@@ -1,0 +1,32 @@
+sudo: required
+language: node_js
+node_js:
+  - '4'
+  - '5'
+  - '6'
+matrix:
+  fast_finish: true
+addons:
+  apt:
+    sources:
+      - ubuntu-toolchain-r-test
+    packages:
+      - g++-4.8
+before_install:
+  - git clone git://github.com/ladislav-zezula/StormLib.git
+  - cd StormLib
+  - cmake CMakeLists.txt
+  - sudo make install
+  - sudo ldconfig
+  - cd $TRAVIS_BUILD_DIR
+
+  - git clone git://github.com/Kanma/BLPConverter.git
+  - cd BLPConverter
+  - cmake CMakeLists.txt -DWITH_LIBRARY=YES
+  - sudo make install
+  - sudo ldconfig
+  - cd $TRAVIS_BUILD_DIR
+env:
+  - CXX=g++-4.8
+script: npm test --coverage
+after_script: codeclimate < coverage/lcov.info

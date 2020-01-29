@@ -1,0 +1,3 @@
+instrumentation:
+  excludes: ['dist/**', 'src/**', 'gulpfile.js']
+  include-all-sources: true

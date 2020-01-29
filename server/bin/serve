@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+const Cluster = require('../dist/cluster');
+const ServerConfig = require('../dist/config');
+
+ServerConfig.verify().then(function() {
+  const cluster = new Cluster();
+  cluster.start();
+});

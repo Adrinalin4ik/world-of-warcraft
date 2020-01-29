@@ -1,0 +1,67 @@
+{
+  "name": "blizzardry",
+  "version": "0.4.0",
+  "description": "JavaScript library for mastering the wizardry that is Blizzard's game files",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "LICENSE.md"
+  ],
+  "scripts": {
+    "gulp": "gulp",
+    "lint": "eslint src *.js; exit 0",
+    "pretest": "gulp rebuild",
+    "test": "istanbul test ./node_modules/mocha/bin/_mocha -- spec --recursive"
+  },
+  "repository": "wowserhq/blizzardry",
+  "author": "Tim Kurvers <tim@moonsphere.net>",
+  "license": "MIT",
+  "keywords": [
+    "adt",
+    "blizzardry",
+    "blizzard",
+    "blp",
+    "dbc",
+    "m2",
+    "mpq",
+    "wdt"
+  ],
+  "dependencies": {
+    "ffi": "^2.0.0",
+    "ref": "^1.3.0",
+    "ref-array": "^1.1.0",
+    "ref-struct": "^1.0.0",
+    "restructure": "^0.5.0",
+    "temp": "^0.8.1",
+    "xtend": "^4.0.0"
+  },
+  "devDependencies": {
+    "babel-core": "^6.9.1",
+    "babel-eslint": "^6.0.4",
+    "babel-plugin-transform-class-properties": "^6.9.1",
+    "babel-plugin-transform-export-extensions": "^6.8.0",
+    "babel-plugin-transform-function-bind": "^6.8.0",
+    "babel-plugin-transform-es2015-block-scoping": "^6.10.1",
+    "babel-plugin-transform-es2015-destructuring": "^6.9.0",
+    "babel-plugin-transform-es2015-modules-commonjs": "^6.8.0",
+    "babel-plugin-transform-es2015-parameters": "^6.9.0",
+    "babel-plugin-add-module-exports": "^0.2.1",
+    "chai": "3.5.0",
+    "codeclimate-test-reporter": "0.3.2",
+    "del": "^1.2.0",
+    "eslint": "^2.12.0",
+    "eslint-config-airbnb": "^1.0.0",
+    "eslint-config-timkurvers": "^0.2.2",
+    "gulp": "gulpjs/gulp.git",
+    "gulp-babel": "^6.0.0",
+    "gulp-cached": "^1.1.0",
+    "gulp-plumber": "^1.1.0",
+    "gulp-spawn-mocha": "^2.2.1",
+    "inflected": "^1.1.6",
+    "istanbul": "^0.4.0",
+    "memo-is": "0.0.2",
+    "mocha": "^2.5.0",
+    "sinon": "^1.17.0",
+    "sinon-chai": "2.8.0"
+  }
+}
