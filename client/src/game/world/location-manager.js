@@ -56,9 +56,9 @@ class LocationManager {
     const maybeInsideWMO = wmo.root.boundingBox.containsPoint(cameraLocal);
 
     // Camera cannot be inside this WMO
-    if (!maybeInsideWMO) {
-      return;
-    }
+    // if (!maybeInsideWMO) {
+    //   return;
+    // }
 
     // Check if camera is in any of this WMO's groups
     for (const group of wmo.groups.values()) {
