@@ -1,6 +1,6 @@
-import { DecodeStream } from '../../../../blizzardry/lib/restructure';
-import M2 from '../../../../blizzardry/lib/m2';
-import Skin from '../../../../blizzardry/lib/m2/skin';
+import { DecodeStream } from 'blizzardry/lib/restructure';
+import M2 from 'blizzardry/lib/m2';
+import Skin from 'blizzardry/lib/m2/skin';
 
 import Loader from '../../net/loader';
 

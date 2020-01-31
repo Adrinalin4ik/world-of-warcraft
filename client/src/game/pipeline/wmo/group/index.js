@@ -22,6 +22,7 @@ class WMOGroup {
     this.attenuateVertexColors(root, def.attributes, def.batches);
     this.createGeometry(def.attributes, def.batches);
     this.createBoundingBox(def.boundingBox);
+    console.log(def)
     this.createBSPTree(def.bspNodes, def.bspPlaneIndices, def.attributes);
     this.view = null;
   }
@@ -101,8 +102,8 @@ class WMOGroup {
   createBoundingBox(def) {
     const boundingBox = this.boundingBox = new THREE.Box3();
 
-    const min = new THREE.Vector3(def.min[0], def.min[1], def.min[2]);
-    const max = new THREE.Vector3(def.max[0], def.max[1], def.max[2]);
+    const min = new THREE.Vector3(def.min.x, def.min.y, def.min.z);
+    const max = new THREE.Vector3(def.max.x, def.max.y, def.max.z);
 
     boundingBox.set(min, max);
   }
@@ -110,7 +111,7 @@ class WMOGroup {
   createBSPTree(nodes, planeIndices, attributes) {
     const { indices, positions } = attributes;
 
-    const bspTree = this.bspTree = new BSPTree(nodes, planeIndices, indices, positions);
+    this.bspTree = new BSPTree(nodes, planeIndices, indices, positions);
   }
 
   /**

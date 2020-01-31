@@ -1,5 +1,5 @@
-import ADT from '../../../../blizzardry/lib/adt';
-import { DecodeStream } from '../../../../blizzardry/lib/restructure';
+import ADT from 'blizzardry/lib/adt';
+import { DecodeStream } from 'blizzardry/lib/restructure';
 
 import Loader from '../../net/loader';
 

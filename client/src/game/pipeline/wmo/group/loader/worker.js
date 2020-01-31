@@ -1,5 +1,5 @@
-import { DecodeStream } from '../../../../../../blizzardry/lib/restructure';
-import WMOGroup from '../../../../../../blizzardry/lib/wmo/group';
+import { DecodeStream } from 'blizzardry/lib/restructure';
+import WMOGroup from 'blizzardry/lib/wmo/group';
 
 import Loader from '../../../../net/loader';
 import WMOGroupDefinition from './definition';

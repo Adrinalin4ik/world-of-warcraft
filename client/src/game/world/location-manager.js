@@ -51,14 +51,14 @@ class LocationManager {
 
     // All operations assume the camera position is in local space
     const cameraLocal = wmo.views.root.worldToLocal(camera.position.clone());
+    console.log(cameraLocal)
 
     // Check if camera could be inside this WMO
     const maybeInsideWMO = wmo.root.boundingBox.containsPoint(cameraLocal);
-
     // Camera cannot be inside this WMO
-    // if (!maybeInsideWMO) {
-    //   return;
-    // }
+    if (!maybeInsideWMO) {
+      return;
+    }
 
     // Check if camera is in any of this WMO's groups
     for (const group of wmo.groups.values()) {
@@ -137,7 +137,7 @@ class LocationManager {
           }
         }
       };
-
+      console.log(location)
       candidates.push(location);
     }
   }

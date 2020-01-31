@@ -30,7 +30,8 @@ export default class World extends EventEmitter {
     this.player.on('position:change', this.changePosition.bind(this));
 
     // const spot: any = spots[spots.length - 2]
-    const spot: any = spots.find(x => x.id === "dun murog")
+    // const spot: any = spots.find(x => x.id === "dun murog")
+    const spot: any = spots.find(x => x.id === 2)
     // const spot: any = spots.find(x => x.id === "stormwind")
     this.player.worldport(spot.zoneId, spot.coords);
   }

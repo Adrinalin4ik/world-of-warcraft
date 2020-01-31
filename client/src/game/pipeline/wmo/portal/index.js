@@ -15,8 +15,8 @@ class WMOPortal {
 
     for (let vindex = 0; vindex < vertexCount; ++vindex) {
       const vertex = new THREE.Vector3(
-        def.vertices[vindex * 3],
-        def.vertices[vindex * 3 + 1],
+        -def.vertices[vindex * 3],
+        -def.vertices[vindex * 3 + 1],
         def.vertices[vindex * 3 + 2]
       );
 
@@ -55,14 +55,14 @@ class WMOPortal {
   }
 
   createMaterial() {
-    const material = this.material = new THREE.MeshBasicMaterial;
+    const material = this.material = new THREE.MeshBasicMaterial();
 
     material.color = new THREE.Color(0xffff00);
     material.side = THREE.DoubleSide;
-    material.opacity = 0.1;
-    material.transparent = true;
+    material.opacity = 1;
+    material.transparent = false;
     material.depthWrite = false;
-    material.visible = false;
+    material.visible = true;
   }
 
 }

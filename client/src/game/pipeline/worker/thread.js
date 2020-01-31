@@ -1,10 +1,12 @@
+// eslint-disable-next-line import/no-webpack-loader-syntax
+import Worker from 'worker-loader!./'
 class Thread {
 
   constructor() {
     this._onMessage = this._onMessage.bind(this);
 
-    this.worker = new Worker('worker.js');
-    // this.worker = new Worker();
+    // this.worker = new Worker('worker.js');
+    this.worker = new Worker();
     this.worker.addEventListener('message', this._onMessage);
   }
 

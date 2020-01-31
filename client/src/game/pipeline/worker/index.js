@@ -5,6 +5,7 @@ import WDT from '../wdt/loader';
 import WMORoot from '../wmo/root/loader/worker';
 import WMOGroup from '../wmo/group/loader/worker';
 
+// eslint-disable-next-line no-restricted-globals
 const worker = self;
 
 const loaders = {

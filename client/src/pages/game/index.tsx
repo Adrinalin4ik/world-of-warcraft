@@ -22,7 +22,7 @@ class GameScreen extends React.Component {
   private clock: THREE.Clock = new THREE.Clock();
   private game: Game = new Game();
 
-  private debug = true;
+  private debug = false;
   //refs
   private controls = React.createRef<Controls>()
 

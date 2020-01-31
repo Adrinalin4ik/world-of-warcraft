@@ -11,7 +11,6 @@ class BSPTree {
       plane: planeIndices,
       face: faceIndices
     };
-
     this.vertices = vertices;
   }
 
@@ -24,7 +23,8 @@ class BSPTree {
   }
 
   queryBox(box, nodeIndex, leafIndices) {
-    if (nodeIndex === -1) {
+    if (nodeIndex === -1 || !this.nodes) {
+      console.error("Nodes is empty")
       return;
     }
 
@@ -35,29 +35,29 @@ class BSPTree {
       return;
     }
 
-    const leftPlane = new THREE.Plane;
-    const rightPlane = new THREE.Plane;
+    const leftPlane = new THREE.Plane();
+    const rightPlane = new THREE.Plane();
 
     if (node.planeType === 0) {
-      leftPlane.setComponents(-1.0, 0.0, 0.0, node.distance);
-      rightPlane.setComponents(1.0, 0.0, 0.0, -node.distance);
+      leftPlane.setComponents(-1.0, 0.0, 0.0, node.planeDist);
+      rightPlane.setComponents(1.0, 0.0, 0.0, -node.planeDist);
     } else if (node.planeType === 1) {
-      leftPlane.setComponents(0.0, -1.0, 0.0, node.distance);
-      rightPlane.setComponents(0.0, 1.0, 0.0, -node.distance);
+      leftPlane.setComponents(0.0, -1.0, 0.0, node.planeDist);
+      rightPlane.setComponents(0.0, 1.0, 0.0, -node.planeDist);
     } else if (node.planeType === 2) {
-      leftPlane.setComponents(0.0, 0.0, -1.0, node.distance);
-      rightPlane.setComponents(0.0, 0.0, 1.0, -node.distance);
+      leftPlane.setComponents(0.0, 0.0, -1.0, node.planeDist);
+      rightPlane.setComponents(0.0, 0.0, 1.0, -node.planeDist);
     }
 
     const includeLeft = THREEUtil.planeContainsBox(leftPlane, box);
     const includeRight = THREEUtil.planeContainsBox(rightPlane, box);
 
     if (includeLeft) {
-      this.queryBox(box, node.children[0], leafIndices);
+      this.queryBox(box, node.negChild, leafIndices);
     }
 
     if (includeRight) {
-      this.queryBox(box, node.children[1], leafIndices);
+      this.queryBox(box, node.posChild, leafIndices);
     }
   }
 
@@ -68,8 +68,8 @@ class BSPTree {
     for (let lindex = 0, lcount = leafIndices.length; lindex < lcount; ++lindex) {
       const node = this.nodes[leafIndices[lindex]];
 
-      const pbegin = node.firstFace;
-      const pend = node.firstFace + node.faceCount;
+      const pbegin = node.faceStart;
+      const pend = node.faceStart + node.nFaces;
 
       for (let pindex = pbegin; pindex < pend; ++pindex) {
         const vindex1 = this.indices.face[3 * this.indices.plane[pindex] + 0];

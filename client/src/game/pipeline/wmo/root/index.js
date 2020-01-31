@@ -9,7 +9,7 @@ class WMORoot {
 
   constructor(def) {
     this.path = def.path;
-
+    console.log(def)
     this.id = def.rootID;
     this.header = def.header;
 
@@ -144,11 +144,11 @@ class WMORoot {
     for (let index = 0; index < portalCount; ++index) {
       const def = defs[index];
 
-      const vindex = def.vertexOffset * 3;
-      const vlen = def.vertexCount * 3;
-
-      const nindex = index * 3;
       const nlen = 3;
+      const vindex = def.vertexOffset * nlen;
+      const vlen = def.vertexCount * nlen;
+
+      const nindex = index * nlen;
 
       const portal = new WMOPortal({
         index: index,
@@ -156,16 +156,16 @@ class WMORoot {
         normal: normals.subarray(nindex, nindex + nlen),
         constant: constants[index]
       });
-
+      
       portals.push(portal);
     }
   }
 
   createBoundingBox(def) {
-    const boundingBox = this.boundingBox = new THREE.Box3;
-
-    const min = new THREE.Vector3(def.min[0], def.min[1], def.min[2]);
-    const max = new THREE.Vector3(def.max[0], def.max[1], def.max[2]);
+    const boundingBox = this.boundingBox = new THREE.Box3();
+    
+    const min = new THREE.Vector3(def.min.x, def.min.y, def.min.z);
+    const max = new THREE.Vector3(def.max.x, def.max.y, def.max.z);
 
     boundingBox.set(min, max);
   }
