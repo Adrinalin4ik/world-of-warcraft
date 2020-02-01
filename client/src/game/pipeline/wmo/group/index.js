@@ -22,7 +22,6 @@ class WMOGroup {
     this.attenuateVertexColors(root, def.attributes, def.batches);
     this.createGeometry(def.attributes, def.batches);
     this.createBoundingBox(def.boundingBox);
-    console.log(def)
     this.createBSPTree(def.bspNodes, def.bspPlaneIndices, def.attributes);
     this.view = null;
   }
@@ -143,9 +142,9 @@ class WMOGroup {
       const portal = this.portals[index];
       const portalRef = this.portalRefs[index];
 
-      const distance = portal.plane.projectPoint(point).
-        clamp(portal.boundingBox.min, portal.boundingBox.max).
-        distanceTo(point);
+      const distance = portal.plane.projectPoint(point)
+        .clamp(portal.boundingBox.min, portal.boundingBox.max)
+        .distanceTo(point);
 
       if (shortestDistance === null || distance < shortestDistance) {
         shortestDistance = distance;

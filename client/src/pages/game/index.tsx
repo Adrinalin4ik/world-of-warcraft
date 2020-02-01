@@ -4,13 +4,14 @@ import * as THREE from 'three';
 import './index.scss';
 import Game from '../../game';
 import Controls from './controls/controls';
-interface IGameProps {
+import DebugPanel from './debug/debug';
 
+interface IGameProps {}
+interface IGameScreenState {
+  renderer: THREE.WebGLRenderer | null;
+  game: Game | null;
 }
 
-interface IUpdate {
-  update(): void;
-}
 
 class GameScreen extends React.Component {
   private camera: THREE.PerspectiveCamera;
@@ -25,6 +26,7 @@ class GameScreen extends React.Component {
   private debug = false;
   //refs
   private controls = React.createRef<Controls>()
+  private debugPanel = React.createRef<DebugPanel>()
 
   constructor(props: IGameProps) {
     super(props);
@@ -36,6 +38,11 @@ class GameScreen extends React.Component {
     this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 1000);
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
+
+    this.state = {
+      renderer: null,
+      game: null
+    } as IGameScreenState;
   }
   
   componentDidMount() {
@@ -43,6 +50,9 @@ class GameScreen extends React.Component {
       alpha: true,
       canvas: this.refs.canvas as HTMLCanvasElement
     });
+
+    this.setState({renderer: this.renderer})
+
     if (this.debug) {
       this.debugRenderer = new THREE.WebGLRenderer({
         alpha: true,
@@ -82,7 +92,10 @@ class GameScreen extends React.Component {
     }
 
     this.controls.current!.update();
-    
+    if (this.debugPanel.current){
+      this.debugPanel.current.forceUpdate();
+    }
+
     const cameraMoved: boolean =
       this.prevCameraRotation === null ||
       this.prevCameraPosition === null ||
@@ -113,6 +126,7 @@ class GameScreen extends React.Component {
         <canvas ref="debugCanvas" 
                 className="canvas debug_canvas" 
                 style={{ position: this.debug ? "relative" : "absolute"}}></canvas> : null
+
     return (
       <div className="game_screen">
           <canvas ref="canvas" 
@@ -120,6 +134,7 @@ class GameScreen extends React.Component {
                   style={{ position: this.debug ? "relative" : "absolute"}}></canvas>
           {debugCanvas}
           <Controls ref={this.controls} player={ this.game.world.player } camera={ this.camera } clock={this.clock} />
+          <DebugPanel ref="debugPanel" renderer={this.renderer} game={this.game}></DebugPanel>
       </div>
     );
   }

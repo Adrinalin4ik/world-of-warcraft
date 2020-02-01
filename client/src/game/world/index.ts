@@ -12,7 +12,7 @@ export default class World extends EventEmitter {
   public debugScene: THREE.Scene;
   public player: Player;
   private entities: Set<Unit> = new Set();
-  private map: WorldMap | null = null;
+  public map: WorldMap | null = null;
 
   constructor() {
     super();
@@ -29,11 +29,18 @@ export default class World extends EventEmitter {
     this.player.on('map:change', this.changeMap.bind(this));
     this.player.on('position:change', this.changePosition.bind(this));
 
-    // const spot: any = spots[spots.length - 2]
-    // const spot: any = spots.find(x => x.id === "dun murog")
-    const spot: any = spots.find(x => x.id === 2)
-    // const spot: any = spots.find(x => x.id === "stormwind")
-    this.player.worldport(spot.zoneId, spot.coords);
+    const spot: any = JSON.parse(localStorage.getItem('debugCoords') || "");
+    if (spot !== "") {
+      this.player.worldport(spot.zoneId, spot.coords);
+    } else {
+      // const spot: any = spots[spots.length - 2]
+      const spot: any = spots.find(x => x.id === "dun murog")
+      // const spot: any = spots.find(x => x.id === 2)
+      // const spot: any = spots.find(x => x.id === "stormwind")
+      // const spot: any = spots.find(x => x.id === "ogrimar")
+      this.player.worldport(spot.zoneId, spot.coords);
+    }
+
   }
 
   add(entity: Unit) {

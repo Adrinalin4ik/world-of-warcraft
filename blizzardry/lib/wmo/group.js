@@ -99,16 +99,24 @@ var MODR = (0, _chunk2.default)({
   doodadIndices: new _restructure2.default.Array(_restructure2.default.int16le, 'size', 'bytes')
 });
 
-// const MOBN = Chunk({
-//   data: new r.Struct({
-//     flags: r.uint16le,
-//     negChild: r.int16le,
-//     posChild: r.int16le,
-//     nFaces: r.uint16le,
-//     faceStart: r.uint32le,
-//     planeDist: r.floatle
-//   })
-// });
+var MOLR = (0, _chunk2.default)({
+  lightRefList: new _restructure2.default.Array(_restructure2.default.int16le, 'size', 'bytes')
+});
+
+var MOBN = (0, _chunk2.default)({
+  nodes: new _restructure2.default.Array(new _restructure2.default.Struct({
+    flags: _restructure2.default.uint16le,
+    negChild: _restructure2.default.int16le,
+    posChild: _restructure2.default.int16le,
+    nFaces: _restructure2.default.uint16le,
+    faceStart: _restructure2.default.uint32le,
+    planeDist: _restructure2.default.floatle
+  }), 'size', 'bytes')
+});
+
+var MOBR = (0, _chunk2.default)({
+  indices: new _restructure2.default.Array(_restructure2.default.int16le, 'size', 'bytes')
+});
 
 exports.default = (0, _chunked2.default)({
   MOGP: MOGP,
@@ -123,16 +131,16 @@ exports.default = (0, _chunked2.default)({
     return this.MOGP.flags;
   },
 
-  MOLR: new _restructure2.default.Optional(_skipChunk2.default, function () {
+  MOLR: new _restructure2.default.Optional(MOLR, function () {
     return this.flags & 0x200;
   }),
   MODR: new _restructure2.default.Optional(MODR, function () {
     return this.flags & 0x800;
   }),
-  MOBN: new _restructure2.default.Optional(_skipChunk2.default, function () {
+  MOBN: new _restructure2.default.Optional(MOBN, function () {
     return this.flags & 0x1;
   }),
-  MOBR: new _restructure2.default.Optional(_skipChunk2.default, function () {
+  MOBR: new _restructure2.default.Optional(MOBR, function () {
     return this.flags & 0x1;
   }),
   MOCV: new _restructure2.default.Optional(MOCV, function () {

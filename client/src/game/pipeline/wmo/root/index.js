@@ -9,7 +9,6 @@ class WMORoot {
 
   constructor(def) {
     this.path = def.path;
-    console.log(def)
     this.id = def.rootID;
     this.header = def.header;
 

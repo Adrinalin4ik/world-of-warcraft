@@ -88,7 +88,8 @@ class Controls extends React.Component<IProp, IUpdate> {
     this.element.addEventListener('mouseup', this._onMouseUp.bind(this));
     this.element.addEventListener('mousemove', this._onMouseMove.bind(this));
     this.element.addEventListener('mousewheel', this._onMouseWheel.bind(this));
-
+    document.addEventListener('keypress', this._onKeyPress.bind(this));
+    
     // this.element.addEventListener('touchstart', this._onTouchStart.bind(this));
     // this.element.addEventListener('touchend', this._onTouchEnd.bind(this));
     // this.element.addEventListener('touchmove', this._onTouchMove.bind(this));
@@ -97,17 +98,18 @@ class Controls extends React.Component<IProp, IUpdate> {
     this.element.addEventListener('DOMMouseScroll', this._onMouseWheel.bind(this));
     
     this.element.addEventListener('contextmenu', this._onContextMenu.bind(this), false);
-
+    
     this.update();
   }
-
+  
   componentWillUnmount() {
     this.element.removeEventListener('mousedown', this._onMouseDown.bind(this));
     this.element.removeEventListener('mouseup', this._onMouseUp.bind(this));
     this.element.removeEventListener('mousemove', this._onMouseMove.bind(this));
     this.element.removeEventListener('mousewheel', this._onMouseWheel.bind(this));
     this.element.removeEventListener('DOMMouseScroll', this._onMouseWheel.bind(this));
-
+    document.removeEventListener('keypress', this._onKeyPress.bind(this));
+    
     // this.element.removeEventListener('touchstart', this._onTouchDown.bind(this));
     // this.element.removeEventListener('touchend', this._onTouchEnd.bind(this));
     // this.element.removeEventListener('touchmove', this._onTouchMove.bind(this));
@@ -115,6 +117,27 @@ class Controls extends React.Component<IProp, IUpdate> {
     this.element.removeEventListener('contextmenu', this._onContextMenu.bind(this));
 
     this.isRun = false;
+  }
+
+  _onKeyPress(event: KeyboardEvent) {
+    if (event.key === 't' || event.key === 'е') {
+      const p = this.unit.position;
+      localStorage.setItem('debugCoords', JSON.stringify({
+        zoneId: this.unit.mapId,
+        coords: [p.x, p.y, p.z]
+      }));
+
+      alert("Coords saved successfully")
+    }
+
+    if (event.key === 'r' || event.key === 'к') {
+      const spot = JSON.parse(localStorage.getItem('debugCoords') || "");
+      if (spot) {
+        this.unit.worldport(spot.zoneId, spot.coords);
+      }
+      console.log('Coords has been restored')
+    }
+
   }
 
   _onContextMenu(event: Event) {
@@ -174,7 +197,7 @@ class Controls extends React.Component<IProp, IUpdate> {
       if (key.isPressed('right') || key.isPressed('d')) {
         unit.rotateRight(delta);
       }
-
+      
       this.target = this.unit.position;
     }
 

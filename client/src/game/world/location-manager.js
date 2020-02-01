@@ -51,7 +51,7 @@ class LocationManager {
 
     // All operations assume the camera position is in local space
     const cameraLocal = wmo.views.root.worldToLocal(camera.position.clone());
-    console.log(cameraLocal)
+    // console.log(cameraLocal)
 
     // Check if camera could be inside this WMO
     const maybeInsideWMO = wmo.root.boundingBox.containsPoint(cameraLocal);
@@ -137,7 +137,7 @@ class LocationManager {
           }
         }
       };
-      console.log(location)
+      // console.log(location)
       candidates.push(location);
     }
   }
@@ -151,6 +151,7 @@ class LocationManager {
       // If a query didn't get a min Z bound from the BSP tree or from raycasting for portals, the
       // candidate is invalid.
       if (query.z.min === null) {
+        console.log('here')
         return null;
       }
 
@@ -162,9 +163,9 @@ class LocationManager {
       const cameraInBoundsZ =
         camera.local.z >= query.z.min &&
         camera.local.z <= query.z.max;
-
-      if (!cameraInBoundsZ) {
-        return null;
+        
+        if (!cameraInBoundsZ) {
+          return null;
       }
 
       // Get the closest portal within a small range and ensure we're inside it
@@ -199,7 +200,6 @@ class LocationManager {
         return 0;
       }
     });
-
     return validCandidates[0];
   }
 

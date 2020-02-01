@@ -18,19 +18,18 @@ class BSPTree {
     const leafIndices = [];
 
     this.queryBox(subject, startingNodeIndex, leafIndices);
-
     return leafIndices;
   }
 
   queryBox(box, nodeIndex, leafIndices) {
     if (nodeIndex === -1 || !this.nodes) {
-      console.error("Nodes is empty")
+      console.error("Node is empty", nodeIndex)
       return;
     }
 
     const node = this.nodes[nodeIndex];
 
-    if (node.planeType === 4) {
+    if (node.flags === 4) {
       leafIndices.push(nodeIndex);
       return;
     }
@@ -38,13 +37,13 @@ class BSPTree {
     const leftPlane = new THREE.Plane();
     const rightPlane = new THREE.Plane();
 
-    if (node.planeType === 0) {
+    if (node.flags === 0) {
       leftPlane.setComponents(-1.0, 0.0, 0.0, node.planeDist);
       rightPlane.setComponents(1.0, 0.0, 0.0, -node.planeDist);
-    } else if (node.planeType === 1) {
+    } else if (node.flags === 1) {
       leftPlane.setComponents(0.0, -1.0, 0.0, node.planeDist);
       rightPlane.setComponents(0.0, 1.0, 0.0, -node.planeDist);
-    } else if (node.planeType === 2) {
+    } else if (node.flags === 2) {
       leftPlane.setComponents(0.0, 0.0, -1.0, node.planeDist);
       rightPlane.setComponents(0.0, 0.0, 1.0, -node.planeDist);
     }
@@ -55,12 +54,12 @@ class BSPTree {
     if (includeLeft) {
       this.queryBox(box, node.negChild, leafIndices);
     }
-
+    
     if (includeRight) {
       this.queryBox(box, node.posChild, leafIndices);
     }
   }
-
+  
   calculateZRange(point, leafIndices) {
     let rangeMin = null;
     let rangeMax = null;
@@ -105,6 +104,7 @@ class BSPTree {
           point.y >= minY && point.y <= maxY;
 
         if (!pointInBoundsXY) {
+          // console.log("here 1")
           continue;
         }
 
@@ -168,6 +168,7 @@ class BSPTree {
 
     // If no leaves were found, there is no valid result
     if (leafIndices.length === 0) {
+      // console.log("here 1", bounding, leafIndices, point)
       return null;
     }
 
