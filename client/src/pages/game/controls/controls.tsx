@@ -56,7 +56,7 @@ class Controls extends React.Component<IProp, IUpdate> {
   private zoomSpeed: number = 1.0;
   private zoomScale: number = Math.pow(0.95, this.zoomSpeed);
   // Zoom distance limits
-  private minDistance: number = 6;
+  private minDistance: number = 0;
   private maxDistance: number = 500;
 
   private quat: THREE.Quaternion

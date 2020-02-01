@@ -59,10 +59,10 @@ class WMOPortal {
 
     material.color = new THREE.Color(0xffff00);
     material.side = THREE.DoubleSide;
-    material.opacity = 1;
-    material.transparent = false;
+    material.opacity = 0.5;
+    material.transparent = true;
     material.depthWrite = false;
-    material.visible = true;
+    material.visible = false;
   }
 
 }

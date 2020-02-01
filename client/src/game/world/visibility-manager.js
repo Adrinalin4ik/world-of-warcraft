@@ -38,11 +38,11 @@ class VisibilityManager {
       // Obtain a frustum matching the camera
       const frustum = new THREE.Frustum();
       frustum.setFromMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
-
+      // console.log(frustum)
       // Adjust near plane (5) back to camera position
       const nearGap = frustum.planes[5].distanceToPoint(camera.position);
       frustum.planes[5].constant -= nearGap;
-
+      // console.log(camera.location.type);
       if (camera.location.type === 'exterior') {
         this.enablePortalsFromExterior(0, camera, frustum);
       } else {
@@ -109,7 +109,7 @@ class VisibilityManager {
     const wmo = camera.location.wmo.handler;
     const group = camera.location.wmo.group;
     const groupView = camera.location.wmo.views.group;
-
+    // console.log("Enable inrerior", groupView)
     // The group the camera is currently in should always be visible
     groupView.visible = true;
 

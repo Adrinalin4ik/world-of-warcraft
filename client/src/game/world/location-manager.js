@@ -36,6 +36,7 @@ class LocationManager {
 
     if (location) {
       camera.location = location;
+      // console.log("Interior")
     } else {
       camera.location = {
         type: 'exterior'
@@ -48,9 +49,12 @@ class LocationManager {
     if (!wmo.views.root) {
       return;
     }
-
+    let cameraLocal = wmo.views.root.worldToLocal(camera.position.clone());
     // All operations assume the camera position is in local space
-    const cameraLocal = wmo.views.root.worldToLocal(camera.position.clone());
+    cameraLocal = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
+    // let cameraLocal = wmo.views.root.localToWorld(camera.position.clone());
+    // cameraLocal = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
+    // const cameraLocal = camera.position.clone()
     // console.log(cameraLocal)
 
     // Check if camera could be inside this WMO
@@ -60,12 +64,15 @@ class LocationManager {
       return;
     }
 
+    
     // Check if camera is in any of this WMO's groups
     for (const group of wmo.groups.values()) {
       // Only hunting for interior groups
-      if (group.header.flags & 0x08) {
+      const isExterior = (group.header.flags & 0x08) !== 0;
+      if (isExterior) { //08 - exterior
         continue;
       }
+      // console.log(isExterior)
 
       // Check if camera could be inside this group
       const maybeInsideGroup = group.boundingBox.containsPoint(cameraLocal);
@@ -137,7 +144,7 @@ class LocationManager {
           }
         }
       };
-      // console.log(location)
+      // console.log("Interior", location)
       candidates.push(location);
     }
   }
@@ -150,11 +157,14 @@ class LocationManager {
 
       // If a query didn't get a min Z bound from the BSP tree or from raycasting for portals, the
       // candidate is invalid.
-      if (query.z.min === null) {
-        console.log('here')
-        return null;
-      }
+      // if (query.z.min === null) {
+      //   // console.log('here', query.z.min)
+      //   return null;
+      // }
 
+      if (query.z.min === null) {
+        query.z.min = group.boundingBox.min.z;
+      }
       // Assume the bounding box max in cases where max Z is unbounded
       if (query.z.max === null) {
         query.z.max = group.boundingBox.max.z;
@@ -166,15 +176,15 @@ class LocationManager {
         
         if (!cameraInBoundsZ) {
           return null;
-      }
-
-      // Get the closest portal within a small range and ensure we're inside it
-      const closestPortal = group.closestPortal(camera.local, 1.0);
-
-      if (closestPortal !== null) {
-        const outsidePortal = closestPortal.portalRef.side * closestPortal.distance < 0.0;
-
-        if (outsidePortal) {
+        }
+        
+        // Get the closest portal within a small range and ensure we're inside it
+        const closestPortal = group.closestPortal(camera.local, 1.0);
+        
+        if (closestPortal !== null) {
+          const outsidePortal = closestPortal.portalRef.side * closestPortal.distance < 0.0;
+          
+          if (outsidePortal) {
           return null;
         }
       }

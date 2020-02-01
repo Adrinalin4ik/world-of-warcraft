@@ -29,17 +29,18 @@ export default class World extends EventEmitter {
     this.player.on('map:change', this.changeMap.bind(this));
     this.player.on('position:change', this.changePosition.bind(this));
 
-    const spot: any = JSON.parse(localStorage.getItem('debugCoords') || "");
-    if (spot !== "") {
-      this.player.worldport(spot.zoneId, spot.coords);
-    } else {
-      // const spot: any = spots[spots.length - 2]
-      const spot: any = spots.find(x => x.id === "dun murog")
-      // const spot: any = spots.find(x => x.id === 2)
-      // const spot: any = spots.find(x => x.id === "stormwind")
-      // const spot: any = spots.find(x => x.id === "ogrimar")
-      this.player.worldport(spot.zoneId, spot.coords);
-    }
+    // const spot: any = JSON.parse(localStorage.getItem('debugCoords') || "");
+    // if (spot !== "") {
+    //   // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
+    //   this.player.worldport(spot.zoneId, spot.coords);
+    // } else {
+    // const spot: any = spots[spots.length - 2]
+    // const spot: any = spots.find(x => x.id === "dun murog")
+    // const spot: any = spots.find(x => x.id === 2)
+    const spot: any = spots.find(x => x.id === "stormwind")
+    // const spot: any = spots.find(x => x.id === "ogrimar")
+    this.player.worldport(spot.zoneId, spot.coords);
+    // }
 
   }
 
@@ -101,7 +102,7 @@ export default class World extends EventEmitter {
     if (this.map !== null) {
       if (cameraMoved) {
         this.map.locateCamera(camera);
-        // this.map.updateVisibility(camera);
+        this.map.updateVisibility(camera);
       }
       // this.map.updateWorldTime(camera, this.map.mapID);
       if (this.map) {
