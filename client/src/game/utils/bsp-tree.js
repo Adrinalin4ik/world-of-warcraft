@@ -63,13 +63,12 @@ class BSPTree {
   calculateZRange(point, leafIndices) {
     let rangeMin = null;
     let rangeMax = null;
-
     for (let lindex = 0, lcount = leafIndices.length; lindex < lcount; ++lindex) {
       const node = this.nodes[leafIndices[lindex]];
 
       const pbegin = node.faceStart;
       const pend = node.faceStart + node.nFaces;
-
+      
       for (let pindex = pbegin; pindex < pend; ++pindex) {
         const vindex1 = this.indices.face[3 * this.indices.plane[pindex] + 0];
         const vindex2 = this.indices.face[3 * this.indices.plane[pindex] + 1];
@@ -92,21 +91,20 @@ class BSPTree {
           this.vertices[3 * vindex3 + 1],
           this.vertices[3 * vindex3 + 2]
         );
-
         const minX = Math.min(vertex1.x, vertex2.x, vertex3.x);
         const maxX = Math.max(vertex1.x, vertex2.x, vertex3.x);
 
         const minY = Math.min(vertex1.y, vertex2.y, vertex3.y);
         const maxY = Math.max(vertex1.y, vertex2.y, vertex3.y);
-
+        
         const pointInBoundsXY =
-          point.x >= minX && point.x <= maxX &&
-          point.y >= minY && point.y <= maxY;
+          point.x > minX && point.x < maxX &&
+          point.y > minY && point.y < maxY;
 
         if (!pointInBoundsXY) {
-          // console.log("here 1")
           continue;
         }
+        // console.log("here 1", [point.x, point.y], [minX, minY, maxX, maxY])
 
         const triangle = new THREE.Triangle(vertex1, vertex2, vertex3);
 
@@ -119,6 +117,18 @@ class BSPTree {
         if (!baryInBounds) {
           continue;
         }
+
+        // var normal_avg = bary.x*vertex1[2]+bary.y*vertex1[2]+bary.z*vertex1[2];
+
+        // if (normal_avg > 0) {
+        //     //Bottom
+        //     var distanceToCamera = point.z - z;
+        //     if ((distanceToCamera > 0) && (distanceToCamera < 99999))
+        //       rangeMin = z;
+        // } else {
+        //     //Top
+        //     rangeMax = Math.max(z, rangeMin);
+        // }
 
         if (z < point.z && (rangeMin === null || z < rangeMin)) {
           rangeMin = z;
@@ -156,8 +166,8 @@ class BSPTree {
   }
 
   queryBoundedPoint(point, bounding) {
-    const epsilon = 0.2;
-
+    const epsilon = 0.4;
+    
     // Define a small bounding box for point
     const box = new THREE.Box3();
     box.min.set(point.x - epsilon, point.y - epsilon, bounding.min.z);
@@ -174,6 +184,7 @@ class BSPTree {
 
     // Determine upper and lower Z bounds of leaves
     const zRange = this.calculateZRange(point, leafIndices);
+
     const minZ = zRange[0];
     const maxZ = zRange[1];
 

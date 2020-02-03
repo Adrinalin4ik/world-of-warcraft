@@ -81,7 +81,7 @@ class LocationManager {
       if (!maybeInsideGroup) {
         continue;
       }
-
+      // console.log(group.boundingBox, cameraLocal)
       // Query BSP tree for matching leaves
       let result = group.bspTree.queryBoundedPoint(cameraLocal, group.boundingBox);
 
@@ -157,8 +157,8 @@ class LocationManager {
 
       // If a query didn't get a min Z bound from the BSP tree or from raycasting for portals, the
       // candidate is invalid.
+      // console.log('here', query.z.min)
       // if (query.z.min === null) {
-      //   // console.log('here', query.z.min)
       //   return null;
       // }
 
@@ -185,8 +185,8 @@ class LocationManager {
           const outsidePortal = closestPortal.portalRef.side * closestPortal.distance < 0.0;
           
           if (outsidePortal) {
-          return null;
-        }
+            return null;
+          }
       }
 
       return candidate;

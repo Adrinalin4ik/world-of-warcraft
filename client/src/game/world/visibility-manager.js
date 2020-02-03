@@ -137,7 +137,8 @@ class VisibilityManager {
   traversePortalsAndEnable(depth, camera, wmo, group, frustum = null, visitedPortals = new Set()) {
     const view = wmo.views.groups.get(group.index);
 
-    const cameraLocal = view.worldToLocal(camera.position.clone());
+    let cameraLocal = view.worldToLocal(camera.position.clone());
+    cameraLocal = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
 
     // Doodads within frustum are visible
     for (const doodad of wmo.doodadsForGroup(group)) {
@@ -182,9 +183,9 @@ class VisibilityManager {
       }
 
       // Portal out of group is not visible from previous frustum
-      if (frustum !== null && !portalView.intersectFrustum(frustum)) {
-        continue;
-      }
+      // if (frustum !== null && !portalView.intersectFrustum(frustum)) {
+      //   continue;
+      // }
 
       // Portal out of group is visible, thus the destination group is visible
       destinationView.visible = true;
