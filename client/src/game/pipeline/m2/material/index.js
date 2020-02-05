@@ -12,7 +12,7 @@ class M2Material extends THREE.ShaderMaterial {
     } else {
       super({ skinning: false });
     }
-
+    // console.log(def)
     this.m2 = m2;
 
     this.eventListeners = [];
@@ -35,7 +35,7 @@ class M2Material extends THREE.ShaderMaterial {
       animatedVertexColorAlpha: { type: 'f', value: 1.0 },
 
       // Animated transparency
-      animatedTransparency: { type: 'f', value: 1.0 },
+      animatedTransparency: { type: 'f', value: 10.0 },
 
       // Animated texture coordinate transform matrices
       animatedUVs: {
@@ -220,7 +220,11 @@ class M2Material extends THREE.ShaderMaterial {
     const textures = [];
 
     textureDefs.forEach((textureDef) => {
-      textures.push(this.loadTexture(textureDef));
+      if (!textureDef.filename.includes("TEMP")) {
+        textures.push(this.loadTexture(textureDef));
+      } else {
+        this.visible = false;
+      }
     });
 
     this.textures = textures;

@@ -167,7 +167,7 @@ class Unit extends Entity {
        16 - grounding
        31 - fall
       */
-      m2.animations.playAnimation(this.currentAnimationIndex, 0);
+      m2.animations.playAnimation(this.currentAnimationIndex);
       m2.animations.playAllSequences();
     }
 
@@ -176,9 +176,11 @@ class Unit extends Entity {
   }
 
   setAnimation(index: number, inrerrupt: boolean = false) {
-    if (!this.model.animations.currentAnimation.isRunning() || inrerrupt) {
+    if (!this.model.animations.currentAnimation.isRunning()
+      || inrerrupt
+      || this.currentAnimationIndex !== index) {
       this.model.animations.stopAnimation(this.currentAnimationIndex);
-      this.model.animations.playAnimation(index, 0);
+      this.model.animations.playAnimation(index);
       this.currentAnimationIndex = index;
     }
   }
@@ -321,7 +323,7 @@ class Unit extends Entity {
   }
 
   update(delta: number) {
-    this.isMoving = false;
+    // this.isMoving = false;
     // this.setAnimation(0);
     this.updateGravity(delta);
   }

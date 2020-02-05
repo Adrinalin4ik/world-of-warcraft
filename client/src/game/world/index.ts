@@ -29,16 +29,17 @@ export default class World extends EventEmitter {
     this.player.on('map:change', this.changeMap.bind(this));
     this.player.on('position:change', this.changePosition.bind(this));
 
-    const spot: any = JSON.parse(localStorage.getItem('debugCoords') || "");
-    if (spot !== "") {
+    const loadedSpot = localStorage.getItem('debugCoords');
+    if (loadedSpot) {
+      const spot: any = JSON.parse(loadedSpot);
       // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
       this.player.worldport(spot.zoneId, spot.coords);
     } else {
       // const spot: any = spots[spots.length - 2]
       // const spot: any = spots.find(x => x.id === "dun murog")
-      const spot: any = spots.find(x => x.id === "dun murog")
+      // const spot: any = spots.find(x => x.id === "dun murog")
       // const spot: any = spots.find(x => x.id === 2)
-      // const spot: any = spots.find(x => x.id === "stormwind")
+      const spot: any = spots.find(x => x.id === "stormwind")
       // const spot: any = spots.find(x => x.id === "ogrimar")
       this.player.worldport(spot.zoneId, spot.coords);
     }

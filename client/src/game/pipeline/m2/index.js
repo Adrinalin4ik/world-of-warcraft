@@ -9,7 +9,6 @@ import geometryToBufferGeometry from '../../utils/geometry-to-buffer-geometry';
 class M2 extends THREE.Group {
 
   static cache = {};
-
   constructor(path, data, skinData, instance = null) {
     super();
 
@@ -91,7 +90,7 @@ class M2 extends THREE.Group {
   createBoundingMesh(vertices) {
     let mesh;
     
-    const material = new THREE.MeshBasicMaterial({ wireframe: true, transparent: false, opacity: 0 });
+    const material = new THREE.MeshBasicMaterial({ wireframe: false, transparent: true, opacity: 0 });
     const geometry = new THREE.Geometry();
     // make geometry
     for (let vertexIndex = 0, len = vertices.length; vertexIndex < len; ++vertexIndex) {

@@ -73,8 +73,7 @@ class WMORoot {
 
     for (let mindex = 0, mcount = materials.length; mindex < mcount; ++mindex) {
       const data = materials[mindex];
-
-      const { flags, blendingMode, shaderID } = data;
+      const { flags, blendMode, shader } = data;
       const textures = [];
 
       for (let tindex = 0, tcount = data.textures.length; tindex < tcount; ++tindex) {
@@ -86,7 +85,7 @@ class WMORoot {
         }
       }
 
-      const def = new WMOMaterialDefinition(mindex, flags, blendingMode, shaderID, textures);
+      const def = new WMOMaterialDefinition(mindex, flags, blendMode, shader, textures);
 
       defs.set(mindex, def);
     }

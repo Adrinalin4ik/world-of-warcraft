@@ -8,9 +8,8 @@ class WMOMaterial extends THREE.ShaderMaterial {
 
   constructor(def) {
     super();
-
     this.textures = [];
-
+    // console.log(def)
     this.uniforms = {
       textures: { type: 'tv', value: [] },
       textureCount: { type: 'i', value: 0 },
