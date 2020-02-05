@@ -7,7 +7,11 @@ const values = {
   sunAmbientColor:    [ 0.5,    0.5,  0.5, 0.0],
   sunDiffuseColor:    [ 0.25,   0.5,  1.0, 0.0],
   fogParams:          [ -(1.0 / (fogRange)), (1.0 / fogRange) * fogEnd, 1.0, 0.0],
-  fogColor:           [ 0.25,   0.5,  1.0, 0.0]
+  fogColor:           [ 0.25,   0.5,  1.0, 0.0],
+  fogScalar: 1,
+  fogStart,
+  fogEnd,
+  fogRange
 };
 
 export default values;

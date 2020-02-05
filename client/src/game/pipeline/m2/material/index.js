@@ -35,7 +35,7 @@ class M2Material extends THREE.ShaderMaterial {
       animatedVertexColorAlpha: { type: 'f', value: 1.0 },
 
       // Animated transparency
-      animatedTransparency: { type: 'f', value: 1.0 },
+      animatedTransparency: { type: 'f', value: 10.0 }, //outline
 
       // Animated texture coordinate transform matrices
       animatedUVs: {

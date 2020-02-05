@@ -5,12 +5,12 @@ uniform vec4 fogParams;
 uniform vec4 fogColor;
 
 uniform vec4 sunParams;
-uniform vec4 sunDiffuseColor;
-uniform vec4 sunAmbientColor;
+uniform vec3 sunDiffuseColor;
+uniform vec3 sunAmbientColor;
 
 uniform vec4 materialParams;
-uniform vec4 emissiveColor;
+uniform vec3 emissiveColor;
 
 varying vec2 coords[2];
-varying vec4 colors[2];
+varying vec2 colors[2];
 varying vec4 fog;

@@ -1,12 +1,32 @@
-#pragma glslify: import('./header.glsl')
+// #pragma glslify: import('./header.glsl')
+
+attribute vec4 acolor;
+
+uniform vec4 fogParams;
+uniform vec4 fogColor;
+
+uniform vec4 sunParams;
+uniform vec4 sunDiffuseColor;
+uniform vec4 sunAmbientColor;
+
+uniform vec4 materialParams;
+uniform vec4 emissiveColor;
+
+varying vec2 coords[2];
+varying vec4 colors[2];
+varying vec4 fog;
+
 #pragma glslify: import('./functions.glsl')
+
+
+
 
 void main() {
   vec3 objectPosition = (modelMatrix * vec4(position, 1.0)).xyz;
   vec3 objectNormal = (modelMatrix * vec4(normal, 0.0)).xyz;
 
   float cameraDistance = length(modelViewMatrix * vec4(position, 1.0));
-
+ 
   // t1 coordinate
   coords[0] = uv;
 

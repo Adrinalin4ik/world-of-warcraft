@@ -60,7 +60,12 @@ class WorldLight {
     fogParams:          new THREE.Uniform(new Float32Array(Default.fogParams)),
 
     // [r, g, b, a]
-    fogColor:           new THREE.Uniform(new Float32Array(Default.fogColor))
+    fogColor:           new THREE.Uniform(new Float32Array(Default.fogColor)),
+
+    fogStart:           new THREE.Uniform(Default.fogStart),
+    fogEnd:           new THREE.Uniform(Default.fogEnd),
+    fogRange:           new THREE.Uniform(Default.fogRange),
+    fogScalar:           new THREE.Uniform('1.0'),
   };
 
   static update(camera, mapID, time = null) {
@@ -143,6 +148,9 @@ class WorldLight {
     this.uniforms.sunAmbientColor.value.set(Default.sunAmbientColor, 0);
     this.uniforms.fogParams.value.set(Default.fogParams, 0);
     this.uniforms.fogColor.value.set(Default.fogColor, 0);
+    this.uniforms.fogStart.value.set(Default.fogStart, 0);
+    this.uniforms.fogEnd.value.set(Default.fogEnd, 0);
+    this.uniforms.fogRange.value.set(Default.fogRange, 0);
   }
 
   static updateUniforms(result) {
@@ -186,6 +194,10 @@ class WorldLight {
     this.uniforms.fogParams.value[1] = (1.0 / fogRange) * fogEnd;
     this.uniforms.fogParams.value[2] = 1.0;
     this.uniforms.fogParams.value[3] = 0.0;
+    this.uniforms.fogStart = fogStart;
+    this.uniforms.fogEnd = fogEnd;
+    this.uniforms.fogRange = fogRange;
+    this.uniforms.fogScalar = fogScalar;
 
     // Fog Color
 

@@ -119,7 +119,7 @@ class M2 extends THREE.Group {
     mesh.name = 'BoundingMesh';
     mesh.matrixAutoUpdate = this.matrixAutoUpdate;
 
-    mesh.visible = true;
+    mesh.visible = false;
 
     ColliderManager.collidableMeshList.set(mesh.uuid, mesh);
     

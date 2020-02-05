@@ -3,6 +3,8 @@ import * as THREE from 'three';
 import TextureLoader from '../../texture-loader';
 import fragmentShader from './shader.frag';
 import vertexShader from './shader.vert';
+import LightManager from '../../../world/light';
+import WorldMap from '../../../world/map';
 
 class Material extends THREE.ShaderMaterial {
 
@@ -21,9 +23,11 @@ class Material extends THREE.ShaderMaterial {
     this.layerCount = 0;
     this.textures = [];
     this.alphaMaps = [];
-
+    
+    // console.log(LightManager.uniforms)
+    // console.log(LightManager.active)
+    // debugger
     this.loadLayers();
-
     this.uniforms = {
       layerCount: { type: 'i', value: this.layerCount },
       alphaMaps: { type: 'tv', value: this.alphaMaps },
@@ -33,12 +37,19 @@ class Material extends THREE.ShaderMaterial {
       lightModifier: { type: 'f', value: '1.0' },
       ambientLight: { type: 'c', value: new THREE.Color(0.5, 0.5, 0.5) },
       diffuseLight: { type: 'c', value: new THREE.Color(0.25, 0.5, 1.0) },
+      // ambientLight: { type: 'c', value: new THREE.Color(LightManager.uniforms.sunAmbientColor)},
+      // diffuseLight: { type: 'c', value: new THREE.Color(LightManager.uniforms.sunDiffuseColor)},
 
       // Managed by light manager
-      fogModifier: { type: 'f', value: '1.0' },
+      fogModifier: { type: 'f', value: 1.0 },
       fogColor: { type: 'c', value: new THREE.Color(0.25, 0.5, 1.0) },
-      fogStart: { type: 'f', value: 5.0 },
-      fogEnd: { type: 'f', value: 400.0 }
+      fogStart: { type: 'f', value: 5 },
+      fogEnd: { type: 'f', value:  400 },
+      // fogModifier: { type: 'f', value: LightManager.uniforms.fogRange },
+      // fogColor: { type: 'c', value: new THREE.Color(LightManager.uniforms.fogColor) },
+      // fogStart: { type: 'f', value: WorldMap.FOG_START_CONSTANT },
+      // fogEnd: { type: 'f', value: 20000 * WorldMap.CHUNK_RENDER_RADIUS },
+      // fogEnd: { type: 'f', value:  LightManager.uniforms.fogEnd }
     };
   }
 
