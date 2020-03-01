@@ -155,7 +155,7 @@ class Controls extends React.Component<IProp, IUpdate> {
 
   _onKeyUp(event: KeyboardEvent) {
     const unit = this.unit;
-    if (unit) {
+    if (unit && unit) {
       if (event.keyCode !== Key.space) {
         unit.stopAnimation();
       }

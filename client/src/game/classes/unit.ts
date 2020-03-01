@@ -95,7 +95,6 @@ class Unit extends Entity {
     if (value) {
       this.setAnimation(15, true, 0);
     } else {
-      // this.setAnimation(31, true);
       this.setAnimation(16, true, 0);
     }
   }
@@ -249,7 +248,6 @@ class Unit extends Entity {
     }
     this.moving.forward = true;
     this.translatePosition({ x: this.moveSpeed * delta });
-    // this.view.translateX(this.moveSpeed * delta);
   }
 
   moveBackward(delta: number) {
@@ -261,12 +259,16 @@ class Unit extends Entity {
 
 
   rotateLeft(delta: number) {
-    this.setAnimation(38);
+    if (!this.isMoving) {
+      this.setAnimation(38);
+    }
     this.view.rotateZ(this.rotateSpeed * delta);
   }
 
   rotateRight(delta: number) {
-    this.setAnimation(38);
+    if (!this.isMoving) {
+      this.setAnimation(38);
+    }
     this.view.rotateZ(-this.rotateSpeed * delta);
   }
 
@@ -431,18 +433,13 @@ class Unit extends Entity {
 
   // Обеспецивает хождение по земле
   updateGroundFollow(delta: number) {
-    // const diff = this._groundFollowConstant - this.groundDistance;
-    // this.translatePosition({ z: diff });
-    // if ((this.groundDistance > this._groundFollowConstant + 0.5) && !this.isJump) {
-    // this.translatePosition({ z: -diff * this.gravity * delta });
     const diff = this._groundFollowConstant - this.groundDistance;
     this.translatePosition({ z: diff - 0.1 });
-    // }
   }
 
   updateGravity(delta: number) {
     const animationSpeed = 1.6;
-    if (this.isJump || this.isFall) {
+    if (this.isJump) {
       let x = 0;
       let y = 0;
       if (this.jumpMoving.forward) x = this.moveSpeed * delta;
