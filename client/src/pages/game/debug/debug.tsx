@@ -46,6 +46,27 @@ class DebugPanel extends React.Component<IProp> {
         <p>
           Ground distance: { player.groundDistance.toFixed(2) }
         </p>
+        <p>
+          On ground: { player.isOnGround.toString() }
+        </p>
+        <p>
+          Jump: { player.isJump.toString() }
+        </p>
+        <p>
+          Jump velocity: { player.jumpVelocity.toFixed(2) }
+        </p>
+        <p>
+          Moving forward: { player.moving.forward.toString() }
+        </p>
+        <p>
+          Moving backward: { player.moving.backward.toString() }
+        </p>
+        <p>
+          Moving right: { player.moving.strafeRight.toString() }
+        </p>
+        <p>
+          Moving left: { player.moving.strafeLeft.toString() }
+        </p>
         <div className="divider"></div>
         {/* <p>
           Collides: { player.isCollide() ? 'true' : 'false' }

@@ -26,13 +26,13 @@ class Unit extends Entity {
   private displayInfo: DBC | null = null;
 
   public rotateSpeed: number = 2;
-  public moveSpeed: number = 20;
-  public fallSpeed: number = 0; //10;
-  public jumpSpeedConst: number = 0.3;
-  public jumpSpeed: number = 0;
-  public isFly: boolean = true;
+  public moveSpeed: number = 10;
+  public gravity: number = 10; //10;
+  public jumpVelocityConst: number = 16;
+  public jumpVelocity: number = 0;
+  public isFly: boolean = false;
   public isMoving: boolean = false;
-  public isJump: boolean = false;
+  public _isJump: boolean = false;
   public isCollides: boolean = false;
   public groundDistance: number = 0;
   private previousGroundDistance: number = 0;
@@ -40,6 +40,20 @@ class Unit extends Entity {
   private _groundFollowConstant: number = 1; // точка с которой нужно начинать следовать рельефу
   private groundDistanceRaycaster: THREE.Raycaster = new THREE.Raycaster();
   private prevPosition: THREE.Vector3 = new THREE.Vector3();
+
+  public moving = {
+    forward: false,
+    backward: false,
+    strafeLeft: false,
+    strafeRight: false
+  }
+
+  public jumpMoving = {
+    forward: false,
+    backward: false,
+    strafeLeft: false,
+    strafeRight: false
+  }
 
   //helpers
   public arrow: THREE.ArrowHelper = new THREE.ArrowHelper(
@@ -64,6 +78,27 @@ class Unit extends Entity {
     this.currentAnimationIndex = 0;
   }
 
+  get isOnGround() {
+    return this.groundDistance <= this.groundZeroConstant;
+  }
+
+  get isFall() {
+    return !this.isOnGround;
+  }
+
+  get isJump() {
+    return this._isJump;
+  }
+
+  set isJump(value) {
+    this._isJump = value;
+    if (value) {
+      this.setAnimation(15, true, 0);
+    } else {
+      // this.setAnimation(31, true);
+      this.setAnimation(16, true, 0);
+    }
+  }
   get position(): THREE.Vector3 {
     return this._view.position;
   }
@@ -107,10 +142,6 @@ class Unit extends Entity {
 
   get model() {
     return this._model!;
-  }
-
-  get isOnGround() {
-    return this.groundDistance <= this.groundZeroConstant;
   }
 
   updatePlayerColliderBox() {
@@ -167,6 +198,8 @@ class Unit extends Entity {
        15 - jump
        16 - grounding
        31 - fall
+       38 - rotate
+       133 - backward
       */
       m2.animations.playAnimation(this.currentAnimationIndex);
       m2.animations.playAllSequences();
@@ -176,19 +209,31 @@ class Unit extends Entity {
     this._model = m2;
   }
 
-  setAnimation(index: number, inrerrupt: boolean = false) {
+  setAnimation(index: number, inrerrupt: boolean = false, repetitions: number = Infinity) {
     if (!this.model.animations.currentAnimation.isRunning()
       || inrerrupt
       || this.currentAnimationIndex !== index) {
       this.model.animations.stopAnimation(this.currentAnimationIndex);
-      this.model.animations.playAnimation(index);
       this.currentAnimationIndex = index;
+      return this.model.animations.playAnimation(index, repetitions);
     }
   }
 
   stopAnimation(index?: number) {
     this.model.animations.stopAnimation(index || this.currentAnimationIndex);
   }
+
+  jump() {
+    if (this.isOnGround && !this.isJump) {
+      this.isJump = true;
+      this.jumpMoving.forward = this.moving.forward;
+      this.jumpMoving.backward = this.moving.backward;
+      this.jumpMoving.strafeLeft = this.moving.strafeLeft;
+      this.jumpMoving.strafeRight = this.moving.strafeRight;
+      this.jumpVelocity = this.jumpVelocityConst;
+    }
+  }
+
   ascend(delta: number) {
     this.translatePosition({ z: this.moveSpeed * delta });
   }
@@ -198,41 +243,53 @@ class Unit extends Entity {
   }
 
   moveForward(delta: number) {
-    this.setAnimation(2);
+    if (this.isJump) return;
+    if (this.isOnGround) {
+      this.setAnimation(2);
+    }
+    this.moving.forward = true;
     this.translatePosition({ x: this.moveSpeed * delta });
     // this.view.translateX(this.moveSpeed * delta);
   }
 
   moveBackward(delta: number) {
-    this.translatePosition({ x: -this.moveSpeed * delta });
+    if (this.isJump) return;
+    this.moving.backward = true;
+    this.setAnimation(133);
+    this.translatePosition({ x: -this.moveSpeed * delta / 2 });
   }
 
+
   rotateLeft(delta: number) {
+    this.setAnimation(38);
     this.view.rotateZ(this.rotateSpeed * delta);
-    // this.emit('position:change', this.position);
-    // this.changePosition();
   }
 
   rotateRight(delta: number) {
+    this.setAnimation(38);
     this.view.rotateZ(-this.rotateSpeed * delta);
-    // this.emit('position:change', this.position);
-    // this.changePosition();
   }
 
   strafeLeft(delta: number) {
+    if (this.isJump) return;
+    this.moving.strafeLeft = true;
     this.translatePosition({ y: this.moveSpeed * delta });
   }
 
   strafeRight(delta: number) {
+    if (this.isJump) return;
+    this.moving.strafeRight = true;
     this.translatePosition({ y: -this.moveSpeed * delta });
   }
 
   strafeUp(delta: number) {
-    this.translatePosition({ z: this.fallSpeed * delta });
+    if (!this.isJump) {
+      this.translatePosition({ z: this.gravity * delta });
+    }
   }
 
   strafeDown(delta: number) {
-    this.translatePosition({ z: -this.fallSpeed * delta });
+    this.translatePosition({ z: -this.gravity * delta });
   }
 
   translatePosition(vector: { x?: number, y?: number, z?: number }) {
@@ -321,10 +378,25 @@ class Unit extends Entity {
     }
   }
 
+  clear() {
+    this.moving.forward = false;
+    this.moving.backward = false;
+    this.moving.strafeLeft = false;
+    this.moving.strafeRight = false;
+
+    if (!this.isJump) {
+      this.jumpMoving.forward = false;
+      this.jumpMoving.backward = false;
+      this.jumpMoving.strafeLeft = false;
+      this.jumpMoving.strafeRight = false;
+    }
+  }
+
   update(delta: number) {
     // this.isMoving = false;
     // this.setAnimation(0);
     this.updateGravity(delta);
+    this.clear();
   }
 
   // isCollide() {
@@ -359,36 +431,40 @@ class Unit extends Entity {
 
   // Обеспецивает хождение по земле
   updateGroundFollow(delta: number) {
-    const diff = Math.abs(this._groundFollowConstant - this.groundDistance);
-    if ((this.groundDistance > this._groundFollowConstant + 0.5) && !this.isJump) {
-      this.translatePosition({ z: -diff * this.fallSpeed * delta });
-    } else {
-      if (this.isOnGround) {
-        if (this.isJump) {
-          this.isJump = false;
-          this.stopAnimation();
-          // this.setAnimation(16, true);
-        }
-      }
-
-      if (this.groundDistance < this._groundFollowConstant) {
-        this.translatePosition({ z: diff * this.fallSpeed * 2 * delta });
-      }
-    }
+    // const diff = this._groundFollowConstant - this.groundDistance;
+    // this.translatePosition({ z: diff });
+    // if ((this.groundDistance > this._groundFollowConstant + 0.5) && !this.isJump) {
+    // this.translatePosition({ z: -diff * this.gravity * delta });
+    const diff = this._groundFollowConstant - this.groundDistance;
+    this.translatePosition({ z: diff - 0.1 });
+    // }
   }
 
   updateGravity(delta: number) {
-    if (this.isJump && this.jumpSpeed > 0) {
-      this.translatePosition({ z: this.jumpSpeed });
-      this.jumpSpeed -= 0.01;
-    }
+    const animationSpeed = 1.6;
+    if (this.isJump || this.isFall) {
+      let x = 0;
+      let y = 0;
+      if (this.jumpMoving.forward) x = this.moveSpeed * delta;
+      if (this.jumpMoving.backward) x = -this.moveSpeed * delta;
+      if (this.jumpMoving.strafeLeft) y = this.moveSpeed * delta;
+      if (this.jumpMoving.strafeRight) y = -this.moveSpeed * delta;
+      this.translatePosition({
+        x,
+        y,
+        z: (this.jumpVelocity - this.gravity) * delta * animationSpeed
+      });
 
-    if (this.isJump && !this.isOnGround) {
-      this.setAnimation(31, true);
-      this.translatePosition({ z: -this.fallSpeed * delta });
+      if (this.isOnGround) {
+        this.isJump = false;
+        this.jumpVelocity = 0;
+      }
+      if (this.jumpVelocity >= 0) {
+        this.jumpVelocity -= this.gravity * delta * animationSpeed;
+      }
+    } else {
+      this.updateGroundFollow(delta);
     }
-
-    this.updateGroundFollow(delta);
   }
 }
 

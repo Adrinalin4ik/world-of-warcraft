@@ -13,12 +13,6 @@ class Player extends Unit {
     (window as any).player = this;
   }
 
-  jump() {
-    if (this.isOnGround) {
-      this.setAnimation(15, true);
-    }
-  }
-
   worldport(mapId: number, coord: Array<number>) {
     this.position.set(coord[0], coord[1], coord[2]);
     if (!this.mapId || this.mapId !== mapId) {

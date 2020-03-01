@@ -20,11 +20,21 @@ import Player from '../../../game/classes/player';
 //   background: 'transparent'
 // };
 
+enum Key {
+  space = 32,
+  W = 87,
+  A = 65,
+  D = 68,
+  S = 83,
+  Q = 81,
+  E = 69,
+  R = 82,
+  T = 84
+}
 
 interface IProp {
   camera: THREE.PerspectiveCamera,
   player: Player
-  clock: THREE.Clock
 }
 
 interface IUpdate {
@@ -36,7 +46,6 @@ class Controls extends React.Component<IProp, IUpdate> {
   private element: HTMLElement = document.body;
   private unit: Player;
   private camera: THREE.PerspectiveCamera;
-  private clock: THREE.Clock;
 
   private rotateStart: THREE.Vector2 = new THREE.Vector2();
   private rotateEnd: THREE.Vector2 = new THREE.Vector2();
@@ -74,10 +83,7 @@ class Controls extends React.Component<IProp, IUpdate> {
     console.log('Camera', this.camera);
     // Based on THREE's OrbitControls
     // See: http://threejs.org/examples/js/controls/OrbitControls.js
-    // this.clock = props.clock
-    this.clock = new THREE.Clock()
 
-    
     this.quat = new THREE.Quaternion().setFromUnitVectors(
       this.camera.up, new THREE.Vector3(0, 1, 0)
     );
@@ -88,7 +94,8 @@ class Controls extends React.Component<IProp, IUpdate> {
     this.element.addEventListener('mouseup', this._onMouseUp.bind(this));
     this.element.addEventListener('mousemove', this._onMouseMove.bind(this));
     this.element.addEventListener('mousewheel', this._onMouseWheel.bind(this));
-    document.addEventListener('keypress', this._onKeyPress.bind(this));
+    document.addEventListener('keydown', this._onKeyDown.bind(this));
+    document.addEventListener('keyup', this._onKeyUp.bind(this));
     
     // this.element.addEventListener('touchstart', this._onTouchStart.bind(this));
     // this.element.addEventListener('touchend', this._onTouchEnd.bind(this));
@@ -99,7 +106,6 @@ class Controls extends React.Component<IProp, IUpdate> {
     
     this.element.addEventListener('contextmenu', this._onContextMenu.bind(this), false);
     
-    this.update();
   }
   
   componentWillUnmount() {
@@ -108,7 +114,8 @@ class Controls extends React.Component<IProp, IUpdate> {
     this.element.removeEventListener('mousemove', this._onMouseMove.bind(this));
     this.element.removeEventListener('mousewheel', this._onMouseWheel.bind(this));
     this.element.removeEventListener('DOMMouseScroll', this._onMouseWheel.bind(this));
-    document.removeEventListener('keypress', this._onKeyPress.bind(this));
+    document.removeEventListener('keydown', this._onKeyDown.bind(this));
+    document.removeEventListener('keyup', this._onKeyUp.bind(this));
     
     // this.element.removeEventListener('touchstart', this._onTouchDown.bind(this));
     // this.element.removeEventListener('touchend', this._onTouchEnd.bind(this));
@@ -119,8 +126,8 @@ class Controls extends React.Component<IProp, IUpdate> {
     this.isRun = false;
   }
 
-  _onKeyPress(event: KeyboardEvent) {
-    if (event.key === 't' || event.key === 'е') {
+  _onKeyDown(event: KeyboardEvent) {
+    if (event.keyCode === Key.T) {
       const p = this.unit.position;
       localStorage.setItem('debugCoords', JSON.stringify({
         zoneId: this.unit.mapId,
@@ -130,7 +137,7 @@ class Controls extends React.Component<IProp, IUpdate> {
       alert("Coords saved successfully")
     }
 
-    if (event.key === 'r' || event.key === 'к') {
+    if (event.keyCode === Key.R) {
       const spot = JSON.parse(localStorage.getItem('debugCoords') || "");
       if (spot) {
         this.unit.worldport(spot.zoneId, spot.coords);
@@ -138,6 +145,21 @@ class Controls extends React.Component<IProp, IUpdate> {
       console.log('Coords has been restored')
     }
 
+    const unit = this.unit;
+    if (unit) {
+      if (event.keyCode === Key.space) {
+        unit.jump();
+      }
+    }
+  }
+
+  _onKeyUp(event: KeyboardEvent) {
+    const unit = this.unit;
+    if (unit) {
+      if (event.keyCode !== Key.space) {
+        unit.stopAnimation();
+      }
+    }
   }
 
   _onContextMenu(event: Event) {
@@ -156,15 +178,13 @@ class Controls extends React.Component<IProp, IUpdate> {
   //   })
   // }
 
-  public update() {
+  public update(delta: number) {
     const unit = this.unit;
 
-    // TODO: Get rid of this delta retrieval call
-    const delta = this.clock.getDelta();
     if (this.unit) {
-      if (key.isPressed('space')) {
-        unit.jump();
-      }
+      // if (key.isPressed('space')) {
+      //   unit.jump();
+      // }
 
       if (key.isPressed('up') || key.isPressed('w') || this.isRun) {
         unit.moveForward(delta);
@@ -183,7 +203,7 @@ class Controls extends React.Component<IProp, IUpdate> {
       }
 
       if (key.isPressed('space')) {
-        unit.ascend(delta);
+        // unit.ascend(delta);
       }
 
       if (key.isPressed('x')) {
@@ -287,8 +307,6 @@ class Controls extends React.Component<IProp, IUpdate> {
       );
 
       this.rotateStart.copy(this.rotateEnd);
-
-      this.update();
     }
   }
 
@@ -332,8 +350,6 @@ class Controls extends React.Component<IProp, IUpdate> {
       );
 
       this.rotateStart.copy(this.rotateEnd);
-
-      this.update();
     }
   }
 
@@ -347,8 +363,6 @@ class Controls extends React.Component<IProp, IUpdate> {
     } else if (delta < 0) {
       this.zoomOut();
     }
-
-    this.update();
   }
 
   render() {

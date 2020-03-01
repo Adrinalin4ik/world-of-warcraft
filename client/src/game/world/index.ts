@@ -50,7 +50,7 @@ export default class World extends EventEmitter {
     this.entities.add(entity);
     if (entity.view) {
       this.scene.add(entity.view);
-      this.scene.add(entity.collider); // if you want to see the player collider
+      // this.scene.add(entity.collider); // if you want to see the player collider
       this.scene.add(entity.arrow);
 
       entity.on('model:change', this.changeModel.bind(this));

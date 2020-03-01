@@ -62,11 +62,11 @@ class AnimationManager extends EventEmitter {
     return;
   }
 
-  playAnimation(animationIndex, repetitions = Infinity) {
+  playAnimation(animationIndex, repetitions = Infinity, loop = THREE.LoopRepeat) {
     const action = this.loadAnimation(animationIndex);
-    action.repetitions = repetitions;
+    action.setLoop(loop, repetitions)
     this.currentAnimation = action;
-    action.play();
+    return action.play();
   }
 
   stopAnimation(animationIndex) {

@@ -63,12 +63,15 @@ class GameScreen extends React.Component {
     this.forceUpdate();
     this.resize();
     
-    setInterval(() => {
-      this.animate();
-      this.forceUpdate();
-    }, 1000/30);
+    this.callFrame();
 
     window.addEventListener('resize', this.resize.bind(this));
+  }
+
+  callFrame() {
+    this.animate();
+    this.forceUpdate();
+    window.requestAnimationFrame(this.callFrame.bind(this));
   }
 
   get aspectRatio() {
@@ -92,37 +95,40 @@ class GameScreen extends React.Component {
       return;
     }
 
-    this.controls.current!.update();
+    const delta = this.clock.getDelta();
     if (this.debugPanel.current){
       this.debugPanel.current.forceUpdate();
     }
-
+    
     const cameraMoved: boolean =
-      this.prevCameraRotation === null ||
-      this.prevCameraPosition === null ||
-      !this.prevCameraRotation.equals(this.camera.quaternion) ||
-      !this.prevCameraPosition.equals(this.camera.position);
-    this.game.world.animate(this.clock.getDelta(), this.camera, cameraMoved);
-
+    this.prevCameraRotation === null ||
+    this.prevCameraPosition === null ||
+    !this.prevCameraRotation.equals(this.camera.quaternion) ||
+    !this.prevCameraPosition.equals(this.camera.position);
+    this.game.world.animate(delta, this.camera, cameraMoved);
+    
     this.renderer.render(this.game.world.scene, this.camera);
     if (this.debugRenderer) {
-
+      
       this.debugCamera.position.set(this.camera.position.x + 20, 
-                                    this.camera.position.y + 20, 
-                                    this.camera.position.z + 100)
-                                    
-      this.debugRenderer.render(this.game.world.scene, this.debugCamera);
+        this.camera.position.y + 20, 
+        this.camera.position.z + 100)
+        
+        this.debugRenderer.render(this.game.world.scene, this.debugCamera);
+      }
+      
+      this.prevCameraRotation = this.camera.quaternion.clone();
+      this.prevCameraPosition = this.camera.position.clone();
+      if (this.controls.current) {
+        this.controls.current.update(delta);
+      }
     }
-
-    this.prevCameraRotation = this.camera.quaternion.clone();
-    this.prevCameraPosition = this.camera.position.clone();
-  }
-
-  render() {
-    const debugCanvas = this.debug ? 
-        <canvas ref="debugCanvas" 
-                className="canvas debug_canvas" 
-                style={{position: this.debug ? "relative" : "absolute"}}></canvas> : null
+    
+    render() {
+      const debugCanvas = this.debug ? 
+      <canvas ref="debugCanvas" 
+      className="canvas debug_canvas" 
+      style={{position: this.debug ? "relative" : "absolute"}}></canvas> : null
     const { renderer } = this.state;
 
     return (
@@ -131,7 +137,7 @@ class GameScreen extends React.Component {
                   className="canvas main_canvas" 
                   style={{position: this.debug ? "relative" : "absolute"}}></canvas>
           {debugCanvas}
-          <Controls ref={this.controls} player={this.game.world.player} camera={this.camera} clock={this.clock} />
+          <Controls ref={this.controls} player={this.game.world.player} camera={this.camera} />
           <DebugPanel ref="debugPanel" renderer={renderer} game={this.game}></DebugPanel>
       </div>
     );
