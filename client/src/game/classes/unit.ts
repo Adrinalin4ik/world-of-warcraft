@@ -234,11 +234,15 @@ class Unit extends Entity {
   }
 
   ascend(delta: number) {
-    this.translatePosition({ z: this.moveSpeed * delta });
+    if (this.isFly) {
+      this.translatePosition({ z: this.moveSpeed * this.gravity * delta });
+    }
   }
 
   descend(delta: number) {
-    this.translatePosition({ z: -this.moveSpeed * delta });
+    if (this.isFly) {
+      this.translatePosition({ z: -this.moveSpeed * this.gravity * delta });
+    }
   }
 
   moveForward(delta: number) {
@@ -438,6 +442,8 @@ class Unit extends Entity {
   }
 
   updateGravity(delta: number) {
+    if (this.isFly) return;
+
     const animationSpeed = 1.6;
     if (this.isJump) {
       let x = 0;

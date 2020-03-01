@@ -13,7 +13,7 @@ export default class World extends EventEmitter {
   public player: Player;
   private entities: Set<Unit> = new Set();
   public map: WorldMap | null = null;
-
+  private skybox: THREE.Mesh;
   constructor() {
     super();
 
@@ -28,6 +28,26 @@ export default class World extends EventEmitter {
     this.add(this.player);
     this.player.on('map:change', this.changeMap.bind(this));
     this.player.on('position:change', this.changePosition.bind(this));
+
+    var geometry = new THREE.CubeGeometry(1000, 1000, 1000);
+    var cubeMaterials = [
+      new THREE.MeshBasicMaterial({ map: new THREE.TextureLoader().load('/yonder_ft.jpg'), side: THREE.DoubleSide }), //front side
+      new THREE.MeshBasicMaterial({ map: new THREE.TextureLoader().load('/yonder_bk.jpg'), side: THREE.DoubleSide }), //back side
+      new THREE.MeshBasicMaterial({ map: new THREE.TextureLoader().load('/yonder_up.jpg'), side: THREE.DoubleSide }), //up side
+      new THREE.MeshBasicMaterial({ map: new THREE.TextureLoader().load('/yonder_dn.jpg'), side: THREE.DoubleSide }), //down side
+      new THREE.MeshBasicMaterial({ map: new THREE.TextureLoader().load('/yonder_rt.jpg'), side: THREE.DoubleSide }), //right side
+      new THREE.MeshBasicMaterial({ map: new THREE.TextureLoader().load('/yonder_lf.jpg'), side: THREE.DoubleSide }) //left side
+    ];
+
+    var cubeMaterial = new THREE.MeshFaceMaterial(cubeMaterials);
+    this.skybox = new THREE.Mesh(geometry, cubeMaterial);
+    this.skybox.rotation.set(
+      -Math.PI / 2,
+      Math.PI,
+      Math.PI,
+    );
+    this.skybox.name = "Skybox"
+    this.scene.add(this.skybox);
 
     const loadedSpot = localStorage.getItem('debugCoords');
     if (loadedSpot) {
@@ -96,6 +116,7 @@ export default class World extends EventEmitter {
   changePosition(position: THREE.Vector3) {
     // console.log('changePosition', this)
     this.renderAtCoords(position.x, position.y);
+    this.skybox.position.set(position.x, position.y, 100)
   }
 
   animate(delta: number, camera: THREE.PerspectiveCamera, cameraMoved: boolean) {

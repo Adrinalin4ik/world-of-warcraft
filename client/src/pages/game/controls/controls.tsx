@@ -203,7 +203,7 @@ class Controls extends React.Component<IProp, IUpdate> {
       }
 
       if (key.isPressed('space')) {
-        // unit.ascend(delta);
+        unit.ascend(delta);
       }
 
       if (key.isPressed('x')) {

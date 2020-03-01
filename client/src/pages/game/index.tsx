@@ -36,11 +36,11 @@ class GameScreen extends React.Component {
   constructor(props: IGameProps) {
     super(props);
 
-    this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 1000);
+    this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 20000);
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(15, 0, 7);
 
-    this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 1000);
+    this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 20000);
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
   }
@@ -48,6 +48,7 @@ class GameScreen extends React.Component {
   componentDidMount() {
     this.renderer = new THREE.WebGLRenderer({
       alpha: true,
+      antialias: true,
       canvas: this.refs.canvas as HTMLCanvasElement
     });
 
