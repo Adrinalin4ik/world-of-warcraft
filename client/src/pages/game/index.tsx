@@ -28,6 +28,11 @@ class GameScreen extends React.Component {
   private controls = React.createRef<Controls>()
   private debugPanel = React.createRef<DebugPanel>()
 
+  public state: IGameScreenState = {
+    renderer: null,
+    game: null
+  }
+
   constructor(props: IGameProps) {
     super(props);
 
@@ -38,11 +43,6 @@ class GameScreen extends React.Component {
     this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 1000);
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
-
-    this.state = {
-      renderer: null,
-      game: null
-    } as IGameScreenState;
   }
   
   componentDidMount() {
@@ -52,19 +52,20 @@ class GameScreen extends React.Component {
     });
 
     this.setState({renderer: this.renderer})
-
+    
     if (this.debug) {
       this.debugRenderer = new THREE.WebGLRenderer({
         alpha: true,
         canvas: this.refs.debugCanvas as HTMLCanvasElement
       });
     }
-    console.log(this)
+    console.log("componentDidMount", this)
     this.forceUpdate();
     this.resize();
-
+    
     setInterval(() => {
       this.animate();
+      this.forceUpdate();
     }, 1000/30);
 
     window.addEventListener('resize', this.resize.bind(this));
@@ -108,11 +109,7 @@ class GameScreen extends React.Component {
 
       this.debugCamera.position.set(this.camera.position.x + 20, 
                                     this.camera.position.y + 20, 
-                                    this.camera.position.z+ 100)
-
-      // this.debugCamera.rotation.set(-this.camera.rotation.x + 270, 
-      //                               -this.camera.rotation.y + 360, 
-      //                               -this.camera.rotation.z + 360)
+                                    this.camera.position.z + 100)
                                     
       this.debugRenderer.render(this.game.world.scene, this.debugCamera);
     }
@@ -125,16 +122,17 @@ class GameScreen extends React.Component {
     const debugCanvas = this.debug ? 
         <canvas ref="debugCanvas" 
                 className="canvas debug_canvas" 
-                style={{ position: this.debug ? "relative" : "absolute"}}></canvas> : null
+                style={{position: this.debug ? "relative" : "absolute"}}></canvas> : null
+    const { renderer } = this.state;
 
     return (
       <div className="game_screen">
           <canvas ref="canvas" 
                   className="canvas main_canvas" 
-                  style={{ position: this.debug ? "relative" : "absolute"}}></canvas>
+                  style={{position: this.debug ? "relative" : "absolute"}}></canvas>
           {debugCanvas}
-          <Controls ref={this.controls} player={ this.game.world.player } camera={ this.camera } clock={this.clock} />
-          <DebugPanel ref="debugPanel" renderer={this.renderer} game={this.game}></DebugPanel>
+          <Controls ref={this.controls} player={this.game.world.player} camera={this.camera} clock={this.clock} />
+          <DebugPanel ref="debugPanel" renderer={renderer} game={this.game}></DebugPanel>
       </div>
     );
   }

@@ -1,7 +1,7 @@
 .stats {
   position: absolute;
-  bottom: 0;
-  right: 0;
-  z-index: 3;
-  width: 160px;
+  z-index: 123;
+  background: #00a907;
+  font-size: 12px;
+  pointer-events:none;
 }

@@ -21,7 +21,7 @@ class Unit extends Entity {
   private modelData: DBC | null = null;
   private playerGeometry: THREE.BoxGeometry = new THREE.BoxGeometry(0, 0, 0);
   private playerMaterial: THREE.MeshBasicMaterial = new THREE.MeshBasicMaterial({ wireframe: true, opacity: 0 });
-  private collider: THREE.Mesh = new THREE.Mesh(this.playerGeometry, this.playerMaterial);
+  public collider: THREE.Mesh = new THREE.Mesh(this.playerGeometry, this.playerMaterial);
   private currentAnimationIndex: number = 0;
   private displayInfo: DBC | null = null;
 
@@ -112,6 +112,7 @@ class Unit extends Entity {
   get isOnGround() {
     return this.groundDistance <= this.groundZeroConstant;
   }
+
   updatePlayerColliderBox() {
     const { max, min } = this.model!.geometry.boundingBox;
     this.collider.position.set(
@@ -249,16 +250,14 @@ class Unit extends Entity {
 
   beforePositionChange(newCoords: THREE.Vector3) {
     this.prevPosition = this.position.clone();
-    // if (this.world.map.collidableMeshList) {
     this.updateGroundDistance(newCoords);
-    // }
 
     this.updateIsMovingFlag(newCoords);
-    // this.();
+    this.updatePlayerColliderBox();
   }
 
   afterPositionChange() {
-    this.updatePlayerColliderBox();
+
   }
 
   changePosition(vector: { x?: number, y?: number, z?: number }, translate: boolean) {
@@ -328,12 +327,14 @@ class Unit extends Entity {
     this.updateGravity(delta);
   }
 
-  // isCollide(meshList: []) {
+  // isCollide() {
+  //   const meshList = Array.from(ColliderManager.collidableMeshList.values()) as THREE.Object3D[];
+  //   const colligerGeometry = this.collider.geometry as THREE.Geometry;
   //   let isCollide = false;
   //   this.isCollides = false;
   //   if (this.model) {
   //     const originPoint = this.collider.position.clone();
-  //     this.collider.geometry.vertices.forEach((vertex) => {
+  //     colligerGeometry.vertices.forEach((vertex) => {
   //       const localVertex = vertex.clone();
   //       const globalVertex = localVertex.applyMatrix4(this.collider.matrix);
   //       const directionVector = globalVertex.sub(this.collider.position);

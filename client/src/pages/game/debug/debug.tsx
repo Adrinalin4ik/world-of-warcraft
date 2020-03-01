@@ -1,5 +1,6 @@
 import React from 'react';
 import Game from '../../../game';
+import './debug.scss';
 
 interface IProp {
   game: Game | null,
@@ -18,8 +19,39 @@ class DebugPanel extends React.Component<IProp> {
     console.log("Debug component", this)
   }
 
-  componentWillUnmount() {
+  getSnapshotBeforeUpdate(prevProps:IProp, _prevState:any) {
+    this.renderer = prevProps.renderer;
+    this.game = prevProps.game;
+  }
+
+  playerStats() {
+    if (!this.game) return;
+    const player = this.game.world.player;
     
+    return (
+      <div>
+        <div className="divider"></div>
+        <p>
+          Map Id: { player.mapId }
+        </p>
+        <p>
+          x: { Math.round(player.position.x) }
+        </p>
+        <p>
+          y: { Math.round(player.position.y) }
+        </p>
+        <p>
+          z: { Math.round(player.position.z) }
+        </p>
+        <p>
+          Ground distance: { player.groundDistance.toFixed(2) }
+        </p>
+        <div className="divider"></div>
+        {/* <p>
+          Collides: { player.isCollide() ? 'true' : 'false' }
+        </p> */}
+      </div>
+    )
   }
 
   mapStats() {
@@ -38,7 +70,9 @@ class DebugPanel extends React.Component<IProp> {
         </p>
 
         <div className="divider"></div>
-
+        <div>
+          
+        </div>
         <h2>Map Doodads</h2>
         <div className="divider"></div>
         <p>
@@ -87,9 +121,11 @@ class DebugPanel extends React.Component<IProp> {
 
     const map = this.game.world.map;
 
-    const { memory, programs, render } = renderer.info;
+    const { memory, programs } = renderer.info;
     return (
-      <div>
+      <div className="stats">
+        <h2>Player</h2>
+        { this.playerStats() }
         <h2>Memory</h2>
         <div className="divider"></div>
         <p>
@@ -103,23 +139,9 @@ class DebugPanel extends React.Component<IProp> {
         </p>
 
         <div className="divider"></div>
-
-        {/* <h2>Render</h2>
-        <div className="divider"></div>
-        <p>
-          Calls: { render.calls }
-        </p>
-        <p>
-          Points: { render.points }
-        </p>
-        <p>
-          Faces: { render.faces!.toString()}
-        </p>
-        <p>
-          Vertices: { render.vertices }
-        </p> */}
-
-        { map && this.mapStats() }
+        <div className="mapStat">
+          { map && this.mapStats() }
+        </div>
       </div>
     );
   }
