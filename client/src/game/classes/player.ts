@@ -5,7 +5,7 @@ class Player extends Unit {
 
   constructor(name: string, guid: string) {
     super(guid);
-    this.displayId = 24641;
+    this.displayId = 22235;
     this.name = name;
     this.mapId = null;
     this.view.name = "MainPlayer";

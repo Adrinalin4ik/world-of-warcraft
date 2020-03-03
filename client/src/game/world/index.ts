@@ -13,7 +13,7 @@ export default class World extends EventEmitter {
   public player: Player;
   private entities: Set<Unit> = new Set();
   public map: WorldMap | null = null;
-  private skybox: THREE.Mesh;
+  // private skybox: THREE.Mesh;
   constructor() {
     super();
 
@@ -81,6 +81,7 @@ export default class World extends EventEmitter {
     this.entities.delete(entity);
     if (entity.view) {
       this.scene.remove(entity.view);
+      this.scene.remove(entity.arrow);
       entity.removeListener('model:change', this.changeModel.bind(this));
     }
   }
