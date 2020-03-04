@@ -40,6 +40,7 @@ class Unit extends Entity {
   private _groundFollowConstant: number = 1; // точка с которой нужно начинать следовать рельефу
   private groundDistanceRaycaster: THREE.Raycaster = new THREE.Raycaster();
   private prevPosition: THREE.Vector3 = new THREE.Vector3();
+  public useGravity: boolean = true;
 
   public moving = {
     forward: false,
@@ -100,6 +101,10 @@ class Unit extends Entity {
   }
   get position(): THREE.Vector3 {
     return this._view.position;
+  }
+
+  get rotation(): THREE.Euler {
+    return this._view.rotation;
   }
 
   get displayId(): number {
@@ -208,18 +213,24 @@ class Unit extends Entity {
     this._model = m2;
   }
 
-  setAnimation(index: number, inrerrupt: boolean = false, repetitions: number = Infinity) {
+  setAnimation(index: number, inrerrupt: boolean = false, repetitions: number = -1) {
     if (!this.model.animations.currentAnimation.isRunning()
       || inrerrupt
       || this.currentAnimationIndex !== index) {
       this.model.animations.stopAnimation(this.currentAnimationIndex);
       this.currentAnimationIndex = index;
-      return this.model.animations.playAnimation(index, repetitions);
+      this.emit('animation:play', index, inrerrupt, repetitions)
+      return this.model.animations.playAnimation(
+        index,
+        repetitions === -1 ? Infinity : repetitions
+      );
     }
   }
 
   stopAnimation(index?: number) {
-    this.model.animations.stopAnimation(index || this.currentAnimationIndex);
+    const animationIndex = index || this.currentAnimationIndex;
+    this.emit('animation:stop', animationIndex)
+    this.model.animations.stopAnimation(animationIndex);
   }
 
   jump() {
@@ -267,6 +278,7 @@ class Unit extends Entity {
       this.setAnimation(38);
     }
     this.view.rotateZ(this.rotateSpeed * delta);
+    this.changeRotation();
   }
 
   rotateRight(delta: number) {
@@ -274,6 +286,7 @@ class Unit extends Entity {
       this.setAnimation(38);
     }
     this.view.rotateZ(-this.rotateSpeed * delta);
+    this.changeRotation();
   }
 
   strafeLeft(delta: number) {
@@ -323,6 +336,10 @@ class Unit extends Entity {
 
   }
 
+  changeRotation() {
+    this.emit('position:change', this.position, this.view.rotation);
+  }
+
   changePosition(vector: { x?: number, y?: number, z?: number }, translate: boolean) {
     // Считаем то,как изменится позиция после проведения операции
     let newCoords: THREE.Vector3 = new THREE.Vector3();
@@ -363,7 +380,7 @@ class Unit extends Entity {
     this.afterPositionChange();
 
     if (!this.prevPosition.equals(this.position)) {
-      this.emit('position:change', this.position);
+      this.emit('position:change', this.position, this.view.rotation);
     }
   }
 
@@ -401,7 +418,9 @@ class Unit extends Entity {
   update(delta: number) {
     // this.isMoving = false;
     // this.setAnimation(0);
-    this.updateGravity(delta);
+    if (this.useGravity) {
+      this.updateGravity(delta);
+    }
     this.clear();
   }
 

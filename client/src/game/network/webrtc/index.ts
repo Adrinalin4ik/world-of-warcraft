@@ -1,17 +1,18 @@
 import * as EasyMediasoup from 'easy-mediasoup-v3-client';
-import { Subject } from 'rxjs';
 import Peer from './peer';
 import Player from '../../classes/player';
 import World from '../../world';
+import { MessageType } from './types';
+import { MessageHandler } from './message_handler';
 
 export default class Webrtc {
-  public messages: Subject<string> = new Subject();
   public peers: Map<string, Peer> = new Map();
+  public peerId: string = (Math.random() * 1000).toFixed(3);
   private em: any;
   private config = {
     autorun: true,
     roomId: "1",
-    peerId: (Math.random() * 1000).toFixed(3),
+    peerId: this.peerId,
     displayName: "test",
     customData: {
       fname: "John",
@@ -41,8 +42,10 @@ export default class Webrtc {
   };
 
   private world: World;
+
   constructor(world: World) {
     this.world = world;
+    this.world.player.guid = this.peerId;
   }
   connect() {
     this.em = new EasyMediasoup.Init(this.config);
@@ -51,12 +54,16 @@ export default class Webrtc {
     this.em.emitter.on('SET_ROOM_STATE', (state: string) => {
       //new/connecting/connected/disconnected/closed
       console.log("SET_ROOM_STATE", state)
+      if (state === "connected") {
+        this.em.client.enableDataProducer();
+      }
     })
 
     this.em.emitter.on('peerAdded', (params: { id: string }) => {
       console.log('peerAdded', params)
 
-      const player = new Player("TestName", params.id);
+      const player = new Player(params.id, "TestName");
+      player.useGravity = false;
       const pos = this.world.player.position.clone();
       player.worldport(this.world.player.mapId!, [pos.x, pos.y, pos.z])
       this.world.add(player);
@@ -65,8 +72,6 @@ export default class Webrtc {
         id: params.id,
         player
       }))
-
-
     });
 
     this.em.emitter.on('peerRemoved', (id: string) => {
@@ -79,7 +84,11 @@ export default class Webrtc {
     });
 
     this.em.emitter.on('onDataMessage', (message: string) => {
-      this.messages.next(message);
+      MessageHandler.handle(message)
     })
+  }
+
+  sendMessage(message: string) {
+    this.em.client.sendMessage(message)
   }
 }

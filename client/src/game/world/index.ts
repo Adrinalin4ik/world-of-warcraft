@@ -11,7 +11,7 @@ export default class World extends EventEmitter {
   public scene: THREE.Scene;
   public debugScene: THREE.Scene;
   public player: Player;
-  private entities: Set<Unit> = new Set();
+  public entities: Map<string, Unit> = new Map();
   public map: WorldMap | null = null;
   // private skybox: THREE.Mesh;
   constructor() {
@@ -22,9 +22,9 @@ export default class World extends EventEmitter {
     this.debugScene = new THREE.Scene();
     this.debugScene.matrixAutoUpdate = true;
 
-    this.entities = new Set();
+    this.entities = new Map();
 
-    this.player = new Player("TestName", "-1");
+    this.player = new Player("-1", "TestName");
     this.add(this.player);
     this.player.on('map:change', this.changeMap.bind(this));
     this.player.on('position:change', this.changePosition.bind(this));
@@ -67,7 +67,7 @@ export default class World extends EventEmitter {
   }
 
   add(entity: Unit) {
-    this.entities.add(entity);
+    this.entities.set(entity.guid, entity);
     if (entity.view) {
       this.scene.add(entity.view);
       // this.scene.add(entity.collider); // if you want to see the player collider
@@ -78,7 +78,7 @@ export default class World extends EventEmitter {
   }
 
   remove(entity: Unit) {
-    this.entities.delete(entity);
+    this.entities.delete(entity.guid);
     if (entity.view) {
       this.scene.remove(entity.view);
       this.scene.remove(entity.arrow);

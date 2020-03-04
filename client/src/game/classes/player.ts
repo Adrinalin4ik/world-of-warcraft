@@ -3,7 +3,7 @@ import Unit from './unit';
 class Player extends Unit {
   public mapId: number | null;
 
-  constructor(name: string, guid: string) {
+  constructor(guid: string, name: string) {
     super(guid);
     this.displayId = 22235;
     this.name = name;
