@@ -13,7 +13,7 @@ export default class World extends EventEmitter {
   public player: Player;
   private entities: Set<Unit> = new Set();
   public map: WorldMap | null = null;
-  private skybox: THREE.Mesh;
+  // private skybox: THREE.Mesh;
   constructor() {
     super();
 

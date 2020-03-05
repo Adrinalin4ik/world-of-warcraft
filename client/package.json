@@ -2,6 +2,12 @@
   "name": "browser-wow",
   "version": "0.1.0",
   "private": true,
+  "scripts": {
+    "start": "PORT=3001 DANGEROUSLY_DISABLE_HOST_CHECK=true node scripts/start.js",
+    "build": "node scripts/build.js",
+    "test": "node scripts/test.js",
+    "build:beta": "NODE_ENV=beta npm run build"
+  },
   "dependencies": {
     "@babel/core": "7.7.4",
     "@svgr/webpack": "4.3.3",
@@ -75,11 +81,6 @@
     "webpack-manifest-plugin": "2.2.0",
     "workbox-webpack-plugin": "4.3.1",
     "worker-loader": "2.0.0"
-  },
-  "scripts": {
-    "start": "PORT=3001 DANGEROUSLY_DISABLE_HOST_CHECK=true node scripts/start.js",
-    "build": "node scripts/build.js",
-    "test": "node scripts/test.js"
   },
   "eslintConfig": {
     "extends": "react-app"
