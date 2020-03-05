@@ -1,0 +1,10 @@
+version: '3.4'
+services:
+  web:
+    build:
+      context: .
+      args:
+        - env=beta
+    ports:
+      - '8081:80'
+    container_name: world-of-warcraft-web
