@@ -2,7 +2,6 @@ import * as EasyMediasoup from 'easy-mediasoup-v3-client';
 import Peer from './peer';
 import Player from '../../classes/player';
 import World from '../../world';
-import { MessageType } from './types';
 import { MessageHandler } from './message_handler';
 
 export default class Webrtc {
@@ -19,7 +18,7 @@ export default class Webrtc {
       lname: 'Travolta'
     },
     // media_server_wss:"wss://v3mediasoup.org:3444",
-    media_server_wss: "ws://localhost:4443",
+    media_server_wss: process.env.gameServerUrl || "localhost:4443",
     produce: true,
     consume: true,
     externalVideo: false,

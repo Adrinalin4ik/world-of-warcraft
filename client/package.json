@@ -6,7 +6,7 @@
     "start": "PORT=3001 DANGEROUSLY_DISABLE_HOST_CHECK=true node scripts/start.js",
     "build": "node scripts/build.js",
     "test": "node scripts/test.js",
-    "build:beta": "NODE_ENV=beta npm run build"
+    "build:beta": "NODE_ENV=production npm run build"
   },
   "dependencies": {
     "@babel/core": "7.7.4",

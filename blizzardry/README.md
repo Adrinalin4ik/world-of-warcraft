@@ -3,15 +3,15 @@
 [![Version](https://img.shields.io/npm/v/blizzardry.svg?style=flat)](https://www.npmjs.org/package/blizzardry)
 [![Join chat](https://img.shields.io/badge/gitter-join_chat-blue.svg?style=flat)](https://gitter.im/wowserhq/blizzardry)
 [![Build Status](https://img.shields.io/travis/wowserhq/blizzardry.svg?style=flat)](https://travis-ci.org/wowserhq/blizzardry)
-[![Dependency Status](https://img.shields.io/gemnasium/wowserhq/blizzardry.svg?style=flat)](https://gemnasium.com/wowserhq/blizzardry)
-[![Code Climate](https://img.shields.io/codeclimate/github/wowserhq/blizzardry.svg?style=flat)](https://codeclimate.com/github/wowserhq/blizzardry)
-[![Coverage](https://img.shields.io/codeclimate/coverage/github/wowserhq/blizzardry.svg?style=flat)](https://codeclimate.com/github/wowserhq/blizzardry)
+[![Known Vulnerabilities](https://snyk.io/test/github/wowserhq/blizzardry/badge.svg)](https://snyk.io/test/github/wowserhq/blizzardry)
+[![Maintainability](https://api.codeclimate.com/v1/badges/dc66eca9b4afbbf290b3/maintainability)](https://codeclimate.com/github/wowserhq/blizzardry/maintainability)
+[![Test Coverage](https://api.codeclimate.com/v1/badges/dc66eca9b4afbbf290b3/test_coverage)](https://codeclimate.com/github/wowserhq/blizzardry/test_coverage)
 
 JavaScript library for mastering the wizardry that is [Blizzard]'s game files.
 
 Blizzardry currently focusses on [Wrath of the Lich King] game content.
 
-Licensed under the **MIT** license, see LICENSE for more information.
+Licensed under the [**MIT** license](LICENSE).
 
 ## Installation
 
@@ -80,6 +80,17 @@ to `libblp.dll` and ensure it ends up on the load PATH.
 
 By default, node-gyp compiles ffi for x64 so make sure `libblp.dll`
 matches this architecture.
+
+#### Ubuntu, Debian
+
+```shell
+sudo apt-get install cmake git gcc
+git clone git://github.com/Kanma/BLPConverter.git
+cd BLPConverter
+cmake CMakeLists.txt -DWITH_LIBRARY=YES
+sudo make install
+sudo ldconfig
+```
 
 #### Other platforms
 
@@ -189,6 +200,17 @@ rename `StormLib.dll` to `libstorm.dll` and ensure it ends up on the load PATH.
 
 By default, node-gyp compiles ffi for x64 so make sure `libstorm.dll`
 matches this architecture.
+
+#### Ubuntu, Debian
+
+```shell
+sudo apt-get install cmake git gcc zlib1g-dev
+git clone git://github.com/ladislav-zezula/StormLib.git
+cd StormLib
+cmake CMakeLists.txt -DBUILD_SHARED_LIBS=ON
+sudo make install
+sudo ldconfig
+```
 
 #### Other platforms
 
