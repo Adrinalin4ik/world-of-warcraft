@@ -6,6 +6,12 @@ import M2Blueprint from '../pipeline/m2/blueprint';
 import ColliderManager from '../world/collider-manager';
 import M2 from '../pipeline/m2';
 
+enum SlopeType {
+  sliding,
+  climbing,
+  none
+}
+
 class Unit extends Entity {
 
   public guid: string;
@@ -20,9 +26,12 @@ class Unit extends Entity {
   private _model: M2 | null = null;
   private modelData: DBC | null = null;
   private playerGeometry: THREE.BoxGeometry = new THREE.BoxGeometry(0, 0, 0);
-  private playerMaterial: THREE.MeshBasicMaterial = new THREE.MeshBasicMaterial({ wireframe: true, opacity: 0 });
+  private playerMaterial: THREE.MeshBasicMaterial = new THREE.MeshBasicMaterial({
+    wireframe: true,
+    opacity: 0
+  });
   public collider: THREE.Mesh = new THREE.Mesh(this.playerGeometry, this.playerMaterial);
-  private currentAnimationIndex: number = 0;
+  public currentAnimationIndex: number = 0;
   private displayInfo: DBC | null = null;
 
   public rotateSpeed: number = 2;
@@ -36,17 +45,29 @@ class Unit extends Entity {
   public isCollides: boolean = false;
   public groundDistance: number = 0;
   private previousGroundDistance: number = 0;
-  private groundZeroConstant: number = 1; // точка с которой будет считаться что мы на земле
+  private minGroundDistance: number = 0.1;
+  private groundZeroConstant: number = 1.5; // точка с которой будет считаться что мы на земле
   private _groundFollowConstant: number = 1; // точка с которой нужно начинать следовать рельефу
-  private groundDistanceRaycaster: THREE.Raycaster = new THREE.Raycaster();
+  private groundDistanceRaycaster: THREE.Raycaster = new THREE.Raycaster(
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 0, -1)
+  );
   private prevPosition: THREE.Vector3 = new THREE.Vector3();
   public useGravity: boolean = true;
+  private slopeLimit = 45; //максимальный угол между землей и юнитом до падения (грудусы)
+  public slopeAng: number = 0;
+  public slopeType: SlopeType = SlopeType.none;
 
   public moving = {
     forward: false,
     backward: false,
     strafeLeft: false,
-    strafeRight: false
+    strafeRight: false,
+    strafeUp: false,
+    strafeDown: false,
+    idle: true,
+    rotateRight: false,
+    rotateLeft: false
   }
 
   public jumpMoving = {
@@ -71,12 +92,13 @@ class Unit extends Entity {
     this.collider.geometry = new THREE.BoxGeometry(1, 1, 1);
     this.collider.name = 'Collider';
 
-    this.groundDistanceRaycaster.set(this.position, this.view.position);
-
     this.arrow.setDirection(this.groundDistanceRaycaster.ray.direction);
 
     // Animation
     this.currentAnimationIndex = 0;
+
+    // this.view.add(this.collider);
+    // this.view.add(this.arrow);
   }
 
   get isOnGround() {
@@ -148,15 +170,6 @@ class Unit extends Entity {
     return this._model!;
   }
 
-  updatePlayerColliderBox() {
-    const { max, min } = this.model!.geometry.boundingBox;
-    this.collider.position.set(
-      this.position.x,
-      this.position.y,
-      this.position.z + (max.z - min.z) / 2
-    );
-  }
-
   set model(m2: M2) {
     // TODO: Should this support multiple models? Mounts?
     if (this._model) {
@@ -214,20 +227,30 @@ class Unit extends Entity {
   }
 
   setAnimation(index: number, inrerrupt: boolean = false, repetitions: number = -1) {
-    if (!this.model.animations.currentAnimation.isRunning()
-      || inrerrupt
-      || this.currentAnimationIndex !== index) {
-      this.model.animations.stopAnimation(this.currentAnimationIndex);
-      this.currentAnimationIndex = index;
-      this.emit('animation:play', index, inrerrupt, repetitions)
-      return this.model.animations.playAnimation(
-        index,
-        repetitions === -1 ? Infinity : repetitions
-      );
+    if (!this.model) return;
+    const isRunning = this.model.animations.currentAnimation.isRunning();
+    if (isRunning) {
+      if (this.model.animations.currentAnimation.repetitions === Infinity &&
+        this.currentAnimationIndex !== index) {
+        this.startAnimation(index, repetitions)
+      }
+    } else {
+      this.startAnimation(index, repetitions)
     }
   }
 
+  startAnimation(index: number, repetitions: number) {
+    this.stopAnimation();
+    this.model.animations.playAnimation(
+      index,
+      repetitions === -1 ? Infinity : repetitions
+    );
+    this.currentAnimationIndex = index;
+    this.emit('animation:play', index, repetitions)
+  }
+
   stopAnimation(index?: number) {
+    if (!this.model) return;
     const animationIndex = index || this.currentAnimationIndex;
     this.emit('animation:stop', animationIndex)
     this.model.animations.stopAnimation(animationIndex);
@@ -258,47 +281,37 @@ class Unit extends Entity {
 
   moveForward(delta: number) {
     if (this.isJump) return;
-    if (this.isOnGround) {
-      this.setAnimation(2);
-    }
     this.moving.forward = true;
-    this.translatePosition({ x: this.moveSpeed * delta });
+    // this.translatePosition({ x: this.moveSpeed * delta });
   }
 
   moveBackward(delta: number) {
     if (this.isJump) return;
     this.moving.backward = true;
-    this.setAnimation(133);
-    this.translatePosition({ x: -this.moveSpeed * delta / 2 });
+    // this.setAnimation(133, false, 0);
+    // this.translatePosition({ x: -this.moveSpeed * delta / 2 });
   }
 
-
   rotateLeft(delta: number) {
-    if (!this.isMoving) {
-      this.setAnimation(38);
-    }
-    this.view.rotateZ(this.rotateSpeed * delta);
-    this.changeRotation();
+    this.moving.rotateLeft = true;
+    // this.view.rotateZ(this.rotateSpeed * delta);
+    // this.changeRotation();
   }
 
   rotateRight(delta: number) {
-    if (!this.isMoving) {
-      this.setAnimation(38);
-    }
-    this.view.rotateZ(-this.rotateSpeed * delta);
-    this.changeRotation();
+    this.moving.rotateRight = true;
   }
 
   strafeLeft(delta: number) {
     if (this.isJump) return;
     this.moving.strafeLeft = true;
-    this.translatePosition({ y: this.moveSpeed * delta });
+    // this.translatePosition({ y: this.moveSpeed * delta });
   }
 
   strafeRight(delta: number) {
     if (this.isJump) return;
     this.moving.strafeRight = true;
-    this.translatePosition({ y: -this.moveSpeed * delta });
+    // this.translatePosition({ y: -this.moveSpeed * delta });
   }
 
   strafeUp(delta: number) {
@@ -326,10 +339,9 @@ class Unit extends Entity {
 
   beforePositionChange(newCoords: THREE.Vector3) {
     this.prevPosition = this.position.clone();
-    this.updateGroundDistance(newCoords);
+    // this.updateGroundDistance(newCoords);
 
     this.updateIsMovingFlag(newCoords);
-    this.updatePlayerColliderBox();
   }
 
   afterPositionChange() {
@@ -340,21 +352,22 @@ class Unit extends Entity {
     this.emit('position:change', this.position, this.view.rotation);
   }
 
-  changePosition(vector: { x?: number, y?: number, z?: number }, translate: boolean) {
+  tmpVector = new THREE.Vector3(this.position.x, this.position.y, this.position.z);
+  changePosition(vector: { x?: number, y?: number, z?: number }, translate: boolean = false) {
     // Считаем то,как изменится позиция после проведения операции
     let newCoords: THREE.Vector3 = new THREE.Vector3();
     if (translate) {
       // eslint-disable-next-line no-param-reassign
       newCoords.set(
-        vector.x ? vector.x + this.view.position.x : this.view.position.x,
-        vector.y ? vector.y + this.view.position.y : this.view.position.y,
-        vector.z ? vector.z + this.view.position.z : this.view.position.z
+        vector.x ? vector.x + this.position.x : this.position.x,
+        vector.y ? vector.y + this.position.y : this.position.y,
+        vector.z ? vector.z + this.position.z : this.position.z
       );
     } else {
       newCoords.set(
-        vector.x ? vector.x : this.view.position.x,
-        vector.y ? vector.y : this.view.position.y,
-        vector.z ? vector.z : this.view.position.z
+        vector.x ? vector.x : this.position.x,
+        vector.y ? vector.y : this.position.y,
+        vector.z ? vector.z : this.position.z
       );
     }
 
@@ -363,16 +376,16 @@ class Unit extends Entity {
     if (vector) {
 
       if (translate) {
-        if (vector.x && newCoords.x !== this.view.position.x) this.view.translateX(vector.x);
-        if (vector.y && newCoords.y !== this.view.position.y) this.view.translateY(vector.y);
-        if (vector.z && newCoords.z !== this.view.position.z) this.view.translateZ(vector.z);
+        if (vector.x && newCoords.x !== this.position.x) this.tmpVector.setX(vector.x)//this.view.translateX(vector.x);
+        if (vector.y && newCoords.y !== this.position.y) this.tmpVector.setY(vector.y)//this.view.translateY(vector.y);
+        if (vector.z && newCoords.z !== this.position.z) this.tmpVector.setZ(vector.z)//this.view.translateZ(vector.z);
       } else {
         const builtVector = {
-          x: vector.x ? vector.x : this.view.position.x,
-          y: vector.y ? vector.y : this.view.position.y,
-          z: vector.z ? vector.z : this.view.position.z
+          x: vector.x ? vector.x : this.position.x,
+          y: vector.y ? vector.y : this.position.y,
+          z: vector.z ? vector.z : this.position.z
         };
-        this.view.position.set(builtVector.x, builtVector.y, builtVector.z);
+        this.position.set(builtVector.x, builtVector.y, builtVector.z)
       }
     }
 
@@ -384,21 +397,77 @@ class Unit extends Entity {
     }
   }
 
-  updateGroundDistance(newPosition: THREE.Vector3) {
+  applyTranslatePosition() {
+    this.view.translateX(this.tmpVector.x)
+    this.view.translateY(this.tmpVector.y)
+    this.view.translateZ(this.tmpVector.z)
+    this.tmpVector.set(0, 0, 0);
+  }
+
+  updateGroundDistance() {
+
     this.previousGroundDistance = this.groundDistance;
-    const newZ = newPosition.z + this._groundFollowConstant - 0.1;
+    this.groundDistance = 0;
+    const newZ = this.position.z + this._groundFollowConstant;
     this.groundDistanceRaycaster.set(
-      new THREE.Vector3(newPosition.x, newPosition.y, newZ),
+      new THREE.Vector3(this.position.x, this.position.y, newZ),
       new THREE.Vector3(0, 0, -1)
     );
-    this.arrow.setDirection(this.groundDistanceRaycaster.ray.direction);
-    this.arrow.position.set(newPosition.x, newPosition.y, newZ);
+    // this.arrow.setDirection(this.groundDistanceRaycaster.ray.direction);
 
     // intersect with all scene meshes.
     const intersects = this.groundDistanceRaycaster.intersectObjects(Array.from(ColliderManager.collidableMeshList.values()) as THREE.Object3D[]);
     if (intersects.length > 0) {
       this.groundDistance = intersects[0].distance;
+      this.slopeAng = new THREE.Vector3(0, 1, 0).angleTo(intersects[0].face!.normal) * 180 / Math.PI;
+      this.slopeType = this.slopeAng < this.slopeLimit ? SlopeType.sliding : SlopeType.climbing;
     }
+  }
+
+  updateMoving(delta: number) {
+    this.moving.idle = (!this.moving.backward &&
+      !this.moving.forward &&
+      !this.moving.strafeLeft &&
+      !this.moving.strafeRight &&
+      !this.moving.rotateRight &&
+      !this.moving.rotateLeft &&
+      !this.isJump)
+
+    if (this.isOnGround) {
+      if (this.moving.forward) {
+        this.translatePosition({ x: this.moveSpeed * delta });
+        this.setAnimation(2);
+      }
+      if (this.moving.backward) {
+        this.translatePosition({ x: -this.moveSpeed * delta / 2 });
+        this.setAnimation(133);
+      }
+      if (this.moving.strafeRight) {
+        this.translatePosition({ y: -this.moveSpeed * delta });
+      }
+      if (this.moving.strafeLeft) {
+        this.translatePosition({ y: this.moveSpeed * delta });
+      }
+      if (this.moving.rotateRight) {
+        if (!this.isMoving) {
+          this.setAnimation(38);
+        }
+        this.view.rotateZ(-this.rotateSpeed * delta);
+        this.changeRotation();
+      }
+      if (this.moving.rotateLeft) {
+        if (!this.isMoving) {
+          this.setAnimation(38);
+        }
+        this.view.rotateZ(this.rotateSpeed * delta);
+        this.changeRotation();
+      }
+
+      if (this.moving.idle) {
+        this.setAnimation(0);
+      }
+    }
+
   }
 
   clear() {
@@ -406,6 +475,8 @@ class Unit extends Entity {
     this.moving.backward = false;
     this.moving.strafeLeft = false;
     this.moving.strafeRight = false;
+    this.moving.rotateRight = false;
+    this.moving.rotateLeft = false;
 
     if (!this.isJump) {
       this.jumpMoving.forward = false;
@@ -416,48 +487,19 @@ class Unit extends Entity {
   }
 
   update(delta: number) {
-    // this.isMoving = false;
-    // this.setAnimation(0);
+    this.updateGroundDistance();
+    this.updateMoving(delta);
     if (this.useGravity) {
       this.updateGravity(delta);
     }
+    this.applyTranslatePosition();
     this.clear();
   }
-
-  // isCollide() {
-  //   const meshList = Array.from(ColliderManager.collidableMeshList.values()) as THREE.Object3D[];
-  //   const colligerGeometry = this.collider.geometry as THREE.Geometry;
-  //   let isCollide = false;
-  //   this.isCollides = false;
-  //   if (this.model) {
-  //     const originPoint = this.collider.position.clone();
-  //     colligerGeometry.vertices.forEach((vertex) => {
-  //       const localVertex = vertex.clone();
-  //       const globalVertex = localVertex.applyMatrix4(this.collider.matrix);
-  //       const directionVector = globalVertex.sub(this.collider.position);
-
-  //       const ray = new THREE.Raycaster(originPoint, directionVector.clone().normalize());
-  //       const collisionResults = ray.intersectObjects(meshList);
-  //       if (collisionResults.length > 0 &&
-  //         collisionResults[0].distance < directionVector.length()
-  //       ) {
-  //         isCollide = true;
-  //         this.isCollides = true;
-  //       }
-  //     });
-  //   }
-
-  //   return isCollide;
-  // }
-
-  // updateCollider(meshList) {
-  //   this.isCollide(meshList);
-  // }
 
   // Обеспецивает хождение по земле
   updateGroundFollow(delta: number) {
     const diff = this._groundFollowConstant - this.groundDistance;
-    this.translatePosition({ z: diff - 0.1 });
+    this.translatePosition({ z: diff + this.minGroundDistance });
   }
 
   updateGravity(delta: number) {
@@ -468,16 +510,20 @@ class Unit extends Entity {
       let x = 0;
       let y = 0;
       if (this.jumpMoving.forward) x = this.moveSpeed * delta;
-      if (this.jumpMoving.backward) x = -this.moveSpeed * delta;
+      if (this.jumpMoving.backward) x = -this.moveSpeed / 2 * delta;
       if (this.jumpMoving.strafeLeft) y = this.moveSpeed * delta;
       if (this.jumpMoving.strafeRight) y = -this.moveSpeed * delta;
-      this.translatePosition({
-        x,
-        y,
-        z: (this.jumpVelocity - this.gravity) * delta * animationSpeed
-      });
 
-      if (this.isOnGround) {
+      let z = (this.jumpVelocity - this.gravity) * delta * animationSpeed;
+      const fallDown = z < 0;
+      if (this.isOnGround && fallDown) {
+        const diff = (this._groundFollowConstant) - this.groundDistance;
+        if (z > diff) z = diff;
+      }
+      this.translatePosition({ x, y, z });
+
+
+      if (this.isOnGround && fallDown) {
         this.isJump = false;
         this.jumpVelocity = 0;
       }

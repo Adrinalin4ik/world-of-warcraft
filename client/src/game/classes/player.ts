@@ -14,7 +14,7 @@ class Player extends Unit {
   }
 
   worldport(mapId: number, coord: Array<number>) {
-    this.position.set(coord[0], coord[1], coord[2]);
+    this.changePosition({x: coord[0], y: coord[1], z: coord[2]});
     if (!this.mapId || this.mapId !== mapId) {
       this.mapId = mapId;
       this.emit('map:change', mapId);

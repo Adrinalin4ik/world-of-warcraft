@@ -157,7 +157,7 @@ class Controls extends React.Component<IProp, IUpdate> {
     const unit = this.unit;
     if (unit && unit) {
       if (event.keyCode !== Key.space) {
-        unit.stopAnimation();
+        // unit.stopAnimation();
       }
     }
   }

@@ -56,6 +56,12 @@ class DebugPanel extends React.Component<IProp> {
           Jump velocity: { player.jumpVelocity.toFixed(2) }
         </p>
         <p>
+          Slope type: { player.slopeType == 0 ? 'sliding' : 'climbing' }
+        </p>
+        <p>
+          Slope ang: { player.slopeAng.toFixed(2) }
+        </p>
+        <p>
           Moving forward: { player.moving.forward.toString() }
         </p>
         <p>
@@ -66,6 +72,15 @@ class DebugPanel extends React.Component<IProp> {
         </p>
         <p>
           Moving left: { player.moving.strafeLeft.toString() }
+        </p>
+        <p>
+          Rotate right: { player.moving.rotateRight.toString() }
+        </p>
+        <p>
+          Rotate left: { player.moving.rotateLeft.toString() }
+        </p>
+        <p>
+          Animation index: { player.currentAnimationIndex.toString() }
         </p>
         <div className="divider"></div>
         {/* <p>
@@ -147,7 +162,7 @@ class DebugPanel extends React.Component<IProp> {
       <div className="stats">
         <h2>Player</h2>
         { this.playerStats() }
-        <h2>Memory</h2>
+        {/* <h2>Memory</h2>
         <div className="divider"></div>
         <p>
           Geometries: { memory.geometries }
@@ -157,12 +172,12 @@ class DebugPanel extends React.Component<IProp> {
         </p>
         <p>
           Programs: { programs!.length }
-        </p>
+        </p> */}
 
         <div className="divider"></div>
-        <div className="mapStat">
+        {/* <div className="mapStat">
           { map && this.mapStats() }
-        </div>
+        </div> */}
       </div>
     );
   }

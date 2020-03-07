@@ -18,7 +18,7 @@ export default class Webrtc {
       lname: 'Travolta'
     },
     // media_server_wss:"wss://v3mediasoup.org:3444",
-    media_server_wss: process.env.gameServerUrl || "localhost:4443",
+    media_server_wss: process.env.gameServerUrl || "wss://mediasoup-v3.trainingspace.online",
     produce: true,
     consume: true,
     externalVideo: false,

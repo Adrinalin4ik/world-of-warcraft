@@ -5,7 +5,7 @@ import './index.scss';
 import Game from '../../game';
 import Controls from './controls/controls';
 import DebugPanel from './debug/debug';
-
+import Stats from 'stats-js';
 interface IGameProps {}
 interface IGameScreenState {
   renderer: THREE.WebGLRenderer | null;
@@ -27,6 +27,7 @@ class GameScreen extends React.Component {
   //refs
   private controls = React.createRef<Controls>()
   private debugPanel = React.createRef<DebugPanel>()
+  private stats: any = new Stats();
 
   public state: IGameScreenState = {
     renderer: null,
@@ -36,11 +37,13 @@ class GameScreen extends React.Component {
   constructor(props: IGameProps) {
     super(props);
 
-    this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 20000);
+    document.body.appendChild(this.stats.dom);
+    this.stats.showPanel(1);
+    this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(15, 0, 7);
 
-    this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 20000);
+    this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
   }
@@ -92,6 +95,7 @@ class GameScreen extends React.Component {
   }
 
   animate() {
+    this.stats.begin();
     if (!this.renderer) {
       return;
     }
@@ -107,14 +111,12 @@ class GameScreen extends React.Component {
     !this.prevCameraRotation.equals(this.camera.quaternion) ||
     !this.prevCameraPosition.equals(this.camera.position);
     this.game.world.animate(delta, this.camera, cameraMoved);
-    
     this.renderer.render(this.game.world.scene, this.camera);
     if (this.debugRenderer) {
       
       this.debugCamera.position.set(this.camera.position.x + 20, 
         this.camera.position.y + 20, 
         this.camera.position.z + 100)
-        
         this.debugRenderer.render(this.game.world.scene, this.debugCamera);
       }
       
@@ -123,6 +125,7 @@ class GameScreen extends React.Component {
       if (this.controls.current) {
         this.controls.current.update(delta);
       }
+      this.stats.end();
     }
     
     render() {

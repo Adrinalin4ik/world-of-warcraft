@@ -6,6 +6,7 @@ import Unit from '../classes/unit';
 import M2Blueprint from '../pipeline/m2/blueprint';
 import WorldMap from './map';
 import { EventEmitter } from 'events';
+import ColliderManager from '../world/collider-manager';
 
 export default class World extends EventEmitter {
   public scene: THREE.Scene;
@@ -71,7 +72,7 @@ export default class World extends EventEmitter {
     if (entity.view) {
       this.scene.add(entity.view);
       // this.scene.add(entity.collider); // if you want to see the player collider
-      this.scene.add(entity.arrow);
+      // this.scene.add(entity.arrow);
 
       entity.on('model:change', this.changeModel.bind(this));
     }
@@ -108,7 +109,32 @@ export default class World extends EventEmitter {
     });
   }
 
+  checkCollision() {
+    for (const entity of Array.from(this.entities.values())) {
+      if (!entity.collider) continue;
+      var originPoint = entity.collider.position.clone();
+      const collider = entity.collider;
+      const geometry = collider.geometry as THREE.Geometry;
+      entity.isCollides = false;
+      for (var vertexIndex = 0; vertexIndex < geometry.vertices.length; vertexIndex++) {
 
+        var localVertex = geometry.vertices[vertexIndex].clone();
+
+        var globalVertex = localVertex.applyMatrix4(collider.matrix);
+
+        var directionVector = globalVertex.sub(collider.position);
+
+        var ray = new THREE.Raycaster(originPoint, directionVector.clone().normalize());
+
+        var collisionResults = ray.intersectObjects(Array.from(ColliderManager.collidableMeshList.values()));
+
+        if (collisionResults.length > 0 && collisionResults[0].distance < directionVector.length()) {
+          entity.isCollides = true;
+
+        }
+      }
+    }
+  }
 
   changeModel(_unit: Unit, _oldModel: Unit, _newModel: Unit) {
     console.log('Model change', _unit, _oldModel, _newModel);
@@ -121,6 +147,7 @@ export default class World extends EventEmitter {
   }
 
   animate(delta: number, camera: THREE.PerspectiveCamera, cameraMoved: boolean) {
+    // this.checkCollision();
     this.animateEntities(delta, camera, cameraMoved);
 
     if (this.map !== null) {
