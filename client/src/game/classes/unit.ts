@@ -12,6 +12,15 @@ enum SlopeType {
   none
 }
 
+enum Animation {
+  idle = 0,
+  forward = 2,
+  backward = 133,
+  jump = 15,
+  rotating = 38,
+  grounding = 16,
+}
+
 class Unit extends Entity {
 
   public guid: string;
@@ -116,9 +125,9 @@ class Unit extends Entity {
   set isJump(value) {
     this._isJump = value;
     if (value) {
-      this.setAnimation(15, true, 0);
+      this.setAnimation(Animation.jump, true, 0);
     } else {
-      this.setAnimation(16, true, 0);
+      // this.setAnimation(Animation.grounding, true, 0);
     }
   }
   get position(): THREE.Vector3 {
@@ -226,7 +235,7 @@ class Unit extends Entity {
     this._model = m2;
   }
 
-  setAnimation(index: number, inrerrupt: boolean = false, repetitions: number = -1) {
+  setAnimation(index: number, interrupt: boolean = false, repetitions: number = -1) {
     if (!this.model) return;
     const isRunning = this.model.animations.currentAnimation.isRunning();
     if (isRunning) {
@@ -391,10 +400,6 @@ class Unit extends Entity {
 
 
     this.afterPositionChange();
-
-    if (!this.prevPosition.equals(this.position)) {
-      this.emit('position:change', this.position, this.view.rotation);
-    }
   }
 
   applyTranslatePosition() {
@@ -402,6 +407,13 @@ class Unit extends Entity {
     this.view.translateY(this.tmpVector.y)
     this.view.translateZ(this.tmpVector.z)
     this.tmpVector.set(0, 0, 0);
+
+    if (this.prevPosition.x !== this.position.x ||
+      this.prevPosition.y !== this.position.y ||
+      this.prevPosition.z !== this.position.z
+    ) {
+      this.emit('position:change', this.position, this.view.rotation);
+    }
   }
 
   updateGroundDistance() {
@@ -431,16 +443,17 @@ class Unit extends Entity {
       !this.moving.strafeRight &&
       !this.moving.rotateRight &&
       !this.moving.rotateLeft &&
-      !this.isJump)
+      !this.isJump &&
+      !this.isMoving)
 
-    if (this.isOnGround) {
+    if (true) {
       if (this.moving.forward) {
         this.translatePosition({ x: this.moveSpeed * delta });
-        this.setAnimation(2);
+        this.setAnimation(Animation.forward, true);
       }
       if (this.moving.backward) {
         this.translatePosition({ x: -this.moveSpeed * delta / 2 });
-        this.setAnimation(133);
+        this.setAnimation(Animation.backward);
       }
       if (this.moving.strafeRight) {
         this.translatePosition({ y: -this.moveSpeed * delta });
@@ -450,21 +463,21 @@ class Unit extends Entity {
       }
       if (this.moving.rotateRight) {
         if (!this.isMoving) {
-          this.setAnimation(38);
+          this.setAnimation(Animation.rotating);
         }
         this.view.rotateZ(-this.rotateSpeed * delta);
         this.changeRotation();
       }
       if (this.moving.rotateLeft) {
         if (!this.isMoving) {
-          this.setAnimation(38);
+          this.setAnimation(Animation.rotating);
         }
         this.view.rotateZ(this.rotateSpeed * delta);
         this.changeRotation();
       }
 
       if (this.moving.idle) {
-        this.setAnimation(0);
+        this.setAnimation(Animation.idle);
       }
     }
 

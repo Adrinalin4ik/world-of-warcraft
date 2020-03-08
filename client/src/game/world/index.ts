@@ -140,8 +140,7 @@ export default class World extends EventEmitter {
     console.log('Model change', _unit, _oldModel, _newModel);
   }
 
-  changePosition(position: THREE.Vector3) {
-    // console.log('changePosition', this)
+  changePosition(position: THREE.Vector3, _rotation: THREE.Vector3) {
     this.renderAtCoords(position.x, position.y);
     // this.skybox.position.set(position.x, position.y, 100)
   }

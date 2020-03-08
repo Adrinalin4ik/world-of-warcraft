@@ -22,6 +22,7 @@ class DebugPanel extends React.Component<IProp> {
   getSnapshotBeforeUpdate(prevProps:IProp, _prevState:any) {
     this.renderer = prevProps.renderer;
     this.game = prevProps.game;
+    return null;
   }
 
   playerStats() {
@@ -56,10 +57,13 @@ class DebugPanel extends React.Component<IProp> {
           Jump velocity: { player.jumpVelocity.toFixed(2) }
         </p>
         <p>
-          Slope type: { player.slopeType == 0 ? 'sliding' : 'climbing' }
+          Slope type: { player.slopeType === 0 ? 'sliding' : 'climbing' }
         </p>
         <p>
           Slope ang: { player.slopeAng.toFixed(2) }
+        </p>
+        <p>
+          Is moving: { player.isMoving.toString() }
         </p>
         <p>
           Moving forward: { player.moving.forward.toString() }
