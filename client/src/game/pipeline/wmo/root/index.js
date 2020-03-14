@@ -36,7 +36,7 @@ class WMORoot {
     };
 
     this.createBoundingBox(def.boundingBox);
-
+    console.log(def)
     this.createMaterialDefs(def.materials, def.texturePaths);
 
     this.createPortals(def.portals, def.portalNormals, def.portalConstants, def.portalVertices);
@@ -160,12 +160,11 @@ class WMORoot {
   }
 
   createBoundingBox(def) {
-    const boundingBox = this.boundingBox = new THREE.Box3();
+    this.boundingBox = new THREE.Box3();
     
     const min = new THREE.Vector3(def.min.x, def.min.y, def.min.z);
     const max = new THREE.Vector3(def.max.x, def.max.y, def.max.z);
-
-    boundingBox.set(min, max);
+    this.boundingBox.set(min, max);
   }
 
 }

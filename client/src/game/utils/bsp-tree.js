@@ -6,7 +6,6 @@ class BSPTree {
 
   constructor(nodes, planeIndices, faceIndices, vertices) {
     this.nodes = nodes;
-
     this.indices = {
       plane: planeIndices,
       face: faceIndices

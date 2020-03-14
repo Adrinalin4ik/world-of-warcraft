@@ -78,9 +78,15 @@ const Spots = [
     coords: [-743.149, 8385.114, 50.435]
   },
   {
-    id: 10,
+    id: 'daggercap_bay',
+    title: 'Daggercap Bay (Northrend)',
+    zoneId: 571,
+    coords: [1031, -5192, 180]
+  },
+  {
+    id: 'dalaran',
     title: 'Dalaran',
-    zoneId: 531,
+    zoneId: 571,
     coords: [5797, 629, 647]
   }
 ];

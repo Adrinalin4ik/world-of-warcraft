@@ -44,11 +44,12 @@ class Unit extends Entity {
   private displayInfo: DBC | null = null;
 
   public rotateSpeed: number = 2;
-  public moveSpeed: number = 10;
+  public moveSpeed: number = 10; //10
+  public flySpeed: number = 15; //10
   public gravity: number = 10; //10;
   public jumpVelocityConst: number = 16;
   public jumpVelocity: number = 0;
-  public isFly: boolean = false;
+  public isFly: boolean = true;
   public isMoving: boolean = false;
   public _isJump: boolean = false;
   public isCollides: boolean = false;
@@ -101,13 +102,14 @@ class Unit extends Entity {
     this.collider.geometry = new THREE.BoxGeometry(1, 1, 1);
     this.collider.name = 'Collider';
 
-    this.arrow.setDirection(this.groundDistanceRaycaster.ray.direction);
+    // this.arrow.setDirection(this.groundDistanceRaycaster.ray.direction);
+    this.arrow.setDirection(new THREE.Vector3(1, 0, 0));
 
     // Animation
     this.currentAnimationIndex = 0;
 
     // this.view.add(this.collider);
-    // this.view.add(this.arrow);
+    this.view.add(this.arrow);
   }
 
   get isOnGround() {
@@ -266,7 +268,7 @@ class Unit extends Entity {
   }
 
   jump() {
-    if (this.isOnGround && !this.isJump) {
+    if (this.isOnGround && !this.isJump && !this.isFly) {
       this.isJump = true;
       this.jumpMoving.forward = this.moving.forward;
       this.jumpMoving.backward = this.moving.backward;
@@ -278,13 +280,13 @@ class Unit extends Entity {
 
   ascend(delta: number) {
     if (this.isFly) {
-      this.translatePosition({ z: this.moveSpeed * this.gravity * delta });
+      this.translatePosition({ z: this.flySpeed * delta });
     }
   }
 
   descend(delta: number) {
     if (this.isFly) {
-      this.translatePosition({ z: -this.moveSpeed * this.gravity * delta });
+      this.translatePosition({ z: -this.flySpeed * delta });
     }
   }
 

@@ -31,18 +31,16 @@ class VisibilityManager {
       if (!camera.location) {
         continue;
       }
-
-      camera.updateMatrix();
-      camera.updateMatrixWorld();
+      
+      camera.updateMatrix(); // make sure camera's local matrix is updated
+      camera.updateMatrixWorld(); // make sure camera's world matrix is updated
 
       // Obtain a frustum matching the camera
       const frustum = new THREE.Frustum();
       frustum.setFromMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
-      // console.log(frustum)
       // Adjust near plane (5) back to camera position
       const nearGap = frustum.planes[5].distanceToPoint(camera.position);
       frustum.planes[5].constant -= nearGap;
-      // console.log(camera.location.type);
       if (camera.location.type === 'exterior') {
         this.enablePortalsFromExterior(0, camera, frustum);
       } else {
@@ -152,6 +150,7 @@ class VisibilityManager {
 
       // Destination group is pending load
       if (!destination) {
+        console.debug('Destination group is pending load')
         continue;
       }
 
@@ -161,53 +160,59 @@ class VisibilityManager {
 
       // Destination group's view is pending load
       if (!destinationView) {
+        console.debug('Destination group\'s view is pending load')
         continue;
       }
 
       // Already visited this portal, so we're done
       if (visitedPortals.has(portalView)) {
+        console.debug("Already visited this portal, so we're done")
         continue;
       }
 
       // Exterior to exterior links are already covered by enablePortalsFromExterior
       if ((group.header.flags & 0x08) !== 0 && exteriorDestination) {
-        continue;
-      }
-
-      const distance = portal.plane.distanceToPoint(cameraLocal) * ref.side + 0.001;
-      const insidePortal = distance < 0.0;
-
-      // Portals must be traversed outward
-      if (insidePortal) {
+        console.debug('Exterior to exterior links are already covered by enablePortalsFromExterior')
         continue;
       }
 
       // Portal out of group is not visible from previous frustum
-      // if (frustum !== null && !portalView.intersectFrustum(frustum)) {
+      if (frustum !== null && !portalView.intersectFrustum(frustum)) {
+        console.debug('Portal out of group is not visible from previous frustum')
+        continue;
+      }
+
+      // const distance = portal.plane.distanceToPoint(cameraLocal) * ref.side + 0.001;
+      // const insidePortal = distance < 0.0;
+
+      // // Portals must be traversed outward
+      // if (insidePortal) {
+      //   console.debug('Portals must be traversed outward', distance, ref)
       //   continue;
       // }
 
       // Portal out of group is visible, thus the destination group is visible
       destinationView.visible = true;
-
+      
       // Track visited portals to prevent duplicate work
       visitedPortals.add(portalView);
-
+      
       // Project a frustum out of this portal for use in the next level of recursion
-      const nextFrustum = portalView.createFrustum(camera, frustum, ref.side < 0);
-
-      if (!nextFrustum) {
-        continue;
-      }
+      // const nextFrustum = portalView.createFrustum(camera, frustum, ref.side < 0);
+      
+      // if (!nextFrustum) {
+      //   console.log('Project a frustum out of this portal for use in the next level of recursion')
+      //   continue;
+      // }
 
       // Portal out of group is to exterior and camera is not already in exterior, thus we need
       // to traverse and enable exterior groups
       if (exteriorDestination && camera.location.type !== 'exterior') {
-        this.enablePortalsFromExterior(depth + 1, camera, nextFrustum, visitedPortals);
+        this.enablePortalsFromExterior(depth + 1, camera, frustum, visitedPortals);
       }
 
       // Recurse
-      this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, nextFrustum, visitedPortals);
+      this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, frustum, visitedPortals);
     }
   }
 

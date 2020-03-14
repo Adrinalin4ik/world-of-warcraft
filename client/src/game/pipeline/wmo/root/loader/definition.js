@@ -21,12 +21,13 @@ class WMORootDefinition {
 
     this.createPortals(data);
     this.createBoundingBox(data.MOHD);
+    console.log(data) 
   }
 
   createBoundingBox(mohd) {
-    const boundingBox = this.boundingBox = {};
-    boundingBox.min = mohd.minBoundingBox;
-    boundingBox.max = mohd.maxBoundingBox;
+    this.boundingBox = {};
+    this.boundingBox.min = mohd.minBoundingBox;
+    this.boundingBox.max = mohd.maxBoundingBox;
   }
 
   createPortals(data) {

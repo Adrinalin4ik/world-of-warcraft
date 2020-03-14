@@ -6,7 +6,7 @@ import { MessageHandler } from './message_handler';
 
 export default class Webrtc {
   public peers: Map<string, Peer> = new Map();
-  public peerId: string = (Math.random() * 1000).toFixed(3);
+  public peerId: string = (Math.random() * 1000000).toFixed(0);
   private em: any;
   private config = {
     autorun: true,

@@ -3,9 +3,9 @@ import Network from './network';
 
 export default class Game {
   public world: World;
-  // public network: Network
+  public network: Network
   constructor() {
     this.world = new World();
-    // this.network = new Network(this.world);
+    this.network = new Network(this.world);
   }
 }

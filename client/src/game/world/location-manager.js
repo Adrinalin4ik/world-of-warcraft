@@ -145,6 +145,7 @@ class LocationManager {
         }
       };
       // console.log("Interior", location)
+      // console.log(candidates)
       candidates.push(location);
     }
   }

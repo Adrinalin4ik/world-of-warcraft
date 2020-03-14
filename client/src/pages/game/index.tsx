@@ -16,13 +16,13 @@ interface IGameScreenState {
 class GameScreen extends React.Component {
   private camera: THREE.PerspectiveCamera;
   public debugCamera: THREE.PerspectiveCamera;
+  public cameraHelper: THREE.CameraHelper;
   private prevCameraRotation: THREE.Quaternion | null = null;
   private prevCameraPosition: THREE.Vector3 | null = null;
   private renderer: THREE.WebGLRenderer | null = null;
   private debugRenderer: THREE.WebGLRenderer | null = null;
   private clock: THREE.Clock = new THREE.Clock();
   private game: Game = new Game();
-
   private debug = false;
   //refs
   private controls = React.createRef<Controls>()
@@ -39,10 +39,12 @@ class GameScreen extends React.Component {
 
     document.body.appendChild(this.stats.dom);
     this.stats.showPanel(1);
-    this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
+    this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 200);
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(15, 0, 7);
 
+    this.cameraHelper = new THREE.CameraHelper( this.camera );
+    this.game.world.scene.add(this.cameraHelper);
     this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
@@ -51,7 +53,8 @@ class GameScreen extends React.Component {
   componentDidMount() {
     this.renderer = new THREE.WebGLRenderer({
       alpha: true,
-      antialias: true,
+      antialias: false,
+      powerPreference: 'high-performance',
       canvas: this.refs.canvas as HTMLCanvasElement
     });
 
@@ -112,12 +115,11 @@ class GameScreen extends React.Component {
     !this.prevCameraPosition.equals(this.camera.position);
     this.game.world.animate(delta, this.camera, cameraMoved);
     this.renderer.render(this.game.world.scene, this.camera);
-    if (this.debugRenderer) {
-      
-      this.debugCamera.position.set(this.camera.position.x + 20, 
-        this.camera.position.y + 20, 
-        this.camera.position.z + 100)
-        this.debugRenderer.render(this.game.world.scene, this.debugCamera);
+      if (this.debugRenderer) {
+        this.debugCamera.position.set(this.camera.position.x, 
+          this.camera.position.y, 
+          this.camera.position.z + 120)
+          this.debugRenderer.render(this.game.world.scene, this.debugCamera);
       }
       
       this.prevCameraRotation = this.camera.quaternion.clone();

@@ -129,9 +129,11 @@ class Controls extends React.Component<IProp, IUpdate> {
   _onKeyDown(event: KeyboardEvent) {
     if (event.keyCode === Key.T) {
       const p = this.unit.position;
+      const r = this.unit.rotation;
       localStorage.setItem('debugCoords', JSON.stringify({
         zoneId: this.unit.mapId,
-        coords: [p.x, p.y, p.z]
+        coords: [p.x, p.y, p.z],
+        rotation: [r.x, r.y, r.z]
       }));
 
       alert("Coords saved successfully")
@@ -141,6 +143,7 @@ class Controls extends React.Component<IProp, IUpdate> {
       const spot = JSON.parse(localStorage.getItem('debugCoords') || "");
       if (spot) {
         this.unit.worldport(spot.zoneId, spot.coords);
+        this.unit.rotation.set(spot.rotation[0], spot.rotation[1], spot.rotation[2])
       }
       console.log('Coords has been restored')
     }
@@ -185,7 +188,11 @@ class Controls extends React.Component<IProp, IUpdate> {
       // if (key.isPressed('space')) {
       //   unit.jump();
       // }
-
+      
+      if (key.isPressed('f')) {
+        unit.isFly = !unit.isFly;
+      }
+      
       if (key.isPressed('up') || key.isPressed('w') || this.isRun) {
         unit.moveForward(delta);
       }

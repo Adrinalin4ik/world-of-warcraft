@@ -6,7 +6,7 @@ class WMOPortal {
 
   constructor(def) {
     this.index = def.index;
-
+    // console.log(this, def)
     const vertexCount = def.vertices.length / 3;
 
     const vertices = this.vertices = [];
@@ -22,10 +22,11 @@ class WMOPortal {
 
       // Stretch bounding box
       this.boundingBox.expandByPoint(vertex);
-
+        
       vertices.push(vertex);
     }
 
+    // this.boundingBox.setFromPoints(this.vertices)
     const normal = this.normal = new THREE.Vector3(def.normal[0], def.normal[1], def.normal[2]);
     const constant = this.constant = def.constant;
     this.plane = new THREE.Plane(normal, constant);
@@ -47,7 +48,7 @@ class WMOPortal {
       geometry.vertices.push(vertices[vindex]);
     }
 
-    const faceCount = vertexCount - 3 + 1;
+    const faceCount = vertexCount - 2;
 
     for (let findex = 0; findex < faceCount; ++findex) {
       geometry.faces.push(new THREE.Face3(findex + 1, findex + 2, 0));
@@ -59,10 +60,11 @@ class WMOPortal {
 
     material.color = new THREE.Color(0xffff00);
     material.side = THREE.DoubleSide;
-    material.opacity = 0.5;
+    material.opacity = 0.2;
     material.transparent = true;
     material.depthWrite = false;
-    material.visible = false;
+    material.visible = true;
+    material.wireframe = false
   }
 
 }
