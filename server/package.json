@@ -1,5 +1,5 @@
 {
-  "name": "wowser",
+  "name": "worldofwarcraft",
   "version": "0.0.1",
   "description": "World of Warcraft in the browser using JavaScript and WebGL",
   "main": "lib/client/index.js",
@@ -26,8 +26,8 @@
     "restart:deamon": "forever restart -o out.log bin/serve",
     "stop:deamon": "forever stop -o out.log bin/serve"
   },
-  "repository": "wowserhq/wowser",
-  "author": "Tim Kurvers <tim@moonsphere.net>",
+  "repository": "https://github.com/Adrinalin4ik/world-of-warcraft/edit/master/server",
+  "author": "Alexey Panfilkin",
   "license": "MIT",
   "keywords": [
     "world of warcraft",
