@@ -38,8 +38,8 @@ class GameScreen extends React.Component {
     super(props);
 
     document.body.appendChild(this.stats.dom);
-    this.stats.showPanel(1);
-    this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 200);
+    this.stats.showPanel(0);
+    this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(15, 0, 7);
 

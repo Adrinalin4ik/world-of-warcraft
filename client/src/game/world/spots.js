@@ -88,7 +88,33 @@ const Spots = [
     title: 'Dalaran',
     zoneId: 571,
     coords: [5797, 629, 647]
+  },
+  {
+    id: 'north_bay',
+    title: 'North Bay',
+    zoneId: 571,
+    coords: [2624, -1787, 18]
+  },
+  {
+    id: 'naxramas',
+    title: 'Naxramas',
+    zoneId: 571,
+    coords: [3805, -686, 225],
+  },
+  {
+    id: 'olo',
+    title: 'olo',
+    zoneId: 571,
+    coords: [5323, 2836, 413],
+  },
+  {
+    id: 'icecrowncitadel',
+    title: 'Ice crown citadel',
+    zoneId: 571,
+    coords: [5932, 2136, 667],
   }
 ];
+
+
 
 export default Spots;

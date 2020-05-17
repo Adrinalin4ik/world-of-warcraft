@@ -2,6 +2,8 @@
 
 Install StormLib and BLPConverter, which are used to handle Blizzard's game files.
 
+#node 10
+
 #BPL converter
 sudo apt-get install cmake git gcc g++
 git clone git://github.com/Kanma/BLPConverter.git

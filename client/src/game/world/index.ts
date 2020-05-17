@@ -1,11 +1,11 @@
-import * as THREE from 'three';
-import Player from '../classes/player';
-import spots from './spots';
-import Unit from '../classes/unit';
+import * as THREE from "three";
+import Player from "../classes/player";
+import spots from "./spots";
+import Unit from "../classes/unit";
 
-import M2Blueprint from '../pipeline/m2/blueprint';
-import WorldMap from './map';
-import { EventEmitter } from 'events';
+import M2Blueprint from "../pipeline/m2/blueprint";
+import WorldMap from "./map";
+import { EventEmitter } from "events";
 
 export default class World extends EventEmitter {
   public scene: THREE.Scene;
@@ -18,16 +18,16 @@ export default class World extends EventEmitter {
     super();
 
     this.scene = new THREE.Scene();
-    this.scene.matrixAutoUpdate = true;
+    this.scene.matrixAutoUpdate = false;
     this.debugScene = new THREE.Scene();
-    this.debugScene.matrixAutoUpdate = true;
+    this.debugScene.matrixAutoUpdate = false;
 
     this.entities = new Map();
 
     this.player = new Player("-1", "TestName");
     this.add(this.player);
-    this.player.on('map:change', this.changeMap.bind(this));
-    this.player.on('position:change', this.changePosition.bind(this));
+    this.player.on("map:change", this.changeMap.bind(this));
+    this.player.on("position:change", this.changePosition.bind(this));
 
     // var geometry = new THREE.CubeGeometry(1000, 1000, 1000);
     // var cubeMaterials = [
@@ -49,23 +49,28 @@ export default class World extends EventEmitter {
     // this.skybox.name = "Skybox"
     // this.scene.add(this.skybox);
 
-    const loadedSpot = localStorage.getItem('debugCoords');
+    const loadedSpot = null//localStorage.getItem("debugCoords");
     if (loadedSpot) {
       const spot: any = JSON.parse(loadedSpot);
       // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
       this.player.worldport(spot.zoneId, spot.coords);
-      this.player.rotation.set(spot.rotation[0], spot.rotation[1], spot.rotation[2])
+      this.player.rotation.set(
+        spot.rotation[0],
+        spot.rotation[1],
+        spot.rotation[2]
+      );
     } else {
       // const spot: any = spots[spots.length - 2]
       // const spot: any = spots.find(x => x.id === "dun murog")
-      // const spot: any = spots.find(x => x.id === "dun murog")
       // const spot: any = spots.find(x => x.id === 2)
-      const spot: any = spots.find(x => x.id === "stormwind")
+      // const spot: any = spots.find(x => x.id === "stormwind")
       // const spot: any = spots.find(x => x.id === "ogrimar")
-      // const spot: any = spots.find(x => x.id === "daggercap_bay")
+      // const spot: any = spots.find(x => x.id === "daggercap_bay");
+      // const spot: any = spots.find(x => x.id === "north_bay");
+      const spot: any = spots.find(x => x.id === "naxramas");
+      // const spot: any = spots.find(x => x.id === "dalaran");
       this.player.worldport(spot.zoneId, spot.coords);
     }
-
   }
 
   add(entity: Unit) {
@@ -75,7 +80,7 @@ export default class World extends EventEmitter {
       // this.scene.add(entity.collider); // if you want to see the player collider
       // this.scene.add(entity.arrow);
 
-      entity.on('model:change', this.changeModel.bind(this));
+      entity.on("model:change", this.changeModel.bind(this));
     }
   }
 
@@ -84,7 +89,7 @@ export default class World extends EventEmitter {
     if (entity.view) {
       this.scene.remove(entity.view);
       this.scene.remove(entity.arrow);
-      entity.removeListener('model:change', this.changeModel.bind(this));
+      entity.removeListener("model:change", this.changeModel.bind(this));
     }
   }
 
@@ -97,21 +102,21 @@ export default class World extends EventEmitter {
   }
 
   changeMap(mapId: number) {
-    console.log('Load map', mapId);
+    console.log("Load map", mapId);
     WorldMap.load(mapId).then((map: WorldMap) => {
       if (this.map) {
         this.scene.remove(this.map);
       }
       this.map = map;
-      console.log("Map loaded", this.map)
+      console.log("Map loaded", this.map);
       this.scene.add(this.map);
       this.renderAtCoords(this.player.position.x, this.player.position.y);
-      this.player.emit('map:changed', this.map);
+      this.player.emit("map:changed", this.map);
     });
   }
 
   changeModel(_unit: Unit, _oldModel: Unit, _newModel: Unit) {
-    console.log('Model change', _unit, _oldModel, _newModel);
+    console.log("Model change", _unit, _oldModel, _newModel);
   }
 
   changePosition(position: THREE.Vector3, _rotation: THREE.Vector3) {
@@ -119,7 +124,11 @@ export default class World extends EventEmitter {
     // this.skybox.position.set(position.x, position.y, 100)
   }
 
-  animate(delta: number, camera: THREE.PerspectiveCamera, cameraMoved: boolean) {
+  animate(
+    delta: number,
+    camera: THREE.PerspectiveCamera,
+    cameraMoved: boolean
+  ) {
     this.animateEntities(delta, camera, cameraMoved);
 
     if (this.map !== null) {
@@ -128,19 +137,19 @@ export default class World extends EventEmitter {
         this.map.updateVisibility(camera);
       }
       // this.map.updateWorldTime(camera, this.map.mapID);
-      if (this.map) {
-        this.map.animate(delta, camera, cameraMoved);
-      }
+      this.map.animate(delta, camera, cameraMoved);
     }
 
     // Send delta updates to instanced M2 animation managers.
     M2Blueprint.animate(delta);
   }
 
-  animateEntities(delta: number, camera: THREE.PerspectiveCamera, cameraMoved: boolean) {
-
-    this.entities.forEach((entity) => {
-
+  animateEntities(
+    delta: number,
+    camera: THREE.PerspectiveCamera,
+    cameraMoved: boolean
+  ) {
+    this.entities.forEach(entity => {
       const { model } = entity;
 
       if (model === null || !model.animated) {

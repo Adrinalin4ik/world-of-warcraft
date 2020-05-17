@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import DebugPanel from '../../pages/game/debug/debug';
 
 class LocationManager {
 
@@ -49,16 +50,16 @@ class LocationManager {
     if (!wmo.views.root) {
       return;
     }
-    let cameraLocal = wmo.views.root.worldToLocal(camera.position.clone());
+    const cameraLocal = wmo.views.root.worldToLocal(camera.position.clone());
     // All operations assume the camera position is in local space
-    cameraLocal = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
+    const cameraLocalConverted = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
     // let cameraLocal = wmo.views.root.localToWorld(camera.position.clone());
     // cameraLocal = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
     // const cameraLocal = camera.position.clone()
     // console.log(cameraLocal)
 
     // Check if camera could be inside this WMO
-    const maybeInsideWMO = wmo.root.boundingBox.containsPoint(cameraLocal);
+    const maybeInsideWMO = wmo.root.boundingBox.containsPoint(cameraLocalConverted);
     // Camera cannot be inside this WMO
     if (!maybeInsideWMO) {
       return;
@@ -75,7 +76,7 @@ class LocationManager {
       // console.log(isExterior)
 
       // Check if camera could be inside this group
-      const maybeInsideGroup = group.boundingBox.containsPoint(cameraLocal);
+      const maybeInsideGroup = group.boundingBox.containsPoint(cameraLocalConverted);
 
       // Camera cannot be inside this group
       if (!maybeInsideGroup) {
@@ -83,8 +84,8 @@ class LocationManager {
       }
       // console.log(group.boundingBox, cameraLocal)
       // Query BSP tree for matching leaves
-      let result = group.bspTree.queryBoundedPoint(cameraLocal, group.boundingBox);
-
+      let result = group.bspTree.queryBoundedPoint(cameraLocalConverted, group.boundingBox);
+      // console.log(result)
       // Depending on group geometry, interior portions of a group may lack BSP leaves
       if (result === null) {
         result = {
@@ -96,37 +97,38 @@ class LocationManager {
       }
 
       // Attempt to find unbounded Zs by raycasting the Z axis against portals
-      if (result.z.min === null || result.z.max === null) {
-        const portalViews = [];
+      // if (result.z.min === null || result.z.max === null) {
+      //   const portalViews = [];
 
-        for (const portalRef of group.portalRefs) {
-          const portalView = wmo.views.portals.get(portalRef.portalIndex);
-          portalViews.push(portalView);
-        }
+      //   for (const portalRef of group.portalRefs) {
+      //     const portalView = wmo.views.portals.get(portalRef.portalIndex);
+      //     portalViews.push(portalView);
+      //   }
 
-        // Unbounded max Z (raycast up to try find portal)
-        if (result.z.max === null) {
-          this.raycaster.set(camera.position, this.raycastUp);
-          const upIntersections = this.raycaster.intersectObjects(portalViews);
+      //   // Unbounded max Z (raycast up to try find portal)
+      //   if (result.z.max === null) {
+      //     this.raycaster.set(camera.position, this.raycastUp);
+      //     const upIntersections = this.raycaster.intersectObjects(portalViews);
 
-          if (upIntersections.length > 0) {
-            const closestUp = upIntersections[0];
-            result.z.max = closestUp.object.worldToLocal(closestUp.point).z;
-          }
-        }
+      //     if (upIntersections.length > 0) {
+      //       const closestUp = upIntersections[0];
+      //       result.z.max = closestUp.object.worldToLocal(closestUp.point).z;
+      //     }
+      //   }
 
-        // Unbounded min Z (raycast down to try find portal)
-        if (result.z.min === null) {
-          this.raycaster.set(camera.position, this.raycastDown);
-          const downIntersections = this.raycaster.intersectObjects(portalViews);
+      //   // Unbounded min Z (raycast down to try find portal)
+      //   if (result.z.min === null) {
+      //     this.raycaster.set(camera.position, this.raycastDown);
+      //     const downIntersections = this.raycaster.intersectObjects(portalViews);
+      //     // console.log(downIntersections)
 
-          if (downIntersections.length > 0) {
-            const closestDown = downIntersections[0];
-            result.z.min = closestDown.object.worldToLocal(closestDown.point).z;
-          }
-        }
-      }
-
+      //     if (downIntersections.length > 0) {
+      //       const closestDown = downIntersections[0];
+      //       result.z.min = closestDown.object.worldToLocal(closestDown.point).z;
+      //     }
+      //   }
+      // }
+      // console.log(result.z.min)
       const location = {
         type: 'interior',
         query: result,
@@ -159,9 +161,9 @@ class LocationManager {
       // If a query didn't get a min Z bound from the BSP tree or from raycasting for portals, the
       // candidate is invalid.
       // console.log('here', query.z.min)
-      // if (query.z.min === null) {
-      //   return null;
-      // }
+      if (query.z.min === null) {
+        return null;
+      }
 
       if (query.z.min === null) {
         query.z.min = group.boundingBox.min.z;
@@ -175,19 +177,19 @@ class LocationManager {
         camera.local.z >= query.z.min &&
         camera.local.z <= query.z.max;
         
-        if (!cameraInBoundsZ) {
+      if (!cameraInBoundsZ) {
+        return null;
+      }
+      
+      // Get the closest portal within a small range and ensure we're inside it
+      const closestPortal = group.closestPortal(camera.local, 1.0);
+      
+      if (closestPortal !== null) {
+        const outsidePortal = closestPortal.portalRef.side * closestPortal.distance < 0.0;
+        
+        if (outsidePortal) {
           return null;
         }
-        
-        // Get the closest portal within a small range and ensure we're inside it
-        const closestPortal = group.closestPortal(camera.local, 1.0);
-        
-        if (closestPortal !== null) {
-          const outsidePortal = closestPortal.portalRef.side * closestPortal.distance < 0.0;
-          
-          if (outsidePortal) {
-            return null;
-          }
       }
 
       return candidate;
@@ -202,6 +204,7 @@ class LocationManager {
     }
 
     // The correct candidate has the highest min Z bound of all remaining candidates
+    // validCandidates.sort((a,b) => a.query.z.min + b.query.z.min)
     validCandidates.sort((a, b) => {
       if (a.query.z.min > b.query.z.min) {
         return -1;

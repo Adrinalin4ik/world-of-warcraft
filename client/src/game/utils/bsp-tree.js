@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-
+import { vec3 } from 'gl-matrix';
 import THREEUtil from './three-util';
 
 class BSPTree {
@@ -74,20 +74,20 @@ class BSPTree {
         const vindex3 = this.indices.face[3 * this.indices.plane[pindex] + 2];
 
         const vertex1 = new THREE.Vector3(
-          this.vertices[3 * vindex1 + 0],
-          this.vertices[3 * vindex1 + 1],
+          -this.vertices[3 * vindex1 + 0],
+          -this.vertices[3 * vindex1 + 1],
           this.vertices[3 * vindex1 + 2]
         );
 
         const vertex2 = new THREE.Vector3(
-          this.vertices[3 * vindex2 + 0],
-          this.vertices[3 * vindex2 + 1],
+          -this.vertices[3 * vindex2 + 0],
+          -this.vertices[3 * vindex2 + 1],
           this.vertices[3 * vindex2 + 2]
         );
 
         const vertex3 = new THREE.Vector3(
-          this.vertices[3 * vindex3 + 0],
-          this.vertices[3 * vindex3 + 1],
+          -this.vertices[3 * vindex3 + 0],
+          -this.vertices[3 * vindex3 + 1],
           this.vertices[3 * vindex3 + 2]
         );
         const minX = Math.min(vertex1.x, vertex2.x, vertex3.x);
@@ -97,8 +97,8 @@ class BSPTree {
         const maxY = Math.max(vertex1.y, vertex2.y, vertex3.y);
         
         const pointInBoundsXY =
-          point.x > minX && point.x < maxX &&
-          point.y > minY && point.y < maxY;
+          point.x >= minX && point.x <= maxX &&
+          point.y >= minY && point.y <= maxY;
 
         if (!pointInBoundsXY) {
           continue;
@@ -169,8 +169,8 @@ class BSPTree {
     
     // Define a small bounding box for point
     const box = new THREE.Box3();
-    box.min.set(point.x - epsilon, point.y - epsilon, bounding.min.z);
-    box.max.set(point.x + epsilon, point.y + epsilon, bounding.max.z);
+    box.min.set(point.x - epsilon, point.y - epsilon, bounding.min.z - epsilon);
+    box.max.set(point.x + epsilon, point.y + epsilon, bounding.max.z + epsilon);
 
     // Query BSP tree
     const leafIndices = this.query(box, 0);
@@ -183,7 +183,8 @@ class BSPTree {
 
     // Determine upper and lower Z bounds of leaves
     const zRange = this.calculateZRange(point, leafIndices);
-
+    // const zRange = this.getTopAndBottomTriangleFromBsp(point, leafIndices)
+    // console.log(zRange)
     const minZ = zRange[0];
     const maxZ = zRange[1];
 
@@ -195,6 +196,132 @@ class BSPTree {
     };
   }
 
+  getTopAndBottomTriangleFromBsp(point, leafIndices) {
+    var cameraLocal = [point.x, point.y, point.z]
+    console.log("cameraLocal", cameraLocal, this)
+    var result = 0;
+    var nodes = this.nodes;
+    var topZ = -999999;
+    var bottomZ = 999999;
+    var minPositiveDistanceToCamera = 99999;
+    for (var i = 0; i < leafIndices.length; i++) {
+      var node = nodes[leafIndices[i]];
+
+      for (var j = node.firstFace; j < node.firstFace+node.numFaces; j++) {
+        var vertexInd1 = this.indices.face[3*this.indices.plane[j] + 0];
+        var vertexInd2 = this.indices.face[3*this.indices.plane[j] + 1];
+        var vertexInd3 = this.indices.face[3*this.indices.plane[j] + 2];
+
+        var vert1 = vec3.fromValues(
+          -this.vertices[3*vertexInd1 + 0],
+          -this.vertices[3*vertexInd1 + 1],
+          this.vertices[3*vertexInd1 + 2]);
+
+        var vert2 = vec3.fromValues(
+          -this.vertices[3*vertexInd2 + 0],
+          -this.vertices[3*vertexInd2 + 1],
+          this.vertices[3*vertexInd2 + 2]);
+
+        var vert3 = vec3.fromValues(
+          -this.vertices[3*vertexInd3 + 0],
+          -this.vertices[3*vertexInd3 + 1],
+          this.vertices[3*vertexInd3 + 2]);
+
+        //1. Get if camera position inside vertex
+
+        var minX = Math.min(vert1[0], vert2[0], vert3[0]);
+        var minY = Math.min(vert1[1], vert2[1], vert3[1]);
+        var minZ = Math.min(vert1[2], vert2[2], vert3[2]);
+
+        var maxX = Math.max(vert1[0], vert2[0], vert3[0]);
+        var maxY = Math.max(vert1[1], vert2[1], vert3[1]);
+        var maxZ = Math.max(vert1[2], vert2[2], vert3[2]);
+
+        var testPassed = (
+          (cameraLocal[0] > minX && cameraLocal[0] < maxX) &&
+          (cameraLocal[1] > minY && cameraLocal[1] < maxY)
+        );
+        if (!testPassed) continue;
+
+        var z = this.calcZ(vert1,vert2,vert3,cameraLocal[0],cameraLocal[1]);
+
+        //2. Get if vertex top or bottom
+        var normal1 = vec3.fromValues(
+          -this.normals[3*vertexInd1 + 0],
+          -this.normals[3*vertexInd1 + 1],
+          this.normals[3*vertexInd1 + 2]
+        );
+        var normal2 = vec3.fromValues(
+          -this.normals[3*vertexInd2 + 0],
+          -this.normals[3*vertexInd2 + 1],
+          this.normals[3*vertexInd2 + 2]
+        );
+        var normal3 = vec3.fromValues(
+          -this.normals[3*vertexInd3 + 0],
+          -this.normals[3*vertexInd3 + 1],
+          this.normals[3*vertexInd3 + 2]
+        );
+
+        var bary = this.getBarycentric(
+          vec3.fromValues(cameraLocal[0], cameraLocal[1], z),
+          vert1,
+          vert2,
+          vert3
+        );
+
+        /*if (testPassed && cameraLocal[2] < vert1[2] || cameraLocal[2] < vert2[2] || cameraLocal[2] < vert3[2]){
+          debugger;
+          } */
+        if ((bary[0] < 0) || (bary[1] < 0) || (bary[2] < 0)) continue;
+
+        var normal_avg = bary[0]*normal1[2]+bary[1]*normal2[2]+bary[2]*normal3[2];
+        if (normal_avg > 0) {
+          //Bottom
+          var distanceToCamera = cameraLocal[2] - z;
+          if ((distanceToCamera > 0) && (distanceToCamera < minPositiveDistanceToCamera))
+              bottomZ = z;
+        } else {
+          //Top
+          topZ = Math.max(z, topZ);
+        }
+      }
+    }
+    return [bottomZ, topZ];
+  }
+
+  calcZ(p1, p2, p3, x, y) {
+    var det = (p2[1] - p3[1]) * (p1[0] - p3[0]) + (p3[0] - p2[0]) * (p1[1] - p3[1]);
+
+    if (det > -0.001 && det < 0.001) {
+        return Math.min(p1[0], p2[0], p3[0]);
+    }
+
+    var l1 = ((p2[1] - p3[1]) * (x - p3[0]) + (p3[0] - p2[0]) * (y - p3[1])) / det;
+    var l2 = ((p3[1] - p1[1]) * (x - p3[0]) + (p1[0] - p3[0]) * (y - p3[1])) / det;
+    var l3 = 1.0 - l1 - l2;
+
+    return l1 * p1[2] + l2 * p2[2] + l3 * p3[2];
+  }
+
+  getBarycentric( p, a, b, c) {
+    var v0 = vec3.create();
+    vec3.subtract(v0, b, a);
+    var v1 = vec3.create();
+    vec3.subtract(v1, c, a);
+    var v2 = vec3.create();
+    vec3.subtract(v2, p, a);
+
+    var d00 = vec3.dot(v0, v0);
+    var d01 = vec3.dot(v0, v1);
+    var d11 = vec3.dot(v1, v1);
+    var d20 = vec3.dot(v2, v0);
+    var d21 = vec3.dot(v2, v1);
+    var denom = d00 * d11 - d01 * d01;
+    var v = (d11 * d20 - d01 * d21) / denom;
+    var w = (d00 * d21 - d01 * d20) / denom;
+    var u = 1.0 - v - w;
+    return vec3.fromValues(u, v, w)
+  }
 }
 
 export default BSPTree;

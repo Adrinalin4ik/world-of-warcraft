@@ -17,7 +17,7 @@ class WorldMap extends THREE.Group {
   static CHUNKS_PER_ROW = 64 * 16;
 
   // Controls when ADT chunks are loaded and unloaded from the map.
-  static CHUNK_RENDER_RADIUS = 1;
+  static CHUNK_RENDER_RADIUS = 10;
 
   constructor(data, wdt) {
     super();

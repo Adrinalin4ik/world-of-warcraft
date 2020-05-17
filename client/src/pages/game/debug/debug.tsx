@@ -11,6 +11,10 @@ class DebugPanel extends React.Component<IProp> {
 
   private game: Game | null;
   private renderer: THREE.WebGLRenderer | null;
+  
+  private static test1: string = "";
+  private static test2: string = "";
+  private static test3: string = "";
 
   constructor(props: IProp) {
     super(props);
@@ -23,6 +27,19 @@ class DebugPanel extends React.Component<IProp> {
     this.renderer = prevProps.renderer;
     this.game = prevProps.game;
     return null;
+  }
+
+  static vector3ToString(v: {x: number, y: number, z: number}) {
+    return `${v.x}, ${v.y}, ${v.z}`
+  }
+
+  static frustumToString(frustum: any[]) {
+    return `[0]:${DebugPanel.vector3ToString(frustum[0].normal)},
+    [1]:${DebugPanel.vector3ToString(frustum[1].normal)},
+    [2]:${DebugPanel.vector3ToString(frustum[2].normal)},
+    [3]:${DebugPanel.vector3ToString(frustum[3].normal)},
+    [4]:${DebugPanel.vector3ToString(frustum[4].normal)},
+    [5]:${DebugPanel.vector3ToString(frustum[5].normal)}`
   }
 
   playerStats() {
@@ -164,6 +181,16 @@ class DebugPanel extends React.Component<IProp> {
     const { memory, programs } = renderer.info;
     return (
       <div className="stats">
+        <h2>Tests</h2>
+        <p>
+          Test1: {DebugPanel.test1}
+        </p>
+        <p>
+          Test2: {DebugPanel.test2}
+        </p>
+        <p>
+          Test3: {DebugPanel.test3}
+        </p>
         <h2>Player</h2>
         { this.playerStats() }
         {/* <h2>Memory</h2>

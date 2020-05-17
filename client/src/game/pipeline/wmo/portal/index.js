@@ -27,7 +27,7 @@ class WMOPortal {
     }
 
     // this.boundingBox.setFromPoints(this.vertices)
-    const normal = this.normal = new THREE.Vector3(def.normal[0], def.normal[1], def.normal[2]);
+    const normal = this.normal = new THREE.Vector3(-def.normal[0], -def.normal[1], def.normal[2]);
     const constant = this.constant = def.constant;
     this.plane = new THREE.Plane(normal, constant);
 
@@ -63,7 +63,7 @@ class WMOPortal {
     material.opacity = 0.2;
     material.transparent = true;
     material.depthWrite = false;
-    material.visible = true;
+    material.visible = false;
     material.wireframe = false
   }
 

@@ -21,7 +21,6 @@ class WMORootDefinition {
 
     this.createPortals(data);
     this.createBoundingBox(data.MOHD);
-    console.log(data) 
   }
 
   createBoundingBox(mohd) {

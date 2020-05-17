@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 
 import THREEUtil from '../utils/three-util';
+import { vec4 } from 'gl-matrix';
+import DebugPanel from '../../pages/game/debug/debug';
 
 class VisibilityManager {
 
@@ -32,15 +34,18 @@ class VisibilityManager {
         continue;
       }
       
-      camera.updateMatrix(); // make sure camera's local matrix is updated
-      camera.updateMatrixWorld(); // make sure camera's world matrix is updated
-
+      // camera.updateMatrix(); // make sure camera's local matrix is updated
+      // camera.updateMatrixWorld(); // make sure camera's world matrix is updated
+      // camera.updateProjectionMatrix(); // make sure camera's world matrix is updated
+      // console.log(camera)
       // Obtain a frustum matching the camera
       const frustum = new THREE.Frustum();
       frustum.setFromMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
       // Adjust near plane (5) back to camera position
       const nearGap = frustum.planes[5].distanceToPoint(camera.position);
       frustum.planes[5].constant -= nearGap;
+
+      DebugPanel.test1 = camera.location.type;
       if (camera.location.type === 'exterior') {
         this.enablePortalsFromExterior(0, camera, frustum);
       } else {
@@ -80,6 +85,7 @@ class VisibilityManager {
 
         // Cache world-space bounding box on group view
         if (!view.worldBoundingBox) {
+          console.log(view, wmo.views.root)
           view.worldBoundingBox = group.boundingBox.clone().applyMatrix4(wmo.views.root.matrixWorld);
         }
 
@@ -133,10 +139,11 @@ class VisibilityManager {
   }
 
   traversePortalsAndEnable(depth, camera, wmo, group, frustum = null, visitedPortals = new Set()) {
+    // if (depth > 8) return; 
+    
     const view = wmo.views.groups.get(group.index);
-
-    let cameraLocal = view.worldToLocal(camera.position.clone());
-    cameraLocal = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
+    const cameraLocal = view.worldToLocal(camera.position.clone());
+    const cameraLocalConverted = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
 
     // Doodads within frustum are visible
     for (const doodad of wmo.doodadsForGroup(group)) {
@@ -176,17 +183,37 @@ class VisibilityManager {
         continue;
       }
 
+      if (portalView.geometry.vertices.length < 4) {
+        console.debug('Portal has less then 4 verticies. It is invalid');
+        continue;
+      }
+
       // Portal out of group is not visible from previous frustum
       if (frustum !== null && !portalView.intersectFrustum(frustum)) {
         console.debug('Portal out of group is not visible from previous frustum')
         continue;
       }
 
-      // const distance = portal.plane.distanceToPoint(cameraLocal) * ref.side + 0.001;
-      // const insidePortal = distance < 0.0;
+      // const plane = portal.plane;
+      // const vec = vec4.fromValues(plane.normal.x, plane.normal.y, plane.normal.z, plane.constant);
+      // console.log(vec)
+      // var dotResult = (vec4.dot(
+      //   vec, 
+      //   [cameraLocal.x, cameraLocal.y, cameraLocal.z, 1]
+      // ));
+      // dotResult = dotResult + ref.side * 0.01;
+      // DebugPanel.test1 = dotResult;
+      // var isInsidePortalThis = (ref.side < 0) ? (dotResult <= 0) : (dotResult >= 0);
+      // if (!isInsidePortalThis) continue;
 
-      // // Portals must be traversed outward
-      // if (insidePortal) {
+      // const distance = portal.plane.distanceToPoint(cameraLocal) + 0.001;
+      // // const insidePortal = distance < 0.0;
+      // var insidePortal = (ref.side > 0) ? (distance <= 0) : (distance >= 0);
+      // DebugPanel.test1 = distance;
+      // DebugPanel.test2 = ref.side;
+      
+      // // // Portals must be traversed outward
+      // if (!insidePortal) {
       //   console.debug('Portals must be traversed outward', distance, ref)
       //   continue;
       // }
@@ -200,19 +227,21 @@ class VisibilityManager {
       // Project a frustum out of this portal for use in the next level of recursion
       // const nextFrustum = portalView.createFrustum(camera, frustum, ref.side < 0);
       
-      // if (!nextFrustum) {
-      //   console.log('Project a frustum out of this portal for use in the next level of recursion')
-      //   continue;
-      // }
+      const nextFrustum = portalView.portalCull(camera, frustum, ref.side < 0);
+
+      if (!nextFrustum) {
+        console.debug('Project a frustum out of this portal for use in the next level of recursion')
+        continue;
+      }
 
       // Portal out of group is to exterior and camera is not already in exterior, thus we need
       // to traverse and enable exterior groups
       if (exteriorDestination && camera.location.type !== 'exterior') {
-        this.enablePortalsFromExterior(depth + 1, camera, frustum, visitedPortals);
+        this.enablePortalsFromExterior(depth + 1, camera, nextFrustum, visitedPortals);
       }
 
       // Recurse
-      this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, frustum, visitedPortals);
+      this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, nextFrustum, visitedPortals);
     }
   }
 

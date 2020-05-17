@@ -1,10 +1,10 @@
-import * as THREE from 'three';
+import * as THREE from "three";
 
-import DBC from '../pipeline/dbc';
-import Entity from './entity';
-import M2Blueprint from '../pipeline/m2/blueprint';
-import ColliderManager from '../world/collider-manager';
-import M2 from '../pipeline/m2';
+import DBC from "../pipeline/dbc";
+import Entity from "./entity";
+import M2Blueprint from "../pipeline/m2/blueprint";
+import ColliderManager from "../world/collider-manager";
+import M2 from "../pipeline/m2";
 
 enum SlopeType {
   sliding,
@@ -18,13 +18,12 @@ enum Animation {
   backward = 133,
   jump = 15,
   rotating = 38,
-  grounding = 16,
+  grounding = 16
 }
 
 class Unit extends Entity {
-
   public guid: string;
-  public name: string = '<unknown>';
+  public name: string = "<unknown>";
   public level: number = 0;
   public target: Unit | null = null;
   public health: number = 0;
@@ -35,11 +34,16 @@ class Unit extends Entity {
   private _model: M2 | null = null;
   private modelData: DBC | null = null;
   private playerGeometry: THREE.BoxGeometry = new THREE.BoxGeometry(0, 0, 0);
-  private playerMaterial: THREE.MeshBasicMaterial = new THREE.MeshBasicMaterial({
-    wireframe: true,
-    opacity: 0
-  });
-  public collider: THREE.Mesh = new THREE.Mesh(this.playerGeometry, this.playerMaterial);
+  private playerMaterial: THREE.MeshBasicMaterial = new THREE.MeshBasicMaterial(
+    {
+      wireframe: true,
+      opacity: 0
+    }
+  );
+  public collider: THREE.Mesh = new THREE.Mesh(
+    this.playerGeometry,
+    this.playerMaterial
+  );
   public currentAnimationIndex: number = 0;
   private displayInfo: DBC | null = null;
 
@@ -78,14 +82,14 @@ class Unit extends Entity {
     idle: true,
     rotateRight: false,
     rotateLeft: false
-  }
+  };
 
   public jumpMoving = {
     forward: false,
     backward: false,
     strafeLeft: false,
     strafeRight: false
-  }
+  };
 
   //helpers
   public arrow: THREE.ArrowHelper = new THREE.ArrowHelper(
@@ -100,7 +104,7 @@ class Unit extends Entity {
     this.guid = guid;
 
     this.collider.geometry = new THREE.BoxGeometry(1, 1, 1);
-    this.collider.name = 'Collider';
+    this.collider.name = "Collider";
 
     // this.arrow.setDirection(this.groundDistanceRaycaster.ray.direction);
     this.arrow.setDirection(new THREE.Vector3(1, 0, 0));
@@ -149,11 +153,11 @@ class Unit extends Entity {
       return;
     }
 
-    DBC.load('CreatureDisplayInfo', displayId).then((displayInfo: DBC) => {
+    DBC.load("CreatureDisplayInfo", displayId).then((displayInfo: DBC) => {
       this._displayId = displayId;
       this.displayInfo = displayInfo;
       const modelID = displayInfo.modelID;
-      DBC.load('CreatureModelData', modelID).then((modelData: DBC) => {
+      DBC.load("CreatureModelData", modelID).then((modelData: DBC) => {
         this.modelData = modelData;
         this.modelData.path = this.modelData.file.match(/^(.+?)(?:[^\\]+)$/)[1];
         this.displayInfo!.modelData = this.modelData;
@@ -196,7 +200,6 @@ class Unit extends Entity {
     // Auto-play animation index 0 in unit model, if present
     // TODO: Properly manage unit animations
     if (m2.animated && m2.animations.length > 0) {
-
       /*
         penguin
         0 - fly 1
@@ -233,20 +236,26 @@ class Unit extends Entity {
       m2.animations.playAllSequences();
     }
 
-    this.emit('model:change', this, this._model, m2);
+    this.emit("model:change", this, this._model, m2);
     this._model = m2;
   }
 
-  setAnimation(index: number, interrupt: boolean = false, repetitions: number = -1) {
+  setAnimation(
+    index: number,
+    interrupt: boolean = false,
+    repetitions: number = -1
+  ) {
     if (!this.model) return;
     const isRunning = this.model.animations.currentAnimation.isRunning();
     if (isRunning) {
-      if (this.model.animations.currentAnimation.repetitions === Infinity &&
-        this.currentAnimationIndex !== index) {
-        this.startAnimation(index, repetitions)
+      if (
+        this.model.animations.currentAnimation.repetitions === Infinity &&
+        this.currentAnimationIndex !== index
+      ) {
+        this.startAnimation(index, repetitions);
       }
     } else {
-      this.startAnimation(index, repetitions)
+      this.startAnimation(index, repetitions);
     }
   }
 
@@ -257,13 +266,13 @@ class Unit extends Entity {
       repetitions === -1 ? Infinity : repetitions
     );
     this.currentAnimationIndex = index;
-    this.emit('animation:play', index, repetitions)
+    this.emit("animation:play", index, repetitions);
   }
 
   stopAnimation(index?: number) {
     if (!this.model) return;
     const animationIndex = index || this.currentAnimationIndex;
-    this.emit('animation:stop', animationIndex)
+    this.emit("animation:stop", animationIndex);
     this.model.animations.stopAnimation(animationIndex);
   }
 
@@ -335,13 +344,17 @@ class Unit extends Entity {
     this.translatePosition({ z: -this.gravity * delta });
   }
 
-  translatePosition(vector: { x?: number, y?: number, z?: number }) {
+  translatePosition(vector: { x?: number; y?: number; z?: number }) {
     this.changePosition(vector, true);
   }
 
   updateIsMovingFlag(newCoords: THREE.Vector3) {
     const coords = this.view.position;
-    if (newCoords.x !== coords.x || newCoords.y !== coords.y || newCoords.z !== coords.z) {
+    if (
+      newCoords.x !== coords.x ||
+      newCoords.y !== coords.y ||
+      newCoords.z !== coords.z
+    ) {
       this.isMoving = true;
     } else {
       this.isMoving = false;
@@ -355,16 +368,21 @@ class Unit extends Entity {
     this.updateIsMovingFlag(newCoords);
   }
 
-  afterPositionChange() {
-
-  }
+  afterPositionChange() { }
 
   changeRotation() {
-    this.emit('position:change', this.position, this.view.rotation);
+    this.emit("position:change", this.position, this.view.rotation);
   }
 
-  tmpVector = new THREE.Vector3(this.position.x, this.position.y, this.position.z);
-  changePosition(vector: { x?: number, y?: number, z?: number }, translate: boolean = false) {
+  tmpVector = new THREE.Vector3(
+    this.position.x,
+    this.position.y,
+    this.position.z
+  );
+  changePosition(
+    vector: { x?: number; y?: number; z?: number },
+    translate: boolean = false
+  ) {
     // Считаем то,как изменится позиция после проведения операции
     let newCoords: THREE.Vector3 = new THREE.Vector3();
     if (translate) {
@@ -385,41 +403,42 @@ class Unit extends Entity {
     this.beforePositionChange(newCoords);
 
     if (vector) {
-
       if (translate) {
-        if (vector.x && newCoords.x !== this.position.x) this.tmpVector.setX(vector.x)//this.view.translateX(vector.x);
-        if (vector.y && newCoords.y !== this.position.y) this.tmpVector.setY(vector.y)//this.view.translateY(vector.y);
-        if (vector.z && newCoords.z !== this.position.z) this.tmpVector.setZ(vector.z)//this.view.translateZ(vector.z);
+        if (vector.x && newCoords.x !== this.position.x)
+          this.tmpVector.setX(vector.x); //this.view.translateX(vector.x);
+        if (vector.y && newCoords.y !== this.position.y)
+          this.tmpVector.setY(vector.y); //this.view.translateY(vector.y);
+        if (vector.z && newCoords.z !== this.position.z)
+          this.tmpVector.setZ(vector.z); //this.view.translateZ(vector.z);
       } else {
         const builtVector = {
           x: vector.x ? vector.x : this.position.x,
           y: vector.y ? vector.y : this.position.y,
           z: vector.z ? vector.z : this.position.z
         };
-        this.position.set(builtVector.x, builtVector.y, builtVector.z)
+        this.position.set(builtVector.x, builtVector.y, builtVector.z);
       }
     }
-
 
     this.afterPositionChange();
   }
 
   applyTranslatePosition() {
-    this.view.translateX(this.tmpVector.x)
-    this.view.translateY(this.tmpVector.y)
-    this.view.translateZ(this.tmpVector.z)
+    this.view.translateX(this.tmpVector.x);
+    this.view.translateY(this.tmpVector.y);
+    this.view.translateZ(this.tmpVector.z);
     this.tmpVector.set(0, 0, 0);
 
-    if (this.prevPosition.x !== this.position.x ||
+    if (
+      this.prevPosition.x !== this.position.x ||
       this.prevPosition.y !== this.position.y ||
       this.prevPosition.z !== this.position.z
     ) {
-      this.emit('position:change', this.position, this.view.rotation);
+      this.emit("position:change", this.position, this.view.rotation);
     }
   }
 
   updateGroundDistance() {
-
     this.previousGroundDistance = this.groundDistance;
     this.groundDistance = 0;
     const newZ = this.position.z + this._groundFollowConstant;
@@ -430,23 +449,33 @@ class Unit extends Entity {
     // this.arrow.setDirection(this.groundDistanceRaycaster.ray.direction);
 
     // intersect with all scene meshes.
-    const intersects = this.groundDistanceRaycaster.intersectObjects(Array.from(ColliderManager.collidableMeshList.values()) as THREE.Object3D[]);
+    const intersects = this.groundDistanceRaycaster.intersectObjects(
+      Array.from(
+        ColliderManager.collidableMeshList.values()
+      ) as THREE.Object3D[]
+    );
     if (intersects.length > 0) {
       this.groundDistance = intersects[0].distance;
-      this.slopeAng = new THREE.Vector3(0, 1, 0).angleTo(intersects[0].face!.normal) * 180 / Math.PI;
-      this.slopeType = this.slopeAng < this.slopeLimit ? SlopeType.sliding : SlopeType.climbing;
+      this.slopeAng =
+        (new THREE.Vector3(0, 1, 0).angleTo(intersects[0].face!.normal) * 180) /
+        Math.PI;
+      this.slopeType =
+        this.slopeAng < this.slopeLimit
+          ? SlopeType.sliding
+          : SlopeType.climbing;
     }
   }
 
   updateMoving(delta: number) {
-    this.moving.idle = (!this.moving.backward &&
+    this.moving.idle =
+      !this.moving.backward &&
       !this.moving.forward &&
       !this.moving.strafeLeft &&
       !this.moving.strafeRight &&
       !this.moving.rotateRight &&
       !this.moving.rotateLeft &&
       !this.isJump &&
-      !this.isMoving)
+      !this.isMoving;
 
     if (true) {
       if (this.moving.forward) {
@@ -454,7 +483,7 @@ class Unit extends Entity {
         this.setAnimation(Animation.forward, true);
       }
       if (this.moving.backward) {
-        this.translatePosition({ x: -this.moveSpeed * delta / 2 });
+        this.translatePosition({ x: (-this.moveSpeed * delta) / 2 });
         this.setAnimation(Animation.backward);
       }
       if (this.moving.strafeRight) {
@@ -482,7 +511,6 @@ class Unit extends Entity {
         this.setAnimation(Animation.idle);
       }
     }
-
   }
 
   clear() {
@@ -525,18 +553,17 @@ class Unit extends Entity {
       let x = 0;
       let y = 0;
       if (this.jumpMoving.forward) x = this.moveSpeed * delta;
-      if (this.jumpMoving.backward) x = -this.moveSpeed / 2 * delta;
+      if (this.jumpMoving.backward) x = (-this.moveSpeed / 2) * delta;
       if (this.jumpMoving.strafeLeft) y = this.moveSpeed * delta;
       if (this.jumpMoving.strafeRight) y = -this.moveSpeed * delta;
 
       let z = (this.jumpVelocity - this.gravity) * delta * animationSpeed;
       const fallDown = z < 0;
       if (this.isOnGround && fallDown) {
-        const diff = (this._groundFollowConstant) - this.groundDistance;
+        const diff = this._groundFollowConstant - this.groundDistance;
         if (z > diff) z = diff;
       }
       this.translatePosition({ x, y, z });
-
 
       if (this.isOnGround && fallDown) {
         this.isJump = false;
