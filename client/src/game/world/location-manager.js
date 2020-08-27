@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { THREE } from 'enable3d';
 import DebugPanel from '../../pages/game/debug/debug';
 
 class LocationManager {

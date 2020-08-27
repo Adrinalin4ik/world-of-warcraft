@@ -1,5 +1,5 @@
 import React from 'react';
-// import * as THREE from 'three';
+// import { THREE } from 'enable3d';
 import { THREE } from 'enable3d';
 import './index.scss';
 import Game from '../../game';

@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { THREE } from 'enable3d';
 import { PlaneHelper } from '../../../utils/plane-helper';
 import { FrustumHelper } from '../../../utils/frustum-helper';
 import THREEUtil from '../../../utils/three-util';

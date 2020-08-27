@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { THREE } from 'enable3d';
 import Liquid from '../../liquid';
 import ADT from '../';
 import Material from './material';

@@ -294,11 +294,11 @@ class M2 extends THREE.Group {
 
     if (this.useSkinning) {
       // console.log(geometry)
-      // const bufferGeometry = geometryToBufferGeometry(geometry);
+      const bufferGeometry = geometryToBufferGeometry(geometry);
 
       // console.log(bufferGeometry)
-      // mesh = new THREE.SkinnedMesh(bufferGeometry);
-      mesh = new THREE.SkinnedMesh(geometry);
+      mesh = new THREE.SkinnedMesh(bufferGeometry);
+      // mesh = new THREE.SkinnedMesh(geometry);
       // console.log("mesh", mesh)
       // Assign root bones to mesh
       rootBones.forEach((bone) => {

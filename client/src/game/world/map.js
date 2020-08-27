@@ -1,4 +1,4 @@
-// import * as THREE from 'three';
+// import { THREE } from 'enable3d';
 import { THREE } from 'enable3d';
 import ADT from '../pipeline/adt';
 import Chunk from '../pipeline/adt/chunk';

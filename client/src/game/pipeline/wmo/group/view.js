@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { THREE } from 'enable3d';
 import ColliderManager from '../../../world/collider-manager';
 
 class WMOGroupView extends THREE.Mesh {

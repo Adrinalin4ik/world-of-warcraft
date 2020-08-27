@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { THREE } from 'enable3d';
 import { vec3 } from 'gl-matrix';
 import THREEUtil from './three-util';
 

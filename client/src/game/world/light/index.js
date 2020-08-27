@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { THREE } from 'enable3d';
 
 import DBC from '../../pipeline/dbc';
 import Default from './default';

@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { THREE } from 'enable3d';
 
 import WMORootView from './view';
 import WMOPortal from '../portal';
