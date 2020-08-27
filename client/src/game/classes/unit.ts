@@ -456,13 +456,27 @@ class Unit extends Entity {
     );
     if (intersects.length > 0) {
       this.groundDistance = intersects[0].distance;
+      const intersectedObject = intersects[0].object;
+      const slopeRay = new THREE.Ray(this.position, this.rotation.toVector3())
+      const slopeRayGround = new THREE.Ray(intersectedObject.position, this.rotation.toVector3())
+
+      // const slopeIntersects = slopeRay.intersectObject(slopeRayGround)
+      const slopeIntersects = slopeRay.direction.dot(slopeRayGround.direction)
+      // console.log(slopeRayGround.direction)
+      // const reverseAngle = slopeIntersects.length ? -90 : 90;
       this.slopeAng =
-        (new THREE.Vector3(0, 1, 0).angleTo(intersects[0].face!.normal) * 180) /
-        Math.PI;
+        (this.position.angleTo(intersects[0].face!.normal) * 180) / Math.PI - 90;
+      this.slopeAng = (slopeIntersects ? -1 : 1) * THREE.Math.degToRad(this.slopeAng);
+      // new THREE.Vector3(0, 1, 0).angleTo(intersects[0].face!.normal)
       this.slopeType =
         this.slopeAng < this.slopeLimit
           ? SlopeType.sliding
           : SlopeType.climbing;
+
+      // this.rotation.set(0, this.slopeAng, 0); 
+      // this.arrow.lookAt(new THREE.Vector3(1, 0, this.slopeAng))
+      // this.arrow.setDirection(new THREE.Vector3(1, 0, this.slopeAng))
+      this.arrow.setDirection(slopeRayGround.direction)
     }
   }
 

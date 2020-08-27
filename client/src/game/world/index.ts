@@ -49,7 +49,7 @@ export default class World extends EventEmitter {
     // this.skybox.name = "Skybox"
     // this.scene.add(this.skybox);
 
-    const loadedSpot = null//localStorage.getItem("debugCoords");
+    const loadedSpot = localStorage.getItem("debugCoords");
     if (loadedSpot) {
       const spot: any = JSON.parse(loadedSpot);
       // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
