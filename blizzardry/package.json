@@ -49,7 +49,7 @@
     "chai": "3.5.0",
     "codeclimate-test-reporter": "0.3.2",
     "del": "^1.2.0",
-    "eslint": "^2.12.0",
+    "eslint": "^4.18.2",
     "eslint-config-airbnb": "^1.0.0",
     "eslint-config-timkurvers": "^0.2.2",
     "gulp": "gulpjs/gulp.git",
