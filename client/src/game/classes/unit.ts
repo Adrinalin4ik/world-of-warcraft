@@ -1,5 +1,5 @@
-import * as THREE from "three";
-
+// import * as THREE from "three";
+import { THREE } from 'enable3d';
 import DBC from "../pipeline/dbc";
 import Entity from "./entity";
 import M2Blueprint from "../pipeline/m2/blueprint";

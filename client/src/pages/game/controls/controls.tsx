@@ -1,5 +1,6 @@
 import React from 'react';
-import * as THREE from 'three';
+// import * as THREE from 'three';
+import { THREE } from 'enable3d';
 import key from 'keymaster';
 import Player from '../../../game/classes/player';
 

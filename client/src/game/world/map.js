@@ -1,5 +1,5 @@
-import * as THREE from 'three';
-
+// import * as THREE from 'three';
+import { THREE } from 'enable3d';
 import ADT from '../pipeline/adt';
 import Chunk from '../pipeline/adt/chunk';
 import DBC from '../pipeline/dbc';
