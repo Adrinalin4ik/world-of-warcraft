@@ -40,7 +40,7 @@ class VisibilityManager {
       // console.log(camera)
       // Obtain a frustum matching the camera
       const frustum = new THREE.Frustum();
-      frustum.setFromMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+      frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
       // Adjust near plane (5) back to camera position
       const nearGap = frustum.planes[5].distanceToPoint(camera.position);
       frustum.planes[5].constant -= nearGap;
@@ -85,7 +85,7 @@ class VisibilityManager {
 
         // Cache world-space bounding box on group view
         if (!view.worldBoundingBox) {
-          console.log(view, wmo.views.root)
+          // console.log(view, wmo.views.root)
           view.worldBoundingBox = group.boundingBox.clone().applyMatrix4(wmo.views.root.matrixWorld);
         }
 

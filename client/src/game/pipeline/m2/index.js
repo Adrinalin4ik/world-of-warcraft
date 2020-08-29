@@ -110,7 +110,7 @@ class M2 extends THREE.Group {
     // Rotate
     const matrix = new THREE.Matrix4();
     matrix.makeScale(-1, 1, 1);
-    geometry.applyMatrix(matrix);
+    geometry.applyMatrix4(matrix);
     geometry.rotateX(-Math.PI);
 
     // Build mesh
@@ -282,7 +282,7 @@ class M2 extends THREE.Group {
     // Mirror geometry over X and Y axes and rotate
     const matrix = new THREE.Matrix4();
     matrix.makeScale(-1, -1, 1);
-    geometry.applyMatrix(matrix);
+    geometry.applyMatrix4(matrix);
     geometry.rotateX(-Math.PI / 2);
 
     // Preserve the geometry

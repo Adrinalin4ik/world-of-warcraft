@@ -83,10 +83,10 @@ class Chunk extends THREE.Mesh {
 
     const geometry = this.geometry = new THREE.BufferGeometry();
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    geometry.addAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.addAttribute('normal', new THREE.BufferAttribute(normals, 3));
-    geometry.addAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    geometry.addAttribute('uvAlpha', new THREE.BufferAttribute(uvsAlpha, 2));
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geometry.setAttribute('uvAlpha', new THREE.BufferAttribute(uvsAlpha, 2));
 
     if (adt.data.MH2O) {
       const liquid = adt.data.MH2O && adt.data.MH2O.chunks[id];

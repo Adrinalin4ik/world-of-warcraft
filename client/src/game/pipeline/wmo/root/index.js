@@ -36,7 +36,7 @@ class WMORoot {
     };
 
     this.createBoundingBox(def.boundingBox);
-    console.log(def)
+    // console.log(def)
     this.createMaterialDefs(def.materials, def.texturePaths);
 
     this.createPortals(def.portals, def.portalNormals, def.portalConstants, def.portalVertices);

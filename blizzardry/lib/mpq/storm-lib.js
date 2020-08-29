@@ -5,15 +5,15 @@ Object.defineProperty(exports, "__esModule", {
 });
 exports.HANDLEPtr = exports.FIND_DATA = undefined;
 
-var _refStruct = require('ref-struct');
+var _refStruct = require('@saleae/ref-struct');
 
 var _refStruct2 = _interopRequireDefault(_refStruct);
 
-var _ffi = require('ffi');
+var _ffi = require('@saleae/ffi');
 
 var _ffi2 = _interopRequireDefault(_ffi);
 
-var _ref = require('ref');
+var _ref = require('@saleae/ref');
 
 var _ref2 = _interopRequireDefault(_ref);
 

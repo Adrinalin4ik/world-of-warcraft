@@ -1,5 +1,5 @@
-import ffi from 'ffi';
-import ref from 'ref';
+import ffi from '@saleae/ffi';
+import ref from '@saleae/ref';
 
 const { bool } = ref.types;
 const string = ref.types.CString;

@@ -4,7 +4,7 @@ Object.defineProperty(exports, "__esModule", {
   value: true
 });
 
-var _ref = require('ref');
+var _ref = require('@saleae/ref');
 
 var _ref2 = _interopRequireDefault(_ref);
 

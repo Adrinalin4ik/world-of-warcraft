@@ -9,7 +9,7 @@ class TextureLoader {
   static pendingUnload = new Set();
   static unloaderRunning = false;
 
-  static UNLOAD_INTERVAL = 15000;
+  static UNLOAD_INTERVAL = 5000;
 
   static load(rawPath, wrapS = THREE.RepeatWrapping, wrapT = THREE.RepeatWrapping, flipY = true) {
     const path = rawPath.toUpperCase();

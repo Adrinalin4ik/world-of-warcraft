@@ -58,7 +58,7 @@ vec3 getDirectedDiffuseLight(vec3 lightDirection, vec3 lightNormal, vec3 diffuse
 vec4 lightLayer(vec4 color, vec3 diffuse, vec3 ambient) {
   if (lightModifier > 0.0) {
     color.rgb *= diffuse + ambient;
-    color.rgb = saturate(color.rgb);
+    color.rgb = clamp(color.rgb, 0.0, 1.0);
   }
 
   return color;

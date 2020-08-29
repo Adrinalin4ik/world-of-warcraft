@@ -56,8 +56,13 @@ class WMOGroup {
   // Materials are created on the root blueprint to take advantage of sharing materials across
   // multiple groups (when possible).
   createMaterial(materialRefs) {
-    const material = this.material = new THREE.MultiMaterial();
-    material.materials = this.root.loadMaterials(materialRefs);
+    // const material = this.material = new THREE.MultiMaterial();
+    this.material = {
+      materials: []
+    }
+    this.material.materials = this.root.loadMaterials(materialRefs);
+    // const materials = [];
+    // var loader = new THREE.MaterialLoader();
   }
 
   createGeometry(attributes, batches) {
@@ -65,10 +70,10 @@ class WMOGroup {
 
     const { indices, positions, normals, uvs, colors } = attributes;
 
-    geometry.addAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.addAttribute('normal', new THREE.BufferAttribute(normals, 3));
-    geometry.addAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    geometry.addAttribute('acolor', new THREE.BufferAttribute(colors, 4));
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geometry.setAttribute('acolor', new THREE.BufferAttribute(colors, 4));
 
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeBoundingBox();

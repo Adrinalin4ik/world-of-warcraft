@@ -4,11 +4,11 @@ Object.defineProperty(exports, "__esModule", {
   value: true
 });
 
-var _ffi = require('ffi');
+var _ffi = require('@saleae/ffi');
 
 var _ffi2 = _interopRequireDefault(_ffi);
 
-var _ref = require('ref');
+var _ref = require('@saleae/ref');
 
 var _ref2 = _interopRequireDefault(_ref);
 

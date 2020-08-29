@@ -1,6 +1,6 @@
-const shaders = {
-  Vertex: require('./vertex/main.glsl'),
-  Fragment: require('./fragment/main.glsl')
+import * as vertexShader from './vertex/main.glsl'
+import * as fragmentShader from './fragment/main.glsl'
+export default {
+  vertexShader,
+  fragmentShader
 };
-
-export default shaders;

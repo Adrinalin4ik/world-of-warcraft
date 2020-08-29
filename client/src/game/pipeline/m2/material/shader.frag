@@ -86,11 +86,11 @@ vec4 fragCombinersWrath2Pass(sampler2D texture1, vec2 uv1, sampler2D texture2, v
 vec4 applyDiffuseLighting(vec4 color) {
   vec3 lightDirection = vec3(1, 1, -1);
 
-  float light = saturate(dot(vertexWorldNormal, normalize(-lightDirection)));
+  float light = clamp(dot(vertexWorldNormal, normalize(-lightDirection)), 0.0, 1.0);
 
   vec3 diffusion = diffuseLight.rgb * light;
   diffusion += ambientLight.rgb;
-  diffusion = saturate(diffusion);
+  diffusion = clamp(diffusion, 0.0, 1.0);
 
   color.rgb *= diffusion;
 

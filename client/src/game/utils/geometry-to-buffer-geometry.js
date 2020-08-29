@@ -5,33 +5,33 @@ export default function geometryToBufferGeometry( geometry ) {
   var bufferGeometry = new THREE.BufferGeometry();
 
   var positions = new Float32Array( geometry.vertices.length * 3 );
-  bufferGeometry.addAttribute( 'position', new THREE.BufferAttribute( positions, 3 ).copyVector3sArray( geometry.vertices ) );
+  bufferGeometry.setAttribute( 'position', new THREE.BufferAttribute( positions, 3 ).copyVector3sArray( geometry.vertices ) );
 
   if ( geometry.normals && geometry.normals.length > 0 ) {
 
     var normals = new Float32Array( geometry.normals.length * 3 );
-    bufferGeometry.addAttribute( 'normal', new THREE.BufferAttribute( normals, 3 ).copyVector3sArray( geometry.normals ) );
+    bufferGeometry.setAttribute( 'normal', new THREE.BufferAttribute( normals, 3 ).copyVector3sArray( geometry.normals ) );
 
   }
 
   if ( geometry.colors && geometry.colors.length > 0 ) {
 
     var colors = new Float32Array( geometry.colors.length * 3 );
-    bufferGeometry.addAttribute( 'color', new THREE.BufferAttribute( colors, 3 ).copyColorsArray( geometry.colors ) );
+    bufferGeometry.setAttribute( 'color', new THREE.BufferAttribute( colors, 3 ).copyColorsArray( geometry.colors ) );
 
   }
 
   if ( geometry.uvs && geometry.uvs.length > 0 ) {
 
     var uvs = new Float32Array( geometry.uvs.length * 2 );
-    bufferGeometry.addAttribute( 'uv', new THREE.BufferAttribute( uvs, 2 ).copyVector2sArray( geometry.uvs ) );
+    bufferGeometry.setAttribute( 'uv', new THREE.BufferAttribute( uvs, 2 ).copyVector2sArray( geometry.uvs ) );
 
   }
 
   if ( geometry.uvs2 && geometry.uvs2.length > 0 ) {
 
     var uvs2 = new Float32Array( geometry.uvs2.length * 2 );
-    bufferGeometry.addAttribute( 'uv2', new THREE.BufferAttribute( uvs2, 2 ).copyVector2sArray( geometry.uvs2 ) );
+    bufferGeometry.setAttribute( 'uv2', new THREE.BufferAttribute( uvs2, 2 ).copyVector2sArray( geometry.uvs2 ) );
 
   }
 
@@ -76,7 +76,7 @@ export default function geometryToBufferGeometry( geometry ) {
       arr.push(skinIndex.x, skinIndex.y, skinIndex.z, skinIndex.w)
     }
     var skinIndices = new THREE.BufferAttribute( new Float32Array(arr), 4 );
-    bufferGeometry.addAttribute( 'skinIndex', skinIndices);
+    bufferGeometry.setAttribute( 'skinIndex', skinIndices);
 
   }
 
@@ -88,7 +88,7 @@ export default function geometryToBufferGeometry( geometry ) {
     }
     var skinWeights = new THREE.BufferAttribute( new Float32Array(arr), 4 );
 
-    bufferGeometry.addAttribute( 'skinWeight', skinWeights );
+    bufferGeometry.setAttribute( 'skinWeight', skinWeights );
 
   }
 

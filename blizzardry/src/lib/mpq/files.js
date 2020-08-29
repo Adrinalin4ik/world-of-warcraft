@@ -1,4 +1,4 @@
-import ref from 'ref';
+import ref from '@saleae/ref';
 
 import File from './file';
 import { default as StormLib, FIND_DATA, HANDLEPtr } from './storm-lib';

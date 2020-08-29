@@ -37,7 +37,7 @@ function PlaneHelper( plane, size, hex ) {
 
 	var geometry = new BufferGeometry();
 
-	geometry.addAttribute( 'position', new BufferAttribute( positions, 3 ) );
+	geometry.setAttribute( 'position', new BufferAttribute( positions, 3 ) );
 
 	Line.call( this, geometry, new LineBasicMaterial( { color: color } ) );
 

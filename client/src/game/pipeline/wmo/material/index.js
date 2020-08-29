@@ -3,6 +3,9 @@ import { THREE } from 'enable3d';
 import TextureLoader from '../../texture-loader';
 import vertexShader from './shader.vert';
 import fragmentShader from './shader.frag';
+// import vertexShader from './shaders/vertex/main.glsl';
+// import fragmentShader from './shaders/fragment/main.glsl';
+
 
 class WMOMaterial extends THREE.ShaderMaterial {
 
@@ -81,6 +84,7 @@ class WMOMaterial extends THREE.ShaderMaterial {
     this.fragmentShader = fragmentShader;
 
     this.loadTextures(def.textures);
+    console.log("Here", this)
   }
 
   // TODO: Handle texture flags and color.

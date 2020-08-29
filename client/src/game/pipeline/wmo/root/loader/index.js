@@ -9,7 +9,7 @@ class WMORootLoader {
   static pendingUnload = new Set();
   static unloaderRunning = false;
 
-  static UNLOAD_INTERVAL = 15000;
+  static UNLOAD_INTERVAL = 5000;
 
   static load(rawPath) {
     const path = rawPath.toUpperCase();

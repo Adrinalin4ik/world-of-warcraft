@@ -1,5 +1,5 @@
 import { THREE } from 'enable3d';
-
+// import * as THREE from 'three'
 import TextureLoader from '../../texture-loader';
 import fragmentShader from './shader.frag';
 import vertexShader from './shader.vert';
@@ -12,7 +12,7 @@ class Material extends THREE.ShaderMaterial {
     this.layers = data.MCLY.layers;
     this.rawAlphaMaps = data.MCAL.alphaMaps;
     this.textureNames = textureNames;
-
+    
     this.vertexShader = vertexShader;
     this.fragmentShader = fragmentShader;
 
