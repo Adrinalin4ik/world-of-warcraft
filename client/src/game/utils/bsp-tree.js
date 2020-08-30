@@ -109,7 +109,9 @@ class BSPTree {
 
         const z = this.calculateZFromTriangleAndXY(triangle, point.x, point.y);
 
-        const bary = triangle.getBarycoord(new THREE.Vector3(point.x, point.y, z), triangle);
+        const bary = new THREE.Vector3();
+
+        triangle.getBarycoord(new THREE.Vector3(point.x, point.y, z), bary);
 
         const baryInBounds = bary.x >= 0 && bary.y >= 0 && bary.z >= 0;
 

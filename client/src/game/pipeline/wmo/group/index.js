@@ -140,8 +140,9 @@ class WMOGroup {
       const portal = this.portals[index];
       const portalRef = this.portalRefs[index];
 
-      const distance = portal.plane.projectPoint(point)
-        .clamp(portal.boundingBox.min, portal.boundingBox.max)
+      const point = new THREE.Vector3();
+      portal.plane.projectPoint(point, point);
+      const distance = point.clamp(portal.boundingBox.min, portal.boundingBox.max)
         .distanceTo(point);
 
       if (shortestDistance === null || distance < shortestDistance) {
