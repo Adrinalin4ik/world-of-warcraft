@@ -16,21 +16,6 @@ uniform int useBaseColor;
 uniform vec3 baseColor;
 uniform float baseAlpha;
 
-vec4 saturate(vec4 value) {
-  vec4 result = clamp(value, 0.0, 1.0);
-  return result;
-}
-
-vec3 saturate(vec3 value) {
-  vec3 result = clamp(value, 0.0, 1.0);
-  return result;
-}
-
-float saturate(float value) {
-  float result = clamp(value, 0.0, 1.0);
-  return result;
-}
-
 void main() {
   vUv = uv;
 
@@ -46,7 +31,5 @@ void main() {
 
   vertexWorldNormal = (modelMatrix * vec4(normal, 0.0)).xyz;
 
-  gl_Position = projectionMatrix *
-                modelViewMatrix *
-                vec4(position, 1.0);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }

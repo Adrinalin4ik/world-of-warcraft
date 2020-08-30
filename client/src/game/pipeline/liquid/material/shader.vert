@@ -37,8 +37,8 @@ uniform float baseAlpha;
    vertexColor = vec4(color, alpha);
 
    if (indoor == 1 && useBaseColor == 1) {
-    vertexColor.rgb = saturate(vertexColor.rgb + baseColor.rgb);
-    vertexColor.a = saturate(mod(vertexColor.a, 1.0) + (1.0 - baseAlpha));
+    vertexColor.rgb = clamp(vertexColor.rgb + baseColor.rgb, 0.0, 1.0);
+    vertexColor.a = clamp(mod(vertexColor.a, 1.0) + (1.0 - baseAlpha), 0.0, 1.0);
   }
 
    vec3 vertexWorldPosition = (modelMatrix * vec4(position, 1.0)).xyz;

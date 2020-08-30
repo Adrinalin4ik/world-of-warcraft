@@ -32,7 +32,7 @@ vec3 createGlobalLight(vec3 lightDirection, vec3 lightNormal, vec3 diffuseLight,
   vec3 directedDiffuseLight = diffuseLight.rgb * light;
 
   directedDiffuseLight.rgb += ambientLight.rgb;
-  directedDiffuseLight = saturate(directedDiffuseLight);
+  directedDiffuseLight = clamp(directedDiffuseLight, 0.0, 1.0);
 
   return directedDiffuseLight;
 }
@@ -59,7 +59,7 @@ vec4 lightIndoor(vec4 color, vec4 vertexColor, vec3 light) {
   vec3 indoorLight;
 
   indoorLight = (vertexColor.a * light.rgb) + ((1.0 - vertexColor.a) * groupColor);
-  indoorLight.rgb = saturate(indoorLight.rgb);
+  indoorLight.rgb = clamp(indoorLight.rgb, 0.0, 1.0);
 
   color.rgb *= indoorLight;
 
@@ -68,7 +68,7 @@ vec4 lightIndoor(vec4 color, vec4 vertexColor, vec3 light) {
 
 vec4 lightOutdoor(vec4 color, vec4 vertexColor, vec3 light) {
   vec3 outdoorLight = light.rgb += (vertexColor.rgb * 2.0);
-  outdoorLight.rgb = saturate(outdoorLight.rgb);
+  outdoorLight.rgb = clamp(outdoorLight.rgb, 0.0, 1.0);
 
   color.rgb *= outdoorLight;
 

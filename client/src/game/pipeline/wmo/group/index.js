@@ -31,7 +31,7 @@ class WMOGroup {
     if (this.view) {
       ColliderManager.collidableMeshList.delete(this.view.uuid);
     }
-    this.view = new WMOGroupView(this, this.geometry, this.material);
+    this.view = new WMOGroupView(this, this.geometry, this.materials);
     return this.view;
   }
 
@@ -56,13 +56,7 @@ class WMOGroup {
   // Materials are created on the root blueprint to take advantage of sharing materials across
   // multiple groups (when possible).
   createMaterial(materialRefs) {
-    // const material = this.material = new THREE.MultiMaterial();
-    this.material = {
-      materials: []
-    }
-    this.material.materials = this.root.loadMaterials(materialRefs);
-    // const materials = [];
-    // var loader = new THREE.MaterialLoader();
+    this.materials = this.root.loadMaterials(materialRefs);
   }
 
   createGeometry(attributes, batches) {
@@ -97,7 +91,7 @@ class WMOGroup {
     }
 
     if (this.material) {
-      for (const material of this.material.materials) {
+      for (const material of this.materials) {
         this.root.unloadMaterial(material);
       }
     }

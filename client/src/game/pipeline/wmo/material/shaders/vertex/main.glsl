@@ -28,19 +28,19 @@ void main() {
 
   #if BATCH_TYPE == 1
     // Transition between vertex color and light based on vertex alpha
-    colors[0].rgb = saturate(mix(vertexColor.rgb, light.rgb * 0.5, vertexColor.a) + emissiveColor.rgb);
+    colors[0].rgb = clamp(mix(vertexColor.rgb, light.rgb * 0.5, vertexColor.a) + emissiveColor.rgb, 0.0, 1.0);
     colors[0].a = vertexColor.a;
   #endif
 
   #if BATCH_TYPE == 2
     // Transition between vertex color and light added to vertex color
-    colors[0].rgb = saturate(mix(vertexColor.rgb, (light.rgb * 0.5) + vertexColor.rgb, vertexColor.a));
+    colors[0].rgb = clamp(mix(vertexColor.rgb, (light.rgb * 0.5) + vertexColor.rgb, vertexColor.a), 0.0, 1.0);
     colors[0].a = vertexColor.a;
   #endif
 
   #if BATCH_TYPE == 3
     // Multiply vertex color and light
-    colors[0].rgb = saturate((vertexColor.rgb * light.rgb) + emissiveColor.rgb);
+    colors[0].rgb = clamp((vertexColor.rgb * light.rgb) + emissiveColor.rgb, 0.0, 1.0);
     colors[0].a = vertexColor.a;
   #endif
 

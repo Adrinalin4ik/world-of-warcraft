@@ -84,7 +84,6 @@ class WMOMaterial extends THREE.ShaderMaterial {
     this.fragmentShader = fragmentShader;
 
     this.loadTextures(def.textures);
-    console.log("Here", this)
   }
 
   // TODO: Handle texture flags and color.
