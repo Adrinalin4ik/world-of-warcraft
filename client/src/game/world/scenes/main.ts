@@ -233,9 +233,11 @@ export default class MainScene extends Scene3D {
       shape: 'sphere',
       radius: 1,
       width: 1,
+      mass: 20,
+      collisionFlags: 1
     })
     this.player.view.body.setFriction(0);
-    this.player.view.body.setAngularFactor(0, 0, 0);
+    this.player.view.body.setAngularFactor(1, 1, 1);
     this.player.view.body.setCcdMotionThreshold(1e-7)
     this.player.view.body.setCcdSweptSphereRadius(0.25)
 
@@ -303,12 +305,12 @@ export default class MainScene extends Scene3D {
 
       if (key.isPressed('space')) {
         // unit.ascend(delta);
-        this.player.view.body.applyForceZ(speed)
+        this.player.view.body.setVelocityZ(speed)
       }
 
       if (key.isPressed('x')) {
         // unit.descend(delta);
-        this.player.view.body.applyForceZ(-speed)
+        this.player.view.body.setVelocityZ(-speed)
       }
 
       if (key.isPressed('left') || key.isPressed('a')) {
@@ -546,6 +548,7 @@ export default class MainScene extends Scene3D {
         2 * Math.PI * this.rotateDelta.x / window.innerWidth * this.rotateSpeed
       );
 
+      console.log(event.which)
       if (event.which === 3) {
         this.player.view.rotateZ(this.thetaDelta);
         // let temp = (this.camera.rotation.x * this.camera.rotation.y);

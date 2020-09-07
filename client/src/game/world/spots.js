@@ -9,7 +9,7 @@ const Spots = [
     id: 'dun murog',
     title: 'dun murog',
     zoneId: 0,
-    coords: [-5046, -810, 521]
+    coords: [-5046, -810, 561]
   },
   {
     id: 'stormwind',
