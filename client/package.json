@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@babel/core": "7.7.4",
+    "@enable3d/ammo-physics": "^0.19.1",
+    "@enable3d/phaser-extension": "^0.19.1",
     "@svgr/webpack": "4.3.3",
     "@testing-library/jest-dom": "^4.2.4",
     "@testing-library/react": "^9.4.0",
@@ -57,6 +59,7 @@
     "keymaster": "^1.6.2",
     "mini-css-extract-plugin": "0.8.0",
     "optimize-css-assets-webpack-plugin": "5.0.3",
+    "phaser": "^3.24.1",
     "physijs-webpack": "^0.1.4",
     "pnp-webpack-plugin": "1.5.0",
     "postcss-flexbugs-fixes": "4.1.0",

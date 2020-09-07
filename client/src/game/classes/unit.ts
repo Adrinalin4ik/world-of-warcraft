@@ -1,5 +1,5 @@
 // import * as THREE from "three";
-import { THREE } from 'enable3d';
+import { THREE, ExtendedGroup, ExtendedObject3D } from 'enable3d';
 import DBC from "../pipeline/dbc";
 import Entity from "./entity";
 import M2Blueprint from "../pipeline/m2/blueprint";
@@ -29,7 +29,7 @@ class Unit extends Entity {
   public health: number = 0;
   public mana: number = 0;
 
-  private _view: THREE.Group = new THREE.Group();
+  private _view: ExtendedObject3D = new ExtendedObject3D();
   private _displayId: number = 0;
   private _model: M2 | null = null;
   private modelData: DBC | null = null;
@@ -47,8 +47,8 @@ class Unit extends Entity {
   public currentAnimationIndex: number = 0;
   private displayInfo: DBC | null = null;
 
-  public rotateSpeed: number = 2;
-  public moveSpeed: number = 10; //10
+  public rotateSpeed: number = 0.2;
+  public moveSpeed: number = 0.10; //10
   public flySpeed: number = 15; //10
   public gravity: number = 10; //10;
   public jumpVelocityConst: number = 16;
@@ -532,9 +532,9 @@ class Unit extends Entity {
   update(delta: number) {
     this.updateGroundDistance();
     this.updateMoving(delta);
-    if (this.useGravity) {
-      this.updateGravity(delta);
-    }
+    // if (this.useGravity) {
+    //   this.updateGravity(delta);
+    // }
     this.applyTranslatePosition();
     this.clear();
   }

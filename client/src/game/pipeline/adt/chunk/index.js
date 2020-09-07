@@ -1,9 +1,9 @@
-import { THREE } from 'enable3d';
+import { THREE, ExtendedMesh } from 'enable3d';
 import Liquid from '../../liquid';
 import ADT from '../';
 import Material from './material';
 
-class Chunk extends THREE.Mesh {
+class Chunk extends ExtendedMesh {
 
   static SIZE = 33.33333;
   static UNIT_SIZE = 33.33333 / 8;

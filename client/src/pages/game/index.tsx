@@ -1,11 +1,15 @@
 import React from 'react';
 // import { THREE } from 'enable3d';
-import { THREE } from 'enable3d';
+import { PhysicsLoader, Project, THREE } from 'enable3d';
+import * as Phaser from 'phaser';
+import { enable3d } from '@enable3d/phaser-extension';
 import './index.scss';
 import Game from '../../game';
 import Controls from './controls/controls';
 import DebugPanel from './debug/debug';
 import Stats from 'stats-js';
+import MainScene from '../../game/world/scenes/main';
+
 interface IGameProps {}
 interface IGameScreenState {
   renderer: THREE.WebGLRenderer | null;
@@ -44,19 +48,52 @@ class GameScreen extends React.Component {
     this.camera.position.set(15, 0, 7);
 
     this.cameraHelper = new THREE.CameraHelper( this.camera );
-    this.game.world.scene.add(this.cameraHelper);
+    // this.game.world.scene.add(this.cameraHelper);
     this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
   }
   
   componentDidMount() {
-    this.renderer = new THREE.WebGLRenderer({
-      alpha: true,
-      antialias: false,
-      powerPreference: 'high-performance',
-      canvas: this.refs.canvas as HTMLCanvasElement
-    });
+    const config: any = {
+      type: Phaser.WEBGL,
+      camera: this.camera,
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: window.innerWidth * Math.max(1, window.devicePixelRatio / 2),
+        height: window.innerHeight * Math.max(1, window.devicePixelRatio / 2)
+      },
+      scenes: [MainScene],
+      canvas: this.refs.canvas as HTMLCanvasElement,
+      gravity: {x:0, y:0, z: -20}
+    };
+
+    // const config: Phaser.Types.Core.GameConfig = {
+    //   type: Phaser.WEBGL,
+    //   scale: {
+    //     mode: Phaser.Scale.FIT,
+    //     autoCenter: Phaser.Scale.CENTER_BOTH,
+    //     width: window.innerWidth * Math.max(1, window.devicePixelRatio / 2),
+    //     height: window.innerHeight * Math.max(1, window.devicePixelRatio / 2)
+    //   },
+    //   scene: [MainScene],
+    //   canvas: this.refs.canvas as HTMLCanvasElement
+    // };
+      
+    PhysicsLoader(
+      '/lib',
+      () => new Project(config));
+    // enable3d(() => new Phaser.Game(config)).withPhysics('/lib');
+
+    // const game = new Phaser.Game(config);
+    // console.log(game)
+    // this.renderer = new THREE.WebGLRenderer({
+    //   alpha: true,
+    //   antialias: false,
+    //   powerPreference: 'high-performance',
+    //   canvas: this.refs.canvas as HTMLCanvasElement
+    // });
 
     this.setState({renderer: this.renderer})
     
@@ -98,36 +135,36 @@ class GameScreen extends React.Component {
   }
 
   animate() {
-    this.stats.begin();
-    if (!this.renderer) {
-      return;
-    }
+    // this.stats.begin();
+    // if (!this.renderer) {
+    //   return;
+    // }
 
-    const delta = this.clock.getDelta();
-    if (this.debugPanel.current){
-      this.debugPanel.current.forceUpdate();
-    }
+    // const delta = this.clock.getDelta();
+    // if (this.debugPanel.current){
+    //   this.debugPanel.current.forceUpdate();
+    // }
     
-    const cameraMoved: boolean =
-    this.prevCameraRotation === null ||
-    this.prevCameraPosition === null ||
-    !this.prevCameraRotation.equals(this.camera.quaternion) ||
-    !this.prevCameraPosition.equals(this.camera.position);
-    this.game.world.animate(delta, this.camera, cameraMoved);
-    this.renderer.render(this.game.world.scene, this.camera);
-      if (this.debugRenderer) {
-        this.debugCamera.position.set(this.camera.position.x, 
-          this.camera.position.y, 
-          this.camera.position.z + 120)
-          this.debugRenderer.render(this.game.world.scene, this.debugCamera);
-      }
+    // const cameraMoved: boolean =
+    // this.prevCameraRotation === null ||
+    // this.prevCameraPosition === null ||
+    // !this.prevCameraRotation.equals(this.camera.quaternion) ||
+    // !this.prevCameraPosition.equals(this.camera.position);
+    // this.game.world.animate(delta, this.camera, cameraMoved);
+    // this.renderer.render(this.game.world.scene, this.camera);
+    //   if (this.debugRenderer) {
+    //     this.debugCamera.position.set(this.camera.position.x, 
+    //       this.camera.position.y, 
+    //       this.camera.position.z + 120)
+    //       this.debugRenderer.render(this.game.world.scene, this.debugCamera);
+    //   }
       
-      this.prevCameraRotation = this.camera.quaternion.clone();
-      this.prevCameraPosition = this.camera.position.clone();
-      if (this.controls.current) {
-        this.controls.current.update(delta);
-      }
-      this.stats.end();
+    //   this.prevCameraRotation = this.camera.quaternion.clone();
+    //   this.prevCameraPosition = this.camera.position.clone();
+    //   if (this.controls.current) {
+    //     this.controls.current.update(delta);
+    //   }
+    //   this.stats.end();
     }
     
     render() {

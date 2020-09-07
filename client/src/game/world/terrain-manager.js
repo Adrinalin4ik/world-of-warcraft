@@ -11,7 +11,8 @@ class TerrainManager {
 
   loadChunk(_index, terrain) {
     this.view.add(terrain);
-    ColliderManager.collidableMeshList.set(terrain.uuid, terrain);
+    // ColliderManager.collidableMeshList.set(terrain.uuid, terrain);
+    ColliderManager.add(terrain.uuid, terrain);
     terrain.updateMatrix();
   }
 
@@ -19,7 +20,8 @@ class TerrainManager {
     this.view.remove(terrain);
     terrain.dispose();
 
-    ColliderManager.collidableMeshList.delete(terrain.uuid);
+    // ColliderManager.collidableMeshList.delete(terrain.uuid);
+    ColliderManager.remove(terrain.uuid);
   }
 
   animate(delta, camera, cameraMoved) {

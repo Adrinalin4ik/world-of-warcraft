@@ -1,5 +1,5 @@
 // import * as THREE from "three";
-import { THREE } from 'enable3d';
+import { THREE, Scene3D } from 'enable3d';
 import Player from "../classes/player";
 import spots from "./spots";
 import Unit from "../classes/unit";
@@ -10,7 +10,7 @@ import { EventEmitter } from "events";
 
 export default class World extends EventEmitter {
   public scene: THREE.Scene;
-  public debugScene: THREE.Scene;
+  public debugScene: Scene3D;
   public player: Player;
   public entities: Map<string, Unit> = new Map();
   public map: WorldMap | null = null;
@@ -19,9 +19,9 @@ export default class World extends EventEmitter {
     super();
 
     this.scene = new THREE.Scene();
-    this.scene.matrixAutoUpdate = false;
-    this.debugScene = new THREE.Scene();
-    this.debugScene.matrixAutoUpdate = false;
+    // this.scene.matrixAutoUpdate = false;
+    this.debugScene = new Scene3D();
+    // this.debugScene.matrixAutoUpdate = false;
 
     this.entities = new Map();
 
@@ -50,34 +50,35 @@ export default class World extends EventEmitter {
     // this.skybox.name = "Skybox"
     // this.scene.add(this.skybox);
 
-    const loadedSpot = null//localStorage.getItem("debugCoords");
-    if (loadedSpot) {
-      const spot: any = JSON.parse(loadedSpot);
-      // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
-      this.player.worldport(spot.zoneId, spot.coords);
-      this.player.rotation.set(
-        spot.rotation[0],
-        spot.rotation[1],
-        spot.rotation[2]
-      );
-    } else {
-      // const spot: any = spots[spots.length - 2]
-      const spot: any = spots.find(x => x.id === "dun murog")
-      // const spot: any = spots.find(x => x.id === 2)
-      // const spot: any = spots.find(x => x.id === "stormwind")
-      // const spot: any = spots.find(x => x.id === "ogrimar")
-      // const spot: any = spots.find(x => x.id === "daggercap_bay");
-      // const spot: any = spots.find(x => x.id === "north_bay");
-      // const spot: any = spots.find(x => x.id === "naxramas");
-      // const spot: any = spots.find(x => x.id === "dalaran");
-      this.player.worldport(spot.zoneId, spot.coords);
-    }
+    // const loadedSpot = null//localStorage.getItem("debugCoords");
+    // if (loadedSpot) {
+    //   const spot: any = JSON.parse(loadedSpot);
+    //   // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
+    //   this.player.worldport(spot.zoneId, spot.coords);
+    //   this.player.rotation.set(
+    //     spot.rotation[0],
+    //     spot.rotation[1],
+    //     spot.rotation[2]
+    //   );
+    // } else {
+    //   // const spot: any = spots[spots.length - 2]
+    //   const spot: any = spots.find(x => x.id === "dun murog")
+    //   // const spot: any = spots.find(x => x.id === 2)
+    //   // const spot: any = spots.find(x => x.id === "stormwind")
+    //   // const spot: any = spots.find(x => x.id === "ogrimar")
+    //   // const spot: any = spots.find(x => x.id === "daggercap_bay");
+    //   // const spot: any = spots.find(x => x.id === "north_bay");
+    //   // const spot: any = spots.find(x => x.id === "naxramas");
+    //   // const spot: any = spots.find(x => x.id === "dalaran");
+    //   this.player.worldport(spot.zoneId, spot.coords);
+    // }
   }
 
   add(entity: Unit) {
     this.entities.set(entity.guid, entity);
     if (entity.view) {
-      this.scene.add(entity.view);
+      console.log(this)
+      // this.scene.add(entity.view);
       // this.scene.add(entity.collider); // if you want to see the player collider
       // this.scene.add(entity.arrow);
 
@@ -88,8 +89,8 @@ export default class World extends EventEmitter {
   remove(entity: Unit) {
     this.entities.delete(entity.guid);
     if (entity.view) {
-      this.scene.remove(entity.view);
-      this.scene.remove(entity.arrow);
+      // this.scene.remove(entity.view);
+      // this.scene.remove(entity.arrow);
       entity.removeListener("model:change", this.changeModel.bind(this));
     }
   }

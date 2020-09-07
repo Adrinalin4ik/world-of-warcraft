@@ -1,5 +1,5 @@
 // import { THREE } from 'enable3d';
-import { THREE } from 'enable3d';
+import { THREE, ExtendedObject3D } from 'enable3d';
 import ADT from '../pipeline/adt';
 import Chunk from '../pipeline/adt/chunk';
 import DBC from '../pipeline/dbc';
@@ -10,7 +10,7 @@ import TerrainManager from './terrain-manager';
 import VisibilityManager from './visibility-manager';
 import LocationManager from './location-manager';
 import WorldLight from './light';
-class WorldMap extends THREE.Group {
+class WorldMap extends ExtendedObject3D {
 
   static ZEROPOINT = ADT.SIZE * 32;
 
@@ -24,7 +24,7 @@ class WorldMap extends THREE.Group {
 
     this.matrixAutoUpdate = false;
     this.name = 'WorldMap';
-    this.exterior = new THREE.Group();
+    this.exterior = new ExtendedObject3D();
     this.exterior.name = 'ExteriorView';
     this.add(this.exterior);
 
@@ -104,8 +104,8 @@ class WorldMap extends THREE.Group {
       this.chunks.set(index, chunk);
 
       this.terrainManager.loadChunk(index, chunk);
-      this.doodadManager.loadChunk(index, chunk.doodadEntries);
-      this.wmoManager.loadChunk(index, chunk.wmoEntries);
+      // this.doodadManager.loadChunk(index, chunk.doodadEntries);
+      // this.wmoManager.loadChunk(index, chunk.wmoEntries);
     }));
   }
 
@@ -116,8 +116,8 @@ class WorldMap extends THREE.Group {
     }
 
     this.terrainManager.unloadChunk(index, chunk);
-    this.doodadManager.unloadChunk(index, chunk.doodadEntries);
-    this.wmoManager.unloadChunk(index, chunk.wmoEntries);
+    // this.doodadManager.unloadChunk(index, chunk.doodadEntries);
+    // this.wmoManager.unloadChunk(index, chunk.wmoEntries);
 
     this.queuedChunks.delete(index);
     this.chunks.delete(index);

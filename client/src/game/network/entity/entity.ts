@@ -9,32 +9,32 @@ export class EntityHandler {
     private messageHandler: MessageHandler,
     private world: World) {
 
-    this.world.player.on('animation:play', (animationIndex, inrerrupt, repetitions) => {
-      const animationMessage: IAnimation = {
-        animationIndex,
-        inrerrupt,
-        repetitions,
-        playbackType: AnimationPlaybackType.start
-      };
+    // this.world.player.on('animation:play', (animationIndex, inrerrupt, repetitions) => {
+    //   const animationMessage: IAnimation = {
+    //     animationIndex,
+    //     inrerrupt,
+    //     repetitions,
+    //     playbackType: AnimationPlaybackType.start
+    //   };
 
-      this.messageHandler.sendMessage(MessageType.animation, animationMessage)
-    })
-    this.world.player.on('animation:stop', (animationIndex: number) => {
-      const animationMessage: IAnimation = {
-        animationIndex,
-        playbackType: AnimationPlaybackType.stop
-      };
-      this.messageHandler.sendMessage(MessageType.animation, animationMessage)
-    })
+    //   this.messageHandler.sendMessage(MessageType.animation, animationMessage)
+    // })
+    // this.world.player.on('animation:stop', (animationIndex: number) => {
+    //   const animationMessage: IAnimation = {
+    //     animationIndex,
+    //     playbackType: AnimationPlaybackType.stop
+    //   };
+    //   this.messageHandler.sendMessage(MessageType.animation, animationMessage)
+    // })
 
-    this.world.player.on('position:change', (pos: THREE.Vector3, rot: THREE.Euler) => {
-      const movementMessage: IMovement = {
-        position: [pos.x, pos.y, pos.z],
-        rotation: [rot.x, rot.y, rot.z],
-        type: MovementType.forward
-      }
-      this.messageHandler.sendMessage(MessageType.movement, movementMessage)
-    })
+    // this.world.player.on('position:change', (pos: THREE.Vector3, rot: THREE.Euler) => {
+    //   const movementMessage: IMovement = {
+    //     position: [pos.x, pos.y, pos.z],
+    //     rotation: [rot.x, rot.y, rot.z],
+    //     type: MovementType.forward
+    //   }
+    //   this.messageHandler.sendMessage(MessageType.movement, movementMessage)
+    // })
 
     MessageHandler.subscribe(MessageType.movement, (peerId: string, data: IMovement) => {
       const entity = this.world.entities.get(peerId);
