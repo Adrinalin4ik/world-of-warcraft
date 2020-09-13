@@ -28,12 +28,12 @@ export class EntityHandler {
     })
 
     this.world.player.on('position:change', (pos: THREE.Vector3, rot: THREE.Euler) => {
-      const movementMessage: IMovement = {
-        position: [pos.x, pos.y, pos.z],
-        rotation: [rot.x, rot.y, rot.z],
-        type: MovementType.forward
-      }
-      this.messageHandler.sendMessage(MessageType.movement, movementMessage)
+      // const movementMessage: IMovement = {
+      //   position: [pos.x, pos.y, pos.z],
+      //   rotation: [rot.x, rot.y, rot.z],
+      //   type: MovementType.forward
+      // }
+      // this.messageHandler.sendMessage(MessageType.movement, movementMessage)
     })
 
     MessageHandler.subscribe(MessageType.movement, (peerId: string, data: IMovement) => {

@@ -101,6 +101,7 @@ class Unit extends Entity {
 
   constructor(guid: string) {
     super();
+    (window as any).collider = ColliderManager;
     this.guid = guid;
 
     this.collider.geometry = new THREE.BoxGeometry(1, 1, 1);
@@ -447,13 +448,9 @@ class Unit extends Entity {
       new THREE.Vector3(0, 0, -1)
     );
     // this.arrow.setDirection(this.groundDistanceRaycaster.ray.direction);
-
+    const meshList: THREE.Object3D[] = Array.from(ColliderManager.collidableMeshList.values())
     // intersect with all scene meshes.
-    const intersects = this.groundDistanceRaycaster.intersectObjects(
-      Array.from(
-        ColliderManager.collidableMeshList.values()
-      ) as THREE.Object3D[]
-    );
+    const intersects = this.groundDistanceRaycaster.intersectObjects(meshList);
     if (intersects.length > 0) {
       this.groundDistance = intersects[0].distance;
       this.slopeAng =
@@ -530,7 +527,7 @@ class Unit extends Entity {
   }
 
   update(delta: number) {
-    this.updateGroundDistance();
+    // this.updateGroundDistance();
     this.updateMoving(delta);
     if (this.useGravity) {
       this.updateGravity(delta);

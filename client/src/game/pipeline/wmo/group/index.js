@@ -98,11 +98,11 @@ class WMOGroup {
   }
 
   createBoundingBox(def) {
-    const boundingBox = this.boundingBox = new THREE.Box3();
+    this.boundingBox = new THREE.Box3();
     const min = new THREE.Vector3(def.min.x, def.min.y, def.min.z);
     const max = new THREE.Vector3(def.max.x, def.max.y, def.max.z);
 
-    boundingBox.set(min, max);
+    this.boundingBox.set(min, max);
   }
 
   createBSPTree(nodes, planeIndices, attributes) {

@@ -15,8 +15,8 @@ class WMOPortal {
 
     for (let vindex = 0; vindex < vertexCount; ++vindex) {
       const vertex = new THREE.Vector3(
-        -def.vertices[vindex * 3],
-        -def.vertices[vindex * 3 + 1],
+        def.vertices[vindex * 3],
+        def.vertices[vindex * 3 + 1],
         def.vertices[vindex * 3 + 2]
       );
 
@@ -27,7 +27,7 @@ class WMOPortal {
     }
 
     // this.boundingBox.setFromPoints(this.vertices)
-    const normal = this.normal = new THREE.Vector3(-def.normal[0], -def.normal[1], def.normal[2]);
+    const normal = this.normal = new THREE.Vector3(def.normal[0], def.normal[1], def.normal[2]);
     const constant = this.constant = def.constant;
     this.plane = new THREE.Plane(normal, constant);
 
@@ -60,10 +60,10 @@ class WMOPortal {
 
     material.color = new THREE.Color(0xffff00);
     material.side = THREE.DoubleSide;
-    material.opacity = 0.2;
+    material.opacity = 0.4;
     material.transparent = true;
     material.depthWrite = false;
-    material.visible = false;
+    material.visible = true;
     material.wireframe = false
   }
 

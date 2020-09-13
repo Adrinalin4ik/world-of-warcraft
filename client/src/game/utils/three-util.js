@@ -36,6 +36,38 @@ class THREEUtil {
     return true;
   }
 
+  // Fully converted
+  static checkFrustum(frustum, box) {
+    // check box outside/inside of frustum
+    for (let pindex = 0, pcount = frustum.planes.length; pindex < pcount; ++pindex) {
+      const plane = frustum.planes[pindex];
+      const converted_plane = [plane.normal.x, plane.normal.y, plane.normal.z, plane.constant];
+
+      var out = 0;
+      out += ((vec4.dot(converted_plane, vec4.fromValues(box.min.x, box.min.y, box.min.z, 1.0) ) < 0.0 )?1:0);
+      out += ((vec4.dot(converted_plane, vec4.fromValues(box.max.x, box.min.y, box.min.z, 1.0) ) < 0.0 )?1:0);
+      out += ((vec4.dot(converted_plane, vec4.fromValues(box.min.x, box.max.y, box.min.z, 1.0) ) < 0.0 )?1:0);
+      out += ((vec4.dot(converted_plane, vec4.fromValues(box.max.x, box.max.y, box.min.z, 1.0) ) < 0.0 )?1:0);
+      out += ((vec4.dot(converted_plane, vec4.fromValues(box.min.x, box.min.y, box.max.z, 1.0) ) < 0.0 )?1:0);
+      out += ((vec4.dot(converted_plane, vec4.fromValues(box.max.x, box.min.y, box.max.z, 1.0) ) < 0.0 )?1:0);
+      out += ((vec4.dot(converted_plane, vec4.fromValues(box.min.x, box.max.y, box.max.z, 1.0) ) < 0.0 )?1:0);
+      out += ((vec4.dot(converted_plane, vec4.fromValues(box.max.x, box.max.y, box.max.z, 1.0) ) < 0.0 )?1:0);
+
+      if( out === 8 ) return false;
+    }
+      // check frustum outside/inside box
+      // if (points) {
+      //     out = 0; for (var i = 0; i < 8; i++) out += ((points[i][0] > box[1][0]) ? 1 : 0); if (out == 8) return false;
+      //     out = 0; for (var i = 0; i < 8; i++) out += ((points[i][0] < box[0][0]) ? 1 : 0); if (out == 8) return false;
+      //     out = 0; for (var i = 0; i < 8; i++) out += ((points[i][1] > box[1][1]) ? 1 : 0); if (out == 8) return false;
+      //     out = 0; for (var i = 0; i < 8; i++) out += ((points[i][1] < box[0][1]) ? 1 : 0); if (out == 8) return false;
+      //     out = 0; for (var i = 0; i < 8; i++) out += ((points[i][2] > box[1][2]) ? 1 : 0); if (out == 8) return false;
+      //     out = 0; for (var i = 0; i < 8; i++) out += ((points[i][2] < box[0][2]) ? 1 : 0); if (out == 8) return false;
+      // }
+
+      return true;
+  }
+
   // static planeCull(vertices, planes) {
   //   const points = this.geometry.vertices;
   //   function intersection(p1, p2, k) {

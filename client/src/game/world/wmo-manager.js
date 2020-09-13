@@ -213,7 +213,8 @@ class WMOManager {
     // Adjust WMO rotation to match Wowser's axes.
     const quat = view.quaternion;
     quat.set(quat.x, quat.y, quat.z, -quat.w);
-
+    view.scale.set(-1,-1, 1)
+    // console.log(view)
     view.updateMatrix();
     view.updateMatrixWorld();
 

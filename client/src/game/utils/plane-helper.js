@@ -11,7 +11,9 @@ import {
   BufferGeometry,
   Object3D,
   FrontSide,
-  BackSide } from 'three';
+	BackSide ,
+	Float32BufferAttribute
+} from 'three';
 // import { Line } from '../objects/Line.js';
 // import { Mesh } from '../objects/Mesh.js';
 // import { LineBasicMaterial } from '../materials/LineBasicMaterial.js';
@@ -33,7 +35,7 @@ function PlaneHelper( plane, size, hex ) {
 
 	if ( size === undefined ) size = 1;
 
-	var positions = [ 1, - 1, 1, - 1, 1, 1, - 1, - 1, 1, 1, 1, 1, - 1, 1, 1, - 1, - 1, 1, 1, - 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0 ];
+	var positions = new Float32BufferAttribute([ 1, - 1, 1, - 1, 1, 1, - 1, - 1, 1, 1, 1, 1, - 1, 1, 1, - 1, - 1, 1, 1, - 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0 ]);
 
 	var geometry = new BufferGeometry();
 

@@ -27,6 +27,17 @@ class BSPTree {
     }
 
     const node = this.nodes[nodeIndex];
+    
+    /*
+      interface Node {
+        faceStart: 0
+        flags: 0
+        nFaces: 0
+        negChild: 361
+        planeDist: -161
+        posChild: 1
+      }
+    */
 
     if (node.flags === 4) {
       leafIndices.push(nodeIndex);
@@ -35,7 +46,6 @@ class BSPTree {
 
     const leftPlane = new THREE.Plane();
     const rightPlane = new THREE.Plane();
-
     if (node.flags === 0) {
       leftPlane.setComponents(-1.0, 0.0, 0.0, node.planeDist);
       rightPlane.setComponents(1.0, 0.0, 0.0, -node.planeDist);
@@ -74,20 +84,20 @@ class BSPTree {
         const vindex3 = this.indices.face[3 * this.indices.plane[pindex] + 2];
 
         const vertex1 = new THREE.Vector3(
-          -this.vertices[3 * vindex1 + 0],
-          -this.vertices[3 * vindex1 + 1],
+          this.vertices[3 * vindex1 + 0],
+          this.vertices[3 * vindex1 + 1],
           this.vertices[3 * vindex1 + 2]
         );
 
         const vertex2 = new THREE.Vector3(
-          -this.vertices[3 * vindex2 + 0],
-          -this.vertices[3 * vindex2 + 1],
+          this.vertices[3 * vindex2 + 0],
+          this.vertices[3 * vindex2 + 1],
           this.vertices[3 * vindex2 + 2]
         );
 
         const vertex3 = new THREE.Vector3(
-          -this.vertices[3 * vindex3 + 0],
-          -this.vertices[3 * vindex3 + 1],
+          this.vertices[3 * vindex3 + 0],
+          this.vertices[3 * vindex3 + 1],
           this.vertices[3 * vindex3 + 2]
         );
         const minX = Math.min(vertex1.x, vertex2.x, vertex3.x);
@@ -215,18 +225,18 @@ class BSPTree {
         var vertexInd3 = this.indices.face[3*this.indices.plane[j] + 2];
 
         var vert1 = vec3.fromValues(
-          -this.vertices[3*vertexInd1 + 0],
-          -this.vertices[3*vertexInd1 + 1],
+          this.vertices[3*vertexInd1 + 0],
+          this.vertices[3*vertexInd1 + 1],
           this.vertices[3*vertexInd1 + 2]);
 
         var vert2 = vec3.fromValues(
-          -this.vertices[3*vertexInd2 + 0],
-          -this.vertices[3*vertexInd2 + 1],
+          this.vertices[3*vertexInd2 + 0],
+          this.vertices[3*vertexInd2 + 1],
           this.vertices[3*vertexInd2 + 2]);
 
         var vert3 = vec3.fromValues(
-          -this.vertices[3*vertexInd3 + 0],
-          -this.vertices[3*vertexInd3 + 1],
+          this.vertices[3*vertexInd3 + 0],
+          this.vertices[3*vertexInd3 + 1],
           this.vertices[3*vertexInd3 + 2]);
 
         //1. Get if camera position inside vertex
@@ -249,18 +259,18 @@ class BSPTree {
 
         //2. Get if vertex top or bottom
         var normal1 = vec3.fromValues(
-          -this.normals[3*vertexInd1 + 0],
-          -this.normals[3*vertexInd1 + 1],
+          this.normals[3*vertexInd1 + 0],
+          this.normals[3*vertexInd1 + 1],
           this.normals[3*vertexInd1 + 2]
         );
         var normal2 = vec3.fromValues(
-          -this.normals[3*vertexInd2 + 0],
-          -this.normals[3*vertexInd2 + 1],
+          this.normals[3*vertexInd2 + 0],
+          this.normals[3*vertexInd2 + 1],
           this.normals[3*vertexInd2 + 2]
         );
         var normal3 = vec3.fromValues(
-          -this.normals[3*vertexInd3 + 0],
-          -this.normals[3*vertexInd3 + 1],
+          this.normals[3*vertexInd3 + 0],
+          this.normals[3*vertexInd3 + 1],
           this.normals[3*vertexInd3 + 2]
         );
 

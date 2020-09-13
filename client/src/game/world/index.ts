@@ -62,13 +62,13 @@ export default class World extends EventEmitter {
       );
     } else {
       // const spot: any = spots[spots.length - 2]
-      const spot: any = spots.find(x => x.id === "dun murog")
+      // const spot: any = spots.find(x => x.id === "dun murog")
       // const spot: any = spots.find(x => x.id === 2)
       // const spot: any = spots.find(x => x.id === "stormwind")
       // const spot: any = spots.find(x => x.id === "ogrimar")
       // const spot: any = spots.find(x => x.id === "daggercap_bay");
       // const spot: any = spots.find(x => x.id === "north_bay");
-      // const spot: any = spots.find(x => x.id === "naxramas");
+      const spot: any = spots.find(x => x.id === "naxramas");
       // const spot: any = spots.find(x => x.id === "dalaran");
       this.player.worldport(spot.zoneId, spot.coords);
     }

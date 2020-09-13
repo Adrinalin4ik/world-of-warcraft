@@ -52,14 +52,14 @@ class LocationManager {
     }
     const cameraLocal = wmo.views.root.worldToLocal(camera.position.clone());
     // All operations assume the camera position is in local space
-    const cameraLocalConverted = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
+    // const cameraLocalConverted = new THREE.Vector3(cameraLocal.x, cameraLocal.y, cameraLocal.z)
     // let cameraLocal = wmo.views.root.localToWorld(camera.position.clone());
     // cameraLocal = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
     // const cameraLocal = camera.position.clone()
     // console.log(cameraLocal)
 
     // Check if camera could be inside this WMO
-    const maybeInsideWMO = wmo.root.boundingBox.containsPoint(cameraLocalConverted);
+    const maybeInsideWMO = wmo.root.boundingBox.containsPoint(cameraLocal);
     // Camera cannot be inside this WMO
     if (!maybeInsideWMO) {
       return;
@@ -76,7 +76,7 @@ class LocationManager {
       // console.log(isExterior)
 
       // Check if camera could be inside this group
-      const maybeInsideGroup = group.boundingBox.containsPoint(cameraLocalConverted);
+      const maybeInsideGroup = group.boundingBox.containsPoint(cameraLocal);
 
       // Camera cannot be inside this group
       if (!maybeInsideGroup) {
@@ -84,7 +84,7 @@ class LocationManager {
       }
       // console.log(group.boundingBox, cameraLocal)
       // Query BSP tree for matching leaves
-      let result = group.bspTree.queryBoundedPoint(cameraLocalConverted, group.boundingBox);
+      let result = group.bspTree.queryBoundedPoint(cameraLocal, group.boundingBox);
       // console.log(result)
       // Depending on group geometry, interior portions of a group may lack BSP leaves
       if (result === null) {
@@ -97,37 +97,37 @@ class LocationManager {
       }
 
       // Attempt to find unbounded Zs by raycasting the Z axis against portals
-      // if (result.z.min === null || result.z.max === null) {
-      //   const portalViews = [];
+      if (result.z.min === null || result.z.max === null) {
+        const portalViews = [];
 
-      //   for (const portalRef of group.portalRefs) {
-      //     const portalView = wmo.views.portals.get(portalRef.portalIndex);
-      //     portalViews.push(portalView);
-      //   }
+        for (const portalRef of group.portalRefs) {
+          const portalView = wmo.views.portals.get(portalRef.portalIndex);
+          portalViews.push(portalView);
+        }
 
-      //   // Unbounded max Z (raycast up to try find portal)
-      //   if (result.z.max === null) {
-      //     this.raycaster.set(camera.position, this.raycastUp);
-      //     const upIntersections = this.raycaster.intersectObjects(portalViews);
+        // Unbounded max Z (raycast up to try find portal)
+        if (result.z.max === null) {
+          this.raycaster.set(camera.position, this.raycastUp);
+          const upIntersections = this.raycaster.intersectObjects(portalViews);
 
-      //     if (upIntersections.length > 0) {
-      //       const closestUp = upIntersections[0];
-      //       result.z.max = closestUp.object.worldToLocal(closestUp.point).z;
-      //     }
-      //   }
+          if (upIntersections.length > 0) {
+            const closestUp = upIntersections[0];
+            result.z.max = closestUp.object.worldToLocal(closestUp.point).z;
+          }
+        }
 
-      //   // Unbounded min Z (raycast down to try find portal)
-      //   if (result.z.min === null) {
-      //     this.raycaster.set(camera.position, this.raycastDown);
-      //     const downIntersections = this.raycaster.intersectObjects(portalViews);
-      //     // console.log(downIntersections)
+        // Unbounded min Z (raycast down to try find portal)
+        if (result.z.min === null) {
+          this.raycaster.set(camera.position, this.raycastDown);
+          const downIntersections = this.raycaster.intersectObjects(portalViews);
+          // console.log(downIntersections)
 
-      //     if (downIntersections.length > 0) {
-      //       const closestDown = downIntersections[0];
-      //       result.z.min = closestDown.object.worldToLocal(closestDown.point).z;
-      //     }
-      //   }
-      // }
+          if (downIntersections.length > 0) {
+            const closestDown = downIntersections[0];
+            result.z.min = closestDown.object.worldToLocal(closestDown.point).z;
+          }
+        }
+      }
       // console.log(result.z.min)
       const location = {
         type: 'interior',

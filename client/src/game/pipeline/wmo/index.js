@@ -3,6 +3,7 @@ import WMORootLoader from './root/loader';
 import WMOGroupLoader from './group/loader';
 import M2Blueprint from '../m2/blueprint';
 import ColliderManager from '../../world/collider-manager';
+import * as THREE from 'three';
 class WMO {
 
   static LOAD_GROUP_INTERVAL = 1;
@@ -283,6 +284,11 @@ class WMO {
     // ColliderManager.collidableMeshList.set(groupView.uuid, groupView);
     groupView.updateMatrix();
     groupView.updateMatrixWorld();
+    // console.log(groupView)
+    const box = new THREE.Box3(groupView.group.boundingBox.min, groupView.group.boundingBox.max);
+
+    var helper = new THREE.Box3Helper(box, 0xffff00);
+    this.views.root.add(helper)
   }
 
   placePortalView(portalView) {
@@ -295,14 +301,15 @@ class WMO {
   placeDoodad(doodadEntry, doodad) {
     const { position, rotation, scale } = doodadEntry;
 
-    doodad.position.set(-position.x, -position.y, position.z);
+    doodad.position.set(position.x, position.y, position.z);
 
     // Adjust doodad rotation to match Wowser's axes.
-    const quat = doodad.quaternion;
-    doodad.boundingMesh.quaternion.set(rotation.x, rotation.y, -rotation.z, -rotation.w);
-    quat.set(rotation.x, rotation.y, -rotation.z, -rotation.w);
+    // const quat = doodad.quaternion;
+    // doodad.boundingMesh.quaternion.set(rotation.x, rotation.y, -rotation.z, -rotation.w);
+    // quat.set(rotation.x, rotation.y, -rotation.z, -rotation.w);
 
-    doodad.scale.set(scale, scale, scale);
+    // doodad.scale.set(scale, scale, scale);
+    // doodad.scale.set(-1, -1, 1);
 
     // Add to scene and update matrices
     this.views.root.add(doodad);

@@ -31,7 +31,7 @@ class WMOPortalView extends THREE.Mesh {
       const local = this.geometry.vertices[vindex].clone();
       const world = this.localToWorld(local);
       const {x, y, z} = world;
-      vertices.push([x, y, z, 1]);
+      vertices.push([x, y, z]);
     }
 
     for (const plane of frustum.planes) {
@@ -40,18 +40,18 @@ class WMOPortalView extends THREE.Mesh {
     }
     var thisPortalVertices = vertices;
     var thisPortalVerticesCopy = thisPortalVertices.slice(0);
-    for (var i = 0; i < thisPortalVerticesCopy.length; i++)
+    for (let i = 0; i < thisPortalVerticesCopy.length; i++)
         thisPortalVerticesCopy[i] = vec4.clone(thisPortalVerticesCopy[i]);
 
     var visible = true;
-    for (var i = 0; visible && i < frustumPlanes.length; i++) {
+    for (let i = 0; visible && i < frustumPlanes.length; i++) {
         visible = visible && THREEUtil.planeCull(thisPortalVerticesCopy, frustumPlanes);
     }
-    DebugPanel.test3 = visible.toString();
+
     if (!visible) return null;
 
     const {x, y, z} = this.portal.plane.normal;
-    const plane = [x, y, z, this.portal.plane.constant]
+    const plane = [x, y, z, 1]
     THREEUtil.sortVec3ArrayAgainstPlane(thisPortalVerticesCopy, plane);
 
     // var lastFrustumPlanesLen = frustumPlanes.length;
@@ -60,7 +60,7 @@ class WMOPortalView extends THREE.Mesh {
     var thisPortalPlanes = [];
     
     const cameraVec4 = [origin.x, origin.y, origin.z]
-    for (var i = 0; i < thisPortalVerticesCopy.length; ++i) {
+    for (let i = 0; i < thisPortalVerticesCopy.length; ++i) {
         var i2 = (i + 1) % thisPortalVerticesCopy.length;
 
         var n = THREEUtil.createPlaneFromEyeAndVertexes(cameraVec4, thisPortalVerticesCopy[i], thisPortalVerticesCopy[i2]);
@@ -132,7 +132,6 @@ class WMOPortalView extends THREE.Mesh {
     // Check distance to portal
     const distance = this.portal.plane.distanceToPoint(this.worldToLocal(origin));
     const close = distance > 1.0 && distance < -1.0;
-    DebugPanel.test1 = distance.toString();
     // console.log(distance)
     /* 
       If the portal is very close, use the portal vertices unedited; otherwise, clip the portal
@@ -142,7 +141,6 @@ class WMOPortalView extends THREE.Mesh {
 
     // If clipping the portal vertices resulted in a polygon with fewer than 3 vertices, return
     // null to indicate a new frustum couldn't be produced.
-    DebugPanel.test2 = clipped.length;
     if (clipped.length < 3) {
       return null;
     }
@@ -175,7 +173,6 @@ class WMOPortalView extends THREE.Mesh {
     //   this.parent.position.z)
     // console.log(this.parent.parent.parent)
     // this.add(planeHelper);
-    DebugPanel.test3 = planes.length;
     const newFrustum = { planes };
     // DebugPanel.test3 = DebugPanel.frustumToString(newFrustum.planes);
     // const fr = new THREE.Frustum(...planes);

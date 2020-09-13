@@ -3,6 +3,7 @@ import { THREE } from 'enable3d';
 import THREEUtil from '../utils/three-util';
 import { vec4 } from 'gl-matrix';
 import DebugPanel from '../../pages/game/debug/debug';
+import { PlaneHelper } from '../utils/plane-helper';
 
 class VisibilityManager {
 
@@ -41,6 +42,7 @@ class VisibilityManager {
       // Obtain a frustum matching the camera
       const frustum = new THREE.Frustum();
       frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+      // this.map.add(new PlaneHelper(frustum))
       // Adjust near plane (5) back to camera position
       const nearGap = frustum.planes[5].distanceToPoint(camera.position);
       frustum.planes[5].constant -= nearGap;
@@ -87,10 +89,15 @@ class VisibilityManager {
         if (!view.worldBoundingBox) {
           // console.log(view, wmo.views.root)
           view.worldBoundingBox = group.boundingBox.clone().applyMatrix4(wmo.views.root.matrixWorld);
+          // console.log(view.worldBoundingBox)
         }
 
         // If the current frustum does not include the group view, we can skip it
+        // if (!THREEUtil.checkFrustum(frustum, view.worldBoundingBox)) {
+        //   continue;
+        // }
         if (!THREEUtil.frustumContainsBox(frustum, view.worldBoundingBox)) {
+          // console.log(frustum, view)
           continue;
         }
 
@@ -113,7 +120,7 @@ class VisibilityManager {
     const wmo = camera.location.wmo.handler;
     const group = camera.location.wmo.group;
     const groupView = camera.location.wmo.views.group;
-    // console.log("Enable inrerior", groupView)
+
     // The group the camera is currently in should always be visible
     groupView.visible = true;
 
@@ -143,7 +150,6 @@ class VisibilityManager {
     
     const view = wmo.views.groups.get(group.index);
     const cameraLocal = view.worldToLocal(camera.position.clone());
-    const cameraLocalConverted = new THREE.Vector3(-cameraLocal.x, -cameraLocal.y, cameraLocal.z)
 
     // Doodads within frustum are visible
     for (const doodad of wmo.doodadsForGroup(group)) {
@@ -206,17 +212,15 @@ class VisibilityManager {
       // var isInsidePortalThis = (ref.side < 0) ? (dotResult <= 0) : (dotResult >= 0);
       // if (!isInsidePortalThis) continue;
 
-      // const distance = portal.plane.distanceToPoint(cameraLocal) + 0.001;
-      // // const insidePortal = distance < 0.0;
-      // var insidePortal = (ref.side > 0) ? (distance <= 0) : (distance >= 0);
-      // DebugPanel.test1 = distance;
-      // DebugPanel.test2 = ref.side;
+      const distance = portal.plane.distanceToPoint(cameraLocal) + 0.001;
+      // const insidePortal = distance < 0.0;
+      var insidePortal = (ref.side < 0) ? (distance <= 0) : (distance >= 0);
       
-      // // // Portals must be traversed outward
-      // if (!insidePortal) {
-      //   console.debug('Portals must be traversed outward', distance, ref)
-      //   continue;
-      // }
+      // Portals must be traversed outward
+      if (!insidePortal) {
+        console.debug('Portals must be traversed outward', distance, ref)
+        continue;
+      }
 
       // Portal out of group is visible, thus the destination group is visible
       destinationView.visible = true;

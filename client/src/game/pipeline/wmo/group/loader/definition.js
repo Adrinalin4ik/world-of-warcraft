@@ -63,7 +63,7 @@ class WMOGroupDefinition {
     for (let index = 0; index < vertexCount; ++index) {
       const vertex = movt.vertices[index];
       
-      attribute.set([-vertex[0], -vertex[1], vertex[2]], index * 3);
+      attribute.set([vertex[0], vertex[1], vertex[2]], index * 3);
     }
   }
 
@@ -79,7 +79,7 @@ class WMOGroupDefinition {
     for (let index = 0; index < vertexCount; ++index) {
       const normal = monr.normals[index];
 
-      attribute.set([-normal[0], -normal[1], normal[2]], index * 3);
+      attribute.set([normal[0], normal[1], normal[2]], index * 3);
     }
   }
 

@@ -145,6 +145,8 @@ class Controls extends React.Component<IProp, IUpdate> {
       if (spot) {
         this.unit.worldport(spot.zoneId, spot.coords);
         this.unit.rotation.set(spot.rotation[0], spot.rotation[1], spot.rotation[2])
+        this.camera.position.set(spot.coords[0], spot.coords[1], spot.coords[2])
+        this.camera.rotation.set(spot.rotation[0], spot.rotation[1], spot.rotation[2])
       }
       console.log('Coords has been restored')
     }
