@@ -23,7 +23,7 @@ class GameScreen extends React.Component {
   private debugRenderer: THREE.WebGLRenderer | null = null;
   private clock: THREE.Clock = new THREE.Clock();
   private game: Game = new Game();
-  private debug = true;
+  private debug = false;
   //refs
   private controls = React.createRef<Controls>()
   private debugPanel = React.createRef<DebugPanel>()

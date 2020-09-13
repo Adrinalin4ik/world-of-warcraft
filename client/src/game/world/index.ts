@@ -50,7 +50,7 @@ export default class World extends EventEmitter {
     // this.skybox.name = "Skybox"
     // this.scene.add(this.skybox);
 
-    const loadedSpot = null//localStorage.getItem("debugCoords");
+    const loadedSpot = localStorage.getItem("debugCoords");
     if (loadedSpot) {
       const spot: any = JSON.parse(loadedSpot);
       // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
@@ -64,11 +64,11 @@ export default class World extends EventEmitter {
       // const spot: any = spots[spots.length - 2]
       // const spot: any = spots.find(x => x.id === "dun murog")
       // const spot: any = spots.find(x => x.id === 2)
-      // const spot: any = spots.find(x => x.id === "stormwind")
+      const spot: any = spots.find(x => x.id === "stormwind")
       // const spot: any = spots.find(x => x.id === "ogrimar")
       // const spot: any = spots.find(x => x.id === "daggercap_bay");
       // const spot: any = spots.find(x => x.id === "north_bay");
-      const spot: any = spots.find(x => x.id === "naxramas");
+      // const spot: any = spots.find(x => x.id === "naxramas");
       // const spot: any = spots.find(x => x.id === "dalaran");
       this.player.worldport(spot.zoneId, spot.coords);
     }

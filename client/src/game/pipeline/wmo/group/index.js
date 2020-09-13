@@ -70,7 +70,7 @@ class WMOGroup {
     geometry.setAttribute('acolor', new THREE.BufferAttribute(colors, 4));
 
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    geometry.computeBoundingBox();
+    // geometry.computeBoundingBox();
     this.assignBatches(geometry, batches);
 
     return geometry;

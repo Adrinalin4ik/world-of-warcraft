@@ -527,7 +527,7 @@ class Unit extends Entity {
   }
 
   update(delta: number) {
-    // this.updateGroundDistance();
+    this.updateGroundDistance();
     this.updateMoving(delta);
     if (this.useGravity) {
       this.updateGravity(delta);
