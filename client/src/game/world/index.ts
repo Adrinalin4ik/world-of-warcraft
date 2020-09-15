@@ -61,15 +61,23 @@ export default class World extends EventEmitter {
         spot.rotation[2]
       );
     } else {
-      // const spot: any = spots[spots.length - 2]
-      // const spot: any = spots.find(x => x.id === "dun murog")
-      // const spot: any = spots.find(x => x.id === 2)
-      const spot: any = spots.find(x => x.id === "stormwind")
-      // const spot: any = spots.find(x => x.id === "ogrimar")
-      // const spot: any = spots.find(x => x.id === "daggercap_bay");
-      // const spot: any = spots.find(x => x.id === "north_bay");
-      // const spot: any = spots.find(x => x.id === "naxramas");
-      // const spot: any = spots.find(x => x.id === "dalaran");
+      // let spot: any = spots[spots.length - 2]
+      let spot: any = spots.find(x => x.id === "dun murog")
+      // let spot: any = spots.find(x => x.id === 2)
+      // let spot: any = spots.find(x => x.id === "stormwind")
+      // let spot: any = spots.find(x => x.id === "ogrimar")
+      // let spot: any = spots.find(x => x.id === "daggercap_bay");
+      // let spot: any = spots.find(x => x.id === "north_bay");
+      // let spot: any = spots.find(x => x.id === "naxramas");
+      // let spot: any = spots.find(x => x.id === "dalaran");
+
+      const lastLocation = localStorage.getItem("lastLocation");
+
+      if (lastLocation) {
+        spot = JSON.parse(lastLocation);
+        console.log(spot)
+      }
+
       this.player.worldport(spot.zoneId, spot.coords);
     }
   }

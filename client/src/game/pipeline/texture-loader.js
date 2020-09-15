@@ -1,4 +1,5 @@
 import { THREE } from 'enable3d';
+import gameSettings from '../settings';
 
 const loader = new THREE.TextureLoader();
 
@@ -9,7 +10,7 @@ class TextureLoader {
   static pendingUnload = new Set();
   static unloaderRunning = false;
 
-  static UNLOAD_INTERVAL = 5000;
+  static UNLOAD_INTERVAL = gameSettings.texture.unloadInterval;
 
   static load(rawPath, wrapS = THREE.RepeatWrapping, wrapT = THREE.RepeatWrapping, flipY = true) {
     const path = rawPath.toUpperCase();

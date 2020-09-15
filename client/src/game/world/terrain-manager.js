@@ -11,8 +11,11 @@ class TerrainManager {
 
   loadChunk(_index, terrain) {
     this.view.add(terrain);
-    ColliderManager.collidableMeshList.set(terrain.uuid, terrain);
+    
     terrain.updateMatrix();
+    terrain.updateWorldMatrix();
+
+    ColliderManager.collidableMeshList.set(terrain.uuid, terrain);
   }
 
   unloadChunk(_index, terrain) {

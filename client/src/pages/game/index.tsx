@@ -6,10 +6,14 @@ import Game from '../../game';
 import Controls from './controls/controls';
 import DebugPanel from './debug/debug';
 import Stats from 'stats-js';
+import * as Bowser from "bowser";
+import spots from '../../game/world/spots';
+
 interface IGameProps {}
 interface IGameScreenState {
   renderer: THREE.WebGLRenderer | null;
   game: Game | null;
+  currentLocation: string | number
 }
 
 
@@ -29,16 +33,22 @@ class GameScreen extends React.Component {
   private debugPanel = React.createRef<DebugPanel>()
   private stats: any = new Stats();
 
+  private isMobile: boolean = false;
+
   public state: IGameScreenState = {
     renderer: null,
-    game: null
+    game: null,
+    currentLocation: ''
   }
 
   constructor(props: IGameProps) {
     super(props);
+    const browser = Bowser.getParser(window.navigator.userAgent);
+    this.isMobile = browser.getPlatform().type === 'mobile';
 
     document.body.appendChild(this.stats.dom);
     this.stats.showPanel(0);
+    
     this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(15, 0, 7);
@@ -130,6 +140,13 @@ class GameScreen extends React.Component {
       this.stats.end();
     }
     
+    setLocation(locationId: string | number) {
+      const spot = spots.find(x => x.id === locationId);
+      if (spot) {
+        this.game.world.player.worldport(spot.zoneId, spot.coords);
+      }
+    }
+
     render() {
       const debugCanvas = this.debug ? 
       <canvas ref="debugCanvas" 
@@ -144,7 +161,20 @@ class GameScreen extends React.Component {
                   style={{position: this.debug ? "relative" : "absolute"}}></canvas>
           {debugCanvas}
           <Controls ref={this.controls} player={this.game.world.player} camera={this.camera} />
-          <DebugPanel ref="debugPanel" renderer={renderer} game={this.game}></DebugPanel>
+          { !this.isMobile && <DebugPanel ref="debugPanel" renderer={renderer} game={this.game}></DebugPanel>}
+          <select className="location_select" onChange={(e) => this.setLocation(e.target.value)}>
+            {
+              spots.map(x => {
+                return (
+                  <option 
+                    key={x.id}
+                    value={x.id}>
+                      {x.title}
+                  </option>
+                )
+              })
+            }
+          </select>
       </div>
     );
   }

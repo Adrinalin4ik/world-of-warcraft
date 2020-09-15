@@ -3,7 +3,6 @@ class WMORootDefinition {
   constructor(path, data) {
     this.path = path;
     this.rootID = data.MOHD.rootID;
-
     this.header = {
       flags: data.MOHD.flags,
       ambientColor: data.MOHD.ambientColor

@@ -3,16 +3,19 @@ import WMORootLoader from './root/loader';
 import WMOGroupLoader from './group/loader';
 import M2Blueprint from '../m2/blueprint';
 import ColliderManager from '../../world/collider-manager';
+
+import gameSettings from '../../settings';
+
 import * as THREE from 'three';
 class WMO {
 
-  static LOAD_GROUP_INTERVAL = 1;
-  static LOAD_GROUP_WORK_FACTOR = 1 / 10;
-  static LOAD_GROUP_WORK_MIN = 2;
+  static LOAD_GROUP_INTERVAL = gameSettings.wmo.group.loadInterval;
+  static LOAD_GROUP_WORK_FACTOR = gameSettings.wmo.group.workFactor;
+  static LOAD_GROUP_WORK_MIN = gameSettings.wmo.group.loadMin;
 
-  static LOAD_DOODAD_INTERVAL = 1;
-  static LOAD_DOODAD_WORK_FACTOR = 1 / 20;
-  static LOAD_DOODAD_WORK_MIN = 2;
+  static LOAD_DOODAD_INTERVAL = gameSettings.wmo.doodad.loadInterval;
+  static LOAD_DOODAD_WORK_FACTOR = gameSettings.wmo.doodad.workFactor;
+  static LOAD_DOODAD_WORK_MIN = gameSettings.wmo.doodad.loadMin;
 
   constructor(filename, doodadSetIndex = null, entryID = null, parentCounters = null) {
     this.filename = filename;

@@ -1,5 +1,6 @@
 import WorkerPool from '../../../worker/pool';
 import WMORoot from '../';
+import gameSettings from '../../../../settings';
 
 class WMORootLoader {
 
@@ -9,7 +10,7 @@ class WMORootLoader {
   static pendingUnload = new Set();
   static unloaderRunning = false;
 
-  static UNLOAD_INTERVAL = 5000;
+  static UNLOAD_INTERVAL = gameSettings.wmo.root.unloadInterval;
 
   static load(rawPath) {
     const path = rawPath.toUpperCase();

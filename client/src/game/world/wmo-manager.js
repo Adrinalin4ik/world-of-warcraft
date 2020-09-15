@@ -1,13 +1,14 @@
 import ContentQueue from '../utils/content-queue';
 import WMO from '../pipeline/wmo';
+import gameSettings from '../settings';
 
 class WMOManager {
 
-  static LOAD_ENTRY_INTERVAL = 1;
-  static LOAD_ENTRY_WORK_FACTOR = 1 / 10;
-  static LOAD_ENTRY_WORK_MIN = 2;
+  static LOAD_ENTRY_INTERVAL = gameSettings.wmo.loadInterval;
+  static LOAD_ENTRY_WORK_FACTOR = gameSettings.wmo.loadFactor;
+  static LOAD_ENTRY_WORK_MIN = gameSettings.wmo.loadMin;
 
-  static UNLOAD_DELAY_INTERVAL = 1000;
+  static UNLOAD_DELAY_INTERVAL = gameSettings.wmo.unloadDelay;
 
   constructor(view, zeropoint) {
     this.view = view;

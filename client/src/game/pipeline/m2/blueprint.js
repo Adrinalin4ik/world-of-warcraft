@@ -1,6 +1,8 @@
 import WorkerPool from '../worker/pool';
 import M2 from './';
 import ColliderManager from '../../world/collider-manager';
+import gameSettings from '../../settings';
+
 class M2Blueprint {
 
   static cache = new Map();
@@ -10,7 +12,7 @@ class M2Blueprint {
   static pendingUnload = new Set();
   static unloaderRunning = false;
 
-  static UNLOAD_INTERVAL = 1000;
+  static UNLOAD_INTERVAL = gameSettings.m2.unloadInterval;
 
   static load(rawPath) {
     const path = rawPath.replace(/\.md(x|l)/i, '.m2').toUpperCase();

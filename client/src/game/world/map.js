@@ -10,6 +10,8 @@ import TerrainManager from './terrain-manager';
 import VisibilityManager from './visibility-manager';
 import LocationManager from './location-manager';
 import WorldLight from './light';
+import gameSettings from '../settings';
+
 class WorldMap extends THREE.Group {
 
   static ZEROPOINT = ADT.SIZE * 32;
@@ -17,7 +19,7 @@ class WorldMap extends THREE.Group {
   static CHUNKS_PER_ROW = 64 * 16;
 
   // Controls when ADT chunks are loaded and unloaded from the map.
-  static CHUNK_RENDER_RADIUS = 1;
+  static CHUNK_RENDER_RADIUS = gameSettings.world.render.radius;
 
   constructor(data, wdt) {
     super();

@@ -1,6 +1,8 @@
 import WorkerPool from '../../../worker/pool';
 import WMOGroup from '../';
 import ColliderManager from '../../../../world/collider-manager';
+import gameSettings  from '../../../../settings';
+
 class WMOGroupLoader {
 
   static cache = new Map();
@@ -9,7 +11,7 @@ class WMOGroupLoader {
   static pendingUnload = new Set();
   static unloaderRunning = false;
 
-  static UNLOAD_INTERVAL = 15000;
+  static UNLOAD_INTERVAL = gameSettings.wmo.unloadInterval;
 
   static load(root, index, rawPath) {
     const path = rawPath.toUpperCase();

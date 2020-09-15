@@ -1,15 +1,16 @@
 import M2Blueprint from '../pipeline/m2/blueprint';
+import gameSettings from '../settings';
 
 class DoodadManager {
 
   // Proportion of pending doodads to load or unload in a given tick.
-  static LOAD_FACTOR = 1 / 40;
+  static LOAD_FACTOR = gameSettings.doodad.loadFactor;
 
   // Minimum number of pending doodads to load or unload in a given tick.
-  static MINIMUM_LOAD_THRESHOLD = 2;
+  static MINIMUM_LOAD_THRESHOLD = gameSettings.doodad.loadMin;
 
   // Number of milliseconds to wait before loading another portion of doodads.
-  static LOAD_INTERVAL = 1;
+  static LOAD_INTERVAL = gameSettings.doodad.loadInterval;
 
   constructor(map, zeropoint) {
     this.map = map;

@@ -1,25 +1,24 @@
 import React from 'react';
-// import { THREE } from 'enable3d';
 import { THREE } from 'enable3d';
 import key from 'keymaster';
 import Player from '../../../game/classes/player';
+import JoyStick from 'react-joystick';
 
+const joyOptions = {
+  mode: 'semi',
+  catchDistance: 150,
+  color: 'white'
+};
 
-// const joyOptions = {
-//   mode: 'semi',
-//   catchDistance: 150,
-//   color: 'white'
-// };
-
-// const containerStyle = {
-//   position: 'fixed',
-//   height: '50%',
-//   width: '20%',
-//   bottom: 0,
-//   left: 0,
-//   zIndex: 10,
-//   background: 'transparent'
-// };
+const containerStyle = {
+  position: 'fixed',
+  height: '50%',
+  width: '20%',
+  bottom: 0,
+  left: 0,
+  zIndex: 10,
+  background: 'transparent'
+};
 
 enum Key {
   space = 32,
@@ -74,11 +73,14 @@ class Controls extends React.Component<IProp, IUpdate> {
 
   private EPS: number = 0.000001;
 
-  private isRun: boolean = false;
+  private moveForward: boolean = false;
+  private moveBackward: boolean = false;
+  private moveLeft: boolean = false;
+  private moveRight: boolean = false;
+  private currentDireciton: string | null = null;
 
   constructor(props: IProp) {
     super(props);
-
     this.unit = props.player;
     this.camera = props.camera;
     console.log('Camera', this.camera);
@@ -90,6 +92,7 @@ class Controls extends React.Component<IProp, IUpdate> {
     );
 
     this.quatInverse = this.quat.clone().inverse();
+    this.managerListener = this.managerListener.bind(this);
 
     this.element.addEventListener('mousedown', this._onMouseDown.bind(this));
     this.element.addEventListener('mouseup', this._onMouseUp.bind(this));
@@ -97,10 +100,9 @@ class Controls extends React.Component<IProp, IUpdate> {
     this.element.addEventListener('mousewheel', this._onMouseWheel.bind(this));
     document.addEventListener('keydown', this._onKeyDown.bind(this));
     document.addEventListener('keyup', this._onKeyUp.bind(this));
-    
-    // this.element.addEventListener('touchstart', this._onTouchStart.bind(this));
-    // this.element.addEventListener('touchend', this._onTouchEnd.bind(this));
-    // this.element.addEventListener('touchmove', this._onTouchMove.bind(this));
+    this.element.addEventListener('touchstart', this._onTouchStart.bind(this));
+    this.element.addEventListener('touchend', this._onTouchEnd.bind(this));
+    this.element.addEventListener('touchmove', this._onTouchMove.bind(this));
 
     // Firefox scroll-wheel support
     this.element.addEventListener('DOMMouseScroll', this._onMouseWheel.bind(this));
@@ -118,13 +120,12 @@ class Controls extends React.Component<IProp, IUpdate> {
     document.removeEventListener('keydown', this._onKeyDown.bind(this));
     document.removeEventListener('keyup', this._onKeyUp.bind(this));
     
-    // this.element.removeEventListener('touchstart', this._onTouchDown.bind(this));
-    // this.element.removeEventListener('touchend', this._onTouchEnd.bind(this));
-    // this.element.removeEventListener('touchmove', this._onTouchMove.bind(this));
+    this.element.removeEventListener('touchstart', this._onTouchStart.bind(this));
+    this.element.removeEventListener('touchend', this._onTouchEnd.bind(this));
+    this.element.removeEventListener('touchmove', this._onTouchMove.bind(this));
 
     this.element.removeEventListener('contextmenu', this._onContextMenu.bind(this));
 
-    this.isRun = false;
   }
 
   _onKeyDown(event: KeyboardEvent) {
@@ -173,16 +174,41 @@ class Controls extends React.Component<IProp, IUpdate> {
     return false;
   }
 
-  // managerListener(manager) {
-  //   manager.on('move', (e, stick) => {
-  //     // console.log('I moved!')
-  //     this.isRun = true;
-  //   })
-  //   manager.on('end', () => {
-  //     // console.log('I ended!')
-  //     this.isRun = false;
-  //   })
-  // }
+  managerListener(manager: any) {
+    manager.on('move', (e: any, stick: any) => {
+      const diration = stick.direction?.angle;
+      if (this.currentDireciton !== diration) {
+        this.moveForward = false;
+        this.moveBackward = false;
+        this.moveLeft = false;
+        this.moveRight = false;
+      }
+
+      this.moveForward = true;
+      // switch(diration) {
+      //   case 'up':
+      //     this.moveForward = true;
+      //     break;
+      //   case 'down':
+      //     this.moveBackward = true;
+      //     break;
+      //   case 'left':
+      //     this.moveLeft = true;
+      //     break;
+      //   case 'right':
+      //     this.moveRight = true;
+      //     break;
+      // }
+      this.currentDireciton = diration
+    })
+    manager.on('end', () => {
+      this.moveForward = false;
+      this.moveBackward = false;
+      this.moveLeft = false;
+      this.moveRight = false;
+      this.currentDireciton = null;
+    })
+  }
 
   public update(delta: number) {
     const unit = this.unit;
@@ -196,19 +222,19 @@ class Controls extends React.Component<IProp, IUpdate> {
         unit.isFly = !unit.isFly;
       }
       
-      if (key.isPressed('up') || key.isPressed('w') || this.isRun) {
+      if (key.isPressed('up') || key.isPressed('w') || this.moveForward) {
         unit.moveForward(delta);
       }
 
-      if (key.isPressed('down') || key.isPressed('s')) {
+      if (key.isPressed('down') || key.isPressed('s') || this.moveBackward) {
         unit.moveBackward(delta);
       }
 
-      if (key.isPressed('q')) {
+      if (key.isPressed('q') || this.moveLeft) {
         unit.strafeLeft(delta);
       }
 
-      if (key.isPressed('e')) {
+      if (key.isPressed('e') || this.moveRight) {
         unit.strafeRight(delta);
       }
 
@@ -266,6 +292,8 @@ class Controls extends React.Component<IProp, IUpdate> {
 
     position.copy(this.target).add(this.offset);
     this.camera.lookAt(this.target);
+    
+    this.unit.view.rotateZ(this.thetaDelta);
 
     this.thetaDelta = 0;
     this.phiDelta = 0;
@@ -298,7 +326,7 @@ class Controls extends React.Component<IProp, IUpdate> {
   }
 
   _onTouchMove(event: TouchEvent) {
-    if (this.rotating) {
+    if (this.rotating && event.touches.length >= 1) {
       event.preventDefault();
 
       this.rotateEnd.set(event.touches[0].clientX, event.touches[0].clientY);
@@ -308,12 +336,12 @@ class Controls extends React.Component<IProp, IUpdate> {
         2 * Math.PI * this.rotateDelta.x / this.element.clientWidth * this.rotateSpeed
       );
       
-      if (event.touches.length === 1) {
-        this.unit.view.rotateZ(this.thetaDelta);
-      }
+      // if (event.touches.length === 1) {
+        // this.unit.view.rotateZ(this.thetaDelta);
+      // }
 
       this.rotateVertically(
-        2 * Math.PI * this.rotateDelta.y / this.element.clientHeight * this.rotateSpeed
+        2 * Math.PI * this.rotateDelta.y / this.element.clientHeight * this.rotateSpeed / 40
       );
 
       this.rotateStart.copy(this.rotateEnd);
@@ -347,7 +375,7 @@ class Controls extends React.Component<IProp, IUpdate> {
       );
       
       if (event.which === 3) {
-        this.unit.view.rotateZ(this.thetaDelta);
+        // this.unit.view.rotateZ(this.thetaDelta);
         // let temp = (this.camera.rotation.x * this.camera.rotation.y);
         // console.log(temp);
         // if (temp < 0.5 && temp > 0) {
@@ -378,7 +406,7 @@ class Controls extends React.Component<IProp, IUpdate> {
   render() {
     return (
       <div className="controls">
-        {/* <JoyStick joyOptions={joyOptions} containerStyle={containerStyle} managerListener={this.managerListener} /> */}
+        <JoyStick joyOptions={joyOptions} containerStyle={containerStyle} managerListener={this.managerListener} />
       </div>
     );
   }

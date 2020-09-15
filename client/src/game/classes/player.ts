@@ -13,13 +13,17 @@ class Player extends Unit {
     (window as any).player = this;
   }
 
-  worldport(mapId: number, coord: Array<number>) {
-    this.changePosition({x: coord[0], y: coord[1], z: coord[2]});
+  worldport(mapId: number, coords: Array<number>) {
+    this.changePosition({ x: coords[0], y: coords[1], z: coords[2] });
     if (!this.mapId || this.mapId !== mapId) {
       this.mapId = mapId;
       this.emit('map:change', mapId);
+      localStorage.setItem('lastLocation', JSON.stringify({
+        zoneId: mapId,
+        coords
+      }));
     }
-    this.emit('position:change', this.position);
+    this.emit('position:change', this.position, this.view.rotation);
   }
 
 }

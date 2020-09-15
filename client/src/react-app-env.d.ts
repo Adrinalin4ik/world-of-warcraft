@@ -66,6 +66,7 @@ declare module '*.module.sass' {
 
 
 declare module 'easy-mediasoup-v3-client';
+declare module 'react-joystick';
 // Type definitions for Physijs
 // Project: http://chandlerprall.github.io/Physijs/
 // Definitions by: Satoru Kimura <https://github.com/gyohk>
