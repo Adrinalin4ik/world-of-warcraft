@@ -1,4 +1,4 @@
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 import ArrayUtil from './array-util';
 
 export default function geometryToBufferGeometry( geometry ) {

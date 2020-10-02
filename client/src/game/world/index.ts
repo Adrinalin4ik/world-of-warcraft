@@ -1,5 +1,5 @@
 // import * as THREE from "three";
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 import Player from "../classes/player";
 import spots from "./spots";
 import Unit from "../classes/unit";

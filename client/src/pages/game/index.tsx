@@ -1,6 +1,6 @@
 import React from 'react';
-// import { THREE } from 'enable3d';
-import { THREE } from 'enable3d';
+// import * as THREE from 'three';
+import * as THREE from 'three';
 import './index.scss';
 import Game from '../../game';
 import Controls from './controls/controls';

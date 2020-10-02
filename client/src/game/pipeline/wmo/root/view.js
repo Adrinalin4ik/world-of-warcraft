@@ -1,4 +1,4 @@
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 
 class WMORootView extends THREE.Group {
 

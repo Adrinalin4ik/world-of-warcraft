@@ -1,4 +1,4 @@
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 
 import WMORootFlags from '../root/flags';
 import WMOGroupView from './view';

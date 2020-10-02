@@ -1,4 +1,4 @@
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 // import * as THREE from 'three'
 import TextureLoader from '../../texture-loader';
 import fragmentShader from './shader.frag';

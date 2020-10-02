@@ -1,5 +1,5 @@
 // import * as THREE from "three";
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 import DBC from "../pipeline/dbc";
 import Entity from "./entity";
 import M2Blueprint from "../pipeline/m2/blueprint";
@@ -527,7 +527,7 @@ class Unit extends Entity {
   }
 
   update(delta: number) {
-    this.updateGroundDistance();
+    // this.updateGroundDistance();
     this.updateMoving(delta);
     if (this.useGravity) {
       this.updateGravity(delta);

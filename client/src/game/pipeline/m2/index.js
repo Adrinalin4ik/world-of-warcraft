@@ -1,5 +1,5 @@
 import * as THREE_NATIVE from 'three';
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 import Submesh from './submesh';
 import M2Material from './material';
 import AnimationManager from './animation-manager';

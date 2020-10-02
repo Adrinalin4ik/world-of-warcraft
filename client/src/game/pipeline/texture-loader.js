@@ -1,4 +1,4 @@
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 import gameSettings from '../settings';
 
 const loader = new THREE.TextureLoader();

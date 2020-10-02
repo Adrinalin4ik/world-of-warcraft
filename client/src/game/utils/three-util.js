@@ -1,4 +1,4 @@
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 import {vec4, vec3} from 'gl-matrix';
 
 class THREEUtil {

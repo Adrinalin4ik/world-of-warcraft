@@ -1,5 +1,5 @@
 import React from 'react';
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 import key from 'keymaster';
 import Player from '../../../game/classes/player';
 import JoyStick from 'react-joystick';

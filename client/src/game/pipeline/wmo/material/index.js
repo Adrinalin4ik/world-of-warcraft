@@ -1,4 +1,4 @@
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 
 import TextureLoader from '../../texture-loader';
 import vertexShader from './shader.vert';

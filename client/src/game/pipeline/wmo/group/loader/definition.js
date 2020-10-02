@@ -3,6 +3,7 @@ import MathUtil from '../../../../utils/math-util';
 class WMOGroupDefinition {
 
   constructor(path, index, rootHeader, groupData) {
+    // console.log(groupData.MLIQ)
     this.path = path;
     this.index = index;
     this.groupID = groupData.MOGP.groupID;

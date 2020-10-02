@@ -1,5 +1,5 @@
 import EventEmitter from 'events';
-import { THREE } from 'enable3d';
+import * as THREE from 'three';
 
 class AnimationManager extends EventEmitter {
 
