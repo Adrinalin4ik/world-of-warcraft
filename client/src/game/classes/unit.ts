@@ -425,18 +425,18 @@ class Unit extends Entity {
   }
 
   applyTranslatePosition() {
-    this.view.translateX(this.tmpVector.x);
-    this.view.translateY(this.tmpVector.y);
-    this.view.translateZ(this.tmpVector.z);
-    this.tmpVector.set(0, 0, 0);
+    if (this.tmpVector.x !== 0 ||
+        this.tmpVector.y !== 0 ||
+        this.tmpVector.z !== 0 ) {
 
-    if (
-      this.prevPosition.x !== this.position.x ||
-      this.prevPosition.y !== this.position.y ||
-      this.prevPosition.z !== this.position.z
-    ) {
+      this.view.translateX(this.tmpVector.x);
+      this.view.translateY(this.tmpVector.y);
+      this.view.translateZ(this.tmpVector.z);
+      this.tmpVector.set(0, 0, 0);
+      
       this.emit("position:change", this.position, this.view.rotation);
     }
+
   }
 
   updateGroundDistance() {

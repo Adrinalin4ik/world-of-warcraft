@@ -64,6 +64,7 @@ class GameScreen extends React.Component {
     this.renderer = new THREE.WebGLRenderer({
       alpha: true,
       antialias: false,
+      stencil: false,
       powerPreference: 'high-performance',
       canvas: this.refs.canvas as HTMLCanvasElement
     });

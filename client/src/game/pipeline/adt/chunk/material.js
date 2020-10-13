@@ -17,7 +17,6 @@ class Material extends THREE.ShaderMaterial {
     this.fragmentShader = fragmentShader;
 
     this.side = THREE.BackSide;
-
     this.layerCount = 0;
     this.textures = [];
     this.alphaMaps = [];
