@@ -118,6 +118,16 @@ var MOBR = (0, _chunk2.default)({
   indices: new _restructure2.default.Array(_restructure2.default.int16le, 'size', 'bytes')
 });
 
+// const MLIQ = Chunk({
+//   xverts: r.uint32le,
+//   yverts: r.uint32le,
+//   xtiles: r.uint32le,
+//   ytiles: r.uint32le,
+//   x: Vec3Float,
+//   y: Vec3Float,
+//   materialId: r.uint32le
+// });
+
 exports.default = (0, _chunked2.default)({
   MOGP: MOGP,
   MOPY: MOPY,
@@ -146,7 +156,9 @@ exports.default = (0, _chunked2.default)({
   MOCV: new _restructure2.default.Optional(MOCV, function () {
     return this.flags & 0x4;
   }),
-
+  // MLIQ: new r.Optional(MLIQ, function() {
+  //   return this.flags & 0x2;
+  // }),
   interior: function () {
     return (this.flags & 0x2000) !== 0 && (this.flags & 0x8) === 0;
   }
