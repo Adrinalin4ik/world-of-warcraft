@@ -3,6 +3,46 @@
 /// <reference types="react-dom" />
 /// <reference types="three" />
 
+declare module 'browserify-zlib';
+
+declare module 'byte-buffer' {
+  export default class ByteBuffer {
+    static HEADER_SIZE: number;
+    static LITTLE_ENDIAN: number;
+    static BIG_ENDIAN: number;
+    constructor(source?:ArrayBuffer, order?: number, implicitGrowth?: boolean)
+    buffer: ArrayBuffer;
+    view: NodeJS.ArrayBufferView;
+    raw: Uint8Array[];
+    readByte(order?):number;
+    readUnsignedByte(order?):number;
+    readShort(order?):number;
+    readUnsignedShort(order?):number;
+    readInt(order?):number;
+    readUnsignedInt(order?):number;
+    readFloat(order?):number;
+    readDouble(order?):number;
+    readCString(order?):number;
+    writeByte():number;
+    writeUnsignedByte():number;
+    writeUnsignedByte():number;
+    writeShort():number;
+    writeUnsignedShort():number;
+    writeInt():number;
+    writeUnsignedInt():number;
+    writeFloat():number;
+    writeDouble():number;
+    writeCString(str: string): number;
+    toHex(spacer: string):string;
+    toASCII(spacer: string, align: boolean, unknown: string):string;
+    clone(): ByteBuffer;
+    clip(begin: number, end: number): ByteBuffer;
+    append(bytes: number): ByteBuffer;
+    read(method: string, bytes?: number): ByteBuffer;
+    length: number;
+  }
+}
+
 declare namespace NodeJS {
   interface ProcessEnv {
     readonly NODE_ENV: 'development' | 'production' | 'test';

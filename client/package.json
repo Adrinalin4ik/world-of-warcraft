@@ -6,7 +6,10 @@
     "start": "PORT=3001 DANGEROUSLY_DISABLE_HOST_CHECK=true node scripts/start.js",
     "build": "node scripts/build.js",
     "test": "node scripts/test.js",
-    "build:beta": "NODE_ENV=production npm run build"
+    "build:beta": "NODE_ENV=production npm run build",
+    "proxy": "node websockify.js",
+    "proxy1": "npm run proxy 3724 logon.nw-wow.ru:3724",
+    "proxy2": "npm run proxy 8086 95.181.139.52:8086"
   },
   "dependencies": {
     "@babel/core": "7.7.4",
@@ -29,7 +32,10 @@
     "babel-loader": "8.0.6",
     "babel-plugin-named-asset-import": "^0.3.5",
     "babel-preset-react-app": "^9.1.0",
+    "bitset": "^5.1.1",
     "bowser": "^2.11.0",
+    "browserify-zlib": "^0.2.0",
+    "byte-buffer": "^2.0.0",
     "camelcase": "^5.3.1",
     "case-sensitive-paths-webpack-plugin": "2.2.0",
     "css-loader": "3.2.0",
@@ -56,11 +62,16 @@
     "jest-environment-jsdom-fourteen": "0.1.0",
     "jest-resolve": "24.9.0",
     "jest-watch-typeahead": "0.4.2",
+    "jsbn": "timkurvers/jsbn.git#wowser",
     "keymaster": "^1.6.2",
     "mini-css-extract-plugin": "0.8.0",
+    "minizlib": "^2.1.2",
+    "normalize.css": "^8.0.1",
+    "optimist": "^0.6.1",
     "optimize-css-assets-webpack-plugin": "5.0.3",
     "physijs-webpack": "^0.1.4",
     "pnp-webpack-plugin": "1.5.0",
+    "policyfile": "0.0.6",
     "postcss-flexbugs-fixes": "4.1.0",
     "postcss-loader": "3.0.0",
     "postcss-normalize": "8.0.1",
@@ -87,7 +98,8 @@
     "webpack": "4.41.2",
     "webpack-dev-server": "3.9.0",
     "webpack-manifest-plugin": "2.2.0",
-    "workbox-webpack-plugin": "4.3.1"
+    "workbox-webpack-plugin": "4.3.1",
+    "zlib": "^1.0.5"
   },
   "eslintConfig": {
     "extends": "react-app"

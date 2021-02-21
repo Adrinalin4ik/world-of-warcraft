@@ -5,6 +5,7 @@ import Entity from "./entity";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import ColliderManager from "../world/collider-manager";
 import M2 from "../pipeline/m2";
+import { Vector3 } from 'three';
 
 enum SlopeType {
   sliding,
@@ -98,7 +99,12 @@ class Unit extends Entity {
     100,
     0x8888ff
   );
+  
 
+  private currentMovingTime: number = 0;
+  private totalMovingTime: number = 0;
+  private spline: THREE.CatmullRomCurve3 | null = null;
+  
   constructor(guid: string) {
     super();
     (window as any).collider = ColliderManager;
@@ -114,7 +120,7 @@ class Unit extends Entity {
     this.currentAnimationIndex = 0;
 
     // this.view.add(this.collider);
-    this.view.add(this.arrow);
+    // this.view.add(this.arrow);
   }
 
   get isOnGround() {
@@ -474,6 +480,7 @@ class Unit extends Entity {
       !this.isJump &&
       !this.isMoving;
 
+      
     if (true) {
       if (this.moving.forward) {
         this.translatePosition({ x: this.moveSpeed * delta });
@@ -529,6 +536,7 @@ class Unit extends Entity {
   update(delta: number) {
     // this.updateGroundDistance();
     this.updateMoving(delta);
+    this.updateSplineFollowing(delta);
     if (this.useGravity) {
       this.updateGravity(delta);
     }
@@ -572,6 +580,41 @@ class Unit extends Entity {
     } else {
       this.updateGroundFollow(delta);
     }
+  }
+
+  updateSplineFollowing(delta: number) {
+    if (!this.spline) return;
+    // console.log('spline', this.spline)
+    const currentTime = (this.currentMovingTime + delta / this.totalMovingTime);
+    if (currentTime >= 1) {
+      // this.currentMovingTime = 0;
+      return;
+    }
+    const pos = this.spline?.getPoint(currentTime);
+    // this.view.lookAt(new THREE.Vector3(pos.x, pos.y, pos.z));
+    // this.view.rotateX(this.view.rotation.x +  180 * Math.PI / 180); // to radians
+    // this.view.rotateY(this.view.rotation.y -  Math.PI / 2); // to radians
+    // this.view.rotateZ(this.view.rotation.z +  180 * Math.PI / 180); // to radians
+    this.position.set(
+      pos?.x,
+      pos?.y,
+      pos?.z
+    )
+    
+
+    this.currentMovingTime += (delta / this.moveSpeed / 4);
+  }
+
+  setMovingData(currentMovingTime: number, totalMovingTime: number, points: Vector3[]) {
+    this.currentMovingTime = currentMovingTime;
+    this.totalMovingTime = totalMovingTime;
+
+    if (!points.length) {
+      return;
+    }
+
+    this.spline = new THREE.CatmullRomCurve3(points, false, 'chordal');
+    console.log('splines', this.spline);
   }
 }
 

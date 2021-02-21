@@ -9,11 +9,15 @@ import {
   Route,
   Link
 } from "react-router-dom";
+import { GameSession } from './network/session';
+import RealmsScreen from './pages/realms/realms';
+import CharactersScreen from './pages/characters';
+const gameSession = new GameSession();
 
 const App: React.FC = () => {
   return (
     <Router>
-      <div>
+      <div className="wowser">
         <nav>
           <ul>
             <li>
@@ -25,20 +29,21 @@ const App: React.FC = () => {
         {/* A <Switch> looks through its children <Route>s and
             renders the first one that matches the current URL. */}
         <Switch>
-          <Route path="/auth">
-            <Auth />
+          
+          <Route path="/realms">
+            <RealmsScreen session={gameSession}/>
           </Route>
-          <Route path="/realm">
-            <div>realm select</div>
-          </Route>
-          <Route path="/characters-list">
-            <div>character list</div>
+          <Route path="/characters">
+            <CharactersScreen session={gameSession} />
           </Route>
           <Route path="/create-character">
             <div>create character</div>
           </Route>
+          <Route path="/game">
+            <GameScreen session={gameSession} />
+          </Route>
           <Route path="/">
-            <GameScreen />
+            <Auth session={gameSession} />
           </Route>
         </Switch>
       </div>

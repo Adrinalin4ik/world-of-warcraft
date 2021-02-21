@@ -7,29 +7,42 @@ import Unit from "../classes/unit";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import WorldMap from "./map";
 import { EventEmitter } from "events";
-
+import { GameSession } from '../../network/session';
+import { GameHandler } from '../../network/game/handler';
 export default class World extends EventEmitter {
   public scene: THREE.Scene;
   public debugScene: THREE.Scene;
   public player: Player;
   public entities: Map<string, Unit> = new Map();
   public map: WorldMap | null = null;
-  // private skybox: THREE.Mesh;
-  constructor() {
-    super();
+  public session: GameSession;
+  public game: GameHandler;
 
+  // private skybox: THREE.Mesh;
+  constructor(game: GameHandler) {
+    super();
+    console.log(game)
+    console.log('WORLD GAME', game)
     this.scene = new THREE.Scene();
     this.scene.matrixAutoUpdate = false;
     this.debugScene = new THREE.Scene();
     this.debugScene.matrixAutoUpdate = false;
 
-    this.entities = new Map();
+    this.game = game;
+    this.session = game.session;
+    this.player = this.session.player;
 
-    this.player = new Player("-1", "TestName");
-    this.add(this.player);
     this.player.on("map:change", this.changeMap.bind(this));
     this.player.on("position:change", this.changePosition.bind(this));
+  }
 
+  run() {
+    this.add(this.player);
+    // if (this.game.authenticated) {
+    //   this.player = this.session.player;
+    // }
+
+    this.player.worldport(this.player.mapId, [this.player.x, this.player.y, this.player.z]);
     // var geometry = new THREE.CubeGeometry(1000, 1000, 1000);
     // var cubeMaterials = [
     //   new THREE.MeshBasicMaterial({ map: new THREE.TextureLoader().load('/yonder_ft.jpg'), side: THREE.DoubleSide }), //front side
@@ -49,36 +62,37 @@ export default class World extends EventEmitter {
     // );
     // this.skybox.name = "Skybox"
     // this.scene.add(this.skybox);
+    if (!this.session.game.authenticated) {
+      const loadedSpot = localStorage.getItem("debugCoords");
+      if (loadedSpot) {
+        const spot: any = JSON.parse(loadedSpot);
+        // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
+        this.player.worldport(spot.zoneId, spot.coords);
+        this.player.rotation.set(
+          spot.rotation[0],
+          spot.rotation[1],
+          spot.rotation[2]
+        );
+      } else {
+        // let spot: any = spots[spots.length - 2]
+        let spot: any = spots.find(x => x.id === "dun murog")
+        // let spot: any = spots.find(x => x.id === 2)
+        // let spot: any = spots.find(x => x.id === "stormwind")
+        // let spot: any = spots.find(x => x.id === "ogrimar")
+        // let spot: any = spots.find(x => x.id === "daggercap_bay");
+        // let spot: any = spots.find(x => x.id === "north_bay");
+        // let spot: any = spots.find(x => x.id === "naxramas");
+        // let spot: any = spots.find(x => x.id === "dalaran");
 
-    const loadedSpot = localStorage.getItem("debugCoords");
-    if (loadedSpot) {
-      const spot: any = JSON.parse(loadedSpot);
-      // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
-      this.player.worldport(spot.zoneId, spot.coords);
-      this.player.rotation.set(
-        spot.rotation[0],
-        spot.rotation[1],
-        spot.rotation[2]
-      );
-    } else {
-      // let spot: any = spots[spots.length - 2]
-      let spot: any = spots.find(x => x.id === "dun murog")
-      // let spot: any = spots.find(x => x.id === 2)
-      // let spot: any = spots.find(x => x.id === "stormwind")
-      // let spot: any = spots.find(x => x.id === "ogrimar")
-      // let spot: any = spots.find(x => x.id === "daggercap_bay");
-      // let spot: any = spots.find(x => x.id === "north_bay");
-      // let spot: any = spots.find(x => x.id === "naxramas");
-      // let spot: any = spots.find(x => x.id === "dalaran");
+        const lastLocation = localStorage.getItem("lastLocation");
 
-      const lastLocation = localStorage.getItem("lastLocation");
+        if (lastLocation) {
+          spot = JSON.parse(lastLocation);
+          console.log(spot)
+        }
 
-      if (lastLocation) {
-        spot = JSON.parse(lastLocation);
-        console.log(spot)
+        this.player.worldport(spot.zoneId, spot.coords);
       }
-
-      this.player.worldport(spot.zoneId, spot.coords);
     }
   }
 
@@ -125,7 +139,7 @@ export default class World extends EventEmitter {
   }
 
   changeModel(_unit: Unit, _oldModel: Unit, _newModel: Unit) {
-    console.log("Model change", _unit, _oldModel, _newModel);
+    // console.log("Model change", _unit, _oldModel, _newModel);
   }
 
   changePosition(position: THREE.Vector3, _rotation: THREE.Vector3) {

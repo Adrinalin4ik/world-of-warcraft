@@ -1,33 +1,18 @@
 import React from 'react';
-import Game from '../../../game';
+import { GameHandler } from '../../../network/game/handler';
 import './debug.scss';
 
 interface IProp {
-  game: Game | null,
+  game: GameHandler | null,
   renderer: THREE.WebGLRenderer | null
 }
 
 class DebugPanel extends React.Component<IProp> {
 
-  private game: Game | null;
-  private renderer: THREE.WebGLRenderer | null;
-  
+
   private static test1: string = "";
   private static test2: string = "";
   private static test3: string = "";
-
-  constructor(props: IProp) {
-    super(props);
-    this.game = props.game;
-    this.renderer = props.renderer;
-    console.log("Debug component", this)
-  }
-
-  getSnapshotBeforeUpdate(prevProps:IProp, _prevState:any) {
-    this.renderer = prevProps.renderer;
-    this.game = prevProps.game;
-    return null;
-  }
 
   static vector3ToString(v: {x: number, y: number, z: number}) {
     return `${v.x}, ${v.y}, ${v.z}`
@@ -43,8 +28,8 @@ class DebugPanel extends React.Component<IProp> {
   }
 
   playerStats() {
-    if (!this.game) return;
-    const player = this.game.world.player;
+    if (!this.props.game) return;
+    const player = this.props.game.world.player;
     
     return (
       <div>
@@ -112,9 +97,9 @@ class DebugPanel extends React.Component<IProp> {
   }
 
   mapStats() {
-    if (!this.game) return;
+    if (!this.props.game) return;
 
-    const map = this.game.world.map;
+    const map = this.props.game.world.map;
 
     return (
       <div>
@@ -172,11 +157,11 @@ class DebugPanel extends React.Component<IProp> {
   }
 
   render() {
-    if (!this.game || !this.renderer) return null;
+    if (!this.props.game || !this.props.renderer) return null;
 
-    const renderer = this.renderer;
+    const renderer = this.props.renderer;
 
-    const map = this.game.world.map;
+    const map = this.props.game.world.map;
 
     const { memory, programs } = renderer.info;
     return (

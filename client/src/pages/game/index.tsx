@@ -2,22 +2,24 @@ import React from 'react';
 // import * as THREE from 'three';
 import * as THREE from 'three';
 import './index.scss';
-import Game from '../../game';
 import Controls from './controls/controls';
 import DebugPanel from './debug/debug';
 import Stats from 'stats-js';
 import * as Bowser from "bowser";
 import spots from '../../game/world/spots';
+import { GameSession } from '../../network/session';
+import { GameHandler } from '../../network/game/handler';
 
-interface IGameProps {}
+interface IGameProps {
+  session: GameSession;
+}
 interface IGameScreenState {
   renderer: THREE.WebGLRenderer | null;
-  game: Game | null;
   currentLocation: string | number
 }
 
 
-class GameScreen extends React.Component {
+class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private camera: THREE.PerspectiveCamera;
   public debugCamera: THREE.PerspectiveCamera;
   public cameraHelper: THREE.CameraHelper;
@@ -26,7 +28,7 @@ class GameScreen extends React.Component {
   private renderer: THREE.WebGLRenderer | null = null;
   private debugRenderer: THREE.WebGLRenderer | null = null;
   private clock: THREE.Clock = new THREE.Clock();
-  private game: Game = new Game();
+  private game: GameHandler;
   private debug = false;
   //refs
   private controls = React.createRef<Controls>()
@@ -37,12 +39,14 @@ class GameScreen extends React.Component {
 
   public state: IGameScreenState = {
     renderer: null,
-    game: null,
     currentLocation: ''
   }
 
   constructor(props: IGameProps) {
     super(props);
+    
+    this.game = this.props.session.game;
+
     const browser = Bowser.getParser(window.navigator.userAgent);
     this.isMobile = browser.getPlatform().type === 'mobile';
 
@@ -84,6 +88,8 @@ class GameScreen extends React.Component {
     this.callFrame();
 
     window.addEventListener('resize', this.resize.bind(this));
+
+    this.game.world.run();
   }
 
   callFrame() {
