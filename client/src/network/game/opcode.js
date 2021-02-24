@@ -18,6 +18,8 @@ class GameOpcode {
 
   static SMSG_MONSTER_MOVE                  = 0x00DD;
 
+  static SMSG_MONSTER_MOVE_TRANSPORT        = 0x2AE;
+
   static SMSG_TUTORIAL_FLAGS                = 0x00FD;
 
   static SMSG_INITIALIZE_FACTIONS           = 0x0122;
@@ -92,6 +94,47 @@ class GameOpcode {
   static SMSG_PONG                          = 0x01DD;
 
   static SMSG_GM_MESSAGECHAT                = 0x03B3;
+
+  static MSG_MOVE_START_FORWARD = 0x0B5;	//(0x00B5)
+  static MSG_MOVE_START_BACKWARD = 0x00B6;	//(0x00B6)
+  static MSG_MOVE_STOP = 183;	//(0x00B7)
+  static MSG_MOVE_START_STRAFE_LEFT = 184;	//(0x00B8)
+  static MSG_MOVE_START_STRAFE_RIGHT = 185;	//(0x00B9)
+  static MSG_MOVE_STOP_STRAFE = 186;	//(0x00BA)
+  static MSG_MOVE_JUMP = 187;	//(0x00BB)
+  static MSG_MOVE_START_TURN_LEFT = 188;	//(0x00BC)
+  static MSG_MOVE_START_TURN_RIGHT = 189;	//(0x00BD)
+  static MSG_MOVE_STOP_TURN = 190;	//(0x00BE)
+  static MSG_MOVE_START_PITCH_UP = 191;	//(0x00BF)
+  static MSG_MOVE_START_PITCH_DOWN = 192;	//(0x00C0)
+  static MSG_MOVE_STOP_PITCH = 193;	//(0x00C1)
+  static MSG_MOVE_SET_RUN_MODE = 194;	//(0x00C2)
+  static MSG_MOVE_SET_WALK_MODE = 195;	//(0x00C3)
+  static MSG_MOVE_TOGGLE_LOGGING = 196;	//(0x00C4)
+  static MSG_MOVE_TELEPORT = 197;	//(0x00C5)
+  static MSG_MOVE_TELEPORT_CHEAT = 198;	//(0x00C6)
+  static MSG_MOVE_TELEPORT_ACK = 199;	//(0x00C7)
+  static MSG_MOVE_TOGGLE_FALL_LOGGING = 200;	//(0x00C8)
+  static MSG_MOVE_FALL_LAND = 201;	//(0x00C9)
+  static MSG_MOVE_START_SWIM = 202;	//(0x00CA)
+  static MSG_MOVE_STOP_SWIM = 203;	//(0x00CB)
+  static MSG_MOVE_SET_RUN_SPEED_CHEAT = 204;	//(0x00CC)
+  static MSG_MOVE_SET_RUN_SPEED = 205;	//(0x00CD)
+  static MSG_MOVE_SET_RUN_BACK_SPEED_CHEAT = 206;	//(0x00CE)
+  static MSG_MOVE_SET_RUN_BACK_SPEED = 207;	//(0x00CF)
+  static MSG_MOVE_SET_WALK_SPEED_CHEAT = 208;	//(0x00D0)
+  static MSG_MOVE_SET_WALK_SPEED = 209;	//(0x00D1)
+  static MSG_MOVE_SET_SWIM_SPEED_CHEAT = 210;	//(0x00D2)
+  static MSG_MOVE_SET_SWIM_SPEED = 211;	//(0x00D3)
+  static MSG_MOVE_SET_SWIM_BACK_SPEED_CHEAT = 212;	//(0x00D4)
+  static MSG_MOVE_SET_SWIM_BACK_SPEED = 213;	//(0x00D5)
+  static MSG_MOVE_SET_ALL_SPEED_CHEAT = 214;	//(0x00D6)
+  static MSG_MOVE_SET_TURN_RATE_CHEAT = 215;	//(0x00D7)
+  static MSG_MOVE_SET_TURN_RATE = 216;	//(0x00D8)
+  static MSG_MOVE_TOGGLE_COLLISION_CHEAT = 217;	//(0x00D9)
+  static MSG_MOVE_SET_FACING = 218;	//(0x00DA)
+  static MSG_MOVE_SET_PITCH = 219;	//(0x00DB)
+  static MSG_MOVE_WORLDPORT_ACK = 220;	//(0x00DC)
 
   // static SMSG_CHAR_DELETE = 0x278;
   // static SMSG_ADDON_INFO = 0xAF9;

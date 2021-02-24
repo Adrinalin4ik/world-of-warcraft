@@ -80,13 +80,13 @@ export class UpdateObjectHandler extends EventEmitter {
     } catch(ex) {
       console.error(ex);
     }
-    console.log('Final obj', packs);
+    // console.log('Final obj', packs);
   }
   async applyUpdates(pack: any) {
     // if (!pack.movement.spline) return;
     // let unit: Unit = this.game.units.get(pack.guid);
     let unit = this.game.world.entities.get(pack.guid);
-    // if (this.game.world.entities.size > 10) return;
+    if (this.game.world.entities.size > 10) return;
     if (!unit) {
       unit = new Unit(pack.guid);
       this.game.world.add(unit);
@@ -109,7 +109,7 @@ export class UpdateObjectHandler extends EventEmitter {
         splines.push(new THREE.Vector3(p.x, p.y, p.z))
       });
     
-      unit.setMovingData(splineData.currentTime, splineData.fullTime, splines);
+      unit.setMovingData(splineData.currentTime, splines, splineData.fullTime);
     }
   }
 

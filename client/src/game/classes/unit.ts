@@ -101,8 +101,8 @@ class Unit extends Entity {
   );
   
 
-  private currentMovingTime: number = 0;
-  private totalMovingTime: number = 0;
+  public currentMovingTime: number = 0;
+  public totalMovingTime: number = 0;
   private spline: THREE.CatmullRomCurve3 | null = null;
   
   constructor(guid: string) {
@@ -309,12 +309,14 @@ class Unit extends Entity {
   moveForward(delta: number) {
     if (this.isJump) return;
     this.moving.forward = true;
+    this.emit('moveForward');
     // this.translatePosition({ x: this.moveSpeed * delta });
   }
 
   moveBackward(delta: number) {
     if (this.isJump) return;
     this.moving.backward = true;
+    this.emit('moveBackward');
     // this.setAnimation(133, false, 0);
     // this.translatePosition({ x: -this.moveSpeed * delta / 2 });
   }
@@ -332,12 +334,14 @@ class Unit extends Entity {
   strafeLeft(delta: number) {
     if (this.isJump) return;
     this.moving.strafeLeft = true;
+    this.emit('strafeLeft');
     // this.translatePosition({ y: this.moveSpeed * delta });
   }
 
   strafeRight(delta: number) {
     if (this.isJump) return;
     this.moving.strafeRight = true;
+    this.emit('strafeRight');
     // this.translatePosition({ y: -this.moveSpeed * delta });
   }
 
@@ -587,7 +591,7 @@ class Unit extends Entity {
     // console.log('spline', this.spline)
     const currentTime = (this.currentMovingTime + delta / this.totalMovingTime);
     if (currentTime >= 1) {
-      // this.currentMovingTime = 0;
+      this.currentMovingTime = 0;
       return;
     }
     const pos = this.spline?.getPoint(currentTime);
@@ -605,15 +609,17 @@ class Unit extends Entity {
     this.currentMovingTime += (delta / this.moveSpeed / 4);
   }
 
-  setMovingData(currentMovingTime: number, totalMovingTime: number, points: Vector3[]) {
+  setMovingData(currentMovingTime: number, points: Vector3[], totalMovingTime?: number) {
     this.currentMovingTime = currentMovingTime;
-    this.totalMovingTime = totalMovingTime;
+    if (totalMovingTime) {
+      this.totalMovingTime = totalMovingTime;
+    }
 
     if (!points.length) {
       return;
     }
 
-    this.spline = new THREE.CatmullRomCurve3(points, false, 'chordal');
+    this.spline = new THREE.CatmullRomCurve3(points, true, 'chordal');
     console.log('splines', this.spline);
   }
 }
