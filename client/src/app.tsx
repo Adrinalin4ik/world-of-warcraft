@@ -14,6 +14,10 @@ import RealmsScreen from './pages/realms/realms';
 import CharactersScreen from './pages/characters';
 const gameSession = new GameSession();
 
+if (window.location.pathname != '/') {
+  window.location.replace('/' + window.location.search);
+}
+
 const App: React.FC = () => {
   return (
     <Router>

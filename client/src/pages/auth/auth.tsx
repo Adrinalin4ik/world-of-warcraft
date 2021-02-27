@@ -15,16 +15,22 @@ interface State {
 
 class Auth extends React.Component<Props> {
 
-  public state: State = {
-    username: 'Adrinalin4ik',
-    password: 'Hi73s6dL',
-  }
+  public state: State;
 
+  constructor(props: Props) {
+    super(props)
+
+    this.state = {
+      username: window.location.search.split('account=')[1] || 'Adrinalin4ik',
+      password: 'Hi73s6dL',
+    }
+  }
   async authenticate(username: string, password: string) {
+    // username = window.location.search.split('account=')[1] || this.state.username;
     const status = await this.props.session.authenticate(username, password);
     if (status.status === AuthorizationStatus.Success) {
-      console.log('authenticate status', status);
-      this.props.history.push('/realms');
+      console.log('authenticate status' , status);
+      this.props.history.push('/realms' + window.location.search);
     }
   }
 

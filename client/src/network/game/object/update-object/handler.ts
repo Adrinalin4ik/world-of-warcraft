@@ -66,9 +66,21 @@ export class UpdateObjectHandler extends EventEmitter {
             break;
           case UpdateType.FarObjects:
             pack.farObjects = this.parseAroundObjects(packet);
+            for (const guid of pack.farObjects) {
+              const unit = this.game.world.entities.get(guid);
+              if (unit) {
+                unit.view.visible = false;
+              }
+            }
             break;
           case UpdateType.NearObjects:
             pack.nearObjects = this.parseAroundObjects(packet);
+            for (const guid of pack.nearObjects) {
+              const unit = this.game.world.entities.get(guid);
+              if (unit) {
+                unit.view.visible = true;
+              }
+            }
             break;
           default: 
             console.error(`Cannot proceed such UpdateType ${pack.updateType}`)
@@ -82,11 +94,13 @@ export class UpdateObjectHandler extends EventEmitter {
     }
     // console.log('Final obj', packs);
   }
+
   async applyUpdates(pack: any) {
     // if (!pack.movement.spline) return;
     // let unit: Unit = this.game.units.get(pack.guid);
     let unit = this.game.world.entities.get(pack.guid);
-    if (this.game.world.entities.size > 10) return;
+    //if (this.game.world.entities.size > 10) return;
+    //if (pack.obj_type !== ObjectType.Player) return
     if (!unit) {
       unit = new Unit(pack.guid);
       this.game.world.add(unit);

@@ -583,10 +583,15 @@ groups.set(ObjectType.GameObject, GameObjectField);
 groups.set(ObjectType.DynamicObject, DynamicObjectField);
 groups.set(ObjectType.Corpse, CorpseField);
 
-export const getUpdateFieldName = (index: number, group: ObjectType) => {
-  const gr = groups.get(group);
+const allGroups = Object.entries(Array.from(groups.values()).reduce((obj, x) => {
+  return {...obj, ...x}
+}, {}));
+
+export const getUpdateFieldName = (index: number, type: ObjectType) => {
+  
+  const gr = groups.get(type);
   if (gr) {
-    const result = Object.entries(gr).find(([key, value]) => index === value);
+    const result = allGroups.find(([key, value]) => index === value);
     if (result) {
       return result[0];
     }

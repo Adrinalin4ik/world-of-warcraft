@@ -66,7 +66,6 @@ export class GameHandler extends Socket {
     if (this._crypt) {
       this._crypt.encrypt(new Uint8Array(packet.buffer, 0, GamePacket.HEADER_SIZE_OUTGOING));
     }
-
     return super.send(packet);
   }
 
@@ -219,10 +218,9 @@ export class GameHandler extends Socket {
 
     const build = config.build;
     const account = this.session.auth.account;
-
     const size = GamePacket.HEADER_SIZE_OUTGOING + 8 + this.session.auth.account.length + 1 + 4 + 4 + 20 + 20 + 4;
 
-    const app = new GamePacket(GameOpcode.CMSG_AUTH_PROOF, size);
+    const app = new GamePacket(GameOpcode.CMSG_AUTH_SESSION, size);
     app.writeUnsignedInt(build); // build
     app.writeUnsignedInt(0);     // (?)
     app.writeCString(account);   // account
@@ -236,6 +234,7 @@ export class GameHandler extends Socket {
     app.write(hash.digest);      // digest
     app.writeUnsignedInt(0);     // addon-data
 
+    console.log('Account', app)
     this.send(app);
 
     this._crypt = new Crypt();

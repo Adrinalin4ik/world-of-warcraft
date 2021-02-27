@@ -50,7 +50,7 @@ class CharactersScreen extends React.Component<Props, State> {
   }
 
   onJoin() {
-    this.props.history.push('/game');
+    this.props.history.push('/game' + window.location.search);
   }
 
   onRefresh() {
@@ -67,7 +67,7 @@ class CharactersScreen extends React.Component<Props, State> {
     if (character) {
       const joined = this.props.session.game.join(character);
       if (joined) {
-        this.props.history.push('/game');
+        this.props.history.push('/game'  + window.location.search);
       }
     }
   }

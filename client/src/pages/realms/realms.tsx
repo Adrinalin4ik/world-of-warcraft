@@ -24,7 +24,7 @@ class RealmsScreen extends React.Component<Props, State> {
 
     this.props.session.realms.on('refresh', this.onRefresh.bind(this));
     this.props.session.game.on('authenticate', () => {
-      this.props.history.push('/characters');
+      this.props.history.push('/characters'  + window.location.search);
     });
 
     this.refresh();
@@ -56,7 +56,8 @@ class RealmsScreen extends React.Component<Props, State> {
     event.preventDefault();
     const realm = this.state.realm;
     if (realm) {
-      this.connect(realm);
+      // this.connect(realm);
+      this.connect( this.props.session.realms.list[1]);
     }
   }
 

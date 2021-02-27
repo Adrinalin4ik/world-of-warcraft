@@ -1,6 +1,6 @@
 import ByteBuffer from 'byte-buffer';
 import GUID from '../game/guid';
-
+window['ByteBuffer'] = ByteBuffer;
 class Packet extends ByteBuffer {
   
   // Creates a new packet with given opcode from given source or length
@@ -52,6 +52,42 @@ class Packet extends ByteBuffer {
   // Writes given GUID to this packet
   writeGUID(guid) {
     this.write(guid.raw);
+    return this;
+  }
+
+  // procedure TPacket.PutCompressed(const Value: TWoWGuid);
+  //   var
+  //     MaskPos: Integer;
+  //     i: Byte;
+  //   begin
+  //     MaskPos := WritePos;
+  //     Inc(FWritePos, 2); // add space for 2 masks
+
+  //     for i := 0 to SizeOf(Value.Low) - 1 do
+  //     begin
+  //       if (Int64Rec(Value.Low).Bytes[i] > 0) then
+  //       begin
+  //         FBuffer[MaskPos] := FBuffer[MaskPos] or 1 shl i; // low mask
+  //         PutUInt8(Int64Rec(Value.Low).Bytes[i]);
+  //       end;
+  //     end;
+
+  //     for i := 0 to SizeOf(Value.High) - 1 do
+  //     begin
+  //       if (Int64Rec(Value.High).Bytes[i] > 0) then
+  //       begin
+  //         FBuffer[MaskPos+1] := FBuffer[MaskPos+1] or 1 shl i; // high mask
+  //         PutUInt8(Int64Rec(Value.High).Bytes[i]);
+  //       end;
+  //     end;
+  //   end;
+
+  writePackedGUID(guid) {
+    const buffer = new ByteBuffer(8, -1);
+    buffer.writeUnsignedInt(guid.low);
+    buffer.writeUnsignedInt(guid.high);
+
+    this.write([3, buffer.raw[0], buffer.raw[1], 1, buffer.raw[5], buffer.raw[6], 0, 0])
     return this;
   }
 

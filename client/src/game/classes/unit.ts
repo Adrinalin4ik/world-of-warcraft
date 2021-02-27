@@ -123,6 +123,10 @@ class Unit extends Entity {
     // this.view.add(this.arrow);
   }
 
+  get facing() {
+    return this.rotation.z
+  }
+  
   get isOnGround() {
     return this.groundDistance <= this.groundZeroConstant;
   }
@@ -181,7 +185,7 @@ class Unit extends Entity {
           );
         });
       });
-    });
+    }).catch(console.error);
   }
 
   get view() {
@@ -622,6 +626,32 @@ class Unit extends Entity {
     this.spline = new THREE.CatmullRomCurve3(points, true, 'chordal');
     console.log('splines', this.spline);
   }
+
+  // public calculateOrientation() {
+  //   let orientation;
+  //   if (this.rotation.x == 0)
+  //   {
+  //       if (this.rotation.y > 0)
+  //           orientation = Math.PI / 2;
+  //       else
+  //           orientation = 3 * Math.PI / 2;
+  //   }
+  //   else if (this.rotation.z == 0)
+  //   {
+  //       if (this.rotation.x > 0)
+  //           orientation = 0;
+  //       else
+  //           orientation = Math.PI;
+  //   }
+  //   else
+  //   {
+  //       orientation = Math.atan2(this.rotation.y, this.rotation.x);
+  //       if (orientation < 0)
+  //           orientation += 2 * Math.PI;
+  //   }
+
+  //   return orientation;
+  // }
 }
 
 export default Unit;
