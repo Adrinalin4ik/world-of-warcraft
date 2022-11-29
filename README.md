@@ -1,4 +1,8 @@
 # World-of-warcraft
+### Preview (click to watch)
+[![Preview](https://img.youtube.com/vi/1RO-usV3xvs/hqdefault.jpg)](https://youtu.be/1RO-usV3xvs)
+
+<video src=""></video>
 
 Install StormLib and BLPConverter, which are using for handling Blizzard's game files.
 
