@@ -1,9 +1,8 @@
 import React from 'react';
-import { RouteComponentProps, withRouter } from "react-router-dom";
 import Character from '../../network/characters/character';
 import { GameSession } from '../../network/session';
 
-interface Props extends RouteComponentProps {
+interface Props {
   session: GameSession
 }
 
@@ -50,7 +49,8 @@ class CharactersScreen extends React.Component<Props, State> {
   }
 
   onJoin() {
-    this.props.history.push('/game' + window.location.search);
+    window.location.href = '/game' + window.location.search
+    // this.props.history.push('/game' + window.location.search);
   }
 
   onRefresh() {
@@ -67,7 +67,8 @@ class CharactersScreen extends React.Component<Props, State> {
     if (character) {
       const joined = this.props.session.game.join(character);
       if (joined) {
-        this.props.history.push('/game'  + window.location.search);
+        window.location.href = '/game'  + window.location.search;
+        // this.props.history.push('/game'  + window.location.search);
       }
     }
   }
@@ -110,4 +111,4 @@ class CharactersScreen extends React.Component<Props, State> {
 
 }
 
-export default withRouter(CharactersScreen);
+export default CharactersScreen;

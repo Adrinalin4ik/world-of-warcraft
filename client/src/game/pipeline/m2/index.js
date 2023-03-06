@@ -1,11 +1,11 @@
-import * as THREE_NATIVE from 'three';
 import * as THREE from 'three';
-import Submesh from './submesh';
-import M2Material from './material';
+import { Face3, Geometry } from '../../utils/geometry';
+import geometryToBufferGeometry from '../../utils/geometry-to-buffer-geometry';
+import ColliderManager from '../../world/collider-manager';
 import AnimationManager from './animation-manager';
 import BatchManager from './batch-manager';
-import ColliderManager from '../../world/collider-manager';
-import geometryToBufferGeometry from '../../utils/geometry-to-buffer-geometry';
+import M2Material from './material';
+import Submesh from './submesh';
 class M2 extends THREE.Group {
 
   static cache = {};
@@ -91,7 +91,7 @@ class M2 extends THREE.Group {
     let mesh;
     
     const material = new THREE.MeshBasicMaterial({ wireframe: false, transparent: true, opacity: 0 });
-    const geometry = new THREE.Geometry();
+    const geometry = new Geometry();
     // make geometry
     for (let vertexIndex = 0, len = vertices.length; vertexIndex < len; ++vertexIndex) {
       const vertex = vertices[vertexIndex];
@@ -102,7 +102,7 @@ class M2 extends THREE.Group {
 
     // Make faces
     for (let i = 0; i < this.boundingTriangles.length; i += 3) {
-      geometry.faces.push(new THREE.Face3(this.boundingTriangles[i],
+      geometry.faces.push(new Face3(this.boundingTriangles[i],
                                           this.boundingTriangles[i + 1],
                                           this.boundingTriangles[i + 2]));
     }
@@ -258,7 +258,7 @@ class M2 extends THREE.Group {
   }
 
   createGeometry(vertices) {
-    const geometry = new THREE.Geometry();
+    const geometry = new Geometry();
 
     for (let vertexIndex = 0, len = vertices.length; vertexIndex < len; ++vertexIndex) {
       const vertex = vertices[vertexIndex];
@@ -367,7 +367,7 @@ class M2 extends THREE.Group {
         indices[triangles[i + 2]]
       ];
 
-      const face = new THREE.Face3(vindices[0], vindices[1], vindices[2]);
+      const face = new Face3(vindices[0], vindices[1], vindices[2]);
 
       geometry.faces.push(face);
 

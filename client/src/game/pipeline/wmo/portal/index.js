@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-
+import { Face3, Geometry } from '../../../utils/geometry';
 import WMOPortalView from './view';
 
 class WMOPortal {
@@ -40,7 +40,7 @@ class WMOPortal {
   }
 
   createGeometry(vertices) {
-    const geometry = this.geometry = new THREE.Geometry();
+    const geometry = this.geometry = new Geometry();
 
     const vertexCount = vertices.length;
 
@@ -51,7 +51,7 @@ class WMOPortal {
     const faceCount = vertexCount - 2;
 
     for (let findex = 0; findex < faceCount; ++findex) {
-      geometry.faces.push(new THREE.Face3(findex + 1, findex + 2, 0));
+      geometry.faces.push(new Face3(findex + 1, findex + 2, 0));
     }
   }
 

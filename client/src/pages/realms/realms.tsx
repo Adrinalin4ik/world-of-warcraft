@@ -1,10 +1,9 @@
 import React from 'react';
-import { RouteComponentProps, withRouter } from "react-router-dom";
 import Realm from '../../network/realms/realm';
 import { GameSession } from '../../network/session';
 import './realms.scss';
 
-interface Props extends RouteComponentProps {
+interface Props {
   session: GameSession;
 }
 
@@ -24,7 +23,8 @@ class RealmsScreen extends React.Component<Props, State> {
 
     this.props.session.realms.on('refresh', this.onRefresh.bind(this));
     this.props.session.game.on('authenticate', () => {
-      this.props.history.push('/characters'  + window.location.search);
+      window.location.href = '/characters'  + window.location.search;
+      // this.props.history.push('/characters'  + window.location.search);
     });
 
     this.refresh();
@@ -94,4 +94,4 @@ class RealmsScreen extends React.Component<Props, State> {
   }
 }
 
-export default withRouter(RealmsScreen);
+export default RealmsScreen;

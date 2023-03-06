@@ -1,8 +1,8 @@
-import React from 'react';
-import * as THREE from 'three';
 import key from 'keymaster';
-import Player from '../../../game/classes/player';
+import React from 'react';
 import JoyStick from 'react-joystick';
+import * as THREE from 'three';
+import Player from '../../../game/classes/player';
 
 const joyOptions = {
   mode: 'semi',
@@ -91,7 +91,7 @@ class Controls extends React.Component<IProp, IUpdate> {
       this.camera.up, new THREE.Vector3(0, 1, 0)
     );
 
-    this.quatInverse = this.quat.clone().inverse();
+    this.quatInverse = this.quat.clone().invert();
     this.managerListener = this.managerListener.bind(this);
 
     this.element.addEventListener('mousedown', this._onMouseDown.bind(this));
@@ -391,7 +391,7 @@ class Controls extends React.Component<IProp, IUpdate> {
     }
   }
 
-  _onMouseWheel(event: MouseWheelEvent | any) {
+  _onMouseWheel(event: MouseEvent | any) {
     event.preventDefault();
     event.stopPropagation();
 

@@ -1,10 +1,9 @@
 import React from 'react';
-import './auth.scss';
-import { GameSession } from '../../network/session';
 import { AuthorizationStatus, SocketConnestionStatus } from '../../network/enums';
-import { RouteComponentProps, withRouter } from "react-router-dom";
+import { GameSession } from '../../network/session';
+import './auth.scss';
 
-interface Props extends RouteComponentProps {
+interface Props {
   session: GameSession;
 }
 
@@ -30,7 +29,8 @@ class Auth extends React.Component<Props> {
     const status = await this.props.session.authenticate(username, password);
     if (status.status === AuthorizationStatus.Success) {
       console.log('authenticate status' , status);
-      this.props.history.push('/realms' + window.location.search);
+      window.location.href = '/realms' + window.location.search;
+      // this.props.history.push('/realms' + window.location.search);
     }
   }
 
@@ -90,4 +90,4 @@ class Auth extends React.Component<Props> {
   }
 }
 
-export default withRouter(Auth);
+export default Auth;
