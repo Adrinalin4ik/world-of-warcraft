@@ -4,27 +4,27 @@ Object.defineProperty(exports, "__esModule", {
   value: true
 });
 
-var _ffi = require('@saleae/ffi');
+var _ffiNapi = require('ffi-napi');
 
-var _ffi2 = _interopRequireDefault(_ffi);
+var _ffiNapi2 = _interopRequireDefault(_ffiNapi);
 
-var _ref = require('@saleae/ref');
+var _refNapi = require('ref-napi');
 
-var _ref2 = _interopRequireDefault(_ref);
+var _refNapi2 = _interopRequireDefault(_refNapi);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
-var bool = _ref2.default.types.bool;
+var bool = _refNapi2.default.types.bool;
 
-var string = _ref2.default.types.CString;
+var string = _refNapi2.default.types.CString;
 
-var voidPtr = _ref2.default.refType(_ref2.default.types.void);
+var voidPtr = _refNapi2.default.refType(_refNapi2.default.types.void);
 
 var FILE = voidPtr;
 
 var library = process.platform.match(/win32/) ? 'msvcr120' : 'libc';
 
-exports.default = new _ffi2.default.Library(library, {
+exports.default = new _ffiNapi2.default.Library(library, {
   fopen: [FILE, [string, string]],
   fclose: [bool, [FILE]]
 });

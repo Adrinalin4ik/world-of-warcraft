@@ -1,3 +1,5 @@
+#!/usr/bin/env node --experimental-modules --no-warnings
+
 /**
  * usage notes:
  * 1) place this script in blizzardry folder
@@ -8,7 +10,6 @@
  * 6) rinse repeat with pattern for any other files you want to extract (for example `Interface*`)
  *
  * Note: this script has only been tested on macOS, use at your own risk
- * To convert files to png use pyton extra/convert_all.py <folder> from blp converter
  */
 
 import fs from 'fs';
@@ -16,10 +17,10 @@ import path from 'path';
 
 import glob from 'globby';
 
-import MPQ from './lib/mpq/index.js';
+import MPQ from '../blizzardry/lib/mpq/index.js';
 
 const dataDir = '/home/alexey/Desktop/World_of_Warcraft/Data/';
-const outDir = '/home/alexey/Desktop/World_of_Warcraft/extracted_interface';
+const outDir = '/media/alexey/Seagate Backup Plus Drive/ExtractedData';
 
 const mpqs = [
   'common.MPQ',
@@ -35,7 +36,7 @@ const mpqs = [
   '*/patch-????.MPQ',
   '*/patch-*.MPQ',
   'patch.MPQ',
-  'patch-*.MPQ'
+  'patch-*.MPQ',
 ];
 
 const patterns = mpqs.map(mpq => (
@@ -64,4 +65,3 @@ mpq.files.find(pattern).forEach(file => {
   ++count;
 });
 console.log(`Extracted ${count} files`);
-

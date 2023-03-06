@@ -4,9 +4,9 @@ Object.defineProperty(exports, "__esModule", {
   value: true
 });
 
-var _ref = require('@saleae/ref');
+var _refNapi = require('ref-napi');
 
-var _ref2 = _interopRequireDefault(_ref);
+var _refNapi2 = _interopRequireDefault(_refNapi);
 
 var _files = require('./files');
 
@@ -73,7 +73,7 @@ class MPQ {
     }
 
     var priority = 0;
-    var handlePtr = _ref2.default.alloc(_stormLib.HANDLEPtr);
+    var handlePtr = _refNapi2.default.alloc(_stormLib.HANDLEPtr);
     if (_stormLib2.default.SFileOpenArchive(path, priority, flags, handlePtr)) {
       var handle = handlePtr.deref();
       var mpq = new this(path, flags, handle);
@@ -93,7 +93,7 @@ class MPQ {
   static create(path, callback) {
     var flags = 0;
     var maxFileCount = 0;
-    var handlePtr = _ref2.default.alloc(_stormLib.HANDLEPtr);
+    var handlePtr = _refNapi2.default.alloc(_stormLib.HANDLEPtr);
     if (_stormLib2.default.SFileCreateArchive(path, flags, maxFileCount, handlePtr)) {
       return this.open(path, callback);
     }

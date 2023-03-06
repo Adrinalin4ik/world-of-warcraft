@@ -4,9 +4,9 @@ Object.defineProperty(exports, "__esModule", {
   value: true
 });
 
-var _ref = require('@saleae/ref');
+var _refNapi = require('ref-napi');
 
-var _ref2 = _interopRequireDefault(_ref);
+var _refNapi2 = _interopRequireDefault(_refNapi);
 
 var _file = require('./file');
 
@@ -34,7 +34,7 @@ class Files {
 
   get(file) {
     if (this.handle) {
-      var fileHandlePtr = _ref2.default.alloc(_stormLib.HANDLEPtr);
+      var fileHandlePtr = _refNapi2.default.alloc(_stormLib.HANDLEPtr);
       if (_stormLib2.default.SFileOpenFileEx(this.handle, file, this.constructor.FROM_MPQ, fileHandlePtr)) {
         return new _file2.default(fileHandlePtr.deref());
       }

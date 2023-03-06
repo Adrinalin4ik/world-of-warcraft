@@ -1,6 +1,6 @@
-import Struct from '@saleae/ref-struct';
-import ffi from '@saleae/ffi';
-import ref from '@saleae/ref';
+import ffi from 'ffi-napi';
+import ref from 'ref-napi';
+import Struct from 'ref-struct-napi';
 
 const { bool, int32, uint32 } = ref.types;
 const string = ref.types.CString;

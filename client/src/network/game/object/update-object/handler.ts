@@ -25,7 +25,7 @@ export class UpdateObjectHandler extends EventEmitter {
 
   
   // SMSG_COMPRESSED_UPDATE_OBJECT
-  handleCompressedUpdateObjectPacket(gp: GamePacket) {
+  async handleCompressedUpdateObjectPacket(gp: GamePacket) {
     var uncompressedLength = gp.readInt();
     gp.readByte(2); // unk junk from RFC 1950
     const buffer = gp.raw.slice(8); // remove first 9 bytes
@@ -99,7 +99,7 @@ export class UpdateObjectHandler extends EventEmitter {
     // if (!pack.movement.spline) return;
     // let unit: Unit = this.game.units.get(pack.guid);
     let unit = this.game.world.entities.get(pack.guid);
-    //if (this.game.world.entities.size > 10) return;
+    // if (this.game.world.entities.size > 10) return;
     //if (pack.obj_type !== ObjectType.Player) return
     if (!unit) {
       unit = new Unit(pack.guid);
@@ -111,6 +111,7 @@ export class UpdateObjectHandler extends EventEmitter {
     }
 
     unit.displayId = pack.newObject.unit_field_displayid;
+    // unit.displayId = 21976;
 
     const {x, y, z, runSpeed} = pack.movement;
 

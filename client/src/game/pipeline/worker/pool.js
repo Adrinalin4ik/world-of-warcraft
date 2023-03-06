@@ -1,13 +1,13 @@
 import Task from './task';
 import Thread from './thread';
-
+const { AwaitQueue } = require('awaitqueue');
 class WorkerPool {
 
   constructor(concurrency = this.defaultConcurrency) {
     this.concurrency = concurrency;
     this.queue = [];
     this.threads = [];
-
+    // this.queue = new AwaitQueue();
     this.next = this.next.bind(this);
   }
 
@@ -33,11 +33,20 @@ class WorkerPool {
     this.queue.push(task);
     this.next();
     return task.promise;
+    // const task = new Task(...args);
+    // const thread = this.thread;
+
+    // try {
+    //   this.queue.push(() => thread.execute(task));
+    // } catch(ex) {
+    //   console.log('Enqueue error', ex);
+    // }
+
+    // return task.promise;
   }
 
   next() {
     try {
-
       if (this.queue.length) {
         const thread = this.thread;
         if (thread) {

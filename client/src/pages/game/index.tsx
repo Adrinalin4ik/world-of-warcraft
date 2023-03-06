@@ -1,14 +1,14 @@
+import * as Bowser from "bowser";
 import React from 'react';
+import Stats from 'stats-js';
 // import * as THREE from 'three';
 import * as THREE from 'three';
-import './index.scss';
+import spots from '../../game/world/spots';
+import { GameHandler } from '../../network/game/handler';
+import { GameSession } from '../../network/session';
 import Controls from './controls/controls';
 import DebugPanel from './debug/debug';
-import Stats from 'stats-js';
-import * as Bowser from "bowser";
-import spots from '../../game/world/spots';
-import { GameSession } from '../../network/session';
-import { GameHandler } from '../../network/game/handler';
+import './index.scss';
 
 interface IGameProps {
   session: GameSession;
@@ -29,7 +29,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private debugRenderer: THREE.WebGLRenderer | null = null;
   private clock: THREE.Clock = new THREE.Clock();
   private game: GameHandler;
-  private debug = false;
+  private debug = true;
   //refs
   private controls = React.createRef<Controls>()
   private debugPanel = React.createRef<DebugPanel>()

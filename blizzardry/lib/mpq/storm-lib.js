@@ -5,28 +5,28 @@ Object.defineProperty(exports, "__esModule", {
 });
 exports.HANDLEPtr = exports.FIND_DATA = undefined;
 
-var _refStruct = require('@saleae/ref-struct');
+var _ffiNapi = require('ffi-napi');
 
-var _refStruct2 = _interopRequireDefault(_refStruct);
+var _ffiNapi2 = _interopRequireDefault(_ffiNapi);
 
-var _ffi = require('@saleae/ffi');
+var _refNapi = require('ref-napi');
 
-var _ffi2 = _interopRequireDefault(_ffi);
+var _refNapi2 = _interopRequireDefault(_refNapi);
 
-var _ref = require('@saleae/ref');
+var _refStructNapi = require('ref-struct-napi');
 
-var _ref2 = _interopRequireDefault(_ref);
+var _refStructNapi2 = _interopRequireDefault(_refStructNapi);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
-var _ref$types = _ref2.default.types,
+var _ref$types = _refNapi2.default.types,
     bool = _ref$types.bool,
     int32 = _ref$types.int32,
     uint32 = _ref$types.uint32;
 
-var string = _ref2.default.types.CString;
+var string = _refNapi2.default.types.CString;
 
-var voidPtr = _ref2.default.refType(_ref2.default.types.void);
+var voidPtr = _refNapi2.default.refType(_refNapi2.default.types.void);
 
 var FixedString = function (length) {
   return {
@@ -40,7 +40,7 @@ var FixedString = function (length) {
   };
 };
 
-var FIND_DATA = (0, _refStruct2.default)({
+var FIND_DATA = (0, _refStructNapi2.default)({
   filename: FixedString(1024),
   name: string,
   hashIndex: uint32,
@@ -54,11 +54,11 @@ var FIND_DATA = (0, _refStruct2.default)({
 });
 
 var HANDLE = voidPtr;
-var HANDLEPtr = _ref2.default.refType(HANDLE);
+var HANDLEPtr = _refNapi2.default.refType(HANDLE);
 
 var LPDWORD = voidPtr;
 
-exports.default = new _ffi2.default.Library('libstorm', {
+exports.default = new _ffiNapi2.default.Library('libstorm', {
 
   SFileGetLocale: [uint32, []],
 
@@ -66,7 +66,7 @@ exports.default = new _ffi2.default.Library('libstorm', {
 
   SFileOpenArchive: [bool, [string, uint32, uint32, HANDLEPtr]],
 
-  SFileCreateArchive: [_ref2.default.types.char, [string, uint32, uint32, HANDLEPtr]],
+  SFileCreateArchive: [_refNapi2.default.types.char, [string, uint32, uint32, HANDLEPtr]],
 
   // SFileCreateArchive2: [ref.types.char, [
   //   TCHARPtr,

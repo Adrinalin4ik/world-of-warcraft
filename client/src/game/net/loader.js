@@ -11,18 +11,26 @@ class Loader {
     return new Promise((resolve, _reject) => {
       const uri = `${this.prefix}${path}`;
 
-      const xhr = new XMLHttpRequest();
-      xhr.open('GET', encodeURI(uri), true);
+      fetch(encodeURI(uri), {
+        responseType: this.responseType
+      }).then(async(res) => {
+        const buffer = await res.arrayBuffer();
+        resolve(buffer);
+      }).catch((ex) => console.error('Loader error', ex));
 
-      xhr.onload = function(_event) {
-        // TODO: Handle failure
-        if (this.status >= 200 && this.status < 400) {
-          resolve(this.response);
-        }
-      };
+      // const xhr = new XMLHttpRequest();
+      // xhr.open('GET', encodeURI(uri), true);
 
-      xhr.responseType = this.responseType;
-      xhr.send();
+      // xhr.onload = function(_event) {
+      //   // TODO: Handle failure
+      //   if (this.status >= 200 && this.status < 400) {
+      //     console.log(this.response)
+      //     resolve(this.response);
+      //   }
+      // };
+      
+      // xhr.responseType = this.responseType;
+      // xhr.send();
     });
   }
 

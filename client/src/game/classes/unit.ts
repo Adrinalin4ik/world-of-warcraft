@@ -1,11 +1,11 @@
 // import * as THREE from "three";
 import * as THREE from 'three';
+import { Vector3 } from 'three';
 import DBC from "../pipeline/dbc";
-import Entity from "./entity";
+import M2 from "../pipeline/m2";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import ColliderManager from "../world/collider-manager";
-import M2 from "../pipeline/m2";
-import { Vector3 } from 'three';
+import Entity from "./entity";
 
 enum SlopeType {
   sliding,
@@ -30,6 +30,8 @@ class Unit extends Entity {
   public health: number = 0;
   public mana: number = 0;
 
+  public isPlayer: boolean = false;
+
   private _view: THREE.Group = new THREE.Group();
   private _displayId: number = 0;
   private _model: M2 | null = null;
@@ -50,7 +52,7 @@ class Unit extends Entity {
 
   public rotateSpeed: number = 2;
   public moveSpeed: number = 10; //10
-  public flySpeed: number = 15; //10
+  public flySpeed: number = 10; //10
   public gravity: number = 10; //10;
   public jumpVelocityConst: number = 16;
   public jumpVelocity: number = 0;
@@ -542,13 +544,16 @@ class Unit extends Entity {
   }
 
   update(delta: number) {
-    // this.updateGroundDistance();
-    this.updateMoving(delta);
-    this.updateSplineFollowing(delta);
-    if (this.useGravity) {
-      this.updateGravity(delta);
+    this.updateGroundDistance();
+    if (this.isPlayer) {
+      this.updateMoving(delta);
+      if (this.useGravity) {
+        this.updateGravity(delta);
+      }
+      this.applyTranslatePosition();
+    } else {
+      this.updateSplineFollowing(delta);
     }
-    this.applyTranslatePosition();
     this.clear();
   }
 
@@ -624,7 +629,7 @@ class Unit extends Entity {
     }
 
     this.spline = new THREE.CatmullRomCurve3(points, true, 'chordal');
-    console.log('splines', this.spline);
+    // console.log('splines', this.spline);
   }
 
   // public calculateOrientation() {

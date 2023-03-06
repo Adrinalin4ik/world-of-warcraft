@@ -4,27 +4,27 @@ Object.defineProperty(exports, "__esModule", {
   value: true
 });
 
-var _ffi = require('@saleae/ffi');
+var _ffiNapi = require('ffi-napi');
 
-var _ffi2 = _interopRequireDefault(_ffi);
+var _ffiNapi2 = _interopRequireDefault(_ffiNapi);
 
-var _ref = require('@saleae/ref');
+var _refNapi = require('ref-napi');
 
-var _ref2 = _interopRequireDefault(_ref);
+var _refNapi2 = _interopRequireDefault(_refNapi);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
-var _ref$types = _ref2.default.types,
+var _ref$types = _refNapi2.default.types,
     bool = _ref$types.bool,
     uint8 = _ref$types.uint8,
     uint32 = _ref$types.uint32;
 
-var voidPtr = _ref2.default.refType(_ref2.default.types.void);
+var voidPtr = _refNapi2.default.refType(_refNapi2.default.types.void);
 
 var BLP = voidPtr;
 var FILE = voidPtr;
 
-exports.default = new _ffi2.default.Library('libblp', {
+exports.default = new _ffiNapi2.default.Library('libblp', {
   blp_convert: [voidPtr, [FILE, BLP, uint8]],
   blp_height: [uint32, [BLP, uint8]],
   blp_nbMipLevels: [uint32, [BLP]],

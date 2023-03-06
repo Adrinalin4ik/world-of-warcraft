@@ -2,7 +2,6 @@ import EventEmitter from 'events';
 import { GameHandler } from '../../handler';
 import GameOpcode from '../../opcode';
 import GamePacket from '../../packet';
-import * as THREE from 'three';
 import { PlayerMovementFlag } from './enums';
 
 
@@ -53,10 +52,10 @@ export class PlayerMovementHandler extends EventEmitter {
     this.game.on('packet:receive:MSG_MOVE_START_TURN_RIGHT', this.handleMovement.bind(this));
     this.game.on('packet:receive:MSG_MOVE_STOP_TURN', this.handleMovement.bind(this));
     
-    this.game.session.player.on('moveForward', this.moveForward.bind(this));
-    this.game.session.player.on('moveBackward', this.moveBackward.bind(this));
-    this.game.session.player.on('strafeRight', this.strafeRight.bind(this));
-    this.game.session.player.on('strafeLeft', this.strafeLeft.bind(this));
+    // this.game.session.player.on('moveForward', this.moveForward.bind(this));
+    // this.game.session.player.on('moveBackward', this.moveBackward.bind(this));
+    // this.game.session.player.on('strafeRight', this.strafeRight.bind(this));
+    // this.game.session.player.on('strafeLeft', this.strafeLeft.bind(this));
   }
 
   private handleMovement(packet: GamePacket) {

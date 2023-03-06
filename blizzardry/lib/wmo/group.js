@@ -157,7 +157,7 @@ exports.default = (0, _chunked2.default)({
     return this.flags & 0x4;
   }),
   // MLIQ: new r.Optional(MLIQ, function() {
-  //   return this.flags & 0x2;
+  //   return this.flags & 0x4;
   // }),
   interior: function () {
     return (this.flags & 0x2000) !== 0 && (this.flags & 0x8) === 0;

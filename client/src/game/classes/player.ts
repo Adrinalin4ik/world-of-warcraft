@@ -11,7 +11,7 @@ class Player extends Unit {
     this.displayId = 21976;
     this.name = name;
     this.view.name = "MainPlayer";
-
+    this.isPlayer = true;
     (window as any).player = this;
   }
 

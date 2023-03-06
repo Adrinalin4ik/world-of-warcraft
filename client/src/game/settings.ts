@@ -1,14 +1,14 @@
 export default {
   world: {
     render: {
-      radius: 1
+      radius: 10
     }
   },
   texture: {
-    unloadInterval: 5000
+    unloadInterval: 30000
   },
   m2: {
-    unloadInterval: 5000
+    unloadInterval: 5 * 60 * 1000
   },
   doodad: {
     // Proportion of pending doodads to load or unload in a given tick.
