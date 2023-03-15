@@ -4,13 +4,13 @@ import ADT from '../pipeline/adt';
 import Chunk from '../pipeline/adt/chunk';
 import DBC from '../pipeline/dbc';
 import WDT from '../pipeline/wdt';
+import gameSettings from '../settings';
 import DoodadManager from './doodad-manager';
-import WMOManager from './wmo-manager';
+import WorldLight from './light';
+import LocationManager from './location-manager';
 import TerrainManager from './terrain-manager';
 import VisibilityManager from './visibility-manager';
-import LocationManager from './location-manager';
-import WorldLight from './light';
-import gameSettings from '../settings';
+import WMOManager from './wmo-manager';
 
 class WorldMap extends THREE.Group {
 
@@ -106,7 +106,7 @@ class WorldMap extends THREE.Group {
       this.chunks.set(index, chunk);
 
       this.terrainManager.loadChunk(index, chunk);
-      this.doodadManager.loadChunk(index, chunk.doodadEntries);
+      // this.doodadManager.loadChunk(index, chunk.doodadEntries);
       this.wmoManager.loadChunk(index, chunk.wmoEntries);
     }));
   }
@@ -118,7 +118,7 @@ class WorldMap extends THREE.Group {
     }
 
     this.terrainManager.unloadChunk(index, chunk);
-    this.doodadManager.unloadChunk(index, chunk.doodadEntries);
+    // this.doodadManager.unloadChunk(index, chunk.doodadEntries);
     this.wmoManager.unloadChunk(index, chunk.wmoEntries);
 
     this.queuedChunks.delete(index);

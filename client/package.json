@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "PORT=3001 DANGEROUSLY_DISABLE_HOST_CHECK=true node scripts/start.js",
+    "start": "BROWSER=none NODE_ENV=development PORT=3001 DANGEROUSLY_DISABLE_HOST_CHECK=true node scripts/start.js",
     "build": "node scripts/build.js",
     "test": "node scripts/test.js",
     "build:beta": "NODE_ENV=production npm run build",
@@ -27,14 +27,13 @@
     "@typescript-eslint/eslint-plugin": "^5.54.0",
     "@typescript-eslint/parser": "^5.54.0",
     "awaitqueue": "^3.0.1",
-    "babel-eslint": "10.1.0",
     "babel-jest": "^29.5.0",
     "babel-loader": "9.1.2",
     "babel-plugin-named-asset-import": "^0.3.8",
     "babel-preset-react-app": "^10.0.1",
     "bitset": "^5.1.1",
     "bowser": "^2.11.0",
-    "browserify-zlib": "^0.2.0",
+    "buffer": "^6.0.3",
     "byte-buffer": "^2.0.0",
     "camelcase": "^7.0.1",
     "case-sensitive-paths-webpack-plugin": "2.4.0",
@@ -43,15 +42,11 @@
     "easy-mediasoup-v3-client": "2.1.42",
     "enable3d": "^0.25.3",
     "eslint-config-react-app": "^7.0.1",
-    "eslint-plugin-flowtype": "8.0.3",
-    "eslint-plugin-import": "2.27.5",
-    "eslint-plugin-jsx-a11y": "6.7.1",
-    "eslint-plugin-react": "7.32.2",
-    "eslint-plugin-react-hooks": "^4.6.0",
     "file-loader": "6.2.0",
     "fs-extra": "^11.1.0",
     "gl-matrix": "^3.4.3",
     "glslify-import": "3.1.0",
+    "glslify-import-loader": "^0.1.2",
     "glslify-loader": "2.0.0",
     "html-webpack-plugin": "5.5.0",
     "identity-obj-proxy": "3.0.0",
@@ -72,15 +67,18 @@
     "postcss-normalize": "10.0.1",
     "postcss-preset-env": "8.0.1",
     "postcss-safe-parser": "6.0.0",
+    "postprocessing": "^6.30.1",
     "raw-loader": "^4.0.2",
     "react": "^18.2.0",
     "react-app-polyfill": "^3.0.0",
     "react-dev-utils": "^12.0.1",
     "react-dom": "^18.2.0",
     "react-joystick": "^1.0.3",
+    "react-refresh": "^0.14.0",
     "react-router-dom": "^6.8.2",
     "resolve": "1.22.1",
     "resolve-url-loader": "5.0.0",
+    "restructure": "0.5.0",
     "rxjs": "^7.8.0",
     "sass-loader": "13.2.0",
     "semver": "7.3.8",
@@ -88,30 +86,47 @@
     "stream": "^0.0.2",
     "style-loader": "3.3.1",
     "terser-webpack-plugin": "5.3.6",
-    "three": "0.150.1",
+    "three": "^0.150.1",
+    "three-mesh-bvh": "^0.5.23",
     "ts-pnp": "1.2.0",
     "typescript": "^4.9.5",
     "url-loader": "4.1.1",
+    "util": "^0.12.5",
     "webpack": "^5.75.0",
     "webpack-dev-server": "4.11.1",
     "webpack-manifest-plugin": "5.0.0",
     "workbox-webpack-plugin": "6.5.4",
-    "zlib": "^1.0.5"
+    "zlib": "^1.0.5",
+    "zlib-browserify": "^0.0.3"
   },
   "devDependencies": {
     "@testing-library/react": "^14.0.0",
     "@types/react-router-dom": "^5.3.3",
     "@types/three": "^0.149.0",
+    "assert": "^2.0.0",
     "css-minimizer-webpack-plugin": "^4.2.2",
     "dotenv-expand": "^10.0.0",
     "eslint": "^8.35.0",
     "eslint-webpack-plugin": "^4.0.0",
+    "ffi-napi": "^4.0.3",
+    "https-browserify": "^1.0.0",
     "node-sass": "^8.0.0",
+    "os": "^0.1.2",
+    "os-browserify": "^0.3.0",
+    "react-app-rewired": "^2.1.9",
+    "ref-napi": "^3.0.3",
+    "ref-struct-napi": "^1.1.1",
     "stats-js": "^1.0.1",
+    "stream-browserify": "^3.0.0",
+    "stream-http": "^3.2.0",
+    "temp": "^0.9.4",
     "worker-loader": "^3.0.8"
   },
   "eslintConfig": {
-    "extends": "react-app"
+    "extends": "react-app",
+    "env": {
+      "NODE_ENV": "development"
+    }
   },
   "browserslist": {
     "production": [
@@ -173,11 +188,6 @@
     "watchPlugins": [
       "jest-watch-typeahead/filename",
       "jest-watch-typeahead/testname"
-    ]
-  },
-  "babel": {
-    "presets": [
-      "react-app"
     ]
   }
 }

@@ -1,10 +1,17 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import * as THREE from 'three';
+import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh';
 import App from './app';
 import './index.scss';
 import * as serviceWorker from './serviceWorker';
 import './styles/ui/index.scss';
 
+window['THREE'] = THREE;
+
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 const container = document.getElementById('root');
 if (container) {

@@ -1,7 +1,7 @@
-import { MessageType } from "./types";
 import Webrtc from ".";
-import { EntityHandler } from "../entity/entity";
 import World from "../../world";
+import { EntityHandler } from "../entity/entity";
+import { MessageType } from "./types";
 
 export class MessageHandler {
   public static subscribers: Map<MessageType, Function[]> = new Map();

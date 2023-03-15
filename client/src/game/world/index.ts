@@ -1,14 +1,15 @@
 // import * as THREE from "three";
 import * as THREE from 'three';
 import Player from "../classes/player";
-import spots from "./spots";
 import Unit from "../classes/unit";
+import spots from "./spots";
 
+import { EventEmitter } from "events";
+import { GameHandler } from '../../network/game/handler';
+import { GameSession } from '../../network/session';
 import M2Blueprint from "../pipeline/m2/blueprint";
 import WorldMap from "./map";
-import { EventEmitter } from "events";
-import { GameSession } from '../../network/session';
-import { GameHandler } from '../../network/game/handler';
+
 export default class World extends EventEmitter {
   public scene: THREE.Scene;
   public debugScene: THREE.Scene;
@@ -17,12 +18,12 @@ export default class World extends EventEmitter {
   public map: WorldMap | null = null;
   public session: GameSession;
   public game: GameHandler;
-
   // private skybox: THREE.Mesh;
   constructor(game: GameHandler) {
     super();
     console.log(game)
     console.log('WORLD GAME', game)
+    window['world'] = this;
     this.scene = new THREE.Scene();
     this.scene.matrixAutoUpdate = false;
     this.debugScene = new THREE.Scene();
@@ -34,6 +35,37 @@ export default class World extends EventEmitter {
 
     this.player.on("map:change", this.changeMap.bind(this));
     this.player.on("position:change", this.changePosition.bind(this));
+    
+    // debugger;
+    // let visualizer: MeshBVHVisualizer;
+    // setInterval(() => {
+    //   const staticGenerator = new StaticGeometryGenerator( this.scene );
+    //   staticGenerator.attributes = [ 'position' ];
+    //   const mergedGeometry = staticGenerator.generate();
+    //   mergedGeometry.computeBoundsTree();
+
+    //   if (ColliderManager.collidableMesh) {
+    //     ColliderManager.collidableMesh.geometry = mergedGeometry;
+    //     visualizer && visualizer.update();
+    //   }
+
+    //   if (!this.scene.children.find(x => x.name === 'MeshBVHVisualizer')) {
+    //     // debugger;
+        
+    //     // mergedGeometry.boundsTree = new MeshBVH( mergedGeometry);
+    //     ColliderManager.collidableMesh = new THREE.Mesh( mergedGeometry );
+    //     ColliderManager.collidableMesh.name = 'MeshBVHVCollider'
+    //     ColliderManager.collidableMesh.material = new THREE.MeshStandardMaterial({wireframe: true, color: new THREE.Color(0xffffff)});
+
+    //     visualizer = new MeshBVHVisualizer( ColliderManager.collidableMesh, 10 );
+    //     this.scene.add( visualizer );
+    //     this.scene.add( ColliderManager.collidableMesh );
+    //   }
+
+      
+
+      
+    // }, 5000)
   }
 
   run() {
@@ -42,7 +74,7 @@ export default class World extends EventEmitter {
     //   this.player = this.session.player;
     // }
 
-    this.player.worldport(this.player.mapId, [this.player.x, this.player.y, this.player.z]);
+    // this.player.worldport(this.player.mapId, [this.player.x, this.player.y, this.player.z]);
     // var geometry = new THREE.CubeGeometry(1000, 1000, 1000);
     // var cubeMaterials = [
     //   new THREE.MeshBasicMaterial({ map: new THREE.TextureLoader().load('/yonder_ft.jpg'), side: THREE.DoubleSide }), //front side
@@ -76,6 +108,7 @@ export default class World extends EventEmitter {
       } else {
         // let spot: any = spots[spots.length - 2]
         let spot: any = spots.find(x => x.id === "dun murog")
+        
         // let spot: any = spots.find(x => x.id === 2)
         // let spot: any = spots.find(x => x.id === "stormwind")
         // let spot: any = spots.find(x => x.id === "ogrimar")
@@ -90,7 +123,6 @@ export default class World extends EventEmitter {
           spot = JSON.parse(lastLocation);
           console.log(spot)
         }
-
         this.player.worldport(spot.zoneId, spot.coords);
       }
     }
@@ -182,7 +214,7 @@ export default class World extends EventEmitter {
       entity.update(delta);
 
       if (model.receivesAnimationUpdates && model.animations.length > 0) {
-        model.animations.update(delta);
+        model.animationManager.update(delta);
       }
 
       if (cameraMoved && model.billboards.length > 0) {

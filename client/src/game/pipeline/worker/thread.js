@@ -1,5 +1,5 @@
 // eslint-disable-next-line import/no-webpack-loader-syntax
-import Worker from 'worker-loader!./'
+import Worker from 'worker-loader!./';
 class Thread {
 
   constructor() {

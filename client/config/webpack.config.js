@@ -292,7 +292,18 @@ module.exports = function (webpackEnv) {
         new CssMinimizerPlugin(),
       ],
     },
+    stats: {
+      children: true,
+    },
     resolve: {
+      fallback: {
+        process: require.resolve("process/browser"),
+        zlib: require.resolve("zlib-browserify"),
+        stream: require.resolve("stream-browserify"),
+        util: require.resolve("util"),
+        buffer: require.resolve("buffer"),
+        asset: require.resolve("assert"),
+      },
       // This allows you to set a fallback for where webpack should look for modules.
       // We placed these paths second because we want `node_modules` to "win"
       // if there are any conflicts. This matches Node resolution mechanism.
@@ -310,6 +321,7 @@ module.exports = function (webpackEnv) {
         .map(ext => `.${ext}`)
         .filter(ext => useTypeScript || !ext.includes('ts')),
       alias: {
+        'stream': 'stream-browserify',
         // Support React Native Web
         // https://www.smashingmagazine.com/2016/08/a-glimpse-into-the-future-with-react-native-for-web/
         'react-native': 'react-native-web',
@@ -351,6 +363,20 @@ module.exports = function (webpackEnv) {
           // match the requirements. When no loader matches it will fall
           // back to the "file" loader at the end of the loader list.
           oneOf: [
+            {
+              test: /\.(frag|vert|glsl)$/,
+              type: 'asset/source',
+              use: [
+                {
+                  loader: 'glslify-loader',
+                  options: {
+                    transform: [
+                      ['glslify-import']
+                    ]
+                  }
+                }
+              ]
+            },
             // TODO: Merge this config once `image/avif` is in the mime-db
             // https://github.com/jshttp/mime-db
             {
@@ -563,6 +589,10 @@ module.exports = function (webpackEnv) {
       ].filter(Boolean),
     },
     plugins: [
+      new webpack.ProvidePlugin({
+          Buffer: ['buffer', 'Buffer'],
+          process: "process/browser",
+      }),
       // Generates an `index.html` file with the <script> injected.
       new HtmlWebpackPlugin(
         Object.assign(

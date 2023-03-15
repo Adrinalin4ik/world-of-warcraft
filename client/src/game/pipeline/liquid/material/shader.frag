@@ -1,6 +1,6 @@
 varying vec2 vUv;
 
-uniform sampler2D texture;
+uniform sampler2D texture_sampler;
 
 varying vec4 vertexColor;
 varying vec3 vertexWorldNormal;
@@ -81,7 +81,7 @@ vec3 createGlobalLight(vec3 lightDirection, vec3 lightNormal, vec3 diffuseLight,
   vec3 lightNormal = normalize(vertexWorldNormal);
   vec3 globalLight = createGlobalLight(lightDirection, lightNormal, diffuseLight, ambientLight);
 
-   vec4 color = texture2D(texture, vUv);
+   vec4 color = texture2D(texture_sampler, vUv);
 
    // // Knock out transparent pixels in blending mode 1
   // if (blendingMode == 1 && color.a < (10.0 / 255.0)) {

@@ -83,6 +83,7 @@ class Controls extends React.Component<IProp, IUpdate> {
     super(props);
     this.unit = props.player;
     this.camera = props.camera;
+    this.unit.camera = this.camera;
     console.log('Camera', this.camera);
     // Based on THREE's OrbitControls
     // See: http://threejs.org/examples/js/controls/OrbitControls.js
@@ -270,14 +271,15 @@ class Controls extends React.Component<IProp, IUpdate> {
       Math.sqrt(this.offset.x * this.offset.x + this.offset.z * this.offset.z),
       this.offset.y
     );
-
     theta += this.thetaDelta;
     phi += this.phiDelta;
-
+    
     // Limit vertical orbit
     phi = Math.max(this.minPhi, Math.min(this.maxPhi, phi));
     phi = Math.max(this.EPS, Math.min(Math.PI - this.EPS, phi));
-
+    
+    this.unit.theta = theta;
+    this.unit.phi = phi;
     let radius = this.offset.length() * this.scale;
 
     // Limit zoom distance

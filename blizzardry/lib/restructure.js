@@ -1,15 +1,16 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-exports.default = undefined;
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = _restructure2.default;
-module.exports = exports['default'];
+var _restructure = require("restructure");
+Object.keys(_restructure).forEach(function (key) {
+  if (key === "default" || key === "__esModule") return;
+  if (key in exports && exports[key] === _restructure[key]) return;
+  Object.defineProperty(exports, key, {
+    enumerable: true,
+    get: function get() {
+      return _restructure[key];
+    }
+  });
+});

@@ -1,9 +1,6 @@
+import { vec4 } from 'gl-matrix';
 import * as THREE from 'three';
-import { PlaneHelper } from '../../../utils/plane-helper';
-import { FrustumHelper } from '../../../utils/frustum-helper';
 import THREEUtil from '../../../utils/three-util';
-import {vec4, vec3} from 'gl-matrix';
-import DebugPanel from '../../../../pages/game/debug/debug'
 class WMOPortalView extends THREE.Mesh {
 
   constructor(portal, geometry, material) {
@@ -12,8 +9,11 @@ class WMOPortalView extends THREE.Mesh {
     this.matrixAutoUpdate = false;
 
     this.portal = portal;
-    this.geometry = geometry;
+    this.legacyGeometry = geometry;
     this.material = material;
+
+    this.geometry = geometry.toBufferGeometry();
+    this.geometry.computeBoundsTree();
   }
 
   clone() {
@@ -27,8 +27,8 @@ class WMOPortalView extends THREE.Mesh {
     // let local = this.worldToLocal(origin);
     // local = new THREE.Vector3(-local.x, -local.y, local.z)
     // Obtain vertices in world space
-    for (let vindex = 0, vcount = this.geometry.vertices.length; vindex < vcount; ++vindex) {
-      const local = this.geometry.vertices[vindex].clone();
+    for (let vindex = 0, vcount = this.legacyGeometry.vertices.length; vindex < vcount; ++vindex) {
+      const local = this.legacyGeometry.vertices[vindex].clone();
       const world = this.localToWorld(local);
       const {x, y, z} = world;
       vertices.push([x, y, z]);
@@ -95,8 +95,8 @@ class WMOPortalView extends THREE.Mesh {
     // let local = this.worldToLocal(origin);
     // local = new THREE.Vector3(-local.x, -local.y, local.z)
     // Obtain vertices in world space
-    for (let vindex = 0, vcount = this.geometry.vertices.length; vindex < vcount; ++vindex) {
-      const local = this.geometry.vertices[vindex].clone();
+    for (let vindex = 0, vcount = this.legacyGeometry.vertices.length; vindex < vcount; ++vindex) {
+      const local = this.legacyGeometry.vertices[vindex].clone();
       const world = this.localToWorld(local);
       vertices.push(world);
     }
@@ -195,7 +195,7 @@ class WMOPortalView extends THREE.Mesh {
    */
   intersectFrustum(frustum) {
     const planes = frustum.planes;
-    const vertices = this.geometry.vertices;
+    const vertices = this.legacyGeometry.vertices;
 
     for (let pindex = 0, pcount = planes.length; pindex < pcount; ++pindex) {
       const plane = planes[pindex];

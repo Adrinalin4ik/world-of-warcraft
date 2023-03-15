@@ -1,7 +1,6 @@
-import ContentQueue from '../utils/content-queue';
 import WMO from '../pipeline/wmo';
 import gameSettings from '../settings';
-
+import ContentQueue from '../utils/content-queue';
 class WMOManager {
 
   static LOAD_ENTRY_INTERVAL = gameSettings.wmo.loadInterval;

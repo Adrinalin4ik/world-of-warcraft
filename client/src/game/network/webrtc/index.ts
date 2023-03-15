@@ -1,8 +1,8 @@
-import geckos, { ClientChannel} from '@geckos.io/client';
-import Peer from './peer';
+import geckos, { ClientChannel } from '@geckos.io/client';
 import Player from '../../classes/player';
 import World from '../../world';
 import { MessageHandler } from './message_handler';
+import Peer from './peer';
 
 export default class Webrtc {
   public peers: Map<string, Peer> = new Map();

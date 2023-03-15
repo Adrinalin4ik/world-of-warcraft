@@ -1,13 +1,11 @@
 import EventEmitter from 'events';
-import SplineType from './../spline-type';
-import SplineFlag from './../spline-flag';
-import { GameHandler } from '../../handler';
-import zlib from 'browserify-zlib';
-import Packet from '../../../net/packet';
-import { getUpdateFieldName, ObjectType, UpdateFlags, UpdateType } from '../enums';
-import GamePacket from '../../packet';
-import Unit from '../../../../game/classes/unit';
 import * as THREE from 'three';
+import zlib from 'zlib-browserify';
+import Unit from '../../../../game/classes/unit';
+import Packet from '../../../net/packet';
+import { GameHandler } from '../../handler';
+import GamePacket from '../../packet';
+import { getUpdateFieldName, ObjectType, UpdateFlags, UpdateType } from '../enums';
 
 export class UpdateObjectHandler extends EventEmitter {
   private game: GameHandler;

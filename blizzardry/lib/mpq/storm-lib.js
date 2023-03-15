@@ -1,46 +1,31 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-exports.HANDLEPtr = exports.FIND_DATA = undefined;
-
-var _ffiNapi = require('ffi-napi');
-
-var _ffiNapi2 = _interopRequireDefault(_ffiNapi);
-
-var _refNapi = require('ref-napi');
-
-var _refNapi2 = _interopRequireDefault(_refNapi);
-
-var _refStructNapi = require('ref-struct-napi');
-
-var _refStructNapi2 = _interopRequireDefault(_refStructNapi);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-var _ref$types = _refNapi2.default.types,
-    bool = _ref$types.bool,
-    int32 = _ref$types.int32,
-    uint32 = _ref$types.uint32;
-
-var string = _refNapi2.default.types.CString;
-
-var voidPtr = _refNapi2.default.refType(_refNapi2.default.types.void);
-
-var FixedString = function (length) {
+exports["default"] = exports.HANDLEPtr = exports.FIND_DATA = void 0;
+var _ffiNapi = _interopRequireDefault(require("ffi-napi"));
+var _refNapi = _interopRequireDefault(require("ref-napi"));
+var _refStructNapi = _interopRequireDefault(require("ref-struct-napi"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _ref$types = _refNapi["default"].types,
+  bool = _ref$types.bool,
+  int32 = _ref$types.int32,
+  uint32 = _ref$types.uint32;
+var string = _refNapi["default"].types.CString;
+var voidPtr = _refNapi["default"].refType(_refNapi["default"].types["void"]);
+var FixedString = function FixedString(length) {
   return {
     size: length,
     alignment: length,
     indirection: 1,
     name: 'pointer',
-    get: function (buffer, offset) {
+    get: function get(buffer, offset) {
       return buffer.readCString(offset);
     }
   };
 };
-
-var FIND_DATA = (0, _refStructNapi2.default)({
+var FIND_DATA = (0, _refStructNapi["default"])({
   filename: FixedString(1024),
   name: string,
   hashIndex: uint32,
@@ -52,22 +37,16 @@ var FIND_DATA = (0, _refStructNapi2.default)({
   fileTimeHi: uint32,
   locale: uint32
 });
-
+exports.FIND_DATA = FIND_DATA;
 var HANDLE = voidPtr;
-var HANDLEPtr = _refNapi2.default.refType(HANDLE);
-
+var HANDLEPtr = _refNapi["default"].refType(HANDLE);
+exports.HANDLEPtr = HANDLEPtr;
 var LPDWORD = voidPtr;
-
-exports.default = new _ffiNapi2.default.Library('libstorm', {
-
+var _default = new _ffiNapi["default"].Library('libstorm', {
   SFileGetLocale: [uint32, []],
-
   SFileSetLocale: [uint32, [uint32]],
-
   SFileOpenArchive: [bool, [string, uint32, uint32, HANDLEPtr]],
-
-  SFileCreateArchive: [_refNapi2.default.types.char, [string, uint32, uint32, HANDLEPtr]],
-
+  SFileCreateArchive: [_refNapi["default"].types["char"], [string, uint32, uint32, HANDLEPtr]],
   // SFileCreateArchive2: [ref.types.char, [
   //   TCHARPtr,
   //   _SFILE_CREATE_MPQPtr,
@@ -83,7 +62,6 @@ exports.default = new _ffiNapi2.default.Library('libstorm', {
   // ]]
 
   SFileCloseArchive: [bool, [HANDLE]],
-
   // SFileAddListFile: [ref.types.int32, [
   //   HANDLE,
   //   ref.types.CString
@@ -125,21 +103,13 @@ exports.default = new _ffiNapi2.default.Library('libstorm', {
   // ]]
 
   SFileOpenPatchArchive: [bool, [HANDLE, string, string, uint32]],
-
   SFileIsPatchedArchive: [bool, [HANDLE]],
-
   SFileHasFile: [bool, [HANDLE, string]],
-
   SFileOpenFileEx: [bool, [HANDLE, string, uint32, HANDLEPtr]],
-
   SFileGetFileSize: [uint32, [HANDLE, LPDWORD]],
-
   SFileSetFilePointer: [uint32, [HANDLE, int32, int32, uint32]],
-
   SFileReadFile: [bool, [HANDLE, voidPtr, uint32, LPDWORD, voidPtr]],
-
   SFileCloseFile: [bool, [HANDLE]],
-
   // SFileGetFileInfo: [ref.types.char, [
   //   HANDLE,
   //   ref.types.uint32,
@@ -149,14 +119,12 @@ exports.default = new _ffiNapi2.default.Library('libstorm', {
   // ]]
 
   SFileGetFileName: [bool, [HANDLE, voidPtr]],
-
   // SFileFreeFileInfo: [ref.types.char, [
   //   voidPtr,
   //   ref.types.uint32
   // ]]
 
   SFileExtractFile: [bool, [HANDLE, string, string, uint32]],
-
   // SFileGetFileChecksums: [ref.types.char, [
   //   HANDLE,
   //   ref.types.CString,
@@ -181,11 +149,8 @@ exports.default = new _ffiNapi2.default.Library('libstorm', {
   // ]]
 
   SFileFindFirstFile: [HANDLE, [HANDLE, string, voidPtr, string]],
-
   SFileFindNextFile: [bool, [HANDLE, voidPtr]],
-
   SFileFindClose: [bool, [HANDLE]],
-
   // SListFileFindFirstFile: [HANDLE, [
   //   HANDLE,
   //   ref.types.CString,
@@ -322,5 +287,4 @@ exports.default = new _ffiNapi2.default.Library('libstorm', {
 
   GetLastError: [int32, []]
 });
-exports.FIND_DATA = FIND_DATA;
-exports.HANDLEPtr = HANDLEPtr;
+exports["default"] = _default;

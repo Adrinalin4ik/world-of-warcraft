@@ -1,30 +1,20 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-var _entity = require('../entity');
-
-var _entity2 = _interopRequireDefault(_entity);
-
-var _localizedStringRef = require('../localized-string-ref');
-
-var _localizedStringRef2 = _interopRequireDefault(_localizedStringRef);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = (0, _entity2.default)({
-  id: _restructure2.default.uint32le,
-  xp: _restructure2.default.uint32le,
-  factor: _restructure2.default.floatle,
-  outdoorHours: _restructure2.default.floatle,
-  innHours: _restructure2.default.floatle,
-  name: _localizedStringRef2.default,
-  threshold: _restructure2.default.floatle
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+var _entity = _interopRequireDefault(require("../entity"));
+var _localizedStringRef = _interopRequireDefault(require("../localized-string-ref"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _default = (0, _entity["default"])({
+  id: _restructure["default"].uint32le,
+  xp: _restructure["default"].uint32le,
+  factor: _restructure["default"].floatle,
+  outdoorHours: _restructure["default"].floatle,
+  innHours: _restructure["default"].floatle,
+  name: _localizedStringRef["default"],
+  threshold: _restructure["default"].floatle
 });
-module.exports = exports['default'];
+exports["default"] = _default;

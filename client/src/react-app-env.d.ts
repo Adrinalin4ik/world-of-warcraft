@@ -3,6 +3,15 @@
 /// <reference types="react-dom" />
 /// <reference types="three" />
 
+declare module '*.frag' {
+  const value: string
+  export default value
+}
+declare module '*.vert' {
+  const value: string
+  export default value
+}
+
 declare module 'browserify-zlib';
 
 declare module 'byte-buffer' {

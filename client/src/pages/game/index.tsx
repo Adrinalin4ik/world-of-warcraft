@@ -2,6 +2,7 @@ import * as Bowser from "bowser";
 import React from 'react';
 import Stats from 'stats-js';
 // import * as THREE from 'three';
+import { DepthPass, EffectComposer } from 'postprocessing';
 import * as THREE from 'three';
 import spots from '../../game/world/spots';
 import { GameHandler } from '../../network/game/handler';
@@ -15,6 +16,7 @@ interface IGameProps {
 }
 interface IGameScreenState {
   renderer: THREE.WebGLRenderer | null;
+  composer: EffectComposer,
   currentLocation: string | number
 }
 
@@ -29,7 +31,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private debugRenderer: THREE.WebGLRenderer | null = null;
   private clock: THREE.Clock = new THREE.Clock();
   private game: GameHandler;
-  private debug = true;
+  private debug = false;
+  private debugCameraRange = 120;
   //refs
   private controls = React.createRef<Controls>()
   private debugPanel = React.createRef<DebugPanel>()
@@ -37,14 +40,18 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
 
   private isMobile: boolean = false;
 
+  public depthPass: DepthPass;
+
   public state: IGameScreenState = {
     renderer: null,
+    composer: null,
     currentLocation: ''
   }
 
   constructor(props: IGameProps) {
     super(props);
     
+    window['GameScreen'] = this;
     this.game = this.props.session.game;
 
     const browser = Bowser.getParser(window.navigator.userAgent);
@@ -54,26 +61,44 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.stats.showPanel(0);
     
     this.camera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
+    this.camera.name = 'MainCamera';
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(15, 0, 7);
 
     this.cameraHelper = new THREE.CameraHelper( this.camera );
     this.game.world.scene.add(this.cameraHelper);
     this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
+    this.debugCamera.name = 'DebugCamera';
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
   }
   
   componentDidMount() {
-    this.renderer = new THREE.WebGLRenderer({
+    const renderer = this.renderer = new THREE.WebGLRenderer({
       alpha: true,
       antialias: false,
-      stencil: false,
       powerPreference: 'high-performance',
-      canvas: this.refs.canvas as HTMLCanvasElement
+      canvas: this.refs.canvas as HTMLCanvasElement,
     });
+    
+    const composer = new EffectComposer(renderer);
 
-    this.setState({renderer: this.renderer})
+    console.log('Renderer', renderer);
+
+    // window['depthPass'] = this.depthPass = new DepthPass(this.game.world.scene, this.camera);
+    // this.depthPass.renderToScreen = false;
+
+    // const depthTexture = this.depthPass.texture;
+    // depthTexture.wrapS = THREE.RepeatWrapping;
+    // depthTexture.wrapT = THREE.RepeatWrapping;
+    // depthTexture.generateMipmaps = false;
+    // depthTexture.magFilter = THREE.NearestFilter;
+    // depthTexture.minFilter = THREE.NearestFilter;
+
+    this.setState({
+      renderer,
+      composer
+    })
     
     if (this.debug) {
       this.debugRenderer = new THREE.WebGLRenderer({
@@ -135,7 +160,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       if (this.debugRenderer) {
         this.debugCamera.position.set(this.camera.position.x, 
           this.camera.position.y, 
-          this.camera.position.z + 120)
+          this.camera.position.z + this.debugCameraRange)
           this.debugRenderer.render(this.game.world.scene, this.debugCamera);
       }
       

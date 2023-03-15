@@ -36,11 +36,11 @@ class WMOPortal {
   }
 
   createView() {
-    return new WMOPortalView(this, this.geometry, this.material);
+    return new WMOPortalView(this, this.legacyGeometry, this.material);
   }
 
   createGeometry(vertices) {
-    const geometry = this.geometry = new Geometry();
+    const geometry = this.legacyGeometry = new Geometry();
 
     const vertexCount = vertices.length;
 
@@ -53,6 +53,9 @@ class WMOPortal {
     for (let findex = 0; findex < faceCount; ++findex) {
       geometry.faces.push(new Face3(findex + 1, findex + 2, 0));
     }
+
+    this.geometry = geometry.toBufferGeometry();
+    this.geometry.computeBoundsTree();
   }
 
   createMaterial() {

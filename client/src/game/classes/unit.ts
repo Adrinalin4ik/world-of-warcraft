@@ -1,6 +1,7 @@
 // import * as THREE from "three";
 import * as THREE from 'three';
 import { Vector3 } from 'three';
+import DebugPanel from '../../pages/game/debug/debug';
 import DBC from "../pipeline/dbc";
 import M2 from "../pipeline/m2";
 import M2Blueprint from "../pipeline/m2/blueprint";
@@ -53,7 +54,7 @@ class Unit extends Entity {
   public rotateSpeed: number = 2;
   public moveSpeed: number = 10; //10
   public flySpeed: number = 10; //10
-  public gravity: number = 10; //10;
+  public gravity: number = -30; //10;
   public jumpVelocityConst: number = 16;
   public jumpVelocity: number = 0;
   public isFly: boolean = true;
@@ -129,9 +130,10 @@ class Unit extends Entity {
     return this.rotation.z
   }
   
-  get isOnGround() {
-    return this.groundDistance <= this.groundZeroConstant;
-  }
+  // get isOnGround() {
+  //   return this.groundDistance <= this.groundZeroConstant;
+  // }
+  isOnGround = false;
 
   get isFall() {
     return !this.isOnGround;
@@ -170,12 +172,12 @@ class Unit extends Entity {
       this._displayId = displayId;
       this.displayInfo = displayInfo;
       const modelID = displayInfo.modelID;
-      DBC.load("CreatureModelData", modelID).then((modelData: DBC) => {
+      return DBC.load("CreatureModelData", modelID).then((modelData: DBC) => {
         this.modelData = modelData;
         this.modelData.path = this.modelData.file.match(/^(.+?)(?:[^\\]+)$/)[1];
         this.displayInfo!.modelData = this.modelData;
-
-        M2Blueprint.load(this.modelData.file).then((m2: M2) => {
+        return M2Blueprint.load(this.modelData.file).then((m2: M2) => {
+          console.error('here', displayInfo)
           this.model = m2;
           this.model.displayInfo = this.displayInfo;
 
@@ -245,8 +247,8 @@ class Unit extends Entity {
        38 - rotate
        133 - backward
       */
-      m2.animations.playAnimation(this.currentAnimationIndex);
-      m2.animations.playAllSequences();
+      m2.animationManager.playAnimation(this.currentAnimationIndex);
+      m2.animationManager.playAllSequences();
     }
 
     this.emit("model:change", this, this._model, m2);
@@ -259,10 +261,10 @@ class Unit extends Entity {
     repetitions: number = -1
   ) {
     if (!this.model) return;
-    const isRunning = this.model.animations.currentAnimation.isRunning();
+    const isRunning = this.model.animationManager.currentAnimation?.isRunning();
     if (isRunning) {
       if (
-        this.model.animations.currentAnimation.repetitions === Infinity &&
+        this.model.animationManager.currentAnimation.repetitions === Infinity &&
         this.currentAnimationIndex !== index
       ) {
         this.startAnimation(index, repetitions);
@@ -273,20 +275,20 @@ class Unit extends Entity {
   }
 
   startAnimation(index: number, repetitions: number) {
-    this.stopAnimation();
-    this.model.animations.playAnimation(
-      index,
-      repetitions === -1 ? Infinity : repetitions
-    );
-    this.currentAnimationIndex = index;
-    this.emit("animation:play", index, repetitions);
+    // this.stopAnimation();
+    // this.model.animationManager.playAnimation(
+    //   index,
+    //   repetitions === -1 ? Infinity : repetitions
+    // );
+    // this.currentAnimationIndex = index;
+    // this.emit("animation:play", index, repetitions);
   }
 
   stopAnimation(index?: number) {
-    if (!this.model) return;
-    const animationIndex = index || this.currentAnimationIndex;
-    this.emit("animation:stop", animationIndex);
-    this.model.animations.stopAnimation(animationIndex);
+    // if (!this.model) return;
+    // const animationIndex = index || this.currentAnimationIndex;
+    // this.emit("animation:stop", animationIndex);
+    // this.model.animationManager.stopAnimation(animationIndex);
   }
 
   jump() {
@@ -521,9 +523,9 @@ class Unit extends Entity {
         this.changeRotation();
       }
 
-      if (this.moving.idle) {
-        this.setAnimation(Animation.idle);
-      }
+      // if (this.moving.idle) {
+      //   this.setAnimation(Animation.idle);
+      // }
     }
   }
 
@@ -544,17 +546,159 @@ class Unit extends Entity {
   }
 
   update(delta: number) {
-    this.updateGroundDistance();
+    // this.updateGroundDistance();
     if (this.isPlayer) {
       this.updateMoving(delta);
-      if (this.useGravity) {
-        this.updateGravity(delta);
-      }
+      // if (this.useGravity) {
+      //   this.updateGravity(delta);
+      // }
       this.applyTranslatePosition();
     } else {
       this.updateSplineFollowing(delta);
     }
+    // this.updatePlayer(delta);
     this.clear();
+  }
+
+  velocity = new THREE.Vector3();
+  capsuleInfo = {
+		radius: 0.5,
+		segment: new THREE.Line3( new THREE.Vector3(), new THREE.Vector3( 0, - 1.0, 0.0 ) )
+	};
+  tempBox = new THREE.Box3();
+  tempMat = new THREE.Matrix4();
+  tempSegment = new THREE.Line3();
+  tempVector2 = new THREE.Vector3();
+  tempVector = new THREE.Vector3();
+  upVector = new THREE.Vector3( 0, 1, 0 );
+  theta: number;
+  phi: number;
+  camera: THREE.PerspectiveCamera;
+
+  updatePlayer( delta ) {
+    if (!ColliderManager.collidableMesh.geometry.boundsTree) return;
+    
+    this.velocity.z += this.isOnGround ? 0 : delta * this.gravity;
+    this.position.addScaledVector( this.velocity, delta );
+  
+    // move the player
+    // const angle = controls.getAzimuthalAngle();
+    // const direction = this.camera.getWorldDirection(this.position);
+    const angle = this.theta//= direction.angleTo(this.position)
+
+    if ( this.moving.forward ) {
+  
+      this.tempVector.set( 0, 0, - 1 ).applyAxisAngle( this.upVector, angle );
+      this.position.addScaledVector( this.tempVector, this.moveSpeed * delta );
+  
+    }
+  
+    if ( this.moving.backward ) {
+  
+      this.tempVector.set( 0, 0, 1 ).applyAxisAngle( this.upVector, angle );
+      this.position.addScaledVector( this.tempVector, this.moveSpeed * delta );
+  
+    }
+  
+    if ( this.moving.strafeLeft ) {
+  
+      this.tempVector.set( - 1, 0, 0 ).applyAxisAngle( this.upVector, angle );
+      this.position.addScaledVector( this.tempVector, this.moveSpeed * delta );
+  
+    }
+  
+    if ( this.moving.strafeRight ) {
+  
+      this.tempVector.set( 1, 0, 0 ).applyAxisAngle( this.upVector, angle );
+      this.position.addScaledVector( this.tempVector, this.moveSpeed * delta );
+  
+    }
+  
+    this.view.updateMatrixWorld();
+  
+    // adjust player position based on collisions
+    const capsuleInfo = this.capsuleInfo;
+    this.tempBox.makeEmpty();
+    this.tempMat.copy( ColliderManager.collidableMesh.matrixWorld ).invert();
+    this.tempSegment.copy( capsuleInfo.segment );
+  
+    // get the position of the capsule in the local space of the collider
+    this.tempSegment.start.applyMatrix4( this.view.matrixWorld ).applyMatrix4( this.tempMat );
+    this.tempSegment.end.applyMatrix4( this.view.matrixWorld ).applyMatrix4( this.tempMat );
+  
+    // get the axis aligned bounding box of the capsule
+    this.tempBox.expandByPoint( this.tempSegment.start );
+    this.tempBox.expandByPoint( this.tempSegment.end );
+  
+    this.tempBox.min.addScalar( - capsuleInfo.radius );
+    this.tempBox.max.addScalar( capsuleInfo.radius );
+  
+    ColliderManager.collidableMesh.geometry.boundsTree.shapecast( {
+  
+      intersectsBounds: box => box.intersectsBox( this.tempBox ),
+  
+      intersectsTriangle: tri => {
+  
+        // check if the triangle is intersecting the capsule and adjust the
+        // capsule position if it is.
+        const triPoint = this.tempVector;
+        const capsulePoint = this.tempVector2;
+  
+        const distance = tri.closestPointToSegment( this.tempSegment, triPoint, capsulePoint );
+        
+        if ( distance < capsuleInfo.radius ) {
+          
+          const depth = capsuleInfo.radius - distance;
+          const direction = capsulePoint.sub( triPoint ).normalize();
+  
+          this.tempSegment.start.addScaledVector( direction, depth );
+          this.tempSegment.end.addScaledVector( direction, depth );
+  
+        }
+  
+      }
+  
+    } );
+  
+    // get the adjusted position of the capsule collider in world space after checking
+    // triangle collisions and moving it. capsuleInfo.segment.start is assumed to be
+    // the origin of the player model.
+    const newPosition = this.tempVector;
+    newPosition.copy( this.tempSegment.start ).applyMatrix4( ColliderManager.collidableMesh.matrixWorld );
+  
+    // check how much the collider was moved
+    const deltaVector = this.tempVector2;
+    deltaVector.subVectors( newPosition, this.position );
+  
+    // if the player was primarily adjusted vertically we assume it's on something we should consider ground
+    this.isOnGround = deltaVector.z > Math.abs( delta * this.velocity.z * 0.25 );
+    DebugPanel.test2 = deltaVector.z.toFixed();
+    const offset = Math.max( 0.0, deltaVector.length() - 1e-5 );
+    deltaVector.normalize().multiplyScalar( offset );
+  
+    // adjust the player model
+    this.position.add( deltaVector );
+  
+    if ( ! this.isOnGround ) {
+  
+      deltaVector.normalize();
+      this.velocity.addScaledVector( deltaVector,  deltaVector.dot( this.velocity ) );
+  
+    } else {
+  
+      this.velocity.set( 0, 0, 0 );
+  
+    }
+  
+    // adjust the camera
+  
+    // if the player has fallen too far below the level reset their position to the start
+    if ( this.position.y < - 25 ) {
+  
+      // reset();
+  
+    }
+  
   }
 
   // Обеспецивает хождение по земле

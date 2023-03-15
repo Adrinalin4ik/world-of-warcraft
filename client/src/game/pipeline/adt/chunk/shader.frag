@@ -1,3 +1,5 @@
+#include <packing>
+
 uniform int layerCount;
 uniform sampler2D alphaMaps[4];
 uniform sampler2D textures[4];

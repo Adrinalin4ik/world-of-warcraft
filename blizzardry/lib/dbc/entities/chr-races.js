@@ -1,54 +1,34 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-var _entity = require('../entity');
-
-var _entity2 = _interopRequireDefault(_entity);
-
-var _localizedStringRef = require('../localized-string-ref');
-
-var _localizedStringRef2 = _interopRequireDefault(_localizedStringRef);
-
-var _stringRef = require('../string-ref');
-
-var _stringRef2 = _interopRequireDefault(_stringRef);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = (0, _entity2.default)({
-  id: _restructure2.default.uint32le,
-  flags: _restructure2.default.uint32le,
-
-  factionID: _restructure2.default.uint32le,
-  explorationSoundID: _restructure2.default.uint32le,
-  maleDisplayID: _restructure2.default.uint32le,
-  femaleDisplayID: _restructure2.default.uint32le,
-
-  clientPrefix: _stringRef2.default,
-
-  skip: new _restructure2.default.Reserved(_restructure2.default.uint32le),
-
-  baseLanguage: _restructure2.default.uint32le,
-  resSicknessSpellID: _restructure2.default.uint32le,
-  splashSoundID: _restructure2.default.uint32le,
-  clientFileString: _stringRef2.default,
-  cinematicSequenceID: _restructure2.default.uint32le,
-
-  name: _localizedStringRef2.default,
-  nameFemale: _localizedStringRef2.default,
-  nameMale: _localizedStringRef2.default,
-
-  facialHairCustomization: _stringRef2.default,
-  facialHairCustomization2: _stringRef2.default,
-  hairCustomization: _stringRef2.default,
-
-  expansionID: _restructure2.default.uint32le
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+var _entity = _interopRequireDefault(require("../entity"));
+var _localizedStringRef = _interopRequireDefault(require("../localized-string-ref"));
+var _stringRef = _interopRequireDefault(require("../string-ref"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _default = (0, _entity["default"])({
+  id: _restructure["default"].uint32le,
+  flags: _restructure["default"].uint32le,
+  factionID: _restructure["default"].uint32le,
+  explorationSoundID: _restructure["default"].uint32le,
+  maleDisplayID: _restructure["default"].uint32le,
+  femaleDisplayID: _restructure["default"].uint32le,
+  clientPrefix: _stringRef["default"],
+  skip: new _restructure["default"].Reserved(_restructure["default"].uint32le),
+  baseLanguage: _restructure["default"].uint32le,
+  resSicknessSpellID: _restructure["default"].uint32le,
+  splashSoundID: _restructure["default"].uint32le,
+  clientFileString: _stringRef["default"],
+  cinematicSequenceID: _restructure["default"].uint32le,
+  name: _localizedStringRef["default"],
+  nameFemale: _localizedStringRef["default"],
+  nameMale: _localizedStringRef["default"],
+  facialHairCustomization: _stringRef["default"],
+  facialHairCustomization2: _stringRef["default"],
+  hairCustomization: _stringRef["default"],
+  expansionID: _restructure["default"].uint32le
 });
-module.exports = exports['default'];
+exports["default"] = _default;

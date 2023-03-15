@@ -10,9 +10,9 @@ interface IProp {
 class DebugPanel extends React.Component<IProp> {
 
 
-  private static test1: string = "";
-  private static test2: string = "";
-  private static test3: string = "";
+  public static test1: string = "";
+  public static test2: string = "";
+  public static test3: string = "";
 
   static vector3ToString(v: {x: number, y: number, z: number}) {
     return `${v.x}, ${v.y}, ${v.z}`

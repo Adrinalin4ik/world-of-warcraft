@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import DebugPanel from '../../pages/game/debug/debug';
 
 class LocationManager {
 
@@ -7,8 +6,11 @@ class LocationManager {
     this.map = map;
 
     this.raycaster = new THREE.Raycaster();
+    this.raycaster.firstHitOnly = true;
     this.raycastUp = new THREE.Vector3(0, 0, 1);
+    this.raycastUp.firstHitOnly = true;
     this.raycastDown = new THREE.Vector3(0, 0, -1);
+    this.raycastDown.firstHitOnly = true;
   }
 
   /**

@@ -1,48 +1,33 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-var _chunk = require('../chunked/chunk');
-
-var _chunk2 = _interopRequireDefault(_chunk);
-
-var _chunked = require('../chunked');
-
-var _chunked2 = _interopRequireDefault(_chunked);
-
-var _skipChunk = require('../chunked/skip-chunk');
-
-var _skipChunk2 = _interopRequireDefault(_skipChunk);
-
-var _types = require('../types');
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-var MOGP = (0, _chunk2.default)({
-  nameOffset: _restructure2.default.uint32le,
-  descriptionOffset: _restructure2.default.uint32le,
-  flags: _restructure2.default.uint32le,
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+var _chunk = _interopRequireDefault(require("../chunked/chunk"));
+var _chunked = _interopRequireDefault(require("../chunked"));
+var _skipChunk = _interopRequireDefault(require("../chunked/skip-chunk"));
+var _types = require("../types");
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var MOGP = (0, _chunk["default"])({
+  nameOffset: _restructure["default"].uint32le,
+  descriptionOffset: _restructure["default"].uint32le,
+  flags: _restructure["default"].uint32le,
   minBoundingBox: _types.Vec3Float,
   maxBoundingBox: _types.Vec3Float,
-  portalOffset: _restructure2.default.uint16le,
-  portalCount: _restructure2.default.uint16le,
-  batchCounts: new _restructure2.default.Struct({
-    a: _restructure2.default.uint16le,
-    b: _restructure2.default.uint16le,
-    c: _restructure2.default.int32le
+  portalOffset: _restructure["default"].uint16le,
+  portalCount: _restructure["default"].uint16le,
+  batchCounts: new _restructure["default"].Struct({
+    a: _restructure["default"].uint16le,
+    b: _restructure["default"].uint16le,
+    c: _restructure["default"].int32le
   }),
-  fogOffsets: new _restructure2.default.Array(_restructure2.default.uint8, 4),
-  unknown: new _restructure2.default.Reserved(_restructure2.default.uint32le),
-  groupID: _restructure2.default.uint32le,
-  unknowns: new _restructure2.default.Reserved(_restructure2.default.uint32le, 2),
-
-  batchOffsets: function () {
+  fogOffsets: new _restructure["default"].Array(_restructure["default"].uint8, 4),
+  unknown: new _restructure["default"].Reserved(_restructure["default"].uint32le),
+  groupID: _restructure["default"].uint32le,
+  unknowns: new _restructure["default"].Reserved(_restructure["default"].uint32le, 2),
+  batchOffsets: function batchOffsets() {
     return {
       a: 0,
       b: this.batchCounts.a,
@@ -50,72 +35,61 @@ var MOGP = (0, _chunk2.default)({
     };
   }
 });
-
-var MOPY = (0, _chunk2.default)({
-  triangles: new _restructure2.default.Array(new _restructure2.default.Struct({
-    flags: _restructure2.default.uint8,
-    materialID: _restructure2.default.int8
+var MOPY = (0, _chunk["default"])({
+  triangles: new _restructure["default"].Array(new _restructure["default"].Struct({
+    flags: _restructure["default"].uint8,
+    materialID: _restructure["default"].int8
   }), 'size', 'bytes')
 });
-
-var MOVI = (0, _chunk2.default)({
-  triangles: new _restructure2.default.Array(_restructure2.default.uint16le, 'size', 'bytes')
+var MOVI = (0, _chunk["default"])({
+  triangles: new _restructure["default"].Array(_restructure["default"].uint16le, 'size', 'bytes')
 });
-
-var MOVT = (0, _chunk2.default)({
-  vertices: new _restructure2.default.Array(_types.float32array3, 'size', 'bytes')
+var MOVT = (0, _chunk["default"])({
+  vertices: new _restructure["default"].Array(_types.float32array3, 'size', 'bytes')
 });
-
-var MONR = (0, _chunk2.default)({
-  normals: new _restructure2.default.Array(_types.float32array3, 'size', 'bytes')
+var MONR = (0, _chunk["default"])({
+  normals: new _restructure["default"].Array(_types.float32array3, 'size', 'bytes')
 });
-
-var MOTV = (0, _chunk2.default)({
-  textureCoords: new _restructure2.default.Array(_types.float32array2, 'size', 'bytes')
+var MOTV = (0, _chunk["default"])({
+  textureCoords: new _restructure["default"].Array(_types.float32array2, 'size', 'bytes')
 });
-
-var MOCV = (0, _chunk2.default)({
-  colors: new _restructure2.default.Array(new _restructure2.default.Struct({
-    b: _restructure2.default.uint8,
-    g: _restructure2.default.uint8,
-    r: _restructure2.default.uint8,
-    a: _restructure2.default.uint8
+var MOCV = (0, _chunk["default"])({
+  colors: new _restructure["default"].Array(new _restructure["default"].Struct({
+    b: _restructure["default"].uint8,
+    g: _restructure["default"].uint8,
+    r: _restructure["default"].uint8,
+    a: _restructure["default"].uint8
   }), 'size', 'bytes')
 });
-
-var MOBA = (0, _chunk2.default)({
-  batches: new _restructure2.default.Array(new _restructure2.default.Struct({
-    skips: new _restructure2.default.Reserved(_restructure2.default.int16le, 2 * 3),
-    firstIndex: _restructure2.default.uint32le,
-    indexCount: _restructure2.default.uint16le,
-    firstVertex: _restructure2.default.uint16le,
-    lastVertex: _restructure2.default.uint16le,
-    skip: new _restructure2.default.Reserved(_restructure2.default.uint8),
-    materialID: _restructure2.default.uint8
+var MOBA = (0, _chunk["default"])({
+  batches: new _restructure["default"].Array(new _restructure["default"].Struct({
+    skips: new _restructure["default"].Reserved(_restructure["default"].int16le, 2 * 3),
+    firstIndex: _restructure["default"].uint32le,
+    indexCount: _restructure["default"].uint16le,
+    firstVertex: _restructure["default"].uint16le,
+    lastVertex: _restructure["default"].uint16le,
+    skip: new _restructure["default"].Reserved(_restructure["default"].uint8),
+    materialID: _restructure["default"].uint8
   }), 'size', 'bytes')
 });
-
-var MODR = (0, _chunk2.default)({
-  doodadIndices: new _restructure2.default.Array(_restructure2.default.int16le, 'size', 'bytes')
+var MODR = (0, _chunk["default"])({
+  doodadIndices: new _restructure["default"].Array(_restructure["default"].int16le, 'size', 'bytes')
 });
-
-var MOLR = (0, _chunk2.default)({
-  lightRefList: new _restructure2.default.Array(_restructure2.default.int16le, 'size', 'bytes')
+var MOLR = (0, _chunk["default"])({
+  lightRefList: new _restructure["default"].Array(_restructure["default"].int16le, 'size', 'bytes')
 });
-
-var MOBN = (0, _chunk2.default)({
-  nodes: new _restructure2.default.Array(new _restructure2.default.Struct({
-    flags: _restructure2.default.uint16le,
-    negChild: _restructure2.default.int16le,
-    posChild: _restructure2.default.int16le,
-    nFaces: _restructure2.default.uint16le,
-    faceStart: _restructure2.default.uint32le,
-    planeDist: _restructure2.default.floatle
+var MOBN = (0, _chunk["default"])({
+  nodes: new _restructure["default"].Array(new _restructure["default"].Struct({
+    flags: _restructure["default"].uint16le,
+    negChild: _restructure["default"].int16le,
+    posChild: _restructure["default"].int16le,
+    nFaces: _restructure["default"].uint16le,
+    faceStart: _restructure["default"].uint32le,
+    planeDist: _restructure["default"].floatle
   }), 'size', 'bytes')
 });
-
-var MOBR = (0, _chunk2.default)({
-  indices: new _restructure2.default.Array(_restructure2.default.int16le, 'size', 'bytes')
+var MOBR = (0, _chunk["default"])({
+  indices: new _restructure["default"].Array(_restructure["default"].int16le, 'size', 'bytes')
 });
 
 // const MLIQ = Chunk({
@@ -127,8 +101,7 @@ var MOBR = (0, _chunk2.default)({
 //   y: Vec3Float,
 //   materialId: r.uint32le
 // });
-
-exports.default = (0, _chunked2.default)({
+var _default = (0, _chunked["default"])({
   MOGP: MOGP,
   MOPY: MOPY,
   MOVI: MOVI,
@@ -136,31 +109,29 @@ exports.default = (0, _chunked2.default)({
   MONR: MONR,
   MOTV: MOTV,
   MOBA: MOBA,
-
-  flags: function () {
+  flags: function flags() {
     return this.MOGP.flags;
   },
-
-  MOLR: new _restructure2.default.Optional(MOLR, function () {
+  MOLR: new _restructure["default"].Optional(MOLR, function () {
     return this.flags & 0x200;
   }),
-  MODR: new _restructure2.default.Optional(MODR, function () {
+  MODR: new _restructure["default"].Optional(MODR, function () {
     return this.flags & 0x800;
   }),
-  MOBN: new _restructure2.default.Optional(MOBN, function () {
+  MOBN: new _restructure["default"].Optional(MOBN, function () {
     return this.flags & 0x1;
   }),
-  MOBR: new _restructure2.default.Optional(MOBR, function () {
+  MOBR: new _restructure["default"].Optional(MOBR, function () {
     return this.flags & 0x1;
   }),
-  MOCV: new _restructure2.default.Optional(MOCV, function () {
+  MOCV: new _restructure["default"].Optional(MOCV, function () {
     return this.flags & 0x4;
   }),
   // MLIQ: new r.Optional(MLIQ, function() {
   //   return this.flags & 0x4;
   // }),
-  interior: function () {
+  interior: function interior() {
     return (this.flags & 0x2000) !== 0 && (this.flags & 0x8) === 0;
   }
 });
-module.exports = exports['default'];
+exports["default"] = _default;

@@ -1,8 +1,7 @@
 import ContentQueue from '../../utils/content-queue';
-import WMORootLoader from './root/loader';
-import WMOGroupLoader from './group/loader';
 import M2Blueprint from '../m2/blueprint';
-import ColliderManager from '../../world/collider-manager';
+import WMOGroupLoader from './group/loader';
+import WMORootLoader from './root/loader';
 
 import gameSettings from '../../settings';
 
@@ -230,15 +229,15 @@ class WMO {
 
     this.placeDoodad(doodadEntry, doodad);
 
-    if (doodad.animated) {
-      this.animatedDoodads.set(doodadEntry.id, doodad);
+    // if (doodad.animated) {
+    //   this.animatedDoodads.set(doodadEntry.id, doodad);
 
-      if (doodad.animations.length > 0) {
-        // TODO: Do WMO doodads have more than one animation? If so, which one should play?
-        doodad.animations.playAnimation(0);
-        doodad.animations.playAllSequences();
-      }
-    }
+    //   if (doodad.animations.length > 0) {
+    //     // TODO: Do WMO doodads have more than one animation? If so, which one should play?
+    //     doodad.animations.playAnimation(0);
+    //     doodad.animations.playAllSequences();
+    //   }
+    // }
 
     this.doodads.set(doodadEntry.id, doodad);
   }

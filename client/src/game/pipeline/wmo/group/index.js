@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 
-import WMORootFlags from '../root/flags';
-import WMOGroupView from './view';
 import BSPTree from '../../../utils/bsp-tree';
 import ColliderManager from '../../../world/collider-manager';
+import WMORootFlags from '../root/flags';
+import WMOGroupView from './view';
 
 class WMOGroup {
 
@@ -72,6 +72,8 @@ class WMOGroup {
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     // geometry.computeBoundingBox();
     this.assignBatches(geometry, batches);
+    
+    geometry.computeBoundsTree();
 
     return geometry;
   }
@@ -140,7 +142,7 @@ class WMOGroup {
       const portal = this.portals[index];
       const portalRef = this.portalRefs[index];
 
-      const point = new THREE.Vector3();
+      // const point = new THREE.Vector3();
       portal.plane.projectPoint(point, point);
       const distance = point.clamp(portal.boundingBox.min, portal.boundingBox.max)
         .distanceTo(point);

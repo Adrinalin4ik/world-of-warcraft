@@ -1,14 +1,10 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = new _restructure2.default.Array(_restructure2.default.fixed16le, 4);
-module.exports = exports['default'];
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _default = new _restructure["default"].Array(_restructure["default"].fixed16le, 4);
+exports["default"] = _default;

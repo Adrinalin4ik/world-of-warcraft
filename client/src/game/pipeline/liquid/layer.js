@@ -60,6 +60,8 @@ class LiquidLayer extends THREE.Mesh {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
 
+    geometry.computeBoundsTree();
+
     LiquidType.load(this.data.liquidTypeID).then((type) => {
       this.material = type.material;
     });

@@ -1,5 +1,5 @@
-import * as THREE from 'three';
 import { vec3 } from 'gl-matrix';
+import * as THREE from 'three';
 import THREEUtil from './three-util';
 
 class BSPTree {
@@ -282,7 +282,6 @@ class BSPTree {
         );
 
         /*if (testPassed && cameraLocal[2] < vert1[2] || cameraLocal[2] < vert2[2] || cameraLocal[2] < vert3[2]){
-          debugger;
           } */
         if ((bary[0] < 0) || (bary[1] < 0) || (bary[2] < 0)) continue;
 

@@ -1,10 +1,10 @@
+import Player from "../game/classes/player";
+import AuthHandler from "./auth/handler";
+import CharacterHandler from "./characters/handler";
+import { AuthorizationStatus, SocketConnestionStatus } from "./enums";
+import { GameHandler } from "./game/handler";
+import RealmsHandler from "./realms/handler";
 
-import Player from '../game/classes/player';
-import AuthHandler from './auth/handler';
-import CharacterHandler from './characters/handler';
-import { AuthorizationStatus, SocketConnestionStatus } from './enums';
-import { GameHandler } from './game/handler';
-import RealmsHandler from './realms/handler';
 
 
 export class GameSession {
@@ -13,6 +13,29 @@ export class GameSession {
   public realms = new RealmsHandler(this);
   public game = new GameHandler(this);
   public characters = new CharacterHandler(this);
+  // public auth = {
+  //   host: '',
+  //   authenticate(username: string, password: string) {},
+  //   removeListener(a: any, b: any) {},
+  //   connect() {},
+  //   on(a: any, b:any) {},
+  // };
+  
+  // public realms = {
+  //   list: [],
+  //   refresh() {},
+  //   on(a: any, b:any) {},
+  // };
+  // // game = {
+  // //   connect(a: any, b:any) {},
+  // //   on(a: any, b:any) {}
+  // // }
+  // public characters = {
+  //   list: [],
+  //   refresh() {},
+  //   removeListener(a: any, b: any) {},
+  //   on(a: any, b:any) {}
+  // };
 
   constructor() {
     (window as any).session = this;

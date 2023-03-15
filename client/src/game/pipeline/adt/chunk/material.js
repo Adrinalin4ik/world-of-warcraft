@@ -8,11 +8,9 @@ class Material extends THREE.ShaderMaterial {
 
   constructor(data, textureNames) {
     super();
-
     this.layers = data.MCLY.layers;
     this.rawAlphaMaps = data.MCAL.alphaMaps;
     this.textureNames = textureNames;
-    
     this.vertexShader = vertexShader;
     this.fragmentShader = fragmentShader;
 

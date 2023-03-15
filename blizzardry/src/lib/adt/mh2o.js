@@ -38,12 +38,12 @@ import r from 'restructure';
 
    fill: new r.Pointer(r.uint32le, new r.Array(r.uint8, 'height'), {
     type: 'global',
-    relativeTo: 'parent.parent.offset'
+    relativeTo: () => 'parent.parent.offset'
   }),
 
    vertexData: new r.Pointer(r.uint32le, VertexData, {
     type: 'global',
-    relativeTo: 'parent.parent.offset'
+    relativeTo: () => 'parent.parent.offset'
   })
 });
 
@@ -56,12 +56,12 @@ import r from 'restructure';
   layers: new r.Pointer(r.uint32le, new r.Array(LiquidLayer, 'layerCount'), {
     type: 'global',
     lazy: true,
-    relativeTo: 'parent.offset'
+    relativeTo: () => 'parent.offset'
   }),
   layerCount: r.uint32le,
   flags: new r.Pointer(r.uint32le, LiquidFlags, {
     type: 'global',
-    relativeTo: 'parent.offset'
+    relativeTo: () => 'parent.offset'
   })
 });
 

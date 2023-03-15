@@ -1,7 +1,7 @@
+import gameSettings from '../../settings';
+import ColliderManager from '../../world/collider-manager';
 import WorkerPool from '../worker/pool';
 import M2 from './';
-import ColliderManager from '../../world/collider-manager';
-import gameSettings from '../../settings';
 
 class M2Blueprint {
 
@@ -91,8 +91,8 @@ class M2Blueprint {
   static animate(delta) {
     this.animationUpdateTargets.forEach((m2) => {
       // Handle delta updates for instanced M2s (which share animation managers).
-      if (m2.animations.length > 0) {
-        m2.animations.update(delta);
+      if (m2.animationManager.length > 0) {
+        m2.animationManager.update(delta);
       }
     });
   }

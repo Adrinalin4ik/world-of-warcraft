@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 
 import TextureLoader from '../../texture-loader';
-import vertexShader from './shader.vert';
 import fragmentShader from './shader.frag';
+import vertexShader from './shader.vert';
 // import vertexShader from './shaders/vertex/main.glsl';
 // import fragmentShader from './shaders/fragment/main.glsl';
 

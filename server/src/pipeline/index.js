@@ -1,12 +1,12 @@
-import BLP from '../../../blizzardry/lib/blp';
-import * as DBC from '../../../blizzardry/lib/dbc/entities';
-import { DecodeStream } from '../../../blizzardry/lib/restructure';
-import { PNG } from 'pngjs';
-import express from 'express';
 import find from 'array-find';
+import express from 'express';
+import { PNG } from 'pngjs';
+import { DecodeStream } from 'restructure';
+import BLP from '../wow-data-parser/blp';
+import * as DBC from '../wow-data-parser/dbc/entities';
 
-import Archive from './archive';
 import ServerConfig from '../config';
+import Archive from './archive';
 
 class Pipeline {
 

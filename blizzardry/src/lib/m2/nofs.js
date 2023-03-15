@@ -14,7 +14,7 @@ class Nofs {
     }
 
     if (this.type) {
-      const pointer = new r.Pointer(r.uint32le, new r.Array(this.type, length), 'global');
+      const pointer = new r.Pointer(r.uint32le, new r.Array(this.type, length), { type: 'global' });
       return pointer.decode(stream, parent);
     }
 

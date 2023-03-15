@@ -1,5 +1,5 @@
-import { DecodeStream } from 'blizzardry/lib/restructure';
-import WMOGroup from 'blizzardry/lib/wmo/group';
+import { DecodeStream } from 'restructure';
+import WMOGroup from '../../../../../wow-data-parser/wmo/group';
 
 import Loader from '../../../../net/loader';
 import WMOGroupDefinition from './definition';

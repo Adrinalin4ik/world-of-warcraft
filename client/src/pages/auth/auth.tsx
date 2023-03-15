@@ -91,3 +91,5 @@ class Auth extends React.Component<Props> {
 }
 
 export default Auth;
+
+// export default {}

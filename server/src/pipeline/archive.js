@@ -1,5 +1,5 @@
-import MPQ from '../../../blizzardry/lib/mpq';
 import glob from 'globby';
+import MPQ from '../wow-data-parser/mpq';
 
 class Archive {
 

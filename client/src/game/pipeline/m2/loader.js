@@ -1,6 +1,6 @@
-import { DecodeStream } from 'blizzardry/lib/restructure';
-import M2 from 'blizzardry/lib/m2';
-import Skin from 'blizzardry/lib/m2/skin';
+import { DecodeStream } from 'restructure';
+import M2 from '../../../wow-data-parser/m2';
+import Skin from '../../../wow-data-parser/m2/skin';
 
 import Loader from '../../net/loader';
 
@@ -19,6 +19,7 @@ export default function(path) {
     return loader.load(skinPath).then((rawSkin) => {
       buffer = new Buffer(new Uint8Array(rawSkin));
       stream = new DecodeStream(buffer);
+      
       const skinData = Skin.decode(stream);
       return [data, skinData];
     });

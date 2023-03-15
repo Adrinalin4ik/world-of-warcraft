@@ -1,31 +1,21 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-var _entity = require('../entity');
-
-var _entity2 = _interopRequireDefault(_entity);
-
-var _localizedStringRef = require('../localized-string-ref');
-
-var _localizedStringRef2 = _interopRequireDefault(_localizedStringRef);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = (0, _entity2.default)({
-  id: _restructure2.default.uint32le,
-  minRangeHostile: _restructure2.default.floatle,
-  minRangeFriendly: _restructure2.default.floatle,
-  maxRangeHostile: _restructure2.default.floatle,
-  maxRangeFriendly: _restructure2.default.floatle,
-  type: _restructure2.default.uint32le,
-  description: _localizedStringRef2.default,
-  name: _localizedStringRef2.default
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+var _entity = _interopRequireDefault(require("../entity"));
+var _localizedStringRef = _interopRequireDefault(require("../localized-string-ref"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _default = (0, _entity["default"])({
+  id: _restructure["default"].uint32le,
+  minRangeHostile: _restructure["default"].floatle,
+  minRangeFriendly: _restructure["default"].floatle,
+  maxRangeHostile: _restructure["default"].floatle,
+  maxRangeFriendly: _restructure["default"].floatle,
+  type: _restructure["default"].uint32le,
+  description: _localizedStringRef["default"],
+  name: _localizedStringRef["default"]
 });
-module.exports = exports['default'];
+exports["default"] = _default;

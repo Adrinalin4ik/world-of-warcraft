@@ -1,9 +1,7 @@
 import * as THREE from 'three';
 
-import THREEUtil from '../utils/three-util';
-import { vec4 } from 'gl-matrix';
 import DebugPanel from '../../pages/game/debug/debug';
-import { PlaneHelper } from '../utils/plane-helper';
+import THREEUtil from '../utils/three-util';
 
 class VisibilityManager {
 
@@ -31,29 +29,29 @@ class VisibilityManager {
     this.hideAllWMOGroups();
     this.hideAllWMODoodads();
 
-    for (const camera of cameras) {
-      if (!camera.location) {
-        continue;
-      }
-      
-      // camera.updateMatrix(); // make sure camera's local matrix is updated
-      // camera.updateMatrixWorld(); // make sure camera's world matrix is updated
-      // camera.updateProjectionMatrix(); // make sure camera's world matrix is updated
-      // console.log(camera)
-      // Obtain a frustum matching the camera
-      const frustum = new THREE.Frustum();
-      frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
-      // this.map.add(new PlaneHelper(frustum))
-      // Adjust near plane (5) back to camera position
-      const nearGap = frustum.planes[5].distanceToPoint(camera.position);
-      frustum.planes[5].constant -= nearGap;
+    const camera = cameras.find(x => x.name === 'MainCamera');
+    
+    if (!camera) {
+      return;
+    }
+    
+    // camera.updateMatrix(); // make sure camera's local matrix is updated
+    // camera.updateMatrixWorld(); // make sure camera's world matrix is updated
+    // camera.updateProjectionMatrix(); // make sure camera's world matrix is updated
+    // console.log(camera)
+    // Obtain a frustum matching the camera
+    const frustum = new THREE.Frustum();
+    frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    // this.map.add(new PlaneHelper(frustum))
+    // Adjust near plane (5) back to camera position
+    // const nearGap = frustum.planes[5].distanceToPoint(camera.position);
+    // frustum.planes[5].constant -= nearGap;
 
-      DebugPanel.test1 = camera.location.type;
-      if (camera.location.type === 'exterior') {
-        this.enablePortalsFromExterior(0, camera, frustum);
-      } else {
-        this.enablePortalsFromInterior(0, camera, frustum);
-      }
+    DebugPanel.test1 = camera.location.type;
+    if (camera.location.type === 'exterior') {
+      this.enablePortalsFromExterior(0, camera, frustum);
+    } else {
+      this.enablePortalsFromInterior(0, camera, frustum);
     }
 
     this.updateStats();
@@ -151,7 +149,7 @@ class VisibilityManager {
   }
 
   traversePortalsAndEnable(depth, camera, wmo, group, frustum = null, visitedPortals = new Set()) {
-    // if (depth > 8) return; 
+    if (depth > 8) return; 
     
     const view = wmo.views.groups.get(group.index);
     const cameraLocal = view.worldToLocal(camera.position.clone());
@@ -194,7 +192,7 @@ class VisibilityManager {
         continue;
       }
 
-      if (portalView.geometry.vertices.length < 4) {
+      if (portalView.legacyGeometry.vertices.length < 4) {
         console.debug('Portal has less then 4 verticies. It is invalid');
         continue;
       }
