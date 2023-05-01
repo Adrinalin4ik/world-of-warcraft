@@ -11,9 +11,9 @@ vec4 saturate(vec4 value) {
 }
 
 vec3 createLight(in vec3 normal, in vec3 direction, in vec3 diffuseColor, in vec3 ambientColor) {
-  float factor =  clamp((dot(-direction.xyz, normalize(normal.xyz)), 0.0, 1.0);
+  float factor = saturate(dot(-direction.xyz, normalize(normal.xyz)));
 
-  vec3 light = clamp((diffuseColor.rgb * factor) + ambientColor.rgb, 0.0, 1.0);
+  vec3 light = saturate((diffuseColor.rgb * factor) + ambientColor.rgb);
 
   return light;
 }

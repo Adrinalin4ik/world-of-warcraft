@@ -19,6 +19,8 @@ uniform vec3 fogColor;
 
 uniform int indoor;
 
+uniform float alphaTestValue;
+
 // Given a light direction and normal, return a directed diffuse light.
 vec3 createGlobalLight(vec3 lightDirection, vec3 lightNormal, vec3 diffuseLight, vec3 ambientLight) {
   float light = dot(lightNormal, -lightDirection);
@@ -84,9 +86,9 @@ void main() {
   vec4 color = texture2D(textures[0], vUv);
 
   // Knock out transparent pixels in transparent blending mode (1).
-  if (blendingMode == 1 && color.a < (10.0 / 255.0)) {
-    discard;
-  }
+  // if (blendingMode == 1 && color.a < (10.0 / 255.0)) {
+  //   discard;
+  // }
 
   // Force transparent pixels to fully opaque if in opaque blending mode (0). Needed to prevent
   // transparent pixels from becoming inappropriately bright.
@@ -94,6 +96,10 @@ void main() {
     color.a = 1.0;
   }
 
+  if (blendingMode == 1 && color.a < alphaTestValue) {
+    discard;
+  }
+  
   if (lightModifier > 0.0) {
     if (indoor == 1) {
       color = lightIndoor(color, vertexColor, globalLight);
@@ -103,6 +109,6 @@ void main() {
   }
 
   color = applyFog(color);
-
+  
   gl_FragColor = color;
 }

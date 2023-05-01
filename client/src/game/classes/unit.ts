@@ -52,7 +52,7 @@ class Unit extends Entity {
   private displayInfo: DBC | null = null;
 
   public rotateSpeed: number = 2;
-  public moveSpeed: number = 10; //10
+  public moveSpeed: number = 100; //10
   public flySpeed: number = 10; //10
   public gravity: number = -30; //10;
   public jumpVelocityConst: number = 16;
@@ -108,6 +108,8 @@ class Unit extends Entity {
   public totalMovingTime: number = 0;
   private spline: THREE.CatmullRomCurve3 | null = null;
   
+  private raycaster = new THREE.Raycaster();
+
   constructor(guid: string) {
     super();
     (window as any).collider = ColliderManager;
@@ -177,7 +179,6 @@ class Unit extends Entity {
         this.modelData.path = this.modelData.file.match(/^(.+?)(?:[^\\]+)$/)[1];
         this.displayInfo!.modelData = this.modelData;
         return M2Blueprint.load(this.modelData.file).then((m2: M2) => {
-          console.error('here', displayInfo)
           this.model = m2;
           this.model.displayInfo = this.displayInfo;
 
@@ -187,6 +188,7 @@ class Unit extends Entity {
             max.y - min.y,
             max.z - min.z
           );
+          this.model.visible = true;
         });
       });
     }).catch(console.error);
@@ -558,6 +560,21 @@ class Unit extends Entity {
     }
     // this.updatePlayer(delta);
     this.clear();
+    // const m = ObjectsManager;
+
+    // for (const obj of m) {
+    //   var direction = new THREE.Vector3(); // create a new vector
+    //   direction.subVectors(obj.position, this.position); // set the direction to point at the object
+    //   this.raycaster.set(this.position, direction.normalize());
+    //   this.raycaster.firstHitOnly = true;
+    //   var intersects = this.raycaster.intersectObject(obj);
+    //   if (intersects) {
+    //     obj.visible = true
+    //   } else {
+    //     obj.visible = false
+    //   }
+    //   console.log(intersects);
+    // }
   }
 
   velocity = new THREE.Vector3();

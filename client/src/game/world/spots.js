@@ -112,6 +112,30 @@ const Spots = [
     title: 'Ice crown citadel',
     zoneId: 571,
     coords: [5932, 2136, 667],
+  },
+  {
+    id: 'Arathi_Basin',
+    title: 'Arathi Basin',
+    zoneId: 529,
+    coords: [756, 764, -29],
+  },
+  {
+    id: 'warsong',
+    title: 'Warsong',
+    zoneId: 489,
+    coords: [1044, 1391, 344],
+  },
+  {
+    id: 'eye_of_the_storm',
+    title: 'Eye of the Strorm',
+    zoneId: 566,
+    coords: [2099, 1561, 1206],
+  },
+  {
+    id: 'island_of_conquest',
+    title: 'Island of Conquest',
+    zoneId: 628,
+    coords: [786, -635, 55],
   }
 ];
 

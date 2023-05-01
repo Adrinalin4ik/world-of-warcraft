@@ -5,7 +5,6 @@ import WMORootLoader from './root/loader';
 
 import gameSettings from '../../settings';
 
-import * as THREE from 'three';
 class WMO {
 
   static LOAD_GROUP_INTERVAL = gameSettings.wmo.group.loadInterval;
@@ -74,9 +73,12 @@ class WMO {
   }
 
   load() {
+    console.log('loading file', this.filename)
+    // if (!this.filename.includes('NIGHTELFSMALLHOUSE_WSG')) return Promise.reject();
+    if (!this.filename.includes('CTFNIGHTELF_A')) return Promise.reject(); // tonnel
     return WMORootLoader.load(this.filename).then((root) => {
       this.root = root;
-
+      console.log('Load WMO', this)
       const rootView = this.root.createView();
       this.views.root = rootView;
 
@@ -287,10 +289,10 @@ class WMO {
     groupView.updateMatrix();
     groupView.updateMatrixWorld();
     // console.log(groupView)
-    const box = new THREE.Box3(groupView.group.boundingBox.min, groupView.group.boundingBox.max);
+    // const box = new THREE.Box3(groupView.group.boundingBox.min, groupView.group.boundingBox.max);
     
-    var helper = new THREE.Box3Helper(box, 0xffff00);
-    this.views.root.add(helper)
+    // var helper = new THREE.Box3Helper(box, 0xffff00);
+    // this.views.root.add(helper)
   }
 
   placePortalView(portalView) {

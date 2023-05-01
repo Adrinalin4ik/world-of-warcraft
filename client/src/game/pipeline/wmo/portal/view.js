@@ -14,6 +14,7 @@ class WMOPortalView extends THREE.Mesh {
 
     this.geometry = geometry.toBufferGeometry();
     this.geometry.computeBoundsTree();
+    this.visible = false;
   }
 
   clone() {

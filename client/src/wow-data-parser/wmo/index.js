@@ -39,19 +39,75 @@ const MOMT = Chunk({
     flags: r.uint32le,
     shader: r.uint32le,
     blendMode: r.uint32le,
+    // textures: [
+    //   new r.Struct({
+    //     offset: r.int32le,
+    //     color: new r.Struct({
+    //       r: r.uint8,
+    //       g: r.uint8,
+    //       b: r.uint8,
+    //       a: r.uint8
+    //     }),
+    //     flags: r.int32le
+    //   }),
+    //   new r.Struct({
+    //     offset: r.int32le,
+    //     color2: new r.Struct({
+    //       r: r.uint8,
+    //       g: r.uint8,
+    //       b: r.uint8,
+    //       a: r.uint8
+    //     }),
+    //     flags: r.int32le,
+    //     color3: new r.Struct({
+    //       r: r.uint8,
+    //       g: r.uint8,
+    //       b: r.uint8,
+    //       a: r.uint8
+    //     }),
+    //   })
+    // ],
 
-    textures: new r.Array(new r.Struct({
-      offset: r.uint32le,
+    texture1: new r.Struct({
+      offset: r.int32le,
       color: new r.Struct({
         r: r.uint8,
         g: r.uint8,
         b: r.uint8,
         a: r.uint8
       }),
-      flags: r.uint32le
-    }), 3),
+      flags: r.int32le
+    }),
+    texture2: new r.Struct({
+      offset: r.int32le,
+      color2: new r.Struct({
+        r: r.uint8,
+        g: r.uint8,
+        b: r.uint8,
+        a: r.uint8
+      }),
+      flags: r.int32le,
+      color3: new r.Struct({
+        r: r.uint8,
+        g: r.uint8,
+        b: r.uint8,
+        a: r.uint8
+      }),
+    }),
+    unknown1: r.int32le,
+    dx: new r.Array(r.int32le, 5),
+    // textures: new r.Array(new r.Struct({
+    //   offset: r.uint32le,
+    //   color: new r.Struct({
+    //     r: r.uint8,
+    //     g: r.uint8,
+    //     b: r.uint8,
+    //     a: r.uint8
+    //   }),
+    //   flags: r.uint32le
+    // }), 3),
 
-    unknowns: new r.Reserved(r.uint32le, 4)
+    // unknowns: new r.Reserved(r.uint32le, 4)
   }), 'size', 'bytes')
 });
 

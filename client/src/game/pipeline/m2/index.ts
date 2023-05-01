@@ -1,13 +1,16 @@
 import * as THREE from 'three';
 import { BufferGeometry } from 'three';
 import { Face3, Geometry } from '../../utils/geometry';
+import CacheManager from '../../world/cache-manager';
 import ColliderManager from '../../world/collider-manager';
+import { ObjectsManager } from '../../world/visibility-manager';
 import AnimationManager from './animation-manager';
 import BatchManager from './batch-manager';
 import M2Material from './material';
 import Submesh from './submesh';
-class M2 extends THREE.Group {
 
+class M2 extends THREE.Group {
+  static CacheManager = CacheManager;
   static cache = {};
 
   eventListeners= [];
@@ -42,6 +45,8 @@ class M2 extends THREE.Group {
 
   constructor(path, data, skinData, instance = null) {
     super();
+
+    this.visible = false;
 
     this.matrixAutoUpdate = false;
 
@@ -94,7 +99,7 @@ class M2 extends THREE.Group {
         this.receivesAnimationUpdates = false;
       }
     }
-
+    
     this.createSkeleton(data.bones);
 
     // Instanced M2s can share geometries and texture units.
@@ -113,8 +118,7 @@ class M2 extends THREE.Group {
     this.geometry.computeBoundingBox();
     this.boundingMesh = this.createBoundingMesh(this.boundingVertices);
 
-    // console.log('M2', this);
-
+    ObjectsManager.push(this);
   }
 
   createBoundingMesh(vertices) {

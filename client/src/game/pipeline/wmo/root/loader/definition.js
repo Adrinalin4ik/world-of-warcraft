@@ -9,7 +9,7 @@ class WMORootDefinition {
     };
 
     this.groupInfo = data.MOGI.groups;
-
+    console.log('Definition', data)
     this.materials = data.MOMT.materials;
     this.texturePaths = data.MOTX.filenames;
 

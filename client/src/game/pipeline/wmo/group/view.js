@@ -10,7 +10,6 @@ class WMOGroupView extends THREE.Mesh {
     this.group = group;
     this.geometry = geometry;
     this.material = material;
-
     ColliderManager.collidableMeshList.set(this.uuid, this);
   }
 

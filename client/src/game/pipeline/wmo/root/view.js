@@ -4,7 +4,6 @@ class WMORootView extends THREE.Group {
 
   constructor(root) {
     super();
-
     this.matrixAutoUpdate = false;
 
     this.root = root;

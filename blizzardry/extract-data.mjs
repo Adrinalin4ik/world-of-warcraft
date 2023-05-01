@@ -18,8 +18,8 @@ import glob from 'globby';
 
 import MPQ from './lib/mpq/index.js';
 
-const dataDir = '/home/alexey/Desktop/World_of_Warcraft/Data/';
-const outDir = '/home/alexey/Desktop/World_of_Warcraft/extracted_interface';
+const dataDir = '/media/alexey/Новый\ том/WowCircle/Data/';
+const outDir = '/home/alexey/Desktop/Projects/JS/world-of-warcraft/blizzardry/extracted_data';
 
 const mpqs = [
   'common.MPQ',
@@ -44,7 +44,7 @@ const patterns = mpqs.map(mpq => (
 
 const archives = glob.sync(patterns);
 
-const mpq = MPQ.open(archives.shift(), MPQ.OPEN.READ_ONLY);
+const mpq = MPQ.default.open(archives.shift(), MPQ.default.OPEN.READ_ONLY);
 archives.forEach((archive) => {
   mpq.patch(archive, '');
 });

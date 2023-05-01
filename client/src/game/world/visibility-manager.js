@@ -3,6 +3,9 @@ import * as THREE from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import THREEUtil from '../utils/three-util';
 
+
+export const ObjectsManager = [];
+
 class VisibilityManager {
 
   constructor(map) {
@@ -27,7 +30,7 @@ class VisibilityManager {
     this.hideAllMapChanks();
     this.hideAllMapDoodads();
     this.hideAllWMOGroups();
-    this.hideAllWMODoodads();
+    // this.hideAllWMODoodads();
 
     const camera = cameras.find(x => x.name === 'MainCamera');
     
@@ -128,9 +131,9 @@ class VisibilityManager {
     groupView.visible = true;
 
     // Doodads within frustum are visible
-    for (const doodad of wmo.doodadsForGroup(group)) {
-      this.enableStaticObjectInFrustum(doodad, frustum);
-    }
+    // for (const doodad of wmo.doodadsForGroup(group)) {
+    //   this.enableStaticObjectInFrustum(doodad, frustum);
+    // }
 
     // Traverse outward from the given group, marking any relevant WMO groups as visible
     this.traversePortalsAndEnable(depth, camera, wmo, group, frustum, visitedPortals);
@@ -149,15 +152,15 @@ class VisibilityManager {
   }
 
   traversePortalsAndEnable(depth, camera, wmo, group, frustum = null, visitedPortals = new Set()) {
-    if (depth > 8) return; 
+    // if (depth > 8) return; 
     
     const view = wmo.views.groups.get(group.index);
     const cameraLocal = view.worldToLocal(camera.position.clone());
 
     // Doodads within frustum are visible
-    for (const doodad of wmo.doodadsForGroup(group)) {
-      this.enableStaticObjectInFrustum(doodad, frustum);
-    }
+    // for (const doodad of wmo.doodadsForGroup(group)) {
+    //   this.enableStaticObjectInFrustum(doodad, frustum);
+    // }
 
     for (let pindex = 0, pcount = group.portals.length; pindex < pcount; ++pindex) {
       const portal = group.portals[pindex];

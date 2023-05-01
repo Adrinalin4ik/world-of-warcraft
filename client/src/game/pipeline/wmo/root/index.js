@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 
-import WMORootView from './view';
-import WMOPortal from '../portal';
 import WMOMaterial from '../material';
 import WMOMaterialDefinition from '../material/loader/definition';
+import WMOPortal from '../portal';
+import WMORootView from './view';
 
 class WMORoot {
 
@@ -38,7 +38,7 @@ class WMORoot {
     this.createBoundingBox(def.boundingBox);
     // console.log(def)
     this.createMaterialDefs(def.materials, def.texturePaths);
-
+    
     this.createPortals(def.portals, def.portalNormals, def.portalConstants, def.portalVertices);
 
     this.portalRefs = def.portalRefs;
@@ -70,18 +70,25 @@ class WMORoot {
   // thread to reduce the cost of transferring the definition off of the worker thread.
   createMaterialDefs(materials, texturePaths) {
     const defs = this.defs.material;
-
     for (let mindex = 0, mcount = materials.length; mindex < mcount; ++mindex) {
       const data = materials[mindex];
+      
       const { flags, blendMode, shader } = data;
       const textures = [];
-
-      for (let tindex = 0, tcount = data.textures.length; tindex < tcount; ++tindex) {
-        const textureData = data.textures[tindex];
+      const textureDefs = [
+        data.texture1,
+        data.texture2,
+      ]
+  
+      for (let tindex = 0, tcount = textureDefs.length; tindex < tcount; ++tindex) {
+        const textureData = textureDefs[tindex];
         const texturePath = texturePaths[textureData.offset];
 
         if (texturePath) {
-          textures.push({ path: texturePath });
+          textures.push({
+            textureData,
+            path: texturePath 
+          });
         }
       }
 
