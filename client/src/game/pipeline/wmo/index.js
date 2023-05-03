@@ -74,8 +74,9 @@ class WMO {
 
   load() {
     console.log('loading file', this.filename)
+    // REMOVE THIS
     // if (!this.filename.includes('NIGHTELFSMALLHOUSE_WSG')) return Promise.reject();
-    if (!this.filename.includes('CTFNIGHTELF_A')) return Promise.reject(); // tonnel
+    // if (!this.filename.includes('CTFNIGHTELF_A')) return Promise.reject(); // tonnel
     return WMORootLoader.load(this.filename).then((root) => {
       this.root = root;
       console.log('Load WMO', this)

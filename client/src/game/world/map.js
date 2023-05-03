@@ -34,7 +34,6 @@ class WorldMap extends THREE.Group {
     this.terrainManager = new TerrainManager(this, this.constructor.ZEROPOINT);
     this.doodadManager = new DoodadManager(this, this.constructor.ZEROPOINT);
     this.wmoManager = new WMOManager(this, this.constructor.ZEROPOINT);
-    this.worldLight = new WorldLight();
     this.visibilityManager = new VisibilityManager(this);
     this.locationManager = new LocationManager(this);
 
@@ -107,7 +106,7 @@ class WorldMap extends THREE.Group {
 
       this.terrainManager.loadChunk(index, chunk);
       // this.doodadManager.loadChunk(index, chunk.doodadEntries);
-      this.wmoManager.loadChunk(index, chunk.wmoEntries);
+      // this.wmoManager.loadChunk(index, chunk.wmoEntries);
     }));
   }
 
@@ -119,7 +118,7 @@ class WorldMap extends THREE.Group {
 
     this.terrainManager.unloadChunk(index, chunk);
     // this.doodadManager.unloadChunk(index, chunk.doodadEntries);
-    this.wmoManager.unloadChunk(index, chunk.wmoEntries);
+    // this.wmoManager.unloadChunk(index, chunk.wmoEntries);
 
     this.queuedChunks.delete(index);
     this.chunks.delete(index);
@@ -130,12 +129,13 @@ class WorldMap extends THREE.Group {
   }
 
   animate(delta, camera, cameraMoved) {
+    this.updateWorldTime(camera, this.mapID);
     this.terrainManager.animate(delta, camera, cameraMoved);
     this.doodadManager.animate(delta, camera, cameraMoved);
     this.wmoManager.animate(delta, camera, cameraMoved);
   }
 
-  updateWorldTime(camera, mapID, time) {
+  updateWorldTime(camera, mapID, time=null) {
     WorldLight.update(camera, mapID, time);
   }
 

@@ -13,7 +13,9 @@ class WMOGroup {
     this.index = def.index;
     this.id = def.groupID;
     this.header = def.header;
-
+    this.def = def;
+    this.interior = def.interior;
+    
     this.doodadRefs = def.doodadRefs;
 
     this.createPortals(root, def);
@@ -56,7 +58,7 @@ class WMOGroup {
   // Materials are created on the root blueprint to take advantage of sharing materials across
   // multiple groups (when possible).
   createMaterial(materialRefs) {
-    this.materials = this.root.loadMaterials(materialRefs);
+    this.materials = this.root.loadMaterials(materialRefs, this);
   }
 
   createGeometry(attributes, batches) {

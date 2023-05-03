@@ -7,6 +7,7 @@ class WMOGroupDefinition {
     this.path = path;
     this.index = index;
     this.groupID = groupData.MOGP.groupID;
+    this.interior = groupData.interior;
 
     this.header = {
       batchCounts: groupData.MOGP.batchCounts,

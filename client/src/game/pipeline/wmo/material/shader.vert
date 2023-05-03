@@ -10,7 +10,7 @@ attribute float alpha;
 
 varying vec4 vertexColor;
 
-uniform int indoor;
+uniform int interior;
 
 uniform int useBaseColor;
 uniform vec3 baseColor;
@@ -21,7 +21,7 @@ void main() {
 
   vertexColor = vec4(color, alpha);
 
-  if (indoor == 1 && useBaseColor == 1) {
+  if (interior == 1 && useBaseColor == 1) {
     vertexColor.rgb = clamp(vertexColor.rgb + baseColor.rgb, 0.0, 1.0);
     vertexColor.a = clamp(mod(vertexColor.a, 1.0) + (1.0 - baseAlpha), 0.0, 1.0);
   }

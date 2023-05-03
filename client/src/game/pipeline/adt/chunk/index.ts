@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
 import ADT from '..';
 import Liquid from '../../liquid';
-import Material from './material';
+import AdtMaterial from './material';
 
 class Chunk extends THREE.Mesh {
 
@@ -11,7 +11,7 @@ class Chunk extends THREE.Mesh {
 
   data: any = null;
   holes: number;
-  material: Material = null;
+  material: AdtMaterial = null;
   meshBVH: MeshBVH;
   constructor(adt, id) {
     super();
@@ -95,10 +95,10 @@ class Chunk extends THREE.Mesh {
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
     geometry.setAttribute('uvAlpha', new THREE.BufferAttribute(uvsAlpha, 2));
 
-    // geometry.computeBoundingBox();
-    geometry.computeBoundsTree();
+    geometry.computeBoundingBox();
+    // geometry.computeBoundsTree();
 
-    this.meshBVH = new MeshBVH(this.geometry);
+    // this.meshBVH = new MeshBVH(this.geometry);
     
     if (adt.data.MH2O) {
       const liquid = adt.data.MH2O && adt.data.MH2O.chunks[id];
@@ -107,7 +107,7 @@ class Chunk extends THREE.Mesh {
       }
     }
     
-    this.material = new Material(data, textureNames);
+    this.material = new AdtMaterial(data, textureNames);
   }
 
   get doodadEntries() {

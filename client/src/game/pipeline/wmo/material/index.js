@@ -1,60 +1,50 @@
 import * as THREE from 'three';
 
+import WorldLight from '../../../world/light';
 import TextureLoader from '../../texture-loader';
-import fragmentShader from './shader.frag';
-import vertexShader from './shader.vert';
-// import fragmentShader from './shaders/fragment/main.glsl';
-// import vertexShader from './shaders/vertex/main.glsl';
+// import fragmentShader from './shader.frag';
+// import vertexShader from './shader.vert';
+import fragmentShader from './shaders/fragment/main.glsl';
+import vertexShader from './shaders/vertex/main.glsl';
 
 
 class WMOMaterial extends THREE.ShaderMaterial {
 
-  constructor(def) {
+  constructor(def, groupData) {
     super();
     this.def = def;
+    this.interior = def.interior || groupData.interior;
     this.textures = [];
-    console.log(def)
+
     this.uniforms = {
-      BATCH_TYPE: { value: def.batchType },
-      textures: { type: 'tv', value: [] },
-      textureCount: { type: 'i', value: 0 },
-      blendingMode: { type: 'i', value: def.blendingMode },
-
-      useBaseColor: { type: 'i', value: 0 },
-      baseColor: { type: 'c', value: new THREE.Color(0, 0, 0) },
-      baseAlpha: { type: 'f', value: 0.0 },
-
-      indoor: { type: 'i', value: 0 },
-
-      // Managed by light manager
-      lightModifier: { type: 'f', value: 1.0 },
-      ambientLight: { type: 'c', value: new THREE.Color(0.5, 0.5, 0.5) },
-      diffuseLight: { type: 'c', value: new THREE.Color(0.25, 0.5, 1.0) },
-
-      // Managed by light manager
-      fogModifier: { type: 'f', value: 1.0 },
-      fogColor: { type: 'c', value: new THREE.Color(0.25, 0.5, 1.0) },
-      fogStart: { type: 'f', value: 5.0 },
-      fogEnd: { type: 'f', value: 400.0 }
+      sunParams: WorldLight.uniforms.sunParams,
+      sunDiffuseColor: WorldLight.uniforms.sunDiffuseColor,
+      sunAmbientColor: WorldLight.uniforms.sunAmbientColor,
+      
+      fogParams: WorldLight.uniforms.fogParams,
+      fogColor: WorldLight.uniforms.fogColor,
+      materialParams: { value: [1,1,1,1] }
     };
 
-    if (def.useBaseColor) {
-      const baseColor = new THREE.Color(
-        def.baseColor.r / 255.0,
-        def.baseColor.g / 255.0,
-        def.baseColor.b / 255.0
-      );
-
-      const baseAlpha = def.baseColor.a / 255.0;
-
-      this.uniforms.useBaseColor = { type: 'i', value: 1 };
-      this.uniforms.baseColor = { type: 'c', value: baseColor };
-      this.uniforms.baseAlpha = { type: 'f', value: baseAlpha };
+    // Enable lighting
+    this.defines.USE_LIGHTING = 0;
+    this.defines.USE_VERTEX_COLOR = 0;
+    
+    // Define interior
+    if (this.interior) {
+      this.defines.INTERIOR = 1;
+    }
+    
+    // Define blending mode
+    this.defines.BLENDING_MODE = def.blendingMode;
+    this.defines.BATCH_TYPE = def.batchType;
+    if (def.flags & 0x10) {
+      this.uniforms.sunParams.value[3] = 0.0;
     }
 
     // Tag lighting mode (based on group flags)
-    if (def.indoor) {
-      this.uniforms.indoor = { type: 'i', value: 1 };
+    if (this.interior) {
+      this.uniforms.interior = { type: 'i', value: 1 };
     }
 
     // Flag 0x01 (unlit)
@@ -81,6 +71,7 @@ class WMOMaterial extends THREE.ShaderMaterial {
     } else {
       this.wrapping = THREE.RepeatWrapping;
     }
+
     switch(def.blendingMode) {
       case 0: // GxBlend_Opaque
       case 1: // GxBlend_AlphaKey
@@ -219,11 +210,13 @@ class WMOMaterial extends THREE.ShaderMaterial {
     this.textures = textures;
 
     // Update shader uniforms to reflect loaded textures.
+    this.defines.TEXTURE_COUNT = textures.length;
     this.uniforms.textures = { type: 'tv', value: textures };
     this.uniforms.textureCount = { type: 'i', value: textures.length };
     // const texture1_color = textureDefs[0].textureData.color;
     // this.uniforms.baseColor = { type: 'c', value: new THREE.Color(texture1_color.r, texture1_color.g, texture1_color.b) }
-    // const color = textureDefs[0].textureData.color;
+    const color = textureDefs[0].textureData.color;
+    this.uniforms.emissiveColor = new THREE.Uniform(new Float32Array([color.r, color.g, color.b, color.a]));
     
     // if (this.def.blendingMode != 0) {
     //   let alphaTestVal = 0.878431;
@@ -240,14 +233,28 @@ class WMOMaterial extends THREE.ShaderMaterial {
     // }
 
     // this.uniforms.alphaTest = { value: [color.r, color.g, color.b, color.a]}
+    this.needsUpdate = true;
+  }
+
+  unloadTextures() {
+    // Unload textures in the loader
+    for (const texture of this.textures) {
+      TextureLoader.unload(texture);
+    }
+
+    // Clear array
+    this.textures.splice(0);
+
+    // Update texture count
+    this.defines.TEXTURE_COUNT = 0;
+
+    // Ensure changes propagate to renderer
+    this.needsUpdate = true;
   }
 
   dispose() {
     super.dispose();
-
-    this.textures.forEach((texture) => {
-      TextureLoader.unload(texture);
-    });
+    this.unloadTextures();
   }
 }
 

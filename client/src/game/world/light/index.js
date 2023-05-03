@@ -63,6 +63,11 @@ class WorldLight {
     fogColor:           new THREE.Uniform(new Float32Array(Default.fogColor))
   };
 
+  static savedParams = {
+    sunAmbientColor: null,
+    sunDiffuseColor: null,
+  }
+
   static update(camera, mapID, time = null) {
     // console.log(camera, mapID, time)
     const { x, y, z } = camera.position;
@@ -86,7 +91,7 @@ class WorldLight {
       
       const blend = this.blendLights(results);
       
-      this.updateUniforms(blend);
+      this.updateUniforms(results);
       // console.log("Loaded", results)
 
       this.active.sources = results;
@@ -145,15 +150,25 @@ class WorldLight {
     this.uniforms.fogColor.value.set(Default.fogColor, 0);
   }
 
-  static updateUniforms(result) {
-    this.updateLightUniforms(result);
-    this.updateFogUniforms(result);
+  static updateUniforms(results) {
+    const currentParams = results[1];
+    const nextParams = results[0];
+
+    let dist = Math.abs(1 - nextParams.percentageDistance - currentParams.percentageDistance) / 2;
+    if (dist > 1) {
+      dist = 1;
+    }
+
+    this.updateLightUniforms(currentParams, nextParams, dist);
+    this.updateFogUniforms(currentParams, nextParams, dist);
   }
 
-  static updateLightUniforms(result) {
+  static updateLightUniforms(currentParams, nextParams, dist) {
     // Diffuse Color
-
-    const diffuseColor = result.colors[0];
+    const currentDiffuseColor = currentParams.colors[0];
+    const nextDiffuseColor = nextParams.colors[0];
+    
+    const diffuseColor = this.lerpVectors(currentDiffuseColor, nextDiffuseColor, dist);
 
     this.uniforms.sunDiffuseColor.value.set([
       diffuseColor[0] / 255.0,
@@ -164,7 +179,10 @@ class WorldLight {
 
     // Ambient Color
 
-    const ambientColor = result.colors[1];
+    const currentAmbientColor = currentParams.colors[1];
+    const nextAmbientColor = nextParams.colors[1];
+    
+    const ambientColor = this.lerpVectors(currentAmbientColor, nextAmbientColor, dist);
 
     this.uniforms.sunAmbientColor.value.set([
       ambientColor[0] / 255.0,
@@ -174,11 +192,14 @@ class WorldLight {
     ], 0);
   }
 
-  static updateFogUniforms(result) {
+  static updateFogUniforms(currentParams, nextParams, dist) {
     // Fog Params
-
-    const fogEnd = Math.min(result.floats[0] / 36.0, 350.0);
-    const fogScalar = result.floats[1];
+    const interpolatedFloatsParams = {
+      0: this.lerpFloats(currentParams.floats[0], nextParams.floats[0], dist),
+      1: this.lerpFloats(currentParams.floats[1], nextParams.floats[1], dist),
+    };
+    const fogEnd = Math.min(interpolatedFloatsParams[0] / 36.0, 400.0);
+    const fogScalar = interpolatedFloatsParams[1];
     const fogStart = fogEnd * fogScalar;
     const fogRange = fogEnd - fogStart;
 
@@ -188,8 +209,9 @@ class WorldLight {
     this.uniforms.fogParams.value[3] = 0.0;
 
     // Fog Color
-
-    const fogColor = result.colors[7];
+    const currentFogColor = currentParams.colors[7];
+    const nextFogColor = nextParams.colors[7];
+    const fogColor =  this.lerpVectors(currentFogColor, nextFogColor, dist);
 
     this.uniforms.fogColor.value.set([
       fogColor[0] / 255.0,
@@ -226,18 +248,17 @@ class WorldLight {
         }
 
         const { position, fallOffStart, fallOffEnd } = record;
-
         const worldPosition = new THREE.Vector3(
           17066.666 - (position.z / 36.0),
           17066.666 - (position.x / 36.0),
           position.y / 36.0
-        );
-
+          );
+          
         const distance = worldPosition.distanceTo(queryPosition) * 36.0;
-
-        if (distance > fallOffEnd) {
-          continue;
-        }
+        
+        // if (distance > fallOffEnd) {
+        //   continue;
+        // }
 
         let falloff = 0.0;
 
@@ -245,9 +266,14 @@ class WorldLight {
           falloff = (distance - fallOffStart) / (fallOffEnd - fallOffStart);
         }
 
+        const percentageDistance = fallOffEnd / distance;
+        
         results.push({
           distance: distance / 36.0,
+          percentageDistance: percentageDistance,
           falloff: falloff,
+          fallOffStart,
+          fallOffEnd,
           light: record,
           params: null,
           colors: [],
@@ -258,7 +284,10 @@ class WorldLight {
       if (results.length === 0) {
         results.push({
           distance: 0,
+          percentageDistance: 0,
           falloff: 0,
+          fallOffStart: 0,
+          fallOffEnd: 0,
           light: dbc[1],
           params: null,
           colors: [],
@@ -391,10 +420,10 @@ class WorldLight {
 
   static sortLights(results) {
     results.sort((a, b) => {
-      if (a.light.fallOffEnd > b.light.fallOffEnd) {
-        return 1;
-      } else if (b.light.fallOffEnd > a.light.fallOffEnd) {
+      if (a.percentageDistance > b.percentageDistance) {
         return -1;
+      } else if (b.percentageDistance > a.percentageDistance) {
+        return 1;
       } else {
         return 0;
       }

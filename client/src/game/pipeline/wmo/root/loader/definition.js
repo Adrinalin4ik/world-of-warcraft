@@ -96,7 +96,7 @@ class WMORootDefinition {
     // load before interior groups.
     for (let index = 0; index < this.groupCount; ++index) {
       const group = data.MOGI.groups[index];
-
+      
       if (group.interior) {
         this.interiorGroupIndices.push(index);
         this.interiorGroupCount++;

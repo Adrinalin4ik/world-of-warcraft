@@ -11,13 +11,14 @@ uniform int blendingMode;
 uniform float lightModifier;
 uniform vec3 ambientLight;
 uniform vec3 diffuseLight;
+uniform vec3 lightDirection;
 
 uniform float fogModifier;
 uniform float fogStart;
 uniform float fogEnd;
 uniform vec3 fogColor;
 
-uniform int indoor;
+uniform int interior;
 
 uniform float alphaTestValue;
 
@@ -78,7 +79,7 @@ vec4 lightOutdoor(vec4 color, vec4 vertexColor, vec3 light) {
 }
 
 void main() {
-  vec3 lightDirection = normalize(vec3(-1, -1, -1));
+  // vec3 lightDirection = normalize(vec3(-1, -1, -1));
   vec3 lightNormal = normalize(vertexWorldNormal);
   vec3 globalLight = createGlobalLight(lightDirection, lightNormal, diffuseLight, ambientLight);
 
@@ -101,7 +102,7 @@ void main() {
   }
   
   if (lightModifier > 0.0) {
-    if (indoor == 1) {
+    if (interior == 1) {
       color = lightIndoor(color, vertexColor, globalLight);
     } else {
       color = lightOutdoor(color, vertexColor, globalLight);

@@ -1,4 +1,4 @@
-#include <packing>
+#include <common>
 
 uniform int layerCount;
 uniform sampler2D alphaMaps[4];
@@ -18,6 +18,16 @@ uniform float fogModifier;
 uniform float fogStart;
 uniform float fogEnd;
 uniform vec3 fogColor;
+
+// vec3 saturate(vec3 value) {
+//   vec3 result = clamp(value, 0.0, 1.0);
+//   return result;
+// }
+
+// float saturate(float value) {
+//   float result = clamp(value, 0.0, 1.0);
+//   return result;
+// }
 
 vec4 applyFog(vec4 color) {
   float fogFactor = (fogEnd - cameraDistance) / (fogEnd - fogStart);
@@ -60,7 +70,7 @@ vec3 getDirectedDiffuseLight(vec3 lightDirection, vec3 lightNormal, vec3 diffuse
 vec4 lightLayer(vec4 color, vec3 diffuse, vec3 ambient) {
   if (lightModifier > 0.0) {
     color.rgb *= diffuse + ambient;
-    color.rgb = clamp(color.rgb, 0.0, 1.0);
+    color.rgb = saturate(color.rgb);
   }
 
   return color;
@@ -69,8 +79,8 @@ vec4 lightLayer(vec4 color, vec3 diffuse, vec3 ambient) {
 // Given a color, light it, and blend it with a layer.
 vec4 lightAndBlendLayer(vec4 color, vec4 layer, vec4 blend, vec3 diffuse, vec3 ambient) {
   layer = lightLayer(layer, diffuse, ambient);
-  color = (layer * blend) + ((1.0 - blend) * color);
-
+  color = (layer * blend.r) + ((1.0 - blend.r) * color); //use r color instead of a, because of RedFormat of material
+  
   return color;
 }
 
@@ -95,7 +105,7 @@ void main() {
     color = lightAndBlendLayer(color, layer, blend, directedDiffuseLight, ambientLight);
   }
 
-  // 3rd layer
+  // // 3rd layer
   if (layerCount > 2) {
     layer = texture2D(textures[2], vUv);
     blend = texture2D(alphaMaps[1], vUvAlpha);
@@ -103,13 +113,14 @@ void main() {
     color = lightAndBlendLayer(color, layer, blend, directedDiffuseLight, ambientLight);
   }
 
-  // 4th layer
+  // // 4th layer
   if (layerCount > 3) {
     layer = texture2D(textures[3], vUv);
     blend = texture2D(alphaMaps[2], vUvAlpha);
 
     color = lightAndBlendLayer(color, layer, blend, directedDiffuseLight, ambientLight);
   }
+
 
   color = finalizeColor(color);
 

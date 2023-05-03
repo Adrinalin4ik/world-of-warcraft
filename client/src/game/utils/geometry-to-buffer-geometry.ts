@@ -126,7 +126,7 @@ export default function geometryToBufferGeometry( geometry: Geometry ) {
   const positionAttribute = new THREE.BufferAttribute(positions, 3);
 
   // set the position attribute on the buffer geometry
-  bufferGeometry.addAttribute('position', positionAttribute);
+  bufferGeometry.setAttribute('position', positionAttribute);
 
   // create a Uint16Array to hold the face indices
   const indices = new Uint16Array(geometry.faces.length * 3);

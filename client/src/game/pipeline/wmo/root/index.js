@@ -8,6 +8,7 @@ import WMORootView from './view';
 class WMORoot {
 
   constructor(def) {
+    console.log('WMOROOT', def)
     this.path = def.path;
     this.id = def.rootID;
     this.header = def.header;
@@ -91,14 +92,13 @@ class WMORoot {
           });
         }
       }
-
       const def = new WMOMaterialDefinition(mindex, flags, blendMode, shader, textures);
 
       defs.set(mindex, def);
     }
   }
 
-  loadMaterials(refs) {
+  loadMaterials(refs, groupData) {
     const materials = [];
     for (let rindex = 0, rcount = refs.length; rindex < rcount; ++rindex) {
       const ref = refs[rindex];
@@ -110,7 +110,7 @@ class WMORoot {
       let material = this.caches.material.get(def.key);
 
       if (!material) {
-        material = new WMOMaterial(def);
+        material = new WMOMaterial(def, groupData);
         this.caches.material.set(def.key, material);
       }
 
