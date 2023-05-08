@@ -149,7 +149,12 @@ class Chunk extends THREE.Mesh {
     const id = offsetX * 16 + offsetY;
 
     return ADT.loadTile(map.internalName, tileX, tileY, map.wdt.data.flags).then((adt) => {
-      return new this(adt, id);
+      if (adt && adt.data) {
+        return new Chunk(adt, id);
+      } else {
+        console.warn(`ADT chunk at coords x: ${chunkX}, y: ${chunkY} not found`);
+        return null;
+      }
     });
   }
 

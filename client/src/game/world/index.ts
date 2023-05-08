@@ -35,7 +35,6 @@ export default class World extends EventEmitter {
 
     this.player.on("map:change", this.changeMap.bind(this));
     this.player.on("position:change", this.changePosition.bind(this));
-    
     // debugger;
     // let visualizer: MeshBVHVisualizer;
     // setInterval(() => {
@@ -221,9 +220,9 @@ export default class World extends EventEmitter {
         model.applyBillboards(camera);
       }
 
-      if (model.skeletonHelper) {
-        model.skeletonHelper.update();
-      }
+      // if (model.skeletonHelper) {
+      //   model.skeletonHelper.update();
+      // }
     });
   }
 }

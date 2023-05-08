@@ -23,3 +23,13 @@ if (container) {
 // unregister() to register() below. Note this comes with some pitfalls.
 // Learn more about service workers: https://bit.ly/CRA-PWA
 serviceWorker.unregister();
+
+window['safePrintTimer'] = null;
+window['safePrint'] = function(...log) {
+  if (window['safePrintTimer'] === null) {
+    window['safePrintTimer'] = setTimeout(() => {
+      console.log(...log);
+      window['safePrintTimer'] = null;
+    }, 1000)
+  }
+}

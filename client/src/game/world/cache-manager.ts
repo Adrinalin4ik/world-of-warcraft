@@ -25,7 +25,7 @@ class CacheManager {
     };
     
     request.onupgradeneeded = function(event) {
-      debugger;
+      // debugger;
       // var db = event.result;
       // var objectStore = db.createObjectStore("m2", {keyPath: "id"});
       // // for (var i in employeeData) {

@@ -43,10 +43,10 @@ class AdtMaterial extends THREE.ShaderMaterial {
       diffuseLight: { value: new THREE.Color(0.25, 0.5, 1.0) },
 
       // Managed by light manager
-      // fogModifier: { value: '1.0' },
+      fogModifier: { value: '1.0' },
       // fogColor: { value: new THREE.Color(0.25, 0.5, 1.0) },
       // fogStart: { value: 5.0 },
-      // fogEnd: { value: 400.0 }
+      // fogEnd: { value: 400.0 },
 
       sunParams: WorldLight.uniforms.sunParams,
       sunDiffuseColor: WorldLight.uniforms.sunDiffuseColor,
@@ -57,18 +57,10 @@ class AdtMaterial extends THREE.ShaderMaterial {
       materialParams: { value: [1,1,1,1] }
     };
 
-    // this.uniforms = {
-    //   sunParams: WorldLight.uniforms.sunParams,
-    //   sunDiffuseColor: WorldLight.uniforms.sunDiffuseColor,
-    //   sunAmbientColor: WorldLight.uniforms.sunAmbientColor,
-      
-    //   fogParams: WorldLight.uniforms.fogParams,
-    //   fogColor: WorldLight.uniforms.fogColor,
-    //   materialParams: { value: [1,1,1,1] }
-    // };
-
     this.needsUpdate = true;
+    this.defines.USE_LIGHTING = 1;
   }
+
 
   loadLayers() {
     this.layerCount = this.layers.length;

@@ -1,5 +1,5 @@
 const fogStart = 20.0;
-const fogEnd = 400.0;
+const fogEnd = 2000.0; //400
 const fogRange = fogEnd - fogStart;
 
 const values = {

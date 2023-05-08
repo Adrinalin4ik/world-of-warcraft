@@ -18,7 +18,7 @@ uniform float baseAlpha;
 
 void main() {
   vUv = uv;
-
+  
   vertexColor = vec4(color, alpha);
 
   if (interior == 1 && useBaseColor == 1) {

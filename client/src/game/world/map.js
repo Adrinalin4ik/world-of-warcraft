@@ -48,6 +48,7 @@ class WorldMap extends THREE.Group {
     this.chunks = new Map();
 
     this.collidableMeshList = [];
+    WorldLight.scene = this;
   }
 
   get internalName() {
@@ -102,11 +103,12 @@ class WorldMap extends THREE.Group {
     const chunkY = index % perRow;
 
     this.queuedChunks.set(index, Chunk.load(this, chunkX, chunkY).then((chunk) => {
-      this.chunks.set(index, chunk);
-
-      this.terrainManager.loadChunk(index, chunk);
-      // this.doodadManager.loadChunk(index, chunk.doodadEntries);
-      // this.wmoManager.loadChunk(index, chunk.wmoEntries);
+      if (chunk) {
+        this.chunks.set(index, chunk);
+        // this.terrainManager.loadChunk(index, chunk);
+        this.doodadManager.loadChunk(index, chunk.doodadEntries);
+        this.wmoManager.loadChunk(index, chunk.wmoEntries);
+      }
     }));
   }
 
@@ -116,9 +118,9 @@ class WorldMap extends THREE.Group {
       return;
     }
 
-    this.terrainManager.unloadChunk(index, chunk);
-    // this.doodadManager.unloadChunk(index, chunk.doodadEntries);
-    // this.wmoManager.unloadChunk(index, chunk.wmoEntries);
+    // this.terrainManager.unloadChunk(index, chunk);
+    this.doodadManager.unloadChunk(index, chunk.doodadEntries);
+    this.wmoManager.unloadChunk(index, chunk.wmoEntries);
 
     this.queuedChunks.delete(index);
     this.chunks.delete(index);
@@ -148,14 +150,18 @@ class WorldMap extends THREE.Group {
   }
 
   static load(id) {
-    return DBC.load('Map', id).then((data) => {
-      if (data) {
-        const { internalName: name } = data;
-        return WDT.load(`World\\Maps\\${name}\\${name}.wdt`).then((wdt) => {
-          return new this(data, wdt);
-        });
-      }
-    })
+    try {
+      return DBC.load('Map', id).then((data) => {
+        if (data) {
+          const { internalName: name } = data;
+          return WDT.load(`World\\Maps\\${name}\\${name}.wdt`).then((wdt) => {
+            return new this(data, wdt);
+          });
+        }
+      })
+    } catch(ex) {
+      console.warn('ADT load exeption', ex);
+    }
   }
 
 }

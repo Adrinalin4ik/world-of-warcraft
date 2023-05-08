@@ -37,11 +37,12 @@ class Unit extends Entity {
   private _displayId: number = 0;
   private _model: M2 | null = null;
   private modelData: DBC | null = null;
-  private playerGeometry: THREE.BoxGeometry = new THREE.BoxGeometry(0, 0, 0);
+  private playerGeometry: THREE.BoxGeometry = new THREE.BoxGeometry(5, 5, 5);
   private playerMaterial: THREE.MeshBasicMaterial = new THREE.MeshBasicMaterial(
     {
-      wireframe: true,
-      opacity: 0
+      color: '0xff0000',
+      // wireframe: true,
+      // opacity: 1
     }
   );
   public collider: THREE.Mesh = new THREE.Mesh(
@@ -53,7 +54,7 @@ class Unit extends Entity {
 
   public rotateSpeed: number = 2;
   public moveSpeed: number = 100; //10
-  public flySpeed: number = 10; //10
+  public flySpeed: number = 100; //10
   public gravity: number = -30; //10;
   public jumpVelocityConst: number = 16;
   public jumpVelocity: number = 0;
@@ -124,7 +125,7 @@ class Unit extends Entity {
     // Animation
     this.currentAnimationIndex = 0;
 
-    // this.view.add(this.collider);
+    this.view.add(this.collider);
     // this.view.add(this.arrow);
   }
 

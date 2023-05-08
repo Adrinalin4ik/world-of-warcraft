@@ -38,7 +38,7 @@ class TextureLoader {
 
     if (!this.cache.has(textureKey)) {
       // TODO: Promisify THREE's TextureLoader callbacks
-      this.cache.set(textureKey, loader.load(encodedPath, function(texture) {
+      const texture = loader.load(encodedPath, function(texture) {
         texture.sourceFile = path;
         texture.textureKey = textureKey;
 
@@ -47,7 +47,10 @@ class TextureLoader {
         texture.flipY = flipY;
 
         texture.needsUpdate = true;
-      }));
+      })
+      if (texture) {
+        this.cache.set(textureKey, texture);
+      }
     }
 
     return this.cache.get(textureKey);

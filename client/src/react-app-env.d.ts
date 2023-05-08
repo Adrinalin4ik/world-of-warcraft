@@ -3,6 +3,10 @@
 /// <reference types="react-dom" />
 /// <reference types="three" />
 
+declare global {
+  interface Window { safePrint: any; }
+}
+
 declare module '*.glsl' {
   const value: string;
   export default value;

@@ -17,7 +17,7 @@ class M2 extends THREE.Group {
   path: string;
   data: any;
   skinData: any;
-  batchManager: BatchManager = new BatchManager();
+  batchManager: BatchManager;
   canInstance: boolean;
   animated: boolean;
   billboards: THREE.Bone[];
@@ -66,6 +66,9 @@ class M2 extends THREE.Group {
     this.boundingVertices = data.boundingVertices;
     this.boundingNormals = data.boundingNormals;
     this.boundingTriangles = data.boundingTriangles;
+
+    this.batchManager = new BatchManager(data, skinData);
+
     // Keep track of whether or not to use skinning. If the M2 has bone animations, useSkinning is
     // set to true, and all meshes and materials used in the M2 will be skinning enabled. Otherwise,
     // skinning will not be enabled. Skinning has a very significant impact on the render loop in
@@ -109,7 +112,7 @@ class M2 extends THREE.Group {
       this.submeshGeometries = instance.submeshGeometries;
     } else {
       this.createTextureAnimations(data);
-      this.createBatches(data, skinData);
+      this.createBatches();
       this.createGeometry(data.vertices);
     }
 
@@ -264,10 +267,10 @@ class M2 extends THREE.Group {
 
   // Returns a map of M2Materials indexed by submesh. Each material represents a batch,
   // to be rendered in the order of appearance in the map's entry for the submesh index.
-  createBatches(data, skinData) {
+  createBatches() {
     const batches = new Map();
 
-    const batchDefs = this.batchManager.createDefs(data, skinData);
+    const batchDefs = this.batchManager.createDefs();
 
     const batchLen = batchDefs.length;
     for (let batchIndex = 0; batchIndex < batchLen; ++batchIndex) {
@@ -667,10 +670,10 @@ class M2 extends THREE.Group {
   }
 
   detachEventListeners() {
-    this.eventListeners.forEach((entry) => {
-      const [target, event, listener] = entry;
-      target.removeListener(event, listener);
-    });
+    // this.eventListeners.forEach((entry) => {
+      // const [target, event, listener] = entry;
+      // target.removeListener(event, listener);
+    // });
   }
 
   dispose() {
@@ -699,7 +702,7 @@ class M2 extends THREE.Group {
     }
     ColliderManager.collidableMeshList.delete(this.boundingMesh.uuid);
     const newM2 = new M2(this.path, this.data, this.skinData, instance);
-    return newM2 as THREE.Group;
+    return newM2 as any;
   }
 
 }

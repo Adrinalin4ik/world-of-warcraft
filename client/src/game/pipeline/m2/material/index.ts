@@ -1,40 +1,90 @@
 import * as THREE from 'three';
+
 import M2 from '..';
-
+import WorldLight from '../../../world/light';
 import TextureLoader from '../../texture-loader';
-
-import fragmentShader from './shader.frag';
-import vertexShader from './shader.vert';
 
 class M2Material extends THREE.ShaderMaterial {
 
+  static VERTEX_SHADERS = {
+    'Diffuse_T1': require('./vertex/diffuse-t1.glsl'),
+    'Diffuse_Env': require('./vertex/diffuse-env.glsl'),
+    'Diffuse_T1_T2': require('./vertex/diffuse-t1-t2.glsl'),
+    'Diffuse_T1_Env': require('./vertex/diffuse-t1-env.glsl'),
+    'Diffuse_Env_Env': require('./vertex/diffuse-env-env.glsl'),
+    'Discard': require('./vertex/discard.glsl')
+  };
+
+  static FRAGMENT_SHADERS = {
+    'Combiners_Opaque': require('./fragment/combiners-opaque.glsl'),
+    'Combiners_Mod': require('./fragment/combiners-mod.glsl'),
+    'Combiners_Opaque_Opaque': require('./fragment/combiners-opaque-opaque.glsl'),
+    'Combiners_Opaque_Add': require('./fragment/combiners-opaque-add.glsl'),
+    'Combiners_Opaque_AddNA': require('./fragment/combiners-opaque-addna.glsl'),
+    'Combiners_Opaque_AddAlpha': require('./fragment/combiners-opaque-addalpha.glsl'),
+    'Combiners_Opaque_AddAlpha_Alpha': require('./fragment/combiners-opaque-addalpha-alpha.glsl'),
+    'Combiners_Opaque_Mod': require('./fragment/combiners-opaque-mod.glsl'),
+    'Combiners_Opaque_Mod2x': require('./fragment/combiners-opaque-mod2x.glsl'),
+    'Combiners_Opaque_Mod2xNA': require('./fragment/combiners-opaque-mod2xna.glsl'),
+    'Combiners_Opaque_Mod2xNA_Alpha': require('./fragment/combiners-opaque-mod2xna-alpha.glsl'),
+    'Combiners_Mod_Opaque': require('./fragment/combiners-mod-opaque.glsl'),
+    'Combiners_Mod_Mod': require('./fragment/combiners-mod-mod.glsl'),
+    'Combiners_Mod_Mod2x': require('./fragment/combiners-mod-mod2x.glsl'),
+    'Discard': require('./fragment/discard.glsl')
+    /*
+    'Combiners_Mod':              'frag/mod.frag',
+    'Combiners_Decal':            'frag/decal.frag',
+    'Combiners_Add':              'frag/add.frag',
+    'Combiners_Mod2x':            'frag/mod2x.frag',
+    'Combiners_Fade':             'frag/fade.frag',
+    'Combiners_Opaque_Opaque':    'frag/opaque-opaque.frag',
+    'Combiners_Opaque_Mod':       'frag/opaque-mod.frag',
+    'Combiners_Opaque_Add':       '',
+    'Combiners_Opaque_Mod2x':     9,
+    'Combiners_Opaque_Mod2xNA':   10,
+    'Combiners_Opaque_AddNA':     11,
+    'Combiners_Mod_Opaque':       12,
+    'Combiners_Mod_Mod':          13
+    'Combiners_Mod_Add':          14,
+    'Combiners_Mod_Mod2x':        15,
+    'Combiners_Mod_Mod2xNA':      16,
+    'Combiners_Mod_AddNA':        17,
+    'Combiners_Add_Mod':          18,
+    'Combiners_Mod2x_Mod2x':      19
+    */
+  };
+
   m2: M2;
   eventListeners = [];
-  textureDefs: any;
+  layer;
+  skins = {
+    skin1: null,
+    skin2: null,
+    skin3: null,
+  };
   textures = [];
-  skins: any = {};
-  shaderID: number;
-
+  textureDefs;
+  shaderNames = {
+    vertex: null,
+    fragment: null,
+  };
   constructor(m2, def) {
     super();
     // if (def.useSkinning) {
-    //   super({ clipping: true });
+    //   super({ skinning: true });
     // } else {
-    //   super({ clipping: false });
+    //   super({ skinning: false });
     // }
-    // console.log(def)
+
     this.m2 = m2;
 
-    const vertexShaderMode = this.vertexShaderModeFromID(def.shaderID, def.opCount);
-    const fragmentShaderMode = this.fragmentShaderModeFromID(def.shaderID, def.opCount);
+    this.eventListeners = [];
+
+    this.layer = def.layer;
 
     this.uniforms = {
       textureCount: { value: 0 },
       textures: { value: [] },
-
-      blendingMode: { value: 0 },
-      vertexShaderMode: { value: vertexShaderMode },
-      fragmentShaderMode: { value: fragmentShaderMode },
 
       billboarded: { value: 0.0 },
 
@@ -43,7 +93,7 @@ class M2Material extends THREE.ShaderMaterial {
       animatedVertexColorAlpha: { value: 1.0 },
 
       // Animated transparency
-      animatedTransparency: { value: 10.0 },
+      animatedTransparency: { value: 1.0 },
 
       // Animated texture coordinate transform matrices
       animatedUVs: {
@@ -56,82 +106,29 @@ class M2Material extends THREE.ShaderMaterial {
       },
 
       // Managed by light manager
-      lightModifier: { value: '1.0' },
-      ambientLight: { value: new THREE.Color(0.5, 0.5, 0.5) },
-      diffuseLight: { value: new THREE.Color(0.25, 0.5, 1.0) },
-
-      // Managed by light manager
-      fogModifier: { value: '1.0' },
-      fogColor: {  value: new THREE.Color(0.25, 0.5, 1.0) },
-      fogStart: { value: 5.0 },
-      fogEnd: { value: 400.0 }
+      sunParams: WorldLight.uniforms.sunParams,
+      sunDiffuseColor: WorldLight.uniforms.sunDiffuseColor,
+      sunAmbientColor: WorldLight.uniforms.sunAmbientColor,
+      
+      fogParams: WorldLight.uniforms.fogParams,
+      fogColor: WorldLight.uniforms.fogColor,
+      materialParams: { value: [1,1,1,1] }
     };
 
-    // this.vertexShader = [
-    //   "varying vec2 vUv;",
-    //   "void main() {",
-    //       "vUv = uv;",
-    //       "gl_PointSize = 8.0;",
-    //       "gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);",
-    //   "}",
-    // ].join("\n"),
-
-    // this.fragmentShader = [
-    //         "varying vec2 vUv;",
-    //         "uniform sampler2D textures;",
-    //         "void main() {",
-    //             "gl_FragColor = texture2D(textures, vUv);",
-    //         "}",
-    // ].join("\n")
-    this.wireframe = false;
-    this.vertexShader = vertexShader;
-    this.fragmentShader = fragmentShader;
-
+    this.defines.MAX_BONES = 200;
+    this.defines.USE_LIGHTING = 1;
+    
     this.applyRenderFlags(def.renderFlags);
     this.applyBlendingMode(def.blendingMode);
-    // Shader ID is a masked int that determines mode for vertex and fragment shader.
-    this.shaderID = def.shaderID;
+
+    this.assignShaders(def.shaderNames);
 
     // Loaded by calling updateSkinTextures()
-    this.skins = {};
-    this.skins.skin1 = null;
-    this.skins.skin2 = null;
-    this.skins.skin3 = null;
 
-    this.textures = [];
     this.textureDefs = def.textures;
     this.loadTextures();
 
     this.registerAnimations(def);
-  }
-
-  // TODO: Fully expand these lookups.
-  vertexShaderModeFromID(shaderID, opCount) {
-    if (opCount === 1) {
-      return 0;
-    }
-
-    if (shaderID === 0) {
-      return 1;
-    }
-
-    return -1;
-  }
-
-  // TODO: Fully expand these lookups.
-  fragmentShaderModeFromID(shaderID, opCount) {
-    if (opCount === 1) {
-      // fragCombinersWrath1Pass
-      return 0;
-    }
-
-    if (shaderID === 0) {
-      // fragCombinersWrath2Pass
-      return 1;
-    }
-
-    // Unknown / unhandled
-    return -1;
   }
 
   enableBillboarding() {
@@ -140,7 +137,7 @@ class M2Material extends THREE.ShaderMaterial {
 
     // TODO: Shouldn't this be FrontSide? Billboarding logic currently seems to flips the mesh
     // backward.
-    this.side = THREE.BackSide;
+    this.side = THREE.DoubleSide;
   }
 
   applyRenderFlags(renderFlags) {
@@ -167,7 +164,7 @@ class M2Material extends THREE.ShaderMaterial {
   }
 
   applyBlendingMode(blendingMode) {
-    this.uniforms.blendingMode.value = blendingMode;
+    this.defines.BLENDING_MODE = blendingMode;
 
     if (blendingMode === 1) {
       this.uniforms.alphaKey = { value: 1.0 };
@@ -237,20 +234,56 @@ class M2Material extends THREE.ShaderMaterial {
     }
   }
 
+  assignShaders(shaderNames) {
+    /*
+    let vertex, fragment;
+
+    if (!shaderNames) {
+      // TODO: warn somehow?
+      console.log('missing shader names, assigning defaults');
+
+      vertex = 'Diffuse_T1';
+      fragment = 'Combiners_Opaque';
+    } else {
+      vertex = shaderNames.vertex;
+      fragment = shaderNames.fragment;
+    }
+
+    this.shaderNames = {
+      vertex: vertex,
+      fragment: fragment
+    };
+    */
+
+    this.shaderNames = shaderNames;
+
+    if (this.shaderNames) {
+      this.vertexShader = M2Material.VERTEX_SHADERS[shaderNames.vertex];
+      this.fragmentShader = M2Material.FRAGMENT_SHADERS[shaderNames.fragment];
+
+      if (!M2Material.FRAGMENT_SHADERS[shaderNames.fragment]) {
+        console.warn('MISSING SHADERS FOR M2: ', this.m2.name, this.shaderNames.fragment);
+      }
+    } else {
+      this.vertexShader = M2Material.VERTEX_SHADERS['Discard'];
+      this.fragmentShader = M2Material.FRAGMENT_SHADERS['Discard'];
+    }
+
+    this.vertexShader = M2Material.VERTEX_SHADERS.Diffuse_T1;
+    this.fragmentShader = M2Material.FRAGMENT_SHADERS.Combiners_Opaque;
+  }
+
   loadTextures() {
     const textureDefs = this.textureDefs;
 
     const textures = [];
 
     textureDefs.forEach((textureDef) => {
-      if (!textureDef.filename.includes("TEMP")) {
-        textures.push(this.loadTexture(textureDef));
-      } else {
-        this.visible = false;
-      }
+      textures.push(this.loadTexture(textureDef));
     });
 
     this.textures = textures;
+
     // Update shader uniforms to reflect loaded textures.
     this.uniforms.textures = { value: textures };
     this.uniforms.textureCount = { value: textures.length };
@@ -311,7 +344,7 @@ class M2Material extends THREE.ShaderMaterial {
       return;
     }
 
-    const { animationManager, uvAnimationValues } = this.m2;
+    const { animations, uvAnimationValues } = this.m2;
 
     const updater = () => {
       uvAnimationIndices.forEach((uvAnimationIndex, opIndex) => {
@@ -322,9 +355,9 @@ class M2Material extends THREE.ShaderMaterial {
       });
     };
 
-    animationManager.on('update', updater);
+    // animations.on('update', updater);
 
-    this.eventListeners.push([animationManager, 'update', updater]);
+    this.eventListeners.push([animations, 'update', updater]);
   }
 
   registerTransparencyAnimation(transparencyAnimationIndex) {
@@ -332,7 +365,7 @@ class M2Material extends THREE.ShaderMaterial {
       return;
     }
 
-    const { animationManager, transparencyAnimationValues } = this.m2;
+    const { animations, transparencyAnimationValues } = this.m2;
 
     const target = this.uniforms.animatedTransparency;
     const source = transparencyAnimationValues;
@@ -342,9 +375,9 @@ class M2Material extends THREE.ShaderMaterial {
       target.value = source[valueIndex];
     };
 
-    animationManager.on('update', updater);
+    // animations.on('update', updater);
 
-    this.eventListeners.push([animationManager, 'update', updater]);
+    this.eventListeners.push([animations, 'update', updater]);
   }
 
   registerVertexColorAnimation(vertexColorAnimationIndex) {
@@ -352,7 +385,7 @@ class M2Material extends THREE.ShaderMaterial {
       return;
     }
 
-    const { animationManager, vertexColorAnimationValues } = this.m2;
+    const { animations, vertexColorAnimationValues } = this.m2;
 
     const targetRGB = this.uniforms.animatedVertexColorRGB;
     const targetAlpha = this.uniforms.animatedVertexColorAlpha;
@@ -364,9 +397,9 @@ class M2Material extends THREE.ShaderMaterial {
       targetAlpha.value = source[valueIndex].alpha;
     };
 
-    animationManager.on('update', updater);
+    // animations.on('update', updater);
 
-    this.eventListeners.push([animationManager, 'update', updater]);
+    this.eventListeners.push([animations, 'update', updater]);
   }
 
   detachEventListeners() {
@@ -380,6 +413,7 @@ class M2Material extends THREE.ShaderMaterial {
     this.skins.skin1 = skin1;
     this.skins.skin2 = skin2;
     this.skins.skin3 = skin3;
+
     this.loadTextures();
   }
 

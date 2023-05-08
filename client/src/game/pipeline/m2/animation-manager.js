@@ -166,9 +166,9 @@ class AnimationManager extends EventEmitter {
     let trackID;
 
     if (opts.animationBlock.globalSequenceID > -1) {
-      trackID = this.registerSequenceTrack(opts);
+      // trackID = this.registerSequenceTrack(opts);
     } else {
-      trackID = this.registerAnimationTrack(opts);
+      // trackID = this.registerAnimationTrack(opts);
     }
 
     return trackID;
