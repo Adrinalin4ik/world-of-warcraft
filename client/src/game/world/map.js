@@ -105,7 +105,7 @@ class WorldMap extends THREE.Group {
     this.queuedChunks.set(index, Chunk.load(this, chunkX, chunkY).then((chunk) => {
       if (chunk) {
         this.chunks.set(index, chunk);
-        // this.terrainManager.loadChunk(index, chunk);
+        this.terrainManager.loadChunk(index, chunk);
         this.doodadManager.loadChunk(index, chunk.doodadEntries);
         this.wmoManager.loadChunk(index, chunk.wmoEntries);
       }
@@ -118,7 +118,7 @@ class WorldMap extends THREE.Group {
       return;
     }
 
-    // this.terrainManager.unloadChunk(index, chunk);
+    this.terrainManager.unloadChunk(index, chunk);
     this.doodadManager.unloadChunk(index, chunk.doodadEntries);
     this.wmoManager.unloadChunk(index, chunk.wmoEntries);
 

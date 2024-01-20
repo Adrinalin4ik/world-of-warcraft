@@ -1,7 +1,7 @@
 export default {
   world: {
     render: {
-      radius: 20
+      radius: 10
     }
   },
   texture: {

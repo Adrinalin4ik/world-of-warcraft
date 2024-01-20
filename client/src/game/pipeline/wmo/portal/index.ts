@@ -3,15 +3,23 @@ import { Face3, Geometry } from '../../../utils/geometry';
 import WMOPortalView from './view';
 
 class WMOPortal {
-
-  constructor(def) {
+  public index: number;
+  public vertices = [];
+  public parent: THREE.Object3D;
+  public boundingBox =  new THREE.Box3();
+  public normal: THREE.Vector3;
+  public plane: THREE.Plane;
+  public constant: number;
+  public legacyGeometry: Geometry;
+  public geometry: THREE.BufferGeometry;
+  public material: THREE.MeshBasicMaterial;
+  constructor(def, parent) {
     this.index = def.index;
     // console.log(this, def)
     const vertexCount = def.vertices.length / 3;
 
     const vertices = this.vertices = [];
-
-    this.boundingBox = new THREE.Box3();
+    this.parent = parent;
 
     for (let vindex = 0; vindex < vertexCount; ++vindex) {
       const vertex = new THREE.Vector3(
@@ -33,6 +41,10 @@ class WMOPortal {
 
     this.createGeometry(vertices);
     this.createMaterial();
+
+    setInterval(() => {
+      this.material.color = new THREE.Color(0xff0000);
+    }, 1000)
   }
 
   createView() {
@@ -55,17 +67,17 @@ class WMOPortal {
     }
 
     this.geometry = geometry.toBufferGeometry();
-    this.geometry.computeBoundsTree();
+    // this.geometry.computeBoundsTree();
   }
 
   createMaterial() {
     const material = this.material = new THREE.MeshBasicMaterial();
 
-    material.color = new THREE.Color(0xffff00);
+    material.color = new THREE.Color(0xff0000);
     material.side = THREE.DoubleSide;
-    material.opacity = 0.4;
+    material.opacity = 0.2;
     material.transparent = true;
-    material.depthWrite = false;
+    material.depthWrite = true;
     material.visible = false;
     material.wireframe = false
   }

@@ -8,9 +8,9 @@ import prompts from './setup-prompts';
 class ServerConfig {
 
   static DEFAULTS = {
-    'clientData': null,
-    'clusterWorkerCount': 1,
-    'isFirstRun': true,
+    'clientData': '/media/alexey/Новый\ том/WowCircle/Data/',
+    'clusterWorkerCount': 6,
+    'isFirstRun': false,
     'serverPort': '3000'
   };
 
@@ -23,10 +23,11 @@ class ServerConfig {
   }
 
   verify() {
-    const promise = this.isFirstRun ? this.prompt() : Promise.resolve();
-    return promise.then(function() {
-      // TODO: Verify the actual configuration and bail out when needed
-    });
+    return Promise.resolve();
+    // const promise = this.isFirstRun ? this.prompt() : Promise.resolve();
+    // return promise.then(function() {
+    //   // TODO: Verify the actual configuration and bail out when needed
+    // });
   }
 
   prompt() {

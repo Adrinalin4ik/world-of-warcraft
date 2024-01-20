@@ -32,7 +32,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private clock: THREE.Clock = new THREE.Clock();
   private game: GameHandler;
   private debug = false;
-  private debugCameraRange = 120;
+  private debugCameraRange = 300;
   //refs
   private controls = React.createRef<Controls>()
   private debugPanel = React.createRef<DebugPanel>()
@@ -53,7 +53,6 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     
     window['GameScreen'] = this;
     this.game = this.props.session.game;
-
     const browser = Bowser.getParser(window.navigator.userAgent);
     this.isMobile = browser.getPlatform().type === 'mobile';
 
@@ -64,6 +63,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.camera.name = 'MainCamera';
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(15, 0, 7);
+    this.game.camera = this.camera;
 
     this.cameraHelper = new THREE.CameraHelper( this.camera );
     this.game.world.scene.add(this.cameraHelper);
@@ -155,6 +155,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.prevCameraPosition === null ||
     !this.prevCameraRotation.equals(this.camera.quaternion) ||
     !this.prevCameraPosition.equals(this.camera.position);
+    
     this.game.world.animate(delta, this.camera, cameraMoved);
     this.renderer.render(this.game.world.scene, this.camera);
       if (this.debugRenderer) {
@@ -181,7 +182,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
 
     render() {
       const debugCanvas = this.debug ? 
-      <canvas ref="debugCanvas" 
+      <canvas ref="debugCanvas"
       className="canvas debug_canvas" 
       style={{position: this.debug ? "relative" : "absolute"}}></canvas> : null
     const { renderer } = this.state;

@@ -23,7 +23,7 @@ class WMORoot {
 
     this.doodadSets = def.doodadSets;
     this.doodadEntries = def.doodadEntries;
-
+    this.view = this.createView();
     this.caches = {
       material: new Map()
     };
@@ -160,7 +160,7 @@ class WMORoot {
         vertices: vertices.subarray(vindex, vindex + vlen),
         normal: normals.subarray(nindex, nindex + nlen),
         constant: constants[index]
-      });
+      }, this.view);
       
       portals.push(portal);
     }

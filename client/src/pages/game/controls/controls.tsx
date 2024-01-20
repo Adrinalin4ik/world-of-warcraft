@@ -51,6 +51,7 @@ class Controls extends React.Component<IProp, IUpdate> {
   private rotateEnd: THREE.Vector2 = new THREE.Vector2();
   private rotateDelta: THREE.Vector2 = new THREE.Vector2();
   private rotating: boolean = false;
+  private moving: boolean = false;
   private rotateSpeed: number = 1.0;
   private offset: THREE.Vector3 = new THREE.Vector3(-10, 0, 10);
   private target: THREE.Vector3 = new THREE.Vector3();
@@ -130,13 +131,22 @@ class Controls extends React.Component<IProp, IUpdate> {
   }
 
   _onKeyDown(event: KeyboardEvent) {
+    this.moving = true;
     if (event.keyCode === Key.T) {
       const p = this.unit.position;
       const r = this.unit.rotation;
+      const cameraPosition = this.camera.position;
+      const cameraRotation = this.camera.rotation;
       localStorage.setItem('debugCoords', JSON.stringify({
         zoneId: this.unit.mapId,
-        coords: [p.x, p.y, p.z],
-        rotation: [r.x, r.y, r.z]
+        player: {
+          coords: [p.x, p.y, p.z],
+          rotation: [r.x, r.y, r.z]
+        },
+        camera: {
+          coords: [cameraPosition.x, cameraPosition.y, cameraPosition.z],
+          rotation: [cameraRotation.x, cameraRotation.y, cameraRotation.z]
+        }
       }));
 
       alert("Coords saved successfully")
@@ -162,6 +172,7 @@ class Controls extends React.Component<IProp, IUpdate> {
   }
 
   _onKeyUp(event: KeyboardEvent) {
+    this.moving = false;
     const unit = this.unit;
     if (unit && unit) {
       if (event.keyCode !== Key.space) {
@@ -258,6 +269,14 @@ class Controls extends React.Component<IProp, IUpdate> {
       this.target = this.unit.position;
     }
 
+    this.calculateCamera();
+    
+    // if (this.rotating) {
+      this.camera.lookAt(this.target);
+    // }
+  }
+
+  calculateCamera() {
     const position = this.camera.position;
 
     // Rotate offset to "y-axis-is-up" space
@@ -291,9 +310,11 @@ class Controls extends React.Component<IProp, IUpdate> {
 
     // Rotate offset back to 'camera-up-vector-is-up' space
     this.offset.applyQuaternion(this.quatInverse);
-
-    position.copy(this.target).add(this.offset);
-    this.camera.lookAt(this.target);
+    
+    // if (this.moving || this.rotating) {
+      position.copy(this.target).add(this.offset);
+    // }
+    
     
     this.unit.view.rotateZ(this.thetaDelta);
 

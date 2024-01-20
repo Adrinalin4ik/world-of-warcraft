@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import DebugPanel from '../../pages/game/debug/debug';
 
 class LocationManager {
 
@@ -36,7 +37,7 @@ class LocationManager {
     }
 
     const location = this.selectCandidate(candidates);
-
+    // const location = candidates[0];
     if (location) {
       camera.location = location;
       // console.log("Interior")
@@ -67,7 +68,6 @@ class LocationManager {
       return;
     }
 
-    
     // Check if camera is in any of this WMO's groups
     for (const group of wmo.groups.values()) {
       // Only hunting for interior groups
@@ -76,10 +76,10 @@ class LocationManager {
         continue;
       }
       // console.log(isExterior)
-
+      
       // Check if camera could be inside this group
       const maybeInsideGroup = group.boundingBox.containsPoint(cameraLocal);
-
+      
       // Camera cannot be inside this group
       if (!maybeInsideGroup) {
         continue;
@@ -87,6 +87,7 @@ class LocationManager {
       // console.log(group.boundingBox, cameraLocal)
       // Query BSP tree for matching leaves
       let result = group.bspTree.queryBoundedPoint(cameraLocal, group.boundingBox);
+      
       // console.log(result)
       // Depending on group geometry, interior portions of a group may lack BSP leaves
       if (result === null) {
@@ -149,13 +150,15 @@ class LocationManager {
         }
       };
       // console.log("Interior", location)
-      // console.log(candidates)
       candidates.push(location);
     }
   }
 
   selectCandidate(candidates) {
     // Adjust bounds and mark invalid candidates
+    if (candidates.length > 1) {
+      // debugger;
+    }
     const adjustedCandidates = candidates.map((candidate) => {
       const { camera, query } = candidate;
       const { group } = candidate.wmo;
@@ -163,6 +166,7 @@ class LocationManager {
       // If a query didn't get a min Z bound from the BSP tree or from raycasting for portals, the
       // candidate is invalid.
       // console.log('here', query.z.min)
+      // debugger;
       if (query.z.min === null) {
         return null;
       }
@@ -175,48 +179,76 @@ class LocationManager {
         query.z.max = group.boundingBox.max.z;
       }
 
-      const cameraInBoundsZ =
-        camera.local.z >= query.z.min &&
-        camera.local.z <= query.z.max;
+      // const cameraInBoundsZ =
+      //   camera.local.z >= query.z.min &&
+      //   camera.local.z <= query.z.max;
         
-      if (!cameraInBoundsZ) {
-        return null;
-      }
+      // if (!cameraInBoundsZ) {
+      //   return null;
+      // }
       
       // Get the closest portal within a small range and ensure we're inside it
       const closestPortal = group.closestPortal(camera.local, 1.0);
       
       if (closestPortal !== null) {
-        const outsidePortal = closestPortal.portalRef.side * closestPortal.distance < 0.0;
+        // const outsidePortal = closestPortal.portalRef.side * closestPortal.distance < 0.0;
         
-        if (outsidePortal) {
-          return null;
-        }
+        // if (outsidePortal) {
+        //   return null;
+        // }
       }
 
-      return candidate;
+      return {
+        candidate,
+        closestPortal
+      };
     });
 
     // Remove invalid candidates
-    const validCandidates = adjustedCandidates.filter((candidate) => candidate !== null);
+    // const validCandidates = adjustedCandidates.filter((candidate) => candidate !== null);
 
     // No valid candidates
-    if (validCandidates.length === 0) {
-      return null;
-    }
+    // if (validCandidates.length === 0) {
+    //   return null;
+    // }
 
     // The correct candidate has the highest min Z bound of all remaining candidates
     // validCandidates.sort((a,b) => a.query.z.min + b.query.z.min)
-    validCandidates.sort((a, b) => {
-      if (a.query.z.min > b.query.z.min) {
-        return -1;
-      } else if (a.query.z.min < b.query.z.min) {
-        return 1;
-      } else {
-        return 0;
-      }
+    // validCandidates.sort((a, b) => {
+    //   if (a.query.z.min > b.query.z.min) {
+    //     return -1;
+    //   } else if (a.query.z.min < b.query.z.min) {
+    //     return 1;
+    //   } else {
+    //     return 0;
+    //   }
+    // });
+    // return validCandidates[0];
+
+    adjustedCandidates.sort((a,b) => {
+      const aPortal = a?.closestPortal;
+      const bPortal = b?.closestPortal;
+
+      // if (aPortal.distance)
+
+      return aPortal?.distance - bPortal?.distance;
+
+      // return aPortal?.distance - bPortal?.distance;
     });
-    return validCandidates[0];
+
+    const candidate = adjustedCandidates[0];
+
+
+    // if (candidate?.candidate) {
+    //   candidate.candidate.wmo.group.portals.forEach(p => p.material.color = new THREE.Color(0x0000ff));
+    // }
+
+    // if (candidate?.closestPortal) {
+    //   candidate.closestPortal.portal.material.color = new THREE.Color(0x00ff00);
+    //   // console.log(candidate.closestPortal.distance, candidate.closestPortal.sign, candidate.closestPortal.portalRef.side)
+    //   DebugPanel.test2 = candidate.closestPortal.portal.index
+    // }
+    return candidate?.candidate;
   }
 
 }

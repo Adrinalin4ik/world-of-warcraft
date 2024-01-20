@@ -57,6 +57,7 @@ class TextureLoader {
   }
 
   static unload(texture) {
+    if (!texture) return;
     const textureKey = texture.textureKey;
 
     let refCount = this.references.get(textureKey) || 1;

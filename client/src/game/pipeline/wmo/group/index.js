@@ -25,7 +25,7 @@ class WMOGroup {
     this.createGeometry(def.attributes, def.batches);
     this.createBoundingBox(def.boundingBox);
     this.createBSPTree(def.bspNodes, def.bspPlaneIndices, def.attributes);
-    this.view = null;
+    this.view = this.createView();
   }
 
   // Produce a new WMOGroupView suitable for placement in a scene.
@@ -134,33 +134,44 @@ class WMOGroup {
 
     let shortestDistance = max;
 
-    const result = {
-      portal: null,
-      portalRef: null,
-      distance: null
-    };
 
+
+    const portals = [];
     for (let index = 0, count = this.portals.length; index < count; ++index) {
       const portal = this.portals[index];
       const portalRef = this.portalRefs[index];
+      const projectedPoint = new THREE.Vector3();
+      portal.plane.projectPoint(point, projectedPoint);
 
-      // const point = new THREE.Vector3();
-      portal.plane.projectPoint(point, point);
-      const distance = point.clamp(portal.boundingBox.min, portal.boundingBox.max)
+      
+      const distance = projectedPoint.clamp(portal.boundingBox.min, portal.boundingBox.max)
         .distanceTo(point);
 
-      if (shortestDistance === null || distance < shortestDistance) {
-        shortestDistance = distance;
+      // if (shortestDistance === null || distance < shortestDistance) {
+      //   shortestDistance = distance;
 
         const sign = portal.plane.distanceToPoint(point) < 0.0 ? -1 : 1;
 
-        result.portal = portal;
-        result.portalRef = portalRef;
-        result.distance = distance * sign;
-      }
+        const result = {
+          portal,
+          portalRef,
+          distance: distance,
+          sign
+        };
+        
+        // if (portalRef.side * distance >= 0.0 && result.distance > 0) {
+        // console.log(portal.index, distance, sign, portalRef.side);
+        if ((portalRef.side === 1 && distance * sign > 0) || (portalRef.side === -1 && distance * sign <= 0)) {
+          portals.push(result);
+        }
+      // }
     }
 
-    return (result.portal === null) ? null : result;
+    portals.sort((a,b) => a.distance - b.distance);
+
+    return portals[0] || null;
+
+    // return (result.portal === null) ? null : result;
   }
 
   attenuateVertexColors(root, attributes, batches) {

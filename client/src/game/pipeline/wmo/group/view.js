@@ -11,6 +11,9 @@ class WMOGroupView extends THREE.Mesh {
     this.geometry = geometry;
     this.material = material;
     ColliderManager.collidableMeshList.set(this.uuid, this);
+    // this.boxHelper = new THREE.BoxHelper( this, 0xff0000 );
+    // this.boxHelper.visible = false;
+    // this.add(this.boxHelper);
   }
 
   clone() {

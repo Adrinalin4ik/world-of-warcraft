@@ -11,6 +11,7 @@ import ChatEnum from './chat/chatEnum';
 import config from '../config';
 import { ObjectHandler } from './object/handler';
 import World from '../../game/world';
+import { Camera } from 'three';
 
 export class GameHandler extends Socket {
 
@@ -40,7 +41,7 @@ export class GameHandler extends Socket {
     this.on('packet:receive:SMSG_AUTH_RESPONSE', this.handleAuthResponse.bind(this));
     this.on('packet:receive:SMSG_LOGIN_VERIFY_WORLD', this.handleWorldLogin.bind(this));
     this.on('packet:receive:SMSG_NAME_QUERY_RESPONSE', this.handleName.bind(this));
-
+    this.camera = null;
     this.world = new World(this);
   }
 

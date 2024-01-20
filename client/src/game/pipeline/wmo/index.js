@@ -73,15 +73,14 @@ class WMO {
   }
 
   load() {
-    console.log('loading file', this.filename)
     // REMOVE THIS
     // if (!this.filename.includes('NIGHTELFSMALLHOUSE_WSG')) return Promise.reject();
     // if (!this.filename.includes('CTFNIGHTELF_A')) return Promise.reject(); // tonnel
     return WMORootLoader.load(this.filename).then((root) => {
       this.root = root;
-      console.log('Load WMO', this)
-      const rootView = this.root.createView();
-      this.views.root = rootView;
+      // const rootView = this.root.createView();
+      // this.views.root = rootView;
+      this.views.root = this.root.view;
 
       this.loadPortals(this.root.portals);
 
@@ -144,7 +143,8 @@ class WMO {
   }
 
   loadGroup(group) {
-    const groupView = group.createView();
+    // const groupView = group.createView();
+    const groupView = group.view;
     this.placeGroupView(groupView);
     this.views.groups.set(group.index, groupView);
 
@@ -285,6 +285,7 @@ class WMO {
 
   placeGroupView(groupView) {
     // Add to scene and update matrices
+    // world.scene.add(groupView)
     this.views.root.add(groupView);
     // ColliderManager.collidableMeshList.set(groupView.uuid, groupView);
     groupView.updateMatrix();

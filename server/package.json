@@ -35,13 +35,16 @@
     "blizzard",
     "wow"
   ],
-  "engines": {"node": "^17.x.x"},
+  "engines": {
+    "node": "^17.x.x"
+  },
   "dependencies": {
     "array-find": "^0.1.1",
     "bluebird": "^2.10.0",
     "byte-buffer": "^1.0.3",
     "classnames": "^2.2.0",
     "configstore": "^1.2.0",
+    "cors": "^2.8.5",
     "deep-equal": "^1.0.0",
     "express": "^4.9.3",
     "ffi-napi": "4.0.3",

@@ -41,9 +41,9 @@ function PlaneHelper( plane, size, hex ) {
 
 	geometry.setAttribute( 'position', new BufferAttribute( positions, 3 ) );
 
-	Line.call( this, geometry, new LineBasicMaterial( { color: color } ) );
+	// Line.call( this, geometry, new LineBasicMaterial( { color: color } ) );
 
-	this.geometry.computeBoundingSphere();
+	// this.geometry.computeBoundingSphere();
 
 	this.update();
 

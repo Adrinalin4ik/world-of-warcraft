@@ -2,7 +2,8 @@ import * as THREE from 'three';
 
 import DebugPanel from '../../pages/game/debug/debug';
 import THREEUtil from '../utils/three-util';
-
+import { PlaneHelper } from '../utils/plane-helper';
+import { vec4 } from 'gl-matrix';
 
 export const ObjectsManager = [];
 
@@ -30,7 +31,7 @@ class VisibilityManager {
     this.hideAllMapChanks();
     this.hideAllMapDoodads();
     this.hideAllWMOGroups();
-    // this.hideAllWMODoodads();
+    this.hideAllWMODoodads();
 
     const camera = cameras.find(x => x.name === 'MainCamera');
     
@@ -43,14 +44,35 @@ class VisibilityManager {
     // camera.updateProjectionMatrix(); // make sure camera's world matrix is updated
     // console.log(camera)
     // Obtain a frustum matching the camera
+    // const cameraHelper = new THREE.CameraHelper(camera);
+    // const projectionMatrix = camera.projectionMatrix;
     const frustum = new THREE.Frustum();
+    // const frustum = new THREE.Frustum(
+    //   (new THREE.Plane(-projectionMatrix.elements[3] - projectionMatrix.elements[0], -projectionMatrix.elements[7] - projectionMatrix.elements[4], -projectionMatrix.elements[11] - projectionMatrix.elements[8], -projectionMatrix.elements[15] - projectionMatrix.elements[12])),
+    //   (new THREE.Plane(-projectionMatrix.elements[3] + projectionMatrix.elements[0], -projectionMatrix.elements[7] + projectionMatrix.elements[4], -projectionMatrix.elements[11] + projectionMatrix.elements[8], -projectionMatrix.elements[15] + projectionMatrix.elements[12])),
+    //   (new THREE.Plane(-projectionMatrix.elements[3] + projectionMatrix.elements[1], -projectionMatrix.elements[7] + projectionMatrix.elements[5], -projectionMatrix.elements[11] + projectionMatrix.elements[9], -projectionMatrix.elements[15] + projectionMatrix.elements[13])),
+    //   (new THREE.Plane(-projectionMatrix.elements[3] - projectionMatrix.elements[1], -projectionMatrix.elements[7] - projectionMatrix.elements[5], -projectionMatrix.elements[11] - projectionMatrix.elements[9], -projectionMatrix.elements[15] - projectionMatrix.elements[13])),
+    //   (new THREE.Plane(-projectionMatrix.elements[2], -projectionMatrix.elements[6], -projectionMatrix.elements[10], -projectionMatrix.elements[14]))
+    // );
+    // debugger;
     frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    // frustum.setFromProjectionMatrix(camera.projectionMatrix);
+    // debugger;
     // this.map.add(new PlaneHelper(frustum))
+    // const p1 = new THREE.PlaneHelper(frustum.planes[0], 1, 0xffff00);
+    // p1.position.set(camera.position.x, camera.position.y, camera.position.z);
+    // world.scene.add(p1);
+    // this.map.add(new THREE.PlaneHelper(frustum.planes[1], 1, 0xffff00));
+    // this.map.add(new THREE.PlaneHelper(frustum.planes[2], 1, 0xffff00));
     // Adjust near plane (5) back to camera position
-    // const nearGap = frustum.planes[5].distanceToPoint(camera.position);
-    // frustum.planes[5].constant -= nearGap;
+    const nearGap = frustum.planes[5].distanceToPoint(camera.position);
+    frustum.planes[5].constant -= nearGap;
 
-    DebugPanel.test1 = camera.location.type;
+    // var nearPlane = frustum.planes[5];
+    // var cameraVec4 = vec4.fromValues(camera.position.x, camera.position.y, camera.position.z,1);
+    // var dist = vec4.dot(nearPlane, cameraVec4);
+    // nearPlane.constant -= dist;
+
     if (camera.location.type === 'exterior') {
       this.enablePortalsFromExterior(0, camera, frustum);
     } else {
@@ -131,10 +153,9 @@ class VisibilityManager {
     groupView.visible = true;
 
     // Doodads within frustum are visible
-    // for (const doodad of wmo.doodadsForGroup(group)) {
-    //   this.enableStaticObjectInFrustum(doodad, frustum);
-    // }
-
+    for (const doodad of wmo.doodadsForGroup(group)) {
+      this.enableStaticObjectInFrustum(doodad, frustum);
+    }
     // Traverse outward from the given group, marking any relevant WMO groups as visible
     this.traversePortalsAndEnable(depth, camera, wmo, group, frustum, visitedPortals);
   }
@@ -152,15 +173,15 @@ class VisibilityManager {
   }
 
   traversePortalsAndEnable(depth, camera, wmo, group, frustum = null, visitedPortals = new Set()) {
-    // if (depth > 8) return; 
+    if (depth > 10) return; 
     
     const view = wmo.views.groups.get(group.index);
     const cameraLocal = view.worldToLocal(camera.position.clone());
 
     // Doodads within frustum are visible
-    // for (const doodad of wmo.doodadsForGroup(group)) {
-    //   this.enableStaticObjectInFrustum(doodad, frustum);
-    // }
+    for (const doodad of wmo.doodadsForGroup(group)) {
+      this.enableStaticObjectInFrustum(doodad, frustum);
+    }
 
     for (let pindex = 0, pcount = group.portals.length; pindex < pcount; ++pindex) {
       const portal = group.portals[pindex];
@@ -169,7 +190,7 @@ class VisibilityManager {
 
       // Destination group is pending load
       if (!destination) {
-        console.debug('Destination group is pending load')
+        // console.debug('Destination group is pending load')
         continue;
       }
 
@@ -179,42 +200,40 @@ class VisibilityManager {
 
       // Destination group's view is pending load
       if (!destinationView) {
-        console.debug('Destination group\'s view is pending load')
+        // console.debug('Destination group\'s view is pending load')
         continue;
       }
 
       // Already visited this portal, so we're done
       if (visitedPortals.has(portalView)) {
-        console.debug("Already visited this portal, so we're done")
+        // console.debug("Already visited this portal, so we're done")
         continue;
       }
 
       // Exterior to exterior links are already covered by enablePortalsFromExterior
       if ((group.header.flags & 0x08) !== 0 && exteriorDestination) {
-        console.debug('Exterior to exterior links are already covered by enablePortalsFromExterior')
+        // console.debug('Exterior to exterior links are already covered by enablePortalsFromExterior')
         continue;
       }
 
       if (portalView.legacyGeometry.vertices.length < 4) {
-        console.debug('Portal has less then 4 verticies. It is invalid');
+        // console.debug('Portal has less then 4 verticies. It is invalid');
         continue;
       }
 
       // Portal out of group is not visible from previous frustum
       if (frustum !== null && !portalView.intersectFrustum(frustum)) {
-        console.debug('Portal out of group is not visible from previous frustum')
+        // console.debug('Portal out of group is not visible from previous frustum')
         continue;
       }
 
       // const plane = portal.plane;
       // const vec = vec4.fromValues(plane.normal.x, plane.normal.y, plane.normal.z, plane.constant);
-      // console.log(vec)
       // var dotResult = (vec4.dot(
       //   vec, 
       //   [cameraLocal.x, cameraLocal.y, cameraLocal.z, 1]
       // ));
       // dotResult = dotResult + ref.side * 0.01;
-      // DebugPanel.test1 = dotResult;
       // var isInsidePortalThis = (ref.side < 0) ? (dotResult <= 0) : (dotResult >= 0);
       // if (!isInsidePortalThis) continue;
 
@@ -224,7 +243,7 @@ class VisibilityManager {
       
       // Portals must be traversed outward
       if (!insidePortal) {
-        console.debug('Portals must be traversed outward', distance, ref)
+        // console.debug('Portals must be traversed outward', distance, ref)
         continue;
       }
 
@@ -235,12 +254,12 @@ class VisibilityManager {
       visitedPortals.add(portalView);
       
       // Project a frustum out of this portal for use in the next level of recursion
-      // const nextFrustum = portalView.createFrustum(camera, frustum, ref.side < 0);
+      const nextFrustum = portalView.createFrustum(camera, frustum, ref.side > 0);
       
-      const nextFrustum = portalView.portalCull(camera, frustum, ref.side < 0);
+      // const nextFrustum = portalView.portalCull(camera, frustum, ref.side < 0);
 
       if (!nextFrustum) {
-        console.debug('Project a frustum out of this portal for use in the next level of recursion')
+        // console.debug('Project a frustum out of this portal for use in the next level of recursion')
         continue;
       }
 

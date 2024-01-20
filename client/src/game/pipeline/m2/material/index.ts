@@ -403,10 +403,10 @@ class M2Material extends THREE.ShaderMaterial {
   }
 
   detachEventListeners() {
-    this.eventListeners.forEach((entry) => {
-      const [target, event, listener] = entry;
-      target.removeListener(event, listener);
-    });
+    // this.eventListeners.forEach((entry) => {
+    //   const [target, event, listener] = entry;
+    //   target.removeListener(event, listener);
+    // });
   }
 
   updateSkinTextures(skin1, skin2, skin3) {

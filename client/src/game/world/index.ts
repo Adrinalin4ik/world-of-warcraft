@@ -98,12 +98,20 @@ export default class World extends EventEmitter {
       if (loadedSpot) {
         const spot: any = JSON.parse(loadedSpot);
         // "{"zoneId":1,"coords":[-3685.162399035418,-4526.337356788462,16.28410000000111]}"
-        this.player.worldport(spot.zoneId, spot.coords);
+        this.player.worldport(spot.zoneId, spot.player.coords);
         this.player.rotation.set(
-          spot.rotation[0],
-          spot.rotation[1],
-          spot.rotation[2]
+          spot.player.rotation[0],
+          spot.player.rotation[1],
+          spot.player.rotation[2]
         );
+        setTimeout(() => {
+          this.game.camera.position.set(spot.camera.coords[0], spot.camera.coords[1], spot.camera.coords[2])
+          this.game.camera.rotation.set(
+            spot.camera.rotation[0],
+            spot.camera.rotation[1],
+            spot.camera.rotation[2]
+          );
+        }, 5000)
       } else {
         // let spot: any = spots[spots.length - 2]
         let spot: any = spots.find(x => x.id === "dun murog")
@@ -190,7 +198,7 @@ export default class World extends EventEmitter {
         this.map.locateCamera(camera);
         this.map.updateVisibility(camera);
       }
-      // this.map.updateWorldTime(camera, this.map.mapID);
+      this.map.updateWorldTime(camera, this.map.mapID);
       this.map.animate(delta, camera, cameraMoved);
     }
 

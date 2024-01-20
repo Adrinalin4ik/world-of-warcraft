@@ -1,4 +1,4 @@
-import { vec4 } from 'gl-matrix';
+import { vec4, mat4 } from 'gl-matrix';
 import * as THREE from 'three';
 import THREEUtil from '../../../utils/three-util';
 class WMOPortalView extends THREE.Mesh {
@@ -13,8 +13,8 @@ class WMOPortalView extends THREE.Mesh {
     this.material = material;
 
     this.geometry = geometry.toBufferGeometry();
-    this.geometry.computeBoundsTree();
-    this.visible = false;
+    // this.geometry.computeBoundsTree();
+    this.geometry.computeBoundingBox();
   }
 
   clone() {
@@ -46,7 +46,7 @@ class WMOPortalView extends THREE.Mesh {
 
     var visible = true;
     for (let i = 0; visible && i < frustumPlanes.length; i++) {
-        visible = visible && THREEUtil.planeCull(thisPortalVerticesCopy, frustumPlanes);
+      visible = visible && THREEUtil.planeCull(thisPortalVerticesCopy, frustumPlanes);
     }
 
     if (!visible) return null;
@@ -89,12 +89,11 @@ class WMOPortalView extends THREE.Mesh {
    *
    */
   createFrustum(camera, frustum, flip = false) {
-    // return frustum
     const planes = [];
     const vertices = [];
-    const origin = camera.position.clone();
-    // let local = this.worldToLocal(origin);
-    // local = new THREE.Vector3(-local.x, -local.y, local.z)
+
+    const origin = camera.position;
+
     // Obtain vertices in world space
     for (let vindex = 0, vcount = this.legacyGeometry.vertices.length; vindex < vcount; ++vindex) {
       const local = this.legacyGeometry.vertices[vindex].clone();
@@ -102,43 +101,13 @@ class WMOPortalView extends THREE.Mesh {
       vertices.push(world);
     }
 
-    // for (var i = 0; i < vertices.length; ++i) {
-    //     var i2 = (i + 1) % vertices.length;
-
-    //     // var n = mathHelper.createPlaneFromEyeAndVertexes(cameraVec4, thisPortalVerticesCopy[i], thisPortalVerticesCopy[i2]);
-    //     const eye = origin;
-    //     const vertex1 = vertices[i]
-    //     const vertex2 = vertices[i2]
-    //     var edgeDir1 = new THREE.Vector3();
-    //     edgeDir1.subVectors(vertex1, eye)
-        
-    //     var edgeDir2 = new THREE.Vector3();
-    //     edgeDir2.subVectors(vertex2, eye)
-        
-    //     const normVector = new THREE.Vector3();
-    //     normVector.cross(edgeDir2, edgeDir1);
-    //     normVector.normalize();
-    //     const distToPlane = normVector.distanceTo(eye);
-    //     normVector.z = -distToPlane;
-
-    //     const planeNorm = new THREE.Plane(normVector);
-
-    //     if (flip) {
-    //       planeNorm.negate();
-    //     }
-    //     // console.warn('here', planeNorm)
-    //     planes.push(planeNorm);
-    // }
-
     // Check distance to portal
-    const distance = this.portal.plane.distanceToPoint(this.worldToLocal(origin));
-    const close = distance > 1.0 && distance < -1.0;
-    // console.log(distance)
-    /* 
-      If the portal is very close, use the portal vertices unedited; otherwise, clip the portal
-      vertices by the provided frustum.
-    */
-    const clipped = THREEUtil.clipVerticesByFrustum(vertices, frustum)//close ? vertices : THREEUtil.clipVerticesByFrustum(vertices, frustum);
+    const distance = this.portal.plane.distanceToPoint(this.worldToLocal(origin.clone()));
+    const close = distance < 1.0 && distance > -1.0;
+
+    // If the portal is very close, use the portal vertices unedited; otherwise, clip the portal
+    // vertices by the provided frustum.
+    const clipped = close ? vertices : THREEUtil.clipVerticesByFrustum(vertices, frustum);
 
     // If clipping the portal vertices resulted in a polygon with fewer than 3 vertices, return
     // null to indicate a new frustum couldn't be produced.
@@ -151,8 +120,8 @@ class WMOPortalView extends THREE.Mesh {
       const vertex1 = clipped[vindex];
       const vertex2 = clipped[(vindex + 1) % vcount];
 
-      const plane = new THREE.Plane().setFromCoplanarPoints(vertex1, vertex2, origin);
-      // if (flip) plane.negate();
+      const plane = new THREE.Plane().setFromCoplanarPoints(origin, vertex1, vertex2);
+      if (flip) plane.negate();
       planes.push(plane);
     }
 
@@ -160,28 +129,14 @@ class WMOPortalView extends THREE.Mesh {
     const farPlaneIndex = frustum.planes.length - 1;
     const farPlane = frustum.planes[farPlaneIndex];
     planes.push(farPlane);
-    // this.add(new THREE.PlaneHelper( farPlane, 1, 0xff0000 ));
+
     // Create a near plane matching the portal
     const nearPlane = new THREE.Plane().setFromCoplanarPoints(clipped[0], clipped[1], clipped[2]);
-    // if (flip) nearPlane.negate();
+    if (flip) nearPlane.negate();
     planes.push(nearPlane);
-    // let h = new PlaneHelper( nearPlane, 10, 0x0000ff );
-    // this.add(h);
-    // const planeHelper = new PlaneHelper( nearPlane, 10, 0xff0000 );
-    // planeHelper.position.set(
-    //   this.parent.position.x, 
-    //   this.parent.position.y, 
-    //   this.parent.position.z)
-    // console.log(this.parent.parent.parent)
-    // this.add(planeHelper);
+
     const newFrustum = { planes };
-    // DebugPanel.test3 = DebugPanel.frustumToString(newFrustum.planes);
-    // const fr = new THREE.Frustum(...planes);
-    // const h = new FrustumHelper(fr);
-    // console.log(h)
-    // this.parent.add(h)
-    this.material.color = new THREE.Color(0xff0000);
-    // this.material.opacity = 1;
+
     return newFrustum;
   }
 
