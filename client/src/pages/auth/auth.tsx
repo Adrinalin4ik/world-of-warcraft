@@ -21,7 +21,7 @@ class Auth extends React.Component<Props> {
 
     this.state = {
       username: window.location.search.split('account=')[1] || 'Adrinalin4ik',
-      password: 'Hi73s6dL',
+      password: '',
     }
   }
   async authenticate(username: string, password: string) {
