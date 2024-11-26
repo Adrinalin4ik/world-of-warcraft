@@ -46,7 +46,7 @@
     "express": "^4.9.3",
     "forever": "^2.0.0",
     "globby": "^5.0.0",
-    "gsap": "^1.19.0",
+    "gsap": "^3.6.0",
     "inquirer": "^0.8.5",
     "jsbn": "timkurvers/jsbn.git#wowser",
     "keymaster": "^1.6.2",
