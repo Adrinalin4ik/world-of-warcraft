@@ -14,6 +14,7 @@ class WMOManager {
     this.zeropoint = zeropoint;
 
     this.chunkRefs = new Map();
+    this.mapLight = null;
 
     this.counters = {
       loadingEntries: 0,
@@ -224,6 +225,33 @@ class WMOManager {
   animate(delta, camera, cameraMoved) {
     this.entries.forEach((wmo) => {
       wmo.animate(delta, camera, cameraMoved);
+    });
+  }
+
+  /**
+   * Set the map light system
+   */
+  setMapLight(mapLight) {
+    this.mapLight = mapLight;
+    
+    // Propagate to all existing WMO entries
+    this.entries.forEach((wmo) => {
+      if (wmo.setMapLight) {
+        wmo.setMapLight(mapLight);
+      }
+    });
+  }
+
+  /**
+   * Update lighting for all WMO entries
+   */
+  updateLighting() {
+    if (!this.mapLight) return;
+    
+    this.entries.forEach((wmo) => {
+      if (wmo.updateLighting) {
+        wmo.updateLighting();
+      }
     });
   }
 

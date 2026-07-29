@@ -9,6 +9,7 @@ varying vec2 vUv;
 varying vec2 vUvAlpha;
 
 varying vec3 vertexNormal;
+varying vec3 vertexWorldPosition;
 varying float cameraDistance;
 
 uniform float lightModifier;
@@ -44,6 +45,18 @@ vec3 createLight(in vec3 normal, in vec3 direction, in vec3 diffuseColor, in vec
   vec3 light = saturate((diffuseColor.rgb * factor) + ambientColor.rgb);
 
   return light;
+}
+
+vec3 createSpecularLight(in vec3 normal, in vec3 direction, in vec3 viewDirection, in vec3 specularColor, in float shininess) {
+  // direction points FROM sun TO surface, so we need -direction for light direction
+  vec3 lightDirection = -direction;
+  vec3 halfVector = normalize(lightDirection + viewDirection);
+  float specularFactor = pow(max(dot(normalize(normal), halfVector), 0.0), shininess);
+  
+  // Make specular more dramatic and responsive to camera angle
+  specularFactor = pow(specularFactor, 0.5); // Square root to make it more spread out
+  
+  return specularColor * specularFactor;
 }
 
 vec4 applyFog(vec4 color) {
@@ -101,13 +114,19 @@ vec4 lightAndBlendLayer(vec4 color, vec4 layer, vec4 blend, vec3 light) {
 }
 
 void main() {
-  vec3 lightDirection = normalize(vec3(-1, -1, -1));
   vec3 lightNormal = normalize(vertexNormal);
-
-  // vec3 directedDiffuseLight = createLight(lightDirection, lightNormal, diffuseLight);
+  vec3 viewDirection = normalize(cameraPosition - vertexWorldPosition);
 
   #if USE_LIGHTING == 1
+    // Use dynamic sun direction from WorldLight system
     vec3 light = createLight(vertexNormal.xyz, sunParams.xyz, sunDiffuseColor.rgb, sunAmbientColor.rgb);
+    
+    // Add specular highlights for sun glints
+    vec3 specularColor = vec3(0.4, 0.35, 0.3); // Moderate warm white for realistic glints
+    float shininess = 16.0; // Realistic shininess for terrain surfaces
+    vec3 specular = createSpecularLight(vertexNormal.xyz, sunParams.xyz, viewDirection, specularColor, shininess);
+    
+    light += specular;
     light = mix(light, vec3(1.0, 1.0, 1.0), 1.0 - materialParams.y);
   #else
     vec3 light = vec3(1.0, 1.0, 1.0);

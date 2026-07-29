@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 
 import M2 from '..';
-import WorldLight from '../../../world/light';
+import MapLight from '../../../world/light/MapLight';
 import TextureLoader from '../../texture-loader';
 
 class M2Material extends THREE.ShaderMaterial {
+
+  private mapLight: MapLight | null = null;
 
   static VERTEX_SHADERS = {
     'Diffuse_T1': require('./vertex/diffuse-t1.glsl'),
@@ -106,12 +108,12 @@ class M2Material extends THREE.ShaderMaterial {
       },
 
       // Managed by light manager
-      sunParams: WorldLight.uniforms.sunParams,
-      sunDiffuseColor: WorldLight.uniforms.sunDiffuseColor,
-      sunAmbientColor: WorldLight.uniforms.sunAmbientColor,
-      
-      fogParams: WorldLight.uniforms.fogParams,
-      fogColor: WorldLight.uniforms.fogColor,
+      sunParams: { value: new THREE.Vector4() },
+      sunDiffuseColor: { value: new THREE.Color() },
+      sunAmbientColor: { value: new THREE.Color() },
+
+      fogParams: { value: new THREE.Vector4() },
+      fogColor: { value: new THREE.Color() },
       materialParams: { value: [1,1,1,1] }
     };
 
@@ -427,6 +429,31 @@ class M2Material extends THREE.ShaderMaterial {
       TextureLoader.unload(texture);
     });
   }
+
+  /**
+   * Set the map light system
+   */
+  setMapLight(mapLight: MapLight): void {
+    this.mapLight = mapLight;
+    this.updateLightUniforms();
+  }
+
+  /**
+   * Update light uniforms from the map light system
+   */
+  updateLightUniforms(): void {
+    if (this.mapLight) {
+      const uniforms = this.mapLight.uniforms;
+      this.uniforms.fogParams.value.copy(uniforms.fogParams.value);
+      this.uniforms.fogColor.value.copy(uniforms.fogColor.value);
+      this.uniforms.sunParams.value.copy(uniforms.sunDir.value);
+      this.uniforms.sunDiffuseColor.value.copy(uniforms.sunDiffuseColor.value);
+      this.uniforms.sunAmbientColor.value.copy(uniforms.sunAmbientColor.value);
+    }
+  }
 }
 
 export default M2Material;
+
+
+

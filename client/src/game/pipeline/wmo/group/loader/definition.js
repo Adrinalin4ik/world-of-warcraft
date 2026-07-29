@@ -14,7 +14,8 @@ class WMOGroupDefinition {
       batchOffsets: groupData.MOGP.batchOffsets,
       portalCount: groupData.MOGP.portalCount,
       portalOffset: groupData.MOGP.portalOffset,
-      flags: groupData.MOGP.flags
+      flags: groupData.MOGP.flags,
+      groupLiquid: groupData.MOGP.groupLiquid
     };
 
     this.doodadRefs = groupData.MODR ? groupData.MODR.doodadIndices : [];
@@ -27,6 +28,9 @@ class WMOGroupDefinition {
 
     this.bspNodes = groupData.MOBN.nodes;
     this.bspPlaneIndices = new Uint16Array(groupData.MOBR.indices);
+    
+    // Process liquid data if present
+    this.liquidData = this.createLiquidData(rootHeader, groupData);
   }
 
   createBoundingBox(mogp) {
@@ -227,6 +231,167 @@ class WMOGroupDefinition {
     }
   }
 
+  createLiquidData(rootHeader, groupData) {
+    if (!groupData.MLIQ) {
+      return null;
+    }
+
+    console.log('Processing MLIQ chunk for WMO group:', this.path, this.index);
+    console.log('MLIQ data:', groupData.MLIQ);
+    console.log('MLIQ vertices count:', groupData.MLIQ.vertices.length);
+    console.log('MLIQ tiles count:', groupData.MLIQ.tiles.length);
+    console.log('Sample vertex:', groupData.MLIQ.vertices[0]);
+    console.log('Sample tile:', groupData.MLIQ.tiles[0]);
+
+    const mliq = groupData.MLIQ;
+    const mogp = groupData.MOGP;
+    
+    try {
+      // Determine liquid type based on WMO flags and group liquid
+      const liquidType = this.determineLiquidType(rootHeader, mogp, mliq);
+      
+      // Create liquid layer data compatible with existing liquid system
+      const liquidLayer = {
+        liquidTypeID: liquidType,
+        liquidObjectID: 0, // Not used for WMO liquids
+        
+        minHeightLevel: mogp.minBoundingBox[2],
+        maxHeightLevel: mogp.maxBoundingBox[2],
+        
+        offsetX: 0,
+        offsetY: 0,
+        width: mliq.liquidTiles.x,
+        height: mliq.liquidTiles.y,
+        
+        vertexCount: mliq.vertexCount,
+        
+        // Pass interior flag for proper lighting
+        interior: this.interior,
+        
+        // Create fill data from tile flags
+        fill: this.createFillData(mliq),
+        
+        // Create vertex data from MLIQ vertices
+        vertexData: {
+          heights: mliq.vertices.map(vertex => vertex.height),
+          alphas: new Array(mliq.vertexCount).fill(255) // Default alpha
+        }
+      };
+      
+      return {
+        layers: [liquidLayer],
+        layerCount: 1,
+        // Add MLIQ-specific data for WMO liquid rendering
+        liquidCorner: mliq.liquidCorner,
+        liquidVerts: mliq.liquidVerts,
+        liquidTiles: mliq.liquidTiles,
+        vertices: mliq.vertices,
+        tiles: mliq.tiles
+      };
+    } catch (error) {
+      console.error('Error parsing MLIQ data:', error);
+      
+      // Fallback: create a simple liquid layer without detailed parsing
+      console.log('Creating fallback liquid layer');
+      const liquidLayer = {
+        liquidTypeID: this.determineLiquidType(rootHeader, mogp, null),
+        liquidObjectID: 0,
+        
+        minHeightLevel: mogp.minBoundingBox[2],
+        maxHeightLevel: mogp.maxBoundingBox[2],
+        
+        offsetX: 0,
+        offsetY: 0,
+        width: 1,
+        height: 1,
+        
+        vertexCount: 4,
+        
+        fill: new Uint8Array([0xFF]), // Single filled tile
+        
+        vertexData: {
+          heights: [mogp.maxBoundingBox[2], mogp.maxBoundingBox[2], mogp.maxBoundingBox[2], mogp.maxBoundingBox[2]],
+          alphas: [255, 255, 255, 255]
+        }
+      };
+      
+      return {
+        layers: [liquidLayer],
+        layerCount: 1
+      };
+    }
+  }
+  
+  
+  determineLiquidType(rootHeader, mogp, mliq) {
+    const useLiquidTypeDbcId = rootHeader.flags & 0x80000000; // flag_use_liquid_type_dbc_id
+    const groupLiquid = mogp.groupLiquid;
+    
+    if (useLiquidTypeDbcId) {
+      // Newer WMOs use DBC liquid types
+      if (groupLiquid < 21) { // LIQUID_FIRST_NONBASIC_LIQUID_TYPE
+        return this.toWmoLiquid(groupLiquid - 1, mogp);
+      } else {
+        return groupLiquid;
+      }
+    } else {
+      // Older WMOs use legacy liquid types
+      if (groupLiquid === 15) { // LIQUID_Green_Lava
+        // Use tile-based liquid type determination
+        return this.determineLegacyLiquidType(mliq);
+      } else {
+        const liquidType = groupLiquid + 1;
+        if (groupLiquid < 20) { // LIQUID_END_BASIC_LIQUIDS
+          return this.toWmoLiquid(groupLiquid, mogp);
+        } else {
+          return liquidType;
+        }
+      }
+    }
+  }
+  
+  toWmoLiquid(basicType, mogp) {
+    const basic = basicType & 3; // liquid_basic_types_MASK
+    const isOcean = mogp.flags & 0x80000; // is_not_water_but_ocean
+    
+    switch (basic) {
+      case 0: // liquid_basic_types_water
+        return isOcean ? 14 : 13; // LIQUID_WMO_Ocean : LIQUID_WMO_Water
+      case 1: // liquid_basic_types_ocean
+        return 14; // LIQUID_WMO_Ocean
+      case 2: // liquid_basic_types_magma
+        return 19; // LIQUID_WMO_Magma
+      case 3: // liquid_basic_types_slime
+        return 20; // LIQUID_WMO_Slime
+      default:
+        return 13; // Default to water
+    }
+  }
+  
+  determineLegacyLiquidType(mliq) {
+    // For green lava, determine type based on tile flags
+    // This is a simplified implementation - in practice, you'd analyze the tile data
+    return 13; // Default to WMO Water for now
+  }
+  
+  createFillData(mliq) {
+    const fill = new Uint8Array(mliq.tiles.length);
+    
+    for (let i = 0; i < mliq.tiles.length; i++) {
+      const tile = mliq.tiles[i];
+      const legacyLiquidType = tile.flags & 0x0F; // First 4 bits
+      
+      if (legacyLiquidType <= 20) {
+        // Determine if tile should be filled based on liquid type
+        fill[i] = legacyLiquidType > 0 ? 0xFF : 0x00;
+      } else {
+        fill[i] = 0xFF; // Fill for non-basic liquid types
+      }
+    }
+    
+    return fill;
+  }
+
   // Returns an array of references to typed arrays that we'd like to transfer across worker
   // boundaries.
   get transferable() {
@@ -239,6 +404,15 @@ class WMOGroupDefinition {
     list.push(this.attributes.colors.buffer);
 
     list.push(this.bspPlaneIndices.buffer);
+    
+    // Add liquid data buffers if present
+    if (this.liquidData) {
+      this.liquidData.layers.forEach(layer => {
+        if (layer.fill) {
+          list.push(layer.fill.buffer);
+        }
+      });
+    }
 
     return list;
   }

@@ -6,7 +6,7 @@ import DBC from '../pipeline/dbc';
 import WDT from '../pipeline/wdt';
 import gameSettings from '../settings';
 import DoodadManager from './doodad-manager';
-import WorldLight from './light';
+import MapLight from './light/MapLight';
 import LocationManager from './location-manager';
 import TerrainManager from './terrain-manager';
 import VisibilityManager from './visibility-manager';
@@ -17,6 +17,8 @@ class WorldMap extends THREE.Group {
   static ZEROPOINT = ADT.SIZE * 32;
 
   static CHUNKS_PER_ROW = 64 * 16;
+  
+  mapLight = null;
 
   // Controls when ADT chunks are loaded and unloaded from the map.
   static CHUNK_RENDER_RADIUS = gameSettings.world.render.radius;
@@ -48,7 +50,14 @@ class WorldMap extends THREE.Group {
     this.chunks = new Map();
 
     this.collidableMeshList = [];
-    WorldLight.scene = this;
+    // Initialize map light system
+    this.mapLight = new MapLight();
+    
+    // Set up light system for all managers
+    this.setupLightSystem();
+    
+    // Set map ID on the light system
+    this.mapLight.mapId = this.mapID;
   }
 
   get internalName() {
@@ -138,7 +147,121 @@ class WorldMap extends THREE.Group {
   }
 
   updateWorldTime(camera, mapID, time=null) {
-    WorldLight.update(camera, mapID, time);
+    if (this.mapLight) {
+      // Set camera on MapLight if not already set
+      if (!this.mapLight.camera) {
+        this.mapLight.camera = camera;
+      }
+      
+      this.mapLight.update(camera, mapID, time);
+      
+      // Propagate light updates to all materials
+      this.updateAllMaterialsWithLight();
+    }
+  }
+
+  /**
+   * Set up the light system for all managers
+   */
+  setupLightSystem() {
+    if (!this.mapLight) return;
+
+    // Set MapLight on all managers that support it
+    if (this.wmoManager && this.wmoManager.setMapLight) {
+      this.wmoManager.setMapLight(this.mapLight);
+    }
+    
+    if (this.doodadManager && this.doodadManager.setMapLight) {
+      this.doodadManager.setMapLight(this.mapLight);
+    }
+    
+    if (this.terrainManager && this.terrainManager.setMapLight) {
+      this.terrainManager.setMapLight(this.mapLight);
+    }
+    
+    // Also set MapLight on all existing materials in the scene
+    this.propagateMapLightToAllMaterials();
+  }
+
+  /**
+   * Propagate MapLight to all existing materials in the scene
+   */
+  propagateMapLightToAllMaterials() {
+    if (!this.mapLight) return;
+
+    let materialCount = 0;
+    let setCount = 0;
+
+    this.traverse((child) => {
+      if (child.material) {
+        if (Array.isArray(child.material)) {
+          child.material.forEach(material => {
+            materialCount++;
+            if (material.setMapLight) {
+              material.setMapLight(this.mapLight);
+              setCount++;
+            }
+            // Also try to enable new light system if available
+            if (material.enableNewLightSystem) {
+              material.enableNewLightSystem(this.mapLight.camera, this.mapID);
+            }
+          });
+        } else {
+          materialCount++;
+          if (child.material.setMapLight) {
+            child.material.setMapLight(this.mapLight);
+            setCount++;
+          }
+          // Also try to enable new light system if available
+          if (child.material.enableNewLightSystem) {
+            child.material.enableNewLightSystem(this.mapLight.camera, this.mapID);
+          }
+        }
+      }
+    });
+
+    console.log(`MapLight: Set MapLight on ${setCount}/${materialCount} materials`);
+  }
+
+  /**
+   * Update all materials in the scene with current light data
+   */
+  updateAllMaterialsWithLight() {
+    if (!this.mapLight) return;
+
+    let materialCount = 0;
+    let updatedCount = 0;
+
+    // Update ADT materials
+    this.traverse((child) => {
+      if (child.material) {
+        if (Array.isArray(child.material)) {
+          child.material.forEach(material => {
+            materialCount++;
+            if (material.updateLightUniforms) {
+              material.updateLightUniforms();
+              updatedCount++;
+            }
+          });
+        } else {
+          materialCount++;
+          if (child.material.updateLightUniforms) {
+            child.material.updateLightUniforms();
+            updatedCount++;
+          }
+        }
+      }
+    });
+
+    // Update WMO materials
+    if (this.wmoManager && this.wmoManager.updateLighting) {
+      this.wmoManager.updateLighting();
+    }
+
+    // Update M2 materials
+    if (this.doodadManager && this.doodadManager.updateLighting) {
+      this.doodadManager.updateLighting();
+    }
   }
 
   locateCamera(camera) {

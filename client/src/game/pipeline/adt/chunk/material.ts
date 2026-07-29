@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import WorldLight from '../../../world/light';
+import MapLight from '../../../world/light/MapLight';
 import TextureLoader from '../../texture-loader';
 import fragmentShader from './shader.frag';
 import vertexShader from './shader.vert';
@@ -12,6 +12,7 @@ class AdtMaterial extends THREE.ShaderMaterial {
   layers = [];
   rawAlphaMaps = [];
   textureNames: string[] = [];
+  private mapLight: MapLight | null = null;
 
   vertexShader = vertexShader;
   fragmentShader = fragmentShader;
@@ -48,12 +49,12 @@ class AdtMaterial extends THREE.ShaderMaterial {
       // fogStart: { value: 5.0 },
       // fogEnd: { value: 400.0 },
 
-      sunParams: WorldLight.uniforms.sunParams,
-      sunDiffuseColor: WorldLight.uniforms.sunDiffuseColor,
-      sunAmbientColor: WorldLight.uniforms.sunAmbientColor,
-      
-      fogParams: WorldLight.uniforms.fogParams,
-      fogColor: WorldLight.uniforms.fogColor,
+      sunParams: { value: new THREE.Vector4() },
+      sunDiffuseColor: { value: new THREE.Color() },
+      sunAmbientColor: { value: new THREE.Color() },
+
+      fogParams: { value: new THREE.Vector4() },
+      fogColor: { value: new THREE.Color() },
       materialParams: { value: [1,1,1,1] }
     };
 
@@ -104,6 +105,28 @@ class AdtMaterial extends THREE.ShaderMaterial {
     });
 
     this.textures = textures;
+  }
+
+  /**
+   * Set the map light system
+   */
+  setMapLight(mapLight: MapLight): void {
+    this.mapLight = mapLight;
+    this.updateLightUniforms();
+  }
+
+  /**
+   * Update light uniforms from the map light system
+   */
+  updateLightUniforms(): void {
+    if (this.mapLight) {
+      const uniforms = this.mapLight.uniforms;
+      this.uniforms.fogParams.value.copy(uniforms.fogParams.value);
+      this.uniforms.fogColor.value.copy(uniforms.fogColor.value);
+      this.uniforms.sunParams.value.copy(uniforms.sunDir.value);
+      this.uniforms.sunDiffuseColor.value.copy(uniforms.sunDiffuseColor.value);
+      this.uniforms.sunAmbientColor.value.copy(uniforms.sunAmbientColor.value);
+    }
   }
 
   dispose() {

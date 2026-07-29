@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 
-import WorldLight from '../../../world/light';
 import TextureLoader from '../../texture-loader';
 // import fragmentShader from './shader.frag';
 // import vertexShader from './shader.vert';
@@ -15,14 +14,15 @@ class WMOMaterial extends THREE.ShaderMaterial {
     this.def = def;
     this.interior = def.interior || groupData.interior;
     this.textures = [];
+    this.mapLight = null;
 
     this.uniforms = {
-      sunParams: WorldLight.uniforms.sunParams,
-      sunDiffuseColor: WorldLight.uniforms.sunDiffuseColor,
-      sunAmbientColor: WorldLight.uniforms.sunAmbientColor,
-      
-      fogParams: WorldLight.uniforms.fogParams,
-      fogColor: WorldLight.uniforms.fogColor,
+      sunParams: { value: new THREE.Vector4() },
+      sunDiffuseColor: { value: new THREE.Color() },
+      sunAmbientColor: { value: new THREE.Color() },
+
+      fogParams: { value: new THREE.Vector4() },
+      fogColor: { value: new THREE.Color() },
       materialParams: { value: [1,1,1,1] }
     };
 
@@ -43,9 +43,7 @@ class WMOMaterial extends THREE.ShaderMaterial {
     }
 
     // Tag lighting mode (based on group flags)
-    if (this.interior) {
-      this.uniforms.interior = { type: 'i', value: 1 };
-    }
+    this.uniforms.interior = { type: 'i', value: this.interior ? 1 : 0 };
 
     // Flag 0x01 (unlit)
     // TODO: This is really only unlit at night. Needs to integrate with the light manager in
@@ -250,6 +248,28 @@ class WMOMaterial extends THREE.ShaderMaterial {
 
     // Ensure changes propagate to renderer
     this.needsUpdate = true;
+  }
+
+  /**
+   * Set the map light system
+   */
+  setMapLight(mapLight) {
+    this.mapLight = mapLight;
+    this.updateLightUniforms();
+  }
+
+  /**
+   * Update light uniforms from the map light system
+   */
+  updateLightUniforms() {
+    if (this.mapLight) {
+      const uniforms = this.mapLight.getUniforms();
+      this.uniforms.fogParams.value.copy(uniforms.fogParams.value);
+      this.uniforms.fogColor.value.copy(uniforms.fogColor.value);
+      this.uniforms.sunParams.value.copy(uniforms.sunParams.value);
+      this.uniforms.sunDiffuseColor.value.copy(uniforms.sunDiffuseColor.value);
+      this.uniforms.sunAmbientColor.value.copy(uniforms.sunAmbientColor.value);
+    }
   }
 
   dispose() {

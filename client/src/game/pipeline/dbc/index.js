@@ -5,8 +5,9 @@ class DBC {
   static cache = {};
 
   constructor(data) {
-    this.data = data;
-    this.records = data.records;
+    this.data = data || {};
+    this.records = data?.records || [];
+    console.log(`DBC: Constructing with ${this.records.length} records`);
     this.index();
     this.modelID = null;
     this.path = null;
@@ -15,9 +16,15 @@ class DBC {
   }
 
   index() {
-    this.modelData = this.records.modelData
+    this.modelData = this.records?.modelData || null;
+    
+    if (!Array.isArray(this.records)) {
+      console.warn('DBC records is not an array, skipping indexing');
+      return;
+    }
+    
     this.records.forEach(function(record) {
-      if (record.id === undefined) {
+      if (!record || record.id === undefined) {
         return;
       }
       this[record.id] = record;
@@ -29,6 +36,9 @@ class DBC {
       this.cache[name] = WorkerPool.enqueue('DBC', name).then((args) => {
         const data = args;
         return new this(data);
+      }).catch((error) => {
+        console.error(`Failed to load DBC ${name}:`, error);
+        return new this({ records: [] });
       });
     }
 

@@ -20,7 +20,8 @@ const MOGP = Chunk({
   fogOffsets: new r.Array(r.uint8, 4),
   unknown: new r.Reserved(r.uint32le),
   groupID: r.uint32le,
-  unknowns: new r.Reserved(r.uint32le, 2),
+  unknowns: new r.Reserved(r.uint32le, 1),
+  groupLiquid: r.uint32le, // Liquid type for this group
 
   batchOffsets: function() {
     return {
@@ -98,15 +99,44 @@ const MOBR = Chunk({
   indices: new r.Array(r.int16le, 'size', 'bytes')
 });
 
-// const MLIQ = Chunk({
-//   xverts: r.uint32le,
-//   yverts: r.uint32le,
-//   xtiles: r.uint32le,
-//   ytiles: r.uint32le,
-//   x: Vec3Float,
-//   y: Vec3Float,
-//   materialId: r.uint32le
-// });
+// MLIQ chunk structure for WMO liquids
+const SMOLVert = new r.Struct({
+  flow1: r.uint8,
+  flow2: r.uint8,
+  flow1Pct: r.uint8,
+  filler: r.uint8,
+  height: r.floatle
+});
+
+const SMOLTile = new r.Struct({
+  flags: r.uint8 // Packed flags: legacyLiquidType(4), unknown1(1), unknown2(1), fishable(1), shared(1)
+});
+
+const MLIQ = Chunk({
+  liquidVerts: new r.Struct({
+    x: r.uint32le,
+    y: r.uint32le
+  }),
+  liquidTiles: new r.Struct({
+    x: r.uint32le,
+    y: r.uint32le
+  }),
+  liquidCorner: Vec3Float,
+  liquidMtlId: r.uint16le,
+  
+  // Computed properties
+  vertexCount: function() {
+    return this.liquidVerts.x * this.liquidVerts.y;
+  },
+  
+  tileCount: function() {
+    return this.liquidTiles.x * this.liquidTiles.y;
+  },
+  
+  // Use proper arrays with bounds checking
+  vertices: new r.Array(SMOLVert, 'vertexCount'),
+  tiles: new r.Array(SMOLTile, 'tileCount')
+});
 
 export default Chunked({
   MOGP: MOGP,
@@ -136,9 +166,9 @@ export default Chunked({
   MOCV: new r.Optional(MOCV, function() {
     return this.flags & 0x4;
   }),
-  // MLIQ: new r.Optional(MLIQ, function() {
-  //   return this.flags & 0x4;
-  // }),
+  MLIQ: new r.Optional(MLIQ, function() {
+    return this.flags & 0x1000; // LIQUIDSURFACE flag
+  }),
   interior: function() {
     return (this.flags & 0x2000) !== 0 && (this.flags & 0x8) === 0;
   }

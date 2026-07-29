@@ -18,6 +18,7 @@ class DoodadManager {
     this.zeropoint = zeropoint;
 
     this.chunkRefs = new Map();
+    this.mapLight = null;
 
     this.doodads = new Map();
     this.animatedDoodads = new Map();
@@ -237,6 +238,33 @@ class DoodadManager {
 
       if (doodad.skeletonHelper) {
         doodad.skeletonHelper.update();
+      }
+    });
+  }
+
+  /**
+   * Set the map light system
+   */
+  setMapLight(mapLight) {
+    this.mapLight = mapLight;
+    
+    // Propagate to all existing doodads
+    this.doodads.forEach((doodad) => {
+      if (doodad.setMapLight) {
+        doodad.setMapLight(mapLight);
+      }
+    });
+  }
+
+  /**
+   * Update lighting for all doodads
+   */
+  updateLighting() {
+    if (!this.mapLight) return;
+    
+    this.doodads.forEach((doodad) => {
+      if (doodad.updateLighting) {
+        doodad.updateLighting();
       }
     });
   }

@@ -159,17 +159,36 @@ const MODD = Chunk({
   }), 'size', 'bytes')
 });
 
+const MOLT = Chunk({
+  lights: new r.Array(new r.Struct({
+    type: r.uint8,                    // LightType enum (0=OMNI, 1=SPOT, 2=DIRECT, 3=AMBIENT)
+    useAtten: r.uint8,                // Use attenuation flag
+    pad: new r.Reserved(r.uint8, 2),  // Padding (2 bytes)
+    color: r.uint32le,                // CImVector color (BGRA)
+    position: Vec3Float,              // C3Vector position (XYZ)
+    intensity: r.floatle,             // Light intensity
+    rotation: new r.Struct({          // C4Quaternion rotation (for spot/direct lights)
+      x: r.floatle,
+      y: r.floatle,
+      z: r.floatle,
+      w: r.floatle
+    }),
+    attenStart: r.floatle,            // Attenuation start distance
+    attenEnd: r.floatle               // Attenuation end distance
+  }), 'size', 'bytes')
+});
+
 const MFOG = Chunk({
   fogs: new r.Array(new r.Struct({
-    flags: r.uint32le,
-    position: Vec3Float,
-    smallerRadius: r.floatle,
-    largerRadius: r.floatle,
-    fogEnd: r.floatle,
-    fogStartMultiplier: r.floatle,
-    color: r.uint32le,
-    unknowns: new r.Reserved(r.floatle, 2),
-    color2: r.uint32le
+    flag_infinite_radius: r.uint32le,  // Flag: infinite radius (bit 0)
+    pos: Vec3Float,                    // C3Vector position
+    smaller_radius: r.floatle,         // Start radius
+    larger_radius: r.floatle,          // End radius
+    fogs: new r.Array(new r.Struct({   // Array of 2 fog types (FOG and UWFOG)
+      end: r.floatle,                  // Fog end distance
+      start_scalar: r.floatle,         // Start scalar (0..1)
+      color: r.uint32le                // CImVector color (BGRA)
+    }), 2)                             // NUM_FOGS = 2 (FOG and UWFOG)
   }), 'size', 'bytes')
 });
 
@@ -209,7 +228,7 @@ export default Chunked({
   MOPR: MOPR,
   MOVV: SkipChunk,
   MOVB: SkipChunk,
-  MOLT: SkipChunk,
+  MOLT: MOLT,
   MODS: MODS,
   MODN: MODN,
   MODD: MODD,

@@ -102,7 +102,7 @@ class Chunk extends THREE.Mesh {
     
     if (adt.data.MH2O) {
       const liquid = adt.data.MH2O && adt.data.MH2O.chunks[id];
-      if (liquid.layerCount > 0) {
+      if (liquid && liquid.layerCount > 0) {
         this.add(new Liquid(liquid));
       }
     }

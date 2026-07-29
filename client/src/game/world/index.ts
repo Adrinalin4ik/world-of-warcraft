@@ -8,6 +8,8 @@ import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
 import M2Blueprint from "../pipeline/m2/blueprint";
+import SkyDebug from "../pipeline/sky/debug";
+import SkyManager from "../pipeline/sky/manager";
 import WorldMap from "./map";
 
 export default class World extends EventEmitter {
@@ -18,6 +20,8 @@ export default class World extends EventEmitter {
   public map: WorldMap | null = null;
   public session: GameSession;
   public game: GameHandler;
+  public skyManager: SkyManager;
+  private skyDebug: SkyDebug;
   // private skybox: THREE.Mesh;
   constructor(game: GameHandler) {
     super();
@@ -32,6 +36,13 @@ export default class World extends EventEmitter {
     this.game = game;
     this.session = game.session;
     this.player = this.session.player;
+
+    // Initialize sky manager
+    this.skyManager = new SkyManager(this.scene);
+    this.skyManager.initialize('cone'); // Default to cone method
+    
+    // Initialize sky debug interface
+    this.skyDebug = new SkyDebug(this.skyManager);
 
     this.player.on("map:change", this.changeMap.bind(this));
     this.player.on("position:change", this.changePosition.bind(this));
@@ -201,6 +212,9 @@ export default class World extends EventEmitter {
       this.map.updateWorldTime(camera, this.map.mapID);
       this.map.animate(delta, camera, cameraMoved);
     }
+
+    // Update sky system
+    this.skyManager.update(camera, this.map?.mapID || 0);
 
     // Send delta updates to instanced M2 animation managers.
     M2Blueprint.animate(delta);

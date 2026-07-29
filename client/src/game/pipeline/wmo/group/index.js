@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 import BSPTree from '../../../utils/bsp-tree';
 import ColliderManager from '../../../world/collider-manager';
+import WMOLiquid from '../../liquid/wmo-liquid';
 import WMORootFlags from '../root/flags';
 import WMOGroupView from './view';
 
@@ -25,6 +26,10 @@ class WMOGroup {
     this.createGeometry(def.attributes, def.batches);
     this.createBoundingBox(def.boundingBox);
     this.createBSPTree(def.bspNodes, def.bspPlaneIndices, def.attributes);
+    
+    // Create liquid meshes if liquid data is present
+    this.liquid = this.createLiquid(def.liquidData);
+    
     this.view = this.createView();
   }
 
@@ -113,6 +118,18 @@ class WMOGroup {
     const { indices, positions } = attributes;
 
     this.bspTree = new BSPTree(nodes, planeIndices, indices, positions);
+  }
+
+  createLiquid(liquidData) {
+    if (!liquidData) {
+      return null;
+    }
+
+    console.log('Creating WMO liquid mesh for WMO group:', this.path, this.index);
+    console.log('Liquid data:', liquidData);
+
+    // Create WMO-specific liquid mesh
+    return new WMOLiquid(liquidData);
   }
 
   /**

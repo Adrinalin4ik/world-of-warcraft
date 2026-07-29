@@ -3,6 +3,7 @@ precision highp float;
 varying vec2 vUv;
 
 varying vec3 vertexWorldNormal;
+varying vec3 vertexWorldPosition;
 varying float cameraDistance;
 
 attribute vec3 color;
