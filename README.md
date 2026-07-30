@@ -1,36 +1,33 @@
 # world-of-warcraft
 
-Install StormLib and BLPConverter, which are used to handle Blizzard's game files.
+World of Warcraft (3.3.5a) rendered in the browser with WebGL.
 
-#node 10
+Game assets are fetched over HTTP from a host serving loose, extracted client files, and every
+format — BLP, WDT, ADT, M2, WMO, DBC — is parsed in the browser. There is no asset server to run and
+no local copy of the game needed: StormLib and BLPConverter are no longer used.
 
-#BPL converter
-sudo apt-get install cmake git gcc g++
-git clone git://github.com/Kanma/BLPConverter.git
-cd BLPConverter
-cmake CMakeLists.txt -DWITH_LIBRARY=YES
-sudo make install
-sudo ldconfig
-
-#Storm lib
-```shell
-sudo apt-get install cmake git gcc zlib1g-dev python libbz2-dev
-git clone git://github.com/ladislav-zezula/StormLib.git
-cd StormLib
-cmake CMakeLists.txt -DBUILD_SHARED_LIBS=ON
-sudo make install
-sudo ldconfig
-```
+## Client
 
 ```bash
-#client
-cd client 
+cd client
 npm install
 npm run start
-
-#server
-cd ../server
-npm install
-npm run gulp
-npm run serve
 ```
+
+### Asset host
+
+The client reads its asset host from `REACT_APP_DATA_URI`, set in `client/.env.development`:
+
+```
+REACT_APP_DATA_URI=https://data-direct.spelunkerdb.com/12340
+```
+
+Point it at any host that serves extracted 3.3.5a files as `<base>/<path>`, including a local static
+directory. Paths are lower-cased with forward slashes before the request goes out, so
+`DBFilesClient\Map.dbc` is fetched as `dbfilesclient/map.dbc`. A cross-origin host must send
+`Access-Control-Allow-Origin`.
+
+## Game server
+
+`server/game-server` is the multiplayer piece and is unrelated to assets. The client points at it via
+`gameServerUrl` in the same env file.

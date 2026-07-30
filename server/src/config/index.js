@@ -1,5 +1,5 @@
-import Configstore from 'configstore';
 import Promise from 'bluebird';
+import Configstore from 'configstore';
 import inquirer from 'inquirer';
 
 import pkg from '../../package.json';
@@ -8,7 +8,6 @@ import prompts from './setup-prompts';
 class ServerConfig {
 
   static DEFAULTS = {
-    'clientData': '/media/alexey/Новый\ том/WowCircle/Data/',
     'clusterWorkerCount': 6,
     'isFirstRun': false,
     'serverPort': '3000'
