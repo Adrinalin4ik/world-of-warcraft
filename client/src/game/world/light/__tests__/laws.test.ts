@@ -1,7 +1,22 @@
 /**
  * @jest-environment node
  */
-import { cap96, evalProbe, floor112, floor168, Lobe, propProbeCoeffs, RGB, Vec3 } from '../laws';
+import {
+  cap96,
+  dawnDuskCurve,
+  evalProbe,
+  floor112,
+  floor168,
+  interpDayNight,
+  Lobe,
+  propProbeCoeffs,
+  quantizeGlow,
+  RGB,
+  sidnNightFraction,
+  skyWarp,
+  stormBlend,
+  Vec3,
+} from '../laws';
 
 // benilla's golden case: the abbey stand MODD[24]. ambient/diffuse are its decoded colour words, and
 // `AXIS` is an arbitrary unit direction -- the fold's identities hold in any frame, because the
@@ -119,5 +134,107 @@ describe('MODD colour byte laws', () => {
     // The reference's decoded abbey benches: truncation gives 127 where nearest would give 128.
     expect(asBytes(floor168([59, 65, 92]))).toEqual([107, 118, 168]);
     expect(asBytes(floor168([69, 63, 83]))).toEqual([139, 127, 168]);
+  });
+});
+
+describe('interpDayNight', () => {
+  it('lerps between adjacent keyframes', () => {
+    const table: Array<[number, number]> = [
+      [0.0, 0.0],
+      [0.5, 10.0],
+    ];
+    expect(interpDayNight(table, 0.25)).toBeCloseTo(5.0, 5);
+  });
+
+  it('wraps around the end of the day', () => {
+    // Between the 0.75 key and the 0.25 key going forwards through midnight: 0.0 is halfway.
+    const table: Array<[number, number]> = [
+      [0.25, 0.0],
+      [0.75, 4.0],
+    ];
+    expect(interpDayNight(table, 0.0)).toBeCloseTo(2.0, 5);
+  });
+
+  it('reproduces the sun elevation table at its keyframes', () => {
+    const phi: Array<[number, number]> = [
+      [0.0, 2.2165682],
+      [0.25, 1.9198623],
+      [0.5, 2.2165682],
+      [0.75, 1.9198623],
+    ];
+    expect(interpDayNight(phi, 0.0)).toBeCloseTo(2.2165682, 5);
+    expect(interpDayNight(phi, 0.25)).toBeCloseTo(1.9198623, 5);
+    expect(interpDayNight(phi, 0.5)).toBeCloseTo(2.2165682, 5);
+    expect(interpDayNight(phi, 0.125)).toBeCloseTo(2.0682153, 4);
+  });
+});
+
+describe('sidnNightFraction', () => {
+  const at = (hour: number, minute: number) => sidnNightFraction(hour * 60 + minute);
+
+  it('is full overnight', () => {
+    expect(at(0, 0)).toBeCloseTo(1.0, 5);
+    expect(at(6, 0)).toBeCloseTo(1.0, 5);
+    expect(at(23, 0)).toBeCloseTo(1.0, 5);
+  });
+
+  it('ramps out over 06:00 to 07:00', () => {
+    expect(at(6, 30)).toBeCloseTo(0.5, 5);
+    expect(at(7, 0)).toBeCloseTo(0.0, 5);
+  });
+
+  it('is off all day', () => {
+    expect(at(12, 0)).toBeCloseTo(0.0, 5);
+    expect(at(20, 30)).toBeCloseTo(0.0, 5);
+  });
+
+  it('ramps in over 20:30 to 21:30', () => {
+    expect(at(21, 0)).toBeCloseTo(0.5, 5);
+    expect(at(21, 30)).toBeCloseTo(1.0, 4);
+  });
+});
+
+describe('dawnDuskCurve and skyWarp', () => {
+  it('is zero across midday and deep night', () => {
+    expect(dawnDuskCurve(720)).toBeCloseTo(0.0, 5);
+    expect(dawnDuskCurve(0)).toBeCloseTo(0.0, 5);
+    expect(dawnDuskCurve(1080)).toBeCloseTo(0.0, 5);
+  });
+
+  it('spikes to ~1 at dawn and dusk', () => {
+    expect(dawnDuskCurve(390)).toBeGreaterThan(0.99);
+    expect(dawnDuskCurve(1290)).toBeGreaterThan(0.99);
+  });
+
+  it('is partway up the dawn ramp at 06:00', () => {
+    const mid = dawnDuskCurve(360);
+    expect(mid).toBeGreaterThan(0.0);
+    expect(mid).toBeLessThan(1.0);
+  });
+
+  it('is identically zero in a highlightSky = 0 zone at every hour', () => {
+    for (let minute = 0; minute < 1440; minute += 15) {
+      expect(skyWarp(minute, 0)).toBe(0);
+    }
+  });
+
+  it('passes the curve through at highlightSky = 1', () => {
+    expect(skyWarp(390, 1)).toBeCloseTo(dawnDuskCurve(390), 5);
+  });
+});
+
+describe('quantizeGlow and stormBlend', () => {
+  it('quantizes glow to the byte the reference packs', () => {
+    expect(quantizeGlow(0.65)).toBeCloseTo(0.647, 3);
+    expect(quantizeGlow(1.0)).toBeCloseTo(1.0, 5);
+    expect(quantizeGlow(0.0)).toBe(0);
+  });
+
+  it('saturates the storm blend at a quarter sky density', () => {
+    expect(stormBlend(0)).toBe(0);
+    expect(stormBlend(0.125)).toBeCloseTo(0.5, 5);
+    expect(stormBlend(0.25)).toBeCloseTo(1.0, 5);
+    // Clamped, so an out-of-domain density cannot overdrive the lerp.
+    expect(stormBlend(1.0)).toBe(1);
   });
 });

@@ -180,3 +180,110 @@ export function floor112(bytes: Vec3): RGB {
 export function floor168(bytes: Vec3): RGB {
   return floorRaise(bytes, 168);
 }
+
+/**
+ * Vanilla `DayNight::InterpTable` -- wrap-around linear interpolation of a (dayFraction, value) table
+ * over [0, 1) (benilla `lighting/daynight.rs::interp_daynight`). Both of the client's return branches
+ * reduce to a plain lerp, so this is one.
+ *
+ * Wrapping matters: several of these tables have their first keyframe well after midnight, and the
+ * value at 00:30 comes from interpolating the LAST key forward into the first.
+ */
+export function interpDayNight(table: Array<[number, number]>, dayFraction: number): number {
+  const n = table.length;
+  if (n === 0) {
+    return 0;
+  }
+
+  let ahead = 0;
+  while (ahead < n && dayFraction > table[ahead][0]) {
+    ahead += 1;
+  }
+
+  // Off either end of the table means we are in the wrap span between its last and first keys.
+  let a: number;
+  let b: number;
+  if (ahead === n || ahead === 0) {
+    a = ahead === n ? 0 : ahead;
+    b = n - 1;
+  } else {
+    a = ahead;
+    b = ahead - 1;
+  }
+
+  let span = table[a][0] - table[b][0];
+  if (span < 0) {
+    span += 1;
+  }
+  let into = dayFraction - table[b][0];
+  if (into < 0) {
+    into += 1;
+  }
+
+  const t = span !== 0 ? into / span : 0;
+  return table[b][1] + t * (table[a][1] - table[b][1]);
+}
+
+/**
+ * The SIDN self-illumination night schedule (benilla `daynight.rs::SIDN_NIGHT_CURVE`, track
+ * `0xce9a34`): 1.0 overnight, 0.0 all day, linear ramps 20:30 -> 21:30 and 06:00 -> 07:00. Every WMO
+ * SIDN material's authored emissive colour is multiplied by this, which is the windows-glow-at-night
+ * ramp.
+ */
+const SIDN_NIGHT_CURVE: Array<[number, number]> = [
+  [0.25, 1.0], // 06:00 -- still full night glow
+  [0.2916667, 0.0], // 07:00 -- faded out for the day
+  [0.8541667, 0.0], // 20:30 -- starts ramping in
+  [0.8958333, 1.0], // 21:30 -- full glow (wraps forward to 06:00 holding 1.0)
+];
+
+/** The SIDN night fraction at a game minute-of-day (0..1439). See [`SIDN_NIGHT_CURVE`]. */
+export function sidnNightFraction(minute: number): number {
+  return interpDayNight(SIDN_NIGHT_CURVE, minute / 1440);
+}
+
+/**
+ * The dawn/dusk sky-dome warp strength curve (benilla `daynight.rs::SKY_WARP_CURVE`, table
+ * `0xce9b2c`): two triangular spikes at sunrise (~06:29) and sunset (~21:29), and zero everywhere
+ * else -- all of midday AND deep night.
+ */
+const SKY_WARP_CURVE: Array<[number, number]> = [
+  [0.125, 0.0], // 03:00
+  [0.2708, 1.0], // 06:29 -- dawn spike
+  [0.2917, 0.0], // 07:00
+  [0.8542, 0.0], // 20:30
+  [0.8958, 1.0], // 21:29 -- dusk spike
+  [0.9993, 0.0], // 23:59
+];
+
+/** The raw dawn/dusk warp curve at a game minute-of-day. See [`SKY_WARP_CURVE`]. */
+export function dawnDuskCurve(minute: number): number {
+  return interpDayNight(SKY_WARP_CURVE, minute / 1440);
+}
+
+/**
+ * Sky-dome warp strength `S` = curve x the zone's `highlightSky` flag. Zero across midday and night,
+ * and zero at EVERY hour in a highlightSky = 0 zone (Duskwood), so the warp is identity there. At
+ * S = 0 the daytime sky stays byte-faithful.
+ */
+export function skyWarp(minute: number, highlightSky: number): number {
+  return dawnDuskCurve(minute) * highlightSky;
+}
+
+/**
+ * Quantize a raw `LightParams.glow` to the byte the reference packs into its composite-quad colour:
+ * `floor(g * 255) / 255`. Elwynn's authored 0.65 becomes 0.647.
+ */
+export function quantizeGlow(glow: number): number {
+  return Math.floor(glow * 255) / 255;
+}
+
+/**
+ * The storm light blend `bcc = min(1, skyDensity * 4)` (benilla `weather`/`cloud_density_clamp
+ * 0x6d4500`). The weather state machine's sky-density channel lives in the [0, 0.25] knee domain, so
+ * a fully ramped storm gives exactly 1.0. This weight lerps the storm `LightParams` record over the
+ * clear one across every band at once -- ambient, diffuse, sky stops, fog colour AND fog distances.
+ */
+export function stormBlend(skyDensity: number): number {
+  return Math.min(1, Math.max(0, skyDensity * 4));
+}
