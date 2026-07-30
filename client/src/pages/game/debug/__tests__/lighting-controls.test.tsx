@@ -48,4 +48,36 @@ describe('LightingControls', () => {
     fireEvent.click(screen.getByLabelText(/follow clock/i));
     expect(mapLight.timeOverride).toBeNull();
   });
+
+  it('still updates the displayed time when the same mapLight object is mutated in place', () => {
+    // mapLight is the same long-lived object every frame (the parent panel force-updates and passes
+    // the identical reference each time). A naive `shouldComponentUpdate` that compares
+    // `this.props.mapLight !== nextProps.mapLight` would always see equal references here and freeze.
+    const mapLight = makeMapLight({ time: 1440 });
+    const { rerender } = render(<LightingControls mapLight={mapLight} />);
+    expect(screen.getByText(/12:00/)).toBeInTheDocument();
+
+    mapLight.time = 1500; // 750 minutes = 12:30, still the same object reference.
+    rerender(<LightingControls mapLight={mapLight} />);
+
+    expect(screen.getByText(/12:30/)).toBeInTheDocument();
+  });
+
+  it('does not re-render when nothing displayed has changed', () => {
+    // This is what happens 60 times a second in the real app: the parent panel force-updates every
+    // animation frame and passes the same (mutated-in-place) mapLight down again. Without
+    // shouldComponentUpdate, render() would run every time and React would rewrite the controlled
+    // inputs' checked/value/disabled on every commit, fighting the user's own click or drag.
+    const renderSpy = jest.spyOn(LightingControls.prototype, 'render');
+    const mapLight = makeMapLight({ time: 1440 });
+    const { rerender } = render(<LightingControls mapLight={mapLight} />);
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+
+    // Simulate the parent's per-frame forceUpdate: re-render with the same, unchanged object.
+    rerender(<LightingControls mapLight={mapLight} />);
+    rerender(<LightingControls mapLight={mapLight} />);
+
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+    renderSpy.mockRestore();
+  });
 });
