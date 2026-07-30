@@ -41,14 +41,39 @@ exactly. The sun direction is sound and is not touched.
 **In:** the M2 exterior irradiance lobe; interior M2 prop SH probes; the WMO fixed-function law with
 its three batch classes; SIDN night glow; the WINDOW midpoint law; per-object point-light selection
 with the verified falloff; MFOG interior fog with its crossfade; one shared fog implementation across
-M2, WMO and terrain; the `Light.dbc` 8-slot `LightParams` schema and slot selection.
+M2, WMO and terrain; the `Light.dbc` 8-slot `LightParams` schema and slot selection; the weather
+intensity state machine and the storm light blend, driven from the debug UI; the DBC sky gradient, the
+dawn/dusk sky warp, and the per-zone glow weight.
 
 **Out, and why:**
 
 - **Specular, and WMO per-group authored colour.** benilla excludes both. Specular is its deferred
   "Step 7b", held back because M2 per-material shininess is *inferred* rather than verified. Matching
   the reference here means matching its uncertainty. This omission is deliberate — not an oversight.
-- **Terrain and sky *lighting*.** Outside the request. Terrain's *fog* is in scope (see below).
+- **Precipitation rendering** (rain/snow/sand pools — benilla's `weather/precip.rs`). The weather
+  *state machine* is in, because lighting depends on it; drawing falling rain is a separate feature
+  that consumes the same state.
+- **Clouds** (benilla's `clouds/` — ~1160 lines). A procedural noise coverage field, not a lighting
+  law. Its consumers are cloud-dome rendering and sun-flare occlusion, neither of which exists here.
+  The authored cloud density band is still sampled and published, so the field can be added later
+  without revisiting lighting.
+- **Celestial bodies** — sun and moon discs, disc size curves, per-body lens-flare envelopes, star
+  alpha (benilla's `sun/` — ~1450 lines). Needs billboard and glare infrastructure this client does
+  not have. The directions and curves these consume are cheap and *are* resolved (see below), so the
+  bodies can be built against them later.
+- **Terrain and sky *shading* beyond the bands below.** Terrain's *fog* is in scope; its lighting is
+  not.
+
+### Colour space
+
+Favourable, and worth recording because it is the failure mode this port would most plausibly have
+had. benilla runs a **gamma lane**: shaders do lighting math on authored byte values and emit raw
+gamma, with exactly one decode late in the frame. This client already matches — `pages/game/index.tsx`
+deliberately pins `renderer.outputColorSpace = THREE.LinearSRGBColorSpace` to suppress three.js's
+linear→sRGB conversion. So the ported arithmetic lands on the same bytes and needs no remapping.
+
+One thing to confirm during implementation: BLP textures must not be sRGB-decoded on upload, or the
+albedo enters the math in a different space than the reference's.
 
 ## Architecture: the per-object lighting block
 
@@ -89,6 +114,15 @@ Pure functions. No three.js scene dependencies, no I/O, unit-testable in isolati
 - `selectPointLights(anchor, lights, max) → light[]`
 - `sidnNightFraction(minute) → number`
 - `stormBlend(density) → number`
+- `dawnDuskCurve(dayFraction) → number`
+- `quantizeGlow(g) → number`
+
+### `client/src/game/world/light/weather.ts` (new)
+
+The two ramped intensity channels and `setWeather(kind, grade, instant)`. The ramp law is pure and
+tested; the module holds only the current channel state and elapsed time. No renderer or network
+dependency — the debug UI drives it today, `SMSG_WEATHER` could drive it tomorrow, and neither is
+visible from in here.
 
 ### `client/src/game/world/light/PerObjectLight.ts` (new)
 
@@ -100,7 +134,9 @@ Holds one instance's resolved lighting state and writes it into a material's uni
 
 `m2/material/fragment/common-header.glsl`, `m2/material/vertex/common-main.glsl`,
 `wmo/material/shaders/{vertex,fragment}/*.glsl`, `adt/chunk/shader.frag` (fog block only),
-`world/light/MapLight.ts`, `wmo/root/loader/definition.js`, `wmo/index.js`.
+`world/light/MapLight.ts`, `wmo/root/loader/definition.js`, `wmo/index.js`,
+`pipeline/sky/*` (band wiring and the warp), `pages/game/debug/debug.tsx`,
+the `Light.dbc` / `LightParams` schemas in the DBC entity definitions.
 
 ## The laws
 
@@ -285,17 +321,113 @@ fogged WMO. Terrain, liquid, sky and exterior groups keep scene fog.
 
 ### Inert inputs, stated plainly
 
-Three of the four slot selectors have no signal in this client. Each gets **one** call site returning
-a constant, so the machinery behind it goes live unchanged when the upstream system lands:
+Weather is driven from the debug UI (below), so the storm slot is live. The other two selectors have
+no signal in this client. Each gets **one** call site returning a constant, so the machinery behind it
+goes live unchanged when the upstream system lands:
 
 | Input | Reports | Blocked on |
 |---|---|---|
-| weather density | `0` (clear) | no weather system; needs `SMSG_WEATHER` |
 | submersion | `dry` | no liquid height query exists anywhere in the client |
 | ghost | `alive` | player flags not surfaced from the network layer |
 
-Building those three is networking and collision work, not lighting work, and is not in this spec.
-Until they land, the storm/underwater/death param slots are loaded and selectable but never selected.
+Both are collision and networking work rather than lighting work, and are not in this spec. Until
+they land, the underwater and death param slots are loaded and selectable but never selected.
+
+## Weather
+
+Driven from the debug UI, not the network. The state machine is the faithful part; where the grade
+comes from is one function call, so attaching the wire later touches exactly one seam.
+
+`client/src/game/world/light/weather.ts` — `setWeather(kind, grade, instant)` and a per-frame tick.
+Two ramped channels sharing one primitive, from the reference's `weather_intensity_ramp`:
+
+```
+value = clamped_lerp(from → to, elapsed_s / ((|to − from| · spanScale + 0.001) · 10))
+```
+
+- **Channel A — effect intensity**, `spanScale = 1`. A full 0→1 swing takes ~10 s. The effect density
+  precipitation would consume is `max((A − 0.25)·4/3, 0)`: below grade 0.25 nothing falls.
+- **Channel B — sky density**, `spanScale = 4`, but its endpoints live in the `[0, 0.25]` knee domain
+  because `SetWeather` writes `clamp(grade, 0, 0.25)` into them. The ×4 cancels the quarter-span, so
+  **B also swings in ~10 s**.
+
+**Do not read the ×4 as "B is four times slower."** benilla made exactly that error and had to correct
+it; the endpoint clamping is what makes the two rates equal. Both channels run on real elapsed time,
+so a transition keeps ramping through a loading screen like the reference.
+
+Channel A has no consumer while precipitation is out of scope. It is still implemented — it is the
+same primitive as B, so it costs nothing, and it is what a later precipitation feature needs.
+
+Lighting consumes B only: `bcc = min(1, B·4)`, which lerps the storm `LightParams` record over the
+clear one across **every band at once** — ambient, diffuse, sky stops, fog colour *and* fog distances.
+That single blend is the reference's whole overcast-darkening and fog-draw-in. Zones with no storm
+param fall back to their clear param, making the lerp an identity there.
+
+For whoever wires `SMSG_WEATHER` later: the opcode is already defined, the payload is
+`type/grade/sound/instant`, and the wire's last byte is **0 = smooth, nonzero = instant** — the
+reference's net handler *inverts* it before `SetWeather`, whose internal flag is 1 = smooth. vmangos
+always sends 0.
+
+## Sky
+
+The bands, not the bodies. All of this is the same `Light.dbc` sample the model lighting already
+resolves, so it is close to free once that exists — and the existing sky pipeline already reads some
+of these bands with hardcoded fallbacks.
+
+- **Five gradient stops**, zenith→horizon, from `LightIntBand` rows 2–6 — already enumerated in
+  `constants.ts` as `BAND_SKY_TOP_COLOR` through `BAND_SKY_SMOG_COLOR`. Interpolated across the dome
+  by elevation.
+- **Backdrop convergence.** The clear colour becomes the row-7 fog colour, written **raw** with no
+  conversion (the gamma lane), so a fully-fogged texel at the far plane lands on the same byte as the
+  void behind it and the horizon has no seam.
+- **Dawn/dusk sky warp.** `S = dawnDuskCurve(dayFraction) × highlightSky`, in `[0,1]`: the sun-facing
+  quarter of the dome warms toward `SkyColor0`, the away side desaturates toward `SkyColor1`. The
+  curve is **0 across all of midday and deep night**, spiking to 1 only at ~06:30 and ~21:30, and 0
+  entirely in `highlightSky = 0` zones such as Duskwood. At `S = 0` the warp is identity, so daytime
+  sky stays byte-faithful. benilla flags an **open** fidelity question here — their shader may
+  over-apply the warp to the dome apex and rim versus the binary's four middle rings, and the dusk
+  result is unconfirmed. Port it, and inherit the caveat rather than pretending it is settled.
+- **Per-zone glow weight.** `LightParams.glow`, quantised `floor(g·255)/255` exactly as the reference
+  packs it (Elwynn ≈ 0.647, Duskwood ≈ 0.498; fallback 0.5). Published for a bloom pass to consume if
+  one is built.
+- **Cloud density** (`LightFloatBand` sub-3) is sampled and published even though clouds are out of
+  scope, so adding a cloud field later needs no change here.
+
+The `LightParams` decode this needs — `highlightSky`, `glow`, `cloudDensity`, water alphas — rides the
+same 8-slot schema fix.
+
+## Debug controls
+
+The panel earns its place twice: it is how the shader laws get verified at all (they are not
+unit-testable), and it makes both flagged risks measurable instead of arguable. Extends the existing
+React panel at `pages/game/debug/debug.tsx`.
+
+**Drivers**
+
+- **Time of day** — follow-clock toggle plus a manual minute scrub. `MapLight.timeOverride` already
+  exists with no UI; this is mostly exposure.
+- **Weather** — kind, a grade slider, an instant toggle, and a live readout of both ramp channels so
+  the ~10 s swing can be watched rather than inferred.
+- **A/B toggles** — M2 lobe versus the old matte; the per-object block on/off; fog on/off. The first
+  makes the response change visible side by side; the second is the measurement harness for the
+  per-draw uniform risk.
+
+**Readouts.** These are the numeric probes benilla drives through environment variables, on screen
+instead:
+
+- **Resolved light**: map id, the eye position actually sampled, minute, and ambient / diffuse / spec /
+  fog as 0–255 bytes with fog start and end. benilla's comment on this one is worth heeding — it leads
+  with the map and position because those two inputs decide everything after them, neither is visible
+  from the chair, and without the map printed *"is this the atmosphere the zone authored, or the one
+  next door?"* costs a session.
+- **Fog**: scene triple versus interior triple plus the ramp `t`, so the 4 s crossfade can be watched
+  travelling. A once-a-second sample cannot catch the target flipping, so this wants per-frame.
+- **Point lights**: the committed count and the nearest few with distance and colour — the direct
+  answer to "what is actually lighting this".
+- **Area lights**: selected `Light.dbc` sphere ids and their blend weights.
+- **Derived scalars**: SIDN night fraction, storm `bcc`, sky warp `S`, resolved sun intensity.
+- **Interior state**: which side the camera resolved to, the claimed WMO and group, and that group's
+  batch-class counts.
 
 ## Load-time wiring
 
@@ -329,6 +461,14 @@ porting from a reference with tests is to inherit them:
   scales off the *clamped* end.
 - `selectPointLights`: picks 3 of many by distance from the anchor; excludes a candidate outside its
   own range; a selected light is **not** cut off by distance.
+- Weather ramp: a 0→1 grade swing completes in ~10 s on **both** channels — this is the assertion that
+  pins the misreading described above, so it must test B explicitly and not just A. Channel B stays
+  within `[0, 0.25]` for any input grade including 1.0. `instant` skips the ramp. A mid-ramp target
+  change re-aims from the *current* value, not from the original start.
+- `stormBlend`: `min(1, density·4)`, so a fully-ramped B of 0.25 gives exactly 1.0.
+- `dawnDuskCurve`: 0 across midday and deep night, peaking at ~06:30 and ~21:30; multiplied by
+  `highlightSky = 0` it is 0 at every time of day.
+- `quantizeGlow(0.65) → 0.647` (the reference's `floor(g·255)/255`).
 
 Shader laws are not directly unit-testable here. They are verified by visual A/B against the
 reference, listed below.
@@ -341,27 +481,38 @@ reference, listed below.
   it lands as light-from-above-and-45° in a real interior rather than trusting the inference.
 - **Performance:** measure the per-draw uniform refresh in a doodad-dense scene before and after.
   Fallback is per-instance material clones for interior props only.
-- **Looks:** a WMO exterior across a full day/night cycle; an inn interior (INT bake, fireplace
-  emissive mask, warm MFOG haze); windows at 20:30 → 21:30 → midnight for the SIDN ramp; a window
-  pane from inside by daylight for the WINDOW midpoint; a torch interior for point-light falloff and
-  the absence of point light on the walls; a tree at the fog boundary against the terrain under it.
+- **Looks**, all reachable from the debug panel without waiting on a server clock: a WMO exterior
+  across a full day/night cycle; an inn interior (INT bake, fireplace emissive mask, warm MFOG haze);
+  windows at 20:30 → 21:30 → midnight for the SIDN ramp; a window pane from inside by daylight for the
+  WINDOW midpoint; a torch interior for point-light falloff and the absence of point light on the
+  walls; a tree at the fog boundary against the terrain under it; a grade 0→1 weather swing watched for
+  the ~10 s overcast ramp and fog draw-in, then back down; the sky at 06:30 and 21:30 in a
+  `highlightSky = 1` zone (Elwynn) against a `highlightSky = 0` zone (Duskwood), where the warp must
+  do nothing at all; the horizon checked for a seam between the fogged far plane and the backdrop.
 
 ## Implementation order
 
-This is more than one plan's worth of work, and it decomposes cleanly — with one hard coupling.
+This is well past one plan's worth of work, and it decomposes cleanly — with one hard coupling.
 
-1. **WMO plumbing.** Stop discarding `colors[0]`; move lighting to the fragment stage; the matte with
+1. **`laws.ts` + tests.** Pure, no renderer dependency, so it lands before anything consumes it.
+2. **Debug panel: time scrub and readouts.** Deliberately early. Every step after this is verified by
+   eye, and the readouts are how that verification stops being guesswork. Building it last would mean
+   debugging steps 3–7 without instruments.
+3. **WMO plumbing.** Stop discarding `colors[0]`; move lighting to the fragment stage; the matte with
    MOCV inside the clamp. Largest single visual change, and independently verifiable.
-2. **`laws.ts` + tests.** Pure, no renderer dependency, so it can land before anything consumes it.
-3. **WMO batch classes, SIDN, WINDOW.** Depends on 1.
-4. **The per-object block + M2 lobe + interior probes + point lights.** Depends on 2. **Steps 3 and 4
+4. **WMO batch classes, SIDN, WINDOW.** Depends on 3.
+5. **The per-object block + M2 lobe + interior probes + point lights.** Depends on 1. **Steps 4 and 5
    must land together** — see risk 3: removing the interior sun fade before both the batch classes
-   and the probes exist leaves interiors darker than either the old or the new behaviour.
-5. **Fog: shared implementation across M2, WMO, terrain, then MFOG.** Independent of the lighting
+   and the probes exist leaves interiors darker than either the old or the new behaviour. The A/B
+   toggle and the perf measurement belong to this step.
+6. **Fog: shared implementation across M2, WMO, terrain, then MFOG.** Independent of the lighting
    laws; the shared-implementation part should precede MFOG so there is one place to add the second
    triple.
-6. **`Light.dbc` 8-slot schema + slot selection + storm lerp.** Independent of everything above.
-   Lands with its selectors inert.
+7. **`Light.dbc` 8-slot schema + `LightParams` decode + slot selection.** Independent of everything
+   above, and a prerequisite for 8 and 9.
+8. **Weather state machine + storm blend + the weather controls.** Depends on 7 for the storm param.
+9. **Sky bands, backdrop convergence, sky warp, glow weight.** Depends on 7 for `highlightSky` and
+   `glow`. Last because it is the least entangled and the most self-evident when wrong.
 
 ## Risks
 
