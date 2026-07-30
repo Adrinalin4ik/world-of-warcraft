@@ -43,6 +43,10 @@ class M2 extends THREE.Group {
   // this, dispose() -- which only walks this.submeshes -- would never release them, leaking a
   // material and a texture reference per emitter-only doodad on every load/unload cycle.
   suppressedBatches: any[];
+  // Parsed M2Particle definitions, retained so the particle system can register emitters for this
+  // model. Previously only the array's length was read, for the template-suppression check, and the
+  // definitions themselves were dropped on the floor.
+  particleEmitters: any[];
   // True only for the M2 instance that actually called createBatches() and therefore owns
   // this.batches. Instanced/cloned M2s share the source's this.batches (see the constructor's
   // `instance` branch and clone()) and must not dispose materials they merely borrowed.
@@ -89,6 +93,7 @@ class M2 extends THREE.Group {
     this.mesh = null;
     this.submeshes = [];
     this.suppressedBatches = [];
+    this.particleEmitters = data.particleEmitters || [];
     this.parts = new Map();
 
     this.geometry = null;
@@ -380,7 +385,7 @@ class M2 extends THREE.Group {
     const { vertices } = data;
     const { submeshes, indices, triangles } = skinData;
 
-    const emitterCount = data.particleEmitters ? data.particleEmitters.length : 0;
+    const emitterCount = this.particleEmitters.length;
     const submeshCount = submeshes.length;
 
     const subLen = submeshes.length;
