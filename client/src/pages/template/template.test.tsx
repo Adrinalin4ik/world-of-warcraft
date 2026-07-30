@@ -2,8 +2,8 @@ import React from 'react';
 import { render } from '@testing-library/react';
 import Template from './template';
 
-test('renders learn react link', () => {
+test('renders its placeholder content', () => {
   const { getByText } = render(<Template />);
-  const linkElement = getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
+
+  expect(getByText('Template works')).toBeInTheDocument();
 });
