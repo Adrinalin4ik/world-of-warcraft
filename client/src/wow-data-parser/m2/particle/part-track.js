@@ -18,8 +18,15 @@ export const decodeFixed16 = (raw) => raw / FIXED16_SCALE;
  * single particle's lifetime, and its arrays are flat.
  *
  * @param type - restructure type of each value
+ *
+ * The export MUST stay an anonymous function expression. react-refresh/babel (enabled via
+ * FAST_REFRESH in client/config/webpack.config.js) treats a capitalised top-level function
+ * declaration or const as a React component and injects a `$RefreshReg$(...)` call; the refresh
+ * runtime isn't present for this module, so that call throws on `undefined.register` and kills
+ * the whole M2 import chain. See client/src/wow-data-parser/m2/animation-block.js for the same
+ * pattern.
  */
-export default function FBlock(type) {
+export default function(type) {
   return new r.Struct({
     times: new Nofs(r.int16le),
     values: new Nofs(type),
