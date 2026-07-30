@@ -37,6 +37,16 @@ class M2 extends THREE.Group {
   rootBones: THREE.Bone[];
   receivesAnimationUpdates: boolean;
   batches: Map<number, any>;
+  // Batches belonging to submeshes suppressed by isTemplateSubmesh(). createBatches() already
+  // constructed their M2Materials (and, transitively, loaded their textures) before
+  // createSubmeshes() decided to skip them, so nothing else references these materials. Without
+  // this, dispose() -- which only walks this.submeshes -- would never release them, leaking a
+  // material and a texture reference per emitter-only doodad on every load/unload cycle.
+  suppressedBatches: any[];
+  // True only for the M2 instance that actually called createBatches() and therefore owns
+  // this.batches. Instanced/cloned M2s share the source's this.batches (see the constructor's
+  // `instance` branch and clone()) and must not dispose materials they merely borrowed.
+  ownsBatches: boolean;
   boundingMesh: THREE.Mesh;
   animationManager: AnimationManager;
   uvAnimationValues = [];
@@ -78,6 +88,7 @@ class M2 extends THREE.Group {
 
     this.mesh = null;
     this.submeshes = [];
+    this.suppressedBatches = [];
     this.parts = new Map();
 
     this.geometry = null;
@@ -111,10 +122,12 @@ class M2 extends THREE.Group {
       this.batches = instance.batches;
       this.geometry = instance.geometry;
       this.submeshGeometries = instance.submeshGeometries;
+      this.ownsBatches = false;
     } else {
       this.createTextureAnimations(data);
       this.createBatches();
       this.createGeometry(data.vertices);
+      this.ownsBatches = true;
     }
 
     this.createMesh(this.geometry, this.skeleton, this.rootBones);
@@ -381,6 +394,10 @@ class M2 extends THREE.Group {
         this.createSubmeshGeometry(submeshDef, indices, triangles, vertices);
 
       if (this.isTemplateSubmesh(submeshGeometry, emitterCount, submeshCount)) {
+        if (submeshBatches) {
+          this.suppressedBatches.push(...submeshBatches);
+        }
+
         continue;
       }
 
@@ -720,6 +737,15 @@ class M2 extends THREE.Group {
     this.submeshes.forEach((submesh) => {
       submesh.dispose();
     });
+
+    // Only the M2 that owns this.batches may dispose the materials backing suppressed (template)
+    // submeshes -- an instanced/cloned M2 shares batches with its source and would otherwise
+    // double-dispose (or prematurely dispose) materials still in use elsewhere.
+    if (this.ownsBatches) {
+      this.suppressedBatches.forEach((batchMaterial) => {
+        batchMaterial.dispose();
+      });
+    }
   }
 
   clone() {

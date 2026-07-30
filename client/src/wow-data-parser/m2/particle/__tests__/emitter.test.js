@@ -9,7 +9,17 @@ const { fetchFixture } = require('../test-support/fixtures');
 
 const MODELS = [
   'WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\LAVASPLASHPARTICLE.M2',
-  'WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\LAVASMOKEEMITTERB.M2'
+  'WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\LAVASMOKEEMITTERB.M2',
+  // Additional fixtures broadening the corpus for the emitterType enum check (2 models is well
+  // short of the "across a dozen files" claim the check's docstring makes). Each verified to
+  // return HTTP 200 from the asset host before being added, and each carries 1+ particle emitters
+  // and no ribbon emitters (checked manually; not asserted here since the existing suite has no
+  // ribbon-count assertion).
+  'WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\LAVASMOKEEMITTER.M2',
+  'WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\BLACKSMITH_SMOKE.M2',
+  'WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\FOUNTAINPARTICLES.M2',
+  'WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\STEAM02.M2',
+  'WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\SHADOWFANGFOG01.M2'
 ];
 
 describe('ParticleEmitter struct', () => {

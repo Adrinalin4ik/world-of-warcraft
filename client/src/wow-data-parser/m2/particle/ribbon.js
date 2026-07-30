@@ -27,6 +27,8 @@ const Ribbon = new r.Struct({
   materialIndices: new Nofs(r.uint16le),
 
   colorTrack: AnimationBlock(Vec3Float),
+  // Raw int16 in 0..32767 (fixed16). A consumer must divide by FIXED16_SCALE (see part-track.js)
+  // to get the 0..1 alpha fraction; this parser does not decode it.
   alphaTrack: AnimationBlock(r.int16le),
   heightAboveTrack: AnimationBlock(r.floatle),
   heightBelowTrack: AnimationBlock(r.floatle),

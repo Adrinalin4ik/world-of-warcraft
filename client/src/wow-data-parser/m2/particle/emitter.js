@@ -53,6 +53,8 @@ const ParticleEmitter = new r.Struct({
   zSource: AnimationBlock(r.floatle),
 
   colorTrack: FBlock(Vec3Float),
+  // Raw int16 in 0..32767 (fixed16). A consumer must divide by FIXED16_SCALE (see part-track.js)
+  // to get the 0..1 alpha fraction; this parser does not decode it.
   alphaTrack: FBlock(r.int16le),
   scaleTrack: FBlock(float32array2),
   scaleVary: float32array2,
@@ -64,6 +66,7 @@ const ParticleEmitter = new r.Struct({
   twinklePercent: r.floatle,
   twinkleScaleMin: r.floatle,
   twinkleScaleMax: r.floatle,
+  // wowdev calls this field burstMultiplier.
   inheritVelocityScale: r.floatle,
   drag: r.floatle,
 
