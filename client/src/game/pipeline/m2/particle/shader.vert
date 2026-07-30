@@ -8,6 +8,7 @@ attribute vec4 iUvRect;
 
 varying vec2 vUv;
 varying vec4 vColor;
+varying float cameraDistance;
 
 void main() {
   // `position` is the unit quad, spanning -0.5..0.5 in x and y with z = 0.
@@ -33,6 +34,11 @@ void main() {
   // this back to `position.xy + 0.5` -- it was tried, and it is wrong.
   vUv = iUvRect.xy + vec2(position.x + 0.5, 0.5 - position.y) * iUvRect.zw;
   vColor = iColor;
+
+  // Distance from the camera to the particle's centre, in view space. The fog ramp in the fragment
+  // shader is a function of this, and taking it from the billboard centre rather than per corner
+  // keeps a single quad from being fogged unevenly across its own width.
+  cameraDistance = length(viewCenter.xyz);
 
   gl_Position = projectionMatrix * viewCenter;
 }

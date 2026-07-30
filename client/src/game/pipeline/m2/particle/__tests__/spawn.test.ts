@@ -374,7 +374,7 @@ describe('spawnParticle — reference kernel conformance', () => {
     const params = {
       ...baseParams,
       emitterType: EMITTER_TYPE.SPHERE,
-      flags: 0x4000,
+      flags: 0x100, // file flag; the reference remaps it to runtime 0x4000 for sphere emitters
       areaWidth: 5, areaLength: 5,
       verticalRange: Math.PI, horizontalRange: 0,
       speed: 1, speedVariation: 0,

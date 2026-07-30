@@ -3,10 +3,15 @@ import { ParticlePool } from './pool';
 import { ParticleSpline } from './spline';
 
 /**
- * M2Particle flag 0x4000: a sphere emitter throws its particles straight up (+Z) instead of radially
- * outward along the shell normal. The shell still decides where each particle is *born*.
+ * M2Particle file flag 0x100, honoured only on a sphere emitter: birth velocity is straight +Z
+ * instead of radial through the shell point. The shell still decides where each particle is *born*.
+ *
+ * Note this is the *file* flag. The reference's loader remaps it to runtime flag 0x4000 (and only
+ * when the emitter's type word is 2), and secondary sources quote the runtime value -- but 0x4000 in
+ * the file is a different flag entirely (follow-emitter motion), so keying off it both misses every
+ * real sphere-up emitter and fires on unrelated ones.
  */
-export const SPHERE_EMIT_UP = 0x4000;
+export const SPHERE_EMIT_UP = 0x100;
 
 /**
  * Initial state for one particle, in the emitter's local space.

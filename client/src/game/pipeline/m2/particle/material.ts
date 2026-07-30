@@ -85,6 +85,10 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
     this.vertexShader = vertexShader;
     this.fragmentShader = fragmentShader;
 
+    // The fragment shader's fog branch is compiled per blend mode, exactly as the M2 materials do it,
+    // so an additive particle fades toward black while an alpha-blended one fades toward fog colour.
+    this.defines = { BLENDING_MODE: blendingType };
+
     this.uniforms = {
       texture_sampler: { value: TextureLoader.PLACEHOLDER },
       // Only mode 1 (ALPHA_KEY) turns this on. `this.alphaTest = 0.5` below is kept too -- it is
@@ -92,6 +96,12 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
       // anything on a ShaderMaterial with a hand-written fragment shader; `alphaKey` is what the
       // shader actually reads to do the cut. See shader.frag.
       alphaKey: { value: blendingType === PARTICLE_BLEND_MODE.ALPHA_KEY ? 1.0 : 0.0 },
+
+      // Refreshed each frame from MapLight by ParticleManager. The defaults are a no-op ramp: with
+      // fogParams.y = 1 the factor is zero at every distance, so a material that never receives an
+      // update renders exactly as it did before fog existed rather than turning solid fog colour.
+      fogParams: { value: new THREE.Vector4(0.0, 1.0, 1.0, 1.0) },
+      fogColor: { value: new THREE.Color(0, 0, 0) },
     };
 
     // Both faces: a billboarded quad's winding depends on the camera, and culling it would make

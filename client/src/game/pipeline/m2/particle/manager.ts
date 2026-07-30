@@ -54,6 +54,13 @@ export class ParticleManager {
   private emitters: LiveEmitter[] = [];
   private registered = new Set<any>();
 
+  /**
+   * The zone's light source, for the fog ramp. Set by the map once it exists. Particles are unlit --
+   * the reference's particle shader takes no diffuse or ambient term -- but they are fogged, and a
+   * flame that ignores fog stays at full brightness after the geometry behind it has faded out.
+   */
+  mapLight: any = null;
+
   constructor(group: THREE.Object3D) {
     this.group = group;
   }
@@ -204,6 +211,16 @@ export class ParticleManager {
 
       entry.culled = false;
       entry.batch.visible = true;
+
+      // Only for emitters that survived the cull: copying onto all 698 materials every frame would
+      // be almost entirely wasted, since fewer than 60 are usually drawing.
+      if (this.mapLight) {
+        const uniforms = (entry.batch.material as THREE.ShaderMaterial).uniforms;
+        if (uniforms && uniforms.fogParams) {
+          uniforms.fogParams.value.copy(this.mapLight.uniforms.fogParams.value);
+          uniforms.fogColor.value.copy(this.mapLight.uniforms.fogColor.value);
+        }
+      }
 
       // The instance's own matrix places its particles in the world; the emitter's bone orients them
       // within the model. This also refreshes the bone subtree, which the basis below reads.

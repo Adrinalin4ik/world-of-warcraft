@@ -60,6 +60,8 @@ class WorldMap extends THREE.Group {
     this.collidableMeshList = [];
     // Initialize map light system
     this.mapLight = new MapLight();
+    // Particles read the same fog ramp as everything else in the zone.
+    this.particleManager.mapLight = this.mapLight;
     
     // Set up light system for all managers
     this.setupLightSystem();
