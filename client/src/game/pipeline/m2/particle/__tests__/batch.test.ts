@@ -1,0 +1,136 @@
+/**
+ * @jest-environment node
+ */
+import * as THREE from 'three';
+
+import { ParticleBatch } from '../batch';
+import { ParticlePool } from '../pool';
+
+// A material stand-in: ParticleBatch only stores it, and constructing the real one would fetch a texture.
+const stubMaterial: any = new THREE.MeshBasicMaterial();
+
+const definition = {
+  colorTrack: { keys: [{ time: 0, value: { x: 255, y: 0, z: 0 } }] },
+  alphaTrack: { keys: [{ time: 0, value: 32767 }] },
+  scaleTrack: { keys: [{ time: 0, value: [2, 3] }] },
+  headUVAnim: { keys: [{ time: 0, value: 0 }] },
+  scaleVary: [0, 0],
+};
+
+const seed = (pool: ParticlePool, position: number[], lifespan: number) => {
+  const slot = pool.allocate();
+  pool.position.set(position, slot * 3);
+  pool.lifespan[slot] = lifespan;
+  pool.age[slot] = 0;
+  pool.spin[slot] = 0;
+  return slot;
+};
+
+describe('ParticleBatch', () => {
+  it('writes one instance per live particle and reports the count', () => {
+    const pool = new ParticlePool(8);
+    seed(pool, [1, 2, 3], 5);
+    seed(pool, [4, 5, 6], 5);
+
+    const batch = new ParticleBatch(stubMaterial, 8, 1, 1);
+    const count = batch.pack(pool, definition, new THREE.Matrix4());
+
+    expect(count).toBe(2);
+    expect((batch.geometry as THREE.InstancedBufferGeometry).instanceCount).toBe(2);
+  });
+
+  it('writes nothing for an empty pool', () => {
+    const pool = new ParticlePool(8);
+    const batch = new ParticleBatch(stubMaterial, 8, 1, 1);
+
+    expect(batch.pack(pool, definition, new THREE.Matrix4())).toBe(0);
+    expect((batch.geometry as THREE.InstancedBufferGeometry).instanceCount).toBe(0);
+  });
+
+  it('transforms particle positions by the world matrix', () => {
+    const pool = new ParticlePool(4);
+    seed(pool, [1, 0, 0], 5);
+
+    const batch = new ParticleBatch(stubMaterial, 4, 1, 1);
+    const worldMatrix = new THREE.Matrix4().makeTranslation(10, 20, 30);
+    batch.pack(pool, definition, worldMatrix);
+
+    const offset = batch.geometry.getAttribute('iOffset');
+    expect(offset.getX(0)).toBeCloseTo(11, 4);
+    expect(offset.getY(0)).toBeCloseTo(20, 4);
+    expect(offset.getZ(0)).toBeCloseTo(30, 4);
+  });
+
+  it('applies the colour and alpha tracks', () => {
+    const pool = new ParticlePool(4);
+    seed(pool, [0, 0, 0], 5);
+
+    const batch = new ParticleBatch(stubMaterial, 4, 1, 1);
+    batch.pack(pool, definition, new THREE.Matrix4());
+
+    const color = batch.geometry.getAttribute('iColor');
+    expect(color.getX(0)).toBeCloseTo(1, 3);
+    expect(color.getY(0)).toBeCloseTo(0, 3);
+    expect(color.getW(0)).toBeCloseTo(1, 3);
+  });
+
+  it('applies the scale track', () => {
+    const pool = new ParticlePool(4);
+    seed(pool, [0, 0, 0], 5);
+
+    const batch = new ParticleBatch(stubMaterial, 4, 1, 1);
+    batch.pack(pool, definition, new THREE.Matrix4());
+
+    const scale = batch.geometry.getAttribute('iScale');
+    expect(scale.getX(0)).toBeCloseTo(2, 4);
+    expect(scale.getY(0)).toBeCloseTo(3, 4);
+  });
+
+  it('derives the uv rect from the rows and columns of the flipbook', () => {
+    const pool = new ParticlePool(4);
+    seed(pool, [0, 0, 0], 5);
+
+    // 2x2 atlas, cell 0 -> origin (0, 0), size (0.5, 0.5)
+    const batch = new ParticleBatch(stubMaterial, 4, 2, 2);
+    batch.pack(pool, definition, new THREE.Matrix4());
+
+    const rect = batch.geometry.getAttribute('iUvRect');
+    expect(rect.getZ(0)).toBeCloseTo(0.5, 5);
+    expect(rect.getW(0)).toBeCloseTo(0.5, 5);
+    expect(rect.getX(0)).toBeCloseTo(0, 5);
+    expect(rect.getY(0)).toBeCloseTo(0, 5);
+  });
+
+  it('treats a 1x1 flipbook as the whole texture', () => {
+    const pool = new ParticlePool(4);
+    seed(pool, [0, 0, 0], 5);
+
+    const batch = new ParticleBatch(stubMaterial, 4, 1, 1);
+    batch.pack(pool, definition, new THREE.Matrix4());
+
+    const rect = batch.geometry.getAttribute('iUvRect');
+    expect(rect.getZ(0)).toBeCloseTo(1, 5);
+    expect(rect.getW(0)).toBeCloseTo(1, 5);
+  });
+
+  it('never writes more instances than its capacity', () => {
+    const pool = new ParticlePool(16);
+    for (let i = 0; i < 16; i++) {
+      seed(pool, [i, 0, 0], 5);
+    }
+
+    const batch = new ParticleBatch(stubMaterial, 4, 1, 1);
+
+    expect(batch.pack(pool, definition, new THREE.Matrix4())).toBe(4);
+  });
+
+  it('marks the attributes for upload', () => {
+    const pool = new ParticlePool(4);
+    seed(pool, [0, 0, 0], 5);
+
+    const batch = new ParticleBatch(stubMaterial, 4, 1, 1);
+    batch.pack(pool, definition, new THREE.Matrix4());
+
+    expect(batch.geometry.getAttribute('iOffset').needsUpdate).toBe(true);
+  });
+});
