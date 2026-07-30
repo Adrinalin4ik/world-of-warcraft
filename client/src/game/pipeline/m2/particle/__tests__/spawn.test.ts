@@ -7,6 +7,7 @@ import { spawnParticle } from '../spawn';
 
 const baseParams = {
   emitterType: EMITTER_TYPE.PLANE,
+  flags: 0,
   areaWidth: 4,
   areaLength: 6,
   verticalRange: 0,
@@ -275,6 +276,116 @@ describe('spawnParticle — bone basis', () => {
     expect(pool.position[slot * 3]).toBeCloseTo(0, 5);
     expect(pool.position[slot * 3 + 2]).toBeCloseTo(1, 5);
     expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(1, 5);
+  });
+});
+
+// Cross-checked against samples/benilla (crates/benilla/src/particles/emit.rs), a byte-verified
+// reverse of the reference client's three shape kernels. The reference prepends a fixed +90 degree
+// rotation about local +Z -- rot90(v) = (-v.y, v.x, v.z) -- to EVERY emitter's kernel output, not
+// just the sphere's, and the record-position translation stays outside it.
+describe('spawnParticle — reference kernel conformance', () => {
+  it('pairs plane area axes so the rectangle keeps its authored orientation', () => {
+    const pool = new ParticlePool(512);
+    // Deliberately anisotropic: an 8 x 2 rectangle. On a square area the pairing is unobservable,
+    // which is exactly how benilla carried this bug for two releases.
+    const params = {
+      ...baseParams, areaLength: 8, areaWidth: 2, verticalRange: 0, horizontalRange: 0,
+    };
+
+    let maxX = 0;
+    let maxY = 0;
+    for (let i = 0; i < 300; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+      maxX = Math.max(maxX, Math.abs(pool.position[slot * 3]));
+      maxY = Math.max(maxY, Math.abs(pool.position[slot * 3 + 1]));
+    }
+
+    // Kernel puts x <- areaLength and y <- areaWidth; rot90 then swaps them, so the observable
+    // extent is areaWidth along x and areaLength along y.
+    expect(maxX).toBeGreaterThan(0.8);
+    expect(maxX).toBeLessThanOrEqual(1 + 1e-6);
+    expect(maxY).toBeGreaterThan(3.5);
+    expect(maxY).toBeLessThanOrEqual(4 + 1e-6);
+  });
+
+  it('tilts the plane cone symmetrically rather than one-sided', () => {
+    const pool = new ParticlePool(512);
+    const params = {
+      ...baseParams,
+      areaLength: 0, areaWidth: 0,
+      verticalRange: Math.PI / 4, horizontalRange: 0, speed: 1, speedVariation: 0,
+    };
+
+    let positive = 0;
+    let negative = 0;
+    for (let i = 0; i < 300; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+      // theta = S11 * verticalRange, so the cone leans both ways. rot90 sends the lean onto +/-y.
+      const y = pool.velocity[slot * 3 + 1];
+      if (y > 1e-3) { positive++; }
+      if (y < -1e-3) { negative++; }
+    }
+
+    expect(positive).toBeGreaterThan(0);
+    expect(negative).toBeGreaterThan(0);
+  });
+
+  it('rotates the plane cone onto the reference axis', () => {
+    const pool = new ParticlePool(64);
+    const params = {
+      ...baseParams,
+      areaLength: 0, areaWidth: 0,
+      verticalRange: Math.PI / 4, horizontalRange: 0, speed: 1, speedVariation: 0,
+    };
+
+    for (let i = 0; i < 40; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+      // With longitude zero the kernel cone leans along +/-x; rot90 puts it on +/-y, leaving x flat.
+      expect(Math.abs(pool.velocity[slot * 3])).toBeLessThan(1e-6);
+    }
+  });
+
+  it('measures zSource from the shape-local birth, excluding the emitter offset', () => {
+    const pool = new ParticlePool(8);
+    const params = {
+      ...baseParams,
+      emitterType: -1, // point spawn: shape-local birth is exactly the origin
+      areaLength: 0, areaWidth: 0, verticalRange: 0, horizontalRange: 0,
+      speed: 1, speedVariation: 0,
+      originX: 0, originY: 0, originZ: 50,
+      zSource: 2,
+    };
+
+    const slot = pool.allocate();
+    spawnParticle(pool, slot, params, scriptedRandom([0.5]));
+
+    // The birth sits at shape-local (0,0,0), so the direction from the pivot (0,0,2) is straight
+    // down -Z. Measuring after the origin was added instead would put the birth at z=50 and send it
+    // straight up, which is what this used to do.
+    expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(-1, 5);
+  });
+
+  it('honours the sphere flag that forces emission straight up', () => {
+    const pool = new ParticlePool(64);
+    const params = {
+      ...baseParams,
+      emitterType: EMITTER_TYPE.SPHERE,
+      flags: 0x4000,
+      areaWidth: 5, areaLength: 5,
+      verticalRange: Math.PI, horizontalRange: 0,
+      speed: 1, speedVariation: 0,
+    };
+
+    for (let i = 0; i < 30; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+      expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(1, 5);
+      expect(Math.abs(pool.velocity[slot * 3])).toBeLessThan(1e-6);
+      expect(Math.abs(pool.velocity[slot * 3 + 1])).toBeLessThan(1e-6);
+    }
   });
 });
 

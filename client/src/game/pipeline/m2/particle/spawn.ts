@@ -2,6 +2,12 @@ import { EMITTER_TYPE } from '../../../../wow-data-parser/m2/particle/emitter';
 import { ParticlePool } from './pool';
 
 /**
+ * M2Particle flag 0x4000: a sphere emitter throws its particles straight up (+Z) instead of radially
+ * outward along the shell normal. The shell still decides where each particle is *born*.
+ */
+export const SPHERE_EMIT_UP = 0x4000;
+
+/**
  * Initial state for one particle, in the emitter's local space.
  *
  * The width and length fields mean different things per generator, which is a genuine quirk of the
@@ -18,6 +24,8 @@ import { ParticlePool } from './pool';
  */
 export interface SpawnParams {
   emitterType: number;
+  /** M2Particle.flags. Only SPHERE_EMIT_UP is read here. */
+  flags: number;
   areaWidth: number;
   areaLength: number;
   verticalRange: number;
@@ -57,11 +65,17 @@ const spawnPlane = (
 ) => {
   const base = slot * 3;
 
-  pool.position[base] = (random() - 0.5) * params.areaWidth;
-  pool.position[base + 1] = (random() - 0.5) * params.areaLength;
+  // Local x takes areaLength and local y takes areaWidth -- the reference pairing, not the one the
+  // names suggest. Only observable on an anisotropic rectangle, and here it was transposed while the
+  // universal rot90 below was also missing; the two cancelled exactly, so plane positions came out
+  // right by luck. Fixing either alone would have broken them.
+  pool.position[base] = (random() - 0.5) * params.areaLength;
+  pool.position[base + 1] = (random() - 0.5) * params.areaWidth;
   pool.position[base + 2] = 0;
 
-  const polar = params.verticalRange * random();
+  // Both cone angles are symmetric draws. Latitude used to sweep [0, range] instead of +/-range,
+  // which tilted every flame in the game the same way rather than scattering them about +Z.
+  const polar = params.verticalRange * (random() - 0.5) * 2;
   const azimuth = params.horizontalRange * (random() - 0.5) * 2;
 
   const sinPolar = Math.sin(polar);
@@ -80,26 +94,32 @@ const spawnSphere = (
   const minRadius = params.areaLength;
   const radius = minRadius + (maxRadius - minRadius) * random();
 
-  // Both angles sweep [-range, +range], centred on zero, as the plane generator's azimuth does.
-  // Latitude used to sweep [0, +lat], which on the dungeon portal (lat = pi, long = 0, fixed radius
-  // -- a ring) kept sin(polar) non-negative and so drew exactly half the ring.
-  const polar = params.verticalRange * (random() - 0.5) * 2;
-  const azimuth = params.horizontalRange * (random() - 0.5) * 2;
+  // Latitude is measured from the equator, not from the pole: at lat = 0 the point sits on the
+  // equator, at lat = +/-pi/2 at a pole. Both draws are symmetric. Latitude used to sweep [0, +lat],
+  // which on the dungeon portal (lat = pi, long = 0, fixed radius -- a ring) kept the ring from
+  // closing and drew exactly half of it.
+  const lat = params.verticalRange * (random() - 0.5) * 2;
+  const lon = params.horizontalRange * (random() - 0.5) * 2;
 
-  const sinPolar = Math.sin(polar);
+  const cosLat = Math.cos(lat);
 
-  // At longitude zero the ring lies in the YZ plane -- x = 0 -- and longitude rotates it about Z.
-  // This had cos and sin the other way round, putting the unrotated ring in the XZ plane instead:
-  // the same ring turned 90 degrees. Invisible on a full spherical shell, and invisible on the plane
-  // emitters that make up 694 of the 698 emitters loaded at Blackrock, but on the portal it stood
-  // face-on to the corridor rather than edge-on across the doorway.
-  const dirX = sinPolar * Math.sin(azimuth);
-  const dirY = sinPolar * Math.cos(azimuth);
-  const dirZ = Math.cos(polar);
+  // One lat/lon unit vector serves as both the shell point and the radial velocity below. The
+  // reference reuses the same pair, which is what keeps a zero-radius sphere spraying uniformly
+  // rather than collapsing to a degenerate direction.
+  const dirX = cosLat * Math.cos(lon);
+  const dirY = cosLat * Math.sin(lon);
+  const dirZ = Math.sin(lat);
 
   pool.position[base] = dirX * radius;
   pool.position[base + 1] = dirY * radius;
   pool.position[base + 2] = dirZ * radius;
+
+  if (params.flags & SPHERE_EMIT_UP) {
+    pool.velocity[base] = 0;
+    pool.velocity[base + 1] = 0;
+    pool.velocity[base + 2] = 1;
+    return;
+  }
 
   // Emitted outward along the shell normal.
   pool.velocity[base] = dirX;
@@ -140,13 +160,11 @@ export const spawnParticle = (
 
   const base = slot * 3;
 
-  // The emitter's own offset in model space, applied before zSource reads the position -- per
-  // wowdev, zSource's direction is computed from the particle's (already-offset) position.
-  pool.position[base] += params.originX;
-  pool.position[base + 1] += params.originY;
-  pool.position[base + 2] += params.originZ;
-
   // When zSource > 0, replace the velocity direction with the normalized direction from the source.
+  // Measured against the *shape-local* birth, before the emitter's own offset is added: the pivot is
+  // at (0, 0, zSource) in the emitter's frame, not the model's. This ran after the offset, so an
+  // emitter mounted high on a model measured its fountain from far below the pivot and sprayed
+  // almost straight up regardless of where the particle was born.
   if (params.zSource > 0) {
     const dx = pool.position[base];
     const dy = pool.position[base + 1];
@@ -159,6 +177,24 @@ export const spawnParticle = (
       pool.velocity[base + 2] = dz / length;
     }
   }
+
+  // A fixed +90 degree rotation about local +Z, prepended to every emitter regardless of shape.
+  // It applies to the kernel-relative vectors only -- the emitter offset below stays outside it.
+  // This is what stands the portal's ring edge-on across a doorway instead of face-on down the
+  // corridor, and it was previously hand-folded into the sphere branch alone, leaving every plane
+  // emitter's cone rotated a quarter turn from the reference.
+  const localX = pool.position[base];
+  pool.position[base] = -pool.position[base + 1];
+  pool.position[base + 1] = localX;
+
+  const velocityX = pool.velocity[base];
+  pool.velocity[base] = -pool.velocity[base + 1];
+  pool.velocity[base + 1] = velocityX;
+
+  // The emitter's own offset in model space.
+  pool.position[base] += params.originX;
+  pool.position[base + 1] += params.originY;
+  pool.position[base + 2] += params.originZ;
 
   // Reorient out of the emitter's own frame and into model space. Done here, after zSource, because
   // zSource's direction is defined relative to the emitter -- rotating first would measure it against

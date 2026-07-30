@@ -78,6 +78,7 @@ export class RuntimeEmitter {
     // Reused every spawn; allocating one of these per particle would defeat the pool.
     this.spawnParams = {
       emitterType: definition.emitterType,
+      flags: definition.flags || 0,
       areaWidth: 0,
       areaLength: 0,
       verticalRange: 0,
