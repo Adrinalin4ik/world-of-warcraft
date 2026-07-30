@@ -3,6 +3,7 @@ import * as r from 'restructure';
 import { color16, compfixed16array4, float32array2, float32array3, Vec3Float } from '../types';
 import AnimationBlock from './animation-block';
 import Nofs from './nofs';
+import ParticleEmitter from './particle/emitter';
 
 const Animation = new r.Struct({
   id: r.uint16le,
@@ -154,7 +155,7 @@ export default new r.Struct({
   cameras: new Nofs(),
   cameraLookups: new Nofs(),
   ribbonEmitters: new Nofs(),
-  particleEmitters: new Nofs(),
+  particleEmitters: new Nofs(ParticleEmitter),
 
   blendingOverrides: new r.Optional(new Nofs(r.uint16le), function() {
     return (this.flags & 0x08) !== 0;
