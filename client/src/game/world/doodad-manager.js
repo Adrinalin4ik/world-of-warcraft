@@ -129,6 +129,10 @@ class DoodadManager {
 
       this.placeDoodad(doodad, entry.position, entry.rotation, entry.scale);
 
+      if (this.map.particleManager) {
+        this.map.particleManager.register(doodad);
+      }
+
       if (doodad.animated) {
         this.enableDoodadAnimations(entry, doodad);
       }
@@ -180,6 +184,11 @@ class DoodadManager {
 
   unloadDoodad(entry) {
     const doodad = this.doodads.get(entry.id);
+
+    if (this.map.particleManager) {
+      this.map.particleManager.unregister(doodad);
+    }
+
     this.doodads.delete(entry.id);
     this.animatedDoodads.delete(entry.id);
     this.view.remove(doodad);

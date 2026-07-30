@@ -11,6 +11,7 @@ import LocationManager from './location-manager';
 import TerrainManager from './terrain-manager';
 import VisibilityManager from './visibility-manager';
 import WMOManager from './wmo-manager';
+import { ParticleManager } from '../pipeline/m2/particle/manager';
 
 class WorldMap extends THREE.Group {
 
@@ -38,6 +39,13 @@ class WorldMap extends THREE.Group {
     this.wmoManager = new WMOManager(this, this.constructor.ZEROPOINT);
     this.visibilityManager = new VisibilityManager(this);
     this.locationManager = new LocationManager(this);
+
+    // Particles live in their own group so that doodad visibility culling cannot take them with it.
+    this.particleGroup = new THREE.Group();
+    this.particleGroup.name = 'Particles';
+    this.add(this.particleGroup);
+
+    this.particleManager = new ParticleManager(this.particleGroup);
 
     this.data = data;
     this.wdt = wdt;
@@ -144,6 +152,7 @@ class WorldMap extends THREE.Group {
     this.terrainManager.animate(delta, camera, cameraMoved);
     this.doodadManager.animate(delta, camera, cameraMoved);
     this.wmoManager.animate(delta, camera, cameraMoved);
+    this.particleManager.animate(delta);
   }
 
   updateWorldTime(camera, mapID, time=null) {

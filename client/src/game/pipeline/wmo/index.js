@@ -17,10 +17,11 @@ class WMO {
   static LOAD_DOODAD_WORK_FACTOR = gameSettings.wmo.doodad.workFactor;
   static LOAD_DOODAD_WORK_MIN = gameSettings.wmo.doodad.loadMin;
 
-  constructor(filename, doodadSetIndex = null, entryID = null, parentCounters = null) {
+  constructor(filename, doodadSetIndex = null, entryID = null, parentCounters = null, particleManager = null) {
     this.filename = filename;
     this.doodadSetIndex = doodadSetIndex;
     this.entryID = entryID;
+    this.particleManager = particleManager;
 
     this.counters = this.stubCounters();
     this.parentCounters = parentCounters || this.stubCounters();
@@ -245,6 +246,10 @@ class WMO {
     // }
 
     this.doodads.set(doodadEntry.id, doodad);
+
+    if (this.particleManager) {
+      this.particleManager.register(doodad);
+    }
   }
 
   unload() {
@@ -265,6 +270,10 @@ class WMO {
     }
 
     for (const doodad of this.doodads.values()) {
+      if (this.particleManager) {
+        this.particleManager.unregister(doodad);
+      }
+
       M2Blueprint.unload(doodad);
     }
 

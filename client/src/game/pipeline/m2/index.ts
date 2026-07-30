@@ -7,7 +7,7 @@ import { ObjectsManager } from '../../world/visibility-manager';
 import AnimationManager from './animation-manager';
 import BatchManager from './batch-manager';
 import M2Material from './material';
-import { isParticleTemplate } from './particle/template';
+import { modelOwnsSubmeshes } from './particle/template';
 import Submesh from './submesh';
 
 class M2 extends THREE.Group {
@@ -385,8 +385,9 @@ class M2 extends THREE.Group {
     const { vertices } = data;
     const { submeshes, indices, triangles } = skinData;
 
-    const emitterCount = this.particleEmitters.length;
-    const submeshCount = submeshes.length;
+    // A model with particle emitters owns its own geometry; the particle system instances it per
+    // particle rather than the scene graph drawing it once.
+    const suppressAll = modelOwnsSubmeshes(this.particleEmitters.length);
 
     const subLen = submeshes.length;
 
@@ -398,11 +399,10 @@ class M2 extends THREE.Group {
       const submeshGeometry = this.submeshGeometries.get(submeshIndex) ||
         this.createSubmeshGeometry(submeshDef, indices, triangles, vertices);
 
-      if (this.isTemplateSubmesh(submeshGeometry, emitterCount, submeshCount)) {
+      if (suppressAll) {
         if (submeshBatches) {
           this.suppressedBatches.push(...submeshBatches);
         }
-
         continue;
       }
 
@@ -415,26 +415,6 @@ class M2 extends THREE.Group {
 
       this.add(submesh);
     }
-  }
-
-  /**
-   * A particle emitter's template quad, which the particle system draws rather than the scene graph.
-   */
-  isTemplateSubmesh(geometry, emitterCount, submeshCount) {
-    if (emitterCount === 0 || submeshCount !== 1) {
-      return false;
-    }
-
-    const position = geometry && geometry.getAttribute && geometry.getAttribute('position');
-
-    if (!position) {
-      return false;
-    }
-
-    const vertexCount = position.count;
-    const triangleCount = geometry.index ? geometry.index.count / 3 : vertexCount / 3;
-
-    return isParticleTemplate({ emitterCount, submeshCount, vertexCount, triangleCount });
   }
 
   createSubmeshGeometry(submeshDef, indices, triangles, vertices) {
