@@ -27,3 +27,4 @@ deploy.sh
 
 # Downloaded M2/BLP test fixtures. Game assets are never committed; they come from the asset host.
 /src/**/__tests__/.fixture-cache/
+/src/**/test-support/.fixture-cache/

@@ -5,7 +5,7 @@ import { DecodeStream } from 'restructure';
 
 import M2 from '../../index';
 import ParticleEmitter, { PARTICLE_EMITTER_SIZE, EMITTER_TYPE } from '../emitter';
-const { fetchFixture } = require('./fixtures');
+const { fetchFixture } = require('../test-support/fixtures');
 
 const MODELS = [
   'WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\LAVASPLASHPARTICLE.M2',
