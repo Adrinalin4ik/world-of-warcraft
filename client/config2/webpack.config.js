@@ -339,9 +339,12 @@ module.exports = function (webpackEnv) {
     module: {
       strictExportPresence: true,
       rules: [
-        // Handle node_modules packages that contain sourcemaps
+        // Restricted to our own source; see the matching comment in config/webpack.config.js. Applied
+        // to node_modules too, a dependency shipping a source map that references unpublished files
+        // hard-fails the build with ENOENT instead of warning.
         shouldUseSourceMap && {
           enforce: 'pre',
+          include: paths.appSrc,
           exclude: /@babel(?:\/|\\{1,2})runtime/,
           test: /\.(js|mjs|jsx|ts|tsx|css)$/,
           loader: require.resolve('source-map-loader'),

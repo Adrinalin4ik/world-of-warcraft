@@ -36,6 +36,12 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   //refs
   private controls = React.createRef<Controls>()
   private debugPanel = React.createRef<DebugPanel>()
+  // React 19 removed string refs, so the two canvases and the debug panel now use createRef like the
+  // controls above. The debug panel is worth noting: it already had this createRef, but its element was
+  // written as ref="debugPanel", so `debugPanel.current` was always null and the guarded
+  // `forceUpdate()` in the render loop has silently never fired. Wiring it up actually connects it.
+  private canvas = React.createRef<HTMLCanvasElement>()
+  private debugCanvas = React.createRef<HTMLCanvasElement>()
   private stats: any = new Stats();
 
   private isMobile: boolean = false;
@@ -78,7 +84,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       alpha: true,
       antialias: false,
       powerPreference: 'high-performance',
-      canvas: this.refs.canvas as HTMLCanvasElement,
+      canvas: this.canvas.current as HTMLCanvasElement,
     });
     
     const composer = new EffectComposer(renderer);
@@ -103,7 +109,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     if (this.debug) {
       this.debugRenderer = new THREE.WebGLRenderer({
         alpha: true,
-        canvas: this.refs.debugCanvas as HTMLCanvasElement
+        canvas: this.debugCanvas.current as HTMLCanvasElement
       });
     }
     console.log("componentDidMount", this)
@@ -182,19 +188,19 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
 
     render() {
       const debugCanvas = this.debug ? 
-      <canvas ref="debugCanvas"
+      <canvas ref={this.debugCanvas}
       className="canvas debug_canvas" 
       style={{position: this.debug ? "relative" : "absolute"}}></canvas> : null
     const { renderer } = this.state;
 
     return (
       <div className="game_screen">
-          <canvas ref="canvas" 
+          <canvas ref={this.canvas} 
                   className="canvas main_canvas" 
                   style={{position: this.debug ? "relative" : "absolute"}}></canvas>
           {debugCanvas}
           <Controls ref={this.controls} player={this.game.world.player} camera={this.camera} />
-          { !this.isMobile && <DebugPanel ref="debugPanel" renderer={renderer} game={this.game}></DebugPanel>}
+          { !this.isMobile && <DebugPanel ref={this.debugPanel} renderer={renderer} game={this.game}></DebugPanel>}
           <select className="location_select" onChange={(e) => this.setLocation(e.target.value)}>
             {
               spots.map(x => {

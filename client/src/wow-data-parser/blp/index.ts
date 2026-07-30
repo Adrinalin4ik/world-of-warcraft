@@ -37,8 +37,12 @@ class BLP {
   private preferredFormat: BLP_PIXEL_FORMAT = BLP_PIXEL_FORMAT.PIXEL_DXT5;
   private _width = 0;
   private _height = 0;
-  private images: Uint8Array[] = [];
-  private palette: Uint8Array;
+  // ArrayBufferLike, not the default ArrayBuffer. TypeScript 5.7 made Uint8Array generic over its
+  // backing buffer, and these views are carved out of a Node Buffer (whose buffer is ArrayBufferLike,
+  // since it may be a SharedArrayBuffer). Leaving these as a bare Uint8Array rejects the subarray
+  // assignments below; widening the declaration is accurate and avoids copying every mip level.
+  private images: Uint8Array<ArrayBufferLike>[] = [];
+  private palette: Uint8Array<ArrayBufferLike>;
 
   get colorFormat() {
     return this._colorFormat;
@@ -106,7 +110,11 @@ class BLP {
         break;
       }
 
-      this.images[level] = bytes.subarray(offset, offset + size);
+      // A plain Uint8Array view rather than bytes.subarray(). Node's Buffer is not assignable to
+      // Uint8Array<ArrayBufferLike> under @types/node with TypeScript 5.7+ -- Buffer.slice() returns
+      // Buffer where the base declares Uint8Array<ArrayBuffer>, so the method signatures conflict.
+      // This is still zero-copy: it is a view over the same memory, just not a Buffer.
+      this.images[level] = new Uint8Array(bytes.buffer, bytes.byteOffset + offset, size);
     }
 
     return this;

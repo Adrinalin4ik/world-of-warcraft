@@ -23,8 +23,6 @@
     "@types/keymaster": "^1.6.30",
     "@types/node": "16.18.13",
     "@types/physijs": "1.0.0",
-    "@types/react": "^18.0.28",
-    "@types/react-dom": "^18.0.11",
     "@typescript-eslint/eslint-plugin": "^5.54.0",
     "@typescript-eslint/parser": "^5.54.0",
     "awaitqueue": "^3.0.1",
@@ -39,6 +37,7 @@
     "camelcase": "^7.0.1",
     "case-sensitive-paths-webpack-plugin": "2.4.0",
     "css-loader": "6.7.3",
+    "deep-equal": "^2.2.3",
     "dotenv": "16.0.3",
     "easy-mediasoup-v3-client": "2.1.42",
     "enable3d": "^0.25.3",
@@ -69,12 +68,12 @@
     "postcss-safe-parser": "6.0.0",
     "postprocessing": "^6.30.1",
     "raw-loader": "^4.0.2",
-    "react": "^18.2.0",
+    "react": "^19.2.8",
     "react-app-polyfill": "^3.0.0",
     "react-dev-utils": "^12.0.1",
-    "react-dom": "^18.2.0",
+    "react-dom": "^19.2.8",
     "react-joystick": "^1.0.3",
-    "react-refresh": "^0.14.0",
+    "react-refresh": "^0.17.0",
     "react-router-dom": "^6.8.2",
     "resolve": "1.22.1",
     "resolve-url-loader": "5.0.0",
@@ -89,7 +88,6 @@
     "three": "^0.150.1",
     "three-mesh-bvh": "^0.5.23",
     "ts-pnp": "1.2.0",
-    "typescript": "^4.9.5",
     "url-loader": "4.1.1",
     "util": "^0.12.5",
     "webpack": "^5.75.0",
@@ -100,7 +98,10 @@
     "zlib-browserify": "^0.0.3"
   },
   "devDependencies": {
-    "@testing-library/react": "^14.0.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "@types/react-router-dom": "^5.3.3",
     "@types/three": "^0.149.0",
     "assert": "^2.0.0",
@@ -119,13 +120,11 @@
     "stats-js": "^1.0.1",
     "stream-browserify": "^3.0.0",
     "stream-http": "^3.2.0",
+    "typescript": "^5.9.3",
     "worker-loader": "^3.0.8"
   },
   "eslintConfig": {
-    "extends": "react-app",
-    "env": {
-      "NODE_ENV": "development"
-    }
+    "extends": "react-app"
   },
   "browserslist": {
     "production": [
@@ -189,5 +188,11 @@
       "jest-watch-typeahead/filename",
       "jest-watch-typeahead/testname"
     ]
+  },
+  "overrides": {
+    "react-joystick": {
+      "react": "$react",
+      "react-dom": "$react-dom"
+    }
   }
 }

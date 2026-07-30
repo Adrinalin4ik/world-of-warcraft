@@ -354,6 +354,15 @@ module.exports = function (webpackEnv) {
         // Handle node_modules packages that contain sourcemaps
         shouldUseSourceMap && {
           enforce: 'pre',
+          // Restricted to our own source. Applied to node_modules as well (CRA's default), this rule
+          // hard-fails the build whenever any dependency ships a source map referencing files it did
+          // not publish: source-map-loader throws ENOENT rather than warning. One such package took the
+          // whole dev server down with
+          //   "ENOENT: no such file or directory, open '.../node_modules/deep-equal/index.js'"
+          // which surfaced as a blank page and no window.world, looking for all the world like an
+          // application error. Third-party source maps are not worth a build failure; ours are the ones
+          // that get stepped through.
+          include: paths.appSrc,
           exclude: /@babel(?:\/|\\{1,2})runtime/,
           test: /\.(js|mjs|jsx|ts|tsx|css)$/,
           loader: require.resolve('source-map-loader'),
