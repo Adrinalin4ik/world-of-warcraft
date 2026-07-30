@@ -1284,12 +1284,19 @@ which is worse than its absence.
 - Modify: `client/src/game/world/light/SceneLight.ts`
 - Modify: `client/src/pages/game/debug/debug.tsx`
 - Test: `client/src/game/world/light/__tests__/laws.test.ts` (the `fogStart` fix)
+- Test: `client/src/pages/game/debug/__tests__/lighting-readouts.test.tsx`
 
 **Interfaces:**
 - Consumes: `sidnNightFraction` from Task 3.
-- Produces: `LightingReadouts` — default-exported React class component taking `{ mapLight: any | null }`.
+- Produces: `LightingReadouts` — default-exported React class component taking
+  `{ mapLight: LightingReadoutsTarget | null }`, plus the exported `LightingReadoutsTarget` type.
   New on `MapLight`: `get selectedLights(): WeightedAreaLight[]`, `get sampledPosition(): THREE.Vector3 | null`,
   `get sidnNight(): number`.
+
+**Typing decision (overrides an earlier draft of this plan):** `LightingReadoutsTarget` is a narrow
+structural type, matching `LightingControlsTarget` in Task 5. It describes colours and vectors by shape
+(`{ r, g, b }`, `{ x, y, z }`) rather than importing THREE types, which keeps the component free of
+three.js and testable with plain objects. Plans 2–5 extend the type as they add resolved values.
 
 - [ ] **Step 1: Write the failing test for the fogStart bug**
 
@@ -1403,14 +1410,36 @@ Create `client/src/pages/game/debug/lighting-readouts.tsx`:
 ```tsx
 import React from 'react';
 
+type Rgb = { r: number; g: number; b: number };
+type Xyz = { x: number; y: number; z: number };
+
+/**
+ * The slice of MapLight these readouts print. Narrow and structural for the same reasons as
+ * `LightingControlsTarget`: no three.js import, and testable with plain objects. Colours and vectors
+ * are described by shape, so a THREE.Color and a THREE.Vector3 both satisfy it. Plans 2-5 extend this
+ * as they add resolved values (storm bcc, sky warp, interior fog triple, batch-class counts).
+ */
+export type LightingReadoutsTarget = {
+  mapId: number | undefined;
+  sampledPosition: Xyz | null;
+  location: 'exterior' | 'interior';
+  sunAmbientColor: Rgb;
+  sunDiffuseColor: Rgb;
+  fogColor: Rgb;
+  fogStart: number;
+  fogEnd: number;
+  sunDir: Xyz;
+  sidnNight: number;
+  selectedLights: Array<{ light: { id: number }; weight: number; distance: number }>;
+  wmoPointLights: unknown[];
+};
+
 type Props = {
-  // Structurally a MapLight. Typed loosely because MapLight's own surface is still growing across
-  // plans 2-5, and pinning a narrow type here would mean editing it in every one of them.
-  mapLight: any | null;
+  mapLight: LightingReadoutsTarget | null;
 };
 
 /** 0..1 colour to the 0..255 bytes the reference's own dumps report, so values compare directly. */
-const asBytes = (color: { r: number; g: number; b: number } | undefined) => {
+const asBytes = (color: Rgb | undefined) => {
   if (!color) {
     return '-';
   }
@@ -1462,8 +1491,8 @@ class LightingReadouts extends React.Component<Props> {
           Fog range: {asFixed(mapLight.fogStart)} / {asFixed(mapLight.fogEnd)}
         </p>
         <p>
-          Sun dir: {asFixed(mapLight.sunDir?.x, 3)}, {asFixed(mapLight.sunDir?.y, 3)},{' '}
-          {asFixed(mapLight.sunDir?.z, 3)}
+          Sun dir: {asFixed(mapLight.sunDir.x, 3)}, {asFixed(mapLight.sunDir.y, 3)},{' '}
+          {asFixed(mapLight.sunDir.z, 3)}
         </p>
 
         <div className="divider"></div>
@@ -1471,7 +1500,7 @@ class LightingReadouts extends React.Component<Props> {
 
         <div className="divider"></div>
         <p>Area lights: {selected.length}</p>
-        {selected.slice(0, 4).map((entry: any) => (
+        {selected.slice(0, 4).map((entry) => (
           <p key={entry.light.id}>
             id {entry.light.id} &middot; weight {asFixed(entry.weight, 3)} &middot; dist{' '}
             {asFixed(entry.distance, 1)}
@@ -1488,7 +1517,70 @@ class LightingReadouts extends React.Component<Props> {
 export default LightingReadouts;
 ```
 
-- [ ] **Step 7: Render it from the debug panel**
+- [ ] **Step 7: Test the readouts**
+
+Create `client/src/pages/game/debug/__tests__/lighting-readouts.test.tsx`:
+
+```tsx
+import { render, screen } from '@testing-library/react';
+import React from 'react';
+import LightingReadouts, { LightingReadoutsTarget } from '../lighting-readouts';
+
+const target = (overrides: Partial<LightingReadoutsTarget> = {}): LightingReadoutsTarget => ({
+  mapId: 0,
+  sampledPosition: { x: 1.25, y: -2.5, z: 83.5 },
+  location: 'exterior',
+  sunAmbientColor: { r: 61 / 255, g: 59 / 255, b: 96 / 255 },
+  sunDiffuseColor: { r: 90 / 255, g: 86 / 255, b: 141 / 255 },
+  fogColor: { r: 0.5, g: 0.5, b: 0.5 },
+  fogStart: 125,
+  fogEnd: 500,
+  sunDir: { x: -0.5, y: 0.25, z: -0.83 },
+  sidnNight: 0,
+  selectedLights: [],
+  wmoPointLights: [],
+  ...overrides,
+});
+
+describe('LightingReadouts', () => {
+  it('renders nothing without a map light', () => {
+    const { container } = render(<LightingReadouts mapLight={null} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('prints colours as 0-255 bytes so they compare against the DBC and the reference dumps', () => {
+    render(<LightingReadouts mapLight={target()} />);
+    expect(screen.getByText(/61, 59, 96/)).toBeInTheDocument();
+    expect(screen.getByText(/90, 86, 141/)).toBeInTheDocument();
+  });
+
+  it('prints the fog range start-before-end', () => {
+    render(<LightingReadouts mapLight={target()} />);
+    expect(screen.getByText(/125 \/ 500/)).toBeInTheDocument();
+  });
+
+  it('shows a dash rather than a wrong number when nothing has been sampled yet', () => {
+    render(<LightingReadouts mapLight={target({ sampledPosition: null })} />);
+    expect(screen.getByText(/Sampled at: -/)).toBeInTheDocument();
+  });
+
+  it('lists the selected area lights with their blend weights', () => {
+    const selected = [
+      { light: { id: 16 }, weight: 0.75, distance: 120.5 },
+      { light: { id: 2 }, weight: 0.25, distance: 400.0 },
+    ];
+    render(<LightingReadouts mapLight={target({ selectedLights: selected })} />);
+    expect(screen.getByText(/Area lights: 2/)).toBeInTheDocument();
+    expect(screen.getByText(/id 16/)).toBeInTheDocument();
+    expect(screen.getByText(/0\.750/)).toBeInTheDocument();
+  });
+});
+```
+
+Run: `cd client && yarn test --watchAll=false --testPathPattern="lighting-readouts"`
+Expected: PASS, 5 tests.
+
+- [ ] **Step 8: Render it from the debug panel**
 
 In `client/src/pages/game/debug/debug.tsx`, add the import:
 
@@ -1502,7 +1594,7 @@ and render it immediately after `<LightingControls ... />`:
         <LightingReadouts mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
 ```
 
-- [ ] **Step 8: Verify in the running app**
+- [ ] **Step 9: Verify in the running app**
 
 Run the client and confirm:
 - Map id and sampled position are populated and the position tracks the camera as it moves.
@@ -1512,16 +1604,16 @@ Run the client and confirm:
   drives SIDN night from 0 toward 1.
 - The area-light list is non-empty in a zone with `Light.dbc` coverage.
 
-- [ ] **Step 9: Run the full test suite**
+- [ ] **Step 10: Run the full test suite**
 
 Run: `cd client && yarn test --watchAll=false`
 Expected: PASS. The `SceneLight.fogStart` change is the only edit reaching outside new files — check
 that no existing suite depended on the old wrong value.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add client/src/pages/game/debug/lighting-readouts.tsx client/src/pages/game/debug/debug.tsx client/src/game/world/light/MapLight.ts client/src/game/world/light/SceneLight.ts client/src/game/world/light/__tests__/laws.test.ts
+git add client/src/pages/game/debug/lighting-readouts.tsx client/src/pages/game/debug/__tests__/lighting-readouts.test.tsx client/src/pages/game/debug/debug.tsx client/src/game/world/light/MapLight.ts client/src/game/world/light/SceneLight.ts client/src/game/world/light/__tests__/laws.test.ts
 git commit -m "feat(debug): add resolved-light readouts and fix the fogStart getter"
 ```
 
@@ -1531,6 +1623,7 @@ git commit -m "feat(debug): add resolved-light readouts and fix the fogStart get
 
 - `yarn test --watchAll=false --testPathPattern="light"` passes, 38 tests.
 - `yarn test --watchAll=false --testPathPattern="lighting-controls"` passes, 5 tests.
+- `yarn test --watchAll=false --testPathPattern="lighting-readouts"` passes, 5 tests.
 - The debug panel drives time of day and prints the resolved light as bytes.
 - `laws.ts` imports nothing, and every constant in it cites its reference origin.
 
