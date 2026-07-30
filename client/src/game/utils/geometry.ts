@@ -156,7 +156,10 @@ THREE.Float32BufferAttribute.prototype['copyVector4sArray'] = function ( vectors
 
 }
 
-export class Geometry extends THREE.EventDispatcher {
+// EventDispatcher became generic over its event map. Left unparameterised the map defaults to {}, so
+// `keyof TEventMap` is never and dispatchEvent rejects every event. This declares the one event this
+// class actually emits.
+export class Geometry extends THREE.EventDispatcher<{ dispose: {} }> {
 	
 	uuid = THREE.MathUtils.generateUUID();
 

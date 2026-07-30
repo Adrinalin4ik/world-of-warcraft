@@ -1,3 +1,4 @@
+import * as THREE from "three";
 import World from "../../world";
 import { MessageType } from "../webrtc/types";
 import { MessageHandler } from "../webrtc/message_handler";

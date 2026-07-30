@@ -86,6 +86,11 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       powerPreference: 'high-performance',
       canvas: this.canvas.current as HTMLCanvasElement,
     });
+
+    // r150's default. From r152 the default became SRGBColorSpace, which would apply a linear-to-sRGB
+    // conversion on output that none of this client's shaders or textures were tuned for. See the
+    // ColorManagement note in src/index.tsx.
+    renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     
     const composer = new EffectComposer(renderer);
 
@@ -111,6 +116,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         alpha: true,
         canvas: this.debugCanvas.current as HTMLCanvasElement
       });
+      this.debugRenderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     }
     console.log("componentDidMount", this)
     this.forceUpdate();

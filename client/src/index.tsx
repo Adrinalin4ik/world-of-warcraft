@@ -9,6 +9,19 @@ import './styles/ui/index.scss';
 
 window['THREE'] = THREE;
 
+// three r152 turned colour management on by default and switched the renderer's output to sRGB. Every
+// shader, every light-database colour and every DXT texture in this client was authored and tuned
+// against r150's behaviour -- colour management off, linear output -- so both are pinned back to it
+// here and in the renderer setup (see pages/game/index.tsx).
+//
+// Adopting managed colour would change the appearance of the entire game: Color.setHex would convert
+// sRGB to linear, and the renderer would convert linear to sRGB on the way out, so the fog colours,
+// water tints and sun bands read out of Light.dbc would all shift. That is a deliberate visual project
+// with its own before/after pass, not a side effect of a dependency upgrade.
+//
+// Set before anything constructs a Color, because the flag is read at construction time.
+THREE.ColorManagement.enabled = false;
+
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;

@@ -1,4 +1,5 @@
 import React from 'react';
+import * as THREE from 'three';
 import { GameHandler } from '../../../network/game/handler';
 import './debug.scss';
 
