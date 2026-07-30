@@ -287,3 +287,108 @@ export function quantizeGlow(glow: number): number {
 export function stormBlend(skyDensity: number): number {
   return Math.min(1, Math.max(0, skyDensity * 4));
 }
+
+/**
+ * The FIXED engine axis an interior prop's diffuse word is committed on -- never the day/night sun,
+ * which is why an interior prop's light is day/night independent (benilla
+ * `benilla-assets/src/wmo.rs`, the `0x6a77e0` create site).
+ *
+ * Expressed toward-light in the same WoW-space convention `SUN_PHI_TABLE` / `SUN_THETA_TABLE` produce
+ * and the shaders consume unpermuted. VERIFY THIS IN A REAL INTERIOR before trusting it: the client's
+ * world frame versus the WoW frame is only implicitly documented (`MapLight` permutes axes for light
+ * positions but not for sun direction), so this constant is inferred from the sun's working
+ * convention rather than measured. `foldInteriorProbe` takes the axis as an argument so a correction
+ * here never touches the fold.
+ */
+export const INTERIOR_LIGHT_AXIS: Vec3 = [0.30822, 0.30822, 0.9];
+
+/** One MOLR-referenced omni light as the interior fold consumes it. Colour is pre-multiplied by intensity. */
+export type PropLobeLight = {
+  position: Vec3;
+  color: RGB;
+  attenStart: number;
+  attenEnd: number;
+};
+
+/**
+ * Fold one interior prop's committed light into its 7-row SH probe: the ambient word, plus the
+ * diffuse word as a directional on the fixed axis, plus each MOLR lobe gated by its own disk window
+ * measured from `refPoint` (benilla `terrain_stream.rs::fold_interior_probe`, falloff `0x69e1c0`).
+ *
+ * The gate is: at or inside `attenStart` full gain; at or beyond `attenEnd` excluded entirely;
+ * linear in between. A group with no MOLR lights means NO point light at all -- its own flame
+ * included.
+ *
+ * Deliberately takes no time-of-day argument. An interior prop's light is filled once at create and
+ * does not track the clock.
+ */
+export function foldInteriorProbe(
+  ambient: RGB,
+  diffuse: RGB,
+  refPoint: Vec3,
+  lights: PropLobeLight[],
+  axis: Vec3 = INTERIOR_LIGHT_AXIS,
+): ProbeCoeffs {
+  const lobes: Lobe[] = [{ dir: axis, color: diffuse }];
+
+  for (const light of lights) {
+    const dx = light.position[0] - refPoint[0];
+    const dy = light.position[1] - refPoint[1];
+    const dz = light.position[2] - refPoint[2];
+    const distance = Math.hypot(dx, dy, dz);
+
+    let gain: number;
+    if (distance <= light.attenStart) {
+      gain = 1;
+    } else if (distance >= light.attenEnd || light.attenEnd <= light.attenStart) {
+      gain = 0;
+    } else {
+      gain = 1 - (distance - light.attenStart) / (light.attenEnd - light.attenStart);
+    }
+    if (gain <= 0) {
+      continue;
+    }
+
+    const safe = Math.max(distance, 1e-4);
+    lobes.push({
+      dir: [dx / safe, dy / safe, dz / safe],
+      color: [light.color[0] * gain, light.color[1] * gain, light.color[2] * gain],
+    });
+  }
+
+  return propProbeCoeffs(ambient, lobes);
+}
+
+/**
+ * Pick the point lights a receiver actually gets: the NEAREST few to the receiving object's own
+ * position (benilla `wow_model.wgsl::point_light_sum`, gather `0x71bf90`). The reference commits at
+ * most three and drops the fourth.
+ *
+ * Two things about this are easy to get wrong:
+ *  - The anchor is the RECEIVING OBJECT's position -- never the camera, never the vertex. Selecting
+ *    against the camera lights fixtures from sideways lamps the real client never commits.
+ *  - Ranking is by plain distance, NOT by estimated contribution. A light's own range bounds
+ *    candidacy, but once selected it reaches the whole object with no distance cutoff, so selection
+ *    pops at object granularity -- which is the authored behaviour, not an artifact.
+ */
+export function selectPointLights<T extends { position: Vec3; attenEnd: number }>(
+  anchor: Vec3,
+  lights: T[],
+  max = 3,
+): T[] {
+  const candidates: Array<{ light: T; d2: number }> = [];
+
+  for (const light of lights) {
+    const dx = light.position[0] - anchor[0];
+    const dy = light.position[1] - anchor[1];
+    const dz = light.position[2] - anchor[2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > light.attenEnd * light.attenEnd) {
+      continue;
+    }
+    candidates.push({ light, d2 });
+  }
+
+  candidates.sort((first, second) => first.d2 - second.d2);
+  return candidates.slice(0, max).map((entry) => entry.light);
+}

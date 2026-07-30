@@ -7,11 +7,15 @@ import {
   evalProbe,
   floor112,
   floor168,
+  foldInteriorProbe,
+  INTERIOR_LIGHT_AXIS,
   interpDayNight,
   Lobe,
   propProbeCoeffs,
+  PropLobeLight,
   quantizeGlow,
   RGB,
+  selectPointLights,
   sidnNightFraction,
   skyWarp,
   stormBlend,
@@ -236,5 +240,96 @@ describe('quantizeGlow and stormBlend', () => {
     expect(stormBlend(0.25)).toBeCloseTo(1.0, 5);
     // Clamped, so an out-of-domain density cannot overdrive the lerp.
     expect(stormBlend(1.0)).toBe(1);
+  });
+});
+
+describe('foldInteriorProbe', () => {
+  const AMB: RGB = [0.2, 0.2, 0.2];
+  const DIF: RGB = [0.4, 0.4, 0.4];
+
+  it('commits the diffuse word on the fixed axis, not the sun', () => {
+    const c = foldInteriorProbe(AMB, DIF, [0, 0, 0], []);
+    // Facing the fixed axis returns ambient + diffuse exactly.
+    expectClose(evalProbe(c, normalize(INTERIOR_LIGHT_AXIS)), [0.6, 0.6, 0.6]);
+  });
+
+  it('adds a MOLR lobe at full gain inside attenStart', () => {
+    const light: PropLobeLight = {
+      position: [0, 0, 10],
+      color: [0.5, 0, 0],
+      attenStart: 20,
+      attenEnd: 40,
+    };
+    const withLight = foldInteriorProbe(AMB, DIF, [0, 0, 0], [light]);
+    const without = foldInteriorProbe(AMB, DIF, [0, 0, 0], []);
+    // Facing the light, the red channel gains the full lobe peak.
+    const toLight: Vec3 = [0, 0, 1];
+    expect(evalProbe(withLight, toLight)[0] - evalProbe(without, toLight)[0]).toBeCloseTo(0.5, 5);
+  });
+
+  it('excludes a MOLR lobe at or beyond attenEnd', () => {
+    const light: PropLobeLight = {
+      position: [0, 0, 40],
+      color: [0.5, 0, 0],
+      attenStart: 20,
+      attenEnd: 40,
+    };
+    const withLight = foldInteriorProbe(AMB, DIF, [0, 0, 0], [light]);
+    const without = foldInteriorProbe(AMB, DIF, [0, 0, 0], []);
+    expect(evalProbe(withLight, [0, 0, 1])).toEqual(evalProbe(without, [0, 0, 1]));
+  });
+
+  it('ramps a MOLR lobe linearly between attenStart and attenEnd', () => {
+    const light: PropLobeLight = {
+      position: [0, 0, 30],
+      color: [0.5, 0, 0],
+      attenStart: 20,
+      attenEnd: 40,
+    };
+    const withLight = foldInteriorProbe(AMB, DIF, [0, 0, 0], [light]);
+    const without = foldInteriorProbe(AMB, DIF, [0, 0, 0], []);
+    // Halfway through the window -> half gain.
+    const gained = evalProbe(withLight, [0, 0, 1])[0] - evalProbe(without, [0, 0, 1])[0];
+    expect(gained).toBeCloseTo(0.25, 5);
+  });
+
+  it('overrides the axis when one is supplied', () => {
+    // Plan 3 verifies INTERIOR_LIGHT_AXIS in a real interior. The parameter is how a correction lands
+    // in one place, so it needs to actually be honoured.
+    const axis: Vec3 = [0, 0, 1];
+    const c = foldInteriorProbe(AMB, DIF, [0, 0, 0], [], axis);
+    expectClose(evalProbe(c, axis), [0.6, 0.6, 0.6]);
+  });
+});
+
+describe('selectPointLights', () => {
+  const light = (x: number, attenEnd = 100) => ({ position: [x, 0, 0] as Vec3, attenEnd });
+
+  it('keeps the three nearest to the anchor', () => {
+    const lights = [light(50), light(10), light(30), light(20), light(40)];
+    const picked = selectPointLights([0, 0, 0], lights);
+    expect(picked.map((l) => l.position[0])).toEqual([10, 20, 30]);
+  });
+
+  it('ranks by distance from the anchor, not from the origin', () => {
+    const lights = [light(0), light(100)];
+    const picked = selectPointLights([90, 0, 0], lights);
+    expect(picked[0].position[0]).toBe(100);
+  });
+
+  it('excludes a candidate whose own range does not reach the anchor', () => {
+    const lights = [light(10, 5), light(30)];
+    const picked = selectPointLights([0, 0, 0], lights);
+    expect(picked.map((l) => l.position[0])).toEqual([30]);
+  });
+
+  it('returns everything when fewer than the cap are in range', () => {
+    expect(selectPointLights([0, 0, 0], [light(10)])).toHaveLength(1);
+    expect(selectPointLights([0, 0, 0], [])).toHaveLength(0);
+  });
+
+  it('honours an explicit cap', () => {
+    const lights = [light(10), light(20), light(30)];
+    expect(selectPointLights([0, 0, 0], lights, 2)).toHaveLength(2);
   });
 });

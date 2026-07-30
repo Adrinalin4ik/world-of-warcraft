@@ -35,6 +35,26 @@ export {
 // Blending functions
 export { blendLights } from './blend';
 
+// Pure lighting laws ported from samples/benilla. Dependency-free by design -- see laws.ts.
+export {
+  cap96,
+  dawnDuskCurve,
+  evalProbe,
+  floor112,
+  floor168,
+  foldInteriorProbe,
+  INTERIOR_LIGHT_AXIS,
+  interpDayNight,
+  propProbeCoeffs,
+  quantizeGlow,
+  selectPointLights,
+  sidnNightFraction,
+  skyWarp,
+  stormBlend,
+} from './laws';
+
+export type { Lobe, ProbeCoeffs, PropLobeLight, RGB, Vec3, Vec4 } from './laws';
+
 // Types and constants
 export type {
   AreaLight,
