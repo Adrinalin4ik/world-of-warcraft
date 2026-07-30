@@ -1298,11 +1298,29 @@ structural type, matching `LightingControlsTarget` in Task 5. It describes colou
 (`{ r, g, b }`, `{ x, y, z }`) rather than importing THREE types, which keeps the component free of
 three.js and testable with plain objects. Plans 2–5 extend the type as they add resolved values.
 
-- [ ] **Step 1: Write the failing test for the fogStart bug**
+- [ ] **Step 1: Write the failing test for the fog-range bugs**
 
-`SceneLight.fogStart` computes `fogEnd - 1.0 / fogParams.x`. `blendLights` packs
-`fogParams.x = -1/(end - start)`, so `1/x = -(end - start)` and the getter returns `2*end - start` —
-not `start`. The readout would print a wrong number, so fix it first.
+**Corrected during execution — `fogEnd` is broken too, and this step originally missed it.**
+`blendLights` packs `fogParams` as a (slope, intercept) pair for the shader's `f1 = d*x + y`, NOT as
+(step, end):
+
+```
+x = -1 / (end - start)
+y =  end / (end - start)
+```
+
+which gives `f1 = 1` at `d = start` and `0` at `d = end`. Two getters try to read `start` and `end`
+back out of that pair, and both do it wrongly:
+
+- `fogEnd` returns `y` raw, i.e. `end / (end - start)` — for a 125..500 band, `1.333` instead of `500`.
+- `fogStart` computes `fogEnd - 1/x`, which evaluates to `2*end - start` instead of `start`.
+
+Recovery is `fogEnd = -y/x` and `fogStart = fogEnd + 1/x`. Both are fixed in Step 3.
+
+This is safe to change: the only readers of either getter are `getFogParams()` in
+`M2LightIntegration` and `WMOLightIntegration`, and **`getFogParams` has no callers anywhere in the
+client** — verified before authorising the wider edit. The fix cannot alter rendering; it only makes
+the getters return what their names claim.
 
 Append to `client/src/game/world/light/__tests__/laws.test.ts` — a new suite at the end. Note this one
 needs the jsdom-free node env the file already declares, and `SceneLight` imports three.js, which
@@ -1310,18 +1328,34 @@ loads fine under node:
 
 ```ts
 describe('SceneLight fog range', () => {
-  it('recovers the fog start that blendLights packed', async () => {
+  // Pack exactly as blendLights does: the shader's (slope, intercept) pair, not (step, end).
+  const packed = async (start: number, end: number) => {
     const SceneLight = (await import('../SceneLight')).default;
     const scene = new SceneLight();
-
-    // Pack exactly as blendLights does for a 125..500 yard fog band.
-    const start = 125;
-    const end = 500;
     const step = 1 / (end - start);
     scene.fogParams.set(-step, end * step, 1, 1);
+    return scene;
+  };
 
-    expect(scene.fogEnd).toBeCloseTo(end, 4);
-    expect(scene.fogStart).toBeCloseTo(start, 4);
+  it('recovers the fog range that blendLights packed', async () => {
+    const scene = await packed(125, 500);
+    expect(scene.fogEnd).toBeCloseTo(500, 4);
+    expect(scene.fogStart).toBeCloseTo(125, 4);
+  });
+
+  it('recovers a band starting at zero', async () => {
+    // A zero start makes fogStart land on exactly 0, which a sign error would miss.
+    const scene = await packed(0, 200);
+    expect(scene.fogEnd).toBeCloseTo(200, 4);
+    expect(scene.fogStart).toBeCloseTo(0, 4);
+  });
+
+  it('reads zero rather than NaN before the first blend', async () => {
+    const SceneLight = (await import('../SceneLight')).default;
+    const scene = new SceneLight();
+    scene.fogParams.set(0, 0, 0, 0);
+    expect(scene.fogEnd).toBe(0);
+    expect(Number.isFinite(scene.fogStart)).toBe(true);
   });
 });
 ```
@@ -1329,15 +1363,17 @@ describe('SceneLight fog range', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd client && yarn test --watchAll=false --testPathPattern="light/__tests__/laws"`
-Expected: FAIL — `fogStart` returns 875 (which is `2*500 - 125`), expected 125.
+Expected: FAIL on `fogEnd` first — it returns `1.333` (`500/375`), expected `500`. Once that is fixed,
+`fogStart` fails too, returning `875` (`2*500 - 125`) where `125` is expected.
 
-- [ ] **Step 3: Fix the getter**
+- [ ] **Step 3: Fix both getters**
 
-In `client/src/game/world/light/SceneLight.ts`, replace the `fogStart` getter:
+In `client/src/game/world/light/SceneLight.ts`, replace the `fogStart` AND `fogEnd` getters:
 
 ```ts
   /**
-   * `blendLights` packs `fogParams.x = -1 / (end - start)`, so the span is recovered by ADDING the
+   * `blendLights` packs `fogParams` as the shader's (slope, intercept) pair, not as (step, end):
+   * `x = -1/(end - start)`, `y = end/(end - start)`. So the span is recovered by ADDING the
    * reciprocal, not subtracting it: `end + 1/x = end - (end - start) = start`. Subtracting yielded
    * `2*end - start`, which read plausibly on a narrow band and was wrong everywhere.
    */
@@ -1345,12 +1381,24 @@ In `client/src/game/world/light/SceneLight.ts`, replace the `fogStart` getter:
     const step = this.#params[this.#location].fogParams.x;
     return step !== 0 ? this.fogEnd + 1.0 / step : this.fogEnd;
   }
+
+  /**
+   * The packed intercept is `end/(end - start)`, so the raw component is NOT the fog end — recover it
+   * as `-y/x`. Returning `y` directly reported 1.333 for a 125..500 yard band.
+   *
+   * Guarded at `x == 0` so an unset `fogParams` (all zeros, before the first blend) reads 0 rather
+   * than NaN or Infinity in a debug readout.
+   */
+  get fogEnd() {
+    const params = this.#params[this.#location].fogParams;
+    return params.x !== 0 ? -params.y / params.x : 0;
+  }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd client && yarn test --watchAll=false --testPathPattern="light/__tests__/laws"`
-Expected: PASS, 38 tests.
+Expected: PASS, 40 tests (37 existing + 3 new).
 
 - [ ] **Step 5: Expose what the readouts need on MapLight**
 
@@ -1621,7 +1669,7 @@ git commit -m "feat(debug): add resolved-light readouts and fix the fogStart get
 
 ## Done when
 
-- `yarn test --watchAll=false --testPathPattern="light"` passes, 38 tests.
+- `yarn test --watchAll=false --testPathPattern="light"` passes, 40 tests.
 - `yarn test --watchAll=false --testPathPattern="lighting-controls"` passes, 5 tests.
 - `yarn test --watchAll=false --testPathPattern="lighting-readouts"` passes, 5 tests.
 - The debug panel drives time of day and prints the resolved light as bytes.
