@@ -64,27 +64,45 @@ export class ParticleManager {
       return 0;
     }
 
-    this.registered.add(instance);
+    // Built locally first so a throw partway through leaves this.emitters, this.group and
+    // this.registered untouched -- a malformed definition must not half-register the instance and
+    // permanently wedge it behind the registered.has() guard above.
+    const built: LiveEmitter[] = [];
 
-    let added = 0;
+    try {
+      for (const definition of definitions) {
+        const capacity = ParticleManager.capacityFor(definition);
 
-    for (const definition of definitions) {
-      const capacity = ParticleManager.capacityFor(definition);
+        const texture = (instance.textures || [])[definition.textureId];
+        const texturePath = texture && texture.filename ? texture.filename : '';
 
-      const texture = (instance.textures || [])[definition.textureId];
-      const texturePath = texture && texture.filename ? texture.filename : '';
+        const material = new ParticleMaterial(texturePath, definition.blendingType);
+        const batch = new ParticleBatch(material, capacity, definition.rows, definition.columns);
+        const pool = new ParticlePool(capacity);
 
-      const material = new ParticleMaterial(texturePath, definition.blendingType);
-      const batch = new ParticleBatch(material, capacity, definition.rows, definition.columns);
-      const pool = new ParticlePool(capacity);
+        built.push({ emitter: new RuntimeEmitter(definition, pool), batch, definition, instance });
+      }
+    } catch (error) {
+      for (const entry of built) {
+        entry.batch.geometry.dispose();
+        (entry.batch.material as THREE.Material).dispose();
+      }
 
-      this.group.add(batch);
-      this.emitters.push({ emitter: new RuntimeEmitter(definition, pool), batch, definition, instance });
+      const path = instance && instance.path ? instance.path : instance;
+      // eslint-disable-next-line no-console
+      console.error('ParticleManager: failed to register emitters for', path, error);
 
-      added++;
+      return 0;
     }
 
-    return added;
+    this.registered.add(instance);
+
+    for (const entry of built) {
+      this.group.add(entry.batch);
+      this.emitters.push(entry);
+    }
+
+    return built.length;
   }
 
   unregister(instance: any) {

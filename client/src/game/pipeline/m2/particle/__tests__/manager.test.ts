@@ -137,4 +137,55 @@ describe('ParticleManager', () => {
     expect(manager.register(instance)).toBe(1);
     expect(() => manager.animate(1 / 60)).not.toThrow();
   });
+
+  it('rolls back a partially-constructed registration when a later definition throws', () => {
+    const group = new THREE.Group();
+    const manager = new ParticleManager(group);
+
+    const goodDefinition = emitterDefinition();
+    const badDefinition = emitterDefinition();
+    Object.defineProperty(badDefinition, 'emissionRate', {
+      get() {
+        throw new Error('boom');
+      },
+    });
+
+    const instance = fakeInstance([goodDefinition, badDefinition]);
+
+    expect(manager.register(instance)).toBe(0);
+    expect(manager.emitterCount).toBe(0);
+    expect(group.children.length).toBe(0);
+
+    // A later retry with a well-formed instance must still succeed.
+    const otherInstance = fakeInstance([emitterDefinition()]);
+    expect(manager.register(otherInstance)).toBe(1);
+    expect(manager.emitterCount).toBe(1);
+  });
+
+  it('unregisters one of several instances without disturbing the others', () => {
+    const group = new THREE.Group();
+    const manager = new ParticleManager(group);
+
+    const instanceA = fakeInstance([emitterDefinition()]);
+    const instanceB = fakeInstance([emitterDefinition(), emitterDefinition()]);
+    const instanceC = fakeInstance([emitterDefinition()]);
+
+    manager.register(instanceA);
+    manager.register(instanceB);
+    manager.register(instanceC);
+
+    expect(manager.emitterCount).toBe(4);
+    expect(group.children.length).toBe(4);
+
+    manager.unregister(instanceB);
+
+    expect(manager.emitterCount).toBe(2);
+    expect(group.children.length).toBe(2);
+
+    for (let i = 0; i < 30; i++) {
+      manager.animate(1 / 30);
+    }
+
+    expect(manager.liveParticleCount).toBeGreaterThan(0);
+  });
 });
