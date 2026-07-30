@@ -113,3 +113,70 @@ export function evalProbe(coeffs: ProbeCoeffs, normal: Vec3): RGB {
   }
   return out;
 }
+
+/**
+ * Round half to even ("banker's rounding"), which is what Rust's `round_ties_even` and the
+ * reference's float-to-int conversion do. JS `Math.round` rounds halves UP, and the two disagree on
+ * exactly one input that matters here: a MODD colour whose max channel is 160 makes the cap scale
+ * land on 152.5, where this gives 152 and `Math.round` gives 153.
+ */
+function roundTiesEven(value: number): number {
+  const rounded = Math.round(value);
+  const isTie = Math.abs(value % 1) === 0.5;
+  return isTie && rounded % 2 !== 0 ? rounded - 1 : rounded;
+}
+
+/**
+ * The AMBIENT-word cap of the reference's colour splitter (benilla `benilla-assets/src/wmo.rs::cap96`,
+ * from `0x6a77e0`): a colour whose max channel exceeds 96 is scaled down so the max lands on 96, hue
+ * and saturation preserved. Input is 0..255 bytes; output is normalized 0..1.
+ *
+ * The arithmetic is integer on purpose -- an 8.8 fixed-point scale and a `>> 8` recombine. Doing it in
+ * floats drifts by a byte on some inputs.
+ */
+export function cap96(bytes: Vec3): RGB {
+  const max = Math.max(bytes[0], bytes[1], bytes[2]);
+  if (max <= 96) {
+    return [bytes[0] / 255, bytes[1] / 255, bytes[2] / 255];
+  }
+  const scale = roundTiesEven((96 * 255) / max - 0.5);
+  return [
+    ((bytes[0] * scale + 255) >> 8) / 255,
+    ((bytes[1] * scale + 255) >> 8) / 255,
+    ((bytes[2] * scale + 255) >> 8) / 255,
+  ];
+}
+
+/**
+ * The DIFFUSE-word FLOOR of the same splitter (benilla `wmo.rs::floor_raise`): a colour whose max
+ * channel falls BELOW `threshold` is raised so the max lands exactly on it, hue preserved -- and the
+ * per-channel scale TRUNCATES.
+ *
+ * Truncation is load-bearing, not incidental: the reference's decoded abbey benches need
+ * 63 * 168 / 83 = 127.52 to land on 127, which truncation gives and nearest-rounding does not.
+ */
+function floorRaise(bytes: Vec3, threshold: number): RGB {
+  const max = Math.max(bytes[0], bytes[1], bytes[2]);
+  if (max >= threshold || max === 0) {
+    return [bytes[0] / 255, bytes[1] / 255, bytes[2] / 255];
+  }
+  return [
+    Math.floor((bytes[0] * threshold) / max) / 255,
+    Math.floor((bytes[1] * threshold) / max) / 255,
+    Math.floor((bytes[2] * threshold) / max) / 255,
+  ];
+}
+
+/** [`floorRaise`] at the MODD create site's threshold 112 -- the interior-prop diffuse word. */
+export function floor112(bytes: Vec3): RGB {
+  return floorRaise(bytes, 112);
+}
+
+/**
+ * [`floorRaise`] at the entity/footprint attach site's threshold 168 -- the GameObject M2 lane.
+ * Unused by this plan; ported alongside its twin because they are one law with two thresholds and
+ * splitting them across plans would invite a divergent second implementation.
+ */
+export function floor168(bytes: Vec3): RGB {
+  return floorRaise(bytes, 168);
+}

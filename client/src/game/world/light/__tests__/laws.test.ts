@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { evalProbe, Lobe, propProbeCoeffs, RGB, Vec3 } from '../laws';
+import { cap96, evalProbe, floor112, floor168, Lobe, propProbeCoeffs, RGB, Vec3 } from '../laws';
 
 // benilla's golden case: the abbey stand MODD[24]. ambient/diffuse are its decoded colour words, and
 // `AXIS` is an arbitrary unit direction -- the fold's identities hold in any frame, because the
@@ -77,5 +77,47 @@ describe('propProbeCoeffs', () => {
   it('ignores a zero-length lobe direction rather than emitting NaN', () => {
     const c = propProbeCoeffs(AMBIENT, [{ dir: [0, 0, 0], color: DIFFUSE }]);
     expectClose(evalProbe(c, [0, 1, 0]), AMBIENT);
+  });
+});
+
+describe('MODD colour byte laws', () => {
+  // Compare in bytes, which is how the reference's own golden values are recorded.
+  const asBytes = (c: RGB) => c.map((v) => Math.round(v * 255));
+
+  it('caps the ambient word at value 96, hue preserved', () => {
+    expect(asBytes(cap96([78, 76, 134]))).toEqual([56, 55, 96]);
+    expect(asBytes(cap96([90, 86, 141]))).toEqual([61, 59, 96]);
+  });
+
+  it('passes an ambient word whose max is already <= 96 straight through', () => {
+    expect(asBytes(cap96([96, 40, 20]))).toEqual([96, 40, 20]);
+  });
+
+  it('rounds the cap scale half-to-even, not half-up', () => {
+    // max = 160 makes 96*255/160 - 0.5 land exactly on 152.5 -- the one tie in the whole byte domain.
+    // Round-half-to-even gives scale 152, so the max channel recombines to (160*152 + 255) >> 8 = 95.
+    // Math.round would give 153 and a max of 96. Note the cap therefore does NOT always land the max
+    // exactly on 96; the reference's own rounding is what decides, and here it lands a byte under.
+    expect(asBytes(cap96([160, 160, 160]))).toEqual([95, 95, 95]);
+    expect(asBytes(cap96([160, 80, 40]))).toEqual([95, 48, 24]);
+  });
+
+  it('raises a diffuse word below 112 by a truncating scale', () => {
+    expect(asBytes(floor112([56, 28, 14]))).toEqual([112, 56, 28]);
+  });
+
+  it('passes a diffuse word at or above 112 through untouched', () => {
+    expect(asBytes(floor112([78, 76, 134]))).toEqual([78, 76, 134]);
+    expect(asBytes(floor112([90, 86, 141]))).toEqual([90, 86, 141]);
+  });
+
+  it('leaves black black rather than dividing by zero', () => {
+    expect(asBytes(floor112([0, 0, 0]))).toEqual([0, 0, 0]);
+  });
+
+  it('truncates the entity threshold at 168 the same way', () => {
+    // The reference's decoded abbey benches: truncation gives 127 where nearest would give 128.
+    expect(asBytes(floor168([59, 65, 92]))).toEqual([107, 118, 168]);
+    expect(asBytes(floor168([69, 63, 83]))).toEqual([139, 127, 168]);
   });
 });
