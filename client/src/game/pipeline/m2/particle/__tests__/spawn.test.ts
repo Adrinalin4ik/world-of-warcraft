@@ -16,6 +16,7 @@ const baseParams = {
   lifespan: 2,
   baseSpin: 0,
   spinSpeed: 0,
+  zSource: 0,
 };
 
 // A deterministic stand-in for Math.random that cycles a fixed script.
@@ -140,6 +141,57 @@ describe('spawnParticle — common state', () => {
       expect(pool.position[slot * 3 + 1]).toBeCloseTo(0, 6);
       expect(pool.position[slot * 3 + 2]).toBeCloseTo(0, 6);
       expect(pool.lifespan[slot]).toBeCloseTo(2, 5);
+    }
+  });
+
+  it('with zSource: 0, velocity is unchanged', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+
+    spawnParticle(pool, slot, baseParams, scriptedRandom([0.5]));
+
+    expect(pool.velocity[slot * 3]).toBeCloseTo(0, 6);
+    expect(pool.velocity[slot * 3 + 1]).toBeCloseTo(0, 6);
+    expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(baseParams.speed, 5);
+  });
+
+  it('with positive zSource and a particle above the source, velocity points away from the source', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+
+    spawnParticle(pool, slot, { ...baseParams, zSource: 5 }, scriptedRandom([0.5]));
+
+    // Particle spawned at (x, y, 0) with zSource at z=5.
+    // The direction should be normalize((0, 0, 0) - (0, 0, 5)) = normalize((0, 0, -5)) = (0, 0, -1).
+    const vx = pool.velocity[slot * 3];
+    const vy = pool.velocity[slot * 3 + 1];
+    const vz = pool.velocity[slot * 3 + 2];
+    const mag = Math.sqrt(vx * vx + vy * vy + vz * vz);
+
+    const expectedDx = 0;
+    const expectedDy = 0;
+    const expectedDz = -1;
+
+    expect(vx / mag).toBeCloseTo(expectedDx, 5);
+    expect(vy / mag).toBeCloseTo(expectedDy, 5);
+    expect(vz / mag).toBeCloseTo(expectedDz, 5);
+  });
+
+  it('speed magnitude still respects variation with zSource active', () => {
+    const pool = new ParticlePool(64);
+    const params = { ...baseParams, speedVariation: 0.5, zSource: 10 };
+
+    for (let i = 0; i < 40; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+
+      const vx = pool.velocity[slot * 3];
+      const vy = pool.velocity[slot * 3 + 1];
+      const vz = pool.velocity[slot * 3 + 2];
+      const magnitude = Math.sqrt(vx * vx + vy * vy + vz * vz);
+
+      expect(magnitude).toBeGreaterThanOrEqual(params.speed * 0.5 - 1e-4);
+      expect(magnitude).toBeLessThanOrEqual(params.speed * 1.5 + 1e-4);
     }
   });
 });

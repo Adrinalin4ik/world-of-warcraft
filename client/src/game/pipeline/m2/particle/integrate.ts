@@ -3,7 +3,6 @@ import { ParticlePool } from './pool';
 export interface Forces {
   gravity: number;
   drag: number;
-  zSource: number;
 }
 
 /**
@@ -40,22 +39,6 @@ export const integratePool = (pool: ParticlePool, dt: number, forces: Forces): n
       pool.velocity[base] *= dragFactor;
       pool.velocity[base + 1] *= dragFactor;
       pool.velocity[base + 2] *= dragFactor;
-    }
-
-    if (forces.zSource > 0) {
-      // Documented as: velocity is pushed along (particle.position - (0, 0, zSource)) normalised.
-      const dx = pool.position[base];
-      const dy = pool.position[base + 1];
-      const dz = pool.position[base + 2] - forces.zSource;
-      const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-      if (length > 1e-6) {
-        const scale = gravityStep !== 0 ? Math.abs(gravityStep) : dt;
-
-        pool.velocity[base] += (dx / length) * scale;
-        pool.velocity[base + 1] += (dy / length) * scale;
-        pool.velocity[base + 2] += (dz / length) * scale;
-      }
     }
 
     pool.position[base] += pool.velocity[base] * dt;

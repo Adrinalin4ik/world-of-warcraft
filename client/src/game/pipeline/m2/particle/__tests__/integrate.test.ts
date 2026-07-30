@@ -4,7 +4,7 @@
 import { integratePool } from '../integrate';
 import { ParticlePool } from '../pool';
 
-const noForces = { gravity: 0, drag: 0, zSource: 0 };
+const noForces = { gravity: 0, drag: 0 };
 
 const place = (pool: ParticlePool, position: number[], velocity: number[], lifespan: number) => {
   const slot = pool.allocate();
@@ -41,7 +41,7 @@ describe('integratePool', () => {
     const pool = new ParticlePool(4);
     const slot = place(pool, [0, 0, 0], [0, 0, 0], 10);
 
-    integratePool(pool, 1, { gravity: 9.8, drag: 0, zSource: 0 });
+    integratePool(pool, 1, { gravity: 9.8, drag: 0 });
 
     expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(-9.8, 4);
     expect(pool.position[slot * 3 + 2]).toBeCloseTo(-9.8, 4);
@@ -51,7 +51,7 @@ describe('integratePool', () => {
     const pool = new ParticlePool(4);
     const slot = place(pool, [0, 0, 0], [10, 0, 0], 10);
 
-    integratePool(pool, 1, { gravity: 0, drag: 1, zSource: 0 });
+    integratePool(pool, 1, { gravity: 0, drag: 1 });
 
     expect(pool.velocity[slot * 3]).toBeCloseTo(10 * Math.exp(-1), 4);
   });
@@ -63,16 +63,6 @@ describe('integratePool', () => {
     integratePool(pool, 1, noForces);
 
     expect(pool.velocity[slot * 3]).toBeCloseTo(10, 5);
-  });
-
-  it('pushes velocity away from the zSource point', () => {
-    const pool = new ParticlePool(4);
-    // Particle sits above the source at z=0, so the outward direction is +Z.
-    const slot = place(pool, [0, 0, 5], [0, 0, 0], 10);
-
-    integratePool(pool, 1, { gravity: 0, drag: 0, zSource: 1 });
-
-    expect(pool.velocity[slot * 3 + 2]).toBeGreaterThan(0);
   });
 
   it('advances spin by spinSpeed', () => {

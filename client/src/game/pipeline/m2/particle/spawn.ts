@@ -27,6 +27,7 @@ export interface SpawnParams {
   lifespan: number;
   baseSpin: number;
   spinSpeed: number;
+  zSource: number;
 }
 
 const spawnPlane = (
@@ -106,10 +107,25 @@ export const spawnParticle = (
       break;
   }
 
+  const base = slot * 3;
+
+  // When zSource > 0, replace the velocity direction with the normalized direction from the source.
+  if (params.zSource > 0) {
+    const dx = pool.position[base];
+    const dy = pool.position[base + 1];
+    const dz = pool.position[base + 2] - params.zSource;
+    const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    if (length > 1e-6) {
+      pool.velocity[base] = dx / length;
+      pool.velocity[base + 1] = dy / length;
+      pool.velocity[base + 2] = dz / length;
+    }
+  }
+
   // The direction written above is a unit vector; scale it to the emission speed.
   const variation = 1 + params.speedVariation * (random() * 2 - 1);
   const speed = params.speed * variation;
-  const base = slot * 3;
 
   pool.velocity[base] *= speed;
   pool.velocity[base + 1] *= speed;
