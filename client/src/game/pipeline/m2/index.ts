@@ -7,7 +7,7 @@ import { ObjectsManager } from '../../world/visibility-manager';
 import AnimationManager from './animation-manager';
 import BatchManager from './batch-manager';
 import M2Material from './material';
-import { collectEmitterTextureIndices, isParticleTemplate } from './particle/template';
+import { isParticleTemplate } from './particle/template';
 import Submesh from './submesh';
 
 class M2 extends THREE.Group {
@@ -367,7 +367,8 @@ class M2 extends THREE.Group {
     const { vertices } = data;
     const { submeshes, indices, triangles } = skinData;
 
-    const emitterTextureIndices = collectEmitterTextureIndices(data.particleEmitters);
+    const emitterCount = data.particleEmitters ? data.particleEmitters.length : 0;
+    const submeshCount = submeshes.length;
 
     const subLen = submeshes.length;
 
@@ -379,7 +380,7 @@ class M2 extends THREE.Group {
       const submeshGeometry = this.submeshGeometries.get(submeshIndex) ||
         this.createSubmeshGeometry(submeshDef, indices, triangles, vertices);
 
-      if (this.isTemplateSubmesh(submeshGeometry, submeshBatches, emitterTextureIndices)) {
+      if (this.isTemplateSubmesh(submeshGeometry, emitterCount, submeshCount)) {
         continue;
       }
 
@@ -397,8 +398,8 @@ class M2 extends THREE.Group {
   /**
    * A particle emitter's template quad, which the particle system draws rather than the scene graph.
    */
-  isTemplateSubmesh(geometry, batches, emitterTextureIndices) {
-    if (emitterTextureIndices.size === 0) {
+  isTemplateSubmesh(geometry, emitterCount, submeshCount) {
+    if (emitterCount === 0 || submeshCount !== 1) {
       return false;
     }
 
@@ -411,13 +412,7 @@ class M2 extends THREE.Group {
     const vertexCount = position.count;
     const triangleCount = geometry.index ? geometry.index.count / 3 : vertexCount / 3;
 
-    const textureIndices = [];
-
-    (batches || []).forEach((batch) => {
-      (batch.textureIndices || []).forEach((index) => textureIndices.push(index));
-    });
-
-    return isParticleTemplate({ vertexCount, triangleCount, textureIndices, emitterTextureIndices });
+    return isParticleTemplate({ emitterCount, submeshCount, vertexCount, triangleCount });
   }
 
   createSubmeshGeometry(submeshDef, indices, triangles, vertices) {

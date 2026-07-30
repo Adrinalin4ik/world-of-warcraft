@@ -1,57 +1,36 @@
 /**
  * @jest-environment node
  */
-import { collectEmitterTextureIndices, isParticleTemplate } from '../template';
-
-describe('collectEmitterTextureIndices', () => {
-  it('gathers texture ids from every emitter', () => {
-    const set = collectEmitterTextureIndices([{ textureId: 2 }, { textureId: 5 }, { textureId: 2 }]);
-
-    expect([...set].sort()).toEqual([2, 5]);
-  });
-
-  it('returns an empty set when there are no emitters', () => {
-    expect(collectEmitterTextureIndices(undefined).size).toBe(0);
-    expect(collectEmitterTextureIndices([]).size).toBe(0);
-  });
-});
+import { isParticleTemplate } from '../template';
 
 describe('isParticleTemplate', () => {
-  const emitterTextureIndices = new Set([2]);
-
-  it('accepts a single quad whose texture an emitter owns', () => {
+  it('fires for a model whose entire content is a single quad submesh with an emitter', () => {
     expect(isParticleTemplate({
-      vertexCount: 6, triangleCount: 2, textureIndices: [2], emitterTextureIndices
+      emitterCount: 1, submeshCount: 1, vertexCount: 6, triangleCount: 2
     })).toBe(true);
   });
 
-  it('rejects geometry larger than one quad', () => {
+  it('does not fire when the model has no particle emitters', () => {
     expect(isParticleTemplate({
-      vertexCount: 24, triangleCount: 12, textureIndices: [2], emitterTextureIndices
+      emitterCount: 0, submeshCount: 1, vertexCount: 6, triangleCount: 2
     })).toBe(false);
   });
 
-  it('rejects a quad whose texture no emitter owns', () => {
+  it('does not fire when the model has more than one submesh', () => {
     expect(isParticleTemplate({
-      vertexCount: 6, triangleCount: 2, textureIndices: [7], emitterTextureIndices
+      emitterCount: 1, submeshCount: 2, vertexCount: 6, triangleCount: 2
     })).toBe(false);
   });
 
-  it('rejects a quad using a mix of owned and unowned textures', () => {
+  it('does not fire for geometry larger than one quad', () => {
     expect(isParticleTemplate({
-      vertexCount: 6, triangleCount: 2, textureIndices: [2, 7], emitterTextureIndices
+      emitterCount: 1, submeshCount: 1, vertexCount: 24, triangleCount: 12
     })).toBe(false);
   });
 
-  it('rejects everything when the model has no emitters', () => {
+  it('does not fire for a single quad within a model that has two submeshes', () => {
     expect(isParticleTemplate({
-      vertexCount: 6, triangleCount: 2, textureIndices: [2], emitterTextureIndices: new Set<number>()
-    })).toBe(false);
-  });
-
-  it('rejects a quad with no texture information', () => {
-    expect(isParticleTemplate({
-      vertexCount: 6, triangleCount: 2, textureIndices: [], emitterTextureIndices
+      emitterCount: 1, submeshCount: 2, vertexCount: 6, triangleCount: 2
     })).toBe(false);
   });
 });
