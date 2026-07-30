@@ -4,6 +4,7 @@ import { color16, compfixed16array4, float32array2, float32array3, Vec3Float } f
 import AnimationBlock from './animation-block';
 import Nofs from './nofs';
 import ParticleEmitter from './particle/emitter';
+import Ribbon from './particle/ribbon';
 
 const Animation = new r.Struct({
   id: r.uint16le,
@@ -154,7 +155,7 @@ export default new r.Struct({
   lights: new Nofs(),
   cameras: new Nofs(),
   cameraLookups: new Nofs(),
-  ribbonEmitters: new Nofs(),
+  ribbonEmitters: new Nofs(Ribbon),
   particleEmitters: new Nofs(ParticleEmitter),
 
   blendingOverrides: new r.Optional(new Nofs(r.uint16le), function() {
