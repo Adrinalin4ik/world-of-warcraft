@@ -11,6 +11,9 @@ interface LiveEmitter {
   batch: ParticleBatch;
   definition: any;
   instance: any;
+  // Tracks whether this entry was culled as of the previous animate() call, so the pool is only reset
+  // on the transition into culled (see I5) rather than every frame it stays culled.
+  culled: boolean;
 }
 
 // Reused across animate() calls to avoid an allocation per emitter per frame.
@@ -100,7 +103,7 @@ export class ParticleManager {
         const batch = new ParticleBatch(material, capacity, definition.rows, definition.columns);
         const pool = new ParticlePool(capacity);
 
-        built.push({ emitter: new RuntimeEmitter(definition, pool), batch, definition, instance });
+        built.push({ emitter: new RuntimeEmitter(definition, pool), batch, definition, instance, culled: false });
       }
     } catch (error) {
       for (const entry of built) {
@@ -148,28 +151,49 @@ export class ParticleManager {
   animate(delta: number, camera: THREE.Camera) {
     const cullDistanceSquared = ParticleManager.CULL_DISTANCE * ParticleManager.CULL_DISTANCE;
 
-    for (const entry of this.emitters) {
-      // The instance's own matrix places its particles in the world. Emitters bound to a specific bone
-      // are Phase 2c; for now every emitter sits at the model's origin.
-      entry.instance.updateMatrixWorld(false);
+    // Clamp at the manager boundary: after a backgrounded tab, `Clock.getDelta()` can hand back several
+    // seconds' worth of elapsed time in one call. A multi-second Euler step would teleport every live
+    // particle across the screen for a frame before the lifespan check kills them. 0.1s (~6 frames at
+    // 60fps) is generous for a normal frame and still short enough that a resumed tab doesn't visibly
+    // jump.
+    const dt = Math.min(delta, 0.1);
 
+    for (const entry of this.emitters) {
+      // Read matrixWorld directly instead of calling updateMatrixWorld() up front: the renderer's own
+      // scene.updateMatrixWorld() has already produced it this frame, and a static doodad's subtree
+      // (submeshes plus bone hierarchy) doesn't need walking again just to answer the cull distance
+      // check. Recursing that subtree is only worth paying for emitters that survive the cull below.
       scratchWorldPosition.setFromMatrixPosition(entry.instance.matrixWorld);
       const distanceSquared = camera.position.distanceToSquared(scratchWorldPosition);
 
       if (distanceSquared > cullDistanceSquared) {
         // Beyond the cull distance: don't step or pack, and draw nothing. Comparing squared
         // distances avoids a per-emitter, per-frame Math.sqrt.
+        if (!entry.culled) {
+          // Release on the transition into culled, not every frame: an emitter simulates nothing while
+          // culled, so re-resetting an already-empty pool every frame would be pure waste. Without this,
+          // particles freeze mid-animation instead of being released, so walking away and back shows a
+          // stale, frozen puff before the emitter resumes -- and the pool's slots are never reclaimed.
+          entry.emitter.pool.reset();
+          entry.culled = true;
+        }
+
         (entry.batch.geometry as THREE.InstancedBufferGeometry).instanceCount = 0;
         entry.batch.visible = false;
         continue;
       }
 
+      entry.culled = false;
       entry.batch.visible = true;
+
+      // The instance's own matrix places its particles in the world. Emitters bound to a specific bone
+      // are Phase 2c; for now every emitter sits at the model's origin.
+      entry.instance.updateMatrixWorld(false);
 
       // advance() is a self-driven stand-in for the model's animation mixer, wrapped to the longest
       // timestamp among the emitter's own animated inputs. Driving this from the mixer's real time,
       // wrapped to the clip duration, is Phase 2c.
-      entry.emitter.step(delta, entry.emitter.advance(delta));
+      entry.emitter.step(dt, entry.emitter.advance(dt));
       entry.batch.pack(entry.emitter.pool, entry.definition, entry.instance.matrixWorld);
     }
   }

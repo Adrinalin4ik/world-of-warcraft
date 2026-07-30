@@ -3,7 +3,16 @@
  */
 import * as THREE from 'three';
 
-import { applyParticleBlending, PARTICLE_BLEND_MODE } from '../material';
+import { applyParticleBlending, ParticleMaterial, PARTICLE_BLEND_MODE } from '../material';
+
+jest.mock('../../../texture-loader', () => ({
+  __esModule: true,
+  default: {
+    PLACEHOLDER: new (require('three').Texture)(),
+    load: jest.fn(() => new Promise(() => {})),
+    unload: jest.fn(),
+  },
+}));
 
 describe('applyParticleBlending', () => {
   it('leaves mode 0 unblended', () => {
@@ -54,5 +63,24 @@ describe('applyParticleBlending', () => {
 
     expect(material.blending).toBe(THREE.CustomBlending);
     expect(material.blendSrc).toBe(THREE.SrcAlphaFactor);
+  });
+});
+
+describe('ParticleMaterial alphaKey uniform', () => {
+  // alphaTest does nothing on a hand-written ShaderMaterial: the actual discard happens in
+  // shader.frag, gated on this uniform. This is the value that does the real work for mode 1.
+  it('is 1.0 for mode 1 (ALPHA_KEY)', () => {
+    const material = new ParticleMaterial('TEST.BLP', PARTICLE_BLEND_MODE.ALPHA_KEY);
+    expect(material.uniforms.alphaKey.value).toBe(1.0);
+  });
+
+  it('is 0.0 for mode 0 (OPAQUE)', () => {
+    const material = new ParticleMaterial('TEST.BLP', PARTICLE_BLEND_MODE.OPAQUE);
+    expect(material.uniforms.alphaKey.value).toBe(0.0);
+  });
+
+  it('is 0.0 for mode 2 (ALPHA)', () => {
+    const material = new ParticleMaterial('TEST.BLP', PARTICLE_BLEND_MODE.ALPHA);
+    expect(material.uniforms.alphaKey.value).toBe(0.0);
   });
 });

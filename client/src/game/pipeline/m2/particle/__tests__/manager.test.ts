@@ -238,4 +238,28 @@ describe('ParticleManager', () => {
     expect(farBatch.visible).toBe(false);
     expect(farBatch.geometry.instanceCount).toBe(0);
   });
+
+  it('releases a culled emitter\'s particles rather than freezing them', () => {
+    const group = new THREE.Group();
+    const manager = new ParticleManager(group);
+
+    const instance = fakeInstance([emitterDefinition()]);
+    manager.register(instance);
+
+    const camera = testCamera();
+
+    // Emit some live particles while in range.
+    for (let i = 0; i < 30; i++) {
+      manager.animate(1 / 30, camera);
+    }
+    expect(manager.liveParticleCount).toBeGreaterThan(0);
+
+    // Walk far away: the next animate() call must observe the cull transition and release the pool.
+    instance.position.set(ParticleManager.CULL_DISTANCE * 10, 0, 0);
+    instance.updateMatrixWorld(true);
+
+    manager.animate(1 / 30, camera);
+
+    expect(manager.liveParticleCount).toBe(0);
+  });
 });

@@ -24,7 +24,14 @@ void main() {
   viewCenter.xy += spun;
 
   // position.xy spans -0.5..0.5, so +0.5 maps it to 0..1 within the atlas cell.
-  vUv = iUvRect.xy + (position.xy + 0.5) * iUvRect.zw;
+  //
+  // Every texture is loaded with flipY = false (see texture-loader.js), so image row 0 lands at v = 0
+  // -- v = 0 is the *top* of the source image. But position.y = +0.5 is up on screen, and a plain
+  // `(position.y + 0.5)` would map "up" to v = 1, the *bottom* of the image, drawing every sprite
+  // upside down (a flame's taper points the wrong way). Flipping the y term here, and only here,
+  // corrects that without touching the cell selection (iUvRect.xy/zw) or the U axis. Do not "simplify"
+  // this back to `position.xy + 0.5` -- it was tried, and it is wrong.
+  vUv = iUvRect.xy + vec2(position.x + 0.5, 0.5 - position.y) * iUvRect.zw;
   vColor = iColor;
 
   gl_Position = projectionMatrix * viewCenter;

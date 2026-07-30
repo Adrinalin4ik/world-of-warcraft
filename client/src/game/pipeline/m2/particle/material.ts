@@ -74,6 +74,9 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
 
   readonly blendingType: number;
 
+  private resolvedTexture: THREE.Texture | null = null;
+  private disposed = false;
+
   constructor(texturePath: string, blendingType: number) {
     super();
 
@@ -84,6 +87,11 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
 
     this.uniforms = {
       texture_sampler: { value: TextureLoader.PLACEHOLDER },
+      // Only mode 1 (ALPHA_KEY) turns this on. `this.alphaTest = 0.5` below is kept too -- it is
+      // harmless and keeps the material-level test meaningful -- but it does not itself discard
+      // anything on a ShaderMaterial with a hand-written fragment shader; `alphaKey` is what the
+      // shader actually reads to do the cut. See shader.frag.
+      alphaKey: { value: blendingType === PARTICLE_BLEND_MODE.ALPHA_KEY ? 1.0 : 0.0 },
     };
 
     // Both faces: a billboarded quad's winding depends on the camera, and culling it would make
@@ -94,11 +102,30 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
 
     TextureLoader.load(texturePath)
       .then((texture) => {
+        if (this.disposed) {
+          // The material was disposed before the texture arrived: release it immediately rather than
+          // pinning a reference nothing will ever use or unload.
+          TextureLoader.unload(texture);
+          return;
+        }
+
+        this.resolvedTexture = texture;
         this.uniforms.texture_sampler.value = texture;
       })
       .catch((error) => {
         console.error(`Failed to load particle texture ${texturePath}:`, error);
       });
+  }
+
+  dispose() {
+    super.dispose();
+
+    this.disposed = true;
+
+    if (this.resolvedTexture) {
+      TextureLoader.unload(this.resolvedTexture);
+      this.resolvedTexture = null;
+    }
   }
 
 }

@@ -143,6 +143,23 @@ describe('ParticleBatch', () => {
     });
   });
 
+  it('scales iScale by the world matrix scale (billboard sizes track doodad scale)', () => {
+    const identityPool = new ParticlePool(4);
+    seed(identityPool, [0, 0, 0], 5);
+    const identityBatch = new ParticleBatch(stubMaterial, 4, 1, 1);
+    identityBatch.pack(identityPool, definition, new THREE.Matrix4());
+    const identityScale = identityBatch.geometry.getAttribute('iScale');
+
+    const scaledPool = new ParticlePool(4);
+    seed(scaledPool, [0, 0, 0], 5);
+    const scaledBatch = new ParticleBatch(stubMaterial, 4, 1, 1);
+    scaledBatch.pack(scaledPool, definition, new THREE.Matrix4().makeScale(3, 3, 3));
+    const scaledScale = scaledBatch.geometry.getAttribute('iScale');
+
+    expect(scaledScale.getX(0)).toBeCloseTo(identityScale.getX(0) * 3, 4);
+    expect(scaledScale.getY(0)).toBeCloseTo(identityScale.getY(0) * 3, 4);
+  });
+
   it('bounds the update range to the live prefix', () => {
     const pool = new ParticlePool(16);
     seed(pool, [0, 0, 0], 5);

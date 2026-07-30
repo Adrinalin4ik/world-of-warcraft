@@ -11,6 +11,7 @@ import {
 const scratchColor = { r: 1, g: 1, b: 1 };
 const scratchScale = { x: 1, y: 1 };
 const scratchPosition = new THREE.Vector3();
+const scratchWorldScale = new THREE.Vector3();
 
 /**
  * One draw call's worth of particles.
@@ -85,6 +86,24 @@ export class ParticleBatch extends THREE.Mesh {
     const cellWidth = 1 / this.columns;
     const cellHeight = 1 / this.rows;
 
+    // Extracted once per pack call, not per particle: `worldMatrix` applies to the doodad's position
+    // already (via applyMatrix4 below), but the scale track values are billboard sizes in the emitter's
+    // local space and never otherwise pick up the instance's world scale. A doodad placed at scale 3
+    // must render a triple-size flame, not a triple-size torch with a normal-size flame on top of it.
+    // Particles are billboards facing the camera, so there is no meaningful way to apply x/y/z scale
+    // separately -- take the largest axis as a single uniform factor.
+    if (typeof (worldMatrix as any).extractScale === 'function') {
+      (worldMatrix as any).extractScale(scratchWorldScale);
+    } else {
+      const e = worldMatrix.elements;
+      scratchWorldScale.set(
+        Math.hypot(e[0], e[1], e[2]),
+        Math.hypot(e[4], e[5], e[6]),
+        Math.hypot(e[8], e[9], e[10]),
+      );
+    }
+    const worldScaleFactor = Math.max(scratchWorldScale.x, scratchWorldScale.y, scratchWorldScale.z);
+
     let index = 0;
 
     pool.forEachLive((slot) => {
@@ -106,8 +125,8 @@ export class ParticleBatch extends THREE.Mesh {
       this.offsets[index * 3 + 2] = scratchPosition.z;
 
       evaluateFBlockVec2(definition.scaleTrack, t, scratchScale);
-      this.scales[index * 2] = scratchScale.x;
-      this.scales[index * 2 + 1] = scratchScale.y;
+      this.scales[index * 2] = scratchScale.x * worldScaleFactor;
+      this.scales[index * 2 + 1] = scratchScale.y * worldScaleFactor;
 
       this.rotations[index] = pool.spin[slot];
 
