@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import DBC from '../../pipeline/dbc';
 import { blendLights } from './blend';
 import { LIGHT_FLOAT_BAND, LIGHT_PARAM } from './constants';
+import { sidnNightFraction } from './laws';
 import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
 import { AreaLight, WeightedAreaLight } from './types';
@@ -32,6 +33,11 @@ class MapLight extends SceneLight {
 
   // Camera reference for light calculations
   #camera: THREE.Camera | null = null;
+
+  // The world position the area-light blend was last sampled at -- the camera eye, not the player.
+  // Surfaced for the debug readout: it and the map id decide every colour below them, and neither is
+  // otherwise visible.
+  #sampledPosition: THREE.Vector3 | null = null;
 
   // Must match MAX_WMO_LIGHTS in the M2 fragment shader.
   static MAX_WMO_POINT_LIGHTS = 4;
@@ -85,6 +91,22 @@ class MapLight extends SceneLight {
 
   get time() {
     return this.#time;
+  }
+
+  get selectedLights() {
+    return this.#selectedLights;
+  }
+
+  get sampledPosition() {
+    return this.#sampledPosition;
+  }
+
+  /**
+   * The SIDN self-illumination night fraction for the current time -- 1 overnight, 0 by day. WMO
+   * window materials multiply their authored emissive colour by this (consumed from plan 2 onward).
+   */
+  get sidnNight() {
+    return sidnNightFraction(this.#time / 2);
   }
 
   get timeProgression() {
@@ -332,6 +354,8 @@ class MapLight extends SceneLight {
   }
 
   #selectLights(position: THREE.Vector3) {
+    this.#sampledPosition = position;
+
     if (!this.#lights || this.#mapId === undefined || !this.#lights[this.#mapId]) {
       return;
     }

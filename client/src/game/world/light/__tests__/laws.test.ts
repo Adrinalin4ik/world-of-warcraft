@@ -333,3 +333,33 @@ describe('selectPointLights', () => {
     expect(selectPointLights([0, 0, 0], lights, 2)).toHaveLength(2);
   });
 });
+
+describe('SceneLight fog range', () => {
+  it('recovers the fog start that blendLights packed', async () => {
+    const SceneLight = (await import('../SceneLight')).default;
+    const scene = new SceneLight();
+
+    // Pack exactly as blendLights does for a 125..500 yard fog band.
+    const start = 125;
+    const end = 500;
+    const step = 1 / (end - start);
+    scene.fogParams.set(-step, end * step, 1, 1);
+
+    expect(scene.fogEnd).toBeCloseTo(end, 4);
+    expect(scene.fogStart).toBeCloseTo(start, 4);
+  });
+
+  it('recovers a zero-start band, which a sign error would miss', async () => {
+    const SceneLight = (await import('../SceneLight')).default;
+    const scene = new SceneLight();
+
+    // Pack exactly as blendLights does for a 0..200 yard fog band.
+    const start = 0;
+    const end = 200;
+    const step = 1 / (end - start);
+    scene.fogParams.set(-step, end * step, 1, 1);
+
+    expect(scene.fogEnd).toBeCloseTo(end, 4);
+    expect(scene.fogStart).toBeCloseTo(start, 4);
+  });
+});
