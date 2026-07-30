@@ -17,6 +17,9 @@ const baseParams = {
   baseSpin: 0,
   spinSpeed: 0,
   zSource: 0,
+  originX: 0,
+  originY: 0,
+  originZ: 0,
 };
 
 // A deterministic stand-in for Math.random that cycles a fixed script.
@@ -76,6 +79,27 @@ describe('spawnParticle — plane emitter', () => {
 
     // Full polar angle with azimuth 0 lays the velocity into the XY plane.
     expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(0, 5);
+  });
+
+  it('applies originZ so the emission area sits around the offset, not the model origin', () => {
+    const pool = new ParticlePool(64);
+    const params = { ...baseParams, originZ: 5 };
+
+    for (let i = 0; i < 40; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+
+      expect(pool.position[slot * 3 + 2]).toBeCloseTo(5, 6);
+    }
+  });
+
+  it('with the origin at zero, behaviour is unchanged from today', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+
+    spawnParticle(pool, slot, baseParams, scriptedRandom([0.5]));
+
+    expect(pool.position[slot * 3 + 2]).toBeCloseTo(0, 6);
   });
 });
 

@@ -179,6 +179,40 @@ describe('RuntimeEmitter', () => {
     expect(emitterAtEnd.liveCount).toBeGreaterThan(0);
   });
 
+  it('advance() returns 0 forever when none of the emitter inputs are animated', () => {
+    const pool = new ParticlePool(16);
+    const emitter = new RuntimeEmitter(makeDefinition(), pool, () => 0.5);
+
+    expect(emitter.trackDurationMs).toBe(0);
+
+    for (let i = 0; i < 10; i++) {
+      expect(emitter.advance(0.1)).toBe(0);
+    }
+  });
+
+  it('advance() drives emissionRate through its ramp within one continuous run of step calls', () => {
+    // An emissionRate that ramps [0, 1000]ms -> [0, 100] emits nothing early (rate near 0) and
+    // emits once time has advanced toward the end of the ramp -- proving advance() actually moves
+    // time forward across repeated calls, rather than the manager's old hard-coded 0.
+    const rampTrack = { tracks: [{ animationIndex: 0, timestamps: [0, 1000], values: [0, 100] }] };
+    const pool = new ParticlePool(64);
+    const emitter = new RuntimeEmitter(makeDefinition({ emissionRate: rampTrack }), pool, () => 0.5);
+
+    expect(emitter.trackDurationMs).toBe(1000);
+
+    // Early in the ramp (a few ms in), the rate is still near zero.
+    for (let i = 0; i < 3; i++) {
+      emitter.step(0.001, emitter.advance(0.001));
+    }
+    expect(emitter.liveCount).toBe(0);
+
+    // Continue the same run out toward the end of the 1000ms ramp, where the rate is high.
+    for (let i = 0; i < 200; i++) {
+      emitter.step(0.005, emitter.advance(0.005));
+    }
+    expect(emitter.liveCount).toBeGreaterThan(0);
+  });
+
   it('falls back to DEFAULT_LIFESPAN_SECONDS when the lifespan track is empty', () => {
     const pool = new ParticlePool(16);
     const emitter = new RuntimeEmitter(makeDefinition({ lifespan: { tracks: [] } }), pool, () => 0.5);

@@ -28,6 +28,12 @@ export interface SpawnParams {
   baseSpin: number;
   spinSpeed: number;
   zSource: number;
+  // The emitter's own offset, in model space, relative to its bone (bone binding itself is a later
+  // phase -- see the module docs on RuntimeEmitter). Applied to the generator's local spawn position
+  // before anything else reads it, including zSource below.
+  originX: number;
+  originY: number;
+  originZ: number;
 }
 
 const spawnPlane = (
@@ -108,6 +114,12 @@ export const spawnParticle = (
   }
 
   const base = slot * 3;
+
+  // The emitter's own offset in model space, applied before zSource reads the position -- per
+  // wowdev, zSource's direction is computed from the particle's (already-offset) position.
+  pool.position[base] += params.originX;
+  pool.position[base + 1] += params.originY;
+  pool.position[base + 2] += params.originZ;
 
   // When zSource > 0, replace the velocity direction with the normalized direction from the source.
   if (params.zSource > 0) {

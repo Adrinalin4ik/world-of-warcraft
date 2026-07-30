@@ -32,8 +32,27 @@ export class RuntimeEmitter {
    * which spawns and instantly kills at full rate forever -- indistinguishable from a broken pool. */
   static DEFAULT_LIFESPAN_SECONDS = 1;
 
+  /**
+   * AnimationBlock inputs whose animated values matter to emission and spawning. Walked once in the
+   * constructor to find the longest timestamp among them, so `advance()` can wrap a self-driven clock
+   * to roughly the span these tracks actually animate over. Driving this from the model's real
+   * animation mixer, wrapped to the clip's actual duration, is a later phase -- this is the
+   * self-contained stand-in until then.
+   */
+  private static readonly ANIMATED_INPUT_KEYS = [
+    'emissionRate', 'emissionSpeed', 'speedVariation', 'verticalRange', 'horizontalRange',
+    'gravity', 'lifespan', 'emissionAreaWidth', 'emissionAreaLength', 'zSource', 'enabledIn',
+  ];
+
   readonly definition: any;
   readonly pool: ParticlePool;
+
+  /**
+   * The longest timestamp, in milliseconds, across every animated input's tracks. Zero when none of
+   * the emitter's inputs are animated, in which case `advance()` always returns 0 -- unchanged from
+   * this class's behaviour before animation time existed.
+   */
+  readonly trackDurationMs: number;
 
   animationIndex = 0;
   enabled = true;
@@ -43,12 +62,18 @@ export class RuntimeEmitter {
   private pending = 0;
   private spawnParams: SpawnParams;
   private animationTimeMs = 0;
+  private elapsedMs = 0;
 
   constructor(definition: any, pool: ParticlePool, random: () => number = Math.random) {
     this.definition = definition;
     this.pool = pool;
     this.random = random;
     this.capacity = pool.capacity;
+
+    // The emitter's own offset in model space, relative to its bone. Bone binding itself is a later
+    // phase (see the class doc comment); applying this offset alone is what puts a torch's flame at
+    // the head of the torch instead of its base.
+    const position = definition.position;
 
     // Reused every spawn; allocating one of these per particle would defeat the pool.
     this.spawnParams = {
@@ -63,7 +88,38 @@ export class RuntimeEmitter {
       baseSpin: 0,
       spinSpeed: 0,
       zSource: 0,
+      originX: (position && position.x) || 0,
+      originY: (position && position.y) || 0,
+      originZ: (position && position.z) || 0,
     };
+
+    this.trackDurationMs = RuntimeEmitter.computeTrackDurationMs(definition);
+  }
+
+  private static computeTrackDurationMs(definition: any): number {
+    let maxTimestamp = 0;
+
+    for (const key of RuntimeEmitter.ANIMATED_INPUT_KEYS) {
+      const block = definition[key];
+      const tracks = block && block.tracks;
+      if (!tracks) {
+        continue;
+      }
+
+      for (const track of tracks) {
+        const timestamps = track && track.timestamps;
+        if (!timestamps || timestamps.length === 0) {
+          continue;
+        }
+
+        const last = timestamps[timestamps.length - 1];
+        if (last > maxTimestamp) {
+          maxTimestamp = last;
+        }
+      }
+    }
+
+    return maxTimestamp;
   }
 
   get liveCount() {
@@ -81,6 +137,28 @@ export class RuntimeEmitter {
 
   private atStep = (block: any, fallback: number) =>
     evaluateAnimationTrackStep(block, this.animationIndex, this.animationTimeMs, fallback);
+
+  /**
+   * Produce the next animation time for `step()`'s `animationTimeMs` argument, by accumulating `dt`
+   * and wrapping to `trackDurationMs`.
+   *
+   * This is a self-driven stand-in for the real animation mixer's time, wrapped to the clip's actual
+   * duration -- that wiring is a later phase. `step()` still takes animation time as an explicit
+   * parameter so that substitution can happen later without touching it.
+   *
+   * @param dt animation-independent step, in seconds
+   * @returns the current animation time in milliseconds, wrapped modulo `trackDurationMs`, or 0 when
+   *   none of this emitter's inputs are animated.
+   */
+  advance(dt: number): number {
+    if (this.trackDurationMs <= 0) {
+      return 0;
+    }
+
+    this.elapsedMs += dt * 1000;
+
+    return this.elapsedMs % this.trackDurationMs;
+  }
 
   /**
    * @param dt animation-independent step, in seconds

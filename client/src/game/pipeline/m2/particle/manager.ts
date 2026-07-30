@@ -166,9 +166,10 @@ export class ParticleManager {
 
       entry.batch.visible = true;
 
-      // Animation time is not tracked per emitter yet, so unanimated inputs are evaluated at time zero.
-      // Driving this from the model's animation mixer, wrapped to the clip duration, is Phase 2c.
-      entry.emitter.step(delta, 0);
+      // advance() is a self-driven stand-in for the model's animation mixer, wrapped to the longest
+      // timestamp among the emitter's own animated inputs. Driving this from the mixer's real time,
+      // wrapped to the clip duration, is Phase 2c.
+      entry.emitter.step(delta, entry.emitter.advance(delta));
       entry.batch.pack(entry.emitter.pool, entry.definition, entry.instance.matrixWorld);
     }
   }
