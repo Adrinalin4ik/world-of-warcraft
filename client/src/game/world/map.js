@@ -152,7 +152,7 @@ class WorldMap extends THREE.Group {
     this.terrainManager.animate(delta, camera, cameraMoved);
     this.doodadManager.animate(delta, camera, cameraMoved);
     this.wmoManager.animate(delta, camera, cameraMoved);
-    this.particleManager.animate(delta);
+    this.particleManager.animate(delta, camera);
   }
 
   updateWorldTime(camera, mapID, time=null) {

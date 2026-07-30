@@ -46,6 +46,10 @@ const fakeInstance = (emitters: any[]) => {
   return instance;
 };
 
+// A camera sitting at the world origin, alongside every fakeInstance created above -- well within
+// ParticleManager.CULL_DISTANCE unless a test deliberately moves the instance or camera apart.
+const testCamera = () => new THREE.PerspectiveCamera();
+
 describe('ParticleManager', () => {
   it('registers one emitter per definition and reports the count', () => {
     const manager = new ParticleManager(new THREE.Group());
@@ -90,8 +94,9 @@ describe('ParticleManager', () => {
 
     expect(manager.liveParticleCount).toBe(0);
 
+    const camera = testCamera();
     for (let i = 0; i < 30; i++) {
-      manager.animate(1 / 30);
+      manager.animate(1 / 30, camera);
     }
 
     expect(manager.liveParticleCount).toBeGreaterThan(0);
@@ -102,8 +107,9 @@ describe('ParticleManager', () => {
     // 10 per second for 2 seconds needs about 20 slots, nowhere near the per-emitter ceiling.
     manager.register(fakeInstance([emitterDefinition()]));
 
+    const camera = testCamera();
     for (let i = 0; i < 200; i++) {
-      manager.animate(1 / 30);
+      manager.animate(1 / 30, camera);
     }
 
     expect(manager.liveParticleCount).toBeLessThanOrEqual(ParticleManager.MAX_PARTICLES_PER_EMITTER);
@@ -117,8 +123,9 @@ describe('ParticleManager', () => {
       lifespan: constantTrack(100),
     })]));
 
+    const camera = testCamera();
     for (let i = 0; i < 60; i++) {
-      manager.animate(1 / 60);
+      manager.animate(1 / 60, camera);
     }
 
     expect(manager.liveParticleCount).toBeLessThanOrEqual(ParticleManager.MAX_PARTICLES_PER_EMITTER);
@@ -130,12 +137,28 @@ describe('ParticleManager', () => {
     expect(() => manager.unregister(fakeInstance([emitterDefinition()]))).not.toThrow();
   });
 
-  it('survives an emitter whose textureId is out of range', () => {
-    const manager = new ParticleManager(new THREE.Group());
+  it('skips an emitter whose textureId is out of range, registering nothing', () => {
+    const group = new THREE.Group();
+    const manager = new ParticleManager(group);
     const instance = fakeInstance([emitterDefinition({ textureId: 99 })]);
 
-    expect(manager.register(instance)).toBe(1);
-    expect(() => manager.animate(1 / 60)).not.toThrow();
+    expect(manager.register(instance)).toBe(0);
+    expect(manager.emitterCount).toBe(0);
+    expect(group.children.length).toBe(0);
+    expect(() => manager.animate(1 / 60, testCamera())).not.toThrow();
+  });
+
+  it('registers zero emitters when every emitter has an unresolvable texture', () => {
+    const group = new THREE.Group();
+    const manager = new ParticleManager(group);
+    const instance = fakeInstance([
+      emitterDefinition({ textureId: 99 }),
+      emitterDefinition({ textureId: -1 }),
+    ]);
+
+    expect(manager.register(instance)).toBe(0);
+    expect(manager.emitterCount).toBe(0);
+    expect(group.children.length).toBe(0);
   });
 
   it('rolls back a partially-constructed registration when a later definition throws', () => {
@@ -182,10 +205,37 @@ describe('ParticleManager', () => {
     expect(manager.emitterCount).toBe(2);
     expect(group.children.length).toBe(2);
 
+    const camera = testCamera();
     for (let i = 0; i < 30; i++) {
-      manager.animate(1 / 30);
+      manager.animate(1 / 30, camera);
     }
 
     expect(manager.liveParticleCount).toBeGreaterThan(0);
+  });
+
+  it('culls an emitter beyond CULL_DISTANCE: it stays at zero live particles and its batch is hidden', () => {
+    const group = new THREE.Group();
+    const manager = new ParticleManager(group);
+
+    const near = fakeInstance([emitterDefinition()]);
+    const far = fakeInstance([emitterDefinition()]);
+    far.position.set(ParticleManager.CULL_DISTANCE * 10, 0, 0);
+    far.updateMatrixWorld(true);
+
+    manager.register(near);
+    manager.register(far);
+
+    const camera = testCamera();
+    for (let i = 0; i < 30; i++) {
+      manager.animate(1 / 30, camera);
+    }
+
+    const nearBatch = group.children[0] as any;
+    const farBatch = group.children[1] as any;
+
+    expect(manager.liveParticleCount).toBeGreaterThan(0);
+    expect(nearBatch.visible).toBe(true);
+    expect(farBatch.visible).toBe(false);
+    expect(farBatch.geometry.instanceCount).toBe(0);
   });
 });

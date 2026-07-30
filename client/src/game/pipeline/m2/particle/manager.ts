@@ -13,6 +13,9 @@ interface LiveEmitter {
   instance: any;
 }
 
+// Reused across animate() calls to avoid an allocation per emitter per frame.
+const scratchWorldPosition = new THREE.Vector3();
+
 /**
  * Owns every live particle emitter and its batch.
  *
@@ -28,6 +31,14 @@ export class ParticleManager {
    * lifespan; this only bounds a pathological definition, which does exist in game data.
    */
   static MAX_PARTICLES_PER_EMITTER = 512;
+
+  /**
+   * World units beyond which an emitter is culled: not stepped, not packed, and drawn with zero
+   * instances. Roughly the distance at which a particle a metre across stops being legible. A
+   * proximity-ranked global budget with distance-based culling is Phase 2c; this is a cheap interim
+   * cutoff to keep every emitter in the loaded world from simulating and drawing every frame.
+   */
+  static CULL_DISTANCE = 120;
 
   private group: THREE.Object3D;
   private emitters: LiveEmitter[] = [];
@@ -71,10 +82,19 @@ export class ParticleManager {
 
     try {
       for (const definition of definitions) {
-        const capacity = ParticleManager.capacityFor(definition);
-
         const texture = (instance.textures || [])[definition.textureId];
         const texturePath = texture && texture.filename ? texture.filename : '';
+
+        if (!texturePath) {
+          // An emitter with no resolvable texture can never draw, so building a batch for it is
+          // pure cost -- it would only ever load the empty placeholder path.
+          const path = instance && instance.path ? instance.path : instance;
+          // eslint-disable-next-line no-console
+          console.warn('ParticleManager: skipping emitter with unresolvable textureId', definition.textureId, 'for', path);
+          continue;
+        }
+
+        const capacity = ParticleManager.capacityFor(definition);
 
         const material = new ParticleMaterial(texturePath, definition.blendingType);
         const batch = new ParticleBatch(material, capacity, definition.rows, definition.columns);
@@ -125,11 +145,26 @@ export class ParticleManager {
     });
   }
 
-  animate(delta: number) {
+  animate(delta: number, camera: THREE.Camera) {
+    const cullDistanceSquared = ParticleManager.CULL_DISTANCE * ParticleManager.CULL_DISTANCE;
+
     for (const entry of this.emitters) {
       // The instance's own matrix places its particles in the world. Emitters bound to a specific bone
       // are Phase 2c; for now every emitter sits at the model's origin.
       entry.instance.updateMatrixWorld(false);
+
+      scratchWorldPosition.setFromMatrixPosition(entry.instance.matrixWorld);
+      const distanceSquared = camera.position.distanceToSquared(scratchWorldPosition);
+
+      if (distanceSquared > cullDistanceSquared) {
+        // Beyond the cull distance: don't step or pack, and draw nothing. Comparing squared
+        // distances avoids a per-emitter, per-frame Math.sqrt.
+        (entry.batch.geometry as THREE.InstancedBufferGeometry).instanceCount = 0;
+        entry.batch.visible = false;
+        continue;
+      }
+
+      entry.batch.visible = true;
 
       // Animation time is not tracked per emitter yet, so unanimated inputs are evaluated at time zero.
       // Driving this from the model's animation mixer, wrapped to the clip duration, is Phase 2c.
