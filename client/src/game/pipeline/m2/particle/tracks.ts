@@ -109,8 +109,9 @@ export const evaluateFBlockVec2 = (
 };
 
 /**
- * Texture cell index. Snapped rather than interpolated: a blended cell index would sample a
- * meaningless sub-rect halfway between two frames of the flipbook.
+ * Texture cell index. Floored rather than interpolated: a blended cell index would sample a
+ * meaningless sub-rect between two frames of the flipbook, and real clients hold the lower
+ * bracketing frame for the whole interval rather than switching early at the midpoint.
  */
 export const evaluateFBlockCell = (block: Block<number> | undefined, t: number): number => {
   const keys = block && block.keys;
@@ -118,9 +119,9 @@ export const evaluateFBlockCell = (block: Block<number> | undefined, t: number):
     return 0;
   }
 
-  const { a, b, mix } = bracket(keys, t);
+  const { a } = bracket(keys, t);
 
-  return mix < 0.5 ? keys[a].value : keys[b].value;
+  return keys[a].value;
 };
 
 /**
@@ -166,4 +167,52 @@ export const evaluateAnimationTrack = (
   const span = timestamps[b] - timestamps[a];
 
   return lerp(values[a], values[b], span > 0 ? (timeMs - timestamps[a]) / span : 0);
+};
+
+/**
+ * Evaluate an AnimationBlock at a time in milliseconds, without interpolation.
+ *
+ * Some AnimationBlocks are flags rather than continuous quantities -- `enabledIn` is an
+ * `AnimationBlock(uint8)` holding only 0 or 1 -- and lerping between an ON key and an OFF key
+ * would yield 0.5, a value the flag was never meant to take. This holds the lower bracketing
+ * key's value for the whole interval instead, matching how a boolean gate actually behaves.
+ *
+ * Bracketing and clamping are identical to `evaluateAnimationTrack`; only the interpolation step
+ * differs.
+ */
+export const evaluateAnimationTrackStep = (
+  block: { tracks?: Array<{ animationIndex: number; timestamps: number[]; values: number[] }> } | undefined,
+  animationIndex: number,
+  timeMs: number,
+  fallback: number,
+): number => {
+  const tracks = block && block.tracks;
+  if (!tracks || tracks.length === 0) {
+    return fallback;
+  }
+
+  const track = tracks.find((candidate) => candidate.animationIndex === animationIndex) || tracks[0];
+
+  const { timestamps, values } = track;
+  if (!timestamps || !values || values.length === 0) {
+    return fallback;
+  }
+
+  if (values.length === 1 || timeMs <= timestamps[0]) {
+    return values[0];
+  }
+
+  const last = values.length - 1;
+  if (timeMs >= timestamps[last]) {
+    return values[last];
+  }
+
+  let b = 1;
+  while (b < last && timestamps[b] < timeMs) {
+    b++;
+  }
+
+  const a = b - 1;
+
+  return values[a];
 };

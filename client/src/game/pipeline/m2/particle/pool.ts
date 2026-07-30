@@ -78,8 +78,12 @@ export class ParticlePool {
   }
 
   reset() {
+    // Only `live` and the free list are cleared. Per-particle attributes (position, velocity,
+    // age, lifespan, spin, spinSpeed, ...) are deliberately left holding whatever the previous
+    // occupant wrote: `spawnParticle` fully overwrites every one of them on allocation, so a
+    // freshly allocated slot never reads stale data. Zeroing 20 000 particles' worth of arrays on
+    // every reset would be wasted work for state nothing ever reads before it is overwritten.
     this.live.fill(0);
-    this.age.fill(0);
     this.freeCount = this.capacity;
 
     for (let index = 0; index < this.capacity; index++) {

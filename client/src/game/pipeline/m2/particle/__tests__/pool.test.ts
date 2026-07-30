@@ -72,7 +72,11 @@ describe('ParticlePool', () => {
     expect(pool.allocate()).toBe(-1);
   });
 
-  it('clears live state and zeroes age on reset', () => {
+  it('clears live state on reset and hands out a usable slot afterwards', () => {
+    // Per the documented contract, reset() only clears live state and the free list -- it does not
+    // zero per-particle attribute arrays, because spawnParticle overwrites every one of them on
+    // allocation. So the contract to test is: live count goes to zero, and a fresh allocate after
+    // reset returns a usable slot (not -1), regardless of what stale data that slot still holds.
     const pool = new ParticlePool(2);
     const slot = pool.allocate();
     pool.age[slot] = 5;
@@ -80,6 +84,9 @@ describe('ParticlePool', () => {
     pool.reset();
 
     expect(pool.liveCount).toBe(0);
-    expect(pool.age[slot]).toBe(0);
+
+    const reallocated = pool.allocate();
+    expect(reallocated).toBeGreaterThanOrEqual(0);
+    expect(pool.liveCount).toBe(1);
   });
 });

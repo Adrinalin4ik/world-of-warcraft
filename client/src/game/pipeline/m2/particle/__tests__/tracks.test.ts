@@ -3,6 +3,7 @@
  */
 import {
   evaluateAnimationTrack,
+  evaluateAnimationTrackStep,
   evaluateFBlockAlpha,
   evaluateFBlockCell,
   evaluateFBlockColor,
@@ -90,11 +91,20 @@ describe('evaluateFBlockAlpha', () => {
 });
 
 describe('evaluateFBlockCell', () => {
-  it('snaps to the nearest key rather than interpolating', () => {
+  it('floors to the lower bracketing key rather than interpolating or rounding', () => {
     const block = { keys: [{ time: 0, value: 0 }, { time: 1, value: 8 }] };
 
     expect(evaluateFBlockCell(block, 0.1)).toBe(0);
-    expect(evaluateFBlockCell(block, 0.9)).toBe(8);
+    // Real clients hold the lower key for the whole interval and only advance at the next key's
+    // own timestamp, so t=0.9 (still short of t=1) must still read the lower key (0), not the
+    // upper one -- rounding to nearest would advance the frame half an interval early.
+    expect(evaluateFBlockCell(block, 0.9)).toBe(0);
+  });
+
+  it('reaches the upper key only at its own timestamp', () => {
+    const block = { keys: [{ time: 0, value: 0 }, { time: 1, value: 8 }] };
+
+    expect(evaluateFBlockCell(block, 1)).toBe(8);
   });
 
   it('is cell zero for an empty block', () => {
@@ -129,5 +139,36 @@ describe('evaluateAnimationTrack', () => {
   it('returns the fallback when the track holds nothing', () => {
     expect(evaluateAnimationTrack({ tracks: [] }, 0, 0, -1)).toBe(-1);
     expect(evaluateAnimationTrack(undefined, 0, 0, -1)).toBe(-1);
+  });
+});
+
+describe('evaluateAnimationTrackStep', () => {
+  const track = {
+    tracks: [
+      { animationIndex: 0, timestamps: [0, 1000], values: [1, 0] },
+      { animationIndex: 1, timestamps: [0], values: [9] },
+    ],
+  };
+
+  it('holds the lower key across the whole interval instead of interpolating', () => {
+    // A flag-style track (e.g. enabledIn) must never read a blended value like 0.5 between an ON
+    // key and an OFF key.
+    expect(evaluateAnimationTrackStep(track, 0, 1, -1)).toBe(1);
+    expect(evaluateAnimationTrackStep(track, 0, 500, -1)).toBe(1);
+    expect(evaluateAnimationTrackStep(track, 0, 999, -1)).toBe(1);
+  });
+
+  it('clamps past the last timestamp', () => {
+    expect(evaluateAnimationTrackStep(track, 0, 1000, -1)).toBe(0);
+    expect(evaluateAnimationTrackStep(track, 0, 99999, -1)).toBe(0);
+  });
+
+  it('handles a single-key track', () => {
+    expect(evaluateAnimationTrackStep(track, 1, 500, -1)).toBe(9);
+  });
+
+  it('returns the fallback when the block holds nothing', () => {
+    expect(evaluateAnimationTrackStep({ tracks: [] }, 0, 0, -1)).toBe(-1);
+    expect(evaluateAnimationTrackStep(undefined, 0, 0, -1)).toBe(-1);
   });
 });
