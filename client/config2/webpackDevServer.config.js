@@ -87,12 +87,8 @@ module.exports = function(proxy, allowedHost) {
       disableDotRule: true,
     },
     public: allowedHost,
-    proxy: {
-      '/pipeline/*': {
-        target: 'http://localhost:3000',
-        secure: false
-      }
-    },
+    // Assets are fetched directly from REACT_APP_DATA_URI, so there is no local pipeline to proxy.
+    proxy: proxy,
     before(app, server) {
       if (fs.existsSync(paths.proxySetup)) {
         // This registers user provided middleware for proxy reasons

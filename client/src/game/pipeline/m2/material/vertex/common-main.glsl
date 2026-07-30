@@ -39,6 +39,7 @@ vec3 transformed = vec3(position);
 // Vertex color
 vertexColor = vec4(animatedVertexColorRGB.rgb * 0.5, animatedVertexColorAlpha);
 
-// Camera distance
-vec3 worldVertexPosition = (modelMatrix * vec4(position, 1.0)).xyz;
+// Camera distance. worldVertexPosition is a varying rather than a local so the fragment stage can
+// use it to attenuate WMO point lights.
+worldVertexPosition = (modelMatrix * vec4(position, 1.0)).xyz;
 cameraDistance = distance(cameraPosition, worldVertexPosition);

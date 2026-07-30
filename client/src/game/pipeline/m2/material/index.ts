@@ -107,6 +107,13 @@ class M2Material extends THREE.ShaderMaterial {
         ]
       },
 
+      // WMO point lights (MOLT) affecting this model, in world space. Assigned by the WMO that owns
+      // the doodad; models outside a WMO keep a count of zero and skip the loop entirely.
+      wmoLightCount: { value: 0 },
+      wmoLightPosition: { value: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()] },
+      wmoLightColor: { value: [new THREE.Color(), new THREE.Color(), new THREE.Color(), new THREE.Color()] },
+      wmoLightAtten: { value: [new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2()] },
+
       // Managed by light manager
       sunParams: { value: new THREE.Vector4() },
       sunDiffuseColor: { value: new THREE.Color() },
@@ -114,6 +121,12 @@ class M2Material extends THREE.ShaderMaterial {
 
       fogParams: { value: new THREE.Vector4() },
       fogColor: { value: new THREE.Color() },
+
+      // Cleared by render flag 0x02 (unfogged). Declared here so fogged materials -- the majority --
+      // have it set: applyRenderFlags only ever assigned it for the unfogged case, and a uniform the
+      // shader declares but nobody supplies reads as zero, which would have unfogged everything.
+      fogModifier: { value: 1.0 },
+
       materialParams: { value: [1,1,1,1] }
     };
 
@@ -148,9 +161,11 @@ class M2Material extends THREE.ShaderMaterial {
       this.uniforms.lightModifier = { value: '0.0' };
     }
 
-    // Flag 0x02 (unfogged)
+    // Flag 0x02 (unfogged). Numeric, not the string '0.0' this used to assign -- and the shader now
+    // actually reads it. Torch flames and glow billboards carry this flag, and ignoring it is what let
+    // fog tint them.
     if (renderFlags & 0x02) {
-      this.uniforms.fogModifier = { value: '0.0' };
+      this.uniforms.fogModifier.value = 0.0;
     }
 
     // Flag 0x04 (no backface culling)
@@ -280,8 +295,25 @@ class M2Material extends THREE.ShaderMaterial {
 
     const textures = [];
 
-    textureDefs.forEach((textureDef) => {
-      textures.push(this.loadTexture(textureDef));
+    textureDefs.forEach((textureDef, index) => {
+      const path = this.resolveTexturePath(textureDef);
+
+      if (!path) {
+        textures[index] = null;
+        return;
+      }
+
+      // Claim the slot so `textureCount` and the uniform array keep their shape; the entry is
+      // replaced in place once the texture has been fetched and decoded.
+      textures[index] = TextureLoader.PLACEHOLDER;
+
+      TextureLoader.load(path, THREE.RepeatWrapping, THREE.RepeatWrapping)
+        .then((texture) => {
+          textures[index] = texture;
+        })
+        .catch((error) => {
+          console.error(`Failed to load M2 texture ${path}:`, error);
+        });
     });
 
     this.textures = textures;
@@ -291,11 +323,7 @@ class M2Material extends THREE.ShaderMaterial {
     this.uniforms.textureCount = { value: textures.length };
   }
 
-  loadTexture(textureDef) {
-    const wrapS = THREE.RepeatWrapping;
-    const wrapT = THREE.RepeatWrapping;
-    const flipY = false;
-
+  resolveTexturePath(textureDef) {
     let path = null;
 
     switch (textureDef.type) {
@@ -326,11 +354,7 @@ class M2Material extends THREE.ShaderMaterial {
         break;
     }
 
-    if (path) {
-      return TextureLoader.load(path, wrapS, wrapT, flipY);
-    } else {
-      return null;
-    }
+    return path;
   }
 
   registerAnimations(def) {
@@ -431,6 +455,35 @@ class M2Material extends THREE.ShaderMaterial {
   }
 
   /**
+   * Assign the WMO point lights that reach this model.
+   *
+   * Expects world-space positions, already narrowed to the closest few by the caller: the shader
+   * keeps a fixed-size array, so anything beyond MAX_WMO_LIGHTS is dropped.
+   */
+  setWmoLights(lights): void {
+    const positions = this.uniforms.wmoLightPosition.value;
+    const colors = this.uniforms.wmoLightColor.value;
+    const attenuations = this.uniforms.wmoLightAtten.value;
+
+    const count = Math.min(lights ? lights.length : 0, positions.length);
+
+    for (let index = 0; index < count; ++index) {
+      const light = lights[index];
+
+      positions[index].set(light.position.x, light.position.y, light.position.z);
+      // Intensity folded into the colour so the shader does not need a fourth array.
+      colors[index].setRGB(
+        light.color.r * light.intensity,
+        light.color.g * light.intensity,
+        light.color.b * light.intensity
+      );
+      attenuations[index].set(light.attenStart, light.attenEnd);
+    }
+
+    this.uniforms.wmoLightCount.value = count;
+  }
+
+  /**
    * Set the map light system
    */
   setMapLight(mapLight: MapLight): void {
@@ -446,7 +499,9 @@ class M2Material extends THREE.ShaderMaterial {
       const uniforms = this.mapLight.uniforms;
       this.uniforms.fogParams.value.copy(uniforms.fogParams.value);
       this.uniforms.fogColor.value.copy(uniforms.fogColor.value);
-      this.uniforms.sunParams.value.copy(uniforms.sunDir.value);
+      // World-space sun direction: this shader lights against worldVertexNormal. `uniforms.sunDir`
+      // carries the view-space variant, which rotates with the camera.
+      this.uniforms.sunParams.value.copy(this.mapLight.sunDir);
       this.uniforms.sunDiffuseColor.value.copy(uniforms.sunDiffuseColor.value);
       this.uniforms.sunAmbientColor.value.copy(uniforms.sunAmbientColor.value);
     }

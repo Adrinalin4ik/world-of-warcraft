@@ -100,12 +100,9 @@ module.exports = function (proxy, allowedHost) {
       index: paths.publicUrlOrPath,
     },
     // `proxy` is run between `before` and `after` `webpack-dev-server` hooks
+    // Assets are fetched directly from REACT_APP_DATA_URI, so there is no local pipeline to proxy.
     proxy: {
       ...proxy,
-      '/pipeline/*': {
-        target: 'http://localhost:3000',
-        secure: false
-      }
     },
     onBeforeSetupMiddleware(devServer) {
       // Keep `evalSourceMapMiddleware`

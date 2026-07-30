@@ -22,12 +22,15 @@ uniform vec3 diffuseLight;
 // uniform vec3 fogColor;
 
 uniform vec4 sunParams;
-uniform vec4 sunDiffuseColor;
-uniform vec4 sunAmbientColor;
+// vec3, not vec4: these are fed THREE.Color values, which have no .w component. Declaring them vec4
+// makes three.js take its array upload path for a non-array object, the upload fails, and the
+// uniforms stay at zero -- leaving the specular term as the only light on the terrain.
+uniform vec3 sunDiffuseColor;
+uniform vec3 sunAmbientColor;
 uniform vec4 materialParams;
 
 uniform vec4 fogParams;
-uniform vec4 fogColor;
+uniform vec3 fogColor;
 
 // vec3 saturate(vec3 value) {
 //   vec3 result = clamp(value, 0.0, 1.0);
@@ -39,10 +42,18 @@ uniform vec4 fogColor;
 //   return result;
 // }
 
-vec3 createLight(in vec3 normal, in vec3 direction, in vec3 diffuseColor, in vec3 ambientColor) {
-  float factor = saturate(dot(-direction.xyz, normalize(normal.xyz)));
+// Defined further down; declared here so createLight can use it.
+vec3 getDirectedDiffuseLight(vec3 lightDirection, vec3 lightNormal, vec3 diffuseLight);
 
-  vec3 light = saturate((diffuseColor.rgb * factor) + ambientColor.rgb);
+vec3 createLight(in vec3 normal, in vec3 direction, in vec3 diffuseColor, in vec3 ambientColor) {
+  // Routed through getDirectedDiffuseLight rather than a raw saturated dot product. That function
+  // carries the knee the client applies to directional light -- response above 0.5 is compressed by
+  // 0.65, topping out at 0.825 instead of 1.0 -- and it was written here but never called. With a
+  // raw dot product a fully sun-facing slope takes about 21% more sun than it should, which against a
+  // saturated sunset diffuse made lit and unlit ground look like two different times of day.
+  vec3 directedDiffuseLight = getDirectedDiffuseLight(direction, normalize(normal), diffuseColor);
+
+  vec3 light = saturate(directedDiffuseLight + ambientColor.rgb);
 
   return light;
 }
@@ -120,13 +131,12 @@ void main() {
   #if USE_LIGHTING == 1
     // Use dynamic sun direction from WorldLight system
     vec3 light = createLight(vertexNormal.xyz, sunParams.xyz, sunDiffuseColor.rgb, sunAmbientColor.rgb);
-    
-    // Add specular highlights for sun glints
-    vec3 specularColor = vec3(0.4, 0.35, 0.3); // Moderate warm white for realistic glints
-    float shininess = 16.0; // Realistic shininess for terrain surfaces
-    vec3 specular = createSpecularLight(vertexNormal.xyz, sunParams.xyz, viewDirection, specularColor, shininess);
-    
-    light += specular;
+
+    // No specular term here on purpose. `light` multiplies the terrain texture, and specular is an
+    // additive highlight, so folding it in scaled the base color by a view-dependent warm value.
+    // That fought the fixed blue-ish ambient and made the ground swing between blue and brown as the
+    // camera merely turned. Terrain is diffuse anyway; if glints are wanted back, add them after the
+    // layers are blended rather than into this multiplier.
     light = mix(light, vec3(1.0, 1.0, 1.0), 1.0 - materialParams.y);
   #else
     vec3 light = vec3(1.0, 1.0, 1.0);

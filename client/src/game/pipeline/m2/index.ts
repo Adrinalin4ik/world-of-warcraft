@@ -413,12 +413,6 @@ class M2 extends THREE.Group {
       );
     }
 
-    // Mirror geometry over X and Y axes and rotate
-    const matrix = new THREE.Matrix4();
-    matrix.makeScale(-1, -1, 1);
-    geometry.applyMatrix4(matrix);
-    geometry.rotateX(-Math.PI / 2);
-    
     const uvs = [];
 
     const { startTriangle: start, triangleCount: count } = submeshDef;
@@ -441,9 +435,20 @@ class M2 extends THREE.Group {
 
         uvs[faceIndex].push(new THREE.Vector2(textureCoords[0][0], textureCoords[0][1]));
 
-        face.vertexNormals.push(new THREE.Vector3(normal[0], normal[1], normal[2]));
+        // Same (X, Z, -Y) swizzle the positions get above. Pushed raw, the normals stayed in the
+        // model's own axes while the positions moved into engine axes, so lighting arrived from the
+        // wrong direction -- canopies were lit from underneath.
+        face.vertexNormals.push(new THREE.Vector3(normal[0], normal[2], -normal[1]));
       }
     }
+
+    // Mirror geometry over X and Y axes and rotate.
+    // Deliberately after the faces exist: applyMatrix4 transforms face normals as well as vertices,
+    // and running it before the normals were pushed left them untransformed.
+    const matrix = new THREE.Matrix4();
+    matrix.makeScale(-1, -1, 1);
+    geometry.applyMatrix4(matrix);
+    geometry.rotateX(-Math.PI / 2);
 
     geometry.faceVertexUvs = [uvs];
 

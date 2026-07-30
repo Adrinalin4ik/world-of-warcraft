@@ -1,4 +1,5 @@
 import ADT from '../adt/loader';
+import BLP from '../blp/loader';
 import DBC from '../dbc/loader';
 import M2 from '../m2/loader';
 import WDT from '../wdt/loader';
@@ -10,6 +11,7 @@ const worker = self;
 
 const loaders = {
   ADT,
+  BLP,
   DBC,
   M2,
   WDT,

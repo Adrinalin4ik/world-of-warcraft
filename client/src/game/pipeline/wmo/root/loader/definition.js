@@ -19,7 +19,50 @@ class WMORootDefinition {
     this.summarizeGroups(data);
 
     this.createPortals(data);
+    this.createLights(data);
     this.createBoundingBox(data.MOHD);
+  }
+
+  /**
+   * MOLT point lights, converted once into the shape the renderer wants.
+   *
+   * Kept in WMO local space -- the handler transforms them to world space when the root view exists,
+   * since only then is the placement known. Types other than omni are skipped: spot and directional
+   * lights need cone/orientation handling the shaders do not have, and ambient lights are already
+   * covered by the group's baked vertex colours.
+   */
+  createLights(data) {
+    const lights = this.lights = [];
+
+    if (!data.MOLT || !data.MOLT.lights) {
+      return;
+    }
+
+    for (const light of data.MOLT.lights) {
+      // Omni only (type 0).
+      if (light.type !== 0) {
+        continue;
+      }
+
+      // CImVector is {b, g, r, a} in memory, so as a little-endian uint32 red lands at >> 16.
+      // Same unpacking MapLight uses for the light band colours.
+      const r = (light.color >> 16) & 0xff;
+      const g = (light.color >> 8) & 0xff;
+      const b = light.color & 0xff;
+
+      // A zero attenuation end would light the entire model uniformly, so treat it as disabled.
+      if (!(light.attenEnd > 0)) {
+        continue;
+      }
+
+      lights.push({
+        position: { x: light.position.x, y: light.position.y, z: light.position.z },
+        color: { r: r / 255, g: g / 255, b: b / 255 },
+        intensity: light.intensity,
+        attenStart: light.attenStart,
+        attenEnd: light.attenEnd
+      });
+    }
   }
 
   createBoundingBox(mohd) {

@@ -87,15 +87,30 @@ const getTableKeys = (table: any[], key: number) => {
  * @param color
  */
 export const interpolateColorTable = (table: any[], key: number, color: THREE.Color): void => {
+  // Bands are optional. A light that defines no record for one leaves an empty table, and a table
+  // with a single stop has nothing to interpolate between. Both cases used to walk off the end and
+  // hand undefined to lerpColors, which threw while reading `.r`.
+  if (!table || table.length < 2) {
+    return;
+  }
+
   const { previous, previousKey, next, nextKey } = getTableKeys(table, key);
 
   const previousValue = table[previous * 2 + 1];
   const nextValue = table[next * 2 + 1];
 
+  if (!previousValue || !nextValue) {
+    return;
+  }
+
   const keyDistance = nextKey - previousKey;
 
   if (Math.abs(keyDistance) < 0.001) {
-    return previousValue;
+    // Coincident stops, so there is nothing to blend. Written into the destination rather than
+    // returned: this function reports its result through `color`, and returning the value left the
+    // caller looking at whatever the colour held from the previous light.
+    color.copy(previousValue);
+    return;
   }
 
   const factor = (key - previousKey) / keyDistance;
@@ -112,10 +127,20 @@ export const interpolateColorTable = (table: any[], key: number, color: THREE.Co
  * @param key
  */
 export const interpolateNumericTable = (table: any[], key: number): number => {
+  // Same optional-band guard as the colour version above. Silently produced NaN before, which then
+  // spread through fog parameters.
+  if (!table || table.length < 2) {
+    return 0;
+  }
+
   const { previous, previousKey, next, nextKey } = getTableKeys(table, key);
 
   const previousValue = table[previous * 2 + 1];
   const nextValue = table[next * 2 + 1];
+
+  if (previousValue === undefined || nextValue === undefined) {
+    return 0;
+  }
 
   const keyDistance = nextKey - previousKey;
 

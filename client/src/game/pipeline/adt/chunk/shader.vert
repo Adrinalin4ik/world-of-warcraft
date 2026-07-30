@@ -10,7 +10,10 @@ varying vec3 vertexWorldPosition;
 varying float cameraDistance;
 
 void main() {
-  vUv = uv;
+  // Terrain textures are BLPs uploaded as compressed DXT, and three.js cannot flip a compressed
+  // texture on upload the way it flipped the PNGs this pipeline used to fetch. Flip V here instead.
+  // vUvAlpha is deliberately untouched: the alpha maps are DataTextures built from MCAL, not BLPs.
+  vUv = vec2(uv.x, 1.0 - uv.y);
   vUvAlpha = uvAlpha;
 
   // Calculate world position for specular lighting

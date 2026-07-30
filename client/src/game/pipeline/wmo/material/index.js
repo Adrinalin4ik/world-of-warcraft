@@ -26,9 +26,13 @@ class WMOMaterial extends THREE.ShaderMaterial {
       materialParams: { value: [1,1,1,1] }
     };
 
-    // Enable lighting
-    this.defines.USE_LIGHTING = 0;
-    this.defines.USE_VERTEX_COLOR = 0;
+    // Enable lighting.
+    // Both were pinned to 0, which made the vertex shader take its unlit branch (light = 1.0) and
+    // substitute a flat 0.5 grey for the vertex color, so WMOs ignored the map light entirely -- no
+    // sun, no time of day, no baked interior shading. Every WMO geometry supplies both `normal` and
+    // `acolor`, so there is data behind both paths.
+    this.defines.USE_LIGHTING = 1;
+    this.defines.USE_VERTEX_COLOR = 1;
     
     // Define interior
     if (this.interior) {
@@ -200,8 +204,18 @@ class WMOMaterial extends THREE.ShaderMaterial {
     const textures = [];
     textureDefs.forEach((textureDef) => {
       if (textureDef !== null) {
-        const texture = TextureLoader.load(textureDef.path, this.wrapping, this.wrapping, false);
-        textures.push(texture);
+        // Slots are claimed in order and filled in place, so TEXTURE_COUNT and the uniform array
+        // are correct immediately even though each texture is still being fetched and decoded.
+        const index = textures.length;
+        textures.push(TextureLoader.PLACEHOLDER);
+
+        TextureLoader.load(textureDef.path, this.wrapping, this.wrapping)
+          .then((texture) => {
+            textures[index] = texture;
+          })
+          .catch((error) => {
+            console.error(`Failed to load WMO texture ${textureDef.path}:`, error);
+          });
       }
     });
 
@@ -263,10 +277,15 @@ class WMOMaterial extends THREE.ShaderMaterial {
    */
   updateLightUniforms() {
     if (this.mapLight) {
-      const uniforms = this.mapLight.getUniforms();
+      // Matches AdtMaterial: MapLight exposes `uniforms`, not a getUniforms() method, and it carries
+      // the sun direction as `sunDir` rather than `sunParams`. This previously read the older shape,
+      // which threw as soon as a WMO material was actually handed a MapLight.
+      const uniforms = this.mapLight.uniforms;
       this.uniforms.fogParams.value.copy(uniforms.fogParams.value);
       this.uniforms.fogColor.value.copy(uniforms.fogColor.value);
-      this.uniforms.sunParams.value.copy(uniforms.sunParams.value);
+      // World-space sun direction: `uniforms.sunDir` carries the view-space variant, which rotates
+      // with the camera and would make lighting depend on where you are looking.
+      this.uniforms.sunParams.value.copy(this.mapLight.sunDir);
       this.uniforms.sunDiffuseColor.value.copy(uniforms.sunDiffuseColor.value);
       this.uniforms.sunAmbientColor.value.copy(uniforms.sunAmbientColor.value);
     }

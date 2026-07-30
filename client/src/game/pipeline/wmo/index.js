@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+
 import ContentQueue from '../../utils/content-queue';
 import M2Blueprint from '../m2/blueprint';
 import WMOGroupLoader from './group/loader';

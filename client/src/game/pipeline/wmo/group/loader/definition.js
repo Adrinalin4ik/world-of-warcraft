@@ -324,30 +324,35 @@ class WMOGroupDefinition {
   
   
   determineLiquidType(rootHeader, mogp, mliq) {
-    const useLiquidTypeDbcId = rootHeader.flags & 0x80000000; // flag_use_liquid_type_dbc_id
+    // MOHD flag_use_liquid_type_dbc_id is 0x4. This used to test bit 31, which is never set, so every
+    // WMO took the legacy path below regardless of what its root header said.
+    const useLiquidTypeDbcId = rootHeader.flags & 0x4;
     const groupLiquid = mogp.groupLiquid;
-    
+
     if (useLiquidTypeDbcId) {
-      // Newer WMOs use DBC liquid types
+      // Newer WMOs name a LiquidType.dbc row directly.
       if (groupLiquid < 21) { // LIQUID_FIRST_NONBASIC_LIQUID_TYPE
         return this.toWmoLiquid(groupLiquid - 1, mogp);
       } else {
         return groupLiquid;
       }
-    } else {
-      // Older WMOs use legacy liquid types
-      if (groupLiquid === 15) { // LIQUID_Green_Lava
-        // Use tile-based liquid type determination
-        return this.determineLegacyLiquidType(mliq);
-      } else {
-        const liquidType = groupLiquid + 1;
-        if (groupLiquid < 20) { // LIQUID_END_BASIC_LIQUIDS
-          return this.toWmoLiquid(groupLiquid, mogp);
-        } else {
-          return liquidType;
-        }
-      }
     }
+
+    // Older WMOs carry their liquid type per MLIQ tile rather than on the group -- SMOLTile's
+    // legacyLiquidType field exists precisely for this. Blackrock is the clear case: its groups all
+    // report groupLiquid 0, which reads as plain water, while the tiles say 6 and the room is lava.
+    const legacyFromTiles = this.determineLegacyLiquidType(mliq);
+
+    if (legacyFromTiles !== null) {
+      return legacyFromTiles;
+    }
+
+    // No tile data to go on, so fall back to the group's own value.
+    if (groupLiquid < 20) { // LIQUID_END_BASIC_LIQUIDS
+      return this.toWmoLiquid(groupLiquid, mogp);
+    }
+
+    return groupLiquid + 1;
   }
   
   toWmoLiquid(basicType, mogp) {
@@ -368,10 +373,49 @@ class WMOGroupDefinition {
     }
   }
   
+  /**
+   * Liquid type of a legacy WMO, read from its MLIQ tiles.
+   *
+   * The low nibble of each tile is a legacy liquid type, and the LiquidType.dbc ids run one ahead of
+   * it: the first twelve rows are (water, ocean, magma, slime) repeated for normal, slow and fast
+   * flow, so legacy 6 is row 7, "Slow Magma". 0x0F marks a tile with no liquid and is ignored.
+   *
+   * The dominant type wins, since a single surface is one liquid even where stray tiles disagree.
+   *
+   * Returns null when there is nothing to go on, leaving the caller to fall back to the group value.
+   */
   determineLegacyLiquidType(mliq) {
-    // For green lava, determine type based on tile flags
-    // This is a simplified implementation - in practice, you'd analyze the tile data
-    return 13; // Default to WMO Water for now
+    if (!mliq || !mliq.tiles || mliq.tiles.length === 0) {
+      return null;
+    }
+
+    const counts = new Map();
+
+    for (const tile of mliq.tiles) {
+      const legacyType = tile.flags & 0x0F;
+
+      if (legacyType === 0x0F) {
+        continue;
+      }
+
+      counts.set(legacyType, (counts.get(legacyType) || 0) + 1);
+    }
+
+    if (counts.size === 0) {
+      return null;
+    }
+
+    let dominant = null;
+    let dominantCount = -1;
+
+    for (const [legacyType, count] of counts) {
+      if (count > dominantCount) {
+        dominant = legacyType;
+        dominantCount = count;
+      }
+    }
+
+    return dominant + 1;
   }
   
   createFillData(mliq) {
@@ -379,14 +423,13 @@ class WMOGroupDefinition {
     
     for (let i = 0; i < mliq.tiles.length; i++) {
       const tile = mliq.tiles[i];
-      const legacyLiquidType = tile.flags & 0x0F; // First 4 bits
-      
-      if (legacyLiquidType <= 20) {
-        // Determine if tile should be filled based on liquid type
-        fill[i] = legacyLiquidType > 0 ? 0xFF : 0x00;
-      } else {
-        fill[i] = 0xFF; // Fill for non-basic liquid types
-      }
+
+      // 0x0F is the "no liquid here" sentinel; every other value is a real liquid type, including 0.
+      // Same inversion that was in WMOLiquidLayer.isFilled -- testing `> 0` filled the empty tiles
+      // and emptied the filled ones.
+      const legacyLiquidType = tile.flags & 0x0F;
+
+      fill[i] = legacyLiquidType === 0x0F ? 0x00 : 0xFF;
     }
     
     return fill;

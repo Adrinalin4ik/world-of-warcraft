@@ -12,6 +12,7 @@ uniform mat4 animatedUVs[4];
 varying vec2 coordinates[2];
 varying vec4 vertexColor;
 varying vec3 worldVertexNormal;
+varying vec3 worldVertexPosition;
 varying float cameraDistance;
 
 #ifdef USE_SKINNING

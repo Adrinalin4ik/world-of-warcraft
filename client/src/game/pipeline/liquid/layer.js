@@ -19,6 +19,7 @@ class LiquidLayer extends THREE.Mesh {
     this.position.x = -(offsetY * unitSize);
 
     const positions = new Float32Array(vertexCount * 3);
+    const normals = new Float32Array(vertexCount * 3);
     const uvs = new Float32Array(vertexCount * 2);
     const colors = new Float32Array(vertexCount * 3);
     const alphas = new Float32Array(vertexCount);
@@ -31,7 +32,13 @@ class LiquidLayer extends THREE.Mesh {
       positions[index * 3] = -(y * unitSize);
       positions[index * 3 + 1] = -(x * unitSize);
       positions[index * 3 + 2] = height;
-      
+
+      // Faces up. Mirroring over X and Y leaves +Z as up, so this is unaffected by it. The shader
+      // normalizes this varying, and without the attribute that was normalize(vec3(0)) -- NaN through
+      // the diffuse dot product and the specular half vector alike.
+      normals[index * 3 + 2] = 1.0;
+
+
 
       // Scale UV coordinates to make texture patterns larger and less dense
       uvs[index * 2] = x;
@@ -71,6 +78,7 @@ class LiquidLayer extends THREE.Mesh {
     const geometry = this.geometry = new THREE.BufferGeometry();
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geometry.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));

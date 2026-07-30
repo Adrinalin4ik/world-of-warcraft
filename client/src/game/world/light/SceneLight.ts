@@ -59,6 +59,24 @@ class SceneLight {
     return this.#params[this.#location].fogColor;
   }
 
+  get riverCloseColor() {
+    return this.#params[this.#location].riverCloseColor;
+  }
+
+  get oceanCloseColor() {
+    return this.#params[this.#location].oceanCloseColor;
+  }
+
+  /**
+   * Params for a specific location, regardless of which one is currently active.
+   *
+   * The public getters above all resolve through `location`, so they can only ever read or write
+   * whichever side is selected. Subclasses that compute both sides need to address them directly.
+   */
+  protected paramsFor(location: LightLocation) {
+    return this.#params[location];
+  }
+
   update(camera: THREE.Camera) {
     const viewMatrix = camera.matrixWorldInverse;
 

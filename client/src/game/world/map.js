@@ -226,6 +226,41 @@ class WorldMap extends THREE.Group {
   /**
    * Update all materials in the scene with current light data
    */
+  /**
+   * Give a material the map light the first time we see it, then refresh its light uniforms.
+   *
+   * Adopting unseen materials here is what keeps streamed terrain lit. `setupLightSystem` only runs
+   * once, from the constructor, so it reaches nothing: ADT chunks are built lazily as tiles load in.
+   * A material that was never handed the light keeps `mapLight` null, which makes its
+   * `updateLightUniforms` a no-op, and it stays on its constructor defaults forever - fully bright,
+   * unfogged and with no time of day.
+   */
+  applyLightToMaterial(material) {
+    if (!material) {
+      return false;
+    }
+
+    let applied = false;
+
+    if (!material.mapLight && material.setMapLight) {
+      // setMapLight refreshes the uniforms itself.
+      material.setMapLight(this.mapLight);
+      applied = true;
+    } else if (material.updateLightUniforms) {
+      material.updateLightUniforms();
+      applied = true;
+    }
+
+    // The WMO point light selection is camera-relative and therefore shared by every material, which
+    // is what makes it workable at all: M2 materials are reused across instances of a model.
+    if (material.setWmoLights) {
+      material.setWmoLights(this.mapLight.wmoPointLights);
+      applied = true;
+    }
+
+    return applied;
+  }
+
   updateAllMaterialsWithLight() {
     if (!this.mapLight) return;
 
@@ -235,21 +270,14 @@ class WorldMap extends THREE.Group {
     // Update ADT materials
     this.traverse((child) => {
       if (child.material) {
-        if (Array.isArray(child.material)) {
-          child.material.forEach(material => {
-            materialCount++;
-            if (material.updateLightUniforms) {
-              material.updateLightUniforms();
-              updatedCount++;
-            }
-          });
-        } else {
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+
+        materials.forEach((material) => {
           materialCount++;
-          if (child.material.updateLightUniforms) {
-            child.material.updateLightUniforms();
+          if (this.applyLightToMaterial(material)) {
             updatedCount++;
           }
-        }
+        });
       }
     });
 

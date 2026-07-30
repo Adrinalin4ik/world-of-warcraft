@@ -96,12 +96,20 @@ class AdtMaterial extends THREE.ShaderMaterial {
   loadTextures() {
     const textures = [];
 
-    this.layers.forEach((layer) => {
+    this.layers.forEach((layer, index) => {
       const filename = this.textureNames[layer.textureID];
-      const texture = TextureLoader.load(filename);
-      texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
 
-      textures.push(texture);
+      // Claim the slot up front. The array is handed to the `textures` uniform by reference, so the
+      // layer appears as soon as its texture is swapped in; until then it samples as transparent.
+      textures[index] = TextureLoader.PLACEHOLDER;
+
+      TextureLoader.load(filename, THREE.RepeatWrapping, THREE.RepeatWrapping)
+        .then((texture) => {
+          textures[index] = texture;
+        })
+        .catch((error) => {
+          console.error(`Failed to load ADT texture ${filename}:`, error);
+        });
     });
 
     this.textures = textures;
@@ -123,7 +131,11 @@ class AdtMaterial extends THREE.ShaderMaterial {
       const uniforms = this.mapLight.uniforms;
       this.uniforms.fogParams.value.copy(uniforms.fogParams.value);
       this.uniforms.fogColor.value.copy(uniforms.fogColor.value);
-      this.uniforms.sunParams.value.copy(uniforms.sunDir.value);
+      // mapLight.sunDir, not uniforms.sunDir: the latter exposes SceneLightParams' sunDirView, which
+      // is re-derived from the camera's view matrix every frame. This shader dots the sun against a
+      // world-space normal, so feeding it the view-space vector made the sun swing around with the
+      // camera and the terrain change colour on rotation alone.
+      this.uniforms.sunParams.value.copy(this.mapLight.sunDir);
       this.uniforms.sunDiffuseColor.value.copy(uniforms.sunDiffuseColor.value);
       this.uniforms.sunAmbientColor.value.copy(uniforms.sunAmbientColor.value);
     }

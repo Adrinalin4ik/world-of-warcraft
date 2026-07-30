@@ -43,6 +43,10 @@ class WMORoot {
     this.createPortals(def.portals, def.portalNormals, def.portalConstants, def.portalVertices);
 
     this.portalRefs = def.portalRefs;
+
+    // MOLT point lights, still in WMO local space. The WMO handler converts them to world space when
+    // it hands them to a doodad, since only then is the placement known.
+    this.lights = def.lights || [];
   }
 
   createView() {

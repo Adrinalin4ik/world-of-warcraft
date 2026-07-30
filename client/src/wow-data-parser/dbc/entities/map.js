@@ -8,6 +8,7 @@ export default Entity({
   id: r.uint32le,
   internalName: StringRef,
   type: r.uint32le,
+  flags: r.uint32le,
   pvp: new r.Boolean(r.uint32le),
   name: LocalizedStringRef,
   areaID: r.uint32le,

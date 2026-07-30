@@ -29,4 +29,9 @@ export type LightUniforms = {
   sunAmbientColor: { value: THREE.Color };
   fogParams: { value: THREE.Vector4 };
   fogColor: { value: THREE.Color };
+  // Water tints. LiquidType.dbc carries a Color pair but leaves it zeroed for most types in 3.3.5a,
+  // so the client colours water from these light bands instead, which is also what makes it track
+  // time of day.
+  riverCloseColor: { value: THREE.Color };
+  oceanCloseColor: { value: THREE.Color };
 };

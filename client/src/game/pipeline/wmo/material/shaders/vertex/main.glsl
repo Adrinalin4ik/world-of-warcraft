@@ -49,8 +49,14 @@ void main() {
   #endif
 
   #if BATCH_TYPE == 2
-    // Transition between vertex color and light added to vertex color
-    colors[0].rgb = saturate(mix(vertexColor.rgb, (light.rgb * 0.5) + vertexColor.rgb, vertexColor.a));
+    // Transition between vertex color and light, same shape as batch A above.
+    //
+    // This used to add vertexColor on top of the light instead of being replaced by it. Where MOCV
+    // alpha is 0 -- genuine interior geometry -- both forms collapse to vertexColor, so nothing
+    // changes indoors. Where alpha rises, meaning the surface is meant to be lit from outside, the
+    // additive form floored the result at the baked colour and left buildings looking midday-bright
+    // at midnight no matter what the map light said.
+    colors[0].rgb = saturate(mix(vertexColor.rgb, light.rgb * 0.5, vertexColor.a) + emissiveColor.rgb);
     colors[0].a = vertexColor.a;
   #endif
 

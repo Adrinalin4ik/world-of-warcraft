@@ -10,6 +10,9 @@ class SceneLightParams {
   #fogParams = new THREE.Vector4(1.0 / 577.0, 577.0, 1.0, 1.0);
   #fogColor = new THREE.Color(0.25, 0.5, 0.8);
 
+  #riverCloseColor = new THREE.Color(0.25, 0.5, 0.8);
+  #oceanCloseColor = new THREE.Color(0.25, 0.5, 0.8);
+
   #uniforms: LightUniforms = {
     sunDir: {
       value: this.#sunDirView,
@@ -25,6 +28,12 @@ class SceneLightParams {
     },
     fogColor: {
       value: this.#fogColor,
+    },
+    riverCloseColor: {
+      value: this.#riverCloseColor,
+    },
+    oceanCloseColor: {
+      value: this.#oceanCloseColor,
     },
   };
 
@@ -50,6 +59,14 @@ class SceneLightParams {
 
   get fogColor() {
     return this.#fogColor;
+  }
+
+  get riverCloseColor() {
+    return this.#riverCloseColor;
+  }
+
+  get oceanCloseColor() {
+    return this.#oceanCloseColor;
   }
 
   get uniforms() {

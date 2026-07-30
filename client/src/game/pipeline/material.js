@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-const loader = new THREE.TextureLoader();
+import TextureLoader from './texture-loader';
 
 class Material extends THREE.MeshBasicMaterial {
 
@@ -10,14 +10,15 @@ class Material extends THREE.MeshBasicMaterial {
   }
 
   set texture(path) {
-    loader.load(encodeURI(`pipeline/${path}.png`), (texture) => {
-      texture.flipY = false;
-      texture.wrapS = THREE.RepeatWrapping;
-      texture.wrapT = THREE.RepeatWrapping;
-      this.wireframe = false;
-      this.map = texture;
-      this.needsUpdate = true;
-    });
+    TextureLoader.load(path, THREE.RepeatWrapping, THREE.RepeatWrapping)
+      .then((texture) => {
+        this.wireframe = false;
+        this.map = texture;
+        this.needsUpdate = true;
+      })
+      .catch((error) => {
+        console.error(`Failed to load material texture ${path}:`, error);
+      });
   }
 
 }

@@ -190,6 +190,12 @@ class Unit extends Entity {
             max.z - min.z
           );
           this.model.visible = true;
+
+          // Assigning displayInfo above kicks off texture loads, which are deliberately
+          // fire-and-forget: each one fills its slot in the material's texture array when it
+          // resolves and handles its own errors. Bluebird cannot tell that apart from a forgotten
+          // return and warns about it, so say explicitly that nothing is being chained.
+          return null;
         });
       });
     }).catch(console.error);
