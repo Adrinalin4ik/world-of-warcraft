@@ -119,6 +119,13 @@ class Unit extends Entity {
     this.collider.geometry = new THREE.BoxGeometry(1, 1, 1);
     this.collider.name = "Collider";
 
+    // The collider is a physics volume, not something to look at. It was being drawn as an opaque
+    // white box standing over the character in every frame -- the "white cube" that appeared in every
+    // screenshot of this client. Its geometry and matrix are still used for the capsule shapecast in
+    // checkCollisions(), which reads matrixWorld and boundsTree directly and does not care whether the
+    // mesh is rendered. Set `visible = true` here if you need to see the collision volume.
+    this.collider.visible = false;
+
     // this.arrow.setDirection(this.groundDistanceRaycaster.ray.direction);
     this.arrow.setDirection(new THREE.Vector3(1, 0, 0));
 
