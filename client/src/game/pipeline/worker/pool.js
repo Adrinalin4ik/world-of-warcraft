@@ -12,7 +12,10 @@ class WorkerPool {
   }
 
   get defaultConcurrency() {
-    return navigator.hardwareConcurrency || 4;
+    // `navigator` is undefined under a plain Node test environment (e.g. Jest's
+    // `@jest-environment node`), which previously made importing anything upstream of
+    // TextureLoader throw before a single test could run.
+    return (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
   }
 
   get thread() {
