@@ -11,6 +11,12 @@ interface LiveEmitter {
   batch: ParticleBatch;
   definition: any;
   instance: any;
+  // The bone this emitter hangs off, per M2Particle.boneId, or null when the model has no such bone.
+  // Its transform is what orients the emitter; see `basis` on SpawnParams.
+  bone: THREE.Bone | null;
+  // Scratch for this entry's bone-in-model-space matrix. Per entry rather than shared, because
+  // RuntimeEmitter holds a reference to the elements array across frames.
+  basis: THREE.Matrix4 | null;
   // Tracks whether this entry was culled as of the previous animate() call, so the pool is only reset
   // on the transition into culled (see I5) rather than every frame it stays culled.
   culled: boolean;
@@ -18,6 +24,7 @@ interface LiveEmitter {
 
 // Reused across animate() calls to avoid an allocation per emitter per frame.
 const scratchWorldPosition = new THREE.Vector3();
+const scratchInverse = new THREE.Matrix4();
 
 /**
  * Owns every live particle emitter and its batch.
@@ -103,7 +110,19 @@ export class ParticleManager {
         const batch = new ParticleBatch(material, capacity, definition.rows, definition.columns);
         const pool = new ParticlePool(capacity);
 
-        built.push({ emitter: new RuntimeEmitter(definition, pool), batch, definition, instance, culled: false });
+        // M2Particle.boneId names the bone whose transform orients this emitter. A model may have no
+        // bones at all, or name one out of range in malformed data, so an unresolved bone falls back
+        // to null -- meaning "emit along model space", the pre-bone-binding behaviour.
+        const bones = instance.bones;
+        const bone = (bones && bones[definition.boneId]) || null;
+
+        built.push({
+          emitter: new RuntimeEmitter(definition, pool),
+          batch, definition, instance,
+          bone,
+          basis: bone ? new THREE.Matrix4() : null,
+          culled: false,
+        });
       }
     } catch (error) {
       for (const entry of built) {
@@ -186,9 +205,19 @@ export class ParticleManager {
       entry.culled = false;
       entry.batch.visible = true;
 
-      // The instance's own matrix places its particles in the world. Emitters bound to a specific bone
-      // are Phase 2c; for now every emitter sits at the model's origin.
+      // The instance's own matrix places its particles in the world; the emitter's bone orients them
+      // within the model. This also refreshes the bone subtree, which the basis below reads.
       entry.instance.updateMatrixWorld(false);
+
+      // Bone-in-model-space = inverse(model world) * bone world. `pack()` then applies the model's
+      // world matrix to every particle, so composing the two puts a spawn exactly where its bone is
+      // while keeping the pool in model space. Recomputed each frame so an animated bone drags its
+      // emitter along; for a static doodad like a portal it simply resolves to the same matrix.
+      if (entry.bone && entry.basis) {
+        scratchInverse.copy(entry.instance.matrixWorld).invert();
+        entry.basis.multiplyMatrices(scratchInverse, entry.bone.matrixWorld);
+        entry.emitter.setBasis(entry.basis.elements);
+      }
 
       // advance() is a self-driven stand-in for the model's animation mixer, wrapped to the longest
       // timestamp among the emitter's own animated inputs. Driving this from the mixer's real time,

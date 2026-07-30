@@ -96,6 +96,16 @@ export class RuntimeEmitter {
     this.trackDurationMs = RuntimeEmitter.computeTrackDurationMs(definition);
   }
 
+  /**
+   * Set the emitter bone's model-space transform, used to orient each spawn. Call before `step()`;
+   * the manager refreshes it every frame so an animated bone carries its emitter with it.
+   *
+   * Pass null to emit along model space's axes, which is what this did before bone binding existed.
+   */
+  setBasis(elements: ArrayLike<number> | null) {
+    this.spawnParams.basis = elements;
+  }
+
   private static computeTrackDurationMs(definition: any): number {
     let maxTimestamp = 0;
 

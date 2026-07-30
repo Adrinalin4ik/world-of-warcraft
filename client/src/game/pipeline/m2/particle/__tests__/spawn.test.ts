@@ -128,6 +128,154 @@ describe('spawnParticle — sphere emitter', () => {
       expect(radius).toBeLessThanOrEqual(10 + 1e-4);
     }
   });
+
+  // The radius assertion above is invariant to azimuth, so it passed just as happily while the sweep
+  // covered only half the circle: spawnSphere used `horizontalRange * random()`, giving [0, +h], where
+  // spawnPlane used the centred `horizontalRange * (random() - 0.5) * 2`, giving [-h, +h]. A one-sided
+  // azimuth makes sin(azimuth) non-negative for every particle, so the whole emission collapses into
+  // the +Y half-space -- which is exactly how the dungeon portal rendered: half a ring.
+  it('sweeps azimuth symmetrically, reaching both halves of the circle', () => {
+    const pool = new ParticlePool(512);
+    const params = {
+      ...baseParams,
+      emitterType: EMITTER_TYPE.SPHERE,
+      areaWidth: 10,
+      areaLength: 10,
+      verticalRange: Math.PI / 2,
+      horizontalRange: Math.PI,
+    };
+
+    let negativeY = 0;
+    let positiveY = 0;
+
+    for (let i = 0; i < 200; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+
+      const y = pool.position[slot * 3 + 1];
+      if (y < -1e-3) { negativeY++; }
+      if (y > 1e-3) { positiveY++; }
+    }
+
+    expect(positiveY).toBeGreaterThan(0);
+    expect(negativeY).toBeGreaterThan(0);
+  });
+});
+
+// The values here are read off WORLD\GENERIC\PASSIVEDOODADS\INSTANCEPORTAL\INSTANCEPORTAL.M2 as it
+// is loaded in game -- the dungeon-entrance portal, four sphere emitters, all identical. A fixed
+// radius with lat = pi and long = 0 describes a *ring*, and in the official client it reads as a thin
+// vertical column of light because you see that ring edge-on.
+describe('spawnParticle — sphere emitter, dungeon portal parameters', () => {
+  const portalParams = {
+    ...baseParams,
+    emitterType: EMITTER_TYPE.SPHERE,
+    areaWidth: 4.17,
+    areaLength: 4.17,
+    verticalRange: Math.PI,
+    horizontalRange: 0,
+    speed: 1,
+  };
+
+  it('closes the ring instead of drawing half of it', () => {
+    const pool = new ParticlePool(512);
+    let above = 0;
+    let below = 0;
+
+    for (let i = 0; i < 200; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, portalParams, Math.random);
+
+      const y = pool.position[slot * 3 + 1];
+      if (y > 1e-3) { above++; }
+      if (y < -1e-3) { below++; }
+    }
+
+    // polar swept [0, lat] rather than [-lat, +lat], so the ring only ever covered one side.
+    expect(above).toBeGreaterThan(0);
+    expect(below).toBeGreaterThan(0);
+  });
+
+  it('lays the ring in the YZ plane, not XZ', () => {
+    const pool = new ParticlePool(512);
+
+    for (let i = 0; i < 120; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, portalParams, Math.random);
+
+      // With longitude zero the ring is unrotated, so it must lie flat against x = 0. It used to come
+      // out as x = sin(polar), z = cos(polar) -- the same ring turned 90 degrees, which is why the
+      // portal faced the camera instead of standing edge-on in the doorway.
+      expect(Math.abs(pool.position[slot * 3])).toBeLessThan(1e-6);
+
+      const y = pool.position[slot * 3 + 1];
+      const z = pool.position[slot * 3 + 2];
+      expect(Math.sqrt(y * y + z * z)).toBeCloseTo(4.17, 4);
+    }
+  });
+});
+
+// An M2Particle names the bone it hangs off (`boneId`), and that bone's transform is what orients
+// the emitter. Only the emitter's translation was ever applied, so every emitter fired along model
+// space's axes with an identity orientation. On a radially symmetric plume that is invisible; on a
+// ring emitter -- a dungeon portal -- the ring lands in the wrong plane, face-on instead of edge-on.
+describe('spawnParticle — bone basis', () => {
+  // Column-major, as THREE.Matrix4#elements is: a +90 deg rotation about X, translated by (5, 0, 0).
+  // Under it (0, 0, 1) maps to (0, -1, 0).
+  const rotateXTranslate = [
+    1, 0, 0, 0,
+    0, 0, 1, 0,
+    0, -1, 0, 0,
+    5, 0, 0, 1,
+  ];
+
+  const pointParams = {
+    ...baseParams,
+    emitterType: -1, // no generator -- falls through to the deterministic point spawn
+    speed: 1,
+    originX: 0,
+    originY: 0,
+    originZ: 1,
+  };
+
+  it('rotates the spawn position without applying the bone translation', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+
+    spawnParticle(pool, slot, { ...pointParams, basis: rotateXTranslate }, scriptedRandom([0.5]));
+
+    // (0, 0, 1) rotated about X is (0, -1, 0). If the basis translation were applied on top, x would
+    // be 5 -- and on a real model that is a double-count, because the emitter's own `position` already
+    // places it in model space. INSTANCEPORTAL.M2 has position and pivot both [0, 0, 2.74]; applying
+    // both put its ring's centre at 5.48 rather than 2.74.
+    expect(pool.position[slot * 3]).toBeCloseTo(0, 5);
+    expect(pool.position[slot * 3 + 1]).toBeCloseTo(-1, 5);
+    expect(pool.position[slot * 3 + 2]).toBeCloseTo(0, 5);
+  });
+
+  it('rotates velocity without translating it', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+
+    spawnParticle(pool, slot, { ...pointParams, basis: rotateXTranslate }, scriptedRandom([0.5]));
+
+    // The point generator emits along +Z at unit speed; rotated about X that is -Y. If the basis
+    // translation leaked into the velocity, x would be 5 rather than 0.
+    expect(pool.velocity[slot * 3]).toBeCloseTo(0, 5);
+    expect(pool.velocity[slot * 3 + 1]).toBeCloseTo(-1, 5);
+    expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(0, 5);
+  });
+
+  it('leaves spawns untouched when no basis is supplied', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+
+    spawnParticle(pool, slot, pointParams, scriptedRandom([0.5]));
+
+    expect(pool.position[slot * 3]).toBeCloseTo(0, 5);
+    expect(pool.position[slot * 3 + 2]).toBeCloseTo(1, 5);
+    expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(1, 5);
+  });
 });
 
 describe('spawnParticle — common state', () => {
