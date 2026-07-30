@@ -1,6 +1,7 @@
 import React from 'react';
 import * as THREE from 'three';
 import { GameHandler } from '../../../network/game/handler';
+import LightingControls from './lighting-controls';
 import './debug.scss';
 
 interface IProp {
@@ -179,6 +180,7 @@ class DebugPanel extends React.Component<IProp> {
         </p>
         <h2>Player</h2>
         { this.playerStats() }
+        <LightingControls mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
         {/* <h2>Memory</h2>
         <div className="divider"></div>
         <p>
