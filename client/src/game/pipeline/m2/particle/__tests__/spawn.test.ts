@@ -4,6 +4,7 @@
 import { EMITTER_TYPE } from '../../../../../wow-data-parser/m2/particle/emitter';
 import { ParticlePool } from '../pool';
 import { spawnParticle } from '../spawn';
+import { ParticleSpline } from '../spline';
 
 const baseParams = {
   emitterType: EMITTER_TYPE.PLANE,
@@ -385,6 +386,115 @@ describe('spawnParticle — reference kernel conformance', () => {
       expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(1, 5);
       expect(Math.abs(pool.velocity[slot * 3])).toBeLessThan(1e-6);
       expect(Math.abs(pool.velocity[slot * 3 + 1])).toBeLessThan(1e-6);
+    }
+  });
+});
+
+describe('spawnParticle — spline emitter', () => {
+  // A single straight segment running 0 -> 3 along +X, control points at exact thirds.
+  const straightSpline = () => ParticleSpline.create([
+    { x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }, { x: 3, y: 0, z: 0 },
+  ]);
+
+  const splineParams = () => ({
+    ...baseParams,
+    emitterType: EMITTER_TYPE.SPLINE,
+    spline: straightSpline(),
+    // For a spline emitter these are repurposed as the arc-fraction bounds, not an area.
+    areaLength: 0,
+    areaWidth: 1,
+    verticalRange: 0,
+    horizontalRange: 0,
+    speed: 1,
+    speedVariation: 0,
+  });
+
+  it('births particles along the curve rather than at a single point', () => {
+    const pool = new ParticlePool(512);
+    const params = splineParams();
+
+    let minAlong = Infinity;
+    let maxAlong = -Infinity;
+
+    for (let i = 0; i < 200; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+
+      // The chain runs along +X, and the universal rot90 turns that onto +Y.
+      expect(Math.abs(pool.position[slot * 3])).toBeLessThan(1e-6);
+      expect(Math.abs(pool.position[slot * 3 + 2])).toBeLessThan(1e-6);
+
+      const along = pool.position[slot * 3 + 1];
+      minAlong = Math.min(minAlong, along);
+      maxAlong = Math.max(maxAlong, along);
+    }
+
+    // Spread over the whole chain -- the point-spawn fallback this replaces put every particle at 0.
+    expect(minAlong).toBeLessThan(0.5);
+    expect(maxAlong).toBeGreaterThan(2.5);
+    expect(maxAlong).toBeLessThanOrEqual(3 + 1e-6);
+  });
+
+  it('honours the arc-fraction bounds carried in the area fields', () => {
+    const pool = new ParticlePool(512);
+    const params = { ...splineParams(), areaLength: 0.5, areaWidth: 1 };
+
+    for (let i = 0; i < 200; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+
+      // t restricted to [0.5, 1] means the back half of a 3-unit chain.
+      expect(pool.position[slot * 3 + 1]).toBeGreaterThanOrEqual(1.5 - 1e-4);
+    }
+  });
+
+  it('leaves the particle at rest when no spin is authored', () => {
+    const pool = new ParticlePool(8);
+    const slot = pool.allocate();
+
+    spawnParticle(pool, slot, splineParams(), scriptedRandom([0.5]));
+
+    // It sits on the curve and only gravity and drag move it.
+    expect(pool.velocity[slot * 3]).toBeCloseTo(0, 6);
+    expect(pool.velocity[slot * 3 + 1]).toBeCloseTo(0, 6);
+    expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(0, 6);
+  });
+
+  it('spins velocity about the curve tangent when verticalRange is authored', () => {
+    const pool = new ParticlePool(512);
+    const params = { ...splineParams(), verticalRange: Math.PI / 2 };
+
+    let sawTilt = false;
+    for (let i = 0; i < 200; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+
+      const vx = pool.velocity[slot * 3];
+      const vy = pool.velocity[slot * 3 + 1];
+      const vz = pool.velocity[slot * 3 + 2];
+
+      // Unit direction scaled by speed 1, so the magnitude stays 1 whatever the spin angle.
+      expect(Math.sqrt(vx * vx + vy * vy + vz * vz)).toBeCloseTo(1, 4);
+      if (Math.abs(vz) < 0.9) { sawTilt = true; }
+    }
+
+    expect(sawTilt).toBe(true);
+  });
+
+  it('falls back to the plane kernel when the chain is missing', () => {
+    const pool = new ParticlePool(64);
+    // A type-3 emitter with no parsed chain is ordinary in game data; the reference degrades to the
+    // plane kernel rather than dropping the emitter.
+    const params = {
+      ...splineParams(), spline: null, areaLength: 6, areaWidth: 4,
+    };
+
+    for (let i = 0; i < 40; i++) {
+      const slot = pool.allocate();
+      spawnParticle(pool, slot, params, Math.random);
+
+      expect(Math.abs(pool.position[slot * 3])).toBeLessThanOrEqual(4 / 2 + 1e-6);
+      expect(Math.abs(pool.position[slot * 3 + 1])).toBeLessThanOrEqual(6 / 2 + 1e-6);
     }
   });
 });

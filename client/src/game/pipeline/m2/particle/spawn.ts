@@ -1,5 +1,6 @@
 import { EMITTER_TYPE } from '../../../../wow-data-parser/m2/particle/emitter';
 import { ParticlePool } from './pool';
+import { ParticleSpline } from './spline';
 
 /**
  * M2Particle flag 0x4000: a sphere emitter throws its particles straight up (+Z) instead of radially
@@ -26,6 +27,11 @@ export interface SpawnParams {
   emitterType: number;
   /** M2Particle.flags. Only SPHERE_EMIT_UP is read here. */
   flags: number;
+  /**
+   * The parsed spline chain for an emitterType 3 emitter, or null. Built once when the emitter is
+   * constructed -- the arc-length knots cost a 16-chord walk per segment and never change.
+   */
+  spline?: ParticleSpline | null;
   areaWidth: number;
   areaLength: number;
   verticalRange: number;
@@ -127,6 +133,86 @@ const spawnSphere = (
   pool.velocity[base + 2] = dirZ;
 };
 
+/**
+ * Born ON the authored Bezier chain at a uniform arc fraction. For a spline emitter the generic
+ * emission-area fields are repurposed as that fraction's bounds: areaLength is tMin and areaWidth is
+ * tMax, both clamped to [0, 1].
+ *
+ * Velocity is +Z spun about the local curve tangent by an angle drawn from verticalRange -- a
+ * Rodrigues rotation, so a flat chain throws straight up and a tilted one throws along its own lean.
+ * horizontalRange is then a scatter distance *along* that direction, not an angle. With no vertical
+ * range the particle has no velocity at all and simply sits on the curve while gravity and drag act
+ * on it, which is how the standing fire-column effects are authored.
+ */
+const spawnSpline = (
+  pool: ParticlePool, slot: number, params: SpawnParams, random: () => number,
+) => {
+  const base = slot * 3;
+  const spline = params.spline!;
+
+  const tMin = Math.min(Math.max(params.areaLength, 0), 1);
+  const tMax = Math.min(Math.max(params.areaWidth, 0), 1);
+  const t = tMin + random() * (tMax - tMin);
+
+  const point = spline.eval(t);
+  pool.position[base] = point.x;
+  pool.position[base + 1] = point.y;
+  pool.position[base + 2] = point.z;
+
+  if (params.zSource > 0) {
+    // The shared tail replaces this with the radial-from-pivot direction, and no scatter applies.
+    pool.velocity[base] = 0;
+    pool.velocity[base + 1] = 0;
+    pool.velocity[base + 2] = 1;
+    return;
+  }
+
+  if (params.verticalRange === 0) {
+    // No spin authored: the particle is born at rest on the curve.
+    pool.velocity[base] = 0;
+    pool.velocity[base + 1] = 0;
+    pool.velocity[base + 2] = 0;
+    return;
+  }
+
+  const tangent = spline.tangent(t);
+  const length = Math.sqrt(
+    tangent.x * tangent.x + tangent.y * tangent.y + tangent.z * tangent.z,
+  );
+
+  let axisX = 0;
+  let axisY = 0;
+  let axisZ = 1;
+  if (length > 1e-6) {
+    axisX = tangent.x / length;
+    axisY = tangent.y / length;
+    axisZ = tangent.z / length;
+  }
+
+  // Rodrigues rotation of +Z about the tangent by psi. With v = +Z this reduces to
+  // Z*cos + (axis X Z)*sin + axis*(axis.z)*(1 - cos), and axis X Z is (axis.y, -axis.x, 0).
+  const psi = params.verticalRange * (random() - 0.5) * 2;
+  const sinPsi = Math.sin(psi);
+  const cosPsi = Math.cos(psi);
+  const oneMinusCos = axisZ * (1 - cosPsi);
+
+  const dirX = axisY * sinPsi + axisX * oneMinusCos;
+  const dirY = -axisX * sinPsi + axisY * oneMinusCos;
+  const dirZ = cosPsi + axisZ * oneMinusCos;
+
+  pool.velocity[base] = dirX;
+  pool.velocity[base + 1] = dirY;
+  pool.velocity[base + 2] = dirZ;
+
+  // A scatter *distance* along the velocity, displacing the birth off the curve.
+  if (params.horizontalRange !== 0) {
+    const scatter = random() * params.horizontalRange;
+    pool.position[base] += scatter * dirX;
+    pool.position[base + 1] += scatter * dirY;
+    pool.position[base + 2] += scatter * dirZ;
+  }
+};
+
 const spawnPoint = (pool: ParticlePool, slot: number) => {
   const base = slot * 3;
 
@@ -151,9 +237,19 @@ export const spawnParticle = (
       spawnSphere(pool, slot, params, random);
       break;
 
+    case EMITTER_TYPE.SPLINE:
+      // A spline emitter whose chain is missing or malformed falls through to the plane kernel, as
+      // the reference does, rather than being dropped.
+      if (params.spline) {
+        spawnSpline(pool, slot, params, random);
+      } else {
+        spawnPlane(pool, slot, params, random);
+      }
+      break;
+
     default:
-      // Spline and bone generators are Phase 2b+. A point spawn keeps them harmless meanwhile rather
-      // than leaving position and velocity holding whatever the previous occupant of the slot left.
+      // The bone generator is not implemented. A point spawn keeps it harmless rather than leaving
+      // position and velocity holding whatever the previous occupant of the slot left.
       spawnPoint(pool, slot);
       break;
   }

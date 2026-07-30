@@ -1,6 +1,7 @@
 import { integratePool } from './integrate';
 import { ParticlePool } from './pool';
 import { spawnParticle, SpawnParams } from './spawn';
+import { ParticleSpline } from './spline';
 import { evaluateAnimationTrack, evaluateAnimationTrackStep } from './tracks';
 
 /**
@@ -79,6 +80,8 @@ export class RuntimeEmitter {
     this.spawnParams = {
       emitterType: definition.emitterType,
       flags: definition.flags || 0,
+      // Built once: the arc-length knots need a 16-chord walk per segment, and the chain is static.
+      spline: ParticleSpline.create(definition.splinePoints),
       areaWidth: 0,
       areaLength: 0,
       verticalRange: 0,
