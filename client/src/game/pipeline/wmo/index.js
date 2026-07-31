@@ -401,6 +401,8 @@ class WMO {
       interior: true,
       sunIntensity: 1.0,
       probe,
+      // Deliberately empty, not an unfinished stub: this doodad's MOLR lobes are already folded into
+      // `probe` above (see foldInteriorProbe). Populating both would double-count the same lights.
       pointLights: []
     };
 

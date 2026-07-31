@@ -22,12 +22,12 @@ uniform float fogModifier;
 uniform float animatedTransparency;
 
 // WMO point lights (MOLT) affecting this model. Positions are world space, matching
-// worldVertexPosition. Count is zero for anything not standing inside a WMO.
-#define MAX_WMO_LIGHTS 4
+// worldVertexPosition. Count is zero for anything not standing inside a WMO. Selected per object
+// (world/light/laws.ts::selectPointLights), which commits at most three -- see MAX_WMO_LIGHTS below.
+#define MAX_WMO_LIGHTS 3
 uniform int wmoLightCount;
 uniform vec3 wmoLightPosition[MAX_WMO_LIGHTS];
 uniform vec3 wmoLightColor[MAX_WMO_LIGHTS];
-uniform vec2 wmoLightAtten[MAX_WMO_LIGHTS];
 
 varying vec2 coordinates[2];
 varying vec4 vertexColor;
@@ -41,8 +41,9 @@ uniform vec4 probeCoeffs[7];
 /**
  * Diffuse contribution of the WMO's own point lights.
  *
- * Interiors get no sun, so without these a doodad indoors is lit by ambient alone. Attenuation is
- * linear between attenStart and attenEnd, which is what the client uses for omni lights.
+ * Interiors get no sun, so without these a doodad indoors is lit by ambient alone. Lights are
+ * selected per object, nearest-few to the object's own position (world/light/laws.ts::selectPointLights),
+ * not per fragment, so there is no per-fragment cutoff here to match.
  */
 vec3 applyWmoPointLights(vec3 normal) {
   vec3 accumulated = vec3(0.0);
@@ -56,18 +57,14 @@ vec3 applyWmoPointLights(vec3 normal) {
     vec3 toLight = wmoLightPosition[i] - worldVertexPosition;
     float distance = length(toLight);
 
-    float attenStart = wmoLightAtten[i].x;
-    float attenEnd = wmoLightAtten[i].y;
-
-    // Full brightness inside attenStart, falling to nothing at attenEnd.
-    float falloff = 1.0 - clamp((distance - attenStart) / max(attenEnd - attenStart, 0.001), 0.0, 1.0);
-    if (falloff <= 0.0) {
-      continue;
-    }
+    // The reference's falloff (samples/benilla wow_model.wgsl::point_light_sum): a selected light
+    // reaches the whole object with NO distance cutoff, so selection pops at object granularity --
+    // the authored behaviour, not an artifact. Diffuse only; committed ambient and specular are zero.
+    float attenuation = 1.0 / (0.7 * distance + 0.03 * distance * distance);
 
     float incidence = max(dot(normal, toLight / max(distance, 0.001)), 0.0);
 
-    accumulated += wmoLightColor[i] * (incidence * falloff);
+    accumulated += wmoLightColor[i] * (incidence * attenuation);
   }
 
   return accumulated;
@@ -109,6 +106,11 @@ vec3 m2SunLobe(in vec3 normal, in vec3 toLight, in vec3 ambient, in vec3 diffuse
  *
  * Note the lobe's soft wrap (side-on about 0.088 of the colour) is the reference's authored response,
  * deliberately NOT a hard max(N.L, 0).
+ *
+ * CLAMP THE SUM, NEVER A TERM (same invariant as `m2SunLobe` above): this function is currently the
+ * interior lane's only term, so returning it unclamped is safe -- `applyDiffuseLighting` clamps the
+ * whole `light` sum right after calling this. Do not reintroduce a clamp here once a second interior
+ * term (e.g. a folded point light) exists alongside it.
  */
 vec3 evalInteriorProbe(in vec3 normal) {
   vec3 n = normalize(normal);
@@ -121,7 +123,7 @@ vec3 evalInteriorProbe(in vec3 normal) {
   result.g = dot(probeCoeffs[1], n1) + dot(probeCoeffs[4], quad) + probeCoeffs[6].y * x2y2;
   result.b = dot(probeCoeffs[2], n1) + dot(probeCoeffs[5], quad) + probeCoeffs[6].z * x2y2;
 
-  return clamp(result, 0.0, 1.0);
+  return result;
 }
 
 vec4 applyDiffuseLighting(vec4 result) {

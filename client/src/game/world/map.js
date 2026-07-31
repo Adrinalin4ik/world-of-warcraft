@@ -262,13 +262,6 @@ class WorldMap extends THREE.Group {
       applied = true;
     }
 
-    // The WMO point light selection is camera-relative and therefore shared by every material, which
-    // is what makes it workable at all: M2 materials are reused across instances of a model.
-    if (material.setWmoLights) {
-      material.setWmoLights(this.mapLight.wmoPointLights);
-      applied = true;
-    }
-
     return applied;
   }
 

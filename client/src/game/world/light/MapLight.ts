@@ -8,7 +8,6 @@ import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
 import { AreaLight, WeightedAreaLight } from './types';
 import { getDayNightTime, interpolateNumericTable, selectLightsForPosition } from './utils';
-import { worldSpaceLightsForWmo } from './wmo-lights';
 
 type MapLightOptions = {
   // Add any options needed for initialization
@@ -49,23 +48,10 @@ class MapLight extends SceneLight {
   // The WMO the camera is standing in, for the debug readout. Null outdoors.
   #wmo: { name: string; groupIndex: number; ext: number; int: number; trans: number } | null = null;
 
-  // Must match MAX_WMO_LIGHTS in the M2 fragment shader.
-  static MAX_WMO_POINT_LIGHTS = 4;
-
   // A blended band that no light contributed to stays at exactly zero.
   static #isUnset(color: THREE.Color) {
     return color.r + color.g + color.b < 0.001;
   }
-
-  /**
-   * WMO point lights (MOLT) nearest the camera, in world space, refreshed each frame.
-   *
-   * Selected relative to the camera rather than per doodad because M2 materials are shared between
-   * instances of a model -- one material can back hundreds of meshes spread across a building, so
-   * there is nowhere to hang a per-doodad set. Interiors are small enough that what is near the
-   * camera is near the props around it, and every material can safely share the one selection.
-   */
-  wmoPointLights: any[] = [];
 
   constructor(options: MapLightOptions = {}) {
     super();
@@ -174,7 +160,8 @@ class MapLight extends SceneLight {
    *
    * LocationManager already works this out for portal culling and stores it on the camera earlier in
    * the frame, so this only has to read it. The colours themselves come from the light database
-   * either way; only the WMO point light selection below differs by side.
+   * either way. WMO point lights are no longer selected here: each object picks its own nearest few
+   * via `laws.selectPointLights` anchored at its own position, not the camera's.
    */
   #trackCameraLocation(camera: THREE.Camera) {
     const location = (camera as any).location;
@@ -182,7 +169,6 @@ class MapLight extends SceneLight {
 
     this.location = interior ? 'interior' : 'exterior';
 
-    this.#selectWmoPointLights(interior ? location.wmo : null, camera);
     this.#wmo = interior ? MapLight.#describeWmo(location.wmo) : null;
   }
 
@@ -213,55 +199,6 @@ class MapLight extends SceneLight {
       int: count('int'),
       ext: count('ext'),
     };
-  }
-
-  /**
-   * Pick the closest few of the current WMO's point lights.
-   *
-   * Cleared when outside, which leaves every material with a light count of zero and skips the loop
-   * in the shader entirely.
-   */
-  #selectWmoPointLights(wmo: any, camera: THREE.Camera) {
-    const selected = this.wmoPointLights;
-    selected.length = 0;
-
-    const lights = wmo && worldSpaceLightsForWmo(wmo);
-    if (!lights || lights.length === 0) {
-      return;
-    }
-
-    const candidates = [];
-
-    for (const light of lights) {
-      // root.lights (and therefore this array) is positionally aligned with MOLT and has holes for
-      // lights createLights skipped -- see WMORootDefinition.createLights.
-      if (!light) {
-        continue;
-      }
-
-      const distance = camera.position.distanceTo(light.position);
-
-      // Beyond its own falloff, so it cannot contribute wherever the camera is standing.
-      if (distance > light.attenEnd) {
-        continue;
-      }
-
-      // Ranked by how much the light would actually add, not by raw distance. Sorting on distance
-      // alone let a close but nearly spent light displace a brighter one, and meant a light entering
-      // the top few arrived at full strength instead of easing in. Matching the shader's own falloff
-      // means whatever drops off the end was contributing close to nothing.
-      const span = Math.max(light.attenEnd - light.attenStart, 0.001);
-      const falloff = 1.0 - Math.min(Math.max((distance - light.attenStart) / span, 0), 1);
-
-      candidates.push({ light, score: falloff * light.intensity });
-    }
-
-    candidates.sort((first, second) => second.score - first.score);
-
-    const limit = Math.min(candidates.length, MapLight.MAX_WMO_POINT_LIGHTS);
-    for (let index = 0; index < limit; ++index) {
-      selected.push(candidates[index].light);
-    }
   }
 
   #updateTime() {

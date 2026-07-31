@@ -14,7 +14,6 @@ const target = (overrides: Partial<LightingReadoutsTarget> = {}): LightingReadou
   sunDir: { x: -0.5, y: 0.25, z: -0.83 },
   sidnNight: 0,
   selectedLights: [],
-  wmoPointLights: [],
   wmo: null,
   ...overrides,
 });

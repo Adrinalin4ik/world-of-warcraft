@@ -8,6 +8,11 @@ type Xyz = { x: number; y: number; z: number };
  * `LightingControlsTarget`: no three.js import, and testable with plain objects. Colours and vectors
  * are described by shape, so a THREE.Color and a THREE.Vector3 both satisfy it. Plans 2-5 extend this
  * as they add resolved values (storm bcc, sky warp, interior fog triple, batch-class counts).
+ *
+ * There is deliberately no WMO-point-light count here: selection moved from MapLight (camera-anchored,
+ * one shared answer) to per-object (`laws.selectPointLights` anchored at each instance), so there is no
+ * longer a single number that describes the whole scene. A readout describing lighting the renderer is
+ * not doing is worse than no readout.
  */
 export type LightingReadoutsTarget = {
   mapId: number | undefined;
@@ -21,7 +26,6 @@ export type LightingReadoutsTarget = {
   sunDir: Xyz;
   sidnNight: number;
   selectedLights: Array<{ light: { id: number }; weight: number; distance: number }>;
-  wmoPointLights: unknown[];
   /** The WMO the camera is standing in, or null outdoors. */
   wmo: {
     name: string;
@@ -104,9 +108,6 @@ class LightingReadouts extends React.Component<Props> {
             {asFixed(entry.distance, 1)}
           </p>
         ))}
-
-        <div className="divider"></div>
-        <p>WMO point lights: {(mapLight.wmoPointLights || []).length}</p>
 
         <div className="divider"></div>
         <p>
