@@ -24,8 +24,10 @@ varying float cameraDistance;
 vec4 applyFog(vec4 color) {
   float f1 = (cameraDistance * fogParams.x) + fogParams.y;
   float f2 = max(f1, 0.0);
-  float f3 = pow(f2, fogParams.z);
-  float f4 = min(f3, 1.0);
+  // fogParams.z is always 1.0 at the only packing site (blendLights), so the pow was a no-op costing
+  // a per-fragment exponentiation and disguising a plain linear ramp. The law is
+  // factor = 1 - clamp((end - eyeZ) / (end - start)).
+  float f4 = min(f2, 1.0);
 
   float fogFactor = 1.0 - f4;
 

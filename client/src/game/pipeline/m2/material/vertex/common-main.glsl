@@ -42,4 +42,10 @@ vertexColor = vec4(animatedVertexColorRGB.rgb * 0.5, animatedVertexColorAlpha);
 // Camera distance. worldVertexPosition is a varying rather than a local so the fragment stage can
 // use it to attenuate WMO point lights.
 worldVertexPosition = (modelMatrix * vec4(position, 1.0)).xyz;
-cameraDistance = distance(cameraPosition, worldVertexPosition);
+
+// Fog rides PLANAR EYE-Z (view-space depth), not radial distance. Radial over-fogs the screen edges:
+// a surface at the edge of view is farther from the eye than one dead ahead at the same depth, so it
+// hazes more and the fog visibly curves. VERIFIED in the reference (samples/benilla terrain.wgsl and
+// wow_model.wgsl both use planar eye-Z and say radial over-fogs the edges). mvPosition already carries
+// the skinned position on the skinned path, so this is correct there too.
+cameraDistance = -mvPosition.z;

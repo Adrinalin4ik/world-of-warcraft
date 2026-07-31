@@ -78,7 +78,10 @@ vec3 createSpecularLight(vec3 normal, vec3 direction, vec3 viewDirection, vec3 s
   //
   // Same derivation as the ADT chunk shader, which had it right.
   float f1 = (cameraDistance * fogParams.x) + fogParams.y;
-  float fogFactor = 1.0 - min(pow(max(f1, 0.0), fogParams.z), 1.0);
+  // fogParams.z is always 1.0 at the only packing site (blendLights), so the pow was a no-op costing
+  // a per-fragment exponentiation and disguising a plain linear ramp. The law is
+  // factor = 1 - clamp((end - eyeZ) / (end - start)).
+  float fogFactor = 1.0 - min(max(f1, 0.0), 1.0);
 
   color.rgb = mix(color.rgb, fogColor.rgb, fogFactor);
 

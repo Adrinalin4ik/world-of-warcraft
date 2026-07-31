@@ -35,10 +35,13 @@ void main() {
   vUv = iUvRect.xy + vec2(position.x + 0.5, 0.5 - position.y) * iUvRect.zw;
   vColor = iColor;
 
-  // Distance from the camera to the particle's centre, in view space. The fog ramp in the fragment
-  // shader is a function of this, and taking it from the billboard centre rather than per corner
-  // keeps a single quad from being fogged unevenly across its own width.
-  cameraDistance = length(viewCenter.xyz);
+  // Fog rides PLANAR EYE-Z (view-space depth) of the particle's centre, not radial distance. Radial
+  // over-fogs the screen edges: a surface at the edge of view is farther from the eye than one dead
+  // ahead at the same depth, so it hazes more and the fog visibly curves. VERIFIED in the reference
+  // (samples/benilla terrain.wgsl and wow_model.wgsl both use planar eye-Z and say radial over-fogs
+  // the edges). Taking it from the billboard centre rather than per corner keeps a single quad from
+  // being fogged unevenly across its own width.
+  cameraDistance = -viewCenter.z;
 
   gl_Position = projectionMatrix * viewCenter;
 }

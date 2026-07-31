@@ -1,8 +1,10 @@
 vec4 createFog(in float cameraDistance) {
   float f1 = (cameraDistance * fogParams.x) + fogParams.y;
   float f2 = max(f1, 0.0);
-  float f3 = pow(f2, fogParams.z);
-  float f4 = min(f3, 1.0);
+  // fogParams.z is always 1.0 at the only packing site (blendLights), so the pow was a no-op costing
+  // a per-fragment exponentiation and disguising a plain linear ramp. The law is
+  // factor = 1 - clamp((end - eyeZ) / (end - start)).
+  float f4 = min(f2, 1.0);
 
   float fogFactor = 1.0 - f4;
 
@@ -18,7 +20,11 @@ void main() {
   vec3 objectPosition = (modelMatrix * vec4(position, 1.0)).xyz;
   vec3 objectNormal = (modelMatrix * vec4(normal, 0.0)).xyz;
 
-  float cameraDistance = length(modelViewMatrix * vec4(position, 1.0));
+  // Fog rides PLANAR EYE-Z (view-space depth), not radial distance. Radial over-fogs the screen
+  // edges: a surface at the edge of view is farther from the eye than one dead ahead at the same
+  // depth, so it hazes more and the fog visibly curves. VERIFIED in the reference (samples/benilla
+  // terrain.wgsl and wow_model.wgsl both use planar eye-Z and say radial over-fogs the edges).
+  float cameraDistance = -(modelViewMatrix * vec4(position, 1.0)).z;
 
   // t1 coordinate
   coords[0] = uv;
