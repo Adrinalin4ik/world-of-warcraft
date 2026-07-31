@@ -1669,8 +1669,9 @@ git commit -m "feat(debug): add resolved-light readouts and fix the fogStart get
 
 ## Done when
 
-- `yarn test --watchAll=false --testPathPattern="light"` passes, 40 tests.
-- `yarn test --watchAll=false --testPathPattern="lighting-controls"` passes, 5 tests.
+- `yarn test --watchAll=false --testPathPattern="light"` passes, 39 tests.
+- `yarn test --watchAll=false --testPathPattern="lighting-controls"` passes, 7 tests (5 as planned,
+  plus 2 added when the per-frame re-render defect was fixed).
 - `yarn test --watchAll=false --testPathPattern="lighting-readouts"` passes, 5 tests.
 - The debug panel drives time of day and prints the resolved light as bytes.
 - `laws.ts` imports nothing, and every constant in it cites its reference origin.
@@ -1680,10 +1681,19 @@ git commit -m "feat(debug): add resolved-light readouts and fix the fogStart get
 Plan 2 (WMO lighting) consumes `sidnNightFraction` via `MapLight.sidnNight`, and nothing else from
 here. Plan 3 consumes `foldInteriorProbe`, `selectPointLights`, `evalProbe`, `cap96` and `floor112`.
 
-Two things to carry forward:
+Three things to carry forward:
 
 1. **`INTERIOR_LIGHT_AXIS` is inferred, not measured.** Plan 3's first interior check must confirm it
    reads as light-from-above-and-45°. The fold takes the axis as a parameter so correcting it is a
    one-line change in one place.
 2. **Do not remove `MapLight`'s interior sun fade in plan 2.** It comes out at the end of plan 3, once
    both the WMO batch classes and the M2 probes exist. See "Plan decomposition" above.
+3. **Two point-light selection strategies now coexist, and plan 3 must collapse them to one.**
+   `MapLight.#selectWmoPointLights` (pre-existing, untouched here) ranks by
+   `falloff × intensity` anchored at the CAMERA, and carries a comment arguing distance-only ranking
+   is wrong. The new `selectPointLights` in `laws.ts` ranks by plain distance anchored at the
+   RECEIVING OBJECT, because that is what the reference does. Both are currently live: the debug
+   panel's "WMO point lights" count comes from the old path while plan 3's shaders will consume the
+   new one. Left as-is they will silently disagree about which lights are chosen, and the readout
+   will describe lighting the renderer is not doing. Plan 3 replaces the old call sites rather than
+   adding beside them.
