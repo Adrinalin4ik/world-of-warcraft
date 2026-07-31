@@ -229,7 +229,12 @@ class LightingReadouts extends React.Component<Props> {
         ))}
         {mapLight.dumpLightSlotBands && (
           <p>
-            <button type="button" onClick={mapLight.dumpLightSlotBands}>
+            {/* Bound at the call site rather than passed as a bare reference: `mapLight` is a real
+                `MapLight` with ECMAScript `#private` fields, so `onClick={mapLight.dumpLightSlotBands}`
+                detaches the method from its receiver and every `this.#field` access inside it throws
+                once React invokes it as `onClick(event)`. Calling it through `mapLight` here keeps
+                `this` bound. */}
+            <button type="button" onClick={() => mapLight.dumpLightSlotBands!()}>
               Dump per-slot fog bands to console
             </button>
           </p>

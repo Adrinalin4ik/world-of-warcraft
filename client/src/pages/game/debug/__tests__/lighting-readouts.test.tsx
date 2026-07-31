@@ -140,6 +140,31 @@ describe('LightingReadouts light slots (diagnostic 1)', () => {
     button.click();
     expect(dumpLightSlotBands).toHaveBeenCalledTimes(1);
   });
+
+  it('calls dumpLightSlotBands bound to the mapLight receiver, not detached', () => {
+    // Regression test for a real crash: MapLight#dumpLightSlotBands reads ECMAScript `#private`
+    // fields, so a bare `onClick={mapLight.dumpLightSlotBands}` detaches the method from `mapLight`
+    // and every `this.#field` read throws once React calls it as `onClick(event)` (`this` is
+    // `undefined`, not `mapLight`). A jest.fn() mock can't reproduce that -- it doesn't care what
+    // `this` is -- so this fixture behaves like the real MapLight: it throws unless invoked as
+    // `mapLight.dumpLightSlotBands()`, exactly the shape of the original bug.
+    let receiver: unknown;
+    const mapLightTarget = target();
+    const withMethod: LightingReadoutsTarget = {
+      ...mapLightTarget,
+      dumpLightSlotBands() {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        receiver = this;
+        if (this !== withMethod) {
+          throw new TypeError('Cannot convert undefined or null to object');
+        }
+      },
+    };
+    render(<LightingReadouts mapLight={withMethod} />);
+    const button = screen.getByRole('button', { name: /dump per-slot fog bands/i });
+    expect(() => button.click()).not.toThrow();
+    expect(receiver).toBe(withMethod);
+  });
 });
 
 describe('LightingReadouts nearby WMO groups (diagnostic 2)', () => {
