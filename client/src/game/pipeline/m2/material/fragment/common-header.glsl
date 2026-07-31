@@ -175,15 +175,25 @@ vec4 applyFog(vec4 color) {
   // Opaque, alpha-keyed and alpha-blended geometry replaces what is behind it, so fog replaces its
   // colour in the usual way.
   color.rgb = mix(color.rgb, fogColor.rgb, fogFactor);
-#elif BLENDING_MODE == 3 || BLENDING_MODE == 4 || BLENDING_MODE == 6
-  // These modes *add* their result into the framebuffer. Mixing toward a lit fog colour therefore adds
-  // light rather than removing it: a torch's additive glow picked up the fog tint and drew a coloured
-  // halo over everything nearby -- violet, wherever the zone's fog colour is blue. Fog has to fade an
-  // additive contribution toward black instead, which is the additive identity.
+#elif BLENDING_MODE == 3 || BLENDING_MODE == 4
+  // Modes 3 (NoAlphaAdd) and 4 (Add) *add* their result into the framebuffer. Mixing toward a lit fog
+  // colour therefore adds light rather than removing it: a torch's additive glow picked up the fog tint
+  // and drew a coloured halo over everything nearby -- violet, wherever the zone's fog colour is blue.
+  // Fog has to fade an additive contribution toward black instead, which is the additive identity.
+  //
+  // Mode 6 (Mod2x) used to be lumped in here too, which is wrong -- it is a multiply-and-double, not an
+  // add, and fogging it toward black darkened it instead of neutralising it. See the Mod2x branch below.
   color.rgb = mix(color.rgb, vec3(0.0), fogFactor);
+#elif BLENDING_MODE == 5
+  // Mode 5 (Mod) is a pure multiply (applyBlendingMode: DstColor/Zero). Its identity is WHITE -- fade
+  // toward that, so a modulating decal (e.g. a shadow blob) stops affecting the framebuffer at fog
+  // distance instead of staying crisp forever.
+  color.rgb = mix(color.rgb, vec3(1.0), fogFactor);
+#elif BLENDING_MODE == 6
+  // Mode 6 (Mod2x) multiplies and doubles (applyBlendingMode: DstColor/SrcColor), so its identity is
+  // grey (0.5): mixing toward that neutralises the doubling instead of darkening it toward black.
+  color.rgb = mix(color.rgb, vec3(0.50196078), fogFactor);
 #endif
-  // BLENDING_MODE 5 is a pure modulate (DstColor/Zero). Its identity is white, and fogging it toward
-  // either black or the fog colour would darken whatever it multiplies, so it is left alone.
 
   return color;
 }
