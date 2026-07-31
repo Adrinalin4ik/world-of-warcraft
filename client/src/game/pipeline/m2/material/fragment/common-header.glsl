@@ -35,13 +35,8 @@ varying vec3 worldVertexNormal;
 varying vec3 worldVertexPosition;
 varying float cameraDistance;
 
-vec3 createLight(in vec3 normal, in vec3 direction, in vec3 diffuseColor, in vec3 ambientColor) {
-  float factor = saturate(dot(-direction.xyz, normalize(normal.xyz)));
-
-  vec3 light = saturate((diffuseColor.rgb * factor) + ambientColor.rgb);
-
-  return light;
-}
+uniform int interiorProbe;
+uniform vec4 probeCoeffs[7];
 
 /**
  * Diffuse contribution of the WMO's own point lights.
@@ -101,11 +96,48 @@ vec3 m2SunLobe(in vec3 normal, in vec3 toLight, in vec3 ambient, in vec3 diffuse
   return clamp(ambient + diffuse * (intensity * lobe), 0.0, 1.0);
 }
 
+/**
+ * Evaluate the per-instance interior light probe at a surface normal.
+ *
+ * The reference fills an interior MODD prop's light ONCE at create -- from the MODD entry's own baked
+ * colour, never a footprint sample -- and commits it as an order-2 SH probe the vertex program
+ * evaluates (samples/benilla wow_model.wgsl, the interior-prop lane). Being folded at create is why an
+ * interior prop's light is day/night INDEPENDENT.
+ *
+ * The basis here MIRRORS `evalProbe` in world/light/laws.ts. If you change one, change both -- that
+ * function exists so the unit tests and this shader cannot silently disagree.
+ *
+ * Note the lobe's soft wrap (side-on about 0.088 of the colour) is the reference's authored response,
+ * deliberately NOT a hard max(N.L, 0).
+ */
+vec3 evalInteriorProbe(in vec3 normal) {
+  vec3 n = normalize(normal);
+  vec4 n1 = vec4(n, 1.0);
+  vec4 quad = vec4(n.x * n.y, n.y * n.z, n.z * n.z, n.x * n.z);
+  float x2y2 = n.x * n.x - n.y * n.y;
+
+  vec3 result;
+  result.r = dot(probeCoeffs[0], n1) + dot(probeCoeffs[3], quad) + probeCoeffs[6].x * x2y2;
+  result.g = dot(probeCoeffs[1], n1) + dot(probeCoeffs[4], quad) + probeCoeffs[6].y * x2y2;
+  result.b = dot(probeCoeffs[2], n1) + dot(probeCoeffs[5], quad) + probeCoeffs[6].z * x2y2;
+
+  return clamp(result, 0.0, 1.0);
+}
+
 vec4 applyDiffuseLighting(vec4 result) {
   #if USE_LIGHTING == 1
-    vec3 toLight = -normalize(sunParams.xyz);
-    vec3 light = m2SunLobe(worldVertexNormal, toLight, sunAmbientColor, sunDiffuseColor, sunIntensity);
-    light += applyWmoPointLights(normalize(worldVertexNormal.xyz));
+    vec3 light;
+
+    if (interiorProbe == 1) {
+      // Interior prop: its folded probe IS its light. No sun, no time of day. Point lights are already
+      // folded into the probe at spawn, so none are added here.
+      light = evalInteriorProbe(worldVertexNormal);
+    } else {
+      vec3 toLight = -normalize(sunParams.xyz);
+      light = m2SunLobe(worldVertexNormal, toLight, sunAmbientColor, sunDiffuseColor, sunIntensity);
+      light += applyWmoPointLights(normalize(worldVertexNormal.xyz));
+    }
+
     light = min(light, vec3(1.0, 1.0, 1.0));
     light = mix(light, vec3(1.0, 1.0, 1.0), 1.0 - materialParams.y);
   #else
