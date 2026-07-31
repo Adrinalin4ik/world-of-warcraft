@@ -527,8 +527,9 @@ class BatchManager {
         break;
     }
 
-    // TODO: Implement sub_876530 logic (which can throw back to the table based lookup)
-
+    // Returns null for low bits 0 and for anything above 3. `sub_876530`'s throw-back to the table
+    // lookup -- what the TODO here used to ask for -- now lives one frame up in
+    // `lookupShaderNames`, so a null from here resolves rather than reaching the caller.
     return names;
   }
 

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import DBC from '../../pipeline/dbc';
 import { batchClassOf } from '../../pipeline/wmo/material/laws';
 import { blendLights } from './blend';
-import { LIGHT_FLOAT_BAND, LIGHT_PARAM } from './constants';
+import { LIGHT_FLOAT_BAND, LIGHT_PARAM, LIGHT_PARAM_LABELS } from './constants';
 import { FogTriple, MfogRecord, packFogParams, selectWmoFogTarget, unpackFogParams, WmoFogRamp } from './fog';
 import { quantizeGlow, sidnNightFraction, skyWarp, stormBlend } from './laws';
 import SceneLight from './SceneLight';
@@ -342,10 +342,7 @@ class MapLight extends SceneLight {
       return;
     }
 
-    const SLOT_LABELS = [
-      'paramsStandard', 'paramsUnderwater', 'paramsStormy', 'paramsStormyUnderwater', 'paramsDeath',
-      'reserved5', 'reserved6', 'reserved7',
-    ];
+    const SLOT_LABELS = LIGHT_PARAM_LABELS;
 
     const rows: Array<{
       lightId: number;

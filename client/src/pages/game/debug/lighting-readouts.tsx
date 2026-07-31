@@ -1,5 +1,9 @@
 import React from 'react';
 
+// `constants.ts` imports nothing itself, so pulling the canonical slot labels in does not drag
+// three.js into this component -- the reason `LightingReadoutsTarget` stays a structural type.
+import { LIGHT_PARAM_LABELS } from '../../../game/world/light/constants';
+
 type Rgb = { r: number; g: number; b: number };
 type Xyz = { x: number; y: number; z: number };
 
@@ -153,10 +157,10 @@ const asFixed = (value: number | undefined, places = 0) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(places) : '-';
 
 /** Light.dbc's eight LightParams slot fields, in record order -- see `AreaLight.lightSlots`'s doc
- * comment. Slot 0 (`paramsStandard`) is the only one blended into the scene's light every frame today. */
-const LIGHT_SLOT_LABELS = [
-  'skyFog', 'water', 'sunset', 'other', 'death', 'reserved5', 'reserved6', 'reserved7',
-];
+ * comment. Imported rather than restated: this panel used to carry its own copy, which kept printing
+ * the pre-rename names (`sunset` for the STORMY slot, `other` for stormy underwater) long after the
+ * schema was corrected, while the console sweep next to it printed the right ones. */
+const LIGHT_SLOT_LABELS = LIGHT_PARAM_LABELS;
 
 /** A selected light's eight raw slot ids, labelled by index -- diagnostic 1. `-` for a fixture that
  * omits `lightSlots` entirely (existing plain test fixtures, and any light not yet carrying it). */

@@ -10,6 +10,28 @@ export enum LIGHT_PARAM {
   NUM_LIGHT_PARAMS,
 }
 
+/**
+ * Light.dbc's eight LightParams slot fields, in record order, indexed by `LIGHT_PARAM`.
+ *
+ * The single source of truth for these labels. Two diagnostics print them -- the console sweep in
+ * `MapLight#dumpLightSlotBands` and the debug panel's slot row -- and they were separately hardcoded,
+ * which let the panel keep showing the PRE-RENAME names (`skyFog`, `water`, `sunset`, `other`) after
+ * the DBC schema had corrected them. Those old names are not merely terse, they are positionally
+ * WRONG: what was called `sunset` is the stormy slot and what was called `other` is stormy
+ * underwater. A diagnostic that mislabels the slot it is reporting is worse than no diagnostic,
+ * because the reader trusts it -- so there is one list, and both surfaces read it.
+ */
+export const LIGHT_PARAM_LABELS = [
+  'paramsStandard',
+  'paramsUnderwater',
+  'paramsStormy',
+  'paramsStormyUnderwater',
+  'paramsDeath',
+  'reserved5',
+  'reserved6',
+  'reserved7',
+];
+
 export enum LIGHT_INT_BAND {
   BAND_DIRECT_COLOR = 0,
   BAND_AMBIENT_COLOR,

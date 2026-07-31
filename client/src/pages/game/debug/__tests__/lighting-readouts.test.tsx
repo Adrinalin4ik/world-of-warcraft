@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import React from 'react';
+import { LIGHT_PARAM_LABELS } from '../../../../game/world/light/constants';
 import LightingReadouts, { LightingReadoutsTarget } from '../lighting-readouts';
 
 const target = (overrides: Partial<LightingReadoutsTarget> = {}): LightingReadoutsTarget => ({
@@ -132,6 +133,11 @@ describe('LightingReadouts light slots (diagnostic 1)', () => {
   });
 
   it('labels all eight Light.dbc slot ids by name, in field order', () => {
+    // The names must be the SCHEMA's, not the pre-rename ones. This test used to assert `skyFog`,
+    // `water` and `sunset`, which locked in labels that were positionally wrong -- `sunset` is the
+    // STORMY slot -- so the panel kept mislabelling slot 2 while the console sweep beside it printed
+    // `paramsStormy`. Asserting against `LIGHT_PARAM_LABELS` means a future rename cannot leave the
+    // two diagnostics disagreeing again.
     const selected = [
       {
         light: { id: 16, params: [{ id: 165 }], lightSlots: [165, 0, 166, 0, 0, 0, 0, 0] },
@@ -140,9 +146,10 @@ describe('LightingReadouts light slots (diagnostic 1)', () => {
       },
     ];
     render(<LightingReadouts mapLight={target({ selectedLights: selected })} />);
-    expect(screen.getByText(/skyFog 165/)).toBeInTheDocument();
-    expect(screen.getByText(/water 0/)).toBeInTheDocument();
-    expect(screen.getByText(/sunset 166/)).toBeInTheDocument();
+    expect(LIGHT_PARAM_LABELS[2]).toBe('paramsStormy');
+    expect(screen.getByText(/paramsStandard 165/)).toBeInTheDocument();
+    expect(screen.getByText(/paramsUnderwater 0/)).toBeInTheDocument();
+    expect(screen.getByText(/paramsStormy 166/)).toBeInTheDocument();
     expect(screen.getByText(/reserved7 0/)).toBeInTheDocument();
   });
 
