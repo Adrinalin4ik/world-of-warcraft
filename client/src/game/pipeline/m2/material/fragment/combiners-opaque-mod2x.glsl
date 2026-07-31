@@ -1,4 +1,3 @@
-#pragma glslify: import('./common-header.glsl')
 
 vec4 combinersOpaqueMod2x() {
   vec4 result;

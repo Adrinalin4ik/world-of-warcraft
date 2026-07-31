@@ -1,7 +1,6 @@
-#pragma glslify: import('./common-header.glsl')
 
 void main() {
-	#pragma glslify: import('./common-main.glsl')
+	// GLSLIFY_COMMON_MAIN
 
   // c0 mapping (t1)
   coordinates[0] = vec2(uv);

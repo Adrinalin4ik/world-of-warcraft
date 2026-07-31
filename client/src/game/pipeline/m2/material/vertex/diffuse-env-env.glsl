@@ -1,7 +1,6 @@
-#pragma glslify: import('./common-header.glsl')
 
 void main() {
-	#pragma glslify: import('./common-main.glsl')
+	// GLSLIFY_COMMON_MAIN
 
   // c0 mapping (env)
   coordinates[0] = envMapSphere(mvPosition.xyz, normal);

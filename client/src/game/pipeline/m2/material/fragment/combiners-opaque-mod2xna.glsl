@@ -1,4 +1,3 @@
-#pragma glslify: import('./common-header.glsl')
 
 /*
 float4 main_PS_Combiners_Opaque_Mod2xNA(PixelInput input) : SV_Target

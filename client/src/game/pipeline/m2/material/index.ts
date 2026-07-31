@@ -4,35 +4,87 @@ import M2 from '..';
 import MapLight from '../../../world/light/MapLight';
 import TextureLoader from '../../texture-loader';
 
+// Shader sources are assembled HERE, in JS, rather than with `#pragma glslify: import(...)`.
+//
+// glslify-import is a source TRANSFORM: it reads the target with `fs` and splices the text in, so the
+// spliced files never enter glslify's dependency tree and glslify-loader never calls addDependency for
+// them. Webpack therefore does not watch them, and edits to a common chunk do NOT invalidate the
+// variant that imports it -- a running dev server keeps serving the stale compiled shader.
+//
+// That defect silently discarded most of plan 2's WMO shader work. Do not "tidy" this back into
+// pragmas.
+import fragmentCommonHeader from './fragment/common-header.glsl';
+import vertexCommonHeader from './vertex/common-header.glsl';
+import vertexCommonMain from './vertex/common-main.glsl';
+
+import vertexDiffuseT1 from './vertex/diffuse-t1.glsl';
+import vertexDiffuseEnv from './vertex/diffuse-env.glsl';
+import vertexDiffuseT1T2 from './vertex/diffuse-t1-t2.glsl';
+import vertexDiffuseT1Env from './vertex/diffuse-t1-env.glsl';
+import vertexDiffuseEnvEnv from './vertex/diffuse-env-env.glsl';
+import vertexDiscard from './vertex/discard.glsl';
+
+import fragmentCombinersOpaque from './fragment/combiners-opaque.glsl';
+import fragmentCombinersMod from './fragment/combiners-mod.glsl';
+import fragmentCombinersOpaqueOpaque from './fragment/combiners-opaque-opaque.glsl';
+import fragmentCombinersOpaqueAdd from './fragment/combiners-opaque-add.glsl';
+import fragmentCombinersOpaqueAddNA from './fragment/combiners-opaque-addna.glsl';
+import fragmentCombinersOpaqueAddAlpha from './fragment/combiners-opaque-addalpha.glsl';
+import fragmentCombinersOpaqueAddAlphaAlpha from './fragment/combiners-opaque-addalpha-alpha.glsl';
+import fragmentCombinersOpaqueMod from './fragment/combiners-opaque-mod.glsl';
+import fragmentCombinersOpaqueMod2x from './fragment/combiners-opaque-mod2x.glsl';
+import fragmentCombinersOpaqueMod2xNA from './fragment/combiners-opaque-mod2xna.glsl';
+import fragmentCombinersOpaqueMod2xNAAlpha from './fragment/combiners-opaque-mod2xna-alpha.glsl';
+import fragmentCombinersModOpaque from './fragment/combiners-mod-opaque.glsl';
+import fragmentCombinersModMod from './fragment/combiners-mod-mod.glsl';
+import fragmentCombinersModMod2x from './fragment/combiners-mod-mod2x.glsl';
+import fragmentDiscard from './fragment/discard.glsl';
+
+/** Prepend the shared fragment header to a combiner variant. */
+const assembleFragment = (body: string) => `${fragmentCommonHeader}\n${body}`;
+
+/**
+ * Assemble a vertex variant: prepend the shared header, and splice the shared main-body chunk in at
+ * the variant's `// GLSLIFY_COMMON_MAIN` marker (it has to sit INSIDE main(), because it declares
+ * locals -- `mvPosition`, `transformed`, `skinned` -- that the rest of main() uses).
+ */
+const assembleVertex = (body: string) => {
+  if (!body.includes('// GLSLIFY_COMMON_MAIN')) {
+    throw new Error('M2 vertex shader variant is missing its // GLSLIFY_COMMON_MAIN marker');
+  }
+
+  return `${vertexCommonHeader}\n${body.replace('// GLSLIFY_COMMON_MAIN', vertexCommonMain)}`;
+};
+
 class M2Material extends THREE.ShaderMaterial {
 
   private mapLight: MapLight | null = null;
 
   static VERTEX_SHADERS = {
-    'Diffuse_T1': require('./vertex/diffuse-t1.glsl'),
-    'Diffuse_Env': require('./vertex/diffuse-env.glsl'),
-    'Diffuse_T1_T2': require('./vertex/diffuse-t1-t2.glsl'),
-    'Diffuse_T1_Env': require('./vertex/diffuse-t1-env.glsl'),
-    'Diffuse_Env_Env': require('./vertex/diffuse-env-env.glsl'),
-    'Discard': require('./vertex/discard.glsl')
+    'Diffuse_T1': assembleVertex(vertexDiffuseT1),
+    'Diffuse_Env': assembleVertex(vertexDiffuseEnv),
+    'Diffuse_T1_T2': assembleVertex(vertexDiffuseT1T2),
+    'Diffuse_T1_Env': assembleVertex(vertexDiffuseT1Env),
+    'Diffuse_Env_Env': assembleVertex(vertexDiffuseEnvEnv),
+    'Discard': vertexDiscard
   };
 
   static FRAGMENT_SHADERS = {
-    'Combiners_Opaque': require('./fragment/combiners-opaque.glsl'),
-    'Combiners_Mod': require('./fragment/combiners-mod.glsl'),
-    'Combiners_Opaque_Opaque': require('./fragment/combiners-opaque-opaque.glsl'),
-    'Combiners_Opaque_Add': require('./fragment/combiners-opaque-add.glsl'),
-    'Combiners_Opaque_AddNA': require('./fragment/combiners-opaque-addna.glsl'),
-    'Combiners_Opaque_AddAlpha': require('./fragment/combiners-opaque-addalpha.glsl'),
-    'Combiners_Opaque_AddAlpha_Alpha': require('./fragment/combiners-opaque-addalpha-alpha.glsl'),
-    'Combiners_Opaque_Mod': require('./fragment/combiners-opaque-mod.glsl'),
-    'Combiners_Opaque_Mod2x': require('./fragment/combiners-opaque-mod2x.glsl'),
-    'Combiners_Opaque_Mod2xNA': require('./fragment/combiners-opaque-mod2xna.glsl'),
-    'Combiners_Opaque_Mod2xNA_Alpha': require('./fragment/combiners-opaque-mod2xna-alpha.glsl'),
-    'Combiners_Mod_Opaque': require('./fragment/combiners-mod-opaque.glsl'),
-    'Combiners_Mod_Mod': require('./fragment/combiners-mod-mod.glsl'),
-    'Combiners_Mod_Mod2x': require('./fragment/combiners-mod-mod2x.glsl'),
-    'Discard': require('./fragment/discard.glsl')
+    'Combiners_Opaque': assembleFragment(fragmentCombinersOpaque),
+    'Combiners_Mod': assembleFragment(fragmentCombinersMod),
+    'Combiners_Opaque_Opaque': assembleFragment(fragmentCombinersOpaqueOpaque),
+    'Combiners_Opaque_Add': assembleFragment(fragmentCombinersOpaqueAdd),
+    'Combiners_Opaque_AddNA': assembleFragment(fragmentCombinersOpaqueAddNA),
+    'Combiners_Opaque_AddAlpha': assembleFragment(fragmentCombinersOpaqueAddAlpha),
+    'Combiners_Opaque_AddAlpha_Alpha': assembleFragment(fragmentCombinersOpaqueAddAlphaAlpha),
+    'Combiners_Opaque_Mod': assembleFragment(fragmentCombinersOpaqueMod),
+    'Combiners_Opaque_Mod2x': assembleFragment(fragmentCombinersOpaqueMod2x),
+    'Combiners_Opaque_Mod2xNA': assembleFragment(fragmentCombinersOpaqueMod2xNA),
+    'Combiners_Opaque_Mod2xNA_Alpha': assembleFragment(fragmentCombinersOpaqueMod2xNAAlpha),
+    'Combiners_Mod_Opaque': assembleFragment(fragmentCombinersModOpaque),
+    'Combiners_Mod_Mod': assembleFragment(fragmentCombinersModMod),
+    'Combiners_Mod_Mod2x': assembleFragment(fragmentCombinersModMod2x),
+    'Discard': fragmentDiscard
     /*
     'Combiners_Mod':              'frag/mod.frag',
     'Combiners_Decal':            'frag/decal.frag',
