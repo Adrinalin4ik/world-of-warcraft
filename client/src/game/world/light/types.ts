@@ -29,6 +29,11 @@ export type LightUniforms = {
   sunAmbientColor: { value: THREE.Color };
   fogParams: { value: THREE.Vector4 };
   fogColor: { value: THREE.Color };
+  // The camera-in-WMO interior fog, already crossfaded by `MapLight`'s `WmoFogRamp` and packed
+  // identically to `fogParams` (see `fog.ts`'s `packFogParams`) -- a consumer picks between this and
+  // `fogParams`/`fogColor` above with no extra maths.
+  wmoFogParams: { value: THREE.Vector4 };
+  wmoFogColor: { value: THREE.Color };
   // Water tints. LiquidType.dbc carries a Color pair but leaves it zeroed for most types in 3.3.5a,
   // so the client colours water from these light bands instead, which is also what makes it track
   // time of day.

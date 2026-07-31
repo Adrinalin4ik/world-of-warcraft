@@ -47,6 +47,11 @@ class WMORoot {
     // MOLT point lights, still in WMO local space. The WMO handler converts them to world space when
     // it hands them to a doodad, since only then is the placement known.
     this.lights = def.lights || [];
+
+    // MFOG records, staged into the shape `fog.ts` consumes (`WMORootDefinition.createFogs`). Not
+    // resolved here -- that is the camera-in-interior fog consumer's job (`MapLight`) -- just carried
+    // through so `location.wmo.root.fogs` is reachable the same way `location.wmo.root.lights` is.
+    this.fogs = def.fogs || [];
   }
 
   createView() {

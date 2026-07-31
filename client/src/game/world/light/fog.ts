@@ -32,6 +32,32 @@ export function stageMfog(record: MfogRecord, farclip: number): FogTriple {
 export const WMO_FOG_RAMP_PER_SEC = 0.25;
 
 /**
+ * Pack a (start, end) fog range the way the shader's `f1 = distance * x + y` expects: falling from
+ * 1 at `start` to 0 at `end`, `z`/`w` fixed at 1 (see `blendLights`'s comment on this exact packing).
+ *
+ * The one definition both `blendLights` (the scene fog) and `MapLight` (the WMO interior fog) call --
+ * two independent copies of a packing this subtle is how they drift, and reading this same packing
+ * back out has already cost this project one fix round (see `SceneLight.fogEnd`/`fogStart`).
+ */
+export function packFogParams(start: number, end: number): [number, number, number, number] {
+  const step = 1.0 / (end - start);
+  return [-step, end * step, 1.0, 1.0];
+}
+
+/**
+ * Invert `packFogParams`: recover `(start, end)` from the packed `(x, y)` pair. `end = -y/x`, then
+ * `start = end + 1/x` -- see `SceneLight.fogEnd`/`fogStart` for why it is `+1/x` and not `-1/x`.
+ */
+export function unpackFogParams(x: number, y: number): { start: number; end: number } {
+  if (x === 0) {
+    return { start: 0, end: 0 };
+  }
+  const end = -y / x;
+  const start = end + 1.0 / x;
+  return { start, end };
+}
+
+/**
  * The camera-in-WMO interior fog crossfade.
  *
  * While the camera stands in a WMO interior the scene fog -- a storm's veil included -- crossfades

@@ -209,7 +209,10 @@ export default class World extends EventEmitter {
         this.map.locateCamera(camera);
         this.map.updateVisibility(camera);
       }
-      this.map.updateWorldTime(camera, this.map.mapID);
+      // `map.animate` itself calls `updateWorldTime` first thing, with the real per-frame `delta` --
+      // a separate call here (as there used to be, with no delta) invoked MapLight.update() twice a
+      // frame. Harmless while MapLight ignored everything past `camera`, but the interior-fog
+      // crossfade now needs a real dt and would have advanced twice as fast for it.
       this.map.animate(delta, camera, cameraMoved);
     }
 

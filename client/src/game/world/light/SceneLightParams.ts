@@ -10,6 +10,12 @@ class SceneLightParams {
   #fogParams = new THREE.Vector4(1.0 / 577.0, 577.0, 1.0, 1.0);
   #fogColor = new THREE.Color(0.25, 0.5, 0.8);
 
+  // The camera-in-WMO interior fog (`MapLight`'s `WmoFogRamp` output), packed identically to
+  // `fogParams` above. Defaults to the same scene fog values so a frame rendered before the first
+  // `MapLight.update()` call has no visible seam between the two.
+  #wmoFogParams = new THREE.Vector4(1.0 / 577.0, 577.0, 1.0, 1.0);
+  #wmoFogColor = new THREE.Color(0.25, 0.5, 0.8);
+
   #riverCloseColor = new THREE.Color(0.25, 0.5, 0.8);
   #oceanCloseColor = new THREE.Color(0.25, 0.5, 0.8);
 
@@ -28,6 +34,12 @@ class SceneLightParams {
     },
     fogColor: {
       value: this.#fogColor,
+    },
+    wmoFogParams: {
+      value: this.#wmoFogParams,
+    },
+    wmoFogColor: {
+      value: this.#wmoFogColor,
     },
     riverCloseColor: {
       value: this.#riverCloseColor,
@@ -59,6 +71,14 @@ class SceneLightParams {
 
   get fogColor() {
     return this.#fogColor;
+  }
+
+  get wmoFogParams() {
+    return this.#wmoFogParams;
+  }
+
+  get wmoFogColor() {
+    return this.#wmoFogColor;
   }
 
   get riverCloseColor() {

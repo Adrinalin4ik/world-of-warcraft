@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { unpackFogParams } from './fog';
 import SceneLightParams from './SceneLightParams';
 import { LightLocation, LightUniforms } from './types';
 
@@ -49,27 +50,34 @@ class SceneLight {
 
   /**
    * `blendLights` packs `fogParams` as the (slope, intercept) pair the shader evaluates directly --
-   * `x = -1/(end - start)`, `y = end/(end - start)` -- not as (step, end). So `fogEnd` must be
-   * recovered the same way `fogStart` is: `-y/x = -(end/(end-start)) / (-1/(end-start)) = end`.
-   * Reading `y` raw returned `end/(end-start)`, which only ever equalled `end` when `end-start === 1`.
+   * `x = -1/(end - start)`, `y = end/(end - start)` -- not as (step, end). Recovering `end`/`start`
+   * from that packing is exactly `unpackFogParams` (`fog.ts`), the same helper `packFogParams` there
+   * packs it with -- reading this back out wrong has already cost this project one fix round, so
+   * there is one definition for both directions now, not a second copy of the inverse maths here.
    */
   get fogEnd() {
-    const step = this.#params[this.#location].fogParams.x;
-    return step !== 0 ? -this.#params[this.#location].fogParams.y / step : 0;
+    return unpackFogParams(this.#params[this.#location].fogParams.x, this.#params[this.#location].fogParams.y).end;
   }
 
-  /**
-   * `blendLights` packs `fogParams.x = -1 / (end - start)`, so the span is recovered by ADDING the
-   * reciprocal, not subtracting it: `end + 1/x = end - (end - start) = start`. Subtracting yielded
-   * `2*end - start`, which read plausibly on a narrow band and was wrong everywhere.
-   */
   get fogStart() {
-    const step = this.#params[this.#location].fogParams.x;
-    return step !== 0 ? this.fogEnd + 1.0 / step : this.fogEnd;
+    return unpackFogParams(this.#params[this.#location].fogParams.x, this.#params[this.#location].fogParams.y).start;
   }
 
   get fogColor() {
     return this.#params[this.#location].fogColor;
+  }
+
+  /**
+   * The camera-in-WMO interior fog, already crossfaded by `MapLight`'s `WmoFogRamp` -- packed the
+   * same way `fogParams` is, via the same `packFogParams` helper, so a consumer needs no extra maths
+   * to choose between this and the scene fog above.
+   */
+  get wmoFogParams() {
+    return this.#params[this.#location].wmoFogParams;
+  }
+
+  get wmoFogColor() {
+    return this.#params[this.#location].wmoFogColor;
   }
 
   get riverCloseColor() {

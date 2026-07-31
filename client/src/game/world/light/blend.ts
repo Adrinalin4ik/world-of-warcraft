@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { LIGHT_FLOAT_BAND, LIGHT_INT_BAND, LIGHT_PARAM } from './constants';
+import { packFogParams } from './fog';
 import { WeightedAreaLight } from './types';
 import { interpolateColorTable, interpolateNumericTable } from './utils';
 
@@ -112,13 +113,12 @@ export const blendLights = (
     );
 
     const fogStart = fogStartScalar * fogEnd;
-    const fogStep = 1.0 / (fogEnd - fogStart);
 
     // Packed so the shader's `f1 = distance * x + y` falls from 1 at fogStart to 0 at fogEnd, which
     // is what it then turns into a fog factor via `1 - min(pow(max(f1, 0), z), 1)`.
     // Passing (fogStep, fogEnd) instead left f1 permanently far above 1, pinning the fog factor at
     // zero, so fog never applied no matter how distant the geometry.
-    table.fogParams.set(-fogStep, fogEnd * fogStep, 1.0, 1.0);
+    table.fogParams.set(...packFogParams(fogStart, fogEnd));
 
     addWeightedVector(blend.fogParams, table.fogParams, weight);
 

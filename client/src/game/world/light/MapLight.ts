@@ -3,11 +3,20 @@ import DBC from '../../pipeline/dbc';
 import { batchClassOf } from '../../pipeline/wmo/material/laws';
 import { blendLights } from './blend';
 import { LIGHT_FLOAT_BAND, LIGHT_PARAM } from './constants';
+import { FogTriple, MfogRecord, packFogParams, unpackFogParams, WmoFogRamp } from './fog';
 import { sidnNightFraction } from './laws';
 import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
 import { AreaLight, WeightedAreaLight } from './types';
 import { getDayNightTime, interpolateNumericTable, selectLightsForPosition } from './utils';
+
+// Default fog range, matching `SceneLightParams`'s own default -- only visible before the first
+// `MapLight.update()` call has resolved anything real.
+const DEFAULT_FOG_TRIPLE: FogTriple = { color: [0.25, 0.5, 0.8], start: 0, end: 577 };
+
+// Farclip fallback for callers whose camera is not a THREE.PerspectiveCamera (so has no `.far`) --
+// matches the scene fog's own default range, not an arbitrary guess.
+const DEFAULT_FARCLIP = 577;
 
 type MapLightOptions = {
   // Add any options needed for initialization
@@ -47,6 +56,24 @@ class MapLight extends SceneLight {
 
   // The WMO the camera is standing in, for the debug readout. Null outdoors.
   #wmo: { name: string; groupIndex: number; ext: number; int: number; trans: number } | null = null;
+
+  // The raw `location.wmo` (handler/root/group/views), for the fog resolver -- distinct from `#wmo`
+  // above, which is a debug-readout summary, not something a resolver should be parsing back apart.
+  #wmoLocation: any = null;
+
+  // The camera-in-WMO interior fog crossfade. Held across frames so the fade-in/out ramps smoothly
+  // rather than resetting whenever the camera crosses a portal.
+  #fogRamp = new WmoFogRamp();
+
+  // The interior fog triple last published -- `WmoFogRamp.blend`'s result, i.e. the scene fog already
+  // crossfaded toward the camera's claimed WMO room fog (or the scene fog verbatim, outdoors or before
+  // the ramp has engaged). Surfaced for tests and the next task's debug readout.
+  #interiorFog: FogTriple = DEFAULT_FOG_TRIPLE;
+
+  // Wall-clock fallback for callers that have not been plumbed with a real per-frame delta (none of
+  // which sit on the live render path -- see `update`'s `dt` doc). Never used when a caller passes
+  // `dt` explicitly.
+  #lastFrameTime: number | null = null;
 
   // A blended band that no light contributed to stays at exactly zero.
   static #isUnset(color: THREE.Color) {
@@ -90,6 +117,21 @@ class MapLight extends SceneLight {
 
   get wmo() {
     return this.#wmo;
+  }
+
+  /**
+   * The camera-in-WMO interior fog crossfade's current result: the scene fog, blended toward the
+   * camera's claimed room fog by `WmoFogRamp`. Equal to the scene fog outdoors or before the ramp has
+   * ever engaged.
+   */
+  get interiorFog() {
+    return this.#interiorFog;
+  }
+
+  /** The ramp's current blend weight (0 outdoors/settled-out, 1 fully faded into a room), for the
+   * debug readout. */
+  get fogRampWeight() {
+    return this.#fogRamp.weight;
   }
 
   /**
@@ -140,7 +182,18 @@ class MapLight extends SceneLight {
     this.#wmoBrightness = Math.min(Math.max(value, 0), 4);
   }
 
-  update(camera: THREE.Camera) {
+  /**
+   * `dt` is the real elapsed seconds since the previous frame -- `WorldMap.animate`'s `delta`
+   * parameter, itself `THREE.Clock.getDelta()` (`pages/game/index.tsx`). It drives the four-second
+   * interior-fog crossfade (`WmoFogRamp`), so a caller that hands back a fixed guess (e.g. 1/60)
+   * makes that crossfade track frame rate instead of wall-clock time.
+   *
+   * Callers not yet plumbed with a real delta (the legacy, unwired `WDTManager` / `WDTManagerLite` /
+   * `M2LightIntegration` / `WMOLightIntegration` integrations -- none sit on the live render path,
+   * see `light/index.ts`'s re-exports vs. their lack of any `new` call site) omit `dt` entirely; this
+   * falls back to measuring real wall-clock time between calls rather than assuming any fixed rate.
+   */
+  update(camera: THREE.Camera, dt?: number) {
     // Resolved before the light values are computed, since it decides which side they are read from.
     this.#trackCameraLocation(camera);
 
@@ -152,7 +205,21 @@ class MapLight extends SceneLight {
       this.#updateLights();
     }
 
+    this.#updateInteriorFog(camera, this.#resolveDt(dt));
+
     super.update(camera);
+  }
+
+  /** See `update`'s doc for why this is a wall-clock measurement and not a fixed constant. */
+  #resolveDt(dt: number | undefined): number {
+    if (dt !== undefined) {
+      return dt;
+    }
+
+    const now = performance.now();
+    const delta = this.#lastFrameTime === null ? 0 : (now - this.#lastFrameTime) / 1000;
+    this.#lastFrameTime = now;
+    return delta;
   }
 
   /**
@@ -170,6 +237,82 @@ class MapLight extends SceneLight {
     this.location = interior ? 'interior' : 'exterior';
 
     this.#wmo = interior ? MapLight.#describeWmo(location.wmo) : null;
+    this.#wmoLocation = interior ? location.wmo : null;
+  }
+
+  /**
+   * Resolve and publish the camera-in-WMO interior fog for this frame.
+   *
+   * Selection is deliberately simple: the camera's claimed group's first `fogOffsets` entry that
+   * indexes a real MFOG record on the root, seeded only if the root carries at least two records (the
+   * reference's `select_wmo_fog` bail -- `samples/benilla/crates/benilla/src/wmo_portal/fog.rs:59-61`
+   * -- a one-record room keeps the scene fog verbatim, e.g. the ref forge showing the storm's veil
+   * unmodified). Out-of-range offsets are skipped, not treated as "no fog for this room".
+   *
+   * The RAW record is handed to `WmoFogRamp.blend`, never a pre-staged triple -- see `fog.ts`'s
+   * `blend` doc for why re-staging every call (against the current farclip) is deliberate, not
+   * redundant.
+   */
+  #updateInteriorFog(camera: THREE.Camera, dt: number) {
+    const target = this.location === 'interior'
+      ? MapLight.#resolveWmoFogTarget(this.#wmoLocation)
+      : null;
+
+    const farclip = (camera as THREE.PerspectiveCamera).far ?? DEFAULT_FARCLIP;
+
+    const exterior = this.paramsFor('exterior');
+    const { start, end } = unpackFogParams(exterior.fogParams.x, exterior.fogParams.y);
+    const sceneTriple: FogTriple = {
+      color: [exterior.fogColor.r, exterior.fogColor.g, exterior.fogColor.b],
+      start,
+      end,
+    };
+
+    this.#interiorFog = this.#fogRamp.blend(target, sceneTriple, farclip, dt);
+
+    const [x, y, z, w] = packFogParams(this.#interiorFog.start, this.#interiorFog.end);
+    const [r, g, b] = this.#interiorFog.color;
+
+    for (const location of ['exterior', 'interior'] as const) {
+      const params = this.paramsFor(location);
+      params.wmoFogParams.set(x, y, z, w);
+      params.wmoFogColor.setRGB(r, g, b);
+    }
+  }
+
+  /**
+   * The camera group's fog target, `null` if the camera is not standing in a WMO interior group, the
+   * root carries fewer than two MFOG records, or none of the group's `fogOffsets` index a real one.
+   *
+   * `wmoLocation` is `camera.location.wmo` (`{ handler, root, group, views }` -- see
+   * `location-manager.js`). `group.fogOffsets` is read off the group instance directly
+   * (`WMOGroup.fogOffsets`) with a `def` fallback, matching `#describeWmo`'s defensiveness about the
+   * same two spots for `materialRefs`.
+   */
+  static #resolveWmoFogTarget(wmoLocation: any): MfogRecord | null {
+    const root = wmoLocation && wmoLocation.root;
+    const group = wmoLocation && wmoLocation.group;
+    const fogs = root && root.fogs;
+
+    if (!fogs || fogs.length < 2 || !group) {
+      return null;
+    }
+
+    const offsets = group.fogOffsets || (group.def && group.def.fogOffsets);
+
+    if (!offsets) {
+      return null;
+    }
+
+    for (const offset of offsets) {
+      const record = fogs[offset];
+
+      if (record) {
+        return record;
+      }
+    }
+
+    return null;
   }
 
   /**

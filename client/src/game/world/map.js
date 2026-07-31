@@ -150,22 +150,27 @@ class WorldMap extends THREE.Group {
   }
 
   animate(delta, camera, cameraMoved) {
-    this.updateWorldTime(camera, this.mapID);
+    this.updateWorldTime(camera, this.mapID, null, delta);
     this.terrainManager.animate(delta, camera, cameraMoved);
     this.doodadManager.animate(delta, camera, cameraMoved);
     this.wmoManager.animate(delta, camera, cameraMoved);
     this.particleManager.animate(delta, camera);
   }
 
-  updateWorldTime(camera, mapID, time=null) {
+  // `delta` is the real per-frame seconds elapsed (THREE.Clock.getDelta(), from
+  // pages/game/index.tsx's animate loop) -- MapLight's interior-fog crossfade needs it to track
+  // wall-clock time rather than frame rate. Optional because this is also called from
+  // `World.animate` before `delta` has been read for the frame it belongs to (see world/index.ts);
+  // MapLight falls back to its own wall-clock measurement when it is omitted.
+  updateWorldTime(camera, mapID, time=null, delta=undefined) {
     if (this.mapLight) {
       // Set camera on MapLight if not already set
       if (!this.mapLight.camera) {
         this.mapLight.camera = camera;
       }
-      
-      this.mapLight.update(camera, mapID, time);
-      
+
+      this.mapLight.update(camera, delta);
+
       // Propagate light updates to all materials
       this.updateAllMaterialsWithLight();
     }
