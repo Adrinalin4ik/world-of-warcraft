@@ -576,17 +576,59 @@ and in the constructor, after `this.defines.BATCH_TYPE = def.batchType;`, replac
     }
 ```
 
-- [ ] **Step 7: Verify in the running app**
+- [ ] **Step 7: Drive the INTERIOR define from the LIGHTING class**
+
+**Gap closed during execution.** Task 7 added `lightingInterior` to `MOGI` in
+`client/src/wow-data-parser/wmo/index.js`, but the material reads its interior flag from **`MOGP`**
+(`material/index.js:15` — `this.interior = def.interior || groupData.interior`), whose parser is
+`client/src/wow-data-parser/wmo/group.js`. So the new lighting class never reaches the material.
+
+Add the same field to `MOGP`, beside its existing `interior` at around line 172 and leaving that one
+untouched:
+
+```js
+    // The LIGHTING class — see MOGI.lightingInterior and laws.isLightingInterior. Distinct from
+    // `interior` above, which answers the culling/containment question: an EXTERIOR_LIT porch
+    // claims the camera but is lit as outdoors.
+    lightingInterior: function() {
+      return (this.flags & 0x48) === 0;
+    }
+```
+
+Then in `material/index.js`, keep `this.interior` exactly as it is — other code depends on it — and
+add a separate field for the lighting lane:
+
+```js
+    // Lighting takes the reference's 0x48 class; `this.interior` above stays the culling question.
+    this.lightingInterior = groupData.lightingInterior === undefined
+      ? this.interior
+      : groupData.lightingInterior;
+```
+
+The `undefined` fallback matters: `groupData` also arrives from paths that predate this field, and
+falling back to the culling flag is closer than defaulting to exterior.
+
+Finally, set the shader define from the new field rather than the old one:
+
+```js
+    if (this.lightingInterior) {
+      this.defines.INTERIOR = 1;
+    }
+```
+
+Task 8 de-duplicates the `0x48` mask across all three sites.
+
+- [ ] **Step 8: Verify in the running app**
 
 Buildings should now be lit per fragment rather than per vertex — smooth shading across large wall
 faces instead of visible triangle banding — and should track the time-of-day slider. Interiors will
 still look wrong (the batch classes land in Task 4) and SIDN materials still have no glow (Task 5).
 Note what you see.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add client/src/game/pipeline/wmo/material/shaders client/src/game/pipeline/wmo/material/index.js
+git add client/src/game/pipeline/wmo/material/shaders client/src/game/pipeline/wmo/material/index.js client/src/wow-data-parser/wmo/group.js
 git commit -m "feat(wmo): put surfaces on the reference fixed-function law, per fragment"
 ```
 
@@ -615,7 +657,9 @@ In `material/index.js`, replace `this.defines.BATCH_TYPE = def.batchType;` with:
 
 Extend the import: `import { batchClassOf, decodeMaterialLighting } from './laws';`
 
-Keep `this.defines.INTERIOR = 1` where it already is set for interior groups.
+`this.defines.INTERIOR` is already set from `this.lightingInterior` by Task 3 step 7 — leave it as
+Task 3 left it. Do NOT re-point it at `this.interior`, which answers the culling question, not the
+lighting one.
 
 - [ ] **Step 2: Implement the three laws**
 
