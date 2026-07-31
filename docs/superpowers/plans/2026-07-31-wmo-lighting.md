@@ -568,8 +568,10 @@ and in the constructor, after `this.defines.BATCH_TYPE = def.batchType;`, replac
     // reading -- a material we cannot identify must not glow. See the open questions.
     const sidnWord =
       def.textures.length > 0 ? def.textures[0].textureData.color : { r: 0, g: 0, b: 0, a: 0 };
-    const lighting = decodeMaterialLighting(def.flags, sidnWord);
-    this.lighting = lighting;
+    // Kept on the instance because Task 5 reads `sidnColor` and `window` off it, and because a
+    // material's decoded lighting is worth inspecting from a breakpoint.
+    this.lighting = decodeMaterialLighting(def.flags, sidnWord);
+    const lighting = this.lighting;
 
     if (lighting.unlit) {
       this.uniforms.lightModifier.value = 0.0;
