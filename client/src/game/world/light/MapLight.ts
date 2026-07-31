@@ -57,15 +57,6 @@ class MapLight extends SceneLight {
    */
   wmoPointLights: any[] = [];
 
-  // How far indoors the camera is, 0 outside and 1 fully inside, eased rather than switched.
-  // Crossing a portal used to flip the sun between full strength and nothing in a single frame,
-  // which read as the whole scene changing colour the instant you stepped through a doorway.
-  #interiorFactor = 0;
-
-  // Per-frame approach rate for the above. Roughly a third of a second at 30fps, which is enough to
-  // read as a transition without lagging behind the camera.
-  static INTERIOR_FADE_RATE = 0.1;
-
   constructor(options: MapLightOptions = {}) {
     super();
 
@@ -160,18 +151,14 @@ class MapLight extends SceneLight {
    * Follow the camera between the outside world and WMO interiors.
    *
    * LocationManager already works this out for portal culling and stores it on the camera earlier in
-   * the frame, so this only has to read it. Which side is selected decides whether the shaders see
-   * the sun; the colours themselves come from the light database either way.
+   * the frame, so this only has to read it. The colours themselves come from the light database
+   * either way; only the WMO point light selection below differs by side.
    */
   #trackCameraLocation(camera: THREE.Camera) {
     const location = (camera as any).location;
     const interior = !!(location && location.type === 'interior');
 
     this.location = interior ? 'interior' : 'exterior';
-
-    // Eased towards the target rather than snapped, so the sun fades in and out across a doorway.
-    const target = interior ? 1 : 0;
-    this.#interiorFactor += (target - this.#interiorFactor) * MapLight.INTERIOR_FADE_RATE;
 
     this.#selectWmoPointLights(interior ? location.wmo : null, camera);
   }
@@ -306,13 +293,10 @@ class MapLight extends SceneLight {
       this.#timeProgression,
     );
 
-    // Both sides get the same values, differing only by how much sun the interior factor lets
-    // through. Keeping them identical is what removes the discontinuity: `location` selects which
-    // params object the getters return, so any difference between the two shows up as a hard step the
-    // frame the camera crosses a portal. With them equal, the fade below is the only thing that
-    // moves.
-    const sunScale = 1.0 - this.#interiorFactor;
-
+    // Both sides get the same values. `location` selects which params object the getters return, so
+    // any difference between the two would show up as a hard step the frame the camera crosses a
+    // portal. Whether a roof blocks the sun is expressed by the WMO's own batch classes (the INT/
+    // TRANS bakes), not by varying these params between interior and exterior.
     for (const location of ['exterior', 'interior'] as const) {
       const params = this.paramsFor(location);
 
@@ -330,8 +314,8 @@ class MapLight extends SceneLight {
       params.riverCloseColor.copy(MapLight.#isUnset(riverCloseColor) ? fogColor : riverCloseColor);
       params.oceanCloseColor.copy(MapLight.#isUnset(oceanCloseColor) ? fogColor : oceanCloseColor);
 
-      // Direct sun is the one thing that genuinely differs indoors: a roof blocks it.
-      params.sunDiffuseColor.copy(sunDiffuseColor).multiplyScalar(sunScale);
+      // Direct sun, same as outside -- the reference does not zero this indoors either.
+      params.sunDiffuseColor.copy(sunDiffuseColor);
     }
 
     // Interior ambient comes from the light database, not from the WMO. Light.dbc carries records
@@ -341,10 +325,6 @@ class MapLight extends SceneLight {
     // the Ironforge gate), which left every doodad indoors unlit.
     const interior = this.paramsFor('interior');
     interior.sunAmbientColor.copy(sunAmbientColor);
-
-    // Still no direct sun indoors, which is the one thing that genuinely differs from outside:
-    // keeping it would light interior doodads as though the roof were not there.
-    interior.sunDiffuseColor.setRGB(0.0, 0.0, 0.0);
 
     // Fog is carried over from outside. WMO groups do define their own fog, but it is not parsed
     // yet, and reusing the outdoor values is closer than the constructor defaults this side used to
