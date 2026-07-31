@@ -153,62 +153,95 @@ export const interpolateNumericTable = (table: any[], key: number): number => {
 };
 
 /**
+ * Choose the map's seed light -- the record that absorbs whatever the local falloff spheres don't
+ * claim (see `selectLightsForPosition`'s doc). Deliberately a pure function of `lights` alone, NOT
+ * of the camera position: round 2 of this fix found that picking the seed by anything
+ * position-dependent (originally: nearest `falloffEnd === 0` record to the camera) reintroduces a
+ * step the moment two candidate seeds swap rank, which is exactly the discontinuity this module
+ * exists to remove. A map's seed is therefore the same record for every camera position, decided
+ * once from the data:
+ *
+ *  1. Among records with `falloffEnd === 0` (no falloff radius -- a map-wide light by definition),
+ *     the one with the lowest `id`. Several such records on one map is a data quirk, not a reason to
+ *     let the seed's identity depend on where the camera happens to be standing.
+ *  2. Otherwise, the record with the largest `falloffEnd` on the map (tie-broken by lowest `id`).
+ *     The light covering the most area is the closest thing to a map-wide default a spatial light
+ *     can be, and -- critically -- "largest falloffEnd" is a property of the record, not of the
+ *     camera, so this is exactly as stable as case 1.
+ *  3. `null` if the map has no light records at all.
+ */
+const findSeedLight = (lights: AreaLight[]): AreaLight | null => {
+  if (lights.length === 0) {
+    return null;
+  }
+
+  const defaultLights = lights.filter((light) => light.falloffEnd === 0.0);
+
+  if (defaultLights.length > 0) {
+    return defaultLights.reduce((best, light) => (light.id < best.id ? light : best));
+  }
+
+  return lights.reduce((best, light) => {
+    if (light.falloffEnd > best.falloffEnd) {
+      return light;
+    }
+    if (light.falloffEnd === best.falloffEnd && light.id < best.id) {
+      return light;
+    }
+    return best;
+  });
+};
+
+/**
  * Select the area lights that apply at `position`, with weights that sum to 1 by construction --
  * never by normalising after the fact (see the history below for why that was wrong).
  *
  * The reference (benilla) seeds its blend from the map's global light and alpha-lerps each
  * overlapping local sphere over that seed, so the total is always 1 *and* each local light's own
- * share still falls off continuously with distance. This ports that as a weight split: local,
- * falloff-based shares are computed first exactly as before, and whatever they leave unclaimed is
- * handed to the map's default light rather than divided away or spread proportionally.
+ * share still falls off continuously with distance. This ports that as a weight split: the map's
+ * seed light (`findSeedLight`, chosen once from the data and never from the camera) is excluded from
+ * the local falloff pool entirely, the remaining lights' falloff-based shares are computed exactly as
+ * before, and whatever they leave unclaimed goes to the seed.
  *
- * History: an earlier fix normalised the selected weights (divided each by their sum) to stop the
- * scene reading darker the farther the camera sat from the nearest record -- a real bug, since
- * `blendLights` scales ambient/diffuse/fog by whatever the weights sum to. But normalising a SINGLE
- * selected light always drives it to weight 1.0 regardless of distance, which flattens the falloff
- * ramp into a step: the resolved light then only changes when the selected *set* changes, not
- * continuously within it. Reported as fog "changes not smoothly, more like instant".
+ * History, round 1: an earlier fix normalised the selected weights (divided each by their sum) to
+ * stop the scene reading darker the farther the camera sat from the nearest record -- a real bug,
+ * since `blendLights` scales ambient/diffuse/fog by whatever the weights sum to. But normalising a
+ * SINGLE selected light always drives it to weight 1.0 regardless of distance, which flattens the
+ * falloff ramp into a step. Reported as fog "changes not smoothly, more like instant".
  *
- * Default-light identification was also too strict: it required both `falloffEnd === 0` AND the
- * record sitting exactly at the map corner (`MAP_CORNER_X`/`MAP_CORNER_Y`). `falloffEnd === 0` is
- * already sufficient -- a light with no falloff radius is a map-wide seed regardless of where its
- * record happens to be positioned in the DBC, and the position match is what made map 571 resolve
- * zero area lights (`falloffEnd === 0` records exist; the position check just rejected them). Keying
- * on falloff alone is also what the reference does: `select_wmo_fog`-style selection treats a
- * zero-radius record as unconditional, never as "unconditional only if also at the origin".
+ * Round 1's replacement fix (hand the leftover to the map's default light, identified by
+ * `falloffEnd === 0` -- the old position-gated check was too strict and likely why map 571 resolved
+ * zero area lights) was right in spirit but picked BOTH the default-light tie-break AND the
+ * no-default fallback by distance to the camera. That just relocates the step: whichever record was
+ * "nearest" (and so held the leftover) changes as the camera moves, and the leftover transfers
+ * instantaneously between records on that swap -- observable as one light jumping straight from a
+ * partial weight to 1.0 the instant a nearer light drops out of range. `findSeedLight` removes camera
+ * position from the decision entirely, which is what actually closes the gap.
  */
 export const selectLightsForPosition = (
   lights: AreaLight[],
   position: THREE.Vector3,
 ): WeightedAreaLight[] => {
+  const seed = findSeedLight(lights);
   const selectedLights: WeightedAreaLight[] = [];
 
-  // The map's default/global light -- identified by falloff alone (see doc above), not position.
-  // Tracked as the nearest such record in case a map defines more than one; distance is otherwise
-  // irrelevant to it, since it always absorbs whatever local falloff didn't claim.
-  let defaultLight: WeightedAreaLight | null = null;
-
-  // Nearest ordinary (non-default) record overall, in range or not. Only used as a last-resort seed
-  // when the map has no default light at all and nothing is currently in range either -- see below.
-  let nearestOverall: WeightedAreaLight | null = null;
-
   for (const light of lights) {
-    const distance = position.distanceTo(light.position);
-
-    if (light.falloffEnd === 0.0) {
-      if (!defaultLight || distance < defaultLight.distance) {
-        defaultLight = { light, distance, weight: 0.0 };
-      }
+    // The seed never competes for a falloff share -- it only ever receives the leftover, below. Were
+    // it left in this pool it could be selected AND seeded, double-counting its weight. Every OTHER
+    // falloffEnd === 0 record (a map can define more than one) is skipped too: it has no falloff
+    // radius to speak of, so it is not a spatial candidate at all, just a losing tie-break for the
+    // seed slot -- without this, such a record would only ever satisfy `distance <= 0` (i.e. the
+    // camera standing exactly on top of it) and grab the entire pool at that single point, which is a
+    // degenerate special case, not a real local light.
+    if (light === seed || light.falloffEnd === 0.0) {
       continue;
     }
+
+    const distance = position.distanceTo(light.position);
 
     // Include lights if position is within falloff radii
     if (distance <= light.falloffEnd) {
       selectedLights.push({ light, distance, weight: 0.0 });
-    }
-
-    if (!nearestOverall || distance < nearestOverall.distance) {
-      nearestOverall = { light, distance, weight: 0.0 };
     }
   }
 
@@ -237,35 +270,23 @@ export const selectLightsForPosition = (
     availableWeight -= weight;
   }
 
-  // Seed whatever is left, rather than normalising it away. Preference order, matching the reference's
-  // seed-then-lerp shape as closely as this weight-based model allows:
-  //
-  //  1. The map's default light, if it has one. Its own weight then IS the leftover -- as local
-  //     lights' falloff shares grow (camera approaches) the default's share shrinks to match, and
-  //     vice versa, all continuously. This is the common case and the one that matters for map 571.
-  //  2. No default record for this map: hand the leftover to the nearest in-range light instead of
-  //     spreading it proportionally across every selected light. This still sums to 1 and still
-  //     varies continuously as the "nearest" light's own raw share varies (see utils.test.ts's
-  //     smoothness case) -- it degrades to the pre-normalisation darkness bug only in the degenerate
-  //     case of a single light with nothing else on the map to vary against, which is an accepted,
-  //     documented trade-off, not a silent one.
-  //  3. Nothing in range and no default: seed from the nearest record overall, so a position outside
-  //     every falloff band still resolves to something (continuously, as that nearest record's own
-  //     distance changes) instead of leaving the selection empty -- which used to make MapLight freeze
-  //     the previous frame's colours rather than resolving anything at all.
-  //  4. No light records for the map whatsoever: `selectedLights` stays empty. There is nothing to
-  //     seed from; MapLight#updateLights resolves this to its own documented neutral fallback instead
-  //     of leaving the frame's params untouched.
-  if (availableWeight > 0.0) {
-    if (defaultLight) {
-      selectedLights.push({ ...defaultLight, weight: availableWeight });
-    } else if (selectedLights.length > 0) {
-      selectedLights[0].weight += availableWeight;
-    } else if (nearestOverall) {
-      selectedLights.push({ ...nearestOverall, weight: availableWeight });
-    }
+  // The leftover always goes to the seed -- never to `selectedLights[0]` (the nearest in-range
+  // light). Handing it to "nearest" was round 1's mistake: that assignment target changes identity as
+  // the camera moves, so the leftover would jump between records instead of the seed's own weight
+  // moving smoothly. The seed's identity never changes for a given map (see `findSeedLight`), so this
+  // assignment is a continuous function of distance even though which OTHER lights are competing for
+  // the remaining pool changes as the camera moves.
+  if (seed) {
+    selectedLights.push({
+      light: seed,
+      distance: position.distanceTo(seed.position),
+      weight: availableWeight,
+    });
   }
 
+  // No light records for the map whatsoever: `selectedLights` stays empty (there is nothing to seed
+  // from). MapLight#updateLights resolves this to its own documented neutral fallback instead of
+  // leaving the frame's params untouched.
   return selectedLights;
 };
 
