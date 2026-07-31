@@ -179,7 +179,11 @@ class M2Material extends THREE.ShaderMaterial {
       // shader declares but nobody supplies reads as zero, which would have unfogged everything.
       fogModifier: { value: 1.0 },
 
-      materialParams: { value: [1,1,1,1] }
+      materialParams: { value: [1,1,1,1] },
+
+      // The per-instance terrain-shade intensity. Declared unconditionally with 1.0: a uniform the
+      // shader reads but nobody supplies reads as ZERO, which would flatten every model's sun term.
+      sunIntensity: { value: 1.0 },
     };
 
     this.defines.MAX_BONES = 200;

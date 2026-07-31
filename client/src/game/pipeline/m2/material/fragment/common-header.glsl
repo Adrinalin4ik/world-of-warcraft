@@ -13,6 +13,7 @@ uniform vec4 sunParams;
 uniform vec3 sunDiffuseColor;
 uniform vec3 sunAmbientColor;
 uniform vec4 materialParams;
+uniform float sunIntensity;
 
 uniform vec4 fogParams;
 uniform vec3 fogColor;
@@ -77,9 +78,33 @@ vec3 applyWmoPointLights(vec3 normal) {
   return accumulated;
 }
 
+/**
+ * The exterior M2 response -- the closed form of the shipped `Model2.bls` vertex program's lighting
+ * block (samples/benilla wow_model.wgsl, and `lighting/sh.rs::prop_probe_coeffs` for the same curve):
+ *
+ *   E = A + D * I * (4/17) * (0.375 + 2*mu + 1.875*mu*mu),  mu = dot(N, toLight)
+ *
+ * This is NOT the fixed-function matte it replaces. Exterior M2s are drawn by Model2.bls -- gated on
+ * the M2UseShaders cvar, which defaults to "1" -- and that program is an order-2 irradiance lobe. The
+ * fixed-function light commits visible in a reference world frame belong to TERRAIN and WMO.
+ *
+ * Peaks at exactly 1.0 at mu = 1 by construction: (4/17)(0.375 + 2 + 1.875) = 1. Side-on leaves
+ * 0.0882, fully-away 0.0588 -- an authored soft wrap, deliberately not a hard max(N.L, 0).
+ *
+ * CLAMP THE SUM, NEVER A TERM. The lobe dips to about -0.037*D around mu = -0.53 (low-order SH
+ * ringing) and that dip is part of the response the reference chose. Clamping the sun term alone
+ * would floor it away.
+ */
+vec3 m2SunLobe(in vec3 normal, in vec3 toLight, in vec3 ambient, in vec3 diffuse, in float intensity) {
+  float mu = dot(normalize(normal), toLight);
+  float lobe = (4.0 / 17.0) * (0.375 + 2.0 * mu + 1.875 * mu * mu);
+  return clamp(ambient + diffuse * (intensity * lobe), 0.0, 1.0);
+}
+
 vec4 applyDiffuseLighting(vec4 result) {
   #if USE_LIGHTING == 1
-    vec3 light = createLight(worldVertexNormal.xyz, sunParams.xyz, sunDiffuseColor.rgb, sunAmbientColor.rgb);
+    vec3 toLight = -normalize(sunParams.xyz);
+    vec3 light = m2SunLobe(worldVertexNormal, toLight, sunAmbientColor, sunDiffuseColor, sunIntensity);
     light += applyWmoPointLights(normalize(worldVertexNormal.xyz));
     light = min(light, vec3(1.0, 1.0, 1.0));
     light = mix(light, vec3(1.0, 1.0, 1.0), 1.0 - materialParams.y);
