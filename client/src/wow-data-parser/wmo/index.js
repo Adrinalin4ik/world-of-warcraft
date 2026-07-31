@@ -124,6 +124,13 @@ const MOGI = Chunk({
 
     interior: function() {
       return (this.flags & 0x2000) !== 0 && (this.flags & 0x8) === 0;
+    },
+
+    // The LIGHTING class, which is not the same question as `interior` above. The reference forks
+    // it on MOGI & 0x48: EXTERIOR (0x8) or EXTERIOR_LIT (0x40) both mean "lit as outdoors". An
+    // EXTERIOR_LIT porch still claims the camera for culling, which is why both flags exist.
+    lightingInterior: function() {
+      return (this.flags & 0x48) === 0;
     }
   }), 'size', 'bytes')
 });

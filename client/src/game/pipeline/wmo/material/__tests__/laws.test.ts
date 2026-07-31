@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { batchClassOf, decodeMaterialLighting, MOMT_FLAG } from '../laws';
+import { batchClassOf, decodeMaterialLighting, isLightingInterior, MOMT_FLAG } from '../laws';
 
 const NO_COLOR = { r: 0, g: 0, b: 0, a: 0 };
 
@@ -67,5 +67,29 @@ describe('batchClassOf', () => {
     // An exterior group's batches carry no meaningful class; exterior is the plain law.
     expect(batchClassOf(0)).toBe('ext');
     expect(batchClassOf(99)).toBe('ext');
+  });
+});
+
+describe('isLightingInterior', () => {
+  it('is interior when neither EXTERIOR nor EXTERIOR_LIT is set', () => {
+    expect(isLightingInterior(0x0000)).toBe(true);
+    expect(isLightingInterior(0x2000)).toBe(true);
+  });
+
+  it('is exterior when EXTERIOR (0x8) is set', () => {
+    expect(isLightingInterior(0x0008)).toBe(false);
+    expect(isLightingInterior(0x2008)).toBe(false);
+  });
+
+  it('is exterior when EXTERIOR_LIT (0x40) is set, even with INTERIOR also set', () => {
+    // This is the case the old rule got wrong: an EXTERIOR_LIT porch flagged INTERIOR read as
+    // indoors and took the interior law, where the reference lights it as outdoors.
+    expect(isLightingInterior(0x0040)).toBe(false);
+    expect(isLightingInterior(0x2040)).toBe(false);
+  });
+
+  it('ignores unrelated flag bits', () => {
+    // 0x1 BSP, 0x4 vertex colours, 0x200 lights, 0x800 doodads -- none of them classify lighting.
+    expect(isLightingInterior(0x0001 | 0x0004 | 0x0200 | 0x0800)).toBe(true);
   });
 });

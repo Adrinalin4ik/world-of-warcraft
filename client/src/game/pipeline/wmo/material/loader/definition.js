@@ -1,11 +1,14 @@
 class WMOMaterialDefinition {
 
-  constructor(index, flags, blendingMode, shaderID, textures) {
+  constructor(index, flags, blendingMode, shaderID, textures, sidnColor) {
     this.index = index;
     this.flags = flags;
     this.blendingMode = blendingMode;
     this.shaderID = shaderID;
     this.textures = textures;
+    // MOMT slot 1's colour word — the SIDN emissive. Carried separately from `textures` because
+    // that list is FILTERED to slots whose path resolved, so its index 0 is not reliably slot 0.
+    this.sidnColor = sidnColor;
 
     // Comes from reference
     this.batchType = null;
@@ -38,8 +41,8 @@ class WMOMaterialDefinition {
   }
 
   clone() {
-    const { index, flags, blendingMode, shaderID, textures } = this;
-    return new WMOMaterialDefinition(index, flags, blendingMode, shaderID, textures);
+    const { index, flags, blendingMode, shaderID, textures, sidnColor } = this;
+    return new WMOMaterialDefinition(index, flags, blendingMode, shaderID, textures, sidnColor);
   }
 
 }

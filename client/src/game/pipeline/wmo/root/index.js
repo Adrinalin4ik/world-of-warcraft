@@ -96,7 +96,16 @@ class WMORoot {
           });
         }
       }
-      const def = new WMOMaterialDefinition(mindex, flags, blendMode, shader, textures);
+      // data.texture1.color IS the MOMT sidnColor word, and it is present whether or not that
+      // slot's texture path resolved — unlike anything reachable through the filtered list above.
+      const def = new WMOMaterialDefinition(
+        mindex,
+        flags,
+        blendMode,
+        shader,
+        textures,
+        data.texture1.color,
+      );
 
       defs.set(mindex, def);
     }

@@ -87,3 +87,25 @@ export function batchClassOf(batchType: number): BatchClass {
   }
   return 'ext';
 }
+
+/** `MOGI`/`MOGP` group flag bits that decide the LIGHTING class. */
+export const MOGI_FLAG = {
+  /** An outdoor group — street, deck, terrace. */
+  EXTERIOR: 0x8,
+  /** An interior-graph group that is nonetheless LIT as outdoors: a porch, a courtyard. */
+  EXTERIOR_LIT: 0x40,
+} as const;
+
+/**
+ * Whether a group takes the INTERIOR lighting law.
+ *
+ * The reference forks the lighting class on `MOGI & 0x48` — either EXTERIOR (`0x8`) or EXTERIOR_LIT
+ * (`0x40`) sends the group down the exterior leg (benilla `wmo_portal/mod.rs`, classify `0x6a87f0`).
+ *
+ * This is deliberately a SECOND notion of "interior", separate from the `interior` flag that drives
+ * portal culling and camera containment — the reference keeps both, because an EXTERIOR_LIT-only
+ * porch still claims the camera while lighting as outdoors. Do not collapse them.
+ */
+export function isLightingInterior(mogiFlags: number): boolean {
+  return (mogiFlags & (MOGI_FLAG.EXTERIOR | MOGI_FLAG.EXTERIOR_LIT)) === 0;
+}
