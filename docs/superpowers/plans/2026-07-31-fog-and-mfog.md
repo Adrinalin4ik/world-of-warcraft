@@ -518,6 +518,53 @@ git commit -m "feat(fog): fog interior WMO groups with their own MFOG triple"
 3. **`dt` for the ramp.** If the frame delta is not readily available in `MapLight.update`, plumbing it
    is part of Task 5 — do not substitute a fixed 1/60, or the crossfade's duration tracks frame rate.
 
+## Outcome
+
+Six tasks, three fix rounds, and a four-commit final fix wave. Suite 242/242, `tsc --noEmit` clean.
+
+**The plan's premise was corrected before it was written**, which is why the work was smaller than the
+spec implied: the pipelines never disagreed about the fog *law* — all pack `fogParams` identically and,
+with `fogParams.z` hardcoded `1.0`, all evaluated the same linear ramp. The real defects were the radial
+coordinate, a vestigial `pow`, M2's missing Mod/Mod2x policy, and the absent MFOG.
+
+**Four things the plan itself got wrong, all caught during execution:**
+
+1. **Mod2x is blend mode 6, not 7 — and there is no mode 7.** Worse, mode 6 was sitting in the
+   *additive* branch, so Mod2x geometry fogged toward black instead of grey. Both the implementer and
+   the reviewer derived the enumeration independently from the GL blend factors.
+2. **The `blend` signature was internally inconsistent** — typed for a raw record while its own tests
+   passed a staged triple. Resolved toward the reference (stage inside `blend`, every call), which also
+   removed a trap the next task would have walked into: with staging outside, caching a staged triple
+   silently stops the view-distance slider re-clamping interior fog.
+3. **The absence rule was guessed wrong.** The plan proposed "all-zero `fogOffsets` means no fog";
+   index 0 is a legitimate record and all-zero offsets are normal. The real rule, verified in
+   `fog.rs:59-61`, is that interior fog engages only with **at least 2** MFOG records.
+4. **MFOG selection is positional, which the plan omitted entirely.** The reference seeds from record 0
+   and blends in positioned records by proximity within their radius band, nearest winning. The plan's
+   "first valid offset" would have engaged the wrong record everywhere in a multi-zone room.
+
+**Three defects found in passing, none of them in this plan's scope on paper:**
+
+- A **duplicate per-frame `MapLight.update()`** — `world/index.ts` called both `updateWorldTime` and
+  `animate`, which itself calls it. That double-advanced the ramp, making the four-second crossfade take
+  two.
+- **`WMORoot` never copied `fogs`** from its definition, so the previous task's data was unreachable —
+  the *third* half-threaded-field failure in this project.
+- **The fog packing produced `Infinity`** for a zero-width band, found only because a test was added for
+  the degenerate case. Now floored in `packFogParams` so every caller benefits.
+
+**And one straggler the plan's own risk section predicted and its task list still missed:**
+`m2/particle/shader.frag` keeps a second copy of `applyFog`, with a comment asserting it was identical
+to the shared one. It was not — the blend-mode fix never reached it. Risk 1 said "a partial change puts a
+visible seam"; the plan then scoped Task 2 to one file. **A comment claiming two copies are identical is
+not evidence that they are.**
+
+### Known gap against the reference
+
+M2 doodads standing in an interior still fog with the **scene** triple. The reference fogs them with the
+interior one via a per-instance flag on the per-object lighting block. Scoped out deliberately, recorded
+here rather than left implicit.
+
 ## Handoff to plan 5
 
 Plan 5 (LightParams slots, weather, sky) needs the `Light.dbc` 8-slot schema fix, which is where the
