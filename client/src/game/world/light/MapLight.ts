@@ -436,9 +436,10 @@ class MapLight extends SceneLight {
     const interior = this.paramsFor('interior');
     interior.sunAmbientColor.copy(sunAmbientColor);
 
-    // Fog is carried over from outside. WMO groups do define their own fog, but it is not parsed
-    // yet, and reusing the outdoor values is closer than the constructor defaults this side used to
-    // keep (a fixed blue at a 577 unit range).
+    // Fog is carried over from outside for THIS pair (`fogColor`/`fogParams`, consumed by M2
+    // materials). The camera's own WMO room fog (MFOG) is a separate uniform pair --
+    // `wmoFogColor`/`wmoFogParams`, consumed by WMO materials only -- resolved and crossfaded every
+    // frame by `#updateInteriorFog`, not here.
     interior.fogColor.copy(fogColor);
     interior.fogParams.copy(fogParams);
   }
