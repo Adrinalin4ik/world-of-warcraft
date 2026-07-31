@@ -42,9 +42,11 @@ class WMOMaterial extends THREE.ShaderMaterial {
     this.defines.USE_VERTEX_COLOR = 1;
     
     // Lighting takes the reference's 0x48 class; `this.interior` above stays the culling question.
-    this.lightingInterior = groupData.lightingInterior === undefined
-      ? this.interior
-      : groupData.lightingInterior;
+    // `def.lightingInterior` is the value the cache key (WMOMaterialDefinition#key) was computed
+    // from, so it must win here -- otherwise a cache hit could still build with the wrong law.
+    this.lightingInterior = def.lightingInterior !== null && def.lightingInterior !== undefined
+      ? def.lightingInterior
+      : (groupData.lightingInterior === undefined ? this.interior : groupData.lightingInterior);
 
     if (this.lightingInterior) {
       this.defines.INTERIOR = 1;

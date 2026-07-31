@@ -221,6 +221,9 @@ class WMOGroupDefinition {
 
       ref.materialIndex = batch.materialID;
       ref.interior = groupData.MOGP.interior;
+      // Same lighting-class value as `this.lightingInterior` above -- one derivation, not a second
+      // read of the MOGP/MOGI flags, so the ref and the group definition can never disagree.
+      ref.lightingInterior = this.lightingInterior;
 
       if (index >= batchOffsets.c) {
         ref.batchType = 3;

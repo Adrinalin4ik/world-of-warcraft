@@ -13,6 +13,10 @@ class WMOMaterialDefinition {
     // Comes from reference
     this.batchType = null;
     this.interior = null;
+    // The reference's LIGHTING class (MOGI/MOGP flags & 0x48), distinct from `interior` above,
+    // which is the portal-culling/camera-containment question. Must be in `key` or two groups that
+    // share `interior` but differ here silently collide on one cached WMOMaterial instance.
+    this.lightingInterior = null;
   }
 
   forRef(ref) {
@@ -20,6 +24,7 @@ class WMOMaterialDefinition {
 
     clone.batchType = ref.batchType;
     clone.interior = ref.interior;
+    clone.lightingInterior = ref.lightingInterior;
 
     return clone;
   }
@@ -35,6 +40,10 @@ class WMOMaterialDefinition {
 
     if (this.interior !== null) {
       key.push(this.interior ? 'i' : 'e');
+    }
+
+    if (this.lightingInterior !== null) {
+      key.push(this.lightingInterior ? 'l' : 'x');
     }
 
     return key.join(';');
