@@ -29,6 +29,10 @@ class WMOMaterial extends THREE.ShaderMaterial {
       // Declared unconditionally: a uniform the shader reads but nobody supplies reads as ZERO,
       // which under the fragment law means "unlit". Only F_UNLIT materials should be 0.
       lightModifier: { value: 1.0 },
+
+      sidnColor: { value: new THREE.Vector3() },
+      sidnNight: { value: 0.0 },
+      windowFlag: { value: 0.0 },
     };
 
     // Enable lighting.
@@ -71,6 +75,9 @@ class WMOMaterial extends THREE.ShaderMaterial {
     if (lighting.unlit) {
       this.uniforms.lightModifier.value = 0.0;
     }
+
+    this.uniforms.sidnColor.value.fromArray(lighting.sidnColor);
+    this.uniforms.windowFlag.value = lighting.window ? 1.0 : 0.0;
 
     // Tag lighting mode (based on group flags)
     this.uniforms.interior = { type: 'i', value: this.interior ? 1 : 0 };
@@ -246,9 +253,7 @@ class WMOMaterial extends THREE.ShaderMaterial {
     this.uniforms.textureCount = { type: 'i', value: textures.length };
     // const texture1_color = textureDefs[0].textureData.color;
     // this.uniforms.baseColor = { type: 'c', value: new THREE.Color(texture1_color.r, texture1_color.g, texture1_color.b) }
-    const color = textureDefs[0].textureData.color;
-    this.uniforms.emissiveColor = new THREE.Uniform(new Float32Array([color.r, color.g, color.b, color.a]));
-    
+
     // if (this.def.blendingMode != 0) {
     //   let alphaTestVal = 0.878431;
     //   if ((this.def.flags & 0x80) > 0) {
@@ -307,6 +312,7 @@ class WMOMaterial extends THREE.ShaderMaterial {
       this.uniforms.sunParams.value.copy(this.mapLight.sunDir);
       this.uniforms.sunDiffuseColor.value.copy(uniforms.sunDiffuseColor.value);
       this.uniforms.sunAmbientColor.value.copy(uniforms.sunAmbientColor.value);
+      this.uniforms.sidnNight.value = this.mapLight.sidnNight;
     }
   }
 

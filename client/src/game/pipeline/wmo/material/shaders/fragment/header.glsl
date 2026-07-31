@@ -16,3 +16,13 @@ uniform vec3 sunAmbientColor;
 // 0 for a material whose lighting is off (MOMT F_UNLIT).
 uniform float lightModifier;
 
+// MOMT F_SIDN: the authored emissive colour, already normalized to 0..1 by laws.ts. Black on a
+// material without the flag.
+uniform vec3 sidnColor;
+
+// The live night fraction: 1 overnight, 0 by day, ramping 20:30-21:30 and 06:00-07:00.
+uniform float sidnNight;
+
+// MOMT F_WINDOW: 1 for a window pane, 0 otherwise.
+uniform float windowFlag;
+

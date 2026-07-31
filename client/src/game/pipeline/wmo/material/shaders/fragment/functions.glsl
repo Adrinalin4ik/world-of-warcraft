@@ -12,11 +12,31 @@
  *    the material's ambient+diffuse, not a post-multiply on the result.
  *  - The light sum saturates FIRST, and the texture modulates the clamped result. The other order
  *    lets a bright term push a surface past its own fully-lit texture.
+ *
+ * The interior WINDOW law (MOMT 0x20; samples/benilla wow_model.wgsl, wmo-interior-night-light).
+ *
+ * An interior-group batch flagged WINDOW swaps GL_LIGHT0 for a brighter pair: ambient AND diffuse
+ * both become the MIDPOINT of the direct and ambient bands, with ambient lifted a further 16/255
+ * saturating. Folding the warm direct band in at full weight is what makes an interior pane read
+ * bright and warm in daylight instead of taking the flat interior ambient -- and it still tracks
+ * time of day. The exterior drawer has no WINDOW machinery, so exterior batches never take this.
  */
 vec3 wmoLitFactor(vec3 normal, vec3 mocv) {
   vec3 toLight = -normalize(sunParams.xyz);
   float incidence = max(dot(normalize(normal), toLight), 0.0);
-  vec3 light = sunAmbientColor + sunDiffuseColor * incidence;
+
+  vec3 ambient = sunAmbientColor;
+  vec3 diffuse = sunDiffuseColor;
+
+#if defined(INTERIOR)
+  if (windowFlag > 0.0) {
+    vec3 midpoint = 0.5 * (sunDiffuseColor + sunAmbientColor);
+    ambient = midpoint + vec3(16.0 / 255.0);
+    diffuse = midpoint;
+  }
+#endif
+
+  vec3 light = ambient + diffuse * incidence;
   return clamp(mocv * light, 0.0, 1.0);
 }
 
@@ -44,10 +64,15 @@ vec4 applyWmoLighting(vec4 tex) {
   // this as two passes (lit x SRC_ALPHA + unlit x (1 - SRC_ALPHA)); collapsed to one pass, the lit
   // factor is mix(1, lit, MOCV.a).
   vec3 lit = wmoLitFactor(worldNormal, mocv);
-  result.rgb = tex.rgb * mix(vec3(1.0), lit, vertexColorOut.a);
+  // TRANS: emission rides the lit pass, weighted by the same MOCV alpha that weights the lerp.
+  vec3 emission = sidnColor * (sidnNight * vertexColorOut.a);
+  result.rgb = tex.rgb * clamp(mix(vec3(1.0), lit, vertexColorOut.a) + emission, 0.0, 1.0);
 #else
   // EXT -- an interior group's exterior-law batches, and every exterior group batch.
-  result.rgb = tex.rgb * wmoLitFactor(worldNormal, mocv);
+  // Emission at full weight -- never multiplied by MOCV, added INSIDE the clamp alongside the lit
+  // terms, exactly where glMaterialfv(GL_EMISSION) sits in the fixed-function pipeline.
+  vec3 emission = sidnColor * sidnNight;
+  result.rgb = tex.rgb * clamp(wmoLitFactor(worldNormal, mocv) + emission, 0.0, 1.0);
 #endif
 
   return result;

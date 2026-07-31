@@ -11,7 +11,6 @@ uniform vec3 sunDiffuseColor;
 uniform vec3 sunAmbientColor;
 
 uniform vec4 materialParams;
-uniform vec4 emissiveColor;
 
 varying vec2 coords[2];
 // The lighting inputs the fragment stage needs. The reference evaluates N.L per fragment, so the
