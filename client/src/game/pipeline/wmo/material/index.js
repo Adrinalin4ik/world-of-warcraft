@@ -5,7 +5,7 @@ import TextureLoader from '../../texture-loader';
 // import vertexShader from './shader.vert';
 import fragmentShader from './shaders/fragment/main.glsl';
 import vertexShader from './shaders/vertex/main.glsl';
-import { decodeMaterialLighting } from './laws';
+import { batchClassOf, decodeMaterialLighting } from './laws';
 
 
 class WMOMaterial extends THREE.ShaderMaterial {
@@ -50,7 +50,11 @@ class WMOMaterial extends THREE.ShaderMaterial {
 
     // Define blending mode
     this.defines.BLENDING_MODE = def.blendingMode;
-    this.defines.BATCH_TYPE = def.batchType;
+
+    // The batch's lighting law. MOBA orders batches trans, int, ext and the group loader numbers
+    // those ranges 1/2/3; laws.ts maps them. 0 = ext, 1 = int, 2 = trans in the shader.
+    const batchClass = batchClassOf(def.batchType);
+    this.defines.BATCH_CLASS = batchClass === 'int' ? 1 : batchClass === 'trans' ? 2 : 0;
 
     // Flag decode lives in laws.ts. Note this corrects a swap: the old code tested 0x10 (SIDN) as
     // though it were UNLIT, so it unlit exactly the materials that should glow at night.
