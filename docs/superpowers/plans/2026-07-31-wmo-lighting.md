@@ -1271,10 +1271,18 @@ load and may run in a worker with a different resolution root — do NOT force i
 to a named constant in the parser with a comment pointing at `laws.ts` as the source of truth, and say
 in your report which route you took and why.
 
-- [ ] **Step 4: Delete the dead shaders**
+- [ ] **Step 4: Delete the dead shaders and the orphaned material class**
+
+Task 4's review flagged a third piece of dead code: `client/src/game/pipeline/wmo/material/WMOMaterialNew.ts`
+is unimported and still sets the removed `BATCH_TYPE` define. It is a trap rather than mere clutter —
+rewiring it, or copying it as a template, silently reinstates the old lighting law with no compile
+error, because `BATCH_TYPE` just becomes an inert unused define. Delete it too, after confirming with
+a grep that nothing imports it (including barrel files like `game/world/light/index.ts`, which
+re-exports several sibling `*New`/`*Lite` classes — check there specifically).
+
 
 ```bash
-git rm client/src/game/pipeline/wmo/material/shader.frag client/src/game/pipeline/wmo/material/shader.vert
+git rm client/src/game/pipeline/wmo/material/shader.frag client/src/game/pipeline/wmo/material/shader.vert client/src/game/pipeline/wmo/material/WMOMaterialNew.ts
 ```
 
 Before committing, grep the whole client for `shader.frag` and `shader.vert` under the WMO material
