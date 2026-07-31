@@ -91,6 +91,13 @@ export type LightingReadoutsTarget = {
    * `(flags & 0x48) === 0` test cannot distinguish from a genuinely interior group.
    */
   nearbyWmoGroups: Array<{
+    /**
+     * The WMO PLACEMENT's id, which is what makes a row unique. `name` + `groupIndex` does not: the
+     * same WMO file placed several times in the world yields several entries sharing both, and React
+     * silently duplicates or omits children whose keys collide -- the panel reported "5" groups while
+     * rendering sixteen rows, several of them the same group repeated at an identical distance.
+     */
+    entryId: string;
     name: string;
     groupIndex: number;
     flags: number;
@@ -254,7 +261,7 @@ class LightingReadouts extends React.Component<Props> {
         <div className="divider"></div>
         <p>Nearby WMO groups: {mapLight.nearbyWmoGroups.length}</p>
         {mapLight.nearbyWmoGroups.map((group) => (
-          <p key={`${group.name}#${group.groupIndex}`}>
+          <p key={`${group.entryId}#${group.groupIndex}`}>
             {group.name} &middot; group {group.groupIndex} &middot; dist {asFixed(group.distance, 1)}
             <br />
             flags {asHexFlags(group.flags)} &middot; interior {String(group.lightingInterior)} &middot;{' '}

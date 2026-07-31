@@ -176,6 +176,7 @@ describe('LightingReadouts nearby WMO groups (diagnostic 2)', () => {
   it('prints each nearby group\'s raw flags in hex beside its resolved lightingInterior, so a zero-flags group misread as interior is visible', () => {
     const nearbyWmoGroups = [
       {
+        entryId: 'placement-1',
         name: 'SomeBuilding.wmo',
         groupIndex: 2,
         flags: 0,
@@ -186,6 +187,7 @@ describe('LightingReadouts nearby WMO groups (diagnostic 2)', () => {
         trans: 1,
       },
       {
+        entryId: 'placement-1',
         name: 'SomeBuilding.wmo',
         groupIndex: 0,
         flags: 0x8,
@@ -200,6 +202,28 @@ describe('LightingReadouts nearby WMO groups (diagnostic 2)', () => {
     expect(screen.getByText(/Nearby WMO groups: 2/)).toBeInTheDocument();
     expect(screen.getByText(/flags 0x0 · interior true/)).toBeInTheDocument();
     expect(screen.getByText(/flags 0x8 · interior false/)).toBeInTheDocument();
+  });
+
+  it('renders every row when two PLACEMENTS share a filename and group index', () => {
+    // The reported bug: `name` + `groupIndex` is not unique, because the same WMO file placed several
+    // times yields several rows sharing both. React silently duplicates or omits children on a key
+    // collision -- the panel reported 5 groups while rendering sixteen rows. Only `entryId` (the
+    // placement's own id) distinguishes them, so all four rows below must survive to the DOM.
+    const nearbyWmoGroups = [0, 1, 2, 3].map((n) => ({
+      entryId: `placement-${n}`,
+      name: 'REDRIDGE_STABLE.WMO',
+      groupIndex: 0,
+      flags: 0x8,
+      lightingInterior: false,
+      distance: 10 + n,
+      ext: 4,
+      int: 0,
+      trans: 0,
+    }));
+    render(<LightingReadouts mapLight={target({ nearbyWmoGroups })} />);
+    expect(screen.getByText(/Nearby WMO groups: 4/)).toBeInTheDocument();
+    // One row per placement -- a key collision would collapse these to fewer.
+    expect(screen.getAllByText(/REDRIDGE_STABLE\.WMO · group 0/)).toHaveLength(4);
   });
 });
 

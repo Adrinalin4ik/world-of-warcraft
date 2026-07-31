@@ -90,6 +90,7 @@ class MapLight extends SceneLight {
   // The nearest few loaded WMO groups to the camera, regardless of which one (if any) claims it --
   // see `#collectNearbyWmoGroups`'s doc comment for why this exists alongside `#wmo` above.
   #nearbyWmoGroups: Array<{
+    entryId: string;
     name: string;
     groupIndex: number;
     flags: number;
@@ -556,6 +557,7 @@ class MapLight extends SceneLight {
 
     const center = new THREE.Vector3();
     const results: Array<{
+      entryId: string;
       name: string;
       groupIndex: number;
       flags: number;
@@ -566,7 +568,10 @@ class MapLight extends SceneLight {
       trans: number;
     }> = [];
 
-    for (const wmo of wmoManager.entries.values()) {
+    // Iterate with the Map KEY, not just the value: the key is the placement's id, and it is the only
+    // thing that distinguishes two placements of the same WMO file. Keying a rendered row on
+    // name + groupIndex alone collides across placements, and React then duplicates or omits rows.
+    for (const [entryId, wmo] of wmoManager.entries.entries()) {
       if (!wmo.views || !wmo.views.root || !wmo.groups) {
         continue;
       }
@@ -584,6 +589,7 @@ class MapLight extends SceneLight {
           refs.filter((ref: any) => batchClassOf(ref.batchType) === cls).length;
 
         results.push({
+          entryId: String(entryId),
           name: wmo.filename || 'unknown',
           groupIndex: group.index,
           flags: (group.header && group.header.flags) ?? 0,
