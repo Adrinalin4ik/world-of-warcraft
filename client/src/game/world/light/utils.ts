@@ -203,6 +203,21 @@ export const selectLightsForPosition = (
     availableWeight -= weight;
   }
 
+  // Normalise so the selected weights sum to 1. A map that has a default-light record at the map
+  // corner (falloffEnd === 0) already absorbs the whole 1.0 -- this is then a no-op. A map without
+  // one (e.g. 489, Warsong Gulch) leaves a shortfall that used to just vanish, so blendLights
+  // accumulated a fraction of a light's contribution and the whole scene read darker the farther the
+  // camera sat from the nearest record. Normalising here, rather than in blendLights, means the debug
+  // readout -- which reports these same `weight` fields -- shows the weights actually used instead of
+  // the pre-shortfall figures.
+  const totalWeight = selectedLights.reduce((sum, selectedLight) => sum + selectedLight.weight, 0);
+
+  if (totalWeight > 0) {
+    for (const selectedLight of selectedLights) {
+      selectedLight.weight /= totalWeight;
+    }
+  }
+
   return selectedLights;
 };
 
