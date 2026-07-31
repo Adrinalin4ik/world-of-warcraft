@@ -148,6 +148,24 @@ const MIN_FOG_SPAN = 1e-4;
  * and the fog simply becomes an effectively instantaneous cutoff at `end` instead of poisoning the
  * uniform.
  */
+/**
+ * The default (start, end) band `SceneLightParams` packs before the first `MapLight.update()` call
+ * has ever run -- i.e. what a material sees if it renders on the very first frame, or if it is
+ * never reached by `updateAllMaterialsWithLight`'s traverse at all. `end = 577` matches the literal
+ * that was already here; `start = 0` is the most conservative choice for an unauthored default: it
+ * fogs gradually across the WHOLE band rather than guessing at a near plane, so an object that never
+ * gets real light data still reads as "in fog" rather than "no fog" (the bug this constant fixes) or
+ * "fog starts implausibly close" (a guess at a narrower band would risk this instead).
+ */
+export const DEFAULT_FOG_BAND = { start: 0, end: 577 } as const;
+
+/** `packFogParams(DEFAULT_FOG_BAND.start, DEFAULT_FOG_BAND.end)`, precomputed for callers that just
+ * want the packed uniform value (e.g. `SceneLightParams`'s field initializers). */
+export const DEFAULT_FOG_PARAMS: [number, number, number, number] = packFogParams(
+  DEFAULT_FOG_BAND.start,
+  DEFAULT_FOG_BAND.end,
+);
+
 export function packFogParams(start: number, end: number): [number, number, number, number] {
   const rawSpan = end - start;
   const span = Math.abs(rawSpan) < MIN_FOG_SPAN
