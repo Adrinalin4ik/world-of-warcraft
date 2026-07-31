@@ -174,6 +174,14 @@ export default Chunked({
     return (this.flags & 0x2000) !== 0 && (this.flags & 0x8) === 0;
   },
 
+  // MOGP/MOGI flag 0x8 (EXTERIOR). Consumed by WMOGroupDefinition.fixVertexColors' outdoor-alpha
+  // law -- see FixColorVertexAlpha in the reference. Lives on this outer chunked object (it reads
+  // `this.flags`, exposed here, not on the MOGP sub-struct), same as `interior` above; the
+  // consumer must be threaded a value from here, not `groupData.MOGP.exterior`.
+  exterior: function() {
+    return (this.flags & 0x8) !== 0;
+  },
+
   // The LIGHTING class — see MOGI.lightingInterior and laws.isLightingInterior. Distinct from
   // `interior` above, which answers the culling/containment question: an EXTERIOR_LIT porch
   // claims the camera but is lit as outdoors.

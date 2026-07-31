@@ -70,8 +70,11 @@ class WMOGroupDefinition {
     const normals = attributes.normals = new Float32Array(vertexCount * 3);
     this.assignVertexNormals(vertexCount, groupData.MONR, normals);
 
-    // Manipulate vertex colors a la FixColorVertexAlpha
-    this.fixVertexColors(vertexCount, rootHeader, groupData.MOGP, groupData.MOBA, groupData.MOCV);
+    // Manipulate vertex colors a la FixColorVertexAlpha.
+    // `exterior` is computed on the OUTER chunked object (group.js `exterior`, reading
+    // `this.flags`), not on the MOGP sub-struct handed in below -- `groupData.MOGP.exterior` is
+    // always undefined. Threaded through explicitly so fixVertexColors doesn't have to guess.
+    this.fixVertexColors(vertexCount, rootHeader, groupData.MOGP, groupData.MOBA, groupData.MOCV, groupData.exterior);
 
     const colors = attributes.colors = new Float32Array(vertexCount * 4);
     this.assignVertexColors(vertexCount, rootHeader, groupData.MOGP, groupData.MOCV, colors);
@@ -141,7 +144,14 @@ class WMOGroupDefinition {
     }
   }
 
-  fixVertexColors(vertexCount, rootHeader, mogp, moba, mocv) {
+  // The outdoor-alpha law from FixColorVertexAlpha: EXTERIOR groups get 255 (lit from outside),
+  // everything else gets 0. Pulled out as a pure function so it can be tested without decoding a
+  // real MOCV buffer or driving the whole loader.
+  static resolveOutdoorVertexAlpha(exterior) {
+    return exterior ? 255 : 0;
+  }
+
+  fixVertexColors(vertexCount, rootHeader, mogp, moba, mocv, exterior) {
     if (!mocv) {
       return;
     }
@@ -157,9 +167,11 @@ class WMOGroupDefinition {
 
     // Root Flag 0x08: something about outdoor groups
     if (rootHeader.flags & 0x08) {
+      const alpha = WMOGroupDefinition.resolveOutdoorVertexAlpha(exterior);
+
       for (let index = batchStartB; index < vertexCount; ++index) {
         const color = mocv.colors[index];
-        color.a = mogp.exterior ? 255 : 0;
+        color.a = alpha;
       }
 
       return;
@@ -214,7 +226,7 @@ class WMOGroupDefinition {
       color.g = MathUtil.clamp(color.g, 0, 255);
       color.b = MathUtil.clamp(color.b, 0, 255);
 
-      color.a = mogp.exterior ? 255 : 0;
+      color.a = WMOGroupDefinition.resolveOutdoorVertexAlpha(exterior);
     }
   }
 
