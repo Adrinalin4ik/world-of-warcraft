@@ -1,7 +1,16 @@
 /**
  * @jest-environment node
  */
-import { FogTriple, MfogRecord, packFogParams, stageMfog, unpackFogParams, WmoFogRamp } from '../fog';
+import {
+  FogTriple,
+  MfogRecord,
+  packFogParams,
+  selectWmoFogTarget,
+  stageMfog,
+  unpackFogParams,
+  WmoFogRamp,
+  WmoFogRecord,
+} from '../fog';
 
 const scene: FogTriple = { color: [0.2, 0.2, 0.2], start: -139, end: 278 };
 const room: MfogRecord = { color: [1.0, 0.5, 0.0], end: 194.4, startScalar: 0.25 };
@@ -59,6 +68,89 @@ describe('packFogParams / unpackFogParams', () => {
     const { start, end } = unpackFogParams(x, y);
     expect(Number.isFinite(start)).toBe(true);
     expect(Number.isFinite(end)).toBe(true);
+  });
+});
+
+describe('selectWmoFogTarget', () => {
+  // Helper matching WMORootDefinition.createFogs's shape: pos/radiusInner/radiusOuter/flags in
+  // WMO-local space, alongside the MfogRecord fields fog.ts already knows how to stage.
+  const rec = (
+    overrides: Partial<WmoFogRecord> = {},
+  ): WmoFogRecord => ({
+    color: [0, 0, 0],
+    end: 200,
+    startScalar: 0.25,
+    pos: { x: 0, y: 0, z: 0 },
+    radiusInner: 0,
+    radiusOuter: 0,
+    flags: 0,
+    ...overrides,
+  });
+
+  it('is glue for a root with two MFOG records and a group fogOffsets that point at them: the '
+    + 'engaged candidate is selected', () => {
+    const fogs: WmoFogRecord[] = [
+      rec({ end: 200, color: [0, 0, 0] }),
+      rec({ end: 80, color: [1, 1, 1], pos: { x: 10, y: 0, z: 0 }, radiusInner: 5, radiusOuter: 25 }),
+    ];
+
+    // Camera standing exactly at the positioned record -- full weight, the room fog verbatim.
+    const target = selectWmoFogTarget(fogs, [1, 0, 0, 0], { x: 10, y: 0, z: 0 });
+
+    expect(target).not.toBeNull();
+    expect(target!.end).toBeCloseTo(80, 4);
+    expect(target!.color[0]).toBeCloseTo(1, 5);
+  });
+
+  it('a single-record root yields no interior fog -- the count == 1 bail', () => {
+    const fogs: WmoFogRecord[] = [rec({ end: 444.4 })];
+
+    expect(selectWmoFogTarget(fogs, [0, 0, 0, 0], { x: 0, y: 0, z: 0 })).toBeNull();
+  });
+
+  it('an out-of-range offset is skipped, not treated as an abort -- the seed still resolves', () => {
+    const fogs: WmoFogRecord[] = [
+      rec({ end: 194.4, color: [0.5, 0.5, 0.5] }),
+      rec({ end: 83.3, pos: { x: 12.3, y: -0.6, z: 2.8 }, radiusInner: 0, radiusOuter: 3.36 }),
+    ];
+
+    // Offset 7 does not index any real record on this root.
+    const target = selectWmoFogTarget(fogs, [7, 0, 0, 0], { x: 0, y: 0, z: 0 });
+
+    expect(target).not.toBeNull();
+    expect(target!.end).toBeCloseTo(194.4, 4);
+  });
+
+  it('excludes an infinite-radius (flags & 1) candidate, leaving the seed', () => {
+    const fogs: WmoFogRecord[] = [
+      rec({ end: 194.4, color: [0.98, 0.85, 0.56] }),
+      rec({ end: 83.3, flags: 1, pos: { x: 12.3, y: -0.6, z: 2.8 }, radiusOuter: 3.36 }),
+    ];
+
+    const target = selectWmoFogTarget(fogs, [1, 0, 0, 0], { x: 12.3, y: -0.6, z: 2.8 });
+
+    expect(target).not.toBeNull();
+    expect(target!.end).toBeCloseTo(194.4, 4);
+  });
+
+  it('blends a candidate toward the seed by radius-band proximity, nearest winning most', () => {
+    const fogs: WmoFogRecord[] = [
+      rec({ end: 200, color: [0, 0, 0] }),
+      rec({ end: 80, color: [1, 1, 1], pos: { x: 10, y: 0, z: 0 }, radiusInner: 5, radiusOuter: 25 }),
+    ];
+
+    // Half-way through the falloff band (d = 15 -> weight 0.5) -> the midpoint.
+    const midpoint = selectWmoFogTarget(fogs, [1, 0, 0, 0], { x: 25, y: 0, z: 0 });
+    expect(midpoint!.end).toBeCloseTo(140, 3);
+
+    // Beyond the outer radius -> the seed alone.
+    const outOfBand = selectWmoFogTarget(fogs, [1, 0, 0, 0], { x: 40, y: 0, z: 0 });
+    expect(outOfBand!.end).toBeCloseTo(200, 4);
+  });
+
+  it('a root with no MFOG records at all yields no interior fog', () => {
+    expect(selectWmoFogTarget([], [0, 0, 0, 0], { x: 0, y: 0, z: 0 })).toBeNull();
+    expect(selectWmoFogTarget(null, [0, 0, 0, 0], { x: 0, y: 0, z: 0 })).toBeNull();
   });
 });
 
