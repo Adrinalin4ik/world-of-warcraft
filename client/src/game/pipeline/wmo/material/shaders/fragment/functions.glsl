@@ -48,7 +48,15 @@ vec4 applyWmoLighting(vec4 tex) {
     return tex;
   }
 
-  vec3 mocv = vertexColorOut.rgb;
+  // MOCV arrives HALVED from the loader -- `fixVertexColors` divides every channel by 2, which is the
+  // real client's FixColorVertexAlpha, and the client compensates with a x2 where the shader consumes
+  // it. The no-MOCV default of 127/255 (half-white) in `assignVertexColors` is the same convention
+  // stated in the data path. Restore full range here, once, for every lane.
+  //
+  // This x2 used to live in the combiners as `colors[0].rgb * sampled0.rgb * 2.0` and was removed by
+  // mistake, paired off against the vertex stage's `light * 0.5` -- two independent factors. The
+  // `light * 0.5` was a genuine fudge and stays gone; this one is load-time compensation.
+  vec3 mocv = vertexColorOut.rgb * 2.0;
   vec4 result = tex;
 
 #if defined(INTERIOR) && BATCH_CLASS == 1
