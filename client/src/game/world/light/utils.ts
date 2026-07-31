@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { MAP_CORNER_X, MAP_CORNER_Y } from './constants';
 import { AreaLight, WeightedAreaLight } from './types';
 
 const clamp = (value: number, min: number, max: number) => {
@@ -153,27 +152,63 @@ export const interpolateNumericTable = (table: any[], key: number): number => {
   return lerpNumbers(previousValue, nextValue, factor);
 };
 
+/**
+ * Select the area lights that apply at `position`, with weights that sum to 1 by construction --
+ * never by normalising after the fact (see the history below for why that was wrong).
+ *
+ * The reference (benilla) seeds its blend from the map's global light and alpha-lerps each
+ * overlapping local sphere over that seed, so the total is always 1 *and* each local light's own
+ * share still falls off continuously with distance. This ports that as a weight split: local,
+ * falloff-based shares are computed first exactly as before, and whatever they leave unclaimed is
+ * handed to the map's default light rather than divided away or spread proportionally.
+ *
+ * History: an earlier fix normalised the selected weights (divided each by their sum) to stop the
+ * scene reading darker the farther the camera sat from the nearest record -- a real bug, since
+ * `blendLights` scales ambient/diffuse/fog by whatever the weights sum to. But normalising a SINGLE
+ * selected light always drives it to weight 1.0 regardless of distance, which flattens the falloff
+ * ramp into a step: the resolved light then only changes when the selected *set* changes, not
+ * continuously within it. Reported as fog "changes not smoothly, more like instant".
+ *
+ * Default-light identification was also too strict: it required both `falloffEnd === 0` AND the
+ * record sitting exactly at the map corner (`MAP_CORNER_X`/`MAP_CORNER_Y`). `falloffEnd === 0` is
+ * already sufficient -- a light with no falloff radius is a map-wide seed regardless of where its
+ * record happens to be positioned in the DBC, and the position match is what made map 571 resolve
+ * zero area lights (`falloffEnd === 0` records exist; the position check just rejected them). Keying
+ * on falloff alone is also what the reference does: `select_wmo_fog`-style selection treats a
+ * zero-radius record as unconditional, never as "unconditional only if also at the origin".
+ */
 export const selectLightsForPosition = (
   lights: AreaLight[],
   position: THREE.Vector3,
 ): WeightedAreaLight[] => {
-  const selectedLights = [];
+  const selectedLights: WeightedAreaLight[] = [];
+
+  // The map's default/global light -- identified by falloff alone (see doc above), not position.
+  // Tracked as the nearest such record in case a map defines more than one; distance is otherwise
+  // irrelevant to it, since it always absorbs whatever local falloff didn't claim.
+  let defaultLight: WeightedAreaLight | null = null;
+
+  // Nearest ordinary (non-default) record overall, in range or not. Only used as a last-resort seed
+  // when the map has no default light at all and nothing is currently in range either -- see below.
+  let nearestOverall: WeightedAreaLight | null = null;
 
   for (const light of lights) {
     const distance = position.distanceTo(light.position);
+
+    if (light.falloffEnd === 0.0) {
+      if (!defaultLight || distance < defaultLight.distance) {
+        defaultLight = { light, distance, weight: 0.0 };
+      }
+      continue;
+    }
 
     // Include lights if position is within falloff radii
     if (distance <= light.falloffEnd) {
       selectedLights.push({ light, distance, weight: 0.0 });
     }
 
-    // Include default light
-    if (
-      light.position.x === MAP_CORNER_X &&
-      light.position.y === MAP_CORNER_Y &&
-      light.falloffEnd === 0.0
-    ) {
-      selectedLights.push({ light, distance, weight: 0.0 });
+    if (!nearestOverall || distance < nearestOverall.distance) {
+      nearestOverall = { light, distance, weight: 0.0 };
     }
   }
 
@@ -191,7 +226,6 @@ export const selectLightsForPosition = (
 
     const { light, distance } = selectedLight;
 
-    // Default light has no falloff
     const falloff =
       light.falloffStart > 0.0 && light.falloffEnd > 0.0
         ? (distance - light.falloffStart) / (light.falloffEnd - light.falloffStart)
@@ -203,18 +237,32 @@ export const selectLightsForPosition = (
     availableWeight -= weight;
   }
 
-  // Normalise so the selected weights sum to 1. A map that has a default-light record at the map
-  // corner (falloffEnd === 0) already absorbs the whole 1.0 -- this is then a no-op. A map without
-  // one (e.g. 489, Warsong Gulch) leaves a shortfall that used to just vanish, so blendLights
-  // accumulated a fraction of a light's contribution and the whole scene read darker the farther the
-  // camera sat from the nearest record. Normalising here, rather than in blendLights, means the debug
-  // readout -- which reports these same `weight` fields -- shows the weights actually used instead of
-  // the pre-shortfall figures.
-  const totalWeight = selectedLights.reduce((sum, selectedLight) => sum + selectedLight.weight, 0);
-
-  if (totalWeight > 0) {
-    for (const selectedLight of selectedLights) {
-      selectedLight.weight /= totalWeight;
+  // Seed whatever is left, rather than normalising it away. Preference order, matching the reference's
+  // seed-then-lerp shape as closely as this weight-based model allows:
+  //
+  //  1. The map's default light, if it has one. Its own weight then IS the leftover -- as local
+  //     lights' falloff shares grow (camera approaches) the default's share shrinks to match, and
+  //     vice versa, all continuously. This is the common case and the one that matters for map 571.
+  //  2. No default record for this map: hand the leftover to the nearest in-range light instead of
+  //     spreading it proportionally across every selected light. This still sums to 1 and still
+  //     varies continuously as the "nearest" light's own raw share varies (see utils.test.ts's
+  //     smoothness case) -- it degrades to the pre-normalisation darkness bug only in the degenerate
+  //     case of a single light with nothing else on the map to vary against, which is an accepted,
+  //     documented trade-off, not a silent one.
+  //  3. Nothing in range and no default: seed from the nearest record overall, so a position outside
+  //     every falloff band still resolves to something (continuously, as that nearest record's own
+  //     distance changes) instead of leaving the selection empty -- which used to make MapLight freeze
+  //     the previous frame's colours rather than resolving anything at all.
+  //  4. No light records for the map whatsoever: `selectedLights` stays empty. There is nothing to
+  //     seed from; MapLight#updateLights resolves this to its own documented neutral fallback instead
+  //     of leaving the frame's params untouched.
+  if (availableWeight > 0.0) {
+    if (defaultLight) {
+      selectedLights.push({ ...defaultLight, weight: availableWeight });
+    } else if (selectedLights.length > 0) {
+      selectedLights[0].weight += availableWeight;
+    } else if (nearestOverall) {
+      selectedLights.push({ ...nearestOverall, weight: availableWeight });
     }
   }
 

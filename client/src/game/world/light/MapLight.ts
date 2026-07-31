@@ -386,7 +386,14 @@ class MapLight extends SceneLight {
   }
 
   #updateLights() {
+    // `selectLightsForPosition` now always seeds a resolve from a default or nearest-record light
+    // (see utils.ts) whenever the map has ANY light data at all, so an empty selection here means
+    // there are no light records for this map whatsoever -- not merely "nothing currently in range".
+    // Bailing out used to freeze the previous frame's colours until a light came back into range, then
+    // snap; resolving to a documented neutral fallback every frame instead avoids both the freeze and
+    // the snap.
     if (!this.#selectedLights || this.#selectedLights.length === 0) {
+      this.#applyFallbackLights();
       return;
     }
 
@@ -442,6 +449,33 @@ class MapLight extends SceneLight {
     // frame by `#updateInteriorFog`, not here.
     interior.fogColor.copy(fogColor);
     interior.fogParams.copy(fogParams);
+  }
+
+  /**
+   * Neutral, documented resolve for a map with no light records at all -- distinct from "nothing
+   * currently in range", which `selectLightsForPosition` now always seeds from a default or
+   * nearest-record light instead of leaving empty. Written to every param every frame (not cached or
+   * applied once) so it reads as a steady value rather than whatever the params happened to hold
+   * before this map was selected.
+   *
+   * Values match `DEFAULT_FOG_TRIPLE`/`SceneLightParams`'s own pre-resolve defaults: a mid-grey
+   * ambient, full-white direct sun, and the same fog colour/range used before the first real
+   * `update()` call resolves anything.
+   */
+  #applyFallbackLights() {
+    const [x, y, z, w] = packFogParams(DEFAULT_FOG_TRIPLE.start, DEFAULT_FOG_TRIPLE.end);
+    const [r, g, b] = DEFAULT_FOG_TRIPLE.color;
+
+    for (const location of ['exterior', 'interior'] as const) {
+      const params = this.paramsFor(location);
+
+      params.sunAmbientColor.setRGB(0.5, 0.5, 0.5);
+      params.sunDiffuseColor.setRGB(1, 1, 1);
+      params.fogColor.setRGB(r, g, b);
+      params.fogParams.set(x, y, z, w);
+      params.riverCloseColor.setRGB(r, g, b);
+      params.oceanCloseColor.setRGB(r, g, b);
+    }
   }
 
   #selectLights(position: THREE.Vector3) {
