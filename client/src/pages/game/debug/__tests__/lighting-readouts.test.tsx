@@ -50,6 +50,25 @@ describe('LightingReadouts', () => {
     expect(screen.getByText(/Sampled at: -/)).toBeInTheDocument();
   });
 
+  it('shows the resolved weather channels and storm blend when the target carries them', () => {
+    render(
+      <LightingReadouts
+        mapLight={target({
+          weather: { kind: 1, effectKind: 1, effectIntensity: 0.4, skyDensity: 0.125 },
+          stormBlend: 0.5,
+        })}
+      />,
+    );
+    expect(screen.getByText(/intensity 0\.400/)).toBeInTheDocument();
+    expect(screen.getByText(/sky density 0\.125/)).toBeInTheDocument();
+    expect(screen.getByText(/storm blend 0\.500/)).toBeInTheDocument();
+  });
+
+  it('omits the weather line entirely for a fixture built before this task', () => {
+    render(<LightingReadouts mapLight={target()} />);
+    expect(screen.queryByText(/storm blend/)).not.toBeInTheDocument();
+  });
+
   it('prints the interior fog triple beside the scene one, and the ramp weight', () => {
     const interiorFog = { color: [0.1, 0.2, 0.3] as [number, number, number], start: 10, end: 90 };
     render(<LightingReadouts mapLight={target({ interiorFog, fogRampWeight: 0.42 })} />);

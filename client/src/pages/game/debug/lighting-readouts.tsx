@@ -115,6 +115,25 @@ export type LightingReadoutsTarget = {
    * called from `render()`: it is a `console.table` dump wired to a button, not a per-frame log.
    */
   dumpLightSlotBands?: () => void;
+  /**
+   * `MapLight.stormBlend` -- the resolved storm `LightParams` lerp weight (`laws.stormBlend` applied
+   * to `weather.skyDensity`), the same number `blendLights`'s per-light loop lerps every band by.
+   * Optional so existing fixtures built before this task keep satisfying the type.
+   */
+  stormBlend?: number;
+  /**
+   * `MapLight.weather`'s two ramped channels, for watching the ~ten-second swing without inferring it
+   * from `stormBlend` alone -- `effectIntensity` (channel A, drives precipitation once one exists) and
+   * `skyDensity` (channel B, what `stormBlend` is derived from) lead and lag each other on purpose (see
+   * `weather.ts`'s doc comment), so seeing both side by side is what makes that asymmetry legible
+   * rather than just "the fog changed". Optional for the same reason `stormBlend` is.
+   */
+  weather?: {
+    kind: number;
+    effectKind: number;
+    effectIntensity: number;
+    skyDensity: number;
+  };
 };
 
 type Props = {
@@ -210,6 +229,14 @@ class LightingReadouts extends React.Component<Props> {
           Interior fog range: {asFixed(mapLight.interiorFog.start)} / {asFixed(mapLight.interiorFog.end)}
         </p>
         <p>Fog ramp weight: {asFixed(mapLight.fogRampWeight, 3)}</p>
+        {mapLight.weather && (
+          <p>
+            Weather kind {mapLight.weather.kind} &middot; effect {mapLight.weather.effectKind}
+            &middot; intensity {asFixed(mapLight.weather.effectIntensity, 3)} &middot; sky density{' '}
+            {asFixed(mapLight.weather.skyDensity, 3)} &middot; storm blend{' '}
+            {asFixed(mapLight.stormBlend, 3)}
+          </p>
+        )}
         <p>
           Sun dir: {asFixed(mapLight.sunDir.x, 3)}, {asFixed(mapLight.sunDir.y, 3)},{' '}
           {asFixed(mapLight.sunDir.z, 3)}

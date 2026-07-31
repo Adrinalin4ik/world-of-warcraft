@@ -1,4 +1,25 @@
 import React from 'react';
+import { WeatherKind } from '../../../game/world/light/weather';
+
+/**
+ * The slice of `WeatherState` (Task 2) this control drives and reads back. A structural subset
+ * rather than the class itself so a plain test double can satisfy it without constructing a real
+ * `WeatherState`.
+ */
+export type LightingControlsWeatherTarget = {
+  /** The latest wire type, Fine included -- what the kind selector should show as selected. */
+  kind: WeatherKind;
+  /** The latest type actually spawning an effect (see `WeatherState.effectKind`'s doc). */
+  effectKind: WeatherKind;
+  /** Channel A's raw ramped value -- the wire grade, ramped. Live readout only. */
+  effectIntensity: number;
+  /** The knee-mapped spawn density (`max((A - 0.25) * 4/3, 0)`). Live readout only. */
+  effectDensity: number;
+  /** Channel B's current value, in the [0, 0.25] knee domain. Live readout only. */
+  skyDensity: number;
+  /** `WeatherState.setWeather` -- the wire's own (`kind`, `grade`, `instant`) signature. */
+  setWeather(kind: WeatherKind, grade: number, instant: boolean): void;
+};
 
 /**
  * The slice of MapLight this control drives. Narrow on purpose: it keeps the component testable
@@ -12,10 +33,35 @@ export type LightingControlsTarget = {
   timeOverride: number | null;
   /** WMO brightness multiplier, 1.0..4.0. 1.0 is faithful to the reference. */
   wmoBrightness: number;
+  /** `MapLight.weather` -- the zone weather state machine this panel drives directly, since
+   * `SMSG_WEATHER` is not wired up yet. */
+  weather: LightingControlsWeatherTarget;
+  /** `MapLight.stormBlend` -- the resolved storm `LightParams` lerp weight, `laws.stormBlend`
+   * applied to `weather.skyDensity`. Live readout only; nothing here writes it. */
+  stormBlend: number;
 };
 
 type Props = {
   mapLight: LightingControlsTarget | null;
+};
+
+/** Dropdown options for the weather kind selector, in wire-value order. */
+const WEATHER_KIND_OPTIONS: Array<{ value: WeatherKind; label: string }> = [
+  { value: WeatherKind.Fine, label: 'Fine' },
+  { value: WeatherKind.Rain, label: 'Rain' },
+  { value: WeatherKind.Snow, label: 'Snow' },
+  { value: WeatherKind.Sand, label: 'Sand' },
+];
+
+const weatherKindLabel = (kind: WeatherKind) =>
+  WEATHER_KIND_OPTIONS.find((option) => option.value === kind)?.label ?? `kind ${kind}`;
+
+type State = {
+  /** Staged kind/grade/instant for the next `setWeather` call -- `WeatherState` itself only exposes
+   * the ramped/last-applied values, not "what the sliders are currently sitting at". */
+  selectedKind: WeatherKind;
+  grade: number;
+  instant: boolean;
 };
 
 /** Half-minutes since midnight to a 24-hour clock string. */
@@ -37,13 +83,32 @@ const deriveDisplay = (mapLight: LightingControlsTarget) => {
   return { following, halfMinutes };
 };
 
-/** Everything the control actually displays, collapsed into one comparable value. */
+/**
+ * Everything the control actually displays, collapsed into one comparable value.
+ *
+ * The weather channels (`effectIntensity`/`skyDensity`) and `stormBlend` ramp continuously over the
+ * ~ten-second swing, so they MUST be in this string -- any displayed value left out renders once and
+ * then looks frozen while the real number keeps moving underneath it (the exact trap this component
+ * already has a regression test for around `wmoBrightness`). Rounded to 3dp so float noise below the
+ * readout's own precision doesn't force a render on every frame once a ramp has settled.
+ */
 const displayState = (mapLight: LightingControlsTarget | null) => {
   if (!mapLight) {
     return 'none';
   }
   const { following, halfMinutes } = deriveDisplay(mapLight);
-  return `${following}:${Math.floor(halfMinutes / 2)}:${mapLight.wmoBrightness}`;
+  const { weather } = mapLight;
+  return [
+    following,
+    Math.floor(halfMinutes / 2),
+    mapLight.wmoBrightness,
+    weather.kind,
+    weather.effectKind,
+    weather.effectIntensity.toFixed(3),
+    weather.effectDensity.toFixed(3),
+    weather.skyDensity.toFixed(3),
+    mapLight.stormBlend.toFixed(3),
+  ].join(':');
 };
 
 /**
@@ -56,13 +121,19 @@ const displayState = (mapLight: LightingControlsTarget | null) => {
  * The parent panel force-updates every frame, so this reads MapLight directly as the source of truth
  * instead of mirroring it into component state, which would drift.
  */
-class LightingControls extends React.Component<Props> {
+class LightingControls extends React.Component<Props, State> {
   // What was last rendered, cached so shouldComponentUpdate can detect a real change. `mapLight` is a
   // single long-lived object mutated in place -- the same reference every frame -- so comparing
   // `this.props.mapLight` against `nextProps.mapLight` can never see a difference: both reads see the
   // *current* mutated values. The cache below is the only way to tell "what we drew" apart from
   // "what is on the object right now".
   private rendered: string | null = null;
+
+  state: State = {
+    selectedKind: this.props.mapLight?.weather.kind ?? WeatherKind.Fine,
+    grade: 0,
+    instant: false,
+  };
 
   componentDidMount() {
     this.rendered = displayState(this.props.mapLight);
@@ -80,10 +151,44 @@ class LightingControls extends React.Component<Props> {
    * commit, 60 times a second, which fights the user's own click/drag. Compare against `this.rendered`
    * (see above), never against `this.props.mapLight` directly -- that comparison is always trivially
    * true/false regardless of real change, because the object is mutated in place rather than replaced.
+   *
+   * Also compares `nextState` against `this.state`: the weather selector/grade/instant toggle below
+   * are local component state (see `State`'s doc), and a `setState` call must still get through even
+   * when nothing on `mapLight` itself has changed yet.
    */
-  shouldComponentUpdate(nextProps: Props) {
-    return displayState(nextProps.mapLight) !== this.rendered;
+  shouldComponentUpdate(nextProps: Props, nextState: State) {
+    const stateChanged = nextState.selectedKind !== this.state.selectedKind
+      || nextState.grade !== this.state.grade
+      || nextState.instant !== this.state.instant;
+    return stateChanged || displayState(nextProps.mapLight) !== this.rendered;
   }
+
+  private applyWeather = (kind: WeatherKind, grade: number, instant: boolean) => {
+    const { mapLight } = this.props;
+    if (!mapLight) {
+      return;
+    }
+    mapLight.weather.setWeather(kind, grade, instant);
+  };
+
+  private changeWeatherKind = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    const kind = Number(event.target.value) as WeatherKind;
+    this.setState({ selectedKind: kind });
+    this.applyWeather(kind, this.state.grade, this.state.instant);
+  };
+
+  private scrubWeatherGrade = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const grade = Number(event.target.value);
+    this.setState({ grade });
+    this.applyWeather(this.state.selectedKind, grade, this.state.instant);
+  };
+
+  private toggleWeatherInstant = () => {
+    // Instant only takes effect on the NEXT `setWeather` call (the wire's own semantics -- it is a
+    // flag on the update, not a standing mode) -- toggling it alone stages the flag without ramping
+    // anything.
+    this.setState((state) => ({ instant: !state.instant }));
+  };
 
   private toggleFollowClock = () => {
     const { mapLight } = this.props;
@@ -156,6 +261,57 @@ class LightingControls extends React.Component<Props> {
             value={mapLight.wmoBrightness}
             onChange={this.scrubWmoBrightness}
           />
+        </p>
+
+        <div className="divider"></div>
+        <p>
+          <label htmlFor="lighting-weather-kind">Weather</label>
+          <select
+            id="lighting-weather-kind"
+            value={this.state.selectedKind}
+            onChange={this.changeWeatherKind}
+          >
+            {WEATHER_KIND_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </p>
+        <p>
+          <label htmlFor="lighting-weather-grade">
+            Grade: {this.state.grade.toFixed(2)}
+          </label>
+          <input
+            id="lighting-weather-grade"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={this.state.grade}
+            onChange={this.scrubWeatherGrade}
+          />
+        </p>
+        <p>
+          <label htmlFor="lighting-weather-instant">Instant</label>
+          <input
+            id="lighting-weather-instant"
+            type="checkbox"
+            checked={this.state.instant}
+            onChange={this.toggleWeatherInstant}
+          />
+        </p>
+        <p>
+          Kind: {weatherKindLabel(mapLight.weather.kind)} &middot; effect{' '}
+          {weatherKindLabel(mapLight.weather.effectKind)}
+        </p>
+        <p>
+          Effect intensity (A): {mapLight.weather.effectIntensity.toFixed(3)} &middot; density{' '}
+          {mapLight.weather.effectDensity.toFixed(3)}
+        </p>
+        <p>
+          Sky density (B): {mapLight.weather.skyDensity.toFixed(3)} &middot; storm blend{' '}
+          {mapLight.stormBlend.toFixed(3)}
         </p>
       </div>
     );

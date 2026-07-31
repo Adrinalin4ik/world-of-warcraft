@@ -52,6 +52,107 @@ const weighted = (light: AreaLight, weight: number, distance = 0): WeightedAreaL
   distance,
 });
 
+/** A light whose PARAM_STORMY slot is a distinct id from PARAM_STANDARD, with its own colours and its
+ * own (fogEnd, fogStartScalar) -- so a storm lerp is observable on every band the brief calls out,
+ * fog distances included. */
+const mkStormyLight = (): AreaLight => {
+  const light = mkLight(500, 0.25); // clear: fogEnd 500, fogStart 125
+
+  const stormyIntBands: any[][] = [];
+  stormyIntBands[LIGHT_INT_BAND.BAND_DIRECT_COLOR] = colorBand(new THREE.Color(1, 1, 1));
+  stormyIntBands[LIGHT_INT_BAND.BAND_AMBIENT_COLOR] = colorBand(new THREE.Color(1, 1, 1));
+  stormyIntBands[LIGHT_INT_BAND.BAND_SKY_FOG_COLOR] = colorBand(new THREE.Color(1, 1, 1));
+
+  const stormyFloatBands: any[][] = [];
+  stormyFloatBands[LIGHT_FLOAT_BAND.BAND_FOG_END] = numericBand(100); // stormy fog closes in
+  stormyFloatBands[LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR] = numericBand(-0.5); // stormy: fogStart -50
+
+  light.params[LIGHT_PARAM.PARAM_STORMY] = {
+    id: 1,
+    intBands: stormyIntBands,
+    floatBands: stormyFloatBands,
+    rawFogEndBand: undefined,
+    highlightSky: false,
+    glow: 0.5,
+  };
+
+  return light;
+};
+
+describe('blendLights storm weight', () => {
+  it('at weight 0, is identical to the clear-only blend', () => {
+    const light = mkStormyLight();
+    const clear = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+    const { start: clearStart, end: clearEnd } = unpackFogParams(clear.fogParams.x, clear.fogParams.y);
+
+    const stormed = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0);
+    const { start, end } = unpackFogParams(stormed.fogParams.x, stormed.fogParams.y);
+
+    expect(end).toBeCloseTo(clearEnd, 4);
+    expect(start).toBeCloseTo(clearStart, 4);
+    expect(stormed.sunAmbientColor.r).toBeCloseTo(clear.sunAmbientColor.r, 4);
+  });
+
+  it('at weight 1, resolves entirely to the stormy slot -- fog distances included, not just colour', () => {
+    const light = mkStormyLight();
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 1);
+    const { start, end } = unpackFogParams(blend.fogParams.x, blend.fogParams.y);
+
+    // Colour moved to the stormy slot's white.
+    expect(blend.sunAmbientColor.r).toBeCloseTo(1, 4);
+    expect(blend.sunDiffuseColor.r).toBeCloseTo(1, 4);
+    // Fog DISTANCES moved too -- the regression test for "tint not weather": lerping only the
+    // colours would leave `end` at the clear 500 and `start` at the clear 125.
+    expect(end).toBeCloseTo(100, 4);
+    expect(start).toBeCloseTo(-50, 4); // fogStartScalar -0.5 * fogEnd 100
+  });
+
+  it('at weight 0.5, the fog distances (not only the colours) sit exactly halfway', () => {
+    const light = mkStormyLight();
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0.5);
+    const { start, end } = unpackFogParams(blend.fogParams.x, blend.fogParams.y);
+
+    // fogEnd: lerp(500, 100, 0.5) = 300. fogStartScalar: lerp(0.25, -0.5, 0.5) = -0.125.
+    // fogStart = fogStartScalar * fogEnd = -0.125 * 300 = -37.5.
+    expect(end).toBeCloseTo(300, 4);
+    expect(start).toBeCloseTo(-37.5, 4);
+
+    // Colour sits halfway too (clear 0 -> stormy 1).
+    expect(blend.sunAmbientColor.r).toBeCloseTo(0.5, 4);
+  });
+
+  it('a light with no stormy slot (a hole) is unaffected by any storm weight', () => {
+    // mkLight only ever sets PARAM_STANDARD -- PARAM_STORMY is a genuine hole here, as it is for
+    // any zone with no authored storm look (see AreaLight.params' doc comment).
+    const light = mkLight(500, 0.25); // fogEnd 500, fogStart 125
+
+    for (const stormWeight of [0, 0.5, 1]) {
+      const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, stormWeight);
+      const { start, end } = unpackFogParams(blend.fogParams.x, blend.fogParams.y);
+      expect(end).toBeCloseTo(500, 4);
+      expect(start).toBeCloseTo(125, 4);
+    }
+  });
+
+  it('blends a mix of lights -- one with a stormy override, one without -- correctly per light', () => {
+    // The brief's own trap: a post-hoc lerp on the final weighted mean cannot express this, because
+    // the two lights' storm behaviour differs. `a` has a distinct stormy slot; `b` is a hole.
+    const a = mkStormyLight(); // clear fogEnd 500, stormy fogEnd 100
+    const b = mkLight(200, 0.5); // no stormy slot at all -- fogEnd 200 regardless of weight
+
+    const blend = blendLights(
+      [weighted(a, 0.5), weighted(b, 0.5)],
+      LIGHT_PARAM.PARAM_STANDARD,
+      0,
+      1, // full storm
+    );
+    const { end } = unpackFogParams(blend.fogParams.x, blend.fogParams.y);
+
+    // a resolves fully to its stormy fogEnd (100); b is unaffected (200). Weighted mean: 150.
+    expect(end).toBeCloseTo(0.5 * 100 + 0.5 * 200, 4);
+  });
+});
+
 describe('blendLights fog band', () => {
   it('recovers a single light\'s (fogStart, fogEnd) band at full weight', () => {
     const light = mkLight(500, 0.25); // fogStart = 0.25 * 500 = 125

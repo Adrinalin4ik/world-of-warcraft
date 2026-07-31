@@ -12,6 +12,18 @@ const table = {
   oceanCloseColor: new THREE.Color(),
 };
 
+// Scratch for the STORMY slot's resolve, per band, per light -- lerped into `table`'s matching entry
+// by `stormWeight` before that light's contribution is added to the running blend. Kept separate from
+// `table` (rather than reusing it) because a band's clear and stormy values must both be live at once
+// to lerp between them.
+const stormTable = {
+  sunDiffuseColor: new THREE.Color(),
+  sunAmbientColor: new THREE.Color(),
+  fogColor: new THREE.Color(),
+  riverCloseColor: new THREE.Color(),
+  oceanCloseColor: new THREE.Color(),
+};
+
 const blend = {
   sunDiffuseColor: new THREE.Color(),
   sunAmbientColor: new THREE.Color(),
@@ -31,28 +43,76 @@ const addWeightedColor = (color: THREE.Color, add: THREE.Color, weight: number) 
   color.add(tempColor.copy(add).multiplyScalar(weight));
 };
 
+/** Linear interpolation between two plain numbers -- the fog scalars' storm lerp. */
+const lerpScalar = (from: number, to: number, t: number) => from + (to - from) * t;
+
 /**
- * Interpolate one optional int band and fold it into the running blend.
- *
- * Not every light defines every band. When one is absent the interpolation leaves its scratch colour
- * as it was, so accumulating unconditionally would add whatever the previous light left there. This
- * skips the light instead, which is what "no band" should mean.
+ * Resolve one required int band's colour for a light, lerped toward its STORMY counterpart by
+ * `stormWeight`. `stormyIntBands` is the light's own stormy slot's bands when it has one, or the
+ * SAME clear slot's bands when it does not (see `blendLights`'s per-light resolve) -- lerping a value
+ * toward itself at any weight is that value, so a light with no stormy override needs no separate
+ * branch here: the fallback alone makes the weight a no-op for it.
  */
-const blendOptionalBandColor = (
-  intBands: any[],
+const resolveBandColor = (
+  clearIntBands: any[],
+  stormyIntBands: any[],
   band: LIGHT_INT_BAND,
   timeProgression: number,
+  stormWeight: number,
   scratch: THREE.Color,
+  stormScratch: THREE.Color,
+) => {
+  interpolateColorTable(clearIntBands[band], timeProgression, scratch);
+  if (stormWeight > 0) {
+    interpolateColorTable(stormyIntBands[band], timeProgression, stormScratch);
+    scratch.lerp(stormScratch, stormWeight);
+  }
+  return scratch;
+};
+
+/**
+ * Interpolate one optional int band and fold it into the running blend, lerped toward its stormy
+ * counterpart the same way `resolveBandColor` does for the required bands above.
+ *
+ * Not every light defines every band, clear or stormy, independently -- a light can have a river
+ * colour on its clear slot and none on its stormy one, or vice versa. When NEITHER side has the band
+ * this skips the light entirely (accumulating unconditionally would add whatever the previous light
+ * left in the scratch colour); when only one side has it, that side is used as-is with no lerp,
+ * which is "the storm doesn't touch this band for this light" rather than blending toward black.
+ */
+const blendOptionalBandColor = (
+  clearIntBands: any[],
+  stormyIntBands: any[],
+  band: LIGHT_INT_BAND,
+  timeProgression: number,
+  stormWeight: number,
+  scratch: THREE.Color,
+  stormScratch: THREE.Color,
   target: THREE.Color,
   weight: number,
 ) => {
-  const bandTable = intBands[band];
+  const clearTable = clearIntBands[band];
+  const stormyTable = stormWeight > 0 ? stormyIntBands[band] : undefined;
 
-  if (!bandTable || bandTable.length < 2) {
+  const hasClear = !!(clearTable && clearTable.length >= 2);
+  const hasStorm = !!(stormyTable && stormyTable.length >= 2);
+
+  if (!hasClear && !hasStorm) {
     return;
   }
 
-  interpolateColorTable(bandTable, timeProgression, scratch);
+  if (hasClear) {
+    interpolateColorTable(clearTable, timeProgression, scratch);
+  }
+  if (hasStorm) {
+    interpolateColorTable(stormyTable, timeProgression, stormScratch);
+    if (hasClear) {
+      scratch.lerp(stormScratch, stormWeight);
+    } else {
+      scratch.copy(stormScratch);
+    }
+  }
+
   addWeightedColor(target, scratch, weight);
 };
 
@@ -60,6 +120,11 @@ export const blendLights = (
   weightedLights: WeightedAreaLight[],
   param: LIGHT_PARAM,
   timeProgression: number,
+  // The weight `laws.stormBlend(skyDensity)` resolves -- 0 is the clear-only look every call site used
+  // before this existed. Lerped PER LIGHT inside the loop below, never applied to the final weighted
+  // mean: see the loop's own comment for why (a zone can mix a light with a stormy override and one
+  // without, which a post-hoc lerp on the blended result cannot express).
+  stormWeight = 0,
 ) => {
   blend.sunDiffuseColor.setScalar(0);
   blend.sunAmbientColor.setScalar(0);
@@ -92,45 +157,104 @@ export const blendLights = (
     // `paramsStandard`, which every real Light.dbc record defines. The array is typed sparse (other
     // slots CAN be holes) because nothing consumes them yet; this asserts non-null rather than
     // widening every consumer here to handle a slot this call never actually leaves empty.
-    const { intBands, floatBands, rawFogEndBand } = light.params[param]!;
+    const clearParams = light.params[param]!;
+
+    // `PARAM_STORMY` genuinely can be a hole (a zone with no authored storm look at all -- see
+    // `AreaLight.params`'s doc comment). Falling back to the light's OWN clear slot rather than
+    // skipping the lerp is what makes the weight a no-op for that light: every band below lerps the
+    // clear value toward itself, which is the clear value, at any weight. This must stay INSIDE the
+    // loop -- each light carries its own slots, and a zone can mix a light with a stormy override
+    // beside one without; a lerp applied to the final weighted mean cannot express that.
+    const stormyParams = light.params[LIGHT_PARAM.PARAM_STORMY] ?? clearParams;
+
+    const { intBands: clearIntBands, floatBands: clearFloatBands, rawFogEndBand: clearRawFogEndBand } =
+      clearParams;
+    const { intBands: stormyIntBands, floatBands: stormyFloatBands, rawFogEndBand: stormyRawFogEndBand } =
+      stormyParams;
 
     // Sun
 
-    interpolateColorTable(
-      intBands[LIGHT_INT_BAND.BAND_DIRECT_COLOR],
+    resolveBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_DIRECT_COLOR,
       timeProgression,
+      stormWeight,
       table.sunDiffuseColor,
+      stormTable.sunDiffuseColor,
     );
 
     addWeightedColor(blend.sunDiffuseColor, table.sunDiffuseColor, weight);
 
-    interpolateColorTable(
-      intBands[LIGHT_INT_BAND.BAND_AMBIENT_COLOR],
+    resolveBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_AMBIENT_COLOR,
       timeProgression,
+      stormWeight,
       table.sunAmbientColor,
+      stormTable.sunAmbientColor,
     );
 
     addWeightedColor(blend.sunAmbientColor, table.sunAmbientColor, weight);
 
     // Fog
 
-    interpolateColorTable(
-      intBands[LIGHT_INT_BAND.BAND_SKY_FOG_COLOR],
+    resolveBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_SKY_FOG_COLOR,
       timeProgression,
+      stormWeight,
       table.fogColor,
+      stormTable.fogColor,
     );
 
     addWeightedColor(blend.fogColor, table.fogColor, weight);
 
-    const fogEnd = interpolateNumericTable(
-      floatBands[LIGHT_FLOAT_BAND.BAND_FOG_END],
+    // The fog DISTANCES lerp exactly like the colours above -- and this is the whole of the
+    // reference's storm draw-in. Lerping only the colours yields a storm that goes grey without
+    // closing in, which reads as a tint rather than as weather (see this function's own doc/the
+    // task brief). `fogStart`/`rawFogEnd` are debug-readout-only, but resolving them here (rather
+    // than re-deriving from the packed pair afterward) keeps every number describing the same
+    // per-light resolve.
+    const clearFogEnd = interpolateNumericTable(
+      clearFloatBands[LIGHT_FLOAT_BAND.BAND_FOG_END],
       timeProgression,
     );
+    const clearFogStartScalar = interpolateNumericTable(
+      clearFloatBands[LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR],
+      timeProgression,
+    );
+    // Debug-readout-only. `rawFogEndBand` is absent exactly when `floatBands[BAND_FOG_END]` is (see
+    // `AreaLightParams.rawFogEndBand`'s doc comment) -- reconstruct from the scaled value in that case
+    // rather than lose the readout entirely; a light that never had the band cannot expose a scale bug
+    // either way.
+    const clearRawFogEnd = clearRawFogEndBand
+      ? interpolateNumericTable(clearRawFogEndBand, timeProgression)
+      : clearFogEnd * 36;
 
-    const fogStartScalar = interpolateNumericTable(
-      floatBands[LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR],
-      timeProgression,
-    );
+    let fogEnd = clearFogEnd;
+    let fogStartScalar = clearFogStartScalar;
+    let rawFogEnd = clearRawFogEnd;
+
+    if (stormWeight > 0) {
+      const stormyFogEnd = interpolateNumericTable(
+        stormyFloatBands[LIGHT_FLOAT_BAND.BAND_FOG_END],
+        timeProgression,
+      );
+      const stormyFogStartScalar = interpolateNumericTable(
+        stormyFloatBands[LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR],
+        timeProgression,
+      );
+      const stormyRawFogEnd = stormyRawFogEndBand
+        ? interpolateNumericTable(stormyRawFogEndBand, timeProgression)
+        : stormyFogEnd * 36;
+
+      fogEnd = lerpScalar(clearFogEnd, stormyFogEnd, stormWeight);
+      fogStartScalar = lerpScalar(clearFogStartScalar, stormyFogStartScalar, stormWeight);
+      rawFogEnd = lerpScalar(clearRawFogEnd, stormyRawFogEnd, stormWeight);
+    }
 
     const fogStart = fogStartScalar * fogEnd;
 
@@ -138,33 +262,31 @@ export const blendLights = (
     fogStartBlend += fogStart * weight;
     fogWeightTotal += weight;
 
-    // Debug-readout-only. `rawFogEndBand` is absent exactly when `floatBands[BAND_FOG_END]` is (see
-    // `AreaLightParams.rawFogEndBand`'s doc comment) -- reconstruct from the scaled value in that case
-    // rather than lose the readout entirely; a light that never had the band cannot expose a scale bug
-    // either way.
-    const rawFogEnd = rawFogEndBand
-      ? interpolateNumericTable(rawFogEndBand, timeProgression)
-      : fogEnd * 36;
-
     fogStartScalarBlend += fogStartScalar * weight;
     rawFogEndBlend += rawFogEnd * weight;
 
-    // Water. Optional: plenty of lights define no river or ocean band at all.
+    // Water. Optional: plenty of lights define no river or ocean band at all, clear or stormy.
 
     blendOptionalBandColor(
-      intBands,
+      clearIntBands,
+      stormyIntBands,
       LIGHT_INT_BAND.BAND_RIVER_CLOSE_COLOR,
       timeProgression,
+      stormWeight,
       table.riverCloseColor,
+      stormTable.riverCloseColor,
       blend.riverCloseColor,
       weight,
     );
 
     blendOptionalBandColor(
-      intBands,
+      clearIntBands,
+      stormyIntBands,
       LIGHT_INT_BAND.BAND_OCEAN_CLOSE_COLOR,
       timeProgression,
+      stormWeight,
       table.oceanCloseColor,
+      stormTable.oceanCloseColor,
       blend.oceanCloseColor,
       weight,
     );

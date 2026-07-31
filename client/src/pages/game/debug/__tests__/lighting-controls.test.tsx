@@ -1,15 +1,51 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
 import LightingControls from '../lighting-controls';
+import { WeatherKind } from '../../../../game/world/light/weather';
+
+// A stand-in for `WeatherState` carrying only what the control reads/writes. `setWeather` records its
+// calls on a plain array rather than trying to reproduce the ramp -- these tests are about the panel
+// wiring, not the ramp itself (that is `weather.test.ts`'s job).
+const makeWeather = (
+  overrides: Partial<{
+    kind: WeatherKind;
+    effectKind: WeatherKind;
+    effectIntensity: number;
+    effectDensity: number;
+    skyDensity: number;
+  }> = {}
+) => {
+  const calls: Array<[WeatherKind, number, boolean]> = [];
+  return {
+    kind: WeatherKind.Fine,
+    effectKind: WeatherKind.Fine,
+    effectIntensity: 0,
+    effectDensity: 0,
+    skyDensity: 0,
+    ...overrides,
+    setWeather: jest.fn((kind: WeatherKind, grade: number, instant: boolean) => {
+      calls.push([kind, grade, instant]);
+    }),
+    calls,
+  };
+};
 
 // A stand-in for MapLight carrying only what the control touches. Using the real MapLight here would
 // drag in three.js, the DBC loader and a network fetch for a slider.
 const makeMapLight = (
-  overrides: Partial<{ time: number; timeOverride: number | null; wmoBrightness: number }> = {}
+  overrides: Partial<{
+    time: number;
+    timeOverride: number | null;
+    wmoBrightness: number;
+    weather: ReturnType<typeof makeWeather>;
+    stormBlend: number;
+  }> = {}
 ) => ({
   time: 1440,
   timeOverride: null as number | null,
   wmoBrightness: 1.0,
+  weather: makeWeather(),
+  stormBlend: 0,
   ...overrides,
 });
 
@@ -110,6 +146,65 @@ describe('LightingControls', () => {
 
     expect(renderSpy).toHaveBeenCalledTimes(2);
     expect(screen.getByLabelText(/wmo brightness/i)).toHaveValue('2');
+    renderSpy.mockRestore();
+  });
+
+  it('calls setWeather with the selected kind, the staged grade and the instant flag', () => {
+    const mapLight = makeMapLight();
+    render(<LightingControls mapLight={mapLight} />);
+
+    fireEvent.click(screen.getByLabelText(/instant/i));
+    fireEvent.change(screen.getByLabelText(/grade/i), { target: { value: '0.75' } });
+    fireEvent.change(screen.getByLabelText(/weather/i), { target: { value: String(WeatherKind.Rain) } });
+
+    expect(mapLight.weather.calls).toEqual([
+      [WeatherKind.Fine, 0.75, true],
+      [WeatherKind.Rain, 0.75, true],
+    ]);
+  });
+
+  it('shows both ramped weather channels and the resolved storm blend', () => {
+    const mapLight = makeMapLight({
+      weather: makeWeather({ effectIntensity: 0.4, effectDensity: 0.2, skyDensity: 0.125 }),
+      stormBlend: 0.5,
+    });
+    render(<LightingControls mapLight={mapLight} />);
+
+    expect(screen.getByText(/effect intensity.*0\.400/i)).toBeInTheDocument();
+    expect(screen.getByText(/sky density.*0\.125/i)).toBeInTheDocument();
+    expect(screen.getByText(/storm blend.*0\.500/i)).toBeInTheDocument();
+  });
+
+  it('re-renders when only the weather channels change on the same mutated-in-place object', () => {
+    // Same trap as wmoBrightness: `weather.effectIntensity`/`skyDensity` ramp continuously while the
+    // panel force-updates every frame. If they were left out of displayState, the readout would look
+    // frozen while the real ramp kept moving underneath it.
+    const renderSpy = jest.spyOn(LightingControls.prototype, 'render');
+    const weather = makeWeather({ effectIntensity: 0, skyDensity: 0 });
+    const mapLight = makeMapLight({ weather });
+    const { rerender } = render(<LightingControls mapLight={mapLight} />);
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+
+    weather.effectIntensity = 0.5;
+    weather.skyDensity = 0.2;
+    rerender(<LightingControls mapLight={mapLight} />);
+
+    expect(renderSpy).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/effect intensity.*0\.500/i)).toBeInTheDocument();
+    renderSpy.mockRestore();
+  });
+
+  it('re-renders when only the storm blend readout changes', () => {
+    const renderSpy = jest.spyOn(LightingControls.prototype, 'render');
+    const mapLight = makeMapLight({ stormBlend: 0 });
+    const { rerender } = render(<LightingControls mapLight={mapLight} />);
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+
+    mapLight.stormBlend = 1;
+    rerender(<LightingControls mapLight={mapLight} />);
+
+    expect(renderSpy).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/storm blend.*1\.000/i)).toBeInTheDocument();
     renderSpy.mockRestore();
   });
 });

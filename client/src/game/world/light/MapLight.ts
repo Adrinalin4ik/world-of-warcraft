@@ -4,11 +4,12 @@ import { batchClassOf } from '../../pipeline/wmo/material/laws';
 import { blendLights } from './blend';
 import { LIGHT_FLOAT_BAND, LIGHT_PARAM } from './constants';
 import { FogTriple, MfogRecord, packFogParams, selectWmoFogTarget, unpackFogParams, WmoFogRamp } from './fog';
-import { sidnNightFraction } from './laws';
+import { sidnNightFraction, stormBlend } from './laws';
 import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
 import { AreaLight, AreaLightParams, WeightedAreaLight } from './types';
 import { getDayNightTime, interpolateNumericTable, selectLightsForPosition } from './utils';
+import { WeatherState } from './weather';
 
 // Default fog range, matching `SceneLightParams`'s own default -- only visible before the first
 // `MapLight.update()` call has resolved anything real.
@@ -114,6 +115,12 @@ class MapLight extends SceneLight {
   // which sit on the live render path -- see `update`'s `dt` doc). Never used when a caller passes
   // `dt` explicitly.
   #lastFrameTime: number | null = null;
+
+  // The zone weather state machine (Task 2) -- driven from the debug UI for now, ticked from the same
+  // per-frame `dt` that drives the interior fog crossfade below. NOT a second timing source: see
+  // `update`'s doc for why `#resolveDt` is called exactly once per frame and its result handed to
+  // both this and `#updateInteriorFog`.
+  #weather = new WeatherState();
 
   // A blended band that no light contributed to stays at exactly zero.
   static #isUnset(color: THREE.Color) {
@@ -234,6 +241,26 @@ class MapLight extends SceneLight {
 
   set camera(camera: THREE.Camera | null) {
     this.#camera = camera;
+  }
+
+  /**
+   * The zone weather state (Task 2's `WeatherState`) -- exposed so the debug panel can call
+   * `setWeather` directly and read both ramped channels for its live readout. `setWeather`'s own
+   * signature is the wire's (`kind`, `grade`, `instant`), so the network path can drive this the same
+   * way once it exists.
+   */
+  get weather() {
+    return this.#weather;
+  }
+
+  /**
+   * The storm `LightParams` blend weight `laws.stormBlend` resolves from the weather state's sky
+   * channel -- what `#updateLights` actually lerps every light's stormy slot in by. Surfaced
+   * separately from `#weather` itself so the debug readout can show the resolved weight beside the
+   * two raw channels that produce it.
+   */
+  get stormBlend() {
+    return stormBlend(this.#weather.skyDensity);
   }
 
   /**
@@ -377,6 +404,13 @@ class MapLight extends SceneLight {
     // Resolved before the light values are computed, since it decides which side they are read from.
     this.#trackCameraLocation(camera);
 
+    // Resolved exactly ONCE per frame and handed to every per-frame-delta consumer below (the interior
+    // fog crossfade AND the weather ramp) -- this project has already shipped a duplicated per-frame
+    // `MapLight.update()` that halved a crossfade rate by measuring `dt` twice, and calling
+    // `#resolveDt` a second time here would be the same bug again.
+    const resolvedDt = this.#resolveDt(dt);
+    this.#weather.tick(resolvedDt);
+
     // Only update if we have valid data
     if (this.#lights !== undefined) {
       this.#selectLights(camera.position);
@@ -385,7 +419,7 @@ class MapLight extends SceneLight {
       this.#updateLights();
     }
 
-    this.#updateInteriorFog(camera, this.#resolveDt(dt));
+    this.#updateInteriorFog(camera, resolvedDt);
 
     // Debug-readout-only (diagnostic 2). Independent of `#trackCameraLocation`/`#wmo` above: this
     // walks EVERY loaded WMO group near the camera, not only the one (if any) that claims it, so a
@@ -674,6 +708,7 @@ class MapLight extends SceneLight {
       this.#selectedLights,
       LIGHT_PARAM.PARAM_STANDARD,
       this.#timeProgression,
+      this.stormBlend,
     );
 
     // Debug-readout-only (see the getters' doc comments) -- resolved alongside the packed `fogParams`
