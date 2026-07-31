@@ -32,6 +32,8 @@ const mkLight = (
     intBands,
     floatBands,
     rawFogEndBand: rawFogEnd !== undefined ? numericBand(rawFogEnd) : undefined,
+    highlightSky: false,
+    glow: 0.5,
   };
 
   return {

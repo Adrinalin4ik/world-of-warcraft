@@ -10,6 +10,13 @@ export type AreaLightParams = {
   // inspection instead of by guessing at the final fog range. Absent when the band itself is absent,
   // same as `floatBands`.
   rawFogEndBand?: any[];
+  // Gates the dawn/dusk sky warp. Carried straight off the `LightParams` row -- previously parsed by
+  // `MapLight#getAreaLightsFromDb` and then discarded.
+  highlightSky: boolean;
+  // Per-zone bloom weight, off the same `LightParams` row. `0.5` is the documented default when the
+  // row itself is missing (a slot id of 0, or an id with no matching `LightParams` record) -- see
+  // `MapLight#getAreaLightsFromDb`.
+  glow: number;
 };
 
 export type AreaLight = {
@@ -18,14 +25,20 @@ export type AreaLight = {
   position: THREE.Vector3;
   falloffStart: number;
   falloffEnd: number;
-  params: AreaLightParams[];
   /**
-   * The Light.dbc record's eight raw LightParams slot ids, in DBC field order: `[skyFogID, waterID,
-   * sunsetID, otherID, deathID, reserved5, reserved6, reserved7]`. Debug-readout-only (diagnostic 1)
-   * -- `params` above only ever carries the resolved bands for slot 0 (`skyFogID`), the only slot
-   * this client loads bands for. Printing all eight beside which one was actually loaded is what
-   * lets a shifted field order, or a zone that authors a storm-like fog under the "standard" slot,
-   * be told apart from a slot-selection bug. Optional so existing `AreaLight` fixtures built by hand
+   * Sparse, indexed by `LIGHT_PARAM` (constants.ts) -- `params[LIGHT_PARAM.PARAM_STORMY]` is the
+   * stormy-weather params, etc. A slot whose Light.dbc id is 0 (the record does not define that
+   * param) is a HOLE, `undefined` at that index, rather than a copy of slot 0's data: otherwise "no
+   * override for this slot" would be indistinguishable from "this slot happens to equal slot 0".
+   */
+  params: Array<AreaLightParams | undefined>;
+  /**
+   * The Light.dbc record's eight raw LightParams slot ids, in DBC field order: `[paramsStandard,
+   * paramsUnderwater, paramsStormy, paramsStormyUnderwater, paramsDeath, reserved5, reserved6,
+   * reserved7]` -- the same order `LIGHT_PARAM` uses for its first five members. Debug-readout-only
+   * (diagnostic 1). Printing all eight beside which ones were actually loaded is what lets a shifted
+   * field order, or a zone that authors a storm-like fog under the "standard" slot, be told apart
+   * from a slot-selection bug. Optional so existing `AreaLight` fixtures built by hand
    * (blend.test.ts) keep satisfying the type.
    */
   lightSlots?: number[];

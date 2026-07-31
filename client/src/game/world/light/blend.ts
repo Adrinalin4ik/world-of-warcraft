@@ -87,7 +87,12 @@ export const blendLights = (
 
   for (const weightedLight of weightedLights) {
     const { light, weight } = weightedLight;
-    const { intBands, floatBands, rawFogEndBand } = light.params[param];
+    // `param` is `PARAM_STANDARD` at every call site today (see `MapLight#updateLights`), and every
+    // loaded `AreaLight` carries that slot -- `#getAreaLightsFromDb` always resolves it from
+    // `paramsStandard`, which every real Light.dbc record defines. The array is typed sparse (other
+    // slots CAN be holes) because nothing consumes them yet; this asserts non-null rather than
+    // widening every consumer here to handle a slot this call never actually leaves empty.
+    const { intBands, floatBands, rawFogEndBand } = light.params[param]!;
 
     // Sun
 

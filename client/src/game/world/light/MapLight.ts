@@ -7,7 +7,7 @@ import { FogTriple, MfogRecord, packFogParams, selectWmoFogTarget, unpackFogPara
 import { sidnNightFraction } from './laws';
 import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
-import { AreaLight, WeightedAreaLight } from './types';
+import { AreaLight, AreaLightParams, WeightedAreaLight } from './types';
 import { getDayNightTime, interpolateNumericTable, selectLightsForPosition } from './utils';
 
 // Default fog range, matching `SceneLightParams`'s own default -- only visible before the first
@@ -77,8 +77,8 @@ class MapLight extends SceneLight {
 
   // The `LightFloatBand` DBC table, kept around ONLY for `dumpLightSlotBands` (diagnostic 1's
   // on-demand console sweep) -- `#getAreaLightsFromDb` already reads it once at load time to build
-  // each `AreaLight`'s (slot-0-only) `floatBands`, but that pass discards the table itself. Null
-  // until `#loadLights` resolves, or if it failed.
+  // each loaded slot's `floatBands`, but that pass discards the table itself. Null until
+  // `#loadLights` resolves, or if it failed.
   #lightFloatBandDb: any = null;
 
   // The loaded WMOManager, for the near-camera WMO-group survey (diagnostic 2). Set externally
@@ -251,9 +251,10 @@ class MapLight extends SceneLight {
    * For each currently selected light, and each of its eight Light.dbc slots (`AreaLight.lightSlots`)
    * that is non-zero, recomputes BAND_FOG_END and BAND_FOG_START_SCALAR from THAT SLOT's own id --
    * `(slotId * 6) - 5 + i`, the exact formula `#getAreaLightsFromDb` already uses, just run against
-   * every candidate slot instead of always `skyFogID` (slot 0). Slot 0's row in the printed table is
-   * always the one actually feeding `fogStart`/`fogEnd` every frame (see `#getAreaLightsFromDb`,
-   * which only ever builds `params[0]` from `lightSlots[0]`) -- comparing it against the other seven
+   * every candidate slot instead of always `paramsStandard` (slot 0). Slot 0's row in the printed
+   * table is always the one actually feeding `fogStart`/`fogEnd` every frame (see
+   * `#getAreaLightsFromDb`/`#updateLights`, which blend `LIGHT_PARAM.PARAM_STANDARD` only -- the other
+   * slots are now loaded but nothing consumes them yet) -- comparing it against the other seven
    * settles the question directly: if a DIFFERENT slot reads the storm-like scalar, slot selection is
    * wrong; if slot 0 itself already does, the zone's own data authors it.
    *
@@ -273,7 +274,7 @@ class MapLight extends SceneLight {
     }
 
     const SLOT_LABELS = [
-      'skyFogID', 'waterID', 'sunsetID', 'otherID', 'deathID',
+      'paramsStandard', 'paramsUnderwater', 'paramsStormy', 'paramsStormyUnderwater', 'paramsDeath',
       'reserved5', 'reserved6', 'reserved7',
     ];
 
@@ -292,7 +293,7 @@ class MapLight extends SceneLight {
       const slots = light.lightSlots || [];
 
       slots.forEach((slotId, slotIndex) => {
-        // Slot 0 (skyFogID) is always non-zero in practice (every Light.dbc record names a standard
+        // Slot 0 (paramsStandard) is always non-zero in practice (every Light.dbc record names a standard
         // params row), but the other seven frequently are not -- a light with no water/sunset/death
         // override just repeats slot 0's id or reads 0. Per the task: EVERY non-zero slot, not every
         // slot.
@@ -825,38 +826,76 @@ class MapLight extends SceneLight {
         lightRecord.position.y / 36.0
       );
 
-      // Get light parameters
-      const lightParams = lightParamsDb[lightRecord.skyFogID];
-      
-      // Get color bands
-      const intBands = [];
-      const floatBands = [];
-      
-      // Process integer bands (colors)
-      // Assigned by index rather than appended: consumers look bands up by their LIGHT_INT_BAND /
-      // LIGHT_FLOAT_BAND position, so a single missing record would otherwise shift every band after
-      // it and silently pair the wrong colour with the wrong slot.
-      for (let i = 0; i < 18; i++) {
-        const bandId = (lightRecord.skyFogID * 18) - 17 + i;
-        if (lightIntBandDb[bandId]) {
-          intBands[i] = this.#processIntBand(lightIntBandDb[bandId]);
+      // The five meaningful Light.dbc slots, in `LIGHT_PARAM` order. Slots 5-7 are read (see
+      // `lightSlots` below) but carry no documented semantic meaning -- see light.js's doc comment on
+      // why `reserved7` being non-zero on some records does not make them a sixth real param.
+      const slotIds = [
+        lightRecord.paramsStandard,
+        lightRecord.paramsUnderwater,
+        lightRecord.paramsStormy,
+        lightRecord.paramsStormyUnderwater,
+        lightRecord.paramsDeath,
+      ];
+
+      // Sparse, indexed by LIGHT_PARAM -- a slot id of 0 means the record does not define that param,
+      // so it stays a hole rather than being backfilled from another slot's data.
+      const params: Array<AreaLightParams | undefined> = [];
+
+      for (let slotIndex = 0; slotIndex < slotIds.length; slotIndex++) {
+        const paramsId = slotIds[slotIndex];
+
+        if (!paramsId) {
+          continue;
         }
-      }
 
-      // Process float bands
-      let rawFogEndBand: any[] | undefined;
-      for (let i = 0; i < 6; i++) {
-        const bandId = (lightRecord.skyFogID * 6) - 5 + i;
-        if (lightFloatBandDb[bandId]) {
-          floatBands[i] = this.#processFloatBand(lightFloatBandDb[bandId], i);
+        // Get color bands
+        const intBands: any[] = [];
+        const floatBands: any[] = [];
 
-          // Debug-readout-only: the same band, interpolated again with the `1/36` scale withheld, so
-          // the raw DBC value can be shown beside the scaled one (see AreaLightParams.rawFogEndBand's
-          // doc comment).
-          if (i === LIGHT_FLOAT_BAND.BAND_FOG_END) {
-            rawFogEndBand = this.#processFloatBand(lightFloatBandDb[bandId], i, true);
+        // Process integer bands (colors). Assigned by index rather than appended: consumers look
+        // bands up by their LIGHT_INT_BAND / LIGHT_FLOAT_BAND position, so a single missing record
+        // would otherwise shift every band after it and silently pair the wrong colour with the wrong
+        // slot.
+        //
+        // The band-id arithmetic below uses THIS slot's own `paramsId`, not the standard slot's id --
+        // reusing slot 0's id for every slot would load the same eighteen/six bands five times over
+        // and make every slot identical, which presents as "the storm has no effect" rather than as a
+        // bug.
+        for (let i = 0; i < 18; i++) {
+          const bandId = (paramsId * 18) - 17 + i;
+          if (lightIntBandDb[bandId]) {
+            intBands[i] = this.#processIntBand(lightIntBandDb[bandId]);
           }
         }
+
+        // Process float bands
+        let rawFogEndBand: any[] | undefined;
+        for (let i = 0; i < 6; i++) {
+          const bandId = (paramsId * 6) - 5 + i;
+          if (lightFloatBandDb[bandId]) {
+            floatBands[i] = this.#processFloatBand(lightFloatBandDb[bandId], i);
+
+            // Debug-readout-only: the same band, interpolated again with the `1/36` scale withheld, so
+            // the raw DBC value can be shown beside the scaled one (see AreaLightParams.rawFogEndBand's
+            // doc comment).
+            if (i === LIGHT_FLOAT_BAND.BAND_FOG_END) {
+              rawFogEndBand = this.#processFloatBand(lightFloatBandDb[bandId], i, true);
+            }
+          }
+        }
+
+        const lightParams = lightParamsDb[paramsId];
+
+        params[slotIndex] = {
+          id: paramsId,
+          intBands,
+          floatBands,
+          rawFogEndBand,
+          // highlightSky gates the dawn/dusk sky warp; glow is the per-zone bloom weight. Both were
+          // already parsed and already looked up here -- the result was simply discarded.
+          highlightSky: !!lightParams?.highlightSky,
+          glow: lightParams?.glow ?? 0.5,
+        };
       }
 
       const areaLight: AreaLight = {
@@ -871,22 +910,16 @@ class MapLight extends SceneLight {
         // changed with them.
         falloffStart: lightRecord.fallOffStart / 36.0,
         falloffEnd: lightRecord.fallOffEnd / 36.0,
-        params: [{
-          id: lightRecord.skyFogID,
-          intBands,
-          floatBands,
-          rawFogEndBand
-        }],
+        params,
         // Debug-readout-only (diagnostic 1). All eight Light.dbc slot ids, in field order -- `params`
-        // above only ever resolves bands for `skyFogID` (slot 0), so this is the only place the other
-        // seven ids (including the three previously-unreadable reserved words -- see light.js's DBC
-        // entity) are exposed at all.
+        // above only carries the five meaningful slots, so this is the only place the reserved words
+        // are exposed at all.
         lightSlots: [
-          lightRecord.skyFogID,
-          lightRecord.waterID,
-          lightRecord.sunsetID,
-          lightRecord.otherID,
-          lightRecord.deathID,
+          lightRecord.paramsStandard,
+          lightRecord.paramsUnderwater,
+          lightRecord.paramsStormy,
+          lightRecord.paramsStormyUnderwater,
+          lightRecord.paramsDeath,
           lightRecord.reserved5,
           lightRecord.reserved6,
           lightRecord.reserved7,

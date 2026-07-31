@@ -56,14 +56,15 @@ export type LightingReadoutsTarget = {
       id: number;
       /**
        * The area light's own `params` -- specifically `params[0].id`, the `LightParams` (Light.dbc's
-       * `skyFogID`) each selected light resolved its int/float bands from. Optional so existing plain
+       * `paramsStandard`) each selected light resolved its int/float bands from. Optional so existing plain
        * test fixtures (`{ light: { id } }`) keep satisfying this type -- `MapLight#selectedLights`
        * (the real target) always carries the full `AreaLight` shape, `params` included.
        */
       params?: Array<{ id: number }>;
       /**
-       * All eight Light.dbc slot ids for this light, in field order (`[skyFogID, waterID, sunsetID,
-       * otherID, deathID, reserved5, reserved6, reserved7]`) -- diagnostic 1. `params[0].id` above is
+       * All eight Light.dbc slot ids for this light, in field order (`[paramsStandard, paramsUnderwater,
+       * paramsStormy, paramsStormyUnderwater, paramsDeath, reserved5, reserved6, reserved7]`) --
+       * diagnostic 1. `params[0].id` above is
        * always `lightSlots[0]` (`#getAreaLightsFromDb` only ever resolves bands for slot 0); showing
        * every slot beside it is what would make a shifted field order, or a slot the client should be
        * reading instead, obvious by inspection rather than by guessing from the final fog range.
@@ -133,7 +134,7 @@ const asFixed = (value: number | undefined, places = 0) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(places) : '-';
 
 /** Light.dbc's eight LightParams slot fields, in record order -- see `AreaLight.lightSlots`'s doc
- * comment. Slot 0 (`skyFogID`) is the only one this client resolves bands for. */
+ * comment. Slot 0 (`paramsStandard`) is the only one blended into the scene's light every frame today. */
 const LIGHT_SLOT_LABELS = [
   'skyFog', 'water', 'sunset', 'other', 'death', 'reserved5', 'reserved6', 'reserved7',
 ];
