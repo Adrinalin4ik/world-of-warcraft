@@ -8,7 +8,6 @@ const table = {
   sunDiffuseColor: new THREE.Color(),
   sunAmbientColor: new THREE.Color(),
   fogColor: new THREE.Color(),
-  fogParams: new THREE.Vector4(),
   riverCloseColor: new THREE.Color(),
   oceanCloseColor: new THREE.Color(),
 };
@@ -23,14 +22,9 @@ const blend = {
 };
 
 const tempColor = new THREE.Color();
-const tempVector = new THREE.Vector4();
 
 const addWeightedColor = (color: THREE.Color, add: THREE.Color, weight: number) => {
   color.add(tempColor.copy(add).multiplyScalar(weight));
-};
-
-const addWeightedVector = (vector: THREE.Vector4, add: THREE.Vector4, weight: number) => {
-  vector.add(tempVector.copy(add).multiplyScalar(weight));
 };
 
 /**
@@ -66,9 +60,21 @@ export const blendLights = (
   blend.sunDiffuseColor.setScalar(0);
   blend.sunAmbientColor.setScalar(0);
   blend.fogColor.setScalar(0);
-  blend.fogParams.setScalar(0);
   blend.riverCloseColor.setScalar(0);
   blend.oceanCloseColor.setScalar(0);
+
+  // Blended as plain scalars -- a weighted MEAN, not a raw weighted sum -- and packed exactly ONCE
+  // below, never packed per light and then blended. Two things matter here:
+  //  - Packing (`packFogParams`) is not linear in the weight: scaling the packed (x, y) pair
+  //    preserves `end` (the ratio -y/x) but destroys `start`, which depends on the pair's magnitude.
+  //    Blending the scalars first and packing the result once avoids that entirely.
+  //  - Dividing by the total weight (rather than assuming it already sums to 1) means the fog band
+  //    is correct even if the caller's weights are not normalised -- a future regression in the
+  //    weight distribution upstream (see `selectLightsForPosition`) cannot silently reintroduce the
+  //    fog distortion even if it reintroduces the darkness.
+  let fogEndBlend = 0;
+  let fogStartBlend = 0;
+  let fogWeightTotal = 0;
 
   for (const weightedLight of weightedLights) {
     const { light, weight } = weightedLight;
@@ -114,13 +120,9 @@ export const blendLights = (
 
     const fogStart = fogStartScalar * fogEnd;
 
-    // Packed so the shader's `f1 = distance * x + y` falls from 1 at fogStart to 0 at fogEnd, which
-    // is what it then turns into a fog factor via `1 - min(pow(max(f1, 0), z), 1)`.
-    // Passing (fogStep, fogEnd) instead left f1 permanently far above 1, pinning the fog factor at
-    // zero, so fog never applied no matter how distant the geometry.
-    table.fogParams.set(...packFogParams(fogStart, fogEnd));
-
-    addWeightedVector(blend.fogParams, table.fogParams, weight);
+    fogEndBlend += fogEnd * weight;
+    fogStartBlend += fogStart * weight;
+    fogWeightTotal += weight;
 
     // Water. Optional: plenty of lights define no river or ocean band at all.
 
@@ -142,6 +144,17 @@ export const blendLights = (
       weight,
     );
   }
+
+  // Packed so the shader's `f1 = distance * x + y` falls from 1 at fogStart to 0 at fogEnd, which is
+  // what it then turns into a fog factor via `1 - min(pow(max(f1, 0), z), 1)`. Packing happens exactly
+  // once, from the already-blended (and mean-normalised) scalar pair -- see the comment above the
+  // loop for why packing per light and then blending the packed pairs is wrong, and for why dividing
+  // by the total weight here rather than trusting it to already be 1.
+  const [fogEndMean, fogStartMean] = fogWeightTotal > 0
+    ? [fogEndBlend / fogWeightTotal, fogStartBlend / fogWeightTotal]
+    : [0, 0];
+
+  blend.fogParams.set(...packFogParams(fogStartMean, fogEndMean));
 
   return blend;
 };
