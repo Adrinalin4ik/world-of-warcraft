@@ -45,7 +45,11 @@ vec3 wmoLitFactor(vec3 normal) {
 
 vec4 applyWmoLighting(vec4 tex) {
   if (lightModifier <= 0.0) {
-    return tex;
+    // UNLIT: still take the debug brightness multiplier below, on `tex.rgb` directly, so the
+    // control has an effect on every WMO lane, this one included.
+    vec4 unlit = tex;
+    unlit.rgb *= wmoBrightness;
+    return unlit;
   }
 
   // MOCV arrives HALVED from the loader -- `fixVertexColors` divides every channel by 2, which is the
@@ -70,6 +74,12 @@ vec4 applyWmoLighting(vec4 tex) {
   // bakes alpha around 100/255, giving roughly x2.6. It is near zero everywhere unpainted, where
   // this collapses to the plain tex x MOCV it replaces.
   result.rgb = clamp(tex.rgb * mocv * (1.0 + 4.0 * vertexColorOut.a), 0.0, 1.0);
+  // Debug-panel brightness deviation -- NOT part of the reference. The INT law above has no
+  // scene-light term whatsoever to raise, so this is the only lever for zones the artists baked
+  // very dark (Blackrock's lava caverns, e.g.). 1.0 is faithful. Applied AFTER the clamp above and
+  // deliberately left unclamped here, so a value past 1.0 can push the result past that clamp's
+  // ceiling instead of being folded back under it.
+  result.rgb *= wmoBrightness;
 #elif defined(INTERIOR) && BATCH_CLASS == 2
   // TRANS -- the per-vertex lerp between the lit surface and that unlit bake. The reference draws
   // this as two passes (lit x SRC_ALPHA + unlit x (1 - SRC_ALPHA)); collapsed to one pass, the lit
@@ -79,12 +89,18 @@ vec4 applyWmoLighting(vec4 tex) {
   // TRANS: emission rides the lit pass, weighted by the same MOCV alpha that weights the lerp.
   vec3 emission = sidnColor * (sidnNight * vertexColorOut.a);
   result.rgb = tex.rgb * clamp(mocv * lit + emission, 0.0, 1.0);
+  // Debug-panel brightness deviation -- see the INT lane above for why this exists. Applied AFTER
+  // the clamp, left unclamped here on purpose.
+  result.rgb *= wmoBrightness;
 #else
   // EXT -- an interior group's exterior-law batches, and every exterior group batch.
   // Emission at full weight -- never multiplied by MOCV, added INSIDE the clamp alongside the lit
   // terms, exactly where glMaterialfv(GL_EMISSION) sits in the fixed-function pipeline.
   vec3 emission = sidnColor * sidnNight;
   result.rgb = tex.rgb * clamp(mocv * wmoLitFactor(worldNormal) + emission, 0.0, 1.0);
+  // Debug-panel brightness deviation -- see the INT lane above for why this exists. Applied AFTER
+  // the clamp, left unclamped here on purpose.
+  result.rgb *= wmoBrightness;
 #endif
 
   return result;

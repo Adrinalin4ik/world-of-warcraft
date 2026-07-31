@@ -26,6 +26,11 @@ class MapLight extends SceneLight {
   // Overridden time in half-minutes since midnight (0 - 2879)
   #timeOverride: number | null = null;
 
+  // Debug-panel WMO brightness multiplier -- NOT part of the reference. 1.0 is faithful; see
+  // WMOMaterial's fragment shader (applyWmoLighting) for why this exists at all: the INT lane's
+  // law has no scene-light term to raise, so this is the only way to brighten a very dark bake.
+  #wmoBrightness = 1.0;
+
   // Time as a floating point range from 0.0 to 1.0
   #timeProgression = 0.0;
 
@@ -138,6 +143,14 @@ class MapLight extends SceneLight {
   set timeOverride(override: number | null) {
     this.#timeOverride = override;
     this.#updateTime();
+  }
+
+  get wmoBrightness() {
+    return this.#wmoBrightness;
+  }
+
+  set wmoBrightness(value: number) {
+    this.#wmoBrightness = Math.min(Math.max(value, 0), 4);
   }
 
   update(camera: THREE.Camera) {

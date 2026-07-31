@@ -4,9 +4,12 @@ import LightingControls from '../lighting-controls';
 
 // A stand-in for MapLight carrying only what the control touches. Using the real MapLight here would
 // drag in three.js, the DBC loader and a network fetch for a slider.
-const makeMapLight = (overrides: Partial<{ time: number; timeOverride: number | null }> = {}) => ({
+const makeMapLight = (
+  overrides: Partial<{ time: number; timeOverride: number | null; wmoBrightness: number }> = {}
+) => ({
   time: 1440,
   timeOverride: null as number | null,
+  wmoBrightness: 1.0,
   ...overrides,
 });
 
@@ -78,6 +81,35 @@ describe('LightingControls', () => {
     rerender(<LightingControls mapLight={mapLight} />);
 
     expect(renderSpy).toHaveBeenCalledTimes(1);
+    renderSpy.mockRestore();
+  });
+
+  it('shows the current WMO brightness value', () => {
+    render(<LightingControls mapLight={makeMapLight({ wmoBrightness: 2.5 })} />);
+    expect(screen.getByLabelText(/wmo brightness/i)).toHaveValue('2.5');
+  });
+
+  it('writes the slider position into wmoBrightness', () => {
+    const mapLight = makeMapLight({ wmoBrightness: 1.0 });
+    render(<LightingControls mapLight={mapLight} />);
+    fireEvent.change(screen.getByLabelText(/wmo brightness/i), { target: { value: '3.25' } });
+    expect(mapLight.wmoBrightness).toBe(3.25);
+  });
+
+  it('re-renders when only wmoBrightness changes on the same mutated-in-place object', () => {
+    // Same failure mode as the time-of-day case above: if wmoBrightness were left out of
+    // displayState, shouldComponentUpdate would never see a difference and the slider would look
+    // stuck while the underlying value kept changing.
+    const renderSpy = jest.spyOn(LightingControls.prototype, 'render');
+    const mapLight = makeMapLight({ wmoBrightness: 1.0 });
+    const { rerender } = render(<LightingControls mapLight={mapLight} />);
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+
+    mapLight.wmoBrightness = 2.0;
+    rerender(<LightingControls mapLight={mapLight} />);
+
+    expect(renderSpy).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText(/wmo brightness/i)).toHaveValue('2');
     renderSpy.mockRestore();
   });
 });

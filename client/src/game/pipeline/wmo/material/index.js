@@ -31,6 +31,11 @@ class WMOMaterial extends THREE.ShaderMaterial {
       sidnColor: { value: new THREE.Vector3() },
       sidnNight: { value: 0.0 },
       windowFlag: { value: 0.0 },
+
+      // Declared unconditionally, default 1.0 (faithful): same reasoning as `lightModifier` above --
+      // a uniform the shader reads but nobody supplies reads as ZERO, which would render every WMO
+      // black. Debug-panel-only look deviation; see fragment/functions.glsl for why it exists.
+      wmoBrightness: { value: 1.0 },
     };
 
     // Enable lighting.
@@ -292,6 +297,7 @@ class WMOMaterial extends THREE.ShaderMaterial {
       this.uniforms.sunDiffuseColor.value.copy(uniforms.sunDiffuseColor.value);
       this.uniforms.sunAmbientColor.value.copy(uniforms.sunAmbientColor.value);
       this.uniforms.sidnNight.value = this.mapLight.sidnNight;
+      this.uniforms.wmoBrightness.value = this.mapLight.wmoBrightness;
     }
   }
 

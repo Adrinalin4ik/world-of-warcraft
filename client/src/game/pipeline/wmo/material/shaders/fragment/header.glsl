@@ -26,3 +26,9 @@ uniform float sidnNight;
 // MOMT F_WINDOW: 1 for a window pane, 0 otherwise.
 uniform float windowFlag;
 
+// Debug-panel look deviation, NOT part of the reference: a flat multiplier on every WMO lane's
+// final colour. 1.0 is faithful. Exists because the INT lane's law -- clamp(tex * MOCV * (1 + 4 *
+// MOCV.a)) -- has no scene-light term at all, so there is nothing to raise for zones the artists
+// baked very dark (Blackrock's lava caverns, e.g.). See applyWmoLighting for where it is applied.
+uniform float wmoBrightness;
+

@@ -10,6 +10,8 @@ export type LightingControlsTarget = {
   time: number;
   /** Manual override in half-minutes, or null to follow the clock. */
   timeOverride: number | null;
+  /** WMO brightness multiplier, 1.0..4.0. 1.0 is faithful to the reference. */
+  wmoBrightness: number;
 };
 
 type Props = {
@@ -41,7 +43,7 @@ const displayState = (mapLight: LightingControlsTarget | null) => {
     return 'none';
   }
   const { following, halfMinutes } = deriveDisplay(mapLight);
-  return `${following}:${Math.floor(halfMinutes / 2)}`;
+  return `${following}:${Math.floor(halfMinutes / 2)}:${mapLight.wmoBrightness}`;
 };
 
 /**
@@ -100,6 +102,14 @@ class LightingControls extends React.Component<Props> {
     mapLight.timeOverride = Number(event.target.value) * 2;
   };
 
+  private scrubWmoBrightness = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const { mapLight } = this.props;
+    if (!mapLight) {
+      return;
+    }
+    mapLight.wmoBrightness = Number(event.target.value);
+  };
+
   render() {
     const { mapLight } = this.props;
     if (!mapLight) {
@@ -133,6 +143,20 @@ class LightingControls extends React.Component<Props> {
             value={Math.floor(halfMinutes / 2)}
             disabled={following}
             onChange={this.scrubTime}
+          />
+        </p>
+        <p>
+          <label htmlFor="lighting-wmo-brightness">
+            WMO brightness (1.0 = faithful): {mapLight.wmoBrightness.toFixed(2)}
+          </label>
+          <input
+            id="lighting-wmo-brightness"
+            type="range"
+            min={1}
+            max={4}
+            step={0.05}
+            value={mapLight.wmoBrightness}
+            onChange={this.scrubWmoBrightness}
           />
         </p>
       </div>
