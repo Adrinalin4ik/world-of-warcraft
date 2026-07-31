@@ -15,6 +15,7 @@ const target = (overrides: Partial<LightingReadoutsTarget> = {}): LightingReadou
   sidnNight: 0,
   selectedLights: [],
   wmoPointLights: [],
+  wmo: null,
   ...overrides,
 });
 
@@ -49,5 +50,22 @@ describe('LightingReadouts', () => {
     expect(screen.getByText(/Area lights: 2/)).toBeInTheDocument();
     expect(screen.getByText(/id 16/)).toBeInTheDocument();
     expect(screen.getByText(/0\.750/)).toBeInTheDocument();
+  });
+});
+
+describe('LightingReadouts WMO state', () => {
+  it('shows a dash when the camera is not in a WMO', () => {
+    render(<LightingReadouts mapLight={target({ wmo: null })} />);
+    expect(screen.getByText(/WMO: -/)).toBeInTheDocument();
+  });
+
+  it('names the claimed WMO group and its batch-class counts', () => {
+    const wmo = { name: 'Stormwind_Inn', groupIndex: 3, ext: 12, int: 40, trans: 5 };
+    render(<LightingReadouts mapLight={target({ wmo })} />);
+    expect(screen.getByText(/Stormwind_Inn/)).toBeInTheDocument();
+    expect(screen.getByText(/group 3/)).toBeInTheDocument();
+    expect(screen.getByText(/ext 12/)).toBeInTheDocument();
+    expect(screen.getByText(/int 40/)).toBeInTheDocument();
+    expect(screen.getByText(/trans 5/)).toBeInTheDocument();
   });
 });

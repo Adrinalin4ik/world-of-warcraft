@@ -22,6 +22,14 @@ export type LightingReadoutsTarget = {
   sidnNight: number;
   selectedLights: Array<{ light: { id: number }; weight: number; distance: number }>;
   wmoPointLights: unknown[];
+  /** The WMO the camera is standing in, or null outdoors. */
+  wmo: {
+    name: string;
+    groupIndex: number;
+    ext: number;
+    int: number;
+    trans: number;
+  } | null;
 };
 
 type Props = {
@@ -99,6 +107,19 @@ class LightingReadouts extends React.Component<Props> {
 
         <div className="divider"></div>
         <p>WMO point lights: {(mapLight.wmoPointLights || []).length}</p>
+
+        <div className="divider"></div>
+        <p>
+          WMO:{' '}
+          {mapLight.wmo
+            ? `${mapLight.wmo.name} · group ${mapLight.wmo.groupIndex}`
+            : '-'}
+        </p>
+        {mapLight.wmo && (
+          <p>
+            Batches: ext {mapLight.wmo.ext} · int {mapLight.wmo.int} · trans {mapLight.wmo.trans}
+          </p>
+        )}
       </div>
     );
   }

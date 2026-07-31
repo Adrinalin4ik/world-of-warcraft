@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import DBC from '../../pipeline/dbc';
+import { batchClassOf } from '../../pipeline/wmo/material/laws';
 import { blendLights } from './blend';
 import { LIGHT_FLOAT_BAND, LIGHT_PARAM } from './constants';
 import { sidnNightFraction } from './laws';
@@ -38,6 +39,9 @@ class MapLight extends SceneLight {
   // Surfaced for the debug readout: it and the map id decide every colour below them, and neither is
   // otherwise visible.
   #sampledPosition: THREE.Vector3 | null = null;
+
+  // The WMO the camera is standing in, for the debug readout. Null outdoors.
+  #wmo: { name: string; groupIndex: number; ext: number; int: number; trans: number } | null = null;
 
   // Must match MAX_WMO_LIGHTS in the M2 fragment shader.
   static MAX_WMO_POINT_LIGHTS = 4;
@@ -90,6 +94,10 @@ class MapLight extends SceneLight {
 
   get sampledPosition() {
     return this.#sampledPosition;
+  }
+
+  get wmo() {
+    return this.#wmo;
   }
 
   /**
@@ -161,6 +169,36 @@ class MapLight extends SceneLight {
     this.location = interior ? 'interior' : 'exterior';
 
     this.#selectWmoPointLights(interior ? location.wmo : null, camera);
+    this.#wmo = interior ? MapLight.#describeWmo(location.wmo) : null;
+  }
+
+  /**
+   * Summarise the claimed WMO group for the debug readout: which building and group, and how its
+   * batches split across the three lighting classes. The counts are the fastest way to tell a
+   * misclassified group from a mis-lit one -- an interior room reporting all-ext batches is a
+   * classification bug, not a shader bug.
+   *
+   * `materialRefs` is built on the group's loader definition (`WMOGroup.def.materialRefs`, see
+   * `pipeline/wmo/group/loader/definition.js`), not copied onto the group instance itself -- the
+   * group only forwards it once, into `createMaterial`. Both spots are checked so the readout keeps
+   * working if that gets tidied up later; if neither is reachable, the counts fall back to zero
+   * rather than plumbing a new path through the WMO manager.
+   */
+  static #describeWmo(wmo: any) {
+    const group = wmo && wmo.group;
+    if (!group) {
+      return null;
+    }
+    const refs = group.materialRefs || (group.def && group.def.materialRefs) || [];
+    const count = (cls: 'trans' | 'int' | 'ext') =>
+      refs.filter((ref: any) => batchClassOf(ref.batchType) === cls).length;
+    return {
+      name: (wmo.handler && wmo.handler.filename) || (wmo.root && wmo.root.path) || 'unknown',
+      groupIndex: group.index,
+      trans: count('trans'),
+      int: count('int'),
+      ext: count('ext'),
+    };
   }
 
   /**
