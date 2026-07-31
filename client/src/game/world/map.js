@@ -243,13 +243,29 @@ class WorldMap extends THREE.Group {
    * Update all materials in the scene with current light data
    */
   /**
-   * Give a material the map light the first time we see it, then refresh its light uniforms.
+   * Give a material the CURRENT map light the first time we see it (or the first time we see it
+   * again after the light system it was bound to stopped being this one), then refresh its light
+   * uniforms.
    *
    * Adopting unseen materials here is what keeps streamed terrain lit. `setupLightSystem` only runs
    * once, from the constructor, so it reaches nothing: ADT chunks are built lazily as tiles load in.
    * A material that was never handed the light keeps `mapLight` null, which makes its
    * `updateLightUniforms` a no-op, and it stays on its constructor defaults forever - fully bright,
    * unfogged and with no time of day.
+   *
+   * The comparison is `!==`, not a truthiness check, because M2 materials are cached and shared
+   * across every placement AND every map that uses the same model (`M2Blueprint.cache`/`this.batches`
+   * -- see per-object-light.ts's doc comment). `changeMap` (world/index.ts) swaps `WorldMap.mapLight`
+   * for a brand-new `MapLight` on every zone change but never touches that cache, so a common prop --
+   * a shipwreck, a floating log pile, anything likely to reappear across zones -- keeps whatever
+   * `MapLight` it was first bound to. A truthiness check treats that stale reference as "already
+   * bound" and only ever calls `updateLightUniforms()` against it, which reads `mapLight.uniforms` off
+   * the OLD `MapLight` -- one nobody calls `.update()` on anymore, since the new `WorldMap.animate()`
+   * only updates its OWN `mapLight`. Its fog/sun/time-of-day freeze at whatever they were the instant
+   * the old zone's `MapLight` stopped ticking: on a zone that authors little or no fog, that reads as
+   * "no fog at all" while everything freshly bound to the current `MapLight` fogs correctly around it.
+   * Comparing against the CURRENT `this.mapLight` re-binds the material the next time this sweep sees
+   * it, exactly like a material that had never been bound at all.
    */
   applyLightToMaterial(material) {
     if (!material) {
@@ -258,7 +274,7 @@ class WorldMap extends THREE.Group {
 
     let applied = false;
 
-    if (!material.mapLight && material.setMapLight) {
+    if (material.mapLight !== this.mapLight && material.setMapLight) {
       // setMapLight refreshes the uniforms itself.
       material.setMapLight(this.mapLight);
       applied = true;
