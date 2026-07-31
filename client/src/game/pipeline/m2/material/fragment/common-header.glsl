@@ -19,6 +19,14 @@ uniform vec4 fogParams;
 uniform vec3 fogColor;
 uniform float fogModifier;
 
+// The interior fog triple (MapLight's resolved camera-in-WMO-room haze), published for WMO materials
+// too (wmo/material/index.js). `interiorFog` is per-instance (per-object-light.ts) -- set when this
+// particular doodad should hold its room's haze -- separate from `interiorProbe` above, which only
+// selects the lighting LANE. See PerObjectLighting.interiorFog for why the two are not the same flag.
+uniform vec4 wmoFogParams;
+uniform vec3 wmoFogColor;
+uniform int interiorFog;
+
 uniform float animatedTransparency;
 
 // WMO point lights (MOLT) affecting this model. Positions are world space, matching
@@ -160,9 +168,21 @@ vec4 applyDiffuseLighting(vec4 result) {
 }
 
 vec4 applyFog(vec4 color) {
-  float f1 = (cameraDistance * fogParams.x) + fogParams.y;
+  // Interior-fogged instances (this doodad's owning WMO group is `lightingInterior`, or -- for a
+  // unit standing in a WMO interior -- its own light-node classification, per-object-light.ts) take
+  // the camera's claimed room triple instead of the scene's, exactly like the WMO shader's
+  // `createFog` does at compile time. Everything else keeps the scene triple.
+  vec3 fogRgb = fogColor;
+  vec4 fogSpan = fogParams;
+
+  if (interiorFog == 1) {
+    fogRgb = wmoFogColor;
+    fogSpan = wmoFogParams;
+  }
+
+  float f1 = (cameraDistance * fogSpan.x) + fogSpan.y;
   float f2 = max(f1, 0.0);
-  // fogParams.z is always 1.0 at the only packing site (blendLights), so the pow was a no-op costing
+  // fogSpan.z is always 1.0 at the only packing site (blendLights), so the pow was a no-op costing
   // a per-fragment exponentiation and disguising a plain linear ramp. The law is
   // factor = 1 - clamp((end - eyeZ) / (end - start)).
   float f4 = min(f2, 1.0);
@@ -174,7 +194,7 @@ vec4 applyFog(vec4 color) {
 #if BLENDING_MODE <= 2
   // Opaque, alpha-keyed and alpha-blended geometry replaces what is behind it, so fog replaces its
   // colour in the usual way.
-  color.rgb = mix(color.rgb, fogColor.rgb, fogFactor);
+  color.rgb = mix(color.rgb, fogRgb, fogFactor);
 #elif BLENDING_MODE == 3 || BLENDING_MODE == 4
   // Modes 3 (NoAlphaAdd) and 4 (Add) *add* their result into the framebuffer. Mixing toward a lit fog
   // colour therefore adds light rather than removing it: a torch's additive glow picked up the fog tint

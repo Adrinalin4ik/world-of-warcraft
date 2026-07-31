@@ -26,6 +26,16 @@ export type SelectedLight = {
 export type PerObjectLighting = {
   /** True for a model standing in a WMO interior -- takes the probe lane instead of the sun lobe. */
   interior: boolean;
+  /**
+   * True when this instance should fog with the interior triple (`wmoFogColor`/`wmoFogParams`)
+   * instead of the scene triple. A SEPARATE question from `interior` above: `interior` selects the
+   * lighting LANE (probe vs sun lobe), while this selects the fog COLOUR/RANGE the fragment shader
+   * mixes toward. For a WMO doodad the two happen to be set from the same `group.lightingInterior`
+   * check today, but the reference stages a unit's fog by the unit's OWN light-node classification
+   * (samples/benilla wow_model.wgsl: `interior_fogged`, the per-instance tag bit 30) -- an M2 can
+   * want interior fog while not being an interior *prop* -- so do not collapse this into `interior`.
+   */
+  interiorFog: boolean;
   /** The terrain-shade intensity family: 2.5 lit / 0.5 MCSH-shadowed / 1.0 fixed, capped at 1.0. */
   sunIntensity: number;
   /** The folded interior probe, or null on the exterior lane. */
@@ -52,6 +62,7 @@ export function applyPerObjectLighting(
 
   uniforms.sunIntensity.value = lighting.sunIntensity;
   uniforms.interiorProbe.value = lighting.interior && lighting.probe ? 1 : 0;
+  uniforms.interiorFog.value = lighting.interiorFog ? 1 : 0;
 
   if (lighting.probe) {
     // ONE flat Float32Array of 28 floats, not an array of Vector4s. three.js accepts a flat typed array

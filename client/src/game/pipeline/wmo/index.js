@@ -407,6 +407,10 @@ class WMO {
 
     doodad.perObjectLighting = {
       interior: true,
+      // This doodad's owning group is `lightingInterior` -- it fogs with the room's own triple, not
+      // the storm's. See PerObjectLighting.interiorFog: a SEPARATE flag from `interior` above, even
+      // though for a WMO doodad the two happen to be set from the same group check.
+      interiorFog: true,
       sunIntensity: 1.0,
       probe,
       // Deliberately empty, not an unfinished stub: this doodad's MOLR lobes are already folded into
@@ -463,6 +467,10 @@ class WMO {
 
     doodad.perObjectLighting = {
       interior: false,
+      // The owning group (a porch, a courtyard, any EXTERIOR_LIT group) is not `lightingInterior`, so
+      // this doodad keeps the scene fog -- the storm outside stays the storm, even standing under an
+      // awning.
+      interiorFog: false,
       sunIntensity: 1.0,
       probe: null,
       pointLights

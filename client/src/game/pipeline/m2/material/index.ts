@@ -173,6 +173,12 @@ class M2Material extends THREE.ShaderMaterial {
       fogParams: { value: new THREE.Vector4() },
       fogColor: { value: new THREE.Color() },
 
+      // The interior fog triple (MapLight's resolved camera-in-WMO-room haze), pulled the same way
+      // the WMO material does. Only consumed when `interiorFog` (below) is set for this draw --
+      // defaults here just keep the material sane before the first `updateLightUniforms()` call.
+      wmoFogParams: { value: new THREE.Vector4(1.0 / 577.0, 577.0, 1.0, 1.0) },
+      wmoFogColor: { value: new THREE.Color(0.25, 0.5, 0.8) },
+
       // Cleared by render flag 0x02 (unfogged). Declared here so fogged materials -- the majority --
       // have it set: applyRenderFlags only ever assigned it for the unfogged case, and a uniform the
       // shader declares but nobody supplies reads as zero, which would have unfogged everything.
@@ -184,6 +190,10 @@ class M2Material extends THREE.ShaderMaterial {
       // reads but nobody supplies reads as zero, and for `sunIntensity` that would flatten the sun.
       sunIntensity: { value: 1.0 },
       interiorProbe: { value: 0 },
+      // Per-object, pushed by per-object-light.ts alongside interiorProbe -- but a SEPARATE question
+      // from it (see PerObjectLighting.interiorFog). Selects the interior fog triple above instead of
+      // the scene triple in applyFog.
+      interiorFog: { value: 0 },
       // A flat Float32Array of 7 vec4s. See per-object-light.ts for why this is not Vector4[].
       probeCoeffs: { value: new Float32Array(28) },
     };
@@ -528,6 +538,8 @@ class M2Material extends THREE.ShaderMaterial {
       const uniforms = this.mapLight.uniforms;
       this.uniforms.fogParams.value.copy(uniforms.fogParams.value);
       this.uniforms.fogColor.value.copy(uniforms.fogColor.value);
+      this.uniforms.wmoFogParams.value.copy(uniforms.wmoFogParams.value);
+      this.uniforms.wmoFogColor.value.copy(uniforms.wmoFogColor.value);
       // World-space sun direction: this shader lights against worldVertexNormal. `uniforms.sunDir`
       // carries the view-space variant, which rotates with the camera.
       this.uniforms.sunParams.value.copy(this.mapLight.sunDir);

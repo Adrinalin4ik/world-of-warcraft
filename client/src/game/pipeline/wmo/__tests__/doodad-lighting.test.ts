@@ -54,6 +54,7 @@ describe('WMO#foldDoodadLighting exterior lane', () => {
 
     expect(doodad.perObjectLighting).toBeTruthy();
     expect(doodad.perObjectLighting.interior).toBe(false);
+    expect(doodad.perObjectLighting.interiorFog).toBe(false);
     expect(doodad.perObjectLighting.probe).toBeNull();
     // The far light is outside its own attenEnd from the doodad's origin, so only the near one
     // should have been selected.
@@ -76,6 +77,7 @@ describe('WMO#foldDoodadLighting exterior lane', () => {
     wmo.foldDoodadLighting({ id: 2 }, doodad);
 
     expect(doodad.perObjectLighting.interior).toBe(false);
+    expect(doodad.perObjectLighting.interiorFog).toBe(false);
     expect(doodad.perObjectLighting.pointLights.length).toBe(1);
   });
 
@@ -89,6 +91,9 @@ describe('WMO#foldDoodadLighting exterior lane', () => {
     wmo.foldDoodadLighting({ id: 3, color: 0x00706050 }, doodad);
 
     expect(doodad.perObjectLighting.interior).toBe(true);
+    // Interior fog is a SEPARATE flag from `interior` (see PerObjectLighting.interiorFog) -- it just
+    // happens to be set from the same group check for a WMO doodad.
+    expect(doodad.perObjectLighting.interiorFog).toBe(true);
     expect(doodad.perObjectLighting.probe).toBeTruthy();
     expect(doodad.perObjectLighting.pointLights).toEqual([]);
   });

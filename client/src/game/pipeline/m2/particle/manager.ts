@@ -219,6 +219,13 @@ export class ParticleManager {
         if (uniforms && uniforms.fogParams) {
           uniforms.fogParams.value.copy(this.mapLight.uniforms.fogParams.value);
           uniforms.fogColor.value.copy(this.mapLight.uniforms.fogColor.value);
+          uniforms.wmoFogParams.value.copy(this.mapLight.uniforms.wmoFogParams.value);
+          uniforms.wmoFogColor.value.copy(this.mapLight.uniforms.wmoFogColor.value);
+          // The owning instance's own interior-fog flag (per-object-light.ts) -- an emitter hanging
+          // off a doodad standing in a WMO interior fogs with the room's haze too. Instances that
+          // never went through WMO#foldDoodadLighting (an ADT-placed M2, say) have no
+          // `perObjectLighting` at all, so this defaults to the scene triple, same as before.
+          uniforms.interiorFog.value = entry.instance.perObjectLighting && entry.instance.perObjectLighting.interiorFog ? 1.0 : 0.0;
         }
       }
 

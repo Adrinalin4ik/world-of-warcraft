@@ -14,6 +14,15 @@ uniform float alphaKey;
 uniform vec4 fogParams;
 uniform vec3 fogColor;
 
+// The interior fog triple, and the per-emitter flag selecting it -- mirrors `wmoFogParams` /
+// `wmoFogColor` / `interiorFog` in m2/material/fragment/common-header.glsl. Set by ParticleManager
+// from the owning M2 instance's `perObjectLighting.interiorFog` (per-object-light.ts), so an emitter
+// hanging off a doodad standing in a WMO interior fogs with the room's haze too, not just its own
+// mesh batches.
+uniform vec4 wmoFogParams;
+uniform vec3 wmoFogColor;
+uniform float interiorFog;
+
 varying vec2 vUv;
 varying vec4 vColor;
 varying float cameraDistance;
@@ -22,9 +31,17 @@ varying float cameraDistance;
 // blend-mode split. Particles and the batches they sit among must fog the same way or the same
 // texture reads differently in each.
 vec4 applyFog(vec4 color) {
-  float f1 = (cameraDistance * fogParams.x) + fogParams.y;
+  vec3 fogRgb = fogColor;
+  vec4 fogSpan = fogParams;
+
+  if (interiorFog > 0.5) {
+    fogRgb = wmoFogColor;
+    fogSpan = wmoFogParams;
+  }
+
+  float f1 = (cameraDistance * fogSpan.x) + fogSpan.y;
   float f2 = max(f1, 0.0);
-  // fogParams.z is always 1.0 at the only packing site (blendLights), so the pow was a no-op costing
+  // fogSpan.z is always 1.0 at the only packing site (blendLights), so the pow was a no-op costing
   // a per-fragment exponentiation and disguising a plain linear ramp. The law is
   // factor = 1 - clamp((end - eyeZ) / (end - start)).
   float f4 = min(f2, 1.0);
@@ -34,7 +51,7 @@ vec4 applyFog(vec4 color) {
 #if BLENDING_MODE <= 2
   // Opaque, alpha-keyed and alpha-blended particles replace what is behind them, so fog replaces
   // their colour in the usual way.
-  color.rgb = mix(color.rgb, fogColor.rgb, fogFactor);
+  color.rgb = mix(color.rgb, fogRgb, fogFactor);
 #elif BLENDING_MODE == 3 || BLENDING_MODE == 4
   // Modes 3 (NoAlphaAdd) and 4 (Add) *add* their result into the framebuffer. Mixing toward a lit
   // fog colour would ADD light rather than remove it -- a distant torch would paint a coloured halo

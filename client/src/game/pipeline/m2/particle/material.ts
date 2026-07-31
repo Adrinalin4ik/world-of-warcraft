@@ -102,6 +102,12 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
       // update renders exactly as it did before fog existed rather than turning solid fog colour.
       fogParams: { value: new THREE.Vector4(0.0, 1.0, 1.0, 1.0) },
       fogColor: { value: new THREE.Color(0, 0, 0) },
+
+      // The interior fog triple and its selector, refreshed each frame by ParticleManager from the
+      // owning M2 instance's `perObjectLighting.interiorFog`. See shader.frag's `applyFog`.
+      wmoFogParams: { value: new THREE.Vector4(0.0, 1.0, 1.0, 1.0) },
+      wmoFogColor: { value: new THREE.Color(0, 0, 0) },
+      interiorFog: { value: 0.0 },
     };
 
     // Both faces: a billboarded quad's winding depends on the camera, and culling it would make

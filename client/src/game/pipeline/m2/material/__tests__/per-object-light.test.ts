@@ -8,6 +8,7 @@ const makeMaterial = () => ({
   uniforms: {
     sunIntensity: { value: 1.0 },
     interiorProbe: { value: 0 },
+    interiorFog: { value: 0 },
     probeCoeffs: { value: new Float32Array(28) },
     wmoLightCount: { value: 0 },
     wmoLightPosition: { value: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }] },
@@ -18,6 +19,7 @@ const makeMaterial = () => ({
 
 const exterior: PerObjectLighting = {
   interior: false,
+  interiorFog: false,
   sunIntensity: 1.0,
   probe: null,
   pointLights: [],
@@ -45,6 +47,7 @@ describe('applyPerObjectLighting', () => {
     const probe = Array.from({ length: 7 }, (_, row) => [row, row + 1, row + 2, row + 3]);
     applyPerObjectLighting(material as any, {
       interior: true,
+      interiorFog: true,
       sunIntensity: 1.0,
       probe: probe as any,
       pointLights: [],
@@ -52,6 +55,18 @@ describe('applyPerObjectLighting', () => {
     expect(material.uniforms.interiorProbe.value).toBe(1);
     // Row 3 occupies floats 12..15 of the flat array.
     expect(Array.from(material.uniforms.probeCoeffs.value.slice(12, 16))).toEqual([3, 4, 5, 6]);
+  });
+
+  it('pushes interiorFog independently of the interior probe flag', () => {
+    // A doodad can want interior fog without taking the probe lane (and vice-versa in principle) --
+    // the two are deliberately separate questions. See PerObjectLighting.interiorFog.
+    const material = makeMaterial();
+    applyPerObjectLighting(material as any, { ...exterior, interior: false, interiorFog: true });
+    expect(material.uniforms.interiorProbe.value).toBe(0);
+    expect(material.uniforms.interiorFog.value).toBe(1);
+
+    applyPerObjectLighting(material as any, { ...exterior, interior: false, interiorFog: false });
+    expect(material.uniforms.interiorFog.value).toBe(0);
   });
 
   it('caps the point lights at three and folds intensity into the colour', () => {
