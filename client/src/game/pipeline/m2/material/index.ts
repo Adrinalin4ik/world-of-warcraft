@@ -353,9 +353,6 @@ class M2Material extends THREE.ShaderMaterial {
       this.vertexShader = M2Material.VERTEX_SHADERS['Discard'];
       this.fragmentShader = M2Material.FRAGMENT_SHADERS['Discard'];
     }
-
-    this.vertexShader = M2Material.VERTEX_SHADERS.Diffuse_T1;
-    this.fragmentShader = M2Material.FRAGMENT_SHADERS.Combiners_Opaque;
   }
 
   loadTextures() {
