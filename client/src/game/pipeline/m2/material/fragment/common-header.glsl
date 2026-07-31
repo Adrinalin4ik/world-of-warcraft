@@ -86,11 +86,15 @@ vec3 applyWmoPointLights(vec3 normal) {
  * CLAMP THE SUM, NEVER A TERM. The lobe dips to about -0.037*D around mu = -0.53 (low-order SH
  * ringing) and that dip is part of the response the reference chose. Clamping the sun term alone
  * would floor it away.
+ *
+ * Returns the UNCLAMPED ambient+diffuse sum -- `applyDiffuseLighting` is the one place that clamps,
+ * after adding the point-light term. Do not re-clamp here: a nearby point light needs the negative
+ * dip to still be there to sum against, or the shadow side of a model reads brighter than it should.
  */
 vec3 m2SunLobe(in vec3 normal, in vec3 toLight, in vec3 ambient, in vec3 diffuse, in float intensity) {
   float mu = dot(normalize(normal), toLight);
   float lobe = (4.0 / 17.0) * (0.375 + 2.0 * mu + 1.875 * mu * mu);
-  return clamp(ambient + diffuse * (intensity * lobe), 0.0, 1.0);
+  return ambient + diffuse * (intensity * lobe);
 }
 
 /**
@@ -140,7 +144,11 @@ vec4 applyDiffuseLighting(vec4 result) {
       light += applyWmoPointLights(normalize(worldVertexNormal.xyz));
     }
 
-    light = min(light, vec3(1.0, 1.0, 1.0));
+    // Clamp the SUM, never a term: both lanes above hand back unclamped values (the exterior lane's
+    // point lights are added in above; the interior probe's own docstring says the same). Clamping
+    // BOTH ends matters -- a bare min() would leave the sun lobe's negative dip in place, and that
+    // negative factor would darken the albedo below black once multiplied through.
+    light = clamp(light, 0.0, 1.0);
     light = mix(light, vec3(1.0, 1.0, 1.0), 1.0 - materialParams.y);
   #else
     vec3 light = vec3(1.0, 1.0, 1.0);
