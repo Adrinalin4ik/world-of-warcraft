@@ -1,8 +1,6 @@
 import * as THREE from 'three';
 
 import TextureLoader from '../../texture-loader';
-// import fragmentShader from './shader.frag';
-// import vertexShader from './shader.vert';
 import fragmentShader from './shaders/fragment/main.glsl';
 import vertexShader from './shaders/vertex/main.glsl';
 import { batchClassOf, decodeMaterialLighting } from './laws';
@@ -93,12 +91,11 @@ class WMOMaterial extends THREE.ShaderMaterial {
       this.side = THREE.DoubleSide;
     }
 
-    // Flag 0x40: clamp to edge
-    if (def.flags & 0x40) {
-      this.wrapping = THREE.ClampToEdgeWrapping;
-    } else {
-      this.wrapping = THREE.RepeatWrapping;
-    }
+    // MOMT carries clamp-S (0x40) and clamp-T (0x80) independently. The old code derived ONE wrap
+    // mode from the S flag and passed it for both axes, so a clamp-S-only material had its T axis
+    // wrongly clamped and a clamp-T-only material had neither.
+    this.wrapS = lighting.clampS ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+    this.wrapT = lighting.clampT ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
 
     switch(def.blendingMode) {
       case 0: // GxBlend_Opaque
@@ -203,16 +200,10 @@ class WMOMaterial extends THREE.ShaderMaterial {
     }
 
 
-    if (this.def.blendingMode != 0) {
-      let alphaTestVal = 0.878431;
-      if ((this.def.flags & 0x80) > 0) {
-        alphaTestVal = 0.2999999;
-      }
-      if ((this.def.flags & 0x01) > 0) {
-        // alphaTestVal = 0.1; //TODO: confirm this
-      }
-
-      this.uniforms.alphaTestValue = { value: alphaTestVal };
+    if (this.def.blendingMode !== 0) {
+      // 224/255, the vanilla cutout reference. The previous 0.2999999 branch keyed off flags & 0x80,
+      // which is F_CLAMP_T -- a texture wrap mode with nothing to say about an alpha cutoff.
+      this.uniforms.alphaTestValue = { value: 0.878431 };
     } else {
       this.uniforms.alphaTestValue = { value: -1.0 };
     }
@@ -235,7 +226,7 @@ class WMOMaterial extends THREE.ShaderMaterial {
         const index = textures.length;
         textures.push(TextureLoader.PLACEHOLDER);
 
-        TextureLoader.load(textureDef.path, this.wrapping, this.wrapping)
+        TextureLoader.load(textureDef.path, this.wrapS, this.wrapT)
           .then((texture) => {
             textures[index] = texture;
           })
@@ -253,20 +244,6 @@ class WMOMaterial extends THREE.ShaderMaterial {
     this.uniforms.textureCount = { type: 'i', value: textures.length };
     // const texture1_color = textureDefs[0].textureData.color;
     // this.uniforms.baseColor = { type: 'c', value: new THREE.Color(texture1_color.r, texture1_color.g, texture1_color.b) }
-
-    // if (this.def.blendingMode != 0) {
-    //   let alphaTestVal = 0.878431;
-    //   if ((this.def.flags & 0x80) > 0) {
-    //     alphaTestVal = 0.2999999;
-    //   }
-    //   if ((this.def.flags & 0x01) > 0) {
-    //     // alphaTestVal = 0.1; //TODO: confirm this
-    //   }
-
-    //   this.uniforms.alphaTestValue = { value: alphaTestVal };
-    // } else {
-    //   this.uniforms.alphaTestValue = { value: -1.0 };
-    // }
 
     // this.uniforms.alphaTest = { value: [color.r, color.g, color.b, color.a]}
     this.needsUpdate = true;

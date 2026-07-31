@@ -5,6 +5,7 @@ import Chunk from '../chunked/chunk';
 import PaddedStrings from '../chunked/padded-strings';
 import SkipChunk from '../chunked/skip-chunk';
 import { float32array3, Quat, Vec3Float } from '../types';
+import { isLightingInterior } from '../../game/pipeline/wmo/material/laws';
 
 const MOHD = Chunk({
   textureCount: r.uint32le,
@@ -129,8 +130,9 @@ const MOGI = Chunk({
     // The LIGHTING class, which is not the same question as `interior` above. The reference forks
     // it on MOGI & 0x48: EXTERIOR (0x8) or EXTERIOR_LIT (0x40) both mean "lit as outdoors". An
     // EXTERIOR_LIT porch still claims the camera for culling, which is why both flags exist.
+    // Mask lives once, in laws.ts -- see isLightingInterior.
     lightingInterior: function() {
-      return (this.flags & 0x48) === 0;
+      return isLightingInterior(this.flags);
     }
   }), 'size', 'bytes')
 });

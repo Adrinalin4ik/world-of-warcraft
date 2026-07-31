@@ -3,6 +3,7 @@ import * as r from 'restructure';
 import Chunked from '../chunked';
 import Chunk from '../chunked/chunk';
 import { float32array2, float32array3, Vec3Float } from '../types';
+import { isLightingInterior } from '../../game/pipeline/wmo/material/laws';
 
 const MOGP = Chunk({
   nameOffset: r.uint32le,
@@ -177,6 +178,6 @@ export default Chunked({
   // `interior` above, which answers the culling/containment question: an EXTERIOR_LIT porch
   // claims the camera but is lit as outdoors.
   lightingInterior: function() {
-    return (this.flags & 0x48) === 0;
+    return isLightingInterior(this.flags);
   }
 });
