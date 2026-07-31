@@ -31,6 +31,11 @@ export function stageMfog(record: MfogRecord, farclip: number): FogTriple {
 /** Crossfade rate: 0.25/second, i.e. four seconds in and four seconds out. */
 export const WMO_FOG_RAMP_PER_SEC = 0.25;
 
+// Below this span, `1/(end-start)` is treated as a divide-by-zero rather than merely a very steep
+// slope. A zero-width (or coincident) band handing the shader an infinite/NaN `x` or `y` would blank
+// whatever geometry reads it, silently, rather than just rendering a slightly-too-sharp fog edge.
+const MIN_FOG_SPAN = 1e-4;
+
 /**
  * Pack a (start, end) fog range the way the shader's `f1 = distance * x + y` expects: falling from
  * 1 at `start` to 0 at `end`, `z`/`w` fixed at 1 (see `blendLights`'s comment on this exact packing).
@@ -38,9 +43,19 @@ export const WMO_FOG_RAMP_PER_SEC = 0.25;
  * The one definition both `blendLights` (the scene fog) and `MapLight` (the WMO interior fog) call --
  * two independent copies of a packing this subtle is how they drift, and reading this same packing
  * back out has already cost this project one fix round (see `SceneLight.fogEnd`/`fogStart`).
+ *
+ * Guards a zero-width (`start === end`) band: `1/(end-start)` would otherwise be `Infinity` (or `NaN`
+ * once multiplied through), which is not a hypothetical -- an unset or coincident MFOG record hits
+ * this every time. The span is floored to `MIN_FOG_SPAN`, sign-preserved, so the result stays finite
+ * and the fog simply becomes an effectively instantaneous cutoff at `end` instead of poisoning the
+ * uniform.
  */
 export function packFogParams(start: number, end: number): [number, number, number, number] {
-  const step = 1.0 / (end - start);
+  const rawSpan = end - start;
+  const span = Math.abs(rawSpan) < MIN_FOG_SPAN
+    ? (rawSpan < 0 ? -MIN_FOG_SPAN : MIN_FOG_SPAN)
+    : rawSpan;
+  const step = 1.0 / span;
   return [-step, end * step, 1.0, 1.0];
 }
 

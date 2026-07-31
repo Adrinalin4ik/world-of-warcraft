@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { FogTriple, MfogRecord, stageMfog, WmoFogRamp } from '../fog';
+import { FogTriple, MfogRecord, packFogParams, stageMfog, unpackFogParams, WmoFogRamp } from '../fog';
 
 const scene: FogTriple = { color: [0.2, 0.2, 0.2], start: -139, end: 278 };
 const room: MfogRecord = { color: [1.0, 0.5, 0.0], end: 194.4, startScalar: 0.25 };
@@ -16,6 +16,49 @@ describe('stageMfog', () => {
   it('treats the record start as a FRACTION of end, not an absolute distance', () => {
     const staged = stageMfog({ color: [0, 0, 0], end: 200, startScalar: 0.5 }, 1000);
     expect(staged.start).toBeCloseTo(100, 4);
+  });
+});
+
+describe('packFogParams / unpackFogParams', () => {
+  const bands: Array<[number, number]> = [
+    [125, 500],
+    [0, 200],
+    [400, 410], // narrow -- where a wrong denominator still looks right on a wide band
+  ];
+
+  it('round-trips start/end through pack then unpack', () => {
+    for (const [start, end] of bands) {
+      const [x, y] = packFogParams(start, end);
+      const { start: gotStart, end: gotEnd } = unpackFogParams(x, y);
+      expect(gotStart).toBeCloseTo(start, 4);
+      expect(gotEnd).toBeCloseTo(end, 4);
+    }
+  });
+
+  it('packs the actual shader contract: f1 = d*x + y is 1 at start and 0 at end, with x negative', () => {
+    for (const [start, end] of bands) {
+      const [x, y] = packFogParams(start, end);
+      expect(x).toBeLessThan(0);
+      expect(start * x + y).toBeCloseTo(1, 4);
+      expect(end * x + y).toBeCloseTo(0, 4);
+    }
+  });
+
+  it('guards the degenerate zero-width band instead of producing NaN/Infinity', () => {
+    const [x, y, z, w] = packFogParams(300, 300);
+
+    expect(Number.isFinite(x)).toBe(true);
+    expect(Number.isFinite(y)).toBe(true);
+    expect(Number.isFinite(z)).toBe(true);
+    expect(Number.isFinite(w)).toBe(true);
+    expect(Number.isNaN(x)).toBe(false);
+    expect(Number.isNaN(y)).toBe(false);
+
+    // Round-tripping a degenerate band is not expected to recover the exact original values (the
+    // span was floored, not preserved) -- what matters is that unpacking it ALSO stays finite.
+    const { start, end } = unpackFogParams(x, y);
+    expect(Number.isFinite(start)).toBe(true);
+    expect(Number.isFinite(end)).toBe(true);
   });
 });
 
