@@ -1348,10 +1348,41 @@ One genuine unknown remains:
    unfounded (it keyed off a texture-wrap flag). If cutout geometry visibly worsens, the answer is a
    per-blend-mode threshold, not restoring a wrap flag as the selector. Report rather than revert.
 
+## Outcome
+
+All nine tasks landed (run order 1 → 7 → 2 → 3 → 4 → 5 → 8 → 9 → 6), plus Task 9 added mid-flight and
+one fix from the final review. Suite 212/212 across 20 suites, `tsc --noEmit` clean.
+
+**Task 9 was not in the original plan.** It fixed two bugs the human found by looking at an interior:
+
+1. **My plan's TRANS snippet was wrong.** It nested MOCV inside `wmoLitFactor` and then did
+   `mix(vec3(1.0), lit, MOCV.a)`, so at `MOCV.a = 0` the lane rendered `tex × 1.0` — no vertex colour
+   at all. The reference keeps the light factor MOCV-free and multiplies MOCV *outside* the mix, so it
+   applies to both branches. Now `a = 0` → `tex × MOCV`, `a = 1` → `tex × clamp(MOCV × lit + emission)`.
+2. **The interior sun fade double-darkened every non-INT interior batch** — `tex × MOCV × ambient`
+   with diffuse forced to zero.
+
+**The final whole-branch review caught a bug no task-scoped review could see:** the material cache key
+was built from `interior` (culling) while the `INTERIOR` shader define came from `lightingInterior`
+(lighting). An interior room and an attached `EXTERIOR_LIT` porch collide on one key, and whichever
+loads first imposes its lighting law on the other. Fixed by threading `lightingInterior` onto the
+definition and into the key, with a regression test. **The lesson generalises: adding a second notion
+of an existing concept means auditing every identity key that gates reuse.**
+
+### Unresolved question, recorded rather than guessed
+
+The UNLIT lane (`lightModifier <= 0.0`) returns the bare texture, dropping MOCV. The final review could
+not settle whether the reference does the same: its `is_emissive` branch uses `albedo`, which Bevy
+folds with the vertex colour whenever `VERTEX_COLORS` is set, so the reference may retain a MOCV
+multiply there. It may also be moot if UNLIT-flagged WMO batches conventionally bake near-white MOCV.
+Left as-is; revisit with evidence rather than by preference.
+
 ## Handoff to plan 3
 
-- **`MapLight`'s interior sun fade is still in place** and must come out at the END of plan 3, once
-  the M2 interior probes exist.
+- **`MapLight`'s interior sun fade is GONE** — removed in Task 9, overriding this plan's own hard
+  constraint, on the project owner's explicit call ("make it how it works in reference"). The accepted
+  consequence: **M2 doodads standing indoors read as sunlit** until plan 3 lands their per-instance SH
+  probes. Plan 3 must fix that by adding the probes, **not** by re-adding the fade.
 - **Two point-light selection strategies are live.** `MapLight.#selectWmoPointLights` ranks by
   `falloff x intensity` from the camera; `world/light/laws.ts`'s `selectPointLights` ranks by plain
   distance from the receiving object. Plan 3 replaces the old call sites rather than adding beside
