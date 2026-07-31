@@ -1,6 +1,7 @@
 import React from 'react';
 import * as THREE from 'three';
 import { GameHandler } from '../../../network/game/handler';
+import CollapsibleSection from './collapsible-section';
 import LightingControls from './lighting-controls';
 import LightingReadouts from './lighting-readouts';
 import './debug.scss';
@@ -169,20 +170,26 @@ class DebugPanel extends React.Component<IProp> {
     const { memory, programs } = renderer.info;
     return (
       <div className="stats">
-        <h2>Tests</h2>
-        <p>
-          Test1: {DebugPanel.test1}
-        </p>
-        <p>
-          Test2: {DebugPanel.test2}
-        </p>
-        <p>
-          Test3: {DebugPanel.test3}
-        </p>
-        <h2>Player</h2>
-        { this.playerStats() }
-        <LightingControls mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
-        <LightingReadouts mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
+        <CollapsibleSection title="Tests" storageKey="tests" defaultCollapsed={true}>
+          <p>
+            Test1: {DebugPanel.test1}
+          </p>
+          <p>
+            Test2: {DebugPanel.test2}
+          </p>
+          <p>
+            Test3: {DebugPanel.test3}
+          </p>
+        </CollapsibleSection>
+        <CollapsibleSection title="Player" storageKey="player" defaultCollapsed={true}>
+          { this.playerStats() }
+        </CollapsibleSection>
+        <CollapsibleSection title="Lighting" storageKey="lighting" defaultCollapsed={false}>
+          <LightingControls mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
+        </CollapsibleSection>
+        <CollapsibleSection title="Lighting resolve" storageKey="lighting-resolve" defaultCollapsed={false}>
+          <LightingReadouts mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
+        </CollapsibleSection>
         {/* <h2>Memory</h2>
         <div className="divider"></div>
         <p>

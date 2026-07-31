@@ -177,8 +177,6 @@ class LightingReadouts extends React.Component<Props> {
 
     return (
       <div className="lightingReadouts">
-        <h2>Lighting resolve</h2>
-        <div className="divider"></div>
         <p>Map: {mapLight.mapId ?? '-'}</p>
         <p>
           Sampled at:{' '}

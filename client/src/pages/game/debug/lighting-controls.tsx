@@ -120,8 +120,6 @@ class LightingControls extends React.Component<Props> {
 
     return (
       <div className="lightingControls">
-        <h2>Lighting</h2>
-        <div className="divider"></div>
         <p>
           <label htmlFor="lighting-follow-clock">Follow clock</label>
           <input
