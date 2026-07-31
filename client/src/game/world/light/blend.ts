@@ -19,6 +19,10 @@ const blend = {
   fogParams: new THREE.Vector4(),
   riverCloseColor: new THREE.Color(),
   oceanCloseColor: new THREE.Color(),
+  // Debug-readout-only (see MapLight#fogStartScalar / #rawFogEnd's doc comments). Plain numbers, so
+  // -- unlike the colours/vector above -- these are just reassigned each call, not mutated in place.
+  fogStartScalar: 0,
+  rawFogEnd: 0,
 };
 
 const tempColor = new THREE.Color();
@@ -76,9 +80,14 @@ export const blendLights = (
   let fogStartBlend = 0;
   let fogWeightTotal = 0;
 
+  // Debug-readout-only accumulators (see MapLight#fogStartScalar / #rawFogEnd's doc comments) --
+  // blended the same weighted-mean way as fogEnd/fogStart above, so they describe the same resolve.
+  let fogStartScalarBlend = 0;
+  let rawFogEndBlend = 0;
+
   for (const weightedLight of weightedLights) {
     const { light, weight } = weightedLight;
-    const { intBands, floatBands } = light.params[param];
+    const { intBands, floatBands, rawFogEndBand } = light.params[param];
 
     // Sun
 
@@ -124,6 +133,17 @@ export const blendLights = (
     fogStartBlend += fogStart * weight;
     fogWeightTotal += weight;
 
+    // Debug-readout-only. `rawFogEndBand` is absent exactly when `floatBands[BAND_FOG_END]` is (see
+    // `AreaLightParams.rawFogEndBand`'s doc comment) -- reconstruct from the scaled value in that case
+    // rather than lose the readout entirely; a light that never had the band cannot expose a scale bug
+    // either way.
+    const rawFogEnd = rawFogEndBand
+      ? interpolateNumericTable(rawFogEndBand, timeProgression)
+      : fogEnd * 36;
+
+    fogStartScalarBlend += fogStartScalar * weight;
+    rawFogEndBlend += rawFogEnd * weight;
+
     // Water. Optional: plenty of lights define no river or ocean band at all.
 
     blendOptionalBandColor(
@@ -155,6 +175,10 @@ export const blendLights = (
     : [0, 0];
 
   blend.fogParams.set(...packFogParams(fogStartMean, fogEndMean));
+
+  // Debug-readout-only -- see the accumulators' doc comments above.
+  blend.fogStartScalar = fogWeightTotal > 0 ? fogStartScalarBlend / fogWeightTotal : 0;
+  blend.rawFogEnd = fogWeightTotal > 0 ? rawFogEndBlend / fogWeightTotal : 0;
 
   return blend;
 };

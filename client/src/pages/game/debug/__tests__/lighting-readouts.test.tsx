@@ -11,6 +11,8 @@ const target = (overrides: Partial<LightingReadoutsTarget> = {}): LightingReadou
   fogColor: { r: 0.5, g: 0.5, b: 0.5 },
   fogStart: 125,
   fogEnd: 500,
+  fogStartScalar: 0.25,
+  rawFogEnd: 18000,
   interiorFog: { color: [0.5, 0.5, 0.5], start: 125, end: 500 },
   fogRampWeight: 0,
   sunDir: { x: -0.5, y: 0.25, z: -0.83 },
@@ -73,6 +75,32 @@ describe('LightingReadouts', () => {
     expect(screen.getByText(/Area lights: 2/)).toBeInTheDocument();
     expect(screen.getByText(/id 16/)).toBeInTheDocument();
     expect(screen.getByText(/0\.750/)).toBeInTheDocument();
+  });
+
+  it('shows a dash for the LightParams id when a fixture omits params entirely', () => {
+    const selected = [{ light: { id: 16 }, weight: 0.75, distance: 120.5 }];
+    render(<LightingReadouts mapLight={target({ selectedLights: selected })} />);
+    expect(screen.getByText(/id 16 · params -/)).toBeInTheDocument();
+  });
+
+  it('prints the LightParams id each selected light resolved its bands from', () => {
+    const selected = [
+      { light: { id: 16, params: [{ id: 165 }] }, weight: 0.75, distance: 120.5 },
+      { light: { id: 2, params: [{ id: 42 }] }, weight: 0.25, distance: 400.0 },
+    ];
+    render(<LightingReadouts mapLight={target({ selectedLights: selected })} />);
+    expect(screen.getByText(/id 16 · params 165/)).toBeInTheDocument();
+    expect(screen.getByText(/id 2 · params 42/)).toBeInTheDocument();
+  });
+
+  it('prints the resolved fog start scalar, before it is multiplied by fogEnd', () => {
+    render(<LightingReadouts mapLight={target({ fogStartScalar: -0.5 })} />);
+    expect(screen.getByText(/Fog start scalar: -0\.500/)).toBeInTheDocument();
+  });
+
+  it('prints the raw fog-end band value beside the scaled one, so a scale bug shows by inspection', () => {
+    render(<LightingReadouts mapLight={target({ fogEnd: 500, rawFogEnd: 18000 })} />);
+    expect(screen.getByText(/Fog end raw \/ scaled: 18000\.0 \/ 500\.0/)).toBeInTheDocument();
   });
 });
 

@@ -75,6 +75,15 @@ class MapLight extends SceneLight {
   // the ramp has engaged). Surfaced for tests and the next task's debug readout.
   #interiorFog: FogTriple = DEFAULT_FOG_TRIPLE;
 
+  // The resolved (blended) `LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR`, before it is multiplied by
+  // `#rawFogEnd`'s scaled counterpart to produce `fogStart`. Debug-readout-only -- see
+  // `lighting-readouts.tsx`'s doc comment on the field it feeds.
+  #fogStartScalar = 0;
+
+  // The resolved `LIGHT_FLOAT_BAND.BAND_FOG_END`, before `#processFloatBand`'s `1/36` unit
+  // conversion. Debug-readout-only, same reasoning as `#fogStartScalar` above.
+  #rawFogEnd = DEFAULT_FOG_TRIPLE.end * 36;
+
   // Wall-clock fallback for callers that have not been plumbed with a real per-frame delta (none of
   // which sit on the live render path -- see `update`'s `dt` doc). Never used when a caller passes
   // `dt` explicitly.
@@ -137,6 +146,24 @@ class MapLight extends SceneLight {
    * debug readout. */
   get fogRampWeight() {
     return this.#fogRamp.weight;
+  }
+
+  /**
+   * The resolved `LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR`, before it is multiplied by `fogEnd` to
+   * produce `fogStart` (`SceneLight#fogStart`). Debug-readout-only -- see `lighting-readouts.tsx`'s
+   * doc comment on the field it feeds.
+   */
+  get fogStartScalar() {
+    return this.#fogStartScalar;
+  }
+
+  /**
+   * The resolved `LIGHT_FLOAT_BAND.BAND_FOG_END`, before `#processFloatBand`'s `1/36` unit conversion
+   * -- i.e. the same quantity `fogEnd` (`SceneLight#fogEnd`) reports, but unscaled. Debug-readout-only:
+   * printing both side by side is what lets a misplaced (or doubled) scale be spotted by inspection.
+   */
+  get rawFogEnd() {
+    return this.#rawFogEnd;
   }
 
   /**
@@ -404,12 +431,19 @@ class MapLight extends SceneLight {
       fogColor,
       fogParams,
       riverCloseColor,
-      oceanCloseColor
+      oceanCloseColor,
+      fogStartScalar,
+      rawFogEnd,
     } = blendLights(
       this.#selectedLights,
       LIGHT_PARAM.PARAM_STANDARD,
       this.#timeProgression,
     );
+
+    // Debug-readout-only (see the getters' doc comments) -- resolved alongside the packed `fogParams`
+    // above rather than re-derived from it, since the whole point is to compare the two independently.
+    this.#fogStartScalar = fogStartScalar;
+    this.#rawFogEnd = rawFogEnd;
 
     // Both sides get the same values. `location` selects which params object the getters return, so
     // any difference between the two would show up as a hard step the frame the camera crosses a
@@ -477,6 +511,12 @@ class MapLight extends SceneLight {
       params.riverCloseColor.setRGB(r, g, b);
       params.oceanCloseColor.setRGB(r, g, b);
     }
+
+    // Debug-readout-only. `DEFAULT_FOG_TRIPLE.start` is 0, so the scalar is 0 regardless of `end`;
+    // `#rawFogEnd` is reconstructed by inverting `#processFloatBand`'s `1/36` scale, since there is no
+    // real band to read raw here at all -- this is the no-light-data fallback.
+    this.#fogStartScalar = 0;
+    this.#rawFogEnd = DEFAULT_FOG_TRIPLE.end * 36;
   }
 
   #selectLights(position: THREE.Vector3) {
@@ -564,10 +604,18 @@ class MapLight extends SceneLight {
       }
 
       // Process float bands
+      let rawFogEndBand: any[] | undefined;
       for (let i = 0; i < 6; i++) {
         const bandId = (lightRecord.skyFogID * 6) - 5 + i;
         if (lightFloatBandDb[bandId]) {
           floatBands[i] = this.#processFloatBand(lightFloatBandDb[bandId], i);
+
+          // Debug-readout-only: the same band, interpolated again with the `1/36` scale withheld, so
+          // the raw DBC value can be shown beside the scaled one (see AreaLightParams.rawFogEndBand's
+          // doc comment).
+          if (i === LIGHT_FLOAT_BAND.BAND_FOG_END) {
+            rawFogEndBand = this.#processFloatBand(lightFloatBandDb[bandId], i, true);
+          }
         }
       }
 
@@ -586,7 +634,8 @@ class MapLight extends SceneLight {
         params: [{
           id: lightRecord.skyFogID,
           intBands,
-          floatBands
+          floatBands,
+          rawFogEndBand
         }]
       };
 
@@ -622,11 +671,16 @@ class MapLight extends SceneLight {
     return table;
   }
 
-  #processFloatBand(bandRecord: any, band: number): any[] {
+  /**
+   * `raw`, when true, withholds the `1/36` unit conversion regardless of `band` -- used ONLY to build
+   * `AreaLightParams.rawFogEndBand` for the debug readout (see its doc comment), never for the real
+   * `floatBands` table.
+   */
+  #processFloatBand(bandRecord: any, band: number, raw = false): any[] {
     // Fog distances share the light coordinate system and need the same 36 scale as the positions and
     // falloff radii. Without it fog ended ~29000 units out, far past any view distance, so no
     // geometry ever reached a non-zero fog factor. The start scalar is a ratio, so it stays as is.
-    const scale = band === LIGHT_FLOAT_BAND.BAND_FOG_END ? 1.0 / 36.0 : 1.0;
+    const scale = !raw && band === LIGHT_FLOAT_BAND.BAND_FOG_END ? 1.0 / 36.0 : 1.0;
 
     const table = [];
     

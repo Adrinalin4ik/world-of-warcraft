@@ -4,6 +4,12 @@ export type AreaLightParams = {
   id: number;
   intBands: any[][];
   floatBands: any[][];
+  // The `LIGHT_FLOAT_BAND.BAND_FOG_END` table, interpolated the same way `floatBands` is, but BEFORE
+  // `MapLight#processFloatBand`'s `1/36` unit conversion. Debug-readout-only: it exists so the raw DBC
+  // value can be shown beside the scaled one and a wrongly-placed (or doubled) scale settles by
+  // inspection instead of by guessing at the final fog range. Absent when the band itself is absent,
+  // same as `floatBands`.
+  rawFogEndBand?: any[];
 };
 
 export type AreaLight = {

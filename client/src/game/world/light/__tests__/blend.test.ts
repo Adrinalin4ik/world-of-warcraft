@@ -12,7 +12,11 @@ import { AreaLight, WeightedAreaLight } from '../types';
 const colorBand = (color: THREE.Color): any[] => [0, color];
 const numericBand = (value: number): any[] => [0, value];
 
-const mkLight = (fogEnd: number, fogStartScalar: number): AreaLight => {
+const mkLight = (
+  fogEnd: number,
+  fogStartScalar: number,
+  rawFogEnd?: number,
+): AreaLight => {
   const intBands: any[][] = [];
   intBands[LIGHT_INT_BAND.BAND_DIRECT_COLOR] = colorBand(new THREE.Color(0, 0, 0));
   intBands[LIGHT_INT_BAND.BAND_AMBIENT_COLOR] = colorBand(new THREE.Color(0, 0, 0));
@@ -23,7 +27,12 @@ const mkLight = (fogEnd: number, fogStartScalar: number): AreaLight => {
   floatBands[LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR] = numericBand(fogStartScalar);
 
   const params: AreaLight['params'] = [];
-  params[LIGHT_PARAM.PARAM_STANDARD] = { id: 0, intBands, floatBands };
+  params[LIGHT_PARAM.PARAM_STANDARD] = {
+    id: 0,
+    intBands,
+    floatBands,
+    rawFogEndBand: rawFogEnd !== undefined ? numericBand(rawFogEnd) : undefined,
+  };
 
   return {
     id: 0,
@@ -102,5 +111,53 @@ describe('blendLights fog band', () => {
 
     expect(Number.isNaN(blend.fogParams.x)).toBe(false);
     expect(Number.isNaN(blend.fogParams.y)).toBe(false);
+    expect(Number.isNaN(blend.fogStartScalar)).toBe(false);
+    expect(Number.isNaN(blend.rawFogEnd)).toBe(false);
+  });
+});
+
+// Debug-readout-only fields (see MapLight#fogStartScalar / #rawFogEnd's doc comments): resolved
+// independently of the packed fogParams pair, specifically so a scale bug in #processFloatBand would
+// show up as a mismatch between `rawFogEnd / 36` and `fogEnd` rather than being invisible.
+describe('blendLights debug fields', () => {
+  it('reports the resolved fogStartScalar BEFORE it is multiplied by fogEnd', () => {
+    const light = mkLight(500, -0.5);
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+
+    expect(blend.fogStartScalar).toBeCloseTo(-0.5, 4);
+  });
+
+  it('reports the raw fogEnd band value, independent of the scaled one', () => {
+    // 500 scaled (what floatBands carries) does not have to equal 18000 / 36 by construction here --
+    // the two are tracked through entirely separate accumulators, which is the point: if
+    // MapLight#processFloatBand's scale were applied to the wrong band, or twice, `fogEnd` here would
+    // drift from `rawFogEnd / 36` and the debug readout would show the mismatch.
+    const light = mkLight(500, 0.25, 18000);
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+
+    const { end } = unpackFogParams(blend.fogParams.x, blend.fogParams.y);
+    expect(end).toBeCloseTo(500, 4);
+    expect(blend.rawFogEnd).toBeCloseTo(18000, 4);
+  });
+
+  it('falls back to fogEnd * 36 when a light has no rawFogEndBand at all', () => {
+    const light = mkLight(500, 0.25); // no rawFogEnd passed
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+
+    expect(blend.rawFogEnd).toBeCloseTo(500 * 36, 4);
+  });
+
+  it('blends fogStartScalar and rawFogEnd as weighted means across multiple lights', () => {
+    const a = mkLight(500, 0.25, 18000);
+    const b = mkLight(200, -0.5, 3600);
+
+    const blend = blendLights(
+      [weighted(a, 0.6), weighted(b, 0.4)],
+      LIGHT_PARAM.PARAM_STANDARD,
+      0,
+    );
+
+    expect(blend.fogStartScalar).toBeCloseTo(0.6 * 0.25 + 0.4 * -0.5, 4);
+    expect(blend.rawFogEnd).toBeCloseTo(0.6 * 18000 + 0.4 * 3600, 4);
   });
 });

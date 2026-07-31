@@ -24,6 +24,23 @@ export type LightingReadoutsTarget = {
   fogStart: number;
   fogEnd: number;
   /**
+   * The resolved (blended, weighted-mean) `LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR`, BEFORE it is
+   * multiplied by `fogEnd` to produce `fogStart` above. A start scalar around -0.5 is not obviously
+   * wrong on its own -- the reference authors a negative start deliberately for a storm's near veil --
+   * but showing it separately from the already-multiplied `fogStart` is what lets a look this intense
+   * be checked against the DBC's own band value instead of guessed at from the final range.
+   */
+  fogStartScalar: number;
+  /**
+   * The resolved `LIGHT_FLOAT_BAND.BAND_FOG_END`, BEFORE `MapLight#processFloatBand`'s `1/36` unit
+   * conversion (Light.dbc's distances share the light coordinate system, not world yards). Printed
+   * beside `fogEnd` (the scaled value used everywhere else) so the two can be checked against each
+   * other by inspection: `rawFogEnd / 36` should equal `fogEnd` exactly. If it does not, the scale is
+   * being applied somewhere it should not be (or applied twice), and that -- not the fog maths -- is
+   * what would be producing an implausible range.
+   */
+  rawFogEnd: number;
+  /**
    * The camera-in-WMO interior fog crossfade's current result (`MapLight#interiorFog`) -- the scene
    * fog blended toward the camera's claimed room fog by `WmoFogRamp`. Equal to the scene triple
    * outdoors, so this doubling as a readout only matters once you are actually standing in a room.
@@ -34,7 +51,20 @@ export type LightingReadoutsTarget = {
   fogRampWeight: number;
   sunDir: Xyz;
   sidnNight: number;
-  selectedLights: Array<{ light: { id: number }; weight: number; distance: number }>;
+  selectedLights: Array<{
+    light: {
+      id: number;
+      /**
+       * The area light's own `params` -- specifically `params[0].id`, the `LightParams` (Light.dbc's
+       * `skyFogID`) each selected light resolved its int/float bands from. Optional so existing plain
+       * test fixtures (`{ light: { id } }`) keep satisfying this type -- `MapLight#selectedLights`
+       * (the real target) always carries the full `AreaLight` shape, `params` included.
+       */
+      params?: Array<{ id: number }>;
+    };
+    weight: number;
+    distance: number;
+  }>;
   /** The WMO the camera is standing in, or null outdoors. */
   wmo: {
     name: string;
@@ -111,6 +141,10 @@ class LightingReadouts extends React.Component<Props> {
         <p>
           Fog range: {asFixed(mapLight.fogStart)} / {asFixed(mapLight.fogEnd)}
         </p>
+        <p>Fog start scalar: {asFixed(mapLight.fogStartScalar, 3)}</p>
+        <p>
+          Fog end raw / scaled: {asFixed(mapLight.rawFogEnd, 1)} / {asFixed(mapLight.fogEnd, 1)}
+        </p>
         <p>Interior fog colour: {asBytesTriple(mapLight.interiorFog.color)}</p>
         <p>
           Interior fog range: {asFixed(mapLight.interiorFog.start)} / {asFixed(mapLight.interiorFog.end)}
@@ -128,8 +162,8 @@ class LightingReadouts extends React.Component<Props> {
         <p>Area lights: {selected.length}</p>
         {selected.slice(0, 4).map((entry) => (
           <p key={entry.light.id}>
-            id {entry.light.id} &middot; weight {asFixed(entry.weight, 3)} &middot; dist{' '}
-            {asFixed(entry.distance, 1)}
+            id {entry.light.id} &middot; params {entry.light.params?.[0]?.id ?? '-'} &middot; weight{' '}
+            {asFixed(entry.weight, 3)} &middot; dist {asFixed(entry.distance, 1)}
           </p>
         ))}
 
