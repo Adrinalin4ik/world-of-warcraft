@@ -16,7 +16,8 @@ class WMOGroup {
     this.header = def.header;
     this.def = def;
     this.interior = def.interior;
-    
+    this.lightingInterior = def.lightingInterior;
+
     this.doodadRefs = def.doodadRefs;
 
     this.createPortals(root, def);

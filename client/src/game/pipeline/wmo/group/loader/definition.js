@@ -8,6 +8,9 @@ class WMOGroupDefinition {
     this.index = index;
     this.groupID = groupData.MOGP.groupID;
     this.interior = groupData.interior;
+    // The LIGHTING class (MOGP/MOGI 0x48) — see group.js `lightingInterior`. Without this the
+    // material never sees anything but `undefined` and silently falls back to `this.interior`.
+    this.lightingInterior = groupData.lightingInterior;
 
     this.header = {
       batchCounts: groupData.MOGP.batchCounts,

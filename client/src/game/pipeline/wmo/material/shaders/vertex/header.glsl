@@ -14,5 +14,8 @@ uniform vec4 materialParams;
 uniform vec4 emissiveColor;
 
 varying vec2 coords[2];
-varying vec4 colors[2];
+// The lighting inputs the fragment stage needs. The reference evaluates N.L per fragment, so the
+// vertex stage hands over the raw normal and MOCV rather than a pre-lit colour.
+varying vec4 vertexColorOut;
+varying vec3 worldNormal;
 varying vec4 fog;

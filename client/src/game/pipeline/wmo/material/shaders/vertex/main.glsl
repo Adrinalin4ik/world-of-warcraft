@@ -29,44 +29,16 @@ void main() {
   // Fog
   fog = createFog(cameraDistance);
 
-  #if USE_LIGHTING == 1
-    vec3 light = createLight(objectNormal.xyz, sunParams.xyz, sunDiffuseColor.rgb, sunAmbientColor.rgb);
-    light = mix(light, vec3(1.0, 1.0, 1.0), 1.0 - materialParams.y);
-  #else
-    vec3 light = vec3(1.0, 1.0, 1.0);
-  #endif
-
+  // Lighting moved to the fragment stage (the reference evaluates N.L per fragment). The vertex
+  // stage now only transports what that needs. The old `light * 0.5` here and the matching `* 2.0`
+  // in the combiners were a cancelling pair of fudges around the missing real law; both are gone.
   #if USE_VERTEX_COLOR == 1
-    vec4 vertexColor = vec4(acolor.rgb, acolor.a);
+    vertexColorOut = acolor;
   #else
-    vec4 vertexColor = vec4(0.5, 0.5, 0.5, 1.0);
+    vertexColorOut = vec4(1.0, 1.0, 1.0, 1.0);
   #endif
 
-  #if BATCH_TYPE == 1
-    // Transition between vertex color and light based on vertex alpha
-    colors[0].rgb = saturate(mix(vertexColor.rgb, light.rgb * 0.5, vertexColor.a) + emissiveColor.rgb);
-    colors[0].a = vertexColor.a;
-  #endif
-
-  #if BATCH_TYPE == 2
-    // Transition between vertex color and light, same shape as batch A above.
-    //
-    // This used to add vertexColor on top of the light instead of being replaced by it. Where MOCV
-    // alpha is 0 -- genuine interior geometry -- both forms collapse to vertexColor, so nothing
-    // changes indoors. Where alpha rises, meaning the surface is meant to be lit from outside, the
-    // additive form floored the result at the baked colour and left buildings looking midday-bright
-    // at midnight no matter what the map light said.
-    colors[0].rgb = saturate(mix(vertexColor.rgb, light.rgb * 0.5, vertexColor.a) + emissiveColor.rgb);
-    colors[0].a = vertexColor.a;
-  #endif
-
-  #if BATCH_TYPE == 3
-    // Multiply vertex color and light
-    colors[0].rgb = saturate((vertexColor.rgb * light.rgb) + emissiveColor.rgb);
-    colors[0].a = vertexColor.a;
-  #endif
-
-  colors[1] = vec4(0.0);
+  worldNormal = objectNormal;
 
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }

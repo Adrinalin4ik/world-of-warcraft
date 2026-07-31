@@ -5,6 +5,7 @@ import TextureLoader from '../../texture-loader';
 // import vertexShader from './shader.vert';
 import fragmentShader from './shaders/fragment/main.glsl';
 import vertexShader from './shaders/vertex/main.glsl';
+import { decodeMaterialLighting } from './laws';
 
 
 class WMOMaterial extends THREE.ShaderMaterial {
@@ -23,7 +24,11 @@ class WMOMaterial extends THREE.ShaderMaterial {
 
       fogParams: { value: new THREE.Vector4() },
       fogColor: { value: new THREE.Color() },
-      materialParams: { value: [1,1,1,1] }
+      materialParams: { value: [1,1,1,1] },
+
+      // Declared unconditionally: a uniform the shader reads but nobody supplies reads as ZERO,
+      // which under the fragment law means "unlit". Only F_UNLIT materials should be 0.
+      lightModifier: { value: 1.0 },
     };
 
     // Enable lighting.
@@ -34,27 +39,37 @@ class WMOMaterial extends THREE.ShaderMaterial {
     this.defines.USE_LIGHTING = 1;
     this.defines.USE_VERTEX_COLOR = 1;
     
-    // Define interior
-    if (this.interior) {
+    // Lighting takes the reference's 0x48 class; `this.interior` above stays the culling question.
+    this.lightingInterior = groupData.lightingInterior === undefined
+      ? this.interior
+      : groupData.lightingInterior;
+
+    if (this.lightingInterior) {
       this.defines.INTERIOR = 1;
     }
-    
+
     // Define blending mode
     this.defines.BLENDING_MODE = def.blendingMode;
     this.defines.BATCH_TYPE = def.batchType;
-    if (def.flags & 0x10) {
-      this.uniforms.sunParams.value[3] = 0.0;
+
+    // Flag decode lives in laws.ts. Note this corrects a swap: the old code tested 0x10 (SIDN) as
+    // though it were UNLIT, so it unlit exactly the materials that should glow at night.
+    //
+    // `def.sidnColor` comes from Task 7 -- MOMT slot 1's colour word, carried on the definition
+    // directly. Do NOT read it off `def.textures[0]`: that list holds only the slots whose texture
+    // path RESOLVED, so its index 0 is not reliably MOMT slot 0.
+    //
+    // Kept on the instance because Task 5 reads `sidnColor` and `window` off it, and because a
+    // material's decoded lighting is worth inspecting from a breakpoint.
+    this.lighting = decodeMaterialLighting(def.flags, def.sidnColor);
+    const lighting = this.lighting;
+
+    if (lighting.unlit) {
+      this.uniforms.lightModifier.value = 0.0;
     }
 
     // Tag lighting mode (based on group flags)
     this.uniforms.interior = { type: 'i', value: this.interior ? 1 : 0 };
-
-    // Flag 0x01 (unlit)
-    // TODO: This is really only unlit at night. Needs to integrate with the light manager in
-    // some fashion.
-    if (def.flags & 0x10) {
-      this.uniforms.lightModifier = { type: 'f', value: 0.0 };
-    }
 
     // Transparent blending
     if (def.blendingMode === 1) {

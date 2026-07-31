@@ -27,6 +27,8 @@ void main() {
     }
   #endif
 
+  result = applyWmoLighting(result);
+
   result = finalizeResult(result);
 
   gl_FragColor = result;

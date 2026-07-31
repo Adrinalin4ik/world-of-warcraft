@@ -171,5 +171,12 @@ export default Chunked({
   }),
   interior: function() {
     return (this.flags & 0x2000) !== 0 && (this.flags & 0x8) === 0;
+  },
+
+  // The LIGHTING class — see MOGI.lightingInterior and laws.isLightingInterior. Distinct from
+  // `interior` above, which answers the culling/containment question: an EXTERIOR_LIT porch
+  // claims the camera but is lit as outdoors.
+  lightingInterior: function() {
+    return (this.flags & 0x48) === 0;
   }
 });
