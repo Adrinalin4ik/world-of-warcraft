@@ -41,6 +41,15 @@ class WMOMaterial extends THREE.ShaderMaterial {
 
       fogParams: { value: new THREE.Vector4() },
       fogColor: { value: new THREE.Color() },
+
+      // The camera-in-WMO interior fog (MapLight's WmoFogRamp output), selected instead of the scene
+      // fog above by interior-lit batches (see vertex/main.glsl's createFog). Defaulted to the same
+      // range/colour as the scene fog's own faithful default -- NOT zero -- because a zero fog colour
+      // paired with a zero range (start=end=0, so f1 evaluates to 0 and fogFactor to 1) would fog an
+      // interior to solid black for any frame rendered before `updateLightUniforms` first runs.
+      wmoFogParams: { value: new THREE.Vector4(1.0 / 577.0, 577.0, 1.0, 1.0) },
+      wmoFogColor: { value: new THREE.Color(0.25, 0.5, 0.8) },
+
       materialParams: { value: [1,1,1,1] },
 
       // Declared unconditionally: a uniform the shader reads but nobody supplies reads as ZERO,
@@ -310,6 +319,8 @@ class WMOMaterial extends THREE.ShaderMaterial {
       const uniforms = this.mapLight.uniforms;
       this.uniforms.fogParams.value.copy(uniforms.fogParams.value);
       this.uniforms.fogColor.value.copy(uniforms.fogColor.value);
+      this.uniforms.wmoFogParams.value.copy(uniforms.wmoFogParams.value);
+      this.uniforms.wmoFogColor.value.copy(uniforms.wmoFogColor.value);
       // World-space sun direction: `uniforms.sunDir` carries the view-space variant, which rotates
       // with the camera and would make lighting depend on where you are looking.
       this.uniforms.sunParams.value.copy(this.mapLight.sunDir);

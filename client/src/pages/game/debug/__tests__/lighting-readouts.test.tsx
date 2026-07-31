@@ -11,6 +11,8 @@ const target = (overrides: Partial<LightingReadoutsTarget> = {}): LightingReadou
   fogColor: { r: 0.5, g: 0.5, b: 0.5 },
   fogStart: 125,
   fogEnd: 500,
+  interiorFog: { color: [0.5, 0.5, 0.5], start: 125, end: 500 },
+  fogRampWeight: 0,
   sunDir: { x: -0.5, y: 0.25, z: -0.83 },
   sidnNight: 0,
   selectedLights: [],
@@ -32,12 +34,34 @@ describe('LightingReadouts', () => {
 
   it('prints the fog range start-before-end', () => {
     render(<LightingReadouts mapLight={target()} />);
-    expect(screen.getByText(/125 \/ 500/)).toBeInTheDocument();
+    // The default target's interior fog shares the same 125/500 range (see the interior-fog test
+    // below for why), so this scopes the match to the scene "Fog range:" line specifically rather
+    // than colliding with "Interior fog range:".
+    expect(
+      screen.getByText((_content, element) => element?.textContent === 'Fog range: 125 / 500'),
+    ).toBeInTheDocument();
   });
 
   it('shows a dash rather than a wrong number when nothing has been sampled yet', () => {
     render(<LightingReadouts mapLight={target({ sampledPosition: null })} />);
     expect(screen.getByText(/Sampled at: -/)).toBeInTheDocument();
+  });
+
+  it('prints the interior fog triple beside the scene one, and the ramp weight', () => {
+    const interiorFog = { color: [0.1, 0.2, 0.3] as [number, number, number], start: 10, end: 90 };
+    render(<LightingReadouts mapLight={target({ interiorFog, fogRampWeight: 0.42 })} />);
+    expect(screen.getByText(/Interior fog colour: 26, 51, 77/)).toBeInTheDocument();
+    expect(screen.getByText(/Interior fog range: 10 \/ 90/)).toBeInTheDocument();
+    expect(screen.getByText(/Fog ramp weight: 0\.420/)).toBeInTheDocument();
+  });
+
+  it('shows the interior fog equal to the scene fog outdoors, before the ramp has engaged', () => {
+    render(<LightingReadouts mapLight={target()} />);
+    // The default target's interiorFog matches its scene fog -- outdoors, or before the camera-in-WMO
+    // ramp has ever engaged, MapLight publishes the scene triple verbatim for both.
+    expect(screen.getByText(/Interior fog colour: 128, 128, 128/)).toBeInTheDocument();
+    expect(screen.getByText(/Interior fog range: 125 \/ 500/)).toBeInTheDocument();
+    expect(screen.getByText(/Fog ramp weight: 0\.000/)).toBeInTheDocument();
   });
 
   it('lists the selected area lights with their blend weights', () => {

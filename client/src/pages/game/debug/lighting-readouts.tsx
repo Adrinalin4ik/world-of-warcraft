@@ -23,6 +23,15 @@ export type LightingReadoutsTarget = {
   fogColor: Rgb;
   fogStart: number;
   fogEnd: number;
+  /**
+   * The camera-in-WMO interior fog crossfade's current result (`MapLight#interiorFog`) -- the scene
+   * fog blended toward the camera's claimed room fog by `WmoFogRamp`. Equal to the scene triple
+   * outdoors, so this doubling as a readout only matters once you are actually standing in a room.
+   */
+  interiorFog: { color: [number, number, number]; start: number; end: number };
+  /** The ramp's current blend weight (`MapLight#fogRampWeight`): 0 outdoors/settled-out, 1 fully
+   * faded into a room, travelling over the four-second crossfade. */
+  fogRampWeight: number;
   sunDir: Xyz;
   sidnNight: number;
   selectedLights: Array<{ light: { id: number }; weight: number; distance: number }>;
@@ -51,6 +60,16 @@ const asBytes = (color: Rgb | undefined) => {
 
 const asFixed = (value: number | undefined, places = 0) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(places) : '-';
+
+/** Same byte conversion as `asBytes`, for the `[r, g, b]` tuple `FogTriple.color` uses rather than
+ * the `{r, g, b}` shape a THREE.Color satisfies. */
+const asBytesTriple = (color: [number, number, number] | undefined) => {
+  if (!color) {
+    return '-';
+  }
+  const byte = (v: number) => Math.round(v * 255);
+  return `${byte(color[0])}, ${byte(color[1])}, ${byte(color[2])}`;
+};
 
 /**
  * The resolved-light numeric probe.
@@ -92,6 +111,11 @@ class LightingReadouts extends React.Component<Props> {
         <p>
           Fog range: {asFixed(mapLight.fogStart)} / {asFixed(mapLight.fogEnd)}
         </p>
+        <p>Interior fog colour: {asBytesTriple(mapLight.interiorFog.color)}</p>
+        <p>
+          Interior fog range: {asFixed(mapLight.interiorFog.start)} / {asFixed(mapLight.interiorFog.end)}
+        </p>
+        <p>Fog ramp weight: {asFixed(mapLight.fogRampWeight, 3)}</p>
         <p>
           Sun dir: {asFixed(mapLight.sunDir.x, 3)}, {asFixed(mapLight.sunDir.y, 3)},{' '}
           {asFixed(mapLight.sunDir.z, 3)}

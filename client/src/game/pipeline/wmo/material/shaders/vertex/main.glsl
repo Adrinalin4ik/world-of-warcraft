@@ -1,8 +1,20 @@
 vec4 createFog(in float cameraDistance) {
-  float f1 = (cameraDistance * fogParams.x) + fogParams.y;
+  // Interior-lit batches (INTERIOR define, set from the group's `lightingInterior`) fog with the
+  // camera's claimed room triple instead of the scene's, so the storm outside an inn's open door
+  // stays grey while the room keeps its own haze. Exterior/trans-of-exterior groups, terrain, liquid
+  // and sky are never built with INTERIOR, so they always take the scene triple.
+#if defined(INTERIOR)
+  vec3 fogRgb = wmoFogColor;
+  vec4 fogSpan = wmoFogParams;
+#else
+  vec3 fogRgb = fogColor;
+  vec4 fogSpan = fogParams;
+#endif
+
+  float f1 = (cameraDistance * fogSpan.x) + fogSpan.y;
   float f2 = max(f1, 0.0);
-  // fogParams.z is always 1.0 at the only packing site (blendLights), so the pow was a no-op costing
-  // a per-fragment exponentiation and disguising a plain linear ramp. The law is
+  // fogSpan.z is always 1.0 at the only packing site (blendLights / packFogParams), so the pow was a
+  // no-op costing a per-fragment exponentiation and disguising a plain linear ramp. The law is
   // factor = 1 - clamp((end - eyeZ) / (end - start)).
   float f4 = min(f2, 1.0);
 
@@ -10,7 +22,7 @@ vec4 createFog(in float cameraDistance) {
 
   vec4 fog;
 
-  fog.rgb = fogColor.rgb;
+  fog.rgb = fogRgb;
   fog.a = fogFactor;
 
   return fog;

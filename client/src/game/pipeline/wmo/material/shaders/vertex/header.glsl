@@ -6,6 +6,11 @@ uniform vec4 fogParams;
 // declaration leaves them uploaded as zero.
 uniform vec3 fogColor;
 
+// The camera-in-WMO interior fog triple, packed identically to fogParams/fogColor above. Selected
+// instead of the scene fog by interior-lit batches -- see createFog below.
+uniform vec4 wmoFogParams;
+uniform vec3 wmoFogColor;
+
 uniform vec4 sunParams;
 uniform vec3 sunDiffuseColor;
 uniform vec3 sunAmbientColor;
