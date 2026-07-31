@@ -138,6 +138,18 @@ export type LightingReadoutsTarget = {
     effectIntensity: number;
     skyDensity: number;
   };
+  /**
+   * Cloud bands stage 1: the resolved (blended, storm-lerped) `LIGHT_FLOAT_BAND.BAND_CLOUD_DENSITY`
+   * scalar `C`, and the three cloud-palette colours (`LIGHT_INT_BAND.BAND_CLOUD_SUN_COLOR`/
+   * `BAND_CLOUD_SLOPE_COLOR`/`BAND_CLOUD_BASE_COLOR`). No coverage kernel or dome consumes these yet
+   * -- this is the readout for the number a future one would threshold
+   * (`T = trunc((1 - C) * 255)`), so it is worth being able to check against the DBC directly.
+   * Optional so existing fixtures built before this task keep satisfying the type.
+   */
+  cloudDensity?: number;
+  cloudSunColor?: Rgb;
+  cloudSlopeColor?: Rgb;
+  cloudBaseColor?: Rgb;
 };
 
 type Props = {
@@ -239,6 +251,13 @@ class LightingReadouts extends React.Component<Props> {
             &middot; intensity {asFixed(mapLight.weather.effectIntensity, 3)} &middot; sky density{' '}
             {asFixed(mapLight.weather.skyDensity, 3)} &middot; storm blend{' '}
             {asFixed(mapLight.stormBlend, 3)}
+          </p>
+        )}
+        {typeof mapLight.cloudDensity === 'number' && (
+          <p>
+            Cloud density: {asFixed(mapLight.cloudDensity, 3)} &middot; sun{' '}
+            {asBytes(mapLight.cloudSunColor)} &middot; slope {asBytes(mapLight.cloudSlopeColor)}
+            &middot; base {asBytes(mapLight.cloudBaseColor)}
           </p>
         )}
         <p>

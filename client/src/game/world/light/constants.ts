@@ -32,6 +32,19 @@ export const LIGHT_PARAM_LABELS = [
   'reserved7',
 ];
 
+/**
+ * Rows 8-13 were off by one against the reference's byte-verified table (`samples/benilla/crates/
+ * benilla-formats/src/light/atmosphere.rs`: the band gather `0x6d64d0` stores sub-10/11/12 at
+ * colour-table slots 9/10/11 = `0xce9c30/34/38`, the three palettes the cloud dome builder `0x6cfb00`
+ * reads) -- this client had `BAND_SUN_COLOR` at row 8 (should be 9) and invented a FOURTH cloud band
+ * across 9-12 (the reference has three: sun-glow tint, gradient slope, gradient base). Verified live
+ * against real Light.dbc data before renumbering: row 9 reads as a genuine sun colour (warm orange at
+ * dawn/dusk, pale white at noon, cool blue-white at night), rows 10/11 read as a plausible cloud
+ * palette, and row 8 is a flat, non-diurnal grey with none of the sun row's day/night structure --
+ * consistent with it being unnamed. None of rows 8-12 was consumed anywhere in the client before this
+ * fix (only `BAND_SKY_SMOG_COLOR` and the water rows were read), so there was no live behaviour to
+ * preserve.
+ */
 export enum LIGHT_INT_BAND {
   BAND_DIRECT_COLOR = 0,
   BAND_AMBIENT_COLOR,
@@ -41,11 +54,16 @@ export enum LIGHT_INT_BAND {
   BAND_SKY_BAND_2_COLOR,
   BAND_SKY_SMOG_COLOR,
   BAND_SKY_FOG_COLOR,
+  /** Unnamed in the reference too -- not consumed. */
+  BAND_8,
   BAND_SUN_COLOR,
+  /** Cloud sun-glow tint (reference `IB_CLOUD_SUN`). */
   BAND_CLOUD_SUN_COLOR,
-  BAND_CLOUD_EMISSIVE_COLOR,
-  BAND_CLOUD_LAYER_1_AMBIENT_COLOR,
-  BAND_CLOUD_LAYER_2_AMBIENT_COLOR,
+  /** Cloud gradient slope (reference `IB_CLOUD_SLOPE`). */
+  BAND_CLOUD_SLOPE_COLOR,
+  /** Cloud gradient base (reference `IB_CLOUD_GBASE`). */
+  BAND_CLOUD_BASE_COLOR,
+  /** Unnamed in the reference too -- not consumed. */
   BAND_13,
   BAND_OCEAN_CLOSE_COLOR,
   BAND_OCEAN_FAR_COLOR,
@@ -58,7 +76,13 @@ export enum LIGHT_FLOAT_BAND {
   BAND_FOG_END,
   BAND_FOG_START_SCALAR,
   BAND_2,
-  BAND_3,
+  /**
+   * Cloud density `C` (reference `FB_CLOUD_DENSITY`), byte-verified: the scalar gather `0x6d64d0`
+   * stores float sub-3 at `[0xce9c64]`, feeding the coverage threshold `T = trunc((1 - C) * 255)`.
+   * Live-checked against a real zone: reads 0.5 across the day for the seed light on map 0 (Elwynn),
+   * a plausible authored density, not a hole or NaN.
+   */
+  BAND_CLOUD_DENSITY,
   BAND_4,
   BAND_5,
   NUM_LIGHT_FLOAT_BANDS,

@@ -17,6 +17,11 @@ const table = {
   skyBand1Color: new THREE.Color(),
   skyBand2Color: new THREE.Color(),
   skySmogColor: new THREE.Color(),
+  // The three authored cloud-palette rows (Step 3, `LIGHT_INT_BAND` rows 10-12) -- optional, like
+  // river/ocean, since not every light authors them.
+  cloudSunColor: new THREE.Color(),
+  cloudSlopeColor: new THREE.Color(),
+  cloudBaseColor: new THREE.Color(),
 };
 
 // Scratch for the STORMY slot's resolve, per band, per light -- lerped into `table`'s matching entry
@@ -34,6 +39,9 @@ const stormTable = {
   skyBand1Color: new THREE.Color(),
   skyBand2Color: new THREE.Color(),
   skySmogColor: new THREE.Color(),
+  cloudSunColor: new THREE.Color(),
+  cloudSlopeColor: new THREE.Color(),
+  cloudBaseColor: new THREE.Color(),
 };
 
 const blend = {
@@ -48,6 +56,9 @@ const blend = {
   skyBand1Color: new THREE.Color(),
   skyBand2Color: new THREE.Color(),
   skySmogColor: new THREE.Color(),
+  cloudSunColor: new THREE.Color(),
+  cloudSlopeColor: new THREE.Color(),
+  cloudBaseColor: new THREE.Color(),
   // Debug-readout-only (see MapLight#fogStartScalar / #rawFogEnd's doc comments). Plain numbers, so
   // -- unlike the colours/vector above -- these are just reassigned each call, not mutated in place.
   fogStartScalar: 0,
@@ -58,6 +69,11 @@ const blend = {
   // a zone boundary straddles two `LightParams` rows with different `glow`/`highlightSky`.
   glow: 0.5,
   highlightSky: 0,
+  // Cloud density `C` (Step 2/3, `LIGHT_FLOAT_BAND.BAND_CLOUD_DENSITY`) -- a plain weighted-mean
+  // scalar, blended exactly like the fog scalars beside it (see the fog-loop comment above `blend`'s
+  // own fog accumulators), and per-light storm-lerped like every other band. Defaults to 0.0, the
+  // reference's documented no-light-record fallback (`Atmosphere::DEFAULT.cloud_density`).
+  cloudDensity: 0,
 };
 
 const tempColor = new THREE.Color();
@@ -159,6 +175,9 @@ export const blendLights = (
   blend.skyBand1Color.setScalar(0);
   blend.skyBand2Color.setScalar(0);
   blend.skySmogColor.setScalar(0);
+  blend.cloudSunColor.setScalar(0);
+  blend.cloudSlopeColor.setScalar(0);
+  blend.cloudBaseColor.setScalar(0);
 
   // Blended as plain scalars -- a weighted MEAN, not a raw weighted sum -- and packed exactly ONCE
   // below, never packed per light and then blended. Two things matter here:
@@ -181,6 +200,12 @@ export const blendLights = (
   // Task 4's glow/highlightSky weighted means -- see `blend.glow`/`blend.highlightSky`'s doc comment.
   let glowBlend = 0;
   let highlightSkyBlend = 0;
+
+  // Cloud density `C` (Step 2/3) -- a plain scalar weighted mean, exactly like `fogEndBlend`/
+  // `fogStartBlend` above, and dividing by the SAME `fogWeightTotal` those use (this loop's weights
+  // are the same set for every scalar accumulator, fog or cloud). Never packed, never touched outside
+  // this per-light loop, so the per-light storm lerp below is the only place it can be skipped.
+  let cloudDensityBlend = 0;
 
   for (const weightedLight of weightedLights) {
     const { light, weight } = weightedLight;
@@ -378,6 +403,29 @@ export const blendLights = (
     glowBlend += glow * weight;
     highlightSkyBlend += highlightSky * weight;
 
+    // Cloud density `C` (Step 2/3) -- a plain scalar, blended exactly like the fog scalars above:
+    // `interpolateNumericTable` already returns 0 for an absent band (the reference's documented
+    // no-light-record fallback), and the per-light storm lerp is the same no-op-when-no-stormy-slot
+    // shape as `glow`/`highlightSky` just above. This MUST go through the storm lerp -- the reference
+    // is explicit that `C` "rides `cloud_density`, weather/underwater blends included", so a density
+    // that ignored `stormWeight` here would defeat the entire point of publishing it.
+    const clearCloudDensity = interpolateNumericTable(
+      clearFloatBands[LIGHT_FLOAT_BAND.BAND_CLOUD_DENSITY],
+      timeProgression,
+    );
+
+    let cloudDensity = clearCloudDensity;
+
+    if (stormWeight > 0) {
+      const stormyCloudDensity = interpolateNumericTable(
+        stormyFloatBands[LIGHT_FLOAT_BAND.BAND_CLOUD_DENSITY],
+        timeProgression,
+      );
+      cloudDensity = lerpScalar(clearCloudDensity, stormyCloudDensity, stormWeight);
+    }
+
+    cloudDensityBlend += cloudDensity * weight;
+
     // Water. Optional: plenty of lights define no river or ocean band at all, clear or stormy.
 
     blendOptionalBandColor(
@@ -403,6 +451,45 @@ export const blendLights = (
       blend.oceanCloseColor,
       weight,
     );
+
+    // Cloud palette (Step 3) -- optional int bands, like river/ocean above: not every light authors
+    // them (row 12/gradient-base is entirely absent for plenty of real records -- see constants.ts's
+    // doc comment).
+    blendOptionalBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_CLOUD_SUN_COLOR,
+      timeProgression,
+      stormWeight,
+      table.cloudSunColor,
+      stormTable.cloudSunColor,
+      blend.cloudSunColor,
+      weight,
+    );
+
+    blendOptionalBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_CLOUD_SLOPE_COLOR,
+      timeProgression,
+      stormWeight,
+      table.cloudSlopeColor,
+      stormTable.cloudSlopeColor,
+      blend.cloudSlopeColor,
+      weight,
+    );
+
+    blendOptionalBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_CLOUD_BASE_COLOR,
+      timeProgression,
+      stormWeight,
+      table.cloudBaseColor,
+      stormTable.cloudBaseColor,
+      blend.cloudBaseColor,
+      weight,
+    );
   }
 
   // Packed so the shader's `f1 = distance * x + y` falls from 1 at fogStart to 0 at fogEnd, which is
@@ -425,6 +512,10 @@ export const blendLights = (
   // case that default documents.
   blend.glow = fogWeightTotal > 0 ? glowBlend / fogWeightTotal : 0.5;
   blend.highlightSky = fogWeightTotal > 0 ? highlightSkyBlend / fogWeightTotal : 0;
+
+  // Step 2/3: the reference's documented no-light-record fallback (`Atmosphere::DEFAULT.cloud_density`)
+  // is 0.0, same shape as `highlightSky`'s own empty-selection default above.
+  blend.cloudDensity = fogWeightTotal > 0 ? cloudDensityBlend / fogWeightTotal : 0;
 
   return blend;
 };

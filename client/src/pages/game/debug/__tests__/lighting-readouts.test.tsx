@@ -269,3 +269,27 @@ describe('LightingReadouts WMO state', () => {
     expect(screen.getByText(/trans 5/)).toBeInTheDocument();
   });
 });
+
+describe('LightingReadouts cloud bands (stage 1)', () => {
+  it('omits the cloud line entirely for a fixture built before this task', () => {
+    render(<LightingReadouts mapLight={target()} />);
+    expect(screen.queryByText(/Cloud density/)).not.toBeInTheDocument();
+  });
+
+  it('prints the resolved cloud density and the three cloud-palette colours as bytes', () => {
+    render(
+      <LightingReadouts
+        mapLight={target({
+          cloudDensity: 0.5,
+          cloudSunColor: { r: 1, g: 0.9, b: 0.7 },
+          cloudSlopeColor: { r: 0.3, g: 0.4, b: 0.5 },
+          cloudBaseColor: { r: 0.6, g: 0.6, b: 0.7 },
+        })}
+      />,
+    );
+    expect(screen.getByText(/Cloud density: 0\.500/)).toBeInTheDocument();
+    expect(screen.getByText(/sun 255, 230, 179/)).toBeInTheDocument();
+    expect(screen.getByText(/slope 77, 102, 128/)).toBeInTheDocument();
+    expect(screen.getByText(/base 153, 153, 179/)).toBeInTheDocument();
+  });
+});

@@ -312,6 +312,109 @@ describe('blendLights sky bands and glow/highlightSky', () => {
   });
 });
 
+// Step 2/3: cloud density (`LIGHT_FLOAT_BAND.BAND_CLOUD_DENSITY`) and the three cloud-palette colours
+// (`LIGHT_INT_BAND.BAND_CLOUD_SUN_COLOR`/`BAND_CLOUD_SLOPE_COLOR`/`BAND_CLOUD_BASE_COLOR`).
+describe('blendLights cloud bands', () => {
+  /** A light whose clear cloud density is distinct from its PARAM_STORMY slot's, so the storm lerp is
+   * directly observable -- the same shape as `mkStormyLight`, but adding the cloud density float band
+   * (BAND_CLOUD_DENSITY) to both slots instead of colour/fog bands. */
+  const mkCloudLight = (clearDensity: number, stormyDensity: number): AreaLight => {
+    const light = mkLight(500, 0.25);
+
+    const standardFloatBands = light.params[LIGHT_PARAM.PARAM_STANDARD]!.floatBands;
+    standardFloatBands[LIGHT_FLOAT_BAND.BAND_CLOUD_DENSITY] = numericBand(clearDensity);
+
+    const stormyFloatBands: any[][] = [];
+    stormyFloatBands[LIGHT_FLOAT_BAND.BAND_FOG_END] = numericBand(500);
+    stormyFloatBands[LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR] = numericBand(0.25);
+    stormyFloatBands[LIGHT_FLOAT_BAND.BAND_CLOUD_DENSITY] = numericBand(stormyDensity);
+
+    light.params[LIGHT_PARAM.PARAM_STORMY] = {
+      id: 1,
+      intBands: [],
+      floatBands: stormyFloatBands,
+      rawFogEndBand: undefined,
+      highlightSky: false,
+      glow: 0.5,
+    };
+
+    return light;
+  };
+
+  it('rides the per-light storm lerp -- weight 0 reads the clear density', () => {
+    const light = mkCloudLight(0.2, 0.9);
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0);
+    expect(blend.cloudDensity).toBeCloseTo(0.2, 4);
+  });
+
+  it('rides the per-light storm lerp -- weight 1 reads the stormy density entirely', () => {
+    const light = mkCloudLight(0.2, 0.9);
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 1);
+    expect(blend.cloudDensity).toBeCloseTo(0.9, 4);
+  });
+
+  it('rides the per-light storm lerp -- a fractional weight sits between the two', () => {
+    const light = mkCloudLight(0.2, 0.9);
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0.5);
+    expect(blend.cloudDensity).toBeCloseTo(0.55, 4); // lerp(0.2, 0.9, 0.5)
+  });
+
+  it('defaults to 0.0 -- not a hole or NaN -- when the band is entirely absent', () => {
+    const light = mkLight(500, 0.25); // no BAND_CLOUD_DENSITY set at all
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0.5);
+    expect(blend.cloudDensity).toBe(0);
+    expect(Number.isNaN(blend.cloudDensity)).toBe(false);
+  });
+
+  it('does not divide by zero (and is not NaN) on an empty light list', () => {
+    const blend = blendLights([], LIGHT_PARAM.PARAM_STANDARD, 0);
+    expect(blend.cloudDensity).toBe(0);
+    expect(Number.isNaN(blend.cloudDensity)).toBe(false);
+  });
+
+  it('publishes the three cloud-palette colours for a single light at full weight', () => {
+    const light = mkLight(500, 0.25);
+    const intBands = light.params[LIGHT_PARAM.PARAM_STANDARD]!.intBands;
+    intBands[LIGHT_INT_BAND.BAND_CLOUD_SUN_COLOR] = colorBand(new THREE.Color(1, 0.9, 0.7));
+    intBands[LIGHT_INT_BAND.BAND_CLOUD_SLOPE_COLOR] = colorBand(new THREE.Color(0.3, 0.4, 0.5));
+    intBands[LIGHT_INT_BAND.BAND_CLOUD_BASE_COLOR] = colorBand(new THREE.Color(0.6, 0.6, 0.7));
+
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+
+    expect(blend.cloudSunColor.toArray()).toEqual([1, 0.9, 0.7]);
+    expect(blend.cloudSlopeColor.toArray()).toEqual([0.3, 0.4, 0.5]);
+    expect(blend.cloudBaseColor.toArray()).toEqual([0.6, 0.6, 0.7]);
+  });
+
+  it('is optional -- a light that authors none of the three cloud colours contributes nothing', () => {
+    const light = mkLight(500, 0.25); // no cloud int bands set
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+
+    expect(blend.cloudSunColor.toArray()).toEqual([0, 0, 0]);
+    expect(blend.cloudSlopeColor.toArray()).toEqual([0, 0, 0]);
+    expect(blend.cloudBaseColor.toArray()).toEqual([0, 0, 0]);
+  });
+
+  it('lerps the cloud colours toward the stormy slot by stormWeight, same as sky/water', () => {
+    const light = mkLight(500, 0.25);
+    const intBands = light.params[LIGHT_PARAM.PARAM_STANDARD]!.intBands;
+    intBands[LIGHT_INT_BAND.BAND_CLOUD_SUN_COLOR] = colorBand(new THREE.Color(0, 0, 0));
+
+    light.params[LIGHT_PARAM.PARAM_STORMY] = {
+      ...light.params[LIGHT_PARAM.PARAM_STANDARD]!,
+      id: 1,
+      intBands: (() => {
+        const bands: any[][] = [...intBands];
+        bands[LIGHT_INT_BAND.BAND_CLOUD_SUN_COLOR] = colorBand(new THREE.Color(1, 1, 1));
+        return bands;
+      })(),
+    };
+
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0.5);
+    expect(blend.cloudSunColor.r).toBeCloseTo(0.5, 4);
+  });
+});
+
 // Debug-readout-only fields (see MapLight#fogStartScalar / #rawFogEnd's doc comments): resolved
 // independently of the packed fogParams pair, specifically so a scale bug in #processFloatBand would
 // show up as a mismatch between `rawFogEnd / 36` and `fogEnd` rather than being invisible.

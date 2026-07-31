@@ -133,6 +133,17 @@ class MapLight extends SceneLight {
   // highlightSky=1 and a highlightSky=0 light fades the warp rather than stepping it.
   #highlightSky = 0;
 
+  // Cloud bands stage 1 (naming and publishing the authored cloud inputs -- no coverage kernel or
+  // dome exists yet, so nothing in this client reads these). Resolved by `blendLights` the same
+  // per-light storm-lerped way as `#glow`/`#highlightSky` above: `cloudDensity` is the plain scalar
+  // (`LIGHT_FLOAT_BAND.BAND_CLOUD_DENSITY`), `0.0` matching the reference's documented
+  // no-light-record fallback; the three colours are the optional cloud palette
+  // (`LIGHT_INT_BAND.BAND_CLOUD_SUN_COLOR`/`BAND_CLOUD_SLOPE_COLOR`/`BAND_CLOUD_BASE_COLOR`).
+  #cloudDensity = 0;
+  #cloudSunColor = new THREE.Color(1.0, 0.98, 0.9);
+  #cloudSlopeColor = new THREE.Color(0.35, 0.38, 0.42);
+  #cloudBaseColor = new THREE.Color(0.75, 0.78, 0.82);
+
   // A blended band that no light contributed to stays at exactly zero.
   static #isUnset(color: THREE.Color) {
     return color.r + color.g + color.b < 0.001;
@@ -281,6 +292,31 @@ class MapLight extends SceneLight {
    */
   get glow() {
     return quantizeGlow(this.#glow);
+  }
+
+  /**
+   * The resolved (weighted-mean, storm-lerped) cloud density `C` -- `blendLights`' `cloudDensity`,
+   * verbatim. This is the number a future coverage kernel would threshold
+   * (`T = trunc((1 - C) * 255)`); no such kernel exists yet, so nothing else in this client reads it.
+   */
+  get cloudDensity() {
+    return this.#cloudDensity;
+  }
+
+  /** The cloud palette's sun-glow tint (`LIGHT_INT_BAND.BAND_CLOUD_SUN_COLOR`). Cloud bands stage 1 --
+   * published, not yet consumed by any renderer. */
+  get cloudSunColor() {
+    return this.#cloudSunColor;
+  }
+
+  /** The cloud palette's gradient slope (`LIGHT_INT_BAND.BAND_CLOUD_SLOPE_COLOR`). */
+  get cloudSlopeColor() {
+    return this.#cloudSlopeColor;
+  }
+
+  /** The cloud palette's gradient base (`LIGHT_INT_BAND.BAND_CLOUD_BASE_COLOR`). */
+  get cloudBaseColor() {
+    return this.#cloudBaseColor;
   }
 
   /**
@@ -750,6 +786,10 @@ class MapLight extends SceneLight {
       skySmogColor,
       glow,
       highlightSky,
+      cloudDensity,
+      cloudSunColor,
+      cloudSlopeColor,
+      cloudBaseColor,
     } = blendLights(
       this.#selectedLights,
       LIGHT_PARAM.PARAM_STANDARD,
@@ -766,6 +806,14 @@ class MapLight extends SceneLight {
     // doc comments and the `glow`/`skyWarp` getters that publish them.
     this.#glow = glow;
     this.#highlightSky = highlightSky;
+
+    // Cloud bands stage 1 -- see `#cloudDensity`'s doc comment. Published off `MapLight` directly,
+    // same as `#glow`/`#highlightSky` just above, rather than split by `SceneLightParams` location:
+    // nothing consumes any of this yet, so there is no interior/exterior distinction to preserve.
+    this.#cloudDensity = cloudDensity;
+    this.#cloudSunColor.copy(cloudSunColor);
+    this.#cloudSlopeColor.copy(cloudSlopeColor);
+    this.#cloudBaseColor.copy(cloudBaseColor);
 
     // Both sides get the same values. `location` selects which params object the getters return, so
     // any difference between the two would show up as a hard step the frame the camera crosses a
@@ -865,6 +913,13 @@ class MapLight extends SceneLight {
     // `blendLights` itself falls back to on an empty selection.
     this.#glow = 0.5;
     this.#highlightSky = 0;
+
+    // Cloud bands stage 1: no light data means no authored cloud density/palette either. Matches the
+    // reference's own no-light-record fallback (`Atmosphere::DEFAULT`) -- 0.0 density, no clouds.
+    this.#cloudDensity = 0;
+    this.#cloudSunColor.setRGB(1.0, 0.98, 0.9);
+    this.#cloudSlopeColor.setRGB(0.35, 0.38, 0.42);
+    this.#cloudBaseColor.setRGB(0.75, 0.78, 0.82);
   }
 
   #selectLights(position: THREE.Vector3) {
