@@ -83,6 +83,24 @@ export type LightingReadoutsTarget = {
     trans: number;
   } | null;
   /**
+   * The nearest few loaded WMO groups to the camera (diagnostic 2), regardless of whether any of
+   * them claims it -- `wmo` above is null the moment the camera steps outside a building, which is
+   * exactly when the black-silhouette bug is reported. `flags` is the raw MOGP flags word: printed in
+   * hex beside the resolved `lightingInterior` so "flags say exterior" (a nonzero EXTERIOR/
+   * EXTERIOR_LIT bit) can be told apart from "flags are zero", which `isLightingInterior`'s
+   * `(flags & 0x48) === 0` test cannot distinguish from a genuinely interior group.
+   */
+  nearbyWmoGroups: Array<{
+    name: string;
+    groupIndex: number;
+    flags: number;
+    lightingInterior: boolean;
+    distance: number;
+    ext: number;
+    int: number;
+    trans: number;
+  }>;
+  /**
    * One-shot console sweep (diagnostic 1): for each selected light's non-zero Light.dbc slots,
    * recomputes the BAND_FOG_END / BAND_FOG_START_SCALAR float bands from that slot's OWN id and
    * prints a table. Optional -- plain test fixtures need not implement it -- and deliberately not
@@ -121,6 +139,11 @@ const asLightSlots = (slots: number[] | undefined) => {
   }
   return slots.map((id, index) => `${LIGHT_SLOT_LABELS[index] ?? `slot${index}`} ${id}`).join(' · ');
 };
+
+/** MOGP flags as hex, per diagnostic 2 -- printed instead of decimal so `0x0` (no flags at all,
+ * the hypothesis under test) is legible at a glance rather than just "0". */
+const asHexFlags = (flags: number | undefined) =>
+  typeof flags === 'number' ? `0x${flags.toString(16)}` : '-';
 
 /** Same byte conversion as `asBytes`, for the `[r, g, b]` tuple `FogTriple.color` uses rather than
  * the `{r, g, b}` shape a THREE.Color satisfies. */
@@ -224,6 +247,17 @@ class LightingReadouts extends React.Component<Props> {
             Batches: ext {mapLight.wmo.ext} · int {mapLight.wmo.int} · trans {mapLight.wmo.trans}
           </p>
         )}
+
+        <div className="divider"></div>
+        <p>Nearby WMO groups: {mapLight.nearbyWmoGroups.length}</p>
+        {mapLight.nearbyWmoGroups.map((group) => (
+          <p key={`${group.name}#${group.groupIndex}`}>
+            {group.name} &middot; group {group.groupIndex} &middot; dist {asFixed(group.distance, 1)}
+            <br />
+            flags {asHexFlags(group.flags)} &middot; interior {String(group.lightingInterior)} &middot;{' '}
+            ext {group.ext} · int {group.int} · trans {group.trans}
+          </p>
+        ))}
       </div>
     );
   }

@@ -19,6 +19,7 @@ const target = (overrides: Partial<LightingReadoutsTarget> = {}): LightingReadou
   sidnNight: 0,
   selectedLights: [],
   wmo: null,
+  nearbyWmoGroups: [],
   ...overrides,
 });
 
@@ -138,6 +139,42 @@ describe('LightingReadouts light slots (diagnostic 1)', () => {
     expect(dumpLightSlotBands).not.toHaveBeenCalled();
     button.click();
     expect(dumpLightSlotBands).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('LightingReadouts nearby WMO groups (diagnostic 2)', () => {
+  it('shows zero nearby groups outdoors with none loaded', () => {
+    render(<LightingReadouts mapLight={target()} />);
+    expect(screen.getByText(/Nearby WMO groups: 0/)).toBeInTheDocument();
+  });
+
+  it('prints each nearby group\'s raw flags in hex beside its resolved lightingInterior, so a zero-flags group misread as interior is visible', () => {
+    const nearbyWmoGroups = [
+      {
+        name: 'SomeBuilding.wmo',
+        groupIndex: 2,
+        flags: 0,
+        lightingInterior: true,
+        distance: 15.2,
+        ext: 0,
+        int: 8,
+        trans: 1,
+      },
+      {
+        name: 'SomeBuilding.wmo',
+        groupIndex: 0,
+        flags: 0x8,
+        lightingInterior: false,
+        distance: 30.0,
+        ext: 12,
+        int: 0,
+        trans: 0,
+      },
+    ];
+    render(<LightingReadouts mapLight={target({ nearbyWmoGroups })} />);
+    expect(screen.getByText(/Nearby WMO groups: 2/)).toBeInTheDocument();
+    expect(screen.getByText(/flags 0x0 · interior true/)).toBeInTheDocument();
+    expect(screen.getByText(/flags 0x8 · interior false/)).toBeInTheDocument();
   });
 });
 

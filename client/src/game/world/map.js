@@ -186,6 +186,10 @@ class WorldMap extends THREE.Group {
     if (this.wmoManager && this.wmoManager.setMapLight) {
       this.wmoManager.setMapLight(this.mapLight);
     }
+
+    // The reverse link, for the debug readout's near-camera WMO-group survey (diagnostic 2) --
+    // MapLight has no other way to reach the loaded WMO groups, since it does not raycast the scene.
+    this.mapLight.wmoManager = this.wmoManager;
     
     if (this.doodadManager && this.doodadManager.setMapLight) {
       this.doodadManager.setMapLight(this.mapLight);

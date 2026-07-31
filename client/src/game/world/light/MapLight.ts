@@ -81,6 +81,25 @@ class MapLight extends SceneLight {
   // until `#loadLights` resolves, or if it failed.
   #lightFloatBandDb: any = null;
 
+  // The loaded WMOManager, for the near-camera WMO-group survey (diagnostic 2). Set externally
+  // (`WorldMap.setupLightSystem`) rather than constructed here -- MapLight has no reason to know how
+  // WMOs are loaded, only where to find the ones that already are. Null until wired up, or on a map
+  // with no WMOs at all.
+  #wmoManager: any = null;
+
+  // The nearest few loaded WMO groups to the camera, regardless of which one (if any) claims it --
+  // see `#collectNearbyWmoGroups`'s doc comment for why this exists alongside `#wmo` above.
+  #nearbyWmoGroups: Array<{
+    name: string;
+    groupIndex: number;
+    flags: number;
+    lightingInterior: boolean;
+    distance: number;
+    ext: number;
+    int: number;
+    trans: number;
+  }> = [];
+
   // The resolved (blended) `LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR`, before it is multiplied by
   // `#rawFogEnd`'s scaled counterpart to produce `fogStart`. Debug-readout-only -- see
   // `lighting-readouts.tsx`'s doc comment on the field it feeds.
@@ -137,6 +156,26 @@ class MapLight extends SceneLight {
 
   get wmo() {
     return this.#wmo;
+  }
+
+  /**
+   * The nearest few loaded WMO groups to the camera (diagnostic 2), regardless of which one -- if
+   * any -- claims it. See `#collectNearbyWmoGroups`'s doc comment for why this exists alongside
+   * `#wmo`: that field only ever describes the group the camera is standing IN, which is empty
+   * outdoors even when a badly-lit building is right in front of the camera.
+   */
+  get nearbyWmoGroups() {
+    return this.#nearbyWmoGroups;
+  }
+
+  /**
+   * Wired up externally (`WorldMap.setupLightSystem`) once the map's `WMOManager` exists.
+   * `WMOManager` already takes a `MapLight` the other way (`setMapLight`, for shading); this is the
+   * reverse link, used only to walk `entries` for the debug readout above -- not for anything that
+   * feeds a lighting or fog computation.
+   */
+  set wmoManager(wmoManager: any) {
+    this.#wmoManager = wmoManager;
   }
 
   /**
@@ -346,6 +385,11 @@ class MapLight extends SceneLight {
 
     this.#updateInteriorFog(camera, this.#resolveDt(dt));
 
+    // Debug-readout-only (diagnostic 2). Independent of `#trackCameraLocation`/`#wmo` above: this
+    // walks EVERY loaded WMO group near the camera, not only the one (if any) that claims it, so a
+    // building the camera is standing outside of still shows up here.
+    this.#nearbyWmoGroups = MapLight.#collectNearbyWmoGroups(this.#wmoManager, camera.position);
+
     super.update(camera);
   }
 
@@ -477,6 +521,84 @@ class MapLight extends SceneLight {
       int: count('int'),
       ext: count('ext'),
     };
+  }
+
+  /**
+   * The nearest few loaded WMO groups to `position`, walked from `WMOManager.entries` -- NOT via a
+   * raycast, per the task's own instruction: the manager already holds every loaded group, and
+   * raycasting would only find whatever surface is directly under the cursor, not "what building is
+   * this dark silhouette".
+   *
+   * Exists to settle (not assume) a specific hypothesis: `isLightingInterior` (`laws.ts`) is
+   * `(flags & 0x48) === 0`, which reads true for a group with NO flags set at all, not only for one
+   * that explicitly declares itself interior. An exterior group whose MOGP flags happen to carry
+   * neither `EXTERIOR` (0x8) nor `EXTERIOR_LIT` (0x40) would be misclassified as interior, take the
+   * bake-only INT law, and render black if its vertex bake is dark -- exactly the black-silhouette
+   * symptom this diagnostic exists for. Printing the raw flags in hex beside the resolved
+   * `lightingInterior` is what tells "flags say exterior" apart from "flags are zero" at a glance.
+   *
+   * Every loaded WMO's every loaded group is a candidate (not just the one MOGI marks `interior`, and
+   * not just the WMO nearest the camera) because the whole point is to catch a group the existing
+   * camera-claimed readout (`#describeWmo`/`#wmo`) cannot see: the camera is OUTSIDE the building in
+   * the reported bug, so it claims no group at all.
+   *
+   * A group's world position is its local bounding-box centre transformed by its owning WMO's root
+   * view matrix -- `WMOGroupView` (group/view.js) is added as a child of `views.root` at the identity
+   * transform, so the geometry (and therefore the bounding box) is already expressed in the root's
+   * local space, and `views.root.matrixWorld` alone places it in the world. `updateMatrixWorld` is
+   * not called here: `WMOManager.placeWMOView`/`WMO.placeGroupView` already called it once when each
+   * view was placed, and neither the WMO nor the camera moves after that, so it stays current.
+   */
+  static #collectNearbyWmoGroups(wmoManager: any, position: THREE.Vector3, limit = 5) {
+    if (!wmoManager || !wmoManager.entries) {
+      return [];
+    }
+
+    const center = new THREE.Vector3();
+    const results: Array<{
+      name: string;
+      groupIndex: number;
+      flags: number;
+      lightingInterior: boolean;
+      distance: number;
+      ext: number;
+      int: number;
+      trans: number;
+    }> = [];
+
+    for (const wmo of wmoManager.entries.values()) {
+      if (!wmo.views || !wmo.views.root || !wmo.groups) {
+        continue;
+      }
+
+      for (const group of wmo.groups.values()) {
+        if (!group.boundingBox) {
+          continue;
+        }
+
+        group.boundingBox.getCenter(center);
+        center.applyMatrix4(wmo.views.root.matrixWorld);
+
+        const refs = group.materialRefs || (group.def && group.def.materialRefs) || [];
+        const count = (cls: 'trans' | 'int' | 'ext') =>
+          refs.filter((ref: any) => batchClassOf(ref.batchType) === cls).length;
+
+        results.push({
+          name: wmo.filename || 'unknown',
+          groupIndex: group.index,
+          flags: (group.header && group.header.flags) ?? 0,
+          lightingInterior: !!group.lightingInterior,
+          distance: center.distanceTo(position),
+          ext: count('ext'),
+          int: count('int'),
+          trans: count('trans'),
+        });
+      }
+    }
+
+    results.sort((a, b) => a.distance - b.distance);
+
+    return results.slice(0, limit);
   }
 
   #updateTime() {
