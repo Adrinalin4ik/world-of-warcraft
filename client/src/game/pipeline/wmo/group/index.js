@@ -19,6 +19,7 @@ class WMOGroup {
     this.lightingInterior = def.lightingInterior;
 
     this.doodadRefs = def.doodadRefs;
+    this.lightRefs = def.lightRefs;
 
     this.createPortals(root, def);
 

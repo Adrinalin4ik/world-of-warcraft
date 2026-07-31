@@ -6,6 +6,7 @@ import { attachPerObjectLighting } from '../m2/material/per-object-light';
 import WMOGroupLoader from './group/loader';
 import WMORootLoader from './root/loader';
 import { cap96, floor112, foldInteriorProbe } from '../../world/light/laws';
+import { worldSpaceLightsForWmo } from '../../world/light/wmo-lights';
 
 import gameSettings from '../../settings';
 
@@ -367,8 +368,8 @@ class WMO {
    * the FIXED engine axis rather than the day/night sun -- which is why an interior prop's light is
    * day/night independent and can be folded once here rather than every frame.
    *
-   * MOLR point lights are not folded in yet (tracked as a follow-up); a group with no MOLR means no
-   * point light at all, so passing an empty list here is correct today, not a placeholder.
+   * MOLR point lights (the group's referenced omni lights, its own flame included) are gated by
+   * distance inside `foldInteriorProbe` itself; a group with no MOLR means no point light at all.
    */
   foldDoodadLighting(doodadEntry, doodad) {
     const group = this.doodadLightingGroups.get(doodadEntry.id);
@@ -392,7 +393,9 @@ class WMO {
     const worldPosition = doodad.getWorldPosition(new THREE.Vector3());
     const refPoint = [worldPosition.x, worldPosition.y, worldPosition.z];
 
-    const probe = foldInteriorProbe(ambient, diffuse, refPoint, []);
+    const lights = this.molrLightsFor(group);
+
+    const probe = foldInteriorProbe(ambient, diffuse, refPoint, lights);
 
     doodad.perObjectLighting = {
       interior: true,
@@ -402,6 +405,42 @@ class WMO {
     };
 
     this.attachDoodadLighting(doodad);
+  }
+
+  // The owning group's MOLR-referenced lights, converted to world space (cached on this WMO
+  // instance) and shaped for foldInteriorProbe. A group with no MOLR chunk, or whose refs all miss
+  // (non-omni/disabled MOLT slots), yields no point lights at all -- correct per the law, not a bug.
+  molrLightsFor(group) {
+    const refs = group.lightRefs;
+    if (!refs || refs.length === 0) {
+      return [];
+    }
+
+    const worldLights = worldSpaceLightsForWmo(this);
+    if (!worldLights) {
+      return [];
+    }
+
+    const lights = [];
+    for (const ref of refs) {
+      const light = worldLights[ref];
+      if (!light) {
+        continue;
+      }
+
+      lights.push({
+        position: [light.position.x, light.position.y, light.position.z],
+        color: [
+          light.color.r * light.intensity,
+          light.color.g * light.intensity,
+          light.color.b * light.intensity
+        ],
+        attenStart: light.attenStart,
+        attenEnd: light.attenEnd
+      });
+    }
+
+    return lights;
   }
 
   // Install the per-draw lighting push on each of the doodad's batch meshes -- one mesh per batch,

@@ -22,6 +22,10 @@ class WMOGroupDefinition {
     };
 
     this.doodadRefs = groupData.MODR ? groupData.MODR.doodadIndices : [];
+    // Raw MOLT indices (via MOLR) this group's props want lit by. Resolved against
+    // `root.lights` (kept positionally MOLT-aligned) at fold time -- see wmo-lights.ts. A group
+    // with no MOLR chunk means no point light for anything it owns.
+    this.lightRefs = groupData.MOLR ? groupData.MOLR.lightRefList : [];
 
     this.createBoundingBox(groupData.MOGP);
 

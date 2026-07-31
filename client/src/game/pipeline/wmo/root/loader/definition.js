@@ -38,9 +38,14 @@ class WMORootDefinition {
       return;
     }
 
+    // A WMO group's MOLR chunk references lights by their raw index into THIS MOLT array. To keep
+    // those refs valid, `lights` stays positionally aligned with MOLT -- a light this loop skips
+    // pushes `null` rather than being omitted, leaving a hole instead of shifting every index after
+    // it. Consumers (wmo-lights.ts, MapLight) skip the holes themselves.
     for (const light of data.MOLT.lights) {
       // Omni only (type 0).
       if (light.type !== 0) {
+        lights.push(null);
         continue;
       }
 
@@ -52,6 +57,7 @@ class WMORootDefinition {
 
       // A zero attenuation end would light the entire model uniformly, so treat it as disabled.
       if (!(light.attenEnd > 0)) {
+        lights.push(null);
         continue;
       }
 

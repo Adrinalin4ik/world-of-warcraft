@@ -8,6 +8,7 @@ import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
 import { AreaLight, WeightedAreaLight } from './types';
 import { getDayNightTime, interpolateNumericTable, selectLightsForPosition } from './utils';
+import { worldSpaceLightsForWmo } from './wmo-lights';
 
 type MapLightOptions = {
   // Add any options needed for initialization
@@ -224,7 +225,7 @@ class MapLight extends SceneLight {
     const selected = this.wmoPointLights;
     selected.length = 0;
 
-    const lights = wmo && this.#worldSpaceLightsFor(wmo);
+    const lights = wmo && worldSpaceLightsForWmo(wmo);
     if (!lights || lights.length === 0) {
       return;
     }
@@ -232,6 +233,12 @@ class MapLight extends SceneLight {
     const candidates = [];
 
     for (const light of lights) {
+      // root.lights (and therefore this array) is positionally aligned with MOLT and has holes for
+      // lights createLights skipped -- see WMORootDefinition.createLights.
+      if (!light) {
+        continue;
+      }
+
       const distance = camera.position.distanceTo(light.position);
 
       // Beyond its own falloff, so it cannot contribute wherever the camera is standing.
@@ -255,35 +262,6 @@ class MapLight extends SceneLight {
     for (let index = 0; index < limit; ++index) {
       selected.push(candidates[index].light);
     }
-  }
-
-  /**
-   * MOLT lights converted to world space, cached on the WMO.
-   *
-   * MOLT stores positions in WMO local space. A WMO never moves once placed, so the conversion is
-   * done once rather than re-running 200-odd matrix transforms every frame.
-   */
-  #worldSpaceLightsFor(wmo: any) {
-    if (!wmo.root || !wmo.root.lights || !wmo.views || !wmo.views.root) {
-      return null;
-    }
-
-    if (!wmo.worldSpaceLights) {
-      const root = wmo.views.root;
-      root.updateMatrixWorld(true);
-
-      wmo.worldSpaceLights = wmo.root.lights.map((light) => ({
-        position: root.localToWorld(
-          new THREE.Vector3(light.position.x, light.position.y, light.position.z)
-        ),
-        color: light.color,
-        intensity: light.intensity,
-        attenStart: light.attenStart,
-        attenEnd: light.attenEnd
-      }));
-    }
-
-    return wmo.worldSpaceLights;
   }
 
   #updateTime() {
