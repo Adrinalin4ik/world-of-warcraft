@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('crypto');
+
 // This is a custom Jest transformer turning shader-source imports (.glsl/.frag/.vert) into the raw
 // file text, matching what webpack hands back for the same extensions (`type: 'asset/source'` in
 // config/webpack.config.js). Without this, Jest's catch-all fileTransform.js takes over and stubs the
@@ -14,6 +16,9 @@ module.exports = {
     return { code: `module.exports = ${JSON.stringify(src)};` };
   },
   getCacheKey(src, filename) {
-    return `${filename}:${src.length}`;
+    // Hash the CONTENT, not its length. Keying on `src.length` collides on any same-length edit --
+    // e.g. changing one numeric literal to another of equal width -- and jest would then serve a stale
+    // compiled module. That is the same silent-stale-shader failure this transform exists to avoid.
+    return crypto.createHash('md5').update(`${filename}:${src}`).digest('hex');
   },
 };
