@@ -3,7 +3,7 @@ import DBC from '../../pipeline/dbc';
 import { batchClassOf } from '../../pipeline/wmo/material/laws';
 import { blendLights } from './blend';
 import { LIGHT_FLOAT_BAND, LIGHT_PARAM } from './constants';
-import { FogTriple, MfogRecord, packFogParams, unpackFogParams, WmoFogRamp } from './fog';
+import { FogTriple, MfogRecord, packFogParams, selectWmoFogTarget, unpackFogParams, WmoFogRamp } from './fog';
 import { sidnNightFraction } from './laws';
 import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
@@ -60,6 +60,11 @@ class MapLight extends SceneLight {
   // The raw `location.wmo` (handler/root/group/views), for the fog resolver -- distinct from `#wmo`
   // above, which is a debug-readout summary, not something a resolver should be parsing back apart.
   #wmoLocation: any = null;
+
+  // The camera position in WMO-local space (`location.camera.local`, already computed by
+  // `LocationManager.addCandidates` while placing the camera), for the fog resolver's radius test.
+  // MFOG positions/radii are WMO local space, same as MOLT (see `WMORootDefinition.createLights`).
+  #wmoCameraLocal: THREE.Vector3 | null = null;
 
   // The camera-in-WMO interior fog crossfade. Held across frames so the fade-in/out ramps smoothly
   // rather than resetting whenever the camera crosses a portal.
@@ -238,24 +243,28 @@ class MapLight extends SceneLight {
 
     this.#wmo = interior ? MapLight.#describeWmo(location.wmo) : null;
     this.#wmoLocation = interior ? location.wmo : null;
+    this.#wmoCameraLocal = interior ? location.camera.local : null;
   }
 
   /**
    * Resolve and publish the camera-in-WMO interior fog for this frame.
    *
-   * Selection is deliberately simple: the camera's claimed group's first `fogOffsets` entry that
-   * indexes a real MFOG record on the root, seeded only if the root carries at least two records (the
-   * reference's `select_wmo_fog` bail -- `samples/benilla/crates/benilla/src/wmo_portal/fog.rs:59-61`
-   * -- a one-record room keeps the scene fog verbatim, e.g. the ref forge showing the storm's veil
-   * unmodified). Out-of-range offsets are skipped, not treated as "no fog for this room".
+   * Selection is the reference's `select_wmo_fog`
+   * (`samples/benilla/crates/benilla/src/wmo_portal/fog.rs:52-90`, ported as `fog.ts`'s
+   * `selectWmoFogTarget`): seeded from record 0, blending in a candidate from the camera's claimed
+   * group's `fogOffsets` only when the WMO-local camera position falls inside that record's radius
+   * band, weighted by proximity within the band, falling back to the seed outside every band. A
+   * one-record root keeps the scene fog verbatim (the ref forge's "null fog" record shows the
+   * storm's veil unmodified). Out-of-range offsets are skipped, not treated as "no fog for this
+   * room".
    *
    * The RAW record is handed to `WmoFogRamp.blend`, never a pre-staged triple -- see `fog.ts`'s
    * `blend` doc for why re-staging every call (against the current farclip) is deliberate, not
    * redundant.
    */
   #updateInteriorFog(camera: THREE.Camera, dt: number) {
-    const target = this.location === 'interior'
-      ? MapLight.#resolveWmoFogTarget(this.#wmoLocation)
+    const target = this.location === 'interior' && this.#wmoCameraLocal
+      ? MapLight.#resolveWmoFogTarget(this.#wmoLocation, this.#wmoCameraLocal)
       : null;
 
     const farclip = (camera as THREE.PerspectiveCamera).far ?? DEFAULT_FARCLIP;
@@ -282,37 +291,29 @@ class MapLight extends SceneLight {
 
   /**
    * The camera group's fog target, `null` if the camera is not standing in a WMO interior group, the
-   * root carries fewer than two MFOG records, or none of the group's `fogOffsets` index a real one.
+   * root carries fewer than two MFOG records, or no candidate from the group's `fogOffsets` falls
+   * inside its own radius band. See `selectWmoFogTarget` (`fog.ts`) for the actual selection law --
+   * this is only the glue that gathers the root's records, the group's offsets, and the WMO-local
+   * camera position it needs.
    *
    * `wmoLocation` is `camera.location.wmo` (`{ handler, root, group, views }` -- see
    * `location-manager.js`). `group.fogOffsets` is read off the group instance directly
    * (`WMOGroup.fogOffsets`) with a `def` fallback, matching `#describeWmo`'s defensiveness about the
-   * same two spots for `materialRefs`.
+   * same two spots for `materialRefs`. `eyeLocal` is `location.camera.local`, already computed by
+   * `LocationManager.addCandidates` while placing the camera in this same WMO.
    */
-  static #resolveWmoFogTarget(wmoLocation: any): MfogRecord | null {
+  static #resolveWmoFogTarget(wmoLocation: any, eyeLocal: THREE.Vector3): MfogRecord | null {
     const root = wmoLocation && wmoLocation.root;
     const group = wmoLocation && wmoLocation.group;
     const fogs = root && root.fogs;
 
-    if (!fogs || fogs.length < 2 || !group) {
+    if (!group) {
       return null;
     }
 
     const offsets = group.fogOffsets || (group.def && group.def.fogOffsets);
 
-    if (!offsets) {
-      return null;
-    }
-
-    for (const offset of offsets) {
-      const record = fogs[offset];
-
-      if (record) {
-        return record;
-      }
-    }
-
-    return null;
+    return selectWmoFogTarget(fogs, offsets, eyeLocal);
   }
 
   /**

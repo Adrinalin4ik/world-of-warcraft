@@ -17,6 +17,19 @@ export type MfogRecord = {
 };
 
 /**
+ * One MFOG record as the ROOT loader hands it to `MapLight` -- `MfogRecord` plus the fields
+ * `select_wmo_fog` needs to decide whether the record engages at all: its WMO-local position, its
+ * inner/outer radius band, and its flags. `pos`/`radiusInner`/`radiusOuter`/`flags` are WMO local
+ * space, matching MOLT (see `WMORootDefinition.createLights`).
+ */
+export type WmoFogRecord = MfogRecord & {
+  pos: { x: number; y: number; z: number };
+  radiusInner: number;
+  radiusOuter: number;
+  flags: number;
+};
+
+/**
  * Stage an MFOG record into a usable triple: `end = min(record end, farclip)`, and
  * `start = end * startScalar` off the CLAMPED end.
  *
@@ -26,6 +39,91 @@ export type MfogRecord = {
 export function stageMfog(record: MfogRecord, farclip: number): FogTriple {
   const end = Math.min(record.end, farclip);
   return { color: record.color, start: end * record.startScalar, end };
+}
+
+/**
+ * The camera-in-interior MFOG record selection, ported from `samples/benilla`'s
+ * `select_wmo_fog` (`crates/benilla/src/wmo_portal/fog.rs:52-90`).
+ *
+ * The law, read off that source rather than summarised: `fogs.len() < 2` bails to `null` --
+ * one-record rooms keep the scene fog verbatim (the ref forge's "null fog" record shows the
+ * storm's veil unmodified; a one-record engagement made those rooms too crisp). Otherwise seed
+ * `acc` with record 0 (the WMO default fog), then walk `offsets`: an offset that does not index a
+ * real record, or whose record has `flags & 1` set (infinite-radius records are never distance
+ * candidates -- only the seed itself is), is dropped. A candidate's distance to its OWN `pos` must
+ * be `<= radiusOuter`; further out, it does not engage at all. Candidates are sorted FARTHEST
+ * first so the NEAREST is blended in LAST (closer wins ties). Each candidate blends over the
+ * running accumulator by weight `1 - (d - radiusInner) / (radiusOuter - radiusInner)`, clamped to
+ * `[0, 1]`, or `1` outright when the band has no width. The result is a single blended
+ * `MfogRecord`-shaped triple, never a set of records -- `WmoFogRamp.blend` (the caller) crossfades
+ * the SCENE fog toward this one target over four seconds either way.
+ */
+export function selectWmoFogTarget(
+  fogs: WmoFogRecord[] | null | undefined,
+  offsets: readonly number[] | null | undefined,
+  eyeLocal: { x: number; y: number; z: number },
+): MfogRecord | null {
+  if (!fogs || fogs.length < 2) {
+    return null;
+  }
+
+  const candidates: Array<{ distance: number; record: WmoFogRecord }> = [];
+
+  if (offsets) {
+    for (const offset of offsets) {
+      const record = fogs[offset];
+
+      if (!record) {
+        continue;
+      }
+
+      // Bit 0: infinite-radius record. Those are never distance candidates -- only the seed
+      // (record 0) is unconditional.
+      if (record.flags & 1) {
+        continue;
+      }
+
+      const distance = Math.hypot(
+        eyeLocal.x - record.pos.x,
+        eyeLocal.y - record.pos.y,
+        eyeLocal.z - record.pos.z,
+      );
+
+      if (distance <= record.radiusOuter) {
+        candidates.push({ distance, record });
+      }
+    }
+  }
+
+  // Farthest first, so the nearest candidate is blended in LAST and wins.
+  candidates.sort((a, b) => b.distance - a.distance);
+
+  let acc: MfogRecord = toMfogRecord(fogs[0]);
+
+  for (const { distance, record } of candidates) {
+    const span = record.radiusOuter - record.radiusInner;
+    const weight = span > 0
+      ? Math.min(1, Math.max(0, 1 - (distance - record.radiusInner) / span))
+      : 1;
+
+    const target = toMfogRecord(record);
+
+    acc = {
+      color: [
+        acc.color[0] + (target.color[0] - acc.color[0]) * weight,
+        acc.color[1] + (target.color[1] - acc.color[1]) * weight,
+        acc.color[2] + (target.color[2] - acc.color[2]) * weight,
+      ],
+      end: acc.end + (target.end - acc.end) * weight,
+      startScalar: acc.startScalar + (target.startScalar - acc.startScalar) * weight,
+    };
+  }
+
+  return acc;
+}
+
+function toMfogRecord(record: WmoFogRecord): MfogRecord {
+  return { color: record.color, end: record.end, startScalar: record.startScalar };
 }
 
 /** Crossfade rate: 0.25/second, i.e. four seconds in and four seconds out. */

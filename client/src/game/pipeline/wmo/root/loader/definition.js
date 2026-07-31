@@ -34,6 +34,12 @@ class WMORootDefinition {
    * group's MOGP.fogOffsets indexes this array directly -- see WMOGroupDefinition.fogOffsets.
    * Resolving those offsets against this array (including what an all-zero or out-of-range
    * index means) is the camera-in-interior fog consumer's job, not this loader's.
+   *
+   * `pos`/`radiusInner`/`radiusOuter`/`flags` are carried through un-transformed -- WMO local
+   * space, matching MOLT (see `createLights` above) -- because the selection law
+   * (`samples/benilla/crates/benilla/src/wmo_portal/fog.rs::select_wmo_fog`, ported as
+   * `fog.ts`'s `selectWmoFogTarget`) needs the camera position and each record's radius band to
+   * pick which positioned record engages, not just the first offset that happens to resolve.
    */
   createFogs(data) {
     const fogs = this.fogs = [];
@@ -54,7 +60,11 @@ class WMORootDefinition {
       fogs.push({
         color: [r / 255, g / 255, b / 255],
         end: fog.end,
-        startScalar: fog.start_scalar
+        startScalar: fog.start_scalar,
+        pos: { x: record.pos.x, y: record.pos.y, z: record.pos.z },
+        radiusInner: record.smaller_radius,
+        radiusOuter: record.larger_radius,
+        flags: record.flag_infinite_radius
       });
     }
   }
