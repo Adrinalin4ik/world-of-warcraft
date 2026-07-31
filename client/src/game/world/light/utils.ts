@@ -169,6 +169,16 @@ export const interpolateNumericTable = (table: any[], key: number): number => {
  *     can be, and -- critically -- "largest falloffEnd" is a property of the record, not of the
  *     camera, so this is exactly as stable as case 1.
  *  3. `null` if the map has no light records at all.
+ *
+ * Consequence of case 2, worth meeting deliberately rather than discovering later: the seed
+ * receives the leftover weight EVERY frame it is picked, including every position where the camera
+ * is outside that light's own falloff radius entirely. Round 1 never did this -- there, the leftover
+ * only ever landed on a light the camera was already inside. So an incidental light authored with an
+ * unusually large `falloffEnd` (not necessarily intended as a map-wide default at all) becomes a de
+ * facto one for the whole map the moment no `falloffEnd === 0` record exists. That is intended --
+ * it's what keeps the total at 1 without a real default light -- but it means such a light's colours
+ * apply arbitrarily far outside its own authored radius, which would look wrong read in isolation
+ * from the DBC.
  */
 const findSeedLight = (lights: AreaLight[]): AreaLight | null => {
   if (lights.length === 0) {

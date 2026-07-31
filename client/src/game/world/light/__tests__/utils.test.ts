@@ -185,33 +185,44 @@ describe('selectLightsForPosition smoothness', () => {
 
   it('changes both lights\' weights continuously across a drop-out point, with no default light present -- round-2 regression', () => {
     // The exact counterexample the round-2 review raised: light A sits near the camera's path but has
-    // a SMALL falloffEnd, so it is spent (near-zero raw weight) just before it drops out of range.
-    // Light B is farther but has a LARGE falloffEnd, so it is the seed (largest falloffEnd, no
-    // falloffEnd === 0 record on this map) and holds the leftover throughout.
+    // a SMALL falloffEnd, so it is nearly spent (a small but nonzero raw share) just before it drops
+    // out of range. Light B is farther but has a LARGE falloffEnd, so it is the seed (largest
+    // falloffEnd, no falloffEnd === 0 record on this map) and holds the leftover throughout.
     //
-    // Under round 1's "hand the leftover to selectedLights[0] (nearest in range)" rule, the instant A
-    // drops out of range, the leftover it was holding transfers instantaneously to B, which jumps in a
-    // single step. Seeding by `findSeedLight` (a property of the data, not of which light happens to
-    // be nearest) removes that: B holds the leftover the entire time, so its weight moves only as A's
-    // own raw share moves -- continuously.
-    // falloffStart must be > 0 for a graded ramp at all -- at falloffStart === 0 the falloff formula's
-    // own guard (`falloffStart > 0 && falloffEnd > 0`) disables the gradient entirely and A would sit
-    // at a flat weight of 1 for its whole range, which is a different (and uninteresting) shape than
-    // the one this test means to exercise.
-    const lightA = mkLight(1, 0, 0, 0, 20, 60);
-    const lightB = mkLight(2, 200, 0, 0, 0, 300); // largest falloffEnd on the map -> B is the seed
+    // Both lights need a GENUINE graded ramp -- falloffStart > 0, comfortably inside falloffEnd -- for
+    // this to exercise anything. A round-2 test here originally gave `lightB` falloffStart === 0, which
+    // takes the falloff formula's `: 0.0` branch (no gradient at all): B's own raw weight then clamps
+    // straight to whatever the pool has left, which happened to already be near zero by the time B was
+    // processed under round 1's algorithm too -- so round 1 and the fix produced numerically identical
+    // output and the test passed against the bug it was meant to catch. Both lights below have a real
+    // falloffStart, so a genuine leftover survives to be fought over at the transition.
+    const lightA = mkLight(1, 0, 0, 0, 20, 60); // near; falloffEnd 60 -- nearly spent approaching x=60
+    const lightB = mkLight(2, 200, 0, 0, 40, 240); // far (distance ~130-150 here); broad -> the seed
 
     const steps = 40;
     const epsilon = 1 / steps + 0.02;
 
-    // Walk the camera from inside A's full-weight zone, through its falloff ramp, and out past
-    // falloffEnd where it drops out of range entirely.
-    const startDistance = 20;
+    // Walk the camera across A's own falloffEnd (60) -- the point where it drops out of the local
+    // pool entirely and the fixed vs. buggy algorithms diverge most sharply.
+    const startDistance = 50;
     const endDistance = 70;
+
+    // A's raw falloff share, computed independently of `selectLightsForPosition` (no shared code path)
+    // so this test cannot pass merely because it happens to call the same formula the implementation
+    // uses. With exactly one non-seed light in the pool, `availableWeight` is always 1 when it is
+    // processed, so the clamp never binds and the algorithm's own weight for A must equal this exactly
+    // -- UNLESS something (round 1's bug) hands A extra weight on top of its own share, which is
+    // exactly the failure mode this assertion is built to catch.
+    const rawShareOfA = (distance: number) => {
+      if (distance > lightA.falloffEnd) {
+        return null; // out of range -- A is not selected at all
+      }
+      const falloff = (distance - lightA.falloffStart) / (lightA.falloffEnd - lightA.falloffStart);
+      return Math.min(Math.max(1 - falloff, 0), 1);
+    };
 
     const weightsA: number[] = [];
     const weightsB: number[] = [];
-    const seedIds: number[] = [];
 
     for (let i = 0; i <= steps; i++) {
       const x = startDistance + (i / steps) * (endDistance - startDistance);
@@ -219,11 +230,26 @@ describe('selectLightsForPosition smoothness', () => {
       const selected = selectLightsForPosition([lightA, lightB], position);
 
       const a = selected.find((s) => s.light === lightA);
-      const b = selected.find((s) => s.light === lightB)!;
+      const b = selected.find((s) => s.light === lightB);
+
+      // B (the seed) must always be present, holding whatever A did not claim -- if it ever vanished,
+      // there would be nothing to test the leftover against.
+      expect(b).toBeDefined();
 
       weightsA.push(a ? a.weight : 0);
-      weightsB.push(b.weight);
-      seedIds.push(b.light.id);
+      weightsB.push(b!.weight);
+
+      // The seed-identity check that actually discriminates: whenever A is selected, its reported
+      // weight must equal its own independently-computed raw share, not that share plus a leftover.
+      // A seed swap onto A (round 1's bug, relocated rather than removed) shows up here directly,
+      // independently of which object `.find` happened to return.
+      const expectedA = rawShareOfA(position.distanceTo(lightA.position));
+      if (a) {
+        expect(expectedA).not.toBeNull();
+        expect(a.weight).toBeCloseTo(expectedA as number, 6);
+      } else {
+        expect(expectedA).toBeNull();
+      }
     }
 
     for (let i = 1; i < weightsA.length; i++) {
@@ -231,9 +257,11 @@ describe('selectLightsForPosition smoothness', () => {
       expect(Math.abs(weightsB[i] - weightsB[i - 1])).toBeLessThanOrEqual(epsilon);
     }
 
-    // The seed (the light holding the leftover) never changes identity across the walk.
-    expect(new Set(seedIds).size).toBe(1);
-    expect(seedIds[0]).toBe(lightB.id);
+    // Every sample sums to 1 -- B's weight is therefore always exactly `1 - A's raw share` (or 1, once
+    // A is out of range), which is the leftover-to-seed invariant this whole fix exists to guarantee.
+    for (let i = 0; i < weightsA.length; i++) {
+      expect(weightsA[i] + weightsB[i]).toBeCloseTo(1, 6);
+    }
 
     // A genuine transition happened, not two flat lines: A ends at/near 0 once out of range, B ends
     // at/near 1 once A has nothing left to claim.
