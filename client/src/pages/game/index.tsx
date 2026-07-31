@@ -161,7 +161,20 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     if (this.debugPanel.current){
       this.debugPanel.current.forceUpdate();
     }
-    
+
+    // Task 4 Step 3: converge the backdrop on the row-7 fog colour, so nothing shows through where the
+    // fully-fogged far plane meets the void behind the sky dome. `mapLight.fogColor` already holds raw,
+    // unconverted values (every write to it goes through THREE.Color#copy, never `setStyle`/`setHex`,
+    // which is what keeps the whole lighting pipeline on the gamma-passthrough lane -- see
+    // `renderer.outputColorSpace = LinearSRGBColorSpace` above). `WebGLRenderer#setClearColor` reads
+    // the colour back out via `Color#getRGB(target, renderer.outputColorSpace)`, which is a Linear ->
+    // Linear identity conversion given that same `outputColorSpace` -- so this stays raw end to end,
+    // not merely "close enough".
+    const mapLight = this.game.world.mapLight;
+    if (mapLight) {
+      this.renderer.setClearColor(mapLight.fogColor, 1);
+    }
+
     const cameraMoved: boolean =
     this.prevCameraRotation === null ||
     this.prevCameraPosition === null ||

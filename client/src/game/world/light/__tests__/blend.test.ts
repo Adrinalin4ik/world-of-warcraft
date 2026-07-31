@@ -16,10 +16,16 @@ const mkLight = (
   fogEnd: number,
   fogStartScalar: number,
   rawFogEnd?: number,
+  options: { highlightSky?: boolean; glow?: number; sky?: Partial<Record<'top' | 'middle' | 'band1' | 'band2' | 'smog', THREE.Color>> } = {},
 ): AreaLight => {
   const intBands: any[][] = [];
   intBands[LIGHT_INT_BAND.BAND_DIRECT_COLOR] = colorBand(new THREE.Color(0, 0, 0));
   intBands[LIGHT_INT_BAND.BAND_AMBIENT_COLOR] = colorBand(new THREE.Color(0, 0, 0));
+  intBands[LIGHT_INT_BAND.BAND_SKY_TOP_COLOR] = colorBand(options.sky?.top ?? new THREE.Color(0, 0, 0));
+  intBands[LIGHT_INT_BAND.BAND_SKY_MIDDLE_COLOR] = colorBand(options.sky?.middle ?? new THREE.Color(0, 0, 0));
+  intBands[LIGHT_INT_BAND.BAND_SKY_BAND_1_COLOR] = colorBand(options.sky?.band1 ?? new THREE.Color(0, 0, 0));
+  intBands[LIGHT_INT_BAND.BAND_SKY_BAND_2_COLOR] = colorBand(options.sky?.band2 ?? new THREE.Color(0, 0, 0));
+  intBands[LIGHT_INT_BAND.BAND_SKY_SMOG_COLOR] = colorBand(options.sky?.smog ?? new THREE.Color(0, 0, 0));
   intBands[LIGHT_INT_BAND.BAND_SKY_FOG_COLOR] = colorBand(new THREE.Color(0, 0, 0));
 
   const floatBands: any[][] = [];
@@ -32,8 +38,8 @@ const mkLight = (
     intBands,
     floatBands,
     rawFogEndBand: rawFogEnd !== undefined ? numericBand(rawFogEnd) : undefined,
-    highlightSky: false,
-    glow: 0.5,
+    highlightSky: options.highlightSky ?? false,
+    glow: options.glow ?? 0.5,
   };
 
   return {
@@ -216,6 +222,93 @@ describe('blendLights fog band', () => {
     expect(Number.isNaN(blend.fogParams.y)).toBe(false);
     expect(Number.isNaN(blend.fogStartScalar)).toBe(false);
     expect(Number.isNaN(blend.rawFogEnd)).toBe(false);
+  });
+});
+
+// Task 4: the five sky-dome gradient stops (rows 2-6) and the glow/highlightSky weighted means.
+describe('blendLights sky bands and glow/highlightSky', () => {
+  it('publishes all five gradient stops for a single light at full weight', () => {
+    const light = mkLight(500, 0.25, undefined, {
+      sky: {
+        top: new THREE.Color(0.1, 0.2, 0.9),
+        middle: new THREE.Color(0.2, 0.3, 0.8),
+        band1: new THREE.Color(0.3, 0.4, 0.7),
+        band2: new THREE.Color(0.4, 0.5, 0.6),
+        smog: new THREE.Color(0.5, 0.6, 0.5),
+      },
+    });
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+
+    expect(blend.skyTopColor.toArray()).toEqual([0.1, 0.2, 0.9]);
+    expect(blend.skyMiddleColor.toArray()).toEqual([0.2, 0.3, 0.8]);
+    expect(blend.skyBand1Color.toArray()).toEqual([0.3, 0.4, 0.7]);
+    expect(blend.skyBand2Color.toArray()).toEqual([0.4, 0.5, 0.6]);
+    expect(blend.skySmogColor.toArray()).toEqual([0.5, 0.6, 0.5]);
+  });
+
+  it('blends the gradient stops as a weighted mean across two lights', () => {
+    const a = mkLight(500, 0.25, undefined, { sky: { top: new THREE.Color(1, 0, 0) } });
+    const b = mkLight(200, 0.5, undefined, { sky: { top: new THREE.Color(0, 1, 0) } });
+
+    const blend = blendLights(
+      [weighted(a, 0.5), weighted(b, 0.5)],
+      LIGHT_PARAM.PARAM_STANDARD,
+      0,
+    );
+
+    expect(blend.skyTopColor.r).toBeCloseTo(0.5, 4);
+    expect(blend.skyTopColor.g).toBeCloseTo(0.5, 4);
+  });
+
+  it('lerps the gradient stops toward the stormy slot by stormWeight', () => {
+    const light = mkLight(500, 0.25, undefined, { sky: { top: new THREE.Color(0, 0, 0) } });
+    light.params[LIGHT_PARAM.PARAM_STORMY] = {
+      ...light.params[LIGHT_PARAM.PARAM_STANDARD]!,
+      id: 1,
+      intBands: (() => {
+        const bands: any[][] = [...light.params[LIGHT_PARAM.PARAM_STANDARD]!.intBands];
+        bands[LIGHT_INT_BAND.BAND_SKY_TOP_COLOR] = colorBand(new THREE.Color(1, 1, 1));
+        return bands;
+      })(),
+    };
+
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0.5);
+    expect(blend.skyTopColor.r).toBeCloseTo(0.5, 4);
+  });
+
+  it('publishes glow/highlightSky at their documented no-data defaults when nothing is selected', () => {
+    const blend = blendLights([], LIGHT_PARAM.PARAM_STANDARD, 0);
+    expect(blend.glow).toBe(0.5);
+    expect(blend.highlightSky).toBe(0);
+  });
+
+  it('publishes a single light\'s glow and highlightSky verbatim at full weight', () => {
+    const light = mkLight(500, 0.25, undefined, { glow: 0.65, highlightSky: true });
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+
+    expect(blend.glow).toBeCloseTo(0.65, 4);
+    expect(blend.highlightSky).toBe(1);
+  });
+
+  it('blends highlightSky as a weighted mean across a zone boundary -- a fractional gate, not a pick-one', () => {
+    const a = mkLight(500, 0.25, undefined, { highlightSky: true });
+    const b = mkLight(500, 0.25, undefined, { highlightSky: false });
+
+    const blend = blendLights(
+      [weighted(a, 0.3), weighted(b, 0.7)],
+      LIGHT_PARAM.PARAM_STANDARD,
+      0,
+    );
+    expect(blend.highlightSky).toBeCloseTo(0.3, 4);
+  });
+
+  it('is unaffected by storm weight when the light has no stormy slot (a hole), same as the other bands', () => {
+    const light = mkLight(500, 0.25, undefined, { glow: 0.7, highlightSky: true });
+    for (const stormWeight of [0, 0.5, 1]) {
+      const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, stormWeight);
+      expect(blend.glow).toBeCloseTo(0.7, 4);
+      expect(blend.highlightSky).toBe(1);
+    }
   });
 });
 

@@ -10,6 +10,13 @@ const table = {
   fogColor: new THREE.Color(),
   riverCloseColor: new THREE.Color(),
   oceanCloseColor: new THREE.Color(),
+  // The five authored sky-dome gradient stops, zenith -> horizon (Task 4, `LIGHT_INT_BAND` rows 2-6).
+  // Row 7 (the horizon/fog colour) is `fogColor` above -- it was already published under that name.
+  skyTopColor: new THREE.Color(),
+  skyMiddleColor: new THREE.Color(),
+  skyBand1Color: new THREE.Color(),
+  skyBand2Color: new THREE.Color(),
+  skySmogColor: new THREE.Color(),
 };
 
 // Scratch for the STORMY slot's resolve, per band, per light -- lerped into `table`'s matching entry
@@ -22,6 +29,11 @@ const stormTable = {
   fogColor: new THREE.Color(),
   riverCloseColor: new THREE.Color(),
   oceanCloseColor: new THREE.Color(),
+  skyTopColor: new THREE.Color(),
+  skyMiddleColor: new THREE.Color(),
+  skyBand1Color: new THREE.Color(),
+  skyBand2Color: new THREE.Color(),
+  skySmogColor: new THREE.Color(),
 };
 
 const blend = {
@@ -31,10 +43,21 @@ const blend = {
   fogParams: new THREE.Vector4(),
   riverCloseColor: new THREE.Color(),
   oceanCloseColor: new THREE.Color(),
+  skyTopColor: new THREE.Color(),
+  skyMiddleColor: new THREE.Color(),
+  skyBand1Color: new THREE.Color(),
+  skyBand2Color: new THREE.Color(),
+  skySmogColor: new THREE.Color(),
   // Debug-readout-only (see MapLight#fogStartScalar / #rawFogEnd's doc comments). Plain numbers, so
   // -- unlike the colours/vector above -- these are just reassigned each call, not mutated in place.
   fogStartScalar: 0,
   rawFogEnd: 0,
+  // The weighted-mean per-zone bloom weight and dawn/dusk warp gate (Task 4), resolved the same way
+  // `fogStartScalar`/`rawFogEnd` are -- see the accumulators below the fog loop for why a weighted MEAN
+  // over the selected lights, rather than picking one light's value, is the right generalisation when
+  // a zone boundary straddles two `LightParams` rows with different `glow`/`highlightSky`.
+  glow: 0.5,
+  highlightSky: 0,
 };
 
 const tempColor = new THREE.Color();
@@ -131,6 +154,11 @@ export const blendLights = (
   blend.fogColor.setScalar(0);
   blend.riverCloseColor.setScalar(0);
   blend.oceanCloseColor.setScalar(0);
+  blend.skyTopColor.setScalar(0);
+  blend.skyMiddleColor.setScalar(0);
+  blend.skyBand1Color.setScalar(0);
+  blend.skyBand2Color.setScalar(0);
+  blend.skySmogColor.setScalar(0);
 
   // Blended as plain scalars -- a weighted MEAN, not a raw weighted sum -- and packed exactly ONCE
   // below, never packed per light and then blended. Two things matter here:
@@ -149,6 +177,10 @@ export const blendLights = (
   // blended the same weighted-mean way as fogEnd/fogStart above, so they describe the same resolve.
   let fogStartScalarBlend = 0;
   let rawFogEndBlend = 0;
+
+  // Task 4's glow/highlightSky weighted means -- see `blend.glow`/`blend.highlightSky`'s doc comment.
+  let glowBlend = 0;
+  let highlightSkyBlend = 0;
 
   for (const weightedLight of weightedLights) {
     const { light, weight } = weightedLight;
@@ -197,6 +229,65 @@ export const blendLights = (
     );
 
     addWeightedColor(blend.sunAmbientColor, table.sunAmbientColor, weight);
+
+    // Sky dome gradient stops (Task 4) -- rows 2-6, zenith -> horizon, each a REQUIRED band exactly
+    // like direct/ambient above (every real Light.dbc params row authors all five), resolved through
+    // the same per-light storm lerp.
+
+    resolveBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_SKY_TOP_COLOR,
+      timeProgression,
+      stormWeight,
+      table.skyTopColor,
+      stormTable.skyTopColor,
+    );
+    addWeightedColor(blend.skyTopColor, table.skyTopColor, weight);
+
+    resolveBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_SKY_MIDDLE_COLOR,
+      timeProgression,
+      stormWeight,
+      table.skyMiddleColor,
+      stormTable.skyMiddleColor,
+    );
+    addWeightedColor(blend.skyMiddleColor, table.skyMiddleColor, weight);
+
+    resolveBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_SKY_BAND_1_COLOR,
+      timeProgression,
+      stormWeight,
+      table.skyBand1Color,
+      stormTable.skyBand1Color,
+    );
+    addWeightedColor(blend.skyBand1Color, table.skyBand1Color, weight);
+
+    resolveBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_SKY_BAND_2_COLOR,
+      timeProgression,
+      stormWeight,
+      table.skyBand2Color,
+      stormTable.skyBand2Color,
+    );
+    addWeightedColor(blend.skyBand2Color, table.skyBand2Color, weight);
+
+    resolveBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_SKY_SMOG_COLOR,
+      timeProgression,
+      stormWeight,
+      table.skySmogColor,
+      stormTable.skySmogColor,
+    );
+    addWeightedColor(blend.skySmogColor, table.skySmogColor, weight);
 
     // Fog
 
@@ -265,6 +356,28 @@ export const blendLights = (
     fogStartScalarBlend += fogStartScalar * weight;
     rawFogEndBlend += rawFogEnd * weight;
 
+    // Task 4: the per-zone glow weight and the dawn/dusk warp gate. Neither lives in a band table --
+    // both are plain fields on the `LightParams` row itself (`AreaLightParams.glow`/`.highlightSky`) --
+    // but they lerp toward their STORMY slot's own value exactly like the fog scalars above, and are
+    // folded into the same weighted mean so a light with no stormy override is a no-op at any weight
+    // (same reasoning as `resolveBandColor`'s fallback).
+    const clearGlow = clearParams.glow;
+    const clearHighlightSky = clearParams.highlightSky ? 1 : 0;
+
+    let glow = clearGlow;
+    let highlightSky = clearHighlightSky;
+
+    if (stormWeight > 0) {
+      const stormyGlow = stormyParams.glow;
+      const stormyHighlightSky = stormyParams.highlightSky ? 1 : 0;
+
+      glow = lerpScalar(clearGlow, stormyGlow, stormWeight);
+      highlightSky = lerpScalar(clearHighlightSky, stormyHighlightSky, stormWeight);
+    }
+
+    glowBlend += glow * weight;
+    highlightSkyBlend += highlightSky * weight;
+
     // Water. Optional: plenty of lights define no river or ocean band at all, clear or stormy.
 
     blendOptionalBandColor(
@@ -306,6 +419,12 @@ export const blendLights = (
   // Debug-readout-only -- see the accumulators' doc comments above.
   blend.fogStartScalar = fogWeightTotal > 0 ? fogStartScalarBlend / fogWeightTotal : 0;
   blend.rawFogEnd = fogWeightTotal > 0 ? rawFogEndBlend / fogWeightTotal : 0;
+
+  // Task 4. `0.5`/`0` match `AreaLightParams.glow`/`.highlightSky`'s own no-data defaults
+  // (`MapLight#getAreaLightsFromDb`) -- an empty selection here means no light data at all, the same
+  // case that default documents.
+  blend.glow = fogWeightTotal > 0 ? glowBlend / fogWeightTotal : 0.5;
+  blend.highlightSky = fogWeightTotal > 0 ? highlightSkyBlend / fogWeightTotal : 0;
 
   return blend;
 };

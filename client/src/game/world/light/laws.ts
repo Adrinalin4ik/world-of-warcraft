@@ -279,6 +279,115 @@ export function quantizeGlow(glow: number): number {
 }
 
 /**
+ * Sun-relative azimuth phase -> glow factor `g` for the sky dome's dawn/dusk azimuthal warp (benilla
+ * `sky.wgsl::azimuth_glow`, table `0xce9af8` off writer `FUN_006d0f50`/`FUN_006ce210`). Six wrap-around
+ * keyframes, piecewise-linear, symmetric about phase 0.625.
+ *
+ * `g = +1.0` at phase 0.125 is the IDENTITY case (see [`warpSkyRingColor`]) and that phase is where the
+ * SUN bearing lands, so the sun side is the bright, unwarped stop. `g` troughs at -0.7 (phase 0.625),
+ * the anti-sun side, which pulls the ring toward the dark zenith.
+ */
+export function skyWarpAzimuthGlow(phase: number): number {
+  const p = phase - Math.floor(phase);
+  const mix = (a: number, b: number, t: number) => a + (b - a) * t;
+
+  if (p < 0.125) {
+    return mix(0.0, 1.0, (p + 0.125) / 0.25); // wraps 0.875 -> 1.125
+  }
+  if (p < 0.375) {
+    return mix(1.0, 0.0, (p - 0.125) / 0.25);
+  }
+  if (p < 0.5) {
+    return mix(0.0, -0.5, (p - 0.375) / 0.125);
+  }
+  if (p < 0.625) {
+    return mix(-0.5, -0.7, (p - 0.5) / 0.125);
+  }
+  if (p < 0.75) {
+    return mix(-0.7, -0.5, (p - 0.625) / 0.125);
+  }
+  if (p < 0.875) {
+    return mix(-0.5, 0.0, (p - 0.75) / 0.125);
+  }
+  return mix(0.0, 1.0, (p - 0.875) / 0.25); // wraps 0.875 -> 1.125
+}
+
+const mixRGB = (a: RGB, b: RGB, t: number): RGB => [
+  a[0] + (b[0] - a[0]) * t,
+  a[1] + (b[1] - a[1]) * t,
+  a[2] + (b[2] - a[2]) * t,
+];
+
+/**
+ * One mid sky-ring's warped colour for a single glow factor `g` and warp strength `s`
+ * (benilla `sky.wgsl::warp_one`, `FUN_006d0f50`, dusk-capture reconciled).
+ *
+ * `g >= 0` (sun-facing half): desaturate toward `warm` (the first authored stop below the zenith) by
+ * `(1 - g) * s^2` -- at `g = 1` (the sun's own bearing) this is exactly identity, which is why the
+ * sunset glow reads as the unwarped stop rather than something brightened.
+ *
+ * `g < 0` (anti-sun half): a prepass toward `warm` by `s`, then toward `dark` (the zenith stop) by
+ * `0.7 * -g * s^2` -- the darkest, most desaturated point of the ring. `0.7` is the reference's own
+ * constant (binary `0x7ffd7c`).
+ *
+ * At `s = 0` this returns `base` unchanged for every `g` -- the identity case Task 4's brief calls out
+ * by name, verified directly in `laws.test.ts` rather than only by eyeballing the dome.
+ */
+export function warpSkyRingColor(base: RGB, warm: RGB, dark: RGB, g: number, s: number): RGB {
+  const s2 = s * s;
+  if (g >= 0) {
+    return mixRGB(base, warm, (1 - g) * s2);
+  }
+  const prepass = mixRGB(base, warm, s);
+  return mixRGB(prepass, dark, 0.7 * -g * s2);
+}
+
+/**
+ * The full per-fragment azimuthal warp (benilla `sky.wgsl`'s fragment body): quantizes the fragment's
+ * sun-relative bearing to the reference's 24 azimuth segments (matching the binary's per-vertex dome,
+ * which bakes the warp at 24 segments and Gouraud-interpolates between them) and lerps between the two
+ * bracketing segments' warped colours.
+ *
+ * `fragAzimuth`/`sunAzimuth` are both `atan2`-style bearings in radians, in the SAME horizontal plane
+ * convention the caller uses for both (this client is Z-up, so that means `atan2(y, x)`; benilla is
+ * Y-up and uses `atan2(z, x)` -- the maths here is convention-agnostic, only the caller's inputs commit
+ * to one).
+ *
+ * `s <= 0` short-circuits to `base` with no maths at all -- the S = 0 identity case, true for all of
+ * midday and deep night and for every hour in a `highlightSky = 0` zone. This must never change the
+ * daytime sky, which is why it is the first thing this function checks and the first thing
+ * `laws.test.ts` asserts.
+ */
+export function applySkyAzimuthWarp(
+  base: RGB,
+  warm: RGB,
+  dark: RGB,
+  fragAzimuth: number,
+  sunAzimuth: number,
+  s: number,
+): RGB {
+  if (s <= 0) {
+    return base;
+  }
+
+  const TAU = Math.PI * 2;
+  let az = (fragAzimuth - sunAzimuth) / TAU + 0.125;
+  az -= Math.floor(az);
+
+  const seg = az * 24;
+  const seg0 = Math.floor(seg);
+  const f = seg - seg0;
+
+  const g0 = skyWarpAzimuthGlow(seg0 / 24);
+  const g1 = skyWarpAzimuthGlow((seg0 + 1) / 24);
+
+  const c0 = warpSkyRingColor(base, warm, dark, g0, s);
+  const c1 = warpSkyRingColor(base, warm, dark, g1, s);
+
+  return mixRGB(c0, c1, f);
+}
+
+/**
  * The storm light blend `bcc = min(1, skyDensity * 4)` (benilla `weather`/`cloud_density_clamp
  * 0x6d4500`). The weather state machine's sky-density channel lives in the [0, 0.25] knee domain, so
  * a fully ramped storm gives exactly 1.0. This weight lerps the storm `LightParams` record over the

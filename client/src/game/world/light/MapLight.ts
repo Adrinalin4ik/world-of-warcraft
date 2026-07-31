@@ -4,7 +4,7 @@ import { batchClassOf } from '../../pipeline/wmo/material/laws';
 import { blendLights } from './blend';
 import { LIGHT_FLOAT_BAND, LIGHT_PARAM } from './constants';
 import { FogTriple, MfogRecord, packFogParams, selectWmoFogTarget, unpackFogParams, WmoFogRamp } from './fog';
-import { sidnNightFraction, stormBlend } from './laws';
+import { quantizeGlow, sidnNightFraction, skyWarp, stormBlend } from './laws';
 import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
 import { AreaLight, AreaLightParams, WeightedAreaLight } from './types';
@@ -121,6 +121,17 @@ class MapLight extends SceneLight {
   // `update`'s doc for why `#resolveDt` is called exactly once per frame and its result handed to
   // both this and `#updateInteriorFog`.
   #weather = new WeatherState();
+
+  // The resolved (weighted-mean) per-zone bloom weight, before `laws.quantizeGlow`'s byte quantization
+  // -- see `blendLights`' `glow` doc comment. `0.5` matches its own no-data default. Task 4: nothing
+  // consumes the quantized value yet (there is no bloom pass in this client) -- publishing it off the
+  // `glow` getter below IS the task; see this file's doc history / the task report.
+  #glow = 0.5;
+
+  // The resolved (weighted-mean) dawn/dusk warp gate, 0..1 -- see `blendLights`' `highlightSky` doc
+  // comment. A continuous weighted mean rather than a hard boolean pick, so a zone boundary between a
+  // highlightSky=1 and a highlightSky=0 light fades the warp rather than stepping it.
+  #highlightSky = 0;
 
   // A blended band that no light contributed to stays at exactly zero.
   static #isUnset(color: THREE.Color) {
@@ -261,6 +272,37 @@ class MapLight extends SceneLight {
    */
   get stormBlend() {
     return stormBlend(this.#weather.skyDensity);
+  }
+
+  /**
+   * The per-zone bloom weight, quantized to the byte the reference packs
+   * (`laws.quantizeGlow`) -- see `#glow`'s doc comment. Task 4: nothing in this client consumes
+   * this yet, there is no bloom pass -- publishing it is the task itself.
+   */
+  get glow() {
+    return quantizeGlow(this.#glow);
+  }
+
+  /**
+   * The dawn/dusk sky-dome warp strength `S` (`laws.skyWarp`) at the current time-of-day and the
+   * resolved (weighted-mean) `highlightSky` gate. 0 across all of midday and deep night, and 0 at
+   * every hour when the selected lights' `highlightSky` is entirely 0 (e.g. Duskwood) -- see
+   * `laws.skyWarp`'s own doc for why that identity case matters more than the dusk warp itself.
+   */
+  get skyWarp() {
+    return skyWarp(this.#time / 2, this.#highlightSky);
+  }
+
+  /**
+   * The sun's own compass bearing in this client's Z-up horizontal plane (`atan2(y, x)` of the
+   * TOWARD-the-sun direction) -- the dome shader's azimuth reference for the dawn/dusk warp
+   * (`laws.applySkyAzimuthWarp`). `sunDir` (`SceneLight`) points the OTHER way -- the direction light
+   * travels, sun down onto the world (see `#updateSunDirection`'s own doc) -- so this negates it
+   * before taking the bearing.
+   */
+  get sunAzimuth() {
+    const dir = this.sunDir;
+    return Math.atan2(-dir.y, -dir.x);
   }
 
   /**
@@ -704,6 +746,13 @@ class MapLight extends SceneLight {
       oceanCloseColor,
       fogStartScalar,
       rawFogEnd,
+      skyTopColor,
+      skyMiddleColor,
+      skyBand1Color,
+      skyBand2Color,
+      skySmogColor,
+      glow,
+      highlightSky,
     } = blendLights(
       this.#selectedLights,
       LIGHT_PARAM.PARAM_STANDARD,
@@ -715,6 +764,11 @@ class MapLight extends SceneLight {
     // above rather than re-derived from it, since the whole point is to compare the two independently.
     this.#fogStartScalar = fogStartScalar;
     this.#rawFogEnd = rawFogEnd;
+
+    // Task 4: the per-zone glow weight and the dawn/dusk warp gate -- see `#glow`/`#highlightSky`'s
+    // doc comments and the `glow`/`skyWarp` getters that publish them.
+    this.#glow = glow;
+    this.#highlightSky = highlightSky;
 
     // Both sides get the same values. `location` selects which params object the getters return, so
     // any difference between the two would show up as a hard step the frame the camera crosses a
@@ -739,6 +793,15 @@ class MapLight extends SceneLight {
 
       // Direct sun, same as outside -- the reference does not zero this indoors either.
       params.sunDiffuseColor.copy(sunDiffuseColor);
+
+      // The five sky-dome gradient stops (Task 4). Only `exterior` is ever actually read by the sky
+      // dome (there is no sky indoors), but both sides get them for the same reason as everything
+      // else in this loop: consistency, and no seam if a future consumer reads the interior side.
+      params.skyTopColor.copy(skyTopColor);
+      params.skyMiddleColor.copy(skyMiddleColor);
+      params.skyBand1Color.copy(skyBand1Color);
+      params.skyBand2Color.copy(skyBand2Color);
+      params.skySmogColor.copy(skySmogColor);
     }
 
     // Interior ambient comes from the light database, not from the WMO. Light.dbc carries records
@@ -781,6 +844,18 @@ class MapLight extends SceneLight {
       params.fogParams.set(x, y, z, w);
       params.riverCloseColor.setRGB(r, g, b);
       params.oceanCloseColor.setRGB(r, g, b);
+
+      // Sky bands (Task 4) follow the same neutral-fallback convention as river/ocean above -- this
+      // is the documented "no light records for this map at all" resolve, already a plausible default
+      // for everything else it touches, so the sky bands match it rather than standing out on their
+      // own. (The DELIBERATELY obvious fallback the brief asks for lives one level up, in
+      // `ProceduralSky`'s own handling of "no `MapLight` reference (yet)" -- a different, earlier
+      // failure than "this map's DBC data resolved to nothing".)
+      params.skyTopColor.setRGB(r, g, b);
+      params.skyMiddleColor.setRGB(r, g, b);
+      params.skyBand1Color.setRGB(r, g, b);
+      params.skyBand2Color.setRGB(r, g, b);
+      params.skySmogColor.setRGB(r, g, b);
     }
 
     // Debug-readout-only. `DEFAULT_FOG_TRIPLE.start` is 0, so the scalar is 0 regardless of `end`;
@@ -788,6 +863,11 @@ class MapLight extends SceneLight {
     // real band to read raw here at all -- this is the no-light-data fallback.
     this.#fogStartScalar = 0;
     this.#rawFogEnd = DEFAULT_FOG_TRIPLE.end * 36;
+
+    // Task 4: no light data means no authored glow/highlightSky either -- same documented defaults
+    // `blendLights` itself falls back to on an empty selection.
+    this.#glow = 0.5;
+    this.#highlightSky = 0;
   }
 
   #selectLights(position: THREE.Vector3) {

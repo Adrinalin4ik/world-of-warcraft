@@ -89,6 +89,30 @@ class SceneLight {
   }
 
   /**
+   * The five authored sky-dome gradient stops (Task 4), zenith -> horizon. Row 7 (the
+   * horizon/fog colour) is `fogColor` above -- already published under that name.
+   */
+  get skyTopColor() {
+    return this.#params[this.#location].skyTopColor;
+  }
+
+  get skyMiddleColor() {
+    return this.#params[this.#location].skyMiddleColor;
+  }
+
+  get skyBand1Color() {
+    return this.#params[this.#location].skyBand1Color;
+  }
+
+  get skyBand2Color() {
+    return this.#params[this.#location].skyBand2Color;
+  }
+
+  get skySmogColor() {
+    return this.#params[this.#location].skySmogColor;
+  }
+
+  /**
    * Params for a specific location, regardless of which one is currently active.
    *
    * The public getters above all resolve through `location`, so they can only ever read or write

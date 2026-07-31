@@ -1,11 +1,12 @@
 import * as THREE from 'three';
+import MapLight from '../../../world/light/MapLight';
 import SkyCone from '../cone';
 import ProceduralSky from '../procedural';
 import Skybox from '../skybox';
 
 /**
  * Sky Manager
- * 
+ *
  * Manages sky rendering using either the Blizzard method (sky cone) or
  * procedural method (sphere with elevation-based color interpolation).
  */
@@ -17,8 +18,25 @@ class SkyManager {
   private currentMethod: 'cone' | 'procedural' | 'skybox' = 'cone';
   private isEnabled: boolean = true;
 
+  // Task 4: the current sky object needs the same `MapLight` reference the rest of the world uses,
+  // to read the published sky-dome bands off it. Held here (rather than only handed once) because
+  // `setMethod` can swap the active sky object out from under a caller that already called
+  // `setMapLight` once -- the freshly created object needs it too.
+  private mapLight: MapLight | null = null;
+
   constructor(scene: THREE.Scene) {
     this.scene = scene;
+  }
+
+  /**
+   * Forward the world's `MapLight` to whichever sky object is currently active, and remember it so a
+   * later `setMethod` call can hand it to the NEXT sky object too. See `ProceduralSky.setMapLight` for
+   * what happens when this is null (the "no MapLight reference at all" fallback, distinct from the
+   * DBC-missing fallback `MapLight` itself already has).
+   */
+  public setMapLight(mapLight: MapLight | null): void {
+    this.mapLight = mapLight;
+    (this.getCurrentSky() as any)?.setMapLight?.(mapLight);
   }
 
   /**
@@ -50,6 +68,7 @@ class SkyManager {
     } else if (method === 'procedural') {
       console.log('SkyManager: Creating procedural sky...');
       this.proceduralSky = new ProceduralSky();
+      this.proceduralSky.setMapLight(this.mapLight);
       this.scene.add(this.proceduralSky);
       console.log('SkyManager: Procedural sky added to scene');
     } else if (method === 'skybox') {

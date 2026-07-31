@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import {
+  applySkyAzimuthWarp,
   cap96,
   dawnDuskCurve,
   evalProbe,
@@ -18,8 +19,10 @@ import {
   selectPointLights,
   sidnNightFraction,
   skyWarp,
+  skyWarpAzimuthGlow,
   stormBlend,
   Vec3,
+  warpSkyRingColor,
 } from '../laws';
 
 // benilla's golden case: the abbey stand MODD[24]. ambient/diffuse are its decoded colour words, and
@@ -224,6 +227,71 @@ describe('dawnDuskCurve and skyWarp', () => {
 
   it('passes the curve through at highlightSky = 1', () => {
     expect(skyWarp(390, 1)).toBeCloseTo(dawnDuskCurve(390), 5);
+  });
+});
+
+describe('applySkyAzimuthWarp', () => {
+  const BASE: RGB = [0.2, 0.3, 0.9];
+  const WARM: RGB = [0.9, 0.6, 0.3];
+  const DARK: RGB = [0.05, 0.05, 0.15];
+
+  it('is exactly identity at S = 0, for any azimuth pair -- the case the brief calls out by name', () => {
+    for (let frag = 0; frag < Math.PI * 2; frag += 0.3) {
+      for (let sun = 0; sun < Math.PI * 2; sun += 0.7) {
+        expect(applySkyAzimuthWarp(BASE, WARM, DARK, frag, sun, 0)).toEqual(BASE);
+      }
+    }
+  });
+
+  it('is identity on the sun bearing itself (g = 1) even with S > 0', () => {
+    // Phase 0.125 (see `skyWarpAzimuthGlow`'s doc) is where g = 1 lands, and it lands there when the
+    // fragment azimuth equals the sun azimuth exactly (az = 0 -> +0.125 -> segment 3 exactly, g = 1).
+    const sunAzimuth = 1.1;
+    const result = applySkyAzimuthWarp(BASE, WARM, DARK, sunAzimuth, sunAzimuth, 1);
+    for (let ch = 0; ch < 3; ++ch) {
+      expect(result[ch]).toBeCloseTo(BASE[ch], 5);
+    }
+  });
+
+  it('pulls the anti-sun bearing toward dark, never toward warm alone, at full strength', () => {
+    const sunAzimuth = 0;
+    const antiSun = Math.PI; // 180 degrees away
+    const result = applySkyAzimuthWarp(BASE, WARM, DARK, antiSun, sunAzimuth, 1);
+    // At the trough (g = -0.7) the ring is a prepass toward warm by s=1 (i.e. warm itself) and then a
+    // second mix toward dark -- so the result must sit between warm and dark, not equal either
+    // endpoint nor the untouched base.
+    for (let ch = 0; ch < 3; ++ch) {
+      expect(result[ch]).not.toBeCloseTo(BASE[ch], 3);
+    }
+  });
+});
+
+describe('skyWarpAzimuthGlow', () => {
+  it('peaks at exactly 1 at phase 0.125 (the sun bearing) and troughs at -0.7 at 0.625', () => {
+    expect(skyWarpAzimuthGlow(0.125)).toBeCloseTo(1, 5);
+    expect(skyWarpAzimuthGlow(0.625)).toBeCloseTo(-0.7, 5);
+  });
+
+  it('wraps around at phase 0 the same as phase 1', () => {
+    expect(skyWarpAzimuthGlow(0)).toBeCloseTo(skyWarpAzimuthGlow(1), 5);
+  });
+});
+
+describe('warpSkyRingColor', () => {
+  const BASE: RGB = [0.2, 0.3, 0.9];
+  const WARM: RGB = [0.9, 0.6, 0.3];
+  const DARK: RGB = [0.05, 0.05, 0.15];
+
+  it('is identity at s = 0 regardless of g', () => {
+    expect(warpSkyRingColor(BASE, WARM, DARK, 1, 0)).toEqual(BASE);
+    expect(warpSkyRingColor(BASE, WARM, DARK, -0.7, 0)).toEqual(BASE);
+  });
+
+  it('is identity at g = 1 (the sun bearing) regardless of s', () => {
+    const result = warpSkyRingColor(BASE, WARM, DARK, 1, 1);
+    for (let ch = 0; ch < 3; ++ch) {
+      expect(result[ch]).toBeCloseTo(BASE[ch], 5);
+    }
   });
 });
 

@@ -24,6 +24,16 @@ class SceneLightParams {
   #riverCloseColor = new THREE.Color(0.25, 0.5, 0.8);
   #oceanCloseColor = new THREE.Color(0.25, 0.5, 0.8);
 
+  // The five authored sky-dome gradient stops (Task 4, `LIGHT_INT_BAND` rows 2-6, zenith -> horizon).
+  // Row 7 (the horizon/fog colour) is `#fogColor` above -- already published under that name before
+  // this task. Defaults match `#fogColor`'s own pre-resolve default, so a frame rendered before the
+  // first `MapLight.update()` call has no visible seam between the dome and the fog it converges into.
+  #skyTopColor = new THREE.Color(0.25, 0.5, 0.8);
+  #skyMiddleColor = new THREE.Color(0.25, 0.5, 0.8);
+  #skyBand1Color = new THREE.Color(0.25, 0.5, 0.8);
+  #skyBand2Color = new THREE.Color(0.25, 0.5, 0.8);
+  #skySmogColor = new THREE.Color(0.25, 0.5, 0.8);
+
   #uniforms: LightUniforms = {
     sunDir: {
       value: this.#sunDirView,
@@ -53,6 +63,26 @@ class SceneLightParams {
       value: this.#oceanCloseColor,
     },
   };
+
+  get skyTopColor() {
+    return this.#skyTopColor;
+  }
+
+  get skyMiddleColor() {
+    return this.#skyMiddleColor;
+  }
+
+  get skyBand1Color() {
+    return this.#skyBand1Color;
+  }
+
+  get skyBand2Color() {
+    return this.#skyBand2Color;
+  }
+
+  get skySmogColor() {
+    return this.#skySmogColor;
+  }
 
   get sunDir() {
     return this.#sunDir;

@@ -39,7 +39,13 @@ export default class World extends EventEmitter {
 
     // Initialize sky manager
     this.skyManager = new SkyManager(this.scene);
-    this.skyManager.initialize('cone'); // Default to cone method
+    // Task 4 defect fix: this used to default to 'cone', a stub sky object that never read the
+    // `MapLight`-published bands at all (its own `update()` always called `setDefaultColors()` and
+    // `SkyManager` never called `setMapLight` on ANYTHING -- the sky was completely disconnected from
+    // the light system before this task). 'procedural' is the dome the plan's Task 4 targets and the
+    // one now actually wired to the published Light.dbc gradient stops -- defaulting to it is what
+    // makes that work visible in the running game rather than only in unit tests.
+    this.skyManager.initialize('procedural');
     
     // Initialize sky debug interface
     this.skyDebug = new SkyDebug(this.skyManager);
@@ -166,6 +172,15 @@ export default class World extends EventEmitter {
     }
   }
 
+  /**
+   * The current map's `MapLight`, or null before a map has loaded. `WorldMap` owns the instance (it
+   * is recreated per zone change, see `changeMap`); this is just the one place anything outside
+   * `WorldMap` (the sky system, the renderer's clear colour) needs to reach it.
+   */
+  get mapLight() {
+    return this.map?.mapLight ?? null;
+  }
+
   renderAtCoords(x: number, y: number) {
     if (!this.map) {
       return;
@@ -216,7 +231,10 @@ export default class World extends EventEmitter {
       this.map.animate(delta, camera, cameraMoved);
     }
 
-    // Update sky system
+    // Update sky system. `setMapLight` every frame (not once) because `changeMap` swaps in a brand
+    // new `MapLight` per zone -- the same staleness trap `WorldMap#adoptMaterial` already documents
+    // for materials. Cheap: it is just a reference assignment when nothing has changed.
+    this.skyManager.setMapLight(this.mapLight);
     this.skyManager.update(camera, this.map?.mapID || 0);
 
     // Send delta updates to instanced M2 animation managers.
