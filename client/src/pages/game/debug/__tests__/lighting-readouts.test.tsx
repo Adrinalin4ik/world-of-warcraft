@@ -104,6 +104,43 @@ describe('LightingReadouts', () => {
   });
 });
 
+describe('LightingReadouts light slots (diagnostic 1)', () => {
+  it('shows a dash for slots when a fixture omits lightSlots entirely', () => {
+    const selected = [{ light: { id: 16 }, weight: 0.75, distance: 120.5 }];
+    render(<LightingReadouts mapLight={target({ selectedLights: selected })} />);
+    expect(screen.getByText(/slots: -/)).toBeInTheDocument();
+  });
+
+  it('labels all eight Light.dbc slot ids by name, in field order', () => {
+    const selected = [
+      {
+        light: { id: 16, params: [{ id: 165 }], lightSlots: [165, 0, 166, 0, 0, 0, 0, 0] },
+        weight: 1,
+        distance: 10,
+      },
+    ];
+    render(<LightingReadouts mapLight={target({ selectedLights: selected })} />);
+    expect(screen.getByText(/skyFog 165/)).toBeInTheDocument();
+    expect(screen.getByText(/water 0/)).toBeInTheDocument();
+    expect(screen.getByText(/sunset 166/)).toBeInTheDocument();
+    expect(screen.getByText(/reserved7 0/)).toBeInTheDocument();
+  });
+
+  it('does not render a dump button when the target has no dumpLightSlotBands', () => {
+    render(<LightingReadouts mapLight={target()} />);
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('wires the dump button to dumpLightSlotBands, one-shot rather than per-frame', () => {
+    const dumpLightSlotBands = jest.fn();
+    render(<LightingReadouts mapLight={target({ dumpLightSlotBands })} />);
+    const button = screen.getByRole('button', { name: /dump per-slot fog bands/i });
+    expect(dumpLightSlotBands).not.toHaveBeenCalled();
+    button.click();
+    expect(dumpLightSlotBands).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('LightingReadouts WMO state', () => {
   it('shows a dash when the camera is not in a WMO', () => {
     render(<LightingReadouts mapLight={target({ wmo: null })} />);

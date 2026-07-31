@@ -19,6 +19,16 @@ export type AreaLight = {
   falloffStart: number;
   falloffEnd: number;
   params: AreaLightParams[];
+  /**
+   * The Light.dbc record's eight raw LightParams slot ids, in DBC field order: `[skyFogID, waterID,
+   * sunsetID, otherID, deathID, reserved5, reserved6, reserved7]`. Debug-readout-only (diagnostic 1)
+   * -- `params` above only ever carries the resolved bands for slot 0 (`skyFogID`), the only slot
+   * this client loads bands for. Printing all eight beside which one was actually loaded is what
+   * lets a shifted field order, or a zone that authors a storm-like fog under the "standard" slot,
+   * be told apart from a slot-selection bug. Optional so existing `AreaLight` fixtures built by hand
+   * (blend.test.ts) keep satisfying the type.
+   */
+  lightSlots?: number[];
 };
 
 export type WeightedAreaLight = {

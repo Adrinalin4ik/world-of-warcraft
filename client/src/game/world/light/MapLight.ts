@@ -75,6 +75,12 @@ class MapLight extends SceneLight {
   // the ramp has engaged). Surfaced for tests and the next task's debug readout.
   #interiorFog: FogTriple = DEFAULT_FOG_TRIPLE;
 
+  // The `LightFloatBand` DBC table, kept around ONLY for `dumpLightSlotBands` (diagnostic 1's
+  // on-demand console sweep) -- `#getAreaLightsFromDb` already reads it once at load time to build
+  // each `AreaLight`'s (slot-0-only) `floatBands`, but that pass discards the table itself. Null
+  // until `#loadLights` resolves, or if it failed.
+  #lightFloatBandDb: any = null;
+
   // The resolved (blended) `LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR`, before it is multiplied by
   // `#rawFogEnd`'s scaled counterpart to produce `fogStart`. Debug-readout-only -- see
   // `lighting-readouts.tsx`'s doc comment on the field it feeds.
@@ -195,6 +201,107 @@ class MapLight extends SceneLight {
    */
   async loadLights() {
     await this.#loadLights();
+  }
+
+  /**
+   * One-shot console sweep for diagnostic 1 ("which LightParams slot are we actually reading?") --
+   * deliberately NOT run every frame (the task's own constraint against adding another per-frame log
+   * to an already-busy console). Wired to a debug-panel button, not a lifecycle hook.
+   *
+   * For each currently selected light, and each of its eight Light.dbc slots (`AreaLight.lightSlots`)
+   * that is non-zero, recomputes BAND_FOG_END and BAND_FOG_START_SCALAR from THAT SLOT's own id --
+   * `(slotId * 6) - 5 + i`, the exact formula `#getAreaLightsFromDb` already uses, just run against
+   * every candidate slot instead of always `skyFogID` (slot 0). Slot 0's row in the printed table is
+   * always the one actually feeding `fogStart`/`fogEnd` every frame (see `#getAreaLightsFromDb`,
+   * which only ever builds `params[0]` from `lightSlots[0]`) -- comparing it against the other seven
+   * settles the question directly: if a DIFFERENT slot reads the storm-like scalar, slot selection is
+   * wrong; if slot 0 itself already does, the zone's own data authors it.
+   *
+   * Read-only: this recomputes the same bands `#getAreaLightsFromDb`/`blendLights` already produce
+   * for slot 0, against additional slots, entirely for inspection. It does not write anything back
+   * into `#lights`, `#selectedLights`, or any fog/lighting uniform.
+   */
+  dumpLightSlotBands() {
+    if (!this.#lightFloatBandDb) {
+      console.warn('MapLight#dumpLightSlotBands: LightFloatBand DBC not loaded (yet)');
+      return;
+    }
+
+    if (this.#selectedLights.length === 0) {
+      console.warn('MapLight#dumpLightSlotBands: no selected lights to sweep');
+      return;
+    }
+
+    const SLOT_LABELS = [
+      'skyFogID', 'waterID', 'sunsetID', 'otherID', 'deathID',
+      'reserved5', 'reserved6', 'reserved7',
+    ];
+
+    const rows: Array<{
+      lightId: number;
+      slotIndex: number;
+      slot: string;
+      slotId: number;
+      loadedSlot: boolean;
+      fogEndRaw: number | '-';
+      fogEndScaled: number | '-';
+      fogStartScalar: number | '-';
+    }> = [];
+
+    for (const { light } of this.#selectedLights) {
+      const slots = light.lightSlots || [];
+
+      slots.forEach((slotId, slotIndex) => {
+        // Slot 0 (skyFogID) is always non-zero in practice (every Light.dbc record names a standard
+        // params row), but the other seven frequently are not -- a light with no water/sunset/death
+        // override just repeats slot 0's id or reads 0. Per the task: EVERY non-zero slot, not every
+        // slot.
+        if (!slotId) {
+          return;
+        }
+
+        const fogEndBandId = (slotId * 6) - 5 + LIGHT_FLOAT_BAND.BAND_FOG_END;
+        const fogStartScalarBandId = (slotId * 6) - 5 + LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR;
+
+        const fogEndRecord = this.#lightFloatBandDb[fogEndBandId];
+        const fogStartScalarRecord = this.#lightFloatBandDb[fogStartScalarBandId];
+
+        const fogEndRaw = fogEndRecord
+          ? interpolateNumericTable(
+              this.#processFloatBand(fogEndRecord, LIGHT_FLOAT_BAND.BAND_FOG_END, true),
+              this.#timeProgression,
+            )
+          : '-';
+
+        const fogEndScaled = fogEndRecord
+          ? interpolateNumericTable(
+              this.#processFloatBand(fogEndRecord, LIGHT_FLOAT_BAND.BAND_FOG_END, false),
+              this.#timeProgression,
+            )
+          : '-';
+
+        const fogStartScalar = fogStartScalarRecord
+          ? interpolateNumericTable(
+              this.#processFloatBand(fogStartScalarRecord, LIGHT_FLOAT_BAND.BAND_FOG_START_SCALAR, false),
+              this.#timeProgression,
+            )
+          : '-';
+
+        rows.push({
+          lightId: light.id,
+          slotIndex,
+          slot: SLOT_LABELS[slotIndex] ?? `slot${slotIndex}`,
+          slotId,
+          loadedSlot: slotIndex === 0,
+          fogEndRaw,
+          fogEndScaled,
+          fogStartScalar,
+        });
+      });
+    }
+
+    console.log('MapLight: per-slot fog band sweep (diagnostic 1) -- "loadedSlot" marks the row that actually feeds fogStart/fogEnd every frame');
+    console.table(rows);
   }
 
   get timeOverride() {
@@ -551,6 +658,11 @@ class MapLight extends SceneLight {
       }
 
       this.#lights = this.#getAreaLightsFromDb(lightDb, lightParamsDb, lightIntBandDb, lightFloatBandDb);
+
+      // Debug-readout-only (diagnostic 1's on-demand slot sweep, `dumpLightSlotBands`). Kept
+      // alongside `#lights` rather than re-fetched per dump so the sweep never re-triggers a DBC
+      // load of its own.
+      this.#lightFloatBandDb = lightFloatBandDb;
     } catch (error) {
       console.error('Error loading light databases:', error);
       this.#lights = {};
@@ -636,7 +748,21 @@ class MapLight extends SceneLight {
           intBands,
           floatBands,
           rawFogEndBand
-        }]
+        }],
+        // Debug-readout-only (diagnostic 1). All eight Light.dbc slot ids, in field order -- `params`
+        // above only ever resolves bands for `skyFogID` (slot 0), so this is the only place the other
+        // seven ids (including the three previously-unreadable reserved words -- see light.js's DBC
+        // entity) are exposed at all.
+        lightSlots: [
+          lightRecord.skyFogID,
+          lightRecord.waterID,
+          lightRecord.sunsetID,
+          lightRecord.otherID,
+          lightRecord.deathID,
+          lightRecord.reserved5,
+          lightRecord.reserved6,
+          lightRecord.reserved7,
+        ],
       };
 
       lights[mapId].push(areaLight);

@@ -61,6 +61,15 @@ export type LightingReadoutsTarget = {
        * (the real target) always carries the full `AreaLight` shape, `params` included.
        */
       params?: Array<{ id: number }>;
+      /**
+       * All eight Light.dbc slot ids for this light, in field order (`[skyFogID, waterID, sunsetID,
+       * otherID, deathID, reserved5, reserved6, reserved7]`) -- diagnostic 1. `params[0].id` above is
+       * always `lightSlots[0]` (`#getAreaLightsFromDb` only ever resolves bands for slot 0); showing
+       * every slot beside it is what would make a shifted field order, or a slot the client should be
+       * reading instead, obvious by inspection rather than by guessing from the final fog range.
+       * Optional for the same reason `params` is: existing plain test fixtures still satisfy the type.
+       */
+      lightSlots?: number[];
     };
     weight: number;
     distance: number;
@@ -73,6 +82,13 @@ export type LightingReadoutsTarget = {
     int: number;
     trans: number;
   } | null;
+  /**
+   * One-shot console sweep (diagnostic 1): for each selected light's non-zero Light.dbc slots,
+   * recomputes the BAND_FOG_END / BAND_FOG_START_SCALAR float bands from that slot's OWN id and
+   * prints a table. Optional -- plain test fixtures need not implement it -- and deliberately not
+   * called from `render()`: it is a `console.table` dump wired to a button, not a per-frame log.
+   */
+  dumpLightSlotBands?: () => void;
 };
 
 type Props = {
@@ -90,6 +106,21 @@ const asBytes = (color: Rgb | undefined) => {
 
 const asFixed = (value: number | undefined, places = 0) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(places) : '-';
+
+/** Light.dbc's eight LightParams slot fields, in record order -- see `AreaLight.lightSlots`'s doc
+ * comment. Slot 0 (`skyFogID`) is the only one this client resolves bands for. */
+const LIGHT_SLOT_LABELS = [
+  'skyFog', 'water', 'sunset', 'other', 'death', 'reserved5', 'reserved6', 'reserved7',
+];
+
+/** A selected light's eight raw slot ids, labelled by index -- diagnostic 1. `-` for a fixture that
+ * omits `lightSlots` entirely (existing plain test fixtures, and any light not yet carrying it). */
+const asLightSlots = (slots: number[] | undefined) => {
+  if (!slots || slots.length === 0) {
+    return '-';
+  }
+  return slots.map((id, index) => `${LIGHT_SLOT_LABELS[index] ?? `slot${index}`} ${id}`).join(' · ');
+};
 
 /** Same byte conversion as `asBytes`, for the `[r, g, b]` tuple `FogTriple.color` uses rather than
  * the `{r, g, b}` shape a THREE.Color satisfies. */
@@ -161,11 +192,25 @@ class LightingReadouts extends React.Component<Props> {
         <div className="divider"></div>
         <p>Area lights: {selected.length}</p>
         {selected.slice(0, 4).map((entry) => (
-          <p key={entry.light.id}>
-            id {entry.light.id} &middot; params {entry.light.params?.[0]?.id ?? '-'} &middot; weight{' '}
-            {asFixed(entry.weight, 3)} &middot; dist {asFixed(entry.distance, 1)}
-          </p>
+          <React.Fragment key={entry.light.id}>
+            <p>
+              id {entry.light.id} &middot; params {entry.light.params?.[0]?.id ?? '-'} &middot; weight{' '}
+              {asFixed(entry.weight, 3)} &middot; dist {asFixed(entry.distance, 1)}
+            </p>
+            {/* Diagnostic 1: every raw Light.dbc slot id this light carries, so a shifted field order
+                or a wrongly-read slot shows up beside the one actually loaded (slot 0, above). */}
+            <p className="lightingReadouts-slots">
+              slots: {asLightSlots(entry.light.lightSlots)}
+            </p>
+          </React.Fragment>
         ))}
+        {mapLight.dumpLightSlotBands && (
+          <p>
+            <button type="button" onClick={mapLight.dumpLightSlotBands}>
+              Dump per-slot fog bands to console
+            </button>
+          </p>
+        )}
 
         <div className="divider"></div>
         <p>
