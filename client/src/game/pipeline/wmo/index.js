@@ -5,7 +5,7 @@ import M2Blueprint from '../m2/blueprint';
 import { attachPerObjectLighting } from '../m2/material/per-object-light';
 import WMOGroupLoader from './group/loader';
 import WMORootLoader from './root/loader';
-import { cap96, floor112, foldInteriorProbe } from '../../world/light/laws';
+import { cap96, floor112, foldInteriorProbe, selectPointLights } from '../../world/light/laws';
 import { worldSpaceLightsForWmo } from '../../world/light/wmo-lights';
 
 import gameSettings from '../../settings';
@@ -359,10 +359,24 @@ class WMO {
   }
 
   /**
-   * Fold this doodad's interior light probe once at create, for a doodad whose owning group is
-   * `lightingInterior` (the reference's MOGI & 0x48 lighting class -- deliberately not `interior`,
-   * which only answers portal culling). Exterior-owned doodads are untouched here and keep
-   * whatever exterior lighting path already applies to them.
+   * Fold this doodad's per-object lighting once at create. Which lane it takes depends on the
+   * owning group's lighting class (the reference's MOGI & 0x48 -- deliberately not `interior`,
+   * which only answers portal culling): `lightingInterior` groups fold a probe, everything else
+   * (a porch, a courtyard, any EXTERIOR_LIT group) takes the exterior lane, which still owes the
+   * doodad its building's own MOLT point lights -- only WMO *surfaces* take none of those.
+   */
+  foldDoodadLighting(doodadEntry, doodad) {
+    const group = this.doodadLightingGroups.get(doodadEntry.id);
+
+    if (group && group.lightingInterior) {
+      this.foldInteriorDoodadLighting(doodadEntry, doodad, group);
+    } else {
+      this.foldExteriorDoodadLighting(doodad);
+    }
+  }
+
+  /**
+   * The interior lane: fold the group's ambient/diffuse/MOLR lights into one SH probe.
    *
    * `ambient = cap96(MODD.colour)` and `diffuse = floor112(MODD.colour)`, the latter committed on
    * the FIXED engine axis rather than the day/night sun -- which is why an interior prop's light is
@@ -371,13 +385,7 @@ class WMO {
    * MOLR point lights (the group's referenced omni lights, its own flame included) are gated by
    * distance inside `foldInteriorProbe` itself; a group with no MOLR means no point light at all.
    */
-  foldDoodadLighting(doodadEntry, doodad) {
-    const group = this.doodadLightingGroups.get(doodadEntry.id);
-
-    if (!group || !group.lightingInterior) {
-      return;
-    }
-
+  foldInteriorDoodadLighting(doodadEntry, doodad, group) {
     // MODD.color is a uint32. CImVector is BGRA in memory, so as a little-endian uint32 red lands
     // at >> 16 -- the same unpacking WMORootDefinition.createLights uses for MOLT colour.
     const color = doodadEntry.color;
@@ -404,6 +412,60 @@ class WMO {
       // Deliberately empty, not an unfinished stub: this doodad's MOLR lobes are already folded into
       // `probe` above (see foldInteriorProbe). Populating both would double-count the same lights.
       pointLights: []
+    };
+
+    this.attachDoodadLighting(doodad);
+  }
+
+  /**
+   * The exterior lane: no probe, no folded ambient/diffuse -- those keep coming from MapLight's own
+   * day/night blend the way they always have. What WAS missing without this fold is the doodad's
+   * own ≤3-nearest MOLT point lights (benilla wow_model.wgsl::point_light_sum): a doodad standing on
+   * a porch or in a courtyard group still takes its building's point lights, exactly like the
+   * reference -- it is WMO *surfaces*, not M2 doodads, that take none.
+   *
+   * Anchored at the doodad's own world position, never the camera -- selecting against the camera
+   * lights doodads from sideways lamps the real client never commits. Candidates are drawn from
+   * THIS WMO instance's own MOLT lights (`worldSpaceLightsForWmo(this)`, the same conversion
+   * `molrLightsFor` uses for the interior fold above), so a doodad here never picks up a
+   * neighbouring building's lights, and an ADT doodad placed outside any WMO never reaches this
+   * method at all (it is only called from `loadDoodad`, which only runs for this WMO's own doodads).
+   */
+  foldExteriorDoodadLighting(doodad) {
+    const worldPosition = doodad.getWorldPosition(new THREE.Vector3());
+    const origin = [worldPosition.x, worldPosition.y, worldPosition.z];
+
+    const worldLights = worldSpaceLightsForWmo(this);
+    const candidates = [];
+
+    if (worldLights) {
+      for (const light of worldLights) {
+        // root.lights (and therefore this array) is positionally aligned with MOLT and has holes
+        // for lights createLights skipped -- see WMORootDefinition.createLights.
+        if (!light) {
+          continue;
+        }
+
+        candidates.push({
+          position: [light.position.x, light.position.y, light.position.z],
+          color: [
+            light.color.r * light.intensity,
+            light.color.g * light.intensity,
+            light.color.b * light.intensity
+          ],
+          attenStart: light.attenStart,
+          attenEnd: light.attenEnd
+        });
+      }
+    }
+
+    const pointLights = selectPointLights(origin, candidates, 3);
+
+    doodad.perObjectLighting = {
+      interior: false,
+      sunIntensity: 1.0,
+      probe: null,
+      pointLights
     };
 
     this.attachDoodadLighting(doodad);
