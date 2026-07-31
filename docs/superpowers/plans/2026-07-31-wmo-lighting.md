@@ -1377,6 +1377,33 @@ folds with the vertex colour whenever `VERTEX_COLORS` is set, so the reference m
 multiply there. It may also be moot if UNLIT-flagged WMO batches conventionally bake near-white MOCV.
 Left as-is; revisit with evidence rather than by preference.
 
+## The build defect that hid this plan's work — READ BEFORE PLAN 3
+
+Most of this plan's shader work was **absent from the running app** while it was being written, and it
+took three rounds of "still too dark" reports to find out why.
+
+`client/config/webpack.config.js` runs `.glsl` through `glslify-loader` with the `glslify-import`
+transform. `glslify-loader` does call `this.addDependency` — but only for entries in glslify's
+dependency tree, and **`glslify-import` is a source transform**: it reads the target with `fs` and
+splices the text in, so those files never enter the tree. Nothing registers them, so editing a chunk
+reached by `#pragma glslify: import('./functions.glsl')` never invalidates the `main.glsl` that imports
+it. The dev server keeps serving the stale compiled shader, and a browser reload cannot help.
+
+Fixed for WMO: `wmo/material/index.js` now imports each chunk explicitly and concatenates them, so
+webpack tracks real modules. **Do not tidy that back into pragmas.**
+
+**M2 STILL HAS THIS HAZARD** — `client/src/game/pipeline/m2/material/{fragment,vertex}/*.glsl` use the
+same pragmas. **Plan 3's first task must fix its own build path**, or every M2 shader edit it makes will
+be silently discarded exactly as these were.
+
+Two process lessons worth keeping:
+
+- **A shader edit that appears to do nothing is a build-path suspect before it is a maths problem.**
+  Three fix rounds were spent re-deriving lighting laws that were correct and simply never compiled.
+- **Falsifiable predictions locate this.** What finally cracked it was committing to "this is a straight
+  2× on every WMO surface; if you reload and it looks identical, my diagnosis is wrong." The identical
+  screenshot then pointed at the build rather than the arithmetic.
+
 ## Handoff to plan 3
 
 - **`MapLight`'s interior sun fade is GONE** — removed in Task 9, overriding this plan's own hard
