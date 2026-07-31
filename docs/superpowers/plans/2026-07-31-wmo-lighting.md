@@ -1201,7 +1201,33 @@ from the Task 1 decode, which already exposes both:
 Keep `this.wrapping` as an alias for `this.wrapS` **only if** something outside this file reads it —
 grep first. If nothing does, remove it.
 
-- [ ] **Step 3: Delete the dead shaders**
+- [ ] **Step 3: De-duplicate the `0x48` lighting-class mask**
+
+Task 7's review flagged this: `MOGI.lightingInterior` in `client/src/wow-data-parser/wmo/index.js`
+inlines `(this.flags & 0x48) === 0`, duplicating `isLightingInterior` in
+`client/src/game/pipeline/wmo/material/laws.ts`. Two copies of a magic mask drift.
+
+`laws.ts` imports nothing and is pure, so importing it from the parser introduces no cycle. Add at the
+top of `client/src/wow-data-parser/wmo/index.js`:
+
+```js
+import { isLightingInterior } from '../../game/pipeline/wmo/material/laws';
+```
+
+and replace the inlined field body:
+
+```js
+    lightingInterior: function() {
+      return isLightingInterior(this.flags);
+    }
+```
+
+**If that import turns out not to work from this module** — the parser is plain JS evaluated at module
+load and may run in a worker with a different resolution root — do NOT force it. Instead move the mask
+to a named constant in the parser with a comment pointing at `laws.ts` as the source of truth, and say
+in your report which route you took and why.
+
+- [ ] **Step 4: Delete the dead shaders**
 
 ```bash
 git rm client/src/game/pipeline/wmo/material/shader.frag client/src/game/pipeline/wmo/material/shader.vert
@@ -1211,7 +1237,7 @@ Before committing, grep the whole client for `shader.frag` and `shader.vert` und
 directory to confirm nothing imports them. `material/index.js` has them as commented-out imports at
 the top — remove those comment lines too.
 
-- [ ] **Step 4: Verify**
+- [ ] **Step 5: Verify**
 
 Run: `cd client && yarn test --watchAll=false` and `npx tsc --noEmit`. Then run the client and check
 alpha-keyed WMO geometry — railings, lattices, window frames, foliage on buildings. The cutout
@@ -1221,10 +1247,10 @@ silhouette should be clean, with no newly-chunky or newly-disappeared edges.
 material genuinely relied on the 0.3 threshold, and the right answer is a per-blend-mode threshold
 rather than restoring a wrap flag as the selector.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add client/src/game/pipeline/wmo/material/index.js
+git add client/src/game/pipeline/wmo/material/index.js client/src/wow-data-parser/wmo/index.js
 git commit -m "fix(wmo): correct the alpha-test threshold and per-axis wrap, drop dead shaders"
 ```
 
