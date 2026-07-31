@@ -35,14 +35,22 @@ vec4 applyFog(vec4 color) {
   // Opaque, alpha-keyed and alpha-blended particles replace what is behind them, so fog replaces
   // their colour in the usual way.
   color.rgb = mix(color.rgb, fogColor.rgb, fogFactor);
-#elif BLENDING_MODE == 3 || BLENDING_MODE == 4 || BLENDING_MODE == 6
-  // Additive modes add into the framebuffer, so mixing toward a lit fog colour would ADD light
-  // rather than remove it -- a distant torch would paint a coloured halo over the fog instead of
-  // fading into it. Fog has to fade an additive contribution toward black, its identity.
+#elif BLENDING_MODE == 3 || BLENDING_MODE == 4
+  // Modes 3 (NoAlphaAdd) and 4 (Add) *add* their result into the framebuffer. Mixing toward a lit
+  // fog colour would ADD light rather than remove it -- a distant torch would paint a coloured halo
+  // over the fog instead of fading into it. Fog has to fade an additive contribution toward black,
+  // its identity. Mode 6 (Mod2x) is NOT an additive mode -- see its own branch below.
   color.rgb = mix(color.rgb, vec3(0.0), fogFactor);
+#elif BLENDING_MODE == 5
+  // Mode 5 (Mod) is a pure multiply (DstColor/Zero). Its identity is WHITE -- fade toward that, so a
+  // modulating particle stops affecting the framebuffer at fog distance instead of staying crisp
+  // forever.
+  color.rgb = mix(color.rgb, vec3(1.0), fogFactor);
+#elif BLENDING_MODE == 6
+  // Mode 6 (Mod2x) multiplies and doubles (DstColor/SrcColor), so its identity is grey (0.5): mixing
+  // toward that neutralises the doubling instead of darkening it toward black.
+  color.rgb = mix(color.rgb, vec3(0.50196078), fogFactor);
 #endif
-  // BLENDING_MODE 5 is a pure modulate (DstColor/Zero) whose identity is white; fogging it toward
-  // either black or the fog colour would darken whatever it multiplies, so it is left alone.
 
   return color;
 }
