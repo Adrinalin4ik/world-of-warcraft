@@ -162,9 +162,8 @@ class M2Material extends THREE.ShaderMaterial {
       // WMO point lights (MOLT) affecting this model, in world space. Assigned by the WMO that owns
       // the doodad; models outside a WMO keep a count of zero and skip the loop entirely.
       wmoLightCount: { value: 0 },
-      wmoLightPosition: { value: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()] },
-      wmoLightColor: { value: [new THREE.Color(), new THREE.Color(), new THREE.Color(), new THREE.Color()] },
-      wmoLightAtten: { value: [new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2()] },
+      wmoLightPosition: { value: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()] },
+      wmoLightColor: { value: [new THREE.Color(), new THREE.Color(), new THREE.Color()] },
 
       // Managed by light manager
       sunParams: { value: new THREE.Vector4() },
@@ -181,9 +180,12 @@ class M2Material extends THREE.ShaderMaterial {
 
       materialParams: { value: [1,1,1,1] },
 
-      // The per-instance terrain-shade intensity. Declared unconditionally with 1.0: a uniform the
-      // shader reads but nobody supplies reads as ZERO, which would flatten every model's sun term.
+      // The per-object block (per-object-light.ts). Declared with safe defaults: a uniform the shader
+      // reads but nobody supplies reads as zero, and for `sunIntensity` that would flatten the sun.
       sunIntensity: { value: 1.0 },
+      interiorProbe: { value: 0 },
+      // A flat Float32Array of 7 vec4s. See per-object-light.ts for why this is not Vector4[].
+      probeCoeffs: { value: new Float32Array(28) },
     };
 
     this.defines.MAX_BONES = 200;
@@ -508,35 +510,6 @@ class M2Material extends THREE.ShaderMaterial {
     this.textures.forEach((texture) => {
       TextureLoader.unload(texture);
     });
-  }
-
-  /**
-   * Assign the WMO point lights that reach this model.
-   *
-   * Expects world-space positions, already narrowed to the closest few by the caller: the shader
-   * keeps a fixed-size array, so anything beyond MAX_WMO_LIGHTS is dropped.
-   */
-  setWmoLights(lights): void {
-    const positions = this.uniforms.wmoLightPosition.value;
-    const colors = this.uniforms.wmoLightColor.value;
-    const attenuations = this.uniforms.wmoLightAtten.value;
-
-    const count = Math.min(lights ? lights.length : 0, positions.length);
-
-    for (let index = 0; index < count; ++index) {
-      const light = lights[index];
-
-      positions[index].set(light.position.x, light.position.y, light.position.z);
-      // Intensity folded into the colour so the shader does not need a fourth array.
-      colors[index].setRGB(
-        light.color.r * light.intensity,
-        light.color.g * light.intensity,
-        light.color.b * light.intensity
-      );
-      attenuations[index].set(light.attenStart, light.attenEnd);
-    }
-
-    this.uniforms.wmoLightCount.value = count;
   }
 
   /**
