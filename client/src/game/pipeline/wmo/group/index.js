@@ -17,6 +17,9 @@ class WMOGroup {
     this.def = def;
     this.interior = def.interior;
     this.lightingInterior = def.lightingInterior;
+    // See WMOGroupDefinition.fogOffsets -- indices into root.fogs, resolved by the
+    // camera-in-interior fog consumer, not here.
+    this.fogOffsets = def.fogOffsets;
 
     this.doodadRefs = def.doodadRefs;
     this.lightRefs = def.lightRefs;

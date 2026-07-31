@@ -12,6 +12,11 @@ class WMOGroupDefinition {
     // material never sees anything but `undefined` and silently falls back to `this.interior`.
     this.lightingInterior = groupData.lightingInterior;
 
+    // MOGP's four uint8 indices into the root's MFOG array (see wmo/index.js `MFOG` and
+    // WMORootDefinition.createFogs). Carried verbatim -- resolving them against the root's
+    // fog records is the camera-in-interior fog consumer's job, not this loader's.
+    this.fogOffsets = groupData.MOGP.fogOffsets;
+
     this.header = {
       batchCounts: groupData.MOGP.batchCounts,
       batchOffsets: groupData.MOGP.batchOffsets,

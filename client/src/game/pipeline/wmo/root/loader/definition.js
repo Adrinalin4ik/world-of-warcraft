@@ -20,7 +20,43 @@ class WMORootDefinition {
 
     this.createPortals(data);
     this.createLights(data);
+    this.createFogs(data);
     this.createBoundingBox(data.MOHD);
+  }
+
+  /**
+   * MFOG records, staged into the shape `fog.ts`'s `stageMfog`/`WmoFogRamp` consume
+   * (`{ color: [r,g,b] 0..1, end, startScalar }`).
+   *
+   * Each MFOG record packs TWO fog blocks -- index 0 is FOG, index 1 is UWFOG (underwater).
+   * This client has no submersion state, so underwater fog is out of scope; only block 0 is
+   * read. Kept positionally aligned with MFOG (one entry per record, none skipped) since a
+   * group's MOGP.fogOffsets indexes this array directly -- see WMOGroupDefinition.fogOffsets.
+   * Resolving those offsets against this array (including what an all-zero or out-of-range
+   * index means) is the camera-in-interior fog consumer's job, not this loader's.
+   */
+  createFogs(data) {
+    const fogs = this.fogs = [];
+
+    if (!data.MFOG || !data.MFOG.fogs) {
+      return;
+    }
+
+    for (const record of data.MFOG.fogs) {
+      const fog = record.fogs[0];
+
+      // CImVector is {b, g, r, a} in memory, so as a little-endian uint32 red lands at >> 16.
+      // Same unpacking createLights uses above for MOLT colour.
+      const r = (fog.color >> 16) & 0xff;
+      const g = (fog.color >> 8) & 0xff;
+      const b = fog.color & 0xff;
+
+      fogs.push({
+        color: [r / 255, g / 255, b / 255],
+        end: fog.end,
+        startScalar: fog.start_scalar
+      });
+    }
   }
 
   /**
