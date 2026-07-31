@@ -346,8 +346,18 @@ class M2Material extends THREE.ShaderMaterial {
       this.vertexShader = M2Material.VERTEX_SHADERS[shaderNames.vertex];
       this.fragmentShader = M2Material.FRAGMENT_SHADERS[shaderNames.fragment];
 
+      // Warn about a missing VERTEX shader too, not just a missing fragment one. An unresolved
+      // vertex shader leaves `this.vertexShader` undefined, three.js silently substitutes its own,
+      // and the model renders through a shader that knows nothing about M2 UV animation or lighting
+      // -- with no diagnostic at all. `Diffuse_T2` was in exactly that state (named by
+      // `shaderNamesFromSingleOpTable`, absent from `VERTEX_SHADERS`) and it took a GL driver error
+      // on an unrelated code path to find it.
       if (!M2Material.FRAGMENT_SHADERS[shaderNames.fragment]) {
-        console.warn('MISSING SHADERS FOR M2: ', this.m2.name, this.shaderNames.fragment);
+        console.warn('MISSING FRAGMENT SHADER FOR M2: ', this.m2.name, this.shaderNames.fragment);
+      }
+
+      if (!M2Material.VERTEX_SHADERS[shaderNames.vertex]) {
+        console.warn('MISSING VERTEX SHADER FOR M2: ', this.m2.name, this.shaderNames.vertex);
       }
     } else {
       this.vertexShader = M2Material.VERTEX_SHADERS['Discard'];

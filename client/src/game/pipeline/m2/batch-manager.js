@@ -475,6 +475,21 @@ class BatchManager {
       }
     } else {
       names = this.shaderNamesFromOther(shaderID);
+
+      // The non-table path resolves only low bits 1-3; anything else (0 included) drops out with no
+      // names, and the real client's `sub_876530` THROWS BACK TO THE TABLE LOOKUP rather than
+      // rendering nothing -- the TODO in `shaderNamesFromOther` records exactly this.
+      //
+      // Falling through to `Discard` instead is not a harmless no-op. It went unnoticed only because
+      // `assignShaders` used to overwrite every selection with `Diffuse_T1`/`Combiners_Opaque`, which
+      // happens to be what the table returns for these batches anyway. With that override gone the
+      // gap became visible two ways at once: 42 batches in Ironforge (IRONFORGESTEAMTANK,
+      // 2SIDEDPICKAXE, HARPOON01, ORCSTAFF02, IRONFORGECRYSTALROOF, METALCUP03) stopped drawing, and
+      // each one spammed `GL_INVALID_OPERATION: glDrawArrays: Active draw buffers with missing
+      // fragment shader outputs` because the `Discard` fragment shader writes no output at all.
+      if (!names) {
+        names = this.shaderNamesFromTable(shaderID, opCount, textureMapping);
+      }
     }
 
     return names;
@@ -540,10 +555,18 @@ class BatchManager {
     if (t1EnvMapped) {
       vertexName = 'Diffuse_Env';
     } else {
-      if (textureMapping === 0) {
-        vertexName = 'Diffuse_T1';
-      } else {
+      // Test for T2 explicitly rather than for "not T1". `def.textureMapping` is only assigned when
+      // the batch's `textureMappingIndex` is >= 0; otherwise it keeps `stubDef`'s `null`, and
+      // `null !== 0` used to route every unmapped batch to `Diffuse_T2`. That is wrong twice over:
+      // there is no `Diffuse_T2` entry in `M2Material.VERTEX_SHADERS` at all, and these models carry
+      // no `uv2` attribute for it to read (vanilla M2 vertices have a single texcoord -- checked live
+      // on IRONFORGESTEAMTANK, 2SIDEDPICKAXE, HARPOON01, ORCSTAFF02, IRONFORGECRYSTALROOF,
+      // METALCUP03: `position, normal, color, uv, skinIndex, skinWeight` and nothing else).
+      // An absent mapping means "no explicit mapping", which is T1.
+      if (textureMapping === 1) {
         vertexName = 'Diffuse_T2';
+      } else {
+        vertexName = 'Diffuse_T1';
       }
     }
 
