@@ -562,15 +562,13 @@ and in the constructor, after `this.defines.BATCH_TYPE = def.batchType;`, replac
     // Flag decode lives in laws.ts. Note this corrects a swap: the old code tested 0x10 (SIDN) as
     // though it were UNLIT, so it unlit exactly the materials that should glow at night.
     //
-    // The colour word is guarded: `def.textures` only contains slots whose texture path RESOLVED
-    // (see WMORoot's build loop), so it can be empty, and on a material whose first slot has no
-    // path, index 0 is a LATER slot carrying color_2 rather than the SIDN colour. Black is the safe
-    // reading -- a material we cannot identify must not glow. See the open questions.
-    const sidnWord =
-      def.textures.length > 0 ? def.textures[0].textureData.color : { r: 0, g: 0, b: 0, a: 0 };
+    // `def.sidnColor` comes from Task 7 -- MOMT slot 1's colour word, carried on the definition
+    // directly. Do NOT read it off `def.textures[0]`: that list holds only the slots whose texture
+    // path RESOLVED, so its index 0 is not reliably MOMT slot 0.
+    //
     // Kept on the instance because Task 5 reads `sidnColor` and `window` off it, and because a
     // material's decoded lighting is worth inspecting from a breakpoint.
-    this.lighting = decodeMaterialLighting(def.flags, sidnWord);
+    this.lighting = decodeMaterialLighting(def.flags, def.sidnColor);
     const lighting = this.lighting;
 
     if (lighting.unlit) {
@@ -964,6 +962,286 @@ git commit -m "feat(debug): report the camera's WMO and its batch-class counts"
 - WMOs are visibly lit, track time of day, and interiors read as their baked warmth.
 - Windows glow between 20:30 and 21:30 and are dark at noon.
 
+### Task 7: Slot-exact SIDN colour and the interior lighting class
+
+**RUN THIS AFTER TASK 1 AND BEFORE TASK 3.** Two decode-adjacent defects that Tasks 3–5 depend on.
+
+**Files:**
+- Modify: `client/src/game/pipeline/wmo/material/loader/definition.js`
+- Modify: `client/src/game/pipeline/wmo/root/index.js`
+- Modify: `client/src/wow-data-parser/wmo/index.js`
+- Modify: `client/src/game/pipeline/wmo/material/laws.ts`
+- Test: `client/src/game/pipeline/wmo/material/__tests__/laws.test.ts`
+
+**Interfaces:**
+- Consumes: `MomtColor` from Task 1.
+- Produces:
+  - `WMOMaterialDefinition.sidnColor: MomtColor` — MOMT slot 1's colour word, always present
+  - `isLightingInterior(mogiFlags: number): boolean` in `laws.ts`
+  - `MOGI.lightingInterior` on parsed groups
+
+**Defect 1 — `def.textures` is a filtered list, so index 0 is not MOMT slot 0.**
+`WMORoot.createMaterialDefs` appends only those texture slots whose path resolved, so on a material
+whose first slot has no texture, `textures[0]` carries `color_2` rather than the SIDN word — and the
+list can be empty. Reading the emissive colour from it is unsound. The fix is exact and small: the
+parser already exposes `data.texture1.color`, which IS the SIDN word, independent of path
+resolution.
+
+**Defect 2 — the interior rule disagrees with the reference.**
+`MOGI.interior` computes `(flags & 0x2000) !== 0 && (flags & 0x8) === 0`. The reference forks the
+**lighting** class on `MOGI & 0x48` — either EXTERIOR (`0x8`) or EXTERIOR_LIT (`0x40`) means the
+exterior lighting law (benilla `wmo_portal/mod.rs`, classify `0x6a87f0`). These disagree on a group
+flagged EXTERIOR_LIT without INTERIOR.
+
+**This is deliberately a SECOND notion of interior, not a replacement.** The reference keeps both: an
+EXTERIOR_LIT-only porch still *claims* the camera for portal and containment purposes while lighting
+as outdoors. So `interior` stays exactly as it is — it drives culling — and `lightingInterior` is
+added beside it. Do not change `interior`, and do not route culling through the new flag.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `client/src/game/pipeline/wmo/material/__tests__/laws.test.ts`, adding `isLightingInterior`
+to the import:
+
+```ts
+describe('isLightingInterior', () => {
+  it('is interior when neither EXTERIOR nor EXTERIOR_LIT is set', () => {
+    expect(isLightingInterior(0x0000)).toBe(true);
+    expect(isLightingInterior(0x2000)).toBe(true);
+  });
+
+  it('is exterior when EXTERIOR (0x8) is set', () => {
+    expect(isLightingInterior(0x0008)).toBe(false);
+    expect(isLightingInterior(0x2008)).toBe(false);
+  });
+
+  it('is exterior when EXTERIOR_LIT (0x40) is set, even with INTERIOR also set', () => {
+    // This is the case the old rule got wrong: an EXTERIOR_LIT porch flagged INTERIOR read as
+    // indoors and took the interior law, where the reference lights it as outdoors.
+    expect(isLightingInterior(0x0040)).toBe(false);
+    expect(isLightingInterior(0x2040)).toBe(false);
+  });
+
+  it('ignores unrelated flag bits', () => {
+    // 0x1 BSP, 0x4 vertex colours, 0x200 lights, 0x800 doodads -- none of them classify lighting.
+    expect(isLightingInterior(0x0001 | 0x0004 | 0x0200 | 0x0800)).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd client && yarn test --watchAll=false --testPathPattern="wmo/material/__tests__/laws"`
+Expected: FAIL — `isLightingInterior is not a function`.
+
+- [ ] **Step 3: Add the classifier**
+
+Append to `client/src/game/pipeline/wmo/material/laws.ts`:
+
+```ts
+/** `MOGI`/`MOGP` group flag bits that decide the LIGHTING class. */
+export const MOGI_FLAG = {
+  /** An outdoor group — street, deck, terrace. */
+  EXTERIOR: 0x8,
+  /** An interior-graph group that is nonetheless LIT as outdoors: a porch, a courtyard. */
+  EXTERIOR_LIT: 0x40,
+} as const;
+
+/**
+ * Whether a group takes the INTERIOR lighting law.
+ *
+ * The reference forks the lighting class on `MOGI & 0x48` — either EXTERIOR (`0x8`) or EXTERIOR_LIT
+ * (`0x40`) sends the group down the exterior leg (benilla `wmo_portal/mod.rs`, classify `0x6a87f0`).
+ *
+ * This is deliberately a SECOND notion of "interior", separate from the `interior` flag that drives
+ * portal culling and camera containment — the reference keeps both, because an EXTERIOR_LIT-only
+ * porch still claims the camera while lighting as outdoors. Do not collapse them.
+ */
+export function isLightingInterior(mogiFlags: number): boolean {
+  return (mogiFlags & (MOGI_FLAG.EXTERIOR | MOGI_FLAG.EXTERIOR_LIT)) === 0;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd client && yarn test --watchAll=false --testPathPattern="wmo/material/__tests__/laws"`
+Expected: PASS, 13 tests (9 from Task 1 + 4 new).
+
+- [ ] **Step 5: Expose the lighting class on parsed groups**
+
+In `client/src/wow-data-parser/wmo/index.js`, in the `MOGI` struct, add beside the existing
+`interior` computed field — leaving `interior` untouched:
+
+```js
+    // The LIGHTING class, which is not the same question as `interior` above. The reference forks
+    // it on MOGI & 0x48: EXTERIOR (0x8) or EXTERIOR_LIT (0x40) both mean "lit as outdoors". An
+    // EXTERIOR_LIT porch still claims the camera for culling, which is why both flags exist.
+    lightingInterior: function() {
+      return (this.flags & 0x48) === 0;
+    }
+```
+
+- [ ] **Step 6: Carry the SIDN colour on the material definition**
+
+In `client/src/game/pipeline/wmo/material/loader/definition.js`, add `sidnColor` to the constructor
+signature, the field list, and `clone()`:
+
+```js
+  constructor(index, flags, blendingMode, shaderID, textures, sidnColor) {
+    this.index = index;
+    this.flags = flags;
+    this.blendingMode = blendingMode;
+    this.shaderID = shaderID;
+    this.textures = textures;
+    // MOMT slot 1's colour word — the SIDN emissive. Carried separately from `textures` because
+    // that list is FILTERED to slots whose path resolved, so its index 0 is not reliably slot 0.
+    this.sidnColor = sidnColor;
+```
+
+and in `clone()`:
+
+```js
+  clone() {
+    const { index, flags, blendingMode, shaderID, textures, sidnColor } = this;
+    return new WMOMaterialDefinition(index, flags, blendingMode, shaderID, textures, sidnColor);
+  }
+```
+
+In `client/src/game/pipeline/wmo/root/index.js`, pass it at the construction site:
+
+```js
+      // data.texture1.color IS the MOMT sidnColor word, and it is present whether or not that
+      // slot's texture path resolved — unlike anything reachable through the filtered list above.
+      const def = new WMOMaterialDefinition(
+        mindex,
+        flags,
+        blendMode,
+        shader,
+        textures,
+        data.texture1.color,
+      );
+```
+
+- [ ] **Step 7: Verify nothing regressed**
+
+Run: `cd client && yarn test --watchAll=false` and `npx tsc --noEmit`.
+Expected: both clean. Nothing consumes `sidnColor` or `lightingInterior` yet — Tasks 3–5 do — so the
+app should look exactly as it did.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add client/src/game/pipeline/wmo/material/laws.ts client/src/game/pipeline/wmo/material/__tests__/laws.test.ts client/src/game/pipeline/wmo/material/loader/definition.js client/src/game/pipeline/wmo/root/index.js client/src/wow-data-parser/wmo/index.js
+git commit -m "fix(wmo): slot-exact SIDN colour and the reference interior lighting class"
+```
+
+---
+
+### Task 8: Correct the alpha-test and wrap flags, delete the dead shaders
+
+**RUN THIS AFTER TASK 5 AND BEFORE TASK 6.** Three smaller defects, cleaned up once the new law is in
+place so any regression is attributable to a known change.
+
+**Files:**
+- Modify: `client/src/game/pipeline/wmo/material/index.js`
+- Delete: `client/src/game/pipeline/wmo/material/shader.frag`
+- Delete: `client/src/game/pipeline/wmo/material/shader.vert`
+
+**Interfaces:**
+- Consumes: `decodeMaterialLighting` from Task 1 (its `clampS`/`clampT` fields, unused until now).
+- Produces: nothing later tasks import.
+
+**Defect 1 — the alpha-test threshold keys off a texture-wrap flag.** `material/index.js` picks
+`0.2999999` instead of `0.878431` when `flags & 0x80` is set. `0x80` is `F_CLAMP_T`, a texture
+wrap mode with no bearing on an alpha cutoff. `0.878431` is 224/255, the vanilla cutout reference
+(benilla pins the same constant as `VANILLA_ALPHA_KEY = 0.8784314`). The `0.3` branch is not a law;
+remove it.
+
+**Defect 2 — clamp is applied to both axes from the S flag alone.** The code sets one `this.wrapping`
+from `flags & 0x40` (`F_CLAMP_S`) and passes it as BOTH the S and T wrap mode. A material flagged
+clamp-S but not clamp-T gets its T axis wrongly clamped, and one flagged clamp-T only gets neither.
+
+**Defect 3 — dead shader files.** `material/shader.frag` and `material/shader.vert` are not imported
+by anything (`index.js` imports from `shaders/{vertex,fragment}/main.glsl`) and still carry a third,
+now-superseded lighting law.
+
+- [ ] **Step 1: Fix the alpha-test threshold**
+
+In `material/index.js`, replace the alpha-test block with:
+
+```js
+    if (this.def.blendingMode !== 0) {
+      // 224/255, the vanilla cutout reference. The previous 0.2999999 branch keyed off flags & 0x80,
+      // which is F_CLAMP_T -- a texture wrap mode with nothing to say about an alpha cutoff.
+      this.uniforms.alphaTestValue = { value: 0.878431 };
+    } else {
+      this.uniforms.alphaTestValue = { value: -1.0 };
+    }
+```
+
+- [ ] **Step 2: Fix the per-axis wrap modes**
+
+Replace the single `this.wrapping` assignment (the `flags & 0x40` branch) with per-axis values taken
+from the Task 1 decode, which already exposes both:
+
+```js
+    // MOMT carries clamp-S (0x40) and clamp-T (0x80) independently. The old code derived ONE wrap
+    // mode from the S flag and passed it for both axes, so a clamp-S-only material had its T axis
+    // wrongly clamped and a clamp-T-only material had neither.
+    this.wrapS = lighting.clampS ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+    this.wrapT = lighting.clampT ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+```
+
+`lighting` is the decode result from Task 3. Then in `loadTextures`, pass them separately:
+
+```js
+        TextureLoader.load(textureDef.path, this.wrapS, this.wrapT)
+```
+
+Keep `this.wrapping` as an alias for `this.wrapS` **only if** something outside this file reads it —
+grep first. If nothing does, remove it.
+
+- [ ] **Step 3: Delete the dead shaders**
+
+```bash
+git rm client/src/game/pipeline/wmo/material/shader.frag client/src/game/pipeline/wmo/material/shader.vert
+```
+
+Before committing, grep the whole client for `shader.frag` and `shader.vert` under the WMO material
+directory to confirm nothing imports them. `material/index.js` has them as commented-out imports at
+the top — remove those comment lines too.
+
+- [ ] **Step 4: Verify**
+
+Run: `cd client && yarn test --watchAll=false` and `npx tsc --noEmit`. Then run the client and check
+alpha-keyed WMO geometry — railings, lattices, window frames, foliage on buildings. The cutout
+silhouette should be clean, with no newly-chunky or newly-disappeared edges.
+
+**If any alpha-keyed geometry looks visibly worse than before, report it** — that would mean some
+material genuinely relied on the 0.3 threshold, and the right answer is a per-blend-mode threshold
+rather than restoring a wrap flag as the selector.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add client/src/game/pipeline/wmo/material/index.js
+git commit -m "fix(wmo): correct the alpha-test threshold and per-axis wrap, drop dead shaders"
+```
+
+---
+
+## Execution order
+
+Tasks 7 and 8 were added after the plan was first written, when the project owner ruled that the
+defects originally listed as "open questions" get fixed now rather than deferred to a later plan.
+They are numbered last but **do not run last**. Dispatch in this order:
+
+**1 → 7 → 2 → 3 → 4 → 5 → 8 → 6**
+
+Task 7 must precede Task 3, which reads the SIDN colour and the interior lighting class it
+establishes. Task 8 is cleanup that wants the new law already in place so a regression is
+attributable. Task 6 (readouts) stays last so it reports the finished state.
+
 ## Two things this plan deliberately does NOT do
 
 **No point lights on WMO surfaces.** The reference commits **zero** point lights to any WMO surface
@@ -982,21 +1260,15 @@ Delete them in plan 4, once this law is confirmed in-game.
 
 ## Open questions to raise, not guess
 
-1. **The `interior` derivation disagrees with the spec.** `blizzardry/src/lib/wmo/group.js` computes
-   `interior = (flags & 0x2000) !== 0 && (flags & 0x8) === 0`, while the spec calls for
-   `(groupFlags & 0x48) === 0` — the reference's rule, using EXTERIOR (`0x8`) and EXTERIOR_LIT
-   (`0x40`). They agree on most groups and disagree on groups flagged EXTERIOR_LIT without INTERIOR.
-   This plan keeps the existing derivation, because it also drives portal culling and changing it
-   reaches well beyond lighting. Raise it if interiors misclassify.
-2. **`alphaTestValue` keys off `flags & 0x80`**, which is `F_CLAMP_T` — a texture wrap flag with no
-   obvious bearing on an alpha threshold. Not touched here. Flag it if alpha-keyed WMO geometry looks
-   wrong.
-3. **`def.textures` is a filtered list, not slot-indexed.** `WMORoot` appends only those `MOMT`
-   texture slots whose path resolved, so index 0 is not reliably slot 0 — on a material whose first
-   slot has no texture, `textures[0].textureData.color` is `color_2`, not `sidnColor`. Task 3 guards
-   the empty case and Task 1 forces black on non-SIDN materials, which contains the damage, but the
-   real fix is for the loader to preserve slot indices. Out of scope here. Raise it if a SIDN
-   material glows the wrong colour.
+The three defects previously listed here — the `interior` derivation, the `alphaTestValue` flag, and
+the filtered `def.textures` list — are no longer deferred. The project owner ruled they get fixed in
+this plan: they are Tasks 7 and 8.
+
+One genuine unknown remains:
+
+1. **Whether any alpha-keyed WMO material relied on the old `0.3` threshold.** Task 8 removes it as
+   unfounded (it keyed off a texture-wrap flag). If cutout geometry visibly worsens, the answer is a
+   per-blend-mode threshold, not restoring a wrap flag as the selector. Report rather than revert.
 
 ## Handoff to plan 3
 
