@@ -44,9 +44,17 @@ export const WMO_FOG_RAMP_PER_SEC = 0.25;
  */
 export class WmoFogRamp {
   private t = 0;
-  private staged: FogTriple | null = null;
+  private staged: MfogRecord | null = null;
 
-  blend(target: FogTriple | null, scene: FogTriple, farclip: number, dt: number): FogTriple {
+  /**
+   * The raw MFOG record is latched, not a pre-staged triple, and `stageMfog` is re-run against
+   * `farclip` on EVERY call -- including during fade-out, while `target` is null and we're only
+   * consulting the latch. That is deliberate, not redundant: if it staged once on entry and cached
+   * the result, a farclip change (e.g. the view-distance slider) while still inside the room would
+   * silently stop re-clamping the interior fog. Re-staging every call means a farclip change is
+   * picked up immediately, with no discipline required of the caller.
+   */
+  blend(target: MfogRecord | null, scene: FogTriple, farclip: number, dt: number): FogTriple {
     if (target) {
       this.staged = target;
     }
@@ -64,7 +72,7 @@ export class WmoFogRamp {
     }
 
     const k = this.t;
-    const staged = this.staged;
+    const staged = stageMfog(this.staged, farclip);
     return {
       color: [
         scene.color[0] + (staged.color[0] - scene.color[0]) * k,

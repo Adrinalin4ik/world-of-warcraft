@@ -1,10 +1,10 @@
 /**
  * @jest-environment node
  */
-import { FogTriple, stageMfog, WmoFogRamp } from '../fog';
+import { FogTriple, MfogRecord, stageMfog, WmoFogRamp } from '../fog';
 
 const scene: FogTriple = { color: [0.2, 0.2, 0.2], start: -139, end: 278 };
-const room: FogTriple = { color: [1.0, 0.5, 0.0], start: 194.4 * 0.25, end: 194.4 };
+const room: MfogRecord = { color: [1.0, 0.5, 0.0], end: 194.4, startScalar: 0.25 };
 
 describe('stageMfog', () => {
   it('clamps the record end to the farclip and scales start off the CLAMPED end', () => {
@@ -49,5 +49,14 @@ describe('WmoFogRamp', () => {
   it('is the scene triple while the camera has never been inside', () => {
     const ramp = new WmoFogRamp();
     expect(ramp.blend(null, scene, 1000, 0.016)).toEqual(scene);
+  });
+
+  it('re-stages the latched record against farclip on every call, not just on entry', () => {
+    const ramp = new WmoFogRamp();
+    // Fade fully in with a farclip that does NOT clamp the room's 194.4 end.
+    ramp.blend(room, scene, 1000, 4);
+    // A farclip change while still latched (e.g. the view-distance slider) -- 100 DOES clamp.
+    const clamped = ramp.blend(room, scene, 100, 0);
+    expect(clamped.end).toBeCloseTo(100, 4);
   });
 });
