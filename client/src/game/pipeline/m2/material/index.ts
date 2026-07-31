@@ -317,6 +317,32 @@ class M2Material extends THREE.ShaderMaterial {
       default:
         break;
     }
+
+    // Emulate the reference's OPAQUE backbuffer: keep every mode's RGB factors exactly as authored
+    // above, but never let a draw touch the framebuffer's ALPHA channel, so it stays at the cleared
+    // 1.0 across the whole frame.
+    //
+    // Why this is needed at all: a browser canvas is composited over the page, and three.js requests
+    // `alpha: true` for the context unconditionally (its own `alpha` parameter only chooses the clear
+    // alpha), with `premultipliedAlpha: true`. So the compositor reads our NON-premultiplied output as
+    // premultiplied and adds `(1 - a)` of whatever is behind the canvas -- nothing here, so white.
+    // Any fragment that leaves sub-1 alpha in the buffer gets a bright halo.
+    //
+    // It stayed hidden while `assignShaders` forced `Combiners_Opaque` on every M2, because that
+    // writes `result.a = vertexColor.a` (effectively 1). The authored combiners write real texture
+    // alpha -- `Combiners_Mod` is `sampled0.a * vertexColor.a * animatedTransparency` -- and mode 1
+    // (alpha key) had `blendSrcAlpha` One / `blendDstAlpha` Zero, which stores it verbatim. Alpha
+    // testing keeps every edge texel in [0.5, 1], so all of Elwynn's foliage gained a white fringe.
+    //
+    // Zero/One fixes the whole class rather than foliage alone: the genuinely blended modes (2, 4, 6 --
+    // waterfalls, spell effects) mirrored their RGB factors into alpha and left sub-1 values behind
+    // too. Mode 0 is `NoBlending`, which ignores these factors and writes the shader's alpha directly;
+    // it is left as-is because `Combiners_Opaque` is the only combiner that pairs with it and its
+    // alpha is already 1.
+    if (blendingMode >= 1) {
+      this.blendSrcAlpha = THREE.ZeroFactor;
+      this.blendDstAlpha = THREE.OneFactor;
+    }
   }
 
   assignShaders(shaderNames) {

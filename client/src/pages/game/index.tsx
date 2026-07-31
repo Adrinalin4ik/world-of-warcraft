@@ -81,7 +81,25 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   
   componentDidMount() {
     const renderer = this.renderer = new THREE.WebGLRenderer({
-      alpha: true,
+      // OPAQUE drawing buffer. With `alpha: true` the canvas is composited over the page, and because
+      // WebGL also defaults to `premultipliedAlpha: true` the compositor treats our non-premultiplied
+      // output as premultiplied and adds `(1 - a)` of whatever is behind the canvas -- which is
+      // nothing here, so the browser's white base. Every partial-alpha fragment therefore gained a
+      // bright halo.
+      //
+      // That went unseen for as long as `assignShaders` forced `Combiners_Opaque` onto every M2,
+      // because it writes `result.a = vertexColor.a` (effectively 1). The authored combiners write
+      // real texture alpha -- `Combiners_Mod` is `sampled0.a * vertexColor.a * animatedTransparency`
+      // -- and under blend mode 1 (alpha key: `blendSrcAlpha` One, `blendDstAlpha` Zero) that lands
+      // in the framebuffer verbatim. Alpha-tested foliage keeps every edge texel in [0.5, 1], so all
+      // of Elwynn's trees and bushes picked up a white fringe.
+      //
+      // The reference renders to an opaque backbuffer; its framebuffer alpha means nothing. Turning
+      // compositing off is that, and it fixes the whole class at once rather than foliage alone --
+      // genuinely blended modes (2, 4, 6: waterfalls, spell effects) leave sub-1 alpha behind too.
+      // Nothing sits behind the main canvas to show through: it is the bottom layer, and the scene
+      // draws a full sky dome.
+      alpha: false,
       antialias: false,
       powerPreference: 'high-performance',
       canvas: this.canvas.current as HTMLCanvasElement,
