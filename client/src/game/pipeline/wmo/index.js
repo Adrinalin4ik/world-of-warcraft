@@ -2,8 +2,10 @@ import * as THREE from 'three';
 
 import ContentQueue from '../../utils/content-queue';
 import M2Blueprint from '../m2/blueprint';
+import { attachPerObjectLighting } from '../m2/material/per-object-light';
 import WMOGroupLoader from './group/loader';
 import WMORootLoader from './root/loader';
+import { cap96, floor112, foldInteriorProbe } from '../../world/light/laws';
 
 import gameSettings from '../../settings';
 
@@ -38,6 +40,15 @@ class WMO {
       doodad: new Map(),
       group: new Map()
     };
+
+    // Which group's lighting a doodad takes. Keyed per WMO INSTANCE, never on the doodadEntry --
+    // WMORootLoader caches WMORoot and its doodadEntries by FILENAME, so those objects are shared by
+    // every placement of this building in the world. Writing placement-dependent state onto them
+    // would leak one placement's light onto all the others.
+    //
+    // First referencing group wins: the reference creates a doodad once, on the first visible-group
+    // walk that names it, and that create freezes its lighting lane.
+    this.doodadLightingGroups = new Map();
 
     this.views = {
       root: null,
@@ -181,6 +192,12 @@ class WMO {
       // Assign the index as an id property on the entry.
       doodadEntry.id = doodadIndex;
 
+      // Record the owning group on THIS instance's map (never on doodadEntry -- see the field's
+      // comment in the constructor). First writer wins.
+      if (!this.doodadLightingGroups.has(doodadEntry.id)) {
+        this.doodadLightingGroups.set(doodadEntry.id, group);
+      }
+
       const refCount = this.addDoodadRef(doodadEntry, group);
 
       // Only enqueue load on the first reference, since it'll already have been enqueued on
@@ -234,6 +251,9 @@ class WMO {
     doodad.entryID = doodadEntry.id;
 
     this.placeDoodad(doodadEntry, doodad);
+
+    // World position is only valid once placeDoodad has updated this instance's world matrix.
+    this.foldDoodadLighting(doodadEntry, doodad);
 
     // if (doodad.animated) {
     //   this.animatedDoodads.set(doodadEntry.id, doodad);
@@ -335,6 +355,63 @@ class WMO {
     // this.views.root.add(doodad.boundingMesh);
     // doodad.boundingMesh.updateMatrix();
     // doodad.boundingMesh.updateMatrixWorld();
+  }
+
+  /**
+   * Fold this doodad's interior light probe once at create, for a doodad whose owning group is
+   * `lightingInterior` (the reference's MOGI & 0x48 lighting class -- deliberately not `interior`,
+   * which only answers portal culling). Exterior-owned doodads are untouched here and keep
+   * whatever exterior lighting path already applies to them.
+   *
+   * `ambient = cap96(MODD.colour)` and `diffuse = floor112(MODD.colour)`, the latter committed on
+   * the FIXED engine axis rather than the day/night sun -- which is why an interior prop's light is
+   * day/night independent and can be folded once here rather than every frame.
+   *
+   * MOLR point lights are not folded in yet (tracked as a follow-up); a group with no MOLR means no
+   * point light at all, so passing an empty list here is correct today, not a placeholder.
+   */
+  foldDoodadLighting(doodadEntry, doodad) {
+    const group = this.doodadLightingGroups.get(doodadEntry.id);
+
+    if (!group || !group.lightingInterior) {
+      return;
+    }
+
+    // MODD.color is a uint32. CImVector is BGRA in memory, so as a little-endian uint32 red lands
+    // at >> 16 -- the same unpacking WMORootDefinition.createLights uses for MOLT colour.
+    const color = doodadEntry.color;
+    const bytes = [
+      (color >> 16) & 0xff,
+      (color >> 8) & 0xff,
+      color & 0xff
+    ];
+
+    const ambient = cap96(bytes);
+    const diffuse = floor112(bytes);
+
+    const worldPosition = doodad.getWorldPosition(new THREE.Vector3());
+    const refPoint = [worldPosition.x, worldPosition.y, worldPosition.z];
+
+    const probe = foldInteriorProbe(ambient, diffuse, refPoint, []);
+
+    doodad.perObjectLighting = {
+      interior: true,
+      sunIntensity: 1.0,
+      probe,
+      pointLights: []
+    };
+
+    this.attachDoodadLighting(doodad);
+  }
+
+  // Install the per-draw lighting push on each of the doodad's batch meshes -- one mesh per batch,
+  // per Submesh.applyBatches, all sharing the model's material.
+  attachDoodadLighting(doodad) {
+    doodad.submeshes.forEach((submesh) => {
+      submesh.children.forEach((batchMesh) => {
+        attachPerObjectLighting(batchMesh, () => doodad.perObjectLighting);
+      });
+    });
   }
 
   addDoodadRef(doodadEntry, group) {
