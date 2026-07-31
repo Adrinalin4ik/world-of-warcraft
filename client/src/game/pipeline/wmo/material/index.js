@@ -1,9 +1,28 @@
 import * as THREE from 'three';
 
 import TextureLoader from '../../texture-loader';
-import fragmentShader from './shaders/fragment/main.glsl';
-import vertexShader from './shaders/vertex/main.glsl';
+
+// The fragment/vertex shaders used to pull their pieces together with `#pragma glslify:
+// import(...)`. That pragma is handled by `glslify-import`, which is a plain source TRANSFORM:
+// it tokenizes main.glsl, reads header/functions/combiners off disk with `fs`, and splices their
+// text in before webpack ever sees it. `glslify-loader` only calls `addDependency` for files that
+// show up in glslify's OWN dependency tree, and spliced-in files never do -- so webpack's watcher
+// had no idea header.glsl / functions.glsl / combiners.glsl existed. Editing them never invalidated
+// main.glsl, so a running dev server kept serving a stale compiled shader indefinitely. Importing
+// each chunk here instead makes every chunk a real webpack module with a real dependency edge, so
+// edits are picked up like any other source file. Do NOT put the pragmas back.
+import fragmentHeader from './shaders/fragment/header.glsl';
+import fragmentFunctions from './shaders/fragment/functions.glsl';
+import fragmentCombiners from './shaders/fragment/combiners.glsl';
+import fragmentMain from './shaders/fragment/main.glsl';
+import vertexHeader from './shaders/vertex/header.glsl';
+import vertexFunctions from './shaders/vertex/functions.glsl';
+import vertexMain from './shaders/vertex/main.glsl';
 import { batchClassOf, decodeMaterialLighting } from './laws';
+
+// Order matters: this is plain text concatenation, so declarations must precede use.
+const fragmentShader = [fragmentHeader, fragmentFunctions, fragmentCombiners, fragmentMain].join('\n');
+const vertexShader = [vertexHeader, vertexFunctions, vertexMain].join('\n');
 
 
 class WMOMaterial extends THREE.ShaderMaterial {

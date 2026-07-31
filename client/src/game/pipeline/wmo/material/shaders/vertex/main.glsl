@@ -1,6 +1,3 @@
-#pragma glslify: import('./header.glsl')
-#pragma glslify: import('./functions.glsl')
-
 vec4 createFog(in float cameraDistance) {
   float f1 = (cameraDistance * fogParams.x) + fogParams.y;
   float f2 = max(f1, 0.0);

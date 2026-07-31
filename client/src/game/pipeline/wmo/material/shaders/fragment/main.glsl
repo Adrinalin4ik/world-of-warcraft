@@ -1,7 +1,3 @@
-#pragma glslify: import('./header.glsl')
-#pragma glslify: import('./functions.glsl')
-#pragma glslify: import('./combiners.glsl')
-
 void main() {
   vec4 result;
 
