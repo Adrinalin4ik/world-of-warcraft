@@ -1,8 +1,7 @@
 import * as THREE from 'three';
 import MapLight from '../../../world/light/MapLight';
 import DBC from '../../dbc';
-import TextureLoader from '../../texture-loader';
-import { buildSkyboxMeshes, loadSkyboxBatches } from './model';
+import { buildSkyboxMeshes, disposeSkyboxMesh, loadSkyboxBatches, updateSkyboxAnimatedAlpha } from './model';
 
 /**
  * The zone skybox (celestial-sky plan, Task 6 Step 1): `LightParams.lightSkyboxID` -> `LightSkybox.dbc`
@@ -46,6 +45,11 @@ class Skybox extends THREE.Group {
   // or it decodes to zero usable batches. Cleared on every id change, so a later zone gets a fresh
   // attempt. See `isActive` for why this exists at all.
   private failed = false;
+
+  // Wall-clock ms since this instance's current skybox model started loading (`Date.now()`, set right
+  // before `buildSkyboxMeshes` is called) -- the free-running clock `updateSkyboxAnimatedAlpha`'s
+  // per-batch global-sequence tracks loop against (see `model.ts`'s own module doc, point 2).
+  private loadedAtMs = 0;
 
   constructor() {
     super();
@@ -91,21 +95,16 @@ class Skybox extends THREE.Group {
       this.currentID = id;
       this.resolveAndLoad(id);
     }
+
+    if (this.meshes.length > 0) {
+      updateSkyboxAnimatedAlpha(this.meshes, Date.now() - this.loadedAtMs);
+    }
   }
 
   private clearMeshes(): void {
     for (const mesh of this.meshes) {
       this.remove(mesh);
-      mesh.geometry.dispose();
-      const material = mesh.material as THREE.MeshBasicMaterial;
-      const map = material.map;
-      material.dispose();
-      // The shared PLACEHOLDER texture (model.ts's initial map) is never refcounted by TextureLoader
-      // and must not be handed back to it -- only a texture that actually resolved through
-      // `TextureLoader.load` owns a refcount to release.
-      if (map && map !== TextureLoader.PLACEHOLDER) {
-        TextureLoader.unload(map);
-      }
+      disposeSkyboxMesh(mesh);
     }
     this.meshes = [];
   }
@@ -164,6 +163,7 @@ class Skybox extends THREE.Group {
       return;
     }
 
+    this.loadedAtMs = Date.now();
     const meshes = buildSkyboxMeshes(batches, ZONE_SKYBOX_RENDER_ORDER);
     for (const mesh of meshes) {
       this.add(mesh);
