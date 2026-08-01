@@ -220,10 +220,16 @@ class DoodadManager {
     const quat = doodad.quaternion;
     quat.set(quat.x, quat.y, quat.z, -quat.w);
 
+    const scaleFloat = scale / 1024;
+
     if (scale !== 1024) {
-      const scaleFloat = scale / 1024;
       doodad.scale.set(scaleFloat, scaleFloat, scaleFloat);
     }
+
+    // World bounding-sphere radius = authored M2 radius x placement scale, matching the reference's
+    // `rec+0x68` (`FUN_006952a0`: radius x scale). Read by the distance-fade cull; see
+    // pipeline/m2/fade/laws.ts.
+    doodad.worldFadeRadius = (doodad.vertexRadius || 0) * scaleFloat;
 
     // Add doodad to world map.
     doodad.updateMatrix();

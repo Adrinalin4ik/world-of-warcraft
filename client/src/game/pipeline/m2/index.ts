@@ -25,6 +25,7 @@ class M2 extends THREE.Group {
   boundingVertices: [];
   boundingNormals: [];
   boundingTriangles: [];
+  vertexRadius: number;
   useSkinning: boolean;
   mesh: THREE.Mesh;
   submeshes: Submesh[];
@@ -82,6 +83,13 @@ class M2 extends THREE.Group {
     this.animated = data.animated;
 
     this.billboards = [];
+    // The AUTHORED render bounding-sphere radius (M2 header, immediately after the vertex box).
+    // This is benilla's `bounding_sphere_radius`, the one the doodad fade law buckets on -- NOT
+    // `data.boundingRadius`, which is the COLLISION sphere. The two names are swapped relative to
+    // benilla's parser (benilla-m2/src/lib.rs:162 reads the field our parser calls `vertexRadius`);
+    // see pipeline/m2/fade/laws.ts.
+    this.vertexRadius = data.vertexRadius ?? 0;
+
     this.boundingVertices = data.boundingVertices;
     this.boundingNormals = data.boundingNormals;
     this.boundingTriangles = data.boundingTriangles;
