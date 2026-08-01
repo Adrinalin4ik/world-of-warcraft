@@ -78,3 +78,33 @@ describe('SkyManager backdrop precedence', () => {
     expect(internals.zoneSkybox.visible).toBe(true);
   });
 });
+
+describe('SkyManager skybox suppression', () => {
+  const camera = () => new THREE.PerspectiveCamera();
+
+  it('lets a WMO skybox suppress the whole celestial pass', () => {
+    // A MOSB cube is sealed and gap-free -- a real total replacement, which is what the reference's
+    // King's Square capture shows (three draws, nothing else).
+    const { sky, internals } = manager();
+
+    setActive(internals.wmoSkybox, true);
+    sky.update(camera(), 0, 1 / 60);
+
+    expect(internals.celestialGroup.visible).toBe(false);
+  });
+
+  it('does NOT let a zone skybox suppress anything', () => {
+    // The regression this guards, and it produced every symptom reported: a fully white sky in Eye
+    // of the Storm, white behind Nagrand's wisps, and a lone star-field triangle floating in white
+    // below the terrain. A LightSkybox model is a loose set of non-contiguous cloud/ray/stream quads
+    // with real gaps (checked on NagrandSkyBox.m2's 87 batches) -- layers meant to draw OVER a sky,
+    // not to replace one. Suppressing the backdrop for them leaves the gaps as bare canvas.
+    const { sky, internals } = manager();
+
+    setActive(internals.zoneSkybox, true);
+    setActive(internals.wmoSkybox, false);
+    sky.update(camera(), 0, 1 / 60);
+
+    expect(internals.celestialGroup.visible).toBe(true);
+  });
+});

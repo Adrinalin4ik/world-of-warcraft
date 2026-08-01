@@ -283,14 +283,28 @@ class SkyManager {
 
   /**
    * `CSky::Render` carries one shared boolean and skips ALL SIX element draws together when a skybox
-   * is active -- stars, sun disc, both moons, gradient band and cloud dome (plan Task 6 Step 3; a live
-   * capture in Stratholme's King's Square shows exactly three draws, the skybox cube's own texture
-   * pairs, and nothing else). Only the glare survives, because it renders outside this pass -- see
-   * `celestialGroup`'s own doc comment for why `sunGlare`/`moonGlare` are never touched here.
+   * is active -- stars, sun disc, both moons, gradient band and cloud dome. Only the glare survives,
+   * because it renders outside this pass -- see `celestialGroup`'s own doc for why `sunGlare`/
+   * `moonGlare` are never touched here.
+   *
+   * **Only the WMO skybox triggers it.** The evidence behind that rule is a capture of the reference
+   * standing in Stratholme's King's Square, and what stands in for the sky there is a `MOSB` cube:
+   * sealed, gap-free, three draws covering the entire view. It really is a total replacement.
+   *
+   * A ZONE skybox (`LightSkybox.dbc`) is a different kind of model and generalising the rule onto it
+   * was wrong. Checked against `NagrandSkyBox.m2`: its 87 batches are a loose set of small,
+   * non-contiguous cloud-layer, ray and stream quads with real gaps between them -- wisps meant to be
+   * layered OVER a sky, not to be one. Suppressing the backdrop for those left the gaps as bare
+   * canvas, which is what produced every symptom reported: a fully white sky in Eye of the Storm
+   * (map 566), white behind Nagrand's wisps, and a lone star-field triangle floating in white when
+   * the camera went below the terrain.
+   *
+   * So the zone skybox suppresses nothing. Its layers draw over the gradient dome, the clouds and the
+   * celestial bodies -- which is what their authored gaps expect, and why you can still see the sun
+   * through Nagrand's sky.
    */
   private updateSkyboxSuppression(): void {
-    const suppressed = this.zoneSkybox.isActive || this.wmoSkybox.isActive;
-    this.celestialGroup.visible = !suppressed;
+    this.celestialGroup.visible = !this.wmoSkybox.isActive;
   }
 
   /**
