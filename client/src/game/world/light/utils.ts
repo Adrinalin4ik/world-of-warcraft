@@ -17,6 +17,23 @@ export const getDayNightTime = () => {
 };
 
 /**
+ * Continuous whole+fractional game DAYS since the epoch -- this client's stand-in for the reference's
+ * server-synced `dayCounter` (`net.rs::day_continuous`, `(dayCounter + todPhase) mod 1.7`, feeding
+ * moon02's phase precession -- see `laws.moon02State`). Unlike `getDayNightTime` this is deliberately
+ * UNWRAPPED (never resets at real midnight): moon02's clock needs to keep advancing across day
+ * boundaries, not snap back to 0.
+ *
+ * This client has no server day serial to read, so real wall-clock time -- scaled by the exact same
+ * 30x compression `getDayNightTime` already uses (`ms/1000/30` half-minutes; a full day is 2880 of
+ * those) -- stands in for it. moon02 is vertex-black regardless of the phase it lands on (see
+ * `moon02State`'s own doc), so only the precession's SHAPE needs to be faithful here, not which real
+ * moment maps to which phase.
+ */
+export const getDayContinuous = () => {
+  return Date.now() / 1000.0 / 30.0 / 2880.0;
+};
+
+/**
  * Given two numbers, linearly interpolate between them according to the given factor.
  *
  * @param value1 - First number

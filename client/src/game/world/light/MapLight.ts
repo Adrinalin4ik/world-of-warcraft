@@ -8,6 +8,7 @@ import {
   celestialSunDirection,
   cloudGlowIsSun,
   cloudGlowTrack,
+  moon02State,
   moonDirection,
   quantizeGlow,
   sidnNightFraction,
@@ -17,7 +18,7 @@ import {
 import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
 import { AreaLight, AreaLightParams, WeightedAreaLight } from './types';
-import { getDayNightTime, interpolateNumericTable, selectLightsForPosition } from './utils';
+import { getDayContinuous, getDayNightTime, interpolateNumericTable, selectLightsForPosition } from './utils';
 import { WeatherState } from './weather';
 
 // Default fog range, matching `SceneLightParams`'s own default -- only visible before the first
@@ -176,6 +177,22 @@ class MapLight extends SceneLight {
   // why reusing `cloudGlowDir` here would be wrong on both counts. Defaults to straight up so a
   // pre-resolve frame parks the disc at the zenith rather than at the camera.
   #celestialSunDir = new THREE.Vector3(0, 0, 1);
+
+  // The visible WHITE MOON direction (celestial-sky plan, Task 4) -- `laws.moonDirection`, the SAME
+  // law `#updateCloudGlow` already reuses for the night-time cloud glow body, but published here as
+  // its OWN dedicated to-body vector rather than read off `cloudGlowDir`: that vector swaps to the
+  // SUN outside `cloudGlowIsSun`'s ~04:50-22:10 window (see `#updateCloudGlow`'s own doc), which
+  // would hand the moon disc the sun's direction for most of the day. Defaults to straight up so a
+  // pre-resolve frame parks the disc at the zenith rather than at the camera.
+  #moonDir = new THREE.Vector3(0, 0, 1);
+
+  // moon02 -- the engine's third disc (celestial-sky plan, Task 4) -- direction + size scale
+  // (`laws.moon02State`). Drawn every frame per the reference's own draw order, but vertex-BLACK
+  // (its colour field has no writer in the binary; see `moon02State`'s own doc) -- ported for
+  // fidelity to the draw order, not to be made visible. Defaults to straight up / scale 1 so a
+  // pre-resolve frame is inert rather than reading as an error.
+  #moon02Dir = new THREE.Vector3(0, 0, 1);
+  #moon02Scale = 1;
 
   // A blended band that no light contributed to stays at exactly zero.
   static #isUnset(color: THREE.Color) {
@@ -381,6 +398,31 @@ class MapLight extends SceneLight {
    */
   get celestialSunDir() {
     return this.#celestialSunDir;
+  }
+
+  /**
+   * The visible WHITE MOON's camera->body direction (`laws.moonDirection`), in this client's
+   * unpermuted WoW frame (Z up) -- see `#moonDir`'s field doc for why the moon disc (celestial-sky
+   * plan, Task 4) reads this rather than `cloudGlowDir`: `cloudGlowDir` swaps to the SUN for most of
+   * the day (`cloudGlowIsSun`'s window), which would place the moon disc at the sun's own bearing.
+   */
+  get moonDir() {
+    return this.#moonDir;
+  }
+
+  /**
+   * moon02's camera->body direction (`laws.moon02State`), on its own phase-precessed bearing --
+   * NEVER the white moon's. See `#moon02Dir`'s field doc: this disc is vertex-black in the
+   * reference and stays that way here (the plan is explicit -- do not "fix" it into visibility).
+   */
+  get moon02Dir() {
+    return this.#moon02Dir;
+  }
+
+  /** moon02's size-curve multiplier (`laws.moon02State`, before its own x1.0 base). See
+   * `#moon02Dir`'s field doc. */
+  get moon02Scale() {
+    return this.#moon02Scale;
   }
 
   /** The cloud glow's day envelope, `laws.cloudGlowTrack`. Full across the day and across deep
@@ -833,6 +875,18 @@ class MapLight extends SceneLight {
     const minute = this.#timeProgression * 1440;
     const [csx, csy, csz] = celestialSunDirection(minute);
     this.#celestialSunDir.set(csx, csy, csz);
+
+    // The visible WHITE MOON -- its own dedicated direction (see `#moonDir`'s field doc for why this
+    // is NOT `cloudGlowDir`). `laws.Vec3` is a tuple, not an `{x, y, z}` object.
+    const [mx, my, mz] = moonDirection(minute);
+    this.#moonDir.set(mx, my, mz);
+
+    // moon02 -- its own phase-precessed clock, independent of `#timeProgression`/`timeOverride` (this
+    // client has no server day-serial to read; see `getDayContinuous`'s own doc). Vertex-black either
+    // way, so only the direction/size-scale MATH needs to stay faithful, not the wall-clock mapping.
+    const { dir: moon02Dir, sizeScale: moon02Scale } = moon02State(getDayContinuous());
+    this.#moon02Dir.set(moon02Dir[0], moon02Dir[1], moon02Dir[2]);
+    this.#moon02Scale = moon02Scale;
   }
 
   /**
