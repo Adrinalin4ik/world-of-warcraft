@@ -42,19 +42,35 @@ class Skybox extends THREE.Group {
 
   private disposedFlag = false;
 
+  // Set when the CURRENT id definitively cannot be drawn: the DBC row names nothing, the model 404s,
+  // or it decodes to zero usable batches. Cleared on every id change, so a later zone gets a fresh
+  // attempt. See `isActive` for why this exists at all.
+  private failed = false;
+
   constructor() {
     super();
     this.name = 'Skybox';
     this.matrixAutoUpdate = false;
   }
 
-  /** Whether this zone currently names a skybox at all -- Task 6 Step 3's suppression gate reads this
-   * (combined with the WMO skybox's own `isActive`) to decide whether to hide the rest of the celestial
-   * pass. Gated on the PUBLISHED id, not on whether the model has finished loading, so a skybox zone
-   * with a slow-loading model still suppresses the gradient dome/stars/discs the instant the zone data
-   * says so -- exactly like the reference, which has no async load to straddle in the first place. */
+  /**
+   * Whether this zone has a skybox that can actually be drawn -- Task 6 Step 3's suppression gate
+   * reads this (with the WMO skybox's own `isActive`) to decide whether to hide the rest of the
+   * celestial pass.
+   *
+   * Deliberately NOT gated on the published id alone. It was, on the reasoning that a slow-loading
+   * model should still suppress the dome the instant the zone data says so -- true, and the reason
+   * `failed` is separate from "still loading". But the reference has no async load precisely because
+   * its model cannot 404, and ours can: Nagrand's `LightSkybox` row names an `.mdx` path, so every
+   * load failed, and a skybox drawing NOTHING went on suppressing the gradient dome, the clouds, the
+   * stars and both discs. The whole sky rendered as the bare clear colour.
+   *
+   * So: suppress while loading (no flash of gradient dome on a zone change), and stop suppressing the
+   * moment we know this id cannot draw. A zone whose skybox is missing falls back to the sky it would
+   * have had, which is strictly better than a blank one.
+   */
   public get isActive(): boolean {
-    return !!this.currentID;
+    return !!this.currentID && !this.failed;
   }
 
   public setMapLight(mapLight: MapLight | null): void {
@@ -98,6 +114,8 @@ class Skybox extends THREE.Group {
     const myGeneration = ++this.generation;
 
     this.clearMeshes();
+    // A fresh attempt for a new id: suppress again while it loads (see `isActive`).
+    this.failed = false;
 
     if (!id) {
       return;
@@ -113,8 +131,15 @@ class Skybox extends THREE.Group {
 
     if (!path) {
       console.warn(`Skybox: LightSkybox.dbc row ${id} names no model -- keeping the gradient dome`);
+      this.failed = true;
       return;
     }
+
+    // LightSkybox.dbc stores the authoring-time extension, not the shipped one: every row names a
+    // `.mdx` (Warcraft III's model extension, which the WoW toolchain kept in the DBCs), while the
+    // file in the data chain is `.m2`. Nagrand's row 12 is `Environments\Stars\NagrandSkyBox.mdx`,
+    // and asking the asset host for that returns 404 for every skybox zone in the game.
+    path = path.replace(/\.(mdx|mdl)$/i, '.m2');
 
     if (this.disposedFlag || myGeneration !== this.generation) {
       return;
@@ -125,6 +150,7 @@ class Skybox extends THREE.Group {
       batches = await loadSkyboxBatches(path);
     } catch (error) {
       console.error(`Skybox: failed to load zone skybox model '${path}':`, error);
+      this.failed = true;
       return;
     }
 
@@ -134,6 +160,7 @@ class Skybox extends THREE.Group {
 
     if (batches.length === 0) {
       console.warn(`Skybox: zone skybox model '${path}' decoded to zero usable batches -- keeping the gradient dome`);
+      this.failed = true;
       return;
     }
 
