@@ -30,6 +30,21 @@ export default class World extends EventEmitter {
     window['world'] = this;
     this.scene = new THREE.Scene();
     this.scene.matrixAutoUpdate = false;
+
+    // Stop `WebGLRenderer.render` calling `scene.updateMatrixWorld()` every frame
+    // (three.module.js:17629). That call recurses the ENTIRE graph -- 31k nodes here -- to
+    // recompute world matrices for terrain, static doodads and WMO geometry placed once and never
+    // moved again. Measured at 4.4 ms; switching it off took the render section from 8.1 ms to
+    // 1.9 ms with draw calls, triangles and GPU time all unchanged.
+    //
+    // Note `matrixAutoUpdate = false` above does NOT do this: it only skips composing an object's
+    // LOCAL matrix. And setting `matrixWorldAutoUpdate = false` on individual static objects does
+    // nothing either -- `Object3D.updateMatrixWorld` (three.core.js:12900) recurses into children
+    // unconditionally, so the flag only gates that one object's multiply. The root is the only
+    // place the walk can actually be stopped.
+    //
+    // `updateDynamicMatrices()` below now owns keeping everything that moves up to date.
+    this.scene.matrixWorldAutoUpdate = false;
     this.debugScene = new THREE.Scene();
     this.debugScene.matrixAutoUpdate = false;
 
@@ -249,6 +264,61 @@ export default class World extends EventEmitter {
 
     // Send delta updates to instanced M2 animation managers.
     M2Blueprint.animate(delta);
+
+    // LAST: everything above may have moved something. See the constructor for why the renderer no
+    // longer does this itself.
+    this.updateDynamicMatrices();
+  }
+
+  /**
+   * Refresh world matrices for everything that can move, now that the renderer no longer walks the
+   * whole scene graph each frame.
+   *
+   * Deliberately OPT-OUT rather than opt-in: every scene-root child is updated unless it is flagged
+   * `isStaticSubtree`. Only `WorldMap` sets that flag, and it holds the streamed content -- terrain
+   * tiles, static doodads, WMO geometry -- which is positioned once at placement and never again.
+   * A new scene-root object (a spell effect, a nameplate) therefore updates correctly by default;
+   * the failure mode of forgetting one is a little wasted time, not an object frozen in place.
+   *
+   * Inside the map, the movers are enumerated explicitly because the rest of that subtree is the
+   * static bulk this exists to skip.
+   */
+  updateDynamicMatrices() {
+    const children = this.scene.children;
+    for (let i = 0, len = children.length; i < len; ++i) {
+      const child = children[i] as any;
+      if (child.isStaticSubtree === true) {
+        continue;
+      }
+      child.updateMatrixWorld(true);
+    }
+
+    const map = this.map as any;
+    if (!map) {
+      return;
+    }
+
+    // Particles are re-positioned every frame by ParticleManager.
+    if (map.particleGroup) {
+      map.particleGroup.updateMatrixWorld(true);
+    }
+
+    // Animated doodads: skinning reads `bone.matrixWorld`, and this is also the exact set that
+    // `DoodadManager#animate` runs `applyBillboards` over -- both mutate transforms under the
+    // doodad, so the whole subtree is forced.
+    if (map.doodadManager) {
+      map.doodadManager.animatedDoodads.forEach((doodad: any) => {
+        doodad.updateMatrixWorld(true);
+      });
+    }
+
+    if (map.wmoManager) {
+      map.wmoManager.entries.forEach((wmo: any) => {
+        if (wmo.animatedDoodads) {
+          wmo.animatedDoodads.forEach((doodad: any) => doodad.updateMatrixWorld(true));
+        }
+      });
+    }
   }
 
   animateEntities(

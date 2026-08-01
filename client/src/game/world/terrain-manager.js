@@ -14,7 +14,14 @@ class TerrainManager {
     this.view.add(terrain);
 
     terrain.updateMatrix();
-    terrain.updateWorldMatrix();
+
+    // `updateMatrixWorld(true)`, NOT `updateWorldMatrix()`. Those are different methods: the latter
+    // takes (updateParents, updateChildren) and with no arguments updates neither, so a chunk's
+    // CHILDREN -- its liquid layers, added in the Chunk constructor -- never received a world matrix
+    // here at all. That went unnoticed only because the renderer's per-frame `scene.updateMatrixWorld()`
+    // fixed them up every frame; with that walk switched off (world/index.ts) the water would have
+    // rendered at the world origin. Forcing the subtree once, at load, is the actual fix.
+    terrain.updateMatrixWorld(true);
 
     // Register this tile's materials once, here, instead of rediscovering them by walking the whole
     // scene every frame.

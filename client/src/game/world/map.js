@@ -30,6 +30,12 @@ class WorldMap extends THREE.Group {
 
     this.matrixAutoUpdate = false;
     this.name = 'WorldMap';
+
+    // Read by World#updateDynamicMatrices: this subtree is the streamed static world -- terrain
+    // tiles, static doodads, WMO geometry -- each positioned once at placement and never moved
+    // again, so it is excluded from the per-frame world-matrix refresh. The movers it does contain
+    // (particles, animated doodads) are updated explicitly there.
+    this.isStaticSubtree = true;
     this.exterior = new THREE.Group();
     this.exterior.name = 'ExteriorView';
     this.add(this.exterior);
