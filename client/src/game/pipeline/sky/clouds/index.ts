@@ -253,12 +253,29 @@ class CloudDome extends THREE.Mesh {
           vec4 texel = texture2D(cloudTex, vUv);
           float a = texel.a * vAlpha;
           gl_FragColor = vec4(texel.rgb * a, a);
+
+          // THE SKY DEPTH LAW (the reference's SKY_FAR_DEPTH; see the material flags below for why
+          // this dome needs it and the opaque gradient dome does not). Force every cloud fragment to
+          // the maximum depth, so it survives ONLY where the depth buffer still holds its cleared
+          // value -- i.e. exactly where no world geometry drew. That is "the world paints over the
+          // sky", expressed independently of how big this dome's shell happens to be.
+          gl_FragDepth = 1.0;
         }
       `,
       side: THREE.DoubleSide, // No culling -- the dome is viewed from inside.
       transparent: true,
       depthWrite: false,
-      depthTest: false,
+      // depthTest MUST be on, and this is the one place the cloud dome cannot copy the gradient
+      // dome. three.js draws every TRANSPARENT material after every OPAQUE one; `renderOrder` sorts
+      // only within a pass, it does not lift a transparent object ahead of opaque geometry. The
+      // gradient dome gets away with `depthTest: false` because it is `transparent: false`, so its
+      // `renderOrder = -1000` really does put it first and the world then paints over it.
+      //
+      // This dome is transparent, so it draws AFTER the world -- and with the test off it ignored
+      // depth entirely and painted clouds over mountains and buildings. Depth-testing against the
+      // forced far depth above restores the reference's ordering. `depthWrite` stays off: the sky
+      // must not occlude anything, including the celestial bodies drawn beside it.
+      depthTest: true,
       // The white-fringe trap (see the module doc): never let this material touch the framebuffer's
       // alpha channel. RGB keeps the premultiplied-over blend the shader's own output already assumes
       // (src factor One, since the shader premultiplies RGB by alpha itself); alpha stays pinned at

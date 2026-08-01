@@ -21,11 +21,29 @@ We have the gradient strip and the cloud dome. Everything else on that list is m
 and two kinds of location-specific sky.
 
 **How the order maps here.** benilla fights Bevy's view-z sort with `depth_bias` rungs; this client
-does not have that problem. `ProceduralSky` establishes the local idiom — `renderOrder`,
-`depthTest: false`, `depthWrite: false`, camera-pinned — and the cloud dome already follows it at
-`-999`. So the ladder is just integers, and the reference's `SKY_FAR_DEPTH` trick is unnecessary
-because nothing in the sky depth-tests at all. **Do not port the depth-bias numbers.** Port the
-*order*:
+does not have that problem, so the ladder is just `renderOrder` integers. **Do not port the
+depth-bias numbers.** Port the *order*.
+
+**But the reference's `SKY_FAR_DEPTH` law DOES port, and this section originally said it did not.**
+That error shipped: clouds drew over mountains and buildings, and the sun disc would have too.
+
+`renderOrder` sorts only *within* a render pass. three.js draws every **transparent** material after
+every **opaque** one, so a transparent sky element with `renderOrder = -999` still draws after all
+world geometry. `ProceduralSky` gets away with `depthTest: false` **only because it is
+`transparent: false`** — in the opaque pass `-1000` genuinely does put it first, and the world paints
+over it. Every other sky element is transparent and must therefore:
+
+- `depthTest: true`, `depthWrite: false`, and
+- force `gl_FragDepth = 1.0` in the fragment shader.
+
+With three.js's default `LessEqualDepth`, a fragment at max depth survives exactly where the depth
+buffer still holds its cleared value — i.e. where no world geometry drew. That is "the world paints
+over the sky", independent of any shell radius, which is precisely what the reference's law says.
+`sky/__tests__/sky-depth-law.test.ts` enforces it across every transparent sky element at once;
+add new ones to it rather than re-deriving the rule.
+
+(Do not write `gl_FragDepth` in a GLSL comment containing backticks — these shaders live in JS
+template literals, and a stray backtick silently terminates the string.)
 
 | element | renderOrder | notes |
 |---|---|---|

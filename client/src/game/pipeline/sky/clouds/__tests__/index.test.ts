@@ -118,11 +118,17 @@ describe('CloudDome', () => {
     expect(texture.wrapT).toBe(THREE.RepeatWrapping);
   });
 
-  it('does not test or write depth (matching the sky gradient dome`s idiom)', () => {
+  it('depth-tests against a forced far depth, and writes no depth', () => {
+    // This originally asserted `depthTest: false`, copying the opaque gradient dome -- and that is
+    // what let clouds paint over mountains and buildings. three.js draws every TRANSPARENT material
+    // after every opaque one, and `renderOrder` sorts only within a pass, so this dome (unlike the
+    // `transparent: false` gradient dome) draws AFTER the world. With the test off it ignored depth
+    // entirely. See the shared law in `sky/__tests__/sky-depth-law.test.ts`.
     const dome = new CloudDome();
     const material = dome.material as THREE.ShaderMaterial;
     expect(material.depthWrite).toBe(false);
-    expect(material.depthTest).toBe(false);
+    expect(material.depthTest).toBe(true);
+    expect(material.fragmentShader).toContain('gl_FragDepth = 1.0;');
   });
 
   it('starts fully transparent until the first coverage upload', () => {

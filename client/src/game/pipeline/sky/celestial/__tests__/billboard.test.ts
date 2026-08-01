@@ -41,11 +41,18 @@ describe('CelestialBillboard', () => {
     }
   });
 
-  it('does not depth-test or depth-write, matching the sky dome idiom', () => {
+  it('depth-tests against a forced far depth, and writes no depth', () => {
+    // This originally copied the OPAQUE gradient dome's `depthTest: false`, which is wrong for a
+    // transparent element: three.js draws every transparent material after every opaque one, and
+    // `renderOrder` sorts only within a pass -- so a celestial billboard draws AFTER the world and
+    // with the test off would hang in front of mountains and buildings. The forced far depth in the
+    // fragment shader is what makes the test mean "the world paints over the sky", independent of
+    // this sprite's shell radius. Shared law: `sky/__tests__/sky-depth-law.test.ts`.
     const sprite = new CelestialBillboard(makeTexture(), { renderOrder: 0 });
     const material = sprite.material as THREE.ShaderMaterial;
-    expect(material.depthTest).toBe(false);
+    expect(material.depthTest).toBe(true);
     expect(material.depthWrite).toBe(false);
+    expect(material.fragmentShader).toContain('gl_FragDepth = 1.0;');
   });
 
   it('places the sprite at cam + 12*dir by default (the shared near-sphere radius)', () => {

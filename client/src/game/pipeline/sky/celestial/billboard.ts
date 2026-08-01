@@ -154,11 +154,26 @@ class CelestialBillboard extends THREE.Mesh {
           // Premultiplied output, matching the cloud dome's own shader -- the fragment premultiplies
           // RGB by its own alpha rather than leaning on a GL premultiply blend factor.
           gl_FragColor = vec4(texel.rgb * uColor * a, a);
+
+          // THE SKY DEPTH LAW (the reference's SKY_FAR_DEPTH). Force every celestial fragment to the
+          // maximum depth so it survives only where the depth buffer still holds its cleared value --
+          // exactly where no world geometry drew. Without it a body draws through mountains and
+          // buildings, because a transparent material is drawn AFTER all opaque geometry (see the
+          // depthTest note on the material below) and its shell radius does not order it against
+          // the world. No backticks in this comment: it lives inside a JS template literal.
+          gl_FragDepth = 1.0;
         }
       `,
       transparent: true,
       depthWrite: false,
-      depthTest: false,
+      // depthTest MUST be on for a TRANSPARENT sky element. three.js draws every transparent
+      // material after every opaque one; `renderOrder` sorts only within a pass and cannot lift a
+      // transparent object ahead of opaque geometry. The gradient dome gets away with the test off
+      // only because it is `transparent: false`, so its `renderOrder = -1000` genuinely puts it
+      // first. A celestial billboard is transparent, so the depth test against the forced far depth
+      // above is the only thing that lets terrain occlude it. `depthWrite` stays off so bodies never
+      // occlude each other -- the ladder's `renderOrder` decides that.
+      depthTest: true,
       side: THREE.DoubleSide,
       // The white-fringe trap (module doc): RGB blends premultiplied-over (src ONE, since the shader
       // already premultiplies) for the alpha mode, or gamma-ADDS for the glare mode; the ALPHA channel
