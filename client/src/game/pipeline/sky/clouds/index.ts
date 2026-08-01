@@ -200,6 +200,29 @@ class CloudDome extends THREE.Mesh {
     // Never sRGB-decode: the texels are the kernel's own gamma bytes (see the module doc's
     // colour-space section).
     this.cloudTexture.colorSpace = THREE.NoColorSpace;
+
+    // LINEAR filtering, explicitly. `THREE.DataTexture` defaults BOTH filters to `NearestFilter`,
+    // unlike every other texture path -- and a 128x128 tile stretched across the whole sky at
+    // nearest reads as a patchwork of large flat squares, which is exactly how this first rendered.
+    //
+    // Filtering is what the reference expects, not a smoothing liberty: the kernel's colour pass
+    // fills `t == 0` cells with the PREVIOUS cell's RGB at alpha 0 rather than leaving them black,
+    // and its own comment calls that "the filtering-friendly hole fill". That fill exists solely so
+    // a linear sampler blending across a coverage edge pulls neighbouring cloud colour instead of
+    // black. Under nearest it is dead code.
+    this.cloudTexture.magFilter = THREE.LinearFilter;
+    this.cloudTexture.minFilter = THREE.LinearFilter;
+
+    // The tile is TOROIDAL -- `CloudKernel.coverage` masks its lookup with `& (COLS - 1)` on both
+    // axes -- so the texture must wrap, not clamp. Clamping stretches the edge row/column outward
+    // and puts a seam where the dome's UV crosses the tile boundary.
+    this.cloudTexture.wrapS = THREE.RepeatWrapping;
+    this.cloudTexture.wrapT = THREE.RepeatWrapping;
+
+    // No mipmaps: the tile is re-uploaded ~10x a second, and each upload would rebuild the whole
+    // chain for a texture that is never minified far (it covers the sky, not a distant surface).
+    this.cloudTexture.generateMipmaps = false;
+
     this.cloudTexture.needsUpdate = true;
 
     const material = new THREE.ShaderMaterial({

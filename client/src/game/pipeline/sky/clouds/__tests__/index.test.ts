@@ -101,6 +101,23 @@ describe('CloudDome', () => {
     expect(texture.colorSpace).toBe(THREE.NoColorSpace);
   });
 
+  it('samples the coverage texture with LINEAR filtering and toroidal wrapping', () => {
+    // `THREE.DataTexture` defaults both filters to `NearestFilter`, unlike other texture paths, and
+    // a 128x128 tile across the whole sky at nearest renders as a patchwork of flat squares -- how
+    // this first shipped. The kernel's `t == 0` hole fill (previous cell's RGB at alpha 0) exists
+    // specifically so a linear sampler blends toward neighbouring cloud rather than black; under
+    // nearest it is dead code. Wrapping must be Repeat because the tile is toroidal --
+    // `CloudKernel.coverage` masks with `& (COLS - 1)` -- so clamping puts a seam at the boundary.
+    const dome = new CloudDome();
+    const material = dome.material as THREE.ShaderMaterial;
+    const texture = material.uniforms.cloudTex.value as THREE.DataTexture;
+
+    expect(texture.magFilter).toBe(THREE.LinearFilter);
+    expect(texture.minFilter).toBe(THREE.LinearFilter);
+    expect(texture.wrapS).toBe(THREE.RepeatWrapping);
+    expect(texture.wrapT).toBe(THREE.RepeatWrapping);
+  });
+
   it('does not test or write depth (matching the sky gradient dome`s idiom)', () => {
     const dome = new CloudDome();
     const material = dome.material as THREE.ShaderMaterial;
