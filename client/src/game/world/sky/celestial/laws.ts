@@ -71,3 +71,47 @@ export function billboardPosition(
     z: cam.z + dir.z * distance,
   };
 }
+
+/**
+ * The glare's `0x6cf490` **view lerp** (celestial-sky plan, Task 5; benilla `sun/follow.rs::view_lerp`,
+ * VERIFIED): `f = saturate((cosTheta - 0.7) / 0.3)`, `cosTheta` the dot of the camera's forward axis
+ * and the camera->body direction -- 0 until the view swings within ~45 degrees of the body, ramping to
+ * 1 as it lines up dead-on. Drives both the sun and moon glare's quad scale and intensity lerps.
+ */
+export function viewLerp(camForward: Vec3Like, toBody: Vec3Like): number {
+  const cosTheta = camForward.x * toBody.x + camForward.y * toBody.y + camForward.z * toBody.z;
+  return Math.min(1, Math.max(0, (cosTheta - 0.7) / 0.3));
+}
+
+/**
+ * The glare's own below-horizon gate (benilla `sun/follow.rs::horizon_gate`, VERIFIED): a smoothstep
+ * on the body's `sin(elevation)` (`dirZ` in this client's Z-up frame) -- 0 at/below the horizon,
+ * ramping to 1 over the next ~2 degrees. Distinct from [`horizonClipFade`] (the DISC's clip+fade,
+ * `HORIZON_FADE_SCALE = 30`): the reference uses a separate, steeper gate here (`1/0.035 ~= 28.6`) as
+ * one factor of the glare's slewed envelope target, not as the glare material's own alpha -- glares
+ * never route the disc's horizon clip (see `billboard.ts`'s `applyHorizonFade` doc).
+ */
+export function flareHorizonGate(dirZ: number): number {
+  const t = Math.min(1, Math.max(0, dirZ / 0.035));
+  return t * t * (3 - 2 * t);
+}
+
+/** The sun glare's envelope rise rate, `[glare+0x28]` (`0xce97d0`, VERIFIED, decision 0508): units/sec. */
+export const SUN_FLARE_RISE = 4.0;
+/** The moon glare's envelope rise rate, `[glare+0x28]` (`0xce9720`, VERIFIED, decision 0508):
+ * 100/33 ~= 3.0303 units/sec -- slower than the sun's. */
+export const MOON_FLARE_RISE = 100 / 33;
+/** The shared envelope fall rate, `[glare+0x2c]` (`0xce97d4`/`0xce9724`, VERIFIED, decision 0508):
+ * 50/33 ~= 1.5152 units/sec -- a killed flare takes ~0.66s to go dark, slower than either rise. */
+export const FLARE_FALL = 50 / 33;
+
+/**
+ * One step of the reference's `[glare+0x30]` **asymmetric linear slew** toward `target`
+ * (benilla `sun/follow.rs::flare_slew`, VERIFIED, decision 0508): rising is capped at `rise*dt`,
+ * falling at `fall*dt`, and the value never overshoots the target. Not an exponential ease -- the
+ * reference's own byte-pinned constants are linear rates.
+ */
+export function flareSlew(current: number, target: number, rise: number, fall: number, dt: number): number {
+  const delta = Math.min(rise * dt, Math.max(-fall * dt, target - current));
+  return current + delta;
+}

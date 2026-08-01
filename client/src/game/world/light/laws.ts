@@ -399,6 +399,44 @@ export function starGlobalAlpha(minute: number): number {
 }
 
 /**
+ * Sun lens-flare day/night envelope curve (celestial-sky plan, Task 5; benilla
+ * `daynight.rs::SUN_FLARE_DN_CURVE`, the per-body inline 4-key dnCurve table at `[glare+0x70]`,
+ * sun `0xce9818`, VERIFIED -- Addendum #5, decision 0508): a factor of the sun glare's flare-intensity
+ * slew target -- the flare exists only by day, 0 until 06:30, full 07:30->19:30, gone by 21:00. Dusk
+ * (21:00->22:45) and dawn (03:15->06:30) are flare dead-bands for BOTH bodies.
+ */
+const SUN_FLARE_DN_CURVE: Array<[number, number]> = [
+  [0.2708333, 0.0], // 06:30 -- still off
+  [0.3125, 1.0], // 07:30 -- full day flare
+  [0.8125, 1.0], // 19:30 -- still full
+  [0.875, 0.0], // 21:00 -- off before the sun sets
+];
+
+/** The sun glare's flare dnCurve at a game minute-of-day. See [`SUN_FLARE_DN_CURVE`]. */
+export function sunFlareDn(minute: number): number {
+  return interpDayNight(SUN_FLARE_DN_CURVE, minute / 1440);
+}
+
+/**
+ * Moon lens-flare night envelope curve (celestial-sky plan, Task 5; benilla
+ * `daynight.rs::MOON_FLARE_DN_CURVE`, moon dnCurve table `0xce9768`, VERIFIED -- Addendum #5,
+ * decision 0508): flat ZERO from 03:15 to 22:45 -- the whole day *and* early evening -- ramping in
+ * 22:45->24:00 (23:00 ~ 0.20, 23:30 ~ 0.61), full 00:00->02:00, out by 03:15. A 22:30 moonrise has
+ * NO halo; it first lights at 22:45 and peaks near midnight.
+ */
+const MOON_FLARE_DN_CURVE: Array<[number, number]> = [
+  [0.0833333, 1.0], // 02:00 -- still full
+  [0.1354167, 0.0], // 03:15 -- out
+  [0.9479167, 0.0], // 22:45 -- first light
+  [0.999306, 1.0], // ~23:59 -- full (the wrap to 02:00 holds 1.0 across midnight)
+];
+
+/** The moon glare's flare dnCurve at a game minute-of-day. See [`MOON_FLARE_DN_CURVE`]. */
+export function moonFlareDn(minute: number): number {
+  return interpDayNight(MOON_FLARE_DN_CURVE, minute / 1440);
+}
+
+/**
  * Moon-disc size-multiplier curve (benilla `daynight.rs::MOON_SIZE_CURVE`, shared table `0xce8c8c`,
  * VERIFIED): 1.5x at moonrise/moonset (the horizon, ~22:00 / ~04:00) shrinking to 1.0x overhead
  * (~01:00) -- the same horizon-enlargement the sun disc gets. BOTH moon discs (white and moon02)

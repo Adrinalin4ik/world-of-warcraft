@@ -32,6 +32,20 @@ const transparentSkyElements = (): Array<{ name: string; material: THREE.ShaderM
   // body direction of its own), so it builds its own depth-law material -- covered here rather than
   // re-deriving the rule for it.
   const stars = buildStarMaterial(new THREE.Texture());
+  // The sun/moon glare (Task 5, renderOrder +1000): additive `CelestialBillboard`s, drawn LAST in the
+  // frame -- the one element on the ladder that draws AFTER the world -- but still transparent, so
+  // the same depth law applies: forced far depth + depth-tested, or a glare would paint straight
+  // through terrain the moment it is occluded.
+  const sunGlare = new CelestialBillboard(new THREE.Texture(), {
+    renderOrder: 1000,
+    blending: 'additive',
+    applyHorizonFade: false,
+  });
+  const moonGlare = new CelestialBillboard(new THREE.Texture(), {
+    renderOrder: 1000,
+    blending: 'additive',
+    applyHorizonFade: false,
+  });
 
   return [
     { name: 'CloudDome', material: dome.material as THREE.ShaderMaterial },
@@ -39,6 +53,8 @@ const transparentSkyElements = (): Array<{ name: string; material: THREE.ShaderM
     { name: 'WhiteMoon', material: whiteMoon.material as THREE.ShaderMaterial },
     { name: 'Moon02', material: moon02.material as THREE.ShaderMaterial },
     { name: 'Stars', material: stars },
+    { name: 'SunGlare', material: sunGlare.material as THREE.ShaderMaterial },
+    { name: 'MoonGlare', material: moonGlare.material as THREE.ShaderMaterial },
   ];
 };
 

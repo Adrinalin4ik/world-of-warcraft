@@ -1,13 +1,16 @@
 import * as THREE from 'three';
 import MapLight from '../../../world/light/MapLight';
-import { CloudFrame, CloudKernel, Vec3Like } from '../../../world/sky/clouds/kernel';
+import { CloudFrame, CloudKernel, Vec3Like, occ1Sun, occ1Moon } from '../../../world/sky/clouds/kernel';
+import { CELESTIAL_DISTANCE } from '../../../world/sky/celestial/laws';
 import SkyCone from '../cone';
 import CloudDome from '../clouds';
 import ProceduralSky from '../procedural';
 import Skybox from '../skybox';
+import WmoSkybox from '../skybox/wmo';
 import SunDisc from '../celestial/sun';
 import { Moon02, WhiteMoon } from '../celestial/moons';
 import Stars from '../celestial/stars';
+import { SunGlare, MoonGlare } from '../celestial/glare';
 
 /** Task 6's instrument bundle -- the numbers that distinguish "the field is empty" from "the field
  * is fine and the dome is not drawing" (see the plan's own framing). `null` before the kernel has
@@ -46,6 +49,11 @@ class SkyManager {
   // `setMapLight` once -- the freshly created object needs it too.
   private mapLight: MapLight | null = null;
 
+  // Task 6 Step 2: the world's `WMOManager` (duck-typed `any`, same as `skybox/wmo-resolve.ts` --
+  // see that file's own doc comment for why). `null` until `setWmoManager` is called at least once,
+  // which resolves to "no WMO skybox" the same way an empty `entries` map does.
+  private wmoManagerRef: any = null;
+
   // Procedural clouds (Task 6): the coverage kernel and the visible dome that renders its bytes.
   // Owned here (not swapped by `setMethod`) because clouds sit above whichever sky-gradient method
   // is active, exactly like `MapLight` itself is not tied to the render method.
@@ -74,24 +82,70 @@ class SkyManager {
   // whichever gradient/skybox method is active, not swapped by `setMethod`.
   private stars: Stars;
 
+  // Task 5: the sun/moon glare -- the cloud coverage field's first consumer. Owned the same way as
+  // the other celestial bodies above; renders at +1000 (after the world), unlike everything else on
+  // the ladder -- see `glare.ts`'s own module doc.
+  private sunGlare: SunGlare;
+  private moonGlare: MoonGlare;
+
+  // Task 6 Step 3's suppression rule -- ONE gate over the whole celestial pass (plan Risk 3: "six
+  // independent checks will drift; one gate will not"). Every element `CSky::Render`'s shared boolean
+  // would hide -- stars, both discs, both moons, the gradient dome (cone OR procedural), and the cloud
+  // dome -- lives inside this group, and `updateSkyboxSuppression` below is the ONLY place that
+  // touches its `.visible`. `skybox` (the legacy method-selectable flat skybox), `sunGlare` and
+  // `moonGlare` are deliberately NOT inside it: a skybox replaces this group, and the glare renders
+  // outside the sky pass entirely (per the reference; see `glare.ts`'s own module doc) -- gating either
+  // of those here would be wrong.
+  private celestialGroup: THREE.Group;
+
+  // Task 6 Step 1: the zone skybox (`LightSkybox.dbc`) -- automatic, driven off `MapLight.
+  // lightSkyboxID` every frame, unlike the legacy method-selectable `skybox` above. Owned
+  // unconditionally, like the celestial bodies, since it applies regardless of `currentMethod`.
+  private zoneSkybox: Skybox;
+
+  // Task 6 Step 2: the WMO skybox (`MOSB`) -- automatic, driven off the camera's portal-flood
+  // resolve every frame (see `skybox/wmo-resolve.ts`). Owned unconditionally, same reasoning as
+  // `zoneSkybox` above.
+  private wmoSkybox: WmoSkybox;
+
   constructor(scene: THREE.Scene) {
     this.scene = scene;
+
+    this.celestialGroup = new THREE.Group();
+    this.celestialGroup.name = 'CelestialGroup';
+    this.scene.add(this.celestialGroup);
+
     this.cloudDome = new CloudDome();
-    this.scene.add(this.cloudDome);
+    this.celestialGroup.add(this.cloudDome);
 
     // First on the plan's draw-order ladder (renderOrder -1003) -- constructed first so the scene
     // graph's own order roughly mirrors the ladder, though renderOrder is what actually decides it.
     this.stars = new Stars();
-    this.scene.add(this.stars);
+    this.celestialGroup.add(this.stars);
 
     this.sunDisc = new SunDisc();
-    this.scene.add(this.sunDisc);
+    this.celestialGroup.add(this.sunDisc);
 
     this.whiteMoon = new WhiteMoon();
-    this.scene.add(this.whiteMoon);
+    this.celestialGroup.add(this.whiteMoon);
 
     this.moon02 = new Moon02();
-    this.scene.add(this.moon02);
+    this.celestialGroup.add(this.moon02);
+
+    // Last on the plan's draw-order ladder (renderOrder +1000, after the world) -- constructed here
+    // regardless, since scene-graph insertion order does not decide draw order, only `renderOrder` does.
+    // Outside `celestialGroup`: the glare survives a skybox (see the group's own doc comment above).
+    this.sunGlare = new SunGlare();
+    this.scene.add(this.sunGlare);
+
+    this.moonGlare = new MoonGlare();
+    this.scene.add(this.moonGlare);
+
+    this.zoneSkybox = new Skybox();
+    this.scene.add(this.zoneSkybox);
+
+    this.wmoSkybox = new WmoSkybox();
+    this.scene.add(this.wmoSkybox);
   }
 
   /**
@@ -103,6 +157,20 @@ class SkyManager {
   public setMapLight(mapLight: MapLight | null): void {
     this.mapLight = mapLight;
     (this.getCurrentSky() as any)?.setMapLight?.(mapLight);
+    // Task 6 Step 1: the zone skybox reads `MapLight.lightSkyboxID` every frame -- it needs the SAME
+    // live reference every other sky object gets, not a one-time hand-off (`WorldMap` swaps in a
+    // brand new `MapLight` per zone).
+    this.zoneSkybox.setMapLight(mapLight);
+  }
+
+  /**
+   * Task 6 Step 2: the world's `WMOManager`, forwarded every frame (cheap -- just a reference
+   * assignment) so the WMO skybox can re-resolve the flood-reached predicate off the SAME portal-flood
+   * visibility flags `VisibilityManager` just set this frame. `null` on a map with no WMOs at all (or
+   * before one has loaded), which resolves to "no WMO skybox" exactly like an empty `entries` map does.
+   */
+  public setWmoManager(wmoManager: any): void {
+    this.wmoManagerRef = wmoManager ?? null;
   }
 
   /**
@@ -129,13 +197,13 @@ class SkyManager {
     if (method === 'cone') {
       console.log('SkyManager: Creating sky cone...');
       this.skyCone = new SkyCone();
-      this.scene.add(this.skyCone);
+      this.celestialGroup.add(this.skyCone);
       console.log('SkyManager: Sky cone added to scene');
     } else if (method === 'procedural') {
       console.log('SkyManager: Creating procedural sky...');
       this.proceduralSky = new ProceduralSky();
       this.proceduralSky.setMapLight(this.mapLight);
-      this.scene.add(this.proceduralSky);
+      this.celestialGroup.add(this.proceduralSky);
       console.log('SkyManager: Procedural sky added to scene');
     } else if (method === 'skybox') {
       console.log('SkyManager: Creating skybox...');
@@ -150,13 +218,13 @@ class SkyManager {
    */
   private removeCurrentSky(): void {
     if (this.skyCone) {
-      this.scene.remove(this.skyCone);
+      this.celestialGroup.remove(this.skyCone);
       this.skyCone.dispose();
       this.skyCone = null;
     }
-    
+
     if (this.proceduralSky) {
-      this.scene.remove(this.proceduralSky);
+      this.celestialGroup.remove(this.proceduralSky);
       this.proceduralSky.dispose();
       this.proceduralSky = null;
     }
@@ -189,15 +257,37 @@ class SkyManager {
     }
 
     this.updateClouds(camera, dt);
-    this.updateCelestialBodies(camera);
+    this.updateCelestialBodies(camera, dt);
+
+    // Task 6 Steps 1-2: resolve/build whichever skybox this frame wants. Both are no-ops (stay
+    // invisible) when neither the zone nor any WMO names one active right now.
+    this.zoneSkybox.update(camera, mapID);
+    this.wmoSkybox.update(camera, this.wmoManagerRef);
+
+    // Task 6 Step 3: the suppression rule, as ONE gate over the whole celestial pass -- see
+    // `celestialGroup`'s own doc comment for why this is a single assignment rather than six.
+    this.updateSkyboxSuppression();
+  }
+
+  /**
+   * `CSky::Render` carries one shared boolean and skips ALL SIX element draws together when a skybox
+   * is active -- stars, sun disc, both moons, gradient band and cloud dome (plan Task 6 Step 3; a live
+   * capture in Stratholme's King's Square shows exactly three draws, the skybox cube's own texture
+   * pairs, and nothing else). Only the glare survives, because it renders outside this pass -- see
+   * `celestialGroup`'s own doc comment for why `sunGlare`/`moonGlare` are never touched here.
+   */
+  private updateSkyboxSuppression(): void {
+    const suppressed = this.zoneSkybox.isActive || this.wmoSkybox.isActive;
+    this.celestialGroup.visible = !suppressed;
   }
 
   /**
    * Task 2 (and the route Tasks 3-5 follow): place/tint every celestial body from the SAME per-frame
    * `MapLight` reference the rest of this manager reads -- no second clock, no second camera-follow.
-   * A no-op before `setMapLight` has ever run (matches `updateClouds`'s own null guard).
+   * A no-op before `setMapLight` has ever run (matches `updateClouds`'s own null guard). `dt` only
+   * matters to the glare's slewed envelope (Task 5); the discs/stars ignore it, same as before.
    */
-  private updateCelestialBodies(camera: THREE.Camera): void {
+  private updateCelestialBodies(camera: THREE.Camera, dt: number): void {
     if (!this.mapLight) {
       return;
     }
@@ -205,6 +295,43 @@ class SkyManager {
     this.sunDisc.updateFromLight(camera, this.mapLight);
     this.whiteMoon.updateFromLight(camera, this.mapLight);
     this.moon02.updateFromLight(camera, this.mapLight);
+    this.updateGlare(camera, dt);
+  }
+
+  /**
+   * Task 5: the sun/moon glare. Samples the SAME `cloudKernel` instance the cloud dome renders from
+   * (plan Risk 5 -- a second field would dim the flare for clouds nobody can see) at each body's
+   * 12-unit sky point (`laws.CELESTIAL_DISTANCE`, the glare's own near-sphere placement -- the
+   * kernel's `coverage(d)` is not scale-invariant, so this offset must match the point the glare
+   * actually sits at, not a bare unit direction). `interior` stands in for the reference's terrain/
+   * interior occlusion gate -- see `glare.ts`'s module doc for why only the interior half is ported.
+   */
+  private updateGlare(camera: THREE.Camera, dt: number): void {
+    const mapLight = this.mapLight;
+    if (!mapLight) {
+      return;
+    }
+
+    const interior = mapLight.location === 'interior';
+
+    const sunDir = mapLight.celestialSunDir;
+    const sunPoint: Vec3Like = {
+      x: sunDir.x * CELESTIAL_DISTANCE,
+      y: sunDir.y * CELESTIAL_DISTANCE,
+      z: sunDir.z * CELESTIAL_DISTANCE,
+    };
+    const sunOcc1 = occ1Sun(this.cloudKernel.coverage(sunPoint));
+
+    const moonDir = mapLight.moonDir;
+    const moonPoint: Vec3Like = {
+      x: moonDir.x * CELESTIAL_DISTANCE,
+      y: moonDir.y * CELESTIAL_DISTANCE,
+      z: moonDir.z * CELESTIAL_DISTANCE,
+    };
+    const moonOcc1 = occ1Moon(this.cloudKernel.coverage(moonPoint));
+
+    this.sunGlare.updateFromLight(camera, mapLight, sunOcc1, interior, dt);
+    this.moonGlare.updateFromLight(camera, mapLight, moonOcc1, interior, dt);
   }
 
   /**
@@ -296,18 +423,15 @@ class SkyManager {
    */
   public setEnabled(enabled: boolean): void {
     this.isEnabled = enabled;
-    
-    if (this.skyCone) {
-      this.skyCone.visible = enabled;
-    }
-    
-    if (this.proceduralSky) {
-      this.proceduralSky.visible = enabled;
-    }
-    
+
+    this.celestialGroup.visible = enabled;
+
     if (this.skybox) {
       this.skybox.visible = enabled;
     }
+
+    this.zoneSkybox.visible = enabled;
+    this.wmoSkybox.visible = enabled;
   }
 
   /**
@@ -343,16 +467,25 @@ class SkyManager {
    */
   public dispose(): void {
     this.removeCurrentSky();
-    this.scene.remove(this.cloudDome);
+    this.celestialGroup.remove(this.cloudDome);
     this.cloudDome.dispose();
-    this.scene.remove(this.stars);
+    this.celestialGroup.remove(this.stars);
     this.stars.dispose();
-    this.scene.remove(this.sunDisc);
+    this.celestialGroup.remove(this.sunDisc);
     this.sunDisc.dispose();
-    this.scene.remove(this.whiteMoon);
+    this.celestialGroup.remove(this.whiteMoon);
     this.whiteMoon.dispose();
-    this.scene.remove(this.moon02);
+    this.celestialGroup.remove(this.moon02);
     this.moon02.dispose();
+    this.scene.remove(this.celestialGroup);
+    this.scene.remove(this.sunGlare);
+    this.sunGlare.dispose();
+    this.scene.remove(this.moonGlare);
+    this.moonGlare.dispose();
+    this.scene.remove(this.zoneSkybox);
+    this.zoneSkybox.dispose();
+    this.scene.remove(this.wmoSkybox);
+    this.wmoSkybox.dispose();
   }
 }
 

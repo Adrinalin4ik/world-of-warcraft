@@ -18,6 +18,7 @@ import {
   moon02State,
   moonDirection,
   moonDiscScale,
+  moonFlareDn,
   propProbeCoeffs,
   PropLobeLight,
   quantizeGlow,
@@ -30,6 +31,7 @@ import {
   starGlobalAlpha,
   stormBlend,
   sunDiscScale,
+  sunFlareDn,
   Vec3,
   warpSkyRingColor,
 } from '../laws';
@@ -608,5 +610,27 @@ describe('moon02State (celestial-sky plan, Task 4 -- the vertex-black third disc
     expect(wrapped.dir[0]).toBeCloseTo(dayZero.dir[0], 5);
     expect(wrapped.dir[1]).toBeCloseTo(dayZero.dir[1], 5);
     expect(wrapped.dir[2]).toBeCloseTo(dayZero.dir[2], 5);
+  });
+});
+
+describe('sunFlareDn and moonFlareDn (celestial-sky plan, Task 5 -- the glare dnCurves)', () => {
+  it('the sun flare is a DAY curve: full at noon, gone by 21:00 and all night', () => {
+    expect(sunFlareDn(12 * 60)).toBeCloseTo(1.0, 3); // noon
+    expect(sunFlareDn(21 * 60)).toBe(0); // 21:00, off before sunset
+    expect(sunFlareDn(23 * 60)).toBe(0); // deep night
+    expect(sunFlareDn(6 * 60 + 30)).toBeLessThan(1e-3); // 06:30 still off
+  });
+
+  it('the moon flare is a DEEP-NIGHT curve: a 22:30 moonrise carries no halo', () => {
+    expect(moonFlareDn(22 * 60 + 30)).toBe(0); // 22:30 -- no halo yet
+    expect(moonFlareDn(12 * 60)).toBe(0); // noon -- no halo
+    const at2300 = moonFlareDn(23 * 60);
+    expect(at2300).toBeGreaterThan(0.15);
+    expect(at2300).toBeLessThan(0.25); // ~0.20
+    const at2330 = moonFlareDn(23 * 60 + 30);
+    expect(at2330).toBeGreaterThan(0.55);
+    expect(at2330).toBeLessThan(0.65); // ~0.61
+    expect(moonFlareDn(60)).toBeCloseTo(1.0, 3); // 01:00, full (wraps across midnight)
+    expect(moonFlareDn(3 * 60 + 15)).toBeLessThan(1e-3); // 03:15, out
   });
 });
