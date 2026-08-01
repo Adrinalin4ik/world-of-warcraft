@@ -2,11 +2,16 @@ import * as THREE from 'three';
 
 import DebugPanel from '../../pages/game/debug/debug';
 import { doodadFadeAlpha } from '../pipeline/m2/fade/laws';
+import { FULL_SCREEN_RECT } from '../pipeline/wmo/portal/rect';
+import { crossesDownRay } from '../pipeline/wmo/portal/seed';
 import THREEUtil from '../utils/three-util';
 import { PlaneHelper } from '../utils/plane-helper';
 import { vec4 } from 'gl-matrix';
 
 export const ObjectsManager = [];
+
+// Camera position converted into a WMO view's local space, once per group visited per frame.
+const SCRATCH_CAMERA_LOCAL = new THREE.Vector3();
 
 class VisibilityManager {
 
@@ -36,6 +41,17 @@ class VisibilityManager {
     // Matrix4 here rather than inside it keeps the cull pass allocation-free at its top level.
     this.scratchFrustum = new THREE.Frustum();
     this.scratchViewProjection = new THREE.Matrix4();
+
+    // Portal windows onto the exterior left by this frame's flood. Empty means a sealed room: the
+    // exterior scene is not drawn at all (exterior_cull.rs).
+    this.exteriorWindows = [];
+
+    // Scratch for turning a window rect back into a sub-frustum. An NDC rect is a scale+offset on
+    // clip space, so `rectToNdc * viewProjection` extracts the same 6 planes the reference builds
+    // by bilerping its corner rays -- one plane-extraction implementation, not a private port.
+    this.scratchRectToNdc = new THREE.Matrix4();
+    this.scratchRectMatrix = new THREE.Matrix4();
+    this.scratchRectFrustum = new THREE.Frustum();
 
     // Camera position for the horizontal fade distance, refreshed once per update().
     this.cameraX = 0;
@@ -101,10 +117,15 @@ class VisibilityManager {
     // var dist = vec4.dot(nearPlane, cameraVec4);
     // nearPlane.constant -= dist;
 
+    this.exteriorWindows.length = 0;
+
     if (camera.location.type === 'exterior') {
       this.enablePortalsFromExterior(0, camera, frustum);
     } else {
-      this.enablePortalsFromInterior(0, camera, frustum);
+      this.enablePortalsFromInterior(0, camera, FULL_SCREEN_RECT);
+      // The flood has now filled `exteriorWindows`. Draw the outdoors only through them -- and not
+      // at all if there are none.
+      this.enableExteriorThroughWindows();
     }
 
     this.resolveVisibility();
@@ -167,13 +188,14 @@ class VisibilityManager {
         }
 
         // Traverse inward from the exterior groups of all WMOs, marking any relevant WMO groups
-        // as visible.
-        this.traversePortalsAndEnable(depth, camera, wmo, group, frustum, visitedPortals);
+        // as visible. The flood carries a screen rect, not a plane frustum -- from outdoors it
+        // starts unrestricted.
+        this.traversePortalsAndEnable(depth, camera, wmo, group, FULL_SCREEN_RECT, visitedPortals);
       }
     }
   }
 
-  enablePortalsFromInterior(depth, camera, frustum = null, visitedPortals = new Set()) {
+  enablePortalsFromInterior(depth, camera, rect = FULL_SCREEN_RECT, visitedPortals = new Set()) {
     const wmo = camera.location.wmo.handler;
     const group = camera.location.wmo.group;
     const groupView = camera.location.wmo.views.group;
@@ -181,12 +203,107 @@ class VisibilityManager {
     // The group the camera is currently in should always be visible
     groupView.visibleFrame = this.frame;
 
-    // Doodads within frustum are visible
     for (const doodad of wmo.doodadsForGroup(group)) {
-      this.enableStaticObjectInFrustum(doodad, frustum);
+      this.enableStaticObjectInRect(doodad, rect);
     }
-    // Traverse outward from the given group, marking any relevant WMO groups as visible
-    this.traversePortalsAndEnable(depth, camera, wmo, group, frustum, visitedPortals);
+
+    this.traversePortalsAndEnable(depth, camera, wmo, group, rect, visitedPortals);
+
+    // Across-group seeds. The camera's "current group" is not one group: walking-collision faces
+    // race portal crossings under the eye, so a portal crossed by the straight-down ray puts its
+    // destination in the seed set too, flooded as an independent root. Without this, standing on a
+    // threshold blanks whichever room the collision face happened not to pick.
+    // See pipeline/wmo/portal/seed.ts.
+    const view = wmo.views.groups.get(group.index);
+    if (!view) {
+      return;
+    }
+
+    SCRATCH_CAMERA_LOCAL.copy(camera.position);
+    const cameraLocal = view.worldToLocal(SCRATCH_CAMERA_LOCAL);
+
+    for (let pindex = 0, pcount = group.portals.length; pindex < pcount; ++pindex) {
+      const portal = group.portals[pindex];
+      const ref = group.portalRefs[pindex];
+
+      if (!crossesDownRay(portal.plane.normal.z, portal.plane.distanceToPoint(cameraLocal))) {
+        continue;
+      }
+
+      const seedGroup = wmo.groups.get(ref.groupIndex);
+      const seedView = seedGroup && wmo.views.groups.get(seedGroup.index);
+      if (!seedGroup || !seedView) {
+        continue;
+      }
+
+      seedView.visibleFrame = this.frame;
+      this.traversePortalsAndEnable(depth, camera, wmo, seedGroup, rect, visitedPortals);
+    }
+  }
+
+  /**
+   * Admit a static object against a screen-rect window by building that window's sub-frustum.
+   *
+   * The returned frustum is shared scratch -- consume it immediately, never hold it across a
+   * recursion.
+   */
+  enableStaticObjectInRect(object, rect) {
+    this.enableStaticObjectInFrustum(object, this.frustumForRect(rect));
+  }
+
+  frustumForRect(rect) {
+    if (rect === FULL_SCREEN_RECT) {
+      return this.scratchFrustum;
+    }
+
+    const sx = 2 / (rect.maxX - rect.minX);
+    const sy = 2 / (rect.maxY - rect.minY);
+    const tx = -(rect.maxX + rect.minX) / (rect.maxX - rect.minX);
+    const ty = -(rect.maxY + rect.minY) / (rect.maxY - rect.minY);
+
+    this.scratchRectToNdc.set(
+      sx, 0, 0, tx,
+      0, sy, 0, ty,
+      0, 0, 1, 0,
+      0, 0, 0, 1,
+    );
+
+    this.scratchRectMatrix.multiplyMatrices(this.scratchRectToNdc, this.scratchViewProjection);
+    this.scratchRectFrustum.setFromProjectionMatrix(this.scratchRectMatrix);
+    return this.scratchRectFrustum;
+  }
+
+  /**
+   * Draw the exterior scene once per portal window left by the interior flood.
+   *
+   * Zero windows means a sealed room: no exterior content at all, with no second path for it to
+   * leak through. Ported from samples/benilla `exterior_cull.rs`, which carves the law out of the
+   * world scene driver `0x681070` (`0x681199 jbe 0x681204` skips the whole walk on a zero count).
+   *
+   * Deliberately NOT gated here: world WMO placements and open-world liquid. Both already have a
+   * visibility authority -- WMO groups are written by the portal flood itself -- and bolting a
+   * second writer onto the same objects is the two-authorities bug benilla's decision 0025 forbids.
+   * A distant building seen through a wall therefore remains, as it does in the reference port.
+   */
+  enableExteriorThroughWindows() {
+    if (this.exteriorWindows.length === 0) {
+      this.map.exterior.visible = false;
+      return;
+    }
+
+    this.map.exterior.visible = true;
+
+    for (let i = 0; i < this.exteriorWindows.length; ++i) {
+      const frustum = this.frustumForRect(this.exteriorWindows[i]);
+
+      for (const doodad of this.map.doodadManager.doodads.values()) {
+        this.enableStaticObjectInFrustum(doodad, frustum);
+      }
+
+      for (const chunk of this.map.chunks.values()) {
+        this.enableStaticObjectInFrustum(chunk, frustum);
+      }
+    }
   }
 
   enableStaticObjectInFrustum(object, frustum) {
@@ -243,15 +360,25 @@ class VisibilityManager {
     object.worldBoundingBoxKey = version;
   }
 
-  traversePortalsAndEnable(depth, camera, wmo, group, frustum = null, visitedPortals = new Set()) {
-    if (depth > 10) return; 
-    
-    const view = wmo.views.groups.get(group.index);
-    const cameraLocal = view.worldToLocal(camera.position.clone());
+  /**
+   * Flood the portal graph from `group`, carrying a screen rect that narrows at every portal.
+   *
+   * Ported from samples/benilla `wmo_portal/mod.rs`. The rect -- NOT a plane frustum -- is the
+   * working frustum, and a branch terminates the instant the rect collapses below RECT_EPS. The
+   * previous implementation built an N-plane frustum per portal per frame and never terminated on
+   * area, which is why interiors over-drew.
+   */
+  traversePortalsAndEnable(depth, camera, wmo, group, rect = FULL_SCREEN_RECT, visitedPortals = new Set()) {
+    if (depth > 10) return;
 
-    // Doodads within frustum are visible
+    const view = wmo.views.groups.get(group.index);
+    if (!view) return;
+
+    SCRATCH_CAMERA_LOCAL.copy(camera.position);
+    const cameraLocal = view.worldToLocal(SCRATCH_CAMERA_LOCAL);
+
     for (const doodad of wmo.doodadsForGroup(group)) {
-      this.enableStaticObjectInFrustum(doodad, frustum);
+      this.enableStaticObjectInRect(doodad, rect);
     }
 
     for (let pindex = 0, pcount = group.portals.length; pindex < pcount; ++pindex) {
@@ -259,89 +386,42 @@ class VisibilityManager {
       const ref = group.portalRefs[pindex];
       const destination = wmo.groups.get(ref.groupIndex);
 
-      // Destination group is pending load
-      if (!destination) {
-        // console.debug('Destination group is pending load')
-        continue;
-      }
+      // Destination group is pending load.
+      if (!destination) continue;
 
       const portalView = wmo.views.portals.get(ref.portalIndex);
       const destinationView = wmo.views.groups.get(destination.index);
       const exteriorDestination = (destination.header.flags & 0x08) !== 0;
 
-      // Destination group's view is pending load
-      if (!destinationView) {
-        // console.debug('Destination group\'s view is pending load')
-        continue;
-      }
+      if (!portalView || !destinationView) continue;
+      if (visitedPortals.has(portalView)) continue;
 
-      // Already visited this portal, so we're done
-      if (visitedPortals.has(portalView)) {
-        // console.debug("Already visited this portal, so we're done")
-        continue;
-      }
+      // Exterior-to-exterior links are already covered by enablePortalsFromExterior.
+      if ((group.header.flags & 0x08) !== 0 && exteriorDestination) continue;
 
-      // Exterior to exterior links are already covered by enablePortalsFromExterior
-      if ((group.header.flags & 0x08) !== 0 && exteriorDestination) {
-        // console.debug('Exterior to exterior links are already covered by enablePortalsFromExterior')
-        continue;
-      }
+      if (portalView.legacyGeometry.vertices.length < 4) continue;
 
-      if (portalView.legacyGeometry.vertices.length < 4) {
-        // console.debug('Portal has less then 4 verticies. It is invalid');
-        continue;
-      }
-
-      // Portal out of group is not visible from previous frustum
-      if (frustum !== null && !portalView.intersectFrustum(frustum)) {
-        // console.debug('Portal out of group is not visible from previous frustum')
-        continue;
-      }
-
-      // const plane = portal.plane;
-      // const vec = vec4.fromValues(plane.normal.x, plane.normal.y, plane.normal.z, plane.constant);
-      // var dotResult = (vec4.dot(
-      //   vec, 
-      //   [cameraLocal.x, cameraLocal.y, cameraLocal.z, 1]
-      // ));
-      // dotResult = dotResult + ref.side * 0.01;
-      // var isInsidePortalThis = (ref.side < 0) ? (dotResult <= 0) : (dotResult >= 0);
-      // if (!isInsidePortalThis) continue;
-
+      // The side test: portals are traversed outward only.
       const distance = portal.plane.distanceToPoint(cameraLocal) + 0.001;
-      // const insidePortal = distance < 0.0;
-      var insidePortal = (ref.side < 0) ? (distance <= 0) : (distance >= 0);
-      
-      // Portals must be traversed outward
-      if (!insidePortal) {
-        // console.debug('Portals must be traversed outward', distance, ref)
-        continue;
-      }
+      const insidePortal = ref.side < 0 ? distance <= 0 : distance >= 0;
+      if (!insidePortal) continue;
 
-      // Portal out of group is visible, thus the destination group is visible
-      destinationView.visibleFrame = this.frame;
-      
-      // Track visited portals to prevent duplicate work
+      // Narrow the window through this portal. Null means the branch dies here -- either the portal
+      // projects to nothing, or the narrowed rect collapsed to zero area.
+      const nextRect = portalView.projectToRect(this.scratchViewProjection, rect, cameraLocal);
+      if (!nextRect) continue;
+
       visitedPortals.add(portalView);
-      
-      // Project a frustum out of this portal for use in the next level of recursion
-      const nextFrustum = portalView.createFrustum(camera, frustum, ref.side > 0);
-      
-      // const nextFrustum = portalView.portalCull(camera, frustum, ref.side < 0);
+      destinationView.visibleFrame = this.frame;
 
-      if (!nextFrustum) {
-        // console.debug('Project a frustum out of this portal for use in the next level of recursion')
+      if (exteriorDestination) {
+        // A doorway onto the outdoors. The exterior is drawn once per such window by
+        // `enableExteriorThroughWindows`, and not at all when there are none.
+        this.exteriorWindows.push(nextRect);
         continue;
       }
 
-      // Portal out of group is to exterior and camera is not already in exterior, thus we need
-      // to traverse and enable exterior groups
-      if (exteriorDestination && camera.location.type !== 'exterior') {
-        this.enablePortalsFromExterior(depth + 1, camera, nextFrustum, visitedPortals);
-      }
-
-      // Recurse
-      this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, nextFrustum, visitedPortals);
+      this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, nextRect, visitedPortals);
     }
   }
 
