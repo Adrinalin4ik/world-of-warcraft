@@ -152,8 +152,29 @@ export type LightingReadoutsTarget = {
   cloudBaseColor?: Rgb;
 };
 
+/**
+ * Task 6's cloud instruments -- deliberately its own narrow structural type rather than folded into
+ * `LightingReadoutsTarget`, since it comes off `SkyManager` (whoever owns the coverage kernel), not
+ * `MapLight`. No three.js import, satisfiable by a plain test object, same reasoning as
+ * `LightingReadoutsTarget` itself.
+ *
+ * `tileMean` and `sampledCoverage` are the pair the plan calls out by name: they are what
+ * distinguishes "the field is empty" (both near 0) from "the field is fine and the dome is not
+ * drawing" (`tileMean` non-zero, dome still invisible on screen).
+ */
+export type CloudReadoutTarget = {
+  density: number;
+  phase: number;
+  scroll: number;
+  tileMean: number;
+  sampledCoverage: number;
+};
+
 type Props = {
   mapLight: LightingReadoutsTarget | null;
+  /** `SkyManager#getCloudReadout()` -- null before the coverage kernel has ever been primed (no
+   * `MapLight` yet). Optional so existing call sites/tests that predate Task 6 keep compiling. */
+  cloudReadout?: CloudReadoutTarget | null;
 };
 
 /** 0..1 colour to the 0..255 bytes the reference's own dumps report, so values compare directly. */
@@ -210,7 +231,7 @@ const asBytesTriple = (color: [number, number, number] | undefined) => {
  */
 class LightingReadouts extends React.Component<Props> {
   render() {
-    const { mapLight } = this.props;
+    const { mapLight, cloudReadout } = this.props;
     if (!mapLight) {
       return null;
     }
@@ -264,6 +285,14 @@ class LightingReadouts extends React.Component<Props> {
           Sun dir: {asFixed(mapLight.sunDir.x, 3)}, {asFixed(mapLight.sunDir.y, 3)},{' '}
           {asFixed(mapLight.sunDir.z, 3)}
         </p>
+        {cloudReadout && (
+          <p>
+            Cloud C: {asFixed(cloudReadout.density, 3)} &middot; phase {cloudReadout.phase}
+            &middot; scroll {cloudReadout.scroll} &middot; tile mean{' '}
+            {asFixed(cloudReadout.tileMean, 1)} &middot; sampled coverage{' '}
+            {asFixed(cloudReadout.sampledCoverage, 3)}
+          </p>
+        )}
 
         <div className="divider"></div>
         <p>SIDN night: {asFixed(mapLight.sidnNight, 3)}</p>

@@ -234,8 +234,14 @@ export default class World extends EventEmitter {
     // Update sky system. `setMapLight` every frame (not once) because `changeMap` swaps in a brand
     // new `MapLight` per zone -- the same staleness trap `WorldMap#adoptMaterial` already documents
     // for materials. Cheap: it is just a reference assignment when nothing has changed.
+    //
+    // `delta` is passed through as the cloud kernel's tick `dt` too (Task 6) -- the SAME per-frame
+    // delta `map.animate` above already fed the interior-fog crossfade and the weather ramp. This
+    // project has already shipped a duplicated per-frame `MapLight.update()` that halved a crossfade
+    // rate by measuring `dt` twice; reusing `delta` here rather than a fresh clock is that fix
+    // applying here too.
     this.skyManager.setMapLight(this.mapLight);
-    this.skyManager.update(camera, this.map?.mapID || 0);
+    this.skyManager.update(camera, this.map?.mapID || 0, delta);
 
     // Send delta updates to instanced M2 animation managers.
     M2Blueprint.animate(delta);

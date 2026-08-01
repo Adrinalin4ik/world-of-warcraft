@@ -188,7 +188,10 @@ class DebugPanel extends React.Component<IProp> {
           <LightingControls mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
         </CollapsibleSection>
         <CollapsibleSection title="Lighting resolve" storageKey="lighting-resolve" defaultCollapsed={false}>
-          <LightingReadouts mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
+          <LightingReadouts
+            mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null }
+            cloudReadout={ this.props.game.world.skyManager.getCloudReadout() }
+          />
         </CollapsibleSection>
         {/* <h2>Memory</h2>
         <div className="divider"></div>
