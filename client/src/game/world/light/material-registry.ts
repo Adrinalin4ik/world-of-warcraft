@@ -3,6 +3,8 @@ export interface LightBoundMaterial {
   mapLight?: unknown;
   setMapLight?(light: unknown): void;
   updateLightUniforms?(): void;
+  /** Implemented by M2MaterialNew / M2MaterialNewShaders / M2MaterialLite. Opt-in, one-shot. */
+  enableNewLightSystem?(camera: unknown, mapId?: number): void;
 }
 
 export interface ApplyResult {
@@ -64,6 +66,10 @@ export class MaterialRegistry {
 
   delete(material: LightBoundMaterial): void {
     this.materials.delete(material);
+  }
+
+  forEach(callback: (material: LightBoundMaterial) => void): void {
+    this.materials.forEach(callback);
   }
 
   clear(): void {

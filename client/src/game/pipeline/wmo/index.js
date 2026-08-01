@@ -20,11 +20,14 @@ class WMO {
   static LOAD_DOODAD_WORK_FACTOR = gameSettings.wmo.doodad.workFactor;
   static LOAD_DOODAD_WORK_MIN = gameSettings.wmo.doodad.loadMin;
 
-  constructor(filename, doodadSetIndex = null, entryID = null, parentCounters = null, particleManager = null) {
+  constructor(filename, doodadSetIndex = null, entryID = null, parentCounters = null, particleManager = null, materialRegistry = null) {
     this.filename = filename;
     this.doodadSetIndex = doodadSetIndex;
     this.entryID = entryID;
     this.particleManager = particleManager;
+    // Groups and doodads stream in progressively long after `load()` resolves, so each registers
+    // its own materials as it is placed rather than the manager harvesting the root once.
+    this.materialRegistry = materialRegistry;
 
     this.counters = this.stubCounters();
     this.parentCounters = parentCounters || this.stubCounters();
@@ -319,6 +322,10 @@ class WMO {
     // Add to scene and update matrices
     // world.scene.add(groupView)
     this.views.root.add(groupView);
+
+    if (this.materialRegistry) {
+      this.materialRegistry.addFrom(groupView);
+    }
     // ColliderManager.collidableMeshList.set(groupView.uuid, groupView);
     groupView.updateMatrix();
     groupView.updateMatrixWorld();
@@ -353,6 +360,10 @@ class WMO {
     this.views.root.add(doodad);
     doodad.updateMatrix();
     doodad.updateMatrixWorld();
+
+    if (this.materialRegistry) {
+      this.materialRegistry.addFrom(doodad);
+    }
     // this.views.root.add(doodad.boundingMesh);
     // doodad.boundingMesh.updateMatrix();
     // doodad.boundingMesh.updateMatrixWorld();

@@ -12,15 +12,27 @@ class TerrainManager {
 
   loadChunk(_index, terrain) {
     this.view.add(terrain);
-    
+
     terrain.updateMatrix();
     terrain.updateWorldMatrix();
+
+    // Register this tile's materials once, here, instead of rediscovering them by walking the whole
+    // scene every frame.
+    this.map.materialRegistry.addFrom(terrain);
 
     ColliderManager.collidableMeshList.set(terrain.uuid, terrain);
   }
 
   unloadChunk(_index, terrain) {
     this.view.remove(terrain);
+
+    terrain.traverse((child) => {
+      const material = child.material;
+      if (!material) return;
+      const materials = Array.isArray(material) ? material : [material];
+      materials.forEach((entry) => this.map.materialRegistry.delete(entry));
+    });
+
     terrain.dispose();
 
     ColliderManager.collidableMeshList.delete(terrain.uuid);

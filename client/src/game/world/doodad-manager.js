@@ -129,6 +129,8 @@ class DoodadManager {
 
       this.placeDoodad(doodad, entry.position, entry.rotation, entry.scale);
 
+      this.map.materialRegistry.addFrom(doodad);
+
       if (this.map.particleManager) {
         this.map.particleManager.register(doodad);
       }
@@ -193,6 +195,9 @@ class DoodadManager {
     this.animatedDoodads.delete(entry.id);
     this.view.remove(doodad);
 
+    // Materials are intentionally left in the registry: M2 materials are cached and shared across
+    // placements (M2Blueprint.cache), so removing them here would darken every other placement of
+    // the same model still on screen.
     M2Blueprint.unload(doodad);
   }
 

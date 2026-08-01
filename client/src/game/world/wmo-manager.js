@@ -185,7 +185,7 @@ class WMOManager {
   }
 
   processLoadEntry(entry) {
-    const wmo = new WMO(entry.filename, entry.doodadSet, entry.id, this.counters, this.view.particleManager);
+    const wmo = new WMO(entry.filename, entry.doodadSet, entry.id, this.counters, this.view.particleManager, this.view.materialRegistry);
 
     this.entries.set(entry.id, wmo);
 

@@ -7,6 +7,7 @@ import WDT from '../pipeline/wdt';
 import gameSettings from '../settings';
 import DoodadManager from './doodad-manager';
 import MapLight from './light/MapLight';
+import { MaterialRegistry } from './light/material-registry';
 import LocationManager from './location-manager';
 import TerrainManager from './terrain-manager';
 import VisibilityManager from './visibility-manager';
@@ -39,6 +40,10 @@ class WorldMap extends THREE.Group {
     this.wmoManager = new WMOManager(this, this.constructor.ZEROPOINT);
     this.visibilityManager = new VisibilityManager(this);
     this.locationManager = new LocationManager(this);
+
+    // Materials that want per-frame light uniforms. Populated at content-load time by the managers
+    // above, so the per-frame pass never walks the scene graph. See light/material-registry.ts.
+    this.materialRegistry = new MaterialRegistry();
 
     // Particles live in their own group so that doodad visibility culling cannot take them with it.
     this.particleGroup = new THREE.Group();
@@ -209,115 +214,49 @@ class WorldMap extends THREE.Group {
   propagateMapLightToAllMaterials() {
     if (!this.mapLight) return;
 
-    let materialCount = 0;
-    let setCount = 0;
+    // Bind the current light to everything already registered. This runs once from the constructor,
+    // when the registry is typically empty -- the streaming managers register as content arrives,
+    // and `updateAllMaterialsWithLight` binds each newly seen material on the next frame.
+    const { seen, applied } = this.materialRegistry.applyLight(this.mapLight);
 
-    this.traverse((child) => {
-      if (child.material) {
-        if (Array.isArray(child.material)) {
-          child.material.forEach(material => {
-            materialCount++;
-            if (material.setMapLight) {
-              material.setMapLight(this.mapLight);
-              setCount++;
-            }
-            // Also try to enable new light system if available
-            if (material.enableNewLightSystem) {
-              material.enableNewLightSystem(this.mapLight.camera, this.mapID);
-            }
-          });
-        } else {
-          materialCount++;
-          if (child.material.setMapLight) {
-            child.material.setMapLight(this.mapLight);
-            setCount++;
-          }
-          // Also try to enable new light system if available
-          if (child.material.enableNewLightSystem) {
-            child.material.enableNewLightSystem(this.mapLight.camera, this.mapID);
-          }
-        }
+    // Preserved from the traverse this replaced: the opt-in "new light system" hook on
+    // M2MaterialNew / M2MaterialNewShaders / M2MaterialLite. It was only ever called here, never
+    // on the per-frame path.
+    this.materialRegistry.forEach((material) => {
+      if (material.enableNewLightSystem) {
+        material.enableNewLightSystem(this.mapLight.camera, this.mapID);
       }
     });
 
-    console.log(`MapLight: Set MapLight on ${setCount}/${materialCount} materials`);
+    console.log(`MapLight: Set MapLight on ${applied}/${seen} materials`);
   }
 
   /**
    * Update all materials in the scene with current light data
-   */
-  /**
-   * Give a material the CURRENT map light the first time we see it (or the first time we see it
-   * again after the light system it was bound to stopped being this one), then refresh its light
-   * uniforms.
    *
-   * Adopting unseen materials here is what keeps streamed terrain lit. `setupLightSystem` only runs
-   * once, from the constructor, so it reaches nothing: ADT chunks are built lazily as tiles load in.
-   * A material that was never handed the light keeps `mapLight` null, which makes its
-   * `updateLightUniforms` a no-op, and it stays on its constructor defaults forever - fully bright,
-   * unfogged and with no time of day.
-   *
-   * The comparison is `!==`, not a truthiness check, because M2 materials are cached and shared
-   * across every placement AND every map that uses the same model (`M2Blueprint.cache`/`this.batches`
-   * -- see per-object-light.ts's doc comment). `changeMap` (world/index.ts) swaps `WorldMap.mapLight`
-   * for a brand-new `MapLight` on every zone change but never touches that cache, so a common prop --
-   * a shipwreck, a floating log pile, anything likely to reappear across zones -- keeps whatever
-   * `MapLight` it was first bound to. A truthiness check treats that stale reference as "already
-   * bound" and only ever calls `updateLightUniforms()` against it, which reads `mapLight.uniforms` off
-   * the OLD `MapLight` -- one nobody calls `.update()` on anymore, since the new `WorldMap.animate()`
-   * only updates its OWN `mapLight`. Its fog/sun/time-of-day freeze at whatever they were the instant
-   * the old zone's `MapLight` stopped ticking: on a zone that authors little or no fog, that reads as
-   * "no fog at all" while everything freshly bound to the current `MapLight` fogs correctly around it.
-   * Comparing against the CURRENT `this.mapLight` re-binds the material the next time this sweep sees
-   * it, exactly like a material that had never been bound at all.
+   * The per-material binding rule -- including WHY the staleness check is `!==` and not a truthiness
+   * check -- now lives in `light/material-registry.ts`, along with its tests.
    */
-  applyLightToMaterial(material) {
-    if (!material) {
-      return false;
-    }
-
-    let applied = false;
-
-    if (material.mapLight !== this.mapLight && material.setMapLight) {
-      // setMapLight refreshes the uniforms itself.
-      material.setMapLight(this.mapLight);
-      applied = true;
-    } else if (material.updateLightUniforms) {
-      material.updateLightUniforms();
-      applied = true;
-    }
-
-    return applied;
-  }
-
   updateAllMaterialsWithLight() {
     if (!this.mapLight) return;
 
-    let materialCount = 0;
-    let updatedCount = 0;
+    // Flat iteration over the registry. This used to be `this.traverse()` across the entire scene
+    // graph, every frame, purely to rediscover the same material set. Registration now happens once
+    // per loaded object; see light/material-registry.ts for why the rebinding check stays `!==`.
+    this.materialRegistry.applyLight(this.mapLight);
 
-    // Update ADT materials
-    this.traverse((child) => {
-      if (child.material) {
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-
-        materials.forEach((material) => {
-          materialCount++;
-          if (this.applyLightToMaterial(material)) {
-            updatedCount++;
-          }
-        });
-      }
-    });
-
-    // Update WMO materials
+    // Object-level lighting, distinct from material uniforms: these iterate their own flat maps
+    // already and are not scene walks.
     if (this.wmoManager && this.wmoManager.updateLighting) {
       this.wmoManager.updateLighting();
     }
 
-    // Update M2 materials
     if (this.doodadManager && this.doodadManager.updateLighting) {
       this.doodadManager.updateLighting();
+    }
+
+    if (this.terrainManager && this.terrainManager.updateLighting) {
+      this.terrainManager.updateLighting();
     }
   }
 
