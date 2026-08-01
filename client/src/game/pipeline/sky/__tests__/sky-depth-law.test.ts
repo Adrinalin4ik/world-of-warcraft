@@ -19,7 +19,6 @@ import * as THREE from 'three';
 import CloudDome from '../clouds';
 import CelestialBillboard from '../celestial/billboard';
 import { buildStarMaterial } from '../celestial/stars';
-import { buildSkyboxMaterial } from '../skybox/model';
 
 /** Every transparent sky element, built the way its owner builds it. */
 const transparentSkyElements = (): Array<{ name: string; material: THREE.ShaderMaterial }> => {
@@ -47,12 +46,6 @@ const transparentSkyElements = (): Array<{ name: string; material: THREE.ShaderM
     blending: 'additive',
     applyHorizonFade: false,
   });
-  // The zone/WMO skybox model's own blended layers (`sky/skybox/model.ts`'s `buildSkyboxMaterial`,
-  // celestial-sky plan Task 6): verified against `NagrandSkyBox.m2` that every batch carries a real
-  // M2 `blendingMode` >= 1 (2 or 4 there), never 0 (opaque) -- so unlike the gradient dome this
-  // becomes `transparent: true` and needs the same law, not the dome's exemption. Blend mode 2 (alpha
-  // blend) exercises the law at a representative mode; mode 0 (opaque) is covered separately below.
-  const skyboxLayer = buildSkyboxMaterial(2) as THREE.ShaderMaterial;
 
   return [
     { name: 'CloudDome', material: dome.material as THREE.ShaderMaterial },
@@ -62,7 +55,6 @@ const transparentSkyElements = (): Array<{ name: string; material: THREE.ShaderM
     { name: 'Stars', material: stars },
     { name: 'SunGlare', material: sunGlare.material as THREE.ShaderMaterial },
     { name: 'MoonGlare', material: moonGlare.material as THREE.ShaderMaterial },
-    { name: 'SkyboxLayer', material: skyboxLayer },
   ];
 };
 
