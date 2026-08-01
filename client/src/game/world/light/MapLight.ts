@@ -143,6 +143,13 @@ class MapLight extends SceneLight {
   // highlightSky=1 and a highlightSky=0 light fades the warp rather than stepping it.
   #highlightSky = 0;
 
+  // The resolved zone-skybox id (celestial-sky plan, Task 6 Step 1) -- `blendLights`' nearest-wins
+  // pick off `LightParams.lightSkyboxID` (see that function's own doc comment on why this is a pick,
+  // not a blend). `0` matches its no-data default; a real `LightSkybox.dbc` id is never 0. The Skybox
+  // renderer resolves this id to a model path itself (it owns the `LightSkybox.dbc` load), so nothing
+  // here needs the DBC at all -- publishing the bare id is the whole of this task's job.
+  #lightSkyboxID = 0;
+
   // Cloud bands stage 1 (naming and publishing the authored cloud inputs -- no coverage kernel or
   // dome exists yet, so nothing in this client reads these). Resolved by `blendLights` the same
   // per-light storm-lerped way as `#glow`/`#highlightSky` above: `cloudDensity` is the plain scalar
@@ -342,6 +349,16 @@ class MapLight extends SceneLight {
    */
   get glow() {
     return quantizeGlow(this.#glow);
+  }
+
+  /**
+   * The resolved zone-skybox id (Task 6 Step 1) -- `blendLights`' nearest-wins pick off
+   * `LightParams.lightSkyboxID`, verbatim. `0` means this location authors no zone skybox at all
+   * (draw the gradient dome); a non-zero value is a `LightSkybox.dbc` row id the `Skybox` renderer
+   * resolves to a model path.
+   */
+  get lightSkyboxID() {
+    return this.#lightSkyboxID;
   }
 
   /**
@@ -957,6 +974,7 @@ class MapLight extends SceneLight {
       cloudSunColor,
       cloudSlopeColor,
       cloudBaseColor,
+      lightSkyboxID,
     } = blendLights(
       this.#selectedLights,
       LIGHT_PARAM.PARAM_STANDARD,
@@ -973,6 +991,7 @@ class MapLight extends SceneLight {
     // doc comments and the `glow`/`skyWarp` getters that publish them.
     this.#glow = glow;
     this.#highlightSky = highlightSky;
+    this.#lightSkyboxID = lightSkyboxID;
 
     // Cloud bands stage 1 -- see `#cloudDensity`'s doc comment. Published off `MapLight` directly,
     // same as `#glow`/`#highlightSky` just above, rather than split by `SceneLightParams` location:
@@ -1085,6 +1104,7 @@ class MapLight extends SceneLight {
     // `blendLights` itself falls back to on an empty selection.
     this.#glow = 0.5;
     this.#highlightSky = 0;
+    this.#lightSkyboxID = 0;
 
     // Cloud bands stage 1: no light data means no authored cloud density/palette either. Matches the
     // reference's own no-light-record fallback (`Atmosphere::DEFAULT`) -- 0.0 density, no clouds.
@@ -1238,6 +1258,10 @@ class MapLight extends SceneLight {
           // already parsed and already looked up here -- the result was simply discarded.
           highlightSky: !!lightParams?.highlightSky,
           glow: lightParams?.glow ?? 0.5,
+          // The zone skybox id (Task 6 Step 1) -- same story as highlightSky/glow just above: already
+          // parsed onto the LightParams row, never carried through to AreaLightParams. `0` (no row at
+          // all) matches "no skybox" -- a real LightSkybox.dbc id is never 0.
+          lightSkyboxID: lightParams?.lightSkyboxID ?? 0,
         };
       }
 

@@ -241,6 +241,10 @@ export default class World extends EventEmitter {
     // rate by measuring `dt` twice; reusing `delta` here rather than a fresh clock is that fix
     // applying here too.
     this.skyManager.setMapLight(this.mapLight);
+    // Task 6 Step 2: the WMO skybox's flood-reached predicate reads this frame's portal-flood
+    // visibility flags off the WMOs `this.map.wmoManager` owns -- see `skybox/wmo-resolve.ts`. Cheap
+    // reference hand-off, same reasoning as `setMapLight` just above.
+    this.skyManager.setWmoManager(this.map?.wmoManager ?? null);
     this.skyManager.update(camera, this.map?.mapID || 0, delta);
 
     // Send delta updates to instanced M2 animation managers.

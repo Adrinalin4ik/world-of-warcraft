@@ -52,6 +52,10 @@ class WMORoot {
     // resolved here -- that is the camera-in-interior fog consumer's job (`MapLight`) -- just carried
     // through so `location.wmo.root.fogs` is reachable the same way `location.wmo.root.lights` is.
     this.fogs = def.fogs || [];
+
+    // The WMO skybox (celestial-sky plan, Task 6 Step 2, `MOSB`) -- carried through unresolved, same
+    // reasoning as `fogs` above. `null` when this root has no MOSB chunk (the overwhelming majority).
+    this.skybox = def.skybox || null;
   }
 
   createView() {

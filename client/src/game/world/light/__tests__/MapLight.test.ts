@@ -156,11 +156,11 @@ describe('MapLight#getAreaLightsFromDb slot loading', () => {
     expect(stormy.intBands[0][1].b).toBeCloseTo(1, 4); // 0x0000ff
   });
 
-  it('carries highlightSky and glow off the LightParams row onto each loaded slot', async () => {
+  it('carries highlightSky, glow and lightSkyboxID off the LightParams row onto each loaded slot', async () => {
     const lightRecord = mockLightRecord();
     setupDbcMocks(lightRecord, {
-      100: { id: 100, highlightSky: true, glow: 0.9 },
-      200: { id: 200, highlightSky: false, glow: 0.2 },
+      100: { id: 100, highlightSky: true, glow: 0.9, lightSkyboxID: 12 },
+      200: { id: 200, highlightSky: false, glow: 0.2, lightSkyboxID: 0 },
     });
 
     const mapLight = new MapLight();
@@ -168,11 +168,13 @@ describe('MapLight#getAreaLightsFromDb slot loading', () => {
 
     expect(light.params[LIGHT_PARAM.PARAM_STANDARD]!.highlightSky).toBe(true);
     expect(light.params[LIGHT_PARAM.PARAM_STANDARD]!.glow).toBeCloseTo(0.9, 4);
+    expect(light.params[LIGHT_PARAM.PARAM_STANDARD]!.lightSkyboxID).toBe(12);
     expect(light.params[LIGHT_PARAM.PARAM_STORMY]!.highlightSky).toBe(false);
     expect(light.params[LIGHT_PARAM.PARAM_STORMY]!.glow).toBeCloseTo(0.2, 4);
+    expect(light.params[LIGHT_PARAM.PARAM_STORMY]!.lightSkyboxID).toBe(0);
   });
 
-  it('defaults glow to 0.5 and highlightSky to false when the LightParams row is missing', async () => {
+  it('defaults glow to 0.5, highlightSky to false and lightSkyboxID to 0 when the LightParams row is missing', async () => {
     // Slot id 100 has no matching LightParams row at all (not even present in the fixture).
     const lightRecord = mockLightRecord({ paramsStormy: 0 });
     setupDbcMocks(lightRecord, {});
@@ -183,9 +185,23 @@ describe('MapLight#getAreaLightsFromDb slot loading', () => {
     const standard = light.params[LIGHT_PARAM.PARAM_STANDARD]!;
     expect(standard.highlightSky).toBe(false);
     expect(standard.glow).toBeCloseTo(0.5, 4);
+    expect(standard.lightSkyboxID).toBe(0);
 
     // paramsStormy was zeroed for this fixture -- still a hole, not a slot with defaulted params.
     expect(light.params[LIGHT_PARAM.PARAM_STORMY]).toBeUndefined();
+  });
+
+  it('publishes the resolved lightSkyboxID off MapLight#lightSkyboxID after a full update()', async () => {
+    const lightRecord = mockLightRecord();
+    setupDbcMocks(lightRecord, {
+      100: { id: 100, highlightSky: false, glow: 0.5, lightSkyboxID: 77 },
+      200: { id: 200, highlightSky: false, glow: 0.5, lightSkyboxID: 0 },
+    });
+
+    const mapLight = new MapLight();
+    await selectSingleLight(mapLight);
+
+    expect(mapLight.lightSkyboxID).toBe(77);
   });
 });
 

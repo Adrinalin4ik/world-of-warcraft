@@ -16,7 +16,7 @@ const mkLight = (
   fogEnd: number,
   fogStartScalar: number,
   rawFogEnd?: number,
-  options: { highlightSky?: boolean; glow?: number; celestialTint?: THREE.Color; sky?: Partial<Record<'top' | 'middle' | 'band1' | 'band2' | 'smog', THREE.Color>> } = {},
+  options: { highlightSky?: boolean; glow?: number; lightSkyboxID?: number; celestialTint?: THREE.Color; sky?: Partial<Record<'top' | 'middle' | 'band1' | 'band2' | 'smog', THREE.Color>> } = {},
 ): AreaLight => {
   const intBands: any[][] = [];
   intBands[LIGHT_INT_BAND.BAND_DIRECT_COLOR] = colorBand(new THREE.Color(0, 0, 0));
@@ -41,6 +41,7 @@ const mkLight = (
     rawFogEndBand: rawFogEnd !== undefined ? numericBand(rawFogEnd) : undefined,
     highlightSky: options.highlightSky ?? false,
     glow: options.glow ?? 0.5,
+    lightSkyboxID: options.lightSkyboxID ?? 0,
   };
 
   return {
@@ -81,6 +82,7 @@ const mkStormyLight = (): AreaLight => {
     rawFogEndBand: undefined,
     highlightSky: false,
     glow: 0.5,
+    lightSkyboxID: 0,
   };
 
   return light;
@@ -281,6 +283,7 @@ describe('blendLights sky bands and glow/highlightSky', () => {
     const blend = blendLights([], LIGHT_PARAM.PARAM_STANDARD, 0);
     expect(blend.glow).toBe(0.5);
     expect(blend.highlightSky).toBe(0);
+    expect(blend.lightSkyboxID).toBe(0);
   });
 
   it('publishes a single light\'s glow and highlightSky verbatim at full weight', () => {
@@ -310,6 +313,57 @@ describe('blendLights sky bands and glow/highlightSky', () => {
       expect(blend.glow).toBeCloseTo(0.7, 4);
       expect(blend.highlightSky).toBe(1);
     }
+  });
+});
+
+// Task 6 Step 1 of the celestial-sky plan: the zone skybox is a NEAREST-WINS pick, never a blend --
+// a model path cannot be lerped the way every scalar/colour band above can.
+describe('blendLights zone skybox (nearest-wins pick)', () => {
+  it('publishes a single light\'s lightSkyboxID verbatim at full weight', () => {
+    const light = mkLight(500, 0.25, undefined, { lightSkyboxID: 42 });
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+    expect(blend.lightSkyboxID).toBe(42);
+  });
+
+  it('picks the GREATEST-WEIGHT light\'s id outright rather than averaging across a zone boundary', () => {
+    const near = mkLight(500, 0.25, undefined, { lightSkyboxID: 7 });
+    const far = mkLight(500, 0.25, undefined, { lightSkyboxID: 0 });
+
+    const blend = blendLights(
+      [weighted(far, 0.3), weighted(near, 0.7)],
+      LIGHT_PARAM.PARAM_STANDARD,
+      0,
+    );
+    // A weighted mean would land somewhere between 0 and 7 (e.g. 4.9); nearest-wins takes exactly 7.
+    expect(blend.lightSkyboxID).toBe(7);
+  });
+
+  it('the nearest light STILL wins even when it names no skybox at all -- "nearest", not "any non-zero"', () => {
+    const near = mkLight(500, 0.25, undefined, { lightSkyboxID: 0 });
+    const far = mkLight(500, 0.25, undefined, { lightSkyboxID: 99 });
+
+    const blend = blendLights(
+      [weighted(far, 0.2), weighted(near, 0.8)],
+      LIGHT_PARAM.PARAM_STANDARD,
+      0,
+    );
+    expect(blend.lightSkyboxID).toBe(0);
+  });
+
+  it('past the halfway point of a storm crossfade, the STORMY slot\'s id wins outright', () => {
+    const light = mkLight(500, 0.25, undefined, { lightSkyboxID: 5 });
+    light.params[LIGHT_PARAM.PARAM_STORMY] = {
+      ...light.params[LIGHT_PARAM.PARAM_STANDARD]!,
+      lightSkyboxID: 9,
+    };
+
+    // `blendLights` returns a shared mutable singleton (like every other field on it) -- read each
+    // result out immediately rather than holding both `blend` references, or the second call's
+    // mutation clobbers the first.
+    const below = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0.49).lightSkyboxID;
+    const above = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0.51).lightSkyboxID;
+    expect(below).toBe(5);
+    expect(above).toBe(9);
   });
 });
 
@@ -393,6 +447,7 @@ describe('blendLights cloud bands', () => {
       rawFogEndBand: undefined,
       highlightSky: false,
       glow: 0.5,
+      lightSkyboxID: 0,
     };
 
     return light;

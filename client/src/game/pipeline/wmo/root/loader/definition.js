@@ -16,6 +16,14 @@ class WMORootDefinition {
     this.doodadSets = data.MODS.sets;
     this.doodadEntries = data.MODD.doodads;
 
+    // The WMO skybox (celestial-sky plan, Task 6 Step 2, `MOSB`) -- the painted sky a building swaps
+    // in when a flood-reached group carries MOGP/MOGI SHOW_SKYBOX (see
+    // `pipeline/sky/skybox/wmo-resolve.ts`). Not every root's MOSB is even a model path (Sunken
+    // Temple's is the literal string "the temple of atal'hakkar"); this loader carries the raw string
+    // through unfiltered -- the resolver is what decides whether a group ever actually asks for it,
+    // and the model loader is what discovers a non-M2 string can't be decoded.
+    this.skybox = this.readSkybox(data);
+
     this.summarizeGroups(data);
 
     this.createPortals(data);
@@ -115,6 +123,18 @@ class WMORootDefinition {
         attenEnd: light.attenEnd
       });
     }
+  }
+
+  /** `MOSB` is optional -- most roots have no skybox chunk at all -- and its string is fixed-width,
+   * null-padded to the chunk's own byte size, so trim at the first NUL rather than trusting the
+   * decoder to have done it. An empty (or all-whitespace) result is treated the same as "no chunk". */
+  readSkybox(data) {
+    if (!data.MOSB || !data.MOSB.skybox) {
+      return null;
+    }
+
+    const raw = String(data.MOSB.skybox).replace(/\0.*$/, '').trim();
+    return raw.length > 0 ? raw : null;
   }
 
   createBoundingBox(mohd) {

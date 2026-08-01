@@ -1,206 +1,152 @@
 import * as THREE from 'three';
 import MapLight from '../../../world/light/MapLight';
 import DBC from '../../dbc';
+import TextureLoader from '../../texture-loader';
+import { buildSkyboxMeshes, loadSkyboxBatches } from './model';
 
 /**
- * Skybox implementation using LightSkybox DBC
- * 
- * This creates a traditional skybox using cube textures from the LightSkybox DBC.
- * The skybox is positioned at the camera and rotates with it.
+ * The zone skybox (celestial-sky plan, Task 6 Step 1): `LightParams.lightSkyboxID` -> `LightSkybox.dbc`
+ * -> an M2 this zone draws in place of the gradient dome. `MapLight` already resolves the id with a
+ * nearest-wins pick (see `blendLights`' doc comment on `lightSkyboxID`); this class's whole job is
+ * turning that id into a model on screen.
+ *
+ * ## Why this no longer builds a cube texture
+ *
+ * The previous implementation of this file read `LightSkybox.dbc`'s `file` field and (when it got past
+ * its own "texture loading disabled for debugging" stub at all) tried to treat it as a set of static
+ * face colours/textures for a `THREE.CubeTexture`. That is not what the field names: `LightSkybox.dbc`
+ * names an **M2 model** (the reference's own `CM2Model` skybox, per benilla `wmo_sky.rs`'s module doc,
+ * which documents the SAME "draw the model as authored, camera-anchored, identity rotation" treatment
+ * for the sibling WMO-skybox feature), not six flat cube faces. Building a cube texture from it was
+ * building the wrong artifact from the right field. This class now decodes and draws the real M2
+ * instead of approximating it as a skybox cube -- see `./model.ts` for the shared M2 decode (also used
+ * by the WMO skybox, `./wmo.ts`) and `stars.ts`'s own module doc for why that decode bypasses
+ * `M2ManagerLite` entirely.
  */
-class Skybox extends THREE.Mesh {
-  private lightData: any = null;
-  private skyboxID: number | null = null;
-  private textures: THREE.CubeTexture | null = null;
+
+const ZONE_SKYBOX_RENDER_ORDER = -1000;
+
+class Skybox extends THREE.Group {
   private mapLight: MapLight | null = null;
+
+  // The `LightSkybox.dbc` id this instance is currently showing a model for, or `null` before any
+  // resolve has run. Distinct from `0` (a resolved "no skybox" state) so the first frame -- before
+  // `MapLight` has ever published anything -- doesn't look identical to "this zone explicitly has none".
+  private currentID: number | null = null;
+
+  private meshes: THREE.Mesh[] = [];
+
+  // Bumped on every id change so a load that resolves after a LATER id change (a fast zone swap, or a
+  // dev hot-reload) discards its result instead of replacing a newer skybox with a stale one.
+  private generation = 0;
+
+  private disposedFlag = false;
 
   constructor() {
     super();
     this.name = 'Skybox';
-    
-    // Create the skybox geometry and material
-    this.createGeometry();
-    this.createMaterial();
-    
-    // Set up the skybox to be positioned at the camera
-    this.position.set(0, 0, 0);
-    this.frustumCulled = false; // Always render regardless of camera position
-    this.renderOrder = -1000; // Render before everything else
-    
-    // Apply the same rotation as the working skybox implementation
-    this.rotation.set(
-      -Math.PI / 2,
-      Math.PI,
-      Math.PI,
-    );
-    
-    // Ensure skybox is always visible and not affected by visibility manager
-    this.visible = true;
-    this.matrixAutoUpdate = false; // Don't auto-update matrix
+    this.matrixAutoUpdate = false;
   }
 
-  /**
-   * Creates a large box geometry for the skybox
-   */
-  private createGeometry(): void {
-    const size = 2000; // Large size to cover the entire view
-    const geometry = new THREE.BoxGeometry(size, size, size);
-    
-    // Don't flip the geometry - we'll handle orientation with rotation
-    this.geometry = geometry;
+  /** Whether this zone currently names a skybox at all -- Task 6 Step 3's suppression gate reads this
+   * (combined with the WMO skybox's own `isActive`) to decide whether to hide the rest of the celestial
+   * pass. Gated on the PUBLISHED id, not on whether the model has finished loading, so a skybox zone
+   * with a slow-loading model still suppresses the gradient dome/stars/discs the instant the zone data
+   * says so -- exactly like the reference, which has no async load to straddle in the first place. */
+  public get isActive(): boolean {
+    return !!this.currentID;
   }
 
-  /**
-   * Creates the skybox material
-   */
-  private createMaterial(): void {
-    // Create materials for each face with different colors for testing
-    const materials = [
-      new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide }), // Right - Red
-      new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide }), // Left - Green
-      new THREE.MeshBasicMaterial({ color: 0x0000ff, side: THREE.DoubleSide }), // Top - Blue
-      new THREE.MeshBasicMaterial({ color: 0xffff00, side: THREE.DoubleSide }), // Bottom - Yellow
-      new THREE.MeshBasicMaterial({ color: 0xff00ff, side: THREE.DoubleSide }), // Front - Magenta
-      new THREE.MeshBasicMaterial({ color: 0x00ffff, side: THREE.DoubleSide }), // Back - Cyan
-    ];
-    
-    this.material = materials;
-    console.log('Skybox material created with 6 different colors for testing');
-  }
-
-  /**
-   * Creates a cube texture from an array of colors
-   */
-  private createCubeTextureFromColors(colors: THREE.Color[]): THREE.CubeTexture {
-    const size = 1;
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const context = canvas.getContext('2d')!;
-    
-    const cubeTexture = new THREE.CubeTexture();
-    cubeTexture.format = THREE.RGBAFormat;
-    cubeTexture.type = THREE.UnsignedByteType;
-    
-    const images: HTMLImageElement[] = [];
-    
-    for (let i = 0; i < 6; i++) {
-      const color = colors[i] || new THREE.Color(0.5, 0.5, 0.5);
-      
-      // Fill canvas with color
-      context.fillStyle = `rgb(${Math.floor(color.r * 255)}, ${Math.floor(color.g * 255)}, ${Math.floor(color.b * 255)})`;
-      context.fillRect(0, 0, size, size);
-      
-      // Create image from canvas
-      const image = new Image();
-      image.src = canvas.toDataURL();
-      images.push(image);
-    }
-    
-    cubeTexture.images = images;
-    cubeTexture.needsUpdate = true;
-    
-    return cubeTexture;
-  }
-
-  /**
-   * Loads skybox textures from LightSkybox DBC
-   */
-  private async loadSkyboxTextures(skyboxID: number): Promise<void> {
-    try {
-      // Load LightSkybox DBC
-      const lightSkyboxDBC = await DBC.load('LightSkybox');
-      const skyboxRecord = lightSkyboxDBC[skyboxID];
-      
-      if (!skyboxRecord || !skyboxRecord.file) {
-        console.warn(`No skybox record found for ID: ${skyboxID}`);
-        console.log('Available skybox IDs:', Object.keys(lightSkyboxDBC));
-        console.log('Using fallback colors instead');
-        return;
-      }
-      
-      console.log(`Loading skybox ID ${skyboxID}: ${skyboxRecord.file}`);
-      
-      // Check if the file is a texture (not .mdx)
-      if (skyboxRecord.file.endsWith('.mdx')) {
-        console.warn(`Skybox ID ${skyboxID} points to .mdx file, not texture: ${skyboxRecord.file}`);
-        console.log('MDX files are 3D models, not textures. Using fallback colors instead.');
-        return;
-      }
-      
-      // For now, skip texture loading and use fallback colors
-      console.log('Texture loading disabled for debugging. Using fallback colors.');
-      return;
-      
-    } catch (error) {
-      console.warn('Failed to load LightSkybox.dbc:', error);
-      console.log('Using fallback colors instead');
-    }
-  }
-
-  /**
-   * Updates the skybox based on current lighting conditions
-   */
-  public update(camera: THREE.Camera, mapID: number): void {
-    // Position skybox at camera position so it follows the camera
-    this.position.copy(camera.position);
-    
-    // Force skybox to be visible - override any visibility manager changes
-    this.visible = true;
-    this.frustumCulled = false;
-    
-    // Update skybox if we have light data
-    if (this.mapLight) {
-      // For now, use default skybox until we implement proper light data access
-      this.updateSkybox(null);
-    }
-  }
-
-  /**
-   * Set the map light system
-   */
-  setMapLight(mapLight: MapLight): void {
+  public setMapLight(mapLight: MapLight | null): void {
     this.mapLight = mapLight;
-    
-    // Update skybox if we have light data
-    if (this.mapLight) {
-      // For now, use default skybox until we implement proper light data access
-      this.updateSkybox(null);
+  }
+
+  public update(camera: THREE.Camera, _mapID: number): void {
+    // World-aligned, camera-anchored, identity rotation -- the same treatment the WMO skybox and
+    // `Stars` give their own camera-anchored shells (benilla `wmo_sky.rs::follow_camera`'s own doc:
+    // the model's local origin sits exactly at the eye).
+    this.position.copy(camera.position);
+    this.rotation.set(0, 0, 0);
+    this.updateMatrix();
+    this.updateMatrixWorld(true);
+
+    const id = this.mapLight?.lightSkyboxID ?? 0;
+    if (id !== this.currentID) {
+      this.currentID = id;
+      this.resolveAndLoad(id);
     }
   }
 
-  /**
-   * Updates the skybox based on light data
-   */
-  private updateSkybox(lightData: any): void {
-    if (!lightData || !lightData.params) return;
-    
-    const skyboxID = lightData.params.lightSkyboxID;
-
-    // Only load new skybox if the ID has changed
-    if (skyboxID !== null && skyboxID !== undefined && skyboxID !== this.skyboxID) {
-      this.skyboxID = skyboxID;
-      this.loadSkyboxTextures(skyboxID);
-    }
-  }
-
-  /**
-   * Disposes of the skybox resources
-   */
-  public dispose(): void {
-    if (this.geometry) {
-      this.geometry.dispose();
-    }
-    if (this.material) {
-      if (Array.isArray(this.material)) {
-        this.material.forEach(material => material.dispose());
-      } else {
-        this.material.dispose();
+  private clearMeshes(): void {
+    for (const mesh of this.meshes) {
+      this.remove(mesh);
+      mesh.geometry.dispose();
+      const material = mesh.material as THREE.MeshBasicMaterial;
+      const map = material.map;
+      material.dispose();
+      // The shared PLACEHOLDER texture (model.ts's initial map) is never refcounted by TextureLoader
+      // and must not be handed back to it -- only a texture that actually resolved through
+      // `TextureLoader.load` owns a refcount to release.
+      if (map && map !== TextureLoader.PLACEHOLDER) {
+        TextureLoader.unload(map);
       }
     }
-    if (this.textures) {
-      this.textures.dispose();
+    this.meshes = [];
+  }
+
+  private async resolveAndLoad(id: number): Promise<void> {
+    const myGeneration = ++this.generation;
+
+    this.clearMeshes();
+
+    if (!id) {
+      return;
     }
+
+    let path: string | null = null;
+    try {
+      const record = await DBC.load('LightSkybox', id);
+      path = record?.file ? String(record.file).replace(/\0.*$/, '').trim() : null;
+    } catch (error) {
+      console.error(`Skybox: failed to load LightSkybox.dbc row ${id}:`, error);
+    }
+
+    if (!path) {
+      console.warn(`Skybox: LightSkybox.dbc row ${id} names no model -- keeping the gradient dome`);
+      return;
+    }
+
+    if (this.disposedFlag || myGeneration !== this.generation) {
+      return;
+    }
+
+    let batches;
+    try {
+      batches = await loadSkyboxBatches(path);
+    } catch (error) {
+      console.error(`Skybox: failed to load zone skybox model '${path}':`, error);
+      return;
+    }
+
+    if (this.disposedFlag || myGeneration !== this.generation) {
+      return;
+    }
+
+    if (batches.length === 0) {
+      console.warn(`Skybox: zone skybox model '${path}' decoded to zero usable batches -- keeping the gradient dome`);
+      return;
+    }
+
+    const meshes = buildSkyboxMeshes(batches, ZONE_SKYBOX_RENDER_ORDER);
+    for (const mesh of meshes) {
+      this.add(mesh);
+    }
+    this.meshes = meshes;
+  }
+
+  public dispose(): void {
+    this.disposedFlag = true;
+    this.clearMeshes();
   }
 }
 

@@ -17,6 +17,13 @@ export type AreaLightParams = {
   // row itself is missing (a slot id of 0, or an id with no matching `LightParams` record) -- see
   // `MapLight#getAreaLightsFromDb`.
   glow: number;
+  // The zone skybox (celestial-sky plan, Task 6 Step 1) -- `LightParams.lightSkyboxID`, an id into
+  // `LightSkybox.dbc` naming the M2 this zone draws in place of the gradient dome, or `0` (no row id
+  // is ever 0 in the DBC) when the row authors none. Carried straight off the row like
+  // `highlightSky`/`glow` above -- previously parsed and then discarded. NOT blended: a model path
+  // cannot be lerped, so `blendLights` picks the nearest light's value rather than averaging it (see
+  // that function's own doc comment on `lightSkyboxID`).
+  lightSkyboxID: number;
 };
 
 export type AreaLight = {

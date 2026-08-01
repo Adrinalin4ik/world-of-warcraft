@@ -82,6 +82,12 @@ const blend = {
   // own fog accumulators), and per-light storm-lerped like every other band. Defaults to 0.0, the
   // reference's documented no-light-record fallback (`Atmosphere::DEFAULT.cloud_density`).
   cloudDensity: 0,
+  // The zone skybox (Task 6 Step 1, `LightParams.lightSkyboxID`) -- NOT a weighted mean like every
+  // scalar above. A model path cannot be lerped, so this is a NEAREST-WINS pick: the loop below tracks
+  // the single greatest-weight light seen so far (weight is `selectLightsForPosition`'s falloff-based
+  // contribution, so "greatest weight" is "nearest"/most-dominant) and takes THAT light's id, storm
+  // slot included. `0` (no light selected at all) matches the no-data default every other field uses.
+  lightSkyboxID: 0,
 };
 
 const tempColor = new THREE.Color();
@@ -215,6 +221,13 @@ export const blendLights = (
   // are the same set for every scalar accumulator, fog or cloud). Never packed, never touched outside
   // this per-light loop, so the per-light storm lerp below is the only place it can be skipped.
   let cloudDensityBlend = 0;
+
+  // The zone-skybox nearest-wins pick (see `blend.lightSkyboxID`'s doc comment) -- tracked alongside
+  // the weighted-mean accumulators above but resolved differently: greatest WEIGHT wins outright,
+  // never averaged. `-Infinity` so even a single light with weight 0 replaces this initial "nothing
+  // selected" state.
+  let bestSkyboxWeight = -Infinity;
+  let bestSkyboxID = 0;
 
   for (const weightedLight of weightedLights) {
     const { light, weight } = weightedLight;
@@ -450,6 +463,17 @@ export const blendLights = (
 
     cloudDensityBlend += cloudDensity * weight;
 
+    // Nearest-wins zone-skybox pick (see `blend.lightSkyboxID`'s doc comment): the storm axis gets
+    // the same "cannot lerp a path" treatment as the spatial one above -- past the halfway point of
+    // the storm crossfade this light's STORMY id wins outright rather than being blended toward it.
+    const lightSkyboxID = stormWeight >= 0.5
+      ? (stormyParams.lightSkyboxID ?? 0)
+      : (clearParams.lightSkyboxID ?? 0);
+    if (weight > bestSkyboxWeight) {
+      bestSkyboxWeight = weight;
+      bestSkyboxID = lightSkyboxID;
+    }
+
     // Water. Optional: plenty of lights define no river or ocean band at all, clear or stormy.
 
     blendOptionalBandColor(
@@ -540,6 +564,10 @@ export const blendLights = (
   // Step 2/3: the reference's documented no-light-record fallback (`Atmosphere::DEFAULT.cloud_density`)
   // is 0.0, same shape as `highlightSky`'s own empty-selection default above.
   blend.cloudDensity = fogWeightTotal > 0 ? cloudDensityBlend / fogWeightTotal : 0;
+
+  // The nearest-wins pick itself -- see `blend.lightSkyboxID`'s doc comment. `fogWeightTotal > 0` is
+  // the same "was anything selected at all" guard every other field above uses.
+  blend.lightSkyboxID = fogWeightTotal > 0 ? bestSkyboxID : 0;
 
   return blend;
 };
