@@ -70,9 +70,24 @@ class LocationManager {
 
     // Check if camera is in any of this WMO's groups
     for (const group of wmo.groups.values()) {
-      // Only hunting for interior groups
-      const isExterior = (group.header.flags & 0x08) !== 0;
-      if (isExterior) { //08 - exterior
+      // Only hunting for interior groups.
+      //
+      // The test is `MOGI & 0x48` -- EXTERIOR (0x8) OR EXTERIOR_LIT (0x40) -- not 0x8 alone. The
+      // reference forks its exterior/interior class on both bits (samples/benilla
+      // `wmo_portal/mod.rs`, decision 0475), and city WMOs are built almost entirely out of the
+      // 0x40-without-0x8 kind: measured in Stormwind, 88 loaded groups carry 0x40 without 0x8
+      // against just 10 with 0x8.
+      //
+      // Testing 0x8 alone classified every city street as an INTERIOR. `VisibilityManager.update`
+      // then took its interior branch, which leaves `map.exterior` hidden unless the portal flood
+      // reaches an exterior group -- and from a street group it never does. The result was terrain
+      // and every map doodad vanishing while the buildings stayed, standing at e.g. (-8716, 570,
+      // 109) on flags 0x2a41.
+      //
+      // This is deliberately NOT the zone-text indoor predicate, which does key on 0x8 alone; that
+      // is a separate law for area naming.
+      const isExterior = (group.header.flags & 0x48) !== 0;
+      if (isExterior) {
         continue;
       }
       // console.log(isExterior)

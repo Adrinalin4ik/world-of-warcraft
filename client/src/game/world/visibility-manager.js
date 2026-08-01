@@ -8,6 +8,21 @@ import { vec4 } from 'gl-matrix';
 
 export const ObjectsManager = [];
 
+/**
+ * MOGP EXTERIOR (0x8) and EXTERIOR_LIT (0x40): a group is drawn as OUTDOORS if it carries EITHER.
+ *
+ * The reference forks its exterior/interior class on `MOGI & 0x48`, not on 0x8 alone (samples/benilla
+ * `wmo_portal/mod.rs`, decision 0475). Testing 0x8 by itself calls every city street group an
+ * interior: measured in Stormwind, 88 of the loaded groups are 0x40-WITHOUT-0x8 against just 10 with
+ * 0x8. Standing on a street (flags 0x2a41) the flood then never reached an exterior group, so
+ * `map.exterior` stayed hidden and the whole outdoor world -- terrain and every map doodad --
+ * vanished, leaving the buildings floating in the clear colour.
+ *
+ * Note this is deliberately NOT the zone-text indoor predicate, which does key on 0x8 alone; that is
+ * a separate law for area naming and must not be unified with this one.
+ */
+const EXTERIOR_FLAGS = 0x08 | 0x40;
+
 class VisibilityManager {
 
   /**
@@ -128,7 +143,7 @@ class VisibilityManager {
       const groups = wmo.groups.values();
 
       for (const group of groups) {
-        const isExterior = (group.header.flags & 0x08) !== 0;
+        const isExterior = (group.header.flags & EXTERIOR_FLAGS) !== 0;
 
         // Only concerned with exterior groups.
         if (!isExterior) {
@@ -267,7 +282,7 @@ class VisibilityManager {
 
       const portalView = wmo.views.portals.get(ref.portalIndex);
       const destinationView = wmo.views.groups.get(destination.index);
-      const exteriorDestination = (destination.header.flags & 0x08) !== 0;
+      const exteriorDestination = (destination.header.flags & EXTERIOR_FLAGS) !== 0;
 
       // Destination group's view is pending load
       if (!destinationView) {
@@ -282,7 +297,7 @@ class VisibilityManager {
       }
 
       // Exterior to exterior links are already covered by enablePortalsFromExterior
-      if ((group.header.flags & 0x08) !== 0 && exteriorDestination) {
+      if ((group.header.flags & EXTERIOR_FLAGS) !== 0 && exteriorDestination) {
         // console.debug('Exterior to exterior links are already covered by enablePortalsFromExterior')
         continue;
       }
