@@ -89,5 +89,49 @@ Reverted. The screen-rect flood dropped rooms; it needs near-plane polygon clipp
 See the revert commit for the full analysis.
 
 ### Stage 4 gate
-Classified above. The recommended next change is `scene.matrixWorldAutoUpdate = false` plus explicit
-updates for movers. Not yet implemented — it is a decision point, and the risk is real.
+Classified above, then implemented: `scene.matrixWorldAutoUpdate = false` plus explicit updates for
+movers (`World#updateDynamicMatrices`). Verified by a differential motion test — the set of objects
+whose world matrix changes is identical with the walk on and off.
+
+## Where this ended up
+
+On the user's machine, standing in Stormwind, start of session → end:
+
+| | before | after |
+|---|---|---|
+| over-budget | 300/300 | **82/300** |
+| gpu | 16.5 ms | **6.9 ms** |
+| render CPU | 22.3 ms | **10.5 ms** |
+| draw calls | 3611 | **1947** |
+| visible WMO doodads | 1020 | **242** |
+| fps | ~35 | ~56 |
+
+Bugs fixed along the way, all pre-existing:
+
+- city streets classified as interiors, hiding the entire outdoor world (the "void");
+- terrain liquid layers never given a world matrix, masked by the per-frame walk;
+- the HUD counting only WMO doodads, so the map doodads the fade cull acts on were invisible.
+
+## The one thing left, and why it is blocked
+
+`groups` is still ~91 in a city. Those are WMO groups admitted by frustum test alone, because the
+visibility mask is `0x48` — which puts city streets OUTSIDE the portal graph entirely.
+
+The faithful value is `0x08` (benilla: a `0x40`-without-`0x8` group is "an interior-graph group lit
+as OUTDOORS"; the `0x48` fork is the LIGHTING class, not this one). Measured across three Stormwind
+vantage points:
+
+| spot | mask | location | groups | chunks | void frames |
+|---|---|---|---|---|---|
+| statue | 0x48 | exterior | 6–9 | 15–41 | 0 |
+| statue | **0x08** | exterior | **2–4** | 15–41 | 0 |
+| high | 0x48 | exterior | 8–11 | 27–51 | 0 |
+| high | **0x08** | interior | 1 | **0** | **8/8** |
+
+The portal flood culls correctly where it can reach outdoors — the statue courtyard more than halves
+its group count. But from some street groups it finds no `0x8` destination, produces no exterior
+windows, and the outdoor world disappears.
+
+**Blocked on:** making the exterior survive a flood that reaches no `0x8` group. Either generate
+windows at `EXTERIOR_LIT` boundaries too, or add an explicit fallback when the window list is empty.
+Reproduce live with `WmoFlags.visibilityMask = 0x08`.
