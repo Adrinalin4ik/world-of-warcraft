@@ -354,6 +354,13 @@ class WMO {
     quat.set(rotation.x, rotation.y, -rotation.z, -rotation.w);
 
     doodad.scale.set(-scale, -scale, scale);
+
+    // WMO doodads take the same size-bucketed distance fade as world doodads -- the reference
+    // attaches it to "every doodad/WMO submesh entity at spawn" (benilla model_fade.rs). Without
+    // this every lamp, bench and crate in a city drew at any distance: measured 1020 visible WMO
+    // doodads in Stormwind against 3611 draw calls, while perhaps a hundred were actually on screen.
+    // See pipeline/m2/fade/laws.ts. `scale` here is already a float, unlike the ADT 1024 fixed point.
+    doodad.worldFadeRadius = (doodad.vertexRadius || 0) * Math.abs(scale);
     // doodad.scale.set(-1, -1, 1);
 
     // Add to scene and update matrices

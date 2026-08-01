@@ -210,8 +210,12 @@ class VisibilityManager {
     // outright. See pipeline/m2/fade/laws.ts for the ported law.
     const radius = object.worldFadeRadius;
     if (radius !== undefined && VisibilityManager.fadeCullEnabled) {
-      const dx = object.position.x - this.cameraX;
-      const dy = object.position.y - this.cameraY;
+      // World-space translation, NOT `object.position`. A map doodad's parent is at the origin so
+      // the two agree, but a WMO doodad's position is local to its building's root -- measuring the
+      // camera distance from that would be meaningless.
+      const e = object.matrixWorld.elements;
+      const dx = e[12] - this.cameraX;
+      const dy = e[13] - this.cameraY;
       const horizDist = Math.sqrt(dx * dx + dy * dy);
       const alpha = doodadFadeAlpha(radius, horizDist);
 
