@@ -10,6 +10,12 @@ const table = {
   fogColor: new THREE.Color(),
   riverCloseColor: new THREE.Color(),
   oceanCloseColor: new THREE.Color(),
+  // The celestial diffuse (celestial-sky plan, Task 1, `LIGHT_INT_BAND` row 9 -- `BAND_SUN_COLOR`,
+  // corrected off-by-one from row 8; see constants.ts's doc comment). Live-verified as a genuine,
+  // day/night-structured sun colour (warm orange dawn/dusk, pale white noon, cool blue-white night)
+  // in every real Light.dbc record checked -- treated as REQUIRED like the sun/sky bands above, not
+  // optional like the cloud palette below, on that evidence.
+  celestialTint: new THREE.Color(),
   // The five authored sky-dome gradient stops, zenith -> horizon (Task 4, `LIGHT_INT_BAND` rows 2-6).
   // Row 7 (the horizon/fog colour) is `fogColor` above -- it was already published under that name.
   skyTopColor: new THREE.Color(),
@@ -34,6 +40,7 @@ const stormTable = {
   fogColor: new THREE.Color(),
   riverCloseColor: new THREE.Color(),
   oceanCloseColor: new THREE.Color(),
+  celestialTint: new THREE.Color(),
   skyTopColor: new THREE.Color(),
   skyMiddleColor: new THREE.Color(),
   skyBand1Color: new THREE.Color(),
@@ -51,6 +58,7 @@ const blend = {
   fogParams: new THREE.Vector4(),
   riverCloseColor: new THREE.Color(),
   oceanCloseColor: new THREE.Color(),
+  celestialTint: new THREE.Color(),
   skyTopColor: new THREE.Color(),
   skyMiddleColor: new THREE.Color(),
   skyBand1Color: new THREE.Color(),
@@ -170,6 +178,7 @@ export const blendLights = (
   blend.fogColor.setScalar(0);
   blend.riverCloseColor.setScalar(0);
   blend.oceanCloseColor.setScalar(0);
+  blend.celestialTint.setScalar(0);
   blend.skyTopColor.setScalar(0);
   blend.skyMiddleColor.setScalar(0);
   blend.skyBand1Color.setScalar(0);
@@ -254,6 +263,21 @@ export const blendLights = (
     );
 
     addWeightedColor(blend.sunAmbientColor, table.sunAmbientColor, weight);
+
+    // The celestial diffuse (Task 1 of the celestial-sky plan) -- the "big 0485 correction": the
+    // discs' and glares' RGB is not hardcoded, it rides this ONE band, resolved through the same
+    // per-light storm lerp as every other required band above.
+    resolveBandColor(
+      clearIntBands,
+      stormyIntBands,
+      LIGHT_INT_BAND.BAND_SUN_COLOR,
+      timeProgression,
+      stormWeight,
+      table.celestialTint,
+      stormTable.celestialTint,
+    );
+
+    addWeightedColor(blend.celestialTint, table.celestialTint, weight);
 
     // Sky dome gradient stops (Task 4) -- rows 2-6, zenith -> horizon, each a REQUIRED band exactly
     // like direct/ambient above (every real Light.dbc params row authors all five), resolved through

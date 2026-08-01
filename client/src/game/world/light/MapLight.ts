@@ -152,6 +152,14 @@ class MapLight extends SceneLight {
   #cloudSlopeColor = new THREE.Color(0.35, 0.38, 0.42);
   #cloudBaseColor = new THREE.Color(0.75, 0.78, 0.82);
 
+  // The celestial diffuse (celestial-sky plan, Task 1) -- `LIGHT_INT_BAND.BAND_SUN_COLOR`, blended by
+  // `blendLights` through the same per-light storm lerp as every other required band. Drives the sun
+  // disc, sun glare, white-moon disc and moon glare tint every frame (alpha forced to 1 on the colour
+  // side; see `celestialTint`'s doc comment) -- warm cream at night, orange at dawn/dusk. No sky-body
+  // renderer exists yet to consume it (Tasks 2-5 build those); publishing it off `MapLight` IS this
+  // task. Defaults to white so a pre-resolve frame tints nothing rather than reading black.
+  #celestialTint = new THREE.Color(1, 1, 1);
+
   // The cloud glow body's camera->body direction and its day envelope -- the colour pass's two
   // time-driven inputs. See `#updateCloudGlow` for the sign convention and the frame, both of which
   // are easy to get wrong in ways that still produce a picture. Defaults point straight up at full
@@ -332,6 +340,17 @@ class MapLight extends SceneLight {
   /** The cloud palette's gradient base (`LIGHT_INT_BAND.BAND_CLOUD_BASE_COLOR`). */
   get cloudBaseColor() {
     return this.#cloudBaseColor;
+  }
+
+  /**
+   * The celestial diffuse (`LIGHT_INT_BAND.BAND_SUN_COLOR`) -- see `#celestialTint`'s doc comment.
+   * The one colour that drives the sun disc, sun glare, white-moon disc and moon glare's RGB every
+   * frame (celestial-sky plan, Risk 1: "hardcoding disc colours looks right at midday and is wrong at
+   * every other hour"). Not location-split (interior/exterior) like the sun/sky bands above: the sky
+   * bodies are an outdoor-only concern and there is exactly one tint to publish.
+   */
+  get celestialTint() {
+    return this.#celestialTint;
   }
 
   /**
@@ -843,6 +862,7 @@ class MapLight extends SceneLight {
       fogParams,
       riverCloseColor,
       oceanCloseColor,
+      celestialTint,
       fogStartScalar,
       rawFogEnd,
       skyTopColor,
@@ -880,6 +900,11 @@ class MapLight extends SceneLight {
     this.#cloudSunColor.copy(cloudSunColor);
     this.#cloudSlopeColor.copy(cloudSlopeColor);
     this.#cloudBaseColor.copy(cloudBaseColor);
+
+    // The celestial diffuse (Task 1) -- published off `MapLight` directly, same reasoning as the
+    // cloud bands just above: no sky body exists yet to read this per-location, and the reference
+    // broadcasts one tint regardless of where the camera stands.
+    this.#celestialTint.copy(celestialTint);
 
     // Both sides get the same values. `location` selects which params object the getters return, so
     // any difference between the two would show up as a hard step the frame the camera crosses a
@@ -986,6 +1011,10 @@ class MapLight extends SceneLight {
     this.#cloudSunColor.setRGB(1.0, 0.98, 0.9);
     this.#cloudSlopeColor.setRGB(0.35, 0.38, 0.42);
     this.#cloudBaseColor.setRGB(0.75, 0.78, 0.82);
+
+    // No light data means no celestial diffuse either -- white, so a pre-resolve/no-data frame tints
+    // nothing rather than reading black (matches `#celestialTint`'s own field default).
+    this.#celestialTint.setRGB(1, 1, 1);
   }
 
   #selectLights(position: THREE.Vector3) {

@@ -16,11 +16,12 @@ const mkLight = (
   fogEnd: number,
   fogStartScalar: number,
   rawFogEnd?: number,
-  options: { highlightSky?: boolean; glow?: number; sky?: Partial<Record<'top' | 'middle' | 'band1' | 'band2' | 'smog', THREE.Color>> } = {},
+  options: { highlightSky?: boolean; glow?: number; celestialTint?: THREE.Color; sky?: Partial<Record<'top' | 'middle' | 'band1' | 'band2' | 'smog', THREE.Color>> } = {},
 ): AreaLight => {
   const intBands: any[][] = [];
   intBands[LIGHT_INT_BAND.BAND_DIRECT_COLOR] = colorBand(new THREE.Color(0, 0, 0));
   intBands[LIGHT_INT_BAND.BAND_AMBIENT_COLOR] = colorBand(new THREE.Color(0, 0, 0));
+  intBands[LIGHT_INT_BAND.BAND_SUN_COLOR] = colorBand(options.celestialTint ?? new THREE.Color(0, 0, 0));
   intBands[LIGHT_INT_BAND.BAND_SKY_TOP_COLOR] = colorBand(options.sky?.top ?? new THREE.Color(0, 0, 0));
   intBands[LIGHT_INT_BAND.BAND_SKY_MIDDLE_COLOR] = colorBand(options.sky?.middle ?? new THREE.Color(0, 0, 0));
   intBands[LIGHT_INT_BAND.BAND_SKY_BAND_1_COLOR] = colorBand(options.sky?.band1 ?? new THREE.Color(0, 0, 0));
@@ -309,6 +310,62 @@ describe('blendLights sky bands and glow/highlightSky', () => {
       expect(blend.glow).toBeCloseTo(0.7, 4);
       expect(blend.highlightSky).toBe(1);
     }
+  });
+});
+
+// Task 1 of the celestial-sky plan: the celestial diffuse (`LIGHT_INT_BAND.BAND_SUN_COLOR`), the "big
+// 0485 correction" -- one colour drives every celestial disc/glare's RGB, resolved through the same
+// per-light storm lerp and weighted-mean machinery as the sun/sky bands above.
+describe('blendLights celestial tint', () => {
+  it('publishes a single light\'s celestial tint verbatim at full weight', () => {
+    const light = mkLight(500, 0.25, undefined, { celestialTint: new THREE.Color(0.9, 0.6, 0.3) });
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0);
+
+    expect(blend.celestialTint.toArray()).toEqual([0.9, 0.6, 0.3]);
+  });
+
+  it('blends the celestial tint as a weighted mean across two lights', () => {
+    const a = mkLight(500, 0.25, undefined, { celestialTint: new THREE.Color(1, 0, 0) });
+    const b = mkLight(200, 0.5, undefined, { celestialTint: new THREE.Color(0, 1, 0) });
+
+    const blend = blendLights(
+      [weighted(a, 0.5), weighted(b, 0.5)],
+      LIGHT_PARAM.PARAM_STANDARD,
+      0,
+    );
+
+    expect(blend.celestialTint.r).toBeCloseTo(0.5, 4);
+    expect(blend.celestialTint.g).toBeCloseTo(0.5, 4);
+  });
+
+  it('lerps the celestial tint toward the stormy slot by stormWeight, same as every other band', () => {
+    const light = mkLight(500, 0.25, undefined, { celestialTint: new THREE.Color(0, 0, 0) });
+    light.params[LIGHT_PARAM.PARAM_STORMY] = {
+      ...light.params[LIGHT_PARAM.PARAM_STANDARD]!,
+      id: 1,
+      intBands: (() => {
+        const bands: any[][] = [...light.params[LIGHT_PARAM.PARAM_STANDARD]!.intBands];
+        bands[LIGHT_INT_BAND.BAND_SUN_COLOR] = colorBand(new THREE.Color(1, 1, 1));
+        return bands;
+      })(),
+    };
+
+    const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, 0.5);
+    expect(blend.celestialTint.r).toBeCloseTo(0.5, 4);
+  });
+
+  it('is unaffected by storm weight when the light has no stormy slot (a hole)', () => {
+    const light = mkLight(500, 0.25, undefined, { celestialTint: new THREE.Color(0.4, 0.5, 0.6) });
+    for (const stormWeight of [0, 0.5, 1]) {
+      const blend = blendLights([weighted(light, 1.0)], LIGHT_PARAM.PARAM_STANDARD, 0, stormWeight);
+      expect(blend.celestialTint.toArray()).toEqual([0.4, 0.5, 0.6]);
+    }
+  });
+
+  it('does not divide by zero (and is not NaN) on an empty light list', () => {
+    const blend = blendLights([], LIGHT_PARAM.PARAM_STANDARD, 0);
+    expect(Number.isNaN(blend.celestialTint.r)).toBe(false);
+    expect(blend.celestialTint.toArray()).toEqual([0, 0, 0]);
   });
 });
 
