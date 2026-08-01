@@ -36,7 +36,19 @@ const App: React.FC = () => {
       path: "/game",
       element: <GameScreen session={gameSession} />
     },
-  ]);
+  ], {
+    // Serve the same route table from a sub-path when the app is not at the domain root.
+    //
+    // On a GitHub Pages PROJECT site the app lives under `/<repo>/`, so the browser's URL for the
+    // game screen is `/world-of-warcraft/game`, not `/game`. Without a basename every route above
+    // fails to match and the app renders nothing but a blank page -- which looks like a build
+    // failure rather than a routing one.
+    //
+    // `PUBLIC_URL` is inlined at build time by the CRA build (`config/paths.js` derives it from the
+    // env var or package.json's `homepage`). It is empty for a normal local build and for `yarn
+    // start`, and react-router rejects an empty basename, hence the `/` fallback.
+    basename: process.env.PUBLIC_URL || '/',
+  });
 
   return (
     <div className="wowser">

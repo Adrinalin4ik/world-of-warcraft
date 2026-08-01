@@ -10,7 +10,8 @@
     "build:beta": "cross-env NODE_ENV=production npm run build",
     "proxy": "node websockify.js",
     "proxy1": "npm run proxy 3724 logon.nw-wow.ru:3724",
-    "proxy2": "npm run proxy 8086 95.181.139.52:8086"
+    "proxy2": "npm run proxy 8086 95.181.139.52:8086",
+    "build:gh-pages": "cross-env NODE_ENV=production PUBLIC_URL=/world-of-warcraft node scripts/build.js && node scripts/gh-pages-postbuild.js"
   },
   "dependencies": {
     "@babel/core": "7.29.7",

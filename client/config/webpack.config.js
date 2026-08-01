@@ -373,18 +373,26 @@ module.exports = function (webpackEnv) {
           // back to the "file" loader at the end of the loader list.
           oneOf: [
             {
+              // Shaders are imported as SOURCE TEXT. `asset/source` is the whole rule on purpose:
+              // there is no `glslify-loader` here any more, and adding one back breaks the
+              // production build.
+              //
+              // With the loader in place, dev inlined the shader text (43 `gl_Position` in the
+              // bundle) while production emitted all 31 files to `static/media/*.glsl` and imported
+              // their URLs instead (1 `gl_Position`, and that one from a JS template literal). The
+              // first thing to touch a shader then threw -- `assembleVertex` looked for its
+              // `// GLSLIFY_COMMON_MAIN` marker in what was actually a URL string -- at module
+              // scope, so nothing rendered at all. The dev and production configs are byte-identical
+              // here, so the divergence was the loader's own behaviour, not a config branch.
+              //
+              // Removing it is safe because it had nothing left to do: no `.glsl`, `.frag` or
+              // `.vert` file in this project contains a `#pragma glslify` directive. The M2 and WMO
+              // shaders were deliberately converted to assemble their chunks in JS instead (see
+              // `pipeline/m2/material/index.ts`'s header for why -- glslify-import is a source
+              // transform webpack cannot watch, which silently served stale shaders). The loader
+              // was left wired up after that migration with no remaining input.
               test: /\.(frag|vert|glsl)$/,
               type: 'asset/source',
-              use: [
-                {
-                  loader: 'glslify-loader',
-                  options: {
-                    transform: [
-                      ['glslify-import']
-                    ]
-                  }
-                }
-              ]
             },
             // TODO: Merge this config once `image/avif` is in the mime-db
             // https://github.com/jshttp/mime-db

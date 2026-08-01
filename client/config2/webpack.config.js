@@ -293,6 +293,18 @@ module.exports = function (webpackEnv) {
       ],
     },
     resolve: {
+      // Node core polyfills, which webpack 5 stopped providing automatically. Mirrors `config/`'s
+      // own list -- see the `ProvidePlugin` below for why this config was missing them and what that
+      // broke. The binary format parsers (`wow-data-parser`, via `restructure`) are the consumers:
+      // they read M2/WMO/BLP/DBC files out of `Buffer`s and streams.
+      fallback: {
+        process: require.resolve('process/browser'),
+        zlib: require.resolve('zlib-browserify'),
+        stream: require.resolve('stream-browserify'),
+        util: require.resolve('util'),
+        buffer: require.resolve('buffer'),
+        asset: require.resolve('assert'),
+      },
       // This allows you to set a fallback for where webpack should look for modules.
       // We placed these paths second because we want `node_modules` to "win"
       // if there are any conflicts. This matches Node resolution mechanism.
@@ -310,6 +322,18 @@ module.exports = function (webpackEnv) {
         .map(ext => `.${ext}`)
         .filter(ext => useTypeScript || !ext.includes('ts')),
       alias: {
+        // `stream` must mean `stream-browserify`, and an ALIAS is the only thing that achieves it
+        // here -- `resolve.fallback` cannot, because fallback applies only when resolution FAILS.
+        // This client has a direct dependency on the npm package literally named `stream`
+        // (`stream@0.0.2`, a 2013 shim), so a bare `require('stream')` resolves successfully to that
+        // and never reaches the fallback. That shim predates streams3 and exposes no `Readable`, so
+        // `restructure`'s CoffeeScript `EncodeStream` -- which does `__super__` inheritance off
+        // `stream.Readable` -- threw `Cannot read properties of undefined (reading 'prototype')` at
+        // module scope and killed the whole bundle before React mounted.
+        //
+        // `config/` (dev) has always had this alias; `config2/` (production) did not, which is the
+        // third and last reason a built app had never run. Keep the two in step.
+        'stream': 'stream-browserify',
         // Support React Native Web
         // https://www.smashingmagazine.com/2016/08/a-glimpse-into-the-future-with-react-native-for-web/
         'react-native': 'react-native-web',
@@ -354,6 +378,29 @@ module.exports = function (webpackEnv) {
           // match the requirements. When no loader matches it will fall
           // back to the "file" loader at the end of the loader list.
           oneOf: [
+            // Shaders, imported as SOURCE TEXT. This rule was missing here, and its absence meant
+            // the production build had never worked.
+            //
+            // This repo has TWO webpack configs: `scripts/start.js` (dev) loads `config/`, while
+            // `scripts/build.js` (production) loads `config2/`. `config/` has always had this rule;
+            // `config2/` did not. So every `.glsl` import fell through to the `asset/resource`
+            // fallback at the end of this list and resolved to a URL string instead of the shader
+            // source -- 31 files emitted to `static/media/*.glsl`, and `gl_Position` appearing once
+            // in the whole bundle instead of 43 times.
+            //
+            // The first code to touch a shader then threw at module scope (`assembleVertex` looking
+            // for its `// GLSLIFY_COMMON_MAIN` marker in what was really a URL), so a production
+            // build rendered a blank page with no canvas at all. Nothing downstream could work,
+            // which is why this is worth a rule rather than a workaround.
+            //
+            // No loader: no `.glsl`, `.frag` or `.vert` in this project contains a `#pragma glslify`
+            // directive any more -- the M2 and WMO shaders assemble their chunks in JS instead (see
+            // `pipeline/m2/material/index.ts`'s header for why). `config/`'s copy of this rule still
+            // listed `glslify-loader`; it had no remaining input and is gone from both.
+            {
+              test: /\.(frag|vert|glsl)$/,
+              type: 'asset/source',
+            },
             // TODO: Merge this config once `image/avif` is in the mime-db
             // https://github.com/jshttp/mime-db
             {
@@ -566,6 +613,18 @@ module.exports = function (webpackEnv) {
       ].filter(Boolean),
     },
     plugins: [
+      // `Buffer` and `process` as free globals. webpack 5 no longer shims Node globals, and the
+      // binary parsers use `Buffer` directly (`Buffer.from(new Uint8Array(raw))` when decoding M2s,
+      // skins, BLPs and DBCs), so without this a production bundle threw `ReferenceError: Buffer is
+      // not defined` on the first asset decode and rendered nothing.
+      //
+      // Like the shader rule above, this existed in `config/` (used by `scripts/start.js` for dev)
+      // but not in `config2/` (used by `scripts/build.js` for production) -- which is why the app
+      // worked in development and had never worked when built.
+      new webpack.ProvidePlugin({
+        Buffer: ['buffer', 'Buffer'],
+        process: 'process/browser',
+      }),
       // Generates an `index.html` file with the <script> injected.
       new HtmlWebpackPlugin(
         Object.assign(

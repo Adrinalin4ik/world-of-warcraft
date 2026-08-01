@@ -1,0 +1,100 @@
+# Build the browser client and publish it to GitHub Pages.
+#
+# Publishing model: the build is uploaded as an artifact and deployed by `actions/deploy-pages`,
+# NOT committed to a `gh-pages` branch. That means Pages must be configured with
+# Settings -> Pages -> Build and deployment -> Source = "GitHub Actions". With the branch source
+# selected instead, this workflow runs green and nothing ever appears on the site.
+#
+# The site is a PROJECT page, so it is served from `https://<owner>.github.io/world-of-warcraft/`
+# rather than a domain root. `PUBLIC_URL` below sets that sub-path; it feeds both the asset URLs
+# (via the CRA build) and the router's `basename` (see `client/src/app.tsx`). If this repo is ever
+# renamed, or moved to a user/organisation page or a custom domain, PUBLIC_URL is the one value to
+# change -- and for a domain root it becomes an empty string, not `/`.
+name: Deploy client to GitHub Pages
+
+on:
+  push:
+    branches:
+      # `master` is the long-term home, but this project's work currently lives on
+      # `feature/remote-assets` (master is ~160 commits behind it), so deploying only master would
+      # publish a years-old build. Both are listed deliberately; drop the feature branch once it
+      # merges.
+      - master
+      - feature/remote-assets
+    # Only rebuild when something that affects the bundle changed. The repo also carries native
+    # tools, extracted game data and design docs, none of which reach the client build.
+    paths:
+      - 'client/**'
+      - '.github/workflows/deploy-client.yml'
+  workflow_dispatch:
+
+# GITHUB_TOKEN needs `pages: write` + `id-token: write` for the deploy step's OIDC exchange;
+# `contents: read` is all the build needs.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a run finish rather than being cancelled mid-deploy, but keep only one queued behind it --
+# the site only ever reflects the newest successful build anyway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the version this client is developed against; its ejected CRA toolchain is old
+          # enough that a newer major is a real risk, not a hypothetical one.
+          node-version: '18'
+          cache: yarn
+          cache-dependency-path: client/yarn.lock
+
+      # The client carries BOTH a yarn.lock and a package-lock.json. Yarn is what the project is
+      # actually developed and tested with, so the lockfile that governs CI is yarn's -- and
+      # --frozen-lockfile makes a drifted lockfile fail here rather than silently resolving
+      # different versions than a developer gets.
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: yarn test --watchAll=false
+        env:
+          CI: true
+
+      - name: Build
+        run: yarn build:gh-pages
+        env:
+          # CRA promotes warnings to errors when CI is set, and this codebase has a long tail of
+          # pre-existing lint warnings (unused vars, anonymous default exports). Failing the deploy
+          # on those would mean fixing hundreds of unrelated warnings before anything ships, so the
+          # build runs with CI unset. The typecheck and test steps above are the real gates.
+          CI: ''
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: client/build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
