@@ -4,6 +4,8 @@
 import {
   applySkyAzimuthWarp,
   cap96,
+  cloudGlowIsSun,
+  cloudGlowTrack,
   dawnDuskCurve,
   evalProbe,
   floor112,
@@ -12,6 +14,7 @@ import {
   INTERIOR_LIGHT_AXIS,
   interpDayNight,
   Lobe,
+  moonDirection,
   propProbeCoeffs,
   PropLobeLight,
   quantizeGlow,
@@ -429,5 +432,59 @@ describe('SceneLight fog range', () => {
 
     expect(scene.fogEnd).toBeCloseTo(end, 4);
     expect(scene.fogStart).toBeCloseTo(start, 4);
+  });
+});
+
+describe('cloud glow envelope + moon direction', () => {
+  // Mirrors benilla's own `cloud_glow_track_matches_the_client_envelope` test byte-for-byte, since
+  // the non-monotonic table's whole point is the seam wrap this test pins down.
+  it('is full at noon, notches to zero at dawn/dusk, and wraps back to full past the dusk notch', () => {
+    expect(cloudGlowTrack(720)).toBe(1.0); // noon
+    expect(cloudGlowTrack(0.20139 * 1440)).toBe(0.0); // the 04:50 notch
+
+    const notch = cloudGlowTrack(0.9236 * 1440); // approaching the 22:10 notch from below
+    expect(notch).toBeLessThan(0.01);
+
+    // The cliff: one minute-step past the notch, the array-order scan runs off the non-monotonic
+    // tail and the seam wrap snaps the envelope back to 1.0 -- the verified mechanism this whole
+    // table exists to reproduce. Sorting the table would make this assertion fail.
+    expect(cloudGlowTrack(0.9237 * 1440)).toBe(1.0);
+    expect(cloudGlowTrack(0.95 * 1440)).toBe(1.0); // deep night stays wrapped to full
+
+    const midDusk = cloudGlowTrack(0.9097 * 1440); // halfway 21:30 -> 22:10
+    expect(midDusk).toBeCloseTo(0.5, 2);
+  });
+
+  it('picks the sun inside the 04:50-22:10 window and the moon outside it, agreeing with the glow window', () => {
+    expect(cloudGlowIsSun(720)).toBe(true); // noon
+    expect(cloudGlowIsSun(0.95 * 1440)).toBe(false); // deep night
+
+    // The window's own edges, inclusive.
+    expect(cloudGlowIsSun(0.2013889 * 1440)).toBe(true);
+    expect(cloudGlowIsSun(0.9236111 * 1440)).toBe(true);
+    expect(cloudGlowIsSun(0.2013888 * 1440)).toBe(false);
+    expect(cloudGlowIsSun(0.9236112 * 1440)).toBe(false);
+  });
+
+  it('parks the moon below the horizon at noon and overhead at midnight, agreeing with cloudGlowIsSun', () => {
+    const noon = moonDirection(720);
+    const midnight = moonDirection(0);
+
+    // z = cosPhi in this client's unpermuted WoW frame (see moonDirection's doc comment): positive
+    // is above the WoW-frame horizon, matching MapLight's existing sun-direction convention.
+    expect(noon[2]).toBeLessThan(0); // below the horizon at noon
+    expect(midnight[2]).toBeGreaterThan(0); // overhead at midnight
+
+    expect(cloudGlowIsSun(720)).toBe(true); // sun drives the glow when the moon is down
+    expect(cloudGlowIsSun(0)).toBe(false); // moon drives the glow when it's up
+  });
+
+  it('holds the moon at a constant 45 degree azimuth, the suns own bearing', () => {
+    const heading = (d: Vec3) => Math.atan2(d[1], d[0]);
+    const expected = Math.PI * 0.25;
+
+    for (const minute of [0, 180, 480, 720, 900, 1200, 1439]) {
+      expect(heading(moonDirection(minute))).toBeCloseTo(expected, 5);
+    }
   });
 });

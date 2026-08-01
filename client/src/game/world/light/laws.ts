@@ -243,6 +243,78 @@ export function sidnNightFraction(minute: number): number {
 }
 
 /**
+ * The cloud sun-glow envelope (benilla `daynight.rs::cloud_glow_track`, the internal static 8-key
+ * track at `0xce9ab8`, built once by `0x6ce390` from constants -- NOT a Light.dbc band). ~1.0 across
+ * the full day, notching to 0 at the twilight boundaries.
+ *
+ * The key array is stored NON-MONOTONIC ON PURPOSE: keys 6 and 7 sit before key 5 in time. Do NOT
+ * sort this table. The array-order scan in [`interpDayNight`] advances past every key strictly less
+ * than the query and stops at the first one that isn't, so once the scan has passed key 4 (21:30) and
+ * key 5 (22:10, the dusk notch), keys 6 and 7 are behind the cursor and can never be selected again
+ * that lap -- they are structurally unreachable, not merely small. A query just past 22:10 therefore
+ * runs off the end of the array (`ahead === n`) and wraps to interpolate from key 5 (0.0) forward to
+ * key 0 (1.0, 04:00) -- the seam that snaps deep night back to full glow. That wrap is byte-verified
+ * in the reference; only the *intent* behind storing unreachable keys is flagged INFERRED there.
+ */
+const CLOUD_GLOW_CURVE: Array<[number, number]> = [
+  [0.16667, 1.0], // 04:00 -- full
+  [0.19444, 0.0], // 04:40 -- dawn notch
+  [0.20139, 0.0], // 04:50
+  [0.22917, 1.0], // 05:30 -- full through the day
+  [0.89583, 1.0], // 21:30
+  [0.92361, 0.0], // 22:10 -- dusk notch
+  [0.88889, 0.0], // structurally unreachable -- stored order kept, see the doc comment above
+  [0.91667, 1.0], // ditto; this is the seam the >22:10 wrap lands on
+];
+
+/** The cloud glow envelope at a game minute-of-day. See [`CLOUD_GLOW_CURVE`]. */
+export function cloudGlowTrack(minute: number): number {
+  return interpDayNight(CLOUD_GLOW_CURVE, minute / 1440);
+}
+
+/**
+ * The cloud glow's body pick (benilla `daynight.rs::cloud_glow_is_sun`, `0x6cfb00` setup): the SUN
+ * drives the glow while the day fraction sits in `[0.2013889, 0.9236111]` (~04:50-22:10), the MOON
+ * otherwise. Both bounds are inclusive, matching the reference's `RangeInclusive::contains`.
+ */
+export function cloudGlowIsSun(minute: number): boolean {
+  const dp = minute / 1440;
+  return dp >= 0.2013889 && dp <= 0.9236111;
+}
+
+/**
+ * The visible WHITE moon direction (benilla `daynight.rs::moon_direction`, elevation table
+ * `0xce8d24`, VERIFIED off `0x6d3b80`): polar angle from the up axis sweeps 35 degrees (overhead at
+ * midnight) to 100 degrees (parked below the horizon 04:00 through 22:00), azimuth a constant 45
+ * degrees -- the sun's own bearing (table `0xce8d0c`).
+ *
+ * Frame: this client keeps the WoW spherical formula in WoW's OWN frame, unpermuted -- established
+ * from `MapLight#updateSunDirection`, which builds `x = sinPhi*cosTheta, y = sinPhi*sinTheta,
+ * z = cosPhi` straight from `SUN_PHI_TABLE`/`SUN_THETA_TABLE` with no axis swap and no Y-up
+ * conversion (the reference is Bevy/+Y-up and applies `wow_to_bevy`; this client never does that
+ * permutation for the sun, so the moon must match it, not the reference's raw numbers). This returns
+ * the to-moon direction in that same frame: `z = cosPhi > 0` is above the WoW-frame horizon (z-up),
+ * matching `MapLight`'s existing convention where `z = cosPhi` is negative for the sun's downward
+ * travel direction while the sun itself sits above the horizon.
+ */
+export function moonDirection(minute: number): Vec3 {
+  const ELEV_TABLE: Array<[number, number]> = [
+    [0.0, Math.PI * 0.194444], // 35 deg -- midnight (overhead)
+    [0.003472, Math.PI * 0.194444], // 35 deg
+    [0.166667, Math.PI * 0.555556], // 100 deg -- 04:00 (sets below the horizon)
+    [0.916667, Math.PI * 0.555556], // 100 deg -- 22:00 (still below the horizon)
+    [0.996528, Math.PI * 0.194444], // 35 deg -- risen again before midnight
+  ];
+  const THETA = Math.PI * 0.25; // 45 deg, constant -- shares the sun's bearing
+
+  const phi = interpDayNight(ELEV_TABLE, minute / 1440);
+  const sinPhi = Math.sin(phi);
+  const cosPhi = Math.cos(phi);
+
+  return [sinPhi * Math.cos(THETA), sinPhi * Math.sin(THETA), cosPhi];
+}
+
+/**
  * The dawn/dusk sky-dome warp strength curve (benilla `daynight.rs::SKY_WARP_CURVE`, table
  * `0xce9b2c`): two triangular spikes at sunrise (~06:29) and sunset (~21:29), and zero everywhere
  * else -- all of midday AND deep night.
