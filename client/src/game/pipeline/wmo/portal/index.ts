@@ -41,10 +41,6 @@ class WMOPortal {
 
     this.createGeometry(vertices);
     this.createMaterial();
-
-    setInterval(() => {
-      this.material.color = new THREE.Color(0xff0000);
-    }, 1000)
   }
 
   createView() {

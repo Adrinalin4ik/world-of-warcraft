@@ -1,6 +1,11 @@
 import { vec4, mat4 } from 'gl-matrix';
 import * as THREE from 'three';
 import THREEUtil from '../../../utils/three-util';
+
+// Reused across localToWorld conversions. These run per portal vertex, per portal, per frame; a
+// fresh Vector3 per vertex was the single largest allocator in the cull pass.
+const SCRATCH_VERTEX = new THREE.Vector3();
+
 class WMOPortalView extends THREE.Mesh {
 
   constructor(portal, geometry, material) {
@@ -95,14 +100,17 @@ class WMOPortalView extends THREE.Mesh {
     const origin = camera.position;
 
     // Obtain vertices in world space
+    // These world-space vertices are retained by the clipper, so each needs its own Vector3 -- but
+    // the intermediate copy does not.
     for (let vindex = 0, vcount = this.legacyGeometry.vertices.length; vindex < vcount; ++vindex) {
-      const local = this.legacyGeometry.vertices[vindex].clone();
-      const world = this.localToWorld(local);
+      const world = new THREE.Vector3().copy(this.legacyGeometry.vertices[vindex]);
+      this.localToWorld(world);
       vertices.push(world);
     }
 
     // Check distance to portal
-    const distance = this.portal.plane.distanceToPoint(this.worldToLocal(origin.clone()));
+    SCRATCH_VERTEX.copy(origin);
+    const distance = this.portal.plane.distanceToPoint(this.worldToLocal(SCRATCH_VERTEX));
     const close = distance < 1.0 && distance > -1.0;
 
     // If the portal is very close, use the portal vertices unedited; otherwise, clip the portal
@@ -163,8 +171,9 @@ class WMOPortalView extends THREE.Mesh {
       let inside = 0;
 
       for (let vindex = 0, vcount = vertices.length; vindex < vcount; ++vindex) {
-        const vertex = this.localToWorld(vertices[vindex].clone());
-        const distance = plane.distanceToPoint(vertex);
+        SCRATCH_VERTEX.copy(vertices[vindex]);
+        this.localToWorld(SCRATCH_VERTEX);
+        const distance = plane.distanceToPoint(SCRATCH_VERTEX);
 
         if (distance >= 0.0) {
           inside++;

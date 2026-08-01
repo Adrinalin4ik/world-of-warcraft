@@ -26,8 +26,9 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private camera: THREE.PerspectiveCamera;
   public debugCamera: THREE.PerspectiveCamera;
   public cameraHelper: THREE.CameraHelper;
-  private prevCameraRotation: THREE.Quaternion | null = null;
-  private prevCameraPosition: THREE.Vector3 | null = null;
+  private prevCameraRotation: THREE.Quaternion = new THREE.Quaternion();
+  private prevCameraPosition: THREE.Vector3 = new THREE.Vector3();
+  private hasPrevCamera = false;
   private renderer: THREE.WebGLRenderer | null = null;
   private debugRenderer: THREE.WebGLRenderer | null = null;
   private clock: THREE.Clock = new THREE.Clock();
@@ -209,10 +210,9 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     }
 
     const cameraMoved: boolean =
-    this.prevCameraRotation === null ||
-    this.prevCameraPosition === null ||
-    !this.prevCameraRotation.equals(this.camera.quaternion) ||
-    !this.prevCameraPosition.equals(this.camera.position);
+      !this.hasPrevCamera ||
+      !this.prevCameraRotation.equals(this.camera.quaternion) ||
+      !this.prevCameraPosition.equals(this.camera.position);
     
     this.perf.sections.begin('world.animate');
     this.game.world.animate(delta, this.camera, cameraMoved);
@@ -231,8 +231,9 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
           this.debugRenderer.render(this.game.world.scene, this.debugCamera);
       }
 
-      this.prevCameraRotation = this.camera.quaternion.clone();
-      this.prevCameraPosition = this.camera.position.clone();
+      this.prevCameraRotation.copy(this.camera.quaternion);
+      this.prevCameraPosition.copy(this.camera.position);
+      this.hasPrevCamera = true;
       if (this.controls.current) {
         this.controls.current.update(delta);
       }

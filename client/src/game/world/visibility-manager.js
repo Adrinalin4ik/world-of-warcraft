@@ -22,6 +22,11 @@ class VisibilityManager {
         visibleDoodads: 0
       }
     };
+
+    // Per-frame scratch. `update` runs every frame the camera moves; allocating a Frustum and a
+    // Matrix4 here rather than inside it keeps the cull pass allocation-free at its top level.
+    this.scratchFrustum = new THREE.Frustum();
+    this.scratchViewProjection = new THREE.Matrix4();
   }
 
   update(cameras) {
@@ -50,7 +55,7 @@ class VisibilityManager {
     // Obtain a frustum matching the camera
     // const cameraHelper = new THREE.CameraHelper(camera);
     // const projectionMatrix = camera.projectionMatrix;
-    const frustum = new THREE.Frustum();
+    const frustum = this.scratchFrustum;
     // const frustum = new THREE.Frustum(
     //   (new THREE.Plane(-projectionMatrix.elements[3] - projectionMatrix.elements[0], -projectionMatrix.elements[7] - projectionMatrix.elements[4], -projectionMatrix.elements[11] - projectionMatrix.elements[8], -projectionMatrix.elements[15] - projectionMatrix.elements[12])),
     //   (new THREE.Plane(-projectionMatrix.elements[3] + projectionMatrix.elements[0], -projectionMatrix.elements[7] + projectionMatrix.elements[4], -projectionMatrix.elements[11] + projectionMatrix.elements[8], -projectionMatrix.elements[15] + projectionMatrix.elements[12])),
@@ -59,7 +64,8 @@ class VisibilityManager {
     //   (new THREE.Plane(-projectionMatrix.elements[2], -projectionMatrix.elements[6], -projectionMatrix.elements[10], -projectionMatrix.elements[14]))
     // );
     // debugger;
-    frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    this.scratchViewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    frustum.setFromProjectionMatrix(this.scratchViewProjection);
     // frustum.setFromProjectionMatrix(camera.projectionMatrix);
     // debugger;
     // this.map.add(new PlaneHelper(frustum))
