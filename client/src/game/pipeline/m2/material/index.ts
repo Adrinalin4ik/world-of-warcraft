@@ -56,6 +56,107 @@ const assembleVertex = (body: string) => {
   return `${vertexCommonHeader}\n${body.replace('// GLSLIFY_COMMON_MAIN', vertexCommonMain)}`;
 };
 
+/**
+ * The WoW M2 blend-mode -> three.js blend-state mapping, extracted so callers that are NOT
+ * `M2Material` (its `defines.BLENDING_MODE` / `uniforms.alphaKey` are specific to its own hand-written
+ * combiner shaders) can still get the exact same GL blend factors -- the zone/WMO skybox models
+ * (`sky/skybox/model.ts`) are the first of these: their batches carry real M2 `blendingMode` values
+ * (modes 2 and 4 observed on Nagrand's `NagrandSkyBox.m2`) and must not re-derive this mapping.
+ *
+ * Carries the same hard-won fix `M2Material.applyBlendingMode` does: modes >= 1 pin
+ * `blendSrcAlpha = ZeroFactor` / `blendDstAlpha = OneFactor` so a draw never writes the framebuffer's
+ * alpha channel (see `d348889` and this function's own comment below for why that matters on a
+ * premultiplied-alpha canvas composited over the page).
+ */
+export function applyBlendingModeToMaterial(material: THREE.Material, blendingMode: number): void {
+  if (blendingMode >= 1) {
+    material.transparent = true;
+    material.blending = THREE.CustomBlending;
+  }
+
+  switch (blendingMode) {
+    case 0:
+      material.blending = THREE.NoBlending;
+      material.blendSrc = THREE.OneFactor;
+      material.blendDst = THREE.ZeroFactor;
+      break;
+
+    case 1:
+      material.alphaTest = 0.5;
+      material.side = THREE.DoubleSide;
+
+      material.blendSrc = THREE.OneFactor;
+      material.blendDst = THREE.ZeroFactor;
+      material.blendSrcAlpha = THREE.OneFactor;
+      material.blendDstAlpha = THREE.ZeroFactor;
+      break;
+
+    case 2:
+      material.blendSrc = THREE.SrcAlphaFactor;
+      material.blendDst = THREE.OneMinusSrcAlphaFactor;
+      material.blendSrcAlpha = THREE.SrcAlphaFactor;
+      material.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+      break;
+
+    case 3:
+      material.blendSrc = THREE.SrcColorFactor;
+      material.blendDst = THREE.DstColorFactor;
+      material.blendSrcAlpha = THREE.SrcAlphaFactor;
+      material.blendDstAlpha = THREE.DstAlphaFactor;
+      break;
+
+    case 4:
+      material.blendSrc = THREE.SrcAlphaFactor;
+      material.blendDst = THREE.OneFactor;
+      material.blendSrcAlpha = THREE.SrcAlphaFactor;
+      material.blendDstAlpha = THREE.OneFactor;
+      break;
+
+    case 5:
+      material.blendSrc = THREE.DstColorFactor;
+      material.blendDst = THREE.ZeroFactor;
+      material.blendSrcAlpha = THREE.DstAlphaFactor;
+      material.blendDstAlpha = THREE.ZeroFactor;
+      break;
+
+    case 6:
+      material.blendSrc = THREE.DstColorFactor;
+      material.blendDst = THREE.SrcColorFactor;
+      material.blendSrcAlpha = THREE.DstAlphaFactor;
+      material.blendDstAlpha = THREE.SrcAlphaFactor;
+      break;
+
+    default:
+      break;
+  }
+
+  // Emulate the reference's OPAQUE backbuffer: keep every mode's RGB factors exactly as authored
+  // above, but never let a draw touch the framebuffer's ALPHA channel, so it stays at the cleared
+  // 1.0 across the whole frame.
+  //
+  // Why this is needed at all: a browser canvas is composited over the page, and three.js requests
+  // `alpha: true` for the context unconditionally (its own `alpha` parameter only chooses the clear
+  // alpha), with `premultipliedAlpha: true`. So the compositor reads our NON-premultiplied output as
+  // premultiplied and adds `(1 - a)` of whatever is behind the canvas -- nothing here, so white.
+  // Any fragment that leaves sub-1 alpha in the buffer gets a bright halo.
+  //
+  // It stayed hidden while `assignShaders` forced `Combiners_Opaque` on every M2, because that
+  // writes `result.a = vertexColor.a` (effectively 1). The authored combiners write real texture
+  // alpha -- `Combiners_Mod` is `sampled0.a * vertexColor.a * animatedTransparency` -- and mode 1
+  // (alpha key) had `blendSrcAlpha` One / `blendDstAlpha` Zero, which stores it verbatim. Alpha
+  // testing keeps every edge texel in [0.5, 1], so all of Elwynn's foliage gained a white fringe.
+  //
+  // Zero/One fixes the whole class rather than foliage alone: the genuinely blended modes (2, 4, 6 --
+  // waterfalls, spell effects) mirrored their RGB factors into alpha and left sub-1 values behind
+  // too. Mode 0 is `NoBlending`, which ignores these factors and writes the shader's alpha directly;
+  // it is left as-is because `Combiners_Opaque` is the only combiner that pairs with it and its
+  // alpha is already 1.
+  if (blendingMode >= 1) {
+    material.blendSrcAlpha = THREE.ZeroFactor;
+    material.blendDstAlpha = THREE.OneFactor;
+  }
+}
+
 class M2Material extends THREE.ShaderMaterial {
 
   private mapLight: MapLight | null = null;
@@ -257,92 +358,7 @@ class M2Material extends THREE.ShaderMaterial {
       this.uniforms.alphaKey = { value: 0.0 };
     }
 
-    if (blendingMode >= 1) {
-      this.transparent = true;
-      this.blending = THREE.CustomBlending;
-    }
-
-    switch (blendingMode) {
-      case 0:
-        this.blending = THREE.NoBlending;
-        this.blendSrc = THREE.OneFactor;
-        this.blendDst = THREE.ZeroFactor;
-        break;
-
-      case 1:
-        this.alphaTest = 0.5;
-        this.side = THREE.DoubleSide;
-
-        this.blendSrc = THREE.OneFactor;
-        this.blendDst = THREE.ZeroFactor;
-        this.blendSrcAlpha = THREE.OneFactor;
-        this.blendDstAlpha = THREE.ZeroFactor;
-        break;
-
-      case 2:
-        this.blendSrc = THREE.SrcAlphaFactor;
-        this.blendDst = THREE.OneMinusSrcAlphaFactor;
-        this.blendSrcAlpha = THREE.SrcAlphaFactor;
-        this.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
-        break;
-
-      case 3:
-        this.blendSrc = THREE.SrcColorFactor;
-        this.blendDst = THREE.DstColorFactor;
-        this.blendSrcAlpha = THREE.SrcAlphaFactor;
-        this.blendDstAlpha = THREE.DstAlphaFactor;
-        break;
-
-      case 4:
-        this.blendSrc = THREE.SrcAlphaFactor;
-        this.blendDst = THREE.OneFactor;
-        this.blendSrcAlpha = THREE.SrcAlphaFactor;
-        this.blendDstAlpha = THREE.OneFactor;
-        break;
-
-      case 5:
-        this.blendSrc = THREE.DstColorFactor;
-        this.blendDst = THREE.ZeroFactor;
-        this.blendSrcAlpha = THREE.DstAlphaFactor;
-        this.blendDstAlpha = THREE.ZeroFactor;
-        break;
-
-      case 6:
-        this.blendSrc = THREE.DstColorFactor;
-        this.blendDst = THREE.SrcColorFactor;
-        this.blendSrcAlpha = THREE.DstAlphaFactor;
-        this.blendDstAlpha = THREE.SrcAlphaFactor;
-        break;
-
-      default:
-        break;
-    }
-
-    // Emulate the reference's OPAQUE backbuffer: keep every mode's RGB factors exactly as authored
-    // above, but never let a draw touch the framebuffer's ALPHA channel, so it stays at the cleared
-    // 1.0 across the whole frame.
-    //
-    // Why this is needed at all: a browser canvas is composited over the page, and three.js requests
-    // `alpha: true` for the context unconditionally (its own `alpha` parameter only chooses the clear
-    // alpha), with `premultipliedAlpha: true`. So the compositor reads our NON-premultiplied output as
-    // premultiplied and adds `(1 - a)` of whatever is behind the canvas -- nothing here, so white.
-    // Any fragment that leaves sub-1 alpha in the buffer gets a bright halo.
-    //
-    // It stayed hidden while `assignShaders` forced `Combiners_Opaque` on every M2, because that
-    // writes `result.a = vertexColor.a` (effectively 1). The authored combiners write real texture
-    // alpha -- `Combiners_Mod` is `sampled0.a * vertexColor.a * animatedTransparency` -- and mode 1
-    // (alpha key) had `blendSrcAlpha` One / `blendDstAlpha` Zero, which stores it verbatim. Alpha
-    // testing keeps every edge texel in [0.5, 1], so all of Elwynn's foliage gained a white fringe.
-    //
-    // Zero/One fixes the whole class rather than foliage alone: the genuinely blended modes (2, 4, 6 --
-    // waterfalls, spell effects) mirrored their RGB factors into alpha and left sub-1 values behind
-    // too. Mode 0 is `NoBlending`, which ignores these factors and writes the shader's alpha directly;
-    // it is left as-is because `Combiners_Opaque` is the only combiner that pairs with it and its
-    // alpha is already 1.
-    if (blendingMode >= 1) {
-      this.blendSrcAlpha = THREE.ZeroFactor;
-      this.blendDstAlpha = THREE.OneFactor;
-    }
+    applyBlendingModeToMaterial(this, blendingMode);
   }
 
   assignShaders(shaderNames) {
