@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { buildSkyboxMeshes, disposeSkyboxMesh, loadSkyboxBatches, SkyboxBatch, updateSkyboxAnimatedAlpha } from './model';
+import TextureLoader from '../../texture-loader';
+import { buildSkyboxMeshes, loadSkyboxBatches, SkyboxBatch } from './model';
 import { resolveActiveWmoSkybox } from './wmo-resolve';
 
 /**
@@ -22,12 +23,6 @@ type BuiltSkybox = {
    * frame, and the gradient dome stays the correct fallback for it (mirrors benilla's own
    * `BuiltSkyboxes`, which records a failed path too). */
   settled: boolean;
-  /** This entry's own meshes (empty until the load settles) -- kept off `group.children` so
-   * `updateSkyboxAnimatedAlpha` doesn't have to filter out a possible future non-mesh child. */
-  meshes: THREE.Mesh[];
-  /** Wall-clock ms (`Date.now()`) this entry's `buildAndCache` call started -- the free-running clock
-   * its batches' global-sequence alpha tracks loop against (`model.ts`'s own module doc, point 2). */
-  loadedAtMs: number;
 };
 
 class WmoSkybox extends THREE.Group {
@@ -57,10 +52,6 @@ class WmoSkybox extends THREE.Group {
   public update(camera: THREE.Camera, wmoManager: any): void {
     this.position.copy(camera.position);
     this.rotation.set(0, 0, 0);
-    // Normalised-to-unit-shell geometry (`loadSkyboxBatches`) rescaled to the camera's own far clip,
-    // like every other sky shell in this client -- see model.ts's own "Placement" doc.
-    const far = (camera as THREE.PerspectiveCamera).far ?? 500;
-    this.scale.setScalar(far * 0.9);
     this.updateMatrix();
     this.updateMatrixWorld(true);
 
@@ -74,18 +65,12 @@ class WmoSkybox extends THREE.Group {
     if (path && !this.built.has(path)) {
       this.buildAndCache(path);
     }
-
-    for (const entry of this.built.values()) {
-      if (entry.meshes.length > 0) {
-        updateSkyboxAnimatedAlpha(entry.meshes, Date.now() - entry.loadedAtMs);
-      }
-    }
   }
 
   private buildAndCache(path: string): void {
     const group = new THREE.Group();
     this.add(group);
-    const entry: BuiltSkybox = { group, loading: true, settled: false, meshes: [], loadedAtMs: Date.now() };
+    const entry: BuiltSkybox = { group, loading: true, settled: false };
     this.built.set(path, entry);
 
     loadSkyboxBatches(path)
@@ -99,12 +84,10 @@ class WmoSkybox extends THREE.Group {
           console.warn(`WmoSkybox: '${path}' decoded to zero usable batches -- keeping the gradient dome`);
           return;
         }
-        entry.loadedAtMs = Date.now();
         const meshes = buildSkyboxMeshes(batches, WMO_SKYBOX_RENDER_ORDER);
         for (const mesh of meshes) {
           group.add(mesh);
         }
-        entry.meshes = meshes;
         // Only the currently-resolved path should be visible; a build that settles after the camera
         // already moved on must not pop a stale skybox onto the screen.
         group.visible = this.activePath === path;
@@ -119,8 +102,14 @@ class WmoSkybox extends THREE.Group {
   public dispose(): void {
     this.disposedFlag = true;
     for (const entry of this.built.values()) {
-      for (const mesh of entry.meshes) {
-        disposeSkyboxMesh(mesh);
+      for (const mesh of entry.group.children as THREE.Mesh[]) {
+        mesh.geometry.dispose();
+        const material = mesh.material as THREE.MeshBasicMaterial;
+        const map = material.map;
+        material.dispose();
+        if (map && map !== TextureLoader.PLACEHOLDER) {
+          TextureLoader.unload(map);
+        }
       }
     }
     this.built.clear();

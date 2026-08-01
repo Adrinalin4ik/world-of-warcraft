@@ -19,7 +19,6 @@ import * as THREE from 'three';
 import CloudDome from '../clouds';
 import CelestialBillboard from '../celestial/billboard';
 import { buildStarMaterial } from '../celestial/stars';
-import { buildSkyboxMaterial } from '../skybox/model';
 
 /** Every transparent sky element, built the way its owner builds it. */
 const transparentSkyElements = (): Array<{ name: string; material: THREE.ShaderMaterial }> => {
@@ -47,11 +46,6 @@ const transparentSkyElements = (): Array<{ name: string; material: THREE.ShaderM
     blending: 'additive',
     applyHorizonFade: false,
   });
-  // The zone/WMO skybox M2 (celestial-sky plan, Task 6): every real batch carries blendingMode 2 or 4
-  // (`model.ts`'s own module doc), never 0 -- covered here at both, since `buildSkyboxMaterial`
-  // branches on the mode.
-  const skyboxAlpha = buildSkyboxMaterial(2) as THREE.ShaderMaterial;
-  const skyboxAdditive = buildSkyboxMaterial(4) as THREE.ShaderMaterial;
 
   return [
     { name: 'CloudDome', material: dome.material as THREE.ShaderMaterial },
@@ -61,8 +55,6 @@ const transparentSkyElements = (): Array<{ name: string; material: THREE.ShaderM
     { name: 'Stars', material: stars },
     { name: 'SunGlare', material: sunGlare.material as THREE.ShaderMaterial },
     { name: 'MoonGlare', material: moonGlare.material as THREE.ShaderMaterial },
-    { name: 'SkyboxAlpha', material: skyboxAlpha },
-    { name: 'SkyboxAdditive', material: skyboxAdditive },
   ];
 };
 

@@ -88,31 +88,15 @@ class SkyManager {
   private sunGlare: SunGlare;
   private moonGlare: MoonGlare;
 
-  // Task 6 Step 3's suppression rule -- ONE gate over the discrete celestial bodies (plan Risk 3: "six
-  // independent checks will drift; one gate will not"). Stars, both discs and both moons live inside
-  // this group, and `updateSkyboxSuppression` below is the ONLY place that touches its `.visible`.
-  // `skybox` (the legacy method-selectable flat skybox), `sunGlare` and `moonGlare` are deliberately
-  // NOT inside it: a skybox replaces this group, and the glare renders outside the sky pass entirely
-  // (per the reference; see `glare.ts`'s own module doc) -- gating either of those here would be wrong.
-  //
-  // The gradient dome and cloud dome used to live in here too, suppressed by the SAME boolean as the
-  // bodies -- see `backdropGroup`'s own doc comment for why they were pulled out.
+  // Task 6 Step 3's suppression rule -- ONE gate over the whole celestial pass (plan Risk 3: "six
+  // independent checks will drift; one gate will not"). Every element `CSky::Render`'s shared boolean
+  // would hide -- stars, both discs, both moons, the gradient dome (cone OR procedural), and the cloud
+  // dome -- lives inside this group, and `updateSkyboxSuppression` below is the ONLY place that
+  // touches its `.visible`. `skybox` (the legacy method-selectable flat skybox), `sunGlare` and
+  // `moonGlare` are deliberately NOT inside it: a skybox replaces this group, and the glare renders
+  // outside the sky pass entirely (per the reference; see `glare.ts`'s own module doc) -- gating either
+  // of those here would be wrong.
   private celestialGroup: THREE.Group;
-
-  // The gradient/procedural sky (cone OR procedural, whichever `setMethod` last picked) plus the cloud
-  // dome -- split out of `celestialGroup` because the two skybox kinds this client draws are NOT
-  // equally reliable full replacements for them. The WMO skybox (`MOSB`, a building interior's sealed
-  // cube) is: benilla's own capture of `CSky::Render` inside Stratholme's King's Square shows exactly
-  // three draws total, the skybox's own texture pairs and nothing else, because the cube has no gaps.
-  // The ZONE skybox (`LightSkybox.dbc`) is not: verified against `NagrandSkyBox.m2` (Nagrand, 87
-  // batches), its batches are a loose set of small, non-contiguous cloud-layer/ray/stream quads with
-  // real gaps between them (confirmed by rendering each batch's raw texture alpha channel directly --
-  // solid black gaps between wisp-shaped quads, no batch covering huge stretches of the dome at all).
-  // Suppressing this group for the zone skybox the way `celestialGroup` still is left those gaps as
-  // literal empty canvas -- transparent pixels a `premultipliedAlpha` canvas composites as the page's
-  // white background, not a sky. So `backdropGroup` is hidden only for the WMO skybox; the zone
-  // skybox's sparse layers draw ON TOP of it, which is what their gaps were authored expecting.
-  private backdropGroup: THREE.Group;
 
   // Task 6 Step 1: the zone skybox (`LightSkybox.dbc`) -- automatic, driven off `MapLight.
   // lightSkyboxID` every frame, unlike the legacy method-selectable `skybox` above. Owned
@@ -131,12 +115,8 @@ class SkyManager {
     this.celestialGroup.name = 'CelestialGroup';
     this.scene.add(this.celestialGroup);
 
-    this.backdropGroup = new THREE.Group();
-    this.backdropGroup.name = 'SkyBackdropGroup';
-    this.scene.add(this.backdropGroup);
-
     this.cloudDome = new CloudDome();
-    this.backdropGroup.add(this.cloudDome);
+    this.celestialGroup.add(this.cloudDome);
 
     // First on the plan's draw-order ladder (renderOrder -1003) -- constructed first so the scene
     // graph's own order roughly mirrors the ladder, though renderOrder is what actually decides it.
@@ -217,13 +197,13 @@ class SkyManager {
     if (method === 'cone') {
       console.log('SkyManager: Creating sky cone...');
       this.skyCone = new SkyCone();
-      this.backdropGroup.add(this.skyCone);
+      this.celestialGroup.add(this.skyCone);
       console.log('SkyManager: Sky cone added to scene');
     } else if (method === 'procedural') {
       console.log('SkyManager: Creating procedural sky...');
       this.proceduralSky = new ProceduralSky();
       this.proceduralSky.setMapLight(this.mapLight);
-      this.backdropGroup.add(this.proceduralSky);
+      this.celestialGroup.add(this.proceduralSky);
       console.log('SkyManager: Procedural sky added to scene');
     } else if (method === 'skybox') {
       console.log('SkyManager: Creating skybox...');
@@ -238,13 +218,13 @@ class SkyManager {
    */
   private removeCurrentSky(): void {
     if (this.skyCone) {
-      this.backdropGroup.remove(this.skyCone);
+      this.celestialGroup.remove(this.skyCone);
       this.skyCone.dispose();
       this.skyCone = null;
     }
 
     if (this.proceduralSky) {
-      this.backdropGroup.remove(this.proceduralSky);
+      this.celestialGroup.remove(this.proceduralSky);
       this.proceduralSky.dispose();
       this.proceduralSky = null;
     }
@@ -307,27 +287,10 @@ class SkyManager {
    * capture in Stratholme's King's Square shows exactly three draws, the skybox cube's own texture
    * pairs, and nothing else). Only the glare survives, because it renders outside this pass -- see
    * `celestialGroup`'s own doc comment for why `sunGlare`/`moonGlare` are never touched here.
-   *
-   * That capture was of the WMO skybox (a building interior's `MOSB`) -- a sealed, fully-enclosing
-   * cube with no gaps, exactly the kind of thing that can safely stand in for the ENTIRE sky. The
-   * zone skybox (`LightSkybox.dbc`) is a different animal: verified against `NagrandSkyBox.m2`, its
-   * 87 batches are a loose set of small, non-contiguous cloud-layer/ray/stream quads -- large
-   * stretches of the dome have no batch covering them at all (confirmed by rendering each batch's raw
-   * texture alpha channel directly: solid black gaps between wisp-shaped quads). Suppressing the
-   * gradient dome and cloud dome for THIS case leaves those gaps as literal empty canvas -- transparent
-   * pixels that the browser composites as white page background, not a sky. So only the WMO skybox
-   * gets the full six-element suppression; the zone skybox suppresses just the discrete bodies (stars,
-   * sun, both moons -- still wrong to show a sun disc through cloud wisps that don't occlude it) and
-   * leaves the gradient dome + cloud dome as the backdrop its own sparse layers were authored to sit
-   * over.
    */
   private updateSkyboxSuppression(): void {
     const suppressed = this.zoneSkybox.isActive || this.wmoSkybox.isActive;
     this.celestialGroup.visible = !suppressed;
-    // See `backdropGroup`'s own doc comment: only the WMO skybox (a sealed, gap-free cube) is a full
-    // enough replacement to hide the gradient/cloud backdrop. The zone skybox's sparse batches need it
-    // showing through their gaps.
-    this.backdropGroup.visible = !this.wmoSkybox.isActive;
   }
 
   /**
@@ -474,7 +437,6 @@ class SkyManager {
     this.isEnabled = enabled;
 
     this.celestialGroup.visible = enabled;
-    this.backdropGroup.visible = enabled;
 
     if (this.skybox) {
       this.skybox.visible = enabled;
@@ -525,7 +487,7 @@ class SkyManager {
    */
   public dispose(): void {
     this.removeCurrentSky();
-    this.backdropGroup.remove(this.cloudDome);
+    this.celestialGroup.remove(this.cloudDome);
     this.cloudDome.dispose();
     this.celestialGroup.remove(this.stars);
     this.stars.dispose();
@@ -536,7 +498,6 @@ class SkyManager {
     this.celestialGroup.remove(this.moon02);
     this.moon02.dispose();
     this.scene.remove(this.celestialGroup);
-    this.scene.remove(this.backdropGroup);
     this.scene.remove(this.sunGlare);
     this.sunGlare.dispose();
     this.scene.remove(this.moonGlare);
