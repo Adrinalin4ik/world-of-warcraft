@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
 import DebugPanel from '../../pages/game/debug/debug';
+import { doodadFadeAlpha } from '../pipeline/m2/fade/laws';
 import THREEUtil from '../utils/three-util';
 import { PlaneHelper } from '../utils/plane-helper';
 import { vec4 } from 'gl-matrix';
@@ -27,6 +28,10 @@ class VisibilityManager {
     // Matrix4 here rather than inside it keeps the cull pass allocation-free at its top level.
     this.scratchFrustum = new THREE.Frustum();
     this.scratchViewProjection = new THREE.Matrix4();
+
+    // Camera position for the horizontal fade distance, refreshed once per update().
+    this.cameraX = 0;
+    this.cameraY = 0;
   }
 
   update(cameras) {
@@ -47,7 +52,10 @@ class VisibilityManager {
     if (!camera) {
       return;
     }
-    
+
+    this.cameraX = camera.position.x;
+    this.cameraY = camera.position.y;
+
     // camera.updateMatrix(); // make sure camera's local matrix is updated
     // camera.updateMatrixWorld(); // make sure camera's world matrix is updated
     // camera.updateProjectionMatrix(); // make sure camera's world matrix is updated
@@ -123,11 +131,11 @@ class VisibilityManager {
           continue;
         }
 
-        // Cache world-space bounding box on group view
-        if (!view.worldBoundingBox) {
-          // console.log(view, wmo.views.root)
+        // Cache world-space bounding box on group view, invalidated when the root moves.
+        const rootMatrixKey = wmo.views.root.matrixWorld.elements.join(',');
+        if (!view.worldBoundingBox || view.worldBoundingBoxKey !== rootMatrixKey) {
           view.worldBoundingBox = group.boundingBox.clone().applyMatrix4(wmo.views.root.matrixWorld);
-          // console.log(view.worldBoundingBox)
+          view.worldBoundingBoxKey = rootMatrixKey;
         }
 
         // If the current frustum does not include the group view, we can skip it
@@ -171,15 +179,57 @@ class VisibilityManager {
   }
 
   enableStaticObjectInFrustum(object, frustum) {
-    // Cache world-space bounding box
-    if (!object.worldBoundingBox) {
-      // object.geometry.computeBoundingBox();
-      object.worldBoundingBox = object.geometry.boundingBox.clone().applyMatrix4(object.matrixWorld);
+    // The distance fade runs BEFORE the frustum test: it is far cheaper (two subtractions and a
+    // compare against the object's own radius) and it rejects the bulk of a dense zone's props
+    // outright. See pipeline/m2/fade/laws.ts for the ported law.
+    const radius = object.worldFadeRadius;
+    if (radius !== undefined) {
+      const dx = object.position.x - this.cameraX;
+      const dy = object.position.y - this.cameraY;
+      const horizDist = Math.sqrt(dx * dx + dy * dy);
+      const alpha = doodadFadeAlpha(radius, horizDist);
+
+      object.fadeAlpha = alpha;
+
+      // `fade <= 0` means the object contributes nothing and is not added to the draw list at all.
+      if (alpha <= 0) {
+        return;
+      }
     }
 
-    if (THREEUtil.frustumContainsBox(frustum, object.worldBoundingBox)) {
+    this.refreshWorldBoundingBox(object);
+
+    if (object.worldBoundingBox && THREEUtil.frustumContainsBox(frustum, object.worldBoundingBox)) {
       object.visible = true;
     }
+  }
+
+  /**
+   * Recompute the cached world-space bounding box when the object's world matrix has changed.
+   *
+   * This used to be a compute-once cache with no invalidation, so any object that moved after its
+   * first culled frame was tested against a stale box forever.
+   *
+   * The key is a string built from the matrix elements. That is only acceptable because it is
+   * computed once per object and only when the object has actually moved -- a static doodad hits
+   * the early return on the identity compare below. If this ever shows up in the HUD's profile,
+   * replace it with a numeric revision counter bumped by whatever moves the object.
+   */
+  refreshWorldBoundingBox(object) {
+    const matrix = object.matrixWorld;
+    const version = matrix.elements.join(',');
+
+    if (object.worldBoundingBox && object.worldBoundingBoxKey === version) {
+      return;
+    }
+
+    const source = object.geometry && object.geometry.boundingBox;
+    if (!source) {
+      return;
+    }
+
+    object.worldBoundingBox = source.clone().applyMatrix4(matrix);
+    object.worldBoundingBoxKey = version;
   }
 
   traversePortalsAndEnable(depth, camera, wmo, group, frustum = null, visitedPortals = new Set()) {
