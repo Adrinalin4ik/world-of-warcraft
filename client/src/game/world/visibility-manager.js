@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import { doodadFadeAlpha } from '../pipeline/m2/fade/laws';
 import { FULL_SCREEN_RECT } from '../pipeline/wmo/portal/rect';
+import { WmoFlags } from './wmo-flags';
 import THREEUtil from '../utils/three-util';
 import { PlaneHelper } from '../utils/plane-helper';
 import { vec4 } from 'gl-matrix';
@@ -12,20 +13,6 @@ export const ObjectsManager = [];
 // Camera position converted into a WMO view's local space, once per group visited per frame.
 const SCRATCH_CAMERA_LOCAL = new THREE.Vector3();
 
-/**
- * MOGP EXTERIOR (0x8) and EXTERIOR_LIT (0x40): a group is drawn as OUTDOORS if it carries EITHER.
- *
- * The reference forks its exterior/interior class on `MOGI & 0x48`, not on 0x8 alone (samples/benilla
- * `wmo_portal/mod.rs`, decision 0475). Testing 0x8 by itself calls every city street group an
- * interior: measured in Stormwind, 88 of the loaded groups are 0x40-WITHOUT-0x8 against just 10 with
- * 0x8. Standing on a street (flags 0x2a41) the flood then never reached an exterior group, so
- * `map.exterior` stayed hidden and the whole outdoor world -- terrain and every map doodad --
- * vanished, leaving the buildings floating in the clear colour.
- *
- * Note this is deliberately NOT the zone-text indoor predicate, which does key on 0x8 alone; that is
- * a separate law for area naming and must not be unified with this one.
- */
-const EXTERIOR_FLAGS = 0x08 | 0x40;
 
 class VisibilityManager {
 
@@ -152,7 +139,7 @@ class VisibilityManager {
       const groups = wmo.groups.values();
 
       for (const group of groups) {
-        const isExterior = (group.header.flags & EXTERIOR_FLAGS) !== 0;
+        const isExterior = (group.header.flags & WmoFlags.visibilityMask) !== 0;
 
         // Only concerned with exterior groups.
         if (!isExterior) {
@@ -282,7 +269,7 @@ class VisibilityManager {
    * with the narrowed window. The reference's stricter "no window => no exterior at all" gate is
    * deliberately NOT reinstated here: it was tried, and it hid the whole outdoor world because the
    * doorway test keyed on MOGP 0x8 while city streets carry 0x40. That predicate is fixed now
-   * (EXTERIOR_FLAGS), but the gate needs its own verification pass before it comes back.
+   * (see world/wmo-flags.ts), but the gate needs its own verification pass first.
    */
   traversePortalsAndEnable(depth, camera, wmo, group, rect = FULL_SCREEN_RECT, visitedPortals = new Set()) {
     if (depth > 10) return;
@@ -307,13 +294,13 @@ class VisibilityManager {
 
       const portalView = wmo.views.portals.get(ref.portalIndex);
       const destinationView = wmo.views.groups.get(destination.index);
-      const exteriorDestination = (destination.header.flags & EXTERIOR_FLAGS) !== 0;
+      const exteriorDestination = (destination.header.flags & WmoFlags.visibilityMask) !== 0;
 
       if (!portalView || !destinationView) continue;
       if (visitedPortals.has(portalView)) continue;
 
       // Exterior-to-exterior links are already covered by enablePortalsFromExterior.
-      if ((group.header.flags & EXTERIOR_FLAGS) !== 0 && exteriorDestination) continue;
+      if ((group.header.flags & WmoFlags.visibilityMask) !== 0 && exteriorDestination) continue;
 
       if (portalView.legacyGeometry.vertices.length < 4) continue;
 
