@@ -4,6 +4,7 @@
 import {
   applySkyAzimuthWarp,
   cap96,
+  celestialSunDirection,
   cloudGlowIsSun,
   cloudGlowTrack,
   dawnDuskCurve,
@@ -24,6 +25,7 @@ import {
   skyWarp,
   skyWarpAzimuthGlow,
   stormBlend,
+  sunDiscScale,
   Vec3,
   warpSkyRingColor,
 } from '../laws';
@@ -486,5 +488,48 @@ describe('cloud glow envelope + moon direction', () => {
     for (const minute of [0, 180, 480, 720, 900, 1200, 1439]) {
       expect(heading(moonDirection(minute))).toBeCloseTo(expected, 5);
     }
+  });
+});
+
+describe('celestialSunDirection (the visible rising/setting sun, distinct from the lighting sun)', () => {
+  it('parks below the horizon at midnight and sits near zenith at solar noon', () => {
+    const midnight = celestialSunDirection(0);
+    const noon = celestialSunDirection(720);
+
+    expect(midnight[2]).toBeLessThan(0); // parked -10 degrees, below the WoW-frame horizon
+    expect(noon[2]).toBeGreaterThan(0.9); // near zenith: cos(5deg) ~ 0.996
+  });
+
+  it('actually crosses the horizon at dawn/dusk, unlike the near-fixed lighting sun', () => {
+    // The lighting sun (MapLight#sunDir, SUN_PHI_TABLE) never leaves its ~20-37 degree elevation
+    // band. The celestial sun must genuinely rise through zero around sunrise/sunset.
+    const beforeDawn = celestialSunDirection(0.2 * 1440)[2]; // 04:48, still below the horizon
+    const afterDawn = celestialSunDirection(0.35 * 1440)[2]; // 08:24, risen
+    expect(beforeDawn).toBeLessThan(0);
+    expect(afterDawn).toBeGreaterThan(0);
+  });
+
+  it('holds a constant 45 degree azimuth, the same bearing as the lighting sun', () => {
+    const heading = (d: Vec3) => Math.atan2(d[1], d[0]);
+    const expected = Math.PI * 0.25;
+
+    for (const minute of [0, 180, 480, 720, 900, 1200, 1439]) {
+      expect(heading(celestialSunDirection(minute))).toBeCloseTo(expected, 5);
+    }
+  });
+});
+
+describe('sunDiscScale', () => {
+  it('is 2x at the dawn/dusk horizon and 1x across midday (vanilla size table 0xce8cac)', () => {
+    expect(sunDiscScale(6 * 60)).toBeCloseTo(2.0, 3); // 06:00 sunrise
+    expect(sunDiscScale(21 * 60)).toBeCloseTo(2.0, 3); // 21:00 sunset
+    expect(sunDiscScale(12 * 60)).toBeCloseTo(1.0, 3); // solar noon
+    expect(sunDiscScale(9 * 60)).toBeCloseTo(1.0, 3); // mid-morning plateau
+  });
+
+  it('ramps smoothly between the horizon and the midday plateau rather than stepping', () => {
+    const partial = sunDiscScale(6 * 60 + 20); // between the 06:00 and 06:45 keys
+    expect(partial).toBeGreaterThan(1.0);
+    expect(partial).toBeLessThan(2.0);
   });
 });

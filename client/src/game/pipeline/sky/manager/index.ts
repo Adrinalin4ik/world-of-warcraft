@@ -5,6 +5,7 @@ import SkyCone from '../cone';
 import CloudDome from '../clouds';
 import ProceduralSky from '../procedural';
 import Skybox from '../skybox';
+import SunDisc from '../celestial/sun';
 
 /** Task 6's instrument bundle -- the numbers that distinguish "the field is empty" from "the field
  * is fine and the dome is not drawing" (see the plan's own framing). `null` before the kernel has
@@ -57,10 +58,18 @@ class SkyManager {
   // a full rebuild instead of an incremental tick.
   private lastCloudMapLight: MapLight | null = null;
 
+  // The celestial bodies (celestial-sky plan): the sun disc (Task 2) here, with stars/moons/glare
+  // (Tasks 3-5) joining it the same way -- owned here, not swapped by `setMethod`, exactly like the
+  // cloud dome above, since the sky bodies sit above whichever gradient/skybox method is active.
+  private sunDisc: SunDisc;
+
   constructor(scene: THREE.Scene) {
     this.scene = scene;
     this.cloudDome = new CloudDome();
     this.scene.add(this.cloudDome);
+
+    this.sunDisc = new SunDisc();
+    this.scene.add(this.sunDisc);
   }
 
   /**
@@ -158,6 +167,19 @@ class SkyManager {
     }
 
     this.updateClouds(camera, dt);
+    this.updateCelestialBodies(camera);
+  }
+
+  /**
+   * Task 2 (and the route Tasks 3-5 follow): place/tint every celestial body from the SAME per-frame
+   * `MapLight` reference the rest of this manager reads -- no second clock, no second camera-follow.
+   * A no-op before `setMapLight` has ever run (matches `updateClouds`'s own null guard).
+   */
+  private updateCelestialBodies(camera: THREE.Camera): void {
+    if (!this.mapLight) {
+      return;
+    }
+    this.sunDisc.updateFromLight(camera, this.mapLight);
   }
 
   /**
@@ -298,6 +320,8 @@ class SkyManager {
     this.removeCurrentSky();
     this.scene.remove(this.cloudDome);
     this.cloudDome.dispose();
+    this.scene.remove(this.sunDisc);
+    this.sunDisc.dispose();
   }
 }
 

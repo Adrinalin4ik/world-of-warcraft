@@ -315,6 +315,57 @@ export function moonDirection(minute: number): Vec3 {
 }
 
 /**
+ * The visible CELESTIAL sun direction (benilla `daynight.rs::celestial_sun_direction`, elevation
+ * table `0xce8d64`, VERIFIED off `0x6d3b80`) -- the sky BODY the player sees rise and set, a
+ * SEPARATE system from `MapLight#sunDir` (the near-fixed lighting/shadow sun, `SUN_PHI_TABLE`/
+ * `SUN_THETA_TABLE`, elevation only ~20-37 degrees all day, never near the horizon). Confusing the
+ * two is the celestial-sky plan's own Risk: `MapLight.cloudGlowDir` (the negated lighting sun) is
+ * NOT this -- it shares the lighting sun's narrow elevation band and would place the sun disc far
+ * too high, never touching the horizon and defeating both the 2x horizon-size curve and the
+ * horizon clip+fade. The polar angle sweeps 100 degrees (10 below the horizon, parked there all
+ * night) to 5 degrees (near zenith, solar noon); azimuth is a constant 45 degrees, the lighting
+ * sun's own bearing, so the bright disc sits in the lit direction.
+ *
+ * Returns the to-sun direction (camera->body) in this client's unpermuted WoW frame (Z up),
+ * matching `moonDirection`'s own convention: `z = cosPhi > 0` is above the horizon.
+ */
+export function celestialSunDirection(minute: number): Vec3 {
+  const ELEV_TABLE: Array<[number, number]> = [
+    [0.2291667, Math.PI * 0.555556], // 100 deg -- near horizon, dawn/sunrise
+    [0.4965278, Math.PI * 0.027778], // 5 deg -- near zenith, rising into noon
+    [0.5, Math.PI * 0.027778], // 5 deg -- solar noon
+    [0.5034722, Math.PI * 0.027778], // 5 deg -- near zenith, falling out of noon
+    [0.8958333, Math.PI * 0.555556], // 100 deg -- near horizon, dusk/sunset
+  ];
+  const THETA = Math.PI * 0.25; // 45 deg, constant -- the to-sun azimuth (shares the lighting sun's bearing)
+
+  const phi = interpDayNight(ELEV_TABLE, minute / 1440);
+  const sinPhi = Math.sin(phi);
+  const cosPhi = Math.cos(phi);
+
+  return [sinPhi * Math.cos(THETA), sinPhi * Math.sin(THETA), cosPhi];
+}
+
+/**
+ * Sun-disc size-multiplier curve (benilla `daynight.rs::SUN_SIZE_CURVE`, vanilla size table
+ * `0xce8cac`, VERIFIED): the disc grows to 2x at the dawn/dusk horizon (06:00 / 21:00) and is 1x
+ * across midday -- the baked "huge sun at the horizon". The sun's own base multiplier is 1x, so
+ * this curve IS its disc scale.
+ */
+const SUN_SIZE_CURVE: Array<[number, number]> = [
+  [0.25, 2.0], // 06:00 -- sunrise at the horizon (largest)
+  [0.28125, 1.0], // 06:45 -- risen -> the midday plateau
+  [0.84375, 1.0], // 20:15 -- still small
+  [0.875, 2.0], // 21:00 -- sunset at the horizon (largest)
+];
+
+/** The sun disc's size multiplier at a game minute-of-day: 1.0 midday, up to 2.0 at the dawn/dusk
+ * horizon. See [`SUN_SIZE_CURVE`]. */
+export function sunDiscScale(minute: number): number {
+  return interpDayNight(SUN_SIZE_CURVE, minute / 1440);
+}
+
+/**
  * The dawn/dusk sky-dome warp strength curve (benilla `daynight.rs::SKY_WARP_CURVE`, table
  * `0xce9b2c`): two triangular spikes at sunrise (~06:29) and sunset (~21:29), and zero everywhere
  * else -- all of midday AND deep night.

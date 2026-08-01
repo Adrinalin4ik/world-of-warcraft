@@ -5,6 +5,7 @@ import { blendLights } from './blend';
 import { LIGHT_FLOAT_BAND, LIGHT_PARAM, LIGHT_PARAM_LABELS } from './constants';
 import { FogTriple, MfogRecord, packFogParams, selectWmoFogTarget, unpackFogParams, WmoFogRamp } from './fog';
 import {
+  celestialSunDirection,
   cloudGlowIsSun,
   cloudGlowTrack,
   moonDirection,
@@ -166,6 +167,15 @@ class MapLight extends SceneLight {
   // envelope, so an unresolved frame lights the zenith rather than the underside of the world.
   #cloudGlowDir = new THREE.Vector3(0, 0, 1);
   #cloudGlowTrack = 1;
+
+  // The visible CELESTIAL sun direction (celestial-sky plan, Task 2) -- `laws.celestialSunDirection`,
+  // a SEPARATE system from `sunDir` (the near-fixed lighting sun) and from `cloudGlowDir` (which
+  // reuses that same lighting sun's negation, and swaps to the moon outside `cloudGlowIsSun`'s
+  // window besides). The sun disc needs a dedicated to-body vector that (a) actually rises and sets
+  // in elevation and (b) never becomes the moon at night -- see `#updateSunDirection`'s call site for
+  // why reusing `cloudGlowDir` here would be wrong on both counts. Defaults to straight up so a
+  // pre-resolve frame parks the disc at the zenith rather than at the camera.
+  #celestialSunDir = new THREE.Vector3(0, 0, 1);
 
   // A blended band that no light contributed to stays at exactly zero.
   static #isUnset(color: THREE.Color) {
@@ -360,6 +370,17 @@ class MapLight extends SceneLight {
    */
   get cloudGlowDir() {
     return this.#cloudGlowDir;
+  }
+
+  /**
+   * The visible celestial sun's camera->body direction (`laws.celestialSunDirection`), in this
+   * client's unpermuted WoW frame (Z up) -- see `#celestialSunDir`'s field doc for why the sun disc
+   * (celestial-sky plan, Task 2) reads this rather than `cloudGlowDir`: this vector is dedicated to
+   * the sun alone (never swaps to the moon) and genuinely rises/sets in elevation, unlike the
+   * near-fixed lighting sun `cloudGlowDir` derives from.
+   */
+  get celestialSunDir() {
+    return this.#celestialSunDir;
   }
 
   /** The cloud glow's day envelope, `laws.cloudGlowTrack`. Full across the day and across deep
@@ -806,6 +827,12 @@ class MapLight extends SceneLight {
     this.paramsFor('interior').sunDir.set(x, y, z);
 
     this.#updateCloudGlow(x, y, z);
+
+    // The visible celestial sun -- a genuinely separate direction from the lighting sun above (see
+    // `#celestialSunDir`'s field doc). Computed from the current time only, not from x/y/z.
+    const minute = this.#timeProgression * 1440;
+    const [csx, csy, csz] = celestialSunDirection(minute);
+    this.#celestialSunDir.set(csx, csy, csz);
   }
 
   /**
