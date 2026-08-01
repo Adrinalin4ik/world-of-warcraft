@@ -264,6 +264,18 @@ class SkyManager {
     this.zoneSkybox.update(camera, mapID);
     this.wmoSkybox.update(camera, this.wmoManagerRef);
 
+    // The two backdrops are MUTUALLY EXCLUSIVE, and the WMO one wins. A zone can name a
+    // `LightSkybox` while the camera also stands somewhere whose portal flood reaches a group asking
+    // for the root's MOSB -- and both are opaque at the same `renderOrder`, so without a tie-break
+    // whichever the renderer happens to sort second wins, differently from frame to frame.
+    //
+    // The building wins because that is what the WMO skybox IS: the sky a building swaps in for the
+    // zone's own while you are inside it. Suppressing the zone box is also what makes the celestial
+    // suppression below correct either way -- one backdrop, one gate.
+    if (this.wmoSkybox.isActive) {
+      this.zoneSkybox.visible = false;
+    }
+
     // Task 6 Step 3: the suppression rule, as ONE gate over the whole celestial pass -- see
     // `celestialGroup`'s own doc comment for why this is a single assignment rather than six.
     this.updateSkyboxSuppression();
@@ -432,6 +444,14 @@ class SkyManager {
 
     this.zoneSkybox.visible = enabled;
     this.wmoSkybox.visible = enabled;
+
+    // The glare lives OUTSIDE `celestialGroup` on purpose -- it renders after the world, so a skybox
+    // must not suppress it (see `updateSkyboxSuppression`). But "the skybox hides it" and "the user
+    // turned the sky off" are different questions, and hiding the group answered only the first.
+    // Because `update()` early-returns while disabled, the two flare quads kept their last resolved
+    // tint, scale and position and simply hung in the sky, frozen, after the sky was switched off.
+    this.sunGlare.visible = enabled;
+    this.moonGlare.visible = enabled;
   }
 
   /**
