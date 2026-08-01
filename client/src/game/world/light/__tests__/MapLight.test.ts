@@ -188,3 +188,61 @@ describe('MapLight#getAreaLightsFromDb slot loading', () => {
     expect(light.params[LIGHT_PARAM.PARAM_STORMY]).toBeUndefined();
   });
 });
+
+describe('MapLight cloud glow body (clouds Task 4)', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  /** Drive the light to a given time of day and return the resolved glow state. */
+  const glowAt = async (hour: number) => {
+    const lightRecord = mockLightRecord();
+    setupDbcMocks(lightRecord, { 100: { id: 100, highlightSky: false, glow: 0.5 } });
+
+    const mapLight = new MapLight();
+    await mapLight.loadLights();
+    mapLight.mapId = MAP_ID;
+    // `time` is half-minutes since midnight, so an hour is 120 of them.
+    mapLight.timeOverride = hour * 120;
+
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(0, 0, 0);
+    camera.updateMatrixWorld();
+    mapLight.update(camera, 0);
+
+    return {
+      dir: mapLight.cloudGlowDir.clone(),
+      track: mapLight.cloudGlowTrack,
+      sunDir: mapLight.sunDir.clone(),
+    };
+  };
+
+  it('points the daytime glow AT the sun, not along the direction light travels', async () => {
+    // The negation is the subtlety. `sunDir` is sun-down-onto-the-world and stays below the horizon
+    // all day (see `#updateSunDirection`); the kernel intersects a camera->body ray with the sky
+    // dome, so handing it the travel direction would place the glow under the world. Feeding the
+    // unnegated vector still renders -- it just lights the wrong hemisphere -- which is exactly the
+    // kind of wrong that survives a visual check.
+    const { dir, sunDir } = await glowAt(12);
+
+    expect(dir.x).toBeCloseTo(-sunDir.x, 6);
+    expect(dir.y).toBeCloseTo(-sunDir.y, 6);
+    expect(dir.z).toBeCloseTo(-sunDir.z, 6);
+    // Z is up in this client's unpermuted WoW frame, so the daytime body is above the horizon.
+    expect(dir.z).toBeGreaterThan(0);
+  });
+
+  it('swaps the body to the moon at night, still above the horizon', async () => {
+    // Deep night runs at FULL glow envelope because of the verified 22:10 seam wrap, so the body
+    // genuinely matters here -- keeping the sun would track one parked below the horizon.
+    const { dir, track } = await glowAt(2);
+
+    expect(track).toBeCloseTo(1, 5);
+    expect(dir.z).toBeGreaterThan(0);
+  });
+
+  it('notches the envelope to zero at the dawn twilight boundary', async () => {
+    const { track } = await glowAt(0.2013889 * 24);
+    expect(track).toBeCloseTo(0, 5);
+  });
+});

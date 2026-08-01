@@ -4,7 +4,15 @@ import { batchClassOf } from '../../pipeline/wmo/material/laws';
 import { blendLights } from './blend';
 import { LIGHT_FLOAT_BAND, LIGHT_PARAM, LIGHT_PARAM_LABELS } from './constants';
 import { FogTriple, MfogRecord, packFogParams, selectWmoFogTarget, unpackFogParams, WmoFogRamp } from './fog';
-import { quantizeGlow, sidnNightFraction, skyWarp, stormBlend } from './laws';
+import {
+  cloudGlowIsSun,
+  cloudGlowTrack,
+  moonDirection,
+  quantizeGlow,
+  sidnNightFraction,
+  skyWarp,
+  stormBlend,
+} from './laws';
 import SceneLight from './SceneLight';
 import { SUN_PHI_TABLE, SUN_THETA_TABLE } from './sun-tables';
 import { AreaLight, AreaLightParams, WeightedAreaLight } from './types';
@@ -143,6 +151,13 @@ class MapLight extends SceneLight {
   #cloudSunColor = new THREE.Color(1.0, 0.98, 0.9);
   #cloudSlopeColor = new THREE.Color(0.35, 0.38, 0.42);
   #cloudBaseColor = new THREE.Color(0.75, 0.78, 0.82);
+
+  // The cloud glow body's camera->body direction and its day envelope -- the colour pass's two
+  // time-driven inputs. See `#updateCloudGlow` for the sign convention and the frame, both of which
+  // are easy to get wrong in ways that still produce a picture. Defaults point straight up at full
+  // envelope, so an unresolved frame lights the zenith rather than the underside of the world.
+  #cloudGlowDir = new THREE.Vector3(0, 0, 1);
+  #cloudGlowTrack = 1;
 
   // A blended band that no light contributed to stays at exactly zero.
   static #isUnset(color: THREE.Color) {
@@ -317,6 +332,21 @@ class MapLight extends SceneLight {
   /** The cloud palette's gradient base (`LIGHT_INT_BAND.BAND_CLOUD_BASE_COLOR`). */
   get cloudBaseColor() {
     return this.#cloudBaseColor;
+  }
+
+  /**
+   * The cloud glow body's direction, camera->body, in this client's unpermuted WoW frame (Z up).
+   * The sun inside `laws.cloudGlowIsSun`'s window, the white moon outside it. See
+   * `#updateCloudGlow` -- this is the NEGATED sun vector, which `sunDir` deliberately is not.
+   */
+  get cloudGlowDir() {
+    return this.#cloudGlowDir;
+  }
+
+  /** The cloud glow's day envelope, `laws.cloudGlowTrack`. Full across the day and across deep
+   * night, notching to zero only at the two twilight boundaries. */
+  get cloudGlowTrack() {
+    return this.#cloudGlowTrack;
   }
 
   /**
@@ -755,6 +785,42 @@ class MapLight extends SceneLight {
     // other holding a stale direction the moment the camera moves indoors or back out.
     this.paramsFor('exterior').sunDir.set(x, y, z);
     this.paramsFor('interior').sunDir.set(x, y, z);
+
+    this.#updateCloudGlow(x, y, z);
+  }
+
+  /**
+   * Resolve the cloud glow body and its day envelope (the reference's `0x6cfb00` per-frame setup).
+   *
+   * Takes the sun vector already computed above rather than recomputing it, and **negates it**. That
+   * negation is the whole subtlety here: `sunDir` is the direction light TRAVELS -- sun down onto the
+   * world, pointing below the horizon all day (see `#updateSunDirection`'s own comment on why it is
+   * not negated there). The glow wants the opposite, a camera->body ray, because the kernel intersects
+   * it with the sky dome to find which tile cell the body sits over. Feeding it the travel direction
+   * puts the glow under the world.
+   *
+   * `moonDirection` needs no such negation: it is authored TO-body already (`z = cos(phi) > 0` is
+   * above the horizon), matching the reference's own `to-moon` formulation.
+   *
+   * Both vectors are in this client's unpermuted WoW frame (Z up), NOT the reference's Bevy Y-up --
+   * see `#updateSunDirection`. A consumer that treats Y as up will place the glow sideways.
+   *
+   * The body swaps to the moon outside `cloudGlowIsSun`'s window, and that is load-bearing rather
+   * than cosmetic: the envelope's verified seam wrap leaves deep night at FULL glow, so with the sun
+   * as the body the night glow would track a sun parked below the horizon.
+   */
+  #updateCloudGlow(sunX: number, sunY: number, sunZ: number) {
+    const minute = this.#timeProgression * 1440;
+
+    if (cloudGlowIsSun(minute)) {
+      this.#cloudGlowDir.set(-sunX, -sunY, -sunZ);
+    } else {
+      // `laws.Vec3` is a tuple, not an `{x, y, z}` object -- see its declaration.
+      const [mx, my, mz] = moonDirection(minute);
+      this.#cloudGlowDir.set(mx, my, mz);
+    }
+
+    this.#cloudGlowTrack = cloudGlowTrack(minute);
   }
 
   #updateLights() {
