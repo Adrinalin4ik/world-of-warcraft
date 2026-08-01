@@ -250,6 +250,9 @@ class M2Material extends THREE.ShaderMaterial {
       // Animated transparency
       animatedTransparency: { value: 1.0 },
 
+      // Per-object distance-fade alpha (fade/laws.ts). 1.0 until a doodad enters its fade band.
+      fadeAlpha: { value: 1.0 },
+
       // Animated texture coordinate transform matrices
       animatedUVs: {
         value: [
@@ -569,6 +572,20 @@ class M2Material extends THREE.ShaderMaterial {
     this.textures.forEach((texture) => {
       TextureLoader.unload(texture);
     });
+  }
+
+  /**
+   * The per-object distance-fade alpha (pipeline/m2/fade/laws.ts).
+   *
+   * Only the feathering band ever reaches here: `visibility-manager` culls the object outright at
+   * alpha <= 0, so this never has to represent "fully gone". The uniform feeds both the cutout
+   * alpha test and the output alpha -- see fragment/common-header.glsl.
+   *
+   * Materials are cached and shared across placements (M2Blueprint.cache), so this is written per
+   * frame by whichever doodad is being drawn rather than latched; see doodad-manager's fade pass.
+   */
+  setFadeAlpha(alpha: number): void {
+    this.uniforms.fadeAlpha.value = alpha;
   }
 
   /**

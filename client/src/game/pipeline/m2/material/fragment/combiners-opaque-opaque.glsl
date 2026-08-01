@@ -6,7 +6,7 @@ vec4 combinersOpaqueOpaque() {
   vec4 sampled1 = texture2D(textures[1], coordinates[1]);
 
   // TODO: Does this apply to opaque+opaque?
-  if (alphaKey == 1.0 && sampled0.a < 0.5) {
+  if (alphaKey == 1.0 && sampled0.a * fadeAlpha < 0.5) {
     discard;
   }
 

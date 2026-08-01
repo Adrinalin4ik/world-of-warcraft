@@ -29,6 +29,17 @@ uniform int interiorFog;
 
 uniform float animatedTransparency;
 
+// The per-object distance-fade alpha (pipeline/m2/fade/laws.ts -- the size-bucketed law from
+// FUN_00683f80). 1.0 is opaque; the cull drops the object entirely at 0.0, so only the feathering
+// band 0 < a < 1 ever reaches here.
+//
+// It multiplies into BOTH the cutout alpha test in each combiner AND the output alpha below. The
+// test is what makes a fading prop erode edge-first rather than dim uniformly -- the reference's
+// `discard if tex0.a * diffuse.a < threshold`. (Our threshold is 0.5 where the reference's is
+// 224/255; that difference predates this and is deliberately left alone here, since changing it
+// would alter the silhouette of every alpha-tested prop in the game.)
+uniform float fadeAlpha;
+
 // WMO point lights (MOLT) affecting this model. Positions are world space, matching
 // worldVertexPosition. Count is zero for anything not standing inside a WMO. Selected per object
 // (world/light/laws.ts::selectPointLights), which commits at most three -- see MAX_WMO_LIGHTS below.
@@ -243,10 +254,15 @@ vec4 applyFog(vec4 color) {
 // }
 
 vec4 finalizeColor(vec4 result) {
-  
+
   result = applyDiffuseLighting(result);
 
   result = applyFog(result);
+
+  // The distance fade rides the same output-alpha channel as everything else (the reference's single
+  // render-alpha slot, CM2Model+0x19c). Applied last so fog's own per-blend-mode alpha handling above
+  // is unaffected by it.
+  result.a *= fadeAlpha;
 
   return result;
 }

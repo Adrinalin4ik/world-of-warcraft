@@ -1,5 +1,31 @@
 import * as THREE from 'three';
 
+/**
+ * Push the owning placement's distance-fade alpha into the shared material, immediately before this
+ * batch is drawn.
+ *
+ * It has to happen here, per draw, and not once per doodad: M2 materials are cached and shared
+ * across every placement of a model (M2Blueprint.cache / M2#batches), so writing the uniform from a
+ * per-doodad loop would leave every placement rendering with whichever one happened to write last.
+ * The reference has the same shape -- a per-INSTANCE render-alpha slot (CM2Model+0x19c) feeding a
+ * shared batch -- and `onBeforeRender` is three.js's equivalent seam.
+ *
+ * The walk up is two hops (batch mesh -> Submesh -> M2) and stops at whatever carries `fadeAlpha`.
+ * Anything with no fade owner -- WMO-interior doodads, units -- renders fully opaque.
+ */
+function applyFadeAlphaBeforeRender(_renderer, _scene, _camera, _geometry, material) {
+  if (!material || !material.uniforms || !material.uniforms.fadeAlpha) {
+    return;
+  }
+
+  let node = this;
+  while (node && node.fadeAlpha === undefined) {
+    node = node.parent;
+  }
+
+  material.uniforms.fadeAlpha.value = node ? node.fadeAlpha : 1.0;
+}
+
 class Submesh extends THREE.Group {
 
   constructor(opts) {
@@ -52,6 +78,7 @@ class Submesh extends THREE.Group {
       }
 
       batchMesh.matrixAutoUpdate = this.matrixAutoUpdate;
+      batchMesh.onBeforeRender = applyFadeAlphaBeforeRender;
 
       this.add(batchMesh);
     }
