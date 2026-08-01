@@ -52,6 +52,59 @@ export function intersectRect(a: ScreenRect, b: ScreenRect): ScreenRect | null {
   return isCollapsed(narrowed) ? null : narrowed;
 }
 
+/**
+ * Clip a clip-space polygon against the near plane, returning the part in front of the eye.
+ *
+ * THIS IS NOT OPTIONAL, and leaving it out is what broke the first attempt at the rect flood.
+ * A portal you are standing in the plane of has vertices on both sides of the eye. Projecting a
+ * vertex with negative `w` divides by that negative value and flips it through the origin, so the
+ * screen-space AABB of a mixed-sign polygon comes out SMALL and bounded where the true projection
+ * is unbounded. The flood then collapses the branch and drops rooms that really are visible through
+ * the doorway. The `w` clamp does not help: it only covers `w` near zero, not a polygon spanning it.
+ *
+ * Clipping first also makes the projection well-conditioned. In a WebGL perspective matrix
+ * `w_clip = -z_view`, so every surviving vertex has `w >= near`, and no sign flip is possible.
+ *
+ * Sutherland-Hodgman against the OpenGL near plane `z = -w`, i.e. inside where `z + w > 0`.
+ */
+export function clipPolygonToNearPlane(
+  vertices: ReadonlyArray<ArrayLike<number>>,
+): number[][] {
+  const count = vertices.length;
+  if (count < 3) {
+    return [];
+  }
+
+  const out: number[][] = [];
+  const distance = (v: ArrayLike<number>) => v[2] + v[3];
+
+  for (let i = 0; i < count; ++i) {
+    const current = vertices[i];
+    const next = vertices[(i + 1) % count];
+    const dCurrent = distance(current);
+    const dNext = distance(next);
+    const currentInside = dCurrent > 0;
+    const nextInside = dNext > 0;
+
+    if (currentInside) {
+      out.push([current[0], current[1], current[2], current[3]]);
+    }
+
+    // Crossing the plane in either direction contributes the intersection point.
+    if (currentInside !== nextInside) {
+      const t = dCurrent / (dCurrent - dNext);
+      out.push([
+        current[0] + (next[0] - current[0]) * t,
+        current[1] + (next[1] - current[1]) * t,
+        current[2] + (next[2] - current[2]) * t,
+        current[3] + (next[3] - current[3]) * t,
+      ]);
+    }
+  }
+
+  return out.length >= 3 ? out : [];
+}
+
 /** Perspective divide with the client's `w` clamp. `clip` is `[x, y, z, w]`. */
 export function ndcFromClip(clip: ArrayLike<number>): [number, number] {
   let w = clip[3];

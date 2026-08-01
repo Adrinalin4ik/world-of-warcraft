@@ -1,6 +1,17 @@
 import { vec4, mat4 } from 'gl-matrix';
 import * as THREE from 'three';
 import THREEUtil from '../../../utils/three-util';
+import {
+  clipPolygonToNearPlane,
+  FULL_SCREEN_RECT,
+  intersectRect,
+  ON_PLANE_EPS,
+  rectFromClipPolygon,
+} from './rect';
+
+// Clip-space scratch, grown on demand. Portal polygons are small (4-8 vertices in practice) and
+// this runs per portal per frame, so the buffer is reused rather than rebuilt.
+const SCRATCH_CLIP = [];
 
 // Reused across localToWorld conversions. These run per portal vertex, per portal, per frame; a
 // fresh Vector3 per vertex was the single largest allocator in the cull pass.
@@ -146,6 +157,63 @@ class WMOPortalView extends THREE.Mesh {
     const newFrustum = { planes };
 
     return newFrustum;
+  }
+
+  /**
+   * Project this portal into the screen rect the flood should carry through it.
+   *
+   * Returns the incoming rect narrowed by this portal's screen-space AABB, or null when the branch
+   * dies -- the portal is entirely behind the eye, or the narrowed rect collapsed below the
+   * client's zero-area epsilon. That collapse is the mechanism: it is why a room behind a doorway
+   * you cannot see through stops being drawn.
+   *
+   * The polygon is clipped against the NEAR PLANE before projecting. See
+   * `rect.ts::clipPolygonToNearPlane` for why skipping that step silently drops visible rooms.
+   *
+   * The reference's special case (client `0x6b46f0`): an eye within ON_PLANE_EPS of the portal's
+   * plane gets the full screen rect for that portal, because the projection is degenerate there.
+   *
+   * @param viewProjection  projection * matrixWorldInverse for the main camera
+   * @param incoming        the rect this branch arrived with
+   * @param cameraLocal     camera position in THIS portal view's local space
+   */
+  projectToRect(viewProjection, incoming, cameraLocal) {
+    if (Math.abs(this.portal.plane.distanceToPoint(cameraLocal)) <= ON_PLANE_EPS) {
+      return intersectRect(incoming, FULL_SCREEN_RECT);
+    }
+
+    const vertices = this.legacyGeometry.vertices;
+    const count = vertices.length;
+    const e = viewProjection.elements;
+
+    for (let vindex = 0; vindex < count; ++vindex) {
+      SCRATCH_VERTEX.copy(vertices[vindex]);
+      this.localToWorld(SCRATCH_VERTEX);
+      const { x, y, z } = SCRATCH_VERTEX;
+
+      let clip = SCRATCH_CLIP[vindex];
+      if (!clip) {
+        clip = SCRATCH_CLIP[vindex] = [0, 0, 0, 0];
+      }
+
+      // THREE.Matrix4 stores column-major, so column n starts at element 4n.
+      clip[0] = e[0] * x + e[4] * y + e[8] * z + e[12];
+      clip[1] = e[1] * x + e[5] * y + e[9] * z + e[13];
+      clip[2] = e[2] * x + e[6] * y + e[10] * z + e[14];
+      clip[3] = e[3] * x + e[7] * y + e[11] * z + e[15];
+    }
+
+    const clipped = clipPolygonToNearPlane(SCRATCH_CLIP.slice(0, count));
+    if (clipped.length < 3) {
+      return null;
+    }
+
+    const projected = rectFromClipPolygon(clipped);
+    if (!projected) {
+      return null;
+    }
+
+    return intersectRect(incoming, projected);
   }
 
   /**

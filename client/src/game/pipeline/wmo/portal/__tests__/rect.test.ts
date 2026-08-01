@@ -1,5 +1,6 @@
 /** @jest-environment node */
 import {
+  clipPolygonToNearPlane,
   FULL_SCREEN_RECT,
   intersectRect,
   isCollapsed,
@@ -99,6 +100,57 @@ describe('ndcFromClip w clamping', () => {
   it('does NOT clamp a w of exactly +0.001', () => {
     const [x] = ndcFromClip([1, 0, 0, 0.001]);
     expect(x).toBeCloseTo(1000, 6);
+  });
+});
+
+describe('clipPolygonToNearPlane', () => {
+  // A quad entirely in front of the near plane (z + w > 0 for every vertex).
+  const inFront = [
+    [-1, -1, 1, 2], [1, -1, 1, 2], [1, 1, 1, 2], [-1, 1, 1, 2],
+  ];
+  // A quad entirely behind the eye.
+  const behind = [
+    [-1, -1, -3, -1], [1, -1, -3, -1], [1, 1, -3, -1], [-1, 1, -3, -1],
+  ];
+  // Bottom edge in front, top edge behind -- a doorway the camera is standing in the plane of.
+  const straddling = [
+    [-1, -1, 1, 2], [1, -1, 1, 2], [1, 1, -3, -1], [-1, 1, -3, -1],
+  ];
+
+  it('leaves a polygon fully in front untouched', () => {
+    expect(clipPolygonToNearPlane(inFront)).toHaveLength(4);
+  });
+
+  it('discards a polygon fully behind the near plane', () => {
+    expect(clipPolygonToNearPlane(behind)).toHaveLength(0);
+  });
+
+  it('keeps the in-front vertices and adds the two crossings', () => {
+    const clipped = clipPolygonToNearPlane(straddling);
+    expect(clipped).toHaveLength(4);
+    // Every surviving vertex is on or in front of the near plane...
+    clipped.forEach((v) => expect(v[2] + v[3]).toBeGreaterThanOrEqual(-1e-9));
+    // ...and crucially every w is now positive, so the perspective divide cannot flip a sign.
+    clipped.forEach((v) => expect(v[3]).toBeGreaterThan(0));
+  });
+
+  it('WIDENS the screen rect of a straddling portal instead of shrinking it', () => {
+    // THE regression this exists to prevent. Projecting a mixed-sign polygon without clipping
+    // divides the behind-camera vertices by a negative w, flipping them across the origin. The
+    // resulting AABB comes out small and bounded, so the flood collapses the branch and drops
+    // rooms that are actually visible through the doorway.
+    const unclipped = rectFromClipPolygon(straddling)!;
+    const clipped = rectFromClipPolygon(clipPolygonToNearPlane(straddling))!;
+
+    expect(unclipped).not.toBeNull();
+    expect(clipped).not.toBeNull();
+
+    const widthOf = (r: any) => r.maxX - r.minX;
+    expect(widthOf(clipped)).toBeGreaterThan(widthOf(unclipped));
+  });
+
+  it('returns an empty polygon for fewer than three input vertices', () => {
+    expect(clipPolygonToNearPlane([[0, 0, 1, 2], [1, 0, 1, 2]])).toHaveLength(0);
   });
 });
 
