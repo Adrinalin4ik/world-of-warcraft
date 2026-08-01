@@ -248,6 +248,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         textures: info.memory.textures,
         visibleChunks: visibility?.stats.map?.visibleChunks ?? 0,
         visibleGroups: visibility?.stats.wmo?.visibleGroups ?? 0,
+        visibleMapDoodads: visibility?.stats.map?.visibleDoodads ?? 0,
+        loadedMapDoodads: this.game.world.map?.doodadManager?.doodads.size ?? 0,
         visibleDoodads: visibility?.stats.wmo?.visibleDoodads ?? 0,
       });
 

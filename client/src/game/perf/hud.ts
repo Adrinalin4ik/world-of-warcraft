@@ -18,6 +18,10 @@ export interface PerfPayload {
   textures: number;
   visibleChunks: number;
   visibleGroups: number;
+  /** Map (ADT) doodads — what the distance-fade cull acts on. */
+  visibleMapDoodads: number;
+  loadedMapDoodads: number;
+  /** Doodads belonging to WMO interiors, which the fade cull does not touch. */
   visibleDoodads: number;
 }
 
@@ -73,7 +77,8 @@ function format(p: PerfPayload): string {
     '',
     `calls ${p.calls}  tris ${p.triangles}`,
     `programs ${p.programs}  geom ${p.geometries}  tex ${p.textures}`,
-    `chunks ${p.visibleChunks}  groups ${p.visibleGroups}  doodads ${p.visibleDoodads}`,
+    `chunks ${p.visibleChunks}  groups ${p.visibleGroups}`,
+    `map doodads ${p.visibleMapDoodads}/${p.loadedMapDoodads}  wmo doodads ${p.visibleDoodads}`,
   ];
 
   if (p.sections.size > 0) {

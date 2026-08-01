@@ -10,6 +10,14 @@ export const ObjectsManager = [];
 
 class VisibilityManager {
 
+  /**
+   * Live kill-switch for the doodad distance-fade cull, so it can be A/B'd against the
+   * frustum-only behaviour at a fixed camera pose from the browser console:
+   *
+   *   VisibilityManager.fadeCullEnabled = false; world.map.updateVisibility(world.game.camera)
+   */
+  static fadeCullEnabled = true;
+
   constructor(map) {
     this.map = map;
 
@@ -186,7 +194,7 @@ class VisibilityManager {
     // compare against the object's own radius) and it rejects the bulk of a dense zone's props
     // outright. See pipeline/m2/fade/laws.ts for the ported law.
     const radius = object.worldFadeRadius;
-    if (radius !== undefined) {
+    if (radius !== undefined && VisibilityManager.fadeCullEnabled) {
       const dx = object.position.x - this.cameraX;
       const dy = object.position.y - this.cameraY;
       const horizDist = Math.sqrt(dx * dx + dy * dy);
@@ -420,6 +428,13 @@ class VisibilityManager {
     this.stats.wmo.visibleDoodads = visibleDoodadCount;
   }
 
+}
+
+// Exposed for live debugging from the browser console -- the `fadeCullEnabled` A/B above needs a
+// handle on the class, not an instance. Guarded because the pure-logic tests run under
+// `@jest-environment node`, where `window` does not exist.
+if (typeof window !== 'undefined') {
+  window.VisibilityManager = VisibilityManager;
 }
 
 export default VisibilityManager;

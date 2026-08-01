@@ -18,6 +18,8 @@ export interface SceneCounters {
   textures: number;
   visibleChunks: number;
   visibleGroups: number;
+  visibleMapDoodads: number;
+  loadedMapDoodads: number;
   visibleDoodads: number;
 }
 

@@ -6,7 +6,7 @@ function payload(overrides: Partial<PerfPayload> = {}): PerfPayload {
     gpuMs: 6.25,
     sections: new Map([['cull', 3.5]]),
     calls: 812, triangles: 450000, programs: 40, geometries: 900, textures: 300,
-    visibleChunks: 120, visibleGroups: 8, visibleDoodads: 260,
+    visibleChunks: 120, visibleGroups: 8, visibleMapDoodads: 180, loadedMapDoodads: 900, visibleDoodads: 260,
     ...overrides,
   };
 }
