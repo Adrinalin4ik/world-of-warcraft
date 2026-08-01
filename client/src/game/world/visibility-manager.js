@@ -32,6 +32,11 @@ class VisibilityManager {
     // Camera position for the horizontal fade distance, refreshed once per update().
     this.cameraX = 0;
     this.cameraY = 0;
+
+    // Monotonic frame counter. An object whose `visibleFrame` equals the current frame was reached
+    // by this frame's traversal; anything else is invisible. This replaces four full "hide
+    // everything" sweeps that ran before any culling decision existed.
+    this.frame = 0;
   }
 
   update(cameras) {
@@ -42,10 +47,7 @@ class VisibilityManager {
     // Hide the exterior world (doodads and terrain) until a traversal reaches the exterior
     this.map.exterior.visible = false;
 
-    this.hideAllMapChanks();
-    this.hideAllMapDoodads();
-    this.hideAllWMOGroups();
-    this.hideAllWMODoodads();
+    ++this.frame;
 
     const camera = cameras.find(x => x.name === 'MainCamera');
     
@@ -97,6 +99,7 @@ class VisibilityManager {
       this.enablePortalsFromInterior(0, camera, frustum);
     }
 
+    this.resolveVisibility();
     this.updateStats();
   }
 
@@ -148,7 +151,7 @@ class VisibilityManager {
         }
 
         // Since the camera is in the exterior, all exterior WMO groups are visible.
-        view.visible = true;
+        view.visibleFrame = this.frame;
 
         // Doodads within frustum are visible
         for (const doodad of wmo.doodadsForGroup(group)) {
@@ -168,7 +171,7 @@ class VisibilityManager {
     const groupView = camera.location.wmo.views.group;
 
     // The group the camera is currently in should always be visible
-    groupView.visible = true;
+    groupView.visibleFrame = this.frame;
 
     // Doodads within frustum are visible
     for (const doodad of wmo.doodadsForGroup(group)) {
@@ -200,7 +203,7 @@ class VisibilityManager {
     this.refreshWorldBoundingBox(object);
 
     if (object.worldBoundingBox && THREEUtil.frustumContainsBox(frustum, object.worldBoundingBox)) {
-      object.visible = true;
+      object.visibleFrame = this.frame;
     }
   }
 
@@ -308,7 +311,7 @@ class VisibilityManager {
       }
 
       // Portal out of group is visible, thus the destination group is visible
-      destinationView.visible = true;
+      destinationView.visibleFrame = this.frame;
       
       // Track visited portals to prevent duplicate work
       visitedPortals.add(portalView);
@@ -334,46 +337,35 @@ class VisibilityManager {
     }
   }
 
-  hideAllWMOGroups() {
-    const wmos = this.map.wmoManager.entries.values();
+  /**
+   * Write the frame's verdict onto `visible`.
+   *
+   * One pass over each collection, at the end, instead of a "hide everything" sweep at the start
+   * plus an enable sweep in the middle -- which touched every loaded object at least twice per
+   * frame before any culling decision existed.
+   */
+  resolveVisibility() {
+    const frame = this.frame;
 
-    for (const wmo of wmos) {
-      const groups = wmo.groups.values();
-
-      for (const group of groups) {
-        const view = wmo.views.groups.get(group.index);
-
-        // View can be pending load
-        if (!view) {
-          continue;
-        }
-
-        view.visible = false;
-      }
+    for (const chunk of this.map.chunks.values()) {
+      chunk.visible = chunk.visibleFrame === frame;
     }
-  }
 
-  hideAllWMODoodads() {
-    const wmos = this.map.wmoManager.entries.values();
-
-    for (const wmo of wmos) {
-      const doodads = wmo.doodads.values();
-
-      for (const doodad of doodads) {
-        doodad.visible = false;
-      }
-    }
-  }
-
-  hideAllMapDoodads() {
     for (const doodad of this.map.doodadManager.doodads.values()) {
-      doodad.visible = false;
+      doodad.visible = doodad.visibleFrame === frame;
     }
-  }
 
-  hideAllMapChanks() {
-    for (const chank of this.map.chunks.values()) {
-      chank.visible = false;
+    for (const wmo of this.map.wmoManager.entries.values()) {
+      for (const group of wmo.groups.values()) {
+        const view = wmo.views.groups.get(group.index);
+        if (view) {
+          view.visible = view.visibleFrame === frame;
+        }
+      }
+
+      for (const doodad of wmo.doodads.values()) {
+        doodad.visible = doodad.visibleFrame === frame;
+      }
     }
   }
 
