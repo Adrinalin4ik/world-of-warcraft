@@ -366,6 +366,108 @@ export function sunDiscScale(minute: number): number {
 }
 
 /**
+ * Star-field global-alpha curve (celestial-sky plan, Task 3; benilla `daynight.rs::STAR_CURVE`,
+ * vanilla star curve `0xce9a98`, VERIFIED off `WoW.exe`): the `Stars.m2` model-global alpha
+ * (`[stars+0xb]/255`) fades on this exact schedule -- full all deep night, off all day, fading in
+ * 22:30->00:00 and out 03:00->04:30. This is the raw 0..1 curve; [`starGlobalAlpha`] applies the
+ * reference's own byte quantization + skip-below-2 rule on top.
+ */
+const STAR_CURVE: Array<[number, number]> = [
+  [0.0, 1.0], // 00:00 -- full (deep night)
+  [0.125, 1.0], // 03:00 -- still full
+  [0.1875, 0.0], // 04:30 -- fully out
+  [0.9375, 0.0], // 22:30 -- start fading in (wraps forward to 00:00)
+];
+
+/** The raw star curve at a game minute-of-day: 1.0 deep night, 0.0 all day. See [`STAR_CURVE`]. */
+export function starAlpha(minute: number): number {
+  return interpDayNight(STAR_CURVE, minute / 1440);
+}
+
+/**
+ * The star dome's actual per-frame global alpha (benilla `sun/follow.rs::follow_stars`): the
+ * reference quantizes [`starAlpha`] to a model-global BYTE (`trunc(curve*254 + 1)`) and skips the
+ * draw entirely once that byte falls below 2 (`0x6d1b50`/`0x7e6120`) -- so the curve's own near-zero
+ * tail (just above/below the fade boundary) reads as exactly off, matching the reference's byte
+ * quantization rather than a smooth float tail past it. Each star patch then multiplies its own
+ * authored transparency weight under this.
+ */
+export function starGlobalAlpha(minute: number): number {
+  const curve = starAlpha(minute);
+  const byte = Math.trunc(curve * 254 + 1);
+  return byte < 2 ? 0 : byte / 255;
+}
+
+/**
+ * Moon-disc size-multiplier curve (benilla `daynight.rs::MOON_SIZE_CURVE`, shared table `0xce8c8c`,
+ * VERIFIED): 1.5x at moonrise/moonset (the horizon, ~22:00 / ~04:00) shrinking to 1.0x overhead
+ * (~01:00) -- the same horizon-enlargement the sun disc gets. BOTH moon discs (white and moon02)
+ * sample this same curve; only their own base multiplier differs (white x1.75, moon02 x1.0) and, for
+ * moon02, which phase fraction it is sampled at (see [`moon02State`]).
+ */
+const MOON_SIZE_CURVE: Array<[number, number]> = [
+  [0.041667, 1.0], // 01:00 -- overhead (smallest)
+  [0.166667, 1.5], // 04:00 -- moonset horizon
+  [0.916667, 1.5], // 22:00 -- moonrise horizon
+  [0.999306, 1.0], // 23:59 -- wraps toward 01:00 (overhead)
+];
+
+/** The moon disc's size multiplier at a game minute-of-day: 1.0 overhead (~01:00) to 1.5 at
+ * moonrise/moonset. Multiply by the per-disc base (white x1.75, moon02 x1.0). See
+ * [`MOON_SIZE_CURVE`]. */
+export function moonDiscScale(minute: number): number {
+  return interpDayNight(MOON_SIZE_CURVE, minute / 1440);
+}
+
+/**
+ * moon02 -- the engine's third disc (`moon02.blp`) -- direction + size scale (benilla
+ * `daynight.rs::moon02_state`, VERIFIED): drawn every frame but vertex-BLACK, its colour field
+ * (`[0xce98a4]`) has no writer in the binary, so it can never read as a second moon (see this
+ * module's own header / the celestial-sky plan's Task 4). Ported anyway because it is in the
+ * reference's draw order and omitting it silently changes what is on screen.
+ *
+ * Its tracks run on a phase-precessed clock separate from the game clock:
+ * `phase = fmod(dayCounter + todPhase, 1.7)` (`0x6d41b9`, `dayContinuous` = that server-synced sum in
+ * this client's stand-in, continuous whole+fractional days), which the track kernel (`0x6cf6c0`)
+ * clamps to `[0, 1]` -- so across the whole `[1.0, 1.7)` leg BOTH tracks park frozen on their `r=1`
+ * value (azimuth 165 degrees, polar 35 degrees = elevation +55 degrees). Azimuth sweeps 135 -> 150 ->
+ * 165 degrees (table `0xce8ccc`); elevation shares the white moon's own curve shape (35 <-> 100
+ * degrees, table `0xce8ce4`); size samples [`MOON_SIZE_CURVE`] on the SAME phase, base x1.0.
+ *
+ * Returns the to-body direction in this client's unpermuted WoW frame (Z up, matching
+ * [`moonDirection`]'s own convention) and the size-curve multiplier (before the x1.0 base, which is
+ * folded in by the caller alongside the disc's own alpha-0 gate).
+ */
+export function moon02State(dayContinuous: number): { dir: Vec3; sizeScale: number } {
+  const AZ_TABLE: Array<[number, number]> = [
+    [0.0, Math.PI * 0.75], // 135 deg
+    [0.166667, Math.PI * 0.833333], // 150 deg
+    [0.916667, Math.PI * 0.916667], // 165 deg
+  ];
+  const ELEV_TABLE: Array<[number, number]> = [
+    [0.0, Math.PI * 0.194444], // 35 deg -- phase 0 (overhead, +55 deg)
+    [0.003472, Math.PI * 0.194444], // 35 deg
+    [0.166667, Math.PI * 0.555556], // 100 deg -- below the horizon (clipped away)
+    [0.916667, Math.PI * 0.555556], // 100 deg
+    [0.996528, Math.PI * 0.194444], // 35 deg
+  ];
+
+  // The kernel clamp: fmod into [0, 1.7), then anything past 1.0 evaluates AT 1.0 (`0x6cf6c0`).
+  const wrapped = dayContinuous - Math.floor(dayContinuous / 1.7) * 1.7;
+  const phase = Math.min(wrapped, 1.0);
+
+  const theta = interpDayNight(AZ_TABLE, phase);
+  const phi = interpDayNight(ELEV_TABLE, phase);
+  const sinPhi = Math.sin(phi);
+  const cosPhi = Math.cos(phi);
+
+  return {
+    dir: [sinPhi * Math.cos(theta), sinPhi * Math.sin(theta), cosPhi],
+    sizeScale: interpDayNight(MOON_SIZE_CURVE, phase),
+  };
+}
+
+/**
  * The dawn/dusk sky-dome warp strength curve (benilla `daynight.rs::SKY_WARP_CURVE`, table
  * `0xce9b2c`): two triangular spikes at sunrise (~06:29) and sunset (~21:29), and zero everywhere
  * else -- all of midday AND deep night.

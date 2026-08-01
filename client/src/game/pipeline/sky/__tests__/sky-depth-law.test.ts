@@ -18,15 +18,27 @@
 import * as THREE from 'three';
 import CloudDome from '../clouds';
 import CelestialBillboard from '../celestial/billboard';
+import { buildStarMaterial } from '../celestial/stars';
 
 /** Every transparent sky element, built the way its owner builds it. */
 const transparentSkyElements = (): Array<{ name: string; material: THREE.ShaderMaterial }> => {
   const dome = new CloudDome();
   const billboard = new CelestialBillboard(new THREE.Texture(), { renderOrder: -1002 });
+  // The white moon and moon02 (celestial-sky plan, Task 4) -- both configurations of the same shared
+  // `CelestialBillboard`, so the law is exercised at their own renderOrder slots too.
+  const whiteMoon = new CelestialBillboard(new THREE.Texture(), { renderOrder: -1001 });
+  const moon02 = new CelestialBillboard(new THREE.Texture(), { renderOrder: -1000.5 });
+  // Stars (Task 3, renderOrder -1003): not a CelestialBillboard (a multi-patch dome with no single
+  // body direction of its own), so it builds its own depth-law material -- covered here rather than
+  // re-deriving the rule for it.
+  const stars = buildStarMaterial(new THREE.Texture());
 
   return [
     { name: 'CloudDome', material: dome.material as THREE.ShaderMaterial },
     { name: 'CelestialBillboard', material: billboard.material as THREE.ShaderMaterial },
+    { name: 'WhiteMoon', material: whiteMoon.material as THREE.ShaderMaterial },
+    { name: 'Moon02', material: moon02.material as THREE.ShaderMaterial },
+    { name: 'Stars', material: stars },
   ];
 };
 

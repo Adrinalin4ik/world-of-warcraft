@@ -6,6 +6,8 @@ import CloudDome from '../clouds';
 import ProceduralSky from '../procedural';
 import Skybox from '../skybox';
 import SunDisc from '../celestial/sun';
+import { Moon02, WhiteMoon } from '../celestial/moons';
+import Stars from '../celestial/stars';
 
 /** Task 6's instrument bundle -- the numbers that distinguish "the field is empty" from "the field
  * is fine and the dome is not drawing" (see the plan's own framing). `null` before the kernel has
@@ -63,13 +65,33 @@ class SkyManager {
   // cloud dome above, since the sky bodies sit above whichever gradient/skybox method is active.
   private sunDisc: SunDisc;
 
+  // Task 4: the white moon and moon02, owned the same way as `sunDisc` above -- above whichever
+  // gradient/skybox method is active, not swapped by `setMethod`.
+  private whiteMoon: WhiteMoon;
+  private moon02: Moon02;
+
+  // Task 3: the night-sky stars, owned the same way as `sunDisc`/`whiteMoon`/`moon02` above -- above
+  // whichever gradient/skybox method is active, not swapped by `setMethod`.
+  private stars: Stars;
+
   constructor(scene: THREE.Scene) {
     this.scene = scene;
     this.cloudDome = new CloudDome();
     this.scene.add(this.cloudDome);
 
+    // First on the plan's draw-order ladder (renderOrder -1003) -- constructed first so the scene
+    // graph's own order roughly mirrors the ladder, though renderOrder is what actually decides it.
+    this.stars = new Stars();
+    this.scene.add(this.stars);
+
     this.sunDisc = new SunDisc();
     this.scene.add(this.sunDisc);
+
+    this.whiteMoon = new WhiteMoon();
+    this.scene.add(this.whiteMoon);
+
+    this.moon02 = new Moon02();
+    this.scene.add(this.moon02);
   }
 
   /**
@@ -179,7 +201,10 @@ class SkyManager {
     if (!this.mapLight) {
       return;
     }
+    this.stars.updateFromLight(camera, this.mapLight);
     this.sunDisc.updateFromLight(camera, this.mapLight);
+    this.whiteMoon.updateFromLight(camera, this.mapLight);
+    this.moon02.updateFromLight(camera, this.mapLight);
   }
 
   /**
@@ -320,8 +345,14 @@ class SkyManager {
     this.removeCurrentSky();
     this.scene.remove(this.cloudDome);
     this.cloudDome.dispose();
+    this.scene.remove(this.stars);
+    this.stars.dispose();
     this.scene.remove(this.sunDisc);
     this.sunDisc.dispose();
+    this.scene.remove(this.whiteMoon);
+    this.whiteMoon.dispose();
+    this.scene.remove(this.moon02);
+    this.moon02.dispose();
   }
 }
 

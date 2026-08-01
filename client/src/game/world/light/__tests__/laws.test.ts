@@ -15,7 +15,9 @@ import {
   INTERIOR_LIGHT_AXIS,
   interpDayNight,
   Lobe,
+  moon02State,
   moonDirection,
+  moonDiscScale,
   propProbeCoeffs,
   PropLobeLight,
   quantizeGlow,
@@ -24,6 +26,8 @@ import {
   sidnNightFraction,
   skyWarp,
   skyWarpAzimuthGlow,
+  starAlpha,
+  starGlobalAlpha,
   stormBlend,
   sunDiscScale,
   Vec3,
@@ -531,5 +535,78 @@ describe('sunDiscScale', () => {
     const partial = sunDiscScale(6 * 60 + 20); // between the 06:00 and 06:45 keys
     expect(partial).toBeGreaterThan(1.0);
     expect(partial).toBeLessThan(2.0);
+  });
+});
+
+describe('starAlpha and starGlobalAlpha (celestial-sky plan, Task 3)', () => {
+  it('is full all deep night and off all day (vanilla star curve 0xce9a98)', () => {
+    expect(starAlpha(0)).toBeCloseTo(1.0, 3); // 00:00 midnight
+    expect(starAlpha(2 * 60)).toBeCloseTo(1.0, 3); // 02:00 still full
+    expect(starAlpha(12 * 60)).toBe(0.0); // noon off
+    expect(starAlpha(18 * 60)).toBe(0.0); // 18:00 off
+  });
+
+  it('fades in 22:30->00:00 and out 03:00->04:30 rather than stepping', () => {
+    const dusk = starAlpha(23 * 60 + 15);
+    expect(dusk).toBeGreaterThan(0);
+    expect(dusk).toBeLessThan(1);
+
+    const dawn = starAlpha(3 * 60 + 45);
+    expect(dawn).toBeGreaterThan(0);
+    expect(dawn).toBeLessThan(1);
+  });
+
+  it('quantizes to the reference byte and skips the draw once it falls below 2/255', () => {
+    // Deep night: byte = trunc(1.0*254+1) = 255 -> alpha 1.0.
+    expect(starGlobalAlpha(0)).toBeCloseTo(1.0, 3);
+    // Broad daylight: the raw curve is exactly 0, byte = trunc(0*254+1) = 1 < 2 -> clipped to 0.
+    expect(starGlobalAlpha(12 * 60)).toBe(0);
+  });
+
+  it('matches the reference byte formula exactly at a swept sample of the day', () => {
+    for (let minute = 0; minute < 1440; minute += 37) {
+      const byte = Math.trunc(starAlpha(minute) * 254 + 1);
+      const expected = byte < 2 ? 0 : byte / 255;
+      expect(starGlobalAlpha(minute)).toBe(expected);
+    }
+  });
+});
+
+describe('moonDiscScale (celestial-sky plan, Task 4)', () => {
+  it('is 1.5x at moonrise/moonset and 1.0x overhead (shared moon-size table 0xce8c8c)', () => {
+    expect(moonDiscScale(4 * 60)).toBeCloseTo(1.5, 3); // 04:00 moonset horizon
+    expect(moonDiscScale(22 * 60)).toBeCloseTo(1.5, 3); // 22:00 moonrise horizon
+    expect(moonDiscScale(60)).toBeCloseTo(1.0, 3); // 01:00 overhead
+  });
+});
+
+describe('moon02State (celestial-sky plan, Task 4 -- the vertex-black third disc)', () => {
+  it('sits on its own 135-165 degree bearing, never the white moon\'s 45 degrees', () => {
+    const heading = (d: Vec3) => Math.atan2(d[1], d[0]);
+    const hw = heading(moonDirection(0));
+    const h02 = heading(moon02State(0).dir);
+
+    expect(h02).not.toBeCloseTo(hw, 2);
+    expect(h02).toBeGreaterThanOrEqual(Math.PI * 0.75 - 1e-6);
+    expect(h02).toBeLessThanOrEqual(Math.PI * (150 / 180) + 1e-6);
+  });
+
+  it('parks frozen on the r=1 leg for the whole [1.0, 1.7) stretch of the phase clock', () => {
+    const parkedA = moon02State(1.05);
+    const parkedB = moon02State(1.65);
+
+    expect(parkedA.dir[0]).toBeCloseTo(parkedB.dir[0], 6);
+    expect(parkedA.dir[1]).toBeCloseTo(parkedB.dir[1], 6);
+    expect(parkedA.dir[2]).toBeCloseTo(parkedB.dir[2], 6);
+    expect(parkedA.sizeScale).toBeCloseTo(parkedB.sizeScale, 6);
+  });
+
+  it('wraps the phase clock at 1.7 days, not 1.0', () => {
+    const dayZero = moon02State(0);
+    const wrapped = moon02State(1.7);
+
+    expect(wrapped.dir[0]).toBeCloseTo(dayZero.dir[0], 5);
+    expect(wrapped.dir[1]).toBeCloseTo(dayZero.dir[1], 5);
+    expect(wrapped.dir[2]).toBeCloseTo(dayZero.dir[2], 5);
   });
 });
