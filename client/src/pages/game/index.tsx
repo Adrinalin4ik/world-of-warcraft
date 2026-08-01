@@ -9,6 +9,7 @@ import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
 import Controls from './controls/controls';
 import DebugPanel from './debug/debug';
+import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
 import './index.scss';
 
 interface IGameProps {
@@ -43,6 +44,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private canvas = React.createRef<HTMLCanvasElement>()
   private debugCanvas = React.createRef<HTMLCanvasElement>()
   private stats: any = new Stats();
+  private perf: PerfMonitor = new PerfMonitor();
+  private lastDebugPanelPaint = 0;
 
   private isMobile: boolean = false;
 
@@ -114,6 +117,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
 
     console.log('Renderer', renderer);
 
+    this.perf.attach(renderer.getContext() as WebGL2RenderingContext);
+
     // window['depthPass'] = this.depthPass = new DepthPass(this.game.world.scene, this.camera);
     // this.depthPass.renderToScreen = false;
 
@@ -147,9 +152,12 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.game.world.run();
   }
 
+  // No forceUpdate here. This component's state (renderer, composer, currentLocation) changes at
+  // mount and on explicit user action; re-rendering the subtree at 60 Hz cost a full React
+  // reconciliation per frame for nothing. Per-frame numbers go to the perf HUD, which writes DOM
+  // directly at 4 Hz (see game/perf/hud.ts).
   callFrame() {
     this.animate();
-    this.forceUpdate();
     window.requestAnimationFrame(this.callFrame.bind(this));
   }
 
@@ -175,8 +183,15 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       return;
     }
 
+    this.perf.beginFrame();
+
     const delta = this.clock.getDelta();
-    if (this.debugPanel.current){
+
+    // The debug panel is a full React subtree. It reads slow-moving values (position, zone, light
+    // state) that no one can perceive at 60 Hz, so it repaints on the HUD's 4 Hz cadence.
+    const nowMs = performance.now();
+    if (this.debugPanel.current && nowMs - this.lastDebugPanelPaint >= HUD_REPAINT_MS) {
+      this.lastDebugPanelPaint = nowMs;
       this.debugPanel.current.forceUpdate();
     }
 
@@ -199,20 +214,42 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     !this.prevCameraRotation.equals(this.camera.quaternion) ||
     !this.prevCameraPosition.equals(this.camera.position);
     
+    this.perf.sections.begin('world.animate');
     this.game.world.animate(delta, this.camera, cameraMoved);
+    this.perf.sections.end('world.animate');
+
+    this.perf.sections.begin('render');
+    this.perf.gpuBegin();
     this.renderer.render(this.game.world.scene, this.camera);
+    this.perf.gpuEnd();
+    this.perf.sections.end('render');
+
       if (this.debugRenderer) {
-        this.debugCamera.position.set(this.camera.position.x, 
-          this.camera.position.y, 
+        this.debugCamera.position.set(this.camera.position.x,
+          this.camera.position.y,
           this.camera.position.z + this.debugCameraRange)
           this.debugRenderer.render(this.game.world.scene, this.debugCamera);
       }
-      
+
       this.prevCameraRotation = this.camera.quaternion.clone();
       this.prevCameraPosition = this.camera.position.clone();
       if (this.controls.current) {
         this.controls.current.update(delta);
       }
+
+      const info = this.renderer.info;
+      const visibility = this.game.world.map?.visibilityManager;
+      this.perf.endFrame({
+        calls: info.render.calls,
+        triangles: info.render.triangles,
+        programs: info.programs?.length ?? 0,
+        geometries: info.memory.geometries,
+        textures: info.memory.textures,
+        visibleChunks: visibility?.stats.map?.visibleChunks ?? 0,
+        visibleGroups: visibility?.stats.wmo?.visibleGroups ?? 0,
+        visibleDoodads: visibility?.stats.wmo?.visibleDoodads ?? 0,
+      });
+
       this.stats.end();
     }
     

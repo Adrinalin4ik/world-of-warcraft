@@ -13,6 +13,10 @@ class VisibilityManager {
     this.map = map;
 
     this.stats = {
+      map: {
+        visibleChunks: 0,
+        visibleDoodads: 0
+      },
       wmo: {
         visibleGroups: 0,
         visibleDoodads: 0
@@ -346,6 +350,23 @@ class VisibilityManager {
         }
       }
     }
+
+    let visibleChunkCount = 0;
+    for (const chunk of this.map.chunks.values()) {
+      if (chunk.visible) {
+        visibleChunkCount++;
+      }
+    }
+
+    let visibleMapDoodadCount = 0;
+    for (const doodad of this.map.doodadManager.doodads.values()) {
+      if (doodad.visible) {
+        visibleMapDoodadCount++;
+      }
+    }
+
+    this.stats.map.visibleChunks = visibleChunkCount;
+    this.stats.map.visibleDoodads = visibleMapDoodadCount;
 
     this.stats.wmo.visibleGroups = visibleGroupCount;
     this.stats.wmo.visibleDoodads = visibleDoodadCount;
