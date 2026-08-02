@@ -44,6 +44,11 @@ export class WmoProvider {
    */
   private seen = new Set<number>();
 
+  /** Registered group-collider count. Read by the collision debug overlay. */
+  get size(): number {
+    return this.colliders.size;
+  }
+
   add(collider: WmoCollider): void {
     this.colliders.set(collider.view, collider);
   }

@@ -68,3 +68,24 @@
 .debugSection-body {
   padding-left: 2px;
 }
+
+// The Collisions section. Its controls sit on the panel's dark card, so the browser's default
+// light form styling would be invisible against it.
+.collision_controls {
+  select,
+  button {
+    background: rgba(234, 255, 240, 0.1);
+    color: #eafff0;
+    border: 1px solid rgba(234, 255, 240, 0.35);
+    font-size: 11px;
+    padding: 0 2px;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  label {
+    cursor: pointer;
+  }
+}

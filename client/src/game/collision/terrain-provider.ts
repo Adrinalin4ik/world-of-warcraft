@@ -32,6 +32,11 @@ const _e2 = new THREE.Vector3();
 export class TerrainProvider {
   private chunks = new Set<any>();
 
+  /** Registered chunk count. Read by the collision debug overlay. */
+  get size(): number {
+    return this.chunks.size;
+  }
+
   add(chunk: any): void {
     this.chunks.add(chunk);
   }

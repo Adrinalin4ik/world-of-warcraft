@@ -27,6 +27,11 @@ const _e2 = new THREE.Vector3();
 export class DoodadProvider {
   private hulls = new Set<THREE.Mesh>();
 
+  /** Registered hull count. Read by the collision debug overlay. */
+  get size(): number {
+    return this.hulls.size;
+  }
+
   add(mesh: THREE.Mesh): void {
     this.hulls.add(mesh);
   }

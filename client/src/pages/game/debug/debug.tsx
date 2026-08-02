@@ -2,6 +2,7 @@ import React from 'react';
 import * as THREE from 'three';
 import { GameHandler } from '../../../network/game/handler';
 import CollapsibleSection from './collapsible-section';
+import CollisionControls from './collision-controls';
 import MoveReadout from './move-readout';
 import LightingControls from './lighting-controls';
 import LightingReadouts from './lighting-readouts';
@@ -164,6 +165,9 @@ class DebugPanel extends React.Component<IProp> {
         </CollapsibleSection>
         <CollapsibleSection title="Player" storageKey="player" defaultCollapsed={true}>
           { this.playerStats() }
+        </CollapsibleSection>
+        <CollapsibleSection title="Collisions" storageKey="collisions" defaultCollapsed={true}>
+          <CollisionControls view={ this.props.game.world.collisionDebug } />
         </CollapsibleSection>
         <CollapsibleSection title="Lighting" storageKey="lighting" defaultCollapsed={false}>
           <LightingControls mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />

@@ -7,6 +7,7 @@ import spots from "./spots";
 import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
+import { collisionDebugView } from "../collision/debug-view";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
@@ -21,6 +22,8 @@ export default class World extends EventEmitter {
   public session: GameSession;
   public game: GameHandler;
   public skyManager: SkyManager;
+  /** The collision wireframe overlay, driven from `animate` and toggled from the debug panel. */
+  public collisionDebug = collisionDebugView;
   private skyDebug: SkyDebug;
   // private skybox: THREE.Mesh;
   constructor(game: GameHandler) {
@@ -47,6 +50,10 @@ export default class World extends EventEmitter {
     this.scene.matrixWorldAutoUpdate = false;
     this.debugScene = new THREE.Scene();
     this.debugScene.matrixAutoUpdate = false;
+
+    // Added once and left in place: it is invisible and draws nothing until enabled, and its
+    // vertices are already world-space, so it wants the scene root rather than any placed subtree.
+    this.scene.add(this.collisionDebug.object);
 
     this.game = game;
     this.session = game.session;
@@ -328,6 +335,10 @@ export default class World extends EventEmitter {
 
     // Send delta updates to instanced M2 animation managers.
     M2Blueprint.animate(delta);
+
+    // Centred on the player rather than the camera: the overlay exists to show what the MOVEMENT
+    // cast sees, and the camera can be thirty yards away from that.
+    this.collisionDebug.update(this.player.position);
 
     // LAST: everything above may have moved something. See the constructor for why the renderer no
     // longer does this itself.
