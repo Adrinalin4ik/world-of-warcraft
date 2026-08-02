@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 
+import { modelSpaceBindMatrix } from './bind-pose';
+
 /**
  * Push the owning placement's distance-fade alpha into the shared material, immediately before this
  * batch is drawn.
@@ -72,7 +74,11 @@ class Submesh extends THREE.Group {
       // Only use a skinned mesh if the submesh uses skinning.
       if (this.useSkinning) {
         batchMesh = new THREE.SkinnedMesh(this.geometry, batchMaterial);
-        batchMesh.bind(this.skeleton);
+        // EXPLICIT bind matrix. `bind(skeleton)` alone re-runs skeleton.calculateInverses() as a
+        // side effect, and applyBatches runs again whenever display-info textures resolve -- by
+        // which time the bones have been moved into world space by the scene graph, so the bind
+        // pose gets recomputed from the wrong state and the mesh is culled out of the frame.
+        batchMesh.bind(this.skeleton, modelSpaceBindMatrix());
       } else {
         batchMesh = new THREE.Mesh(this.geometry, batchMaterial);
       }

@@ -16,13 +16,16 @@ const HALF_H = CAPSULE_HEIGHT / 2;
 
 const openWater: CastFn = () => null;
 
+/** A named identity for the lakebed. */
+const BED = { name: 'bed' };
+
 /** Solid ground at z = 0, for the shallows cases. */
 const lakebed: CastFn = (from, dir, maxDist) => {
   if (dir.z > -0.5) return null;
   const gap = from.z - HALF_H;
   if (gap < 0 || gap > maxDist) return null;
 
-  return { distance: gap, normal: UP.clone(), source: 'bed' } as CastHit;
+  return { distance: gap, normal: UP.clone(), source: BED } as CastHit;
 };
 
 function swimmer(feetZ: number) {

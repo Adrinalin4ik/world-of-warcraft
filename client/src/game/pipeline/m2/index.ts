@@ -6,6 +6,7 @@ import { collisionWorld } from '../../collision/collision-world';
 import { ObjectsManager } from '../../world/visibility-manager';
 import AnimationManager from './animation-manager';
 import BatchManager from './batch-manager';
+import { modelSpaceBindMatrix, poseBindSkeleton } from './bind-pose';
 import M2Material from './material';
 import { isParticleTemplate } from './particle/template';
 import Submesh from './submesh';
@@ -291,8 +292,12 @@ class M2 extends THREE.Group {
     this.rootBones = rootBones;
     this.billboards = billboards;
 
-    // Assemble the skeleton
-    this.skeleton = new THREE.Skeleton(bones);
+    // Assemble the skeleton from the MODEL-SPACE bind pose. `new THREE.Skeleton(bones)` on its own
+    // takes its bone inverses from bones that have never been through updateMatrixWorld, so every
+    // inverse comes out identity -- which makes each palette entry the bone's full world matrix and
+    // sends the skinned bounding sphere to roughly twice the model's world position. three then
+    // culls the mesh and the body draws nothing. See bind-pose.ts.
+    this.skeleton = poseBindSkeleton(rootBones, bones);
 
     this.skeleton.matrixAutoUpdate = this.matrixAutoUpdate;
   }
@@ -375,8 +380,9 @@ class M2 extends THREE.Group {
         bone.skin = mesh;
       });
 
-      // Bind mesh to skeleton
-      mesh.bind(skeleton);
+      // Bind with an EXPLICIT matrix: `bind(skeleton)` alone re-runs calculateInverses() as a side
+      // effect, throwing away the bind pose computed above.
+      mesh.bind(skeleton, modelSpaceBindMatrix());
     } else {
       mesh = new THREE.Mesh(bufferGeometry);
     }

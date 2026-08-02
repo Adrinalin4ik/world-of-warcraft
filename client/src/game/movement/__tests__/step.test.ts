@@ -23,6 +23,9 @@ const jumping = { moving: false, dir: v3(0, 0, 0), speed: 0, wantJump: true };
 /** Open air everywhere. */
 const air: CastFn = () => null;
 
+/** A named identity for the floor, so `out.ground` can be asserted against it. */
+const FLOOR = { name: 'floor' };
+
 /**
  * Solid ground at z = 0. Downward probes report the distance from the capsule's bottom cap to the
  * floor; everything else misses.
@@ -32,7 +35,7 @@ const ground: CastFn = (from, dir, maxDist) => {
   const gap = from.z - HALF_H;
   if (gap < 0 || gap > maxDist) return null;
 
-  return { distance: gap, normal: UP.clone(), source: 'floor' } as CastHit;
+  return { distance: gap, normal: UP.clone(), source: FLOOR } as CastHit;
 };
 
 /** Feet on the floor. */
@@ -50,7 +53,7 @@ describe('step: standing and falling', () => {
     expect(out.grounded).toBe(true);
     expect(player.velZ).toBe(0);
     expect(player.airborneSince).toBeNull();
-    expect(out.ground).toBe('floor');
+    expect(out.ground).toBe(FLOOR);
   });
 
   it('accelerates a body in open air under gravity', () => {
@@ -214,12 +217,13 @@ describe('step: the wedge rest', () => {
     // A pinch is a capsule that CANNOT descend: the funnel walls are already in contact, so every
     // probe reports zero distance. Letting it creep even a couple of centimetres per iteration
     // would beat the stall threshold honestly and would not be a wedge at all.
+    const FUNNEL = { name: 'funnel' };
     const r = (78 * Math.PI) / 180;
     const funnelWall = v3(-Math.sin(r), 0, Math.cos(r));
     const wedge: CastFn = (_from, dir) => ({
       distance: 0,
       normal: dir.z < -0.5 ? funnelWall.clone() : v3(-1, 0, 0),
-      source: 'funnel',
+      source: FUNNEL,
     } as CastHit);
 
     const player = standing();

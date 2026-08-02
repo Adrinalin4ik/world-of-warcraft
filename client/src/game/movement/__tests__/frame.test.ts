@@ -16,12 +16,16 @@ const H = 2.031;
 const HALF_H = CAPSULE_HEIGHT / 2;
 const SURFACE = 100;
 
+/** A named identity for the floor. */
+const FLOOR = { name: 'floor' };
+
+/** Solid ground at z = 0; downward probes only. */
 const ground: CastFn = (from, dir, maxDist) => {
   if (dir.z > -0.5) return null;
   const gap = from.z - HALF_H;
   if (gap < 0 || gap > maxDist) return null;
 
-  return { distance: gap, normal: UP.clone(), source: 'floor' } as CastHit;
+  return { distance: gap, normal: UP.clone(), source: FLOOR } as CastHit;
 };
 
 const dry = { cast: ground, surfaceAt: () => null };
