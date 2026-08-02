@@ -123,6 +123,11 @@ class WMOGroup {
     const { indices, positions } = attributes;
 
     this.bspTree = new BSPTree(nodes, planeIndices, indices, positions);
+
+    // MOPY flags, one byte per triangle, indexed by the SAME triangle index MOBR's entries carry.
+    // That shared indexing is what lets the walk face set (minus DETAIL) and the camera face set
+    // (minus NOCAMCOLLIDE) come out of one shared BSP instead of two bakes.
+    this.triangleFlags = attributes.triangleFlags;
   }
 
   createLiquid(liquidData) {
