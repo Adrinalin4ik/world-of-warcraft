@@ -120,10 +120,21 @@ export function castCapsuleAgainstTriangles(
         // lands the capsule exactly on the surface. The ground probe then found nothing, the mover
         // called itself airborne, gravity pulled it deeper, and each frame made the overlap worse
         // -- the avatar sank through the world a second after landing.
-        const along = dir.dot(triangle.normal);
+        // Orient the contact normal toward the side we are ON, taken from the separation
+        // direction -- NOT from the direction of travel.
+        //
+        // Orienting it against the motion looks equivalent and is not: walking along a slope, the
+        // horizontal step closes on the floor underfoot, `dir . n` comes out positive, and the
+        // floor's normal gets flipped to point DOWN. `walkableRideVelocity` then no longer
+        // recognises it as ground and `steepWallPlane` does not apply either, so the slide dead
+        // stops and the avatar cannot walk uphill at all.
+        const facing = separation > 1e-12
+          ? _sep.dot(triangle.normal)
+          : -dir.dot(triangle.normal);
+
         return {
           distance: Math.max(0, travelled - skin),
-          normal: along > 0 ? triangle.normal.clone().negate() : triangle.normal.clone(),
+          normal: facing < 0 ? triangle.normal.clone().negate() : triangle.normal.clone(),
           source: triangle.source,
         };
       }

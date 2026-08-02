@@ -182,6 +182,31 @@ describe('castCapsuleAgainstTriangles', () => {
     expect(hit!.normal.x).toBeLessThan(0);
   });
 
+  it('keeps a floor contact normal pointing UP during a horizontal step along a slope', () => {
+    // Orienting the contact normal against the direction of travel looks equivalent and is not.
+    // Walking along a slope, the horizontal step closes on the floor underfoot and `dir . n` comes
+    // out positive -- flipping the floor's normal to point down. walkableRideVelocity then stops
+    // recognising it as ground, steepWallPlane does not apply either, and the slide dead stops:
+    // the avatar cannot walk uphill at all.
+    const s = 50;
+    const r = (9 * Math.PI) / 180;
+    const k = Math.tan(r);
+    const n: [number, number, number] = [-Math.sin(r), 0, Math.cos(r)];
+    const slope = [
+      tri([-s, -s, -s * k], [s, -s, s * k], [s, s, s * k], n),
+      tri([-s, -s, -s * k], [s, s, s * k], [-s, s, -s * k], n),
+    ];
+
+    // Resting on the slope, stepping uphill.
+    const resting = new THREE.Vector3(0, 0, HALF_SEGMENT + RADIUS);
+    const hit = cast(resting, new THREE.Vector3(1, 0, 0), 0.2, slope);
+
+    if (hit) {
+      expect(hit.normal.z).toBeGreaterThan(0);
+      expect(hit.normal.z).toBeCloseTo(Math.cos(r), 3);
+    }
+  });
+
   it('misses on an empty candidate list', () => {
     expect(cast(new THREE.Vector3(0, 0, 5), new THREE.Vector3(0, 0, -1), 10, [])).toBeNull();
   });
