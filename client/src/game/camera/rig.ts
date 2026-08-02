@@ -151,3 +151,194 @@ export function selfFadeAlpha(cameraToPivot: number): number {
 
   return Math.min(1, Math.max(0, t));
 }
+
+const _up = new THREE.Vector3(0, 0, 1);
+
+/**
+ * Orient the camera and orbit it behind the avatar, with world collision.
+ *
+ * The framing PIVOT is `feet + pivotHeight` (model-derived, about neck height). The camera looks at
+ * it and, at zoom 0, sits ON it -- the first-person eye inside the head.
+ *
+ * Camera collision is a single sweep of the probe sphere from the player's HEAD, not the pivot, out
+ * to the ideal seat. Rooting the arm at the head is what makes it robust: body collision keeps the
+ * head inside the room -- even mid-jump it cannot pass the ceiling -- so the swept camera can never
+ * end up on the far side of a wall. That is why a jump in a low room does not push it through the
+ * roof; the sweep just stops under the ceiling.
+ *
+ * Pull-in is instant and collision wins outright: there is no minimum-distance floor forcing the
+ * camera past a too-close hit. Push-out eases at CAM_RETURN_RATE.
+ *
+ * `cast` must be the CAMERA audience's cast, not the walking one.
+ */
+export function seatCamera(
+  rig: CameraControl,
+  opts: {
+    feet: THREE.Vector3;
+    head: THREE.Vector3;
+    pivotHeight: number;
+    cast: CastFn;
+    dt: number;
+  },
+): { position: THREE.Vector3; quaternion: THREE.Quaternion } {
+  const {
+    feet, head, pivotHeight, cast, dt,
+  } = opts;
+
+  // Z-up forward from yaw (about Z) and pitch.
+  const cosPitch = Math.cos(rig.pitch);
+  const forward = new THREE.Vector3(
+    Math.cos(rig.yaw) * cosPitch,
+    Math.sin(rig.yaw) * cosPitch,
+    Math.sin(rig.pitch),
+  );
+
+  const pivot = feet.clone();
+  pivot.z += pivotHeight;
+
+  const seat = pivot.clone().addScaledVector(forward, -rig.distance);
+  const boom = seat.clone().sub(head);
+  const boomLength = Math.max(boom.length(), 1e-3);
+  const boomDir = boom.clone().divideScalar(boomLength);
+
+  const hit = cast(head, boomDir, boomLength);
+  const open = hit ? hit.distance : boomLength;
+
+  if (open < rig.collisionDistance) {
+    // Instant: a wall must never sit between the camera and the character.
+    rig.collisionDistance = open;
+  } else {
+    const t = 1 - Math.exp(-CAM_RETURN_RATE * dt);
+    rig.collisionDistance += (open - rig.collisionDistance) * t;
+  }
+
+  const frac = Math.min(1, Math.max(0, rig.collisionDistance / boomLength));
+  const position = head.clone().addScaledVector(boom, frac);
+
+  rig.selfFadeAlpha = selfFadeAlpha(position.distanceTo(pivot));
+
+  const quaternion = new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().lookAt(position, pivot, _up),
+  );
+
+  return { position, quaternion };
+}
+
+export interface LookButtons {
+  left: boolean;
+  right: boolean;
+}
+
+export interface LookSessionResult {
+  /** Yaw rotation applied this frame (radians). A right-drag also feeds this to the facing. */
+  yawDelta: number;
+  /** This frame's look turns the CHARACTER (right-drag or both-button run), not just the camera. */
+  turnsCharacter: boolean;
+  /** Both buttons are held: vanilla's both-button forward run. */
+  bothButtonsRun: boolean;
+  /** A left press and release that never dragged -- a target select. */
+  leftClick: boolean;
+  /** A right press and release that never turned -- the context action. */
+  rightClick: boolean;
+}
+
+/** Accumulated drag distance per button while a press is being classified. */
+interface PendingClicks {
+  left: number | null;
+  right: number | null;
+}
+
+export function createPendingClicks(): PendingClicks {
+  return { left: null, right: null };
+}
+
+/**
+ * The mouse-look session state machine: start, stop and hand-off between the two look modes, plus
+ * the click-versus-drag tests.
+ *
+ * Right-drag turns the character and engages INSTANTLY on press -- turning must feel immediate --
+ * so its click test just rides the session and the release decides. Left-drag orbits the camera and
+ * is DEFERRED: a left click selects a target instead, so the orbit only engages once the cursor
+ * drags past CLICK_DRAG_THRESHOLD. Both buttons held is vanilla's forward run, steering like a
+ * right-drag, and is never a click.
+ *
+ * `pending` is caller-owned so two rigs cannot share click state.
+ */
+export function runLookSession(
+  rig: CameraControl,
+  buttons: LookButtons,
+  motion: { dx: number; dy: number },
+  prev: LookButtons,
+  pending: PendingClicks,
+): LookSessionResult {
+  const bothButtonsRun = buttons.left && buttons.right;
+  let leftClick = false;
+  let rightClick = false;
+
+  // Press edges start a click test.
+  if (buttons.right && !prev.right) {
+    pending.right = 0;
+  }
+  if (buttons.left && !prev.left) {
+    pending.left = 0;
+  }
+
+  // A left+right gesture is a run or a turn, never a target select. Cancel the pending left test
+  // the instant the right button joins in, so releasing out of a both-button move fires nothing.
+  if (buttons.right) {
+    pending.left = null;
+  }
+  if (buttons.left && buttons.right) {
+    pending.right = null;
+  }
+
+  const moved = Math.hypot(motion.dx, motion.dy);
+  if (pending.right !== null) {
+    pending.right += moved;
+  }
+  if (pending.left !== null) {
+    pending.left += moved;
+  }
+
+  if (rig.look) {
+    const held = rig.look === 'right' ? buttons.right : buttons.left;
+    if (!held) {
+      if (rig.look === 'right' && pending.right !== null && pending.right < CLICK_DRAG_THRESHOLD) {
+        rightClick = true;
+      }
+      pending[rig.look] = null;
+
+      // Hand off to the other button if it is still held rather than ending the session -- vanilla
+      // keeps turning or orbiting seamlessly, cursor staying hidden throughout.
+      const other: LookButton = rig.look === 'right' ? 'left' : 'right';
+      const otherHeld = other === 'right' ? buttons.right : buttons.left;
+      rig.look = otherHeld ? other : null;
+    }
+  } else if (buttons.right) {
+    rig.look = 'right'; // instant on press
+  } else if (buttons.left && pending.left !== null && pending.left >= CLICK_DRAG_THRESHOLD) {
+    rig.look = 'left'; // deferred past the drag threshold
+  }
+
+  // Releases with a pending, never-dragged test are clicks.
+  if (!buttons.left && prev.left && pending.left !== null) {
+    leftClick = pending.left < CLICK_DRAG_THRESHOLD;
+    pending.left = null;
+  }
+  if (!buttons.right && prev.right) {
+    if (pending.right !== null && pending.right < CLICK_DRAG_THRESHOLD) {
+      rightClick = true;
+    }
+    pending.right = null;
+  }
+
+  const yawDelta = rig.look ? applyLookDelta(rig, motion.dx, motion.dy) : 0;
+
+  return {
+    yawDelta,
+    turnsCharacter: rig.look === 'right' || bothButtonsRun,
+    bothButtonsRun,
+    leftClick,
+    rightClick,
+  };
+}
