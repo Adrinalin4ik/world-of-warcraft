@@ -6,6 +6,8 @@ import DBC from "../pipeline/dbc";
 import M2 from "../pipeline/m2";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import ColliderManager from "../world/collider-manager";
+import { DEFAULT_COLLISION_HEIGHT } from "../movement/constants";
+import { createPlayerMoveState } from "../movement/player-state";
 import Entity from "./entity";
 
 enum SlopeType {
@@ -51,6 +53,20 @@ class Unit extends Entity {
   );
   public currentAnimationIndex: number = 0;
   private displayInfo: DBC | null = null;
+
+  /**
+   * The kinematic mover's state -- feet position, velocities, facing, swim latch.
+   *
+   * This is the authority on where the unit is. `syncViewFromMove()` pushes it onto the scene
+   * graph; nothing should write `view.position` directly.
+   */
+  public move = createPlayerMoveState();
+
+  /**
+   * The unit's own collision height (yd) -- `CreatureModelData.collisionHeight x displayScale`.
+   * Every swim depth line is a fraction of it. NOT the movement capsule, which is a constant.
+   */
+  public collisionHeight: number = DEFAULT_COLLISION_HEIGHT;
 
   public rotateSpeed: number = 2;
   public moveSpeed: number = 100; //10
@@ -186,16 +202,21 @@ class Unit extends Entity {
         this.modelData = modelData;
         this.modelData.path = this.modelData.file.match(/^(.+?)(?:[^\\]+)$/)[1];
         this.displayInfo!.modelData = this.modelData;
+        // The unit's OWN collision height -- what every swim depth line is a fraction of, which is
+        // why a gnome floats with her head out and a night elf sits deeper. NOT the movement
+        // capsule height, which is a constant feel knob. Falls back to the client's own
+        // empty-world default when the row carries no usable value, because at zero every depth
+        // line collapses and the avatar swims on dry land.
+        const rawHeight = (modelData as any).collisionHeight;
+        const displayScale = (displayInfo as any).scale || (modelData as any).scale || 1;
+        this.collisionHeight = rawHeight > 0
+          ? rawHeight * displayScale
+          : DEFAULT_COLLISION_HEIGHT;
+        this.move.collisionHeight = this.collisionHeight;
+
         return M2Blueprint.load(this.modelData.file).then((m2: M2) => {
           this.model = m2;
           this.model.displayInfo = this.displayInfo;
-
-          const { max, min } = m2.geometry.boundingBox;
-          this.collider.geometry = new THREE.BoxGeometry(
-            max.x - min.x,
-            max.y - min.y,
-            max.z - min.z
-          );
           this.model.visible = true;
 
           // Assigning displayInfo above kicks off texture loads, which are deliberately
@@ -561,15 +582,27 @@ class Unit extends Entity {
     }
   }
 
+  /**
+   * Push the mover's state onto the scene graph.
+   *
+   * `move.pos` is the authority on position; `move.modelYaw` is the RENDERED body heading, which is
+   * deliberately not `move.faceYaw` -- the two diverge while strafing, and the aim is what the wire
+   * will carry.
+   */
+  syncViewFromMove() {
+    this.view.position.copy(this.move.pos);
+    this.view.rotation.z = this.move.modelYaw;
+    this.emit("position:change", this.position, this.view.rotation);
+  }
+
   update(delta: number) {
-    // this.updateGroundDistance();
+    // The player's frame is driven from Controls, which owns the input and the camera heading and
+    // calls `movementFrame` + `syncViewFromMove` itself. Only non-player units integrate here.
     if (this.isPlayer) {
-      this.updateMoving(delta);
-      // if (this.useGravity) {
-      //   this.updateGravity(delta);
-      // }
-      this.applyTranslatePosition();
-    } else {
+      return;
+    }
+
+    {
       this.updateSplineFollowing(delta);
     }
     // this.updatePlayer(delta);

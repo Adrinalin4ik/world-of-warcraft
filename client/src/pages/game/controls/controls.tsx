@@ -1,439 +1,258 @@
-import key from 'keymaster';
 import React from 'react';
-import JoyStick from 'react-joystick';
 import * as THREE from 'three';
+
+import {
+  CAM_COLLISION_RADIUS, CameraControl, advanceZoom, applyZoomScroll, createCameraControl,
+  createPendingClicks, runLookSession, seatCamera,
+} from '../../../game/camera/rig';
+import { headHeight } from '../../../game/camera/pivot';
+import { collisionWorld } from '../../../game/collision/collision-world';
+import { CollisionLayer } from '../../../game/collision/types';
+import {
+  CAPSULE_HEIGHT, CAPSULE_RADIUS, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO, RUN_SPEED,
+  STATIONARY_CHASE_RATE, TURN_RATE, TURN_RATE_MOVING, capsuleHalfSegment,
+} from '../../../game/movement/constants';
+import { movementFrame } from '../../../game/movement/frame';
 import Player from '../../../game/classes/player';
 
-const joyOptions = {
-  mode: 'semi',
-  catchDistance: 150,
-  color: 'white'
-};
-
-const containerStyle = {
-  position: 'fixed',
-  height: '50%',
-  width: '20%',
-  bottom: 0,
-  left: 0,
-  zIndex: 10,
-  background: 'transparent'
-};
-
-enum Key {
-  space = 32,
-  W = 87,
-  A = 65,
-  D = 68,
-  S = 83,
-  Q = 81,
-  E = 69,
-  R = 82,
-  T = 84
-}
-
 interface IProp {
-  camera: THREE.PerspectiveCamera,
-  player: Player
+  camera: THREE.PerspectiveCamera;
+  player: Player;
 }
 
-interface IUpdate {
-  update(): void;
+/** Shortest signed angle, so a chase never takes the long way round. */
+function wrapPi(angle: number): number {
+  return Math.atan2(Math.sin(angle), Math.cos(angle));
 }
 
-class Controls extends React.Component<IProp, IUpdate> {
-
+/**
+ * Input adapter for the avatar and the third-person camera.
+ *
+ * Deliberately thin: it owns DOM listeners, pointer lock and key state, and nothing else. Every
+ * decision about how the body moves lives in `game/movement`, and every decision about where the
+ * camera sits lives in `game/camera` -- both as pure functions over a cast closure, which is what
+ * lets them be tested with no world loaded.
+ *
+ * This replaces an OrbitControls derivative that orbited a target, had no collision, no look modes,
+ * and rotated the character by the same delta it orbited the camera by.
+ */
+class Controls extends React.Component<IProp> {
   private element: HTMLElement = document.body;
+
   private unit: Player;
+
   private camera: THREE.PerspectiveCamera;
 
-  private rotateStart: THREE.Vector2 = new THREE.Vector2();
-  private rotateEnd: THREE.Vector2 = new THREE.Vector2();
-  private rotateDelta: THREE.Vector2 = new THREE.Vector2();
-  private rotating: boolean = false;
-  private moving: boolean = false;
-  private rotateSpeed: number = 1.0;
-  private offset: THREE.Vector3 = new THREE.Vector3(-10, 0, 10);
-  private target: THREE.Vector3 = new THREE.Vector3();
+  private rig: CameraControl = createCameraControl();
 
-  private phiDelta: number = 0;
-  private thetaDelta: number = 0;
-  // Vertical orbit limits
-  private minPhi: number = 0;
-  private maxPhi: number = Math.PI * 0.45;
+  private pending = createPendingClicks();
 
-  private scale: number = 1;
-  private zoomSpeed: number = 1.0;
-  private zoomScale: number = Math.pow(0.95, this.zoomSpeed);
-  // Zoom distance limits
-  private minDistance: number = 0;
-  private maxDistance: number = 500;
+  private buttons = { left: false, right: false };
 
-  private quat: THREE.Quaternion
-  private quatInverse: THREE.Quaternion
+  private prevButtons = { left: false, right: false };
 
-  private EPS: number = 0.000001;
+  private motion = { dx: 0, dy: 0 };
 
-  private moveForward: boolean = false;
-  private moveBackward: boolean = false;
-  private moveLeft: boolean = false;
-  private moveRight: boolean = false;
-  private currentDireciton: string | null = null;
+  private scrollNotches = 0;
+
+  private keys = new Set<string>();
+
+  /** Edge-triggered: the swim breach fires once per PRESS, never on a held key. */
+  private jumpPressed = false;
 
   constructor(props: IProp) {
     super(props);
     this.unit = props.player;
     this.camera = props.camera;
-    this.unit.camera = this.camera;
-    console.log('Camera', this.camera);
-    // Based on THREE's OrbitControls
-    // See: http://threejs.org/examples/js/controls/OrbitControls.js
 
-    this.quat = new THREE.Quaternion().setFromUnitVectors(
-      this.camera.up, new THREE.Vector3(0, 1, 0)
-    );
-
-    this.quatInverse = this.quat.clone().invert();
-    this.managerListener = this.managerListener.bind(this);
-
-    this.element.addEventListener('mousedown', this._onMouseDown.bind(this));
-    this.element.addEventListener('mouseup', this._onMouseUp.bind(this));
-    this.element.addEventListener('mousemove', this._onMouseMove.bind(this));
-    this.element.addEventListener('mousewheel', this._onMouseWheel.bind(this));
-    document.addEventListener('keydown', this._onKeyDown.bind(this));
-    document.addEventListener('keyup', this._onKeyUp.bind(this));
-    this.element.addEventListener('touchstart', this._onTouchStart.bind(this));
-    this.element.addEventListener('touchend', this._onTouchEnd.bind(this));
-    this.element.addEventListener('touchmove', this._onTouchMove.bind(this));
-
-    // Firefox scroll-wheel support
-    this.element.addEventListener('DOMMouseScroll', this._onMouseWheel.bind(this));
-    
-    this.element.addEventListener('contextmenu', this._onContextMenu.bind(this), false);
-    
+    this.onMouseDown = this.onMouseDown.bind(this);
+    this.onMouseUp = this.onMouseUp.bind(this);
+    this.onMouseMove = this.onMouseMove.bind(this);
+    this.onWheel = this.onWheel.bind(this);
+    this.onKeyDown = this.onKeyDown.bind(this);
+    this.onKeyUp = this.onKeyUp.bind(this);
+    this.onContextMenu = this.onContextMenu.bind(this);
   }
-  
+
+  componentDidMount() {
+    this.element.addEventListener('mousedown', this.onMouseDown);
+    window.addEventListener('mouseup', this.onMouseUp);
+    this.element.addEventListener('mousemove', this.onMouseMove);
+    this.element.addEventListener('wheel', this.onWheel, { passive: false });
+    this.element.addEventListener('contextmenu', this.onContextMenu);
+    document.addEventListener('keydown', this.onKeyDown);
+    document.addEventListener('keyup', this.onKeyUp);
+  }
+
   componentWillUnmount() {
-    this.element.removeEventListener('mousedown', this._onMouseDown.bind(this));
-    this.element.removeEventListener('mouseup', this._onMouseUp.bind(this));
-    this.element.removeEventListener('mousemove', this._onMouseMove.bind(this));
-    this.element.removeEventListener('mousewheel', this._onMouseWheel.bind(this));
-    this.element.removeEventListener('DOMMouseScroll', this._onMouseWheel.bind(this));
-    document.removeEventListener('keydown', this._onKeyDown.bind(this));
-    document.removeEventListener('keyup', this._onKeyUp.bind(this));
-    
-    this.element.removeEventListener('touchstart', this._onTouchStart.bind(this));
-    this.element.removeEventListener('touchend', this._onTouchEnd.bind(this));
-    this.element.removeEventListener('touchmove', this._onTouchMove.bind(this));
-
-    this.element.removeEventListener('contextmenu', this._onContextMenu.bind(this));
-
+    this.element.removeEventListener('mousedown', this.onMouseDown);
+    window.removeEventListener('mouseup', this.onMouseUp);
+    this.element.removeEventListener('mousemove', this.onMouseMove);
+    this.element.removeEventListener('wheel', this.onWheel);
+    this.element.removeEventListener('contextmenu', this.onContextMenu);
+    document.removeEventListener('keydown', this.onKeyDown);
+    document.removeEventListener('keyup', this.onKeyUp);
   }
 
-  _onKeyDown(event: KeyboardEvent) {
-    this.moving = true;
-    if (event.keyCode === Key.T) {
-      const p = this.unit.position;
-      const r = this.unit.rotation;
-      const cameraPosition = this.camera.position;
-      const cameraRotation = this.camera.rotation;
-      localStorage.setItem('debugCoords', JSON.stringify({
-        zoneId: this.unit.mapId,
-        player: {
-          coords: [p.x, p.y, p.z],
-          rotation: [r.x, r.y, r.z]
-        },
-        camera: {
-          coords: [cameraPosition.x, cameraPosition.y, cameraPosition.z],
-          rotation: [cameraRotation.x, cameraRotation.y, cameraRotation.z]
-        }
-      }));
-
-      alert("Coords saved successfully")
-    }
-
-    if (event.keyCode === Key.R) {
-      const spot = JSON.parse(localStorage.getItem('debugCoords') || "");
-      if (spot) {
-        this.unit.worldport(spot.zoneId, spot.coords);
-        this.unit.rotation.set(spot.rotation[0], spot.rotation[1], spot.rotation[2])
-        this.camera.position.set(spot.coords[0], spot.coords[1], spot.coords[2])
-        this.camera.rotation.set(spot.rotation[0], spot.rotation[1], spot.rotation[2])
-      }
-      console.log('Coords has been restored')
-    }
-
-    const unit = this.unit;
-    if (unit) {
-      if (event.keyCode === Key.space) {
-        unit.jump();
-      }
-    }
-  }
-
-  _onKeyUp(event: KeyboardEvent) {
-    this.moving = false;
-    const unit = this.unit;
-    if (unit && unit) {
-      if (event.keyCode !== Key.space) {
-        // unit.stopAnimation();
-      }
-    }
-  }
-
-  _onContextMenu(event: Event) {
+  private onContextMenu(event: Event) {
+    // Right-drag turns the character; the browser menu must not interrupt it.
     event.preventDefault();
-    return false;
   }
 
-  managerListener(manager: any) {
-    manager.on('move', (e: any, stick: any) => {
-      const diration = stick.direction?.angle;
-      if (this.currentDireciton !== diration) {
-        this.moveForward = false;
-        this.moveBackward = false;
-        this.moveLeft = false;
-        this.moveRight = false;
-      }
+  private onMouseDown(event: MouseEvent) {
+    if (event.button === 0) this.buttons.left = true;
+    if (event.button === 2) this.buttons.right = true;
+  }
 
-      this.moveForward = true;
-      // switch(diration) {
-      //   case 'up':
-      //     this.moveForward = true;
-      //     break;
-      //   case 'down':
-      //     this.moveBackward = true;
-      //     break;
-      //   case 'left':
-      //     this.moveLeft = true;
-      //     break;
-      //   case 'right':
-      //     this.moveRight = true;
-      //     break;
-      // }
-      this.currentDireciton = diration
-    })
-    manager.on('end', () => {
-      this.moveForward = false;
-      this.moveBackward = false;
-      this.moveLeft = false;
-      this.moveRight = false;
-      this.currentDireciton = null;
-    })
+  private onMouseUp(event: MouseEvent) {
+    if (event.button === 0) this.buttons.left = false;
+    if (event.button === 2) this.buttons.right = false;
+    if (!this.buttons.left && !this.buttons.right && document.pointerLockElement) {
+      document.exitPointerLock();
+    }
+  }
+
+  private onMouseMove(event: MouseEvent) {
+    if (!this.buttons.left && !this.buttons.right) {
+      return;
+    }
+    // While pointer-locked, movementX/Y are the only meaningful deltas -- clientX/Y stop moving.
+    this.motion.dx += event.movementX ?? 0;
+    this.motion.dy += event.movementY ?? 0;
+  }
+
+  private onWheel(event: WheelEvent) {
+    event.preventDefault();
+    this.scrollNotches += event.deltaY > 0 ? -1 : 1;
+  }
+
+  private onKeyDown(event: KeyboardEvent) {
+    const key = event.code;
+    if (key === 'Space' && !this.keys.has(key)) {
+      this.jumpPressed = true;
+    }
+    this.keys.add(key);
+  }
+
+  private onKeyUp(event: KeyboardEvent) {
+    this.keys.delete(event.code);
+  }
+
+  private held(...codes: string[]): boolean {
+    return codes.some((code) => this.keys.has(code));
+  }
+
+  /** True when translating -- the turn rate drops while moving. */
+  private isTranslating(forward: number, strafe: number): boolean {
+    return forward !== 0 || strafe !== 0;
   }
 
   public update(delta: number) {
-    const unit = this.unit;
+    const player = this.unit;
+    const now = performance.now() / 1000;
 
-    if (this.unit) {
-      // if (key.isPressed('space')) {
-      //   unit.jump();
-      // }
-      
-      if (key.isPressed('f')) {
-        unit.isFly = !unit.isFly;
-      }
-      
-      if (key.isPressed('up') || key.isPressed('w') || this.moveForward) {
-        unit.moveForward(delta);
-      }
+    // 1. Mouse look. Right-drag turns the character, left-drag orbits, both buttons run forward.
+    const look = runLookSession(this.rig, this.buttons, this.motion, this.prevButtons, this.pending);
+    this.motion.dx = 0;
+    this.motion.dy = 0;
+    this.prevButtons = { ...this.buttons };
 
-      if (key.isPressed('down') || key.isPressed('s') || this.moveBackward) {
-        unit.moveBackward(delta);
-      }
-
-      if (key.isPressed('q') || this.moveLeft) {
-        unit.strafeLeft(delta);
-      }
-
-      if (key.isPressed('e') || this.moveRight) {
-        unit.strafeRight(delta);
-      }
-
-      if (key.isPressed('space')) {
-        unit.ascend(delta);
-      }
-
-      if (key.isPressed('x')) {
-        unit.descend(delta);
-      }
-
-      if (key.isPressed('left') || key.isPressed('a')) {
-        unit.rotateLeft(delta);
-      }
-
-      if (key.isPressed('right') || key.isPressed('d')) {
-        unit.rotateRight(delta);
-      }
-      
-      this.target = this.unit.position;
+    if (this.rig.look && !document.pointerLockElement) {
+      this.element.requestPointerLock?.();
     }
 
-    this.calculateCamera();
-    
-    // if (this.rotating) {
-      this.camera.lookAt(this.target);
-    // }
-  }
+    if (look.turnsCharacter) {
+      player.move.faceYaw += look.yawDelta;
+    }
 
-  calculateCamera() {
-    const position = this.camera.position;
+    // While swimming, mouselook is a DIRECT set of the swim pitch from the camera aim -- no
+    // integrator and no rate limit, which is what makes aiming up and swimming forward feel
+    // immediate. A left-drag orbit steers nothing, so it must not bend the swim.
+    if (player.move.swimming && this.rig.look === 'right') {
+      player.move.swimPitch = Math.max(
+        -MOUSELOOK_PITCH_CLAMP, Math.min(MOUSELOOK_PITCH_CLAMP, this.rig.pitch),
+      );
+    }
 
-    // Rotate offset to "y-axis-is-up" space
-    this.offset.applyQuaternion(this.quat);
+    // 2. Zoom.
+    if (this.scrollNotches !== 0) {
+      applyZoomScroll(this.rig, this.scrollNotches);
+      this.scrollNotches = 0;
+    }
+    advanceZoom(this.rig, delta);
 
-    // Angle from z-axis around y-axis
-    let theta = Math.atan2(this.offset.x, this.offset.z);
+    // 3. Keyboard. A/D TURN in vanilla rather than strafing; Q/E strafe.
+    const forward = (this.held('KeyW', 'ArrowUp') || look.bothButtonsRun ? 1 : 0)
+      - (this.held('KeyS', 'ArrowDown') ? 1 : 0);
+    const strafe = (this.held('KeyQ') ? 1 : 0) - (this.held('KeyE') ? 1 : 0);
+    const turning = (this.held('KeyA', 'ArrowLeft') ? 1 : 0)
+      - (this.held('KeyD', 'ArrowRight') ? 1 : 0);
 
-    // Angle from y-axis
-    let phi = Math.atan2(
-      Math.sqrt(this.offset.x * this.offset.x + this.offset.z * this.offset.z),
-      this.offset.y
+    if (turning !== 0) {
+      const rate = TURN_RATE * (this.isTranslating(forward, strafe) ? TURN_RATE_MOVING : 1);
+      player.move.faceYaw += turning * rate * delta;
+    }
+
+    // 4. Movement direction, expressed in the facing basis.
+    const yaw = player.move.faceYaw;
+    const dir = new THREE.Vector3(
+      Math.cos(yaw) * forward - Math.sin(yaw) * strafe,
+      Math.sin(yaw) * forward + Math.cos(yaw) * strafe,
+      0,
     );
-    theta += this.thetaDelta;
-    phi += this.phiDelta;
-    
-    // Limit vertical orbit
-    phi = Math.max(this.minPhi, Math.min(this.maxPhi, phi));
-    phi = Math.max(this.EPS, Math.min(Math.PI - this.EPS, phi));
-    
-    this.unit.theta = theta;
-    this.unit.phi = phi;
-    let radius = this.offset.length() * this.scale;
+    const moving = forward !== 0 || strafe !== 0;
+    const speed = forward < 0 ? RUN_SPEED * RUN_BACK_RATIO : RUN_SPEED;
 
-    // Limit zoom distance
-    radius = Math.max(this.minDistance, Math.min(this.maxDistance, radius));
+    // 5. One movement frame. The claim is outdoor-only for now; see the note in Task 22.
+    const claim = { wmoGroup: null };
+    const deps = {
+      cast: collisionWorld.castFor(CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment()),
+      surfaceAt: (feet: THREE.Vector3) => (
+        collisionWorld.surfaceAt(feet.x, feet.y, claim)?.surfaceZ ?? null
+      ),
+    };
 
-    this.offset.x = radius * Math.sin(phi) * Math.sin(theta);
-    this.offset.y = radius * Math.cos(phi);
-    this.offset.z = radius * Math.sin(phi) * Math.cos(theta);
+    movementFrame(player.move, deps, {
+      moving, dir, speed, wantJump: this.jumpPressed, jumpPressed: this.jumpPressed,
+    }, delta, now);
+    this.jumpPressed = false;
 
-    // Rotate offset back to 'camera-up-vector-is-up' space
-    this.offset.applyQuaternion(this.quatInverse);
-    
-    // if (this.moving || this.rotating) {
-      position.copy(this.target).add(this.offset);
-    // }
-    
-    
-    this.unit.view.rotateZ(this.thetaDelta);
-
-    this.thetaDelta = 0;
-    this.phiDelta = 0;
-    this.scale = 1;
-  }
-
-  rotateHorizontally(angle: number) {
-    this.thetaDelta -= angle;
-  }
-
-  rotateVertically(angle: number) {
-    this.phiDelta -= angle;
-  }
-
-  zoomOut() {
-    this.scale /= this.zoomScale;
-  }
-
-  zoomIn() {
-    this.scale *= this.zoomScale;
-  }
-
-  _onTouchStart(event: TouchEvent) {
-    this.rotating = true;
-    this.rotateStart.set(event.touches[0].clientX, event.touches[0].clientY);
-  }
-
-  _onTouchEnd() {
-    this.rotating = false;
-  }
-
-  _onTouchMove(event: TouchEvent) {
-    if (this.rotating && event.touches.length >= 1) {
-      event.preventDefault();
-
-      this.rotateEnd.set(event.touches[0].clientX, event.touches[0].clientY);
-      this.rotateDelta.subVectors(this.rotateEnd, this.rotateStart);
-
-      this.rotateHorizontally(
-        2 * Math.PI * this.rotateDelta.x / this.element.clientWidth * this.rotateSpeed
-      );
-      
-      // if (event.touches.length === 1) {
-        // this.unit.view.rotateZ(this.thetaDelta);
-      // }
-
-      this.rotateVertically(
-        2 * Math.PI * this.rotateDelta.y / this.element.clientHeight * this.rotateSpeed / 40
-      );
-
-      this.rotateStart.copy(this.rotateEnd);
-    }
-  }
-
-  _onMouseDown(event: MouseEvent) {
-    this.rotating = true;
-    this.rotateStart.set(event.clientX, event.clientY);
-
-    if (event.which === 3) {
-      // this.unit.view.rotation.z = this.camera.getWorldDirection().z;
+    // 6. The rendered body heading. Moving without a strafe snaps to the aim; standing, it chases.
+    if (moving && strafe === 0) {
+      player.move.modelYaw = yaw;
+    } else if (!moving) {
+      const gap = wrapPi(yaw - player.move.modelYaw);
+      const chase = Math.min(1, (STATIONARY_CHASE_RATE * TURN_RATE * delta) / Math.PI);
+      player.move.modelYaw += gap * chase;
     }
 
-  }
-  
-  _onMouseUp() {
-    this.rotating = false;
-  }
+    player.syncViewFromMove();
 
-  _onMouseMove(event: MouseEvent) {
-    if (this.rotating) {
-      // console.log("Here", event)
-      event.preventDefault();
+    // 7. Seat the camera. Its cast uses the CAMERA face set, not the walking one, so it stops at
+    // overhangs the player walks under and threads railings the player stands on.
+    const head = player.move.pos.clone();
+    head.z += CAPSULE_HEIGHT - CAPSULE_RADIUS;
 
-      this.rotateEnd.set(event.clientX, event.clientY);
-      this.rotateDelta.subVectors(this.rotateEnd, this.rotateStart);
+    const seat = seatCamera(this.rig, {
+      feet: player.move.pos,
+      head,
+      pivotHeight: headHeight(null, 1),
+      cast: collisionWorld.castFor(CollisionLayer.Camera, CAM_COLLISION_RADIUS, 0),
+      dt: delta,
+    });
 
-      this.rotateHorizontally(
-        2 * Math.PI * this.rotateDelta.x / this.element.clientWidth * this.rotateSpeed
-      );
-      
-      if (event.which === 3) {
-        // this.unit.view.rotateZ(this.thetaDelta);
-        // let temp = (this.camera.rotation.x * this.camera.rotation.y);
-        // console.log(temp);
-        // if (temp < 0.5 && temp > 0) {
-        //   this.unit.view.rotation.z = this.camera.rotation.x * this.camera.rotation.y - Math.PI/2;
-        // }
-      }
+    this.camera.position.copy(seat.position);
+    this.camera.quaternion.copy(seat.quaternion);
 
-      this.rotateVertically(
-        0.1 * Math.PI * this.rotateDelta.y / this.element.clientHeight * this.rotateSpeed
-      );
-
-      this.rotateStart.copy(this.rotateEnd);
-    }
-  }
-
-  _onMouseWheel(event: MouseEvent | any) {
-    event.preventDefault();
-    event.stopPropagation();
-
-    const delta = event.deltaY || -event.detail;
-    if (delta > 0) {
-      this.zoomIn();
-    } else if (delta < 0) {
-      this.zoomOut();
+    // 8. First person: hide the body once the fade reaches zero.
+    if (player.model) {
+      player.model.visible = this.rig.selfFadeAlpha > 0.01;
     }
   }
 
   render() {
-    return (
-      <div className="controls">
-        <JoyStick joyOptions={joyOptions} containerStyle={containerStyle} managerListener={this.managerListener} />
-      </div>
-    );
+    return <div className="controls" />;
   }
-
 }
 
 export default Controls;
