@@ -1,7 +1,12 @@
 import * as THREE from 'three';
 
-import { GRAVITY } from './constants';
+import { CastFn } from '../collision/collision-world';
+import { CAPSULE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE, SKIN_WIDTH } from './constants';
+import { Outcome } from './mover';
 import { PlayerMoveState } from './player-state';
+import { airborneHitResponse, moveAndSlide } from './slide';
+
+const _down = new THREE.Vector3(0, 0, -1);
 
 /** Swim travel speed (yd/s) -- vanilla's default MOVE_SWIM (0.66x run). */
 export const SWIM_SPEED = 4.722222;
@@ -168,4 +173,123 @@ export function updateSwimming(
   }
 
   return state.swimming;
+}
+
+/** The outcome of one swim step -- read for the wire and animation flags. */
+export interface SwimOutcome {
+  /**
+   * Solid walkable floor right under the feet. With the exit hysteresis this is how a swim into the
+   * shallows resolves back onto the ground.
+   */
+  grounded: boolean;
+  /**
+   * The EFFECTIVE travel pitch after the rest-line redirect (the surface-swim regime), or null when
+   * the cap did not bite. The raw camera aim stays in `state.swimPitch` untouched.
+   */
+  surfacePitch: number | null;
+}
+
+/**
+ * Advance the avatar one swim frame: the pitched travel velocity through the client's FLOATING
+ * physics, a collide-and-slide against the lakebed and banks, and the hard rest-line cap.
+ *
+ * Gravity is bypassed entirely (VERIFIED): an idle swimmer's depth is FROZEN -- no sink, no rise,
+ * no ease -- and the vertical comes only from `inputVel`.
+ *
+ * `surfaceZ` is the waterline over the feet at the START of the frame: the rise cap is a limit on
+ * THIS frame's climb, so it belongs to the position we climb from. `surfaceAt` resamples it wherever
+ * the stroke actually lands, because the settle has to satisfy the constraint where the swimmer ends
+ * up -- on a river, reading the entry waterline instead lags by a frame's descent, which on a steep
+ * enough surface is the whole hysteresis band.
+ */
+export function swimStep(
+  state: PlayerMoveState,
+  cast: CastFn,
+  inputVel: THREE.Vector3,
+  surfaceZ: number | null,
+  surfaceAt: (feet: THREE.Vector3) => number | null,
+  dt: number,
+): SwimOutcome {
+  const halfH = CAPSULE_HEIGHT * 0.5;
+  const center = state.pos.clone();
+  center.z += halfH;
+
+  // The one vertical constraint: never rise ABOVE the resting waterline. Cap the upward VELOCITY so
+  // the feet reach at most the rest line this frame -- NOT the position after the slide.
+  //
+  // That distinction is load-bearing. A position clamp overrides terrain collision, shoving the feet
+  // down onto the rest line even where a shallow bottom holds them higher, which clips into the
+  // floor AND pins the depth at or above rest -- so the latch never sees water shallow enough to
+  // leave and you cannot walk out onto land. A velocity cap leaves the bottom in charge.
+  //
+  // No waterline, no rest line: a null surface is GM flight, where the constraint has nothing to
+  // constrain against and an ascent must be free.
+  let cap = Infinity;
+  if (surfaceZ !== null && dt > 0) {
+    const restFeetZ = surfaceZ - restCap(state.collisionHeight);
+    cap = Math.max(0, (restFeetZ - state.pos.z) / dt);
+  }
+  const { velocity, surfacePitch } = capRedirect(inputVel, cap);
+
+  const resolved = moveAndSlide(cast, center, velocity, dt, airborneHitResponse).position;
+
+  // SATISFY the rest line rather than merely guarding it -- and do it with a SWEPT drop, not a
+  // clamp, so the bottom stays in charge. Gated on a stroke, matching the resolver's own outer
+  // gate: an idle floater is not resolved at all, so its depth stays frozen.
+  if (inputVel.lengthSq() > 0) {
+    const feet = resolved.clone();
+    feet.z -= halfH;
+    const surfaceNow = surfaceAt(feet);
+    if (surfaceNow !== null) {
+      const excess = settleToRest(feet.z, surfaceNow, state.collisionHeight);
+      if (excess > 0) {
+        const hit = cast(resolved, _down, excess, SKIN_WIDTH);
+        resolved.z -= hit ? Math.min(hit.distance, excess) : excess;
+      }
+    }
+  }
+
+  state.pos.copy(resolved);
+  state.pos.z -= halfH;
+
+  // Swim owns its vertical directly. Leave a clean zero so exiting into a fall starts from rest, and
+  // so horizVel drives the swim gait's playback rate like every other locomotion clip.
+  state.velZ = 0;
+  state.horizVel.set(velocity.x, velocity.y, 0);
+
+  const probe = cast(resolved, _down, GROUND_PROBE, SKIN_WIDTH);
+
+  return {
+    grounded: !!probe && probe.normal.z >= GROUND_COS,
+    surfacePitch,
+  };
+}
+
+/**
+ * The JUMP OUT OF THE WATER -- the takeoff frame of a jump while swimming (VERIFIED `0x7c6230`):
+ * swimming selects SWIM_JUMP_SPEED over the land 7.955547, then the handler clears SWIMMING and
+ * sets FALLING.
+ *
+ * The Jump command routes here at ANY depth: at the surface it breaches out, submerged it is the
+ * dolphin hop.
+ *
+ * Horizontal momentum freezes at takeoff like every jump, so the last swim frame's travel carries
+ * the leap. As with the land jump's takeoff frame there is no gravity tick here -- the walk mover
+ * integrates gravity from the next frame -- so the arc snapshot carries the exact seed.
+ *
+ * The caller has already cleared `state.swimming`; the walk and fall machinery owns the arc now.
+ */
+export function breachStep(state: PlayerMoveState, cast: CastFn, dt: number): Outcome {
+  state.velZ = SWIM_JUMP_SPEED;
+
+  const halfH = CAPSULE_HEIGHT * 0.5;
+  const center = state.pos.clone();
+  center.z += halfH;
+  const velocity = new THREE.Vector3(state.horizVel.x, state.horizVel.y, state.velZ);
+
+  const resolved = moveAndSlide(cast, center, velocity, dt, airborneHitResponse).position;
+  state.pos.copy(resolved);
+  state.pos.z -= halfH;
+
+  return { held: false, grounded: false, jumped: true, airNudged: false, ground: null };
 }
