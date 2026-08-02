@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
-import { GROUND_COS } from './constants';
+import { CastFn } from '../collision/collision-world';
+import { GROUND_COS, MAX_SLIDE_ITERATIONS, SKIN_WIDTH } from './constants';
 
 /**
  * The even-speed ramp ride: a walkable slope never slows or deflects the grounded walk.
@@ -68,4 +69,105 @@ export function steepWallPlane(n: THREE.Vector3, v: THREE.Vector3): THREE.Vector
 
   // Steepness bounds the horizontal part below by sin 50, so the normalize is safe.
   return new THREE.Vector3(n.x, n.y, 0).normalize();
+}
+
+/**
+ * One contact, handed to the slide callback.
+ *
+ * Both fields are MUTABLE: a callback rewrites `velocity` to change what the remainder of the move
+ * does, and `normal` to change which plane the clip happens against. That is the contract the two
+ * hit rules above are applied through.
+ */
+export interface SlideHit {
+  normal: THREE.Vector3;
+  velocity: THREE.Vector3;
+  source: object;
+}
+
+export type SlideCallback = (hit: SlideHit) => void;
+
+/**
+ * Collide-and-slide a capsule through the world for one frame.
+ *
+ * The reference delegates this to its physics engine, so this is the one piece of the mover with no
+ * line-for-line source. Its required behaviour is fixed instead by the callback contract: at each
+ * contact the callback may rewrite the normal and the velocity, then the remaining motion is
+ * clipped onto the resulting plane and the sweep continues.
+ *
+ * Neither input vector is mutated.
+ */
+export function moveAndSlide(
+  cast: CastFn,
+  from: THREE.Vector3,
+  velocity: THREE.Vector3,
+  dt: number,
+  onHit: SlideCallback,
+): { position: THREE.Vector3; contacts: number } {
+  const position = from.clone();
+  const vel = velocity.clone();
+  const dir = new THREE.Vector3();
+  let remainingTime = dt;
+  let contacts = 0;
+
+  for (let i = 0; i < MAX_SLIDE_ITERATIONS; ++i) {
+    const speed = vel.length();
+    if (remainingTime <= 1e-9 || speed < 1e-6) {
+      break;
+    }
+
+    const distance = speed * remainingTime;
+    dir.copy(vel).divideScalar(speed);
+
+    const hit = cast(position, dir, distance, SKIN_WIDTH);
+    if (!hit) {
+      position.addScaledVector(dir, distance);
+      break;
+    }
+
+    contacts += 1;
+    const travelled = Math.max(0, hit.distance);
+    position.addScaledVector(dir, travelled);
+    remainingTime -= travelled / speed;
+
+    // Hand the contact to the caller's rule set. It may redirect the velocity outright (the
+    // walkable ride) or flatten the plane we are about to clip against (the steep wall).
+    const slideHit: SlideHit = { normal: hit.normal.clone(), velocity: vel, source: hit.source };
+    onHit(slideHit);
+
+    // Clip whatever velocity survived onto the (possibly rewritten) plane. The walkable ride
+    // deliberately returns a velocity already lying IN its plane, so this passes it untouched --
+    // which is how the ride keeps full horizontal speed rather than being re-clipped away.
+    vel.addScaledVector(slideHit.normal, -vel.dot(slideHit.normal));
+  }
+
+  return { position, contacts };
+}
+
+/**
+ * The GROUNDED contact response: ride an opposing walkable plane at full horizontal speed, else
+ * flatten a steep face so it cannot lift us. This is the order the reference applies them in.
+ */
+export function groundedHitResponse(hit: SlideHit): void {
+  const ride = walkableRideVelocity(hit.normal, hit.velocity);
+  if (ride) {
+    hit.velocity.copy(ride);
+    return;
+  }
+
+  const wall = steepWallPlane(hit.normal, hit.velocity);
+  if (wall) {
+    hit.normal.copy(wall);
+  }
+}
+
+/**
+ * The AIRBORNE contact response: steep faces get the same wall treatment as on the ground, but
+ * there is no ride. An arc owns its own height, so the only thing the world may do to it is stop
+ * it, and a landing should still slide naturally down a walkable plane.
+ */
+export function airborneHitResponse(hit: SlideHit): void {
+  const wall = steepWallPlane(hit.normal, hit.velocity);
+  if (wall) {
+    hit.normal.copy(wall);
+  }
 }
