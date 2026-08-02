@@ -17,7 +17,10 @@ class Player extends Unit {
 
   worldport(mapId: number, coords: Array<number>) {
     console.log('worldport', coords)
-    this.changePosition({ x: coords[0], y: coords[1], z: coords[2] });
+    // Relocates the MOVER, not just the view: the mover owns position, and a view-only write is
+    // undone on the next frame's sync. Also arms the settle hold so we do not fall through
+    // collision that has not streamed in yet.
+    this.teleportTo(coords[0], coords[1], coords[2]);
     if (!this.mapId || this.mapId !== mapId) {
       this.mapId = mapId;
       this.emit('map:change', mapId);

@@ -212,6 +212,22 @@ class Controls extends React.Component<IProp> {
       ),
     };
 
+    // Release the post-teleport settle hold once the destination's collision has actually arrived.
+    //
+    // The hold exists because streamed collision lands several frames after the snap, and gravity
+    // would drop the avatar through a city that has not loaded. Releasing on GROUND CONTACT is the
+    // trap: a teleport into open air, or onto water, never produces contact and would hang forever.
+    // So release on either the ground appearing OR the timeout, whichever comes first.
+    if (player.move.settling) {
+      const feetCentre = player.move.pos.clone();
+      feetCentre.z += CAPSULE_HEIGHT * 0.5;
+      const resident = deps.cast(feetCentre, new THREE.Vector3(0, 0, -1), 200) !== null;
+
+      if (resident || now >= player.move.settleDeadline) {
+        player.move.settling = false;
+      }
+    }
+
     movementFrame(player.move, deps, {
       moving, dir, speed, wantJump: this.jumpPressed, jumpPressed: this.jumpPressed,
     }, delta, now);

@@ -6,7 +6,7 @@ import DBC from "../pipeline/dbc";
 import M2 from "../pipeline/m2";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import ColliderManager from "../world/collider-manager";
-import { DEFAULT_COLLISION_HEIGHT } from "../movement/constants";
+import { DEFAULT_COLLISION_HEIGHT, SETTLE_TIMEOUT } from "../movement/constants";
 import { createPlayerMoveState } from "../movement/player-state";
 import Entity from "./entity";
 
@@ -476,7 +476,34 @@ class Unit extends Entity {
       }
     }
 
+    // The mover owns position: `syncViewFromMove()` copies `move.pos` onto the view every frame.
+    // So anything that sets the view directly -- worldport, a spawn, a debug jump -- has to tell
+    // the mover too, or the next frame silently drags the unit back to wherever the mover thought
+    // it was. That is what made worldport look like it did nothing.
+    this.move.pos.copy(this.position);
+
     this.afterPositionChange();
+  }
+
+  /**
+   * Relocate the unit outright: mover, view, and the velocities that would otherwise carry over.
+   *
+   * `settling` freezes the body with gravity off until the destination's collision has streamed in.
+   * Without it the avatar falls through a city that has not loaded yet -- the ground under a
+   * teleport simply is not there for the first few frames.
+   */
+  teleportTo(x: number, y: number, z: number) {
+    this.move.pos.set(x, y, z);
+    this.move.velZ = 0;
+    this.move.horizVel.set(0, 0, 0);
+    this.move.airborneSince = null;
+    this.move.fallFar = false;
+    this.move.wedged = false;
+    this.move.settling = true;
+    this.move.settleDeadline = performance.now() / 1000 + SETTLE_TIMEOUT;
+
+    this.view.position.set(x, y, z);
+    this.emit("position:change", this.position, this.view.rotation);
   }
 
   applyTranslatePosition() {
