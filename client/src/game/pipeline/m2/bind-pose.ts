@@ -46,3 +46,40 @@ export function poseBindSkeleton(rootBones: THREE.Bone[], bones: THREE.Bone[]): 
 export function modelSpaceBindMatrix(): THREE.Matrix4 {
   return new THREE.Matrix4();
 }
+
+/** What M2 bone weights are stored as: four bytes per vertex, summing to 255. */
+const M2_BONE_WEIGHT_SCALE = 255;
+
+/**
+ * Convert an M2 vertex's bone weights into the normalized form three.js skinning expects.
+ *
+ * The format stores them as four `uint8` summing to **255**; three's skinning sums the weighted
+ * bone matrices and expects them to sum to **1**. Handing the raw bytes straight to a
+ * `skinWeight` attribute scales every vertex by ~255.
+ *
+ * That does not look like a weighting bug from the outside. The mesh balloons to hundreds of times
+ * its size, its skinned bounding sphere lands tens of thousands of yards from the model, the
+ * frustum test drops it, and the body renders as nothing at all -- while its geometry, its
+ * skeleton, its materials and its world matrix all inspect as perfectly correct.
+ *
+ * Weights that are already normalized are passed through, so this is safe to apply to any source.
+ */
+export function normalizeBoneWeights(weights: ArrayLike<number>): [number, number, number, number] {
+  const w0 = weights[0] ?? 0;
+  const w1 = weights[1] ?? 0;
+  const w2 = weights[2] ?? 0;
+  const w3 = weights[3] ?? 0;
+
+  const sum = w0 + w1 + w2 + w3;
+  if (sum === 0) {
+    // An unweighted vertex. Bind it fully to its first bone rather than collapsing it to the
+    // origin, which is what a zero weight vector would do.
+    return [1, 0, 0, 0];
+  }
+
+  const scale = sum > 1.5 ? 1 / sum : 1 / Math.max(sum, 1e-6);
+
+  return [w0 * scale, w1 * scale, w2 * scale, w3 * scale];
+}
+
+export { M2_BONE_WEIGHT_SCALE };

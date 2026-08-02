@@ -6,7 +6,7 @@ import { collisionWorld } from '../../collision/collision-world';
 import { ObjectsManager } from '../../world/visibility-manager';
 import AnimationManager from './animation-manager';
 import BatchManager from './batch-manager';
-import { modelSpaceBindMatrix, poseBindSkeleton } from './bind-pose';
+import { modelSpaceBindMatrix, normalizeBoneWeights, poseBindSkeleton } from './bind-pose';
 import M2Material from './material';
 import { isParticleTemplate } from './particle/template';
 import Submesh from './submesh';
@@ -349,8 +349,10 @@ class M2 extends THREE.Group {
         new THREE.Vector4(...vertex.boneIndices)
       );
 
+      // M2 stores bone weights as four bytes summing to 255; three's skinning expects them to sum
+      // to 1. Handing over the raw bytes scales every vertex by ~255.
       geometry.skinWeights.push(
-        new THREE.Vector4(...vertex.boneWeights)
+        new THREE.Vector4(...normalizeBoneWeights(vertex.boneWeights))
       );
     }
 
@@ -477,8 +479,10 @@ class M2 extends THREE.Group {
         new THREE.Vector4(...vertex.boneIndices)
       );
 
+      // M2 stores bone weights as four bytes summing to 255; three's skinning expects them to sum
+      // to 1. Handing over the raw bytes scales every vertex by ~255.
       geometry.skinWeights.push(
-        new THREE.Vector4(...vertex.boneWeights)
+        new THREE.Vector4(...normalizeBoneWeights(vertex.boneWeights))
       );
     }
 

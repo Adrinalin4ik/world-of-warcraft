@@ -3,7 +3,45 @@
  */
 import * as THREE from 'three';
 
-import { modelSpaceBindMatrix, poseBindSkeleton } from '../bind-pose';
+import { modelSpaceBindMatrix, normalizeBoneWeights, poseBindSkeleton } from '../bind-pose';
+
+describe('normalizeBoneWeights', () => {
+  it('scales M2 byte weights so they sum to one', () => {
+    // The format stores four uint8 summing to 255; three's skinning expects them to sum to 1.
+    const [a, b, c, d] = normalizeBoneWeights([255, 0, 0, 0]);
+    expect(a + b + c + d).toBeCloseTo(1, 9);
+    expect(a).toBeCloseTo(1, 9);
+  });
+
+  it('preserves the relative influence of each bone', () => {
+    const w = normalizeBoneWeights([128, 64, 63, 0]);
+    expect(w[0] + w[1] + w[2] + w[3]).toBeCloseTo(1, 9);
+    expect(w[0] / w[1]).toBeCloseTo(2, 5);
+  });
+
+  it('passes already-normalized weights through unchanged', () => {
+    const w = normalizeBoneWeights([0.5, 0.25, 0.25, 0]);
+    expect(w).toEqual([0.5, 0.25, 0.25, 0]);
+  });
+
+  it('binds an unweighted vertex to its first bone instead of collapsing it', () => {
+    // A zero weight vector would send the vertex to the origin, dragging the mesh bounds with it.
+    expect(normalizeBoneWeights([0, 0, 0, 0])).toEqual([1, 0, 0, 0]);
+  });
+
+  it('handles a short or missing weight list', () => {
+    expect(normalizeBoneWeights([255])).toEqual([1, 0, 0, 0]);
+  });
+
+  it('never leaves a sum that would scale the mesh', () => {
+    // The defect this exists to prevent: raw bytes summing to 255 scale every vertex ~255x, which
+    // inflates the skinned bounding sphere far enough that the frustum test drops the mesh.
+    for (const raw of [[255, 0, 0, 0], [128, 127, 0, 0], [64, 64, 64, 63], [200, 55, 0, 0]]) {
+      const w = normalizeBoneWeights(raw);
+      expect(w[0] + w[1] + w[2] + w[3]).toBeCloseTo(1, 6);
+    }
+  });
+});
 
 /**
  * A two-bone chain with real pivots, built exactly the way `M2#createSkeleton` builds one: local
