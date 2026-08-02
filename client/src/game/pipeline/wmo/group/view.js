@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import ColliderManager from '../../../world/collider-manager';
+import { collisionWorld } from '../../../collision/collision-world';
+import { wmoLiquidSurface } from '../../../collision/liquid-query';
 
 class WMOGroupView extends THREE.Group {
 
@@ -21,7 +22,24 @@ class WMOGroupView extends THREE.Group {
       this.add(group.liquid);
     }
     
-    ColliderManager.collidableMeshList.set(this.uuid, this.mesh);
+    // Collision comes from the group's MOBN/MOBR BSP -- the client's own collision structure --
+    // not from the render mesh. The flags ride along so the walk and camera audiences can be
+    // filtered out of the one shared tree.
+    collisionWorld.wmo.add({
+      view: this,
+      bspTree: group.bspTree,
+      triangleFlags: group.triangleFlags
+    });
+
+    // This room's own liquid, scoped to this group: indoors only THIS placement's MLIQ answers a
+    // depth query, so a building's floor water cannot answer for someone standing outside it.
+    if (group.liquid) {
+      group.liquid.children.forEach((layer) => {
+        if (layer.data && layer.data.liquidVerts) {
+          collisionWorld.liquid.add(wmoLiquidSurface(layer, this));
+        }
+      });
+    }
     // this.boxHelper = new THREE.BoxHelper( this, 0xff0000 );
     // this.boxHelper.visible = false;
     // this.add(this.boxHelper);

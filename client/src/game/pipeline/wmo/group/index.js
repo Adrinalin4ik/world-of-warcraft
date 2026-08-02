@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 import BSPTree from '../../../utils/bsp-tree';
-import ColliderManager from '../../../world/collider-manager';
+import { collisionWorld } from '../../../collision/collision-world';
 import WMOLiquid from '../../liquid/wmo-liquid';
 import WMORootFlags from '../root/flags';
 import WMOGroupView from './view';
@@ -41,7 +41,7 @@ class WMOGroup {
   // Produce a new WMOGroupView suitable for placement in a scene.
   createView() {
     if (this.view) {
-      ColliderManager.collidableMeshList.delete(this.view.uuid);
+      collisionWorld.wmo.remove(this.view);
     }
     this.view = new WMOGroupView(this, this.geometry, this.materials);
     return this.view;

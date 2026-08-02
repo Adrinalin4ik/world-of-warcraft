@@ -1,6 +1,6 @@
 import WorkerPool from '../../../worker/pool';
 import WMOGroup from '../';
-import ColliderManager from '../../../../world/collider-manager';
+import { collisionWorld } from '../../../../collision/collision-world';
 import gameSettings  from '../../../../settings';
 
 class WMOGroupLoader {
@@ -54,7 +54,7 @@ class WMOGroupLoader {
 
   static unload(group) {
     const path = group.path.toUpperCase();
-    ColliderManager.collidableMeshList.delete(group.view.uuid);
+    collisionWorld.wmo.remove(group.view);
     const refCount = (this.refCounts.get(path) || 1) - 1;
 
     if (refCount <= 0) {

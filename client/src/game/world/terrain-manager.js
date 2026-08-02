@@ -1,5 +1,6 @@
+import { collisionWorld } from '../collision/collision-world';
+import { adtLiquidSurface } from '../collision/liquid-query';
 import LiquidType from '../pipeline/liquid/type';
-import ColliderManager from './collider-manager';
 
 class TerrainManager {
 
@@ -27,13 +28,23 @@ class TerrainManager {
     // scene every frame.
     this.map.materialRegistry.addFrom(terrain);
 
-    ColliderManager.collidableMeshList.set(terrain.uuid, terrain);
+    collisionWorld.terrain.add(terrain);
+
+    // Liquid layers are children of the chunk, added in the Chunk constructor. They are a surface
+    // QUERY, not a collider -- you do not collide with water, you compare its height to your feet.
+    terrain.traverse((child) => {
+      if (child.isMesh && child.data && child.data.vertexData) {
+        collisionWorld.liquid.add(adtLiquidSurface(child));
+      }
+    });
   }
 
   unloadChunk(_index, terrain) {
     this.view.remove(terrain);
 
     terrain.traverse((child) => {
+      collisionWorld.liquid.remove(child);
+
       const material = child.material;
       if (!material) return;
       const materials = Array.isArray(material) ? material : [material];
@@ -42,7 +53,7 @@ class TerrainManager {
 
     terrain.dispose();
 
-    ColliderManager.collidableMeshList.delete(terrain.uuid);
+    collisionWorld.terrain.remove(terrain);
   }
 
   animate(delta, camera, cameraMoved) {

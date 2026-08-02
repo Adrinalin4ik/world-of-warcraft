@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { BufferGeometry } from 'three';
 import { Face3, Geometry } from '../../utils/geometry';
 import CacheManager from '../../world/cache-manager';
-import ColliderManager from '../../world/collider-manager';
+import { collisionWorld } from '../../collision/collision-world';
 import { ObjectsManager } from '../../world/visibility-manager';
 import AnimationManager from './animation-manager';
 import BatchManager from './batch-manager';
@@ -192,7 +192,7 @@ class M2 extends THREE.Group {
 
     mesh.visible = true;
 
-    ColliderManager.collidableMeshList.set(mesh.uuid, mesh);
+    collisionWorld.doodads.add(mesh);
     
     
     this.add(mesh);
@@ -748,7 +748,7 @@ class M2 extends THREE.Group {
     this.detachEventListeners();
     this.eventListeners = [];
 
-    ColliderManager.collidableMeshList.delete(this.boundingMesh.uuid);
+    collisionWorld.doodads.remove(this.boundingMesh);
     this.boundingMesh.geometry.dispose();
     this.geometry.dispose();
     this.mesh.geometry.dispose();
@@ -777,7 +777,7 @@ class M2 extends THREE.Group {
     } else {
       instance = null;
     }
-    ColliderManager.collidableMeshList.delete(this.boundingMesh.uuid);
+    collisionWorld.doodads.remove(this.boundingMesh);
     const newM2 = new M2(this.path, this.data, this.skinData, instance);
     return newM2 as any;
   }

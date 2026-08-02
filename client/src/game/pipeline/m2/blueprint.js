@@ -1,5 +1,5 @@
 import gameSettings from '../../settings';
-import ColliderManager from '../../world/collider-manager';
+import { collisionWorld } from '../../collision/collision-world';
 import WorkerPool from '../worker/pool';
 import M2 from './';
 
@@ -61,7 +61,7 @@ class M2Blueprint {
     let refCount = this.references.get(path) || 1;
     
     --refCount;
-    ColliderManager.collidableMeshList.delete(m2.boundingMesh.uuid);
+    collisionWorld.doodads.remove(m2.boundingMesh);
 
     if (refCount === 0) {
       this.pendingUnload.add(path);
