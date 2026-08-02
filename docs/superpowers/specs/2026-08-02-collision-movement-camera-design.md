@@ -8,10 +8,10 @@ implementation (`samples/benilla`) into this client, and get the player's own bo
 
 ## Goal
 
-A player avatar that walks, runs, jumps, falls, climbs stairs and slides off steep faces the way
-vanilla WoW does, with a third-person camera that turns, orbits, zooms and collides the way vanilla
-WoW's does — driven by the collision structures Blizzard already ships in the game data, at a cost
-that does not show up in the frame budget.
+A player avatar that walks, runs, jumps, falls, climbs stairs, slides off steep faces, wades into
+water and swims in it the way vanilla WoW does, with a third-person camera that turns, orbits, zooms
+and collides the way vanilla WoW's does — driven by the collision structures Blizzard already ships
+in the game data, at a cost that does not show up in the frame budget.
 
 Fidelity target is the reference: where `samples/benilla` records a binary-verified constant or a
 named byte address for a rule, the port carries that rule and that provenance. Where the reference
@@ -23,7 +23,6 @@ reason.
 Named so they read as decisions rather than omissions. Each drops in beside the mover later, the way
 it does in the reference:
 
-- Swimming and liquid interaction (`player/swim.rs`)
 - Transports / platform frames (`PlayerRide`)
 - Gait and animation selection (`player/gait.rs`, `creature_anim`)
 - Remote-mover dead reckoning
@@ -48,6 +47,7 @@ every frame. And it rebuilds acceleration structures the game files already cont
 | Terrain | MCVT 9×9+8×8 heightmap on a regular grid, MCNR normals | Parsed at `client/src/game/pipeline/adt/chunk/index.ts:32-67` |
 | WMO | MOBN/MOBR BSP tree over collidable faces, MOPY per-triangle flags | `client/src/game/utils/bsp-tree.ts`, built per group at `client/src/game/pipeline/wmo/group/index.js:122` |
 | M2 doodads | `boundingVertices` / `boundingTriangles` / `boundingNormals` — the model's own low-poly hull | Parsed at `blizzardry/src/lib/m2/index.js:147-149`; `BoundingMesh` built at `client/src/game/pipeline/m2/index.ts:174-198` |
+| Liquid | ADT MH2O and WMO MLIQ — per-vertex heights on a regular grid with a per-tile filled mask | Parsed and meshed at `client/src/game/pipeline/liquid/layer.js` and `wmo-layer.js`; MLIQ struct at `client/src/wow-data-parser/wmo/group.js:116` |
 
 The resulting cost structure:
 
@@ -123,6 +123,24 @@ Three implementations:
 - **`DoodadProvider`** — the M2 `boundingVertices` / `boundingTriangles` / `boundingNormals` hull.
   Broadphase on placement bounds.
 
+**`liquid-query.ts` — the surface query.** Liquid is *not* a collider; you do not collide with water,
+you ask how deep you are in it. So this is a separate, simpler interface:
+
+```ts
+liquidAt(x: number, y: number, claim: LiquidClaim) -> { surfaceZ: number; typeId: number } | null
+```
+
+The same O(1) grid walk as the terrain provider: find the covering liquid layer, index its tile,
+check the filled mask, interpolate the vertex heights. Answers for **all** liquids, not just water —
+you swim in lava and slime too (Blackrock's magma, Undercity's sludge are surfaces you enter, not
+ones you fall through).
+
+`claim` scopes *which* liquid answers: inside a WMO group only that placement's own MLIQ, outdoors
+only the ADT's. Without the scoping a building's floor liquid answers for someone standing outside it
+and vice versa — the reference's "swim in air" defect class. This client already classifies the
+camera as interior/exterior (`bspTree.checkIfInsidePortals`, the visibility manager's WMO work); the
+claim reuses that classification for the player position.
+
 **`capsule-cast.ts` — the reference's `cast_move`.**
 
 ```ts
@@ -148,11 +166,22 @@ NOCAMCOLLIDE faces the player still stands on. Terrain and doodads belong to bot
 (`terrain-manager.js:30`, the WMO group loader, `m2/index.ts`), which already fire at exactly the
 right moments. Replaces `ColliderManager`, which is deleted.
 
-**Data-plumbing prerequisite.** MOPY is parsed by blizzardry (`blizzardry/src/lib/wmo/group.js:36`)
-but dropped: `client/src/game/pipeline/wmo/group/loader/definition.js` never copies it into
-`attributes`, so it never crosses the worker boundary. Add
-`attributes.triangleFlags = Uint8Array(...)` alongside the existing arrays and push its buffer to
-the transferable list. Without it the two collision audiences cannot exist.
+**Data-plumbing prerequisites.** Two, both small and both blocking:
+
+1. **MOPY flags never cross the worker boundary.** MOPY is parsed
+   (`blizzardry/src/lib/wmo/group.js:36`) but
+   `client/src/game/pipeline/wmo/group/loader/definition.js` never copies it into `attributes`. Add
+   `attributes.triangleFlags = Uint8Array(...)` alongside the existing arrays and push its buffer to
+   the transferable list. Without it the two collision audiences cannot exist.
+
+2. **`CreatureModelData.collisionHeight` is not parsed.**
+   `client/src/wow-data-parser/dbc/entities/creature-model-data.js` (and the blizzardry copy) ends at
+   `bloodID` followed by `skips: Reserved(uint32, 22)`. The 28-field vanilla layout puts
+   `collisionWidth` at index 14 and `collisionHeight` at 15 — inside that reserved block. Replace the
+   single `Reserved(22)` with `Reserved(8)` / `collisionWidth: floatle` / `collisionHeight: floatle`
+   / `Reserved(12)`, which sums back to 22 so the record size is unchanged. Verify the field count
+   against the DBC header at load rather than trusting the arithmetic. Every swim depth line is a
+   fraction of this value, so swimming cannot be correct without it.
 
 ### `client/src/game/movement/`
 
@@ -195,8 +224,57 @@ the transferable list. Without it the two collision audiences cannot exist.
   normal), clip velocity onto the resulting plane, repeat. The reference's callback contract defines
   its required behaviour precisely.
 
+- **`swim.ts`** — the port of `swim.rs`. Swimming is a second movement regime the ground mover
+  cannot express: when the water gets deep enough the avatar leaves the floor, floats, and swims in
+  3D along its pitched facing.
+
+  - **The enter/leave latch** (`updateSwimming`): depth = `surfaceZ − feetZ`, compared against
+    `0.75 × collisionHeight` to enter (strict `>`) and `0.75 × collisionHeight − 1/36` to leave, a
+    genuine hysteresis band so wading the boundary cannot flicker the regime. There is **no separate
+    wade flag** — wading is the implicit in-liquid-below-threshold state, so "deepest water you can
+    wade" and "shallowest water you swim in" are necessarily one number.
+  - **The fraction multiplies the unit's *own* collision height**, not a constant. This is the
+    reference's decision 0645 and it is load-bearing: with one human-sized constant, a gnome's rest
+    line sits above her own head and she can never surface. The movement capsule stays constant;
+    only the depth lines are per-unit. These are genuinely two different quantities.
+  - **The vertical law**: while swimming, gravity is **bypassed entirely**. An idle swimmer's depth
+    is *frozen* — no sink, no rise, no ease. The vertical comes only from the pitched travel
+    velocity. There is no buoyancy spring and no resting seek.
+  - **The rest line** is a hard cap at `surface − 0.75 × collisionHeight`, so a surfacing swimmer
+    stops three-quarters submerged, head out. It constrains the position **both ways** and is
+    re-satisfied each frame (`settleToRest`) rather than merely guarded — because the common way a
+    swimmer ends up above the line is the *surface descending to meet them* on a river, which
+    otherwise crosses the whole 1/36 yd hysteresis band in a fraction of a second and flaps the
+    latch ~10×/s. The correction is a **swept** drop, not a position clamp: a clamp overrides
+    terrain collision and pins the depth so the shore exit can never fire.
+  - **The cap redirects rather than bleeds** (`capRedirect`): reaching the rest line flips a
+    pitched-up stroke into full-speed *level* surface swimming, preserving speed. A plain slide
+    against the cap plane leaves `cos(pitch) × speed` ≈ 0 — the "invisible wall". This one is
+    flagged in the reference as its own construction (a named divergence from the disassembly,
+    reproducing director-confirmed behaviour); the port carries the divergence and the note.
+  - **The swim jump** (`breachStep`): Space at *any* depth clears swimming unconditionally and
+    launches the walk mover's falling arc at `SWIM_JUMP_SPEED 9.096748` — at the surface it breaches
+    out, submerged it is the dolphin hop. Re-entry is the depth check plus the fall gate: swim
+    re-latches once upward velocity has decayed to **half** the launch value, while still rising,
+    discarding the residual.
+  - Speeds: `SWIM_SPEED 4.722222` (0.66× run), `SWIM_BACK_SPEED 2.5`, a net-backward swim taking
+    `min(swimBack, swim)`.
+
+  Like the mover, every function takes its world access as a parameter (the cast, and a
+  `surfaceAt(pos)` closure), so the whole law is unit-testable with no world loaded.
+
 - **`player-state.ts`** — `pos` (feet), `velZ`, `horizVel`, `faceYaw`, `modelYaw`, `airborneSince`,
-  `jumpZSpeed`, `fallStartZ`, `fallFar`, `wedged`, `wedgeStill`, `settling`, `settleDeadline`.
+  `jumpZSpeed`, `fallStartZ`, `fallFar`, `wedged`, `wedgeStill`, `settling`, `settleDeadline`,
+  `swimming`, `swimPitch`, `swimStrokeSpeed`, `collisionHeight`, `levitating`.
+
+  `collisionHeight` defaults to `DEFAULT_COLLISION_HEIGHT 2.0277777` and is replaced once the
+  display id resolves — kept as a real default rather than zero-initialised precisely because at
+  zero every depth line collapses to 0 and the avatar swims on dry land.
+
+  `levitating` is server-driven and so is always `false` until the wire lands. It is included now
+  because it is not an optimisation but a mechanism: while set, the water decision does **not run
+  at all** — neither arm — which is what makes GM flight work and what stops dry ground clearing a
+  server-granted swim on the next frame. Its absence would be a hole to re-open later.
 
   `faceYaw` (the aim, what the server would be told) and `modelYaw` (the rendered body heading,
   which a strafe offsets) are separate fields from the start, as they are in the reference.
@@ -225,6 +303,13 @@ dead code goes: `updatePlayer`, `updateGravity`, `updateGroundFollow`, `updateGr
   the far side of a ceiling mid-jump. Collision pull-in is instant (a wall must never sit between
   camera and character); push-out eases at 6/s.
 - Zoom range 0…30 yd, default 15. Pitch clamp ±89.00° (1.5533430576 rad), uniform at every zoom.
+- **The camera pitch drives the swim pitch.** While swimming, mouselook is a *direct set* of
+  `swimPitch` from the camera aim pitch — no integrator, no rate limit, so there is zero lag and
+  aiming up with the right mouse plus swimming forward is how you rise. A left-drag orbit steers
+  nothing (it does not turn the character, so it must not bend the swim). `swimPitch` is **held**
+  when unsteered: an idle floater keeps its pitch and is never auto-levelled. This is the one place
+  the camera and the mover are genuinely coupled, so it lives in the rig's contract rather than
+  being discovered later.
 - A left-drag orbit offset **persists** — the vanilla `cameraSmoothStyle` auto-follow is
   deliberately not ported, matching the reference's decision.
 
@@ -274,10 +359,12 @@ concrete preparations:
    the heartbeat. Returning it now costs nothing and is the entire integration surface.
 
 3. **The state fields the wire needs exist and are maintained**, even though nothing reads them yet:
-   `moveFlags`, `lastFacing`, `airborneSince`, `jumpZSpeed`, `fallFar`, `settling`. These are not
-   speculative additions — each is written by a mover behaviour being ported anyway (`fallFar` by
-   the FALLINGFAR latch, `jumpZSpeed` by the takeoff snapshot). Leaving them out would mean removing
-   working logic and putting it back later.
+   `moveFlags`, `lastFacing`, `airborneSince`, `jumpZSpeed`, `fallFar`, `settling`, `swimming`,
+   `swimPitch`, `swimStrokeSpeed`, `levitating`. These are not speculative additions — each is
+   written by a behaviour being ported anyway (`fallFar` by the FALLINGFAR latch, `jumpZSpeed` by
+   the takeoff snapshot, `swimming` by the depth latch). Leaving them out would mean removing
+   working logic and putting it back later. `MOVEFLAG_SWIMMING` and its pitch tail are the swim
+   regime's entire wire surface, and both are already computed.
 
 Beyond these, `grounded_step` / `airborne_step` are exported as standalone functions for the same
 reason the reference exports them: a remote mover's dead reckoning runs the identical resolve, so a
@@ -295,6 +382,14 @@ watched player meets the same walls. Nothing calls them that way yet.
   parallel cases; miss cases; origin penetration ignored.
 - Each provider's `gather` against synthetic data: terrain cell selection and hole handling, WMO
   local-space transform round-trip, MOPY layer filtering.
+- The swim law. The reference's suite ports directly and is unusually valuable here because it
+  encodes defects that were expensive to find: the enter/exit hysteresis at three different body
+  heights; `levitating` bailing the decision in **both** directions; the latch leaving the settle
+  hold alone; the hop re-latching at half launch velocity while still rising; the rest line being
+  satisfied from above but never pulling up; **every race floating with its head out** (the property
+  no single constant can satisfy — the gnome defect); the descending-river surface not flapping the
+  latch, written as the actual frame loop that produced the bug with a real measured river slope;
+  and the cap redirecting level at full speed rather than grinding.
 
 **Not unit-testable:** feel. So the mover carries a trace hook equivalent to the reference's
 `WOW_MOVE_TRACE` — one line per frame with every probe number and the step-up verdict
@@ -312,6 +407,11 @@ report that something feels wrong.
   interior work, but not yet for per-frame collision queries. If `queryBox` proves slow, the fix is
   to cache the leaf set per placement between frames — the player moves a fraction of a yard per
   frame and the leaf set rarely changes.
+- **The liquid claim depends on interior classification this client uses for rendering, not
+  physics.** Scoping which room's liquid answers requires knowing which WMO group the *player* is
+  in; today the equivalent classification is done for the camera. If reusing it proves awkward, the
+  fallback is ADT-only liquid, which is correct outdoors (where nearly all swimming happens) and
+  wrong inside flooded buildings — a bounded, visible failure rather than a subtle one.
 - **Terrain provider correctness depends on chunk indexing.** The mirrored axes in
   `adt/chunk/index.ts` (`position.y = adt.y - indexX * size`, `position.x = adt.x - indexY * size`)
   must be reproduced exactly by the height lookup. Mitigation: the provider derives triangles from
