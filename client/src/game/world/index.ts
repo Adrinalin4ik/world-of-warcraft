@@ -213,13 +213,77 @@ export default class World extends EventEmitter {
       this.map = map;
       console.log("Map loaded", this.map);
       this.scene.add(this.map);
+      // Units outlive the map, and each map builds its own MaterialRegistry -- so re-adopt them
+      // against the new one or they lose their light and fog uniforms (see `changeModel`).
+      this.adoptEntityMaterials();
       this.renderAtCoords(this.player.position.x, this.player.position.y);
       this.player.emit("map:changed", this.map);
     });
   }
 
-  changeModel(_unit: Unit, _oldModel: Unit, _newModel: Unit) {
-    // console.log("Model change", _unit, _oldModel, _newModel);
+  /**
+   * Hand a unit model's materials to the map's light + fog registry, and drop the outgoing one's.
+   *
+   * Terrain, WMOs and doodads reach the registry through the streaming path -- `TerrainManager`
+   * calls `materialRegistry.addFrom` as each tile loads. A unit's model never does: `add()` puts it
+   * straight into the scene. So nothing hands it fog uniforms and they keep their defaults, which
+   * means `fogParams` stays all-zero and therefore `fogEnd = 0`.
+   *
+   * That is fatal rather than cosmetic. The M2 fragment shader ends with
+   *
+   *     if (blendingMode >= 2 && blendingMode < 6) { color.a *= 1.0 - fogFactor; }
+   *
+   * and `fogFactor` is derived from `(fogEnd - cameraDistance) / (fogEnd - fogStart)`. At
+   * `fogEnd = 0` that degenerates, clamps to 1, and multiplies the body's alpha by ZERO -- so a
+   * character whose geometry, skeleton, bind pose, textures, bounds and world matrix are all
+   * provably correct draws nothing at all. (The same zero also trips the branch above it, which
+   * replaces the colour with an unset white `fogColor`, so forcing the material opaque shows a
+   * white silhouette rather than a textured model.)
+   */
+  changeModel(_unit: Unit, oldModel: any, newModel: any) {
+    const registry = this.map?.materialRegistry;
+    if (!registry) {
+      // No map yet -- the player's model resolves before the first zone finishes loading. The
+      // re-adoption in `changeMap` picks it up.
+      return;
+    }
+
+    if (oldModel && oldModel.traverse) {
+      oldModel.traverse((child: any) => {
+        const material = child.material;
+        if (!material) {
+          return;
+        }
+        const materials = Array.isArray(material) ? material : [material];
+        materials.forEach((entry) => registry.delete(entry));
+      });
+    }
+
+    if (newModel) {
+      registry.addFrom(newModel);
+    }
+  }
+
+  /**
+   * Re-register every live unit's materials with the incoming map's registry.
+   *
+   * `WorldMap` builds a fresh `MaterialRegistry` per zone, so everything adopted against the
+   * previous one is dropped on the floor at a map change. Streamed content re-registers as it
+   * reloads; units persist across the change and would otherwise silently lose their lighting --
+   * and, per `changeModel`, their visibility.
+   */
+  adoptEntityMaterials() {
+    const registry = this.map?.materialRegistry;
+    if (!registry) {
+      return;
+    }
+
+    this.entities.forEach((entity) => {
+      const model = entity.model;
+      if (model) {
+        registry.addFrom(model);
+      }
+    });
   }
 
   changePosition(position: THREE.Vector3, _rotation: THREE.Vector3) {
