@@ -6,6 +6,7 @@ import DBC from "../pipeline/dbc";
 import M2 from "../pipeline/m2";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import ColliderManager from "../world/collider-manager";
+import { collisionWorld } from "../collision/collision-world";
 import { DEFAULT_COLLISION_HEIGHT, SETTLE_TIMEOUT } from "../movement/constants";
 import { createPlayerMoveState } from "../movement/player-state";
 import Entity from "./entity";
@@ -246,6 +247,14 @@ class Unit extends Entity {
     // TODO: Figure out whether this 180 degree rotation is correct
     m2.rotation.z = Math.PI;
     m2.updateMatrix();
+
+    // A unit's own body is NOT world collision. `M2.createBoundingMesh` registers every model's
+    // hull as a static doodad collider, which for a unit means the player collides with itself:
+    // the camera boom swept from the head hits the avatar's own hull at zero distance and collapses
+    // into first person looking at nothing, and the body's own casts fight its own volume.
+    if (m2.boundingMesh) {
+      collisionWorld.doodads.remove(m2.boundingMesh);
+    }
 
     this.view.add(m2);
 

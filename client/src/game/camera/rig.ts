@@ -217,8 +217,16 @@ export function seatCamera(
 
   rig.selfFadeAlpha = selfFadeAlpha(position.distanceTo(pivot));
 
+  // In first person -- zoom 0, or the boom pulled all the way in -- the camera sits ON the pivot,
+  // and `lookAt` toward a target it is already standing at is degenerate: the view direction
+  // collapses and the orientation flips to whatever the up vector leaves. Aim along the look
+  // direction instead, which is what the eye should do anyway once it is inside the head.
+  const target = position.distanceToSquared(pivot) > 1e-4
+    ? pivot
+    : position.clone().add(forward);
+
   const quaternion = new THREE.Quaternion().setFromRotationMatrix(
-    new THREE.Matrix4().lookAt(position, pivot, _up),
+    new THREE.Matrix4().lookAt(position, target, _up),
   );
 
   return { position, quaternion };

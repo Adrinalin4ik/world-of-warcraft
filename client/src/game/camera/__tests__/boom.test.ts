@@ -126,6 +126,34 @@ describe('seatCamera', () => {
     expect(rig.selfFadeAlpha).toBeLessThan(1);
   });
 
+  it('aims along the look direction in first person, not at a target it stands on', () => {
+    // `lookAt` toward a point the camera already occupies is degenerate -- the view direction
+    // collapses and the orientation flips to whatever the up vector leaves, which reads as the
+    // camera staring at the sky and refusing to pitch.
+    const rig = createCameraControl();
+    rig.distance = 0;
+    rig.targetDistance = 0;
+    rig.pitch = -0.5; // looking down
+
+    const out = seat(rig, openWorld, 1 / 60);
+    const forward = v3(0, 0, -1).applyQuaternion(out.quaternion);
+
+    expect(forward.z).toBeLessThan(0); // down, as asked
+    expect(Number.isFinite(forward.x)).toBe(true);
+  });
+
+  it('keeps pitching in first person instead of locking to one orientation', () => {
+    const down = createCameraControl();
+    down.distance = 0; down.targetDistance = 0; down.pitch = -0.8;
+    const up = createCameraControl();
+    up.distance = 0; up.targetDistance = 0; up.pitch = 0.8;
+
+    const fwdDown = v3(0, 0, -1).applyQuaternion(seat(down, openWorld, 1 / 60).quaternion);
+    const fwdUp = v3(0, 0, -1).applyQuaternion(seat(up, openWorld, 1 / 60).quaternion);
+
+    expect(fwdDown.z).toBeLessThan(fwdUp.z);
+  });
+
   it('follows the yaw around the character', () => {
     const rig = createCameraControl();
     const behind = seat(rig, openWorld, 1.0).position.clone();
