@@ -70,6 +70,11 @@ export class WmoProvider {
       return;
     }
 
+    // Same staleness guard as the doodad provider: a placement registered before its transform was
+    // resolved would query the BSP in the wrong frame, and the scene root does not walk static
+    // subtrees to fix it.
+    view.updateWorldMatrix(true, false);
+
     _inverse.copy(view.matrixWorld).invert();
     _localBox.copy(worldBox).applyMatrix4(_inverse);
 

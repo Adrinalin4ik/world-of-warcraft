@@ -131,6 +131,47 @@ describe('DoodadProvider', () => {
     expect(atNewPlace).toHaveLength(12);
   });
 
+  it('finds a hull whose world matrix was never updated after placement', () => {
+    // Hulls are registered when the M2 is CONSTRUCTED, before the doodad is placed, and the scene
+    // root does not walk static subtrees -- so nothing updates the matrix afterwards. Rejecting on
+    // a stale (identity) matrix puts the bounds at the world origin, where no query reaches, and
+    // the doodad never collides. Measured in game: 2528 doodads loaded, zero triangles gathered.
+    const provider = new DoodadProvider();
+    const mesh = hull();
+    provider.add(mesh);
+
+    // Placed under a parent, exactly as a streamed doodad is -- and deliberately NOT updated.
+    const placement = new THREE.Object3D();
+    placement.position.set(120, -40, 15);
+    placement.add(mesh);
+    placement.updateMatrix();
+
+    const out: Triangle[] = [];
+    provider.gather(boxAt(120, -40, 15, 2), out);
+
+    expect(out).toHaveLength(12);
+    expect(out[0].a.x).toBeGreaterThan(119);
+  });
+
+  it('picks up a placement that moves without an explicit matrix update', () => {
+    const provider = new DoodadProvider();
+    const mesh = hull();
+    const placement = new THREE.Object3D();
+    placement.add(mesh);
+    provider.add(mesh);
+
+    placement.position.set(300, 0, 0);
+    placement.updateMatrix();
+
+    const atOld: Triangle[] = [];
+    const atNew: Triangle[] = [];
+    provider.gather(boxAt(0, 0, 0, 2), atOld);
+    provider.gather(boxAt(300, 0, 0, 2), atNew);
+
+    expect(atOld).toHaveLength(0);
+    expect(atNew).toHaveLength(12);
+  });
+
   it('ignores a mesh with no position attribute rather than throwing', () => {
     const provider = new DoodadProvider();
     provider.add(new THREE.Mesh(new THREE.BufferGeometry()));

@@ -52,6 +52,15 @@ export class DoodadProvider {
       return;
     }
 
+    // Refresh the world matrix from the parent chain before using it.
+    //
+    // A hull is registered when its M2 is CONSTRUCTED, which happens before the doodad is placed --
+    // and the scene root deliberately does not walk static subtrees, so nothing else ever updates
+    // it. A stale matrix is the identity, which puts the bounds at the world origin where no query
+    // reaches, and the doodad silently never collides at all. Measured: 2528 map doodads loaded,
+    // zero triangles gathered.
+    mesh.updateWorldMatrix(true, false);
+
     if (!geometry.boundingBox) {
       geometry.computeBoundingBox();
     }
