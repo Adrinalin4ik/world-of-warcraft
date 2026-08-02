@@ -68,6 +68,11 @@ class WorldMap extends THREE.Group {
     this.queuedChunks = new Map();
     this.chunks = new Map();
 
+    // Set by `unload()`. A chunk load in flight when the zone changes resolves against a map that is
+    // no longer in the scene, and would register its terrain, WMO groups and doodad hulls with the
+    // collision world after everything else had been taken back out.
+    this.unloaded = false;
+
     this.collidableMeshList = [];
     // Initialize map light system
     this.mapLight = new MapLight();
@@ -133,7 +138,7 @@ class WorldMap extends THREE.Group {
     const chunkY = index % perRow;
 
     this.queuedChunks.set(index, Chunk.load(this, chunkX, chunkY).then((chunk) => {
-      if (chunk) {
+      if (chunk && !this.unloaded) {
         this.chunks.set(index, chunk);
         this.terrainManager.loadChunk(index, chunk);
         this.doodadManager.loadChunk(index, chunk.doodadEntries);
@@ -154,6 +159,37 @@ class WorldMap extends THREE.Group {
 
     this.queuedChunks.delete(index);
     this.chunks.delete(index);
+  }
+
+  /**
+   * Tear this zone's streamed content down -- every loaded chunk, and with it that chunk's terrain,
+   * WMO entries and doodads.
+   *
+   * A zone change used to drop the map reference and remove it from the scene, and nothing else. The
+   * scene graph does not own this content's OTHER registrations, so all of them survived: the
+   * collision world kept every terrain chunk, WMO group collider and M2 bounding hull of every zone
+   * visited this session. Measured in game, on one session with 45 chunks actually loaded: 1323
+   * terrain chunks, 142 WMO groups and 11132 M2 hulls still registered.
+   *
+   * That is not merely a leak. Every map is its own 64x64 grid over the SAME world coordinates, so
+   * the leftovers do not sit harmlessly off to one side -- they overlap wherever the player now is,
+   * and the cast collides with a previous zone's floors and walls layered through this one.
+   *
+   * Deliberately routed through `unloadChunkByIndex` rather than clearing the collision world
+   * directly: colliders are registered from CONSTRUCTORS (`WMOGroupView`, `M2#createBoundingMesh`)
+   * whose results the loaders cache by path, so a construction never repeats for a re-visited model.
+   * Wiping the registries would therefore lose that geometry permanently. Unloading properly takes
+   * the loader refcounts down with it, which is what lets a re-visit rebuild.
+   */
+  unload() {
+    this.unloaded = true;
+
+    // Snapshot: `unloadChunkByIndex` deletes from the map being walked.
+    for (const index of Array.from(this.chunks.keys())) {
+      this.unloadChunkByIndex(index);
+    }
+
+    this.queuedChunks.clear();
   }
 
   indexFor(chunkX, chunkY) {

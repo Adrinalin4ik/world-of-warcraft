@@ -215,6 +215,10 @@ export default class World extends EventEmitter {
     console.log("Load map", mapId);
     WorldMap.load(mapId).then((map: WorldMap) => {
       if (this.map) {
+        // Removing the group from the scene only takes back the RENDERING. Collision, the material
+        // registry and the loader refcounts are registered elsewhere and outlive it -- see
+        // `WorldMap#unload` for what that cost, measured.
+        this.map.unload();
         this.scene.remove(this.map);
       }
       this.map = map;
