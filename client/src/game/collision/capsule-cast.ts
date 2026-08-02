@@ -7,11 +7,13 @@ import { CastHit, Triangle } from './types';
 export const CAPSULE_CAST_EPS = 1e-4;
 
 /**
- * Iteration ceiling for conservative advancement. Each step advances by the full free gap, so the
- * loop converges geometrically; 48 is far above what any real candidate set needs and exists only
- * so a degenerate triangle cannot spin the frame.
+ * How far off a face the verification pass still counts as a contact.
+ *
+ * The plane solution is exact; this only absorbs the float error of re-evaluating the distance at
+ * the solved time, plus the sliver at a shared edge where neither adjacent face contains the
+ * contact point cleanly.
  */
-const MAX_ADVANCE_STEPS = 48;
+const CONTACT_TOLERANCE = 1e-3;
 
 // `closestPointToSegment` lives on three-mesh-bvh's ExtendedTriangle, not core THREE.Triangle.
 const _tri = new ExtendedTriangle();
@@ -19,7 +21,7 @@ const _line = new THREE.Line3();
 const _closestOnTri = new THREE.Vector3();
 const _closestOnSeg = new THREE.Vector3();
 const _probe = new THREE.Vector3();
-const _sep = new THREE.Vector3();
+const _toTri = new THREE.Vector3();
 
 /**
  * Distance from the capsule's AXIS SEGMENT to a triangle, minus the radius: the signed gap between
@@ -55,21 +57,70 @@ export function closestDistanceCapsuleTriangle(
 }
 
 /**
+ * Time of impact of the swept capsule against ONE triangle's plane, or null.
+ *
+ * Exact, closed form, no iteration: the capsule's support along the face normal is
+ * `radius + halfSegment * |n.z|`, so the gap along the normal shrinks linearly with travel and the
+ * contact time is a single division. This is the semantics the reference gets from its physics
+ * engine's shape cast -- an exact time of impact per collider, minimum taken over the set.
+ *
+ * The plane solution is then VERIFIED against the real capsule-triangle distance, because a plane
+ * is infinite and a triangle is not: a sweep can reach the plane well outside the face. One
+ * distance evaluation settles it, and neighbouring faces of a closed mesh cover the edges.
+ */
+function planeTimeOfImpact(
+  from: THREE.Vector3,
+  dir: THREE.Vector3,
+  maxDist: number,
+  radius: number,
+  halfSegment: number,
+  triangle: Triangle,
+): { t: number; side: number } | null {
+  const n = triangle.normal;
+
+  // How far the capsule reaches along the face normal: the radius, plus the axis projected onto it.
+  const support = radius + halfSegment * Math.abs(n.z);
+
+  _toTri.subVectors(from, triangle.a);
+  const centreDistance = _toTri.dot(n);
+  const side = centreDistance >= 0 ? 1 : -1;
+  const gap = side * centreDistance - support;
+
+  // Closing speed along the normal, from whichever side we are on.
+  const closing = -side * dir.dot(n);
+
+  if (gap <= CAPSULE_CAST_EPS) {
+    // Already touching or overlapping. A contact only counts if we are still driving into the face;
+    // otherwise a body resting on the floor could never cast away from it.
+    return closing > 1e-9 ? { t: 0, side } : null;
+  }
+
+  if (closing <= 1e-9) {
+    return null; // parallel, or receding -- can never be reached
+  }
+
+  const t = gap / closing;
+
+  return t <= maxDist ? { t, side } : null;
+}
+
+/**
  * Sweep a vertical capsule from `from` along unit `dir` for at most `maxDist`, returning the first
- * contact. This is the one world primitive the whole movement and camera stack is built on.
+ * contact. The one world primitive the whole movement and camera stack is built on.
  *
- * **Conservative advancement.** At each step the smallest gap over the candidate triangles is the
- * furthest the capsule can possibly travel without touching anything: `dir` is unit length, so the
- * gap can shrink at most one yard per yard travelled. Advance by exactly that and repeat. This is
- * exact at convergence and needs no substep tuning, and it is affordable precisely because the
- * candidate list is small -- tens of triangles, gathered from the acceleration structures the WoW
- * files already ship.
+ * **Exact time of impact, minimum over the set** -- the semantics the reference gets from its
+ * physics engine's `cast_move`. Each face contributes a closed-form contact time; the nearest wins.
+ * There is no iteration and therefore no iteration ceiling.
  *
- * **Side is taken from geometry, not winding.** Collision faces must block from both sides, and
- * WoW's carry no reliable outward normal, so "am I approaching this face" comes from the separation
- * direction between capsule and triangle. A face the sweep runs parallel to has zero approach rate
- * and cannot be hit -- which is what lets a capsule resting on the floor still walk along it, while
- * a downward probe from that same rest still finds the floor.
+ * That ceiling is what the earlier conservative-advancement version died on. It advanced by the
+ * smallest free gap, so a single grazing face -- of which a WMO interior offers hundreds -- throttled
+ * every step down to the convergence epsilon, the step budget ran out, and the sweep reported NO
+ * HIT. Measured in a real building: 776 walk faces and 1446 camera faces within six yards. The
+ * camera flew through walls and the body could not climb a stair, both from the same cause.
+ *
+ * **Side comes from geometry, not winding.** Collision faces must block from both sides and WoW's
+ * carry no reliable outward normal, so the contact normal is oriented by which side of the plane the
+ * capsule is on, and the reported normal always opposes the approach.
  *
  * `skin` is subtracted from the reported distance so the caller stops that far off the surface; the
  * result is clamped at 0. Returns null when nothing is reached within `maxDist`.
@@ -87,80 +138,38 @@ export function castCapsuleAgainstTriangles(
     return null;
   }
 
-  let travelled = 0;
+  let bestT = Infinity;
+  let best: Triangle | null = null;
+  let bestSide = 1;
 
-  for (let step = 0; step < MAX_ADVANCE_STEPS; ++step) {
-    _probe.copy(dir).multiplyScalar(travelled).add(from);
+  for (let i = 0, len = triangles.length; i < len; ++i) {
+    const triangle = triangles[i];
 
-    let soonest = Infinity;
-    let nearest: Triangle | null = null;
-
-    for (let i = 0, len = triangles.length; i < len; ++i) {
-      const triangle = triangles[i];
-      const gap = closestDistanceCapsuleTriangle(_probe, halfSegment, radius, triangle, _sep);
-
-      // Are we moving TOWARD this face? Taken from the separation direction, not the triangle's
-      // winding: collision geometry has to block from both sides, and WoW's faces carry no reliable
-      // outward normal. A face we run parallel to has zero approach rate and cannot be hit -- which
-      // is exactly what lets a capsule resting on the floor still walk along it.
-      const separation = _sep.lengthSq();
-      const approach = separation > 1e-12
-        ? -dir.dot(_sep) / Math.sqrt(separation)
-        : Math.abs(dir.dot(triangle.normal));
-
-      if (approach <= 1e-6) {
-        continue;
-      }
-
-      if (gap <= CAPSULE_CAST_EPS) {
-        // Touching, or overlapping and still driving in. Either way this is the contact.
-        //
-        // Reporting a hit at zero gap is what the earlier "drop anything we start inside" filter
-        // got wrong: it also dropped the floor a body was RESTING on, because the election snap
-        // lands the capsule exactly on the surface. The ground probe then found nothing, the mover
-        // called itself airborne, gravity pulled it deeper, and each frame made the overlap worse
-        // -- the avatar sank through the world a second after landing.
-        // Orient the contact normal toward the side we are ON, taken from the separation
-        // direction -- NOT from the direction of travel.
-        //
-        // Orienting it against the motion looks equivalent and is not: walking along a slope, the
-        // horizontal step closes on the floor underfoot, `dir . n` comes out positive, and the
-        // floor's normal gets flipped to point DOWN. `walkableRideVelocity` then no longer
-        // recognises it as ground and `steepWallPlane` does not apply either, so the slide dead
-        // stops and the avatar cannot walk uphill at all.
-        const facing = separation > 1e-12
-          ? _sep.dot(triangle.normal)
-          : -dir.dot(triangle.normal);
-
-        return {
-          distance: Math.max(0, travelled - skin),
-          normal: facing < 0 ? triangle.normal.clone().negate() : triangle.normal.clone(),
-          source: triangle.source,
-        };
-      }
-
-      // How far the sweep may safely advance before this face could be reached. Dividing by the
-      // approach rate rather than stepping the raw gap converges in one or two iterations on planar
-      // geometry, instead of creeping along a surface it runs beside.
-      const reach = gap / approach;
-      if (reach < soonest) {
-        soonest = reach;
-        nearest = triangle;
-      }
+    const solution = planeTimeOfImpact(from, dir, maxDist, radius, halfSegment, triangle);
+    if (solution === null || solution.t >= bestT) {
+      continue;
     }
 
-    if (nearest === null || !Number.isFinite(soonest)) {
-      return null;
+    // The plane is infinite; the face is not. Confirm the capsule actually meets THIS triangle at
+    // that time rather than its plane somewhere off the edge.
+    _probe.copy(dir).multiplyScalar(solution.t).add(from);
+    const gap = closestDistanceCapsuleTriangle(_probe, halfSegment, radius, triangle);
+    if (gap > CONTACT_TOLERANCE) {
+      continue;
     }
 
-    travelled += Math.max(soonest, CAPSULE_CAST_EPS);
-    if (travelled > maxDist) {
-      return null;
-    }
+    bestT = solution.t;
+    best = triangle;
+    bestSide = solution.side;
   }
 
-  // Did not converge within the ceiling. Report no hit rather than a wrong one: a missed contact
-  // costs one frame of penetration that the next frame's cast corrects, while a fabricated one
-  // wedges the mover in place.
-  return null;
+  if (best === null) {
+    return null;
+  }
+
+  return {
+    distance: Math.max(0, bestT - skin),
+    normal: bestSide > 0 ? best.normal.clone() : best.normal.clone().negate(),
+    source: best.source,
+  };
 }
