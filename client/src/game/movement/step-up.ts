@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 
 import { CastFn } from '../collision/collision-world';
-import { GROUND_COS, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT } from './constants';
+import {
+  GROUND_COS, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT,
+} from './constants';
 
 /**
  * Why the step-up did or did not commit.
@@ -89,7 +91,8 @@ export function stepUp(
   // SETTLE: the walk election's reach below the advanced point -- the rise undone, plus the
   // travel-scaled step-down allowance -- onto a WALKABLE floor only.
   const reach = rise + travel * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
-  const downHit = cast(over, _down, reach);
+  // Same skin as the election snap: a committed step must not land flush against its floor.
+  const downHit = cast(over, _down, reach, SKIN_WIDTH);
   if (!downHit) {
     return miss('no-floor');
   }

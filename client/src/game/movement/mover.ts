@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 import { CastFn } from '../collision/collision-world';
 import {
-  AIR_NUDGE_SPEED, CAPSULE_HEIGHT, FALL_FAR_DROP, FALL_FAR_TIME, GRAVITY, GROUND_COS, GROUND_PROBE,
+  AIR_NUDGE_SPEED, CAPSULE_HEIGHT, SKIN_WIDTH, FALL_FAR_DROP, FALL_FAR_TIME, GRAVITY, GROUND_COS, GROUND_PROBE,
   JUMP_SPEED, LAND_PROBE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, TERMINAL_VELOCITY, WEDGE_MIN_FALL,
   WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 } from './constants';
@@ -93,7 +93,15 @@ export function groundedStep(
   const dx = slid.x - center.x;
   const dy = slid.y - center.y;
   const reach = Math.hypot(dx, dy) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK + CAPSULE_HEIGHT;
-  const hit = cast(slid, _down, reach);
+  // SKIN_WIDTH, so the body settles a hair ABOVE the floor rather than exactly on it.
+  //
+  // Resting at a zero gap is what dead-stopped every uphill step: the horizontal sweep reported a
+  // contact with the floor underfoot at distance zero, the ride redirected the velocity along the
+  // plane, and the next iteration reported the same zero-distance contact again -- because on a
+  // slope the approach rate along the surface is ~1e-3, small but not zero, so the face is never
+  // skipped. Four iterations, no movement. A skin gap makes the same sweep clear the floor by a
+  // wide margin.
+  const hit = cast(slid, _down, reach, SKIN_WIDTH);
   const snap: SnapTrace = {
     reach,
     hit: hit ? { distance: hit.distance, normalZ: hit.normal.z } : null,
