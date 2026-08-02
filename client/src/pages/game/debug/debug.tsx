@@ -2,6 +2,7 @@ import React from 'react';
 import * as THREE from 'three';
 import { GameHandler } from '../../../network/game/handler';
 import CollapsibleSection from './collapsible-section';
+import MoveReadout from './move-readout';
 import LightingControls from './lighting-controls';
 import LightingReadouts from './lighting-readouts';
 import './debug.scss';
@@ -51,47 +52,27 @@ class DebugPanel extends React.Component<IProp> {
           z: { Math.round(player.position.z) }
         </p>
         <p>
-          Ground distance: { player.groundDistance.toFixed(2) }
+          facing: { (player.move.faceYaw * 180 / Math.PI).toFixed(1) }&deg;
+          &nbsp;body: { (player.move.modelYaw * 180 / Math.PI).toFixed(1) }&deg;
         </p>
         <p>
-          On ground: { player.isOnGround.toString() }
+          vz: { player.move.velZ.toFixed(2) }
+          &nbsp;horiz: { player.move.horizVel.length().toFixed(2) }
         </p>
         <p>
-          Jump: { player.isJump.toString() }
+          airborne: { player.move.airborneSince === null ? 'no' : 'yes' }
+          &nbsp;fallFar: { player.move.fallFar.toString() }
+          &nbsp;wedged: { player.move.wedged.toString() }
         </p>
         <p>
-          Jump velocity: { player.jumpVelocity.toFixed(2) }
+          swimming: { player.move.swimming.toString() }
+          &nbsp;pitch: { (player.move.swimPitch * 180 / Math.PI).toFixed(1) }&deg;
+          &nbsp;stroke: { player.move.swimStrokeSpeed.toFixed(2) }
         </p>
         <p>
-          Slope type: { player.slopeType === 0 ? 'sliding' : 'climbing' }
+          collision height: { player.collisionHeight.toFixed(3) }
         </p>
-        <p>
-          Slope ang: { player.slopeAng.toFixed(2) }
-        </p>
-        <p>
-          Is moving: { player.isMoving.toString() }
-        </p>
-        <p>
-          Moving forward: { player.moving.forward.toString() }
-        </p>
-        <p>
-          Moving backward: { player.moving.backward.toString() }
-        </p>
-        <p>
-          Moving right: { player.moving.strafeRight.toString() }
-        </p>
-        <p>
-          Moving left: { player.moving.strafeLeft.toString() }
-        </p>
-        <p>
-          Rotate right: { player.moving.rotateRight.toString() }
-        </p>
-        <p>
-          Rotate left: { player.moving.rotateLeft.toString() }
-        </p>
-        <p>
-          Animation index: { player.currentAnimationIndex.toString() }
-        </p>
+        <MoveReadout />
         <div className="divider"></div>
         {/* <p>
           Collides: { player.isCollide() ? 'true' : 'false' }
