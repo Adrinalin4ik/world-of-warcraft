@@ -193,9 +193,16 @@ class M2 extends THREE.Group {
 
     mesh.visible = true;
 
-    collisionWorld.doodads.add(mesh);
-    
-    
+    // Collision geometry is OPTIONAL in M2: plenty of models ship none at all (a rope coil, a
+    // decal, most effects), and for those this mesh is empty -- its bounding box comes out inverted
+    // infinite, which no query can ever intersect. Registering it anyway costs every cast in the
+    // game one wasted whole-hull rejection, forever, and inflates the registered-hull readout past
+    // any use. Measured: 2519 hulls registered against 936 live doodads.
+    if (this.boundingTriangles.length > 0 && vertices.length > 0) {
+      collisionWorld.doodads.add(mesh);
+    }
+
+
     this.add(mesh);
 
     return mesh;
