@@ -19,6 +19,7 @@ const _line = new THREE.Line3();
 const _closestOnTri = new THREE.Vector3();
 const _closestOnSeg = new THREE.Vector3();
 const _probe = new THREE.Vector3();
+const _sep = new THREE.Vector3();
 
 /**
  * Distance from the capsule's AXIS SEGMENT to a triangle, minus the radius: the signed gap between
@@ -27,7 +28,11 @@ const _probe = new THREE.Vector3();
  * `base` is the capsule centre; the axis runs +/- `halfSegment` along Z from it.
  */
 export function closestDistanceCapsuleTriangle(
-  base: THREE.Vector3, halfSegment: number, radius: number, triangle: Triangle,
+  base: THREE.Vector3,
+  halfSegment: number,
+  radius: number,
+  triangle: Triangle,
+  separationOut?: THREE.Vector3,
 ): number {
   _line.start.set(base.x, base.y, base.z - halfSegment);
   _line.end.set(base.x, base.y, base.z + halfSegment);
@@ -37,7 +42,16 @@ export function closestDistanceCapsuleTriangle(
   _tri.c.copy(triangle.c);
   _tri.needsUpdate = true;
 
-  return _tri.closestPointToSegment(_line, _closestOnTri, _closestOnSeg) - radius;
+  const distance = _tri.closestPointToSegment(_line, _closestOnTri, _closestOnSeg);
+
+  if (separationOut) {
+    // Points from the face toward the capsule. Which SIDE we are on, derived from geometry rather
+    // than from winding -- collision faces must block from both sides, and WoW's do not guarantee
+    // a consistent outward normal.
+    separationOut.subVectors(_closestOnSeg, _closestOnTri);
+  }
+
+  return distance - radius;
 }
 
 /**
@@ -51,10 +65,11 @@ export function closestDistanceCapsuleTriangle(
  * candidate list is small -- tens of triangles, gathered from the acceleration structures the WoW
  * files already ship.
  *
- * **Origin penetration is ignored.** A capsule already overlapping a face -- a head grazing a
- * ceiling, a body resting on the floor -- still casts outward instead of reporting an instant hit.
- * Any triangle whose gap is already negative at t = 0 is dropped for the whole sweep. Without this,
- * the down-probe that runs every grounded frame would stop dead at zero.
+ * **Side is taken from geometry, not winding.** Collision faces must block from both sides, and
+ * WoW's carry no reliable outward normal, so "am I approaching this face" comes from the separation
+ * direction between capsule and triangle. A face the sweep runs parallel to has zero approach rate
+ * and cannot be hit -- which is what lets a capsule resting on the floor still walk along it, while
+ * a downward probe from that same rest still finds the floor.
  *
  * `skin` is subtracted from the reported distance so the caller stops that far off the surface; the
  * result is clamped at 0. Returns null when nothing is reached within `maxDist`.
@@ -72,43 +87,62 @@ export function castCapsuleAgainstTriangles(
     return null;
   }
 
-  const candidates: Triangle[] = [];
-  for (let i = 0, len = triangles.length; i < len; ++i) {
-    if (closestDistanceCapsuleTriangle(from, halfSegment, radius, triangles[i]) > 0) {
-      candidates.push(triangles[i]);
-    }
-  }
-  if (candidates.length === 0) {
-    return null;
-  }
-
   let travelled = 0;
+
   for (let step = 0; step < MAX_ADVANCE_STEPS; ++step) {
     _probe.copy(dir).multiplyScalar(travelled).add(from);
 
-    let nearestGap = Infinity;
+    let soonest = Infinity;
     let nearest: Triangle | null = null;
-    for (let i = 0, len = candidates.length; i < len; ++i) {
-      const gap = closestDistanceCapsuleTriangle(_probe, halfSegment, radius, candidates[i]);
-      if (gap < nearestGap) {
-        nearestGap = gap;
-        nearest = candidates[i];
+
+    for (let i = 0, len = triangles.length; i < len; ++i) {
+      const triangle = triangles[i];
+      const gap = closestDistanceCapsuleTriangle(_probe, halfSegment, radius, triangle, _sep);
+
+      // Are we moving TOWARD this face? Taken from the separation direction, not the triangle's
+      // winding: collision geometry has to block from both sides, and WoW's faces carry no reliable
+      // outward normal. A face we run parallel to has zero approach rate and cannot be hit -- which
+      // is exactly what lets a capsule resting on the floor still walk along it.
+      const separation = _sep.lengthSq();
+      const approach = separation > 1e-12
+        ? -dir.dot(_sep) / Math.sqrt(separation)
+        : Math.abs(dir.dot(triangle.normal));
+
+      if (approach <= 1e-6) {
+        continue;
+      }
+
+      if (gap <= CAPSULE_CAST_EPS) {
+        // Touching, or overlapping and still driving in. Either way this is the contact.
+        //
+        // Reporting a hit at zero gap is what the earlier "drop anything we start inside" filter
+        // got wrong: it also dropped the floor a body was RESTING on, because the election snap
+        // lands the capsule exactly on the surface. The ground probe then found nothing, the mover
+        // called itself airborne, gravity pulled it deeper, and each frame made the overlap worse
+        // -- the avatar sank through the world a second after landing.
+        const along = dir.dot(triangle.normal);
+        return {
+          distance: Math.max(0, travelled - skin),
+          normal: along > 0 ? triangle.normal.clone().negate() : triangle.normal.clone(),
+          source: triangle.source,
+        };
+      }
+
+      // How far the sweep may safely advance before this face could be reached. Dividing by the
+      // approach rate rather than stepping the raw gap converges in one or two iterations on planar
+      // geometry, instead of creeping along a surface it runs beside.
+      const reach = gap / approach;
+      if (reach < soonest) {
+        soonest = reach;
+        nearest = triangle;
       }
     }
 
-    if (nearest === null) {
+    if (nearest === null || !Number.isFinite(soonest)) {
       return null;
     }
 
-    if (nearestGap <= CAPSULE_CAST_EPS) {
-      return {
-        distance: Math.max(0, travelled - skin),
-        normal: nearest.normal.clone(),
-        source: nearest.source,
-      };
-    }
-
-    travelled += nearestGap;
+    travelled += Math.max(soonest, CAPSULE_CAST_EPS);
     if (travelled > maxDist) {
       return null;
     }

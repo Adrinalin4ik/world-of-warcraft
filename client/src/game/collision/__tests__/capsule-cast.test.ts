@@ -144,6 +144,44 @@ describe('castCapsuleAgainstTriangles', () => {
     expect(hit!.normal.z).toBeCloseTo(Math.cos(Math.PI / 6), 4);
   });
 
+  it('still finds the floor it is RESTING on', () => {
+    // The election snap lands the capsule exactly on the surface, so the gap is zero. An earlier
+    // filter dropped anything at or below zero as "origin penetration", which threw away the very
+    // floor the body stood on: the ground probe found nothing, the mover called itself airborne,
+    // gravity pulled it deeper, and the avatar sank through the world a second after landing.
+    const restingCentre = new THREE.Vector3(0, 0, HALF_SEGMENT + RADIUS);
+    const hit = cast(restingCentre, new THREE.Vector3(0, 0, -1), 0.2, floor(0));
+
+    expect(hit).not.toBeNull();
+    expect(hit!.distance).toBeCloseTo(0, 3);
+    expect(hit!.normal.z).toBeCloseTo(1, 5);
+  });
+
+  it('does not let the floor it rests on block a horizontal step', () => {
+    // The other half of the same problem: reporting that contact for a sideways sweep would pin the
+    // body in place. A face the sweep runs parallel to has zero approach rate.
+    const restingCentre = new THREE.Vector3(0, 0, HALF_SEGMENT + RADIUS);
+
+    expect(cast(restingCentre, new THREE.Vector3(1, 0, 0), 0.5, floor(0))).toBeNull();
+  });
+
+  it('blocks a wall regardless of which way its winding faces', () => {
+    // WoW collision faces carry no reliable outward normal, and a wall has to stop you from both
+    // sides. Deriving approach from the winding would let you walk through half the world.
+    const s = 50;
+    const facingAway = [
+      tri([10, -s, -s], [10, s, -s], [10, s, s], [1, 0, 0]),
+      tri([10, -s, -s], [10, s, s], [10, -s, s], [1, 0, 0]),
+    ];
+
+    const hit = cast(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 0, 0), 20, facingAway);
+
+    expect(hit).not.toBeNull();
+    expect(hit!.distance).toBeCloseTo(10 - RADIUS, 3);
+    // The reported normal always opposes the motion, whichever way the face was wound.
+    expect(hit!.normal.x).toBeLessThan(0);
+  });
+
   it('misses on an empty candidate list', () => {
     expect(cast(new THREE.Vector3(0, 0, 5), new THREE.Vector3(0, 0, -1), 10, [])).toBeNull();
   });
