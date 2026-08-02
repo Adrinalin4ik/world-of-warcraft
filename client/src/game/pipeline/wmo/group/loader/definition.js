@@ -61,6 +61,14 @@ class WMOGroupDefinition {
     const indices = attributes.indices = new Uint16Array(indexCount);
     this.assignIndices(indexCount, groupData.MOVI, indices);
 
+    // MOPY: one flags byte per triangle, sharing the triangle indexing MOBR's entries use. The
+    // player body and the camera collide against DIFFERENT WMO face sets -- walk drops DETAIL
+    // (0x04), camera drops NOCAMCOLLIDE (0x02) -- so the camera stops at overhangs the player walks
+    // under, and passes through faces the player still stands on. The chunk was always parsed; it
+    // just never reached the attributes the worker transfers, so nothing could filter on it.
+    const triangleFlags = attributes.triangleFlags = new Uint8Array(indexCount / 3);
+    this.assignTriangleFlags(groupData.MOPY, triangleFlags);
+
     const positions = attributes.positions = new Float32Array(vertexCount * 3);
     this.assignVertexPositions(vertexCount, groupData.MOVT, positions);
 
@@ -106,6 +114,19 @@ class WMOGroupDefinition {
 
   assignIndices(_indexCount, movi, attribute) {
     attribute.set(movi.triangles, 0);
+  }
+
+  // A truncated MOPY leaves its tail flagless rather than undefined -- an unflagged face collides
+  // with both audiences, so a damaged chunk degrades to solid geometry instead of a walk-through
+  // hole.
+  assignTriangleFlags(mopy, attribute) {
+    const triangles = (mopy && mopy.triangles) || [];
+
+    for (let index = 0, len = attribute.length; index < len; ++index) {
+      const triangle = triangles[index];
+
+      attribute[index] = triangle ? triangle.flags : 0;
+    }
   }
 
   assignVertexColors(vertexCount, rootHeader, mogp, mocv, attribute) {
@@ -468,6 +489,7 @@ class WMOGroupDefinition {
     const list = [];
 
     list.push(this.attributes.indices.buffer);
+    list.push(this.attributes.triangleFlags.buffer);
     list.push(this.attributes.positions.buffer);
     list.push(this.attributes.uvs.buffer);
     list.push(this.attributes.normals.buffer);
