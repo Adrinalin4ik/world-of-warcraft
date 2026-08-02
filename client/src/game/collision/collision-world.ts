@@ -87,3 +87,10 @@ export class CollisionWorld {
  * whole rule set be unit-tested with no world loaded.
  */
 export const collisionWorld = new CollisionWorld();
+
+if (typeof window !== 'undefined') {
+  // Reachable from the console: "is there any collision geometry near me, and from which provider"
+  // is the first question every movement or camera report asks, and it is not answerable from the
+  // scene graph -- collision comes from the BSP and the heightmap, not from what is drawn.
+  (window as any).collisionWorld = collisionWorld;
+}
