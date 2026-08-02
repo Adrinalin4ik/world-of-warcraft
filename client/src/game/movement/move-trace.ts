@@ -18,6 +18,9 @@ export interface MoveTraceFrame {
   snap: SnapTrace | null;
   climb: number | null;
   stepUpVerdict: StepUpVerdict | null;
+  /** Contacts the slide resolved this frame, and the first blocking face. */
+  contacts?: number;
+  blockedBy?: { normalZ: number; distance: number } | null;
 }
 
 const HISTORY = 120;

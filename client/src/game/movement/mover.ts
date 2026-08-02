@@ -35,6 +35,9 @@ export interface GroundedStep {
   stepUpVerdict: StepUpVerdict | null;
   /** The election snap's probe, or null when the step-up took the frame instead. */
   snap: SnapTrace | null;
+  /** How many contacts the slide resolved, and what the first one was. Trace fodder. */
+  contacts: number;
+  blockedBy: { normalZ: number; distance: number } | null;
 }
 
 /**
@@ -74,11 +77,20 @@ export function groundedStep(
         climb: stepped.climb,
         stepUpVerdict,
         snap: null,
+        contacts: 0,
+        blockedBy: null,
       };
     }
   }
 
-  const slid = moveAndSlide(cast, center, horizVel, dt, groundedHitResponse).position;
+  let firstContact: { normalZ: number; distance: number } | null = null;
+  const slide = moveAndSlide(cast, center, horizVel, dt, (hit) => {
+    if (firstContact === null) {
+      firstContact = { normalZ: hit.normal.z, distance: 0 };
+    }
+    groundedHitResponse(hit);
+  });
+  const slid = slide.position;
 
   // Snap onto the surface so we follow downhill slopes and steps down -- the client's step-vs-fall
   // election. The probe reaches `travel * STEP_SLOPE_RATIO + STEP_SNAP_SLACK + collisionHeight`
@@ -113,7 +125,10 @@ export function groundedStep(
     ground = hit.source;
   }
 
-  return { center: slid, ground, climb: null, stepUpVerdict, snap };
+  return {
+    center: slid, ground, climb: null, stepUpVerdict, snap,
+    contacts: slide.contacts, blockedBy: firstContact,
+  };
 }
 
 /**
@@ -249,6 +264,8 @@ export function step(
   let climb: number | null = null;
   let snap: SnapTrace | null = null;
   let stepUpVerdict: StepUpVerdict | null = null;
+  let contacts = 0;
+  let blockedBy: { normalZ: number; distance: number } | null = null;
 
   if (!held && grounded && !jumped) {
     const resolved = groundedStep(cast, center, state.horizVel, dt);
@@ -256,6 +273,8 @@ export function step(
     climb = resolved.climb;
     snap = resolved.snap;
     stepUpVerdict = resolved.stepUpVerdict;
+    contacts = resolved.contacts;
+    blockedBy = resolved.blockedBy;
     if (resolved.ground) {
       groundEntity = resolved.ground;
     }
@@ -336,6 +355,8 @@ export function step(
     snap,
     climb,
     stepUpVerdict,
+    contacts,
+    blockedBy,
   });
 
   return {
