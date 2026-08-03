@@ -330,7 +330,15 @@ class M2Material extends THREE.ShaderMaterial {
   applyRenderFlags(renderFlags) {
     // Flag 0x01 (unlit)
     if (renderFlags & 0x01) {
-      this.uniforms.lightModifier = { value: '0.0' };
+      // `materialParams.y`, because that is the switch the shader actually reads:
+      // `light = mix(light, vec3(1.0), 1.0 - materialParams.y)`. At y = 0 the light term becomes
+      // white and the batch renders unlit.
+      //
+      // This used to assign `uniforms.lightModifier = { value: '0.0' }` -- a uniform the fragment
+      // header declares but nothing reads, and a STRING where a float belongs. So the unlit flag has
+      // never done anything: every flagged batch (glows, eyes, spell effects, anything the reference
+      // lights not at all) has been taking the full sun and the full day/night ramp.
+      this.uniforms.materialParams.value[1] = 0.0;
     }
 
     // Flag 0x02 (unfogged). Numeric, not the string '0.0' this used to assign -- and the shader now

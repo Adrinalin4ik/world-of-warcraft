@@ -25,18 +25,25 @@ vec3 transformed = vec3(position);
   skinMatrix += skinWeight.z * boneMatZ;
   skinMatrix += skinWeight.w * boneMatW;
 
-  // `modelMatrix` as well as the skin, because bone matrices map model space onto POSED MODEL space
-  // -- exactly like `skinned` above, which `modelViewMatrix` then takes the rest of the way. Without
-  // it the two branches of this #ifdef hand the fragment stage vectors in DIFFERENT SPACES, while
-  // both consumers -- `sunParams.xyz` in m2SunLobe and `wmoLightPosition` in applyWmoPointLights --
-  // are world space.
+  // NO `modelMatrix` here, and that is not an omission -- adding one double-transforms the normal.
   //
-  // For a unit that error is a whole yaw: `Unit#model` sets `m2.rotation.z = PI` and the view carries
-  // the body heading on top. So the sun arrives from the wrong side and, at night, every fragment
-  // lands near the lobe's minimum -- ambient plus 6% of diffuse. Measured with the night sun
-  // (#4b5b97) and ambient (#0f3456) that is light (0.08, 0.22, 0.38), which against dark ground is
-  // the difference between a dim body and one nobody can find.
-  worldVertexNormal = (modelMatrix * skinMatrix * vec4(normal, 0.0)).xyz;
+  // `skinMatrix` is already a MODEL-TO-WORLD map. `Skeleton.update` writes each palette entry as
+  // `bone.matrixWorld * boneInverse`, and `poseBindSkeleton` takes those inverses in MODEL space
+  // (before the M2 is in the scene), so an entry is
+  //
+  //     M2.matrixWorld  .  bonePose_model  .  bindPose_model^-1
+  //
+  // and the world transform is baked in. That is also why the POSITION works: with three's default
+  // AttachedBindMode, `bindMatrix` stays the identity we pass while `bindMatrixInverse` is
+  // recomputed as `matrixWorld^-1` every frame -- deliberately NOT its inverse -- so `skinned` above
+  // is the world-space sum brought back into local space, which `modelViewMatrix` then expects.
+  //
+  // So both branches of this #ifdef DO hand the fragment stage a world-space normal; they just get
+  // there by different routes, one through the palette and one through modelMatrix. A previous
+  // "fix" here added modelMatrix to this branch on the reasoning that bone matrices are model-space.
+  // They are not, and the result was the body lit through an extra whole yaw -- `Unit#model` sets
+  // `rotation.z = PI` and the view carries the body heading on top of it.
+  worldVertexNormal = (skinMatrix * vec4(normal, 0.0)).xyz;
 #else
   worldVertexNormal = (modelMatrix * vec4(normal, 0.0)).xyz;
 #endif

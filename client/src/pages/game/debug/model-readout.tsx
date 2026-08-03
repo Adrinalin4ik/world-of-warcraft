@@ -79,6 +79,9 @@ function BatchRow({ b }: { b: BatchReport }) {
           {' sun '}{b.shading.sunDiffuse ?? '?'} amb {b.shading.sunAmbient ?? '?'}
           {' int '}{b.shading.sunIntensity ?? '?'}
           <br />
+          &nbsp;&nbsp;sunDir {b.shading.sunParams
+            ? b.shading.sunParams.slice(0, 3).map((v) => v.toFixed(3)).join(', ') : '?'}
+          <br />
           &nbsp;&nbsp;matParams {b.shading.materialParams
             ? b.shading.materialParams.map((v) => v.toFixed(2)).join(', ') : '?'}
           {' probe '}{b.shading.interiorProbe ?? '?'}

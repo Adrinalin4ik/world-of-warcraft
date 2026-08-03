@@ -3,6 +3,7 @@
  */
 import * as THREE from 'three';
 
+import fragmentHeader from '../fragment/common-header.glsl';
 import commonHeader from '../vertex/common-header.glsl';
 import commonMain from '../vertex/common-main.glsl';
 
@@ -34,17 +35,22 @@ describe('M2 vertex common-main', () => {
     expect(normalAssignments).toHaveLength(2);
   });
 
-  it('takes the normal to WORLD space in both branches', () => {
-    for (const line of normalAssignments) {
-      expect(line).toMatch(/modelMatrix/);
-    }
-  });
-
-  it('composes the skin with modelMatrix, since bone matrices land in model space', () => {
+  it('reaches world space through the palette on the skinned branch, without modelMatrix', () => {
+    // The palette is ALREADY model-to-world: `Skeleton.update` writes `bone.matrixWorld *
+    // boneInverse`, and poseBindSkeleton takes those inverses in model space, so M2.matrixWorld is
+    // baked into every entry. Multiplying by modelMatrix here applies it a second time, and the body
+    // is lit through an extra whole yaw. This test exists because that mistake was made and shipped.
     const skinned = normalAssignments.find((line: string) => line.includes('skinMatrix'));
 
     expect(skinned).toBeDefined();
-    expect(skinned).toMatch(/modelMatrix\s*\*\s*skinMatrix/);
+    expect(skinned).not.toMatch(/modelMatrix/);
+  });
+
+  it('reaches world space through modelMatrix on the unskinned branch', () => {
+    const unskinned = normalAssignments.find((line: string) => !line.includes('skinMatrix'));
+
+    expect(unskinned).toBeDefined();
+    expect(unskinned).toMatch(/modelMatrix/);
   });
 
   it('gets getBoneMatrix from three rather than hand-rolling it', () => {
@@ -75,6 +81,25 @@ describe('M2 vertex common-main', () => {
     for (const component of ['x', 'y', 'z', 'w']) {
       expect(commonMain).toMatch(new RegExp(`getBoneMatrix\\(\\s*skinIndex\\.${component}\\s*\\)`));
     }
+  });
+
+  it('gates lighting on materialParams, not on lightModifier', () => {
+    // `applyRenderFlags` must write the switch the shader READS. It used to set `lightModifier`,
+    // which the fragment header declares and nobody reads, so the M2 unlit flag (0x01) did nothing.
+    const code = codeOf(fragmentHeader);
+    const mix = code.split('\n').find((line: string) => /light\s*=\s*mix\(/.test(line));
+
+    expect(mix).toBeDefined();
+    expect(mix).toMatch(/materialParams/);
+
+    // `lightModifier` may still be DECLARED -- removing it is a separate cleanup -- but nothing may
+    // read it, or the switch and the writer drift apart again.
+    const uses = code
+      .split('\n')
+      .filter((line: string) => line.includes('lightModifier'))
+      .filter((line: string) => !/^\s*uniform\b/.test(line));
+
+    expect(uses).toEqual([]);
   });
 
   it('still declares the marker the assembler splices this chunk in at', () => {
