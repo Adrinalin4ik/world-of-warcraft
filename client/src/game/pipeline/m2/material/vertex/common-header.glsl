@@ -15,43 +15,24 @@ varying vec3 worldVertexNormal;
 varying vec3 worldVertexPosition;
 varying float cameraDistance;
 
-#ifdef USE_SKINNING
-	uniform mat4 bindMatrix;
-	uniform mat4 bindMatrixInverse;
-
-	#ifdef BONE_TEXTURE
-		uniform sampler2D boneTexture;
-		uniform int boneTextureWidth;
-		uniform int boneTextureHeight;
-
-		mat4 getBoneMatrix( const in float i ) {
-			float j = i * 4.0;
-			float x = mod( j, float( boneTextureWidth ) );
-			float y = floor( j / float( boneTextureWidth ) );
-
-			float dx = 1.0 / float( boneTextureWidth );
-			float dy = 1.0 / float( boneTextureHeight );
-
-			y = dy * ( y + 0.5 );
-
-			vec4 v1 = texture2D( boneTexture, vec2( dx * ( x + 0.5 ), y ) );
-			vec4 v2 = texture2D( boneTexture, vec2( dx * ( x + 1.5 ), y ) );
-			vec4 v3 = texture2D( boneTexture, vec2( dx * ( x + 2.5 ), y ) );
-			vec4 v4 = texture2D( boneTexture, vec2( dx * ( x + 3.5 ), y ) );
-
-			mat4 bone = mat4( v1, v2, v3, v4 );
-
-			return bone;
-		}
-	#else
-		uniform mat4 boneGlobalMatrices[ MAX_BONES ];
-
-		mat4 getBoneMatrix( const in float i ) {
-			mat4 bone = boneGlobalMatrices[ int(i) ];
-			return bone;
-		}
-	#endif
-#endif
+// three's OWN skinning declarations: `bindMatrix`, `bindMatrixInverse`, `boneTexture` and
+// `getBoneMatrix`, guarded by `USE_SKINNING` inside the chunk itself. `common-main.glsl` calls
+// getBoneMatrix; this is where it comes from.
+//
+// It used to be hand-rolled here, and it read two uniforms three does not have -- `boneTextureWidth`
+// and `boneTextureHeight`. Three supplies the bone texture but derives its size in GLSL
+// (`textureSize(boneTexture, 0)`); a uniform nothing uploads reads as ZERO, so `mod(j, 0.0)` gave NaN
+// and `1.0 / 0.0` gave Inf. Every bone matrix came back NaN, `gl_Position` with it, and the GPU
+// discarded every vertex -- so the draw call was issued and covered nothing.
+//
+// That failure is completely silent. It compiles, it links, it raises no warning, `onAfterRender`
+// still fires, and every uniform still reads correct from JS because none of them reaches the shader.
+// A skinned body drew nothing while static doodads, which never enter this path, were fine.
+//
+// Delegated rather than corrected: three has changed how bone matrices reach the shader more than
+// once (boneTextureSize, then boneTextureWidth/Height, now textureSize), and any version we
+// hand-write here will drift again on the next upgrade.
+#include <skinning_pars_vertex>
 
 vec2 envMapSphere(in vec3 cameraVertex, in vec3 normal) {
   vec3 cameraNormal = (modelViewMatrix * vec4(normal, 0.0)).xyz;
