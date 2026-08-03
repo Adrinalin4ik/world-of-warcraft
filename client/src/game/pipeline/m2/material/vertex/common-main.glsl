@@ -25,7 +25,18 @@ vec3 transformed = vec3(position);
   skinMatrix += skinWeight.z * boneMatZ;
   skinMatrix += skinWeight.w * boneMatW;
 
-  worldVertexNormal = (skinMatrix * vec4(normal, 0.0)).xyz;
+  // `modelMatrix` as well as the skin, because bone matrices map model space onto POSED MODEL space
+  // -- exactly like `skinned` above, which `modelViewMatrix` then takes the rest of the way. Without
+  // it the two branches of this #ifdef hand the fragment stage vectors in DIFFERENT SPACES, while
+  // both consumers -- `sunParams.xyz` in m2SunLobe and `wmoLightPosition` in applyWmoPointLights --
+  // are world space.
+  //
+  // For a unit that error is a whole yaw: `Unit#model` sets `m2.rotation.z = PI` and the view carries
+  // the body heading on top. So the sun arrives from the wrong side and, at night, every fragment
+  // lands near the lobe's minimum -- ambient plus 6% of diffuse. Measured with the night sun
+  // (#4b5b97) and ambient (#0f3456) that is light (0.08, 0.22, 0.38), which against dark ground is
+  // the difference between a dim body and one nobody can find.
+  worldVertexNormal = (modelMatrix * skinMatrix * vec4(normal, 0.0)).xyz;
 #else
   worldVertexNormal = (modelMatrix * vec4(normal, 0.0)).xyz;
 #endif
