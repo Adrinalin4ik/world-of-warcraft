@@ -39,9 +39,23 @@ function BatchRow({ b }: { b: BatchReport }) {
       &nbsp;&nbsp;fog {b.fogParams ? b.fogParams.slice(0, 3).map((v) => v.toFixed(4)).join(', ') : 'unset'}
       {' '}{b.fogColor ?? ''}
       {' mod '}{b.fogModifier ?? '?'}
+      { b.skin && (
+        <>
+          <br />
+          &nbsp;&nbsp;bones {b.skin.bones}
+          {' zero '}{b.skin.zeroMatrices}
+          {' nan '}{b.skin.nonFiniteMatrices}
+          {' wsum '}{b.skin.sampleWeightSum === null ? '?' : b.skin.sampleWeightSum.toFixed(3)}
+          <br />
+          &nbsp;&nbsp;v0 {vec(b.skin.samplePosition)} &rarr; {vec(b.skin.sampleSkinned)}
+        </>
+      ) }
     </p>
   );
 }
+
+const vec = (v: [number, number, number] | null) =>
+  (v === null ? 'n/a' : `(${v.map((n) => (Number.isFinite(n) ? n.toFixed(3) : String(n))).join(', ')})`);
 
 /**
  * The Player model section of the debug panel.

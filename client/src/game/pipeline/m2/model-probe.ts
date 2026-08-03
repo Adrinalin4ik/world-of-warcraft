@@ -8,6 +8,27 @@ import * as THREE from 'three';
  * to reason about: this project has diagnosed an invisible character body wrongly five times, and
  * every one of those wrong diagnoses was a plausible story about a link nobody had measured.
  */
+/**
+ * What the skinning transform actually does to one real vertex.
+ *
+ * The reason this is worth computing rather than inspecting: a collapsed skin is INVISIBLE TO EVERY
+ * OTHER CHECK. `frustumCulled` tests the geometry's own bounding sphere, which is the UNSKINNED
+ * bounds, so a mesh whose every vertex is mapped to a single point still passes the frustum test,
+ * still issues a draw, and still reports healthy uniforms and textures -- exactly the state a body
+ * that draws seven batches a frame and shows nothing is in.
+ */
+export interface SkinReport {
+  bones: number;
+  /** Bone matrices whose sixteen elements are all zero -- a skeleton that never got posed. */
+  zeroMatrices: number;
+  nonFiniteMatrices: number;
+  /** Geometry vertex 0, before skinning. */
+  samplePosition: [number, number, number] | null;
+  /** The same vertex after the shader's own math, run here on the CPU. */
+  sampleSkinned: [number, number, number] | null;
+  sampleWeightSum: number | null;
+}
+
 export interface BatchReport {
   submesh: number;
   batch: number;
@@ -36,6 +57,8 @@ export interface BatchReport {
   opacity: number;
   transparent: boolean;
   colorWrite: boolean;
+  /** Null for a non-skinned batch. */
+  skin: SkinReport | null;
 }
 
 export interface ModelReport {
@@ -52,6 +75,114 @@ export interface ModelReport {
 /** Fog uniforms nobody has written yet: `fogFactor` comes out 1 and the colour is fully replaced. */
 const fogUnset = (fog: [number, number, number, number] | null) =>
   fog !== null && fog[0] === 0 && fog[1] === 0 && fog[2] === 0;
+
+const _bone = new THREE.Matrix4();
+const _skinVertex = new THREE.Vector4();
+const _accum = new THREE.Vector4();
+
+/** All sixteen elements zero -- a bone matrix that was never composed, not merely an identity. */
+function matrixIsZero(m: Float32Array | number[], offset: number): boolean {
+  for (let i = 0; i < 16; ++i) {
+    if (m[offset + i] !== 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Run the vertex shader's skinning on geometry vertex 0, here, on the CPU.
+ *
+ * Deliberately the SAME sequence as `vertex/common-main.glsl`:
+ *
+ *   skinVertex = bindMatrix * position
+ *   skinned    = sum over i of boneMatrix[i] * skinVertex * weight[i]
+ *   skinned    = bindMatrixInverse * skinned
+ *
+ * so that a disagreement between what is reported here and what appears on screen means the shader,
+ * and an agreement means the data. Reading the matrices without composing them cannot make that
+ * distinction: four healthy-looking matrices with weights summing to zero still collapse the mesh.
+ */
+function readSkin(mesh: any): SkinReport | null {
+  const skeleton = mesh.skeleton;
+  const geometry = mesh.geometry;
+
+  if (!skeleton || !geometry) {
+    return null;
+  }
+
+  const matrices: Float32Array | undefined = skeleton.boneMatrices;
+  const bones: any[] = skeleton.bones ?? [];
+
+  const report: SkinReport = {
+    bones: bones.length,
+    zeroMatrices: 0,
+    nonFiniteMatrices: 0,
+    samplePosition: null,
+    sampleSkinned: null,
+    sampleWeightSum: null,
+  };
+
+  if (matrices) {
+    for (let b = 0; b < bones.length; ++b) {
+      const offset = b * 16;
+      if (matrixIsZero(matrices, offset)) {
+        report.zeroMatrices += 1;
+      }
+      for (let i = 0; i < 16; ++i) {
+        if (!Number.isFinite(matrices[offset + i])) {
+          report.nonFiniteMatrices += 1;
+          break;
+        }
+      }
+    }
+  }
+
+  const position = geometry.getAttribute?.('position');
+  const skinIndex = geometry.getAttribute?.('skinIndex');
+  const skinWeight = geometry.getAttribute?.('skinWeight');
+
+  if (!position || position.count === 0) {
+    return report;
+  }
+
+  report.samplePosition = [position.getX(0), position.getY(0), position.getZ(0)];
+
+  if (!skinIndex || !skinWeight || !matrices || !mesh.bindMatrix || !mesh.bindMatrixInverse) {
+    return report;
+  }
+
+  const weights = [skinWeight.getX(0), skinWeight.getY(0), skinWeight.getZ(0), skinWeight.getW(0)];
+  const indices = [skinIndex.getX(0), skinIndex.getY(0), skinIndex.getZ(0), skinIndex.getW(0)];
+  report.sampleWeightSum = weights.reduce((a, b) => a + b, 0);
+
+  _skinVertex.set(report.samplePosition[0], report.samplePosition[1], report.samplePosition[2], 1)
+    .applyMatrix4(mesh.bindMatrix);
+
+  _accum.set(0, 0, 0, 0);
+
+  for (let i = 0; i < 4; ++i) {
+    const weight = weights[i];
+    if (weight === 0) {
+      continue;
+    }
+
+    const offset = indices[i] * 16;
+    if (offset + 15 >= matrices.length) {
+      continue; // index past the end of the palette -- reported through the sample coming out short
+    }
+
+    _bone.fromArray(matrices as any, offset);
+
+    const v = _skinVertex.clone().applyMatrix4(_bone).multiplyScalar(weight);
+    _accum.add(v);
+  }
+
+  _accum.applyMatrix4(mesh.bindMatrixInverse);
+  report.sampleSkinned = [_accum.x, _accum.y, _accum.z];
+
+  return report;
+}
 
 function readMaterial(material: any, report: BatchReport): void {
   report.opacity = material?.opacity ?? 1;
@@ -151,7 +282,12 @@ export function inspectModel(
         opacity: 1,
         transparent: false,
         colorWrite: true,
+        skin: null,
       };
+
+      if (report.skinned) {
+        report.skin = readSkin(mesh);
+      }
 
       if (frustum && mesh.geometry) {
         try {
@@ -174,6 +310,44 @@ export function inspectModel(
     batches,
     verdict: verdictFor(hiddenAncestor, submeshes.length, batches),
   };
+}
+
+const finite = (v: [number, number, number] | null) =>
+  v !== null && v.every((n) => Number.isFinite(n));
+
+const magnitude = (v: [number, number, number]) => Math.hypot(v[0], v[1], v[2]);
+
+/**
+ * What the skinning data says is wrong, or null when it looks sound.
+ *
+ * Only faults that hold for EVERY skinned batch are reported: one collapsed batch among six healthy
+ * ones is a submesh problem, not the reason a whole body is missing, and blaming it would send the
+ * search off in the wrong direction.
+ */
+export function skinVerdict(skins: SkinReport[]): string | null {
+  if (skins.every((s) => s.bones > 0 && s.zeroMatrices === s.bones)) {
+    return 'every bone matrix is all zeros -- the skeleton was never posed, so the shader maps '
+      + 'every vertex to nothing';
+  }
+  if (skins.every((s) => s.nonFiniteMatrices > 0)) {
+    return 'bone matrices contain NaN or Infinity -- the skinned position is undefined';
+  }
+  if (skins.every((s) => s.sampleSkinned !== null && !finite(s.sampleSkinned))) {
+    return 'skinning yields a non-finite position for a real vertex';
+  }
+  if (skins.every((s) => s.sampleWeightSum !== null && s.sampleWeightSum < 1e-4)) {
+    return 'skin weights sum to zero -- every vertex is weighted onto no bone at all';
+  }
+  if (skins.every((s) => (
+    finite(s.sampleSkinned) && finite(s.samplePosition)
+    && magnitude(s.samplePosition!) > 1e-3
+    && magnitude(s.sampleSkinned!) < 1e-4
+  ))) {
+    return 'skinning collapses every vertex onto the model origin -- the mesh has no extent on '
+      + 'screen, which is why it passes the frustum test and draws nothing';
+  }
+
+  return null;
 }
 
 /**
@@ -216,6 +390,16 @@ export function verdictFor(
   }
   if (drawn.every((b) => b.colorWrite === false)) {
     return 'drawn with colorWrite off';
+  }
+
+  // The VERTEX stage before the fragment stage: a collapsed or non-finite skin passes every other
+  // check in this function, because the frustum test uses the UNSKINNED bounding sphere.
+  const skinned = drawn.filter((b) => b.skin !== null);
+  if (skinned.length > 0) {
+    const skinFault = skinVerdict(skinned.map((b) => b.skin as SkinReport));
+    if (skinFault) {
+      return skinFault;
+    }
   }
   if (drawn.every((b) => b.textureCount === 0 || b.texturesReady === 0)) {
     return 'drawn, but no texture has image data -- sampling nothing, so alpha may key it away';

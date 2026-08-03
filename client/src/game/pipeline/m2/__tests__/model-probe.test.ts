@@ -3,7 +3,9 @@
  */
 import * as THREE from 'three';
 
-import { BatchReport, ModelProbe, inspectModel, verdictFor } from '../model-probe';
+import {
+  BatchReport, ModelProbe, SkinReport, inspectModel, skinVerdict, verdictFor,
+} from '../model-probe';
 
 /** A batch mesh carrying an M2Material-shaped material. */
 function batchMesh(overrides: any = {}, uniforms: any = {}) {
@@ -172,6 +174,18 @@ const healthy = (overrides: Partial<BatchReport> = {}): BatchReport => ({
   opacity: 1,
   transparent: false,
   colorWrite: true,
+  skin: null,
+  ...overrides,
+});
+
+/** A skin report describing a healthy, posed skeleton. */
+const healthySkin = (overrides: Partial<SkinReport> = {}): SkinReport => ({
+  bones: 60,
+  zeroMatrices: 0,
+  nonFiniteMatrices: 0,
+  samplePosition: [0.2, 0.4, 1.1],
+  sampleSkinned: [0.21, 0.39, 1.12],
+  sampleWeightSum: 1,
   ...overrides,
 });
 
@@ -229,11 +243,142 @@ describe('verdictFor', () => {
     expect(verdict).toMatch(/no draw was issued/);
   });
 
+  it('reports a collapsed skin, which every other check passes', () => {
+    // The state a body that draws seven batches a frame and shows nothing is in: healthy uniforms,
+    // healthy textures, in frustum -- because the frustum test uses the UNSKINNED bounding sphere.
+    const collapsed = healthySkin({ sampleSkinned: [0, 0, 0] });
+    const verdict = verdictFor(null, 1, [healthy({ skin: collapsed })]);
+
+    expect(verdict).toMatch(/collapses every vertex onto the model origin/);
+  });
+
+  it('puts the vertex-stage fault ahead of any fragment-stage one', () => {
+    const verdict = verdictFor(null, 1, [healthy({
+      skin: healthySkin({ sampleSkinned: [0, 0, 0] }),
+      texturesReady: 0,
+      fogParams: [0, 0, 0, 0],
+    })]);
+
+    expect(verdict).toMatch(/collapses every vertex/);
+  });
+
+  it('says nothing about skinning when the skin is sound', () => {
+    expect(verdictFor(null, 1, [healthy({ skin: healthySkin() })])).toMatch(/plausible/);
+  });
+
   it('does not blame a term only SOME batches zero', () => {
     // A model whose one transparent batch has faded out is normal; the body is still visible.
     const verdict = verdictFor(null, 1, [healthy(), healthy({ batch: 1, fadeAlpha: 0 })]);
 
     expect(verdict).toMatch(/plausible/);
+  });
+});
+
+describe('skinVerdict', () => {
+  it('passes a posed skeleton', () => {
+    expect(skinVerdict([healthySkin()])).toBeNull();
+  });
+
+  it('reports an entirely unposed skeleton', () => {
+    expect(skinVerdict([healthySkin({ bones: 60, zeroMatrices: 60 })]))
+      .toMatch(/every bone matrix is all zeros/);
+  });
+
+  it('reports NaN in the bone palette', () => {
+    expect(skinVerdict([healthySkin({ nonFiniteMatrices: 3 })])).toMatch(/NaN or Infinity/);
+  });
+
+  it('reports a non-finite skinned vertex', () => {
+    expect(skinVerdict([healthySkin({ sampleSkinned: [NaN, NaN, NaN] })]))
+      .toMatch(/non-finite position/);
+  });
+
+  it('reports weights that sum to zero', () => {
+    expect(skinVerdict([healthySkin({ sampleWeightSum: 0 })])).toMatch(/sum to zero/);
+  });
+
+  it('reports the collapse to the origin', () => {
+    expect(skinVerdict([healthySkin({ sampleSkinned: [0, 0, 0] })]))
+      .toMatch(/collapses every vertex/);
+  });
+
+  it('does not call a vertex authored AT the origin a collapse', () => {
+    // A vertex that starts at the model origin ends there legitimately. Reporting that as a collapse
+    // would fire on healthy models.
+    expect(skinVerdict([healthySkin({ samplePosition: [0, 0, 0], sampleSkinned: [0, 0, 0] })]))
+      .toBeNull();
+  });
+
+  it('stays quiet when only ONE batch is collapsed', () => {
+    const verdict = skinVerdict([
+      healthySkin(),
+      healthySkin({ sampleSkinned: [0, 0, 0] }),
+    ]);
+
+    expect(verdict).toBeNull();
+  });
+});
+
+describe('inspectModel skin reading', () => {
+  /** A skinned batch whose skeleton palette and bind matrices the test controls outright. */
+  function skinnedBatch(boneMatrices: Float32Array, bones: number) {
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    geometry.computeBoundingSphere();
+    geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(
+      new Array(geometry.getAttribute('position').count * 4).fill(0), 4,
+    ));
+    const weights = new Float32Array(geometry.getAttribute('position').count * 4);
+    for (let i = 0; i < weights.length; i += 4) {
+      weights[i] = 1;
+    }
+    geometry.setAttribute('skinWeight', new THREE.BufferAttribute(weights, 4));
+
+    const mesh: any = new THREE.Mesh(geometry, { uniforms: {} } as any);
+    mesh.isSkinnedMesh = true;
+    mesh.bindMatrix = new THREE.Matrix4();
+    mesh.bindMatrixInverse = new THREE.Matrix4();
+    mesh.skeleton = { bones: new Array(bones).fill(null), boneMatrices };
+    mesh.updateMatrixWorld(true);
+    return mesh;
+  }
+
+  it('runs the shader math and reproduces an identity pose verbatim', () => {
+    const palette = new Float32Array(16);
+    new THREE.Matrix4().toArray(palette, 0);
+
+    const report = inspectModel(model([[skinnedBatch(palette, 1)]]), null, drawnAlways);
+    const skin = report.batches[0].skin!;
+
+    expect(skin.sampleWeightSum).toBeCloseTo(1, 6);
+    expect(skin.sampleSkinned![0]).toBeCloseTo(skin.samplePosition![0], 5);
+    expect(skin.sampleSkinned![2]).toBeCloseTo(skin.samplePosition![2], 5);
+    expect(skin.zeroMatrices).toBe(0);
+  });
+
+  it('sees the collapse an all-zero palette produces', () => {
+    // A real frustum containing the mesh, so the verdict reaches the skin checks instead of
+    // stopping at "not in frustum" -- which is the whole point: a collapsed skin IS in frustum.
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+    camera.position.set(0, 0, 10);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld(true);
+    camera.updateProjectionMatrix();
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(
+      new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse),
+    );
+
+    const report = inspectModel(
+      model([[skinnedBatch(new Float32Array(16), 1)]]), frustum, drawnAlways,
+    );
+    const skin = report.batches[0].skin!;
+
+    expect(skin.zeroMatrices).toBe(1);
+    expect(skin.sampleSkinned).toEqual([0, 0, 0]);
+    expect(report.verdict).toMatch(/every bone matrix is all zeros/);
+  });
+
+  it('leaves a non-skinned batch with no skin report', () => {
+    expect(inspectModel(model([[batchMesh()]]), null, drawnAlways).batches[0].skin).toBeNull();
   });
 });
 
