@@ -244,7 +244,9 @@ function readWorld(mesh: any, skin: SkinReport | null, camera: THREE.Camera): Wo
     onScreen: false,
   };
 
-  const sphere = mesh.geometry?.boundingSphere;
+  // A SkinnedMesh carries its OWN bounding sphere (three computes it over the posed skeleton) and
+  // leaves the geometry's null, so reading only the geometry reported "n/a" for every skinned batch.
+  const sphere = mesh.boundingSphere ?? mesh.geometry?.boundingSphere;
   if (sphere) {
     _sphere.copy(sphere).applyMatrix4(matrixWorld);
     report.sphereCentre = [_sphere.center.x, _sphere.center.y, _sphere.center.z];
@@ -550,6 +552,27 @@ export function verdictFor(
 }
 
 /**
+ * Every batch mesh under an M2 root, in submesh order.
+ *
+ * Walks `root.submeshes` rather than `traverse`, so the bounding hull, the skeleton helper and any
+ * other non-batch mesh hanging off the model cannot be mistaken for drawable geometry.
+ */
+export function batchMeshes(root: any): any[] {
+  const submeshes: any[] = Array.isArray(root?.submeshes) ? root.submeshes : [];
+  const out: any[] = [];
+
+  for (const submesh of submeshes) {
+    for (const mesh of submesh?.children ?? []) {
+      if (mesh?.isMesh === true) {
+        out.push(mesh);
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
  * Stateful half: stamps each batch mesh as it is drawn.
  *
  * Uses `onAfterRender`, which nothing else in the M2 pipeline sets -- `onBeforeRender` already
@@ -566,26 +589,80 @@ export class ModelProbe {
 
   private root: any = null;
 
+  /**
+   * Swap every batch's material for a flat unlit colour that ignores depth.
+   *
+   * A BISECTION, not a hypothesis. Every reading so far says the body is drawn, skinned correctly,
+   * and projected to the centre of the screen -- so the pixels are either produced and then lost, or
+   * the M2 fragment shader is emitting nothing usable. This separates those two: geometry, skinning,
+   * placement, draw order and the render target are all shared with the real material, and only the
+   * shading is replaced.
+   *
+   * Magenta appears  -> everything up to shading is sound; the fault is in the M2 combiner output.
+   * Nothing appears  -> the draw is lost outside the material entirely (viewport, scissor, stencil,
+   *                     or a render target that never reaches the canvas).
+   */
+  flatColor = false;
+
+  private overridden = new Map<any, any>();
+
+  private flatMaterial: THREE.MeshBasicMaterial | null = null;
+
+  private material(): THREE.MeshBasicMaterial {
+    if (!this.flatMaterial) {
+      this.flatMaterial = new THREE.MeshBasicMaterial({
+        color: 0xff00ff,
+        // Drawn on top of everything, so an occluder cannot be mistaken for a missing body.
+        depthTest: false,
+        depthWrite: false,
+        fog: false,
+        side: THREE.DoubleSide,
+      });
+    }
+    return this.flatMaterial;
+  }
+
+  /** Install or lift the flat-colour override to match `flatColor`. Idempotent. */
+  private syncOverride(root: any): void {
+    if (this.flatColor) {
+      for (const mesh of batchMeshes(root)) {
+        if (!this.overridden.has(mesh)) {
+          this.overridden.set(mesh, mesh.material);
+          mesh.material = this.material();
+        }
+      }
+      return;
+    }
+
+    for (const [mesh, original] of this.overridden) {
+      mesh.material = original;
+    }
+    this.overridden.clear();
+  }
+
   tick(root: any): void {
     this.frame += 1;
 
     if (!this.enabled) {
+      // Still lift a live override, or unchecking the section would leave the body magenta.
+      if (this.overridden.size > 0) {
+        this.flatColor = false;
+        this.syncOverride(root);
+      }
       return;
     }
 
     this.root = root;
-    const submeshes: any[] = Array.isArray(root?.submeshes) ? root.submeshes : [];
+    this.syncOverride(root);
 
-    for (const submesh of submeshes) {
-      for (const mesh of submesh?.children ?? []) {
-        if (mesh?.isMesh !== true || this.stamped.has(mesh)) {
-          continue;
-        }
-        this.stamped.add(mesh);
-        mesh.onAfterRender = () => {
-          mesh.userData.probeFrame = this.frame;
-        };
+    for (const mesh of batchMeshes(root)) {
+      if (this.stamped.has(mesh)) {
+        continue;
       }
+      this.stamped.add(mesh);
+      mesh.onAfterRender = () => {
+        mesh.userData.probeFrame = this.frame;
+      };
     }
   }
 

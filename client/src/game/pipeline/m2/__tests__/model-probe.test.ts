@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 
 import {
-  BatchReport, ModelProbe, SkinReport, inspectModel, skinVerdict, verdictFor,
+  BatchReport, ModelProbe, SkinReport, batchMeshes, inspectModel, skinVerdict, verdictFor,
 } from '../model-probe';
 
 /** A batch mesh carrying an M2Material-shaped material. */
@@ -468,6 +468,114 @@ describe('inspectModel skin reading', () => {
 
   it('leaves a non-skinned batch with no skin report', () => {
     expect(inspectModel(model([[batchMesh()]]), null, drawnAlways).batches[0].skin).toBeNull();
+  });
+});
+
+describe('ModelProbe flat-colour bisection', () => {
+  it('swaps every batch material while enabled', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.flatColor = true;
+    const mesh = batchMesh();
+    const original = mesh.material;
+
+    probe.tick(model([[mesh]]));
+
+    expect(mesh.material).not.toBe(original);
+    expect((mesh.material as any).isMeshBasicMaterial).toBe(true);
+  });
+
+  it('ignores depth so an occluder cannot be mistaken for a missing body', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.flatColor = true;
+    const mesh = batchMesh();
+    probe.tick(model([[mesh]]));
+
+    expect((mesh.material as any).depthTest).toBe(false);
+    expect((mesh.material as any).depthWrite).toBe(false);
+  });
+
+  it('restores the original material when switched off', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.flatColor = true;
+    const mesh = batchMesh();
+    const root = model([[mesh]]);
+    const original = mesh.material;
+
+    probe.tick(root);
+    probe.flatColor = false;
+    probe.tick(root);
+
+    expect(mesh.material).toBe(original);
+  });
+
+  it('restores it when the whole probe is switched off, not just the override', () => {
+    // Otherwise collapsing the panel section leaves the character permanently magenta.
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.flatColor = true;
+    const mesh = batchMesh();
+    const root = model([[mesh]]);
+    const original = mesh.material;
+
+    probe.tick(root);
+    probe.enabled = false;
+    probe.tick(root);
+
+    expect(mesh.material).toBe(original);
+    expect(probe.flatColor).toBe(false);
+  });
+
+  it('does not stack overrides across frames', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.flatColor = true;
+    const mesh = batchMesh();
+    const root = model([[mesh]]);
+    const original = mesh.material;
+
+    probe.tick(root);
+    probe.tick(root);
+    probe.tick(root);
+    probe.flatColor = false;
+    probe.tick(root);
+
+    expect(mesh.material).toBe(original);
+  });
+
+  it('leaves materials alone while the override is off', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    const mesh = batchMesh();
+    const original = mesh.material;
+
+    probe.tick(model([[mesh]]));
+
+    expect(mesh.material).toBe(original);
+  });
+});
+
+describe('batchMeshes', () => {
+  it('collects batch meshes in submesh order', () => {
+    const a = batchMesh();
+    const b = batchMesh();
+    const c = batchMesh();
+
+    expect(batchMeshes(model([[a, b], [c]]))).toEqual([a, b, c]);
+  });
+
+  it('ignores non-batch children, such as the bounding hull or a bone', () => {
+    const a = batchMesh();
+    const root = model([[a]]);
+    root.submeshes[0].add(new THREE.Bone());
+
+    expect(batchMeshes(root)).toEqual([a]);
+  });
+
+  it('returns nothing for a model that has not resolved', () => {
+    expect(batchMeshes(null)).toEqual([]);
   });
 });
 
