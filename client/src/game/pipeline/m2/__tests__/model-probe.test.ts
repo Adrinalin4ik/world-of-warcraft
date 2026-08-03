@@ -4,8 +4,8 @@
 import * as THREE from 'three';
 
 import {
-  BatchReport, ModelProbe, ShadingReport, SkinReport, batchMeshes, inspectModel, shadingVerdict,
-  skinVerdict, verdictFor,
+  BatchReport, ModelProbe, ShadingReport, SkinReport, batchMeshes, inspectModel, readTexture,
+  shadingVerdict, skinVerdict, verdictFor,
 } from '../model-probe';
 
 /** A batch mesh carrying an M2Material-shaped material. */
@@ -30,6 +30,8 @@ function batchMesh(overrides: any = {}, uniforms: any = {}) {
       fogColor: { value: new THREE.Color(0x334455) },
       animatedVertexColorRGB: { value: new THREE.Vector3(1, 1, 1) },
       animatedVertexColorAlpha: { value: 1 },
+      // A bare array, exactly as `M2Material` declares it -- see `vec4Of`.
+      materialParams: { value: [1, 1, 1, 1] },
       sunParams: { value: new THREE.Vector4(0.3, 0.4, -0.8, 0) },
       sunDiffuseColor: { value: new THREE.Color(0.8, 0.8, 0.7) },
       sunAmbientColor: { value: new THREE.Color(0.3, 0.3, 0.4) },
@@ -222,6 +224,15 @@ const healthy = (overrides: Partial<BatchReport> = {}): BatchReport => ({
   blendingMode: 0,
   textureCount: 1,
   texturesReady: 1,
+  textures: [{
+    name: 'CREATURE\\ARTHAS\\ARTHAS.BLP',
+    width: 256,
+    height: 256,
+    compressed: false,
+    format: 1023,
+    mean: [120, 110, 95, 255],
+    sampled: 1024,
+  }],
   alphaKey: 0,
   fadeAlpha: 1,
   animatedTransparency: 1,
@@ -492,6 +503,116 @@ describe('inspectModel skin reading', () => {
   });
 });
 
+describe('readTexture', () => {
+  /** A DataTexture-shaped object with a flat RGBA pixel array. */
+  const dataTexture = (fill: number[], width = 4, height = 4, name = 'SKIN.BLP') => {
+    const data = new Uint8Array(width * height * fill.length);
+    for (let i = 0; i < data.length; i += fill.length) {
+      fill.forEach((v, k) => { data[i + k] = v; });
+    }
+    return { name, format: 1023, image: { data, width, height } };
+  };
+
+  it('names the texture from the loader-stamped path', () => {
+    expect(readTexture(dataTexture([10, 20, 30, 255])).name).toBe('SKIN.BLP');
+  });
+
+  it('averages a flat RGBA surface exactly', () => {
+    const report = readTexture(dataTexture([10, 20, 30, 255]));
+
+    expect(report.mean).toEqual([10, 20, 30, 255]);
+    expect(report.sampled).toBeGreaterThan(0);
+  });
+
+  it('measures a black surface as black', () => {
+    // The reading that separates a correct skin from one that decoded to nothing -- which
+    // `texturesReady` cannot do, since both have image data.
+    expect(readTexture(dataTexture([0, 0, 0, 255])).mean).toEqual([0, 0, 0, 255]);
+  });
+
+  it('derives the component count rather than assuming four', () => {
+    // A 3-channel surface read as 4-channel slides the sample across channels and reports a colour
+    // nothing on screen has.
+    expect(readTexture(dataTexture([60, 70, 80])).mean).toEqual([60, 70, 80, 255]);
+  });
+
+  it('reports a compressed texture without inventing a mean', () => {
+    const report = readTexture({
+      name: 'DXT.BLP', isCompressedTexture: true, image: { width: 128, height: 128 },
+    });
+
+    expect(report.compressed).toBe(true);
+    expect(report.mean).toBeNull();
+    expect(report.width).toBe(128);
+  });
+
+  it('reports no mean for a texture with no pixel data', () => {
+    const report = readTexture({ name: 'placeholder', image: null });
+
+    expect(report.mean).toBeNull();
+    expect(report.sampled).toBe(0);
+  });
+
+  it('strides a large surface rather than walking every pixel', () => {
+    const report = readTexture(dataTexture([5, 5, 5, 255], 512, 512));
+
+    expect(report.sampled).toBeLessThanOrEqual(1100);
+    expect(report.mean).toEqual([5, 5, 5, 255]);
+  });
+});
+
+describe('verdictFor texture measurement', () => {
+  const blackTex = () => [{
+    name: 'ARTHAS.BLP',
+    width: 256,
+    height: 256,
+    compressed: false,
+    format: 1023,
+    mean: [0, 0, 0, 255] as [number, number, number, number],
+    sampled: 1024,
+  }];
+
+  it('reports a measured-black skin, and names the file', () => {
+    const verdict = verdictFor(null, 1, [healthy({ textures: blackTex() })]);
+
+    expect(verdict).toMatch(/every sampled texel is black/);
+    expect(verdict).toMatch(/ARTHAS\.BLP/);
+  });
+
+  it('puts the black texel ahead of the shading factors', () => {
+    const verdict = verdictFor(null, 1, [healthy({
+      textures: blackTex(),
+      shading: healthyShading({ vertexColorRGB: [0, 0, 0] }),
+    })]);
+
+    expect(verdict).toMatch(/every sampled texel is black/);
+  });
+
+  it('says nothing when the skin measures bright', () => {
+    expect(verdictFor(null, 1, [healthy()])).toMatch(/plausible/);
+  });
+
+  it('does not call an unmeasurable compressed texture black', () => {
+    const verdict = verdictFor(null, 1, [healthy({
+      textures: [{
+        name: 'DXT.BLP', width: 256, height: 256, compressed: true, format: 33779,
+        mean: null, sampled: 0,
+      }],
+    })]);
+
+    expect(verdict).toMatch(/plausible/);
+  });
+
+  it('does not blame a black texel on only ONE batch', () => {
+    const verdict = verdictFor(null, 1, [
+      healthy(),
+      healthy({ batch: 1, textures: blackTex() }),
+    ]);
+
+    expect(verdict).toMatch(/plausible/);
+  });
+});
+
 describe('shadingVerdict', () => {
   it('passes healthy albedo and lighting', () => {
     expect(shadingVerdict([healthyShading()])).toBeNull();
@@ -547,6 +668,14 @@ describe('shadingVerdict', () => {
 });
 
 describe('inspectModel shading reading', () => {
+  it('reads a bare-array vec4 uniform as well as a Vector4', () => {
+    // `M2Material` declares materialParams as [1,1,1,1]. Reading only `.x` reported it absent, which
+    // read as "the lighting mix is unset" when it is in fact 1.
+    const shading = inspectModel(model([[batchMesh()]]), null, drawnAlways).batches[0].shading!;
+
+    expect(shading.materialParams).toEqual([1, 1, 1, 1]);
+  });
+
   it('reads the albedo and sun uniforms off the material', () => {
     const shading = inspectModel(model([[batchMesh()]]), null, drawnAlways).batches[0].shading!;
 

@@ -52,6 +52,19 @@ function BatchRow({ b }: { b: BatchReport }) {
           &nbsp;&nbsp;v0 {vec(b.skin.samplePosition)} &rarr; {vec(b.skin.sampleSkinned)}
         </>
       ) }
+      { b.textures.map((t, i) => (
+        <React.Fragment key={i}>
+          <br />
+          &nbsp;&nbsp;tex{i} {t.name ? t.name.split('\\').pop() : '?'}
+          {' '}{t.width ?? '?'}x{t.height ?? '?'}
+          {t.compressed ? ' compressed' : ''}
+          <br />
+          &nbsp;&nbsp;&nbsp;&nbsp;mean {t.mean
+            ? t.mean.map((v) => v.toFixed(1)).join(', ')
+            : (t.compressed ? 'n/a (compressed)' : 'n/a')}
+          {' over '}{t.sampled}
+        </React.Fragment>
+      )) }
       { b.shading && (
         <>
           <br />

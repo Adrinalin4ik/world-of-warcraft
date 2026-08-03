@@ -79,6 +79,28 @@ export interface ShadingReport {
   interiorProbe: number | null;
 }
 
+/**
+ * One bound texture, named and MEASURED.
+ *
+ * `texturesReady` only ever established that a slot had decoded image data. It cannot distinguish a
+ * correct skin from a black one, and `Combiners_Opaque` writes rgb at blending mode 0 regardless of
+ * alpha -- so a black texel is a black body, fully drawn and fully opaque, which on a dark scene is
+ * indistinguishable from an absent one. The mean is what separates those.
+ */
+export interface TextureReport {
+  /** `TextureLoader` stamps the BLP path onto `name`/`sourceFile`, so this names the actual file. */
+  name: string | null;
+  width: number | null;
+  height: number | null;
+  /** DXT and friends: no flat pixel array to average, so `mean` stays null. */
+  compressed: boolean;
+  format: number | null;
+  /** Mean RGBA over a strided sample, 0..255. Null for a compressed or dataless texture. */
+  mean: [number, number, number, number] | null;
+  /** Sampled pixel count, so a mean of zero over zero pixels cannot be mistaken for black. */
+  sampled: number;
+}
+
 export interface BatchReport {
   submesh: number;
   batch: number;
@@ -97,6 +119,7 @@ export interface BatchReport {
   textureCount: number;
   /** How many of those textures actually have decoded image data. */
   texturesReady: number;
+  textures: TextureReport[];
   alphaKey: number | null;
   fadeAlpha: number | null;
   animatedTransparency: number | null;
@@ -314,10 +337,85 @@ function readWorld(mesh: any, skin: SkinReport | null, camera: THREE.Camera): Wo
 const vec3Of = (v: any): [number, number, number] | null =>
   (v && typeof v.x === 'number' ? [v.x, v.y, v.z] : null);
 
-const vec4Of = (v: any): [number, number, number, number] | null =>
-  (v && typeof v.x === 'number' ? [v.x, v.y, v.z, v.w] : null);
+/**
+ * A vec4 uniform, whether it is a `THREE.Vector4` or a plain array.
+ *
+ * `M2Material` declares `materialParams` as `[1, 1, 1, 1]` -- a bare array, unlike every other vec4
+ * on the material. Reading only `.x` reported it as absent, which read as "the shader's lighting mix
+ * is unset" when it is in fact set to 1.
+ */
+const vec4Of = (v: any): [number, number, number, number] | null => {
+  if (v && typeof v.x === 'number') {
+    return [v.x, v.y, v.z, v.w];
+  }
+  if (Array.isArray(v) && v.length >= 4) {
+    return [v[0], v[1], v[2], v[3]];
+  }
+  return null;
+};
 
 const hexOf = (c: any): string | null => (c && c.getHexString ? `#${c.getHexString()}` : null);
+
+/** How many pixels the mean is taken over. Enough to be representative, cheap enough for 4 Hz. */
+const TEXTURE_SAMPLE_LIMIT = 1024;
+
+/**
+ * Name and measure one bound texture.
+ *
+ * The mean is taken over a STRIDED sample rather than the whole surface: a character skin is a
+ * megabyte or two, the panel repaints four times a second, and a thousand pixels spread across the
+ * image answers "is this black" exactly as well as all of them.
+ */
+export function readTexture(texture: any): TextureReport {
+  const image = texture?.image;
+
+  const report: TextureReport = {
+    name: texture?.name ?? texture?.sourceFile ?? null,
+    width: image?.width ?? null,
+    height: image?.height ?? null,
+    compressed: texture?.isCompressedTexture === true,
+    format: texture?.format ?? null,
+    mean: null,
+    sampled: 0,
+  };
+
+  const data: ArrayLike<number> | undefined = image?.data;
+  if (report.compressed || !data || data.length === 0) {
+    return report;
+  }
+
+  const pixels = (report.width ?? 0) * (report.height ?? 0);
+  if (pixels <= 0) {
+    return report;
+  }
+
+  // Derived, not assumed: an RGB BLP gives 3 and an RGBA one gives 4, and guessing 4 for a 3-channel
+  // surface would slide the sample across channels and report a colour nothing on screen has.
+  const components = Math.max(1, Math.round(data.length / pixels));
+  const stride = Math.max(1, Math.floor(pixels / TEXTURE_SAMPLE_LIMIT));
+
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let a = 0;
+  let n = 0;
+
+  for (let p = 0; p < pixels; p += stride) {
+    const i = p * components;
+    r += data[i] ?? 0;
+    g += data[i + 1] ?? 0;
+    b += data[i + 2] ?? 0;
+    a += components >= 4 ? (data[i + 3] ?? 0) : 255;
+    n += 1;
+  }
+
+  if (n > 0) {
+    report.mean = [r / n, g / n, b / n, a / n];
+    report.sampled = n;
+  }
+
+  return report;
+}
 
 /** The albedo and lighting factors, straight off the uniforms the combiners actually read. */
 function readShading(material: any): ShadingReport | null {
@@ -367,6 +465,7 @@ function readMaterial(material: any, report: BatchReport): void {
     report.texturesReady = textures.filter(
       (t: any) => t && t.image && (t.image.width === undefined || t.image.width > 0),
     ).length;
+    report.textures = textures.filter(Boolean).map(readTexture);
   }
 
   const fog = uniforms.fogParams?.value;
@@ -445,6 +544,7 @@ export function inspectModel(
         blendingMode: null,
         textureCount: 0,
         texturesReady: 0,
+        textures: [],
         alphaKey: null,
         fadeAlpha: null,
         animatedTransparency: null,
@@ -637,6 +737,22 @@ export function verdictFor(
   }
   if (drawn.every((b) => b.textureCount === 0 || b.texturesReady === 0)) {
     return 'drawn, but no texture has image data -- sampling nothing, so alpha may key it away';
+  }
+
+  // A measured-black texel, ahead of the shading factors: `Combiners_Opaque` writes rgb at blending
+  // mode 0 whatever the alpha, so a black skin is a black body, and `texturesReady` cannot see it.
+  const measured = drawn.filter((b) => b.textures.some((t) => t.mean !== null));
+  if (measured.length === drawn.length && measured.length > 0 && measured.every(
+    (b) => b.textures.every((t) => t.mean === null || Math.max(t.mean[0], t.mean[1], t.mean[2]) < 2),
+  )) {
+    const name = measured[0].textures.find((t) => t.mean !== null)?.name ?? 'the bound texture';
+    return `drawn, but every sampled texel is black -- \`${name}\` decoded to a black surface`;
+  }
+
+  if (measured.length === drawn.length && measured.length > 0 && measured.every(
+    (b) => b.textures.every((t) => t.mean === null || t.mean[3] < 2),
+  ) && drawn.every((b) => b.blendingMode !== 0)) {
+    return 'drawn, but every sampled texel has zero alpha, and no batch writes at blending mode 0';
   }
 
   // The albedo product, ahead of the alpha terms: a body multiplied to black is fully opaque and
