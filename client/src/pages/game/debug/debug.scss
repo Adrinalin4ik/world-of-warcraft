@@ -77,6 +77,12 @@
     font-weight: bold;
   }
 
+  // A shader that did not compile invalidates every other field, so it reads as an error.
+  &-error {
+    color: #ff8080;
+    white-space: pre-wrap;
+  }
+
   p {
     word-break: break-word;
   }

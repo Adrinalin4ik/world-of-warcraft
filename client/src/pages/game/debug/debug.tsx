@@ -169,7 +169,11 @@ class DebugPanel extends React.Component<IProp> {
           { this.playerStats() }
         </CollapsibleSection>
         <CollapsibleSection title="Player model" storageKey="player-model" defaultCollapsed={true}>
-          <ModelReadout probe={ modelProbe } camera={ this.props.game.camera } />
+          <ModelReadout
+            probe={ modelProbe }
+            camera={ this.props.game.camera }
+            renderer={ this.props.renderer }
+          />
         </CollapsibleSection>
         <CollapsibleSection title="Collisions" storageKey="collisions" defaultCollapsed={true}>
           <CollisionControls view={ this.props.game.world.collisionDebug } />

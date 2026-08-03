@@ -137,6 +137,12 @@ export interface BatchReport {
   shading: ShadingReport | null;
 }
 
+/** One shader program three failed to build, with whatever it recorded about why. */
+export interface ProgramError {
+  name: string;
+  log: string;
+}
+
 export interface ModelReport {
   hasModel: boolean;
   path: string | null;
@@ -144,6 +150,17 @@ export interface ModelReport {
   hiddenAncestor: string | null;
   submeshes: number;
   batches: BatchReport[];
+  /**
+   * Programs the renderer failed to build, ACROSS THE WHOLE SCENE.
+   *
+   * Not per batch, because a failed compile is not visible from the material at all -- and this is
+   * the blind spot that let the readout hand out a clean bill of health. `onAfterRender` is called by
+   * the renderer whether or not the program linked, so `drawn` reads yes for a draw that emits
+   * nothing; and every uniform the probe reports lives in JS, so all of them read healthy while none
+   * of them ever reaches the GPU. A body that renders correctly under two substitute materials and
+   * not under its own is exactly this shape.
+   */
+  shaderErrors: ProgramError[];
   /** A one-line reading of the above: what to look at next. */
   verdict: string;
 }
@@ -417,6 +434,42 @@ export function readTexture(texture: any): TextureReport {
   return report;
 }
 
+/**
+ * Programs the renderer failed to build.
+ *
+ * `renderer.info.programs` is three's own live list, and it stamps `diagnostics` onto any program
+ * whose compile or link failed while `renderer.debug.checkShaderErrors` is on (the default). Reading
+ * it turns "go and look for red text in the console" into a field.
+ */
+export function readProgramErrors(renderer: any): ProgramError[] {
+  const programs = renderer?.info?.programs;
+  if (!Array.isArray(programs)) {
+    return [];
+  }
+
+  const errors: ProgramError[] = [];
+
+  for (const program of programs) {
+    const diagnostics = program?.diagnostics;
+    if (!diagnostics || diagnostics.runnable !== false) {
+      continue;
+    }
+
+    const parts = [
+      diagnostics.programLog,
+      diagnostics.vertexShader?.log,
+      diagnostics.fragmentShader?.log,
+    ].filter((part) => part && String(part).trim().length > 0);
+
+    errors.push({
+      name: program.name ?? diagnostics.material?.type ?? 'unnamed program',
+      log: parts.join(' | ') || 'link failed with no log',
+    });
+  }
+
+  return errors;
+}
+
 /** The albedo and lighting factors, straight off the uniforms the combiners actually read. */
 function readShading(material: any): ShadingReport | null {
   const uniforms = material?.uniforms;
@@ -498,7 +551,10 @@ export function inspectModel(
    * down to. The probe passes the stashed original instead.
    */
   materialOf: (mesh: any) => any = (mesh) => mesh.material,
+  /** The renderer, for its program list. Omit and shader errors go unreported, not unnoticed. */
+  renderer: any = null,
 ): ModelReport {
+  const shaderErrors = readProgramErrors(renderer);
   const frustum = camera
     ? new THREE.Frustum().setFromProjectionMatrix(
       new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse),
@@ -507,8 +563,10 @@ export function inspectModel(
 
   if (!root) {
     return {
-      hasModel: false, path: null, hiddenAncestor: null, submeshes: 0, batches: [],
-      verdict: 'no model resolved -- display id never produced an M2',
+      hasModel: false, path: null, hiddenAncestor: null, submeshes: 0, batches: [], shaderErrors,
+      verdict: shaderErrors.length > 0
+        ? programVerdict(shaderErrors)
+        : 'no model resolved -- display id never produced an M2',
     };
   }
 
@@ -588,7 +646,8 @@ export function inspectModel(
     hiddenAncestor,
     submeshes: submeshes.length,
     batches,
-    verdict: verdictFor(hiddenAncestor, submeshes.length, batches),
+    shaderErrors,
+    verdict: verdictFor(hiddenAncestor, submeshes.length, batches, shaderErrors),
   };
 }
 
@@ -673,9 +732,26 @@ export function shadingVerdict(shadings: ShadingReport[]): string | null {
  * issued a draw would send the search to the wrong end of the pipeline, which is the mistake this
  * whole module exists to stop.
  */
+/** The one-liner for a failed compile, first line of the log only -- the rest is in the readout. */
+export function programVerdict(errors: ProgramError[]): string {
+  const first = errors[0].log.split('\n').find((line) => line.trim().length > 0) ?? '';
+
+  return `${errors.length} shader program(s) failed to build. A failed program still issues its `
+    + `draw, so \`drawn\` reads yes and every JS-side uniform reads healthy: ${first.trim()}`;
+}
+
 export function verdictFor(
-  hiddenAncestor: string | null, submeshes: number, batches: BatchReport[],
+  hiddenAncestor: string | null,
+  submeshes: number,
+  batches: BatchReport[],
+  shaderErrors: ProgramError[] = [],
 ): string {
+  // FIRST, ahead of everything: a program that did not build makes every other field in this report
+  // meaningless. The uniforms all live in JS and read fine while none of them reaches the GPU.
+  if (shaderErrors.length > 0) {
+    return programVerdict(shaderErrors);
+  }
+
   if (hiddenAncestor) {
     return `hidden: \`${hiddenAncestor}\`.visible is false -- nothing below it draws`;
   }
@@ -975,8 +1051,8 @@ export class ModelProbe {
     return typeof stamp === 'number' && this.frame - stamp <= 1;
   };
 
-  read(camera: THREE.Camera | null): ModelReport {
-    return inspectModel(this.root, camera, this.wasDrawn, this.originalMaterial);
+  read(camera: THREE.Camera | null, renderer: any = null): ModelReport {
+    return inspectModel(this.root, camera, this.wasDrawn, this.originalMaterial, renderer);
   }
 
   /** The real M2 material, even while the flat-colour override is installed over it. */

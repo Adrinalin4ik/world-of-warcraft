@@ -4,8 +4,8 @@
 import * as THREE from 'three';
 
 import {
-  BatchReport, ModelProbe, ShadingReport, SkinReport, batchMeshes, inspectModel, readTexture,
-  shadingVerdict, skinVerdict, verdictFor,
+  BatchReport, ModelProbe, ShadingReport, SkinReport, batchMeshes, inspectModel, readProgramErrors,
+  readTexture, shadingVerdict, skinVerdict, verdictFor,
 } from '../model-probe';
 
 /** A batch mesh carrying an M2Material-shaped material. */
@@ -500,6 +500,74 @@ describe('inspectModel skin reading', () => {
 
   it('leaves a non-skinned batch with no skin report', () => {
     expect(inspectModel(model([[batchMesh()]]), null, drawnAlways).batches[0].skin).toBeNull();
+  });
+});
+
+describe('readProgramErrors', () => {
+  const rendererWith = (programs: any[]) => ({ info: { programs } });
+
+  it('reports nothing for a renderer whose programs all built', () => {
+    expect(readProgramErrors(rendererWith([{ name: 'ok' }, { name: 'fine' }]))).toEqual([]);
+  });
+
+  it('reports a program three marked not runnable', () => {
+    const errors = readProgramErrors(rendererWith([{
+      name: 'M2Material',
+      diagnostics: {
+        runnable: false,
+        programLog: 'link failed',
+        fragmentShader: { log: "ERROR: 'materialParams' : undeclared identifier" },
+      },
+    }]));
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].name).toBe('M2Material');
+    expect(errors[0].log).toMatch(/undeclared identifier/);
+  });
+
+  it('ignores diagnostics that are present but runnable', () => {
+    // three attaches diagnostics for warnings too; only `runnable: false` means nothing draws.
+    expect(readProgramErrors(rendererWith([{
+      name: 'warned', diagnostics: { runnable: true, programLog: 'just a warning' },
+    }]))).toEqual([]);
+  });
+
+  it('never returns an empty log, so a silent link failure is still visible', () => {
+    const errors = readProgramErrors(rendererWith([{
+      name: 'silent', diagnostics: { runnable: false },
+    }]));
+
+    expect(errors[0].log).toMatch(/link failed/);
+  });
+
+  it('survives a renderer with no info at all', () => {
+    expect(readProgramErrors(null)).toEqual([]);
+    expect(readProgramErrors({})).toEqual([]);
+  });
+});
+
+describe('verdictFor shader errors', () => {
+  const error = [{ name: 'M2Material', log: "ERROR: 'foo' : undeclared identifier" }];
+
+  it('outranks every other verdict, including a healthy-looking batch', () => {
+    // The blind spot this closes: a failed program still issues its draw, so `drawn` reads yes, and
+    // every uniform the probe reports lives in JS and reads healthy while none reaches the GPU.
+    const verdict = verdictFor(null, 1, [healthy()], error);
+
+    expect(verdict).toMatch(/failed to build/);
+    expect(verdict).toMatch(/undeclared identifier/);
+  });
+
+  it('outranks even a hidden ancestor', () => {
+    expect(verdictFor('UnitView', 1, [healthy()], error)).toMatch(/failed to build/);
+  });
+
+  it('explains why `drawn` cannot be trusted in that state', () => {
+    expect(verdictFor(null, 1, [healthy()], error)).toMatch(/still issues its draw/);
+  });
+
+  it('is absent when no program failed', () => {
+    expect(verdictFor(null, 1, [healthy()], [])).toMatch(/plausible/);
   });
 });
 

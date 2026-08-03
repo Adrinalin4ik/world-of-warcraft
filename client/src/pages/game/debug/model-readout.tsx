@@ -14,12 +14,13 @@ export type ModelReadoutTarget = {
   texturedBasic: boolean;
   /** ...and, separately, whether the override ignores depth. */
   ignoreDepth: boolean;
-  read(camera: any): ModelReport;
+  read(camera: any, renderer: any): ModelReport;
 };
 
 type Props = {
   probe: ModelReadoutTarget | null;
   camera: any;
+  renderer: any;
 };
 
 const yn = (v: boolean) => (v ? 'yes' : 'NO');
@@ -142,7 +143,7 @@ export default class ModelReadout extends React.Component<Props> {
       );
     }
 
-    const report = probe.read(this.props.camera);
+    const report = probe.read(this.props.camera, this.props.renderer);
 
     return (
       <div className="model_readout">
@@ -192,6 +193,17 @@ export default class ModelReadout extends React.Component<Props> {
         </p>
 
         <p className="model_readout-verdict">{ report.verdict }</p>
+
+        { report.shaderErrors.length > 0 && (
+          <>
+            <div className="divider"></div>
+            { report.shaderErrors.map((e, i) => (
+              <p key={i} className="model_readout-error">
+                <strong>{e.name}</strong><br />{e.log}
+              </p>
+            )) }
+          </>
+        ) }
 
         <div className="divider"></div>
 
