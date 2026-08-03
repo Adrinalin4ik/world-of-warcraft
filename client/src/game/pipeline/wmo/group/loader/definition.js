@@ -85,7 +85,10 @@ class WMOGroupDefinition {
     this.fixVertexColors(vertexCount, rootHeader, groupData.MOGP, groupData.MOBA, groupData.MOCV, groupData.exterior);
 
     const colors = attributes.colors = new Float32Array(vertexCount * 4);
-    this.assignVertexColors(vertexCount, rootHeader, groupData.MOGP, groupData.MOCV, colors);
+    // `interior` lives on the OUTER chunked object too, for exactly the same reason `exterior` does
+    // (group.js reads `this.flags`, which MOGP does not expose). Passing `groupData.MOGP` here made
+    // the ambient test read `undefined`, so the root ambient was NEVER added to any interior group.
+    this.assignVertexColors(vertexCount, rootHeader, groupData.interior, groupData.MOCV, colors);
   }
 
   assignVertexPositions(vertexCount, movt, attribute) {
@@ -129,7 +132,20 @@ class WMOGroupDefinition {
     }
   }
 
-  assignVertexColors(vertexCount, rootHeader, mogp, mocv, attribute) {
+  /**
+   * MOCV vertex colours, plus the root's ambient for INTERIOR groups.
+   *
+   * The ambient is the only ADDITIVE term a WMO surface gets. MOCV is baked lighting, and a room's
+   * unlit corners are genuinely near-black in the file; the reference lifts them with the root's
+   * `ambientColor`. Without it those faces stay at zero, and no brightness control can rescue them,
+   * because every brightness knob in this renderer is a MULTIPLY -- which is exactly how the defect
+   * showed up in game: turning WMO brightness up lit only the parts that already had colour.
+   *
+   * `interior` is passed in rather than read off `mogp`. It is a getter on the outer chunked object
+   * (group.js, reading `this.flags`), and MOGP exposes only `flags` -- so `mogp.interior` was
+   * `undefined` and this branch never ran for any group in the game.
+   */
+  assignVertexColors(vertexCount, rootHeader, interior, mocv, attribute) {
     if (!mocv) {
       // Assign default vertex color.
       for (let index = 0; index < vertexCount; ++index) {
@@ -147,7 +163,7 @@ class WMOGroupDefinition {
     const mod = { r: 0, g: 0, b: 0, a: 0 };
 
     // For interior groups, add root ambient color to vertex colors.
-    if (mogp.interior) {
+    if (interior) {
       mod.r = rootHeader.ambientColor.r / 2.0;
       mod.g = rootHeader.ambientColor.g / 2.0;
       mod.b = rootHeader.ambientColor.b / 2.0;

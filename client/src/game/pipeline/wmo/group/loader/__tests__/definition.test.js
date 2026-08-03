@@ -54,3 +54,71 @@ describe('WMOGroupDefinition#fixVertexColors outdoor branch (root flag 0x08)', (
     }
   });
 });
+
+describe('WMOGroupDefinition#assignVertexColors ambient branch', () => {
+  // Same class of defect the exterior tests above guard, on the other flag: `interior` is a getter on
+  // the parser's OUTER chunked object (group.js reads `this.flags`, which MOGP does not expose), so
+  // handing this method `groupData.MOGP` made the test read `undefined` and the root ambient was never
+  // added to any interior group in the game. The ambient is the only ADDITIVE term a WMO surface gets,
+  // and every brightness control in this renderer is a multiply -- so the faces stayed black and
+  // turning brightness up lit only what already had colour.
+  const ROOT = { ambientColor: { r: 80, g: 90, b: 100 } };
+
+  const makeMocv = (count, value = 12) => ({
+    colors: Array.from({ length: count }, () => ({ r: value, g: value, b: value, a: 255 })),
+  });
+
+  function assign(interior, mocv, count = 2) {
+    const definition = Object.create(WMOGroupDefinition.prototype);
+    const attribute = new Float32Array(count * 4);
+
+    definition.assignVertexColors(count, ROOT, interior, mocv, attribute);
+
+    return attribute;
+  }
+
+  it('adds half the root ambient for an interior group', () => {
+    const colors = assign(true, makeMocv(2));
+
+    // (12 + 80 / 2) / 255
+    expect(colors[0]).toBeCloseTo(52 / 255, 6);
+    expect(colors[1]).toBeCloseTo(57 / 255, 6);
+    expect(colors[2]).toBeCloseTo(62 / 255, 6);
+    expect(colors[3]).toBeCloseTo(1, 6);
+  });
+
+  it('adds nothing for an exterior group', () => {
+    const colors = assign(false, makeMocv(2));
+
+    expect(colors[0]).toBeCloseTo(12 / 255, 6);
+    expect(colors[1]).toBeCloseTo(12 / 255, 6);
+  });
+
+  it('lifts a black interior face off zero -- the whole point', () => {
+    // A multiply cannot rescue zero, which is why this is the field that matters.
+    const colors = assign(true, makeMocv(1, 0), 1);
+
+    expect(colors[0]).toBeGreaterThan(0);
+  });
+
+  it('leaves a black exterior face at zero', () => {
+    const colors = assign(false, makeMocv(1, 0), 1);
+
+    expect(colors[0]).toBe(0);
+  });
+
+  it('would read a MOGP sub-struct as not-interior, which is the bug it replaced', () => {
+    // Passing `groupData.MOGP` supplies an object with `flags` and no `interior`, so this is exactly
+    // what the old call site produced. Pinned so the parameter cannot quietly become an object again.
+    const colors = assign({ flags: 0x2000 }.interior, makeMocv(1, 0), 1);
+
+    expect(colors[0]).toBe(0);
+  });
+
+  it('falls back to mid grey when the group carries no MOCV at all', () => {
+    const colors = assign(true, null);
+
+    expect(colors[0]).toBeCloseTo(127 / 255, 6);
+    expect(colors[3]).toBeCloseTo(1, 6);
+  });
+});
