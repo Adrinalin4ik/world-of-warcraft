@@ -9,6 +9,7 @@ import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
 import { collisionDebugView } from "../collision/debug-view";
 import M2Blueprint from "../pipeline/m2/blueprint";
+import { modelProbe } from "../pipeline/m2/model-probe";
 import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
 import WorldMap from "./map";
@@ -343,6 +344,10 @@ export default class World extends EventEmitter {
     // Centred on the player rather than the camera: the overlay exists to show what the MOVEMENT
     // cast sees, and the camera can be thirty yards away from that.
     this.collisionDebug.update(this.player.position);
+
+    // Ticked every frame whether or not it is enabled: the frame counter is what "was this batch
+    // drawn" is measured against, and it has to keep advancing for that answer to mean anything.
+    modelProbe.tick(this.player.model);
 
     // LAST: everything above may have moved something. See the constructor for why the renderer no
     // longer does this itself.

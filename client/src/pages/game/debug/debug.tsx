@@ -3,7 +3,9 @@ import * as THREE from 'three';
 import { GameHandler } from '../../../network/game/handler';
 import CollapsibleSection from './collapsible-section';
 import CollisionControls from './collision-controls';
+import ModelReadout from './model-readout';
 import MoveReadout from './move-readout';
+import { modelProbe } from '../../../game/pipeline/m2/model-probe';
 import LightingControls from './lighting-controls';
 import LightingReadouts from './lighting-readouts';
 import './debug.scss';
@@ -165,6 +167,9 @@ class DebugPanel extends React.Component<IProp> {
         </CollapsibleSection>
         <CollapsibleSection title="Player" storageKey="player" defaultCollapsed={true}>
           { this.playerStats() }
+        </CollapsibleSection>
+        <CollapsibleSection title="Player model" storageKey="player-model" defaultCollapsed={true}>
+          <ModelReadout probe={ modelProbe } camera={ this.props.game.camera } />
         </CollapsibleSection>
         <CollapsibleSection title="Collisions" storageKey="collisions" defaultCollapsed={true}>
           <CollisionControls view={ this.props.game.world.collisionDebug } />

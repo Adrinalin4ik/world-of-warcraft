@@ -69,6 +69,19 @@
   padding-left: 2px;
 }
 
+// The Player model section. Its verdict line is the point of the whole readout, so it is the one
+// thing in the panel allowed to shout.
+.model_readout {
+  &-verdict {
+    color: #ffe066;
+    font-weight: bold;
+  }
+
+  p {
+    word-break: break-word;
+  }
+}
+
 // The Collisions section. Its controls sit on the panel's dark card, so the browser's default
 // light form styling would be invisible against it.
 .collision_controls {
