@@ -834,6 +834,19 @@ export class ModelProbe {
    */
   flatColor = false;
 
+  /**
+   * Whether the flat override also ignores depth. SEPARATE from `flatColor` on purpose.
+   *
+   * The first run of this bisection changed both at once -- flat colour AND no depth test -- so when
+   * magenta appeared it could not distinguish "the combiner emits nothing" from "the body is drawn
+   * and then occluded". Two variables, one observation, no conclusion. Flat colour WITH the depth
+   * test is the experiment that separates them:
+   *
+   *   magenta with depth on  -> the draw survives depth; the fault is the combiner's own output
+   *   magenta only with it off -> the pixels lose the depth test to something drawn nearer
+   */
+  ignoreDepth = false;
+
   private overridden = new Map<any, any>();
 
   private flatMaterial: THREE.MeshBasicMaterial | null = null;
@@ -842,24 +855,27 @@ export class ModelProbe {
     if (!this.flatMaterial) {
       this.flatMaterial = new THREE.MeshBasicMaterial({
         color: 0xff00ff,
-        // Drawn on top of everything, so an occluder cannot be mistaken for a missing body.
-        depthTest: false,
-        depthWrite: false,
         fog: false,
         side: THREE.DoubleSide,
       });
     }
+
+    // Kept in sync every frame rather than at construction, so the toggle takes effect live.
+    this.flatMaterial.depthTest = !this.ignoreDepth;
+    this.flatMaterial.depthWrite = !this.ignoreDepth;
+
     return this.flatMaterial;
   }
 
   /** Install or lift the flat-colour override to match `flatColor`. Idempotent. */
   private syncOverride(root: any): void {
     if (this.flatColor) {
+      const flat = this.material();
       for (const mesh of batchMeshes(root)) {
         if (!this.overridden.has(mesh)) {
           this.overridden.set(mesh, mesh.material);
-          mesh.material = this.material();
         }
+        mesh.material = flat;
       }
       return;
     }

@@ -8,8 +8,10 @@ import { BatchReport, ModelReport } from '../../../game/pipeline/m2/model-probe'
  */
 export type ModelReadoutTarget = {
   enabled: boolean;
-  /** Swap every batch to flat magenta, depth test off -- the bisection, see `ModelProbe`. */
+  /** Swap every batch to flat magenta -- the bisection, see `ModelProbe`. */
   flatColor: boolean;
+  /** ...and, separately, whether that override ignores depth. */
+  ignoreDepth: boolean;
   read(camera: any): ModelReport;
 };
 
@@ -160,7 +162,19 @@ export default class ModelReadout extends React.Component<Props> {
               checked={probe.flatColor}
               onChange={(e) => { probe.flatColor = e.target.checked; this.forceUpdate(); }}
             />
-            &nbsp;Force flat magenta, no depth test
+            &nbsp;Force flat magenta
+          </label>
+        </p>
+
+        <p>
+          <label>
+            <input
+              type="checkbox"
+              checked={probe.ignoreDepth}
+              disabled={!probe.flatColor}
+              onChange={(e) => { probe.ignoreDepth = e.target.checked; this.forceUpdate(); }}
+            />
+            &nbsp;...and ignore depth
           </label>
         </p>
 

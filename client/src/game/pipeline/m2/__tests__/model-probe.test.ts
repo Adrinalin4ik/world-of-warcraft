@@ -742,12 +742,30 @@ describe('ModelProbe flat-colour bisection', () => {
     expect((mesh.material as any).isMeshBasicMaterial).toBe(true);
   });
 
-  it('ignores depth so an occluder cannot be mistaken for a missing body', () => {
+  it('RESPECTS depth by default, so the two variables stay separated', () => {
+    // The first run of this bisection changed flat colour and the depth test together, so magenta
+    // appearing could not distinguish "the combiner emits nothing" from "the body is occluded".
     const probe = new ModelProbe();
     probe.enabled = true;
     probe.flatColor = true;
     const mesh = batchMesh();
     probe.tick(model([[mesh]]));
+
+    expect((mesh.material as any).depthTest).toBe(true);
+  });
+
+  it('ignores depth only when asked to, and live', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.flatColor = true;
+    const mesh = batchMesh();
+    const root = model([[mesh]]);
+
+    probe.tick(root);
+    expect((mesh.material as any).depthTest).toBe(true);
+
+    probe.ignoreDepth = true;
+    probe.tick(root);
 
     expect((mesh.material as any).depthTest).toBe(false);
     expect((mesh.material as any).depthWrite).toBe(false);
