@@ -52,6 +52,33 @@ export interface WorldReport {
   onScreen: boolean;
 }
 
+/**
+ * The two factors the combiner multiplies the sampled texel by, neither of which any earlier reading
+ * covered.
+ *
+ * Both `Combiners_Opaque` and `Combiners_Mod` compute
+ *
+ *   rgb = texel.rgb * vertexColor.rgb * 2.0
+ *
+ * and the vertex stage builds `vertexColor.rgb = animatedVertexColorRGB * 0.5`, so the surviving
+ * albedo scale is exactly `animatedVertexColorRGB`. `applyDiffuseLighting` then multiplies by the
+ * clamped sun lobe. Either one at zero yields a BLACK body -- which on a night scene is
+ * indistinguishable from an absent one, while every other field in this report reads healthy.
+ */
+export interface ShadingReport {
+  /** The `USE_LIGHTING` define; 0 substitutes white light and cannot darken anything. */
+  useLighting: number | null;
+  vertexColorRGB: [number, number, number] | null;
+  vertexColorAlpha: number | null;
+  sunParams: [number, number, number, number] | null;
+  sunDiffuse: string | null;
+  sunAmbient: string | null;
+  sunIntensity: number | null;
+  /** `materialParams.y` is the lighting mix: 0 lights nothing, 1 takes the sun in full. */
+  materialParams: [number, number, number, number] | null;
+  interiorProbe: number | null;
+}
+
 export interface BatchReport {
   submesh: number;
   batch: number;
@@ -84,6 +111,7 @@ export interface BatchReport {
   skin: SkinReport | null;
   /** Null when no camera was supplied. */
   world: WorldReport | null;
+  shading: ShadingReport | null;
 }
 
 export interface ModelReport {
@@ -283,6 +311,36 @@ function readWorld(mesh: any, skin: SkinReport | null, camera: THREE.Camera): Wo
   return report;
 }
 
+const vec3Of = (v: any): [number, number, number] | null =>
+  (v && typeof v.x === 'number' ? [v.x, v.y, v.z] : null);
+
+const vec4Of = (v: any): [number, number, number, number] | null =>
+  (v && typeof v.x === 'number' ? [v.x, v.y, v.z, v.w] : null);
+
+const hexOf = (c: any): string | null => (c && c.getHexString ? `#${c.getHexString()}` : null);
+
+/** The albedo and lighting factors, straight off the uniforms the combiners actually read. */
+function readShading(material: any): ShadingReport | null {
+  const uniforms = material?.uniforms;
+  if (!uniforms) {
+    return null;
+  }
+
+  const define = material?.defines?.USE_LIGHTING;
+
+  return {
+    useLighting: define === undefined ? null : Number(define),
+    vertexColorRGB: vec3Of(uniforms.animatedVertexColorRGB?.value),
+    vertexColorAlpha: uniforms.animatedVertexColorAlpha?.value ?? null,
+    sunParams: vec4Of(uniforms.sunParams?.value),
+    sunDiffuse: hexOf(uniforms.sunDiffuseColor?.value),
+    sunAmbient: hexOf(uniforms.sunAmbientColor?.value),
+    sunIntensity: uniforms.sunIntensity?.value ?? null,
+    materialParams: vec4Of(uniforms.materialParams?.value),
+    interiorProbe: uniforms.interiorProbe?.value ?? null,
+  };
+}
+
 function readMaterial(material: any, report: BatchReport): void {
   report.opacity = material?.opacity ?? 1;
   report.transparent = !!material?.transparent;
@@ -334,6 +392,13 @@ export function inspectModel(
   root: any,
   camera: THREE.Camera | null,
   wasDrawn: (mesh: any) => boolean,
+  /**
+   * Which material to READ. Defaults to the one currently assigned, but the flat-colour bisection
+   * swaps that for a `MeshBasicMaterial` -- and reading it turned the whole readout into `tex 0/0`,
+   * `fade ?`, `fog unset`, hiding exactly the uniforms the bisection had just narrowed the search
+   * down to. The probe passes the stashed original instead.
+   */
+  materialOf: (mesh: any) => any = (mesh) => mesh.material,
 ): ModelReport {
   const frustum = camera
     ? new THREE.Frustum().setFromProjectionMatrix(
@@ -391,6 +456,7 @@ export function inspectModel(
         colorWrite: true,
         skin: null,
         world: null,
+        shading: null,
       };
 
       if (report.skinned) {
@@ -409,7 +475,9 @@ export function inspectModel(
         }
       }
 
-      readMaterial(mesh.material, report);
+      const material = materialOf(mesh);
+      readMaterial(material, report);
+      report.shading = readShading(material);
       batches.push(report);
     });
   });
@@ -457,6 +525,42 @@ export function skinVerdict(skins: SkinReport[]): string | null {
   ))) {
     return 'skinning collapses every vertex onto the model origin -- the mesh has no extent on '
       + 'screen, which is why it passes the frustum test and draws nothing';
+  }
+
+  return null;
+}
+
+/** A colour string that is exactly black -- the only value that can zero a product. */
+const isBlack = (hex: string | null) => hex === '#000000';
+
+/**
+ * What the two albedo factors say is wrong, or null when they cannot be blamed.
+ *
+ * Same rule as the others: only a fault holding for EVERY drawn batch is reported. A single dark
+ * batch on a model is ordinary.
+ */
+export function shadingVerdict(shadings: ShadingReport[]): string | null {
+  if (shadings.every((s) => {
+    const v = s.vertexColorRGB;
+    return v !== null && Math.max(v[0], v[1], v[2]) < 1e-6;
+  })) {
+    return 'the animated vertex colour is black -- both combiners compute '
+      + '`texel * vertexColor * 2`, so the albedo is multiplied to zero and the body draws black';
+  }
+
+  if (shadings.every((s) => s.vertexColorAlpha === 0)) {
+    return 'animatedVertexColorAlpha is zero -- Combiners_Mod writes it straight to output alpha';
+  }
+
+  // Lighting can only darken where the define enables it AND the material takes it in full;
+  // `materialParams.y` below 1 mixes back toward white, which is what unlit geometry relies on.
+  const lit = shadings.filter((s) => s.useLighting === 1
+    && (s.materialParams === null || s.materialParams[1] > 0.999));
+
+  if (lit.length === shadings.length && lit.length > 0
+    && lit.every((s) => s.interiorProbe !== 1 && isBlack(s.sunDiffuse) && isBlack(s.sunAmbient))) {
+    return 'both sun colours are pure black while lighting is enabled -- every lit pixel resolves '
+      + 'to black, so the body is drawn and then shaded away';
   }
 
   return null;
@@ -533,6 +637,16 @@ export function verdictFor(
   }
   if (drawn.every((b) => b.textureCount === 0 || b.texturesReady === 0)) {
     return 'drawn, but no texture has image data -- sampling nothing, so alpha may key it away';
+  }
+
+  // The albedo product, ahead of the alpha terms: a body multiplied to black is fully opaque and
+  // fully drawn, and on a night scene it is indistinguishable from one that was never there.
+  const shaded = drawn.filter((b) => b.shading !== null);
+  if (shaded.length > 0) {
+    const shadingFault = shadingVerdict(shaded.map((b) => b.shading as ShadingReport));
+    if (shadingFault) {
+      return shadingFault;
+    }
   }
   if (drawn.every((b) => b.fadeAlpha === 0)) {
     return 'drawn with fadeAlpha 0 -- output alpha multiplied to zero';
@@ -673,8 +787,12 @@ export class ModelProbe {
   };
 
   read(camera: THREE.Camera | null): ModelReport {
-    return inspectModel(this.root, camera, this.wasDrawn);
+    return inspectModel(this.root, camera, this.wasDrawn, this.originalMaterial);
   }
+
+  /** The real M2 material, even while the flat-colour override is installed over it. */
+  private originalMaterial = (mesh: any) =>
+    (this.overridden.has(mesh) ? this.overridden.get(mesh) : mesh.material);
 }
 
 /** The process-wide probe. `World` ticks it; the debug panel enables and reads it. */

@@ -52,6 +52,20 @@ function BatchRow({ b }: { b: BatchReport }) {
           &nbsp;&nbsp;v0 {vec(b.skin.samplePosition)} &rarr; {vec(b.skin.sampleSkinned)}
         </>
       ) }
+      { b.shading && (
+        <>
+          <br />
+          &nbsp;&nbsp;albedo x {vec(b.shading.vertexColorRGB)} a {b.shading.vertexColorAlpha ?? '?'}
+          <br />
+          &nbsp;&nbsp;lighting {b.shading.useLighting ?? '?'}
+          {' sun '}{b.shading.sunDiffuse ?? '?'} amb {b.shading.sunAmbient ?? '?'}
+          {' int '}{b.shading.sunIntensity ?? '?'}
+          <br />
+          &nbsp;&nbsp;matParams {b.shading.materialParams
+            ? b.shading.materialParams.map((v) => v.toFixed(2)).join(', ') : '?'}
+          {' probe '}{b.shading.interiorProbe ?? '?'}
+        </>
+      ) }
       { b.world && (
         <>
           <br />

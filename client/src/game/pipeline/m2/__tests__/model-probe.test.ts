@@ -4,7 +4,8 @@
 import * as THREE from 'three';
 
 import {
-  BatchReport, ModelProbe, SkinReport, batchMeshes, inspectModel, skinVerdict, verdictFor,
+  BatchReport, ModelProbe, ShadingReport, SkinReport, batchMeshes, inspectModel, shadingVerdict,
+  skinVerdict, verdictFor,
 } from '../model-probe';
 
 /** A batch mesh carrying an M2Material-shaped material. */
@@ -27,6 +28,11 @@ function batchMesh(overrides: any = {}, uniforms: any = {}) {
       fogModifier: { value: 1 },
       fogParams: { value: new THREE.Vector4(-0.001, 1.2, 1, 1) },
       fogColor: { value: new THREE.Color(0x334455) },
+      animatedVertexColorRGB: { value: new THREE.Vector3(1, 1, 1) },
+      animatedVertexColorAlpha: { value: 1 },
+      sunParams: { value: new THREE.Vector4(0.3, 0.4, -0.8, 0) },
+      sunDiffuseColor: { value: new THREE.Color(0.8, 0.8, 0.7) },
+      sunAmbientColor: { value: new THREE.Color(0.3, 0.3, 0.4) },
       ...uniforms,
     },
   } as any);
@@ -236,6 +242,21 @@ const healthy = (overrides: Partial<BatchReport> = {}): BatchReport => ({
     behindCamera: false,
     onScreen: true,
   },
+  shading: healthyShading(),
+  ...overrides,
+});
+
+/** Shading uniforms that cannot darken anything. */
+const healthyShading = (overrides: Partial<ShadingReport> = {}): ShadingReport => ({
+  useLighting: 1,
+  vertexColorRGB: [1, 1, 1],
+  vertexColorAlpha: 1,
+  sunParams: [0.3, 0.4, -0.8, 0],
+  sunDiffuse: '#cccbb2',
+  sunAmbient: '#4d4d66',
+  sunIntensity: 1,
+  materialParams: [1, 1, 0, 0],
+  interiorProbe: 0,
   ...overrides,
 });
 
@@ -471,7 +492,114 @@ describe('inspectModel skin reading', () => {
   });
 });
 
+describe('shadingVerdict', () => {
+  it('passes healthy albedo and lighting', () => {
+    expect(shadingVerdict([healthyShading()])).toBeNull();
+  });
+
+  it('reports a black animated vertex colour, and says what multiplies what', () => {
+    // Both combiners compute `texel.rgb * vertexColor.rgb * 2.0`, and the vertex stage builds
+    // vertexColor.rgb from animatedVertexColorRGB * 0.5 -- so this factor IS the albedo scale.
+    const verdict = shadingVerdict([healthyShading({ vertexColorRGB: [0, 0, 0] })]);
+
+    expect(verdict).toMatch(/animated vertex colour is black/);
+    expect(verdict).toMatch(/multiplied to zero/);
+  });
+
+  it('reports a zeroed vertex-colour alpha', () => {
+    expect(shadingVerdict([healthyShading({ vertexColorAlpha: 0 })]))
+      .toMatch(/animatedVertexColorAlpha is zero/);
+  });
+
+  it('reports both sun colours black while lighting is on', () => {
+    const verdict = shadingVerdict([healthyShading({
+      sunDiffuse: '#000000', sunAmbient: '#000000',
+    })]);
+
+    expect(verdict).toMatch(/both sun colours are pure black/);
+  });
+
+  it('does not blame black sun colours when lighting is compiled out', () => {
+    expect(shadingVerdict([healthyShading({
+      useLighting: 0, sunDiffuse: '#000000', sunAmbient: '#000000',
+    })])).toBeNull();
+  });
+
+  it('does not blame them when the material mixes back toward white', () => {
+    // materialParams.y below 1 mixes the light term toward white -- what unlit geometry relies on.
+    expect(shadingVerdict([healthyShading({
+      materialParams: [1, 0, 0, 0], sunDiffuse: '#000000', sunAmbient: '#000000',
+    })])).toBeNull();
+  });
+
+  it('does not blame them for an interior prop, whose probe is its light', () => {
+    expect(shadingVerdict([healthyShading({
+      interiorProbe: 1, sunDiffuse: '#000000', sunAmbient: '#000000',
+    })])).toBeNull();
+  });
+
+  it('does not blame a factor only ONE batch zeroes', () => {
+    expect(shadingVerdict([
+      healthyShading(),
+      healthyShading({ vertexColorRGB: [0, 0, 0] }),
+    ])).toBeNull();
+  });
+});
+
+describe('inspectModel shading reading', () => {
+  it('reads the albedo and sun uniforms off the material', () => {
+    const shading = inspectModel(model([[batchMesh()]]), null, drawnAlways).batches[0].shading!;
+
+    expect(shading.vertexColorRGB).toEqual([1, 1, 1]);
+    expect(shading.vertexColorAlpha).toBe(1);
+    expect(shading.sunParams).toEqual([0.3, 0.4, -0.8, 0]);
+    expect(shading.sunDiffuse).toMatch(/^#/);
+  });
+
+  it('reads a black vertex colour as black and reaches the verdict', () => {
+    const report = inspectModel(
+      model([[batchMesh({}, { animatedVertexColorRGB: { value: new THREE.Vector3(0, 0, 0) } })]]),
+      cameraAtOrigin(), drawnAlways,
+    );
+
+    expect(report.batches[0].shading!.vertexColorRGB).toEqual([0, 0, 0]);
+    expect(report.verdict).toMatch(/animated vertex colour is black/);
+  });
+
+  it('leaves shading null for a material with no uniforms', () => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial());
+    mesh.updateMatrixWorld(true);
+
+    expect(inspectModel(model([[mesh]]), null, drawnAlways).batches[0].shading).toBeNull();
+  });
+
+  it('reads the material the resolver names, not the one currently assigned', () => {
+    // What the flat-colour bisection needs: magenta on screen, real uniforms in the readout.
+    const mesh = batchMesh();
+    const real = mesh.material;
+    mesh.material = new THREE.MeshBasicMaterial();
+
+    const report = inspectModel(model([[mesh]]), null, drawnAlways, () => real);
+
+    expect(report.batches[0].shading).not.toBeNull();
+    expect(report.batches[0].texturesReady).toBe(1);
+  });
+});
+
 describe('ModelProbe flat-colour bisection', () => {
+  it('still reports the real material while the override is installed', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.flatColor = true;
+    const mesh = batchMesh();
+    probe.tick(model([[mesh]]));
+
+    const report = probe.read(cameraAtOrigin());
+
+    expect(report.batches[0].texturesReady).toBe(1);
+    expect(report.batches[0].shading!.vertexColorRGB).toEqual([1, 1, 1]);
+  });
+
   it('swaps every batch material while enabled', () => {
     const probe = new ModelProbe();
     probe.enabled = true;
