@@ -54,6 +54,16 @@ function model(meshesPerSubmesh: any[][], rootOverrides: any = {}) {
 const drawnAlways = () => true;
 const drawnNever = () => false;
 
+/** A camera at +Z looking at the origin, with the matrices `inspectModel` needs already resolved. */
+function cameraAtOrigin() {
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+  camera.position.set(0, 0, 10);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld(true);
+  camera.updateProjectionMatrix();
+  return camera;
+}
+
 describe('inspectModel', () => {
   it('reports no model at all rather than throwing', () => {
     const report = inspectModel(null, null, drawnAlways);
@@ -119,23 +129,64 @@ describe('inspectModel', () => {
   });
 
   it('tests the frustum with the same call three culls on', () => {
-    const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
-    camera.position.set(0, 0, 10);
-    camera.lookAt(0, 0, 0);
-    camera.updateMatrixWorld(true);
-    camera.updateProjectionMatrix();
+    const camera = cameraAtOrigin();
 
-    const frustum = new THREE.Frustum().setFromProjectionMatrix(
-      new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse),
-    );
-
-    const near = inspectModel(model([[batchMesh()]]), frustum, drawnAlways);
+    const near = inspectModel(model([[batchMesh()]]), camera, drawnAlways);
     expect(near.batches[0].inFrustum).toBe(true);
 
     const far = batchMesh();
     far.position.set(0, 0, 4000);
     far.updateMatrixWorld(true);
-    expect(inspectModel(model([[far]]), frustum, drawnAlways).batches[0].inFrustum).toBe(false);
+    expect(inspectModel(model([[far]]), camera, drawnAlways).batches[0].inFrustum).toBe(false);
+  });
+
+  it('projects the sample vertex to NDC and calls a centred model on screen', () => {
+    const report = inspectModel(model([[batchMesh()]]), cameraAtOrigin(), drawnAlways);
+    const world = report.batches[0].world!;
+
+    expect(world.onScreen).toBe(true);
+    expect(world.behindCamera).toBe(false);
+    expect(Math.abs(world.sampleNdc![0])).toBeLessThan(1);
+    expect(world.sphereRadius).toBeGreaterThan(0);
+  });
+
+  it('flags a vertex behind the eye BEFORE the perspective divide folds it back in', () => {
+    // A negative w divides the point back into [-1, 1], so a report that only checked NDC bounds
+    // would call a body standing behind the camera "on screen".
+    const behind = batchMesh();
+    behind.position.set(0, 0, 60);
+    behind.updateMatrixWorld(true);
+
+    const world = inspectModel(model([[behind]]), cameraAtOrigin(), drawnAlways).batches[0].world!;
+
+    expect(world.behindCamera).toBe(true);
+    expect(world.onScreen).toBe(false);
+  });
+
+  it('calls an off-to-the-side vertex off screen even where the sphere passes the frustum', () => {
+    const aside = batchMesh();
+    aside.position.set(40, 0, 0);
+    aside.updateMatrixWorld(true);
+
+    const world = inspectModel(model([[aside]]), cameraAtOrigin(), drawnAlways).batches[0].world!;
+
+    expect(world.onScreen).toBe(false);
+    expect(Math.abs(world.sampleNdc![0])).toBeGreaterThan(1);
+  });
+
+  it('reports the world matrix translation, not the model-space vertex', () => {
+    const placed = batchMesh();
+    placed.position.set(3, -4, 5);
+    placed.updateMatrixWorld(true);
+
+    const world = inspectModel(model([[placed]]), cameraAtOrigin(), drawnAlways).batches[0].world!;
+
+    expect(world.matrixWorldPosition[0]).toBeCloseTo(3, 5);
+    expect(world.matrixWorldPosition[1]).toBeCloseTo(-4, 5);
+  });
+
+  it('leaves the world report null with no camera', () => {
+    expect(inspectModel(model([[batchMesh()]]), null, drawnAlways).batches[0].world).toBeNull();
   });
 
   it('carries the drawn predicate through verbatim', () => {
@@ -175,6 +226,16 @@ const healthy = (overrides: Partial<BatchReport> = {}): BatchReport => ({
   transparent: false,
   colorWrite: true,
   skin: null,
+  // On screen by default, so the verdict tests exercise the term each one is actually about.
+  world: {
+    matrixWorldPosition: [10, 20, 30],
+    sphereCentre: [10, 20, 31],
+    sphereRadius: 2.4,
+    sampleWorld: [10.2, 19.8, 31.1],
+    sampleNdc: [0.1, -0.2, 0.5],
+    behindCamera: false,
+    onScreen: true,
+  },
   ...overrides,
 });
 
@@ -264,6 +325,43 @@ describe('verdictFor', () => {
 
   it('says nothing about skinning when the skin is sound', () => {
     expect(verdictFor(null, 1, [healthy({ skin: healthySkin() })])).toMatch(/plausible/);
+  });
+
+  it('reports a body drawn behind the eye', () => {
+    const verdict = verdictFor(null, 1, [healthy({
+      world: { ...healthy().world!, behindCamera: true, sampleNdc: null, onScreen: false },
+    })]);
+
+    expect(verdict).toMatch(/BEHIND the eye/);
+  });
+
+  it('reports a body drawn outside the viewport, and blames the bounding sphere', () => {
+    // The false clean bill of health: `inFrustum` passed on an oversized sphere while the triangles
+    // are elsewhere, so every other field reads healthy.
+    const verdict = verdictFor(null, 1, [healthy({
+      world: { ...healthy().world!, sampleNdc: [4.2, -0.3, 0.5], onScreen: false },
+    })]);
+
+    expect(verdict).toMatch(/outside the viewport/);
+    expect(verdict).toMatch(/oversized bounding sphere/);
+  });
+
+  it('puts being off screen ahead of any fragment-stage term', () => {
+    const verdict = verdictFor(null, 1, [healthy({
+      world: { ...healthy().world!, sampleNdc: [4.2, 0, 0.5], onScreen: false },
+      texturesReady: 0,
+    })]);
+
+    expect(verdict).toMatch(/outside the viewport/);
+  });
+
+  it('stays quiet when only ONE batch is off screen', () => {
+    const verdict = verdictFor(null, 1, [
+      healthy(),
+      healthy({ batch: 1, world: { ...healthy().world!, onScreen: false, sampleNdc: [3, 0, 0] } }),
+    ]);
+
+    expect(verdict).toMatch(/plausible/);
   });
 
   it('does not blame a term only SOME batches zero', () => {
@@ -356,19 +454,10 @@ describe('inspectModel skin reading', () => {
   });
 
   it('sees the collapse an all-zero palette produces', () => {
-    // A real frustum containing the mesh, so the verdict reaches the skin checks instead of
-    // stopping at "not in frustum" -- which is the whole point: a collapsed skin IS in frustum.
-    const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
-    camera.position.set(0, 0, 10);
-    camera.lookAt(0, 0, 0);
-    camera.updateMatrixWorld(true);
-    camera.updateProjectionMatrix();
-    const frustum = new THREE.Frustum().setFromProjectionMatrix(
-      new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse),
-    );
-
+    // A real camera containing the mesh, so the verdict reaches the skin checks instead of stopping
+    // at "not in frustum" -- which is the whole point: a collapsed skin IS in frustum.
     const report = inspectModel(
-      model([[skinnedBatch(new Float32Array(16), 1)]]), frustum, drawnAlways,
+      model([[skinnedBatch(new Float32Array(16), 1)]]), cameraAtOrigin(), drawnAlways,
     );
     const skin = report.batches[0].skin!;
 

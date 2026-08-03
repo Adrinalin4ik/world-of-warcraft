@@ -29,6 +29,29 @@ export interface SkinReport {
   sampleWeightSum: number | null;
 }
 
+/**
+ * Where the batch actually lands, in world space and then on screen.
+ *
+ * `inFrustum` alone cannot answer this. It tests the geometry's bounding SPHERE, so a mesh carrying
+ * an oversized or mis-centred sphere passes from anywhere in the zone while its triangles sit
+ * somewhere else entirely -- a false positive that looks exactly like a healthy report. Projecting a
+ * real vertex all the way to NDC is the only reading that cannot lie about it.
+ */
+export interface WorldReport {
+  /** Translation of the batch's `matrixWorld`. Should be the player's feet, not the world origin. */
+  matrixWorldPosition: [number, number, number];
+  /** The geometry's bounding sphere, taken into world space -- radius included, since a huge one is
+   * itself the explanation for a frustum false positive. */
+  sphereCentre: [number, number, number] | null;
+  sphereRadius: number | null;
+  /** The skinned sample vertex in world space. */
+  sampleWorld: [number, number, number] | null;
+  /** ...and projected. `w <= 0` means behind the eye, which no clamp to [-1, 1] would reveal. */
+  sampleNdc: [number, number, number] | null;
+  behindCamera: boolean;
+  onScreen: boolean;
+}
+
 export interface BatchReport {
   submesh: number;
   batch: number;
@@ -59,6 +82,8 @@ export interface BatchReport {
   colorWrite: boolean;
   /** Null for a non-skinned batch. */
   skin: SkinReport | null;
+  /** Null when no camera was supplied. */
+  world: WorldReport | null;
 }
 
 export interface ModelReport {
@@ -184,6 +209,78 @@ function readSkin(mesh: any): SkinReport | null {
   return report;
 }
 
+const _clip = new THREE.Vector4();
+const _sphere = new THREE.Sphere();
+const _worldPos = new THREE.Vector3();
+
+/** Geometry vertex 0 in model space, or null when the mesh carries no positions. */
+function localVertexZero(mesh: any): [number, number, number] | null {
+  const position = mesh.geometry?.getAttribute?.('position');
+  if (!position || position.count === 0) {
+    return null;
+  }
+  return [position.getX(0), position.getY(0), position.getZ(0)];
+}
+
+/**
+ * Take the skinned sample vertex through the rest of the pipeline: world, then clip, then NDC.
+ *
+ * The same three matrices the GPU uses, in the same order, so a vertex the probe places off screen
+ * is off screen. That is the difference between "the body is not being drawn" and "the body is being
+ * drawn somewhere you are not looking", and nothing measured so far can tell those apart.
+ */
+function readWorld(mesh: any, skin: SkinReport | null, camera: THREE.Camera): WorldReport {
+  const matrixWorld: THREE.Matrix4 = mesh.matrixWorld;
+
+  _worldPos.setFromMatrixPosition(matrixWorld);
+
+  const report: WorldReport = {
+    matrixWorldPosition: [_worldPos.x, _worldPos.y, _worldPos.z],
+    sphereCentre: null,
+    sphereRadius: null,
+    sampleWorld: null,
+    sampleNdc: null,
+    behindCamera: false,
+    onScreen: false,
+  };
+
+  const sphere = mesh.geometry?.boundingSphere;
+  if (sphere) {
+    _sphere.copy(sphere).applyMatrix4(matrixWorld);
+    report.sphereCentre = [_sphere.center.x, _sphere.center.y, _sphere.center.z];
+    report.sphereRadius = _sphere.radius;
+  }
+
+  // The skinned sample where there is one; otherwise geometry vertex 0 read here. A static batch
+  // still wants locating on screen, and reading the sample only inside `readSkin` left every
+  // non-skinned M2 with no world position at all.
+  const local = skin?.sampleSkinned ?? skin?.samplePosition ?? localVertexZero(mesh);
+  if (!local) {
+    return report;
+  }
+
+  _clip.set(local[0], local[1], local[2], 1).applyMatrix4(matrixWorld);
+  report.sampleWorld = [_clip.x, _clip.y, _clip.z];
+
+  _clip.applyMatrix4(camera.matrixWorldInverse).applyMatrix4(camera.projectionMatrix);
+
+  // Behind the eye. Dividing through by a non-positive w folds the point back into the visible
+  // range, so this has to be read before the divide, not after.
+  if (_clip.w <= 0) {
+    report.behindCamera = true;
+    return report;
+  }
+
+  const ndc: [number, number, number] = [
+    _clip.x / _clip.w, _clip.y / _clip.w, _clip.z / _clip.w,
+  ];
+  report.sampleNdc = ndc;
+  report.onScreen = ndc.every((n) => Number.isFinite(n))
+    && Math.abs(ndc[0]) <= 1 && Math.abs(ndc[1]) <= 1 && ndc[2] >= -1 && ndc[2] <= 1;
+
+  return report;
+}
+
 function readMaterial(material: any, report: BatchReport): void {
   report.opacity = material?.opacity ?? 1;
   report.transparent = !!material?.transparent;
@@ -226,14 +323,22 @@ function readMaterial(material: any, report: BatchReport): void {
 /**
  * Read the whole draw chain for one model.
  *
- * Pure: the caller supplies the frustum and the "was this drawn" predicate, so the entire thing is
- * testable against plain objects with no renderer, no camera and no loaded world.
+ * Takes the camera rather than a prebuilt frustum: the frustum is derived from it, and the same
+ * camera then projects the sample vertex to NDC -- the two readings have to come from one camera or
+ * they can disagree. Still pure, and a bare `PerspectiveCamera` is all a test needs; there is no
+ * renderer and no loaded world in the way.
  */
 export function inspectModel(
   root: any,
-  frustum: THREE.Frustum | null,
+  camera: THREE.Camera | null,
   wasDrawn: (mesh: any) => boolean,
 ): ModelReport {
+  const frustum = camera
+    ? new THREE.Frustum().setFromProjectionMatrix(
+      new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse),
+    )
+    : null;
+
   if (!root) {
     return {
       hasModel: false, path: null, hiddenAncestor: null, submeshes: 0, batches: [],
@@ -283,10 +388,15 @@ export function inspectModel(
         transparent: false,
         colorWrite: true,
         skin: null,
+        world: null,
       };
 
       if (report.skinned) {
         report.skin = readSkin(mesh);
+      }
+
+      if (camera) {
+        report.world = readWorld(mesh, report.skin, camera);
       }
 
       if (frustum && mesh.geometry) {
@@ -380,6 +490,24 @@ export function verdictFor(
     return 'no batch is in the camera frustum -- bounding sphere or world matrix is wrong';
   }
 
+  // Ahead of the draw check on purpose. A batch can be drawn AND off screen: `inFrustum` tests the
+  // bounding sphere, so an oversized or mis-centred one passes from anywhere while the triangles are
+  // elsewhere. Reporting "drawn, uniforms plausible" for that is the false clean bill of health this
+  // check exists to remove.
+  const located = visible.filter((b) => b.world?.sampleNdc || b.world?.behindCamera);
+  if (located.length > 0) {
+    if (located.every((b) => b.world!.behindCamera)) {
+      return 'drawn, but the sampled vertex is BEHIND the eye -- the body is on the wrong side of '
+        + 'the camera, not missing';
+    }
+    if (located.every((b) => !b.world!.onScreen)) {
+      const ndc = located[0].world!.sampleNdc;
+      const where = ndc ? `ndc (${ndc.map((n) => n.toFixed(2)).join(', ')})` : 'off screen';
+      return `drawn, but the sampled vertex projects outside the viewport -- ${where}. The frustum `
+        + 'test passed on an oversized bounding sphere';
+    }
+  }
+
   const drawn = batches.filter((b) => b.drawn);
   if (drawn.length === 0) {
     return 'in frustum, yet no draw was issued -- look at culling and the parent chain';
@@ -468,17 +596,7 @@ export class ModelProbe {
   };
 
   read(camera: THREE.Camera | null): ModelReport {
-    let frustum: THREE.Frustum | null = null;
-
-    if (camera) {
-      frustum = new THREE.Frustum().setFromProjectionMatrix(
-        new THREE.Matrix4().multiplyMatrices(
-          camera.projectionMatrix, camera.matrixWorldInverse,
-        ),
-      );
-    }
-
-    return inspectModel(this.root, frustum, this.wasDrawn);
+    return inspectModel(this.root, camera, this.wasDrawn);
   }
 }
 

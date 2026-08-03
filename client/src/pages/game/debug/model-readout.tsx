@@ -50,6 +50,20 @@ function BatchRow({ b }: { b: BatchReport }) {
           &nbsp;&nbsp;v0 {vec(b.skin.samplePosition)} &rarr; {vec(b.skin.sampleSkinned)}
         </>
       ) }
+      { b.world && (
+        <>
+          <br />
+          &nbsp;&nbsp;matrixWorld {vec(b.world.matrixWorldPosition)}
+          <br />
+          &nbsp;&nbsp;sphere {vec(b.world.sphereCentre)} r{' '}
+          { b.world.sphereRadius === null ? '?' : b.world.sphereRadius.toFixed(2) }
+          <br />
+          &nbsp;&nbsp;world {vec(b.world.sampleWorld)}
+          <br />
+          &nbsp;&nbsp;ndc { b.world.behindCamera ? 'BEHIND EYE' : vec(b.world.sampleNdc) }
+          {' on-screen '}{yn(b.world.onScreen)}
+        </>
+      ) }
     </p>
   );
 }
