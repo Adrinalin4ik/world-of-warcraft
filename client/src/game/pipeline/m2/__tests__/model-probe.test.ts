@@ -832,6 +832,106 @@ describe('ModelProbe flat-colour bisection', () => {
   });
 });
 
+describe('ModelProbe textured-basic bisection', () => {
+  it('wraps the batch\'s own bound texture in three\'s basic shader', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.texturedBasic = true;
+    const mesh = batchMesh();
+    const bound = (mesh.material as any).uniforms.textures.value[0];
+
+    probe.tick(model([[mesh]]));
+
+    expect((mesh.material as any).isMeshBasicMaterial).toBe(true);
+    expect((mesh.material as any).map).toBe(bound);
+  });
+
+  it('takes precedence over flat colour, being strictly more informative', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.flatColor = true;
+    probe.texturedBasic = true;
+    const mesh = batchMesh();
+
+    probe.tick(model([[mesh]]));
+
+    expect((mesh.material as any).map).toBeTruthy();
+  });
+
+  it('falls back to flat magenta for a batch with no usable texture', () => {
+    // A mixed override -- some batches replaced, some not -- would make the screen unreadable.
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.texturedBasic = true;
+    const mesh = batchMesh({}, { textures: { value: [null] } });
+
+    probe.tick(model([[mesh]]));
+
+    expect((mesh.material as any).isMeshBasicMaterial).toBe(true);
+    expect((mesh.material as any).map).toBeFalsy();
+  });
+
+  it('reuses one material per texture rather than per batch', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.texturedBasic = true;
+    const shared = { image: { width: 8, height: 8 }, name: 'SHARED.BLP' };
+    const a = batchMesh({}, { textures: { value: [shared] } });
+    const b = batchMesh({}, { textures: { value: [shared] } });
+
+    probe.tick(model([[a, b]]));
+
+    expect(a.material).toBe(b.material);
+  });
+
+  it('takes the texture from the ORIGINAL material, not a previous override', () => {
+    // Switching between the two modes must not end up wrapping the flat magenta material.
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.flatColor = true;
+    const mesh = batchMesh();
+    const bound = (mesh.material as any).uniforms.textures.value[0];
+    const root = model([[mesh]]);
+
+    probe.tick(root);
+    probe.texturedBasic = true;
+    probe.tick(root);
+
+    expect((mesh.material as any).map).toBe(bound);
+  });
+
+  it('restores the real material when both modes are lifted', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.texturedBasic = true;
+    const mesh = batchMesh();
+    const root = model([[mesh]]);
+    const original = mesh.material;
+
+    probe.tick(root);
+    probe.texturedBasic = false;
+    probe.tick(root);
+
+    expect(mesh.material).toBe(original);
+  });
+
+  it('restores it when the whole probe is switched off', () => {
+    const probe = new ModelProbe();
+    probe.enabled = true;
+    probe.texturedBasic = true;
+    const mesh = batchMesh();
+    const root = model([[mesh]]);
+    const original = mesh.material;
+
+    probe.tick(root);
+    probe.enabled = false;
+    probe.tick(root);
+
+    expect(mesh.material).toBe(original);
+    expect(probe.texturedBasic).toBe(false);
+  });
+});
+
 describe('batchMeshes', () => {
   it('collects batch meshes in submesh order', () => {
     const a = batchMesh();

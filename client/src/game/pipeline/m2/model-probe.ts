@@ -847,9 +847,28 @@ export class ModelProbe {
    */
   ignoreDepth = false;
 
+  /**
+   * The SECOND bisection step, and the one that needs no numbers read back.
+   *
+   * Swap each batch for a `MeshBasicMaterial` carrying that batch's own first bound texture. Same
+   * geometry, same UV attribute, same texture object, same skinning -- but three's own shader instead
+   * of the M2 combiner, so nothing of ours is in the path.
+   *
+   *   appears textured -> the texture, its UVs and the skinned draw are all sound, and the fault is
+   *                       in the combiner or the lighting it multiplies through
+   *   appears black    -> the BLP decoded to a black surface
+   *   still invisible  -> the sampled alpha is zero, or the UVs land somewhere empty
+   *
+   * Takes precedence over `flatColor`, since it is strictly more informative.
+   */
+  texturedBasic = false;
+
   private overridden = new Map<any, any>();
 
   private flatMaterial: THREE.MeshBasicMaterial | null = null;
+
+  /** One basic material per bound texture, so a shared skin is not re-wrapped per batch. */
+  private texturedMaterials = new Map<any, THREE.MeshBasicMaterial>();
 
   private material(): THREE.MeshBasicMaterial {
     if (!this.flatMaterial) {
@@ -867,15 +886,52 @@ export class ModelProbe {
     return this.flatMaterial;
   }
 
-  /** Install or lift the flat-colour override to match `flatColor`. Idempotent. */
+  /**
+   * The basic material carrying `mesh`'s own first bound texture, or null when it has none to carry.
+   *
+   * The texture is taken from the ORIGINAL material, not the currently assigned one, so switching
+   * between the two override modes cannot end up wrapping a previous override.
+   */
+  private texturedMaterial(mesh: any): THREE.MeshBasicMaterial | null {
+    const original = this.originalMaterial(mesh);
+    const bound = original?.uniforms?.textures?.value;
+    const texture = Array.isArray(bound) ? bound.find((t: any) => t && t.image) : null;
+
+    if (!texture) {
+      return null;
+    }
+
+    let material = this.texturedMaterials.get(texture);
+    if (!material) {
+      material = new THREE.MeshBasicMaterial({
+        map: texture,
+        fog: false,
+        side: THREE.DoubleSide,
+      });
+      this.texturedMaterials.set(texture, material);
+    }
+
+    material.depthTest = !this.ignoreDepth;
+    material.depthWrite = !this.ignoreDepth;
+
+    return material;
+  }
+
+  /** Install or lift whichever override is selected. Idempotent. */
   private syncOverride(root: any): void {
-    if (this.flatColor) {
+    if (this.texturedBasic || this.flatColor) {
       const flat = this.material();
+
       for (const mesh of batchMeshes(root)) {
         if (!this.overridden.has(mesh)) {
           this.overridden.set(mesh, mesh.material);
         }
-        mesh.material = flat;
+
+        // Falls back to flat where a batch has no usable texture, rather than silently leaving that
+        // batch on the real material -- a mixed override would make the screen unreadable.
+        mesh.material = this.texturedBasic
+          ? (this.texturedMaterial(mesh) ?? flat)
+          : flat;
       }
       return;
     }
@@ -890,9 +946,10 @@ export class ModelProbe {
     this.frame += 1;
 
     if (!this.enabled) {
-      // Still lift a live override, or unchecking the section would leave the body magenta.
+      // Still lift a live override, or unchecking the section would leave the body overridden.
       if (this.overridden.size > 0) {
         this.flatColor = false;
+        this.texturedBasic = false;
         this.syncOverride(root);
       }
       return;

@@ -10,7 +10,9 @@ export type ModelReadoutTarget = {
   enabled: boolean;
   /** Swap every batch to flat magenta -- the bisection, see `ModelProbe`. */
   flatColor: boolean;
-  /** ...and, separately, whether that override ignores depth. */
+  /** Swap to three's own basic shader carrying the batch's real texture. Wins over `flatColor`. */
+  texturedBasic: boolean;
+  /** ...and, separately, whether the override ignores depth. */
   ignoreDepth: boolean;
   read(camera: any): ModelReport;
 };
@@ -170,8 +172,19 @@ export default class ModelReadout extends React.Component<Props> {
           <label>
             <input
               type="checkbox"
+              checked={probe.texturedBasic}
+              onChange={(e) => { probe.texturedBasic = e.target.checked; this.forceUpdate(); }}
+            />
+            &nbsp;Force basic shader + real texture
+          </label>
+        </p>
+
+        <p>
+          <label>
+            <input
+              type="checkbox"
               checked={probe.ignoreDepth}
-              disabled={!probe.flatColor}
+              disabled={!probe.flatColor && !probe.texturedBasic}
               onChange={(e) => { probe.ignoreDepth = e.target.checked; this.forceUpdate(); }}
             />
             &nbsp;...and ignore depth
