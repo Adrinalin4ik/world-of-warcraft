@@ -53,6 +53,14 @@ describe('classify', () => {
   it('is true for a model animated only through transparency', () => {
     expect(classify(data({ transparencyAnimations: [keyedBlock()] }))).toBe(true);
   });
+
+  it('is true for a model animated only through vertex-colour color', () => {
+    expect(classify(data({ vertexColorAnimations: [{ color: keyedBlock(), alpha: emptyBlock() }] }))).toBe(true);
+  });
+
+  it('is true for a model animated only through vertex-colour alpha', () => {
+    expect(classify(data({ vertexColorAnimations: [{ color: emptyBlock(), alpha: keyedBlock() }] }))).toBe(true);
+  });
 });
 
 describe('ModelAnim', () => {
