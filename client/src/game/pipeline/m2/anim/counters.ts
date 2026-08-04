@@ -29,12 +29,21 @@ export interface AnimCountersSnapshot {
    */
   posesApplied: number;
   /**
-   * Instances whose UV / transparency / vertex-colour channels were sampled this frame.
+   * CALLS to `M2#evaluateMaterialChannels` this frame -- one per drawn instance with an
+   * `InstanceAnim`, whether or not that instance declares a single UV, transparency or colour
+   * channel.
+   *
+   * Deliberately the call count and NOT "instances that had channels", which is what this doc used
+   * to claim. The two differ by a lot: `ModelAnim.classify()` admits a model on ANY animated channel
+   * including bone tracks, so a purely bone-animated doodad is counted here while sampling nothing.
+   * The call is still the unit of cost -- `DoodadManager#animate` makes it unconditionally past the
+   * draw gate, and each one is a call through `M2` into the evaluator plus three empty-array checks.
    *
    * Counted separately from `posed` because it is a separately GATED population: material channels
    * are evaluated for every drawn instance, with no distance decimation and no bone budget (there
    * are no bones to budget). It is therefore the one per-frame animation cost nothing throttles, and
-   * Task 20 has to re-derive the frame gate from measurement -- so it must be visible.
+   * Task 20 has to re-derive the frame gate from measurement -- from a number that means what the
+   * frame actually spends, which is why the doc was corrected to the code rather than the reverse.
    */
   materialsEvaluated: number;
 }

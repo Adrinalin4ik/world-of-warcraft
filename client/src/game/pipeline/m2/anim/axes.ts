@@ -52,3 +52,55 @@ export function toEngineQuaternion(
 ): THREE.Quaternion {
   return out.set(-x, -y, z, w);
 }
+
+/**
+ * Per-element signs of `D M D` for a column-major 4x4, precomputed.
+ *
+ * `(D M D)[row][col] = d[row] * M[row][col] * d[col]` with `d = (-1, -1, 1, 1)`, and a
+ * `THREE.Matrix4`'s `elements[k]` is `row = k % 4`, `col = (k / 4) | 0`. Rows 0-1 paired with
+ * cols 0-1 (the in-plane rotation block) and rows 2-3 with cols 2-3 keep their sign; the two
+ * off-diagonal blocks flip. Note element 12/13 -- the X and Y translation -- flipping, which is the
+ * same `(-x, -y, z)` `toEngineTranslation` applies.
+ *
+ * A table rather than arithmetic so the conversion is a straight multiply per element with no
+ * branch and no allocation; it runs once per single-bone submesh per posed frame.
+ */
+const D_CONJUGATION_SIGNS = new Int8Array([
+  1, 1, -1, -1,
+  1, 1, -1, -1,
+  -1, -1, 1, 1,
+  -1, -1, 1, 1,
+]);
+
+/**
+ * Conjugate one raw-axis palette matrix into engine axes: `out = D . palette_i . D`.
+ *
+ * `InstanceAnim.palette` holds each bone's transform RELATIVE TO BIND POSE in raw file axes, while
+ * the scene graph the result has to drive lives in engine axes. This is the matrix form of the same
+ * `D` conjugation `toEngineTranslation`/`toEngineQuaternion` apply component-wise, and it is exactly
+ * the invariant `anim/__tests__/pose.test.ts` pins against three's own palette:
+ *
+ *     skeleton.boneMatrices[i]  ==  D . instanceAnim.palette[i] . D
+ *
+ * Skipping it is nearly invisible: a swinging sign still swings, at the right rate, through the
+ * right arc -- mirrored about the model's X/Y.
+ *
+ * Allocation-free: writes through `out.elements`.
+ *
+ * @param out      destination, overwritten
+ * @param palette  `InstanceAnim.palette`, raw axes, 16 floats per bone
+ * @param offset   element offset of the bone's entry, i.e. `boneIndex * 16`
+ */
+export function toEngineMatrix(
+  out: THREE.Matrix4,
+  palette: ArrayLike<number>,
+  offset: number,
+): THREE.Matrix4 {
+  const e = out.elements;
+
+  for (let k = 0; k < 16; ++k) {
+    e[k] = D_CONJUGATION_SIGNS[k] * palette[offset + k];
+  }
+
+  return out;
+}

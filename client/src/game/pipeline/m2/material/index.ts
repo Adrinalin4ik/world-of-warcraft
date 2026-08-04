@@ -519,19 +519,13 @@ class M2Material extends THREE.ShaderMaterial {
     });
   }
 
-  /**
-   * The per-object distance-fade alpha (pipeline/m2/fade/laws.ts).
-   *
-   * Only the feathering band ever reaches here: `visibility-manager` culls the object outright at
-   * alpha <= 0, so this never has to represent "fully gone". The uniform feeds both the cutout
-   * alpha test and the output alpha -- see fragment/common-header.glsl.
-   *
-   * Materials are cached and shared across placements (M2Blueprint.cache), so this is written per
-   * frame by whichever doodad is being drawn rather than latched; see doodad-manager's fade pass.
-   */
-  setFadeAlpha(alpha: number): void {
-    this.uniforms.fadeAlpha.value = alpha;
-  }
+  // `setFadeAlpha(alpha)` used to sit here. Deleted, not deprecated: it had zero callers, and it
+  // wrote `uniforms.fadeAlpha.value` WITHOUT raising `uniformsNeedUpdate`, which is the one dirty-
+  // flag invariant Task 14 established (`submesh.js#applyUniformsBeforeRender` documents why a bare
+  // `.value` write never reaches the GPU for a shared material). Keeping a public setter that
+  // silently breaks it is a loaded gun. The live path is the per-draw push in
+  // `submesh.js#applyFadeAlphaBeforeRender`, which reports whether it changed anything so the caller
+  // can raise the flag once for both pushes.
 
   /**
    * Set the map light system

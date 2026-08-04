@@ -91,9 +91,20 @@ function format(p: PerfPayload): string {
     `map doodads ${p.visibleMapDoodads}/${p.loadedMapDoodads}  wmo doodads ${p.visibleDoodads}`,
   ];
 
-  if (p.animResident !== undefined) {
+  // ANY animation counter turns the block on, not `animResident` alone. The rows print four other
+  // fields, so keying on one of them meant a caller supplying, say, only `animPosed` and
+  // `animMaterialsEvaluated` got no rows at all -- the measurement was collected and then silently
+  // dropped, which is the same failure these rows were added to fix.
+  const hasAnimCounters =
+    p.animResident !== undefined ||
+    p.animPosed !== undefined ||
+    p.animSkipped !== undefined ||
+    p.animBonesSolved !== undefined ||
+    p.animMaterialsEvaluated !== undefined;
+
+  if (hasAnimCounters) {
     lines.push(
-      `anim ${p.animPosed ?? 0}/${p.animResident} posed  skipped ${p.animSkipped ?? 0}`,
+      `anim ${p.animPosed ?? 0}/${p.animResident ?? 0} posed  skipped ${p.animSkipped ?? 0}`,
       `bones ${p.animBonesSolved ?? 0}  materials ${p.animMaterialsEvaluated ?? 0}`,
     );
   }

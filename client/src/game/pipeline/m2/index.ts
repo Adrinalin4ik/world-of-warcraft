@@ -16,6 +16,7 @@ import {
 } from './anim/material-channels';
 import { ModelAnim } from './anim/model-anim';
 import { applyLocalPose } from './anim/pose';
+import { SubmeshSkinningScope, submeshSkinningScope } from './anim/skinning-scope';
 import { buildBoneHierarchy, modelSpaceBindMatrix, normalizeBoneWeights, poseBindSkeleton } from './bind-pose';
 import M2Material from './material';
 import { isParticleTemplate } from './particle/template';
@@ -36,7 +37,30 @@ class M2 extends THREE.Group {
   boundingNormals: [];
   boundingTriangles: [];
   vertexRadius: number;
+  /**
+   * MODEL-GLOBAL: does this model have any animated bone at all?
+   *
+   * Still the right question for three places -- `createMesh` (which parents the root bones, needed
+   * for billboarding via `bone.skin`), `DoodadManager#animate`'s bone-mesh gate, and `applyPose`.
+   * It is NO LONGER the question asked of an individual submesh: see `submeshSkinning` below.
+   */
   useSkinning: boolean;
+  /**
+   * PER SUBMESH INDEX (parallel to `skinData.submeshes`): draw skinned, or ride one bone?
+   *
+   * One animated bone anywhere used to force every submesh of the model onto `THREE.SkinnedMesh`, a
+   * skinning shader variant and a bone texture. Most animated doodad submeshes ride exactly one bone,
+   * and for those the bone's transform relative to bind pose simply IS the submesh's local matrix.
+   * The equivalence derivation, and the two cases where it fails, live in `anim/skinning-scope.ts`.
+   */
+  submeshSkinning: SubmeshSkinningScope[];
+  /**
+   * The subset of `submeshes` with a sole bone, so the per-frame pose path does not re-scan.
+   *
+   * Almost always empty or very short. `applyPose` walks this rather than `this.submeshes`, so a
+   * model with no single-bone submesh pays one length check per posed frame.
+   */
+  soleBoneSubmeshes: Submesh[];
   mesh: THREE.Mesh;
   submeshes: Submesh[];
   parts: Map<string, any>;
@@ -142,6 +166,8 @@ class M2 extends THREE.Group {
 
     this.mesh = null;
     this.submeshes = [];
+    this.submeshSkinning = [];
+    this.soleBoneSubmeshes = [];
     this.suppressedBatches = [];
     this.particleEmitters = data.particleEmitters || [];
     this.textures = data.textures || [];
@@ -175,6 +201,17 @@ class M2 extends THREE.Group {
     // a BONE is animated, so the models that clone are exactly the UV/transparency-animated ones
     // this task exists for. Their animation would have been dropped on the floor.
     this.createTextureAnimations(data);
+
+    // BEFORE createBatches, which needs the per-submesh answer to set each batch material's skinning
+    // flag, and before createSubmeshes, which needs it to pick the mesh class. Derived purely from
+    // the shared, immutable `data`/`skinData`, so an instanceable clone takes its source's copy
+    // rather than re-walking every submesh's triangles. A non-instanceable model recomputes -- and
+    // `canInstance` is false exactly when a bone is animated, i.e. for every model this matters to --
+    // but that is one extra O(indices) construction-time pass beside `createSubmeshGeometry`, which
+    // is already O(vertices) per submesh on the same path.
+    this.submeshSkinning = (instance && instance.submeshSkinning)
+      ? instance.submeshSkinning
+      : this.computeSubmeshSkinning(data, skinData);
 
     // Instanced M2s can share geometries and texture units.
     if (instance) {
@@ -273,6 +310,34 @@ class M2 extends THREE.Group {
     this.skeleton.matrixAutoUpdate = this.matrixAutoUpdate;
   }
 
+  /**
+   * Decide, per submesh index, whether it needs the skinning path.
+   *
+   * Parallel to `skinData.submeshes` -- indexed by submesh INDEX, not by position in
+   * `this.submeshes`, which skips suppressed particle templates.
+   */
+  computeSubmeshSkinning(data, skinData): SubmeshSkinningScope[] {
+    const defs = (skinData && skinData.submeshes) || [];
+    const scopes: SubmeshSkinningScope[] = [];
+
+    for (let i = 0, len = defs.length; i < len; ++i) {
+      scopes.push(submeshSkinningScope(
+        defs[i],
+        skinData,
+        data.vertices,
+        data.bones,
+        this.useSkinning,
+      ));
+    }
+
+    return scopes;
+  }
+
+  /** The skinning decision for one submesh index, falling back to the old model-global answer. */
+  skinningScopeFor(submeshIndex: number): SubmeshSkinningScope {
+    return this.submeshSkinning[submeshIndex] || { skinned: this.useSkinning, soleBone: -1 };
+  }
+
   // Returns a map of M2Materials indexed by submesh. Each material represents a batch,
   // to be rendered in the order of appearance in the map's entry for the submesh index.
   createBatches() {
@@ -293,8 +358,13 @@ class M2 extends THREE.Group {
       // Array that will contain materials matching each batch.
       const submeshBatches = batches.get(submeshIndex);
 
-      // Observe the M2's skinning flag in the M2Material.
-      batchDef.useSkinning = this.useSkinning;
+      // PER SUBMESH now, not the model-global flag -- each batch belongs to exactly one submesh
+      // index, so its material is only ever used by that submesh's mesh. Note that `M2Material`
+      // itself currently ignores this field (`material/index.ts` has the `skinning: true` super()
+      // call commented out); the real program split comes from three, whose program cache key
+      // includes `object.isSkinnedMesh`. A material drawn only by a plain `THREE.Mesh` therefore
+      // compiles one variant instead of the skinning one, which is where `programs` drops.
+      batchDef.useSkinning = this.skinningScopeFor(submeshIndex).skinned;
       const batchMaterial = new M2Material(this, batchDef);
 
       submeshBatches.unshift(batchMaterial);
@@ -398,10 +468,15 @@ class M2 extends THREE.Group {
         continue;
       }
 
-      const submesh = this.createSubmesh(submeshDef, submeshGeometry, submeshBatches);
+      const submesh = this.createSubmesh(submeshDef, submeshGeometry, submeshBatches, submeshIndex);
 
       this.parts.set(submesh.userData.partID, submesh);
       this.submeshes.push(submesh);
+
+      // Built here rather than derived per frame -- see the field's doc.
+      if (submesh.soleBoneIndex >= 0) {
+        this.soleBoneSubmeshes.push(submesh);
+      }
 
       this.submeshGeometries.set(submeshIndex, submeshGeometry);
 
@@ -502,14 +577,16 @@ class M2 extends THREE.Group {
     return bufferGeometry;
   }
 
-  createSubmesh(submeshDef, geometry, batches) {
+  createSubmesh(submeshDef, geometry, batches, submeshIndex = -1) {
     const rootBone = this.bones[submeshDef.rootBone];
+    const scope = this.skinningScopeFor(submeshIndex);
 
     const opts = {
       skeleton: this.skeleton,
       geometry,
       rootBone,
-      useSkinning: this.useSkinning,
+      useSkinning: scope.skinned,
+      soleBoneIndex: scope.soleBone,
       matrixAutoUpdate: this.matrixAutoUpdate
     };
 
@@ -637,6 +714,19 @@ class M2 extends THREE.Group {
 
     applyLocalPose(this.bones, this.boneBindPositions, inst.localTRS);
 
+    // Single-bone submeshes are NOT on the skeleton -- they carry the bone's transform as their own
+    // local matrix instead, which is why they need no skinning shader and no bone texture. The
+    // palette they read was filled by `solveBones` immediately before this call (see
+    // `DoodadManager#poseDoodad`), and the same `poseFrame` stamp that gets the bones re-accumulated
+    // gets these matrices composed into `matrixWorld`.
+    //
+    // NOT `uploadPalette`, which the brief named and which does not exist: writing into
+    // `skeleton.boneMatrices` is impossible here (`anim/pose.ts` reason 1).
+    const sole = this.soleBoneSubmeshes;
+    for (let i = 0, len = sole.length; i < len; ++i) {
+      sole[i].applySoleBone(inst.palette);
+    }
+
     animCounters.posesApplied++;
   }
 
@@ -750,6 +840,9 @@ class M2 extends THREE.Group {
       instance.geometry = this.geometry;
       instance.submeshGeometries = this.submeshGeometries;
       instance.batches = this.batches;
+      // Read-only after construction and derived only from the shared `data`/`skinData`, so sharing
+      // it saves the clone a whole-model triangle walk.
+      instance.submeshSkinning = this.submeshSkinning;
     } else {
       instance = null;
     }

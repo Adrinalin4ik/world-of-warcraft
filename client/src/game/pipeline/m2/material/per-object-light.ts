@@ -112,10 +112,14 @@ export function applyPerObjectLighting(
  * every WMO-interior doodad -- invisible today only because those doodads have no animated-channel
  * evaluation call yet, and due to become a live bug the moment Task 16 adds one.
  *
- * NOTE for the other direction: `Submesh#applyBatches` REPLACES `onBeforeRender` outright, and it
- * runs again whenever display-info textures resolve. A WMO doodad whose skins resolve after its
- * lighting was attached therefore loses this handler. Fixing that properly means a real handler list
- * on the mesh; it is called out here rather than left to be rediscovered.
+ * NOTE for the other direction: `Submesh#applyBatches` REPLACES `onBeforeRender` outright, so a
+ * re-run of it would drop this handler. That does NOT currently happen -- `applyBatches` has exactly
+ * one caller, `M2#createSubmesh`, during construction, and the display-info path
+ * (`Submesh#set displayInfo`) updates the existing materials' textures in place rather than
+ * rebuilding batch meshes -- so attaching after construction is safe today. It stops being safe the
+ * moment `applyBatches` gains a second caller (a real display-info rebuild, an LOD swap); the fix
+ * then is a real handler list on the mesh, and it is called out here rather than left to be
+ * rediscovered.
  */
 export function attachPerObjectLighting(
   mesh: { material: any; onBeforeRender?: Function },

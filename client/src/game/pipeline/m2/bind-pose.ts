@@ -127,9 +127,14 @@ export function poseBindSkeleton(rootBones: THREE.Bone[], bones: THREE.Bone[]): 
  * `SkinnedMesh.bind(skeleton)` called WITHOUT a bind matrix re-runs `skeleton.calculateInverses()`
  * as a side effect, re-deriving the inverses from wherever the bones happen to be at that moment.
  * That is fine exactly once, at construction; it is destructive every time afterwards, because by
- * then the bones have been moved into world space by the scene graph. The M2 pipeline rebinds on
- * every `applyBatches`, which happens again whenever display-info textures resolve -- so the
- * inverses were being recomputed long after the bind pose was gone.
+ * then the bones have been moved into world space by the scene graph.
+ *
+ * The M2 pipeline rebinds on every `Submesh#applyBatches`. As the code stands today that runs
+ * exactly once per submesh, from `M2#createSubmesh` during construction -- the display-info path
+ * (`Submesh#set displayInfo`) updates the existing materials' textures in place and does NOT rebuild
+ * batch meshes -- so the destructive re-run is not currently reachable. Passing the bind matrix is
+ * what keeps it unreachable BY CONSTRUCTION rather than by accident of who happens to call
+ * `applyBatches`: give it a second caller and the recomputation would otherwise be live again.
  *
  * Passing an explicit bind matrix takes that branch out entirely. Identity is the correct value:
  * the geometry and the bind pose are both in model space, and `AttachedBindMode` recomputes

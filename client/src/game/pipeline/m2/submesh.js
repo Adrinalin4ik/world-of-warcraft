@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 
+import { toEngineMatrix } from './anim/axes';
 import { modelSpaceBindMatrix } from './bind-pose';
 
 /**
@@ -119,6 +120,15 @@ export function applyAnimatedUniformsBeforeRender(_renderer, _scene, _camera, _g
     const b = source ? source.color[2] : 1.0;
     const a = source ? source.alpha : 1.0;
 
+    // This compare is only meaningful because the uniform holds its OWN `Vector3` -- see
+    // `material/index.ts` and `material/M2MaterialNew.ts`, both of which initialise the slot with a
+    // fresh `new THREE.Vector3(1, 1, 1)`, and `rgb.set(...)` below writes through that copy rather
+    // than swapping in the source. If the slot were ever made to ALIAS the sampled value (as
+    // `M2MaterialNewShaders#updateAnimatedVertexColor` does -- `uniforms.animatedVertexColorRGB.value
+    // = rgb` -- assigning the caller's object straight into the slot), this becomes a self-compare:
+    // `rgb` would already be the source, the three tests would always be false, the material would
+    // report permanently clean, `uniformsNeedUpdate` would never be raised for it, and the animated
+    // colour would freeze on whatever reached the GPU first.
     if (rgb.x !== r || rgb.y !== g || rgb.z !== b) {
       rgb.set(r, g, b);
       changed = true;
@@ -176,6 +186,15 @@ class Submesh extends THREE.Group {
 
     this.useSkinning = opts.useSkinning;
 
+    /**
+     * The one bone this submesh rides, or -1.
+     *
+     * Set only when `useSkinning` is false BECAUSE the submesh was found rigid under a single bone
+     * (`anim/skinning-scope.ts`), never for a genuinely static submesh. `applySoleBone` below is
+     * what makes the two paths equivalent; the derivation lives in that module's header.
+     */
+    this.soleBoneIndex = opts.soleBoneIndex === undefined ? -1 : opts.soleBoneIndex;
+
     this.rootBone = null;
     this.billboarded = false;
 
@@ -191,6 +210,40 @@ class Submesh extends THREE.Group {
 
     // Preserve the geometry for use in applying batches.
     this.geometry = opts.geometry;
+  }
+
+  /**
+   * Drive a single-bone submesh from its one bone's palette entry.
+   *
+   * No skeleton, no bone texture, no skinning shader variant -- the bone's transform relative to
+   * bind pose IS this submesh's local matrix. `anim/skinning-scope.ts` derives why that substitution
+   * is EXACT rather than an approximation, including why the bind-pose inverse is already folded in
+   * (an `InstanceAnim` palette entry is relative to bind pose by construction) and the two cases
+   * where it does not hold, which that module refuses up front.
+   *
+   * The conjugation is load-bearing. `InstanceAnim.palette` is in RAW M2 axes while the scene graph
+   * is in engine axes, so it goes through `toEngineMatrix` (`anim/axes.ts`), the matrix form of the
+   * same `D = diag(-1, -1, 1)` the bone path applies component-wise. Taking the palette entry
+   * straight would leave the submesh mirrored about X and Y: still animating, at the right rate,
+   * through the right arc, swinging the wrong way.
+   *
+   * The `matrix` write is what actually reaches the screen -- `matrixAutoUpdate` is false on the
+   * whole M2 subtree, so `World#updateDynamicMatrices`' forced `updateMatrixWorld(true)` composes
+   * `this.matrix` as written. The decompose keeps `position`/`quaternion`/`scale` honest for anything
+   * that inspects them (and would keep this correct if the subtree ever went auto-update); it uses
+   * three's module-level scratch and allocates nothing.
+   *
+   * Called from `M2#applyPose`, i.e. only for instances actually posed this frame. A gated instance
+   * simply keeps last frame's matrix -- exactly what its bones would have done.
+   */
+  applySoleBone(palette) {
+    if (this.soleBoneIndex < 0) {
+      return;
+    }
+
+    toEngineMatrix(this.matrix, palette, this.soleBoneIndex * 16);
+    this.matrix.decompose(this.position, this.quaternion, this.scale);
+    this.matrixWorldNeedsUpdate = true;
   }
 
   // Submeshes get one mesh per batch, which allows them to effectively simulate multiple
@@ -214,20 +267,32 @@ class Submesh extends THREE.Group {
       if (this.useSkinning) {
         batchMesh = new THREE.SkinnedMesh(this.geometry, batchMaterial);
         // EXPLICIT bind matrix. `bind(skeleton)` alone re-runs skeleton.calculateInverses() as a
-        // side effect, and applyBatches runs again whenever display-info textures resolve -- by
-        // which time the bones have been moved into world space by the scene graph, so the bind
-        // pose gets recomputed from the wrong state and the mesh is culled out of the frame.
+        // side effect, which is destructive on any call after the first: by then the bones have been
+        // moved into world space by the scene graph, so the bind pose would be recomputed from the
+        // wrong state and the mesh culled out of the frame.
+        //
+        // As the code stands TODAY there is no second call -- `applyBatches` has exactly one caller,
+        // `M2#createSubmesh`, during construction, and the display-info path
+        // (`Submesh#set displayInfo`) mutates the existing materials' textures without rebuilding
+        // batch meshes. The explicit bind matrix is kept because it costs nothing and it is what
+        // makes a re-run SAFE: give `applyBatches` a second caller -- a real display-info rebuild, a
+        // batch-order change, an LOD swap -- and the hazard is live again the same day.
         batchMesh.bind(this.skeleton, modelSpaceBindMatrix());
       } else {
         batchMesh = new THREE.Mesh(this.geometry, batchMaterial);
       }
 
       batchMesh.matrixAutoUpdate = this.matrixAutoUpdate;
-      // ASSIGNS the slot, and this method runs again whenever display-info textures resolve. Any
-      // handler installed on a batch mesh from outside -- `attachPerObjectLighting` is the one such
-      // caller today, for WMO-interior doodads -- is un-installed by a re-run. The batch meshes are
-      // rebuilt here anyway, so nothing outside can hold onto one; the hazard is an attacher that
-      // ran against the PREVIOUS set. See the note on `attachPerObjectLighting`.
+      // ASSIGNS the slot outright, so any handler installed on a batch mesh from outside --
+      // `attachPerObjectLighting` is the one such caller today, for WMO-interior doodads -- would be
+      // un-installed by a re-run of this method.
+      //
+      // No re-run happens today: `applyBatches` has exactly one caller, `M2#createSubmesh`, during
+      // construction, and the display-info path (`Submesh#set displayInfo`) updates the existing
+      // materials' textures in place rather than rebuilding batch meshes. So the ordering hazard is
+      // currently theoretical. It becomes real the moment `applyBatches` gains a second caller, and
+      // the fix then is a real handler list on the mesh rather than one slot with three claimants.
+      // See the matching note on `attachPerObjectLighting`.
       batchMesh.onBeforeRender = applyUniformsBeforeRender;
 
       this.add(batchMesh);
