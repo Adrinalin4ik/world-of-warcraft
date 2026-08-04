@@ -1,3 +1,7 @@
+import { animCounters } from '../pipeline/m2/anim/counters';
+import { BoneBudget, shouldPose } from '../pipeline/m2/anim/gating';
+import { armDoodad, cycleDoodad } from '../pipeline/m2/anim/variation-cycle';
+import { worldClock } from '../pipeline/m2/anim/world-clock';
 import M2Blueprint from '../pipeline/m2/blueprint';
 import gameSettings from '../settings';
 
@@ -22,6 +26,15 @@ class DoodadManager {
 
     this.doodads = new Map();
     this.animatedDoodads = new Map();
+
+    // Dense, monotonically increasing slot handed to each animated doodad at registration. This is
+    // the phase input for `shouldPose`'s decimation stagger, and it deliberately is NOT the doodad's
+    // entry id: entry ids are sparse, large, and clustered by map chunk, so `id % period` can put a
+    // whole chunk's worth of props on one phase -- which is the single-phase pile-up the stagger
+    // exists to prevent, and a worse worst frame than not decimating at all.
+    this.nextPoseSlot = 0;
+
+    this.boneBudget = new BoneBudget(gameSettings.m2.boneBudgetPerFrame);
 
     this.entriesPendingLoad = new Map();
     this.entriesPendingUnload = new Map();
@@ -155,9 +168,13 @@ class DoodadManager {
     // call to animate() during the render loop.
     this.animatedDoodads.set(entry.id, doodad);
 
-    // Task 13 arms the doodad's `instanceAnim` here (variation-cycle.armDoodad). Note that
-    // membership in this map does NOT imply `instanceAnim` is non-null -- a billboard-only doodad
-    // is here purely for `applyBillboards`.
+    doodad.poseSlot = this.nextPoseSlot++;
+
+    // Membership in this map does NOT imply `instanceAnim` is non-null -- a billboard-only doodad
+    // is here purely for `applyBillboards`, and never allocates an instance at all.
+    if (doodad.instanceAnim) {
+      armDoodad(doodad.instanceAnim, worldClock.ms);
+    }
   }
 
   // Every tick of the load interval, unload a portion of any doodads pending unload.
@@ -249,12 +266,42 @@ class DoodadManager {
       return;
     }
 
+    // Clock-INDEXED, never delta-accumulated, and shared with every other animation consumer -- see
+    // `anim/world-clock.ts` and `InstanceAnim`. `delta` is untouched here on purpose.
+    const worldClockMs = worldClock.ms;
+    const frameIndex = worldClock.frameIndex;
+
+    this.boneBudget.beginFrame();
+
+    const camPos = camera.position;
+
     this.animatedDoodads.forEach((doodad) => {
+      // A member of this map has EITHER keyframes to sample OR billboarded bones, and possibly only
+      // the latter -- in which case `instanceAnim` is null and every pose step below is skipped
+      // while the billboard step at the bottom still runs.
+      const inst = doodad.instanceAnim;
+
+      if (inst) {
+        animCounters.resident++;
+
+        // RESIDENCY gate: the variation cycle runs for every loaded doodad, drawn or not.
+        // Deliberately separate from the pose gate below -- benilla `doodad_anim.rs:20-25`. A doodad
+        // behind the camera keeps cycling; it just stops being posed. Because sampling is
+        // clock-indexed that costs nothing and drifts nothing.
+        cycleDoodad(inst, worldClockMs);
+      }
+
+      // DRAW gate: only what is actually drawn gets posed or turned.
       if (!doodad.visible) {
+        if (inst) {
+          animCounters.skipped++;
+        }
         return;
       }
 
-      // Task 13 poses `doodad.instanceAnim` here, on the world clock.
+      if (inst) {
+        this.poseDoodad(doodad, inst, camPos, frameIndex, worldClockMs);
+      }
 
       if (cameraMoved && doodad.billboards.length > 0) {
         doodad.applyBillboards(camera);
@@ -264,6 +311,39 @@ class DoodadManager {
         doodad.skeletonHelper.update();
       }
     });
+  }
+
+  /**
+   * Distance-decimate, budget, solve and apply one visible instance's pose.
+   *
+   * Split out of the loop purely for readability; it allocates nothing.
+   */
+  poseDoodad(doodad, inst, camPos, frameIndex, worldClockMs) {
+    // World-space translation off `matrixWorld`, NOT `doodad.position` -- the same rule
+    // `VisibilityManager#enableStaticObjectInFrustum` documents. A terrain doodad's parent sits at
+    // the origin so the two agree, but a WMO doodad's position is local to its building, and Task 16
+    // reuses this gate.
+    const e = doodad.matrixWorld.elements;
+    const dx = e[12] - camPos.x;
+    const dy = e[13] - camPos.y;
+    const dz = e[14] - camPos.z;
+    const distanceYd = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    if (!shouldPose(doodad.poseSlot, distanceYd, frameIndex)) {
+      animCounters.skipped++;
+      return;
+    }
+
+    // The backstop. Denied instances hold last frame's pose for a frame, which a clock-indexed
+    // sampler makes safe.
+    if (!this.boneBudget.request(inst.model.boneDefs.length)) {
+      animCounters.skipped++;
+      return;
+    }
+
+    animCounters.posed++;
+    animCounters.bonesSolved += inst.solveBones(worldClockMs);
+    doodad.applyPose();
   }
 
   /**

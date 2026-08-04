@@ -12,6 +12,13 @@ const scratchLocal = new THREE.Matrix4();
 const scratchPivotTo = new THREE.Matrix4();
 const scratchPivotBack = new THREE.Matrix4();
 
+/** Shared empty buffers, so an unarmed instance holds no per-bone storage at all. */
+const EMPTY_F32 = new Float32Array(0);
+const EMPTY_U8 = new Uint8Array(0);
+
+/** Floats per bone in `localTRS`: 3 position, 4 quaternion, 3 scale. */
+export const LOCAL_TRS_STRIDE = 10;
+
 /**
  * Per-placement animation state: a clock, and nothing else that could have lived on the model.
  *
@@ -33,20 +40,59 @@ export class InstanceAnim {
   private law: ClockLaw = 0;
   private periodMs = 0;
 
-  /** Bone world matrices, 16 floats each, model space. Allocated once. */
-  readonly palette: Float32Array;
+  /**
+   * Bone matrices relative to bind pose, 16 floats each, RAW M2 model axes.
+   *
+   * Not engine axes -- the sampler reads `pivotPoint` and the translation/rotation tracks exactly as
+   * the file stores them, while the geometry and the bone hierarchy were both mirrored by
+   * `diag(-1, -1, 1)` on the way in. Anything driving three.js from this must conjugate first; see
+   * `anim/axes.ts`.
+   *
+   * Allocated on first `arm()`, and then never again.
+   */
+  palette: Float32Array = EMPTY_F32;
+
+  /**
+   * This frame's sampled LOCAL transform per bone -- 3 position, 4 quaternion, 3 scale, raw axes.
+   *
+   * The palette above is the accumulated, parent-composed form. This is the un-composed form, and
+   * it is what actually reaches the screen: `M2#applyPose` writes it into the three.js bone
+   * hierarchy, which then does the accumulation itself. Recording it here costs ten stores per bone
+   * inside a pass that was already sampling exactly these three values, so nothing is sampled twice.
+   */
+  localTRS: Float32Array = EMPTY_F32;
 
   /** Per-bone "already solved this frame" flags, cleared at the top of each solve. */
-  private readonly solved: Uint8Array;
+  private solved: Uint8Array = EMPTY_U8;
 
   /** Scratch matrices, one per bone, so composition never allocates. */
   private readonly matrices: THREE.Matrix4[] = [];
 
+  private allocated = false;
+
   constructor(model: ModelAnim) {
     this.model = model;
+  }
 
-    const boneCount = model.boneDefs.length;
+  /**
+   * Allocate the per-bone buffers, once, on first use.
+   *
+   * Deliberately NOT done in the constructor. Every animated placement owns an `InstanceAnim`, and
+   * a 40-bone model's buffers run to roughly 8 KB -- but one of those placements is
+   * `M2Blueprint.cache`'s prototype, which exists only to be cloned and is never placed, never
+   * armed and never rendered. Streaming a zone builds one prototype per model path plus one
+   * instance per placement, and the prototypes' share of that is pure waste. Deferring to `arm()`
+   * also means a doodad that is only in the per-frame set for BILLBOARDING pays nothing here.
+   */
+  private ensureBuffers(): void {
+    if (this.allocated) {
+      return;
+    }
+    this.allocated = true;
+
+    const boneCount = this.model.boneDefs.length;
     this.palette = new Float32Array(boneCount * 16);
+    this.localTRS = new Float32Array(boneCount * LOCAL_TRS_STRIDE);
     this.solved = new Uint8Array(boneCount);
     for (let i = 0; i < boneCount; ++i) {
       this.matrices.push(new THREE.Matrix4());
@@ -59,6 +105,7 @@ export class InstanceAnim {
    * The clock law is resolved once, here, from the sequence's own loop flag -- never per sample.
    */
   arm(seq: Sequence, worldClockMs: number): void {
+    this.ensureBuffers();
     this.current = seq;
     this.armedAtMs = worldClockMs;
     this.periodMs = seq.lengthMs;
@@ -90,6 +137,8 @@ export class InstanceAnim {
    * flag check rather than a matrix compose.
    */
   solveBones(worldClockMs: number): number {
+    this.ensureBuffers();
+
     const count = this.model.boneDefs.length;
     this.solved.fill(0);
 
@@ -134,6 +183,21 @@ export class InstanceAnim {
     if (scaling) {
       sampleVec3(scaling, isStep(def.scaling), t, scratchScale);
     }
+
+    // Record the un-composed local TRS BEFORE recursing into the parent -- the scratch objects are
+    // module-level and the recursive call below overwrites all three of them.
+    const trs = this.localTRS;
+    const o = index * LOCAL_TRS_STRIDE;
+    trs[o] = scratchPos.x;
+    trs[o + 1] = scratchPos.y;
+    trs[o + 2] = scratchPos.z;
+    trs[o + 3] = scratchQuat.x;
+    trs[o + 4] = scratchQuat.y;
+    trs[o + 5] = scratchQuat.z;
+    trs[o + 6] = scratchQuat.w;
+    trs[o + 7] = scratchScale.x;
+    trs[o + 8] = scratchScale.y;
+    trs[o + 9] = scratchScale.z;
 
     // M2 animates AROUND the pivot: translate to the pivot, apply the animated TRS, translate back.
     const pivot = def.pivotPoint;

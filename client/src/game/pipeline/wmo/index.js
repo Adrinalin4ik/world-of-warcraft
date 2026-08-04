@@ -248,7 +248,10 @@ class WMO {
       this.parentCounters.loadedDoodads++;
       this.counters.loadedDoodads++;
 
-      if (doodad.animated) {
+      // Same two-part membership test the real gates use (`DoodadManager#loadDoodad`): posing and
+      // billboarding are separate reasons to be in the per-frame set. Counting only `animated` here
+      // would under-report the set Task 16 will actually iterate.
+      if (doodad.animated || doodad.billboards.length > 0) {
         this.parentCounters.animatedDoodads++;
         this.counters.animatedDoodads++;
       }

@@ -1,6 +1,6 @@
 /** @jest-environment node */
 import * as THREE from 'three';
-import { InstanceAnim } from '../instance-anim';
+import { InstanceAnim, LOCAL_TRS_STRIDE } from '../instance-anim';
 import { ModelAnim } from '../model-anim';
 
 const animation = (over: any = {}) => ({
@@ -243,5 +243,129 @@ describe('solveBones', () => {
     inst.solveBones(0);
     inst.solveBones(16);
     expect(inst.palette).toBe(first);
+  });
+});
+
+/**
+ * The blueprint cache holds one never-placed prototype M2 per model path, and it owns an
+ * `InstanceAnim` like any other placement. Buffers sized off the bone count are the bulk of that
+ * object, so nothing may be allocated until an instance is actually armed.
+ */
+describe('lazy buffer allocation', () => {
+  const manyBones = () => model({
+    bones: Array.from({ length: 40 }, () => bone()),
+  });
+
+  it('holds no per-bone storage before arming', () => {
+    const inst = new InstanceAnim(manyBones());
+    expect(inst.palette.length).toBe(0);
+    expect(inst.localTRS.length).toBe(0);
+  });
+
+  it('allocates on arm', () => {
+    const m = manyBones();
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    expect(inst.palette.length).toBe(40 * 16);
+    expect(inst.localTRS.length).toBe(40 * LOCAL_TRS_STRIDE);
+  });
+
+  it('allocates on a solve that was never preceded by an arm', () => {
+    const inst = new InstanceAnim(manyBones());
+    expect(inst.solveBones(0)).toBe(40);
+    expect(inst.palette.length).toBe(40 * 16);
+  });
+
+  it('allocates exactly once across arm, re-arm and many solves', () => {
+    const m = manyBones();
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    const palette = inst.palette;
+    const trs = inst.localTRS;
+    inst.solveBones(0);
+    inst.arm(m.sequences[0], 500);
+    inst.solveBones(516);
+    expect(inst.palette).toBe(palette);
+    expect(inst.localTRS).toBe(trs);
+  });
+
+  it('costs nothing at all for a zero-bone model', () => {
+    const m = model({ bones: [] });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    expect(inst.palette.length).toBe(0);
+  });
+});
+
+/**
+ * `localTRS` is what actually reaches the screen -- `M2#applyPose` writes it into the three.js bone
+ * hierarchy, which then accumulates the parent chain. It must therefore hold the UN-composed local
+ * transform, never the parent-composed one the palette carries.
+ */
+describe('localTRS', () => {
+  it('defaults an unanimated bone to identity TRS', () => {
+    const m = model({ bones: [bone()] });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    inst.solveBones(0);
+    expect(Array.from(inst.localTRS)).toEqual([0, 0, 0, 0, 0, 0, 1, 1, 1, 1]);
+  });
+
+  it('records the sampled translation at the cursor', () => {
+    const m = model({
+      bones: [bone({ translation: vec3Block([[0, 0, 0], [10, 20, 30]]) })],
+    });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    inst.solveBones(500);
+    expect(inst.localTRS[0]).toBeCloseTo(5, 4);
+    expect(inst.localTRS[1]).toBeCloseTo(10, 4);
+    expect(inst.localTRS[2]).toBeCloseTo(15, 4);
+  });
+
+  it('records a child LOCAL, not the parent-composed matrix the palette holds', () => {
+    const m = model({
+      bones: [
+        bone({ translation: vec3Block([[100, 0, 0], [100, 0, 0]]) }),
+        bone({ parentID: 0, translation: vec3Block([[7, 0, 0], [7, 0, 0]]) }),
+      ],
+    });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    inst.solveBones(0);
+
+    // The palette accumulates: child sits at 107 along X.
+    expect(new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 1)).x).toBeCloseTo(107, 4);
+    // localTRS does not: the child's own contribution is 7.
+    expect(inst.localTRS[LOCAL_TRS_STRIDE]).toBeCloseTo(7, 4);
+  });
+
+  it('survives the parent recursion clobbering the shared scratch objects', () => {
+    // solveBone samples into module-level scratch and then recurses into its parent, which samples
+    // into the same scratch. Bone 1 is solved first here and must still report ITS values.
+    const m = model({
+      bones: [
+        bone({ translation: vec3Block([[1, 1, 1], [1, 1, 1]]) }),
+        bone({ parentID: 0, translation: vec3Block([[9, 9, 9], [9, 9, 9]]) }),
+      ],
+    });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    inst.solveBones(0);
+    expect(inst.localTRS[LOCAL_TRS_STRIDE]).toBeCloseTo(9, 4);
+    expect(inst.localTRS[0]).toBeCloseTo(1, 4);
+  });
+
+  it('records a sampled rotation as a unit quaternion', () => {
+    const m = model({
+      bones: [bone({ rotation: quatBlock([[0, 0, 0, 1], [0, 0, 0, 1]]) })],
+    });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    inst.solveBones(250);
+    const q = new THREE.Quaternion(
+      inst.localTRS[3], inst.localTRS[4], inst.localTRS[5], inst.localTRS[6],
+    );
+    expect(q.length()).toBeCloseTo(1, 6);
   });
 });

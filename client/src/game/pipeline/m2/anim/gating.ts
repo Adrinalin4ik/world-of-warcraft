@@ -3,9 +3,16 @@ export const NEAR_YD = 40;
 /** Below this, pose every second frame; beyond it, every fourth. */
 export const MID_YD = 120;
 
-/** How many frames apart an instance at this distance is re-posed. */
+/**
+ * How many frames apart an instance at this distance is re-posed.
+ *
+ * A non-finite distance takes the SAFEST bucket, not the cheapest. Written as a pair of `<`
+ * comparisons the NaN case falls all the way through to period 4, because every comparison against
+ * NaN is false -- so an uninitialised position would surface as a doodad animating at a quarter
+ * rate for no visible reason, which is a far harder bug to see than one animating at full rate.
+ */
 export function decimationPeriod(distanceYd: number): number {
-  if (distanceYd < NEAR_YD) {
+  if (!(distanceYd >= NEAR_YD)) {
     return 1;
   }
   return distanceYd < MID_YD ? 2 : 4;
@@ -21,6 +28,11 @@ export function decimationPeriod(distanceYd: number): number {
  *
  * Holding the previous palette between poses is safe because sampling is clock-indexed -- a stale
  * pose is a slightly old pose, never a drifting one. See `InstanceAnim`.
+ *
+ * `instanceId` must be a DENSE per-instance counter, not a content id. Feeding it doodad ENTRY ids
+ * -- which are sparse, large and clustered by chunk -- lets many instances share one residue and
+ * degrades the spread back toward the single-phase case this exists to prevent. Callers assign the
+ * slot at registration; see `DoodadManager#enableDoodadAnimations`.
  */
 export function shouldPose(instanceId: number, distanceYd: number, frameIndex: number): boolean {
   const period = decimationPeriod(distanceYd);

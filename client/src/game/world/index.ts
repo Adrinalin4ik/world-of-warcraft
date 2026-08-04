@@ -8,6 +8,7 @@ import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
 import { collisionDebugView } from "../collision/debug-view";
+import { worldClock } from "../pipeline/m2/anim/world-clock";
 import { modelProbe } from "../pipeline/m2/model-probe";
 import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
@@ -323,6 +324,12 @@ export default class World extends EventEmitter {
     camera: THREE.PerspectiveCamera,
     cameraMoved: boolean
   ) {
+    // FIRST, before anything reads it. Every animation consumer -- terrain doodads, WMO doodads,
+    // unit models, global sequences -- indexes off this one monotonic clock, so it has to advance
+    // exactly once per frame and it has to advance before the first read. See `anim/world-clock.ts`
+    // for why this is not a per-manager field.
+    worldClock.advance(delta);
+
     this.animateEntities(delta, camera, cameraMoved);
 
     if (this.map !== null) {
@@ -411,8 +418,14 @@ export default class World extends EventEmitter {
     }
 
     // Animated doodads: skinning reads `bone.matrixWorld`, and this is also the exact set that
-    // `DoodadManager#animate` runs `applyBillboards` over -- both mutate transforms under the
-    // doodad, so the whole subtree is forced.
+    // `DoodadManager#animate` runs `applyPose` and `applyBillboards` over -- both mutate transforms
+    // under the doodad, so the whole subtree is forced.
+    //
+    // Task 13's brief called for deleting this walk, on the grounds that the evaluator writes bone
+    // world matrices into the skeleton palette itself and three re-walking the hierarchy repeats the
+    // work. It does not: `M2#applyPose` writes per-bone LOCAL transforms (the M2 bone law reduces to
+    // one per bone -- see that method), and this walk is what accumulates them. Deleting it freezes
+    // every animated doodad AND every billboard-only doodad in bind pose. Kept deliberately.
     if (map.doodadManager) {
       map.doodadManager.animatedDoodads.forEach((doodad: any) => {
         doodad.updateMatrixWorld(true);

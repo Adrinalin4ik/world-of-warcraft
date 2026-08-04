@@ -16,6 +16,24 @@ describe('decimationPeriod', () => {
     expect(decimationPeriod(120)).toBe(4);
     expect(decimationPeriod(1000)).toBe(4);
   });
+
+  /**
+   * A NaN distance must take the SAFEST bucket, not the cheapest. Written as two `<` comparisons it
+   * fell through to period 4, because every comparison against NaN is false -- so an uninitialised
+   * position produced a doodad quietly animating at a quarter rate instead of an obvious one.
+   */
+  it('poses every frame when the distance is not a number', () => {
+    expect(decimationPeriod(NaN)).toBe(1);
+    expect(shouldPose(7, NaN, 3)).toBe(true);
+  });
+
+  it('poses every frame for a negative distance', () => {
+    expect(decimationPeriod(-1)).toBe(1);
+  });
+
+  it('still decimates an infinite distance', () => {
+    expect(decimationPeriod(Infinity)).toBe(4);
+  });
 });
 
 describe('shouldPose', () => {
