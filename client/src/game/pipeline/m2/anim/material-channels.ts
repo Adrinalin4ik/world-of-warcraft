@@ -31,7 +31,7 @@
 
 import * as THREE from 'three';
 
-import { InstanceAnim } from './instance-anim';
+import { InstanceAnim, UNARMED_SLOT } from './instance-anim';
 import { ModelAnim } from './model-anim';
 import { AnimBlock, isStep, sampleQuat, sampleScalar, sampleVec3, trackFor } from './tracks';
 
@@ -210,7 +210,11 @@ export function evaluateMaterialChannels(
   values: MaterialChannelValues,
   worldClockMs: number,
 ): void {
-  const seqIndex = inst && inst.current ? inst.current.index : 0;
+  // UNARMED reads `UNARMED_SLOT`, a non-slot, NOT slot 0 -- see the constant's own note. Slot 0 may
+  // be a quarantined external sequence, and nothing upstream checks `inst.current` before calling
+  // here. A GLOBAL-SEQUENCE channel is unaffected: `channelTrackIndex` overrides any slot with 0 for
+  // those, so a clock-driven glow keeps pulsing on an instance that never armed, as it must.
+  const seqIndex = inst && inst.current ? inst.current.index : UNARMED_SLOT;
 
   const uvDefs = defs.uv;
   for (let i = 0, len = uvDefs.length; i < len; ++i) {

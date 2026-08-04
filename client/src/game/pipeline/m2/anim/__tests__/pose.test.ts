@@ -11,8 +11,18 @@ import { buildBoneHierarchy, poseBindSkeleton } from '../../bind-pose';
  */
 const D = new THREE.Matrix4().makeScale(-1, -1, 1);
 
+/**
+ * `0x20` = keyframes inline in this .m2, as wolf Stand/Walk/Run really carry.
+ *
+ * These tests arm a sequence by hand rather than through `resolve`/`pickVariation`, so they would
+ * pass with `flags: 0` too -- but `flags: 0` means EXTERNAL, and `ModelAnim` quarantines it
+ * (`hasInlineData`). A fixture on that value describes a model that cannot reach these code paths.
+ * `0x20` leaves bit 0 alone, so no clock law moves.
+ */
+const INLINE = 0x20;
+
 const animation = (over: any = {}) => ({
-  id: 0, subID: 0, length: 1000, flags: 0, probability: 32767,
+  id: 0, subID: 0, length: 1000, flags: INLINE, probability: 32767,
   blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0, ...over,
 });
 
@@ -153,7 +163,7 @@ describe('applyLocalPose drives three to D . palette . D', () => {
   });
 
   /**
-   * Sampled at 500, NOT at 1000. The fixture sequence has `flags: 0` -> loops -> WRAP, and
+   * Sampled at 500, NOT at 1000. The fixture sequence has bit 0 clear -> loops -> WRAP, and
    * `length: 1000`, so `cursorMs(WRAP, 1000, 1000)` is `1000 % 1000` = 0 -- the FIRST key. Sampling
    * at the period made this assert the identity palette on both sides, a strictly weaker duplicate
    * of 'holds bind pose for an unanimated bone', and left non-uniform scale untested anywhere in the

@@ -33,8 +33,18 @@ const submeshDef = (over: any = {}) => ({
   startTriangle: 0, triangleCount: 0, rootBone: 0, ...over,
 });
 
+/**
+ * `0x20` = keyframes inline in this .m2, as wolf Stand/Walk/Run really carry.
+ *
+ * These tests arm a sequence by hand rather than through `resolve`/`pickVariation`, so they would
+ * pass with `flags: 0` too -- but `flags: 0` means EXTERNAL, and `ModelAnim` quarantines it
+ * (`hasInlineData`). A fixture on that value describes a model that cannot reach these code paths.
+ * `0x20` leaves bit 0 alone, so no clock law moves.
+ */
+const INLINE = 0x20;
+
 const animation = (over: any = {}) => ({
-  id: 0, subID: 0, length: 1000, flags: 0, probability: 32767,
+  id: 0, subID: 0, length: 1000, flags: INLINE, probability: 32767,
   blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0, ...over,
 });
 
@@ -307,7 +317,7 @@ describe('applySoleBone reproduces three\'s own palette entry', () => {
   });
 
   /**
-   * Sampled at 500, NOT at 1000. `flags: 0` loops -> WRAP, and `cursorMs(WRAP, 1000, 1000)` is 0 --
+   * Sampled at 500, NOT at 1000. the fixture loops (bit 0 clear) -> WRAP, and `cursorMs(WRAP, 1000, 1000)` is 0 --
    * sampling at the period would silently take the FIRST key and re-assert the at-rest case above.
    */
   it('matches for a translated bone with a non-zero pivot', () => {

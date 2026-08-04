@@ -20,6 +20,17 @@ const EMPTY_U8 = new Uint8Array(0);
 export const LOCAL_TRS_STRIDE = 10;
 
 /**
+ * The sequence slot an UNARMED instance samples: a non-slot.
+ *
+ * Deliberately not 0. Slot 0 is a real sequence whose keys may be quarantined noise
+ * (`model-anim.ts#hasInlineData`), and the pose paths solve an instance whether or not it ever
+ * armed. `-1` indexes past the start of every `tracks` array, so `trackFor` returns null and every
+ * channel holds its identity -- bind pose for bones, and for material channels their default value.
+ * It is the one index that cannot itself be quarantined, now or after Task 20.
+ */
+export const UNARMED_SLOT = -1;
+
+/**
  * Per-placement animation state: a clock, and nothing else that could have lived on the model.
  *
  * Sampling is CLOCK-INDEXED (`cursor = worldClock - armedAt`), never delta-accumulated
@@ -172,7 +183,14 @@ export class InstanceAnim {
     this.solved[index] = 1;
 
     const def = this.model.boneDefs[index];
-    const seqIndex = this.current ? this.current.index : 0;
+    // UNARMED reads slot -1, a non-slot, NOT slot 0. Nothing on the pose paths checks `current` --
+    // `poseGatedInstance` calls `solveBones` unconditionally and its callers gate on `inst !== null`
+    // -- so an instance that never armed still gets solved every eligible frame. Slot 0 is not
+    // guaranteed inline, and a model whose id-0 variations are all external (so `armDoodad` latched
+    // unarmable, or `resolve` returned null) would sample exactly the quarantined noise
+    // `hasInlineData` exists to withhold. `trackFor` returns null for -1, so every channel falls to
+    // bind pose, which is the correct unarmed appearance anyway.
+    const seqIndex = this.current ? this.current.index : UNARMED_SLOT;
     const t = this.cursor(worldClockMs);
 
     scratchPos.set(0, 0, 0);

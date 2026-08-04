@@ -3,8 +3,18 @@ import * as THREE from 'three';
 import { InstanceAnim, LOCAL_TRS_STRIDE } from '../instance-anim';
 import { ModelAnim } from '../model-anim';
 
+/**
+ * `0x20` = keyframes inline in this .m2, as wolf Stand/Walk/Run really carry.
+ *
+ * These tests arm `m.sequences[0]` by hand rather than through `resolve`/`pickVariation`, so they
+ * would pass with `flags: 0` too -- but `flags: 0` means EXTERNAL, and `ModelAnim` quarantines it
+ * (`hasInlineData`). A fixture on that value describes a model that cannot reach these code paths.
+ * `0x20` leaves bit 0 alone, so no clock law moves.
+ */
+const INLINE = 0x20;
+
 const animation = (over: any = {}) => ({
-  id: 0, subID: 0, length: 1000, flags: 0, probability: 32767,
+  id: 0, subID: 0, length: 1000, flags: INLINE, probability: 32767,
   blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0, ...over,
 });
 
@@ -35,7 +45,7 @@ describe('InstanceAnim clock', () => {
   });
 
   it('clamps a one-shot sequence at its length', () => {
-    const m = model({ animations: [animation({ flags: 0x01, length: 1000 })] });
+    const m = model({ animations: [animation({ flags: INLINE | 0x01, length: 1000 })] });
     const inst = new InstanceAnim(m);
     inst.arm(m.sequences[0], 0);
     expect(inst.cursor(2500)).toBe(1000);
@@ -89,7 +99,7 @@ const quatBlock = (values: number[][]) => ({
 });
 /** A non-wrapping 2000ms sequence -- see the comment on 'composes a child onto its parent'. */
 const longAnimation = () => ([{
-  id: 0, subID: 0, length: 2000, flags: 0, probability: 32767,
+  id: 0, subID: 0, length: 2000, flags: INLINE, probability: 32767,
   blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0,
 }]);
 const bone = (over: any = {}) => ({
@@ -122,7 +132,7 @@ describe('solveBones', () => {
 
   it('composes a child onto its parent', () => {
     // NOTE: sequence length is overridden to 2000ms (not the fixture default of 1000ms). The
-    // default model()'s sequence loops (flags 0) with length 1000ms, and the WRAP clock law wraps
+    // default model()'s sequence loops (bit 0 clear) with length 1000ms, and the WRAP clock law wraps
     // an elapsed time exactly equal to the period back to cursor 0 (verified by
     // 'does not drift across many pause/resume cycles' above) -- so solveBones(1000) against the
     // default-length sequence would sample the START of the translation track, not the end, and
@@ -130,7 +140,7 @@ describe('solveBones', () => {
     // sequence keeps 1000ms strictly inside the window.
     const m = model({
       animations: [{
-        id: 0, subID: 0, length: 2000, flags: 0, probability: 32767,
+        id: 0, subID: 0, length: 2000, flags: INLINE, probability: 32767,
         blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0,
       }],
       bones: [
@@ -376,5 +386,82 @@ describe('localTRS', () => {
       inst.localTRS[3], inst.localTRS[4], inst.localTRS[5], inst.localTRS[6],
     );
     expect(q.length()).toBeCloseTo(1, 6);
+  });
+});
+
+/**
+ * `poseGatedInstance` calls `solveBones` unconditionally, and its three callers
+ * (`doodad-manager.js#animateDoodads`, `wmo/index.js#animate`, `world/index.ts#animateEntities`)
+ * gate on `inst !== null`, not on `inst.current !== null`. So an instance that never armed is still
+ * solved every eligible frame -- reachable whenever `armDoodad` latches unarmable or `resolve`
+ * returns null, both of which the external-sequence quarantine makes more common.
+ *
+ * Defaulting that case to sequence slot 0 reads a real track, and slot 0 is not guaranteed inline.
+ */
+describe('the unarmed instance solves from a non-slot, not slot 0', () => {
+  // Kills: `this.current ? this.current.index : 0` in `solveBone`.
+  //
+  // Slot 0's FIRST key is [7, 0, 0], not the origin, and that detail is load-bearing: `cursor()`
+  // returns 0 for an unarmed instance, so a slot-0 default samples key 0 of the track and nothing
+  // else. A fixture whose first key happens to be the origin passes either way -- which is exactly
+  // what the first draft of this test did. Real noise has no reason to start at the origin.
+  it('poses to bind pose rather than sampling slot 0', () => {
+    const m = new ModelAnim({
+      // Slot 0 EXTERNAL, slot 1 inline -- the shape where slot 0's keys are parsed noise.
+      animations: [animation({ id: 0, flags: 0 }), animation({ id: 1, flags: INLINE })],
+      sequences: [],
+      bones: [bone({
+        translation: {
+          interpolationType: 1,
+          globalSequenceID: -1,
+          tracks: [
+            { animationIndex: 0, timestamps: [0, 1000], values: [[7, 0, 0], [10, 0, 0]] },
+            { animationIndex: 1, timestamps: [0, 1000], values: [[0, 0, 0], [0, 0, 0]] },
+          ],
+        },
+      })],
+    });
+
+    const inst = new InstanceAnim(m);
+    expect(inst.current).toBeNull();
+    inst.solveBones(500);
+
+    expect(matrixOf(inst, 0).equals(new THREE.Matrix4())).toBe(true);
+  });
+
+  // Kills: a fix that reaches bind pose by refusing to solve at all. The palette must still be
+  // filled with identity matrices, because the skinning shader reads it either way.
+  it('still fills the palette, with identity', () => {
+    const m = model({ bones: [bone(), bone({ parentID: 0 })] });
+    const inst = new InstanceAnim(m);
+
+    expect(inst.solveBones(500)).toBe(2);
+    expect(matrixOf(inst, 0).equals(new THREE.Matrix4())).toBe(true);
+    expect(matrixOf(inst, 1).equals(new THREE.Matrix4())).toBe(true);
+  });
+
+  // Kills: reintroducing slot 0 once a sequence IS armed. The same block, the same instance --
+  // arming slot 1 must select slot 1's track, and arming slot 0 must select slot 0's.
+  it('reads the armed slot once armed', () => {
+    const m = model({
+      animations: [animation(), animation({ id: 1 })],
+      bones: [bone({ translation: {
+        interpolationType: 1,
+        globalSequenceID: -1,
+        tracks: [
+          { animationIndex: 0, timestamps: [0, 1000], values: [[0, 0, 0], [10, 0, 0]] },
+          { animationIndex: 1, timestamps: [0, 1000], values: [[0, 0, 0], [-6, 0, 0]] },
+        ],
+      } })],
+    });
+    const inst = new InstanceAnim(m);
+
+    inst.arm(m.sequences[0], 0);
+    inst.solveBones(500);
+    expect(new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 0)).x).toBeCloseTo(5, 4);
+
+    inst.arm(m.sequences[1], 0);
+    inst.solveBones(500);
+    expect(new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 0)).x).toBeCloseTo(-3, 4);
   });
 });

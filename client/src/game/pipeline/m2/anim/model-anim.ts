@@ -97,13 +97,22 @@ function inlineSlots(data: M2AnimData): boolean[] {
 /**
  * Is this block's track at `slot` readable, or is it quarantined noise?
  *
- * A GLOBAL-SEQUENCE block is exempt: its `tracks` array is not a sequence timeline at all. It holds
- * a single track read at index 0 regardless of what is playing (`channelTrackIndex`), so a sequence
- * slot's inline flag says nothing about it. Quarantining those would silently freeze every
- * clock-driven glow and sky band in the game.
+ * A GLOBAL-SEQUENCE block does not have a sequence timeline at all: it carries a single track, read
+ * at index 0 whatever is playing. So a sequence slot's inline flag says nothing about it, and
+ * quarantining one would silently freeze every clock-driven glow and sky band in the game. It is
+ * exempt -- but at index 0 ONLY, matching what the sampler actually reads. A global block whose
+ * track 0 is empty and whose track 1 is populated can never produce a sample, so calling it
+ * animated would put the model in the posing set for nothing.
+ *
+ * The `channelTrackIndex` rule this mirrors is the MATERIAL path
+ * (`material-channels.ts#channelTrackIndex`). `InstanceAnim#solveBone` samples bone blocks with a
+ * raw `trackFor(def.translation, seqIndex)` and ignores `globalSequenceID` entirely, so for a
+ * global-sequence BONE block the exemption admits a key the bone sampler will index by `seqIndex`
+ * and usually miss. That inconsistency predates this quarantine and is left alone deliberately:
+ * classifying such a model animated is the conservative side of a bug that lives elsewhere.
  */
 function slotReadable(block: AnimBlock, slot: number, slots: boolean[]): boolean {
-  return block.globalSequenceID > -1 || slots[slot] === true;
+  return block.globalSequenceID > -1 ? slot === 0 : slots[slot] === true;
 }
 
 /** Does an animation block hold any keys at all, in a slot that is not quarantined? */

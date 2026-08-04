@@ -136,6 +136,31 @@ describe('Unit#startAnimation resolution', () => {
     expect(u.model.instanceAnim.current.index).toBe(0);
   });
 
+  /**
+   * `resolve` now returns null for a model whose every sequence is EXTERNAL -- its keyframes live
+   * in a sibling `.anim` file and what the parser read off the `.m2` buffer is noise
+   * (`model-anim.ts#hasInlineData`). This is what `unit.ts`'s `if (!seq) return;` promises, and it
+   * is reachable in normal play: `unit.ts` arms whatever id the SMSG handler sends.
+   *
+   * Kills: an exit gate in `resolve` that can never return null, and a `startAnimation` that
+   * dereferences the result before checking it. Also pins that `currentAnimationId` is still
+   * recorded -- Task 20 merges the real data later, and the model setter replays that id, so
+   * dropping it here would leave the unit silently stuck on Stand for ever afterwards.
+   */
+  it('does not arm a model whose every sequence is external, but still records the request', () => {
+    const u = unit([animation({ id: 0, flags: 0 }), animation({ id: 15, flags: 0 })]);
+
+    expect(u.model.modelAnim.resolve(15)).toBeNull();
+    expect(() => u.startAnimation(15, -1)).not.toThrow();
+
+    expect(u.model.instanceAnim.current).toBeNull();
+    expect(u.emitted).toHaveLength(0);
+
+    // `setAnimation` records BEFORE the resolve, so a later merge can replay it.
+    u.setAnimation(15);
+    expect(u.currentAnimationId).toBe(15);
+  });
+
   /** Kills: dereferencing a null `instanceAnim` -- true for every model that animates nothing. */
   it('does nothing for a model with no instance', () => {
     const u = unit([animation()]);

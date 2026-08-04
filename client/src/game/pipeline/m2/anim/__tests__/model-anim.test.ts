@@ -416,12 +416,36 @@ describe('external sequences are quarantined', () => {
     })).toBe(true);
   });
 
+  // Kills: exempting EVERY track of a global block rather than track 0 alone. Only track 0 is ever
+  // read (`channelTrackIndex`), so keys parked in track 1 can never produce a sample and must not
+  // pull the model into the posing set.
+  it('exempts a global-sequence block at track 0 only', () => {
+    const keysInTrackOneOnly = {
+      interpolationType: 1,
+      globalSequenceID: 0,
+      tracks: [
+        { animationIndex: 0, timestamps: [], values: [] },
+        { animationIndex: 1, timestamps: [0, 500], values: [0.0, 1.0] },
+      ],
+    };
+    expect(classify({
+      animations: [animation({ id: 0, flags: 0 })],
+      sequences: [1000],
+      bones: [],
+      transparencyAnimations: [keysInTrackOneOnly],
+    })).toBe(false);
+  });
+
   // Kills: folding the inline bit into `sequenceLoops`. Bit 0 is independent of the 0x130 mask, and
   // an external one-shot must still report one-shot -- Task 20 lifts the quarantine without
   // re-deriving the clock law.
   it('leaves the loop law independent of the inline bit', () => {
-    expect(sequenceLoops(0x00)).toBe(sequenceLoops(0x20));
-    expect(sequenceLoops(0x01)).toBe(sequenceLoops(0x21));
+    // Absolute, not `toBe(sequenceLoops(...))` -- an equality between two calls of the same
+    // function survives a `return false` mutant.
+    expect(sequenceLoops(0x00)).toBe(true);
+    expect(sequenceLoops(0x20)).toBe(true);
+    expect(sequenceLoops(0x01)).toBe(false);
+    expect(sequenceLoops(0x21)).toBe(false);
     const m = new ModelAnim(data({ animations: [animation({ id: 0, flags: 0x01 })] }));
     expect(m.sequences[0]).toMatchObject({ inline: false, loops: false });
   });

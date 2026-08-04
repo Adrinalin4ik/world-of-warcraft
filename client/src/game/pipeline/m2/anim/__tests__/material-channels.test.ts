@@ -10,8 +10,18 @@ import {
 } from '../material-channels';
 import { ModelAnim } from '../model-anim';
 
+/**
+ * `0x20` = keyframes inline in this .m2, as wolf Stand/Walk/Run really carry.
+ *
+ * These tests arm a sequence by hand rather than through `resolve`/`pickVariation`, so they would
+ * pass with `flags: 0` too -- but `flags: 0` means EXTERNAL, and `ModelAnim` quarantines it
+ * (`hasInlineData`). A fixture on that value describes a model that cannot reach these code paths.
+ * `0x20` leaves bit 0 alone, so no clock law moves.
+ */
+const INLINE = 0x20;
+
 const animation = (over: any = {}) => ({
-  id: 0, subID: 0, length: 2000, flags: 0, probability: 32767,
+  id: 0, subID: 0, length: 2000, flags: INLINE, probability: 32767,
   blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0, ...over,
 });
 
@@ -438,5 +448,68 @@ describe('degenerate input', () => {
     inst.arm(m.sequences[0], 0);
 
     expect(() => evaluateMaterialChannels(m, inst, defs, values(), 100)).not.toThrow();
+  });
+});
+
+/**
+ * Nothing upstream checks `inst.current` before evaluating. The material path is reached with a
+ * null instance (`evaluateMaterialChannels(m, null, ...)`) and with an instance that was allocated
+ * from `animated` but never armed -- e.g. a unit whose `resolve` returned null because every
+ * sequence it owns is external, or a doodad whose `armDoodad` latched unarmable.
+ *
+ * Defaulting that case to slot 0 samples a real sequence's track, and slot 0 is not guaranteed
+ * inline. `UNARMED_SLOT` is -1, a non-slot, so every sequence-timeline channel holds its identity.
+ */
+describe('the unarmed instance reads a non-slot, not slot 0', () => {
+  const quarantinedSlotZero = () => new ModelAnim({
+    // Slot 0 EXTERNAL, slot 1 inline: the shape that makes the old `: 0` default sample noise.
+    animations: [animation({ id: 0, flags: 0 }), animation({ id: 1, flags: INLINE })],
+    sequences: [],
+    bones: [],
+  });
+
+  // Kills: `inst && inst.current ? ... : 0`. Slot 0's track is loud and non-identity, so a default
+  // of 0 writes 0.25 here instead of leaving the channel opaque.
+  it('holds transparency at its identity rather than sampling slot 0', () => {
+    const m = quarantinedSlotZero();
+    const defs = {
+      uv: [],
+      transparency: [seqBlock([
+        { timestamps: [0, 1000], values: [0.0, 0.5] },   // slot 0 -- quarantined noise
+        { timestamps: [0, 1000], values: [1.0, 1.0] },   // slot 1 -- inline
+      ])],
+      vertexColor: [],
+    };
+    const v = values(0, 1, 0);
+
+    const neverArmed = new InstanceAnim(m);
+    expect(neverArmed.current).toBeNull();
+    evaluateMaterialChannels(m, neverArmed, defs, v, 500);
+    expect(v.transparency[0]).toBe(1.0);
+
+    // Same for no instance at all, which is the other way this path is reached.
+    v.transparency[0] = 1.0;
+    evaluateMaterialChannels(m, null, defs, v, 500);
+    expect(v.transparency[0]).toBe(1.0);
+  });
+
+  // Kills: over-correcting the fix into "an unarmed instance evaluates nothing". A global sequence
+  // is clock-driven with zero arming -- `channelTrackIndex` overrides the slot with 0 for those --
+  // so a brazier must keep pulsing on an instance nobody ever armed.
+  it('still runs a global-sequence channel while unarmed', () => {
+    const m = new ModelAnim({
+      animations: [animation({ id: 0, flags: 0 })],
+      sequences: [1000],
+      bones: [],
+    });
+    const defs = {
+      uv: [],
+      transparency: [globalBlock(0, [0, 1000], [0.0, 1.0])],
+      vertexColor: [],
+    };
+    const v = values(0, 1, 0);
+
+    evaluateMaterialChannels(m, new InstanceAnim(m), defs, v, 500);
+    expect(v.transparency[0]).toBeCloseTo(0.5);
   });
 });
