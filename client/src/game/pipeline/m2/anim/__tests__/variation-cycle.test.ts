@@ -36,6 +36,15 @@ describe('SharedRng', () => {
     const b = rng.next();
     expect(a).not.toBe(b);
   });
+
+  /**
+   * Locks fidelity to MSVC rand(). The LCG is state = state * 214013 + 2531011; result = (state >> 16) & 0x7fff.
+   * With seed 1: state = 1 * 214013 + 2531011 = 2745024 = 0x29E800; >> 16 = 0x29 = 41; & 0x7fff = 41.
+   */
+  it('matches the reference MSVC rand() sequence on the first draw', () => {
+    const rng = new SharedRng(1);
+    expect(rng.next()).toBe(41);
+  });
 });
 
 describe('armDoodad', () => {
