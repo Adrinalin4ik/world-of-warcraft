@@ -104,13 +104,18 @@ export function sampleScalar(
   }
 
   const k0 = bracket(timestamps, tMs);
-  const va = values[k0] as number;
+  // Clamp k0 to the valid range of the values array. This defends against malformed tracks
+  // where timestamps and values arrays have mismatched lengths — real data that can occur when
+  // a parser or data source has a bug. Without this guard, k0 can index past the values array,
+  // causing `va` and `vb` to be `undefined` and silently propagating NaN into bone matrices.
+  const k0Clamped = Math.min(k0, values.length - 1);
+  const va = values[k0Clamped] as number;
 
   // Step, or past the final key: HOLD. There is deliberately no wrap-lerp back toward key 0.
   if (step || atEnd(track, k0)) {
     return va;
   }
 
-  const vb = values[k0 + 1] as number;
+  const vb = values[k0Clamped + 1] as number;
   return va + (vb - va) * fraction(timestamps, k0, tMs);
 }

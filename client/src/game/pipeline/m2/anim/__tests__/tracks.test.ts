@@ -68,7 +68,33 @@ describe('sampleScalar', () => {
     expect(sampleScalar(track([], []), false, 10, -1)).toBe(-1);
   });
 
-  it('holds rather than dividing by zero on duplicate timestamps', () => {
+  it('clamps to the last real value when timestamps and values array lengths mismatch (timestamps longer)', () => {
+    // Malformed track where timestamps array is longer than values array.
+    // bracket() returns k0=2 (last timestamp <= 200), but values[2] is out of bounds.
+    // Should return the last real value (values[1]), not undefined/NaN.
+    expect(sampleScalar(track([0, 100, 200], [0, 10]), false, 200, -1)).toBe(10);
+    expect(sampleScalar(track([0, 100, 200], [0, 10]), false, 10_000, -1)).toBe(10);
+  });
+
+  it('clamps to the last real value on step interpolation with mismatched array lengths', () => {
+    expect(sampleScalar(track([0, 100, 200], [0, 10]), true, 200, -1)).toBe(10);
+    expect(sampleScalar(track([0, 100, 200], [0, 10]), true, 10_000, -1)).toBe(10);
+  });
+
+  it('always returns a finite number, never undefined or NaN', () => {
+    const result1 = sampleScalar(linear, false, 150, -1);
+    expect(Number.isFinite(result1)).toBe(true);
+
+    const result2 = sampleScalar(track([0, 100, 200], [0, 10]), false, 200, -1);
+    expect(Number.isFinite(result2)).toBe(true);
+
+    const result3 = sampleScalar(track([40], [7]), false, 900, -1);
+    expect(Number.isFinite(result3)).toBe(true);
+  });
+
+  it('holds the last key on duplicate timestamps', () => {
+    // When timestamps[k0] === timestamps[k0+1], fraction returns 0, so we hold at va.
+    // This is the correct behavior for authors who keyframe the same value twice.
     expect(sampleScalar(track([0, 100, 100, 200], [0, 5, 9, 12]), false, 100, 0)).toBe(9);
   });
 });
