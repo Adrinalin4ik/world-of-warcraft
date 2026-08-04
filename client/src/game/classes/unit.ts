@@ -321,10 +321,17 @@ class Unit extends Entity {
   /**
    * Request an animation by `AnimationData.dbc` id.
    *
-   * The re-entry guard is load-bearing, not an optimisation. `updateMoving` calls this once per
-   * FRAME for as long as a movement key is held, and `InstanceAnim` is clock-indexed off its
-   * `armedAtMs`: re-arming every frame pins the cursor at zero and freezes the model on the first
-   * keyframe of a run cycle -- an animation system that looks exactly like a broken one.
+   * WHO ACTUALLY CALLS THIS TODAY: only the SMSG handler at `network/entity/entity.ts:52`, plus the
+   * model setter's one-time Stand. `updateMoving` below WOULD call it once per frame per held
+   * movement key, and `jump()` would fire the one-shot -- but neither has a caller anywhere in the
+   * client (Controls drives the player's frame directly and never touches animation), so no unit
+   * currently plays anything but Stand. See this task's report: wiring locomotion is unplanned work.
+   *
+   * The re-entry guard below is therefore a LATENT correctness fix, not one that fires today, and it
+   * is retained deliberately because it becomes load-bearing the moment `updateMoving` is wired:
+   * `InstanceAnim` is clock-indexed off `armedAtMs`, so a per-frame re-arm pins the cursor at zero
+   * and freezes the model on the first keyframe of its run cycle -- an animation system that looks
+   * exactly like a broken one. It is far cheaper to keep than to rediscover.
    *
    * `repetitions` is carried for the network caller's signature (`network/entity/entity.ts`) and is
    * not honoured yet: `InstanceAnim` holds one sequence and its loop flag, with no repeat count.
@@ -334,6 +341,13 @@ class Unit extends Entity {
     interrupt: boolean = false,
     repetitions: number = -1
   ) {
+    // BEFORE the model check, so a request that beats the model home is not dropped. Spawn and
+    // animation packets routinely arrive ahead of an async M2 load, and the model setter replays
+    // `currentAnimationId` when the load lands -- so recording it here is what turns "arrived too
+    // early" into "arrives late" instead of into silence. Returning without this left the unit on
+    // Stand with nothing to say why.
+    this.currentAnimationId = id;
+
     if (!this.model) return;
 
     const inst = this.model.instanceAnim;

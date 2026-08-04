@@ -45,11 +45,12 @@ describe('Unit#setAnimation re-entry guard', () => {
   /**
    * Kills: arming unconditionally on every call -- which is what the pre-Task-16 stub did.
    *
-   * `Unit#updateMoving` calls `setAnimation(Animation.forward, true)` once per FRAME for as long as
-   * the key is held, and `InstanceAnim` is clock-indexed off `armedAtMs`. Re-arming each frame pins
-   * the cursor at zero, so the model stands on the first keyframe of its run cycle for the whole
-   * run. Note the `interrupt` argument is `true` at that call site, so the guard must hold in spite
-   * of it for a looping sequence.
+   * `Unit#updateMoving` WOULD call `setAnimation(Animation.forward, true)` once per FRAME for as
+   * long as the key is held -- it has no caller today (locomotion is unwired; see the task report),
+   * so this pins a LATENT hazard rather than a live one. `InstanceAnim` is clock-indexed off
+   * `armedAtMs`, so re-arming each frame pins the cursor at zero and the model stands on the first
+   * keyframe of its run cycle for the whole run. Note `interrupt` is `true` at that call site, so
+   * the guard must hold in spite of it for a looping sequence.
    */
   it('does not re-arm a loop that is already running, even with interrupt set', () => {
     const u = unit([animation({ id: 2 })]);
@@ -141,5 +142,28 @@ describe('Unit#startAnimation resolution', () => {
     u.model = null;
 
     expect(() => u.setAnimation(0)).not.toThrow();
+  });
+
+  /**
+   * Kills: the early `if (!this.model) return;` dropping the request on the floor.
+   *
+   * Spawn and animation packets routinely arrive ahead of the async M2 load, so this is the normal
+   * case for a unit streaming in, not an edge one. The id has to be RECORDED even though it cannot
+   * be armed, because the `model` setter replays `currentAnimationId` when the load lands. Returning
+   * first left the unit standing on Stand with nothing to explain why.
+   */
+  it('records an animation requested before the model has loaded, for the setter to replay', () => {
+    const u = unit([animation({ id: 0 }), animation({ id: 15 })]);
+    const pending = u.model;
+    u.model = null;
+
+    u.setAnimation(15);
+    expect(u.currentAnimationId).toBe(15);
+
+    // What `set model` does once the load resolves.
+    u.model = pending;
+    u.startAnimation(u.currentAnimationId, -1);
+
+    expect(u.model.instanceAnim.current.id).toBe(15);
   });
 });

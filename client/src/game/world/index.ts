@@ -531,11 +531,11 @@ export default class World extends EventEmitter {
 
       // Assigned lazily: a unit's model arrives asynchronously, long after `add()`, so there is no
       // single registration site to hang this on the way the doodad managers have.
-      if (inst !== null && model.poseSlot < 0) {
+      if (inst && model.poseSlot < 0) {
         model.poseSlot = this.nextUnitPoseSlot++;
       }
 
-      if (inst !== null) {
+      if (inst) {
         animCounters.resident++;
       }
 
@@ -544,14 +544,14 @@ export default class World extends EventEmitter {
       // running `cycleDoodad` here would re-roll a creature's animation out from under the server
       // every time its current one ended.
       if (model.visible === false) {
-        if (inst !== null) {
+        if (inst) {
           animCounters.skipped++;
         }
         return;
       }
 
       // Non-bone channels behind the DRAW gate only -- same split as the doodad paths.
-      if (inst !== null) {
+      if (inst) {
         animCounters.materialsEvaluated++;
         model.evaluateMaterialChannels(worldClockMs);
       }
@@ -559,10 +559,10 @@ export default class World extends EventEmitter {
       // Bone work behind `useSkinning`: a model animating only UV / transparency / vertex colour has
       // its bones orphaned from the scene graph (`createMesh` parents the root bones only on the
       // skinning branch), so solving them writes into objects nothing reads.
-      if (inst !== null && model.useSkinning) {
+      if (inst && model.useSkinning) {
         // `null` budget: units are exempt. See this method's doc.
         poseGatedInstance(model, inst, camPos, frameIndex, worldClockMs, null);
-      } else if (inst !== null) {
+      } else if (inst) {
         animCounters.skipped++;
       }
 
@@ -570,9 +570,28 @@ export default class World extends EventEmitter {
         model.applyBillboards(camera);
       }
 
-      // No `poseFrame` stamp and no gated walk for units: `entity.view` is a direct child of the
-      // scene root, and `updateDynamicMatrices` re-accumulates every non-static root child
-      // unconditionally. Units move every frame anyway, so there is nothing to skip.
+      // NO `poseFrame` stamp and no gated walk for units, and this cost is KNOWINGLY retained.
+      //
+      // `entity.view` is a direct child of the scene root, so `updateDynamicMatrices` gives it an
+      // unconditional forced `updateMatrixWorld(true)` -- the same O(bones) accumulate the doodad
+      // paths gate on `poseFrame`. So a distant unit that the decimation gate just skipped still
+      // pays for the walk, which does blunt decimation for exactly the population it was adopted
+      // for. The earlier claim here ("units move every frame anyway, so there is nothing to skip")
+      // was too glib, and is corrected rather than acted on, because the gate is NOT the same shape
+      // as the doodad one:
+      //
+      // A doodad's world transform is fixed at placement, so its bone subtree only needs
+      // re-accumulating when its BONES moved. A unit's does not: skinning draws
+      // `bone.matrixWorld . boneInverse` against `mesh.matrixWorld^-1`, so the moment the unit's own
+      // transform changes, stale bone world matrices smear the model regardless of whether it was
+      // posed. The correct predicate is therefore `posed OR moved`, not `posed`, and the genuinely
+      // skippable set is only units that are BOTH un-posed AND stationary -- which excludes every
+      // walking creature and, since `decimationPeriod` is 1 inside 40 yd, every nearby idle one too.
+      //
+      // Implementing it means lifting entity views out of the generic root-child loop and tracking
+      // per-unit movement there. That is worth doing when the unit count justifies it; the entity
+      // map currently holds the player. Task 20 has the measurement (`animCounters` now includes
+      // units) to decide.
 
       // if (model.skeletonHelper) {
       //   model.skeletonHelper.update();
