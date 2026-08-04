@@ -98,6 +98,12 @@ export function classify(data: M2AnimData): boolean {
   return false;
 }
 
+/** Sequence flag 0x40: this sequence is an alias for the one `alias` points at. */
+const FLAG_ALIAS = 0x40;
+
+/** Guard against a malformed alias ring. Real chains are one or two hops. */
+const MAX_ALIAS_HOPS = 8;
+
 /**
  * Per-model animation data: immutable, built ONCE per model path in the M2Blueprint cache.
  *
@@ -133,5 +139,87 @@ export class ModelAnim {
 
     this.globalSequenceDurations = data.sequences || [];
     this.animated = classify(data);
+  }
+
+  /** Every sequence sharing an `AnimationData.dbc` id -- the variation set. */
+  variationsOf(animId: number): Sequence[] {
+    const out: Sequence[] = [];
+    for (let i = 0, len = this.sequences.length; i < len; ++i) {
+      if (this.sequences[i].id === animId) {
+        out.push(this.sequences[i]);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Choose among an id's variations by frequency weight.
+   *
+   * Port of benilla's `pick_variation` (`anims.rs:189`). `roll` comes from the single shared RNG
+   * stream -- see `variation-cycle.ts` for why the stream must be shared rather than seeded per
+   * placement.
+   *
+   * An all-zero weight set still returns a variation: some models leave `probability` unset, and
+   * refusing to pick would freeze them instead of animating them uniformly.
+   */
+  pickVariation(animId: number, roll: number): Sequence | null {
+    const variations = this.variationsOf(animId);
+    if (variations.length === 0) {
+      return null;
+    }
+
+    let total = 0;
+    for (let i = 0, len = variations.length; i < len; ++i) {
+      total += variations[i].probability;
+    }
+    if (total <= 0) {
+      return variations[roll % variations.length];
+    }
+
+    let cumulative = 0;
+    for (let i = 0, len = variations.length; i < len; ++i) {
+      cumulative += variations[i].probability;
+      if (roll < cumulative) {
+        return variations[i];
+      }
+    }
+
+    return variations[variations.length - 1];
+  }
+
+  /**
+   * Resolve a requested animation id to a sequence this model actually owns.
+   *
+   * Port of benilla's `resolve` (`anims.rs:213`). Three steps, in order: follow an alias chain to
+   * its target; return a directly owned id; otherwise fall back to sequence 0 (Stand).
+   *
+   * Falling back rather than returning null for an unowned id is deliberate -- a unit asked to play
+   * an animation its model lacks should stand, not freeze in bind pose.
+   */
+  resolve(requestedId: number): Sequence | null {
+    if (this.sequences.length === 0) {
+      return null;
+    }
+
+    let current = this.findById(requestedId);
+
+    for (let hop = 0; current && (current.flags & FLAG_ALIAS) !== 0 && hop < MAX_ALIAS_HOPS; ++hop) {
+      const target = this.sequences[current.alias];
+      if (!target || target === current) {
+        break;
+      }
+      current = target;
+    }
+
+    return current || this.sequences[0];
+  }
+
+  private findById(animId: number): Sequence | null {
+    for (let i = 0, len = this.sequences.length; i < len; ++i) {
+      if (this.sequences[i].id === animId) {
+        return this.sequences[i];
+      }
+    }
+    return null;
   }
 }

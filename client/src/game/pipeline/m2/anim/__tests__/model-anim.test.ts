@@ -89,3 +89,81 @@ describe('ModelAnim', () => {
     expect(new ModelAnim(data()).animated).toBe(false);
   });
 });
+
+describe('pickVariation', () => {
+  const m = new ModelAnim(data({
+    animations: [
+      animation({ id: 0, subID: 0, probability: 30000 }),
+      animation({ id: 0, subID: 1, probability: 2767 }),
+      animation({ id: 4, subID: 0, probability: 32767 }),
+    ],
+  }));
+
+  it('lists every variation sharing an id', () => {
+    expect(m.variationsOf(0).map((s) => s.subId)).toEqual([0, 1]);
+    expect(m.variationsOf(4).map((s) => s.subId)).toEqual([0]);
+  });
+
+  it('selects by cumulative probability weight', () => {
+    expect(m.pickVariation(0, 0)!.subId).toBe(0);
+    expect(m.pickVariation(0, 29999)!.subId).toBe(0);
+    expect(m.pickVariation(0, 30000)!.subId).toBe(1);
+    expect(m.pickVariation(0, 32766)!.subId).toBe(1);
+  });
+
+  it('clamps a roll at or past the total weight to the last variation', () => {
+    expect(m.pickVariation(0, 999999)!.subId).toBe(1);
+  });
+
+  it('returns null for an id the model does not own', () => {
+    expect(m.pickVariation(77, 0)).toBeNull();
+  });
+
+  it('returns the only variation regardless of roll when weights are all zero', () => {
+    const zero = new ModelAnim(data({
+      animations: [animation({ id: 2, subID: 0, probability: 0 }),
+                   animation({ id: 2, subID: 1, probability: 0 })],
+    }));
+    expect(zero.pickVariation(2, 12345)).not.toBeNull();
+  });
+});
+
+describe('resolve', () => {
+  it('returns a directly owned sequence', () => {
+    const m = new ModelAnim(data({ animations: [animation({ id: 5 })] }));
+    expect(m.resolve(5)!.id).toBe(5);
+  });
+
+  it('follows nextAnimationID when the requested id is absent', () => {
+    const m = new ModelAnim(data({
+      animations: [animation({ id: 0, nextAnimationID: -1 })],
+    }));
+    // 5 is absent; nothing chains to it, so it falls back to Stand (id 0).
+    expect(m.resolve(5)!.id).toBe(0);
+  });
+
+  it('follows an alias to its target', () => {
+    const m = new ModelAnim(data({
+      animations: [
+        animation({ id: 0, flags: 0 }),
+        animation({ id: 9, flags: 0x40, alias: 0 }),
+      ],
+    }));
+    expect(m.resolve(9)!.id).toBe(0);
+  });
+
+  it('does not hang on an alias cycle', () => {
+    const m = new ModelAnim(data({
+      animations: [
+        animation({ id: 1, flags: 0x40, alias: 1 }),
+        animation({ id: 2, flags: 0x40, alias: 0 }),
+      ],
+    }));
+    expect(() => m.resolve(1)).not.toThrow();
+  });
+
+  it('returns null for a model with no sequences at all', () => {
+    expect(new ModelAnim(data({ animations: [] })).resolve(0)).toBeNull();
+  });
+});
+
