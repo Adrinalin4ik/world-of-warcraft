@@ -7,7 +7,9 @@ import ModelReadout from './model-readout';
 import MoveReadout from './move-readout';
 import SavedCoords from './saved-coords';
 import WmoControls from './wmo-controls';
+import FogControls from './fog-controls';
 import { wmoDebug } from '../../../game/world/wmo-debug';
+import { fogDebug } from '../../../game/world/fog-debug';
 import { modelProbe } from '../../../game/pipeline/m2/model-probe';
 import LightingControls from './lighting-controls';
 import LightingReadouts from './lighting-readouts';
@@ -187,6 +189,8 @@ class DebugPanel extends React.Component<IProp> {
           <CollisionControls view={ this.props.game.world.collisionDebug } />
         </CollapsibleSection>
         <CollapsibleSection title="Lighting" storageKey="lighting" defaultCollapsed={false}>
+          <FogControls fog={ fogDebug } />
+          <div className="divider"></div>
           <LightingControls mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
         </CollapsibleSection>
         <CollapsibleSection title="Lighting resolve" storageKey="lighting-resolve" defaultCollapsed={false}>

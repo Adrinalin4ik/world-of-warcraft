@@ -12,6 +12,7 @@ import M2Blueprint from "../pipeline/m2/blueprint";
 import { modelProbe } from "../pipeline/m2/model-probe";
 import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
+import { fogDebug } from "./fog-debug";
 import { readMark } from "./saved-mark";
 import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
@@ -136,6 +137,17 @@ export default class World extends EventEmitter {
     // this.skybox.name = "Skybox"
     // this.scene.add(this.skybox);
     if (!this.session.game.authenticated) {
+      // FIRST, ahead of both `debugCoords` and `lastLocation`. The mark is an explicit "put me back
+      // here" the user just clicked; the other two are older debugging leftovers, and `debugCoords`
+      // in particular short-circuits everything below it -- which is why the mark appeared to do
+      // nothing for anyone who still had that key set from an earlier session.
+      const mark = readMark();
+
+      if (mark) {
+        this.player.worldport(mark.mapId, [mark.x, mark.y, mark.z]);
+        return;
+      }
+
       const loadedSpot = localStorage.getItem("debugCoords");
       if (loadedSpot) {
         const spot: any = JSON.parse(loadedSpot);
@@ -173,17 +185,7 @@ export default class World extends EventEmitter {
           console.log(spot)
         }
 
-        // The debug mark WINS over `lastLocation`. They are not the same thing: `lastLocation` is
-        // only written when `worldport` actually changes MAP, so walking around never updates it --
-        // it is the last zone entered, not the last place stood. The mark is an explicit "put me back
-        // here", which is the whole reason to reload.
-        const mark = readMark();
-
-        if (mark) {
-          this.player.worldport(mark.mapId, [mark.x, mark.y, mark.z]);
-        } else {
-          this.player.worldport(spot.zoneId, spot.coords);
-        }
+        this.player.worldport(spot.zoneId, spot.coords);
       }
     }
   }
@@ -365,6 +367,10 @@ export default class World extends EventEmitter {
     // Every frame so groups that stream in while a mode is active are overridden too. A no-op with
     // nothing selected.
     wmoDebug.sync(this.map as any);
+
+    // AFTER `map.animate` above, which runs the per-frame light pass -- that pass re-copies
+    // `fogParams` from MapLight, so neutralising fog before it would be overwritten immediately.
+    fogDebug.sync(this.map as any);
 
     // LAST: everything above may have moved something. See the constructor for why the renderer no
     // longer does this itself.
