@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 
+import { loadPref, savePref } from './debug-prefs';
+
 /**
  * What to draw WMO surfaces with instead of their own material.
  *
@@ -43,7 +45,17 @@ export interface WmoDebugMapLike {
  * placed group views, and the collision provider indexes the same objects for an unrelated purpose.
  */
 export class WmoDebug {
-  mode: WmoDebugMode = WmoDebugMode.Off;
+  private _mode = loadPref('wmoMode', WmoDebugMode.Off as string) as WmoDebugMode;
+
+  /** Persisted, same reason as the fog and lighting switches. */
+  get mode(): WmoDebugMode {
+    return this._mode;
+  }
+
+  set mode(value: WmoDebugMode) {
+    this._mode = value;
+    savePref('wmoMode', value);
+  }
 
   /** Original material per mesh, so the real draw comes back exactly as it was. */
   private originals = new Map<object, any>();

@@ -11,6 +11,8 @@
  * frame.
  */
 
+import { loadPref, savePref } from './debug-prefs';
+
 /** A material carrying the fog uniforms. Structural: the three families share these names. */
 interface FoggedMaterial {
   uniforms?: {
@@ -24,7 +26,19 @@ export interface FogDebugMapLike {
 }
 
 export class FogDebug {
-  disabled = false;
+  // Annotated: `loadPref`'s generic would otherwise infer the LITERAL `false` from the fallback and
+  // the setter could never store true.
+  private _disabled: boolean = loadPref('fogOff', false);
+
+  /** Persisted: a switch that reset on reload made the comparison it exists for impossible to hold. */
+  get disabled(): boolean {
+    return this._disabled;
+  }
+
+  set disabled(value: boolean) {
+    this._disabled = value;
+    savePref('fogOff', value);
+  }
 
   /** Materials neutralised on the last sync. Read by the panel, so a no-op toggle is visible. */
   applied = 0;

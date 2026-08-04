@@ -88,6 +88,14 @@ class WMOGroupDefinition {
       groupData.MOCV, vertexCount, this.path, this.index,
     );
 
+    // Carried onto the definition as plain numbers so they survive the structured clone out of the
+    // worker and can be read back in game. The `console.warn` above lands in the WORKER's console,
+    // which is easy to miss or filter out, and "was MOCV usable" is the one fact that separates a
+    // parse fault from genuinely dark authored data.
+    this.vertexCount = vertexCount;
+    this.mocvCount = groupData.MOCV && groupData.MOCV.colors ? groupData.MOCV.colors.length : 0;
+    this.vertexColorsUsable = mocv !== null;
+
     // Manipulate vertex colors a la FixColorVertexAlpha.
     // `exterior` is computed on the OUTER chunked object (group.js `exterior`, reading
     // `this.flags`), not on the MOGP sub-struct handed in below -- `groupData.MOGP.exterior` is

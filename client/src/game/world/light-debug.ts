@@ -15,6 +15,8 @@
  * already, and restoring a blanket 1.0 would silently light geometry the format says must not be.
  */
 
+import { loadPref, savePref } from './debug-prefs';
+
 interface LitMaterial {
   uniforms?: {
     lightModifier?: { value?: unknown };
@@ -32,7 +34,18 @@ interface Saved {
 }
 
 export class LightDebug {
-  disabled = false;
+  // Annotated for the same reason as FogDebug's: the fallback would pin the type to literal `false`.
+  private _disabled: boolean = loadPref('lightOff', false);
+
+  /** Persisted, same reason as the fog switch: a reload must not lose the comparison. */
+  get disabled(): boolean {
+    return this._disabled;
+  }
+
+  set disabled(value: boolean) {
+    this._disabled = value;
+    savePref('lightOff', value);
+  }
 
   /** Materials neutralised on the last sync, so a switch that reached nothing is visible. */
   applied = 0;
