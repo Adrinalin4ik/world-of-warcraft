@@ -13,6 +13,7 @@ import { modelProbe } from "../pipeline/m2/model-probe";
 import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
 import { readMark } from "./saved-mark";
+import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
 
 export default class World extends EventEmitter {
@@ -360,6 +361,10 @@ export default class World extends EventEmitter {
     // Ticked every frame whether or not it is enabled: the frame counter is what "was this batch
     // drawn" is measured against, and it has to keep advancing for that answer to mean anything.
     modelProbe.tick(this.player.model);
+
+    // Every frame so groups that stream in while a mode is active are overridden too. A no-op with
+    // nothing selected.
+    wmoDebug.sync(this.map as any);
 
     // LAST: everything above may have moved something. See the constructor for why the renderer no
     // longer does this itself.

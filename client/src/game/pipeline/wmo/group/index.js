@@ -79,7 +79,13 @@ class WMOGroup {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    geometry.setAttribute('acolor', new THREE.BufferAttribute(colors, 4));
+    const colorAttribute = new THREE.BufferAttribute(colors, 4);
+    geometry.setAttribute('acolor', colorAttribute);
+    // The SAME buffer under three's own attribute name, so a `vertexColors: true` material can read
+    // MOCV without any shader of ours in the path -- see world/wmo-debug.ts. Costs nothing: one extra
+    // attribute record over shared memory, and the WMO shader keeps reading `acolor` explicitly, so
+    // nothing about the real draw changes.
+    geometry.setAttribute('color', colorAttribute);
 
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     // geometry.computeBoundingBox();

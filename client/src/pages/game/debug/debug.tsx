@@ -6,6 +6,8 @@ import CollisionControls from './collision-controls';
 import ModelReadout from './model-readout';
 import MoveReadout from './move-readout';
 import SavedCoords from './saved-coords';
+import WmoControls from './wmo-controls';
+import { wmoDebug } from '../../../game/world/wmo-debug';
 import { modelProbe } from '../../../game/pipeline/m2/model-probe';
 import LightingControls from './lighting-controls';
 import LightingReadouts from './lighting-readouts';
@@ -177,6 +179,9 @@ class DebugPanel extends React.Component<IProp> {
             camera={ this.props.game.camera }
             renderer={ this.props.renderer }
           />
+        </CollapsibleSection>
+        <CollapsibleSection title="WMO surfaces" storageKey="wmo-surfaces" defaultCollapsed={true}>
+          <WmoControls wmo={ wmoDebug } />
         </CollapsibleSection>
         <CollapsibleSection title="Collisions" storageKey="collisions" defaultCollapsed={true}>
           <CollisionControls view={ this.props.game.world.collisionDebug } />

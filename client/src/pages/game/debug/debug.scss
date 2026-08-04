@@ -88,6 +88,13 @@
   }
 }
 
+.wmo_controls {
+  &-hint {
+    color: #b8d8c4;
+    font-style: italic;
+  }
+}
+
 // Save / return to a position mark, in the Player section.
 .saved_coords {
   button {
