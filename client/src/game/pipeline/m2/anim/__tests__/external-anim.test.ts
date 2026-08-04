@@ -199,3 +199,35 @@ describe('ExternalAnimCache handover to the merge', () => {
     spy.mockRestore();
   });
 });
+
+describe('ExternalAnimCache failure notification', () => {
+  // Kills a cache that only notifies on success. The caller is holding state against the path --
+  // `ExternalAnimBinder` holds a whole parsed `ModelAnim` -- and "the answer never came" has to be
+  // distinguishable from "the answer was no" or that state is retained for the session.
+  it('notifies the caller when a fetch fails', async () => {
+    const loader = new FakeLoader();
+    const cache = new ExternalAnimCache(loader);
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const failed: string[] = [];
+
+    cache.request('creature/wolf/wolf.m2', seq(), undefined, (path) => failed.push(path));
+    loader.rejectWith('creature/wolf/wolf0097-00.anim', new Error('404'));
+    await flush();
+
+    expect(failed).toEqual(['creature/wolf/wolf0097-00.anim']);
+    spy.mockRestore();
+  });
+
+  // Kills firing the failure handler on the success branch.
+  it('does not report a failure for a fetch that lands', async () => {
+    const loader = new FakeLoader();
+    const cache = new ExternalAnimCache(loader);
+    let failed = false;
+
+    cache.request('creature/wolf/wolf.m2', seq(), undefined, () => { failed = true; });
+    loader.resolveWith('creature/wolf/wolf0097-00.anim', new ArrayBuffer(8));
+    await flush();
+
+    expect(failed).toBe(false);
+  });
+});

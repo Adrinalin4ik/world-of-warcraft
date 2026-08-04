@@ -52,7 +52,6 @@ export default function(type, valueTypeName = null) {
     interpolationType: r.uint16le,
     globalSequenceID: r.int16le,
     timestamps: new Nofs(new TrackRef(r.uint32le)),
-    // timestamps: new Nofs(r.uint32le),
     values: new Nofs(new TrackRef(type)),
 
     valueTypeName: function() {

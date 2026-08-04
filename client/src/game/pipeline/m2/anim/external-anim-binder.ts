@@ -1,7 +1,13 @@
 import { ExternalAnimCache, externalAnimPath } from './external-anim';
 import { isAliasSequence, ModelAnim, Sequence } from './model-anim';
 
-/** What a path in flight is being fetched for. */
+/**
+ * What a path in flight is being fetched for.
+ *
+ * MUTABLE, and deliberately so. A model can be unloaded and re-parsed while its `.anim` is still in
+ * the air -- walking out of a zone and back in is enough -- and the payload must then land in the
+ * `ModelAnim` that is now live, not the discarded one it was requested for. See `ensure`.
+ */
 interface Pending {
   model: ModelAnim;
   seq: Sequence;
@@ -29,17 +35,41 @@ export class ExternalAnimBinder {
   private readonly pending = new Map<string, Pending>();
 
   constructor(private readonly cache: ExternalAnimCache = new ExternalAnimCache()) {
-    // Bound ONCE. `request` takes the handler per call, and a fresh arrow function per call would
-    // allocate; this one reference serves every request this binder ever makes.
+    // Bound ONCE. `request` takes the handlers per call, and fresh arrow functions per call would
+    // allocate; these two references serve every request this binder ever makes.
     this.onLoaded = this.onLoaded.bind(this);
+    this.onFailed = this.onFailed.bind(this);
+  }
+
+  /**
+   * The paths this binder is still holding a `ModelAnim` for.
+   *
+   * Exposed because the leak it guards against is invisible from the outside: a retained entry
+   * changes no behaviour at all, it just never lets a parsed model be collected. Asserting on the
+   * registry directly is the only way to pin that, short of a heap probe.
+   */
+  retained(): string[] {
+    return Array.from(this.pending.keys());
   }
 
   /**
    * Request every `.anim` file this model still needs, once each.
    *
    * Skips sequences that are already inline (nothing external to fetch), already merged (same
-   * thing), already requested, and ALIASES -- an alias owns no keyframes, so no sibling file is
-   * written for it and the request would be a guaranteed 404. See `isAliasSequence`.
+   * thing), and ALIASES -- an alias owns no keyframes, so no sibling file is written for it and the
+   * request would be a guaranteed 404. See `isAliasSequence`.
+   *
+   * A path already IN FLIGHT is not re-requested, but its target is RE-AIMED at whichever model is
+   * asking now. That is not a refinement, it is the fix for a silent loss: `pending` is keyed by
+   * path and outlives the `ModelAnim` it was created for, so a model unloaded mid-flight and
+   * re-parsed on the player's way back into a zone would otherwise have its payload merged into the
+   * discarded object, leaving the live one quarantined for the rest of the session with no error
+   * and no retry. Re-aiming is safe precisely because the two `ModelAnim`s are parses of the same
+   * file: the track references the merge re-reads are identical.
+   *
+   * A path that has already FAILED is skipped outright rather than re-registered. The cache never
+   * retries one, so a pending entry for it would never settle -- and every such entry pins a whole
+   * parsed model.
    */
   ensure(modelPath: string, model: ModelAnim): void {
     const sequences = model.sequences;
@@ -50,12 +80,19 @@ export class ExternalAnimBinder {
       }
 
       const path = externalAnimPath(modelPath, seq.id, seq.subId);
-      if (this.pending.has(path)) {
+      if (this.cache.failed(path)) {
+        continue;
+      }
+
+      const existing = this.pending.get(path);
+      if (existing) {
+        existing.model = model;
+        existing.seq = seq;
         continue;
       }
 
       this.pending.set(path, { model, seq });
-      this.cache.request(modelPath, seq, this.onLoaded);
+      this.cache.request(modelPath, seq, this.onLoaded, this.onFailed);
     }
   }
 
@@ -74,6 +111,20 @@ export class ExternalAnimBinder {
       return;
     }
     entry.model.mergeExternal(entry.seq, buffer);
+  }
+
+  /**
+   * Let go of a path that will never arrive.
+   *
+   * Without this the registry keeps `{ model, seq }` for every 404 for the whole session, and a
+   * `ModelAnim` is not a small thing to pin: it holds the entire parsed `M2AnimData` -- every
+   * keyframe array of every block -- plus `boneDefs` and the cached block list. `M2Blueprint`
+   * deletes its own `modelAnims` entry on unload, so after that this map is the ONLY reference
+   * left, and the binder is a module singleton. A missing `.anim` is not exotic: it is what any
+   * incomplete asset host produces.
+   */
+  private onFailed(path: string): void {
+    this.pending.delete(path);
   }
 
 }

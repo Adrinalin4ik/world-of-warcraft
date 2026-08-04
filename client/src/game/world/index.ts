@@ -528,7 +528,7 @@ export default class World extends EventEmitter {
       // ABOVE the gate below -- the gate is exactly what would keep such a model out for ever.
       // Steady-state cost is one boolean compare per unit per frame; the method itself is not
       // entered once the answer stops changing.
-      if (!model.animated && typeof model.syncMergedAnimation === 'function') {
+      if (!model.animated) {
         model.syncMergedAnimation();
       }
 

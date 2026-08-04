@@ -43,15 +43,21 @@ const payload = () => {
 
 class FakeLoader implements AnimByteLoader {
   calls: string[] = [];
-  private resolvers = new Map<string, (buf: ArrayBuffer) => void>();
+  private settlers = new Map<string, { resolve: (buf: ArrayBuffer) => void; reject: (e: Error) => void }>();
 
   load(path: string): Promise<ArrayBuffer> {
     this.calls.push(path);
-    return new Promise<ArrayBuffer>((resolve) => { this.resolvers.set(path, resolve); });
+    return new Promise<ArrayBuffer>((resolve, reject) => {
+      this.settlers.set(path, { resolve, reject });
+    });
   }
 
   resolveWith(path: string, buffer: ArrayBuffer): void {
-    this.resolvers.get(path)!(buffer);
+    this.settlers.get(path)!.resolve(buffer);
+  }
+
+  rejectWith(path: string): void {
+    this.settlers.get(path)!.reject(new Error('404 Not Found'));
   }
 }
 
@@ -106,6 +112,10 @@ describe('ExternalAnimBinder#ensure', () => {
     expect(m.sequences[0].inline).toBe(true);
     expect(m.boneDefs[0].translation.tracks[0].values).toEqual([[7, 0, 0], [8, 1, 2]]);
     expect(m.animated).toBe(true);
+    // Kills a merge that flips EVERY sequence inline rather than the one whose data landed. Slot 2
+    // is external and no `.anim` was ever fetched for it, so it must still be quarantined -- the
+    // slot-1 comparison cannot show this, because slot 1 was inline before the merge too.
+    expect(m.sequences[2].inline).toBe(false);
   });
 
   // Kills leaving the payload in the cache. The map has no other eviction path, `M2Blueprint`
@@ -149,6 +159,69 @@ describe('ExternalAnimBinder#ensure', () => {
 
     expect(m.sequences[0].inline).toBe(false);
     expect(m.mergeVersion).toBe(0);
+  });
+
+  // Kills a binder that only clears its registry on the SUCCESS branch. The entry holds a whole
+  // `ModelAnim` -- the entire parsed `M2AnimData`, every keyframe array -- and `M2Blueprint` drops
+  // its own reference on unload, so this map becomes the only one left and the binder is a module
+  // singleton. A missing `.anim` is not exotic; it is what any incomplete asset host produces.
+  it('lets go of the model when the fetch fails', async () => {
+    const loader = new FakeLoader();
+    const binder = new ExternalAnimBinder(new ExternalAnimCache(loader));
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    binder.ensure('creature/wolf/wolf.m2', model());
+    loader.rejectWith('creature/wolf/wolf0097-00.anim');
+    await flush();
+
+    expect(binder.retained()).toEqual([]);
+    spy.mockRestore();
+  });
+
+  // Kills re-registering a terminally failed path. The cache never retries it, so the entry would
+  // never settle -- and it pins a parsed model while it waits for something that cannot happen.
+  it('does not re-register a path that has already failed', async () => {
+    const loader = new FakeLoader();
+    const binder = new ExternalAnimBinder(new ExternalAnimCache(loader));
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    binder.ensure('creature/wolf/wolf.m2', model());
+    loader.rejectWith('creature/wolf/wolf0097-00.anim');
+    await flush();
+
+    binder.ensure('creature/wolf/wolf.m2', model());
+
+    expect(binder.retained()).toEqual([]);
+    expect(loader.calls).toHaveLength(1);
+    spy.mockRestore();
+  });
+
+  /**
+   * Kills deduping a path against a stale registry entry.
+   *
+   * The sequence is ordinary play: the player walks out of a zone while an `.anim` is still in the
+   * air, `M2Blueprint.backgroundUnload` drops the model, the player walks back and the blueprint
+   * re-parses. Without re-aiming, the payload merges into the discarded `ModelAnim` and the LIVE
+   * one stays quarantined for the rest of the session -- no error, no retry, no wrong pose, just a
+   * creature that never plays those animations.
+   */
+  it('merges into the model that is live now, not the one it was requested for', async () => {
+    const loader = new FakeLoader();
+    const binder = new ExternalAnimBinder(new ExternalAnimCache(loader));
+
+    const unloaded = model();
+    binder.ensure('creature/wolf/wolf.m2', unloaded);
+
+    const reloaded = model();
+    binder.ensure('creature/wolf/wolf.m2', reloaded);
+    expect(loader.calls).toHaveLength(1);
+
+    loader.resolveWith('creature/wolf/wolf0097-00.anim', payload());
+    await flush();
+
+    expect(reloaded.sequences[0].inline).toBe(true);
+    expect(reloaded.boneDefs[0].translation.tracks[0].values).toEqual([[7, 0, 0], [8, 1, 2]]);
+    expect(unloaded.sequences[0].inline).toBe(false);
   });
 
   it('does no work at all for a model with no external sequence', () => {

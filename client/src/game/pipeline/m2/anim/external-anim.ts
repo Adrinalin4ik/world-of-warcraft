@@ -37,6 +37,15 @@ type Outcome = ArrayBuffer | 'failed';
 export type AnimLoadedHandler = (path: string, buffer: ArrayBuffer) => void;
 
 /**
+ * Called once when a requested path settles as a FAILURE.
+ *
+ * Separate from `AnimLoadedHandler` rather than a nullable buffer, so a caller cannot accidentally
+ * treat a failure as an empty payload and merge nothing into a model. Failures are terminal here --
+ * this fires at most once per path, ever.
+ */
+export type AnimFailedHandler = (path: string) => void;
+
+/**
  * Fetches and caches external `.anim` files.
  *
  * Task 19's whole job: get the bytes in hand, off the frame path, at most once per path -- and no
@@ -99,7 +108,12 @@ export class ExternalAnimCache {
    * never serves (inline sequences are not laid out as sibling `.anim` files at all). Also a
    * no-op for a path already resolved (success or failure) or currently in flight.
    */
-  request(modelPath: string, seq: Sequence, onLoaded?: AnimLoadedHandler): void {
+  request(
+    modelPath: string,
+    seq: Sequence,
+    onLoaded?: AnimLoadedHandler,
+    onFailed?: AnimFailedHandler,
+  ): void {
     if (seq.inline) {
       return;
     }
@@ -125,6 +139,13 @@ export class ExternalAnimCache {
       .catch((err) => {
         this.inFlight.delete(path);
         this.results.set(path, 'failed');
+        // The failure branch notifies too. It is not a branch a caller may skip: whoever asked for
+        // this path is holding state against it, and "the answer never came" and "the answer was
+        // no" have to be distinguishable to them or that state is retained for the session. See
+        // `ExternalAnimBinder#onFailed`, which frees a whole parsed model here.
+        if (onFailed) {
+          onFailed(path);
+        }
         // eslint-disable-next-line no-console
         console.error(`Failed to fetch external animation ${path}:`, err);
       });
