@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 
 import BSPTree from '../../../utils/bsp-tree';
-import { collisionWorld } from '../../../collision/collision-world';
 import WMOLiquid from '../../liquid/wmo-liquid';
 import WMORootFlags from '../root/flags';
 import WMOGroupView from './view';
@@ -34,17 +33,23 @@ class WMOGroup {
     
     // Create liquid meshes if liquid data is present
     this.liquid = this.createLiquid(def.liquidData);
-    
-    this.view = this.createView();
   }
 
-  // Produce a new WMOGroupView suitable for placement in a scene.
+  /**
+   * A FRESH view, per placement. The group owns no view of its own.
+   *
+   * `WMOGroupLoader` caches groups by path, so a group object is shared by every placement of the
+   * building in the world. It used to hold `this.view` and hand the same object out to all of them --
+   * and an Object3D has ONE parent, so re-parenting moved it: only the last placement existed, and
+   * every earlier copy of that building was simply absent. Measured in game: two placements of
+   * NIGHTELFSMALLHOUSE_WSG reported byte-identical world bounding boxes, which two buildings in
+   * different places cannot have.
+   *
+   * Geometry and materials stay shared -- they are the expensive part and they are placement
+   * independent. Only the scene node is per placement.
+   */
   createView() {
-    if (this.view) {
-      collisionWorld.wmo.remove(this.view);
-    }
-    this.view = new WMOGroupView(this, this.geometry, this.materials);
-    return this.view;
+    return new WMOGroupView(this, this.geometry, this.materials);
   }
 
   createPortals(root, def) {

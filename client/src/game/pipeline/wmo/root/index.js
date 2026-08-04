@@ -23,7 +23,9 @@ class WMORoot {
 
     this.doodadSets = def.doodadSets;
     this.doodadEntries = def.doodadEntries;
-    this.view = this.createView();
+    // No `this.view` here, on purpose. `WMORootLoader` caches roots by FILENAME, so a root is shared
+    // by every placement of the building; a view owned here is one scene node for all of them, and an
+    // Object3D has one parent. See `WMOGroup#createView` for what that cost.
     this.caches = {
       material: new Map()
     };
@@ -182,8 +184,12 @@ class WMORoot {
         vertices: vertices.subarray(vindex, vindex + vlen),
         normal: normals.subarray(nindex, nindex + nlen),
         constant: constants[index]
-      }, this.view);
-      
+      // No parent view: the root owns none, and `WMOPortal` only stores this and never reads it. The
+      // visibility flood works off the PLACEMENT's own portal views (`wmo.views.portals`, made per
+      // instance in `WMO#loadPortals`) and the placement's group view for `worldToLocal` -- so portal
+      // world space was already per placement and needs nothing from here.
+      }, null);
+
       portals.push(portal);
     }
   }

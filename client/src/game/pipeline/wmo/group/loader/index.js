@@ -1,6 +1,5 @@
 import WorkerPool from '../../../worker/pool';
 import WMOGroup from '../';
-import { collisionWorld } from '../../../../collision/collision-world';
 import gameSettings  from '../../../../settings';
 
 class WMOGroupLoader {
@@ -54,7 +53,10 @@ class WMOGroupLoader {
 
   static unload(group) {
     const path = group.path.toUpperCase();
-    collisionWorld.wmo.remove(group.view);
+    // Colliders are NOT removed here any more. A group is cached by path and shared by every
+    // placement, while a collider belongs to a PLACEMENT's view -- so this removed one arbitrary
+    // view's collider whenever any placement streamed out, and unconditionally, ignoring the refcount
+    // just below. `WMO#unload` removes the views it owns instead.
     const refCount = (this.refCounts.get(path) || 1) - 1;
 
     if (refCount <= 0) {

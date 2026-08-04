@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 
+import { collisionWorld } from '../../collision/collision-world';
 import ContentQueue from '../../utils/content-queue';
 import M2Blueprint from '../m2/blueprint';
 import { attachPerObjectLighting } from '../m2/material/per-object-light';
@@ -96,9 +97,12 @@ class WMO {
     // if (!this.filename.includes('CTFNIGHTELF_A')) return Promise.reject(); // tonnel
     return WMORootLoader.load(this.filename).then((root) => {
       this.root = root;
-      // const rootView = this.root.createView();
-      // this.views.root = rootView;
-      this.views.root = this.root.view;
+      // A view of our OWN. The root is cached by filename and shared across every placement of this
+      // building, so taking `root.view` gave all of them one scene node -- and since an Object3D has
+      // one parent, only the placement that ran last existed. Every other copy was missing from the
+      // world, which is exactly how this presented: two placements of NIGHTELFSMALLHOUSE_WSG with
+      // byte-identical world bounding boxes, and a house you could stand next to but not see.
+      this.views.root = this.root.createView();
 
       this.loadPortals(this.root.portals);
 
@@ -161,8 +165,8 @@ class WMO {
   }
 
   loadGroup(group) {
-    // const groupView = group.createView();
-    const groupView = group.view;
+    // Per placement, same reasoning as the root view above -- groups are cached by path too.
+    const groupView = group.createView();
     this.placeGroupView(groupView);
     this.views.groups.set(group.index, groupView);
 
@@ -287,6 +291,13 @@ class WMO {
     this.counters.loadingDoodads = 0;
     this.counters.loadedDoodads = 0;
     this.counters.animatedDoodads = 0;
+
+    // OUR views' colliders, before the loader drops its refcounts. Views are per placement now, so
+    // this instance is the only thing that knows which ones are its own -- `WMOGroupLoader.unload`
+    // used to guess, and got it wrong for every building placed more than once.
+    for (const groupView of this.views.groups.values()) {
+      collisionWorld.wmo.remove(groupView);
+    }
 
     for (const group of this.groups.values()) {
       WMOGroupLoader.unload(group);
