@@ -5,10 +5,10 @@ import CacheManager from '../../world/cache-manager';
 import { collisionWorld } from '../../collision/collision-world';
 import { ObjectsManager } from '../../world/visibility-manager';
 import BatchManager from './batch-manager';
-import { toEngineQuaternion, toEngineTranslation } from './anim/axes';
 import { animCounters } from './anim/counters';
-import { InstanceAnim, LOCAL_TRS_STRIDE } from './anim/instance-anim';
+import { InstanceAnim } from './anim/instance-anim';
 import { ModelAnim } from './anim/model-anim';
+import { applyLocalPose } from './anim/pose';
 import { modelSpaceBindMatrix, normalizeBoneWeights, poseBindSkeleton } from './bind-pose';
 import M2Material from './material';
 import { isParticleTemplate } from './particle/template';
@@ -610,29 +610,9 @@ class M2 extends THREE.Group {
   /**
    * Push this frame's solved pose into the three.js bone hierarchy.
    *
-   * WHY THE BONES AND NOT THE PALETTE DIRECTLY. The obvious shape -- copy `instanceAnim.palette`
-   * into `skeleton.boneMatrices` and flag the bone texture -- does not work in three 0.185, for two
-   * independent reasons, either of which alone is fatal:
-   *
-   *   1. `WebGLObjects.update` calls `skeleton.update()` once per frame for every skinned mesh it is
-   *      about to draw (`node_modules/three/src/renderers/webgl/WebGLObjects.js:46-57`), and that
-   *      recomputes `boneMatrices` from `bone.matrixWorld * boneInverse`. Anything written into
-   *      `boneMatrices` before `render()` is overwritten during it. The write is not merely
-   *      redundant, it is invisible.
-   *   2. Billboarding is applied to BONES (`applyBillboards` sets `bone.rotation`). A palette
-   *      written straight from the solver knows nothing about it, so every billboarded bone on an
-   *      animated model would lose its facing -- and the doodads with the most billboards are
-   *      exactly the ones this task exists to animate.
-   *
-   * Writing bone TRS instead keeps the proven render path: the scene walk in
-   * `World#updateDynamicMatrices` accumulates the hierarchy, `skeleton.update()` builds the palette
-   * against the bind inverses `poseBindSkeleton` computed, and billboarding composes on top by
-   * simply running afterwards.
-   *
-   * The hierarchy accumulation is not duplicated work. The M2 bone law
-   * `parent * T(pivot) * TRS * T(-pivot)` reduces per bone to `T(pivot - parentPivot) * TRS`, so
-   * what goes in here is a LOCAL transform; the parent composition happens exactly once, in the
-   * scene graph.
+   * The mechanism, and why it is bone TRS rather than a palette write, lives on `applyLocalPose` in
+   * `anim/pose.ts` -- along with the invariant its tests pin. This method is the `M2`-shaped wrapper
+   * around it.
    *
    * Only called for instances actually posed this frame, so a gated doodad costs nothing here.
    */
@@ -642,38 +622,14 @@ class M2 extends THREE.Group {
       return;
     }
 
-    const trs = inst.localTRS;
-    if (trs.length === 0) {
+    // An unarmed instance has not allocated its buffers yet -- see InstanceAnim's lazy allocation.
+    if (inst.localTRS.length === 0) {
       return;
     }
 
-    const bones = this.bones;
-    const bind = this.boneBindPositions;
+    applyLocalPose(this.bones, this.boneBindPositions, inst.localTRS);
 
-    for (let i = 0, len = bones.length; i < len; ++i) {
-      const bone = bones[i];
-      const o = i * LOCAL_TRS_STRIDE;
-      const b = i * 3;
-
-      toEngineTranslation(
-        bone.position,
-        bind[b], bind[b + 1], bind[b + 2],
-        trs[o], trs[o + 1], trs[o + 2],
-      );
-
-      // A billboarded bone's rotation belongs to the camera, not to the keyframes. Writing the
-      // sampled rotation here would fight `applyBillboards` -- and win on every frame the camera
-      // did not move, since billboarding only runs on `cameraMoved`.
-      if (bone.userData.billboarded !== true) {
-        toEngineQuaternion(bone.quaternion, trs[o + 3], trs[o + 4], trs[o + 5], trs[o + 6]);
-      }
-
-      bone.scale.set(trs[o + 7], trs[o + 8], trs[o + 9]);
-    }
-
-    // One posed instance is one bone-texture upload: `skeleton.update()` sets
-    // `boneTexture.needsUpdate` for this skeleton exactly once during the following render.
-    animCounters.paletteUploads++;
+    animCounters.posesApplied++;
   }
 
   applyBillboards(camera) {

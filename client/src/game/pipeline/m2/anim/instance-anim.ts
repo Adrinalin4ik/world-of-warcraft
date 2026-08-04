@@ -36,6 +36,16 @@ export class InstanceAnim {
   current: Sequence | null = null;
   armedAtMs = 0;
 
+  /**
+   * False once arming has been attempted and found the model owns nothing to play.
+   *
+   * Memoised because the failure is a permanent property of the MODEL, while the attempt costs a
+   * draw from the SHARED rng stream. `cycleDoodad` re-arms whenever `current` is null, so without
+   * this a model with no animation id 0 perturbs the one stream every other doodad de-syncs off,
+   * every frame, for as long as it stays loaded.
+   */
+  armable = true;
+
   /** Cached from `current`, so the per-frame path does not re-derive it. */
   private law: ClockLaw = 0;
   private periodMs = 0;

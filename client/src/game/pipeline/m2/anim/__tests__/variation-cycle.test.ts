@@ -64,6 +64,65 @@ describe('armDoodad', () => {
   });
 });
 
+/**
+ * The draw is taken before the result can be inspected, and `cycleDoodad` re-arms on every frame an
+ * instance is unarmed. Without a latch, one un-animatable doodad pulls a draw per frame out of the
+ * single stream every OTHER doodad's de-sync depends on -- so a model with no animation 0 would
+ * quietly perturb the variation choices of the whole zone, for as long as it stayed loaded.
+ */
+describe('un-animatable models do not bleed the shared stream', () => {
+  const noAnimZero = () => new ModelAnim({
+    animations: [{
+      id: 7, subID: 0, length: 1000, flags: 0, probability: 32767,
+      blendTime: 0, movementSpeed: 0, nextAnimationID: -1, alias: 0,
+    }],
+    sequences: [],
+    bones: [],
+  });
+
+  it('costs exactly one draw, ever', () => {
+    const rng = new SharedRng(1);
+    const inst = new InstanceAnim(noAnimZero());
+
+    armDoodad(inst, 0, rng);
+    const afterFirst = rng.next();
+
+    // A thousand frames of cycling against an instance that can never arm.
+    const control = new SharedRng(1);
+    control.next();
+    control.next();
+
+    for (let f = 0; f < 1000; ++f) {
+      cycleDoodad(inst, f * 16, rng);
+    }
+
+    // The stream has not advanced past where the single failed attempt plus our probe left it.
+    expect(rng.next()).toBe(control.next());
+    expect(afterFirst).toBeDefined();
+  });
+
+  it('latches armable off after the failed attempt', () => {
+    const inst = new InstanceAnim(noAnimZero());
+    expect(inst.armable).toBe(true);
+    armDoodad(inst, 0, new SharedRng(1));
+    expect(inst.armable).toBe(false);
+    expect(inst.current).toBeNull();
+  });
+
+  it('keeps reporting no re-arm from cycleDoodad', () => {
+    const inst = new InstanceAnim(noAnimZero());
+    expect(cycleDoodad(inst, 0, new SharedRng(1))).toBe(false);
+    expect(cycleDoodad(inst, 5000, new SharedRng(1))).toBe(false);
+  });
+
+  it('leaves a normal model armable', () => {
+    const inst = new InstanceAnim(twoVariations());
+    armDoodad(inst, 0, new SharedRng(1));
+    expect(inst.armable).toBe(true);
+    expect(inst.current).not.toBeNull();
+  });
+});
+
 describe('cycleDoodad', () => {
   it('does not re-arm before the play window elapses', () => {
     const m = twoVariations();

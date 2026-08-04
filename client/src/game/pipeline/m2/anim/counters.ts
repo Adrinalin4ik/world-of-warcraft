@@ -17,8 +17,17 @@ export interface AnimCountersSnapshot {
   skipped: number;
   /** Bones solved this frame across every posed instance. */
   bonesSolved: number;
-  /** Bone-texture uploads issued this frame. */
-  paletteUploads: number;
+  /**
+   * Instances whose solved pose was written into the bone hierarchy this frame.
+   *
+   * NOT a bone-texture upload count, which is what this field was originally named for. Under the
+   * plan's abandoned direct-palette route the two would have been the same number; on the route
+   * that actually works they are not related. three raises `boneTexture.needsUpdate` inside
+   * `Skeleton#update()`, which `WebGLObjects.update` calls once per frame for every skinned mesh it
+   * is about to DRAW -- posed or not, gated or not. The real upload count is therefore a property of
+   * the draw list, not of this loop, and nothing here can observe it.
+   */
+  posesApplied: number;
 }
 
 class AnimCounters implements AnimCountersSnapshot {
@@ -26,14 +35,14 @@ class AnimCounters implements AnimCountersSnapshot {
   posed = 0;
   skipped = 0;
   bonesSolved = 0;
-  paletteUploads = 0;
+  posesApplied = 0;
 
   reset(): void {
     this.resident = 0;
     this.posed = 0;
     this.skipped = 0;
     this.bonesSolved = 0;
-    this.paletteUploads = 0;
+    this.posesApplied = 0;
   }
 
   snapshot(): AnimCountersSnapshot {
@@ -42,7 +51,7 @@ class AnimCounters implements AnimCountersSnapshot {
       posed: this.posed,
       skipped: this.skipped,
       bonesSolved: this.bonesSolved,
-      paletteUploads: this.paletteUploads,
+      posesApplied: this.posesApplied,
     };
   }
 }

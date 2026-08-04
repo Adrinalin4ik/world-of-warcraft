@@ -343,6 +343,15 @@ describe('localTRS', () => {
   it('survives the parent recursion clobbering the shared scratch objects', () => {
     // solveBone samples into module-level scratch and then recurses into its parent, which samples
     // into the same scratch. Bone 1 is solved first here and must still report ITS values.
+    //
+    // NOTE: this test does NOT currently discriminate, and is kept as a guard rather than as
+    // evidence. `solveBones` iterates bones in file order, and real M2 data always declares a parent
+    // before its children (`parentID < index`), so by the time a child is reached its parent is
+    // already flagged solved and the recursion returns without touching the scratch. The hazard is
+    // reachable only through malformed data with a forward parent reference -- which the fixture
+    // below does not construct, because `ModelAnim` would be describing a file no client could load.
+    // Contriving one would test the fixture, not the solver. If the iteration order ever changes,
+    // this is the test that should start failing.
     const m = model({
       bones: [
         bone({ translation: vec3Block([[1, 1, 1], [1, 1, 1]]) }),

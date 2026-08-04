@@ -417,18 +417,29 @@ export default class World extends EventEmitter {
       map.particleGroup.updateMatrixWorld(true);
     }
 
-    // Animated doodads: skinning reads `bone.matrixWorld`, and this is also the exact set that
-    // `DoodadManager#animate` runs `applyPose` and `applyBillboards` over -- both mutate transforms
-    // under the doodad, so the whole subtree is forced.
+    // WHY THIS WALK EXISTS -- do not delete it. `M2#applyPose` writes per-bone LOCAL transforms
+    // (`anim/pose.ts` derives why local is the correct form), and this is what accumulates them into
+    // `bone.matrixWorld`, which is in turn the only thing three's `Skeleton#update()` reads when it
+    // builds the palette during `render()`. Without this walk the solver runs, the counters tick,
+    // and every animated doodad stands in bind pose.
     //
-    // Task 13's brief called for deleting this walk, on the grounds that the evaluator writes bone
-    // world matrices into the skeleton palette itself and three re-walking the hierarchy repeats the
-    // work. It does not: `M2#applyPose` writes per-bone LOCAL transforms (the M2 bone law reduces to
-    // one per bone -- see that method), and this walk is what accumulates them. Deleting it freezes
-    // every animated doodad AND every billboard-only doodad in bind pose. Kept deliberately.
+    // Plan section 5.1.4 and Task 13's brief both called for dropping it, on the belief that the
+    // evaluator writes bone WORLD matrices into the palette itself and three then repeats the
+    // hierarchy walk. It does not, and it cannot -- see `anim/pose.ts` for the two independent
+    // reasons the direct-palette route does not work in three 0.185. That optimization is void.
+    //
+    // It IS gated, though, which is the part the plan got right for the wrong reason: only a doodad
+    // whose bones actually moved this frame needs re-accumulating. `DoodadManager#animate` stamps
+    // `poseFrame` when `applyPose` or `applyBillboards` touched a doodad, so everything the
+    // visibility gate rejected, the decimation gate skipped or the bone budget denied is passed over
+    // here too. This walk is O(bones) per doodad -- the same order as `solveBones` -- so leaving it
+    // ungated would have handed back most of what those gates save.
     if (map.doodadManager) {
+      const frameIndex = worldClock.frameIndex;
       map.doodadManager.animatedDoodads.forEach((doodad: any) => {
-        doodad.updateMatrixWorld(true);
+        if (doodad.poseFrame === frameIndex) {
+          doodad.updateMatrixWorld(true);
+        }
       });
     }
 

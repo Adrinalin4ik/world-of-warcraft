@@ -44,14 +44,23 @@ export const sharedRng = new SharedRng(1);
  * A doodad is NOT "animation 0 on loop". Per benilla (`doodad_anim.rs:4-9`) it is armed at bone 0 /
  * animation id 0 / `linkFlag=1`, and then re-arms itself at every play-window boundary for ever,
  * rolling a new variation each time. Global sequences run underneath with no arming at all.
+ *
+ * A model that owns no animation id 0 is latched off after ONE attempt. The draw happens before the
+ * result can be inspected, so the attempt is not free -- and `cycleDoodad` re-arms on every frame an
+ * instance is unarmed, which without the latch would pull a draw per such doodad per frame out of
+ * the single stream every other doodad's de-sync depends on.
  */
 export function armDoodad(
   inst: InstanceAnim,
   worldClockMs: number,
   rng: SharedRng = sharedRng,
 ): void {
+  if (!inst.armable) {
+    return;
+  }
   const seq = inst.model.pickVariation(DOODAD_ANIM_ID, rng.next());
   if (!seq) {
+    inst.armable = false;
     return;
   }
   inst.arm(seq, worldClockMs);

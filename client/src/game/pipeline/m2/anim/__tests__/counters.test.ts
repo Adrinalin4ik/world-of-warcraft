@@ -6,7 +6,7 @@ describe('animCounters', () => {
 
   it('starts at zero', () => {
     expect(animCounters.snapshot()).toEqual({
-      resident: 0, posed: 0, skipped: 0, bonesSolved: 0, paletteUploads: 0,
+      resident: 0, posed: 0, skipped: 0, bonesSolved: 0, posesApplied: 0,
     });
   });
 
@@ -16,7 +16,7 @@ describe('animCounters', () => {
     animCounters.posed += 2;
     animCounters.bonesSolved += 40;
     expect(animCounters.snapshot()).toEqual({
-      resident: 12, posed: 5, skipped: 0, bonesSolved: 40, paletteUploads: 0,
+      resident: 12, posed: 5, skipped: 0, bonesSolved: 40, posesApplied: 0,
     });
   });
 
@@ -25,10 +25,10 @@ describe('animCounters', () => {
     animCounters.posed = 9;
     animCounters.skipped = 9;
     animCounters.bonesSolved = 9;
-    animCounters.paletteUploads = 9;
+    animCounters.posesApplied = 9;
     animCounters.reset();
     expect(animCounters.snapshot()).toEqual({
-      resident: 0, posed: 0, skipped: 0, bonesSolved: 0, paletteUploads: 0,
+      resident: 0, posed: 0, skipped: 0, bonesSolved: 0, posesApplied: 0,
     });
   });
 });

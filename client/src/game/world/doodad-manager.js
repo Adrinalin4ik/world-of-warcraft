@@ -170,6 +170,10 @@ class DoodadManager {
 
     doodad.poseSlot = this.nextPoseSlot++;
 
+    // Last frame on which this doodad's bones were actually written. Read by
+    // `World#updateDynamicMatrices` to skip the scene walk for everything the gates rejected.
+    doodad.poseFrame = -1;
+
     // Membership in this map does NOT imply `instanceAnim` is non-null -- a billboard-only doodad
     // is here purely for `applyBillboards`, and never allocates an instance at all.
     if (doodad.instanceAnim) {
@@ -299,12 +303,32 @@ class DoodadManager {
         return;
       }
 
-      if (inst) {
-        this.poseDoodad(doodad, inst, camPos, frameIndex, worldClockMs);
+      // `touched` drives the scene walk in `World#updateDynamicMatrices`. Only a doodad whose bones
+      // actually moved this frame needs its subtree re-accumulated, and that walk is O(bones) --
+      // comparable to `solveBones` itself, so leaving it ungated would have handed back most of
+      // what the gates above just saved.
+      let touched = false;
+
+      // BONE-MESH gate. `classify()` returns true for UV, transparency and vertex-colour animation
+      // with no bone tracks at all, but `useSkinning` is driven only by `boneDef.animated`, and
+      // `createMesh` parents the root bones ONLY on the skinning branch. For such a model the bones
+      // are orphaned from the scene graph, so solving them charges the bone budget and writes into
+      // objects nothing reads. The instance must still be resident and must still cycle -- Task 14
+      // needs its clock for the UV and transparency channels -- so this gates the BONE work only,
+      // never the membership.
+      if (inst && doodad.useSkinning) {
+        touched = this.poseDoodad(doodad, inst, camPos, frameIndex, worldClockMs);
+      } else if (inst) {
+        animCounters.skipped++;
       }
 
       if (cameraMoved && doodad.billboards.length > 0) {
         doodad.applyBillboards(camera);
+        touched = true;
+      }
+
+      if (touched) {
+        doodad.poseFrame = frameIndex;
       }
 
       if (doodad.skeletonHelper) {
@@ -316,7 +340,8 @@ class DoodadManager {
   /**
    * Distance-decimate, budget, solve and apply one visible instance's pose.
    *
-   * Split out of the loop purely for readability; it allocates nothing.
+   * Returns whether the bones were actually written, which is what decides if this doodad needs a
+   * scene-graph walk this frame. Split out of the loop purely for readability; it allocates nothing.
    */
   poseDoodad(doodad, inst, camPos, frameIndex, worldClockMs) {
     // World-space translation off `matrixWorld`, NOT `doodad.position` -- the same rule
@@ -331,19 +356,21 @@ class DoodadManager {
 
     if (!shouldPose(doodad.poseSlot, distanceYd, frameIndex)) {
       animCounters.skipped++;
-      return;
+      return false;
     }
 
     // The backstop. Denied instances hold last frame's pose for a frame, which a clock-indexed
     // sampler makes safe.
     if (!this.boneBudget.request(inst.model.boneDefs.length)) {
       animCounters.skipped++;
-      return;
+      return false;
     }
 
     animCounters.posed++;
     animCounters.bonesSolved += inst.solveBones(worldClockMs);
     doodad.applyPose();
+
+    return true;
   }
 
   /**
