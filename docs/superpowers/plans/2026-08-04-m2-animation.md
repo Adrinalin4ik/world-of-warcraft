@@ -1279,7 +1279,12 @@ Then, as methods on `ModelAnim`:
       return variations[roll % variations.length];
     }
 
-    const target = roll % total;
+    // NO modulo on `roll`. Wrapping it back into the distribution biases mass toward the first
+    // variation, and it also makes the trailing clamp below dead code -- with `target < total`
+    // guaranteed, the loop's final comparison always fires. `roll` comes from a stream returning
+    // [0, 32767] and an id's weights conventionally sum to 32767, so `roll >= total` is reachable
+    // at the boundary; clamping there is correct and wrapping is a real distribution bug.
+    const target = roll;
     let cumulative = 0;
     for (let i = 0, len = variations.length; i < len; ++i) {
       cumulative += variations[i].probability;
@@ -3038,561 +3043,334 @@ git commit -m "feat(anim): animate WMO doodads and units through the evaluator"
 
 ---
 
-### Task 17: `.anim` probe
+> **Tasks 17–21 were rewritten on 2026-08-04 after the probe originally scheduled as Task 17 was
+> run headlessly by the controller.** The asset host answers `curl`, so three real creature models
+> (`wolf`, `murloc`, `kobold`) were fetched and parsed with the project's own parser. Four findings
+> forced a re-plan:
+>
+> 1. **`.anim` naming confirmed:** `<stem><animId:04d>-<subId:02d>.anim`, lowercase.
+>    `creature/wolf/wolf0097-00.anim` → 200; every other spelling 404s.
+> 2. **Quaternion range confirmed:** 203,524 components, min `-1.00000`, max `1.00003`, zero
+>    non-finite. `sampleQuat` needs no decode step. Task 3 Step 6 is closed.
+> 3. **Locomotion is INLINE, not external.** Wolf Stand/Walk/Run are all flagged `0x20`; murloc has
+>    zero external sequences. External ids observed are 96–101, 69, 128, 62 — emotes and specials.
+>    The spec's claim that locomotion lives in `.anim` files is **false for 3.3.5a**.
+> 4. **External sequences parse as GARBAGE, not empty** — a live bug, not a gap. See Task 17.
 
-Verify the format against real data **before** writing a parser against an assumption. This task produces knowledge and a test fixture, not shipped code.
+---
+
+### Task 17: Quarantine external sequences
+
+The spec assumed a sequence with no inline data parses as empty. It does not: the animation block's
+offsets point into the `.anim` file and are read against the `.m2` buffer, yielding plausible-looking
+arrays of noise. Measured: **302** bone-tracks on `wolf.m2` and **130** on `kobold.m2` carry
+timestamps far past their sequence length — slot 19 (id 97, length 2000 ms) holds a timestamp of
+3,197,923,783 ms.
+
+This is reachable in normal play. `unit.ts` arms whatever id the SMSG handler supplies, and
+`ModelAnim#resolve` returns an external sequence when the model declares that id.
 
 **Files:**
-- Create: `client/src/game/pipeline/m2/anim/__tests__/fixtures/README.md`
+- Modify: `client/src/game/pipeline/m2/anim/model-anim.ts`
+- Modify: `client/src/game/pipeline/m2/anim/__tests__/model-anim.test.ts`
 
-- [ ] **Step 1: Find a model with external sequences**
+**Interfaces:**
+- Produces: `function hasInlineData(flags: number): boolean`; `Sequence.inline: boolean`
 
-Add a temporary log in `client/src/game/pipeline/m2/loader.js` after `M2.decode(stream)`:
+- [ ] **Step 1: Write the failing tests**
 
-```js
-    const external = data.animations
-      .map((a, i) => ({ i, id: a.id, subID: a.subID, flags: a.flags }))
-      .filter((a) => (a.flags & 0x130) === 0);
-    if (external.length > 0) {
-      console.log('[anim probe]', path, 'external sequences:', JSON.stringify(external));
-    }
+```ts
+describe('hasInlineData', () => {
+  it('is true when any of 0x10 / 0x20 / 0x100 is set', () => {
+    expect(hasInlineData(0x20)).toBe(true);   // wolf Stand/Walk/Run
+    expect(hasInlineData(0x21)).toBe(true);
+    expect(hasInlineData(0x10)).toBe(true);
+    expect(hasInlineData(0x100)).toBe(true);
+  });
+
+  it('is false for the external flag values observed in real data', () => {
+    // wolf ids 97/96/98/100/99/101, kobold id 62 -- measured, not invented.
+    [0, 1, 3, 5, 8].forEach((f) => expect(hasInlineData(f)).toBe(false));
+  });
+});
+
+describe('external sequences are quarantined', () => {
+  const seqs = [
+    animation({ id: 0, flags: 0x20 }),
+    animation({ id: 97, flags: 0 }),
+  ];
+
+  it('marks each sequence with whether its data is inline', () => {
+    const m = new ModelAnim(data({ animations: seqs }));
+    expect(m.sequences.map((s) => s.inline)).toEqual([true, false]);
+  });
+
+  it('never picks an external variation', () => {
+    const m = new ModelAnim(data({
+      animations: [animation({ id: 0, subID: 0, flags: 0, probability: 32767 })],
+    }));
+    expect(m.pickVariation(0, 0)).toBeNull();
+  });
+
+  it('resolve falls back rather than returning an external sequence', () => {
+    const m = new ModelAnim(data({ animations: seqs }));
+    const got = m.resolve(97);
+    expect(got).not.toBeNull();
+    expect(got.inline).toBe(true);
+    expect(got.id).toBe(0);
+  });
+
+  it('classify ignores keys that live in an external slot', () => {
+    // A bone whose ONLY keys sit in an external slot is not animated -- those keys are noise.
+    const boneWithExternalKeysOnly = bone({
+      rotation: {
+        interpolationType: 1,
+        globalSequenceID: -1,
+        tracks: [
+          { animationIndex: 0, timestamps: [], values: [] },
+          { animationIndex: 1, timestamps: [0, 999999999], values: [[0, 0, 0, 1], [0, 0, 0, 1]] },
+        ],
+      },
+    });
+    expect(classify(data({ animations: seqs, bones: [boneWithExternalKeysOnly] }))).toBe(false);
+  });
+});
 ```
 
-Run the app, load Elwynn Forest, and walk near creatures. Record one model path and its external sequence list.
+- [ ] **Step 2: Run to verify they fail**
 
-- [ ] **Step 2: Confirm the file naming**
+Run: `cd client && CI=true npm test -- --testPathPattern="anim/__tests__/model-anim"`
+Expected: FAIL — `hasInlineData is not a function`
 
-For a model logged as `creature/wolf/wolf.m2` with external sequence `{id: 4, subID: 0}`, try fetching each candidate in the browser console against the configured `REACT_APP_DATA_URI`:
+- [ ] **Step 3: Implement**
 
-```js
-const base = 'https://data-direct.spelunkerdb.com/12340';
-for (const name of ['creature/wolf/wolf0004-00.anim', 'creature/wolf/wolf-0004-00.anim']) {
-  fetch(`${base}/${name}`).then((r) => console.log(name, r.status));
+In `model-anim.ts`:
+
+```ts
+/**
+ * Sequence flag bits meaning "this sequence's keyframes are inline in the .m2".
+ *
+ * The same mask the old AnimationManager used to SKIP such sequences. Measured against real 3.3.5a
+ * data: wolf Stand/Walk/Run carry 0x20; the external ids 96-101 carry 0, 1, 3, 5 and 8.
+ */
+const INLINE_MASK = 0x130;
+
+/**
+ * Whether a sequence's keyframes live in the .m2 rather than a sibling .anim file.
+ *
+ * This is a SAFETY gate, not an optimization. An external sequence's animation-block offsets point
+ * into the .anim file, but the parser reads them against the .m2 buffer -- so the arrays are not
+ * empty, they are NOISE. Measured: 302 bone-tracks on wolf.m2 and 130 on kobold.m2 carry timestamps
+ * far past their own sequence length, one of them 3,197,923,783 ms against a 2000 ms sequence.
+ *
+ * Arming such a sequence samples that noise and wrecks the pose, and it is reachable in normal play
+ * because `unit.ts` arms whatever id the server sends. Everything downstream of `ModelAnim` therefore
+ * treats an external sequence as absent until Task 20 merges its real data.
+ */
+export function hasInlineData(flags: number): boolean {
+  return (flags & INLINE_MASK) !== 0;
 }
 ```
 
-Record which returns 200.
+Add `inline: hasInlineData(a.flags)` to the `Sequence` interface and to the constructor's table build.
 
-- [ ] **Step 3: Confirm the loop flag against real data**
+Then quarantine at the three consumption points:
 
-For the same model, log each sequence's `flags` alongside whether it visibly loops in the reference client or in [wow.tools](https://wow.tools). Confirm that `sequenceLoops` (bit 0 clear ⇒ loops) matches for at least a Stand sequence (should loop) and a Death sequence (should not).
+- `variationsOf` filters to `s.inline`.
+- `findById` filters to `s.inline`.
+- `resolve`'s final fallback returns the first **inline** sequence, or `null` if the model has none.
+- `classify`'s `blockAnimated` takes the inline slot set and ignores tracks outside it.
 
-**If it does not match, fix `sequenceLoops` in `model-anim.ts` now** — it is deliberately the single place that rule lives.
+Every quarantine site carries a one-line comment saying it is guarding against parsed noise, and
+naming Task 20 as what lifts it.
 
-- [ ] **Step 4: Record the findings**
+- [ ] **Step 4: Run to verify they pass**
 
-Write `client/src/game/pipeline/m2/anim/__tests__/fixtures/README.md`:
+Run: `cd client && CI=true npm test -- --testPathPattern="anim/__tests__"`
+Expected: PASS.
 
-```markdown
-# `.anim` probe findings
+- [ ] **Step 5: Full suite and build**
 
-Recorded during Task 17 of the M2 animation plan, against the configured asset host.
-
-- **Naming pattern:** `<model-path-without-extension><animId padded to 4><separator><subId padded to 2>.anim`
-  — exact form as verified: `<FILL IN FROM STEP 2>`
-- **Example that returned 200:** `<FILL IN>`
-- **Model probed:** `<FILL IN>`
-- **External sequences on it:** `<FILL IN>`
-- **Loop flag:** bit 0 clear ⇒ loops — `<CONFIRMED / CORRECTED TO ...>`
-```
-
-Every `<FILL IN>` must be replaced with the observed value before this task is complete.
-
-- [ ] **Step 5: Remove the temporary logging**
-
-Revert the `console.log` in `loader.js`. Do not commit it.
+Run: `cd client && CI=true npm test` then `cd client && npm run build`
+Expected: both green. 1327 tests currently.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add client/src/game/pipeline/m2/anim/__tests__/fixtures/README.md \
-        client/src/game/pipeline/m2/anim/model-anim.ts
-git commit -m "docs(m2): record verified .anim naming and loop-flag findings"
+git add client/src/game/pipeline/m2/anim/model-anim.ts \
+        client/src/game/pipeline/m2/anim/__tests__/model-anim.test.ts
+git commit -m "fix(m2): quarantine external sequences, whose keyframes parse as noise"
 ```
 
 ---
 
-### Task 18: `.anim` fetch, parse and merge
+### Task 18: Unit locomotion
+
+Units route through the evaluator but nothing drives them: `Unit#updateMoving` has no callers, so
+every unit including the player avatar arms `resolve(0)` → Stand and holds it. The probe proved the
+data needed is **inline** — wolf Walk is id 4 flag `0x20`, Run is id 5 — so this needs no `.anim`
+support.
+
+**Files:**
+- Modify: `client/src/game/classes/unit.ts`
+- Modify: `client/src/game/classes/__tests__/unit-animation.test.ts`
+- Read first: `client/src/game/world/index.ts` (`animateEntities`), and whatever drives player
+  movement from Controls.
+
+**Interfaces:**
+- Produces: `Unit#updateLocomotion(delta: number): void`, called once per frame per unit.
+
+- [ ] **Step 1: Establish the animation ids from data, not memory**
+
+`AnimationData.dbc` ids used below were observed directly in the probe: `0` Stand, `4` Walk,
+`5` Run, `1` Death, `16`/`17` attack variants. **Confirm each against the parsed sequence tables of
+at least two models before relying on it** — read `client/src/game/pipeline/dbc/` for how DBCs are
+already loaded here and prefer the catalog over a hard-coded map if one is available.
+
+- [ ] **Step 2: Write the failing tests**
+
+Cover, with a fake model exposing `modelAnim`/`instanceAnim`:
+- a stationary unit arms Stand and **stays armed** — no re-arm on subsequent frames (assert
+  `armedAtMs` is unchanged, the guard Task 16 retained);
+- a unit whose speed crosses zero arms Walk exactly once, and re-arming does not restart every frame;
+- a unit above the run threshold arms Run;
+- returning to zero speed arms Stand again;
+- a model lacking Walk falls back through `resolve` rather than freezing;
+- **the failure mode Task 16 flagged:** wiring locomotion without the idle branch leaves a unit
+  running in place after it stops. Assert stopping arms Stand.
+
+Sample times must avoid the WRAP-at-exactly-`length` boundary — `cursorMs(WRAP, 1000, 1000)` is `0`.
+
+- [ ] **Step 3: Implement `updateLocomotion`**
+
+Derive speed from the unit's own movement state. Pick the id by threshold, `resolve` it, and arm
+**only when the resolved sequence differs from the current one** — the `if (seq.loops) return;`
+guard Task 16 added is what stops a per-frame re-arm, and this must not defeat it.
+
+Un-comment `setAnimation(Animation.idle)` at the stop transition, which Task 16 flagged as the trap.
+
+- [ ] **Step 4: Call it**
+
+From `World#animateEntities`, alongside the existing per-unit work, before posing. One call site.
+
+- [ ] **Step 5: Both gates**
+
+`cd client && CI=true npm test` and `cd client && npm run build`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git commit -m "feat(anim): drive unit locomotion from movement state"
+```
+
+---
+
+### Task 19: `.anim` fetch and cache
+
+Naming is **confirmed against the live host**: `<stem><animId:04d>-<subId:02d>.anim`, lowercase.
+`creature/wolf/wolf0097-00.anim` returns 200 at 5712 bytes; `wolf-0097-00.anim`, `wolf0097-0.anim`,
+`wolf097-00.anim` and `Wolf0097-00.anim` all 404. A 404 returns an HTML error page, which
+`Loader#load` already rejects on `!response.ok`.
 
 **Files:**
 - Create: `client/src/game/pipeline/m2/anim/external-anim.ts`
 - Create: `client/src/game/pipeline/m2/anim/__tests__/external-anim.test.ts`
 
 **Interfaces:**
-- Consumes: `Loader` from `client/src/game/net/loader.js`; `ModelAnim`, `Sequence`; the naming pattern verified in Task 17
-- Produces:
-  - `function externalAnimPath(modelPath: string, animId: number, subId: number): string`
-  - `function isExternal(flags: number): boolean`
-  - `class ExternalAnimCache` with `request(modelPath: string, seq: Sequence): void`, `readonly pending: number`
+- Produces: `externalAnimPath(modelPath, animId, subId): string`; `class ExternalAnimCache` with
+  `request(modelPath, seq): void` and `readonly pending: number`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
-```ts
-/** @jest-environment node */
-import { ExternalAnimCache, externalAnimPath, isExternal } from '../external-anim';
+Assert the exact confirmed pattern (`creature/wolf/wolf.m2`, id 97, sub 0 →
+`creature/wolf/wolf0097-00.anim`), multi-digit sub ids, case preservation of the stem, that an
+**inline** sequence is never requested, that each path is requested at most once, that a rejected
+fetch neither throws nor is retried, and that `pending` returns to zero on failure.
 
-describe('isExternal', () => {
-  it('is external when none of the inline bits are set', () => {
-    expect(isExternal(0)).toBe(true);
-  });
+- [ ] **Step 2–4: Implement, run, commit**
 
-  it('is inline when any of 0x10 / 0x20 / 0x100 is set', () => {
-    expect(isExternal(0x10)).toBe(false);
-    expect(isExternal(0x20)).toBe(false);
-    expect(isExternal(0x100)).toBe(false);
-    expect(isExternal(0x130)).toBe(false);
-  });
-});
-
-describe('externalAnimPath', () => {
-  // Pattern verified in Task 17 -- see __tests__/fixtures/README.md.
-  it('pads the animation id to four digits and the sub id to two', () => {
-    expect(externalAnimPath('creature/wolf/wolf.m2', 4, 0))
-      .toBe('creature/wolf/wolf0004-00.anim');
-  });
-
-  it('handles a multi-digit sub id', () => {
-    expect(externalAnimPath('creature/wolf/wolf.m2', 64, 12))
-      .toBe('creature/wolf/wolf0064-12.anim');
-  });
-
-  it('is case-insensitive about the extension', () => {
-    expect(externalAnimPath('Creature/Wolf/Wolf.M2', 4, 0))
-      .toBe('Creature/Wolf/Wolf0004-00.anim');
-  });
-});
-
-describe('ExternalAnimCache', () => {
-  const seq = (over: any = {}) => ({
-    index: 1, id: 4, subId: 0, lengthMs: 1000, flags: 0, probability: 32767,
-    blendTimeMs: 0, moveSpeed: 0, nextAnimationId: -1, alias: 0, loops: true, ...over,
-  });
-
-  it('requests each path at most once', async () => {
-    const load = jest.fn().mockResolvedValue(new ArrayBuffer(8));
-    const cache = new ExternalAnimCache({ load } as any, () => null);
-    cache.request('creature/wolf/wolf.m2', seq());
-    cache.request('creature/wolf/wolf.m2', seq());
-    await Promise.resolve();
-    expect(load).toHaveBeenCalledTimes(1);
-  });
-
-  it('ignores an inline sequence', () => {
-    const load = jest.fn();
-    const cache = new ExternalAnimCache({ load } as any, () => null);
-    cache.request('creature/wolf/wolf.m2', seq({ flags: 0x20 }));
-    expect(load).not.toHaveBeenCalled();
-  });
-
-  it('survives a failed fetch without throwing', async () => {
-    const load = jest.fn().mockRejectedValue(new Error('404'));
-    const cache = new ExternalAnimCache({ load } as any, () => null);
-    expect(() => cache.request('creature/wolf/wolf.m2', seq())).not.toThrow();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(cache.pending).toBe(0);
-  });
-
-  it('does not re-request a path that already failed', async () => {
-    const load = jest.fn().mockRejectedValue(new Error('404'));
-    const cache = new ExternalAnimCache({ load } as any, () => null);
-    cache.request('creature/wolf/wolf.m2', seq());
-    await new Promise((r) => setTimeout(r, 0));
-    cache.request('creature/wolf/wolf.m2', seq());
-    expect(load).toHaveBeenCalledTimes(1);
-  });
-});
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `cd client && CI=true npm test -- --testPathPattern="anim/__tests__/external-anim"`
-Expected: FAIL — `Cannot find module '../external-anim'`
-
-- [ ] **Step 3: Write the implementation**
-
-```ts
-import { Sequence } from './model-anim';
-
-/**
- * Sequence flag bits that mean "keyframe data is inline in the .m2".
- *
- * The same mask the old AnimationManager used to SKIP external sequences
- * (`animation-manager.js:186`). Here it selects them instead.
- */
-const INLINE_MASK = 0x130;
-
-export function isExternal(flags: number): boolean {
-  return (flags & INLINE_MASK) === 0;
-}
-
-const pad = (value: number, width: number) => String(value).padStart(width, '0');
-
-/**
- * The sibling `.anim` path for a sequence.
- *
- * Pattern verified against the live asset host in Task 17 -- see
- * `__tests__/fixtures/README.md`. Do not change it without re-running that probe.
- */
-export function externalAnimPath(modelPath: string, animId: number, subId: number): string {
-  const stem = modelPath.replace(/\.m2$/i, '');
-  return `${stem}${pad(animId, 4)}-${pad(subId, 2)}.anim`;
-}
-
-interface LoaderLike {
-  load(path: string): Promise<ArrayBuffer>;
-}
-
-/**
- * Lazy, cached `.anim` loading. Never on the frame path.
- *
- * A miss is not an error state: until a fetch resolves -- and permanently, if it fails -- the model
- * plays whatever sequences are inline. A creature standing instead of walking is a far better
- * failure than a stalled frame or a thrown exception mid-render.
- */
-export class ExternalAnimCache {
-  private readonly loader: LoaderLike;
-  private readonly parse: (buffer: ArrayBuffer) => unknown;
-  private readonly requested = new Set<string>();
-  pending = 0;
-
-  constructor(loader: LoaderLike, parse: (buffer: ArrayBuffer) => unknown) {
-    this.loader = loader;
-    this.parse = parse;
-  }
-
-  /**
-   * Fire a fetch for this sequence's external data if it has one and we have not tried before.
-   *
-   * `requested` is added to BEFORE the fetch and never removed, so a 404 is remembered. Without
-   * that, every frame that notices a missing sequence would re-issue the same failing request.
-   */
-  request(modelPath: string, seq: Sequence): void {
-    if (!isExternal(seq.flags)) {
-      return;
-    }
-
-    const path = externalAnimPath(modelPath, seq.id, seq.subId);
-    if (this.requested.has(path)) {
-      return;
-    }
-    this.requested.add(path);
-    this.pending++;
-
-    this.loader
-      .load(path)
-      .then((buffer) => {
-        this.parse(buffer);
-      })
-      .catch(() => {
-        // Logged once per path by virtue of `requested` -- the model keeps its inline sequences.
-        console.warn(`[m2] external animation unavailable: ${path}`);
-      })
-      .then(() => {
-        this.pending--;
-      });
-  }
-}
-```
-
-- [ ] **Step 4: Run the test to verify it passes**
-
-Run: `cd client && CI=true npm test -- --testPathPattern="anim/__tests__/external-anim"`
-Expected: PASS (10 tests)
-
-- [ ] **Step 5: Correct the path pattern if Task 17 found a different one**
-
-If `__tests__/fixtures/README.md` records a separator other than `-`, or different padding, update `externalAnimPath` **and its test** to match the verified form. The test asserting `wolf0004-00.anim` encodes an assumption that Task 17 either confirmed or corrected.
-
-- [ ] **Step 6: Commit**
+Lazy, cached per path, off the frame path, parsed in the existing worker pool. A failure logs once
+and leaves the model on its inline sequences. Mirror Task 18's original brief, but with the
+**confirmed** pattern rather than a guess.
 
 ```bash
-git add client/src/game/pipeline/m2/anim/external-anim.ts \
-        client/src/game/pipeline/m2/anim/__tests__/external-anim.test.ts
 git commit -m "feat(m2): lazy cached external .anim fetching off the frame path"
 ```
 
 ---
 
-### Task 19: Wire `.anim` data into the sequence table
+### Task 20: Parse `.anim` payloads and lift the quarantine
 
-**Files:**
-- Modify: `client/src/game/pipeline/m2/anim/external-anim.ts`
-- Modify: `client/src/game/pipeline/m2/anim/model-anim.ts`
-- Modify: `client/src/game/pipeline/m2/anim/__tests__/model-anim.test.ts`
+**This is the task with no reference.** benilla is 1.12.1 and vanilla has no `.anim` files;
+WebWoWViewer is the only guide. Do not write the byte layout from memory.
 
-**Interfaces:**
-- Produces: `ModelAnim.mergeExternal(seqIndex: number, boneTracks: any[]): void`; `ModelAnim.hasExternalPending: boolean`
+- [ ] **Step 1: Determine the layout empirically**
 
-- [ ] **Step 1: Write the failing test**
+A `.anim` file is the raw keyframe payload the `.m2`'s animation blocks point into for one sequence.
+Download `creature/wolf/wolf0097-00.anim` (5712 bytes, confirmed reachable) and cross-check the
+offsets recorded in `wolf.m2`'s slot-19 blocks against it. Verify by reconstructing one bone's
+rotation track and checking the timestamps land inside the sequence's 2000 ms length — the same
+sanity test that exposed the garbage in Task 17.
 
-Append to `__tests__/model-anim.test.ts`:
+**If the layout cannot be established from data, stop and report.** Do not ship a parser that
+produces plausible noise; that is the exact failure Task 17 exists to contain.
 
-```ts
-describe('mergeExternal', () => {
-  const externalBones = () => [{
-    translation: { tracks: [null, { animationIndex: 1, timestamps: [0, 500], values: [[0, 0, 0], [5, 0, 0]] }] },
-    rotation: { tracks: [] },
-    scaling: { tracks: [] },
-  }];
+- [ ] **Step 2: Merge**
 
-  it('fills the named sequence slot on each bone block', () => {
-    const m = new ModelAnim(data({
-      animations: [animation({ id: 0 }), animation({ id: 4, flags: 0 })],
-      bones: [bone({ translation: { interpolationType: 1, globalSequenceID: -1, tracks: [] } })],
-    }));
+`ModelAnim#mergeExternal(seqIndex, boneTracks)` splices the parsed tracks into `boneDefs` and then
+**clears that sequence's quarantine** — flip `Sequence.inline` to true for the merged slot so
+`variationsOf`, `findById`, `resolve` and `classify` begin admitting it. Re-run `classify`, since
+external data can be the first real keys a model has.
 
-    m.mergeExternal(1, externalBones());
+Guard a bone-count mismatch by ignoring the merge rather than applying it partially.
 
-    expect(m.boneDefs[0].translation.tracks[1]).toMatchObject({
-      animationIndex: 1, timestamps: [0, 500],
-    });
-  });
+- [ ] **Step 3: Tests, gates, commit**
 
-  it('leaves other sequence slots untouched', () => {
-    const inline = { animationIndex: 0, timestamps: [0], values: [[9, 9, 9]] };
-    const m = new ModelAnim(data({
-      animations: [animation({ id: 0 }), animation({ id: 4 })],
-      bones: [bone({
-        translation: { interpolationType: 1, globalSequenceID: -1, tracks: [inline] },
-      })],
-    }));
-
-    m.mergeExternal(1, externalBones());
-
-    expect(m.boneDefs[0].translation.tracks[0]).toBe(inline);
-  });
-
-  it('flips animated to true when external data brings the first keys', () => {
-    const m = new ModelAnim(data({
-      animations: [animation({ id: 0 }), animation({ id: 4 })],
-      bones: [bone()],
-    }));
-    expect(m.animated).toBe(false);
-
-    m.mergeExternal(1, externalBones());
-
-    expect(m.animated).toBe(true);
-  });
-
-  it('ignores a bone count mismatch rather than corrupting the skeleton', () => {
-    const m = new ModelAnim(data({
-      animations: [animation({ id: 0 }), animation({ id: 4 })],
-      bones: [bone(), bone()],
-    }));
-    expect(() => m.mergeExternal(1, externalBones())).not.toThrow();
-  });
-});
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `cd client && CI=true npm test -- --testPathPattern="anim/__tests__/model-anim"`
-Expected: FAIL — `m.mergeExternal is not a function`
-
-- [ ] **Step 3: Write the implementation**
-
-In `model-anim.ts`, change `readonly animated` to a mutable field (`animated: boolean`) and add:
-
-```ts
-  /**
-   * Splice externally-loaded keyframes into one sequence slot of every bone block.
-   *
-   * `.anim` data arrives long after the model is built and long after placements have been created,
-   * so this MUTATES shared per-model data in place. That is safe precisely because instances hold
-   * no keyframes of their own -- they read `boneDefs` through `ModelAnim` on every solve, so the
-   * next posed frame simply sees the new tracks.
-   *
-   * A bone-count mismatch is ignored rather than partially applied: a `.anim` from a different
-   * model version would otherwise pose half the skeleton from the wrong rig.
-   */
-  mergeExternal(seqIndex: number, boneTracks: any[]): void {
-    if (boneTracks.length !== this.boneDefs.length) {
-      console.warn(
-        `[m2] external animation bone count ${boneTracks.length} != model ${this.boneDefs.length}; ignored`,
-      );
-      return;
-    }
-
-    for (let i = 0, len = this.boneDefs.length; i < len; ++i) {
-      const target = this.boneDefs[i];
-      const source = boneTracks[i];
-      this.spliceTrack(target.translation, source.translation, seqIndex);
-      this.spliceTrack(target.rotation, source.rotation, seqIndex);
-      this.spliceTrack(target.scaling, source.scaling, seqIndex);
-    }
-
-    // External data can be the FIRST keys a model has, so a model classified static at load may
-    // become animated here.
-    this.animated = classify({
-      animations: [], sequences: this.globalSequenceDurations, bones: this.boneDefs,
-    });
-  }
-
-  private spliceTrack(targetBlock: any, sourceBlock: any, seqIndex: number): void {
-    if (!targetBlock || !sourceBlock || !sourceBlock.tracks) {
-      return;
-    }
-    const incoming = sourceBlock.tracks[seqIndex];
-    if (!incoming || !incoming.timestamps || incoming.timestamps.length === 0) {
-      return;
-    }
-    while (targetBlock.tracks.length <= seqIndex) {
-      targetBlock.tracks.push({ animationIndex: targetBlock.tracks.length, timestamps: [], values: [] });
-    }
-    targetBlock.tracks[seqIndex] = incoming;
-  }
-```
-
-- [ ] **Step 4: Run the test to verify it passes**
-
-Run: `cd client && CI=true npm test -- --testPathPattern="anim/__tests__/model-anim"`
-Expected: PASS (29 tests)
-
-- [ ] **Step 5: Request external data when a unit arms a sequence**
-
-In `client/src/game/classes/unit.ts`, before arming:
-
-```ts
-      // Fires at most once per path. Until it resolves the model plays its inline sequences.
-      externalAnims.request(m2.path, seq);
-```
-
-Create the singleton in `external-anim.ts`:
-
-```ts
-import Loader from '../../../net/loader';
-
-/** The one cache every model requests through. */
-export const externalAnims = new ExternalAnimCache(new Loader(), () => null);
-```
-
-The `parse` callback stays `() => null` until the `.anim` decoder exists; `mergeExternal` is wired to it in Step 6.
-
-- [ ] **Step 6: Decode and merge**
-
-Replace the `parse` callback with a decoder that reuses the existing bone-block reader. In `external-anim.ts`:
-
-```ts
-import { DecodeStream } from 'restructure';
-```
-
-The `.anim` payload is the raw keyframe arrays the `.m2`'s animation blocks point into for that sequence. Construct the cache per model so the merge target is known:
-
-```ts
-export function externalAnimsFor(model: ModelAnim, modelPath: string): ExternalAnimCache {
-  return new ExternalAnimCache(new Loader(), (buffer) => {
-    const stream = new DecodeStream(Buffer.from(new Uint8Array(buffer)));
-    const boneTracks = decodeAnimBoneTracks(stream, model.boneDefs.length);
-    return boneTracks;
-  });
-}
-```
-
-**`decodeAnimBoneTracks` must be written against the layout recorded in Task 17's fixtures README.** If that probe did not establish the payload layout, stop here and extend the probe before writing the decoder — do not guess the byte layout.
-
-- [ ] **Step 7: Verify**
-
-Run: `cd client && CI=true npm test && npm run build`
-Expected: PASS, build succeeds.
-
-Run the app, find a creature whose walk is an external sequence, and watch it move.
-Expected: it walks rather than sliding in Stand pose. The console shows no repeated 404 warnings for the same path.
-
-- [ ] **Step 8: Commit**
+Include a test that a merged sequence becomes armable and an unmerged one stays quarantined.
 
 ```bash
-git add client/src/game/pipeline/m2/anim/external-anim.ts \
-        client/src/game/pipeline/m2/anim/model-anim.ts \
-        client/src/game/pipeline/m2/anim/__tests__/model-anim.test.ts \
-        client/src/game/classes/unit.ts
-git commit -m "feat(m2): merge external .anim keyframes into the shared sequence table"
+git commit -m "feat(m2): parse external .anim payloads and lift the quarantine"
 ```
 
 ---
 
-### Task 20: Measure against the gate
+### Task 21: Measure, and derive the frame gate
 
-The acceptance criterion. No automated test can cover it.
+The spec's ≤ 2 ms figure is **void as a target**. It rested partly on §5.1.4 ("drop the
+per-animated-doodad `updateMatrixWorld`"), which Task 13 proved impossible — three recomputes the
+bone palette from `bone.matrixWorld` every frame, so the walk must stay. Two further changes push
+the same way: terrain and WMO hold **separate** `BoneBudget` instances, so the ceiling is 2× the
+configured value, and units are exempt from the budget by design.
 
-**Files:**
-- Modify: `client/src/game/world/index.ts` (the `anim` CPU span)
-- Create: `docs/superpowers/plans/2026-08-04-m2-animation-measurements.md`
+**Derive the number from measurement. Do not defend the old one.**
 
-- [ ] **Step 1: Wrap the animation work in a CPU span**
+- [ ] **Step 1: Baseline**
 
-In `client/src/pages/game/index.tsx`, the existing `world.animate` span already covers the evaluator. Add a nested span so animation is attributable separately. In `client/src/game/world/index.ts#animate`, around the doodad and entity animation calls:
+Check out the merge base, run with the HUD open, and record `worst`, `p50`, `p99` and `over-budget`
+over a 30-second sample at: Goldshire facing the inn; Stormwind Trade District centre; Westfall open
+terrain facing away from buildings.
 
-```ts
-    this.perf?.sections.begin('anim');
-```
+- [ ] **Step 2: This branch**
 
-and after the last of them:
+Same three positions, same figures, plus the `anim` section time and every `anim*` counter
+(`animResident`, `animPosed`, `animSkipped`, `animBonesSolved`, `animMaterialsEvaluated`).
 
-```ts
-    this.perf?.sections.end('anim');
-```
+- [ ] **Step 3: Write it up**
 
-Pass the `PerfMonitor` into `World` if it is not already reachable; if threading it is invasive, import the module singleton the HUD already uses instead.
+`docs/superpowers/plans/2026-08-04-m2-animation-measurements.md`, table filled with observed
+numbers, then a proposed gate justified by the data and a note on the dual-budget ceiling.
 
-- [ ] **Step 2: Take the baseline**
+- [ ] **Step 4: If the delta is unacceptable**
 
-Check out the merge base and run the app with the HUD open, standing at each of these:
+Tighten in this order, re-measuring each time: unify the two `BoneBudget` instances; lower
+`gameSettings.m2.boneBudgetPerFrame`; reduce `NEAR_YD`; raise the far decimation period; last,
+introduce a priority-ordered budget covering units.
 
-- Goldshire, facing the inn
-- Stormwind Trade District, centre of the square
-- Westfall, open terrain facing away from any building
-
-Record `worst`, `p50`, `p99` and `over-budget` from a 30-second sample at each.
-
-- [ ] **Step 3: Take the measurement on this branch**
-
-Repeat at the same three positions on the animation branch. Record the same four figures plus the `anim` section time and the four `anim*` counters.
-
-- [ ] **Step 4: Write up the results**
-
-Create `docs/superpowers/plans/2026-08-04-m2-animation-measurements.md`:
-
-```markdown
-# M2 Animation — Measurements
-
-Against the gate from the design spec: `anim` <= 2 ms, worst frame unchanged versus the static build.
-
-| Location | Build | worst | p50 | p99 | over-budget | anim ms | resident | posed | skipped | bones |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Goldshire | baseline | | | | | — | — | — | — | — |
-| Goldshire | animated | | | | | | | | | |
-| Stormwind | baseline | | | | | — | — | — | — | — |
-| Stormwind | animated | | | | | | | | | |
-| Westfall | baseline | | | | | — | — | — | — | — |
-| Westfall | animated | | | | | | | | | |
-
-## Verdict
-
-<PASS / FAIL against the gate, with the specific figure that decides it.>
-
-## If it failed
-
-Tighten in this order, re-measuring after each:
-1. Lower `gameSettings.m2.boneBudgetPerFrame`.
-2. Reduce `NEAR_YD` in `gating.ts` so fewer instances pose every frame.
-3. Raise the far decimation period from 4.
-```
-
-Every cell must be filled with an observed number.
-
-- [ ] **Step 5: Act on the verdict**
-
-If the gate fails, apply the tightening steps in order, re-measure, and record each pass in the table. **Do not mark this task complete on a failing gate** — report the numbers and stop.
-
-- [ ] **Step 6: Commit**
+Do not mark complete on an unmeasured gate.
 
 ```bash
-git add docs/superpowers/plans/2026-08-04-m2-animation-measurements.md \
-        client/src/game/world/index.ts
-git commit -m "perf(anim): measure the evaluator against the 2ms frame gate"
+git commit -m "perf(anim): measure the evaluator and derive the frame gate"
 ```
-
----
 
 ## Self-Review
 
