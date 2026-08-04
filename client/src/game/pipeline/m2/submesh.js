@@ -14,10 +14,13 @@ import { modelSpaceBindMatrix } from './bind-pose';
  *
  * The walk up is two hops (batch mesh -> Submesh -> M2) and stops at whatever carries `fadeAlpha`.
  * Anything with no fade owner -- WMO-interior doodads, units -- renders fully opaque.
+ *
+ * Returns whether the uniform actually changed. See `applyUniformsBeforeRender` for what that is
+ * for; writing `.value` alone never reaches the GPU.
  */
-function applyFadeAlphaBeforeRender(_renderer, _scene, _camera, _geometry, material) {
+export function applyFadeAlphaBeforeRender(_renderer, _scene, _camera, _geometry, material) {
   if (!material || !material.uniforms || !material.uniforms.fadeAlpha) {
-    return;
+    return false;
   }
 
   let node = this;
@@ -25,7 +28,13 @@ function applyFadeAlphaBeforeRender(_renderer, _scene, _camera, _geometry, mater
     node = node.parent;
   }
 
-  material.uniforms.fadeAlpha.value = node ? node.fadeAlpha : 1.0;
+  const next = node ? node.fadeAlpha : 1.0;
+  if (material.uniforms.fadeAlpha.value === next) {
+    return false;
+  }
+
+  material.uniforms.fadeAlpha.value = next;
+  return true;
 }
 
 /**
@@ -46,15 +55,17 @@ const IDENTITY_UV = new THREE.Matrix4();
  * EVERY slot the material declares is written on every call, including the ones this batch does not
  * animate. Skipping them would leave the previous placement's matrix in the shared uniform, which is
  * the exact failure this function exists to prevent.
+ *
+ * Returns whether anything changed -- see `applyUniformsBeforeRender`.
  */
-function applyAnimatedUniformsBeforeRender(_renderer, _scene, _camera, _geometry, material) {
+export function applyAnimatedUniformsBeforeRender(_renderer, _scene, _camera, _geometry, material) {
   if (!material || !material.uniforms) {
-    return;
+    return false;
   }
 
   const def = material.animationDef;
   if (!def) {
-    return;
+    return false;
   }
 
   // Two hops (batch mesh -> Submesh -> M2), stopping at whatever carries the value slots.
@@ -63,45 +74,97 @@ function applyAnimatedUniformsBeforeRender(_renderer, _scene, _camera, _geometry
     node = node.parent;
   }
   if (!node) {
-    return;
+    return false;
   }
 
   const { uniforms } = material;
+  let changed = false;
 
   if (uniforms.animatedUVs) {
     const slots = uniforms.animatedUVs.value;
     const indices = def.uvAnimationIndices;
     for (let i = 0, len = slots.length; i < len; ++i) {
       const source = i < indices.length ? node.uvAnimationValues[indices[i]] : undefined;
-      slots[i] = source ? source.matrix : IDENTITY_UV;
+      const next = source ? source.matrix : IDENTITY_UV;
+
+      if (slots[i] !== next) {
+        slots[i] = next;
+        changed = true;
+      } else if (source) {
+        // Same object as last draw, but its CONTENTS were resampled since -- `evaluateMaterialChannels`
+        // rewrites the matrix in place every frame. A reference compare cannot see that, and a
+        // 16-float compare to find out would cost more than it could ever save on a slot that is
+        // animated by definition. An identity slot, which is the overwhelmingly common case, still
+        // reports clean.
+        changed = true;
+      }
     }
   }
 
   if (uniforms.animatedTransparency && def.transparencyAnimationIndex >= 0) {
     const value = node.transparencyAnimationValues[def.transparencyAnimationIndex];
-    uniforms.animatedTransparency.value = value === undefined ? 1.0 : value;
+    const next = value === undefined ? 1.0 : value;
+    if (uniforms.animatedTransparency.value !== next) {
+      uniforms.animatedTransparency.value = next;
+      changed = true;
+    }
   }
 
   if (uniforms.animatedVertexColorRGB && def.vertexColorAnimationIndex >= 0) {
     const source = node.vertexColorAnimationValues[def.vertexColorAnimationIndex];
     const rgb = uniforms.animatedVertexColorRGB.value;
-    if (source) {
-      rgb.set(source.color[0], source.color[1], source.color[2]);
-      uniforms.animatedVertexColorAlpha.value = source.alpha;
-    } else {
-      rgb.set(1.0, 1.0, 1.0);
-      uniforms.animatedVertexColorAlpha.value = 1.0;
+
+    const r = source ? source.color[0] : 1.0;
+    const g = source ? source.color[1] : 1.0;
+    const b = source ? source.color[2] : 1.0;
+    const a = source ? source.alpha : 1.0;
+
+    if (rgb.x !== r || rgb.y !== g || rgb.z !== b) {
+      rgb.set(r, g, b);
+      changed = true;
+    }
+    if (uniforms.animatedVertexColorAlpha.value !== a) {
+      uniforms.animatedVertexColorAlpha.value = a;
+      changed = true;
     }
   }
+
+  return changed;
 }
 
 /**
- * The batch meshes' single `onBeforeRender`. A named module-level function rather than a closure per
- * batch mesh, so chaining the two handlers costs no allocation per batch.
+ * The batch meshes' single `onBeforeRender`.
+ *
+ * `uniformsNeedUpdate` is the load-bearing line, for exactly the reason
+ * `material/per-object-light.ts` already documents: three.js re-uploads a ShaderMaterial's uniforms
+ * only when the material changes between draws (`WebGLRenderer#setProgram`: the upload sits behind
+ * `refreshMaterial`, which needs a program swap or a different `material.id`) or when this flag is
+ * set. Two placements of one model share a material and sort adjacently, so without the flag every
+ * placement after the first draws with the FIRST one's UV matrix, transparency and colour -- the
+ * same class of bug this whole file exists to prevent, moved from "last writer wins" to "first
+ * drawer wins". It was missing from the fade push too, so that has never reached the GPU for a
+ * second placement either.
+ *
+ * CONDITIONAL rather than the unconditional raise `applyPerObjectLighting` does. The flag re-uploads
+ * the material's ENTIRE uniform list -- textures, a 28-float `probeCoeffs`, three light arrays -- and
+ * the great majority of M2 batches animate no channel at all and sit at a constant fade alpha, so
+ * for them this is a pure cost with nothing to show. A batch that genuinely animates reports dirty
+ * every frame and pays the same as an unconditional raise would.
+ *
+ * Both handlers run before the flag is decided: `||` would short-circuit and skip the second push.
+ *
+ * A named module-level function rather than a closure per batch mesh, so chaining costs no
+ * allocation per batch.
  */
-function applyUniformsBeforeRender(renderer, scene, camera, geometry, material, group) {
-  applyFadeAlphaBeforeRender.call(this, renderer, scene, camera, geometry, material, group);
-  applyAnimatedUniformsBeforeRender.call(this, renderer, scene, camera, geometry, material, group);
+export function applyUniformsBeforeRender(renderer, scene, camera, geometry, material, group) {
+  const fadeChanged =
+    applyFadeAlphaBeforeRender.call(this, renderer, scene, camera, geometry, material, group);
+  const animatedChanged =
+    applyAnimatedUniformsBeforeRender.call(this, renderer, scene, camera, geometry, material, group);
+
+  if (fadeChanged || animatedChanged) {
+    material.uniformsNeedUpdate = true;
+  }
 }
 
 class Submesh extends THREE.Group {
@@ -160,6 +223,11 @@ class Submesh extends THREE.Group {
       }
 
       batchMesh.matrixAutoUpdate = this.matrixAutoUpdate;
+      // ASSIGNS the slot, and this method runs again whenever display-info textures resolve. Any
+      // handler installed on a batch mesh from outside -- `attachPerObjectLighting` is the one such
+      // caller today, for WMO-interior doodads -- is un-installed by a re-run. The batch meshes are
+      // rebuilt here anyway, so nothing outside can hold onto one; the hazard is an attacher that
+      // ran against the PREVIOUS set. See the note on `attachPerObjectLighting`.
       batchMesh.onBeforeRender = applyUniformsBeforeRender;
 
       this.add(batchMesh);

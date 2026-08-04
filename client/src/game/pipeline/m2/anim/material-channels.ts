@@ -75,6 +75,9 @@ const scratchScaling = new THREE.Vector3();
 const scratchColor = new THREE.Vector3();
 const scratchCompose = new THREE.Matrix4();
 
+/** Compared against, never written. */
+const IDENTITY = new THREE.Matrix4();
+
 /** `T(0.5, 0.5, 0)` and its inverse. Built once; never mutated. */
 const uvPivotTo = new THREE.Matrix4().makeTranslation(0.5, 0.5, 0);
 const uvPivotBack = new THREE.Matrix4().makeTranslation(-0.5, -0.5, 0);
@@ -144,6 +147,19 @@ export function evaluateUVAnimation(
   scratchScaling.set(1, 1, 1);
 
   const translation = channelTrack(def.translation, seqIndex);
+  const rotationTrack = channelTrack(def.rotation, seqIndex);
+  const scalingTrack = channelTrack(def.scaling, seqIndex);
+
+  // Nothing drives this animation under the playing sequence. If the slot is already identity there
+  // is nothing to reset either, so skip the compose entirely -- a model in `animatedDoodads` for its
+  // BONES alone reaches here once per UV animation per frame and would otherwise pay three matrix
+  // multiplies to rewrite an identity it already has.
+  if (!translation && !rotationTrack && !scalingTrack) {
+    if (value.matrix.equals(IDENTITY)) {
+      return;
+    }
+  }
+
   if (translation) {
     sampleVec3(
       translation, isStep(def.translation),
@@ -151,18 +167,16 @@ export function evaluateUVAnimation(
     );
   }
 
-  const rotation = channelTrack(def.rotation, seqIndex);
-  if (rotation) {
+  if (rotationTrack) {
     sampleQuat(
-      rotation, isStep(def.rotation),
+      rotationTrack, isStep(def.rotation),
       channelCursor(model, def.rotation, inst, worldClockMs), scratchRotation,
     );
   }
 
-  const scaling = channelTrack(def.scaling, seqIndex);
-  if (scaling) {
+  if (scalingTrack) {
     sampleVec3(
-      scaling, isStep(def.scaling),
+      scalingTrack, isStep(def.scaling),
       channelCursor(model, def.scaling, inst, worldClockMs), scratchScaling,
     );
   }

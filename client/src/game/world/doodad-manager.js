@@ -321,6 +321,7 @@ class DoodadManager {
       // (`applyAnimatedUniformsBeforeRender`), and sampling is clock-indexed, so an undrawn doodad
       // that resumes samples the value the shared clock dictates rather than a stale one.
       if (inst) {
+        animCounters.materialsEvaluated++;
         doodad.evaluateMaterialChannels(worldClockMs);
       }
 

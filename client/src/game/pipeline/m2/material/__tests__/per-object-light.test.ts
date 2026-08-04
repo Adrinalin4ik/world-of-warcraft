@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { applyPerObjectLighting, PerObjectLighting } from '../per-object-light';
+import { applyPerObjectLighting, attachPerObjectLighting, PerObjectLighting } from '../per-object-light';
 
 // A stand-in for the shared ShaderMaterial: only the uniforms and the refresh flag matter.
 const makeMaterial = () => ({
@@ -98,5 +98,61 @@ describe('applyPerObjectLighting', () => {
     material.uniforms.wmoLightPosition.value[2].x = 99;
     applyPerObjectLighting(material as any, exterior);
     expect(material.uniforms.wmoLightPosition.value[2].x).toBe(99);
+  });
+});
+
+describe('attachPerObjectLighting', () => {
+  const mesh = (over: any = {}) => ({ material: makeMaterial(), ...over });
+
+  /**
+   * `onBeforeRender` is ONE slot with several claimants on an M2 batch mesh: the distance-fade push,
+   * the animated UV/transparency/colour push (installed together by `Submesh#applyBatches`), and
+   * this. Assigning over the slot silently deleted the other two for every WMO-interior doodad.
+   */
+  it('chains onto a handler the mesh already carries instead of replacing it', () => {
+    const existing = jest.fn();
+    const m: any = mesh({ onBeforeRender: existing });
+
+    attachPerObjectLighting(m, () => exterior);
+    m.onBeforeRender(1, 2, 3, 4, m.material, 6);
+
+    expect(existing).toHaveBeenCalledTimes(1);
+    expect(m.material.uniformsNeedUpdate).toBe(true);
+  });
+
+  it('forwards the renderer argument list and `this` to the previous handler', () => {
+    let seenThis: any = null;
+    let seenArgs: any[] = [];
+    const m: any = mesh({
+      onBeforeRender(...args: any[]) {
+        seenThis = this;
+        seenArgs = args;
+      },
+    });
+
+    attachPerObjectLighting(m, () => exterior);
+    m.onBeforeRender('r', 's', 'c', 'g', m.material, 'grp');
+
+    expect(seenThis).toBe(m);
+    expect(seenArgs).toEqual(['r', 's', 'c', 'g', m.material, 'grp']);
+  });
+
+  it('still runs the previous handler when this object has no lighting to push', () => {
+    const existing = jest.fn();
+    const m: any = mesh({ onBeforeRender: existing });
+
+    attachPerObjectLighting(m, () => null);
+    m.onBeforeRender(null, null, null, null, m.material, null);
+
+    expect(existing).toHaveBeenCalledTimes(1);
+    expect(m.material.uniformsNeedUpdate).toBe(false);
+  });
+
+  it('works on a mesh with no previous handler at all', () => {
+    const m: any = mesh();
+
+    attachPerObjectLighting(m, () => exterior);
+    expect(() => m.onBeforeRender(null, null, null, null, m.material, null)).not.toThrow();
+    expect(m.material.uniformsNeedUpdate).toBe(true);
   });
 });

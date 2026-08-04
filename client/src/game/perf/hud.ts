@@ -23,6 +23,16 @@ export interface PerfPayload {
   loadedMapDoodads: number;
   /** Doodads belonging to WMO interiors, which the fade cull does not touch. */
   visibleDoodads: number;
+
+  // The animation counters (`pipeline/m2/anim/counters.ts`). Optional because the render loop has
+  // always passed them while this HUD rendered none of them -- they were collected and thrown away.
+  // Optional rather than required so a caller measuring something else need not invent them.
+  animResident?: number;
+  animPosed?: number;
+  animSkipped?: number;
+  animBonesSolved?: number;
+  /** Instances whose UV / transparency / colour channels were sampled -- ungated by budget. */
+  animMaterialsEvaluated?: number;
 }
 
 /**
@@ -80,6 +90,13 @@ function format(p: PerfPayload): string {
     `chunks ${p.visibleChunks}  groups ${p.visibleGroups}`,
     `map doodads ${p.visibleMapDoodads}/${p.loadedMapDoodads}  wmo doodads ${p.visibleDoodads}`,
   ];
+
+  if (p.animResident !== undefined) {
+    lines.push(
+      `anim ${p.animPosed ?? 0}/${p.animResident} posed  skipped ${p.animSkipped ?? 0}`,
+      `bones ${p.animBonesSolved ?? 0}  materials ${p.animMaterialsEvaluated ?? 0}`,
+    );
+  }
 
   if (p.sections.size > 0) {
     lines.push('');

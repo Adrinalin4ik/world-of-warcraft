@@ -104,12 +104,33 @@ export function applyPerObjectLighting(
 /**
  * Install the per-draw push on one mesh. `getLighting` is called per draw, so it must be cheap -- do
  * the selection and folding when the object moves or its room changes, not here.
+ *
+ * CHAINS onto whatever handler the mesh already carries rather than replacing it. `onBeforeRender`
+ * is a single slot with three claimants on an M2 batch mesh: the distance-fade push, the animated
+ * UV/transparency/colour push (both installed together by `Submesh#applyBatches` as
+ * `applyUniformsBeforeRender`), and this. Assigning over the slot silently deleted the other two for
+ * every WMO-interior doodad -- invisible today only because those doodads have no animated-channel
+ * evaluation call yet, and due to become a live bug the moment Task 16 adds one.
+ *
+ * NOTE for the other direction: `Submesh#applyBatches` REPLACES `onBeforeRender` outright, and it
+ * runs again whenever display-info textures resolve. A WMO doodad whose skins resolve after its
+ * lighting was attached therefore loses this handler. Fixing that properly means a real handler list
+ * on the mesh; it is called out here rather than left to be rediscovered.
  */
 export function attachPerObjectLighting(
   mesh: { material: any; onBeforeRender?: Function },
   getLighting: () => PerObjectLighting | null,
 ): void {
-  mesh.onBeforeRender = function perObjectLighting() {
+  const previous = mesh.onBeforeRender;
+
+  mesh.onBeforeRender = function perObjectLighting(
+    this: any,
+    renderer: any, scene: any, camera: any, geometry: any, material: any, group: any,
+  ) {
+    if (previous) {
+      previous.call(this, renderer, scene, camera, geometry, material, group);
+    }
+
     const lighting = getLighting();
     if (!lighting || !this.material || !this.material.uniforms) {
       return;

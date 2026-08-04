@@ -25,6 +25,8 @@ export interface SceneCounters {
   animPosed: number;
   animSkipped: number;
   animBonesSolved: number;
+  /** Instances whose material channels were sampled. Neither decimated nor bone-budgeted. */
+  animMaterialsEvaluated: number;
 }
 
 /**

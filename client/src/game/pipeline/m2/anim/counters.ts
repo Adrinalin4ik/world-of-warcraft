@@ -28,6 +28,15 @@ export interface AnimCountersSnapshot {
    * the draw list, not of this loop, and nothing here can observe it.
    */
   posesApplied: number;
+  /**
+   * Instances whose UV / transparency / vertex-colour channels were sampled this frame.
+   *
+   * Counted separately from `posed` because it is a separately GATED population: material channels
+   * are evaluated for every drawn instance, with no distance decimation and no bone budget (there
+   * are no bones to budget). It is therefore the one per-frame animation cost nothing throttles, and
+   * Task 20 has to re-derive the frame gate from measurement -- so it must be visible.
+   */
+  materialsEvaluated: number;
 }
 
 class AnimCounters implements AnimCountersSnapshot {
@@ -36,6 +45,7 @@ class AnimCounters implements AnimCountersSnapshot {
   skipped = 0;
   bonesSolved = 0;
   posesApplied = 0;
+  materialsEvaluated = 0;
 
   reset(): void {
     this.resident = 0;
@@ -43,6 +53,7 @@ class AnimCounters implements AnimCountersSnapshot {
     this.skipped = 0;
     this.bonesSolved = 0;
     this.posesApplied = 0;
+    this.materialsEvaluated = 0;
   }
 
   snapshot(): AnimCountersSnapshot {
@@ -52,6 +63,7 @@ class AnimCounters implements AnimCountersSnapshot {
       skipped: this.skipped,
       bonesSolved: this.bonesSolved,
       posesApplied: this.posesApplied,
+      materialsEvaluated: this.materialsEvaluated,
     };
   }
 }

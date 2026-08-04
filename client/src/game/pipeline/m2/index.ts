@@ -79,7 +79,6 @@ class M2 extends THREE.Group {
   // materials are cached and shared across every placement of a model.
   uvAnimationValues: UVAnimationValue[] = [];
   transparencyAnimationValues: number[] = [];
-  textureAnimations: THREE.Object3D;
   vertexColorAnimationValues: VertexColorValue[] = [];
   // The parsed blocks the three arrays above are sampled from, plus a holder aliasing the arrays.
   // Both are built once, in `createTextureAnimations`, so the per-frame evaluator allocates nothing.
@@ -524,7 +523,9 @@ class M2 extends THREE.Group {
   }
 
   createTextureAnimations(data) {
-    this.textureAnimations = new THREE.Object3D();
+    // `this.textureAnimations = new THREE.Object3D()` used to live here. Nothing ever read it -- and
+    // now that this method runs per PLACEMENT rather than per model path, it would have been one
+    // pointless Object3D per doodad in the world.
     this.uvAnimationValues = [];
     this.transparencyAnimationValues = [];
     this.vertexColorAnimationValues = [];

@@ -345,6 +345,11 @@ describe('transparency', () => {
     expect(v.transparency[0]).toBeCloseTo(0.5);
   });
 
+  /**
+   * Two-phase on purpose. Asserting 1.0 straight after construction would also pass against a
+   * version that simply left the slot alone, since `values()` seeds it at 1.0 -- so drive it away
+   * from the default first, then prove the fallback RESETS it.
+   */
   it('falls back to fully opaque when the playing sequence drives nothing', () => {
     const m = model();
     const defs = {
@@ -355,9 +360,13 @@ describe('transparency', () => {
     const v = values(0, 1);
 
     const inst = new InstanceAnim(m);
-    inst.arm(m.sequences[1], 0);
-    evaluateMaterialChannels(m, inst, defs, v, 500);
+    inst.arm(m.sequences[0], 0);
+    evaluateMaterialChannels(m, inst, defs, v, 250);
+    expect(v.transparency[0]).toBeCloseTo(0.75);
 
+    // Sequence 1 has no track on this block. The batch must go back to fully opaque, not hold 0.75.
+    inst.arm(m.sequences[1], 250);
+    evaluateMaterialChannels(m, inst, defs, v, 600);
     expect(v.transparency[0]).toBe(1.0);
   });
 });
