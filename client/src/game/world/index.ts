@@ -532,8 +532,12 @@ export default class World extends EventEmitter {
       // Deliberately ABOVE the DRAW gate, unlike the material and bone work. Gait is state, not a
       // pose: skipping it for an off-screen unit would leave it standing when it walks back into
       // view, and the measured-displacement leg would then difference across the whole gap and read
-      // a teleport. It costs one vector subtract and, on the frames the gait actually changes, one
-      // `resolve` walk.
+      // a teleport.
+      //
+      // Steady-state cost is a two-component subtract, a sqrt and a reference comparison. The
+      // `resolve` walk -- a full linear scan of the sequence table per candidate -- runs only when
+      // the gait BUCKET changes, because `updateLocomotion` memoises the resolved sequence against
+      // the candidate list it came from. Without that memo it would run for every unit every frame.
       entity.updateLocomotion(delta);
 
       // Membership here does NOT imply `instanceAnim` is non-null -- a billboard-only model reaches

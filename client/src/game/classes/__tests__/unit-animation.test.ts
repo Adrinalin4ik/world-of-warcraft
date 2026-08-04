@@ -215,15 +215,29 @@ function locoUnit(animations: any[], isPlayer: boolean = true) {
   const instanceAnim = new InstanceAnim(modelAnim);
 
   const proto: any = (Unit as any).prototype;
+
+  // `view.position` and `position` are the SAME vector, as they are on a real Unit (`get position()`
+  // returns `this._view.position`). `teleportTo` writes through both names.
+  const pos = new THREE.Vector3();
+
   const u: any = {
     isPlayer,
-    move: { swimming: false, swimStrokeSpeed: 0, horizVel: new THREE.Vector3() },
-    view: { position: new THREE.Vector3() },
+    wireDriven: false,
+    move: {
+      swimming: false, swimStrokeSpeed: 0,
+      horizVel: new THREE.Vector3(), pos: new THREE.Vector3(),
+    },
+    view: { position: pos, rotation: {} },
+    position: pos,
     model: { modelAnim, instanceAnim },
     currentAnimationId: 0,
     locoPrevX: 0,
     locoPrevY: 0,
     locoTracking: false,
+    externalAnimation: false,
+    locoCandidates: null,
+    locoTarget: 0,
+    locoSeq: null,
     emitted: [] as any[],
     emit(...args: any[]) { u.emitted.push(args); },
     setAnimation: proto.setAnimation,
@@ -231,6 +245,7 @@ function locoUnit(animations: any[], isPlayer: boolean = true) {
     locomotionSpeed: proto.locomotionSpeed,
     gaitFor: proto.gaitFor,
     updateLocomotion: proto.updateLocomotion,
+    teleportTo: proto.teleportTo,
   };
 
   return u;
@@ -426,40 +441,166 @@ describe('Unit#updateLocomotion speed source', () => {
   });
 
   /**
-   * Kills: ignoring the swim latch. While swimming the mover's `horizVel` is the 3D stroke's
-   * horizontal component and understates the gait; the reference reads `swim_stroke_speed`
-   * (`player.rs:1209-1213`). Here `horizVel` is left at zero and only the stroke speed is set, so a
-   * mutant reading `horizVel` stands still mid-swim.
+   * Kills: ignoring the swim latch. While swimming the mover's `horizVel` is only the HORIZONTAL
+   * component of a 3D stroke (`movement/swim.ts:256-258` really does write it), so it understates
+   * the gait whenever the swimmer is pitched. The reference reads `swim_stroke_speed` instead
+   * (`player.rs:1209-1213`).
+   *
+   * The fixture is the state the mover actually produces: a 7 yd/s stroke pitched down about 73
+   * degrees leaves `horizVel` at 2 yd/s. A mutant reading `horizVel` picks Walk (4); the correct
+   * code picks Run (5). Both are non-zero, so the test cannot pass by accident on a Stand default.
    */
-  it('uses the swim stroke speed for a swimming player', () => {
+  it('uses the swim stroke speed, not horizVel, for a swimming player', () => {
     const u = locoUnit(gaits());
     u.move.swimming = true;
     u.move.swimStrokeSpeed = 7;
+    u.move.horizVel.set(2, 0, 0);
 
     u.updateLocomotion(0.4);
 
     expect(u.model.instanceAnim.current.id).toBe(5);
   });
+
+  /**
+   * IMPORTANT 2. Kills: running locomotion for a wire-driven peer.
+   *
+   * A peer's `view.position` advances only on the frames a `movement` message lands, so
+   * differencing it every frame alternates between "no displacement" (Stand) and "a whole batch in
+   * one delta" (above `TELEPORT_SPEED`, also Stand), with real gaits in between. This replays that
+   * cadence exactly: two quiet frames, then a catch-up. A mutant that drops the `wireDriven` gate
+   * re-arms on the flips -- `armedAtMs` moves and the cursor is pinned near zero, which is the
+   * freeze this whole task exists to prevent.
+   *
+   * The wire's own `setAnimation` must be all that ever touches the peer.
+   */
+  it('does not run locomotion for a wire-driven peer', () => {
+    const u = locoUnit(gaits(), false);
+    u.wireDriven = true;
+
+    // What the wire said: this peer is running.
+    u.setAnimation(5);
+    const armedAt = u.model.instanceAnim.armedAtMs;
+
+    // Two quiet frames, then a coalesced catch-up of 3 yd in one 16 ms frame (187 yd/s).
+    worldClock.advance(0.016);
+    u.updateLocomotion(0.016);
+    worldClock.advance(0.016);
+    u.updateLocomotion(0.016);
+    u.view.position.set(3, 0, 0);
+    worldClock.advance(0.016);
+    u.updateLocomotion(0.016);
+
+    expect(u.model.instanceAnim.current.id).toBe(5);
+    expect(u.model.instanceAnim.armedAtMs).toBe(armedAt);
+    expect(u.model.instanceAnim.cursor(worldClock.ms)).toBeCloseTo(48);
+  });
+
+  /**
+   * MINOR. Kills: leaving the displacement baseline in place across a teleport.
+   *
+   * `TELEPORT_SPEED` only catches a relocation big enough to exceed it. A 1 yd hop in one 16 ms
+   * frame is 62.5 yd/s -- under the clamp, and a perfectly plausible sprint. `teleportTo` knows it
+   * was not locomotion, so it drops the baseline and the next frame re-seeds instead of measuring.
+   */
+  it('does not read a short teleport as a gait', () => {
+    const u = locoUnit(gaits(), false);
+
+    u.updateLocomotion(0.016);
+    expect(u.model.instanceAnim.current.id).toBe(0);
+
+    u.teleportTo(1, 0, 0);
+    worldClock.advance(0.016);
+    u.updateLocomotion(0.016);
+
+    expect(u.model.instanceAnim.current.id).toBe(0);
+  });
 });
 
-describe('Unit#updateLocomotion one-shot hold', () => {
+/**
+ * IMPORTANT 1: what an externally-armed animation owns, and for how long.
+ *
+ * The gait pick runs every frame, so without an ownership rule it replaces anything armed from
+ * outside -- the wire handler at `network/entity/entity.ts:52`, `jump()`, and every future SMSG
+ * animation -- on the next frame. `Unit#externalAnimation` is the thin form of the reference's
+ * `Special` / `Mode` states, which likewise outrank the gait (`select.rs:280+`).
+ */
+describe('Unit#updateLocomotion external-animation ownership', () => {
   /**
-   * Kills: letting the per-frame gait pick stomp a playing one-shot. Without the hold, a jump is
-   * overwritten on the very next frame and no one-shot in the game is ever visible for more than
-   * ~16 ms. The release side matters just as much: a hold with no expiry would strand the unit on
-   * the jump pose for ever.
+   * THE REGRESSION THIS ROUND EXISTS FOR: a corpse must not stand back up.
+   *
+   * Death (id 1) is a ONE-SHOT, so a plain "hold until the window elapses" rule plays it through
+   * and then hands the body to the gait -- Stand -- and the dead unit stands up. That is worse than
+   * pre-Task-18 behaviour, where it held its final Death frame for ever.
+   *
+   * Kills: dropping the `currentAnimationId === DEATH` arm of the release check (the corpse arms
+   * Stand at 1.4 s), and dropping the ownership check outright (it stands up at 0.4 s, mid-clip).
+   * The reference arms death once and holds it the same way (`driver.rs:351`).
    */
-  it('holds a one-shot inside its window, then releases to the gait', () => {
-    const u = locoUnit([...gaits(), animation({ id: 15, flags: ONE_SHOT, length: 1000 })]);
+  it('never releases Death, even after its one-shot window elapses', () => {
+    const u = locoUnit([...gaits(), animation({ id: 1, flags: ONE_SHOT, length: 1000 })]);
 
-    u.setAnimation(15);
+    u.setAnimation(1);
+    const armedAt = u.model.instanceAnim.armedAtMs;
+
+    // Still inside the window.
+    worldClock.advance(0.4);
+    u.updateLocomotion(0.4);
+    expect(u.model.instanceAnim.current.id).toBe(1);
+
+    // Well past it. A corpse does not stand up, and does not re-arm either.
+    worldClock.advance(1.0);
+    u.updateLocomotion(0.4);
+    worldClock.advance(1.0);
+    u.updateLocomotion(0.4);
+
+    expect(u.model.instanceAnim.current.id).toBe(1);
+    expect(u.model.instanceAnim.armedAtMs).toBe(armedAt);
+  });
+
+  /**
+   * Kills: releasing a LOOPING externally-armed animation. A dance, a sit, or the `Dead` 6 loop has
+   * no window to elapse, so a rule phrased only in terms of `windowElapsed` would hand the body
+   * back on the very first frame -- the emote would not survive one frame of being received.
+   *
+   * The unit is also MOVING here, so a mutant that releases has a Run to arm and the failure is
+   * unambiguous rather than a coincidental Stand.
+   */
+  it('never releases a looping emote armed from outside', () => {
+    const u = locoUnit([...gaits(), animation({ id: 60, length: 1000 })]);
+
+    u.setAnimation(60);
+    const armedAt = u.model.instanceAnim.armedAtMs;
+
+    u.move.horizVel.set(7, 0, 0);
+    worldClock.advance(0.4);
+    u.updateLocomotion(0.4);
+    worldClock.advance(1.2);
+    u.updateLocomotion(0.4);
+
+    expect(u.model.instanceAnim.current.id).toBe(60);
+    expect(u.model.instanceAnim.armedAtMs).toBe(armedAt);
+    // And it is genuinely LOOPING, not frozen: 1.6 s into a 1 s loop is cursor 600.
+    expect(u.model.instanceAnim.cursor(worldClock.ms)).toBeCloseTo(600);
+  });
+
+  /**
+   * The release side, which matters as much as the hold: an attack swing or a jump must give the
+   * body back when it finishes, or the unit is stranded on its end pose for ever.
+   *
+   * Kills: holding every one-shot unconditionally (the unit never returns to Run), and dropping the
+   * hold entirely (the swing is stomped at 0.4 s, mid-clip, and no one-shot is ever visible).
+   */
+  it('holds a non-Death one-shot for its window, then releases to the gait', () => {
+    const u = locoUnit([...gaits(), animation({ id: 16, flags: ONE_SHOT, length: 1000 })]);
+
+    u.setAnimation(16);
     const armedAt = u.model.instanceAnim.armedAtMs;
 
     u.move.horizVel.set(7, 0, 0);
     worldClock.advance(0.4);
     u.updateLocomotion(0.4);
 
-    expect(u.model.instanceAnim.current.id).toBe(15);
+    expect(u.model.instanceAnim.current.id).toBe(16);
     expect(u.model.instanceAnim.armedAtMs).toBe(armedAt);
 
     // 1.4 s in: past the 1000 ms window, so the gait takes the body back.
@@ -467,5 +608,111 @@ describe('Unit#updateLocomotion one-shot hold', () => {
     u.updateLocomotion(0.4);
 
     expect(u.model.instanceAnim.current.id).toBe(5);
+  });
+
+  /**
+   * Kills: latching ownership on a `setAnimation` that never actually armed anything.
+   *
+   * A request for an id whose every sequence is external resolves to null and arms nothing, but it
+   * still records `currentAnimationId`. If ownership latched on the REQUEST rather than on what is
+   * armed, the unit would be suppressed for ever and never animate again.
+   */
+  it('releases when the external request armed nothing at all', () => {
+    // Every sequence external, so `resolve` returns null and nothing is ever armed.
+    const u = locoUnit([animation({ id: 0, flags: 0 }), animation({ id: 1, flags: 0 })]);
+
+    u.setAnimation(1);
+    expect(u.externalAnimation).toBe(true);
+    expect(u.model.instanceAnim.current).toBeNull();
+
+    u.move.horizVel.set(7, 0, 0);
+    worldClock.advance(0.4);
+    expect(() => u.updateLocomotion(0.4)).not.toThrow();
+
+    expect(u.externalAnimation).toBe(false);
+  });
+
+  /**
+   * Kills: treating EVERY external request as a state that owns the body.
+   *
+   * A gait id is a gait request, not a state, whoever sent it -- and the peer handler and the
+   * server both send Stand routinely. Stand is a LOOP, and a looping owner never releases, so a
+   * mutant without `isGaitId` latches on the first wire Stand and the unit stands still for the
+   * rest of the session however far it walks. It arms Run here; the mutant stays on Stand.
+   */
+  it('does not take ownership when the wire sends a gait id', () => {
+    const u = locoUnit(gaits());
+
+    u.setAnimation(0);
+    expect(u.externalAnimation).toBe(false);
+
+    u.move.horizVel.set(7, 0, 0);
+    worldClock.advance(0.4);
+    u.updateLocomotion(0.4);
+
+    expect(u.model.instanceAnim.current.id).toBe(5);
+  });
+});
+
+describe('Unit#updateLocomotion non-looping gait', () => {
+  /**
+   * IMPORTANT 4. Kills: gating the arm on sequence identity ALONE (`inst.current === seq`).
+   *
+   * `setAnimation` deliberately restarts a NON-looping sequence once its window has elapsed. An
+   * identity-only outer gate goes behind that and swallows the restart: the one-shot hold returns
+   * while the window runs, then the candidate walk resolves the same object and the gate returns,
+   * for ever. The clip plays exactly once and freezes on its clamped end pose for as long as the
+   * unit keeps moving.
+   *
+   * Reachable, not theoretical: real wolf sequences carry `0x21` / `0x23` / `0x61`, all of which
+   * set bit 0, and `sequenceLoops` is itself still unverified for 3.3.5 (`model-anim.ts:57-58`).
+   *
+   * The gate is `seq.loops && inst.current === seq`, so a one-shot gait re-arms each time its
+   * window elapses and the cycle keeps playing.
+   */
+  it('re-arms a one-shot gait when its window elapses, instead of freezing on the end pose', () => {
+    const u = locoUnit([
+      animation({ id: 0 }),
+      animation({ id: 5, flags: ONE_SHOT, length: 1000 }),
+    ]);
+
+    u.move.horizVel.set(7, 0, 0);
+    u.updateLocomotion(0.4);
+
+    const first = u.model.instanceAnim.armedAtMs;
+    expect(u.model.instanceAnim.current.id).toBe(5);
+
+    // Mid-window: held, not restarted.
+    worldClock.advance(0.4);
+    u.updateLocomotion(0.4);
+    expect(u.model.instanceAnim.armedAtMs).toBe(first);
+
+    // Past the window: the cycle plays again rather than sticking on the clamped last frame.
+    worldClock.advance(0.8);
+    u.updateLocomotion(0.4);
+    expect(u.model.instanceAnim.current.id).toBe(5);
+    expect(u.model.instanceAnim.armedAtMs).toBe(worldClock.ms);
+  });
+
+  /**
+   * The other half of the same gate: a LOOPING gait must still never be re-armed, however long it
+   * runs. Kills: dropping the gate's `inst.current === seq` half, or removing the gate entirely and
+   * relying on `setAnimation` while routing through `startAnimation`.
+   */
+  it('still never re-arms a looping gait', () => {
+    const u = locoUnit(gaits());
+
+    u.move.horizVel.set(7, 0, 0);
+    u.updateLocomotion(0.4);
+    const armedAt = u.model.instanceAnim.armedAtMs;
+
+    for (let i = 0; i < 4; ++i) {
+      worldClock.advance(0.4);
+      u.updateLocomotion(0.4);
+    }
+
+    expect(u.model.instanceAnim.armedAtMs).toBe(armedAt);
+    // 1.6 s into a 1 s loop: cursor 600, and deliberately not 1000 (the WRAP boundary reads 0).
+    expect(u.model.instanceAnim.cursor(worldClock.ms)).toBeCloseTo(600);
   });
 });

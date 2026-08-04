@@ -22,20 +22,46 @@ enum SlopeType {
 /**
  * One-shot / state animation ids, `AnimationData.dbc` ids.
  *
- * `idle` is Stand, confirmed against the DBC name column (`Stand` at row 0) and against every model
- * parsed for this task -- `Rabbit.m2`'s single sequence is id 0, and wolf / kobold / murloc all
- * carry it as slot 0.
+ * EVERY member here is cited. This enum was previously a set of numbers read off a per-model
+ * sequence-table listing in a comment block rather than off the DBC, and FIVE of the six were
+ * wrong:
  *
- * The members this enum USED to carry (`forward = 2`, `backward = 133`, `rotating = 38`) were read
- * off a per-model sequence-table listing, not the DBC, and were wrong as DBC ids: row 133 is
- * `FishingCast`, not a backpedal. They were only ever read by `updateMoving`, which never had a
- * caller; locomotion now goes through the verified gait ids below.
+ * - `forward = 2`, `backward = 133`, `rotating = 38` -- deleted with `updateMoving`. Row 133 is
+ *   `FishingCast`; the backpedal is `WalkBackwards` 13 (`select.rs:431`) and the turn-in-place is
+ *   `ShuffleLeft` 11 / `ShuffleRight` 12 (`select.rs:458`).
+ * - `jump = 15` -- WRONG, and corrected below. The reference's jump ENTRY clip is `JumpStart` 37
+ *   (`select.rs:295`, `select/tests.rs:187`). Nothing in the reference names 15 at all.
+ * - `grounding = 16` -- WRONG, and DELETED. Row 16 is `AttackUnarmed`, a bare-hands swing
+ *   (`select.rs:621,629`), not a landing. The landing pick is `JumpEnd` 39 when stopped and
+ *   `JumpLandRun` 187 when moving (`select.rs:339-340`, `select/tests.rs:193-194`). Its only
+ *   reference in this file was already commented out, so nothing replaces it; landing is a
+ *   follow-up, because a correct one needs the touchdown movement flags to choose between 39
+ *   and 187.
  */
 enum Animation {
+  /** Stand. DBC name row 0; `Rabbit.m2`'s only sequence, and slot 0 of wolf / kobold / murloc. */
   idle = 0,
-  jump = 15,
-  grounding = 16
+
+  /**
+   * `JumpStart` -- the jump bracket's ENTRY one-shot (`select.rs:295`, `select/tests.rs:187`).
+   *
+   * The reference plays a three-part bracket: JumpStart 37 -> a `Jump` 38 hang loop while airborne
+   * -> a landing pick of JumpEnd 39 / JumpLandRun 187 (`select.rs:270`, `:339-340`). Only the entry
+   * is wired here, because `jump()` still has no caller -- Controls drives the player's jump
+   * through the mover and never touches animation. Wiring the full bracket is a follow-up.
+   */
+  jump = 37
 }
+
+/**
+ * `Death`. DBC row 1, confirmed by the task probe (id 1 observed in a parsed sequence table) and
+ * by the reference, which gives death its own arm-once-and-hold guard (`driver.rs:351`,
+ * `if drv.gait != Some(DEATH)`).
+ *
+ * Locomotion treats it as TERMINAL: see `updateLocomotion`'s ownership check. A corpse must not
+ * stand back up when the one-shot's window elapses.
+ */
+const DEATH = 1;
 
 // -- Locomotion ----------------------------------------------------------------------------------
 // Ported from the reference selector, `samples/benilla/crates/benilla/src/creature_anim/select.rs`
@@ -60,6 +86,20 @@ const RUN = 5;
 const GAIT_RUN: readonly number[] = [RUN, WALK, STAND];
 const GAIT_WALK: readonly number[] = [WALK, STAND];
 const GAIT_STAND: readonly number[] = [STAND];
+
+/**
+ * Is this id a GAIT rather than a state?
+ *
+ * A gait request never takes the body away from the gait driver, whoever sent it. Without this, a
+ * wire-sent Stand -- which the peer handler does send, and which the server sends constantly --
+ * would latch `externalAnimation` on a LOOPING sequence, and a looping owner never releases: the
+ * unit would stand still for the rest of the session no matter how far it walked. The reference
+ * draws the same line, between its `Special` / `Mode` states and the gait itself
+ * (`select.rs:280+`).
+ */
+function isGaitId(id: number): boolean {
+  return id === STAND || id === WALK || id === RUN;
+}
 
 /**
  * Below this ground speed (yd/s) a unit counts as standing still -- `select.rs:19`'s
@@ -93,6 +133,25 @@ class Unit extends Entity {
   public mana: number = 0;
 
   public isPlayer: boolean = false;
+
+  /**
+   * This unit's animation comes off the wire, so LOCOMOTION MUST NOT RUN FOR IT.
+   *
+   * Set by the peer handler (`network/entity/entity.ts`) on the first message of either kind. Those
+   * units are not merely also-driven, they are UNMEASURABLE: a peer's `view.position` is written
+   * only on the frames a `movement` message lands, while locomotion differences that position every
+   * render frame. On a quiet frame the displacement is zero and reads as Stand; on the frame a
+   * coalesced batch arrives, the whole accumulated displacement is divided by ONE frame's delta and
+   * lands above `TELEPORT_SPEED`, which also reads as Stand. In between it reads as a gait. So the
+   * measurement alternates at message cadence and re-arms on every flip, pinning the cursor near
+   * zero -- the same freeze the re-arm guards exist to prevent, arriving through the other door.
+   *
+   * Nothing is lost by skipping them: the wire already carries their gait, chosen by the very same
+   * `updateLocomotion` running on the peer's own machine. Server creatures are NOT wire-driven in
+   * this sense -- they move on splines this client integrates itself, frame by frame, and their
+   * displacement is real.
+   */
+  public wireDriven: boolean = false;
 
   private _view: THREE.Group = new THREE.Group();
   private _displayId: number = 0;
@@ -145,7 +204,6 @@ class Unit extends Entity {
   public jumpVelocityConst: number = 16;
   public jumpVelocity: number = 0;
   public isFly: boolean = true;
-  public isMoving: boolean = false;
   public _isJump: boolean = false;
   public isCollides: boolean = false;
   public groundDistance: number = 0;
@@ -170,7 +228,6 @@ class Unit extends Entity {
     strafeRight: false,
     strafeUp: false,
     strafeDown: false,
-    idle: true,
     rotateRight: false,
     rotateLeft: false
   };
@@ -363,6 +420,12 @@ class Unit extends Entity {
     this.emit("model:change", this, this._model, m2);
     this._model = m2;
 
+    // The gait memo is keyed on nothing but the candidate list, so a new model would otherwise be
+    // posed with the OLD one's resolved sequence -- an object belonging to a different sequence
+    // table. This is the only event that can change what an id resolves to.
+    this.locoCandidates = null;
+    this.locoSeq = null;
+
     // Arm the unit's standing sequence immediately. Deliberately NOT gated on
     // `m2.animated && m2.modelAnim.sequences.length > 0`: `instanceAnim` is null for exactly
     // `!animated`, and `resolve()` returns null for a sequence table with nothing playable in it
@@ -405,6 +468,11 @@ class Unit extends Entity {
     // early" into "arrives late" instead of into silence. Returning without this left the unit on
     // Stand with nothing to say why.
     this.currentAnimationId = id;
+
+    // A STATE request takes the body from the gait driver; a GAIT request never does, whoever sent
+    // it. This one line is also what releases locomotion's own arm, since its target is by
+    // construction a gait id. See `externalAnimation` and `isGaitId`.
+    this.externalAnimation = !isGaitId(id);
 
     if (!this.model) return;
 
@@ -539,24 +607,9 @@ class Unit extends Entity {
     this.changePosition(vector, true);
   }
 
-  updateIsMovingFlag(newCoords: THREE.Vector3) {
-    const coords = this.view.position;
-    if (
-      newCoords.x !== coords.x ||
-      newCoords.y !== coords.y ||
-      newCoords.z !== coords.z
-    ) {
-      this.isMoving = true;
-    } else {
-      this.isMoving = false;
-    }
-  }
-
-  beforePositionChange(newCoords: THREE.Vector3) {
+  beforePositionChange(_newCoords: THREE.Vector3) {
     this.prevPosition = this.position.clone();
     // this.updateGroundDistance(newCoords);
-
-    this.updateIsMovingFlag(newCoords);
   }
 
   afterPositionChange() { }
@@ -638,22 +691,14 @@ class Unit extends Entity {
     this.move.settleDeadline = performance.now() / 1000 + SETTLE_TIMEOUT;
 
     this.view.position.set(x, y, z);
+
+    // Drop the displacement baseline. `TELEPORT_SPEED` only catches a relocation big enough to
+    // exceed it -- a short hop (a worldport within a zone, a spawn correction, a step out of a
+    // vehicle) lands under it and would be measured as a perfectly plausible gait for exactly one
+    // frame. Here we KNOW it was not locomotion, so say so rather than inferring it from magnitude.
+    this.locoTracking = false;
+
     this.emit("position:change", this.position, this.view.rotation);
-  }
-
-  applyTranslatePosition() {
-    if (this.tmpVector.x !== 0 ||
-        this.tmpVector.y !== 0 ||
-        this.tmpVector.z !== 0 ) {
-
-      this.view.translateX(this.tmpVector.x);
-      this.view.translateY(this.tmpVector.y);
-      this.view.translateZ(this.tmpVector.z);
-      this.tmpVector.set(0, 0, 0);
-      
-      this.emit("position:change", this.position, this.view.rotation);
-    }
-
   }
 
   updateGroundDistance() {
@@ -697,21 +742,60 @@ class Unit extends Entity {
   private locoTracking = false;
 
   /**
+   * An externally-armed STATE animation owns this unit's body; the gait pick must stand off.
+   *
+   * Set by `setAnimation` for any id that is not a gait (`isGaitId`), cleared for any id that is.
+   * That single rule covers both directions: locomotion's own arm always names a gait and so never
+   * latches, and a wire-sent Stand is understood as a gait request rather than as a state that
+   * would suppress walking for the rest of the session. This is the thin version of the reference's
+   * `Special` / `Mode` states, which likewise outrank the gait (`select.rs:280+`).
+   *
+   * Without it, ANYTHING armed from outside is stomped by the next frame's gait pick: the wire
+   * handler at `network/entity/entity.ts:52`, `jump()`, and every future SMSG animation. Death is
+   * the case that makes it non-negotiable -- Death is a ONE-SHOT, so it would play through, its
+   * window would elapse, and the corpse would stand up. A looping emote (dance, sit, the `Dead` 6
+   * loop) would not even last one frame.
+   *
+   * Release, checked at the top of `updateLocomotion`:
+   * - nothing actually armed -> release (the request lost to a missing model or an empty table);
+   * - a LOOP -> never releases. A looping emote holds until something else is requested, which is
+   *   what "sit until told otherwise" means.
+   * - `DEATH` -> never releases, one-shot or not (`driver.rs:351` arms it once and holds);
+   * - any other one-shot -> holds for its window, then releases. An attack swing or a jump gives
+   *   the body back when it finishes.
+   */
+  private externalAnimation = false;
+
+  /**
+   * Memo for the candidate walk: the list picked last frame and what it resolved to.
+   *
+   * `resolve` is a linear scan of the sequence table per candidate, and the gait bucket is the same
+   * on the overwhelming majority of frames -- a unit runs for seconds at a time. The lists are
+   * module constants, so the hit test is one reference comparison. Invalidated on `set model`,
+   * which is the only thing that can change what an id resolves to.
+   */
+  private locoCandidates: readonly number[] | null = null;
+  private locoTarget: number = STAND;
+  private locoSeq: Sequence | null = null;
+
+  /**
    * This frame's horizontal ground speed (yd/s) -- the gait threshold's only input.
    *
-   * TWO LEGS, exactly as the reference's `select::unify` (`select.rs:931-965`) has three:
+   * TWO LEGS, mirroring the reference's `select::unify` (`select.rs:931-965`):
    *
    * - The PLAYER is driven from Controls, which runs `movementFrame` and leaves the applied
    *   horizontal velocity on `move.horizVel`. That is an INTENDED velocity, not a displacement,
    *   which is deliberate and matches `benilla/src/player.rs:1209-1213`: running into a wall keeps
    *   the run cycle playing, which is the WoW look. Swimming substitutes the stroke speed, same as
-   *   the reference's `if swimming { swim_stroke_speed }`.
+   *   the reference's `if swimming { swim_stroke_speed }` -- `swim.ts:256-258` does leave a real
+   *   `horizVel` behind, but it is only the horizontal component of a 3D stroke and understates the
+   *   gait whenever the swimmer is pitched.
    *
-   * - EVERY OTHER unit is moved by writing `view.position` outright -- the spline follower for
-   *   server creatures (`updateSplineFollowing`), and the peer handler at
-   *   `network/entity/entity.ts` for remote players. Neither maintains a velocity, so the speed has
-   *   to be measured. This is the reference's creature leg, whose `Spline::speed()` is likewise a
-   *   path length over a duration rather than a state field.
+   * - Server creatures are moved by writing `view.position` outright (`updateSplineFollowing`,
+   *   integrated here every frame) and maintain no velocity, so their speed is MEASURED. This is
+   *   the reference's creature leg, whose `Spline::speed()` is likewise a length over a duration.
+   *   Wire-driven peers are excluded from locomotion entirely before this is ever called -- see
+   *   `wireDriven` for why their displacement is not a measurement at all.
    */
   locomotionSpeed(delta: number): number {
     const x = this.view.position.x;
@@ -758,12 +842,25 @@ class Unit extends Entity {
    *
    * THE GUARD, and the whole reason this is not just `setAnimation(gait)` every frame: `InstanceAnim`
    * is clock-indexed off `armedAtMs`, so re-arming a running loop pins its cursor at zero and the
-   * creature holds the first keyframe of its run cycle for ever. `setAnimation` already refuses to
-   * re-arm a running loop, and this method must not go behind its back -- so the arm is gated on the
-   * resolved SEQUENCE differing from the one already playing, which is the reference's own shape
-   * (`driver.rs:1017`, `if drv.gait == Some(target)` -> re-sync only, no re-arm).
+   * creature holds the first keyframe of its run cycle for ever.
+   *
+   * The gate is `seq.loops && inst.current === seq`, and the `loops` half is load-bearing. A gate on
+   * sequence identity ALONE would go behind `setAnimation`'s back for a NON-looping gait:
+   * `setAnimation` deliberately restarts a one-shot once its window has elapsed, and swallowing that
+   * would leave the clip frozen on its clamped end pose for as long as the unit kept moving. That is
+   * reachable, not theoretical -- real wolf sequences carry `0x21` / `0x23` / `0x61`, all of which
+   * set bit 0, and `sequenceLoops` is itself still unverified for 3.3.5 (`model-anim.ts:57-58`). For
+   * a LOOP the gate and `setAnimation`'s own `if (seq.loops) return;` agree, and this one runs first
+   * only to skip the redundant `resolve`. Shape follows the reference (`driver.rs:1017`,
+   * `if drv.gait == Some(target)` -> re-sync only, no re-arm).
    */
   updateLocomotion(delta: number) {
+    // Wire-driven peers never reach the measurement: their displacement is an artefact of message
+    // cadence, not of movement. See `wireDriven`.
+    if (this.wireDriven) {
+      return;
+    }
+
     const speed = this.locomotionSpeed(delta);
 
     const model = this.model;
@@ -777,46 +874,60 @@ class Unit extends Entity {
       return;
     }
 
-    // A one-shot still inside its play window OWNS the body: a jump, a landing, an attack swing.
-    // Locomotion runs every frame and would otherwise stomp it on the very next one, so nothing
-    // one-shot would ever be visible. The reference holds the same way and releases on the clip
-    // finishing (`driver.rs:868-884`, `Mode::Swing`). Loops are not held -- that is the gait itself.
-    const playing = inst.current;
-    if (playing !== null && !playing.loops && !inst.windowElapsed(worldClock.ms)) {
-      return;
+    // An externally-armed animation OWNS the body until it gives it back. See `externalAnimation`
+    // for the release rules and for why Death needs a case of its own.
+    if (this.externalAnimation) {
+      const owner = inst.current;
+      if (owner === null) {
+        this.externalAnimation = false;
+      } else if (owner.loops || this.currentAnimationId === DEATH) {
+        return;
+      } else if (!inst.windowElapsed(worldClock.ms)) {
+        return;
+      } else {
+        this.externalAnimation = false;
+      }
     }
 
     const candidates = this.gaitFor(speed);
 
-    // Step down the list, taking the first id the model actually OWNS. `resolve` handing back a
-    // sequence whose id is not the one asked for means it fell back, so this rung is absent.
-    let target = candidates[candidates.length - 1];
-    let seq: Sequence | null = null;
-    for (let i = 0; i < candidates.length; ++i) {
-      const candidate = candidates[i];
-      const resolved = modelAnim.resolve(candidate);
-      if (resolved !== null && resolved.id === candidate) {
-        target = candidate;
-        seq = resolved;
-        break;
+    // Step down the list, taking the first rung the model actually OWNS -- `resolve(id, false)`
+    // withholds the Stand consolation precisely so "absent" is distinguishable from "present".
+    if (candidates !== this.locoCandidates || this.locoSeq === null) {
+      let target = candidates[candidates.length - 1];
+      let seq: Sequence | null = null;
+      for (let i = 0; i < candidates.length; ++i) {
+        const candidate = candidates[i];
+        const resolved = modelAnim.resolve(candidate, false);
+        if (resolved !== null) {
+          target = candidate;
+          seq = resolved;
+          break;
+        }
       }
-    }
 
-    if (seq === null) {
-      // Nothing on the list is owned. Take whatever `resolve` falls back to for the last rung --
-      // sequence 0 -- rather than freezing in bind pose. Null only for a model with nothing
-      // playable at all (empty table, or every sequence quarantined as external).
-      seq = modelAnim.resolve(target);
       if (seq === null) {
-        return;
+        // Nothing on the list is owned. Take whatever `resolve` falls back to for the last rung --
+        // the first inline sequence -- rather than freezing in bind pose. Null only for a model with
+        // nothing playable at all (empty table, or every sequence quarantined as external), and
+        // that is memoised as a miss so the walk is retried rather than caching a null.
+        seq = modelAnim.resolve(target);
+        if (seq === null) {
+          return;
+        }
       }
+
+      this.locoCandidates = candidates;
+      this.locoTarget = target;
+      this.locoSeq = seq;
     }
 
-    if (inst.current === seq) {
+    if (this.locoSeq.loops && inst.current === this.locoSeq) {
       return;
     }
 
-    this.setAnimation(target);
+    // `setAnimation` clears `externalAnimation` for us: the target is always a gait id.
+    this.setAnimation(this.locoTarget);
   }
 
   clear() {

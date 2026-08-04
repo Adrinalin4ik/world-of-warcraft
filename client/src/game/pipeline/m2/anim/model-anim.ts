@@ -386,8 +386,15 @@ export class ModelAnim {
    * `sequences[current.alias]` is a raw slot index, so an inline alias can still point at a
    * quarantined target. A model with no inline sequence at all resolves to null; the caller must
    * already handle that, since a model with no sequences does too.
+   *
+   * `fallback = false` asks the narrower question "does this model OWN a playable clip for this
+   * id?", returning null instead of Stand. That is what a candidate-list walk needs
+   * (`Unit#updateLocomotion`): stepping Run -> Walk requires distinguishing "no Run" from "Run",
+   * and comparing the returned sequence's `id` against the requested one cannot do it -- an alias
+   * hop legitimately lands on a target carrying a different id, which would then be misread as
+   * absent. The alias walk still runs; only the final `firstInline()` consolation is withheld.
    */
-  resolve(requestedId: number): Sequence | null {
+  resolve(requestedId: number, fallback: boolean = true): Sequence | null {
     if (this.sequences.length === 0) {
       return null;
     }
@@ -405,7 +412,7 @@ export class ModelAnim {
     if (current && current.inline) {
       return current;
     }
-    return this.firstInline();
+    return fallback ? this.firstInline() : null;
   }
 
   /**
