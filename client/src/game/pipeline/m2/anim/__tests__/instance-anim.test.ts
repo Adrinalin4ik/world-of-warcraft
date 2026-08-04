@@ -82,6 +82,16 @@ const vec3Block = (values: number[][]) => ({
   globalSequenceID: -1,
   tracks: [{ animationIndex: 0, timestamps: [0, 1000], values }],
 });
+const quatBlock = (values: number[][]) => ({
+  interpolationType: 1,
+  globalSequenceID: -1,
+  tracks: [{ animationIndex: 0, timestamps: [0, 1000], values }],
+});
+/** A non-wrapping 2000ms sequence -- see the comment on 'composes a child onto its parent'. */
+const longAnimation = () => ([{
+  id: 0, subID: 0, length: 2000, flags: 0, probability: 32767,
+  blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0,
+}]);
 const bone = (over: any = {}) => ({
   parentID: -1, flags: 0, keyBoneID: -1, pivotPoint: [0, 0, 0],
   translation: emptyBlock(), rotation: emptyBlock(), scaling: emptyBlock(), ...over,
@@ -134,6 +144,86 @@ describe('solveBones', () => {
     const p = new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 1));
     expect(p.x).toBeCloseTo(10, 4);
     expect(p.y).toBeCloseTo(4, 4);
+  });
+
+  it('composes parent then child in that order, not the reverse', () => {
+    // Both bones in 'composes a child onto its parent' above are pure translations, and
+    // translation matrices commute (T(a)*T(b) == T(b)*T(a)) -- so that test cannot tell
+    // `out.premultiply(parent)` (parent * child, correct) apart from `out.multiply(parent)`
+    // (child * parent, the reversal the task brief warned against). Rotation does not commute
+    // with translation, so a rotated parent is the discriminator.
+    //
+    // Parent: rotated 90 degrees about Z, no translation, pivot at the origin.
+    // Child: translated [10, 0, 0] from its parent, no rotation of its own.
+    //
+    // Correct order (parent * child): the child's local translation is rotated INTO the
+    // parent's frame, landing at world (0, 10, 0).
+    // Reversed order (child * parent): the child's local translation is applied in its OWN
+    // frame first, and multiplying a pure translation by a pure rotation on the right leaves
+    // the translation column unrotated -- the child would incorrectly stay at (10, 0, 0), as if
+    // the parent's rotation had no effect on it at all.
+    const m = model({
+      animations: longAnimation(),
+      bones: [
+        bone({ rotation: quatBlock([[0, 0, 0, 1], [0, 0, Math.SQRT1_2, Math.SQRT1_2]]) }),
+        bone({ parentID: 0, translation: vec3Block([[0, 0, 0], [10, 0, 0]]) }),
+      ],
+    });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    inst.solveBones(1000);
+    const p = new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 1));
+    expect(p.x).toBeCloseTo(0, 4);
+    expect(p.y).toBeCloseTo(10, 4);
+  });
+
+  it('rotates a bone around its own pivot, not around the model origin', () => {
+    // Every other fixture uses pivotPoint [0, 0, 0], which makes `scratchPivotTo` and
+    // `scratchPivotBack` both identity -- swapping them would not fail a single existing test.
+    // A non-zero pivot with a rotation is the discriminator.
+    //
+    // Bone: pivot at [5, 0, 0], rotated 180 degrees about Z, no translation of its own.
+    //
+    // Correct composition (pivotTo * local * pivotBack): the pivot point itself is a fixed point
+    // of the rotation, so it stays put; the origin, which is 5 units on the near side of the
+    // pivot, ends up 5 units on the FAR side -- world (10, 0, 0).
+    // Swapped (pivotBack * local * pivotTo): the origin would instead land at (-10, 0, 0) --
+    // rotated the opposite way around a pivot mirrored through the origin.
+    const m = model({
+      animations: longAnimation(),
+      bones: [
+        bone({ pivotPoint: [5, 0, 0], rotation: quatBlock([[0, 0, 0, 1], [0, 0, 1, 0]]) }),
+      ],
+    });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+    inst.solveBones(1000);
+
+    const origin = new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 0));
+    expect(origin.x).toBeCloseTo(10, 4);
+    expect(origin.y).toBeCloseTo(0, 4);
+
+    const pivot = new THREE.Vector3(5, 0, 0).applyMatrix4(matrixOf(inst, 0));
+    expect(pivot.x).toBeCloseTo(5, 4);
+    expect(pivot.y).toBeCloseTo(0, 4);
+  });
+
+  it('degrades a parent-ID cycle to a wrong pose, never a crash', () => {
+    // Shipped M2 data can be malformed. `solved[index]` is set BEFORE `solveBone` recurses into
+    // the parent specifically so a parent cycle terminates instead of recursing until the stack
+    // blows. The resulting pose for a bone caught in a cycle is allowed to be wrong; the call is
+    // not allowed to throw or hang.
+    const m = model({
+      bones: [bone({ parentID: 1 }), bone({ parentID: 0 })],
+    });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[0], 0);
+
+    let solved = -1;
+    expect(() => {
+      solved = inst.solveBones(0);
+    }).not.toThrow();
+    expect(solved).toBe(2);
   });
 
   it('solves each bone exactly once however many children request it', () => {
