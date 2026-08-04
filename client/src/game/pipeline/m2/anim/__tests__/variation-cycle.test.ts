@@ -3,8 +3,12 @@ import { InstanceAnim } from '../instance-anim';
 import { ModelAnim } from '../model-anim';
 import { armDoodad, cycleDoodad, SharedRng, sharedRng } from '../variation-cycle';
 
+/** `0x20` = keyframes inline in the .m2, as wolf Stand/Walk/Run carry. `flags: 0` means EXTERNAL,
+ *  which `ModelAnim` quarantines -- see `hasInlineData`. */
+const INLINE = 0x20;
+
 const animation = (over: any = {}) => ({
-  id: 0, subID: 0, length: 1000, flags: 0, probability: 32767,
+  id: 0, subID: 0, length: 1000, flags: INLINE, probability: 32767,
   blendTime: 0, movementSpeed: 0, nextAnimationID: -1, alias: 0, ...over,
 });
 
@@ -73,7 +77,8 @@ describe('armDoodad', () => {
 describe('un-animatable models do not bleed the shared stream', () => {
   const noAnimZero = () => new ModelAnim({
     animations: [{
-      id: 7, subID: 0, length: 1000, flags: 0, probability: 32767,
+      // Inline on purpose: the scenario under test is "owns no id 0", not "is quarantined".
+      id: 7, subID: 0, length: 1000, flags: INLINE, probability: 32767,
       blendTime: 0, movementSpeed: 0, nextAnimationID: -1, alias: 0,
     }],
     sequences: [],

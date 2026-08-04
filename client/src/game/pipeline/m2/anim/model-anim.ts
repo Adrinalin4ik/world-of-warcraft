@@ -19,6 +19,12 @@ export interface Sequence {
   alias: number;
   /** Derived from `flags` -- the clock law for every track this sequence drives. */
   loops: boolean;
+  /**
+   * Derived from `flags` -- do this sequence's keyframes live in the `.m2` we parsed?
+   *
+   * `false` means QUARANTINED: the slot holds parsed noise, not keys. See `hasInlineData`.
+   */
+  inline: boolean;
 }
 
 /** The subset of parsed M2 data the animation layer reads. */
@@ -44,33 +50,91 @@ export function sequenceLoops(flags: number): boolean {
   return (flags & 0x01) === 0;
 }
 
-/** Does an animation block hold any keys at all? */
-function blockAnimated(block: AnimBlock | undefined): boolean {
+/**
+ * Sequence flag bits meaning "this sequence's keyframes are inline in the `.m2`".
+ *
+ * The same mask the old `AnimationManager` used to SKIP such sequences, and the one WoWModelViewer
+ * and WebWoWViewer both test. Measured against real 3.3.5a data: wolf Stand/Walk/Run carry `0x20`
+ * (also seen: `0x21`, `0x23`, `0x61`); the external ids 96-101 carry `0`, `1`, `3`, `5` and `8`.
+ * Bit `0x40` (alias) is deliberately NOT in the mask -- see `hasInlineData` and `resolve`.
+ */
+const INLINE_MASK = 0x130;
+
+/**
+ * Whether a sequence's keyframes live in the `.m2` rather than a sibling `.anim` file.
+ *
+ * This is a SAFETY gate, not an optimisation. An external sequence's animation-block offsets point
+ * into the `.anim` file, but the parser reads them against the `.m2` buffer -- so the arrays are not
+ * empty, they are NOISE. Measured: 302 bone-tracks on `wolf.m2` and 130 on `kobold.m2` carry
+ * timestamps far past their own sequence length, one of them 3,197,923,783 ms against a 2000 ms
+ * sequence.
+ *
+ * Arming such a sequence samples that noise and wrecks the pose, and it is reachable in normal play
+ * because `unit.ts` arms whatever id the server sends. Everything downstream of `ModelAnim` therefore
+ * treats an external sequence as absent until Task 20 merges its real data and flips `inline` true
+ * per sequence. The entries STAY in the table -- Task 20 lifts the quarantine, it does not add rows.
+ */
+export function hasInlineData(flags: number): boolean {
+  return (flags & INLINE_MASK) !== 0;
+}
+
+/**
+ * Which sequence slots a keyframe may legitimately be read from.
+ *
+ * Indexed by file slot, i.e. by position in an animation block's `tracks` array -- which is exactly
+ * what `trackFor` and `channelTrackIndex` index with. A slot past the end reads `undefined`, which
+ * is falsy, so a track with no owning sequence is quarantined too: nothing can ever arm it.
+ */
+function inlineSlots(data: M2AnimData): boolean[] {
+  const animations = data.animations || [];
+  const slots: boolean[] = new Array(animations.length);
+  for (let i = 0, len = animations.length; i < len; ++i) {
+    slots[i] = hasInlineData(animations[i].flags);
+  }
+  return slots;
+}
+
+/**
+ * Is this block's track at `slot` readable, or is it quarantined noise?
+ *
+ * A GLOBAL-SEQUENCE block is exempt: its `tracks` array is not a sequence timeline at all. It holds
+ * a single track read at index 0 regardless of what is playing (`channelTrackIndex`), so a sequence
+ * slot's inline flag says nothing about it. Quarantining those would silently freeze every
+ * clock-driven glow and sky band in the game.
+ */
+function slotReadable(block: AnimBlock, slot: number, slots: boolean[]): boolean {
+  return block.globalSequenceID > -1 || slots[slot] === true;
+}
+
+/** Does an animation block hold any keys at all, in a slot that is not quarantined? */
+function blockAnimated(block: AnimBlock | undefined, slots: boolean[]): boolean {
   if (!block || !block.tracks) {
     return false;
   }
   for (let i = 0, len = block.tracks.length; i < len; ++i) {
-    if (block.tracks[i].timestamps.length > 0) {
+    if (slotReadable(block, i, slots) && block.tracks[i].timestamps.length > 0) {
       return true;
     }
   }
   return false;
 }
 
-/** Total keys across every sequence track of a block. Mirrors the parser's `keyframeCount`. */
-function keyframeCount(block: AnimBlock): number {
+/** Total readable keys across a block's sequence tracks. Mirrors the parser's `keyframeCount`. */
+function keyframeCount(block: AnimBlock, slots: boolean[]): number {
   let count = 0;
   for (let i = 0, len = block.tracks.length; i < len; ++i) {
-    count += block.tracks[i].timestamps.length;
+    if (slotReadable(block, i, slots)) {
+      count += block.tracks[i].timestamps.length;
+    }
   }
   return count;
 }
 
-/** The block's first authored value in file order. Mirrors the parser's `firstKeyframe.value`. */
-function firstValue(block: AnimBlock): unknown {
+/** The block's first readable value in file order. Mirrors the parser's `firstKeyframe.value`. */
+function firstValue(block: AnimBlock, slots: boolean[]): unknown {
   for (let i = 0, len = block.tracks.length; i < len; ++i) {
     const track = block.tracks[i];
-    if (track.timestamps.length > 0) {
+    if (slotReadable(block, i, slots) && track.timestamps.length > 0) {
       return track.values[0];
     }
   }
@@ -100,15 +164,16 @@ function firstValue(block: AnimBlock): unknown {
  */
 function blockAnimatedBeyondIdentity(
   block: AnimBlock | undefined,
-  isIdentity: (value: unknown) => boolean
+  isIdentity: (value: unknown) => boolean,
+  slots: boolean[],
 ): boolean {
-  if (!blockAnimated(block)) {
+  if (!blockAnimated(block, slots)) {
     return false;
   }
-  if (keyframeCount(block!) > 1) {
+  if (keyframeCount(block!, slots) > 1) {
     return true;
   }
-  return !isIdentity(firstValue(block!));
+  return !isIdentity(firstValue(block!, slots));
 }
 
 /** Transparency and vertex-colour alpha are `color16` scalars; identity is fully opaque. */
@@ -141,34 +206,46 @@ function isWhite(value: unknown): boolean {
  * whose only moving part is a billboarded bone has no keys to sample, but still has to be turned to
  * face the camera each frame. Callers that build a per-frame set must ask both questions -- see
  * `doodad-manager.js#loadDoodad` and `world/index.ts#animateEntities`.
+ *
+ * QUARANTINE (lifted per sequence by Task 20): keys sitting in an EXTERNAL sequence slot are parsed
+ * noise, not authoring, and are ignored here. A model whose only keys are noise must come out
+ * static. Counting them would resurrect the erosion the lone-identity-key rule above exists to stop
+ * -- only worse, since every external-heavy creature model in the game would flip to animated and
+ * join the per-frame posing set to sample garbage.
  */
 export function classify(data: M2AnimData): boolean {
+  const slots = inlineSlots(data);
+
   const bones = data.bones || [];
   for (let i = 0, len = bones.length; i < len; ++i) {
     const bone = bones[i];
-    if (blockAnimated(bone.translation) || blockAnimated(bone.rotation) || blockAnimated(bone.scaling)) {
+    if (blockAnimated(bone.translation, slots) ||
+        blockAnimated(bone.rotation, slots) ||
+        blockAnimated(bone.scaling, slots)) {
       return true;
     }
   }
 
   const uv = data.uvAnimations || [];
   for (let i = 0, len = uv.length; i < len; ++i) {
-    if (blockAnimated(uv[i].translation) || blockAnimated(uv[i].rotation) || blockAnimated(uv[i].scaling)) {
+    if (blockAnimated(uv[i].translation, slots) ||
+        blockAnimated(uv[i].rotation, slots) ||
+        blockAnimated(uv[i].scaling, slots)) {
       return true;
     }
   }
 
   const transparency = data.transparencyAnimations || [];
   for (let i = 0, len = transparency.length; i < len; ++i) {
-    if (blockAnimatedBeyondIdentity(transparency[i], isOpaque)) {
+    if (blockAnimatedBeyondIdentity(transparency[i], isOpaque, slots)) {
       return true;
     }
   }
 
   const colors = data.vertexColorAnimations || [];
   for (let i = 0, len = colors.length; i < len; ++i) {
-    if (blockAnimatedBeyondIdentity(colors[i].color, isWhite) ||
-        blockAnimatedBeyondIdentity(colors[i].alpha, isOpaque)) {
+    if (blockAnimatedBeyondIdentity(colors[i].color, isWhite, slots) ||
+        blockAnimatedBeyondIdentity(colors[i].alpha, isOpaque, slots)) {
       return true;
     }
   }
@@ -214,6 +291,10 @@ export class ModelAnim {
         nextAnimationId: a.nextAnimationID,
         alias: a.alias,
         loops: sequenceLoops(a.flags),
+        // Quarantine marker. External entries STAY in the table -- Task 20 merges their `.anim`
+        // keys and flips this true; nothing here may drop or renumber a row, because `index` is the
+        // file slot every animation block's `tracks` array is indexed by.
+        inline: hasInlineData(a.flags),
       });
     }
 
@@ -222,11 +303,18 @@ export class ModelAnim {
     this.boneDefs = data.bones || [];
   }
 
-  /** Every sequence sharing an `AnimationData.dbc` id -- the variation set. */
+  /**
+   * Every PLAYABLE sequence sharing an `AnimationData.dbc` id -- the variation set.
+   *
+   * Quarantined (external) entries are withheld: their slots hold parsed noise, so picking one
+   * poses the model from garbage. Task 20 lifts this per sequence. An id whose every variation is
+   * external therefore returns empty, and `pickVariation` returns null -- correct, because the
+   * caller has nothing safe to play.
+   */
   variationsOf(animId: number): Sequence[] {
     const out: Sequence[] = [];
     for (let i = 0, len = this.sequences.length; i < len; ++i) {
-      if (this.sequences[i].id === animId) {
+      if (this.sequences[i].id === animId && this.sequences[i].inline) {
         out.push(this.sequences[i]);
       }
     }
@@ -241,7 +329,9 @@ export class ModelAnim {
    * placement.
    *
    * An all-zero weight set still returns a variation: some models leave `probability` unset, and
-   * refusing to pick would freeze them instead of animating them uniformly.
+   * refusing to pick would freeze them instead of animating them uniformly. That branch's
+   * `roll % variations.length` is safe under the quarantine only because the empty check above runs
+   * FIRST -- filtering `variationsOf` down to nothing must return null, never divide by zero.
    */
   pickVariation(animId: number, roll: number): Sequence | null {
     const variations = this.variationsOf(animId);
@@ -280,6 +370,13 @@ export class ModelAnim {
    *
    * Falling back rather than returning null for an unowned id is deliberate -- a unit asked to play
    * an animation its model lacks should stand, not freeze in bind pose.
+   *
+   * QUARANTINE (lifted per sequence by Task 20). One gate, at the EXIT: whatever the walk lands on
+   * must be inline or it is discarded, and the fallback is the first INLINE sequence rather than
+   * `sequences[0]`, which is not guaranteed inline. Gating only at lookup would not be enough --
+   * `sequences[current.alias]` is a raw slot index, so an inline alias can still point at a
+   * quarantined target. A model with no inline sequence at all resolves to null; the caller must
+   * already handle that, since a model with no sequences does too.
    */
   resolve(requestedId: number): Sequence | null {
     if (this.sequences.length === 0) {
@@ -296,12 +393,42 @@ export class ModelAnim {
       current = target;
     }
 
-    return current || this.sequences[0];
+    if (current && current.inline) {
+      return current;
+    }
+    return this.firstInline();
   }
 
+  /**
+   * The declared entry for an id, preferring a playable one.
+   *
+   * Returns an inline match when the id has one, so an id whose FIRST variation is external but
+   * whose second is inline still plays instead of collapsing to Stand. Falls back to an external
+   * match rather than null, because an alias entry has no keys of its own and may legitimately
+   * carry no inline bit -- the walk in `resolve` must still get to start, and `resolve`'s exit gate
+   * is what makes returning an external entry from here safe.
+   */
   private findById(animId: number): Sequence | null {
+    let external: Sequence | null = null;
     for (let i = 0, len = this.sequences.length; i < len; ++i) {
-      if (this.sequences[i].id === animId) {
+      const seq = this.sequences[i];
+      if (seq.id !== animId) {
+        continue;
+      }
+      if (seq.inline) {
+        return seq;
+      }
+      if (!external) {
+        external = seq;
+      }
+    }
+    return external;
+  }
+
+  /** The first sequence whose keyframes are actually in this file, or null if there is none. */
+  private firstInline(): Sequence | null {
+    for (let i = 0, len = this.sequences.length; i < len; ++i) {
+      if (this.sequences[i].inline) {
         return this.sequences[i];
       }
     }

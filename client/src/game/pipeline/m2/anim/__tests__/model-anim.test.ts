@@ -1,5 +1,14 @@
 /** @jest-environment node */
-import { classify, ModelAnim, sequenceLoops } from '../model-anim';
+import { classify, hasInlineData, ModelAnim, sequenceLoops } from '../model-anim';
+
+/**
+ * The inline-data bit every fixture sequence carries unless it is testing the quarantine.
+ *
+ * `0x20` is what wolf.m2's Stand/Walk/Run actually hold. The old fixtures used `flags: 0`, which
+ * real data only ever shows on an EXTERNAL sequence -- they were describing a model that cannot
+ * exist. `0x20` leaves `sequenceLoops` (bit 0) untouched, so no clock law moves.
+ */
+const INLINE = 0x20;
 
 const emptyBlock = () => ({ interpolationType: 1, globalSequenceID: -1, tracks: [], animated: false });
 const keyedBlock = () => ({
@@ -24,7 +33,7 @@ const bone = (over: any = {}) => ({
 });
 
 const animation = (over: any = {}) => ({
-  id: 0, subID: 0, length: 1000, flags: 0, probability: 32767,
+  id: 0, subID: 0, length: 1000, flags: INLINE, probability: 32767,
   blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0,
   ...over,
 });
@@ -101,7 +110,12 @@ describe('classify', () => {
           { animationIndex: 1, timestamps: [0], values: [1.0] },
         ],
       };
-      expect(classify(data({ transparencyAnimations: [oneKeyEachInTwoSequences] }))).toBe(true);
+      // BOTH slots must exist and be inline, or the quarantine drops the second key and the
+      // lone-identity-key rule -- correctly -- calls this static.
+      expect(classify(data({
+        animations: [animation(), animation({ id: 1 })],
+        transparencyAnimations: [oneKeyEachInTwoSequences],
+      }))).toBe(true);
     });
 
     it('rejects a single white vertex-colour key', () => {
@@ -141,7 +155,7 @@ describe('classify', () => {
 describe('ModelAnim', () => {
   it('builds a sequence table off the parsed animation structs', () => {
     const m = new ModelAnim(data({
-      animations: [animation({ id: 0, length: 1200, blendTime: 150, flags: 0 })],
+      animations: [animation({ id: 0, length: 1200, blendTime: 150, flags: INLINE })],
     }));
     expect(m.sequences).toHaveLength(1);
     expect(m.sequences[0]).toMatchObject({
@@ -150,7 +164,7 @@ describe('ModelAnim', () => {
   });
 
   it('marks a bit-0 sequence as one-shot', () => {
-    const m = new ModelAnim(data({ animations: [animation({ flags: 0x01 })] }));
+    const m = new ModelAnim(data({ animations: [animation({ flags: INLINE | 0x01 })] }));
     expect(m.sequences[0].loops).toBe(false);
   });
 
@@ -220,8 +234,8 @@ describe('resolve', () => {
   it('follows an alias to its target', () => {
     const m = new ModelAnim(data({
       animations: [
-        animation({ id: 0, flags: 0 }),
-        animation({ id: 9, flags: 0x40, alias: 0 }),
+        animation({ id: 0, flags: INLINE }),
+        animation({ id: 9, flags: INLINE | 0x40, alias: 0 }),
       ],
     }));
     expect(m.resolve(9)!.id).toBe(0);
@@ -230,8 +244,8 @@ describe('resolve', () => {
   it('does not hang on an alias cycle', () => {
     const m = new ModelAnim(data({
       animations: [
-        animation({ id: 1, flags: 0x40, alias: 1 }),
-        animation({ id: 2, flags: 0x40, alias: 0 }),
+        animation({ id: 1, flags: INLINE | 0x40, alias: 1 }),
+        animation({ id: 2, flags: INLINE | 0x40, alias: 0 }),
       ],
     }));
     expect(() => m.resolve(1)).not.toThrow();
@@ -239,6 +253,177 @@ describe('resolve', () => {
 
   it('returns null for a model with no sequences at all', () => {
     expect(new ModelAnim(data({ animations: [] })).resolve(0)).toBeNull();
+  });
+});
+
+describe('hasInlineData', () => {
+  // Kills: an empty / wrong mask. 0x130 is the bit set WoWModelViewer and the old AnimationManager
+  // both test, and the values below are what wolf.m2 and kobold.m2 actually carry.
+  it('is true when any of 0x10 / 0x20 / 0x100 is set', () => {
+    expect(hasInlineData(0x20)).toBe(true);   // wolf Stand id 0, Walk id 4, Run id 5
+    expect(hasInlineData(0x21)).toBe(true);
+    expect(hasInlineData(0x23)).toBe(true);
+    expect(hasInlineData(0x61)).toBe(true);   // an ALIAS that still carries its own inline bit
+    expect(hasInlineData(0x10)).toBe(true);
+    expect(hasInlineData(0x100)).toBe(true);
+  });
+
+  // Kills: widening the mask to catch a low bit. 0x40 (alias) in particular must NOT be in it --
+  // `resolve` relies on alias-ness and inline-ness being separate questions.
+  it('is false for the external flag values observed in real data', () => {
+    // wolf ids 96-101 and 69/128, kobold id 62 -- measured, not invented.
+    [0, 1, 3, 5, 8].forEach((f) => expect(hasInlineData(f)).toBe(false));
+    expect(hasInlineData(0x40)).toBe(false);
+  });
+});
+
+describe('external sequences are quarantined', () => {
+  const seqs = () => [
+    animation({ id: 0, flags: INLINE }),
+    animation({ id: 97, flags: 0 }),
+  ];
+
+  // Kills: dropping `inline` from the table, or hard-coding it true. Also pins that the external
+  // entry SURVIVES at its own file slot -- Task 20 needs the row, and `index` is the track index.
+  it('marks each sequence with whether its data is inline, keeping both rows', () => {
+    const m = new ModelAnim(data({ animations: seqs() }));
+    expect(m.sequences.map((s) => s.inline)).toEqual([true, false]);
+    expect(m.sequences.map((s) => s.index)).toEqual([0, 1]);
+    expect(m.sequences[1].id).toBe(97);
+  });
+
+  // Kills: removing the `.inline` filter from `variationsOf`.
+  it('never lists an external variation', () => {
+    const m = new ModelAnim(data({
+      animations: [
+        animation({ id: 4, subID: 0, flags: 0 }),
+        animation({ id: 4, subID: 1, flags: INLINE }),
+      ],
+    }));
+    expect(m.variationsOf(4).map((s) => s.subId)).toEqual([1]);
+  });
+
+  // Kills: filtering `variationsOf` but letting `pickVariation` reach `roll % length` on an empty
+  // list (NaN index -> undefined, not null), and kills dropping the filter entirely.
+  it('never picks an external variation, and does not divide by zero doing it', () => {
+    const m = new ModelAnim(data({
+      animations: [animation({ id: 0, subID: 0, flags: 0, probability: 32767 })],
+    }));
+    expect(m.pickVariation(0, 0)).toBeNull();
+    // Zero total weight is the branch that does the modulo; it must still be unreachable.
+    const zeroWeight = new ModelAnim(data({
+      animations: [animation({ id: 0, subID: 0, flags: 0, probability: 0 })],
+    }));
+    expect(zeroWeight.pickVariation(0, 12345)).toBeNull();
+  });
+
+  // Kills: `resolve` returning the external entry it found for the requested id.
+  it('resolve falls back rather than returning an external sequence', () => {
+    const m = new ModelAnim(data({ animations: seqs() }));
+    const got = m.resolve(97)!;
+    expect(got).not.toBeNull();
+    expect(got.inline).toBe(true);
+    expect(got.id).toBe(0);
+  });
+
+  // Kills: keeping `return current || this.sequences[0]`. Slot 0 here is EXTERNAL, so the old
+  // fallback hands back exactly the noise the quarantine exists to withhold.
+  it('resolve falls back to the first INLINE sequence, not to sequence 0', () => {
+    const m = new ModelAnim(data({
+      animations: [
+        animation({ id: 0, flags: 0 }),
+        animation({ id: 4, flags: INLINE }),
+      ],
+    }));
+    expect(m.resolve(999)!.id).toBe(4);
+  });
+
+  // Kills: an exit gate that never returns null. A model whose every sequence is external has
+  // nothing safe to play, and posing it from slot 0 is the original bug.
+  it('resolve returns null when the model has no inline sequence at all', () => {
+    const m = new ModelAnim(data({ animations: [animation({ id: 0, flags: 0 })] }));
+    expect(m.resolve(0)).toBeNull();
+  });
+
+  // Kills: gating only at lookup. `sequences[current.alias]` is a raw slot index, so an inline
+  // alias walks straight into a quarantined target unless the gate sits at the exit.
+  it('does not follow an alias into a quarantined target', () => {
+    const m = new ModelAnim(data({
+      animations: [
+        animation({ id: 0, flags: INLINE }),
+        animation({ id: 97, flags: 0 }),
+        animation({ id: 9, flags: INLINE | 0x40, alias: 1 }),
+      ],
+    }));
+    expect(m.resolve(9)!.id).toBe(0);
+  });
+
+  // Kills: `findById` returning the first id match unconditionally. The external row comes first in
+  // file order, and collapsing to Stand would lose a variation the model really can play.
+  it('prefers an inline sibling over an external entry sharing the id', () => {
+    const m = new ModelAnim(data({
+      animations: [
+        animation({ id: 0, flags: INLINE }),
+        animation({ id: 5, subID: 0, flags: 0 }),
+        animation({ id: 5, subID: 1, flags: INLINE }),
+      ],
+    }));
+    const got = m.resolve(5)!;
+    expect(got.id).toBe(5);
+    expect(got.subId).toBe(1);
+  });
+
+  const externalKeysOnly = () => bone({
+    rotation: {
+      interpolationType: 1,
+      globalSequenceID: -1,
+      tracks: [
+        { animationIndex: 0, timestamps: [], values: [] },
+        { animationIndex: 1, timestamps: [0, 999999999], values: [[0, 0, 0, 1], [0, 0, 0, 1]] },
+      ],
+    },
+  });
+
+  // Kills: leaving `blockAnimated` slot-blind. This is the 302-track case on wolf.m2 -- get it
+  // permissive and every external-heavy creature flips to animated and poses from garbage.
+  it('classify ignores keys that live in an external slot', () => {
+    expect(classify(data({ animations: seqs(), bones: [externalKeysOnly()] }))).toBe(false);
+  });
+
+  // Kills: over-correcting into "ignore slot 1 always". Same block, same keys -- only the owning
+  // sequence's flags differ, and now it must be animated.
+  it('counts those same keys once their slot is inline', () => {
+    expect(classify(data({
+      animations: [animation({ id: 0, flags: INLINE }), animation({ id: 97, flags: INLINE })],
+      bones: [externalKeysOnly()],
+    }))).toBe(true);
+  });
+
+  // Kills: applying the slot filter to a GLOBAL-SEQUENCE block. Its tracks array is not a sequence
+  // timeline -- track 0 is read whatever is playing -- so filtering it freezes every clock-driven
+  // glow in the game.
+  it('classify still counts a global-sequence block whose slot is external', () => {
+    const globalBlock = {
+      interpolationType: 1,
+      globalSequenceID: 0,
+      tracks: [{ animationIndex: 0, timestamps: [0, 500], values: [0.0, 1.0] }],
+    };
+    expect(classify({
+      animations: [animation({ id: 0, flags: 0 })],
+      sequences: [1000],
+      bones: [],
+      transparencyAnimations: [globalBlock],
+    })).toBe(true);
+  });
+
+  // Kills: folding the inline bit into `sequenceLoops`. Bit 0 is independent of the 0x130 mask, and
+  // an external one-shot must still report one-shot -- Task 20 lifts the quarantine without
+  // re-deriving the clock law.
+  it('leaves the loop law independent of the inline bit', () => {
+    expect(sequenceLoops(0x00)).toBe(sequenceLoops(0x20));
+    expect(sequenceLoops(0x01)).toBe(sequenceLoops(0x21));
+    const m = new ModelAnim(data({ animations: [animation({ id: 0, flags: 0x01 })] }));
+    expect(m.sequences[0]).toMatchObject({ inline: false, loops: false });
   });
 });
 

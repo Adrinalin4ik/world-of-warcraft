@@ -9,13 +9,22 @@ import { InstanceAnim } from '../../pipeline/m2/anim/instance-anim';
 import { ModelAnim } from '../../pipeline/m2/anim/model-anim';
 import { worldClock } from '../../pipeline/m2/anim/world-clock';
 
+/**
+ * `0x20` = "keyframes are inline in this .m2", as wolf Stand/Walk/Run really carry.
+ *
+ * Every fixture here needs it: `ModelAnim` quarantines a sequence without it, because an external
+ * sequence's blocks parse as noise off the wrong buffer (`hasInlineData`). It does not touch bit 0,
+ * so no clock law moves.
+ */
+const INLINE = 0x20;
+
 const animation = (over: any = {}) => ({
-  id: 0, subID: 0, length: 1000, flags: 0, probability: 32767,
+  id: 0, subID: 0, length: 1000, flags: INLINE, probability: 32767,
   blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0, ...over,
 });
 
 /** `flags` bit 0 SET means a one-shot; clear means it loops (`sequenceLoops`). */
-const ONE_SHOT = 0x01;
+const ONE_SHOT = INLINE | 0x01;
 
 /**
  * `setAnimation` / `startAnimation` called on the prototype against a hand-built `this`.

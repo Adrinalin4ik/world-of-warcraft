@@ -10,8 +10,12 @@ import { InstanceAnim } from '../../m2/anim/instance-anim';
 import { ModelAnim } from '../../m2/anim/model-anim';
 import { worldClock } from '../../m2/anim/world-clock';
 
+/** `0x20` = keyframes inline in the .m2. Without it `ModelAnim` quarantines the sequence as
+ *  external, and nothing can arm it -- see `hasInlineData`. */
+const INLINE = 0x20;
+
 const animation = (over: any = {}) => ({
-  id: 0, subID: 0, length: 1000, flags: 0, probability: 32767,
+  id: 0, subID: 0, length: 1000, flags: INLINE, probability: 32767,
   blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0, ...over,
 });
 

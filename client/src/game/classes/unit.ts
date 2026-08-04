@@ -308,7 +308,8 @@ class Unit extends Entity {
 
     // Arm the unit's standing sequence immediately. Deliberately NOT gated on
     // `m2.animated && m2.modelAnim.sequences.length > 0`: `instanceAnim` is null for exactly
-    // `!animated`, and `resolve()` returns null for an empty sequence table, so both halves of that
+    // `!animated`, and `resolve()` returns null for a sequence table with nothing playable in it
+    // (empty, or every entry quarantined as external), so both halves of that
     // old gate are already inside `startAnimation`. Reconstructing it here would also have invited
     // the conflation Task 12 warned about -- the mixer's `m2.animations.length` was a CLIP count
     // (sequences plus global sequences), while `modelAnim.sequences` is the sequence table alone.
@@ -383,8 +384,10 @@ class Unit extends Entity {
 
     // Through `resolve`, never a raw index: a unit asked for an animation its model lacks should
     // fall back to Stand, not freeze in bind pose. See the KNOWN GAP in this task's report --
-    // `resolve` follows the alias chain and then falls back to sequence 0, but does NOT follow
-    // `nextAnimationID`, so an absent animation yields Stand rather than the authored successor.
+    // `resolve` follows the alias chain and then falls back to the first INLINE sequence, but does
+    // NOT follow `nextAnimationID`, so an absent animation yields Stand rather than the authored
+    // successor. It can also return null now: a model whose every sequence lives in a sibling
+    // `.anim` file has nothing safe to play until Task 20 merges that data in.
     const seq = this.model.modelAnim.resolve(id);
     if (!seq) {
       return;
