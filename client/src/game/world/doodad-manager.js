@@ -309,6 +309,21 @@ class DoodadManager {
       // what the gates above just saved.
       let touched = false;
 
+      // NON-BONE channels: UV scroll, transparency, vertex colour.
+      //
+      // Deliberately NOT inside `poseDoodad`. That path is behind the `useSkinning` test below AND
+      // behind the distance-decimation and bone-budget gates, and neither applies here: a scrolling
+      // waterfall or a pulsing glow often has no animated bone at all (so `useSkinning` is false),
+      // and a doodad the bone gates denied still has to keep scrolling -- there are no bones to
+      // budget for these three channels, only a handful of scalar samples.
+      //
+      // Behind the DRAW gate above, though. The values are only read per draw
+      // (`applyAnimatedUniformsBeforeRender`), and sampling is clock-indexed, so an undrawn doodad
+      // that resumes samples the value the shared clock dictates rather than a stale one.
+      if (inst) {
+        doodad.evaluateMaterialChannels(worldClockMs);
+      }
+
       // BONE-MESH gate. `classify()` returns true for UV, transparency and vertex-colour animation
       // with no bone tracks at all, but `useSkinning` is driven only by `boneDef.animated`, and
       // `createMesh` parents the root bones ONLY on the skinning branch. For such a model the bones

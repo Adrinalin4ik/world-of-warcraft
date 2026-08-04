@@ -7,6 +7,13 @@ import { ObjectsManager } from '../../world/visibility-manager';
 import BatchManager from './batch-manager';
 import { animCounters } from './anim/counters';
 import { InstanceAnim } from './anim/instance-anim';
+import {
+  evaluateMaterialChannels,
+  MaterialChannelDefs,
+  MaterialChannelValues,
+  UVAnimationValue,
+  VertexColorValue,
+} from './anim/material-channels';
 import { ModelAnim } from './anim/model-anim';
 import { applyLocalPose } from './anim/pose';
 import { buildBoneHierarchy, modelSpaceBindMatrix, normalizeBoneWeights, poseBindSkeleton } from './bind-pose';
@@ -67,10 +74,17 @@ class M2 extends THREE.Group {
   modelAnim: ModelAnim;
   // Per-placement clock plus bone solver. Null for a model that animates nothing at all.
   instanceAnim: InstanceAnim | null;
-  uvAnimationValues = [];
-  transparencyAnimationValues = [];
+  // The three non-bone animated channels, PER PLACEMENT. Read per draw by
+  // `applyAnimatedUniformsBeforeRender` (m2/submesh.js), never pushed at a material from here: the
+  // materials are cached and shared across every placement of a model.
+  uvAnimationValues: UVAnimationValue[] = [];
+  transparencyAnimationValues: number[] = [];
   textureAnimations: THREE.Object3D;
-  vertexColorAnimationValues = [];
+  vertexColorAnimationValues: VertexColorValue[] = [];
+  // The parsed blocks the three arrays above are sampled from, plus a holder aliasing the arrays.
+  // Both are built once, in `createTextureAnimations`, so the per-frame evaluator allocates nothing.
+  materialChannelDefs: MaterialChannelDefs = { uv: [], transparency: [], vertexColor: [] };
+  materialChannelValues: MaterialChannelValues = { uv: [], transparency: [], vertexColor: [] };
 
   /**
    * `sharedModelAnim` is a SEPARATE parameter from `instance` on purpose.
@@ -154,6 +168,15 @@ class M2 extends THREE.Group {
 
     this.createSkeleton(data.bones);
 
+    // PER PLACEMENT, outside the `instance` branch below on purpose. These are this placement's own
+    // sampled UV / transparency / colour slots, not shared state: an instanced clone took the
+    // BATCHES from its source, and the whole point of Task 14 is that the values pushed into those
+    // shared materials come from the placement being drawn. Built inside the else-branch, as it was,
+    // every clone of an instanceable model kept empty arrays -- and `canInstance` is false only when
+    // a BONE is animated, so the models that clone are exactly the UV/transparency-animated ones
+    // this task exists for. Their animation would have been dropped on the floor.
+    this.createTextureAnimations(data);
+
     // Instanced M2s can share geometries and texture units.
     if (instance) {
       this.batches = instance.batches;
@@ -161,7 +184,6 @@ class M2 extends THREE.Group {
       this.submeshGeometries = instance.submeshGeometries;
       this.ownsBatches = false;
     } else {
-      this.createTextureAnimations(data);
       this.createBatches();
       this.createGeometry(data.vertices);
       this.ownsBatches = true;
@@ -512,25 +534,39 @@ class M2 extends THREE.Group {
     this.createUVAnimations(uvAnimations);
     this.createTransparencyAnimations(transparencyAnimations);
     this.createVertexColorAnimations(vertexColorAnimations);
+
+    // The defs are kept alongside the value slots so `evaluateMaterialChannels` can pair them
+    // without reaching back into `this.data` (which an entity model may not carry) and without
+    // building a holder object per frame.
+    this.materialChannelDefs = {
+      uv: uvAnimations || [],
+      transparency: transparencyAnimations || [],
+      vertexColor: vertexColorAnimations || [],
+    };
+
+    // Aliases, not copies -- `submesh.js` reads the three named arrays directly.
+    this.materialChannelValues = {
+      uv: this.uvAnimationValues,
+      transparency: this.transparencyAnimationValues,
+      vertexColor: this.vertexColorAnimationValues,
+    };
   }
 
-  // TODO: Add support for rotation and scaling in UV animations.
   createUVAnimations(uvAnimationDefs) {
     if (uvAnimationDefs.length === 0) {
       return;
     }
 
     uvAnimationDefs.forEach((uvAnimationDef, index) => {
-      // Default value
+      // Identity defaults: no scroll, no spin, unit scale. `translation` used to default to
+      // (1, 1, 1), which is a full-texture offset rather than "none" -- harmless while nothing read
+      // it, wrong now that it is a real sample slot.
       this.uvAnimationValues[index] = {
-        translation: [1.0, 1.0, 1.0],
+        translation: [0.0, 0.0, 0.0],
         rotation: [0.0, 0.0, 0.0, 1.0],
         scaling: [1.0, 1.0, 1.0],
         matrix: new THREE.Matrix4()
       };
-
-      // Only the default is set up here. Task 14 samples the UV animation blocks per draw and
-      // writes the sampled TRS (and the composed matrix) back into this slot.
     });
   }
 
@@ -540,7 +576,6 @@ class M2 extends THREE.Group {
     }
 
     transparencyAnimationDefs.forEach((transparencyAnimationDef, index) => {
-      // Default value. Task 14 samples `transparencyAnimationDef` per draw and writes here.
       this.transparencyAnimationValues[index] = 1.0;
     });
   }
@@ -551,14 +586,32 @@ class M2 extends THREE.Group {
     }
 
     vertexColorAnimationDefs.forEach((vertexColorAnimationDef, index) => {
-      // Default value
       this.vertexColorAnimationValues[index] = {
         color: [1.0, 1.0, 1.0],
         alpha: 1.0
       };
-
-      // Only the default is set up here. Task 14 samples the color/alpha blocks per draw.
     });
+  }
+
+  /**
+   * Sample THIS placement's UV, transparency and vertex-colour channels into its own value slots.
+   *
+   * The sampling itself lives in `anim/material-channels.ts` -- `M2` is untestable directly (its
+   * constructor reaches for `collisionWorld` and `ObjectsManager`), and the coordinate-space
+   * reasoning for these channels is documented there.
+   *
+   * Deliberately NOT gated on `useSkinning`, and deliberately not folded into the pose path: a
+   * waterfall that scrolls or a glow that pulses may have no animated bone at all, and a doodad the
+   * distance/bone-budget gates denied still has to keep scrolling.
+   */
+  evaluateMaterialChannels(worldClockMs: number) {
+    evaluateMaterialChannels(
+      this.modelAnim,
+      this.instanceAnim,
+      this.materialChannelDefs,
+      this.materialChannelValues,
+      worldClockMs,
+    );
   }
 
   /**

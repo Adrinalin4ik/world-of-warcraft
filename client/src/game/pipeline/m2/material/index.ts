@@ -218,6 +218,12 @@ class M2Material extends THREE.ShaderMaterial {
   };
   textures = [];
   textureDefs;
+  /** Which animated-channel slots this batch reads. See the constructor. */
+  animationDef: {
+    uvAnimationIndices: number[];
+    transparencyAnimationIndex: number;
+    vertexColorAnimationIndex: number;
+  };
   shaderNames = {
     vertex: null,
     fragment: null,
@@ -315,9 +321,19 @@ class M2Material extends THREE.ShaderMaterial {
     // The three `register*Animation` subscription helpers that used to run here are gone. They
     // pushed closures onto an EventEmitter owned by the shared AnimationManager (the `.on('update')`
     // calls had already been commented out, leaving them inert), which is precisely the binding
-    // model this refactor removes. Task 14 replaces them with a per-draw `onBeforeRender` push of
-    // `m2.uvAnimationValues` / `transparencyAnimationValues` / `vertexColorAnimationValues` into the
-    // uniforms -- per draw, because materials are cached and shared across placements.
+    // model this refactor removes.
+    //
+    // What replaces them is a per-draw push (`applyAnimatedUniformsBeforeRender` in `m2/submesh.js`)
+    // of the DRAWN placement's value slots. All this material keeps is which slots its batch reads:
+    // it is shared across every placement, so it cannot hold any placement's values itself.
+    //
+    // `?? -1` rather than a truthiness test on purpose -- `BatchManager.stubDef()` leaves both
+    // indices `null` when the batch has no such animation, and `null >= 0` is TRUE in JS.
+    this.animationDef = {
+      uvAnimationIndices: def.uvAnimationIndices || [],
+      transparencyAnimationIndex: def.transparencyAnimationIndex ?? -1,
+      vertexColorAnimationIndex: def.vertexColorAnimationIndex ?? -1,
+    };
   }
 
   enableBillboarding() {

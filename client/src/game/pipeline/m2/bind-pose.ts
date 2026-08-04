@@ -1,26 +1,5 @@
 import * as THREE from 'three';
 
-/**
- * Bind a skeleton to its MODEL-SPACE bind pose.
- *
- * `THREE.Skeleton` derives its bone inverses from each bone's `matrixWorld` at construction, and a
- * freshly built bone hierarchy has never been through `updateMatrixWorld` -- every bone still
- * carries the identity it was created with, so every inverse comes out identity too.
- *
- * An identity inverse is not a harmless approximation. Each palette entry becomes the bone's FULL
- * WORLD matrix instead of its delta from bind pose, and that breaks the mesh in a way that looks
- * nothing like a skinning bug:
- *
- *   `SkinnedMesh.computeBoundingSphere()` skins the vertices with the palette, so the sphere it
- *   computes is centred on the model's WORLD position -- while still being treated as a LOCAL
- *   bound. The frustum test then multiplies it by `matrixWorld`, adding that position a second
- *   time, and the sphere lands roughly twice as far from the origin as the model itself. three
- *   culls the mesh, `setProgram` never runs for it, its bone texture is never created, and the
- *   body is present, visible, correctly placed, and draws nothing at all.
- *
- * Posing the roots first puts the hierarchy in model space, which is exactly the space the inverses
- * should be taken from.
- */
 /** Everything `buildBoneHierarchy` derives from a model's bone defs. */
 export interface BoneHierarchy {
   /** File order -- index i pairs with bone def i, and with palette/localTRS slot i. */
@@ -113,6 +92,27 @@ export function buildBoneHierarchy(boneDefs: any[]): BoneHierarchy {
   return { bones, rootBones, billboards, bindPositions, useSkinning };
 }
 
+/**
+ * Bind a skeleton to its MODEL-SPACE bind pose.
+ *
+ * `THREE.Skeleton` derives its bone inverses from each bone's `matrixWorld` at construction, and a
+ * freshly built bone hierarchy has never been through `updateMatrixWorld` -- every bone still
+ * carries the identity it was created with, so every inverse comes out identity too.
+ *
+ * An identity inverse is not a harmless approximation. Each palette entry becomes the bone's FULL
+ * WORLD matrix instead of its delta from bind pose, and that breaks the mesh in a way that looks
+ * nothing like a skinning bug:
+ *
+ *   `SkinnedMesh.computeBoundingSphere()` skins the vertices with the palette, so the sphere it
+ *   computes is centred on the model's WORLD position -- while still being treated as a LOCAL
+ *   bound. The frustum test then multiplies it by `matrixWorld`, adding that position a second
+ *   time, and the sphere lands roughly twice as far from the origin as the model itself. three
+ *   culls the mesh, `setProgram` never runs for it, its bone texture is never created, and the
+ *   body is present, visible, correctly placed, and draws nothing at all.
+ *
+ * Posing the roots first puts the hierarchy in model space, which is exactly the space the inverses
+ * should be taken from.
+ */
 export function poseBindSkeleton(rootBones: THREE.Bone[], bones: THREE.Bone[]): THREE.Skeleton {
   for (let i = 0, len = rootBones.length; i < len; ++i) {
     rootBones[i].updateMatrixWorld(true);

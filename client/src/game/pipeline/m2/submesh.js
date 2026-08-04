@@ -28,6 +28,82 @@ function applyFadeAlphaBeforeRender(_renderer, _scene, _camera, _geometry, mater
   material.uniforms.fadeAlpha.value = node ? node.fadeAlpha : 1.0;
 }
 
+/**
+ * The identity a UV slot falls back to. Shared, and never mutated -- the slots are only ever
+ * REPLACED, never written through.
+ */
+const IDENTITY_UV = new THREE.Matrix4();
+
+/**
+ * Push the owning placement's animated UV / transparency / vertex-colour values into the shared
+ * material, immediately before this batch is drawn.
+ *
+ * Same reason as `applyFadeAlphaBeforeRender` directly above: M2 materials are cached and shared
+ * across every placement, so writing these from a per-doodad loop would leave every placement
+ * rendering with whichever one happened to write last. `onBeforeRender` is the per-draw seam, and it
+ * is also cheaper -- a culled batch never pays for the write at all.
+ *
+ * EVERY slot the material declares is written on every call, including the ones this batch does not
+ * animate. Skipping them would leave the previous placement's matrix in the shared uniform, which is
+ * the exact failure this function exists to prevent.
+ */
+function applyAnimatedUniformsBeforeRender(_renderer, _scene, _camera, _geometry, material) {
+  if (!material || !material.uniforms) {
+    return;
+  }
+
+  const def = material.animationDef;
+  if (!def) {
+    return;
+  }
+
+  // Two hops (batch mesh -> Submesh -> M2), stopping at whatever carries the value slots.
+  let node = this;
+  while (node && node.uvAnimationValues === undefined) {
+    node = node.parent;
+  }
+  if (!node) {
+    return;
+  }
+
+  const { uniforms } = material;
+
+  if (uniforms.animatedUVs) {
+    const slots = uniforms.animatedUVs.value;
+    const indices = def.uvAnimationIndices;
+    for (let i = 0, len = slots.length; i < len; ++i) {
+      const source = i < indices.length ? node.uvAnimationValues[indices[i]] : undefined;
+      slots[i] = source ? source.matrix : IDENTITY_UV;
+    }
+  }
+
+  if (uniforms.animatedTransparency && def.transparencyAnimationIndex >= 0) {
+    const value = node.transparencyAnimationValues[def.transparencyAnimationIndex];
+    uniforms.animatedTransparency.value = value === undefined ? 1.0 : value;
+  }
+
+  if (uniforms.animatedVertexColorRGB && def.vertexColorAnimationIndex >= 0) {
+    const source = node.vertexColorAnimationValues[def.vertexColorAnimationIndex];
+    const rgb = uniforms.animatedVertexColorRGB.value;
+    if (source) {
+      rgb.set(source.color[0], source.color[1], source.color[2]);
+      uniforms.animatedVertexColorAlpha.value = source.alpha;
+    } else {
+      rgb.set(1.0, 1.0, 1.0);
+      uniforms.animatedVertexColorAlpha.value = 1.0;
+    }
+  }
+}
+
+/**
+ * The batch meshes' single `onBeforeRender`. A named module-level function rather than a closure per
+ * batch mesh, so chaining the two handlers costs no allocation per batch.
+ */
+function applyUniformsBeforeRender(renderer, scene, camera, geometry, material, group) {
+  applyFadeAlphaBeforeRender.call(this, renderer, scene, camera, geometry, material, group);
+  applyAnimatedUniformsBeforeRender.call(this, renderer, scene, camera, geometry, material, group);
+}
+
 class Submesh extends THREE.Group {
 
   constructor(opts) {
@@ -84,7 +160,7 @@ class Submesh extends THREE.Group {
       }
 
       batchMesh.matrixAutoUpdate = this.matrixAutoUpdate;
-      batchMesh.onBeforeRender = applyFadeAlphaBeforeRender;
+      batchMesh.onBeforeRender = applyUniformsBeforeRender;
 
       this.add(batchMesh);
     }
