@@ -1,4 +1,4 @@
-import { AnimBlock } from './tracks';
+import { AnimBlock, cursorMs, WRAP } from './tracks';
 
 /** One entry of the model's sequence table, off the parsed `Animation` struct. */
 export interface Sequence {
@@ -176,6 +176,10 @@ export class ModelAnim {
       return variations[roll % variations.length];
     }
 
+    // NO modulo on `roll`. Wrapping it back into the distribution biases mass toward the first
+    // variation, and makes the trailing clamp unreachable. `roll` comes from a stream returning
+    // [0, 32767] and an id's weights conventionally sum to 32767, so `roll >= total` is reachable at
+    // the boundary; clamping there is correct and wrapping is a real distribution bug.
     let cumulative = 0;
     for (let i = 0, len = variations.length; i < len; ++i) {
       cumulative += variations[i].probability;
@@ -221,5 +225,24 @@ export class ModelAnim {
       }
     }
     return null;
+  }
+
+  /**
+   * The cursor for a global-sequence channel at a given world time.
+   *
+   * Lives on the MODEL, not the instance. A global sequence is clock-driven with zero arming
+   * (benilla `doodad_anim.rs:9`) -- it is a pure function of world time, so every placement of a
+   * model computes an identical value. Hoisting it here means a courtyard of a hundred braziers
+   * evaluates its glow pulse once instead of a hundred times.
+   *
+   * This is a deliberate divergence from WebWoWViewer, which keeps `globalSequenceTimes` per
+   * instance -- per-instance state that provably cannot differ between instances.
+   */
+  globalSequenceCursor(gseqIndex: number, worldClockMs: number): number {
+    const duration = this.globalSequenceDurations[gseqIndex];
+    if (duration === undefined || duration <= 0) {
+      return 0;
+    }
+    return cursorMs(WRAP, worldClockMs, duration);
   }
 }

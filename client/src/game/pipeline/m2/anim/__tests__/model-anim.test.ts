@@ -134,7 +134,7 @@ describe('resolve', () => {
     expect(m.resolve(5)!.id).toBe(5);
   });
 
-  it('follows nextAnimationID when the requested id is absent', () => {
+  it('falls back to sequence 0 when the requested id is absent', () => {
     const m = new ModelAnim(data({
       animations: [animation({ id: 0, nextAnimationID: -1 })],
     }));
@@ -164,6 +164,27 @@ describe('resolve', () => {
 
   it('returns null for a model with no sequences at all', () => {
     expect(new ModelAnim(data({ animations: [] })).resolve(0)).toBeNull();
+  });
+});
+
+describe('globalSequenceCursor', () => {
+  const m = new ModelAnim(data({ sequences: [1000, 0, 250] }));
+
+  it('wraps world time on the sequence duration', () => {
+    expect(m.globalSequenceCursor(0, 2500)).toBe(500);
+    expect(m.globalSequenceCursor(2, 600)).toBe(100);
+  });
+
+  it('is identical for every caller at the same world time -- there is no per-instance state', () => {
+    expect(m.globalSequenceCursor(0, 12345)).toBe(m.globalSequenceCursor(0, 12345));
+  });
+
+  it('returns 0 for a zero-duration global sequence', () => {
+    expect(m.globalSequenceCursor(1, 9999)).toBe(0);
+  });
+
+  it('returns 0 for an out-of-range index', () => {
+    expect(m.globalSequenceCursor(9, 9999)).toBe(0);
   });
 });
 
