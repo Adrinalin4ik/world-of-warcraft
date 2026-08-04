@@ -1,3 +1,4 @@
+import { BoneBudget } from '../pipeline/m2/anim/gating';
 import WMO from '../pipeline/wmo';
 import gameSettings from '../settings';
 import ContentQueue from '../utils/content-queue';
@@ -27,6 +28,16 @@ class WMOManager {
     };
 
     this.entries = new Map();
+
+    // ONE budget for every building's interior doodads, reset here and passed down into each
+    // `WMO#animate`. Owning it per WMO would multiply the per-frame ceiling by the number of loaded
+    // buildings -- 113 visible groups were measured in Stormwind -- which is not a ceiling.
+    //
+    // Still SEPARATE from `DoodadManager`'s budget of the same size, so the true worst-frame ceiling
+    // is currently 2x `boneBudgetPerFrame` (units are exempt from both; see `World#animateEntities`).
+    // Unifying them means one budget object shared across managers with a single begin-frame, which
+    // is Task 20's job once the HUD says what the real numbers are.
+    this.boneBudget = new BoneBudget(gameSettings.m2.boneBudgetPerFrame);
 
     this.pendingUnloads = new Map();
 
@@ -223,8 +234,10 @@ class WMOManager {
   }
 
   animate(delta, camera, cameraMoved) {
+    this.boneBudget.beginFrame();
+
     this.entries.forEach((wmo) => {
-      wmo.animate(delta, camera, cameraMoved);
+      wmo.animate(delta, camera, cameraMoved, this.boneBudget);
     });
   }
 

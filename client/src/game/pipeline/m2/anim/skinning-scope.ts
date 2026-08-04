@@ -20,9 +20,19 @@
  *     `viewMatrix . W . S . v`, where `S` is the submesh's local matrix (`Submesh` sits directly
  *     under the `M2` group and the batch mesh carries identity).
  *
- * The two agree iff `S = P_i . B_i^-1` -- which is precisely `skeleton.boneMatrices[i]`, bind-pose
- * inverse included, and which `anim/pose.ts` pins as `D . InstanceAnim.palette[i] . D`. So
- * `Submesh#applySoleBone` writes `toEngineMatrix(palette, i)` and nothing else. At rest the palette
+ * The two agree iff `S = P_i . B_i^-1`, bind-pose inverse included, which `anim/pose.ts` pins as
+ * `D . InstanceAnim.palette[i] . D`. So `Submesh#applySoleBone` writes `toEngineMatrix(palette, i)`
+ * and nothing else.
+ *
+ * `P_i . B_i^-1` is NOT `skeleton.boneMatrices[i]`, and an earlier version of this comment said it
+ * was. Line for line above: `Skeleton#update` writes `boneMatrix_i = W . P_i . B_i^-1` -- the two
+ * differ by the M2's whole world matrix `W`. They coincide only in a test frame where `W = I`, which
+ * is exactly the frame the unit tests run in, so nothing here would have caught it. A future reader
+ * simplifying `applySoleBone` into a copy out of `skeleton.boneMatrices` would apply `W` twice: once
+ * in the matrix and again when the scene graph composes the submesh under the `M2` group, sending
+ * the submesh to roughly the square of its world placement. Take the palette, never the skeleton.
+ *
+ * At rest the palette
  * entry is the identity (`T(p) . I . T(-p)`), which is also `B_i . B_i^-1`, so an unposed submesh
  * sitting at its untouched identity matrix is already correct.
  *
@@ -154,10 +164,17 @@ export interface SubmeshSkinningScope {
   soleBone: number;
 }
 
+// FROZEN, because both are returned BY REFERENCE and the same object therefore ends up in the
+// `submeshSkinning` table of every submesh of every model that reaches this verdict -- including the
+// tables instanced clones share with their source (`M2#clone`). One stray `scope.skinned = true`
+// anywhere would silently retune half the world's draw path, and the failure would present as an
+// unrelated model going skinned. Freezing turns that into a throw in strict mode (every ES module is
+// strict) at the write, instead of a rendering mystery a hundred objects away.
+
 /** Kept skinned, riding the model's skeleton. */
-const SCOPE_SKINNED: SubmeshSkinningScope = { skinned: true, soleBone: -1 };
+const SCOPE_SKINNED: SubmeshSkinningScope = Object.freeze({ skinned: true, soleBone: -1 });
 /** Static: no animated bone reaches this submesh at all. */
-const SCOPE_STATIC: SubmeshSkinningScope = { skinned: false, soleBone: -1 };
+const SCOPE_STATIC: SubmeshSkinningScope = Object.freeze({ skinned: false, soleBone: -1 });
 
 /**
  * Decide how one submesh is drawn.

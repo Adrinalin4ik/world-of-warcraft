@@ -1,5 +1,6 @@
 import { animCounters } from '../pipeline/m2/anim/counters';
-import { BoneBudget, shouldPose } from '../pipeline/m2/anim/gating';
+import { BoneBudget } from '../pipeline/m2/anim/gating';
+import { poseGatedInstance } from '../pipeline/m2/anim/pose-gate';
 import { armDoodad, cycleDoodad } from '../pipeline/m2/anim/variation-cycle';
 import { worldClock } from '../pipeline/m2/anim/world-clock';
 import M2Blueprint from '../pipeline/m2/blueprint';
@@ -356,37 +357,13 @@ class DoodadManager {
   /**
    * Distance-decimate, budget, solve and apply one visible instance's pose.
    *
-   * Returns whether the bones were actually written, which is what decides if this doodad needs a
-   * scene-graph walk this frame. Split out of the loop purely for readability; it allocates nothing.
+   * The gate itself now lives in `anim/pose-gate.ts`, shared with the WMO-interior doodads and the
+   * units Task 16 added: it turns on two details (measure from `matrixWorld`, phase on a dense
+   * `poseSlot`) that a second hand-written copy gets wrong quietly. This wrapper is what supplies
+   * THIS manager's bone budget.
    */
   poseDoodad(doodad, inst, camPos, frameIndex, worldClockMs) {
-    // World-space translation off `matrixWorld`, NOT `doodad.position` -- the same rule
-    // `VisibilityManager#enableStaticObjectInFrustum` documents. A terrain doodad's parent sits at
-    // the origin so the two agree, but a WMO doodad's position is local to its building, and Task 16
-    // reuses this gate.
-    const e = doodad.matrixWorld.elements;
-    const dx = e[12] - camPos.x;
-    const dy = e[13] - camPos.y;
-    const dz = e[14] - camPos.z;
-    const distanceYd = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-    if (!shouldPose(doodad.poseSlot, distanceYd, frameIndex)) {
-      animCounters.skipped++;
-      return false;
-    }
-
-    // The backstop. Denied instances hold last frame's pose for a frame, which a clock-indexed
-    // sampler makes safe.
-    if (!this.boneBudget.request(inst.model.boneDefs.length)) {
-      animCounters.skipped++;
-      return false;
-    }
-
-    animCounters.posed++;
-    animCounters.bonesSolved += inst.solveBones(worldClockMs);
-    doodad.applyPose();
-
-    return true;
+    return poseGatedInstance(doodad, inst, camPos, frameIndex, worldClockMs, this.boneBudget);
   }
 
   /**

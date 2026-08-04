@@ -3,6 +3,10 @@ import * as THREE from 'three';
 import { collisionWorld } from '../../collision/collision-world';
 import ContentQueue from '../../utils/content-queue';
 import M2Blueprint from '../m2/blueprint';
+import { animCounters } from '../m2/anim/counters';
+import { poseGatedInstance } from '../m2/anim/pose-gate';
+import { armDoodad, cycleDoodad } from '../m2/anim/variation-cycle';
+import { worldClock } from '../m2/anim/world-clock';
 import { attachPerObjectLighting } from '../m2/material/per-object-light';
 import WMOGroupLoader from './group/loader';
 import WMORootLoader from './root/loader';
@@ -38,6 +42,11 @@ class WMO {
 
     this.doodads = new Map();
     this.animatedDoodads = new Map();
+
+    // Dense phase slot counter for `shouldPose` -- see `enableDoodadAnimations`. Deliberately NOT
+    // reset by `unload()`: a reused id would collide with a doodad still holding the old slot, and
+    // the counter is monotonic precisely so it cannot.
+    this.nextPoseSlot = 0;
 
     this.doodadSet = [];
 
@@ -266,20 +275,45 @@ class WMO {
     // World position is only valid once placeDoodad has updated this instance's world matrix.
     this.foldDoodadLighting(doodadEntry, doodad);
 
-    // Task 13 revives this. Mirror `DoodadManager#loadDoodad`: the membership test is
-    // `doodad.animated || doodad.billboards.length > 0` (posing and billboarding are separate
-    // reasons to be in the per-frame set), and arming goes through `anim/variation-cycle.armDoodad`
-    // against `doodad.instanceAnim`, not a per-model manager.
-    //
-    // if (doodad.animated || doodad.billboards.length > 0) {
-    //   this.animatedDoodads.set(doodadEntry.id, doodad);
-    //   armDoodad(doodad.instanceAnim, worldClockMs);
-    // }
+    // Mirrors `DoodadManager#loadDoodad`: posing and billboarding are separate reasons to be in the
+    // per-frame set, so both are asked. A doodad whose only moving part is a billboarded bone has
+    // nothing to sample (`animated` is false) but still has to be turned to face the camera.
+    if (doodad.animated || doodad.billboards.length > 0) {
+      this.enableDoodadAnimations(doodadEntry, doodad);
+    }
 
     this.doodads.set(doodadEntry.id, doodad);
 
     if (this.particleManager) {
       this.particleManager.register(doodad);
+    }
+  }
+
+  /**
+   * Admit one interior doodad to the per-frame animation set.
+   *
+   * The counterpart of `DoodadManager#enableDoodadAnimations`, and it exists for the same reason:
+   * `shouldPose` is phased on a DENSE `poseSlot`, and without one assigned here the slot would be
+   * the class default and every doodad in the building would share a phase -- the single-phase
+   * pile-up the stagger exists to prevent. (Before `poseSlot` was declared on `M2` it would have
+   * been `undefined`, making `(frameIndex + undefined) % period` NaN and the doodad never posed at
+   * all, silently.)
+   *
+   * The counter is per WMO INSTANCE rather than global, which is fine and deliberate: what the
+   * stagger needs is that the slots in play spread evenly over the residues, and a dense range
+   * repeated once per building does that just as well as one long global range. A shared counter
+   * would need plumbing through `WMOManager` for no measurable gain.
+   */
+  enableDoodadAnimations(doodadEntry, doodad) {
+    this.animatedDoodads.set(doodadEntry.id, doodad);
+
+    doodad.poseSlot = this.nextPoseSlot++;
+    doodad.poseFrame = -1;
+
+    // Membership does NOT imply `instanceAnim` is non-null -- a billboard-only doodad is here purely
+    // for `applyBillboards` and never allocates an instance at all.
+    if (doodad.instanceAnim) {
+      armDoodad(doodad.instanceAnim, worldClock.ms);
     }
   }
 
@@ -628,28 +662,89 @@ class WMO {
     return doodads;
   }
 
-  animate(delta, camera, cameraMoved) {
+  /**
+   * Pose this building's interior doodads.
+   *
+   * Structurally identical to `DoodadManager#animate`, and deliberately so -- an interior brazier is
+   * the same object as an exterior one, and the split only ever existed because the two call sites
+   * were disabled at different times. The one real difference is `boneBudget`, which is owned by
+   * `WMOManager` and shared across every building rather than per WMO: a per-instance budget would
+   * multiply the ceiling by the number of loaded buildings, which in a city is no ceiling at all.
+   *
+   * `delta` is untouched on purpose. Sampling is clock-INDEXED off the one shared `worldClock`,
+   * which `World#animate` has already advanced exactly once this frame.
+   */
+  animate(delta, camera, cameraMoved, boneBudget = null) {
     if (!this.views.root) {
       return;
     }
 
-    const doodads = this.animatedDoodads.values();
+    const worldClockMs = worldClock.ms;
+    const frameIndex = worldClock.frameIndex;
+    const camPos = camera.position;
 
-    for (const doodad of doodads) {
-      if (!doodad.visible) {
-        continue;
+    // `forEach` rather than `for...of` over `.values()`: the latter allocates an iterator per
+    // building per frame, in a path that must allocate nothing.
+    this.animatedDoodads.forEach((doodad) => {
+      // A member of this map has EITHER keyframes to sample OR billboarded bones, and possibly only
+      // the latter -- in which case `instanceAnim` is null, every pose step below is skipped, and
+      // the billboard step at the bottom still runs.
+      const inst = doodad.instanceAnim;
+
+      if (inst) {
+        animCounters.resident++;
+
+        // RESIDENCY gate, deliberately separate from the draw gate below (benilla
+        // `doodad_anim.rs:20-25`): a doodad in an unentered room keeps cycling variations, it just
+        // stops being posed. Clock-indexed sampling makes that free and drift-free.
+        cycleDoodad(inst, worldClockMs);
       }
 
-      // Task 13 poses `doodad.instanceAnim` here, on the world clock.
+      // DRAW gate. `VisibilityManager#resolveVisibility` writes `visible` on every WMO doodad from
+      // the portal flood, so this is the interior-culling result and not merely a frustum test.
+      if (!doodad.visible) {
+        if (inst) {
+          animCounters.skipped++;
+        }
+        return;
+      }
+
+      let touched = false;
+
+      // NON-BONE channels: UV scroll, transparency, vertex colour. Behind the DRAW gate ONLY -- not
+      // behind decimation and not behind the bone budget, because a scrolling or pulsing doodad
+      // often has no animated bone at all and there are no bones here to budget.
+      if (inst) {
+        animCounters.materialsEvaluated++;
+        doodad.evaluateMaterialChannels(worldClockMs);
+      }
+
+      // BONE-MESH gate. `classify()` is true for UV/transparency/colour animation with no bone track
+      // at all, but `createMesh` parents the root bones only on the skinning branch -- so for such a
+      // model the bones are orphaned from the scene graph and solving them writes into objects
+      // nothing reads. This gates the BONE work only, never membership and never the cycle above.
+      if (inst && doodad.useSkinning) {
+        touched = poseGatedInstance(doodad, inst, camPos, frameIndex, worldClockMs, boneBudget);
+      } else if (inst) {
+        animCounters.skipped++;
+      }
 
       if (cameraMoved && doodad.billboards.length > 0) {
         doodad.applyBillboards(camera);
+        touched = true;
+      }
+
+      // Drives the scene walk in `World#updateDynamicMatrices`, which is O(bones) per doodad -- the
+      // same order as `solveBones`. Leaving it ungated would hand back most of what the gates above
+      // just saved.
+      if (touched) {
+        doodad.poseFrame = frameIndex;
       }
 
       if (doodad.skeletonHelper) {
         doodad.skeletonHelper.update();
       }
-    }
+    });
   }
 
 }

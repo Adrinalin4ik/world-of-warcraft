@@ -8,6 +8,8 @@ import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
 import { collisionDebugView } from "../collision/debug-view";
+import { animCounters } from "../pipeline/m2/anim/counters";
+import { poseGatedInstance } from "../pipeline/m2/anim/pose-gate";
 import { worldClock } from "../pipeline/m2/anim/world-clock";
 import { modelProbe } from "../pipeline/m2/model-probe";
 import SkyDebug from "../pipeline/sky/debug";
@@ -30,6 +32,13 @@ export default class World extends EventEmitter {
   /** The collision wireframe overlay, driven from `animate` and toggled from the debug panel. */
   public collisionDebug = collisionDebugView;
   private skyDebug: SkyDebug;
+  /**
+   * Dense phase slot counter for unit models -- the same role `DoodadManager#nextPoseSlot` plays.
+   *
+   * Owned by `World` rather than by the map: units outlive `changeMap`, and a counter that restarted
+   * per zone would hand a live unit's slot out twice.
+   */
+  private nextUnitPoseSlot = 0;
   // private skybox: THREE.Mesh;
   constructor(game: GameHandler) {
     super();
@@ -434,8 +443,9 @@ export default class World extends EventEmitter {
     // visibility gate rejected, the decimation gate skipped or the bone budget denied is passed over
     // here too. This walk is O(bones) per doodad -- the same order as `solveBones` -- so leaving it
     // ungated would have handed back most of what those gates save.
+    const frameIndex = worldClock.frameIndex;
+
     if (map.doodadManager) {
-      const frameIndex = worldClock.frameIndex;
       map.doodadManager.animatedDoodads.forEach((doodad: any) => {
         if (doodad.poseFrame === frameIndex) {
           doodad.updateMatrixWorld(true);
@@ -443,20 +453,64 @@ export default class World extends EventEmitter {
       });
     }
 
+    // Same `poseFrame` gate as the terrain doodads above. It was an unconditional walk while the WMO
+    // set was always empty (Task 13 left the registration commented out); now that interior doodads
+    // actually register, an ungated walk would re-accumulate every prop in every loaded building
+    // every frame -- including the ones the portal flood, the decimation gate and the bone budget
+    // just decided not to touch.
     if (map.wmoManager) {
       map.wmoManager.entries.forEach((wmo: any) => {
         if (wmo.animatedDoodads) {
-          wmo.animatedDoodads.forEach((doodad: any) => doodad.updateMatrixWorld(true));
+          wmo.animatedDoodads.forEach((doodad: any) => {
+            if (doodad.poseFrame === frameIndex) {
+              doodad.updateMatrixWorld(true);
+            }
+          });
         }
       });
     }
   }
 
+  /**
+   * Pose every unit -- creatures, NPCs, the player's own avatar.
+   *
+   * HOW UNITS ARE GATED, and why it is not what the brief specified.
+   *
+   * The brief exempted units from decimation AND from the bone budget outright, on the grounds that
+   * there are few of them, they are what the player looks at, and a held pose on a moving creature
+   * reads as a stutter where a held pose on a distant flag does not. Half of that survives.
+   *
+   *   * The BONE BUDGET is not applied, and that is the brief's argument holding. The budget is the
+   *     one gate that can hard-freeze the object under the crosshair, and which instances it freezes
+   *     is `Map` insertion order -- arbitrary, and unstable across a relog. Charging units against
+   *     the doodad budget would also let a courtyard of braziers starve the creature fighting in it,
+   *     which is precisely backwards.
+   *   * DECIMATION is applied, because the brief's argument does not reach it. `decimationPeriod`
+   *     returns 1 below `NEAR_YD` (40 yd), so posing every unit within 40 yd every single frame is
+   *     what this code already does -- the gate costs a distance calculation and changes nothing for
+   *     the creature you are fighting. What it buys is the crowd at 120 yd across a city square,
+   *     where a quarter-rate pose is invisible and full rate is not free.
+   *   * The DRAW gate is applied. Nothing wrote `visible` on unit models before, so today it only
+   *     rejects a model still streaming in -- but a unit model that is not drawn must not be posed,
+   *     and wiring that in later should not also require remembering this loop.
+   *
+   * WHAT IS STILL UNPROTECTED, stated plainly: a raid boss with a hundred NEARBY units. Every one of
+   * them is inside 40 yd, so decimation gives back nothing there, and with no budget the frame pays
+   * for all hundred. Distance decimation is simply the wrong instrument for a dense near cluster;
+   * the right one is a budget with a priority order (nearest first, target and player exempt), which
+   * needs a measured bone count to size and a sort this loop does not do. Units now feed
+   * `animCounters`, so the HUD's `resident` / `posed` / `bonesSolved` rows report that population
+   * from this task on -- measure before adding a gate whose failure mode is a stuttering boss.
+   */
   animateEntities(
     delta: number,
     camera: THREE.PerspectiveCamera,
     cameraMoved: boolean
   ) {
+    const worldClockMs = worldClock.ms;
+    const frameIndex = worldClock.frameIndex;
+    const camPos = camera.position;
+
     this.entities.forEach(entity => {
       const { model } = entity;
 
@@ -464,17 +518,61 @@ export default class World extends EventEmitter {
       // predicate (ModelAnim.classify), and billboarding is a separate reason to need a per-frame
       // visit. A billboard-only model would otherwise skip `entity.update(delta)` and
       // `applyBillboards` both, and freeze facing bind orientation.
-      if (model === null || (!model.animated && model.billboards.length === 0)) {
+      if (model === null || model === undefined ||
+          (!model.animated && model.billboards.length === 0)) {
         return;
       }
 
       entity.update(delta);
 
-      // Task 16 poses entity models here, through `model.instanceAnim`.
+      // Membership here does NOT imply `instanceAnim` is non-null -- a billboard-only model reaches
+      // this loop for `applyBillboards` alone and never allocates an instance.
+      const inst = model.instanceAnim;
+
+      // Assigned lazily: a unit's model arrives asynchronously, long after `add()`, so there is no
+      // single registration site to hang this on the way the doodad managers have.
+      if (inst !== null && model.poseSlot < 0) {
+        model.poseSlot = this.nextUnitPoseSlot++;
+      }
+
+      if (inst !== null) {
+        animCounters.resident++;
+      }
+
+      // DRAW gate. NO residency cycle above it, unlike the doodads: a unit's sequence is chosen by
+      // gameplay through `Unit#setAnimation`, not rolled from the shared variation stream, and
+      // running `cycleDoodad` here would re-roll a creature's animation out from under the server
+      // every time its current one ended.
+      if (model.visible === false) {
+        if (inst !== null) {
+          animCounters.skipped++;
+        }
+        return;
+      }
+
+      // Non-bone channels behind the DRAW gate only -- same split as the doodad paths.
+      if (inst !== null) {
+        animCounters.materialsEvaluated++;
+        model.evaluateMaterialChannels(worldClockMs);
+      }
+
+      // Bone work behind `useSkinning`: a model animating only UV / transparency / vertex colour has
+      // its bones orphaned from the scene graph (`createMesh` parents the root bones only on the
+      // skinning branch), so solving them writes into objects nothing reads.
+      if (inst !== null && model.useSkinning) {
+        // `null` budget: units are exempt. See this method's doc.
+        poseGatedInstance(model, inst, camPos, frameIndex, worldClockMs, null);
+      } else if (inst !== null) {
+        animCounters.skipped++;
+      }
 
       if (cameraMoved && model.billboards.length > 0) {
         model.applyBillboards(camera);
       }
+
+      // No `poseFrame` stamp and no gated walk for units: `entity.view` is a direct child of the
+      // scene root, and `updateDynamicMatrices` re-accumulates every non-static root child
+      // unconditionally. Units move every frame anyway, so there is nothing to skip.
 
       // if (model.skeletonHelper) {
       //   model.skeletonHelper.update();

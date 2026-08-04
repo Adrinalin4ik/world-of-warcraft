@@ -4,6 +4,7 @@ import { Vector3 } from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import DBC from "../pipeline/dbc";
 import M2 from "../pipeline/m2";
+import { worldClock } from "../pipeline/m2/anim/world-clock";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import ColliderManager from "../world/collider-manager";
 import { collisionWorld } from "../collision/collision-world";
@@ -52,7 +53,18 @@ class Unit extends Entity {
     this.playerGeometry,
     this.playerMaterial
   );
-  public currentAnimationIndex: number = 0;
+  /**
+   * The `AnimationData.dbc` ID this unit is asking to play -- NOT an index into the model's sequence
+   * table.
+   *
+   * The distinction is the whole point of routing through `ModelAnim#resolve`: the ids in the
+   * `Animation` enum below (2 = forward, 133 = backward, 38 = rotating) are DBC ids, and a model's
+   * sequence table is a sparse, per-model selection of them in file order. Indexing the table with
+   * one of these ids plays whatever unrelated sequence happens to sit at that slot, or nothing at
+   * all for the many models with fewer than 134 sequences. It was named `currentAnimationIndex`
+   * while nothing read it.
+   */
+  public currentAnimationId: number = 0;
   private displayInfo: DBC | null = null;
 
   /**
@@ -147,7 +159,7 @@ class Unit extends Entity {
     this.arrow.setDirection(new THREE.Vector3(1, 0, 0));
 
     // Animation
-    this.currentAnimationIndex = 0;
+    this.currentAnimationId = Animation.idle;
 
     this.view.add(this.collider);
     // this.view.add(this.arrow);
@@ -258,15 +270,6 @@ class Unit extends Entity {
 
     this.view.add(m2);
 
-    // Task 16: arm the unit's starting sequence here, through `m2.instanceAnim`, gated on
-    // `m2.animated && m2.modelAnim.sequences.length > 0`.
-    //
-    // The gate is left OUT rather than kept around an empty body, because it no longer means what
-    // it used to: the old `m2.animations.length` was the mixer's clip count -- one clip per
-    // sequence PLUS one per global sequence -- whereas `modelAnim.sequences` is the sequence table
-    // alone. Task 16 should index `modelAnim.sequences` / go through `modelAnim.resolve(animId)`,
-    // and the raw indices below are file slots into that table.
-    //
     /*
         penguin
         0 - fly 1
@@ -302,38 +305,88 @@ class Unit extends Entity {
 
     this.emit("model:change", this, this._model, m2);
     this._model = m2;
+
+    // Arm the unit's standing sequence immediately. Deliberately NOT gated on
+    // `m2.animated && m2.modelAnim.sequences.length > 0`: `instanceAnim` is null for exactly
+    // `!animated`, and `resolve()` returns null for an empty sequence table, so both halves of that
+    // old gate are already inside `startAnimation`. Reconstructing it here would also have invited
+    // the conflation Task 12 warned about -- the mixer's `m2.animations.length` was a CLIP count
+    // (sequences plus global sequences), while `modelAnim.sequences` is the sequence table alone.
+    //
+    // Without this, a unit nobody sends an animation packet for -- every idle NPC, and the player
+    // until the first key press -- would stand in bind pose for ever.
+    this.startAnimation(this.currentAnimationId, -1);
   }
 
+  /**
+   * Request an animation by `AnimationData.dbc` id.
+   *
+   * The re-entry guard is load-bearing, not an optimisation. `updateMoving` calls this once per
+   * FRAME for as long as a movement key is held, and `InstanceAnim` is clock-indexed off its
+   * `armedAtMs`: re-arming every frame pins the cursor at zero and freezes the model on the first
+   * keyframe of a run cycle -- an animation system that looks exactly like a broken one.
+   *
+   * `repetitions` is carried for the network caller's signature (`network/entity/entity.ts`) and is
+   * not honoured yet: `InstanceAnim` holds one sequence and its loop flag, with no repeat count.
+   */
   setAnimation(
-    index: number,
+    id: number,
     interrupt: boolean = false,
     repetitions: number = -1
   ) {
     if (!this.model) return;
 
-    // Task 16: the mixer's "is the current action still running, and does it loop forever?" test
-    // has no equivalent yet. `InstanceAnim` answers the first half with `windowElapsed(worldClockMs)`
-    // and the second with `current.loops`, but neither the world clock nor unit-driven arming is
-    // wired up until Task 16 -- so for now every request simply (re)starts, which is what the
-    // `else` branch below did anyway.
-    this.startAnimation(index, repetitions);
+    const inst = this.model.instanceAnim;
+    const seq = this.model.modelAnim ? this.model.modelAnim.resolve(id) : null;
+
+    if (!inst || !seq) {
+      return;
+    }
+
+    if (inst.current === seq) {
+      // A LOOP that is already running is never re-armed, `interrupt` or not -- see above. A
+      // one-shot still inside its play window is left alone unless the caller says to interrupt it;
+      // once the window has elapsed, the request restarts it.
+      if (seq.loops) {
+        return;
+      }
+      if (!interrupt && !inst.windowElapsed(worldClock.ms)) {
+        return;
+      }
+    }
+
+    this.startAnimation(id, repetitions);
   }
 
-  startAnimation(index: number, repetitions: number) {
-    // this.stopAnimation();
-    // this.model.animationManager.playAnimation(
-    //   index,
-    //   repetitions === -1 ? Infinity : repetitions
-    // );
-    // this.currentAnimationIndex = index;
-    // this.emit("animation:play", index, repetitions);
+  /** Arm unconditionally. `setAnimation` is the guarded entry point; this is the raw one. */
+  startAnimation(id: number, repetitions: number) {
+    if (!this.model) return;
+
+    const inst = this.model.instanceAnim;
+    if (!inst) {
+      return;
+    }
+
+    // Through `resolve`, never a raw index: a unit asked for an animation its model lacks should
+    // fall back to Stand, not freeze in bind pose. See the KNOWN GAP in this task's report --
+    // `resolve` follows the alias chain and then falls back to sequence 0, but does NOT follow
+    // `nextAnimationID`, so an absent animation yields Stand rather than the authored successor.
+    const seq = this.model.modelAnim.resolve(id);
+    if (!seq) {
+      return;
+    }
+
+    inst.arm(seq, worldClock.ms);
+    this.currentAnimationId = id;
+    this.emit("animation:play", id, repetitions);
   }
 
-  stopAnimation(index?: number) {
-    // if (!this.model) return;
-    // const animationIndex = index || this.currentAnimationIndex;
-    // this.emit("animation:stop", animationIndex);
-    // this.model.animationManager.stopAnimation(animationIndex);
+  stopAnimation(id?: number) {
+    const animationId = id === undefined ? this.currentAnimationId : id;
+    this.emit("animation:stop", animationId);
+    // No disarm: `InstanceAnim` has no stopped state, and clearing `current` would drop the model
+    // back to bind pose rather than holding its last frame. Callers that want a different pose ask
+    // for one.
   }
 
   jump() {

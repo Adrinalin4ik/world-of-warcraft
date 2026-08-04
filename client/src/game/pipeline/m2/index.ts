@@ -94,6 +94,24 @@ class M2 extends THREE.Group {
   // `instance` branch and clone()) and must not dispose materials they merely borrowed.
   ownsBatches: boolean;
   boundingMesh: THREE.Mesh;
+  /**
+   * Dense per-instance phase slot for `shouldPose`'s decimation stagger, or -1 while unregistered.
+   *
+   * Declared here rather than stamped on as an ad-hoc property because all THREE animated
+   * populations now need one -- terrain doodads (`DoodadManager#enableDoodadAnimations`), WMO
+   * interior doodads (`WMO#enableDoodadAnimations`) and units (`World#animateEntities`) -- and an
+   * UNDEFINED slot is silently fatal: `(frameIndex + undefined) % period` is NaN, which is never
+   * `=== 0`, so the instance is simply never posed and nothing reports it. A registration site that
+   * forgets to assign now falls back to a shared phase, which is merely a worse worst frame.
+   */
+  poseSlot: number = -1;
+  /**
+   * Last frame index on which this instance's bones were actually written.
+   *
+   * Read by `World#updateDynamicMatrices` to skip the O(bones) scene walk for everything the gates
+   * rejected. `-1` means "never posed", which no real frame index equals.
+   */
+  poseFrame: number = -1;
   // Per-model keyframe data, shared by every placement of this model path. Immutable.
   modelAnim: ModelAnim;
   // Per-placement clock plus bone solver. Null for a model that animates nothing at all.
@@ -203,12 +221,19 @@ class M2 extends THREE.Group {
     this.createTextureAnimations(data);
 
     // BEFORE createBatches, which needs the per-submesh answer to set each batch material's skinning
-    // flag, and before createSubmeshes, which needs it to pick the mesh class. Derived purely from
-    // the shared, immutable `data`/`skinData`, so an instanceable clone takes its source's copy
-    // rather than re-walking every submesh's triangles. A non-instanceable model recomputes -- and
-    // `canInstance` is false exactly when a bone is animated, i.e. for every model this matters to --
-    // but that is one extra O(indices) construction-time pass beside `createSubmeshGeometry`, which
-    // is already O(vertices) per submesh on the same path.
+    // flag, and before createSubmeshes, which needs it to pick the mesh class.
+    //
+    // The clone-sharing below saves LESS than it looks, and the comment that claimed otherwise has
+    // been corrected rather than the code: `canInstance` is false the moment any bone is animated,
+    // and `useSkinning` is set from exactly that (`bind-pose.ts`: `boneDef.animated`). So
+    // `canInstance` implies `!useSkinning`, `submeshSkinningScope` short-circuits to `SCOPE_STATIC`
+    // before it ever calls `submeshBoneSet`, and the table an instanceable clone inherits is always
+    // ALL-STATIC -- there is no triangle walk to save on that path. What sharing actually saves is
+    // one array of short-circuiting calls per clone; the O(indices) walk only ever runs for
+    // NON-instanceable models, which recompute here regardless. It runs beside
+    // `createSubmeshGeometry`, already O(vertices) per submesh on the same path, so it is cheap
+    // where it does run. The sharing is kept because it is free and correct, not because it is the
+    // optimization it was documented as.
     this.submeshSkinning = (instance && instance.submeshSkinning)
       ? instance.submeshSkinning
       : this.computeSubmeshSkinning(data, skinData);
@@ -840,8 +865,10 @@ class M2 extends THREE.Group {
       instance.geometry = this.geometry;
       instance.submeshGeometries = this.submeshGeometries;
       instance.batches = this.batches;
-      // Read-only after construction and derived only from the shared `data`/`skinData`, so sharing
-      // it saves the clone a whole-model triangle walk.
+      // Read-only after construction and derived only from the shared `data`/`skinData`, so it is
+      // safe to share. NOT a whole-model triangle walk saved, as this used to claim: reaching here
+      // means `canInstance`, which means no animated bone, which means the table is all-static and
+      // was built without walking a single triangle. See the constructor.
       instance.submeshSkinning = this.submeshSkinning;
     } else {
       instance = null;

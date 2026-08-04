@@ -221,6 +221,13 @@ class Submesh extends THREE.Group {
    * (an `InstanceAnim` palette entry is relative to bind pose by construction) and the two cases
    * where it does not hold, which that module refuses up front.
    *
+   * The source is the PALETTE, and it cannot be `skeleton.boneMatrices[i]` instead. Those two are not
+   * the same matrix: three writes `boneMatrices[i] = bone.matrixWorld . boneInverse_i`, which carries
+   * the M2's world matrix `W`, while what belongs in a LOCAL matrix here is the `W`-free
+   * `P_i . B_i^-1`. They agree only where `W = I`, which is every unit test and no real placement --
+   * so the substitution looks green and puts the submesh at roughly the square of its world
+   * placement in game.
+   *
    * The conjugation is load-bearing. `InstanceAnim.palette` is in RAW M2 axes while the scene graph
    * is in engine axes, so it goes through `toEngineMatrix` (`anim/axes.ts`), the matrix form of the
    * same `D = diag(-1, -1, 1)` the bone path applies component-wise. Taking the palette entry

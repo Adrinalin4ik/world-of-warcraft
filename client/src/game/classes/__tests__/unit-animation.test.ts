@@ -1,0 +1,145 @@
+/**
+ * jsdom, not node: importing `classes/unit` reaches the debug panel and `cache-manager`, whose
+ * module-level singleton touches `window.indexedDB` at import time.
+ *
+ * @jest-environment jsdom
+ */
+import Unit from '../unit';
+import { InstanceAnim } from '../../pipeline/m2/anim/instance-anim';
+import { ModelAnim } from '../../pipeline/m2/anim/model-anim';
+import { worldClock } from '../../pipeline/m2/anim/world-clock';
+
+const animation = (over: any = {}) => ({
+  id: 0, subID: 0, length: 1000, flags: 0, probability: 32767,
+  blendTime: 150, movementSpeed: 0, nextAnimationID: -1, alias: 0, ...over,
+});
+
+/** `flags` bit 0 SET means a one-shot; clear means it loops (`sequenceLoops`). */
+const ONE_SHOT = 0x01;
+
+/**
+ * `setAnimation` / `startAnimation` called on the prototype against a hand-built `this`.
+ *
+ * `new Unit(guid)` builds three.js geometry, a raycaster and a collider and registers with the
+ * collision world, none of which the arming decision involves.
+ */
+function unit(animations: any[]) {
+  const modelAnim = new ModelAnim({ animations, sequences: [], bones: [] });
+  const instanceAnim = new InstanceAnim(modelAnim);
+
+  const u: any = {
+    model: { modelAnim, instanceAnim },
+    currentAnimationId: 0,
+    emitted: [] as any[],
+    emit(...args: any[]) { u.emitted.push(args); },
+    setAnimation: (Unit as any).prototype.setAnimation,
+    startAnimation: (Unit as any).prototype.startAnimation,
+  };
+
+  return u;
+}
+
+beforeEach(() => worldClock.reset());
+
+describe('Unit#setAnimation re-entry guard', () => {
+  /**
+   * Kills: arming unconditionally on every call -- which is what the pre-Task-16 stub did.
+   *
+   * `Unit#updateMoving` calls `setAnimation(Animation.forward, true)` once per FRAME for as long as
+   * the key is held, and `InstanceAnim` is clock-indexed off `armedAtMs`. Re-arming each frame pins
+   * the cursor at zero, so the model stands on the first keyframe of its run cycle for the whole
+   * run. Note the `interrupt` argument is `true` at that call site, so the guard must hold in spite
+   * of it for a looping sequence.
+   */
+  it('does not re-arm a loop that is already running, even with interrupt set', () => {
+    const u = unit([animation({ id: 2 })]);
+
+    u.setAnimation(2, true);
+    const armedAt = u.model.instanceAnim.armedAtMs;
+
+    worldClock.advance(0.4);
+    u.setAnimation(2, true);
+    worldClock.advance(0.4);
+    u.setAnimation(2, true);
+
+    expect(u.model.instanceAnim.armedAtMs).toBe(armedAt);
+    // Which is the point: the cursor has actually advanced through the run cycle.
+    expect(u.model.instanceAnim.cursor(worldClock.ms)).toBeCloseTo(800);
+  });
+
+  /** Kills: guarding so hard that a genuine animation CHANGE is swallowed too. */
+  it('re-arms when a different animation is requested', () => {
+    const u = unit([animation({ id: 2 }), animation({ id: 133 })]);
+
+    u.setAnimation(2);
+    worldClock.advance(0.4);
+    u.setAnimation(133);
+
+    expect(u.model.instanceAnim.current.id).toBe(133);
+    expect(u.model.instanceAnim.armedAtMs).toBe(worldClock.ms);
+    expect(u.currentAnimationId).toBe(133);
+  });
+
+  /**
+   * Kills: applying the loop guard to one-shots as well, which would leave a jump or an attack
+   * playable exactly once and then dead for the rest of the session.
+   */
+  it('restarts a one-shot whose play window has elapsed', () => {
+    const u = unit([animation({ id: 15, flags: ONE_SHOT, length: 1000 })]);
+
+    u.setAnimation(15);
+    worldClock.advance(1.5);
+    u.setAnimation(15);
+
+    expect(u.model.instanceAnim.armedAtMs).toBe(worldClock.ms);
+  });
+
+  /** Kills: ignoring `interrupt`, which is what re-triggers a one-shot still mid-play. */
+  it('leaves a one-shot mid-window alone unless interrupted', () => {
+    const u = unit([animation({ id: 15, flags: ONE_SHOT, length: 1000 })]);
+
+    u.setAnimation(15);
+    const armedAt = u.model.instanceAnim.armedAtMs;
+
+    worldClock.advance(0.3);
+    u.setAnimation(15, false);
+    expect(u.model.instanceAnim.armedAtMs).toBe(armedAt);
+
+    u.setAnimation(15, true);
+    expect(u.model.instanceAnim.armedAtMs).toBe(worldClock.ms);
+  });
+});
+
+describe('Unit#startAnimation resolution', () => {
+  /**
+   * Kills: indexing `modelAnim.sequences` with the requested id instead of going through
+   * `resolve()`. The ids in `Unit`'s `Animation` enum are `AnimationData.dbc` ids (133 = backward),
+   * not table slots; a raw index into a two-sequence table is `undefined` and the unit freezes in
+   * bind pose. `resolve` falls back to sequence 0 -- Stand -- instead.
+   */
+  it('falls back to sequence 0 for an animation the model does not own', () => {
+    const u = unit([animation({ id: 0 }), animation({ id: 2 })]);
+
+    u.startAnimation(133, -1);
+
+    expect(u.model.instanceAnim.current).not.toBeNull();
+    expect(u.model.instanceAnim.current.index).toBe(0);
+  });
+
+  /** Kills: dereferencing a null `instanceAnim` -- true for every model that animates nothing. */
+  it('does nothing for a model with no instance', () => {
+    const u = unit([animation()]);
+    u.model.instanceAnim = null;
+
+    expect(() => u.startAnimation(0, -1)).not.toThrow();
+    expect(u.emitted).toHaveLength(0);
+  });
+
+  /** Kills: dereferencing a model that has not streamed in yet. */
+  it('does nothing before a model has loaded', () => {
+    const u = unit([animation()]);
+    u.model = null;
+
+    expect(() => u.setAnimation(0)).not.toThrow();
+  });
+});
