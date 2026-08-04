@@ -1,5 +1,16 @@
+import * as THREE from 'three';
 import { ModelAnim, Sequence } from './model-anim';
-import { ClockLaw, clockLaw, cursorMs } from './tracks';
+import { ClockLaw, clockLaw, cursorMs, isStep, sampleQuat, sampleVec3, trackFor } from './tracks';
+
+// Module-level scratch objects -- the solver runs per bone per instance per frame and must not
+// allocate.
+const scratchPos = new THREE.Vector3();
+const scratchQuat = new THREE.Quaternion();
+const scratchScale = new THREE.Vector3();
+const scratchPivot = new THREE.Vector3();
+const scratchLocal = new THREE.Matrix4();
+const scratchPivotTo = new THREE.Matrix4();
+const scratchPivotBack = new THREE.Matrix4();
 
 /**
  * Per-placement animation state: a clock, and nothing else that could have lived on the model.
@@ -22,8 +33,24 @@ export class InstanceAnim {
   private law: ClockLaw = 0;
   private periodMs = 0;
 
+  /** Bone world matrices, 16 floats each, model space. Allocated once. */
+  readonly palette: Float32Array;
+
+  /** Per-bone "already solved this frame" flags, cleared at the top of each solve. */
+  private readonly solved: Uint8Array;
+
+  /** Scratch matrices, one per bone, so composition never allocates. */
+  private readonly matrices: THREE.Matrix4[] = [];
+
   constructor(model: ModelAnim) {
     this.model = model;
+
+    const boneCount = model.boneDefs.length;
+    this.palette = new Float32Array(boneCount * 16);
+    this.solved = new Uint8Array(boneCount);
+    for (let i = 0; i < boneCount; ++i) {
+      this.matrices.push(new THREE.Matrix4());
+    }
   }
 
   /**
@@ -53,5 +80,75 @@ export class InstanceAnim {
       return false;
     }
     return worldClockMs - this.armedAtMs >= this.periodMs;
+  }
+
+  /**
+   * Solve every bone into `palette` and return how many were solved.
+   *
+   * Lazy and parent-first, following WebWoWViewer's `calcBones`: a bone is solved at most once per
+   * frame however many children ask for it, and the recursion means an unanimated branch costs one
+   * flag check rather than a matrix compose.
+   */
+  solveBones(worldClockMs: number): number {
+    const count = this.model.boneDefs.length;
+    this.solved.fill(0);
+
+    for (let i = 0; i < count; ++i) {
+      this.solveBone(i, worldClockMs);
+    }
+
+    for (let i = 0; i < count; ++i) {
+      this.matrices[i].toArray(this.palette, i * 16);
+    }
+
+    return count;
+  }
+
+  private solveBone(index: number, worldClockMs: number): void {
+    if (this.solved[index]) {
+      return;
+    }
+    // Marked BEFORE recursing: a malformed parent cycle would otherwise recurse until the stack
+    // blows, and a cycle in shipped data should degrade to a wrong pose, not a crash.
+    this.solved[index] = 1;
+
+    const def = this.model.boneDefs[index];
+    const seqIndex = this.current ? this.current.index : 0;
+    const t = this.cursor(worldClockMs);
+
+    scratchPos.set(0, 0, 0);
+    scratchQuat.set(0, 0, 0, 1);
+    scratchScale.set(1, 1, 1);
+
+    const translation = trackFor(def.translation, seqIndex);
+    if (translation) {
+      sampleVec3(translation, isStep(def.translation), t, scratchPos);
+    }
+
+    const rotation = trackFor(def.rotation, seqIndex);
+    if (rotation) {
+      sampleQuat(rotation, isStep(def.rotation), t, scratchQuat);
+    }
+
+    const scaling = trackFor(def.scaling, seqIndex);
+    if (scaling) {
+      sampleVec3(scaling, isStep(def.scaling), t, scratchScale);
+    }
+
+    // M2 animates AROUND the pivot: translate to the pivot, apply the animated TRS, translate back.
+    const pivot = def.pivotPoint;
+    scratchPivot.set(pivot[0], pivot[1], pivot[2]);
+    scratchPivotTo.makeTranslation(scratchPivot.x, scratchPivot.y, scratchPivot.z);
+    scratchPivotBack.makeTranslation(-scratchPivot.x, -scratchPivot.y, -scratchPivot.z);
+
+    scratchLocal.compose(scratchPos, scratchQuat, scratchScale);
+
+    const out = this.matrices[index];
+    out.copy(scratchPivotTo).multiply(scratchLocal).multiply(scratchPivotBack);
+
+    if (def.parentID > -1 && def.parentID < this.model.boneDefs.length) {
+      this.solveBone(def.parentID, worldClockMs);
+      out.premultiply(this.matrices[def.parentID]);
+    }
   }
 }

@@ -117,6 +117,8 @@ export class ModelAnim {
   readonly sequences: Sequence[] = [];
   readonly globalSequenceDurations: number[];
   readonly animated: boolean;
+  /** Parsed bone defs, file order. A vertex's bone indices index this list. */
+  readonly boneDefs: any[];
 
   constructor(data: M2AnimData) {
     const animations = data.animations || [];
@@ -139,6 +141,7 @@ export class ModelAnim {
 
     this.globalSequenceDurations = data.sequences || [];
     this.animated = classify(data);
+    this.boneDefs = data.bones || [];
   }
 
   /** Every sequence sharing an `AnimationData.dbc` id -- the variation set. */
