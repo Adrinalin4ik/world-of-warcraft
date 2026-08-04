@@ -13,6 +13,7 @@ import { modelProbe } from "../pipeline/m2/model-probe";
 import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
 import { fogDebug } from "./fog-debug";
+import { lightDebug } from "./light-debug";
 import { readMark } from "./saved-mark";
 import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
@@ -371,6 +372,7 @@ export default class World extends EventEmitter {
     // AFTER `map.animate` above, which runs the per-frame light pass -- that pass re-copies
     // `fogParams` from MapLight, so neutralising fog before it would be overwritten immediately.
     fogDebug.sync(this.map as any);
+    lightDebug.sync(this.map as any);
 
     // LAST: everything above may have moved something. See the constructor for why the renderer no
     // longer does this itself.

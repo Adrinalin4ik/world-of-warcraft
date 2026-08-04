@@ -88,6 +88,13 @@
   }
 }
 
+.light_controls {
+  &-hint {
+    color: #b8d8c4;
+    font-style: italic;
+  }
+}
+
 .wmo_controls {
   &-hint {
     color: #b8d8c4;
