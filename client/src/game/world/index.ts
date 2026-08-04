@@ -12,6 +12,7 @@ import M2Blueprint from "../pipeline/m2/blueprint";
 import { modelProbe } from "../pipeline/m2/model-probe";
 import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
+import { readMark } from "./saved-mark";
 import WorldMap from "./map";
 
 export default class World extends EventEmitter {
@@ -170,7 +171,18 @@ export default class World extends EventEmitter {
           spot = JSON.parse(lastLocation);
           console.log(spot)
         }
-        this.player.worldport(spot.zoneId, spot.coords);
+
+        // The debug mark WINS over `lastLocation`. They are not the same thing: `lastLocation` is
+        // only written when `worldport` actually changes MAP, so walking around never updates it --
+        // it is the last zone entered, not the last place stood. The mark is an explicit "put me back
+        // here", which is the whole reason to reload.
+        const mark = readMark();
+
+        if (mark) {
+          this.player.worldport(mark.mapId, [mark.x, mark.y, mark.z]);
+        } else {
+          this.player.worldport(spot.zoneId, spot.coords);
+        }
       }
     }
   }

@@ -1,11 +1,13 @@
 import React from 'react';
 
-/** Where the mark lives. `localStorage` in the app; a plain object in tests. */
-export interface CoordStorage {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
-}
+import {
+  MarkStorage, SAVED_MARK_KEY, SavedMark, clearMark, defaultMarkStorage, readMark, writeMark,
+} from '../../../game/world/saved-mark';
+
+// Re-exported so the panel's own module stays the one surface a caller needs; the storage itself is
+// owned by the game layer, because `World`'s startup port reads the same mark.
+export type { MarkStorage as CoordStorage, SavedMark };
+export { SAVED_MARK_KEY as SAVED_COORDS_KEY, readMark };
 
 /**
  * The slice of `Player` this control needs.
@@ -20,51 +22,9 @@ export type SavedCoordsTarget = {
   worldport(mapId: number, coords: number[]): void;
 };
 
-export interface SavedMark {
-  mapId: number;
-  x: number;
-  y: number;
-  z: number;
-}
-
-export const SAVED_COORDS_KEY = 'debug.savedCoords';
-
-/**
- * Read the mark back, or null.
- *
- * Tolerates anything: this is `localStorage`, which survives across builds, so a mark written by an
- * older shape must not throw on load and take the whole debug panel down with it.
- */
-export function readMark(storage: CoordStorage, key = SAVED_COORDS_KEY): SavedMark | null {
-  let raw: string | null = null;
-
-  try {
-    raw = storage.getItem(key);
-  } catch {
-    return null;
-  }
-
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(raw);
-    const { mapId, x, y, z } = parsed ?? {};
-
-    if ([mapId, x, y, z].some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
-      return null;
-    }
-
-    return { mapId, x, y, z };
-  } catch {
-    return null;
-  }
-}
-
 type Props = {
   player: SavedCoordsTarget | null;
-  storage?: CoordStorage;
+  storage?: MarkStorage;
 };
 
 type State = {
@@ -78,28 +38,22 @@ const fixed = (v: number) => v.toFixed(1);
  *
  * Persisted, deliberately: debugging this client means reloading constantly, and a mark that did not
  * survive a reload would have to be re-walked every time -- which is most of what it exists to avoid.
+ * `World`'s startup reads the same mark and spawns there, so a reload lands where the mark is.
  */
 export default class SavedCoords extends React.Component<Props, State> {
-  private get storage(): CoordStorage | null {
-    if (this.props.storage) {
-      return this.props.storage;
-    }
-    return typeof window !== 'undefined' ? window.localStorage : null;
+  private get storage(): MarkStorage | null {
+    return this.props.storage ?? defaultMarkStorage();
   }
 
   state: State = { mark: null };
 
   componentDidMount() {
-    const storage = this.storage;
-    if (storage) {
-      this.setState({ mark: readMark(storage) });
-    }
+    this.setState({ mark: readMark(this.storage) });
   }
 
   private save = () => {
     const player = this.props.player;
-    const storage = this.storage;
-    if (!player || !storage) {
+    if (!player) {
       return;
     }
 
@@ -110,12 +64,7 @@ export default class SavedCoords extends React.Component<Props, State> {
       z: player.position.z,
     };
 
-    try {
-      storage.setItem(SAVED_COORDS_KEY, JSON.stringify(mark));
-    } catch {
-      // A full or blocked storage should not lose the mark for this session.
-    }
-
+    writeMark(mark, this.storage);
     this.setState({ mark });
   };
 
@@ -130,14 +79,7 @@ export default class SavedCoords extends React.Component<Props, State> {
   };
 
   private clear = () => {
-    const storage = this.storage;
-
-    try {
-      storage?.removeItem(SAVED_COORDS_KEY);
-    } catch {
-      // Nothing to do; the state below is what the panel reads.
-    }
-
+    clearMark(this.storage);
     this.setState({ mark: null });
   };
 
@@ -159,6 +101,7 @@ export default class SavedCoords extends React.Component<Props, State> {
             ? `saved: map ${mark.mapId} @ ${fixed(mark.x)}, ${fixed(mark.y)}, ${fixed(mark.z)}`
             : 'saved: none' }
         </p>
+        <p>a saved mark is also where a page reload spawns</p>
       </div>
     );
   }
