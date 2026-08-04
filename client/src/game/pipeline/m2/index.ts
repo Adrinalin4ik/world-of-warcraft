@@ -697,6 +697,38 @@ class M2 extends THREE.Group {
   }
 
   /**
+   * Adopt a static -> ANIMATED flip caused by an external `.anim` merge.
+   *
+   * `this.animated` and `this.instanceAnim` are decided at construction, but `modelAnim.animated`
+   * is recomputed whenever a sibling `.anim` lands -- and for a model whose only real authoring is
+   * external, that recompute is the first time the answer is yes. Nothing else would ever notice:
+   * a static placement holds no instance, is not in any per-frame set, and would stand in bind pose
+   * for ever with correct keys sitting in the table beside it.
+   *
+   * There is nothing to rebuild on the RENDER side, which is what makes this a two-field flip
+   * rather than a reload. `useSkinning`, the skeleton and the `SkinnedMesh` choice all come from the
+   * parser's own `boneDef.animated`, which is slot-blind -- it sees the quarantined tracks as keys
+   * and is already true for an external-only bone. Only `ModelAnim.classify` is slot-aware, and
+   * only it was wrong.
+   *
+   * Idempotent, allocation-free once it has flipped, and one field compare when it has not, so it
+   * is safe to call from a per-frame loop. It only ever flips ONE way: a merge can add playable
+   * data and never removes any.
+   *
+   * @returns whether this call flipped it.
+   */
+  syncMergedAnimation(): boolean {
+    if (this.animated || !this.modelAnim || !this.modelAnim.animated) {
+      return false;
+    }
+    this.animated = true;
+    if (!this.instanceAnim) {
+      this.instanceAnim = new InstanceAnim(this.modelAnim);
+    }
+    return true;
+  }
+
+  /**
    * Sample THIS placement's UV, transparency and vertex-colour channels into its own value slots.
    *
    * The sampling itself lives in `anim/material-channels.ts` -- `M2` is untestable directly (its

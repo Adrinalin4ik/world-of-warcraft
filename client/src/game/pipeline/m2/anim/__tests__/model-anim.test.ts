@@ -1,5 +1,5 @@
 /** @jest-environment node */
-import { classify, hasInlineData, ModelAnim, sequenceLoops } from '../model-anim';
+import { classify, hasInlineData, isAliasSequence, ModelAnim, sequenceLoops } from '../model-anim';
 
 /**
  * The inline-data bit every fixture sequence carries unless it is testing the quarantine.
@@ -473,3 +473,147 @@ describe('globalSequenceCursor', () => {
   });
 });
 
+
+describe('isAliasSequence', () => {
+  it('is true for flag 0x40 and false without it', () => {
+    const m = new ModelAnim(data({
+      animations: [animation({ flags: 0x40 }), animation({ flags: INLINE })],
+    }));
+    expect(isAliasSequence(m.sequences[0])).toBe(true);
+    expect(isAliasSequence(m.sequences[1])).toBe(false);
+  });
+
+  // Kills folding the inline bit into the alias test. An alias observed in real data carries 0x61
+  // -- alias AND inline -- and treating that as "not an alias" would make the binder chase a
+  // sibling `.anim` file the host does not serve.
+  it('is true for 0x61, which is an alias that also carries the inline bit', () => {
+    const m = new ModelAnim(data({ animations: [animation({ flags: 0x61 })] }));
+    expect(isAliasSequence(m.sequences[0])).toBe(true);
+  });
+});
+
+/**
+ * The external merge, and the lift of the Task 17 quarantine.
+ *
+ * Every fixture here uses a first key of `[7, 0, 0]` rather than the origin. An unarmed or unmerged
+ * bone poses to bind pose, and an instance with `current === null` samples at cursor 0, so a track
+ * whose first key IS the identity asserts nothing -- it reads correct either way. Same caution
+ * applies to the material channels, whose cursor short-circuits identically.
+ */
+describe('ModelAnim#mergeExternal', () => {
+  /** A block whose slot-`slot` track holds noise plus the refs pointing into the payload. */
+  const externalBlock = (slot: number) => {
+    const tracks: any[] = [];
+    for (let i = 0; i <= slot; ++i) {
+      tracks.push({
+        animationIndex: i,
+        timestamps: i === slot ? [3197923783] : [],
+        values: i === slot ? [[9, 9, 9]] : [],
+        timestampsRef: i === slot ? { count: 2, offset: 0 } : { count: 0, offset: 0 },
+        valuesRef: i === slot ? { count: 2, offset: 8 } : { count: 0, offset: 0 },
+      });
+    }
+    return {
+      interpolationType: 1, globalSequenceID: -1, valueTypeName: 'float32array3', tracks,
+    };
+  };
+
+  /** 2 timestamps at 0, 2 float32array3 values at 8. Fits a 1000 ms sequence. */
+  const goodPayload = () => {
+    const buffer = new ArrayBuffer(32);
+    const view = new DataView(buffer);
+    view.setUint32(0, 0, true);
+    view.setUint32(4, 1000, true);
+    [7, 0, 0, 8, 1, 2].forEach((v, i) => view.setFloat32(8 + i * 4, v, true));
+    return buffer;
+  };
+
+  /** Slot 0 external, slot 1 inline; only slot 0's bone track carries anything. */
+  const externalModel = () => new ModelAnim(data({
+    animations: [animation({ id: 97, flags: 0 }), animation({ id: 0, flags: INLINE })],
+    bones: [bone({ rotation: emptyBlock(), scaling: emptyBlock(), translation: externalBlock(0) })],
+  }));
+
+  it('splices the payload keys into the sequence own slot', () => {
+    const m = externalModel();
+    expect(m.mergeExternal(m.sequences[0], goodPayload())).toBe(true);
+    const track = m.boneDefs[0].translation.tracks[0];
+    expect(track.timestamps).toEqual([0, 1000]);
+    expect(track.values).toEqual([[7, 0, 0], [8, 1, 2]]);
+  });
+
+  // Kills splicing without lifting the quarantine -- real keys sitting in a slot nothing will ever
+  // read, which is the whole failure this task exists to end.
+  it('lifts the quarantine for exactly that sequence', () => {
+    const m = externalModel();
+    expect(m.variationsOf(97)).toHaveLength(0);
+    expect(m.resolve(97)!.id).toBe(0);
+
+    m.mergeExternal(m.sequences[0], goodPayload());
+
+    expect(m.sequences[0].inline).toBe(true);
+    expect(m.sequences[1].inline).toBe(true);
+    expect(m.variationsOf(97)).toHaveLength(1);
+    expect(m.resolve(97)!.id).toBe(97);
+  });
+
+  // Kills omitting the `animated` recompute. Without it the model never joins any per-frame set and
+  // the merged keys are never sampled -- the merge silently does nothing.
+  it('recomputes animated: the merged keys can be the first real keys the model has', () => {
+    const m = externalModel();
+    expect(m.animated).toBe(false);
+    m.mergeExternal(m.sequences[0], goodPayload());
+    expect(m.animated).toBe(true);
+  });
+
+  // Kills omitting the version bump, which is what un-latches `armable` on live instances.
+  it('bumps mergeVersion', () => {
+    const m = externalModel();
+    expect(m.mergeVersion).toBe(0);
+    m.mergeExternal(m.sequences[0], goodPayload());
+    expect(m.mergeVersion).toBe(1);
+  });
+
+  // Kills flipping `inline` before the merge is known to have taken. A rejected payload must leave
+  // the sequence exactly as quarantined as it was.
+  it('changes nothing when the payload is rejected', () => {
+    const m = externalModel();
+    const short = new ArrayBuffer(4);
+    expect(m.mergeExternal(m.sequences[0], short)).toBe(false);
+    expect(m.sequences[0].inline).toBe(false);
+    expect(m.mergeVersion).toBe(0);
+    expect(m.animated).toBe(false);
+    expect(m.boneDefs[0].translation.tracks[0].timestamps).toEqual([3197923783]);
+  });
+
+  // Kills a range-only slot check. Both models have a slot 0, and the foreign sequence's index
+  // addresses a track of THIS model belonging to an unrelated animation -- the wrong-rig splice.
+  it('refuses a Sequence belonging to a different model', () => {
+    const m = externalModel();
+    const other = externalModel();
+    expect(m.mergeExternal(other.sequences[0], goodPayload())).toBe(false);
+    expect(m.sequences[0].inline).toBe(false);
+    expect(m.boneDefs[0].translation.tracks[0].timestamps).toEqual([3197923783]);
+  });
+
+  // Kills re-merging an already-merged slot: the second payload would overwrite real keys, and the
+  // refs no longer describe anything in it.
+  it('refuses a sequence that is already inline', () => {
+    const m = externalModel();
+    m.mergeExternal(m.sequences[0], goodPayload());
+    expect(m.mergeExternal(m.sequences[0], goodPayload())).toBe(false);
+    expect(m.mergeVersion).toBe(1);
+  });
+
+  // Kills merging bones only. UV, transparency and vertex-colour blocks were not observed to carry
+  // external keys, but the format allows them and the merge must not be bone-shaped.
+  it('merges a non-bone channel too', () => {
+    const m = new ModelAnim(data({
+      animations: [animation({ id: 97, flags: 0 })],
+      bones: [],
+      uvAnimations: [{ translation: externalBlock(0), rotation: emptyBlock(), scaling: emptyBlock() }],
+    }));
+    expect(m.mergeExternal(m.sequences[0], goodPayload())).toBe(true);
+    expect(m.animated).toBe(true);
+  });
+});

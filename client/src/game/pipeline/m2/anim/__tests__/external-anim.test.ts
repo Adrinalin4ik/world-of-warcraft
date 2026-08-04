@@ -145,3 +145,57 @@ describe('ExternalAnimCache', () => {
     expect(cache.pending).toBe(2);
   });
 });
+
+describe('ExternalAnimCache handover to the merge', () => {
+  // Kills dropping the handler: the bytes would land in the map and nothing would ever consume
+  // them, so the quarantine would never lift and the failure would be entirely silent.
+  it('hands the landed bytes to the caller, with the path they arrived for', async () => {
+    const loader = new FakeLoader();
+    const cache = new ExternalAnimCache(loader);
+    const seen: Array<[string, number]> = [];
+
+    cache.request('creature/wolf/wolf.m2', seq(), (path, buffer) => {
+      seen.push([path, buffer.byteLength]);
+    });
+    loader.resolveWith('creature/wolf/wolf0097-00.anim', new ArrayBuffer(5712));
+    await flush();
+
+    expect(seen).toEqual([['creature/wolf/wolf0097-00.anim', 5712]]);
+  });
+
+  // Kills firing the handler on the catch branch, which would merge `undefined` into the model.
+  it('does not hand anything over for a failed fetch', async () => {
+    const loader = new FakeLoader();
+    const cache = new ExternalAnimCache(loader);
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    let called = false;
+
+    cache.request('creature/wolf/wolf.m2', seq(), () => { called = true; });
+    loader.rejectWith('creature/wolf/wolf0097-00.anim', new Error('404'));
+    await flush();
+
+    expect(called).toBe(false);
+    spy.mockRestore();
+  });
+
+  // Kills a `release` that drops failures too: the path would be refetched on every later request,
+  // turning a terminal 404 into an unbounded retry loop.
+  it('releases a landed payload but keeps a failure terminal', async () => {
+    const loader = new FakeLoader();
+    const cache = new ExternalAnimCache(loader);
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    cache.request('creature/wolf/wolf.m2', seq({ id: 97 }));
+    cache.request('creature/wolf/wolf.m2', seq({ id: 98 }));
+    loader.resolveWith('creature/wolf/wolf0097-00.anim', new ArrayBuffer(8));
+    loader.rejectWith('creature/wolf/wolf0098-00.anim', new Error('404'));
+    await flush();
+
+    cache.release('creature/wolf/wolf0097-00.anim');
+    cache.release('creature/wolf/wolf0098-00.anim');
+
+    expect(cache.get('creature/wolf/wolf0097-00.anim')).toBeUndefined();
+    expect(cache.failed('creature/wolf/wolf0098-00.anim')).toBe(true);
+    spy.mockRestore();
+  });
+});

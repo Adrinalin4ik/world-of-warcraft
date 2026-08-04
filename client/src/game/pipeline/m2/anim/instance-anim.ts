@@ -48,14 +48,39 @@ export class InstanceAnim {
   armedAtMs = 0;
 
   /**
+   * The model's `mergeVersion` at the moment arming last gave up, or -1 if it never has.
+   *
+   * A version rather than a bare `false`. See `armable`.
+   */
+  private unarmableAtVersion = -1;
+
+  /**
    * False once arming has been attempted and found the model owns nothing to play.
    *
    * Memoised because the failure is a permanent property of the MODEL, while the attempt costs a
    * draw from the SHARED rng stream. `cycleDoodad` re-arms whenever `current` is null, so without
    * this a model with no animation id 0 perturbs the one stream every other doodad de-syncs off,
    * every frame, for as long as it stays loaded.
+   *
+   * It stopped being permanent the moment external `.anim` data could arrive. A model whose only
+   * id-0 variations were quarantined latched here, and nothing un-latched it -- so once the real
+   * keys merged, the doodad would have stood in bind pose for ever with correct data sitting in the
+   * table beside it. Silently: no error, no wrong pose, just something that never moves.
+   *
+   * So the latch is stored AGAINST THE MODEL'S MERGE VERSION rather than as a boolean, and a merge
+   * clears it everywhere at once. No instance registry (which would keep every placement alive), no
+   * per-frame scan, and no notification anybody has to remember to send.
+   *
+   * A `model` without a `mergeVersion` -- a hand-built test double -- degrades correctly:
+   * `undefined !== -1` is armable, and after `armable = false` `undefined !== undefined` is not.
    */
-  armable = true;
+  get armable(): boolean {
+    return this.unarmableAtVersion !== this.model.mergeVersion;
+  }
+
+  set armable(value: boolean) {
+    this.unarmableAtVersion = value ? -1 : this.model.mergeVersion;
+  }
 
   /** Cached from `current`, so the per-frame path does not re-derive it. */
   private law: ClockLaw = 0;

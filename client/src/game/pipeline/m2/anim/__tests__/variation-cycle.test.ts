@@ -188,3 +188,68 @@ describe('sharedRng singleton', () => {
     expect(sharedRng.next()).toBeGreaterThanOrEqual(0);
   });
 });
+
+/**
+ * The un-latch. Task 17 memoised `armable = false` because the failure was a permanent property of
+ * the model; an external `.anim` merge is exactly what stops that being true.
+ *
+ * The fixture's merged track starts at `[7, 0, 0]`, never the origin: an unarmed instance samples
+ * at cursor 0 and poses to bind pose, so a first key of the identity would pass whether or not the
+ * doodad ever re-armed.
+ */
+describe('armable across an external merge', () => {
+  /** A model whose only id-0 variation is quarantined, with the refs a merge re-reads. */
+  const externalOnly = () => new ModelAnim({
+    animations: [animation({ id: 0, flags: 0, length: 1000 })],
+    sequences: [],
+    bones: [{
+      parentID: -1, flags: 0, keyBoneID: -1, pivotPoint: [0, 0, 0],
+      translation: {
+        interpolationType: 1, globalSequenceID: -1, valueTypeName: 'float32array3',
+        tracks: [{
+          animationIndex: 0, timestamps: [3197923783], values: [[9, 9, 9]],
+          timestampsRef: { count: 2, offset: 0 }, valuesRef: { count: 2, offset: 8 },
+        }],
+      },
+      rotation: { interpolationType: 1, globalSequenceID: -1, tracks: [] },
+      scaling: { interpolationType: 1, globalSequenceID: -1, tracks: [] },
+    }],
+  } as any);
+
+  const payload = () => {
+    const buffer = new ArrayBuffer(32);
+    const view = new DataView(buffer);
+    view.setUint32(0, 0, true);
+    view.setUint32(4, 1000, true);
+    [7, 0, 0, 8, 1, 2].forEach((v, i) => view.setFloat32(8 + i * 4, v, true));
+    return buffer;
+  };
+
+  // Kills a plain boolean latch. Nothing un-latches one, and the doodad stands in bind pose for
+  // ever with correct data in the table beside it -- silently: no error and no wrong pose.
+  it('un-latches once the merge lands, and the doodad arms', () => {
+    const m = externalOnly();
+    const inst = new InstanceAnim(m);
+
+    armDoodad(inst, 0, new SharedRng(1));
+    expect(inst.armable).toBe(false);
+    expect(inst.current).toBeNull();
+
+    expect(m.mergeExternal(m.sequences[0], payload())).toBe(true);
+    expect(inst.armable).toBe(true);
+
+    armDoodad(inst, 0, new SharedRng(1));
+    expect(inst.current).not.toBeNull();
+  });
+
+  // Kills a getter that simply reports armable again -- the latch still has to hold for as long as
+  // nothing has changed, or every such doodad draws from the shared rng stream every frame.
+  it('stays latched while no merge has happened', () => {
+    const m = externalOnly();
+    const inst = new InstanceAnim(m);
+    armDoodad(inst, 0, new SharedRng(1));
+    for (let f = 0; f < 100; ++f) {
+      expect(inst.armable).toBe(false);
+    }
+  });
+});

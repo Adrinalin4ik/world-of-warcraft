@@ -1,3 +1,4 @@
+import { mergeExternalAnim, MergeableBlock, MERGE_REJECTED } from './external-anim-data';
 import { AnimBlock, cursorMs, WRAP } from './tracks';
 
 /** One entry of the model's sequence table, off the parsed `Animation` struct. */
@@ -222,8 +223,12 @@ function isWhite(value: unknown): boolean {
  * -- only worse, since every external-heavy creature model in the game would flip to animated and
  * join the per-frame posing set to sample garbage.
  */
-export function classify(data: M2AnimData): boolean {
-  const slots = inlineSlots(data);
+export function classify(data: M2AnimData, mergedSlots?: boolean[]): boolean {
+  // `mergedSlots` overrides the flag-derived table. It has to exist: after Task 20 an external
+  // sequence whose `.anim` has landed IS readable, and `flags` still says it is not -- `inline`
+  // stops being a pure function of `flags` at the merge, and re-deriving it here would make the
+  // recompute a no-op and silently strand every model whose only keys are external.
+  const slots = mergedSlots || inlineSlots(data);
 
   const bones = data.bones || [];
   for (let i = 0, len = bones.length; i < len; ++i) {
@@ -265,6 +270,21 @@ export function classify(data: M2AnimData): boolean {
 /** Sequence flag 0x40: this sequence is an alias for the one `alias` points at. */
 const FLAG_ALIAS = 0x40;
 
+/**
+ * Is this sequence an alias for another slot?
+ *
+ * Exported because it is what decides whether a QUARANTINED sequence has a `.anim` file to fetch.
+ * An alias owns no keyframes -- it is a redirect -- so no sibling file is written for it, and
+ * measured: `wolf0062-00.anim` and `kobold0136-00.anim`, the paths the two observed external
+ * aliases would map to, both 404. Requesting them anyway costs a round trip per alias per creature
+ * model and a console error each, for a file that cannot exist. Such a sequence stays
+ * `inline: false` for ever, which is correct and already handled: `resolve` follows the alias to
+ * its target and gates on the TARGET's inline bit.
+ */
+export function isAliasSequence(seq: Sequence): boolean {
+  return (seq.flags & FLAG_ALIAS) !== 0;
+}
+
 /** Guard against a malformed alias ring. Real chains are one or two hops. */
 const MAX_ALIAS_HOPS = 8;
 
@@ -280,11 +300,47 @@ const MAX_ALIAS_HOPS = 8;
 export class ModelAnim {
   readonly sequences: Sequence[] = [];
   readonly globalSequenceDurations: number[];
-  readonly animated: boolean;
+  /**
+   * Does this model animate anything at all? NOT readonly, and no longer decided once.
+   *
+   * `classify()` only counts keys in an INLINE slot, so a model whose real authoring lives entirely
+   * in sibling `.anim` files classifies static at load and must be re-classified the moment that
+   * data lands -- otherwise it never joins the per-frame set and the merged keys are never sampled.
+   * `mergeExternal` recomputes it; `M2#syncMergedAnimation` is what carries the flip out to a live
+   * placement.
+   */
+  animated: boolean;
   /** Parsed bone defs, file order. A vertex's bone indices index this list. */
   readonly boneDefs: any[];
 
+  /**
+   * Bumped by every successful `mergeExternal`. The model's "shape of what is playable" revision.
+   *
+   * This exists so a live `InstanceAnim` can UN-LATCH `armable` without anybody holding a registry
+   * of instances. `armDoodad` latches `armable = false` when the model owns nothing to play, which
+   * was a permanent property of the model until this task made the table mutable. An instance
+   * records the version it gave up at instead of a bare boolean, so a merge automatically makes it
+   * armable again -- no listener list, no leak, no per-frame scan, and nothing to forget to call.
+   */
+  mergeVersion = 0;
+
+  /** The parsed data, kept so `animated` can be recomputed after a merge. Same object, not a copy. */
+  private readonly data: M2AnimData;
+
+  /** Every block that can carry per-sequence keys. Built on first merge, never per frame. */
+  private blocks: MergeableBlock[] | null = null;
+
+  /**
+   * `inline` per FILE SLOT, kept in step with the sequence table so `classify` can be re-run.
+   *
+   * A parallel array rather than a walk of `sequences`, because `classify` indexes it by slot for
+   * every track of every block and a per-recompute rebuild would be the only allocation on the
+   * merge path that scales with the model.
+   */
+  private readonly slotInline: boolean[] = [];
+
   constructor(data: M2AnimData) {
+    this.data = data;
     const animations = data.animations || [];
     for (let i = 0, len = animations.length; i < len; ++i) {
       const a = animations[i];
@@ -305,11 +361,96 @@ export class ModelAnim {
         // file slot every animation block's `tracks` array is indexed by.
         inline: hasInlineData(a.flags),
       });
+      this.slotInline.push(hasInlineData(a.flags));
     }
 
     this.globalSequenceDurations = data.sequences || [];
     this.animated = classify(data);
     this.boneDefs = data.bones || [];
+  }
+
+  /** Every animation block a sequence slot can index, gathered once. */
+  private mergeableBlocks(): MergeableBlock[] {
+    if (this.blocks) {
+      return this.blocks;
+    }
+    const blocks: MergeableBlock[] = [];
+    const push = (block: MergeableBlock | undefined) => {
+      if (block && block.tracks) {
+        blocks.push(block);
+      }
+    };
+
+    const bones = this.data.bones || [];
+    for (let i = 0, len = bones.length; i < len; ++i) {
+      push(bones[i].translation);
+      push(bones[i].rotation);
+      push(bones[i].scaling);
+    }
+    const uv = this.data.uvAnimations || [];
+    for (let i = 0, len = uv.length; i < len; ++i) {
+      push(uv[i].translation);
+      push(uv[i].rotation);
+      push(uv[i].scaling);
+    }
+    const transparency = this.data.transparencyAnimations || [];
+    for (let i = 0, len = transparency.length; i < len; ++i) {
+      push(transparency[i]);
+    }
+    const colors = this.data.vertexColorAnimations || [];
+    for (let i = 0, len = colors.length; i < len; ++i) {
+      push(colors[i].color);
+      push(colors[i].alpha);
+    }
+
+    this.blocks = blocks;
+    return blocks;
+  }
+
+  /**
+   * Merge a sibling `.anim` payload into a quarantined sequence and LIFT THE QUARANTINE for it.
+   *
+   * This is the one place `Sequence.inline` stops being a pure function of `flags`. Four things
+   * happen, in this order, and all four are required:
+   *
+   *   1. the real keys are spliced into the existing `tracks[seq.index]` objects, in place -- the
+   *      file slot is never dropped, renumbered or appended to;
+   *   2. `inline` flips true, which is what makes `variationsOf` / `findById` / `resolve` /
+   *      `classify` start admitting the slot at all;
+   *   3. `animated` is RECOMPUTED, because the keys that just landed can be the first real keys the
+   *      model has -- `classify` reads the inline-slot table, so it has to run after step 2;
+   *   4. `mergeVersion` is bumped, which un-latches `armable` on every live instance of this model.
+   *
+   * Refusing is always safe: an unmerged sequence stays quarantined, which is the state everything
+   * downstream already handles. So every guard below returns false rather than doing anything
+   * partial.
+   *
+   * @returns whether the merge was applied.
+   */
+  mergeExternal(seq: Sequence, buffer: ArrayBuffer): boolean {
+    // The wrong-rig guard that IS available. A `.anim` carries no bone count to compare against
+    // (it has no header at all), but a `Sequence` handed in from a DIFFERENT model's table is a
+    // reachable caller mistake, and its `index` would address a slot of this model's tracks that
+    // belongs to some unrelated animation. Identity, not just range: two models routinely have a
+    // slot 19.
+    if (this.sequences[seq.index] !== seq) {
+      return false;
+    }
+    if (seq.inline) {
+      return false;
+    }
+
+    const merged = mergeExternalAnim(this.mergeableBlocks(), seq.index, seq.lengthMs, buffer);
+    if (merged === MERGE_REJECTED || merged <= 0) {
+      return false;
+    }
+
+    seq.inline = true;
+    this.slotInline[seq.index] = true;
+    // AFTER the flip, and driven by the live table rather than by `flags` -- see `classify`.
+    this.animated = classify(this.data, this.slotInline);
+    ++this.mergeVersion;
+    return true;
   }
 
   /**

@@ -518,8 +518,21 @@ export default class World extends EventEmitter {
       // predicate (ModelAnim.classify), and billboarding is a separate reason to need a per-frame
       // visit. A billboard-only model would otherwise skip `entity.update(delta)` and
       // `applyBillboards` both, and freeze facing bind orientation.
-      if (model === null || model === undefined ||
-          (!model.animated && model.billboards.length === 0)) {
+      if (model === null || model === undefined) {
+        return;
+      }
+
+      // A unit's model can become animated AFTER it loaded: an external `.anim` merge is what
+      // finally gives a creature whose authoring lives entirely in sibling files something to
+      // sample (`M2#syncMergedAnimation`). This is the pull side of that flip, and it has to sit
+      // ABOVE the gate below -- the gate is exactly what would keep such a model out for ever.
+      // Steady-state cost is one boolean compare per unit per frame; the method itself is not
+      // entered once the answer stops changing.
+      if (!model.animated && typeof model.syncMergedAnimation === 'function') {
+        model.syncMergedAnimation();
+      }
+
+      if (!model.animated && model.billboards.length === 0) {
         return;
       }
 

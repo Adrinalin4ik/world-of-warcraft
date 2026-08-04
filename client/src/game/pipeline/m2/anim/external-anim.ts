@@ -28,6 +28,15 @@ export interface AnimByteLoader {
 type Outcome = ArrayBuffer | 'failed';
 
 /**
+ * Called once, with the bytes, when a requested path lands.
+ *
+ * Takes the PATH as well as the buffer so a single long-lived, pre-bound handler can serve every
+ * request a caller ever makes. `request` may be reached from a per-frame site, and a per-call arrow
+ * function there would allocate a closure per frame.
+ */
+export type AnimLoadedHandler = (path: string, buffer: ArrayBuffer) => void;
+
+/**
  * Fetches and caches external `.anim` files.
  *
  * Task 19's whole job: get the bytes in hand, off the frame path, at most once per path -- and no
@@ -64,6 +73,25 @@ export class ExternalAnimCache {
   }
 
   /**
+   * Drop a successfully fetched payload. Failures are kept, so they stay terminal.
+   *
+   * Task 19 shipped this cache with no eviction path, and left the question open. It matters: a
+   * creature model has up to nine sibling `.anim` files running to tens of kilobytes each, the map
+   * is a module singleton, and `M2Blueprint` unloads models continuously as the player moves. Held
+   * for the session, that is a real leak of the largest kind of thing this cache touches.
+   *
+   * The right eviction rule turns out not to be time or size but CONSUMPTION: once the keys have
+   * been spliced into the model's blocks the bytes have no second reader, so `ExternalAnimBinder`
+   * releases them the moment the merge settles. Dropping the entry cannot cause a refetch either --
+   * a merged sequence is `inline` by then, and `request` refuses inline sequences.
+   */
+  release(path: string): void {
+    if (this.results.get(path) !== 'failed') {
+      this.results.delete(path);
+    }
+  }
+
+  /**
    * Fetch `seq`'s `.anim` file, once.
    *
    * A no-op for an **inline** sequence: its keyframes are already in the `.m2`, so there is
@@ -71,7 +99,7 @@ export class ExternalAnimCache {
    * never serves (inline sequences are not laid out as sibling `.anim` files at all). Also a
    * no-op for a path already resolved (success or failure) or currently in flight.
    */
-  request(modelPath: string, seq: Sequence): void {
+  request(modelPath: string, seq: Sequence, onLoaded?: AnimLoadedHandler): void {
     if (seq.inline) {
       return;
     }
@@ -86,6 +114,13 @@ export class ExternalAnimCache {
       .then((buffer) => {
         this.inFlight.delete(path);
         this.results.set(path, buffer);
+        // Fired only for a FRESH successful fetch, and deliberately not replayed for a path already
+        // in the map: the caller that wants the bytes is the one that asked for them, and a handler
+        // called again for an already-consumed payload would merge into a sequence that is now
+        // inline. Callers that missed the edge can still `get(path)`.
+        if (onLoaded) {
+          onLoaded(path, buffer);
+        }
       })
       .catch((err) => {
         this.inFlight.delete(path);

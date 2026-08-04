@@ -1,6 +1,7 @@
 import gameSettings from '../../settings';
 import { collisionWorld } from '../../collision/collision-world';
 import WorkerPool from '../worker/pool';
+import { externalAnims } from './anim/external-anim-binder';
 import M2 from './';
 
 class M2Blueprint {
@@ -44,6 +45,14 @@ class M2Blueprint {
         const m2 = new M2(path, data, skinData);
 
         this.modelAnims.set(path, m2.modelAnim);
+
+        // Fetch and merge whatever sibling `.anim` files this model's quarantined sequences need.
+        // Fire and forget, and off the load promise on purpose: the model must not wait on them.
+        // Each merge lifts the quarantine for its own sequence when it lands, and until it does the
+        // sequence stays exactly as unplayable as it was -- so an `.anim` that is slow, missing or
+        // corrupt costs nothing but the animation it carried. A model with no external sequence
+        // (nearly every placed doodad) does no work here at all.
+        externalAnims.ensure(path, m2.modelAnim);
 
         return m2;
       }));

@@ -32,9 +32,9 @@ const Bone = new r.Struct({
 
   unknowns: new r.Reserved(r.uint16le, 2),
 
-  translation: new AnimationBlock(float32array3),
-  rotation: new AnimationBlock(compfixed16array4),
-  scaling: new AnimationBlock(float32array3),
+  translation: new AnimationBlock(float32array3, 'float32array3'),
+  rotation: new AnimationBlock(compfixed16array4, 'compfixed16array4'),
+  scaling: new AnimationBlock(float32array3, 'float32array3'),
 
   pivotPoint: float32array3,
 
@@ -89,14 +89,14 @@ const Vertex = new r.Struct({
 });
 
 const Color = new r.Struct({
-  color: new AnimationBlock(float32array3),
-  alpha: new AnimationBlock(color16)
+  color: new AnimationBlock(float32array3, 'float32array3'),
+  alpha: new AnimationBlock(color16, 'color16')
 });
 
 const UVAnimation = new r.Struct({
-  translation: new AnimationBlock(float32array3),
-  rotation: new AnimationBlock(compfixed16array4),
-  scaling: new AnimationBlock(float32array3),
+  translation: new AnimationBlock(float32array3, 'float32array3'),
+  rotation: new AnimationBlock(compfixed16array4, 'compfixed16array4'),
+  scaling: new AnimationBlock(float32array3, 'float32array3'),
 
   animated: function() {
     return this.translation.animated ||
@@ -128,7 +128,7 @@ export default new r.Struct({
 
   vertexColorAnimations: new Nofs(Color),
   textures: new Nofs(Texture),
-  transparencyAnimations: new Nofs(new AnimationBlock(color16)),
+  transparencyAnimations: new Nofs(new AnimationBlock(color16, 'color16')),
   uvAnimations: new Nofs(UVAnimation),
   replacableTextures: new Nofs(),
   materials: new Nofs(Material),
