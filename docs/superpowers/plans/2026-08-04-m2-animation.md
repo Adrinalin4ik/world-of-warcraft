@@ -486,6 +486,27 @@ git commit -m "feat(m2): scalar keyframe sampler with step, hold and clamped fra
 
 Both write into `out` and return it. **No allocation** — these run per bone per instance per frame.
 
+**Prerequisite refactor (do this first).** Task 2's fix round added an inline clamp inside `sampleScalar` guarding `k0` against `values.length`. Hoist it into a shared private helper in the same file and make `sampleScalar` use it, so all three samplers share one guard rather than three copies:
+
+```ts
+/**
+ * Clamp a bracket index into the `values` array.
+ *
+ * `bracket` only inspects `timestamps`. A track whose `values` array is shorter -- malformed but
+ * real data -- therefore yields an index that is valid for `timestamps` and out of bounds for
+ * `values`, and the read returns `undefined` typed as a number. Downstream that is NaN in a bone
+ * matrix, which silently poisons an entire skeleton while every input still inspects as correct.
+ *
+ * Callers guarantee `valuesLength > 0` (each sampler returns early on an empty track), so this
+ * cannot produce -1.
+ */
+function clampToValues(k0: number, valuesLength: number): number {
+  return k0 < valuesLength - 1 ? k0 : valuesLength - 1;
+}
+```
+
+Keep `sampleScalar`'s existing tests passing unchanged — this is a pure refactor of that one guard.
+
 **Note on quaternion encoding:** M2 rotation keys are `compfixed16array4`, and [`comp-fixed16.js`](../../../client/src/wow-data-parser/types/comp-fixed16.js) already converts each component to a float in [-1, 1] at parse time via `(value - 32767) / 32767`. **No decompression belongs in this module** — the values arrive as `[x, y, z, w]` floats. (The design doc's §3.1 claim that decompression lives here is wrong; Step 6 verifies the parser's output range instead.)
 
 - [ ] **Step 1: Write the failing test**
@@ -594,13 +615,17 @@ export function sampleVec3(
   }
 
   const k0 = bracket(timestamps, tMs);
-  const va = values[k0] as ArrayLike<number>;
+  // Same guard `sampleScalar` carries: `bracket` only inspects `timestamps`, so a track whose
+  // `values` array is shorter yields a `k0` out of bounds for `values`, and the read comes back
+  // `undefined` -- which becomes NaN in a bone matrix and silently poisons a whole skeleton.
+  const k0c = clampToValues(k0, values.length);
+  const va = values[k0c] as ArrayLike<number>;
 
   if (step || atEnd(track, k0)) {
     return out.set(va[0], va[1], va[2]);
   }
 
-  const vb = values[k0 + 1] as ArrayLike<number>;
+  const vb = values[k0c + 1] as ArrayLike<number>;
   const f = fraction(timestamps, k0, tMs);
 
   return out.set(
@@ -633,14 +658,15 @@ export function sampleQuat(
   }
 
   const k0 = bracket(timestamps, tMs);
-  const va = values[k0] as ArrayLike<number>;
+  const k0c = clampToValues(k0, values.length);
+  const va = values[k0c] as ArrayLike<number>;
   out.set(va[0], va[1], va[2], va[3]);
 
   if (step || atEnd(track, k0)) {
     return out;
   }
 
-  const vb = values[k0 + 1] as ArrayLike<number>;
+  const vb = values[k0c + 1] as ArrayLike<number>;
   scratchQuat.set(vb[0], vb[1], vb[2], vb[3]);
 
   return out.slerp(scratchQuat, fraction(timestamps, k0, tMs));
