@@ -1,5 +1,6 @@
 /** @jest-environment node */
-import { AnimBlock, isStep, sampleScalar, SeqTrack, trackFor } from '../tracks';
+import * as THREE from 'three';
+import { AnimBlock, isStep, sampleQuat, sampleScalar, sampleVec3, SeqTrack, trackFor } from '../tracks';
 
 const track = (timestamps: number[], values: unknown[]): SeqTrack =>
   ({ animationIndex: 0, timestamps, values });
@@ -96,5 +97,75 @@ describe('sampleScalar', () => {
     // When timestamps[k0] === timestamps[k0+1], fraction returns 0, so we hold at va.
     // This is the correct behavior for authors who keyframe the same value twice.
     expect(sampleScalar(track([0, 100, 100, 200], [0, 5, 9, 12]), false, 100, 0)).toBe(9);
+  });
+});
+
+describe('sampleVec3', () => {
+  const v = track([0, 100], [[0, 0, 0], [10, 20, -30]]);
+
+  it('interpolates each component', () => {
+    const out = sampleVec3(v, false, 50, new THREE.Vector3());
+    expect(out.x).toBeCloseTo(5, 5);
+    expect(out.y).toBeCloseTo(10, 5);
+    expect(out.z).toBeCloseTo(-15, 5);
+  });
+
+  it('holds the previous key when step', () => {
+    const out = sampleVec3(v, true, 50, new THREE.Vector3());
+    expect(out.toArray()).toEqual([0, 0, 0]);
+  });
+
+  it('holds the final key past the end', () => {
+    const out = sampleVec3(v, false, 5000, new THREE.Vector3());
+    expect(out.toArray()).toEqual([10, 20, -30]);
+  });
+
+  it('writes into the supplied vector and returns it, allocating nothing', () => {
+    const out = new THREE.Vector3(1, 1, 1);
+    expect(sampleVec3(v, false, 0, out)).toBe(out);
+    expect(out.toArray()).toEqual([0, 0, 0]);
+  });
+
+  it('leaves the output untouched for an empty track', () => {
+    const out = new THREE.Vector3(3, 4, 5);
+    sampleVec3(track([], []), false, 10, out);
+    expect(out.toArray()).toEqual([3, 4, 5]);
+  });
+});
+
+describe('sampleQuat', () => {
+  // 0 degrees and 90 degrees about Z.
+  const a = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 0);
+  const b = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2);
+  const q = track([0, 100], [a.toArray(), b.toArray()]);
+
+  it('slerps rather than component-lerping', () => {
+    const out = sampleQuat(q, false, 50, new THREE.Quaternion());
+    const expected = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0, 0, 1), Math.PI / 4,
+    );
+    expect(out.angleTo(expected)).toBeCloseTo(0, 5);
+  });
+
+  // The failure a component-lerp produces: a non-unit quaternion, which scales the bone and
+  // visibly shortens the limb at mid-swing.
+  it('stays unit-length at the midpoint, which a component lerp would not', () => {
+    const out = sampleQuat(q, false, 50, new THREE.Quaternion());
+    expect(out.length()).toBeCloseTo(1, 6);
+
+    const lerped = new THREE.Quaternion(
+      (a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2, (a.w + b.w) / 2,
+    );
+    expect(lerped.length()).toBeLessThan(0.99);
+  });
+
+  it('holds the previous key when step', () => {
+    const out = sampleQuat(q, true, 50, new THREE.Quaternion());
+    expect(out.angleTo(a)).toBeCloseTo(0, 6);
+  });
+
+  it('holds the final key past the end', () => {
+    const out = sampleQuat(q, false, 9999, new THREE.Quaternion());
+    expect(out.angleTo(b)).toBeCloseTo(0, 6);
   });
 });

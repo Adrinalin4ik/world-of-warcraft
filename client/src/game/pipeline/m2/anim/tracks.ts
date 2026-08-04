@@ -9,6 +9,8 @@
  * search benilla needs collapses here to a plain bracket search over the sequence's own keys.
  */
 
+import * as THREE from 'three';
+
 /** One sequence's keys within an animation block. `values` element type depends on the block. */
 export interface SeqTrack {
   animationIndex: number;
@@ -47,6 +49,21 @@ export function trackFor(block: AnimBlock, seqIndex: number): SeqTrack | null {
     return null;
   }
   return track;
+}
+
+/**
+ * Clamp a bracket index into the `values` array.
+ *
+ * `bracket` only inspects `timestamps`. A track whose `values` array is shorter -- malformed but
+ * real data -- therefore yields an index that is valid for `timestamps` and out of bounds for
+ * `values`, and the read returns `undefined` typed as a number. Downstream that is NaN in a bone
+ * matrix, which silently poisons an entire skeleton while every input still inspects as correct.
+ *
+ * Callers guarantee `valuesLength > 0` (each sampler returns early on an empty track), so this
+ * cannot produce -1.
+ */
+function clampToValues(k0: number, valuesLength: number): number {
+  return k0 < valuesLength - 1 ? k0 : valuesLength - 1;
 }
 
 /**
@@ -104,18 +121,86 @@ export function sampleScalar(
   }
 
   const k0 = bracket(timestamps, tMs);
-  // Clamp k0 to the valid range of the values array. This defends against malformed tracks
-  // where timestamps and values arrays have mismatched lengths — real data that can occur when
-  // a parser or data source has a bug. Without this guard, k0 can index past the values array,
-  // causing `va` and `vb` to be `undefined` and silently propagating NaN into bone matrices.
-  const k0Clamped = Math.min(k0, values.length - 1);
-  const va = values[k0Clamped] as number;
+  const k0c = clampToValues(k0, values.length);
+  const va = values[k0c] as number;
 
   // Step, or past the final key: HOLD. There is deliberately no wrap-lerp back toward key 0.
   if (step || atEnd(track, k0)) {
     return va;
   }
 
-  const vb = values[k0Clamped + 1] as number;
+  const vb = values[k0c + 1] as number;
   return va + (vb - va) * fraction(timestamps, k0, tMs);
+}
+
+/** Scratch quaternion for the slerp target. Module-level: this runs per bone per frame. */
+const scratchQuat = new THREE.Quaternion();
+
+export function sampleVec3(
+  track: SeqTrack,
+  step: boolean,
+  tMs: number,
+  out: THREE.Vector3,
+): THREE.Vector3 {
+  const { timestamps, values } = track;
+  if (timestamps.length === 0 || values.length === 0) {
+    return out;
+  }
+
+  const k0 = bracket(timestamps, tMs);
+  // Same guard `sampleScalar` carries: `bracket` only inspects `timestamps`, so a track whose
+  // `values` array is shorter yields a `k0` out of bounds for `values`, and the read comes back
+  // `undefined` -- which becomes NaN in a bone matrix and silently poisons a whole skeleton.
+  const k0c = clampToValues(k0, values.length);
+  const va = values[k0c] as ArrayLike<number>;
+
+  if (step || atEnd(track, k0)) {
+    return out.set(va[0], va[1], va[2]);
+  }
+
+  const vb = values[k0c + 1] as ArrayLike<number>;
+  const f = fraction(timestamps, k0, tMs);
+
+  return out.set(
+    va[0] + (vb[0] - va[0]) * f,
+    va[1] + (vb[1] - va[1]) * f,
+    va[2] + (vb[2] - va[2]) * f,
+  );
+}
+
+/**
+ * Sample a rotation track.
+ *
+ * SLERP, never a component-wise lerp. Lerping four components independently produces a shorter,
+ * non-unit quaternion at the midpoint, and a non-unit rotation scales the bone -- limbs visibly
+ * shorten halfway through every swing while both endpoints look perfect, which is why this reads as
+ * a rigging fault rather than a sampling one.
+ *
+ * Keys arrive already decompressed: `compfixed16` converts each component to a float in [-1, 1] at
+ * parse time (`client/src/wow-data-parser/types/comp-fixed16.js`).
+ */
+export function sampleQuat(
+  track: SeqTrack,
+  step: boolean,
+  tMs: number,
+  out: THREE.Quaternion,
+): THREE.Quaternion {
+  const { timestamps, values } = track;
+  if (timestamps.length === 0 || values.length === 0) {
+    return out;
+  }
+
+  const k0 = bracket(timestamps, tMs);
+  const k0c = clampToValues(k0, values.length);
+  const va = values[k0c] as ArrayLike<number>;
+  out.set(va[0], va[1], va[2], va[3]);
+
+  if (step || atEnd(track, k0)) {
+    return out;
+  }
+
+  const vb = values[k0c + 1] as ArrayLike<number>;
+  scratchQuat.set(vb[0], vb[1], vb[2], vb[3]);
+
+  return out.slerp(scratchQuat, fraction(timestamps, k0, tMs));
 }
