@@ -9,7 +9,7 @@ import { animCounters } from './anim/counters';
 import { InstanceAnim } from './anim/instance-anim';
 import { ModelAnim } from './anim/model-anim';
 import { applyLocalPose } from './anim/pose';
-import { modelSpaceBindMatrix, normalizeBoneWeights, poseBindSkeleton } from './bind-pose';
+import { buildBoneHierarchy, modelSpaceBindMatrix, normalizeBoneWeights, poseBindSkeleton } from './bind-pose';
 import M2Material from './material';
 import { isParticleTemplate } from './particle/template';
 import Submesh from './submesh';
@@ -227,66 +227,20 @@ class M2 extends THREE.Group {
   }
 
   createSkeleton(boneDefs) {
-    const rootBones = [];
-    const bones = [];
-    const billboards = [];
-
-    for (let boneIndex = 0, len = boneDefs.length; boneIndex < len; ++boneIndex) {
-      const boneDef = boneDefs[boneIndex];
-      const bone = new THREE.Bone();
-
-      bones.push(bone);
-
-      // M2 bone positioning seems to be inverted on X and Y
-      const { pivotPoint } = boneDef;
-      const correctedPosition = new THREE.Vector3(-pivotPoint[0], -pivotPoint[1], pivotPoint[2]);
-      bone.position.copy(correctedPosition);
-
-      if (boneDef.parentID > -1) {
-        const parent = bones[boneDef.parentID];
-        parent.add(bone);
-
-        // Correct bone positioning relative to parent
-        let up = bone;
-        while (up = (up.parent as THREE.Bone)) {
-          bone.position.sub(up.position);
-        }
-      } else {
-        bone.userData.isRoot = true;
-        rootBones.push(bone);
-      }
-
-      // Enable skinning support on this M2 if we have bone animations.
-      if (boneDef.animated) {
-        this.useSkinning = true;
-      }
-
-      // Flag billboarded bones
-      if (boneDef.billboarded) {
-        bone.userData.billboarded = true;
-        bone.userData.billboardType = boneDef.billboardType;
-
-        billboards.push(bone);
-      }
-
-      // No per-bone track registration here any more. Bone TRS keyframes live once per model on
-      // `this.modelAnim.boneDefs`, and `InstanceAnim#solveBones` reads them directly -- see the
-      // constructor for why registering them per clone was the original defect.
-    }
+    // The hierarchy build lives in bind-pose.ts so that `anim/__tests__/pose.test.ts` exercises the
+    // same code production does, instead of a hand-mirrored copy that would drift silently.
+    const { bones, rootBones, billboards, bindPositions, useSkinning } =
+      buildBoneHierarchy(boneDefs);
 
     // Preserve the bones
     this.bones = bones;
     this.rootBones = rootBones;
     this.billboards = billboards;
+    this.boneBindPositions = bindPositions;
 
-    // Snapshot the bind offsets before anything poses them.
-    this.boneBindPositions = new Float32Array(bones.length * 3);
-    for (let i = 0, len = bones.length; i < len; ++i) {
-      const p = bones[i].position;
-      this.boneBindPositions[i * 3] = p.x;
-      this.boneBindPositions[i * 3 + 1] = p.y;
-      this.boneBindPositions[i * 3 + 2] = p.z;
-    }
+    // OR rather than assign: `useSkinning` is initialised in the constructor and nothing else sets
+    // it before this point, but a future caller that did must not have its answer discarded.
+    this.useSkinning = this.useSkinning || useSkinning;
 
     // Assemble the skeleton from the MODEL-SPACE bind pose. `new THREE.Skeleton(bones)` on its own
     // takes its bone inverses from bones that have never been through updateMatrixWorld, so every

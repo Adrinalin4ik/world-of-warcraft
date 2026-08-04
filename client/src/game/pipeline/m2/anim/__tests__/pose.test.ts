@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { InstanceAnim } from '../instance-anim';
 import { ModelAnim } from '../model-anim';
 import { applyLocalPose } from '../pose';
-import { poseBindSkeleton } from '../../bind-pose';
+import { buildBoneHierarchy, poseBindSkeleton } from '../../bind-pose';
 
 /**
  * The mirror the M2 pipeline bakes into geometry and bone pivots -- 180 degrees about Z, not a
@@ -23,58 +23,31 @@ const block = (values: number[][]) => ({
   tracks: [{ animationIndex: 0, timestamps: [0, 1000], values }],
 });
 
+/**
+ * A parsed bone def. `animated` and `billboarded` are getters on the real parser struct
+ * (`wow-data-parser/m2/index.js`); `buildBoneHierarchy` reads both, so the fixture carries them as
+ * plain fields.
+ */
 const boneDef = (over: any = {}) => ({
-  parentID: -1, flags: 0, keyBoneID: -1, pivotPoint: [0, 0, 0], billboardType: null,
+  parentID: -1, flags: 0, keyBoneID: -1, pivotPoint: [0, 0, 0],
+  animated: true, billboarded: false, billboardType: null,
   translation: emptyBlock(), rotation: emptyBlock(), scaling: emptyBlock(), ...over,
 });
 
 /**
- * Build the bone hierarchy and bind offsets exactly as `M2#createSkeleton` does.
+ * Build the bone hierarchy through the SAME function production uses.
  *
- * Reproduced rather than called: `M2`'s constructor pulls in `collisionWorld` and `ObjectsManager`
- * and cannot be instantiated under jest. Only the parts under test are duplicated -- the pivot
- * mirror `(-p0, -p1, p2)`, the telescoping parent subtraction, and the billboard flag -- so a change
- * to any of those in `createSkeleton` would make this fixture diverge, which is the intended
- * tripwire.
+ * `buildBoneHierarchy` was extracted out of `M2#createSkeleton` for exactly this: `M2` itself cannot
+ * be instantiated under jest (its constructor reaches for `collisionWorld` and `ObjectsManager`),
+ * and a hand-mirrored copy of the bone build would have drifted away from production **silently** --
+ * nothing would fail, the test would just quietly stop describing the code. The pivot mirror, the
+ * telescoping parent subtraction and the billboard flags are all the real ones.
  */
 function buildSkeleton(boneDefs: any[]) {
-  const bones: THREE.Bone[] = [];
-  const rootBones: THREE.Bone[] = [];
-
-  for (let i = 0; i < boneDefs.length; ++i) {
-    const def = boneDefs[i];
-    const bone = new THREE.Bone();
-    bones.push(bone);
-
-    const p = def.pivotPoint;
-    bone.position.set(-p[0], -p[1], p[2]);
-
-    if (def.parentID > -1) {
-      bones[def.parentID].add(bone);
-      let up: any = bone;
-      while ((up = up.parent)) {
-        bone.position.sub(up.position);
-      }
-    } else {
-      rootBones.push(bone);
-    }
-
-    if (def.billboardType !== null) {
-      bone.userData.billboarded = true;
-      bone.userData.billboardType = def.billboardType;
-    }
-  }
-
-  const bind = new Float32Array(bones.length * 3);
-  for (let i = 0; i < bones.length; ++i) {
-    bind[i * 3] = bones[i].position.x;
-    bind[i * 3 + 1] = bones[i].position.y;
-    bind[i * 3 + 2] = bones[i].position.z;
-  }
-
+  const { bones, rootBones, bindPositions } = buildBoneHierarchy(boneDefs);
   const skeleton = poseBindSkeleton(rootBones, bones);
 
-  return { bones, rootBones, bind, skeleton };
+  return { bones, rootBones, bind: bindPositions, skeleton };
 }
 
 /**
@@ -158,11 +131,15 @@ describe('applyLocalPose drives three to D . palette . D', () => {
    * produce a different matrix here, and none of them do on a single translated bone.
    */
   it('matches for a rotated parent with a pivoted child', () => {
-    const half = Math.SQRT1_2;
+    // Normalised: (0.3, 0.1, s, s) with s = SQRT1_2 has norm^2 = 1.1, which is a rotation AND a 1.1
+    // uniform scale -- the invariant survives it, but the fixture would not be modelling what its
+    // name says.
+    const q = new THREE.Quaternion(0.3, 0.1, Math.SQRT1_2, Math.SQRT1_2).normalize();
+    const key = [q.x, q.y, q.z, q.w];
     const defs = [
       boneDef({
         pivotPoint: [1, 2, 3],
-        rotation: block([[0.3, 0.1, half, half], [0.3, 0.1, half, half]]),
+        rotation: block([key, key]),
       }),
       boneDef({
         parentID: 0,
@@ -175,12 +152,28 @@ describe('applyLocalPose drives three to D . palette . D', () => {
     expectMatricesClose(renderedPalette(defs, 400, 1), expectedPalette(defs, 400, 1));
   });
 
+  /**
+   * Sampled at 500, NOT at 1000. The fixture sequence has `flags: 0` -> loops -> WRAP, and
+   * `length: 1000`, so `cursorMs(WRAP, 1000, 1000)` is `1000 % 1000` = 0 -- the FIRST key. Sampling
+   * at the period made this assert the identity palette on both sides, a strictly weaker duplicate
+   * of 'holds bind pose for an unanimated bone', and left non-uniform scale untested anywhere in the
+   * suite. Same boundary that invalidated the plan's own Task 9 fixture.
+   *
+   * The three components are deliberately distinct AND asymmetric (2, 1.5, 2.5), so a swap of any
+   * two `localTRS` scale slots fails rather than cancelling.
+   */
   it('matches for a scaled bone about a non-zero pivot', () => {
     const defs = [boneDef({
       pivotPoint: [5, -5, 2],
       scaling: block([[1, 1, 1], [3, 2, 4]]),
     })];
-    expectMatricesClose(renderedPalette(defs, 1000, 0), expectedPalette(defs, 1000, 0));
+    // At t=500 the linear sample is halfway: (2, 1.5, 2.5).
+    expectMatricesClose(renderedPalette(defs, 500, 0), expectedPalette(defs, 500, 0));
+
+    const scale = new THREE.Vector3().setFromMatrixScale(renderedPalette(defs, 500, 0));
+    expect(scale.x).toBeCloseTo(2, 6);
+    expect(scale.y).toBeCloseTo(1.5, 6);
+    expect(scale.z).toBeCloseTo(2.5, 6);
   });
 
   it('matches through a three-deep chain', () => {
@@ -198,7 +191,7 @@ describe('applyLocalPose drives three to D . palette . D', () => {
 describe('applyLocalPose and billboarded bones', () => {
   it('leaves a billboarded bone\'s rotation to applyBillboards', () => {
     const defs = [boneDef({
-      billboardType: 0,
+      billboarded: true, billboardType: 0,
       pivotPoint: [1, 1, 1],
       rotation: block([[0, 0, Math.SQRT1_2, Math.SQRT1_2], [0, 0, Math.SQRT1_2, Math.SQRT1_2]]),
     })];
@@ -220,7 +213,7 @@ describe('applyLocalPose and billboarded bones', () => {
 
   it('still applies translation and scale to a billboarded bone', () => {
     const defs = [boneDef({
-      billboardType: 0,
+      billboarded: true, billboardType: 0,
       translation: block([[8, 0, 0], [8, 0, 0]]),
       scaling: block([[2, 2, 2], [2, 2, 2]]),
     })];

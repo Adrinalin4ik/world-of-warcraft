@@ -21,6 +21,98 @@ import * as THREE from 'three';
  * Posing the roots first puts the hierarchy in model space, which is exactly the space the inverses
  * should be taken from.
  */
+/** Everything `buildBoneHierarchy` derives from a model's bone defs. */
+export interface BoneHierarchy {
+  /** File order -- index i pairs with bone def i, and with palette/localTRS slot i. */
+  bones: THREE.Bone[];
+  rootBones: THREE.Bone[];
+  billboards: THREE.Bone[];
+  /** Each bone's BIND offset from its parent, engine axes, 3 floats per bone. */
+  bindPositions: Float32Array;
+  /** True if any bone carries TRS keys or is billboarded -- the parser's own `bone.animated`. */
+  useSkinning: boolean;
+}
+
+/**
+ * Build a model's bone hierarchy from its parsed bone defs.
+ *
+ * Extracted from `M2#createSkeleton` so that `anim/__tests__/pose.test.ts` can exercise the REAL
+ * construction rather than a hand-mirrored copy of it. That matters more than it looks: the pose
+ * test's whole value is that it pins `applyLocalPose` against three's own palette, and a hand-copied
+ * fixture would drift away from production silently -- nothing would fail, the test would simply
+ * stop describing the code. `M2` is untestable directly (its constructor reaches for
+ * `collisionWorld` and `ObjectsManager`), so the seam had to move here.
+ *
+ * Two things worth naming, because both are load-bearing and neither is obvious:
+ *
+ *   * The pivot mirror `(-p0, -p1, p2)` is the engine-axis transform `D = diag(-1, -1, 1)` that the
+ *     geometry also gets, in one step rather than three. See `anim/axes.ts`.
+ *   * The parent subtraction walks the WHOLE ancestor chain, subtracting each ancestor's ALREADY
+ *     ADJUSTED position. Those telescope, so the result is `D(pivot_i) - D(pivot_parent)` -- the
+ *     offset from the immediate parent, which is what a three.js bone slot holds. It reads like a
+ *     bug and is not one.
+ */
+export function buildBoneHierarchy(boneDefs: any[]): BoneHierarchy {
+  const bones: THREE.Bone[] = [];
+  const rootBones: THREE.Bone[] = [];
+  const billboards: THREE.Bone[] = [];
+  let useSkinning = false;
+
+  for (let boneIndex = 0, len = boneDefs.length; boneIndex < len; ++boneIndex) {
+    const boneDef = boneDefs[boneIndex];
+    const bone = new THREE.Bone();
+
+    bones.push(bone);
+
+    // M2 bone positioning is mirrored on X and Y -- the same `D` the geometry takes.
+    const { pivotPoint } = boneDef;
+    bone.position.set(-pivotPoint[0], -pivotPoint[1], pivotPoint[2]);
+
+    if (boneDef.parentID > -1) {
+      const parent = bones[boneDef.parentID];
+      parent.add(bone);
+
+      // Telescopes to `position - parentPosition`; see the doc above.
+      let up: any = bone;
+      while ((up = up.parent)) {
+        bone.position.sub(up.position);
+      }
+    } else {
+      bone.userData.isRoot = true;
+      rootBones.push(bone);
+    }
+
+    // Enable skinning support on this M2 if we have bone animations.
+    if (boneDef.animated) {
+      useSkinning = true;
+    }
+
+    // Flag billboarded bones
+    if (boneDef.billboarded) {
+      bone.userData.billboarded = true;
+      bone.userData.billboardType = boneDef.billboardType;
+
+      billboards.push(bone);
+    }
+
+    // No per-bone track registration here. Bone TRS keyframes live once per model on
+    // `ModelAnim.boneDefs`, and `InstanceAnim#solveBones` reads them directly -- see the M2
+    // constructor for why registering them per clone was the original defect.
+  }
+
+  // Snapshot the bind offsets before anything poses them. `M2#applyPose` adds each frame's sampled
+  // translation onto these, so reading them back off `bone.position` later would compound.
+  const bindPositions = new Float32Array(bones.length * 3);
+  for (let i = 0, len = bones.length; i < len; ++i) {
+    const p = bones[i].position;
+    bindPositions[i * 3] = p.x;
+    bindPositions[i * 3 + 1] = p.y;
+    bindPositions[i * 3 + 2] = p.z;
+  }
+
+  return { bones, rootBones, billboards, bindPositions, useSkinning };
+}
+
 export function poseBindSkeleton(rootBones: THREE.Bone[], bones: THREE.Bone[]): THREE.Skeleton {
   for (let i = 0, len = rootBones.length; i < len; ++i) {
     rootBones[i].updateMatrixWorld(true);
