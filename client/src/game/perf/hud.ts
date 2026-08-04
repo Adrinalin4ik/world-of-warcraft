@@ -31,6 +31,15 @@ export interface PerfPayload {
   animPosed?: number;
   animSkipped?: number;
   animBonesSolved?: number;
+  /**
+   * Instances whose solved pose reached the bone hierarchy this frame.
+   *
+   * NOT a bone-texture upload count -- `counters.ts` explains why the two are unrelated on the
+   * route that works. Read against `animPosed`: the two differ by every instance that solved but
+   * had nothing to write (an unarmed instance with no allocated buffers), so a persistent gap
+   * between them is the signature of a population burning `solveBones` for no visible result.
+   */
+  animPosesApplied?: number;
   /** Instances whose UV / transparency / colour channels were sampled -- ungated by budget. */
   animMaterialsEvaluated?: number;
 }
@@ -100,12 +109,13 @@ function format(p: PerfPayload): string {
     p.animPosed !== undefined ||
     p.animSkipped !== undefined ||
     p.animBonesSolved !== undefined ||
+    p.animPosesApplied !== undefined ||
     p.animMaterialsEvaluated !== undefined;
 
   if (hasAnimCounters) {
     lines.push(
       `anim ${p.animPosed ?? 0}/${p.animResident ?? 0} posed  skipped ${p.animSkipped ?? 0}`,
-      `bones ${p.animBonesSolved ?? 0}  materials ${p.animMaterialsEvaluated ?? 0}`,
+      `bones ${p.animBonesSolved ?? 0}  applied ${p.animPosesApplied ?? 0}  materials ${p.animMaterialsEvaluated ?? 0}`,
     );
   }
 

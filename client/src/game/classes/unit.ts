@@ -4,6 +4,7 @@ import { Vector3 } from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import DBC from "../pipeline/dbc";
 import M2 from "../pipeline/m2";
+import { windowElapsedOrInstant } from "../pipeline/m2/anim/instance-anim";
 import type { Sequence } from "../pipeline/m2/anim/model-anim";
 import { worldClock } from "../pipeline/m2/anim/world-clock";
 import M2Blueprint from "../pipeline/m2/blueprint";
@@ -424,11 +425,12 @@ class Unit extends Entity {
     this.emit("model:change", this, this._model, m2);
     this._model = m2;
 
-    // The gait memo is keyed on nothing but the candidate list, so a new model would otherwise be
-    // posed with the OLD one's resolved sequence -- an object belonging to a different sequence
-    // table. This is the only event that can change what an id resolves to.
+    // A new model would otherwise be posed with the OLD one's resolved sequence -- an object
+    // belonging to a different sequence table. `locoMergeVersion` is reset alongside because
+    // versions are per model: the new model's counter starts at 0 and could match the memo's.
     this.locoCandidates = null;
     this.locoSeq = null;
+    this.locoMergeVersion = -1;
 
     // Arm the unit's standing sequence immediately. Deliberately NOT gated on
     // `m2.animated && m2.modelAnim.sequences.length > 0`: `instanceAnim` is null for exactly
@@ -492,7 +494,10 @@ class Unit extends Entity {
       if (seq.loops) {
         return;
       }
-      if (!interrupt && !inst.windowElapsed(worldClock.ms)) {
+      // `windowElapsedOrInstant`, not `windowElapsed`: a ZERO-LENGTH one-shot has no window that can
+      // ever elapse, so the bare form swallowed every re-request for it after the first, for ever.
+      // Same helper, same reason, as the ownership release in `updateLocomotion`.
+      if (!interrupt && !windowElapsedOrInstant(inst, seq, worldClock.ms)) {
         return;
       }
     }
@@ -799,12 +804,21 @@ class Unit extends Entity {
    *
    * A MISS is memoised too, as `locoCandidates` set with `locoSeq` null: a model with nothing
    * playable at all would otherwise pay the full scan every frame for ever, which is precisely the
-   * model that can least afford it. Invalidated in `set model`, the only thing that can change what
-   * an id resolves to.
+   * model that can least afford it.
+   *
+   * TWO things invalidate it, and `set model` is only one of them. The other is an external `.anim`
+   * MERGE, which is the whole point of `mergeExternal`: `resolve` returns different answers before
+   * and after one. A creature whose Run is external and Stand inline self-heals at the next gait
+   * change, but a creature with NO inline sequence memoises `locoSeq = null` on its first Stand
+   * frame and, being stationary, never re-resolves -- standing in bind pose for ever with correct
+   * merged keys in the table beside it. That is the same bug `InstanceAnim#armable` already killed
+   * by storing a VERSION instead of a boolean, and the same signal closes it here.
    */
   private locoCandidates: readonly number[] | null = null;
   private locoTarget: number = STAND;
   private locoSeq: Sequence | null = null;
+  /** `modelAnim.mergeVersion` the memo above was resolved at. -1 matches no real version. */
+  private locoMergeVersion = -1;
 
   /**
    * This frame's horizontal ground speed (yd/s) -- the gait threshold's only input.
@@ -911,7 +925,7 @@ class Unit extends Entity {
         this.externalSeq = null;
       } else if (owner.loops || owner.id === DEATH) {
         return;
-      } else if (owner.lengthMs > 0 && !inst.windowElapsed(worldClock.ms)) {
+      } else if (!windowElapsedOrInstant(inst, owner, worldClock.ms)) {
         return;
       } else {
         this.externalSeq = null;
@@ -922,7 +936,11 @@ class Unit extends Entity {
 
     // Step down the list, taking the first rung the model actually OWNS -- `resolve(id, false)`
     // withholds the Stand consolation precisely so "absent" is distinguishable from "present".
-    if (candidates !== this.locoCandidates) {
+    //
+    // Re-resolved on a MERGE as well as on a gait change: see `locoCandidates`. A version compare,
+    // not a listener -- one integer per unit per frame, and nothing to forget to unsubscribe.
+    const mergeVersion = modelAnim.mergeVersion;
+    if (candidates !== this.locoCandidates || mergeVersion !== this.locoMergeVersion) {
       let target = candidates[candidates.length - 1];
       let seq: Sequence | null = null;
       for (let i = 0; i < candidates.length; ++i) {
@@ -947,6 +965,7 @@ class Unit extends Entity {
       this.locoCandidates = candidates;
       this.locoTarget = target;
       this.locoSeq = seq;
+      this.locoMergeVersion = mergeVersion;
     }
 
     if (this.locoSeq === null) {

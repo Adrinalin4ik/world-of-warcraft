@@ -257,6 +257,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         animPosed: animCounters.posed,
         animSkipped: animCounters.skipped,
         animBonesSolved: animCounters.bonesSolved,
+        animPosesApplied: animCounters.posesApplied,
         animMaterialsEvaluated: animCounters.materialsEvaluated,
       });
 

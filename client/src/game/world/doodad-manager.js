@@ -1,9 +1,11 @@
 import { animCounters } from '../pipeline/m2/anim/counters';
 import { BoneBudget } from '../pipeline/m2/anim/gating';
+import { externalMergeEpoch } from '../pipeline/m2/anim/model-anim';
 import { poseGatedInstance } from '../pipeline/m2/anim/pose-gate';
 import { armDoodad, cycleDoodad } from '../pipeline/m2/anim/variation-cycle';
 import { worldClock } from '../pipeline/m2/anim/world-clock';
 import M2Blueprint from '../pipeline/m2/blueprint';
+import { beginAnimSection, endAnimSection } from '../perf/anim-section';
 import gameSettings from '../settings';
 
 class DoodadManager {
@@ -34,6 +36,11 @@ class DoodadManager {
     // whole chunk's worth of props on one phase -- which is the single-phase pile-up the stagger
     // exists to prevent, and a worse worst frame than not decimating at all.
     this.nextPoseSlot = 0;
+
+    // The global external-`.anim` merge epoch this manager last rescanned at. -1 rather than the
+    // live value so the first frame always scans -- at that point `doodads` is empty or nearly so,
+    // and starting in step would mean a merge that landed BEFORE the first frame was never adopted.
+    this.lastMergeEpoch = -1;
 
     this.boneBudget = new BoneBudget(gameSettings.m2.boneBudgetPerFrame);
 
@@ -158,16 +165,60 @@ class DoodadManager {
       // doodad whose only moving part is a billboarded bone: it would stop being turned to face the
       // camera AND stop getting the forced `updateMatrixWorld` in `World#updateDynamicMatrices`,
       // freezing it in bind orientation.
+      //
+      // The answer is NOT final, either: `doodad.animated` is `ModelAnim.classify()` over the
+      // INLINE slots only, so a model whose real authoring lives in sibling `.anim` files reads
+      // static here and becomes animated later, when the merge lands. `adoptMergedAnimations`
+      // below is what re-asks; without it such a doodad would stand in bind pose for ever with
+      // correct keys in the table beside it.
       if (doodad.animated || doodad.billboards.length > 0) {
-        this.enableDoodadAnimations(entry, doodad);
+        this.enableDoodadAnimations(entry.id, doodad);
       }
     });
   }
 
-  enableDoodadAnimations(entry, doodad) {
+  /**
+   * Re-ask the membership question for every STATIC doodad, but only when an external `.anim` merge
+   * has actually landed somewhere since the last time we asked.
+   *
+   * `loadDoodad` decides membership once, from `doodad.animated`, in the load callback. That is the
+   * right answer for the overwhelming majority of models and the wrong one for a model whose only
+   * real authoring is external: it classifies static, allocates no `InstanceAnim`, joins no
+   * per-frame set, and nothing on this path ever re-asks -- the exact silent failure
+   * `M2#syncMergedAnimation` exists to prevent, which until now only the unit path pulled on.
+   *
+   * Reachability in 3.3.5a is low (external ids are emotes and specials on creature models), but
+   * `externalAnims.ensure` runs for EVERY model from `M2Blueprint.load`, so the machinery is live
+   * here and the failure mode is the silent kind.
+   *
+   * COST. Gated on the global epoch (`externalMergeEpoch`), not on any per-doodad state: the steady
+   * state is one integer compare per frame, and the O(loaded doodads) walk happens only on frames a
+   * merge landed on. Called BEFORE the `animatedDoodads` walk in `animate` on purpose -- it inserts
+   * into that map, and a `Map` grown during its own `forEach` visits the new entries with a
+   * `poseFrame` and `poseSlot` assigned microseconds earlier.
+   */
+  adoptMergedAnimations() {
+    const epoch = externalMergeEpoch();
+    if (epoch === this.lastMergeEpoch) {
+      return;
+    }
+    this.lastMergeEpoch = epoch;
+
+    this.doodads.forEach((doodad, entryID) => {
+      if (this.animatedDoodads.has(entryID)) {
+        return;
+      }
+      // One boolean compare for a doodad that has nothing to adopt. Only ever flips one way.
+      if (doodad.syncMergedAnimation && doodad.syncMergedAnimation()) {
+        this.enableDoodadAnimations(entryID, doodad);
+      }
+    });
+  }
+
+  enableDoodadAnimations(entryID, doodad) {
     // Maintain separate entries for animated doodads to avoid excessive iterations on each
     // call to animate() during the render loop.
-    this.animatedDoodads.set(entry.id, doodad);
+    this.animatedDoodads.set(entryID, doodad);
 
     doodad.poseSlot = this.nextPoseSlot++;
 
@@ -271,6 +322,14 @@ class DoodadManager {
       return;
     }
 
+    // One of the three `'anim'` span call sites (the others are `World#animateEntities` and
+    // `WMOManager#animate`). `CpuSections` sums same-named spans within a frame, so the three
+    // report one `anim` total -- the number the plan's <= 2 ms gate is stated against.
+    beginAnimSection();
+
+    // Before the walk below, and inside the span: adopting a merge is animation work.
+    this.adoptMergedAnimations();
+
     // Clock-INDEXED, never delta-accumulated, and shared with every other animation consumer -- see
     // `anim/world-clock.ts` and `InstanceAnim`. `delta` is untouched here on purpose.
     const worldClockMs = worldClock.ms;
@@ -352,6 +411,8 @@ class DoodadManager {
         doodad.skeletonHelper.update();
       }
     });
+
+    endAnimSection();
   }
 
   /**

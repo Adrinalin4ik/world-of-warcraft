@@ -60,11 +60,43 @@ describe('PerfHud', () => {
     const hud = new PerfHud(document);
     hud.update(0, payload({
       animResident: 940, animPosed: 210, animSkipped: 730,
-      animBonesSolved: 5400, animMaterialsEvaluated: 260,
+      animBonesSolved: 5400, animPosesApplied: 197, animMaterialsEvaluated: 260,
     }));
 
     expect(document.body.textContent).toContain('anim 210/940 posed  skipped 730');
-    expect(document.body.textContent).toContain('bones 5400  materials 260');
+    expect(document.body.textContent).toContain('bones 5400  applied 197  materials 260');
+    hud.dispose();
+  });
+
+  /**
+   * `posesApplied` was incremented in `M2#applyPose` from the day the evaluator landed and read by
+   * nothing -- the oldest deferred item on the branch. Distinct values throughout (197 != 210 !=
+   * 5400 != 260) so the assertion cannot pass by reading a neighbouring field.
+   *
+   * MUTATION KILLED: routing `animPosesApplied` to `animPosed`, `animBonesSolved` or
+   * `animMaterialsEvaluated` in `format`, or dropping the field from `PerfPayload` again.
+   */
+  it('renders posesApplied as its own figure, distinct from posed and bones', () => {
+    const hud = new PerfHud(document);
+    hud.update(0, payload({
+      animResident: 940, animPosed: 210, animSkipped: 730,
+      animBonesSolved: 5400, animPosesApplied: 197, animMaterialsEvaluated: 260,
+    }));
+
+    expect(document.body.textContent).toContain('applied 197');
+    hud.dispose();
+  });
+
+  /**
+   * MUTATION KILLED: leaving `animPosesApplied` out of the `hasAnimCounters` disjunction -- the
+   * exact bug the test above this one already caught for `animResident`. A caller measuring only
+   * the apply count would otherwise get no rows at all.
+   */
+  it('renders the animation rows when posesApplied is the only counter supplied', () => {
+    const hud = new PerfHud(document);
+    hud.update(0, payload({ animPosesApplied: 88 }));
+
+    expect(document.body.textContent).toContain('applied 88');
     hud.dispose();
   });
 

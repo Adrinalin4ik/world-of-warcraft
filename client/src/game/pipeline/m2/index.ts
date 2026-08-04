@@ -22,6 +22,23 @@ import M2Material from './material';
 import { isParticleTemplate } from './particle/template';
 import Submesh from './submesh';
 
+// Module-level scratch for `applySphericalBillboard` / `applyCylindricalZBillboard`.
+//
+// These ran `camera.position.clone()`, three `new THREE.Vector3` and a `new THREE.Matrix4` PER
+// BILLBOARDED BONE PER FRAME, gated only on `cameraMoved` -- which is true on essentially every
+// frame a player is moving or turning. That was survivable while only terrain doodads paid it;
+// `WMO#animate` was an empty method before this branch, so the whole interior population of every
+// loaded building now pays it too, and a city is exactly where the worst-frame metric is read.
+//
+// Safe to share because the two methods are strictly sequential, allocate nothing that outlives the
+// call, and write their only durable output through `bone.rotation.setFromRotationMatrix` before
+// returning. Nothing here is retained across a call boundary.
+const billboardCamPos = new THREE.Vector3();
+const billboardForward = new THREE.Vector3();
+const billboardRight = new THREE.Vector3();
+const billboardUp = new THREE.Vector3();
+const billboardMatrix = new THREE.Matrix4();
+
 class M2 extends THREE.Group {
   static CacheManager = CacheManager;
   static cache = {};
@@ -811,20 +828,21 @@ class M2 extends THREE.Group {
       return;
     }
 
-    const camPos = this.worldToLocal(camera.position.clone());
+    // `copy` then `worldToLocal`, NOT `worldToLocal(clone())`: same result, no allocation.
+    const camPos = this.worldToLocal(billboardCamPos.copy(camera.position));
 
-    const modelForward = new THREE.Vector3(camPos.x, camPos.y, camPos.z);
+    const modelForward = billboardForward.set(camPos.x, camPos.y, camPos.z);
     modelForward.normalize();
 
     const modelVmEl = boneRoot.modelViewMatrix.elements;
-    const modelRight = new THREE.Vector3(modelVmEl[0], modelVmEl[4], modelVmEl[8]);
+    const modelRight = billboardRight.set(modelVmEl[0], modelVmEl[4], modelVmEl[8]);
     modelRight.multiplyScalar(-1);
 
-    const modelUp = new THREE.Vector3();
+    const modelUp = billboardUp.set(0, 0, 0);
     modelUp.crossVectors(modelForward, modelRight);
     modelUp.normalize();
 
-    const rotateMatrix = new THREE.Matrix4();
+    const rotateMatrix = billboardMatrix;
 
     rotateMatrix.set(
       modelForward.x,   modelRight.x,   modelUp.x,  0,
@@ -843,17 +861,17 @@ class M2 extends THREE.Group {
       return;
     }
 
-    const camPos = this.worldToLocal(camera.position.clone());
+    const camPos = this.worldToLocal(billboardCamPos.copy(camera.position));
 
-    const modelForward = new THREE.Vector3(camPos.x, camPos.y, camPos.z);
+    const modelForward = billboardForward.set(camPos.x, camPos.y, camPos.z);
     modelForward.normalize();
 
     const modelVmEl = boneRoot.modelViewMatrix.elements;
-    const modelRight = new THREE.Vector3(modelVmEl[0], modelVmEl[4], modelVmEl[8]);
+    const modelRight = billboardRight.set(modelVmEl[0], modelVmEl[4], modelVmEl[8]);
 
-    const modelUp = new THREE.Vector3(0, 0, 1);
+    const modelUp = billboardUp.set(0, 0, 1);
 
-    const rotateMatrix = new THREE.Matrix4();
+    const rotateMatrix = billboardMatrix;
 
     rotateMatrix.set(
       modelForward.x,   modelRight.x,   modelUp.x,  0,

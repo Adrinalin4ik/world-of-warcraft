@@ -1,3 +1,4 @@
+import { beginAnimSection, endAnimSection } from '../perf/anim-section';
 import { BoneBudget } from '../pipeline/m2/anim/gating';
 import WMO from '../pipeline/wmo';
 import gameSettings from '../settings';
@@ -233,12 +234,23 @@ class WMOManager {
     this.view.add(view);
   }
 
+  /**
+   * Third of the three `'anim'` span call sites -- `World#animateEntities` and
+   * `DoodadManager#animate` are the others, and `CpuSections` sums same-named spans within a frame
+   * so the three report one `anim` total. The span is opened HERE rather than inside `WMO#animate`
+   * so a city's worth of buildings costs one begin/end pair rather than one per building; the total
+   * would be identical either way.
+   */
   animate(delta, camera, cameraMoved) {
+    beginAnimSection();
+
     this.boneBudget.beginFrame();
 
     this.entries.forEach((wmo) => {
       wmo.animate(delta, camera, cameraMoved, this.boneBudget);
     });
+
+    endAnimSection();
   }
 
   /**

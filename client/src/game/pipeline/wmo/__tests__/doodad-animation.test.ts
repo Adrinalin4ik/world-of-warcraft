@@ -5,9 +5,10 @@
  * @jest-environment jsdom
  */
 import WMO from '../index';
+import M2 from '../../m2';
 import { animCounters } from '../../m2/anim/counters';
 import { InstanceAnim } from '../../m2/anim/instance-anim';
-import { ModelAnim } from '../../m2/anim/model-anim';
+import { externalMergeEpoch, ModelAnim } from '../../m2/anim/model-anim';
 import { worldClock } from '../../m2/anim/world-clock';
 
 /** `0x20` = keyframes inline in the .m2. Without it `ModelAnim` quarantines the sequence as
@@ -55,7 +56,7 @@ describe('WMO#enableDoodadAnimations', () => {
     const wmo = registrar();
     const d = doodad({ poseFrame: 99 });
 
-    wmo.enableDoodadAnimations({ id: 4127 }, d);
+    wmo.enableDoodadAnimations(4127, d);
 
     expect(wmo.animatedDoodads.get(4127)).toBe(d);
     // Kills: dropping the `poseFrame = -1` reset. A recycled doodad carrying a stale frame index
@@ -75,9 +76,9 @@ describe('WMO#enableDoodadAnimations', () => {
     const wmo = registrar();
     const ds = [doodad(), doodad(), doodad()];
 
-    wmo.enableDoodadAnimations({ id: 4127 }, ds[0]);
-    wmo.enableDoodadAnimations({ id: 9302 }, ds[1]);
-    wmo.enableDoodadAnimations({ id: 9311 }, ds[2]);
+    wmo.enableDoodadAnimations(4127, ds[0]);
+    wmo.enableDoodadAnimations(9302, ds[1]);
+    wmo.enableDoodadAnimations(9311, ds[2]);
 
     expect(ds.map((d) => d.poseSlot)).toEqual([0, 1, 2]);
   });
@@ -89,7 +90,7 @@ describe('WMO#enableDoodadAnimations', () => {
     worldClock.reset();
     worldClock.advance(2);
 
-    wmo.enableDoodadAnimations({ id: 1 }, d);
+    wmo.enableDoodadAnimations(1, d);
 
     expect(d.instanceAnim.current).not.toBeNull();
     expect(d.instanceAnim.armedAtMs).toBe(worldClock.ms);
@@ -105,7 +106,7 @@ describe('WMO#enableDoodadAnimations', () => {
     const wmo = registrar();
     const d = doodad({ animated: false, instanceAnim: null, billboards: [{}] });
 
-    expect(() => wmo.enableDoodadAnimations({ id: 7 }, d)).not.toThrow();
+    expect(() => wmo.enableDoodadAnimations(7, d)).not.toThrow();
     expect(wmo.animatedDoodads.get(7)).toBe(d);
     expect(d.poseSlot).toBe(0);
   });
@@ -147,7 +148,12 @@ const member = (over: any = {}) => {
 const animator = (members: any[]) => {
   const wmo: any = {
     views: { root: {} },
+    doodads: new Map<number, any>(members.map((m, i) => [i, m])),
     animatedDoodads: new Map<number, any>(members.map((m, i) => [i, m])),
+    // `animate` opens with the merge-adoption rescan; every member here is already registered, so
+    // it is a no-op, but the method has to exist for the loop under test to reach its own body.
+    lastMergeEpoch: -1,
+    adoptMergedAnimations: (WMO as any).prototype.adoptMergedAnimations,
     animate: (WMO as any).prototype.animate,
   };
   return wmo;
@@ -228,5 +234,169 @@ describe('WMO#animate loop ordering', () => {
     expect(d.materialCalls).toBe(1);
     expect(d.poseFrame).toBe(worldClock.frameIndex);
     expect(animCounters.posed).toBe(1);
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// `WMO#adoptMergedAnimations` -- the static -> animated flip.
+//
+// `loadDoodad` decides membership ONCE, from `doodad.animated`, which is `classify()` over INLINE
+// slots only. A model authored entirely in sibling `.anim` files reads static there. Until this
+// existed, `M2#syncMergedAnimation` had exactly one caller (the unit path), so such a doodad joined
+// no per-frame set and nothing ever re-asked -- bind pose for ever, with correct merged keys in the
+// table beside it, and no error anywhere.
+// -------------------------------------------------------------------------------------------------
+
+/** Every sequence quarantined, plus the bone refs a real `mergeExternal` re-reads. */
+const externalOnlyModelAnim = () => new ModelAnim({
+  animations: [animation({ id: 0, flags: 0, length: 1000 })],
+  sequences: [],
+  bones: [{
+    parentID: -1, flags: 0, keyBoneID: -1, pivotPoint: [0, 0, 0],
+    translation: {
+      interpolationType: 1, globalSequenceID: -1, valueTypeName: 'float32array3',
+      tracks: [{
+        animationIndex: 0, timestamps: [3197923783], values: [[9, 9, 9]],
+        timestampsRef: { count: 2, offset: 0 }, valuesRef: { count: 2, offset: 8 },
+      }],
+    },
+    rotation: { interpolationType: 1, globalSequenceID: -1, tracks: [] },
+    scaling: { interpolationType: 1, globalSequenceID: -1, tracks: [] },
+  }],
+} as any);
+
+const externalPayload = () => {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, 0, true);
+  view.setUint32(4, 1000, true);
+  [7, 0, 0, 8, 1, 2].forEach((v, i) => view.setFloat32(8 + i * 4, v, true));
+  return buffer;
+};
+
+/** A placement of an external-only model: static at load, with the real flip method on it. */
+const externalDoodad = (m: any) => ({
+  poseSlot: -1,
+  poseFrame: 0,
+  billboards: [] as any[],
+  animated: false,
+  modelAnim: m,
+  instanceAnim: null as any,
+  syncMergedAnimation: (M2 as any).prototype.syncMergedAnimation,
+});
+
+const adopter = (entries: Array<[number, any]>) => ({
+  doodads: new Map<number, any>(entries),
+  animatedDoodads: new Map<number, any>(),
+  nextPoseSlot: 0,
+  lastMergeEpoch: externalMergeEpoch(),
+  adoptMergedAnimations: (WMO as any).prototype.adoptMergedAnimations,
+  enableDoodadAnimations: (WMO as any).prototype.enableDoodadAnimations,
+});
+
+describe('WMO#adoptMergedAnimations', () => {
+  beforeEach(() => worldClock.reset());
+
+  /**
+   * MUTATION KILLED: deleting the `adoptMergedAnimations()` call from `WMO#animate`, or dropping
+   * the `syncMergedAnimation()` re-ask from inside it. Both leave the doodad out of
+   * `animatedDoodads` for ever -- the silent failure this closes.
+   *
+   * The assertions are on MEMBERSHIP and on the allocated instance, not on a pose: an unarmed
+   * instance samples cursor 0 and reads bind pose, so a pose assertion would prove nothing here.
+   */
+  it('admits a static doodad once its external .anim merges', () => {
+    const m = externalOnlyModelAnim();
+    const d = externalDoodad(m);
+    const wmo = adopter([[7, d]]);
+
+    // Before the merge there is nothing to adopt, whatever the epoch says.
+    wmo.lastMergeEpoch = -1;
+    wmo.adoptMergedAnimations();
+    expect(wmo.animatedDoodads.has(7)).toBe(false);
+    expect(d.instanceAnim).toBeNull();
+
+    expect(m.mergeExternal(m.sequences[0], externalPayload())).toBe(true);
+
+    wmo.adoptMergedAnimations();
+
+    expect(wmo.animatedDoodads.get(7)).toBe(d);
+    expect(d.animated).toBe(true);
+    expect(d.instanceAnim).not.toBeNull();
+    // Registered properly, not just inserted: an undefined phase slot makes `shouldPose` NaN and
+    // the doodad is never posed at all, silently.
+    expect(d.poseSlot).toBe(0);
+  });
+
+  /**
+   * The same flip, driven through `WMO#animate` rather than by calling the rescan directly.
+   *
+   * MUTATION KILLED: deleting `this.adoptMergedAnimations()` from `WMO#animate`. The rescan can be
+   * perfectly correct and still never run, which is precisely the shape of the bug it fixes -- the
+   * unit path had `syncMergedAnimation` and the doodad paths simply never called it.
+   *
+   * `visible: false` so the doodad stops at the draw gate: this test is about membership and the
+   * residency cycle, and a fully-driven loop would need pose plumbing that proves nothing here.
+   */
+  it('adopts the flip from inside the per-frame loop, not only when called directly', () => {
+    const m = externalOnlyModelAnim();
+    const d: any = externalDoodad(m);
+    d.visible = false;
+
+    const wmo: any = animator([]);
+    wmo.doodads = new Map<number, any>([[7, d]]);
+    wmo.nextPoseSlot = 0;
+    wmo.enableDoodadAnimations = (WMO as any).prototype.enableDoodadAnimations;
+    wmo.lastMergeEpoch = externalMergeEpoch();
+
+    wmo.animate(0.016, camera, false, null);
+    expect(wmo.animatedDoodads.has(7)).toBe(false);
+
+    expect(m.mergeExternal(m.sequences[0], externalPayload())).toBe(true);
+
+    wmo.animate(0.016, camera, false, null);
+
+    expect(wmo.animatedDoodads.get(7)).toBe(d);
+    expect(d.instanceAnim).not.toBeNull();
+  });
+
+  /**
+   * MUTATION KILLED: dropping the epoch gate, which turns this into an O(loaded doodads) walk in
+   * the per-frame path -- in a city, the whole interior population of every building, every frame,
+   * for a flip that happens a handful of times per zone load.
+   */
+  it('does not walk the doodad map on a frame where nothing merged', () => {
+    const m = externalOnlyModelAnim();
+    const d = externalDoodad(m);
+    const spy = jest.fn();
+    d.syncMergedAnimation = spy;
+
+    const wmo = adopter([[7, d]]);
+    wmo.adoptMergedAnimations();
+    wmo.adoptMergedAnimations();
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * MUTATION KILLED: re-registering a doodad that is already in the set -- which would hand it a
+   * SECOND `poseSlot` and re-`armDoodad` it, resetting its clock to now. A looping doodad would
+   * visibly snap back to its first keyframe every time any model anywhere merged an `.anim`.
+   */
+  it('leaves an already-registered doodad alone', () => {
+    const m = externalOnlyModelAnim();
+    const d = externalDoodad(m);
+    const wmo = adopter([[7, d]]);
+
+    expect(m.mergeExternal(m.sequences[0], externalPayload())).toBe(true);
+    wmo.adoptMergedAnimations();
+    expect(d.poseSlot).toBe(0);
+
+    const other = externalOnlyModelAnim();
+    expect(other.mergeExternal(other.sequences[0], externalPayload())).toBe(true);
+    wmo.adoptMergedAnimations();
+
+    expect(d.poseSlot).toBe(0);
+    expect(wmo.nextPoseSlot).toBe(1);
   });
 });

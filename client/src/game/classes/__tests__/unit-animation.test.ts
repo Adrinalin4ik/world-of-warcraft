@@ -104,6 +104,39 @@ describe('Unit#setAnimation re-entry guard', () => {
     expect(u.model.instanceAnim.armedAtMs).toBe(worldClock.ms);
   });
 
+  /**
+   * THE MIRROR of the release-side bug the locomotion task already fixed, and the reason both sites
+   * now share `windowElapsedOrInstant`.
+   *
+   * A ZERO-LENGTH one-shot has `periodMs = 0`, and `windowElapsed` answers FALSE for that for ever
+   * (deliberately -- see its doc). So `setAnimation`'s bare `!inst.windowElapsed(...)` swallowed
+   * every re-request after the first: the clip could be played once and never again for the life of
+   * the model, silently. Degenerate zero-length sequences occur in shipped data.
+   *
+   * MUTATION KILLED: reverting this site to `inst.windowElapsed(worldClock.ms)`, and equally any
+   * "fix" that folds the instant case into `windowElapsed` itself (which would make `cycleDoodad`
+   * re-arm a zero-length doodad sequence every frame off the shared rng -- covered separately in
+   * `variation-cycle.test.ts`).
+   *
+   * The clock is advanced first so `armedAtMs` genuinely differs: an assertion against an
+   * unadvanced clock would pass on a mutant that never re-armed at all.
+   */
+  it('replays a zero-length one-shot rather than swallowing the request for ever', () => {
+    const u = unit([animation({ id: 15, flags: ONE_SHOT, length: 0 })]);
+
+    u.setAnimation(15);
+    const first = u.model.instanceAnim.armedAtMs;
+    expect(u.model.instanceAnim.current.id).toBe(15);
+    // The window this site used to wait on, which can never elapse.
+    expect(u.model.instanceAnim.windowElapsed(worldClock.ms)).toBe(false);
+
+    worldClock.advance(0.4);
+    u.setAnimation(15);
+
+    expect(u.model.instanceAnim.armedAtMs).toBe(worldClock.ms);
+    expect(u.model.instanceAnim.armedAtMs).not.toBe(first);
+  });
+
   /** Kills: ignoring `interrupt`, which is what re-triggers a one-shot still mid-play. */
   it('leaves a one-shot mid-window alone unless interrupted', () => {
     const u = unit([animation({ id: 15, flags: ONE_SHOT, length: 1000 })]);
@@ -238,6 +271,7 @@ function locoUnit(animations: any[], isPlayer: boolean = true) {
     locoCandidates: null,
     locoTarget: 0,
     locoSeq: null,
+    locoMergeVersion: -1,
     emitted: [] as any[],
     emit(...args: any[]) { u.emitted.push(args); },
     setAnimation: proto.setAnimation,
@@ -831,5 +865,114 @@ describe('Unit#updateLocomotion non-looping gait', () => {
     expect(u.model.instanceAnim.armedAtMs).toBe(armedAt);
     // 1.6 s into a 1 s loop: cursor 600, and deliberately not 1000 (the WRAP boundary reads 0).
     expect(u.model.instanceAnim.cursor(worldClock.ms)).toBeCloseTo(600);
+  });
+});
+
+/**
+ * The gait memo across an external `.anim` merge.
+ *
+ * `resolve` returns DIFFERENT ANSWERS before and after a merge -- that is the entire point of
+ * `mergeExternal` -- but the memo was keyed on the candidate-list reference alone. The bone fixture
+ * carries the `timestampsRef` / `valuesRef` pair a real merge re-reads, and its merged first key is
+ * `[7, 0, 0]` rather than the origin, so nothing here can pass by sampling bind pose.
+ */
+describe('Unit#updateLocomotion across an external merge', () => {
+  /** Every sequence quarantined (`flags: 0`), so `resolve` returns null until the merge lands. */
+  const externalOnlyAnimations = () => [animation({ id: 0, flags: 0, length: 1000 })];
+
+  const externalBone = () => ({
+    parentID: -1, flags: 0, keyBoneID: -1, pivotPoint: [0, 0, 0],
+    translation: {
+      interpolationType: 1, globalSequenceID: -1, valueTypeName: 'float32array3',
+      tracks: [{
+        animationIndex: 0, timestamps: [3197923783], values: [[9, 9, 9]],
+        timestampsRef: { count: 2, offset: 0 }, valuesRef: { count: 2, offset: 8 },
+      }],
+    },
+    rotation: { interpolationType: 1, globalSequenceID: -1, tracks: [] },
+    scaling: { interpolationType: 1, globalSequenceID: -1, tracks: [] },
+  });
+
+  const payload = () => {
+    const buffer = new ArrayBuffer(32);
+    const view = new DataView(buffer);
+    view.setUint32(0, 0, true);
+    view.setUint32(4, 1000, true);
+    [7, 0, 0, 8, 1, 2].forEach((v, i) => view.setFloat32(8 + i * 4, v, true));
+    return buffer;
+  };
+
+  /** `locoUnit`, but with a real bone so `mergeExternal` has something to splice into. */
+  function mergeableUnit() {
+    const u = locoUnit(gaits());
+    const modelAnim = new ModelAnim({
+      animations: externalOnlyAnimations(),
+      sequences: [],
+      bones: [externalBone()],
+    } as any);
+    u.model = { modelAnim, instanceAnim: new InstanceAnim(modelAnim) };
+    // `set model` is a real setter on `Unit` and this fixture is a plain object, so reset the memo
+    // by hand exactly as the setter does.
+    u.locoCandidates = null;
+    u.locoSeq = null;
+    u.locoMergeVersion = -1;
+    return u;
+  }
+
+  /**
+   * THE PERMANENT FREEZE. A creature with NO inline sequence memoises `locoSeq = null` on its first
+   * Stand frame and, being stationary, never changes gait bucket -- so a memo keyed on the
+   * candidate list alone never re-resolves, and the unit stands in bind pose for the rest of the
+   * session with correct merged keys in the table beside it. This is the identical bug class
+   * `InstanceAnim#armable` already killed by storing a version instead of a boolean.
+   *
+   * MUTATION KILLED: dropping `|| mergeVersion !== this.locoMergeVersion` from the memo gate. The
+   * mutant leaves `inst.current` null for ever; the correct code arms Stand on the next frame.
+   *
+   * The unit is deliberately STATIONARY -- a moving one self-heals at the next gait change, which
+   * is exactly why the stationary case is the one that had to be tested.
+   */
+  it('re-resolves a memoised miss once the merge lands, without a gait change', () => {
+    const u = mergeableUnit();
+
+    u.updateLocomotion(0.4);
+    expect(u.model.instanceAnim.current).toBeNull();
+    // The miss is memoised: the candidate list is now recorded, so a list-keyed memo is closed.
+    expect(u.locoCandidates).not.toBeNull();
+    expect(u.locoSeq).toBeNull();
+
+    expect(u.model.modelAnim.mergeExternal(u.model.modelAnim.sequences[0], payload())).toBe(true);
+
+    worldClock.advance(0.4);
+    u.updateLocomotion(0.4);
+
+    expect(u.model.instanceAnim.current).not.toBeNull();
+    expect(u.model.instanceAnim.current.id).toBe(0);
+  });
+
+  /**
+   * The other half: the memo must still HOLD while nothing has merged, or every unit pays a full
+   * linear scan of its sequence table per candidate every frame -- which is the cost the memo
+   * exists to avoid, and this branch is what a naive "just always re-resolve" fix would destroy.
+   *
+   * MUTATION KILLED: removing the memo gate entirely (`if (true)`), and re-stamping
+   * `locoMergeVersion` outside the recompute branch in a way that makes the compare vacuous.
+   * `resolve` is spied on: it is called for the first frame's walk and never again.
+   */
+  it('still skips the candidate walk on frames where nothing merged', () => {
+    const u = locoUnit(gaits());
+    const spy = jest.spyOn(u.model.modelAnim, 'resolve');
+
+    u.updateLocomotion(0.4);
+    const afterFirst = spy.mock.calls.length;
+    expect(afterFirst).toBeGreaterThan(0);
+
+    for (let f = 0; f < 5; ++f) {
+      worldClock.advance(0.4);
+      u.updateLocomotion(0.4);
+    }
+
+    expect(spy.mock.calls.length).toBe(afterFirst);
+    spy.mockRestore();
   });
 });

@@ -8,6 +8,7 @@ import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
 import { collisionDebugView } from "../collision/debug-view";
+import { beginAnimSection, endAnimSection } from "../perf/anim-section";
 import { animCounters } from "../pipeline/m2/anim/counters";
 import { poseGatedInstance } from "../pipeline/m2/anim/pose-gate";
 import { worldClock } from "../pipeline/m2/anim/world-clock";
@@ -511,6 +512,13 @@ export default class World extends EventEmitter {
     const frameIndex = worldClock.frameIndex;
     const camPos = camera.position;
 
+    // One of the three call sites of the `'anim'` CPU span -- the others are `DoodadManager#animate`
+    // and `WMOManager#animate`. `CpuSections` SUMS spans of the same name within a frame, so the
+    // three report one total, which is the number the plan's <= 2 ms acceptance gate is stated
+    // against. `world.animate` is emphatically not a substitute: it also holds visibility, MapLight,
+    // the sky system, the portal flood and the collision debug overlay.
+    beginAnimSection();
+
     this.entities.forEach(entity => {
       const { model } = entity;
 
@@ -625,5 +633,7 @@ export default class World extends EventEmitter {
       //   model.skeletonHelper.update();
       // }
     });
+
+    endAnimSection();
   }
 }

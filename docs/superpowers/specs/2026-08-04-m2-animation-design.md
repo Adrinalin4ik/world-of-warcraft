@@ -7,6 +7,27 @@ and colour channels — including external `.anim` sequences.
 
 ---
 
+## 0. Corrected by measurement
+
+Nine claims in the body below were disproved during execution. They are listed here rather than
+edited away: a design claim that measurement killed is worth as much as one it confirmed, and the
+body is the record of what was believed at approval time. Where the two disagree, **this section and
+the code it points at are the truth.**
+
+| # | Claim in the body | What is actually true | Where the truth lives |
+|---|---|---|---|
+| 1 | §3.1 — "decompression lives here" (the evaluator decompresses `comp-fixed16` rotations) | The parser already decompresses. All 203,524 measured components arrived in range; the evaluator does none. | [`tracks.ts:179-180`](../../../client/src/game/pipeline/m2/anim/tracks.ts), `blizzardry` `comp-fixed16.js` |
+| 2 | §3.2 — `resolve` follows the alias chain *and then* `nextAnimationID` | `nextAnimationID` is never read anywhere in the client. `resolve` follows the alias chain, then falls back to the first inline sequence. An absent animation yields Stand, not the authored successor. | `ModelAnim#resolve`, [`model-anim.ts`](../../../client/src/game/pipeline/m2/anim/model-anim.ts) |
+| 3 | §3.2 — the `0x04` ignore-parent-rotation bone flag is honoured | Not implemented. `solveBone` premultiplies the parent matrix unconditionally. `0x01` (ignore-parent-translation) and `0x02` (ignore-parent-scale) are likewise unimplemented. | `InstanceAnim#solveBone`, [`instance-anim.ts`](../../../client/src/game/pipeline/m2/anim/instance-anim.ts) |
+| 4 | §3.3 "blend state", and §5.2 item 9 (blending capped to near instances) | **No blending exists.** `blendTimeMs` is parsed and carried on `Sequence` and read by nothing. Sequence changes are hard cuts. | `Sequence.blendTimeMs`, [`model-anim.ts`](../../../client/src/game/pipeline/m2/anim/model-anim.ts) |
+| 5 | §4.1 — "the evaluator writes into `skeleton.boneMatrices` directly" | Impossible in three 0.185, for two independent reasons. The evaluator writes per-bone **local** TRS into the three.js bone hierarchy and lets `Skeleton#update()` build the palette. | [`pose.ts:9-25`](../../../client/src/game/pipeline/m2/anim/pose.ts) |
+| 6 | §5.1 item 4 — drop the per-animated-doodad `updateMatrixWorld` | Void, and it followed from claim 5. That walk is the only thing that accumulates the solved local transforms into `bone.matrixWorld`; without it every doodad stands in bind pose. It is *gated* on `poseFrame` instead. | [`world/index.ts:435-438`](../../../client/src/game/world/index.ts) |
+| 7 | §6 — "a large share of creature locomotion and combat is external" | False for 3.3.5a. External ids there are emotes and specials. Wolf Stand/Walk/Run are all inline; murloc has **zero** external sequences. The merge path matters for correctness, not for volume. | `hasInlineData`, [`model-anim.ts`](../../../client/src/game/pipeline/m2/anim/model-anim.ts) |
+| 8 | §6 — external sequences "parse as empty", so playing one is harmless | False, and materially more dangerous: they parse as **noise**. 302 bone-tracks on `wolf.m2` carry timestamps past their own sequence length. This is why external slots are *quarantined* (`inline: false`) rather than merely left alone. | `Sequence.inline`, `hasInlineData` |
+| 9 | §6 — external `.anim` files are "parsed in the existing worker pool" | `mergeExternalAnim` parses on the **main thread**. Fetch is async; the parse is not. Acceptable at 3.3.5a volumes (see #7) and a known cost, not a design intent. | [`external-anim-data.ts:122`](../../../client/src/game/pipeline/m2/anim/external-anim-data.ts) |
+
+---
+
 ## 1. Problem
 
 Nothing in the world animates. The animation system is fully built and completely inert.

@@ -297,6 +297,26 @@ const MAX_ALIAS_HOPS = 8;
  * of thousands of tracks across a couple of hundred torches. Keyframes live here, once, and
  * placements hold nothing but a clock.
  */
+/**
+ * How many external `.anim` merges have succeeded ANYWHERE, across every loaded model.
+ *
+ * `mergeVersion` answers "has THIS model's playable shape changed?", which is the right question
+ * once you already hold the model. The doodad managers hold thousands of placements and no cheap
+ * way to know which of their models just gained data -- they need the cheaper question "is it worth
+ * asking at all this frame?", and this is it. One integer compare per manager per frame in the
+ * steady state; the O(loaded doodads) rescan behind it runs only on the frames a merge actually
+ * landed on, which over a whole zone load is a handful.
+ *
+ * A free function rather than an exported `let`: an ES module binding read across a Jest module
+ * registry is a snapshot in some transpile targets, and a counter that silently stops advancing
+ * would reintroduce exactly the bug this exists to close.
+ */
+let mergeEpochCounter = 0;
+
+export function externalMergeEpoch(): number {
+  return mergeEpochCounter;
+}
+
 export class ModelAnim {
   readonly sequences: Sequence[] = [];
   readonly globalSequenceDurations: number[];
@@ -450,6 +470,9 @@ export class ModelAnim {
     // AFTER the flip, and driven by the live table rather than by `flags` -- see `classify`.
     this.animated = classify(this.data, this.slotInline);
     ++this.mergeVersion;
+    // The GLOBAL counterpart, read by the doodad managers to decide whether a static->animated
+    // rescan is worth running this frame. See `externalMergeEpoch`.
+    ++mergeEpochCounter;
     return true;
   }
 

@@ -43,7 +43,10 @@ describe('SharedRng', () => {
 
   /**
    * Locks fidelity to MSVC rand(). The LCG is state = state * 214013 + 2531011; result = (state >> 16) & 0x7fff.
-   * With seed 1: state = 1 * 214013 + 2531011 = 2745024 = 0x29E800; >> 16 = 0x29 = 41; & 0x7fff = 41.
+   * With seed 1: state = 1 * 214013 + 2531011 = 2745024 = 0x29E2C0; >> 16 = 0x29 = 41; & 0x7fff = 41.
+   * (The hex was written 0x29E800 here for a long time. 2745024 and the asserted 41 were always
+   * right; only the transcription was wrong, and the high byte -- the part the shift keeps -- is
+   * 0x29 either way, which is why nothing caught it.)
    */
   it('matches the reference MSVC rand() sequence on the first draw', () => {
     const rng = new SharedRng(1);

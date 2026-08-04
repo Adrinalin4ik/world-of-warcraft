@@ -167,7 +167,18 @@ export class InstanceAnim {
     return cursorMs(this.law, worldClockMs - this.armedAtMs, this.periodMs);
   }
 
-  /** Has the current one-shot or loop reached the end of its play window? */
+  /**
+   * Has the current one-shot or loop reached the end of its play window?
+   *
+   * `periodMs <= 0` answers FALSE, and that is load-bearing rather than an oversight: this is also
+   * the cursor's "is there a timeline here at all" test, and a zero-length sequence answering true
+   * would make `cycleDoodad` re-arm -- redrawing from the shared variation rng -- every frame for as
+   * long as the doodad stayed loaded.
+   *
+   * A caller asking the ONE-SHOT question ("may I hand the body back / restart this?") wants the
+   * other reading, where no window means nothing to wait for. That is `windowElapsedOrInstant`
+   * below; do not fold it in here.
+   */
   windowElapsed(worldClockMs: number): boolean {
     if (this.current === null || this.periodMs <= 0) {
       return false;
@@ -268,4 +279,31 @@ export class InstanceAnim {
       out.premultiply(this.matrices[def.parentID]);
     }
   }
+}
+
+/**
+ * "This sequence's play window is over, OR it never had one." The one-shot predicate.
+ *
+ * ONE helper for BOTH one-shot sites, because they are the same question and were answered
+ * differently: `Unit#updateLocomotion` spelled the degenerate case out (`lengthMs > 0 && ...`) while
+ * `Unit#setAnimation` did not, so a zero-length one-shot could be played exactly once and then never
+ * replayed -- the request was swallowed for ever by a window that can never elapse.
+ *
+ * Zero-length sequences are real: an alias row, an authoring stub, and any `.anim`-backed sequence
+ * whose `lengthMs` the file records as 0. `windowElapsed` cannot answer this itself -- see its doc
+ * for what its `false` protects.
+ *
+ * `seq` is a parameter rather than read off `inst.current` so the caller states WHICH sequence it is
+ * asking about. Both sites have already established `inst.current === seq`; passing it makes that
+ * explicit and keeps the helper honest if one day they have not.
+ */
+export function windowElapsedOrInstant(
+  inst: InstanceAnim,
+  seq: Sequence,
+  worldClockMs: number,
+): boolean {
+  if (seq.lengthMs <= 0) {
+    return true;
+  }
+  return inst.windowElapsed(worldClockMs);
 }

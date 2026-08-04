@@ -5,6 +5,7 @@ import ContentQueue from '../../utils/content-queue';
 import M2Blueprint from '../m2/blueprint';
 import { animCounters } from '../m2/anim/counters';
 import { poseGatedInstance } from '../m2/anim/pose-gate';
+import { externalMergeEpoch } from '../m2/anim/model-anim';
 import { armDoodad, cycleDoodad } from '../m2/anim/variation-cycle';
 import { worldClock } from '../m2/anim/world-clock';
 import { attachPerObjectLighting } from '../m2/material/per-object-light';
@@ -47,6 +48,10 @@ class WMO {
     // reset by `unload()`: a reused id would collide with a doodad still holding the old slot, and
     // the counter is monotonic precisely so it cannot.
     this.nextPoseSlot = 0;
+
+    // Global external-`.anim` merge epoch this building last rescanned at. See
+    // `adoptMergedAnimations`; -1 so the first animated frame always asks.
+    this.lastMergeEpoch = -1;
 
     this.doodadSet = [];
 
@@ -278,8 +283,12 @@ class WMO {
     // Mirrors `DoodadManager#loadDoodad`: posing and billboarding are separate reasons to be in the
     // per-frame set, so both are asked. A doodad whose only moving part is a billboarded bone has
     // nothing to sample (`animated` is false) but still has to be turned to face the camera.
+    //
+    // And, as there, the answer is not final: `animated` is `classify()` over INLINE slots only, so
+    // a model authored entirely in sibling `.anim` files reads static here and flips later.
+    // `adoptMergedAnimations` re-asks, gated on the global merge epoch.
     if (doodad.animated || doodad.billboards.length > 0) {
-      this.enableDoodadAnimations(doodadEntry, doodad);
+      this.enableDoodadAnimations(doodadEntry.id, doodad);
     }
 
     this.doodads.set(doodadEntry.id, doodad);
@@ -304,8 +313,33 @@ class WMO {
    * repeated once per building does that just as well as one long global range. A shared counter
    * would need plumbing through `WMOManager` for no measurable gain.
    */
-  enableDoodadAnimations(doodadEntry, doodad) {
-    this.animatedDoodads.set(doodadEntry.id, doodad);
+  /**
+   * The interior counterpart of `DoodadManager#adoptMergedAnimations` -- see there for the failure
+   * this closes and for why the gate is the GLOBAL merge epoch rather than any per-doodad state.
+   *
+   * Per WMO rather than per manager, which costs one integer compare per loaded building per frame
+   * and keeps `poseSlot` allocation on this building's own dense counter, exactly as
+   * `enableDoodadAnimations` requires.
+   */
+  adoptMergedAnimations() {
+    const epoch = externalMergeEpoch();
+    if (epoch === this.lastMergeEpoch) {
+      return;
+    }
+    this.lastMergeEpoch = epoch;
+
+    this.doodads.forEach((doodad, doodadEntryID) => {
+      if (this.animatedDoodads.has(doodadEntryID)) {
+        return;
+      }
+      if (doodad.syncMergedAnimation && doodad.syncMergedAnimation()) {
+        this.enableDoodadAnimations(doodadEntryID, doodad);
+      }
+    });
+  }
+
+  enableDoodadAnimations(doodadEntryID, doodad) {
+    this.animatedDoodads.set(doodadEntryID, doodad);
 
     doodad.poseSlot = this.nextPoseSlot++;
     doodad.poseFrame = -1;
@@ -355,6 +389,9 @@ class WMO {
     this.doodads = new Map();
     this.animatedDoodads = new Map();
     this.doodadRefs = new Map();
+    // The rescan memo describes a doodad population that no longer exists. Left in step, a WMO
+    // reloaded after a merge landed would never re-ask the flip question for its new doodads.
+    this.lastMergeEpoch = -1;
 
     this.views.root = null;
     this.views.groups = new Map();
@@ -678,6 +715,11 @@ class WMO {
     if (!this.views.root) {
       return;
     }
+
+    // Static -> animated flips from an external `.anim` merge, same as `DoodadManager`. Before the
+    // walk below, because it inserts into the map that walk iterates. One integer compare in the
+    // steady state -- see `adoptMergedAnimations`.
+    this.adoptMergedAnimations();
 
     const worldClockMs = worldClock.ms;
     const frameIndex = worldClock.frameIndex;

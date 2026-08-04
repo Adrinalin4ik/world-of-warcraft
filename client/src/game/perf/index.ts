@@ -1,3 +1,4 @@
+import { setAnimSectionSink } from './anim-section';
 import { CpuSections } from './cpu-sections';
 import { FrameStats } from './frame-stats';
 import { GpuTimer } from './gpu-timer';
@@ -5,6 +6,7 @@ import { PerfHud, PerfPayload } from './hud';
 
 export { FRAME_BUDGET_MS, FrameStats } from './frame-stats';
 export { CpuSections } from './cpu-sections';
+export { ANIM_SECTION, beginAnimSection, endAnimSection, setAnimSectionSink } from './anim-section';
 export { GpuTimer } from './gpu-timer';
 export { PerfHud, HUD_REPAINT_MS } from './hud';
 export type { FrameSummary } from './frame-stats';
@@ -25,6 +27,8 @@ export interface SceneCounters {
   animPosed: number;
   animSkipped: number;
   animBonesSolved: number;
+  /** Instances whose solved pose was written into the bone hierarchy. See `counters.ts`. */
+  animPosesApplied: number;
   /** Instances whose material channels were sampled. Neither decimated nor bone-budgeted. */
   animMaterialsEvaluated: number;
 }
@@ -44,6 +48,9 @@ export class PerfMonitor {
 
   constructor(doc: Document = document) {
     this.hud = new PerfHud(doc);
+    // Hand the animation loops a way to open the `'anim'` span without any of them knowing about
+    // this object. See `anim-section.ts` for why this is a registration and not a second monitor.
+    setAnimSectionSink(this.sections);
   }
 
   /** Called once the WebGL context exists. Safe to skip: GPU timing then reads `n/a`. */
@@ -83,6 +90,7 @@ export class PerfMonitor {
   }
 
   dispose(): void {
+    setAnimSectionSink(null);
     this.hud.dispose();
   }
 }

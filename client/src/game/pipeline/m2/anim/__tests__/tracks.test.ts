@@ -94,8 +94,13 @@ describe('sampleScalar', () => {
   });
 
   it('holds the last key on duplicate timestamps', () => {
-    // When timestamps[k0] === timestamps[k0+1], fraction returns 0, so we hold at va.
-    // This is the correct behavior for authors who keyframe the same value twice.
+    // NOT the duplicate-timestamp branch, despite the name -- that attribution was wrong. For this
+    // fixture `bracket` returns k0 = 2, so ta = 100 and tb = 200: the two bracketing timestamps
+    // DIFFER. The zero fraction comes from `tMs === ta` (100 === 100), which is the ordinary
+    // "landed exactly on a key" case, and the result is `va` = the SECOND of the two keys at t=100.
+    // What this does still pin is the choice of which duplicate wins: bracket lands past the pair,
+    // so the later value (9) is held, not the earlier one (5). Correct for authors who keyframe the
+    // same timestamp twice -- the last write is what they meant.
     expect(sampleScalar(track([0, 100, 100, 200], [0, 5, 9, 12]), false, 100, 0)).toBe(9);
   });
 });
