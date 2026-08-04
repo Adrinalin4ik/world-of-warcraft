@@ -92,7 +92,7 @@ const GAIT_STAND: readonly number[] = [STAND];
  *
  * A gait request never takes the body away from the gait driver, whoever sent it. Without this, a
  * wire-sent Stand -- which the peer handler does send, and which the server sends constantly --
- * would latch `externalAnimation` on a LOOPING sequence, and a looping owner never releases: the
+ * would latch `externalSeq` onto a LOOPING sequence, and a looping owner never releases: the
  * unit would stand still for the rest of the session no matter how far it walked. The reference
  * draws the same line, between its `Special` / `Mode` states and the gait itself
  * (`select.rs:280+`).
@@ -147,9 +147,13 @@ class Unit extends Entity {
    * zero -- the same freeze the re-arm guards exist to prevent, arriving through the other door.
    *
    * Nothing is lost by skipping them: the wire already carries their gait, chosen by the very same
-   * `updateLocomotion` running on the peer's own machine. Server creatures are NOT wire-driven in
-   * this sense -- they move on splines this client integrates itself, frame by frame, and their
-   * displacement is real.
+   * `updateLocomotion` running on the peer's own machine.
+   *
+   * NOT LATCHED FOR EVER -- `setMovingData` clears it. Spline-driven creatures are the opposite
+   * case: this client integrates their path itself, frame by frame, so their displacement is a real
+   * measurement and locomotion must run. A creature that took one snapped position update and then
+   * received a spline would otherwise be locomotion-silent for the rest of its life. Whichever kind
+   * of motion arrived most recently is the one that decides.
    */
   public wireDriven: boolean = false;
 
@@ -469,10 +473,8 @@ class Unit extends Entity {
     // Stand with nothing to say why.
     this.currentAnimationId = id;
 
-    // A STATE request takes the body from the gait driver; a GAIT request never does, whoever sent
-    // it. This one line is also what releases locomotion's own arm, since its target is by
-    // construction a gait id. See `externalAnimation` and `isGaitId`.
-    this.externalAnimation = !isGaitId(id);
+    // NOTE: ownership is NOT latched here. It is latched in `startAnimation`, which is the only
+    // place that knows what was actually armed. See `externalSeq`.
 
     if (!this.model) return;
 
@@ -520,6 +522,16 @@ class Unit extends Entity {
 
     inst.arm(seq, worldClock.ms);
     this.currentAnimationId = id;
+
+    // LATCH OWNERSHIP HERE, not at the request, and only when the arm LANDED ON THE REQUESTED
+    // STATE. `resolve` falls back to the first inline sequence -- normally Stand, a LOOP -- for any
+    // id the model does not own, and most models own few state ids. Latching on the request would
+    // therefore hand ownership of a looping Stand to a state that never arrived, and a looping
+    // owner never releases: the unit would stand still for the rest of the session. `seq.id === id`
+    // is exactly the "did we get what we asked for" test, and it needs no caller knowledge --
+    // locomotion's target is always a gait id, so it clears the latch rather than setting it.
+    this.externalSeq = (!isGaitId(id) && seq.id === id) ? seq : null;
+
     this.emit("animation:play", id, repetitions);
   }
 
@@ -742,37 +754,53 @@ class Unit extends Entity {
   private locoTracking = false;
 
   /**
-   * An externally-armed STATE animation owns this unit's body; the gait pick must stand off.
+   * The externally-armed STATE sequence that owns this unit's body; the gait pick must stand off.
    *
-   * Set by `setAnimation` for any id that is not a gait (`isGaitId`), cleared for any id that is.
-   * That single rule covers both directions: locomotion's own arm always names a gait and so never
-   * latches, and a wire-sent Stand is understood as a gait request rather than as a state that
-   * would suppress walking for the rest of the session. This is the thin version of the reference's
-   * `Special` / `Mode` states, which likewise outrank the gait (`select.rs:280+`).
+   * A SEQUENCE, not a boolean. Holding the object is what lets the release check ask "is my owner
+   * still the thing that is playing?" -- so anything re-arming underneath the latch (the wire, a
+   * replay from the `model` setter, a future SMSG state) drops it automatically, with no bookkeeping
+   * at the other end.
    *
-   * Without it, ANYTHING armed from outside is stomped by the next frame's gait pick: the wire
-   * handler at `network/entity/entity.ts:52`, `jump()`, and every future SMSG animation. Death is
-   * the case that makes it non-negotiable -- Death is a ONE-SHOT, so it would play through, its
-   * window would elapse, and the corpse would stand up. A looping emote (dance, sit, the `Dead` 6
-   * loop) would not even last one frame.
+   * Latched in `startAnimation` and ONLY when the arm landed on the requested state
+   * (`!isGaitId(id) && seq.id === id`). Both halves matter:
+   * - `seq.id === id` -- `resolve` falls back to the first inline sequence, normally Stand, for any
+   *   id the model does not own, and most models own few state ids. Latching on the REQUEST would
+   *   hand ownership of a looping Stand to a state that never arrived, and a looping owner never
+   *   releases: the unit would stand for the rest of the session.
+   * - `!isGaitId(id)` -- Stand is a loop, so a wire-sent Stand would latch the same permanent
+   *   freeze. A gait request is a gait request whoever sends it. This is also what releases
+   *   locomotion's own arm, since its target is by construction a gait id.
+   *
+   * This is the thin version of the reference's `Special` / `Mode` states, which likewise outrank
+   * the gait (`select.rs:280+`). Without it, ANYTHING armed from outside is stomped by the next
+   * frame's gait pick: the wire handler at `network/entity/entity.ts`, `jump()`, and every future
+   * SMSG animation. Death is the case that makes it non-negotiable -- Death is a ONE-SHOT, so it
+   * would play through, its window would elapse, and the corpse would stand up.
    *
    * Release, checked at the top of `updateLocomotion`:
-   * - nothing actually armed -> release (the request lost to a missing model or an empty table);
+   * - something else is armed now -> release, the latch is stale;
    * - a LOOP -> never releases. A looping emote holds until something else is requested, which is
    *   what "sit until told otherwise" means.
-   * - `DEATH` -> never releases, one-shot or not (`driver.rs:351` arms it once and holds);
+   * - `DEATH` -> never releases, one-shot or not. `driver.rs:351`: "Death overrides every state
+   *   (a corpse doesn't transition)."
    * - any other one-shot -> holds for its window, then releases. An attack swing or a jump gives
-   *   the body back when it finishes.
+   *   the body back when it finishes. A NON-POSITIVE length counts as already elapsed:
+   *   `InstanceAnim#windowElapsed` returns false for `periodMs <= 0`, so a zero-length state would
+   *   otherwise never release -- the same permanent freeze by a different route.
    */
-  private externalAnimation = false;
+  private externalSeq: Sequence | null = null;
 
   /**
    * Memo for the candidate walk: the list picked last frame and what it resolved to.
    *
    * `resolve` is a linear scan of the sequence table per candidate, and the gait bucket is the same
    * on the overwhelming majority of frames -- a unit runs for seconds at a time. The lists are
-   * module constants, so the hit test is one reference comparison. Invalidated on `set model`,
-   * which is the only thing that can change what an id resolves to.
+   * module constants, so the hit test is one reference comparison.
+   *
+   * A MISS is memoised too, as `locoCandidates` set with `locoSeq` null: a model with nothing
+   * playable at all would otherwise pay the full scan every frame for ever, which is precisely the
+   * model that can least afford it. Invalidated in `set model`, the only thing that can change what
+   * an id resolves to.
    */
   private locoCandidates: readonly number[] | null = null;
   private locoTarget: number = STAND;
@@ -874,18 +902,19 @@ class Unit extends Entity {
       return;
     }
 
-    // An externally-armed animation OWNS the body until it gives it back. See `externalAnimation`
-    // for the release rules and for why Death needs a case of its own.
-    if (this.externalAnimation) {
-      const owner = inst.current;
-      if (owner === null) {
-        this.externalAnimation = false;
-      } else if (owner.loops || this.currentAnimationId === DEATH) {
+    // An externally-armed STATE owns the body until it gives it back. See `externalSeq` for the
+    // release rules, and for why Death and a zero-length clip each need a case of their own.
+    const owner = this.externalSeq;
+    if (owner !== null) {
+      if (inst.current !== owner) {
+        // Something re-armed underneath the latch. Whatever is playing now is not ours to hold.
+        this.externalSeq = null;
+      } else if (owner.loops || owner.id === DEATH) {
         return;
-      } else if (!inst.windowElapsed(worldClock.ms)) {
+      } else if (owner.lengthMs > 0 && !inst.windowElapsed(worldClock.ms)) {
         return;
       } else {
-        this.externalAnimation = false;
+        this.externalSeq = null;
       }
     }
 
@@ -893,7 +922,7 @@ class Unit extends Entity {
 
     // Step down the list, taking the first rung the model actually OWNS -- `resolve(id, false)`
     // withholds the Stand consolation precisely so "absent" is distinguishable from "present".
-    if (candidates !== this.locoCandidates || this.locoSeq === null) {
+    if (candidates !== this.locoCandidates) {
       let target = candidates[candidates.length - 1];
       let seq: Sequence | null = null;
       for (let i = 0; i < candidates.length; ++i) {
@@ -909,24 +938,26 @@ class Unit extends Entity {
       if (seq === null) {
         // Nothing on the list is owned. Take whatever `resolve` falls back to for the last rung --
         // the first inline sequence -- rather than freezing in bind pose. Null only for a model with
-        // nothing playable at all (empty table, or every sequence quarantined as external), and
-        // that is memoised as a miss so the walk is retried rather than caching a null.
+        // nothing playable at all (empty table, or every sequence quarantined as external).
         seq = modelAnim.resolve(target);
-        if (seq === null) {
-          return;
-        }
       }
 
+      // Stored whether or not it resolved: a MISS is memoised too, so a model with nothing playable
+      // stops paying for the scan. `set model` is what re-opens the question.
       this.locoCandidates = candidates;
       this.locoTarget = target;
       this.locoSeq = seq;
+    }
+
+    if (this.locoSeq === null) {
+      return;
     }
 
     if (this.locoSeq.loops && inst.current === this.locoSeq) {
       return;
     }
 
-    // `setAnimation` clears `externalAnimation` for us: the target is always a gait id.
+    // `startAnimation` clears the ownership latch for us: the target is always a gait id.
     this.setAnimation(this.locoTarget);
   }
 
@@ -1191,6 +1222,12 @@ class Unit extends Entity {
   }
 
   setMovingData(currentMovingTime: number, points: Vector3[], totalMovingTime?: number) {
+    // A spline is per-frame motion this client integrates itself, so displacement becomes a real
+    // measurement again and locomotion must resume. Without this, a creature that took one snapped
+    // `MSG_MOVE_*` position before its spline arrived would stay locomotion-silent for life. See
+    // `wireDriven`: the most recent kind of motion decides.
+    this.wireDriven = false;
+
     this.currentMovingTime = currentMovingTime;
     if (totalMovingTime) {
       this.totalMovingTime = totalMovingTime;

@@ -72,7 +72,13 @@ export class PlayerMovementHandler extends EventEmitter {
     console.log('handleMovement obj', pack)
 
     let unit = this.game.world.entities.get(pack.guid);
-    if (unit) {
+    if (unit && !unit.isPlayer) {
+      // A SNAPPED position at message cadence, with no spline to integrate between messages. So
+      // `Unit#updateLocomotion` must not measure this unit's displacement: it would read the quiet
+      // frames as standing and the catch-up frames as teleports, flip-flopping the gait at packet
+      // rate. Cleared again by `setMovingData` if a spline later takes over. See `Unit#wireDriven`.
+      unit.wireDriven = true;
+
       unit.position.set(pack.x, pack.y, pack.z)
       unit.rotation.z = pack.o;
     }

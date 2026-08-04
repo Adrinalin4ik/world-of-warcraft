@@ -234,7 +234,7 @@ function locoUnit(animations: any[], isPlayer: boolean = true) {
     locoPrevX: 0,
     locoPrevY: 0,
     locoTracking: false,
-    externalAnimation: false,
+    externalSeq: null,
     locoCandidates: null,
     locoTarget: 0,
     locoSeq: null,
@@ -521,7 +521,7 @@ describe('Unit#updateLocomotion speed source', () => {
  *
  * The gait pick runs every frame, so without an ownership rule it replaces anything armed from
  * outside -- the wire handler at `network/entity/entity.ts:52`, `jump()`, and every future SMSG
- * animation -- on the next frame. `Unit#externalAnimation` is the thin form of the reference's
+ * animation -- on the next frame. `Unit#externalSeq` is the thin form of the reference's
  * `Special` / `Mode` states, which likewise outrank the gait (`select.rs:280+`).
  */
 describe('Unit#updateLocomotion external-animation ownership', () => {
@@ -622,14 +622,15 @@ describe('Unit#updateLocomotion external-animation ownership', () => {
     const u = locoUnit([animation({ id: 0, flags: 0 }), animation({ id: 1, flags: 0 })]);
 
     u.setAnimation(1);
-    expect(u.externalAnimation).toBe(true);
     expect(u.model.instanceAnim.current).toBeNull();
+    // Nothing armed means nothing to own -- the latch is set by the ARM, not by the request.
+    expect(u.externalSeq).toBeNull();
 
     u.move.horizVel.set(7, 0, 0);
     worldClock.advance(0.4);
     expect(() => u.updateLocomotion(0.4)).not.toThrow();
 
-    expect(u.externalAnimation).toBe(false);
+    expect(u.externalSeq).toBeNull();
   });
 
   /**
@@ -644,11 +645,127 @@ describe('Unit#updateLocomotion external-animation ownership', () => {
     const u = locoUnit(gaits());
 
     u.setAnimation(0);
-    expect(u.externalAnimation).toBe(false);
+    expect(u.externalSeq).toBeNull();
 
     u.move.horizVel.set(7, 0, 0);
     worldClock.advance(0.4);
     u.updateLocomotion(0.4);
+
+    expect(u.model.instanceAnim.current.id).toBe(5);
+  });
+
+  /**
+   * ROUND-2 IMPORTANT 1, and the common case the previous test did NOT cover.
+   *
+   * `resolve` falls back to the first inline sequence -- normally Stand, a LOOP -- for any id the
+   * model does not own, and most models own few state ids. Latching on the REQUEST rather than on
+   * what was ARMED therefore hands ownership of a looping Stand to a state that never arrived, and
+   * a looping owner never releases: the unit stands still for the rest of the session.
+   *
+   * Kills: latching in `setAnimation` off the id (`externalAnimation = !isGaitId(id)`), and any
+   * latch that omits the `seq.id === id` test. Both leave the unit on Stand; the correct code walks
+   * away at Run. The distinction is only visible with the unit MOVING, which is why it runs.
+   */
+  it('does not take ownership when the requested state fell back to Stand', () => {
+    // Id 55 is absent, so `setAnimation(55)` resolves to slot 0 -- Stand, a loop.
+    const u = locoUnit(gaits());
+
+    u.setAnimation(55);
+    expect(u.model.instanceAnim.current.id).toBe(0);
+    expect(u.externalSeq).toBeNull();
+
+    u.move.horizVel.set(7, 0, 0);
+    worldClock.advance(0.4);
+    u.updateLocomotion(0.4);
+
+    expect(u.model.instanceAnim.current.id).toBe(5);
+  });
+
+  /**
+   * ROUND-2 IMPORTANT 2. `InstanceAnim#windowElapsed` returns FALSE when `periodMs <= 0`, so a
+   * zero-length non-looping state never elapses and a release rule phrased only in terms of
+   * `windowElapsed` never fires -- the same permanent freeze by a different route. Degenerate
+   * zero-length sequences do occur in shipped data (`Rabbit.m2`'s only sequence is one).
+   *
+   * Kills: dropping the `owner.lengthMs > 0` guard from the release check. The unit holds the
+   * zero-length swing for ever; the correct code releases on the next frame and runs.
+   */
+  it('releases a zero-length external one-shot instead of freezing on it', () => {
+    const u = locoUnit([...gaits(), animation({ id: 16, flags: ONE_SHOT, length: 0 })]);
+
+    u.setAnimation(16);
+    expect(u.model.instanceAnim.current.id).toBe(16);
+    expect(u.model.instanceAnim.windowElapsed(worldClock.ms)).toBe(false);
+
+    u.move.horizVel.set(7, 0, 0);
+    worldClock.advance(0.4);
+    u.updateLocomotion(0.4);
+
+    expect(u.model.instanceAnim.current.id).toBe(5);
+    expect(u.externalSeq).toBeNull();
+  });
+
+  /**
+   * The reason the latch holds a SEQUENCE rather than a boolean: it goes stale by itself when the
+   * thing it points at is no longer what is playing, with no bookkeeping at the other end.
+   *
+   * The reachable case is a MODEL SWAP, which is normal for a unit -- `set displayId` streams a new
+   * M2 and the `model` setter installs a fresh `InstanceAnim` whose `current` is null. The latch
+   * still points at a sequence belonging to the OLD model's table. Death is the worst version: the
+   * setter's replay of `currentAnimationId` cannot arm it if the new model lacks it, so a latch
+   * keyed on anything but the live sequence would suppress locomotion on the NEW model for ever.
+   *
+   * Kills: a boolean latch, or any release rule that does not compare against `inst.current`. The
+   * mutant holds Stand on the new model; the correct code notices `inst.current !== owner` and runs.
+   */
+  it('drops a stale latch when the model is swapped underneath it', () => {
+    const u = locoUnit([...gaits(), animation({ id: 1, flags: ONE_SHOT, length: 1000 })]);
+
+    u.setAnimation(1);
+    const dead = u.externalSeq;
+    expect(dead).not.toBeNull();
+    expect(u.model.instanceAnim.current).toBe(dead);
+
+    // A new model streams in. Its instance has never armed, and the latch is now dangling.
+    const fresh = locoUnit(gaits());
+    u.model = fresh.model;
+    expect(u.model.instanceAnim.current).toBeNull();
+    expect(u.externalSeq).toBe(dead);
+
+    u.move.horizVel.set(7, 0, 0);
+    worldClock.advance(0.4);
+    u.updateLocomotion(0.4);
+
+    expect(u.externalSeq).toBeNull();
+    expect(u.model.instanceAnim.current.id).toBe(5);
+  });
+});
+
+describe('Unit#wireDriven lifecycle', () => {
+  /**
+   * ROUND-2 IMPORTANT 3. `wireDriven` must not latch for life: a creature that took one snapped
+   * `MSG_MOVE_*` position before its spline arrived would be locomotion-silent for ever after.
+   * A spline IS per-frame motion this client integrates itself, so displacement becomes a real
+   * measurement again.
+   *
+   * Kills: setting `wireDriven` without ever clearing it. The unit stays on Stand; the correct code
+   * measures its displacement again and runs.
+   */
+  it('setMovingData hands a spline creature back to locomotion', () => {
+    const u = locoUnit(gaits(), false);
+    u.setMovingData = (Unit as any).prototype.setMovingData;
+    u.wireDriven = true;
+
+    // Snapped wire position, then a spline takes over.
+    u.updateLocomotion(0.016);
+    u.setMovingData(0, []);
+    expect(u.wireDriven).toBe(false);
+
+    // Now a real, integrated per-frame displacement: 0.16 yd in 16 ms is 10 yd/s.
+    u.updateLocomotion(0.016);
+    u.view.position.set(0.16, 0, 0);
+    worldClock.advance(0.4);
+    u.updateLocomotion(0.016);
 
     expect(u.model.instanceAnim.current.id).toBe(5);
   });
