@@ -258,10 +258,16 @@ class Unit extends Entity {
 
     this.view.add(m2);
 
-    // Auto-play animation index 0 in unit model, if present
-    // TODO: Properly manage unit animations
-    if (m2.animated && m2.modelAnim.sequences.length > 0) {
-      /*
+    // Task 16: arm the unit's starting sequence here, through `m2.instanceAnim`, gated on
+    // `m2.animated && m2.modelAnim.sequences.length > 0`.
+    //
+    // The gate is left OUT rather than kept around an empty body, because it no longer means what
+    // it used to: the old `m2.animations.length` was the mixer's clip count -- one clip per
+    // sequence PLUS one per global sequence -- whereas `modelAnim.sequences` is the sequence table
+    // alone. Task 16 should index `modelAnim.sequences` / go through `modelAnim.resolve(animId)`,
+    // and the raw indices below are file slots into that table.
+    //
+    /*
         penguin
         0 - fly 1
         1 - fly 2
@@ -282,21 +288,17 @@ class Unit extends Entity {
         16 - idle 4
       */
 
-      /*
-       arthas
-       0 - idle
-       1 - run slow
-       2 - run straight
-       15 - jump
-       16 - grounding
-       31 - fall
-       38 - rotate
-       133 - backward
-      */
-      // Task 16: arm the unit's starting sequence through `m2.instanceAnim`.
-      // m2.animationManager.playAnimation(this.currentAnimationIndex);
-      // m2.animationManager.playAllSequences();
-    }
+    /*
+     arthas
+     0 - idle
+     1 - run slow
+     2 - run straight
+     15 - jump
+     16 - grounding
+     31 - fall
+     38 - rotate
+     133 - backward
+    */
 
     this.emit("model:change", this, this._model, m2);
     this._model = m2;

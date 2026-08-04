@@ -210,7 +210,6 @@ class M2Material extends THREE.ShaderMaterial {
   };
 
   m2: M2;
-  eventListeners = [];
   layer;
   skins = {
     skin1: null,
@@ -232,8 +231,6 @@ class M2Material extends THREE.ShaderMaterial {
     // }
 
     this.m2 = m2;
-
-    this.eventListeners = [];
 
     this.layer = def.layer;
 
@@ -490,13 +487,6 @@ class M2Material extends THREE.ShaderMaterial {
     return path;
   }
 
-  detachEventListeners() {
-    // this.eventListeners.forEach((entry) => {
-    //   const [target, event, listener] = entry;
-    //   target.removeListener(event, listener);
-    // });
-  }
-
   updateSkinTextures(skin1, skin2, skin3) {
     this.skins.skin1 = skin1;
     this.skins.skin2 = skin2;
@@ -507,9 +497,6 @@ class M2Material extends THREE.ShaderMaterial {
 
   dispose() {
     super.dispose();
-
-    this.detachEventListeners();
-    this.eventListeners = [];
 
     this.textures.forEach((texture) => {
       TextureLoader.unload(texture);

@@ -9,6 +9,14 @@ const keyedBlock = () => ({
   animated: true,
 });
 
+/** A block holding exactly one key, of whatever value the caller names. */
+const singleKeyBlock = (value: any) => ({
+  interpolationType: 1,
+  globalSequenceID: -1,
+  tracks: [{ animationIndex: 0, timestamps: [0], values: [value] }],
+  animated: true,
+});
+
 const bone = (over: any = {}) => ({
   parentID: -1, flags: 0, keyBoneID: -1, pivotPoint: [0, 0, 0],
   translation: emptyBlock(), rotation: emptyBlock(), scaling: emptyBlock(),
@@ -60,6 +68,73 @@ describe('classify', () => {
 
   it('is true for a model animated only through vertex-colour alpha', () => {
     expect(classify(data({ vertexColorAnimations: [{ color: emptyBlock(), alpha: keyedBlock() }] }))).toBe(true);
+  });
+
+  // A single key equal to the channel's identity is the default written out as a keyframe, not
+  // animation. The parser applies this rule to transparency
+  // (`wow-data-parser/m2/index.js:196-204`) and `classify()` has to agree, or mass-placed static
+  // models join the per-frame posing set for a guaranteed no-op. Measured on
+  // `world_generic_passivedoodads_particleemitters_bubblesb.m2` and `..._lavasplashparticle.m2`,
+  // both of which are `canInstance` and carry exactly one transparency key of 1.0.
+  describe('the lone-identity-key rule', () => {
+    it('rejects a single fully-opaque transparency key', () => {
+      expect(classify(data({ transparencyAnimations: [singleKeyBlock(1.0)] }))).toBe(false);
+    });
+
+    it('accepts a single transparency key that is NOT fully opaque', () => {
+      expect(classify(data({ transparencyAnimations: [singleKeyBlock(0.5)] }))).toBe(true);
+    });
+
+    it('accepts two transparency keys even when both are fully opaque', () => {
+      const twoOpaque = {
+        interpolationType: 1, globalSequenceID: -1, animated: true,
+        tracks: [{ animationIndex: 0, timestamps: [0, 100], values: [1.0, 1.0] }],
+      };
+      expect(classify(data({ transparencyAnimations: [twoOpaque] }))).toBe(true);
+    });
+
+    it('counts keys ACROSS sequence tracks, not per track', () => {
+      const oneKeyEachInTwoSequences = {
+        interpolationType: 1, globalSequenceID: -1, animated: true,
+        tracks: [
+          { animationIndex: 0, timestamps: [0], values: [1.0] },
+          { animationIndex: 1, timestamps: [0], values: [1.0] },
+        ],
+      };
+      expect(classify(data({ transparencyAnimations: [oneKeyEachInTwoSequences] }))).toBe(true);
+    });
+
+    it('rejects a single white vertex-colour key', () => {
+      expect(classify(data({
+        vertexColorAnimations: [{ color: singleKeyBlock([1.0, 1.0, 1.0]), alpha: emptyBlock() }],
+      }))).toBe(false);
+    });
+
+    it('accepts a single NON-white vertex-colour key', () => {
+      expect(classify(data({
+        vertexColorAnimations: [{ color: singleKeyBlock([1.0, 0.0, 0.0]), alpha: emptyBlock() }],
+      }))).toBe(true);
+    });
+
+    it('rejects a single fully-opaque vertex-colour alpha key', () => {
+      expect(classify(data({
+        vertexColorAnimations: [{ color: emptyBlock(), alpha: singleKeyBlock(1.0) }],
+      }))).toBe(false);
+    });
+
+    it('treats a malformed key with no value as animated, matching the parser', () => {
+      const noValue = {
+        interpolationType: 1, globalSequenceID: -1, animated: true,
+        tracks: [{ animationIndex: 0, timestamps: [0], values: [] }],
+      };
+      expect(classify(data({ transparencyAnimations: [noValue] }))).toBe(true);
+    });
+
+    it('does NOT apply to bones -- a lone bone key is still animation', () => {
+      expect(classify(data({
+        bones: [bone({ translation: singleKeyBlock([0, 0, 0]) })],
+      }))).toBe(true);
+    });
   });
 });
 

@@ -263,14 +263,14 @@ class WMO {
     // World position is only valid once placeDoodad has updated this instance's world matrix.
     this.foldDoodadLighting(doodadEntry, doodad);
 
-    // if (doodad.animated) {
+    // Task 13 revives this. Mirror `DoodadManager#loadDoodad`: the membership test is
+    // `doodad.animated || doodad.billboards.length > 0` (posing and billboarding are separate
+    // reasons to be in the per-frame set), and arming goes through `anim/variation-cycle.armDoodad`
+    // against `doodad.instanceAnim`, not a per-model manager.
+    //
+    // if (doodad.animated || doodad.billboards.length > 0) {
     //   this.animatedDoodads.set(doodadEntry.id, doodad);
-
-    //   if (doodad.modelAnim.sequences.length > 0) {
-    //     // TODO: Do WMO doodads have more than one animation? If so, which one should play?
-    //     doodad.animations.playAnimation(0);
-    //     doodad.animations.playAllSequences();
-    //   }
+    //   armDoodad(doodad.instanceAnim, worldClockMs);
     // }
 
     this.doodads.set(doodadEntry.id, doodad);

@@ -16,7 +16,6 @@ class M2 extends THREE.Group {
   static CacheManager = CacheManager;
   static cache = {};
 
-  eventListeners= [];
   path: string;
   data: any;
   skinData: any;
@@ -67,14 +66,23 @@ class M2 extends THREE.Group {
   textureAnimations: THREE.Object3D;
   vertexColorAnimationValues = [];
 
-  constructor(path, data, skinData, instance = null) {
+  /**
+   * `sharedModelAnim` is a SEPARATE parameter from `instance` on purpose.
+   *
+   * `instance` carries the geometry/batch sharing, and `clone()` sets it to null unless
+   * `data.canInstance` -- which the parser makes false the moment ANY bone is animated or
+   * billboarded (`wow-data-parser/m2/index.js:169-179`). Hanging `modelAnim` off `instance` would
+   * therefore have shared it for exactly the models that need it least, and rebuilt a sequence
+   * table plus a whole-model `classify()` walk per placement for every bone-animated model -- the
+   * opposite of the point. Geometry sharing and animation-data sharing are answers to different
+   * questions and are now passed separately.
+   */
+  constructor(path, data, skinData, instance = null, sharedModelAnim: ModelAnim | null = null) {
     super();
 
     this.visible = false;
 
     this.matrixAutoUpdate = false;
-
-    this.eventListeners = [];
 
     this.name = path.split('\\').slice(-1).pop();
     this.path = path;
@@ -85,8 +93,13 @@ class M2 extends THREE.Group {
     this.canInstance = data.canInstance;
 
     // `this.animated` is assigned below, from `ModelAnim.classify(data)` rather than the parser's
-    // own `data.animated` getter. The two agree in substance (both ask "does any channel hold
-    // keys?"), but the evaluator has to be the authority on what it can actually pose.
+    // own `data.animated` getter. They are NOT the same predicate, in two directions:
+    //   * `data.animated` also returns true for a purely BILLBOARDED bone. `classify()` asks only
+    //     "is there anything to sample?", which is the right question for posing -- billboarding is
+    //     handled by `applyBillboards`, off a separate `this.billboards` list. Callers that build a
+    //     per-frame set must therefore test BOTH; see `doodad-manager.js#loadDoodad`.
+    //   * `classify()` rejects a lone identity-valued transparency/colour key, which the parser's
+    //     rule also does for transparency; see `blockAnimatedBeyondIdentity` in model-anim.ts.
 
     this.billboards = [];
     // The AUTHORED render bounding-sphere radius (M2 header, immediately after the vertex box).
@@ -123,14 +136,12 @@ class M2 extends THREE.Group {
     this.bones = [];
     this.rootBones = [];
 
-    // Per-model animation data is shared across every placement -- built once for the source M2 and
+    // Per-model animation data is shared across EVERY placement -- built once for the source M2 and
     // handed to each clone, never rebuilt. The old AnimationManager was shared the same way, but
     // createSkeleton() below then registered THIS clone's bone tracks into it, so every placement
     // appended its own copy of every track to the shared clips. That is the bug that got the whole
     // animation system commented out; ModelAnim holds keyframes and nothing placement-specific.
-    this.modelAnim = instance && instance.modelAnim
-      ? instance.modelAnim
-      : new ModelAnim(data);
+    this.modelAnim = sharedModelAnim || new ModelAnim(data);
 
     this.animated = this.modelAnim.animated;
     this.instanceAnim = this.animated ? new InstanceAnim(this.modelAnim) : null;
@@ -665,17 +676,7 @@ class M2 extends THREE.Group {
     }
   }
 
-  detachEventListeners() {
-    // this.eventListeners.forEach((entry) => {
-      // const [target, event, listener] = entry;
-      // target.removeListener(event, listener);
-    // });
-  }
-
   dispose() {
-    this.detachEventListeners();
-    this.eventListeners = [];
-
     collisionWorld.doodads.remove(this.boundingMesh);
     this.boundingMesh.geometry.dispose();
     this.geometry.dispose();
@@ -696,9 +697,8 @@ class M2 extends THREE.Group {
 
   clone() {
     let instance: any = {};
-    
+
     if (this.canInstance) {
-      instance.modelAnim = this.modelAnim;
       instance.geometry = this.geometry;
       instance.submeshGeometries = this.submeshGeometries;
       instance.batches = this.batches;
@@ -706,7 +706,9 @@ class M2 extends THREE.Group {
       instance = null;
     }
     collisionWorld.doodads.remove(this.boundingMesh);
-    const newM2 = new M2(this.path, this.data, this.skinData, instance);
+    // `this.modelAnim` goes to every clone, instanceable or not -- see the constructor's doc for
+    // why it must NOT ride along inside `instance`.
+    const newM2 = new M2(this.path, this.data, this.skinData, instance, this.modelAnim);
     return newM2 as any;
   }
 

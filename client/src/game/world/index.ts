@@ -436,7 +436,11 @@ export default class World extends EventEmitter {
     this.entities.forEach(entity => {
       const { model } = entity;
 
-      if (model === null || !model.animated) {
+      // Same two-part test `DoodadManager#loadDoodad` documents: `model.animated` is the POSING
+      // predicate (ModelAnim.classify), and billboarding is a separate reason to need a per-frame
+      // visit. A billboard-only model would otherwise skip `entity.update(delta)` and
+      // `applyBillboards` both, and freeze facing bind orientation.
+      if (model === null || (!model.animated && model.billboards.length === 0)) {
         return;
       }
 

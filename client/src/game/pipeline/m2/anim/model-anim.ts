@@ -57,6 +57,78 @@ function blockAnimated(block: AnimBlock | undefined): boolean {
   return false;
 }
 
+/** Total keys across every sequence track of a block. Mirrors the parser's `keyframeCount`. */
+function keyframeCount(block: AnimBlock): number {
+  let count = 0;
+  for (let i = 0, len = block.tracks.length; i < len; ++i) {
+    count += block.tracks[i].timestamps.length;
+  }
+  return count;
+}
+
+/** The block's first authored value in file order. Mirrors the parser's `firstKeyframe.value`. */
+function firstValue(block: AnimBlock): unknown {
+  for (let i = 0, len = block.tracks.length; i < len; ++i) {
+    const track = block.tracks[i];
+    if (track.timestamps.length > 0) {
+      return track.values[0];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Does a block hold keys that actually CHANGE anything?
+ *
+ * A block carrying exactly one key whose value is the channel's identity (fully opaque, white) is
+ * not animation -- it is the default, written out as a keyframe. The uniform already holds that
+ * value, so sampling it every frame produces a guaranteed no-op.
+ *
+ * This mirrors the parser's own rule for transparency
+ * (`wow-data-parser/m2/index.js:196-204`: `keyframeCount > 1 || firstKeyframe.value !== 1.0`),
+ * which the first cut of `classify()` dropped. It is not a micro-optimisation: measured against the
+ * fixture set, `world_generic_passivedoodads_particleemitters_bubblesb.m2` and
+ * `..._lavasplashparticle.m2` -- both `canInstance`, i.e. the mass-placed kind -- flip static ->
+ * animated on a single transparency key of exactly 1.0. Every such placement would allocate an
+ * `InstanceAnim`, join `animatedDoodads`, take a forced whole-subtree `updateMatrixWorld(true)` per
+ * frame and get posed, for nothing. The ~90%-static rejection this whole design rests on erodes one
+ * model at a time.
+ *
+ * An UNDECODABLE first value (missing `values` entry) counts as animated, matching the parser: a
+ * `!== 1.0` comparison against `undefined` is true there too, and guessing "static" on malformed
+ * data would freeze a channel rather than merely cost a sample.
+ */
+function blockAnimatedBeyondIdentity(
+  block: AnimBlock | undefined,
+  isIdentity: (value: unknown) => boolean
+): boolean {
+  if (!blockAnimated(block)) {
+    return false;
+  }
+  if (keyframeCount(block!) > 1) {
+    return true;
+  }
+  return !isIdentity(firstValue(block!));
+}
+
+/** Transparency and vertex-colour alpha are `color16` scalars; identity is fully opaque. */
+function isOpaque(value: unknown): boolean {
+  return value === 1.0;
+}
+
+/**
+ * Vertex-colour RGB identity is white.
+ *
+ * The parser does NOT apply its single-key rule to vertex colour, only to transparency. Extending
+ * it here is deliberate and safe by the same argument: `animatedVertexColorRGB` already defaults to
+ * (1, 1, 1), so a lone white key changes nothing a sampler could produce. A lone NON-white key is
+ * still counted -- that one does change the draw, even though it never varies.
+ */
+function isWhite(value: unknown): boolean {
+  return Array.isArray(value) && value.length >= 3 &&
+    value[0] === 1.0 && value[1] === 1.0 && value[2] === 1.0;
+}
+
 /**
  * Does this model animate anything at all?
  *
@@ -64,6 +136,11 @@ function blockAnimated(block: AnimBlock | undefined): boolean {
  * (`doodad_anim.rs:17-19`). Those keep the existing static path and never allocate an instance,
  * which is the single largest performance win available here -- and it costs nothing at runtime,
  * because the work simply never starts.
+ *
+ * This is the predicate for POSING only. It deliberately says nothing about billboarding: a model
+ * whose only moving part is a billboarded bone has no keys to sample, but still has to be turned to
+ * face the camera each frame. Callers that build a per-frame set must ask both questions -- see
+ * `doodad-manager.js#loadDoodad` and `world/index.ts#animateEntities`.
  */
 export function classify(data: M2AnimData): boolean {
   const bones = data.bones || [];
@@ -83,14 +160,15 @@ export function classify(data: M2AnimData): boolean {
 
   const transparency = data.transparencyAnimations || [];
   for (let i = 0, len = transparency.length; i < len; ++i) {
-    if (blockAnimated(transparency[i])) {
+    if (blockAnimatedBeyondIdentity(transparency[i], isOpaque)) {
       return true;
     }
   }
 
   const colors = data.vertexColorAnimations || [];
   for (let i = 0, len = colors.length; i < len; ++i) {
-    if (blockAnimated(colors[i].color) || blockAnimated(colors[i].alpha)) {
+    if (blockAnimatedBeyondIdentity(colors[i].color, isWhite) ||
+        blockAnimatedBeyondIdentity(colors[i].alpha, isOpaque)) {
       return true;
     }
   }

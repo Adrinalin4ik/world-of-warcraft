@@ -135,7 +135,16 @@ class DoodadManager {
         this.map.particleManager.register(doodad);
       }
 
-      if (doodad.animated) {
+      // TWO independent reasons to be in the per-frame set, and they must both be asked.
+      //
+      // `doodad.animated` comes from `ModelAnim.classify()`, which answers "is there anything to
+      // SAMPLE?" -- the right question for posing, and deliberately blind to billboarding. The
+      // parser's older `data.animated` getter folded `|| billboarded` in
+      // (`wow-data-parser/m2/index.js:63-67`), so gating on `animated` alone would silently drop a
+      // doodad whose only moving part is a billboarded bone: it would stop being turned to face the
+      // camera AND stop getting the forced `updateMatrixWorld` in `World#updateDynamicMatrices`,
+      // freezing it in bind orientation.
+      if (doodad.animated || doodad.billboards.length > 0) {
         this.enableDoodadAnimations(entry, doodad);
       }
     });
@@ -146,7 +155,9 @@ class DoodadManager {
     // call to animate() during the render loop.
     this.animatedDoodads.set(entry.id, doodad);
 
-    // Task 13 arms the doodad's `instanceAnim` here (variation-cycle.armDoodad).
+    // Task 13 arms the doodad's `instanceAnim` here (variation-cycle.armDoodad). Note that
+    // membership in this map does NOT imply `instanceAnim` is non-null -- a billboard-only doodad
+    // is here purely for `applyBillboards`.
   }
 
   // Every tick of the load interval, unload a portion of any doodads pending unload.
