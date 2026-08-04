@@ -488,9 +488,32 @@ describe('ParticleBatch', () => {
     seed(pool, [0, 0, 0], 5);
 
     const batch = new ParticleBatch(stubMaterial, 4, 1, 1);
+
+    // three's `needsUpdate` is a setter with NO getter (three/src/core/BufferAttribute.js:155):
+    // assigning true increments `version`, and reading the property back always yields undefined.
+    // `version` is therefore the only observable evidence the attribute was marked dirty.
+    const names = ['iOffset', 'iScale', 'iRotation', 'iColor', 'iUvRect'];
+    const before = names.map((name) => batch.geometry.getAttribute(name).version);
+
     batch.pack(pool, definition, new THREE.Matrix4());
 
-    expect(batch.geometry.getAttribute('iOffset').needsUpdate).toBe(true);
+    names.forEach((name, index) => {
+      expect(batch.geometry.getAttribute(name).version).toBeGreaterThan(before[index]);
+    });
+  });
+
+  it('bounds the update range to the live prefix', () => {
+    const pool = new ParticlePool(16);
+    seed(pool, [0, 0, 0], 5);
+    seed(pool, [1, 0, 0], 5);
+
+    const batch = new ParticleBatch(stubMaterial, 16, 1, 1);
+    batch.pack(pool, definition, new THREE.Matrix4());
+
+    const offset = batch.geometry.getAttribute('iOffset');
+    expect(offset.updateRanges.length).toBe(1);
+    // Two live particles, three components each.
+    expect(offset.updateRanges[0]).toEqual({ start: 0, count: 6 });
   });
 });
 ```
@@ -663,7 +686,7 @@ export class ParticleBatch extends THREE.Mesh {
 
 Run: `cd client && npx jest --watchAll=false src/game/pipeline/m2/particle/__tests__/batch.test.ts`
 
-Expected: PASS, 9 tests.
+Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Commit**
 

@@ -1,3 +1,11 @@
 {
-  "cmake.sourceDirectory": "/home/alexey/Desktop/Projects/JS/world-of-warcraft/BLPConverter"
+  "cmake.sourceDirectory": "/home/alexey/Desktop/Projects/JS/world-of-warcraft/BLPConverter",
+  "files.exclude": {
+    "**/.git": true,
+    "**/.svn": true,
+    "**/.hg": true,
+    "**/.DS_Store": true,
+    "**/Thumbs.db": true,
+    ".mule": true
+  }
 }
