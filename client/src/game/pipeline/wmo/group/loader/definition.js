@@ -9,9 +9,25 @@ class WMOGroupDefinition {
     this.index = index;
     this.groupID = groupData.MOGP.groupID;
     this.interior = groupData.interior;
+
+    // MOHD 0x02. Decided once here and used twice below -- it governs BOTH whether MOCV is the shade
+    // multiplier and whether the interior lighting LAWS apply at all. See
+    // WMORootFlags.UNIFIED_RENDER_PATH.
+    this.unifiedRenderPath = !!(rootHeader.flags & WMORootFlags.UNIFIED_RENDER_PATH);
+
     // The LIGHTING class (MOGP/MOGI 0x48) — see group.js `lightingInterior`. Without this the
     // material never sees anything but `undefined` and silently falls back to `this.interior`.
-    this.lightingInterior = groupData.lightingInterior;
+    //
+    // Forced false on the unified path, and this is not a shortcut: "unified" means there are no
+    // separate interior laws. Dropping MOCV alone was not enough -- with the neutral no-MOCV value,
+    // MOCV.a comes back as 1.0, and the INT lane reads that as a full self-illumination mask
+    // (`tex x mocv x (1 + 4 x alpha)` = tex x 5), which blows every interior to white. No single
+    // neutral alpha can serve both interior lanes either: INT wants 0 (no mask) while TRANS wants 1
+    // (no bake, so fully lit). Suppressing the lanes is the only consistent answer.
+    //
+    // `interior` above is left alone deliberately: it answers the portal/containment question, which
+    // this bit has nothing to do with.
+    this.lightingInterior = this.unifiedRenderPath ? false : groupData.lightingInterior;
 
     // MOGP's four uint8 indices into the root's MFOG array (see wmo/index.js `MFOG` and
     // WMORootDefinition.createFogs). Carried verbatim -- resolving them against the root's

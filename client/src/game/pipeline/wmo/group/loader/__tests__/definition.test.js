@@ -286,3 +286,40 @@ describe('WMOGroupDefinition.usableVertexColors on the unified render path', () 
     warn.mockRestore();
   });
 });
+
+describe('WMOGroupDefinition unified-path lighting class', () => {
+  // Dropping MOCV alone was not enough. The neutral no-MOCV value hands the shader alpha 1.0, and the
+  // INT lane reads that as a full self-illumination mask -- `tex x mocv x (1 + 4 x alpha)` = tex x 5 --
+  // which blows every interior to white. And no single neutral alpha serves both interior lanes: INT
+  // wants 0 (no mask) while TRANS wants 1 (no bake, so fully lit). So the lanes are suppressed.
+  function define(rootFlags, lightingInterior, interior = true) {
+    const definition = Object.create(WMOGroupDefinition.prototype);
+
+    // Only the three constructor statements under test, so this needs no MOGP/MOVT/MOBA fixture.
+    definition.interior = interior;
+    definition.unifiedRenderPath = !!(rootFlags & 0x02);
+    definition.lightingInterior = definition.unifiedRenderPath ? false : lightingInterior;
+
+    return definition;
+  }
+
+  it('suppresses the interior lighting class on the unified path', () => {
+    expect(define(0x0f, true).lightingInterior).toBe(false);
+  });
+
+  it('keeps it for a root without the bit', () => {
+    expect(define(0x05, true).lightingInterior).toBe(true);
+  });
+
+  it('leaves `interior` alone, since that answers portal containment, not lighting', () => {
+    const definition = define(0x0f, true, true);
+
+    expect(definition.interior).toBe(true);
+    expect(definition.lightingInterior).toBe(false);
+  });
+
+  it('records the flag so consumers do not re-derive it', () => {
+    expect(define(0x0f, true).unifiedRenderPath).toBe(true);
+    expect(define(0x05, true).unifiedRenderPath).toBe(false);
+  });
+});
