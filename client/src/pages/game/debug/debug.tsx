@@ -5,6 +5,7 @@ import CollapsibleSection from './collapsible-section';
 import CollisionControls from './collision-controls';
 import ModelReadout from './model-readout';
 import MoveReadout from './move-readout';
+import SavedCoords from './saved-coords';
 import { modelProbe } from '../../../game/pipeline/m2/model-probe';
 import LightingControls from './lighting-controls';
 import LightingReadouts from './lighting-readouts';
@@ -76,6 +77,8 @@ class DebugPanel extends React.Component<IProp> {
           collision height: { player.collisionHeight.toFixed(3) }
         </p>
         <MoveReadout />
+        <div className="divider"></div>
+        <SavedCoords player={ player } />
         <div className="divider"></div>
         {/* <p>
           Collides: { player.isCollide() ? 'true' : 'false' }
