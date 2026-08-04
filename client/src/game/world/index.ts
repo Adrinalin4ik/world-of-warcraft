@@ -8,7 +8,6 @@ import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
 import { collisionDebugView } from "../collision/debug-view";
-import M2Blueprint from "../pipeline/m2/blueprint";
 import { modelProbe } from "../pipeline/m2/model-probe";
 import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
@@ -354,9 +353,8 @@ export default class World extends EventEmitter {
     this.skyManager.setWmoManager(this.map?.wmoManager ?? null);
     this.skyManager.update(camera, this.map?.mapID || 0, delta);
 
-    // Send delta updates to instanced M2 animation managers.
-    M2Blueprint.animate(delta);
-
+    // No M2Blueprint.animate here any more: global sequences are a pure function of world time and
+    // instances are clock-indexed, so there is no shared timeline left to tick. See M2Blueprint.
     // Centred on the player rather than the camera: the overlay exists to show what the MOVEMENT
     // cast sees, and the camera can be thirty yards away from that.
     this.collisionDebug.update(this.player.position);
@@ -444,9 +442,7 @@ export default class World extends EventEmitter {
 
       entity.update(delta);
 
-      if (model.receivesAnimationUpdates && model.animations.length > 0) {
-        model.animationManager.update(delta);
-      }
+      // Task 16 poses entity models here, through `model.instanceAnim`.
 
       if (cameraMoved && model.billboards.length > 0) {
         model.applyBillboards(camera);

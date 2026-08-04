@@ -6,7 +6,11 @@ import M2 from './';
 class M2Blueprint {
 
   static cache = new Map();
-  static animationUpdateTargets = new Map();
+
+  // Per-model animation data, keyed by the same normalised path `cache` uses. Built once, by the
+  // source M2, and shared by every clone; kept here so callers that hold no M2 (the doodad
+  // variation cycler, debug readouts) can still reach a model's sequence table.
+  static modelAnims = new Map();
 
   static references = new Map();
   static pendingUnload = new Set();
@@ -38,9 +42,8 @@ class M2Blueprint {
         const [data, skinData] = args;
 
         const m2 = new M2(path, data, skinData);
-        if (m2.receivesAnimationUpdates) {
-          this.animationUpdateTargets.set(path, m2);
-        }
+
+        this.modelAnims.set(path, m2.modelAnim);
 
         return m2;
       }));
@@ -80,7 +83,7 @@ class M2Blueprint {
       }
 
       this.cache.delete(path);
-      this.animationUpdateTargets.delete(path);
+      this.modelAnims.delete(path);
       this.references.delete(path);
       this.pendingUnload.delete(path);
     });
@@ -88,14 +91,14 @@ class M2Blueprint {
     setTimeout(this.backgroundUnload.bind(this), this.UNLOAD_INTERVAL);
   }
 
-  static animate(delta) {
-    this.animationUpdateTargets.forEach((m2) => {
-      // Handle delta updates for instanced M2s (which share animation managers).
-      if (m2.animationManager.length > 0) {
-        m2.animationManager.update(delta);
-      }
-    });
-  }
+  /**
+   * There is deliberately no `animate(delta)` here any more.
+   *
+   * Global sequences advance on world time alone -- there is nothing per-instance to tick. The old
+   * `animate(delta)` walked every loaded model to push a delta into a shared AnimationMixer;
+   * instances now read `worldClockMs` directly, so the method is gone. Instance posing lives in the
+   * per-frame doodad pass (`DoodadManager#animate`), added in Task 13.
+   */
 
 }
 

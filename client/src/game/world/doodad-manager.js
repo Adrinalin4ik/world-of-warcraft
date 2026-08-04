@@ -146,12 +146,7 @@ class DoodadManager {
     // call to animate() during the render loop.
     this.animatedDoodads.set(entry.id, doodad);
 
-    // Auto-play animation index 0 in doodad, if animations are present.
-    // TODO: Properly manage doodad animations.
-    if (doodad.animations.length > 0) {
-      doodad.animations.playAnimation(0);
-      doodad.animations.playAllSequences();
-    }
+    // Task 13 arms the doodad's `instanceAnim` here (variation-cycle.armDoodad).
   }
 
   // Every tick of the load interval, unload a portion of any doodads pending unload.
@@ -248,9 +243,7 @@ class DoodadManager {
         return;
       }
 
-      if (doodad.receivesAnimationUpdates && doodad.animations.length > 0) {
-        doodad.animations.update(delta);
-      }
+      // Task 13 poses `doodad.instanceAnim` here, on the world clock.
 
       if (cameraMoved && doodad.billboards.length > 0) {
         doodad.applyBillboards(camera);

@@ -315,7 +315,12 @@ class M2Material extends THREE.ShaderMaterial {
     this.textureDefs = def.textures;
     this.loadTextures();
 
-    this.registerAnimations(def);
+    // The three `register*Animation` subscription helpers that used to run here are gone. They
+    // pushed closures onto an EventEmitter owned by the shared AnimationManager (the `.on('update')`
+    // calls had already been commented out, leaving them inert), which is precisely the binding
+    // model this refactor removes. Task 14 replaces them with a per-draw `onBeforeRender` push of
+    // `m2.uvAnimationValues` / `transparencyAnimationValues` / `vertexColorAnimationValues` into the
+    // uniforms -- per draw, because materials are cached and shared across placements.
   }
 
   enableBillboarding() {
@@ -483,77 +488,6 @@ class M2Material extends THREE.ShaderMaterial {
     }
 
     return path;
-  }
-
-  registerAnimations(def) {
-    const { uvAnimationIndices, transparencyAnimationIndex, vertexColorAnimationIndex } = def;
-
-    this.registerUVAnimations(uvAnimationIndices);
-    this.registerTransparencyAnimation(transparencyAnimationIndex);
-    this.registerVertexColorAnimation(vertexColorAnimationIndex);
-  }
-
-  registerUVAnimations(uvAnimationIndices) {
-    if (uvAnimationIndices.length === 0) {
-      return;
-    }
-
-    const { animations, uvAnimationValues } = this.m2;
-
-    const updater = () => {
-      uvAnimationIndices.forEach((uvAnimationIndex, opIndex) => {
-        const target = this.uniforms.animatedUVs;
-        const source = uvAnimationValues[uvAnimationIndex];
-
-        target.value[opIndex] = source.matrix;
-      });
-    };
-
-    // animations.on('update', updater);
-
-    this.eventListeners.push([animations, 'update', updater]);
-  }
-
-  registerTransparencyAnimation(transparencyAnimationIndex) {
-    if (transparencyAnimationIndex === null || transparencyAnimationIndex === -1) {
-      return;
-    }
-
-    const { animations, transparencyAnimationValues } = this.m2;
-
-    const target = this.uniforms.animatedTransparency;
-    const source = transparencyAnimationValues;
-    const valueIndex = transparencyAnimationIndex;
-
-    const updater = () => {
-      target.value = source[valueIndex];
-    };
-
-    // animations.on('update', updater);
-
-    this.eventListeners.push([animations, 'update', updater]);
-  }
-
-  registerVertexColorAnimation(vertexColorAnimationIndex) {
-    if (vertexColorAnimationIndex === null || vertexColorAnimationIndex === -1) {
-      return;
-    }
-
-    const { animations, vertexColorAnimationValues } = this.m2;
-
-    const targetRGB = this.uniforms.animatedVertexColorRGB;
-    const targetAlpha = this.uniforms.animatedVertexColorAlpha;
-    const source = vertexColorAnimationValues;
-    const valueIndex = vertexColorAnimationIndex;
-
-    const updater = () => {
-      targetRGB.value = source[valueIndex].color;
-      targetAlpha.value = source[valueIndex].alpha;
-    };
-
-    // animations.on('update', updater);
-
-    this.eventListeners.push([animations, 'update', updater]);
   }
 
   detachEventListeners() {

@@ -260,7 +260,7 @@ class Unit extends Entity {
 
     // Auto-play animation index 0 in unit model, if present
     // TODO: Properly manage unit animations
-    if (m2.animated && m2.animations.length > 0) {
+    if (m2.animated && m2.modelAnim.sequences.length > 0) {
       /*
         penguin
         0 - fly 1
@@ -293,8 +293,9 @@ class Unit extends Entity {
        38 - rotate
        133 - backward
       */
-      m2.animationManager.playAnimation(this.currentAnimationIndex);
-      m2.animationManager.playAllSequences();
+      // Task 16: arm the unit's starting sequence through `m2.instanceAnim`.
+      // m2.animationManager.playAnimation(this.currentAnimationIndex);
+      // m2.animationManager.playAllSequences();
     }
 
     this.emit("model:change", this, this._model, m2);
@@ -307,17 +308,13 @@ class Unit extends Entity {
     repetitions: number = -1
   ) {
     if (!this.model) return;
-    const isRunning = this.model.animationManager.currentAnimation?.isRunning();
-    if (isRunning) {
-      if (
-        this.model.animationManager.currentAnimation.repetitions === Infinity &&
-        this.currentAnimationIndex !== index
-      ) {
-        this.startAnimation(index, repetitions);
-      }
-    } else {
-      this.startAnimation(index, repetitions);
-    }
+
+    // Task 16: the mixer's "is the current action still running, and does it loop forever?" test
+    // has no equivalent yet. `InstanceAnim` answers the first half with `windowElapsed(worldClockMs)`
+    // and the second with `current.loops`, but neither the world clock nor unit-driven arming is
+    // wired up until Task 16 -- so for now every request simply (re)starts, which is what the
+    // `else` branch below did anyway.
+    this.startAnimation(index, repetitions);
   }
 
   startAnimation(index: number, repetitions: number) {

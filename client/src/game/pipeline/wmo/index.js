@@ -266,7 +266,7 @@ class WMO {
     // if (doodad.animated) {
     //   this.animatedDoodads.set(doodadEntry.id, doodad);
 
-    //   if (doodad.animations.length > 0) {
+    //   if (doodad.modelAnim.sequences.length > 0) {
     //     // TODO: Do WMO doodads have more than one animation? If so, which one should play?
     //     doodad.animations.playAnimation(0);
     //     doodad.animations.playAllSequences();
@@ -637,9 +637,7 @@ class WMO {
         continue;
       }
 
-      if (doodad.receivesAnimationUpdates && doodad.animations.length > 0) {
-        doodad.animations.update(delta);
-      }
+      // Task 13 poses `doodad.instanceAnim` here, on the world clock.
 
       if (cameraMoved && doodad.billboards.length > 0) {
         doodad.applyBillboards(camera);

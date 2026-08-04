@@ -4,8 +4,9 @@ import { Face3, Geometry } from '../../utils/geometry';
 import CacheManager from '../../world/cache-manager';
 import { collisionWorld } from '../../collision/collision-world';
 import { ObjectsManager } from '../../world/visibility-manager';
-import AnimationManager from './animation-manager';
 import BatchManager from './batch-manager';
+import { InstanceAnim } from './anim/instance-anim';
+import { ModelAnim } from './anim/model-anim';
 import { modelSpaceBindMatrix, normalizeBoneWeights, poseBindSkeleton } from './bind-pose';
 import M2Material from './material';
 import { isParticleTemplate } from './particle/template';
@@ -37,7 +38,6 @@ class M2 extends THREE.Group {
   skeletonHelper: any;
   bones: THREE.Bone[];
   rootBones: THREE.Bone[];
-  receivesAnimationUpdates: boolean;
   batches: Map<number, any>;
   // Batches belonging to submeshes suppressed by isTemplateSubmesh(). createBatches() already
   // constructed their M2Materials (and, transitively, loaded their textures) before
@@ -58,7 +58,10 @@ class M2 extends THREE.Group {
   // `instance` branch and clone()) and must not dispose materials they merely borrowed.
   ownsBatches: boolean;
   boundingMesh: THREE.Mesh;
-  animationManager: AnimationManager;
+  // Per-model keyframe data, shared by every placement of this model path. Immutable.
+  modelAnim: ModelAnim;
+  // Per-placement clock plus bone solver. Null for a model that animates nothing at all.
+  instanceAnim: InstanceAnim | null;
   uvAnimationValues = [];
   transparencyAnimationValues = [];
   textureAnimations: THREE.Object3D;
@@ -81,7 +84,9 @@ class M2 extends THREE.Group {
     // Instanceable M2s share geometry, texture units, and animations.
     this.canInstance = data.canInstance;
 
-    this.animated = data.animated;
+    // `this.animated` is assigned below, from `ModelAnim.classify(data)` rather than the parser's
+    // own `data.animated` getter. The two agree in substance (both ask "does any channel hold
+    // keys?"), but the evaluator has to be the authority on what it can actually pose.
 
     this.billboards = [];
     // The AUTHORED render bounding-sphere radius (M2 header, immediately after the vertex box).
@@ -118,22 +123,18 @@ class M2 extends THREE.Group {
     this.bones = [];
     this.rootBones = [];
 
-    if (instance) {
-      this.animationManager = instance.animationManager;
+    // Per-model animation data is shared across every placement -- built once for the source M2 and
+    // handed to each clone, never rebuilt. The old AnimationManager was shared the same way, but
+    // createSkeleton() below then registered THIS clone's bone tracks into it, so every placement
+    // appended its own copy of every track to the shared clips. That is the bug that got the whole
+    // animation system commented out; ModelAnim holds keyframes and nothing placement-specific.
+    this.modelAnim = instance && instance.modelAnim
+      ? instance.modelAnim
+      : new ModelAnim(data);
 
-      // To prevent over-updating animation timelines, instanced M2s shouldn't receive animation
-      // time deltas. Instead, only the original M2 should receive time deltas.
-      this.receivesAnimationUpdates = false;
-    } else {
-      this.animationManager = new AnimationManager(this, data.animations, data.sequences);
+    this.animated = this.modelAnim.animated;
+    this.instanceAnim = this.animated ? new InstanceAnim(this.modelAnim) : null;
 
-      if (this.animated) {
-        this.receivesAnimationUpdates = true;
-      } else {
-        this.receivesAnimationUpdates = false;
-      }
-    }
-    
     this.createSkeleton(data.bones);
 
     // Instanced M2s can share geometries and texture units.
@@ -251,47 +252,9 @@ class M2 extends THREE.Group {
         billboards.push(bone);
       }
 
-      // Bone translation animation block
-      if (boneDef.translation.animated) {
-        this.animationManager.registerTrack({
-          target: bone,
-          property: 'position',
-          animationBlock: boneDef.translation,
-          trackType: 'VectorKeyframeTrack',
-
-          valueTransform(value) {
-            return [
-              bone.position.x + -value[0],
-              bone.position.y + -value[1],
-              bone.position.z + value[2]
-            ];
-          }
-        });
-      }
-
-      // Bone rotation animation block
-      if (boneDef.rotation.animated) {
-        this.animationManager.registerTrack({
-          target: bone,
-          property: 'quaternion',
-          animationBlock: boneDef.rotation,
-          trackType: 'QuaternionKeyframeTrack',
-
-          valueTransform(value) {
-            return [value[0], value[1], -value[2], -value[3]];
-          }
-        });
-      }
-
-      // Bone scaling animation block
-      if (boneDef.scaling.animated) {
-        this.animationManager.registerTrack({
-          target: bone,
-          property: 'scale',
-          animationBlock: boneDef.scaling,
-          trackType: 'VectorKeyframeTrack'
-        });
-      }
+      // No per-bone track registration here any more. Bone TRS keyframes live once per model on
+      // `this.modelAnim.boneDefs`, and `InstanceAnim#solveBones` reads them directly -- see the
+      // constructor for why registering them per clone was the original defect.
     }
 
     // Preserve the bones
@@ -586,31 +549,8 @@ class M2 extends THREE.Group {
         matrix: new THREE.Matrix4()
       };
 
-      const { translation } = uvAnimationDef;
-
-      this.animationManager.registerTrack({
-        target: this,
-        property: 'uvAnimationValues[' + index + '].translation',
-        animationBlock: translation,
-        trackType: 'VectorKeyframeTrack'
-      });
-
-      // Set up event subscription to produce matrix from translation, rotation, and scaling
-      // values.
-      const updater = () => {
-        const animationValue = this.uvAnimationValues[index];
-
-        // Set up matrix for use in uv transform in vertex shader.
-        animationValue.matrix = new THREE.Matrix4().compose(
-          new THREE.Vector3(...animationValue.translation),
-          new THREE.Quaternion(...animationValue.rotation),
-          new THREE.Vector3(...animationValue.scaling)
-        );
-      };
-
-      this.animationManager.on('update', updater);
-
-      this.eventListeners.push([this.animationManager, 'update', updater]);
+      // Only the default is set up here. Task 14 samples the UV animation blocks per draw and
+      // writes the sampled TRS (and the composed matrix) back into this slot.
     });
   }
 
@@ -620,19 +560,8 @@ class M2 extends THREE.Group {
     }
 
     transparencyAnimationDefs.forEach((transparencyAnimationDef, index) => {
-      // Default value
+      // Default value. Task 14 samples `transparencyAnimationDef` per draw and writes here.
       this.transparencyAnimationValues[index] = 1.0;
-
-      this.animationManager.registerTrack({
-        target: this,
-        property: 'transparencyAnimationValues[' + index + ']',
-        animationBlock: transparencyAnimationDef,
-        trackType: 'NumberKeyframeTrack',
-
-        valueTransform(value) {
-          return [value];
-        }
-      });
     });
   }
 
@@ -648,25 +577,7 @@ class M2 extends THREE.Group {
         alpha: 1.0
       };
 
-      const { color, alpha } = vertexColorAnimationDef;
-
-      this.animationManager.registerTrack({
-        target: this,
-        property: 'vertexColorAnimationValues[' + index + '].color',
-        animationBlock: color,
-        trackType: 'VectorKeyframeTrack'
-      });
-
-      this.animationManager.registerTrack({
-        target: this,
-        property: 'vertexColorAnimationValues[' + index + '].alpha',
-        animationBlock: alpha,
-        trackType: 'NumberKeyframeTrack',
-
-        valueTransform(value) {
-          return [value];
-        }
-      });
+      // Only the default is set up here. Task 14 samples the color/alpha blocks per draw.
     });
   }
 
@@ -787,7 +698,7 @@ class M2 extends THREE.Group {
     let instance: any = {};
     
     if (this.canInstance) {
-      instance.animationManager = this.animationManager;
+      instance.modelAnim = this.modelAnim;
       instance.geometry = this.geometry;
       instance.submeshGeometries = this.submeshGeometries;
       instance.batches = this.batches;
