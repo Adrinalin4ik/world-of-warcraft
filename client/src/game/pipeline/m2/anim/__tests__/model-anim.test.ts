@@ -176,7 +176,8 @@ describe('globalSequenceCursor', () => {
   });
 
   it('is identical for every caller at the same world time -- there is no per-instance state', () => {
-    expect(m.globalSequenceCursor(0, 12345)).toBe(m.globalSequenceCursor(0, 12345));
+    const other = new ModelAnim(data({ sequences: [1000, 0, 250] }));
+    expect(other.globalSequenceCursor(0, 12345)).toBe(m.globalSequenceCursor(0, 12345));
   });
 
   it('returns 0 for a zero-duration global sequence', () => {
