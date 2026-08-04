@@ -189,3 +189,54 @@ describe('WMOGroupDefinition#assignVertexColors ambient branch', () => {
     expect(colors[3]).toBeCloseTo(1, 6);
   });
 });
+
+describe('WMOGroupDefinition.usableVertexColors', () => {
+  // The reference's own guard (samples/benilla wmo/group.rs): colours must be parallel to positions,
+  // or the group counts as having none and every vertex falls back to the neutral default. We had no
+  // such check -- a short chunk indexes past its end, and a long one is not simply a longer version of
+  // the same data, so reading its leading entries assigns other vertices' colours.
+  const mocvOf = (count) => ({
+    colors: Array.from({ length: count }, () => ({ r: 40, g: 40, b: 40, a: 255 })),
+  });
+
+  let warn;
+
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warn.mockRestore(); });
+
+  it('passes MOCV through when it is parallel to the vertices', () => {
+    const mocv = mocvOf(2016);
+
+    expect(WMOGroupDefinition.usableVertexColors(mocv, 2016, 'X.WMO', 0)).toBe(mocv);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('rejects a chunk with FEWER colours than vertices', () => {
+    expect(WMOGroupDefinition.usableVertexColors(mocvOf(100), 2016, 'X.WMO', 0)).toBeNull();
+  });
+
+  it('rejects a chunk with MORE colours than vertices', () => {
+    expect(WMOGroupDefinition.usableVertexColors(mocvOf(4032), 2016, 'X.WMO', 0)).toBeNull();
+  });
+
+  it('names the file, the group and both counts, since that is the whole evidence', () => {
+    WMOGroupDefinition.usableVertexColors(mocvOf(4032), 2016, 'NIGHTELF.WMO', 1);
+
+    const message = warn.mock.calls[0][0];
+    expect(message).toMatch(/NIGHTELF\.WMO/);
+    expect(message).toMatch(/group 1/);
+    expect(message).toMatch(/4032/);
+    expect(message).toMatch(/2016/);
+  });
+
+  it('returns null for an absent chunk without complaining', () => {
+    // A group with no MOCV at all is ordinary, not a mismatch.
+    expect(WMOGroupDefinition.usableVertexColors(null, 2016, 'X.WMO', 0)).toBeNull();
+    expect(WMOGroupDefinition.usableVertexColors({}, 2016, 'X.WMO', 0)).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('accepts a group with no vertices and no colours', () => {
+    expect(WMOGroupDefinition.usableVertexColors(mocvOf(0), 0, 'X.WMO', 0)).not.toBeNull();
+  });
+});

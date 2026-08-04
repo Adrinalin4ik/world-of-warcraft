@@ -78,17 +78,56 @@ class WMOGroupDefinition {
     const normals = attributes.normals = new Float32Array(vertexCount * 3);
     this.assignVertexNormals(vertexCount, groupData.MONR, normals);
 
+    // MOCV must be PARALLEL to MOVT, or the group counts as having no vertex colours at all -- the
+    // reference's own guard (samples/benilla `wmo/group.rs`:
+    // `has_colors = group.vertex_colors.len() == group.vertex_positions.len()`, absent or mismatched
+    // falling back to white). We had none: a short chunk would have indexed past the end and a long
+    // one would have been read from the wrong offset, either way producing colours that belong to
+    // other vertices. Both consumers below take the checked value.
+    const mocv = WMOGroupDefinition.usableVertexColors(
+      groupData.MOCV, vertexCount, this.path, this.index,
+    );
+
     // Manipulate vertex colors a la FixColorVertexAlpha.
     // `exterior` is computed on the OUTER chunked object (group.js `exterior`, reading
     // `this.flags`), not on the MOGP sub-struct handed in below -- `groupData.MOGP.exterior` is
     // always undefined. Threaded through explicitly so fixVertexColors doesn't have to guess.
-    this.fixVertexColors(vertexCount, rootHeader, groupData.MOGP, groupData.MOBA, groupData.MOCV, groupData.exterior);
+    this.fixVertexColors(vertexCount, rootHeader, groupData.MOGP, groupData.MOBA, mocv, groupData.exterior);
 
     const colors = attributes.colors = new Float32Array(vertexCount * 4);
     // `interior` lives on the OUTER chunked object too, for exactly the same reason `exterior` does
     // (group.js reads `this.flags`, which MOGP does not expose). Passing `groupData.MOGP` here made
     // the ambient test read `undefined`, so the root ambient was NEVER added to any interior group.
-    this.assignVertexColors(vertexCount, rootHeader, groupData.interior, groupData.MOCV, colors);
+    this.assignVertexColors(vertexCount, rootHeader, groupData.interior, mocv, colors);
+  }
+
+  /**
+   * MOCV if it is parallel to MOVT, else null.
+   *
+   * The reference's guard, which we did not have. A chunk with FEWER entries than vertices would have
+   * been indexed past its end; one with MORE is not simply a longer version of the same data -- the
+   * entries a group actually owns are not necessarily the leading ones -- so reading the first
+   * `vertexCount` of them assigns other vertices' colours. Either way the neutral default is the
+   * honest answer, and it is what the reference commits.
+   *
+   * Logged rather than swallowed: a whole building rendering unshaded is a thing to know about, and
+   * the count pair is the only evidence that distinguishes a data quirk from a parse fault.
+   */
+  static usableVertexColors(mocv, vertexCount, path, index) {
+    if (!mocv || !mocv.colors) {
+      return null;
+    }
+
+    if (mocv.colors.length === vertexCount) {
+      return mocv;
+    }
+
+    console.warn(
+      `WMO ${path || '?'} group ${index}: MOCV carries ${mocv.colors.length} colours for `
+      + `${vertexCount} vertices -- not parallel, so the group is treated as having none.`,
+    );
+
+    return null;
   }
 
   assignVertexPositions(vertexCount, movt, attribute) {
