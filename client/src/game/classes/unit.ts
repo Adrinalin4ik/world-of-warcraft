@@ -4,6 +4,7 @@ import { Vector3 } from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import DBC from "../pipeline/dbc";
 import M2 from "../pipeline/m2";
+import type { Sequence } from "../pipeline/m2/anim/model-anim";
 import { worldClock } from "../pipeline/m2/anim/world-clock";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import ColliderManager from "../world/collider-manager";
@@ -18,14 +19,70 @@ enum SlopeType {
   none
 }
 
+/**
+ * One-shot / state animation ids, `AnimationData.dbc` ids.
+ *
+ * `idle` is Stand, confirmed against the DBC name column (`Stand` at row 0) and against every model
+ * parsed for this task -- `Rabbit.m2`'s single sequence is id 0, and wolf / kobold / murloc all
+ * carry it as slot 0.
+ *
+ * The members this enum USED to carry (`forward = 2`, `backward = 133`, `rotating = 38`) were read
+ * off a per-model sequence-table listing, not the DBC, and were wrong as DBC ids: row 133 is
+ * `FishingCast`, not a backpedal. They were only ever read by `updateMoving`, which never had a
+ * caller; locomotion now goes through the verified gait ids below.
+ */
 enum Animation {
   idle = 0,
-  forward = 2,
-  backward = 133,
   jump = 15,
-  rotating = 38,
   grounding = 16
 }
+
+// -- Locomotion ----------------------------------------------------------------------------------
+// Ported from the reference selector, `samples/benilla/crates/benilla/src/creature_anim/select.rs`
+// (`gait_candidates`, lines 395-506). Ids are `AnimationData.dbc` ids, NOT sequence-table slots.
+
+/** Stand. DBC name column row 0 = `Stand`; slot 0 of every model parsed for this task. */
+const STAND = 0;
+/** Walk. DBC row 4 -- its own fallback column is empty, i.e. Walk falls back to Stand. */
+const WALK = 4;
+/** Run. DBC name column row 5 = `Run`; wolf and kobold both carry it inline (flags `0x20`). */
+const RUN = 5;
+
+/**
+ * Gait candidate lists, most specific first -- the reference picks a LIST, not an id, so a model
+ * that lacks the ideal clip steps DOWN one rung rather than snapping straight to Stand
+ * (`select.rs:450-455`). This matters here because `ModelAnim#resolve` falls back to sequence 0 and
+ * nothing else: asking it for Run on a model that only walks would yield Stand, which is a creature
+ * sliding along the ground. Walking it instead is both correct and what the reference does.
+ *
+ * Module-level and frozen: `updateLocomotion` runs per unit per frame and must not allocate.
+ */
+const GAIT_RUN: readonly number[] = [RUN, WALK, STAND];
+const GAIT_WALK: readonly number[] = [WALK, STAND];
+const GAIT_STAND: readonly number[] = [STAND];
+
+/**
+ * Below this ground speed (yd/s) a unit counts as standing still -- `select.rs:19`'s
+ * `MOVING_EPSILON`, which guards the near-zero residual a streamed mover leaves behind.
+ */
+const MOVING_EPSILON = 0.1;
+
+/**
+ * Fallback walk speed (yd/s) -- `select.rs:12`'s `DEFAULT_WALK_SPEED`, vanilla's default creature
+ * walk. The run boundary is STRICTLY above 2x this (`RecomputeBaseAnim`, so 5.0 yd/s is still a
+ * walk and 5.1 runs). Per-unit walk speeds arrive on the `LIVING` movement block; until the wire
+ * carries them, every unit shares this one. See the report's follow-ups.
+ */
+const DEFAULT_WALK_SPEED = 2.5;
+
+/**
+ * Displacement speed (yd/s) above which a measured frame is a TELEPORT, not locomotion.
+ *
+ * A worldport or a spawn snap moves a unit hundreds of yards in one frame. Without this the unit
+ * would flash into its run cycle for exactly one frame on arrival. Well above any real gait
+ * (vanilla MOVE_RUN is 7) and well below any real relocation.
+ */
+const TELEPORT_SPEED = 100;
 
 class Unit extends Entity {
   public guid: string;
@@ -322,17 +379,17 @@ class Unit extends Entity {
   /**
    * Request an animation by `AnimationData.dbc` id.
    *
-   * WHO ACTUALLY CALLS THIS TODAY: only the SMSG handler at `network/entity/entity.ts:52`, plus the
-   * model setter's one-time Stand. `updateMoving` below WOULD call it once per frame per held
-   * movement key, and `jump()` would fire the one-shot -- but neither has a caller anywhere in the
-   * client (Controls drives the player's frame directly and never touches animation), so no unit
-   * currently plays anything but Stand. See this task's report: wiring locomotion is unplanned work.
+   * WHO CALLS THIS: `updateLocomotion` below, once per unit per frame, on every gait CHANGE; the
+   * peer handler at `network/entity/entity.ts:52`; and the model setter's one-time Stand. `jump()`
+   * fires the one-shot, and still has no caller (Controls drives the player's jump through the
+   * mover directly and never touches animation).
    *
-   * The re-entry guard below is therefore a LATENT correctness fix, not one that fires today, and it
-   * is retained deliberately because it becomes load-bearing the moment `updateMoving` is wired:
-   * `InstanceAnim` is clock-indexed off `armedAtMs`, so a per-frame re-arm pins the cursor at zero
-   * and freezes the model on the first keyframe of its run cycle -- an animation system that looks
-   * exactly like a broken one. It is far cheaper to keep than to rediscover.
+   * The re-entry guard below is now LOAD-BEARING, not latent: `InstanceAnim` is clock-indexed off
+   * `armedAtMs`, so a per-frame re-arm pins the cursor at zero and freezes the model on the first
+   * keyframe of its run cycle -- an animation system that looks exactly like a broken one.
+   * `updateLocomotion` gates on the resolved sequence changing for the same reason; the two guards
+   * are belt and braces and neither is redundant, since the peer handler reaches this entry point
+   * without passing through the other.
    *
    * `repetitions` is carried for the network caller's signature (`network/entity/entity.ts`) and is
    * not honoured yet: `InstanceAnim` holds one sequence and its loop flag, with no repeat count.
@@ -623,52 +680,143 @@ class Unit extends Entity {
     }
   }
 
-  updateMoving(delta: number) {
-    this.moving.idle =
-      !this.moving.backward &&
-      !this.moving.forward &&
-      !this.moving.strafeLeft &&
-      !this.moving.strafeRight &&
-      !this.moving.rotateRight &&
-      !this.moving.rotateLeft &&
-      !this.isJump &&
-      !this.isMoving;
+  // -- Locomotion ---------------------------------------------------------------------------------
+  //
+  // REPLACES `updateMoving`, deleted here. It had no caller anywhere in the client and could not
+  // safely acquire one: it INTEGRATED position (`translatePosition` per held key) alongside choosing
+  // an animation, and position is now owned by the kinematic mover -- calling it would have dragged
+  // the avatar off `move.pos` every frame. Its animation half also used the wrong ids (see the
+  // `Animation` enum's note). Two pieces of its intent are worth keeping and are NOT ported here:
+  // a distinct backpedal clip (reference: WalkBackwards, id 13) and a turn-in-place shuffle
+  // (reference: 11/12, not the `38` it used). Both need a movement-direction signal this client
+  // does not surface yet. See the report's follow-ups.
 
-      
-    if (true) {
-      if (this.moving.forward) {
-        this.translatePosition({ x: this.moveSpeed * delta });
-        this.setAnimation(Animation.forward, true);
-      }
-      if (this.moving.backward) {
-        this.translatePosition({ x: (-this.moveSpeed * delta) / 2 });
-        this.setAnimation(Animation.backward);
-      }
-      if (this.moving.strafeRight) {
-        this.translatePosition({ y: -this.moveSpeed * delta });
-      }
-      if (this.moving.strafeLeft) {
-        this.translatePosition({ y: this.moveSpeed * delta });
-      }
-      if (this.moving.rotateRight) {
-        if (!this.isMoving) {
-          this.setAnimation(Animation.rotating);
-        }
-        this.view.rotateZ(-this.rotateSpeed * delta);
-        this.changeRotation();
-      }
-      if (this.moving.rotateLeft) {
-        if (!this.isMoving) {
-          this.setAnimation(Animation.rotating);
-        }
-        this.view.rotateZ(this.rotateSpeed * delta);
-        this.changeRotation();
-      }
+  /** Last frame's horizontal position, for the measured-displacement leg. Plain numbers: no alloc. */
+  private locoPrevX = 0;
+  private locoPrevY = 0;
+  private locoTracking = false;
 
-      // if (this.moving.idle) {
-      //   this.setAnimation(Animation.idle);
-      // }
+  /**
+   * This frame's horizontal ground speed (yd/s) -- the gait threshold's only input.
+   *
+   * TWO LEGS, exactly as the reference's `select::unify` (`select.rs:931-965`) has three:
+   *
+   * - The PLAYER is driven from Controls, which runs `movementFrame` and leaves the applied
+   *   horizontal velocity on `move.horizVel`. That is an INTENDED velocity, not a displacement,
+   *   which is deliberate and matches `benilla/src/player.rs:1209-1213`: running into a wall keeps
+   *   the run cycle playing, which is the WoW look. Swimming substitutes the stroke speed, same as
+   *   the reference's `if swimming { swim_stroke_speed }`.
+   *
+   * - EVERY OTHER unit is moved by writing `view.position` outright -- the spline follower for
+   *   server creatures (`updateSplineFollowing`), and the peer handler at
+   *   `network/entity/entity.ts` for remote players. Neither maintains a velocity, so the speed has
+   *   to be measured. This is the reference's creature leg, whose `Spline::speed()` is likewise a
+   *   path length over a duration rather than a state field.
+   */
+  locomotionSpeed(delta: number): number {
+    const x = this.view.position.x;
+    const y = this.view.position.y;
+    const dx = x - this.locoPrevX;
+    const dy = y - this.locoPrevY;
+    const first = !this.locoTracking;
+
+    this.locoTracking = true;
+    this.locoPrevX = x;
+    this.locoPrevY = y;
+
+    if (this.isPlayer) {
+      return this.move.swimming ? this.move.swimStrokeSpeed : this.move.horizVel.length();
     }
+
+    // The FIRST measured frame has no previous position to difference against -- the unit spawned
+    // wherever it spawned, and `0 -> spawn point` is a teleport-sized delta.
+    if (first || delta <= 0) {
+      return 0;
+    }
+
+    const speed = Math.sqrt(dx * dx + dy * dy) / delta;
+    return speed > TELEPORT_SPEED ? 0 : speed;
+  }
+
+  /**
+   * The gait candidate list for a speed. See `GAIT_*` above for why this returns a list.
+   *
+   * Standing is a SPEED test here, not the flag test the reference uses for a player with wire
+   * flags (`select.rs:447`), because this client has no movement flags on the unit -- Controls
+   * computes them locally and does not publish them. The reference does exactly this same
+   * substitution on the one leg that also lacks flags, its spline creatures (`select.rs:958-962`).
+   */
+  gaitFor(speed: number): readonly number[] {
+    if (speed <= MOVING_EPSILON) {
+      return GAIT_STAND;
+    }
+    return speed > 2 * DEFAULT_WALK_SPEED ? GAIT_RUN : GAIT_WALK;
+  }
+
+  /**
+   * Pick this frame's gait and arm it -- once per unit per frame, from `World#animateEntities`.
+   *
+   * THE GUARD, and the whole reason this is not just `setAnimation(gait)` every frame: `InstanceAnim`
+   * is clock-indexed off `armedAtMs`, so re-arming a running loop pins its cursor at zero and the
+   * creature holds the first keyframe of its run cycle for ever. `setAnimation` already refuses to
+   * re-arm a running loop, and this method must not go behind its back -- so the arm is gated on the
+   * resolved SEQUENCE differing from the one already playing, which is the reference's own shape
+   * (`driver.rs:1017`, `if drv.gait == Some(target)` -> re-sync only, no re-arm).
+   */
+  updateLocomotion(delta: number) {
+    const speed = this.locomotionSpeed(delta);
+
+    const model = this.model;
+    if (!model) {
+      return;
+    }
+
+    const inst = model.instanceAnim;
+    const modelAnim = model.modelAnim;
+    if (!inst || !modelAnim) {
+      return;
+    }
+
+    // A one-shot still inside its play window OWNS the body: a jump, a landing, an attack swing.
+    // Locomotion runs every frame and would otherwise stomp it on the very next one, so nothing
+    // one-shot would ever be visible. The reference holds the same way and releases on the clip
+    // finishing (`driver.rs:868-884`, `Mode::Swing`). Loops are not held -- that is the gait itself.
+    const playing = inst.current;
+    if (playing !== null && !playing.loops && !inst.windowElapsed(worldClock.ms)) {
+      return;
+    }
+
+    const candidates = this.gaitFor(speed);
+
+    // Step down the list, taking the first id the model actually OWNS. `resolve` handing back a
+    // sequence whose id is not the one asked for means it fell back, so this rung is absent.
+    let target = candidates[candidates.length - 1];
+    let seq: Sequence | null = null;
+    for (let i = 0; i < candidates.length; ++i) {
+      const candidate = candidates[i];
+      const resolved = modelAnim.resolve(candidate);
+      if (resolved !== null && resolved.id === candidate) {
+        target = candidate;
+        seq = resolved;
+        break;
+      }
+    }
+
+    if (seq === null) {
+      // Nothing on the list is owned. Take whatever `resolve` falls back to for the last rung --
+      // sequence 0 -- rather than freezing in bind pose. Null only for a model with nothing
+      // playable at all (empty table, or every sequence quarantined as external).
+      seq = modelAnim.resolve(target);
+      if (seq === null) {
+        return;
+      }
+    }
+
+    if (inst.current === seq) {
+      return;
+    }
+
+    this.setAnimation(target);
   }
 
   clear() {

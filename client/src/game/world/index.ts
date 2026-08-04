@@ -525,6 +525,17 @@ export default class World extends EventEmitter {
 
       entity.update(delta);
 
+      // Gait selection, AFTER `entity.update` (the spline follower writes `view.position` in there,
+      // and the non-player speed leg differences that position) and BEFORE anything samples the
+      // instance below. The single call site: nothing else drives a unit's locomotion.
+      //
+      // Deliberately ABOVE the DRAW gate, unlike the material and bone work. Gait is state, not a
+      // pose: skipping it for an off-screen unit would leave it standing when it walks back into
+      // view, and the measured-displacement leg would then difference across the whole gap and read
+      // a teleport. It costs one vector subtract and, on the frames the gait actually changes, one
+      // `resolve` walk.
+      entity.updateLocomotion(delta);
+
       // Membership here does NOT imply `instanceAnim` is non-null -- a billboard-only model reaches
       // this loop for `applyBillboards` alone and never allocates an instance.
       const inst = model.instanceAnim;
