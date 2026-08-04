@@ -21,6 +21,10 @@ export interface SceneCounters {
   visibleMapDoodads: number;
   loadedMapDoodads: number;
   visibleDoodads: number;
+  animResident: number;
+  animPosed: number;
+  animSkipped: number;
+  animBonesSolved: number;
 }
 
 /**

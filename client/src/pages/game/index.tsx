@@ -10,6 +10,7 @@ import { GameSession } from '../../network/session';
 import Controls from './controls/controls';
 import DebugPanel from './debug/debug';
 import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
+import { animCounters } from '../../game/pipeline/m2/anim/counters';
 import './index.scss';
 
 interface IGameProps {
@@ -185,6 +186,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     }
 
     this.perf.beginFrame();
+    animCounters.reset();
 
     const delta = this.clock.getDelta();
 
@@ -251,6 +253,10 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         visibleMapDoodads: visibility?.stats.map?.visibleDoodads ?? 0,
         loadedMapDoodads: this.game.world.map?.doodadManager?.doodads.size ?? 0,
         visibleDoodads: visibility?.stats.wmo?.visibleDoodads ?? 0,
+        animResident: animCounters.resident,
+        animPosed: animCounters.posed,
+        animSkipped: animCounters.skipped,
+        animBonesSolved: animCounters.bonesSolved,
       });
 
       this.stats.end();
