@@ -43,15 +43,82 @@ describe('WMOGroupDefinition#fixVertexColors outdoor branch (root flag 0x08)', (
     }
   });
 
-  it('sets alpha 0 on an interior group', () => {
+  it('LEAVES an interior group\'s alpha alone -- it carries data', () => {
+    // This test used to assert alpha 0 here, which is what the code did and what the shader could not
+    // survive. Per samples/benilla `wmo/group.rs`, the alpha->0xFF fixup is the EXTERIOR case; on an
+    // interior group the alpha is the TRANS lit<->bake lerp factor and the INT self-illumination mask
+    // (`tex x mocv x (1 + 4 x alpha)`). Measured on NIGHTELFSMALLHOUSE_WSG_001: all 1587 vertices came
+    // out at alpha exactly 0, so both interior lanes were reading a wiped mask.
     const definition = Object.create(WMOGroupDefinition.prototype);
     const mocv = makeMocv(3);
 
     definition.fixVertexColors(3, { flags: 0x08 }, makeMogp(), { batches: [] }, mocv, false);
 
     for (const color of mocv.colors) {
-      expect(color.a).toBe(0);
+      expect(color.a).toBe(99);
     }
+  });
+
+  it('forces alpha opaque on an exterior group through the long path too', () => {
+    // The non-0x08 path stamped the same 255-or-0 at the end of its second loop.
+    const definition = Object.create(WMOGroupDefinition.prototype);
+    const mocv = makeMocv(3);
+
+    definition.fixVertexColors(
+      3, { flags: 0x02 }, makeMogp(), { batches: [] }, mocv, true,
+    );
+
+    for (const color of mocv.colors) {
+      expect(color.a).toBe(255);
+    }
+  });
+
+  it('preserves an interior alpha through the long path too', () => {
+    const definition = Object.create(WMOGroupDefinition.prototype);
+    const mocv = makeMocv(3);
+
+    definition.fixVertexColors(
+      3, { flags: 0x02 }, makeMogp(), { batches: [] }, mocv, false,
+    );
+
+    for (const color of mocv.colors) {
+      expect(color.a).toBe(99);
+    }
+  });
+});
+
+describe('WMOGroupDefinition.applyOutdoorVertexAlpha', () => {
+  const mocvOf = (alphas) => ({ colors: alphas.map((a) => ({ r: 1, g: 2, b: 3, a })) });
+
+  it('opaques from the given offset only', () => {
+    const mocv = mocvOf([10, 20, 30, 40]);
+
+    WMOGroupDefinition.applyOutdoorVertexAlpha(mocv, 2, 4, true);
+
+    expect(mocv.colors.map((c) => c.a)).toEqual([10, 20, 255, 255]);
+  });
+
+  it('does nothing at all for an interior group', () => {
+    const mocv = mocvOf([10, 20, 30, 40]);
+
+    WMOGroupDefinition.applyOutdoorVertexAlpha(mocv, 0, 4, false);
+
+    expect(mocv.colors.map((c) => c.a)).toEqual([10, 20, 30, 40]);
+  });
+
+  it('never touches rgb', () => {
+    const mocv = mocvOf([10]);
+
+    WMOGroupDefinition.applyOutdoorVertexAlpha(mocv, 0, 1, true);
+
+    expect(mocv.colors[0]).toMatchObject({ r: 1, g: 2, b: 3 });
+  });
+
+  it('tolerates a count past the end of the colour array', () => {
+    const mocv = mocvOf([10]);
+
+    expect(() => WMOGroupDefinition.applyOutdoorVertexAlpha(mocv, 0, 8, true)).not.toThrow();
+    expect(mocv.colors[0].a).toBe(255);
   });
 });
 

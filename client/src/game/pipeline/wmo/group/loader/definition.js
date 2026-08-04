@@ -188,6 +188,36 @@ class WMOGroupDefinition {
     return exterior ? 255 : 0;
   }
 
+  /**
+   * The exterior alpha fixup: force MOCV alpha opaque on an EXTERIOR group, and leave an interior
+   * group's alpha ALONE.
+   *
+   * This used to stamp `resolveOutdoorVertexAlpha(exterior)` -- 255 or **0** -- across every vertex,
+   * which wiped an interior group's alpha to zero. That alpha carries data (samples/benilla
+   * `wmo/group.rs`): "on an interior TRANS batch it is the lit<->bake lerp factor ...; every other
+   * batch class forces it opaque below (alpha encodes blend/unused there -- the exterior alpha->0xFF
+   * fixup)". The ->0xFF fixup is the EXTERIOR case.
+   *
+   * Both interior lanes read it: INT self-illumination is `tex x mocv x (1 + 4 x alpha)` and TRANS is
+   * `mix(1, lit, alpha)`. Zeroing it collapses the first to a plain `tex x mocv` and pins the second
+   * to fully unlit. Measured on NIGHTELFSMALLHOUSE_WSG_001: every one of its 1587 vertices came out
+   * with alpha exactly 0.
+   */
+  static applyOutdoorVertexAlpha(mocv, from, vertexCount, exterior) {
+    if (!exterior) {
+      return;
+    }
+
+    const alpha = WMOGroupDefinition.resolveOutdoorVertexAlpha(true);
+
+    for (let index = from; index < vertexCount; ++index) {
+      const color = mocv.colors[index];
+      if (color) {
+        color.a = alpha;
+      }
+    }
+  }
+
   fixVertexColors(vertexCount, rootHeader, mogp, moba, mocv, exterior) {
     if (!mocv) {
       return;
@@ -202,15 +232,9 @@ class WMOGroupDefinition {
       batchStartB = firstBatchB ? firstBatchB.firstVertex : vertexCount;
     }
 
-    // Root Flag 0x08: something about outdoor groups
+    // Root Flag 0x08 (do_not_fix_vertex_color_alpha): rgb passes through untouched.
     if (rootHeader.flags & 0x08) {
-      const alpha = WMOGroupDefinition.resolveOutdoorVertexAlpha(exterior);
-
-      for (let index = batchStartB; index < vertexCount; ++index) {
-        const color = mocv.colors[index];
-        color.a = alpha;
-      }
-
+      WMOGroupDefinition.applyOutdoorVertexAlpha(mocv, batchStartB, vertexCount, exterior);
       return;
     }
 
@@ -262,9 +286,11 @@ class WMOGroupDefinition {
       color.r = MathUtil.clamp(color.r, 0, 255);
       color.g = MathUtil.clamp(color.g, 0, 255);
       color.b = MathUtil.clamp(color.b, 0, 255);
-
-      color.a = WMOGroupDefinition.resolveOutdoorVertexAlpha(exterior);
     }
+
+    // Same reasoning as the 0x08 branch above: opaque on an exterior group, untouched on an interior
+    // one, whose alpha the INT and TRANS lanes both read as data.
+    WMOGroupDefinition.applyOutdoorVertexAlpha(mocv, batchStartB, vertexCount, exterior);
   }
 
   createMaterialRefs(groupData) {
