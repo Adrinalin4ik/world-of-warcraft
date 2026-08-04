@@ -240,3 +240,49 @@ describe('WMOGroupDefinition.usableVertexColors', () => {
     expect(WMOGroupDefinition.usableVertexColors(mocvOf(0), 0, 'X.WMO', 0)).not.toBeNull();
   });
 });
+
+describe('WMOGroupDefinition.usableVertexColors on the unified render path', () => {
+  // MOHD 0x02 (`use_unified_render_path`): MOCV is not the shade multiplier there, so the group is
+  // treated as carrying no colours -- neutral, which the shader's x2 turns into white. A deliberate
+  // divergence from the reference, which reads no MOHD flags for lighting; see
+  // WMORootFlags.UNIFIED_RENDER_PATH for the five in-game measurements behind it.
+  const mocvOf = (count) => ({
+    colors: Array.from({ length: count }, () => ({ r: 3, g: 3, b: 3, a: 255 })),
+  });
+
+  it('drops parallel MOCV when the bit is set', () => {
+    const mocv = mocvOf(8);
+
+    expect(WMOGroupDefinition.usableVertexColors(mocv, 8, 'X.WMO', 0, { flags: 0x02 })).toBeNull();
+  });
+
+  it('drops it for the real observed flag word too', () => {
+    // NIGHTELFSMALLHOUSE_WSG carries 0xf.
+    expect(WMOGroupDefinition.usableVertexColors(mocvOf(8), 8, 'X.WMO', 0, { flags: 0xf }))
+      .toBeNull();
+  });
+
+  it('keeps MOCV for the flag words that render correctly', () => {
+    // CTFORC_A, CTFNIGHTELF_A and ORCHUT_WSG all carry 0x5, and none of them is black.
+    const mocv = mocvOf(8);
+
+    expect(WMOGroupDefinition.usableVertexColors(mocv, 8, 'X.WMO', 0, { flags: 0x5 })).toBe(mocv);
+    expect(WMOGroupDefinition.usableVertexColors(mocv, 8, 'X.WMO', 0, { flags: 0x0 })).toBe(mocv);
+  });
+
+  it('keeps MOCV when no root header is supplied at all', () => {
+    const mocv = mocvOf(8);
+
+    expect(WMOGroupDefinition.usableVertexColors(mocv, 8, 'X.WMO', 0)).toBe(mocv);
+  });
+
+  it('still rejects a non-parallel chunk regardless of the bit', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    expect(WMOGroupDefinition.usableVertexColors(mocvOf(4), 8, 'X.WMO', 0, { flags: 0x0 }))
+      .toBeNull();
+    expect(warn).toHaveBeenCalled();
+
+    warn.mockRestore();
+  });
+});

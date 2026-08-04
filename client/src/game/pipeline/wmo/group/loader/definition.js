@@ -1,4 +1,5 @@
 import MathUtil from '../../../../utils/math-util';
+import WMORootFlags from '../../root/flags';
 
 class WMOGroupDefinition {
 
@@ -85,7 +86,7 @@ class WMOGroupDefinition {
     // one would have been read from the wrong offset, either way producing colours that belong to
     // other vertices. Both consumers below take the checked value.
     const mocv = WMOGroupDefinition.usableVertexColors(
-      groupData.MOCV, vertexCount, this.path, this.index,
+      groupData.MOCV, vertexCount, this.path, this.index, rootHeader,
     );
 
     // Carried onto the definition as plain numbers so they survive the structured clone out of the
@@ -121,8 +122,16 @@ class WMOGroupDefinition {
    * Logged rather than swallowed: a whole building rendering unshaded is a thing to know about, and
    * the count pair is the only evidence that distinguishes a data quirk from a parse fault.
    */
-  static usableVertexColors(mocv, vertexCount, path, index) {
+  static usableVertexColors(mocv, vertexCount, path, index, rootHeader) {
     if (!mocv || !mocv.colors) {
+      return null;
+    }
+
+    // `use_unified_render_path`: MOCV is not the shade multiplier on that path, so the group is
+    // treated exactly as one carrying no colours -- neutral, which the shader's x2 turns into white.
+    // See WMORootFlags.UNIFIED_RENDER_PATH for the five measurements behind reading this bit, and for
+    // why it is a deliberate divergence from the reference.
+    if (rootHeader && (rootHeader.flags & WMORootFlags.UNIFIED_RENDER_PATH)) {
       return null;
     }
 
