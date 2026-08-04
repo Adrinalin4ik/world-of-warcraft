@@ -213,3 +213,87 @@ describe('WmoProvider', () => {
     expect(out[0].normal.z).toBeLessThan(0);
   });
 });
+
+describe('WmoProvider placement cache', () => {
+  // There is one collider per PLACEMENT now, not one per file, so a city puts hundreds in the registry
+  // and every cast walks all of them -- several casts per frame. The cache turns the per-collider cost
+  // from "inverse matrix + transformed box + BSP descent" into one world-space box overlap.
+  it('rejects a distant placement without ever querying its BSP', () => {
+    const provider = new WmoProvider();
+    const far = collider([0], new THREE.Vector3(500, 500, 500));
+    provider.add(far);
+
+    provider.gather(bigBox(), CollisionLayer.Walk, []);
+
+    expect(far.bspTree.queriedWith).toBeNull();
+  });
+
+  it('still queries a placement the box reaches', () => {
+    const provider = new WmoProvider();
+    const near = collider([0]);
+    provider.add(near);
+
+    const out: Triangle[] = [];
+    provider.gather(bigBox(), CollisionLayer.Walk, out);
+
+    expect(near.bspTree.queriedWith).not.toBeNull();
+    expect(out).toHaveLength(1);
+  });
+
+  it('follows a placement that MOVES, rather than freezing at the old spot', () => {
+    // The cache is keyed on the matrix itself, not a dirty flag. A stale cache here would leave a
+    // building's collision behind where it used to stand.
+    const provider = new WmoProvider();
+    const c = collider([0]);
+    provider.add(c);
+
+    const atOrigin: Triangle[] = [];
+    provider.gather(bigBox(), CollisionLayer.Walk, atOrigin);
+    expect(atOrigin).toHaveLength(1);
+
+    c.view.position.set(500, 500, 500);
+    c.view.updateMatrix();
+    c.view.updateMatrixWorld(true);
+
+    const afterMove: Triangle[] = [];
+    provider.gather(bigBox(), CollisionLayer.Walk, afterMove);
+
+    expect(afterMove).toHaveLength(0);
+
+    const atNewPlace: Triangle[] = [];
+    provider.gather(new THREE.Box3(
+      new THREE.Vector3(490, 490, 490), new THREE.Vector3(510, 510, 510),
+    ), CollisionLayer.Walk, atNewPlace);
+
+    expect(atNewPlace).toHaveLength(1);
+  });
+
+  it('keeps a separate cache per placement of the same building', () => {
+    // Two placements share geometry and a BSP; only their transforms differ. One shared cache would
+    // give them both whichever box was computed last -- the same class of aliasing that made two
+    // placements report byte-identical world bounds and left one building missing.
+    const provider = new WmoProvider();
+    const near = collider([0]);
+    const far = collider([0], new THREE.Vector3(500, 0, 0));
+    provider.add(near);
+    provider.add(far);
+
+    const out: Triangle[] = [];
+    provider.gather(bigBox(), CollisionLayer.Walk, out);
+
+    expect(out).toHaveLength(1);
+    expect(far.bspTree.queriedWith).toBeNull();
+    expect(near.bspTree.queriedWith).not.toBeNull();
+  });
+
+  it('gathers nothing and does not throw for a BSP with no vertices', () => {
+    const provider = new WmoProvider();
+    const c = collider([0]);
+    c.bspTree.vertices = [];
+    provider.add(c);
+
+    const out: Triangle[] = [];
+    expect(() => provider.gather(bigBox(), CollisionLayer.Walk, out)).not.toThrow();
+    expect(out).toHaveLength(0);
+  });
+});

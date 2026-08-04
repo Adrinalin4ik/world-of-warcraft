@@ -11,10 +11,25 @@ export interface WmoCollider {
   bspTree: any;
   /** MOPY flags, one byte per triangle, sharing the BSP's triangle indexing. */
   triangleFlags?: Uint8Array;
+
+  /**
+   * Per-collider cache, filled on first gather and refreshed only when the placement transform
+   * actually changes.
+   *
+   * There is now one collider per PLACEMENT rather than one per file, so a city puts hundreds in the
+   * registry and every cast walks all of them -- and a frame runs several casts (the slide's four
+   * iterations, the ground classify, the election snap, the camera boom). Recomputing an inverse
+   * matrix and transforming the query box per collider per cast is what that costs; a world-space
+   * box test rejects almost all of them for a fraction of it.
+   */
+  cache?: {
+    matrix: THREE.Matrix4;
+    worldBox: THREE.Box3;
+    inverse: THREE.Matrix4;
+  };
 }
 
 const _localBox = new THREE.Box3();
-const _inverse = new THREE.Matrix4();
 const _a = new THREE.Vector3();
 const _b = new THREE.Vector3();
 const _c = new THREE.Vector3();
@@ -67,6 +82,50 @@ export class WmoProvider {
     }
   }
 
+  /**
+   * The collider's cached inverse and world bounds, refreshed only when the placement moved.
+   *
+   * Keyed on the matrix itself rather than a dirty flag: WMO placements are static after load, so this
+   * compares equal on every frame after the first and the recompute never runs again. `Matrix4.equals`
+   * is sixteen float compares -- cheaper than the inverse it guards by a wide margin, and far cheaper
+   * than being wrong if a placement ever does move.
+   *
+   * The world box comes from the BSP's own vertices, not from `group.boundingBox`: MOGP's bounds cover
+   * the RENDER geometry, and the collision hull is a different, usually smaller set. Using the render
+   * bounds would still be correct (they contain the hull) but would reject less.
+   */
+  private cacheFor(collider: WmoCollider) {
+    const matrixWorld = collider.view.matrixWorld;
+
+    if (collider.cache && collider.cache.matrix.equals(matrixWorld)) {
+      return collider.cache;
+    }
+
+    const cache = collider.cache ?? {
+      matrix: new THREE.Matrix4(),
+      worldBox: new THREE.Box3(),
+      inverse: new THREE.Matrix4(),
+    };
+
+    cache.matrix.copy(matrixWorld);
+    cache.inverse.copy(matrixWorld).invert();
+
+    const vertices: ArrayLike<number> | undefined = collider.bspTree?.vertices;
+    cache.worldBox.makeEmpty();
+
+    if (vertices) {
+      for (let i = 0; i + 2 < vertices.length; i += 3) {
+        _a.set(vertices[i], vertices[i + 1], vertices[i + 2]);
+        cache.worldBox.expandByPoint(_a);
+      }
+      cache.worldBox.applyMatrix4(matrixWorld);
+    }
+
+    collider.cache = cache;
+
+    return cache;
+  }
+
   private gatherOne(
     collider: WmoCollider, worldBox: THREE.Box3, layer: CollisionLayer, out: Triangle[],
   ): void {
@@ -80,8 +139,16 @@ export class WmoProvider {
     // subtrees to fix it.
     view.updateWorldMatrix(true, false);
 
-    _inverse.copy(view.matrixWorld).invert();
-    _localBox.copy(worldBox).applyMatrix4(_inverse);
+    const cache = this.cacheFor(collider);
+
+    // WORLD-space reject first, and this is the whole point of the cache. Almost every collider in a
+    // city is nowhere near the query, and this rules it out with one box overlap instead of an inverse
+    // matrix, a transformed box and a BSP descent.
+    if (!cache.worldBox.intersectsBox(worldBox)) {
+      return;
+    }
+
+    _localBox.copy(worldBox).applyMatrix4(cache.inverse);
 
     const leaves: number[] = bspTree.query(_localBox, 0);
     if (!leaves || leaves.length === 0) {
