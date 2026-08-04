@@ -204,3 +204,47 @@ export function sampleQuat(
 
   return out.slerp(scratchQuat, fraction(timestamps, k0, tMs));
 }
+
+/** Sample at `elapsed mod period` — a loop. */
+export const WRAP = 0;
+/** Sample at `min(elapsed, period)` — a one-shot that holds its tail. */
+export const CLAMP = 1;
+
+export type ClockLaw = typeof WRAP | typeof CLAMP;
+
+/**
+ * Which clock a channel runs on. Decided from the DATA, at build time -- never by the caller,
+ * which is how benilla got it wrong first (`key_anim.rs:74-88`).
+ *
+ * A global sequence has its own free-running clock, the same loop in every animation, so it wraps
+ * regardless of what the playing sequence does. An ordinary sequence track inherits the sequence's
+ * own loop flag.
+ *
+ * The distinction is only ever visible at the very end of a one-shot clip -- and that is exactly
+ * where it is load-bearing. An elemental's Death sequence fades every batch to alpha 0; wrap that
+ * clock and one frame later the corpse is fully opaque and frozen in mid-air, permanently.
+ */
+export function clockLaw(block: AnimBlock, sequenceLoops: boolean): ClockLaw {
+  if (block.globalSequenceID > -1) {
+    return WRAP;
+  }
+  return sequenceLoops ? WRAP : CLAMP;
+}
+
+/**
+ * The cursor to sample at, given elapsed time on this channel's own clock.
+ *
+ * A zero or negative period degrades to 0 rather than producing NaN: a constant channel has no
+ * clock at all, and a NaN cursor would silently poison every downstream matrix.
+ */
+export function cursorMs(law: ClockLaw, elapsedMs: number, periodMs: number): number {
+  if (periodMs <= 0) {
+    return 0;
+  }
+  if (law === CLAMP) {
+    return elapsedMs < 0 ? 0 : elapsedMs > periodMs ? periodMs : elapsedMs;
+  }
+  // Euclidean remainder: a negative elapsed time must land inside the period, not outside it.
+  const wrapped = elapsedMs % periodMs;
+  return wrapped < 0 ? wrapped + periodMs : wrapped;
+}

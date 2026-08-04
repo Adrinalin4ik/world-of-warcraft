@@ -1,6 +1,6 @@
 /** @jest-environment node */
 import * as THREE from 'three';
-import { AnimBlock, isStep, sampleQuat, sampleScalar, sampleVec3, SeqTrack, trackFor } from '../tracks';
+import { AnimBlock, isStep, sampleQuat, sampleScalar, sampleVec3, SeqTrack, trackFor, WRAP, CLAMP, clockLaw, cursorMs } from '../tracks';
 
 const track = (timestamps: number[], values: unknown[]): SeqTrack =>
   ({ animationIndex: 0, timestamps, values });
@@ -167,5 +167,61 @@ describe('sampleQuat', () => {
   it('holds the final key past the end', () => {
     const out = sampleQuat(q, false, 9999, new THREE.Quaternion());
     expect(out.angleTo(b)).toBeCloseTo(0, 6);
+  });
+});
+
+describe('clockLaw', () => {
+  const gseq: AnimBlock = { interpolationType: 1, globalSequenceID: 3, tracks: [] };
+  const seq: AnimBlock = { interpolationType: 1, globalSequenceID: -1, tracks: [] };
+
+  it('always wraps a global sequence, whatever the playing sequence does', () => {
+    expect(clockLaw(gseq, true)).toBe(WRAP);
+    expect(clockLaw(gseq, false)).toBe(WRAP);
+  });
+
+  it('follows the sequence loop flag for an ordinary track', () => {
+    expect(clockLaw(seq, true)).toBe(WRAP);
+    expect(clockLaw(seq, false)).toBe(CLAMP);
+  });
+});
+
+describe('cursorMs', () => {
+  it('wraps within the period', () => {
+    expect(cursorMs(WRAP, 250, 100)).toBe(50);
+    expect(cursorMs(WRAP, 100, 100)).toBe(0);
+  });
+
+  it('clamps at the period for a one-shot', () => {
+    expect(cursorMs(CLAMP, 250, 100)).toBe(100);
+    expect(cursorMs(CLAMP, 50, 100)).toBe(50);
+  });
+
+  it('never returns a negative cursor', () => {
+    expect(cursorMs(WRAP, -30, 100)).toBe(70);
+    expect(cursorMs(CLAMP, -30, 100)).toBe(0);
+  });
+
+  it('degrades to 0 for a zero-length period instead of dividing by zero', () => {
+    expect(cursorMs(WRAP, 250, 0)).toBe(0);
+    expect(cursorMs(CLAMP, 250, 0)).toBe(0);
+  });
+});
+
+/**
+ * The regression this whole distinction exists to prevent, stated as the failure it produces:
+ * a Death sequence fades every batch to alpha 0, and a wrapped clock snaps it back to a fully
+ * opaque body frozen in mid-air one frame later, for ever.
+ */
+describe('one-shot tail behaviour', () => {
+  const fade = track([0, 500, 1000], [1, 0.5, 0]);
+
+  it('holds alpha 0 past the end of a one-shot', () => {
+    const t = cursorMs(CLAMP, 1500, 1000);
+    expect(sampleScalar(fade, false, t, 1)).toBe(0);
+  });
+
+  it('would snap back to opaque if the clock wrapped -- the bug being prevented', () => {
+    const t = cursorMs(WRAP, 1500, 1000);
+    expect(sampleScalar(fade, false, t, 1)).toBeCloseTo(0.5, 5);
   });
 });
