@@ -31,6 +31,7 @@ import {
   fogTriple,
   MAIN_MENU_FOG,
   RACE_LIGHTS,
+  RaceLightRow,
   verticalFov,
 } from './scene-rig';
 import { GlueScene, raceKey, scenePath, sceneToken } from './tokens';
@@ -126,8 +127,20 @@ export class GlueSceneView {
    * `ModelFFX` values).
    */
   private buildRig(scene: GlueScene, model: any): NonNullable<GlueSceneView['lighting']> {
-    const key = scene.kind === 'mainmenu' ? 'CHARACTERSELECT' : raceKey(scene.race);
-    const rows = RACE_LIGHTS[key] ?? RACE_LIGHTS.HUMAN;
+    // The LOGIN screen's rig is not a race rig, and giving it one was a fabrication. Read the data:
+    // `SetLighting` is called from exactly one place, `SetBackgroundModel` (glueparent.lua:385),
+    // which only character select and create use. `accountlogin.lua` never calls it — it sets the
+    // model, plays sequence 0, and authors fog and `glow` on the ModelFFX frame itself. So the main
+    // menu takes the engine's DEFAULT background rig ("ResetLights() sets all 6 light sets to default
+    // for the background ... most backgrounds have 3", glueparent.lua:348), whose values are not in
+    // any Lua table we can read. A flat white ambient stands in for it here: measured, it changes the
+    // stage's brightness and nothing else, and it is honest about being a placeholder rather than
+    // borrowing CHARACTERSELECT's rows and pretending that is the law. Spec 3 resolves it against
+    // the real screen.
+    const rows: RaceLightRow[] =
+      scene.kind === 'mainmenu'
+        ? [[1, 0, 0, 0, -1, 1.0, 1.0, 1.0, 1.0, 0.0, 0, 0, 0]]
+        : RACE_LIGHTS[raceKey(scene.race)] ?? RACE_LIGHTS.HUMAN;
     const { probe } = foldRaceLights(rows);
 
     const pointLights: SelectedLight[] = [];
@@ -160,7 +173,7 @@ export class GlueSceneView {
       };
     }
 
-    const fog = fogTriple(key);
+    const fog = fogTriple(raceKey(scene.race));
     return {
       probe,
       pointLights,
