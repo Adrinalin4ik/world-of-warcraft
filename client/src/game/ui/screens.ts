@@ -9,6 +9,7 @@
  */
 import * as THREE from 'three';
 
+import { worldClock } from '../pipeline/m2/anim/world-clock';
 import { GlueArt } from './art';
 import { GlueInput } from './input';
 import { GlueRenderer } from './renderer';
@@ -137,6 +138,13 @@ export class GlueApp {
 
     const dt = (now - this.lastTime) / 1000;
     this.lastTime = now;
+
+    // `world-clock.ts` documents `World#animate` as the clock's one advance site, but the glue app
+    // is a SEPARATE frame loop that never runs concurrently with the world -- they are different
+    // routes, and the glue app is torn down before the game screen mounts. This is the glue side's
+    // own advance site: the scene view arms instances against `worldClock.ms` and would otherwise
+    // sample a permanently frozen clock, since `World#animate` never runs while a glue screen is up.
+    worldClock.advance(dt);
 
     if (this.pending) {
       const next = this.pending;
