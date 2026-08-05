@@ -1,7 +1,7 @@
 import React from 'react';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import './app.scss';
-import { GameSession } from './network/session';
+import { sessionForSearch } from './network/offline-session';
 import Auth from './pages/auth/auth';
 import CharactersScreen from './pages/characters';
 import GameScreen from './pages/game';
@@ -10,7 +10,8 @@ import RealmsScreen from './pages/realms/realms';
 
 
 const App: React.FC = () => {
-  const gameSession = new GameSession();
+  // `?offline=1` builds a session that never connects -- the debug path into the world.
+  const gameSession = sessionForSearch(window.location.search);
 
   // // if (window.location.pathname != '/') {
   // //   window.location.replace('/' + window.location.search);

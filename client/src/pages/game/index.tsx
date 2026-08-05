@@ -6,6 +6,7 @@ import { DepthPass, EffectComposer } from 'postprocessing';
 import * as THREE from 'three';
 import spots from '../../game/world/spots';
 import { GameHandler } from '../../network/game/handler';
+import { offlineSpot } from '../../network/offline-session';
 import { GameSession } from '../../network/session';
 import Controls from './controls/controls';
 import DebugPanel from './debug/debug';
@@ -152,6 +153,13 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     window.addEventListener('resize', this.resize.bind(this));
 
     this.game.world.run();
+
+    // Offline debug entry: nothing will ever send us a login-verify, so place the character now.
+    if ((this.props.session as any).offline) {
+      const spot = offlineSpot();
+      this.game.world.player.worldport(spot.zoneId, spot.coords);
+      this.setState({ currentLocation: spot.id });
+    }
   }
 
   // No forceUpdate here. This component's state (renderer, composer, currentLocation) changes at
