@@ -99,15 +99,28 @@ describe('LoginScreen', () => {
     const remounted = new LoginScreen();
     remounted.mount(second.ctx as never);
     expect(find(second.root, 'login-account').text).toBe('tester');
+    remounted.unmount();
+
+    // Submitted a third time with the box unchecked -- and explicitly unchecked, since mount
+    // pre-checks it from the settings just saved above -- the name must not still come back.
+    const third = fakeContext(fakeProtocol());
+    const unchecked = new LoginScreen();
+    unchecked.mount(third.ctx as never);
+    find(third.root, 'login-account').text = 'someone-else';
+    find(third.root, 'login-password').text = 'secret';
+    find(third.root, 'login-save-name').checked = false;
+    find(third.root, 'login-login').onClick!();
+
+    expect(loadSettings().savedAccount).toBeUndefined();
   });
 });
 
 describe('applyRealmlistOverride', () => {
   it('takes host and port from the URL, so a link can point at another server', () => {
-    const overridden = applyRealmlistOverride(DEFAULT_SETTINGS, '?realmlist=logon.example.com:3724');
+    const overridden = applyRealmlistOverride(DEFAULT_SETTINGS, '?realmlist=logon.example.com:8085');
 
     expect(overridden.logonHost).toBe('logon.example.com');
-    expect(overridden.logonPort).toBe(3724);
+    expect(overridden.logonPort).toBe(8085);
   });
 
   it('keeps the existing port when the URL gives only a host', () => {
