@@ -12,6 +12,8 @@ import * as THREE from 'three';
 import { GlueArt } from './art';
 import { GlueInput } from './input';
 import { GlueRenderer } from './renderer';
+import { GlueSceneView } from './scene/glue-scene';
+import { GlueScene } from './scene/tokens';
 import { GlueStrings } from './strings';
 import { FontStringTextures, loadGlueFonts } from './text';
 import { DrawItem, WidgetRoot } from './widget';
@@ -30,6 +32,8 @@ export interface GlueContext {
   art: GlueArt;
   strings: GlueStrings;
   input: GlueInput;
+  /** Show a glue background scene, or null to tear it down. */
+  setScene(scene: GlueScene | null): void;
   /** Request a state change; takes effect before the next frame. */
   go(state: ClientState): void;
 }
@@ -47,6 +51,7 @@ export class GlueApp {
   private readonly fonts = new FontStringTextures();
   private readonly art = new GlueArt();
   private readonly input: GlueInput;
+  private readonly sceneView: GlueSceneView;
 
   private strings: GlueStrings | null = null;
   private screens = new Map<ClientState, GlueScreen>();
@@ -62,6 +67,7 @@ export class GlueApp {
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.ui = new GlueRenderer(this.renderer);
     this.input = new GlueInput(canvas);
+    this.sceneView = new GlueSceneView(this.renderer);
   }
 
   register(state: ClientState, screen: GlueScreen): void {
@@ -87,6 +93,7 @@ export class GlueApp {
     this.input.detach();
     this.current?.screen.unmount();
     this.current = null;
+    this.sceneView.dispose();
     this.ui.dispose();
     this.fonts.dispose();
     this.art.dispose();
@@ -113,11 +120,14 @@ export class GlueApp {
       art: this.art,
       strings: this.strings!,
       input: this.input,
+      setScene: (scene) => this.sceneView.setScene(scene),
       go: (next) => {
         this.pending = next;
       },
     };
 
+    // A screen that wants no scene gets none, and a screen that wants one asks on mount.
+    this.sceneView.setScene(null);
     screen.mount(ctx);
     this.current = { state, screen, root };
   }
@@ -140,11 +150,14 @@ export class GlueApp {
 
     this.current.screen.update(dt);
 
+    this.renderer.clear();
+    this.sceneView.update(dt);
+    this.sceneView.render();
+
     const viewport = { width: window.innerWidth, height: window.innerHeight };
     const items = this.current.root.drawList(viewport);
     this.input.setDrawList(items);
 
-    this.renderer.clear();
     this.ui.render(items, (item) => this.resolveSprite(item, screenScale(viewport.height)));
   };
 

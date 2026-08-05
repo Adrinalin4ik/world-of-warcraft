@@ -29,6 +29,10 @@ export class ProbeScreen implements GlueScreen {
     ctx.art.registerAll(PROBE_ART);
     void ctx.art.load();
 
+    // The login scene, chosen exactly as accountlogin.lua does. `northrend: false` is the base
+    // main menu; spec 3 picks the variant from the account's expansion level.
+    ctx.setScene({ kind: 'mainmenu', northrend: false });
+
     const logo = ctx.root.root.add(new Widget('texture', 'probe-logo'));
     logo.layer = 'BACKGROUND';
     logo.sprite = 'logo';
