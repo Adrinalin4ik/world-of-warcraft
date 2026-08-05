@@ -28,6 +28,22 @@ export const DEFAULT_SETTINGS: ConnectionSettings = {
   rewriteRealmHost: true,
 };
 
+/**
+ * The logon host a fresh install should show and dial.
+ *
+ * `DEFAULT_SETTINGS` cannot carry this as a constant: the WebSocket-to-TCP proxies listen on the host
+ * the app was SERVED from (which is why `network/config`'s `serverhost` is `window.location.hostname`),
+ * so the honest default is a property of the page rather than a literal. This matters now that the
+ * screen's address field actually dials -- before it did, `localhost` was merely wrong on screen.
+ * Storage still wins over this, and this wins over `DEFAULT_SETTINGS.logonHost`.
+ */
+function servedHost(): string {
+  if (typeof window === 'undefined') {
+    return DEFAULT_SETTINGS.logonHost;
+  }
+  return window.location.hostname || DEFAULT_SETTINGS.logonHost;
+}
+
 type Storage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
 
 function defaultStorage(): Storage | null {
@@ -40,15 +56,17 @@ function defaultStorage(): Storage | null {
 }
 
 export function loadSettings(storage: Storage | null = defaultStorage()): ConnectionSettings {
+  const defaults: ConnectionSettings = { ...DEFAULT_SETTINGS, logonHost: servedHost() };
+
   try {
     const raw = storage?.getItem(STORAGE_KEY);
     if (!raw) {
-      return DEFAULT_SETTINGS;
+      return defaults;
     }
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    return { ...defaults, ...JSON.parse(raw) };
   } catch {
     // Corrupt or partially written settings must not stop the client from starting.
-    return DEFAULT_SETTINGS;
+    return defaults;
   }
 }
 

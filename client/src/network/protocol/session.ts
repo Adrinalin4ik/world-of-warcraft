@@ -15,6 +15,7 @@ import { LoginStage } from './stages';
 import {
   CharacterRecord,
   CharCreateRequest,
+  LogonEndpoint,
   LogonTransport,
   ProtocolRefusal,
   ProtocolRefusalError,
@@ -43,6 +44,12 @@ export class ProtocolSession {
   private refusal_: ProtocolRefusal | null = null;
 
   private credentials: { account: string; password: string } | null = null;
+  /**
+   * The address the current attempt was told to dial, if the caller named one. Held beside the
+   * credentials, and cleared with them, because the 3 s retry has to dial the same place the player
+   * asked for -- not silently fall back to the transport's baked default.
+   */
+  private endpoint: LogonEndpoint | null = null;
   private sessionKey: Uint8Array | null = null;
   /**
    * Whether `chooseRealm` has successfully joined a realm on the current login. Deliberately NOT
@@ -116,6 +123,7 @@ export class ProtocolSession {
       this.retryTimer = null;
     }
     this.credentials = null;
+    this.endpoint = null;
     this.refusal_ = null;
     this.notify();
   }
@@ -126,7 +134,12 @@ export class ProtocolSession {
     return () => this.listeners.delete(listener);
   }
 
-  async login(account: string, password: string): Promise<void> {
+  /**
+   * `endpoint` is where to dial; omitted, the transport's own default stands. It arrives here rather
+   * than at construction because the player can edit the server address on the login screen right up
+   * until they submit.
+   */
+  async login(account: string, password: string, endpoint?: LogonEndpoint): Promise<void> {
     // A fresh login invalidates whatever a previous login joined, and a manual retry here must
     // replace any retry the last failure scheduled -- not stack behind it.
     if (this.retryTimer !== null) {
@@ -138,6 +151,7 @@ export class ProtocolSession {
     // would let a stale disconnect from the old connection read it and fake a live realm list.
     this.sessionKey = null;
     this.credentials = { account, password };
+    this.endpoint = endpoint ?? null;
     this.refusal_ = null;
     return this.attemptLogin();
   }
@@ -219,6 +233,7 @@ export class ProtocolSession {
       const { sessionKey } = await this.logon.authenticate(
         credentials.account,
         credentials.password,
+        this.endpoint ?? undefined,
       );
       this.sessionKey = sessionKey;
 
@@ -240,6 +255,7 @@ export class ProtocolSession {
     if (error instanceof ProtocolRefusalError) {
       this.refusal_ = error.refusal;
       this.credentials = null;
+      this.endpoint = null;
       // Nothing is left to join with: clear the key too, or a stale disconnect from the earlier
       // connection could still read it and claim a realm list right after this refusal.
       this.sessionKey = null;

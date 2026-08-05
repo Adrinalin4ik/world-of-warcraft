@@ -8,7 +8,7 @@
 import SRP from '../../crypto/srp';
 import Socket from '../../net/socket';
 import { isLogonSuccess, logonRefusal } from '../stages';
-import { LogonTransport, ProtocolRefusalError, RealmInfo } from '../types';
+import { LogonEndpoint, LogonTransport, ProtocolRefusalError, RealmInfo } from '../types';
 import {
   decodeLogonChallenge,
   decodeLogonProof,
@@ -80,7 +80,11 @@ export class WotlkLogonTransport implements LogonTransport {
     this.io.onMessage((bytes) => this.receive(bytes));
   }
 
-  async authenticate(account: string, password: string): Promise<{ sessionKey: Uint8Array }> {
+  async authenticate(
+    account: string,
+    password: string,
+    endpoint?: LogonEndpoint,
+  ): Promise<{ sessionKey: Uint8Array }> {
     if (this.authResolve) {
       throw new Error('authenticate() is already in progress on this transport');
     }
@@ -97,7 +101,12 @@ export class WotlkLogonTransport implements LogonTransport {
     this.password = password.toUpperCase();
 
     try {
-      await this.io.connect(this.config.host, this.config.port);
+      // The caller's endpoint wins, and `network/config`'s baked value is only the DEFAULT: this is
+      // what makes the login screen's server-address field (and `?realmlist=`) actually dial.
+      await this.io.connect(
+        endpoint?.host ?? this.config.host,
+        endpoint?.port ?? this.config.port,
+      );
     } catch (error) {
       // A failed connect must leave the transport able to try again, not stuck holding a slot no
       // call will ever finish.

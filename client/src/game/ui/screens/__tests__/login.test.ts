@@ -77,7 +77,28 @@ describe('LoginScreen', () => {
 
     find(root, 'login-login').onClick!();
 
-    expect(protocol.login).toHaveBeenCalledWith('tester', 'secret');
+    // The endpoint is the next test's business; this one is only about the credentials.
+    expect(protocol.login).toHaveBeenCalledWith('tester', 'secret', expect.any(Object));
+  });
+
+  it('dials the address the player typed, not the config default', () => {
+    // The regression: the field wrote localStorage and nothing else, so the client still dialled the
+    // host baked into `network/config` however the player edited it.
+    const protocol = fakeProtocol();
+    const { ctx, root } = fakeContext(protocol);
+    const screen = new LoginScreen();
+    screen.mount(ctx as never);
+
+    find(root, 'login-account').text = 'tester';
+    find(root, 'login-password').text = 'secret';
+    find(root, 'login-server').text = 'logon.example.com:8085';
+
+    find(root, 'login-login').onClick!();
+
+    expect(protocol.login).toHaveBeenCalledWith('tester', 'secret', {
+      host: 'logon.example.com',
+      port: 8085,
+    });
   });
 
   it('remembers the account name only when asked', () => {

@@ -357,15 +357,24 @@ export class LoginScreen implements GlueScreen {
       return;
     }
 
-    const [host, port] = this.server.text.split(':');
+    const current = loadSettings();
+    const [typedHost, typedPort] = this.server.text.split(':');
+    const endpoint = {
+      host: typedHost.trim() || current.logonHost,
+      port: Number(typedPort) || current.logonPort,
+    };
+
     saveSettings({
-      ...loadSettings(),
-      logonHost: host,
-      logonPort: Number(port) || loadSettings().logonPort,
+      ...current,
+      logonHost: endpoint.host,
+      logonPort: endpoint.port,
       savedAccount: this.saveName?.checked ? account : undefined,
     });
 
-    void ctx.protocol.login(account, password).catch(() => undefined);
+    // The endpoint travels WITH the attempt. Saving it is a preference; passing it is what makes this
+    // client reach a server other than the one baked into `network/config`, which is the whole point of
+    // the field -- and it has to be read here, at submit time, because the player can edit it until then.
+    void ctx.protocol.login(account, password, endpoint).catch(() => undefined);
   }
 
   update(): void {

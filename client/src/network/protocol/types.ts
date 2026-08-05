@@ -87,9 +87,24 @@ export class ProtocolRefusalError extends Error {
   }
 }
 
+/**
+ * Where to open the logon socket. Passed per attempt rather than baked into the transport, because the
+ * player can edit the address on the login screen right up until they submit -- the same job
+ * `realmlist.wtf` did in the real client.
+ */
+export type LogonEndpoint = { host: string; port: number };
+
 export interface LogonTransport {
-  /** Opens the logon socket and runs challenge + proof. Rejects with `ProtocolRefusalError`. */
-  authenticate(account: string, password: string): Promise<{ sessionKey: Uint8Array }>;
+  /**
+   * Opens the logon socket and runs challenge + proof. Rejects with `ProtocolRefusalError`.
+   *
+   * `endpoint` overrides whatever default the transport was built with; omitted, that default stands.
+   */
+  authenticate(
+    account: string,
+    password: string,
+    endpoint?: LogonEndpoint,
+  ): Promise<{ sessionKey: Uint8Array }>;
   realms(): Promise<RealmInfo[]>;
   close(): void;
 }
