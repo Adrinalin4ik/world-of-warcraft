@@ -89,6 +89,7 @@ export class GlueApp {
     this.current = null;
     this.ui.dispose();
     this.fonts.dispose();
+    this.art.dispose();
     this.renderer.dispose();
   }
 
@@ -104,6 +105,7 @@ export class GlueApp {
     }
 
     this.current?.screen.unmount();
+    this.input.reset();
 
     const root = new WidgetRoot();
     const ctx: GlueContext = {

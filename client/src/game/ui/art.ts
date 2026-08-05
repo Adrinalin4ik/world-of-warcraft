@@ -78,6 +78,18 @@ export class GlueArt {
   def(key: string): SpriteDef | null {
     return this.defs.get(key) ?? null;
   }
+
+  /**
+   * Release every texture this table loaded and forget the defs. Goes through the loader's own
+   * `unload` (reference-counted) rather than `texture.dispose()` -- some other part of the client
+   * (or another `GlueArt` instance) may still hold the same BLP, and disposing it out from under
+   * that reference would blank a texture that is still on screen elsewhere.
+   */
+  dispose(): void {
+    this.textures.forEach((texture) => TextureLoader.unload(texture));
+    this.textures.clear();
+    this.defs.clear();
+  }
 }
 
 /**

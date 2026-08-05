@@ -6,7 +6,7 @@
  */
 import React from 'react';
 
-import { ClientState, GlueApp } from '../../game/ui/screens';
+import { GlueApp } from '../../game/ui/screens';
 import { ProbeScreen, PROBE_STATE } from '../../game/ui/screens/probe';
 
 class GlueHost extends React.Component {

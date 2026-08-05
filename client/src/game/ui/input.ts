@@ -46,6 +46,20 @@ export class GlueInput {
     }
   }
 
+  /**
+   * Forget every widget this router is tracking. A screen transition retires the whole draw list,
+   * so a stale focus, armed press or hover target left pointing at the old screen's widgets could
+   * fire that screen's handlers on the next Enter/Tab/pointer move.
+   */
+  reset(): void {
+    if (this.hovered) {
+      this.hovered.hovered = false;
+    }
+    this.hovered = null;
+    this.pressed = null;
+    this.focus = null;
+  }
+
   attach(): void {
     this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
