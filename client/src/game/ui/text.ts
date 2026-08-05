@@ -94,6 +94,71 @@ function sharedMeasureContext(): CanvasRenderingContext2D {
   return measureContext;
 }
 
+/**
+ * The same context, or null where there is no 2D canvas at all -- a headless jsdom without the
+ * `canvas` package.
+ *
+ * The measuring functions below take this path so that a SCREEN can be mounted and updated headlessly
+ * (`screens/__tests__/login.test.ts` does exactly that) without a null-context TypeError. They report
+ * an honestly degenerate answer in that case -- no wrapping, no caret advance -- rather than inventing
+ * per-character widths that would silently disagree with what the browser rasterizes. `get()` does not
+ * take this path: rasterizing genuinely requires a canvas, and it already returns through one.
+ */
+function optionalMeasureContext(): CanvasRenderingContext2D | null {
+  try {
+    return sharedMeasureContext() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Break `text` into the lines it rasterizes as.
+ *
+ * One line unless `spec.wrapWidth` is set. Wrapping breaks on SPACES, as the client's own does: a
+ * word longer than the width is left overlong on its own line rather than split mid-word, because
+ * hyphenating an account name or a URL (`RESPONSE_FAILED_TO_CONNECT` contains one) would be worse
+ * than overflowing. Explicit newlines in the string are honoured first -- `gluestrings.lua` escapes
+ * some -- so a `\n` always starts a line whatever the width.
+ */
+export function wrapLines(text: string, spec: FontSpec, scale: number): string[] {
+  const paragraphs = text.split('\n');
+  if (!spec.wrapWidth || spec.wrapWidth <= 0) {
+    return paragraphs.length > 1 ? paragraphs : [text];
+  }
+
+  const pixelScale = density(scale);
+  const context = optionalMeasureContext();
+  if (!context) {
+    return paragraphs;
+  }
+  context.font = cssFont(spec, pixelScale);
+  // The wrap width is a logical-unit budget; measurement happens in device pixels.
+  const budget = spec.wrapWidth * pixelScale;
+
+  const lines: string[] = [];
+  for (const paragraph of paragraphs) {
+    let line = '';
+    for (const word of paragraph.split(' ')) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (line && context.measureText(candidate).width > budget) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = candidate;
+      }
+    }
+    lines.push(line);
+  }
+
+  return lines;
+}
+
+/** Leading from one line's baseline to the next, in logical units. `spacing` is a `Font` attribute. */
+function lineHeight(spec: FontSpec): number {
+  return spec.size + (spec.spacing ?? 0);
+}
+
 /** Logical-unit size of a rendered string, including padding. Same units `get()`'s `size` reports. */
 export function measureText(
   text: string,
@@ -101,16 +166,53 @@ export function measureText(
   scale: number,
 ): { width: number; height: number } {
   const pixelScale = density(scale);
-  const context = sharedMeasureContext();
+  const context = optionalMeasureContext();
+  const lines = wrapLines(text, spec, scale);
+  if (!context) {
+    return { width: 0, height: spec.size + PADDING_V / scale };
+  }
   context.font = cssFont(spec, pixelScale);
-  const metrics = context.measureText(text);
+  const widest = Math.max(...lines.map((line) => context.measureText(line).width));
   // Padding is rasterized at `pixelScale` (device pixels) below, so it has to come back out at the
   // same rate it went in -- `PADDING_H` scaled by the density's DPR factor, then the whole width
   // divided by `pixelScale`, not `scale`, to land back in logical units.
   return {
-    width: (metrics.width + PADDING_H * (pixelScale / scale)) / pixelScale,
-    height: spec.size + PADDING_V / scale,
+    width: (widest + PADDING_H * (pixelScale / scale)) / pixelScale,
+    height:
+      lines.length > 1
+        ? lines.length * spec.size + (lines.length - 1) * (spec.spacing ?? 0) + PADDING_V / scale
+        : spec.size + PADDING_V / scale,
   };
+}
+
+/**
+ * How far the caret sits from the LEFT EDGE OF THE QUAD a font string draws on, in logical units,
+ * with `caret` characters before it.
+ *
+ * OURS: the client's edit-box caret is drawn by the engine and has no XML to transcribe. What is not
+ * ours is where it has to land -- that is dictated by how `get()` below rasterizes, so this measures
+ * the same prefix through the same context rather than assuming a per-character width. The leading
+ * `inset` is the same half-padding `get()` starts its `fillText` at, so offset 0 is the left edge of
+ * the first glyph's cell.
+ *
+ * Pass the MASKED string for a password box: measuring the real one would leak the password's
+ * character widths through the caret's position on screen.
+ */
+export function caretOffset(
+  text: string,
+  spec: FontSpec,
+  scale: number,
+  caret: number,
+): number {
+  const pixelScale = density(scale);
+  const context = optionalMeasureContext();
+  if (!context) {
+    return 0;
+  }
+  context.font = cssFont(spec, pixelScale);
+  const inset = (PADDING_H * devicePixelDensity()) / 2;
+  const prefix = text.slice(0, Math.max(0, Math.min(caret, text.length)));
+  return (inset + context.measureText(prefix).width) / pixelScale;
 }
 
 /** A rasterized string: the texture plus the logical (layout-unit) size the renderer draws it at. */
@@ -138,6 +240,11 @@ export class FontStringTextures {
       spec.size,
       spec.color,
       spec.outline ? 'o' : '-',
+      spec.align,
+      // Wrapping changes the raster, so it has to key it: the same string at two widths is two
+      // different textures, and without this the first width served the second.
+      spec.wrapWidth ?? 0,
+      spec.spacing ?? 0,
       // The cache key must carry the RASTER density, not just the layout scale -- a display change
       // (a window dragged between monitors of different `devicePixelRatio`) must not serve a stale
       // raster baked for the old density.
@@ -159,8 +266,17 @@ export class FontStringTextures {
     const paddingH = PADDING_H * dpr;
     const paddingV = PADDING_V * dpr;
     const inset = paddingH / 2;
-    const width = Math.ceil(context.measureText(text).width) + paddingH;
-    const height = Math.ceil(spec.size * pixelScale) + paddingV;
+
+    const lines = wrapLines(text, spec, scale);
+    const widest = Math.max(...lines.map((line) => context.measureText(line).width));
+    const width = Math.ceil(widest) + paddingH;
+    // A single line keeps EXACTLY the height it always had, so no existing caption's quad moves;
+    // only a wrapped string takes the multi-line path.
+    const height =
+      lines.length > 1
+        ? Math.ceil(lineHeight(spec) * (lines.length - 1) * pixelScale + spec.size * pixelScale) +
+          paddingV
+        : Math.ceil(spec.size * pixelScale) + paddingV;
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(width, 1);
@@ -171,18 +287,34 @@ export class FontStringTextures {
     target.textBaseline = 'middle';
     target.textAlign = 'left';
 
-    if (spec.outline) {
-      // The client's baked ring: one device pixel, drawn as a real stroke -- scaled by `dpr` along
-      // with everything else rasterized here so it stays one DEVICE pixel, not one (now smaller
-      // relative) raster pixel.
-      target.lineWidth = 2 * dpr;
-      target.lineJoin = 'round';
-      target.strokeStyle = '#000000';
-      target.strokeText(text, inset, canvas.height / 2);
-    }
+    // Each line's own baseline, and its own x for the string's justification -- a wrapped block is
+    // justified line by line (`GlueDialogText` is centred), not as one ragged box.
+    const step = lineHeight(spec) * pixelScale;
+    const glyphHeight = spec.size * pixelScale;
+    lines.forEach((line, row) => {
+      const y =
+        lines.length > 1 ? paddingV / 2 + row * step + glyphHeight / 2 : canvas.height / 2;
+      const lineWidth = context.measureText(line).width;
+      const x =
+        spec.align === 'CENTER'
+          ? inset + (widest - lineWidth) / 2
+          : spec.align === 'RIGHT'
+            ? inset + (widest - lineWidth)
+            : inset;
 
-    target.fillStyle = spec.color;
-    target.fillText(text, inset, canvas.height / 2);
+      if (spec.outline) {
+        // The client's baked ring: one device pixel, drawn as a real stroke -- scaled by `dpr` along
+        // with everything else rasterized here so it stays one DEVICE pixel, not one (now smaller
+        // relative) raster pixel.
+        target.lineWidth = 2 * dpr;
+        target.lineJoin = 'round';
+        target.strokeStyle = '#000000';
+        target.strokeText(line, x, y);
+      }
+
+      target.fillStyle = spec.color;
+      target.fillText(line, x, y);
+    });
 
     const texture = new THREE.CanvasTexture(canvas);
     // Match the BLP convention so `applyTexCoords` needs no special case: row 0 is v = 0.
