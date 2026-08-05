@@ -38,11 +38,28 @@ export type LogonConfig = {
   timezone: number;
 };
 
+/** The slice of `crypto/srp.js`'s `SRP` this transport actually drives. */
+export interface SrpLike {
+  feed(s: number[], B: number[], account: string, password: string): void;
+  readonly A: { toArray(): number[] };
+  readonly M1: { digest: number[] };
+  readonly K: number[];
+  validate(M2: number[]): boolean;
+}
+
+/**
+ * Builds the SRP session for a challenge's `N`/`g`. Defaults to the real `SRP`; a test can inject
+ * one that skips the arithmetic and returns fixed `A`/`M1`/`K`, which is the only way the
+ * successful-handshake path (the one that only otherwise fails against a live server) is testable.
+ */
+export type SrpFactory = (N: number[], g: number[]) => SrpLike;
+
 export class WotlkLogonTransport implements LogonTransport {
   private readonly io: LogonIo;
   private readonly config: LogonConfig;
+  private readonly srpFactory: SrpFactory;
 
-  private srp: any = null;
+  private srp: SrpLike | null = null;
   private account = '';
   private password = '';
   private sessionKey: Uint8Array | null = null;
@@ -52,13 +69,22 @@ export class WotlkLogonTransport implements LogonTransport {
   private realmsResolve: ((realms: RealmInfo[]) => void) | null = null;
   private realmsReject: ((error: Error) => void) | null = null;
 
-  constructor(io: LogonIo, config: LogonConfig) {
+  constructor(
+    io: LogonIo,
+    config: LogonConfig,
+    srpFactory: SrpFactory = (N, g) => new SRP(N, g),
+  ) {
     this.io = io;
     this.config = config;
+    this.srpFactory = srpFactory;
     this.io.onMessage((bytes) => this.receive(bytes));
   }
 
   async authenticate(account: string, password: string): Promise<{ sessionKey: Uint8Array }> {
+    if (this.authResolve) {
+      throw new Error('authenticate() is already in progress on this transport');
+    }
+
     this.account = account.toUpperCase();
     this.password = password.toUpperCase();
 
@@ -89,6 +115,9 @@ export class WotlkLogonTransport implements LogonTransport {
     if (!this.sessionKey) {
       throw new Error('cannot list realms before authenticate() resolves');
     }
+    if (this.realmsResolve) {
+      throw new Error('realms() is already in progress on this transport');
+    }
 
     const settled = new Promise<RealmInfo[]>((resolve, reject) => {
       this.realmsResolve = resolve;
@@ -100,6 +129,16 @@ export class WotlkLogonTransport implements LogonTransport {
   }
 
   close(): void {
+    // A caller awaiting a login or a realm list deserves to learn it will never arrive, rather
+    // than hang forever on a promise nothing will ever settle now that the IO is going away.
+    const closedError = new Error('logon transport closed');
+    this.authReject?.(closedError);
+    this.authResolve = null;
+    this.authReject = null;
+    this.realmsReject?.(closedError);
+    this.realmsResolve = null;
+    this.realmsReject = null;
+
     this.io.close();
   }
 
@@ -129,7 +168,7 @@ export class WotlkLogonTransport implements LogonTransport {
       return;
     }
 
-    this.srp = new SRP(Array.from(challenge.N!), Array.from(challenge.g!));
+    this.srp = this.srpFactory(Array.from(challenge.N!), Array.from(challenge.g!));
     this.srp.feed(
       Array.from(challenge.salt!),
       Array.from(challenge.B!),
@@ -179,9 +218,14 @@ export class WotlkLogonTransport implements LogonTransport {
 }
 
 /**
- * The production IO: the existing `net/socket.js`, which already frames realmd's self-delimiting
- * packets by handing us whatever arrived. Kept at the bottom of this file because it is the only
- * part that cannot be unit-tested, and keeping it small is what makes that acceptable.
+ * The production IO: the existing `net/socket.js`. That socket is a raw byte accumulator with no
+ * packet concept of its own -- framing has always been the consumer's job. This adapter hands over
+ * whatever arrived on `data:receive`, exactly what `network/auth/handler.js` has always done
+ * (`AuthPacket.HEADER_SIZE` is 1, and it reads the rest of the buffer as a single packet). realmd's
+ * packets are small and arrive one per message in practice, but a split or coalesced arrival is a
+ * known limitation shared with the existing client, not something this adapter solves. Kept at the
+ * bottom of this file because it is the only part that cannot be unit-tested, and keeping it small
+ * is what makes that acceptable.
  */
 export function createSocketLogonIo(): LogonIo {
   const socket = new Socket();

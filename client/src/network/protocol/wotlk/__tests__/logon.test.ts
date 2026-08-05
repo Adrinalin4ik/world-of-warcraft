@@ -1,5 +1,5 @@
 /** @jest-environment node */
-import { WotlkLogonTransport } from '../logon';
+import { SrpLike, WotlkLogonTransport } from '../logon';
 import {
   encodeLogonChallenge,
   LOGON_OPCODE,
@@ -59,6 +59,22 @@ function challengeResponse(code: number): Uint8Array {
   return out;
 }
 
+/**
+ * A fake SRP session: skips the arithmetic entirely and returns fixed values, which is what makes
+ * the successful-handshake path testable without deriving a real, consistent SRP exchange from
+ * bytes.
+ */
+function fakeSrp(overrides: Partial<SrpLike> = {}): SrpLike & { feed: jest.Mock; validate: jest.Mock } {
+  return {
+    feed: jest.fn(),
+    A: { toArray: () => [0xaa, 0xbb] },
+    M1: { digest: new Array(20).fill(0x11) },
+    K: new Array(40).fill(0x22),
+    validate: jest.fn(() => true),
+    ...overrides,
+  };
+}
+
 describe('WotlkLogonTransport', () => {
   it('sends a challenge for the account it was given', async () => {
     const io = fakeIo();
@@ -100,6 +116,83 @@ describe('WotlkLogonTransport', () => {
     const io = fakeIo();
     new WotlkLogonTransport(io, CONFIG).close();
 
+    expect(io.closed).toBe(true);
+  });
+
+  it('resolves authenticate() with the session key once the server proof validates', async () => {
+    const io = fakeIo();
+    const srp = fakeSrp();
+    const transport = new WotlkLogonTransport(io, CONFIG, () => srp);
+
+    const pending = transport.authenticate('tester', 'secret');
+    await Promise.resolve();
+
+    io.reply(challengeResponse(0x00));
+
+    // A proof should have gone out, built from the fake SRP's A and M1.
+    expect(io.sent).toHaveLength(2);
+    const proofSent = io.sent[1];
+    expect(proofSent[0]).toBe(LOGON_OPCODE.PROOF);
+    expect(Array.from(proofSent.slice(1, 3))).toEqual([0xaa, 0xbb]); // A
+    expect(Array.from(proofSent.slice(3, 23))).toEqual(new Array(20).fill(0x11)); // M1
+
+    const serverProof = new Uint8Array(22);
+    serverProof[0] = LOGON_OPCODE.PROOF;
+    serverProof[1] = 0x00; // success
+    io.reply(serverProof);
+
+    const result = await pending;
+
+    expect(srp.validate).toHaveBeenCalled();
+    expect(Array.from(result.sessionKey)).toEqual(new Array(40).fill(0x22));
+  });
+
+  it('rejects a second authenticate() call made while one is already in flight', async () => {
+    const io = fakeIo();
+    const transport = new WotlkLogonTransport(io, CONFIG);
+
+    const first = transport.authenticate('tester', 'secret');
+    await Promise.resolve();
+
+    await expect(transport.authenticate('tester', 'secret')).rejects.toThrow(/already in progress/i);
+
+    // Clean up the first pending promise so it doesn't leak into the next test.
+    io.reply(new Uint8Array([LOGON_OPCODE.PROOF, 0x04]));
+    await expect(first).rejects.toBeInstanceOf(ProtocolRefusalError);
+  });
+
+  it('rejects a second realms() call made while one is already in flight', async () => {
+    const io = fakeIo();
+    const srp = fakeSrp();
+    const transport = new WotlkLogonTransport(io, CONFIG, () => srp);
+
+    const authPending = transport.authenticate('tester', 'secret');
+    await Promise.resolve();
+    io.reply(challengeResponse(0x00));
+    const serverProof = new Uint8Array(22);
+    serverProof[0] = LOGON_OPCODE.PROOF;
+    serverProof[1] = 0x00;
+    io.reply(serverProof);
+    await authPending;
+
+    const firstRealms = transport.realms();
+    await expect(transport.realms()).rejects.toThrow(/already in progress/i);
+
+    // Clean up the first pending promise.
+    transport.close();
+    await expect(firstRealms).rejects.toThrow(/closed/i);
+  });
+
+  it('rejects a pending authenticate() when close() is called', async () => {
+    const io = fakeIo();
+    const transport = new WotlkLogonTransport(io, CONFIG);
+
+    const pending = transport.authenticate('tester', 'secret');
+    await Promise.resolve();
+
+    transport.close();
+
+    await expect(pending).rejects.toThrow(/closed/i);
     expect(io.closed).toBe(true);
   });
 });

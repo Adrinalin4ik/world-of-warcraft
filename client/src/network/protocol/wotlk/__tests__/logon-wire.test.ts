@@ -118,6 +118,13 @@ describe('decodeLogonChallenge', () => {
     expect(decoded.B).toBeUndefined();
     expect(decoded.salt).toBeUndefined();
   });
+
+  it('throws naming the shortfall on a truncated success response, rather than reading undefined bytes as data', () => {
+    const full = buildChallengeResponse(0x00);
+    const truncated = full.slice(0, 40); // cuts off partway through g/N/salt
+
+    expect(() => decodeLogonChallenge(truncated)).toThrow(/decodeLogonChallenge.*needed \d+ bytes, got 40/);
+  });
 });
 
 describe('proof', () => {
@@ -144,6 +151,12 @@ describe('proof', () => {
 
     const bad = new Uint8Array([LOGON_OPCODE.PROOF, 0x04]);
     expect(decodeLogonProof(bad)).toEqual({ code: 0x04 });
+  });
+
+  it('throws naming the shortfall on a truncated success response, rather than reading undefined bytes as M2', () => {
+    const truncated = new Uint8Array([LOGON_OPCODE.PROOF, 0x00, 0x22, 0x22]); // only 2 of 20 M2 bytes
+
+    expect(() => decodeLogonProof(truncated)).toThrow(/decodeLogonProof.*needed 22 bytes, got 4/);
   });
 });
 
@@ -218,6 +231,13 @@ describe('decodeRealmList', () => {
     expect(realms[1].name).toBe('Lordaeron');
     expect(realms[1].online).toBe(false);
     expect(realms[1].build).toEqual({ major: 3, minor: 3, patch: 5, build: 12340 });
+  });
+
+  it('throws naming the shortfall on a truncated response, rather than reading undefined bytes as a realm', () => {
+    const full = buildRealmList();
+    const truncated = full.slice(0, 15); // cuts off mid-name, before the NUL terminator
+
+    expect(() => decodeRealmList(truncated)).toThrow(/decodeRealmList.*realm 0 name/);
   });
 });
 

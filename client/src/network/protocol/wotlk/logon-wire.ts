@@ -94,16 +94,31 @@ export function decodeLogonChallenge(bytes: Uint8Array): LogonChallenge {
   }
 
   let at = 3;
-  const take = (length: number): Uint8Array => {
+  // A short SUCCESS response must be caught here: an unguarded read past the end returns
+  // `undefined` bytes that flow straight into SRP as if they were real data -- a corrupted
+  // session key that only ever fails against a live server, with nothing pointing at the cause.
+  const need = (length: number, field: string): void => {
+    if (bytes.length < at + length) {
+      throw new Error(
+        `decodeLogonChallenge: truncated success response reading ${field} -- needed ${at + length} bytes, got ${bytes.length}`,
+      );
+    }
+  };
+  const take = (length: number, field: string): Uint8Array => {
+    need(length, field);
     const slice = bytes.slice(at, at + length);
     at += length;
     return slice;
   };
+  const takeLength = (field: string): number => {
+    need(1, field);
+    return bytes[at++];
+  };
 
-  const B = take(32);
-  const g = take(bytes[at++]);
-  const N = take(bytes[at++]);
-  const salt = take(32);
+  const B = take(32, 'B');
+  const g = take(takeLength('g length'), 'g');
+  const N = take(takeLength('N length'), 'N');
+  const salt = take(32, 'salt');
 
   return { code, B, g, N, salt };
 }
@@ -124,6 +139,11 @@ export function decodeLogonProof(bytes: Uint8Array): { code: number; M2?: Uint8A
   if (code !== 0x00) {
     return { code };
   }
+  if (bytes.length < 22) {
+    throw new Error(
+      `decodeLogonProof: truncated success response reading M2 -- needed 22 bytes, got ${bytes.length}`,
+    );
+  }
   return { code, M2: bytes.slice(2, 22) };
 }
 
@@ -133,6 +153,18 @@ export function encodeRealmListRequest(): Uint8Array {
 }
 
 export function decodeRealmList(bytes: Uint8Array): RealmInfo[] {
+  // A short response must be caught here: an unguarded read past the end returns `undefined`
+  // bytes rather than a clean failure, and nothing about the resulting RealmInfo would look wrong
+  // until a player picked the corrupted entry.
+  const need = (length: number, at: number, field: string): void => {
+    if (bytes.length < at + length) {
+      throw new Error(
+        `decodeRealmList: truncated response reading ${field} -- needed ${at + length} bytes, got ${bytes.length}`,
+      );
+    }
+  };
+
+  need(2, 7, 'realm count');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   // opcode(1) + size(2) + unknown(4)
   let at = 7;
@@ -140,10 +172,15 @@ export function decodeRealmList(bytes: Uint8Array): RealmInfo[] {
   const count = view.getUint16(at, true);
   at += 2;
 
-  const readCString = (): string => {
+  const readCString = (field: string): string => {
     let end = at;
     while (end < bytes.length && bytes[end] !== 0) {
       ++end;
+    }
+    if (end >= bytes.length) {
+      throw new Error(
+        `decodeRealmList: truncated response reading ${field} -- no NUL terminator found within ${bytes.length} bytes`,
+      );
     }
     const text = new TextDecoder('latin1').decode(bytes.slice(at, end));
     at = end + 1;
@@ -153,11 +190,13 @@ export function decodeRealmList(bytes: Uint8Array): RealmInfo[] {
   const realms: RealmInfo[] = [];
 
   for (let index = 0; index < count; ++index) {
+    need(3, at, `realm ${index} header`);
     const icon = bytes[at++];
     at++; // lock
     const flags = bytes[at++];
-    const name = readCString();
-    const address = readCString();
+    const name = readCString(`realm ${index} name`);
+    const address = readCString(`realm ${index} address`);
+    need(7, at, `realm ${index} stats`);
     const population = view.getFloat32(at, true);
     at += 4;
     const characterCount = bytes[at++];
@@ -166,6 +205,7 @@ export function decodeRealmList(bytes: Uint8Array): RealmInfo[] {
 
     let build: RealmInfo['build'];
     if (flags & REALM_FLAG_SPECIFY_BUILD) {
+      need(5, at, `realm ${index} build`);
       const major = bytes[at++];
       const minor = bytes[at++];
       const patch = bytes[at++];
