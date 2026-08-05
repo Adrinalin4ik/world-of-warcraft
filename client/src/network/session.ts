@@ -1,7 +1,6 @@
 import Player from "../game/classes/player";
 import AuthHandler from "./auth/handler";
 import CharacterHandler from "./characters/handler";
-import { AuthorizationStatus, SocketConnestionStatus } from "./enums";
 import { GameHandler } from "./game/handler";
 import RealmsHandler from "./realms/handler";
 import config from "./config";
@@ -82,43 +81,8 @@ export class GameSession {
     (window as any).session = this;
   }
 
-  async authenticate(username: string, password: string): Promise<{status: string}> {
-    return new Promise((resolve, reject) => {
-      this.auth.authenticate(username, password);
-
-      const onAuthenticate = () => {
-        this.auth.removeListener('authenticate', onAuthenticate);
-        resolve({status: AuthorizationStatus.Success});
-      }
-
-      setTimeout(() => {
-        reject({status: 'Timeout'});
-      }, 5000);
-
-      this.auth.on('authenticate', onAuthenticate);
-    })
-  }
-
-  async connect(): Promise<{status: string}> {
-    return new Promise((resolve, reject) => {
-      this.auth.connect();
-
-      const onConnect = () => {
-        this.auth.removeListener('connect', onConnect);
-        resolve({status: SocketConnestionStatus.Connected});
-      }
-
-      const onReject = () => {
-        reject({status: 'Server reject the connection'});
-        this.auth.removeListener('reject', onReject);
-      }
-
-      setTimeout(() => {
-        reject({status: 'Timeout'});
-      }, 5000);
-
-      this.auth.on('connect', onConnect);
-      this.auth.on('reject', onReject);
-    })
-  }
+  // `authenticate()` and `connect()` used to live here for the retired React login/realm/character
+  // routes. They were the only remaining way to put a real `SRP` on the same `AuthHandler` that the
+  // world handshake writes its stand-in onto (`protocol/wotlk/world.ts`), and nothing called them once
+  // those routes went. Deleted with the screens they served; the glue screens use `protocol` above.
 }
