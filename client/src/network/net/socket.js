@@ -47,7 +47,13 @@ class Socket extends EventEmitter {
       this.buffer = new ByteBuffer(0, ByteBuffer.LITTLE_ENDIAN);
       this.remaining = false;
 
-      this.socket = new WebSocket(this.uri);
+      // 'binary' is websockify's own contract, which `ws-proxy/server.js` inherited: it answers
+      // 'binary' (raw frames) or 'base64', and its relay reads `client.protocol` to decide which. Ask
+      // for it explicitly. Offering nothing happens to work only because `ws` skips its
+      // `handleProtocols` callback entirely when the client names no subprotocol -- so the gateway's
+      // "must offer binary or base64" refusal is bypassed rather than satisfied, and a stricter server
+      // or a future `ws` would drop the handshake.
+      this.socket = new WebSocket(this.uri, 'binary');
       this.socket.binaryType = 'arraybuffer';
 
       this.socket.onopen = (e) => {
