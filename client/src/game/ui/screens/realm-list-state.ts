@@ -199,8 +199,15 @@ export type RealmSortColumn = 'name' | 'mode' | 'characters' | 'load';
 
 export type RealmSort = { column: RealmSortColumn; descending: boolean };
 
-/** Ascending by name, which is the order a fresh list reads best in. OURS: see `sortRealms`. */
-export const DEFAULT_REALM_SORT: RealmSort = { column: 'name', descending: false };
+/**
+ * No sort at all until the player asks for one -- the list arrives in the order the SERVER sent it.
+ *
+ * A reference screenshot of this screen shows a Cyrillic list whose first row sorts second
+ * alphabetically, so the client is plainly not sorting a freshly-shown list; it is showing realmd's own
+ * order. Sorting by name on mount would silently reorder every server's list before the player touched
+ * anything, which is a decision the client does not make.
+ */
+export const DEFAULT_REALM_SORT: RealmSort | null = null;
 
 /**
  * What clicking a column header does: sort by it, or reverse it if it is already the sort column.
@@ -210,8 +217,8 @@ export const DEFAULT_REALM_SORT: RealmSort = { column: 'name', descending: false
  * Click-again-to-reverse is the behaviour the sort arrow in `RealmSortButtonTemplate` implies and
  * what every other WoW column header does, but it is not transcribed from a file.
  */
-export function nextRealmSort(current: RealmSort, column: RealmSortColumn): RealmSort {
-  if (current.column === column) {
+export function nextRealmSort(current: RealmSort | null, column: RealmSortColumn): RealmSort {
+  if (current && current.column === column) {
     return { column, descending: !current.descending };
   }
   return { column, descending: false };
@@ -224,7 +231,12 @@ export function nextRealmSort(current: RealmSort, column: RealmSortColumn): Real
  * place is a trap regardless), and every comparator falls back to the name so the order is total:
  * three realms with no characters must not shuffle among themselves each time the list refreshes.
  */
-export function sortRealms(realms: RealmInfo[], sort: RealmSort): RealmInfo[] {
+export function sortRealms(realms: RealmInfo[], sort: RealmSort | null): RealmInfo[] {
+  // `null` means the server's own order, which is what a freshly-shown list uses.
+  if (!sort) {
+    return [...realms];
+  }
+
   const byName = (a: RealmInfo, b: RealmInfo): number => a.name.localeCompare(b.name);
 
   const compare = (a: RealmInfo, b: RealmInfo): number => {

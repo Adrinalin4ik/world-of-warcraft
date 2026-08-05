@@ -76,23 +76,26 @@ export const REALMS_ART: Record<string, SpriteDef> = {
     size: [32, 32],
   },
 
-  // `GlueDialogButtonTemplate`'s four states. The template authors the non-blue sheets, but
-  // `GlueDialog_OnUpdate` swaps them for the `-Blue` ones while `CURRENT_GLUE_SCREEN == "login"`
-  // (gluedialog.lua:651-659) -- and the realm list is drawn over `AccountLogin` without changing the
-  // glue screen, so these are the blue ones, exactly as on the login screen. Sized 125x35 after
-  // `RealmListOkButton`/`RealmListCancelButton`'s override (realmlist.xml:732-767).
+  // `GlueDialogButtonTemplate`'s four states, and these stay the template's own NON-blue sheets.
+  //
+  // `GlueDialog_OnUpdate` does swap in the `-Blue` art on the login screen (gluedialog.lua:651-659),
+  // but it iterates `GlueDialogButton1..3` by NAME -- the GlueDialog's own three buttons. `RealmList`
+  // has its own `RealmListOkButton`/`RealmListCancelButton`, which that loop never touches, so they
+  // keep `Glue-Panel-Button-Up` and its siblings. A reference screenshot agrees: Okay draws neutral
+  // dark, and hovered Cancel draws the non-blue highlight's red rather than a blue glow.
+  // Sized 125x35 after their override (realmlist.xml:732-767).
   'button-up': {
-    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Up-Blue',
+    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Up',
     texCoords: BUTTON_TC,
     size: [125, 35],
   },
   'button-down': {
-    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Down-Blue',
+    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Down',
     texCoords: BUTTON_TC,
     size: [125, 35],
   },
   'button-highlight': {
-    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Highlight-Blue',
+    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Highlight',
     texCoords: BUTTON_HIGHLIGHT_TC,
     size: [125, 35],
   },

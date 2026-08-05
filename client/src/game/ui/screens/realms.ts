@@ -131,7 +131,7 @@ export class RealmListScreen implements GlueScreen {
   private closeButton: Widget | null = null;
   private closeHighlight: Widget | null = null;
 
-  private sort: RealmSort = DEFAULT_REALM_SORT;
+  private sort: RealmSort | null = DEFAULT_REALM_SORT;
   /**
    * The selected realm, held by NAME rather than by index -- `RealmList.selectedName`
    * (realmlist.lua:143-144) does the same, and for the same reason: the list is re-sorted and
@@ -700,10 +700,10 @@ export class RealmListScreen implements GlueScreen {
     }
 
     this.sortButtons.forEach((header) => {
-      const active = header.column === this.sort.column;
+      const active = header.column === this.sort?.column;
       this.setShown(header.arrow, active);
       // A per-WIDGET tex-coord override, which the renderer prefers over the sprite's own.
-      header.arrow.texCoords = active && this.sort.descending ? SORT_ARROW_FLIPPED_TC : SORT_ARROW_TC;
+      header.arrow.texCoords = active && this.sort?.descending ? SORT_ARROW_FLIPPED_TC : SORT_ARROW_TC;
       this.setShown(header.glow, header.button.hovered);
     });
 
