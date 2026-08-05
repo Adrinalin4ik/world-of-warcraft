@@ -198,6 +198,14 @@ export class GlueApp {
     }
 
     const texture = widget.sprite ? this.art.texture(widget.sprite) : null;
-    return texture ? { texture } : null;
+    if (!texture) {
+      return null;
+    }
+
+    // The sub-rect travels with the SPRITE, not the widget: `GlueButtonTemplateBlue` names one
+    // region of `Glue-Panel-Button-Up-Blue` for every button that inherits it, so the art table is
+    // where it belongs. Without this the whole 256x64 sheet stretched into the widget's rect and
+    // every glue button drew as a thin bar of blue with two thirds of the quad empty.
+    return { texture, texCoords: this.art.def(widget.sprite as string)?.texCoords ?? null };
   }
 }

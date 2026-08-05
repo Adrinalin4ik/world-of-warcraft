@@ -13,14 +13,19 @@ import * as THREE from 'three';
 
 import { viewportUnits } from './layout';
 import { applyTexCoords, createQuadMaterial } from './material';
-import { DrawItem } from './widget';
+import { DrawItem, TexCoords } from './widget';
 
 /**
  * What resolving a widget's texture hands back. `size` is set for a font string only -- its
  * logical (layout-unit) rasterized size, from `FontStringTextures#get`. An art quad has none: it
  * always fills its widget's authored rect, as it always has.
  */
-export type ResolvedSprite = { texture: THREE.Texture; size?: { width: number; height: number } };
+export type ResolvedSprite = {
+  texture: THREE.Texture;
+  size?: { width: number; height: number };
+  /** The sprite's own sub-rect, from the art table. A widget's own `texCoords` overrides it. */
+  texCoords?: TexCoords | null;
+};
 export type SpriteResolver = (item: DrawItem) => ResolvedSprite | null;
 
 /** One unit quad, shared by every widget. Sub-rects come from the material's map offset/repeat. */
@@ -80,7 +85,11 @@ export class GlueRenderer {
       entry.material.opacity = item.alpha;
       entry.material.color.set(item.widget.vertexColor);
       entry.material.needsUpdate = true;
-      applyTexCoords(entry.material, item.widget.texCoords);
+      // The widget's own sub-rect wins when it sets one; otherwise the sprite's, from the art table.
+      // NOTE: offset/repeat live on the shared THREE.Texture, so two widgets sampling DIFFERENT
+      // regions of one sheet in the same frame would both draw with whichever was applied last. No
+      // glue screen does that yet -- every sprite sharing a sheet shares its region too.
+      applyTexCoords(entry.material, item.widget.texCoords ?? resolved.texCoords ?? null);
 
       const { left, top, width, height } = item.rect;
 

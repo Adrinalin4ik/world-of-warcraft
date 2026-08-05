@@ -171,7 +171,9 @@ export class LoginScreen implements GlueScreen {
     serverLabel.font = LABEL_CENTER;
     // OURS: no honest GlueStrings key names a server-address field -- see the file comment.
     serverLabel.text = 'Server Address';
-    serverLabel.setSize(200, 16).setAnchors({
+    // 64 tall, like the authored captions: the renderer centres a font string vertically in its rect,
+    // so a 16-tall rect at the same -23 offset lands the text inside the box instead of above it.
+    serverLabel.setSize(200, 64).setAnchors({
       point: 'BOTTOM',
       relativeTo: 'login-server',
       relativePoint: 'TOP',
