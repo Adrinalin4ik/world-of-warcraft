@@ -65,6 +65,13 @@ export class ProtocolSession {
    * about to restore on rejection, so the rollback below must stand down instead of overwriting it.
    */
   private stageEpoch = 0;
+  /**
+   * Bumped by `cancelLogin`. `attemptLogin` captures it and re-checks after each await, so a login the
+   * player cancelled cannot land its result afterwards. Separate from `stageEpoch`, which tracks world
+   * DISCONNECTS for the realm/world rollbacks -- conflating them would make a cancel look like a
+   * disconnect to `chooseRealm`'s rollback guard.
+   */
+  private loginEpoch = 0;
   private listeners = new Set<(state: SessionState) => void>();
   /** Set by `stop()`. Once true, a queued retry from `onLoginFailure` is a no-op. */
   private stopped = false;
@@ -125,6 +132,35 @@ export class ProtocolSession {
     this.credentials = null;
     this.endpoint = null;
     this.refusal_ = null;
+    this.notify();
+  }
+
+  /**
+   * The player cancelled an in-flight login attempt -- the connecting dialog's CANCEL button
+   * (`GlueDialogTypes["CANCEL"]`, whose `OnAccept` is the client's own `StatusDialogClick`).
+   *
+   * `dismiss()` is not enough on its own: it clears the refusal and the retry but leaves `stage_`
+   * alone, so the `Connecting` dialog stayed up over a screen whose credentials had just been dropped.
+   * This returns the stage to `Offline` as well, which is what takes the dialog down.
+   *
+   * WHAT THIS DOES NOT DO: abort the socket. Neither transport exposes an abort, so a request already
+   * on the wire stays on it. What this does instead is make it irrelevant -- `loginEpoch` is bumped, and
+   * `attemptLogin` checks it after every await, so a late success neither stores a session key nor moves
+   * the stage to `RealmList` (which would have walked the player onto the realm screen after they
+   * cancelled), and a late failure schedules no retry. The attempt cannot affect anything the player can
+   * see or reach; it merely finishes unobserved.
+   */
+  cancelLogin(): void {
+    this.loginEpoch++;
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.credentials = null;
+    this.endpoint = null;
+    this.refusal_ = null;
+    this.sessionKey = null;
+    this.stage_ = LoginStage.Offline;
     this.notify();
   }
 
@@ -226,6 +262,7 @@ export class ProtocolSession {
       throw new Error('no credentials to log in with');
     }
 
+    const epoch = this.loginEpoch;
     this.enter(LoginStage.Connecting);
 
     try {
@@ -235,11 +272,26 @@ export class ProtocolSession {
         credentials.password,
         this.endpoint ?? undefined,
       );
+      // Cancelled (or superseded) while that was on the wire: drop the result on the floor. Storing
+      // the key or advancing the stage here would walk the player onto the realm screen after they
+      // pressed CANCEL.
+      if (this.loginEpoch !== epoch) {
+        return;
+      }
       this.sessionKey = sessionKey;
 
-      this.realms_ = await this.logon.realms();
+      const realms = await this.logon.realms();
+      if (this.loginEpoch !== epoch) {
+        return;
+      }
+      this.realms_ = realms;
       this.enter(LoginStage.RealmList);
     } catch (error) {
+      // Same guard on the failure path: a cancelled attempt must not re-report its refusal or queue a
+      // retry. `cancelLogin` has already put the stage where it belongs.
+      if (this.loginEpoch !== epoch) {
+        return;
+      }
       this.onLoginFailure(error);
       throw error;
     }
