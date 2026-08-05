@@ -95,6 +95,14 @@ export class GlueSceneView {
       this.model = model;
       this.root.add(model);
 
+      // `M2` constructs itself HIDDEN (`this.visible = false`, `pipeline/m2/index.ts`) — a blueprint
+      // hands back a group nobody is drawing yet, and in the world it is the visibility manager that
+      // turns each placement on once culling has decided it is on screen. The glue scene has no
+      // such manager and exactly one always-on-screen model, so it owns that decision itself.
+      // Without this line everything else works perfectly — the model loads, arms, lights, poses,
+      // and submits zero draw calls, which looks exactly like every other cause of a black screen.
+      model.visible = true;
+
       // `SetSequence(0)` is the FILE SLOT, not an AnimationData id -- slot 0 is the stage's own
       // ambient loop.
       const sequence = model.modelAnim?.sequences?.[0];

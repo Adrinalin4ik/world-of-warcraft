@@ -17,7 +17,14 @@ export function createQuadMaterial(blend: Blend): THREE.MeshBasicMaterial {
     blending: blend === 'ADD' ? THREE.AdditiveBlending : THREE.NormalBlending,
     // Premultiplied would double-darken the client's straight-alpha art.
     premultipliedAlpha: false,
-    side: THREE.FrontSide,
+    // DOUBLE-SIDED, and not by laziness. The UI's orthographic camera is Y-DOWN (`top = 0`,
+    // `bottom = height`), which makes the projection's Y scale negative — a mirror. A mirror
+    // reverses triangle winding, and three.js only compensates for winding flips coming from an
+    // object's own world matrix determinant, never from the camera's projection. So under
+    // `FrontSide` every UI quad presents its back face and is culled: draw calls are issued,
+    // triangles are counted, and not one pixel lands. Depth testing is already off here, so there is
+    // nothing to gain from single-sided culling anyway.
+    side: THREE.DoubleSide,
   });
 }
 
