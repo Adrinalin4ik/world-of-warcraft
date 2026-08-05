@@ -138,3 +138,23 @@ export function foldRaceLights(rows: RaceLightRow[]): { ambient: RGB; probe: Pro
 export function verticalFov(diagonalFov: number, aspect: number): number {
   return diagonalFov / Math.sqrt(aspect * aspect + 1);
 }
+
+/**
+ * WoW model space to the space the M2 pipeline actually puts its vertices in.
+ *
+ * `M2#createGeometry` does not upload raw model coordinates. It builds each vertex as `(x, z, -y)`,
+ * mirrors the result over X and Y, then rotates -90 degrees about X. Composed, those three steps are
+ * a 180-degree yaw about Z: `(x, y, z) -> (-x, -y, z)`.
+ *
+ * Anything read straight out of the model file and used ALONGSIDE that geometry -- an authored
+ * camera's eye and target, a light's position, an attachment point -- has to make the same trip, or
+ * it sits in a space rotated half a turn away from the thing it is meant to describe. That is not a
+ * hypothetical: the glue scene's camera was aimed with raw model values and pointed away from the
+ * stage, which drew a mostly empty frame for one scene and the inside of a mesh for another.
+ *
+ * `__tests__/scene-rig.test.ts` pins this against the pipeline's own matrix chain, so a change there
+ * fails here rather than silently re-rotating every glue scene.
+ */
+export function modelToRender(v: Vec3): Vec3 {
+  return [-v[0], -v[1], v[2]];
+}

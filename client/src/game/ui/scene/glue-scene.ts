@@ -30,6 +30,7 @@ import {
   foldRaceLights,
   fogTriple,
   MAIN_MENU_FOG,
+  modelToRender,
   RACE_LIGHTS,
   RaceLightRow,
   verticalFov,
@@ -114,7 +115,13 @@ export class GlueSceneView {
       this.cameraDef = model.data?.cameras?.[0] ?? null;
       const attachment = (model.data?.attachments ?? []).find((entry: any) => entry.id === 0);
       this.stage = attachment
-        ? new THREE.Vector3(attachment.position[0], attachment.position[1], attachment.position[2])
+        ? new THREE.Vector3(
+            ...modelToRender([
+              attachment.position[0],
+              attachment.position[1],
+              attachment.position[2],
+            ]),
+          )
         : new THREE.Vector3();
 
       this.lighting = this.buildRig(scene, model);
@@ -154,7 +161,9 @@ export class GlueSceneView {
       const color = light.diffuseColor?.firstKeyframe?.value ?? [1, 1, 1];
       const intensity = light.diffuseIntensity?.firstKeyframe?.value ?? 1;
       pointLights.push({
-        position: [light.position[0], light.position[1], light.position[2]],
+        // Model space like the camera, so the same conversion applies -- a point light left in raw
+        // coordinates lights the mirror image of the spot the artist placed it at.
+        position: modelToRender([light.position[0], light.position[1], light.position[2]]),
         color: [color[0] * intensity, color[1] * intensity, color[2] * intensity],
         attenStart: light.attenuationStart?.firstKeyframe?.value ?? 0,
         attenEnd: light.attenuationEnd?.firstKeyframe?.value ?? 0,
@@ -234,15 +243,23 @@ export class GlueSceneView {
     const base = def.positionBase;
     const targetBase = def.targetBase;
 
+    // Model space, then converted: `createGeometry` bakes a 180-degree yaw about Z into every
+    // vertex, so a camera aimed with raw file values points half a turn away from its own stage
+    // (`modelToRender`). This is what drew an almost empty frame for UI_MainMenu and the inside of a
+    // mesh for UI_MainMenu_Northrend.
     const eye = new THREE.Vector3(
-      base[0] + (posKey ? posKey.value[0] : 0),
-      base[1] + (posKey ? posKey.value[1] : 0),
-      base[2] + (posKey ? posKey.value[2] : 0),
+      ...modelToRender([
+        base[0] + (posKey ? posKey.value[0] : 0),
+        base[1] + (posKey ? posKey.value[1] : 0),
+        base[2] + (posKey ? posKey.value[2] : 0),
+      ]),
     );
     const target = new THREE.Vector3(
-      targetBase[0] + (targetKey ? targetKey.value[0] : 0),
-      targetBase[1] + (targetKey ? targetKey.value[1] : 0),
-      targetBase[2] + (targetKey ? targetKey.value[2] : 0),
+      ...modelToRender([
+        targetBase[0] + (targetKey ? targetKey.value[0] : 0),
+        targetBase[1] + (targetKey ? targetKey.value[1] : 0),
+        targetBase[2] + (targetKey ? targetKey.value[2] : 0),
+      ]),
     );
 
     // Up = the authored roll rotated about the view axis. Same law as benilla's

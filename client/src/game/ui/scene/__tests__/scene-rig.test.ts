@@ -1,8 +1,11 @@
+import * as THREE from 'three';
+
 import { sceneToken, scenePath } from '../tokens';
 import {
   CHAR_MODEL_FOG,
   fogTriple,
   foldRaceLights,
+  modelToRender,
   RACE_LIGHTS,
   verticalFov,
 } from '../scene-rig';
@@ -87,5 +90,45 @@ describe('verticalFov', () => {
 
   it('narrows vertically as the window widens, which reveals width', () => {
     expect(verticalFov(1, 16 / 9)).toBeLessThan(verticalFov(1, 4 / 3));
+  });
+});
+
+describe('modelToRender', () => {
+  /**
+   * The pipeline's own vertex transform, reproduced step for step from `M2#createGeometry`:
+   * build as (x, z, -y), mirror X and Y, rotate -90 degrees about X. If that ever changes, this
+   * test fails and `modelToRender` must follow it.
+   */
+  function pipelineTransform(x: number, y: number, z: number): THREE.Vector3 {
+    const v = new THREE.Vector3(x, z, -y);
+    v.applyMatrix4(new THREE.Matrix4().makeScale(-1, -1, 1));
+    v.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
+    return v;
+  }
+
+  it('matches the transform the M2 pipeline applies to vertices', () => {
+    const samples: Array<[number, number, number]> = [
+      [3.84, 2.01, -1.03],
+      [-1.37, 0.76, 0.92],
+      [0, 0, 0],
+      [100, -250.5, 33.25],
+    ];
+
+    for (const [x, y, z] of samples) {
+      const expected = pipelineTransform(x, y, z);
+      const actual = modelToRender([x, y, z]);
+
+      expect(actual[0]).toBeCloseTo(expected.x, 5);
+      expect(actual[1]).toBeCloseTo(expected.y, 5);
+      expect(actual[2]).toBeCloseTo(expected.z, 5);
+    }
+  });
+
+  it('is a half turn about Z: X and Y flip, Z is untouched', () => {
+    expect(modelToRender([1, 2, 3])).toEqual([-1, -2, 3]);
+  });
+
+  it('is its own inverse', () => {
+    expect(modelToRender(modelToRender([7, -8, 9]))).toEqual([7, -8, 9]);
   });
 });
