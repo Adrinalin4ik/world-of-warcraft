@@ -11,6 +11,7 @@
 import * as THREE from 'three';
 
 import Loader from '../net/loader';
+import { ResolvedSprite } from './renderer';
 import { FontSpec } from './widget';
 
 /** The client's shipped faces, by the family name widgets ask for. */
@@ -113,7 +114,7 @@ export function measureText(
 }
 
 /** A rasterized string: the texture plus the logical (layout-unit) size the renderer draws it at. */
-type Entry = { texture: THREE.CanvasTexture; width: number; height: number };
+type Entry = ResolvedSprite & { texture: THREE.CanvasTexture };
 
 export class FontStringTextures {
   private readonly cache = new Map<string, Entry>();
@@ -124,7 +125,7 @@ export class FontStringTextures {
    * (`renderer.ts`). Null for empty text -- the renderer skips a widget with no texture, which is
    * exactly right for an empty label.
    */
-  get(text: string, spec: FontSpec, scale: number): { texture: THREE.CanvasTexture; width: number; height: number } | null {
+  get(text: string, spec: FontSpec, scale: number): ResolvedSprite | null {
     if (!text) {
       return null;
     }
@@ -190,10 +191,17 @@ export class FontStringTextures {
 
     const entry: Entry = {
       texture,
-      // Logical units: the raster is denser (`pixelScale` includes `dpr`) but the quad it draws onto
-      // must stay the same on-screen size regardless of display density.
-      width: canvas.width / pixelScale,
-      height: canvas.height / pixelScale,
+      // Nested under `size` deliberately: this is the exact shape `GlueRenderer` consumes
+      // (`ResolvedSprite`), so a font string that forgets to carry its measured size is a TYPE
+      // ERROR rather than a silent stretch-to-rect. It shipped flat once, and because `size` is
+      // optional and excess properties are not checked on a returned value, every string on screen
+      // was quietly stretched to its widget rect until a screenshot caught it.
+      size: {
+        // Logical units: the raster is denser (`pixelScale` includes `dpr`) but the quad it draws
+        // onto must stay the same on-screen size regardless of display density.
+        width: canvas.width / pixelScale,
+        height: canvas.height / pixelScale,
+      },
     };
     this.cache.set(key, entry);
 
