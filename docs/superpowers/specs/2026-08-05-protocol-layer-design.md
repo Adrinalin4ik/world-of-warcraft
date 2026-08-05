@@ -59,11 +59,13 @@ of the shared types.
 client/src/network/protocol/
   types.ts          version-neutral types and the two transport interfaces
   stages.ts         pure: LoginStage, result-code -> glue string key      <- unit-tested
+  endpoint.ts       pure: which host/port a browser may actually dial     <- unit-tested
   session.ts        the state machine: park model, typed events, policy   <- unit-tested
   wotlk/
-    logon.ts        challenge / proof / realm list over the auth socket
-    world.ts        handshake, char enum/create/delete, enter world
-    codes.ts        3.3.5 result codes
+    logon-wire.ts   pure: challenge / proof / realm-list byte layouts     <- unit-tested
+    logon.ts        the exchange, over injected IO                        <- unit-tested
+    world-wire.ts   pure: char enum / create / delete byte layouts        <- unit-tested
+    world.ts        drives the existing game handler                      <- unit-tested
 ```
 
 `crypto/`, `net/` (socket, byte buffers) and `game/opcode.js` stay where they are and are used by
@@ -84,7 +86,9 @@ places where 3.3.5 differs and the types must therefore stay quiet about it:
 
 ```ts
 export type RealmInfo = {
-  id: number; name: string; address: string; port: number;
+  id: number; name: string;
+  /** Host as the realm advertises it, without the port. What we actually dial is section 3.1a. */
+  host: string; port: number;
   population: number; characterCount: number;
   online: boolean; recommended: boolean; pvp: boolean;
   /** Present only when the realm advertises a build; absent is not an error. */
@@ -112,6 +116,25 @@ export type CharCreateRequest = {
 /** A refusal from the server, typed so the UI can name it in the client's own words. */
 export type ProtocolRefusal = { code: number; stringKey: string };
 ```
+
+### 3.1a Where the browser can actually connect
+
+A browser cannot open a raw TCP socket, so every connection goes through the WebSocket-to-TCP proxy
+in `client/websockify.js` -- one process per (listen port to target host:port), started by hand
+(`npm run proxy1`, `proxy2`). Two consequences the layer must state rather than assume:
+
+- **The realm list advertises the SERVER's address**, e.g. `95.181.139.52:8086`. Nothing is listening
+  for WebSockets there. The existing client survives this by connecting to the *proxy* host with the
+  *realm's* port (`realms.tsx` passes `session.auth.host` along with the realm) -- an unwritten
+  convention that everything silently depends on.
+- So the layer carries one pure policy, `resolveRealmEndpoint(realm, config)`: by default keep the
+  realm's port and substitute the configured proxy host, with an explicit override for a deployment
+  that terminates WebSockets at the realm itself. It is tested, and it is the only place that knows
+  the browser is not talking to the game server directly.
+
+A realm on a port no proxy listens on therefore cannot be reached, and today it fails silently. The
+layer cannot fix that from inside a browser; what it can do is name the endpoint it tried in the
+failure, so the cause is visible instead of mysterious.
 
 ### 3.2 The two transports
 

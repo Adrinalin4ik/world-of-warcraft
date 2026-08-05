@@ -21,15 +21,17 @@
 
 ---
 
-### Task 1: Version-neutral types and the login stages
+### Task 1: Version-neutral types, the login stages, and the endpoint policy
 
 **Files:**
 - Create: `client/src/network/protocol/types.ts`
 - Create: `client/src/network/protocol/stages.ts`
+- Create: `client/src/network/protocol/endpoint.ts`
 - Test: `client/src/network/protocol/__tests__/stages.test.ts`
+- Test: `client/src/network/protocol/__tests__/endpoint.test.ts`
 
 **Interfaces:**
-- Produces: from `types.ts` — `RealmInfo`, `EquipmentDisplay`, `CharacterAppearance`, `CharacterRecord`, `CharCreateRequest`, `ProtocolRefusal`, `LogonTransport`, `WorldTransport`; from `stages.ts` — `enum LoginStage`, `logonRefusal(code): ProtocolRefusal`, `worldRefusal(code): ProtocolRefusal`, `LOGON_RESULT_STRINGS`, `WORLD_RESULT_STRINGS`.
+- Produces: from `types.ts` — `RealmInfo`, `EquipmentDisplay`, `CharacterAppearance`, `CharacterRecord`, `CharCreateRequest`, `ProtocolRefusal`, `LogonTransport`, `WorldTransport`; from `stages.ts` — `enum LoginStage`, `logonRefusal(code): ProtocolRefusal`, `worldRefusal(code): ProtocolRefusal`, `LOGON_RESULT_STRINGS`, `WORLD_RESULT_STRINGS`; from `endpoint.ts` -- `type ProxyConfig = { proxyHost: string; rewriteRealmHost: boolean }`, `resolveRealmEndpoint(realm, config): { host: string; port: number }`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -303,16 +305,90 @@ export function isWorldSuccess(code: number): boolean {
 }
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 5: Write the endpoint test**
 
-Run: `cd client && npm test -- --watchAll=false --testPathPattern=protocol/__tests__/stages`
-Expected: PASS (6 tests)
+```ts
+import { resolveRealmEndpoint } from '../endpoint';
 
-- [ ] **Step 6: Commit**
+const REALM = {
+  id: 1,
+  name: 'Blackrock',
+  host: '95.181.139.52',
+  port: 8086,
+  population: 1,
+  characterCount: 0,
+  online: true,
+  recommended: false,
+  pvp: false,
+};
+
+describe('resolveRealmEndpoint', () => {
+  it('keeps the realm port and substitutes the proxy host', () => {
+    // A browser cannot open a raw TCP socket: the realm's advertised address has no WebSocket
+    // listener, and `client/websockify.js` is what bridges the two. This is the convention the
+    // existing client relies on silently -- `realms.tsx` passes the AUTH host with the realm.
+    expect(resolveRealmEndpoint(REALM, { proxyHost: 'localhost', rewriteRealmHost: true })).toEqual({
+      host: 'localhost',
+      port: 8086,
+    });
+  });
+
+  it('honours the realm address as advertised when told to', () => {
+    // A deployment that terminates WebSockets at the realm itself needs no rewriting.
+    expect(resolveRealmEndpoint(REALM, { proxyHost: 'localhost', rewriteRealmHost: false })).toEqual({
+      host: '95.181.139.52',
+      port: 8086,
+    });
+  });
+});
+```
+
+- [ ] **Step 6: Write `endpoint.ts`**
+
+```ts
+/**
+ * Where the browser may actually connect.
+ *
+ * A browser has no raw TCP, so every game connection goes through the WebSocket-to-TCP proxy in
+ * `client/websockify.js` -- one process per (listen port -> target). The realm list advertises the
+ * SERVER's address, which has no WebSocket listener, so by default we keep the realm's port and
+ * substitute the proxy host. That is exactly what the existing client does by passing the auth host
+ * along with the realm; writing it down here makes it a decision rather than an accident.
+ *
+ * A realm on a port no proxy listens on cannot be reached from a browser at all. This function
+ * cannot fix that -- but every failure out of the transports names the endpoint it tried, so the
+ * cause is visible rather than mysterious.
+ */
+import { RealmInfo } from './types';
+
+export type ProxyConfig = {
+  /** The host the WebSocket proxies listen on. */
+  proxyHost: string;
+  /** False when WebSockets terminate at the realm itself and no rewriting is wanted. */
+  rewriteRealmHost: boolean;
+};
+
+export function resolveRealmEndpoint(
+  realm: RealmInfo,
+  config: ProxyConfig,
+): { host: string; port: number } {
+  return {
+    host: config.rewriteRealmHost ? config.proxyHost : realm.host,
+    port: realm.port,
+  };
+}
+```
+
+- [ ] **Step 7: Run both tests to verify they pass**
+
+Run: `cd client && npm test -- --watchAll=false --testPathPattern="protocol/__tests__/(stages|endpoint)"`
+Expected: PASS (8 tests)
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add client/src/network/protocol
-git commit -m "feat(protocol): add version-neutral types and the login stage table"
+git commit -m "feat(protocol): add version-neutral types, stages and the endpoint policy"
 ```
 
 ---
@@ -1497,7 +1573,7 @@ git commit -m "feat(protocol): add the 3.3.5 logon transport over injected IO"
 
 **Interfaces:**
 - Consumes: the codecs from `./world-wire`; `worldRefusal`, `isWorldSuccess` from `../stages`; `WorldTransport`, `CharacterRecord`, `CharCreateRequest`, `ProtocolRefusalError`, `RealmInfo` from `../types`.
-- Produces: `class WotlkWorldTransport implements WorldTransport`, constructed as `new WotlkWorldTransport(handler)` where `handler: WorldPacketIo` is `{ connect(host, port, realm): Promise<void>; send(opcode: number, body: Uint8Array): void; on(opcodeName: string, listener: (body: Uint8Array) => void): void; onDisconnect(listener: (reason: string) => void): void; close(): void }`, plus `createGameHandlerIo(session): WorldPacketIo`.
+- Produces: `class WotlkWorldTransport implements WorldTransport`, constructed as `new WotlkWorldTransport(io, proxy)` where `proxy: ProxyConfig` comes from `../endpoint` where `handler: WorldPacketIo` is `{ connect(host, port, realm): Promise<void>; send(opcode: number, body: Uint8Array): void; on(opcodeName: string, listener: (body: Uint8Array) => void): void; onDisconnect(listener: (reason: string) => void): void; close(): void }`, plus `createGameHandlerIo(session): WorldPacketIo`.
 
 **Deliberate deviation from the spec, stated out loud.** Spec §3.5 has the handshake MOVING out of `game/handler.js`. It does not move here. `GameHandler` owns the socket, the RC4 header crypt, the packet framing AND all in-world gameplay on the same connection; relocating the handshake risks the working world path for no gain that spec 3 needs. Instead `WotlkWorldTransport` DRIVES the existing handler through the narrow `WorldPacketIo` seam above, and `game/handler.js` is not edited at all. What spec 3 needs is the typed interface, and it gets exactly that. Record this in your report; the relocation stays available later, on its own, with the world route as its test.
 
@@ -1548,7 +1624,7 @@ const REALM = {
 describe('WotlkWorldTransport', () => {
   it('resolves the roster from an enum body', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io);
+    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
 
     const pending = transport.characters();
     io.deliver('SMSG_CHAR_ENUM', new Uint8Array([0])); // zero characters
@@ -1558,7 +1634,7 @@ describe('WotlkWorldTransport', () => {
 
   it('resolves a create on the success byte', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io);
+    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
 
     const pending = transport.createCharacter({
       name: 'Newbie',
@@ -1576,7 +1652,7 @@ describe('WotlkWorldTransport', () => {
 
   it('rejects a create with the client’s own key on refusal', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io);
+    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
 
     const pending = transport.createCharacter({
       name: 'Taken',
@@ -1595,7 +1671,7 @@ describe('WotlkWorldTransport', () => {
 
   it('resolves a delete on its own success byte', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io);
+    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
 
     const pending = transport.deleteCharacter('0x1');
     io.deliver('SMSG_CHAR_DELETE', new Uint8Array([CHAR_RESULT.DELETE_SUCCESS]));
@@ -1605,7 +1681,7 @@ describe('WotlkWorldTransport', () => {
 
   it('resolves entering the world when the world verifies it', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io);
+    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
 
     const pending = transport.enterWorld('0x1');
     io.deliver('SMSG_LOGIN_VERIFY_WORLD', new Uint8Array(20));
@@ -1615,7 +1691,7 @@ describe('WotlkWorldTransport', () => {
 
   it('rejects a join when the handshake is refused', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io);
+    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
 
     const pending = transport.join(REALM, 'TESTER', new Uint8Array(40));
     io.deliver('SMSG_AUTH_RESPONSE', new Uint8Array([0x15]));
@@ -1645,6 +1721,7 @@ One promise per outstanding request, settled by the matching `SMSG_*` listener. 
  */
 import GameOpcode from '../../game/opcode';
 import GamePacket from '../../game/packet';
+import { ProxyConfig, resolveRealmEndpoint } from '../endpoint';
 import { isWorldSuccess, worldRefusal } from '../stages';
 import {
   CharacterRecord,
@@ -1675,6 +1752,7 @@ type Pending<T> = { resolve: (value: T) => void; reject: (error: Error) => void 
 
 export class WotlkWorldTransport implements WorldTransport {
   private readonly io: WorldPacketIo;
+  private readonly proxy: ProxyConfig;
 
   private join_: Pending<void> | null = null;
   private roster: Pending<CharacterRecord[]> | null = null;
@@ -1682,8 +1760,9 @@ export class WotlkWorldTransport implements WorldTransport {
   private remove: Pending<void> | null = null;
   private enter: Pending<void> | null = null;
 
-  constructor(io: WorldPacketIo) {
+  constructor(io: WorldPacketIo, proxy: ProxyConfig) {
     this.io = io;
+    this.proxy = proxy;
 
     this.io.on('SMSG_AUTH_RESPONSE', (body) => {
       const code = decodeResultByte(body);
@@ -1729,9 +1808,12 @@ export class WotlkWorldTransport implements WorldTransport {
   join(realm: RealmInfo, _account: string, _sessionKey: Uint8Array): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       this.join_ = { resolve, reject };
-      // The handshake itself belongs to the handler, which already holds the account and session key
-      // it needs; connecting is what starts it.
-      this.io.connect(realm.host, realm.port, realm).catch(reject);
+      // Through the endpoint policy, never the realm's advertised address: from a browser the game
+      // server is reachable only via the websockify proxy (`endpoint.ts` explains why). The handshake
+      // itself belongs to the handler, which already holds the account and session key it needs;
+      // connecting is what starts it.
+      const endpoint = resolveRealmEndpoint(realm, this.proxy);
+      this.io.connect(endpoint.host, endpoint.port, realm).catch(reject);
     });
   }
 
@@ -1792,11 +1874,17 @@ Append to the same file. It adapts the existing handler: `send` builds a `GamePa
  */
 export function createGameHandlerIo(handler: any): WorldPacketIo {
   return {
-    connect(_host: string, _port: number, realm: RealmInfo) {
+    connect(host: string, port: number, realm: RealmInfo) {
       return new Promise<void>((resolve, reject) => {
         handler.once('authenticate', () => resolve());
-        handler.once('reject', () => reject(new Error('world handshake refused')));
-        handler.connect(handler.session.auth.host, realm);
+        handler.once('reject', () =>
+          // Name the endpoint. A realm on a port no websockify process is listening on fails right
+          // here, and the word "refused" on its own sends the reader looking in the wrong place.
+          reject(new Error(`world handshake refused at ${host}:${port}`)),
+        );
+        // The handler takes (host, realm) and reads the port off the realm, so it must be handed the
+        // POLICY's host and port -- not the realm's advertised address.
+        handler.connect(host, { ...realm, port });
       });
     },
     send(opcode: number, body: Uint8Array) {
@@ -2303,7 +2391,12 @@ In `client/src/network/session.ts`, add the import and a lazily-built accessor. 
           locale: config.locale,
           timezone: config.timezone,
         }),
-        new WotlkWorldTransport(createGameHandlerIo(this.game)),
+        new WotlkWorldTransport(createGameHandlerIo(this.game), {
+          // The websockify proxies listen on the host the app was served from; the realm's own
+          // advertised address has no WebSocket listener. See `protocol/endpoint.ts`.
+          proxyHost: config.serverhost,
+          rewriteRealmHost: true,
+        }),
       );
     }
     return this.protocol_;
