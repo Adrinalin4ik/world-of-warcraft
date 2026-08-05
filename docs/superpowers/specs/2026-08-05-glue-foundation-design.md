@@ -182,10 +182,13 @@ Two blend modes: standard premultiplied alpha, and **ADD** for the glue art that
 a dedicated `AddUiMaterial` for this; `crates/benilla/src/glue/add_material.rs`). Both are unlit,
 depth-test off, drawn in explicit order.
 
-One trap to encode: `TextureLoader` creates every texture with `flipY = false` uniformly, because
+One trap to know about: `TextureLoader` creates every texture with `flipY = false` uniformly, because
 three.js cannot flip a compressed upload
-([`texture-loader.js`](../../../client/src/game/pipeline/texture-loader.js)). UI quads must therefore
-flip V in their own UVs, or every piece of glue art draws upside down.
+([`texture-loader.js`](../../../client/src/game/pipeline/texture-loader.js)), so image row 0 is
+`v = 0`. That happens to cancel against the UI's **Y-down** orthographic camera, which puts the
+quad's `v = 0` edge at the top of the screen: the mapping comes out identity, and *adding* a V flip
+is what would draw every sprite upside down. Font-string textures set `flipY = false` too, so the one
+rule holds for both.
 
 ### 4.5 Input
 
@@ -320,8 +323,12 @@ main-menu fires come free through the existing particle system.
 **Camera framing.** Camera 0 drives a `THREE.PerspectiveCamera`: eye and target sampled from its
 tracks at the sequence-0 time, up from roll, and the authored FOV converted from the M2's
 **diagonal** FOV to a vertical one for our aspect (benilla's `DIAG_TO_VERT`,
-`crates/benilla/src/portrait/framing.rs`). A window wider than the authored aspect must reveal more
-scene, never crop the gate — the same law the widget layer follows in §4.1.
+`crates/benilla/src/portrait/framing.rs`). The client's own conversion is
+`half = (fov / 2) / √(aspect² + 1)`, so the full vertical angle is `fov / √(aspect² + 1)` — `0.6·fov`
+at 4:3. Note what that means and do not "fix" it: as the window widens the vertical angle *narrows*
+while the horizontal one grows, so a widescreen window reveals more of the stage sideways and shows
+less of it top to bottom. Same direction as the widget layer's law in §4.1, different arithmetic —
+the scene keeps the authored diagonal, not the authored height.
 
 **Rendering.** The scene renders **directly into the canvas** as the first pass, widgets second with
 `autoClear = false`. benilla bakes its glue scene to an offscreen texture because one booth serves
@@ -350,6 +357,11 @@ Five unit tests, deliberately no more:
 4. `scene-rig.ts` + `tokens.ts` — race→token mapping (including Troll→Orc and Gnome→Dwarf), fog triple
    from a `CharModelFogInfo` row, and that a `RaceLights` table folds to finite ambient/probe values.
 5. The offline route — `?offline=1` selects the stub session and opens no socket.
+
+The M2 parser work carries two suites of its own on top of those five, in the parser's existing
+hand-built-buffer style: one per new record shape, each pinning the **3.3.5 record stride**. That is
+not padding — the vanilla strides differ (a 1.12 `M2Track` carries an extra `ranges` array), and a
+stride that is wrong by four bytes silently shifts every record after the first.
 
 Everything else is verified by hand: `npm start`, then the probe screen for scale behaviour (resize
 tall/short/wide), ADD blending, font rendering with outline, edit-box typing/paste/focus — and the
