@@ -172,7 +172,7 @@ client's baked 1-pixel outline with offset copies of every string
 (`OutlineCopy`, `crates/benilla/src/glue/mod.rs`); a 2D context gives us `strokeText`, so we draw the
 outline for real and get closer to the reference with less machinery.
 
-Textures are cached by `(text, font, size, color, outline, maxWidth)` and only re-rasterized when a
+Textures are cached by `(text, font, size, colour, outline, device scale)` and only re-rasterized when a
 key changes — a per-frame rasterize of a character list would be a frame-budget hole for text that
 changes on selection, not on frames.
 

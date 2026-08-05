@@ -3256,3 +3256,38 @@ git commit -m "feat(net): add the networking-free /game?offline=1 debug route"
 - `/glue` draws the `UI_MainMenu` scene with real client art, working button/edit box/dialog on top, correct scaling from a short window to a tall one.
 - `/game?offline=1` reaches the world with no socket.
 - `/`, `/realms`, `/characters` still work exactly as before.
+
+---
+
+## Follow-ups carried out of this plan
+
+Everything below was raised by a review, judged not to block this work, and left for whoever
+builds on the foundation. Recorded here because the review workspace is scratch and git is not.
+
+**Needs a human's eyes.** No agent on this plan had a browser, so these were never seen working:
+the probe screen at `/glue` (real client art with ADD blending, button hover/press art, the dialog,
+edit-box typing/paste/Tab/selection, and the scale law from a short window to a tall one), the
+`UI_MainMenu` scene behind it (authored camera framing, looping sequence 0, its fires, the
+`accountlogin.xml` fog values, and a widescreen window revealing more stage), and `/game?offline=1`
+(character standing in Stormwind, no WebSocket in the Network tab). Everything else was verified:
+compile, 91 tests across the UI/parser/offline suites, and every route serving 200.
+
+**Spec gaps left open, for spec 3 to close.** Text has no `maxWidth` and no wrapping — nothing in the
+glue screens needed it, and spec 7's race/class description paragraphs will (they also need the Lua
+`..` multi-line concatenation `strings.ts` currently skips, the same limitation benilla documents).
+`GlueContext.session` is wired but nothing reads it yet; the login screen is its first consumer.
+
+**Sub-pixel and allocation debts.** `measureText` uses the raw glyph width where the rasterizer ceils
+it, and `cssFont` rounds where the height math ceils — under one device pixel each, worth revisiting
+only if text looks soft. `renderer.ts` allocates a `THREE.Vector2` per frame for `getSize`;
+`tick()` allocates a viewport object and a resolver closure per frame, and `drawList` rebuilds its
+arrays every frame though the tree is retained — add a dirty flag when a real screen's widget count
+makes it measurable.
+
+**Latent, currently unreachable.** `appendBLP` treats a dot ANYWHERE in a path as an extension, so a
+future GlueXML path with a dotted directory would 404 — scope the test to the last segment when the
+real screen tables land. A caller-supplied duplicate widget id would collide in the anchor map and
+silently take the wrong rect. A rejected texture fetch leaks its `TextureLoader` reference count
+(that contract predates this branch). The glue frame loop and `World#animate` both advance
+`worldClock`, which is safe only because they never run at once — whoever wires the `InWorld`
+transition must keep it that way. Masking and selection index UTF-16 code units, not graphemes.
