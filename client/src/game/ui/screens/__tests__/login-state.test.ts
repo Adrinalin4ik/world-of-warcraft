@@ -1,5 +1,6 @@
 import { LoginStage } from '../../../../network/protocol/stages';
-import { loginDialog, wantsTrialScene } from '../login-state';
+import { ClientState } from '../../screens';
+import { clientStateForStage, loginDialog, wantsTrialScene } from '../login-state';
 
 describe('loginDialog', () => {
   it('says nothing while the player is still typing', () => {
@@ -28,6 +29,31 @@ describe('loginDialog', () => {
 
   it('says nothing once the realm list has arrived', () => {
     expect(loginDialog(LoginStage.RealmList, null)).toEqual({ kind: 'none' });
+  });
+});
+
+describe('clientStateForStage', () => {
+  it('maps every stage the session can be in', () => {
+    // Every value, because a stage with no mapping is the dead end this function closes: the login
+    // screen would stay mounted with the credentials already accepted.
+    const expected: Record<LoginStage, ClientState> = {
+      [LoginStage.Offline]: ClientState.Login,
+      [LoginStage.Connecting]: ClientState.Login,
+      [LoginStage.Authenticating]: ClientState.Login,
+      [LoginStage.RealmList]: ClientState.RealmList,
+      // The join is still in flight, and the roster CharSelect draws does not exist yet.
+      [LoginStage.JoiningRealm]: ClientState.RealmList,
+      [LoginStage.CharacterList]: ClientState.CharSelect,
+      // Chosen, but the world has not confirmed -- and a failed enterWorld rolls straight back here.
+      [LoginStage.EnteringWorld]: ClientState.CharSelect,
+      [LoginStage.InWorld]: ClientState.InWorld,
+    };
+
+    // A stage added to the enum without a line above fails here rather than silently dead-ending.
+    expect(Object.keys(expected).sort()).toEqual(Object.values(LoginStage).sort());
+    for (const [stage, state] of Object.entries(expected)) {
+      expect(clientStateForStage(stage as LoginStage)).toBe(state);
+    }
   });
 });
 

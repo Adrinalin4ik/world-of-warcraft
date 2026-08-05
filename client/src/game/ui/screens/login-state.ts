@@ -10,6 +10,7 @@
  */
 import { LoginStage } from '../../../network/protocol/stages';
 import { ProtocolRefusal } from '../../../network/protocol/types';
+import { ClientState } from '../screens';
 
 export type LoginDialog =
   | { kind: 'none' }
@@ -26,6 +27,44 @@ export function loginDialog(stage: LoginStage, refusal: ProtocolRefusal | null):
   }
 
   return { kind: 'none' };
+}
+
+/**
+ * Which client state the session's stage means -- the one thing that carries a successful login past
+ * the login screen.
+ *
+ * Total over `LoginStage` deliberately: a stage with no mapping would leave whatever screen happened
+ * to be up still mounted, which is exactly the dead end this function exists to close.
+ *
+ *  - `Offline`, `Connecting` and `Authenticating` all mean the player is still AT the login screen.
+ *    The first two put a dialog over it, but that is `loginDialog`'s business, not a state change.
+ *  - `JoiningRealm` stays on `RealmList`: the realm the player clicked is still being joined and the
+ *    roster `CharSelect` draws does not exist yet. It also lines up with `ProtocolSession#chooseRealm`,
+ *    whose rollback on a failed join restores the stage the player was already looking at.
+ *  - `EnteringWorld` stays on `CharSelect`, for the mirror reason: the character is chosen but the
+ *    world has not confirmed, and a failed `enterWorld` rolls back to `CharacterList` -- the screen
+ *    the player never left.
+ *  - `InWorld` maps to `ClientState.InWorld`, because that is what it means. No glue screen is
+ *    registered for it (the world is its own route), so `GlueApp#enter` warns and keeps the current
+ *    screen. That is the honest outcome: the alternative is to claim the stage means a screen it does
+ *    not mean, and `screens.ts#tick` already documents that the world loop must not start until the
+ *    glue loop has stopped.
+ */
+export function clientStateForStage(stage: LoginStage): ClientState {
+  switch (stage) {
+    case LoginStage.Offline:
+    case LoginStage.Connecting:
+    case LoginStage.Authenticating:
+      return ClientState.Login;
+    case LoginStage.RealmList:
+    case LoginStage.JoiningRealm:
+      return ClientState.RealmList;
+    case LoginStage.CharacterList:
+    case LoginStage.EnteringWorld:
+      return ClientState.CharSelect;
+    case LoginStage.InWorld:
+      return ClientState.InWorld;
+  }
 }
 
 /**

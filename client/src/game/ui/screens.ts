@@ -11,8 +11,9 @@ import * as THREE from 'three';
 
 import { worldClock } from '../pipeline/m2/anim/world-clock';
 import { GameSession } from '../../network/session';
-import { ProtocolSession } from '../../network/protocol/session';
+import { ProtocolSession, SessionState } from '../../network/protocol/session';
 import { GlueArt } from './art';
+import { clientStateForStage } from './screens/login-state';
 import { GlueInput } from './input';
 import { GlueRenderer, ResolvedSprite } from './renderer';
 import { GlueSceneView } from './scene/glue-scene';
@@ -66,6 +67,8 @@ export class GlueApp {
   private screens = new Map<ClientState, GlueScreen>();
   private current: { state: ClientState; screen: GlueScreen; root: WidgetRoot } | null = null;
   private pending: ClientState | null = null;
+  /** The session subscription's unsubscribe, held so `stop()` can drop it. */
+  private unsubscribeSession: (() => void) | null = null;
 
   private frame = 0;
   private lastTime = 0;
@@ -93,6 +96,14 @@ export class GlueApp {
     await Promise.all([loadGlueFonts(), GlueStrings.load().then((s) => (this.strings = s))]);
 
     this.enter(initial);
+
+    // THE path past the login screen. Nothing else advances this machine: the session is the only
+    // thing that knows a login succeeded, a realm was joined or the roster arrived, so without this
+    // subscription a correct login would sit on the login screen forever. Subscribed AFTER the initial
+    // `enter`, so the first emission compares against a real current state rather than against
+    // nothing and immediately re-entering the screen just mounted.
+    this.unsubscribeSession = this.session.protocol.on(this.onSessionState);
+
     this.lastTime = performance.now();
     this.frame = requestAnimationFrame(this.tick);
   }
@@ -101,6 +112,10 @@ export class GlueApp {
     cancelAnimationFrame(this.frame);
     window.removeEventListener('resize', this.resize);
     this.input.detach();
+    // One leaked listener per mounted app is a real leak, and a listener left on a live session would
+    // go on asking a torn-down app to change screens.
+    this.unsubscribeSession?.();
+    this.unsubscribeSession = null;
     this.current?.screen.unmount();
     this.current = null;
     // Cancels any pending 3 s login retry and stops the machine reacting further -- otherwise a
@@ -116,6 +131,22 @@ export class GlueApp {
 
   private resize = (): void => {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+  };
+
+  /**
+   * The session moved: mount whatever state that stage means.
+   *
+   * Only when it DIFFERS from what is already up or already queued. The session emits on every stage
+   * change, and several land in one turn (`Connecting` then `Authenticating`); re-requesting the state
+   * already showing would rebuild that screen under the player -- losing focus, typed text and the
+   * dialog -- on every emission.
+   */
+  private onSessionState = (state: SessionState): void => {
+    const target = clientStateForStage(state.stage);
+    if (target === (this.pending ?? this.current?.state)) {
+      return;
+    }
+    this.pending = target;
   };
 
   private enter(state: ClientState): void {
