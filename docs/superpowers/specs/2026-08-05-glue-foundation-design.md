@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-05
 **Status:** Design approved, spec under review
-**Scope:** The in-canvas widget layer, glue art/string/font access, and the client lifecycle state
-machine that the four pre-world screens (login, realm list, character select, character create) will
-be built on — plus a networking-free debug route into the world.
+**Scope:** The in-canvas widget layer, the 3D glue scene, glue art/string/font access, and the client
+lifecycle state machine that the four pre-world screens (login, realm list, character select,
+character create) will be built on — plus a networking-free debug route into the world.
 
 ---
 
@@ -27,7 +27,14 @@ boxes, no font strings, no hit-testing, no focus, no anchor resolution. Nothing 
 2D interactive element into the WebGL canvas; every UI pixel today is DOM
 ([`pages/game/controls`](../../../client/src/pages/game/controls/), [`pages/game/debug`](../../../client/src/pages/game/debug/)).
 
-What we *do* have is everything the widget layer needs to feed on. Verified against the asset host
+The 3D half is missing too, and less visibly. A glue screen's background is a model scene framed by
+the model's own camera with the character standing on its own attachment point — and our M2 parser
+skips exactly those three chunks: `cameras`, `lights` and `attachments` are declared as typeless
+`Nofs` entries ([`m2/index.js:152-157`](../../../client/src/wow-data-parser/m2/index.js)), which read
+the count and discard the payload. So today we could load `UI_MainMenu.m2` and would have no camera to
+look through, no stage spot, and no point lights.
+
+What we *do* have is everything both halves need to feed on. Verified against the asset host
 (`https://data-direct.spelunkerdb.com/12340`, [`game/net/loader.js`](../../../client/src/game/net/loader.js)):
 
 | Path | Status |
@@ -58,12 +65,12 @@ Seven specs, each with its own plan:
 
 | # | Spec | Delivers |
 |---|---|---|
-| **1** | **Glue foundation** — *this document* | Widget layer, layout law, text, input, `GlueArt`/`GlueStrings`, `ClientState` machine, offline world route |
+| **1** | **Glue foundation** — *this document* | Widget layer, layout law, text, input, `GlueArt`/`GlueStrings`, **the 3D glue scene** (M2 cameras/lights/attachments, `SetBackgroundModel`, fog and light rigs), `ClientState` machine, offline world route |
 | 2 | Protocol layer | Version-neutral protocol interface + 3.3.5 implementation over the existing SRP/RC4 code; typed messages, login stages, char create/delete, full error codes |
 | 3 | Login screen | `AccountLogin.xml` transcribed: account/password boxes, Remember Account Name, Login/Quit, version block, connecting/error dialogs, `UI_MainMenu` glue scene |
 | 4 | Realm list screen | `RealmList.xml` transcribed: realm rows, categories, population, Change Realm |
 | 5 | Character select | `CharacterSelect.xml` transcribed: realm banner, ten rows, Create New Character, Enter World / Back / Delete with the typed-`DELETE` confirm, rotate pair, arrow cycling, double-click enter. Scene without a character yet |
-| 6 | Character appearance + glue booth | `CharSections` skin bake, hair/facial-hair geosets, equipment display from the char-enum record, booth camera/light — puts the character into the select scene and makes create possible |
+| 6 | Character appearance | `CharSections` skin bake, hair/facial-hair geosets, equipment display from the char-enum record — puts a character onto the stage spot the foundation's scene already establishes, and makes create possible |
 | 7 | Character create | Full: race/class matrix from DBC, live-preview customization, RANDOMIZE, race/class descriptions, name validation, server responses |
 
 Order is 1→7. After spec 4 the login→realm path is authentic and entry to the world still runs
@@ -82,12 +89,16 @@ Decisions already fixed for the whole program:
 - **The UI lives in the WebGL canvas**, not the DOM: widget quads in an orthographic scene, our own
   hit-testing, focus and text input — as benilla and the real client do.
 - **The canvas fills the window.** There is no fixed virtual screen and no letterbox.
+- **A glue screen is a 3D scene with widgets on top**, not a picture with widgets on top. The login
+  screen is the `UI_MainMenu` model burning behind the boxes; select and create stand the character in
+  a `UI_<Race>` stage. That 3D half is foundation, not per-screen decoration — §5.
 
 ## 3. Scope of this spec
 
-In: `client/src/game/ui/` — the widget layer and its data sources; the `ClientState` machine and its
-React host; the offline world route. Out: any transcription of a real screen. The foundation is
-proved by one **throwaway probe screen** (logo, a button, an edit box, a dialog) that spec 3 deletes
+In: `client/src/game/ui/` — the widget layer and its data sources; the 3D glue scene (§5) including
+the M2 parser work it needs; the `ClientState` machine and its React host; the offline world route.
+Out: any transcription of a real screen. The foundation is proved by one **throwaway probe screen**
+(the real `UI_MainMenu` scene behind a logo, a button, an edit box and a dialog) that spec 3 deletes
 when the real `AccountLogin` lands.
 
 ## 4. Architecture
@@ -105,6 +116,11 @@ client/src/game/ui/
   renderer.ts    ortho scene + second render pass
   screens.ts     ClientState machine, screen mount/update/unmount
   screens/probe.ts  throwaway proof screen (deleted by spec 3)
+
+client/src/game/ui/scene/       the 3D half (§5)
+  glue-scene.ts  load UI_<token>.m2, sequence 0, camera 0, stage spot
+  scene-rig.ts   pure: RaceLights -> probe/ambient, CharModelFogInfo -> fog triple  <- unit-tested
+  tokens.ts      pure: race -> scene token, expansion -> main-menu variant
 ```
 
 The split is deliberate: **all geometry and interaction logic is pure and Three.js-free**
@@ -235,36 +251,135 @@ no-server runs and marked it explicitly with a `NetOffline` resource so a run th
 wire can't be mistaken for one that did (`crates/benilla/src/net.rs`). We do the same — the offline
 entry announces itself in the console once.
 
-## 5. Testing
+## 5. The 3D glue scene
 
-Four unit tests, deliberately no more:
+A glue screen is not a widget sheet over a still: it is a live model scene with the widgets drawn on
+top. Every pre-world screen in the program depends on this, so it is foundation.
+
+### 5.1 The mechanism, from our own client data
+
+Read out of `interface/gluexml/` on the asset host — this is our version's law, not an inference:
+
+```lua
+-- glueparent.lua:376
+function SetBackgroundModel(model, name)
+    local path = "Interface\\Glues\\Models\\UI_"..name.."\\UI_"..name..".m2";
+    ... SetCharCustomizeBackground(path) / SetCharSelectBackground(path)
+    PlayGlueAmbience(GlueAmbienceTracks[strupper(name)], 4.0);
+    SetLighting(model, strupper(name))
+end
+
+-- characterselect.lua:11 / charactercreate.lua:66
+self:SetSequence(0);
+self:SetCamera(0);
+```
+
+So: **model** = `Interface\Glues\Models\UI_<token>\UI_<token>.m2`, **animation** = sequence 0 looping,
+**framing** = the model's **authored camera 0**, and the character (spec 6) stands on the scene's
+**attachment 0** — the stage spot, which benilla byte-verified is attachment 0, not 1
+(`crates/benilla/src/portrait/glue_booth.rs`).
+
+Login is its own case: `accountlogin.lua:34-36` picks `UI_MainMenu` or **`UI_MainMenu_Northrend`** by
+expansion account level, and `accountlogin.xml:93` authors the fog on the frame itself —
+`<ModelFFX ... fogNear="0" fogFar="1200" glow="0.08">` with `<FogColor r="0.25" g="0.06" b="0.015"/>`.
+
+`SetLighting` (`glueparent.lua:327`) is the rig: sequence 0, fog from `CharModelFogInfo[race]`
+(`{r, g, b, far}`, near always 0) or `ClearFog()`, then `ResetLights()` and the `RaceLights[race]`
+rows added as `AddCharacterLight`/`AddLight`/`AddPetLight` at index `LIGHT_LIVE = 0`.
+
+**Two divergences from benilla, both because we are 3.3.5 and it is 1.12.1** — where they disagree,
+our client data wins:
+
+1. `glueparent.lua:50` states it outright: *"RaceLights[] duplicates the 3.2.2 color values in the
+   models. Henceforth, the models no longer contain directional lights."* benilla folds the scene's
+   **authored M2 directional rig**; on our data the directionals come from the **Lua table** and only
+   the point lights come from the model (`glueparent.lua:361` confirms: *"The current version only
+   supports setting directional lights, and pulls the default point lights from the models."*).
+2. benilla found that 1.12 renders the **select** scene unfogged (the client overwrites the
+   background's fog callback with the light callback). Ours fogs it: `SetBackgroundModel` runs the same
+   `SetLighting` for select as for create, and `CharModelFogInfo` even carries a dedicated
+   `CHARACTERSELECT` row (`{r=0.8, g=0.65, b=0.73, far=222}`). We follow ours.
+
+`RaceLights` rows are 13 numbers whose grouping is legible but not labelled — enabled flag, an index,
+a 3-vector direction, then two colour triples with a scalar between them. Resolving that layout
+against `AddLight`'s real signature is an implementation task, and the check is visual: the Night Elf
+and Scourge stages are lit almost entirely by their stage lights, so a mis-grouped row is obvious.
+
+### 5.2 What has to be built
+
+**M2 parser: cameras, lights, attachments.** All three are currently *skipped*. In
+[`wow-data-parser/m2/index.js:152-157`](../../../client/src/wow-data-parser/m2/index.js) they are
+declared as bare `new Nofs()`, and a typeless `Nofs` reads the count, discards the offset and returns
+**no payload** ([`nofs.js`](../../../client/src/wow-data-parser/m2/nofs.js)). Without them there is no
+camera 0 to frame with, no stage spot to stand on, and no point lights. This spec adds
+`cameras` + `cameraLookups` (position and target spline tracks, FOV, near/far), `lights` (type,
+bone, position, ambient/diffuse colour and intensity tracks, attenuation, visibility), and
+`attachments` + `attachmentLookups`. Ribbons and particle emitters are already parsed, so the
+main-menu fires come free through the existing particle system.
+
+**Camera framing.** Camera 0 drives a `THREE.PerspectiveCamera`: eye and target sampled from its
+tracks at the sequence-0 time, up from roll, and the authored FOV converted from the M2's
+**diagonal** FOV to a vertical one for our aspect (benilla's `DIAG_TO_VERT`,
+`crates/benilla/src/portrait/framing.rs`). A window wider than the authored aspect must reveal more
+scene, never crop the gate — the same law the widget layer follows in §4.1.
+
+**Rendering.** The scene renders **directly into the canvas** as the first pass, widgets second with
+`autoClear = false`. benilla bakes its glue scene to an offscreen texture because one booth serves
+portraits, paper doll and glue alike; we have no such sharing, and a fullscreen render-to-texture
+would cost a 1024²+ target and a blit for nothing.
+
+**Fog and lights** map onto uniforms the M2 material already has — `fogParams`/`fogColor`/`fogModifier`,
+the point-light table, and the 7-vec4 `probeCoeffs` SH block
+([`m2/material/index.ts`](../../../client/src/game/pipeline/m2/material/index.ts)). `scene-rig.ts`
+folds `RaceLights` into ambient + probe coefficients and `CharModelFogInfo` into the fog triple; the
+glue scene pushes them instead of the world's `MapLight`. No shader work, no new material.
+
+**Screen API.** `GlueContext` gains `scene`: `setScene(token | null)` and a `yaw` for the rotate
+controls (spec 5 drives it; the scene root never yaws, only the character does). `null` tears the
+scene down — a screen without one costs nothing.
+
+## 6. Testing
+
+Five unit tests, deliberately no more:
 
 1. `layout.ts` — the scale law (including that a short window scales down rather than clipping) and
    anchor resolution for each anchor point with offsets.
 2. `hit.ts` — top-most-wins ordering on an overlapping tree, `mouseEnabled` skipping, Tab focus order.
 3. `strings.ts` — gluestrings parsing: quoted values, escapes, placeholders, a real excerpt of the
    shipped file.
-4. The offline route — `?offline=1` selects the stub session and opens no socket.
+4. `scene-rig.ts` + `tokens.ts` — race→token mapping (including Troll→Orc and Gnome→Dwarf), fog triple
+   from a `CharModelFogInfo` row, and that a `RaceLights` table folds to finite ambient/probe values.
+5. The offline route — `?offline=1` selects the stub session and opens no socket.
 
-Everything else is verified by hand: `npm start`, then the probe screen against the reference for
-scale behaviour (resize the window tall/short/wide), ADD blending, font rendering with outline, and
-edit-box typing/paste/focus. The probe screen exists for exactly this and is deleted in spec 3.
+Everything else is verified by hand: `npm start`, then the probe screen for scale behaviour (resize
+tall/short/wide), ADD blending, font rendering with outline, edit-box typing/paste/focus — and the
+`UI_MainMenu` scene behind it: authored camera framing, looping sequence 0, its fires, and the fog
+values from `accountlogin.xml`. That scene is why the probe exists; both are deleted in spec 3.
 
-## 6. Out of scope
+## 7. Out of scope
 
-Any real screen layout; the protocol refactor (spec 2); character appearance (spec 6); the in-world
-HUD; FrameXML/Lua interpretation. Note that last one explicitly: benilla's `benilla-ui` crate is a
-FrameXML *interpreter* for the in-game UI. We are **not** building one. GlueXML is read by us as a
-reference document and transcribed into TypeScript, exactly as benilla transcribes it for the glue
-screens.
+Any real screen layout; the protocol refactor (spec 2); character appearance and the character
+standing on the stage spot (spec 6); the in-world HUD; FrameXML/Lua interpretation. Note that last one
+explicitly: benilla's `benilla-ui` crate is a FrameXML *interpreter* for the in-game UI. We are
+**not** building one. GlueXML is read by us as a reference document and transcribed into TypeScript,
+exactly as benilla transcribes it for the glue screens.
 
-## 7. References
+Sound is also out: `SetBackgroundModel` plays a `GlueAmbienceTracks` entry per scene, and nothing in
+this repo plays audio at all. Glue ambience and UI sounds are a spec of their own, after the screens.
+
+## 8. References
 
 - `samples/benilla/crates/benilla/src/glue/` — `mod.rs` (scale law, outline copies), `art.rs` (sprite
   table and tex-coord rects), `widgets.rs` (widget builders), `add_material.rs`, `backdrop.rs`
 - `samples/benilla/crates/benilla/src/char_select/mod.rs` — `ClientState`
+- `samples/benilla/crates/benilla/src/portrait/glue_booth.rs` — glue scene mechanism, stage spot,
+  scene light rig (1.12 variant); `portrait/framing.rs` — diagonal→vertical FOV
 - `samples/benilla/crates/benilla/src/net.rs` — offline/no-IO marking
-- Client data, read at runtime: `interface/gluexml/*.xml|.lua`, `interface/glues/**/*.blp`, `fonts/*.ttf`
+- Client data, read at runtime: `interface/gluexml/*.xml|.lua`, `interface/glues/**/*.blp`,
+  `interface/glues/models/ui_*/`, `fonts/*.ttf`
+- Client data read as reference documents: `glueparent.lua` (`SetBackgroundModel`, `SetLighting`,
+  `RaceLights`, `CharModelFogInfo`), `accountlogin.lua/.xml` (main-menu model choice, `ModelFFX` fog),
+  `characterselect.lua`/`charactercreate.lua` (`SetSequence(0)`, `SetCamera(0)`)
 - Existing infrastructure reused as-is: [`game/net/loader.js`](../../../client/src/game/net/loader.js),
   [`game/pipeline/texture-loader.js`](../../../client/src/game/pipeline/texture-loader.js),
   [`game/pipeline/blp/loader.js`](../../../client/src/game/pipeline/blp/loader.js)
