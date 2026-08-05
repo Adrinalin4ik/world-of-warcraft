@@ -4,6 +4,7 @@ import CharacterHandler from "./characters/handler";
 import { GameHandler } from "./game/handler";
 import RealmsHandler from "./realms/handler";
 import config from "./config";
+import { applyRealmlistOverride, loadSettings } from "./protocol/connection-settings";
 import { ProtocolSession } from "./protocol/session";
 import { createSocketLogonIo, WotlkLogonTransport } from "./protocol/wotlk/logon";
 import { createGameHandlerIo, WotlkWorldTransport } from "./protocol/wotlk/world";
@@ -25,10 +26,16 @@ export class GameSession {
    */
   get protocol(): ProtocolSession {
     if (!this.protocol_) {
+      // The logon DEFAULT, for a caller that names no endpoint. `ProtocolSession#login` is handed one
+      // at submit time and that wins (`WotlkLogonTransport#authenticate`); this is what stands when
+      // nothing does, and it has to agree with the address the login screen shows -- which is these
+      // same settings, not `network/config`'s build-time value.
+      const settings = applyRealmlistOverride(loadSettings(), window.location.search);
+
       this.protocol_ = new ProtocolSession(
         new WotlkLogonTransport(createSocketLogonIo(), {
-          host: config.serverhost,
-          port: Number(config.authport),
+          host: settings.logonHost,
+          port: settings.logonPort,
           game: config.game,
           version: [config.majorVersion, config.minorVersion, config.patchVersion],
           build: config.build,
@@ -37,12 +44,10 @@ export class GameSession {
           locale: config.locale,
           timezone: config.timezone,
         }),
-        new WotlkWorldTransport(createGameHandlerIo(this.game), {
-          // The websockify proxies listen on the host the app was served from; the realm's own
-          // advertised address has no WebSocket listener. See `protocol/endpoint.ts`.
-          proxyHost: config.serverhost,
-          rewriteRealmHost: true,
-        }),
+        // No proxy configuration: the world socket is opened at the gateway with the realm's own
+        // advertised address named in the URL, so there is no host to substitute. See
+        // `protocol/endpoint.ts` and `network/gateway.ts`.
+        new WotlkWorldTransport(createGameHandlerIo(this.game)),
       );
     }
     return this.protocol_;

@@ -1,31 +1,23 @@
 /**
- * Where the browser may actually connect.
+ * Where the browser may actually connect after a realm is chosen: the realm's OWN advertised address.
  *
- * A browser has no raw TCP, so every game connection goes through the WebSocket-to-TCP proxy in
- * `client/websockify.js` -- one process per (listen port -> target). The realm list advertises the
- * SERVER's address, which has no WebSocket listener, so by default we keep the realm's port and
- * substitute the proxy host. That is exactly what the existing client does by passing the auth host
- * along with the realm; writing it down here makes it a decision rather than an accident.
+ * A browser has no raw TCP, but that no longer changes the endpoint. Every socket is opened at the
+ * WebSocket-to-TCP gateway with its target named in the URL (`network/gateway.ts`, `ws-proxy/server.js`),
+ * and the gateway dials the realm itself -- so the address the realm list advertises is exactly what
+ * the client should ask for.
  *
- * A realm on a port no proxy listens on cannot be reached from a browser at all. This function
- * cannot fix that -- but every failure out of the transports names the endpoint it tried, so the
- * cause is visible rather than mysterious.
+ * This used to substitute a proxy host and keep only the realm's port, because the old scheme was one
+ * `websockify` process per port with its target fixed at startup: the client had to aim at a listener
+ * on the served host, and a realm on a port no process had been provisioned for was unreachable from a
+ * browser at all. Nothing about that scheme is left, so nothing here rewrites anything; this function
+ * remains as the one statement of the policy, and because every failure out of the transports names
+ * the endpoint it tried.
  */
 import { RealmInfo } from './types';
 
-export type ProxyConfig = {
-  /** The host the WebSocket proxies listen on. */
-  proxyHost: string;
-  /** False when WebSockets terminate at the realm itself and no rewriting is wanted. */
-  rewriteRealmHost: boolean;
-};
-
-export function resolveRealmEndpoint(
-  realm: RealmInfo,
-  config: ProxyConfig,
-): { host: string; port: number } {
+export function resolveRealmEndpoint(realm: RealmInfo): { host: string; port: number } {
   return {
-    host: config.rewriteRealmHost ? config.proxyHost : realm.host,
+    host: realm.host,
     port: realm.port,
   };
 }

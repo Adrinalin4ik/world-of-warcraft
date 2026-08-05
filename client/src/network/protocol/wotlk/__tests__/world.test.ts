@@ -52,12 +52,10 @@ const REALM = {
   pvp: false,
 };
 
-const PROXY = { proxyHost: 'localhost', rewriteRealmHost: true };
-
 describe('WotlkWorldTransport', () => {
   it('resolves the roster from an enum body', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const pending = transport.characters();
     io.deliver('SMSG_CHAR_ENUM', new Uint8Array([0])); // zero characters
@@ -67,7 +65,7 @@ describe('WotlkWorldTransport', () => {
 
   it('resolves a create on the success byte', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const pending = transport.createCharacter({
       name: 'Newbie',
@@ -85,7 +83,7 @@ describe('WotlkWorldTransport', () => {
 
   it('rejects a create with the client’s own key on refusal', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const pending = transport.createCharacter({
       name: 'Taken',
@@ -104,7 +102,7 @@ describe('WotlkWorldTransport', () => {
 
   it('resolves a delete on its own success byte', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const pending = transport.deleteCharacter('0x1');
     io.deliver('SMSG_CHAR_DELETE', new Uint8Array([CHAR_RESULT.DELETE_SUCCESS]));
@@ -114,7 +112,7 @@ describe('WotlkWorldTransport', () => {
 
   it('resolves entering the world when the world verifies it', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const pending = transport.enterWorld('0x1');
     io.deliver('SMSG_LOGIN_VERIFY_WORLD', new Uint8Array(20));
@@ -122,9 +120,28 @@ describe('WotlkWorldTransport', () => {
     await expect(pending).resolves.toBeUndefined();
   });
 
+  it('dials the realm at its own advertised address, not at a proxy host', async () => {
+    // The gateway is handed the target in the URL and dials it itself (`network/gateway.ts`), so the
+    // address the realm list advertises is exactly what should be asked for. The old scheme -- one
+    // websockify per port, listening on the served host -- forced the realm's host to be replaced
+    // with the proxy's, which made every realm the client could not guess a listener for unreachable.
+    const io = fakeIo();
+    const transport = new WotlkWorldTransport(io);
+
+    void transport.join(REALM, 'TESTER', new Uint8Array(40));
+
+    expect(io.connect).toHaveBeenCalledWith(
+      REALM.host,
+      REALM.port,
+      REALM,
+      'TESTER',
+      expect.anything(),
+    );
+  });
+
   it('rejects a join when the handshake is refused', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const pending = transport.join(REALM, 'TESTER', new Uint8Array(40));
     io.deliver('SMSG_AUTH_RESPONSE', new Uint8Array([0x15]));
@@ -136,7 +153,7 @@ describe('WotlkWorldTransport', () => {
 
   it('rejects an in-flight characters() call rather than hanging when the transport is closed', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const pending = transport.characters();
     transport.close();
@@ -146,7 +163,7 @@ describe('WotlkWorldTransport', () => {
 
   it('rejects an in-flight characters() call rather than hanging on a disconnect', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const pending = transport.characters();
     io.triggerDisconnect('socket closed');
@@ -156,7 +173,7 @@ describe('WotlkWorldTransport', () => {
 
   it('rejects every in-flight request kind on close, not just one', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const joinPending = transport.join(REALM, 'TESTER', new Uint8Array(40));
     const rosterPending = transport.characters();
@@ -171,7 +188,7 @@ describe('WotlkWorldTransport', () => {
 
   it('rejects a second characters() call made while one is in flight, and still settles the first', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
 
     const first = transport.characters();
     const second = transport.characters();
@@ -192,7 +209,7 @@ describe('WotlkWorldTransport', () => {
       earlierListenerCalls += 1;
     });
 
-    const transport = new WotlkWorldTransport(io, PROXY);
+    const transport = new WotlkWorldTransport(io);
     const pending = transport.join(REALM, 'TESTER', new Uint8Array(40));
     io.deliver('SMSG_AUTH_RESPONSE', new Uint8Array([0x15]));
 

@@ -8,7 +8,7 @@
  */
 import GameOpcode from '../../game/opcode';
 import GamePacket from '../../game/packet';
-import { ProxyConfig, resolveRealmEndpoint } from '../endpoint';
+import { resolveRealmEndpoint } from '../endpoint';
 import { isWorldSuccess, worldRefusal } from '../stages';
 import {
   CharacterRecord,
@@ -44,7 +44,6 @@ type Pending<T> = { resolve: (value: T) => void; reject: (error: Error) => void 
 
 export class WotlkWorldTransport implements WorldTransport {
   private readonly io: WorldPacketIo;
-  private readonly proxy: ProxyConfig;
 
   private join_: Pending<void> | null = null;
   private roster: Pending<CharacterRecord[]> | null = null;
@@ -52,9 +51,8 @@ export class WotlkWorldTransport implements WorldTransport {
   private remove: Pending<void> | null = null;
   private enter: Pending<void> | null = null;
 
-  constructor(io: WorldPacketIo, proxy: ProxyConfig) {
+  constructor(io: WorldPacketIo) {
     this.io = io;
-    this.proxy = proxy;
 
     this.io.on('SMSG_AUTH_RESPONSE', (body) => {
       const code = decodeResultByte(body);
@@ -115,11 +113,11 @@ export class WotlkWorldTransport implements WorldTransport {
     // overwrite this slot.
     return new Promise<void>((resolve, reject) => {
       this.join_ = { resolve, reject };
-      // Through the endpoint policy, never the realm's advertised address: from a browser the game
-      // server is reachable only via the websockify proxy (`endpoint.ts` explains why). `account`
+      // Through the endpoint policy, which is now the realm's advertised address: the gateway dials
+      // the realm itself, so nothing rewrites it (`endpoint.ts` explains what changed). `account`
       // and `sessionKey` go through to the IO too -- the handshake needs both, and the existing
       // handler has no way to get them except through this call (see `createGameHandlerIo`).
-      const endpoint = resolveRealmEndpoint(realm, this.proxy);
+      const endpoint = resolveRealmEndpoint(realm);
       this.io.connect(endpoint.host, endpoint.port, realm, account, sessionKey).catch(reject);
     });
   }
@@ -264,12 +262,13 @@ export function createGameHandlerIo(handler: GameHandlerLike): WorldPacketIo {
         // about whether the WebSocket itself came up.
         handler.once('connect', () => resolve());
         handler.once('disconnect', () =>
-          // Name the endpoint. A realm on a port no websockify process is listening on fails right
-          // here, and the word "refused" on its own sends the reader looking in the wrong place.
+          // Name the endpoint. A realm the gateway cannot reach -- or a gateway that is not running
+          // at all -- fails right here, and the word "refused" on its own sends the reader looking in
+          // the wrong place.
           reject(new Error(`world handshake refused at ${host}:${port}`)),
         );
         // The handler takes (host, realm) and reads the port off the realm, so it must be handed the
-        // POLICY's host and port -- not the realm's advertised address.
+        // endpoint policy's host and port rather than reading the realm twice.
         handler.connect(host, { ...realm, port });
       });
     },
