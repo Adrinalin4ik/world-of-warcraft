@@ -22,6 +22,13 @@ export interface SpriteDef {
 export class GlueArt {
   private readonly defs = new Map<string, SpriteDef>();
   private readonly textures = new Map<string, THREE.Texture>();
+  /**
+   * Bumped by `dispose()`. `load()` captures the value in flight and compares it after the
+   * `TextureLoader` fetch resolves -- a mismatch means disposal ran while that fetch was still in
+   * the air, so the reference it just acquired gets released instead of landing in a dead
+   * instance's map, and instead of being stranded in `TextureLoader`'s reference count forever.
+   */
+  private generation = 0;
 
   register(key: string, def: SpriteDef): void {
     this.defs.set(key, def);
@@ -52,6 +59,8 @@ export class GlueArt {
    * renderer skips that quad, so one missing BLP costs one sprite rather than the screen.
    */
   async load(): Promise<void> {
+    const generation = this.generation;
+
     await Promise.all(
       Array.from(this.defs.entries()).map(async ([key, def]) => {
         if (this.textures.has(key)) {
@@ -63,6 +72,14 @@ export class GlueArt {
             THREE.ClampToEdgeWrapping as any,
             THREE.ClampToEdgeWrapping as any,
           );
+
+          if (generation !== this.generation) {
+            // Disposed while this fetch was in flight: release the reference `TextureLoader`
+            // already counted for us rather than stashing a texture nothing will ever read again.
+            TextureLoader.unload(texture);
+            return;
+          }
+
           this.textures.set(key, texture);
         } catch (error) {
           console.warn(`glue art missing: ${key} (${def.path})`, error);
@@ -86,6 +103,7 @@ export class GlueArt {
    * that reference would blank a texture that is still on screen elsewhere.
    */
   dispose(): void {
+    this.generation++;
     this.textures.forEach((texture) => TextureLoader.unload(texture));
     this.textures.clear();
     this.defs.clear();
