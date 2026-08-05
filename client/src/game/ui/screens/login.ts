@@ -1,10 +1,11 @@
 /**
  * The `AccountLogin` screen, transcribed from `interface/gluexml/accountlogin.xml`.
  *
- * Coordinates are the client's own: logo `TOP` +10 at 256x128; account box 600x64 at `BOTTOM` +345;
- * password box 256x64 at `BOTTOM` +275; Login button 170x45 at `BOTTOM` +170. The reference screen's
- * Credits, Cinematics, TOS, survey, token and account-management controls are deliberately absent --
- * they do not serve logging in (benilla cut the same set).
+ * Coordinates are the client's own: logo `TOPLEFT` x=3 y=-7 at 256x128; account box 600x64 at
+ * `BOTTOM` +345; password box 256x64 at `BOTTOM` +275; Login button 170x45 at `BOTTOM` +170; Quit
+ * button 150x38 at `BOTTOMRIGHT` x=-5 y=29. The reference screen's Credits, Cinematics, TOS, survey,
+ * token and account-management controls are deliberately absent -- they do not serve logging in
+ * (benilla cut the same set).
  *
  * The server address field is OURS, not the client's: the real client reads `realmlist.wtf`, and this
  * one targets any private server, so the address has to be reachable from the screen. It is drawn in
@@ -44,6 +45,8 @@ export class LoginScreen implements GlueScreen {
   private saveName: Widget | null = null;
   private loginButton: Widget | null = null;
   private loginCaption: Widget | null = null;
+  private quitButton: Widget | null = null;
+  private quitCaption: Widget | null = null;
   private dialog: Widget | null = null;
   private dialogText: Widget | null = null;
 
@@ -62,7 +65,7 @@ export class LoginScreen implements GlueScreen {
     const logo = root.add(new Widget('texture', 'login-logo'));
     logo.layer = 'ARTWORK';
     logo.sprite = 'logo';
-    logo.setSize(256, 128).setAnchors({ point: 'TOP', x: 0, y: -10 });
+    logo.setSize(256, 128).setAnchors({ point: 'TOPLEFT', x: 3, y: -7 });
 
     // Account box: 600x64 at BOTTOM +345 (accountlogin.xml).
     this.account = this.field(root, 'login-account', 'login-account-text', 600, 345);
@@ -126,6 +129,28 @@ export class LoginScreen implements GlueScreen {
     this.loginCaption.setSize(170, 16).setAnchors({
       point: 'CENTER',
       relativeTo: 'login-login',
+      relativePoint: 'CENTER',
+      x: 0,
+      y: 3, // the template's ButtonText offset
+    });
+
+    // Quit button: 150x38 at BOTTOMRIGHT -5,29 (accountlogin.xml, GlueButtonSmallTemplateBlue). There
+    // is no browser tab for it to close -- it is authored, so it is drawn, but its click is a no-op.
+    this.quitButton = root.add(new Widget('button', 'login-quit'));
+    this.quitButton.layer = 'ARTWORK';
+    this.quitButton.sprite = 'button-small-up';
+    this.quitButton.mouseEnabled = true;
+    this.quitButton.focusable = true;
+    this.quitButton.setSize(150, 38).setAnchors({ point: 'BOTTOMRIGHT', x: -5, y: 29 });
+    this.quitButton.onClick = () => undefined; // no browser tab for this button to close
+
+    this.quitCaption = this.quitButton.add(new Widget('fontstring', 'login-quit-text'));
+    this.quitCaption.layer = 'OVERLAY';
+    this.quitCaption.font = BUTTON_CAPTION;
+    this.quitCaption.text = ctx.strings.get('QUIT');
+    this.quitCaption.setSize(150, 16).setAnchors({
+      point: 'CENTER',
+      relativeTo: 'login-quit',
       relativePoint: 'CENTER',
       x: 0,
       y: 3, // the template's ButtonText offset
@@ -250,6 +275,16 @@ export class LoginScreen implements GlueScreen {
       this.loginButton.blend = this.loginButton.hovered ? 'ADD' : 'ALPHA';
     }
 
+    if (this.quitButton) {
+      this.quitButton.sprite =
+        this.quitButton.state === 'down'
+          ? 'button-small-down'
+          : this.quitButton.hovered
+            ? 'button-small-highlight'
+            : 'button-small-up';
+      this.quitButton.blend = this.quitButton.hovered ? 'ADD' : 'ALPHA';
+    }
+
     const dialog = loginDialog(ctx.protocol.stage, ctx.protocol.lastRefusal);
     if (this.dialog && this.dialogText) {
       if (dialog.kind === 'none') {
@@ -275,6 +310,8 @@ export class LoginScreen implements GlueScreen {
     this.saveName = null;
     this.loginButton = null;
     this.loginCaption = null;
+    this.quitButton = null;
+    this.quitCaption = null;
     this.dialog = null;
     this.dialogText = null;
   }

@@ -38,6 +38,30 @@ export const LOGIN_ART: Record<string, SpriteDef> = {
     texCoords: BUTTON_TC,
     size: [170, 45],
   },
+  // `GlueButtonSmallTemplateBlue` (gluebuttons.xml) reuses these exact four textures and tex-coords
+  // at 150x38 instead of 170x45 -- same paths, same regions, only the authored size differs. Kept as
+  // separate entries (rather than reusing `button-*`) so the table's `size` field stays truthful for
+  // whichever button it names; the screen still sets its own widget size explicitly either way.
+  'button-small-up': {
+    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Up-Blue',
+    texCoords: BUTTON_TC,
+    size: [150, 38],
+  },
+  'button-small-down': {
+    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Down-Blue',
+    texCoords: BUTTON_TC,
+    size: [150, 38],
+  },
+  'button-small-highlight': {
+    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Highlight-Blue',
+    texCoords: BUTTON_HIGHLIGHT_TC,
+    size: [150, 38],
+  },
+  'button-small-disabled': {
+    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Disabled',
+    texCoords: BUTTON_TC,
+    size: [150, 38],
+  },
   'check-up': { path: 'Interface\\Buttons\\UI-CheckBox-Up', size: [20, 20] },
   'check-down': { path: 'Interface\\Buttons\\UI-CheckBox-Down', size: [20, 20] },
   'check-highlight': { path: 'Interface\\Buttons\\UI-CheckBox-Highlight', size: [20, 20] },
