@@ -296,7 +296,28 @@ export class LoginScreen implements GlueScreen {
       y: 3, // the template's ButtonText offset
     });
 
-    // `AccountLoginVersion`: BOTTOMLEFT x=0 y=10, ARTWORK, GlueFontNormalSmall justifyH="LEFT"
+    // These three are all on ARTWORK and the disclaimer sits INSIDE the logo's 100x100 box, so the
+    // order they are added in is the order they draw in. The client's ARTWORK layer lists the logo
+    // first, then the disclaimer, then the version (accountlogin.xml:96-127) -- built the other way
+    // round, the logo covers the disclaimer.
+
+    // Blizzard logo: 100x100 at BOTTOM +8 (accountlogin.xml:96-107) -- bottom-CENTER, not bottom-right,
+    // and much smaller than this screen first drew it.
+    const blizzard = root.add(new Widget('texture', 'login-blizzard'));
+    blizzard.layer = 'ARTWORK';
+    blizzard.sprite = 'blizzard-logo';
+    blizzard.setSize(100, 100).setAnchors({ point: 'BOTTOM', x: 0, y: 8 });
+
+    // `BLIZZ_DISCLAIMER` at BOTTOM y=10 (accountlogin.xml:108-116). The authored FontString carries no
+    // Size and sizes itself to its text; a widget here needs a rect, so it gets a wide centered one --
+    // the renderer draws the string at its measured size inside it rather than stretching to fill.
+    const disclaimer = root.add(new Widget('fontstring', 'login-disclaimer'));
+    disclaimer.layer = 'ARTWORK';
+    disclaimer.font = { ...LABEL_SMALL, align: 'CENTER' };
+    disclaimer.text = ctx.strings.get('BLIZZ_DISCLAIMER');
+    disclaimer.setSize(600, 14).setAnchors({ point: 'BOTTOM', x: 0, y: 10 });
+
+    // `AccountLoginVersion`: BOTTOMLEFT x=0 y=10, GlueFontNormalSmall justifyH="LEFT"
     // (accountlogin.xml:117-127). The client fills the text from `GetBuildInfo()`; there is no build
     // info to read here, so the WORDING is OURS -- a literal, not an invented GlueStrings key.
     const version = root.add(new Widget('fontstring', 'login-version'));
@@ -304,22 +325,6 @@ export class LoginScreen implements GlueScreen {
     version.font = LABEL_SMALL;
     version.text = 'Version 3.3.5 (12340)';
     version.setSize(300, 14).setAnchors({ point: 'BOTTOMLEFT', x: 0, y: 10 });
-
-    // `BLIZZ_DISCLAIMER` at BOTTOM y=10, ARTWORK, GlueFontNormalSmall (accountlogin.xml:108-116). The
-    // authored FontString carries no Size and sizes itself to its text; a widget here needs a rect, so
-    // it gets a wide centered one -- the renderer draws the string at its measured size inside it.
-    const disclaimer = root.add(new Widget('fontstring', 'login-disclaimer'));
-    disclaimer.layer = 'ARTWORK';
-    disclaimer.font = { ...LABEL_SMALL, align: 'CENTER' };
-    disclaimer.text = ctx.strings.get('BLIZZ_DISCLAIMER');
-    disclaimer.setSize(600, 14).setAnchors({ point: 'BOTTOM', x: 0, y: 10 });
-
-    // Blizzard logo: 100x100 at BOTTOM +8, ARTWORK (accountlogin.xml:96-109) -- bottom-CENTER, not
-    // bottom-right, and much smaller than this screen first drew it.
-    const blizzard = root.add(new Widget('texture', 'login-blizzard'));
-    blizzard.layer = 'ARTWORK';
-    blizzard.sprite = 'blizzard-logo';
-    blizzard.setSize(100, 100).setAnchors({ point: 'BOTTOM', x: 0, y: 8 });
 
     // The one dialog, reused for connecting and for a refusal.
     this.dialog = root.add(new Widget('backdrop', 'login-dialog'));
