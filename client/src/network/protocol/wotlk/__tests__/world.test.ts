@@ -1,10 +1,12 @@
-import { WotlkWorldTransport } from '../world';
+import { EventEmitter } from 'events';
+import { WotlkWorldTransport, createGameHandlerIo } from '../world';
 import { ProtocolRefusalError } from '../../types';
 import { CHAR_RESULT } from '../world-wire';
 
 /** A packet-IO stand-in: records sends, lets the test deliver bodies by opcode name. */
 function fakeIo() {
-  const listeners = new Map<string, (body: Uint8Array) => void>();
+  const listeners = new Map<string, Array<(body: Uint8Array) => void>>();
+  const disconnectListeners: Array<(reason: string) => void> = [];
   const sent: Array<{ opcode: number; body: Uint8Array }> = [];
 
   return {
@@ -15,14 +17,25 @@ function fakeIo() {
       sent.push({ opcode, body });
     },
     on(opcodeName: string, listener: (body: Uint8Array) => void) {
-      listeners.set(opcodeName, listener);
+      const existing = listeners.get(opcodeName) ?? [];
+      existing.push(listener);
+      listeners.set(opcodeName, existing);
     },
-    onDisconnect: jest.fn(),
+    onDisconnect(listener: (reason: string) => void) {
+      disconnectListeners.push(listener);
+    },
     close() {
       this.closed = true;
     },
     deliver(opcodeName: string, body: Uint8Array) {
-      listeners.get(opcodeName)!(body);
+      for (const listener of listeners.get(opcodeName) ?? []) {
+        listener(body);
+      }
+    },
+    triggerDisconnect(reason: string) {
+      for (const listener of disconnectListeners) {
+        listener(reason);
+      }
     },
   };
 }
@@ -39,10 +52,12 @@ const REALM = {
   pvp: false,
 };
 
+const PROXY = { proxyHost: 'localhost', rewriteRealmHost: true };
+
 describe('WotlkWorldTransport', () => {
   it('resolves the roster from an enum body', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
+    const transport = new WotlkWorldTransport(io, PROXY);
 
     const pending = transport.characters();
     io.deliver('SMSG_CHAR_ENUM', new Uint8Array([0])); // zero characters
@@ -52,7 +67,7 @@ describe('WotlkWorldTransport', () => {
 
   it('resolves a create on the success byte', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
+    const transport = new WotlkWorldTransport(io, PROXY);
 
     const pending = transport.createCharacter({
       name: 'Newbie',
@@ -70,7 +85,7 @@ describe('WotlkWorldTransport', () => {
 
   it('rejects a create with the client’s own key on refusal', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
+    const transport = new WotlkWorldTransport(io, PROXY);
 
     const pending = transport.createCharacter({
       name: 'Taken',
@@ -89,7 +104,7 @@ describe('WotlkWorldTransport', () => {
 
   it('resolves a delete on its own success byte', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
+    const transport = new WotlkWorldTransport(io, PROXY);
 
     const pending = transport.deleteCharacter('0x1');
     io.deliver('SMSG_CHAR_DELETE', new Uint8Array([CHAR_RESULT.DELETE_SUCCESS]));
@@ -99,7 +114,7 @@ describe('WotlkWorldTransport', () => {
 
   it('resolves entering the world when the world verifies it', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
+    const transport = new WotlkWorldTransport(io, PROXY);
 
     const pending = transport.enterWorld('0x1');
     io.deliver('SMSG_LOGIN_VERIFY_WORLD', new Uint8Array(20));
@@ -109,11 +124,111 @@ describe('WotlkWorldTransport', () => {
 
   it('rejects a join when the handshake is refused', async () => {
     const io = fakeIo();
-    const transport = new WotlkWorldTransport(io, { proxyHost: 'localhost', rewriteRealmHost: true });
+    const transport = new WotlkWorldTransport(io, PROXY);
 
     const pending = transport.join(REALM, 'TESTER', new Uint8Array(40));
     io.deliver('SMSG_AUTH_RESPONSE', new Uint8Array([0x15]));
 
     await expect(pending).rejects.toBeInstanceOf(ProtocolRefusalError);
+  });
+
+  // --- Round 1 hardening: close()/disconnect abandon nothing, re-entrant calls don't orphan. ---
+
+  it('rejects an in-flight characters() call rather than hanging when the transport is closed', async () => {
+    const io = fakeIo();
+    const transport = new WotlkWorldTransport(io, PROXY);
+
+    const pending = transport.characters();
+    transport.close();
+
+    await expect(pending).rejects.toThrow();
+  });
+
+  it('rejects an in-flight characters() call rather than hanging on a disconnect', async () => {
+    const io = fakeIo();
+    const transport = new WotlkWorldTransport(io, PROXY);
+
+    const pending = transport.characters();
+    io.triggerDisconnect('socket closed');
+
+    await expect(pending).rejects.toThrow();
+  });
+
+  it('rejects every in-flight request kind on close, not just one', async () => {
+    const io = fakeIo();
+    const transport = new WotlkWorldTransport(io, PROXY);
+
+    const joinPending = transport.join(REALM, 'TESTER', new Uint8Array(40));
+    const rosterPending = transport.characters();
+    const enterPending = transport.enterWorld('0x1');
+
+    transport.close();
+
+    await expect(joinPending).rejects.toThrow();
+    await expect(rosterPending).rejects.toThrow();
+    await expect(enterPending).rejects.toThrow();
+  });
+
+  it('rejects a second characters() call made while one is in flight, and still settles the first', async () => {
+    const io = fakeIo();
+    const transport = new WotlkWorldTransport(io, PROXY);
+
+    const first = transport.characters();
+    const second = transport.characters();
+
+    await expect(second).rejects.toThrow(/characters/);
+
+    io.deliver('SMSG_CHAR_ENUM', new Uint8Array([0]));
+    await expect(first).resolves.toEqual([]);
+  });
+
+  it('settles a refused join exactly once with the typed refusal, regardless of listener order', async () => {
+    const io = fakeIo();
+    // Registered on the same event BEFORE the transport's own listener, standing in for the
+    // real handler's own internal auth-response handling -- the transport must settle correctly
+    // no matter what else is subscribed first.
+    let earlierListenerCalls = 0;
+    io.on('SMSG_AUTH_RESPONSE', () => {
+      earlierListenerCalls += 1;
+    });
+
+    const transport = new WotlkWorldTransport(io, PROXY);
+    const pending = transport.join(REALM, 'TESTER', new Uint8Array(40));
+    io.deliver('SMSG_AUTH_RESPONSE', new Uint8Array([0x15]));
+
+    await expect(pending).rejects.toBeInstanceOf(ProtocolRefusalError);
+    expect(earlierListenerCalls).toBe(1);
+  });
+});
+
+describe('createGameHandlerIo', () => {
+  function fakeHandler() {
+    const emitter = new EventEmitter();
+    return Object.assign(emitter, {
+      connect: jest.fn(),
+      send: jest.fn(),
+      disconnect: jest.fn(),
+    });
+  }
+
+  it('resolves connect() when the socket itself connects, not on the handshake verdict', async () => {
+    const handler = fakeHandler();
+    const io = createGameHandlerIo(handler as any);
+
+    const pending = io.connect('localhost', 8085, REALM);
+    // No 'authenticate' event at all -- resolution must not depend on it.
+    handler.emit('connect');
+
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it('rejects connect(), naming the endpoint, if the socket closes before connecting', async () => {
+    const handler = fakeHandler();
+    const io = createGameHandlerIo(handler as any);
+
+    const pending = io.connect('localhost', 8085, REALM);
+    handler.emit('disconnect');
+
+    await expect(pending).rejects.toThrow(/localhost:8085/);
   });
 });

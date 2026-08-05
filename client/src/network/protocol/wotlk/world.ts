@@ -90,9 +90,24 @@ export class WotlkWorldTransport implements WorldTransport {
       this.settle(this.enter, undefined);
       this.enter = null;
     });
+
+    // A dropped connection is the common failure, and it is exactly when a screen is waiting on
+    // one of these promises. Without this, a caller awaiting a roster (or a join, or...) when the
+    // socket drops would wait forever -- `close()` below handles the deliberate case, this handles
+    // the involuntary one.
+    this.io.onDisconnect((reason) => {
+      this.abortAll(new Error(`world transport disconnected: ${reason}`));
+    });
   }
 
   join(realm: RealmInfo, _account: string, _sessionKey: Uint8Array): Promise<void> {
+    if (this.join_) {
+      return Promise.reject(new Error('join() is already in progress on this transport'));
+    }
+
+    // Claimed synchronously, before anything async: `connect()` below is a whole handshake, not a
+    // microtask, so a second call in the same turn must not slip past the guard above and race to
+    // overwrite this slot.
     return new Promise<void>((resolve, reject) => {
       this.join_ = { resolve, reject };
       // Through the endpoint policy, never the realm's advertised address: from a browser the game
@@ -105,6 +120,10 @@ export class WotlkWorldTransport implements WorldTransport {
   }
 
   characters(): Promise<CharacterRecord[]> {
+    if (this.roster) {
+      return Promise.reject(new Error('characters() is already in progress on this transport'));
+    }
+
     return new Promise<CharacterRecord[]>((resolve, reject) => {
       this.roster = { resolve, reject };
       this.io.send(GameOpcode.CMSG_CHAR_ENUM, new Uint8Array(0));
@@ -112,6 +131,10 @@ export class WotlkWorldTransport implements WorldTransport {
   }
 
   createCharacter(request: CharCreateRequest): Promise<void> {
+    if (this.create) {
+      return Promise.reject(new Error('createCharacter() is already in progress on this transport'));
+    }
+
     return new Promise<void>((resolve, reject) => {
       this.create = { resolve, reject };
       this.io.send(GameOpcode.CMSG_CHAR_CREATE, encodeCharCreateBody(request));
@@ -119,6 +142,10 @@ export class WotlkWorldTransport implements WorldTransport {
   }
 
   deleteCharacter(guid: string): Promise<void> {
+    if (this.remove) {
+      return Promise.reject(new Error('deleteCharacter() is already in progress on this transport'));
+    }
+
     return new Promise<void>((resolve, reject) => {
       this.remove = { resolve, reject };
       this.io.send(GameOpcode.CMSG_CHAR_DELETE, encodeGuidBody(guid));
@@ -126,6 +153,10 @@ export class WotlkWorldTransport implements WorldTransport {
   }
 
   enterWorld(guid: string): Promise<void> {
+    if (this.enter) {
+      return Promise.reject(new Error('enterWorld() is already in progress on this transport'));
+    }
+
     return new Promise<void>((resolve, reject) => {
       this.enter = { resolve, reject };
       this.io.send(GameOpcode.CMSG_PLAYER_LOGIN, encodeGuidBody(guid));
@@ -133,6 +164,9 @@ export class WotlkWorldTransport implements WorldTransport {
   }
 
   close(): void {
+    // A caller awaiting any of these deserves to learn it will never arrive, rather than hang
+    // forever on a promise nothing will settle now that the IO is going away.
+    this.abortAll(new Error('world transport closed'));
     this.io.close();
   }
 
@@ -147,18 +181,47 @@ export class WotlkWorldTransport implements WorldTransport {
   private fail<T>(pending: Pending<T> | null, error: Error): void {
     pending?.reject(error);
   }
+
+  private abortAll(error: Error): void {
+    this.fail(this.join_, error);
+    this.join_ = null;
+    this.fail(this.roster, error);
+    this.roster = null;
+    this.fail(this.create, error);
+    this.create = null;
+    this.fail(this.remove, error);
+    this.remove = null;
+    this.fail(this.enter, error);
+    this.enter = null;
+  }
+}
+
+/** The slice of `GameHandler` this adapter actually drives. */
+interface GameHandlerLike {
+  connect(host: string, realm: RealmInfo): void;
+  send(packet: GamePacket): void;
+  disconnect(): void;
+  on(event: string, listener: (...args: any[]) => void): void;
+  once(event: string, listener: (...args: any[]) => void): void;
 }
 
 /**
  * Adapts the existing `GameHandler` to `WorldPacketIo`. The handler stays exactly as it is -- this
  * is the whole of the coupling, and it is deliberately this small.
  */
-export function createGameHandlerIo(handler: any): WorldPacketIo {
+export function createGameHandlerIo(handler: GameHandlerLike): WorldPacketIo {
   return {
     connect(host: string, port: number, realm: RealmInfo) {
       return new Promise<void>((resolve, reject) => {
-        handler.once('authenticate', () => resolve());
-        handler.once('reject', () =>
+        // Resolve on the socket actually connecting -- NOT on the handshake verdict. The handler's
+        // own `handleAuthResponse` and this adapter's `SMSG_AUTH_RESPONSE` listener (registered by
+        // `WotlkWorldTransport`, above) both react to the same packet; if this promise also raced
+        // to settle off `authenticate`/`reject`, the join outcome would depend on which of two
+        // listeners on the same event happens to be registered first. It no longer does: the packet
+        // listener is the single source of truth for the handshake verdict, and this promise is only
+        // about whether the WebSocket itself came up.
+        handler.once('connect', () => resolve());
+        handler.once('disconnect', () =>
           // Name the endpoint. A realm on a port no websockify process is listening on fails right
           // here, and the word "refused" on its own sends the reader looking in the wrong place.
           reject(new Error(`world handshake refused at ${host}:${port}`)),
