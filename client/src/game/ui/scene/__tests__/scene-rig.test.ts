@@ -11,9 +11,11 @@ import {
 } from '../scene-rig';
 
 describe('sceneToken', () => {
-  it('maps the main menu, including the Northrend variant', () => {
-    expect(sceneToken({ kind: 'mainmenu', northrend: false })).toBe('MainMenu');
-    expect(sceneToken({ kind: 'mainmenu', northrend: true })).toBe('MainMenu_Northrend');
+  it('maps the main menu by the trial flag, not by expansion', () => {
+    // `accountlogin.lua:32-37`: a streaming-trial account gets the vanilla arch, everyone else gets
+    // the Wrath causeway. The Northrend scene is therefore the DEFAULT 3.3.5 login screen.
+    expect(sceneToken({ kind: 'mainmenu', streamingTrial: true })).toBe('MainMenu');
+    expect(sceneToken({ kind: 'mainmenu', streamingTrial: false })).toBe('MainMenu_Northrend');
   });
 
   it('shares scenes the way the reference does', () => {

@@ -57,7 +57,7 @@ describe('GlueSceneView', () => {
     mockLoad.mockResolvedValue(model);
 
     const view = new GlueSceneView(fakeRenderer());
-    view.setScene({ kind: 'mainmenu', northrend: false });
+    view.setScene({ kind: 'mainmenu', streamingTrial: false });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -70,7 +70,7 @@ describe('GlueSceneView', () => {
     const renderer = fakeRenderer();
 
     const view = new GlueSceneView(renderer);
-    view.setScene({ kind: 'mainmenu', northrend: false });
+    view.setScene({ kind: 'mainmenu', streamingTrial: false });
     await Promise.resolve();
     await Promise.resolve();
     view.render();

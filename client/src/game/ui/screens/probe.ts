@@ -9,6 +9,28 @@ import { PROBE_ART } from '../art';
 import { ClientState, GlueContext, GlueScreen } from '../screens';
 import { FontSpec, Widget } from '../widget';
 
+/**
+ * Which main-menu stage the URL asks for. A debug affordance, not the client's law: the client keys
+ * off `IsStreamingTrial()`, and `expansion` is here because an expansion number is the way a human
+ * thinks about "show me the 3.3.5 screen". `expansion=0` (or `1`) means the pre-Wrath art, which the
+ * client only ever shows to a trial account; anything else, or nothing at all, means Wrath.
+ */
+export function wantsTrialScene(search: string): boolean {
+  const params = new URLSearchParams(search);
+
+  if (params.get('trial') === '1' || params.get('trial') === 'true') {
+    return true;
+  }
+
+  const expansion = params.get('expansion');
+  if (expansion === null) {
+    return false;
+  }
+
+  const level = Number(expansion);
+  return Number.isFinite(level) && level < 2;
+}
+
 const LABEL: FontSpec = {
   family: 'FRIZQT',
   size: 14,
@@ -29,9 +51,16 @@ export class ProbeScreen implements GlueScreen {
     ctx.art.registerAll(PROBE_ART);
     void ctx.art.load();
 
-    // The login scene, chosen exactly as accountlogin.lua does. `northrend: false` is the base
-    // main menu; spec 3 picks the variant from the account's expansion level.
-    ctx.setScene({ kind: 'mainmenu', northrend: false });
+    // The login scene. The real client forks on `IsStreamingTrial()` (`accountlogin.lua:32-37`), so
+    // the Wrath causeway is the DEFAULT and the vanilla arch is the trial variant; spec 3 will read
+    // the account's own flag once there is an account. Until then the URL decides, so both scenes can
+    // be looked at without a code edit:
+    //
+    //   /glue                -> UI_MainMenu_Northrend (what a normal 3.3.5 account sees)
+    //   /glue?expansion=0    -> UI_MainMenu           (the vanilla arch, i.e. the trial screen)
+    //   /glue?expansion=2    -> UI_MainMenu_Northrend
+    //   /glue?trial=1        -> UI_MainMenu           (names the client's actual condition)
+    ctx.setScene({ kind: 'mainmenu', streamingTrial: wantsTrialScene(window.location.search) });
 
     const logo = ctx.root.root.add(new Widget('texture', 'probe-logo'));
     logo.layer = 'BACKGROUND';
