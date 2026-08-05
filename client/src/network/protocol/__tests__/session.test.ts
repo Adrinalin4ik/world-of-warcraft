@@ -23,6 +23,7 @@ function fakeLogon() {
 }
 
 function fakeWorld() {
+  const disconnectListeners: Array<(reason: string) => void> = [];
   return {
     join: jest.fn(async () => undefined),
     characters: jest.fn(async () => []),
@@ -30,7 +31,13 @@ function fakeWorld() {
     deleteCharacter: jest.fn(async () => undefined),
     enterWorld: jest.fn(async () => undefined),
     close: jest.fn(),
-    onDisconnect: jest.fn(),
+    onDisconnect: jest.fn((listener: (reason: string) => void) => {
+      disconnectListeners.push(listener);
+    }),
+    // Test-only hook: simulate the transport dropping out from under the session.
+    disconnect(reason: string) {
+      disconnectListeners.forEach((listener) => listener(reason));
+    },
   };
 }
 
@@ -238,5 +245,59 @@ describe('ProtocolSession', () => {
     expect(logon.authenticate).toHaveBeenCalledTimes(2);
 
     jest.useRealTimers();
+  });
+
+  it('leaves the stage at CharacterList when a second realm join fails', async () => {
+    const world = fakeWorld();
+    const session = new ProtocolSession(fakeLogon(), world);
+    await session.login('tester', 'secret');
+    await session.chooseRealm(session.realms[0]);
+    expect(session.stage).toBe(LoginStage.CharacterList);
+
+    world.join.mockRejectedValueOnce(new Error('second join refused'));
+
+    await expect(session.chooseRealm(session.realms[0])).rejects.toThrow(/second join refused/);
+
+    // Nothing about the roster changed: the machine must not claim it did.
+    expect(session.stage).toBe(LoginStage.CharacterList);
+  });
+
+  it('leaves the stage at InWorld when a second world entry fails', async () => {
+    const world = fakeWorld();
+    const session = new ProtocolSession(fakeLogon(), world);
+    await session.login('tester', 'secret');
+    await session.chooseRealm(session.realms[0]);
+    await session.enterWorld('0x1');
+    expect(session.stage).toBe(LoginStage.InWorld);
+
+    world.enterWorld.mockRejectedValueOnce(new Error('second entry refused'));
+
+    await expect(session.enterWorld('0x2')).rejects.toThrow(/second entry refused/);
+
+    expect(session.stage).toBe(LoginStage.InWorld);
+  });
+
+  it('clears the joined flag on a world disconnect, so a later mutation hits the guard', async () => {
+    const world = fakeWorld();
+    const session = new ProtocolSession(fakeLogon(), world);
+    await session.login('tester', 'secret');
+    await session.chooseRealm(session.realms[0]);
+
+    world.disconnect('socket closed');
+
+    await expect(session.deleteCharacter('0x1')).rejects.toThrow(/joining a realm/);
+    // The guard must fire before the transport is ever touched.
+    expect(world.deleteCharacter).not.toHaveBeenCalled();
+  });
+
+  it('moves the stage to RealmList on a world disconnect while the session key still stands', async () => {
+    const world = fakeWorld();
+    const session = new ProtocolSession(fakeLogon(), world);
+    await session.login('tester', 'secret');
+    await session.chooseRealm(session.realms[0]);
+
+    world.disconnect('socket closed');
+
+    expect(session.stage).toBe(LoginStage.RealmList);
   });
 });

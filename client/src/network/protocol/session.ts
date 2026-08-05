@@ -44,7 +44,11 @@ export class ProtocolSession {
 
   private credentials: { account: string; password: string } | null = null;
   private sessionKey: Uint8Array | null = null;
-  /** Whether `chooseRealm` has successfully joined a realm on the current login. */
+  /**
+   * Whether `chooseRealm` has successfully joined a realm on the current login. Deliberately NOT
+   * cleared when the roster refresh right after a join fails: the realm connection itself is fine
+   * in that case, only the characters call is not, so the mutation guards below should still open.
+   */
   private joined = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Set<(state: SessionState) => void>();
@@ -57,6 +61,7 @@ export class ProtocolSession {
     this.logon = logon;
     this.world = world;
     this.retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
+    this.world.onDisconnect(() => this.onWorldDisconnect());
   }
 
   get stage(): LoginStage {
@@ -99,15 +104,16 @@ export class ProtocolSession {
       throw new Error('cannot choose a realm before logging in');
     }
 
+    const priorStage = this.stage_;
     this.enter(LoginStage.JoiningRealm);
     try {
       await this.world.join(realm, this.credentials.account, this.sessionKey);
       this.joined = true;
       await this.refreshCharacters();
     } catch (error) {
-      // The join (or the roster refresh right after it) failed: the machine never left RealmList
-      // in any way a caller can observe, so put the stage back rather than parking it here forever.
-      this.stage_ = LoginStage.RealmList;
+      // Restore whatever stage the machine actually held before this attempt -- not a guessed
+      // "RealmList", which would be wrong for a realm SWITCH failing out of CharacterList.
+      this.stage_ = priorStage;
       this.notify();
       throw error;
     }
@@ -134,13 +140,15 @@ export class ProtocolSession {
       throw new Error('cannot enter the world before joining a realm');
     }
 
+    const priorStage = this.stage_;
     this.enter(LoginStage.EnteringWorld);
     try {
       await this.world.enterWorld(guid);
       this.enter(LoginStage.InWorld);
     } catch (error) {
-      // Same rollback as chooseRealm: a refused entry must not park the machine at EnteringWorld.
-      this.stage_ = LoginStage.CharacterList;
+      // Same rollback as chooseRealm: restore what was, not a guessed "CharacterList" -- a second
+      // enterWorld failing while already InWorld must not report having left the world.
+      this.stage_ = priorStage;
       this.notify();
       throw error;
     }
@@ -193,6 +201,19 @@ export class ProtocolSession {
         void this.attemptLogin().catch(() => undefined);
       }, this.retryDelayMs);
     }
+  }
+
+  /**
+   * The world connection dropped out from under us. Not a login failure, so the retry policy
+   * above does not apply here -- that policy exists for the logon path only. This just makes the
+   * state honest again: no realm is joined any more, and the stage moves to whatever the player
+   * can still legitimately do next (pick a realm again if the session key still stands, otherwise
+   * log back in from scratch).
+   */
+  private onWorldDisconnect(): void {
+    this.joined = false;
+    this.stage_ = this.sessionKey ? LoginStage.RealmList : LoginStage.Offline;
+    this.notify();
   }
 
   private async refreshCharacters(): Promise<void> {
