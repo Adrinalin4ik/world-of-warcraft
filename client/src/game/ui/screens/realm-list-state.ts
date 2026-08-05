@@ -77,13 +77,12 @@ export type RealmDisplay = {
 export function realmDisplay(realm: RealmInfo): RealmDisplay {
   return {
     down: !realm.online,
-    // Not on our wire -- see `RealmDisplay`. Always false, so `REALM_LOCKED` cannot currently show.
-    locked: false,
-    rp: false,
+    locked: realm.locked,
+    rp: realm.rp,
     pvp: realm.pvp,
     load: realm.recommended ? -3 : realm.population,
     characters: realm.characterCount,
-    invalid: false,
+    invalid: realm.invalid,
   };
 }
 

@@ -52,6 +52,9 @@ const REALM = {
   online: true,
   recommended: false,
   pvp: false,
+  rp: false,
+  locked: false,
+  invalid: false,
 };
 
 describe('WotlkWorldTransport', () => {

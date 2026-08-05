@@ -27,6 +27,9 @@ function realm(over: Partial<RealmInfo>): RealmInfo {
     online: true,
     recommended: false,
     pvp: false,
+    rp: false,
+    locked: false,
+    invalid: false,
     ...over,
   };
 }

@@ -14,11 +14,17 @@ export const LOGON_OPCODE = {
 } as const;
 
 /** Realm flags, from the realmd protocol. */
+const REALM_FLAG_INVALID = 0x01;
 const REALM_FLAG_OFFLINE = 0x02;
 const REALM_FLAG_SPECIFY_BUILD = 0x04;
 const REALM_FLAG_RECOMMENDED = 0x20;
-/** `icon` is the realm TYPE: 1 and 4 are PvP variants. */
-const REALM_TYPE_PVP = new Set([1, 4]);
+/**
+ * `icon` is the realm TYPE. 1 and 4 are the PvP variants; 6 and 8 are the RP ones, and 8 is RP-PvP --
+ * which is why an RP-PvP realm is in BOTH sets rather than a third one. `realmlist.lua:53-61` branches
+ * on `pvp and rp`, `rp`, then `pvp`, so those two booleans are exactly what it needs.
+ */
+const REALM_TYPE_PVP = new Set([1, 4, 8]);
+const REALM_TYPE_RP = new Set([6, 8]);
 
 export type LogonChallengeOptions = {
   account: string;
@@ -204,7 +210,10 @@ export function decodeRealmList(bytes: Uint8Array): RealmInfo[] {
   for (let index = 0; index < count; ++index) {
     need(3, at, `realm ${index} header`);
     const icon = bytes[at++];
-    at++; // lock
+    // The lock byte. Kept, not skipped: the realm screen's `REALM_LOCKED` ("Locked") column comes from
+    // it and from nothing else, so discarding it made a locked realm draw as though it had a normal
+    // population -- which is what a reference screenshot of this very screen showed it is not.
+    const locked = bytes[at++] !== 0;
     const flags = bytes[at++];
     const name = readCString(`realm ${index} name`);
     const address = readCString(`realm ${index} address`, 'latin1');
@@ -238,6 +247,9 @@ export function decodeRealmList(bytes: Uint8Array): RealmInfo[] {
       online: (flags & REALM_FLAG_OFFLINE) === 0,
       recommended: (flags & REALM_FLAG_RECOMMENDED) !== 0,
       pvp: REALM_TYPE_PVP.has(icon),
+      rp: REALM_TYPE_RP.has(icon),
+      locked,
+      invalid: (flags & REALM_FLAG_INVALID) !== 0,
       ...(build ? { build } : {}),
     });
   }

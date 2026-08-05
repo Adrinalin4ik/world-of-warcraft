@@ -19,6 +19,12 @@ export type RealmInfo = {
   online: boolean;
   recommended: boolean;
   pvp: boolean;
+  /** Realm TYPE 6 or 8; 8 is RP-PvP, so an RP-PvP realm is both `pvp` and `rp`. */
+  rp: boolean;
+  /** The realm record's lock byte. The realm screen's "Locked" column comes from this and nothing else. */
+  locked: boolean;
+  /** Realm flag 0x01 -- the realm rejects this account's version or region. */
+  invalid: boolean;
   /** Present only when the realm advertises a build. Absent is normal, not an error. */
   build?: { major: number; minor: number; patch: number; build: number };
 };
