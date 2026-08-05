@@ -13,12 +13,20 @@ import { focusChain, hitTest, nextFocus } from './hit';
 import { viewportUnits } from './layout';
 import { DrawItem, Widget } from './widget';
 
+/**
+ * How close two clicks have to be to count as a double click. OURS: the real client reads the host's
+ * double-click interval, and a browser exposes no such setting -- `dblclick` has its own hidden one.
+ */
+const DOUBLE_CLICK_MS = 500;
+
 export class GlueInput {
   private readonly canvas: HTMLCanvasElement;
   private items: DrawItem[] = [];
   private pressed: Widget | null = null;
   private hovered: Widget | null = null;
   private focus: Widget | null = null;
+  /** The last completed click, for `onDoubleClick`. */
+  private lastClick: { widget: Widget; time: number } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -59,6 +67,8 @@ export class GlueInput {
     this.hovered = null;
     this.pressed = null;
     this.focus = null;
+    // A click on the retired screen must not pair with the first click on the new one.
+    this.lastClick = null;
   }
 
   attach(): void {
@@ -144,6 +154,22 @@ export class GlueInput {
       pressed.checked = !pressed.checked;
     }
     pressed.onClick?.();
+
+    // FrameXML's `OnDoubleClick`: two clicks on the SAME widget inside the interval. It fires after
+    // the second `onClick`, not instead of it, because that is the order the engine's own is
+    // documented in -- the realm list's double-click joins the realm its first click selected.
+    const now = performance.now();
+    if (
+      this.lastClick &&
+      this.lastClick.widget === pressed &&
+      now - this.lastClick.time <= DOUBLE_CLICK_MS
+    ) {
+      // Cleared, so a third click starts a new pair rather than firing again on every click.
+      this.lastClick = null;
+      pressed.onDoubleClick?.();
+    } else {
+      this.lastClick = { widget: pressed, time: now };
+    }
   };
 
   private onKeyDown = (event: KeyboardEvent): void => {

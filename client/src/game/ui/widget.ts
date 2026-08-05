@@ -139,6 +139,12 @@ export class Widget {
   onSubmit: (() => void) | null = null;
   /** Invoked by Escape; if absent, Escape does nothing (no fallback to onClick). */
   onCancel: (() => void) | null = null;
+  /**
+   * FrameXML's `OnDoubleClick`, fired IN ADDITION to the second `onClick` -- which is what the
+   * engine does, and what `RealmListRealmButtonTemplate` relies on: its `OnClick` selects a realm
+   * and its `OnDoubleClick` joins the one just selected (realmlist.xml:234-239).
+   */
+  onDoubleClick: (() => void) | null = null;
 
   constructor(kind: WidgetKind, id?: string) {
     this.kind = kind;
