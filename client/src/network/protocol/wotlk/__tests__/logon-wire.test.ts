@@ -28,13 +28,42 @@ describe('encodeLogonChallenge', () => {
     expect(bytes[2] | (bytes[3] << 8)).toBe(30 + 'TESTER'.length);
   });
 
-  it('writes the four-character tags REVERSED, as the wire wants them', () => {
-    // The client stores these as little-endian u32s, so "Win" reaches the server as "niW\0".
-    const text = new TextDecoder('latin1').decode(bytes);
-    expect(text).toContain('Wow ');
-    expect(text).toContain('68x'); // x86 reversed
-    expect(text).toContain('niW'); // Win reversed
-    expect(text).toContain('SUne'); // enUS reversed
+  it('writes the four-character tags REVERSED with NUL padding on the right, not left', () => {
+    // The client stores these as little-endian u32s. Tags are reversed, then NUL-padded on the right.
+    // Layout after 4-byte header: game(4) + version(3) + build(2) + platform(4) + os(4) + locale(4)
+    // Game is NOT reversed, only tags are.
+
+    // Game at bytes 4-7: "Wow " (not reversed)
+    expect([bytes[4], bytes[5], bytes[6], bytes[7]]).toEqual([87, 111, 119, 32]); // "Wow "
+
+    // Platform at bytes 13-16: "x86" reversed to "68x\0"
+    expect([bytes[13], bytes[14], bytes[15], bytes[16]]).toEqual([54, 56, 120, 0]); // "68x\0"
+
+    // OS at bytes 17-20: "Win" reversed to "niW\0"
+    expect([bytes[17], bytes[18], bytes[19], bytes[20]]).toEqual([110, 105, 87, 0]); // "niW\0"
+
+    // Locale at bytes 21-24: "enUS" reversed to "SUne" (already 4 chars, no pad needed)
+    expect([bytes[21], bytes[22], bytes[23], bytes[24]]).toEqual([83, 85, 110, 101]); // "SUne"
+  });
+
+  it('handles three-character tags: reverses then pads on the right, not left', () => {
+    // Test specifically for the bug where padding before reversing puts pad at the front.
+    // "Mac" should become "caM\0", not " caM" (the bug would reverse the padded " Mac" to "caM ").
+    const bytesWithMac = encodeLogonChallenge({
+      account: 'TEST',
+      game: 'Wow ',
+      version: [3, 3, 5],
+      build: 12340,
+      platform: 'Mac', // 3 characters - will be reversed and NUL-padded on right
+      os: 'Win',
+      locale: 'enUS',
+      timezone: 0,
+    });
+
+    // Platform at bytes 13-16: "Mac" reversed to "caM\0"
+    expect([bytesWithMac[13], bytesWithMac[14], bytesWithMac[15], bytesWithMac[16]]).toEqual(
+      [99, 97, 77, 0] // "caM\0" - NUL is at the end, not the beginning
+    );
   });
 
   it('carries the version, the build and the account', () => {

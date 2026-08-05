@@ -35,10 +35,14 @@ export type LogonChallengeOptions = {
  * The four-character tags travel REVERSED. The client keeps them as little-endian u32s, so "Win"
  * goes out as the bytes `n i W \0`; realmd reverses them back. A tag sent the readable way round is
  * rejected outright.
+ *
+ * Reverse the value first, then pad the reversed result on the right to four characters with NUL.
+ * This implementation mirrors client/src/network/config.ts's raw() function.
  */
 function tag(value: string): number[] {
-  const padded = `${value} `.slice(0, 4);
-  return Array.from(padded).reverse().map((char) => char.charCodeAt(0));
+  const reversed = value.split('').reverse().join('');
+  const padded = (reversed + '\0').slice(0, 4);
+  return Array.from(padded).map((char) => char.charCodeAt(0));
 }
 
 function ascii(value: string): number[] {
