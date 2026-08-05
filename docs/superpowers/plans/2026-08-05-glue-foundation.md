@@ -3282,18 +3282,19 @@ world it is the visibility manager that shows each placement), and every font st
 its widget rect because the measured size was returned flat while the renderer reads it nested. Each
 now has a test or a type that makes silent reintroduction impossible.
 
-**Known wrong, and measured: the scene's composition.** The mechanism is right — model, authored
-camera 0, sequence 0, fog, lights and pose all reach the driver — but neither main-menu scene frames
-correctly. `UI_MainMenu` fills about a fifth of the frame (banner poles, grass and a pedestal lit by
-the model's own point lights) with the rest empty; `UI_MainMenu_Northrend` fills 100% of it with a
-single flat cyan surface, i.e. the camera sits inside a mesh. Measurements that narrow it down, so
-spec 3 does not start from scratch: all 24 drawable meshes are present and visible, including three
-large dome meshes (radii 570/400/232, flagged unlit — the cloud layers) and terrain at radius 582;
-raising the ambient to flat white lifted mean luma 16.9 → 25.8 while leaving the non-black share at
-20.5%, which means the empty areas are geometry the camera does not see rather than geometry lit to
-black. So the remaining suspects are the camera record's interpretation (eye and target both land
-within a few units of the origin) and whether a glue scene needs a transform we are not applying —
-not lighting, and not missing geometry.
+**The scene's composition was wrong and is now fixed.** `M2#createGeometry` does not upload raw model
+coordinates — it builds each vertex as `(x, z, -y)`, mirrors over X and Y, then rotates -90° about X,
+which composes to a 180° yaw about Z. The scene aimed its camera with raw file values and so pointed
+half a turn away from its own stage: `UI_MainMenu` drew a fifth of the frame, `UI_MainMenu_Northrend`
+drew the inside of a mesh. Camera eye/target, point-light positions and the stage attachment now go
+through one named conversion (`modelToRender`) whose test reproduces the pipeline's matrix chain step
+for step. Measured on `UI_MainMenu`: coverage 20.5% → 89.6%, mean luma 16.9 → 108.8, and both scenes
+now frame as the client does — the vanilla stone gate with its hooded statues and the valley through
+the arch, and the Wrath causeway into Icecrown.
+
+One cosmetic issue remains there: the Northrend scene draws a flat cyan wash over everything, so its
+sky/cloud layers are blended or coloured wrong. The vanilla gate scene has no such wash, so it is
+per-model rather than a law — spec 3's job, with the real screen to compare against.
 
 **Still unverified.** Fidelity against the real client's login screen: the probe proves the mechanism,
 not the composition, and only the transcribed `AccountLogin` of spec 3 can be compared side by side.
