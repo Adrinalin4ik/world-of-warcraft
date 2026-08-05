@@ -20,7 +20,7 @@ class Auth extends React.Component<Props> {
     super(props)
 
     this.state = {
-      username: window.location.search.split('account=')[1] || 'Adrinalin4ik',
+      username: window.location.search.split('account=')[1] || '',
       password: '',
     }
   }
