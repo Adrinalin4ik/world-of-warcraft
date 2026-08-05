@@ -2434,9 +2434,201 @@ git commit -m "feat(protocol): expose the typed session without disturbing the o
 
 ---
 
+---
+
+### Task 8: Connection settings as data
+
+This client is meant to work against ANY private 3.3.5 server, used by different people, eventually
+served over https. Three things in the current code contradict that, and all three are small.
+
+**Files:**
+- Create: `client/src/network/protocol/connection-settings.ts`
+- Test: `client/src/network/protocol/__tests__/connection-settings.test.ts`
+- Modify: `client/src/pages/auth/auth.tsx` (drop the hardcoded account)
+
+**Interfaces:**
+- Consumes: `ProxyConfig` from `./endpoint`.
+- Produces: `type ConnectionSettings = { logonHost: string; logonPort: number; gatewayUrl: string; rewriteRealmHost: boolean }`, `DEFAULT_SETTINGS`, `loadSettings(storage?): ConnectionSettings`, `saveSettings(settings, storage?): void`, `gatewaySocketUrl(settings, host, port): string`.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+import {
+  DEFAULT_SETTINGS,
+  gatewaySocketUrl,
+  loadSettings,
+  saveSettings,
+} from '../connection-settings';
+
+/** A localStorage stand-in, so the test never touches the real one. */
+function fakeStorage(seed: Record<string, string> = {}) {
+  const data = new Map(Object.entries(seed));
+  return {
+    getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => void data.set(key, value),
+  };
+}
+
+describe('loadSettings', () => {
+  it('falls back to the defaults when nothing was saved', () => {
+    expect(loadSettings(fakeStorage())).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it('reads what was saved', () => {
+    const storage = fakeStorage();
+    saveSettings({ ...DEFAULT_SETTINGS, logonHost: 'wow.example.com', logonPort: 3724 }, storage);
+
+    expect(loadSettings(storage).logonHost).toBe('wow.example.com');
+  });
+
+  it('ignores corrupt saved data rather than throwing on startup', () => {
+    // A half-written value must not stop the app from loading -- a client that cannot start is
+    // strictly worse than one that starts with defaults.
+    expect(loadSettings(fakeStorage({ 'wow.connection': '{not json' }))).toEqual(DEFAULT_SETTINGS);
+  });
+});
+
+describe('gatewaySocketUrl', () => {
+  it('addresses the target in the URL, so any host and port work without provisioning', () => {
+    const settings = { ...DEFAULT_SETTINGS, gatewayUrl: 'ws://localhost:9000' };
+
+    expect(gatewaySocketUrl(settings, 'logon.example.com', 3724)).toBe(
+      'ws://localhost:9000/tcp/logon.example.com:3724',
+    );
+  });
+
+  it('keeps wss when the gateway is behind TLS', () => {
+    // Served over https, a browser refuses ws:// outright. The gateway URL therefore carries its own
+    // scheme rather than being assembled from window.location.
+    const settings = { ...DEFAULT_SETTINGS, gatewayUrl: 'wss://play.example.com' };
+
+    expect(gatewaySocketUrl(settings, '10.0.0.5', 8085)).toBe('wss://play.example.com/tcp/10.0.0.5:8085');
+  });
+
+  it('tolerates a trailing slash on the gateway url', () => {
+    const settings = { ...DEFAULT_SETTINGS, gatewayUrl: 'ws://localhost:9000/' };
+
+    expect(gatewaySocketUrl(settings, 'h', 1)).toBe('ws://localhost:9000/tcp/h:1');
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd client && npm test -- --watchAll=false --testPathPattern=connection-settings`
+Expected: FAIL -- cannot resolve `../connection-settings`.
+
+- [ ] **Step 3: Write the implementation**
+
+```ts
+/**
+ * Where this client connects, as DATA a person can change -- not constants baked at build time.
+ *
+ * This client is meant to work against any private 3.3.5 server, so the logon address belongs to the
+ * player the way `realmlist.wtf` did in the real client, not to our webpack config. Two further
+ * consequences are already visible: served over https a browser refuses `ws://`, so the gateway URL
+ * carries its own scheme instead of being assembled from `window.location`; and the gateway addresses
+ * its TCP target in the URL, so a realm on any port needs no per-port process provisioned in advance.
+ */
+const STORAGE_KEY = 'wow.connection';
+
+export type ConnectionSettings = {
+  /** The logon (realmd) server the player wants. */
+  logonHost: string;
+  logonPort: number;
+  /** Base URL of the WebSocket-to-TCP gateway, including scheme. */
+  gatewayUrl: string;
+  /** Dial realms through the gateway rather than at the address they advertise. */
+  rewriteRealmHost: boolean;
+};
+
+export const DEFAULT_SETTINGS: ConnectionSettings = {
+  logonHost: 'localhost',
+  logonPort: 3724,
+  gatewayUrl: 'ws://localhost:9000',
+  rewriteRealmHost: true,
+};
+
+type Storage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
+
+function defaultStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    // Storage can be unavailable (private mode, embedded contexts). Defaults still work.
+    return null;
+  }
+}
+
+export function loadSettings(storage: Storage | null = defaultStorage()): ConnectionSettings {
+  try {
+    const raw = storage?.getItem(STORAGE_KEY);
+    if (!raw) {
+      return DEFAULT_SETTINGS;
+    }
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+  } catch {
+    // Corrupt or partially written settings must not stop the client from starting.
+    return DEFAULT_SETTINGS;
+  }
+}
+
+export function saveSettings(
+  settings: ConnectionSettings,
+  storage: Storage | null = defaultStorage(),
+): void {
+  try {
+    storage?.setItem(STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // Nothing to do: unsaved settings are a lost preference, not a failure worth surfacing.
+  }
+}
+
+/** `<gateway>/tcp/<host>:<port>` -- the target is in the path, so no port needs provisioning. */
+export function gatewaySocketUrl(
+  settings: ConnectionSettings,
+  host: string,
+  port: number,
+): string {
+  const base = settings.gatewayUrl.replace(/\/+$/, '');
+  return `${base}/tcp/${host}:${port}`;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd client && npm test -- --watchAll=false --testPathPattern=connection-settings`
+Expected: PASS (6 tests)
+
+- [ ] **Step 5: Drop the hardcoded account from the legacy login form**
+
+In `client/src/pages/auth/auth.tsx` the initial state is
+`window.location.search.split('account=')[1] || 'Adrinalin4ik'`. A client other people use must not
+ship one person's account name. Replace the fallback with an empty string, leaving the `?account=`
+query override intact for convenience:
+
+```tsx
+      username: window.location.search.split('account=')[1] || '',
+```
+
+- [ ] **Step 6: Run the suites and confirm the legacy screens still work**
+
+Run: `cd client && npm test -- --watchAll=false --testPathPattern="protocol|pages"`
+Expected: PASS. Then start the dev server with a bounded polling loop and confirm 200 from `/` and
+`/realms`; report the actual output.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add client/src/network/protocol client/src/pages/auth/auth.tsx
+git commit -m "feat(protocol): make the server address data rather than a build constant"
+```
+
+
 ## Done criteria
 
 - `cd client && npm test -- --watchAll=false` passes, including the five new protocol suites.
 - `session.protocol` walks Offline → RealmList → CharacterList → InWorld against fake transports, refuses to retry a refusal, and retries a transport failure on the 3 s beat.
 - `/`, `/realms`, `/characters`, `/glue` and `/game?offline=1` behave exactly as before; no socket opens from constructing anything.
 - The provisional `CHAR_CREATE_*`/`CHAR_DELETE_*` codes are isolated in `world-wire.ts` and labelled as provisional, with the live-server check named as the thing that confirms them.
+- No server address, account name or port is baked into the build: `connection-settings.ts` holds them as data, and the gateway addresses its TCP target in the URL so any private server's realm ports work without provisioning a process per port.
