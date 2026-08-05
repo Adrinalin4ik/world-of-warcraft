@@ -249,3 +249,26 @@ describe('encodeRealmListRequest', () => {
     expect(bytes).toHaveLength(5);
   });
 });
+
+describe('decodeRealmList encoding', () => {
+  it('decodes a realm name as UTF-8, so a Cyrillic realm is not mojibake', () => {
+    // A Russian realm called "Медив" arrived as its UTF-8 bytes and drew as `ÐœÐµÐ´Ð¸Ð²` when this
+    // decoder read latin1.
+    const name = new TextEncoder().encode('Медив');
+    const address = new TextEncoder().encode('1.2.3.4:8085');
+
+    const bytes = new Uint8Array([
+      0x10, 0, 0, 0, 0, 0, 0, // opcode + size + unknown
+      1, 0,                   // realm count
+      0, 0, 0,                // icon, lock, flags
+      ...name, 0,
+      ...address, 0,
+      0, 0, 0, 0,             // population (f32)
+      0,                      // character count
+      0,                      // timezone
+      1,                      // id
+    ]);
+
+    expect(decodeRealmList(bytes)[0].name).toBe('Медив');
+  });
+});

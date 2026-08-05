@@ -172,7 +172,19 @@ export function decodeRealmList(bytes: Uint8Array): RealmInfo[] {
   const count = view.getUint16(at, true);
   at += 2;
 
-  const readCString = (field: string): string => {
+  /**
+   * The realm NAME is UTF-8; the realm ADDRESS is not decoded as text at all.
+   *
+   * A private server writes whatever its own database holds into the name, and in practice that is
+   * UTF-8 -- a Russian realm called "Медив" arrived as its UTF-8 bytes and, decoded as latin1, drew as
+   * `ÐœÐµÐ´Ð¸Ð²` on the realm screen. The address stays latin1 because a hostname is ASCII by
+   * definition, and there a stray high byte should survive as a visible character in the error rather
+   * than collapse into U+FFFD.
+   *
+   * If some server ever shows replacement characters in a realm name, the likely cause is a core
+   * writing windows-1251 rather than UTF-8; that is a second decoder, not a change to this one.
+   */
+  const readCString = (field: string, encoding: 'utf-8' | 'latin1' = 'utf-8'): string => {
     let end = at;
     while (end < bytes.length && bytes[end] !== 0) {
       ++end;
@@ -182,7 +194,7 @@ export function decodeRealmList(bytes: Uint8Array): RealmInfo[] {
         `decodeRealmList: truncated response reading ${field} -- no NUL terminator found within ${bytes.length} bytes`,
       );
     }
-    const text = new TextDecoder('latin1').decode(bytes.slice(at, end));
+    const text = new TextDecoder(encoding).decode(bytes.slice(at, end));
     at = end + 1;
     return text;
   };
@@ -195,7 +207,7 @@ export function decodeRealmList(bytes: Uint8Array): RealmInfo[] {
     at++; // lock
     const flags = bytes[at++];
     const name = readCString(`realm ${index} name`);
-    const address = readCString(`realm ${index} address`);
+    const address = readCString(`realm ${index} address`, 'latin1');
     need(7, at, `realm ${index} stats`);
     const population = view.getFloat32(at, true);
     at += 4;
