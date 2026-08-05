@@ -176,11 +176,15 @@ because an unmapped code must fall back to something visible rather than to a bl
 - `realms/handler.js` → folded into `wotlk/logon.ts` (`realms()`), since it speaks over the same socket
   and only exists as a separate object because of the emitter style.
 - `characters/handler.js` → `wotlk/world.ts`, joined by create and delete.
-- `game/handler.js` → keeps gameplay; its handshake, `SMSG_AUTH_CHALLENGE`/`RESPONSE`,
-  `SMSG_LOGIN_VERIFY_WORLD` and char-enum plumbing move to `wotlk/world.ts`, which owns the socket and
-  hands the gameplay handler the same socket to keep listening on. **This is the one risky edit in the
-  spec**: it must not disturb the in-world path, so it is a task of its own with the world route
-  exercised before and after.
+- `game/handler.js` → **not edited at all.** It owns the socket, the RC4 header crypt, the packet
+  framing and every in-world gameplay handler on one connection, so relocating the handshake out of it
+  risks the working world path for nothing the login screen needs. `wotlk/world.ts` instead DRIVES it
+  through a narrow packet-IO seam (`connect`, `send(opcode, body)`, `on(opcodeName)`, `onDisconnect`,
+  `close`). What spec 3 needs is the typed surface, and it gets exactly that; the relocation stays
+  available later as its own change, with the world route as its test.
+- The old `auth`/`realms`/`characters` handlers keep working the whole time rather than being deleted
+  as each transport lands, so `/`, `/realms` and `/characters` never break mid-plan. Spec 3 removes
+  them together with the screens that use them.
 - `session.ts` (the existing one) becomes the new machine; `GameSession`'s public surface keeps
   `player`, and the `offline`/`offlineSpot` flags spec 1 added stay untouched.
 
