@@ -28,7 +28,12 @@ import {
 } from './world-wire';
 
 export interface WorldPacketIo {
-  connect(host: string, port: number, realm: RealmInfo): Promise<void>;
+  /**
+   * `account`/`sessionKey` are carried here (not read off some session the adapter happens to
+   * hold) so the seam stays explicit: the world handshake needs them, and this is the one call
+   * that starts it.
+   */
+  connect(host: string, port: number, realm: RealmInfo, account: string, sessionKey: Uint8Array): Promise<void>;
   send(opcode: number, body: Uint8Array): void;
   on(opcodeName: string, listener: (body: Uint8Array) => void): void;
   onDisconnect(listener: (reason: string) => void): void;
@@ -100,7 +105,7 @@ export class WotlkWorldTransport implements WorldTransport {
     });
   }
 
-  join(realm: RealmInfo, _account: string, _sessionKey: Uint8Array): Promise<void> {
+  join(realm: RealmInfo, account: string, sessionKey: Uint8Array): Promise<void> {
     if (this.join_) {
       return Promise.reject(new Error('join() is already in progress on this transport'));
     }
@@ -111,11 +116,11 @@ export class WotlkWorldTransport implements WorldTransport {
     return new Promise<void>((resolve, reject) => {
       this.join_ = { resolve, reject };
       // Through the endpoint policy, never the realm's advertised address: from a browser the game
-      // server is reachable only via the websockify proxy (`endpoint.ts` explains why). The handshake
-      // itself belongs to the handler, which already holds the account and session key it needs;
-      // connecting is what starts it.
+      // server is reachable only via the websockify proxy (`endpoint.ts` explains why). `account`
+      // and `sessionKey` go through to the IO too -- the handshake needs both, and the existing
+      // handler has no way to get them except through this call (see `createGameHandlerIo`).
       const endpoint = resolveRealmEndpoint(realm, this.proxy);
-      this.io.connect(endpoint.host, endpoint.port, realm).catch(reject);
+      this.io.connect(endpoint.host, endpoint.port, realm, account, sessionKey).catch(reject);
     });
   }
 
@@ -196,13 +201,24 @@ export class WotlkWorldTransport implements WorldTransport {
   }
 }
 
-/** The slice of `GameHandler` this adapter actually drives. */
+/**
+ * The slice of `GameHandler` this adapter actually drives -- including the `session.auth` corner
+ * the handshake reads its account/key from. `account` is a plain field (`AuthHandler` assigns it
+ * directly), but `key` is a GETTER with no setter (`get key() { return this.srp && this.srp.K; }`);
+ * this adapter cannot assign it, only the `srp` stand-in it reads from -- see `connect()` below.
+ */
 interface GameHandlerLike {
   connect(host: string, realm: RealmInfo): void;
   send(packet: GamePacket): void;
   disconnect(): void;
   on(event: string, listener: (...args: any[]) => void): void;
   once(event: string, listener: (...args: any[]) => void): void;
+  session: {
+    auth: {
+      account: string;
+      srp: { K: number[] } | null;
+    };
+  };
 }
 
 /**
@@ -211,8 +227,34 @@ interface GameHandlerLike {
  */
 export function createGameHandlerIo(handler: GameHandlerLike): WorldPacketIo {
   return {
-    connect(host: string, port: number, realm: RealmInfo) {
+    connect(host: string, port: number, realm: RealmInfo, account: string, sessionKey: Uint8Array) {
       return new Promise<void>((resolve, reject) => {
+        // `handleAuthChallenge` (game/handler.js:204-243) builds CMSG_AUTH_SESSION from
+        // `this.session.auth.account` and feeds `this.session.auth.key` into both the SHA1 digest
+        // and the RC4 crypt seed -- fields the OLD `AuthHandler`'s own SRP exchange used to
+        // populate. `WotlkLogonTransport` keeps its account and SRP state in its own private
+        // fields and never touches that object, so without this, `.account` is null and the
+        // handler throws on `.length` (handler.js:222) before the handshake is even sent, and
+        // `join()`'s promise never settles. Setting them here, right before `connect()`, is the
+        // seam: `game/handler.js` stays completely unedited.
+        //
+        // `account` must be upper-cased: the SRP proof the server already accepted was computed
+        // against the upper-cased form (both `AuthHandler.authenticate` and `WotlkLogonTransport`
+        // upper-case internally before sending), and `handleAuthChallenge`'s SHA1 digest must
+        // match it exactly.
+        handler.session.auth.account = account.toUpperCase();
+
+        // `AuthHandler.key` has no setter -- it is `get key() { return this.srp && this.srp.K; }`
+        // (network/auth/handler.js). Rather than edit that class, hand it a minimal stand-in
+        // object carrying just the `K` the getter reads. `srp.K` has always been a plain
+        // `number[]` (crypto/srp.js builds it with `this._K = []`), so `sessionKey` -- the
+        // `Uint8Array` the protocol layer carries -- is converted here to match. (Both actual
+        // consumers, `Hash#feed` -> `ByteBuffer#write` and the HMAC's `ba2binb`, would in fact
+        // accept the `Uint8Array` directly -- neither calls `.concat` on it -- but matching the
+        // shape everything else in this handler has always seen costs nothing and removes any
+        // doubt.)
+        handler.session.auth.srp = { K: Array.from(sessionKey) };
+
         // Resolve on the socket actually connecting -- NOT on the handshake verdict. The handler's
         // own `handleAuthResponse` and this adapter's `SMSG_AUTH_RESPONSE` listener (registered by
         // `WotlkWorldTransport`, above) both react to the same packet; if this promise also raced
