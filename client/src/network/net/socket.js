@@ -1,5 +1,6 @@
 import ByteBuffer from 'byte-buffer';
 import EventEmitter from 'events';
+import { gameSocketUrl } from '../gateway';
 
 // Base-class for any socket including signals and host/port management
 class Socket extends EventEmitter {
@@ -33,11 +34,15 @@ class Socket extends EventEmitter {
   }
 
   // Connects to given host through given port (if any; default port is implementation specific)
+  //
+  // `host`/`port` name the TCP target -- a logon or realm server. They are NOT what the WebSocket
+  // opens: a browser cannot speak TCP, so the socket is opened at the gateway with the target named
+  // in the URL. `network/gateway.ts` owns that translation and is the only place that builds a URL.
   connect(host, port = NaN) {
     if (!this.connected) {
       this.host = host;
       this.port = port;
-      this.uri = 'ws://' + this.host + ':' + this.port;
+      this.uri = gameSocketUrl(this.host, this.port);
 
       this.buffer = new ByteBuffer(0, ByteBuffer.LITTLE_ENDIAN);
       this.remaining = false;

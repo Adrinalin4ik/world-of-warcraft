@@ -15,17 +15,17 @@ export type ConnectionSettings = {
   logonPort: number;
   /** Base URL of the WebSocket-to-TCP gateway, including scheme. */
   gatewayUrl: string;
-  /** Dial realms through the gateway rather than at the address they advertise. */
-  rewriteRealmHost: boolean;
   /** The Save Account Name check button on the login screen owns this. */
   savedAccount?: string;
 };
 
+/** `ws-proxy/server.js`'s own default listen port. */
+const GATEWAY_PORT = 9000;
+
 export const DEFAULT_SETTINGS: ConnectionSettings = {
   logonHost: 'localhost',
   logonPort: 3724,
-  gatewayUrl: 'ws://localhost:9000',
-  rewriteRealmHost: true,
+  gatewayUrl: `ws://localhost:${GATEWAY_PORT}`,
 };
 
 /**
@@ -44,6 +44,30 @@ function servedHost(): string {
   return window.location.hostname || DEFAULT_SETTINGS.logonHost;
 }
 
+/**
+ * The gateway URL a fresh install should dial, for the same reason `servedHost()` exists: the gateway
+ * is deployed beside the app, so the honest default is a property of the page rather than a literal.
+ *
+ * The SCHEME has to be derived too, and that is not cosmetic -- a page served over https may not open
+ * a `ws://` socket at all (the browser blocks it as mixed content, before any request is made), so a
+ * baked `ws://` would make an https deployment unusable. Only the port stays a constant, because it is
+ * the gateway's own default and nothing on the page can reveal it. Storage still wins over this, and
+ * this wins over `DEFAULT_SETTINGS.gatewayUrl`.
+ */
+function servedGatewayUrl(): string {
+  if (typeof window === 'undefined') {
+    return DEFAULT_SETTINGS.gatewayUrl;
+  }
+  const host = window.location.hostname || 'localhost';
+  return `${servedScheme()}://${host}:${GATEWAY_PORT}`;
+}
+
+/** The only WebSocket scheme this page is allowed to open: https may not fall back to `ws://`. */
+function servedScheme(): 'ws' | 'wss' {
+  const https = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  return https ? 'wss' : 'ws';
+}
+
 type Storage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
 
 function defaultStorage(): Storage | null {
@@ -56,7 +80,11 @@ function defaultStorage(): Storage | null {
 }
 
 export function loadSettings(storage: Storage | null = defaultStorage()): ConnectionSettings {
-  const defaults: ConnectionSettings = { ...DEFAULT_SETTINGS, logonHost: servedHost() };
+  const defaults: ConnectionSettings = {
+    ...DEFAULT_SETTINGS,
+    logonHost: servedHost(),
+    gatewayUrl: servedGatewayUrl(),
+  };
 
   try {
     const raw = storage?.getItem(STORAGE_KEY);
@@ -114,12 +142,44 @@ export function applyRealmlistOverride(
   };
 }
 
-/** `<gateway>/tcp/<host>:<port>` -- the target is in the path, so no port needs provisioning. */
+/**
+ * `?gateway=ws://host:port` -- the URL override for the gateway, beside `?realmlist=` above.
+ *
+ * Same precedence: the URL wins for the session it is in, then storage, then the derived default. It
+ * exists because the derived default (`servedGatewayUrl()`) is a guess about deployment -- someone
+ * running the app from a dev server while the gateway sits elsewhere has no other way to say so, and
+ * there is no field on the login screen for it. A scheme-less value is accepted and given the page's
+ * own (`?gateway=10.0.0.2:9000`), since a bare host:port is what a person types and `new WebSocket`
+ * would reject it outright.
+ */
+export function applyGatewayOverride(
+  settings: ConnectionSettings,
+  search: string,
+): ConnectionSettings {
+  const raw = new URLSearchParams(search).get('gateway')?.trim();
+  if (!raw) {
+    return settings;
+  }
+
+  return {
+    ...settings,
+    gatewayUrl: /^wss?:\/\//i.test(raw) ? raw : `${servedScheme()}://${raw}`,
+  };
+}
+
+/**
+ * `<gateway>/tcp/<host>:<port>` -- the target is in the path, so no port needs provisioning.
+ *
+ * The host is percent-encoded because it is player-supplied and lands in a URL path: without it a
+ * typed `host/x` or `host?x` would silently retarget or truncate the request, and the gateway
+ * `decodeURIComponent`s it straight back (`ws-proxy/server.js`). The port is not encoded -- it is
+ * already a number.
+ */
 export function gatewaySocketUrl(
   settings: ConnectionSettings,
   host: string,
   port: number,
 ): string {
   const base = settings.gatewayUrl.replace(/\/+$/, '');
-  return `${base}/tcp/${host}:${port}`;
+  return `${base}/tcp/${encodeURIComponent(host)}:${port}`;
 }
