@@ -28,9 +28,11 @@ export function hitTest(items: DrawItem[], x: number, y: number): Widget | null 
   return null;
 }
 
-/** Focusable widgets in draw order -- the Tab ring. */
+/** Focusable, non-disabled widgets in draw order -- the Tab ring. */
 export function focusChain(items: DrawItem[]): Widget[] {
-  return items.filter((item) => item.widget.focusable).map((item) => item.widget);
+  return items
+    .filter((item) => item.widget.focusable && item.widget.state !== 'disabled')
+    .map((item) => item.widget);
 }
 
 /** The next focus target, wrapping. `current` of null starts at the first (or last, backwards). */

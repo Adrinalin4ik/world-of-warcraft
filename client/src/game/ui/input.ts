@@ -36,6 +36,10 @@ export class GlueInput {
     if (this.focus === widget) {
       return;
     }
+    // Refuse disabled widgets.
+    if (widget && widget.state === 'disabled') {
+      return;
+    }
     this.focus = widget;
     if (widget && widget.kind === 'editbox') {
       widget.caret = widget.text.length;
@@ -70,19 +74,23 @@ export class GlueInput {
     const { x, y } = this.toUnits(event);
     const hit = hitTest(this.items, x, y);
 
-    if (this.hovered !== hit) {
+    // Hover skips disabled widgets.
+    const hoverTarget = hit && hit.state !== 'disabled' ? hit : null;
+    if (this.hovered !== hoverTarget) {
       if (this.hovered) {
         this.hovered.hovered = false;
       }
-      if (hit) {
-        hit.hovered = true;
+      if (hoverTarget) {
+        hoverTarget.hovered = true;
       }
-      this.hovered = hit;
+      this.hovered = hoverTarget;
     }
 
     if (this.pressed) {
-      // Pressed art follows the pointer being over the widget, as the reference's buttons do.
-      this.pressed.state = this.pressed === hit ? 'down' : 'up';
+      // Pressed art follows the pointer being over the widget, but guards against disabled.
+      if (this.pressed.state !== 'disabled') {
+        this.pressed.state = this.pressed === hit ? 'down' : 'up';
+      }
     }
   };
 
@@ -102,6 +110,11 @@ export class GlueInput {
     const pressed = this.pressed;
     this.pressed = null;
     if (!pressed) {
+      return;
+    }
+
+    // If the widget became disabled during the press, clear the press but do not fire the click.
+    if (pressed.state === 'disabled') {
       return;
     }
 
@@ -130,9 +143,20 @@ export class GlueInput {
       return;
     }
 
-    if (event.key === 'Enter' || event.key === 'Escape') {
-      // The screen decides what submit/cancel mean; it reads these off the focused widget.
-      target.onClick?.();
+    if (event.key === 'Enter') {
+      if (target.state !== 'disabled') {
+        target.onClick?.();
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      if (target.state !== 'disabled') {
+        target.onCancel?.();
+      }
+      this.setFocus(null);
+      event.preventDefault();
       return;
     }
 

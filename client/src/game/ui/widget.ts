@@ -89,8 +89,10 @@ export class Widget {
   password = false;
   caret = 0;
 
-  /** Per-widget click handler, invoked by the input router. */
+  /** Invoked by Enter (or pointer click on non-checkbutton). */
   onClick: (() => void) | null = null;
+  /** Invoked by Escape; if absent, Escape does nothing (no fallback to onClick). */
+  onCancel: (() => void) | null = null;
 
   constructor(kind: WidgetKind, id?: string) {
     this.kind = kind;
