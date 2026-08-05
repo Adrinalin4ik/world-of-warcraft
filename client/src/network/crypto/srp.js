@@ -177,7 +177,12 @@ class SRP {
     if (!this._M2) {
       return false;
     }
-    return equal(M2.toArray(), this._M2.digest);
+    // Accepts what `BigNum.fromArray` accepts: a byte-buffer slice (what `auth/handler.js` passes)
+    // or a plain/typed array (what the protocol layer passes). Only `toArray()` was accepted before,
+    // which meant a Uint8Array threw here -- and no test reached this line, because every test of a
+    // refusal returns before the proof is validated.
+    const bytes = typeof M2.toArray !== 'undefined' ? M2.toArray() : Array.from(M2);
+    return equal(bytes, this._M2.digest);
   }
 
 }
