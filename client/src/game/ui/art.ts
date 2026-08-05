@@ -32,6 +32,19 @@ export class GlueArt {
   }
 
   /**
+   * Glue art paths are conventionally extensionless, as declared in the game's GlueXML.
+   * The engine supplies `.blp` at load time. This helper appends it when absent, leaving
+   * paths that already carry an extension untouched (some client data does specify `.blp`
+   * explicitly, and future tables may as well).
+   */
+  private appendBLP(path: string): string {
+    if (!path.includes('.')) {
+      return `${path}.blp`;
+    }
+    return path;
+  }
+
+  /**
    * Fetch every registered sprite. Clamped wrapping: glue art is stamped, never tiled, and
    * REPEAT on a sub-rect bleeds neighbouring sprites in along the seams.
    *
@@ -46,7 +59,7 @@ export class GlueArt {
         }
         try {
           const texture = await TextureLoader.load(
-            def.path,
+            this.appendBLP(def.path),
             THREE.ClampToEdgeWrapping as any,
             THREE.ClampToEdgeWrapping as any,
           );
