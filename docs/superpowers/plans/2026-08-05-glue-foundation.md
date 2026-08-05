@@ -3282,6 +3282,19 @@ world it is the visibility manager that shows each placement), and every font st
 its widget rect because the measured size was returned flat while the renderer reads it nested. Each
 now has a test or a type that makes silent reintroduction impossible.
 
+**Known wrong, and measured: the scene's composition.** The mechanism is right — model, authored
+camera 0, sequence 0, fog, lights and pose all reach the driver — but neither main-menu scene frames
+correctly. `UI_MainMenu` fills about a fifth of the frame (banner poles, grass and a pedestal lit by
+the model's own point lights) with the rest empty; `UI_MainMenu_Northrend` fills 100% of it with a
+single flat cyan surface, i.e. the camera sits inside a mesh. Measurements that narrow it down, so
+spec 3 does not start from scratch: all 24 drawable meshes are present and visible, including three
+large dome meshes (radii 570/400/232, flagged unlit — the cloud layers) and terrain at radius 582;
+raising the ambient to flat white lifted mean luma 16.9 → 25.8 while leaving the non-black share at
+20.5%, which means the empty areas are geometry the camera does not see rather than geometry lit to
+black. So the remaining suspects are the camera record's interpretation (eye and target both land
+within a few units of the origin) and whether a glue scene needs a transform we are not applying —
+not lighting, and not missing geometry.
+
 **Still unverified.** Fidelity against the real client's login screen: the probe proves the mechanism,
 not the composition, and only the transcribed `AccountLogin` of spec 3 can be compared side by side.
 Separately, `Fonts\SKURRI.TTF` is rejected by Chrome's font sanitiser ("bad table directory",
