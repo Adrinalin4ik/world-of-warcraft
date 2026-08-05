@@ -21,6 +21,17 @@ const FONT_FILES: Record<string, string> = {
   ARIALN: 'Fonts\\ARIALN.TTF',
 };
 
+/**
+ * Padding around rasterized text.
+ * HORIZONTAL: clearance for stroke width (lineWidth=2, so 1px on each side) plus room for subpixel positioning.
+ * VERTICAL: clearance for stroke width plus extra for centered textBaseline.
+ */
+const PADDING_H = 4;
+const PADDING_V = 6;
+
+/** Maximum entries in the rasterized-text cache before LRU eviction. */
+const TEXTURE_CACHE_MAX = 256;
+
 let fontsPromise: Promise<void> | null = null;
 
 /**
@@ -42,7 +53,7 @@ export function loadGlueFonts(): Promise<void> {
         const data = await loader.load(path);
         const face = new FontFace(family, data);
         await face.load();
-        (document as any).fonts.add(face);
+        document.fonts.add(face);
       } catch (error) {
         console.warn(`glue font ${family} unavailable:`, error);
       }
@@ -65,7 +76,7 @@ function sharedMeasureContext(): CanvasRenderingContext2D {
   return measureContext;
 }
 
-/** Logical-unit size of a rendered string. */
+/** Logical-unit size of a rendered string, including padding. */
 export function measureText(
   text: string,
   spec: FontSpec,
@@ -74,10 +85,13 @@ export function measureText(
   const context = sharedMeasureContext();
   context.font = cssFont(spec, scale);
   const metrics = context.measureText(text);
-  return { width: metrics.width / scale, height: spec.size };
+  return {
+    width: (metrics.width + PADDING_H) / scale,
+    height: spec.size + PADDING_V / scale,
+  };
 }
 
-type Entry = { texture: THREE.CanvasTexture; key: string };
+type Entry = { texture: THREE.CanvasTexture };
 
 export class FontStringTextures {
   private readonly cache = new Map<string, Entry>();
@@ -102,14 +116,17 @@ export class FontStringTextures {
 
     const cached = this.cache.get(key);
     if (cached) {
+      // LRU: move to end on cache hit
+      this.cache.delete(key);
+      this.cache.set(key, cached);
       return cached.texture;
     }
 
     const font = cssFont(spec, scale);
     const context = sharedMeasureContext();
     context.font = font;
-    const width = Math.ceil(context.measureText(text).width) + 4;
-    const height = Math.ceil(spec.size * scale) + 6;
+    const width = Math.ceil(context.measureText(text).width) + PADDING_H;
+    const height = Math.ceil(spec.size * scale) + PADDING_V;
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(width, 1);
@@ -136,7 +153,19 @@ export class FontStringTextures {
     texture.flipY = false;
     texture.needsUpdate = true;
 
-    this.cache.set(key, { texture, key });
+    const entry: Entry = { texture };
+    this.cache.set(key, entry);
+
+    // LRU eviction: if cache exceeds max size, evict oldest (first) entry
+    if (this.cache.size > TEXTURE_CACHE_MAX) {
+      const firstKey = this.cache.keys().next().value;
+      const evicted = this.cache.get(firstKey);
+      if (evicted) {
+        evicted.texture.dispose();
+      }
+      this.cache.delete(firstKey);
+    }
+
     return texture;
   }
 
