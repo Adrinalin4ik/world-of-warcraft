@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Spec: `docs/superpowers/specs/2026-08-05-login-screen-design.md`. Read it before Task 1.
-- **Tests are deliberately minimal** — the human's instruction. Three in the whole plan: the dialog mapping, that the screen submits what was typed, and that the saved account name round-trips. Do not add more. Visual correctness is checked in a browser, not asserted.
+- **Tests are deliberately minimal** — the human's instruction: the dialog mapping, that the screen submits what was typed, that the saved account name round-trips, and the realmlist URL override. Do not add more. Visual correctness is checked in a browser, not asserted.
 - **No user-visible string may be hardcoded.** Text comes from `GlueStrings` (`ctx.strings.get(key)`); the login screen's keys are in the shipped table (verified present: `ACCOUNT_NAME`, `PASSWORD`, `LOGIN`, `EXIT_GAME`, `SAVE_ACCOUNT_NAME` = "Remember
   Account Name", `LOGIN_STATE_CONNECTING`, `SERVER_SELECTION`, and the `AUTH_*` family). Three keys an
   earlier draft of this plan invented -- `AUTH_CONNECTING`, `REALM_LIST`, `CHARACTER_SELECT` -- do NOT
@@ -28,6 +28,8 @@
   - every path above returns 200 from the asset host; `GlueArt` appends `.blp` itself, so table entries stay extensionless
 - The probe drew whole sheets and its button looked like a strip. Tex-coords are why. Do not omit them.
 - Run tests with `cd client && npm test -- --watchAll=false --testPathPattern=<pattern>`; `cd client && npx tsc --noEmit -p tsconfig.json` must report **zero** errors — it is at zero now, so any error is this plan's.
+- The screen honours `?realmlist=host:port`, alongside the `?expansion=` and `?offline=1` affordances
+  the earlier specs added. Precedence: URL, then saved settings, then defaults.
 - Commit after every task.
 
 ---
@@ -482,20 +484,57 @@ export class LoginScreen implements GlueScreen {
 }
 ```
 
-- [ ] **Step 3: Fix the two things that import wrongly on purpose**
+- [ ] **Step 3: Add the saved-account field and the `?realmlist=` override**
 
-The code above imports `loadSettings`/`saveSettings` from a deliberately wrong path, and uses a
-`savedAccount` field that `ConnectionSettings` does not have yet. Both are yours to correct in this
-step, because they are the real integration points:
+Two additions to `client/src/network/protocol/connection-settings.ts`:
 
-1. The real module is `client/src/network/protocol/connection-settings.ts`. Fix the import.
-2. Add `savedAccount?: string` to `ConnectionSettings` in that file, defaulting to absent in
-   `DEFAULT_SETTINGS`, with a one-line comment saying the Save Account Name check button owns it.
-3. Confirm `AUTH_CONNECTING` exists in the shipped `gluestrings.lua` before relying on it. Fetch
-   `https://data-direct.spelunkerdb.com/12340/interface/gluexml/gluestrings.lua` and grep. If it is
-   absent, pick the closest key that IS present and say which you chose and why in your report —
-   `GlueStrings.get` falls back to the key name, so a wrong key shows as `AUTH_CONNECTING` on screen
-   rather than crashing, and a visible wrong string is exactly what we do not want to ship.
+1. `savedAccount?: string` on `ConnectionSettings`, absent from `DEFAULT_SETTINGS`, with a one-line
+   comment saying the Save Account Name check button owns it.
+2. A URL override for the logon address, the same debugging affordance `?offline=1` and `?expansion=0`
+   already give:
+
+```ts
+/**
+ * `?realmlist=host:port` -- the URL override for the logon address.
+ *
+ * The real client reads `realmlist.wtf`; this is the same idea reachable from a link, which makes "try
+ * it against that other server" a one-URL operation instead of a typing exercise. The port is optional
+ * and falls back to whatever the base settings carry, so `?realmlist=logon.example.com` works.
+ *
+ * Precedence is URL, then what was saved, then the defaults. The URL wins for the session it is in;
+ * submitting the screen saves whatever the field then holds, so an override sticks only if the player
+ * logs in with it.
+ */
+export function applyRealmlistOverride(
+  settings: ConnectionSettings,
+  search: string,
+): ConnectionSettings {
+  const raw = new URLSearchParams(search).get('realmlist');
+  if (!raw) {
+    return settings;
+  }
+
+  const [host, port] = raw.split(':');
+  if (!host) {
+    return settings;
+  }
+
+  const parsed = Number(port);
+  return {
+    ...settings,
+    logonHost: host,
+    logonPort: Number.isFinite(parsed) && parsed > 0 ? parsed : settings.logonPort,
+  };
+}
+```
+
+Then have the login screen read it in `mount`, in place of the bare `loadSettings()`:
+
+```ts
+    const settings = applyRealmlistOverride(loadSettings(), window.location.search);
+```
+
+and add `applyRealmlistOverride` to the screen's import from `connection-settings`.
 
 - [ ] **Step 4: Compile**
 
@@ -609,11 +648,41 @@ describe('LoginScreen', () => {
 Run: `cd client && npm test -- --watchAll=false --testPathPattern=screens/__tests__/login`
 Expected: PASS (2 tests). If a test fails because the screen reads or writes something differently than the test assumes, fix the SCREEN if the test describes what a player expects, and fix the test only if it describes something a player would not care about. Say which you chose and why in your report.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Add the one test for the URL override**
+
+Append to the same file, and add `applyRealmlistOverride` to its import from `connection-settings`.
+
+```ts
+describe('applyRealmlistOverride', () => {
+  it('takes host and port from the URL, so a link can point at another server', () => {
+    const overridden = applyRealmlistOverride(DEFAULT_SETTINGS, '?realmlist=logon.example.com:3724');
+
+    expect(overridden.logonHost).toBe('logon.example.com');
+    expect(overridden.logonPort).toBe(3724);
+  });
+
+  it('keeps the existing port when the URL gives only a host', () => {
+    const base = { ...DEFAULT_SETTINGS, logonPort: 3725 };
+
+    expect(applyRealmlistOverride(base, '?realmlist=logon.example.com')).toMatchObject({
+      logonHost: 'logon.example.com',
+      logonPort: 3725,
+    });
+  });
+
+  it('changes nothing when the URL says nothing', () => {
+    expect(applyRealmlistOverride(DEFAULT_SETTINGS, '?offline=1')).toEqual(DEFAULT_SETTINGS);
+  });
+});
+```
+
+Run: `cd client && npm test -- --watchAll=false --testPathPattern="screens/__tests__/login|connection-settings"`
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add client/src/game/ui/screens/__tests__/login.test.ts
-git commit -m "test(login): pin submitting typed credentials and remembering the account"
+git commit -m "test(login): pin submitting credentials, remembering the account, and the realmlist override"
 ```
 
 ---
@@ -759,4 +828,6 @@ git commit -m "feat(login): serve the login screen at / and retire the placehold
 - With Save Account Name checked, the account comes back on the next visit.
 - The realm and character stubs receive the machine's transitions, so the path continues past login.
 - `/realms` and `/characters` are gone; `/game` and `/game?offline=1` are untouched.
-- `npx tsc --noEmit` is at zero and the full suite passes, with exactly three new tests in this plan.
+- `/?realmlist=host:port` points the screen at another server without typing, and `?realmlist=host`
+  alone keeps the current port.
+- `npx tsc --noEmit` is at zero and the full suite passes, with only the small test files this plan adds.
