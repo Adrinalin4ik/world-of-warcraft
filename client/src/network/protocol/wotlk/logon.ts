@@ -234,13 +234,12 @@ export class WotlkLogonTransport implements LogonTransport {
  * whatever arrived on `data:receive`, exactly what `network/auth/handler.js` has always done
  * (`AuthPacket.HEADER_SIZE` is 1, and it reads the rest of the buffer as a single packet). realmd's
  * packets are small and arrive one per message in practice, but a split or coalesced arrival is a
- * known limitation shared with the existing client, not something this adapter solves. Kept at the
- * bottom of this file because it is the only part that cannot be unit-tested, and keeping it small
- * is what makes that acceptable.
+ * known limitation shared with the existing client, not something this adapter solves. Takes the
+ * socket as an optional argument (defaulting to a real one), the same seam the SRP factory used to
+ * make the successful-handshake path testable -- this is the only way `onMessage`'s framing is
+ * testable without a WebSocket.
  */
-export function createSocketLogonIo(): LogonIo {
-  const socket = new Socket();
-
+export function createSocketLogonIo(socket: Socket = new Socket()): LogonIo {
   return {
     connect(host: string, port: number) {
       return new Promise<void>((resolve, reject) => {
@@ -254,8 +253,11 @@ export function createSocketLogonIo(): LogonIo {
     },
     onMessage(listener: (bytes: Uint8Array) => void) {
       socket.on('data:receive', () => {
-        const available = socket.buffer.available;
-        listener(new Uint8Array(socket.buffer.read(available)));
+        // `read()` returns a NEW ByteBuffer wrapping the slice, not the raw bytes -- the naming
+        // invites reading `new Uint8Array(slice)`, which silently yields a zero-length array
+        // because a ByteBuffer isn't array-like. The slice's own `.buffer` is the actual bytes.
+        const slice = socket.buffer.read(socket.buffer.available);
+        listener(new Uint8Array(slice.buffer));
       });
     },
     close() {

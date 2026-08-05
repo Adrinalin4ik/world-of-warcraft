@@ -42,7 +42,6 @@ declare module 'byte-buffer' {
     readDouble(order?):number;
     readCString(order?):number;
     writeByte(number: number):number;
-    write(number: number):number;
     writeUnsignedByte(number: number):number;
     writeUnsignedByte(number: number):number;
     writeShort(number: number):number;
@@ -57,7 +56,14 @@ declare module 'byte-buffer' {
     clone(): ByteBuffer;
     clip(begin: number, end: number): ByteBuffer;
     append(bytes: number): ByteBuffer;
-    read(method: string, bytes?: number): ByteBuffer;
+    // Reads `bytes` bytes (defaults to everything available) and returns a NEW ByteBuffer wrapping
+    // that slice -- not the raw bytes themselves. `new Uint8Array(someByteBuffer)` does not read
+    // through it; the slice's own `.buffer` is what holds the bytes that were read.
+    read(bytes?: number): ByteBuffer;
+    // Accepts a byte sequence (a plain array, a typed array, or another ByteBuffer) -- not a single
+    // number. `auth/handler.js` passes a plain array.
+    write(sequence: ArrayLike<number> | ByteBuffer): number;
+    available: number;
     length: number;
   }
 }

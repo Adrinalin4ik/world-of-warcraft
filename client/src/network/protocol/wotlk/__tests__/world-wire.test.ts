@@ -138,6 +138,18 @@ describe('encodeGuidBody', () => {
   it('writes a guid as eight little-endian bytes -- delete and player-login share this body', () => {
     expect(Array.from(encodeGuidBody('0x1'))).toEqual([1, 0, 0, 0, 0, 0, 0, 0]);
   });
+
+  it('encodes a realistic 64-bit player guid without losing the high half -- cannot use Number()', () => {
+    // A realistic guid beyond safe integer range: 0x123456789ABCDEF0
+    // Low: 0x9ABCDEF0, High: 0x12345678
+    // Parsing as Number(guid) loses precision beyond 2^53-1; this guid is 1.3e18
+    const bytes = encodeGuidBody('0x123456789ABCDEF0');
+    // Little-endian low half: 0x9ABCDEF0
+    const lowBytes = [0xF0, 0xDE, 0xBC, 0x9A];
+    // Little-endian high half: 0x12345678
+    const highBytes = [0x78, 0x56, 0x34, 0x12];
+    expect(Array.from(bytes)).toEqual([...lowBytes, ...highBytes]);
+  });
 });
 
 describe('charCreateRefusal', () => {

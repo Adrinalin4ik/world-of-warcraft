@@ -167,10 +167,29 @@ export function encodeCharCreateBody(request: CharCreateRequest): Uint8Array {
 
 /** The 8-byte little-endian guid body. `CMSG_CHAR_DELETE` and `CMSG_PLAYER_LOGIN` are both just this. */
 export function encodeGuidBody(guid: string): Uint8Array {
-  const value = BigInt(guid);
+  // Parse as two 32-bit halves (low, high) rather than BigInt, for ES6 target compatibility
+  // and parity with GUID.raw and the existing packet layer (client/src/network/game/guid.ts).
+  // A 64-bit value does not survive conversion to JS Number, which is why the guid string exists.
+  let hex = guid.startsWith('0x') ? guid.slice(2) : guid;
+  hex = hex.padStart(16, '0'); // Pad to 16 hex digits (8 bytes, 64 bits)
+
+  const highHex = hex.slice(0, 8); // High 32 bits
+  const lowHex = hex.slice(8, 16); // Low 32 bits
+
+  const low = parseInt(lowHex, 16);
+  const high = parseInt(highHex, 16);
+
   const out = new Uint8Array(8);
-  for (let i = 0; i < 8; ++i) {
-    out[i] = Number((value >> BigInt(8 * i)) & 0xffn);
-  }
+  // Write low 32-bit half (little-endian)
+  out[0] = low & 0xff;
+  out[1] = (low >> 8) & 0xff;
+  out[2] = (low >> 16) & 0xff;
+  out[3] = (low >> 24) & 0xff;
+  // Write high 32-bit half (little-endian)
+  out[4] = high & 0xff;
+  out[5] = (high >> 8) & 0xff;
+  out[6] = (high >> 16) & 0xff;
+  out[7] = (high >> 24) & 0xff;
+
   return out;
 }

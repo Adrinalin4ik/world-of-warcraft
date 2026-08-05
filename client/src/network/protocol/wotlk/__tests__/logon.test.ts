@@ -62,9 +62,13 @@ function challengeResponse(code: number): Uint8Array {
 /**
  * A fake SRP session: skips the arithmetic entirely and returns fixed values, which is what makes
  * the successful-handshake path testable without deriving a real, consistent SRP exchange from
- * bytes.
+ * bytes. `feed`/`validate` are typed as `jest.Mock` (not just `SrpLike`'s plain function types) so
+ * tests can assert on calls, and overrides are typed against that same shape so replacing one
+ * doesn't reintroduce a plain function where a mock is expected.
  */
-function fakeSrp(overrides: Partial<SrpLike> = {}): SrpLike & { feed: jest.Mock; validate: jest.Mock } {
+type FakeSrp = SrpLike & { feed: jest.Mock; validate: jest.Mock };
+
+function fakeSrp(overrides: Partial<FakeSrp> = {}): FakeSrp {
   return {
     feed: jest.fn(),
     A: { toArray: () => [0xaa, 0xbb] },
