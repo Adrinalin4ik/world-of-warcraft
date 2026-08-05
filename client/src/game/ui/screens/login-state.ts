@@ -27,3 +27,25 @@ export function loginDialog(stage: LoginStage, refusal: ProtocolRefusal | null):
 
   return { kind: 'none' };
 }
+
+/**
+ * Which main-menu stage the URL asks for. A debug affordance, not the client's law: the client keys
+ * off `IsStreamingTrial()`, and `expansion` is here because an expansion number is the way a human
+ * thinks about "show me the 3.3.5 screen". `expansion=0` (or `1`) means the pre-Wrath art, which the
+ * client only ever shows to a trial account; anything else, or nothing at all, means Wrath.
+ */
+export function wantsTrialScene(search: string): boolean {
+  const params = new URLSearchParams(search);
+
+  if (params.get('trial') === '1' || params.get('trial') === 'true') {
+    return true;
+  }
+
+  const expansion = params.get('expansion');
+  if (expansion === null) {
+    return false;
+  }
+
+  const level = Number(expansion);
+  return Number.isFinite(level) && level < 2;
+}

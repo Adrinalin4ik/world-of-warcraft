@@ -1,5 +1,5 @@
 import { LoginStage } from '../../../../network/protocol/stages';
-import { loginDialog } from '../login-state';
+import { loginDialog, wantsTrialScene } from '../login-state';
 
 describe('loginDialog', () => {
   it('says nothing while the player is still typing', () => {
@@ -28,5 +28,32 @@ describe('loginDialog', () => {
 
   it('says nothing once the realm list has arrived', () => {
     expect(loginDialog(LoginStage.RealmList, null)).toEqual({ kind: 'none' });
+  });
+});
+
+describe('wantsTrialScene', () => {
+  it('defaults to the Wrath causeway, which is what a normal 3.3.5 account sees', () => {
+    expect(wantsTrialScene('')).toBe(false);
+    expect(wantsTrialScene('?account=x')).toBe(false);
+  });
+
+  it('gives the pre-Wrath arch for expansion 0 and 1', () => {
+    expect(wantsTrialScene('?expansion=0')).toBe(true);
+    expect(wantsTrialScene('?expansion=1')).toBe(true);
+  });
+
+  it('gives the Wrath causeway for expansion 2 and above', () => {
+    expect(wantsTrialScene('?expansion=2')).toBe(false);
+    expect(wantsTrialScene('?expansion=3')).toBe(false);
+  });
+
+  it("accepts the client's own vocabulary too", () => {
+    expect(wantsTrialScene('?trial=1')).toBe(true);
+    expect(wantsTrialScene('?trial=true')).toBe(true);
+    expect(wantsTrialScene('?trial=0')).toBe(false);
+  });
+
+  it('ignores a value that is not a number', () => {
+    expect(wantsTrialScene('?expansion=wrath')).toBe(false);
   });
 });

@@ -18,7 +18,7 @@ import {
 } from '../../../network/protocol/connection-settings';
 import { GlueContext, GlueScreen } from '../screens';
 import { FontSpec, Widget } from '../widget';
-import { loginDialog } from './login-state';
+import { loginDialog, wantsTrialScene } from './login-state';
 import { LOGIN_ART } from './login-art';
 
 /** `GlueFontNormal` in the client: Friz Quadrata, gold, outlined. */
@@ -55,9 +55,10 @@ export class LoginScreen implements GlueScreen {
     ctx.art.registerAll(LOGIN_ART);
     void ctx.art.load();
 
-    // The login stage: the Wrath causeway unless this is a trial account. Spec 1's URL override still
-    // decides while there is no account to read the flag from.
-    ctx.setScene({ kind: 'mainmenu', streamingTrial: false });
+    // The login stage: the Wrath causeway unless this is a trial account. The client's real condition
+    // is `IsStreamingTrial()`; the URL is a debug stand-in until there is an account to read the flag
+    // from.
+    ctx.setScene({ kind: 'mainmenu', streamingTrial: wantsTrialScene(window.location.search) });
 
     const root = ctx.root.root;
     const settings = applyRealmlistOverride(loadSettings(), window.location.search);
