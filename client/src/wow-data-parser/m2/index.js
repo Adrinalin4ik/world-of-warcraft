@@ -105,6 +105,42 @@ const UVAnimation = new r.Struct({
   }
 });
 
+/**
+ * An `M2SplineKey<T>` -- value plus its two tangents. Camera position/target/roll tracks store
+ * these ALWAYS, regardless of the block's interpolation type, so a key is 3x the value size.
+ */
+const SplineKeyVec3 = new r.Struct({
+  value: float32array3,
+  inTan: float32array3,
+  outTan: float32array3
+});
+
+const SplineKeyFloat = new r.Struct({
+  value: r.floatle,
+  inTan: r.floatle,
+  outTan: r.floatle
+});
+
+/**
+ * One authored camera. `SetCamera(index)` in GlueXML indexes this array DIRECTLY -- the glue scene
+ * models carry a single camera whose `cameraLookups` slot holds the 0xffff none sentinel, so the
+ * portrait-style lookup path finds nothing there (benilla `models/records.rs#parse_m2_camera`).
+ *
+ * `fov` is the client's DIAGONAL opening angle, not a vertical FOV. The conversion for our aspect
+ * lives in `game/ui/scene/scene-rig.ts#verticalFov`.
+ */
+export const Camera = new r.Struct({
+  type: r.int32le,
+  fov: r.floatle,
+  farClip: r.floatle,
+  nearClip: r.floatle,
+  positions: new AnimationBlock(SplineKeyVec3),
+  positionBase: float32array3,
+  targetPositions: new AnimationBlock(SplineKeyVec3),
+  targetBase: float32array3,
+  roll: new AnimationBlock(SplineKeyFloat)
+});
+
 export default new r.Struct({
   signature: new r.String(4),
   version: r.uint32le,
@@ -153,8 +189,8 @@ export default new r.Struct({
   attachmentLookups: new Nofs(),
   events: new Nofs(),
   lights: new Nofs(),
-  cameras: new Nofs(),
-  cameraLookups: new Nofs(),
+  cameras: new Nofs(Camera),
+  cameraLookups: new Nofs(r.int16le),
   ribbonEmitters: new Nofs(Ribbon),
   particleEmitters: new Nofs(ParticleEmitter),
 
