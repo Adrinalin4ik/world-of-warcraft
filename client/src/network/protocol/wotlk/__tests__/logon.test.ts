@@ -147,18 +147,42 @@ describe('WotlkLogonTransport', () => {
     expect(Array.from(result.sessionKey)).toEqual(new Array(40).fill(0x22));
   });
 
-  it('rejects a second authenticate() call made while one is already in flight', async () => {
+  it('rejects a second authenticate() call issued in the same synchronous turn, without leaving the first unsettled', async () => {
     const io = fakeIo();
     const transport = new WotlkLogonTransport(io, CONFIG);
 
+    // No `await` between these two calls: with the real IO, `connect()` is a whole WebSocket
+    // handshake, so this window is wide open in production, not a single microtask.
     const first = transport.authenticate('tester', 'secret');
+    const second = transport.authenticate('tester', 'secret');
+
+    await expect(second).rejects.toThrow(/already in progress/i);
+
+    // The first call must still be alive and able to settle normally -- the guard must not have
+    // clobbered its resolvers.
     await Promise.resolve();
-
-    await expect(transport.authenticate('tester', 'secret')).rejects.toThrow(/already in progress/i);
-
-    // Clean up the first pending promise so it doesn't leak into the next test.
     io.reply(new Uint8Array([LOGON_OPCODE.PROOF, 0x04]));
     await expect(first).rejects.toBeInstanceOf(ProtocolRefusalError);
+  });
+
+  it('leaves the transport able to authenticate again after a failed connect', async () => {
+    const io = fakeIo();
+    io.connect = jest.fn(async () => {
+      throw new Error('connect failed');
+    });
+    const transport = new WotlkLogonTransport(io, CONFIG);
+
+    await expect(transport.authenticate('tester', 'secret')).rejects.toThrow('connect failed');
+
+    // A later, legitimate attempt must not be blocked by the failed one's slot still being held.
+    io.connect = jest.fn(async () => undefined);
+    const pending = transport.authenticate('tester', 'secret');
+    await Promise.resolve();
+
+    expect(io.sent[0][0]).toBe(LOGON_OPCODE.CHALLENGE);
+
+    io.reply(new Uint8Array([LOGON_OPCODE.PROOF, 0x04]));
+    await expect(pending).rejects.toBeInstanceOf(ProtocolRefusalError);
   });
 
   it('rejects a second realms() call made while one is already in flight', async () => {

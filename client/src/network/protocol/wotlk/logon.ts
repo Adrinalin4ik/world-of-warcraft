@@ -85,15 +85,26 @@ export class WotlkLogonTransport implements LogonTransport {
       throw new Error('authenticate() is already in progress on this transport');
     }
 
-    this.account = account.toUpperCase();
-    this.password = password.toUpperCase();
-
-    await this.io.connect(this.config.host, this.config.port);
-
+    // Claimed synchronously, before anything async: with the real IO, `connect()` is a whole
+    // WebSocket handshake, not a microtask, so two calls issued in the same turn must not both
+    // slip past the guard above and race to overwrite this slot -- only one may ever hold it.
     const settled = new Promise<{ sessionKey: Uint8Array }>((resolve, reject) => {
       this.authResolve = resolve;
       this.authReject = reject;
     });
+
+    this.account = account.toUpperCase();
+    this.password = password.toUpperCase();
+
+    try {
+      await this.io.connect(this.config.host, this.config.port);
+    } catch (error) {
+      // A failed connect must leave the transport able to try again, not stuck holding a slot no
+      // call will ever finish.
+      this.authResolve = null;
+      this.authReject = null;
+      throw error;
+    }
 
     this.io.send(
       encodeLogonChallenge({
