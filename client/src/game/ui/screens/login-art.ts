@@ -66,6 +66,6 @@ export const LOGIN_ART: Record<string, SpriteDef> = {
   'check-down': { path: 'Interface\\Buttons\\UI-CheckBox-Down', size: [20, 20] },
   'check-highlight': { path: 'Interface\\Buttons\\UI-CheckBox-Highlight', size: [20, 20] },
   'check-mark': { path: 'Interface\\Buttons\\UI-CheckBox-Check', size: [20, 20] },
-  'blizzard-logo': { path: 'Interface\\Glues\\Mainmenu\\Glues-BlizzardLogo' },
+  'blizzard-logo': { path: 'Interface\\Glues\\Mainmenu\\Glues-BlizzardLogo', size: [100, 100] },
   'dialog-background': { path: 'Interface\\DialogFrame\\UI-DialogBox-Background' },
 };
