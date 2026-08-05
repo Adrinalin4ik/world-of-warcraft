@@ -17,6 +17,8 @@ export type ConnectionSettings = {
   gatewayUrl: string;
   /** Dial realms through the gateway rather than at the address they advertise. */
   rewriteRealmHost: boolean;
+  /** The Save Account Name check button on the login screen owns this. */
+  savedAccount?: string;
 };
 
 export const DEFAULT_SETTINGS: ConnectionSettings = {
@@ -59,6 +61,39 @@ export function saveSettings(
   } catch {
     // Nothing to do: unsaved settings are a lost preference, not a failure worth surfacing.
   }
+}
+
+/**
+ * `?realmlist=host:port` -- the URL override for the logon address.
+ *
+ * The real client reads `realmlist.wtf`; this is the same idea reachable from a link, which makes "try
+ * it against that other server" a one-URL operation instead of a typing exercise. The port is optional
+ * and falls back to whatever the base settings carry, so `?realmlist=logon.example.com` works.
+ *
+ * Precedence is URL, then what was saved, then the defaults. The URL wins for the session it is in;
+ * submitting the screen saves whatever the field then holds, so an override sticks only if the player
+ * logs in with it.
+ */
+export function applyRealmlistOverride(
+  settings: ConnectionSettings,
+  search: string,
+): ConnectionSettings {
+  const raw = new URLSearchParams(search).get('realmlist');
+  if (!raw) {
+    return settings;
+  }
+
+  const [host, port] = raw.split(':');
+  if (!host) {
+    return settings;
+  }
+
+  const parsed = Number(port);
+  return {
+    ...settings,
+    logonHost: host,
+    logonPort: Number.isFinite(parsed) && parsed > 0 ? parsed : settings.logonPort,
+  };
 }
 
 /** `<gateway>/tcp/<host>:<port>` -- the target is in the path, so no port needs provisioning. */
