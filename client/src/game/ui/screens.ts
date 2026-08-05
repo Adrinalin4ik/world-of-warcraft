@@ -276,7 +276,15 @@ export class GlueApp {
 
     // A `Backdrop` carries two sheets and is drawn as nine pieces by the renderer, so it resolves
     // both rather than one `sprite`.
-    if (widget.kind === 'backdrop' && widget.backdrop) {
+    //
+    // Keyed off the DEF, never off `kind`. In FrameXML a `Backdrop` is a PROPERTY of a frame, and a
+    // frame of any type may carry one -- the login screen's are on three `EditBox`es and one `Frame`.
+    // Gating this on `kind === 'backdrop'` meant all three edit boxes (kind `editbox`, carrying a
+    // Backdrop) fell through to the sprite path, where their `sprite` is null, so this returned null
+    // and the renderer skipped the widget: no border on screen and no warning anywhere, because
+    // nothing had failed to load. The `backdrop` WidgetKind is only "a frame that is nothing BUT its
+    // Backdrop" (the dialog); it is not what selects this path.
+    if (widget.backdrop) {
       const def = widget.backdrop;
       const background = def.bgSprite ? this.art.texture(def.bgSprite) : null;
       const edge = def.edgeSprite ? this.art.texture(def.edgeSprite) : null;
