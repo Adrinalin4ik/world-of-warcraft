@@ -29,6 +29,17 @@ export class GlueArt {
   private readonly defs = new Map<string, SpriteDef>();
   private readonly textures = new Map<string, THREE.Texture>();
   /**
+   * The path each loaded key was loaded FROM, so `load()` can tell a cached texture apart from a
+   * stale one.
+   *
+   * One `GlueArt` outlives every screen (`GlueApp` owns it), and two screens may use the same key
+   * name for different art -- `AccountLogin`'s Okay button is the `-Blue` sheet, `RealmList`'s is the
+   * plain one, and both are naturally called `button-up`. Keying the load only on "is this key
+   * loaded" meant whichever screen mounted FIRST won for the rest of the session, silently, with the
+   * later screen's `register` call recorded in `defs` and ignored here.
+   */
+  private readonly loadedFrom = new Map<string, string>();
+  /**
    * Bumped by `dispose()`. `load()` captures the value in flight and compares it after the
    * `TextureLoader` fetch resolves -- a mismatch means disposal ran while that fetch was still in
    * the air, so the reference it just acquired gets released instead of landing in a dead
@@ -74,13 +85,24 @@ export class GlueArt {
 
     await Promise.all(
       Array.from(this.defs.entries()).map(async ([key, def]) => {
+        const path = this.appendBLP(def.path);
         if (this.textures.has(key)) {
-          return;
+          if (this.loadedFrom.get(key) === path) {
+            return;
+          }
+          // Same key, different art: release what this key held before taking the new reference, or
+          // the old texture stays counted in `TextureLoader` with nothing left pointing at it.
+          const stale = this.textures.get(key);
+          if (stale) {
+            TextureLoader.unload(stale);
+          }
+          this.textures.delete(key);
+          this.loadedFrom.delete(key);
         }
         try {
           const wrap = def.tile ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
           const texture = await TextureLoader.load(
-            this.appendBLP(def.path),
+            path,
             wrap as any,
             wrap as any,
           );
@@ -93,6 +115,7 @@ export class GlueArt {
           }
 
           this.textures.set(key, texture);
+          this.loadedFrom.set(key, path);
         } catch (error) {
           console.warn(`glue art missing: ${key} (${def.path})`, error);
         }
@@ -118,6 +141,7 @@ export class GlueArt {
     this.generation++;
     this.textures.forEach((texture) => TextureLoader.unload(texture));
     this.textures.clear();
+    this.loadedFrom.clear();
     this.defs.clear();
   }
 }
