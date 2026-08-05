@@ -27,10 +27,7 @@ export function isOfflineRequested(search: string): boolean {
 
 /** A session that will never connect, carrying a stub character and a spawn spot. */
 export function createOfflineSession(): GameSession {
-  const session = new GameSession() as GameSession & {
-    offline: boolean;
-    offlineSpot: string;
-  };
+  const session = new GameSession();
 
   session.offline = true;
   session.offlineSpot = OFFLINE_SPOT_ID;

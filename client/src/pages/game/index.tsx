@@ -155,7 +155,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.game.world.run();
 
     // Offline debug entry: nothing will ever send us a login-verify, so place the character now.
-    if ((this.props.session as any).offline) {
+    if (this.props.session.offline) {
       const spot = offlineSpot();
       this.game.world.player.worldport(spot.zoneId, spot.coords);
       this.setState({ currentLocation: spot.id });

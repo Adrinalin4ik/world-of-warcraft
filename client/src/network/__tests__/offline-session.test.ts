@@ -29,22 +29,55 @@ describe('isOfflineRequested', () => {
 });
 
 describe('sessionForSearch', () => {
+  let webSocketSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    // The invariant this whole task exists to prove: nothing offline ever constructs a
+    // WebSocket. `Socket#connected` (`getter: this.socket && this.socket.readyState ===
+    // WebSocket.OPEN`) is useless as a witness for this -- a freshly-opened WebSocket sits in
+    // CONNECTING, never OPEN, so `.connected` reads falsy whether or not `connect()` ran. `.socket`
+    // itself (null until `connect()` assigns it) and a spy on the global constructor are the two
+    // things that actually catch a stray connect.
+    webSocketSpy = jest.spyOn(window, 'WebSocket' as any);
+  });
+
+  afterEach(() => {
+    webSocketSpy.mockRestore();
+  });
+
   it('opens no socket in offline mode', () => {
     const session = sessionForSearch('?offline=1');
 
-    expect((session.game as any).connected).toBeFalsy();
-    expect((session.auth as any).connected).toBeFalsy();
-    expect((session as any).offline).toBe(true);
+    expect((session.game as any).socket).toBeNull();
+    expect((session.auth as any).socket).toBeNull();
+    expect(session.offline).toBe(true);
+    expect(webSocketSpy).not.toHaveBeenCalled();
   });
 
-  it('seeds a stub character at a known spot', () => {
-    const session = sessionForSearch('?offline=1');
+  it('announces the offline run exactly once, and never for a plain session', () => {
+    const infoSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
 
-    expect((session as any).offlineSpot).toBe(OFFLINE_SPOT_ID);
-    expect(session.player).toBeTruthy();
+    sessionForSearch('?offline=1');
+    expect(infoSpy).toHaveBeenCalledTimes(1);
+    expect(infoSpy.mock.calls[0][0]).toContain('[offline]');
+
+    infoSpy.mockClear();
+    sessionForSearch('');
+    expect(infoSpy).not.toHaveBeenCalled();
+
+    infoSpy.mockRestore();
+  });
+
+  it('records the offline spawn spot, distinctly from a plain session', () => {
+    const session = sessionForSearch('?offline=1');
+    const plain = sessionForSearch('');
+
+    expect(session.offlineSpot).toBe(OFFLINE_SPOT_ID);
+    expect(plain.offlineSpot).toBeUndefined();
+    expect(plain.offline).toBeFalsy();
   });
 
   it('returns a plain session without the flag', () => {
-    expect((sessionForSearch('') as any).offline).toBeFalsy();
+    expect(sessionForSearch('').offline).toBeFalsy();
   });
 });

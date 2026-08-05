@@ -13,6 +13,12 @@ export class GameSession {
   public realms = new RealmsHandler(this);
   public game = new GameHandler(this);
   public characters = new CharacterHandler(this);
+  // Set by `offline-session.ts` for the networking-free `/game?offline=1` debug route. A session
+  // that never calls `auth.connect()`/`game.connect()` -- declared here (not bolted on with `as
+  // any`) so the next caller that reaches for a session sees the flag and can't accidentally wire
+  // one up to the network.
+  public offline?: boolean;
+  public offlineSpot?: string;
   // public auth = {
   //   host: '',
   //   authenticate(username: string, password: string) {},
