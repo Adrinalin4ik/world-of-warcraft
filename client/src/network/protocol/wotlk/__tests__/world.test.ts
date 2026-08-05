@@ -2,6 +2,8 @@ import { EventEmitter } from 'events';
 import { WotlkWorldTransport, createGameHandlerIo } from '../world';
 import { ProtocolRefusalError } from '../../types';
 import { CHAR_RESULT } from '../world-wire';
+import GamePacket from '../../../game/packet';
+import GameOpcode from '../../../game/opcode';
 
 /** A packet-IO stand-in: records sends, lets the test deliver bodies by opcode name. */
 function fakeIo() {
@@ -285,5 +287,32 @@ describe('createGameHandlerIo', () => {
     // reaching into `.srp.K` directly, so this also proves the key arrives in the shape (a plain
     // number[] behind the getter) the handler actually consumes.
     expect(seenBeforeConnect).toEqual({ account: 'TESTER', key: [1, 2, 3] });
+  });
+
+  /**
+   * A real server accepted the world handshake and this adapter then threw
+   * `Invalid number of bytes 0`, because the legacy `GameHandler` registers its own listener for
+   * SMSG_AUTH_RESPONSE, every listener is handed the SAME packet, and the two share one read cursor.
+   * The body was also being read through `new Uint8Array(byteBuffer)`, which yields nothing at all.
+   */
+  it('delivers the whole body even after another listener has already read the packet', () => {
+    const handler = fakeHandler();
+    const io = createGameHandlerIo(handler as any);
+
+    // An incoming packet: a 4-byte header, then the body.
+    const packet = new GamePacket(GameOpcode.SMSG_AUTH_RESPONSE, 4 + 3, false);
+    packet.index = packet.headerSize;
+    packet.write([0x0c, 0xab, 0xcd]);
+
+    const bodies: Uint8Array[] = [];
+    io.on('SMSG_AUTH_RESPONSE', (body) => bodies.push(body));
+    // Stands in for `GameHandler#handleAuthResponse`, which reads the result byte first and so leaves
+    // the cursor one byte into the body.
+    packet.index = packet.headerSize;
+    packet.readUnsignedByte();
+
+    handler.emit('packet:receive:SMSG_AUTH_RESPONSE', packet);
+
+    expect(Array.from(bodies[0])).toEqual([0x0c, 0xab, 0xcd]);
   });
 });

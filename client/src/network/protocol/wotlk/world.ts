@@ -281,7 +281,24 @@ export function createGameHandlerIo(handler: GameHandlerLike): WorldPacketIo {
     },
     on(opcodeName: string, listener: (body: Uint8Array) => void) {
       handler.on(`packet:receive:${opcodeName}`, (packet: any) => {
-        listener(new Uint8Array(packet.read(packet.available)));
+        // Rewind past the header before reading.
+        //
+        // The legacy `GameHandler` registers its OWN listeners for several of these opcodes, and every
+        // listener on the emitter is handed the SAME packet object -- so they share one read cursor.
+        // `GameHandler#handleAuthResponse` runs first and consumes the result byte, which left this
+        // adapter reading from wherever that stopped: an empty body for a one-byte packet, and
+        // `read(0)` throws `Invalid number of bytes 0` rather than yielding nothing. That crash landed
+        // immediately after a real server accepted the world handshake, and it is why the typed session
+        // never saw its own auth response.
+        //
+        // Rewinding makes this adapter independent of the other listeners and of the order they run in.
+        // And `read()` returns a NEW ByteBuffer wrapping the slice, not the bytes: a ByteBuffer is not
+        // array-like, so `new Uint8Array(slice)` yields a ZERO-LENGTH array without complaining. Every
+        // body this adapter delivered was therefore empty even before the crash above. `logon.ts:264-269`
+        // carries the same warning and reaches for `.buffer` for the same reason.
+        packet.index = packet.headerSize;
+        const available = packet.available;
+        listener(available > 0 ? new Uint8Array(packet.read(available).buffer) : new Uint8Array(0));
       });
     },
     onDisconnect(listener: (reason: string) => void) {
