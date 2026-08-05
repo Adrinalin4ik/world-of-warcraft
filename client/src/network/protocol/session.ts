@@ -89,6 +89,37 @@ export class ProtocolSession {
     return this.refusal_;
   }
 
+  /**
+   * Whether a transport failure has a retry queued.
+   *
+   * A screen needs this because a transport failure leaves NO refusal (the server never answered), so
+   * `Offline` with `refusal === null` is otherwise indistinguishable from "the player has not tried
+   * yet" -- and against an unreachable server that made the connecting dialog blink on the 3 s beat
+   * with nothing said.
+   */
+  get retrying(): boolean {
+    return this.retryTimer !== null;
+  }
+
+  /**
+   * The player dismissed whatever the screen was saying about a login attempt.
+   *
+   * Clearing the refusal is the point: a screen derives its dialog from this state every frame, so
+   * hiding the widget alone lasts exactly one frame and the dialog returns on the next. A queued retry
+   * goes too -- a dismissed "failed to connect" that kept retrying behind the player's back would put
+   * its own message straight back up -- and so do the credentials, since nothing may resubmit them
+   * after the player said no.
+   */
+  dismiss(): void {
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.credentials = null;
+    this.refusal_ = null;
+    this.notify();
+  }
+
   /** Subscribe to state; returns the unsubscribe. */
   on(listener: (state: SessionState) => void): () => void {
     this.listeners.add(listener);

@@ -17,13 +17,33 @@ export type LoginDialog =
   | { kind: 'connecting' }
   | { kind: 'error'; stringKey: string };
 
-export function loginDialog(stage: LoginStage, refusal: ProtocolRefusal | null): LoginDialog {
+/**
+ * The client's own wording for a connection that never got through -- verified present in the shipped
+ * `gluestrings.lua` ("Failed to connect.  Please be sure that your computer is currently connected to
+ * the internet, ..."). Not invented: `GlueStrings.get` falls back to the key, so a key that is not in
+ * the table ships as visible mojibake.
+ */
+export const CONNECT_FAILED_STRING_KEY = 'RESPONSE_FAILED_TO_CONNECT';
+
+export function loginDialog(
+  stage: LoginStage,
+  refusal: ProtocolRefusal | null,
+  /** `ProtocolSession#retrying` -- a transport failure with a retry queued. */
+  retrying = false,
+): LoginDialog {
   if (stage === LoginStage.Connecting || stage === LoginStage.Authenticating) {
     return { kind: 'connecting' };
   }
 
   if (refusal && stage === LoginStage.Offline) {
     return { kind: 'error', stringKey: refusal.stringKey };
+  }
+
+  // A transport failure carries no refusal -- the server never answered -- so without this the dialog
+  // would vanish between the 3 s retries and the player would watch it blink with nothing said. The
+  // likeliest first run for anyone pointing this client at their own server is exactly this case.
+  if (retrying && stage === LoginStage.Offline) {
+    return { kind: 'error', stringKey: CONNECT_FAILED_STRING_KEY };
   }
 
   return { kind: 'none' };

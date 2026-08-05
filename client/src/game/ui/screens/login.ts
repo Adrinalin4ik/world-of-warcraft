@@ -87,6 +87,8 @@ export class LoginScreen implements GlueScreen {
   private quitCaption: Widget | null = null;
   private dialog: Widget | null = null;
   private dialogText: Widget | null = null;
+  /** Last frame's dialog visibility, so focus moves on the EDGE rather than every frame. */
+  private dialogShown = false;
 
   mount(ctx: GlueContext): void {
     this.ctx = ctx;
@@ -272,10 +274,17 @@ export class LoginScreen implements GlueScreen {
     this.dialog.layer = 'DIALOG';
     this.dialog.sprite = 'dialog-background';
     this.dialog.mouseEnabled = true;
+    // Focusable so Escape can reach `onCancel` at all -- `input.ts` routes Escape to the FOCUSED
+    // widget, and a dialog that never takes focus has a dead cancel handler however it is written.
+    this.dialog.focusable = true;
     this.dialog.setSize(400, 140).setAnchors({ point: 'CENTER', x: 0, y: 0 });
     this.dialog.hide();
-    this.dialog.onCancel = () => this.dialog?.hide();
-    this.dialog.onClick = () => this.dialog?.hide();
+    // Dismissing has to clear the SESSION's state, not just hide the widget: `update()` re-derives the
+    // dialog from `protocol.stage`/`lastRefusal` every frame, so a hidden widget came straight back on
+    // the next one -- and this quad is `mouseEnabled` and covers the account box, so after "Unknown
+    // account" the player could not edit the account name at all.
+    this.dialog.onCancel = () => this.ctx?.protocol.dismiss();
+    this.dialog.onClick = () => this.ctx?.protocol.dismiss();
 
     this.dialogText = this.dialog.add(new Widget('fontstring', 'login-dialog-text'));
     this.dialogText.layer = 'DIALOG';
@@ -409,7 +418,7 @@ export class LoginScreen implements GlueScreen {
       this.quitButton.blend = this.quitButton.hovered ? 'ADD' : 'ALPHA';
     }
 
-    const dialog = loginDialog(ctx.protocol.stage, ctx.protocol.lastRefusal);
+    const dialog = loginDialog(ctx.protocol.stage, ctx.protocol.lastRefusal, ctx.protocol.retrying);
     if (this.dialog && this.dialogText) {
       if (dialog.kind === 'none') {
         this.dialog.hide();
@@ -419,6 +428,15 @@ export class LoginScreen implements GlueScreen {
           dialog.kind === 'connecting'
             ? ctx.strings.get('LOGIN_STATE_CONNECTING')
             : ctx.strings.get(dialog.stringKey);
+      }
+
+      // On the frame it appears, the dialog takes focus so Escape dismisses it; when it goes, focus
+      // returns to the box the player will type in next. Edge-triggered, or this would fight the
+      // player's own Tab and clicks every frame.
+      const shown = dialog.kind !== 'none';
+      if (shown !== this.dialogShown) {
+        this.dialogShown = shown;
+        ctx.input.setFocus(shown ? this.dialog : this.account);
       }
     }
   }
@@ -439,5 +457,6 @@ export class LoginScreen implements GlueScreen {
     this.quitCaption = null;
     this.dialog = null;
     this.dialogText = null;
+    this.dialogShown = false;
   }
 }
