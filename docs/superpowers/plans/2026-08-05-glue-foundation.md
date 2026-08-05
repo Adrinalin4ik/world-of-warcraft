@@ -3264,13 +3264,30 @@ git commit -m "feat(net): add the networking-free /game?offline=1 debug route"
 Everything below was raised by a review, judged not to block this work, and left for whoever
 builds on the foundation. Recorded here because the review workspace is scratch and git is not.
 
-**Needs a human's eyes.** No agent on this plan had a browser, so these were never seen working:
-the probe screen at `/glue` (real client art with ADD blending, button hover/press art, the dialog,
-edit-box typing/paste/Tab/selection, and the scale law from a short window to a tall one), the
-`UI_MainMenu` scene behind it (authored camera framing, looping sequence 0, its fires, the
-`accountlogin.xml` fog values, and a widescreen window revealing more stage), and `/game?offline=1`
-(character standing in Stormwind, no WebSocket in the Network tab). Everything else was verified:
-compile, 91 tests across the UI/parser/offline suites, and every route serving 200.
+**Verified in a real browser**, with Playwright driving the installed Chrome against the dev server
+(the probe scripts were scratch and are not committed). The probe screen at `/glue` draws real client
+art over the live `UI_MainMenu` scene: the button swaps hover and pressed art, releasing ON it opens
+the dialog while a press dragged OFF it does not, clicking the dialog dismisses it, the edit box
+takes typing capped at its authored 16 letters, a Shift+Home selection is replaced by the next
+keystroke, and Tab then Enter reaches the button. The scene renders through the model's authored
+camera with the `accountlogin.xml` fog — 21 draw calls, 8212 triangles. The scale law holds at window
+heights 911, 768 and 640 and at 2200x720: everything scales, nothing clips, a wider window reveals
+more stage. `/game?offline=1` reaches Stormwind at 60 FPS, logs its `[offline]` notice exactly once,
+raises zero page errors, and the only websocket on the page is the dev server's own HMR channel.
+
+Three real bugs surfaced only under a browser, all now fixed: UI quads were culled as back faces (the
+Y-down projection mirrors winding, and three.js compensates for an object's matrix but never for the
+camera's projection), the scene model stayed hidden (`M2` constructs itself invisible and in the
+world it is the visibility manager that shows each placement), and every font string was stretched to
+its widget rect because the measured size was returned flat while the renderer reads it nested. Each
+now has a test or a type that makes silent reintroduction impossible.
+
+**Still unverified.** Fidelity against the real client's login screen: the probe proves the mechanism,
+not the composition, and only the transcribed `AccountLogin` of spec 3 can be compared side by side.
+Separately, `Fonts\SKURRI.TTF` is rejected by Chrome's font sanitiser ("bad table directory",
+"Invalid font data in ArrayBuffer"). The file is served intact, so its table directory does not meet
+what Chrome enforces; FRIZQT and MORPHEUS load, and no glue screen asks for SKURRI yet, so this is
+logged rather than worked around.
 
 **Spec gaps left open, for spec 3 to close.** Text has no `maxWidth` and no wrapping — nothing in the
 glue screens needed it, and spec 7's race/class description paragraphs will (they also need the Lua
