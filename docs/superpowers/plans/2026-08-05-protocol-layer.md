@@ -2632,3 +2632,21 @@ git commit -m "feat(protocol): make the server address data rather than a build 
 - `/`, `/realms`, `/characters`, `/glue` and `/game?offline=1` behave exactly as before; no socket opens from constructing anything.
 - The provisional `CHAR_CREATE_*`/`CHAR_DELETE_*` codes are isolated in `world-wire.ts` and labelled as provisional, with the live-server check named as the thing that confirms them.
 - No server address, account name or port is baked into the build: `connection-settings.ts` holds them as data, and the gateway addresses its TCP target in the URL so any private server's realm ports work without provisioning a process per port.
+
+---
+
+## Follow-ups carried out of this plan
+
+Recorded here because the review workspace is scratch and git is not.
+
+**The one thing to fix in spec 3, first.** Threading the session key into the world handshake works by writing a stand-in `{ K }` onto `session.auth.srp`, because `AuthHandler.key` is a getter with no setter. That object is the SAME singleton the legacy login path uses, and it lacks `validate`/`feed`/`A`/`M1`. Harmless today — nothing in the UI reaches `session.protocol`, and the legacy path always reassigns a real `SRP` on its next challenge — but the two paths must never run against one `GameSession` at once. Spec 3 removes the legacy screens, which closes the window rather than widening it; do that before wiring the new login screen to `session.protocol`, not after.
+
+**Provisional data, isolated on purpose.** The `CHAR_CREATE_*`/`CHAR_DELETE_*` numeric codes in `wotlk/world-wire.ts` are the plan's one unverifiable table: the key names are verified in the client's own `gluestrings.lua`, the numbers exist nowhere in this repo. They sit in one file with a comment saying so, so a live server corrects them in a one-file edit. The same caveat applies to `WORLD_RESULT_STRINGS` beyond `0x0d`/`0x15`, which are the only two the existing client corroborates.
+
+**Not wired yet, and must not be read otherwise.** `protocol/connection-settings.ts` is complete and tested but inert: nothing calls `loadSettings()` or `gatewaySocketUrl()`, and the logon address still comes from `config.ts`. The client does not yet support an arbitrary private server — the support is built, the wiring is spec 3's.
+
+**Parked by scope decision.** `login()` called while a `chooseRealm` is in flight can clobber the fresh stage, because the rollback's epoch is bumped only on a world disconnect. Real, rare, deliberately not chased. Same for the `joined` variant.
+
+**Carryable debts.** One `disconnect` listener leaks per join attempt (bounded, one per login). `WorldTransport.onDisconnect` has no unsubscribe, so a session reconstructed over a shared transport would double-handle. `close()` rejecting a pending promise can surface as an unhandled rejection for a caller that never awaited. An empty four-character tag would encode as one byte and desync the challenge — unreachable with the current config values, inherited from `config.ts`'s own `raw()`.
+
+**A process note worth keeping.** Nine defects were found during this plan; eight were in the plan's own requirements rather than the implementations — two tests that would have certified broken encoders, a wrong assumption about `srp.validate`, a guard on the wrong side of an `await`, BigInt literals under an ES6 target, three state-machine transition defects, and a `ByteBuffer.read()` misuse that delivered empty messages. They were caught by per-task review, by cross-checking against the working client, and by implementers being told to stop and ask rather than adapt. The one Critical that reached the final review — the session key never reaching the handshake — hid because every world test drives a fake IO and nothing exercised the real handler. For several rounds verification asked only for `npm test`, which runs through babel and ignores types; six type errors accumulated unnoticed, one of them the empty-message bug. Type checking is part of verification, not an extra.
