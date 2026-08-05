@@ -300,4 +300,60 @@ describe('ProtocolSession', () => {
 
     expect(session.stage).toBe(LoginStage.RealmList);
   });
+
+  it('does not let a stale disconnect from an earlier connection resurrect RealmList after a refusal', async () => {
+    const world = fakeWorld();
+    const logon = fakeLogon();
+    const session = new ProtocolSession(logon, world);
+
+    // First login succeeds: a session key now stands.
+    await session.login('tester', 'secret');
+    expect(session.stage).toBe(LoginStage.RealmList);
+
+    // A fresh login attempt is refused.
+    logon.authenticate.mockRejectedValueOnce(
+      new ProtocolRefusalError({ code: 0x04, stringKey: 'AUTH_UNKNOWN_ACCOUNT' }),
+    );
+    await expect(session.login('tester', 'wrong')).rejects.toBeInstanceOf(ProtocolRefusalError);
+    expect(session.stage).toBe(LoginStage.Offline);
+
+    // The earlier connection's disconnect notification arrives late. It must not read the stale
+    // key and invite the player to pick a realm right after telling them the account was refused.
+    world.disconnect('stale connection closed');
+
+    expect(session.stage).toBe(LoginStage.Offline);
+  });
+
+  it('sets Offline on a disconnect with no session key standing', () => {
+    const world = fakeWorld();
+    const session = new ProtocolSession(fakeLogon(), world);
+
+    world.disconnect('closed before any login');
+
+    expect(session.stage).toBe(LoginStage.Offline);
+  });
+
+  it('lets a disconnect landing mid-chooseRealm survive that operation rejecting', async () => {
+    const world = fakeWorld();
+    const session = new ProtocolSession(fakeLogon(), world);
+    await session.login('tester', 'secret');
+    await session.chooseRealm(session.realms[0]);
+    expect(session.stage).toBe(LoginStage.CharacterList);
+
+    // The world drops WHILE the second join is in flight, then that join call itself rejects.
+    world.join.mockImplementationOnce(async () => {
+      world.disconnect('dropped mid-join');
+      throw new Error('join failed after the disconnect');
+    });
+
+    await expect(session.chooseRealm(session.realms[0])).rejects.toThrow(
+      /join failed after the disconnect/,
+    );
+
+    // The disconnect's RealmList must stand -- the rejection's rollback must not resurrect the
+    // CharacterList that was current before this attempt, since that state is now stale.
+    expect(session.stage).toBe(LoginStage.RealmList);
+    // And joined must still read false: a following mutation must still hit the guard.
+    await expect(session.deleteCharacter('0x1')).rejects.toThrow(/joining a realm/);
+  });
 });

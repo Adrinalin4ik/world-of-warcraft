@@ -51,6 +51,13 @@ export class ProtocolSession {
    */
   private joined = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Bumped only by `onWorldDisconnect`. `chooseRealm`/`enterWorld` capture it alongside the stage
+   * they are about to leave; if a disconnect lands (and bumps this) while one of those transport
+   * calls is still in flight, the disconnect's state is NEWER than whatever the operation was
+   * about to restore on rejection, so the rollback below must stand down instead of overwriting it.
+   */
+  private stageEpoch = 0;
   private listeners = new Set<(state: SessionState) => void>();
 
   constructor(
@@ -94,6 +101,9 @@ export class ProtocolSession {
       this.retryTimer = null;
     }
     this.joined = false;
+    // A new login supersedes whatever an earlier one obtained: a session key left standing here
+    // would let a stale disconnect from the old connection read it and fake a live realm list.
+    this.sessionKey = null;
     this.credentials = { account, password };
     this.refusal_ = null;
     return this.attemptLogin();
@@ -105,6 +115,7 @@ export class ProtocolSession {
     }
 
     const priorStage = this.stage_;
+    const epoch = this.stageEpoch;
     this.enter(LoginStage.JoiningRealm);
     try {
       await this.world.join(realm, this.credentials.account, this.sessionKey);
@@ -112,9 +123,14 @@ export class ProtocolSession {
       await this.refreshCharacters();
     } catch (error) {
       // Restore whatever stage the machine actually held before this attempt -- not a guessed
-      // "RealmList", which would be wrong for a realm SWITCH failing out of CharacterList.
-      this.stage_ = priorStage;
-      this.notify();
+      // "RealmList", which would be wrong for a realm SWITCH failing out of CharacterList. But only
+      // if nothing newer has happened since: a disconnect can land while `join`/the roster refresh
+      // is in flight and already move the stage on (bumping stageEpoch); that state is newer than
+      // ours and a stale rollback here must not overwrite it.
+      if (this.stageEpoch === epoch) {
+        this.stage_ = priorStage;
+        this.notify();
+      }
       throw error;
     }
   }
@@ -141,15 +157,18 @@ export class ProtocolSession {
     }
 
     const priorStage = this.stage_;
+    const epoch = this.stageEpoch;
     this.enter(LoginStage.EnteringWorld);
     try {
       await this.world.enterWorld(guid);
       this.enter(LoginStage.InWorld);
     } catch (error) {
-      // Same rollback as chooseRealm: restore what was, not a guessed "CharacterList" -- a second
-      // enterWorld failing while already InWorld must not report having left the world.
-      this.stage_ = priorStage;
-      this.notify();
+      // Same rollback as chooseRealm, with the same epoch guard: restore what was only if a
+      // disconnect has not landed (and moved the stage on) while this call was in flight.
+      if (this.stageEpoch === epoch) {
+        this.stage_ = priorStage;
+        this.notify();
+      }
       throw error;
     }
   }
@@ -188,6 +207,9 @@ export class ProtocolSession {
     if (error instanceof ProtocolRefusalError) {
       this.refusal_ = error.refusal;
       this.credentials = null;
+      // Nothing is left to join with: clear the key too, or a stale disconnect from the earlier
+      // connection could still read it and claim a realm list right after this refusal.
+      this.sessionKey = null;
       this.notify();
       return;
     }
@@ -213,6 +235,9 @@ export class ProtocolSession {
   private onWorldDisconnect(): void {
     this.joined = false;
     this.stage_ = this.sessionKey ? LoginStage.RealmList : LoginStage.Offline;
+    // Mark this as a newer state than any chooseRealm/enterWorld call already in flight, so its
+    // catch block's rollback (captured before this ran) knows to stand down rather than clobber it.
+    this.stageEpoch++;
     this.notify();
   }
 
