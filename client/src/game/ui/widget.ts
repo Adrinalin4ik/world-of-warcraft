@@ -8,6 +8,10 @@
  * `drawList` is the single ordered list of what is on screen. Both the renderer and the hit-test
  * consume it, which is what guarantees the thing you click is the thing you see.
  */
+// Type-only, and it has to stay that way: `backdrop.ts` imports `TexCoords` from here, so a value
+// import in either direction would close a runtime cycle. `isolatedModules` guarantees babel elides
+// this one.
+import type { BackdropDef } from './backdrop';
 import { Anchor, LayoutNode, Rect, resolveAnchors, Viewport } from './layout';
 
 /** Draw layers, back to front -- FrameXML's own ladder plus a DIALOG layer above everything. */
@@ -48,6 +52,18 @@ export interface FontSpec {
   /** Draw the client's 1px outline ring. */
   outline: boolean;
   align: 'LEFT' | 'CENTER' | 'RIGHT';
+  /**
+   * Wrap at this width, in logical units -- a FontString's authored `Size` x when the client lets it
+   * wrap (`GlueDialogText` is 450 wide, gluedialog.xml). OPT-IN: absent means the string is measured
+   * and rasterized as one line exactly as it always was, so no existing caption's metrics move.
+   */
+  wrapWidth?: number;
+  /**
+   * Extra leading between wrapped lines, in logical units -- a `Font`'s `spacing` attribute
+   * (`GlueFontNormalLarge` sets `spacing="2"`, gluefontstyles.xml:97). Only reachable through
+   * `wrapWidth`, since a single line has no gap to space.
+   */
+  spacing?: number;
 }
 
 let nextWidgetId = 0;
@@ -72,6 +88,20 @@ export class Widget {
   /** Sprite key resolved by `GlueArt`; null draws nothing. */
   sprite: string | null = null;
   texCoords: TexCoords | null = null;
+  /**
+   * A FrameXML `Backdrop`, for the `backdrop` kind: the renderer draws it as the nine pieces
+   * `backdrop.ts` computes rather than as one stretched quad. Sprite KEYS, not paths -- the paths
+   * stay in the art table.
+   */
+  backdrop: BackdropDef | null = null;
+  /**
+   * Draw a flat `vertexColor` quad with no art at all.
+   *
+   * OURS, not the client's: this exists for the edit-box caret, which the real client's engine draws
+   * with no XML to transcribe. Nothing else should need it -- every other quad on a glue screen is
+   * authored art.
+   */
+  solid = false;
   blend: Blend = 'ALPHA';
   /** Multiplied into the sprite, as `#rrggbb`. */
   vertexColor = '#ffffff';

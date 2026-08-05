@@ -83,6 +83,13 @@ export class GlueApp {
     this.canvas = canvas;
     this.session = session;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    // The gamma-passthrough lane this whole client runs on, the same line `pages/game/index.tsx`
+    // sets for the world renderer. BLP texels and the client's shaders are already sRGB-encoded, and
+    // r152 changed the default to `SRGBColorSpace`, which converts linear->sRGB on output and so
+    // brightens every already-encoded texel: the glue scene washed out to milky cyan, `-Blue` button
+    // art that is dark navy in the sheet drew pale, and the font rasters lost their contrast (which
+    // reads as blur). Nothing here is authored in linear space, so there is nothing to convert.
+    this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.ui = new GlueRenderer(this.renderer);
     this.input = new GlueInput(canvas);
@@ -137,6 +144,8 @@ export class GlueApp {
     this.ui.dispose();
     this.fonts.dispose();
     this.art.dispose();
+    this.solidTexture?.dispose();
+    this.solidTexture = null;
     this.renderer.dispose();
   }
 
@@ -235,6 +244,21 @@ export class GlueApp {
     this.ui.render(items, (item) => this.resolveSprite(item, screenScale(viewport.height)));
   };
 
+  /**
+   * A 1x1 white texel, for a `solid` widget (the edit-box caret). Lazy, shared, and disposed with
+   * the app -- it is not `GlueArt`'s because it is not client art: it is the minimum a
+   * `MeshBasicMaterial` needs in order to draw a flat `vertexColor` quad.
+   */
+  private solidTexture: THREE.DataTexture | null = null;
+
+  private solid(): THREE.DataTexture {
+    if (!this.solidTexture) {
+      this.solidTexture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+      this.solidTexture.needsUpdate = true;
+    }
+    return this.solidTexture;
+  }
+
   /** A widget's texture: a font string rasterizes, everything else comes from the art table. */
   private resolveSprite(item: DrawItem, scale: number): ResolvedSprite | null {
     const widget = item.widget;
@@ -243,6 +267,23 @@ export class GlueApp {
       // `displayText`, not `text`: password masking (`Widget#displayText`) lives here, at the one
       // place a fontstring's content actually turns into glyphs.
       return widget.font ? this.fonts.get(widget.displayText, widget.font, scale) : null;
+    }
+
+    // A flat colour quad -- the caret. `vertexColor` does the colouring; the texel is just a carrier.
+    if (widget.solid) {
+      return { texture: this.solid() };
+    }
+
+    // A `Backdrop` carries two sheets and is drawn as nine pieces by the renderer, so it resolves
+    // both rather than one `sprite`.
+    if (widget.kind === 'backdrop' && widget.backdrop) {
+      const def = widget.backdrop;
+      const background = def.bgSprite ? this.art.texture(def.bgSprite) : null;
+      const edge = def.edgeSprite ? this.art.texture(def.edgeSprite) : null;
+      if (!background && !edge) {
+        return null;
+      }
+      return { backdrop: { background, edge } };
     }
 
     const texture = widget.sprite ? this.art.texture(widget.sprite) : null;

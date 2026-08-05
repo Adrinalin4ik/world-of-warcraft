@@ -17,6 +17,12 @@ export interface SpriteDef {
   texCoords?: TexCoords;
   /** Authored size in logical units, when the art has one. */
   size?: [number, number];
+  /**
+   * Load with REPEAT wrapping instead of clamped, for a sheet the client TILES -- a `Backdrop`'s
+   * `bgFile` at its `TileSize`. Only safe on a whole-texture sprite, which is why it is opt-in per
+   * sprite rather than the default: see `load()`.
+   */
+  tile?: boolean;
 }
 
 export class GlueArt {
@@ -52,8 +58,13 @@ export class GlueArt {
   }
 
   /**
-   * Fetch every registered sprite. Clamped wrapping: glue art is stamped, never tiled, and
-   * REPEAT on a sub-rect bleeds neighbouring sprites in along the seams.
+   * Fetch every registered sprite. Clamped wrapping by default: most glue art is stamped, never
+   * tiled, and REPEAT on a sub-rect bleeds neighbouring sprites in along the seams.
+   *
+   * `def.tile` opts a sprite into REPEAT, for a `Backdrop`'s `bgFile` -- the client authors those
+   * with `tile="true"` and a `TileSize`, so they genuinely do repeat. The seam-bleeding hazard above
+   * does not apply to them: it is a hazard of REPEAT on a SUB-RECT, and a tiled background samples
+   * its whole sheet, so there is no neighbour to bleed in.
    *
    * A sprite that fails to load is logged and left absent -- `texture()` returns null and the
    * renderer skips that quad, so one missing BLP costs one sprite rather than the screen.
@@ -67,10 +78,11 @@ export class GlueArt {
           return;
         }
         try {
+          const wrap = def.tile ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
           const texture = await TextureLoader.load(
             this.appendBLP(def.path),
-            THREE.ClampToEdgeWrapping as any,
-            THREE.ClampToEdgeWrapping as any,
+            wrap as any,
+            wrap as any,
           );
 
           if (generation !== this.generation) {
