@@ -144,6 +144,9 @@ export class GlueApp {
     // routes, and the glue app is torn down before the game screen mounts. This is the glue side's
     // own advance site: the scene view arms instances against `worldClock.ms` and would otherwise
     // sample a permanently frozen clock, since `World#animate` never runs while a glue screen is up.
+    // NOTE for whoever wires the `InWorld` transition: that non-concurrency is true today but
+    // UNENFORCED -- nothing stops both loops running at once. Do not start `World#animate` before
+    // this loop has stopped (`GlueApp#stop`), or the clock will be double-advanced.
     worldClock.advance(dt);
 
     if (this.pending) {

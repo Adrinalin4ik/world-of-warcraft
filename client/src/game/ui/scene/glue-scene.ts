@@ -168,10 +168,26 @@ export class GlueSceneView {
       return;
     }
 
+    // Read the clock ONCE and reuse it for both channels below, so bone and material sampling
+    // cannot land on two different instants within the same frame.
     const clock = worldClock.ms;
 
     if (this.model.instanceAnim) {
       this.model.evaluateMaterialChannels(clock);
+      // `applyPose()` only copies `instanceAnim.localTRS` into the three.js bone hierarchy -- it
+      // samples nothing. `localTRS` is zero-filled at buffer allocation and written ONLY by
+      // `solveBones`, so without this call every bone would sit at its bind-pose offset forever
+      // regardless of how far the clock has moved. This is deliberately NOT `poseGatedInstance`
+      // (`pose-gate.ts`): that gate applies distance decimation and a bone budget, both
+      // world-population concerns for throttling many doodads/units against a moving camera. The
+      // glue scene is exactly one fullscreen model that must never be decimated and has no
+      // meaningful "distance from camera" in the world-population sense, so it solves and applies
+      // unconditionally instead of going through the gate built for a population it isn't part of.
+      // It also does NOT feed `animCounters`: that singleton is a per-frame perf readout reset once
+      // per frame by `World#animate` (see `counters.ts`), which never runs while a glue screen is
+      // up -- an increment here would accumulate forever unreset instead of reporting a per-frame
+      // figure, polluting the very HUD it exists to keep honest.
+      this.model.instanceAnim.solveBones(clock);
       this.model.applyPose();
     }
     this.model.updateMatrixWorld(true);
