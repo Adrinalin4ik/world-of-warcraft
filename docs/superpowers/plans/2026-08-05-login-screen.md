@@ -831,3 +831,32 @@ git commit -m "feat(login): serve the login screen at / and retire the placehold
 - `/?realmlist=host:port` points the screen at another server without typing, and `?realmlist=host`
   alone keeps the current port.
 - `npx tsc --noEmit` is at zero and the full suite passes, with only the small test files this plan adds.
+
+---
+
+## Follow-ups carried out of this plan
+
+Recorded here because the plan's own workspace is scratch and gets deleted. All are known and
+disclosed in the code where they bite; none block the done criteria above.
+
+- **The edit boxes' border is not the authored art.** The client draws a 9-slice `Backdrop`:
+  background `Interface\Tooltips\UI-Tooltip-Background` tiled at 16, edge
+  `Interface\Glues\Common\Glue-Tooltip-Border` at edgeSize 16, background insets left 10 right 5 top 4
+  bottom 9 (`accountlogin.xml:190-201`). The widget layer has a `backdrop` kind but no 9-slice
+  renderer, so a single stretched `Common-Input-Border` quad stands in — art the client does not use
+  on this screen at all. The stand-in is commented as such in `login-art.ts`. Doing it properly is a
+  widget-layer feature, not login layout, and every later glue screen wants it.
+- **The Northrend main-menu stage renders on a flat cyan sky.** Not a missing sky feature: the vanilla
+  stage (`/?expansion=0`) renders its own sky correctly, so this is specific to that scene. Predates
+  this plan; much more visible now that the screen is the app's front door.
+- **The connecting dialog cannot be cancelled.** `ProtocolSession#dismiss` clears the refusal and the
+  queued retry but does not touch the stage, and there is no way to abort a socket mid-attempt. Until
+  the session exposes one, the dialog simply is not dismissable while an attempt is in flight; it
+  clears itself when the attempt resolves. Explained at `LoginScreen#dismissDialog`.
+- **`login-state.ts` and `screens.ts` import each other.** `clientStateForStage` needs `ClientState`
+  and `GlueApp` needs the mapping. Safe today only because the enum is read inside a function body.
+  Whoever adds the next state should move `ClientState` into its own module.
+- **`FontSpec` has no shadow channel.** The client draws a 1,-1 black shadow under `GlueFontNormal`
+  and its small variants; only the outline ring is reproduced. Noted at the `LABEL` declaration.
+- **`AuthorizationStatus` and `SocketConnestionStatus`** (`src/network/enums/index.ts`) lost their last
+  consumers when `GameSession.authenticate()`/`connect()` went. Dead exports, safe to delete.
