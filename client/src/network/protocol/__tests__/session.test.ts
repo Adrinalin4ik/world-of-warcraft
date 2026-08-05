@@ -155,4 +155,88 @@ describe('ProtocolSession', () => {
     // Unsubscribed: nothing after the realm choice.
     expect(states.some((state) => state.stage === LoginStage.CharacterList)).toBe(false);
   });
+
+  it('rejects createCharacter before a realm is joined, naming the missing step', async () => {
+    const session = new ProtocolSession(fakeLogon(), fakeWorld());
+    await session.login('tester', 'secret');
+
+    await expect(
+      session.createCharacter({
+        name: 'Newbie',
+        race: 1,
+        class: 1,
+        gender: 0,
+        appearance: { skin: 0, face: 0, hairStyle: 0, hairColor: 0, facialHair: 0 },
+        outfitId: 0,
+      }),
+    ).rejects.toThrow(/joining a realm/);
+  });
+
+  it('rejects deleteCharacter before a realm is joined, naming the missing step', async () => {
+    const session = new ProtocolSession(fakeLogon(), fakeWorld());
+    await session.login('tester', 'secret');
+
+    await expect(session.deleteCharacter('0x1')).rejects.toThrow(/joining a realm/);
+  });
+
+  it('rejects enterWorld before a realm is joined, naming the missing step', async () => {
+    const session = new ProtocolSession(fakeLogon(), fakeWorld());
+    await session.login('tester', 'secret');
+
+    await expect(session.enterWorld('0x1')).rejects.toThrow(/joining a realm/);
+  });
+
+  it('leaves the stage at RealmList when the realm join is refused', async () => {
+    const world = fakeWorld();
+    world.join.mockRejectedValueOnce(new Error('join refused'));
+    const session = new ProtocolSession(fakeLogon(), world);
+    await session.login('tester', 'secret');
+
+    await expect(session.chooseRealm(session.realms[0])).rejects.toThrow(/join refused/);
+
+    expect(session.stage).toBe(LoginStage.RealmList);
+  });
+
+  it('leaves the stage at CharacterList when entering the world is refused', async () => {
+    const world = fakeWorld();
+    world.enterWorld.mockRejectedValueOnce(new Error('entry refused'));
+    const session = new ProtocolSession(fakeLogon(), world);
+    await session.login('tester', 'secret');
+    await session.chooseRealm(session.realms[0]);
+
+    await expect(session.enterWorld('0x1')).rejects.toThrow(/entry refused/);
+
+    expect(session.stage).toBe(LoginStage.CharacterList);
+  });
+
+  it('does not let a caller mutate the roster by mutating the returned array', async () => {
+    const session = new ProtocolSession(fakeLogon(), fakeWorld());
+    await session.login('tester', 'secret');
+
+    const realms = session.realms;
+    realms.push({ ...realms[0], id: 999 });
+
+    expect(session.realms).toHaveLength(1);
+  });
+
+  it('replaces a pending retry rather than stacking with it when login is called again', async () => {
+    jest.useFakeTimers();
+    const logon = fakeLogon();
+    logon.authenticate.mockRejectedValueOnce(new Error('socket closed'));
+    const session = new ProtocolSession(logon, fakeWorld());
+
+    await expect(session.login('tester', 'secret')).rejects.toThrow(/socket closed/);
+    expect(logon.authenticate).toHaveBeenCalledTimes(1);
+
+    // Manually retry before the scheduled retry fires.
+    await session.login('tester', 'secret');
+    expect(logon.authenticate).toHaveBeenCalledTimes(2);
+
+    // The stale timer must not survive to fire a third attempt.
+    jest.advanceTimersByTime(RETRY_DELAY_MS * 10);
+    await Promise.resolve();
+    expect(logon.authenticate).toHaveBeenCalledTimes(2);
+
+    jest.useRealTimers();
+  });
 });

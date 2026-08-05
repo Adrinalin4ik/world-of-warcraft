@@ -44,6 +44,8 @@ export class ProtocolSession {
 
   private credentials: { account: string; password: string } | null = null;
   private sessionKey: Uint8Array | null = null;
+  /** Whether `chooseRealm` has successfully joined a realm on the current login. */
+  private joined = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Set<(state: SessionState) => void>();
 
@@ -62,11 +64,11 @@ export class ProtocolSession {
   }
 
   get realms(): RealmInfo[] {
-    return this.realms_;
+    return [...this.realms_];
   }
 
   get characters(): CharacterRecord[] {
-    return this.characters_;
+    return [...this.characters_];
   }
 
   get lastRefusal(): ProtocolRefusal | null {
@@ -80,6 +82,13 @@ export class ProtocolSession {
   }
 
   async login(account: string, password: string): Promise<void> {
+    // A fresh login invalidates whatever a previous login joined, and a manual retry here must
+    // replace any retry the last failure scheduled -- not stack behind it.
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.joined = false;
     this.credentials = { account, password };
     this.refusal_ = null;
     return this.attemptLogin();
@@ -91,24 +100,50 @@ export class ProtocolSession {
     }
 
     this.enter(LoginStage.JoiningRealm);
-    await this.world.join(realm, this.credentials.account, this.sessionKey);
-    await this.refreshCharacters();
+    try {
+      await this.world.join(realm, this.credentials.account, this.sessionKey);
+      this.joined = true;
+      await this.refreshCharacters();
+    } catch (error) {
+      // The join (or the roster refresh right after it) failed: the machine never left RealmList
+      // in any way a caller can observe, so put the stage back rather than parking it here forever.
+      this.stage_ = LoginStage.RealmList;
+      this.notify();
+      throw error;
+    }
   }
 
   async createCharacter(request: CharCreateRequest): Promise<void> {
+    if (!this.joined) {
+      throw new Error('cannot create a character before joining a realm');
+    }
     await this.world.createCharacter(request);
     await this.refreshCharacters();
   }
 
   async deleteCharacter(guid: string): Promise<void> {
+    if (!this.joined) {
+      throw new Error('cannot delete a character before joining a realm');
+    }
     await this.world.deleteCharacter(guid);
     await this.refreshCharacters();
   }
 
   async enterWorld(guid: string): Promise<void> {
+    if (!this.joined) {
+      throw new Error('cannot enter the world before joining a realm');
+    }
+
     this.enter(LoginStage.EnteringWorld);
-    await this.world.enterWorld(guid);
-    this.enter(LoginStage.InWorld);
+    try {
+      await this.world.enterWorld(guid);
+      this.enter(LoginStage.InWorld);
+    } catch (error) {
+      // Same rollback as chooseRealm: a refused entry must not park the machine at EnteringWorld.
+      this.stage_ = LoginStage.CharacterList;
+      this.notify();
+      throw error;
+    }
   }
 
   private async attemptLogin(): Promise<void> {
@@ -173,8 +208,8 @@ export class ProtocolSession {
   private notify(): void {
     const state: SessionState = {
       stage: this.stage_,
-      realms: this.realms_,
-      characters: this.characters_,
+      realms: [...this.realms_],
+      characters: [...this.characters_],
       refusal: this.refusal_,
     };
     this.listeners.forEach((listener) => listener(state));
