@@ -69,6 +69,12 @@ export class GlueApp {
   private pending: ClientState | null = null;
   /** The session subscription's unsubscribe, held so `stop()` can drop it. */
   private unsubscribeSession: (() => void) | null = null;
+  /**
+   * Set by `stop()`. `start()` awaits font and string loading, so a route change during that await
+   * runs `stop()` first and `start()` resumes afterwards into a torn-down app -- subscribing a
+   * listener nothing will ever drop and arming a frame loop nothing will ever cancel.
+   */
+  private stopped = false;
 
   private frame = 0;
   private lastTime = 0;
@@ -95,6 +101,10 @@ export class GlueApp {
     // Fonts and strings first: a screen that mounts before them draws unreadable labels.
     await Promise.all([loadGlueFonts(), GlueStrings.load().then((s) => (this.strings = s))]);
 
+    if (this.stopped) {
+      return;
+    }
+
     this.enter(initial);
 
     // THE path past the login screen. Nothing else advances this machine: the session is the only
@@ -109,6 +119,7 @@ export class GlueApp {
   }
 
   stop(): void {
+    this.stopped = true;
     cancelAnimationFrame(this.frame);
     window.removeEventListener('resize', this.resize);
     this.input.detach();
@@ -144,6 +155,12 @@ export class GlueApp {
   private onSessionState = (state: SessionState): void => {
     const target = clientStateForStage(state.stage);
     if (target === (this.pending ?? this.current?.state)) {
+      return;
+    }
+    // A state with no screen registered has nowhere to go, and `enter` leaves `current` where it was.
+    // Queueing it anyway would re-queue on every later emission and warn once per emission, since the
+    // guard above would never see it as current.
+    if (!this.screens.has(target)) {
       return;
     }
     this.pending = target;

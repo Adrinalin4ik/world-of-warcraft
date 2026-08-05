@@ -16,7 +16,19 @@ function fakeStorage(seed: Record<string, string> = {}) {
 
 describe('loadSettings', () => {
   it('falls back to the defaults when nothing was saved', () => {
-    expect(loadSettings(fakeStorage())).toEqual(DEFAULT_SETTINGS);
+    // `logonHost` is asserted separately below: it defaults to the SERVED host, not to
+    // `DEFAULT_SETTINGS.logonHost`, and under jsdom those two happen to be the same string -- so
+    // comparing the whole object would pass by coincidence and stop testing the fallback it names.
+    expect(loadSettings(fakeStorage())).toEqual({
+      ...DEFAULT_SETTINGS,
+      logonHost: window.location.hostname,
+    });
+  });
+
+  it('defaults the logon host to the host the app was served from', () => {
+    // The WebSocket-to-TCP proxies listen wherever the app is served, so a literal `localhost` would
+    // send anyone running this off their own machine to the wrong place.
+    expect(loadSettings(fakeStorage()).logonHost).toBe(window.location.hostname);
   });
 
   it('reads what was saved', () => {

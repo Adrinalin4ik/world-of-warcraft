@@ -90,6 +90,8 @@ export class LoginScreen implements GlueScreen {
   private dialogText: Widget | null = null;
   /** Last frame's dialog visibility, so focus moves on the EDGE rather than every frame. */
   private dialogShown = false;
+  /** Whether the dialog currently showing is one the player can dismiss -- see `dismissDialog`. */
+  private dialogDismissable = false;
 
   mount(ctx: GlueContext): void {
     this.ctx = ctx;
@@ -286,7 +288,10 @@ export class LoginScreen implements GlueScreen {
 
     this.quitCaption = this.quitButton.add(new Widget('fontstring', 'login-quit-text'));
     this.quitCaption.layer = 'OVERLAY';
-    this.quitCaption.font = BUTTON_CAPTION;
+    // The SMALL template's caption font: `GlueButtonSmallTemplateBlue` authors
+    // `NormalFont style="GlueFontNormalSmall"` (gluebuttons.xml:121), where the full-size
+    // `GlueButtonTemplateBlue` authors `GlueFontNormal`. Same colour, smaller face.
+    this.quitCaption.font = { ...LABEL_SMALL, align: 'CENTER' };
     this.quitCaption.text = ctx.strings.get('QUIT');
     this.quitCaption.setSize(150, 16).setAnchors({
       point: 'CENTER',
@@ -298,17 +303,17 @@ export class LoginScreen implements GlueScreen {
 
     // These three are all on ARTWORK and the disclaimer sits INSIDE the logo's 100x100 box, so the
     // order they are added in is the order they draw in. The client's ARTWORK layer lists the logo
-    // first, then the disclaimer, then the version (accountlogin.xml:96-127) -- built the other way
+    // first, then the disclaimer, then the version (accountlogin.xml:98-127) -- built the other way
     // round, the logo covers the disclaimer.
 
-    // Blizzard logo: 100x100 at BOTTOM +8 (accountlogin.xml:96-107) -- bottom-CENTER, not bottom-right,
+    // Blizzard logo: 100x100 at BOTTOM +8 (accountlogin.xml:98-109) -- bottom-CENTER, not bottom-right,
     // and much smaller than this screen first drew it.
     const blizzard = root.add(new Widget('texture', 'login-blizzard'));
     blizzard.layer = 'ARTWORK';
     blizzard.sprite = 'blizzard-logo';
     blizzard.setSize(100, 100).setAnchors({ point: 'BOTTOM', x: 0, y: 8 });
 
-    // `BLIZZ_DISCLAIMER` at BOTTOM y=10 (accountlogin.xml:108-116). The authored FontString carries no
+    // `BLIZZ_DISCLAIMER` at BOTTOM y=10 (accountlogin.xml:110-118). The authored FontString carries no
     // Size and sizes itself to its text; a widget here needs a rect, so it gets a wide centered one --
     // the renderer draws the string at its measured size inside it rather than stretching to fill.
     const disclaimer = root.add(new Widget('fontstring', 'login-disclaimer'));
@@ -318,7 +323,7 @@ export class LoginScreen implements GlueScreen {
     disclaimer.setSize(600, 14).setAnchors({ point: 'BOTTOM', x: 0, y: 10 });
 
     // `AccountLoginVersion`: BOTTOMLEFT x=0 y=10, GlueFontNormalSmall justifyH="LEFT"
-    // (accountlogin.xml:117-127). The client fills the text from `GetBuildInfo()`; there is no build
+    // (accountlogin.xml:119-127). The client fills the text from `GetBuildInfo()`; there is no build
     // info to read here, so the WORDING is OURS -- a literal, not an invented GlueStrings key.
     const version = root.add(new Widget('fontstring', 'login-version'));
     version.layer = 'ARTWORK';
@@ -340,8 +345,12 @@ export class LoginScreen implements GlueScreen {
     // dialog from `protocol.stage`/`lastRefusal` every frame, so a hidden widget came straight back on
     // the next one -- and this quad is `mouseEnabled` and covers the account box, so after "Unknown
     // account" the player could not edit the account name at all.
-    this.dialog.onCancel = () => this.ctx?.protocol.dismiss();
-    this.dialog.onClick = () => this.ctx?.protocol.dismiss();
+    // Only the ERROR dialog dismisses. While an attempt is in flight the stage itself says
+    // `Connecting`, which `dismiss()` does not change -- so dismissing then would clear the player's
+    // credentials while the dialog stayed up, looking like a dead click. `dismissable` is set from the
+    // dialog kind in `update()`, which is the one place that knows which dialog is showing.
+    this.dialog.onCancel = () => this.dismissDialog();
+    this.dialog.onClick = () => this.dismissDialog();
 
     this.dialogText = this.dialog.add(new Widget('fontstring', 'login-dialog-text'));
     this.dialogText.layer = 'DIALOG';
@@ -466,6 +475,22 @@ export class LoginScreen implements GlueScreen {
     void ctx.protocol.login(account, password, endpoint).catch(() => undefined);
   }
 
+  /**
+   * Dismiss the dialog, when the one showing is dismissable at all.
+   *
+   * `ProtocolSession#dismiss` clears the refusal and the queued retry, which is what makes the error
+   * dialog go away and stay away. It does NOT change the stage, so calling it while an attempt is in
+   * flight would drop the player's credentials with the `Connecting` dialog still up -- a click that
+   * silently breaks the attempt it appears to cancel. Cancelling an in-flight attempt would mean
+   * aborting the socket, which the session does not expose; until it does, the connecting dialog is
+   * simply not dismissable, and it clears itself the moment the attempt resolves either way.
+   */
+  private dismissDialog(): void {
+    if (this.dialogDismissable) {
+      this.ctx?.protocol.dismiss();
+    }
+  }
+
   private setShown(widget: Widget | null, shown: boolean): void {
     if (!widget) {
       return;
@@ -532,6 +557,7 @@ export class LoginScreen implements GlueScreen {
     }
 
     const dialog = loginDialog(ctx.protocol.stage, ctx.protocol.lastRefusal, ctx.protocol.retrying);
+    this.dialogDismissable = dialog.kind === 'error';
     if (this.dialog && this.dialogText) {
       if (dialog.kind === 'none') {
         this.dialog.hide();

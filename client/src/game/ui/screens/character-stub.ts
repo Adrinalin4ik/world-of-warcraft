@@ -9,7 +9,9 @@ import { FontSpec, Widget } from '../widget';
 const ROW: FontSpec = {
   family: 'FRIZQT',
   size: 14,
-  color: '#ffd100',
+  // `GlueFontNormal`'s colour (gluefontstyles.xml:14-22), not FrameXML's
+  // `NORMAL_FONT_COLOR` -- the glue layer has its own table.
+  color: '#ffc700',
   outline: true,
   align: 'CENTER',
 };
