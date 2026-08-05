@@ -141,6 +141,42 @@ export const Camera = new r.Struct({
   roll: new AnimationBlock(SplineKeyFloat)
 });
 
+/**
+ * An authored M2 light. `type` 0 is directional, 1 is an omnidirectional point light with the
+ * engine's FIXED falloff `1 / (0.7d + 0.03d^2)` -- the authored attenuation range is a cull hint,
+ * not the curve (benilla `models/records.rs`, byte-verified).
+ *
+ * For 3.3.5 glue scenes only the POINT lights matter: `glueparent.lua:50` states the directional
+ * rig moved into the Lua `RaceLights` table for this build ("the models no longer contain
+ * directional lights"), and `:361` confirms the engine "pulls the default point lights from the
+ * models".
+ */
+export const Light = new r.Struct({
+  type: r.uint16le,
+  bone: r.int16le,
+  position: float32array3,
+  ambientColor: new AnimationBlock(float32array3),
+  ambientIntensity: new AnimationBlock(r.floatle),
+  diffuseColor: new AnimationBlock(float32array3),
+  diffuseIntensity: new AnimationBlock(r.floatle),
+  attenuationStart: new AnimationBlock(r.floatle),
+  attenuationEnd: new AnimationBlock(r.floatle),
+  visibility: new AnimationBlock(r.uint8)
+});
+
+/**
+ * An attachment point. Records are addressed by ARRAY INDEX here; `attachmentLookups` maps an
+ * attachment ID to that index. The glue screens' character stands on attachment **id 0** -- the
+ * stage spot, on camera 0's axis in every UI_* scene (benilla byte-verified id 0, not 1).
+ */
+export const Attachment = new r.Struct({
+  id: r.uint32le,
+  bone: r.uint16le,
+  unknown: r.uint16le,
+  position: float32array3,
+  animateAttached: new AnimationBlock(r.uint8)
+});
+
 export default new r.Struct({
   signature: new r.String(4),
   version: r.uint32le,
@@ -185,10 +221,10 @@ export default new r.Struct({
   boundingTriangles: new Nofs(r.uint16le),
   boundingVertices: new Nofs(Vec3Float),
   boundingNormals: new Nofs(Vec3Float),
-  attachments: new Nofs(),
-  attachmentLookups: new Nofs(),
+  attachments: new Nofs(Attachment),
+  attachmentLookups: new Nofs(r.int16le),
   events: new Nofs(),
-  lights: new Nofs(),
+  lights: new Nofs(Light),
   cameras: new Nofs(Camera),
   cameraLookups: new Nofs(r.int16le),
   ribbonEmitters: new Nofs(Ribbon),
