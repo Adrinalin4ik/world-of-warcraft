@@ -5,6 +5,7 @@ import { GameSession } from './network/session';
 import Auth from './pages/auth/auth';
 import CharactersScreen from './pages/characters';
 import GameScreen from './pages/game';
+import GlueHost from './pages/glue';
 import RealmsScreen from './pages/realms/realms';
 
 
@@ -35,6 +36,12 @@ const App: React.FC = () => {
     {
       path: "/game",
       element: <GameScreen session={gameSession} />
+    },
+    {
+      // The glue app -- the in-canvas pre-world screens. Spec 3 moves this onto "/" when the
+      // transcribed AccountLogin replaces the probe screen.
+      path: "/glue",
+      element: <GlueHost />
     },
   ], {
     // Serve the same route table from a sub-path when the app is not at the domain root.
