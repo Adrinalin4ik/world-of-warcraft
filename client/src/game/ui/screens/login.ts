@@ -287,6 +287,11 @@ export class LoginScreen implements GlueScreen {
       x: 0,
       y: 0,
     });
+
+    // `AccountLogin_OnShow` (accountlogin.lua:67-72): the account box when there is no saved name, the
+    // PASSWORD box when a name was restored -- the only field left to fill in. Safe only now that Enter
+    // and a pointer click are separate hooks; before that, focusing a box armed the submit.
+    ctx.input.setFocus(settings.savedAccount ? this.password : this.account);
   }
 
   /** One edit box plus its text, at an authored size, `BOTTOM` offset and letter cap. */
@@ -312,7 +317,9 @@ export class LoginScreen implements GlueScreen {
     box.focusable = true;
     box.maxLetters = maxLetters;
     box.setSize(width, height).setAnchors({ point: 'BOTTOM', x: 0, y: bottomOffset });
-    box.onClick = () => this.submit(); // Enter in a box submits, as the client does
+    // `OnEnterPressed` -> `AccountLogin_Login()` (accountlogin.xml). `onSubmit`, NOT `onClick`: the
+    // pointer handler must only take focus, or clicking back into a box to fix a typo submits the typo.
+    box.onSubmit = () => this.submit();
 
     const text = box.add(new Widget('fontstring', textId));
     text.layer = 'OVERLAY';

@@ -160,7 +160,12 @@ export class GlueInput {
 
     if (event.key === 'Enter') {
       if (target.state !== 'disabled') {
-        target.onClick?.();
+        // `onSubmit` wins where a widget has one: an edit box's Enter (FrameXML `OnEnterPressed`) is
+        // NOT its pointer click, which only takes focus. Everything without one -- every button, every
+        // list row -- keeps activating on Enter through `onClick`, where keyboard and pointer
+        // activation genuinely mean the same thing.
+        const activate = target.onSubmit ?? target.onClick;
+        activate?.();
       }
       event.preventDefault();
       return;

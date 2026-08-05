@@ -93,8 +93,20 @@ export class Widget {
   /** Selection anchor. Equal to `caret` when there is no selection (the common case). */
   selectionAnchor = 0;
 
-  /** Invoked by Enter (or pointer click on non-checkbutton). */
+  /**
+   * Invoked by a pointer click, and by Enter on a widget that has no `onSubmit` of its own.
+   *
+   * For a button the two are the same act, so the fallback is correct there. For an EDIT BOX they are
+   * not: clicking into a box takes focus (which is what the client does), and it was this field
+   * carrying both meanings that made clicking back into the account box to fix a typo submit the typo.
+   * A widget where Enter means something a click does not uses `onSubmit`.
+   */
   onClick: (() => void) | null = null;
+  /**
+   * Invoked by Enter, in preference to `onClick`. FrameXML's `OnEnterPressed` -- the login screen's
+   * edit boxes submit the form on Enter, and a pointer click on them must not.
+   */
+  onSubmit: (() => void) | null = null;
   /** Invoked by Escape; if absent, Escape does nothing (no fallback to onClick). */
   onCancel: (() => void) | null = null;
 
