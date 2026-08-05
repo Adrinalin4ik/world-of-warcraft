@@ -59,6 +59,8 @@ export class ProtocolSession {
    */
   private stageEpoch = 0;
   private listeners = new Set<(state: SessionState) => void>();
+  /** Set by `stop()`. Once true, a queued retry from `onLoginFailure` is a no-op. */
+  private stopped = false;
 
   constructor(
     logon: LogonTransport,
@@ -219,9 +221,26 @@ export class ProtocolSession {
     if (this.credentials && this.retryTimer === null) {
       this.retryTimer = setTimeout(() => {
         this.retryTimer = null;
+        if (this.stopped) {
+          return;
+        }
         // Fire and forget: a failed retry schedules the next one through this same path.
         void this.attemptLogin().catch(() => undefined);
       }, this.retryDelayMs);
+    }
+  }
+
+  /**
+   * Tears down what nothing outside the machine can otherwise stop: a pending 3 s retry timer and
+   * the world transport's disconnect subscription's effect. An owner going away mid-retry (a screen
+   * unmounting, `GlueApp#stop`) must not leave a timer firing into a dead object. There is nothing
+   * pending at this level to reject -- callers of `login`/`chooseRealm`/etc. own their own promises.
+   */
+  stop(): void {
+    this.stopped = true;
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
     }
   }
 
@@ -233,6 +252,9 @@ export class ProtocolSession {
    * log back in from scratch).
    */
   private onWorldDisconnect(): void {
+    if (this.stopped) {
+      return;
+    }
     this.joined = false;
     this.stage_ = this.sessionKey ? LoginStage.RealmList : LoginStage.Offline;
     // Mark this as a newer state than any chooseRealm/enterWorld call already in flight, so its

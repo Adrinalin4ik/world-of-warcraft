@@ -11,6 +11,7 @@ import * as THREE from 'three';
 
 import { worldClock } from '../pipeline/m2/anim/world-clock';
 import { GameSession } from '../../network/session';
+import { ProtocolSession } from '../../network/protocol/session';
 import { GlueArt } from './art';
 import { GlueInput } from './input';
 import { GlueRenderer, ResolvedSprite } from './renderer';
@@ -37,6 +38,8 @@ export interface GlueContext {
   /** The session facade (§4.7) -- the same `GameSession` every other route is handed. Nothing in
    * this spec consumes it yet; the login screen (spec 3) is the first screen that will. */
   session: GameSession;
+  /** The typed pre-world session (spec 2). The login screen (spec 3) is its first consumer. */
+  protocol: ProtocolSession;
   /** Show a glue background scene, or null to tear it down. */
   setScene(scene: GlueScene | null): void;
   /** Request a state change; takes effect before the next frame. */
@@ -100,6 +103,10 @@ export class GlueApp {
     this.input.detach();
     this.current?.screen.unmount();
     this.current = null;
+    // Cancels any pending 3 s login retry and stops the machine reacting further -- otherwise a
+    // timer scheduled by a login attempt in flight when this app is torn down fires into a dead
+    // object.
+    this.session.protocol.stop();
     this.sceneView.dispose();
     this.ui.dispose();
     this.fonts.dispose();
@@ -128,6 +135,7 @@ export class GlueApp {
       strings: this.strings!,
       input: this.input,
       session: this.session,
+      protocol: this.session.protocol,
       setScene: (scene) => this.sceneView.setScene(scene),
       go: (next) => {
         this.pending = next;

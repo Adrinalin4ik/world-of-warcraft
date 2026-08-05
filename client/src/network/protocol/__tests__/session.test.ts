@@ -149,6 +149,25 @@ describe('ProtocolSession', () => {
     jest.useRealTimers();
   });
 
+  it('stop() cancels a pending retry so it never fires', async () => {
+    jest.useFakeTimers();
+    const logon = fakeLogon();
+    logon.authenticate.mockRejectedValueOnce(new Error('socket closed'));
+    const session = new ProtocolSession(logon, fakeWorld());
+
+    await expect(session.login('tester', 'secret')).rejects.toThrow(/socket closed/);
+    expect(logon.authenticate).toHaveBeenCalledTimes(1);
+
+    session.stop();
+    jest.advanceTimersByTime(RETRY_DELAY_MS * 10);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The retry that was queued must never fire once stopped.
+    expect(logon.authenticate).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
+
   it('hands every listener the same state object shape', async () => {
     const session = new ProtocolSession(fakeLogon(), fakeWorld());
     const states: any[] = [];

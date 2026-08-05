@@ -4,6 +4,10 @@ import CharacterHandler from "./characters/handler";
 import { AuthorizationStatus, SocketConnestionStatus } from "./enums";
 import { GameHandler } from "./game/handler";
 import RealmsHandler from "./realms/handler";
+import config from "./config";
+import { ProtocolSession } from "./protocol/session";
+import { createSocketLogonIo, WotlkLogonTransport } from "./protocol/wotlk/logon";
+import { createGameHandlerIo, WotlkWorldTransport } from "./protocol/wotlk/world";
 
 
 
@@ -13,6 +17,37 @@ export class GameSession {
   public realms = new RealmsHandler(this);
   public game = new GameHandler(this);
   public characters = new CharacterHandler(this);
+  private protocol_: ProtocolSession | null = null;
+
+  /**
+   * The typed pre-world session. Built on first read, and building it opens nothing -- the transports
+   * connect only when `login()` is called. The legacy handlers above stay exactly where they are
+   * until spec 3's screens replace them.
+   */
+  get protocol(): ProtocolSession {
+    if (!this.protocol_) {
+      this.protocol_ = new ProtocolSession(
+        new WotlkLogonTransport(createSocketLogonIo(), {
+          host: config.serverhost,
+          port: Number(config.authport),
+          game: config.game,
+          version: [config.majorVersion, config.minorVersion, config.patchVersion],
+          build: config.build,
+          platform: config.platform,
+          os: config.os,
+          locale: config.locale,
+          timezone: config.timezone,
+        }),
+        new WotlkWorldTransport(createGameHandlerIo(this.game), {
+          // The websockify proxies listen on the host the app was served from; the realm's own
+          // advertised address has no WebSocket listener. See `protocol/endpoint.ts`.
+          proxyHost: config.serverhost,
+          rewriteRealmHost: true,
+        }),
+      );
+    }
+    return this.protocol_;
+  }
   // Set by `offline-session.ts` for the networking-free `/game?offline=1` debug route. A session
   // that never calls `auth.connect()`/`game.connect()` -- declared here (not bolted on with `as
   // any`) so the next caller that reaches for a session sees the flag and can't accidentally wire
