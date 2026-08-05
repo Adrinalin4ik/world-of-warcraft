@@ -24,7 +24,9 @@ import {
   loadSettings,
   saveSettings,
 } from '../../../network/protocol/connection-settings';
+import { BackdropDef } from '../backdrop';
 import { GlueContext, GlueScreen } from '../screens';
+import { caretOffset, measureText } from '../text';
 import { FontSpec, Widget } from '../widget';
 import { loginDialog, wantsTrialScene } from './login-state';
 import { LOGIN_ART } from './login-art';
@@ -46,7 +48,98 @@ const LABEL: FontSpec = {
 /** `GlueFontNormal`, centered -- what the button captions and the box captions both use. */
 const LABEL_CENTER: FontSpec = { ...LABEL, align: 'CENTER' };
 const BUTTON_CAPTION: FontSpec = LABEL_CENTER;
-const FIELD_TEXT: FontSpec = { ...LABEL, color: '#ffffff' };
+
+/**
+ * `GlueEditBoxFont`: `EditBoxFont_Large` recoloured r=g=b=1.0 (gluefontstyles.xml:126-128), and
+ * `EditBoxFont_Large` is `Fonts\ARIALN.TTF` at FontHeight 16 with no outline and no shadow
+ * (gluefonts.xml:76-80). Not the `GlueFontNormal` face the rest of this screen uses: the client
+ * deliberately puts typed input in narrow Arial, which is why a 320-letter account name fits a
+ * 200-wide box at all.
+ */
+const FIELD_TEXT: FontSpec = {
+  family: 'ARIALN',
+  size: 16,
+  color: '#ffffff',
+  outline: false,
+  align: 'LEFT',
+};
+
+/**
+ * `GlueFontNormalLarge`: `SystemFont_Shadow_Outline_Large` -- FRIZQT, outlined, FontHeight 18
+ * (gluefonts.xml:53-63) -- with `spacing="2"` and colour r=1.0 g=0.78 b=0 -> `#ffc700`
+ * (gluefontstyles.xml:97-99). `GlueDialogText` inherits it and is 450 wide (gluedialog.xml), so this
+ * is the one font string on the screen that WRAPS.
+ */
+const DIALOG_TEXT: FontSpec = {
+  family: 'FRIZQT',
+  size: 18,
+  color: '#ffc700',
+  outline: true,
+  align: 'CENTER',
+  wrapWidth: 450,
+  spacing: 2,
+};
+
+/**
+ * The edit boxes' authored `Backdrop` (accountlogin.xml:190-201; the password box repeats it
+ * verbatim, and the server box borrows the same idiom). Sprite KEYS -- the paths are in
+ * `login-art.ts`.
+ */
+const EDITBOX_BACKDROP: BackdropDef = {
+  bgSprite: 'editbox-bg',
+  edgeSprite: 'editbox-edge',
+  edgeSize: 16,
+  tileSize: 16,
+  backgroundInsets: { left: 10, right: 5, top: 4, bottom: 9 },
+};
+
+/** `TextInsets` on all three authored edit boxes: left 12, right 5, bottom 5 -- and NO top inset
+ * (accountlogin.xml:235-237). The missing top is the whole point: the text is not centred in the
+ * box, it is centred in the box shrunk from the bottom only, so it rides slightly high. */
+const FIELD_TEXT_INSETS = { left: 12, right: 5, top: 0, bottom: 5 };
+
+/** `GlueDialogBackground`'s authored `Backdrop` (gluedialog.xml). */
+const DIALOG_BACKDROP: BackdropDef = {
+  bgSprite: 'dialog-bg',
+  edgeSprite: 'dialog-edge',
+  edgeSize: 32,
+  tileSize: 32,
+  backgroundInsets: { left: 11, right: 12, top: 12, bottom: 11 },
+};
+
+/** `GlueDialogBackground` is 512x256, and `origWidth` -- the width it keeps for every dialog that is
+ * not a `showAlert` type (gluedialog.lua:637-638; `alertWidth` 600 is for those, and none of ours
+ * are). The HEIGHT is recomputed from the content -- see `dialogHeight`. */
+const DIALOG_WIDTH = 512;
+/** `GlueDialogText` is anchored `TOP` with offset y=-16 (gluedialog.xml). */
+const DIALOG_TEXT_OFFSET = 16;
+/** `GlueDialogButtonTemplate` is 220x40 (gluedialog.xml), anchored `BOTTOM` to the background's
+ * `BOTTOM` with offset y=16 in the single-button branch (gluedialog.lua:562). */
+const DIALOG_BUTTON_WIDTH = 220;
+const DIALOG_BUTTON_HEIGHT = 40;
+const DIALOG_BUTTON_OFFSET = 16;
+
+/**
+ * `GlueDialogBackground:SetHeight(32 + GlueDialogText:GetHeight() + 8 + GlueDialogButton1:GetHeight()
+ * + 16)` -- gluedialog.lua:677, the `UPDATE_STATUS_DIALOG` path.
+ *
+ * That path, not `GlueDialog_Show`'s (line 626, which leads with 16 rather than 32), because it is
+ * the one that actually sizes these dialogs. Both `GlueDialogTypes["CANCEL"]` and `["OKAY"]` are
+ * authored with `text = ""` (gluedialog.lua:162-190), so at `GlueDialog_Show` time there is no text
+ * to measure and the height that matters is the one recomputed when the status text arrives. Ours
+ * arrives the same way: `update()` sets it from the session's stage every frame.
+ */
+function dialogHeight(textHeight: number): number {
+  return 32 + textHeight + 8 + DIALOG_BUTTON_HEIGHT + DIALOG_BUTTON_OFFSET;
+}
+
+/**
+ * The caret, both OURS. The client's own is drawn by the engine with no XML behind it, so there is
+ * nothing to cite and nothing here claims otherwise: a one-unit bar, lit for half a second and dark
+ * for half a second.
+ */
+const CARET_WIDTH = 1;
+const CARET_BLINK_SECONDS = 0.5;
 
 /**
  * `GlueFontNormalSmall`: `SystemFont_Shadow_Outline_Med1` in the same `#ffc700`
@@ -88,10 +181,15 @@ export class LoginScreen implements GlueScreen {
   private quitHighlight: Widget | null = null;
   private dialog: Widget | null = null;
   private dialogText: Widget | null = null;
+  private dialogButton: Widget | null = null;
+  private dialogButtonCaption: Widget | null = null;
+  private dialogHighlight: Widget | null = null;
   /** Last frame's dialog visibility, so focus moves on the EDGE rather than every frame. */
   private dialogShown = false;
-  /** Whether the dialog currently showing is one the player can dismiss -- see `dismissDialog`. */
-  private dialogDismissable = false;
+  /** Which dialog is showing, so the one button knows what it does -- see `dialogAction`. */
+  private dialogKind: 'none' | 'connecting' | 'error' = 'none';
+  /** Seconds since mount, for the caret blink. */
+  private caretClock = 0;
 
   mount(ctx: GlueContext): void {
     this.ctx = ctx;
@@ -331,36 +429,83 @@ export class LoginScreen implements GlueScreen {
     version.text = 'Version 3.3.5 (12340)';
     version.setSize(300, 14).setAnchors({ point: 'BOTTOMLEFT', x: 0, y: 10 });
 
-    // The one dialog, reused for connecting and for a refusal.
+    // `GlueDialog` (gluedialog.xml), reused for connecting and for a refusal -- the client reuses the
+    // one dialog for every type too. `GlueDialogBackground` is 512 wide at CENTER with the authored
+    // `Backdrop`; the height is recomputed from the text in `update()` (`dialogHeight`).
     this.dialog = root.add(new Widget('backdrop', 'login-dialog'));
     this.dialog.layer = 'DIALOG';
-    this.dialog.sprite = 'dialog-background';
+    this.dialog.backdrop = DIALOG_BACKDROP;
+    // `enableMouse="true"` on the authored frame. It has to stay on for a reason beyond fidelity:
+    // this quad covers the account box, and without it clicks would fall THROUGH the dialog to the
+    // box behind it. There is deliberately no `onClick` here -- the client's dialog is dismissed by
+    // its button, not by a click anywhere on the frame.
     this.dialog.mouseEnabled = true;
     // Focusable so Escape can reach `onCancel` at all -- `input.ts` routes Escape to the FOCUSED
     // widget, and a dialog that never takes focus has a dead cancel handler however it is written.
     this.dialog.focusable = true;
-    this.dialog.setSize(400, 140).setAnchors({ point: 'CENTER', x: 0, y: 0 });
+    this.dialog.setSize(DIALOG_WIDTH, dialogHeight(0)).setAnchors({ point: 'CENTER', x: 0, y: 0 });
     this.dialog.hide();
-    // Dismissing has to clear the SESSION's state, not just hide the widget: `update()` re-derives the
-    // dialog from `protocol.stage`/`lastRefusal` every frame, so a hidden widget came straight back on
-    // the next one -- and this quad is `mouseEnabled` and covers the account box, so after "Unknown
-    // account" the player could not edit the account name at all.
-    // Only the ERROR dialog dismisses. While an attempt is in flight the stage itself says
-    // `Connecting`, which `dismiss()` does not change -- so dismissing then would clear the player's
-    // credentials while the dialog stayed up, looking like a dead click. `dismissable` is set from the
-    // dialog kind in `update()`, which is the one place that knows which dialog is showing.
-    this.dialog.onCancel = () => this.dismissDialog();
-    this.dialog.onClick = () => this.dismissDialog();
+    // Escape does what the one button does, which is what `GlueDialog_OnKeyDown` does for a
+    // single-button dialog.
+    this.dialog.onCancel = () => this.dialogAction();
 
+    // `GlueDialogText`: `GlueFontNormalLarge`, 450 wide, anchored TOP y=-16, and it WRAPS -- which is
+    // the fix for a long refusal (`RESPONSE_FAILED_TO_CONNECT` is three sentences) previously drawn as
+    // one line off both edges of the screen. Height is set from the measurement in `update()`.
     this.dialogText = this.dialog.add(new Widget('fontstring', 'login-dialog-text'));
     this.dialogText.layer = 'DIALOG';
-    this.dialogText.font = { ...LABEL, align: 'CENTER' };
-    this.dialogText.setSize(380, 16).setAnchors({
-      point: 'CENTER',
+    this.dialogText.font = DIALOG_TEXT;
+    this.dialogText.setSize(DIALOG_TEXT.wrapWidth!, DIALOG_TEXT.size).setAnchors({
+      point: 'TOP',
       relativeTo: 'login-dialog',
+      relativePoint: 'TOP',
+      x: 0,
+      y: -DIALOG_TEXT_OFFSET,
+    });
+
+    // `GlueDialogButton1`, from `GlueDialogButtonTemplate`: 220x40, anchored BOTTOM to the
+    // background's BOTTOM at y=16 (gluedialog.lua:562, the single-button branch). The template
+    // authors the non-blue sheet, but `GlueDialog_OnUpdate` swaps all three states to the `-Blue`
+    // textures whenever `CURRENT_GLUE_SCREEN == "login"` (gluedialog.lua:651-659) -- which is this
+    // screen, so it uses the same blue art the Login button does.
+    this.dialogButton = this.dialog.add(new Widget('button', 'login-dialog-button'));
+    this.dialogButton.layer = 'DIALOG';
+    this.dialogButton.sprite = 'button-up';
+    this.dialogButton.mouseEnabled = true;
+    this.dialogButton.focusable = true;
+    this.dialogButton
+      .setSize(DIALOG_BUTTON_WIDTH, DIALOG_BUTTON_HEIGHT)
+      .setAnchors({
+        point: 'BOTTOM',
+        relativeTo: 'login-dialog',
+        relativePoint: 'BOTTOM',
+        x: 0,
+        y: DIALOG_BUTTON_OFFSET,
+      });
+    this.dialogButton.onClick = () => this.dialogAction();
+
+    this.dialogHighlight = this.overlay(
+      this.dialogButton,
+      'login-dialog-button-highlight',
+      'button-highlight',
+      DIALOG_BUTTON_WIDTH,
+      DIALOG_BUTTON_HEIGHT,
+      'ADD',
+    );
+
+    // `GlueDialogButtonTemplate`'s `ButtonText` is centred with offset y=2 (gluedialog.xml), and its
+    // `NormalFont` is `GlueFontNormal` -- the same caption font the Login button uses.
+    this.dialogButtonCaption = this.dialogButton.add(
+      new Widget('fontstring', 'login-dialog-button-text'),
+    );
+    this.dialogButtonCaption.layer = 'DIALOG';
+    this.dialogButtonCaption.font = BUTTON_CAPTION;
+    this.dialogButtonCaption.setSize(DIALOG_BUTTON_WIDTH, 16).setAnchors({
+      point: 'CENTER',
+      relativeTo: 'login-dialog-button',
       relativePoint: 'CENTER',
       x: 0,
-      y: 0,
+      y: 2, // the template's ButtonText offset
     });
 
     // `AccountLogin_OnShow` (accountlogin.lua:67-72): the account box when there is no saved name, the
@@ -410,16 +555,11 @@ export class LoginScreen implements GlueScreen {
     const box = root.add(new Widget('editbox', id));
     // BACKGROUND, because a FrameXML `Backdrop` draws BENEATH every layer of its own frame -- including
     // the BACKGROUND FontStrings this box carries (its caption and `$parentFill`). Our layer ladder is
-    // flat, so the stand-in quad expresses that by sitting on BACKGROUND ahead of them in insertion
+    // flat, so the backdrop expresses that by sitting on BACKGROUND ahead of them in insertion
     // order, which is what keeps the placeholder visible on top of the border instead of behind it.
     box.layer = 'BACKGROUND';
-    // The authored control is a 9-slice `Backdrop`: bg `Interface\Tooltips\UI-Tooltip-Background`
-    // tiled at 16, edge `Interface\Glues\Common\Glue-Tooltip-Border` at edgeSize 16, background
-    // insets left 10 right 5 top 4 bottom 9 (accountlogin.xml:190-201). Our widget layer's `backdrop`
-    // kind has no 9-slice renderer yet, so this single stretched `Common-Input-Border` quad is a
-    // STAND-IN we invented for this screen -- it is not the client's own art, and is a follow-up to
-    // replace once 9-slice backdrops exist.
-    box.sprite = 'input-border';
+    // The authored 9-slice `Backdrop` (accountlogin.xml:190-201), drawn as nine pieces by the renderer.
+    box.backdrop = EDITBOX_BACKDROP;
     box.mouseEnabled = true;
     box.focusable = true;
     box.maxLetters = maxLetters;
@@ -428,18 +568,76 @@ export class LoginScreen implements GlueScreen {
     // pointer handler must only take focus, or clicking back into a box to fix a typo submits the typo.
     box.onSubmit = () => this.submit();
 
+    // The authored `TextInsets`: the text occupies the box shrunk by them, expressed as two opposing
+    // anchors so `resolveAnchors` sizes it rather than this code restating the arithmetic. `y` is
+    // FrameXML's (+up), so BOTTOMRIGHT's +bottom lifts the bottom edge. With no TOP inset the text
+    // rides above the box's true centre, which is what the client draws.
     const text = box.add(new Widget('fontstring', textId));
     text.layer = 'OVERLAY';
     text.font = FIELD_TEXT;
-    text.setSize(width - 32, 16).setAnchors({
+    text.setAnchors(
+      {
+        point: 'TOPLEFT',
+        relativeTo: id,
+        relativePoint: 'TOPLEFT',
+        x: FIELD_TEXT_INSETS.left,
+        y: -FIELD_TEXT_INSETS.top,
+      },
+      {
+        point: 'BOTTOMRIGHT',
+        relativeTo: id,
+        relativePoint: 'BOTTOMRIGHT',
+        x: -FIELD_TEXT_INSETS.right,
+        y: FIELD_TEXT_INSETS.bottom,
+      },
+    );
+
+    // The caret. OURS: the client's edit-box caret is drawn by its engine and has no XML to
+    // transcribe, so nothing here is cited. Added after the text so it draws over it, and positioned
+    // every frame by `update()` -- `x` is the measured width of the text before the caret.
+    const caret = box.add(new Widget('texture', `${textId}-caret`));
+    caret.layer = 'OVERLAY';
+    caret.solid = true;
+    caret.vertexColor = FIELD_TEXT.color;
+    caret.setSize(CARET_WIDTH, FIELD_TEXT.size).setAnchors({
       point: 'LEFT',
-      relativeTo: id,
+      relativeTo: textId,
       relativePoint: 'LEFT',
-      x: 16,
+      x: 0,
       y: 0,
     });
+    caret.hide();
 
     return box;
+  }
+
+  /**
+   * Put the caret where the next character will land, and blink it, for the focused box only.
+   *
+   * Measured against `displayText`, so a password box positions against the MASKED string: measuring
+   * the real one would put the caret at the real characters' widths and leak them on screen. Measured
+   * at scale 1 because `caretOffset` returns logical units, which the layout scale divides back out
+   * anyway -- the screen has no viewport to ask for the live scale from here.
+   */
+  private placeCaret(box: Widget | null, textId: string): void {
+    if (!box) {
+      return;
+    }
+    const caret = box.children.find((child) => child.id === `${textId}-caret`);
+    if (!caret) {
+      return;
+    }
+
+    const focused = this.ctx?.input.focused === box;
+    // Half a second lit, half dark. OURS, like the caret itself.
+    const lit = this.caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
+    if (!focused || !lit) {
+      caret.hide();
+      return;
+    }
+
+    caret.anchors[0].x = caretOffset(box.displayText, FIELD_TEXT, 1, box.caret);
+    caret.show();
   }
 
   /** What the Login button and Enter both do. */
@@ -476,18 +674,31 @@ export class LoginScreen implements GlueScreen {
   }
 
   /**
-   * Dismiss the dialog, when the one showing is dismissable at all.
+   * What the dialog's one button does, which depends on which dialog is up -- exactly as the client's
+   * does: `GlueDialog_OnClick` runs the `OnAccept` of the current `GlueDialogTypes` entry.
    *
-   * `ProtocolSession#dismiss` clears the refusal and the queued retry, which is what makes the error
-   * dialog go away and stay away. It does NOT change the stage, so calling it while an attempt is in
-   * flight would drop the player's credentials with the `Connecting` dialog still up -- a click that
-   * silently breaks the attempt it appears to cancel. Cancelling an in-flight attempt would mean
-   * aborting the socket, which the session does not expose; until it does, the connecting dialog is
-   * simply not dismissable, and it clears itself the moment the attempt resolves either way.
+   *  - The ERROR dialog is `GlueDialogTypes["OKAY"]`. `ProtocolSession#dismiss` clears the refusal and
+   *    the queued retry, which is what makes it go away and stay away -- `update()` re-derives the
+   *    dialog from the session every frame, so merely hiding the widget lasted one frame.
+   *  - The CONNECTING dialog is `GlueDialogTypes["CANCEL"]`, and the client's carries a real CANCEL, so
+   *    ours does too. `ProtocolSession#cancelLogin` stops the attempt and returns the stage to
+   *    `Offline`, which takes the dialog down on the next frame and leaves the screen usable.
+   *
+   * What cancelling does NOT do is abort the socket already in flight -- the transports expose no
+   * abort, and this screen is not the place to add one. What it does instead is make that socket
+   * IRRELEVANT: its result is discarded whether it succeeds or fails, the 3 s retry is cancelled, the
+   * credentials are dropped so nothing can resubmit them, and the stage returns to `Offline`. The
+   * connection may still be open for a few seconds; nothing the player can see or reach depends on it.
    */
-  private dismissDialog(): void {
-    if (this.dialogDismissable) {
-      this.ctx?.protocol.dismiss();
+  private dialogAction(): void {
+    const protocol = this.ctx?.protocol;
+    if (!protocol) {
+      return;
+    }
+    if (this.dialogKind === 'connecting') {
+      protocol.cancelLogin();
+    } else if (this.dialogKind === 'error') {
+      protocol.dismiss();
     }
   }
 
@@ -502,11 +713,13 @@ export class LoginScreen implements GlueScreen {
     }
   }
 
-  update(): void {
+  update(dt = 0): void {
     const ctx = this.ctx;
     if (!ctx) {
       return;
     }
+
+    this.caretClock += dt;
 
     // Mirror both boxes into their font strings; the widget layer masks the password itself.
     if (this.account && this.accountText) {
@@ -518,6 +731,10 @@ export class LoginScreen implements GlueScreen {
     if (this.server && this.serverText) {
       this.serverText.text = this.server.text;
     }
+
+    this.placeCaret(this.account, 'login-account-text');
+    this.placeCaret(this.password, 'login-password-text');
+    this.placeCaret(this.server, 'login-server-text');
 
     // `$parentFill`: hidden as soon as there is anything typed (accountlogin.xml's `OnTextChanged`).
     if (this.account && this.accountFill) {
@@ -556,8 +773,18 @@ export class LoginScreen implements GlueScreen {
       this.setShown(this.quitHighlight, this.quitButton.hovered);
     }
 
+    if (this.dialogButton) {
+      this.dialogButton.sprite =
+        this.dialogButton.state === 'down'
+          ? 'button-down'
+          : this.dialogButton.state === 'disabled'
+            ? 'button-disabled'
+            : 'button-up';
+      this.setShown(this.dialogHighlight, this.dialogButton.hovered);
+    }
+
     const dialog = loginDialog(ctx.protocol.stage, ctx.protocol.lastRefusal, ctx.protocol.retrying);
-    this.dialogDismissable = dialog.kind === 'error';
+    this.dialogKind = dialog.kind;
     if (this.dialog && this.dialogText) {
       if (dialog.kind === 'none') {
         this.dialog.hide();
@@ -567,6 +794,22 @@ export class LoginScreen implements GlueScreen {
           dialog.kind === 'connecting'
             ? ctx.strings.get('LOGIN_STATE_CONNECTING')
             : ctx.strings.get(dialog.stringKey);
+
+        // `GlueDialogButton1:SetText(dialogInfo.button1)`: the connecting dialog is
+        // `GlueDialogTypes["CANCEL"]` -> `CANCEL`, an error is `GlueDialogTypes["OKAY"]` -> `OKAY`
+        // (gluedialog.lua:162-190). Both keys are in the shipped `gluestrings.lua`.
+        if (this.dialogButtonCaption) {
+          this.dialogButtonCaption.text = ctx.strings.get(
+            dialog.kind === 'connecting' ? 'CANCEL' : 'OKAY',
+          );
+        }
+
+        // The background is resized to its content, not left at the authored 256 tall
+        // (`dialogHeight`). Measured at scale 1: `measureText` returns logical units, which is what a
+        // widget's height is in, so the live layout scale divides back out and is not needed here.
+        const measured = measureText(this.dialogText.text, DIALOG_TEXT, 1);
+        this.dialogText.height = measured.height;
+        this.dialog.height = dialogHeight(measured.height);
       }
 
       // On the frame it appears, the dialog takes focus so Escape dismisses it; when it goes, focus
@@ -600,6 +843,11 @@ export class LoginScreen implements GlueScreen {
     this.quitHighlight = null;
     this.dialog = null;
     this.dialogText = null;
+    this.dialogButton = null;
+    this.dialogButtonCaption = null;
+    this.dialogHighlight = null;
     this.dialogShown = false;
+    this.dialogKind = 'none';
+    this.caretClock = 0;
   }
 }

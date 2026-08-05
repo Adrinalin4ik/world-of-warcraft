@@ -17,18 +17,22 @@ import {
 
 function fakeContext(protocol: { login: jest.Mock; stage: string; lastRefusal: null }) {
   const root = new WidgetRoot();
+  // Mutable, so a test can point focus at a widget the screen only creates during `mount` -- the
+  // caret is drawn for the FOCUSED box only.
+  const input = { setFocus: jest.fn(), focused: null as Widget | null };
   return {
     ctx: {
       root,
       art: new GlueArt(),
       strings: new GlueStrings(new Map([['LOGIN', 'Login'], ['SAVE_ACCOUNT_NAME', 'Save Account Name']])),
-      input: { setFocus: jest.fn() } as never,
+      input: input as never,
       session: {} as never,
       protocol: protocol as never,
       setScene: jest.fn(),
       go: jest.fn(),
     },
     root,
+    input,
   };
 }
 
@@ -133,6 +137,65 @@ describe('LoginScreen', () => {
     find(third.root, 'login-login').onClick!();
 
     expect(loadSettings().savedAccount).toBeUndefined();
+  });
+
+  it('positions the password caret against the MASK, not the real password', () => {
+    // The leak: the caret's x is the measured width of the text before it, so measuring the real
+    // password would put the caret at the real characters' widths and show the password's shape on
+    // screen to anyone watching. It must measure `displayText` -- the bullets.
+    //
+    // jsdom here has no 2D canvas, so measurement is stubbed with a per-character advance that makes
+    // 'W' four times 'i'. That is what gives the two strings different widths at all, which is the
+    // condition the leak would show up under.
+    const advance: Record<string, number> = { i: 0.25, W: 1 };
+    (HTMLCanvasElement.prototype as unknown as { getContext: unknown }).getContext = function () {
+      let font = '10px sans-serif';
+      return {
+        get font() {
+          return font;
+        },
+        set font(value: string) {
+          font = value;
+        },
+        measureText(text: string) {
+          const px = Number(/^(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? 10);
+          return {
+            width: Array.from(text).reduce((sum, char) => sum + (advance[char] ?? 0.5), 0) * px,
+          };
+        },
+      };
+    };
+
+    const harness = fakeContext(fakeProtocol());
+    const screen = new LoginScreen();
+    screen.mount(harness.ctx as never);
+
+    const password = find(harness.root, 'login-password');
+    password.text = 'WWWW';
+    password.caret = 4;
+    harness.input.focused = password;
+    // Far enough into the blink cycle to be lit, so the caret is shown and its anchor is written.
+    screen.update(0);
+
+    const caret = find(harness.root, 'login-password-text-caret');
+    expect(caret.shown).toBe(true);
+
+    // Four bullets, not four Ws: the same offset a 'iiii' password of the same length would give.
+    const asMask = caret.anchors[0].x;
+    password.text = 'iiii';
+    screen.update(0);
+    expect(find(harness.root, 'login-password-text-caret').anchors[0].x).toBe(asMask);
+
+    // And that offset is NOT the one the real 'WWWW' would have produced, which is what makes the
+    // assertion above mean something rather than being trivially true.
+    const account = find(harness.root, 'login-account');
+    account.text = 'WWWW';
+    account.caret = 4;
+    harness.input.focused = account;
+    screen.update(0);
+    expect(find(harness.root, 'login-account-text-caret').anchors[0].x).not.toBe(asMask);
+
+    screen.unmount();
   });
 });
 

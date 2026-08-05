@@ -17,7 +17,11 @@ const BUTTON_HIGHLIGHT_TC = { u0: 0, v0: 0, u1: 0.625, v1: 0.6875 };
 
 export const LOGIN_ART: Record<string, SpriteDef> = {
   logo: { path: 'Interface\\Glues\\Common\\Glues-WoW-WotLKLogo', size: [256, 128] },
-  'input-border': { path: 'Interface\\Common\\Common-Input-Border' },
+  // The edit boxes' authored `Backdrop` (accountlogin.xml:190-201, and the password box repeats it
+  // verbatim). The border is a 128x16 sheet of eight 16x16 tiles -- measured by decoding the BLP, see
+  // `backdrop.ts` -- so its tex-coords are computed per piece there rather than declared here.
+  'editbox-bg': { path: 'Interface\\Tooltips\\UI-Tooltip-Background', tile: true, size: [64, 64] },
+  'editbox-edge': { path: 'Interface\\Glues\\Common\\Glue-Tooltip-Border', size: [128, 16] },
   'button-up': {
     path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Up-Blue',
     texCoords: BUTTON_TC,
@@ -67,5 +71,8 @@ export const LOGIN_ART: Record<string, SpriteDef> = {
   'check-highlight': { path: 'Interface\\Buttons\\UI-CheckBox-Highlight', size: [20, 20] },
   'check-mark': { path: 'Interface\\Buttons\\UI-CheckBox-Check', size: [20, 20] },
   'blizzard-logo': { path: 'Interface\\Glues\\Mainmenu\\Glues-BlizzardLogo', size: [100, 100] },
-  'dialog-background': { path: 'Interface\\DialogFrame\\UI-DialogBox-Background' },
+  // `GlueDialogBackground`'s authored `Backdrop` (gluedialog.xml). The background is 64x64 and tiled
+  // at 32; the border is a 256x32 sheet of eight 32x32 tiles (both measured from the BLPs).
+  'dialog-bg': { path: 'Interface\\DialogFrame\\UI-DialogBox-Background', tile: true, size: [64, 64] },
+  'dialog-edge': { path: 'Interface\\DialogFrame\\UI-DialogBox-Border', size: [256, 32] },
 };
