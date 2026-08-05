@@ -29,11 +29,16 @@ import { FontSpec, Widget } from '../widget';
 import { loginDialog, wantsTrialScene } from './login-state';
 import { LOGIN_ART } from './login-art';
 
-/** `GlueFontNormal` in the client: Friz Quadrata, gold, outlined. */
+/**
+ * `GlueFontNormal`: Friz Quadrata, outlined, colour r=1.0 g=0.78 b=0 -> `#ffc700`
+ * (gluefontstyles.xml:14-22). NOT `#ffd100` -- that is FrameXML's `NORMAL_FONT_COLOR` (1.0, 0.82, 0),
+ * a different table for a different UI. The client also draws a 1,-1 black shadow under this font;
+ * `FontSpec` has no shadow channel (only the outline ring), so the shadow is not reproduced.
+ */
 const LABEL: FontSpec = {
   family: 'FRIZQT',
   size: 14,
-  color: '#ffd100',
+  color: '#ffc700',
   outline: true,
   align: 'LEFT',
 };
@@ -44,31 +49,23 @@ const BUTTON_CAPTION: FontSpec = LABEL_CENTER;
 const FIELD_TEXT: FontSpec = { ...LABEL, color: '#ffffff' };
 
 /**
- * `GlueFontNormalSmall` at FontHeight 10, colour r=1.0 g=0.78 b=0 (accountlogin.xml:530-537). The
- * client also draws a 1,-1 black shadow on this font; `FontSpec` has no shadow channel (only the
- * outline ring `FontSpec#outline` draws), so the shadow is not reproduced here.
+ * `GlueFontNormalSmall`: `SystemFont_Shadow_Outline_Med1` in the same `#ffc700`
+ * (gluefontstyles.xml:65-67). The version block and the Blizzard disclaimer both inherit it as-is.
  */
-const SAVE_NAME_LABEL: FontSpec = {
-  family: 'FRIZQT',
-  size: 10,
-  color: '#ffc700',
-  outline: false,
-  align: 'LEFT',
-};
+const LABEL_SMALL: FontSpec = { ...LABEL, size: 12 };
 
 /**
- * `GlueFontDisableSmall`, approximated: the client authors this as a dim, non-outlined font for
- * disabled/placeholder text (accountlogin.xml:180-188 names the font but not an exact colour), so
- * `#7f7f7f` stands in for "greyed out" rather than transcribing a value that isn't given. `justifyV
- * ="MIDDLE"` is also not representable -- `FontSpec#align` is horizontal only.
+ * `GlueFontNormalSmall` overridden with FontHeight 10 and its colour restated as r=1.0 g=0.78 b=0
+ * (accountlogin.xml:530-548) -- the same `#ffc700`, spelled out again in the FontString itself.
  */
-const PLACEHOLDER_TEXT: FontSpec = {
-  family: 'FRIZQT',
-  size: 12,
-  color: '#7f7f7f',
-  outline: false,
-  align: 'LEFT',
-};
+const SAVE_NAME_LABEL: FontSpec = { ...LABEL, size: 10, align: 'LEFT' };
+
+/**
+ * `GlueFontDisableSmall`: `GlueFontNormalSmall` recoloured r=g=b=0.5 -> `#808080`
+ * (gluefontstyles.xml:84-86), so it keeps that font's outline ring. `justifyV="MIDDLE"` is the one
+ * part not representable -- `FontSpec#align` is horizontal only.
+ */
+const PLACEHOLDER_TEXT: FontSpec = { ...LABEL, size: 12, color: '#808080' };
 
 export class LoginScreen implements GlueScreen {
   private ctx: GlueContext | null = null;
@@ -81,10 +78,14 @@ export class LoginScreen implements GlueScreen {
   private server: Widget | null = null;
   private serverText: Widget | null = null;
   private saveName: Widget | null = null;
+  private saveNameCheck: Widget | null = null;
+  private saveNameHighlight: Widget | null = null;
   private loginButton: Widget | null = null;
   private loginCaption: Widget | null = null;
+  private loginHighlight: Widget | null = null;
   private quitButton: Widget | null = null;
   private quitCaption: Widget | null = null;
+  private quitHighlight: Widget | null = null;
   private dialog: Widget | null = null;
   private dialogText: Widget | null = null;
   /** Last frame's dialog visibility, so focus moves on the EDGE rather than every frame. */
@@ -104,7 +105,9 @@ export class LoginScreen implements GlueScreen {
     const settings = applyRealmlistOverride(loadSettings(), window.location.search);
 
     const logo = root.add(new Widget('texture', 'login-logo'));
-    logo.layer = 'ARTWORK';
+    // `AccountLoginLogo` is authored on OVERLAY (accountlogin.xml:128-141), above the ARTWORK layer the
+    // Blizzard logo and the version block sit on.
+    logo.layer = 'OVERLAY';
     logo.sprite = 'logo';
     logo.setSize(256, 128).setAnchors({ point: 'TOPLEFT', x: 3, y: -7 });
 
@@ -118,7 +121,9 @@ export class LoginScreen implements GlueScreen {
     // The box's own caption -- a separate FontString, not the typed-value mirror above
     // (accountlogin.xml:167-179).
     const accountLabel = root.add(new Widget('fontstring', 'login-account-label'));
-    accountLabel.layer = 'OVERLAY';
+    // BACKGROUND, as authored: the box's own layers sit above its Backdrop, and this caption overlaps
+    // the top of the box by 23 units, which is why the two orders are distinguishable at all.
+    accountLabel.layer = 'BACKGROUND';
     accountLabel.font = LABEL_CENTER;
     accountLabel.text = ctx.strings.get('ACCOUNT_NAME');
     accountLabel.setSize(600, 64).setAnchors({
@@ -132,7 +137,7 @@ export class LoginScreen implements GlueScreen {
     // `$parentFill`: shown only while the account box is empty (accountlogin.xml:180-188; the client
     // hides it in `OnTextChanged`). Driven from `this.account.text` in `update()`.
     this.accountFill = this.account.add(new Widget('fontstring', 'login-account-fill'));
-    this.accountFill.layer = 'OVERLAY';
+    this.accountFill.layer = 'BACKGROUND';
     this.accountFill.font = PLACEHOLDER_TEXT;
     this.accountFill.text = ctx.strings.get('ENTER_EMAIL');
     this.accountFill.setSize(200 - 32, 16).setAnchors({
@@ -149,7 +154,7 @@ export class LoginScreen implements GlueScreen {
     this.password.password = true;
 
     const passwordLabel = root.add(new Widget('fontstring', 'login-password-label'));
-    passwordLabel.layer = 'OVERLAY';
+    passwordLabel.layer = 'BACKGROUND'; // as authored (accountlogin.xml:248-262)
     passwordLabel.font = LABEL_CENTER;
     passwordLabel.text = ctx.strings.get('PASSWORD');
     passwordLabel.setSize(256, 64).setAnchors({
@@ -169,7 +174,7 @@ export class LoginScreen implements GlueScreen {
     this.serverText.text = this.server.text;
 
     const serverLabel = root.add(new Widget('fontstring', 'login-server-label'));
-    serverLabel.layer = 'OVERLAY';
+    serverLabel.layer = 'BACKGROUND'; // the same layer the two authored captions use
     serverLabel.font = LABEL_CENTER;
     // OURS: no honest GlueStrings key names a server-address field -- see the file comment.
     serverLabel.text = 'Server Address';
@@ -192,6 +197,17 @@ export class LoginScreen implements GlueScreen {
     this.loginButton.focusable = true;
     this.loginButton.setSize(220, 45).setAnchors({ point: 'BOTTOM', x: 0, y: 170 });
     this.loginButton.onClick = () => this.submit();
+
+    // `HighlightTexture ... alphaMode="ADD"` OVERLAYS the normal texture (gluebuttons.xml,
+    // `GlueButtonTemplateBlue`); replacing the button art with the glow alone lost the button.
+    this.loginHighlight = this.overlay(
+      this.loginButton,
+      'login-login-highlight',
+      'button-highlight',
+      220,
+      45,
+      'ADD',
+    );
 
     this.loginCaption = this.loginButton.add(new Widget('fontstring', 'login-login-text'));
     this.loginCaption.layer = 'OVERLAY';
@@ -234,6 +250,21 @@ export class LoginScreen implements GlueScreen {
     });
     this.saveName.onClick = () => undefined; // the router toggles `checked` itself
 
+    // The authored CheckButton draws its `CheckedTexture` (`UI-CheckBox-Check`) ON TOP of the
+    // `NormalTexture` frame, and its `HighlightTexture` on ADD on top of both
+    // (accountlogin.xml:579-583) -- not instead of them. Swapping the parent's sprite showed a bare
+    // tick with no frame, so both are child quads: same layer as the parent, later in insertion order,
+    // which is how this widget layer stacks siblings.
+    this.saveNameCheck = this.overlay(this.saveName, 'login-save-name-check', 'check-mark', 20, 20);
+    this.saveNameHighlight = this.overlay(
+      this.saveName,
+      'login-save-name-highlight',
+      'check-highlight',
+      20,
+      20,
+      'ADD',
+    );
+
     // Quit button: 150x38 at BOTTOMRIGHT -5,29 (accountlogin.xml, GlueButtonSmallTemplateBlue). There
     // is no browser tab for it to close -- it is authored, so it is drawn, but its click is a no-op.
     this.quitButton = root.add(new Widget('button', 'login-quit'));
@@ -243,6 +274,15 @@ export class LoginScreen implements GlueScreen {
     this.quitButton.focusable = true;
     this.quitButton.setSize(150, 38).setAnchors({ point: 'BOTTOMRIGHT', x: -5, y: 29 });
     this.quitButton.onClick = () => undefined; // no browser tab for this button to close
+
+    this.quitHighlight = this.overlay(
+      this.quitButton,
+      'login-quit-highlight',
+      'button-small-highlight',
+      150,
+      38,
+      'ADD',
+    );
 
     this.quitCaption = this.quitButton.add(new Widget('fontstring', 'login-quit-text'));
     this.quitCaption.layer = 'OVERLAY';
@@ -256,11 +296,23 @@ export class LoginScreen implements GlueScreen {
       y: 3, // the template's ButtonText offset
     });
 
+    // `AccountLoginVersion`: BOTTOMLEFT x=0 y=10, ARTWORK, GlueFontNormalSmall justifyH="LEFT"
+    // (accountlogin.xml:117-127). The client fills the text from `GetBuildInfo()`; there is no build
+    // info to read here, so the WORDING is OURS -- a literal, not an invented GlueStrings key.
     const version = root.add(new Widget('fontstring', 'login-version'));
-    version.layer = 'OVERLAY';
-    version.font = { ...LABEL, size: 12 };
+    version.layer = 'ARTWORK';
+    version.font = LABEL_SMALL;
     version.text = 'Version 3.3.5 (12340)';
-    version.setSize(300, 14).setAnchors({ point: 'BOTTOMLEFT', x: 10, y: 10 });
+    version.setSize(300, 14).setAnchors({ point: 'BOTTOMLEFT', x: 0, y: 10 });
+
+    // `BLIZZ_DISCLAIMER` at BOTTOM y=10, ARTWORK, GlueFontNormalSmall (accountlogin.xml:108-116). The
+    // authored FontString carries no Size and sizes itself to its text; a widget here needs a rect, so
+    // it gets a wide centered one -- the renderer draws the string at its measured size inside it.
+    const disclaimer = root.add(new Widget('fontstring', 'login-disclaimer'));
+    disclaimer.layer = 'ARTWORK';
+    disclaimer.font = { ...LABEL_SMALL, align: 'CENTER' };
+    disclaimer.text = ctx.strings.get('BLIZZ_DISCLAIMER');
+    disclaimer.setSize(600, 14).setAnchors({ point: 'BOTTOM', x: 0, y: 10 });
 
     // Blizzard logo: 100x100 at BOTTOM +8, ARTWORK (accountlogin.xml:96-109) -- bottom-CENTER, not
     // bottom-right, and much smaller than this screen first drew it.
@@ -303,6 +355,34 @@ export class LoginScreen implements GlueScreen {
     ctx.input.setFocus(settings.savedAccount ? this.password : this.account);
   }
 
+  /**
+   * A texture the client authors ON TOP of a control's normal art -- a `CheckedTexture`, or a
+   * `HighlightTexture` on ADD. Starts hidden; `update()` shows it when its condition holds. Same layer
+   * as the parent, so sibling insertion order puts it above the parent's own quad.
+   */
+  private overlay(
+    parent: Widget,
+    id: string,
+    sprite: string,
+    width: number,
+    height: number,
+    blend: 'ALPHA' | 'ADD' = 'ALPHA',
+  ): Widget {
+    const texture = parent.add(new Widget('texture', id));
+    texture.layer = parent.layer;
+    texture.sprite = sprite;
+    texture.blend = blend;
+    texture.setSize(width, height).setAnchors({
+      point: 'CENTER',
+      relativeTo: parent.id,
+      relativePoint: 'CENTER',
+      x: 0,
+      y: 0,
+    });
+    texture.hide();
+    return texture;
+  }
+
   /** One edit box plus its text, at an authored size, `BOTTOM` offset and letter cap. */
   private field(
     root: Widget,
@@ -314,7 +394,11 @@ export class LoginScreen implements GlueScreen {
     maxLetters: number,
   ): Widget {
     const box = root.add(new Widget('editbox', id));
-    box.layer = 'ARTWORK';
+    // BACKGROUND, because a FrameXML `Backdrop` draws BENEATH every layer of its own frame -- including
+    // the BACKGROUND FontStrings this box carries (its caption and `$parentFill`). Our layer ladder is
+    // flat, so the stand-in quad expresses that by sitting on BACKGROUND ahead of them in insertion
+    // order, which is what keeps the placeholder visible on top of the border instead of behind it.
+    box.layer = 'BACKGROUND';
     // The authored control is a 9-slice `Backdrop`: bg `Interface\Tooltips\UI-Tooltip-Background`
     // tiled at 16, edge `Interface\Glues\Common\Glue-Tooltip-Border` at edgeSize 16, background
     // insets left 10 right 5 top 4 bottom 9 (accountlogin.xml:190-201). Our widget layer's `backdrop`
@@ -377,6 +461,17 @@ export class LoginScreen implements GlueScreen {
     void ctx.protocol.login(account, password, endpoint).catch(() => undefined);
   }
 
+  private setShown(widget: Widget | null, shown: boolean): void {
+    if (!widget) {
+      return;
+    }
+    if (shown) {
+      widget.show();
+    } else {
+      widget.hide();
+    }
+  }
+
   update(): void {
     const ctx = this.ctx;
     if (!ctx) {
@@ -403,28 +498,32 @@ export class LoginScreen implements GlueScreen {
       }
     }
 
+    // Normal/Pushed swap on the control itself; Checked and Highlight are separate quads on top, which
+    // is how the client authors all three (accountlogin.xml:579-583, gluebuttons.xml).
     if (this.saveName) {
-      this.saveName.sprite = this.saveName.checked ? 'check-mark' : 'check-up';
+      this.saveName.sprite = this.saveName.state === 'down' ? 'check-down' : 'check-up';
+      this.setShown(this.saveNameCheck, this.saveName.checked);
+      this.setShown(this.saveNameHighlight, this.saveName.hovered);
     }
 
     if (this.loginButton) {
       this.loginButton.sprite =
         this.loginButton.state === 'down'
           ? 'button-down'
-          : this.loginButton.hovered
-            ? 'button-highlight'
+          : this.loginButton.state === 'disabled'
+            ? 'button-disabled'
             : 'button-up';
-      this.loginButton.blend = this.loginButton.hovered ? 'ADD' : 'ALPHA';
+      this.setShown(this.loginHighlight, this.loginButton.hovered);
     }
 
     if (this.quitButton) {
       this.quitButton.sprite =
         this.quitButton.state === 'down'
           ? 'button-small-down'
-          : this.quitButton.hovered
-            ? 'button-small-highlight'
+          : this.quitButton.state === 'disabled'
+            ? 'button-small-disabled'
             : 'button-small-up';
-      this.quitButton.blend = this.quitButton.hovered ? 'ADD' : 'ALPHA';
+      this.setShown(this.quitHighlight, this.quitButton.hovered);
     }
 
     const dialog = loginDialog(ctx.protocol.stage, ctx.protocol.lastRefusal, ctx.protocol.retrying);
@@ -460,10 +559,14 @@ export class LoginScreen implements GlueScreen {
     this.server = null;
     this.serverText = null;
     this.saveName = null;
+    this.saveNameCheck = null;
+    this.saveNameHighlight = null;
     this.loginButton = null;
     this.loginCaption = null;
+    this.loginHighlight = null;
     this.quitButton = null;
     this.quitCaption = null;
+    this.quitHighlight = null;
     this.dialog = null;
     this.dialogText = null;
     this.dialogShown = false;
