@@ -202,21 +202,45 @@ export class GlueSceneView {
       return;
     }
 
-    const key = def.positions?.firstKeyframe?.value;
+    // Camera tracks store M2SplineKey<T> triples (`{ value, inTan, outTan }`), not bare values --
+    // `firstKeyframe` hands back that wrapper untouched (`m2/animation-block.js#firstKeyframe`,
+    // pinned by `m2/__tests__/camera.test.js`). Indexing the wrapper directly (`key[0]`) reads
+    // `undefined` off a struct and NaNs the whole frame the moment a real model supplies a key --
+    // reach through `.value` for the actual vector/float.
+    const posKey = def.positions?.firstKeyframe?.value;
     const targetKey = def.targetPositions?.firstKeyframe?.value;
+    const rollKey = def.roll?.firstKeyframe?.value;
     const base = def.positionBase;
     const targetBase = def.targetBase;
 
-    this.camera.position.set(
-      base[0] + (key ? key[0] : 0),
-      base[1] + (key ? key[1] : 0),
-      base[2] + (key ? key[2] : 0),
+    const eye = new THREE.Vector3(
+      base[0] + (posKey ? posKey.value[0] : 0),
+      base[1] + (posKey ? posKey.value[1] : 0),
+      base[2] + (posKey ? posKey.value[2] : 0),
     );
-    this.camera.lookAt(
-      targetBase[0] + (targetKey ? targetKey[0] : 0),
-      targetBase[1] + (targetKey ? targetKey[1] : 0),
-      targetBase[2] + (targetKey ? targetKey[2] : 0),
+    const target = new THREE.Vector3(
+      targetBase[0] + (targetKey ? targetKey.value[0] : 0),
+      targetBase[1] + (targetKey ? targetKey.value[1] : 0),
+      targetBase[2] + (targetKey ? targetKey.value[2] : 0),
     );
+
+    // Up = the authored roll rotated about the view axis. Same law as benilla's
+    // `Quat::from_axis_angle(fwd, cam.roll) * Vec3::Y` (`portrait/framing.rs`), with Z standing in
+    // for Y because our scene is Z-up, not Bevy's Y-up. When roll is unkeyed (or zero, as benilla's
+    // own audit found on every portrait camera it checked) this is the identity rotation and up
+    // stays the static (0, 0, 1) it always was.
+    const roll = rollKey ? rollKey.value : 0;
+    const forward = target.clone().sub(eye);
+    const up = new THREE.Vector3(0, 0, 1);
+    // A degenerate eye===target camera has no view axis to roll about; leave up static rather than
+    // feed `applyAxisAngle` a zero-length axis (a non-unit quaternion for any roll !== 0).
+    if (roll !== 0 && forward.lengthSq() > 0) {
+      up.applyAxisAngle(forward.normalize(), roll);
+    }
+    this.camera.up.copy(up);
+
+    this.camera.position.copy(eye);
+    this.camera.lookAt(target);
 
     const size = this.renderer.getSize(new THREE.Vector2());
     const aspect = size.x / Math.max(size.y, 1);

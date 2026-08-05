@@ -84,10 +84,14 @@ export class Widget {
   hovered = false;
   checked = false;
 
-  /** EditBox state. */
+  /** EditBox state. `text` always holds the real string -- password masking is a DRAW-time-only
+   * transform (`screens.ts#resolveSprite`), never applied to the stored value, since that value is
+   * what a login screen submits. */
   maxLetters = 0;
   password = false;
   caret = 0;
+  /** Selection anchor. Equal to `caret` when there is no selection (the common case). */
+  selectionAnchor = 0;
 
   /** Invoked by Enter (or pointer click on non-checkbutton). */
   onClick: (() => void) | null = null;
@@ -142,6 +146,19 @@ export class Widget {
       node = node.parent;
     }
     return true;
+  }
+
+  /**
+   * What an edit box SHOWS, as opposed to what it holds. `text` is always the real string -- a
+   * login screen submits it -- so masking lives here, at the one place every consumer (a mirrored
+   * FontString today; the renderer directly, if a future screen draws an editbox's text itself)
+   * should read from instead of `text` when putting glyphs on screen.
+   */
+  get displayText(): string {
+    if (this.kind === 'editbox' && this.password) {
+      return '•'.repeat(this.text.length);
+    }
+    return this.text;
   }
 }
 

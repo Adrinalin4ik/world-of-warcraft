@@ -43,6 +43,7 @@ export class GlueInput {
     this.focus = widget;
     if (widget && widget.kind === 'editbox') {
       widget.caret = widget.text.length;
+      widget.selectionAnchor = widget.caret;
     }
   }
 
@@ -179,20 +180,47 @@ export class GlueInput {
     }
 
     if (event.key === 'Backspace') {
-      if (target.caret > 0) {
+      if (this.hasSelection(target)) {
+        this.deleteSelection(target);
+      } else if (target.caret > 0) {
         target.text = target.text.slice(0, target.caret - 1) + target.text.slice(target.caret);
         target.caret -= 1;
+        target.selectionAnchor = target.caret;
       }
     } else if (event.key === 'Delete') {
-      target.text = target.text.slice(0, target.caret) + target.text.slice(target.caret + 1);
+      if (this.hasSelection(target)) {
+        this.deleteSelection(target);
+      } else {
+        target.text = target.text.slice(0, target.caret) + target.text.slice(target.caret + 1);
+      }
     } else if (event.key === 'ArrowLeft') {
-      target.caret = Math.max(0, target.caret - 1);
+      if (event.shiftKey) {
+        target.caret = Math.max(0, target.caret - 1);
+      } else if (this.hasSelection(target)) {
+        this.collapse(target, this.selectionStart(target));
+      } else {
+        this.collapse(target, Math.max(0, target.caret - 1));
+      }
     } else if (event.key === 'ArrowRight') {
-      target.caret = Math.min(target.text.length, target.caret + 1);
+      if (event.shiftKey) {
+        target.caret = Math.min(target.text.length, target.caret + 1);
+      } else if (this.hasSelection(target)) {
+        this.collapse(target, this.selectionEnd(target));
+      } else {
+        this.collapse(target, Math.min(target.text.length, target.caret + 1));
+      }
     } else if (event.key === 'Home') {
-      target.caret = 0;
+      if (event.shiftKey) {
+        target.caret = 0;
+      } else {
+        this.collapse(target, 0);
+      }
     } else if (event.key === 'End') {
-      target.caret = target.text.length;
+      if (event.shiftKey) {
+        target.caret = target.text.length;
+      } else {
+        this.collapse(target, target.text.length);
+      }
     } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
       this.insert(target, event.key);
     } else {
@@ -214,14 +242,56 @@ export class GlueInput {
     }
   };
 
-  /** Insert at the caret, honouring the box's `letters` cap. */
+  private hasSelection(target: Widget): boolean {
+    return target.selectionAnchor !== target.caret;
+  }
+
+  private selectionStart(target: Widget): number {
+    return Math.min(target.selectionAnchor, target.caret);
+  }
+
+  private selectionEnd(target: Widget): number {
+    return Math.max(target.selectionAnchor, target.caret);
+  }
+
+  /** Collapse to a single position -- caret and anchor together, as a plain Arrow/Home/End does. */
+  private collapse(target: Widget, position: number): void {
+    target.caret = position;
+    target.selectionAnchor = position;
+  }
+
+  /** Remove the selected range, leaving the caret (and anchor, collapsed) at its start. */
+  private deleteSelection(target: Widget): void {
+    const start = this.selectionStart(target);
+    const end = this.selectionEnd(target);
+    target.text = target.text.slice(0, start) + target.text.slice(end);
+    this.collapse(target, start);
+  }
+
+  /**
+   * Insert at the caret, honouring the box's `letters` cap. A live selection is replaced rather
+   * than inserted alongside -- typing or pasting over a selection is standard text-box behaviour.
+   */
   private insert(target: Widget, text: string): void {
-    const room = target.maxLetters > 0 ? target.maxLetters - target.text.length : text.length;
+    const hasSelection = this.hasSelection(target);
+    const start = hasSelection ? this.selectionStart(target) : target.caret;
+    const end = hasSelection ? this.selectionEnd(target) : target.caret;
+
+    const budget = hasSelection
+      ? target.text.length - (end - start)
+      : target.text.length;
+    const room = target.maxLetters > 0 ? target.maxLetters - budget : text.length;
     const slice = text.slice(0, Math.max(0, room));
+    if (!slice && hasSelection) {
+      // Nothing fits, but a selection still needs to clear on type-over.
+      this.deleteSelection(target);
+      return;
+    }
     if (!slice) {
       return;
     }
-    target.text = target.text.slice(0, target.caret) + slice + target.text.slice(target.caret);
-    target.caret += slice.length;
+
+    target.text = target.text.slice(0, start) + slice + target.text.slice(end);
+    this.collapse(target, start + slice.length);
   }
 }

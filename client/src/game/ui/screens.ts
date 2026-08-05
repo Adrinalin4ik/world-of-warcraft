@@ -10,9 +10,10 @@
 import * as THREE from 'three';
 
 import { worldClock } from '../pipeline/m2/anim/world-clock';
+import { GameSession } from '../../network/session';
 import { GlueArt } from './art';
 import { GlueInput } from './input';
-import { GlueRenderer } from './renderer';
+import { GlueRenderer, ResolvedSprite } from './renderer';
 import { GlueSceneView } from './scene/glue-scene';
 import { GlueScene } from './scene/tokens';
 import { GlueStrings } from './strings';
@@ -33,6 +34,9 @@ export interface GlueContext {
   art: GlueArt;
   strings: GlueStrings;
   input: GlueInput;
+  /** The session facade (§4.7) -- the same `GameSession` every other route is handed. Nothing in
+   * this spec consumes it yet; the login screen (spec 3) is the first screen that will. */
+  session: GameSession;
   /** Show a glue background scene, or null to tear it down. */
   setScene(scene: GlueScene | null): void;
   /** Request a state change; takes effect before the next frame. */
@@ -53,6 +57,7 @@ export class GlueApp {
   private readonly art = new GlueArt();
   private readonly input: GlueInput;
   private readonly sceneView: GlueSceneView;
+  private readonly session: GameSession;
 
   private strings: GlueStrings | null = null;
   private screens = new Map<ClientState, GlueScreen>();
@@ -62,8 +67,9 @@ export class GlueApp {
   private frame = 0;
   private lastTime = 0;
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, session: GameSession) {
     this.canvas = canvas;
+    this.session = session;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.ui = new GlueRenderer(this.renderer);
@@ -121,6 +127,7 @@ export class GlueApp {
       art: this.art,
       strings: this.strings!,
       input: this.input,
+      session: this.session,
       setScene: (scene) => this.sceneView.setScene(scene),
       go: (next) => {
         this.pending = next;
@@ -173,13 +180,16 @@ export class GlueApp {
   };
 
   /** A widget's texture: a font string rasterizes, everything else comes from the art table. */
-  private resolveSprite(item: DrawItem, scale: number): THREE.Texture | null {
+  private resolveSprite(item: DrawItem, scale: number): ResolvedSprite | null {
     const widget = item.widget;
 
     if (widget.kind === 'fontstring') {
-      return widget.font ? this.fonts.get(widget.text, widget.font, scale) : null;
+      // `displayText`, not `text`: password masking (`Widget#displayText`) lives here, at the one
+      // place a fontstring's content actually turns into glyphs.
+      return widget.font ? this.fonts.get(widget.displayText, widget.font, scale) : null;
     }
 
-    return widget.sprite ? this.art.texture(widget.sprite) : null;
+    const texture = widget.sprite ? this.art.texture(widget.sprite) : null;
+    return texture ? { texture } : null;
   }
 }

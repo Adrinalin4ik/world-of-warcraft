@@ -63,8 +63,25 @@ export function loadGlueFonts(): Promise<void> {
   return fontsPromise;
 }
 
-function cssFont(spec: FontSpec, scale: number): string {
-  return `${Math.round(spec.size * scale)}px "${spec.family}"`;
+/**
+ * The WebGL backing store rasterizes at `devicePixelRatio` (`screens.ts` calls
+ * `renderer.setPixelRatio`), but the layout `scale` passed in here is purely the layout law
+ * (`screenScale`) and knows nothing about display density. Rasterizing fonts at `scale` alone bakes
+ * a 1x-density texture that the GPU then upscales onto a denser backing store -- soft text on any
+ * HiDPI display. `density` is the actual pixel scale to rasterize at; logical (layout-unit) sizes
+ * still divide by the plain `scale`, so quad placement on screen is unaffected by display density,
+ * only sharpness is.
+ */
+function devicePixelDensity(): number {
+  return typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1;
+}
+
+function density(scale: number): number {
+  return scale * devicePixelDensity();
+}
+
+function cssFont(spec: FontSpec, pixelScale: number): string {
+  return `${Math.round(spec.size * pixelScale)}px "${spec.family}"`;
 }
 
 let measureContext: CanvasRenderingContext2D | null = null;
@@ -76,34 +93,43 @@ function sharedMeasureContext(): CanvasRenderingContext2D {
   return measureContext;
 }
 
-/** Logical-unit size of a rendered string, including padding. */
+/** Logical-unit size of a rendered string, including padding. Same units `get()`'s `size` reports. */
 export function measureText(
   text: string,
   spec: FontSpec,
   scale: number,
 ): { width: number; height: number } {
+  const pixelScale = density(scale);
   const context = sharedMeasureContext();
-  context.font = cssFont(spec, scale);
+  context.font = cssFont(spec, pixelScale);
   const metrics = context.measureText(text);
+  // Padding is rasterized at `pixelScale` (device pixels) below, so it has to come back out at the
+  // same rate it went in -- `PADDING_H` scaled by the density's DPR factor, then the whole width
+  // divided by `pixelScale`, not `scale`, to land back in logical units.
   return {
-    width: (metrics.width + PADDING_H) / scale,
+    width: (metrics.width + PADDING_H * (pixelScale / scale)) / pixelScale,
     height: spec.size + PADDING_V / scale,
   };
 }
 
-type Entry = { texture: THREE.CanvasTexture };
+/** A rasterized string: the texture plus the logical (layout-unit) size the renderer draws it at. */
+type Entry = { texture: THREE.CanvasTexture; width: number; height: number };
 
 export class FontStringTextures {
   private readonly cache = new Map<string, Entry>();
 
   /**
-   * The texture for one string. Null for empty text -- the renderer skips a widget with no texture,
-   * which is exactly right for an empty label.
+   * The texture for one string plus its logical (layout-unit) size -- a font string draws at THIS
+   * size, positioned in its widget's rect by `FontSpec.align`, never stretched to the rect
+   * (`renderer.ts`). Null for empty text -- the renderer skips a widget with no texture, which is
+   * exactly right for an empty label.
    */
-  get(text: string, spec: FontSpec, scale: number): THREE.CanvasTexture | null {
+  get(text: string, spec: FontSpec, scale: number): { texture: THREE.CanvasTexture; width: number; height: number } | null {
     if (!text) {
       return null;
     }
+
+    const pixelScale = density(scale);
 
     const key = [
       text,
@@ -111,7 +137,10 @@ export class FontStringTextures {
       spec.size,
       spec.color,
       spec.outline ? 'o' : '-',
-      Math.round(scale * 100),
+      // The cache key must carry the RASTER density, not just the layout scale -- a display change
+      // (a window dragged between monitors of different `devicePixelRatio`) must not serve a stale
+      // raster baked for the old density.
+      Math.round(pixelScale * 100),
     ].join('|');
 
     const cached = this.cache.get(key);
@@ -119,14 +148,18 @@ export class FontStringTextures {
       // LRU: move to end on cache hit
       this.cache.delete(key);
       this.cache.set(key, cached);
-      return cached.texture;
+      return cached;
     }
 
-    const font = cssFont(spec, scale);
+    const dpr = devicePixelDensity();
+    const font = cssFont(spec, pixelScale);
     const context = sharedMeasureContext();
     context.font = font;
-    const width = Math.ceil(context.measureText(text).width) + PADDING_H;
-    const height = Math.ceil(spec.size * scale) + PADDING_V;
+    const paddingH = PADDING_H * dpr;
+    const paddingV = PADDING_V * dpr;
+    const inset = paddingH / 2;
+    const width = Math.ceil(context.measureText(text).width) + paddingH;
+    const height = Math.ceil(spec.size * pixelScale) + paddingV;
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(width, 1);
@@ -138,22 +171,30 @@ export class FontStringTextures {
     target.textAlign = 'left';
 
     if (spec.outline) {
-      // The client's baked ring: one device pixel, drawn as a real stroke.
-      target.lineWidth = 2;
+      // The client's baked ring: one device pixel, drawn as a real stroke -- scaled by `dpr` along
+      // with everything else rasterized here so it stays one DEVICE pixel, not one (now smaller
+      // relative) raster pixel.
+      target.lineWidth = 2 * dpr;
       target.lineJoin = 'round';
       target.strokeStyle = '#000000';
-      target.strokeText(text, 2, canvas.height / 2);
+      target.strokeText(text, inset, canvas.height / 2);
     }
 
     target.fillStyle = spec.color;
-    target.fillText(text, 2, canvas.height / 2);
+    target.fillText(text, inset, canvas.height / 2);
 
     const texture = new THREE.CanvasTexture(canvas);
     // Match the BLP convention so `applyTexCoords` needs no special case: row 0 is v = 0.
     texture.flipY = false;
     texture.needsUpdate = true;
 
-    const entry: Entry = { texture };
+    const entry: Entry = {
+      texture,
+      // Logical units: the raster is denser (`pixelScale` includes `dpr`) but the quad it draws onto
+      // must stay the same on-screen size regardless of display density.
+      width: canvas.width / pixelScale,
+      height: canvas.height / pixelScale,
+    };
     this.cache.set(key, entry);
 
     // LRU eviction: if cache exceeds max size, evict oldest (first) entry
@@ -166,7 +207,7 @@ export class FontStringTextures {
       this.cache.delete(firstKey);
     }
 
-    return texture;
+    return entry;
   }
 
   dispose(): void {

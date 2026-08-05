@@ -15,7 +15,13 @@ import { viewportUnits } from './layout';
 import { applyTexCoords, createQuadMaterial } from './material';
 import { DrawItem } from './widget';
 
-export type SpriteResolver = (item: DrawItem) => THREE.Texture | null;
+/**
+ * What resolving a widget's texture hands back. `size` is set for a font string only -- its
+ * logical (layout-unit) rasterized size, from `FontStringTextures#get`. An art quad has none: it
+ * always fills its widget's authored rect, as it always has.
+ */
+export type ResolvedSprite = { texture: THREE.Texture; size?: { width: number; height: number } };
+export type SpriteResolver = (item: DrawItem) => ResolvedSprite | null;
 
 /** One unit quad, shared by every widget. Sub-rects come from the material's map offset/repeat. */
 const QUAD = new THREE.PlaneGeometry(1, 1);
@@ -50,10 +56,11 @@ export class GlueRenderer {
     const live = new Set<string>();
 
     items.forEach((item, index) => {
-      const texture = resolve(item);
-      if (!texture) {
+      const resolved = resolve(item);
+      if (!resolved) {
         return;
       }
+      const { texture, size } = resolved;
 
       live.add(item.widget.id);
 
@@ -76,8 +83,27 @@ export class GlueRenderer {
       applyTexCoords(entry.material, item.widget.texCoords);
 
       const { left, top, width, height } = item.rect;
-      entry.mesh.position.set(left + width / 2, top + height / 2, 0);
-      entry.mesh.scale.set(width, height, 1);
+
+      if (size) {
+        // A font string draws at its rasterized size, not stretched to the widget's rect: text.ts
+        // sizes the canvas to the glyphs' actual extent, so a fixed-size quad would squash or
+        // stretch every letter. Position within the rect by the font's horizontal alignment and
+        // always vertically centred -- there is no vertical-align concept in GlueXML fontstrings.
+        const align = item.widget.font?.align ?? 'LEFT';
+        const quadLeft =
+          align === 'CENTER'
+            ? left + (width - size.width) / 2
+            : align === 'RIGHT'
+              ? left + width - size.width
+              : left;
+        const quadTop = top + (height - size.height) / 2;
+        entry.mesh.position.set(quadLeft + size.width / 2, quadTop + size.height / 2, 0);
+        entry.mesh.scale.set(size.width, size.height, 1);
+      } else {
+        entry.mesh.position.set(left + width / 2, top + height / 2, 0);
+        entry.mesh.scale.set(width, height, 1);
+      }
+
       // Draw order, not depth: depth testing is off and every quad sits at z = 0.
       entry.mesh.renderOrder = index;
       entry.mesh.visible = true;

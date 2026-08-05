@@ -6,10 +6,15 @@
  */
 import React from 'react';
 
+import { GameSession } from '../../network/session';
 import { GlueApp } from '../../game/ui/screens';
 import { ProbeScreen, PROBE_STATE } from '../../game/ui/screens/probe';
 
-class GlueHost extends React.Component {
+interface Props {
+  session: GameSession;
+}
+
+class GlueHost extends React.Component<Props> {
   private canvas = React.createRef<HTMLCanvasElement>();
   private app: GlueApp | null = null;
 
@@ -19,7 +24,7 @@ class GlueHost extends React.Component {
       return;
     }
 
-    this.app = new GlueApp(canvas);
+    this.app = new GlueApp(canvas, this.props.session);
     this.app.register(PROBE_STATE, new ProbeScreen());
     void this.app.start(PROBE_STATE);
   }

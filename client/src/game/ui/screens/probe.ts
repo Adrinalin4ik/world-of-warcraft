@@ -105,7 +105,9 @@ export class ProbeScreen implements GlueScreen {
 
   update(): void {
     if (this.box && this.boxText) {
-      this.boxText.text = this.box.text;
+      // `displayText`, not `text`: the box's stored value is the real string (a login screen
+      // submits it); `displayText` is where password masking lives, per `Widget#displayText`.
+      this.boxText.text = this.box.displayText;
     }
     if (this.button) {
       // Three-state art, as the reference's buttons swap it.

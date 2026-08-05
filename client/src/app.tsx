@@ -42,7 +42,7 @@ const App: React.FC = () => {
       // The glue app -- the in-canvas pre-world screens. Spec 3 moves this onto "/" when the
       // transcribed AccountLogin replaces the probe screen.
       path: "/glue",
-      element: <GlueHost />
+      element: <GlueHost session={gameSession} />
     },
   ], {
     // Serve the same route table from a sub-path when the app is not at the domain root.
