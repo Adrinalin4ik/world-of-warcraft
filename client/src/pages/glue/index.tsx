@@ -7,8 +7,10 @@
 import React from 'react';
 
 import { GameSession } from '../../network/session';
-import { GlueApp } from '../../game/ui/screens';
-import { ProbeScreen, PROBE_STATE } from '../../game/ui/screens/probe';
+import { ClientState, GlueApp } from '../../game/ui/screens';
+import { CharacterStubScreen } from '../../game/ui/screens/character-stub';
+import { LoginScreen } from '../../game/ui/screens/login';
+import { RealmStubScreen } from '../../game/ui/screens/realm-stub';
 
 interface Props {
   session: GameSession;
@@ -25,8 +27,10 @@ class GlueHost extends React.Component<Props> {
     }
 
     this.app = new GlueApp(canvas, this.props.session);
-    this.app.register(PROBE_STATE, new ProbeScreen());
-    void this.app.start(PROBE_STATE);
+    this.app.register(ClientState.Login, new LoginScreen());
+    this.app.register(ClientState.RealmList, new RealmStubScreen());
+    this.app.register(ClientState.CharSelect, new CharacterStubScreen());
+    void this.app.start(ClientState.Login);
   }
 
   componentWillUnmount(): void {

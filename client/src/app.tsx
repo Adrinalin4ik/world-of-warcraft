@@ -2,11 +2,8 @@ import React from 'react';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import './app.scss';
 import { sessionForSearch } from './network/offline-session';
-import Auth from './pages/auth/auth';
-import CharactersScreen from './pages/characters';
 import GameScreen from './pages/game';
 import GlueHost from './pages/glue';
-import RealmsScreen from './pages/realms/realms';
 
 
 const App: React.FC = () => {
@@ -19,28 +16,16 @@ const App: React.FC = () => {
 
   const router = createBrowserRouter([
     {
+      // The glue app -- the in-canvas pre-world screens, starting with the transcribed AccountLogin.
       path: "/",
-      element: <Auth session={gameSession} />
-    },
-    {
-      path: "/realms",
-      element:  <RealmsScreen session={gameSession}/>,
-    },
-    {
-      path: "/characters",
-      element: <CharactersScreen session={gameSession} />,
-    },
-    {
-      path: "/create-character",
-      element: <div>create character</div>
+      element: <GlueHost session={gameSession} />
     },
     {
       path: "/game",
       element: <GameScreen session={gameSession} />
     },
     {
-      // The glue app -- the in-canvas pre-world screens. Spec 3 moves this onto "/" when the
-      // transcribed AccountLogin replaces the probe screen.
+      // Kept as an alias of "/" so existing links and bookmarks still work.
       path: "/glue",
       element: <GlueHost session={gameSession} />
     },

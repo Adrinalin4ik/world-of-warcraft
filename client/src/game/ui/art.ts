@@ -109,21 +109,3 @@ export class GlueArt {
     this.defs.clear();
   }
 }
-
-/**
- * The art the throwaway probe screen draws (Task 11). Every path verified present on the asset
- * host. This table dies with the probe in spec 3, when the real `AccountLogin` table replaces it.
- */
-export const PROBE_ART: Record<string, SpriteDef> = {
-  logo: { path: 'Interface\\Glues\\Common\\Glues-WoW-Logo', size: [400, 200] },
-  'button-up': { path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Up-Blue', size: [128, 32] },
-  'button-down': { path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Down-Blue', size: [128, 32] },
-  'button-highlight': {
-    path: 'Interface\\Glues\\Common\\Glue-Panel-Button-Highlight-Blue',
-    size: [128, 32],
-  },
-  'editbox-left': { path: 'Interface\\ChatFrame\\UI-ChatInputBorder-Left', size: [128, 32] },
-  'editbox-right': { path: 'Interface\\ChatFrame\\UI-ChatInputBorder-Right', size: [128, 32] },
-  'dialog-background': { path: 'Interface\\DialogFrame\\UI-DialogBox-Background' },
-  'dialog-border': { path: 'Interface\\DialogFrame\\UI-DialogBox-Border' },
-};
