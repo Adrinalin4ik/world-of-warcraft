@@ -11,7 +11,7 @@
 // Type-only, and it has to stay that way: `backdrop.ts` imports `TexCoords` from here, so a value
 // import in either direction would close a runtime cycle. `isolatedModules` guarantees babel elides
 // this one.
-import type { BackdropDef } from './backdrop';
+import type { BackdropDef, Insets } from './backdrop';
 import { Anchor, LayoutNode, Rect, resolveAnchors, Viewport } from './layout';
 import { DrawLayer, OrderKey, Strata, compareOrder } from './framexml/order';
 
@@ -128,6 +128,24 @@ export class Widget {
    * what a login screen submits. */
   maxLetters = 0;
   password = false;
+  /**
+   * EditBox `TextInsets`: the rect the engine draws typed text in is this box shrunk by them. Held
+   * here (rather than only as anchors on the text region) because it is authored state a later
+   * `SetTextInsets` has to be able to re-apply, and because the caret needs the same rect.
+   */
+  textInsets: Insets = { left: 0, right: 0, top: 0, bottom: 0 };
+  /**
+   * The FontString an EditBox draws its typed text in -- the client's engine-owned "special" font
+   * string, which FrameXML declares as an unnamed, unanchored direct `<FontString>` child of the box
+   * (accountlogin.xml:234) purely to say which font that text is in. The loader ADOPTS that declared
+   * child into this slot (`EDITBOX.SetTextRegion`), and whoever is running the tree mirrors the box's
+   * `displayText` into it -- which is exactly what the hand-written login screen does by hand.
+   *
+   * Nothing in this renderer rasterizes glyphs for an `editbox` widget itself
+   * (`screens.ts#resolveSprite` only does for `kind === 'fontstring'`), so this slot is how an edit
+   * box gets visible text at all.
+   */
+  textRegion: Widget | null = null;
   caret = 0;
   /** Selection anchor. Equal to `caret` when there is no selection (the common case). */
   selectionAnchor = 0;

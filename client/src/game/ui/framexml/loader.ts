@@ -603,19 +603,17 @@ class DocumentLoader {
    * "special" font string (an EditBox's text font, a message frame's line font), which real FrameXML
    * attaches at OVERLAY.
    *
-   * A GAP THAT MATTERS, reported per EditBox by `applyEditBox` (not from here, since an EditBox that
-   * declares no font string at all is the worst case, not an exempt one): the reference
-   * also ASSIGNS an EditBox's direct `<FontString>` as the box's text region (`adopt_text_region`), and
-   * this runtime has nothing to assign into. Nor does the renderer cover for it -- `resolveSprite`
-   * (`screens.ts`) rasterizes text ONLY for `kind === 'fontstring'`, so an `editbox` widget falls
-   * through to the sprite branch and draws no glyphs at all. The only edit box whose text is visible
-   * today is mirrored by hand, per screen, per frame (`screens/login.ts` copies `displayText` into a
-   * FontString it creates itself).
+   * ON AN `<EditBox>`, this pass is also the ADOPTION: the FIRST such child is handed to the box as
+   * its text region (`SetTextRegion`), which is what the client's engine does implicitly and what the
+   * reference does under the name `adopt_text_region`. `accountlogin.xml:234` is the shape --
+   * `<FontString inherits="GlueEditBoxFont"/>`, unnamed, no size, no anchors: a font DECLARATION for
+   * text the engine draws inside the box's `<TextInsets>`, not a region with a place of its own. The
+   * anchors come from the insets (`kinds.ts#anchorTextRegion`), which is why nothing is lost by this
+   * element having none.
    *
-   * So an XML-loaded `<EditBox>` currently draws its backdrop and nothing typed -- which is the account
-   * and password fields of `AccountLogin.xml`. Closing it is a `widget.ts`/renderer change (either an
-   * `editbox` branch in `resolveSprite`, or a text-region slot on `Widget` that this pass assigns the
-   * declared child into), deliberately not made from inside the loader.
+   * FROM THE DECLARED CHILD, never by searching the tree -- the reference records a find-first
+   * adoption that reached into a `<Layers>` block and took a chat header, so typing overwrote the
+   * label. `element.children` here is direct children only, and the first is the one the engine takes.
    */
   private applySpecialFontStrings(
     element: XmlElement,
@@ -623,6 +621,8 @@ class DocumentLoader {
     selfName: string,
     dbg: string,
   ): void {
+    const isEditBox = element.tag.toLowerCase() === 'editbox';
+    let adopted = false;
     for (const raw of element.children) {
       if (raw.tag.toLowerCase() !== 'fontstring') {
         continue;
@@ -637,9 +637,23 @@ class DocumentLoader {
         this.applyRegionLayout(region, regionWrapper, selfName, dbg);
         this.applyFontStringFont(region, regionWrapper, dbg);
         this.applyRegionVisual(region, regionWrapper, false, dbg);
+        if (isEditBox && !adopted) {
+          this.callMethod(wrapper, 'SetTextRegion', [regionWrapper], dbg);
+          adopted = true;
+        }
       } finally {
         this.rt.vm.unref(regionWrapper);
       }
+    }
+    // The case that has no font at all to draw with. Reported here rather than for every EditBox,
+    // because this IS the one where nothing renders the typed text -- `resolveSprite` (`screens.ts`)
+    // rasterizes glyphs only for `kind === 'fontstring'`, so a box with no adopted region has no
+    // glyphs anywhere.
+    if (isEditBox && !adopted) {
+      this.warnOnce(
+        'editbox:no-text-region',
+        `${dbg}: an <EditBox> with no direct-child <FontString> has no text region to adopt, and nothing else renders an editbox widget's typed text -- this box draws its border and nothing typed`,
+      );
     }
   }
 
@@ -1079,21 +1093,12 @@ class DocumentLoader {
   /**
    * `<EditBox>`: the letter cap, the text insets, and the config flags.
    *
-   * Reported unconditionally here, for EVERY EditBox, and not from the `<FontString>` pass where it
-   * started: an EditBox that declares NO font string is exactly the one nothing renders text for, so
-   * hanging the warning off a declared child reported every case except the worst one. Nothing in this
-   * engine draws an `editbox` widget's typed text at all -- `screens.ts#resolveSprite` rasterizes text
-   * only for `kind === 'fontstring'`, and the one visible edit box today is mirrored by hand, per
-   * frame, in `screens/login.ts`. The reference assigns the declared child as the box's text region
-   * (`adopt_text_region`); there is no slot here to assign into, so this is a renderer/`widget.ts`
-   * follow-up, named in the report rather than worked around from the loader.
+   * The text REGION is not here: it is the declared direct-child `<FontString>`, adopted by
+   * `applySpecialFontStrings` above, which is also where the "this box has none" warning lives now.
+   * `SetTextInsets` below is what positions that region, and it re-anchors an already-adopted one, so
+   * the two passes are order-independent.
    */
   private applyEditBox(element: XmlElement, wrapper: LuaRef, dbg: string): void {
-    this.warnOnce(
-      'editbox:no-text-region',
-      `${dbg}: nothing renders an <EditBox>'s typed text in this runtime (no text-region slot to adopt a <FontString> into, and resolveSprite rasterizes only font strings) -- an XML-loaded EditBox draws its backdrop and nothing typed`,
-    );
-
     const letters = num(attr(element, 'letters'));
     if (letters !== undefined) {
       this.callMethod(wrapper, 'SetMaxLetters', [letters], dbg);

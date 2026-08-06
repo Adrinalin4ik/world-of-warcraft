@@ -306,6 +306,39 @@ const CHECKBUTTON: MethodTable = {
   GetCheckedTexture: (ctx, self) => [ctx.wrapper(ensureCheckedTextureId(ctx, self))],
 };
 
+/**
+ * Anchors an EditBox's adopted text region to the box's rect shrunk by its `TextInsets`.
+ *
+ * Two opposing anchors rather than a size, so `resolveAnchors` derives the rect and nothing here
+ * restates the arithmetic -- and `y` is FrameXML's (+up), so the BOTTOMRIGHT anchor's `+bottom` lifts
+ * the bottom edge. The authored insets on the login boxes have NO top (accountlogin.xml:235), which is
+ * the whole reason this cannot be a "centre it" shortcut: the text is centred in the box shrunk from
+ * the bottom only, so it rides slightly high, and that is what the client draws.
+ */
+function anchorTextRegion(box: Widget): void {
+  const region = box.textRegion;
+  if (region === null) {
+    return;
+  }
+  const insets = box.textInsets;
+  region.setAnchors(
+    {
+      point: 'TOPLEFT',
+      relativeTo: box.id,
+      relativePoint: 'TOPLEFT',
+      x: insets.left,
+      y: -insets.top,
+    },
+    {
+      point: 'BOTTOMRIGHT',
+      relativeTo: box.id,
+      relativePoint: 'BOTTOMRIGHT',
+      x: -insets.right,
+      y: insets.bottom,
+    },
+  );
+}
+
 const EDITBOX: MethodTable = {
   SetText: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
@@ -331,7 +364,47 @@ const EDITBOX: MethodTable = {
     widgetOf(ctx, self).maxLetters = Number(args[0] ?? 0);
     return [];
   },
-  SetTextInsets: notImplemented('SetTextInsets', 'widget.ts has no text-inset field yet'),
+  // SetTextInsets(left, right, top, bottom). Real, now that `Widget` has the field: the insets are
+  // what positions the adopted text region, so re-anchoring here is not a bonus -- a `SetTextInsets`
+  // after the adoption (or a document whose `<TextInsets>` is applied after its `<FontString>`, which
+  // is the order `loader.ts`'s steps happen to run in) would otherwise leave the text where the
+  // previous insets put it.
+  SetTextInsets: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    widget.textInsets = {
+      left: Number(args[0] ?? 0),
+      right: Number(args[1] ?? 0),
+      top: Number(args[2] ?? 0),
+      bottom: Number(args[3] ?? 0),
+    };
+    anchorTextRegion(widget);
+    return [];
+  },
+
+  /**
+   * SetTextRegion(fontString) -- OURS, not the client's API.
+   *
+   * The client's engine does this implicitly: an `<EditBox>`'s declared direct-child `<FontString>` IS
+   * the region it draws typed text in, and there is no Lua call for it because no addon ever needs
+   * one. This runtime materializes documents by calling the object model like an addon does
+   * (`loader.ts`'s one decision), so the adoption needs a door, and this is it. The reference does the
+   * same thing under the name `adopt_text_region`.
+   *
+   * Takes the DECLARED child, which is the caller's job to pass -- `loader.ts` passes the first direct
+   * `<FontString>` of the box and nothing else. Adopting by searching the subtree instead is what once
+   * grabbed a header out of a `<Layers>` block, so typing into the box overwrote a label.
+   */
+  SetTextRegion: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const regionId = ctx.frameIdOf(args[0]);
+    const region = regionId === null ? null : ctx.registry.widget(regionId);
+    if (region === null || region.kind !== 'fontstring') {
+      throw new Error('SetTextRegion: the text region must be a FontString');
+    }
+    widget.textRegion = region;
+    anchorTextRegion(widget);
+    return [];
+  },
   SetPassword: (ctx, self, args) => {
     widgetOf(ctx, self).password = Boolean(args[0]);
     return [];
