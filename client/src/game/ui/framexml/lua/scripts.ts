@@ -231,11 +231,16 @@ const SCRIPT_METHODS: MethodTable = {
   GetScript: (ctx, self, args) => {
     const name = String(args[0] ?? '');
     const handler = getScriptHandler(self, name);
+    if (handler === null) {
+      return [null];
+    }
     // Not the stored handle itself: `SetScript`/module storage owns that one and will `unref` it on
-    // replacement or clear. Handing it out bare would leave Lua code holding a handle whose registry
-    // slot can be freed out from under it the moment the script is next replaced -- the same
-    // use-after-free the retain rule protects `SetScript`'s own argument from, just on the read side.
-    return [handler === null ? null : ctx.vm.dup(handler)];
+    // replacement or clear, and a plain `dup` minted a SECOND handle with no owner -- pinned in the
+    // registry forever, since nothing on the return path ever frees it. `transfer` marks that second
+    // handle for exactly one push: the boundary frees its slot the instant Lua has its own reference,
+    // so this leaks nothing while still giving the caller (`local old = self:GetScript(...)`, the
+    // standard "wrap the existing handler" idiom) a handle that survives the original being replaced.
+    return [ctx.vm.transfer(ctx.vm.dup(handler))];
   },
 };
 

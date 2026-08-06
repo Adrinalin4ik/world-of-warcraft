@@ -44,6 +44,31 @@ function unbox(ref: LuaRef): number {
   return (ref as unknown as LuaRefBox).registryIndex;
 }
 
+/**
+ * A `LuaRef` marked for a ONE-TIME trip across the boundary: whatever pushes it (a method's or a
+ * registered function's result, so far the only place one of these should ever be built) also frees
+ * the registry slot immediately after, because nothing else owns it past that push.
+ *
+ * This exists opposite a BORROWED return like `ctx.wrapper(id)` -- `FrameRegistry` owns that handle
+ * permanently and releases it itself in `reset()`, so pushing it must NOT also release it, or the next
+ * read of the same frame's wrapper would find its registry slot already handed to something else. A
+ * handle minted just to satisfy one return value (`vm.dup(existing)`, when `existing` is not
+ * `ctx.wrapper`'s permanent handle) has no such owner, so wrap it in `transfer` instead of returning it
+ * bare -- otherwise it is pinned in the registry forever, which is exactly the bug `GetScript` had
+ * before this type existed: it returned a bare `dup`, and nothing downstream ever released it.
+ */
+export type LuaTransfer = { readonly __luaTransfer: unique symbol };
+
+type LuaTransferBox = { readonly transferIndex: number };
+
+function boxTransfer(registryIndex: number): LuaTransfer {
+  return { transferIndex: registryIndex } as unknown as LuaTransfer;
+}
+
+function isTransferBox(value: unknown): value is LuaTransferBox {
+  return typeof value === 'object' && value !== null && 'transferIndex' in value;
+}
+
 /** A Lua state, typed just widely enough for what this file calls on it. */
 type LuaState = unknown;
 
@@ -215,6 +240,15 @@ export class LuaVM {
     return typeof value === 'object' && value !== null && 'registryIndex' in value;
   }
 
+  /**
+   * Marks `ref` as a one-time transfer for the NEXT time it is pushed (see `LuaTransfer`'s docstring).
+   * `ref` itself must not be used again after this -- the same registry slot, not a fresh one, is what
+   * gets freed once it is pushed, so this is a relabeling of the handle's ownership, not a copy of it.
+   */
+  transfer(ref: LuaRef): LuaTransfer {
+    return boxTransfer(unbox(ref));
+  }
+
   dispose(): void {
     lua.lua_close(this.L);
   }
@@ -247,6 +281,12 @@ export class LuaVM {
       }
     } else if (typeof value === 'string') {
       lua.lua_pushstring(this.L, value);
+    } else if (isTransferBox(value)) {
+      // Push the value the slot holds, THEN free the slot -- Lua now has its own reference (the
+      // stack, or wherever the caller of `registerFunction`/`call` puts the result), and this
+      // registry slot was never going to be used again.
+      lua.lua_rawgeti(this.L, lua.LUA_REGISTRYINDEX, value.transferIndex);
+      lauxlib.luaL_unref(this.L, lua.LUA_REGISTRYINDEX, value.transferIndex);
     } else if (this.isRef(value)) {
       this.pushRef(value);
     } else {
