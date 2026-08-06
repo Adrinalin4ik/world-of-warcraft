@@ -33,6 +33,23 @@ const PADDING_V = 6;
 /** Maximum entries in the rasterized-text cache before LRU eviction. */
 const TEXTURE_CACHE_MAX = 256;
 
+/**
+ * The reverse of `FONT_FILES`: what `FontString:SetFont(fontFile, height, flags)` passes is the file
+ * PATH the client ships, not the family name widgets otherwise ask for by name (`FontSpec.family`,
+ * `SetFontObject`'s eventual target). Matched case-insensitively and slash-insensitively, since
+ * FrameXML spells the same path both ways across files. Null when the path names a face we did not
+ * bundle -- `SetFont` no-ops on that face rather than guessing one.
+ */
+export function familyForFontFile(fontFile: string): string | null {
+  const needle = fontFile.replace(/\//g, '\\').toLowerCase();
+  for (const [family, path] of Object.entries(FONT_FILES)) {
+    if (path.toLowerCase() === needle) {
+      return family;
+    }
+  }
+  return null;
+}
+
 let fontsPromise: Promise<void> | null = null;
 
 /**

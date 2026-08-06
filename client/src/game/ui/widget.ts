@@ -60,6 +60,8 @@ export interface FontSpec {
 }
 
 let nextWidgetId = 0;
+/** Backs `Widget#linkStamp` -- see its doc comment. */
+let nextLinkStamp = 0;
 
 export class Widget {
   readonly id: string;
@@ -74,11 +76,15 @@ export class Widget {
   /** Born at the parent's level + 1; see `framexml/order.ts` for why the tie matters. */
   frameLevel = 0;
   /**
-   * UNUSED until plan 2: never assigned, so this is permanently 0. `orderKey` below sorts on
-   * `entry.sequence` (a DFS index) instead. Plan 2's `Show` and `SetFrameLevel` give this field the
-   * live list position that makes it real.
+   * The widget's position in its draw bucket's live list -- a global monotonic counter, standing in
+   * for the client's per-bucket tail pointer. Assigned once at construction (so a screen built once
+   * and never re-shown draws in declaration order, unchanged from before this field went live) and
+   * bumped by `restamp()` -- called from `show()` and from the frame and region methods (Task 3's
+   * `SetFrameLevel`/`SetFrameStrata`) whenever the value they touch actually CHANGES. A same-value
+   * `SetFrameLevel` must NOT call `restamp()`: doing so on a no-op set is what makes a frame jump to
+   * the front of its bucket for no reason -- the bug `lua/methods/frame.ts` exists to avoid.
    */
-  linkStamp = 0;
+  linkStamp = nextLinkStamp++;
   anchors: Anchor[] = [];
   width = 0;
   height = 0;
@@ -190,6 +196,12 @@ export class Widget {
 
   show(): void {
     this.shown = true;
+    this.restamp();
+  }
+
+  /** Moves this widget to the tail of its draw bucket. See `linkStamp`'s doc comment for the rule. */
+  restamp(): void {
+    this.linkStamp = nextLinkStamp++;
   }
 
   hide(): void {
@@ -230,18 +242,18 @@ export interface DrawItem {
 }
 
 /**
- * `linkStamp` is the widget's DFS index -- a STAND-IN for the client's live list position, which is
- * re-stamped to the bucket tail when a frame is shown or its strata/level changes. Static DFS order
- * is right for a screen built once and never re-shown, which is every screen today. `Show` and
- * `SetFrameLevel` make it live in plan 2; until then, do not read this as the client's rule.
+ * `linkStamp` is now genuinely live (see `Widget#linkStamp`/`restamp`): `strata`/`frameLevel` group a
+ * bucket, and `linkStamp` orders within it exactly as the client's own tail-append does. `sequence`
+ * (this walk's DFS index) rides along as `declarationSeq` -- a defensive tie-break only, since
+ * `linkStamp` is a global monotonic counter and two widgets sharing one is not expected to happen.
  */
 const orderKey = (entry: { widget: Widget; sequence: number }): OrderKey => ({
   strata: entry.widget.strata,
   frameLevel: entry.widget.frameLevel,
   layer: entry.widget.layer,
   isFontString: entry.widget.kind === 'fontstring',
-  linkStamp: entry.sequence,
-  declarationSeq: 0,
+  linkStamp: entry.widget.linkStamp,
+  declarationSeq: entry.sequence,
 });
 
 export class WidgetRoot {
