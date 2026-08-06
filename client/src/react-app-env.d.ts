@@ -132,6 +132,9 @@ declare module '*.module.sass' {
 
 declare module 'easy-mediasoup-v3-client';
 declare module 'react-joystick';
+// fengari ships no type declarations of its own; game/ui/framexml/lua/vm.ts is the only caller
+// and narrows the untyped surface itself as it uses it.
+declare module 'fengari';
 // Type definitions for Physijs
 // Project: http://chandlerprall.github.io/Physijs/
 // Definitions by: Satoru Kimura <https://github.com/gyohk>

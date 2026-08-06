@@ -9,7 +9,7 @@
     "test": "node scripts/test.js",
     "build:beta": "cross-env NODE_ENV=production npm run build",
     "proxy": "node websockify.js",
-    "proxy1": "npm run proxy 3724 logon.nw-wow.ru:3724",
+    "proxy1": "npm run proxy 3724 projectrx.net:3724",
     "proxy2": "npm run proxy 8086 95.181.139.52:8086",
     "build:gh-pages": "cross-env NODE_ENV=production PUBLIC_URL=/world-of-warcraft node scripts/build.js && node scripts/gh-pages-postbuild.js"
   },
@@ -43,6 +43,7 @@
     "easy-mediasoup-v3-client": "2.1.42",
     "enable3d": "^0.25.3",
     "eslint-config-react-app": "^7.0.1",
+    "fengari": "^0.1.5",
     "file-loader": "6.2.0",
     "fs-extra": "^11.1.0",
     "gl-matrix": "^3.4.3",
