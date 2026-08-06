@@ -15,6 +15,7 @@
  *   - TEXTURE / FONTSTRING: everything else, on the leaf it actually belongs to.
  */
 import { FrameMethod, MethodContext, MethodTable, registerMethods } from '../object';
+import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
 import { Layer, Widget } from '../../../widget';
 import { familyForFontFile, measureText } from '../../../text';
@@ -106,13 +107,104 @@ function resolveRelativeTo(ctx: MethodContext, self: number, value: unknown): st
   return ctx.registry.widget(id)!.id;
 }
 
+/**
+ * How deep a `Show`/`Hide` may re-enter itself before this gives up.
+ *
+ * `ChangedOptionsDialog_OnShow` calls `self:Hide()` -- a handler hiding the very frame whose showing
+ * fired it is the ordinary case, not a pathology, so one level of re-entry has to work. The engine has
+ * no limit here at all and relies on the UI not being written in a loop; a browser cannot afford that
+ * bet, since a `Show`/`Hide` cycle between two frames would hang the tab rather than print a stack.
+ */
+const MAX_VISIBILITY_DEPTH = 16;
+let visibilityDepth = 0;
+
+/**
+ * Fires `OnShow`/`OnHide` for every frame in `widget`'s subtree whose VISIBILITY just changed.
+ *
+ * THE SEMANTICS, which are the whole reason this is a walk and not a single call: the engine's
+ * `OnShow` fires for each frame that BECOMES VISIBLE, not for the one whose `Show()` was called. A
+ * frame is visible only if every ancestor is too (`Widget#visible`), so flipping one frame's own flag
+ * changes the visibility of itself plus every descendant that is already `shown` -- and of nothing
+ * inside a descendant that is hidden in its own right, which is why a `shown === false` child prunes
+ * the walk instead of being skipped-but-descended.
+ *
+ * PARENT FIRST, and re-checked after each handler: a parent's `OnShow` that hides the parent again
+ * (`ChangedOptionsDialog_OnShow` -> `ShowChangedOptionWarnings()` is false -> `self:Hide()`) must stop
+ * its children's `OnShow` from firing, exactly as it does in the client. The nested `Hide()` has by
+ * then fired the subtree's `OnHide` through this same function.
+ *
+ * A HANDLER THAT RAISES does not stop the walk and does not propagate: the engine hands a script
+ * error to the error handler and lets the call that triggered it return normally, and one broken
+ * dialog must not abort the screen change that was showing it. `reportScriptError` is where those go.
+ */
+function cascadeVisibility(ctx: MethodContext, widget: Widget, handler: 'OnShow' | 'OnHide'): void {
+  if (visibilityDepth >= MAX_VISIBILITY_DEPTH) {
+    warnOnce(
+      `${handler}: visibility cascade nested ${MAX_VISIBILITY_DEPTH} deep and was cut off -- a Show/Hide handler is showing or hiding in a loop`,
+    );
+    return;
+  }
+  visibilityDepth += 1;
+  try {
+    const id = ctx.registry.idOfWidget(widget);
+    if (id !== null) {
+      const error = invokeScriptHandler(ctx, id, handler);
+      if (error !== null) {
+        const name = ctx.registry.nameOf(id) ?? widget.id;
+        reportScriptError(`${name}: ${handler}`, error.message);
+      }
+      // The handler may have flipped this frame's own flag (the `self:Hide()` case above), in which
+      // case the nested call has already dealt with the subtree and descending again would fire the
+      // opposite handler's children twice.
+      if (widget.shown !== (handler === 'OnShow')) {
+        return;
+      }
+    }
+    // A copy: a handler is free to create or destroy children, and the client's dialogs do.
+    for (const child of [...widget.children]) {
+      if (child.shown) {
+        cascadeVisibility(ctx, child, handler);
+      }
+    }
+  } finally {
+    visibilityDepth -= 1;
+  }
+}
+
 const REGION: MethodTable = {
+  // The TRANSITION is what dispatches, not the call. `Widget#show` already guards on an unchanged
+  // flag (per-frame code calls it idempotently), and the same guard has to be visible here: an
+  // `OnShow` fired on every tick for a frame that was already up would re-run every dialog's
+  // initialization forever.
+  //
+  // `visible`, not `shown`, decides whether anything is dispatched: showing a frame inside a hidden
+  // ancestor changes nothing about what is on screen, so no `OnShow` is owed. That is also what makes
+  // the boot sequence work out -- every glue screen is authored `hidden="true"`, so their children's
+  // `OnShow` waits for `SetGlueScreen("login")` to show the screen itself, which is precisely when the
+  // client fires them.
   Show: (ctx, self) => {
-    widgetOf(ctx, self).show();
+    const widget = widgetOf(ctx, self);
+    if (widget.shown) {
+      return [];
+    }
+    widget.show();
+    if (widget.visible) {
+      cascadeVisibility(ctx, widget, 'OnShow');
+    }
     return [];
   },
   Hide: (ctx, self) => {
-    widgetOf(ctx, self).hide();
+    const widget = widgetOf(ctx, self);
+    // Read BEFORE the flag moves: afterwards `visible` is false either way and cannot tell a frame
+    // that was on screen from one that was already hidden by an ancestor.
+    const wasVisible = widget.visible;
+    if (!widget.shown) {
+      return [];
+    }
+    widget.hide();
+    if (wasVisible) {
+      cascadeVisibility(ctx, widget, 'OnHide');
+    }
     return [];
   },
   // The widget's OWN flag, not the ancestor chain -- `IsVisible` below is the one that walks up.

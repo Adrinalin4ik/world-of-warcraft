@@ -46,6 +46,7 @@ import { parseToc } from './toc';
 import { parseXml } from './xml';
 import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
+import { drainScriptErrors } from './lua/scripts';
 import { FrameRegistry, MethodContext, installObjectModel } from './lua/object';
 import { LuaVM } from './lua/vm';
 import { installLoginApi } from './lua/api/login';
@@ -180,6 +181,10 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
   const { order, texts, tocMissing } = await prefetch(stopAfter);
 
   const vm = new LuaVM();
+  // The queue is module-level (see `scripts.ts`), so anything a PREVIOUS runtime's last cascade left
+  // behind would otherwise be attributed to this boot's report. Discarded, not reported: it was already
+  // logged to the console when it happened, under the screen that caused it.
+  drainScriptErrors();
   installCompat(vm);
   const registry = new FrameRegistry(options.root);
   const ctx = installObjectModel(vm, registry);
@@ -242,6 +247,11 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
   if (screenError !== null) {
     report.errors.push(`SetGlueScreen("login"): ${screenError.message}`);
   }
+  // Showing the screen is what fires every newly-visible frame's `OnShow` (`methods/region.ts`), and
+  // one of those raising must not abort the screen change -- so those failures are queued rather than
+  // thrown, and this is where they join the report. Drained AFTER `SetGlueScreen`, since that call is
+  // the one that triggers the whole cascade.
+  report.errors.push(...drainScriptErrors());
 
   await registerTreeArt(options.art, options.root);
 

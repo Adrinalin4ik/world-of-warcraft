@@ -182,6 +182,33 @@ export function compileScriptHandler(
 }
 
 /**
+ * Errors raised by a handler this runtime fired from JS rather than from the loader.
+ *
+ * The loader owns a `LoadReport` and pushes an `OnLoad` failure straight into it. A handler fired from
+ * a WIDGET METHOD -- `Show()`'s `OnShow` cascade, in `methods/region.ts` -- has no report in reach and
+ * must not throw either: the engine routes a script error to the error handler and lets the call that
+ * triggered it return, so re-raising out of `Show` would abort whatever piece of the client's Lua
+ * happened to be showing a frame. So the message is queued here and `runtime.ts` drains it into the
+ * load report after the boot sequence, which is the one place these are worth reading.
+ *
+ * Console too, immediately: a cascade fired long after the load report was printed (a dialog opening
+ * ten minutes in) would otherwise sit in this list unread.
+ */
+const pendingScriptErrors: string[] = [];
+
+/** Records a handler failure. `where` should name the frame and the handler. */
+export function reportScriptError(where: string, message: string): void {
+  const line = `${where}: ${message}`;
+  pendingScriptErrors.push(line);
+  console.error(`framexml: ${line}`);
+}
+
+/** Takes and clears the queued handler failures. `runtime.ts` calls this once per boot. */
+export function drainScriptErrors(): string[] {
+  return pendingScriptErrors.splice(0, pendingScriptErrors.length);
+}
+
+/**
  * THE calling convention, in one place. Sets the legacy globals, calls positionally as
  * `(self, ...args)`, and restores the previous globals afterwards no matter how the call came back --
  * a handler that itself fires another handler (directly, or via `invokeScriptHandler` again) must see
