@@ -123,14 +123,30 @@ Transcribed from benilla, because every one of these has a bug attached to it:
   anchors substitute against its **parent's** name, while its regions and children substitute against
   **its own**.
 
-## 6. Draw order — a correction to code we already shipped
+## 6. Draw order — an extension, not the correction I first claimed
 
-benilla's `order.rs` is the part of this port that changes existing behaviour, and it says our current
-model is wrong in the same way theirs was before they fixed it.
+benilla's `order.rs` is the part of this port that changes existing rendering behaviour.
 
-Today `WidgetRoot#drawList` sorts by layer and then by insertion order within the tree, so a frame's
-regions stay grouped behind their frame. The client does not do that. The real order is one ascending
-sort over a single packed key:
+**First, a correction to an earlier draft of this spec.** I wrote that `WidgetRoot#drawList` groups a
+frame's regions behind their frame, the mistake benilla shipped and fixed. It does not.
+`widget.ts:265-270` sorts by layer index first and insertion order second, **globally over the whole
+tree** — so "the draw layer outranks the frame" is already true here, and the interleave benilla's
+regression test protects is already our behaviour. Our base is right; what follows is what is missing
+from it, which is a smaller and lower-risk change than a correction would have been.
+
+Four gaps against the client's key:
+
+- **Strata is conflated with layer.** `Layer` currently carries a sixth member, `DIALOG`, which in the
+  client is not a draw layer at all — it is a *frame strata*, a separate and higher-ranked axis. The
+  real layer ladder is five: BACKGROUND, BORDER, ARTWORK, OVERLAY, HIGHLIGHT. Splitting these is the
+  bulk of this task, and it is a breaking change to every screen that sets `layer = 'DIALOG'`.
+- **No frame level**, so `SetFrameLevel` has nothing to write to and the `GetFrameLevel() - 1` idiom
+  cannot work.
+- **No texture-before-fontstring rank** within a layer.
+- **No link-stamp**: we use static DFS insertion order where the client uses live list position,
+  re-stamped when a frame is shown, changes strata, or has its level changed.
+
+The full key, most- to least-significant:
 
 ```
 stratum ▸ frame level ▸ DRAW LAYER ▸ fontstring? ▸ frame link-stamp ▸ is-region ▸ sub-level ▸ decl seq
