@@ -8,6 +8,14 @@
  *
  * Text entry is a real edit box -- printable keys, backspace/delete, arrows, home/end and paste. In
  * a browser paste is a `paste` event; the reference needed a whole host-clipboard module for this.
+ *
+ * THIS ROUTER IS SHARED by the hand-written screens and by the FrameXML runtime, and the difference
+ * decides the shape of every callback below. A hand-written screen re-reads `hovered`, `state`, `text`
+ * and `focused` off the widget every render tick, so a flag is enough for it. A `<Scripts>` block has
+ * no field to be read out of -- only a handler to be called -- so every state change the router makes
+ * also fires the matching `Widget#onX` hook (`widget.ts`), which `framexml/lua/scripts.ts` binds to
+ * the frame's Lua handler. Those hooks are null on every transcribed screen, which is why adding them
+ * changed nothing about how `/` behaves.
  */
 import { focusChain, hitTest, nextFocus } from './hit';
 import { viewportUnits } from './layout';
@@ -48,10 +56,20 @@ export class GlueInput {
     if (widget && widget.state === 'disabled') {
       return;
     }
+    const previous = this.focus;
     this.focus = widget;
     if (widget && widget.kind === 'editbox') {
       widget.caret = widget.text.length;
       widget.selectionAnchor = widget.caret;
+    }
+    // FrameXML's `OnEditFocusLost` then `OnEditFocusGained`, in the engine's order and AFTER the
+    // pointer has already moved: a handler is free to move focus again (the client's boxes call
+    // `HighlightText` from both, and `AccountLogin_OnShow` moves focus from Lua), and firing before
+    // the field settled would let a re-entrant call be overwritten by this one on the way out. The
+    // re-check is what stops `gained` firing for a widget the `lost` handler has since moved off.
+    previous?.onEditFocusLost?.();
+    if (this.focus === widget) {
+      widget?.onEditFocusGained?.();
     }
   }
 
@@ -108,7 +126,13 @@ export class GlueInput {
       if (hoverTarget) {
         hoverTarget.hovered = true;
       }
+      const left = this.hovered;
       this.hovered = hoverTarget;
+      // FrameXML's `OnLeave`/`OnEnter`: the TRANSITION, which is the only thing this branch runs on.
+      // The flag above is what a hand-written screen re-reads every tick; these are for a `<Scripts>`
+      // block, which has no field to be read out of.
+      left?.onLeave?.();
+      hoverTarget?.onEnter?.();
     }
 
     if (this.pressed) {
@@ -128,6 +152,9 @@ export class GlueInput {
     if (hit && hit.state !== 'disabled') {
       this.pressed = hit;
       hit.state = 'down';
+      // FrameXML's `OnMouseDown`, which is NOT the click: it fires on the press itself, and a press
+      // that drags off and releases elsewhere still had one.
+      hit.onMouseDown?.();
     }
   };
 
@@ -144,6 +171,9 @@ export class GlueInput {
     }
 
     pressed.state = 'up';
+    // The counterpart of `OnMouseDown`: the engine fires `OnMouseUp` on the frame that took the press
+    // wherever the release lands, so this is BEFORE the released-off-the-widget test below.
+    pressed.onMouseUp?.();
 
     const { x, y } = this.toUnits(event as PointerEvent);
     if (hitTest(this.items, x, y) !== pressed) {
@@ -175,6 +205,15 @@ export class GlueInput {
   private onKeyDown = (event: KeyboardEvent): void => {
     if (event.key === 'Tab') {
       event.preventDefault();
+      // A widget that declares `OnTabPressed` decides where Tab goes -- `accountlogin.xml`'s account
+      // box focuses the password box, and its password box picks between the token box and back to the
+      // account box, neither of which a generic draw-order ring can express. Nothing hand-written sets
+      // this, so the ring below is still what every transcribed screen does.
+      const focused = this.focus;
+      if (focused && focused.state !== 'disabled' && focused.onTabPressed) {
+        focused.onTabPressed();
+        return;
+      }
       this.setFocus(nextFocus(focusChain(this.items), this.focus, event.shiftKey));
       return;
     }
@@ -209,6 +248,12 @@ export class GlueInput {
     if (target.kind !== 'editbox') {
       return;
     }
+
+    // Read before the edit, compared after it: FrameXML's `OnTextChanged` fires when the text really
+    // changed, and every branch below has a case that leaves it alone (Backspace at position 0, an
+    // arrow key, an insert with no room left). One comparison at the end covers all of them and cannot
+    // drift the way a call per branch would.
+    const before = target.text;
 
     if (event.key === 'Backspace') {
       if (this.hasSelection(target)) {
@@ -258,6 +303,10 @@ export class GlueInput {
       return;
     }
 
+    if (target.text !== before) {
+      target.onTextChanged?.();
+    }
+
     event.preventDefault();
   };
 
@@ -268,7 +317,11 @@ export class GlueInput {
     }
     const text = event.clipboardData?.getData('text') ?? '';
     if (text) {
+      const before = target.text;
       this.insert(target, text.replace(/\s+/g, ' '));
+      if (target.text !== before) {
+        target.onTextChanged?.();
+      }
       event.preventDefault();
     }
   };

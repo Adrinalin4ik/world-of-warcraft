@@ -24,6 +24,7 @@
  */
 import { LuaRef, LuaVM, LuaError } from './vm';
 import { MethodContext, MethodTable, onFrameTeardown, registerMethods } from './object';
+import { Widget } from '../../widget';
 
 /**
  * The fixed list `SetScript` and `<Scripts>` compilation validate a handler name against. Widening
@@ -39,6 +40,11 @@ export const SCRIPT_HANDLERS: ReadonlySet<string> = new Set([
   'OnEnter',
   'OnLeave',
   'OnClick',
+  // Real in 3.3.5 and used by the manifest this runtime loads -- `RealmListRealmButtonTemplate`'s
+  // `<OnDoubleClick>` joins the realm its `<OnClick>` just selected (realmlist.xml:234). It was missing
+  // here, so loading RealmList.xml printed an "unknown script handler" line for a handler that both the
+  // client and `Widget#onDoubleClick` support.
+  'OnDoubleClick',
   'OnMouseDown',
   'OnMouseUp',
   'OnMouseWheel',
@@ -251,6 +257,92 @@ export function invokeScriptHandler(
   return callWithBothConventions(ctx.vm, handler, ctx.wrapper(self), args);
 }
 
+/**
+ * THE INPUT BRIDGE: the missing link between the router's JS callbacks and a frame's Lua handlers.
+ *
+ * `ui/input.ts` hit-tests, tracks a press, moves focus and edits text, and announces each of those
+ * through a `Widget#onX` callback (`widget.ts`). Nothing set those callbacks for an XML-loaded frame, so
+ * a document whose `<Scripts>` declared `OnClick` rendered perfectly and did nothing at all -- the gap
+ * §5.5 of the task-9 report names.
+ *
+ * BOUND FROM `SetScript`, and that placement is the decision here. `SetScript` is the ONE door a handler
+ * enters by: the XML loader installs every `<Scripts>` child through it (`loader.ts#applyScripts` calls
+ * the Lua method, not `setScriptHandler` directly), and so does every line of the client's own Lua. So
+ * binding here covers both, needs no second pass over the tree, and stays exact -- a frame gets a JS
+ * callback for precisely the handlers it has, and clearing a handler clears the callback with it. The
+ * alternative, binding all of them on every frame at materialize time, would give 292 frames ten
+ * closures each and still miss anything wired from Lua after the load.
+ *
+ * The callback fires the handler BY NAME through `invokeScriptHandler`, never by holding the handle: a
+ * `SetScript` that replaces the handler afterwards has to take effect, which is the same reason
+ * `loader.ts` fires `OnLoad` by slot.
+ *
+ * WHAT A HANDLER IS PASSED. The engine hands `OnClick` the mouse button (`"LeftButton"`), and both
+ * `accountlogin.lua` and `realmlist.lua` ignore it -- but it is passed anyway, because an addon will not,
+ * and because `scripts.ts`'s legacy convention makes it `arg1` and `event` as well. `OnMouseDown`/`OnMouseUp`
+ * take the same argument. Everything else in 3.3.5 takes nothing that the router knows.
+ *
+ * KNOWN LIMIT, and it is the router's: a handler body reads its argument as a NAMED PARAMETER
+ * (`function(self, button)`), and `compileScriptHandler` above compiles a body as `function(self, ...)`
+ * -- so `button` inside an `<OnClick>` body is a nil global, exactly as §5.4 of the report describes for
+ * `OnUpdate`'s `elapsed`. The value is passed positionally and as `arg1`, which is what the pre-2.0
+ * convention every glue handler is written against reads. Nothing on the login screen reads the name.
+ */
+type CallbackBinder = (widget: Widget, fire: ((args?: unknown[]) => void) | null) => void;
+
+/** The mouse button the engine reports for a left click, which is the only one this router routes. */
+const LEFT_BUTTON = 'LeftButton';
+
+const CALLBACK_BINDERS = new Map<string, CallbackBinder>([
+  ['OnClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
+  ['OnDoubleClick', (w, f) => { w.onDoubleClick = f === null ? null : () => f([LEFT_BUTTON]); }],
+  ['OnMouseDown', (w, f) => { w.onMouseDown = f === null ? null : () => f([LEFT_BUTTON]); }],
+  ['OnMouseUp', (w, f) => { w.onMouseUp = f === null ? null : () => f([LEFT_BUTTON]); }],
+  ['OnEnter', (w, f) => { w.onEnter = f === null ? null : () => f(); }],
+  ['OnLeave', (w, f) => { w.onLeave = f === null ? null : () => f(); }],
+  ['OnEnterPressed', (w, f) => { w.onSubmit = f === null ? null : () => f(); }],
+  ['OnEscapePressed', (w, f) => { w.onCancel = f === null ? null : () => f(); }],
+  ['OnTabPressed', (w, f) => { w.onTabPressed = f === null ? null : () => f(); }],
+  ['OnTextChanged', (w, f) => { w.onTextChanged = f === null ? null : () => f(); }],
+  ['OnEditFocusGained', (w, f) => { w.onEditFocusGained = f === null ? null : () => f(); }],
+  ['OnEditFocusLost', (w, f) => { w.onEditFocusLost = f === null ? null : () => f(); }],
+]);
+
+/**
+ * Fires `self`'s handler for `name` and reports a failure instead of raising.
+ *
+ * A handler reached from a POINTER EVENT has no report in reach and nothing above it that could
+ * meaningfully catch: the stack is a DOM listener. So it goes the same way `Show`'s `OnShow` cascade
+ * does -- `reportScriptError`, console immediately and queued for the load report -- because one broken
+ * `OnClick` must not take out the event loop's listener.
+ */
+function fireFromInput(ctx: MethodContext, self: number, name: string, args: unknown[]): void {
+  const error = invokeScriptHandler(ctx, self, name, args);
+  if (error !== null) {
+    reportScriptError(`${ctx.registry.nameOf(self) ?? `frame ${self}`}: ${name}`, error.message);
+  }
+}
+
+/**
+ * Points (or unpoints) the frame's `Widget` callback for `name` at its Lua handler. Called from
+ * `SetScript` for every name, and a no-op for the ones the router cannot observe.
+ */
+function bindInputCallback(ctx: MethodContext, self: number, name: string): void {
+  const binder = CALLBACK_BINDERS.get(name);
+  if (binder === undefined) {
+    return;
+  }
+  const widget = ctx.registry.widget(self);
+  if (widget === null) {
+    return;
+  }
+  if (getScriptHandler(self, name) === null) {
+    binder(widget, null);
+    return;
+  }
+  binder(widget, (args = []) => fireFromInput(ctx, self, name, args));
+}
+
 const SCRIPT_METHODS: MethodTable = {
   // SetScript(name, handler). `handler` nil/omitted clears it. The retain here is the rule this file
   // was built around: `args[1]` is a BORROWED handle, released the moment this method returns, so
@@ -263,12 +355,19 @@ const SCRIPT_METHODS: MethodTable = {
     const handler = args[1];
     if (handler === undefined || handler === null) {
       setScriptHandler(ctx.vm, self, name, null);
+      // Clearing a handler clears the router callback with it, or a widget would keep firing into a
+      // slot nothing answers -- harmless today (`invokeScriptHandler` returns null for a missing
+      // handler) and a lie the moment anything asks whether the widget is interactive.
+      bindInputCallback(ctx, self, name);
       return [];
     }
     if (!ctx.vm.isRef(handler)) {
       throw new Error(`SetScript: the handler for '${name}' must be a function or nil`);
     }
     setScriptHandler(ctx.vm, self, name, ctx.retain(handler));
+    // THE INPUT BRIDGE (see `bindInputCallback`): this is what makes a pointer or a keystroke reach the
+    // handler that was just stored, and the reason it is here is that `SetScript` is the one door.
+    bindInputCallback(ctx, self, name);
     return [];
   },
 

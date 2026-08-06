@@ -173,6 +173,41 @@ export class Widget {
    */
   onDoubleClick: (() => void) | null = null;
 
+  /**
+   * The rest of the FrameXML script surface the input router can actually observe.
+   *
+   * Every one of these is a hook the router already had the EVENT for and nowhere to send it: it
+   * flipped `hovered`, wrote `state`, mutated `text` and moved `focus` and stopped there, which is
+   * fine for a hand-written screen (it re-reads those fields every tick) and is the whole reason an
+   * XML-loaded frame was inert -- a `<Scripts>` block has no field to be read out of, only a handler
+   * to be called. `framexml/lua/scripts.ts` binds these to the frame's Lua handlers; a hand-written
+   * screen leaves them null and behaves exactly as before.
+   *
+   * `onEnter`/`onLeave` are FrameXML's `OnEnter`/`OnLeave` -- the hover TRANSITION, not the flag.
+   * `onMouseDown`/`onMouseUp` are the raw press and release, which are NOT `onClick`: the engine
+   * fires them on press and on release regardless of where the release lands, while a click needs
+   * both on the same widget.
+   */
+  onEnter: (() => void) | null = null;
+  onLeave: (() => void) | null = null;
+  onMouseDown: (() => void) | null = null;
+  onMouseUp: (() => void) | null = null;
+  /**
+   * FrameXML's `OnTabPressed`, and it REPLACES the router's own Tab ring for the widget that has one:
+   * `accountlogin.xml`'s account box moves focus to the password box itself, and a document that
+   * decides where Tab goes must win over a generic draw-order walk. A widget with none keeps the ring.
+   */
+  onTabPressed: (() => void) | null = null;
+  /**
+   * FrameXML's `OnTextChanged`, fired after ANY change to an edit box's text -- typing, backspace,
+   * delete, paste, and a Lua `SetText` (the engine fires it for that too, which is what hides the
+   * login screen's placeholder after `AccountLogin_OnShow` pre-fills the account name).
+   */
+  onTextChanged: (() => void) | null = null;
+  /** FrameXML's `OnEditFocusGained`/`OnEditFocusLost`, fired by the router's own focus transition. */
+  onEditFocusGained: (() => void) | null = null;
+  onEditFocusLost: (() => void) | null = null;
+
   constructor(kind: WidgetKind, id?: string) {
     this.kind = kind;
     this.id = id ?? `${kind}-${nextWidgetId++}`;

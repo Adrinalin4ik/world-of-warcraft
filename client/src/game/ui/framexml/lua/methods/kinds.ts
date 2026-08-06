@@ -14,7 +14,7 @@
  * `EDITBOX` is a sibling of `BUTTON` under `FRAME` (`object.ts`'s `CLASS_PARENT`), not a descendant --
  * it shares no methods with Button beyond what FRAME already gives both.
  */
-import { MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
+import { FocusSink, MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { Anchor } from '../../../layout';
 import { Widget } from '../../../widget';
 import { notImplemented, widgetOf } from './region';
@@ -339,28 +339,76 @@ function anchorTextRegion(box: Widget): void {
   );
 }
 
+/**
+ * The focus router, or the honest gap where one was not threaded in.
+ *
+ * `MethodContext.input` is optional (`object.ts`): the runtime that mounts a screen has a `GlueInput`
+ * and passes it, and a test or a future caller that installs an object model with no router at all must
+ * not get three silent no-ops. `notImplemented` is called HERE, lazily, rather than at module load, so
+ * `NOT_IMPLEMENTED` gains the name only if the gap is ever actually reached -- registering it up front
+ * would have the loader report a working method as a stub.
+ *
+ * Its RESULTS are the caller's, not this helper's: each of the three has a different honest answer for
+ * "there is no router" (nothing, nothing, `false`), and threading a results array through here only to
+ * discard what the factory returns would look like it was being used.
+ */
+function focusSinkOr(ctx: MethodContext, self: number, method: string): FocusSink | null {
+  if (ctx.input !== null) {
+    return ctx.input;
+  }
+  notImplemented(
+    method,
+    'no focus router was threaded into this object model -- installObjectModel was called without a GlueInput',
+  )(ctx, self, []);
+  return null;
+}
+
 const EDITBOX: MethodTable = {
   SetText: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
+    const before = widget.text;
     widget.text = args[0] === undefined || args[0] === null ? '' : String(args[0]);
     // Real `SetText` leaves the cursor at the end of the new string -- the same place `input.ts`'s
     // `setFocus` puts it when a box first gains focus.
     widget.caret = widget.text.length;
     widget.selectionAnchor = widget.caret;
+    // THE ENGINE FIRES `OnTextChanged` FOR A `SetText` TOO, not only for typing, and that is not a
+    // detail: `AccountLogin_OnShow` pre-fills the account box with `GetSavedAccountName()`, and the
+    // ONLY thing that hides the "Enter your email address" placeholder is that box's `<OnTextChanged>`.
+    // Without this the restored account name and the placeholder draw on top of each other, which is
+    // exactly what the owner's screenshot shows. Guarded on a real change, for the same reason
+    // `Show`/`Hide` dispatch the transition rather than the call -- `AccountLogin_Login` calls
+    // `AccountLoginPasswordEdit:SetText("")` on an already-empty box.
+    if (widget.text !== before) {
+      widget.onTextChanged?.();
+    }
     return [];
   },
   GetText: (ctx, self) => [widgetOf(ctx, self).text],
 
-  // `input.ts`'s `GlueInput` owns the live focus pointer, and is not reachable from `MethodContext`:
-  // it is constructed per-screen (see `screens.ts`), outside anything the object model holds a handle
-  // to. Wiring these for real needs `MethodContext` to carry that handle -- a change to `object.ts`
-  // (Task 3's file), bigger than this task's own file scope (`lua/methods/kinds.ts`). Same shape of
-  // gap as `frame.ts`'s `SetScale`. (It cited `SetBackdrop` as the other example until Task 9 made
-  // that one real -- a sprite key may simply BE the path, so no `GlueArt` handle was needed after all.
-  // Worth keeping in view: the reason a stub gives for existing is a claim, and this one did not hold.)
-  SetFocus: notImplemented('SetFocus', 'MethodContext has no GlueInput handle to move focus through'),
-  ClearFocus: notImplemented('ClearFocus', 'MethodContext has no GlueInput handle to move focus through'),
-  HasFocus: notImplemented('HasFocus', 'MethodContext has no GlueInput handle to ask', [false]),
+  // Real, now that `MethodContext` carries the screen's focus router (`object.ts`'s `FocusSink`). The
+  // stub these replaced blamed the object model for not being able to reach `GlueInput` -- true, and the
+  // fix was to hand it one rather than to keep the claim. `SetFocus` goes through `setFocus` rather than
+  // writing a field, so it fires `OnEditFocusLost`/`OnEditFocusGained` and moves the caret exactly as a
+  // mouse click into the box does: `AccountLogin_OnShow` focuses a box from Lua and the client's own
+  // `<OnEditFocusGained>` (`self:HighlightText()`) has to run for it.
+  SetFocus: (ctx, self) => {
+    focusSinkOr(ctx, self, 'SetFocus')?.setFocus(widgetOf(ctx, self));
+    return [];
+  },
+  // Only if THIS box has the focus. A blanket clear would let a box that lost focus ages ago yank it
+  // off whatever holds it now, and the client calls `ClearFocus` from handlers that fire either way.
+  ClearFocus: (ctx, self) => {
+    const input = focusSinkOr(ctx, self, 'ClearFocus');
+    if (input !== null && input.focused === widgetOf(ctx, self)) {
+      input.setFocus(null);
+    }
+    return [];
+  },
+  HasFocus: (ctx, self) => {
+    const input = focusSinkOr(ctx, self, 'HasFocus');
+    return [input !== null && input.focused === widgetOf(ctx, self)];
+  },
 
   SetMaxLetters: (ctx, self, args) => {
     widgetOf(ctx, self).maxLetters = Number(args[0] ?? 0);

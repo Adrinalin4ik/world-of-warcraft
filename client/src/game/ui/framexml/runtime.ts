@@ -47,7 +47,7 @@ import { parseXml } from './xml';
 import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
 import { drainScriptErrors } from './lua/scripts';
-import { FrameRegistry, MethodContext, installObjectModel } from './lua/object';
+import { FocusSink, FrameRegistry, MethodContext, installObjectModel } from './lua/object';
 import { LuaVM } from './lua/vm';
 import { installLoginApi } from './lua/api/login';
 import { installRealmsApi } from './lua/api/realms';
@@ -65,6 +65,12 @@ export interface GlueRuntimeOptions {
   art: GlueArt;
   /** The live pre-world session the engine API binds to. */
   protocol: ProtocolSession;
+  /**
+   * The screen's focus router, which is what makes `EditBox:SetFocus`/`ClearFocus`/`HasFocus` real
+   * (`lua/object.ts`'s `FocusSink`). Optional: without it those three report themselves as a gap
+   * instead of lying, and everything else still loads.
+   */
+  input?: FocusSink;
   /** Stop after this manifest entry, inclusive. Everything after it is not run at all. */
   stopAfter?: string;
   /** `QuitGame` -- what leaving the client means to the host. */
@@ -187,7 +193,7 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
   drainScriptErrors();
   installCompat(vm);
   const registry = new FrameRegistry(options.root);
-  const ctx = installObjectModel(vm, registry);
+  const ctx = installObjectModel(vm, registry, options.input ?? null);
 
   installScreenApi(vm, {
     viewport: options.viewport,

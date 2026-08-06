@@ -58,6 +58,11 @@ export class FrameXmlLoginScreen implements GlueScreen {
           root: ctx.root.root,
           art: ctx.art,
           protocol: ctx.protocol,
+          // The screen's own focus router, which is what `EditBox:SetFocus`/`ClearFocus`/`HasFocus`
+          // move and read (`framexml/lua/object.ts`'s `FocusSink`). The `GlueContext` has had it all
+          // along; nothing was passing it, which is why those three were warn-once no-ops and why
+          // `AccountLogin_OnShow`'s "focus the account name" did nothing.
+          input: ctx.input,
           stopAfter: 'AccountLogin.xml',
           onQuitGame: () => {
             // The same thing the transcription's Quit button can do in a browser: nothing to exit, so

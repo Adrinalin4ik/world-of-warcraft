@@ -168,9 +168,29 @@ export type FrameMethod = (ctx: MethodContext, self: number, args: unknown[]) =>
 
 export type MethodTable = Record<string, FrameMethod>;
 
+/**
+ * The slice of `GlueInput` the object model needs, and nothing more.
+ *
+ * `EditBox:SetFocus`/`ClearFocus`/`HasFocus` are meaningless without the live focus pointer, and that
+ * pointer belongs to the router (`ui/input.ts`), which is constructed per screen outside anything the
+ * object model holds. Declared here as a two-member interface rather than imported as `GlueInput`:
+ * `object.ts` has no business knowing about DOM event routing, `GlueInput` satisfies this structurally,
+ * and a test can hand in a two-line object.
+ */
+export interface FocusSink {
+  readonly focused: Widget | null;
+  setFocus(widget: Widget | null): void;
+}
+
 export interface MethodContext {
   vm: LuaVM;
   registry: FrameRegistry;
+  /**
+   * The screen's focus router, or null when nothing threaded one in -- in which case the three
+   * EditBox focus methods report themselves as the gap they are (`methods/kinds.ts`) rather than
+   * quietly doing nothing.
+   */
+  input: FocusSink | null;
   /** The frame's Lua table, created on first use and the same table forever after. */
   wrapper(id: number): LuaRef;
   /** The frame id behind a Lua value that is (or should be) a frame table; null if it is not one. */
@@ -355,6 +375,19 @@ export class FrameRegistry {
 
     const id = this.nextId++;
     const widget = new Widget(widgetKind, `lua:${id}`);
+    // INTERACTIVITY IS A PROPERTY OF THE CLASS, not of an attribute. `enableMouse="true"` appears on
+    // exactly six elements in the whole loaded manifest and on none of the login form's controls: the
+    // engine makes a Button mouse-enabled and an EditBox mouse-enabled AND focusable because that is
+    // what those classes ARE, and `enableMouse` exists for the other case -- a plain `<Frame>` that
+    // wants to eat clicks (a modal backdrop, which is every one of those six). Without this, nothing an
+    // XML document declares can be clicked or focused at all, whatever its `<Scripts>` say. A later
+    // `EnableMouse(false)` still turns it off; this is the starting value, exactly like `state = 'up'`.
+    if (widgetKind === 'button' || widgetKind === 'checkbutton') {
+      widget.mouseEnabled = true;
+    } else if (widgetKind === 'editbox') {
+      widget.mouseEnabled = true;
+      widget.focusable = true;
+    }
     // `Widget#add` already carries the client's rule -- the child takes the parent's strata, a child
     // FRAME is born at the parent's level + 1, a region stays at its owner's level. Do not re-apply
     // any of that here.
@@ -558,7 +591,11 @@ export function contextFor(vm: LuaVM): MethodContext | null {
  *
  * Call once per VM, after `installCompat` and before any glue Lua runs.
  */
-export function installObjectModel(vm: LuaVM, registry: FrameRegistry): MethodContext {
+export function installObjectModel(
+  vm: LuaVM,
+  registry: FrameRegistry,
+  input: FocusSink | null = null,
+): MethodContext {
   if (CONTEXTS.has(vm)) {
     // Installing twice would strand the first metatable's handle and leave two dispatch caches, one
     // of them unreachable and never invalidated. Nothing needs it, so refuse rather than cope.
@@ -610,7 +647,7 @@ export function installObjectModel(vm: LuaVM, registry: FrameRegistry): MethodCo
     return typeof id === 'number' && registry.classOf(id) !== null ? id : null;
   };
 
-  const ctx: MethodContext = { vm, registry, wrapper, frameIdOf, retain: (ref) => vm.dup(ref) };
+  const ctx: MethodContext = { vm, registry, input, wrapper, frameIdOf, retain: (ref) => vm.dup(ref) };
 
   // THE teardown path (see `FRAME_TEARDOWN`). Subscribed here, after `ctx` exists, because the
   // fan-out needs it: the side-table listeners hold nothing but their own map and need a VM to hand
