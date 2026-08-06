@@ -246,21 +246,19 @@ export class GameHandler extends Socket {
   handleAuthResponse(gp) {
     console.info('handling auth response');
 
-    // Handle result byte
+    // ONLY 0x0C is success.
+    //
+    // This used to special-case 0x0D and 0x15 and treat everything else as a pass, so a real server
+    // answering 0x0E (AUTH_REJECT) was reported as "authenticate" and the client went on to request
+    // the character list on a connection the server was already closing. The full table is
+    // `WORLD_RESULT_STRINGS` in `network/protocol/stages.ts`, and the two codes named here were also
+    // mislabelled: 0x15 is AUTH_UNKNOWN_ACCOUNT, not "account in use".
     const result = gp.readUnsignedByte();
-    if (result === 0x0D) {
-      console.warn('server-side auth/realm failure; try again');
-      this.emit('reject');
+    if (result !== 0x0c) {
+      console.warn(`world handshake refused: 0x${result.toString(16)}`);
+      this.emit('reject', result);
       return;
     }
-
-    if (result === 0x15) {
-      console.warn('account in use/invalid; aborting');
-      this.emit('reject');
-      return;
-    }
-
-    // TODO: Ensure the account is flagged as WotLK (expansion //2)
 
     this.emit('authenticate');
   }
