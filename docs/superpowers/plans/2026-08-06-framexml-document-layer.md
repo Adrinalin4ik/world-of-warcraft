@@ -18,7 +18,7 @@
 - **Never throw on bad input.** A missing include, an unknown tag, an unresolvable inherit, a cycle: each is an entry in a report and processing continues. The client logs and continues; so do we.
 - **No IO in these modules.** Files arrive through an injected `(path: string) => string | null` resolver. This is what makes the whole layer testable from inline strings.
 - **Order is preserved everywhere.** `.toc` entries, XML top-level items, template merge results. The client interleaves script execution with frame definitions in document order and Lua load order depends on it; a "tidier" split-by-kind structure loses that and is wrong.
-- **Essential tests only** — the project owner's standing instruction: happy path, plus a regression test when something actually breaks. Task 4 is the one exception, stated in that task, because there the tests *are* the specification.
+- **Happy path only.** The project owner's standing instruction, restated three times: cover the happy path and nothing else. No error-path tests, no edge cases, no one-test-per-branch. An earlier draft of this plan gave Task 4 five tests on the argument that there the tests were the specification; that argument lost. Where a rule is subtle, it goes in a comment, not in a test nobody asked for. Test budget: **two per task at most, one where one will do.**
 - `cd client && npx tsc --noEmit -p tsconfig.json` at zero errors and `cd client && npm test -- --watchAll=false` green after every task. The suite is at 135 suites / 1632 tests before this plan.
 - Watch for a typographic apostrophe (U+2019) inside single-quoted strings — it has broken this repo's parser on four separate occasions. Straight apostrophes or double quotes.
 
@@ -181,7 +181,7 @@ Turn XML text into an owned tree and classify the root's children. The classific
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-import { attr, attrBool, parseXml } from '../xml';
+import { parseXml } from '../xml';
 
 describe('parseXml', () => {
   it('classifies top-level items and keeps them in document order', () => {
@@ -220,26 +220,12 @@ describe('parseXml', () => {
     expect(frame!.body.trim()).toBe('');
   });
 
-  it('reads attributes case-insensitively, on the name and on a bool value', () => {
-    const doc = parseXml('<Ui><Frame NAME="F" virtual="TRUE" hidden="false"/></Ui>');
-    // `TopLevel` is a union and only three of its members carry an element, so narrow rather than
-    // asserting -- `doc.items[0].element` does not type-check.
-    const item = doc.items[0];
-    const frame = 'element' in item ? item.element : null!;
-
-    expect(attr(frame, 'name')).toBe('F');
-    expect(attrBool(frame, 'VIRTUAL')).toBe(true);
-    expect(attrBool(frame, 'hidden')).toBe(false);
-    expect(attrBool(frame, 'absent')).toBe(false);
-  });
-
-  it('reports a parse failure instead of throwing', () => {
-    const doc = parseXml('<Ui><Frame></Ui>');
-
-    expect(doc.items).toEqual([]);
-    expect(doc.errors.length).toBe(1);
-  });
 });
+
+// Two tests, per the plan's happy-path budget. Case-insensitive `attr`/`attrBool` and the
+// malformed-document path are implemented and commented but not tested: the first is exercised by
+// every test above through `virtual="true"`, and the second is an error path.
+
 ```
 
 Note for the implementer: the second test's name contains an apostrophe inside a single-quoted
@@ -376,7 +362,7 @@ export function parseXml(text: string): ParsedDocument {
 - [ ] **Step 4: Run it and watch it pass**
 
 Run: `cd client && npm test -- --watchAll=false --testPathPattern=framexml/__tests__/xml`
-Expected: PASS, 4 tests.
+Expected: PASS, 2 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -457,17 +443,12 @@ describe('TemplateRegistry', () => {
     expect(attr(expanded, 'hidden')).toBe('true');
   });
 
-  it('warns and terminates on a cycle instead of recursing forever', () => {
-    const registry = new TemplateRegistry();
-    registry.register(only('<Frame name="A" virtual="true" inherits="B"/>'));
-    registry.register(only('<Frame name="B" virtual="true" inherits="A"/>'));
-
-    const warnings: string[] = [];
-    registry.expand(only('<Frame name="Use" inherits="A"/>'), warnings);
-
-    expect(warnings.some((w) => /cycle/i.test(w))).toBe(true);
-  });
 });
+
+// The cycle guard is implemented and commented but not tested -- an error path, per the plan's
+// happy-path budget. Note what that costs: a cycle without the guard HANGS the suite rather than
+// failing it. Keep the `active` set.
+
 
 describe('resolveName', () => {
   it('substitutes $parent case-insensitively and appends the remainder verbatim', () => {
@@ -475,11 +456,6 @@ describe('resolveName', () => {
     expect(resolveName('$PARENTText', 'MyBox')).toBe('MyBoxText');
   });
 
-  it('leaves a name that does not start with the token alone', () => {
-    expect(resolveName('Standalone', 'PlayerFrame')).toBe('Standalone');
-    expect(resolveName(undefined, 'PlayerFrame')).toBeUndefined();
-    expect(resolveName('$parentX', DEFAULT_PARENT_NAME)).toBe('TopX');
-  });
 });
 ```
 
@@ -620,7 +596,7 @@ export class TemplateRegistry {
 - [ ] **Step 4: Run it and watch it pass**
 
 Run: `cd client && npm test -- --watchAll=false --testPathPattern=framexml/__tests__/templates`
-Expected: PASS, 5 tests.
+Expected: PASS, 3 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -634,7 +610,7 @@ git commit -m "feat(framexml): expand inherits templates and resolve \$parent"
 
 ### Task 4: The draw-order key
 
-**Read spec §6 before starting.** This is the one task where the tests are the specification rather than a happy-path sample, and the project owner's minimal-tests instruction is explicitly suspended for it: every rule below is counterintuitive, invisible in a screenshot until it is wrong, and misdiagnoses as an art bug rather than a sort bug.
+**Read spec §6 before starting.** Every rule below is counterintuitive, invisible in a screenshot until it is wrong, and misdiagnoses as an art bug rather than a sort bug — so each one gets a comment in the source explaining the failure it prevents. It gets **one** test: a single set exercising all six ranks at once, asserting the whole sorted order. That is the happy path for a comparator, and it pins every rank without six near-duplicate cases.
 
 **Files:**
 - Create: `client/src/game/ui/framexml/order.ts`
@@ -666,7 +642,10 @@ of the reference, the *order* is the contract.
 | 5 | `linkStamp` | live list position, not creation order |
 | 6 | `declarationSeq` | index within the owning frame |
 
-- [ ] **Step 1: Write the failing tests — one per rank, plus the interleave regression**
+- [ ] **Step 1: Write the failing test**
+
+One test, exercising all six ranks in a single sorted set. Each entry is labelled with the rank it is
+there to pin, so a failure names the rank that broke.
 
 ```ts
 import { OrderKey, compareOrder } from '../order';
@@ -681,75 +660,48 @@ const key = (over: Partial<OrderKey> = {}): OrderKey => ({
   ...over,
 });
 
-/** Sort a labelled set and read back the labels, which is what every test below asserts on. */
-const order = (entries: Array<[string, Partial<OrderKey>]>): string[] =>
-  entries
-    .map(([label, over]) => ({ label, k: key(over) }))
-    .sort((a, b) => compareOrder(a.k, b.k))
-    .map((e) => e.label);
-
 describe('compareOrder', () => {
-  it('ranks strata above everything else', () => {
-    expect(
-      order([
-        ['dialog', { strata: 'DIALOG', frameLevel: 0, layer: 'BACKGROUND' }],
-        ['medium', { strata: 'MEDIUM', frameLevel: 99, layer: 'HIGHLIGHT' }],
-      ]),
-    ).toEqual(['medium', 'dialog']);
-  });
+  it('sorts by strata, then level, then layer, then font strings, then link stamp, then declaration', () => {
+    const entries: Array<[string, Partial<OrderKey>]> = [
+      // rank 3+4: within one (strata, level) bucket the LAYER outranks the frame, and every texture
+      // of a layer precedes every font string of it -- across frames, not grouped per frame.
+      ['b.artwork.text', { linkStamp: 1, layer: 'ARTWORK', isFontString: true }],
+      ['a.artwork.tex', { linkStamp: 0, layer: 'ARTWORK' }],
+      ['b.background', { linkStamp: 1, layer: 'BACKGROUND' }],
+      ['a.artwork.text', { linkStamp: 0, layer: 'ARTWORK', isFontString: true }],
+      ['b.artwork.tex', { linkStamp: 1, layer: 'ARTWORK' }],
+      // rank 6: two regions of one frame keep their declaration order.
+      ['a.background.second', { linkStamp: 0, layer: 'BACKGROUND', declarationSeq: 1 }],
+      ['a.background.first', { linkStamp: 0, layer: 'BACKGROUND', declarationSeq: 0 }],
+      // rank 2: a higher frame level beats every layer of a lower one.
+      ['level1.background', { frameLevel: 1, layer: 'BACKGROUND', linkStamp: 9 }],
+      // rank 1: strata beats everything, including a higher level and the topmost layer.
+      ['dialog.background', { strata: 'DIALOG', layer: 'BACKGROUND', linkStamp: 9 }],
+      ['medium.highlight', { frameLevel: 0, layer: 'HIGHLIGHT', linkStamp: 9 }],
+    ];
 
-  it('ranks frame level above the draw layer', () => {
-    expect(
-      order([
-        ['high-level-background', { frameLevel: 2, layer: 'BACKGROUND' }],
-        ['low-level-highlight', { frameLevel: 1, layer: 'HIGHLIGHT' }],
-      ]),
-    ).toEqual(['low-level-highlight', 'high-level-background']);
-  });
+    const sorted = entries
+      .map(([label, over]) => ({ label, k: key(over) }))
+      .sort((a, b) => compareOrder(a.k, b.k))
+      .map((e) => e.label);
 
-  it('interleaves frames by layer rather than grouping regions behind their frame', () => {
-    // THE regression test. The intuitive model -- draw frame A whole, then frame B whole -- is wrong.
-    // Within one (strata, level) bucket the layer outranks the frame, so every frame's BACKGROUND
-    // draws before any frame's ARTWORK. benilla shipped the intuitive version and a status bar's fill
-    // painted over its own border.
-    expect(
-      order([
-        ['A.artwork', { layer: 'ARTWORK', linkStamp: 0 }],
-        ['A.background', { layer: 'BACKGROUND', linkStamp: 0 }],
-        ['B.artwork', { layer: 'ARTWORK', linkStamp: 1 }],
-        ['B.background', { layer: 'BACKGROUND', linkStamp: 1 }],
-      ]),
-    ).toEqual(['A.background', 'B.background', 'A.artwork', 'B.artwork']);
-  });
-
-  it('draws every texture of a layer before any of its font strings', () => {
-    expect(
-      order([
-        ['A.text', { isFontString: true, linkStamp: 0 }],
-        ['B.tex', { isFontString: false, linkStamp: 1 }],
-        ['A.tex', { isFontString: false, linkStamp: 0 }],
-        ['B.text', { isFontString: true, linkStamp: 1 }],
-      ]),
-    ).toEqual(['A.tex', 'B.tex', 'A.text', 'B.text']);
-  });
-
-  it('orders by link stamp, then by declaration order within one frame', () => {
-    expect(
-      order([
-        ['later-frame.first-region', { linkStamp: 5, declarationSeq: 0 }],
-        ['earlier-frame.second-region', { linkStamp: 1, declarationSeq: 1 }],
-        ['earlier-frame.first-region', { linkStamp: 1, declarationSeq: 0 }],
-      ]),
-    ).toEqual([
-      'earlier-frame.first-region',
-      'earlier-frame.second-region',
-      'later-frame.first-region',
+    expect(sorted).toEqual([
+      'a.background.first',
+      'a.background.second',
+      'b.background',
+      'a.artwork.tex',
+      'b.artwork.tex',
+      'a.artwork.text',
+      'b.artwork.text',
+      'medium.highlight',
+      'level1.background',
+      'dialog.background',
     ]);
   });
 });
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [ ] **Step 2: Run it and watch it fail**
 
 Run: `cd client && npm test -- --watchAll=false --testPathPattern=framexml/__tests__/order`
 Expected: FAIL, "Cannot find module '../order'".
@@ -839,10 +791,10 @@ export function compareOrder(a: OrderKey, b: OrderKey): number {
 }
 ```
 
-- [ ] **Step 4: Run them and watch them pass**
+- [ ] **Step 4: Run it and watch it pass**
 
 Run: `cd client && npm test -- --watchAll=false --testPathPattern=framexml/__tests__/order`
-Expected: PASS, 5 tests.
+Expected: PASS, 1 test.
 
 - [ ] **Step 5: Commit**
 
@@ -1026,7 +978,7 @@ git commit -m "feat(ui): sort the draw list by the client's real order key"
 - `parseXml` classifies `<Include>`, `<Script>`, `<Font>`, virtual templates and instances in document order, and reports a malformed document rather than throwing.
 - `TemplateRegistry` resolves a chain, merges inherited-first so the instance's `<Size>` is last, warns on a cycle, and survives across documents.
 - `resolveName` substitutes `$parent` case-insensitively against the nearest named ancestor.
-- `compareOrder` implements all six ranks, with a test each and the interleave regression.
+- `compareOrder` implements all six ranks, pinned by one test that sorts a set exercising every rank.
 - `Layer` no longer contains `DIALOG`; `Widget` carries `strata`, `frameLevel` and `linkStamp`; `drawList` sorts by `compareOrder`.
 - `npx tsc --noEmit` at zero, the full suite green, and `/` renders unchanged in a real browser apart from the intended font-string ordering.
 
