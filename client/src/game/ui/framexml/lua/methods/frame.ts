@@ -14,7 +14,7 @@
 import { MethodTable, registerMethods } from '../object';
 import { Layer } from '../../../widget';
 import { STRATA_ORDER, Strata } from '../../order';
-import { isDrawLayer, warnOnce, widgetOf } from './region';
+import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
 
 /**
  * `Frame:GetID()`/`SetID()` -- an arbitrary numeric tag (list-row index, action-button slot, ...),
@@ -72,14 +72,8 @@ const FRAME: MethodTable = {
   // is exactly the duck-typing leak this task exists to close. Nothing in `widget.ts` models a
   // per-widget scale that cascades the way `frameLevel` does at `Widget#add`, so this is still a
   // warn-once no-op -- just on the right class now.
-  SetScale: () => {
-    warnOnce('SetScale: not implemented -- widget.ts has no per-widget scale field yet');
-    return [];
-  },
-  GetEffectiveScale: () => {
-    warnOnce('GetEffectiveScale: not implemented -- reporting the only scale that exists today (1)');
-    return [1];
-  },
+  SetScale: notImplemented('SetScale', 'widget.ts has no per-widget scale field yet'),
+  GetEffectiveScale: notImplemented('GetEffectiveScale', 'reporting the only scale that exists today (1)', [1]),
 
   EnableMouse: (ctx, self, args) => {
     widgetOf(ctx, self).mouseEnabled = Boolean(args[0]);
@@ -92,18 +86,9 @@ const FRAME: MethodTable = {
   // variant either. XML-authored backdrops go through a different path (the loader, Task 7) that
   // already has that art table in hand; a live Lua call to change one at runtime is out of reach
   // until `MethodContext` grows an art handle.
-  SetBackdrop: () => {
-    warnOnce('SetBackdrop: not implemented -- MethodContext has no GlueArt handle to resolve art through');
-    return [];
-  },
-  SetBackdropColor: () => {
-    warnOnce('SetBackdropColor: not implemented -- BackdropDef has no tint field yet');
-    return [];
-  },
-  SetBackdropBorderColor: () => {
-    warnOnce('SetBackdropBorderColor: not implemented -- BackdropDef has no tint field yet');
-    return [];
-  },
+  SetBackdrop: notImplemented('SetBackdrop', 'MethodContext has no GlueArt handle to resolve art through'),
+  SetBackdropColor: notImplemented('SetBackdropColor', 'BackdropDef has no tint field yet'),
+  SetBackdropBorderColor: notImplemented('SetBackdropBorderColor', 'BackdropDef has no tint field yet'),
 
   // `registry.create` is the sanctioned path for a region owned by a frame -- `object.ts`'s own
   // comment on `CREATE_FRAME_CLASSES` is explicit that a Texture is created through its OWNER, not
@@ -155,38 +140,14 @@ function applyLayer(widget: { layer: Layer }, arg: unknown): void {
  * visibly does nothing.
  */
 const MODEL: MethodTable = {
-  SetModel: () => {
-    warnOnce('SetModel: not implemented -- no per-widget model state exists; see MODEL surface note');
-    return [];
-  },
-  SetCamera: () => {
-    warnOnce('SetCamera: not implemented -- no per-widget model state exists; see MODEL surface note');
-    return [];
-  },
-  SetSequence: () => {
-    warnOnce('SetSequence: not implemented -- no per-widget model state exists; see MODEL surface note');
-    return [];
-  },
-  SetFogNear: () => {
-    warnOnce('SetFogNear: not implemented -- no per-widget model state exists; see MODEL surface note');
-    return [];
-  },
-  SetFogFar: () => {
-    warnOnce('SetFogFar: not implemented -- no per-widget model state exists; see MODEL surface note');
-    return [];
-  },
-  SetFogColor: () => {
-    warnOnce('SetFogColor: not implemented -- no per-widget model state exists; see MODEL surface note');
-    return [];
-  },
-  ClearFog: () => {
-    warnOnce('ClearFog: not implemented -- no per-widget model state exists; see MODEL surface note');
-    return [];
-  },
-  SetGlow: () => {
-    warnOnce('SetGlow: not implemented -- no per-widget model state exists; see MODEL surface note');
-    return [];
-  },
+  SetModel: notImplemented('SetModel', 'no per-widget model state exists; see MODEL surface note'),
+  SetCamera: notImplemented('SetCamera', 'no per-widget model state exists; see MODEL surface note'),
+  SetSequence: notImplemented('SetSequence', 'no per-widget model state exists; see MODEL surface note'),
+  SetFogNear: notImplemented('SetFogNear', 'no per-widget model state exists; see MODEL surface note'),
+  SetFogFar: notImplemented('SetFogFar', 'no per-widget model state exists; see MODEL surface note'),
+  SetFogColor: notImplemented('SetFogColor', 'no per-widget model state exists; see MODEL surface note'),
+  ClearFog: notImplemented('ClearFog', 'no per-widget model state exists; see MODEL surface note'),
+  SetGlow: notImplemented('SetGlow', 'no per-widget model state exists; see MODEL surface note'),
 };
 
 registerMethods('FRAME', FRAME);

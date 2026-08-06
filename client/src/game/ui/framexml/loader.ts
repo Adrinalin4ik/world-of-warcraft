@@ -41,16 +41,16 @@
  */
 import { LuaRef, LuaVM } from './lua/vm';
 import { MethodContext } from './lua/object';
+import { NOT_IMPLEMENTED } from './lua/methods/region';
 import { compileScriptHandler, invokeScriptHandler } from './lua/scripts';
 import { DEFAULT_PARENT_NAME, TemplateRegistry, resolveName } from './templates';
 import { ParsedDocument, XmlElement, attr, attrBool, childrenNamed, parseXml } from './xml';
 
-// Side-effect imports: the REGION/LAYEREDREGION/TEXTURE/FONTSTRING, FRAME/MODEL and
-// BUTTON/CHECKBUTTON/EDITBOX method tables. `object.ts` deliberately imports none of them, so
+// Side-effect imports: the FRAME/MODEL and BUTTON/CHECKBUTTON/EDITBOX method tables (REGION and the
+// leaves come in with `NOT_IMPLEMENTED` above). `object.ts` deliberately imports none of them, so
 // SOMETHING has to, and this is the module that cannot function without the whole surface -- a
 // forgotten import would show up as a document that materializes and then does nothing at all.
 // Registering after a VM is installed is safe (`registerMethods` flushes the dispatch cache).
-import './lua/methods/region';
 import './lua/methods/frame';
 import './lua/methods/kinds';
 
@@ -104,8 +104,13 @@ export function loadDocument(
   sourceName = '<inline>',
 ): LoadReport {
   const loader = new DocumentLoader(runtime, files);
-  loader.loadDoc(doc, sourceName);
-  loader.finish();
+  try {
+    loader.loadDoc(doc, sourceName);
+  } finally {
+    // Nothing in here throws by design, but the `CreateFrame` handle is held for the whole load and a
+    // handle stranded by a bug of ours is a registry slot pinned for the life of the VM.
+    loader.finish();
+  }
   return loader.report;
 }
 
@@ -293,10 +298,13 @@ class DocumentLoader {
    * Call `target:method(...args)` through Lua, discarding the result -- this is the setter path, and
    * `callForWidget` below is the same call for the getters whose result is the point.
    *
-   * The two failure modes are deliberately not the same thing. A method the object model has never
-   * heard of is a GAP: warned once (by name, so one line per missing method for the whole load) and
-   * skipped, because the attribute it would have applied is simply not modeled yet. A method that
-   * exists and RAISED is an error: something was wrong with the document or with us.
+   * THREE outcomes, and keeping them apart is what makes the report worth reading. A method the object
+   * model has never heard of is a GAP: warned once by name, one line per missing method for the whole
+   * load. A method that is REGISTERED BUT DOES NOTHING is the same kind of gap wearing a success:
+   * `SetBackdrop` and the `Set*FontObject` family exist so duck-typing sees the class correctly and
+   * then return quietly, so without `NOT_IMPLEMENTED` (`lua/methods/region.ts`) this would report a
+   * clean load of a screen missing every backdrop and every label font. A method that exists and
+   * RAISED is an error: something was wrong with the document or with us.
    *
    * `getTableField` runs the wrapper's `__index`, which mints a handle for the bound closure it
    * returns, so every call here releases that handle -- the frame's Lua-side dispatch cache still
@@ -336,6 +344,12 @@ class DocumentLoader {
       if ('message' in result) {
         this.report.errors.push(`${dbg}: ${method}: ${result.message}`);
         return undefined;
+      }
+      if (NOT_IMPLEMENTED.has(method)) {
+        this.warnOnce(
+          `stub:${method}`,
+          `${method} is registered but does nothing in this runtime; every XML use of it is ignored (first: ${dbg})`,
+        );
       }
       return result.value;
     } finally {
@@ -460,6 +474,10 @@ class DocumentLoader {
     if (attrBool(element, 'enableMouse')) {
       this.callMethod(wrapper, 'EnableMouse', [true], dbg);
     }
+    // The window-behaviour attributes. These are ISSUED, not pre-judged: none of the four has a method
+    // in this object model today, and `callMethod` reports that by name from evidence -- so the day one
+    // lands, the attribute starts working and the warning stops, with nothing here to remember to
+    // change. A hardcoded "not in this runtime" line would keep claiming the gap after it closed.
     for (const [name, method] of [
       ['enableKeyboard', 'EnableKeyboard'],
       ['toplevel', 'SetToplevel'],
@@ -468,16 +486,21 @@ class DocumentLoader {
       ['clampedToScreen', 'SetClampedToScreen'],
     ] as const) {
       if (attrBool(element, name)) {
-        this.warnOnce(
-          `attr:${name}`,
-          `${name}="true" ignored: ${method} is not in this runtime's object model (first: ${dbg})`,
-        );
+        this.callMethod(wrapper, method, [true], dbg);
       }
     }
-    if (childrenNamed(element, 'HitRectInsets').length > 0) {
-      this.warnOnce(
-        'attr:hitRectInsets',
-        `<HitRectInsets> ignored: SetHitRectInsets is not in this runtime's object model (first: ${dbg})`,
+    // `<HitRectInsets><AbsInset .../></HitRectInsets>`, also accepted inline on the element: the
+    // frame's MOUSE rect, inset from its resolved rect. An absent side reads 0, so a partial element
+    // insets only what it names.
+    const hitRect = childrenNamed(element, 'HitRectInsets')[0];
+    if (hitRect !== undefined) {
+      const source = childrenNamed(hitRect, 'AbsInset')[0] ?? hitRect;
+      const side = (key: string) => num(attr(source, key)) ?? 0;
+      this.callMethod(
+        wrapper,
+        'SetHitRectInsets',
+        [side('left'), side('right'), side('top'), side('bottom')],
+        dbg,
       );
     }
   }
@@ -580,12 +603,18 @@ class DocumentLoader {
    * "special" font string (an EditBox's text font, a message frame's line font), which real FrameXML
    * attaches at OVERLAY.
    *
-   * Divergence from the reference, stated rather than hidden: it also ASSIGNS an EditBox's direct
-   * `<FontString>` as the box's text region, through a host call (`adopt_text_region`) this runtime
-   * has no equivalent of -- our `editbox` widget renders `Widget#displayText` itself
-   * (`screens.ts#resolveSprite`) and there is no slot to assign into. So the region is created and
-   * placed here, and an EditBox's typed text still draws through the box; the FontString is not
-   * standing in for it.
+   * A GAP THAT MATTERS, and the report says so per EditBox rather than burying it here: the reference
+   * also ASSIGNS an EditBox's direct `<FontString>` as the box's text region (`adopt_text_region`), and
+   * this runtime has nothing to assign into. Nor does the renderer cover for it -- `resolveSprite`
+   * (`screens.ts`) rasterizes text ONLY for `kind === 'fontstring'`, so an `editbox` widget falls
+   * through to the sprite branch and draws no glyphs at all. The only edit box whose text is visible
+   * today is mirrored by hand, per screen, per frame (`screens/login.ts` copies `displayText` into a
+   * FontString it creates itself).
+   *
+   * So an XML-loaded `<EditBox>` currently draws its backdrop and nothing typed -- which is the account
+   * and password fields of `AccountLogin.xml`. Closing it is a `widget.ts`/renderer change (either an
+   * `editbox` branch in `resolveSprite`, or a text-region slot on `Widget` that this pass assigns the
+   * declared child into), deliberately not made from inside the loader.
    */
   private applySpecialFontStrings(
     element: XmlElement,
@@ -609,6 +638,12 @@ class DocumentLoader {
         this.applyRegionVisual(region, regionWrapper, false, dbg);
       } finally {
         this.rt.vm.unref(regionWrapper);
+      }
+      if (element.tag.toLowerCase() === 'editbox') {
+        this.warnOnce(
+          'editbox:no-text-region',
+          `${dbg}: an <EditBox>'s declared <FontString> is created and placed but NOT adopted as the box's text region -- nothing renders an editbox's typed text (see applySpecialFontStrings)`,
+        );
       }
     }
   }
@@ -711,8 +746,12 @@ class DocumentLoader {
         `${dbg}: a <FontString> sets a height/outline with no font face anywhere in its inherits chain; SetFont needs a face`,
       );
     }
-    // The inherited colour and justification. An explicit `<Color>`/`justifyH` on the element itself
-    // is applied AFTER this by the layout/visual passes, so it still wins.
+    // The font object's colour and justification.
+    //
+    // ORDER, precisely, because the two halves differ and both match the reference: this pass runs
+    // AFTER `applyRegionLayout` and BEFORE `applyRegionVisual`, so the font object's `justifyH`
+    // OVERRIDES an element-level `justifyH="LEFT"` (the layout pass already applied it), while an
+    // element-level `<Color>` overrides the object's (the visual pass has not run yet).
     if (resolved.color !== undefined) {
       const [r, g, b] = resolved.color;
       this.callMethod(wrapper, 'SetTextColor', [r, g, b], dbg);
@@ -928,6 +967,10 @@ class DocumentLoader {
     ];
     if (isCheck) {
       slots.push(['CheckedTexture', 'SetCheckedTexture', 'GetCheckedTexture']);
+      // `DisabledCheckedTexture` has NEITHER half in this object model -- unlike the four above, whose
+      // getters Task 7 added, this one would need a new region slot and a new visibility rule
+      // (shown only while checked AND disabled). Listed anyway, so `callMethod` names both missing
+      // methods in the report instead of the element vanishing without a trace.
       slots.push(['DisabledCheckedTexture', 'SetDisabledCheckedTexture', 'GetDisabledCheckedTexture']);
     }
 
@@ -1031,7 +1074,7 @@ class DocumentLoader {
       // keeps it, so a region never clobbers a FrameXML function that happens to share its name.
       this.warnOnce(
         `global:${name}`,
-        `${dbg}: '${name}' is already a global; the region keeps its name but is not published`,
+        `${dbg}: '${name}' is already a global; this region is unreachable by name (the setter created it unnamed, so GetName() is nil too)`,
       );
       return;
     }
@@ -1092,18 +1135,23 @@ class DocumentLoader {
     for (const scripts of childrenNamed(element, 'Scripts')) {
       for (const handler of scripts.children) {
         const name = handler.tag;
-        const compiled = compileScriptHandler(
-          this.rt.vm,
-          name,
-          handler.body,
-          attr(handler, 'function') ?? null,
-          dbg,
-        );
+        const functionAttr = attr(handler, 'function') ?? null;
+        const compiled = compileScriptHandler(this.rt.vm, name, handler.body, functionAttr, dbg);
         if (compiled === null) {
-          // `compileScriptHandler` has already logged WHY (a syntax error, or a `function=` naming a
-          // global that does not exist) to the console; it does not hand the message back. Recorded
-          // here as a report line so the count is visible even when the console is not.
-          this.report.errors.push(`${dbg}: <${name}> produced no handler; see the console for why`);
+          // `compileScriptHandler` has already logged WHY to the console and does not hand the message
+          // back, so what is left here is the DISTINCTION between its two failures, which the report
+          // must not blur. An empty body with a `function=` is a FORWARD REFERENCE: a global that the
+          // Lua file for this screen defines later in the load order, which is a deduped gap and not a
+          // drop -- making it an error fills the report with noise that resolves itself. A body that
+          // failed to compile really did drop a handler.
+          if (handler.body.trim() === '' && functionAttr !== null) {
+            this.warnOnce(
+              `fn:${functionAttr}`,
+              `${dbg}: <${name} function="${functionAttr}"> names no global function (yet); no handler installed`,
+            );
+          } else {
+            this.report.errors.push(`${dbg}: <${name}> produced no handler; see the console for why`);
+          }
           continue;
         }
         // `SetScript` retains its own handle, so the owned one from the compiler is released here.

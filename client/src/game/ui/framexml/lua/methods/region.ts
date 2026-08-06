@@ -14,7 +14,7 @@
  *     SetTexCoord, SetDrawLayer -- the client's own LayeredRegion base class).
  *   - TEXTURE / FONTSTRING: everything else, on the leaf it actually belongs to.
  */
-import { MethodContext, MethodTable, registerMethods } from '../object';
+import { FrameMethod, MethodContext, MethodTable, registerMethods } from '../object';
 import { Anchor, AnchorPoint } from '../../../layout';
 import { Layer, Widget } from '../../../widget';
 import { familyForFontFile, measureText } from '../../../text';
@@ -28,6 +28,39 @@ export function warnOnce(message: string): void {
   }
   warned.add(message);
   console.warn(message);
+}
+
+const notImplementedNames = new Set<string>();
+
+/**
+ * The names of every method that is REGISTERED but does nothing.
+ *
+ * These exist so duck-typing sees the class correctly -- `if frame.SetBackdrop then` has to be true on
+ * a Frame whether or not this engine can draw one -- which means a caller cannot tell a working method
+ * from a stub by asking Lua. That is fine for game code and NOT fine for the XML loader
+ * (`framexml/loader.ts`): every `<Backdrop>` and every `<NormalFont>` on a real glue screen would be
+ * swallowed by a successful-looking call, and the load report would claim a clean load of a screen
+ * missing all of its backdrops and label fonts. So the stubs are declared through `notImplemented`
+ * below, which records the name here, and the loader turns a call to one into a report warning.
+ *
+ * Keyed by NAME, not by (class, name): no stub name is also a real method on another class today. If
+ * one ever is, the loader over-reports that method as a gap on the class where it works -- widen this
+ * to a `class:name` key at that point rather than dropping the check.
+ */
+export const NOT_IMPLEMENTED: ReadonlySet<string> = notImplementedNames;
+
+/**
+ * Declares a method that is registered, warns once, and does nothing -- the honest form of a gap.
+ *
+ * `results` is for the handful that must still answer something plausible (`GetEffectiveScale` reports
+ * the only scale that exists; `HasFocus` reports false).
+ */
+export function notImplemented(method: string, reason: string, results: unknown[] = []): FrameMethod {
+  notImplementedNames.add(method);
+  return () => {
+    warnOnce(`${method}: not implemented -- ${reason}`);
+    return results;
+  };
 }
 
 /** Every method here is only ever invoked with a live id -- `object.ts` checked before dispatching. */
@@ -246,10 +279,7 @@ const TEXTURE: MethodTable = {
     widgetOf(ctx, self).blend = mode === 'ADD' ? 'ADD' : 'ALPHA';
     return [];
   },
-  SetDesaturated: () => {
-    warnOnce('SetDesaturated: not implemented -- widget.ts has no desaturation field yet');
-    return [];
-  },
+  SetDesaturated: notImplemented('SetDesaturated', 'widget.ts has no desaturation field yet'),
 };
 
 /** A `FontSpec`, created on first use so a Texture never carries one and a FontString always can. */
@@ -319,10 +349,7 @@ const FONTSTRING: MethodTable = {
     ensureFont(widgetOf(ctx, self)).align = value as 'LEFT' | 'CENTER' | 'RIGHT';
     return [];
   },
-  SetJustifyV: () => {
-    warnOnce('SetJustifyV: not implemented -- FontSpec has no vertical-justify field yet');
-    return [];
-  },
+  SetJustifyV: notImplemented('SetJustifyV', 'FontSpec has no vertical-justify field yet'),
 };
 
 registerMethods('REGION', REGION);

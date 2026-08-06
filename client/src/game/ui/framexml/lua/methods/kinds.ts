@@ -17,7 +17,7 @@
 import { MethodContext, MethodTable, registerMethods } from '../object';
 import { Anchor } from '../../../layout';
 import { Widget } from '../../../widget';
-import { warnOnce, widgetOf } from './region';
+import { notImplemented, widgetOf } from './region';
 
 /** `0..1` floats to the `#rrggbb` string `Widget` stores colors as -- duplicated from `region.ts`'s
  * private helper of the same shape rather than exported, since it is three lines and not worth a
@@ -53,10 +53,15 @@ function fillParent(region: Widget, parent: Widget): void {
  * later `button:GetNormalTexture():SetTexCoord(...)` (a real addon idiom, used to pick one icon out
  * of a sprite sheet) lands on the right object rather than minting a new one that nothing draws.
  *
- * Only `normal` and `checked` (below) have a getter in the plan's method list -- `GetPushedTexture`
- * etc. are real client API too, but Task 4's brief does not ask for them, so they are not registered;
- * `SetPushedTexture`/`SetDisabledTexture`/`SetHighlightTexture` still each get their OWN region (never
- * share one), since setting one must not overwrite another.
+ * Every slot has BOTH halves, and the getters are not optional conveniences: the XML loader
+ * (`framexml/loader.ts`) creates a state texture through the setter and then decorates whatever the
+ * matching getter hands back, because the setter is the region's lazy constructor and takes nothing but
+ * a file. With `GetPushedTexture`/`GetDisabledTexture`/`GetHighlightTexture` missing (as they were
+ * until Task 7 needed them), the loader silently dropped `alphaMode`, `<Size>`, `<Anchors>` and
+ * `<TexCoords>` for those three slots -- and `alphaMode="ADD"` on a glue button's `<HighlightTexture>`
+ * is the difference between an additive glow and an opaque grey bar over the button.
+ *
+ * Each slot keeps its OWN region (never a shared one), since setting one must not overwrite another.
  */
 type StateSlot = 'normal' | 'pushed' | 'disabled' | 'highlight';
 const stateTextures = new Map<number, Partial<Record<StateSlot, number>>>();
@@ -231,11 +236,13 @@ const BUTTON: MethodTable = {
     syncStateTextures(ctx, self);
     return [];
   },
+  GetPushedTexture: (ctx, self) => [ctx.wrapper(ensureStateTextureId(ctx, self, 'pushed'))],
   SetDisabledTexture: (ctx, self, args) => {
     applyStateArg(ctx.registry.widget(ensureStateTextureId(ctx, self, 'disabled'))!, args[0]);
     syncStateTextures(ctx, self);
     return [];
   },
+  GetDisabledTexture: (ctx, self) => [ctx.wrapper(ensureStateTextureId(ctx, self, 'disabled'))],
   SetHighlightTexture: (ctx, self, args) => {
     const region = ctx.registry.widget(ensureStateTextureId(ctx, self, 'highlight'))!;
     applyStateArg(region, args[0]);
@@ -244,22 +251,17 @@ const BUTTON: MethodTable = {
     region.shown = highlightLocked.has(self);
     return [];
   },
+  // Hands back the region WITHOUT changing its visibility -- `SetHighlightTexture` above owns that
+  // decision, and a getter that re-ran it would show a hover highlight because the loader asked for
+  // the region in order to size it.
+  GetHighlightTexture: (ctx, self) => [ctx.wrapper(ensureStateTextureId(ctx, self, 'highlight'))],
 
   // All three: real FrameXML names a global `Font` template (`GameFontNormal`, ...) that these switch
   // a button's label/highlight/disabled text to wholesale. Nothing in this runtime keeps a
   // name -> FontSpec registry -- same gap `FONTSTRING.SetFontObject` documents in `region.ts`.
-  SetNormalFontObject: () => {
-    warnOnce('SetNormalFontObject: not implemented -- no runtime Font-object registry exists yet');
-    return [];
-  },
-  SetHighlightFontObject: () => {
-    warnOnce('SetHighlightFontObject: not implemented -- no runtime Font-object registry exists yet');
-    return [];
-  },
-  SetDisabledFontObject: () => {
-    warnOnce('SetDisabledFontObject: not implemented -- no runtime Font-object registry exists yet');
-    return [];
-  },
+  SetNormalFontObject: notImplemented('SetNormalFontObject', 'no runtime Font-object registry exists yet'),
+  SetHighlightFontObject: notImplemented('SetHighlightFontObject', 'no runtime Font-object registry exists yet'),
+  SetDisabledFontObject: notImplemented('SetDisabledFontObject', 'no runtime Font-object registry exists yet'),
   // Real `Button:SetTextColor` also takes an alpha channel `FontSpec.color` has nowhere to put --
   // dropped for the same reason `FONTSTRING.SetTextColor` drops it in `region.ts`.
   SetTextColor: (ctx, self, args) => {
@@ -306,27 +308,15 @@ const EDITBOX: MethodTable = {
   // to. Wiring these for real needs `MethodContext` to carry that handle -- a change to `object.ts`
   // (Task 3's file), bigger than this task's own file scope (`lua/methods/kinds.ts`). Same shape of
   // gap as `frame.ts`'s `SetScale`/`SetBackdrop`.
-  SetFocus: () => {
-    warnOnce('SetFocus: not implemented -- MethodContext has no GlueInput handle to move focus through');
-    return [];
-  },
-  ClearFocus: () => {
-    warnOnce('ClearFocus: not implemented -- MethodContext has no GlueInput handle to move focus through');
-    return [];
-  },
-  HasFocus: () => {
-    warnOnce('HasFocus: not implemented -- MethodContext has no GlueInput handle to ask');
-    return [false];
-  },
+  SetFocus: notImplemented('SetFocus', 'MethodContext has no GlueInput handle to move focus through'),
+  ClearFocus: notImplemented('ClearFocus', 'MethodContext has no GlueInput handle to move focus through'),
+  HasFocus: notImplemented('HasFocus', 'MethodContext has no GlueInput handle to ask', [false]),
 
   SetMaxLetters: (ctx, self, args) => {
     widgetOf(ctx, self).maxLetters = Number(args[0] ?? 0);
     return [];
   },
-  SetTextInsets: () => {
-    warnOnce('SetTextInsets: not implemented -- widget.ts has no text-inset field yet');
-    return [];
-  },
+  SetTextInsets: notImplemented('SetTextInsets', 'widget.ts has no text-inset field yet'),
   SetPassword: (ctx, self, args) => {
     widgetOf(ctx, self).password = Boolean(args[0]);
     return [];
@@ -334,10 +324,7 @@ const EDITBOX: MethodTable = {
   // Real `SetAutoFocus` decides whether a box grabs focus the moment it becomes shown. Nothing in
   // this engine focuses a widget on `show()` at all (there is no such hook on `Widget`), so there is
   // no lifecycle event for this to attach to yet.
-  SetAutoFocus: () => {
-    warnOnce('SetAutoFocus: not implemented -- nothing in this engine focuses a widget on show');
-    return [];
-  },
+  SetAutoFocus: notImplemented('SetAutoFocus', 'nothing in this engine focuses a widget on show'),
   HighlightText: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
     const length = widget.text.length;
