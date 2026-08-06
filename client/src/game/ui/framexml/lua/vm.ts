@@ -108,6 +108,33 @@ export class LuaVM {
   }
 
   /**
+   * `call`, but keeping the function's FIRST result instead of discarding it.
+   *
+   * The loader (Task 7) is the first caller that needs one: it materializes a document by calling the
+   * Lua `CreateFrame` global and the wrapper's own `CreateTexture`/`GetFontString`/`GetNormalTexture`,
+   * every one of which is only useful for the widget it hands back. The alternatives were both worse
+   * than a second call method -- reaching into `FrameRegistry` behind Lua's back (the private back door
+   * the whole object model exists to avoid), or splicing frame names into a `runExpr` source string
+   * (which puts arbitrary XML attribute text inside Lua quotes: one apostrophe in a frame name and the
+   * chunk stops parsing).
+   *
+   * The returned value follows `toJs`'s mapping, so a table or function arrives as a FRESH `LuaRef`
+   * the caller owns and must `unref` -- even when the Lua side handed back a permanently-held handle
+   * like a frame's wrapper, because the registry slot is this call's, not that handle's.
+   */
+  callReturning(fn: LuaRef, args: unknown[]): LuaError | { value: unknown } {
+    this.pushRef(fn);
+    for (const arg of args) {
+      this.pushValue(arg);
+    }
+    const status = lua.lua_pcall(this.L, args.length, 1, 0);
+    if (status !== lua.LUA_OK) {
+      return this.popError('<call>');
+    }
+    return { value: this.popValue() };
+  }
+
+  /**
    * Loads and runs a chunk of Lua source that ends in a single `return <expr>`, and hands back the
    * value it returned. `run` above discards every result, which is fine for side-effecting chunks but
    * useless for Task 5's `compileScriptHandler`: compiling `return function(self, ...) ... end` into a
