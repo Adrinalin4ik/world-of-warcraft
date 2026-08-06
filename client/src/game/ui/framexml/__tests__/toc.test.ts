@@ -16,6 +16,7 @@ describe('parseToc', () => {
       ].join('\n'),
     );
 
+    expect(toc.directives).toEqual([['Interface', '30300']]);
     expect(toc.files).toEqual(['GlueStrings.lua', 'GlueFonts.xml', 'AccountLogin.xml']);
     expect(tocDirective(toc, 'interface')).toBe('30300');
   });
