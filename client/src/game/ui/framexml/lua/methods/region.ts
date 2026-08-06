@@ -108,15 +108,39 @@ function resolveRelativeTo(ctx: MethodContext, self: number, value: unknown): st
 }
 
 /**
- * How deep a `Show`/`Hide` may re-enter itself before this gives up.
+ * How many times a `Show`/`Hide` may RE-ENTER before this gives up.
  *
  * `ChangedOptionsDialog_OnShow` calls `self:Hide()` -- a handler hiding the very frame whose showing
- * fired it is the ordinary case, not a pathology, so one level of re-entry has to work. The engine has
- * no limit here at all and relies on the UI not being written in a loop; a browser cannot afford that
- * bet, since a `Show`/`Hide` cycle between two frames would hang the tab rather than print a stack.
+ * fired it is the ordinary case, not a pathology, so re-entry has to work. The engine has no limit here
+ * at all and relies on the UI not being written in a loop; a browser cannot afford that bet, since a
+ * `Show`/`Hide` cycle between two frames would hang the tab rather than print a stack.
+ *
+ * RE-ENTRIES, not tree depth, and the distinction is not academic -- counting the recursive walk
+ * instead would make the cap a limit on how deeply a screen may be NESTED, which `AccountLogin`'s
+ * frame-plus-region tree comes within a few levels of on its own. So the counter moves at the two
+ * method entry points below, and the walk recurses freely.
  */
-const MAX_VISIBILITY_DEPTH = 16;
-let visibilityDepth = 0;
+const MAX_VISIBILITY_REENTRY = 12;
+let visibilityReentry = 0;
+
+/**
+ * Runs one `Show`/`Hide`'s cascade under the re-entry cap. Returns with nothing done if a chain of
+ * handlers has gone `MAX_VISIBILITY_REENTRY` deep, which can only be a loop.
+ */
+function cascadeGuarded(ctx: MethodContext, widget: Widget, handler: 'OnShow' | 'OnHide'): void {
+  if (visibilityReentry >= MAX_VISIBILITY_REENTRY) {
+    warnOnce(
+      `${handler}: Show/Hide re-entered ${MAX_VISIBILITY_REENTRY} times and was cut off -- a visibility handler is showing or hiding in a loop`,
+    );
+    return;
+  }
+  visibilityReentry += 1;
+  try {
+    cascadeVisibility(ctx, widget, handler);
+  } finally {
+    visibilityReentry -= 1;
+  }
+}
 
 /**
  * Fires `OnShow`/`OnHide` for every frame in `widget`'s subtree whose VISIBILITY just changed.
@@ -138,36 +162,25 @@ let visibilityDepth = 0;
  * dialog must not abort the screen change that was showing it. `reportScriptError` is where those go.
  */
 function cascadeVisibility(ctx: MethodContext, widget: Widget, handler: 'OnShow' | 'OnHide'): void {
-  if (visibilityDepth >= MAX_VISIBILITY_DEPTH) {
-    warnOnce(
-      `${handler}: visibility cascade nested ${MAX_VISIBILITY_DEPTH} deep and was cut off -- a Show/Hide handler is showing or hiding in a loop`,
-    );
-    return;
+  const id = ctx.registry.idOfWidget(widget);
+  if (id !== null) {
+    const error = invokeScriptHandler(ctx, id, handler);
+    if (error !== null) {
+      const name = ctx.registry.nameOf(id) ?? widget.id;
+      reportScriptError(`${name}: ${handler}`, error.message);
+    }
+    // The handler may have flipped this frame's own flag (the `self:Hide()` case above), in which
+    // case the nested call has already dealt with the subtree and descending again would fire the
+    // opposite handler's children twice.
+    if (widget.shown !== (handler === 'OnShow')) {
+      return;
+    }
   }
-  visibilityDepth += 1;
-  try {
-    const id = ctx.registry.idOfWidget(widget);
-    if (id !== null) {
-      const error = invokeScriptHandler(ctx, id, handler);
-      if (error !== null) {
-        const name = ctx.registry.nameOf(id) ?? widget.id;
-        reportScriptError(`${name}: ${handler}`, error.message);
-      }
-      // The handler may have flipped this frame's own flag (the `self:Hide()` case above), in which
-      // case the nested call has already dealt with the subtree and descending again would fire the
-      // opposite handler's children twice.
-      if (widget.shown !== (handler === 'OnShow')) {
-        return;
-      }
+  // A copy: a handler is free to create or destroy children, and the client's dialogs do.
+  for (const child of [...widget.children]) {
+    if (child.shown) {
+      cascadeVisibility(ctx, child, handler);
     }
-    // A copy: a handler is free to create or destroy children, and the client's dialogs do.
-    for (const child of [...widget.children]) {
-      if (child.shown) {
-        cascadeVisibility(ctx, child, handler);
-      }
-    }
-  } finally {
-    visibilityDepth -= 1;
   }
 }
 
@@ -189,7 +202,7 @@ const REGION: MethodTable = {
     }
     widget.show();
     if (widget.visible) {
-      cascadeVisibility(ctx, widget, 'OnShow');
+      cascadeGuarded(ctx, widget, 'OnShow');
     }
     return [];
   },
@@ -203,7 +216,7 @@ const REGION: MethodTable = {
     }
     widget.hide();
     if (wasVisible) {
-      cascadeVisibility(ctx, widget, 'OnHide');
+      cascadeGuarded(ctx, widget, 'OnHide');
     }
     return [];
   },
