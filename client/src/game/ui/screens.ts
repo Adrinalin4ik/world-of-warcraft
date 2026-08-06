@@ -14,6 +14,7 @@ import { GameSession } from '../../network/session';
 import { ProtocolSession, SessionState } from '../../network/protocol/session';
 import { GlueArt } from './art';
 import { clientStateForStage } from './screens/login-state';
+import { installFramexmlDebug } from './framexml/debug';
 import { GlueInput } from './input';
 import { GlueRenderer, ResolvedSprite } from './renderer';
 import { GlueSceneView } from './scene/glue-scene';
@@ -104,6 +105,11 @@ export class GlueApp {
     this.resize();
     window.addEventListener('resize', this.resize);
     this.input.attach();
+
+    // The FrameXML document layer has no callers until the Lua runtime lands, so this console hook is
+    // the only way to run it against the client's real files rather than against test fixtures.
+    // Same idea as `skyDebug`, and the same place to remove it from when the loader makes it moot.
+    installFramexmlDebug();
 
     // Fonts and strings first: a screen that mounts before them draws unreadable labels.
     await Promise.all([loadGlueFonts(), GlueStrings.load().then((s) => (this.strings = s))]);
