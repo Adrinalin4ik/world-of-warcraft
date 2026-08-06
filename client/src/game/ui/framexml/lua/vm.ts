@@ -96,6 +96,13 @@ export class LuaVM {
    * Exposes a JS function to Lua as a global. `fn` receives the call's arguments as a plain array
    * and returns the values Lua should see back, in order -- the stack bookkeeping happens here so
    * every caller of `registerFunction` gets to work with values, not stack indices.
+   *
+   * If `fn` throws an `Error`, it is converted into a real Lua error (`luaL_error`), so a binding
+   * can reject bad input the way the client's own engine does -- `CreateFrame("Sparkle")` has to be
+   * catchable by `pcall` and carry a source position, not tear the JS call stack down through
+   * fengari. Anything thrown that is NOT an `Error` is re-thrown untouched, because that is how
+   * fengari signals its own errors internally (it throws the state's `errorJmp` object, which
+   * `lua_pcall` up the stack is waiting to catch); swallowing one would corrupt the VM.
    */
   registerFunction(name: string, fn: (args: unknown[]) => unknown[]): void {
     lua.lua_pushjsfunction(this.L, (L: LuaState) => {
@@ -104,7 +111,15 @@ export class LuaVM {
       for (let i = 1; i <= nargs; i++) {
         args.push(this.toJs(i));
       }
-      const results = fn(args) ?? [];
+      let results: unknown[];
+      try {
+        results = fn(args) ?? [];
+      } catch (error) {
+        if (error instanceof Error) {
+          return lauxlib.luaL_error(L, fengari.to_luastring('%s'), error.message);
+        }
+        throw error;
+      }
       for (const result of results) {
         this.pushValue(result);
       }
@@ -144,6 +159,28 @@ export class LuaVM {
     lua.lua_pop(this.L, 1);
   }
 
+  /**
+   * Releases a handle, freeing its registry slot for reuse. The Lua value itself lives or dies by
+   * ordinary garbage collection afterwards.
+   *
+   * This exists because the registry is the one thing here that JS garbage collection cannot help
+   * with: `luaL_ref` stores the value in a table that is a GC root by definition, so an unreleased
+   * handle pins its value forever. `toJs` mints a fresh handle for EVERY table or function that
+   * crosses the boundary -- including every frame passed as an argument to a widget method -- so
+   * without this the registry would grow with each such call, not just with each object.
+   *
+   * A released handle must not be used again; it is not an error the VM can detect, because the
+   * slot may already have been handed to a different value.
+   */
+  unref(ref: LuaRef): void {
+    lauxlib.luaL_unref(this.L, lua.LUA_REGISTRYINDEX, unbox(ref));
+  }
+
+  /** Whether a value that came back out of Lua is a handle (and so needs `unref` when discarded). */
+  isRef(value: unknown): value is LuaRef {
+    return typeof value === 'object' && value !== null && 'registryIndex' in value;
+  }
+
   dispose(): void {
     lua.lua_close(this.L);
   }
@@ -176,7 +213,7 @@ export class LuaVM {
       }
     } else if (typeof value === 'string') {
       lua.lua_pushstring(this.L, value);
-    } else if (this.isLuaRef(value)) {
+    } else if (this.isRef(value)) {
       this.pushRef(value);
     } else {
       throw new Error(`LuaVM: cannot push a JS value of type ${typeof value} onto the Lua stack`);
@@ -220,7 +257,4 @@ export class LuaVM {
     lua.lua_rawgeti(this.L, lua.LUA_REGISTRYINDEX, unbox(ref));
   }
 
-  private isLuaRef(value: unknown): value is LuaRef {
-    return typeof value === 'object' && value !== null && 'registryIndex' in value;
-  }
 }

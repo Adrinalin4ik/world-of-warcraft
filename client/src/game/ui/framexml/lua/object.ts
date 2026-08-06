@@ -1,0 +1,485 @@
+/**
+ * The FrameScript object model: what makes a widget a real Lua object rather than a handle the glue
+ * code has to keep passing back to us.
+ *
+ * A frame's Lua value is a plain TABLE carrying its integer id, with a shared metatable whose
+ * `__index` dispatches by method name through per-class method tables. Everything on the JS side is
+ * keyed by that integer id -- one flat `FrameRegistry`, no object graph mirrored across the
+ * boundary. That is the shape benilla's Rust implementation was forced into (mlua's reference thread
+ * caps at 8000 slots, so it holds no persistent Lua handles at all); we are not under that
+ * constraint, since fengari is garbage-collected JS, but the shape is worth keeping on its own
+ * merits -- ids serialize, survive a VM restart, and can't leak the Lua state into game code.
+ *
+ * The one rule here that is easy to get backwards, and that the addon goal rests on:
+ *
+ *   METHOD TABLES ARE PER CLASS, AND A CLASS ONLY SEES ITS OWN CHAIN.
+ *
+ * Addons discover what a widget is by asking it: `if frame.SetValue then ... end`. If every widget
+ * shared one flat method table, every frame would answer yes to every question and that idiom --
+ * which is everywhere in real addon code -- would quietly start lying. So a plain Frame resolves
+ * `SetValue` to nil, and a CheckButton resolves a method by walking CHECKBUTTON -> BUTTON -> FRAME ->
+ * REGION, which is the client's own class hierarchy.
+ *
+ * Dispatch itself lives in Lua (see `DISPATCH_CHUNK`), not in JS. `__index` is called on every miss
+ * -- that is, on every single method call in the entire UI -- so the hot path must not cross the JS
+ * boundary more than it has to. The Lua side memoizes the bound closure per (class, method name), so
+ * the JS resolver is consulted once per pair and the steady state is a table lookup.
+ */
+import { LuaRef, LuaVM } from './vm';
+import { Widget, WidgetKind, WidgetRoot } from '../../widget';
+
+/**
+ * The client's widget classes, as a real hierarchy rather than a flat list of kinds.
+ *
+ * REGION is abstract -- nothing is created as one. It exists because textures, font strings and
+ * frames genuinely do share a set of methods (`SetPoint`, `Show`, `GetParent`, ...) and putting them
+ * anywhere else would mean either duplicating them or flattening the tree, which is the mistake this
+ * whole file exists to avoid.
+ */
+export type WidgetClass =
+  | 'REGION'
+  | 'TEXTURE'
+  | 'FONTSTRING'
+  | 'FRAME'
+  | 'BUTTON'
+  | 'CHECKBUTTON'
+  | 'EDITBOX'
+  | 'BACKDROP';
+
+const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
+  REGION: null,
+  TEXTURE: 'REGION',
+  FONTSTRING: 'REGION',
+  FRAME: 'REGION',
+  BUTTON: 'FRAME',
+  CHECKBUTTON: 'BUTTON',
+  EDITBOX: 'FRAME',
+  // OURS, not the client's: `backdrop` is a Widget kind this project invented for a nine-slice
+  // frame. It behaves as a Frame and has no methods of its own today.
+  BACKDROP: 'FRAME',
+};
+
+/** Every class that is a concrete widget, and the `Widget` kind it is built as. */
+const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
+  TEXTURE: 'texture',
+  FONTSTRING: 'fontstring',
+  FRAME: 'frame',
+  BUTTON: 'button',
+  CHECKBUTTON: 'checkbutton',
+  EDITBOX: 'editbox',
+  BACKDROP: 'backdrop',
+};
+
+/**
+ * What `CreateFrame` will build. Deliberately NOT every concrete class: the real client errors on
+ * `CreateFrame("Texture")` because a texture is created through its owner (`CreateTexture`), and
+ * rule 5 makes `CreateFrame` the validation point -- so it has to be able to say no.
+ */
+const CREATE_FRAME_CLASSES: WidgetClass[] = ['FRAME', 'BUTTON', 'CHECKBUTTON', 'EDITBOX', 'BACKDROP'];
+
+/** Parses a FrameXML type name (`"CheckButton"`, `"checkbutton"`) into a class. */
+function parseClass(name: string): WidgetClass | null {
+  const upper = name.toUpperCase();
+  return upper in CLASS_PARENT ? (upper as WidgetClass) : null;
+}
+
+/** The lookup order for a class: itself, then each ancestor. */
+function chainOf(cls: WidgetClass): WidgetClass[] {
+  const chain: WidgetClass[] = [];
+  let node: WidgetClass | null = cls;
+  while (node !== null) {
+    chain.push(node);
+    node = CLASS_PARENT[node];
+  }
+  return chain;
+}
+
+/**
+ * A widget method, as tasks 3-5 write them.
+ *
+ * `self` is the frame's integer id, not its Lua table -- a method that needs the widget asks
+ * `ctx.registry.widget(self)`, and one that needs to hand a frame BACK to Lua returns
+ * `ctx.wrapper(id)`. Nothing on the JS side ever holds a Lua table.
+ *
+ * `args` are the call's remaining arguments, already converted to JS values; a table argument
+ * (usually another frame) arrives as a `LuaRef`, and `ctx.frameIdOf` turns that into an id.
+ */
+export type FrameMethod = (ctx: MethodContext, self: number, args: unknown[]) => unknown[];
+
+export type MethodTable = Record<string, FrameMethod>;
+
+export interface MethodContext {
+  vm: LuaVM;
+  registry: FrameRegistry;
+  /** The frame's Lua table, created on first use and the same table forever after. */
+  wrapper(id: number): LuaRef;
+  /** The frame id behind a Lua value that is (or should be) a frame table; null if it is not one. */
+  frameIdOf(value: unknown): number | null;
+}
+
+const METHODS = new Map<WidgetClass, MethodTable>();
+
+/**
+ * Registers methods against a class. THIS IS THE EXTENSION POINT for every later task: task 3 calls
+ * it for REGION and FRAME, task 4 for BUTTON / CHECKBUTTON / EDITBOX / TEXTURE / FONTSTRING, task 5
+ * adds `SetScript` to FRAME. Calls merge, so a class can be filled in from more than one module and
+ * registering the same name twice is a deliberate override rather than an error.
+ *
+ * Registration is module-level rather than per-VM on purpose: method tables are static definitions
+ * that depend on nothing but the `MethodContext` handed to them at call time, so there is nothing
+ * per-VM about them, and making them global means a task's module only has to be imported, not
+ * threaded through `installObjectModel`.
+ *
+ * REGISTER AT IMPORT TIME, before any frame is created. The Lua side memoizes "this class does not
+ * have that method" as hard as it memoizes the positive answer -- that is what makes duck-typing
+ * cheap -- so a method added after something has already asked for it by name would stay invisible
+ * for the life of the VM.
+ */
+export function registerMethods(cls: WidgetClass, methods: MethodTable): void {
+  const table = METHODS.get(cls) ?? {};
+  Object.assign(table, methods);
+  METHODS.set(cls, table);
+}
+
+function resolveMethod(cls: WidgetClass, name: string): FrameMethod | null {
+  for (const link of chainOf(cls)) {
+    const method = METHODS.get(link)?.[name];
+    if (method !== undefined) {
+      return method;
+    }
+  }
+  return null;
+}
+
+interface FrameEntry {
+  readonly id: number;
+  readonly cls: WidgetClass;
+  readonly name: string | null;
+  readonly widget: Widget;
+  /**
+   * The frame's Lua table, cached so `GetParent()` returns the same table every time -- identity
+   * has to be stable or `frameA == frameB` in Lua lies. Held here rather than in a Map beside the
+   * object model so that `reset` has one place to release from.
+   */
+  wrapper: LuaRef | null;
+}
+
+/**
+ * Every frame the runtime knows about, keyed by integer id.
+ *
+ * The registry owns the widget tree and the name -> id map; it knows nothing about Lua beyond
+ * storing the opaque wrapper handle the object model puts there, and calling back to release it.
+ */
+export class FrameRegistry {
+  /** The tree's root. A frame created with no parent is parented here. */
+  readonly root: Widget;
+
+  private readonly entries = new Map<number, FrameEntry>();
+  private readonly names = new Map<string, number>();
+  private readonly widgetIds = new Map<Widget, number>();
+  private releaseWrapper: ((ref: LuaRef, ownedName: string | null) => void) | null = null;
+  private nextId = 1;
+
+  constructor(root: Widget = new WidgetRoot().root) {
+    this.root = root;
+  }
+
+  /**
+   * Builds a widget and returns its id. `kind` is a FrameXML type name (`"CheckButton"`); an
+   * unrecognized one THROWS, which `installObjectModel` turns into a Lua error, because
+   * `CreateFrame` is where the client validates and a silently-created wrong widget would surface
+   * as a mystery three screens later.
+   */
+  create(kind: string, name: string | null, parent: number | null): number {
+    const cls = parseClass(kind);
+    const widgetKind = cls === null ? undefined : CLASS_KIND[cls];
+    if (cls === null || widgetKind === undefined) {
+      throw new Error(`CreateFrame: unknown frame type '${kind}'`);
+    }
+
+    const parentWidget = parent === null ? this.root : this.entries.get(parent)?.widget;
+    if (parentWidget === undefined) {
+      throw new Error(`CreateFrame: parent frame ${parent} does not exist`);
+    }
+
+    const id = this.nextId++;
+    const widget = new Widget(widgetKind, `lua:${id}`);
+    // `Widget#add` already carries the client's rule -- the child takes the parent's strata, a child
+    // FRAME is born at the parent's level + 1, a region stays at its owner's level. Do not re-apply
+    // any of that here.
+    parentWidget.add(widget);
+
+    this.entries.set(id, { id, cls, name, widget, wrapper: null });
+    this.widgetIds.set(widget, id);
+    // Non-overwriting: the first frame with a name owns it.
+    if (name !== null && !this.names.has(name)) {
+      this.names.set(name, id);
+    }
+    return id;
+  }
+
+  widget(id: number): Widget | null {
+    return this.entries.get(id)?.widget ?? null;
+  }
+
+  byName(name: string): number | null {
+    return this.names.get(name) ?? null;
+  }
+
+  classOf(id: number): WidgetClass | null {
+    return this.entries.get(id)?.cls ?? null;
+  }
+
+  nameOf(id: number): string | null {
+    return this.entries.get(id)?.name ?? null;
+  }
+
+  /** The id of a frame's parent, or null at the root (whose own id is not a frame id). */
+  parentOf(id: number): number | null {
+    const parent = this.entries.get(id)?.widget.parent;
+    if (parent === undefined || parent === null) {
+      return null;
+    }
+    return this.widgetIds.get(parent) ?? null;
+  }
+
+  /** Internal, for `installObjectModel`: the cached Lua table for a frame. */
+  wrapperOf(id: number): LuaRef | null {
+    return this.entries.get(id)?.wrapper ?? null;
+  }
+
+  /** Internal, for `installObjectModel`. */
+  setWrapper(id: number, ref: LuaRef): void {
+    const entry = this.entries.get(id);
+    if (entry !== undefined) {
+      entry.wrapper = ref;
+    }
+  }
+
+  /**
+   * Internal, for `installObjectModel`: how a wrapper handle is given back to the VM on `reset`.
+   * `ownedName` is the `_G` name this frame published, if it was the one that got it.
+   */
+  onWrapperRelease(release: (ref: LuaRef, ownedName: string | null) => void): void {
+    this.releaseWrapper = release;
+  }
+
+  /**
+   * Drops every frame, releasing the Lua handle each one held.
+   *
+   * A glue screen is torn down and rebuilt whenever the session changes state, so without this the
+   * Lua registry would gain a permanently-pinned table per frame per rebuild. The wrapper TABLES are
+   * then ordinary garbage; it is the registry slots that had to be handed back explicitly, since the
+   * Lua registry is a GC root by definition and no amount of JS garbage collection reaches into it.
+   */
+  reset(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.wrapper !== null && this.releaseWrapper !== null) {
+        const owned = entry.name !== null && this.names.get(entry.name) === entry.id;
+        this.releaseWrapper(entry.wrapper, owned ? entry.name : null);
+      }
+      entry.wrapper = null;
+    }
+    this.entries.clear();
+    this.names.clear();
+    this.widgetIds.clear();
+    for (const child of [...this.root.children]) {
+      this.root.remove(child);
+    }
+  }
+}
+
+/**
+ * `__index`, in Lua.
+ *
+ * It runs on every method call in the UI, so it goes out of its way not to: `cache[class][name]`
+ * holds the bound closure (or `false`, meaning "this class genuinely does not have that method" --
+ * the answer duck-typing depends on), and the JS resolver is asked exactly once per class/name pair.
+ * `false` rather than nil for the negative because a nil cache entry is indistinguishable from a
+ * cache miss, and re-asking JS on every `if frame.SetValue then` would be the slow path taken most.
+ *
+ * The two JS bridges are localized and then removed from `_G`: FrameXML and addons walk the global
+ * table, and internals of ours have no business being visible there.
+ */
+const DISPATCH_CHUNK = `
+  local hasMethod = __frameHasMethod
+  local invoke = __frameInvokeMethod
+  local cache = {}
+
+  __frameMetatable = {
+    __index = function(self, key)
+      local class = rawget(self, '__class')
+      local byClass = cache[class]
+      if byClass == nil then
+        byClass = {}
+        cache[class] = byClass
+      end
+      local method = byClass[key]
+      if method == nil then
+        if hasMethod(class, key) then
+          method = function(this, ...)
+            return invoke(rawget(this, '__id'), key, ...)
+          end
+        else
+          method = false
+        end
+        byClass[key] = method
+      end
+      if method == false then
+        return nil
+      end
+      return method
+    end,
+  }
+
+  __frameHasMethod = nil
+  __frameInvokeMethod = nil
+`;
+
+/**
+ * Installs `CreateFrame` and the metatable machinery into a VM.
+ *
+ * Call once per VM, after `installCompat` and before any glue Lua runs.
+ */
+export function installObjectModel(vm: LuaVM, registry: FrameRegistry): void {
+  // A screen teardown gives the handle back AND gives up the global, so the name is free for the
+  // frame the next screen builds with it.
+  registry.onWrapperRelease((ref, ownedName) => {
+    vm.unref(ref);
+    if (ownedName !== null) {
+      vm.setGlobal(ownedName, null);
+    }
+  });
+
+  // Assigned once the dispatch chunk below has run. `wrapper` is a closure, so it only has to be
+  // non-null by the time the first frame is created, which is necessarily after that.
+  let metatable: LuaRef | null = null;
+
+  const wrapper = (id: number): LuaRef => {
+    const existing = registry.wrapperOf(id);
+    if (existing !== null) {
+      return existing;
+    }
+    const cls = registry.classOf(id);
+    if (cls === null) {
+      throw new Error(`frame ${id} does not exist`);
+    }
+    if (metatable === null) {
+      throw new Error('installObjectModel: a frame was created before the dispatch chunk ran');
+    }
+    const table = vm.newTable();
+    vm.setTableField(table, '__id', id);
+    vm.setTableField(table, '__class', cls);
+    vm.setMetatable(table, metatable);
+    registry.setWrapper(id, table);
+
+    // Publish to `_G`, non-overwriting -- the first frame with a name owns it, and an existing
+    // global (a FrameXML function, say) is never clobbered by a frame that happens to share its
+    // name. `getGlobal` mints a handle for a table-valued global, so release it when we discard it.
+    const name = registry.nameOf(id);
+    if (name !== null && registry.byName(name) === id) {
+      const existingGlobal = vm.getGlobal(name);
+      if (existingGlobal === undefined) {
+        vm.setGlobal(name, table);
+      } else if (vm.isRef(existingGlobal)) {
+        vm.unref(existingGlobal);
+      }
+    }
+    return table;
+  };
+
+  const frameIdOf = (value: unknown): number | null => {
+    if (!vm.isRef(value)) {
+      return null;
+    }
+    const id = vm.getTableField(value, '__id');
+    return typeof id === 'number' && registry.classOf(id) !== null ? id : null;
+  };
+
+  const ctx: MethodContext = { vm, registry, wrapper, frameIdOf };
+
+  // Does this class have this method at all? The answer duck-typing turns on, asked once per
+  // class/name pair and memoized on the Lua side.
+  vm.registerFunction('__frameHasMethod', (args) => {
+    const cls = parseClass(String(args[0]));
+    if (cls === null) {
+      return [false];
+    }
+    return [resolveMethod(cls, String(args[1])) !== null];
+  });
+
+  vm.registerFunction('__frameInvokeMethod', (args) => {
+    const id = Number(args[0]);
+    const name = String(args[1]);
+    const cls = registry.classOf(id);
+    const method = cls === null ? null : resolveMethod(cls, name);
+    const rest = args.slice(2);
+    if (method === null) {
+      // Reachable if a frame is destroyed between resolve and call; the Lua-side cache is keyed by
+      // class, so a stale id is the only way to get here.
+      releaseAll(vm, rest, []);
+      throw new Error(`${name}: frame ${id} is not a live widget`);
+    }
+    let results: unknown[] = [];
+    try {
+      results = method(ctx, id, rest) ?? [];
+    } finally {
+      // Every table argument arrived as a fresh registry handle from `toJs`; whatever the method
+      // did with them, they are dead now. A handle the method is RETURNING is spared -- returning
+      // `ctx.wrapper(...)` is the normal case and that one is the frame's permanent handle, but an
+      // argument passed straight back through would otherwise be freed before it is pushed.
+      releaseAll(vm, rest, results);
+    }
+    return results;
+  });
+
+  const chunkError = vm.run(DISPATCH_CHUNK, 'framescript-dispatch.lua');
+  if (chunkError !== null) {
+    throw new Error(`installObjectModel: the dispatch chunk failed to load: ${chunkError.message}`);
+  }
+  const metatableGlobal = vm.getGlobal('__frameMetatable');
+  if (!vm.isRef(metatableGlobal)) {
+    throw new Error('installObjectModel: the dispatch chunk did not leave a metatable behind');
+  }
+  metatable = metatableGlobal;
+  vm.setGlobal('__frameMetatable', null);
+
+  // CreateFrame(type, name, parent, template). The template argument is accepted and ignored here;
+  // templates are applied by the XML loader, which is where the template definitions live.
+  vm.registerFunction('CreateFrame', (args) => {
+    const kind = args[0];
+    if (typeof kind !== 'string') {
+      throw new Error('CreateFrame: the first argument must be a frame type');
+    }
+    const cls = parseClass(kind);
+    if (cls === null || !CREATE_FRAME_CLASSES.includes(cls)) {
+      throw new Error(`CreateFrame: unknown frame type '${kind}'`);
+    }
+    const name = typeof args[1] === 'string' ? args[1] : null;
+
+    let parent: number | null = null;
+    if (vm.isRef(args[2])) {
+      parent = frameIdOf(args[2]);
+      vm.unref(args[2] as LuaRef);
+      if (parent === null) {
+        throw new Error(`CreateFrame: the parent given for '${name ?? kind}' is not a frame`);
+      }
+    }
+    for (const arg of args.slice(3)) {
+      if (vm.isRef(arg)) {
+        vm.unref(arg);
+      }
+    }
+
+    return [wrapper(registry.create(kind, name, parent))];
+  });
+}
+
+/** Releases every handle in `values` that is not also being handed back to Lua in `keep`. */
+function releaseAll(vm: LuaVM, values: unknown[], keep: unknown[]): void {
+  for (const value of values) {
+    if (vm.isRef(value) && !keep.includes(value)) {
+      vm.unref(value);
+    }
+  }
+}
