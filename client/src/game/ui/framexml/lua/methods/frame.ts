@@ -12,6 +12,7 @@
  * worth the confusion of two tasks touching the same name for different reasons.
  */
 import { MethodTable, onFrameTeardown, registerMethods } from '../object';
+import type { Insets } from '../../../backdrop';
 import { Layer } from '../../../widget';
 import { STRATA_ORDER, Strata } from '../../order';
 import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
@@ -85,13 +86,69 @@ const FRAME: MethodTable = {
     return [];
   },
 
-  // A `Backdrop` needs art resolved through `GlueArt` (path -> sprite KEY, then an async fetch) --
-  // see `art.ts` and `widget.ts`'s note that `BackdropDef` holds sprite keys, never paths. Nothing in
-  // `MethodContext` reaches a `GlueArt` table, and `BackdropDef` has no tint field for the Color
-  // variant either. XML-authored backdrops go through a different path (the loader, Task 7) that
-  // already has that art table in hand; a live Lua call to change one at runtime is out of reach
-  // until `MethodContext` grows an art handle.
-  SetBackdrop: notImplemented('SetBackdrop', 'MethodContext has no GlueArt handle to resolve art through'),
+  /**
+   * SetBackdrop(table) -- the tiled background plus the eight-piece border, as
+   * `frame:SetBackdrop{ bgFile=, edgeFile=, tile=, edgeSize=, tileSize=, insets={...} }`.
+   *
+   * This was a warn-once no-op on the grounds that `MethodContext` cannot reach a `GlueArt` table to
+   * turn a path into a sprite key. That reasoning had a hole: nothing says a sprite key may not BE the
+   * path. `BackdropDef` holds keys, and a caller that registers each path under itself
+   * (`framexml/runtime.ts`, which walks the finished tree and registers what it finds) makes the two
+   * the same string -- so no art handle is needed here at all, only honest storage. Without this, every
+   * `<Backdrop>` in the client's own XML drew nothing: both login edit boxes lost their border, and the
+   * loader's `<Backdrop>` pass, which builds the table correctly, had nowhere to put it.
+   *
+   * The frame moves to BACKGROUND, because that is where the engine draws a Backdrop: BENEATH every
+   * layer of its own frame, including the frame's own BACKGROUND font strings. Our layer ladder is
+   * flat, so sitting on BACKGROUND ahead of them in insertion order is how that is expressed -- the
+   * same thing `screens/login.ts` does by hand for the transcribed boxes, and what keeps an edit box's
+   * placeholder visible on top of its border instead of behind it.
+   */
+  SetBackdrop: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const table = args[0];
+    if (table === undefined || table === null) {
+      widget.backdrop = null;
+      return [];
+    }
+    if (!ctx.vm.isRef(table)) {
+      throw new Error('SetBackdrop: the backdrop must be a table or nil');
+    }
+    const str = (key: string): string | null => {
+      const value = ctx.vm.getTableField(table, key);
+      return typeof value === 'string' && value !== '' ? value : null;
+    };
+    const numberField = (key: string, fallback: number): number => {
+      const value = ctx.vm.getTableField(table, key);
+      return typeof value === 'number' ? value : fallback;
+    };
+
+    // `insets` is a nested table, so reading it mints a handle this call owns and has to give back.
+    const insets: Insets = { left: 0, right: 0, top: 0, bottom: 0 };
+    const insetsField = ctx.vm.getTableField(table, 'insets');
+    if (ctx.vm.isRef(insetsField)) {
+      try {
+        for (const side of ['left', 'right', 'top', 'bottom'] as const) {
+          const value = ctx.vm.getTableField(insetsField, side);
+          if (typeof value === 'number') {
+            insets[side] = value;
+          }
+        }
+      } finally {
+        ctx.vm.unref(insetsField);
+      }
+    }
+
+    widget.backdrop = {
+      bgSprite: str('bgFile'),
+      edgeSprite: str('edgeFile'),
+      edgeSize: numberField('edgeSize', 0),
+      tileSize: numberField('tileSize', 0),
+      backgroundInsets: insets,
+    };
+    widget.layer = 'BACKGROUND';
+    return [];
+  },
   SetBackdropColor: notImplemented('SetBackdropColor', 'BackdropDef has no tint field yet'),
   SetBackdropBorderColor: notImplemented('SetBackdropBorderColor', 'BackdropDef has no tint field yet'),
 
