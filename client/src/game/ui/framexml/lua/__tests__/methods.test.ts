@@ -2,10 +2,12 @@ import { LuaVM } from '../vm';
 import { FrameRegistry, installObjectModel } from '../object';
 import { WidgetRoot } from '../../../widget';
 import { resolveAnchors, Viewport } from '../../../layout';
-// Side-effect imports: registers the REGION/LAYEREDREGION/TEXTURE/FONTSTRING and FRAME/MODEL method
-// tables. Nothing here is referenced by name -- `object.ts`'s dispatch is the only consumer.
+// Side-effect imports: registers the REGION/LAYEREDREGION/TEXTURE/FONTSTRING, FRAME/MODEL and
+// BUTTON/CHECKBUTTON/EDITBOX method tables. Nothing here is referenced by name -- `object.ts`'s
+// dispatch is the only consumer.
 import '../methods/frame';
 import '../methods/region';
+import '../methods/kinds';
 
 const VIEWPORT: Viewport = { width: 1024, height: 768 };
 
@@ -139,6 +141,40 @@ describe('the frame and region method surface', () => {
     const after = orderOf();
     expect(after.indexOf(idOf('A'))).toBeGreaterThan(after.indexOf(idOf('B')));
     expect(after.indexOf(idOf('A'))).toBeGreaterThan(after.indexOf(idOf('C')));
+
+    vm.dispose();
+  });
+
+  it('resolves a CheckButton method from its own table, Enable from Button up the chain, and neither on a plain Frame', () => {
+    const vm = new LuaVM();
+    const registry = new FrameRegistry();
+    installObjectModel(vm, registry);
+
+    const error = vm.run(
+      `
+      check = CreateFrame("CheckButton", "Check")
+      check:SetChecked(true)
+      checkHasSetChecked = check.SetChecked ~= nil
+      checkHasEnable = check.Enable ~= nil
+      checkIsChecked = check:GetChecked()
+
+      plain = CreateFrame("Frame", "Plain")
+      plainHasSetChecked = plain.SetChecked ~= nil
+      plainHasEnable = plain.Enable ~= nil
+      `,
+      'checkbutton-chain.test.lua',
+    );
+    expect(error).toBeNull();
+
+    // `SetChecked` is CHECKBUTTON's own -- a plain Frame must not answer to it, or the duck-typing
+    // idiom `if frame.SetChecked then` would lie about every frame being a check button.
+    expect(vm.getGlobal('checkHasSetChecked')).toBe(true);
+    expect(vm.getGlobal('plainHasSetChecked')).toBe(false);
+    // `Enable` lives on BUTTON only; CHECKBUTTON resolves it by walking up the chain, and a plain
+    // Frame (no BUTTON ancestor) must not resolve it at all.
+    expect(vm.getGlobal('checkHasEnable')).toBe(true);
+    expect(vm.getGlobal('plainHasEnable')).toBe(false);
+    expect(vm.getGlobal('checkIsChecked')).toBe(true);
 
     vm.dispose();
   });
