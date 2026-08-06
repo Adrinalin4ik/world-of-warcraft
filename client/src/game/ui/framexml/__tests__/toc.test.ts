@@ -5,7 +5,7 @@ describe('parseToc', () => {
     // A synthetic manifest, NOT a copy of the real gluexml.toc -- it exercises both the
     // colon-directive and comment forms, but the real 3.3.5 gluexml.toc has no `##` line with a
     // colon at all (its four `##` lines are all colon-less comments, and it lists 31 files, not the
-    // 7 below). That is exactly why the comment-versus-directive distinction below is worth testing:
+    // 3 below). That is exactly why the comment-versus-directive distinction below is worth testing:
     // the `##Debug` line has no colon, so it must be skipped as a COMMENT, not fetched as a file
     // named "##DebugHook.lua".
     const toc = parseToc(
