@@ -69,6 +69,13 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
     return [/win/i.test(ua)];
   });
 
+  // AccountLoginUI's <OnShow>: `if ( not IsSystemSupported() ) then GlueDialog_Show("SYSTEM_INCOMPATIBLE_SSE")`
+  // (accountlogin.xml:1487). In the real client this is the SSE2 CPU-feature check. Anything running
+  // this client at all has a WebGL2 context and a JS engine; there is no unsupported system to warn
+  // about, so `true` is the answer, not a guess. Newly reachable: nothing dispatched `OnShow` before
+  // this fix round, so this global's absence was invisible.
+  vm.registerFunction('IsSystemSupported', () => [true]);
+
   // AccountLogin_OnLoad: which main-menu model to show. This build ships only the Wrath assets.
   vm.registerFunction('IsStreamingTrial', () => [false]);
   // AccountLogin_OnShow's Upgrade Account button. No trial accounts on a private server.
@@ -84,6 +91,8 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
     String(config.build),
     '2010-03-25',
   ]);
+
+  installCVars(vm);
 
   vm.registerFunction('SetCurrentScreen', (args) => {
     options.onSetCurrentScreen?.(String(args[0] ?? ''));
@@ -103,4 +112,72 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
     }
     return [];
   });
+}
+
+/**
+ * `GetCVar`/`SetCVar`/`GetCVarBool` over an in-memory store.
+ *
+ * REAL, not a stub, and the difference is the point: a CVar in the client is just a named string in
+ * the config, and a browser client has exactly as much right to keep one in memory as the real client
+ * has to keep it in `Config.wtf`. Nothing here needs a backend, so this is a complete implementation
+ * of a small thing rather than a placeholder for a big one -- which is why it lives here beside the
+ * other environment reads and not in `stubs.ts`.
+ *
+ * PER VM, deliberately: the map is a local of this function, so two runtimes in one process (a screen
+ * torn down and rebuilt, which is the ordinary case) do not inherit each other's settings. A CVar
+ * genuinely does not survive a client restart's worth of state in this client, because nothing
+ * persists it.
+ *
+ * The ONE value the loaded manifest reads is `showToolsUI`: `AccountLoginShowLauncher`'s `<OnLoad>`
+ * compares `GetCVar("showToolsUI") == "1"` and its `<OnClick>` writes the box back
+ * (accountlogin.xml:621,637). Absent that global the OnLoad raised -- one of the fifteen load errors.
+ * Everything the client stores is a STRING, including its booleans, which is why the comparison is
+ * against `"1"` and why `SetCVar` normalizes: `<OnClick>` passes the result of `GetChecked()`, a Lua
+ * boolean, and the real client writes "1"/"0" for it.
+ *
+ * An UNKNOWN name returns nil, exactly as the real `GetCVar` does. Not an error and not an empty
+ * string: FrameXML tests the result for nil in places, and `""` would read as a set-but-empty CVar.
+ */
+function installCVars(vm: LuaVM): void {
+  const cvars = new Map<string, string>([
+    // Off by default: this is the launcher/tools checkbox, and there is no launcher to show.
+    ['showToolsUI', '0'],
+  ]);
+
+  // Case-insensitive, like the client's own CVar table -- FrameXML is not consistent about the casing
+  // of a name between the read and the write site, and a case-sensitive map would silently create a
+  // second CVar rather than update the first.
+  const key = (name: unknown) => String(name ?? '').toLowerCase();
+  const lookup = (name: unknown): string | undefined => {
+    const wanted = key(name);
+    for (const [stored, value] of cvars) {
+      if (stored.toLowerCase() === wanted) {
+        return value;
+      }
+    }
+    return undefined;
+  };
+
+  vm.registerFunction('GetCVar', (args) => [lookup(args[0]) ?? null]);
+
+  vm.registerFunction('SetCVar', (args) => {
+    const raw = args[1];
+    // The client stores strings and nothing else. A Lua boolean is what `GetChecked()` hands a
+    // `SetCVar` call, and the engine writes "1"/"0" for it; a number goes through `String` unchanged.
+    const value =
+      raw === true ? '1' : raw === false || raw === undefined || raw === null ? '0' : String(raw);
+    const wanted = key(args[0]);
+    for (const stored of cvars.keys()) {
+      if (stored.toLowerCase() === wanted) {
+        cvars.set(stored, value);
+        return [];
+      }
+    }
+    cvars.set(String(args[0] ?? ''), value);
+    return [];
+  });
+
+  // The client's own convenience read: "1" is true and everything else, including an unset CVar, is
+  // false. Not `Boolean(value)` -- "0" is a non-empty string and would come back true.
+  vm.registerFunction('GetCVarBool', (args) => [lookup(args[0]) === '1']);
 }
