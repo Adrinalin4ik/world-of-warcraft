@@ -17,7 +17,7 @@
 import { FrameMethod, MethodContext, MethodTable, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
-import { Layer, Widget } from '../../../widget';
+import { Layer, Widget, deriveSize } from '../../../widget';
 import { familyForFontFile, measureText } from '../../../text';
 
 const warned = new Set<string>();
@@ -241,8 +241,15 @@ const REGION: MethodTable = {
     widgetOf(ctx, self).height = Number(args[0] ?? 0);
     return [];
   },
-  GetWidth: (ctx, self) => [widgetOf(ctx, self).width],
-  GetHeight: (ctx, self) => [widgetOf(ctx, self).height],
+  // A FONT STRING with a 0 dimension derives it from its text, exactly as the layout does
+  // (`widget.ts#deriveSize`) and for the same reason: `GlueDialogText` is authored `<Size x="450"
+  // y="0">` and `gluedialog.lua:610,677` sizes the whole dialog panel from its `GetHeight()`, which
+  // reported 0 and left the panel one text-height short. `GetStringWidth` already measured this way.
+  // Measured at scale 1: a widget's size is in logical units, so the live layout scale divides out.
+  // Everything else reports its stored size unchanged -- a FRAME's 0 still means "derive from the
+  // opposing anchors", which only `resolveAnchors` can do.
+  GetWidth: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).width],
+  GetHeight: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).height],
   SetPoint: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
     const point = String(args[0]).toUpperCase() as AnchorPoint;

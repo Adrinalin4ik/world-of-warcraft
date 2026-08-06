@@ -20,7 +20,7 @@ import { GlueRenderer, ResolvedSprite } from './renderer';
 import { GlueSceneView } from './scene/glue-scene';
 import { GlueScene } from './scene/tokens';
 import { GlueStrings } from './strings';
-import { FontStringTextures, loadGlueFonts } from './text';
+import { FontStringTextures, loadGlueFonts, measureText } from './text';
 import { DrawItem, WidgetRoot } from './widget';
 import { screenScale } from './layout';
 
@@ -264,7 +264,10 @@ export class GlueApp {
     this.sceneView.render();
 
     const viewport = { width: window.innerWidth, height: window.innerHeight };
-    const items = this.current.root.drawList(viewport);
+    // `measureText` is what fills in an unsized FONT STRING's rect (`widget.ts#deriveSize`) -- the
+    // same measurement `resolveSprite` below rasterizes at, so what is anchored to a label and what
+    // is painted for it cannot disagree.
+    const items = this.current.root.drawList(viewport, measureText);
     this.input.setDrawList(items);
 
     this.ui.render(items, (item) => this.resolveSprite(item, screenScale(viewport.height)));

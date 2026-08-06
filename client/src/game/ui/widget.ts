@@ -12,7 +12,7 @@
 // import in either direction would close a runtime cycle. `isolatedModules` guarantees babel elides
 // this one.
 import type { BackdropDef, Insets } from './backdrop';
-import { Anchor, LayoutNode, Rect, resolveAnchors, Viewport } from './layout';
+import { Anchor, LayoutNode, Rect, resolveAnchors, screenScale, Viewport } from './layout';
 import { DrawLayer, OrderKey, Strata, compareOrder } from './framexml/order';
 
 /** The five FrameXML draw layers. DIALOG is NOT here -- it is a `Strata`; see `framexml/order.ts`. */
@@ -295,6 +295,66 @@ export class Widget {
   }
 }
 
+/**
+ * How a font string's rasterized size is obtained -- `text.ts#measureText`'s exact signature.
+ *
+ * INJECTED rather than imported. `text.ts` imports three.js (it hands the renderer a
+ * `CanvasTexture`) and imports `FontSpec` from this file, so importing it here would both close a
+ * runtime cycle and put WebGL in the one module the layout, hit-test and screen tests exercise
+ * without a GPU. The measuring itself is pure arithmetic over a 2D canvas, so passing the function
+ * in keeps this file as dependency-free as `layout.ts` while still using ONE measurement -- the same
+ * one `screens.ts#resolveSprite` rasterizes at.
+ */
+export type MeasureText = (
+  text: string,
+  font: FontSpec,
+  scale: number,
+) => { width: number; height: number };
+
+/**
+ * A widget's size with a FONT STRING's zeroes filled in from its text.
+ *
+ * The client's `<Size>` rule, recorded by the loader: an ABSENT dimension is left untouched, and 0
+ * means "derive". For a frame it derives from two opposing anchors, which `layout.ts` already does
+ * (`resolveOne` sizes an axis constrained on both edges and ignores the declared value there) -- so
+ * this touches only `fontstring`, and only the axis that is 0. What a frame's 0 means is unchanged.
+ *
+ * Why it has to happen at all: an unsized `<FontString>` resolved to a 0x0 rect, so its LEFT edge was
+ * its centre and anything anchored to it landed half a label off -- `AccountLoginSaveAccountName`'s
+ * 20x20 check button anchors `RIGHT` to `AccountLoginSaveAccountNameText`'s `LEFT` and nothing else
+ * gives that label a width (accountlogin.xml:530-562).
+ *
+ * `displayText`, not `text`, and the SAME `measure` the renderer rasterizes through
+ * (`screens.ts#resolveSprite` -> `text.ts`): two notions of a label's size is the bug, not the fix.
+ * Empty text keeps 0 on both axes -- `FontStringTextures#get` returns null for it and the renderer
+ * draws nothing, so a rect the size of bare padding would be a hit target over nothing.
+ */
+export function deriveSize(
+  widget: Widget,
+  scale: number,
+  measure?: MeasureText,
+): { width: number; height: number } {
+  if (
+    widget.kind !== 'fontstring' ||
+    !measure ||
+    !widget.font ||
+    (widget.width !== 0 && widget.height !== 0)
+  ) {
+    return { width: widget.width, height: widget.height };
+  }
+
+  const content = widget.displayText;
+  if (!content) {
+    return { width: widget.width, height: widget.height };
+  }
+
+  const measured = measure(content, widget.font, scale);
+  return {
+    width: widget.width === 0 ? measured.width : widget.width,
+    height: widget.height === 0 ? measured.height : widget.height,
+  };
+}
+
 export interface DrawItem {
   widget: Widget;
   rect: Rect;
@@ -335,11 +395,16 @@ export class WidgetRoot {
    * before font strings, then insertion order -- NOT a simple "walk the tree" order. See
    * `framexml/order.ts` for why the layer outranks the frame and why font strings sort last.
    * Hidden subtrees are skipped whole.
+   *
+   * `measure` supplies a FONT STRING's size where its own is 0 -- see `deriveSize`. Optional only so
+   * that a caller with no text at all (`layout.ts`'s and `hit.ts`'s tests) needs nothing; the app
+   * always passes it (`screens.ts`), which is what makes layout and paint agree.
    */
-  drawList(viewport: Viewport): DrawItem[] {
+  drawList(viewport: Viewport, measure?: MeasureText): DrawItem[] {
     const flat: Array<{ widget: Widget; alpha: number; sequence: number }> = [];
     const nodes: LayoutNode[] = [];
     let sequence = 0;
+    const scale = screenScale(viewport.height);
 
     const walk = (widget: Widget, alpha: number): void => {
       if (!widget.shown) {
@@ -348,10 +413,11 @@ export class WidgetRoot {
 
       const cumulative = alpha * widget.alpha;
       flat.push({ widget, alpha: cumulative, sequence: sequence++ });
+      const size = deriveSize(widget, scale, measure);
       nodes.push({
         id: widget.id,
-        width: widget.width,
-        height: widget.height,
+        width: size.width,
+        height: size.height,
         anchors: widget.anchors,
       });
 
