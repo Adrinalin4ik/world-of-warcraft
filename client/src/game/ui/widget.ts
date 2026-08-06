@@ -195,6 +195,14 @@ export class Widget {
   }
 
   show(): void {
+    // The transition, not the call: `login.ts`'s caret and account-fill, and `realms.ts`'s row
+    // highlight, call `show()` idempotently on every tick on an already-visible widget (the same
+    // reason `SetFrameLevel`/`SetFrameStrata` guard on an unchanged value). Without this guard those
+    // per-frame calls would re-stamp to the tail every tick and reorder draw output that never
+    // actually became visible again.
+    if (this.shown) {
+      return;
+    }
     this.shown = true;
     this.restamp();
   }

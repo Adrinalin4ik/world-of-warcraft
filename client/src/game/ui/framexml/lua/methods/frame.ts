@@ -66,6 +66,21 @@ const FRAME: MethodTable = {
   },
   GetFrameLevel: (ctx, self) => [widgetOf(ctx, self).frameLevel],
 
+  // Real `Region` has NO scale method at all in the 3.3.5 API -- scale is Frame-only, because it
+  // cascades to a frame's CHILDREN, and a leaf Texture/FontString has none to cascade to. Registering
+  // these on REGION (as an earlier pass here did) would make `if texture.SetScale then` true, which
+  // is exactly the duck-typing leak this task exists to close. Nothing in `widget.ts` models a
+  // per-widget scale that cascades the way `frameLevel` does at `Widget#add`, so this is still a
+  // warn-once no-op -- just on the right class now.
+  SetScale: () => {
+    warnOnce('SetScale: not implemented -- widget.ts has no per-widget scale field yet');
+    return [];
+  },
+  GetEffectiveScale: () => {
+    warnOnce('GetEffectiveScale: not implemented -- reporting the only scale that exists today (1)');
+    return [1];
+  },
+
   EnableMouse: (ctx, self, args) => {
     widgetOf(ctx, self).mouseEnabled = Boolean(args[0]);
     return [];

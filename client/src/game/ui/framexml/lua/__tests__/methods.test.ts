@@ -28,6 +28,15 @@ describe('the frame and region method surface', () => {
       child:SetWidth(50)
       child:SetHeight(50)
       child:SetPoint("TOPLEFT", parent, "BOTTOMRIGHT", 5, -5)
+
+      -- The explicit-nil-relativeTo form -- "anchor to the screen at an offset", the common FrameXML
+      -- idiom this project's own regression (samples/benilla's anchors.rs) exists for. The bug this
+      -- guards: a nil that fails to consume its argument slot shifts relativePoint/x/y left and
+      -- silently drops the real offset.
+      nilAnchored = CreateFrame("Frame", "NilAnchored")
+      nilAnchored:SetWidth(300)
+      nilAnchored:SetHeight(200)
+      nilAnchored:SetPoint("TOPLEFT", nil, "TOPLEFT", 40, -40)
       `,
       'setpoint.test.lua',
     );
@@ -35,9 +44,10 @@ describe('the frame and region method surface', () => {
 
     const parentWidget = registry.widget(registry.byName('Parent')!)!;
     const childWidget = registry.widget(registry.byName('Child')!)!;
+    const nilAnchoredWidget = registry.widget(registry.byName('NilAnchored')!)!;
 
     const rectsFromLua = resolveAnchors(
-      [parentWidget, childWidget].map((widget) => ({
+      [parentWidget, childWidget, nilAnchoredWidget].map((widget) => ({
         id: widget.id,
         width: widget.width,
         height: widget.height,
@@ -46,7 +56,7 @@ describe('the frame and region method surface', () => {
       VIEWPORT,
     );
 
-    // The same two anchors, hand-built directly against `layout.ts` -- the oracle `SetPoint`'s
+    // The same three anchors, hand-built directly against `layout.ts` -- the oracle `SetPoint`'s
     // output has to agree with, not just "some rect".
     const rectsFromTs = resolveAnchors(
       [
@@ -57,12 +67,23 @@ describe('the frame and region method surface', () => {
           height: 50,
           anchors: [{ point: 'TOPLEFT', relativeTo: 'p', relativePoint: 'BOTTOMRIGHT', x: 5, y: -5 }],
         },
+        {
+          id: 'n',
+          width: 300,
+          height: 200,
+          // No `relativeTo` at all -- an explicit nil resolves to "the screen" here exactly as it
+          // does for the Lua call, since `NilAnchored` has no parent frame either.
+          anchors: [{ point: 'TOPLEFT', relativePoint: 'TOPLEFT', x: 40, y: -40 }],
+        },
       ],
       VIEWPORT,
     );
 
     expect(rectsFromLua.get(parentWidget.id)).toEqual(rectsFromTs.get('p'));
     expect(rectsFromLua.get(childWidget.id)).toEqual(rectsFromTs.get('c'));
+    expect(rectsFromLua.get(nilAnchoredWidget.id)).toEqual(rectsFromTs.get('n'));
+    // The regression's most direct form: a dropped offset would leave this at (0, 0) instead.
+    expect(rectsFromLua.get(nilAnchoredWidget.id)).toEqual({ left: 40, top: 40, width: 300, height: 200 });
 
     vm.dispose();
   });

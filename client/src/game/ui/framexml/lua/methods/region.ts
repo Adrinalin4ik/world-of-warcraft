@@ -110,24 +110,39 @@ const REGION: MethodTable = {
     const point = String(args[0]).toUpperCase() as AnchorPoint;
 
     // Two overload families: (point, x, y) anchors to the parent at the SAME point, and
-    // (point, relativeTo[, relativePoint][, x, y]) anchors elsewhere. A number in slot 1 -- not a
-    // frame or a name -- is the tell for the first family.
+    // (point, relativeTo[, relativePoint][, x, y]) anchors elsewhere. A NUMBER in slot 1 -- not a
+    // frame, a name, or nil -- is the only tell for the first family; nil in slot 1 is the second
+    // family's "anchor to the parent" spelling, not the first family's.
     let relativeToId: string | undefined;
     let relativePoint: AnchorPoint;
     let x: number;
     let y: number;
-    if (typeof args[1] === 'number' || args[1] === undefined) {
+    if (typeof args[1] === 'number') {
       relativeToId = resolveRelativeTo(ctx, self, undefined);
       relativePoint = point;
       x = Number(args[1] ?? 0);
       y = Number(args[2] ?? 0);
     } else {
+      // `relativeTo` occupies this slot whether it is a frame, a name, or an EXPLICIT nil --
+      // `SetPoint("P", nil, "P", 40, -40)` is the common FrameXML idiom for "anchor to the screen at
+      // an offset" (samples/benilla's anchors.rs regression test for exactly this call). A present
+      // nil must still consume its slot, or the offsets that follow shift left and land on the wrong
+      // parameters -- silently dropping the real x/y, which is what pinned a screen-anchored frame to
+      // the corner. `args.length`, not the VALUE at a slot, is what tells "this argument is absent"
+      // apart from "this argument is nil": both read back as `undefined` from Lua.
       relativeToId = resolveRelativeTo(ctx, self, args[1]);
       if (typeof args[2] === 'string') {
         relativePoint = args[2].toUpperCase() as AnchorPoint;
         x = Number(args[3] ?? 0);
         y = Number(args[4] ?? 0);
+      } else if (args.length >= 5) {
+        // The relativePoint slot is PRESENT (an explicit nil) -- still consumed, so the offsets are
+        // at 3/4, not 2/3. This branch is the one the same bug would otherwise skip.
+        relativePoint = point;
+        x = Number(args[3] ?? 0);
+        y = Number(args[4] ?? 0);
       } else {
+        // (point, relativeTo[, x, y]) -- no relativePoint slot at all.
         relativePoint = point;
         x = Number(args[2] ?? 0);
         y = Number(args[3] ?? 0);
@@ -159,18 +174,6 @@ const REGION: MethodTable = {
     };
     widget.setAnchors(of('TOPLEFT'), of('BOTTOMRIGHT'));
     return [];
-  },
-  // Real Region methods, but nothing in `widget.ts` models a per-widget scale: every glue widget
-  // renders at scale 1 today. `SetScale` would need a scale field that cascades to descendants the
-  // way `frameLevel` does at `Widget#add`; `GetEffectiveScale` reports the one truthful value there
-  // is until then, rather than fabricating a cascaded number.
-  SetScale: () => {
-    warnOnce('SetScale: not implemented -- widget.ts has no per-widget scale field yet');
-    return [];
-  },
-  GetEffectiveScale: () => {
-    warnOnce('GetEffectiveScale: not implemented -- reporting the only scale that exists today (1)');
-    return [1];
   },
 };
 
