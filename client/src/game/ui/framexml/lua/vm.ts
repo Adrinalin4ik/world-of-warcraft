@@ -162,7 +162,18 @@ export class LuaVM {
     } else if (typeof value === 'boolean') {
       lua.lua_pushboolean(this.L, value);
     } else if (typeof value === 'number') {
-      lua.lua_pushnumber(this.L, value);
+      // Lua 5.3 keeps integer and float subtypes distinct in ways that are observable, not just
+      // internal: tostring(3.0) is "3.0", and FrameXML concatenates numbers into strings constantly
+      // ("Level "..level, name.." ("..major.."."..minor..")"). Pushing every JS number as a float
+      // would render "80.0" everywhere a whole number was expected, so integral values go through
+      // lua_pushinteger instead. Number.isSafeInteger, not Number.isInteger: a value beyond 2^53
+      // isn't exactly representable as an integer either, so it should stay a float rather than
+      // silently truncate.
+      if (Number.isSafeInteger(value)) {
+        lua.lua_pushinteger(this.L, value);
+      } else {
+        lua.lua_pushnumber(this.L, value);
+      }
     } else if (typeof value === 'string') {
       lua.lua_pushstring(this.L, value);
     } else if (this.isLuaRef(value)) {
