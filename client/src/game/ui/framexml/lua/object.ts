@@ -201,6 +201,24 @@ export interface MethodContext {
 const METHODS = new Map<WidgetClass, MethodTable>();
 
 /**
+ * A once-per-message console warning, LOCAL to this file.
+ *
+ * `methods/region.ts` exports one of these, and importing it here would be wrong twice: it would make
+ * an import cycle (`region.ts` imports this file), and it would break the rule this file's docstring
+ * states -- `object.ts` imports none of the method modules, so that a forgotten import shows up as a
+ * missing method surface rather than being papered over by a transitive one. Two memos rather than one
+ * is the price; the cost is a duplicated message if the same text is warned from both, which none is.
+ */
+const warnedMessages = new Set<string>();
+function warnOnce(message: string): void {
+  if (warnedMessages.has(message)) {
+    return;
+  }
+  warnedMessages.add(message);
+  console.warn(message);
+}
+
+/**
  * One entry per installed VM, clearing that VM's Lua-side dispatch cache.
  *
  * The cache memoizes "this class does not have that method" as hard as the positive answer, which is
@@ -353,6 +371,19 @@ export class FrameRegistry {
 
   widget(id: number): Widget | null {
     return this.entries.get(id)?.widget ?? null;
+  }
+
+  /**
+   * The inverse of `widget`: the frame id behind a live `Widget`, or null for one this registry did
+   * not create (the screen ROOT, most importantly -- it is a `Widget` but not a frame).
+   *
+   * Needed by anything that walks the WIDGET tree and then has to talk to Lua about what it found:
+   * `region.ts`'s `Show`/`Hide` visibility cascade walks a subtree of widgets and fires each frame's
+   * `OnShow`/`OnHide`, and the widget tree is the only place the parent/child relation lives (the
+   * registry stores ids, not a tree).
+   */
+  idOfWidget(widget: Widget): number | null {
+    return this.widgetIds.get(widget) ?? null;
   }
 
   byName(name: string): number | null {
@@ -694,8 +725,28 @@ export function installObjectModel(vm: LuaVM, registry: FrameRegistry): MethodCo
         }
       }
 
-      // The template argument is accepted and ignored: templates are applied by the XML loader,
-      // which is where the template definitions live.
+      // THE TEMPLATE ARGUMENT IS ACCEPTED AND IGNORED, and this warning is the one thing standing
+      // between that and a mystery.
+      //
+      // Templates live in the XML loader's `TemplateRegistry`, which is per-load and not reachable from
+      // here, and applying one means materializing an element's whole subtree -- `<Layers>`, nested
+      // `<Frames>`, `<Scripts>`, `$parent` name publication -- against an ALREADY-CREATED frame, which
+      // is a shape `loader.ts#materialize` does not have (it creates and applies in one pass). So a
+      // Lua-side `CreateFrame(kind, name, parent, template)` builds a BARE frame.
+      //
+      // What that costs, concretely, because it was diagnosed the hard way: `GlueDropDownMenu.lua:159`
+      // creates each menu button as `CreateFrame("BUTTON", listName.."Button"..i, list,
+      // "GlueDropDownMenuButtonTemplate")`, and that template (gluedropdownmenutemplates.xml:3) is where
+      // `$parentInvisibleButton` and `$parentCheck` are declared. With the template dropped, those
+      // children never exist, so `_G[button:GetName().."InvisibleButton"]` and
+      // `_G["DropDownList1Button1Check"]` are nil and the next line indexes nil -- two of the manifest's
+      // load errors. NOT a `$parent` or template-expansion defect: both are correct for XML-declared
+      // frames, and neither is involved in a frame created from Lua.
+      if (typeof args[3] === 'string' && args[3] !== '') {
+        warnOnce(
+          `CreateFrame: the template "${args[3]}" was ignored -- a frame created from Lua gets none of its template's regions, children or scripts (first: ${name ?? kind})`,
+        );
+      }
       return [wrapper(registry.create(kind, name, parent))];
     } finally {
       // The wrapper handed back is the frame's own permanent handle, never one of these.

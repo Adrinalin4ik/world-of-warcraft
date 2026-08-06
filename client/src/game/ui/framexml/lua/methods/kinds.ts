@@ -355,7 +355,9 @@ const EDITBOX: MethodTable = {
   // it is constructed per-screen (see `screens.ts`), outside anything the object model holds a handle
   // to. Wiring these for real needs `MethodContext` to carry that handle -- a change to `object.ts`
   // (Task 3's file), bigger than this task's own file scope (`lua/methods/kinds.ts`). Same shape of
-  // gap as `frame.ts`'s `SetScale`/`SetBackdrop`.
+  // gap as `frame.ts`'s `SetScale`. (It cited `SetBackdrop` as the other example until Task 9 made
+  // that one real -- a sprite key may simply BE the path, so no `GlueArt` handle was needed after all.
+  // Worth keeping in view: the reason a stub gives for existing is a claim, and this one did not hold.)
   SetFocus: notImplemented('SetFocus', 'MethodContext has no GlueInput handle to move focus through'),
   ClearFocus: notImplemented('ClearFocus', 'MethodContext has no GlueInput handle to move focus through'),
   HasFocus: notImplemented('HasFocus', 'MethodContext has no GlueInput handle to ask', [false]),
