@@ -100,11 +100,17 @@ describe('loadDocument', () => {
     const rect = root.drawList(VIEWPORT).find((item) => item.widget.id === textureId)!.rect;
     expect(rect).toEqual({ left: 48, top: 46, width: 256, height: 256 });
 
+    // `reset()` BEFORE `dispose()`, the same order `GlueRuntime#dispose` uses -- and it is not
+    // ceremony here: `kinds.ts`'s per-button side tables are module-level while frame ids restart at 1
+    // per registry, so a test that leaves them populated hands the NEXT test's button a stale label
+    // id -- a documented hazard of those tables, and this is the first file with two tests that both
+    // build a Button. Every test in this file resets for that reason.
+    registry.reset();
     vm.dispose();
   });
 
   it("applies an instance's own <Size> over the template's", () => {
-    const { vm, rt } = runtime();
+    const { vm, registry, rt } = runtime();
 
     // Two things at once, and only because they are the same call: the instance's 125x21 must beat the
     // template's 80x22 (the merge appends the instance's children LAST, so a first-match read would
@@ -132,6 +138,8 @@ describe('loadDocument', () => {
     expect(vm.runExpr('return LoginButton:GetWidth()', 'w.lua')).toEqual({ value: 125 });
     expect(vm.runExpr('return LoginButton:GetHeight()', 'h.lua')).toEqual({ value: 21 });
 
+    // `reset()` before `dispose()`, as `GlueRuntime#dispose` does -- see the note on the first test.
+    registry.reset();
     vm.dispose();
   });
 
@@ -189,6 +197,112 @@ describe('loadDocument', () => {
     const rect = root.drawList(VIEWPORT).find((item) => item.widget.id === pvpId)!.rect;
     expect(rect.left).toBe(235);
 
+    // `reset()` before `dispose()`, as `GlueRuntime#dispose` does -- see the note on the first test.
+    registry.reset();
+    vm.dispose();
+  });
+
+  it('resolves a <Font> chain: face from the root, colour from the middle, height from the leaf', () => {
+    const { vm, registry, rt } = runtime();
+
+    // The shape of `gluefontstyles.xml`'s real chains, one level per channel so a wrong merge shows up
+    // as a wrong CHANNEL rather than a wrong font. The root carries the face and a height, the middle
+    // recolours, the leaf overrides the height and left-justifies -- exactly
+    // `SystemFont_Outline_Med2 -> GlueFontNormal -> GlueFontNormalLeft` with the height moved to the
+    // leaf so the "last <FontHeight> wins" rule is under test too (reading the FIRST would give 15).
+    const report = loadDocument(
+      rt,
+      parseXml(`
+        <Ui>
+          <Font name="RootFont" font="Fonts\\FRIZQT__.TTF" outline="NORMAL" virtual="true">
+            <FontHeight><AbsValue val="15"/></FontHeight>
+          </Font>
+          <Font name="MiddleFont" inherits="RootFont" virtual="true">
+            <Color r="0.1" g="1.0" b="0.1"/>
+          </Font>
+          <Font name="LeafFont" inherits="MiddleFont" justifyH="LEFT" virtual="true">
+            <FontHeight><AbsValue val="10"/></FontHeight>
+          </Font>
+
+          <Frame name="Panel">
+            <Size><AbsDimension x="200" y="40"/></Size>
+            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+            <Layers>
+              <Layer level="ARTWORK">
+                <FontString name="$parentLabel" inherits="LeafFont" text="Медив"/>
+              </Layer>
+            </Layers>
+          </Frame>
+        </Ui>
+      `),
+      noFiles,
+      'GlueFontStyles.xml',
+    );
+
+    expect(report.errors).toEqual([]);
+    expect(registry.widget(registry.byName('PanelLabel')!)!.font).toEqual({
+      family: 'FRIZQT',
+      // From the LEAF, not the root: 10, not 15.
+      size: 10,
+      // From the MIDDLE: 0.1/1.0/0.1 green.
+      color: '#1aff1a',
+      // From the ROOT -- and TRUE, which is the whole point of `fonts.ts#isOutlined`: the XML says
+      // `outline="NORMAL"`, and handing that string to `SetFont`'s `OUTLINE`-substring test read false.
+      outline: true,
+      align: 'LEFT',
+    });
+
+    // `reset()` before `dispose()`, as `GlueRuntime#dispose` does -- see the note on the first test.
+    registry.reset();
+    vm.dispose();
+  });
+
+  it("colours a realm row's name from Lua, through the font object the <Font> published as a global", () => {
+    const { vm, registry, rt } = runtime();
+
+    // `realmlist.lua:123` verbatim in shape: `button:SetNormalFontObject(RealmCharactersNormal)` -- a
+    // BARE GLOBAL, which only exists because a `<Font name=>` publishes one. The button's own
+    // `<NormalFont style="GlueFontNormalLeft"/>` is the gold it starts at, so this asserts the switch,
+    // not the default: gold before the call, green after it.
+    const report = loadDocument(
+      rt,
+      parseXml(`
+        <Ui>
+          <Font name="GlueFontNormalLeft" font="Fonts\\FRIZQT__.TTF" outline="NORMAL" justifyH="LEFT" virtual="true">
+            <FontHeight><AbsValue val="15"/></FontHeight>
+            <Color r="1.0" g="0.78" b="0"/>
+          </Font>
+          <Font name="RealmCharactersNormal" inherits="GlueFontNormalLeft" virtual="true">
+            <Color r="0.1" g="1.0" b="0.1"/>
+          </Font>
+
+          <Button name="RealmRow">
+            <Size><AbsDimension x="512" y="16"/></Size>
+            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+            <ButtonText name="$parentNormalText">
+              <Size><AbsDimension x="220" y="12"/></Size>
+              <Anchors><Anchor point="LEFT"/></Anchors>
+            </ButtonText>
+            <NormalFont style="GlueFontNormalLeft"/>
+          </Button>
+        </Ui>
+      `),
+      noFiles,
+      'RealmList.xml',
+    );
+
+    expect(report.errors).toEqual([]);
+    const label = registry.widget(registry.byName('RealmRowNormalText')!)!;
+    expect(label.font!.color).toBe('#ffc700');
+
+    expect(vm.run('RealmRow:SetText("Медив (x1)"); RealmRow:SetNormalFontObject(RealmCharactersNormal)', 'r.lua')).toBeNull();
+    expect(label.font!.color).toBe('#1aff1a');
+    // The rest of the chain came with it, rather than being reset by a partial write.
+    expect(label.font!.size).toBe(15);
+    expect(label.font!.align).toBe('LEFT');
+
+    // `reset()` before `dispose()`, as `GlueRuntime#dispose` does -- see the note on the first test.
+    registry.reset();
     vm.dispose();
   });
 });

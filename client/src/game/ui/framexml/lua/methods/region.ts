@@ -19,6 +19,7 @@ import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
 import { Layer, Widget, deriveSize } from '../../../widget';
 import { familyForFontFile, measureText } from '../../../text';
+import { FontResolution, isOutlined } from '../../fonts';
 
 const warned = new Set<string>();
 
@@ -416,6 +417,91 @@ function ensureFont(widget: Widget) {
   return widget.font;
 }
 
+/**
+ * A `Set*FontObject` argument, as the name of a registered `<Font>`.
+ *
+ * Both forms are real and both are in the loaded manifest: the OBJECT
+ * (`SetNormalFontObject(RealmCharactersNormal)`, realmlist.lua:123 -- the Lua global the loader
+ * publishes for each `<Font name=>`) and the STRING
+ * (`SetDisabledFontObject("GlueFontHighlightSmall")`, realmlist.lua:236). Anything else, including nil,
+ * yields null and the caller leaves the font alone.
+ *
+ * The handle is BORROWED -- the method boundary releases every ref among a call's arguments -- so
+ * nothing here unrefs it.
+ */
+export function fontObjectName(ctx: MethodContext, value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value === '' ? null : value;
+  }
+  if (!ctx.vm.isRef(value)) {
+    return null;
+  }
+  const name = ctx.vm.getTableField(value, 'name');
+  if (ctx.vm.isRef(name)) {
+    // `getTableField` mints a handle for a table- or function-valued field. Not our font object's
+    // shape, but a caller may pass any table at all, and dropping the handle unreleased would pin a
+    // registry slot per call for the life of the VM.
+    ctx.vm.unref(name);
+    return null;
+  }
+  return typeof name === 'string' && name !== '' ? name : null;
+}
+
+/**
+ * Resolves a font object by name and writes it onto `widget`'s `FontSpec`.
+ *
+ * PARTIAL BY DESIGN: only the channels the chain actually declares are written, so a font object that
+ * overrides nothing but `<Color>` (there are 20 of those in `gluefontstyles.xml`) keeps the face,
+ * height and outline it inherited rather than resetting them to a default. That is also what makes the
+ * per-state button fonts work -- `RealmDownHighlight` is a colour and nothing else.
+ *
+ * Returns false when no font object of that name is registered, which is what the caller turns into a
+ * warning: a name that resolves to nothing must not look like a successful call.
+ */
+export function applyFontObject(ctx: MethodContext, widget: Widget, name: string): boolean {
+  if (ctx.fontObject === null) {
+    warnOnce(
+      `Set*FontObject("${name}"): no font-object registry is installed on this MethodContext, so the font was not applied`,
+    );
+    return false;
+  }
+  const resolved = ctx.fontObject(name);
+  if (resolved === null) {
+    warnOnce(`Set*FontObject: no <Font> named '${name}' is registered; the font was not changed`);
+    return false;
+  }
+  applyFontResolution(widget, resolved, name);
+  return true;
+}
+
+/** The write half of `applyFontObject`, separate only so the loader's own resolution can share it. */
+export function applyFontResolution(widget: Widget, resolved: FontResolution, dbg: string): void {
+  const spec = ensureFont(widget);
+  if (resolved.file !== undefined) {
+    const family = familyForFontFile(resolved.file);
+    if (family === null) {
+      warnOnce(`${dbg}: unknown font file '${resolved.file}'; the face was not changed`);
+    } else {
+      spec.family = family;
+    }
+  }
+  if (resolved.height !== undefined) {
+    spec.size = resolved.height;
+  }
+  if (resolved.outline !== undefined) {
+    // The XML vocabulary (`NONE`/`NORMAL`/`THICK`), not `SetFont`'s flags string -- see
+    // `fonts.ts#isOutlined` for why conflating the two dropped the ring off every outlined font.
+    spec.outline = isOutlined(resolved.outline);
+  }
+  if (resolved.color !== undefined) {
+    spec.color = toHex(resolved.color[0], resolved.color[1], resolved.color[2]);
+  }
+  const align = (resolved.justifyH ?? '').toUpperCase();
+  if (align === 'LEFT' || align === 'CENTER' || align === 'RIGHT') {
+    spec.align = align;
+  }
+}
+
 const FONTSTRING: MethodTable = {
   SetText: (ctx, self, args) => {
     widgetOf(ctx, self).text = args[0] === undefined || args[0] === null ? '' : String(args[0]);
@@ -454,13 +540,19 @@ const FONTSTRING: MethodTable = {
     spec.outline = flags.includes('OUTLINE');
     return [true];
   },
-  // Real FontXML names a global `Font` template (`GameFontNormal`, ...) that this call switches to
-  // wholesale. Nothing in this runtime keeps a name -> FontSpec table of those templates -- the loader
-  // resolves a `<FontString>`'s inherited font at DOCUMENT-LOAD time into a literal spec, and there is
-  // no live registry for a runtime `SetFontObject` call to consult. Through the factory like every
-  // other stub, so `NOT_IMPLEMENTED` knows about it: a bare `warnOnce` here reads to the loader as a
-  // clean success, which is the whole bug the factory exists to close.
-  SetFontObject: notImplemented('SetFontObject', 'no runtime Font-object registry exists yet'),
+  // REAL now: `ctx.fontObject` is the live name -> font-values lookup the loader installs over its
+  // `<Font>` registry (`framexml/fonts.ts`), so the font object a document declared and the one a Lua
+  // call names are the same thing. `GlueTooltip_SetFont` (gluetooltip.xml:41-51) is the manifest's
+  // caller: four `textString:SetFontObject(font)` on a tooltip's own font strings.
+  SetFontObject: (ctx, self, args) => {
+    const name = fontObjectName(ctx, args[0]);
+    if (name === null) {
+      warnOnce('SetFontObject: the argument is neither a font object nor a <Font> name; ignored');
+      return [];
+    }
+    applyFontObject(ctx, widgetOf(ctx, self), name);
+    return [];
+  },
   GetStringWidth: (ctx, self) => {
     const widget = widgetOf(ctx, self);
     return [measureText(widget.text, ensureFont(widget), 1).width];

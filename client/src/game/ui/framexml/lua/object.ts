@@ -26,6 +26,7 @@
  * the JS resolver is consulted once per pair and the steady state is a table lookup.
  */
 import { LuaRef, LuaVM } from './vm';
+import { FontObjectLookup } from '../fonts';
 import { Widget, WidgetKind, WidgetRoot } from '../../widget';
 
 /**
@@ -191,6 +192,13 @@ export interface MethodContext {
    * quietly doing nothing.
    */
   input: FocusSink | null;
+  /**
+   * The live font-object lookup: a `<Font>` name to the font values its whole `inherits=` chain
+   * resolves to. Null until a `FrameXmlRuntime` installs one (`framexml/loader.ts`), because the
+   * registry it reads is per-load and this module knows nothing about documents -- while it is null,
+   * the four `Set*FontObject` methods report the gap rather than guessing at a font.
+   */
+  fontObject: FontObjectLookup | null;
   /** The frame's Lua table, created on first use and the same table forever after. */
   wrapper(id: number): LuaRef;
   /** The frame id behind a Lua value that is (or should be) a frame table; null if it is not one. */
@@ -676,7 +684,16 @@ export function installObjectModel(
     return typeof id === 'number' && registry.classOf(id) !== null ? id : null;
   };
 
-  const ctx: MethodContext = { vm, registry, input, wrapper, frameIdOf, retain: (ref) => vm.dup(ref) };
+  const ctx: MethodContext = {
+    vm,
+    registry,
+    input,
+    // Filled in by `createFrameXmlRuntime`, which is the first thing that has a font registry to read.
+    fontObject: null,
+    wrapper,
+    frameIdOf,
+    retain: (ref) => vm.dup(ref),
+  };
 
   // THE teardown path (see `FRAME_TEARDOWN`). Subscribed here, after `ctx` exists, because the
   // fan-out needs it: the side-table listeners hold nothing but their own map and need a VM to hand

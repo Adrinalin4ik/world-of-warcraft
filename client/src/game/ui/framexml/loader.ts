@@ -41,10 +41,21 @@
  */
 import { LuaRef, LuaVM } from './lua/vm';
 import { MethodContext } from './lua/object';
-import { NOT_IMPLEMENTED } from './lua/methods/region';
+import { NOT_IMPLEMENTED, warnOnce } from './lua/methods/region';
 import { compileScriptHandler, invokeScriptHandler } from './lua/scripts';
 import { DEFAULT_PARENT_NAME, TemplateRegistry, resolveName } from './templates';
-import { ParsedDocument, XmlElement, attr, attrBool, childrenNamed, parseXml } from './xml';
+import { FontResolution, outlineFlags, readFontObject } from './fonts';
+import {
+  ParsedDocument,
+  XmlElement,
+  absValue,
+  attr,
+  attrBool,
+  childrenNamed,
+  colorOf,
+  num,
+  parseXml,
+} from './xml';
 
 // Side-effect imports: the FRAME/MODEL and BUTTON/CHECKBUTTON/EDITBOX method tables (REGION and the
 // leaves come in with `NOT_IMPLEMENTED` above). `object.ts` deliberately imports none of them, so
@@ -84,9 +95,21 @@ export interface FrameXmlRuntime {
   readonly fonts: TemplateRegistry;
 }
 
-/** The sanctioned way to build a runtime: two fresh registries around an installed object model. */
+/**
+ * The sanctioned way to build a runtime: two fresh registries around an installed object model.
+ *
+ * This is also where the object model gets its font-object door. `installObjectModel` leaves
+ * `ctx.fontObject` null because it knows nothing about documents, and the font registry does not exist
+ * until this line -- so the lookup is installed here, pointing at the registry the loads about to
+ * happen will fill. Everything that resolves a font object at RUN time (`SetFontObject`,
+ * `SetNormalFontObject` and the two per-state siblings) goes through it, so a name means the same
+ * thing to Lua as it does to the loader. A `MethodContext` built without a runtime keeps null and those
+ * methods report the gap instead of guessing.
+ */
 export function createFrameXmlRuntime(vm: LuaVM, ctx: MethodContext): FrameXmlRuntime {
-  return { vm, ctx, templates: new TemplateRegistry(), fonts: new TemplateRegistry() };
+  const fonts = new TemplateRegistry();
+  ctx.fontObject = (name) => readFontObject(fonts, name, warnOnce);
+  return { vm, ctx, templates: new TemplateRegistry(), fonts };
 }
 
 /** A file resolver. `null` means "not found", which is a warning and never fatal. */
@@ -121,26 +144,6 @@ function absDim(element: XmlElement): { x?: number; y?: number } {
   return { x: num(attr(source, 'x')), y: num(attr(source, 'y')) };
 }
 
-/** A parsed `<AbsValue val=>` child, else the element's own inline `val`. */
-function absValue(element: XmlElement): number | undefined {
-  const source = childrenNamed(element, 'AbsValue')[0] ?? element;
-  return num(attr(source, 'val'));
-}
-
-function num(value: string | undefined): number | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  const parsed = Number(value.trim());
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-/** `<Color r= g= b= a=>` as an RGBA tuple. A PRESENT element's missing channels read black, alpha 1. */
-function colorOf(element: XmlElement): [number, number, number, number] {
-  const channel = (key: string, fallback: number) => num(attr(element, key)) ?? fallback;
-  return [channel('r', 0), channel('g', 0), channel('b', 0), channel('a', 1)];
-}
-
 /**
  * A `<TexCoords>` child's UV rect, only if all four edges are there.
  *
@@ -156,15 +159,6 @@ function texCoordsOf(element: XmlElement): [number, number, number, number] | nu
   return edges.every((edge): edge is number => edge !== undefined)
     ? [edges[0]!, edges[1]!, edges[2]!, edges[3]!]
     : null;
-}
-
-/** The font values a `<FontString>` ends up with, from its inherited font object and its own attrs. */
-interface FontResolution {
-  file?: string;
-  height?: number;
-  outline?: string;
-  color?: [number, number, number, number];
-  justifyH?: string;
 }
 
 class DocumentLoader {
@@ -276,6 +270,7 @@ class DocumentLoader {
           // at the point a `<FontString>` names it. An unnamed one cannot be inherited, and
           // `register` drops it.
           this.rt.fonts.register(item.element);
+          this.publishFontObject(item.element);
           break;
         case 'template':
           this.rt.templates.register(item.element);
@@ -805,7 +800,16 @@ class DocumentLoader {
   private applyFontStringFont(region: XmlElement, wrapper: LuaRef, dbg: string): void {
     const resolved = this.resolveFont(region, dbg);
     if (resolved.file !== undefined) {
-      this.callMethod(wrapper, 'SetFont', [resolved.file, resolved.height ?? null, resolved.outline ?? null], dbg);
+      // `outlineFlags`, not the raw attribute: the XML vocabulary is `NONE`/`NORMAL`/`THICK` and
+      // `SetFont`'s third argument is the Lua one (`OUTLINE`/`THICKOUTLINE`), which tests for the
+      // substring "OUTLINE". Passing "NORMAL" through read as no outline at all, which silently
+      // stripped the ring off every outlined font object in the manifest -- see `fonts.ts#isOutlined`.
+      this.callMethod(
+        wrapper,
+        'SetFont',
+        [resolved.file, resolved.height ?? null, outlineFlags(resolved.outline) ?? null],
+        dbg,
+      );
     } else if (resolved.height !== undefined || resolved.outline !== undefined) {
       this.warnOnce(
         'font:no-face',
@@ -870,46 +874,58 @@ class DocumentLoader {
 
   /** A registered `<Font>`, flattened through its `inherits=` chain, as font values. */
   private readFont(name: string): FontResolution {
-    // A synthetic `<Font inherits="name"/>` is the shortest way to ask `TemplateRegistry` for the
-    // flattened chain: `expand` resolves the reference and merges inherited-first, so the values here
-    // are already the whole chain with the leaf winning.
-    const reference: XmlElement = {
-      tag: 'Font',
-      attrs: new Map([['inherits', name]]),
-      children: [],
-      body: '',
-    };
-    const warnings: string[] = [];
-    const merged = this.rt.fonts.expand(reference, warnings);
-    for (const warning of warnings) {
-      this.warnOnce(`font-expand:${warning}`, warning);
-    }
+    return (
+      readFontObject(this.rt.fonts, name, (warning) =>
+        this.warnOnce(`font-expand:${warning}`, warning),
+      ) ?? {}
+    );
+  }
 
-    const resolution: FontResolution = {};
-    const file = attr(merged, 'font');
-    if (file !== undefined) {
-      resolution.file = file;
+  /**
+   * A `<Font name="X">` also becomes the Lua GLOBAL `X`, because that is how the client's own code
+   * addresses one: `realmlist.lua:123` is `button:SetNormalFontObject(RealmCharactersNormal)` -- a bare
+   * global, not the string. Without this the argument is nil and the row keeps whatever font it had,
+   * which is exactly why every realm name drew gold where the reference shows one of four colours.
+   *
+   * A TABLE carrying its own name, and both halves of that are deliberate. A table because a font
+   * object in the client IS one (`type()` reports "table" for every FrameScript object), so
+   * `SetDisabledFontObject("GlueFontHighlightSmall")` -- the string form, realmlist.lua:236 -- and the
+   * object form stay distinguishable at the method boundary rather than both being strings. Its name
+   * because that is all any consumer in the loaded manifest ever wants: every one of the eight call
+   * sites passes the object straight through to a `Set*FontObject`, none reads a field or calls a
+   * method on it. What this object does NOT have is the rest of the engine's Font surface
+   * (`GetFont`/`SetTextColor`/`CopyFontObject` and the dozen others), so a document that treats a font
+   * object as a live, mutable thing rather than as a name would find nothing there. Nothing in the glue
+   * manifest does; the day something does, this is the table to grow.
+   *
+   * Non-overwriting, like every other name publication here: the first claimant of a global keeps it.
+   */
+  private publishFontObject(element: XmlElement): void {
+    const name = attr(element, 'name');
+    if (!name) {
+      return;
     }
-    const heights = childrenNamed(merged, 'FontHeight');
-    if (heights.length > 0) {
-      const height = absValue(heights[heights.length - 1]);
-      if (height !== undefined) {
-        resolution.height = height;
-      }
+    const existing = this.rt.vm.getGlobal(name);
+    if (this.rt.vm.isRef(existing)) {
+      // `getGlobal` mints a handle for a table-valued global; dropping it unreleased pins a registry
+      // slot for the life of the VM.
+      this.rt.vm.unref(existing);
     }
-    const outline = attr(merged, 'outline');
-    if (outline !== undefined) {
-      resolution.outline = outline;
+    if (existing !== undefined) {
+      this.warnOnce(
+        `font-global:${name}`,
+        `<Font name="${name}">: a global of that name already exists; the font object was not published`,
+      );
+      return;
     }
-    const colors = childrenNamed(merged, 'Color');
-    if (colors.length > 0) {
-      resolution.color = colorOf(colors[colors.length - 1]);
+    const table = this.rt.vm.newTable();
+    try {
+      this.rt.vm.setTableField(table, 'name', name);
+      this.rt.vm.setGlobal(name, table);
+    } finally {
+      // The global holds the table now; this handle was only for building it.
+      this.rt.vm.unref(table);
     }
-    const justifyH = attr(merged, 'justifyH');
-    if (justifyH !== undefined) {
-      resolution.justifyH = justifyH;
-    }
-    return resolution;
   }
 
   /**
@@ -1144,18 +1160,18 @@ class DocumentLoader {
    * font object and nothing else. Both are read here anyway: `inherits=` costs a line and the day some
    * document uses it, it works.
    *
-   * NORMAL IS APPLIED FOR REAL, the other two are not, and the split is the object model's:
+   * ALL THREE ARE NOW ONE LINE EACH, and that is the point of the font-object registry rather than a
+   * shortcut. This pass used to resolve the NORMAL font itself -- flattening the `<Font>` chain and
+   * pushing a synthetic `<FontString inherits="...">` onto the label `GetFontString()` handed back --
+   * while issuing the other two at declared stubs so the report at least named them. Now
+   * `SetNormalFontObject`/`SetHighlightFontObject`/`SetDisabledFontObject` all resolve the name through
+   * the same registry themselves (`lua/methods/kinds.ts`), so the loader's job is to say what the
+   * document said and nothing more, and a per-state font is applied by the state poll rather than
+   * dropped. It also means a Lua caller and an XML author reach the identical code path, which is the
+   * property this file exists to preserve.
    *
-   *  - The normal font is the caption's font, full stop, so it is resolved the same way a
-   *    `<FontString inherits="...">` is -- through `readFont`'s flattened `<Font>` chain -- and pushed
-   *    onto the label region `GetFontString()` hands back. That reuses `applyFontStringFont` whole,
-   *    including its "a height with no face" warning and its colour/justification ordering, rather
-   *    than growing a second font path that could drift from the first.
-   *  - Highlight and disabled are PER-STATE fonts, and `FontSpec` has one font per region with no
-   *    notion of state. So those two are still issued as `SetHighlightFontObject`/
-   *    `SetDisabledFontObject`, which are declared stubs -- and that is the point: issuing them is what
-   *    puts a line in the load report naming the gap. Before this, the calls never happened at all,
-   *    so a wrong font on every hovered and every disabled caption was completely silent.
+   * ORDER still matters and is unchanged: this runs after `applyRegionLayout` for the `<ButtonText>`,
+   * so the font object's `justifyH` overrides an element-level one, exactly as it did before.
    */
   private applyButtonFonts(element: XmlElement, wrapper: LuaRef, dbg: string): void {
     for (const [tag, method] of [
@@ -1165,30 +1181,8 @@ class DocumentLoader {
     ] as const) {
       for (const font of childrenNamed(element, tag)) {
         const name = attr(font, 'style') ?? attr(font, 'inherits');
-        if (name === undefined) {
-          continue;
-        }
-        if (tag !== 'NormalFont') {
+        if (name !== undefined) {
           this.callMethod(wrapper, method, [name], dbg);
-          continue;
-        }
-        // `GetFontString()` returns nil for a button that has never been given a caption -- the label
-        // is `SetText`'s lazy creation (`lua/methods/kinds.ts`), and a font object with no text to
-        // draw has nothing to land on. Not a gap: a captionless button has no caption to get wrong.
-        const label = this.callForWidget(wrapper, 'GetFontString', [], dbg);
-        if (label === null) {
-          continue;
-        }
-        try {
-          // A synthetic `<FontString inherits="name"/>`: the shortest honest way to say "this region's
-          // font is that font object", and it goes through the ONE font path the loader has.
-          this.applyFontStringFont(
-            { tag: 'FontString', attrs: new Map([['inherits', name]]), children: [], body: '' },
-            label,
-            dbg,
-          );
-        } finally {
-          this.rt.vm.unref(label);
         }
       }
     }

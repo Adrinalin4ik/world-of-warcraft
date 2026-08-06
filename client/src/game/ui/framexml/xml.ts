@@ -54,6 +54,32 @@ export function childrenNamed(element: XmlElement, tag: string): XmlElement[] {
   return element.children.filter((child) => child.tag.toLowerCase() === wanted);
 }
 
+/**
+ * The three value-element readers, here rather than in `loader.ts` because they are XML vocabulary,
+ * not loading policy -- and because `fonts.ts` needs the same `<AbsValue>` and `<Color>` readings the
+ * loader uses. One copy, so a `<FontHeight><AbsValue val="15"/></FontHeight>` cannot mean one thing
+ * at document-load time and another to a runtime `SetFontObject`.
+ */
+export function num(value: string | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** A parsed `<AbsValue val=>` child, else the element's own inline `val`. */
+export function absValue(element: XmlElement): number | undefined {
+  const source = childrenNamed(element, 'AbsValue')[0] ?? element;
+  return num(attr(source, 'val'));
+}
+
+/** `<Color r= g= b= a=>` as an RGBA tuple. A PRESENT element's missing channels read black, alpha 1. */
+export function colorOf(element: XmlElement): [number, number, number, number] {
+  const channel = (key: string, fallback: number) => num(attr(element, key)) ?? fallback;
+  return [channel('r', 0), channel('g', 0), channel('b', 0), channel('a', 1)];
+}
+
 function ownText(node: Element): string {
   let text = '';
   node.childNodes.forEach((child) => {

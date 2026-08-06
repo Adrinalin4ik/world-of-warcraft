@@ -17,7 +17,7 @@
 import { FocusSink, MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { Anchor } from '../../../layout';
 import { Widget } from '../../../widget';
-import { notImplemented, widgetOf } from './region';
+import { applyFontObject, fontObjectName, notImplemented, warnOnce, widgetOf } from './region';
 
 /** `0..1` floats to the `#rrggbb` string `Widget` stores colors as -- duplicated from `region.ts`'s
  * private helper of the same shape rather than exported, since it is three lines and not worth a
@@ -71,7 +71,28 @@ const buttonLabels = new Map<number, number>();
 const highlightLocked = new Set<number>();
 
 /**
- * All four tables above are keyed by frame id, so all four go the same way as the frame -- see
+ * A button's three CAPTION FONTS, by state, as font-object NAMES.
+ *
+ * The engine keeps three font objects per button and draws the caption in whichever the current state
+ * calls for; `FontSpec` holds one font per region, so the state is resolved here instead and the
+ * winning font is written onto the one label. Names rather than resolved specs, because the name is
+ * what the document and the client's Lua both say, and resolving on application keeps one code path
+ * (`region.ts#applyFontObject`) rather than two snapshots that could disagree.
+ *
+ * `applied` is what makes writing it every tick safe: the poll only pushes a font when the WINNING
+ * SLOT changes, so a `Button:SetTextColor` in between survives until the state actually moves -- which
+ * is also what the engine does, since switching font objects is what resets a per-state colour.
+ */
+interface ButtonFonts {
+  normal?: string;
+  highlight?: string;
+  disabled?: string;
+  applied?: 'normal' | 'highlight' | 'disabled';
+}
+const buttonFonts = new Map<number, ButtonFonts>();
+
+/**
+ * All five tables above are keyed by frame id, so all five go the same way as the frame -- see
  * `object.ts`'s `FRAME_TEARDOWN`. Not in the ledger's list of four leaks (which named `scripts.ts`,
  * `events.ts` and `frame.ts`'s `frameIds`), but the same root cause and the same fix: a glue screen
  * has a state-texture entry per button and a label per captioned one, so every rebuild added a set.
@@ -83,6 +104,7 @@ onFrameTeardown((_ctx, id) => {
   checkedTextures.delete(id);
   buttonLabels.delete(id);
   highlightLocked.delete(id);
+  buttonFonts.delete(id);
 });
 
 function ensureStateTextureId(ctx: MethodContext, self: number, slot: StateSlot): number {
@@ -120,6 +142,77 @@ function ensureLabelId(ctx: MethodContext, self: number): number {
     buttonLabels.set(self, id);
   }
   return id;
+}
+
+/**
+ * Stores one of a button's three caption font objects and repaints the caption if that slot is the one
+ * in force. Shared by all three `Set*FontObject` methods, which differ only in the slot.
+ */
+function setButtonFont(
+  ctx: MethodContext,
+  self: number,
+  slot: 'normal' | 'highlight' | 'disabled',
+  arg: unknown,
+): void {
+  const name = fontObjectName(ctx, arg);
+  if (name === null) {
+    warnOnce(
+      `Set${slot === 'normal' ? 'Normal' : slot === 'highlight' ? 'Highlight' : 'Disabled'}FontObject: the argument is neither a font object nor a <Font> name; ignored`,
+    );
+    return;
+  }
+  let fonts = buttonFonts.get(self);
+  if (fonts === undefined) {
+    fonts = {};
+    buttonFonts.set(self, fonts);
+  }
+  fonts[slot] = name;
+  // The slot in force may not have moved, but its NAME just did, so the memo has to be dropped or a
+  // second `SetNormalFontObject` on the same button (which `RealmListUpdate` does on every refresh)
+  // would be a no-op.
+  fonts.applied = undefined;
+  applyButtonFont(ctx, self);
+}
+
+/**
+ * Writes whichever of the three caption fonts the button's CURRENT state calls for onto its label.
+ *
+ * The rule is the engine's: the disabled font while disabled, the highlight font while the pointer is
+ * over it or `LockHighlight` holds it, the normal font otherwise -- and each falls back to the normal
+ * font when its own slot was never set, because a button with only a `<NormalFont>` (most of them) must
+ * not lose its caption font on hover. The transcription states the same rule from the other side:
+ * `screens/realm-list-state.ts#realmNameColor` takes `highlighted = selected || hovered`, where
+ * `selected` is the row `RealmListUpdate` calls `LockHighlight()` on (realmlist.lua:146).
+ *
+ * A no-op for a button with no label yet: `SetText` calls this after creating one, so a font object set
+ * before any caption still lands.
+ */
+function applyButtonFont(ctx: MethodContext, self: number): void {
+  const fonts = buttonFonts.get(self);
+  const labelId = buttonLabels.get(self);
+  if (fonts === undefined || labelId === undefined) {
+    return;
+  }
+  const widget = ctx.registry.widget(self);
+  const label = ctx.registry.widget(labelId);
+  if (widget === null || label === null) {
+    return;
+  }
+  const slot =
+    widget.state === 'disabled'
+      ? 'disabled'
+      : highlightLocked.has(self) || widget.hovered
+        ? 'highlight'
+        : 'normal';
+  if (fonts.applied === slot) {
+    return;
+  }
+  const name = fonts[slot] ?? fonts.normal;
+  if (name === undefined) {
+    return;
+  }
+  applyFontObject(ctx, label, name);
+  fonts.applied = slot;
 }
 
 /**
@@ -209,12 +302,21 @@ export function syncInteractiveArt(ctx: MethodContext, self: number): void {
       region.shown = widget.checked;
     }
   }
+
+  // The CAPTION follows the same three fields the art does -- the engine draws a hovered button's text
+  // in its highlight font, and neither `hovered` nor a raw press goes through a method. Cheap because
+  // `applyButtonFont` returns immediately unless the winning slot actually changed this tick.
+  applyButtonFont(ctx, self);
 }
 
 const BUTTON: MethodTable = {
   SetText: (ctx, self, args) => {
     const label = ctx.registry.widget(ensureLabelId(ctx, self))!;
     label.text = args[0] === undefined || args[0] === null ? '' : String(args[0]);
+    // The label may have only just been created, with `ensureLabelId`'s FRIZQT 12 white default -- so
+    // a font object set BEFORE any caption existed (the loader issues `<NormalFont>` after `SetText`,
+    // but a Lua caller has no such order) lands here.
+    applyButtonFont(ctx, self);
     return [];
   },
   GetText: (ctx, self) => {
@@ -228,17 +330,22 @@ const BUTTON: MethodTable = {
     return [id === undefined ? null : ctx.wrapper(id)];
   },
 
+  // Each of the five state-moving methods below repaints the CAPTION as well as the art: a caller that
+  // disables a button and reads its label back must not have to wait for the next frame's poll, and the
+  // loader (and every unit test) never ticks at all.
   Enable: (ctx, self) => {
     const widget = widgetOf(ctx, self);
     if (widget.state === 'disabled') {
       widget.state = 'up';
       syncStateTextures(ctx, self);
+      applyButtonFont(ctx, self);
     }
     return [];
   },
   Disable: (ctx, self) => {
     widgetOf(ctx, self).state = 'disabled';
     syncStateTextures(ctx, self);
+    applyButtonFont(ctx, self);
     return [];
   },
   IsEnabled: (ctx, self) => [widgetOf(ctx, self).state !== 'disabled'],
@@ -249,6 +356,7 @@ const BUTTON: MethodTable = {
     if (id !== undefined) {
       ctx.registry.widget(id)!.shown = true;
     }
+    applyButtonFont(ctx, self);
     return [];
   },
   UnlockHighlight: (ctx, self) => {
@@ -260,6 +368,7 @@ const BUTTON: MethodTable = {
       // between the unlock and the next update.
       ctx.registry.widget(id)!.shown = widgetOf(ctx, self).hovered;
     }
+    applyButtonFont(ctx, self);
     return [];
   },
 
@@ -272,6 +381,7 @@ const BUTTON: MethodTable = {
     }
     widget.state = String(args[0] ?? '').toUpperCase() === 'PUSHED' ? 'down' : 'up';
     syncStateTextures(ctx, self);
+    applyButtonFont(ctx, self);
     return [];
   },
   GetButtonState: (ctx, self) => {
@@ -316,12 +426,22 @@ const BUTTON: MethodTable = {
   // the region in order to size it.
   GetHighlightTexture: (ctx, self) => [ctx.wrapper(ensureStateTextureId(ctx, self, 'highlight'))],
 
-  // All three: real FrameXML names a global `Font` template (`GameFontNormal`, ...) that these switch
-  // a button's label/highlight/disabled text to wholesale. Nothing in this runtime keeps a
-  // name -> FontSpec registry -- same gap `FONTSTRING.SetFontObject` documents in `region.ts`.
-  SetNormalFontObject: notImplemented('SetNormalFontObject', 'no runtime Font-object registry exists yet'),
-  SetHighlightFontObject: notImplemented('SetHighlightFontObject', 'no runtime Font-object registry exists yet'),
-  SetDisabledFontObject: notImplemented('SetDisabledFontObject', 'no runtime Font-object registry exists yet'),
+  // All three real, over the font-object registry (`framexml/fonts.ts`) and the per-state resolution in
+  // `applyButtonFont` above. `realmlist.lua:115-128` is the caller that made this worth doing: it picks
+  // one of four `<Font>`s per realm row for the name and a matching highlight, which is the whole reason
+  // a row with characters on it is green and one that is down is grey.
+  SetNormalFontObject: (ctx, self, args) => {
+    setButtonFont(ctx, self, 'normal', args[0]);
+    return [];
+  },
+  SetHighlightFontObject: (ctx, self, args) => {
+    setButtonFont(ctx, self, 'highlight', args[0]);
+    return [];
+  },
+  SetDisabledFontObject: (ctx, self, args) => {
+    setButtonFont(ctx, self, 'disabled', args[0]);
+    return [];
+  },
   // Real `Button:SetTextColor` also takes an alpha channel `FontSpec.color` has nowhere to put --
   // dropped for the same reason `FONTSTRING.SetTextColor` drops it in `region.ts`.
   SetTextColor: (ctx, self, args) => {
