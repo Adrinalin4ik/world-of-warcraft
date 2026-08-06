@@ -1195,12 +1195,25 @@ class DocumentLoader {
   }
 
   /**
-   * A NAMED state texture or button label gets its resolved name published as a Lua global.
+   * A NAMED state texture or button label gets its resolved name -- in BOTH name spaces.
    *
    * These regions are created by a setter that takes no name, so `FrameRegistry` never learns one --
    * but real FrameXML addresses them by global (`getglobal(tabName.."Text")` in the reference kit's
-   * own tab code), so the name has to reach `_G` somehow. Set through the VM rather than through the
-   * registry, which is exactly what the reference does here.
+   * own tab code), so the name has to reach `_G`.
+   *
+   * `_G` ALONE IS NOT ENOUGH, and that was a real defect rather than a nicety. This runtime has two
+   * name spaces and only one of them was being filled: `SetPoint`'s `relativeTo` may be a frame NAME
+   * STRING, which `methods/region.ts` resolves through `registry.byName`. `realmlist.xml:221` anchors
+   * every realm row's type column to `self:GetName().."NormalText"` by exactly that route, found
+   * nothing, and fell back to the parent -- which put the type, character-count and population of every
+   * row off the right edge of the panel. `registry.publishName` is the other half; it also makes
+   * `GetName()` answer, as it does in the client, and hands the teardown path the name to clear.
+   *
+   * THE TWO ARE TAKEN TOGETHER OR NOT AT ALL, which is why the registry name is claimed after the `_G`
+   * check below rather than before it. Teardown clears the global a frame OWNS
+   * (`object.ts`'s release listener, keyed off `registry.nameOf`), so a region that took the registry
+   * name while the global belonged to something else would have `reset()` null out a stranger's
+   * global -- a FrameXML function, in the case the warning below exists for.
    */
   private publishRegion(element: XmlElement, region: LuaRef, selfName: string, dbg: string): void {
     const name = resolveName(attr(element, 'name'), selfName);
@@ -1223,6 +1236,10 @@ class DocumentLoader {
       return;
     }
     this.rt.vm.setGlobal(name, region);
+    const id = this.rt.ctx.frameIdOf(region);
+    if (id !== null) {
+      this.rt.ctx.registry.publishName(id, name);
+    }
   }
 
   /**

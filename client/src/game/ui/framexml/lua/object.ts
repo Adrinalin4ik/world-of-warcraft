@@ -295,7 +295,8 @@ function resolveMethod(cls: WidgetClass, name: string): FrameMethod | null {
 interface FrameEntry {
   readonly id: number;
   readonly cls: WidgetClass;
-  readonly name: string | null;
+  /** Mutable for `publishName` alone: a region created unnamed may learn the name its XML declared. */
+  name: string | null;
   readonly widget: Widget;
   /**
    * The frame's Lua table, cached so `GetParent()` returns the same table every time -- identity
@@ -429,6 +430,34 @@ export class FrameRegistry {
 
   nameOf(id: number): string | null {
     return this.entries.get(id)?.name ?? null;
+  }
+
+  /**
+   * Names a frame that was created WITHOUT one -- a button's label region and its state textures, which
+   * their setters construct anonymously while the XML declares a `name=` for them.
+   *
+   * The loader was already publishing those names as Lua GLOBALS (`loader.ts#publishRegion`) and that
+   * is not the same thing, which is the defect this exists to close: `SetPoint`'s `relativeTo` may be a
+   * frame NAME STRING, and `region.ts` resolves such a string through `byName` -- the registry, not
+   * `_G`. So `realmlist.xml:221`'s
+   * `_G[self:GetName().."PVP"]:SetPoint("LEFT", self:GetName().."NormalText", "RIGHT", 10, 0)` could not
+   * find a label the loader had published perfectly well, and fell back to anchoring against the whole
+   * 512-wide button -- putting the type, character-count and population columns of every realm row off
+   * the right edge of the panel.
+   *
+   * Non-overwriting on both sides, for the two reasons that differ: an id that already has a name keeps
+   * it (a frame's name is its identity and a second one would make `GetName()` a lie), and a name
+   * already taken stays with its first claimant (`create`'s own rule). Answers whether it took the name,
+   * so a caller can report the collision.
+   */
+  publishName(id: number, name: string): boolean {
+    const entry = this.entries.get(id);
+    if (entry === undefined || entry.name !== null || this.names.has(name)) {
+      return false;
+    }
+    entry.name = name;
+    this.names.set(name, id);
+    return true;
   }
 
   /** The id of a frame's parent, or null at the root (whose own id is not a frame id). */
