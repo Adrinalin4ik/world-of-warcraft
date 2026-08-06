@@ -159,6 +159,10 @@ export class RealmListScreen implements GlueScreen {
     // which is what `Widget#solid` draws -- introduced for the edit-box caret, but this one IS
     // authored art rather than ours.
     const dim = root.add(new Widget('texture', 'realms-dim'));
+    // `RealmList` is a DIALOG-strata frame drawn over the still-mounted `AccountLogin` in the real
+    // client (see the file comment) -- DIALOG outranks every layer of a MEDIUM frame, which is what
+    // this screen needs even though nothing MEDIUM shares the tree with it today.
+    dim.strata = 'DIALOG';
     dim.layer = 'BACKGROUND';
     dim.solid = true;
     dim.vertexColor = '#000000';
@@ -174,6 +178,8 @@ export class RealmListScreen implements GlueScreen {
     this.wireKeys(dim);
 
     this.panel = root.add(new Widget('frame', 'realms-panel'));
+    // Same DIALOG strata as `dim` -- the panel is the dialog proper, the dim is the screen behind it.
+    this.panel.strata = 'DIALOG';
     this.panel.layer = 'BACKGROUND';
     this.panel.setSize(PANEL_WIDTH, PANEL_HEIGHT).setAnchors({ point: 'CENTER', x: 24, y: 0 });
 

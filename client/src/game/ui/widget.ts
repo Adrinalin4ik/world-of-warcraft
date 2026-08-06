@@ -13,18 +13,11 @@
 // this one.
 import type { BackdropDef } from './backdrop';
 import { Anchor, LayoutNode, Rect, resolveAnchors, Viewport } from './layout';
+import { DrawLayer, OrderKey, Strata, compareOrder } from './framexml/order';
 
-/** Draw layers, back to front -- FrameXML's own ladder plus a DIALOG layer above everything. */
-export type Layer = 'BACKGROUND' | 'BORDER' | 'ARTWORK' | 'OVERLAY' | 'HIGHLIGHT' | 'DIALOG';
-
-export const LAYER_ORDER: Layer[] = [
-  'BACKGROUND',
-  'BORDER',
-  'ARTWORK',
-  'OVERLAY',
-  'HIGHLIGHT',
-  'DIALOG',
-];
+/** The five FrameXML draw layers. DIALOG is NOT here -- it is a `Strata`; see `framexml/order.ts`. */
+export type Layer = DrawLayer;
+export type { Strata };
 
 /** Normal alpha, or the ADD blend the glowing glue art is authored for. */
 export type Blend = 'ALPHA' | 'ADD';
@@ -76,6 +69,12 @@ export class Widget {
   readonly children: Widget[] = [];
 
   layer: Layer = 'ARTWORK';
+  /** Frame strata -- a higher-ranked axis than `layer`. Inherited from the parent on `add`. */
+  strata: Strata = 'MEDIUM';
+  /** Born at the parent's level + 1; see `framexml/order.ts` for why the tie matters. */
+  frameLevel = 0;
+  /** The widget's DFS index -- see `orderKey` below for why this is a stand-in. */
+  linkStamp = 0;
   anchors: Anchor[] = [];
   width = 0;
   height = 0;
@@ -153,6 +152,8 @@ export class Widget {
 
   add(child: Widget): Widget {
     child.parent = this;
+    child.strata = this.strata;
+    child.frameLevel = this.frameLevel + 1;
     this.children.push(child);
     return child;
   }
@@ -217,6 +218,21 @@ export interface DrawItem {
   alpha: number;
 }
 
+/**
+ * `linkStamp` is the widget's DFS index -- a STAND-IN for the client's live list position, which is
+ * re-stamped to the bucket tail when a frame is shown or its strata/level changes. Static DFS order
+ * is right for a screen built once and never re-shown, which is every screen today. `Show` and
+ * `SetFrameLevel` make it live in plan 2; until then, do not read this as the client's rule.
+ */
+const orderKey = (entry: { widget: Widget; sequence: number }): OrderKey => ({
+  strata: entry.widget.strata,
+  frameLevel: entry.widget.frameLevel,
+  layer: entry.widget.layer,
+  isFontString: entry.widget.kind === 'fontstring',
+  linkStamp: entry.sequence,
+  declarationSeq: 0,
+});
+
 export class WidgetRoot {
   readonly root = new Widget('frame', 'root');
 
@@ -231,9 +247,10 @@ export class WidgetRoot {
   /**
    * Flatten to a back-to-front draw list with resolved rects.
    *
-   * Order is layer first, then depth-first insertion order within a layer -- so a child in
-   * OVERLAY draws above an unrelated parent's HIGHLIGHT only if the layer says so, never because of
-   * where it sits in the tree. Hidden subtrees are skipped whole.
+   * Order is the client's real key -- strata, then frame level, then draw layer, then textures
+   * before font strings, then insertion order -- NOT a simple "walk the tree" order. See
+   * `framexml/order.ts` for why the layer outranks the frame and why font strings sort last.
+   * Hidden subtrees are skipped whole.
    */
   drawList(viewport: Viewport): DrawItem[] {
     const flat: Array<{ widget: Widget; alpha: number; sequence: number }> = [];
@@ -264,10 +281,7 @@ export class WidgetRoot {
     const rects = resolveAnchors(nodes, viewport);
 
     return flat
-      .sort((a, b) => {
-        const layers = LAYER_ORDER.indexOf(a.widget.layer) - LAYER_ORDER.indexOf(b.widget.layer);
-        return layers !== 0 ? layers : a.sequence - b.sequence;
-      })
+      .sort((a, b) => compareOrder(orderKey(a), orderKey(b)))
       .map((entry) => ({
         widget: entry.widget,
         rect: rects.get(entry.widget.id)!,

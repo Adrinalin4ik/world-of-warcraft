@@ -433,7 +433,10 @@ export class LoginScreen implements GlueScreen {
     // one dialog for every type too. `GlueDialogBackground` is 512 wide at CENTER with the authored
     // `Backdrop`; the height is recomputed from the text in `update()` (`dialogHeight`).
     this.dialog = root.add(new Widget('backdrop', 'login-dialog'));
-    this.dialog.layer = 'DIALOG';
+    // DIALOG is a frame STRATA, not a draw layer -- it outranks every layer of every MEDIUM frame,
+    // which is what puts this panel over the whole screen rather than merely over its own siblings.
+    this.dialog.strata = 'DIALOG';
+    this.dialog.layer = 'BACKGROUND';
     this.dialog.backdrop = DIALOG_BACKDROP;
     // `enableMouse="true"` on the authored frame. It has to stay on for a reason beyond fidelity:
     // this quad covers the account box, and without it clicks would fall THROUGH the dialog to the
@@ -453,7 +456,8 @@ export class LoginScreen implements GlueScreen {
     // the fix for a long refusal (`RESPONSE_FAILED_TO_CONNECT` is three sentences) previously drawn as
     // one line off both edges of the screen. Height is set from the measurement in `update()`.
     this.dialogText = this.dialog.add(new Widget('fontstring', 'login-dialog-text'));
-    this.dialogText.layer = 'DIALOG';
+    // Inherits the DIALOG strata from `this.dialog`; the layer is its own, same as any plain caption.
+    this.dialogText.layer = 'ARTWORK';
     this.dialogText.font = DIALOG_TEXT;
     this.dialogText.setSize(DIALOG_TEXT.wrapWidth!, DIALOG_TEXT.size).setAnchors({
       point: 'TOP',
@@ -469,7 +473,9 @@ export class LoginScreen implements GlueScreen {
     // textures whenever `CURRENT_GLUE_SCREEN == "login"` (gluedialog.lua:651-659) -- which is this
     // screen, so it uses the same blue art the Login button does.
     this.dialogButton = this.dialog.add(new Widget('button', 'login-dialog-button'));
-    this.dialogButton.layer = 'DIALOG';
+    // Inherits DIALOG strata from `this.dialog`; the layer is ARTWORK, the same as the Login button --
+    // its highlight (same layer, via `overlay`) and its caption (OVERLAY) stack on it the same way.
+    this.dialogButton.layer = 'ARTWORK';
     this.dialogButton.sprite = 'button-up';
     this.dialogButton.mouseEnabled = true;
     this.dialogButton.focusable = true;
@@ -498,7 +504,9 @@ export class LoginScreen implements GlueScreen {
     this.dialogButtonCaption = this.dialogButton.add(
       new Widget('fontstring', 'login-dialog-button-text'),
     );
-    this.dialogButtonCaption.layer = 'DIALOG';
+    // Same idiom as the Login button's caption: OVERLAY, above the button's own ARTWORK and its
+    // same-layer highlight, which is what keeps the caption drawing on top of the button art.
+    this.dialogButtonCaption.layer = 'OVERLAY';
     this.dialogButtonCaption.font = BUTTON_CAPTION;
     this.dialogButtonCaption.setSize(DIALOG_BUTTON_WIDTH, 16).setAnchors({
       point: 'CENTER',
