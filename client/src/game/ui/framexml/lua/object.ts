@@ -31,35 +31,58 @@ import { Widget, WidgetKind, WidgetRoot } from '../../widget';
 /**
  * The client's widget classes, as a real hierarchy rather than a flat list of kinds.
  *
- * REGION is abstract -- nothing is created as one. It exists because textures, font strings and
- * frames genuinely do share a set of methods (`SetPoint`, `Show`, `GetParent`, ...) and putting them
- * anywhere else would mean either duplicating them or flattening the tree, which is the mistake this
- * whole file exists to avoid.
+ * REGION and LAYEREDREGION are abstract -- nothing is created as one. They exist because the methods
+ * really do belong at those levels: `SetPoint`/`Show`/`GetParent` to everything drawable (REGION),
+ * `SetVertexColor`/`SetDrawLayer` to exactly Texture and FontString (LAYEREDREGION). Hoisting the
+ * layered ones to REGION would make every Frame answer to `SetVertexColor`, which is the leak this
+ * whole file exists to prevent; duplicating them into both leaf classes is the same leak waiting to
+ * be introduced by the next editor.
  */
 export type WidgetClass =
   | 'REGION'
+  | 'LAYEREDREGION'
   | 'TEXTURE'
   | 'FONTSTRING'
   | 'FRAME'
   | 'BUTTON'
   | 'CHECKBUTTON'
   | 'EDITBOX'
+  | 'MODEL'
+  | 'SCROLLFRAME'
+  | 'SLIDER'
+  | 'STATUSBAR'
+  | 'SIMPLEHTML'
   | 'BACKDROP';
 
 const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
   REGION: null,
-  TEXTURE: 'REGION',
-  FONTSTRING: 'REGION',
+  LAYEREDREGION: 'REGION',
+  TEXTURE: 'LAYEREDREGION',
+  FONTSTRING: 'LAYEREDREGION',
   FRAME: 'REGION',
   BUTTON: 'FRAME',
   CHECKBUTTON: 'BUTTON',
   EDITBOX: 'FRAME',
+  MODEL: 'FRAME',
+  SCROLLFRAME: 'FRAME',
+  SLIDER: 'FRAME',
+  STATUSBAR: 'FRAME',
+  SIMPLEHTML: 'FRAME',
   // OURS, not the client's: `backdrop` is a Widget kind this project invented for a nine-slice
   // frame. It behaves as a Frame and has no methods of its own today.
   BACKDROP: 'FRAME',
 };
 
-/** Every class that is a concrete widget, and the `Widget` kind it is built as. */
+/**
+ * Every class that is a concrete widget, and the `Widget` kind it is built as.
+ *
+ * The last five map onto the plain `frame` kind because `widget.ts` has no member for them and
+ * widening `WidgetKind` is a bigger change than this task should make. That split is right anyway:
+ * the CLASS is what Lua and addons duck-type against, the `Widget` KIND is what the renderer draws.
+ * A Slider is a distinct Lua class with distinct methods and, until something draws a slider track,
+ * an ordinary frame on screen. Task 4 giving any of them real behaviour is the point at which
+ * widening `WidgetKind` becomes worth it.
+ */
 const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   TEXTURE: 'texture',
   FONTSTRING: 'fontstring',
@@ -68,6 +91,23 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   CHECKBUTTON: 'checkbutton',
   EDITBOX: 'editbox',
   BACKDROP: 'backdrop',
+  MODEL: 'frame',
+  SCROLLFRAME: 'frame',
+  SLIDER: 'frame',
+  STATUSBAR: 'frame',
+  SIMPLEHTML: 'frame',
+};
+
+/**
+ * FrameXML type names that are not simply the class name.
+ *
+ * `ModelFFX` is the one that matters: it is the ROOT element of `AccountLogin.xml`
+ * (`<ModelFFX name="AccountLogin" ...>`), so without this entry rule 5 turns the login screen into
+ * a hard error and nothing materializes at all.
+ */
+const CLASS_ALIASES: Record<string, WidgetClass> = {
+  MODELFFX: 'MODEL',
+  PLAYERMODEL: 'MODEL',
 };
 
 /**
@@ -75,12 +115,32 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
  * `CreateFrame("Texture")` because a texture is created through its owner (`CreateTexture`), and
  * rule 5 makes `CreateFrame` the validation point -- so it has to be able to say no.
  */
-const CREATE_FRAME_CLASSES: WidgetClass[] = ['FRAME', 'BUTTON', 'CHECKBUTTON', 'EDITBOX', 'BACKDROP'];
+const CREATE_FRAME_CLASSES: WidgetClass[] = [
+  'FRAME',
+  'BUTTON',
+  'CHECKBUTTON',
+  'EDITBOX',
+  'MODEL',
+  'SCROLLFRAME',
+  'SLIDER',
+  'STATUSBAR',
+  'SIMPLEHTML',
+  'BACKDROP',
+];
 
-/** Parses a FrameXML type name (`"CheckButton"`, `"checkbutton"`) into a class. */
+/** Parses a FrameXML type name (`"CheckButton"`, `"checkbutton"`, `"ModelFFX"`) into a class. */
 function parseClass(name: string): WidgetClass | null {
   const upper = name.toUpperCase();
-  return upper in CLASS_PARENT ? (upper as WidgetClass) : null;
+  // `hasOwnProperty`, not `in`: `in` walks Object.prototype, so a type named "constructor" or
+  // "toString" would parse as a class. Harmless today only by luck -- no prototype key is all-caps.
+  if (hasOwn(CLASS_ALIASES, upper)) {
+    return CLASS_ALIASES[upper];
+  }
+  return hasOwn(CLASS_PARENT, upper) ? (upper as WidgetClass) : null;
+}
+
+function hasOwn(object: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
 }
 
 /** The lookup order for a class: itself, then each ancestor. */
@@ -115,9 +175,42 @@ export interface MethodContext {
   wrapper(id: number): LuaRef;
   /** The frame id behind a Lua value that is (or should be) a frame table; null if it is not one. */
   frameIdOf(value: unknown): number | null;
+  /**
+   * Takes ownership of a handle a method wants to KEEP past the end of the call -- a `SetScript`
+   * handler, most obviously.
+   *
+   * Handle ownership at this boundary, stated once:
+   *   - Arguments are borrowed. The call boundary releases every handle among them when the method
+   *     returns, because `toJs` mints a fresh one per call and they would otherwise pin the Lua
+   *     registry per CALL, not per object.
+   *   - To store one, `retain` it and keep what `retain` returns. Release it with `ctx.vm.unref`
+   *     when you drop it (replacing a script handler, say) or it leaks.
+   *   - Returning a handle is safe: the boundary skips anything it finds among the results. The
+   *     usual case, `ctx.wrapper(id)`, is the frame's permanent handle and is never released here.
+   */
+  retain(ref: LuaRef): LuaRef;
 }
 
+/**
+ * Method tables, per class. `Object.create(null)` and `hasOwn` below, not `{}` and `[name]`: with a
+ * plain object literal every frame would answer non-nil to `toString`, `constructor`, `valueOf` and
+ * `hasOwnProperty`, which breaks exactly the duck-typing invariant this file exists to protect --
+ * and `frame:toString()` would then call `Object.prototype.toString` as a widget method and push
+ * "[object Undefined]" into Lua as its return values.
+ */
 const METHODS = new Map<WidgetClass, MethodTable>();
+
+/**
+ * One entry per installed VM, clearing that VM's Lua-side dispatch cache.
+ *
+ * The cache memoizes "this class does not have that method" as hard as the positive answer, which is
+ * what makes duck-typing cheap -- but it also means a method table registered after something has
+ * already asked for that name would stay invisible for the life of the VM. Since `object.ts`
+ * deliberately imports none of the method modules, whether they are imported at all is up to the
+ * caller of `installObjectModel`, and a forgotten import would otherwise show up as a UI that
+ * renders and does nothing at all. So registration invalidates instead of relying on ordering.
+ */
+const CACHE_INVALIDATORS = new Set<() => void>();
 
 /**
  * Registers methods against a class. THIS IS THE EXTENSION POINT for every later task: task 3 calls
@@ -130,22 +223,32 @@ const METHODS = new Map<WidgetClass, MethodTable>();
  * per-VM about them, and making them global means a task's module only has to be imported, not
  * threaded through `installObjectModel`.
  *
- * REGISTER AT IMPORT TIME, before any frame is created. The Lua side memoizes "this class does not
- * have that method" as hard as it memoizes the positive answer -- that is what makes duck-typing
- * cheap -- so a method added after something has already asked for it by name would stay invisible
- * for the life of the VM.
+ * Registering late is safe -- every installed VM's dispatch cache is flushed here -- but registering
+ * at import time is still the habit to keep, since a flush throws away the whole memo.
  */
 export function registerMethods(cls: WidgetClass, methods: MethodTable): void {
-  const table = METHODS.get(cls) ?? {};
-  Object.assign(table, methods);
+  const table = METHODS.get(cls) ?? (Object.create(null) as MethodTable);
+  for (const [name, method] of Object.entries(methods)) {
+    table[name] = method;
+  }
   METHODS.set(cls, table);
+
+  for (const invalidate of [...CACHE_INVALIDATORS]) {
+    try {
+      invalidate();
+    } catch {
+      // The VM behind this entry is gone (disposed, most likely, as tests do). Drop it rather than
+      // letting a dead VM break registration for the live ones.
+      CACHE_INVALIDATORS.delete(invalidate);
+    }
+  }
 }
 
 function resolveMethod(cls: WidgetClass, name: string): FrameMethod | null {
   for (const link of chainOf(cls)) {
-    const method = METHODS.get(link)?.[name];
-    if (method !== undefined) {
-      return method;
+    const table = METHODS.get(link);
+    if (table !== undefined && hasOwn(table, name)) {
+      return table[name];
     }
   }
   return null;
@@ -298,17 +401,28 @@ export class FrameRegistry {
  * `false` rather than nil for the negative because a nil cache entry is indistinguishable from a
  * cache miss, and re-asking JS on every `if frame.SetValue then` would be the slow path taken most.
  *
- * The two JS bridges are localized and then removed from `_G`: FrameXML and addons walk the global
- * table, and internals of ours have no business being visible there.
+ * The JS bridges are localized and then removed from `_G`: FrameXML and addons walk the global
+ * table, and internals of ours have no business being visible there. `__frameFlushCache` leaves the
+ * same way, as a handle `installObjectModel` keeps and calls when a method table is registered.
  */
 const DISPATCH_CHUNK = `
   local hasMethod = __frameHasMethod
   local invoke = __frameInvokeMethod
   local cache = {}
 
+  __frameFlushCache = function()
+    cache = {}
+  end
+
   __frameMetatable = {
     __index = function(self, key)
       local class = rawget(self, '__class')
+      -- A table wearing this metatable with no __class is not a frame -- someone nil'd the field, or
+      -- built a lookalike. Answer nil rather than dying in 'cache[nil]' with a table-index error
+      -- three layers from anything the author wrote.
+      if class == nil then
+        return nil
+      end
       local byClass = cache[class]
       if byClass == nil then
         byClass = {}
@@ -336,12 +450,33 @@ const DISPATCH_CHUNK = `
   __frameInvokeMethod = nil
 `;
 
+const CONTEXTS = new WeakMap<LuaVM, MethodContext>();
+
 /**
- * Installs `CreateFrame` and the metatable machinery into a VM.
+ * The context installed on a VM, for callers that are not inside a method body.
+ *
+ * Task 5's script dispatch is driven from JS by events: it has the frame id and the VM, and needs
+ * the frame's Lua TABLE to pass as `self`. `installObjectModel` also returns this, which is the
+ * shorter path when the caller is the one installing.
+ */
+export function contextFor(vm: LuaVM): MethodContext | null {
+  return CONTEXTS.get(vm) ?? null;
+}
+
+/**
+ * Installs `CreateFrame` and the metatable machinery into a VM, and returns the context its methods
+ * will be called with -- `wrapper` in particular, which is how anything outside a method body turns
+ * a frame id into the frame's Lua table.
  *
  * Call once per VM, after `installCompat` and before any glue Lua runs.
  */
-export function installObjectModel(vm: LuaVM, registry: FrameRegistry): void {
+export function installObjectModel(vm: LuaVM, registry: FrameRegistry): MethodContext {
+  if (CONTEXTS.has(vm)) {
+    // Installing twice would strand the first metatable's handle and leave two dispatch caches, one
+    // of them unreachable and never invalidated. Nothing needs it, so refuse rather than cope.
+    throw new Error('installObjectModel: this VM already has an object model installed');
+  }
+
   // A screen teardown gives the handle back AND gives up the global, so the name is free for the
   // frame the next screen builds with it.
   registry.onWrapperRelease((ref, ownedName) => {
@@ -396,7 +531,8 @@ export function installObjectModel(vm: LuaVM, registry: FrameRegistry): void {
     return typeof id === 'number' && registry.classOf(id) !== null ? id : null;
   };
 
-  const ctx: MethodContext = { vm, registry, wrapper, frameIdOf };
+  const ctx: MethodContext = { vm, registry, wrapper, frameIdOf, retain: (ref) => vm.dup(ref) };
+  CONTEXTS.set(vm, ctx);
 
   // Does this class have this method at all? The answer duck-typing turns on, asked once per
   // class/name pair and memoized on the Lua side.
@@ -444,35 +580,55 @@ export function installObjectModel(vm: LuaVM, registry: FrameRegistry): void {
   metatable = metatableGlobal;
   vm.setGlobal('__frameMetatable', null);
 
-  // CreateFrame(type, name, parent, template). The template argument is accepted and ignored here;
-  // templates are applied by the XML loader, which is where the template definitions live.
-  vm.registerFunction('CreateFrame', (args) => {
-    const kind = args[0];
-    if (typeof kind !== 'string') {
-      throw new Error('CreateFrame: the first argument must be a frame type');
+  const flushCache = vm.getGlobal('__frameFlushCache');
+  if (!vm.isRef(flushCache)) {
+    throw new Error('installObjectModel: the dispatch chunk did not leave a cache flush behind');
+  }
+  vm.setGlobal('__frameFlushCache', null);
+  CACHE_INVALIDATORS.add(() => {
+    const callError = vm.call(flushCache, []);
+    if (callError !== null) {
+      throw new Error(`flushing the dispatch cache failed: ${callError.message}`);
     }
-    const cls = parseClass(kind);
-    if (cls === null || !CREATE_FRAME_CLASSES.includes(cls)) {
-      throw new Error(`CreateFrame: unknown frame type '${kind}'`);
-    }
-    const name = typeof args[1] === 'string' ? args[1] : null;
-
-    let parent: number | null = null;
-    if (vm.isRef(args[2])) {
-      parent = frameIdOf(args[2]);
-      vm.unref(args[2] as LuaRef);
-      if (parent === null) {
-        throw new Error(`CreateFrame: the parent given for '${name ?? kind}' is not a frame`);
-      }
-    }
-    for (const arg of args.slice(3)) {
-      if (vm.isRef(arg)) {
-        vm.unref(arg);
-      }
-    }
-
-    return [wrapper(registry.create(kind, name, parent))];
   });
+
+  // CreateFrame(type, name, parent, template).
+  vm.registerFunction('CreateFrame', (args) => {
+    // Borrowed, and released in the `finally` -- including on every throw path, since an argument
+    // handle stranded by a rejected `CreateFrame("Sparkle", nil, parent)` is a registry slot pinned
+    // forever, and rule 5 makes that throw a normal thing for game code to do.
+    const borrowed = args.filter((arg): arg is LuaRef => vm.isRef(arg));
+    try {
+      const kind = args[0];
+      if (typeof kind !== 'string') {
+        throw new Error('CreateFrame: the first argument must be a frame type');
+      }
+      const cls = parseClass(kind);
+      if (cls === null || !CREATE_FRAME_CLASSES.includes(cls)) {
+        throw new Error(`CreateFrame: unknown frame type '${kind}'`);
+      }
+      const name = typeof args[1] === 'string' ? args[1] : null;
+
+      let parent: number | null = null;
+      if (vm.isRef(args[2])) {
+        parent = frameIdOf(args[2]);
+        if (parent === null) {
+          throw new Error(`CreateFrame: the parent given for '${name ?? kind}' is not a frame`);
+        }
+      }
+
+      // The template argument is accepted and ignored: templates are applied by the XML loader,
+      // which is where the template definitions live.
+      return [wrapper(registry.create(kind, name, parent))];
+    } finally {
+      // The wrapper handed back is the frame's own permanent handle, never one of these.
+      for (const ref of borrowed) {
+        vm.unref(ref);
+      }
+    }
+  });
+
+  return ctx;
 }
 
 /** Releases every handle in `values` that is not also being handed back to Lua in `keep`. */

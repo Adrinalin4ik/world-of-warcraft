@@ -176,6 +176,21 @@ export class LuaVM {
     lauxlib.luaL_unref(this.L, lua.LUA_REGISTRYINDEX, unbox(ref));
   }
 
+  /**
+   * Returns a SECOND, independent handle to the same Lua value, so a caller can keep the value after
+   * whoever handed it over releases their handle.
+   *
+   * This is what lets a binding RETAIN something: `frame:SetScript("OnClick", handler)` receives a
+   * handle to the handler function that the call boundary is about to release, and a stored handle
+   * whose registry slot has been freed is far worse than a leak -- the slot is reused by the next
+   * value crossing the boundary, so the stored handler silently becomes some unrelated Lua value
+   * with no error anywhere. Duplicating gives the storing side a handle it owns, and must `unref`.
+   */
+  dup(ref: LuaRef): LuaRef {
+    this.pushRef(ref);
+    return this.ref();
+  }
+
   /** Whether a value that came back out of Lua is a handle (and so needs `unref` when discarded). */
   isRef(value: unknown): value is LuaRef {
     return typeof value === 'object' && value !== null && 'registryIndex' in value;
