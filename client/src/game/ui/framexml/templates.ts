@@ -1,4 +1,4 @@
-import { XmlElement, attr, attrBool } from './xml';
+import { XmlElement, attr } from './xml';
 
 /**
  * The name a `$parent` token resolves against when there is no named ancestor.
@@ -36,6 +36,18 @@ function clone(element: XmlElement): XmlElement {
  * `<Shadow>` may all appear in both, and the override is the LAST one -- so a consumer that reads the
  * first match silently gets the template's value. That is not hypothetical: it pinned every templated
  * frame to its template's size until it was found on a button that declared 125x21 and drew 80x22.
+ *
+ * `name`, `virtual` and `inherits` are attributes like any other, so they splice through this same
+ * rule: an element that omits `name` while inheriting a NAMED virtual template comes out carrying
+ * the template's `name` *and* `virtual="true"`. `<NormalTexture inherits="GluePanelButtonUpTexture"/>`
+ * is a concrete case of it (`GluePanelButtonUpTexture` is `<Texture name="..." virtual="true">`,
+ * gluebuttons.xml:24) -- the merged element ends up named "GluePanelButtonUpTexture" and virtual,
+ * even though the source line never says either. This is transcribed behaviour, not a decision we
+ * made: the reference does exactly this (`samples/benilla/crates/benilla-ui/src/framexml.rs:259-269`)
+ * and flags it as an unverified edge case rather than a silent guess -- real FrameXML apparently
+ * never hits this case (an instance either names itself or stays anonymous), so it is inert in
+ * practice, but we do not special-case it away, because diverging from the reference silently would
+ * be worse than inheriting its caveat.
  */
 function merge(base: XmlElement, over: XmlElement): XmlElement {
   const attrs = new Map(base.attrs);
@@ -79,6 +91,11 @@ export class TemplateRegistry {
     return this.templates.has(name.toLowerCase());
   }
 
+  /**
+   * Resolves the TOP element's own `inherits=` only -- it does not walk into `element`'s children.
+   * A nested `inherits=` (the overwhelming majority of the 377 in the glue XML) is left for the
+   * caller to expand when it materializes that child, matching the reference.
+   */
   expand(element: XmlElement, warnings: string[]): XmlElement {
     return this.expandInner(element, warnings, new Set());
   }

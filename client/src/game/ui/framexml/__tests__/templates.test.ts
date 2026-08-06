@@ -1,4 +1,4 @@
-import { DEFAULT_PARENT_NAME, TemplateRegistry, resolveName } from '../templates';
+import { TemplateRegistry, resolveName } from '../templates';
 import { attr, childrenNamed, parseXml } from '../xml';
 
 /** The single `<Ui>` child of a one-element document, as an owned element. */
@@ -22,12 +22,19 @@ describe('TemplateRegistry', () => {
 
   it('resolves a chain, with the leaf winning over the middle over the root', () => {
     const registry = new TemplateRegistry();
-    registry.register(only('<Frame name="Root" virtual="true" alpha="0.1" hidden="true"/>'));
-    registry.register(only('<Frame name="Mid" virtual="true" inherits="Root" alpha="0.5"/>'));
+    registry.register(
+      only('<Frame name="Root" virtual="true" alpha="0.1" scale="1" hidden="true"/>'),
+    );
+    registry.register(only('<Frame name="Mid" virtual="true" inherits="Root" alpha="0.5" scale="2"/>'));
 
     const expanded = registry.expand(only('<Frame name="Leaf" inherits="Mid" alpha="0.9"/>'), []);
 
     expect(attr(expanded, 'alpha')).toBe('0.9');
+    // Root and Mid both set `scale`; the leaf sets neither. If Root were merged on top of Mid
+    // instead of underneath it, Root's "1" would win here -- this is what distinguishes middle
+    // from root, which "alpha" alone (leaf always wins) and "hidden" alone (only root sets it)
+    // do not.
+    expect(attr(expanded, 'scale')).toBe('2');
     expect(attr(expanded, 'hidden')).toBe('true');
   });
 

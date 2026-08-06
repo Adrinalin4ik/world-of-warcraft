@@ -974,7 +974,7 @@ git commit -m "feat(ui): sort the draw list by the client's real order key"
 
 ## Done criteria
 
-- `parseToc` reads `gluexml.toc` into 27 files in load order, and `tocDirective(toc, 'Interface')` answers.
+- `parseToc` reads `gluexml.toc` into 31 files in load order; the real file carries no `##` colon-directive, so `tocDirective` is exercised by a synthetic fixture instead.
 - `parseXml` classifies `<Include>`, `<Script>`, `<Font>`, virtual templates and instances in document order, and reports a malformed document rather than throwing.
 - `TemplateRegistry` resolves a chain, merges inherited-first so the instance's `<Size>` is last, warns on a cycle, and survives across documents.
 - `resolveName` substitutes `$parent` case-insensitively against the nearest named ancestor.

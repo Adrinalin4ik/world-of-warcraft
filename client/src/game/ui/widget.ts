@@ -73,7 +73,11 @@ export class Widget {
   strata: Strata = 'MEDIUM';
   /** Born at the parent's level + 1; see `framexml/order.ts` for why the tie matters. */
   frameLevel = 0;
-  /** The widget's DFS index -- see `orderKey` below for why this is a stand-in. */
+  /**
+   * UNUSED until plan 2: never assigned, so this is permanently 0. `orderKey` below sorts on
+   * `entry.sequence` (a DFS index) instead. Plan 2's `Show` and `SetFrameLevel` give this field the
+   * live list position that makes it real.
+   */
   linkStamp = 0;
   anchors: Anchor[] = [];
   width = 0;
