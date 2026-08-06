@@ -603,7 +603,8 @@ class DocumentLoader {
    * "special" font string (an EditBox's text font, a message frame's line font), which real FrameXML
    * attaches at OVERLAY.
    *
-   * A GAP THAT MATTERS, and the report says so per EditBox rather than burying it here: the reference
+   * A GAP THAT MATTERS, reported per EditBox by `applyEditBox` (not from here, since an EditBox that
+   * declares no font string at all is the worst case, not an exempt one): the reference
    * also ASSIGNS an EditBox's direct `<FontString>` as the box's text region (`adopt_text_region`), and
    * this runtime has nothing to assign into. Nor does the renderer cover for it -- `resolveSprite`
    * (`screens.ts`) rasterizes text ONLY for `kind === 'fontstring'`, so an `editbox` widget falls
@@ -638,12 +639,6 @@ class DocumentLoader {
         this.applyRegionVisual(region, regionWrapper, false, dbg);
       } finally {
         this.rt.vm.unref(regionWrapper);
-      }
-      if (element.tag.toLowerCase() === 'editbox') {
-        this.warnOnce(
-          'editbox:no-text-region',
-          `${dbg}: an <EditBox>'s declared <FontString> is created and placed but NOT adopted as the box's text region -- nothing renders an editbox's typed text (see applySpecialFontStrings)`,
-        );
       }
     }
   }
@@ -1081,8 +1076,24 @@ class DocumentLoader {
     this.rt.vm.setGlobal(name, region);
   }
 
-  /** `<EditBox>`: the letter cap, the text insets, and the config flags. */
+  /**
+   * `<EditBox>`: the letter cap, the text insets, and the config flags.
+   *
+   * Reported unconditionally here, for EVERY EditBox, and not from the `<FontString>` pass where it
+   * started: an EditBox that declares NO font string is exactly the one nothing renders text for, so
+   * hanging the warning off a declared child reported every case except the worst one. Nothing in this
+   * engine draws an `editbox` widget's typed text at all -- `screens.ts#resolveSprite` rasterizes text
+   * only for `kind === 'fontstring'`, and the one visible edit box today is mirrored by hand, per
+   * frame, in `screens/login.ts`. The reference assigns the declared child as the box's text region
+   * (`adopt_text_region`); there is no slot here to assign into, so this is a renderer/`widget.ts`
+   * follow-up, named in the report rather than worked around from the loader.
+   */
   private applyEditBox(element: XmlElement, wrapper: LuaRef, dbg: string): void {
+    this.warnOnce(
+      'editbox:no-text-region',
+      `${dbg}: nothing renders an <EditBox>'s typed text in this runtime (no text-region slot to adopt a <FontString> into, and resolveSprite rasterizes only font strings) -- an XML-loaded EditBox draws its backdrop and nothing typed`,
+    );
+
     const letters = num(attr(element, 'letters'));
     if (letters !== undefined) {
       this.callMethod(wrapper, 'SetMaxLetters', [letters], dbg);

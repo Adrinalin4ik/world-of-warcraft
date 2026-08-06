@@ -328,14 +328,13 @@ const FONTSTRING: MethodTable = {
     spec.outline = flags.includes('OUTLINE');
     return [true];
   },
-  SetFontObject: () => {
-    // Real FontXML names a global `Font` template (`GameFontNormal`, ...) that this call switches to
-    // wholesale. Nothing in this runtime keeps a name -> FontSpec table of those templates -- the
-    // loader (Task 7) resolves a `<FontString>`'s inherited font at DOCUMENT-LOAD time into a literal
-    // spec, and there is no live registry for a runtime `SetFontObject` call to consult.
-    warnOnce('SetFontObject: not implemented -- no runtime Font-object registry exists yet');
-    return [];
-  },
+  // Real FontXML names a global `Font` template (`GameFontNormal`, ...) that this call switches to
+  // wholesale. Nothing in this runtime keeps a name -> FontSpec table of those templates -- the loader
+  // resolves a `<FontString>`'s inherited font at DOCUMENT-LOAD time into a literal spec, and there is
+  // no live registry for a runtime `SetFontObject` call to consult. Through the factory like every
+  // other stub, so `NOT_IMPLEMENTED` knows about it: a bare `warnOnce` here reads to the loader as a
+  // clean success, which is the whole bug the factory exists to close.
+  SetFontObject: notImplemented('SetFontObject', 'no runtime Font-object registry exists yet'),
   GetStringWidth: (ctx, self) => {
     const widget = widgetOf(ctx, self);
     return [measureText(widget.text, ensureFont(widget), 1).width];
