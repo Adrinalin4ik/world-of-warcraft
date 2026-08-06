@@ -29,13 +29,25 @@ import { wantsTrialScene } from './login-state';
 export class FrameXmlLoginScreen implements GlueScreen {
   private runtime: GlueRuntime | null = null;
   /**
-   * Set by `unmount`. `mount` starts an async boot, and a state change during it would otherwise
-   * leave a runtime nobody disposes attached to a root nobody draws.
+   * Which mount a boot belongs to. MONOTONIC, and a boolean is not enough.
+   *
+   * `GlueApp` reuses one screen instance across session-state changes, and `mount` starts an async
+   * boot. With a single `unmounted` flag the hole was exactly at the trigger the teardown exists for:
+   * mount starts boot #1 -> the state changes -> `unmount()` runs while `this.runtime` is still null,
+   * so there is nothing to dispose -> `mount` clears the flag and starts boot #2 -> boot #1 resolves,
+   * reads the flag as "still mounted", and installs itself. Runtime #1 was then never disposed -- VM
+   * open, frames pinned, `window.glueRuntime` overwritten, its session subscriptions still firing into
+   * a live Lua state attached to a root nobody draws. A token cannot be confused that way: a boot only
+   * installs if the mount it was started for is still the current one.
    */
-  private unmounted = false;
+  private mountToken = 0;
 
   mount(ctx: GlueContext): void {
-    this.unmounted = false;
+    // Any runtime still installed belongs to a previous mount that never got an `unmount` (or got one
+    // that arrived before its boot finished). Dispose it here rather than orphaning it.
+    this.runtime?.dispose();
+    this.runtime = null;
+    const token = ++this.mountToken;
 
     // See the file comment: the host's token, because `SetModel` cannot reach the scene view.
     ctx.setScene({ kind: 'mainmenu', streamingTrial: wantsTrialScene(window.location.search) });
@@ -58,7 +70,9 @@ export class FrameXmlLoginScreen implements GlueScreen {
         }),
       )
       .then((runtime) => {
-        if (this.unmounted) {
+        // Superseded by a later mount, or unmounted outright (which bumps the token too): this boot's
+        // runtime is nobody's, and it is the only thing holding a reference to it.
+        if (token !== this.mountToken) {
           runtime.dispose();
           return;
         }
@@ -83,7 +97,9 @@ export class FrameXmlLoginScreen implements GlueScreen {
   }
 
   unmount(): void {
-    this.unmounted = true;
+    // Bumping the token IS the unmount signal: an in-flight boot compares against it and disposes
+    // itself, and a later `mount` gets a token of its own rather than clearing a shared flag.
+    this.mountToken += 1;
     // THE teardown path (`object.ts`'s `FRAME_TEARDOWN`): this releases every wrapper handle, every
     // stored script handler, every event registration and every side-table entry, then closes the VM.
     this.runtime?.dispose();
