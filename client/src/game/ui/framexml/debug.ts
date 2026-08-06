@@ -116,12 +116,33 @@ export function installFramexmlDebug(): void {
       }
 
       const expanded = registry.expand(found, warnings);
-      console.log(`expanded <${found.tag} name="${instanceName}" inherits="${attr(found, 'inherits') ?? ''}">`, {
-        childrenBefore: found.children.length,
-        childrenAfter: expanded.children.length,
-        childTagsAfter: expanded.children.map((c) => c.tag),
-        attrsAfter: Object.fromEntries(expanded.attrs),
-      });
+
+      // Flat lines and tables, not `console.log('text', obj)`. A collapsed object row is invisible
+      // until you expand it and copies as nothing, which makes the most interesting output of this
+      // whole module the one part you cannot paste into a bug report.
+      console.log(
+        `expanded <${found.tag} name="${instanceName}" inherits="${attr(found, 'inherits') ?? ''}">: ` +
+          `${found.children.length} children -> ${expanded.children.length}`,
+      );
+      console.table(
+        expanded.children.map((child, index) => ({
+          '#': index,
+          tag: child.tag,
+          // Everything up to the instance's own children came from the template, and the boundary is
+          // just the count the instance declared itself.
+          from: index < expanded.children.length - found.children.length ? 'template' : 'own',
+          name: attr(child, 'name') ?? '',
+        })),
+      );
+      console.table(
+        Array.from(expanded.attrs).map(([name, value]) => ({
+          attr: name,
+          value,
+          // `virtual` and `name` splice through from the template like any other attribute -- see the
+          // caveat on `merge`. An element that is not virtual in its own XML can come out marked so.
+          note: attr(found, name) === undefined ? 'INHERITED from the template' : 'its own',
+        })),
+      );
       if (warnings.length) {
         console.warn('warnings:', warnings);
       }
