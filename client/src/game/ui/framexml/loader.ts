@@ -192,6 +192,38 @@ class DocumentLoader {
     }
   }
 
+  /**
+   * A `text=` attribute, resolved the way the client's LoadXML resolves one: if the value NAMES A
+   * GLOBAL STRING, the string is what gets drawn; otherwise the value is the literal.
+   *
+   * This is not a convenience, it is the whole localization mechanism. `accountlogin.xml` writes
+   * `text="ACCOUNT_NAME"`, `text="BLIZZ_DISCLAIMER"`, `text="SAVE_ACCOUNT_NAME"`, and
+   * `GlueStrings.lua` -- which the manifest loads FIRST, for this reason -- defines
+   * `ACCOUNT_NAME = "Battle.net Account Name"`. Without the lookup the login screen draws its own
+   * string keys in place of every caption, which is exactly what the side-by-side diff against the
+   * hand-written screen showed.
+   *
+   * Only an ALL-CAPS identifier is looked up. That is the client's own naming convention for the string
+   * table and it keeps a genuine literal (`text="3.3.5"`, a button captioned `text="X"`) from being
+   * shadowed by an unrelated global; a non-string global of the same name (a table, a function) is not
+   * a string and falls through to the literal too.
+   */
+  private resolveText(value: string): string {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(value)) {
+      return value;
+    }
+    const global = this.rt.vm.getGlobal(value);
+    if (typeof global === 'string') {
+      return global;
+    }
+    if (this.rt.vm.isRef(global)) {
+      // `getGlobal` mints a handle for a table- or function-valued global; discarding it unreleased
+      // pins a registry slot per lookup.
+      this.rt.vm.unref(global);
+    }
+    return value;
+  }
+
   private warnOnce(key: string, message: string): void {
     if (this.warned.has(key)) {
       return;
@@ -531,6 +563,21 @@ class DocumentLoader {
     if (attrBool(element, 'setAllPoints')) {
       this.callMethod(wrapper, 'SetAllPoints', [], dbg);
     }
+    // An element's declared `<Anchors>` ARE its anchors -- they replace whatever it had, they do not
+    // add to it. That only matters for a region whose CONSTRUCTOR gave it some: a button's state
+    // textures and its label are born filling the button (`lua/methods/kinds.ts#fillParent`), so
+    // `<ButtonText><Anchor point="CENTER"><Offset y="3">` (gluebuttons.xml, every glue button) left the
+    // label carrying TOPLEFT, BOTTOMRIGHT *and* CENTER at once, and `resolveAnchors` then put every
+    // button's caption somewhere off to one side of its art instead of on it.
+    //
+    // Cleared once, before the first declared anchor rather than per anchor, or the second `<Anchor>` of
+    // a stretched pair would wipe out the first.
+    const declared = childrenNamed(element, 'Anchors').some(
+      (anchors) => childrenNamed(anchors, 'Anchor').length > 0,
+    );
+    if (declared) {
+      this.callMethod(wrapper, 'ClearAllPoints', [], dbg);
+    }
     for (const anchors of childrenNamed(element, 'Anchors')) {
       for (const anchor of childrenNamed(anchors, 'Anchor')) {
         const point = attr(anchor, 'point');
@@ -704,7 +751,7 @@ class DocumentLoader {
     if (!isTexture) {
       const text = attr(region, 'text');
       if (text !== undefined) {
-        this.callMethod(wrapper, 'SetText', [text], dbg);
+        this.callMethod(wrapper, 'SetText', [this.resolveText(text)], dbg);
       }
       if (color !== null) {
         this.callMethod(wrapper, 'SetTextColor', [color[0], color[1], color[2]], dbg);
@@ -984,7 +1031,14 @@ class DocumentLoader {
     }
 
     for (const [tag, setter, getter] of slots) {
-      for (const texture of childrenNamed(element, tag)) {
+      for (const raw of childrenNamed(element, tag)) {
+        // EXPANDED, like a `<Layers>` region: a state texture routinely carries no `file=` of its own
+        // and inherits a virtual `<Texture>` that has one -- `GlueButtonTemplateBlue` is
+        // `<NormalTexture inherits="GluePanelButtonUpTextureBlue"/>`, and that template holds both the
+        // sheet and the `<TexCoords>` picking the button out of it (gluebuttons.xml). Reading `file=`
+        // off the unexpanded element found nothing, so EVERY glue button drew as a bare caption with no
+        // art behind it -- on the login screen, all seven of them.
+        const texture = this.expandRegion(raw);
         const file = attr(texture, 'file');
         const colorElement = childrenNamed(texture, 'Color')[0];
         // The setter runs even for the colour-only form, with an empty file: it is what creates the
@@ -1009,7 +1063,12 @@ class DocumentLoader {
           if (texCoords !== null) {
             this.callMethod(region, 'SetTexCoord', texCoords, dbg);
           }
-          this.publishRegion(texture, region, selfName, dbg);
+          // From the RAW element, not the expanded one: `merge` splices `name` through like any other
+          // attribute, so an inheriting `<NormalTexture inherits="GluePanelButtonUpTextureBlue"/>`
+          // comes out of `expand` wearing the TEMPLATE's name -- which would publish every blue
+          // button's normal texture under that one global and warn about the clash for all but the
+          // first. Only a name the element declares ITSELF is a name.
+          this.publishRegion(raw, region, selfName, dbg);
         } finally {
           this.rt.vm.unref(region);
         }
@@ -1027,7 +1086,8 @@ class DocumentLoader {
       // `SetText` runs EVEN WITH NO TEXT: it is the label slot's lazy constructor, and the geometry
       // below has to land on a real region. Skipping it is what makes a labelled button centre its
       // text over its whole face instead of where the XML put it.
-      this.callMethod(wrapper, 'SetText', [attr(buttonText, 'text') ?? ''], dbg);
+      const caption = attr(buttonText, 'text');
+      this.callMethod(wrapper, 'SetText', [caption === undefined ? '' : this.resolveText(caption)], dbg);
       const label = this.callForWidget(wrapper, 'GetFontString', [], dbg);
       if (label === null) {
         continue;
@@ -1042,7 +1102,7 @@ class DocumentLoader {
 
     const text = attr(element, 'text');
     if (text !== undefined) {
-      this.callMethod(wrapper, 'SetText', [text], dbg);
+      this.callMethod(wrapper, 'SetText', [this.resolveText(text)], dbg);
     }
 
     for (const [tag, method] of [
