@@ -532,7 +532,6 @@ export function installObjectModel(vm: LuaVM, registry: FrameRegistry): MethodCo
   };
 
   const ctx: MethodContext = { vm, registry, wrapper, frameIdOf, retain: (ref) => vm.dup(ref) };
-  CONTEXTS.set(vm, ctx);
 
   // Does this class have this method at all? The answer duck-typing turns on, asked once per
   // class/name pair and memoized on the Lua side.
@@ -585,6 +584,12 @@ export function installObjectModel(vm: LuaVM, registry: FrameRegistry): MethodCo
     throw new Error('installObjectModel: the dispatch chunk did not leave a cache flush behind');
   }
   vm.setGlobal('__frameFlushCache', null);
+
+  // Only NOW is the VM installed. Marking it earlier meant that a VM whose install threw was left
+  // marked installed, so a caller that caught and retried got the double-install refusal instead of
+  // a real second attempt -- a confusing error standing in front of the real one.
+  CONTEXTS.set(vm, ctx);
+
   CACHE_INVALIDATORS.add(() => {
     const callError = vm.call(flushCache, []);
     if (callError !== null) {
