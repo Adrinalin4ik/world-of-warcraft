@@ -33,6 +33,44 @@ export function installCompat(vm: LuaVM): void {
     -- the replacement is exact and free, so it is defined here rather than left to surprise a
     -- future loader change.
     function getn(t) return #t end
+
+    -- THE ENGINE'S OWN GLOBAL ALIASES, which are not a Lua version difference at all: WoW's Lua
+    -- environment publishes a flat set of names left over from Lua 5.0's standard library layout, and
+    -- FrameXML uses them in preference to the namespaced spellings everywhere. They have to be here for
+    -- the same reason the shims above do -- without them the file that calls one stops loading -- and
+    -- the omission was not visible until the runtime ran the real files: gluedialog.lua:102 calls
+    -- format at FILE SCOPE, so the whole of GlueDialog.lua failed to load, GlueDialog_OnLoad was
+    -- therefore never defined, and the login screen came up with an uninitialized dialog panel sitting
+    -- across the middle of it.
+    --
+    -- Exactly the ones the loaded manifest calls, counted in the files rather than guessed:
+    -- format (5), strsub (6), strlen (5), strupper (1), mod (5), floor (12), min (1), max (1),
+    -- random (2), tinsert (1), tremove (1).
+    format = string.format
+    strsub = string.sub
+    strlen = string.len
+    strupper = string.upper
+    floor = math.floor
+    min = math.min
+    max = math.max
+    random = math.random
+    tinsert = table.insert
+    tremove = table.remove
+    -- WoW's mod() is the C fmod, not Lua 5.3's integer-flavoured '%': gluetemplates.lua's scroll math
+    -- and glueparent.lua's fade math both pass floats.
+    mod = math.fmod
+
+    -- seterrorhandler(handler): the engine's hook for "a script errored". gluebasiccontrols.xml
+    -- installs FrameXML's own _ERRORMESSAGE through it in an INLINE script, so a missing global
+    -- aborted that chunk -- taking the message() global it also defines with it. Nothing in this
+    -- runtime routes Lua errors through a handler (vm.run/pcall return them to the JS caller, which
+    -- is where the load report gets them), so this records the handler and calls nobody, rather than
+    -- pretending to be a hook.
+    local errorHandler = nil
+    function seterrorhandler(handler) errorHandler = handler end
+    function geterrorhandler() return errorHandler or function(message) return message end end
+    -- debuginfo(): a debug-build engine call with no observable effect in a release client.
+    function debuginfo() end
   `;
   const error = vm.run(shim, 'compat.lua');
   if (error !== null) {
