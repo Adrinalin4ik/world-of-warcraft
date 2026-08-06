@@ -303,6 +303,15 @@ module.exports = function (webpackEnv) {
         util: require.resolve("util"),
         buffer: require.resolve("buffer"),
         asset: require.resolve("assert"),
+        // The rest of what fengari reaches for. Its `liolib`/`loslib`/`loadlib` are the standard Lua
+        // `io`, `os` and `require` libraries, which genuinely are filesystem code -- and `luaL_openlibs`
+        // loads them all, so the requires evaluate whether or not a script ever calls them. `false`
+        // gives each an empty module: `io.open`/`os.remove`/`require` from Lua then fail at CALL time,
+        // which is honest (there is no filesystem here), instead of throwing at import and blanking the
+        // page. No glue file uses any of them.
+        fs: false,
+        child_process: false,
+        path: require.resolve("path-browserify"),
       },
       // This allows you to set a fallback for where webpack should look for modules.
       // We placed these paths second because we want `node_modules` to "win"
@@ -322,6 +331,24 @@ module.exports = function (webpackEnv) {
         .filter(ext => useTypeScript || !ext.includes('ts')),
       alias: {
         'stream': 'stream-browserify',
+        // fengari -- the Lua VM the FrameXML runtime runs the client's own glue Lua in -- reads
+        // `require('os').platform()` once, in luaconf.js, to pick a path separator. An ALIAS and not a
+        // `resolve.fallback` entry, because `fallback` only applies when a module cannot be resolved
+        // and this one resolves: `node_modules/os` (a dependency of ours) is `module.exports =
+        // require('os')`, which under webpack resolves back to itself and hands out an empty object.
+        // So `.platform is not a function` threw at IMPORT time and took the whole bundle down --
+        // a blank page, not merely a Lua runtime that would not start.
+        'os': require.resolve('os-browserify/browser'),
+        // ...and `os.tmpname` pulls in the `tmp` package, which reads `fs.constants.O_CREAT` at module
+        // scope -- so an empty `fs` is not enough to get past it and the whole module has to go. Stubbed
+        // rather than polyfilled because a temp FILE is not a thing this client has: `os.tmpname` from
+        // Lua now fails at call time, and no glue file calls it.
+        'tmp': false,
+        // The last of fengari's three node-only dependencies: `debug.debug()` reads a line from the
+        // terminal, and `readline-sync` calls `process.binding` at module scope. A stub with the two
+        // methods `ldblib` calls, not `false`, because webpack hoists that require into the module
+        // factory -- see the shim's own comment.
+        'readline-sync': path.resolve(__dirname, 'shims/readline-sync.js'),
         // Support React Native Web
         // https://www.smashingmagazine.com/2016/08/a-glimpse-into-the-future-with-react-native-for-web/
         'react-native': 'react-native-web',

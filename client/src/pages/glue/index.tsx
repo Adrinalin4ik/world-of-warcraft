@@ -9,8 +9,21 @@ import React from 'react';
 import { GameSession } from '../../network/session';
 import { ClientState, GlueApp } from '../../game/ui/screens';
 import { CharacterStubScreen } from '../../game/ui/screens/character-stub';
+import { FrameXmlLoginScreen } from '../../game/ui/screens/framexml-screen';
 import { LoginScreen } from '../../game/ui/screens/login';
 import { RealmListScreen } from '../../game/ui/screens/realms';
+
+/**
+ * `?ui=lua` mounts the login screen the FrameXML runtime builds from the client's own
+ * `AccountLogin.xml`; anything else keeps the hand-written transcription.
+ *
+ * The DEFAULT stays the transcription deliberately. It is the screen that matches the reference
+ * screenshots, and it is the ORACLE the runtime is being compared against -- so it holds `/` until the
+ * side-by-side diff is clean, not until the runtime merely looks right.
+ */
+function wantsLuaUi(search: string): boolean {
+  return new URLSearchParams(search).get('ui') === 'lua';
+}
 
 interface Props {
   session: GameSession;
@@ -27,7 +40,10 @@ class GlueHost extends React.Component<Props> {
     }
 
     this.app = new GlueApp(canvas, this.props.session);
-    this.app.register(ClientState.Login, new LoginScreen());
+    this.app.register(
+      ClientState.Login,
+      wantsLuaUi(window.location.search) ? new FrameXmlLoginScreen() : new LoginScreen(),
+    );
     this.app.register(ClientState.RealmList, new RealmListScreen());
     this.app.register(ClientState.CharSelect, new CharacterStubScreen());
     void this.app.start(ClientState.Login);

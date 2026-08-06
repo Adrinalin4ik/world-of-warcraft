@@ -1,0 +1,315 @@
+/**
+ * Booting the client's OWN glue interface: fetch `Interface\GlueXML\GlueXML.toc`, run its files in
+ * order, and hand back a live tree plus the load report.
+ *
+ * Everything below this line already existed and is unchanged by this file -- `toc.ts` reads the
+ * manifest, `xml.ts` parses a document, `templates.ts` merges `inherits=`, `loader.ts` materializes it
+ * through the Lua object model, `lua/api/` supplies the engine globals. What was missing was the thing
+ * that puts them in a row against real client data, and the four decisions that takes:
+ *
+ *  1. **Everything is prefetched before anything runs.** `loadDocument`'s resolver is SYNCHRONOUS by
+ *     design (it is what lets its tests run whole documents from inline strings), and the asset host is
+ *     not. So this walks the manifest first, fetching every file and, recursively, every path an
+ *     `<Include>` or `<Script file=>` names, into one text cache -- and only then runs a single
+ *     synchronous pass. A file that 404s is left absent, which surfaces as the loader's own
+ *     "no provider hit" warning rather than as a rejected promise that takes the screen with it.
+ *
+ *  2. **One `FrameXmlRuntime` for the whole manifest**, because the template and font registries have
+ *     to outlive a document: `AccountLogin.xml` inherits `GlueButtonTemplateBlue` from
+ *     `GlueButtons.xml` and `GlueEditBoxFont` from `GlueFontStyles.xml`, and a per-file registry would
+ *     drop every such inherit silently -- the frame still builds, just with none of its template.
+ *
+ *  3. **The screen is shown the way the client shows it**, by calling `SetGlueScreen("login")`
+ *     (glueparent.lua:130) rather than by reaching for `AccountLogin:Show()` ourselves. Every glue
+ *     screen is authored `hidden="true"`; which one is up is a decision the client's own Lua makes, and
+ *     borrowing that decision means the same `SetCurrentScreen`/music/ambience path runs too.
+ *
+ *  4. **Art is discovered from the finished tree, not declared.** A hand-written screen registers a
+ *     sprite TABLE (`screens/login-art.ts`) mapping short keys to paths; a document has no such table
+ *     and names its art by path inline. So after the load this walks the widgets and registers each
+ *     path it finds under ITSELF as the key -- which is also what makes `SetBackdrop` implementable at
+ *     all (`lua/methods/frame.ts`), since `BackdropDef` holds keys and the keys are now the paths.
+ *
+ * What this file deliberately does NOT do: dispatch `OnUpdate`. `lua/scripts.ts` compiles a handler
+ * body as `function(self, ...)`, so an `OnUpdate` body's `elapsed` -- which real FrameXML reads as a
+ * NAMED parameter (`GlueFrameFadeUpdate(elapsed)`, glueparent.xml:15) -- resolves to a nil global.
+ * Firing the tick before that is fixed would call the client's fade and pulse code with nil every
+ * frame. The gap is real and named here rather than half-worked-around.
+ */
+import Loader from '../../net/loader';
+import { GlueArt } from '../art';
+import { ProtocolSession } from '../../../network/protocol/session';
+import { Viewport } from '../layout';
+import { Widget } from '../widget';
+import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
+import { parseToc } from './toc';
+import { parseXml } from './xml';
+import { installCompat } from './lua/compat';
+import { fireEvent } from './lua/events';
+import { FrameRegistry, MethodContext, installObjectModel } from './lua/object';
+import { LuaVM } from './lua/vm';
+import { installLoginApi } from './lua/api/login';
+import { installRealmsApi } from './lua/api/realms';
+import { installScreenApi } from './lua/api/screen';
+import { installSoundApi } from './lua/api/sound';
+import { installStubApi } from './lua/api/stubs';
+
+const GLUE_DIR = 'Interface\\GlueXML\\';
+const TOC = 'GlueXML.toc';
+
+export interface GlueRuntimeOptions {
+  /** The widget the document's frames are built under -- the mounted screen's own root. */
+  root: Widget;
+  /** The app's art table. Every path the document names is registered here and then fetched. */
+  art: GlueArt;
+  /** The live pre-world session the engine API binds to. */
+  protocol: ProtocolSession;
+  /** Stop after this manifest entry, inclusive. Everything after it is not run at all. */
+  stopAfter?: string;
+  /** `QuitGame` -- what leaving the client means to the host. */
+  onQuitGame?: () => void;
+  /** `SetCurrentScreen(name)`, which the client's Lua calls on every screen change. */
+  onSetCurrentScreen?: (name: string) => void;
+  viewport?: () => Viewport;
+}
+
+/** What one document contributed, kept per file so a report line can be traced to its source. */
+export interface FileReport {
+  file: string;
+  kind: 'lua' | 'xml' | 'missing';
+  frames: number;
+  warnings: string[];
+  errors: string[];
+}
+
+export interface GlueRuntime {
+  readonly vm: LuaVM;
+  readonly ctx: MethodContext;
+  readonly registry: FrameRegistry;
+  /** The whole manifest's totals, warnings deduped across files. */
+  readonly report: LoadReport;
+  /** Per file, in load order. */
+  readonly files: FileReport[];
+  /** Per-frame work the document itself cannot do. Safe to call before/after anything. */
+  update(dt: number): void;
+  /** THE teardown: `FrameRegistry.reset()` plus every subscription and the VM itself. */
+  dispose(): void;
+}
+
+/** `Interface\GlueXML\...` paths, as the one key a cached file is looked up by. */
+function cacheKey(path: string): string {
+  return path.trim().replace(/\\/g, '/').toLowerCase();
+}
+
+/**
+ * Fetches the manifest and every file it (transitively) names, up to and including `stopAfter`.
+ *
+ * Returns the load order and a text cache. A file that cannot be fetched is simply absent from the
+ * cache: the loader reports the miss itself, per reference, and one missing include costs an include
+ * rather than the screen.
+ */
+async function prefetch(
+  stopAfter: string,
+): Promise<{ order: string[]; texts: Map<string, string>; tocMissing: boolean }> {
+  const texts = new Map<string, string>();
+  const missing = new Set<string>();
+
+  const fetchText = async (path: string): Promise<string | null> => {
+    const key = cacheKey(path);
+    const cached = texts.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    if (missing.has(key)) {
+      return null;
+    }
+    try {
+      const bytes = await new Loader().load(GLUE_DIR + path);
+      const text = new TextDecoder('utf-8').decode(bytes);
+      texts.set(key, text);
+      return text;
+    } catch {
+      missing.add(key);
+      return null;
+    }
+  };
+
+  const tocText = await fetchText(TOC);
+  if (tocText === null) {
+    return { order: [], texts, tocMissing: true };
+  }
+
+  const all = parseToc(tocText).files;
+  const stop = all.findIndex((file) => cacheKey(file) === cacheKey(stopAfter));
+  const order = stop === -1 ? all : all.slice(0, stop + 1);
+
+  // The referenced-file closure. Depth-first over `<Include>`, since an included document may include
+  // another, and `<Script file=>` targets are leaves.
+  const seen = new Set<string>();
+  const walk = async (path: string): Promise<void> => {
+    const key = cacheKey(path);
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    const text = await fetchText(path);
+    if (text === null || !/\.xml$/i.test(path)) {
+      return;
+    }
+    for (const item of parseXml(text).items) {
+      if (item.kind === 'include' || item.kind === 'script') {
+        await walk(item.path);
+      }
+    }
+  };
+  for (const file of order) {
+    await walk(file);
+  }
+
+  return { order, texts, tocMissing: false };
+}
+
+/**
+ * Boots the client's glue interface onto `options.root` and returns the live runtime.
+ *
+ * Never rejects for a data problem: a missing file, a Lua error, an unmodelled method are all report
+ * lines, because that is what the client does with them and because the report is the point.
+ */
+export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<GlueRuntime> {
+  const stopAfter = options.stopAfter ?? 'AccountLogin.xml';
+  const { order, texts, tocMissing } = await prefetch(stopAfter);
+
+  const vm = new LuaVM();
+  installCompat(vm);
+  const registry = new FrameRegistry(options.root);
+  const ctx = installObjectModel(vm, registry);
+
+  installScreenApi(vm, {
+    viewport: options.viewport,
+    onQuitGame: options.onQuitGame,
+    onSetCurrentScreen: options.onSetCurrentScreen,
+  });
+  installSoundApi(vm);
+  installStubApi(vm);
+  const unsubscribeLogin = installLoginApi(vm, options.protocol);
+  const unsubscribeRealms = installRealmsApi(vm, options.protocol);
+
+  const runtime = createFrameXmlRuntime(vm, ctx);
+  const resolve = (path: string): string | null => texts.get(cacheKey(path)) ?? null;
+
+  const files: FileReport[] = [];
+  const report: LoadReport = { warnings: [], errors: [], frames: 0 };
+  if (tocMissing) {
+    report.errors.push(`${GLUE_DIR}${TOC}: could not be fetched; nothing was loaded`);
+  }
+
+  for (const file of order) {
+    const text = resolve(file);
+    if (text === null) {
+      files.push({ file, kind: 'missing', frames: 0, warnings: [], errors: [`${file}: not found`] });
+      continue;
+    }
+    if (/\.lua$/i.test(file)) {
+      const error = vm.run(text, file);
+      files.push({
+        file,
+        kind: 'lua',
+        frames: 0,
+        warnings: [],
+        errors: error === null ? [] : [`${file}: ${error.message}`],
+      });
+      continue;
+    }
+    const fileReport = loadDocument(runtime, parseXml(text), resolve, file);
+    files.push({ file, kind: 'xml', ...fileReport });
+  }
+
+  for (const entry of files) {
+    report.frames += entry.frames;
+    for (const warning of entry.warnings) {
+      // Deduped across files as well as within one: `warnOnce` is per-document, so a method this
+      // runtime does not model is one line per file that uses it without this.
+      if (!report.warnings.includes(warning)) {
+        report.warnings.push(warning);
+      }
+    }
+    report.errors.push(...entry.errors);
+  }
+
+  // The client's own post-load sequence: FRAMES_LOADED (GlueParent localizes), then the screen.
+  fireEvent(vm, 'FRAMES_LOADED');
+  const screenError = vm.run('SetGlueScreen("login")', 'runtime.ts:SetGlueScreen');
+  if (screenError !== null) {
+    report.errors.push(`SetGlueScreen("login"): ${screenError.message}`);
+  }
+
+  await registerTreeArt(options.art, options.root);
+
+  const editBoxes = collectEditBoxes(options.root);
+
+  return {
+    vm,
+    ctx,
+    registry,
+    report,
+    files,
+    update: () => {
+      // The one thing the document cannot do for itself: an `editbox` widget draws no glyphs (only a
+      // `fontstring` does), so the box's live value is mirrored into the FontString the loader adopted
+      // as its text region. `displayText`, not `text`, because that is where password masking lives.
+      for (const box of editBoxes) {
+        if (box.textRegion !== null) {
+          box.textRegion.text = box.displayText;
+        }
+      }
+    },
+    dispose: () => {
+      // Subscriptions first: a session event arriving after the VM is closed would fire into a dead
+      // Lua state, and `reset()` needs a live one to hand its handles back to.
+      unsubscribeLogin();
+      unsubscribeRealms();
+      registry.reset();
+      vm.dispose();
+    },
+  };
+}
+
+/** Every `editbox` widget in the tree, in tree order. Collected once; the tree is not rebuilt. */
+function collectEditBoxes(root: Widget): Widget[] {
+  const boxes: Widget[] = [];
+  const walk = (widget: Widget): void => {
+    if (widget.kind === 'editbox') {
+      boxes.push(widget);
+    }
+    widget.children.forEach(walk);
+  };
+  walk(root);
+  return boxes;
+}
+
+/**
+ * Registers every art path the finished tree names, keyed by the path itself, and fetches them.
+ *
+ * A `Backdrop`'s `bgFile` is registered as TILED, because that is the only thing a backdrop background
+ * is ever used for (`backdropPieces` repeats it at `tileSize`) -- and the seam-bleed hazard that makes
+ * REPEAT opt-in for ordinary sprites does not apply, since a background samples its whole sheet.
+ */
+async function registerTreeArt(art: GlueArt, root: Widget): Promise<void> {
+  const walk = (widget: Widget): void => {
+    if (widget.sprite) {
+      art.register(widget.sprite, { path: widget.sprite });
+    }
+    const backdrop = widget.backdrop;
+    if (backdrop) {
+      if (backdrop.bgSprite) {
+        art.register(backdrop.bgSprite, { path: backdrop.bgSprite, tile: true });
+      }
+      if (backdrop.edgeSprite) {
+        art.register(backdrop.edgeSprite, { path: backdrop.edgeSprite });
+      }
+    }
+    widget.children.forEach(walk);
+  };
+  walk(root);
+  await art.load();
+}
