@@ -23,7 +23,7 @@
  * was the idiom the convention was named after.
  */
 import { LuaRef, LuaVM, LuaError } from './vm';
-import { MethodContext, MethodTable, registerMethods } from './object';
+import { MethodContext, MethodTable, onFrameTeardown, registerMethods } from './object';
 
 /**
  * The fixed list `SetScript` and `<Scripts>` compilation validate a handler name against. Widening
@@ -90,6 +90,23 @@ function checkHandlerName(name: string, where: string): void {
 
 /** Every frame's stored handlers, by frame id then handler name. Holds OWNED handles only. */
 const handlersByFrame = new Map<number, Map<string, LuaRef>>();
+
+/**
+ * The teardown half of the map above: a released frame's handlers are the LARGEST thing this runtime
+ * pins per screen -- one owned registry handle per `<Scripts>` child, and `AccountLogin.xml` alone
+ * declares dozens. Nothing cleared them before, so a screen rebuilt on every session-state change
+ * pinned a fresh set each time.
+ */
+onFrameTeardown((ctx, id) => {
+  const byName = handlersByFrame.get(id);
+  if (byName === undefined) {
+    return;
+  }
+  for (const handler of byName.values()) {
+    ctx.vm.unref(handler);
+  }
+  handlersByFrame.delete(id);
+});
 
 /**
  * Stores (or, with `handler` null, clears) `self`'s handler for `name`, releasing whatever handle was

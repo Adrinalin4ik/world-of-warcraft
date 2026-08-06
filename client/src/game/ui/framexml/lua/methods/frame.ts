@@ -11,7 +11,7 @@
  * is harmless (`registerMethods` merges), but a placeholder that does nothing observable is also not
  * worth the confusion of two tasks touching the same name for different reasons.
  */
-import { MethodTable, registerMethods } from '../object';
+import { MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { Layer } from '../../../widget';
 import { STRATA_ORDER, Strata } from '../../order';
 import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
@@ -23,6 +23,11 @@ import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
  * meaning, unlike everything else `Widget` carries.
  */
 const frameIds = new Map<number, number>();
+
+/** A released frame takes its numeric tag with it -- see `object.ts`'s `FRAME_TEARDOWN`. */
+onFrameTeardown((_ctx, id) => {
+  frameIds.delete(id);
+});
 
 const FRAME: MethodTable = {
   GetID: (_ctx, self) => [frameIds.get(self) ?? 0],

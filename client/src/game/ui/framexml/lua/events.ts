@@ -26,11 +26,32 @@
  * every iteration for exactly that reason.
  */
 import { LuaVM } from './vm';
-import { MethodTable, contextFor, registerMethods } from './object';
+import { MethodTable, contextFor, onFrameTeardown, registerMethods } from './object';
 import { invokeScriptHandler } from './scripts';
 
 /** Every frame currently registered for an event, in registration order. */
 const framesByEvent = new Map<string, number[]>();
+
+/**
+ * A released frame stops being registered for anything.
+ *
+ * Two reasons this is not merely tidiness. A stale id left in a list makes `fireEvent` dispatch to a
+ * frame that no longer exists -- harmless only because `invokeScriptHandler` finds no handler, which
+ * stops being true the moment id reuse ever happens. And `RegisterEvent`'s `includes` check means a
+ * frame that re-registers after a rebuild would find its OLD id still there and its NEW one appended
+ * behind every surviving list, quietly changing the cross-frame order rule 3 calls a law.
+ *
+ * Removed IN PLACE, and by index scan rather than by rebuilding the arrays, for the same reason
+ * `UnregisterEvent` is: `fireEvent` holds the live array by reference for the length of a dispatch.
+ */
+onFrameTeardown((_ctx, id) => {
+  for (const list of framesByEvent.values()) {
+    const index = list.indexOf(id);
+    if (index !== -1) {
+      list.splice(index, 1);
+    }
+  }
+});
 
 const EVENT_METHODS: MethodTable = {
   // RegisterEvent(eventName). Appending only when the frame is not already in the list is what makes

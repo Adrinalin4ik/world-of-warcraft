@@ -14,7 +14,7 @@
  * `EDITBOX` is a sibling of `BUTTON` under `FRAME` (`object.ts`'s `CLASS_PARENT`), not a descendant --
  * it shares no methods with Button beyond what FRAME already gives both.
  */
-import { MethodContext, MethodTable, registerMethods } from '../object';
+import { MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { Anchor } from '../../../layout';
 import { Widget } from '../../../widget';
 import { notImplemented, widgetOf } from './region';
@@ -69,6 +69,21 @@ const checkedTextures = new Map<number, number>();
 const buttonLabels = new Map<number, number>();
 /** `LockHighlight`/`UnlockHighlight`: which buttons have forced their highlight on regardless of hover. */
 const highlightLocked = new Set<number>();
+
+/**
+ * All four tables above are keyed by frame id, so all four go the same way as the frame -- see
+ * `object.ts`'s `FRAME_TEARDOWN`. Not in the ledger's list of four leaks (which named `scripts.ts`,
+ * `events.ts` and `frame.ts`'s `frameIds`), but the same root cause and the same fix: a glue screen
+ * has a state-texture entry per button and a label per captioned one, so every rebuild added a set.
+ * The REGIONS themselves are registry frames and are released by the same `reset()`; these tables
+ * only hold their ids.
+ */
+onFrameTeardown((_ctx, id) => {
+  stateTextures.delete(id);
+  checkedTextures.delete(id);
+  buttonLabels.delete(id);
+  highlightLocked.delete(id);
+});
 
 function ensureStateTextureId(ctx: MethodContext, self: number, slot: StateSlot): number {
   let bySlot = stateTextures.get(self);

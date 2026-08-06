@@ -267,6 +267,36 @@ interface FrameEntry {
   wrapper: LuaRef | null;
 }
 
+/** One frame going away, as `FrameRegistry.reset` announces it. */
+export interface FrameRelease {
+  readonly id: number;
+  /** The frame's Lua table, if one was ever materialized. Whoever minted it releases it. */
+  readonly wrapper: LuaRef | null;
+  /** The `_G` name this frame published, if it was the frame that got it. */
+  readonly ownedName: string | null;
+}
+
+/**
+ * Listeners for "this frame id is dead", installed at module import time by every module that keys
+ * state by frame id.
+ *
+ * THE ONE TEARDOWN PATH: `screen.unmount()` -> `FrameRegistry.reset()` -> per frame, the object
+ * model's own subscriber releases the wrapper handle and gives up the `_G` name, then fans out to
+ * these so the side tables scattered across `scripts.ts`, `events.ts` and `methods/` drop that id
+ * too. Adding a new side table means adding a listener HERE, in the module that owns the table, not a
+ * new cleanup call in whatever code happens to tear a screen down.
+ *
+ * Module-level rather than per-registry for the same reason `METHODS` is: the tables these listeners
+ * clean are module-level themselves. A listener therefore sees releases from EVERY registry, and must
+ * key strictly on the id it is handed -- never sweep its whole table.
+ */
+const FRAME_TEARDOWN: Array<(ctx: MethodContext, id: number) => void> = [];
+
+/** Registers a side-table cleanup. Called at import time; there is no unregister and nothing needs one. */
+export function onFrameTeardown(listener: (ctx: MethodContext, id: number) => void): void {
+  FRAME_TEARDOWN.push(listener);
+}
+
 /**
  * Every frame the runtime knows about, keyed by integer id.
  *
@@ -280,7 +310,7 @@ export class FrameRegistry {
   private readonly entries = new Map<number, FrameEntry>();
   private readonly names = new Map<string, number>();
   private readonly widgetIds = new Map<Widget, number>();
-  private releaseWrapper: ((ref: LuaRef, ownedName: string | null) => void) | null = null;
+  private readonly releaseListeners: Array<(release: FrameRelease) => void> = [];
   private nextId = 1;
 
   constructor(root: Widget = new WidgetRoot().root) {
@@ -360,11 +390,27 @@ export class FrameRegistry {
   }
 
   /**
-   * Internal, for `installObjectModel`: how a wrapper handle is given back to the VM on `reset`.
-   * `ownedName` is the `_G` name this frame published, if it was the one that got it.
+   * Internal, for `installObjectModel`: subscribe to frame release.
+   *
+   * MULTI-SUBSCRIBER, and that is the whole point of the shape. The single-slot field this replaced
+   * was already claimed by `installObjectModel` (it is the only thing that can give a wrapper handle
+   * back to the VM), so every OTHER thing that keys state by frame id -- `scripts.ts`'s
+   * `handlersByFrame`, `events.ts`'s `framesByEvent`, `methods/frame.ts`'s `frameIds`,
+   * `methods/kinds.ts`'s state-texture/label tables -- had nowhere to hear about a teardown and grew
+   * for the life of the process. They are notified through `onFrameTeardown` below, which
+   * `installObjectModel`'s subscriber fans out to because it is the one holding the `MethodContext`
+   * those listeners need; this hook stays low-level and Lua-free, like the rest of this class.
+   *
+   * Returns an unsubscribe, so a listener can outlive nothing.
    */
-  onWrapperRelease(release: (ref: LuaRef, ownedName: string | null) => void): void {
-    this.releaseWrapper = release;
+  onRelease(listener: (release: FrameRelease) => void): () => void {
+    this.releaseListeners.push(listener);
+    return () => {
+      const index = this.releaseListeners.indexOf(listener);
+      if (index !== -1) {
+        this.releaseListeners.splice(index, 1);
+      }
+    };
   }
 
   /**
@@ -374,12 +420,23 @@ export class FrameRegistry {
    * Lua registry would gain a permanently-pinned table per frame per rebuild. The wrapper TABLES are
    * then ordinary garbage; it is the registry slots that had to be handed back explicitly, since the
    * Lua registry is a GC root by definition and no amount of JS garbage collection reaches into it.
+   *
+   * Every entry is announced, wrapper or not: a frame whose Lua table was never materialized can
+   * still have script handlers and event registrations against its id, and those are exactly what the
+   * listeners are here to drop.
    */
   reset(): void {
     for (const entry of this.entries.values()) {
-      if (entry.wrapper !== null && this.releaseWrapper !== null) {
-        const owned = entry.name !== null && this.names.get(entry.name) === entry.id;
-        this.releaseWrapper(entry.wrapper, owned ? entry.name : null);
+      const owned = entry.name !== null && this.names.get(entry.name) === entry.id;
+      const release: FrameRelease = {
+        id: entry.id,
+        wrapper: entry.wrapper,
+        ownedName: owned ? entry.name : null,
+      };
+      // A copy of the list, because a listener that unsubscribes itself while being notified would
+      // otherwise make the walk skip its neighbour.
+      for (const listener of [...this.releaseListeners]) {
+        listener(release);
       }
       entry.wrapper = null;
     }
@@ -477,15 +534,6 @@ export function installObjectModel(vm: LuaVM, registry: FrameRegistry): MethodCo
     throw new Error('installObjectModel: this VM already has an object model installed');
   }
 
-  // A screen teardown gives the handle back AND gives up the global, so the name is free for the
-  // frame the next screen builds with it.
-  registry.onWrapperRelease((ref, ownedName) => {
-    vm.unref(ref);
-    if (ownedName !== null) {
-      vm.setGlobal(ownedName, null);
-    }
-  });
-
   // Assigned once the dispatch chunk below has run. `wrapper` is a closure, so it only has to be
   // non-null by the time the first frame is created, which is necessarily after that.
   let metatable: LuaRef | null = null;
@@ -532,6 +580,30 @@ export function installObjectModel(vm: LuaVM, registry: FrameRegistry): MethodCo
   };
 
   const ctx: MethodContext = { vm, registry, wrapper, frameIdOf, retain: (ref) => vm.dup(ref) };
+
+  // THE teardown path (see `FRAME_TEARDOWN`). Subscribed here, after `ctx` exists, because the
+  // fan-out needs it: the side-table listeners hold nothing but their own map and need a VM to hand
+  // handles back through.
+  //
+  // Order inside: the listeners run BEFORE the wrapper handle is released, so one that wants to ask
+  // the registry (or Lua) anything about the frame still can. Each is guarded, because a throwing
+  // listener must not strand every remaining frame's handle.
+  registry.onRelease(({ id, wrapper: held, ownedName }) => {
+    for (const listener of FRAME_TEARDOWN) {
+      try {
+        listener(ctx, id);
+      } catch (error) {
+        console.warn(`frame teardown listener failed for frame ${id}`, error);
+      }
+    }
+    if (held !== null) {
+      vm.unref(held);
+    }
+    // Giving up the global too, so the name is free for the frame the next screen builds with it.
+    if (ownedName !== null) {
+      vm.setGlobal(ownedName, null);
+    }
+  });
 
   // Does this class have this method at all? The answer duck-typing turns on, asked once per
   // class/name pair and memoized on the Lua side.
