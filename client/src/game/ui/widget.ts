@@ -153,7 +153,14 @@ export class Widget {
   add(child: Widget): Widget {
     child.parent = this;
     child.strata = this.strata;
-    child.frameLevel = this.frameLevel + 1;
+    // Only a child FRAME is born at parent + 1. A REGION (`texture`, `fontstring`) sits at its
+    // owner's level unchanged -- because `frameLevel` outranks `layer` in `compareOrder`, giving a
+    // region `+1` would tie it with a child frame at that level and let `layer` decide instead,
+    // which is backwards: the client's `SetFrameLevel(GetFrameLevel() - 1)` idiom relies on a child
+    // frame's level being strictly above its parent's regions so the layer rank never has to referee
+    // parent-region-vs-child-frame at all.
+    const isRegion = child.kind === 'texture' || child.kind === 'fontstring';
+    child.frameLevel = isRegion ? this.frameLevel : this.frameLevel + 1;
     this.children.push(child);
     return child;
   }
