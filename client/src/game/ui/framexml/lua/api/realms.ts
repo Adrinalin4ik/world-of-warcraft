@@ -20,6 +20,17 @@ import { fireEvent } from '../events';
 import { ProtocolSession } from '../../../../../network/protocol/session';
 import { LoginStage } from '../../../../../network/protocol/stages';
 import { RealmInfo } from '../../../../../network/protocol/types';
+// The same pure ordering rules the transcription drives its own header buttons from -- IMPORTED, not
+// restated, for the reason `api/login.ts` imports `loginDialog`: if the two screens each carried their
+// own comparator they could disagree about what a column header means, and the transcription is the
+// oracle this one is compared against.
+import {
+  DEFAULT_REALM_SORT,
+  RealmSort,
+  RealmSortColumn,
+  nextRealmSort,
+  sortRealms,
+} from '../../../screens/realm-list-state';
 
 /** RealmList_OnUpdate's poll interval for `RequestRealmList()`, in seconds -- ours; not on the wire. */
 const REFRESH_RATE_SECONDS = 5;
@@ -48,6 +59,21 @@ export function installRealmsApi(vm: LuaVM, session: ProtocolSession): () => voi
   // `GetServerName`. Not part of `SessionState`: the session tracks credentials and a session key, not
   // which `RealmInfo` was chosen.
   let currentRealm: RealmInfo | null = null;
+  // The order the list is PRESENTED in, which is the engine's business and not the session's:
+  // `ProtocolSession#realms` hands out a fresh copy in realmd's own order every time it is read, and
+  // that is the order a freshly-shown list uses (`DEFAULT_REALM_SORT` is null). `SortRealms` moves this.
+  let sort: RealmSort | null = DEFAULT_REALM_SORT;
+
+  /**
+   * The realms as the screen sees them: one ordered view, so `GetNumRealms`, `GetRealmInfo` and
+   * `ChangeRealm` cannot disagree about what index 1 means.
+   *
+   * That agreement is the reason this is a function rather than three separate reads. The realm buttons
+   * are `SetID(realmIndex)`d from the loop in `RealmListUpdate`, and `RealmList_OnOk` feeds that same id
+   * straight to `ChangeRealm` (realmlist.lua:134,266) -- so an index resolved against a differently
+   * ordered array would join a realm the player did not click.
+   */
+  const ordered = (): RealmInfo[] => sortRealms(session.realms, sort);
 
   const unsubscribe = session.on((state) => {
     if (state.stage === LoginStage.RealmList) {
@@ -75,25 +101,54 @@ export function installRealmsApi(vm: LuaVM, session: ProtocolSession): () => voi
     return [category === selectedCategory ? session.realms.length : 0];
   });
 
+  /**
+   * The four column headers' `SortRealms("name"|"mode"|"characters"|"load")` (realmlist.xml:377-449).
+   *
+   * REAL, not a stub, and it has to be: this is the engine's own function with no Lua behind it, so an
+   * absent global is a nil-call the moment the player clicks a header -- the one control on this screen
+   * that would otherwise take the whole handler down. Ordering IS the engine's job here, which is why the
+   * order lives in this module and not in the session: `ProtocolSession#realms` is a getter returning a
+   * fresh copy, so there is nothing there to sort, and reaching in to give it a mutable order would put a
+   * presentation decision behind the wire decoder.
+   *
+   * Re-announcing through `OPEN_REALM_LIST` rather than calling `RealmListUpdate()` directly: the event
+   * is the one door the client's own Lua opens this screen by, and `RealmList_OnEvent` already routes it
+   * to `RealmListUpdate` when the frame is shown.
+   */
+  vm.registerFunction('SortRealms', (args) => {
+    const column = String(args[0] ?? '') as RealmSortColumn;
+    if (!['name', 'mode', 'characters', 'load'].includes(column)) {
+      return [];
+    }
+    sort = nextRealmSort(sort, column);
+    fireEvent(vm, 'OPEN_REALM_LIST');
+    return [];
+  });
+
   vm.registerFunction('GetRealmInfo', (args) => {
     const category = Number(args[0] ?? selectedCategory);
     const index = Number(args[1] ?? 0);
     if (category !== selectedCategory) {
       return [];
     }
-    const realm = session.realms[index - 1];
+    const realm = ordered()[index - 1];
     if (!realm) {
       return [];
     }
     // realmlist.lua:47 -- the exact tuple this is destructured into:
     //   name, numCharacters, invalidRealm, realmDown, currentRealm, pvp, rp, load, locked,
     //   major, minor, revision, build, type
+    //
+    // `currentRealm` is `1`/nil, NOT a boolean, and that is not a style choice: realmlist.lua:179 tests
+    // `if ( currentRealm == 1 )`, and `true == 1` is false in Lua. A boolean there meant the realm the
+    // player is already joined to could never be pre-highlighted. Every OTHER flag in this tuple is only
+    // ever fed to a truthiness test, so those stay booleans.
     return [
       realm.name,
       realm.characterCount,
       realm.invalid,
       !realm.online,
-      currentRealm?.id === realm.id,
+      currentRealm?.id === realm.id ? 1 : null,
       realm.pvp,
       realm.rp,
       realm.recommended ? -3 : realm.population,
@@ -110,7 +165,7 @@ export function installRealmsApi(vm: LuaVM, session: ProtocolSession): () => voi
     const category = Number(args[0] ?? selectedCategory);
     const index = Number(args[1] ?? 0);
     if (category === selectedCategory) {
-      const realm = session.realms[index - 1];
+      const realm = ordered()[index - 1];
       if (realm) {
         currentRealm = realm;
         void session.chooseRealm(realm);
