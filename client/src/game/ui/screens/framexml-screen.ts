@@ -27,7 +27,6 @@ import type { GlueRuntime } from '../framexml/runtime';
 import { wantsTrialScene } from './login-state';
 
 export class FrameXmlLoginScreen implements GlueScreen {
-  private ctx: GlueContext | null = null;
   private runtime: GlueRuntime | null = null;
   /**
    * Set by `unmount`. `mount` starts an async boot, and a state change during it would otherwise
@@ -36,7 +35,6 @@ export class FrameXmlLoginScreen implements GlueScreen {
   private unmounted = false;
 
   mount(ctx: GlueContext): void {
-    this.ctx = ctx;
     this.unmounted = false;
 
     // See the file comment: the host's token, because `SetModel` cannot reach the scene view.
@@ -90,7 +88,6 @@ export class FrameXmlLoginScreen implements GlueScreen {
     // stored script handler, every event registration and every side-table entry, then closes the VM.
     this.runtime?.dispose();
     this.runtime = null;
-    this.ctx = null;
     delete (window as never as Record<string, unknown>).glueRuntime;
   }
 }
