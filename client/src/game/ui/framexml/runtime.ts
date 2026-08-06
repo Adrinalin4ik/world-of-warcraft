@@ -30,17 +30,19 @@
  *     path it finds under ITSELF as the key -- which is also what makes `SetBackdrop` implementable at
  *     all (`lua/methods/frame.ts`), since `BackdropDef` holds keys and the keys are now the paths.
  *
- * What this file deliberately does NOT do: dispatch `OnUpdate`. `lua/scripts.ts` compiles a handler
- * body as `function(self, ...)`, so an `OnUpdate` body's `elapsed` -- which real FrameXML reads as a
- * NAMED parameter (`GlueFrameFadeUpdate(elapsed)`, glueparent.xml:15) -- resolves to a nil global.
- * Firing the tick before that is fixed would call the client's fade and pulse code with nil every
- * frame. The gap is real and named here rather than half-worked-around.
+ * What this file deliberately does NOT do: dispatch `OnUpdate`. The reason it gave -- that a handler
+ * body's `elapsed` compiled to a nil global -- no longer holds: `lua/scripts.ts#SCRIPT_PARAMS` now
+ * compiles each handler with the engine's own parameter list, so `OnUpdate` would receive a real
+ * `elapsed`. What is still missing is the rest of what a tick implies (the presence mirror the design's
+ * §10 asks for, and a decision about what a 292-frame per-tick dispatch costs), so the tick stays off
+ * and this note stays honest about which half of the gap closed.
  */
 import Loader from '../../net/loader';
 import { GlueArt } from '../art';
 import { ProtocolSession } from '../../../network/protocol/session';
 import { Viewport } from '../layout';
 import { Widget } from '../widget';
+import { caretOffset } from '../text';
 import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
 import { parseToc } from './toc';
 import { parseXml } from './xml';
@@ -48,6 +50,7 @@ import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
 import { drainScriptErrors } from './lua/scripts';
 import { FocusSink, FrameRegistry, MethodContext, installObjectModel } from './lua/object';
+import { syncInteractiveArt } from './lua/methods/kinds';
 import { LuaVM } from './lua/vm';
 import { installLoginApi } from './lua/api/login';
 import { installRealmsApi } from './lua/api/realms';
@@ -261,7 +264,11 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
 
   await registerTreeArt(options.art, options.root);
 
-  const editBoxes = collectEditBoxes(options.root);
+  const editBoxes = collectEditBoxes(registry, options.root);
+  const buttons = collectButtons(registry, options.root);
+  const input = options.input ?? null;
+  /** Seconds since the boot, for the caret blink. */
+  let caretClock = 0;
 
   return {
     vm,
@@ -269,14 +276,29 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
     registry,
     report,
     files,
-    update: () => {
-      // The one thing the document cannot do for itself: an `editbox` widget draws no glyphs (only a
-      // `fontstring` does), so the box's live value is mirrored into the FontString the loader adopted
-      // as its text region. `displayText`, not `text`, because that is where password masking lives.
-      for (const box of editBoxes) {
+    update: (dt: number) => {
+      // The three things the document cannot do for itself.
+      //
+      // ONE: an `editbox` widget draws no glyphs (only a `fontstring` does), so the box's live value is
+      // mirrored into the FontString the loader adopted as its text region. `displayText`, not `text`,
+      // because that is where password masking lives.
+      //
+      // TWO: the caret, which is OURS -- see `placeCaret`.
+      //
+      // THREE: every button's state art, which follows from three fields the INPUT ROUTER writes
+      // directly (`state`, `hovered`, `checked`) and no method sees. `methods/kinds.ts#syncInteractiveArt`
+      // is the recompute; this is the tick that drives it, and it is the difference between a button
+      // that lights and presses and one that is a painted picture of a button.
+      caretClock += dt;
+      const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
+      for (const { box, caret } of editBoxes) {
         if (box.textRegion !== null) {
           box.textRegion.text = box.displayText;
         }
+        placeCaret(box, caret, input, litCaret);
+      }
+      for (const id of buttons) {
+        syncInteractiveArt(ctx, id);
       }
     },
     dispose: () => {
@@ -290,17 +312,122 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
   };
 }
 
-/** Every `editbox` widget in the tree, in tree order. Collected once; the tree is not rebuilt. */
-function collectEditBoxes(root: Widget): Widget[] {
-  const boxes: Widget[] = [];
+/**
+ * The caret, OURS.
+ *
+ * The client's edit-box caret is drawn by its engine with no XML behind it, so there is nothing in the
+ * document to materialize and nothing here is cited: a one-unit bar, lit for half a second and dark for
+ * half a second. `screens/login.ts` draws the same thing by hand for the transcription, with the same
+ * two constants -- and this lives in the runtime rather than per screen precisely because every
+ * `<EditBox>` on every glue screen needs it and none of them declares it.
+ */
+const CARET_WIDTH = 1;
+const CARET_BLINK_SECONDS = 0.5;
+
+/** An edit box and the caret bar built for it. */
+interface CaretBox {
+  box: Widget;
+  /** Null for a box with no adopted text region -- there is no font to size a caret from. */
+  caret: Widget | null;
+}
+
+/**
+ * Every `editbox` widget in the tree, each with a caret region built under it. Collected once; the tree
+ * is not rebuilt.
+ *
+ * The caret is created THROUGH THE REGISTRY (`create('Texture', ...)`), not as a loose `Widget`, so it
+ * is torn down by the same `reset()` as everything else and cannot outlive the screen. It is anchored to
+ * the box's TEXT REGION rather than to the box, which is what makes the authored `<TextInsets>` apply
+ * for free -- `kinds.ts#anchorTextRegion` has already inset that region, so the caret starts where the
+ * first character does without repeating the arithmetic.
+ */
+function collectEditBoxes(registry: FrameRegistry, root: Widget): CaretBox[] {
+  const boxes: CaretBox[] = [];
   const walk = (widget: Widget): void => {
     if (widget.kind === 'editbox') {
-      boxes.push(widget);
+      boxes.push({ box: widget, caret: buildCaret(registry, widget) });
+    }
+    // A copy: `buildCaret` adds a child to the box, and walking the live array would then descend into
+    // the caret it just made.
+    [...widget.children].forEach(walk);
+  };
+  walk(root);
+  return boxes;
+}
+
+function buildCaret(registry: FrameRegistry, box: Widget): Widget | null {
+  const region = box.textRegion;
+  const boxId = registry.idOfWidget(box);
+  if (region === null || boxId === null) {
+    return null;
+  }
+  const caret = registry.widget(registry.create('Texture', null, boxId));
+  if (caret === null) {
+    return null;
+  }
+  caret.layer = 'OVERLAY';
+  caret.solid = true;
+  caret.vertexColor = region.font?.color ?? '#ffffff';
+  caret.setSize(CARET_WIDTH, region.font?.size ?? 12).setAnchors({
+    point: 'LEFT',
+    relativeTo: region.id,
+    relativePoint: 'LEFT',
+    x: 0,
+    y: 0,
+  });
+  caret.shown = false;
+  return caret;
+}
+
+/**
+ * Put the caret where the next character will land, and blink it, for the focused box only.
+ *
+ * Measured against `displayText`, so a password box positions against the MASKED string: measuring the
+ * real one would put the caret at the real characters' widths and leak them on screen -- the same rule
+ * `screens/login.ts#placeCaret` states. Measured at scale 1 because `caretOffset` returns logical units,
+ * which the layout scale divides back out anyway.
+ *
+ * `shown` is assigned rather than `show()`/`hide()` called: a blink is twice a second, and `show()`
+ * re-stamps the draw order.
+ */
+function placeCaret(box: Widget, caret: Widget | null, input: FocusSink | null, lit: boolean): void {
+  if (caret === null) {
+    return;
+  }
+  if (!lit || input === null || input.focused !== box) {
+    caret.shown = false;
+    return;
+  }
+  const spec = box.textRegion?.font ?? null;
+  if (spec === null) {
+    caret.shown = false;
+    return;
+  }
+  caret.anchors[0].x = caretOffset(box.displayText, spec, 1, box.caret);
+  caret.shown = true;
+}
+
+/**
+ * Every BUTTON/CHECKBUTTON frame id in the tree, for the per-frame art poll.
+ *
+ * Collected once, like the edit boxes, and the limit is the same and is not a live one: a frame created
+ * from Lua after the load gets none of its template's regions (`object.ts`'s `CreateFrame` warning), so
+ * it has no state textures to repaint in the first place. The day templates work from Lua, this becomes
+ * a walk per tick or a registry hook.
+ */
+function collectButtons(registry: FrameRegistry, root: Widget): number[] {
+  const ids: number[] = [];
+  const walk = (widget: Widget): void => {
+    if (widget.kind === 'button' || widget.kind === 'checkbutton') {
+      const id = registry.idOfWidget(widget);
+      if (id !== null) {
+        ids.push(id);
+      }
     }
     widget.children.forEach(walk);
   };
   walk(root);
-  return boxes;
+  return ids;
 }
 
 /**

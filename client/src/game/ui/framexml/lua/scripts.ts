@@ -83,6 +83,54 @@ export const SCRIPT_HANDLERS: ReadonlySet<string> = new Set([
   'OnTooltipSetUnit',
 ]);
 
+/**
+ * THE PARAMETER LIST EACH HANDLER'S BODY IS COMPILED WITH -- the engine's, per handler name.
+ *
+ * Compiling every body as `function(self, ...)` was the gap §5.4 of the task-9 report names, and it is
+ * not cosmetic: real FrameXML bodies read these as NAMED PARAMETERS, and the one that proved it is
+ * `gluedialog.xml:167`
+ *
+ *     <OnEvent>GlueDialog_OnEvent(self, event, ...);</OnEvent>
+ *
+ * `fireEvent` passes `[eventName, ...eventArgs]` positionally, which is exactly right for the engine's
+ * `OnEvent(self, event, ...)` shape -- but with no `event` parameter to absorb the first one, the body's
+ * `...` began with the event NAME, so `GlueDialog_OnEvent` received `arg1 = "OPEN_STATUS_DIALOG"` and
+ * `arg2 = "CANCEL"`, one slot late, and `GlueDialogTypes[arg1]` was nil. That is why the connecting
+ * dialog never appeared even once something fired the event (traced live: `scratchpad/dialog3.js`).
+ *
+ * `...` is appended after the named list in every case, so a body may still read varargs and a call with
+ * more arguments than the list names cannot error. A name absent from this table keeps the old
+ * `(self, ...)`, which is right for the majority (`OnShow`, `OnEnterPressed`, ...) that take nothing.
+ *
+ * The lists are the 3.3.5 API's, not invented: `OnClick`'s second parameter is the `AnyDown` flag, which
+ * only a `RegisterForClicks` frame ever sees; `OnTextChanged` takes nothing in 3.3.5 (the `isUserInput`
+ * argument is a later expansion).
+ */
+const SCRIPT_PARAMS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['OnEvent', ['event']],
+  ['OnUpdate', ['elapsed']],
+  ['OnEnter', ['motion']],
+  ['OnLeave', ['motion']],
+  ['OnClick', ['button', 'down']],
+  ['OnDoubleClick', ['button']],
+  ['OnMouseDown', ['button']],
+  ['OnMouseUp', ['button']],
+  ['OnMouseWheel', ['delta']],
+  ['OnValueChanged', ['value']],
+  ['OnChar', ['text']],
+  ['OnKeyDown', ['key']],
+  ['OnKeyUp', ['key']],
+  ['OnCursorChanged', ['x', 'y', 'width', 'height']],
+  ['OnScrollRangeChanged', ['xrange', 'yrange']],
+  ['OnVerticalScroll', ['offset']],
+  ['OnHorizontalScroll', ['offset']],
+  ['OnSizeChanged', ['width', 'height']],
+  ['OnAttributeChanged', ['name', 'value']],
+  ['OnHyperlinkClick', ['link', 'text', 'button']],
+  ['OnHyperlinkEnter', ['link', 'text']],
+  ['OnHyperlinkLeave', ['link', 'text']],
+]);
+
 const warnedHandlerNames = new Set<string>();
 
 /** Warns (once per name) rather than throwing: rule 3 -- an unknown handler name is not an error. */
@@ -174,7 +222,10 @@ export function compileScriptHandler(
   }
 
   const chunkName = `${fileName}:${handlerName}`;
-  const source = `return function(self, ...)\n${body}\nend`;
+  // The engine's parameter list for this handler, then `...` -- see `SCRIPT_PARAMS`.
+  const named = SCRIPT_PARAMS.get(handlerName) ?? [];
+  const parameters = ['self', ...named, '...'].join(', ');
+  const source = `return function(${parameters})\n${body}\nend`;
   const result = vm.runExpr(source, chunkName);
   if ('message' in result) {
     console.warn(`${chunkName}: failed to compile: ${result.message}`);
@@ -282,11 +333,10 @@ export function invokeScriptHandler(
  * and because `scripts.ts`'s legacy convention makes it `arg1` and `event` as well. `OnMouseDown`/`OnMouseUp`
  * take the same argument. Everything else in 3.3.5 takes nothing that the router knows.
  *
- * KNOWN LIMIT, and it is the router's: a handler body reads its argument as a NAMED PARAMETER
- * (`function(self, button)`), and `compileScriptHandler` above compiles a body as `function(self, ...)`
- * -- so `button` inside an `<OnClick>` body is a nil global, exactly as §5.4 of the report describes for
- * `OnUpdate`'s `elapsed`. The value is passed positionally and as `arg1`, which is what the pre-2.0
- * convention every glue handler is written against reads. Nothing on the login screen reads the name.
+ * A body that reads `button` as a NAMED PARAMETER now gets it: `SCRIPT_PARAMS` above compiles each
+ * handler with the engine's own parameter list, so `<OnClick>` is `function(self, button, down, ...)`.
+ * The legacy `arg1`/`event` globals are still set for the same call, which is what the pre-2.0
+ * convention every glue handler in this manifest is actually written against.
  */
 type CallbackBinder = (widget: Widget, fire: ((args?: unknown[]) => void) | null) => void;
 

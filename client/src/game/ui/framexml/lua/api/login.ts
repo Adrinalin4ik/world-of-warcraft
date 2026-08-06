@@ -34,6 +34,7 @@ import { fireEvent } from '../events';
 import { ProtocolSession } from '../../../../../network/protocol/session';
 import { LoginStage } from '../../../../../network/protocol/stages';
 import { ConnectionSettings, loadSettings, saveSettings } from '../../../../../network/protocol/connection-settings';
+import { loginDialog } from '../../../screens/login-state';
 
 type Storage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
 
@@ -103,6 +104,52 @@ export function defaultSavedAccountStore(storage: Storage | null = defaultStorag
 const CONNECTED_STAGES = new Set([LoginStage.CharacterList, LoginStage.EnteringWorld, LoginStage.InWorld]);
 
 /**
+ * The three STATUS-DIALOG events, which are how the connecting dialog reaches the screen at all.
+ *
+ * This was diagnosed before it was written, because the obvious suspects were all innocent.
+ * `AccountLogin_Login` (accountlogin.lua:170) does NOT show a dialog -- it plays a sound, calls
+ * `DefaultServerLogin` and clears the password box. In the real client the "Connecting" panel is the
+ * ENGINE's: it fires `OPEN_STATUS_DIALOG`, `GlueDialog_OnEvent` turns that into
+ * `GlueDialog_Show(arg1, arg2)` (gluedialog.lua:663), and `CLOSE_STATUS_DIALOG` takes it away again.
+ * `GlueDialog_OnLoad` registers all three. Nothing here fired any of them, so the dialog was never
+ * asked to appear -- verified by driving `GlueDialog_Show("CANCEL", LOGIN_STATE_CONNECTING)` by hand in
+ * the browser, which showed a correctly sized and captioned panel (`scratchpad/diag-dialog-byhand.png`).
+ * So this is a missing TRIGGER, not a broken dialog, and in particular not the unsized-`<FontString>`
+ * measurement gap: `GlueDialogText` is authored 450x0, `GlueDialogBackground` sizes to 512x80 from it,
+ * and that is a visible panel.
+ *
+ * `loginDialog` (`screens/login-state.ts`) decides WHICH dialog is owed, and it is imported rather than
+ * restated: it is the same pure function the transcription drives its own dialog from, so the two
+ * screens cannot disagree about whether an in-flight attempt outranks a previous failure or whether a
+ * refusal survives the return to `Offline`. What is new here is only the translation into the client's
+ * own event vocabulary.
+ *
+ * EDGE-TRIGGERED on the dialog's identity, not fired per notify: `GlueDialog_Show` re-runs a dialog's
+ * whole setup (and its `OnShow`), so re-firing on every session notify would restart it repeatedly.
+ */
+type DialogSignature = string;
+
+/** The dialog type name `GlueDialogTypes` is keyed by, per kind (gluedialog.lua:162,185). */
+const CONNECTING_DIALOG = 'CANCEL';
+const ERROR_DIALOG = 'OKAY';
+
+/**
+ * A global string by name, or null. The client's own wording, never ours -- `LOGIN_STATE_CONNECTING`
+ * and every refusal key live in `GlueStrings.lua`, which the manifest loads first for this reason.
+ * A non-string global arrives as a handle and would pin a registry slot per read if discarded bare.
+ */
+function globalString(vm: LuaVM, name: string): string | null {
+  const value = vm.getGlobal(name);
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (vm.isRef(value)) {
+    vm.unref(value);
+  }
+  return null;
+}
+
+/**
  * Installs the login/session globals on `vm`, wired to `session`. Returns the unsubscribe from
  * `session.on`, for a screen teardown that must not keep firing events into a dead VM.
  */
@@ -112,6 +159,7 @@ export function installLoginApi(
   store: SavedAccountStore = defaultSavedAccountStore(),
 ): () => void {
   let prevStage = session.stage;
+  let dialogSignature: DialogSignature = 'none';
   const unsubscribe = session.on((state) => {
     if (state.stage === LoginStage.CharacterList) {
       fireEvent(vm, 'CHARACTER_LIST_UPDATE');
@@ -120,6 +168,24 @@ export function installLoginApi(
       fireEvent(vm, 'DISCONNECTED_FROM_SERVER', [0]);
     }
     prevStage = state.stage;
+
+    // The status dialog (see the note above `CONNECTING_DIALOG`).
+    const dialog = loginDialog(state.stage, state.refusal, session.retrying);
+    const signature = dialog.kind === 'error' ? `error:${dialog.stringKey}` : dialog.kind;
+    if (signature === dialogSignature) {
+      return;
+    }
+    dialogSignature = signature;
+    if (dialog.kind === 'none') {
+      fireEvent(vm, 'CLOSE_STATUS_DIALOG');
+      return;
+    }
+    const which = dialog.kind === 'connecting' ? CONNECTING_DIALOG : ERROR_DIALOG;
+    // `arg2` nil is legal and meaningful: `GlueDialog_Show` falls back to `dialogInfo.text` for it, so a
+    // string this client's `GlueStrings.lua` does not define shows the dialog's own default rather than
+    // the key as mojibake.
+    const key = dialog.kind === 'connecting' ? 'LOGIN_STATE_CONNECTING' : dialog.stringKey;
+    fireEvent(vm, 'OPEN_STATUS_DIALOG', [which, globalString(vm, key)]);
   });
 
   // AccountLogin_Login: the account/password the player typed, straight to the session.
@@ -132,6 +198,15 @@ export function installLoginApi(
 
   // TokenEntry_Cancel / the CONNECTING dialog's Cancel button.
   vm.registerFunction('CancelLogin', () => {
+    session.cancelLogin();
+    return [];
+  });
+
+  // `GlueDialogTypes["CANCEL"].OnAccept` -- what the connecting dialog's one button does
+  // (gluedialog.lua:167). `stubs.ts` registers this as a no-op for the case where no session is wired;
+  // overriding it here (this installer runs after `installStubApi`) is what makes the button actually
+  // abandon the attempt instead of only hiding the panel that reports it.
+  vm.registerFunction('StatusDialogClick', () => {
     session.cancelLogin();
     return [];
   });

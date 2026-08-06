@@ -141,14 +141,12 @@ function applyStateArg(region: Widget, arg: unknown): void {
  * slot in the real client is empty for exactly this reason, and adding a fallback here would make
  * every unset Disabled texture look like an enabled button instead of a blank one.
  *
- * Known gap, honestly stated rather than papered over: `input.ts`'s `onPointerDown`/`onPointerUp`
- * write `widget.state` DIRECTLY on every press and release, the same way they do for every
- * hand-written screen (`screens/login.ts`, `screens/realms.ts`) -- and those screens re-poll
- * `button.state` every render tick to move `.sprite` themselves. Nothing does that generic per-frame
- * poll for a Lua-driven tree yet, so a texture set here stays correct for every state change that
- * goes through `Enable`/`Disable`/`SetButtonState` (every method below that can change `state` calls
- * this), but a raw mouse press that never reaches Lua will not repaint a state texture until one of
- * those methods runs again. Wiring a per-frame sync is a renderer-side change outside this file.
+ * `input.ts`'s `onPointerDown`/`onPointerUp` write `widget.state` DIRECTLY on every press and release,
+ * the same way they do for every hand-written screen (`screens/login.ts`, `screens/realms.ts`) -- and
+ * those screens re-poll `button.state` every render tick to move `.sprite` themselves. So this alone
+ * only covers the state changes that go through `Enable`/`Disable`/`SetButtonState`; the generic
+ * per-frame poll for a Lua-driven tree is `syncInteractiveArt` below, driven from
+ * `framexml/runtime.ts#update`, which is what makes a raw press repaint.
  */
 function syncStateTextures(ctx: MethodContext, self: number): void {
   const bySlot = stateTextures.get(self);
@@ -165,6 +163,52 @@ function syncStateTextures(ctx: MethodContext, self: number): void {
   show('normal', state === 'up');
   show('pushed', state === 'down');
   show('disabled', state === 'disabled');
+}
+
+/**
+ * THE PER-FRAME POLL: everything about a button's art that follows from state the INPUT ROUTER owns.
+ *
+ * `input.ts` writes `widget.state` on a press and `widget.hovered` on a hover, and `input.ts` flips
+ * `widget.checked` on a click of a checkbutton -- three fields, none of them reached through a method,
+ * so none of them repainted anything. A hand-written screen re-reads all three every render tick
+ * (`screens/login.ts:759-791`) and moves its own sprites; nothing did that for a Lua-built tree, which
+ * is why a runtime button had no hover glow and no pushed art and a check button looked broken even
+ * though its `OnClick` had run. `framexml/runtime.ts#update` calls this once per frame per button.
+ *
+ * A POLL rather than a callback, deliberately: the three fields are written from several places (the
+ * router, `Enable`/`Disable`/`SetButtonState`, `SetChecked`, `LockHighlight`) and the art is a pure
+ * function of them, so recomputing is both shorter and impossible to leave stale. It is also idempotent
+ * -- `shown` is assigned, never toggled -- and it writes the field directly rather than calling
+ * `Widget#show`, because `show()` re-stamps the draw order and doing that 60 times a second would
+ * shuffle a bucket for no reason.
+ *
+ * The HIGHLIGHT is the one that needs a rule rather than a mirror: it is shown while the pointer is
+ * over an enabled button, OR unconditionally while `LockHighlight` holds it (which is what
+ * `UnlockHighlight` could only guess at before -- its comment called itself best-effort, and this is
+ * what makes it live).
+ */
+export function syncInteractiveArt(ctx: MethodContext, self: number): void {
+  const widget = ctx.registry.widget(self);
+  if (widget === null) {
+    return;
+  }
+  syncStateTextures(ctx, self);
+
+  const highlight = stateTextures.get(self)?.highlight;
+  if (highlight !== undefined) {
+    const region = ctx.registry.widget(highlight);
+    if (region !== null) {
+      region.shown = highlightLocked.has(self) || (widget.hovered && widget.state !== 'disabled');
+    }
+  }
+
+  const checked = checkedTextures.get(self);
+  if (checked !== undefined) {
+    const region = ctx.registry.widget(checked);
+    if (region !== null) {
+      region.shown = widget.checked;
+    }
+  }
 }
 
 const BUTTON: MethodTable = {
@@ -211,8 +255,9 @@ const BUTTON: MethodTable = {
     highlightLocked.delete(self);
     const id = stateTextures.get(self)?.highlight;
     if (id !== undefined) {
-      // Best-effort, not a live binding: falls back to the CURRENT hover flag rather than one that
-      // stays in sync with the mouse -- the same gap `syncStateTextures` documents for press/release.
+      // The CURRENT hover flag, which is now also what keeps it right from here on: the per-frame
+      // `syncInteractiveArt` poll recomputes this every tick, so this line only decides the one frame
+      // between the unlock and the next update.
       ctx.registry.widget(id)!.shown = widgetOf(ctx, self).hovered;
     }
     return [];
