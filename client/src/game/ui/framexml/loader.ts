@@ -53,6 +53,7 @@ import { ParsedDocument, XmlElement, attr, attrBool, childrenNamed, parseXml } f
 // Registering after a VM is installed is safe (`registerMethods` flushes the dispatch cache).
 import './lua/methods/frame';
 import './lua/methods/kinds';
+import './lua/methods/scroll';
 
 /**
  * What a load produced.
@@ -333,10 +334,10 @@ class DocumentLoader {
    * THREE outcomes, and keeping them apart is what makes the report worth reading. A method the object
    * model has never heard of is a GAP: warned once by name, one line per missing method for the whole
    * load. A method that is REGISTERED BUT DOES NOTHING is the same kind of gap wearing a success:
-   * `SetBackdrop` and the `Set*FontObject` family exist so duck-typing sees the class correctly and
-   * then return quietly, so without `NOT_IMPLEMENTED` (`lua/methods/region.ts`) this would report a
-   * clean load of a screen missing every backdrop and every label font. A method that exists and
-   * RAISED is an error: something was wrong with the document or with us.
+   * `SetBackdropColor` and `SetHighlightFontObject`/`SetDisabledFontObject` exist so duck-typing sees
+   * the class correctly and then return quietly, so without `NOT_IMPLEMENTED` (`lua/methods/region.ts`)
+   * this would report a clean load of a screen missing every backdrop tint and every per-state caption
+   * font. A method that exists and RAISED is an error: something was wrong with the document or with us.
    *
    * `getTableField` runs the wrapper's `__index`, which mints a handle for the bound closure it
    * returns, so every call here releases that handle -- the frame's Lua-side dispatch cache still
@@ -407,15 +408,19 @@ class DocumentLoader {
     parent: LuaRef | null,
     parentName: string,
     sourceName: string,
-  ): void {
+  ): number | null {
     // 1 - CreateFrame(type, resolvedName, parent), through the Lua global.
     const resolvedName = resolveName(attr(element, 'name'), parentName);
     const dbg = `${sourceName}:${resolvedName ?? `<${element.tag}>`}`;
     const wrapper = this.create(element.tag, resolvedName ?? null, parent, dbg);
     if (wrapper === null) {
-      return;
+      return null;
     }
     this.report.frames += 1;
+
+    // Read BEFORE the `finally` below releases the handle: an id is a plain number that outlives both
+    // the handle and this call, which is why it is what gets returned.
+    const frameId = this.rt.ctx.frameIdOf(wrapper);
 
     // An unnamed frame passes the nearest named ancestor through unchanged, so a region inside it
     // still resolves `$parent` to something addressable.
@@ -435,8 +440,10 @@ class DocumentLoader {
       this.applyPerKind(element, wrapper, selfName, dbg);
       // 6 - <Scripts>. OnLoad is noted, not fired.
       const hasOnLoad = this.applyScripts(element, wrapper, dbg);
-      // 7 - nested <Frames>, whose own OnLoads therefore run first.
+      // 7 - nested <Frames>, whose own OnLoads therefore run first, then <ScrollChild> (which is the
+      //     same thing wearing a different container, plus the one call that links it to the viewport).
       this.applyChildFrames(element, wrapper, selfName, sourceName);
+      this.applyScrollChild(element, wrapper, selfName, sourceName, dbg);
       // 8 - and only now this frame's OnLoad, with its subtree complete.
       if (hasOnLoad) {
         this.fireOnLoad(wrapper, dbg);
@@ -446,6 +453,9 @@ class DocumentLoader {
       // and its permanent Lua table are owned by `FrameRegistry`; this was a call-result handle.
       this.rt.vm.unref(wrapper);
     }
+    // The frame ID, not the handle: an id needs no ownership and outlives this call. `applyScrollChild`
+    // is the caller that needs it, to hand the child back to its viewport through `SetScrollChild`.
+    return frameId;
   }
 
   /** Step 1: the `CreateFrame` global. An unknown frame type drops this element and its subtree. */
@@ -906,9 +916,12 @@ class DocumentLoader {
    * Step 5, continued: `<Backdrop>` -- the tiled background plus the eight-piece border, built as the
    * same table a Lua `SetBackdrop` call would pass.
    *
-   * `SetBackdrop` is currently a warn-once no-op in this object model (it needs art resolved through
-   * `GlueArt`, which `MethodContext` cannot reach). The table is still built and passed: the day that
-   * method lands, the loader already feeds it correctly, and until then the warning names the gap.
+   * `SetBackdrop` is REAL (`lua/methods/frame.ts`): it writes a `BackdropDef` and the nine-slice draws.
+   * It was a warn-once no-op when this pass was written, on the stated grounds that a backdrop needs art
+   * resolved through `GlueArt` and `MethodContext` cannot reach one -- which turned out to have a hole
+   * in it, since a sprite key may simply BE the path (`runtime.ts`'s art discovery). Its two COLOUR
+   * companions are still stubs: `BackdropDef` has no tint field, so `<Color>`/`<BorderColor>` below are
+   * issued and named in the report rather than dropped.
    */
   private applyBackdrop(element: XmlElement, wrapper: LuaRef, dbg: string): void {
     const backdrop = childrenNamed(element, 'Backdrop')[0];
@@ -988,13 +1001,24 @@ class DocumentLoader {
     } else if (tag === 'statusbar' || tag === 'slider') {
       // Divergence from the reference, stated: it maps `<StatusBar>`/`<Slider>` LoadXML
       // (minValue/maxValue/orientation/<BarTexture>/<ThumbTexture>/...) onto a real bar and thumb.
-      // This object model registers no methods on either class at all -- they exist so
-      // `CreateFrame("StatusBar")` works and duck-typing sees the class, and nothing draws a track or
-      // a thumb yet. Emitting the calls would produce a warning per missing method per document; one
-      // line naming the whole gap is the honest version.
+      // `lua/methods/scroll.ts` now gives SLIDER its VALUE methods -- which is what the client's own
+      // scroll code reads and what eleven of the manifest's load errors turned on -- but nothing in
+      // `widget.ts` draws a slider track or a status bar's fill, and STATUSBAR still has no methods at
+      // all. Emitting the calls would produce a warning per missing method per document; one line
+      // naming the whole gap is the honest version.
       this.warnOnce(
         `kind:${tag}`,
-        `<${element.tag}> bar/thumb attributes are ignored: this object model registers no ${element.tag} methods yet (first: ${dbg})`,
+        `<${element.tag}> bar/thumb attributes are ignored: nothing in this renderer draws a ${element.tag}'s track or fill${tag === 'slider' ? ' (its value methods are real; only the art is missing)' : ', and this object model registers no StatusBar methods at all'} (first: ${dbg})`,
+      );
+    } else if (tag === 'scrollframe') {
+      // The counterpart line for the class that just gained methods: a `<ScrollFrame>`'s scroll VALUES
+      // are tracked for real (`lua/methods/scroll.ts`), and its pixels are not -- `widget.ts` cannot
+      // clip a frame's children, so an offset scroll child would draw outside its viewport instead of
+      // scrolling inside it, and the child is deliberately left where it is. Without this line the
+      // whole gap is invisible: every method the client calls now answers successfully.
+      this.warnOnce(
+        'kind:scrollframe',
+        `<ScrollFrame> scrolling is bookkeeping only: the scroll offsets and ranges are real, but nothing in this renderer clips a viewport or moves a scroll child, so the content does not scroll (first: ${dbg})`,
       );
     }
   }
@@ -1105,15 +1129,66 @@ class DocumentLoader {
       this.callMethod(wrapper, 'SetText', [this.resolveText(text)], dbg);
     }
 
+    this.applyButtonFonts(element, wrapper, dbg);
+  }
+
+  /**
+   * `<NormalFont>`/`<HighlightFont>`/`<DisabledFont>` on a button: the font OBJECT its caption uses.
+   *
+   * `style=`, NOT `inherits=`, is the attribute that carries the name, and reading only the latter is
+   * what made every glue button's caption white FRIZQT 12 instead of `GlueFontNormal`'s outlined gold.
+   * All 26 of these elements in the loaded manifest spell it `style=` and not one spells it `inherits=`
+   * (gluebuttons.xml, gluetemplates.xml, accountlogin.xml, gluedropdownmenutemplates.xml) -- the
+   * client's `UI.xsd` gives `ButtonStyle` a `style` attribute and no `inherits`, because unlike a
+   * `<FontString>` this element is not a region that could inherit a template; it is a reference to a
+   * font object and nothing else. Both are read here anyway: `inherits=` costs a line and the day some
+   * document uses it, it works.
+   *
+   * NORMAL IS APPLIED FOR REAL, the other two are not, and the split is the object model's:
+   *
+   *  - The normal font is the caption's font, full stop, so it is resolved the same way a
+   *    `<FontString inherits="...">` is -- through `readFont`'s flattened `<Font>` chain -- and pushed
+   *    onto the label region `GetFontString()` hands back. That reuses `applyFontStringFont` whole,
+   *    including its "a height with no face" warning and its colour/justification ordering, rather
+   *    than growing a second font path that could drift from the first.
+   *  - Highlight and disabled are PER-STATE fonts, and `FontSpec` has one font per region with no
+   *    notion of state. So those two are still issued as `SetHighlightFontObject`/
+   *    `SetDisabledFontObject`, which are declared stubs -- and that is the point: issuing them is what
+   *    puts a line in the load report naming the gap. Before this, the calls never happened at all,
+   *    so a wrong font on every hovered and every disabled caption was completely silent.
+   */
+  private applyButtonFonts(element: XmlElement, wrapper: LuaRef, dbg: string): void {
     for (const [tag, method] of [
       ['NormalFont', 'SetNormalFontObject'],
       ['HighlightFont', 'SetHighlightFontObject'],
       ['DisabledFont', 'SetDisabledFontObject'],
     ] as const) {
       for (const font of childrenNamed(element, tag)) {
-        const inherits = attr(font, 'inherits');
-        if (inherits !== undefined) {
-          this.callMethod(wrapper, method, [inherits], dbg);
+        const name = attr(font, 'style') ?? attr(font, 'inherits');
+        if (name === undefined) {
+          continue;
+        }
+        if (tag !== 'NormalFont') {
+          this.callMethod(wrapper, method, [name], dbg);
+          continue;
+        }
+        // `GetFontString()` returns nil for a button that has never been given a caption -- the label
+        // is `SetText`'s lazy creation (`lua/methods/kinds.ts`), and a font object with no text to
+        // draw has nothing to land on. Not a gap: a captionless button has no caption to get wrong.
+        const label = this.callForWidget(wrapper, 'GetFontString', [], dbg);
+        if (label === null) {
+          continue;
+        }
+        try {
+          // A synthetic `<FontString inherits="name"/>`: the shortest honest way to say "this region's
+          // font is that font object", and it goes through the ONE font path the loader has.
+          this.applyFontStringFont(
+            { tag: 'FontString', attrs: new Map([['inherits', name]]), children: [], body: '' },
+            label,
+            dbg,
+          );
+        } finally {
+          this.rt.vm.unref(label);
         }
       }
     }
@@ -1266,6 +1341,69 @@ class DocumentLoader {
         this.materialize(this.expand(child), wrapper, selfName, sourceName);
       }
     }
+  }
+
+  /**
+   * Step 7, continued: `<ScrollChild>` -- the single frame a `<ScrollFrame>` scrolls.
+   *
+   * A different container from `<Frames>`, and it was being dropped entirely, which cost more than the
+   * frames themselves. The client addresses these children by global from Lua like any other:
+   * `AccountLogin_ShowUserAgreements` calls `TOSText:Hide()` (accountlogin.lua:259) and
+   * `GlueScrollFrame_Update` reads `_G[frameName.."ScrollChildFrame"]` -- so an absent scroll child is
+   * a nil global in the client's own code, not a missing rectangle. It also decides whether
+   * `GetVerticalScrollRange` can mean anything: the range IS the child's overhang
+   * (`lua/methods/scroll.ts`), and with no child every scroll frame's range is flat zero.
+   *
+   * ANCHORED TOPLEFT-TO-TOPLEFT when it declares no anchors of its own, which none of the twelve in the
+   * loaded manifest does. That is not a default invented here -- a scroll child's position is not the
+   * document's to choose in the first place, it is the viewport's origin plus the scroll offset, and the
+   * engine places it. Left unanchored it would fall wherever `layout.ts` puts an anchorless widget.
+   *
+   * ONE child, and the first: `<ScrollChild>` is singular in the schema, and a scroll frame has exactly
+   * one thing it scrolls. A second is reported rather than silently built into the same parent.
+   */
+  private applyScrollChild(
+    element: XmlElement,
+    wrapper: LuaRef,
+    selfName: string,
+    sourceName: string,
+    dbg: string,
+  ): void {
+    const blocks = childrenNamed(element, 'ScrollChild');
+    if (blocks.length === 0) {
+      return;
+    }
+    if (blocks.length > 1 || blocks[0].children.length > 1) {
+      this.report.warnings.push(
+        `${dbg}: a <ScrollFrame> declares more than one scroll child; only the first is built`,
+      );
+    }
+    const declared = blocks[0].children[0];
+    if (declared === undefined) {
+      return;
+    }
+    const childId = this.materialize(this.expand(declared), wrapper, selfName, sourceName);
+    if (childId === null) {
+      return;
+    }
+    const registry = this.rt.ctx.registry;
+    const child = registry.widget(childId);
+    const viewportId = this.rt.ctx.frameIdOf(wrapper);
+    const viewport = viewportId === null ? null : registry.widget(viewportId);
+    if (child !== null && viewport !== null && child.anchors.length === 0) {
+      child.setAnchors({
+        point: 'TOPLEFT',
+        relativePoint: 'TOPLEFT',
+        relativeTo: viewport.id,
+        x: 0,
+        y: 0,
+      });
+    }
+    // The child's PERMANENT wrapper handle, deliberately not released: `ctx.wrapper` hands back the
+    // frame's own table, which `FrameRegistry` owns for the life of the frame. The method boundary
+    // mints and frees its own fresh handle for the argument it sees (`object.ts`'s ownership note), so
+    // this is the same shape as `SetTextRegion`'s call and not a double free.
+    this.callMethod(wrapper, 'SetScrollChild', [this.rt.ctx.wrapper(childId)], dbg);
   }
 
   /** Step 8: this frame's `OnLoad`, through the one dispatch path (`lua/scripts.ts`). */
