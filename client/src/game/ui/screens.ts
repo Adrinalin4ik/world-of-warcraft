@@ -188,6 +188,26 @@ export class GlueApp {
       return;
     }
 
+    // ONE screen instance may be registered for SEVERAL states, and then a transition between them is
+    // not a remount.
+    //
+    // This is the glue layer's own shape, not a convenience. In the client there is one screen hosting
+    // every glue frame and `GlueParent` shows or hides `AccountLogin`, `RealmList`, `CharacterSelect` in
+    // turn -- `RealmList` is not even a `GlueScreenInfo` entry (glueparent.lua:11-19): it is a
+    // `frameStrata="DIALOG"` frame that `RealmList_OnEvent` shows over the login screen when
+    // `OPEN_REALM_LIST` arrives. A screen that serves both states therefore has nothing to rebuild, and
+    // rebuilding it would be actively wrong: the FrameXML screen's whole Lua VM would be torn down and
+    // rebooted, every `OnLoad` would re-run, and the saved account name and every Lua-side field
+    // (`RealmList.selectedCategory`, `RealmList.offset`) would be lost for a transition the client does
+    // with two `Show`/`Hide` calls.
+    //
+    // Identity, not equality of state: the hand-written screens register a DIFFERENT instance per state,
+    // so `/` takes the unmount-and-remount path below exactly as it always has.
+    if (this.current !== null && this.current.screen === screen) {
+      this.current.state = state;
+      return;
+    }
+
     this.current?.screen.unmount();
     this.input.reset();
 
