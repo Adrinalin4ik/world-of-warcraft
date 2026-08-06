@@ -17,7 +17,7 @@ import Loader from '../../net/loader';
 import { DRAW_LAYER_ORDER, STRATA_ORDER } from './order';
 import { TemplateRegistry } from './templates';
 import { parseToc } from './toc';
-import { ParsedDocument, attr, parseXml } from './xml';
+import { ParsedDocument, XmlElement, attr, parseXml } from './xml';
 
 const GLUE = 'Interface\\GlueXML\\';
 
@@ -82,7 +82,10 @@ export function installFramexmlDebug(): void {
       const registry = new TemplateRegistry();
       const warnings: string[] = [];
       let registered = 0;
-      let target: ParsedDocument['items'][number] | null = null;
+      // The matched NODE, not the top-level item containing it. The interesting elements are nested:
+      // `AccountLoginLoginButton` lives inside the `AccountLogin` ModelFFX, and expanding the ModelFFX
+      // (which inherits nothing) reports a no-op merge that looks like the registry did not work.
+      let target: XmlElement | null = null;
 
       for (const file of files) {
         const doc = await loadDocument(file);
@@ -92,32 +95,31 @@ export function installFramexmlDebug(): void {
             registered += 1;
           }
         }
-        // Instances can nest, so look through the whole tree rather than the top level only.
-        const find = (element: ParsedDocument['items'][number]): void => {
-          if (!('element' in element)) {
-            return;
+        const walk = (node: XmlElement): void => {
+          if (attr(node, 'name') === instanceName) {
+            target = node;
           }
-          const walk = (node: typeof element.element): void => {
-            if (attr(node, 'name') === instanceName) {
-              target = element;
-            }
-            node.children.forEach(walk);
-          };
-          walk(element.element);
+          node.children.forEach(walk);
         };
-        doc.items.forEach(find);
+        doc.items.forEach((item) => {
+          if ('element' in item) {
+            walk(item.element);
+          }
+        });
       }
 
       console.log(`registered ${registered} templates from ${files.length} documents`);
-      if (!target || !('element' in target)) {
+      const found: XmlElement | null = target;
+      if (!found) {
         console.warn(`no element named ${instanceName} in those documents`);
         return { registry, registered };
       }
 
-      const expanded = registry.expand(target.element, warnings);
-      console.log(`expanded ${instanceName}:`, {
-        childrenBefore: target.element.children.length,
+      const expanded = registry.expand(found, warnings);
+      console.log(`expanded <${found.tag} name="${instanceName}" inherits="${attr(found, 'inherits') ?? ''}">`, {
+        childrenBefore: found.children.length,
         childrenAfter: expanded.children.length,
+        childTagsAfter: expanded.children.map((c) => c.tag),
         attrsAfter: Object.fromEntries(expanded.attrs),
       });
       if (warnings.length) {
