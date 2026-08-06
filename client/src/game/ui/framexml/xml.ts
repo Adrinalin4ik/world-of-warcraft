@@ -33,8 +33,20 @@ export function attr(element: XmlElement, name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * A boolean LoadXML attribute.
+ *
+ * `1` COUNTS, and that is not a convenience: the client's own XML writes both spellings, sometimes for
+ * the same attribute in the same file. `accountlogin.xml:239` is `<EditBox name="AccountLoginPasswordEdit"
+ * letters="16" password="1">` -- so a `true`-only reading left the login screen's password field
+ * rendering what was typed in clear text. (`loader.ts#applyButton` already accepted both for `checked=`,
+ * with its own regex, which is how the two spellings came to be half-handled in the first place.)
+ *
+ * Anything else, including `false` and `0`, is false.
+ */
 export function attrBool(element: XmlElement, name: string): boolean {
-  return (attr(element, name) ?? '').toLowerCase() === 'true';
+  const value = (attr(element, name) ?? '').trim().toLowerCase();
+  return value === 'true' || value === '1';
 }
 
 export function childrenNamed(element: XmlElement, tag: string): XmlElement[] {
