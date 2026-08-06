@@ -82,6 +82,25 @@ export class LuaVM {
     return null;
   }
 
+  /**
+   * Loads and runs a chunk of Lua source that ends in a single `return <expr>`, and hands back the
+   * value it returned. `run` above discards every result, which is fine for side-effecting chunks but
+   * useless for Task 5's `compileScriptHandler`: compiling `return function(self, ...) ... end` into a
+   * callable value requires reading that return, not just knowing the chunk didn't error.
+   */
+  runExpr(source: string, chunkName: string): LuaError | { value: unknown } {
+    const bytes = fengari.to_luastring(source);
+    const loadStatus = lauxlib.luaL_loadbuffer(this.L, bytes, bytes.length, chunkName);
+    if (loadStatus !== lua.LUA_OK) {
+      return this.popError(chunkName);
+    }
+    const callStatus = lua.lua_pcall(this.L, 0, 1, 0);
+    if (callStatus !== lua.LUA_OK) {
+      return this.popError(chunkName);
+    }
+    return { value: this.popValue() };
+  }
+
   setGlobal(name: string, value: unknown): void {
     this.pushValue(value);
     lua.lua_setglobal(this.L, name);
