@@ -356,8 +356,19 @@ const TEXTURE: MethodTable = {
   // `SetTexture("")` clears the slot -- the live API's blank form, which real FrameXML uses (an
   // authored `<Texture file="">` template override, most commonly). `nil` clears the same way.
   // The (r, g, b[, a]) overload is real too, and maps onto the flat-color quad `Widget.solid` exists
-  // for (the edit-box caret's own mechanism) -- alpha is dropped, since nothing in `widget.ts` models
-  // a texture-local alpha distinct from the frame's own `SetAlpha`.
+  // for (the edit-box caret's own mechanism).
+  //
+  // THE ALPHA IS APPLIED, and the reason the old comment gave for dropping it ("nothing in `widget.ts`
+  // models a texture-local alpha") did not hold: a Texture is a Region, `SetAlpha` is registered on
+  // REGION, and `drawList` multiplies each widget's OWN `alpha` down the ancestor chain -- so a texture
+  // has had its own opacity all along. Dropping it made `realmlist.xml:260`'s
+  // `<Texture setAllPoints="true"><Color a="0.75" r="0" g="0" b="0"/></Texture>` -- the full-screen dim
+  // the realm list lays over the login screen -- an OPAQUE black sheet, which blacked out the whole
+  // background scene and the login screen with it.
+  //
+  // It does land on the same field `SetAlpha` writes, and in the engine those are two channels rather
+  // than one. Only the LAST caller wins here, which is exactly right for a colour fill (nothing sets
+  // both) and would need a separate field the day some document animates a tinted quad's alpha.
   SetTexture: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
     const first = args[0];
@@ -370,6 +381,9 @@ const TEXTURE: MethodTable = {
       widget.solid = true;
       widget.sprite = null;
       widget.vertexColor = toHex(first, Number(args[1] ?? 0), Number(args[2] ?? 0));
+      if (typeof args[3] === 'number') {
+        widget.alpha = Math.max(0, Math.min(1, args[3]));
+      }
       return [];
     }
     widget.sprite = String(first);
