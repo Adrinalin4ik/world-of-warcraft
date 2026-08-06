@@ -275,6 +275,39 @@ The 60-method surface, measured against what the glue Lua actually calls.
 
 **Test budget: none.** This task's verification is the browser diff and the load report.
 
+#### Five prerequisites this task owns, discovered by tasks 2-8 and recorded in the ledger
+
+Four of them are one root cause — nothing tears down a screen's Lua state — so build **one** teardown
+mechanism rather than four patches:
+
+1. `FrameRegistry.reset()` exists and has no caller. Screen teardown must call it, or registry slots
+   grow on every session state change.
+2. `scripts.ts`'s `handlersByFrame` retains a handle per script and is never cleared. `registry.onWrapperRelease`
+   is single-subscriber and `installObjectModel` already claims it, so this needs a multi-subscriber
+   teardown hook in `object.ts`.
+3. `events.ts`'s `framesByEvent` has the same missing cleanup.
+4. `frame.ts`'s `frameIds` map, backing `GetID`/`SetID`, likewise.
+
+The fifth is separate and is the one that decides whether the diff means anything:
+
+5. **An XML-loaded `<EditBox>` draws its border and nothing typed.** `screens.ts#resolveSprite`
+   rasterizes glyphs only for `kind === 'fontstring'`, so the edit box widget itself renders no text.
+   The authored structure tells you the fix: `accountlogin.xml:234` declares
+   `<FontString inherits="GlueEditBoxFont"/>` as a direct child of the box — unnamed, no size, no
+   anchors, purely a font declaration for the text the engine draws inside the `<TextInsets>` rect. So
+   the loader should **adopt** that FontString as the box's text region: create it as a child fontstring
+   widget, give it the declared font, and anchor it inside the box's `TextInsets`. Then this task's
+   per-frame `update` mirrors the box's `displayText` into it.
+
+   That is exactly what the hand-written screen does by hand — `screens/login.ts:583` creates the child
+   and `login.ts:737` mirrors into it every frame — which is a useful confirmation that the design is
+   right rather than a workaround. Adopt from the **declared** child, never by searching: the reference
+   records that a find-first adoption once grabbed a chat header out of `<Layers>`, so typing overwrote
+   the label.
+
+   `loader.ts` already emits an `editbox:no-text-region` warning for every `<EditBox>`. That warning
+   should disappear from the load report when this is done, which makes it the task's own progress check.
+
 - [ ] Commit: `feat(framexml): serve the real AccountLogin.xml behind ?ui=lua`
 
 ---
