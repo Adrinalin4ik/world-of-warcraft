@@ -70,10 +70,16 @@ function own(node: Element): XmlElement {
 /**
  * Classify a root child.
  *
- * `virtual="true"` makes an element a TEMPLATE regardless of its tag -- a virtual `<Button>` is a
- * template, not a button. Unknown tags fall through to `instance` on purpose: whether a tag names a
- * real widget type is `CreateFrame`'s question, not this parser's, and answering it here would mean
- * this module knowing the widget vocabulary.
+ * The tag checks come FIRST, and that order is load-bearing. Every `<Font>` in the client's own
+ * `gluefontstyles.xml` -- all 57 of them -- carries `virtual="true"`, because that is simply how a
+ * font object is declared. Testing `virtual` before the tag would file every one of them into the
+ * template registry and leave the font registry empty. Fonts and templates are two registries on
+ * purpose: a font inherits a font, never a frame.
+ *
+ * `virtual="true"` therefore makes an element a template only when its tag is not already one of the
+ * kinds above it -- which is what the client does, not a simplification. Unknown tags fall through
+ * to `instance` on purpose: whether a tag names a real widget type is `CreateFrame`'s question, not
+ * this parser's, and answering it here would mean this module knowing the widget vocabulary.
  */
 function classify(element: XmlElement): TopLevel | null {
   const tag = element.tag.toLowerCase();
