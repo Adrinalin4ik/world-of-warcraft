@@ -474,6 +474,19 @@ a decision to make deliberately, not to inherit.
 
 ### 3.2 The stubs, and why they are stubs
 
+> **PIECE 6 IS DONE, and this section is now a historical record rather than a description of the code.**
+> The MODEL surface is real: `SetModel`, `SetSequence`, `SetCamera`, `SetFogColor`, `SetFogNear`,
+> `SetFogFar`, `ClearFog`, `SetGlow`, `ResetLights`, `AddLight`, `AddCharacterLight` and `AddPetLight`
+> all write a per-widget `ModelRig` (`framexml/lua/methods/model.ts`, `ui/widget.ts#modelRig`), which
+> `screens/framexml-screen.ts` polls per tick and pushes into `GlueSceneView#applyRig`.
+> `SetCharSelectModelFrame` and `SetCharCustomizeFrame` are real too, and are two separate slots.
+> `AdvanceTime` remains a declared gap, with a better reason than "no per-widget model state": the glue
+> scene advances every model once per frame from `worldClock`, so a Lua step would double-advance.
+> `RACE_LIGHTS` and `CHAR_MODEL_FOG` -- the transcriptions §3.1 calls out below -- are DELETED; the
+> numbers arrive from `glueparent.lua`'s own tables as the client executes `SetLighting`. Only
+> `MAIN_MENU_FOG` remains, for the hand-written screens that have no Lua VM, and it now carries
+> `accountlogin.xml`'s authored `<FogColor>` as well as its `fogNear`/`fogFar`. See the task-9 report.
+
 | stub | file:line | body |
 |---|---|---|
 | `SetCharSelectModelFrame` | [`api/characters.ts:362`](../../../client/src/game/ui/framexml/lua/api/characters.ts) | `() => []` |
