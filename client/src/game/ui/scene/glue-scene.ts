@@ -30,6 +30,7 @@ import {
   foldRaceLights,
   fogTriple,
   MAIN_MENU_FOG,
+  modelLightRows,
   modelToRender,
   RACE_LIGHTS,
   RaceLightRow,
@@ -134,24 +135,38 @@ export class GlueSceneView {
    * `ModelFFX` values).
    */
   private buildRig(scene: GlueScene, model: any): NonNullable<GlueSceneView['lighting']> {
-    // The LOGIN screen's rig is not a race rig, and giving it one was a fabrication. Read the data:
-    // `SetLighting` is called from exactly one place, `SetBackgroundModel` (glueparent.lua:385),
-    // which only character select and create use. `accountlogin.lua` never calls it — it sets the
-    // model, plays sequence 0, and authors fog and `glow` on the ModelFFX frame itself. So the main
-    // menu takes the engine's DEFAULT background rig ("ResetLights() sets all 6 light sets to default
-    // for the background ... most backgrounds have 3", glueparent.lua:348), whose values are not in
-    // any Lua table we can read. A flat white ambient stands in for it here: measured, it changes the
-    // stage's brightness and nothing else, and it is honest about being a placeholder rather than
-    // borrowing CHARACTERSELECT's rows and pretending that is the law. Spec 3 resolves it against
-    // the real screen.
+    // The LOGIN screen has no Lua rig, and it does not need a placeholder either -- the MODEL's own
+    // lights are the same data. `SetLighting` is reached from exactly one place,
+    // `SetBackgroundModel` (glueparent.lua:385), which only character select and create call, so
+    // the main menu takes the engine's DEFAULT background rig ("ResetLights() sets all 6 light sets
+    // to default for the background", glueparent.lua:348) -- and glueparent.lua:50 says in so many
+    // words where that default comes from: "RaceLights[] duplicates the 3.2.2 color values in the
+    // models."
     //
-    // `lightingKey` is `SetLighting`'s own `strupper(name)` argument (glueparent.lua:385): null for
-    // the main menu, because that screen never reaches `SetLighting` at all.
+    // That is not taken on the comment's word. Byte-checked against the shipped assets, for
+    // `UI_Human.m2`'s three directionals against `RaceLights.HUMAN`'s three rows:
+    //   model light 0  diffuse (0.9490197, 0.8, 0.5411765) x 1.10  = (1.043922, 0.88, 0.595294)
+    //   RaceLights [3] diffuse (0.5219608, 0.44, 0.2976471) x 2.00 = (1.043922, 0.88, 0.595294)
+    //   model light 1  diffuse (0.3058824, 0.5372549, 0.6705883) x 0.65 = (0.198824, 0.349216, 0.435882)
+    //   RaceLights [2] diffuse (0.1988235, 0.3492157, 0.4358824) x 1.00 = (0.198824, 0.349216, 0.435882)
+    //   model light 2  ambient (1, 1, 1) x 0.27 = RaceLights [1] ambient (0.27, 0.27, 0.27) x 1.0
+    // Identical to every digit the files carry. So for a scene with no Lua row the model's own
+    // directionals are not an approximation of the rig, they ARE the rig, and the same fallback is
+    // right for a token the table does not name (DRAENEI and BLOODELF have light rows but no fog
+    // row; a future stage might have neither).
+    //
+    // WHAT THIS DOES NOT FIX, so nobody re-investigates it: the login screen's flat cyan SKY is not
+    // a lighting problem and no rig can touch it. Measured -- drop the main menu's ambient to 0.02
+    // and every surface in the frame goes black (bridge 10,24,29 -> 1,1,1; snow 162,212,239 ->
+    // 3,4,5) while the sky does not move by one 8-bit step, because it is `LOGIN_SKYBOWLA.BLP`
+    // (sampled rgb 43,201,216, which is exactly the texture's own flat region) drawn by materials
+    // the M2 flags 0x13 = UNLIT | UNFOGGED | no-depth-write. The engine could not darken it either.
+    // What our sky is missing against the real screen is the CLOUD layers over that bowl
+    // (`ICECROWN_CLOUDSA*`, `LOGIN_CLOUDS_UNHOLY01`, `ICECROWN_GLOW*`, `ICECROWN_LIGHTRAY_01`) --
+    // their meshes are built and visible (70 of 71 are), so it is a blend/draw-order question in the
+    // M2 pipeline, not a glue-scene one.
     const key = lightingKey(scene);
-    const rows: RaceLightRow[] =
-      key === null
-        ? [[1, 0, 0, 0, -1, 1.0, 1.0, 1.0, 1.0, 0.0, 0, 0, 0]]
-        : RACE_LIGHTS[key] ?? RACE_LIGHTS.HUMAN;
+    const rows = pickLightRows(key, model);
     const { probe } = foldRaceLights(rows);
 
     const pointLights: SelectedLight[] = [];
@@ -334,4 +349,29 @@ export class GlueSceneView {
   dispose(): void {
     this.teardown();
   }
+}
+
+/**
+ * The directional rig for a scene: the client's Lua row if it has one, the model's own directionals
+ * if it does not (see `buildRig` for why those are the same data), and only then a placeholder.
+ *
+ * The placeholder is the LAST resort and it is still a placeholder: a flat white ambient, for a
+ * scene that is named by no Lua table AND ships no directional light of its own. Nothing in this
+ * client reaches it today -- `UI_MainMenu_Northrend` ships one -- and it exists so that such an
+ * asset draws visibly-wrong rather than black, with a console line saying which scene did it.
+ */
+function pickLightRows(key: string | null, model: any): RaceLightRow[] {
+  const fromLua = key === null ? undefined : RACE_LIGHTS[key];
+  if (fromLua) {
+    return fromLua;
+  }
+  const fromModel = modelLightRows(model?.data?.lights ?? []);
+  if (fromModel.length > 0) {
+    return fromModel;
+  }
+  console.warn(
+    `glue scene: no RaceLights row for "${key ?? 'mainmenu'}" and the model ships no directional ` +
+      'light -- falling back to a flat white ambient, which is a placeholder, not the rig',
+  );
+  return [[1, 0, 0, 0, -1, 1.0, 1.0, 1.0, 1.0, 0.0, 0, 0, 0]];
 }

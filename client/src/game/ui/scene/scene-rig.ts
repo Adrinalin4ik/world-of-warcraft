@@ -77,8 +77,90 @@ export const CHAR_MODEL_FOG: Record<string, { r: number; g: number; b: number; f
   CHARACTERSELECT: { r: 0.8, g: 0.65, b: 0.73, far: 222 },
 };
 
-/** `accountlogin.xml:93` authors the login scene's fog on the frame itself, not through the table. */
-export const MAIN_MENU_FOG = { r: 0.25, g: 0.06, b: 0.015, near: 0, far: 1200 };
+/**
+ * The login scene's fog. **`near` and `far` are authored; the colour is not, and this comment used
+ * to claim otherwise.**
+ *
+ * accountlogin.xml:93 is, in full:
+ *   `<ModelFFX name="AccountLogin" ... fogNear="0" fogFar="1200" glow="0.08">`
+ * `UI.xsd`'s `ModelType` puts the colour in an OPTIONAL `<FogColor>` CHILD element, not in an
+ * attribute, and `AccountLogin` declares no such child (nor does any other `<ModelFFX>` in the
+ * manifest). So 0/1200 are the client's numbers and the colour is the engine's unstated default,
+ * which is in no file we can read.
+ *
+ * Black is what an unspecified `ColorType` is elsewhere in this renderer, and it is what
+ * `glue-scene.ts` already uses for a scene whose `CharModelFogInfo` row is missing -- so it is the
+ * consistent unknown rather than a new invention. **Measured, the choice is inert on this scene:**
+ * setting the colour to full red (1, 0, 0) and re-shooting the login screen moved the sampled
+ * pixels by at most one 8-bit step (bridge 10,24,29 -> 11,24,29), because every surface in
+ * `UI_MainMenu_Northrend` sits well inside the authored 0..1200 band and the sky bowl's own
+ * materials are flagged UNFOGGED (0x02). The value that was here before -- (0.25, 0.06, 0.015) --
+ * had no source at all.
+ */
+export const MAIN_MENU_FOG = { r: 0, g: 0, b: 0, near: 0, far: 1200 };
+
+/** One keyframe track, as `wow-data-parser/m2/animation-block.js` hands it back. */
+interface Track<T> {
+  firstKeyframe?: { timestamp: number; value: T } | null;
+}
+
+/** The fields of a parsed M2 `Light` this module reads. Structural, so the parser stays untyped. */
+export interface ModelLight {
+  /** 0 directional, 1 point (`wow-data-parser/m2/index.js#Light`). */
+  type: number;
+  ambientColor?: Track<number[]> | null;
+  ambientIntensity?: Track<number> | null;
+  diffuseColor?: Track<number[]> | null;
+  diffuseIntensity?: Track<number> | null;
+  visibility?: Track<number> | null;
+}
+
+/**
+ * An M2's own DIRECTIONAL lights, as `RaceLights` rows.
+ *
+ * The row layout above is exactly `AddLight`'s argument list, and the M2 `Light` record carries the
+ * same five fields (direction, ambient colour + intensity, diffuse colour + intensity) -- see
+ * `glue-scene.ts#buildRig` for the byte-level check that the two really are the same data for a
+ * scene that has both.
+ *
+ * A directional M2 light's DIRECTION lives in its bone's orientation, not in the `position` field
+ * (which is the bone-space offset), and this does not chase it: rows are emitted pointing straight
+ * down, the direction every ambient-only row in `RaceLights` uses. That is exact for a light whose
+ * diffuse intensity is zero -- `foldRaceLights` never builds a lobe for one, so the direction is
+ * multiplied by nothing -- and approximate for one with a coloured diffuse. `UI_MainMenu_Northrend`,
+ * the only scene that reaches this path today, ships exactly one light and its diffuse intensity is
+ * 0, so nothing about the login screen is approximated. A scene that needs the other case needs the
+ * bone walk, and this is where it goes.
+ *
+ * `type` 0 is directional; point lights are not folded here because the engine keeps them separate
+ * ("pulls the default point lights from the models", glueparent.lua:361) and `glue-scene.ts`
+ * harvests those into the point table itself.
+ */
+export function modelLightRows(lights: readonly ModelLight[]): RaceLightRow[] {
+  const rows: RaceLightRow[] = [];
+
+  for (const light of lights) {
+    if (light?.type !== 0) {
+      continue;
+    }
+    if (light.visibility?.firstKeyframe?.value === 0) {
+      continue; // a light the asset ships explicitly dark, as `glue-scene.ts` skips for points
+    }
+    const ambient = light.ambientColor?.firstKeyframe?.value ?? [0, 0, 0];
+    const diffuse = light.diffuseColor?.firstKeyframe?.value ?? [0, 0, 0];
+    rows.push([
+      1,
+      0,
+      0, 0, -1,
+      light.ambientIntensity?.firstKeyframe?.value ?? 0,
+      ambient[0], ambient[1], ambient[2],
+      light.diffuseIntensity?.firstKeyframe?.value ?? 0,
+      diffuse[0], diffuse[1], diffuse[2],
+    ]);
+  }
+
+  return rows;
+}
 
 /**
  * The fog triple for a scene key, or null when the client would `ClearFog()`.

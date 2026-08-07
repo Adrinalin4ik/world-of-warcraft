@@ -104,22 +104,6 @@ const DEATH_KNIGHT = 6;
  */
 const CHARACTER_FLAG_GHOST = 0x2000;
 
-/**
- * Said once per VM, not once per call: `SetBackgroundModel` runs on every selection change, and a
- * line per click would bury the report the runtime exists to produce.
- */
-let warnedNoScene = false;
-function warnNoScene(path: string): void {
-  if (warnedNoScene) {
-    return;
-  }
-  warnedNoScene = true;
-  console.warn(
-    `SetCharSelectBackground("${path}"): this runtime was booted with no background-model sink, ` +
-      'so the 3D stage stays on whatever it was showing',
-  );
-}
-
 /** The stages in which a world connection is standing -- `IsConnectedToServer`. */
 const CONNECTED_STAGES = new Set([
   LoginStage.CharacterList,
@@ -396,10 +380,20 @@ export function installCharactersApi(
    * `methods/frame.ts` already declares. Only one of the two glue screens is ever up, so one view is
    * enough to be correct today; the day two model frames must draw at once, this is the seam.
    */
+  // Warned once per VM, not once per call: `SetBackgroundModel` runs on every selection change, and
+  // a line per click would bury the report the runtime exists to produce. The latch is a local of
+  // this install, so a screen torn down and rebuilt is told again rather than inheriting silence.
+  let warnedNoSink = false;
   const setBackground = (args: unknown[]): unknown[] => {
     const path = typeof args[0] === 'string' ? args[0] : '';
     if (!onSetBackgroundModel) {
-      warnNoScene(path);
+      if (!warnedNoSink) {
+        warnedNoSink = true;
+        console.warn(
+          `SetCharSelectBackground("${path}"): this runtime was booted with no background-model ` +
+            'sink, so the 3D stage stays on whatever it was showing',
+        );
+      }
       return [];
     }
     onSetBackgroundModel(path);

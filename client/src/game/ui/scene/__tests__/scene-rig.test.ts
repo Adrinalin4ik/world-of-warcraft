@@ -5,6 +5,7 @@ import {
   CHAR_MODEL_FOG,
   fogTriple,
   foldRaceLights,
+  modelLightRows,
   modelToRender,
   RACE_LIGHTS,
   verticalFov,
@@ -102,6 +103,65 @@ describe('foldRaceLights', () => {
     row[0] = 0;
 
     expect(foldRaceLights([row]).ambient).toEqual([0, 0, 0]);
+  });
+});
+
+describe('modelLightRows', () => {
+  /**
+   * The claim `glue-scene.ts#buildRig` rests on, pinned: glueparent.lua:50 says "RaceLights[]
+   * duplicates the 3.2.2 color values in the models", so a model's own directionals folded into rows
+   * must come out as the race's Lua rows do. These three lights are `UI_Human.m2`'s, read out of the
+   * shipped file (build 12340) -- colour x intensity for each equals `RaceLights.HUMAN`'s, which is
+   * what makes the model an honest source for a scene the Lua table does not name.
+   */
+  it("folds UI_Human.m2's own directionals to RaceLights.HUMAN's light", () => {
+    const track = <T,>(value: T) => ({ firstKeyframe: { timestamp: 0, value } });
+    const uiHumanLights = [
+      {
+        type: 0,
+        ambientColor: track([1, 1, 1]),
+        ambientIntensity: track(0),
+        diffuseColor: track([0.9490196704864502, 0.8000000715255737, 0.5411764979362488]),
+        diffuseIntensity: track(1.100000023841858),
+        visibility: track(1),
+      },
+      {
+        type: 0,
+        ambientColor: track([1, 1, 1]),
+        ambientIntensity: track(0),
+        diffuseColor: track([0.30588236451148987, 0.5372549295425415, 0.6705882549285889]),
+        diffuseIntensity: track(0.6499999761581421),
+        visibility: track(1),
+      },
+      {
+        type: 0,
+        ambientColor: track([1, 1, 1]),
+        ambientIntensity: track(0.27000001072883606),
+        diffuseColor: track([1, 1, 1]),
+        diffuseIntensity: track(0),
+        visibility: track(1),
+      },
+    ];
+
+    // What is compared is each row's LIGHT -- colour times intensity, which is the only thing
+    // `foldRaceLights` ever uses the two for. Not the folded probe: the Lua rows carry authored
+    // DIRECTIONS and a directional M2 light's direction lives in its bone, which `modelLightRows`
+    // does not chase (it says so). Rows are matched by their place in the file: model light 2 is
+    // the ambient one and Lua row 0 is, and the two diffuse rows come in opposite order.
+    const light = (row: readonly number[]) => ({
+      ambient: [row[6] * row[5], row[7] * row[5], row[8] * row[5]],
+      diffuse: [row[10] * row[9], row[11] * row[9], row[12] * row[9]],
+    });
+    const model = modelLightRows(uiHumanLights).map(light);
+    const lua = RACE_LIGHTS.HUMAN.map(light);
+    const pairs: Array<[number, number]> = [[2, 0], [1, 1], [0, 2]];
+
+    for (const [fromModel, fromLua] of pairs) {
+      for (let channel = 0; channel < 3; ++channel) {
+        expect(model[fromModel].ambient[channel]).toBeCloseTo(lua[fromLua].ambient[channel], 6);
+        expect(model[fromModel].diffuse[channel]).toBeCloseTo(lua[fromLua].diffuse[channel], 6);
+      }
+    }
   });
 });
 
