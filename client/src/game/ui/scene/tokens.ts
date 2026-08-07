@@ -21,8 +21,9 @@ export type GlueScene =
    *
    * A TOKEN, not a race id, and that is not pedantry: `GetSelectBackgroundModel` answers
    * `"DEATHKNIGHT"` for a death knight of any race (characterselect.lua:538), which no race id can
-   * express. It is also the `strupper(name)` key `SetLighting` looks `CharModelFogInfo`,
-   * `CharModelGlowInfo` and `RaceLights` up by, which is why `lightingKey` is just its upper case.
+   * express. `SetLighting`'s own `race` argument is `strupper` of the same name
+   * (glueparent.lua:375), and it looks `CharModelFogInfo`, `CharModelGlowInfo` and `RaceLights` up
+   * with it inside the client's Lua -- nothing on this side needs the key any more.
    */
   | { kind: 'model'; token: string };
 
@@ -55,16 +56,11 @@ export function sceneToken(scene: GlueScene): string {
   return scene.token;
 }
 
-/**
- * The upper-case key the fog, glow and light tables are indexed by -- `SetLighting`'s `race`
- * argument, which `SetBackgroundModel` computes as `strupper(name)` (glueparent.lua:375,385).
- *
- * The main menu has no such key, and that is the whole of `buildRig`'s fork: `SetLighting` is only
- * ever reached through `SetBackgroundModel`, which only character select and create call.
- */
-export function lightingKey(scene: GlueScene): string | null {
-  return scene.kind === 'mainmenu' ? null : scene.token.toUpperCase();
-}
+// `lightingKey(scene)` used to live here -- the `strupper(name)` key `CharModelFogInfo`,
+// `CharModelGlowInfo` and `RaceLights` were looked up by. It is gone with those tables: the upper-casing
+// happens in `SetBackgroundModel` itself (glueparent.lua:375), the lookups happen in `SetLighting`, and
+// the host now receives the resulting numbers rather than re-deriving a key to find them by. Its last
+// reader was its own test.
 
 /** `Interface\Glues\Models\UI_<token>\UI_<token>.m2` -- the client's own path construction. */
 export function scenePath(scene: GlueScene): string {

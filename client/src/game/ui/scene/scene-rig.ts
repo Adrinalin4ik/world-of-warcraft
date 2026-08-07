@@ -41,14 +41,15 @@ export type RaceLightRow = [
 ];
 
 /**
- * `LIGHT_LIVE`/`LIGHT_GHOST`, glueparent.lua:97-98 -- the first argument to every `Add*Light`.
+ * `LIGHT_LIVE`, glueparent.lua:97 -- the first argument to every `Add*Light`.
  *
- * `SetLighting` only ever passes `LIGHT_LIVE`; the ghost sets exist for the "dead character" glue
- * variant, which no 3.3.5 glue Lua reaches. `ModelRig` records the set a row was added to so a row
- * for the ghost variant is kept apart rather than folded into the live rig by accident.
+ * Its sibling `LIGHT_GHOST = 1` (glueparent.lua:98) is deliberately NOT a constant here: nothing in
+ * this client compares against it, and an exported name with no reader is the shape a recent round
+ * removed twice. `SetLighting` only ever passes `LIGHT_LIVE`; the ghost sets exist for the "dead
+ * character" glue variant, which no 3.3.5 glue Lua reaches. `RigLight.liveness` still records the raw
+ * value a row arrived with, so a ghost row is kept apart rather than folded into the live rig.
  */
 export const LIGHT_LIVE = 0;
-export const LIGHT_GHOST = 1;
 
 /** Which of `ResetLights`'s six sets a row belongs to -- see the comment at glueparent.lua:347-360. */
 export type LightSet = 'background' | 'character' | 'pet';
@@ -56,7 +57,7 @@ export type LightSet = 'background' | 'character' | 'pet';
 /** One `Add*Light` call, kept whole so nothing about which set it was for is lost in the fold. */
 export interface RigLight {
   readonly set: LightSet;
-  /** `LIGHT_LIVE` or `LIGHT_GHOST`. */
+  /** `LIGHT_LIVE` (0) or the ghost set (1) -- raw, as the call carried it. */
   readonly liveness: number;
   readonly row: RaceLightRow;
 }
@@ -125,7 +126,8 @@ export function rigFog(rig: ModelRig | null): { color: RGB; params: [number, num
  * pet. This client folds ONE rig for the whole scene (`glue-scene.ts#render` pushes it into every
  * material it walks), so it takes the BACKGROUND set and drops the other two -- measurably identical
  * today, and named here rather than hidden so the day a caller sets them apart the divergence is
- * findable. `LIGHT_GHOST` rows are dropped for the same reason: nothing in 3.3.5's glue adds one.
+ * findable. A GHOST-set row (`liveness` 1) is dropped for the same reason -- nothing in 3.3.5's glue
+ * adds one.
  */
 export function rigLightRows(rig: ModelRig | null): RaceLightRow[] {
   if (!rig) {

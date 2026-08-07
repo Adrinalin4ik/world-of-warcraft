@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 import { evalProbe } from '../../../world/light/laws';
-import { lightingKey, raceKey, sceneFromPath, sceneToken, scenePath } from '../tokens';
+import { raceKey, sceneFromPath, sceneToken, scenePath } from '../tokens';
 import {
   foldRaceLights,
   modelLightRows,
@@ -71,7 +71,6 @@ describe('sceneFromPath', () => {
 
     expect(scene).toEqual({ kind: 'model', token: 'HUMAN' });
     expect(sceneToken(scene)).toBe('HUMAN');
-    expect(lightingKey(scene)).toBe('HUMAN'); // SetLighting's strupper(name) key
   });
 });
 
