@@ -45,6 +45,37 @@ export function toEngineTranslation(
   return out.set(bx - tx, by - ty, bz + tz);
 }
 
+/**
+ * One M2 ATTACHMENT record's bone-local offset, engine axes -- the local translation an attached model
+ * (a weapon, a shield, a pauldron, a helm) gets under the bone it hangs from.
+ *
+ * `position` is the record's own, and it is in RAW MODEL SPACE, not bone-local. That is the misreading
+ * this function exists to make impossible: `HumanMale.m2`'s attachment 11 (the helm) carries
+ * `[0.0520, 0, 2.0272]` against a body 1.96 tall -- an absolute crown height, not an offset from the
+ * head bone. The bone-local value is therefore `position - bones[record.bone].pivotPoint`, and since
+ * both are raw, `D(p) - D(v) = D(p - v)`: one subtraction and the same `(-x, -y, z)` sign flip
+ * everything else here applies.
+ *
+ * Measured on the real 3.3.5a file: for **all 39** of `HumanMale.m2`'s attachment records the
+ * difference is identically zero (max |difference| 0.000000) -- the attach bones are leaves sitting on
+ * their own attach point, which is what the reference reports of 1.12.1's file too
+ * (`benilla-assets/src/model.rs:343-346`). The subtraction is kept anyway because it is the general law
+ * (`:429-435`, `offset = wow_to_bevy(position) - pivot_bevy(bone)`) and a creature or item model need
+ * not have it zero.
+ *
+ * It lives HERE, in the pipeline's axis module, and not beside its caller in `M2#attachTo`, for two
+ * reasons: `M2` is untestable (its constructor reaches for `collisionWorld` and `ObjectsManager`) and
+ * this is the one number in the attachment path that fails silently -- a sign flip puts a sword through
+ * the hand or floating beside it, a missing pivot subtraction puts it at twice the hand's height, and
+ * both read as a broken model rather than a broken transform.
+ */
+export function attachmentLocalOffset(
+  position: ArrayLike<number>,
+  pivot: ArrayLike<number>,
+): [number, number, number] {
+  return [-(position[0] - pivot[0]), -(position[1] - pivot[1]), position[2] - pivot[2]];
+}
+
 /** Write a bone's engine-space local rotation from a raw sampled quaternion. */
 export function toEngineQuaternion(
   out: THREE.Quaternion,

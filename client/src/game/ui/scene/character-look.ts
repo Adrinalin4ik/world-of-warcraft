@@ -19,12 +19,13 @@
  * array. Both are reached from `resolveCharacterLook`, and both are skipped entirely -- including the
  * 6.7 MB `ItemDisplayInfo` fetch -- for a character wearing nothing.
  *
+ * ATTACHMENTS ARE NOW HERE TOO, in `character-attachments.ts`: the weapons, the shield, the shoulder
+ * pair and the helm's own model, as a list of `.m2` paths plus the body attachment id each hangs from.
+ * `resolveCharacterLook` returns them and `glue-scene.ts` parents them to the body's bones. The
+ * previous note here said a worn helm's hide-masks applied while the helmet did not draw; that is
+ * fixed -- both halves are live.
+ *
  * WHAT THIS DELIBERATELY DOES NOT DO, so nobody reads a gap here as an oversight:
- *  - **No attachments.** Weapons, shields, shoulders, the helm's own model and the cape mesh all hang
- *    off a bone, which nothing in this client can do yet; that is piece 9. So a worn helm's HIDE-MASKS
- *    apply (the hair tucks away) while the helmet itself does not draw -- which on its own looks
- *    worse, not better, and is why nothing bald-makes a character until piece 9 lands. It is applied
- *    anyway because it is the correct half and the roster wears no helm.
  *  - **No `..._Extra` sheet (texture type 8).** `CharSections` BaseSection 0 `TextureName[1]`, bound
  *    whole rather than composited, and only fur races author it (Tauren head/leg fur). A Tauren
  *    therefore still draws part of its own body through an unbound sampler.
@@ -32,6 +33,7 @@
 import DBC from '../../pipeline/dbc';
 import { CharacterAppearance, CharacterRecord } from '../../../network/protocol/types';
 import { BodyLayer, COMPOSITE_TILES, compositeCacheKey } from './body-composite';
+import { AttachedItem, attachedItemsFor } from './character-attachments';
 import {
   HelmetGeosetVisDataRow,
   ItemDisplayInfoRow,
@@ -85,6 +87,15 @@ export type CharacterLook = {
   capeTexture: string | null;
   /** The geoset ids to draw. See `character-equipment.ts#REGION_BASES` for the bare-skin set. */
   geosets: Set<number>;
+  /**
+   * The separate `.m2` files that hang off the skeleton -- weapons, a shield, the shoulder pair, the
+   * helm. Empty for a character carrying none, which is not the same as "no equipment": all five
+   * roster characters are dressed and four of them hold something.
+   *
+   * See `character-attachments.ts` for the attachment ids, the placement law and the orientation
+   * convention (there is none to choose: the bone supplies it).
+   */
+  attachments: AttachedItem[];
 };
 
 /** `ChrRaces` gender column ids. `CharacterRecord.gender` uses the same 0/1. */
@@ -122,7 +133,17 @@ const BASE_SECTION_UNDERWEAR = 4;
 const SECTION_FLAG_DEATH_KNIGHT = 0x04;
 const SECTION_FLAG_NPC = 0x08;
 
-type ChrRacesRow = { id: number; maleDisplayID: number; femaleDisplayID: number };
+type ChrRacesRow = {
+  id: number;
+  maleDisplayID: number;
+  femaleDisplayID: number;
+  /**
+   * `ChrRaces` field 6. `Hu Or Dw Ni Sc Ta Gn Tr Go Be Dr` for races 1..11, read off the live table --
+   * the prefix a helm's per-race-and-sex model file is named with. See
+   * `character-attachments.ts#helmModelFile` for why this column and not a table of eight.
+   */
+  clientPrefix: string;
+};
 type CharHairGeosetsRow = { raceID: number; gender: number; hairType: number; geoset: number };
 type CharacterFacialHairStylesRow = {
   raceID: number;
@@ -613,6 +634,9 @@ export async function resolveCharacterLook(
     hairTexture,
     capeTexture: capeTextureFor(worn),
     geosets: worn ? equipGeosetsFor(slots, worn) : new Set([0, ...slots]),
+    // Piece 9. `raceRow.clientPrefix` is only read by a HELM (the one per-race-and-sex file name);
+    // weapons, shields and pauldrons are one file for every race.
+    attachments: worn ? attachedItemsFor(worn, raceRow.clientPrefix ?? '', character.gender) : [],
   };
 }
 

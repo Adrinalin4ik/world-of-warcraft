@@ -69,6 +69,14 @@ export class GlueSceneView {
   private stage: THREE.Vector3 | null = null;
   /** The loaded character M2, or null. Posed and lit alongside the stage; see `update`/`render`. */
   private character: any = null;
+  /**
+   * The item M2s hanging off the character's bones -- weapons, a shield, the shoulder pair, the helm.
+   *
+   * Tracked separately from `character` even though they are its scene-graph descendants, because
+   * `M2Blueprint.unload` is a reference-counted release against a path and the graph cannot be walked
+   * for it: `dropCharacter` has to release exactly the models it loaded, once each. See `attachItems`.
+   */
+  private attached: any[] = [];
   /** Which `setCharacter` call the in-flight load belongs to. Monotonic, like `loadedToken`. */
   private characterToken = 0;
   private lighting: {
@@ -146,6 +154,15 @@ export class GlueSceneView {
       // visibility manager here to turn it on.
       model.visible = true;
       model.scale.setScalar(look.scale);
+      // `updateMatrix()` or the scale above reaches nothing: `M2` sets `matrixAutoUpdate = false` on
+      // itself (`pipeline/m2/index.ts:163`), so `updateMatrixWorld` skips `updateMatrix` and composes
+      // the parent's world matrix with a `matrix` that is still the identity it was constructed with.
+      // The line was written without this and was therefore inert -- every race drew at scale 1.0,
+      // which is right for the ten races whose `CreatureDisplayInfo.scale` is 1.0 and wrong for exactly
+      // one: Gnome male display 1563 is **1.15** (measured), and `Gfsa` on the live roster is a gnome.
+      // Found while adding attachments, which need the same call for the same reason -- see
+      // `M2#attachTo`.
+      model.updateMatrix();
 
       // A character `.m2` carries every hairstyle, glove, boot and cloak at once -- 61 submeshes on
       // `humanmale00.skin` for 54 geoset ids. Without this the body wears all of them simultaneously.
@@ -192,7 +209,58 @@ export class GlueSceneView {
       }
 
       this.placeCharacter();
+      this.attachItems(model, look, token);
     });
+  }
+
+  /**
+   * Hang the look's item models on the character's bones (piece 9).
+   *
+   * AFTER the body is in the scene and NOT in the `Promise.all` above, because every attachment's
+   * destination is a bone of a model that has to exist first -- `M2#attachTo` reads the body's own
+   * attachment table. So the body appears as soon as it lands and the weapon follows it a frame or
+   * three later, rather than both waiting for the slowest fetch. On character select that gap is
+   * invisible; it is stated here so the ordering is not mistaken for an oversight.
+   *
+   * Each item is loaded independently rather than through one `Promise.all`, so one 404 (a texture
+   * family that ships under a name the DBC does not spell) costs its own model and not the others.
+   *
+   * `token` is re-checked inside every arm: an attachment fetch is exactly as cancellable as the body's
+   * was, and a roster click during it would otherwise hang the previous character's sword on the new
+   * character's hand -- or on nothing at all, since `this.character` has by then been replaced.
+   */
+  private attachItems(body: any, look: CharacterLook, token: number): void {
+    for (const item of look.attachments) {
+      M2Blueprint.load(item.modelPath)
+        .then((model: any) => {
+          if (this.characterToken !== token || this.character !== body) {
+            M2Blueprint.unload(model);
+            return;
+          }
+          if (!body.attachTo(item.attachId, model)) {
+            // Not an error and not a guess: the reference's world path has the same rule -- "the body
+            // has no such attach point -- hold nothing" (`attach/glue_preview.rs:325-326`). It cannot
+            // fire for the six ids piece 9 uses on any playable 3.3.5a character (all six were dumped
+            // out of `HumanMale.m2`), so if it ever does, the model is the news.
+            console.warn(
+              `glue character: ${body.name ?? 'the body'} has no attachment ${item.attachId} ` +
+                `for ${item.kind} -- ${item.modelPath} draws nothing`,
+            );
+            M2Blueprint.unload(model);
+            return;
+          }
+          this.attached.push(model);
+          // Same reason as the body's and the stage's: `M2` constructs itself hidden and there is no
+          // visibility manager on this screen.
+          model.visible = true;
+          // Texture type 2, the item model's only runtime slot. Null when the row names no texture,
+          // which leaves the shared `PLACEHOLDER` -- a visibly flat item rather than a missing one.
+          model.objectTexture = item.texturePath;
+        })
+        .catch((error) => {
+          console.warn(`glue character: ${item.modelPath} did not load`, error);
+        });
+    }
   }
 
   /** Sit the character on `stageSpot` and turn it by `yaw`. Cheap; called per frame from `update`. */
@@ -207,6 +275,15 @@ export class GlueSceneView {
   }
 
   private dropCharacter(): void {
+    // The attachments first, and off their BONES rather than off `characterRoot` -- that is where
+    // `attachTo` put them, and removing the body alone would leave them parented to a disposed
+    // skeleton with their reference never released.
+    for (const item of this.attached) {
+      item.parent?.remove(item);
+      M2Blueprint.unload(item);
+    }
+    this.attached = [];
+
     if (this.character) {
       this.characterRoot.remove(this.character);
       M2Blueprint.unload(this.character);
@@ -365,6 +442,21 @@ export class GlueSceneView {
     // from the moment it is armed enters its first drawn frame at the phase the clock says -- not at
     // keyframe zero, and not one solve behind.
     if (this.character) {
+      // The attachments BEFORE the body's `updateMatrixWorld`, so one recursive walk covers both --
+      // they are its scene-graph descendants (bone children), so the body's walk reaches them and a
+      // second `updateMatrixWorld` per item would be duplicated work.
+      //
+      // POSED BUT NEVER ARMED, deliberately. `solveBones` on an unarmed instance reads sequence slot
+      // -1, every channel falls through to bind pose (`instance-anim.ts:223-228`), and bind pose is
+      // exactly what an attached item should show: the reference calls it "a static mesh: its origin
+      // *is* the grip, aligned by the attach bone's animated frame"
+      // (`equipment/mod.rs:17-18`). What the call still buys is `evaluateMaterialChannels`, so a UV or
+      // transparency track on an item's material is read from its own state rather than left at
+      // whatever the shared material last held. Cheap: 8 bones on the claymore, 1 on the shield,
+      // pauldrons and helm, against the body's 138.
+      for (const item of this.attached) {
+        this.poseModel(item, clock);
+      }
       this.poseModel(this.character, clock);
       this.placeCharacter();
       this.character.updateMatrixWorld(true);

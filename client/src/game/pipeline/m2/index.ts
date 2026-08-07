@@ -5,6 +5,7 @@ import CacheManager from '../../world/cache-manager';
 import { collisionWorld } from '../../collision/collision-world';
 import { ObjectsManager } from '../../world/visibility-manager';
 import BatchManager from './batch-manager';
+import { attachmentLocalOffset } from './anim/axes';
 import { animCounters } from './anim/counters';
 import { InstanceAnim } from './anim/instance-anim';
 import {
@@ -987,6 +988,126 @@ class M2 extends THREE.Group {
     for (let i = 0; i < this.submeshes.length; i++) {
       this.submeshes[i].characterTextures = paths;
     }
+  }
+
+  /**
+   * An ATTACHED item model's own skin -- its texture type 2, which is the only runtime slot any
+   * `Item\ObjectComponents\` model declares.
+   *
+   * Separate from `characterTextures` because the two apply to disjoint models; see
+   * `material/index.ts#updateObjectTexture`.
+   */
+  set objectTexture(path: string | null) {
+    for (let i = 0; i < this.submeshes.length; i++) {
+      this.submeshes[i].objectTexture = path;
+    }
+  }
+
+  /**
+   * Parent `child` to the bone this model's attachment `id` names, so it rides that bone through every
+   * animation. Answers false when the model has no such attachment point.
+   *
+   * THE PLACEMENT LAW, and it is the whole of it. An M2 attachment record carries a bone index and a
+   * position **in raw model space** -- not a bone-local offset, which is the easy misreading and the one
+   * that would put a weapon at twice the hand's height. The bone-local offset is therefore
+   * `position - bones[bone].pivotPoint`, and both go through the engine mirror `D = diag(-1, -1, 1)`
+   * that `createGeometry` and `createSkeleton` already apply (`anim/axes.ts`) --
+   * `D(position) - D(pivot) = D(position - pivot)`, one subtraction and one sign flip.
+   *
+   * The reference computes exactly this (`benilla-assets/src/model.rs:429-435`:
+   * `offset = wow_to_bevy(position) - pivot_bevy(bone)`), and on 3.3.5a's
+   * `Character\Human\Male\HumanMale.m2` the difference is **identically zero for all 39 attachment
+   * records** (measured, max |difference| 0.000000) -- the attach bones are leaves sitting on their
+   * attach point. It is still subtracted rather than assumed away: it is the general law, and an item
+   * or creature model need not have it zero.
+   *
+   * THERE IS NO ROTATION TO CHOOSE, which is the other half of why this is short. The child gets the
+   * identity, and the bone's animated frame supplies the orientation: the item model's origin IS the
+   * grip (`benilla/crates/benilla/src/entities/equipment/mod.rs:14-18`). That this is exactly right and
+   * not an approximation follows from `D` being an involution -- the real client computes
+   * `bone_raw * v_raw` and mirrors the result, and
+   * `D (bone_raw v_raw) = (D bone_raw D)(D v_raw) = bone_engine * v_engine`, i.e. the engine-space bone
+   * matrix applied to the child's own already-mirrored vertices. A weapon through the hand, floating
+   * beside it or pointing at the sky are all symptoms of adding a rotation here, not of omitting one.
+   *
+   * `updateMatrix()` and not a reliance on `matrixAutoUpdate`: `M2` sets that false on itself (line
+   * 163) and an M2 child would therefore keep an identity `matrix` no matter what its `position`
+   * says. The position never changes after this call, so once is enough and per-frame auto-update
+   * would be waste.
+   *
+   * ONE PRECONDITION, stated because it is invisible when it fails: the bone has to be IN the scene
+   * graph, and it is only there when `useSkinning` is true -- `createMesh` parents the root bones to
+   * the `SkinnedMesh`, and the unskinned branch leaves them orphaned. Every character model is skinned
+   * (`humanmale.m2` has 138 bones, all animated), and an unskinned model has no animation for a rider
+   * to follow anyway, so this is a real constraint rather than a case to handle: attaching to an
+   * unskinned host would draw nothing at all, silently.
+   *
+   * AND THE ROOT MESH HAS TO STOP BEING `visible = false`, which is the whole of `unhideBoneSubtree`
+   * below. That is not a preference; it is what the first attempt at this got wrong, and it took a
+   * draw-path instrument to see: the sword was parented to the right bone, at the right offset, with
+   * both shaders resolved, its texture bound, its world sphere measured INSIDE the frustum -- and
+   * `onBeforeRender` fired zero times in 1.2 s of frames.
+   */
+  attachTo(id: number, child: THREE.Object3D): boolean {
+    const record = (this.data?.attachments ?? []).find((entry: any) => entry.id === id);
+    if (!record) {
+      return false;
+    }
+    const bone = this.bones?.[record.bone];
+    if (!bone) {
+      return false;
+    }
+    this.unhideBoneSubtree();
+    const pivot = this.data.bones?.[record.bone]?.pivotPoint ?? [0, 0, 0];
+    // Through `attachmentLocalOffset` and not inline, because this class is untestable (the
+    // constructor reaches for `collisionWorld` and `ObjectsManager`) and that number is the one thing
+    // here that fails silently. See its own doc for the derivation.
+    child.position.set(...attachmentLocalOffset(record.position, pivot));
+    bone.add(child);
+    child.updateMatrix();
+    return true;
+  }
+
+  /**
+   * Let the bones' subtree be DRAWN, without drawing the root mesh that owns it.
+   *
+   * `createMesh` hides that mesh with `visible = false` and says why ("Never display the mesh") -- the
+   * full-model geometry is only there to carry the skeleton binding, and the geosets draw as their own
+   * `Submesh` children of this group. Correct, and harmless until now, because nothing in this client
+   * had ever parented anything to a bone (the research says so in as many words, §1.4: "Nothing parents
+   * an `Object3D` to another model's bone anywhere").
+   *
+   * It is not harmless the moment something is, and three's own renderer says exactly why
+   * (`three.cjs:77803-77807`, verified in the installed 0.185.1):
+   *
+   *     function projectObject( object, camera, groupOrder, sortObjects ) {
+   *       if ( object.visible === false ) return;               // <- returns BEFORE the child walk
+   *       const visible = object.layers.test( camera.layers );
+   *       if ( visible ) { ...push this object's render item... }
+   *       const children = object.children;                     // <- only reached if visible
+   *       for (...) projectObject( children[i], ... );
+   *     }
+   *
+   * So `visible = false` hides the mesh AND everything under it, while a failed `layers.test` hides
+   * only the mesh itself and still walks its children. That is the difference between an attached
+   * weapon that draws and one that is perfect in every inspectable respect and submits no draw call:
+   * measured on the claymore, `visible: true`, `inFrustum: true`, both shaders resolved, its texture
+   * bound, `draws: 0`.
+   *
+   * Applied HERE and not in `createMesh`, so the pipeline-wide default is untouched: this runs only for
+   * a model something is actually attached to, which today is the glue character and nothing else. For
+   * every other population the root mesh keeps `visible = false` exactly as before. Idempotent, because
+   * a character with a weapon in each hand plus a helm calls it three times.
+   *
+   * `layers.disableAll()` and not a layer number: a mask of 0 fails `test` against every camera in this
+   * client, so the mesh is out of every pass rather than out of one that somebody could later enable.
+   */
+  private unhideBoneSubtree(): void {
+    if (!this.mesh || this.mesh.visible) {
+      return;
+    }
+    this.mesh.visible = true;
+    this.mesh.layers.disableAll();
   }
 
   dispose() {

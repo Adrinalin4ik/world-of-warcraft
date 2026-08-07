@@ -31,11 +31,20 @@ export type ItemDisplayInfoRow = {
   maleHelmetGeosetVisID: number;
   femaleHelmetGeosetVisID: number;
   /**
-   * Field 3. The sub-model's own texture NAME (no directory, no extension) -- for the BACK slot this
-   * is the cloak sheet texture type 2 wants; for a shoulder or weapon row it is that model's skin,
-   * which is piece 9's. Named here because the cloak is the one that is not an attachment.
+   * Fields 1/2. The sub-model FILE names (no directory), `.mdx` as the DBC spells them. Empty on the
+   * overwhelming majority of rows: only weapons, shields, shoulders and helms carry one. See
+   * `character-attachments.ts` for which column is which and which directory each kind lives in.
+   */
+  leftModelFile: string;
+  rightModelFile: string;
+  /**
+   * Fields 3/4. The sub-model's own texture NAME (no directory, no extension) -- for the BACK slot
+   * `leftModelTexture` is the cloak sheet texture type 2 wants; for a shoulder, weapon, shield or helm
+   * row it is that MODEL's own type-2 skin (`character-attachments.ts`). `rightModelTexture` is only
+   * ever the right pauldron's.
    */
   leftModelTexture: string;
+  rightModelTexture: string;
   upperArmTexture: string;
   lowerArmTexture: string;
   handsTexture: string;
@@ -100,9 +109,19 @@ const SLOT_BOOTS = 4;
 const SLOT_GLOVES = 6;
 const SLOT_TABARD = 7;
 
-/** The three `SMSG_CHAR_ENUM` slots that are not bodyslots but still change what is drawn. */
+/**
+ * The `SMSG_CHAR_ENUM` slots that are not bodyslots but still change what is drawn.
+ *
+ * `ENUM_SLOT_SHOULDER` and `ENUM_HELD_SLOTS` are consumed by `character-attachments.ts` and declared
+ * HERE rather than there, so that the two files' dependency runs one way only: attachments reads this
+ * file's types and constants, and this file imports nothing from it. A value cycle between them would
+ * be a live hazard, not a style point -- `wearsNothing` below needs the slot numbers at module scope.
+ */
 export const ENUM_SLOT_HELM = 0;
 export const ENUM_SLOT_CLOAK = 14;
+export const ENUM_SLOT_SHOULDER = 2;
+/** Mainhand, offhand, ranged -- `EQUIPMENT_SLOT_MAINHAND/OFFHAND/RANGED`, and `placement`'s order. */
+export const ENUM_HELD_SLOTS = [15, 16, 17] as const;
 
 /**
  * The client's `[0x803bf8]` bodyslot x layer stacking table, transcribed from the reference
@@ -138,14 +157,41 @@ export type WornEquipment = {
   bodyslots: (ItemDisplayInfoRow | null)[];
   cloak: ItemDisplayInfoRow | null;
   helm: ItemDisplayInfoRow | null;
+  /**
+   * The SHOULDER slot (enum slot 2). Not a bodyslot and never was -- a pauldron paints no body region
+   * at all (`ItemDisplayInfo` 1057's eight region columns are empty) -- it is purely two attached
+   * models, so it sits here beside the helm rather than in `bodyslots`.
+   */
+  shoulder: ItemDisplayInfoRow | null;
+  /**
+   * Mainhand, offhand and ranged, in that order -- `placement`'s held-slot index
+   * (`character-attachments.ts`). The `inventoryType` rides along because it is what `placement`
+   * branches on and it is NOT in `ItemDisplayInfo`: it comes off the wire per equipment slot
+   * (`world-wire.ts:138-142`), so it has to be carried from the enum record rather than looked up.
+   */
+  held: ({ row: ItemDisplayInfoRow; inventoryType: number } | null)[];
 };
 
-/** True when nothing at all is worn -- the caller uses it to skip the 6.7 MB `ItemDisplayInfo` load. */
+/**
+ * True when nothing at all is worn -- the caller uses it to skip the 6.7 MB `ItemDisplayInfo` load.
+ *
+ * The slot list has to cover every slot ANY consumer reads, and it grew twice: the shoulder slot and
+ * the held triple were absent while nothing consumed them, so a character wearing only a weapon (or
+ * only pauldrons) would have short-circuited here and drawn empty-handed for want of the table. No
+ * roster character is in that state -- all five wear a shirt -- which is exactly why it would have been
+ * an invisible bug rather than a visible one.
+ */
 export function wearsNothing(equipment: EquipmentDisplay[] | undefined): boolean {
   if (!equipment?.length) {
     return true;
   }
-  const slots = [...BODYSLOT_ENUM_SLOTS, ENUM_SLOT_HELM, ENUM_SLOT_CLOAK];
+  const slots = [
+    ...BODYSLOT_ENUM_SLOTS,
+    ENUM_SLOT_HELM,
+    ENUM_SLOT_CLOAK,
+    ENUM_SLOT_SHOULDER,
+    ...ENUM_HELD_SLOTS,
+  ];
   return !slots.some((slot) => equipment[slot]?.displayId);
 }
 
@@ -162,6 +208,15 @@ export function wornEquipmentFor(
     bodyslots: BODYSLOT_ENUM_SLOTS.map(lookup),
     cloak: lookup(ENUM_SLOT_CLOAK),
     helm: lookup(ENUM_SLOT_HELM),
+    shoulder: lookup(ENUM_SLOT_SHOULDER),
+    held: ENUM_HELD_SLOTS.map((slot) => {
+      const row = lookup(slot);
+      // `?? 0` and not a fallback guess: `placement` treats an unknown inventory type as a plain
+      // weapon, which is the right default for slot 15/16 and irrelevant for 17 (nothing is drawn
+      // there at all on this screen), so a missing byte degrades to "held in the hand" rather than to
+      // nothing.
+      return row ? { row, inventoryType: equipment?.[slot]?.inventoryType ?? 0 } : null;
+    }),
   };
 }
 

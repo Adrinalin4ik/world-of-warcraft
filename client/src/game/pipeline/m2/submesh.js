@@ -350,6 +350,15 @@ class Submesh extends THREE.Group {
     }
   }
 
+  // An attached item model's own skin (texture type 2 -- its only runtime slot), for every batch of
+  // this submesh. See `M2Material#updateObjectTexture`.
+  set objectTexture(path) {
+    const childrenLength = this.children.length;
+    for (let childIndex = 0; childIndex < childrenLength; ++childIndex) {
+      this.children[childIndex].material.updateObjectTexture(path);
+    }
+  }
+
   dispose() {
     this.geometry.dispose();
 

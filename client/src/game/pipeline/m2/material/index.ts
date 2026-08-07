@@ -263,24 +263,28 @@ class M2Material extends THREE.ShaderMaterial {
      */
     hair: null,
     /**
-     * Texture type 2 -- the CLOAK sheet, and now real because the thing that made it unreachable is
-     * gone. The note that used to stand here said type 2 was deliberately unhandled since "a
-     * character with no cloak equipped never shows [1502..1506], and its supplier is
-     * `ItemDisplayInfo` (the equipment piece)". That piece is here: the cloak geoset branch
-     * (`ui/scene/character-equipment.ts`, B8) now enables 1501+v, so the consumer is reachable, and
-     * without this slot it would draw the shared `PLACEHOLDER` -- a flat cape.
+     * Texture type 2 -- the **object skin**. ONE slot, TWO suppliers, which is why it is not called
+     * `cape` any more:
      *
-     * Supplied from the BACK slot's `ItemDisplayInfo.leftModelTexture` as
-     * `Item\ObjectComponents\Cape\<name>.blp` -- verified fetchable on the live host
-     * (`cape_mage_a_01black.blp`, 206 on a range request, 128x256). Note it is **DXT**, unlike every
-     * character-owned BLP measured: that is fine here and only here, because this texture goes to the
-     * GPU through `TextureLoader` rather than through the CPU blit, so the loader's
-     * leave-DXT-compressed default is exactly right for it.
+     *  - on a CHARACTER model it is the cloak sheet, read by geosets 1502..1506 only (see the map
+     *    under `hair`), supplied from the BACK slot's `ItemDisplayInfo.leftModelTexture` as
+     *    `Item\ObjectComponents\Cape\<name>.blp`. Verified fetchable on the live host
+     *    (`cape_mage_a_01black.blp`, 128x256). Note it is **DXT**, unlike every character-owned BLP
+     *    measured: fine here and only here, because this one goes to the GPU through `TextureLoader`
+     *    rather than through the CPU blit, so the loader's leave-DXT-compressed default is right.
+     *  - on an **attached `Item\ObjectComponents\` model** -- a weapon, a shield, a pauldron, a helm --
+     *    it is that model's whole skin, and it is the model's ONLY runtime slot. Measured on the real
+     *    files: `Sword_2H_Claymore_A_01.m2` declares `[type 2 (runtime), type 0
+     *    ITEM\OBJECTCOMPONENTS\WEAPON\ARMORREFLECT3.BLP]`, and `Shield_Round_A_01.m2`,
+     *    `LShoulder_Leather_A_01.m2`, `RShoulder_Leather_A_01.m2` and `Helm_Cloth_A_01_HuM.m2` each
+     *    declare exactly one texture, type 2. Without this an attached weapon draws the shared
+     *    `PLACEHOLDER`.
      *
-     * The cape MESH is a body geoset, not an attachment, which is why it belongs to the equipment
-     * piece rather than to piece 9 -- what piece 9 owns is the shoulder/helm/weapon sub-models.
+     * The cape MESH is a body geoset and not an attachment, which is why the CLOAK belongs to
+     * `character-equipment.ts` while every other type-2 consumer belongs to
+     * `character-attachments.ts`. They share the slot, not the supplier.
      */
-    cape: null,
+    object: null,
   };
   textures = [];
   textureDefs;
@@ -591,9 +595,10 @@ class M2Material extends THREE.ShaderMaterial {
         break;
 
       case 2:
-        // The character cloak sheet -- geosets 1502..1506 only. See `skins.cape`.
-        if (this.skins.cape) {
-          path = this.skins.cape;
+        // The object skin: a character's cloak sheet (geosets 1502..1506 only), or an attached
+        // `Item\ObjectComponents\` model's whole skin. See `skins.object`.
+        if (this.skins.object) {
+          path = this.skins.object;
         }
         break;
 
@@ -654,7 +659,23 @@ class M2Material extends THREE.ShaderMaterial {
   updateCharacterTextures(body, hair, cape) {
     this.skins.body = body;
     this.skins.hair = hair;
-    this.skins.cape = cape;
+    this.skins.object = cape;
+
+    this.loadTextures();
+  }
+
+  /**
+   * Supply an ATTACHED item model's own skin -- its texture type 2, the only runtime slot any
+   * `Item\ObjectComponents\` model declares (measured; see `skins.object`).
+   *
+   * A separate entry point from `updateCharacterTextures` and not a fourth argument to it, because the
+   * two never apply to the same material: a weapon's material has no type 1 and no type 6 to fill, and
+   * the body's has no object model. It is still ONE `loadTextures()` call per material, which is the
+   * constraint that setter's doc is about -- an item model's material is touched exactly once, the same
+   * as the body's.
+   */
+  updateObjectTexture(path) {
+    this.skins.object = path;
 
     this.loadTextures();
   }
