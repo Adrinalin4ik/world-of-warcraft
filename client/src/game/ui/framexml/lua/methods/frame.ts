@@ -210,6 +210,19 @@ const MODEL: MethodTable = {
   SetFogColor: notImplemented('SetFogColor', 'no per-widget model state exists; see MODEL surface note'),
   ClearFog: notImplemented('ClearFog', 'no per-widget model state exists; see MODEL surface note'),
   SetGlow: notImplemented('SetGlow', 'no per-widget model state exists; see MODEL surface note'),
+  // `CharacterSelect_UpdateModel` (characterselect.lua:295) steps the model's animation clock. Declared
+  // with the rest of the surface so the load report names the missing model once, from one place.
+  AdvanceTime: notImplemented('AdvanceTime', 'no per-widget model state exists; see MODEL surface note'),
+  // The lighting half of the same surface, and the four that MATTER most on CharacterSelect:
+  // `SetLighting` (glueparent.lua:326-371) is called from `SetBackgroundModel`, which
+  // `CharacterSelect_SelectCharacter` calls BEFORE `SelectCharacter(id)`. So while `ResetLights` and
+  // the three `Add*Light`s were absent, picking a character raised inside the client's own Lua and the
+  // selection never reached the engine at all -- no character name, no locked row highlight. Declared
+  // stubs turn that into three report lines and a working screen.
+  ResetLights: notImplemented('ResetLights', 'no per-widget model state exists; see MODEL surface note'),
+  AddLight: notImplemented('AddLight', 'no per-widget model state exists; see MODEL surface note'),
+  AddCharacterLight: notImplemented('AddCharacterLight', 'no per-widget model state exists; see MODEL surface note'),
+  AddPetLight: notImplemented('AddPetLight', 'no per-widget model state exists; see MODEL surface note'),
 };
 
 registerMethods('FRAME', FRAME);

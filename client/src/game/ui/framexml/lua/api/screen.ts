@@ -52,16 +52,44 @@ function ensureShiftTracker(): void {
   });
 }
 
+/**
+ * Live pointer position, tracked the same way (and for the same reason) as the Shift key: a poll has
+ * nothing to poll, so it has to be a listener.
+ *
+ * `GetCursorPosition` is the engine's, and its Y axis is the ENGINE's -- measured up from the bottom of
+ * the window, like every FrameXML anchor -- where a DOM `clientY` measures down from the top. The one
+ * caller in this manifest (`CharacterSelectFrame_OnMouseDown`/`_OnUpdate`, characterselect.lua:479-496)
+ * reads only X, so the flip is unobservable today and is done anyway: the day something reads Y, a
+ * silently-inverted axis is a drag that goes the wrong way with nothing to point at.
+ */
+let cursorX = 0;
+let cursorY = 0;
+let cursorTrackerInstalled = false;
+function ensureCursorTracker(): void {
+  if (cursorTrackerInstalled || typeof window === 'undefined') {
+    return;
+  }
+  cursorTrackerInstalled = true;
+  window.addEventListener('pointermove', (event) => {
+    cursorX = event.clientX;
+    cursorY = window.innerHeight - event.clientY;
+  });
+}
+
 /** Installs the screen/environment globals on `vm`. */
 export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): void {
   const viewport = options.viewport ?? defaultViewport;
   ensureShiftTracker();
+  ensureCursorTracker();
 
   // GlueParent_OnLoad: the letterbox-bar math, which needs the real device pixels, not authored units.
   vm.registerFunction('GetScreenWidth', () => [viewport().width]);
   vm.registerFunction('GetScreenHeight', () => [viewport().height]);
 
   vm.registerFunction('IsShiftKeyDown', () => [shiftDown]);
+
+  // CharacterSelectFrame's drag-to-rotate (characterselect.lua:479,492,494).
+  vm.registerFunction('GetCursorPosition', () => [cursorX, cursorY]);
 
   vm.registerFunction('IsWindowsClient', () => {
     const ua =

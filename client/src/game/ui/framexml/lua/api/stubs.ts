@@ -82,6 +82,29 @@ export function installStubApi(vm: LuaVM): void {
   vm.registerFunction('RequestRealmSplitInfo', () => []);
   vm.registerFunction('RealmListDialogCancelled', () => []);
 
+  // --- The addon system (AddonList.xml, and `UpdateAddonButton` from CharacterSelect_OnShow) -------
+  //
+  // This client has no addon loader at all: nothing reads an `.toc`, nothing sandboxes a third-party
+  // Lua file, and there is no disk to enumerate. So "no addons" is the complete and TRUE answer, not a
+  // placeholder -- `GetNumAddOns() > 0` is the first line of `UpdateAddonButton` (addonlist.lua:5) and
+  // it correctly hides the Addons button on the character screen.
+  //
+  // Latent until this task: `UpdateAddonButton` is only reachable from `CharacterSelect_OnShow`, so
+  // while `CharacterSelect.xml` was past `stopAfter` the nil `GetNumAddOns` could not be hit. It aborted
+  // that whole `OnShow` -- which is why `CharSelectRealmName` drew blank before this line existed.
+  vm.registerFunction('GetNumAddOns', () => [0]); // fed into `> 0` and `for i=1, ...`; must be a number.
+  vm.registerFunction('GetAddOnInfo', () => []);
+  vm.registerFunction('GetAddOnDependencies', () => []);
+  vm.registerFunction('GetAddOnEnableState', () => [0]); // 0 = disabled, the state of an absent addon.
+  vm.registerFunction('EnableAddOn', () => []);
+  vm.registerFunction('DisableAddOn', () => []);
+  vm.registerFunction('EnableAllAddOns', () => []);
+  vm.registerFunction('DisableAllAddOns', () => []);
+  vm.registerFunction('ResetAddOns', () => []);
+  vm.registerFunction('SaveAddOns', () => []);
+  vm.registerFunction('IsAddonVersionCheckEnabled', () => [false]);
+  vm.registerFunction('SetAddonVersionCheck', () => []);
+
   // --- CharacterSelect's model-frame background art -----------------------------------------------
   vm.registerFunction('SetCharCustomizeBackground', () => []);
   vm.registerFunction('SetCharSelectBackground', () => []);

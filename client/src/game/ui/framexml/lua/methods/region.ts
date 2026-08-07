@@ -409,8 +409,13 @@ const TEXTURE: MethodTable = {
   SetDesaturated: notImplemented('SetDesaturated', 'widget.ts has no desaturation field yet'),
 };
 
-/** A `FontSpec`, created on first use so a Texture never carries one and a FontString always can. */
-function ensureFont(widget: Widget) {
+/**
+ * A `FontSpec`, created on first use so a Texture never carries one and a FontString always can.
+ *
+ * Exported for `kinds.ts#GetTextWidth`, which measures a BUTTON's caption the same way
+ * `GetStringWidth` measures a font string's own text -- one measurement rule, not two.
+ */
+export function ensureFont(widget: Widget) {
   if (!widget.font) {
     widget.font = { family: 'FRIZQT', size: 12, color: '#ffffff', outline: false, align: 'LEFT' };
   }

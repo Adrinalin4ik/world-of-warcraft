@@ -17,7 +17,8 @@
 import { FocusSink, MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { Anchor } from '../../../layout';
 import { Widget } from '../../../widget';
-import { applyFontObject, fontObjectName, notImplemented, warnOnce, widgetOf } from './region';
+import { applyFontObject, ensureFont, fontObjectName, notImplemented, warnOnce, widgetOf } from './region';
+import { measureText } from '../../../text';
 
 /** `0..1` floats to the `#rrggbb` string `Widget` stores colors as -- duplicated from `region.ts`'s
  * private helper of the same shape rather than exported, since it is three lines and not worth a
@@ -329,6 +330,37 @@ const BUTTON: MethodTable = {
     const id = buttonLabels.get(self);
     return [id === undefined ? null : ctx.wrapper(id)];
   },
+  /**
+   * The width of the button's CAPTION, not of the button -- `GetWidth` is the button's.
+   *
+   * Real, because it is arithmetic the client depends on: `CharacterSelect_TabResize`
+   * (characterselect.lua:413-421) sizes the Change Realm and Create Character buttons to
+   * `GetTextWidth() - 8` plus twice their left cap, so a stub answering 0 would collapse both to their
+   * end caps. Measured through the same `measureText` a `<FontString>`'s `GetStringWidth` uses, at
+   * scale 1, for the same reason that one gives (`region.ts#GetWidth`): a widget's size is in authored
+   * units and no Lua caller expects device pixels back.
+   */
+  GetTextWidth: (ctx, self) => {
+    const id = buttonLabels.get(self);
+    if (id === undefined) {
+      return [0];
+    }
+    const label = ctx.registry.widget(id)!;
+    return [measureText(label.text, ensureFont(label), 1).width];
+  },
+  /**
+   * Which mouse buttons fire `OnClick` -- `RegisterForClicks("LeftButtonDown", ...)`.
+   *
+   * A declared gap rather than a stored set, because storing it would be a lie in the other direction:
+   * `ui/input.ts` routes only a LEFT button press and hardcodes `"LeftButton"` (task-9 report, fix
+   * round 2), so nothing downstream could honour a registration for anything else. The two callers in
+   * this manifest are `CharacterSelectRotateLeft`/`Right` (characterselect.xml), whose held-down
+   * rotation is an `<OnUpdate>` this runtime does not dispatch anyway.
+   */
+  RegisterForClicks: notImplemented(
+    'RegisterForClicks',
+    'ui/input.ts routes only a left-button press, so no other registration could be honoured',
+  ),
 
   // Each of the five state-moving methods below repaints the CAPTION as well as the art: a caller that
   // disables a button and reads its label back must not have to wait for the next frame's poll, and the
