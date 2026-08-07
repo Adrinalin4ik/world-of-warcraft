@@ -79,6 +79,8 @@ export class GlueApp {
 
   private frame = 0;
   private lastTime = 0;
+  /** The last stage-render failure reported, so a per-frame throw is one console line and not a flood. */
+  private lastSceneError: string | null = null;
 
   constructor(canvas: HTMLCanvasElement, session: GameSession) {
     this.canvas = canvas;
@@ -260,8 +262,31 @@ export class GlueApp {
     this.current.screen.update(dt);
 
     this.renderer.clear();
-    this.sceneView.update(dt);
-    this.sceneView.render();
+    // THE 3D STAGE MAY NOT TAKE THE UI DOWN WITH IT.
+    //
+    // The UI pass runs after the stage pass in the same callback, so an exception here used to abort
+    // the rest of the tick -- and the whole 2D interface vanished while the partly-drawn stage stayed
+    // on screen, with nothing on it to say why. That is not hypothetical: `UI_Human`, the character
+    // screen's own stage, has a batch that resolves to the `Diffuse_T2` vertex shader, which has no
+    // entry in `M2Material.VERTEX_SHADERS` (the gap that file's own comment already names). Its
+    // material reaches three.js with `vertexShader === undefined` and `WebGLProgram` throws on every
+    // frame, so `/?ui=lua` reached character select with a correct 368-frame widget tree, correct
+    // rects and not one pixel of UI drawn.
+    //
+    // Warned ONCE by message, because a per-frame throw is a per-frame console line otherwise, and the
+    // one line that matters is drowned by its own repetition. The underlying M2 gap is a
+    // pipeline-layer fix and is deliberately NOT made here; this only stops one layer's failure from
+    // being reported as the other layer's.
+    try {
+      this.sceneView.update(dt);
+      this.sceneView.render();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (this.lastSceneError !== message) {
+        this.lastSceneError = message;
+        console.error(`glue: the background stage failed to render; the UI still draws. ${message}`);
+      }
+    }
 
     const viewport = { width: window.innerWidth, height: window.innerHeight };
     // `measureText` is what fills in an unsized FONT STRING's rect (`widget.ts#deriveSize`) -- the
