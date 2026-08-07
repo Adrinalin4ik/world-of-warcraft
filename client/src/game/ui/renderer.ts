@@ -38,7 +38,7 @@ export type ResolvedSprite = {
 };
 export type SpriteResolver = (item: DrawItem) => ResolvedSprite | null;
 
-/** One unit quad, shared by every plain widget. Sub-rects come from the material's map offset/repeat. */
+/** One unit quad, CLONED per pooled mesh. Sub-rects live in each clone's own `uv` attribute. */
 const QUAD = new THREE.PlaneGeometry(1, 1);
 
 /**
@@ -50,6 +50,7 @@ const ORDER_STRIDE = 16;
 type Pooled = {
   mesh: THREE.Mesh;
   material: THREE.MeshBasicMaterial;
+  geometry: THREE.BufferGeometry;
 };
 
 /**
@@ -58,8 +59,9 @@ type Pooled = {
  * `applyTexCoords` puts a sub-rect on the material's map by setting `offset`/`repeat` on the
  * THREE.Texture -- which is SHARED across every widget sampling that sheet. Nine pieces of one
  * border atlas need nine different sub-rects in a single frame, so going through the shared texture
- * would leave whichever piece was applied last sampling for all nine (the hazard the note at the
- * `applyTexCoords` call site below warns about).
+ * would leave whichever piece was applied last sampling for all nine. Plain widgets now carry their
+ * sub-rects the same way, for the same reason -- see `writeQuadUVs`; the backdrop path just got there
+ * first, because nine-in-one-frame made the hazard unavoidable rather than merely possible.
  *
  * So the sub-rects live in the geometry's `uv` attribute instead, one geometry per piece. This is
  * strictly better than cloning the texture per sub-rect, for two reasons:
@@ -133,6 +135,48 @@ function writePieceUVs(geometry: THREE.BufferGeometry, piece: BackdropPiece): vo
   uv.needsUpdate = true;
 }
 
+/**
+ * The same thing `writePieceUVs` does, for a plain (non-backdrop) widget's single quad.
+ *
+ * WHY THIS EXISTS, rather than `applyTexCoords` on the material: `offset`/`repeat` live on the
+ * `THREE.Texture`, and `GlueArt` hands the SAME texture object to every widget that names the same
+ * file. So two widgets sampling one sheet with DIFFERENT sub-rects in one frame both drew with
+ * whichever was applied last. The note that used to sit at the call site said no glue screen did that
+ * "yet" -- character select does, and has since the arrows were authored:
+ * `CharacterSelectRotateLeft` and `CharacterSelectRotateRight` both take
+ * `Interface\Glues\CharacterCreate\UI-RotationRight-Big-Up`, and the LEFT one flips it with
+ * `<TexCoords left="1.0" right="0" top="0" bottom="1.0"/>` (characterselect.xml:229-234). The right
+ * arrow has no `<TexCoords>`, so it reset the shared texture to identity and both arrows pointed
+ * right.
+ *
+ * REVERSED COORDINATES ARE NOT NORMALISED ANYWHERE, and that was worth checking rather than assuming:
+ * `loader.ts#texCoordsOf` reads the four attributes verbatim, `methods/region.ts#SetTexCoord` stores
+ * them verbatim as `{u0: left, v0: top, u1: right, v1: bottom}`, and nothing sorts or clamps them. So
+ * `u0 > u1` survives all the way here, and the mirror is a straight linear interpolation between the
+ * two -- exactly as the engine treats them.
+ */
+export function writeQuadUVs(geometry: THREE.BufferGeometry, tc: TexCoords | null): void {
+  const uv = geometry.getAttribute('uv') as THREE.BufferAttribute;
+
+  // Vertex order and the (fx, fy) convention are `writePieceUVs`'s; see its comment.
+  const corners: Array<[number, number]> = [
+    [0, 1],
+    [1, 1],
+    [0, 0],
+    [1, 0],
+  ];
+
+  corners.forEach(([fx, fy], index) => {
+    if (!tc) {
+      uv.setXY(index, fx, fy);
+      return;
+    }
+    uv.setXY(index, tc.u0 + fx * (tc.u1 - tc.u0), tc.v0 + fy * (tc.v1 - tc.v0));
+  });
+
+  uv.needsUpdate = true;
+}
+
 export class GlueRenderer {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
@@ -182,11 +226,14 @@ export class GlueRenderer {
 
       let entry = this.pool.get(item.widget.id);
       if (!entry) {
+        // Its OWN geometry, not the shared `QUAD`: the sub-rect is written into this mesh's `uv`
+        // attribute (`writeQuadUVs`), which is per-widget by definition.
+        const geometry = QUAD.clone();
         const material = createQuadMaterial(item.widget.blend);
-        const mesh = new THREE.Mesh(QUAD, material);
+        const mesh = new THREE.Mesh(geometry, material);
         mesh.frustumCulled = false;
         this.scene.add(mesh);
-        entry = { mesh, material };
+        entry = { mesh, material, geometry };
         this.pool.set(item.widget.id, entry);
       }
 
@@ -197,10 +244,12 @@ export class GlueRenderer {
       entry.material.color.set(item.widget.vertexColor);
       entry.material.needsUpdate = true;
       // The widget's own sub-rect wins when it sets one; otherwise the sprite's, from the art table.
-      // NOTE: offset/repeat live on the shared THREE.Texture, so two widgets sampling DIFFERENT
-      // regions of one sheet in the same frame would both draw with whichever was applied last. No
-      // glue screen does that yet -- every sprite sharing a sheet shares its region too.
-      applyTexCoords(entry.material, item.widget.texCoords ?? resolved.texCoords ?? null);
+      // In this mesh's OWN uv attribute -- see `writeQuadUVs` for why the shared texture's
+      // offset/repeat cannot carry it. `applyTexCoords(material, null)` still runs, to clear any
+      // sub-rect a previous frame (or an older build) left on the sheet: the map is shared, so leaving
+      // a stale transform on it would shift every widget that samples the same file.
+      applyTexCoords(entry.material, null);
+      writeQuadUVs(entry.geometry, item.widget.texCoords ?? resolved.texCoords ?? null);
 
       const { left, top, width, height } = item.rect;
 
@@ -332,6 +381,7 @@ export class GlueRenderer {
     this.pool.forEach((entry) => {
       this.scene.remove(entry.mesh);
       entry.material.dispose();
+      entry.geometry.dispose();
     });
     this.pool.clear();
     // The per-piece geometries are this pool's own -- nothing else references them -- so they are
