@@ -29,10 +29,27 @@ export class UpdateObjectHandler extends EventEmitter {
     const buffer = gp.raw.slice(8); // remove first 9 bytes
 
     // https://github.com/tomrus88/WoWTools/blob/e3c4600b5f6d91c12f9014455a3e6c79158055d9/src/UpdatePacketParser/Parser.cs#L139 decompress is here
-    zlib.inflate(buffer, {}, (error: any, result: any) => {
+    //
+    // THE CALLBACK IS THE SECOND ARGUMENT, not the third. `zlib-browserify` is not node's zlib: its
+    // bundled `zlib.js:52` is `function wb(b,a,c){process.nextTick(function(){ ... a(d,f) })}` --
+    // `(input, callback, options)`. Calling it node-style as `(buffer, {}, cb)` made `a` the empty
+    // options object, so every single compressed update threw `a is not a function` INSIDE
+    // `process.nextTick` -- an unhandled window error with no stack into this file, which is why it
+    // read as noise rather than as a dropped packet. Measured on a live world entry against
+    // `logon.gladewow.ru` (roster character `Gesf`): 38 `SMSG_COMPRESSED_UPDATE_OBJECT` in the first
+    // 25 s, 38 throws, zero objects created. `SMSG_UPDATE_OBJECT` (the uncompressed form, 3 in the
+    // same window) worked throughout, which is exactly why the handler looked wired up.
+    //
+    // `error` is now checked. `xb`/`vb` re-throw inside the nextTick's try, so a corrupt stream
+    // arrives here as `error` set and `result` undefined; without the guard that became a
+    // `new Packet(0x01F6, undefined, false)` and a second, more confusing throw.
+    zlib.inflate(buffer, (error: any, result: any) => {
+      if (error) {
+        console.error('SMSG_COMPRESSED_UPDATE_OBJECT: inflate failed', error);
+        return;
+      }
       const packet = new Packet(0x01F6, result, false);
       this.handleUpdateObjectPacket(packet);
-      
     });
   }
 
