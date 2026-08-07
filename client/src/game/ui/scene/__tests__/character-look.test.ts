@@ -51,6 +51,7 @@ const TABLES: Record<string, { records: any[] }> = {
         generalType: 0,
         textures: ['Character\\Human\\Male\\HumanMaleSkin00_00.blp', '', ''],
         flags: 17,
+        type: 0,
         variation: 0,
       },
       {
@@ -59,8 +60,57 @@ const TABLES: Record<string, { records: any[] }> = {
         generalType: 0,
         textures: ['Character\\Human\\Female\\HumanFemaleSkin00_00.blp', '', ''],
         flags: 17,
+        type: 0,
         variation: 0,
       },
+      // BaseSection 3 (hair), Human Male VariationIndex 11, ColorIndex 4 and 5 -- real rows 325 and
+      // 326. Two of them, so the ColorIndex match has something to be wrong about. `Hair02`, not
+      // `Hair11`: the art family is table data, which is exactly why this cannot be templated.
+      {
+        raceID: 1,
+        gender: 0,
+        generalType: 3,
+        textures: [
+          'Character\\Human\\Hair02_04.blp',
+          'Character\\Human\\ScalpLowerHair02_04.blp',
+          'Character\\Human\\ScalpUpperHair02_04.blp',
+        ],
+        flags: 17,
+        type: 11,
+        variation: 4,
+      },
+      {
+        raceID: 1,
+        gender: 0,
+        generalType: 3,
+        textures: [
+          'Character\\Human\\Hair02_05.blp',
+          'Character\\Human\\ScalpLowerHair02_05.blp',
+          'Character\\Human\\ScalpUpperHair02_05.blp',
+        ],
+        flags: 17,
+        type: 11,
+        variation: 5,
+      },
+    ],
+  },
+  CharHairGeosets: {
+    records: [
+      // The real Human Male rows for variations 0, 10, 11 and 12. Variation 11 -> geoset 12, i.e.
+      // the mapping is off by one AND table-driven; variation 0 -> geoset 0 with ShowScalp 1.
+      { raceID: 1, gender: 0, hairType: 0, geoset: 0, bald: true },
+      { raceID: 1, gender: 0, hairType: 10, geoset: 11, bald: false },
+      { raceID: 1, gender: 0, hairType: 11, geoset: 12, bald: false },
+      { raceID: 1, gender: 0, hairType: 12, geoset: 13, bald: false },
+    ],
+  },
+  CharacterFacialHairStyles: {
+    records: [
+      // Human Male variations 0 and 1, verbatim. Variation 1's columns are (1, 2, 1), which is the
+      // asymmetry that makes the column -> group order visible in the assertion below: a naive
+      // column-order mapping would answer 101/202/301 instead of 101/201/302.
+      { raceID: 1, gender: 0, specificID: 0, geosetIDs: [1, 1, 1, 0, 0] },
+      { raceID: 1, gender: 0, specificID: 1, geosetIDs: [1, 2, 1, 0, 0] },
     ],
   },
 };
@@ -81,11 +131,22 @@ jest.mock('../../../pipeline/dbc', () => ({
   },
 }));
 
-const character = (race: number, gender: number): CharacterRecord =>
+const character = (
+  race: number,
+  gender: number,
+  appearance: Partial<CharacterRecord['appearance']> = {},
+): CharacterRecord =>
   ({
     race,
     gender,
-    appearance: { skin: 0, face: 0, hairStyle: 0, hairColor: 0, facialHair: 0 },
+    appearance: {
+      skin: 0,
+      face: 0,
+      hairStyle: 0,
+      hairColor: 0,
+      facialHair: 0,
+      ...appearance,
+    },
   } as CharacterRecord);
 
 describe('resolveCharacterLook', () => {
@@ -101,6 +162,33 @@ describe('resolveCharacterLook', () => {
       modelPath: 'Character\\Human\\Female\\HumanFemale.mdx',
       bodyTexture: 'Character\\Human\\Female\\HumanFemaleSkin00_00.blp',
     });
+  });
+});
+
+describe('resolveCharacterLook, hair and facial hair', () => {
+  it('takes the five appearance dials to geosets and texture paths', async () => {
+    // The real bytes the test server sends for Gesf, a level 1 Human male: skin 0, face 4,
+    // hairStyle 11, hairColor 5, facialHair 1. Read off the live session, not invented -- a
+    // hairStyle of 0 maps to the BALD geoset and would have made this look broken while correct.
+    const look = await resolveCharacterLook(
+      character(1, 0, { face: 4, hairStyle: 11, hairColor: 5, facialHair: 1 }),
+    );
+
+    expect(look).toMatchObject({
+      bodyTexture: 'Character\\Human\\Male\\HumanMaleSkin00_00.blp',
+      // hairStyle 11 + hairColor 5, both dials load-bearing: the stem comes from VariationIndex and
+      // the suffix from ColorIndex, and `_05` is the blonde of the ten.
+      hairTexture: 'Character\\Human\\Hair02_05.blp',
+    });
+
+    // Group 0 keeps the unconditional body (0) and gains hairstyle geoset 12 -- NOT 11, which is what
+    // treating the dial as the geoset id would give.
+    expect(look!.geosets.has(0)).toBe(true);
+    expect(look!.geosets.has(12)).toBe(true);
+
+    // Groups 1/2/3: columns (1, 2, 1) under the measured order (col1->group 1, col2->group 3,
+    // col3->group 2). The clean-shaven 301 that `NAKED_GEOSETS` carries must be GONE, replaced by 302.
+    expect([...look!.geosets].filter((id) => id >= 100 && id < 400).sort()).toEqual([101, 201, 302]);
   });
 });
 

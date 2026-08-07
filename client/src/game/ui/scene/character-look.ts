@@ -11,12 +11,18 @@
  *    atlas of skin + face + facial hair + scalp + underwear + eight equipment regions into that slot;
  *    the base skin alone therefore leaves the atlas's face and pelvis tiles as the blank regions the
  *    file ships with. Known, and the compositor is its own piece of work.
- *  - **No hair and no facial hair.** The geosets are one `CharHairGeosets` /
- *    `CharacterFacialHairStyles` lookup away and `setVisibleGeosets` would show them today -- but
- *    `humanmale.m2`'s hair mesh reads texture type **6** (measured: its four texture defs are types
- *    1, 6, 0, 2), which nothing supplies yet, so the hair would draw with an unbound sampler. A bald
- *    head with real skin is an honest picture; a black helmet is not. Both wait for type 6.
  *  - **No equipment.** Needs `ItemDisplayInfo` (6.7 MB) and the eight geoset branches.
+ *
+ * ONE THING HERE IS HALF-DRESSED BY DESIGN, and it is not an oversight: facial hair. On
+ * `humanmale.m2` the facial-hair geosets (groups 1, 2 and 3) read texture type **1**, the body
+ * atlas -- measured by walking the skin's batches through `textureLookups`. Their art
+ * (`FacialLowerHair<v>_<c>.blp` / `FacialUpperHair<v>_<c>.blp`, `CharSections` BaseSection 2) is a
+ * COMPOSITE layer, so a Human beard cannot be coloured until the compositor lands: the geometry is
+ * right and it samples the blank facial region of the raw base skin, i.e. it reads as bare skin.
+ * That is the same known gap as the flat face, on the same texture, and no worse. Hair itself is
+ * different -- it reads type 6, which is a whole sheet of its own and IS supplied here.
+ * (Other races differ and the data says so: `bloodelfmale.m2` and `dwarfmale.m2` put their
+ * facial-hair groups on type 6, so those DO colour correctly today.)
  */
 import DBC from '../../pipeline/dbc';
 import { CharacterRecord } from '../../../network/protocol/types';
@@ -29,6 +35,12 @@ export type CharacterLook = {
   scale: number;
   /** `CharSections` BaseSection 0 `TextureName[0]`, or null if the table has no row for this look. */
   bodyTexture: string | null;
+  /**
+   * Texture type 6 -- `CharSections` BaseSection 3 `TextureName[0]`, keyed on the hairStyle and
+   * hairColor dials. Null for a bald look, whose BaseSection 3 rows carry three EMPTY strings
+   * (measured: Human Male VariationIndex 0, ids 3262..3271, all three texture columns blank).
+   */
+  hairTexture: string | null;
   /** The geoset ids to draw. See `NAKED_GEOSETS`. */
   geosets: Set<number>;
 };
@@ -71,6 +83,9 @@ const MALE = 0;
  */
 const BASE_SECTION_SKIN = 0;
 
+/** `CharSections.BaseSection` 3 -- hair. `TextureName[0]` is the type-6 mesh sheet. */
+const BASE_SECTION_HAIR = 3;
+
 /**
  * `CharSections.Flags` bits that disqualify a row from being a playable character-create look.
  *
@@ -86,13 +101,22 @@ const SECTION_FLAG_DEATH_KNIGHT = 0x04;
 const SECTION_FLAG_NPC = 0x08;
 
 type ChrRacesRow = { id: number; maleDisplayID: number; femaleDisplayID: number };
+type CharHairGeosetsRow = { raceID: number; gender: number; hairType: number; geoset: number };
+type CharacterFacialHairStylesRow = {
+  raceID: number;
+  gender: number;
+  specificID: number;
+  geosetIDs: number[];
+};
 type CharSectionsRow = {
   raceID: number;
   gender: number;
   generalType: number;
   textures: string[];
   flags: number;
-  /** The schema's name for `ColorIndex` -- the dial value. See `bodySkinFor`. */
+  /** The schema's name for `VariationIndex` -- the hairStyle dial on BaseSection 3 rows. */
+  type: number;
+  /** The schema's name for `ColorIndex` -- the skin or hairColor dial. See `bodySkinFor`. */
   variation: number;
 };
 
@@ -148,18 +172,182 @@ export function bodySkinFor(
 }
 
 /**
- * Resolve one character's look. Four DBC reads, all cached by `DBC.load`.
+ * The group-0 geoset a `hairStyle` dial shows.
  *
- * All four go through `DBC.load`, whose cache is a static keyed by table name -- so `classes/unit.ts`
+ * `CharHairGeosets` (measured: 339 records, 6 fields, 24-byte stride) keys on
+ * (RaceID, SexID, VariationID) and its `geoset` column is TABLE DATA, not arithmetic -- measured for
+ * Human Male, variation 1 maps to geoset **2**, 2 to 3, ... 16 to 17, and variation 0 maps to
+ * geoset 0 with ShowScalp 1.
+ *
+ * `max(1, geoset)` is the reference's rule (`characters/geosets.rs`) and the measured data says why
+ * it is needed: variation 0's geoset column is 0, and 0 is the BODY submesh group, already drawn
+ * unconditionally. Geoset 1 is the bald scalp cap (`humanmale.m2` partID 1, 28 verts at z 1.88..2.02,
+ * texture type 1), which is what a bald head must actually show.
+ *
+ * FIRST ROW WINS on a duplicate key, and duplicates are real: measured four rows for
+ * (race 9 Goblin, sex 0, variation 0) with geosets 1, 2, 1, 2, and three for (race 8 Troll, sex 0,
+ * variation 0). Answers null when the table describes no such (race, sex) at all, so the caller can
+ * leave group 0 at the body alone rather than guess a scalp.
+ */
+export function hairGeosetFor(
+  rows: CharHairGeosetsRow[],
+  race: number,
+  gender: number,
+  hairStyle: number,
+): number | null {
+  let fallback: CharHairGeosetsRow | null = null;
+  for (const row of rows) {
+    if (!row || row.raceID !== race || row.gender !== gender) {
+      continue;
+    }
+    if (row.hairType === hairStyle) {
+      return Math.max(1, row.geoset);
+    }
+    // A roster byte the table does not describe falls to this race/sex's lowest variation rather
+    // than to nothing -- the same shape `bodySkinFor` uses, and for the same reason.
+    if (fallback === null || row.hairType < fallback.hairType) {
+      fallback = row;
+    }
+  }
+  return fallback === null ? null : Math.max(1, fallback.geoset);
+}
+
+/**
+ * The hair sheet (texture type 6) for a hairStyle/hairColor pair.
+ *
+ * `CharSections` BaseSection 3: `VariationIndex` is the hairStyle dial and `ColorIndex` the hairColor
+ * dial. Measured for Human Male hairStyle 11: ColorIndex 0..9 are the ten player rows (flags 17) and
+ * carry `Character\Human\Hair02_00.blp` .. `Hair02_09.blp`, with ColorIndex 10..12 the Death Knight
+ * rows (flags 5). Note the file stem is **Hair02**, not Hair11 -- the art family is table data too.
+ * The ten colours are genuinely different art. Mean RGB of the decoded DXT colour blocks -- which
+ * includes the sheet's transparent texels, so these are hue indicators and not rendered pixels:
+ * `_00` (39,33,40) near-black, `_02` (101,56,52) auburn, `_05` (183,123,46) golden, `_09`
+ * (131,126,125) grey. `_05` renders blonde on screen, which is the check that actually matters.
+ *
+ * Returns null for a bald look on purpose -- VariationIndex 0's three texture columns are empty
+ * strings in the real table, and there is no hair mesh to sample them.
+ */
+export function hairTextureFor(
+  rows: CharSectionsRow[],
+  race: number,
+  gender: number,
+  hairStyle: number,
+  hairColor: number,
+): string | null {
+  let fallback: CharSectionsRow | null = null;
+  for (const row of rows) {
+    if (!row || row.raceID !== race || row.gender !== gender) {
+      continue;
+    }
+    if (row.generalType !== BASE_SECTION_HAIR || row.type !== hairStyle) {
+      continue;
+    }
+    if ((row.flags & (SECTION_FLAG_DEATH_KNIGHT | SECTION_FLAG_NPC)) !== 0) {
+      continue;
+    }
+    if (row.variation === hairColor) {
+      return row.textures?.[0] || null;
+    }
+    if (fallback === null || row.variation < fallback.variation) {
+      fallback = row;
+    }
+  }
+  return fallback?.textures?.[0] || null;
+}
+
+/**
+ * The facial-hair geosets a `facialHair` dial shows, as `{ group: variant }` pairs already turned
+ * into ids.
+ *
+ * `CharacterFacialHairStyles` (measured: 222 records, 8 fields, 32-byte stride, NO id column) keys on
+ * (RaceID, SexID, VariationID) and carries five geoset VARIANT columns. Only the first three are ever
+ * used by a playable race, and **the column -> geoset-group order was an open question the research
+ * could not settle** because Human Male happens to carry only variants 1 and 2 in all three groups.
+ *
+ * IT IS SETTLED NOW, by four races whose columns and models disagree under any other assignment.
+ * Method: read each column's distinct values per (race, sex) out of the DBC, then read which variants
+ * each model's groups 1, 2 and 3 actually carry out of its `.skin`. Only one assignment keeps every
+ * value in range:
+ *
+ *   Draenei Male   (11/0)  col1 = 1..8      model group 1 = 1..8      col3 = 2..6   group 2 = 2..6
+ *   Tauren Female  (6/1)   col3 = 2..5      model group 2 = 2..5      (no group 1; group 3 = {2} only)
+ *   Gnome Female   (7/1)   col3 = 2..7      model group 2 = 2..7      (no group 1, no group 3)
+ *   Human Female   (1/1)   col2 = 2..7      model group 3 = 2..7      (no group 1, no group 2)
+ *   Troll Male     (8/0)   col2 = 2..6      model group 3 = 2..6      (no group 1, no group 2)
+ *
+ * So **column 1 -> group 1, column 2 -> group 3, column 3 -> group 2**. That is also exactly what the
+ * reference recorded for 1.12.1 (`characters/geosets.rs`: gA->1, gB->3, gC->2), so the ordering did
+ * not change between builds -- but it is asserted here on 3.3.5a data, not inherited.
+ *
+ * Columns 4 and 5 are NOT mapped and this is honest ignorance, not a decision: column 4 is zero for
+ * every one of the 222 rows except one garbage row (race 18 sex 1 carries 0xCCCCCCCC in both 4 and 5,
+ * an uninitialized-memory artefact), and column 5 is a constant 2 for Blood Elf, Night Elf and
+ * Undead. Blood Elf's models carry geosets 1702/1703 and no group 16, which makes group 17 the only
+ * in-range reading for that 2 -- suggestive, not proven, and group 17 is the DK eye glow on Human. So
+ * columns 4 and 5 are left alone.
+ *
+ * A zero column means "no geoset in that group", which the data bears out: Human Female's columns 1
+ * and 3 are zero throughout and `humanfemale.m2` has no group 1 and no group 2 at all.
+ */
+export function facialGeosetsFor(
+  rows: CharacterFacialHairStylesRow[],
+  race: number,
+  gender: number,
+  facialHair: number,
+): number[] | null {
+  let fallback: CharacterFacialHairStylesRow | null = null;
+  let match: CharacterFacialHairStylesRow | null = null;
+  for (const row of rows) {
+    if (!row || row.raceID !== race || row.gender !== gender) {
+      continue;
+    }
+    if (row.specificID === facialHair) {
+      match = row;
+      break;
+    }
+    if (fallback === null || row.specificID < fallback.specificID) {
+      fallback = row;
+    }
+  }
+  const row = match ?? fallback;
+  if (!row) {
+    return null;
+  }
+  const [column1, column2, column3] = row.geosetIDs;
+  const ids: number[] = [];
+  if (column1) {
+    ids.push(100 + column1);
+  }
+  if (column3) {
+    ids.push(200 + column3);
+  }
+  if (column2) {
+    ids.push(300 + column2);
+  }
+  return ids;
+}
+
+/**
+ * Resolve one character's look. Six DBC reads, all cached by `DBC.load`.
+ *
+ * All six go through `DBC.load`, whose cache is a static keyed by table name -- so `classes/unit.ts`
  * asking for `CreatureDisplayInfo`/`CreatureModelData` in the world hits whatever this warmed, and
- * vice versa. On a glue screen nothing has warmed them, so this is four cold fetches:
- * `CreatureDisplayInfo` 1.6 MB, `CreatureModelData` 197 KB, `CharSections` 845 KB, `ChrRaces` 6 KB
- * (measured over the wire). Measured chain for a Human Male:
+ * vice versa. On a glue screen nothing has warmed them, so these are cold fetches, measured over the
+ * wire: `CreatureDisplayInfo` 1.6 MB, `CreatureModelData` 197 KB, `CharSections` 845 KB, `ChrRaces`
+ * 6 KB, and the two this round adds -- `CharHairGeosets` 8.2 KB and `CharacterFacialHairStyles`
+ * 7.1 KB. Together 15 KB against the 2.6 MB already in flight, i.e. hair costs ~0.6% more bytes and
+ * two more round trips.
+ *
+ * Measured chain for the real test character (Gesf: race 1, gender 0, skin 0, face 4, hairStyle 11,
+ * hairColor 5, facialHair 1 -- read off the live server, not assumed):
  *
  *   ChrRaces id 1 -> maleDisplayID 49
  *   CreatureDisplayInfo 49 -> modelID 49, scale 1.0
  *   CreatureModelData 49 -> `Character\Human\Male\HumanMale.mdx`
  *   CharSections race 1 sex 0 base 0 colorIndex 0 -> `Character\Human\Male\HumanMaleSkin00_00.blp`
+ *   CharHairGeosets race 1 sex 0 variation 11 -> geoset 12
+ *   CharSections race 1 sex 0 base 3 var 11 color 5 -> `Character\Human\Hair02_05.blp` (blonde)
+ *   CharacterFacialHairStyles race 1 sex 0 variation 1 -> columns (1, 2, 1) -> geosets 101, 302, 201
  *
  * Answers null rather than throwing when a row is missing, and says which link broke: a character
  * whose race the client's own DBCs do not describe is a data problem to read on the console, not an
@@ -201,12 +389,60 @@ export async function resolveCharacterLook(
     );
   }
 
+  const appearance = character.appearance;
+  const sectionRows = (sections?.records ?? []) as CharSectionsRow[];
+  const geosets = new Set(NAKED_GEOSETS);
+
+  // Group 0: the body (geoset 0) is unconditional and stays; the hairstyle is added beside it.
+  const hairRows = ((await DBC.load('CharHairGeosets'))?.records ?? []) as CharHairGeosetsRow[];
+  const hairGeoset = hairGeosetFor(
+    hairRows,
+    character.race,
+    character.gender,
+    appearance?.hairStyle ?? 0,
+  );
+  if (hairGeoset !== null) {
+    geosets.add(hairGeoset);
+  }
+  const hairTexture = hairTextureFor(
+    sectionRows,
+    character.race,
+    character.gender,
+    appearance?.hairStyle ?? 0,
+    appearance?.hairColor ?? 0,
+  );
+
+  // Groups 1, 2 and 3 are the facial-hair groups and the dial owns ALL THREE of them: a variation
+  // that leaves a column at zero means that group draws nothing, so the base ids must come out
+  // before the chosen ones go in. `NAKED_GEOSETS`'s 101/201/301 survive only as the fallback for a
+  // (race, sex) `CharacterFacialHairStyles` does not describe at all, which is why `facialGeosetsFor`
+  // answers null rather than an empty array in that case.
+  const facialRows = ((await DBC.load('CharacterFacialHairStyles'))?.records ??
+    []) as CharacterFacialHairStylesRow[];
+  const facialGeosets = facialGeosetsFor(
+    facialRows,
+    character.race,
+    character.gender,
+    appearance?.facialHair ?? 0,
+  );
+  if (facialGeosets !== null) {
+    for (const id of NAKED_GEOSETS) {
+      if (id >= 100 && id < 400) {
+        geosets.delete(id);
+      }
+    }
+    for (const id of facialGeosets) {
+      geosets.add(id);
+    }
+  }
+
   return {
     modelPath: modelData.file,
     // `|| 1`, not `?? 1`: a zero scale is as unusable as a missing one, and the DBC's float column
     // reads 0 for a row that carries nothing.
     scale: displayInfo.scale || 1,
     bodyTexture,
-    geosets: new Set(NAKED_GEOSETS),
+    hairTexture,
+    geosets,
   };
 }
