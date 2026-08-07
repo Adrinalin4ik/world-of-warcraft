@@ -48,10 +48,11 @@ import { parseToc } from './toc';
 import { parseXml } from './xml';
 import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
-import { drainScriptErrors } from './lua/scripts';
+import { drainScriptErrors, invokeScriptHandler } from './lua/scripts';
 import { FocusSink, FrameRegistry, MethodContext, installObjectModel } from './lua/object';
 import { syncInteractiveArt } from './lua/methods/kinds';
 import { LuaVM } from './lua/vm';
+import { installCharactersApi } from './lua/api/characters';
 import { installLoginApi } from './lua/api/login';
 import { installRealmsApi } from './lua/api/realms';
 import { installScreenApi } from './lua/api/screen';
@@ -186,7 +187,7 @@ async function prefetch(
  * lines, because that is what the client does with them and because the report is the point.
  */
 export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<GlueRuntime> {
-  const stopAfter = options.stopAfter ?? 'AccountLogin.xml';
+  const stopAfter = options.stopAfter ?? 'CharacterSelect.xml';
   const { order, texts, tocMissing } = await prefetch(stopAfter);
 
   const vm = new LuaVM();
@@ -207,6 +208,7 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
   installStubApi(vm);
   const unsubscribeLogin = installLoginApi(vm, options.protocol);
   const unsubscribeRealms = installRealmsApi(vm, options.protocol);
+  const unsubscribeCharacters = installCharactersApi(vm, options.protocol);
 
   const runtime = createFrameXmlRuntime(vm, ctx);
   const resolve = (path: string): string | null => texts.get(cacheKey(path)) ?? null;
@@ -266,6 +268,7 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
 
   const editBoxes = collectEditBoxes(registry, options.root);
   const buttons = collectButtons(registry, options.root);
+  const glueParentId = registry.byName('GlueParent');
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
   let caretClock = 0;
@@ -300,12 +303,26 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
       for (const id of buttons) {
         syncInteractiveArt(ctx, id);
       }
+      // FOUR: `GlueParent`'s own `<OnUpdate>`, and ONLY that one frame's.
+      //
+      // This is not the general `OnUpdate` tick the header above declines to fire; it is one named
+      // frame whose entire handler body is `GlueFrameFadeUpdate(elapsed)` (glueparent.xml:14-16), which
+      // is the client's whole glue fade system. Without it `GlueFrameFade*` queues frames into
+      // `FADEFRAMES` and nothing ever drains the list, and that is not cosmetic: `GlueScreenExit`
+      // ("login" -> "charselect") hands `GoToPendingGlueScreen` to `GlueFrameFadeOut` as its FINISHED
+      // callback (glueparent.lua:249-252), so the login-to-character-select transition never completes
+      // at all. Firing it here rather than driving the fade to completion by hand keeps the alpha ramp
+      // and the completion callback the client's, in the order the client puts them.
+      if (glueParentId !== null) {
+        invokeScriptHandler(ctx, glueParentId, 'OnUpdate', [dt]);
+      }
     },
     dispose: () => {
       // Subscriptions first: a session event arriving after the VM is closed would fire into a dead
       // Lua state, and `reset()` needs a live one to hand its handles back to.
       unsubscribeLogin();
       unsubscribeRealms();
+      unsubscribeCharacters();
       registry.reset();
       vm.dispose();
     },
