@@ -223,6 +223,13 @@ class M2Material extends THREE.ShaderMaterial {
      * Kept in the same bag rather than a field of its own because it answers the same question those
      * three do: a `textureDef` whose `type` is non-zero names a slot the FILE leaves blank and the
      * runtime fills.
+     *
+     * A PATH **OR** A `THREE.Texture`, and both are real cases. The real client's type-1 slot holds a
+     * COMPOSITE of skin + face + facial hair + scalp + underwear (+ armour), which
+     * `ui/scene/body-composite.ts` bakes on the CPU into a `DataTexture` the caller owns -- there is
+     * no file to name, so `loadTextures` binds it straight into the slot instead of asking
+     * `TextureLoader` for it. A string still works and is the fallback for a bake that could not
+     * happen (see `resolveTexturePath`).
      */
     body: null,
     /**
@@ -498,6 +505,17 @@ class M2Material extends THREE.ShaderMaterial {
     const textures = [];
 
     textureDefs.forEach((textureDef, index) => {
+      // A slot the runtime supplies as a TEXTURE rather than as a path -- today only the composited
+      // body skin (type 1). It is bound directly and deliberately NOT put through `TextureLoader`:
+      // the loader is a path->texture cache with reference counting, and a texture that was never
+      // fetched from a path has no key in it to count. Its owner is `body-composite.ts`'s cache, which
+      // is also the only thing that may dispose it -- so this assignment adds no reference to leak.
+      const supplied = this.resolveSuppliedTexture(textureDef);
+      if (supplied) {
+        textures[index] = supplied;
+        return;
+      }
+
       const path = this.resolveTexturePath(textureDef);
 
       if (!path) {
@@ -525,6 +543,18 @@ class M2Material extends THREE.ShaderMaterial {
     this.uniforms.textureCount = { value: textures.length };
   }
 
+  /**
+   * The runtime slots that may be supplied as a ready THREE texture instead of a path. Only type 1
+   * (the composited body skin) is, and only when the caller passed a texture; a string body falls
+   * through to `resolveTexturePath` below.
+   */
+  resolveSuppliedTexture(textureDef) {
+    if (textureDef.type === 1 && this.skins.body && this.skins.body.isTexture) {
+      return this.skins.body;
+    }
+    return null;
+  }
+
   resolveTexturePath(textureDef) {
     let path = null;
 
@@ -535,12 +565,12 @@ class M2Material extends THREE.ShaderMaterial {
         break;
 
       case 1:
-        // The character body skin. In the real client this slot holds the COMPOSITED atlas (base
-        // skin + face + facial hair + scalp + underwear + eight equipment regions); this milestone
-        // deliberately puts the un-composited base skin in it -- `CharSections` BaseSection 0,
-        // `TextureName[0]`, e.g. `Character\Human\Male\HumanMaleSkin00_00.blp`, measured 512x512
-        // DXT. So the face and pelvis regions of the atlas are the blank areas the base skin ships
-        // with. That is a KNOWN, named gap (the compositor), not a decode failure.
+        // The character body skin, as a PATH. Normally this slot is handed the composited atlas as a
+        // texture and never reaches here (`resolveSuppliedTexture`); a string arrives only as the
+        // fallback for a bake that could not happen, and then it is the raw base skin --
+        // `CharSections` BaseSection 0 `TextureName[0]`, e.g.
+        // `Character\Human\Male\HumanMaleSkin00_00.blp`, measured 512x512 palettized. That draws a
+        // body whose face and pelvis tiles are the blank regions the file ships with.
         if (this.skins.body) {
           path = this.skins.body;
         }
@@ -610,6 +640,14 @@ class M2Material extends THREE.ShaderMaterial {
     super.dispose();
 
     this.textures.forEach((texture) => {
+      // Only textures this material took THROUGH the loader may be released to it. A `textureKey` is
+      // what `TextureLoader.load` stamps on, so its absence marks the two kinds it never issued: the
+      // shared `PLACEHOLDER`, and a runtime-supplied texture such as the composited body skin, whose
+      // owner is `body-composite.ts`'s cache. Unloading either used to push `undefined` into
+      // `pendingUnload` and decrement a reference count that does not exist.
+      if (!texture?.textureKey) {
+        return;
+      }
       TextureLoader.unload(texture);
     });
   }

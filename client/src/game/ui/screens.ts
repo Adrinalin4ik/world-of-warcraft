@@ -18,8 +18,8 @@ import { clientStateForStage } from './screens/login-state';
 import { installFramexmlDebug } from './framexml/debug';
 import { GlueInput } from './input';
 import { GlueRenderer, ResolvedSprite } from './renderer';
-import { installBakeSpike } from './scene/bake-spike';
 import { resolveCharacterLook } from './scene/character-look';
+import { clearCompositeCache } from './scene/body-composite';
 import { GlueSceneView } from './scene/glue-scene';
 import { GlueScene } from './scene/tokens';
 import { GlueStrings } from './strings';
@@ -130,12 +130,6 @@ export class GlueApp {
     // Same idea as `skyDebug`, and the same place to remove it from when the loader makes it moot.
     installFramexmlDebug();
 
-    // MEASUREMENT SPIKE, delete with `scene/bake-spike.ts`. Publishes `window.bakeSpike` and nothing
-    // else: no target is allocated and no BLP is fetched until a console call asks. It exists to
-    // settle unknown 4 of the character-model research -- CPU blit versus render target for the body
-    // composite -- with numbers off the real asset host rather than by argument.
-    installBakeSpike(this.renderer);
-
     // A console handle on the 3D stage, beside `glueRuntime` and `glueSession` and for the same
     // reason: the questions this layer raises -- is a character loaded, where is it standing, which
     // geosets are visible, which sequence is armed, what did texture slot 1 resolve to -- are not
@@ -179,6 +173,9 @@ export class GlueApp {
     // object.
     this.session.protocol.stop();
     this.sceneView.dispose();
+    // The body composites are cached across roster selections and their owner is that cache, not the
+    // material that samples them -- so nothing else would ever free them.
+    clearCompositeCache();
     this.ui.dispose();
     this.fonts.dispose();
     this.art.dispose();

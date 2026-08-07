@@ -6,26 +6,25 @@
  * read out of the live host (`https://data-direct.spelunkerdb.com/12340/dbfilesclient/...`) rather
  * than taken from a wiki, and the measurement is quoted where it decides something.
  *
- * WHAT THIS DELIBERATELY DOES NOT DO, so nobody reads a gap here as an oversight:
- *  - **No texture compositing.** The body skin goes into texture type 1 raw. The real client bakes an
- *    atlas of skin + face + facial hair + scalp + underwear + eight equipment regions into that slot;
- *    the base skin alone therefore leaves the atlas's face and pelvis tiles as the blank regions the
- *    file ships with. Known, and the compositor is its own piece of work.
- *  - **No equipment.** Needs `ItemDisplayInfo` (6.7 MB) and the eight geoset branches.
+ * TEXTURE TYPE 1 IS NOW A COMPOSITE, not the raw base skin. `bodyLayersFor` below builds the ordered
+ * layer list -- base skin + face + facial hair + scalp + underwear -- and `body-composite.ts` blits it
+ * into one 512x512 mipped texture. `bodyTexture` survives as the fallback for a bake that could not
+ * happen. That closes three symptoms at once, all of which were the one absent bake: the scalp parting
+ * showing bare skin, a skin-coloured beard (on `humanmale.m2` the facial-hair geosets read type 1, the
+ * body atlas, so their art is a COMPOSITE layer and nothing else could colour them), and a male face
+ * with no brow detail.
  *
- * ONE THING HERE IS HALF-DRESSED BY DESIGN, and it is not an oversight: facial hair. On
- * `humanmale.m2` the facial-hair geosets (groups 1, 2 and 3) read texture type **1**, the body
- * atlas -- measured by walking the skin's batches through `textureLookups`. Their art
- * (`FacialLowerHair<v>_<c>.blp` / `FacialUpperHair<v>_<c>.blp`, `CharSections` BaseSection 2) is a
- * COMPOSITE layer, so a Human beard cannot be coloured until the compositor lands: the geometry is
- * right and it samples the blank facial region of the raw base skin, i.e. it reads as bare skin.
- * That is the same known gap as the flat face, on the same texture, and no worse. Hair itself is
- * different -- it reads type 6, which is a whole sheet of its own and IS supplied here.
- * (Other races differ and the data says so: `bloodelfmale.m2` and `dwarfmale.m2` put their
- * facial-hair groups on type 6, so those DO colour correctly today.)
+ * WHAT THIS DELIBERATELY DOES NOT DO, so nobody reads a gap here as an oversight:
+ *  - **No equipment.** The eight `ItemDisplayInfo` region layers need that table (6.7 MB) and the
+ *    eight geoset branches; they are pieces 7 and 8. `bodyLayersFor` is an ordered list precisely so
+ *    they can join it -- see its closing note.
+ *  - **No `..._Extra` sheet (texture type 8).** `CharSections` BaseSection 0 `TextureName[1]`, bound
+ *    whole rather than composited, and only fur races author it (Tauren head/leg fur). A Tauren
+ *    therefore still draws part of its own body through an unbound sampler.
  */
 import DBC from '../../pipeline/dbc';
-import { CharacterRecord } from '../../../network/protocol/types';
+import { CharacterAppearance, CharacterRecord } from '../../../network/protocol/types';
+import { BodyLayer, COMPOSITE_TILES, compositeCacheKey } from './body-composite';
 
 /** Everything `GlueSceneView#setCharacter` needs, and nothing it does not. */
 export type CharacterLook = {
@@ -33,8 +32,26 @@ export type CharacterLook = {
   modelPath: string;
   /** `CreatureDisplayInfo.scale`. Measured 1.0 for both Human display ids, 1.15 for Gnome male. */
   scale: number;
-  /** `CharSections` BaseSection 0 `TextureName[0]`, or null if the table has no row for this look. */
+  /**
+   * `CharSections` BaseSection 0 `TextureName[0]`, or null if the table has no row for this look.
+   *
+   * This is the base skin RAW, and it is now the FALLBACK rather than the supply: texture type 1 gets
+   * `bodyLayers` baked into one composite (`body-composite.ts`), and this path is bound only if the
+   * bake could not happen at all -- a source that failed to fetch, or a compressed base skin.
+   */
   bodyTexture: string | null;
+  /**
+   * The ordered layer list for the type-1 composite: base skin, face, facial hair, scalp, underwear.
+   * See `bodyLayersFor` for the order's source and for how equipment appends to it.
+   */
+  bodyLayers: BodyLayer[];
+  /**
+   * The composite's cache key -- the whole appearance tuple, so re-selecting a roster row or cycling
+   * a dial back is a map hit rather than eight fetches and a bake. Equipment extends this key when
+   * piece 7 extends the layer list; the reference keys the same cache the same way
+   * (`SkinKey { race, sex, skin, face, facial_hair, hair_style, hair_color, equip: [u32;8] }`).
+   */
+  compositeKey: string;
   /**
    * Texture type 6 -- `CharSections` BaseSection 3 `TextureName[0]`, keyed on the hairStyle and
    * hairColor dials. Null for a bald look, whose BaseSection 3 rows carry three EMPTY strings
@@ -83,8 +100,17 @@ const MALE = 0;
  */
 const BASE_SECTION_SKIN = 0;
 
+/** `CharSections.BaseSection` 1 -- face. `TextureName[0]` lower head tile, `[1]` upper. */
+const BASE_SECTION_FACE = 1;
+
+/** `CharSections.BaseSection` 2 -- facial hair. Columns as for face; keyed on hairColor, not skin. */
+const BASE_SECTION_FACIAL_HAIR = 2;
+
 /** `CharSections.BaseSection` 3 -- hair. `TextureName[0]` is the type-6 mesh sheet. */
 const BASE_SECTION_HAIR = 3;
+
+/** `CharSections.BaseSection` 4 -- underwear. `TextureName[0]` into the pelvis tile. */
+const BASE_SECTION_UNDERWEAR = 4;
 
 /**
  * `CharSections.Flags` bits that disqualify a row from being a playable character-create look.
@@ -108,7 +134,7 @@ type CharacterFacialHairStylesRow = {
   specificID: number;
   geosetIDs: number[];
 };
-type CharSectionsRow = {
+export type CharSectionsRow = {
   raceID: number;
   gender: number;
   generalType: number;
@@ -253,6 +279,133 @@ export function hairTextureFor(
     }
   }
   return fallback?.textures?.[0] || null;
+}
+
+/**
+ * One `CharSections` texture column, by the full key. The general accessor the COMPOSITOR needs, next
+ * to `bodySkinFor`/`hairTextureFor`, which are the two special cases that came first.
+ *
+ * The difference from those two is the missing-row behaviour, and it is deliberate rather than an
+ * omission: this answers **null** when the key names no eligible row, because an overlay layer that
+ * does not exist must be SKIPPED (the reference's own `continue`, `sections.rs:214`) -- a fallback to
+ * some other colour's face tile would paint a visibly wrong face rather than the base skin's blank
+ * one. `bodySkinFor` and `hairTextureFor` fall back on purpose: they supply whole texture slots,
+ * where nothing means an untextured body or hair mesh.
+ *
+ * Same flag predicate as everywhere else here -- Death Knight and NPC rows excluded, `0x10` not
+ * tested because it is set on every eligible row and so cannot discriminate.
+ */
+export function sectionTexture(
+  rows: CharSectionsRow[],
+  race: number,
+  gender: number,
+  baseSection: number,
+  variationIndex: number,
+  colorIndex: number,
+  column: number,
+): string | null {
+  for (const row of rows) {
+    if (!row || row.raceID !== race || row.gender !== gender) {
+      continue;
+    }
+    if (row.generalType !== baseSection || row.type !== variationIndex) {
+      continue;
+    }
+    if (row.variation !== colorIndex) {
+      continue;
+    }
+    if ((row.flags & (SECTION_FLAG_DEATH_KNIGHT | SECTION_FLAG_NPC)) !== 0) {
+      continue;
+    }
+    return row.textures?.[column] || null;
+  }
+  return null;
+}
+
+/**
+ * Appearance -> the ordered layer list for the type-1 composite. The whole DBC side of the bake.
+ *
+ * THE ORDER IS THE REFERENCE'S, not an invention: `CharSections::composite_body`'s `overlays` array
+ * (`benilla-formats/src/characters/sections.rs:205-212`) is base skin (already the canvas) -> face
+ * lower -> face upper -> facial hair lower -> facial hair upper -> scalp lower -> scalp upper ->
+ * underwear, and a later blit sits on top of an earlier one.
+ *
+ * THREE THINGS IN IT ARE TRAPS, all three from measured data rather than assumed:
+ *  - **The texture COLUMN differs by section.** Face and facial hair use `TextureName[0]` for the
+ *    lower head tile and `[1]` for the upper; HAIR uses `[1]` and `[2]`, because its `[0]` is the hair
+ *    MESH sheet (texture type 6, sampled directly by the hair geoset) and must never enter the bake.
+ *  - **The COLOR KEY differs by section.** Face and underwear key on `ColorIndex = skin`; facial hair
+ *    and hair key on `ColorIndex = hairColor`. So a skin click is a FOUR-texture change -- base skin,
+ *    face lower, face upper, underwear -- not one.
+ *  - **The VARIATION key differs too.** Skin and underwear are variation 0; face is the face dial,
+ *    facial hair the facialHair dial, hair the hairStyle dial.
+ *
+ * A missing row or an empty column is SKIPPED, matching the reference's `continue` (`sections.rs:214`)
+ * -- and the empties are real: a bald look (hairStyle 0) carries three blank texture columns on its
+ * BaseSection 3 row (measured, Human Male ids 3262..3271), so a bald character bakes 6 layers where a
+ * haired one bakes 8. The base skin is the exception: without it there is no canvas, so the bake
+ * answers null and the caller binds `bodyTexture` raw instead.
+ *
+ * For the real test character (Gesf: race 1, gender 0, skin 0, face 4, hairStyle 11, hairColor 5,
+ * facialHair 1) this is the eight-layer list the measurement doc's §1 read out of the table by hand:
+ *
+ *   BODY        `HumanMaleSkin00_00.blp`             512x512  (0,0,512,512)
+ *   HEAD_LOWER  `HumanMaleFaceLower04_00.blp`        256x128  (0,384,256,128)
+ *   HEAD_UPPER  `HumanMaleFaceUpper04_00.blp`        256x64   (0,320,256,64)
+ *   HEAD_LOWER  `FacialLowerHair01_05.blp`           128x64   (0,384,256,128)
+ *   HEAD_UPPER  `FacialUpperHair01_05.blp`           128x32   (0,320,256,64)
+ *   HEAD_LOWER  `ScalpLowerHair02_05.blp`            128x64   (0,384,256,128)
+ *   HEAD_UPPER  `ScalpUpperHair02_05.blp`            128x32   (0,320,256,64)
+ *   PELVIS      `HumanMaleNakedPelvisSkin00_00.blp`  256x128  (256,192,256,128)
+ *
+ * HOW EQUIPMENT ATTACHES LATER (piece 7): append to the returned array, and nothing else changes.
+ * Per layer index 0..7, gather the worn `ItemDisplayInfo` region names, order them by the client's
+ * `[0x803bf8]` priority table (`sections.rs:67-76`), resolve each to
+ * `Item\TextureComponents\<dir>\<name>_<M|F|U>.blp`, and push
+ * `{ tile, rect: EQUIP_TILES_512[layer], path }`. The kernel already derives each layer's scale from
+ * its own source dimensions, and every item region measured is 128x64 or 128x32 -- exactly half its
+ * doubled tile, the same shift the scalp layers already take.
+ */
+export function bodyLayersFor(
+  rows: CharSectionsRow[],
+  race: number,
+  gender: number,
+  appearance: CharacterAppearance | null | undefined,
+): BodyLayer[] {
+  const skin = appearance?.skin ?? 0;
+  const face = appearance?.face ?? 0;
+  const facialHair = appearance?.facialHair ?? 0;
+  const hairStyle = appearance?.hairStyle ?? 0;
+  const hairColor = appearance?.hairColor ?? 0;
+
+  const layers: BodyLayer[] = [];
+
+  // The canvas. Through `bodySkinFor` and not a bare lookup, because a roster byte outside the table
+  // must still draw a real body -- see its own comment for why that one falls back and this one's
+  // overlays do not.
+  const base = bodySkinFor(rows, race, gender, skin);
+  if (base) {
+    layers.push({ tile: 'BODY', rect: COMPOSITE_TILES.BODY, path: base });
+  }
+
+  const overlays: [number, number, number, number, BodyLayer['tile']][] = [
+    [BASE_SECTION_FACE, face, skin, 0, 'HEAD_LOWER'],
+    [BASE_SECTION_FACE, face, skin, 1, 'HEAD_UPPER'],
+    [BASE_SECTION_FACIAL_HAIR, facialHair, hairColor, 0, 'HEAD_LOWER'],
+    [BASE_SECTION_FACIAL_HAIR, facialHair, hairColor, 1, 'HEAD_UPPER'],
+    [BASE_SECTION_HAIR, hairStyle, hairColor, 1, 'HEAD_LOWER'],
+    [BASE_SECTION_HAIR, hairStyle, hairColor, 2, 'HEAD_UPPER'],
+    [BASE_SECTION_UNDERWEAR, 0, skin, 0, 'PELVIS'],
+  ];
+
+  for (const [section, variation, color, column, tile] of overlays) {
+    const path = sectionTexture(rows, race, gender, section, variation, color, column);
+    if (path) {
+      layers.push({ tile, rect: COMPOSITE_TILES[tile], path });
+    }
+  }
+
+  return layers;
 }
 
 /**
@@ -438,6 +591,8 @@ export async function resolveCharacterLook(
 
   return {
     modelPath: modelData.file,
+    bodyLayers: bodyLayersFor(sectionRows, character.race, character.gender, appearance),
+    compositeKey: compositeCacheKey(character.race, character.gender, appearance),
     // `|| 1`, not `?? 1`: a zero scale is as unusable as a missing one, and the DBC's float column
     // reads 0 for a row that carries nothing.
     scale: displayInfo.scale || 1,

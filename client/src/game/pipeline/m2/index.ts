@@ -973,8 +973,11 @@ class M2 extends THREE.Group {
    * One setter for both, matching `updateSkinTextures`' three-at-once shape, because each supply
    * costs a full `loadTextures()` walk -- see `material/index.ts#updateCharacterTextures`. The
    * `skins.hair` comment there records which geosets read which type, measured off the real skin.
+   *
+   * `body` is a `THREE.Texture` for the normal case -- the CPU-baked composite, which has no path to
+   * name -- or a path string for the fallback when the bake could not happen.
    */
-  set characterTextures(paths: { body: string | null; hair: string | null }) {
+  set characterTextures(paths: { body: string | THREE.Texture | null; hair: string | null }) {
     for (let i = 0; i < this.submeshes.length; i++) {
       this.submeshes[i].characterTextures = paths;
     }
