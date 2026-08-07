@@ -156,15 +156,24 @@ describe('resolveAnchors', () => {
     });
   });
 
-  it('throws on an anchor cycle instead of looping', () => {
-    expect(() =>
-      resolveAnchors(
-        [
-          { id: 'a', width: 1, height: 1, anchors: [{ point: 'TOPLEFT', relativeTo: 'b', x: 0, y: 0 }] },
-          { id: 'b', width: 1, height: 1, anchors: [{ point: 'TOPLEFT', relativeTo: 'a', x: 0, y: 0 }] },
-        ],
-        viewport,
-      ),
-    ).toThrow(/cycle/i);
+  it('contains an anchor cycle instead of losing the rest of the screen', () => {
+    // It used to throw, and `WidgetRoot#drawList` calls this from `GlueApp#tick`: one bad pair took
+    // every other widget on the screen with it, every frame. `good` is the assertion that matters.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const rects = resolveAnchors(
+      [
+        { id: 'a', width: 1, height: 1, anchors: [{ point: 'TOPLEFT', relativeTo: 'b', x: 0, y: 0 }] },
+        { id: 'b', width: 1, height: 1, anchors: [{ point: 'TOPLEFT', relativeTo: 'a', x: 0, y: 0 }] },
+        { id: 'good', width: 4, height: 4, anchors: [{ point: 'TOPLEFT', x: 7, y: -9 }] },
+      ],
+      viewport,
+    );
+
+    expect(rects.get('good')).toEqual({ left: 7, top: 9, width: 4, height: 4 });
+    expect(rects.has('a')).toBe(true);
+    expect(rects.has('b')).toBe(true);
+    // Reported loudly and by name -- a silent fallback would hide the defect that made this necessary.
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/cycle.*a -> b/));
+    warn.mockRestore();
   });
 });

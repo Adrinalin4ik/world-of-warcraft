@@ -170,15 +170,34 @@ function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect)
   };
 }
 
+/** Layout complaints already reported, so a per-frame one is a single console line. */
+const warned = new Set<string>();
+
 /**
- * Resolve every node's rect. Nodes may anchor to each other in any input order; a cycle throws
- * rather than spinning.
+ * Resolve every node's rect. Nodes may anchor to each other in any input order.
+ *
+ * ONE BAD SUBTREE MUST NOT COST THE SCREEN. A node whose anchor can never resolve -- a genuine cycle,
+ * or a `relativeTo` that is not in this node set at all -- used to make this THROW, and the caller is
+ * `WidgetRoot#drawList` inside `GlueApp#tick`, so the whole 2D interface disappeared every frame while
+ * the 3D stage behind it kept drawing. That is the same structural failure `GlueApp#tick` already
+ * guards the stage pass for, and it is not hypothetical either: `CharSelectChangeRealmButton` anchors
+ * TOP to `CharSelectRealmName` (characterselect.xml:467), `CharacterSelect_OnShow` HIDES that font
+ * string when the engine has no server name (characterselect.lua:73), and `drawList` puts no node in
+ * this set for a hidden widget -- so one legitimately hidden region blanked all 85 shown ones.
+ *
+ * So the unresolvable nodes are placed by whatever anchors they DO have (none of them, in the common
+ * case, which puts them at the window's top-left) and everything else resolves normally. Reported, not
+ * swallowed: a silent fallback here would hide exactly the class of defect that produced that bug, so
+ * the ids are named -- with each unresolvable target beside them, since "anchored to something that is
+ * not being drawn" and "anchored in a circle" are different defects and the message says which.
+ * Warn-once by message, because this runs every frame.
  */
 export function resolveAnchors(nodes: LayoutNode[], viewport: Viewport): Map<string, Rect> {
   const units = viewportUnits(viewport);
   const screen: Rect = { left: 0, top: 0, width: units.width, height: units.height };
 
   const resolved = new Map<string, Rect>();
+  const known = new Set(nodes.map((node) => node.id));
   let pending = nodes.slice();
 
   while (pending.length > 0) {
@@ -187,9 +206,17 @@ export function resolveAnchors(nodes: LayoutNode[], viewport: Viewport): Map<str
     );
 
     if (ready.length === 0) {
-      throw new Error(
-        `anchor cycle among: ${pending.map((node) => node.id).join(', ')}`,
-      );
+      reportUnresolvable(pending, known);
+      for (const node of pending) {
+        // The node's resolvable anchors only. Dropping the others is what breaks the deadlock; keeping
+        // the rest means a node held by one good anchor and one bad one still lands near where it
+        // belongs instead of in the corner.
+        const usable = node.anchors.filter(
+          (anchor) => !anchor.relativeTo || resolved.has(anchor.relativeTo),
+        );
+        resolved.set(node.id, resolveOne({ ...node, anchors: usable }, resolved, screen));
+      }
+      return resolved;
     }
 
     for (const node of ready) {
@@ -200,4 +227,29 @@ export function resolveAnchors(nodes: LayoutNode[], viewport: Viewport): Map<str
   }
 
   return resolved;
+}
+
+/** The one console line for a deadlocked set: which node, which target, and which of the two faults. */
+function reportUnresolvable(pending: LayoutNode[], known: Set<string>): void {
+  const details = pending.flatMap((node) =>
+    node.anchors
+      .filter((anchor) => anchor.relativeTo !== undefined)
+      .map((anchor) => ({ node: node.id, target: anchor.relativeTo as string })),
+  );
+  const missing = details.filter((detail) => !known.has(detail.target));
+  const parts = (missing.length > 0 ? missing : details).map(
+    (detail) => `${detail.node} -> ${detail.target}`,
+  );
+  const kind =
+    missing.length > 0
+      ? 'anchored to a widget that is not in the draw list (hidden, or destroyed)'
+      : 'anchor cycle';
+  const message =
+    `layout: ${pending.length} widget(s) could not be placed -- ${kind}: ${parts.join(', ')}. ` +
+    'They are placed by their remaining anchors; the rest of the screen still draws.';
+  if (warned.has(message)) {
+    return;
+  }
+  warned.add(message);
+  console.warn(message);
 }
