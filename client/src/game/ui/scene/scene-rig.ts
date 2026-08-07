@@ -1,22 +1,36 @@
 /**
  * The glue scene's fog and light rig, folded for the M2 material's uniforms.
  *
- * TRANSCRIBED FROM OUR CLIENT DATA (`interface/gluexml/glueparent.lua`), and this is where 3.3.5
- * parts company with the 1.12 reference. `glueparent.lua:50` says it outright: "RaceLights[]
- * duplicates the 3.2.2 color values in the models. Henceforth, the models no longer contain
- * directional lights", and `:361` adds that the engine "pulls the default point lights from the
- * models". So the DIRECTIONALS come from the table below and only the POINT lights come from the
- * M2 -- where benilla folds the model's own directional rig, we fold this.
+ * **The rig is the client's own, at runtime, not a transcription of it.** `RaceLights` and
+ * `CharModelFogInfo` used to be hand-copied into this file; they are gone. `SetLighting`
+ * (glueparent.lua:327-372) reads those tables ITSELF and pushes them at the model frame --
+ * `SetFogColor`/`SetFogNear`/`SetFogFar` or `ClearFog`, `SetGlow`, `ResetLights`, then
+ * `AddCharacterLight`/`AddLight`/`AddPetLight` per enabled row -- and `lua/methods/model.ts` now
+ * answers all of those for real, into the `ModelRig` below. So the numbers arrive from
+ * `interface/gluexml/glueparent.lua` as the client executes it.
  *
- * Row layout (13 numbers, `AddLight(index, unpack(row))`):
- *   [0] enabled  [1] light slot  [2..4] direction  [5] ambient intensity
- *   [6..8] ambient colour  [9] diffuse intensity  [10..12] diffuse colour
- * Read off the shipped values: Human row 1 is a straight-down light with 0.27 grey ambient and a
- * black diffuse; rows 2 and 3 are ambient-black with coloured diffuse at intensity 1 and 2.
+ * What still has to be OURS is the FOLD: three.js has no six-light-set glue rig, so a set of
+ * `AddLight` rows becomes one ambient term plus an SH probe (`foldRaceLights`). And two of the
+ * client's own comments decide the shape of that fold:
+ *   - glueparent.lua:50 "RaceLights[] duplicates the 3.2.2 color values in the models. Henceforth,
+ *     the models no longer contain directional lights" -- so the DIRECTIONALS come from the Lua.
+ *   - glueparent.lua:361 the engine "pulls the default point lights from the models" -- so the POINT
+ *     lights come from the M2, and `glue-scene.ts#buildRig` harvests them there.
  */
 import { packFogParams } from '../../world/light/fog';
 import { propProbeCoeffs, ProbeCoeffs, RGB, Vec3 } from '../../world/light/laws';
 
+/**
+ * One `AddLight` row: `Array` in `SetLighting`'s inner loop, 13 numbers after the light-set index.
+ *
+ * `f(model, LIGHT_LIVE, unpack(Array))` (glueparent.lua:368) is the call, so a method receives the
+ * SET first and then these:
+ *   [0] enabled  [1] light slot  [2..4] direction  [5] ambient intensity
+ *   [6..8] ambient colour  [9] diffuse intensity  [10..12] diffuse colour
+ * Read off the shipped values: `RaceLights.HUMAN`'s first row is a straight-down light with 0.27
+ * grey ambient and a black diffuse; its other two are ambient-black with coloured diffuse at
+ * intensity 1 and 2.
+ */
 export type RaceLightRow = [
   number, number,
   number, number, number,
@@ -26,78 +40,134 @@ export type RaceLightRow = [
   number, number, number,
 ];
 
-/** `glueparent.lua:51` -- verbatim. */
-export const RACE_LIGHTS: Record<string, RaceLightRow[]> = {
-  HUMAN: [
-    [1, 0, 0, 0, -1, 1.0, 0.27, 0.27, 0.27, 1.0, 0, 0, 0],
-    [1, 0, -0.45756075, -0.58900136, -0.66611975, 1.0, 0, 0, 0, 1.0, 0.19882353, 0.34921569, 0.43588236],
-    [1, 0, -0.64623469, 0.57582057, -0.50081086, 1.0, 0, 0, 0, 2.0, 0.52196085, 0.44, 0.29764709],
-  ],
-  ORC: [
-    [1, 0, 0, 0, -1, 1.0, 0.15, 0.15, 0.15, 1.0, 0, 0, 0],
-    [1, 0, -0.74919, 0.35208, -0.56103, 1.0, 0, 0, 0, 1.0, 0.44706, 0.5451, 0.73725],
-    [1, 0, 0.53162, -0.8434, 0.0778, 1.0, 0, 0, 0, 2.0, 0.55, 0.338625, 0.148825],
-  ],
-  DWARF: [
-    [1, 0, 0, 0, -1, 1.0, 0.3, 0.3, 0.3, 0.0, 0, 0, 0],
-    [1, 0, -0.88314, 0.42916, -0.18945, 1.0, 0, 0, 0, 2.0, 0.44706, 0.67451, 0.760785],
-  ],
-  TAUREN: [
-    [1, 0, -0.48073, 0.71827, -0.50297, 1.0, 0, 0, 0, 2.0, 0.65, 0.397645, 0.2727],
-    [1, 0, -0.49767, -0.78677, 0.36513, 1.0, 0, 0, 0, 1.0, 0.6, 0.47059, 0.32471],
-  ],
-  SCOURGE: [[1, 0, 0, 0, -1, 1.0, 0.2, 0.2, 0.2, 1.0, 0, 0, 0]],
-  NIGHTELF: [[1, 0, 0, 0, -1, 1.0, 0.0902, 0.0902, 0.1702, 1.0, 0, 0, 0]],
-  DRAENEI: [
-    [1, 0, 0.61185, 0.62942, -0.47903, 1.0, 0, 0, 0, 1.0, 0.56941, 0.52, 0.6],
-    [1, 0, -0.64345, -0.31052, -0.69968, 1.0, 0, 0, 0, 1.0, 0.60941, 0.60392, 0.7],
-    [1, 0, -0.46481, -0.1432, 0.87376, 1.0, 0, 0, 0, 2.0, 0.5835, 0.48941, 0.6],
-  ],
-  BLOODELF: [
-    [1, 0, -0.82249, -0.54912, -0.14822, 1.0, 0, 0, 0, 2.0, 0.581175, 0.50588, 0.42588],
-    [1, 0, 0, 0, -1, 1.0, 0.60392, 0.6149, 0.7, 1.0, 0, 0, 0],
-    [1, 0, 0.02575, 0.86518, -0.50081, 1.0, 0, 0, 0, 1.0, 0.59137, 0.51745, 0.63471],
-  ],
-  DEATHKNIGHT: [[1, 0, 0, 0, -1, 1.0, 0.38824, 0.66353, 0.76941, 1.0, 0, 0, 0]],
-  CHARACTERSELECT: [
-    [1, 0, 0, 0, -1, 1.0, 0.15, 0.15, 0.15, 1.0, 0, 0, 0],
-    [1, 0, -0.74919, 0.35208, -0.56103, 1.0, 0, 0, 0, 1.0, 0.44706, 0.5451, 0.73725],
-    [1, 0, 0.53162, -0.8434, 0.0778, 1.0, 0, 0, 0, 2.0, 0.55, 0.338625, 0.148825],
-  ],
-};
+/**
+ * `LIGHT_LIVE`/`LIGHT_GHOST`, glueparent.lua:97-98 -- the first argument to every `Add*Light`.
+ *
+ * `SetLighting` only ever passes `LIGHT_LIVE`; the ghost sets exist for the "dead character" glue
+ * variant, which no 3.3.5 glue Lua reaches. `ModelRig` records the set a row was added to so a row
+ * for the ghost variant is kept apart rather than folded into the live rig by accident.
+ */
+export const LIGHT_LIVE = 0;
+export const LIGHT_GHOST = 1;
 
-/** `glueparent.lua:22` -- verbatim. `near` is always 0 in `SetLighting`. */
-export const CHAR_MODEL_FOG: Record<string, { r: number; g: number; b: number; far: number }> = {
-  HUMAN: { r: 0.8, g: 0.65, b: 0.73, far: 222 },
-  ORC: { r: 0.5, g: 0.5, b: 0.5, far: 270 },
-  DWARF: { r: 0.85, g: 0.88, b: 1.0, far: 500 },
-  NIGHTELF: { r: 0.25, g: 0.22, b: 0.55, far: 611 },
-  TAUREN: { r: 1.0, g: 0.61, b: 0.42, far: 153 },
-  SCOURGE: { r: 0, g: 0.22, b: 0.22, far: 26 },
-  CHARACTERSELECT: { r: 0.8, g: 0.65, b: 0.73, far: 222 },
-};
+/** Which of `ResetLights`'s six sets a row belongs to -- see the comment at glueparent.lua:347-360. */
+export type LightSet = 'background' | 'character' | 'pet';
+
+/** One `Add*Light` call, kept whole so nothing about which set it was for is lost in the fold. */
+export interface RigLight {
+  readonly set: LightSet;
+  /** `LIGHT_LIVE` or `LIGHT_GHOST`. */
+  readonly liveness: number;
+  readonly row: RaceLightRow;
+}
 
 /**
- * The login scene's fog. **`near` and `far` are authored; the colour is not, and this comment used
- * to claim otherwise.**
+ * One MODEL frame's own state, exactly as its Lua and its XML set it.
  *
- * accountlogin.xml:93 is, in full:
- *   `<ModelFFX name="AccountLogin" ... fogNear="0" fogFar="1200" glow="0.08">`
- * `UI.xsd`'s `ModelType` puts the colour in an OPTIONAL `<FogColor>` CHILD element, not in an
- * attribute, and `AccountLogin` declares no such child (nor does any other `<ModelFFX>` in the
- * manifest). So 0/1200 are the client's numbers and the colour is the engine's unstated default,
- * which is in no file we can read.
+ * Every field is written by a method in `lua/methods/model.ts` (or, for the three the login screen
+ * authors as attributes, by `framexml/loader.ts` calling those same methods). Nothing here is
+ * derived from a race token or a screen name -- that is the whole point of the type.
  *
- * Black is what an unspecified `ColorType` is elsewhere in this renderer, and it is what
- * `glue-scene.ts` already uses for a scene whose `CharModelFogInfo` row is missing -- so it is the
- * consistent unknown rather than a new invention. **Measured, the choice is inert on this scene:**
- * setting the colour to full red (1, 0, 0) and re-shooting the login screen moved the sampled
- * pixels by at most one 8-bit step (bridge 10,24,29 -> 11,24,29), because every surface in
- * `UI_MainMenu_Northrend` sits well inside the authored 0..1200 band and the sky bowl's own
- * materials are flagged UNFOGGED (0x02). The value that was here before -- (0.25, 0.06, 0.015) --
- * had no source at all.
+ * `revision` is a monotonic counter bumped by every mutation, and it is how the host notices: the
+ * FrameXML screen reads the active model frame's rig once per tick and only re-pushes when the
+ * number has moved. Same gate the reference uses for its glue preview (`glue_booth.rs:816-819`),
+ * and the reason a `SetCharacterSelectFacing` per drag-frame cannot cost a rig rebuild.
  */
-export const MAIN_MENU_FOG = { r: 0, g: 0, b: 0, near: 0, far: 1200 };
+export interface ModelRig {
+  /** `SetModel(path)`. Null until the frame's Lua names a model. */
+  modelPath: string | null;
+  /** `SetSequence(slot)` -- a FILE SLOT, not an `AnimationData` id. */
+  sequence: number;
+  /** `SetCamera(index)` -- an index into the model's camera TABLE. */
+  camera: number;
+  /** `SetFogColor`/`SetFogNear`/`SetFogFar`, or null once `ClearFog()` has run. */
+  fog: { color: RGB; near: number; far: number } | null;
+  /** `SetGlow(value)`. Recorded; see `glue-scene.ts#buildRig` for what consumes it (nothing yet). */
+  glow: number;
+  /** Every `Add*Light` since the last `ResetLights()`, in call order. */
+  lights: RigLight[];
+  revision: number;
+}
+
+/**
+ * A frame's rig before anything has set it.
+ *
+ * The defaults are the engine's own for an untouched `<ModelFFX>`: no model, sequence and camera 0
+ * (which is what both `SetLighting` and every `OnLoad` in the glue set them to anyway), NO fog --
+ * `ClearFog()`'s state, since a frame that never mentions fog cannot be fogged -- and no lights, in
+ * which case `glue-scene.ts` falls back to the model's own directionals, exactly as `ResetLights()`
+ * without a following `AddLight` means "use the background's defaults" (glueparent.lua:348).
+ *
+ * `glow` starts at 0 rather than at `SetLighting`'s 0.3 fallback: 0.3 is what the client picks for a
+ * race with no `CharModelGlowInfo` row, which is a decision `SetLighting` makes and not a default
+ * of the widget.
+ */
+export function emptyRig(): ModelRig {
+  return { modelPath: null, sequence: 0, camera: 0, fog: null, glow: 0, lights: [], revision: 0 };
+}
+
+/** The fog triple a rig resolves to: the packed `fogParams` vec4 plus its colour. */
+export function rigFog(rig: ModelRig | null): { color: RGB; params: [number, number, number, number] } {
+  if (rig?.fog) {
+    return { color: rig.fog.color, params: packFogParams(rig.fog.near, rig.fog.far) };
+  }
+  // `ClearFog()`, or a frame that never mentioned fog: push the band past the far plane instead of
+  // branching in the shader. Black, because an unfogged surface never samples the colour.
+  return { color: [0, 0, 0], params: packFogParams(0, 100000) };
+}
+
+/**
+ * The rows a rig contributes to the DIRECTIONAL fold, and the two narrowings it makes.
+ *
+ * `SetLighting` adds every enabled row to all three sets with the same values
+ * (`for j, f in pairs({model.AddCharacterLight, model.AddLight, model.AddPetLight})`,
+ * glueparent.lua:366-370), so on every screen the client actually drives, background == character ==
+ * pet. This client folds ONE rig for the whole scene (`glue-scene.ts#render` pushes it into every
+ * material it walks), so it takes the BACKGROUND set and drops the other two -- measurably identical
+ * today, and named here rather than hidden so the day a caller sets them apart the divergence is
+ * findable. `LIGHT_GHOST` rows are dropped for the same reason: nothing in 3.3.5's glue adds one.
+ */
+export function rigLightRows(rig: ModelRig | null): RaceLightRow[] {
+  if (!rig) {
+    return [];
+  }
+  return rig.lights
+    .filter((light) => light.set === 'background' && light.liveness === LIGHT_LIVE)
+    .map((light) => light.row);
+}
+
+/**
+ * The login scene's fog, for the HAND-WRITTEN screens only -- and the one transcription in this file
+ * that survived making the model methods real, with its reason.
+ *
+ * It is the whole of `<ModelFFX name="AccountLogin">`'s authored fog, both halves:
+ *   accountlogin.xml:93   `... fogNear="0" fogFar="1200" glow="0.08">`
+ *   accountlogin.xml:2501 `<FogColor r="0.25" g="0.06" b="0.015"/>`   (last child, before `</ModelFFX>`)
+ *
+ * **THE COLOUR IS AUTHORED, and the comment that used to stand here said the opposite.** It claimed
+ * `AccountLogin` "declares no such child (nor does any other `<ModelFFX>` in the manifest)" and that
+ * (0.25, 0.06, 0.015) "had no source at all". Both are wrong: the element is 2408 lines below the
+ * open tag, after `<Scripts>`, which is presumably how it was missed, and those three numbers are
+ * exactly what it carries. `UI.xsd`'s `ModelType` does put the colour in an optional CHILD rather
+ * than an attribute, which is the only true half of that note. Re-fetched and re-read from
+ * `12340/interface/gluexml/accountlogin.xml` this round; the other two `<ModelFFX>`es
+ * (`CharacterSelect`, characterselect.xml:153; `CharacterCreate`, charactercreate.xml:200) really do
+ * author no fog at all, because `SetLighting` gives them theirs.
+ *
+ * WHY IT STAYS. `?ui=lua` no longer reads it: the loader now issues `SetFogNear`/`SetFogFar`/
+ * `SetGlow`/`SetFogColor` from those very attributes, so the FrameXML login screen's fog comes down
+ * the client's own path. `screens/login.ts` and `screens/realms.ts` -- which serve plain `/` -- have
+ * no Lua VM at all, so nothing there can call a model method; they are the hand-written oracle and
+ * are deliberately out of scope. This is their copy of the same six numbers, and the two paths are
+ * now checked against each other by eye rather than one being derived from the other.
+ *
+ * Measured last round and still true: on this scene the COLOUR is inert -- forcing it to full red
+ * moved sampled pixels by at most one 8-bit step, because every surface in `UI_MainMenu_Northrend`
+ * sits well inside the 0..1200 band and the sky bowl's materials are flagged UNFOGGED (0x02). The
+ * NEAR/FAR pair is not inert, which is why this table could not simply be deleted and left to
+ * `rigFog(null)`'s past-the-far-plane band.
+ */
+export const MAIN_MENU_FOG = { r: 0.25, g: 0.06, b: 0.015, near: 0, far: 1200 };
 
 /** One keyframe track, as `wow-data-parser/m2/animation-block.js` hands it back. */
 interface Track<T> {
@@ -160,20 +230,6 @@ export function modelLightRows(lights: readonly ModelLight[]): RaceLightRow[] {
   }
 
   return rows;
-}
-
-/**
- * The fog triple for a scene key, or null when the client would `ClearFog()`.
- * `params` is the packed `fogParams` vec4 the M2 shader consumes.
- */
-export function fogTriple(
-  key: string,
-): { color: RGB; params: [number, number, number, number] } | null {
-  const row = CHAR_MODEL_FOG[key];
-  if (!row) {
-    return null;
-  }
-  return { color: [row.r, row.g, row.b], params: packFogParams(0, row.far) };
 }
 
 /**

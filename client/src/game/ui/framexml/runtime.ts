@@ -103,11 +103,25 @@ export interface GlueRuntimeOptions {
    * and then selects the character, characterselect.lua:430-433. The token carries neither the gender
    * nor the appearance bytes the body needs, so the stage path cannot stand in for this one.
    *
-   * Deliberately NOT `SetCharSelectModelFrame`. That call names the FRAME the engine draws the
-   * character into and is still a no-op; this milestone puts the character on the one 3D stage the
-   * host already owns, which needs no per-widget model state. The two are independent.
+   * Still a second hook and not a reading of `SetCharSelectModelFrame`: that call names WHERE the
+   * character draws, this one names WHO. The two are independent and both are honoured -- see
+   * `onCharacterModelFrame` below.
    */
   onSelectCharacter?: (character: CharacterRecord | null) => void;
+  /**
+   * `SetCharSelectModelFrame(name)` (characterselect.lua:33) and `SetCharCustomizeFrame(name)`
+   * (charactercreate.lua:75) -- the frame the ENGINE draws the character model into.
+   *
+   * TWO SLOTS through one hook, discriminated by `kind`, and that discriminator is load-bearing rather
+   * than tidy: both `OnLoad`s run during the same boot (`GlueXML.toc` puts the two documents adjacent),
+   * so a shared slot has the create screen's answer overwrite the select screen's before either is ever
+   * shown. See `api/characters.ts#SetCharSelectModelFrame` for what that cost.
+   *
+   * The name is passed through verbatim rather than resolved to a frame here, because whether that frame
+   * is the one on screen is a question only the host's screen machine can answer
+   * (`screens/framexml-screen.ts`, which compares it against `SetCurrentScreen`).
+   */
+  onCharacterModelFrame?: (kind: 'select' | 'customize', name: string | null) => void;
   /**
    * `SetCharacterSelectFacing(degrees)` -- how far the character on the stage has been turned.
    *
@@ -252,6 +266,7 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
     options.onSetBackgroundModel,
     options.onSelectCharacter,
     options.onSetCharacterFacing,
+    options.onCharacterModelFrame,
   );
 
   const runtime = createFrameXmlRuntime(vm, ctx);

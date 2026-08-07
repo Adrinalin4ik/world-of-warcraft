@@ -21,6 +21,7 @@ import { GlueRenderer, ResolvedSprite } from './renderer';
 import { resolveCharacterLook } from './scene/character-look';
 import { clearCompositeCache } from './scene/body-composite';
 import { GlueSceneView } from './scene/glue-scene';
+import type { ModelRig } from './scene/scene-rig';
 import { GlueScene } from './scene/tokens';
 import { GlueStrings } from './strings';
 import { FontStringTextures, loadGlueFonts, measureText } from './text';
@@ -47,6 +48,15 @@ export interface GlueContext {
   protocol: ProtocolSession;
   /** Show a glue background scene, or null to tear it down. */
   setScene(scene: GlueScene | null): void;
+  /**
+   * Hand the 3D stage a MODEL frame's own state -- what `SetSequence`, `SetCamera`, `SetFog*`,
+   * `SetGlow` and `Add*Light` left on it -- or null for a screen that has none.
+   *
+   * Only the FrameXML screen ever calls this, because only it runs the client's Lua. The two
+   * hand-written screens pass nothing and the scene view falls back accordingly (see
+   * `GlueSceneView#applyRig`), which is what keeps plain `/` on its transcribed values.
+   */
+  setModelRig(rig: ModelRig | null): void;
   /**
    * Stand a character on the current scene's stage spot, or null to take it off.
    *
@@ -249,6 +259,7 @@ export class GlueApp {
       session: this.session,
       protocol: this.session.protocol,
       setScene: (scene) => this.sceneView.setScene(scene),
+      setModelRig: (rig) => this.sceneView.applyRig(rig),
       setCharacter: (character) => this.showCharacter(character),
       // Degrees in, radians on the group. A bare field write plus a quaternion, per the reference's
       // own yaw fast path: the drag writes this every frame it moves and it must not touch the model,
@@ -261,8 +272,12 @@ export class GlueApp {
       },
     };
 
-    // A screen that wants no scene gets none, and a screen that wants one asks on mount.
+    // A screen that wants no scene gets none, and a screen that wants one asks on mount. The MODEL
+    // rig goes with it: a screen change past the early-out above is a different screen INSTANCE, so
+    // whatever model frame supplied the last rig no longer exists, and letting it stand would fog the
+    // new screen's stage from a torn-down frame's state.
     this.sceneView.setScene(null);
+    this.sceneView.applyRig(null);
     screen.mount(ctx);
     this.current = { state, screen, root };
   }

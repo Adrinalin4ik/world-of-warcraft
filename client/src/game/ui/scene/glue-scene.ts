@@ -28,17 +28,18 @@ import {
 import { packFogParams } from '../../world/light/fog';
 import {
   foldRaceLights,
-  fogTriple,
   MAIN_MENU_FOG,
+  ModelRig,
   modelLightRows,
   modelToRender,
-  RACE_LIGHTS,
   RaceLightRow,
+  rigFog,
+  rigLightRows,
   verticalFov,
 } from './scene-rig';
 import { CharacterLook } from './character-look';
 import { cachedComposite } from './body-composite';
-import { GlueScene, lightingKey, scenePath, sceneToken } from './tokens';
+import { GlueScene, scenePath, sceneToken } from './tokens';
 
 /**
  * `AnimationData.dbc` id 0 -- Stand. The same id `classes/unit.ts` arms a freshly loaded unit with,
@@ -65,6 +66,21 @@ export class GlueSceneView {
   private requested: GlueScene | null = null;
   private loadedToken: string | null = null;
   private model: any = null;
+  /**
+   * The MODEL frame's own state, as the client's Lua set it -- or null on a screen that has no Lua.
+   *
+   * THE POINT OF THIS CLASS AS IT NOW STANDS: fog, glow, the directional rig, the sequence slot and
+   * the camera index used to be derived host-side from a race token through two hand-transcribed
+   * copies of `glueparent.lua`'s tables. They arrive here instead, from `SetLighting` executing in the
+   * client's own VM (`framexml/lua/methods/model.ts` -> `Widget#modelRig` ->
+   * `screens/framexml-screen.ts`'s per-tick revision poll -> `applyRig`).
+   *
+   * Null is a real case and not "not yet": plain `/` runs `screens/login.ts`, which has no Lua VM at
+   * all, so nothing can ever call a model method there. Every read of this field has to work without
+   * it -- see `buildRig` and `armSequence` for what each falls back to and why the fallback is not an
+   * approximation.
+   */
+  private luaRig: ModelRig | null = null;
   private cameraDef: any = null;
   private stage: THREE.Vector3 | null = null;
   /** The loaded character M2, or null. Posed and lit alongside the stage; see `update`/`render`. */
@@ -325,14 +341,8 @@ export class GlueSceneView {
       // and submits zero draw calls, which looks exactly like every other cause of a black screen.
       model.visible = true;
 
-      // `SetSequence(0)` is the FILE SLOT, not an AnimationData id -- slot 0 is the stage's own
-      // ambient loop.
-      const sequence = model.modelAnim?.sequences?.[0];
-      if (sequence && model.instanceAnim) {
-        model.instanceAnim.arm(sequence, worldClock.ms);
-      }
-
-      this.cameraDef = model.data?.cameras?.[0] ?? null;
+      this.armSequence();
+      this.pickCamera();
       const attachment = (model.data?.attachments ?? []).find((entry: any) => entry.id === 0);
       this.stage = attachment
         ? new THREE.Vector3(
@@ -349,13 +359,82 @@ export class GlueSceneView {
   }
 
   /**
-   * Fold the rig once per scene: RaceLights into the probe lane, the model's own POINT lights into
-   * the point table, and the fog triple from `CharModelFogInfo` (or the login screen's authored
-   * `ModelFFX` values).
+   * The client's Lua has changed a MODEL frame's state: fog, glow, lights, sequence slot, camera.
+   *
+   * Called from the FrameXML screen's per-tick revision poll, so it runs at most once per visible
+   * change however many `SetFogColor`/`AddLight` calls that change was made of. It is deliberately
+   * INDEPENDENT of `setScene`: `SetBackgroundModel` issues `SetCharSelectBackground(path)` and then
+   * `SetLighting(model, race)` in the same Lua call (glueparent.lua:378-385), so the rig is always in
+   * hand before the `.m2` has finished fetching -- and on a screen change back to login the rig
+   * arrives for a stage that is already loaded. Both orders have to work, which is why everything the
+   * rig decides is re-applied here as well as in the load callback.
+   *
+   * `null` takes the scene back to its no-Lua behaviour rather than clearing anything: the model's own
+   * directionals, `MAIN_MENU_FOG` for a `mainmenu` scene, slot 0 and camera 0.
+   */
+  applyRig(rig: ModelRig | null): void {
+    this.luaRig = rig;
+    if (!this.model || !this.requested) {
+      return;
+    }
+    this.armSequence();
+    this.pickCamera();
+    this.lighting = this.buildRig(this.requested, this.model);
+  }
+
+  /**
+   * `SetSequence(slot)` -- the FILE SLOT, not an `AnimationData` id. Slot 0 is a `UI_*` stage's own
+   * ambient loop (the circling dragon, the banners), and it is what every glue caller asks for.
+   *
+   * A slot the model does not carry is left alone rather than falling back to 0: the model keeps
+   * whatever it was already playing, and the console says which slot was missing. Nothing in the glue
+   * reaches that, and silently substituting a different animation is exactly the class of wrong-but-
+   * plausible this file's header argues against.
+   */
+  private armSequence(): void {
+    const slot = this.luaRig?.sequence ?? 0;
+    const sequence = this.model?.modelAnim?.sequences?.[slot];
+    if (!sequence) {
+      console.warn(
+        `glue scene: SetSequence(${slot}) -- ${scenePath(this.requested!)} has no such sequence slot`,
+      );
+      return;
+    }
+    if (this.model.instanceAnim) {
+      this.model.instanceAnim.arm(sequence, worldClock.ms);
+    }
+  }
+
+  /**
+   * `SetCamera(index)` -- an index into the model's camera TABLE.
+   *
+   * NOT a `cameraLookups` slot, which is the trap this class's header already records: these scenes
+   * ship one camera whose lookup entry holds the 0xffff none sentinel, so a lookup-based selection
+   * finds nothing at all.
+   */
+  private pickCamera(): void {
+    const index = this.luaRig?.camera ?? 0;
+    const def = this.model?.data?.cameras?.[index] ?? null;
+    if (def === null && index !== 0) {
+      console.warn(
+        `glue scene: SetCamera(${index}) -- ${scenePath(this.requested!)} has no such camera; ` +
+          'keeping the one that is framing the stage',
+      );
+      return;
+    }
+    this.cameraDef = def;
+  }
+
+  /**
+   * Fold the rig: the frame's own `AddLight` rows into the probe lane, the model's own POINT lights
+   * into the point table, and the fog triple the frame's `SetFog*`/`ClearFog` calls left behind.
+   *
+   * Every one of those inputs is the client's Lua now, not a table in this repo. Re-run whenever
+   * either half lands -- the `.m2` (`setScene`) or the rig (`applyRig`).
    */
   private buildRig(scene: GlueScene, model: any): NonNullable<GlueSceneView['lighting']> {
-    // The LOGIN screen has no Lua rig, and it does not need a placeholder either -- the MODEL's own
-    // lights are the same data. `SetLighting` is reached from exactly one place,
+    // The LOGIN screen has no `SetLighting` rig, and it does not need a placeholder either -- the
+    // MODEL's own lights are the same data. `SetLighting` is reached from exactly one place,
     // `SetBackgroundModel` (glueparent.lua:385), which only character select and create call, so
     // the main menu takes the engine's DEFAULT background rig ("ResetLights() sets all 6 light sets
     // to default for the background", glueparent.lua:348) -- and glueparent.lua:50 says in so many
@@ -369,10 +448,10 @@ export class GlueSceneView {
     //   model light 1  diffuse (0.3058824, 0.5372549, 0.6705883) x 0.65 = (0.198824, 0.349216, 0.435882)
     //   RaceLights [2] diffuse (0.1988235, 0.3492157, 0.4358824) x 1.00 = (0.198824, 0.349216, 0.435882)
     //   model light 2  ambient (1, 1, 1) x 0.27 = RaceLights [1] ambient (0.27, 0.27, 0.27) x 1.0
-    // Identical to every digit the files carry. So for a scene with no Lua row the model's own
-    // directionals are not an approximation of the rig, they ARE the rig, and the same fallback is
-    // right for a token the table does not name (DRAENEI and BLOODELF have light rows but no fog
-    // row; a future stage might have neither).
+    // Identical to every digit the files carry. So for a frame that issued no `AddLight` the model's
+    // own directionals are not an approximation of the rig, they ARE the rig -- which is also exactly
+    // what `ResetLights()` with no following `AddLight` means in the client's own words, so the
+    // fallback and the honoured call now agree by construction rather than by coincidence.
     //
     // WHAT THIS DOES NOT FIX, so nobody re-investigates it: the login screen's flat cyan SKY is not
     // a lighting problem and no rig can touch it. Measured -- drop the main menu's ambient to 0.02
@@ -384,8 +463,7 @@ export class GlueSceneView {
     // (`ICECROWN_CLOUDSA*`, `LOGIN_CLOUDS_UNHOLY01`, `ICECROWN_GLOW*`, `ICECROWN_LIGHTRAY_01`) --
     // their meshes are built and visible (70 of 71 are), so it is a blend/draw-order question in the
     // M2 pipeline, not a glue-scene one.
-    const key = lightingKey(scene);
-    const rows = pickLightRows(key, model);
+    const rows = pickLightRows(this.luaRig, model, sceneToken(scene));
     const { probe } = foldRaceLights(rows);
 
     const pointLights: SelectedLight[] = [];
@@ -411,6 +489,37 @@ export class GlueSceneView {
       }
     }
 
+    // `SetGlow(v)` arrives and is not drawn. Said once per scene rather than swallowed, because it is
+    // the one call on the MODEL surface that is recorded and then has nothing to consume it: this
+    // renderer is a single forward pass into the canvas with no post-processing chain, so there is no
+    // bloom stage for a glue-model glow amount to feed. Not a `notImplemented` -- the value is real
+    // state, `SetLighting` runs to completion, and `GetGlow`-style readers would be answered
+    // correctly -- so the honest form is a line naming what is missing rather than a warning that the
+    // call did nothing.
+    if (this.luaRig !== null && this.luaRig.glow > 0) {
+      console.debug(
+        `glue scene: SetGlow(${this.luaRig.glow}) recorded for ${sceneToken(scene)}; this renderer ` +
+          'has no bloom pass, so the stage draws without it',
+      );
+    }
+
+    // The FOG, and the one place a transcription still stands. `rigFog` answers the frame's own
+    // `SetFogColor`/`SetFogNear`/`SetFogFar` (or `ClearFog`'s past-the-far-plane band) -- which is
+    // where character select, character create AND the FrameXML login screen all get theirs now. The
+    // `mainmenu` fallback below is for the HAND-WRITTEN screens only (`screens/login.ts`,
+    // `screens/realms.ts`, i.e. plain `/`): those have no Lua VM, so no model method can ever be
+    // called on them, and `MAIN_MENU_FOG` is their copy of `AccountLogin`'s authored attributes. See
+    // that constant for the citation and for why deleting it would have changed the picture on `/`.
+    if (this.luaRig?.fog) {
+      const fog = rigFog(this.luaRig);
+      return {
+        probe,
+        pointLights,
+        fogColor: new THREE.Color(fog.color[0], fog.color[1], fog.color[2]),
+        fogParams: fog.params,
+      };
+    }
+
     if (scene.kind === 'mainmenu') {
       return {
         probe,
@@ -420,14 +529,12 @@ export class GlueSceneView {
       };
     }
 
-    const fog = fogTriple(key ?? '');
+    const fog = rigFog(this.luaRig);
     return {
       probe,
       pointLights,
-      fogColor: fog ? new THREE.Color(fog.color[0], fog.color[1], fog.color[2]) : new THREE.Color(0, 0, 0),
-      // No row means ClearFog(): push the fog band past the far plane instead of branching in the
-      // shader.
-      fogParams: fog ? fog.params : packFogParams(0, 100000),
+      fogColor: new THREE.Color(fog.color[0], fog.color[1], fog.color[2]),
+      fogParams: fog.params,
     };
   }
 
@@ -621,21 +728,28 @@ export class GlueSceneView {
 
   dispose(): void {
     this.teardown();
+    // NOT cleared by `teardown`, and the asymmetry is deliberate: `teardown` runs on every stage swap
+    // (a race click), and the rig belongs to the MODEL FRAME rather than to the stage -- `SetLighting`
+    // arrives a tick after `SetCharSelectBackground`, so dropping it there would blank the fog for the
+    // frames in between. A dispose is the end of the app, where nothing is coming back.
+    this.luaRig = null;
   }
 }
 
 /**
- * The directional rig for a scene: the client's Lua row if it has one, the model's own directionals
- * if it does not (see `buildRig` for why those are the same data), and only then a placeholder.
+ * The directional rig for a scene: the frame's own `AddLight` rows if the client's Lua issued any,
+ * the model's own directionals if it did not (see `buildRig` for the byte-level check that those are
+ * the same data), and only then a placeholder.
  *
- * The placeholder is the LAST resort and it is still a placeholder: a flat white ambient, for a
- * scene that is named by no Lua table AND ships no directional light of its own. Nothing in this
- * client reaches it today -- `UI_MainMenu_Northrend` ships one -- and it exists so that such an
- * asset draws visibly-wrong rather than black, with a console line saying which scene did it.
+ * The placeholder is the LAST resort and it is still a placeholder: a flat white ambient, for a frame
+ * that issued no light AND a model that ships no directional light of its own. Nothing in this client
+ * reaches it today -- `UI_MainMenu_Northrend` ships one, and every `SetBackgroundModel` stage gets
+ * three rows out of `RaceLights` -- and it exists so that such an asset draws visibly-wrong rather
+ * than black, with a console line saying which scene did it.
  */
-function pickLightRows(key: string | null, model: any): RaceLightRow[] {
-  const fromLua = key === null ? undefined : RACE_LIGHTS[key];
-  if (fromLua) {
+function pickLightRows(rig: ModelRig | null, model: any, token: string): RaceLightRow[] {
+  const fromLua = rigLightRows(rig);
+  if (fromLua.length > 0) {
     return fromLua;
   }
   const fromModel = modelLightRows(model?.data?.lights ?? []);
@@ -643,8 +757,8 @@ function pickLightRows(key: string | null, model: any): RaceLightRow[] {
     return fromModel;
   }
   console.warn(
-    `glue scene: no RaceLights row for "${key ?? 'mainmenu'}" and the model ships no directional ` +
-      'light -- falling back to a flat white ambient, which is a placeholder, not the rig',
+    `glue scene: the model frame issued no AddLight for "${token}" and the model ships no ` +
+      'directional light -- falling back to a flat white ambient, which is a placeholder, not the rig',
   );
   return [[1, 0, 0, 0, -1, 1.0, 1.0, 1.0, 1.0, 0.0, 0, 0, 0]];
 }

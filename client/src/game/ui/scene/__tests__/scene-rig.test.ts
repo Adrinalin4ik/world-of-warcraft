@@ -3,14 +3,29 @@ import * as THREE from 'three';
 import { evalProbe } from '../../../world/light/laws';
 import { lightingKey, raceKey, sceneFromPath, sceneToken, scenePath } from '../tokens';
 import {
-  CHAR_MODEL_FOG,
-  fogTriple,
   foldRaceLights,
   modelLightRows,
   modelToRender,
-  RACE_LIGHTS,
+  RaceLightRow,
   verticalFov,
 } from '../scene-rig';
+
+/**
+ * `RaceLights.HUMAN`, glueparent.lua:51-55 -- three rows, verbatim.
+ *
+ * A FIXTURE, and it lives here now because the production copy is gone: the client's Lua issues these
+ * through `model:AddLight(LIGHT_LIVE, unpack(Array))` and `framexml/lua/methods/model.ts` records what
+ * arrives, so nothing in `client/src` transcribes them any more. What still has to be pinned is the
+ * FOLD -- `foldRaceLights` is ours, and the "up must beat down" case below is a real defect it once had
+ * -- and a fold test needs real rows to fold. These are the same three the Lua will hand it.
+ */
+const HUMAN_ROWS: RaceLightRow[] = [
+  [1, 0, 0, 0, -1, 1.0, 0.27, 0.27, 0.27, 1.0, 0, 0, 0],
+  [1, 0, -0.45756075, -0.58900136, -0.66611975, 1.0, 0, 0, 0, 1.0, 0.19882353, 0.34921569, 0.43588236],
+  [1, 0, -0.64623469, 0.57582057, -0.50081086, 1.0, 0, 0, 0, 2.0, 0.52196085, 0.44, 0.29764709],
+];
+/** `RaceLights.SCOURGE`, glueparent.lua:69-71 -- one ambient-only row. */
+const SCOURGE_ROWS: RaceLightRow[] = [[1, 0, 0, 0, -1, 1.0, 0.2, 0.2, 0.2, 1.0, 0, 0, 0]];
 
 describe('sceneToken', () => {
   it('maps the main menu by the trial flag, not by expansion', () => {
@@ -57,46 +72,17 @@ describe('sceneFromPath', () => {
     expect(scene).toEqual({ kind: 'model', token: 'HUMAN' });
     expect(sceneToken(scene)).toBe('HUMAN');
     expect(lightingKey(scene)).toBe('HUMAN'); // SetLighting's strupper(name) key
-    expect(RACE_LIGHTS[lightingKey(scene)!]).toBe(RACE_LIGHTS.HUMAN);
-  });
-});
-
-describe('fogTriple', () => {
-  it('reads a CharModelFogInfo row', () => {
-    const fog = fogTriple('SCOURGE')!;
-
-    expect(fog.color).toEqual([0, 0.22, 0.22]);
-    // near is always 0 in SetLighting; far comes from the row.
-    expect(CHAR_MODEL_FOG.SCOURGE.far).toBe(26);
-    expect(fog.params).toHaveLength(4);
-  });
-
-  it('has the dedicated CHARACTERSELECT row -- our select screen IS fogged', () => {
-    // benilla found 1.12 renders select unfogged; 3.3.5 runs the same SetLighting for both screens
-    // and ships this row. Where they disagree, our client data wins.
-    expect(CHAR_MODEL_FOG.CHARACTERSELECT).toEqual({ r: 0.8, g: 0.65, b: 0.73, far: 222 });
-  });
-
-  it('returns null for a race with no row, which means ClearFog', () => {
-    expect(fogTriple('NOSUCHRACE')).toBeNull();
   });
 });
 
 describe('foldRaceLights', () => {
   it('sums the ambient-only rows into ambient and the coloured rows into lobes', () => {
-    const folded = foldRaceLights(RACE_LIGHTS.HUMAN);
+    const folded = foldRaceLights(HUMAN_ROWS);
 
     // Human row 1 is ambient 0.27 grey with a black diffuse; rows 2 and 3 are diffuse-only.
     expect(folded.ambient[0]).toBeCloseTo(0.27);
     expect(folded.probe).toHaveLength(7);
     folded.probe.forEach((row) => row.forEach((value) => expect(Number.isFinite(value)).toBe(true)));
-  });
-
-  it('folds every shipped race table to finite coefficients', () => {
-    Object.values(RACE_LIGHTS).forEach((rows) => {
-      const folded = foldRaceLights(rows);
-      folded.probe.forEach((row) => row.forEach((v) => expect(Number.isFinite(v)).toBe(true)));
-    });
   });
 
   it('lights an up-facing surface from above', () => {
@@ -105,7 +91,7 @@ describe('foldRaceLights', () => {
     // lobes -- both shining downward -- reached an up-facing normal on their negative-dip side, so
     // the probe returned LESS than the 0.27 ambient there and character select's cobblestone ground
     // rendered near-black. Up must beat down, and up must beat ambient alone.
-    const { probe } = foldRaceLights(RACE_LIGHTS.HUMAN);
+    const { probe } = foldRaceLights(HUMAN_ROWS);
     const up = evalProbe(probe, [0, 0, 1]);
     const down = evalProbe(probe, [0, 0, -1]);
 
@@ -114,7 +100,7 @@ describe('foldRaceLights', () => {
   });
 
   it('skips a disabled row', () => {
-    const row = [...RACE_LIGHTS.SCOURGE[0]] as typeof RACE_LIGHTS.SCOURGE[0];
+    const row = [...SCOURGE_ROWS[0]] as RaceLightRow;
     row[0] = 0;
 
     expect(foldRaceLights([row]).ambient).toEqual([0, 0, 0]);
@@ -168,7 +154,7 @@ describe('modelLightRows', () => {
       diffuse: [row[10] * row[9], row[11] * row[9], row[12] * row[9]],
     });
     const model = modelLightRows(uiHumanLights).map(light);
-    const lua = RACE_LIGHTS.HUMAN.map(light);
+    const lua = HUMAN_ROWS.map(light);
     const pairs: Array<[number, number]> = [[2, 0], [1, 1], [0, 2]];
 
     for (const [fromModel, fromLua] of pairs) {

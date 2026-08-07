@@ -125,6 +125,7 @@ export function installCharactersApi(
   onSetBackgroundModel?: (path: string) => void,
   onSelectCharacter?: (character: CharacterRecord | null) => void,
   onSetCharacterFacing?: (degrees: number) => void,
+  onCharacterModelFrame?: (kind: 'select' | 'customize', name: string | null) => void,
 ): () => void {
   /**
    * The 1-based index the client last asked for through `SelectCharacter`.
@@ -365,51 +366,58 @@ export function installCharactersApi(
   vm.registerFunction('UpgradeAccount', () => []);
 
   /**
-   * The two model-frame calls, kept as real no-ops rather than declared gaps for one reason each:
+   * `SetCharSelectModelFrame(name)` and `SetCharCustomizeFrame(name)` -- WHICH FRAME the engine draws
+   * the character model into. **Real this round**, and they are the pair that makes a `<ModelFFX>` a
+   * widget rather than a decoration.
    *
-   *  - `SetCharSelectModelFrame(name)` names which frame the engine's character model draws into. There
-   *    is no character model (see the task report -- bridging `<ModelFFX>` to the M2 pipeline is its own
-   *    piece of work), so there is nothing to point at.
-   *  - `UpdateSelectionCustomizationScene()` is called only from `CharacterSelect_UpdateModel`, which is
-   *    an `<OnUpdate>`, which this runtime does not dispatch.
+   * `characterselect.lua:33` and `charactercreate.lua:75` each call theirs once, from `OnLoad`, with a
+   * frame name (`"CharacterSelect"` / `"CharacterCreate"`). The host compares that name against
+   * `SetCurrentScreen`'s and stands a body on the stage only while the named frame is the visible one
+   * (`screens/framexml-screen.ts#pushModelState`). Both were `() => []` on the grounds that there was
+   * no character model to point at; there is one, and the selection was being placed by the host from
+   * the session instead.
+   *
+   * **TWO SLOTS, NOT ONE, and this cost a probe to find.** They were first wired to a single sink on the
+   * reasoning that only one glue screen is ever up, so only one of the two frames can own a character.
+   * That is true of which frame DRAWS and false of which frame is NAMED: `GlueXML.toc` loads
+   * `CharacterCreate.xml` immediately after `CharacterSelect.xml`, both `OnLoad`s run during the boot,
+   * and so `SetCharCustomizeFrame("CharacterCreate")` overwrote `SetCharSelectModelFrame`'s answer before
+   * either screen was ever shown. The character-select gate then never opened and no body appeared --
+   * with no error anywhere, because every call had succeeded. Found by dumping the bridge's three inputs
+   * (`window.glueModelBridge.state()`), which is the handle that exists for exactly this.
+   *
+   * The name is passed through UNRESOLVED. Whether a frame by that name exists, and whether it is the
+   * one on screen, are the host's questions; answering them here would need the frame registry, which
+   * this module has no business holding.
+   *
+   * `UpdateSelectionCustomizationScene()` stays a real no-op: its only caller is
+   * `CharacterSelect_UpdateModel`, which is an `<OnUpdate>` this runtime does not dispatch, and the
+   * scene it would refresh is refreshed every tick anyway (`screens.ts#tick`).
    *
    * `SetBackgroundModel` is deliberately NOT here, and that is a correction rather than an omission: it
    * LOOKS like an engine global and is not one -- glueparent.lua:374 defines it in Lua, so registering
    * it here would be dead code (the manifest loads after every `installXApi`) and, worse, a comment
    * claiming this client decided something the client's own Lua decides. What it calls through to IS
-   * ours: `SetCharSelectBackground` (below) and the MODEL light methods in `methods/frame.ts`.
+   * ours: `SetCharSelectBackground` (below) and the MODEL methods in `methods/model.ts`, all of which
+   * are now real except `AdvanceTime`.
    *
-   * The MODEL METHODS generally -- `SetModel`, `SetCamera`, `SetSequence`, `SetFog*`, `AdvanceTime`,
-   * `ResetLights`, `Add*Light` -- ARE declared gaps, so the load report names the missing model from one
-   * place instead of these duplicating the line from the function side.
+   * ONE NOTE FOR PIECE 10, measured last round and unchanged: loading `CharacterCreate.xml` at all
+   * (`stopAfter`) takes the report from 371 frames / 29 warnings / 0 errors to 432 / 35 / 0, and the
+   * single error it produced before `SetCharCustomizeFrame` existed was `CharacterCreate_OnLoad`
+   * aborting on line 75, this call. It is needed because `CHARACTER_FACING_INCREMENT = 2` is defined at
+   * `charactercreate.lua:1` and READ by `characterselect.lua:501,507` -- the two rotate arrows under
+   * Enter World.
    */
-  vm.registerFunction('SetCharSelectModelFrame', () => []);
+  const setCharacterModelFrame = (kind: 'select' | 'customize') => (args: unknown[]): unknown[] => {
+    const name = typeof args[0] === 'string' && args[0] !== '' ? args[0] : null;
+    if (onCharacterModelFrame) {
+      onCharacterModelFrame(kind, name);
+    }
+    return [];
+  };
+  vm.registerFunction('SetCharSelectModelFrame', setCharacterModelFrame('select'));
+  vm.registerFunction('SetCharCustomizeFrame', setCharacterModelFrame('customize'));
   vm.registerFunction('UpdateSelectionCustomizationScene', () => []);
-
-  /**
-   * `SetCharCustomizeFrame(name)` -- the create-side twin of `SetCharSelectModelFrame`, and the ONLY
-   * engine global `CharacterCreate.xml` needs in order to load without an error.
-   *
-   * `CharacterCreate.xml` is inside `stopAfter` now, and this line is what makes that free. The reason
-   * it had to come in: `CHARACTER_FACING_INCREMENT = 2` is defined at `charactercreate.lua:1` and READ
-   * by `characterselect.lua:501,507` -- the two rotate arrows under Enter World. The real client loads
-   * both files (`GlueXML.toc` puts `CharacterCreate.xml` immediately after `CharacterSelect.xml`), so
-   * in the reference that global is simply there by the time an arrow is held; with the document
-   * absent the arrows evaluated `GetCharacterSelectFacing() - nil`.
-   *
-   * MEASURED, not assumed, before the `stopAfter` move was kept: loading the document takes the report
-   * from 371 frames / 29 warnings / 0 errors to 432 / 35 / 0 -- one file, 61 more frames, six more
-   * warnings, and still no errors. The single error it produced without this stub was
-   * `CharacterCreate_OnLoad` aborting on line 75, this call. Nothing further in that handler needs an
-   * engine global (the rest is `_G[...]:SetText`, `SetBackdropBorderColor` and `SetBackdropColor`, all
-   * of which this runtime has), and `CharacterCreate_OnShow` -- which DOES need roughly twenty more --
-   * never runs, because the frame is created hidden and no screen shows it.
-   *
-   * A no-op for the same reason as its select-side twin, one step stronger: there is no per-widget
-   * model state to point at, AND there is no character-create screen to point one at. Making this real
-   * is research piece 10, which is a screen-boot task with a model task inside it.
-   */
-  vm.registerFunction('SetCharCustomizeFrame', () => []);
 
   /**
    * `SetCharSelectBackground(path)` / `SetCharCustomizeBackground(path)` -- the two engine calls the

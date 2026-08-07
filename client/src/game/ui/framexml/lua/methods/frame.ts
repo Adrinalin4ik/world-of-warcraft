@@ -226,40 +226,11 @@ function applyLayer(widget: { layer: Layer }, arg: unknown): void {
   }
 }
 
-/**
- * The model-frame surface: `MODEL`/`ModelFFX`/`PlayerModel` all resolve here (`object.ts`'s class
- * aliases). None of these are wired to anything -- the glue's 3D stage (`scene/glue-scene.ts`) is a
- * single `GlueSceneView` singleton driven by SCENE TOKENS from `screens.ts`, not by per-widget state
- * a `MODEL` frame's own Lua calls could reach. Wiring these for real needs two things neither exists
- * today: a per-widget model-state field on `Widget` (file, sequence, camera index, fog triple, glow),
- * and a bridge from that state to `GlueSceneView` (or a second, Lua-driven scene instance). Until
- * then these resolve non-nil and do nothing, which is right: `if frame.SetSequence then` must see a
- * Model as a Model, and a method that silently loaded a WRONG model would be worse than one that
- * visibly does nothing.
- */
-const MODEL: MethodTable = {
-  SetModel: notImplemented('SetModel', 'no per-widget model state exists; see MODEL surface note'),
-  SetCamera: notImplemented('SetCamera', 'no per-widget model state exists; see MODEL surface note'),
-  SetSequence: notImplemented('SetSequence', 'no per-widget model state exists; see MODEL surface note'),
-  SetFogNear: notImplemented('SetFogNear', 'no per-widget model state exists; see MODEL surface note'),
-  SetFogFar: notImplemented('SetFogFar', 'no per-widget model state exists; see MODEL surface note'),
-  SetFogColor: notImplemented('SetFogColor', 'no per-widget model state exists; see MODEL surface note'),
-  ClearFog: notImplemented('ClearFog', 'no per-widget model state exists; see MODEL surface note'),
-  SetGlow: notImplemented('SetGlow', 'no per-widget model state exists; see MODEL surface note'),
-  // `CharacterSelect_UpdateModel` (characterselect.lua:295) steps the model's animation clock. Declared
-  // with the rest of the surface so the load report names the missing model once, from one place.
-  AdvanceTime: notImplemented('AdvanceTime', 'no per-widget model state exists; see MODEL surface note'),
-  // The lighting half of the same surface, and the four that MATTER most on CharacterSelect:
-  // `SetLighting` (glueparent.lua:326-371) is called from `SetBackgroundModel`, which
-  // `CharacterSelect_SelectCharacter` calls BEFORE `SelectCharacter(id)`. So while `ResetLights` and
-  // the three `Add*Light`s were absent, picking a character raised inside the client's own Lua and the
-  // selection never reached the engine at all -- no character name, no locked row highlight. Declared
-  // stubs turn that into three report lines and a working screen.
-  ResetLights: notImplemented('ResetLights', 'no per-widget model state exists; see MODEL surface note'),
-  AddLight: notImplemented('AddLight', 'no per-widget model state exists; see MODEL surface note'),
-  AddCharacterLight: notImplemented('AddCharacterLight', 'no per-widget model state exists; see MODEL surface note'),
-  AddPetLight: notImplemented('AddPetLight', 'no per-widget model state exists; see MODEL surface note'),
-};
+// The MODEL surface -- `SetModel`, `SetCamera`, `SetSequence`, the fog four, `SetGlow`, `ResetLights`
+// and the three `Add*Light`s -- used to be thirteen `notImplemented` entries here, under a note saying
+// they needed per-widget model state and a bridge to `GlueSceneView`. Both exist now
+// (`Widget#modelRig` and `screens/framexml-screen.ts`'s per-tick poll), so the whole table moved to
+// `methods/model.ts` where it is real. `AdvanceTime` is the one that is still a gap and it went with
+// them, so the class has one home.
 
 registerMethods('FRAME', FRAME);
-registerMethods('MODEL', MODEL);

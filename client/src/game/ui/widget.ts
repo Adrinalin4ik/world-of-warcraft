@@ -12,6 +12,9 @@
 // import in either direction would close a runtime cycle. `isolatedModules` guarantees babel elides
 // this one.
 import type { BackdropDef, Insets } from './backdrop';
+// Type-only for the same reason: `scene/scene-rig.ts` imports three.js-adjacent lighting laws, and
+// this file must stay WebGL-free so `layout`/`hit` tests can exercise it without a GL context.
+import type { ModelRig } from './scene/scene-rig';
 import { Anchor, LayoutNode, Rect, resolveAnchors, screenScale, Viewport } from './layout';
 import { DrawLayer, OrderKey, Strata, compareOrder } from './framexml/order';
 
@@ -111,6 +114,17 @@ export class Widget {
    * authored art.
    */
   solid = false;
+  /**
+   * A MODEL frame's own model state, for the `MODEL` Lua class (`ModelFFX`, `PlayerModel`).
+   *
+   * Lazily created by the first `SetModel`/`SetCamera`/`SetSequence`/`SetFog*`/`SetGlow`/`Add*Light`
+   * that frame receives (`framexml/lua/methods/model.ts`), so an ordinary Frame keeps it null. It
+   * lives on `Widget` rather than in a side table for the same reason `backdrop` does: it is
+   * per-widget state the HOST reads -- `screens/framexml-screen.ts` polls the active model frame's
+   * `revision` each tick and pushes the rig at `GlueSceneView`. That poll is what makes the client's
+   * own `SetLighting` drive the 3D scene without a notification channel through the object model.
+   */
+  modelRig: ModelRig | null = null;
   blend: Blend = 'ALPHA';
   /** Multiplied into the sprite, as `#rrggbb`. */
   vertexColor = '#ffffff';

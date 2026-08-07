@@ -57,13 +57,15 @@ import {
   parseXml,
 } from './xml';
 
-// Side-effect imports: the FRAME/MODEL and BUTTON/CHECKBUTTON/EDITBOX method tables (REGION and the
-// leaves come in with `NOT_IMPLEMENTED` above). `object.ts` deliberately imports none of them, so
+// Side-effect imports: the FRAME, MODEL, SCROLLFRAME/SLIDER and BUTTON/CHECKBUTTON/EDITBOX method
+// tables (REGION and the leaves come in with `NOT_IMPLEMENTED` above). `object.ts` deliberately imports
+// none of them, so
 // SOMETHING has to, and this is the module that cannot function without the whole surface -- a
 // forgotten import would show up as a document that materializes and then does nothing at all.
 // Registering after a VM is installed is safe (`registerMethods` flushes the dispatch cache).
 import './lua/methods/frame';
 import './lua/methods/kinds';
+import './lua/methods/model';
 import './lua/methods/scroll';
 
 /**
@@ -1172,6 +1174,8 @@ class DocumentLoader {
         `kind:${tag}`,
         `<${element.tag}> bar/thumb attributes are ignored: nothing in this renderer draws a ${element.tag}'s track or fill${tag === 'slider' ? ' (its value methods are real; only the art is missing)' : ', and this object model registers no StatusBar methods at all'} (first: ${dbg})`,
       );
+    } else if (tag === 'model' || tag === 'modelffx' || tag === 'playermodel') {
+      this.applyModel(element, wrapper, dbg);
     } else if (tag === 'scrollframe') {
       // The counterpart line for the class that just gained methods: a `<ScrollFrame>`'s scroll VALUES
       // are tracked for real (`lua/methods/scroll.ts`), and its pixels are not -- `widget.ts` cannot
@@ -1182,6 +1186,59 @@ class DocumentLoader {
         'kind:scrollframe',
         `<ScrollFrame> scrolling is bookkeeping only: the scroll offsets and ranges are real, but nothing in this renderer clips a viewport or moves a scroll child, so the content does not scroll (first: ${dbg})`,
       );
+    }
+  }
+
+  /**
+   * `<Model>`/`<ModelFFX>`/`<PlayerModel>`: the model attributes, through the frame's own methods.
+   *
+   * `UI.xsd`'s `ModelType` declares `file`, `scale`, `fogNear`, `fogFar` and `glow` as ATTRIBUTES and
+   * the fog COLOUR as an optional `<FogColor>` CHILD -- which is why the colour is read separately
+   * below and not out of the attribute map. The one element in the loaded manifest that uses any of
+   * them is the login screen, and it uses four:
+   *
+   *   accountlogin.xml:93   `<ModelFFX name="AccountLogin" ... fogNear="0" fogFar="1200" glow="0.08">`
+   *   accountlogin.xml:2501 `<FogColor r="0.25" g="0.06" b="0.015"/>`
+   *
+   * Those two lines are 2408 apart, with the whole `<Frames>` and `<Scripts>` block between them, and
+   * a previous pass concluded from the opening tag alone that no colour was authored. It is authored.
+   * `scene/scene-rig.ts#MAIN_MENU_FOG` carries the correction.
+   *
+   * `<FogColor>` is read with `colorOf`, so a present element with a missing channel reads black on
+   * that channel -- the same rule every other `<Color>` in this loader follows.
+   *
+   * ORDER MATTERS, and only in one direction: the colour is issued LAST. `SetFogNear`/`SetFogFar`
+   * materialize a fog triple on a frame that has none (`lua/methods/model.ts` says why), so near/far
+   * first then colour leaves all three set whichever the document happened to declare; the reverse
+   * would work equally well. What must NOT happen is `file=` being issued before them, because
+   * `SetModel` is what makes the host load a stage and the stage should land with its fog already
+   * decided. No glue element uses `file=` -- `AccountLogin` calls `SetModel` from its `OnLoad`, which
+   * step 8 fires after all of this -- so that ordering is guarded by the sequence rather than relied on.
+   *
+   * `scale=` is deliberately not issued: `MODEL` has no `SetModelScale` in this object model and no
+   * glue element authors one, so emitting the call would produce a report line for a gap nothing has.
+   */
+  private applyModel(element: XmlElement, wrapper: LuaRef, dbg: string): void {
+    const near = num(attr(element, 'fogNear'));
+    if (near !== undefined) {
+      this.callMethod(wrapper, 'SetFogNear', [near], dbg);
+    }
+    const far = num(attr(element, 'fogFar'));
+    if (far !== undefined) {
+      this.callMethod(wrapper, 'SetFogFar', [far], dbg);
+    }
+    const glow = num(attr(element, 'glow'));
+    if (glow !== undefined) {
+      this.callMethod(wrapper, 'SetGlow', [glow], dbg);
+    }
+    const fogColor = childrenNamed(element, 'FogColor')[0];
+    if (fogColor !== undefined) {
+      const [r, g, b] = colorOf(fogColor);
+      this.callMethod(wrapper, 'SetFogColor', [r, g, b], dbg);
+    }
+    const file = attr(element, 'file');
+    if (file !== undefined && file.trim() !== '') {
+      this.callMethod(wrapper, 'SetModel', [file], dbg);
     }
   }
 
