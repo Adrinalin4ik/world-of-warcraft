@@ -165,7 +165,10 @@ class Unit extends Entity {
   private playerGeometry: THREE.BoxGeometry = new THREE.BoxGeometry(5, 5, 5);
   private playerMaterial: THREE.MeshBasicMaterial = new THREE.MeshBasicMaterial(
     {
-      color: '0xff0000',
+      // A NUMBER, not the string '0xff0000'. THREE.Color parses a string as a CSS colour, where
+      // "0xff0000" is not a name and not a #hex, so it logged `THREE.Color: Unknown color 0xff0000`
+      // and left the material white. The debug collider box is meant to be red.
+      color: 0xff0000,
       // wireframe: true,
       // opacity: 1
     }

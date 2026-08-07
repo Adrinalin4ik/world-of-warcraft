@@ -329,9 +329,20 @@ class Submesh extends THREE.Group {
   set displayInfo(displayInfo) {
     const { path } = displayInfo.modelData;
 
-    const skin1 = `${path}${displayInfo.skin1}.blp`;
-    const skin2 = `${path}${displayInfo.skin2}.blp`;
-    const skin3 = `${path}${displayInfo.skin3}.blp`;
+    // A CreatureDisplayInfo row carries an EMPTY texture variation wherever the model's own authored
+    // texture is the right one -- which is every character-model display, because a character's body
+    // skin comes from the composite instead. Interpolating that empty column produced the literal
+    // path `Character\Human\Male\null.blp`, a 404 on the asset host and a "Failed to load M2 texture"
+    // for every unit in the world. `null` here is not a failure to report: it is "this slot has no
+    // runtime override", and `M2Material#skinTextureFor` already falls through to the authored
+    // texture on a falsy skin.
+    const skinPath = (variation) => (
+      typeof variation === 'string' && variation.length > 0 ? `${path}${variation}.blp` : null
+    );
+
+    const skin1 = skinPath(displayInfo.skin1);
+    const skin2 = skinPath(displayInfo.skin2);
+    const skin3 = skinPath(displayInfo.skin3);
 
     const childrenLength = this.children.length;
     for (let childIndex = 0; childIndex < childrenLength; ++childIndex) {
