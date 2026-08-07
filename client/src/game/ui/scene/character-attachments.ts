@@ -43,7 +43,7 @@
  * Height is the other confirmation: id 11 at z 2.0272 is the crown of a 1.96-tall body, ids 5/6 at
  * 1.7254 are shoulder height, ids 1/2 at 0.9041 are hands hanging at the hips.
  */
-import type { ItemDisplayInfoRow, WornEquipment } from './character-equipment';
+import type { WornEquipment } from './character-equipment';
 
 /**
  * The body attachment ids piece 9 uses. Measured on `HumanMale.m2` -- see the file comment for the
@@ -301,6 +301,3 @@ export function attachedItemsFor(
 
   return items;
 }
-
-/** Referenced by `itemModel`'s columns; re-stated so a reader of this file sees the row shape. */
-export type { ItemDisplayInfoRow };
