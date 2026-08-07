@@ -52,11 +52,16 @@ class GlueHost extends React.Component<Props> {
       const glue = new FrameXmlGlueScreen();
       this.app.register(ClientState.Login, glue);
       this.app.register(ClientState.RealmList, glue);
+      // ...and CharSelect, on the same instance and for the same reason. `CharacterSelect.xml` is
+      // inside the manifest this screen loads now, and the client's own `SET_GLUE_SCREEN` ->
+      // `GlueScreenExit` -> `SetGlueScreen("charselect")` path shows it. A second instance here would
+      // reboot the Lua VM at exactly the moment the roster arrives.
+      this.app.register(ClientState.CharSelect, glue);
     } else {
       this.app.register(ClientState.Login, new LoginScreen());
       this.app.register(ClientState.RealmList, new RealmListScreen());
+      this.app.register(ClientState.CharSelect, new CharacterStubScreen());
     }
-    this.app.register(ClientState.CharSelect, new CharacterStubScreen());
     void this.app.start(ClientState.Login);
   }
 

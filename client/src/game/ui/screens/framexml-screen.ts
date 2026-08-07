@@ -11,10 +11,14 @@
  * ONE INSTANCE SERVES SEVERAL `ClientState`s, which is why this is `FrameXmlGlueScreen` and not
  * `FrameXmlLoginScreen`. The manifest this loads holds every glue frame at once -- `AccountLogin`,
  * `RealmList`, `AddonList`, `GlueDialog` -- and which of them is visible is a decision the client's own
- * Lua makes, by `Show`/`Hide`. So `pages/glue/index.tsx` registers this same object for `Login` AND
- * `RealmList`, and `GlueApp#enter` recognises it and does not remount: a glue-to-glue transition must
- * not tear down and reboot the Lua VM (see the comment there). Going to `CharSelect` DOES tear it down,
- * correctly -- `CharacterSelect.xml` is past `stopAfter` and is not loaded at all.
+ * Lua makes, by `Show`/`Hide`. So `pages/glue/index.tsx` registers this same object for `Login`,
+ * `RealmList` AND `CharSelect`, and `GlueApp#enter` recognises it and does not remount: a glue-to-glue
+ * transition must not tear down and reboot the Lua VM (see the comment there).
+ *
+ * `CharacterSelect.xml` is inside `stopAfter` now, so the third of those states is served the same way
+ * the second is -- by the document itself. `CharacterSelect` IS a glue screen (unlike `RealmList`): it
+ * is in `GlueScreenInfo`, so `SetGlueScreen("charselect")` shows it and hides `AccountLogin`, and the
+ * `charselect` row of `CLIENT_STATE_FOR_SCREEN` below is what tells the host machine it happened.
  *
  * Two things this screen does that the document cannot do for itself, both named rather than hidden:
  *
@@ -91,7 +95,7 @@ export class FrameXmlGlueScreen implements GlueScreen {
           // along; nothing was passing it, which is why those three were warn-once no-ops and why
           // `AccountLogin_OnShow`'s "focus the account name" did nothing.
           input: ctx.input,
-          stopAfter: 'AccountLogin.xml',
+          stopAfter: 'CharacterSelect.xml',
           onQuitGame: () => {
             // The same thing the transcription's Quit button can do in a browser: nothing to exit, so
             // leave an observable signal rather than pretending.
@@ -131,6 +135,12 @@ export class FrameXmlGlueScreen implements GlueScreen {
         // paths a static screenshot cannot reach -- an edit box's text region, for one, since nothing
         // in this runtime makes an XML-loaded box mouse-focusable yet.
         (window as never as Record<string, unknown>).glueRuntime = runtime;
+        // The session BESIDE the runtime, because half the questions this screen raises are about what
+        // the engine API was handed rather than about what Lua did with it -- and with no world
+        // handshake (both of the owner's servers answer AUTH_REJECT today) staging a roster on the
+        // session is the only way to reach the character screen at all. A read handle on an object the
+        // page already owns; nothing here mutates it.
+        (window as never as Record<string, unknown>).glueSession = ctx.protocol;
       })
       .catch((error) => {
         // A boot that fails outright is the one thing `bootGlueRuntime` does not turn into a report
@@ -152,6 +162,7 @@ export class FrameXmlGlueScreen implements GlueScreen {
     this.runtime?.dispose();
     this.runtime = null;
     delete (window as never as Record<string, unknown>).glueRuntime;
+    delete (window as never as Record<string, unknown>).glueSession;
   }
 }
 
