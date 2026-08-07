@@ -157,11 +157,31 @@ class Packet extends ByteBuffer {
     };
   }
 
+  /**
+   * A 3.3.5a packed quaternion -- 64 bits, three signed fields, `SMSG_UPDATE_OBJECT`'s
+   * UPDATEFLAG_GO_ROTATION.
+   *
+   * TWO FIXES, and the first one is a wire defect rather than a maths one. This read
+   * `this.readByte(8)`, and `readByte`'s argument is the BYTE ORDER, not a length
+   * (`byte-buffer/dist/byte-buffer.js:620` is `reader('getInt8', 1)`), so it consumed ONE of the eight
+   * bytes. Every game object with a rotation -- which in Elwynn is every door, chest and signpost --
+   * left the read cursor seven bytes short, and the next object's mask block count was then read out
+   * of the middle of this quaternion. That is what produced `RangeError: Invalid array length` in
+   * `parseUpdateValues`.
+   *
+   * Second, the shifts. The three fields are 22 / 21 / 21 bits, so `>>` on a JS number cannot express
+   * them: `>>` coerces to int32 and every bit above 31 is gone. BigInt does the shifts at full width
+   * and each field is sign-extended by shifting left to the top and back down, exactly as
+   * `G3D::Quat::unpack` does.
+   */
   readPackedQuaternion() {
-    const packed = this.readByte(8);
-    let x = (packed >> 42) * (1.0 / 2097152.0);
-    let y = (((packed << 22) >> 32) >> 11) * (1.0 / 1048576.0);
-    let z = (packed << 43 >> 43) * (1.0 / 1048576.0);
+    const low = BigInt(this.readUnsignedInt() >>> 0);
+    const high = BigInt(this.readUnsignedInt() >>> 0);
+    const packed = BigInt.asIntN(64, (high << 32n) | low);
+
+    let x = Number(packed >> 42n) * (1.0 / 2097152.0);
+    let y = Number(BigInt.asIntN(64, packed << 22n) >> 43n) * (1.0 / 1048576.0);
+    let z = Number(BigInt.asIntN(64, packed << 43n) >> 43n) * (1.0 / 1048576.0);
 
     let w = x * x + y * y + z * z;
     if (Math.abs(w - 1.0) >= (1 / 1048576.0)) {

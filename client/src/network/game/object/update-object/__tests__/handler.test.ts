@@ -14,6 +14,8 @@
  * a mock that recorded the call shape would have been written to match whichever order the code used.
  */
 import zlib from 'zlib-browserify';
+import Packet from '../../../../net/packet';
+import { UpdateFlags } from '../../enums';
 import { UpdateObjectHandler } from '../handler';
 
 /** The 4-byte incoming header, then the u32 uncompressed length -- what `raw.slice(8)` skips. */
@@ -50,5 +52,60 @@ describe('UpdateObjectHandler', () => {
 
     expect(handler.handleUpdateObjectPacket).toHaveBeenCalledTimes(1);
     expect(seen).toEqual([0]);
+  });
+
+  /**
+   * A FALLING unit's movement block, then its update-mask block, read back off one buffer.
+   *
+   * This is the regression test for `RangeError: Invalid array length at parseUpdateValues`, and it is
+   * deliberately shaped as a CURSOR test rather than an assertion about `parseUpdateValues` alone.
+   * The RangeError was never a bug in the mask code: `parseMovement` wrote `packet.readByte(16)`-style
+   * skips whose argument byte-buffer reads as the BYTE ORDER, so a falling unit's four jump floats
+   * consumed 4 bytes of their 16, and `parseUpdateValues` then read its block count out of the middle
+   * of the previous field. Asserting on the FIELD VALUE that follows the movement block is what pins
+   * that: it can only come out right if every byte before it was consumed.
+   *
+   * Happy path, one packet, no mocks -- the bytes are laid out the way TrinityCore 3.3.5a's
+   * `Object::BuildMovementUpdate` writes them.
+   */
+  it('reads a falling unit\'s movement block at full width, so the mask that follows lands', () => {
+    const handler = new UpdateObjectHandler({ on: jest.fn() } as never);
+
+    const MOVEFLAG_FALLING = 0x00001000;
+
+    // Laid out with a DataView rather than a ByteBuffer: writing the bytes by hand is the point --
+    // a helper that shared the reader's own idea of a field width could not catch a width bug.
+    const raw = new Uint8Array(128);
+    const view = new DataView(raw.buffer);
+    let at = 0;
+    const u16 = (v: number) => { view.setUint16(at, v, true); at += 2; };
+    const u32 = (v: number) => { view.setUint32(at, v, true); at += 4; };
+    const u8 = (v: number) => { view.setUint8(at, v); at += 1; };
+    const f32 = (v: number) => { view.setFloat32(at, v, true); at += 4; };
+
+    u16(UpdateFlags.UPDATEFLAG_LIVING);
+    u32(MOVEFLAG_FALLING); // movement flags
+    u16(0); // extra movement flags
+    u32(12345); // timestamp
+    [-8952.5, -129.8, 83.24, 1.5].forEach(f32); // x, y, z, facing
+    u32(700); // fall time
+    // The four jump floats -- 16 bytes. Each of these was being read as ONE byte.
+    [-7.9556, 0.5, 0.8660254, 4.5].forEach(f32);
+    // Nine speeds: walk, run, runBack, swim, swimBack, fly, flyBack, turn, pitch.
+    [2.5, 7, 4.5, 4.72, 2.5, 7, 4.5, 3.14159, 3.14159].forEach(f32);
+
+    // Then the update-mask block: one 32-bit block with bit 0 set, and its one uint32 value.
+    u8(1);
+    u32(1);
+    u32(0xdecaf);
+
+    const packet = new Packet(0x00a9, raw.subarray(0, at), false);
+    const movement = handler.parseMovement(packet);
+
+    expect(movement.fallTime).toBe(700);
+    expect(movement.fallVelocity).toBeCloseTo(-7.9556, 3);
+    expect(movement.runSpeed).toBeCloseTo(7, 3);
+    // The payload after the movement block. Wrong only if the cursor is wrong.
+    expect(handler.parseUpdateValues(packet)[0]).toBe(0xdecaf);
   });
 });
