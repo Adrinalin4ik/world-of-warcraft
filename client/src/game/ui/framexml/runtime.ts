@@ -331,6 +331,21 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
    * loader turns that into a real `EnableMouse(true)`.
    */
   const characterSelectUiId = registry.byName('CharacterSelectUI');
+  /**
+   * The two rotate arrows under Enter World (characterselect.xml:204,248).
+   *
+   * Named-frame exceptions like `GlueParent` and `CharacterSelectUI`, and for the same reason: their
+   * whole `<OnUpdate>` body is `CharacterSelectRotate{Left,Right}_OnUpdate(self)`, which is the
+   * ENTIRETY of the arrows' behaviour -- `if self:GetButtonState() == "PUSHED" then
+   * SetCharacterSelectFacing(GetCharacterSelectFacing() -/+ CHARACTER_FACING_INCREMENT) end`
+   * (characterselect.lua:499-509). There is no `OnClick` rotation to fall back on; the buttons rotate
+   * ONLY while held, one increment per frame, and a runtime that fires no `OnUpdate` for them makes
+   * them dead art.
+   *
+   * They write the same `SetCharacterSelectFacing` the drag does, so this adds no second facing path.
+   */
+  const rotateLeftId = registry.byName('CharacterSelectRotateLeft');
+  const rotateRightId = registry.byName('CharacterSelectRotateRight');
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
   let caretClock = 0;
@@ -390,12 +405,23 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
       // It is a no-op until the drag starts: the handler's whole body is guarded on
       // `CHARACTER_SELECT_ROTATION_START_X`, which only `OnMouseDown` sets.
       //
-      // The ROTATE ARROWS are deliberately not dispatched alongside it, and that is a real gap rather
-      // than a choice: `CharacterSelectRotateLeft/Right_OnUpdate` add `CHARACTER_FACING_INCREMENT`,
-      // which is defined in `charactercreate.lua:1` -- a file this runtime's `stopAfter` never loads.
-      // Ticking them would evaluate `GetCharacterSelectFacing() - nil` once per frame per button.
       if (characterSelectUiId !== null) {
         invokeScriptHandler(ctx, characterSelectUiId, 'OnUpdate', [dt]);
+      }
+      // SIX: the two ROTATE ARROWS' own `<OnUpdate>`, and only theirs. See the ids above.
+      //
+      // This used to carry a comment saying they were deliberately left out because
+      // `CHARACTER_FACING_INCREMENT` is defined in `charactercreate.lua`, a file `stopAfter` did not
+      // reach -- so ticking them would have computed `GetCharacterSelectFacing() - nil`. That was
+      // accurate; the fix was to load what the client loads (`CharacterCreate.xml` is now inside
+      // `stopAfter`, see `api/characters.ts#SetCharCustomizeFrame`) rather than to invent a constant
+      // here. Each handler is a no-op unless its own button is held, which is what makes an
+      // unconditional per-frame call correct.
+      if (rotateLeftId !== null) {
+        invokeScriptHandler(ctx, rotateLeftId, 'OnUpdate', [dt]);
+      }
+      if (rotateRightId !== null) {
+        invokeScriptHandler(ctx, rotateRightId, 'OnUpdate', [dt]);
       }
     },
     dispose: () => {

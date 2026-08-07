@@ -387,6 +387,31 @@ export function installCharactersApi(
   vm.registerFunction('UpdateSelectionCustomizationScene', () => []);
 
   /**
+   * `SetCharCustomizeFrame(name)` -- the create-side twin of `SetCharSelectModelFrame`, and the ONLY
+   * engine global `CharacterCreate.xml` needs in order to load without an error.
+   *
+   * `CharacterCreate.xml` is inside `stopAfter` now, and this line is what makes that free. The reason
+   * it had to come in: `CHARACTER_FACING_INCREMENT = 2` is defined at `charactercreate.lua:1` and READ
+   * by `characterselect.lua:501,507` -- the two rotate arrows under Enter World. The real client loads
+   * both files (`GlueXML.toc` puts `CharacterCreate.xml` immediately after `CharacterSelect.xml`), so
+   * in the reference that global is simply there by the time an arrow is held; with the document
+   * absent the arrows evaluated `GetCharacterSelectFacing() - nil`.
+   *
+   * MEASURED, not assumed, before the `stopAfter` move was kept: loading the document takes the report
+   * from 371 frames / 29 warnings / 0 errors to 432 / 35 / 0 -- one file, 61 more frames, six more
+   * warnings, and still no errors. The single error it produced without this stub was
+   * `CharacterCreate_OnLoad` aborting on line 75, this call. Nothing further in that handler needs an
+   * engine global (the rest is `_G[...]:SetText`, `SetBackdropBorderColor` and `SetBackdropColor`, all
+   * of which this runtime has), and `CharacterCreate_OnShow` -- which DOES need roughly twenty more --
+   * never runs, because the frame is created hidden and no screen shows it.
+   *
+   * A no-op for the same reason as its select-side twin, one step stronger: there is no per-widget
+   * model state to point at, AND there is no character-create screen to point one at. Making this real
+   * is research piece 10, which is a screen-boot task with a model task inside it.
+   */
+  vm.registerFunction('SetCharCustomizeFrame', () => []);
+
+  /**
    * `SetCharSelectBackground(path)` / `SetCharCustomizeBackground(path)` -- the two engine calls the
    * client's own `SetBackgroundModel` splits into (glueparent.lua:378-382), and the reason character
    * select shows the selected character's race stage at all.

@@ -15,7 +15,8 @@
  * `RealmList` AND `CharSelect`, and `GlueApp#enter` recognises it and does not remount: a glue-to-glue
  * transition must not tear down and reboot the Lua VM (see the comment there).
  *
- * `CharacterSelect.xml` is inside `stopAfter` now, so the third of those states is served the same way
+ * `CharacterSelect.xml` and `CharacterCreate.xml` are both inside `stopAfter` now, so the third of
+ * those states is served the same way
  * the second is -- by the document itself. `CharacterSelect` IS a glue screen (unlike `RealmList`): it
  * is in `GlueScreenInfo`, so `SetGlueScreen("charselect")` shows it and hides `AccountLogin`, and the
  * `charselect` row of `CLIENT_STATE_FOR_SCREEN` below is what tells the host machine it happened.
@@ -104,7 +105,16 @@ export class FrameXmlGlueScreen implements GlueScreen {
           // along; nothing was passing it, which is why those three were warn-once no-ops and why
           // `AccountLogin_OnShow`'s "focus the account name" did nothing.
           input: ctx.input,
-          stopAfter: 'CharacterSelect.xml',
+          // `CharacterCreate.xml`, not `CharacterSelect.xml`, and the reason is on the CHARACTER
+          // SELECT screen: `CHARACTER_FACING_INCREMENT` -- the rotate arrows' per-frame step -- is
+          // defined at `charactercreate.lua:1` and read at `characterselect.lua:501,507`. The client
+          // loads both documents (`GlueXML.toc` has them adjacent, create straight after select), so
+          // this is the reference's own load list rather than a widened one. Cost, measured: 371 ->
+          // 432 frames, 29 -> 35 warnings, 0 -> 0 ERRORS. See
+          // `framexml/lua/api/characters.ts#SetCharCustomizeFrame` for the one stub that keeps the
+          // error count at zero, and note that `ClientState.CharCreate` still has no screen
+          // registered -- the document is loaded, the screen is not booted.
+          stopAfter: 'CharacterCreate.xml',
           onQuitGame: () => {
             // The same thing the transcription's Quit button can do in a browser: nothing to exit, so
             // leave an observable signal rather than pretending.
