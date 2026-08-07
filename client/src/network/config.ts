@@ -17,7 +17,16 @@ class Config {
   timezone = 0;
 
   locale = 'enUS';
-  os = 'Mac';
+  // Exactly `Win` or `OSX` -- no other value works, and the failure is remote and silent.
+  //
+  // The logon server stores this string on the account row; the WORLD server then checks it, and
+  // with Warden enabled rejects anything else outright: `if (wardenActive && account.OS != "Win" &&
+  // account.OS != "OSX")` -> SMSG_AUTH_RESPONSE 0x0E AUTH_REJECT (AzerothCore/TrinityCore
+  // WorldSocket::HandleAuthSessionCallback). This read `Mac` -- which is not what the real 3.3.5a
+  // Mac client sends -- and cost a long hunt, because the rejection arrives at the world handshake
+  // with no diagnostic while the fault was planted one server and one connection earlier. The
+  // handshake itself was correct the whole time; it never got as far as the digest.
+  os = 'OSX';
   platform = 'x86';
   
   raw = {
