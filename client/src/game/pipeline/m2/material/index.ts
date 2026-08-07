@@ -419,15 +419,16 @@ class M2Material extends THREE.ShaderMaterial {
       this.vertexShader = M2Material.VERTEX_SHADERS[shaderNames.vertex];
       this.fragmentShader = M2Material.FRAGMENT_SHADERS[shaderNames.fragment];
 
-      // Warn about a missing VERTEX shader too, not just a missing fragment one, and note that the
-      // two misses are NOT equally survivable.
+      // Warn about a missing VERTEX shader too, not just a missing fragment one. EITHER miss is fatal
+      // to the frame, not to the batch: an unresolved name leaves the field `undefined`, and
+      // `WebGLProgram` calls `resolveIncludes` on both of them (three 0.185.1,
+      // `build/three.cjs:67002` and `:67006`), which does `.replace` on the string. So the throw
+      // aborts the whole `sceneView.render()` traversal. That is why `screens.ts` wraps the stage pass
+      // at all.
       //
-      // A missing FRAGMENT shader leaves `this.fragmentShader` undefined and three.js substitutes its
-      // own, so the batch draws through a program that knows nothing about M2 combiners -- wrong, but
-      // it draws. A missing VERTEX shader leaves `this.vertexShader` undefined and `WebGLProgram`
-      // THROWS (`resolveIncludes` calls `.replace` on it), which aborts the whole
-      // `sceneView.render()` traversal, not just this batch. That is why `screens.ts` wraps the stage
-      // pass at all.
+      // (An earlier version of this comment said three "silently substitutes its own" for a missing
+      // fragment shader. It does not -- `ShaderMaterial`'s defaults are overwritten by the assignments
+      // just above, so there is nothing left to fall back to. Checked in three's source, not assumed.)
       //
       // `Diffuse_T2` was in exactly that state -- named by `shaderNamesFromSingleOpTable`, absent
       // from `VERTEX_SHADERS` -- and it took a GL driver error on an unrelated code path to find it.

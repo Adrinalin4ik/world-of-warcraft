@@ -36,6 +36,10 @@ describe('Diffuse_T2', () => {
     // `createSubmeshGeometry` touches no instance state, so it can be driven directly. One triangle,
     // with a second texcoord set deliberately DIFFERENT from the first -- the previous code pushed
     // only the first set, and GL fed the shader a constant (0, 0) for the attribute it never got.
+    //
+    // Non-zero on purpose for a second reason: the builder only uploads slot 1 when the set carries
+    // something (see its comment for why), so an all-zero fixture would pass this test for the wrong
+    // reason.
     const vertex = (u, v, u2, v2) => ({
       position: [u, v, 0],
       normal: [0, 0, 1],

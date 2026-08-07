@@ -582,7 +582,15 @@ class M2 extends THREE.Group {
     // texel of their layer: `Diffuse_T1_T2` (real, non-zero second coords measured on
     // `UI_MainMenu_Northrend` -- the LOGIN screen -- 2467 of 11728 vertices, and on `UI_DeathKnight`,
     // 964 of 7232) and now `Diffuse_T2`.
+    //
+    // Uploaded only when the set carries something, tracked by `anyUvs2` below. The overwhelming
+    // majority of models leave it entirely zero -- measured: 9 of the 11 `UI_*` glue models, all zero
+    // -- and every doodad, WMO doodad and creature in the world goes through this same builder. An
+    // unconditional second attribute would cost 8 bytes per emitted vertex across all of them for data
+    // GL already supplies for free: an attribute a shader declares but the geometry lacks reads as
+    // (0, 0), which is exactly what an all-zero set would have said.
     const uvs2 = [];
+    let anyUvs2 = false;
 
     const { startTriangle: start, triangleCount: count } = submeshDef;
     for (let i = start, faceIndex = 0; i < start + count; i += 3, ++faceIndex) {
@@ -605,6 +613,7 @@ class M2 extends THREE.Group {
 
         uvs[faceIndex].push(new THREE.Vector2(textureCoords[0][0], textureCoords[0][1]));
         uvs2[faceIndex].push(new THREE.Vector2(textureCoords[1][0], textureCoords[1][1]));
+        anyUvs2 = anyUvs2 || textureCoords[1][0] !== 0 || textureCoords[1][1] !== 0;
 
         // Same (X, Z, -Y) swizzle the positions get above. Pushed raw, the normals stayed in the
         // model's own axes while the positions moved into engine axes, so lighting arrived from the
@@ -627,7 +636,7 @@ class M2 extends THREE.Group {
     // mirror and the `rotateX` above are geometry-space operations and `applyMatrix4` never touches
     // `faceVertexUvs`; see `anim/material-channels.ts:13-18` for why texture space must stay exactly
     // as the file authored it.
-    geometry.faceVertexUvs = [uvs, uvs2];
+    geometry.faceVertexUvs = anyUvs2 ? [uvs, uvs2] : [uvs];
 
 
     const bufferGeometry =  geometry.toBufferGeometry();
