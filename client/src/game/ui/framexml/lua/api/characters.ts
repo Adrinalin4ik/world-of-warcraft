@@ -104,6 +104,22 @@ const DEATH_KNIGHT = 6;
  */
 const CHARACTER_FLAG_GHOST = 0x2000;
 
+/**
+ * Said once per VM, not once per call: `SetBackgroundModel` runs on every selection change, and a
+ * line per click would bury the report the runtime exists to produce.
+ */
+let warnedNoScene = false;
+function warnNoScene(path: string): void {
+  if (warnedNoScene) {
+    return;
+  }
+  warnedNoScene = true;
+  console.warn(
+    `SetCharSelectBackground("${path}"): this runtime was booted with no background-model sink, ` +
+      'so the 3D stage stays on whatever it was showing',
+  );
+}
+
 /** The stages in which a world connection is standing -- `IsConnectedToServer`. */
 const CONNECTED_STAGES = new Set([
   LoginStage.CharacterList,
@@ -114,8 +130,16 @@ const CONNECTED_STAGES = new Set([
 /**
  * Installs the character-select globals on `vm`, wired to `session`. Returns the `session.on`
  * unsubscribe, for a teardown that must not fire events into a closed Lua state.
+ *
+ * `onSetBackgroundModel` is the host's 3D stage, and it is optional in the sense that the API still
+ * installs without it -- a screen that has no scene to drive says so once on the console rather
+ * than pretending the background changed.
  */
-export function installCharactersApi(vm: LuaVM, session: ProtocolSession): () => void {
+export function installCharactersApi(
+  vm: LuaVM,
+  session: ProtocolSession,
+  onSetBackgroundModel?: (path: string) => void,
+): () => void {
   /**
    * The 1-based index the client last asked for through `SelectCharacter`.
    *
@@ -345,7 +369,7 @@ export function installCharactersApi(vm: LuaVM, session: ProtocolSession): () =>
    * LOOKS like an engine global and is not one -- glueparent.lua:374 defines it in Lua, so registering
    * it here would be dead code (the manifest loads after every `installXApi`) and, worse, a comment
    * claiming this client decided something the client's own Lua decides. What it calls through to IS
-   * ours: `SetCharSelectBackground` (`api/stubs.ts`) and the MODEL light methods in `methods/frame.ts`.
+   * ours: `SetCharSelectBackground` (below) and the MODEL light methods in `methods/frame.ts`.
    *
    * The MODEL METHODS generally -- `SetModel`, `SetCamera`, `SetSequence`, `SetFog*`, `AdvanceTime`,
    * `ResetLights`, `Add*Light` -- ARE declared gaps, so the load report names the missing model from one
@@ -353,6 +377,36 @@ export function installCharactersApi(vm: LuaVM, session: ProtocolSession): () =>
    */
   vm.registerFunction('SetCharSelectModelFrame', () => []);
   vm.registerFunction('UpdateSelectionCustomizationScene', () => []);
+
+  /**
+   * `SetCharSelectBackground(path)` / `SetCharCustomizeBackground(path)` -- the two engine calls the
+   * client's own `SetBackgroundModel` splits into (glueparent.lua:378-382), and the reason character
+   * select shows the selected character's race stage at all.
+   *
+   * The whole chain is the client's, not ours: `CharacterSelect_SelectCharacter(id)` asks
+   * `GetSelectBackgroundModel(id)` for a NAME, `SetBackgroundModel` turns that name into
+   * `Interface\Glues\Models\UI_<name>\UI_<name>.m2`, and hands the PATH here
+   * (characterselect.lua:430-431). So this takes a path and not a race, and the host reads the token
+   * back out of it (`scene/tokens.ts#sceneFromPath`) rather than re-deriving one from the roster --
+   * which is what keeps `CharacterSelect_DeathKnightSwap`'s `"DEATHKNIGHT"` stage, a name no race id
+   * can express, working for free.
+   *
+   * Both names point at the same host callback because this client has ONE scene view: the engine
+   * gives each `<ModelFFX>` its own model, and bridging that per-widget is the `MODEL.SetModel` gap
+   * `methods/frame.ts` already declares. Only one of the two glue screens is ever up, so one view is
+   * enough to be correct today; the day two model frames must draw at once, this is the seam.
+   */
+  const setBackground = (args: unknown[]): unknown[] => {
+    const path = typeof args[0] === 'string' ? args[0] : '';
+    if (!onSetBackgroundModel) {
+      warnNoScene(path);
+      return [];
+    }
+    onSetBackgroundModel(path);
+    return [];
+  };
+  vm.registerFunction('SetCharSelectBackground', setBackground);
+  vm.registerFunction('SetCharCustomizeBackground', setBackground);
 
   return unsubscribe;
 }

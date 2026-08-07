@@ -105,7 +105,7 @@ export function installStubApi(vm: LuaVM): void {
   vm.registerFunction('IsAddonVersionCheckEnabled', () => [false]);
   vm.registerFunction('SetAddonVersionCheck', () => []);
 
-  // --- CharacterSelect's model-frame background art -----------------------------------------------
-  vm.registerFunction('SetCharCustomizeBackground', () => []);
-  vm.registerFunction('SetCharSelectBackground', () => []);
+  // `SetCharSelectBackground` and `SetCharCustomizeBackground` were here as no-ops and are now real,
+  // in `api/characters.ts` -- they are the two calls `SetBackgroundModel` (glueparent.lua:374-386)
+  // bottoms out in, so stubbing them was what pinned character select to the login screen's stage.
 }

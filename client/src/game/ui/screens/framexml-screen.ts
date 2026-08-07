@@ -22,12 +22,17 @@
  *
  * Two things this screen does that the document cannot do for itself, both named rather than hidden:
  *
- *  - **The background scene.** `AccountLogin` is a `<ModelFFX>` and `AccountLogin_OnLoad` calls
- *    `self:SetModel("...UI_MainMenu_Northrend.m2")`, but `MODEL.SetModel` is a warn-once stub: there is
- *    no per-widget model state and no bridge from one to `GlueSceneView`, which is driven by SCENE
- *    TOKENS from the host. So the host sets the same token the transcription does. That is not the
+ *  - **The LOGIN screen's background scene.** `AccountLogin` is a `<ModelFFX>` and
+ *    `AccountLogin_OnLoad` calls `self:SetModel("...UI_MainMenu_Northrend.m2")`, but `MODEL.SetModel`
+ *    is a warn-once stub: there is no per-widget model state and no bridge from one to
+ *    `GlueSceneView`. So the host sets the same token the transcription does. That is not the
  *    document's decision being honoured -- it is the diff being kept about the UI layer instead of
  *    being swamped by a black background.
+ *
+ *    **Character select and create are NOT in that category any more.** Their stage comes down the
+ *    client's own path -- `GetSelectBackgroundModel(id)` -> `SetBackgroundModel` (pure Lua, which
+ *    already ran here) -> `SetCharSelectBackground(path)` -> `onSetBackgroundModel` below. This
+ *    screen only translates the path into a scene; it chooses nothing.
  *  - **The per-frame edit-box mirror**, which lives in `framexml/runtime.ts#update`.
  */
 import { ClientState, GlueContext, GlueScreen } from '../screens';
@@ -37,6 +42,7 @@ import { ClientState, GlueContext, GlueScreen } from '../screens';
 // browser-hostile node requires webpack has to be told about (`config/webpack.config.js`); keeping it in
 // its own chunk means a problem there cannot blank the page for a screen that never asked for Lua.
 import type { GlueRuntime } from '../framexml/runtime';
+import { sceneFromPath } from '../scene/tokens';
 import { wantsTrialScene } from './login-state';
 
 /**
@@ -82,7 +88,10 @@ export class FrameXmlGlueScreen implements GlueScreen {
     const token = ++this.mountToken;
 
     // See the file comment: the host's token, because `SetModel` cannot reach the scene view.
-    ctx.setScene({ kind: 'mainmenu', streamingTrial: wantsTrialScene(window.location.search) });
+    const loginScene = (): void => {
+      ctx.setScene({ kind: 'mainmenu', streamingTrial: wantsTrialScene(window.location.search) });
+    };
+    loginScene();
 
     void import('../framexml/runtime')
       .then(({ bootGlueRuntime }) =>
@@ -111,12 +120,31 @@ export class FrameXmlGlueScreen implements GlueScreen {
           // screen instance and does not remount -- which is what makes the boot's own
           // `SetGlueScreen("login")` a no-op rather than a rebuild.
           onSetCurrentScreen: (name) => {
+            // The login screen's stage, restored the moment the client's Lua puts that screen back
+            // up. In the engine this needs no code at all: each `<ModelFFX>` owns its own model, so
+            // hiding `CharacterSelect` and showing `AccountLogin` swaps which model draws. One
+            // shared `GlueSceneView` has to be told, and `SetCurrentScreen` is the client's own
+            // announcement of exactly that -- so the trigger is still the document's, not a guess.
+            if (name === 'login') {
+              loginScene();
+            }
             const next = CLIENT_STATE_FOR_SCREEN[name];
             if (next === undefined) {
               console.log(`framexml: SetCurrentScreen(${name}) -- no ClientState for that screen`);
               return;
             }
             ctx.go(next);
+          },
+          // `SetBackgroundModel` -> `SetCharSelectBackground(path)`, straight from the client's Lua.
+          // The path is parsed rather than pattern-matched against a race, so the token the document
+          // named is the token the stage loads -- including `DEATHKNIGHT`, which is not a race.
+          onSetBackgroundModel: (path) => {
+            const scene = sceneFromPath(path);
+            if (scene === null) {
+              console.warn(`framexml: SetCharSelectBackground("${path}") -- not a UI_<name>.m2 path`);
+              return;
+            }
+            ctx.setScene(scene);
           },
         }),
       )

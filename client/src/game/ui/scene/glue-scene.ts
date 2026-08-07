@@ -35,7 +35,7 @@ import {
   RaceLightRow,
   verticalFov,
 } from './scene-rig';
-import { GlueScene, raceKey, scenePath, sceneToken } from './tokens';
+import { GlueScene, lightingKey, scenePath, sceneToken } from './tokens';
 
 /** The scene's own root, so the character can yaw without the stage yawing with it. */
 export class GlueSceneView {
@@ -144,16 +144,20 @@ export class GlueSceneView {
     // stage's brightness and nothing else, and it is honest about being a placeholder rather than
     // borrowing CHARACTERSELECT's rows and pretending that is the law. Spec 3 resolves it against
     // the real screen.
+    //
+    // `lightingKey` is `SetLighting`'s own `strupper(name)` argument (glueparent.lua:385): null for
+    // the main menu, because that screen never reaches `SetLighting` at all.
+    const key = lightingKey(scene);
     const rows: RaceLightRow[] =
-      scene.kind === 'mainmenu'
+      key === null
         ? [[1, 0, 0, 0, -1, 1.0, 1.0, 1.0, 1.0, 0.0, 0, 0, 0]]
-        : RACE_LIGHTS[raceKey(scene.race)] ?? RACE_LIGHTS.HUMAN;
+        : RACE_LIGHTS[key] ?? RACE_LIGHTS.HUMAN;
     const { probe } = foldRaceLights(rows);
 
     const pointLights: SelectedLight[] = [];
     for (const light of model.data?.lights ?? []) {
       if (light.type !== 1) {
-        continue; // directional: our build takes those from the Lua table, not the model
+        continue; // a directional: it belongs to `rows` above, not to the point table
       }
       if (light.visibility?.firstKeyframe?.value === 0) {
         continue; // a light the asset ships explicitly dark
@@ -182,7 +186,7 @@ export class GlueSceneView {
       };
     }
 
-    const fog = fogTriple(raceKey(scene.race));
+    const fog = fogTriple(key ?? '');
     return {
       probe,
       pointLights,

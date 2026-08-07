@@ -81,6 +81,12 @@ export interface GlueRuntimeOptions {
   onQuitGame?: () => void;
   /** `SetCurrentScreen(name)`, which the client's Lua calls on every screen change. */
   onSetCurrentScreen?: (name: string) => void;
+  /**
+   * `SetCharSelectBackground(path)` / `SetCharCustomizeBackground(path)` -- the 3D stage, as a model
+   * PATH, exactly as `SetBackgroundModel` (glueparent.lua:378-382) builds it. Without it the two
+   * calls report themselves once instead of silently doing nothing.
+   */
+  onSetBackgroundModel?: (path: string) => void;
   viewport?: () => Viewport;
 }
 
@@ -208,7 +214,11 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
   installStubApi(vm);
   const unsubscribeLogin = installLoginApi(vm, options.protocol);
   const unsubscribeRealms = installRealmsApi(vm, options.protocol);
-  const unsubscribeCharacters = installCharactersApi(vm, options.protocol);
+  const unsubscribeCharacters = installCharactersApi(
+    vm,
+    options.protocol,
+    options.onSetBackgroundModel,
+  );
 
   const runtime = createFrameXmlRuntime(vm, ctx);
   const resolve = (path: string): string | null => texts.get(cacheKey(path)) ?? null;

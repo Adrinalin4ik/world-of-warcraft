@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import { sceneToken, scenePath } from '../tokens';
+import { lightingKey, raceKey, sceneFromPath, sceneToken, scenePath } from '../tokens';
 import {
   CHAR_MODEL_FOG,
   fogTriple,
@@ -20,20 +20,42 @@ describe('sceneToken', () => {
 
   it('shares scenes the way the reference does', () => {
     // glueparent.lua's SetBackgroundModel mapping: Troll rides Orc's stage, Gnome rides Dwarf's.
-    expect(sceneToken({ kind: 'race', race: 2 })).toBe('Orc');
-    expect(sceneToken({ kind: 'race', race: 8 })).toBe('Orc');
-    expect(sceneToken({ kind: 'race', race: 3 })).toBe('Dwarf');
-    expect(sceneToken({ kind: 'race', race: 7 })).toBe('Dwarf');
-    expect(sceneToken({ kind: 'race', race: 4 })).toBe('NightElf');
-    expect(sceneToken({ kind: 'race', race: 5 })).toBe('Scourge');
-    expect(sceneToken({ kind: 'race', race: 6 })).toBe('Tauren');
-    expect(sceneToken({ kind: 'race', race: 1 })).toBe('Human');
+    // The witness is the client's own tables -- glueparent.lua:20-67 has no GNOME and no TROLL key
+    // in CharModelFogInfo, GlueAmbienceTracks or RaceLights.
+    expect(raceKey(2)).toBe('ORC');
+    expect(raceKey(8)).toBe('ORC');
+    expect(raceKey(3)).toBe('DWARF');
+    expect(raceKey(7)).toBe('DWARF');
+    expect(raceKey(4)).toBe('NIGHTELF');
+    expect(raceKey(5)).toBe('SCOURGE');
+    expect(raceKey(6)).toBe('TAUREN');
+    expect(raceKey(1)).toBe('HUMAN');
   });
 
   it("builds the client's own model path", () => {
-    expect(scenePath({ kind: 'race', race: 1 })).toBe(
+    expect(scenePath({ kind: 'model', token: 'Human' })).toBe(
       'Interface\\Glues\\Models\\UI_Human\\UI_Human.m2',
     );
+  });
+});
+
+describe('sceneFromPath', () => {
+  /**
+   * THE round trip the character-select background rides on, end to end and in the client's own
+   * order: a race id -> `GetSelectBackgroundModel`'s name (`raceKey`) -> the path
+   * `SetBackgroundModel` builds out of it (glueparent.lua:376) -> the scene this host loads.
+   *
+   * The path string here is not a fixture, it is `"Interface\\Glues\\Models\\UI_"..name.."\\UI_"
+   * ..name..".m2"` with `name` substituted, so a change to either end fails here.
+   */
+  it("recovers the scene from the path SetBackgroundModel builds for a Human", () => {
+    const name = raceKey(1);
+    const scene = sceneFromPath(`Interface\\Glues\\Models\\UI_${name}\\UI_${name}.m2`)!;
+
+    expect(scene).toEqual({ kind: 'model', token: 'HUMAN' });
+    expect(sceneToken(scene)).toBe('HUMAN');
+    expect(lightingKey(scene)).toBe('HUMAN'); // SetLighting's strupper(name) key
+    expect(RACE_LIGHTS[lightingKey(scene)!]).toBe(RACE_LIGHTS.HUMAN);
   });
 });
 
