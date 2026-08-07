@@ -914,6 +914,43 @@ class M2 extends THREE.Group {
     }
   }
 
+  /**
+   * Show only the submeshes whose geoset id is in `ids`; `null` shows every submesh again.
+   *
+   * WHY THIS EXISTS: a character `.m2` carries every customization option at once. Measured on
+   * `character/human/male/humanmale00.skin` (61 submeshes, 54 distinct `partID`s): geoset group 0
+   * holds ids 0..18 -- the bald head plus eighteen hairstyles -- group 4 holds 401..404 (bare hand
+   * plus three glove shapes), group 5 holds 501..505, group 15 holds 1501..1506. Drawing the file as
+   * parsed puts all of them on the body simultaneously. Only a caller that knows the character's
+   * appearance can choose, so the choice is the caller's and this is the switch it throws.
+   *
+   * WALKS `submeshes`, NOT `parts`. `this.parts` is a `Map` keyed by `partID`, so it holds ONE
+   * submesh per id -- and ids repeat: the same measured skin has two submeshes each for partIDs
+   * 0, 4, 5, 9, 10, 16 and 18 (the second entry for partID 0 is an 8-vertex patch at z 1.88, the
+   * scalp cap that sits on the 563-vertex body). Selecting through the map would leave the duplicate
+   * at whatever visibility it happened to have.
+   *
+   * `visible = false` on the `Submesh` group takes its batch meshes with it -- they are its children
+   * (`submesh.js#applyBatches`) and three.js skips a hidden subtree in `projectObject`. It does not
+   * disturb posing: `applyPose` walks `soleBoneSubmeshes` and writes matrices whether or not a
+   * submesh draws, so a hidden geoset shown later is already in the right pose.
+   */
+  setVisibleGeosets(ids: Set<number> | null): void {
+    for (let i = 0, len = this.submeshes.length; i < len; ++i) {
+      const submesh = this.submeshes[i];
+      submesh.visible = ids === null || ids.has(submesh.userData.partID);
+    }
+  }
+
+  /**
+   * The path for texture type 1 -- the character body skin. See `material/index.ts#resolveTexturePath`.
+   */
+  set bodyTexture(path: string | null) {
+    for (let i = 0; i < this.submeshes.length; i++) {
+      this.submeshes[i].bodyTexture = path;
+    }
+  }
+
   dispose() {
     collisionWorld.doodads.remove(this.boundingMesh);
     this.boundingMesh.geometry.dispose();

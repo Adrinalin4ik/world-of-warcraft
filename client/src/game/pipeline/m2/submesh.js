@@ -340,6 +340,14 @@ class Submesh extends THREE.Group {
     }
   }
 
+  // The character body skin (texture type 1), for every batch of this submesh.
+  set bodyTexture(path) {
+    const childrenLength = this.children.length;
+    for (let childIndex = 0; childIndex < childrenLength; ++childIndex) {
+      this.children[childIndex].material.updateBodyTexture(path);
+    }
+  }
+
   dispose() {
     this.geometry.dispose();
 

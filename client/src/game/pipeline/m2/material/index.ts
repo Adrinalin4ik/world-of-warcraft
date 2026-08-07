@@ -217,6 +217,16 @@ class M2Material extends THREE.ShaderMaterial {
     skin1: null,
     skin2: null,
     skin3: null,
+    /**
+     * Texture type 1 -- the character BODY skin, supplied at runtime like `skin1..3` are.
+     *
+     * Kept in the same bag rather than a field of its own because it answers the same question those
+     * three do: a `textureDef` whose `type` is non-zero names a slot the FILE leaves blank and the
+     * runtime fills. Measured on `character/human/male/humanmale.m2`: four texture defs, types
+     * 1, 6, 0 and 2 -- so type 1 is the only one of the three runtime types this milestone fills.
+     * Types 6 (hair sheet) and 2 (cape) are still unhandled and still resolve to null.
+     */
+    body: null,
   };
   textures = [];
   textureDefs;
@@ -491,6 +501,18 @@ class M2Material extends THREE.ShaderMaterial {
         path = textureDef.filename;
         break;
 
+      case 1:
+        // The character body skin. In the real client this slot holds the COMPOSITED atlas (base
+        // skin + face + facial hair + scalp + underwear + eight equipment regions); this milestone
+        // deliberately puts the un-composited base skin in it -- `CharSections` BaseSection 0,
+        // `TextureName[0]`, e.g. `Character\Human\Male\HumanMaleSkin00_00.blp`, measured 512x512
+        // DXT. So the face and pelvis regions of the atlas are the blank areas the base skin ships
+        // with. That is a KNOWN, named gap (the compositor), not a decode failure.
+        if (this.skins.body) {
+          path = this.skins.body;
+        }
+        break;
+
       case 11:
         if (this.skins.skin1) {
           path = this.skins.skin1;
@@ -520,6 +542,13 @@ class M2Material extends THREE.ShaderMaterial {
     this.skins.skin1 = skin1;
     this.skins.skin2 = skin2;
     this.skins.skin3 = skin3;
+
+    this.loadTextures();
+  }
+
+  /** Supply texture type 1. Same shape as `updateSkinTextures`, and the same reload. */
+  updateBodyTexture(path) {
+    this.skins.body = path;
 
     this.loadTextures();
   }
