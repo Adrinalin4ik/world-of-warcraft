@@ -309,7 +309,32 @@ class M2 extends THREE.Group {
     mesh.name = 'BoundingMesh';
     mesh.matrixAutoUpdate = this.matrixAutoUpdate;
 
-    mesh.visible = true;
+    // NEVER DRAWN. This is the model's authored COLLISION hull (`boundingVertices` /
+    // `boundingTriangles`); `collision/doodad-provider.ts` reads its triangles straight off the
+    // geometry and never through the renderer, so submitting it as a draw buys nothing and costs
+    // correctness.
+    //
+    // It used to be `visible = true`, and the material's `opacity: 0` made that look free. It was
+    // not. The material is `transparent: true`, so the draw lands in three's TRANSPARENT pass, and
+    // its `depthWrite` was left at three's default `true` -- so an invisible box wrote depth over
+    // its own silhouette. What that occludes depends on draw order, and the order is not fixed:
+    // three sorts the transparent list by each geometry's BOUNDING-SPHERE CENTRE in view space
+    // (`three.cjs:77863-77880`, then `reversePainterSortStable` at `:68120`), so as a model turns,
+    // the hull's centre crosses other batches' centres and the hull moves from last in the list to
+    // first.
+    //
+    // Measured on the glue character (`HumanMale.m2`, hull = 8 vertices / 12 triangles, i.e. a box):
+    // at facing 0 the draw order is `hair:12` then `HULL`, and the hair renders; at facing 300 it is
+    // `HULL` then `hair:12`, and the hair vanishes entirely. Setting the hull's `colorWrite = false`
+    // changed nothing and `depthWrite = false` restored the hair, which is what pins the mechanism to
+    // depth rather than colour -- the material contributes no colour at all (three's NormalBlending
+    // for a non-premultiplied material multiplies RGB by a source alpha of 0). The same depth write
+    // is what put a pale rectangle on the road around the character's feet: it cut the stage's own
+    // transparent ground layer inside the hull's footprint.
+    //
+    // This is a PIPELINE-WIDE defect, not a glue one -- every doodad, WMO doodad and unit in the
+    // world has been drawing one of these.
+    mesh.visible = false;
 
     // Collision geometry is OPTIONAL in M2: plenty of models ship none at all (a rope coil, a
     // decal, most effects), and for those this mesh is empty -- its bounding box comes out inverted
