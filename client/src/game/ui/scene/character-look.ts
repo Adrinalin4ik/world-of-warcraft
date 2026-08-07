@@ -382,7 +382,9 @@ export function bodyLayersFor(
 
   // The canvas. Through `bodySkinFor` and not a bare lookup, because a roster byte outside the table
   // must still draw a real body -- see its own comment for why that one falls back and this one's
-  // overlays do not.
+  // overlays do not. The consequence, stated rather than hidden: if that fallback ever fires, the
+  // face and underwear overlays are still keyed on the REQUESTED skin, find no row and are skipped,
+  // so a corrupt skin byte draws a real body with a blank face rather than nothing at all.
   const base = bodySkinFor(rows, race, gender, skin);
   if (base) {
     layers.push({ tile: 'BODY', rect: COMPOSITE_TILES.BODY, path: base });

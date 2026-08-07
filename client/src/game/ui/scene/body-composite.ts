@@ -180,7 +180,10 @@ function blitOver(
  * Blit the decoded sources into one mipped RGBA buffer set and wrap it in a `DataTexture`.
  *
  * PER-LAYER MIP SHIFT, which is the only arithmetic here that is not the reference's:
- * `shift = log2(tileWidth / sourceWidth)` -- 0 for the base skin, the face tiles and the pelvis
+ * `shift = log2(tileWidth / sourceWidth)` -- taken from WIDTH alone, because every source measured has
+ * its tile's aspect ratio exactly, and a source that did not would need a per-axis scale the reference
+ * does not have either. It is
+ * 0 for the base skin, the face tiles and the pelvis
  * (their 3.3.5a art is tile-sized), 1 for the scalp and facial-hair tiles (vanilla-era art, half its
  * tile). Dest level L reads source level `L - shift`; when that is negative -- which happens only at
  * dest level 0 of a shift-1 layer -- the source's level 0 is point-doubled instead. So exactly one

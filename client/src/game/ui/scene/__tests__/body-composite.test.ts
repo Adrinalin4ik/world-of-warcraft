@@ -127,7 +127,7 @@ test('the scalp layer point-doubles into its 256x64 tile and touches nothing els
   expect(at(0, 384)).toEqual([128, 128, 128, 255]);
   // Dest level 1 is the scalp's OWN authored level 0 at 1:1 -- the shift, not a resample: the tile
   // there is (0,160,128,32), so (127,191) is its bottom-right corner and (128,160) is outside.
-  const level1 = texture.mipmaps[1].data as Uint8Array;
+  const level1 = (texture.mipmaps[1] as { data: Uint8Array }).data;
   const at1 = (x: number, y: number) => Array.from(level1.subarray((y * 256 + x) * 4, (y * 256 + x) * 4 + 4));
   expect(at1(127, 191)).toEqual([255, 0, 0, 255]);
   expect(at1(128, 160)).toEqual([128, 128, 128, 255]);

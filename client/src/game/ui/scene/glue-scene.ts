@@ -121,9 +121,18 @@ export class GlueSceneView {
     // fetches through the same worker pool the `.m2` uses, and measured they are the slow half (p50
     // 57 ms per cold source against 1.3 ms to decode one). Awaiting them in sequence would add the
     // whole fetch to the time before anything stands on the stage.
+    //
+    // The bake arm CANNOT be allowed to reject. `Promise.all` rejects as a whole, and this pair is
+    // what owns the loaded `.m2`: a rejection would skip the handler below, so the model would never
+    // be added to the scene and never be unloaded either -- a leak plus an invisible character, for a
+    // texture problem. `compositeBody` already answers null for every failure it can name; this
+    // catch is for the one it cannot.
     Promise.all([
       M2Blueprint.load(look.modelPath),
-      cachedComposite(look.compositeKey, look.bodyLayers),
+      cachedComposite(look.compositeKey, look.bodyLayers).catch((error) => {
+        console.warn('glue character: the body composite threw; falling back to the raw skin', error);
+        return null;
+      }),
     ]).then(([model, composite]) => {
       // A different character (or none) was asked for while this was in flight.
       if (this.characterToken !== token) {
