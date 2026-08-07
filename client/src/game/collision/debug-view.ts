@@ -187,6 +187,17 @@ export class CollisionDebugView {
    * disabled or when nothing has moved far enough to matter.
    */
   update(centre: THREE.Vector3): void {
+    // The REGISTERED counts are refreshed unconditionally, ahead of the enabled gate, and this is a
+    // fix rather than tidying. They used to be written only inside `rebuild()`, which the gate below
+    // skips entirely -- so with the overlay checkbox off the panel showed "registered terrain chunks:
+    // 0" for ever, whatever the world held. That reading was taken as evidence that a world-entry
+    // fall happened because nothing had loaded; the live numbers on the same run were 441 terrain
+    // chunks and 318 WMO groups. A registry size is three property reads, so there is no reason for
+    // it to be behind a gate at all: what is expensive, and stays gated, is the GATHER below.
+    this.counts.registeredChunks = collisionWorld.terrain.size;
+    this.counts.registeredWmoGroups = collisionWorld.wmo.size;
+    this.counts.registeredHulls = collisionWorld.doodads.size;
+
     if (!this._enabled) {
       return;
     }
@@ -224,9 +235,8 @@ export class CollisionDebugView {
     this.counts.wmo = wmo;
     this.counts.doodad = doodad;
     this.counts.total = tris.length;
-    this.counts.registeredChunks = collisionWorld.terrain.size;
-    this.counts.registeredWmoGroups = collisionWorld.wmo.size;
-    this.counts.registeredHulls = collisionWorld.doodads.size;
+    // The three `registered*` counts are refreshed in `update()` instead, so they stay true while the
+    // overlay is off.
 
     this.write(tris, terrain, wmo);
   }

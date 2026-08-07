@@ -10,9 +10,11 @@ import { collisionWorld } from '../../../game/collision/collision-world';
 import { CollisionLayer } from '../../../game/collision/types';
 import {
   CAPSULE_HEIGHT, CAPSULE_RADIUS, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO, RUN_SPEED,
-  STATIONARY_CHASE_RATE, TURN_RATE, TURN_RATE_MOVING, capsuleHalfSegment,
+  SETTLE_STREAM_TIMEOUT, SETTLE_TIMEOUT, STATIONARY_CHASE_RATE, TURN_RATE, TURN_RATE_MOVING,
+  capsuleHalfSegment,
 } from '../../../game/movement/constants';
 import { movementFrame } from '../../../game/movement/frame';
+import { rescueFromVoid } from '../../../game/movement/void-rescue';
 import Player from '../../../game/classes/player';
 
 interface IProp {
@@ -59,6 +61,9 @@ class Controls extends React.Component<IProp> {
 
   /** Edge-triggered: the swim breach fires once per PRESS, never on a held key. */
   private jumpPressed = false;
+
+  /** Pointer lock already asked for in this look session. See the request site for why. */
+  private lockRequested = false;
 
   constructor(props: IProp) {
     super(props);
@@ -157,8 +162,23 @@ class Controls extends React.Component<IProp> {
     this.motion.dy = 0;
     this.prevButtons = { ...this.buttons };
 
-    if (this.rig.look && !document.pointerLockElement) {
-      this.element.requestPointerLock?.();
+    // ONE request per look session, on the frame the drag starts -- not every frame it continues.
+    //
+    // `document.pointerLockElement` is not the guard it looks like: the lock is granted
+    // asynchronously, so it stays null for the whole handshake and this fired again on every frame
+    // in between. Chrome then rejects the burst outright with
+    // `NotAllowedError: Too many pointer lock requests in a short window`, which is how a mouselook
+    // drag lost its lock instead of gaining it. Latched on the look session, cleared when the drag
+    // ends, so a genuine denial is not retried at frame rate either.
+    if (this.rig.look) {
+      if (!this.lockRequested && !document.pointerLockElement) {
+        this.lockRequested = true;
+        // Newer Chrome returns a promise here and older ones return undefined; an unhandled
+        // rejection was reported as "a promise was rejected with a non-error" either way.
+        Promise.resolve(this.element.requestPointerLock?.()).catch(() => undefined);
+      }
+    } else {
+      this.lockRequested = false;
     }
 
     if (look.turnsCharacter) {
@@ -217,13 +237,25 @@ class Controls extends React.Component<IProp> {
     // The hold exists because streamed collision lands several frames after the snap, and gravity
     // would drop the avatar through a city that has not loaded. Releasing on GROUND CONTACT is the
     // trap: a teleport into open air, or onto water, never produces contact and would hang forever.
-    // So release on either the ground appearing OR the timeout, whichever comes first.
+    //
+    // THREE releases, not two, and the middle one is the world-entry fix. A plain `SETTLE_TIMEOUT`
+    // release dropped the avatar through Elwynn whenever the ADT under the spawn had not registered
+    // within six seconds -- measured on a live entry with the terrain fetches delayed, and the fall
+    // is unrecoverable once the body is below the surface. So the six-second release now also
+    // requires the terrain under our own XY to be REGISTERED: with ground loaded and still no floor
+    // under the capsule we genuinely are over a hole or a cliff, and falling is right. See
+    // `SETTLE_STREAM_TIMEOUT` for the cap that keeps the wait from ever becoming a hang.
     if (player.move.settling) {
       const feetCentre = player.move.pos.clone();
       feetCentre.z += CAPSULE_HEIGHT * 0.5;
       const resident = deps.cast(feetCentre, new THREE.Vector3(0, 0, -1), 200) !== null;
+      const groundStreamed = collisionWorld.terrain
+        .heightAt(player.move.pos.x, player.move.pos.y) !== null;
+      const elapsed = now - (player.move.settleDeadline - SETTLE_TIMEOUT);
 
-      if (resident || now >= player.move.settleDeadline) {
+      if (resident
+        || (groundStreamed && elapsed >= SETTLE_TIMEOUT)
+        || elapsed >= SETTLE_STREAM_TIMEOUT) {
         player.move.settling = false;
       }
     }
@@ -232,6 +264,17 @@ class Controls extends React.Component<IProp> {
       moving, dir, speed, wantJump: this.jumpPressed, jumpPressed: this.jumpPressed,
     }, delta, now);
     this.jumpPressed = false;
+
+    // The other half of the same fix: a body that fell out of the world anyway is put back on it.
+    // Nothing else can end that fall -- streaming keeps working, the terrain loads, and the mover's
+    // ground probe simply never reaches it from below. Re-arms the settle hold so the mover's own
+    // election snap closes the last fraction of a yard onto the real collision triangle rather than
+    // this rescue's interpolated heightmap height.
+    if (rescueFromVoid(player.move, (x, y) => collisionWorld.terrain.heightAt(x, y))) {
+      player.move.settling = true;
+      player.move.settleDeadline = now + SETTLE_TIMEOUT;
+      console.warn('movement: fell out of the world, replaced on the terrain at', player.move.pos);
+    }
 
     // 6. The rendered body heading. Moving without a strafe snaps to the aim; standing, it chases.
     if (moving && strafe === 0) {

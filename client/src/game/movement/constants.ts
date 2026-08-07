@@ -189,10 +189,28 @@ export const FALL_FAR_TIME = 0.5;
 export const SKIN_WIDTH = 0.02;
 
 /**
- * Max seconds to hold the avatar after a teleport while the world streams in. Generous: this only
- * backstops a world that never becomes resident, so we never hang forever.
+ * Max seconds to hold the avatar after a teleport while the world streams in -- provided the
+ * destination's terrain has actually arrived by then. See `SETTLE_STREAM_TIMEOUT`.
  */
 export const SETTLE_TIMEOUT = 6.0;
+
+/**
+ * The settle hold's ABSOLUTE cap (s), used only while the destination's terrain is still missing.
+ *
+ * WHY THERE ARE TWO TIMEOUTS. `SETTLE_TIMEOUT` alone released the hold after six seconds whatever the
+ * world had managed to load, and if the ADT under the spawn had not registered yet, gravity took the
+ * avatar straight through it. MEASURED on a live entry as `Gesf` with the ADT fetches delayed 20 s
+ * (`scratchpad/f2-fall-slow.js`): released at 6 s, `velZ` pinned at -TERMINAL_VELOCITY (-60.15), and
+ * 441 terrain chunks plus 1289 doodads finished loading while the body kept falling past -4400 --
+ * because nothing re-grounds a body that is already below the terrain. That is the owner's report to
+ * the digit (`z: -5087`, `vz: -60.15`, `fallFar: true`).
+ *
+ * So the six-second release now requires `TerrainProvider#heightAt` to answer: with terrain under us
+ * and still no floor, we really are over a hole or a cliff and the fall is correct. This cap is what
+ * keeps that from ever becoming a hang -- an instance with no ADT at all, or a load that never
+ * completes, releases here instead. `VoidRescue` then catches the body if ground does turn up later.
+ */
+export const SETTLE_STREAM_TIMEOUT = 30.0;
 
 /** Max contact iterations one collide-and-slide resolves before giving up on the remainder. */
 export const MAX_SLIDE_ITERATIONS = 4;
