@@ -218,16 +218,44 @@ export function equipLayersFor(worn: WornEquipment, gender: number): BodyLayer[]
 }
 
 /**
- * The 16 region-base geosets, in the client's own slot order (`geosets.rs:16-18`, `cc+0x144`).
+ * The 16 region-base geosets a character with no hair, no beard and no equipment shows, in the
+ * client's own SLOT order (`geosets.rs:16-18`, `cc+0x144`).
  *
- * Slots 0..3 are the customization's (hair, then the three facial-hair groups) and are overwritten by
- * it; 4..15 are the equipment groups' bare-skin defaults and the branches below add BESIDE them
- * rather than replacing them, except where a branch explicitly disables a range. Group 7's base is
- * **702**, not 701, which is the table's one arithmetic outlier and is real: `humanmale00.skin`
- * carries 701 and 702, and 701 is the tucked-under-a-helm ear the helm masks force.
+ * An ordered slot array and not a set, because both the helm hide-masks and the equipment branches
+ * address a slot by INDEX: slots 0..3 are the customization's (hair, then the three facial-hair
+ * groups) and are overwritten by it, then a helm forces some of those back, and only then do the
+ * branches add and disable. Slots 4..15 are the equipment groups' bare-skin defaults and the branches
+ * add BESIDE them rather than replacing them, except where one explicitly disables a range.
  *
- * Geoset 0 -- the body itself -- is NOT in here; it is unconditional and added separately, exactly as
- * the reference does it (`geosets.rs:59`).
+ * `geosetId = group * 100 + variant`, confirmed on `humanmale00.skin` (54 distinct `partID`s, every
+ * one of them of that shape). Variant 1 is each group's "wearing nothing" mesh, which is real
+ * geometry and not an empty slot -- it is the seam filler the group's other variants replace.
+ * Measured bounding boxes on that file, model space, for the ids in this list that the file has:
+ *
+ *   partID 0    563 verts  z 0.00..1.96   the whole body, bald head included
+ *   partID 0      8 verts  z 1.88..1.89   the scalp cap (a SECOND submesh with the same id)
+ *   partID 101   12 verts  z 1.76..1.81   chin, clean
+ *   partID 201    8 verts  z 1.80..1.90   moustache region, clean
+ *   partID 301   13 verts  z 1.81..1.84   sideburn region, clean
+ *   partID 401   70 verts  z 1.00..1.32   bare hand
+ *   partID 501   62 verts  z 0.13..0.61   bare foot
+ *   partID 702   14 verts  z 1.84..1.91   ear
+ *   partID 1301  91 verts  z 0.55..1.11   hip/thigh, the mesh a robe replaces
+ *   partID 1501  23 verts  z 1.58..1.81   collar, the mesh a cloak replaces
+ *
+ * TWO OUTLIERS, both benilla's and both real. Group 7's base is **702**, not 701 -- `humanmale00.skin`
+ * carries both, and 701 is the tucked-under-a-helm ear the helm masks force. And **geoset 0**, the
+ * body itself, is not a slot at all: it is unconditional, added by `equipGeosetsFor`, exactly as the
+ * reference does it (`geosets.rs:59`).
+ *
+ * Ids in here that a given model does not carry (`humanmale.m2` has no 601, 801, 901, 1001, 1101,
+ * 1201 or 1401; it has 802/803, 902/903, 1002, 1102/1104, 1202 instead) simply match no submesh,
+ * which is the correct outcome: those groups are pure equipment and a naked body shows none of them.
+ *
+ * Slot 0's base being **1** (the bald scalp cap) is the one behavioural difference from the flat
+ * `NAKED_GEOSETS` list this replaced, which carried 0 there and leaned on `hairGeosetFor`'s
+ * `max(1, ...)` to supply the cap. Identical for every (race, sex) `CharHairGeosets` describes; for
+ * one it does not, the cap is now shown instead of nothing.
  */
 export const REGION_BASES: readonly number[] = [
   1, 101, 201, 301, 401, 501, 601, 702, 801, 901, 1001, 1101, 1201, 1301, 1401, 1501,

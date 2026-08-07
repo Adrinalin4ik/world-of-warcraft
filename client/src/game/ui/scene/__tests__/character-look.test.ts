@@ -187,7 +187,7 @@ describe('resolveCharacterLook, hair and facial hair', () => {
     expect(look!.geosets.has(12)).toBe(true);
 
     // Groups 1/2/3: columns (1, 2, 1) under the measured order (col1->group 1, col2->group 3,
-    // col3->group 2). The clean-shaven 301 that `NAKED_GEOSETS` carries must be GONE, replaced by 302.
+    // col3->group 2). The clean-shaven 301 that `REGION_BASES` carries must be GONE, replaced by 302.
     expect([...look!.geosets].filter((id) => id >= 100 && id < 400).sort()).toEqual([101, 201, 302]);
   });
 });

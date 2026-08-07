@@ -83,44 +83,9 @@ export type CharacterLook = {
    * other.
    */
   capeTexture: string | null;
-  /** The geoset ids to draw. See `NAKED_GEOSETS`. */
+  /** The geoset ids to draw. See `character-equipment.ts#REGION_BASES` for the bare-skin set. */
   geosets: Set<number>;
 };
-
-/**
- * The geosets a character with no hair, no beard and no equipment shows.
- *
- * `geosetId = group * 100 + variant`, confirmed on `humanmale00.skin` (54 distinct `partID`s, every
- * one of them of that shape). Variant 1 is each group's "wearing nothing" mesh, which is real
- * geometry and not an empty slot -- it is the seam filler the group's other variants replace.
- * Measured bounding boxes on that file, model space, for the ids in this list that the file has:
- *
- *   partID 0    563 verts  z 0.00..1.96   the whole body, bald head included
- *   partID 0      8 verts  z 1.88..1.89   the scalp cap (a SECOND submesh with the same id)
- *   partID 101   12 verts  z 1.76..1.81   chin, clean
- *   partID 201    8 verts  z 1.80..1.90   moustache region, clean
- *   partID 301   13 verts  z 1.81..1.84   sideburn region, clean
- *   partID 401   70 verts  z 1.00..1.32   bare hand
- *   partID 501   62 verts  z 0.13..0.61   bare foot
- *   partID 702   14 verts  z 1.84..1.91   ear
- *   partID 1301  91 verts  z 0.55..1.11   hip/thigh, the mesh a robe replaces
- *   partID 1501  23 verts  z 1.58..1.81   collar, the mesh a cloak replaces
- *
- * The list is benilla's base set (`characters/geosets.rs:51`), including its two outliers -- group 7
- * bases at **702** and not 701, and geoset **0** is unconditional. Ids in it that a given model does
- * not carry (`humanmale.m2` has no 601, 801, 901, 1001, 1101, 1201 or 1401; it has 802/803, 902/903,
- * 1002, 1102/1104, 1202 instead) simply match no submesh, which is the correct outcome: those groups
- * are pure equipment and a naked body shows none of them.
- *
- * It is now DERIVED from `REGION_BASES`, which is the same 16 in the same order as an ordered SLOT
- * array rather than a set -- because the helm hide-masks and the equipment branches both address a
- * slot by index (`character-equipment.ts`). One difference falls out of that and it is a fix, not a
- * change of intent: slot 0's base is **1** (the bald scalp cap) and geoset 0 (the body) is separate,
- * where this list previously carried 0 in slot 0 and relied on `hairGeosetFor`'s `max(1, ...)` to
- * supply the cap. Identical for every (race, sex) `CharHairGeosets` describes; for one it does not,
- * the scalp cap is now shown instead of nothing.
- */
-export const NAKED_GEOSETS: readonly number[] = [0, ...REGION_BASES];
 
 /** `ChrRaces` gender column ids. `CharacterRecord.gender` uses the same 0/1. */
 const MALE = 0;
