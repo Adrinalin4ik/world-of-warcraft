@@ -718,6 +718,15 @@ compositor's design (§6.1, §6.4) can be argued from something on screen.
 
 Each is named with the evidence that would settle it. None of these blocks pieces 1–4.
 
+> **Unknowns 1 and 4 are settled, by measurement, in the sibling document
+> [`2026-08-07-compositor-measurements.md`](2026-08-07-compositor-measurements.md).** In short: the
+> canvas is **512×512**, the bake belongs on the **CPU**, and unknown 4's premise was wrong — **all 38
+> source BLPs measured are palettized, not DXT**, so `pipeline/blp/loader.js` already returns them
+> decoded and no new decode path is needed. §2.3's lean toward a 256² canvas does not survive the
+> measurement either: a factor-of-two upscale of the 1×-era layers is loss-free, whereas 256² forces the
+> base skin and every re-authored 3.3.5a layer one authored mip down. Read that document before starting
+> piece 5; the two paragraphs below are left as written so the change of premise is visible.
+
 1. **The composite canvas size for 3.3.5a — 256² or 512²?** The base skin is 512×512 but scalp and item
    region art still ship at 1× (§2.3). A 256² canvas takes the base skin's mip 1 and needs no
    resampling anywhere; a 512² canvas needs every 1× layer upscaled. *Settled by:* baking a Human Male
