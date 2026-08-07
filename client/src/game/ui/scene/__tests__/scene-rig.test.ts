@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 
+import { evalProbe } from '../../../world/light/laws';
 import { lightingKey, raceKey, sceneFromPath, sceneToken, scenePath } from '../tokens';
 import {
   CHAR_MODEL_FOG,
@@ -96,6 +97,20 @@ describe('foldRaceLights', () => {
       const folded = foldRaceLights(rows);
       folded.probe.forEach((row) => row.forEach((v) => expect(Number.isFinite(v)).toBe(true)));
     });
+  });
+
+  it('lights an up-facing surface from above', () => {
+    // The defect this pins: `AddLight`'s direction is the direction the light SHINES, and
+    // `propProbeCoeffs` wants the toward-light unit. Fed the row verbatim, Human's two coloured
+    // lobes -- both shining downward -- reached an up-facing normal on their negative-dip side, so
+    // the probe returned LESS than the 0.27 ambient there and character select's cobblestone ground
+    // rendered near-black. Up must beat down, and up must beat ambient alone.
+    const { probe } = foldRaceLights(RACE_LIGHTS.HUMAN);
+    const up = evalProbe(probe, [0, 0, 1]);
+    const down = evalProbe(probe, [0, 0, -1]);
+
+    expect(up[0]).toBeGreaterThan(0.27);
+    expect(up[0]).toBeGreaterThan(down[0]);
   });
 
   it('skips a disabled row', () => {

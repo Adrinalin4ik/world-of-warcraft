@@ -189,7 +189,28 @@ export function foldRaceLights(rows: RaceLightRow[]): { ambient: RGB; probe: Pro
       continue;
     }
 
-    const direction: Vec3 = [row[2], row[3], row[4]];
+    // Two corrections, and both are needed before this row can be a `propProbeCoeffs` lobe.
+    //
+    // 1. `AddLight`'s `[2..4]` is the direction the light SHINES. `propProbeCoeffs` documents its
+    //    lobe direction as the TOWARD-LIGHT unit -- its linear band is `+= 2K * s * u`, so
+    //    evaluating it against a normal yields `mu = dot(N, u)`. Its other caller,
+    //    `foldInteriorProbe`, passes `(lightPos - refPoint)`, which is toward-light. So a row has to
+    //    be negated. The table's own comment names the convention: Human row 1's `(0, 0, -1)` is
+    //    "a straight-down light", i.e. shining down, reaching an up-facing surface from above.
+    // 2. A value read against the M2's geometry has to make `modelToRender`'s trip --
+    //    `(x, y, z) -> (-x, -y, z)` -- exactly as the authored camera, the attachment point and the
+    //    point lights in `glue-scene.ts#buildRig` already do.
+    //
+    // Composed, the two are a flip of Z alone: `-modelToRender(d)` is `(d.x, d.y, -d.z)`.
+    //
+    // Measured before this, on character select's `UI_Human` stage: the cobblestone ground plane's
+    // light factor read 0.225 where the walls read 1.0, because an up-facing normal saw only
+    // `HUMAN`'s 0.27 ambient minus both key lobes' negative dip (-0.038 warm, -0.013 cool, hand-sum
+    // 0.219). The ground is the reference frame's dominant surface and it rendered near-black.
+    // The login screen is unaffected: `pickLightRows` gives it `modelLightRows` over
+    // `UI_MainMenu_Northrend`'s single directional, whose diffuse intensity is 0, so no lobe is
+    // built for it and only the ambient DC lane carries anything.
+    const direction: Vec3 = [row[2], row[3], -row[4]];
     const ambientIntensity = row[5];
     const diffuseIntensity = row[9];
 
