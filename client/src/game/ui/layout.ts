@@ -99,12 +99,28 @@ function pointOf(rect: Rect, point: AnchorPoint): { x: number; y: number } {
   };
 }
 
+/**
+ * Every anchor point constrains BOTH axes, and on one of them it may only pin the CENTRE: `LEFT`
+ * fixes the left edge but says nothing about the top -- only that the node's vertical midpoint sits
+ * on the target's. So the two kinds of constraint are gathered separately and an EDGE always beats a
+ * CENTRE, whatever order the anchors were authored in.
+ *
+ * That precedence is not a tie-break of convenience; it is the only reading that renders the
+ * client's own documents. `CharSelectRealmName` (characterselect.xml:437) declares three anchors --
+ * `TOP` at y=-10, then `LEFT` at x=8, then `RIGHT` at x=-8 -- meaning "span the panel's width, ten
+ * units below its top". Letting the later `LEFT`/`RIGHT` write a centre-derived `top` puts the realm
+ * name (and `CharSelectChangeRealmButton`, which anchors beneath it) halfway down a 642-unit panel
+ * instead of at its head, which is exactly what this screen did before.
+ */
 function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect): Rect {
   // Edge constraints gathered from the anchors. An axis with two of them SIZES the node.
   let left: number | null = null;
   let right: number | null = null;
   let top: number | null = null;
   let bottom: number | null = null;
+  // Centre constraints, used only on an axis no edge constrained.
+  let centerX: number | null = null;
+  let centerY: number | null = null;
 
   for (const anchor of node.anchors) {
     const relative = anchor.relativeTo ? resolved.get(anchor.relativeTo) : screen;
@@ -123,7 +139,7 @@ function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect)
     } else if (h === 1) {
       right = x;
     } else {
-      left = x - node.width / 2;
+      centerX = x;
     }
 
     const v = VERTICAL[anchor.point];
@@ -132,8 +148,15 @@ function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect)
     } else if (v === 1) {
       bottom = y;
     } else {
-      top = y - node.height / 2;
+      centerY = y;
     }
+  }
+
+  if (left === null && right === null && centerX !== null) {
+    left = centerX - node.width / 2;
+  }
+  if (top === null && bottom === null && centerY !== null) {
+    top = centerY - node.height / 2;
   }
 
   const width = left !== null && right !== null ? right - left : node.width;

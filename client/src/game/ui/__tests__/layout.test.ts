@@ -118,6 +118,44 @@ describe('resolveAnchors', () => {
     expect(rects.get('child')!.left).toBe(55);
   });
 
+  // characterselect.xml:437 -- `CharSelectRealmName`, the client's own three-anchor idiom: TOP at
+  // y=-10, then LEFT at x=8, then RIGHT at x=-8, meaning "span the panel's width, ten units below
+  // its top". LEFT and RIGHT each also pin the node's vertical CENTRE, and letting either of those
+  // overwrite the explicit top put the realm name (and the Change Realm button anchored beneath it)
+  // halfway down a 642-unit panel. An EDGE constraint beats a CENTRE one whatever the author order.
+  it('an explicit edge beats a later centre constraint on the same axis', () => {
+    const rects = resolveAnchors(
+      [
+        {
+          id: 'panel',
+          width: 260,
+          height: 642,
+          anchors: [{ point: 'TOPRIGHT', x: -5, y: -15 }],
+        },
+        {
+          id: 'realmName',
+          width: 1,
+          height: 13,
+          anchors: [
+            { point: 'TOP', relativeTo: 'panel', relativePoint: 'TOP', x: 0, y: -10 },
+            { point: 'LEFT', relativeTo: 'panel', relativePoint: 'LEFT', x: 8, y: 0 },
+            { point: 'RIGHT', relativeTo: 'panel', relativePoint: 'RIGHT', x: -8, y: 0 },
+          ],
+        },
+      ],
+      viewport,
+    );
+
+    const panel = rects.get('panel')!;
+    // Ten units below the panel's top edge, NOT the 314.5 a centre-derived top would give.
+    expect(rects.get('realmName')).toEqual({
+      left: panel.left + 8,
+      top: panel.top + 10,
+      width: panel.width - 16,
+      height: 13,
+    });
+  });
+
   it('throws on an anchor cycle instead of looping', () => {
     expect(() =>
       resolveAnchors(
