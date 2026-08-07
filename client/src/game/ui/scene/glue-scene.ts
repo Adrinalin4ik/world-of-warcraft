@@ -150,7 +150,8 @@ export class GlueSceneView {
       // A character `.m2` carries every hairstyle, glove, boot and cloak at once -- 61 submeshes on
       // `humanmale00.skin` for 54 geoset ids. Without this the body wears all of them simultaneously.
       model.setVisibleGeosets(look.geosets);
-      // Texture slots 1 (body) and 6 (hair), in one supply. `hairTexture` is null for a bald look --
+      // Texture slots 1 (body), 6 (hair) and 2 (cloak), in one supply. `hairTexture` is null for a
+      // bald look --
       // `CharSections` BaseSection 3 VariationIndex 0 carries empty strings and there is no hair mesh
       // to sample them, so that is the right value, not a missed assignment.
       //
@@ -171,8 +172,8 @@ export class GlueSceneView {
           'glue character: the body composite could not be baked; binding the raw base skin',
         );
       }
-      if (body || look.hairTexture) {
-        model.characterTextures = { body, hair: look.hairTexture };
+      if (body || look.hairTexture || look.capeTexture) {
+        model.characterTextures = { body, hair: look.hairTexture, cape: look.capeTexture };
       }
 
       // The looping Stand, through `resolve` and not a raw slot: `resolve` follows the alias chain and

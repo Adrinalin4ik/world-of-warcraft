@@ -968,16 +968,22 @@ class M2 extends THREE.Group {
   }
 
   /**
-   * The runtime-supplied CHARACTER texture slots: type 1 (the body skin) and type 6 (the hair sheet).
+   * The runtime-supplied CHARACTER texture slots: type 1 (the body skin), type 6 (the hair sheet) and
+   * type 2 (the cloak sheet).
    *
-   * One setter for both, matching `updateSkinTextures`' three-at-once shape, because each supply
+   * One setter for all three, matching `updateSkinTextures`' three-at-once shape, because each supply
    * costs a full `loadTextures()` walk -- see `material/index.ts#updateCharacterTextures`. The
    * `skins.hair` comment there records which geosets read which type, measured off the real skin.
    *
    * `body` is a `THREE.Texture` for the normal case -- the CPU-baked composite, which has no path to
-   * name -- or a path string for the fallback when the bake could not happen.
+   * name -- or a path string for the fallback when the bake could not happen. `hair` and `cape` are
+   * always paths: they go to the GPU whole, so `TextureLoader` owns them.
    */
-  set characterTextures(paths: { body: string | THREE.Texture | null; hair: string | null }) {
+  set characterTextures(paths: {
+    body: string | THREE.Texture | null;
+    hair: string | null;
+    cape: string | null;
+  }) {
     for (let i = 0; i < this.submeshes.length; i++) {
       this.submeshes[i].characterTextures = paths;
     }

@@ -14,17 +14,17 @@
  * body atlas, so their art is a COMPOSITE layer and nothing else could colour them), and a male face
  * with no brow detail.
  *
- * EQUIPMENT TEXTURES ARE NOW HERE, in `character-equipment.ts`: the eight `ItemDisplayInfo` region
- * textures are appended to `bodyLayersFor`'s list. Reached from `resolveCharacterLook`, and skipped
- * entirely -- including the 6.7 MB `ItemDisplayInfo` fetch -- for a character wearing nothing.
+ * EQUIPMENT IS NOW HERE, in `character-equipment.ts`: the eight `ItemDisplayInfo` region textures are
+ * appended to `bodyLayersFor`'s list and the geoset branches are applied to the region-base slot
+ * array. Both are reached from `resolveCharacterLook`, and both are skipped entirely -- including the
+ * 6.7 MB `ItemDisplayInfo` fetch -- for a character wearing nothing.
  *
  * WHAT THIS DELIBERATELY DOES NOT DO, so nobody reads a gap here as an oversight:
- *  - **No equipment GEOSETS.** An item can change the mesh as well as the texture, through
- *    `ItemDisplayInfo.geosetGroupIDs` and a worn helm's `HelmetGeosetVisData` masks. That is the
- *    separable second half and lands next; until it does, a robe paints a skirt onto the legs it does
- *    not replace, and a worn helm hides nothing.
- *  - **No attachments.** Weapons, shields, shoulders and the helm's own model all hang off a bone,
- *    which nothing in this client can do yet; that is piece 9.
+ *  - **No attachments.** Weapons, shields, shoulders, the helm's own model and the cape mesh all hang
+ *    off a bone, which nothing in this client can do yet; that is piece 9. So a worn helm's HIDE-MASKS
+ *    apply (the hair tucks away) while the helmet itself does not draw -- which on its own looks
+ *    worse, not better, and is why nothing bald-makes a character until piece 9 lands. It is applied
+ *    anyway because it is the correct half and the roster wears no helm.
  *  - **No `..._Extra` sheet (texture type 8).** `CharSections` BaseSection 0 `TextureName[1]`, bound
  *    whole rather than composited, and only fur races author it (Tauren head/leg fur). A Tauren
  *    therefore still draws part of its own body through an unbound sampler.
@@ -33,8 +33,12 @@ import DBC from '../../pipeline/dbc';
 import { CharacterAppearance, CharacterRecord } from '../../../network/protocol/types';
 import { BodyLayer, COMPOSITE_TILES, compositeCacheKey } from './body-composite';
 import {
+  HelmetGeosetVisDataRow,
   ItemDisplayInfoRow,
+  REGION_BASES,
   WornEquipment,
+  applyHelmetMasks,
+  equipGeosetsFor,
   equipLayersFor,
   wearsNothing,
   wornEquipmentFor,
@@ -60,9 +64,9 @@ export type CharacterLook = {
    */
   bodyLayers: BodyLayer[];
   /**
-   * The composite's cache key -- the whole appearance tuple AND the worn display ids, so re-selecting
-   * a roster row or cycling a dial back is a map hit rather than fourteen fetches and a bake. The
-   * reference keys the same cache the same way
+   * The composite's cache key -- the whole appearance tuple, so re-selecting a roster row or cycling
+   * a dial back is a map hit rather than eight fetches and a bake. Equipment extends this key when
+   * piece 7 extends the layer list; the reference keys the same cache the same way
    * (`SkinKey { race, sex, skin, face, facial_hair, hair_style, hair_color, equip: [u32;8] }`).
    */
   compositeKey: string;
@@ -72,6 +76,13 @@ export type CharacterLook = {
    * (measured: Human Male VariationIndex 0, ids 3262..3271, all three texture columns blank).
    */
   hairTexture: string | null;
+  /**
+   * Texture type 2 -- the cloak sheet, `Item\ObjectComponents\Cape\<name>.blp` from the BACK slot's
+   * `ItemDisplayInfo.leftModelTexture`. Null for a character with no cloak, which is every character
+   * on the live test roster; the cloak GEOSET and this go together, so neither is set without the
+   * other.
+   */
+  capeTexture: string | null;
   /** The geoset ids to draw. See `NAKED_GEOSETS`. */
   geosets: Set<number>;
 };
@@ -100,10 +111,16 @@ export type CharacterLook = {
  * not carry (`humanmale.m2` has no 601, 801, 901, 1001, 1101, 1201 or 1401; it has 802/803, 902/903,
  * 1002, 1102/1104, 1202 instead) simply match no submesh, which is the correct outcome: those groups
  * are pure equipment and a naked body shows none of them.
+ *
+ * It is now DERIVED from `REGION_BASES`, which is the same 16 in the same order as an ordered SLOT
+ * array rather than a set -- because the helm hide-masks and the equipment branches both address a
+ * slot by index (`character-equipment.ts`). One difference falls out of that and it is a fix, not a
+ * change of intent: slot 0's base is **1** (the bald scalp cap) and geoset 0 (the body) is separate,
+ * where this list previously carried 0 in slot 0 and relied on `hairGeosetFor`'s `max(1, ...)` to
+ * supply the cap. Identical for every (race, sex) `CharHairGeosets` describes; for one it does not,
+ * the scalp cap is now shown instead of nothing.
  */
-export const NAKED_GEOSETS: readonly number[] = [
-  0, 101, 201, 301, 401, 501, 601, 702, 801, 901, 1001, 1101, 1201, 1301, 1401, 1501,
-];
+export const NAKED_GEOSETS: readonly number[] = [0, ...REGION_BASES];
 
 /** `ChrRaces` gender column ids. `CharacterRecord.gender` uses the same 0/1. */
 const MALE = 0;
@@ -565,9 +582,14 @@ export async function resolveCharacterLook(
 
   const appearance = character.appearance;
   const sectionRows = (sections?.records ?? []) as CharSectionsRow[];
-  const geosets = new Set(NAKED_GEOSETS);
+  // The 16 region-base SLOTS, not a set: the customization overwrites slots 0..3, a worn helm's masks
+  // force some of those back, and only then do the equipment branches add and disable. That is the
+  // client's order and the reference's (`geosets.rs:57-141`), and it is the reason this is an indexed
+  // array here where it used to be a `Set` -- a set cannot express "slot 2 currently holds 201".
+  const slots = [...REGION_BASES];
 
-  // Group 0: the body (geoset 0) is unconditional and stays; the hairstyle is added beside it.
+  // Slot 0: the hairstyle. Geoset 0 (the body) is not a slot -- `equipGeosetsFor` adds it
+  // unconditionally at the end.
   const hairRows = ((await DBC.load('CharHairGeosets'))?.records ?? []) as CharHairGeosetsRow[];
   const hairGeoset = hairGeosetFor(
     hairRows,
@@ -576,7 +598,7 @@ export async function resolveCharacterLook(
     appearance?.hairStyle ?? 0,
   );
   if (hairGeoset !== null) {
-    geosets.add(hairGeoset);
+    slots[0] = hairGeoset;
   }
   const hairTexture = hairTextureFor(
     sectionRows,
@@ -586,11 +608,11 @@ export async function resolveCharacterLook(
     appearance?.hairColor ?? 0,
   );
 
-  // Groups 1, 2 and 3 are the facial-hair groups and the dial owns ALL THREE of them: a variation
-  // that leaves a column at zero means that group draws nothing, so the base ids must come out
-  // before the chosen ones go in. `NAKED_GEOSETS`'s 101/201/301 survive only as the fallback for a
-  // (race, sex) `CharacterFacialHairStyles` does not describe at all, which is why `facialGeosetsFor`
-  // answers null rather than an empty array in that case.
+  // Slots 1, 2 and 3 are the facial-hair groups and the dial owns ALL THREE of them: a variation that
+  // leaves a column at zero means that group draws nothing, which as a SLOT write is just the base
+  // staying put -- the awkward "delete 101/201/301 first" this used to do was the set representation
+  // showing through. `facialGeosetsFor` still answers null for a (race, sex) the table does not
+  // describe at all, in which case the three bases stand.
   const facialRows = ((await DBC.load('CharacterFacialHairStyles'))?.records ??
     []) as CharacterFacialHairStylesRow[];
   const facialGeosets = facialGeosetsFor(
@@ -600,17 +622,20 @@ export async function resolveCharacterLook(
     appearance?.facialHair ?? 0,
   );
   if (facialGeosets !== null) {
-    for (const id of NAKED_GEOSETS) {
-      if (id >= 100 && id < 400) {
-        geosets.delete(id);
-      }
-    }
+    // The id already carries its group: 101.. is slot 1, 201.. slot 2, 301.. slot 3. A column left at
+    // zero produced no id at all, so its base is untouched.
     for (const id of facialGeosets) {
-      geosets.add(id);
+      slots[Math.floor(id / 100)] = id;
     }
   }
 
   const worn = await resolveWornEquipment(character);
+  if (worn) {
+    const helmetRows = worn.helm
+      ? (((await DBC.load('HelmetGeosetVisData'))?.records ?? []) as HelmetGeosetVisDataRow[])
+      : [];
+    applyHelmetMasks(slots, worn, helmetRows, character.race, character.gender);
+  }
 
   return {
     modelPath: modelData.file,
@@ -621,8 +646,25 @@ export async function resolveCharacterLook(
     scale: displayInfo.scale || 1,
     bodyTexture,
     hairTexture,
-    geosets,
+    capeTexture: capeTextureFor(worn),
+    geosets: worn ? equipGeosetsFor(slots, worn) : new Set([0, ...slots]),
   };
+}
+
+/**
+ * The cloak sheet for texture type 2, or null.
+ *
+ * `leftModelTexture` and NOT a region column: a cloak paints no body region at all -- its own
+ * `ItemDisplayInfo` row leaves all eight region columns empty (measured: row 13963
+ * `Cape_Mage_A_01Black` has `geosetGroupIDs [1,0,0]`, an empty `leftModelFile`, and one texture name)
+ * -- so it is a geoset plus a whole-sheet bind, which is exactly what texture type 2 is for.
+ *
+ * The directory is `Item\ObjectComponents\Cape`, the same `ObjectComponents` tree the weapon and
+ * shoulder models live under, verified fetchable on the live host.
+ */
+function capeTextureFor(worn: WornEquipment | null): string | null {
+  const name = worn?.cloak?.leftModelTexture;
+  return name ? `Item\\ObjectComponents\\Cape\\${name}.blp` : null;
 }
 
 /**

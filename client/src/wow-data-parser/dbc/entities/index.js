@@ -57,6 +57,7 @@ export * as FootprintTextures from './footprint-textures';
 export * as GameObjectArtKit from './game-object-art-kit';
 export * as GameObjectDisplayInfo from './game-object-display-info';
 export * as GameTips from './game-tips';
+export * as HelmetGeosetVisData from './helmet-geoset-vis-data';
 export * as HolidayDescriptions from './holiday-descriptions';
 export * as HolidayNames from './holiday-names';
 export * as Item from './item';

@@ -255,18 +255,32 @@ class M2Material extends THREE.ShaderMaterial {
      *
      * Supplied from `CharSections` BaseSection 3 `TextureName[0]` -- see `character-look.ts`.
      *
-     * TYPE 2 IS DELIBERATELY STILL UNHANDLED, and the measurement above is why: the only geometry on
-     * a character model that reads it is cloak variants 1502..1506, which a character with no cloak
-     * equipped never shows, and its supplier is `ItemDisplayInfo` (the equipment piece). A slot with
-     * neither a supplier nor a reachable consumer would be a setter with no callers.
-     *
-     * TYPE 8 EXISTS TOO and is not handled either: `taurenfemale.m2`'s texture defs are types
+     * TYPE 8 EXISTS TOO and is not handled: `taurenfemale.m2`'s texture defs are types
      * 8, 1, 0, 2, and its type-8 slot is read by geoset 0 (the body) and geosets 202..205. Measured
      * supplier: `CharSections` BaseSection 0 `TextureName[1]`, e.g.
      * `Character\Tauren\Female\TaurenFemaleSkin00_00_Extra.blp`. So a Tauren draws part of its body
      * unbound today. No Tauren is on the test roster, so this is reported rather than written blind.
      */
     hair: null,
+    /**
+     * Texture type 2 -- the CLOAK sheet, and now real because the thing that made it unreachable is
+     * gone. The note that used to stand here said type 2 was deliberately unhandled since "a
+     * character with no cloak equipped never shows [1502..1506], and its supplier is
+     * `ItemDisplayInfo` (the equipment piece)". That piece is here: the cloak geoset branch
+     * (`ui/scene/character-equipment.ts`, B8) now enables 1501+v, so the consumer is reachable, and
+     * without this slot it would draw the shared `PLACEHOLDER` -- a flat cape.
+     *
+     * Supplied from the BACK slot's `ItemDisplayInfo.leftModelTexture` as
+     * `Item\ObjectComponents\Cape\<name>.blp` -- verified fetchable on the live host
+     * (`cape_mage_a_01black.blp`, 206 on a range request, 128x256). Note it is **DXT**, unlike every
+     * character-owned BLP measured: that is fine here and only here, because this texture goes to the
+     * GPU through `TextureLoader` rather than through the CPU blit, so the loader's
+     * leave-DXT-compressed default is exactly right for it.
+     *
+     * The cape MESH is a body geoset, not an attachment, which is why it belongs to the equipment
+     * piece rather than to piece 9 -- what piece 9 owns is the shoulder/helm/weapon sub-models.
+     */
+    cape: null,
   };
   textures = [];
   textureDefs;
@@ -576,6 +590,13 @@ class M2Material extends THREE.ShaderMaterial {
         }
         break;
 
+      case 2:
+        // The character cloak sheet -- geosets 1502..1506 only. See `skins.cape`.
+        if (this.skins.cape) {
+          path = this.skins.cape;
+        }
+        break;
+
       case 6:
         // The character hair sheet. See `skins.hair` for the measurement of which geosets read it.
         if (this.skins.hair) {
@@ -617,21 +638,23 @@ class M2Material extends THREE.ShaderMaterial {
   }
 
   /**
-   * Supply the character slots -- texture type 1 (body) and type 6 (hair). Same shape as
-   * `updateSkinTextures`, and the same single reload.
+   * Supply the character slots -- texture type 1 (body), type 6 (hair) and type 2 (cloak). Same shape
+   * as `updateSkinTextures`, and the same single reload.
    *
-   * ONE CALL FOR BOTH, deliberately, and not two setters: `loadTextures()` takes a fresh
+   * ONE CALL FOR ALL THREE, deliberately, and not three setters: `loadTextures()` takes a fresh
    * `TextureLoader` reference for every def it walks and does NOT release the array it replaces
    * (`TextureLoader.unload` keys off a resolved texture's `textureKey`, which a slot still showing
    * `PLACEHOLDER` does not have, so the release cannot be done from the array alone). Every extra
-   * `loadTextures()` therefore pins one more reference on every texture this material holds. Two
-   * setters would have doubled that; one keeps it at the one call the type-1 slot already cost.
+   * `loadTextures()` therefore pins one more reference on every texture this material holds. Three
+   * setters would have tripled that; one keeps it at the one call the type-1 slot already cost.
    * The residual over-reference is pre-existing and is NOT fixed here -- it needs `loadTextures` to
-   * track paths rather than textures, in the shared pipeline, which is not this milestone.
+   * track paths rather than textures, in the shared pipeline, which is not this milestone. The cloak
+   * joining this call rather than getting its own is that constraint honoured, not a convenience.
    */
-  updateCharacterTextures(body, hair) {
+  updateCharacterTextures(body, hair, cape) {
     this.skins.body = body;
     this.skins.hair = hair;
+    this.skins.cape = cape;
 
     this.loadTextures();
   }
