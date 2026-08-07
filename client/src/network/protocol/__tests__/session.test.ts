@@ -1,6 +1,6 @@
 import { ProtocolSession, RETRY_DELAY_MS } from '../session';
 import { LoginStage } from '../stages';
-import { ProtocolRefusalError } from '../types';
+import { CharacterRecord, ProtocolRefusalError } from '../types';
 
 function fakeLogon() {
   return {
@@ -44,6 +44,23 @@ function fakeWorld() {
   };
 }
 
+/** A roster row, complete enough to be a real `CharacterRecord`. */
+const ROSTER_ROW: CharacterRecord = {
+  guid: '0x1',
+  name: 'Tester',
+  race: 1,
+  class: 1,
+  gender: 0,
+  level: 1,
+  appearance: { skin: 0, face: 0, hairStyle: 0, hairColor: 0, facialHair: 0 },
+  zoneId: 12,
+  mapId: 0,
+  position: [-8952.55, -129.84, 83.24],
+  guildId: 0,
+  flags: 0,
+  equipment: [],
+};
+
 describe('ProtocolSession', () => {
   it('starts offline', () => {
     expect(new ProtocolSession(fakeLogon(), fakeWorld()).stage).toBe(LoginStage.Offline);
@@ -83,6 +100,33 @@ describe('ProtocolSession', () => {
 
     expect(session.stage).toBe(LoginStage.InWorld);
     expect(world.enterWorld).toHaveBeenCalledWith('0x1');
+  });
+
+  /**
+   * The world route's spawn point. `CMSG_PLAYER_LOGIN` carries only a guid, so unless the session
+   * remembers WHICH roster row that guid was, the world has nothing to place the player from and
+   * `World#run` falls through to its hard-coded debug spot -- which is exactly what a live entry did
+   * before this: the right zone could not be loaded even once. Asserted on the record's identity, not
+   * just its name, because the roster is the only thing carrying `mapId` and `position` this early.
+   */
+  it('remembers which roster row it entered the world as', async () => {
+    const world = fakeWorld();
+    const roster = [
+      { ...ROSTER_ROW, guid: '0x1', name: 'First' },
+      { ...ROSTER_ROW, guid: '0x2', name: 'Second', mapId: 530, position: [1, 2, 3] as [number, number, number] },
+    ];
+    world.characters = jest.fn(async () => roster);
+    const session = new ProtocolSession(fakeLogon(), world);
+    await session.login('tester', 'secret');
+    await session.chooseRealm(session.realms[0]);
+
+    expect(session.enteredCharacter).toBeNull();
+
+    await session.enterWorld('0x2');
+
+    expect(session.enteredCharacter).toEqual(roster[1]);
+    expect(session.enteredCharacter?.mapId).toBe(530);
+    expect(session.enteredCharacter?.position).toEqual([1, 2, 3]);
   });
 
   it('refreshes the roster after a create and after a delete', async () => {

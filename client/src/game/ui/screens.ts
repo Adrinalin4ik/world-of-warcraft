@@ -109,9 +109,26 @@ export class GlueApp {
   /** The last stage-render failure reported, so a per-frame throw is one console line and not a flood. */
   private lastSceneError: string | null = null;
 
-  constructor(canvas: HTMLCanvasElement, session: GameSession) {
+  /**
+   * The one thing this app cannot do itself: leave the glue layer for the world.
+   *
+   * `InWorld` is the only `ClientState` with no `GlueScreen`, and that is correct rather than a gap --
+   * the world is a different React route with its own canvas, renderer and frame loop. So the glue
+   * app reports the transition and the HOST performs it (`pages/glue/index.tsx` navigates), which
+   * also means the host's unmount runs `stop()` and the glue frame loop halts before `World#animate`
+   * starts. `screens.ts#tick` requires exactly that ordering: both loops advance `worldClock`, and
+   * running them concurrently would double-advance every animation clock in the client.
+   *
+   * Fired at most once per app: `enteredWorld` latches. `ProtocolSession` notifies on every stage
+   * change and several land in one turn, and navigating twice would remount the world route.
+   */
+  private onEnterWorld: (() => void) | null = null;
+  private enteredWorld = false;
+
+  constructor(canvas: HTMLCanvasElement, session: GameSession, onEnterWorld?: () => void) {
     this.canvas = canvas;
     this.session = session;
+    this.onEnterWorld = onEnterWorld ?? null;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
     // The gamma-passthrough lane this whole client runs on, the same line `pages/game/index.tsx`
     // sets for the world renderer. BLP texels and the client's shaders are already sRGB-encoded, and
@@ -208,6 +225,17 @@ export class GlueApp {
    */
   private onSessionState = (state: SessionState): void => {
     const target = clientStateForStage(state.stage);
+
+    // BEFORE the two early-outs below, both of which would swallow it. `InWorld` has no registered
+    // screen, so the `screens.has` guard rejects it; and it is reached from `CharSelect`, which
+    // `clientStateForStage` also maps `EnteringWorld` to, so the "same as what is already up" guard
+    // rejects it too. See `onEnterWorld` for why the host and not this app performs the transition.
+    if (target === ClientState.InWorld && !this.enteredWorld) {
+      this.enteredWorld = true;
+      this.onEnterWorld?.();
+      return;
+    }
+
     if (target === (this.pending ?? this.current?.state)) {
       return;
     }

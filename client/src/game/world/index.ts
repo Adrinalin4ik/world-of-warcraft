@@ -147,6 +147,40 @@ export default class World extends EventEmitter {
     // );
     // this.skybox.name = "Skybox"
     // this.scene.add(this.skybox);
+    // ONLINE WORLD ENTRY, ahead of every debug spot below.
+    //
+    // The gate below is `!game.authenticated`, and `GameHandler#authenticated` is written in exactly
+    // one place -- `GameHandler#join` (handler.js:91) -- which has NO callers anywhere in this repo:
+    // the typed `WotlkWorldTransport#enterWorld` sends `CMSG_PLAYER_LOGIN` instead
+    // (`protocol/wotlk/world.ts:158`). So on a real world entry that flag is false and, without this
+    // branch, the player was worldported to `lastLocation` or to the hard-coded "dun murog" spot --
+    // a debug leftover, not where the character stands. That is why online entry could not have
+    // rendered the right zone even once.
+    //
+    // The roster is the source, deliberately, and it is authoritative enough: `SMSG_CHAR_ENUM`
+    // carries the character's `mapId` and `position` (`wotlk/world-wire.ts#decodeCharEnum`), and it
+    // has already arrived and been read before `CMSG_PLAYER_LOGIN` is even sent. So the map load
+    // starts on the frame the world route mounts rather than waiting on a compressed update-object,
+    // and the packets that follow are checkable against a position we knew independently.
+    //
+    // `session.offline` short-circuits first so `/game?offline=1` is unchanged: reading
+    // `session.protocol` there would construct the transports (which opens nothing -- see
+    // `network/session.ts` -- but the offline route's whole contract is that it never touches them).
+    const entered = this.session.offline ? null : this.session.protocol.enteredCharacter;
+    if (entered) {
+      // The name only. NOT the guid: `Player`'s is a string (`"0x59a6"` shape, as `CharacterRecord`
+      // carries it) while `Packet#readPackedGUID` yields a NUMBER, so `world.entities` cannot match
+      // the two however it is keyed and the server's own update-object for the player still creates a
+      // second `Unit`. Reconciling those two guid representations is piece 11's work, not a rename.
+      this.player.name = entered.name;
+      console.info(
+        `world: entering as ${entered.name} on map ${entered.mapId} (zone ${entered.zoneId}) at`,
+        entered.position,
+      );
+      this.player.worldport(entered.mapId, entered.position);
+      return;
+    }
+
     if (!this.session.game.authenticated) {
       // FIRST, ahead of both `debugCoords` and `lastLocation`. The mark is an explicit "put me back
       // here" the user just clicked; the other two are older debugging leftovers, and `debugCoords`

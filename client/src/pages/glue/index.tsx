@@ -5,6 +5,7 @@
  * `game/ui`, so there is no React state here to keep in step with the glue tree.
  */
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { GameSession } from '../../network/session';
 import { ClientState, GlueApp } from '../../game/ui/screens';
@@ -28,6 +29,8 @@ function wantsLuaUi(search: string): boolean {
 
 interface Props {
   session: GameSession;
+  /** Leave the glue layer for the world route -- see `GlueApp#onEnterWorld`. */
+  onEnterWorld?: () => void;
 }
 
 class GlueHost extends React.Component<Props> {
@@ -40,7 +43,7 @@ class GlueHost extends React.Component<Props> {
       return;
     }
 
-    this.app = new GlueApp(canvas, this.props.session);
+    this.app = new GlueApp(canvas, this.props.session, this.props.onEnterWorld);
     if (wantsLuaUi(window.location.search)) {
       // ONE instance for both glue states, and that is the whole wiring of the realm list: the
       // manifest this screen loads already contains `RealmList.xml`, the client's own
@@ -80,4 +83,28 @@ class GlueHost extends React.Component<Props> {
   }
 }
 
-export default GlueHost;
+/**
+ * The route element: `GlueHost` plus the one thing it needs the router for.
+ *
+ * A ROUTER navigation, not `window.location`. The `GameSession` -- and with it the live world socket
+ * the handshake opened, its RC4 crypt state and `GameHandler`'s packet listeners -- is created once in
+ * `App` and handed to both routes; a document navigation would drop all of it and the world route
+ * would come up on a session that had never connected. `App`'s body does not re-run on a router
+ * navigation, so the same session instance reaches `GameScreen`.
+ *
+ * A function component wrapper because `useNavigate` is a hook and `GlueHost` is a class; keeping the
+ * class means its `componentWillUnmount` still runs `GlueApp#stop()`, which is what stops the glue
+ * frame loop before the world's starts.
+ */
+const GlueRoute: React.FC<{ session: GameSession }> = ({ session }) => {
+  const navigate = useNavigate();
+  const enterWorld = React.useCallback(() => {
+    console.info('glue: entering the world; leaving the glue route');
+    navigate('/game');
+  }, [navigate]);
+
+  return <GlueHost session={session} onEnterWorld={enterWorld} />;
+};
+
+export { GlueHost };
+export default GlueRoute;

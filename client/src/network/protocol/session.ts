@@ -42,6 +42,8 @@ export class ProtocolSession {
   private realms_: RealmInfo[] = [];
   private characters_: CharacterRecord[] = [];
   private refusal_: ProtocolRefusal | null = null;
+  /** See `enteredCharacter`. Set only on a successful `enterWorld`. */
+  private entered_: CharacterRecord | null = null;
 
   private credentials: { account: string; password: string } | null = null;
   /**
@@ -97,6 +99,23 @@ export class ProtocolSession {
 
   get characters(): CharacterRecord[] {
     return [...this.characters_];
+  }
+
+  /**
+   * The character this session actually entered the world as, or null before `enterWorld` succeeds.
+   *
+   * The world route needs it and cannot derive it: `CMSG_PLAYER_LOGIN` carries only a guid, and the
+   * server's own answer for where the character stands arrives spread across
+   * `SMSG_LOGIN_VERIFY_WORLD` and a compressed update-object. The ROSTER already carries `mapId`,
+   * `zoneId` and `position` for every row (`wotlk/world-wire.ts#decodeCharEnum`), so holding the
+   * record the guid resolved to gives the world an authoritative-enough spawn immediately, and gives
+   * anyone reading the packets an independent check on what the server says.
+   *
+   * Deliberately NOT cleared by `onWorldDisconnect`: it records what this session entered as, and a
+   * dropped socket does not make that untrue. It is replaced only by a later successful `enterWorld`.
+   */
+  get enteredCharacter(): CharacterRecord | null {
+    return this.entered_;
   }
 
   get lastRefusal(): ProtocolRefusal | null {
@@ -244,6 +263,10 @@ export class ProtocolSession {
     this.enter(LoginStage.EnteringWorld);
     try {
       await this.world.enterWorld(guid);
+      // BEFORE `enter`, not after: `enter` notifies, and the world route is driven off that
+      // notification -- a listener that navigated to the world and then read a null
+      // `enteredCharacter` would place the player at a debug spot instead of where they stand.
+      this.entered_ = this.characters_.find((record) => record.guid === guid) ?? null;
       this.enter(LoginStage.InWorld);
     } catch (error) {
       // Same rollback as chooseRealm, with the same epoch guard: restore what was only if a
