@@ -12,11 +12,13 @@ import * as THREE from 'three';
 import { worldClock } from '../pipeline/m2/anim/world-clock';
 import { GameSession } from '../../network/session';
 import { ProtocolSession, SessionState } from '../../network/protocol/session';
+import { CharacterRecord } from '../../network/protocol/types';
 import { GlueArt } from './art';
 import { clientStateForStage } from './screens/login-state';
 import { installFramexmlDebug } from './framexml/debug';
 import { GlueInput } from './input';
 import { GlueRenderer, ResolvedSprite } from './renderer';
+import { resolveCharacterLook } from './scene/character-look';
 import { GlueSceneView } from './scene/glue-scene';
 import { GlueScene } from './scene/tokens';
 import { GlueStrings } from './strings';
@@ -44,6 +46,20 @@ export interface GlueContext {
   protocol: ProtocolSession;
   /** Show a glue background scene, or null to tear it down. */
   setScene(scene: GlueScene | null): void;
+  /**
+   * Stand a character on the current scene's stage spot, or null to take it off.
+   *
+   * Takes a `CharacterRecord` off the session rather than a model path: which `.m2`, which body skin
+   * and which geosets a character resolves to is a four-DBC question (`scene/character-look.ts`), and
+   * a screen has no business answering it. Fire-and-forget -- the DBC reads and the `.m2` fetch are
+   * async and the character appears when they land.
+   */
+  setCharacter(character: CharacterRecord | null): void;
+  /**
+   * Turn the character on the stage. DEGREES -- `SetCharacterSelectFacing`'s own unit; see
+   * `framexml/runtime.ts#GlueRuntimeOptions.onSetCharacterFacing` for the two constants that fix it.
+   */
+  setCharacterFacing(degrees: number): void;
   /** Request a state change; takes effect before the next frame. */
   go(state: ClientState): void;
 }
@@ -112,6 +128,13 @@ export class GlueApp {
     // the only way to run it against the client's real files rather than against test fixtures.
     // Same idea as `skyDebug`, and the same place to remove it from when the loader makes it moot.
     installFramexmlDebug();
+
+    // A console handle on the 3D stage, beside `glueRuntime` and `glueSession` and for the same
+    // reason: the questions this layer raises -- is a character loaded, where is it standing, which
+    // geosets are visible, which sequence is armed, what did texture slot 1 resolve to -- are not
+    // answerable from a screenshot, and a screenshot alone is how three separate rounds of "the
+    // character is on the stage" turned out not to reproduce.
+    (window as never as Record<string, unknown>).glueScene = this.sceneView;
 
     // Fonts and strings first: a screen that mounts before them draws unreadable labels.
     await Promise.all([loadGlueFonts(), GlueStrings.load().then((s) => (this.strings = s))]);
@@ -222,6 +245,13 @@ export class GlueApp {
       session: this.session,
       protocol: this.session.protocol,
       setScene: (scene) => this.sceneView.setScene(scene),
+      setCharacter: (character) => this.showCharacter(character),
+      // Degrees in, radians on the group. A bare field write plus a quaternion, per the reference's
+      // own yaw fast path: the drag writes this every frame it moves and it must not touch the model,
+      // the texture or the DBC lookups.
+      setCharacterFacing: (degrees) => {
+        this.sceneView.yaw = THREE.MathUtils.degToRad(degrees);
+      },
       go: (next) => {
         this.pending = next;
       },
@@ -231,6 +261,43 @@ export class GlueApp {
     this.sceneView.setScene(null);
     screen.mount(ctx);
     this.current = { state, screen, root };
+  }
+
+  /**
+   * Resolve a roster row to a look and hand it to the scene view.
+   *
+   * The token guard is the same one `setScene` and `setCharacter` use, for the same reason at one
+   * remove: `resolveCharacterLook` awaits up to four DBC loads, and on a cold cache the FIRST one is
+   * hundreds of milliseconds -- easily long enough for two more selection clicks. Without it, three
+   * clicks resolve in whatever order their fetches settle and the LAST one to land wins, which is not
+   * the one the player picked.
+   *
+   * `characterLookToken` is bumped for a null request too, so "take the character off" cannot be
+   * overtaken by a look still resolving from the row that was selected before it.
+   */
+  private characterLookToken = 0;
+
+  private showCharacter(character: CharacterRecord | null): void {
+    const token = ++this.characterLookToken;
+
+    if (!character) {
+      this.sceneView.setCharacter(null);
+      return;
+    }
+
+    void resolveCharacterLook(character)
+      .then((look) => {
+        if (token !== this.characterLookToken) {
+          return;
+        }
+        // A null look means a DBC row was missing, and `resolveCharacterLook` has already said which
+        // on the console. Leaving the previous body up would attribute it to the newly selected
+        // character, so the stage is cleared instead.
+        this.sceneView.setCharacter(look);
+      })
+      .catch((error) => {
+        console.error('glue: could not resolve the selected character\'s look', error);
+      });
   }
 
   private tick = (now: number): void => {

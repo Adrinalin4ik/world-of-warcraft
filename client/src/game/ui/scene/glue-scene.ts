@@ -36,7 +36,14 @@ import {
   RaceLightRow,
   verticalFov,
 } from './scene-rig';
+import { CharacterLook } from './character-look';
 import { GlueScene, lightingKey, scenePath, sceneToken } from './tokens';
+
+/**
+ * `AnimationData.dbc` id 0 -- Stand. The same id `classes/unit.ts` arms a freshly loaded unit with,
+ * and the id `resolve` falls back to for anything a model does not carry.
+ */
+const STAND_ANIMATION_ID = 0;
 
 /** The scene's own root, so the character can yaw without the stage yawing with it. */
 export class GlueSceneView {
@@ -45,11 +52,24 @@ export class GlueSceneView {
   private readonly camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
   private readonly root = new THREE.Group();
 
+  /**
+   * The character's own parent, so `yaw` turns the character and not the stage.
+   *
+   * `root` holds the STAGE (see `setScene`), so yawing `root` would spin the buildings with the
+   * player -- which is what the class comment's "so the character can yaw without the stage yawing
+   * with it" is guarding against. Two groups is what actually delivers that; one did not.
+   */
+  private readonly characterRoot = new THREE.Group();
+
   private requested: GlueScene | null = null;
   private loadedToken: string | null = null;
   private model: any = null;
   private cameraDef: any = null;
   private stage: THREE.Vector3 | null = null;
+  /** The loaded character M2, or null. Posed and lit alongside the stage; see `update`/`render`. */
+  private character: any = null;
+  /** Which `setCharacter` call the in-flight load belongs to. Monotonic, like `loadedToken`. */
+  private characterToken = 0;
   private lighting: {
     probe: ReturnType<typeof foldRaceLights>['probe'];
     pointLights: SelectedLight[];
@@ -63,13 +83,96 @@ export class GlueSceneView {
     this.renderer = renderer;
     this.scene.name = 'GlueScene';
     this.scene.add(this.root);
+    this.characterRoot.name = 'GlueCharacter';
+    this.scene.add(this.characterRoot);
     // WoW model space is Z-up.
     this.camera.up.set(0, 0, 1);
   }
 
-  /** The character's spot, model space. Null until a scene is loaded (spec 6 consumes it). */
+  /** The character's spot, model space. Null until a scene is loaded. */
   get stageSpot(): THREE.Vector3 | null {
     return this.stage;
+  }
+
+  /**
+   * Put a character on the stage, or take one off with `null`.
+   *
+   * WHERE it stands is the stage asset's own answer: attachment **id 0** of the `UI_<race>.m2`,
+   * which every glue stage ships and which sits on camera 0's axis. Read in `setScene` and exposed
+   * as `stageSpot`; this is its first reader.
+   *
+   * WHEN, relative to the stage, is not ordered: character select changes the stage and the
+   * character on the same click (`CharacterSelect_SelectCharacter` calls `SetBackgroundModel` then
+   * `SelectCharacter`, characterselect.lua:430-433), and either `.m2` may land first. So the
+   * placement is re-applied in `update` from whichever pair is currently in hand rather than done
+   * once here -- a character that arrives before its stage would otherwise stand at the origin for
+   * the rest of the screen.
+   */
+  setCharacter(look: CharacterLook | null): void {
+    const token = ++this.characterToken;
+    this.dropCharacter();
+
+    if (!look) {
+      return;
+    }
+
+    M2Blueprint.load(look.modelPath).then((model) => {
+      // A different character (or none) was asked for while this was in flight.
+      if (this.characterToken !== token) {
+        M2Blueprint.unload(model);
+        return;
+      }
+
+      this.character = model;
+      this.characterRoot.add(model);
+      // Same reason as the stage's own line: `M2` constructs itself hidden and there is no
+      // visibility manager here to turn it on.
+      model.visible = true;
+      model.scale.setScalar(look.scale);
+
+      // A character `.m2` carries every hairstyle, glove, boot and cloak at once -- 61 submeshes on
+      // `humanmale00.skin` for 54 geoset ids. Without this the body wears all of them simultaneously.
+      model.setVisibleGeosets(look.geosets);
+      if (look.bodyTexture) {
+        model.bodyTexture = look.bodyTexture;
+      }
+
+      // The looping Stand, through `resolve` and not a raw slot: `resolve` follows the alias chain and
+      // falls back to the first sequence whose keyframes are actually in the `.m2`. Measured on
+      // `humanmale.m2`: 156 sequences, 104 with inline keys and 52 external (`.anim` siblings), and
+      // AnimationData id 0 has four variations in slots 0, 22, 23 and 136, all inline, all flags
+      // 0x20 -- so bit 0 is clear and `sequenceLoops` makes them loops. Slot 0, length 2667 ms, is
+      // what `resolve(0)` lands on.
+      const sequence = model.modelAnim?.resolve?.(STAND_ANIMATION_ID) ?? null;
+      if (sequence && model.instanceAnim) {
+        model.instanceAnim.arm(sequence, worldClock.ms);
+      } else {
+        console.warn(
+          `glue character: ${look.modelPath} has no playable Stand sequence; it stands in bind pose`,
+        );
+      }
+
+      this.placeCharacter();
+    });
+  }
+
+  /** Sit the character on `stageSpot` and turn it by `yaw`. Cheap; called per frame from `update`. */
+  private placeCharacter(): void {
+    if (!this.character) {
+      return;
+    }
+    if (this.stage) {
+      this.characterRoot.position.copy(this.stage);
+    }
+    this.characterRoot.rotation.z = this.yaw;
+  }
+
+  private dropCharacter(): void {
+    if (this.character) {
+      this.characterRoot.remove(this.character);
+      M2Blueprint.unload(this.character);
+    }
+    this.character = null;
   }
 
   setScene(scene: GlueScene | null): void {
@@ -213,35 +316,57 @@ export class GlueSceneView {
   }
 
   update(dt: number): void {
-    if (!this.model) {
-      return;
-    }
-
     // Read the clock ONCE and reuse it for both channels below, so bone and material sampling
     // cannot land on two different instants within the same frame.
     const clock = worldClock.ms;
 
-    if (this.model.instanceAnim) {
-      this.model.evaluateMaterialChannels(clock);
-      // `applyPose()` only copies `instanceAnim.localTRS` into the three.js bone hierarchy -- it
-      // samples nothing. `localTRS` is zero-filled at buffer allocation and written ONLY by
-      // `solveBones`, so without this call every bone would sit at its bind-pose offset forever
-      // regardless of how far the clock has moved. This is deliberately NOT `poseGatedInstance`
-      // (`pose-gate.ts`): that gate applies distance decimation and a bone budget, both
-      // world-population concerns for throttling many doodads/units against a moving camera. The
-      // glue scene is exactly one fullscreen model that must never be decimated and has no
-      // meaningful "distance from camera" in the world-population sense, so it solves and applies
-      // unconditionally instead of going through the gate built for a population it isn't part of.
-      // It also does NOT feed `animCounters`: that singleton is a per-frame perf readout reset once
-      // per frame by `World#animate` (see `counters.ts`), which never runs while a glue screen is
-      // up -- an increment here would accumulate forever unreset instead of reporting a per-frame
-      // figure, polluting the very HUD it exists to keep honest.
-      this.model.instanceAnim.solveBones(clock);
-      this.model.applyPose();
+    // Before the stage gate: a character can be in hand while the stage `.m2` is still in flight,
+    // and a character frozen on its first Stand keyframe until the buildings arrive would look like
+    // a broken animation system rather than a slow fetch.
+    if (this.character) {
+      this.poseModel(this.character, clock);
+      this.placeCharacter();
+      this.character.updateMatrixWorld(true);
     }
+
+    if (!this.model) {
+      return;
+    }
+
+    this.poseModel(this.model, clock);
     this.model.updateMatrixWorld(true);
 
     this.aimCamera();
+  }
+
+  /**
+   * Advance one model's animation channels and write the solved pose into its bones.
+   *
+   * Shared by the stage and the character because the law is the same for both, and the law is the
+   * point:
+   *
+   * `applyPose()` only copies `instanceAnim.localTRS` into the three.js bone hierarchy -- it samples
+   * nothing. `localTRS` is zero-filled at buffer allocation and written ONLY by `solveBones`, so
+   * without that call every bone would sit at its bind-pose offset forever regardless of how far the
+   * clock has moved. This is deliberately NOT `poseGatedInstance` (`pose-gate.ts`): that gate applies
+   * distance decimation and a bone budget, both world-population concerns for throttling many
+   * doodads/units against a moving camera. The glue scene is one fullscreen stage plus at most one
+   * character, neither of which may be decimated and neither of which has a meaningful "distance from
+   * camera" in the world-population sense, so both solve and apply unconditionally instead of going
+   * through the gate built for a population they are not part of.
+   *
+   * It also does NOT feed `animCounters`: that singleton is a per-frame perf readout reset once per
+   * frame by `World#animate` (see `counters.ts`), which never runs while a glue screen is up -- an
+   * increment here would accumulate forever unreset instead of reporting a per-frame figure,
+   * polluting the very HUD it exists to keep honest.
+   */
+  private poseModel(model: any, clock: number): void {
+    if (!model.instanceAnim) {
+      return;
+    }
+    model.evaluateMaterialChannels(clock);
+    model.instanceAnim.solveBones(clock);
+    model.applyPose();
   }
 
   /** Camera 0 owns the framing while a scene is up. */
@@ -315,7 +440,13 @@ export class GlueSceneView {
 
     // The rig is per-scene, but M2 materials are shared across instances, so it has to be pushed
     // for THIS draw -- `applyPerObjectLighting` sets `uniformsNeedUpdate` for exactly that reason.
-    this.model.traverse((node: any) => {
+    //
+    // Traverses the SCENE, not `this.model`: the character is a sibling group (`characterRoot`), and
+    // a model outside this walk keeps whatever another population last pushed into the shared
+    // material -- for a glue screen, which is reached before any world lighting has run, that is the
+    // uniform defaults, i.e. a black sun and a black probe. The character was correctly placed,
+    // posed and textured and drew as a silhouette.
+    this.scene.traverse((node: any) => {
       const material = node.material;
       if (!material?.uniforms) {
         return;
@@ -335,6 +466,13 @@ export class GlueSceneView {
   }
 
   private teardown(): void {
+    // The character belongs to the ROSTER, not to the stage, and a stage swap on the same screen is
+    // exactly a race click -- so it is dropped here rather than kept: the next `setCharacter` is
+    // already on its way from the same Lua call that changed the stage, and keeping the old body
+    // standing would show the previous character on the new race's stage until it lands.
+    this.characterToken += 1;
+    this.dropCharacter();
+
     if (this.model) {
       this.root.remove(this.model);
       M2Blueprint.unload(this.model);
