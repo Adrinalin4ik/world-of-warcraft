@@ -12,7 +12,8 @@
  * worth the confusion of two tasks touching the same name for different reasons.
  */
 import { MethodTable, onFrameTeardown, registerMethods } from '../object';
-import type { Insets } from '../../../backdrop';
+import { NO_TINT } from '../../../backdrop';
+import type { BackdropTint, Insets } from '../../../backdrop';
 import { Layer } from '../../../widget';
 import { STRATA_ORDER, Strata } from '../../order';
 import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
@@ -24,6 +25,15 @@ import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
  * meaning, unlike everything else `Widget` carries.
  */
 const frameIds = new Map<number, number>();
+
+/**
+ * The `(r, g, b [, a])` argument list the two backdrop-colour setters share. Non-numeric arguments
+ * fall back to the untinted channel rather than to `NaN`, which would blank the piece entirely.
+ */
+function tintOf(args: unknown[]): BackdropTint {
+  const channel = (value: unknown): number => (typeof value === 'number' ? value : 1);
+  return { r: channel(args[0]), g: channel(args[1]), b: channel(args[2]), a: channel(args[3]) };
+}
 
 /** A released frame takes its numeric tag with it -- see `object.ts`'s `FRAME_TEARDOWN`. */
 onFrameTeardown((_ctx, id) => {
@@ -145,12 +155,38 @@ const FRAME: MethodTable = {
       edgeSize: numberField('edgeSize', 0),
       tileSize: numberField('tileSize', 0),
       backgroundInsets: insets,
+      // New art, no colour history: the engine's `SetBackdrop` resets both tints, so a frame given a
+      // second backdrop does not keep the first one's `SetBackdropColor`.
+      color: NO_TINT,
+      borderColor: NO_TINT,
     };
     widget.layer = 'BACKGROUND';
     return [];
   },
-  SetBackdropColor: notImplemented('SetBackdropColor', 'BackdropDef has no tint field yet'),
-  SetBackdropBorderColor: notImplemented('SetBackdropBorderColor', 'BackdropDef has no tint field yet'),
+
+  /**
+   * `SetBackdropColor(r, g, b, a)` tints the BACKGROUND piece; `SetBackdropBorderColor` the eight
+   * EDGE pieces. Alpha is optional and defaults to 1, which is the engine's own default and matters:
+   * `AccountLogin_OnLoad` passes only three arguments for the edit boxes and four (the last `0.85`)
+   * for the character panel.
+   *
+   * Both are no-ops on a frame with no backdrop, and silently -- the engine has nothing to tint
+   * either, and every caller in this manifest declares its backdrop in XML first.
+   */
+  SetBackdropColor: (ctx, self, args) => {
+    const backdrop = widgetOf(ctx, self).backdrop;
+    if (backdrop) {
+      backdrop.color = tintOf(args);
+    }
+    return [];
+  },
+  SetBackdropBorderColor: (ctx, self, args) => {
+    const backdrop = widgetOf(ctx, self).backdrop;
+    if (backdrop) {
+      backdrop.borderColor = tintOf(args);
+    }
+    return [];
+  },
 
   // `registry.create` is the sanctioned path for a region owned by a frame -- `object.ts`'s own
   // comment on `CREATE_FRAME_CLASSES` is explicit that a Texture is created through its OWNER, not

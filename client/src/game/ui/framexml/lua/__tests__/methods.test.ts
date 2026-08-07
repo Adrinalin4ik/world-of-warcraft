@@ -2,6 +2,7 @@ import { LuaVM } from '../vm';
 import { FrameRegistry, installObjectModel } from '../object';
 import { WidgetRoot } from '../../../widget';
 import { resolveAnchors, Viewport } from '../../../layout';
+import { backdropPieces } from '../../../backdrop';
 // Side-effect imports: registers the REGION/LAYEREDREGION/TEXTURE/FONTSTRING, FRAME/MODEL and
 // BUTTON/CHECKBUTTON/EDITBOX method tables. Nothing here is referenced by name -- `object.ts`'s
 // dispatch is the only consumer.
@@ -175,6 +176,56 @@ describe('the frame and region method surface', () => {
     expect(vm.getGlobal('checkHasEnable')).toBe(true);
     expect(vm.getGlobal('plainHasEnable')).toBe(false);
     expect(vm.getGlobal('checkIsChecked')).toBe(true);
+
+    vm.dispose();
+  });
+
+  // characterselect.lua:36-38 verbatim, against `CharacterSelectCharacterFrame`'s own
+  // characterselect.xml:812 backdrop. `DEFAULT_TOOLTIP_COLOR` (accountlogin.lua:2) is one flat
+  // six-element table whose FIRST three are the border and whose LAST three are the background, so a
+  // tint applied to the wrong half -- or to the whole widget rather than per piece -- draws a light
+  // grey pane with a near-black border instead of the reverse. The alpha is the fourth argument of
+  // `SetBackdropColor` alone; `SetBackdropBorderColor` is called with three, and must read 1.
+  it('the two backdrop colour setters tint the background and the edges independently', () => {
+    const vm = new LuaVM();
+    const registry = new FrameRegistry();
+    installObjectModel(vm, registry);
+
+    const error = vm.run(
+      `
+      DEFAULT_TOOLTIP_COLOR = {0.8, 0.8, 0.8, 0.09, 0.09, 0.09}
+      panel = CreateFrame("Frame", "Panel")
+      panel:SetWidth(260)
+      panel:SetHeight(642)
+      panel:SetBackdrop({
+        bgFile = "Interface\\\\Glues\\\\Common\\\\Glue-Tooltip-Background",
+        edgeFile = "Interface\\\\Glues\\\\Common\\\\Glue-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 10, right = 5, top = 4, bottom = 9 },
+      })
+
+      local backdropColor = DEFAULT_TOOLTIP_COLOR
+      panel:SetBackdropBorderColor(backdropColor[1], backdropColor[2], backdropColor[3])
+      panel:SetBackdropColor(backdropColor[4], backdropColor[5], backdropColor[6], 0.85)
+      `,
+      'backdrop-color.test.lua',
+    );
+    expect(error).toBeNull();
+
+    const widget = registry.widget(registry.byName('Panel')!)!;
+    const pieces = backdropPieces({ left: 0, top: 0, width: 260, height: 642 }, widget.backdrop!);
+
+    const background = pieces.filter((piece) => piece.sprite === 'bg');
+    const edges = pieces.filter((piece) => piece.sprite === 'edge');
+    expect(background).toHaveLength(1);
+    expect(edges).toHaveLength(8);
+
+    // 0.09 grey at 85% -- the dark translucent pane, not the sheet's own colour.
+    expect(background[0].tint).toEqual({ r: 0.09, g: 0.09, b: 0.09, a: 0.85 });
+    // All eight edge pieces, and alpha defaults to 1 for the three-argument call.
+    edges.forEach((piece) => {
+      expect(piece.tint).toEqual({ r: 0.8, g: 0.8, b: 0.8, a: 1 });
+    });
 
     vm.dispose();
   });

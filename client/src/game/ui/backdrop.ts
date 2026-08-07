@@ -57,6 +57,17 @@ export interface Insets {
   bottom: number;
 }
 
+/** A straight-alpha tint, 0..1 per channel. Multiplied onto a piece's art, never replacing it. */
+export interface BackdropTint {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+/** What an untinted Backdrop draws with: the sheet's own colour at the widget's own alpha. */
+export const NO_TINT: BackdropTint = { r: 1, g: 1, b: 1, a: 1 };
+
 export interface BackdropDef {
   /** `GlueArt` key for the Backdrop's `bgFile`. Tiled at `tileSize`, never stretched. */
   bgSprite: string | null;
@@ -68,6 +79,21 @@ export interface BackdropDef {
   tileSize: number;
   /** `BackgroundInsets`: how far the background is held off each side of the rect. */
   backgroundInsets: Insets;
+  /**
+   * `SetBackdropColor` / `<Backdrop><Color>`: the tint on the BACKGROUND piece only.
+   *
+   * It lives on the def rather than on the Widget because the engine's `SetBackdrop` resets both
+   * tints to white -- a new backdrop is new art with no colour history. That is also why the
+   * ordering is safe here: every document that tints a backdrop declares the backdrop in XML (so
+   * `SetBackdrop` has run by the time the loader or `*_OnLoad` reaches the colour), and a
+   * `SetBackdropColor` on a frame with no backdrop has nothing to tint in the engine either.
+   *
+   * Optional, and absent means `NO_TINT`: a backdrop that is never coloured -- which is every
+   * hand-written one in `screens/` -- draws exactly as it did before tints existed.
+   */
+  color?: BackdropTint;
+  /** `SetBackdropBorderColor` / `<Backdrop><BorderColor>`: the tint on the eight EDGE pieces. */
+  borderColor?: BackdropTint;
 }
 
 export type BackdropPart =
@@ -106,6 +132,8 @@ export interface BackdropPiece {
   part: BackdropPart;
   /** Which of the Backdrop's two sprites this piece samples. */
   sprite: 'bg' | 'edge';
+  /** The def's `color` for the background piece, its `borderColor` for the eight edge pieces. */
+  tint: BackdropTint;
   rect: Rect;
   /** The atlas sub-rect. Null for BACKGROUND, which uses the whole sheet and repeats it. */
   texCoords: TexCoords | null;
@@ -139,6 +167,7 @@ export function backdropPieces(rect: Rect, def: BackdropDef): BackdropPiece[] {
       pieces.push({
         part: 'BACKGROUND',
         sprite: 'bg',
+        tint: def.color ?? NO_TINT,
         rect: { left: left + insets.left, top: top + insets.top, width: bgWidth, height: bgHeight },
         texCoords: null,
         transposed: false,
@@ -169,6 +198,7 @@ export function backdropPieces(rect: Rect, def: BackdropDef): BackdropPiece[] {
     pieces.push({
       part,
       sprite: 'edge',
+      tint: def.borderColor ?? NO_TINT,
       rect: pieceRect,
       texCoords: edgeTexCoords(part),
       transposed,

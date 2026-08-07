@@ -329,10 +329,10 @@ class DocumentLoader {
    * THREE outcomes, and keeping them apart is what makes the report worth reading. A method the object
    * model has never heard of is a GAP: warned once by name, one line per missing method for the whole
    * load. A method that is REGISTERED BUT DOES NOTHING is the same kind of gap wearing a success:
-   * `SetBackdropColor` and `SetHighlightFontObject`/`SetDisabledFontObject` exist so duck-typing sees
-   * the class correctly and then return quietly, so without `NOT_IMPLEMENTED` (`lua/methods/region.ts`)
-   * this would report a clean load of a screen missing every backdrop tint and every per-state caption
-   * font. A method that exists and RAISED is an error: something was wrong with the document or with us.
+   * `SetHighlightFontObject`/`SetDisabledFontObject` exist so duck-typing sees the class correctly and
+   * then return quietly, so without `NOT_IMPLEMENTED` (`lua/methods/region.ts`) this would report a
+   * clean load of a screen missing every per-state caption font. A method that exists and RAISED is an
+   * error: something was wrong with the document or with us.
    *
    * `getTableField` runs the wrapper's `__index`, which mints a handle for the bound closure it
    * returns, so every call here releases that handle -- the frame's Lua-side dispatch cache still
@@ -936,8 +936,8 @@ class DocumentLoader {
    * It was a warn-once no-op when this pass was written, on the stated grounds that a backdrop needs art
    * resolved through `GlueArt` and `MethodContext` cannot reach one -- which turned out to have a hole
    * in it, since a sprite key may simply BE the path (`runtime.ts`'s art discovery). Its two COLOUR
-   * companions are still stubs: `BackdropDef` has no tint field, so `<Color>`/`<BorderColor>` below are
-   * issued and named in the report rather than dropped.
+   * companions are real now too, so the `<Color>`/`<BorderColor>` calls below tint the background piece
+   * and the eight edge pieces respectively.
    */
   private applyBackdrop(element: XmlElement, wrapper: LuaRef, dbg: string): void {
     const backdrop = childrenNamed(element, 'Backdrop')[0];

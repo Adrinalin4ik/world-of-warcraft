@@ -296,8 +296,21 @@ export class GlueRenderer {
       pooled.material.map = texture;
       pooled.material.blending =
         item.widget.blend === 'ADD' ? THREE.AdditiveBlending : THREE.NormalBlending;
-      pooled.material.opacity = item.alpha;
+      // The backdrop's own tint MULTIPLIES the widget's, exactly as the engine's
+      // `SetBackdropColor`/`SetBackdropBorderColor` do: they darken the sheet rather than replacing
+      // it, so `Glue-Tooltip-Background` at (0.09, 0.09, 0.09, 0.85) is a dark translucent pane and
+      // not a flat fill. Background and edge carry different tints, which is the whole reason a
+      // per-piece colour is needed and a per-widget `vertexColor` cannot express this.
+      //
+      // The channel-wise multiply is exact rather than approximate because `src/index.tsx` sets
+      // `THREE.ColorManagement.enabled = false`: `Color#set` stores the authored sRGB values
+      // untouched, so there is no working-space conversion for the tint to be applied on the wrong
+      // side of.
+      pooled.material.opacity = item.alpha * piece.tint.a;
       pooled.material.color.set(item.widget.vertexColor);
+      pooled.material.color.r *= piece.tint.r;
+      pooled.material.color.g *= piece.tint.g;
+      pooled.material.color.b *= piece.tint.b;
       pooled.material.needsUpdate = true;
 
       writePieceUVs(pooled.geometry, piece);
