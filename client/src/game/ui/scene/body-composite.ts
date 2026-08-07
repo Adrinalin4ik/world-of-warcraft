@@ -15,14 +15,13 @@
  *    DOWNSCALE of the re-authored 3.3.5a art is loss where a 2x point upscale of the vanilla-era
  *    scalp art is not.
  *
- * WHAT IS NOT HERE. Equipment: the eight `ItemDisplayInfo` region layers are pieces 7/8. The seam is
- * `BodyLayer[]` -- an ORDERED list, blitted in order, so equipment joins by appending to it. See
- * `EQUIP_TILES_512` below, which is already the doubled reference table, and the closing note on
- * `character-look.ts#bodyLayersFor` for the exact attach point.
+ * EQUIPMENT IS NOW HERE TOO, and it needed no kernel change -- the eight `ItemDisplayInfo` region
+ * layers are just eight more entries in the same ordered `BodyLayer[]`, at the eight tiles below.
+ * `character-equipment.ts` builds them; the ordering law and the gender suffix live there.
  *
- * The split with `character-look.ts` is DBC against pixels, and it is also what keeps the two modules
- * acyclic: that file reads `CharSections` and builds the layer list, this one owns the tiles, the
- * kernel and the cache.
+ * The split with `character-look.ts` is DBC against pixels, and it is also what keeps the modules
+ * acyclic: those files read the DBCs and build the layer list, this one owns the tiles, the kernel
+ * and the cache.
  */
 import * as THREE from 'three';
 
@@ -56,27 +55,45 @@ export const COMPOSITE_TILES = {
   HEAD_UPPER: [0, 320, 256, 64],
   HEAD_LOWER: [0, 384, 256, 128],
   PELVIS: [256, 192, 256, 128],
+
+  // The eight equipment tiles, the reference's `EQUIP_TILES` (`sections.rs:39-47`) doubled the same
+  // way. `EQUIP_TILE_NAMES` below fixes their LAYER ORDER, which is the load-bearing part: layer
+  // index i == `ItemDisplayInfo` region column i == this tile.
+  //
+  // Note LEG_UPPER is deliberately the same rect as `PELVIS` -- it is in the reference too
+  // (`sections.rs:37`, "g5 == TILE_G5"), and it is why trousers cover the underwear rather than
+  // sitting beside it: the underwear layer blits first, so equipment lands on top.
+  ARM_UPPER: [0, 0, 256, 128],
+  ARM_LOWER: [0, 128, 256, 128],
+  HAND: [0, 256, 256, 64],
+  TORSO_UPPER: [256, 0, 256, 128],
+  TORSO_LOWER: [256, 128, 256, 64],
+  LEG_UPPER: [256, 192, 256, 128],
+  LEG_LOWER: [256, 320, 256, 128],
+  FOOT: [256, 448, 256, 64],
 } as const;
 
 /**
- * The eight equipment tiles, the reference's `EQUIP_TILES` (`sections.rs:39-47`) doubled, kept here
- * so piece 7 does not have to re-derive them. NOT USED YET -- equipment is out of this piece's scope
- * and nothing reads this constant. It is a table, not a code path.
+ * The eight equipment tiles in **layer order** -- `ItemDisplayInfo` region column *i* is compositor
+ * layer *i* is this tile (`sections.rs:36-47`). `character-equipment.ts` indexes this.
  *
- * Note LEG_UPPER is deliberately the same rect as `PELVIS`: it is in the reference too, and it is why
- * a robe covers the underwear rather than sitting beside it. The underwear layer blits first, so
- * equipment lands on top.
+ * MEASURED CORRECTION to the assumption that "every region is exactly half its tile". It is not: a
+ * stratified sample of 508 of the 15 666 distinct region names on the live host measured
+ * 303x 128x64, 107x 128x32 (vanilla-era, half their tile) but also **63x 256x128 and 23x 256x64**
+ * (re-authored for 3.3.5a, exactly tile-sized). So ~17% of equipment art takes mip shift 0 and the
+ * rest shift 1. `bakeLayers` derives the shift per layer from the source's own width, so this needed
+ * no code -- but a hardcoded "always double" would have drawn one in six items at quarter size.
  */
-export const EQUIP_TILES_512: readonly (readonly [number, number, number, number])[] = [
-  [0, 0, 256, 128], // 0 ArmUpper
-  [0, 128, 256, 128], // 1 ArmLower
-  [0, 256, 256, 64], // 2 Hand
-  [256, 0, 256, 128], // 3 TorsoUpper
-  [256, 128, 256, 64], // 4 TorsoLower
-  [256, 192, 256, 128], // 5 LegUpper -- the pelvis tile
-  [256, 320, 256, 128], // 6 LegLower
-  [256, 448, 256, 64], // 7 Foot
-];
+export const EQUIP_TILE_NAMES = [
+  'ARM_UPPER',
+  'ARM_LOWER',
+  'HAND',
+  'TORSO_UPPER',
+  'TORSO_LOWER',
+  'LEG_UPPER',
+  'LEG_LOWER',
+  'FOOT',
+] as const satisfies readonly (keyof typeof COMPOSITE_TILES)[];
 
 /** One blit: a BLP, and where it lands. The whole input to the bake, in order. */
 export type BodyLayer = {
@@ -86,6 +103,14 @@ export type BodyLayer = {
   rect: readonly [number, number, number, number];
   /** The BLP path exactly as the DBC spells it. */
   path: string;
+  /**
+   * Paths to try, in order, if `path` does not resolve -- the reference's own suffix loop
+   * (`read_equip_region`, `sections.rs:288-299`). Only equipment layers set this: an item's region
+   * art ships `_M`/`_F` for a gendered cut and `_U` for the unisex majority, and which one exists is
+   * not derivable from the DBC. `CharSections` layers carry a path the table states outright and
+   * leave this undefined.
+   */
+  alternates?: readonly string[];
 };
 
 /** What `pipeline/blp/loader.js` hands back through the worker for one source. */
@@ -265,18 +290,50 @@ function bakeLayers(layers: BodyLayer[], specs: (BlpSpec | null)[]): BodyComposi
 }
 
 /**
- * Fetch every layer's BLP through the existing worker and bake them.
+ * One layer's source: its own path, then its `alternates` in order, first one that decodes.
  *
- * COMPRESSED SOURCES ARE SKIPPED, NOT DECODED HERE. All 38 sources measured for this layer set come
- * back `format: IMAGE_ABGR8888` -- `pipeline/blp/loader.js:19-23` only leaves a level compressed when
- * the file is `COLOR_DXT`, and none of these files is. But that was a spot check of one appearance
- * and eight armour regions, not a sweep of ~40 000 `ItemDisplayInfo` rows, so a DXT layer may still
- * turn up: it is warned about and skipped (the character keeps every other layer), and if the BASE
- * SKIN is the compressed one the whole bake answers null and the caller falls back to binding that
- * BLP raw -- which is exactly what shipped before this file existed. Decoding it would mean asking
- * the worker for `IMAGE_ABGR8888` on a DXT file, which `wow-data-parser/blp/dxt.ts` already supports;
- * that is a one-line change to the worker's output format and is deliberately not made speculatively.
+ * A MISS IS EXPECTED HERE, and only for equipment. `path` is the gendered `_M`/`_F` candidate and the
+ * unisex `_U` is the shipped majority, so the common equipment layer costs one 404 before its real
+ * file -- the reference pays the same, walking the same three suffixes against its archive
+ * (`sections.rs:288-299`). Layers are resolved concurrently with each other, so the miss adds one
+ * round trip to the whole bake rather than one per layer.
+ *
+ * A COMPRESSED SOURCE IS DECODED, NOT SKIPPED. `pipeline/blp/loader.js` leaves DXT levels compressed
+ * for the GPU, which is right for every other consumer and useless to a CPU blit, so the bake asks
+ * for `decompress` and gets ABGR8888 for a DXT file too (`wow-data-parser/blp/dxt.ts` was always
+ * there; nothing decoded it for this path). Measured: no DXT source has yet turned up in a character
+ * layer set -- all 38 `CharSections` sources and a stratified 508-name sample of the 15 666 distinct
+ * `ItemDisplayInfo` region names are palettized -- but that is a sample of ~3%, and this is the one
+ * place a sweep could not be completed, so the fallback is a real decode instead of a warning.
  */
+async function loadLayerSource(layer: BodyLayer): Promise<BlpSpec | null> {
+  const candidates = [layer.path, ...(layer.alternates ?? [])];
+  for (const candidate of candidates) {
+    try {
+      const spec = (await WorkerPool.enqueue('BLP', candidate.toUpperCase(), true)) as
+        | BlpSpec
+        | null
+        | undefined;
+      if (!spec) {
+        continue;
+      }
+      if (spec.format !== BLP_IMAGE_FORMAT.IMAGE_ABGR8888) {
+        // Unreachable through `decompress` for BLP2's three colour formats; kept because a format
+        // this kernel cannot read must be named rather than blitted as if it were RGBA.
+        console.warn(`body composite: ${candidate} came back format ${spec.format}, not RGBA`);
+        continue;
+      }
+      return spec;
+    } catch (error) {
+      // Not warned per candidate: a 404 on the gendered name is the NORMAL path to the `_U` file.
+      void error;
+    }
+  }
+  console.warn(`body composite: no BLP resolved for ${candidates.join(' / ')}`);
+  return null;
+}
+
+/** Fetch every layer's BLP through the existing worker and bake them. */
 export async function compositeBody(layers: BodyLayer[]): Promise<BodyComposite | null> {
   if (!layers.length) {
     return null;
@@ -284,30 +341,9 @@ export async function compositeBody(layers: BodyLayer[]): Promise<BodyComposite 
 
   const t0 = performance.now();
   // Concurrent, not sequential: measured 5.5 ms for the four sources a skin click needs against
-  // 53.8-144 ms per source cold and sequential. `WorkerPool` de-duplicates by path, and the browser's
-  // HTTP cache makes a re-selected character's sources free.
-  const specs = await Promise.all(
-    layers.map(async (layer) => {
-      try {
-        const spec = (await WorkerPool.enqueue('BLP', layer.path.toUpperCase())) as BlpSpec | null;
-        if (!spec) {
-          console.warn(`body composite: no BLP for ${layer.path}`);
-          return null;
-        }
-        if (spec.format !== BLP_IMAGE_FORMAT.IMAGE_ABGR8888) {
-          console.warn(
-            `body composite: ${layer.path} came back format ${spec.format}, not decoded RGBA -- ` +
-              'skipping the layer. See compositeBody for why this is a skip and not a decode.',
-          );
-          return null;
-        }
-        return spec;
-      } catch (error) {
-        console.warn(`body composite: ${layer.path} failed to load`, error);
-        return null;
-      }
-    }),
-  );
+  // 53.8-144 ms per source cold and sequential. The browser's HTTP cache makes a re-selected
+  // character's sources free.
+  const specs = await Promise.all(layers.map(loadLayerSource));
   const fetchMs = performance.now() - t0;
 
   const baked = bakeLayers(layers, specs);
@@ -335,6 +371,14 @@ export function compositeCacheKey(
   race: number,
   gender: number,
   appearance: CharacterAppearance | null | undefined,
+  /**
+   * The worn display ids, which are half the key now that equipment is half the composite -- the
+   * reference keys the same cache the same way (`SkinKey { …, equip: [u32; 8] }`,
+   * `benilla/src/entities.rs:309`). The WHOLE array is folded in rather than just the eight bodyslots:
+   * it is eleven more numbers, it costs nothing, and it means a key can never collide across a gear
+   * change that this file does not happen to know is invisible.
+   */
+  equipment?: { displayId: number }[] | null,
 ): string {
   return [
     race,
@@ -344,6 +388,7 @@ export function compositeCacheKey(
     appearance?.hairStyle ?? 0,
     appearance?.hairColor ?? 0,
     appearance?.facialHair ?? 0,
+    (equipment ?? []).map((slot) => slot?.displayId ?? 0).join(','),
   ].join('/');
 }
 

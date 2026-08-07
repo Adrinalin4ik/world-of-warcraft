@@ -14,10 +14,17 @@
  * body atlas, so their art is a COMPOSITE layer and nothing else could colour them), and a male face
  * with no brow detail.
  *
+ * EQUIPMENT TEXTURES ARE NOW HERE, in `character-equipment.ts`: the eight `ItemDisplayInfo` region
+ * textures are appended to `bodyLayersFor`'s list. Reached from `resolveCharacterLook`, and skipped
+ * entirely -- including the 6.7 MB `ItemDisplayInfo` fetch -- for a character wearing nothing.
+ *
  * WHAT THIS DELIBERATELY DOES NOT DO, so nobody reads a gap here as an oversight:
- *  - **No equipment.** The eight `ItemDisplayInfo` region layers need that table (6.7 MB) and the
- *    eight geoset branches; they are pieces 7 and 8. `bodyLayersFor` is an ordered list precisely so
- *    they can join it -- see its closing note.
+ *  - **No equipment GEOSETS.** An item can change the mesh as well as the texture, through
+ *    `ItemDisplayInfo.geosetGroupIDs` and a worn helm's `HelmetGeosetVisData` masks. That is the
+ *    separable second half and lands next; until it does, a robe paints a skirt onto the legs it does
+ *    not replace, and a worn helm hides nothing.
+ *  - **No attachments.** Weapons, shields, shoulders and the helm's own model all hang off a bone,
+ *    which nothing in this client can do yet; that is piece 9.
  *  - **No `..._Extra` sheet (texture type 8).** `CharSections` BaseSection 0 `TextureName[1]`, bound
  *    whole rather than composited, and only fur races author it (Tauren head/leg fur). A Tauren
  *    therefore still draws part of its own body through an unbound sampler.
@@ -25,6 +32,13 @@
 import DBC from '../../pipeline/dbc';
 import { CharacterAppearance, CharacterRecord } from '../../../network/protocol/types';
 import { BodyLayer, COMPOSITE_TILES, compositeCacheKey } from './body-composite';
+import {
+  ItemDisplayInfoRow,
+  WornEquipment,
+  equipLayersFor,
+  wearsNothing,
+  wornEquipmentFor,
+} from './character-equipment';
 
 /** Everything `GlueSceneView#setCharacter` needs, and nothing it does not. */
 export type CharacterLook = {
@@ -46,9 +60,9 @@ export type CharacterLook = {
    */
   bodyLayers: BodyLayer[];
   /**
-   * The composite's cache key -- the whole appearance tuple, so re-selecting a roster row or cycling
-   * a dial back is a map hit rather than eight fetches and a bake. Equipment extends this key when
-   * piece 7 extends the layer list; the reference keys the same cache the same way
+   * The composite's cache key -- the whole appearance tuple AND the worn display ids, so re-selecting
+   * a roster row or cycling a dial back is a map hit rather than fourteen fetches and a bake. The
+   * reference keys the same cache the same way
    * (`SkinKey { race, sex, skin, face, facial_hair, hair_style, hair_color, equip: [u32;8] }`).
    */
   compositeKey: string;
@@ -358,19 +372,20 @@ export function sectionTexture(
  *   HEAD_UPPER  `ScalpUpperHair02_05.blp`            128x32   (0,320,256,64)
  *   PELVIS      `HumanMaleNakedPelvisSkin00_00.blp`  256x128  (256,192,256,128)
  *
- * HOW EQUIPMENT ATTACHES LATER (piece 7): append to the returned array, and nothing else changes.
- * Per layer index 0..7, gather the worn `ItemDisplayInfo` region names, order them by the client's
- * `[0x803bf8]` priority table (`sections.rs:67-76`), resolve each to
- * `Item\TextureComponents\<dir>\<name>_<M|F|U>.blp`, and push
- * `{ tile, rect: EQUIP_TILES_512[layer], path }`. The kernel already derives each layer's scale from
- * its own source dimensions, and every item region measured is 128x64 or 128x32 -- exactly half its
- * doubled tile, the same shift the scalp layers already take.
+ * EQUIPMENT APPENDS TO THE RETURNED ARRAY and nothing else changes -- which is what the `worn`
+ * argument does, through `equipLayersFor`. It goes last because every equipment tile sits on top of
+ * the skin it covers, and one of them (LEG_UPPER) IS the pelvis tile, so trousers must blit after the
+ * underwear rather than beside it. For Gesf, whose live gear is a shirt, trousers and boots, that is
+ * six more layers: TorsoUpper/TorsoLower from the shirt, LegUpper/LegLower from the trousers, and
+ * LegLower/Foot from the boots -- the shared LegLower tile taking the trousers first and the boots
+ * over them, by the priority table.
  */
 export function bodyLayersFor(
   rows: CharSectionsRow[],
   race: number,
   gender: number,
   appearance: CharacterAppearance | null | undefined,
+  worn?: WornEquipment | null,
 ): BodyLayer[] {
   const skin = appearance?.skin ?? 0;
   const face = appearance?.face ?? 0;
@@ -405,6 +420,10 @@ export function bodyLayersFor(
     if (path) {
       layers.push({ tile, rect: COMPOSITE_TILES[tile], path });
     }
+  }
+
+  if (worn) {
+    layers.push(...equipLayersFor(worn, gender));
   }
 
   return layers;
@@ -591,10 +610,12 @@ export async function resolveCharacterLook(
     }
   }
 
+  const worn = await resolveWornEquipment(character);
+
   return {
     modelPath: modelData.file,
-    bodyLayers: bodyLayersFor(sectionRows, character.race, character.gender, appearance),
-    compositeKey: compositeCacheKey(character.race, character.gender, appearance),
+    bodyLayers: bodyLayersFor(sectionRows, character.race, character.gender, appearance, worn),
+    compositeKey: compositeCacheKey(character.race, character.gender, appearance, character.equipment),
     // `|| 1`, not `?? 1`: a zero scale is as unusable as a missing one, and the DBC's float column
     // reads 0 for a row that carries nothing.
     scale: displayInfo.scale || 1,
@@ -602,4 +623,37 @@ export async function resolveCharacterLook(
     hairTexture,
     geosets,
   };
+}
+
+/**
+ * The worn `ItemDisplayInfo` rows for a character, or null when nothing is worn.
+ *
+ * NULL IS THE POINT. `ItemDisplayInfo` is **6.7 MB over the wire** -- measured, and by a wide margin
+ * the largest table on this screen's critical path (`CharSections` is 845 KB, everything else under
+ * 200 KB). A character wearing nothing needs none of it, and neither does a test: skipping the load
+ * for an empty equipment array is what keeps the naked path exactly as cheap as it was before piece 7,
+ * and it is why `character-look.test.ts` still runs against four tables.
+ *
+ * The table is loaded ONCE per session and shared -- `DBC.load`'s cache is a static keyed by table
+ * name -- so the cost is paid by whichever roster row is selected first and by no other.
+ */
+async function resolveWornEquipment(character: CharacterRecord): Promise<WornEquipment | null> {
+  if (wearsNothing(character.equipment)) {
+    return null;
+  }
+  const table = await DBC.load('ItemDisplayInfo');
+  if (!table) {
+    console.warn('glue character: ItemDisplayInfo did not load -- the character draws undressed');
+    return null;
+  }
+  return wornEquipmentFor(character.equipment, (displayId) => {
+    // `DBC` indexes its records by id onto itself (`pipeline/dbc/index.js#index`), so this is a
+    // property read and not a scan -- which matters at 57 986 rows and eleven lookups per character.
+    const row = (table as unknown as Record<number, ItemDisplayInfoRow | undefined>)[displayId];
+    if (!row) {
+      console.warn(`glue character: ItemDisplayInfo has no row ${displayId}`);
+      return null;
+    }
+    return row;
+  });
 }
