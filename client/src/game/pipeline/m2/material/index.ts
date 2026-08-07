@@ -222,11 +222,44 @@ class M2Material extends THREE.ShaderMaterial {
      *
      * Kept in the same bag rather than a field of its own because it answers the same question those
      * three do: a `textureDef` whose `type` is non-zero names a slot the FILE leaves blank and the
-     * runtime fills. Measured on `character/human/male/humanmale.m2`: four texture defs, types
-     * 1, 6, 0 and 2 -- so type 1 is the only one of the three runtime types this milestone fills.
-     * Types 6 (hair sheet) and 2 (cape) are still unhandled and still resolve to null.
+     * runtime fills.
      */
     body: null,
+    /**
+     * Texture type 6 -- the character HAIR sheet.
+     *
+     * Measured which geometry actually reads which type, by walking `humanmale02.skin`'s 63 batches
+     * through `textureLookups` into the `.m2`'s four texture defs (types 1, 6, 0, 2):
+     *
+     *   type 1 -> geosets 0 1 4 5 9 10 16 18 101 102 201 202 301 302 401..404 501..505 701 702
+     *             802 803 902 903 1002 1102 1104 1202 1301 1302 1501 1802
+     *   type 6 -> geosets 2..18            (group 0's hairstyles -- the HAIR mesh)
+     *   type 2 -> geosets 1502..1506       (group 15's cloaks)
+     *   type 0 -> geoset 1703              (the hardcoded DK eye glow)
+     *
+     * The `.m2`'s own `replacable_texture_lookup` array agrees independently: 7 entries indexed BY
+     * texture type, `[2, 0, 3, -1, -1, -1, 1]`, i.e. type 1 -> slot 0, type 2 -> slot 3,
+     * type 6 -> slot 1, type 0 -> slot 2. Two readings of the same file, same answer.
+     *
+     * Note the overlap: geosets 4, 5, 9, 10, 16 and 18 appear under BOTH types, because those
+     * hairstyles ship as two submeshes with the same partID -- a scalp piece drawn with the body
+     * atlas and a hair piece drawn with this sheet. Selecting the geoset shows both, which is what
+     * the real client does.
+     *
+     * Supplied from `CharSections` BaseSection 3 `TextureName[0]` -- see `character-look.ts`.
+     *
+     * TYPE 2 IS DELIBERATELY STILL UNHANDLED, and the measurement above is why: the only geometry on
+     * a character model that reads it is cloak variants 1502..1506, which a character with no cloak
+     * equipped never shows, and its supplier is `ItemDisplayInfo` (the equipment piece). A slot with
+     * neither a supplier nor a reachable consumer would be a setter with no callers.
+     *
+     * TYPE 8 EXISTS TOO and is not handled either: `taurenfemale.m2`'s texture defs are types
+     * 8, 1, 0, 2, and its type-8 slot is read by geoset 0 (the body) and geosets 202..205. Measured
+     * supplier: `CharSections` BaseSection 0 `TextureName[1]`, e.g.
+     * `Character\Tauren\Female\TaurenFemaleSkin00_00_Extra.blp`. So a Tauren draws part of its body
+     * unbound today. No Tauren is on the test roster, so this is reported rather than written blind.
+     */
+    hair: null,
   };
   textures = [];
   textureDefs;
@@ -513,6 +546,13 @@ class M2Material extends THREE.ShaderMaterial {
         }
         break;
 
+      case 6:
+        // The character hair sheet. See `skins.hair` for the measurement of which geosets read it.
+        if (this.skins.hair) {
+          path = this.skins.hair;
+        }
+        break;
+
       case 11:
         if (this.skins.skin1) {
           path = this.skins.skin1;
@@ -546,9 +586,22 @@ class M2Material extends THREE.ShaderMaterial {
     this.loadTextures();
   }
 
-  /** Supply texture type 1. Same shape as `updateSkinTextures`, and the same reload. */
-  updateBodyTexture(path) {
-    this.skins.body = path;
+  /**
+   * Supply the character slots -- texture type 1 (body) and type 6 (hair). Same shape as
+   * `updateSkinTextures`, and the same single reload.
+   *
+   * ONE CALL FOR BOTH, deliberately, and not two setters: `loadTextures()` takes a fresh
+   * `TextureLoader` reference for every def it walks and does NOT release the array it replaces
+   * (`TextureLoader.unload` keys off a resolved texture's `textureKey`, which a slot still showing
+   * `PLACEHOLDER` does not have, so the release cannot be done from the array alone). Every extra
+   * `loadTextures()` therefore pins one more reference on every texture this material holds. Two
+   * setters would have doubled that; one keeps it at the one call the type-1 slot already cost.
+   * The residual over-reference is pre-existing and is NOT fixed here -- it needs `loadTextures` to
+   * track paths rather than textures, in the shared pipeline, which is not this milestone.
+   */
+  updateCharacterTextures(body, hair) {
+    this.skins.body = body;
+    this.skins.hair = hair;
 
     this.loadTextures();
   }

@@ -943,11 +943,15 @@ class M2 extends THREE.Group {
   }
 
   /**
-   * The path for texture type 1 -- the character body skin. See `material/index.ts#resolveTexturePath`.
+   * The runtime-supplied CHARACTER texture slots: type 1 (the body skin) and type 6 (the hair sheet).
+   *
+   * One setter for both, matching `updateSkinTextures`' three-at-once shape, because each supply
+   * costs a full `loadTextures()` walk -- see `material/index.ts#updateCharacterTextures`. The
+   * `skins.hair` comment there records which geosets read which type, measured off the real skin.
    */
-  set bodyTexture(path: string | null) {
+  set characterTextures(paths: { body: string | null; hair: string | null }) {
     for (let i = 0; i < this.submeshes.length; i++) {
-      this.submeshes[i].bodyTexture = path;
+      this.submeshes[i].characterTextures = paths;
     }
   }
 

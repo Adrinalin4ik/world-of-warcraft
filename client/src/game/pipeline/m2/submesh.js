@@ -340,11 +340,12 @@ class Submesh extends THREE.Group {
     }
   }
 
-  // The character body skin (texture type 1), for every batch of this submesh.
-  set bodyTexture(path) {
+  // The character body skin (texture type 1) and hair sheet (type 6), for every batch of this
+  // submesh. Both in one call -- see `M2Material#updateCharacterTextures` for why that matters.
+  set characterTextures({ body, hair }) {
     const childrenLength = this.children.length;
     for (let childIndex = 0; childIndex < childrenLength; ++childIndex) {
-      this.children[childIndex].material.updateBodyTexture(path);
+      this.children[childIndex].material.updateCharacterTextures(body, hair);
     }
   }
 
