@@ -150,9 +150,11 @@ export function bodySkinFor(
 /**
  * Resolve one character's look. Four DBC reads, all cached by `DBC.load`.
  *
- * `CreatureDisplayInfo` and `CreatureModelData` are already loaded at runtime by `classes/unit.ts`,
- * so the character path shares their cache rather than adding a fetch. `ChrRaces` (6 KB) and
- * `CharSections` (845 KB) are new loads. Measured chain for a Human Male:
+ * All four go through `DBC.load`, whose cache is a static keyed by table name -- so `classes/unit.ts`
+ * asking for `CreatureDisplayInfo`/`CreatureModelData` in the world hits whatever this warmed, and
+ * vice versa. On a glue screen nothing has warmed them, so this is four cold fetches:
+ * `CreatureDisplayInfo` 1.6 MB, `CreatureModelData` 197 KB, `CharSections` 845 KB, `ChrRaces` 6 KB
+ * (measured over the wire). Measured chain for a Human Male:
  *
  *   ChrRaces id 1 -> maleDisplayID 49
  *   CreatureDisplayInfo 49 -> modelID 49, scale 1.0

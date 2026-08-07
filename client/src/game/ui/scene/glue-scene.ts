@@ -320,9 +320,11 @@ export class GlueSceneView {
     // cannot land on two different instants within the same frame.
     const clock = worldClock.ms;
 
-    // Before the stage gate: a character can be in hand while the stage `.m2` is still in flight,
-    // and a character frozen on its first Stand keyframe until the buildings arrive would look like
-    // a broken animation system rather than a slow fetch.
+    // Before the stage gate, so the character's own clock does not depend on the stage's arrival.
+    // `render` still draws nothing until the stage is in (it needs the stage's rig and camera), but
+    // `InstanceAnim` is clock-INDEXED off `armedAtMs` rather than accumulated, so a character solved
+    // from the moment it is armed enters its first drawn frame at the phase the clock says -- not at
+    // keyframe zero, and not one solve behind.
     if (this.character) {
       this.poseModel(this.character, clock);
       this.placeCharacter();
@@ -441,11 +443,13 @@ export class GlueSceneView {
     // The rig is per-scene, but M2 materials are shared across instances, so it has to be pushed
     // for THIS draw -- `applyPerObjectLighting` sets `uniformsNeedUpdate` for exactly that reason.
     //
-    // Traverses the SCENE, not `this.model`: the character is a sibling group (`characterRoot`), and
-    // a model outside this walk keeps whatever another population last pushed into the shared
-    // material -- for a glue screen, which is reached before any world lighting has run, that is the
-    // uniform defaults, i.e. a black sun and a black probe. The character was correctly placed,
-    // posed and textured and drew as a silhouette.
+    // Traverses the SCENE, not `this.model`: the character is a sibling group (`characterRoot`), so a
+    // walk of the stage model alone would never reach it. M2 materials are shared, and a material
+    // nothing pushes a rig into keeps the uniform DEFAULTS declared in `material/index.ts` -- which
+    // for the probe and sun lanes are zero. Untested, because the character was never drawn without
+    // this line; the reason it is written this way is that no other population has run by the time a
+    // glue screen is up, so there is nothing else that could have left a usable rig in those
+    // uniforms.
     this.scene.traverse((node: any) => {
       const material = node.material;
       if (!material?.uniforms) {
