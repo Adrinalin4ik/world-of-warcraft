@@ -123,6 +123,8 @@ export function installCharactersApi(
   vm: LuaVM,
   session: ProtocolSession,
   onSetBackgroundModel?: (path: string) => void,
+  onSelectCharacter?: (character: CharacterRecord | null) => void,
+  onSetCharacterFacing?: (degrees: number) => void,
 ): () => void {
   /**
    * The 1-based index the client last asked for through `SelectCharacter`.
@@ -135,7 +137,19 @@ export function installCharactersApi(
    */
   let selectedIndex = 0;
 
-  /** `SetCharacterSelectFacing`, in radians. Real state: the client reads it straight back. */
+  /**
+   * `SetCharacterSelectFacing`, in DEGREES. Real state: the client reads it straight back.
+   *
+   * The unit was recorded here as radians and that was wrong. `CHARACTER_ROTATION_CONSTANT = 0.6`
+   * (characterselect.lua:4) turns a cursor PIXEL delta into this value and
+   * `CHARACTER_FACING_INCREMENT = 2` (charactercreate.lua:1) is one frame of a held rotate arrow --
+   * 0.6 per pixel is one turn across 600 authored pixels and 2 per frame is 120 per second, which are
+   * degrees. As radians the same drag would be 57 revolutions.
+   *
+   * THE SINGLE OWNER of the character's facing. The drag and the rotate arrows both go through
+   * `SetCharacterSelectFacing`, so there is one value and the host only mirrors it (see
+   * `onSetCharacterFacing`); nothing downstream keeps a second copy it could disagree with.
+   */
   let facing = 0;
 
   /** AreaTable id -> name, filled once the DBC lands. Empty until then; see the file comment. */
@@ -246,6 +260,13 @@ export function installCharactersApi(
   vm.registerFunction('SelectCharacter', (args) => {
     const index = Number(args[0] ?? 0);
     selectedIndex = index;
+    // The 3D stage's character. This is the client's own selection announcement, so the body that
+    // stands on the stage is the row the player picked rather than a guess from the roster -- and it
+    // is the same call `SetBackgroundModel` runs beside (characterselect.lua:430-433), so the stage
+    // and the body can never disagree about who is selected.
+    if (onSelectCharacter) {
+      onSelectCharacter(at(index));
+    }
     fireEvent(vm, 'UPDATE_SELECTED_CHARACTER', [index]);
     return [];
   });
@@ -302,6 +323,9 @@ export function installCharactersApi(
   vm.registerFunction('GetCharacterSelectFacing', () => [facing]);
   vm.registerFunction('SetCharacterSelectFacing', (args) => {
     facing = Number(args[0] ?? 0);
+    if (onSetCharacterFacing) {
+      onSetCharacterFacing(facing);
+    }
     return [];
   });
 

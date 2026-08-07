@@ -146,6 +146,17 @@ export class FrameXmlGlueScreen implements GlueScreen {
             }
             ctx.setScene(scene);
           },
+          // `SelectCharacter(id)` -> the body on the stage. See `GlueRuntimeOptions` for why this is a
+          // second hook and not a reading of the stage path, and `scene/character-look.ts` for what
+          // this milestone draws and what it knowingly leaves blank.
+          onSelectCharacter: (character) => {
+            ctx.setCharacter(character);
+          },
+          // `SetCharacterSelectFacing(degrees)` -- the drag-to-rotate and the rotate arrows both write
+          // it, so this is the one value the stage turns by. See `GlueRuntimeOptions` for the unit.
+          onSetCharacterFacing: (degrees) => {
+            ctx.setCharacterFacing(degrees);
+          },
         }),
       )
       .then((runtime) => {
