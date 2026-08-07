@@ -558,12 +558,17 @@ class BatchManager {
     } else {
       // Test for T2 explicitly rather than for "not T1". `def.textureMapping` is only assigned when
       // the batch's `textureMappingIndex` is >= 0; otherwise it keeps `stubDef`'s `null`, and
-      // `null !== 0` used to route every unmapped batch to `Diffuse_T2`. That is wrong twice over:
-      // there is no `Diffuse_T2` entry in `M2Material.VERTEX_SHADERS` at all, and these models carry
-      // no `uv2` attribute for it to read (vanilla M2 vertices have a single texcoord -- checked live
-      // on IRONFORGESTEAMTANK, 2SIDEDPICKAXE, HARPOON01, ORCSTAFF02, IRONFORGECRYSTALROOF,
-      // METALCUP03: `position, normal, color, uv, skinIndex, skinWeight` and nothing else).
-      // An absent mapping means "no explicit mapping", which is T1.
+      // `null !== 0` used to route every unmapped batch to `Diffuse_T2`. An absent mapping means "no
+      // explicit mapping", which is T1 -- this narrowing stays for that reason alone, not as a
+      // workaround for a missing shader.
+      //
+      // `Diffuse_T2` is a real entry in `M2Material.VERTEX_SHADERS` now
+      // (`material/vertex/diffuse-t2.glsl`), and `M2#createSubmeshGeometry` now uploads the second
+      // texcoord set as `uv2` for it to read. The claim this comment used to carry -- that M2
+      // vertices have a single texcoord -- was a misreading of the GEOMETRY we were building, not of
+      // the file: `wow-data-parser/m2/index.js`'s `Vertex` has always parsed
+      // `textureCoords: Array(float32array2, 2)`. What those dumps of IRONFORGESTEAMTANK et al. showed
+      // was the attribute list of a BufferGeometry we had only ever put one set into.
       if (textureMapping === 1) {
         vertexName = 'Diffuse_T2';
       } else {

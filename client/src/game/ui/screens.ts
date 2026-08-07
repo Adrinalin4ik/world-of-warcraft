@@ -266,12 +266,17 @@ export class GlueApp {
     //
     // The UI pass runs after the stage pass in the same callback, so an exception here used to abort
     // the rest of the tick -- and the whole 2D interface vanished while the partly-drawn stage stayed
-    // on screen, with nothing on it to say why. That is not hypothetical: `UI_Human`, the character
-    // screen's own stage, has a batch that resolves to the `Diffuse_T2` vertex shader, which has no
-    // entry in `M2Material.VERTEX_SHADERS` (the gap that file's own comment already names). Its
-    // material reaches three.js with `vertexShader === undefined` and `WebGLProgram` throws on every
+    // on screen, with nothing on it to say why. That was not hypothetical: `UI_Human`, the character
+    // screen's own stage, has two batches (the GROUNDSHADOW decals on submeshes 1 and 2) that resolve
+    // to the `Diffuse_T2` vertex shader, which had no entry in `M2Material.VERTEX_SHADERS`. Their
+    // material reached three.js with `vertexShader === undefined` and `WebGLProgram` threw on every
     // frame, so `/?ui=lua` reached character select with a correct 368-frame widget tree, correct
     // rects and not one pixel of UI drawn.
+    //
+    // That specific gap is closed (`m2/material/vertex/diffuse-t2.glsl`), and a measured sweep of all
+    // eleven `UI_*` glue stages says none of them names any other missing shader. This guard stays
+    // anyway: it is not about `Diffuse_T2`, it is about the stage pass and the UI pass sharing one
+    // callback, and the next stage the client asks for may not be one of those eleven.
     //
     // Warned ONCE by message, because a per-frame throw is a per-frame console line otherwise, and the
     // one line that matters is drowned by its own repetition. The underlying M2 gap is a

@@ -575,6 +575,14 @@ class M2 extends THREE.Group {
     }
 
     const uvs = [];
+    // The SECOND texcoord set. An M2 vertex carries two (`wow-data-parser/m2/index.js`'s `Vertex`:
+    // `textureCoords: Array(float32array2, 2)`), and only the first was ever pushed -- so the `uv2`
+    // attribute that `vertex/common-header.glsl` declares did not exist on any geometry, and GL fed
+    // the shader the default (0, 0) for it. Both variants that read `uv2` were therefore sampling one
+    // texel of their layer: `Diffuse_T1_T2` (real, non-zero second coords measured on
+    // `UI_MainMenu_Northrend` -- the LOGIN screen -- 2467 of 11728 vertices, and on `UI_DeathKnight`,
+    // 964 of 7232) and now `Diffuse_T2`.
+    const uvs2 = [];
 
     const { startTriangle: start, triangleCount: count } = submeshDef;
     for (let i = start, faceIndex = 0; i < start + count; i += 3, ++faceIndex) {
@@ -589,12 +597,14 @@ class M2 extends THREE.Group {
       geometry.faces.push(face);
 
       uvs[faceIndex] = [];
+      uvs2[faceIndex] = [];
       for (let vinIndex = 0, vinLen = vindices.length; vinIndex < vinLen; ++vinIndex) {
         const index = vindices[vinIndex];
 
         const { textureCoords, normal } = vertices[index];
 
         uvs[faceIndex].push(new THREE.Vector2(textureCoords[0][0], textureCoords[0][1]));
+        uvs2[faceIndex].push(new THREE.Vector2(textureCoords[1][0], textureCoords[1][1]));
 
         // Same (X, Z, -Y) swizzle the positions get above. Pushed raw, the normals stayed in the
         // model's own axes while the positions moved into engine axes, so lighting arrived from the
@@ -611,7 +621,13 @@ class M2 extends THREE.Group {
     geometry.applyMatrix4(matrix);
     geometry.rotateX(-Math.PI / 2);
 
-    geometry.faceVertexUvs = [uvs];
+    // Slot 1 goes through the same legacy-Geometry door slot 0 does: `DirectGeometry#fromGeometry`
+    // (`utils/geometry.ts:1829`) reads `faceVertexUvs[1]` into `uvs2`, and `toBufferGeometry` turns
+    // that into the `uv2` BufferAttribute. Deliberately NOT swizzled -- the `makeScale(-1, -1, 1)`
+    // mirror and the `rotateX` above are geometry-space operations and `applyMatrix4` never touches
+    // `faceVertexUvs`; see `anim/material-channels.ts:13-18` for why texture space must stay exactly
+    // as the file authored it.
+    geometry.faceVertexUvs = [uvs, uvs2];
 
 
     const bufferGeometry =  geometry.toBufferGeometry();

@@ -18,6 +18,7 @@ import vertexCommonHeader from './vertex/common-header.glsl';
 import vertexCommonMain from './vertex/common-main.glsl';
 
 import vertexDiffuseT1 from './vertex/diffuse-t1.glsl';
+import vertexDiffuseT2 from './vertex/diffuse-t2.glsl';
 import vertexDiffuseEnv from './vertex/diffuse-env.glsl';
 import vertexDiffuseT1T2 from './vertex/diffuse-t1-t2.glsl';
 import vertexDiffuseT1Env from './vertex/diffuse-t1-env.glsl';
@@ -163,6 +164,7 @@ class M2Material extends THREE.ShaderMaterial {
 
   static VERTEX_SHADERS = {
     'Diffuse_T1': assembleVertex(vertexDiffuseT1),
+    'Diffuse_T2': assembleVertex(vertexDiffuseT2),
     'Diffuse_Env': assembleVertex(vertexDiffuseEnv),
     'Diffuse_T1_T2': assembleVertex(vertexDiffuseT1T2),
     'Diffuse_T1_Env': assembleVertex(vertexDiffuseT1Env),
@@ -417,12 +419,22 @@ class M2Material extends THREE.ShaderMaterial {
       this.vertexShader = M2Material.VERTEX_SHADERS[shaderNames.vertex];
       this.fragmentShader = M2Material.FRAGMENT_SHADERS[shaderNames.fragment];
 
-      // Warn about a missing VERTEX shader too, not just a missing fragment one. An unresolved
-      // vertex shader leaves `this.vertexShader` undefined, three.js silently substitutes its own,
-      // and the model renders through a shader that knows nothing about M2 UV animation or lighting
-      // -- with no diagnostic at all. `Diffuse_T2` was in exactly that state (named by
-      // `shaderNamesFromSingleOpTable`, absent from `VERTEX_SHADERS`) and it took a GL driver error
-      // on an unrelated code path to find it.
+      // Warn about a missing VERTEX shader too, not just a missing fragment one, and note that the
+      // two misses are NOT equally survivable.
+      //
+      // A missing FRAGMENT shader leaves `this.fragmentShader` undefined and three.js substitutes its
+      // own, so the batch draws through a program that knows nothing about M2 combiners -- wrong, but
+      // it draws. A missing VERTEX shader leaves `this.vertexShader` undefined and `WebGLProgram`
+      // THROWS (`resolveIncludes` calls `.replace` on it), which aborts the whole
+      // `sceneView.render()` traversal, not just this batch. That is why `screens.ts` wraps the stage
+      // pass at all.
+      //
+      // `Diffuse_T2` was in exactly that state -- named by `shaderNamesFromSingleOpTable`, absent
+      // from `VERTEX_SHADERS` -- and it took a GL driver error on an unrelated code path to find it.
+      // It is present now (`vertex/diffuse-t2.glsl`), and a measured sweep of all eleven `UI_*` glue
+      // stages says nothing they load names any other absent vertex or fragment shader. The warns
+      // stay: character and item models will widen the sample of batch flags this pipeline has seen,
+      // and this pair of lines is the only thing that will say so.
       if (!M2Material.FRAGMENT_SHADERS[shaderNames.fragment]) {
         console.warn('MISSING FRAGMENT SHADER FOR M2: ', this.m2.name, this.shaderNames.fragment);
       }

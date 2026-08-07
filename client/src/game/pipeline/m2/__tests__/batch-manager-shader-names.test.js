@@ -47,8 +47,9 @@ describe('BatchManager#lookupShaderNames', () => {
   it('treats an ABSENT texture mapping as T1, not T2', () => {
     // `def.textureMapping` keeps `stubDef`'s `null` whenever the batch's `textureMappingIndex` is
     // negative, and the old `textureMapping === 0 ? T1 : T2` test sent every one of those to
-    // `Diffuse_T2` -- a name with no entry in `M2Material.VERTEX_SHADERS`, for geometry that carries
-    // no `uv2` attribute for it to read. three.js then silently substitutes its own vertex shader.
+    // `Diffuse_T2`, which would sample the wrong texcoord set. That `Diffuse_T2` now EXISTS
+    // (`material/vertex/diffuse-t2.glsl`, backed by `uv2` from `M2#createSubmeshGeometry`) makes this
+    // case less loud, not less wrong: an absent mapping means "no explicit mapping", which is T1.
     for (const absent of [null, undefined]) {
       expect(manager().lookupShaderNames(0x00, 1, absent)).toEqual({
         vertex: 'Diffuse_T1',
