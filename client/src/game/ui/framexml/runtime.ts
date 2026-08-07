@@ -277,7 +277,6 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
   await registerTreeArt(options.art, options.root);
 
   const editBoxes = collectEditBoxes(registry, options.root);
-  const buttons = collectButtons(registry, options.root);
   const glueParentId = registry.byName('GlueParent');
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
@@ -310,7 +309,7 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
         }
         placeCaret(box, caret, input, litCaret);
       }
-      for (const id of buttons) {
+      for (const id of collectButtons(registry, options.root)) {
         syncInteractiveArt(ctx, id);
       }
       // FOUR: `GlueParent`'s own `<OnUpdate>`, and ONLY that one frame's.
@@ -437,10 +436,14 @@ function placeCaret(box: Widget, caret: Widget | null, input: FocusSink | null, 
 /**
  * Every BUTTON/CHECKBUTTON frame id in the tree, for the per-frame art poll.
  *
- * Collected once, like the edit boxes, and the limit is the same and is not a live one: a frame created
- * from Lua after the load gets none of its template's regions (`object.ts`'s `CreateFrame` warning), so
- * it has no state textures to repaint in the first place. The day templates work from Lua, this becomes
- * a walk per tick or a registry hook.
+ * WALKED PER TICK, not collected once at boot -- and it used to be the latter, on the grounds that a
+ * frame created from Lua after the load got none of its template's regions and so had no state textures
+ * to repaint. `CreateFrame`'s template argument is real now (`loader.ts#applyTemplate`), so that ground
+ * is gone: `GlueDropDownMenu_AddButton` and `RealmList_UpdateTabs` build real templated BUTTONs with
+ * real `<NormalTexture>`/`<HighlightTexture>` regions, long after the load, and a boot-time snapshot
+ * would leave every one of them a painted picture that never lights or presses.
+ *
+ * The cost is one array walk of the widget tree per frame, beside the one `drawList` already does.
  */
 function collectButtons(registry: FrameRegistry, root: Widget): number[] {
   const ids: number[] = [];

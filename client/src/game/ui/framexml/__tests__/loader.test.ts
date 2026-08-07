@@ -143,6 +143,60 @@ describe('loadDocument', () => {
     vm.dispose();
   });
 
+  it("gives a frame created FROM LUA with a template the template's children", () => {
+    const { vm, registry, rt } = runtime();
+
+    // `GlueDropDownMenuButtonTemplate` cut to its shape (gluedropdownmenutemplates.xml:3): a `<Layers>`
+    // texture and a nested `<Frames>` button, both named with `$parent`. The client creates these
+    // buttons only from Lua -- `CreateFrame("BUTTON", listName.."Button"..i, list, template)`,
+    // GlueDropDownMenu.lua:159 -- and then reads the children back by GLOBAL on the very next lines.
+    // With the 4th argument dropped they did not exist, and `_G[...InvisibleButton]:Hide()` was two of
+    // the manifest's load errors.
+    const report = loadDocument(
+      rt,
+      parseXml(`
+        <Ui>
+          <Button name="MenuButtonTemplate" virtual="true">
+            <Size><AbsDimension x="128" y="16"/></Size>
+            <Layers>
+              <Layer level="ARTWORK">
+                <Texture name="$parentCheck" file="Interface\\Buttons\\UI-CheckBox-Check"/>
+              </Layer>
+            </Layers>
+            <Frames>
+              <Button name="$parentInvisibleButton" hidden="true"/>
+            </Frames>
+          </Button>
+          <Frame name="DropDownList1"><Anchors><Anchor point="TOPLEFT"/></Anchors></Frame>
+        </Ui>
+      `),
+      noFiles,
+      'GlueDropDownMenuTemplates.xml',
+    );
+    expect(report.errors).toEqual([]);
+
+    const error = vm.run(
+      'CreateFrame("BUTTON", "DropDownList1Button1", DropDownList1, "MenuButtonTemplate")\n' +
+        'checkName = DropDownList1Button1Check:GetName()\n' +
+        'invisibleShown = DropDownList1Button1InvisibleButton:IsShown()\n' +
+        'width = DropDownList1Button1:GetWidth()',
+      'gluedropdownmenu.lua',
+    );
+
+    expect(error).toBeNull();
+    // The two children, addressable by the `$parent`-resolved globals the client's own Lua reads.
+    expect(vm.getGlobal('checkName')).toBe('DropDownList1Button1Check');
+    expect(registry.byName('DropDownList1Button1InvisibleButton')).not.toBeNull();
+    // The child's own attributes came with it, not just its existence...
+    expect(vm.getGlobal('invisibleShown')).toBe(false);
+    // ...and so did the template's `<Size>`, through the same pass an XML instance uses.
+    expect(vm.getGlobal('width')).toBe(128);
+
+    // `reset()` before `dispose()`, as `GlueRuntime#dispose` does -- see the note on the first test.
+    registry.reset();
+    vm.dispose();
+  });
+
   it("gives a <ButtonText>'s declared name to the REGISTRY too, so SetPoint can anchor to it", () => {
     const { vm, root, registry, rt } = runtime();
 

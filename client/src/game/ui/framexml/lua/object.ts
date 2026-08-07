@@ -199,6 +199,20 @@ export interface MethodContext {
    * the four `Set*FontObject` methods report the gap rather than guessing at a font.
    */
   fontObject: FontObjectLookup | null;
+  /**
+   * `CreateFrame`'s 4th argument, made real: apply the named template's regions, children, scripts and
+   * `OnLoad` to a frame that has JUST been created.
+   *
+   * Installed by `FrameXmlRuntime` for the same reason `fontObject` is -- templates live in the loader's
+   * `TemplateRegistry`, and this module knows nothing about documents. Null when nothing installed one
+   * (a `MethodContext` built without a runtime, as the object-model tests do), and `CreateFrame` then
+   * reports the template it could not apply instead of silently building a bare frame.
+   *
+   * It never throws, and it reports its own failures (a name no template is registered under becomes a
+   * load-report error). `false` means "the frame came out bare"; `CreateFrame` returns the frame either
+   * way, because that is what the client does with a template it cannot find.
+   */
+  template: ((frameId: number, templateName: string) => boolean) | null;
   /** The frame's Lua table, created on first use and the same table forever after. */
   wrapper(id: number): LuaRef;
   /** The frame id behind a Lua value that is (or should be) a frame table; null if it is not one. */
@@ -688,8 +702,10 @@ export function installObjectModel(
     vm,
     registry,
     input,
-    // Filled in by `createFrameXmlRuntime`, which is the first thing that has a font registry to read.
+    // Both filled in by `createFrameXmlRuntime`, which is the first thing that has the registries --
+    // of font objects and of templates -- that these two read.
     fontObject: null,
+    template: null,
     wrapper,
     frameIdOf,
     retain: (ref) => vm.dup(ref),
@@ -808,29 +824,39 @@ export function installObjectModel(
         }
       }
 
-      // THE TEMPLATE ARGUMENT IS ACCEPTED AND IGNORED, and this warning is the one thing standing
-      // between that and a mystery.
+      const id = registry.create(kind, name, parent);
+      // The Lua table BEFORE the template is applied, because minting it is also what publishes
+      // `_G[name]` -- and a template's `<Scripts>`/`OnLoad` runs during the decoration below and may
+      // address this frame (or a `$parent` sibling of its children) by that global.
+      const table = wrapper(id);
+      // THE TEMPLATE ARGUMENT IS REAL, and `ctx.template` is what makes it so.
       //
-      // Templates live in the XML loader's `TemplateRegistry`, which is per-load and not reachable from
-      // here, and applying one means materializing an element's whole subtree -- `<Layers>`, nested
-      // `<Frames>`, `<Scripts>`, `$parent` name publication -- against an ALREADY-CREATED frame, which
-      // is a shape `loader.ts#materialize` does not have (it creates and applies in one pass). So a
-      // Lua-side `CreateFrame(kind, name, parent, template)` builds a BARE frame.
+      // It used to be accepted and dropped, on the grounds that applying a template means materializing
+      // an element's whole subtree against an ALREADY-CREATED frame and `loader.ts#materialize` had no
+      // such shape (it created and applied in one pass). It has one now -- `materialize` is `create` plus
+      // `decorate`, and `decorate` is exactly "apply this element to that frame" -- so the loader's own
+      // element pass is what runs here, rather than a second implementation of it that could drift.
       //
-      // What that costs, concretely, because it was diagnosed the hard way: `GlueDropDownMenu.lua:159`
-      // creates each menu button as `CreateFrame("BUTTON", listName.."Button"..i, list,
+      // What the drop cost, since it is the reason this exists: `GlueDropDownMenu.lua:159` creates each
+      // menu button as `CreateFrame("BUTTON", listName.."Button"..i, list,
       // "GlueDropDownMenuButtonTemplate")`, and that template (gluedropdownmenutemplates.xml:3) is where
-      // `$parentInvisibleButton` and `$parentCheck` are declared. With the template dropped, those
-      // children never exist, so `_G[button:GetName().."InvisibleButton"]` and
-      // `_G["DropDownList1Button1Check"]` are nil and the next line indexes nil -- two of the manifest's
-      // load errors. NOT a `$parent` or template-expansion defect: both are correct for XML-declared
-      // frames, and neither is involved in a frame created from Lua.
-      if (typeof args[3] === 'string' && args[3] !== '') {
-        warnOnce(
-          `CreateFrame: the template "${args[3]}" was ignored -- a frame created from Lua gets none of its template's regions, children or scripts (first: ${name ?? kind})`,
-        );
+      // `$parentInvisibleButton` and `$parentCheck` are declared -- so `_G[...InvisibleButton]` was nil
+      // and the next line indexed nil, which was two of the manifest's load errors.
+      //
+      // The frame is created FIRST and decorated after, in that order and not the other way round,
+      // because `$parent` substitution inside the template resolves against this frame's own name and
+      // its regions are created THROUGH it.
+      const templateName = typeof args[3] === 'string' ? args[3].trim() : '';
+      if (templateName !== '') {
+        if (ctx.template === null) {
+          warnOnce(
+            `CreateFrame: the template "${templateName}" was ignored -- this VM has no template registry installed (no FrameXmlRuntime), so the frame gets none of its regions, children or scripts (first: ${name ?? kind})`,
+          );
+        } else {
+          ctx.template(id, templateName);
+        }
       }
-      return [wrapper(registry.create(kind, name, parent))];
+      return [table];
     } finally {
       // The wrapper handed back is the frame's own permanent handle, never one of these.
       for (const ref of borrowed) {

@@ -109,7 +109,73 @@ export interface FrameXmlRuntime {
 export function createFrameXmlRuntime(vm: LuaVM, ctx: MethodContext): FrameXmlRuntime {
   const fonts = new TemplateRegistry();
   ctx.fontObject = (name) => readFontObject(fonts, name, warnOnce);
-  return { vm, ctx, templates: new TemplateRegistry(), fonts };
+  const runtime: FrameXmlRuntime = { vm, ctx, templates: new TemplateRegistry(), fonts };
+  // The other door installed here, and for the same reason: `CreateFrame`'s 4th argument needs the
+  // template registry that does not exist until this line. See `applyTemplateToFrame`.
+  ctx.template = (frameId, templateName) => applyTemplateToFrame(runtime, frameId, templateName);
+  return runtime;
+}
+
+/**
+ * The loader in progress, if any -- so a template applied from Lua reports into the report of the load
+ * that caused it.
+ *
+ * Almost every templated `CreateFrame` in the glue manifest happens DURING a load: it is an `OnLoad`
+ * body, run by `loadDocument` itself (`GlueDropDownMenu.lua:159`, reached from
+ * `AccountLoginDropDown`'s `OnLoad`). Those warnings and errors belong in that file's report lines,
+ * not on the console where the report cannot see them -- the report is how this runtime's gaps are
+ * counted at all. A call from OUTSIDE a load (a click, a timer) has no report to join, and
+ * `applyTemplateToFrame` sends those lines to the console instead.
+ *
+ * Module-level, like `scripts.ts`'s error queue and for the same reason: the Lua call comes up through
+ * `object.ts`, which knows nothing about documents, so there is no parameter to thread it through.
+ * Loads never nest at this level (an `<Include>` reuses the same `DocumentLoader`).
+ */
+let activeLoader: DocumentLoader | null = null;
+
+/**
+ * Apply a registered template to a just-created frame, through the LOADER's own element pass.
+ *
+ * Reuse, deliberately, down to the report lines: this borrows the in-progress `DocumentLoader` when
+ * there is one, so a `<Layers>` texture whose method this runtime lacks is warned about once for the
+ * whole load whether the frame came from XML or from Lua. Outside a load there is nothing to borrow, so
+ * a throwaway loader runs the same pass and its lines go to the console -- which is the only honest
+ * place for them; inventing a report for a click would be a report nobody reads.
+ *
+ * NOTHING HERE THROWS, which is the rule the whole loader keeps -- and it matters more here than
+ * anywhere, because this is called from inside `CreateFrame`. A raise would come out of the client's own
+ * `CreateFrame(...)` call as a Lua error and take the enclosing handler down with it, turning an
+ * incomplete template into a dead screen.
+ */
+function applyTemplateToFrame(
+  runtime: FrameXmlRuntime,
+  frameId: number,
+  templateName: string,
+): boolean {
+  const borrowed = activeLoader;
+  const loader = borrowed ?? new DocumentLoader(runtime, () => null);
+  try {
+    return loader.applyTemplate(frameId, templateName);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const line = `CreateFrame("${templateName}"): applying the template raised: ${message}`;
+    if (borrowed !== null) {
+      borrowed.report.errors.push(line);
+    } else {
+      warnOnce(line);
+    }
+    return false;
+  } finally {
+    if (borrowed === null) {
+      loader.finish();
+      for (const warning of loader.report.warnings) {
+        warnOnce(warning);
+      }
+      for (const error of loader.report.errors) {
+        warnOnce(error);
+      }
+    }
+  }
 }
 
 /** A file resolver. `null` means "not found", which is a warning and never fatal. */
@@ -128,9 +194,12 @@ export function loadDocument(
   sourceName = '<inline>',
 ): LoadReport {
   const loader = new DocumentLoader(runtime, files);
+  const outer = activeLoader;
+  activeLoader = loader;
   try {
     loader.loadDoc(doc, sourceName);
   } finally {
+    activeLoader = outer;
     // Nothing in here throws by design, but the `CreateFrame` handle is held for the whole load and a
     // handle stranded by a bug of ours is a registry slot pinned for the life of the VM.
     loader.finish();
@@ -422,27 +491,7 @@ class DocumentLoader {
     const selfName = resolvedName ?? parentName;
 
     try {
-      // 2 - the LoadXML attribute set.
-      this.applyAttrs(element, wrapper, dbg);
-      // 3 - <Size>: every one of them, in order, last winning.
-      this.applySize(element, wrapper, dbg);
-      // 4 - <Anchors>, against the PARENT's name.
-      this.applyAnchors(element, wrapper, parentName, dbg);
-      // 5 - the visual content, against THIS frame's name.
-      this.applyLayers(element, wrapper, selfName, dbg);
-      this.applySpecialFontStrings(element, wrapper, selfName, dbg);
-      this.applyBackdrop(element, wrapper, dbg);
-      this.applyPerKind(element, wrapper, selfName, dbg);
-      // 6 - <Scripts>. OnLoad is noted, not fired.
-      const hasOnLoad = this.applyScripts(element, wrapper, dbg);
-      // 7 - nested <Frames>, whose own OnLoads therefore run first, then <ScrollChild> (which is the
-      //     same thing wearing a different container, plus the one call that links it to the viewport).
-      this.applyChildFrames(element, wrapper, selfName, sourceName);
-      this.applyScrollChild(element, wrapper, selfName, sourceName, dbg);
-      // 8 - and only now this frame's OnLoad, with its subtree complete.
-      if (hasOnLoad) {
-        this.fireOnLoad(wrapper, dbg);
-      }
+      this.decorate(element, wrapper, parentName, selfName, sourceName, dbg);
     } finally {
       // The wrapper handle lives exactly as long as this frame's own subtree build. The frame itself
       // and its permanent Lua table are owned by `FrameRegistry`; this was a call-result handle.
@@ -451,6 +500,103 @@ class DocumentLoader {
     // The frame ID, not the handle: an id needs no ownership and outlives this call. `applyScrollChild`
     // is the caller that needs it, to hand the child back to its viewport through `SetScrollChild`.
     return frameId;
+  }
+
+  /**
+   * Steps 2 to 8: everything `materialize` does to a frame once it EXISTS.
+   *
+   * Split out from `materialize` for one caller and one reason: `CreateFrame(kind, name, parent,
+   * template)` from Lua creates the frame itself and then needs precisely this pass over the template's
+   * element. Every property still goes through the wrapper's own Lua method, so a Lua-created frame and
+   * an XML-declared one are decorated by the same code -- which is the point. A second materializer for
+   * the Lua path would be free to drift from this one, and the drift would be invisible until some
+   * screen built the same template both ways and got two different frames.
+   */
+  private decorate(
+    element: XmlElement,
+    wrapper: LuaRef,
+    parentName: string,
+    selfName: string,
+    sourceName: string,
+    dbg: string,
+  ): void {
+    // 2 - the LoadXML attribute set.
+    this.applyAttrs(element, wrapper, dbg);
+    // 3 - <Size>: every one of them, in order, last winning.
+    this.applySize(element, wrapper, dbg);
+    // 4 - <Anchors>, against the PARENT's name.
+    this.applyAnchors(element, wrapper, parentName, dbg);
+    // 5 - the visual content, against THIS frame's name.
+    this.applyLayers(element, wrapper, selfName, dbg);
+    this.applySpecialFontStrings(element, wrapper, selfName, dbg);
+    this.applyBackdrop(element, wrapper, dbg);
+    this.applyPerKind(element, wrapper, selfName, dbg);
+    // 6 - <Scripts>. OnLoad is noted, not fired.
+    const hasOnLoad = this.applyScripts(element, wrapper, dbg);
+    // 7 - nested <Frames>, whose own OnLoads therefore run first, then <ScrollChild> (which is the
+    //     same thing wearing a different container, plus the one call that links it to the viewport).
+    this.applyChildFrames(element, wrapper, selfName, sourceName);
+    this.applyScrollChild(element, wrapper, selfName, sourceName, dbg);
+    // 8 - and only now this frame's OnLoad, with its subtree complete.
+    if (hasOnLoad) {
+      this.fireOnLoad(wrapper, dbg);
+    }
+  }
+
+  /**
+   * `CreateFrame`'s template argument, materialized: apply a registered template to a frame Lua has
+   * just created.
+   *
+   * THE ELEMENT IS SYNTHESIZED AND THEN EXPANDED BY THE ORDINARY PATH -- `<Kind inherits="Template"/>`
+   * through `TemplateRegistry.expand` -- rather than the template being read out of the registry
+   * directly. That is what makes a Lua-created frame get *exactly* what an XML-declared
+   * `<Button inherits="RealmListTabButtonTemplate"/>` gets: the same multi-name `inherits="A, B"`
+   * left-to-right layering, the same chain resolution through a template that itself inherits, the same
+   * inherited-first/own-last child order.
+   *
+   * The synthesized element carries no `name`, and it does not need to: the frame already has its name
+   * from `CreateFrame`, and `selfName`/`parentName` below come from the REGISTRY, which is the only
+   * place that knows them. (`merge` will splice the template's own `name` and `virtual="true"` onto the
+   * expansion -- see `templates.ts` -- and nothing in `decorate` reads either, which is why that
+   * documented quirk is inert here.)
+   */
+  applyTemplate(frameId: number, templateName: string): boolean {
+    const cls = this.rt.ctx.registry.classOf(frameId);
+    if (cls === null) {
+      return false;
+    }
+    const selfName = this.rt.ctx.registry.nameOf(frameId);
+    const parentId = this.rt.ctx.registry.parentOf(frameId);
+    const parentName =
+      (parentId === null ? null : this.rt.ctx.registry.nameOf(parentId)) ?? DEFAULT_PARENT_NAME;
+    const dbg = `CreateFrame:${selfName ?? cls}("${templateName}")`;
+
+    if (!this.rt.templates.has(templateName)) {
+      // Not a template this runtime ever registered. An error rather than a warning: unlike a
+      // `<FontString inherits=>` (which may legitimately name a font object instead), the 4th argument
+      // of `CreateFrame` can only ever be a template, so this is a frame that came out incomplete.
+      this.report.errors.push(`${dbg}: no template of that name is registered; the frame is bare`);
+      return false;
+    }
+
+    const synthetic: XmlElement = {
+      tag: cls,
+      attrs: new Map([['inherits', templateName]]),
+      children: [],
+      body: '',
+    };
+    // The frame's PERMANENT handle (`ctx.wrapper`), which `FrameRegistry` owns -- so, unlike
+    // `materialize`'s call-result handle, it is deliberately not released here.
+    const wrapper = this.rt.ctx.wrapper(frameId);
+    this.decorate(
+      this.expand(synthetic),
+      wrapper,
+      parentName,
+      selfName ?? parentName,
+      'CreateFrame',
+      dbg,
+    );
+    return true;
   }
 
   /** Step 1: the `CreateFrame` global. An unknown frame type drops this element and its subtree. */
