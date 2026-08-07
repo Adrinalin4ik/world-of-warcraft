@@ -18,19 +18,6 @@ const _e1 = new THREE.Vector3();
 const _e2 = new THREE.Vector3();
 
 /**
- * Terrain collision candidates, straight off the MCVT heightmap.
- *
- * There is no acceleration structure here and there does not need to be one: MCVT is a regular
- * grid, so a query box maps arithmetically onto a range of cells. That is what makes swept-capsule
- * movement affordable without a physics engine -- the expensive part of collision, finding the
- * candidates, is O(1) for the surface the player stands on almost all the time.
- *
- * Chunk-LOCAL layout (see `pipeline/adt/chunk/index.ts`): `localX = -(row * cell)` and
- * `localY = -(col * cell)`, both MIRRORED -- hence the negations below, and hence the low local
- * bound mapping to the HIGH cell index. Each of the 8x8 cells is four triangles fanning from its
- * centre vertex at `9 + row * 17 + col`.
- */
-/**
  * Where a triangle's plane sits at a world XY, or `null` when the XY falls outside it.
  *
  * 2D barycentric containment, then the plane solved for Z. Terrain never overhangs, so a triangle
@@ -57,10 +44,23 @@ function planeHeightAt(tri: Triangle, x: number, y: number): number | null {
   return u * a.z + v * b.z + w * c.z;
 }
 
+/**
+ * Terrain collision candidates, straight off the MCVT heightmap.
+ *
+ * There is no acceleration structure here and there does not need to be one: MCVT is a regular
+ * grid, so a query box maps arithmetically onto a range of cells. That is what makes swept-capsule
+ * movement affordable without a physics engine -- the expensive part of collision, finding the
+ * candidates, is O(1) for the surface the player stands on almost all the time.
+ *
+ * Chunk-LOCAL layout (see `pipeline/adt/chunk/index.ts`): `localX = -(row * cell)` and
+ * `localY = -(col * cell)`, both MIRRORED -- hence the negations below, and hence the low local
+ * bound mapping to the HIGH cell index. Each of the 8x8 cells is four triangles fanning from its
+ * centre vertex at `9 + row * 17 + col`.
+ */
 export class TerrainProvider {
   private chunks = new Set<any>();
 
-  /** Scratch list for `heightAt`, kept off the `gather` scratch so a cast in flight is untouched. */
+  /** Scratch list for `heightAt`, so it never has to borrow the caller's candidate array. */
   private column: Triangle[] = [];
 
   /** Registered chunk count. Read by the collision debug overlay. */

@@ -37,12 +37,16 @@ describe('rescueFromVoid', () => {
     expect(state.fallFar).toBe(false);
   });
 
-  it('leaves an ordinary fall alone, however fast', () => {
-    // Well inside VOID_DEPTH of the surface: a real drop, on its way to a real landing.
-    const state = falling(83.24 - VOID_DEPTH * 0.5);
+  it('leaves an ordinary fall alone, however far it has already fallen', () => {
+    // Off a cliff and 400 yd down -- so far past the cheap pre-test that only the surface comparison
+    // can decline it. The ground BELOW us is the valley floor, a few yards under our feet, which is
+    // what makes this a fall in progress rather than a body under the world. Rescuing here would
+    // teleport a falling player up onto a clifftop.
+    const state = falling(83.24 - 400);
 
-    expect(rescueFromVoid(state, () => 83.24)).toBe(false);
+    expect(rescueFromVoid(state, () => 83.24 - 405)).toBe(false);
     expect(state.airborneSince).toBe(3);
+    expect(state.pos.z).toBeCloseTo(83.24 - 400, 5);
   });
 
   it('waits rather than teleporting when the terrain here has not streamed in', () => {

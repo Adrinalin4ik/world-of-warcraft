@@ -251,6 +251,11 @@ class Controls extends React.Component<IProp> {
       const resident = deps.cast(feetCentre, new THREE.Vector3(0, 0, -1), 200) !== null;
       const groundStreamed = collisionWorld.terrain
         .heightAt(player.move.pos.x, player.move.pos.y) !== null;
+      // How long we have been holding, reconstructed from the deadline. `PlayerMoveState` carries a
+      // deadline rather than a start, and every writer of it (`Unit#teleportTo`, and the rescue
+      // below) arms it at `now + SETTLE_TIMEOUT` -- so this subtraction is exact, and it is the ONE
+      // thing that couples the two timeouts. A writer using a different offset would have to say so
+      // here.
       const elapsed = now - (player.move.settleDeadline - SETTLE_TIMEOUT);
 
       if (resident

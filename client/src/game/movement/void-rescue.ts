@@ -47,6 +47,15 @@ export function rescueFromVoid(
     return false;
   }
 
+  // A CHEAP PRE-TEST, and it is here for the frame budget rather than for correctness. `heightAt`
+  // costs one matrix inverse per registered terrain chunk -- 441 of them on a loaded Elwynn -- and
+  // this function is called on every airborne frame, which includes every jump. No jump descends
+  // VOID_DEPTH below its own launch height, so this comparison keeps the heightmap untouched for the
+  // entire population the rescue is not for. `fallStartZ` is the arc's launch, snapshotted by `step`.
+  if (state.fallStartZ - state.pos.z < VOID_DEPTH) {
+    return false;
+  }
+
   const surface = heightAt(state.pos.x, state.pos.y);
   if (surface === null || state.pos.z > surface - VOID_DEPTH) {
     return false;
