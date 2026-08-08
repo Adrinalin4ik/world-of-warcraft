@@ -195,7 +195,12 @@ export class PlayerMovementHandler extends EventEmitter {
     if (!unit) {
       return;
     }
-    if (unit !== this.game.world.player) {
+    // The position is applied only to a unit that is NOT mid-spline. `applyRemoteState` clears the
+    // ride by design -- the two must never both own the body -- and a speed message is not a
+    // statement that the walk is over. `MSG_MOVE_SET_*_SPEED` is the player form (the creature form
+    // is `SMSG_SPLINE_SET_*_SPEED`), but five of them landed in the recorded entry burst and a
+    // mis-addressed one would have stopped a creature dead in the middle of its patrol.
+    if (unit !== this.game.world.player && !unit.splineRide) {
       unit.applyRemoteState({ x: info.x, y: info.y, z: info.z }, info.facing, info.flags);
     }
     if (key === 'run') {

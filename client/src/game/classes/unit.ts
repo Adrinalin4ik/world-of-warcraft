@@ -1,6 +1,5 @@
 // import * as THREE from "three";
 import * as THREE from 'three';
-import { Vector3 } from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import DBC from "../pipeline/dbc";
 import M2 from "../pipeline/m2";

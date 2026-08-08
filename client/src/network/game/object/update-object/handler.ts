@@ -1,5 +1,4 @@
 import EventEmitter from 'events';
-import * as THREE from 'three';
 import zlib from 'zlib-browserify';
 import Unit from '../../../../game/classes/unit';
 import Packet from '../../../net/packet';
