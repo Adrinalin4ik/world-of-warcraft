@@ -351,6 +351,18 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.perf.gpuEnd();
     this.perf.sections.end('render');
 
+    // The WORLD pass's counters, read here and not at the bottom of the frame.
+    //
+    // `renderer.info.render` is reset by every `render()` call, so once a UI pass exists the numbers
+    // read at the end of `animate` are the UI's, not the world's -- and the HUD's `calls`/`tris` rows
+    // have always meant the world's. Mounting the host silently changed what that row measured
+    // (920 -> 372), and the offscreen target changed it again (372 -> 2, the composite quad). This is
+    // the instrument being fixed, not the numbers.
+    const worldRender = {
+      calls: this.renderer.info.render.calls,
+      triangles: this.renderer.info.render.triangles,
+    };
+
     // THE UI PASS, over the world and into the same buffer. See `game/ui/world-ui.ts` for why it is
     // after the world render and not before: the world pass clears (it sets the clear colour from
     // the map's fog every frame above), so a UI pass in front of it would be erased.
@@ -386,8 +398,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       const info = this.renderer.info;
       const visibility = this.game.world.map?.visibilityManager;
       this.perf.endFrame({
-        calls: info.render.calls,
-        triangles: info.render.triangles,
+        calls: worldRender.calls,
+        triangles: worldRender.triangles,
         programs: info.programs?.length ?? 0,
         geometries: info.memory.geometries,
         textures: info.memory.textures,

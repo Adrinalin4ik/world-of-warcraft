@@ -40,8 +40,79 @@ import { screenScale } from './layout';
 import { GlueRenderer } from './renderer';
 import { resolveSprite } from './sprite';
 import { FontStringTextures, loadGlueFonts, measureText } from './text';
-import { WidgetRoot } from './widget';
+import { DrawItem, WidgetRoot } from './widget';
 import type { WorldRuntime } from './framexml/world-runtime';
+
+/** The offscreen target's clear colour. Fully transparent, so only what the UI draws is composited. */
+const TRANSPARENT = new THREE.Color(0, 0, 0);
+
+/**
+ * Redraw the target at least this often, whatever the signature says.
+ *
+ * A SAFETY VALVE, not an optimisation, and it is here because the signature cannot see everything.
+ * A texture that arrives after its widget was first drawn (`GlueArt` fetches asynchronously) changes
+ * no field the signature reads, and without this the widget would stay blank until something else
+ * moved. Twelve frames is a fifth of a second, and it costs one full pass in twelve -- about 0.7 ms
+ * per frame amortised at the ~8 ms a full pass measures.
+ */
+const FULL_DRAW_EVERY = 12;
+
+/**
+ * A cheap value fingerprint of the whole draw list.
+ *
+ * FNV-1a over the fields that decide what a frame LOOKS like: which widget, where, how big, how
+ * opaque, which sprite, which sub-rect, which colour, and what text. Numbers are mixed in through
+ * their bit patterns rather than stringified, so this allocates nothing -- it runs on every frame and
+ * a per-frame string builder for ~350 items would trade one cost for another.
+ *
+ * A collision means one stale frame until the next change, at roughly 2^-32 per frame. The
+ * `FULL_DRAW_EVERY` valve bounds even that to a fifth of a second.
+ */
+const FLOAT_BITS = new Float64Array(1);
+const FLOAT_WORDS = new Uint32Array(FLOAT_BITS.buffer);
+
+function drawListSignature(items: DrawItem[]): number {
+  let hash = 0x811c9dc5;
+  const mix = (value: number): void => {
+    hash ^= value;
+    hash = Math.imul(hash, 0x01000193);
+  };
+  const mixNumber = (value: number): void => {
+    FLOAT_BITS[0] = value;
+    mix(FLOAT_WORDS[0]);
+    mix(FLOAT_WORDS[1]);
+  };
+  const mixText = (text: string): void => {
+    for (let i = 0; i < text.length; i += 1) {
+      mix(text.charCodeAt(i));
+    }
+  };
+
+  mixNumber(items.length);
+  for (const item of items) {
+    mixText(item.widget.id);
+    mixNumber(item.rect.left);
+    mixNumber(item.rect.top);
+    mixNumber(item.rect.width);
+    mixNumber(item.rect.height);
+    mixNumber(item.alpha);
+    mixText(item.widget.vertexColor);
+    if (item.widget.sprite) {
+      mixText(item.widget.sprite);
+    }
+    if (item.widget.kind === 'fontstring') {
+      mixText(item.widget.displayText);
+    }
+    const tc = item.texCoords ?? item.widget.texCoords ?? null;
+    if (tc) {
+      mixNumber(tc.u0);
+      mixNumber(tc.v0);
+      mixNumber(tc.u1);
+      mixNumber(tc.v1);
+    }
+  }
+  return hash;
+}
 
 /** `?ui=lua` -- the same switch `pages/glue/index.tsx` reads, and for the same reason. */
 export function wantsLuaUi(search: string): boolean {
@@ -90,7 +161,9 @@ export class WorldUiHost {
     sections?: UiSections,
   ) {
     this.renderer = renderer;
-    this.ui = new GlueRenderer(renderer);
+    // PREMULTIPLIED, because this pass draws into a transparent offscreen target -- see
+    // `renderer.ts#GlueRenderer.premultiplied` and `composite` below.
+    this.ui = new GlueRenderer(renderer, true);
     this.input = new GlueInput(canvas);
     this.sections = sections ?? { begin: () => undefined, end: () => undefined };
   }
@@ -159,11 +232,143 @@ export class WorldUiHost {
     this.sections.end('ui.layout');
     this.input.setDrawList(items);
     const scale = screenScale(viewport.height);
+
     this.sections.begin('ui.draw');
-    this.ui.render(items, (item) =>
-      resolveSprite(item, scale, { art: this.art, fonts: this.fonts, solid: () => this.solid() }),
-    );
+    // Re-render the OFFSCREEN target only when the interface actually changed; composite it every
+    // frame with one quad. See `signature` and `target` for the measurement that forced this.
+    const signature = drawListSignature(items);
+    const target = this.target();
+    if (
+      target !== null &&
+      (signature !== this.lastSignature || this.framesSinceFullDraw >= FULL_DRAW_EVERY)
+    ) {
+      this.lastSignature = signature;
+      this.framesSinceFullDraw = 0;
+      const previousTarget = this.renderer.getRenderTarget();
+      this.renderer.setRenderTarget(target);
+      // The target starts EMPTY every time. `GlueRenderer` deliberately draws with `autoClear =
+      // false` (it is a layer over something else on the glue screens), so nothing else would.
+      this.renderer.setClearColor(TRANSPARENT, 0);
+      this.renderer.clear(true, false, false);
+      this.ui.render(items, (item) =>
+        resolveSprite(item, scale, { art: this.art, fonts: this.fonts, solid: () => this.solid() }),
+      );
+      this.renderer.setRenderTarget(previousTarget);
+      // The world pass sets its own clear colour from the map's fog at the top of every frame
+      // (`pages/game/index.tsx#animate`), so nothing has to be restored here -- but leaving a
+      // transparent clear colour behind would be a trap for anything that clears between the two.
+      this.renderer.setClearColor(this.savedClearColor, this.savedClearAlpha);
+    } else {
+      this.framesSinceFullDraw += 1;
+    }
+    this.composite();
     this.sections.end('ui.draw');
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // The offscreen target, and why the UI is not drawn straight into the canvas the way the glue
+  // screens draw theirs.
+  //
+  // MEASURED, on the owner's machine (RTX 4070 laptop, Chrome/ANGLE/D3D11) at 1382x911:
+  //
+  //   * `ui.draw` was 11.9 ms of a 12.2 ms UI pass, and `ui.tick` + `ui.layout` together were 1.1 ms.
+  //     The pass is its draw calls and nothing else.
+  //   * Hiding every UI mesh took the same scene from 18.3 ms to 0.1 ms, and hiding half took it to
+  //     8.9 ms -- exactly linear in the number of drawn quads (`W5.json`).
+  //   * Shrinking every quad to one pixel changed nothing (18.5 ms, `W6.json`), so it is not fill
+  //     rate. Sharing one material and one geometry across all of them changed nothing either
+  //     (15.7 ms, `W7.json`), so it is not material or program switching.
+  //
+  // That leaves the draw call itself, at roughly 35 us each, and the only thing that helps is
+  // issuing fewer of them. Order-preserving batching by texture was measured too and is NOT enough:
+  // 460 quads collapse into 219 consecutive same-texture runs (`W8.json`), a 2.1x ceiling.
+  //
+  // So the interface is rendered into a target and composited with ONE quad, and the target is only
+  // re-rendered when the draw list changes. The default world UI is static -- no `OnUpdate` is
+  // dispatched (see `world-runtime.ts`) and nothing moves between events -- so in the steady state
+  // this is one draw call instead of ~230.
+  //
+  // `scene/glue-scene.ts:14-17` explains why the GLUE path does the opposite ("a fullscreen
+  // render-to-texture would cost a target and a blit for nothing"). That reasoning is still right
+  // there: the glue draw list is ~100 items, so the blit would cost more than it saved. It is the
+  // item count that flips the answer, not a change of mind.
+  //
+  // ONE FIDELITY COST, stated rather than hidden: a widget authored `alphaMode="ADD"` is now
+  // additive against the rest of the INTERFACE inside the target, and the target as a whole is
+  // composited over the world with normal blending. Drawn straight into the canvas it would have
+  // been additive against the world too. Nothing in the default in-world UI has been shown to
+  // depend on that; `GameTooltip`'s and the action buttons' glows are additive over other UI art,
+  // which is preserved exactly.
+  // -----------------------------------------------------------------------------------------------
+
+  /** How often the target is re-rendered even when the signature says nothing changed. */
+  private framesSinceFullDraw = 0;
+  private lastSignature = -1;
+  private renderTarget: THREE.WebGLRenderTarget | null = null;
+  private compositeScene: THREE.Scene | null = null;
+  private compositeCamera = new THREE.OrthographicCamera(-0.5, 0.5, 0.5, -0.5, -1, 1);
+  private compositeMesh: THREE.Mesh | null = null;
+  private savedClearColor = new THREE.Color();
+  private savedClearAlpha = 1;
+
+  /** The target at the drawing buffer's current size, rebuilt when the window resizes. */
+  private target(): THREE.WebGLRenderTarget | null {
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    if (size.x < 1 || size.y < 1) {
+      return null;
+    }
+    if (this.renderTarget === null) {
+      this.renderTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        // Nothing in the UI pass depths-tests (`material.ts` turns it off), so neither buffer is
+        // needed and both would cost memory at full screen size.
+        depthBuffer: false,
+        stencilBuffer: false,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+      });
+      this.renderTarget.texture.generateMipmaps = false;
+    } else if (this.renderTarget.width !== size.x || this.renderTarget.height !== size.y) {
+      this.renderTarget.setSize(size.x, size.y);
+      // A resized target holds nothing; the next frame must redraw whatever the signature says.
+      this.lastSignature = -1;
+    }
+    this.renderer.getClearColor(this.savedClearColor);
+    this.savedClearAlpha = this.renderer.getClearAlpha();
+    return this.renderTarget;
+  }
+
+  /** One fullscreen quad of the target, over the world, premultiplied. */
+  private composite(): void {
+    if (this.renderTarget === null) {
+      return;
+    }
+    if (this.compositeScene === null) {
+      const material = new THREE.MeshBasicMaterial({
+        map: this.renderTarget.texture,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        // The target holds PREMULTIPLIED rgba (`GlueRenderer.premultiplied`), so the composite must
+        // blend `(ONE, ONE_MINUS_SRC_ALPHA)` -- which is what three selects for `NormalBlending`
+        // when the material declares this. Straight alpha here would darken every blended edge by a
+        // second multiply.
+        premultipliedAlpha: true,
+        // The same winding argument `material.ts` makes: this camera is not Y-flipped, but a render
+        // target's texture is bottom-up, so the quad is built to match and culling buys nothing.
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+      mesh.frustumCulled = false;
+      const scene = new THREE.Scene();
+      scene.name = 'WorldUiComposite';
+      scene.add(mesh);
+      this.compositeScene = scene;
+      this.compositeMesh = mesh;
+    }
+    const previousAutoClear = this.renderer.autoClear;
+    this.renderer.autoClear = false;
+    this.renderer.render(this.compositeScene, this.compositeCamera);
+    this.renderer.autoClear = previousAutoClear;
   }
 
   private solid(): THREE.DataTexture {
@@ -186,6 +391,14 @@ export class WorldUiHost {
     this.runtime?.dispose();
     this.runtime = null;
     this.ui.dispose();
+    this.renderTarget?.dispose();
+    this.renderTarget = null;
+    if (this.compositeMesh) {
+      this.compositeMesh.geometry.dispose();
+      (this.compositeMesh.material as THREE.Material).dispose();
+    }
+    this.compositeScene = null;
+    this.compositeMesh = null;
     this.fonts.dispose();
     this.art.dispose();
     this.solidTexture?.dispose();

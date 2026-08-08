@@ -220,8 +220,25 @@ export class GlueRenderer {
   /** Backdrop widgets pool separately: one entry holds up to nine meshes rather than one. */
   private readonly backdropPool = new Map<string, PooledBackdrop>();
 
-  constructor(renderer: THREE.WebGLRenderer) {
+  /**
+   * Whether this pass's quads output PREMULTIPLIED alpha.
+   *
+   * False for the glue screens, which draw straight into the canvas over an opaque 3D stage: there,
+   * `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` over straight-alpha art is exactly right and the framebuffer's
+   * own alpha channel means nothing.
+   *
+   * True for a pass that renders into a TRANSPARENT offscreen target and is composited afterwards
+   * (`world-ui.ts`). There the destination's alpha does mean something, and straight alpha gets it
+   * wrong: `dstA = srcA*srcA + dstA*(1-srcA)` rather than `srcA + dstA*(1-srcA)`, so every overlap
+   * ends up more transparent than it should be. Premultiplied output with `(ONE,
+   * ONE_MINUS_SRC_ALPHA)` -- which is what three's `setBlending` selects for `NormalBlending` when
+   * the material declares `premultipliedAlpha` -- gives the identical COLOUR and the correct alpha.
+   */
+  private readonly premultiplied: boolean;
+
+  constructor(renderer: THREE.WebGLRenderer, premultipliedAlpha = false) {
     this.renderer = renderer;
+    this.premultiplied = premultipliedAlpha;
     this.scene.name = 'GlueUI';
   }
 
@@ -264,7 +281,7 @@ export class GlueRenderer {
         // Its OWN geometry, not the shared `QUAD`: the sub-rect is written into this mesh's `uv`
         // attribute (`writeQuadUVs`), which is per-widget by definition.
         const geometry = QUAD.clone();
-        const material = createQuadMaterial(item.widget.blend);
+        const material = createQuadMaterial(item.widget.blend, this.premultiplied);
         const mesh = new THREE.Mesh(geometry, material);
         mesh.frustumCulled = false;
         this.scene.add(mesh);
@@ -400,7 +417,7 @@ export class GlueRenderer {
       let pooled = entry!.pieces[ordinal];
       if (!pooled) {
         const geometry = QUAD.clone();
-        const material = createQuadMaterial(item.widget.blend);
+        const material = createQuadMaterial(item.widget.blend, this.premultiplied);
         const mesh = new THREE.Mesh(geometry, material);
         mesh.frustumCulled = false;
         this.scene.add(mesh);

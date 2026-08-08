@@ -9,14 +9,23 @@ import * as THREE from 'three';
 
 import { Blend, TexCoords } from './widget';
 
-export function createQuadMaterial(blend: Blend): THREE.MeshBasicMaterial {
+export function createQuadMaterial(
+  blend: Blend,
+  premultipliedAlpha = false,
+): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({
     transparent: true,
     depthTest: false,
     depthWrite: false,
     blending: blend === 'ADD' ? THREE.AdditiveBlending : THREE.NormalBlending,
-    // Premultiplied would double-darken the client's straight-alpha art.
-    premultipliedAlpha: false,
+    // Straight alpha by DEFAULT, which is what drawing over an opaque 3D stage wants: the note this
+    // replaces said "premultiplied would double-darken the client's straight-alpha art", and that is
+    // only half true -- three's `premultipliedAlpha` makes the SHADER multiply rgb by a and then
+    // blends with `(ONE, ONE_MINUS_SRC_ALPHA)`, which is arithmetically the same colour, not a
+    // double-darkening. What it also does is accumulate the DESTINATION ALPHA correctly, which only
+    // matters when the destination is a transparent offscreen target that will be composited later.
+    // `renderer.ts#GlueRenderer.premultiplied` is where that choice is argued and who asks for it.
+    premultipliedAlpha,
     // DOUBLE-SIDED, and not by laziness. The UI's orthographic camera is Y-DOWN (`top = 0`,
     // `bottom = height`), which makes the projection's Y scale negative — a mirror. A mirror
     // reverses triangle winding, and three.js only compensates for winding flips coming from an
