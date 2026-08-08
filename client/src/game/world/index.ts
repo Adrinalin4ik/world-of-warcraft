@@ -19,6 +19,7 @@ import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
 import { fogDebug } from "./fog-debug";
 import { lightDebug } from "./light-debug";
+import { reactionFor } from "./faction";
 import { readMark } from "./saved-mark";
 import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
@@ -323,7 +324,53 @@ export default class World extends EventEmitter {
     doomed.forEach((entity) => this.remove(entity));
   }
 
+  /**
+   * OUR CURRENT TARGET, or null.
+   *
+   * The client-side half of the selection. The wire half is `CombatHandler#select`, which is the
+   * only thing allowed to send `CMSG_SET_SELECTION`; `setTarget` below is the only thing that calls
+   * it, so what this holds and what the server believes cannot drift apart.
+   */
+  public target: Unit | null = null;
+
+  /**
+   * Pick a unit (or null to clear), tell the server, and announce it.
+   *
+   * FIRES `target:change` AFTER the state is written and after the query is asked for, which is
+   * benilla's order too (`crates/benilla/src/ui_unit.rs:672-676` sets the unit and only then fires
+   * `PLAYER_TARGET_CHANGED`), so a handler that reads the new target during the event sees it.
+   *
+   * The CREATURE QUERY is fired here because this is the first moment a name is needed: there is no
+   * `UNIT_FIELD_NAME`, and a wolf's name and its elite/rare classification both arrive only in
+   * `SMSG_CREATURE_QUERY_RESPONSE`. Querying every creature that streams into view instead would be
+   * ~40 round trips per grid for names nothing displays.
+   */
+  /**
+   * How `unit` feels about us, on the client's 1..8 scale, or null while `FactionTemplate.dbc` has
+   * not landed. Memoised on the unit; see `world/faction.ts#reactionFor`.
+   */
+  reactionFor(unit: Unit): number | null {
+    return reactionFor(unit, this.player);
+  }
+
+  setTarget(unit: Unit | null) {
+    if (this.target === unit) {
+      return;
+    }
+    this.target = unit;
+    this.game.objectHandler.combatHandler.select(unit ? unit.guid : null);
+    if (unit && unit.fields.entry) {
+      this.game.objectHandler.combatHandler.queryCreature(unit.fields.entry, unit.guid);
+    }
+    this.emit('target:change', unit);
+  }
+
   remove(entity: Unit) {
+    // A target that streams out or dies-and-decays stops being a target. Without this the UI would
+    // keep painting a unit that is no longer in the scene, and `TargetFrame` would never hide.
+    if (this.target === entity) {
+      this.setTarget(null);
+    }
     this.entities.delete(entity.guid);
     if (entity.view) {
       this.scene.remove(entity.view);

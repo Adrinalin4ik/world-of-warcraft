@@ -15,6 +15,8 @@ import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
 import { animCounters } from '../../game/pipeline/m2/anim/counters';
 import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-warm';
 import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
+import { pickUnit } from '../../game/world/pick';
+import { REACTION_NEUTRAL, primeFactionTemplates, reactionFor } from '../../game/world/faction';
 import './index.scss';
 
 interface IGameProps {
@@ -213,6 +215,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         renderer,
         this.canvas.current as HTMLCanvasElement,
         this.perf.sections,
+        this.game.world,
       );
       void this.ui.start().catch((error) => {
         // A boot that fails outright is the one thing `bootWorldRuntime` does not turn into a report
@@ -221,6 +224,11 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       });
     }
 
+    // The reaction table, primed as soon as we are in the world: every unit that streams in wants a
+    // reaction, and resolving one needs `FactionTemplate.dbc`. Fire-and-forget -- a unit whose
+    // reaction is not resolvable yet answers null, and the bridge re-resolves on the next update.
+    void primeFactionTemplates();
+
     // Offline debug entry: nothing will ever send us a login-verify, so place the character now.
     if (this.props.session.offline) {
       const spot = offlineSpot();
@@ -228,6 +236,56 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       this.setState({ currentLocation: spot.id });
     }
   }
+
+  /**
+   * A clean left click on the world: pick a unit and make it the target, or clear the target.
+   *
+   * DEFERS TO THE UI. `pointerWidget` is the Lua router's own current hit, so a click that landed on
+   * an action button or a unit frame does not also reach through it into the world -- and the answer
+   * comes from the router that handled the click rather than from a second hit test that could
+   * disagree. Plain `/game` has no host at all, so `this.ui` null means the world owns every click.
+   *
+   * A click on nothing CLEARS the target, which is the reference's behaviour
+   * (`benilla/src/target/click.rs`: "clicked nothing targetable -> deselect").
+   */
+  private onWorldClick = (ndc: { x: number; y: number }) => {
+    if (this.ui?.pointerWidget) {
+      return;
+    }
+    const world = this.game.world;
+    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player);
+    world.setTarget(hit);
+  };
+
+  /**
+   * A clean right click on the world: the context action. Attack, when the unit under the cursor is
+   * one we can attack.
+   *
+   * SELECTS FIRST. The reference's own law is stop -> select -> re-swing (`target/scan.rs#commit`,
+   * "the one SetSelection law"), and the server refuses `CMSG_ATTACKSWING` on a unit that is not our
+   * selection on some cores -- so the two must go out in that order.
+   *
+   * The reaction gate is `UnitCanAttack`'s and it INCLUDES NEUTRAL -- `benilla/src/target/click.rs:98`
+   * gives the Attack cursor as "alive + reaction <= neutral". A critter or an unaggressive beast is
+   * attackable and simply does not fight back; only a FRIENDLY unit is not. A friendly NPC's right
+   * click is an INTERACT in the real client (gossip, vendor, flight master), which this client has no
+   * wire path for at all -- so it does nothing here rather than swinging at a guard.
+   */
+  private onWorldRightClick = (ndc: { x: number; y: number }) => {
+    if (this.ui?.pointerWidget) {
+      return;
+    }
+    const world = this.game.world;
+    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player);
+    if (!hit) {
+      return;
+    }
+    world.setTarget(hit);
+    const reaction = reactionFor(hit, world.player);
+    if (reaction !== null && reaction <= REACTION_NEUTRAL && !hit.dead) {
+      this.game.objectHandler.combatHandler.startAttack(hit.guid);
+    }
+  };
 
   /**
    * Everything this component put somewhere that outlives it.
@@ -439,7 +497,13 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
                   className="canvas main_canvas" 
                   style={{position: this.debug ? "relative" : "absolute"}}></canvas>
           {debugCanvas}
-          <Controls ref={this.controls} player={this.game.world.player} camera={this.camera} />
+          <Controls
+            ref={this.controls}
+            player={this.game.world.player}
+            camera={this.camera}
+            onWorldClick={this.onWorldClick}
+            onWorldRightClick={this.onWorldRightClick}
+          />
           { !this.isMobile && <DebugPanel ref={this.debugPanel} renderer={renderer} game={this.game}></DebugPanel>}
           <select className="location_select" onChange={(e) => this.setLocation(e.target.value)}>
             {

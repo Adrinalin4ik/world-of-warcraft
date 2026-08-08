@@ -48,6 +48,23 @@ export class GlueInput {
     return this.focus;
   }
 
+  /**
+   * The widget the pointer is currently over, or null when it is over the world.
+   *
+   * THE WORLD CLICK PATH'S GATE. `pages/game/controls` raycasts units on a left-click, and a click
+   * that landed on an action button must not also select whatever unit happens to be behind it. This
+   * router already knows -- it recomputes the hit on every `pointermove` for hover art -- so asking
+   * it is both free and guaranteed to agree with what the UI itself thought it was doing. A second,
+   * independent hit test in the world path would be a second answer that could differ.
+   *
+   * It is the LAST MOVE's hit, not this instant's: a pointer that has not moved since the UI changed
+   * under it reports the stale widget. That is the same staleness the hover ART has, which is what a
+   * player sees, so the two cannot visibly disagree.
+   */
+  get pointerWidget(): Widget | null {
+    return this.hovered;
+  }
+
   setFocus(widget: Widget | null): void {
     if (this.focus === widget) {
       return;

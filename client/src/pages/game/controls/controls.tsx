@@ -22,6 +22,22 @@ import Player from '../../../game/classes/player';
 interface IProp {
   camera: THREE.PerspectiveCamera;
   player: Player;
+  /**
+   * A clean left click on the world -- a press and release that never dragged past the orbit
+   * threshold. The argument is normalised device coordinates (x, y in [-1, 1], y UP).
+   *
+   * `runLookSession` has produced `leftClick` since the camera rig was written and NOTHING HAS EVER
+   * READ IT: its own doc says "a left click selects a target instead", and this is that caller. The
+   * classification is left where it was rather than reimplemented here, so the click-versus-drag rule
+   * and the both-buttons cancellation stay in one place.
+   */
+  onWorldClick?: (ndc: { x: number; y: number }) => void;
+  /**
+   * A clean right click on the world -- the CONTEXT ACTION, which for a hostile unit is "attack"
+   * (`benilla/src/target/click.rs`: "a clean right-click dispatches the context action (attack, NPC
+   * interact, ...)"). Same NDC convention as `onWorldClick`.
+   */
+  onWorldRightClick?: (ndc: { x: number; y: number }) => void;
 }
 
 /** Shortest signed angle, so a chase never takes the long way round. */
@@ -56,6 +72,9 @@ class Controls extends React.Component<IProp> {
   private prevButtons = { left: false, right: false };
 
   private motion = { dx: 0, dy: 0 };
+
+  /** The last un-locked cursor position, in client pixels. See `onMouseMove` for why it is tracked. */
+  private pointer = { x: 0, y: 0 };
 
   private scrollNotches = 0;
 
@@ -107,6 +126,8 @@ class Controls extends React.Component<IProp> {
   }
 
   private onMouseDown(event: MouseEvent) {
+    this.pointer.x = event.clientX;
+    this.pointer.y = event.clientY;
     if (event.button === 0) this.buttons.left = true;
     if (event.button === 2) this.buttons.right = true;
   }
@@ -120,6 +141,18 @@ class Controls extends React.Component<IProp> {
   }
 
   private onMouseMove(event: MouseEvent) {
+    // BEFORE the early return. The pick needs where the cursor IS, and a click is by definition a
+    // press that did not drag -- so the last position with no button held is the position that
+    // matters. Reading it only while dragging would leave the pick using wherever the cursor was
+    // when the last drag ended, which is a different unit.
+    //
+    // Not updated while pointer-locked: `clientX/Y` freeze during a lock and `movementX/Y` are the
+    // only real deltas (see below), so the frozen value is the last true screen position and is what
+    // the release should pick against.
+    if (!document.pointerLockElement) {
+      this.pointer.x = event.clientX;
+      this.pointer.y = event.clientY;
+    }
     if (!this.buttons.left && !this.buttons.right) {
       return;
     }
@@ -185,6 +218,25 @@ class Controls extends React.Component<IProp> {
 
     if (look.turnsCharacter) {
       player.move.faceYaw += look.yawDelta;
+    }
+
+    // THE TARGET SELECT. `leftClick` is a press and release that never dragged, which is exactly the
+    // gesture the reference routes to selection (`benilla/src/target/click.rs#select_on_click`, "a
+    // clean left-click selects the hovered unit ... never a drag").
+    //
+    // NDC from the CLIENT RECT of the look element, not from `window.innerWidth`: the two agree
+    // today because the canvas is fullscreen, and silently would not if it ever were not. y is
+    // flipped -- `clientY` grows downward and NDC y grows up.
+    if ((look.leftClick || look.rightClick) && (this.props.onWorldClick || this.props.onWorldRightClick)) {
+      const bounds = this.element.getBoundingClientRect();
+      if (bounds.width > 0 && bounds.height > 0) {
+        const ndc = {
+          x: ((this.pointer.x - bounds.left) / bounds.width) * 2 - 1,
+          y: -(((this.pointer.y - bounds.top) / bounds.height) * 2 - 1),
+        };
+        if (look.leftClick) this.props.onWorldClick?.(ndc);
+        if (look.rightClick) this.props.onWorldRightClick?.(ndc);
+      }
     }
 
     // While swimming, mouselook is a DIRECT set of the swim pitch from the camera aim -- no
