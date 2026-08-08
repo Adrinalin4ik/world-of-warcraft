@@ -42,6 +42,13 @@ export default class World extends EventEmitter {
    * per zone would hand a live unit's slot out twice.
    */
   private nextUnitPoseSlot = 0;
+  /**
+   * ONE function object for every unit's `model:change` subscription, so `remove` can actually
+   * unsubscribe. `changeModel` takes the unit as its first argument and holds no per-unit state, so
+   * a single shared listener is not merely adequate here -- it is what the signature was built for.
+   */
+  private readonly modelChangeHandler = (unit: Unit, oldModel: any, newModel: any) =>
+    this.changeModel(unit, oldModel, newModel);
   // private skybox: THREE.Mesh;
   constructor(game: GameHandler) {
     super();
@@ -278,7 +285,7 @@ export default class World extends EventEmitter {
       // this.scene.add(entity.collider); // if you want to see the player collider
       // this.scene.add(entity.arrow);
 
-      entity.on("model:change", this.changeModel.bind(this));
+      entity.on('model:change', this.modelChangeHandler);
     }
   }
 
@@ -309,8 +316,18 @@ export default class World extends EventEmitter {
     if (entity.view) {
       this.scene.remove(entity.view);
       this.scene.remove(entity.arrow);
-      entity.removeListener("model:change", this.changeModel.bind(this));
+      // `this.modelChangeHandler`, NOT `this.changeModel.bind(this)`. `bind` returns a NEW function
+      // object every call, so the old line removed nothing -- it could not, because the listener
+      // `add` registered was a different (also freshly bound) function. Every removed unit kept a
+      // live `model:change` subscription calling back into this world for ever. Harmless while
+      // nothing was ever removed; a per-stream-out leak now that units come and go.
+      entity.removeListener('model:change', this.modelChangeHandler);
     }
+    // Hand the outgoing model's materials back out of the map's light/fog registry, the same way
+    // `changeModel` does for a model being replaced -- otherwise the registry accumulates materials
+    // for units that are gone and re-uniforms them every frame.
+    this.changeModel(entity, entity.model, null);
+    entity.release();
   }
 
   /**

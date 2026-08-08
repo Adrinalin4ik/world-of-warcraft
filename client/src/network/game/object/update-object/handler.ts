@@ -7,6 +7,8 @@ import { GameHandler } from '../../handler';
 import GamePacket from '../../packet';
 import { getUpdateFieldName, ObjectType, UpdateFlags, UpdateType } from '../enums';
 import { readMovementInfo } from '../../movement-info';
+import { GUID_BYTES, guidHex } from '../../../guid-hex';
+import { objectTrace } from './trace';
 
 export class UpdateObjectHandler extends EventEmitter {
   private game: GameHandler;
@@ -20,6 +22,41 @@ export class UpdateObjectHandler extends EventEmitter {
     // Listen for character list
     this.game.on('packet:receive:SMSG_COMPRESSED_UPDATE_OBJECT', this.handleCompressedUpdateObjectPacket.bind(this));
     this.game.on('packet:receive:SMSG_UPDATE_OBJECT', this.handleUpdateObjectPacket.bind(this));
+    // `SMSG_DESTROY_OBJECT` (0x0AA) has been in the opcode table (`game/opcode.js:172`) with NO
+    // subscriber anywhere in the client -- the packet was framed, named, emitted and dropped in
+    // silence. It is the other half of the lifecycle from the out-of-range block: out-of-range says
+    // "you left its range", destroy says "it ceased to exist" (a despawn, a corpse decaying before
+    // its respawn). Without it, every mob this client ever saw die stayed standing for ever.
+    this.game.on('packet:receive:SMSG_DESTROY_OBJECT', this.handleDestroyObjectPacket.bind(this));
+  }
+
+  /**
+   * SMSG_DESTROY_OBJECT: `uint64 guid`, then a `uint8` "on death" flag this client has no use for.
+   *
+   * A PLAIN u64, NOT a packed guid -- `readPackedGUID` here would both build the wrong key and read
+   * the wrong number of bytes. (`samples/benilla/crates/benilla-protocol/src/messages/parse.rs:181`
+   * and its `update_object.rs`; `objects.rs#object_destroyed` is the reference behaviour, an instant
+   * removal with no fade.) The eight bytes go straight through `guidHex`, which is the single
+   * formatter every other guid in this client is normalised by (`network/guid-hex.ts`), so this key
+   * and the create path's key are the same string.
+   *
+   * Byte at a time, deliberately. `Packet#read(n)` returns a NEW ByteBuffer WRAPPING the slice, not
+   * the bytes -- a ByteBuffer is not array-like, so `guidHex(gp.read(8))` would read `undefined` at
+   * every index, zero-extend all eight, and answer `0x0` for every object in the game. That trap has
+   * already cost this project twice (`protocol/wotlk/world.ts:296` and `logon.ts:264` both carry the
+   * same warning), and `readPackedGUID` reads its bytes the same way for the same reason.
+   */
+  handleDestroyObjectPacket(gp: GamePacket) {
+    const bytes = new Uint8Array(GUID_BYTES);
+    for (let i = 0; i < GUID_BYTES; ++i) {
+      bytes[i] = gp.readUnsignedByte();
+    }
+    const guid = guidHex(bytes);
+    const unit = this.game.world.entities.get(guid);
+    objectTrace.record({ t: performance.now(), kind: 'destroy', guid, existing: !!unit });
+    if (unit && unit !== this.game.world.player) {
+      this.game.world.remove(unit);
+    }
   }
 
   
@@ -84,21 +121,48 @@ export class UpdateObjectHandler extends EventEmitter {
             this.applyUpdates(pack);
             break;
           case UpdateType.FarObjects:
+            // STREAM-OUT. A REMOVAL, not a hide, and that is the whole of "NPCs vanish and never
+            // come back".
+            //
+            // This used to set `unit.view.visible = false` and leave the unit in `World#entities`.
+            // Nothing ever set it back. The only code that raised the flag again was
+            // `UpdateType.NearObjects` below, and a 3.3.5a server does not send those -- the way an
+            // object comes BACK into range is a fresh `CreateObject2` block, and `applyUpdates`
+            // finds the guid already in the registry, takes its "already have it" branch and never
+            // touches visibility. So the first stream-out was permanent: the unit stayed in the
+            // scene, kept being posed every frame, kept applying the server's movement, and was
+            // invisible for the rest of the session.
+            //
+            // The reference removes it (`samples/benilla/crates/benilla/src/net/apply/objects.rs`,
+            // `objects_removed`: "the unit still exists, we just left its range" -- it drops the
+            // entity from the guid index and despawns it, and a later create streams it back in as
+            // a fresh entity). This does the same, which also means re-entry runs the exact path
+            // that first sight already runs and is known to work.
             pack.farObjects = this.parseAroundObjects(packet);
             for (const guid of pack.farObjects) {
               const unit = this.game.world.entities.get(guid);
-              if (unit) {
-                unit.view.visible = false;
+              objectTrace.record({ t: performance.now(), kind: 'far', guid, existing: !!unit });
+              // Never ourselves. The server has no reason to put our own guid in an out-of-range
+              // list, and removing the local player would take the camera's subject out of the
+              // scene -- a guard, not an observed case.
+              if (unit && unit !== this.game.world.player) {
+                this.game.world.remove(unit);
               }
             }
             break;
           case UpdateType.NearObjects:
+            // Kept, and expected never to fire: no 3.3.5a core is observed to emit this block, and
+            // the trace records it precisely so that "it never arrives" stays a MEASUREMENT rather
+            // than an assumption -- the previous code leaned on it as the way a unit came back, and
+            // that is what made the stream-out permanent. Raising the flag is still right if one
+            // ever does arrive; it is no longer the only thing that could.
             pack.nearObjects = this.parseAroundObjects(packet);
             for (const guid of pack.nearObjects) {
               const unit = this.game.world.entities.get(guid);
               if (unit) {
                 unit.view.visible = true;
               }
+              objectTrace.record({ t: performance.now(), kind: 'near', guid, existing: !!unit });
             }
             break;
           default: 
@@ -155,10 +219,18 @@ export class UpdateObjectHandler extends EventEmitter {
     let unit = this.game.world.entities.get(pack.guid);
     // if (this.game.world.entities.size > 10) return;
     //if (pack.obj_type !== ObjectType.Player) return
+    const existing = !!unit;
     if (!unit) {
       unit = new Unit(pack.guid);
       this.game.world.add(unit);
     }
+    objectTrace.record({
+      t: performance.now(),
+      kind: 'create',
+      guid: pack.guid,
+      existing,
+      visible: unit.view.visible,
+    });
 
     // OUR OWN CHARACTER, and this branch is the second half of killing the duplicate.
     //

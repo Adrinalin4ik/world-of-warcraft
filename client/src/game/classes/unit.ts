@@ -687,6 +687,27 @@ class Unit extends Entity {
     return true;
   }
 
+  /**
+   * Give up everything this unit loaded. Called by `World#remove` as the unit leaves the world.
+   *
+   * Removal used to free nothing at all, which cost nothing while nothing was ever removed. Units
+   * now stream out and back in as the player walks (`update-object/handler.ts`, the `FarObjects`
+   * block), so a release that only unparented the model would leak one `M2Blueprint` reference per
+   * unit per stream-out -- and a blueprint holds the geometry, the skeleton and every texture.
+   *
+   * `M2Blueprint.unload` is a refcount decrement, so this is safe for a model path other units are
+   * still drawing from: only the last holder tears anything down.
+   */
+  release(): void {
+    this.dropAttachedItems();
+    const model = this._model;
+    if (model) {
+      this._view.remove(model);
+      this._model = null;
+      M2Blueprint.unload(model);
+    }
+  }
+
   /** Release every attached item model, off its BONE and off the blueprint's reference count. */
   private dropAttachedItems(): void {
     for (const item of this.attachedItems) {
