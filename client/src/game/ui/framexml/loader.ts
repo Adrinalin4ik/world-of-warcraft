@@ -919,6 +919,45 @@ class DocumentLoader {
    * A region's own geometry: `<Size>` (all of them, last winning, same rule as a frame's),
    * `justifyH`/`justifyV`, the `setAllPoints` shorthand, and `<Anchors>`. `relativeTo` substitutes
    * `$parent` against the OWNING frame's name -- a region's parent is the frame that created it.
+   *
+   * ## A region with no `<Anchors>` FILLS ITS OWNER
+   *
+   * The client's own files are the oracle here, and they are unambiguous.
+   * `PlayerFrameTexture` (playerframe.xml:71) is the entire 232x100 player-frame art -- the border,
+   * the portrait ring, the bar surround -- and it is authored with **no `<Size>` and no
+   * `<Anchors>`**, inside two nested `<Frame setAllPoints="true">`. Without a default it resolved to
+   * a 0x0 rect: the health bar, the mana bar, the name and the level drew, and the art that is meant
+   * to surround them did not, which is exactly the "data outside its frames" report. It is not one
+   * texture either -- 105 regions across the 133 XML files of `FrameXML.toc` are authored with no
+   * anchors, and the ones that were visibly missing include every `ActionButton<n>Icon`
+   * (actionbuttontemplate.xml `$parentIcon`), `MainMenuBarBackpackButtonIconTexture` and the four
+   * `CharacterBag<n>SlotIconTexture`s (itembuttontemplate.xml `$parentIconTexture`), and
+   * `MinimapBorder` (minimap.xml).
+   *
+   * The engine ANCHORS such a region, it does not merely size it: `PlayerFrameTexture` carries a
+   * `<TexCoords>` block and no size at all, so "give it the parent's width and height at the
+   * parent's origin" and "pin all four points to the parent" are the same thing here. The
+   * `SetAllPoints` form is the one this runtime already uses for the same situation elsewhere --
+   * `lua/methods/kinds.ts#fillParent` gives a button's state textures and its label exactly these
+   * two anchors on creation, and `applyAnchors` below already clears them when the element declares
+   * its own.
+   *
+   * SCOPE, stated because it is a real limit: this is the XML loader's default only. A region created
+   * from Lua by `CreateTexture`/`CreateFontString` and never given a point is left as it was, because
+   * nothing in the game's own files settles what the engine does there and inventing an answer would
+   * put the default beyond the evidence. Benilla is silent on both -- its `apply_region_layout`
+   * (`crates/benilla-ui/src/loader/regions.rs:130-190`) handles `setAllPoints` and `<Anchors>` and
+   * has no default, which costs it nothing because it runs its own authored XML rather than
+   * Blizzard's.
+   *
+   * The 37 regions that declare a `<Size>` but no `<Anchors>` get the fill too, and the size loses to
+   * the two opposing anchors. That is the same precedence benilla pins for an explicit
+   * `setAllPoints` ("size present, but setAllPoints wins", `script/tests/regions.rs:131`). Most of
+   * them are positioned from Lua later -- `TutorialFrame`'s arrows, `GameTooltipTemplate`'s ten
+   * `$parentTexture<n>` slots -- and a later `SetPoint` at a NEW point stacks on top of the fill
+   * rather than replacing it, so those keep the owner's rect until something calls `ClearAllPoints`.
+   * Both frames are hidden by default and `GameTooltip` is not a frame type this runtime has yet, so
+   * nothing observable rests on it today; it is written down rather than guessed at.
    */
   private applyRegionLayout(
     region: XmlElement,
@@ -927,6 +966,12 @@ class DocumentLoader {
     dbg: string,
   ): void {
     this.applySize(region, wrapper, dbg);
+    const declaresAnchors = childrenNamed(region, 'Anchors').some(
+      (anchors) => childrenNamed(anchors, 'Anchor').length > 0,
+    );
+    if (!declaresAnchors && !attrBool(region, 'setAllPoints')) {
+      this.callMethod(wrapper, 'SetAllPoints', [], dbg);
+    }
     const justifyH = attr(region, 'justifyH');
     if (justifyH !== undefined) {
       this.callMethod(wrapper, 'SetJustifyH', [justifyH], dbg);

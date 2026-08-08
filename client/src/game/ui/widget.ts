@@ -15,7 +15,9 @@ import type { BackdropDef, Insets } from './backdrop';
 // Type-only for the same reason: `scene/scene-rig.ts` imports three.js-adjacent lighting laws, and
 // this file must stay WebGL-free so `layout`/`hit` tests can exercise it without a GL context.
 import type { ModelRig } from './scene/scene-rig';
-import { Anchor, LayoutNode, Rect, resolveAnchors, screenScale, Viewport } from './layout';
+import {
+  Anchor, LayoutNode, Rect, resolveAnchors, screenScale, unplaceableNodes, Viewport,
+} from './layout';
 import { DrawLayer, OrderKey, Strata, compareOrder } from './framexml/order';
 
 /** The five FrameXML draw layers. DIALOG is NOT here -- it is a `Strata`; see `framexml/order.ts`. */
@@ -492,7 +494,11 @@ export class WidgetRoot {
   readonly root = new Widget('frame', 'root');
 
   constructor() {
-    // The root always fills the window, so a child with no anchors still resolves.
+    // The root IS the screen: two opposing anchors against the window, which is what makes it the
+    // one node in the tree that is placeable without a target. (It used to be described as the
+    // reason "a child with no anchors still resolves" -- it is not. An unanchored child resolves to
+    // the window's own top-left corner whatever the root's rect is, and `unplaceableNodes` now drops
+    // it instead, per the client's resolver.)
     this.root.setAnchors(
       { point: 'TOPLEFT', x: 0, y: 0 },
       { point: 'BOTTOMRIGHT', x: 0, y: 0 },
@@ -540,8 +546,25 @@ export class WidgetRoot {
     walk(this.root, 1);
 
     const rects = resolveAnchors(nodes, viewport);
+    // The client's own resolver drops a frame with no anchor points, and everything anchored to it;
+    // see `layout.ts#unplaceableNodes` for the reference lines and for the frames it took out of the
+    // corner of the world screen. Computed over the SAME node list `resolveAnchors` was given (the
+    // doomed nodes stay in it), so a dependent is judged by its target's real state rather than by
+    // the target having been withheld.
+    const unplaceable = unplaceableNodes(nodes);
 
     return flat
+      .filter((entry) => {
+        if (!unplaceable.has(entry.widget.id)) {
+          return true;
+        }
+        // ONE exemption, and it is the same one the rect map is overruled for below: a StatusBar's
+        // fill region is authored with no anchors on purpose and takes its geometry from the owning
+        // frame (`barFillRect`). Dropping it would delete every health, mana and experience bar in
+        // the client. The owner still has to be placeable -- `barFillRect` reads its rect.
+        const owner = entry.widget.parent;
+        return owner?.statusBar?.bar === entry.widget && !unplaceable.has(owner.id);
+      })
       .sort((a, b) => compareOrder(orderKey(a), orderKey(b)))
       .map((entry) => {
         // THE STATUS-BAR FILL, and the one place the anchor solver is deliberately overruled.

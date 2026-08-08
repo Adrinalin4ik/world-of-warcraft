@@ -103,9 +103,16 @@ describe('the frame and region method surface', () => {
       a = CreateFrame("Frame", "A", parent)
       b = CreateFrame("Frame", "B", parent)
       c = CreateFrame("Frame", "C", parent)
+      parent:SetPoint("TOPLEFT")
       for _, f in ipairs({a, b, c}) do
         f:SetWidth(10)
         f:SetHeight(10)
+        -- A POINT EACH, because a frame with none has no rect and is not drawn at all
+        -- (layout.ts unplaceableNodes, the client's own resolver). This test is about draw ORDER,
+        -- so its fixture has to be three frames that are actually on screen; before that rule
+        -- existed they were placed in the window's top-left corner by default and the setup got
+        -- away with saying nothing about where they are.
+        f:SetPoint("TOPLEFT")
       end
       `,
       'level-setup.test.lua',

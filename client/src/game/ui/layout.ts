@@ -170,6 +170,72 @@ function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect)
   };
 }
 
+/**
+ * The nodes the client's own resolver would not place at all: **a LayoutFrame with no anchor points
+ * has no rect**, and neither has anything anchored to one.
+ *
+ * This is the client's rule, not a policy choice. `samples/benilla/crates/benilla-ui/src/layout.rs`
+ * is a bit-exact transcription of `CLayoutFrame`'s geometry resolver, and it states both halves as
+ * tests: `no_anchor_is_unresolvable` (layout.rs:1254 -- "a frame with no SetPoint cannot resolve;
+ * every edge derives circularly to +Inf") and `dependent_of_unresolvable_is_unresolvable`
+ * (layout.rs:1282, which asserts `rect(A).is_none()` AND `rect(B).is_none()`). The engine's UNSET
+ * sentinel is `+Infinity` and `assemble` fails the whole rect if any edge is still UNSET
+ * (layout.rs:39, 654).
+ *
+ * `resolveOne` below instead gives an unanchored node `left = 0, top = 0` -- the WINDOW's top-left
+ * corner. That single divergence is what put the client's own unanchored frames in a heap in the
+ * corner of the world screen: `QuestInfoRequiredMoneyFrame` (questinfo.xml:213, a `<Frame>` with a
+ * `<Size>` and no `<Anchors>`, whose whole point is that `QuestInfo_Display` anchors it into the
+ * quest frame when a quest is shown) drew its gold/silver/copper coins over the sky, and
+ * `ChatChannelDropDown` and `ChatBNPlayerDropDown` (chatframe.xml:172-173, `UIDropDownMenuTemplate`
+ * with no anchors -- `ToggleDropDownMenu` positions them when a menu opens) drew a whole dropdown
+ * control there. 32 of the 41 unanchored widgets in the live tree were of that shape.
+ *
+ * The propagation is the second half and it is not optional: `QuestInfoRequiredMoneyDisplay` anchors
+ * LEFT to a font string INSIDE the unplaceable frame, so dropping the frame alone would leave the
+ * coins behind, resolved through the "anchored to something not being drawn" fallback -- in the same
+ * corner.
+ *
+ * DELIBERATELY NARROW. A node whose `relativeTo` is not in this node set at all is NOT touched: that
+ * is the hidden-target case `resolveAnchors` reports and places leniently, it is load-bearing on the
+ * character-select screen (`CharSelectChangeRealmButton` -> a font string `CharacterSelect_OnShow`
+ * hides), and the client's answer there is a separate question from this one.
+ */
+export function unplaceableNodes(nodes: LayoutNode[]): Set<string> {
+  const unplaceable = new Set<string>();
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+
+  for (const node of nodes) {
+    if (node.anchors.length === 0) {
+      unplaceable.add(node.id);
+    }
+  }
+
+  // Fixpoint rather than one pass: a chain of three frames each anchored to the last needs as many
+  // passes as it is long, and the tree is not in dependency order.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of nodes) {
+      if (unplaceable.has(node.id)) {
+        continue;
+      }
+      const doomed = node.anchors.some(
+        (anchor) =>
+          anchor.relativeTo !== undefined &&
+          byId.has(anchor.relativeTo) &&
+          unplaceable.has(anchor.relativeTo),
+      );
+      if (doomed) {
+        unplaceable.add(node.id);
+        changed = true;
+      }
+    }
+  }
+
+  return unplaceable;
+}
+
 /** Layout complaints already reported, so a per-frame one is a single console line. */
 const warned = new Set<string>();
 
