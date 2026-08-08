@@ -331,8 +331,33 @@ class Unit extends Entity {
 
   public set moveSpeed(value: number) {
     this._moveSpeed = value;
-    this.speeds.run = value;
+    // VALIDATED, because this value now integrates a body rather than just being reported.
+    //
+    // MEASURED, live, two accounts in Elwynn: the walking peer's run speed arrived as
+    // -3.689e19 (-2^65, the shape of a misaligned float read), and the dead reckoning duly carried
+    // him 3.7e19 yd in one frame. Interpolating between wire positions -- what this replaced --
+    // could not be hurt by a wrong speed, so the wire has never been checked here.
+    //
+    // The ceiling is `TELEPORT_SPEED`, the same 100 yd/s that already means "this is not locomotion"
+    // for the measured leg. Vanilla's fastest is the 32 yd/s flight speed, so no real speed comes
+    // near it. A rejected value leaves `speeds.run` alone -- the previous good speed, or the 7.0
+    // default -- rather than substituting a guess, and says so once.
+    if (Number.isFinite(value) && value > 0 && value <= TELEPORT_SPEED) {
+      this.speeds.run = value;
+      return;
+    }
+    if (this.rejectedSpeed !== value) {
+      this.rejectedSpeed = value;
+      console.warn(
+        `movement: ignoring an impossible run speed ${value} for ${this.guid} --`
+        + ` keeping ${this.speeds.run} yd/s. A speed this far outside 0..${TELEPORT_SPEED} is a`
+        + ' misread float on the wire, not a buff.',
+      );
+    }
   }
+
+  /** The last speed value rejected above, so the warning fires once per distinct bad value. */
+  private rejectedSpeed: number | null = null;
 
   public flySpeed: number = 100; //10
   public gravity: number = -30; //10;
