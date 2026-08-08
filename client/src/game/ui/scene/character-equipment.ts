@@ -221,6 +221,70 @@ export function wornEquipmentFor(
 }
 
 /**
+ * The eleven `CreatureDisplayInfoExtra` item columns projected onto the same `WornEquipment` the
+ * player path uses -- so a humanoid npc runs the identical geoset branches, helm masks and attachment
+ * placement instead of a second copy of them.
+ *
+ * The projection is by NAME and not by index, because the two sources order their slots differently:
+ * `SMSG_CHAR_ENUM` is indexed by equipment slot (`BODYSLOT_ENUM_SLOTS` picks 3,4,5,6,7,8,9,18 out of
+ * it) while `CreatureDisplayInfoExtra` is a flat 11-column `NPCItemDisplay` array in the client's own
+ * order (helm, shoulder, shirt, cuirass, belt, legs, boots, wrist, gloves, tabard, cape). Both land on
+ * the same eight bodyslots, which is what `EQUIP_LAYER_PRIORITY` and `equipGeosetsFor` index.
+ *
+ * `held` is three nulls, and that is the data rather than a gap: `CreatureDisplayInfoExtra` has no
+ * weapon columns at all. An npc's weapons arrive on `UNIT_VIRTUAL_ITEM_SLOT_ID`, a wire field this
+ * client does not decode yet -- so a guard resolved through here stands correctly dressed and
+ * empty-handed. Named here rather than left to be discovered.
+ */
+export type NpcItemDisplayIds = {
+  helmID: number;
+  shoulderID: number;
+  shirtID: number;
+  cuirassID: number;
+  beltID: number;
+  legsID: number;
+  bootsID: number;
+  wristID: number;
+  glovesID: number;
+  tabardID: number;
+  capeID: number;
+};
+
+/** True when the extra row references no item at all -- the caller skips the 6.7 MB table. */
+export function npcWearsNothing(extra: NpcItemDisplayIds): boolean {
+  return !(
+    extra.helmID || extra.shoulderID || extra.shirtID || extra.cuirassID || extra.beltID ||
+    extra.legsID || extra.bootsID || extra.wristID || extra.glovesID || extra.tabardID || extra.capeID
+  );
+}
+
+export function npcWornEquipmentFor(
+  extra: NpcItemDisplayIds,
+  rowFor: (displayId: number) => ItemDisplayInfoRow | null,
+): WornEquipment {
+  const lookup = (displayId: number): ItemDisplayInfoRow | null =>
+    displayId ? rowFor(displayId) : null;
+  return {
+    // The bodyslot order is `BODYSLOT_ENUM_SLOTS`': shirt, chest, belt, pants, boots, wrist, gloves,
+    // tabard.
+    bodyslots: [
+      lookup(extra.shirtID),
+      lookup(extra.cuirassID),
+      lookup(extra.beltID),
+      lookup(extra.legsID),
+      lookup(extra.bootsID),
+      lookup(extra.wristID),
+      lookup(extra.glovesID),
+      lookup(extra.tabardID),
+    ],
+    cloak: lookup(extra.capeID),
+    helm: lookup(extra.helmID),
+    shoulder: lookup(extra.shoulderID),
+    held: [null, null, null],
+  };
+}
+
+/**
  * The equipment half of the composite: the region layers, in blit order.
  *
  * PER LAYER, not per item -- and that is the whole point of the priority table. Two items can both

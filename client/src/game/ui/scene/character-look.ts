@@ -157,7 +157,19 @@ const BASE_SECTION_UNDERWEAR = 4;
 const SECTION_FLAG_DEATH_KNIGHT = 0x04;
 const SECTION_FLAG_NPC = 0x08;
 
-type ChrRacesRow = {
+/**
+ * The flags a PLAYER look excludes, and the default everywhere on this path.
+ *
+ * A humanoid npc excludes NEITHER, and passes 0 (`npc-look.ts`). Its appearance dials come from
+ * `CreatureDisplayInfoExtra` rather than from a character-create screen, so `0x08` -- the bit that
+ * means "npc only" -- is precisely the set of rows it is entitled to, and `0x04` marks the Death
+ * Knight art a Scourge npc legitimately wears. The key (BaseSection, VariationIndex, ColorIndex) is
+ * unique across those flag variants in the measured table, so widening the predicate cannot make a
+ * player row lose to an npc one; it only stops an npc row being invisible.
+ */
+const PLAYER_SECTION_FLAGS = SECTION_FLAG_DEATH_KNIGHT | SECTION_FLAG_NPC;
+
+export type ChrRacesRow = {
   id: number;
   maleDisplayID: number;
   femaleDisplayID: number;
@@ -168,8 +180,8 @@ type ChrRacesRow = {
    */
   clientPrefix: string;
 };
-type CharHairGeosetsRow = { raceID: number; gender: number; hairType: number; geoset: number };
-type CharacterFacialHairStylesRow = {
+export type CharHairGeosetsRow = { raceID: number; gender: number; hairType: number; geoset: number };
+export type CharacterFacialHairStylesRow = {
   raceID: number;
   gender: number;
   specificID: number;
@@ -216,6 +228,7 @@ export function bodySkinFor(
   race: number,
   gender: number,
   skin: number,
+  excludedFlags: number = PLAYER_SECTION_FLAGS,
 ): string | null {
   let fallback: CharSectionsRow | null = null;
   for (const row of rows) {
@@ -225,7 +238,7 @@ export function bodySkinFor(
     if (row.generalType !== BASE_SECTION_SKIN) {
       continue;
     }
-    if ((row.flags & (SECTION_FLAG_DEATH_KNIGHT | SECTION_FLAG_NPC)) !== 0) {
+    if ((row.flags & excludedFlags) !== 0) {
       continue;
     }
     if (row.variation === skin) {
@@ -300,6 +313,7 @@ export function hairTextureFor(
   gender: number,
   hairStyle: number,
   hairColor: number,
+  excludedFlags: number = PLAYER_SECTION_FLAGS,
 ): string | null {
   let fallback: CharSectionsRow | null = null;
   for (const row of rows) {
@@ -309,7 +323,7 @@ export function hairTextureFor(
     if (row.generalType !== BASE_SECTION_HAIR || row.type !== hairStyle) {
       continue;
     }
-    if ((row.flags & (SECTION_FLAG_DEATH_KNIGHT | SECTION_FLAG_NPC)) !== 0) {
+    if ((row.flags & excludedFlags) !== 0) {
       continue;
     }
     if (row.variation === hairColor) {
@@ -355,7 +369,7 @@ export function sectionTexture(
     if (row.variation !== colorIndex) {
       continue;
     }
-    if ((row.flags & (SECTION_FLAG_DEATH_KNIGHT | SECTION_FLAG_NPC)) !== 0) {
+    if ((row.flags & PLAYER_SECTION_FLAGS) !== 0) {
       continue;
     }
     return row.textures?.[column] || null;
@@ -678,7 +692,7 @@ export async function resolveCharacterLook(
  * The directory is `Item\ObjectComponents\Cape`, the same `ObjectComponents` tree the weapon and
  * shoulder models live under, verified fetchable on the live host.
  */
-function capeTextureFor(worn: WornEquipment | null): string | null {
+export function capeTextureFor(worn: WornEquipment | null): string | null {
   const name = worn?.cloak?.leftModelTexture;
   return name ? `Item\\ObjectComponents\\Cape\\${name}.blp` : null;
 }
