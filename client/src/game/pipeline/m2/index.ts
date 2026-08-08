@@ -984,8 +984,8 @@ class M2 extends THREE.Group {
    * The runtime-supplied CHARACTER texture slots: type 1 (the body skin), type 6 (the hair sheet) and
    * type 2 (the cloak sheet).
    *
-   * One entry point for all three, matching `updateSkinTextures`' three-at-once shape, because each supply
-   * costs a full `loadTextures()` walk -- see `material/index.ts#updateCharacterTextures`. The
+   * One entry point for all three, matching `updateSkinTextures`' three-at-once shape, because
+   * each supply costs a full `loadTextures()` walk -- see `material/index.ts#updateCharacterTextures`. The
    * `skins.hair` comment there records which geosets read which type, measured off the real skin.
    *
    * `body` is a `THREE.Texture` for the normal case -- the CPU-baked composite, which has no path to

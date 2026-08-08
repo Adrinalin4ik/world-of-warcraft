@@ -187,8 +187,12 @@ export function failedTexturePaths(failures: TextureFailure[]): string[] {
   return [...new Set(failures.map((failure) => failure.path))];
 }
 
-/** No slots to wait for. Shared so the empty case allocates nothing per submesh. */
-const NO_TEXTURE_FAILURES: TextureFailure[] = [];
+/**
+ * No slots to wait for. Shared so the empty case allocates nothing per submesh, and FROZEN because
+ * it is handed to callers: one caller pushing into the result it was given would poison every empty
+ * result afterwards.
+ */
+const NO_TEXTURE_FAILURES: TextureFailure[] = Object.freeze([]) as TextureFailure[];
 
 /**
  * Flatten the per-material (or per-submesh) results of a supply into one list.
