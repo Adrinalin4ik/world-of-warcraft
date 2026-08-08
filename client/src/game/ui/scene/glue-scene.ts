@@ -162,11 +162,19 @@ export class GlueSceneView {
       // the scale, which is NOT optional: `M2` sets `matrixAutoUpdate = false` on itself, so
       // `scale.setScalar` alone reaches nothing and every race drew at 1.0 -- right for ten races and
       // wrong for exactly one, Gnome male at 1.15, which `Gfsa` on the live roster is.
-      applyCharacterLook(model, look, loaded);
+      const textures = applyCharacterLook(model, look, loaded);
       armStand(model, look.modelPath);
 
       this.placeCharacter();
       this.attachItems(model, look, token);
+
+      // RETURNED from this handler rather than dropped. `applyCharacterLook` now answers a promise
+      // for the three character texture slots (it used to start them through a setter that could
+      // answer nothing), and a promise created inside a `.then` handler and not returned from it is
+      // exactly what bluebird warns about -- correctly, since the stage would otherwise call itself
+      // done while the body was still untextured. Nothing here waits on it: every line above has
+      // already run, and the character is already in the scene.
+      return textures;
     });
   }
 

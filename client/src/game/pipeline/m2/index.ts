@@ -19,7 +19,7 @@ import { ModelAnim } from './anim/model-anim';
 import { applyLocalPose } from './anim/pose';
 import { SubmeshSkinningScope, submeshSkinningScope } from './anim/skinning-scope';
 import { buildBoneHierarchy, modelSpaceBindMatrix, normalizeBoneWeights, poseBindSkeleton } from './bind-pose';
-import M2Material from './material';
+import M2Material, { collectTextureLoads, TextureLoad } from './material';
 import { isParticleTemplate } from './particle/template';
 import Submesh from './submesh';
 
@@ -934,10 +934,22 @@ class M2 extends THREE.Group {
     bone.rotation.setFromRotationMatrix(rotateMatrix);
   }
 
-  set displayInfo(displayInfo) {
+  /**
+   * Point every submesh's materials at a `CreatureDisplayInfo` row's skins, and answer when those
+   * textures have settled and which of them failed.
+   *
+   * A METHOD, where this was `set displayInfo`. The setter could not answer anything -- see
+   * `Submesh#setDisplayInfo` for the defect that cost, and `M2Material#loadTextures` for why the
+   * answer is a list of failures rather than a rejection. The caller (`classes/unit.ts`) is the only
+   * thing that knows WHICH unit and which display id these textures belonged to, so it is the only
+   * thing that can say so on the console.
+   */
+  setDisplayInfo(displayInfo): TextureLoad {
+    const loads: TextureLoad[] = [];
     for (let i = 0; i < this.submeshes.length; i++) {
-      this.submeshes[i].displayInfo = displayInfo;
+      loads.push(this.submeshes[i].setDisplayInfo(displayInfo));
     }
+    return collectTextureLoads(loads);
   }
 
   /**
@@ -972,7 +984,7 @@ class M2 extends THREE.Group {
    * The runtime-supplied CHARACTER texture slots: type 1 (the body skin), type 6 (the hair sheet) and
    * type 2 (the cloak sheet).
    *
-   * One setter for all three, matching `updateSkinTextures`' three-at-once shape, because each supply
+   * One entry point for all three, matching `updateSkinTextures`' three-at-once shape, because each supply
    * costs a full `loadTextures()` walk -- see `material/index.ts#updateCharacterTextures`. The
    * `skins.hair` comment there records which geosets read which type, measured off the real skin.
    *
@@ -980,14 +992,16 @@ class M2 extends THREE.Group {
    * name -- or a path string for the fallback when the bake could not happen. `hair` and `cape` are
    * always paths: they go to the GPU whole, so `TextureLoader` owns them.
    */
-  set characterTextures(paths: {
+  setCharacterTextures(paths: {
     body: string | THREE.Texture | null;
     hair: string | null;
     cape: string | null;
-  }) {
+  }): TextureLoad {
+    const loads: TextureLoad[] = [];
     for (let i = 0; i < this.submeshes.length; i++) {
-      this.submeshes[i].characterTextures = paths;
+      loads.push(this.submeshes[i].setCharacterTextures(paths));
     }
+    return collectTextureLoads(loads);
   }
 
   /**
@@ -997,10 +1011,12 @@ class M2 extends THREE.Group {
    * Separate from `characterTextures` because the two apply to disjoint models; see
    * `material/index.ts#updateObjectTexture`.
    */
-  set objectTexture(path: string | null) {
+  setObjectTexture(path: string | null): TextureLoad {
+    const loads: TextureLoad[] = [];
     for (let i = 0; i < this.submeshes.length; i++) {
-      this.submeshes[i].objectTexture = path;
+      loads.push(this.submeshes[i].setObjectTexture(path));
     }
+    return collectTextureLoads(loads);
   }
 
   /**

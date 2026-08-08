@@ -159,6 +159,60 @@ export function applyBlendingModeToMaterial(material: THREE.Material, blendingMo
   }
 }
 
+/**
+ * ONE texture slot that was asked for and did not arrive.
+ *
+ * A slot with NO path is not one of these. `resolveTexturePath` answers null for every runtime slot
+ * the appearance leaves blank -- a bald head's type 6, an item row that names no texture -- and that
+ * is a deliberate "nothing goes here", not a failure. Only a path that went to `TextureLoader.load`
+ * and came back rejected is recorded.
+ */
+export type TextureFailure = { path: string; error: unknown };
+
+/**
+ * What every texture-supplying entry point in this pipeline hands back: the failures, once every
+ * slot has settled. **It never rejects**, and that is deliberate -- see `M2Material#loadTextures`.
+ */
+export type TextureLoad = Promise<TextureFailure[]>;
+
+/**
+ * The DISTINCT paths in a failure list, in the order they first appear.
+ *
+ * Distinct because a supply is per BATCH and a model's batches share their runtime slot: a cloak
+ * that fails on a five-batch character comes back as the same path five times, and a call site that
+ * printed the raw list would say "5 texture slots failed" for one missing file. The per-file
+ * `console.error` inside `loadTextures` is the per-slot record; a call site wants the files.
+ */
+export function failedTexturePaths(failures: TextureFailure[]): string[] {
+  return [...new Set(failures.map((failure) => failure.path))];
+}
+
+/** No slots to wait for. Shared so the empty case allocates nothing per submesh. */
+const NO_TEXTURE_FAILURES: TextureFailure[] = [];
+
+/**
+ * Flatten the per-material (or per-submesh) results of a supply into one list.
+ *
+ * `Promise.all` and not `allSettled`, which is safe only because none of the arms can reject.
+ */
+export function collectTextureLoads(loads: TextureLoad[]): TextureLoad {
+  if (loads.length === 0) {
+    return Promise.resolve(NO_TEXTURE_FAILURES);
+  }
+  if (loads.length === 1) {
+    return loads[0];
+  }
+  return Promise.all(loads).then((lists) => {
+    const failures: TextureFailure[] = [];
+    for (const list of lists) {
+      for (const failure of list) {
+        failures.push(failure);
+      }
+    }
+    return failures;
+  });
+}
+
 class M2Material extends THREE.ShaderMaterial {
 
   private mapLight: MapLight | null = null;
@@ -387,7 +441,11 @@ class M2Material extends THREE.ShaderMaterial {
     // Loaded by calling updateSkinTextures()
 
     this.textureDefs = def.textures;
-    this.loadTextures();
+    // THE ONE CALL WHOSE RESULT IS DELIBERATELY DROPPED, and it is dropped rather than reported
+    // because a constructor has no caller to hand a promise to and `loadTextures` cannot reject.
+    // Its failures are already on the console from inside the walk. Every OTHER entry point returns
+    // it -- see `loadTextures`.
+    void this.loadTextures();
 
     // The three `register*Animation` subscription helpers that used to run here are gone. They
     // pushed closures onto an EventEmitter owned by the shared AnimationManager (the `.on('update')`
@@ -521,7 +579,7 @@ class M2Material extends THREE.ShaderMaterial {
   /**
    * Fetch priority for every path this material asks the loader for.
    *
-   * Raised, never lowered, and only by the three setters that exist solely to dress a character, a
+   * Raised, never lowered, and only by the three supplies that exist solely to dress a character, a
    * creature or an attached item (`updateSkinTextures`, `updateCharacterTextures`,
    * `updateObjectTexture`). Once a material has been identified as a unit's, it stays one -- a
    * later re-supply must not drop it back into the background stream behind the terrain burst,
@@ -535,7 +593,7 @@ class M2Material extends THREE.ShaderMaterial {
    *
    * WHY KEYS AND NOT THE TEXTURE OBJECTS. `loadTextures()` takes a fresh reference for every def it
    * walks and it can be called more than once on the same material: the three character/creature
-   * setters below each call it again once the appearance is known. Releasing the previous round from
+   * supplies below each call it again once the appearance is known. Releasing the previous round from
    * the `textures` ARRAY is impossible, because a slot that has not finished decoding still holds
    * `PLACEHOLDER`, which carries no `textureKey` -- so the reference it took could not be named, let
    * alone given back. Remembering the keys removes that dependency entirely.
@@ -551,11 +609,42 @@ class M2Material extends THREE.ShaderMaterial {
    */
   private referencedKeys: string[] = [];
 
-  loadTextures() {
+  /**
+   * Fetch every slot this material's defs name, and answer WHEN THEY HAVE ALL SETTLED and WHICH ONES
+   * FAILED.
+   *
+   * IT USED TO ANSWER NOTHING, and that is the defect this signature exists to close. The per-def
+   * `.then` chains below were created and dropped on the floor, so a caller -- `updateObjectTexture`,
+   * reached through the `objectTexture` SETTER from `character/dress.ts` -- had no way to wait for a
+   * texture or to see it fail. Bluebird said so out loud ("a promise was created in a handler ... but
+   * was not returned from it", raised from `loadTextures` through `set objectTexture` inside
+   * `attachCharacterItems`' own handler), and it was right: an item was reported attached before its
+   * skin existed, and a 404 on that skin reached nobody.
+   *
+   * **IT NEVER REJECTS.** The failures are DATA, not a thrown error, and that is the one design
+   * decision here worth defending. This material is shared by every doodad and every WMO in the
+   * world: most callers construct it and walk away (the constructor's own call is one), and a
+   * promise that could reject would turn every one of those into an unhandled rejection. Resolving
+   * with a list means the fire-and-forget callers are exactly as safe as they were, and the callers
+   * that can name WHO the texture belonged to -- a character's item model, a creature's display row
+   * -- can say so.
+   *
+   * The per-def `console.error` stays, and stays where it is. It is the only report the world paths
+   * have ever had, and moving it to the callers would have silenced doodads and WMOs to give
+   * character items a better message. A character call site adds a second line naming the wearer; one
+   * error names the FILE, one warning names the OWNER.
+   *
+   * NOTHING ABOUT THE SEQUENCING CHANGED. Every line below still runs in the same order, the slots
+   * are still filled in as each decode lands, and the release-after-take order the reference fix
+   * (34bd0c2) depends on is untouched. The only new work is one array of already-existing promises
+   * and one `Promise.all` over it.
+   */
+  loadTextures(): TextureLoad {
     const textureDefs = this.textureDefs;
 
     const textures = [];
     const nextKeys: string[] = [];
+    const pending: Promise<TextureFailure | null>[] = [];
 
     textureDefs.forEach((textureDef, index) => {
       // A slot the runtime supplies as a TEXTURE rather than as a path -- today only the composited
@@ -587,15 +676,19 @@ class M2Material extends THREE.ShaderMaterial {
       // `texturePriority` is BACKGROUND for every material until one of the three character/creature
       // setters below raises it. See `worker/pool.js#PRIORITY` for why a visible unit's texture
       // outranks a terrain tile, and the measurement that made it necessary.
-      TextureLoader.load(
-        path, THREE.RepeatWrapping, THREE.RepeatWrapping, this.texturePriority,
-      )
-        .then((texture) => {
-          textures[index] = texture;
-        })
-        .catch((error) => {
-          console.error(`Failed to load M2 texture ${path}:`, error);
-        });
+      pending.push(
+        TextureLoader.load(
+          path, THREE.RepeatWrapping, THREE.RepeatWrapping, this.texturePriority,
+        )
+          .then((texture) => {
+            textures[index] = texture;
+            return null;
+          })
+          .catch((error) => {
+            console.error(`Failed to load M2 texture ${path}:`, error);
+            return { path, error };
+          }),
+      );
     });
 
     // RELEASE AFTER TAKING, never before, and this order is the whole safety argument.
@@ -617,6 +710,14 @@ class M2Material extends THREE.ShaderMaterial {
     // Update shader uniforms to reflect loaded textures.
     this.uniforms.textures = { value: textures };
     this.uniforms.textureCount = { value: textures.length };
+
+    if (pending.length === 0) {
+      return Promise.resolve(NO_TEXTURE_FAILURES);
+    }
+
+    return Promise.all(pending).then(
+      (results) => results.filter((result): result is TextureFailure => result !== null),
+    );
   }
 
   /**
@@ -692,14 +793,16 @@ class M2Material extends THREE.ShaderMaterial {
     return path;
   }
 
-  updateSkinTextures(skin1, skin2, skin3) {
+  updateSkinTextures(skin1, skin2, skin3): TextureLoad {
     this.skins.skin1 = skin1;
     this.skins.skin2 = skin2;
     this.skins.skin3 = skin3;
 
     // A creature's skin. See `texturePriority`.
     this.texturePriority = PRIORITY.CHARACTER;
-    this.loadTextures();
+    // RETURNED, not dropped: this supply's whole point is that the caller knows which creature it was
+    // for, and until now the answer -- including a 404 -- reached nobody. See `loadTextures`.
+    return this.loadTextures();
   }
 
   /**
@@ -716,7 +819,7 @@ class M2Material extends THREE.ShaderMaterial {
    * track paths rather than textures, in the shared pipeline, which is not this milestone. The cloak
    * joining this call rather than getting its own is that constraint honoured, not a convenience.
    */
-  updateCharacterTextures(body, hair, cape) {
+  updateCharacterTextures(body, hair, cape): TextureLoad {
     this.skins.body = body;
     this.skins.hair = hair;
     this.skins.object = cape;
@@ -724,7 +827,7 @@ class M2Material extends THREE.ShaderMaterial {
     // A player character's body, hair and cloak. See `texturePriority` -- these are the three slots
     // whose 6.8 s and 8.4 s queue waits were measured on a real entry.
     this.texturePriority = PRIORITY.CHARACTER;
-    this.loadTextures();
+    return this.loadTextures();
   }
 
   /**
@@ -737,12 +840,12 @@ class M2Material extends THREE.ShaderMaterial {
    * constraint that setter's doc is about -- an item model's material is touched exactly once, the same
    * as the body's.
    */
-  updateObjectTexture(path) {
+  updateObjectTexture(path): TextureLoad {
     this.skins.object = path;
 
     // An attached item model's skin -- a weapon in a visible character's hand. See `texturePriority`.
     this.texturePriority = PRIORITY.CHARACTER;
-    this.loadTextures();
+    return this.loadTextures();
   }
 
   dispose() {

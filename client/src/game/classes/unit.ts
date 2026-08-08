@@ -7,6 +7,7 @@ import { windowElapsedOrInstant } from "../pipeline/m2/anim/instance-anim";
 import type { Sequence } from "../pipeline/m2/anim/model-anim";
 import { worldClock } from "../pipeline/m2/anim/world-clock";
 import M2Blueprint from "../pipeline/m2/blueprint";
+import { failedTexturePaths } from "../pipeline/m2/material";
 import ColliderManager from "../world/collider-manager";
 import { collisionWorld } from "../collision/collision-world";
 import { DEFAULT_COLLISION_HEIGHT, SETTLE_TIMEOUT } from "../movement/constants";
@@ -459,7 +460,12 @@ class Unit extends Entity {
       return;
     }
     this.model = m2;
-    this.model.displayInfo = this.displayInfo;
+    // THROUGH THE METHOD, so the creature's skin fetches can be waited for and their failures seen.
+    // `this.model.displayInfo = ...` was a setter and could answer neither. Started HERE and awaited
+    // at the bottom of this method: the scale, the matrix and the visibility below must not wait for
+    // a texture -- a creature draws with its authored skin until its variation lands, exactly as
+    // before.
+    const textures = this.model.setDisplayInfo(this.displayInfo);
     // AFTER the setter, which writes `rotation.z` and bakes `matrix` itself: `M2` sets
     // `matrixAutoUpdate = false` on itself (`pipeline/m2/index.ts`), so `scale.setScalar` is INERT
     // without the `updateMatrix()` that follows it. Creatures come in many sizes and this was
@@ -470,9 +476,18 @@ class Unit extends Entity {
     this.model.visible = true;
     this.appliedDisplayId = displayId;
 
-    // Assigning displayInfo above kicks off texture loads, which are deliberately
-    // fire-and-forget: each one fills its slot in the material's texture array when it
-    // resolves and handles its own errors.
+    // The texture loads `setDisplayInfo` started, now that everything that must NOT wait for them has
+    // happened. Awaited rather than dropped so this method's promise covers the whole of what it
+    // started -- `set displayId` is its only caller and does not wait on it, so nothing downstream is
+    // delayed by this. Each slot still fills itself in as it resolves; what is new is that a failure
+    // can be named against the unit it disfigured instead of only against the file.
+    const failures = failedTexturePaths(await textures);
+    if (failures.length > 0) {
+      console.warn(
+        `unit: display ${displayId} (${this.modelData.file}) is drawn but ` +
+          `${failures.length} of its texture files did not load: ${failures.join(', ')}`,
+      );
+    }
   }
 
   /**
@@ -634,7 +649,14 @@ class Unit extends Entity {
     const previous = this._model;
 
     this.model = loaded.model;
-    applyCharacterLook(loaded.model, look, loaded);
+    // DELIBERATELY NOT AWAITED, and this is the one place in the pattern where that is the right
+    // answer. `wearLook`'s result is awaited by `update-object/handler.ts`, which places a PEER's
+    // body from the same packet immediately afterwards -- waiting here for a composite and a cloak
+    // sheet would leave every other player standing at the origin until their textures landed.
+    // `applyCharacterLook` already reports its own failures (see `character/dress.ts`), so nothing is
+    // swallowed by letting it run on; and its promise cannot reject, so there is no unhandled
+    // rejection to leave behind.
+    void applyCharacterLook(loaded.model, look, loaded);
     // AFTER the setter and AFTER `applyCharacterLook`, because both write into `matrix` and the last
     // writer wins under `matrixAutoUpdate = false`. See the doc above.
     loaded.model.updateMatrix();

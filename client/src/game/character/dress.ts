@@ -27,6 +27,7 @@
  * characters are worth drawing -- see the report's cost section.
  */
 import M2Blueprint from '../pipeline/m2/blueprint';
+import { failedTexturePaths, TextureFailure } from '../pipeline/m2/material';
 import { worldClock } from '../pipeline/m2/anim/world-clock';
 import { cachedComposite } from '../ui/scene/body-composite';
 import { CharacterLook } from '../ui/scene/character-look';
@@ -78,8 +79,19 @@ export function loadCharacter(look: CharacterLook): Promise<LoadedCharacter> {
  * (`pipeline/m2/index.ts:163`). A missing `updateMatrix()` silently drew gnomes at human size for
  * several rounds, and a world is full of non-human races, so the call is made here and its necessity is
  * stated at both call sites.
+ *
+ * ANSWERS A PROMISE, and everything except the texture slots has already happened by the time it is
+ * returned -- scale, geosets and the Stand are synchronous. The promise is the THREE TEXTURE SLOTS
+ * settling, and it exists because they used to settle into a setter that could tell nobody. It never
+ * rejects (see `M2Material#loadTextures`) and it reports its own failures, so a caller that cannot
+ * usefully wait may drop it; a caller inside a promise handler should RETURN it, which is what stops
+ * bluebird warning that a promise was created in a handler and not returned from it.
  */
-export function applyCharacterLook(model: any, look: CharacterLook, loaded: LoadedCharacter): void {
+export function applyCharacterLook(
+  model: any,
+  look: CharacterLook,
+  loaded: LoadedCharacter,
+): Promise<void> {
   model.scale.setScalar(look.scale);
   model.updateMatrix();
 
@@ -108,9 +120,31 @@ export function applyCharacterLook(model: any, look: CharacterLook, loaded: Load
   } else if (look.bodyLayers.length > 0) {
     console.warn('character: the body composite could not be baked; binding the raw base skin');
   }
-  if (body || look.hairTexture || look.capeTexture) {
-    model.characterTextures = { body, hair: look.hairTexture, cape: look.capeTexture };
+  if (!body && !look.hairTexture && !look.capeTexture) {
+    // Nothing to supply at all -- a bake that produced nothing for a look that names no hair and no
+    // cloak. Not a failure: the model draws its authored textures.
+    return Promise.resolve();
   }
+
+  // THROUGH THE METHOD, and the promise is RETURNED. `model.characterTextures = ...` was a setter,
+  // and a setter cannot hand back the texture loads it starts -- so this function reported a
+  // character dressed before its body, hair and cloak existed, and a 404 on any of them reached
+  // nobody here. `M2#setCharacterTextures` answers the failures instead; see
+  // `M2Material#loadTextures` for why it resolves with them rather than rejecting.
+  return model
+    .setCharacterTextures({ body, hair: look.hairTexture, cape: look.capeTexture })
+    .then((failures: TextureFailure[]) => {
+      if (failures.length === 0) {
+        return;
+      }
+      // The material has already put one `Failed to load M2 texture` line per file on the console.
+      // This one says WHOSE they were, which is the thing only the call site knows.
+      const paths = failedTexturePaths(failures);
+      console.warn(
+        `character: ${look.modelPath} is dressed but ${paths.length} of its texture files did ` +
+          `not load: ${paths.join(', ')}`,
+      );
+    });
 }
 
 /**
@@ -184,8 +218,29 @@ export function attachCharacterItems(
         // unset flag here hides the weapon for ever.
         model.visible = true;
         // Texture type 2, the item model's only runtime slot. Null when the row names no texture,
-        // which leaves the shared `PLACEHOLDER` -- a visibly flat item rather than a missing one.
-        model.objectTexture = item.texturePath;
+        // which leaves the shared `PLACEHOLDER` -- a visibly flat item rather than a missing one,
+        // and NOT a failure: `M2Material#resolveTexturePath` answers null for it and no fetch is
+        // made, so `failures` below stays empty.
+        //
+        // RETURNED FROM THIS HANDLER, which is the whole of the bluebird warning this replaced:
+        // `model.objectTexture = ...` was a setter, so the texture loads it started belonged to
+        // nobody -- the item was reported attached before its skin existed and the `.catch` below
+        // covered only the MODEL fetch. Returning the promise puts the texture inside this item's
+        // own chain.
+        return model
+          .setObjectTexture(item.texturePath)
+          .then((failures: TextureFailure[]) => {
+            if (failures.length === 0) {
+              return;
+            }
+            // One line per file is already on the console from the material. This one names the
+            // item, which is what makes it actionable -- and it stays a WARN because the item is
+            // attached and drawn, with the placeholder skin, rather than missing.
+            console.warn(
+              `character: ${item.kind} ${item.modelPath} is attached but its texture ` +
+                `${failedTexturePaths(failures).join(', ')} did not load; it draws flat`,
+            );
+          });
       })
       .catch((error) => {
         console.warn(`character: ${item.modelPath} did not load`, error);

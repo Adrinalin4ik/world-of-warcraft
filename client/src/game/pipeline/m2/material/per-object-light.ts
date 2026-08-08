@@ -115,7 +115,7 @@ export function applyPerObjectLighting(
  * NOTE for the other direction: `Submesh#applyBatches` REPLACES `onBeforeRender` outright, so a
  * re-run of it would drop this handler. That does NOT currently happen -- `applyBatches` has exactly
  * one caller, `M2#createSubmesh`, during construction, and the display-info path
- * (`Submesh#set displayInfo`) updates the existing materials' textures in place rather than
+ * (`Submesh#setDisplayInfo`) updates the existing materials' textures in place rather than
  * rebuilding batch meshes -- so attaching after construction is safe today. It stops being safe the
  * moment `applyBatches` gains a second caller (a real display-info rebuild, an LOD swap); the fix
  * then is a real handler list on the mesh, and it is called out here rather than left to be

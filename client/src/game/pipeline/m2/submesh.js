@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 import { toEngineMatrix } from './anim/axes';
 import { modelSpaceBindMatrix } from './bind-pose';
+import { collectTextureLoads } from './material';
 
 /**
  * Push the owning placement's distance-fade alpha into the shared material, immediately before this
@@ -280,7 +281,7 @@ class Submesh extends THREE.Group {
         //
         // As the code stands TODAY there is no second call -- `applyBatches` has exactly one caller,
         // `M2#createSubmesh`, during construction, and the display-info path
-        // (`Submesh#set displayInfo`) mutates the existing materials' textures without rebuilding
+        // (`Submesh#setDisplayInfo`) mutates the existing materials' textures without rebuilding
         // batch meshes. The explicit bind matrix is kept because it costs nothing and it is what
         // makes a re-run SAFE: give `applyBatches` a second caller -- a real display-info rebuild, a
         // batch-order change, an LOD swap -- and the hazard is live again the same day.
@@ -295,7 +296,7 @@ class Submesh extends THREE.Group {
       // un-installed by a re-run of this method.
       //
       // No re-run happens today: `applyBatches` has exactly one caller, `M2#createSubmesh`, during
-      // construction, and the display-info path (`Submesh#set displayInfo`) updates the existing
+      // construction, and the display-info path (`Submesh#setDisplayInfo`) updates the existing
       // materials' textures in place rather than rebuilding batch meshes. So the ordering hazard is
       // currently theoretical. It becomes real the moment `applyBatches` gains a second caller, and
       // the fix then is a real handler list on the mesh rather than one slot with three claimants.
@@ -325,8 +326,18 @@ class Submesh extends THREE.Group {
     }
   }
 
-  // Update all existing batch mesh materials to point to the new skins (textures).
-  set displayInfo(displayInfo) {
+  /**
+   * Update all existing batch mesh materials to point to the new skins (textures), and answer when
+   * those textures have settled and which of them failed.
+   *
+   * A METHOD AND NOT THE `set displayInfo` IT REPLACES. A setter cannot answer anything: the texture
+   * fetches it starts were unreachable from the call site, which could therefore neither wait for a
+   * creature's skin nor see a 404 on it. That was live -- bluebird raised "a promise was created in a
+   * handler ... but was not returned from it" through the sibling `set objectTexture` -- and the
+   * setter is deleted rather than kept beside this, because a setter left in place is the same trap
+   * for the next caller. See `M2Material#loadTextures`.
+   */
+  setDisplayInfo(displayInfo) {
     const { path } = displayInfo.modelData;
 
     // A CreatureDisplayInfo row carries an EMPTY texture variation wherever the model's own authored
@@ -344,30 +355,37 @@ class Submesh extends THREE.Group {
     const skin2 = skinPath(displayInfo.skin2);
     const skin3 = skinPath(displayInfo.skin3);
 
+    const loads = [];
     const childrenLength = this.children.length;
     for (let childIndex = 0; childIndex < childrenLength; ++childIndex) {
       const child = this.children[childIndex];
-      child.material.updateSkinTextures(skin1, skin2, skin3);
+      loads.push(child.material.updateSkinTextures(skin1, skin2, skin3));
     }
+    return collectTextureLoads(loads);
   }
 
   // The character body skin (texture type 1), hair sheet (type 6) and cloak sheet (type 2), for every
   // batch of this submesh. All three in one call -- see `M2Material#updateCharacterTextures` for why
-  // that matters.
-  set characterTextures({ body, hair, cape }) {
+  // that matters. Answers the failures, for the same reason `setDisplayInfo` does.
+  setCharacterTextures({ body, hair, cape }) {
+    const loads = [];
     const childrenLength = this.children.length;
     for (let childIndex = 0; childIndex < childrenLength; ++childIndex) {
-      this.children[childIndex].material.updateCharacterTextures(body, hair, cape);
+      loads.push(this.children[childIndex].material.updateCharacterTextures(body, hair, cape));
     }
+    return collectTextureLoads(loads);
   }
 
   // An attached item model's own skin (texture type 2 -- its only runtime slot), for every batch of
-  // this submesh. See `M2Material#updateObjectTexture`.
-  set objectTexture(path) {
+  // this submesh. See `M2Material#updateObjectTexture`. Answers the failures: this is the exact slot
+  // whose unreachable promise bluebird reported.
+  setObjectTexture(path) {
+    const loads = [];
     const childrenLength = this.children.length;
     for (let childIndex = 0; childIndex < childrenLength; ++childIndex) {
-      this.children[childIndex].material.updateObjectTexture(path);
+      loads.push(this.children[childIndex].material.updateObjectTexture(path));
     }
+    return collectTextureLoads(loads);
   }
 
   dispose() {

@@ -131,7 +131,7 @@ export function poseBindSkeleton(rootBones: THREE.Bone[], bones: THREE.Bone[]): 
  *
  * The M2 pipeline rebinds on every `Submesh#applyBatches`. As the code stands today that runs
  * exactly once per submesh, from `M2#createSubmesh` during construction -- the display-info path
- * (`Submesh#set displayInfo`) updates the existing materials' textures in place and does NOT rebuild
+ * (`Submesh#setDisplayInfo`) updates the existing materials' textures in place and does NOT rebuild
  * batch meshes -- so the destructive re-run is not currently reachable. Passing the bind matrix is
  * what keeps it unreachable BY CONSTRUCTION rather than by accident of who happens to call
  * `applyBatches`: give it a second caller and the recomputation would otherwise be live again.
