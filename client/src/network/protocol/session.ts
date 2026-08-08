@@ -75,7 +75,10 @@ export class ProtocolSession {
    */
   private loginEpoch = 0;
   private listeners = new Set<(state: SessionState) => void>();
-  /** Set by `stop()`. Once true, a queued retry from `onLoginFailure` is a no-op. */
+  /**
+   * Set by `stop()` and cleared by `login()`. Once true, a queued retry from `onLoginFailure` is a
+   * no-op. That is ALL it does -- see `onWorldDisconnect` for the thing it used to do and must not.
+   */
   private stopped = false;
 
   constructor(
@@ -202,6 +205,11 @@ export class ProtocolSession {
       this.retryTimer = null;
     }
     this.joined = false;
+    // Somebody is using this session again, so a previous owner's `stop()` must not still be
+    // suppressing this attempt's own retries. `stop()` is called on every glue-route unmount and
+    // never undone, so without this the FIRST world entry left every later login unable to retry a
+    // transport failure -- silently, since a refusal is the only other thing that ends an attempt.
+    this.stopped = false;
     // A new login supersedes whatever an earlier one obtained: a session key left standing here
     // would let a stale disconnect from the old connection read it and fake a live realm list.
     this.sessionKey = null;
@@ -353,10 +361,15 @@ export class ProtocolSession {
   }
 
   /**
-   * Tears down what nothing outside the machine can otherwise stop: a pending 3 s retry timer and
-   * the world transport's disconnect subscription's effect. An owner going away mid-retry (a screen
-   * unmounting, `GlueApp#stop`) must not leave a timer firing into a dead object. There is nothing
-   * pending at this level to reject -- callers of `login`/`chooseRealm`/etc. own their own promises.
+   * Tears down the one thing nothing outside the machine can otherwise stop: a pending 3 s retry
+   * timer. An owner going away mid-retry (a screen unmounting, `GlueApp#stop`) must not leave a
+   * timer firing into a dead object. There is nothing pending at this level to reject -- callers of
+   * `login`/`chooseRealm`/etc. own their own promises.
+   *
+   * It does NOT stop the machine tracking the world connection. It used to, and that was the bug:
+   * this is called on every glue-route unmount, including the one that ENTERS the world, so it
+   * silenced disconnect reporting for the whole rest of the page's life. `login()` clears the flag
+   * again for the same reason.
    */
   stop(): void {
     this.stopped = true;
@@ -374,9 +387,21 @@ export class ProtocolSession {
    * log back in from scratch).
    */
   private onWorldDisconnect(): void {
-    if (this.stopped) {
-      return;
-    }
+    // NO `stopped` GATE HERE, and its removal is the fix rather than an oversight.
+    //
+    // `stop()` runs on the glue route's unmount -- which is what ENTERING THE WORLD does
+    // (`pages/glue/index.tsx:71-74` -> `game/ui/screens.ts:201`) -- and `stopped` is never set back
+    // to false. So from the moment a session started, every world disconnect returned right here and
+    // the machine went on claiming the stage it had. Captured on a live page: after
+    // `session.game.disconnect()`, and after a fresh glue app had mounted and subscribed,
+    // `protocol.stage` still read `InWorld`. Nothing could learn the session had died, so nothing
+    // could tear it down or offer the player a way back.
+    //
+    // `stopped`'s own purpose is narrower than the flag had grown to be, and its declaration says so:
+    // a queued 3 s retry from `onLoginFailure` must not fire after its owner went away. That is
+    // still enforced, at line 346. Keeping the state machine honest costs nothing when nobody is
+    // listening -- `notify()` over an empty `listeners` set is a no-op -- and is exactly what a
+    // later subscriber needs to read.
     this.joined = false;
     this.stage_ = this.sessionKey ? LoginStage.RealmList : LoginStage.Offline;
     // Mark this as a newer state than any chooseRealm/enterWorld call already in flight, so its
