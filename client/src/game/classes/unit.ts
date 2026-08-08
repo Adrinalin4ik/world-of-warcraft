@@ -13,6 +13,15 @@ import { collisionWorld } from "../collision/collision-world";
 import { DEFAULT_COLLISION_HEIGHT, SETTLE_TIMEOUT } from "../movement/constants";
 import { createPlayerMoveState } from "../movement/player-state";
 import {
+  RemoteMotion,
+  SplineRide,
+  acceptRemoteState,
+  advanceRemote,
+  createRemoteMotion,
+  makeSplineRide,
+  sampleSpline,
+} from "../movement/net-motion";
+import {
   applyCharacterLook,
   attachCharacterItems,
   loadCharacter,
@@ -270,8 +279,30 @@ class Unit extends Entity {
 
   public currentMovingTime: number = 0;
   public totalMovingTime: number = 0;
-  private spline: THREE.CatmullRomCurve3 | null = null;
-  
+
+  /**
+   * The server-dictated path this unit is walking (`SMSG_MONSTER_MOVE`, or a create block's
+   * MOVEMENTFLAG_SPLINE_ENABLED tail), or null when it is not path-walking.
+   *
+   * Replaces a `THREE.CatmullRomCurve3` built with `closed = true` and stepped by
+   * `delta / moveSpeed / 4`. Three things were wrong with that and each one alone was fatal:
+   *  - `closed` joins the destination back to the start, so every patrol was a LOOP through a
+   *    segment the server never sent;
+   *  - a Catmull-Rom through a ground path is not what the client does -- ground creature follow is
+   *    a straight segment lerp (benilla `net/motion/spline.rs:99-107`, byte-verified there);
+   *  - the parameter advanced by `delta / moveSpeed / 4` with `moveSpeed` defaulting to 100, i.e.
+   *    at a rate with no relation to the DURATION the packet states. The packet's duration is the
+   *    entire timing statement and it was discarded.
+   */
+  public splineRide: SplineRide | null = null;
+
+  /**
+   * A peer's `MSG_MOVE_*` stream, interpolated. Non-null only for units the wire positions
+   * message-by-message (other players); a spline-walking creature uses `splineRide` instead.
+   */
+  public remoteMotion: RemoteMotion | null = null;
+
+
   private raycaster = new THREE.Raycaster();
 
   constructor(guid: string) {
@@ -1290,9 +1321,10 @@ class Unit extends Entity {
       return;
     }
 
-    {
-      this.updateSplineFollowing(delta);
-    }
+    // The two network motion legs, mutually exclusive by construction (`setSplinePath` and
+    // `applyRemoteState` each clear the other), so at most one writes `view.position` per frame.
+    this.updateSplineFollowing(delta);
+    this.updateRemoteMotion();
     // this.updatePlayer(delta);
     this.clear();
     // const m = ObjectsManager;
@@ -1491,47 +1523,124 @@ class Unit extends Entity {
     }
   }
 
-  updateSplineFollowing(delta: number) {
-    if (!this.spline) return;
-    // console.log('spline', this.spline)
-    const currentTime = (this.currentMovingTime + delta / this.totalMovingTime);
-    if (currentTime >= 1) {
-      this.currentMovingTime = 0;
+  /**
+   * Walk this frame's fraction of the server's path. One of the two network motion legs; see
+   * `movement/net-motion.ts` for why each leg interpolates the way it does.
+   *
+   * `performance.now()` and not the accumulated `delta`, because the ride's clock is the SERVER's
+   * -- a create-block spline is back-dated to where the server already is, and a dropped frame must
+   * not slow the walk down. The clock has to be absolute for either to hold.
+   */
+  updateSplineFollowing(_delta: number) {
+    const ride = this.splineRide;
+    if (!ride) {
       return;
     }
-    const pos = this.spline?.getPoint(currentTime);
-    // this.view.lookAt(new THREE.Vector3(pos.x, pos.y, pos.z));
-    // this.view.rotateX(this.view.rotation.x +  180 * Math.PI / 180); // to radians
-    // this.view.rotateY(this.view.rotation.y -  Math.PI / 2); // to radians
-    // this.view.rotateZ(this.view.rotation.z +  180 * Math.PI / 180); // to radians
-    this.position.set(
-      pos?.x,
-      pos?.y,
-      pos?.z
-    )
-    
 
-    this.currentMovingTime += (delta / this.moveSpeed / 4);
+    const sample = sampleSpline(ride, performance.now(), this.position);
+    if (sample.facing !== null) {
+      this.rotation.z = sample.facing;
+    }
+
+    if (sample.done) {
+      // The final pose is already written -- the sampler clamps to the last point, so the unit ends
+      // exactly at the server's destination rather than near it. Dropping the ride is what makes
+      // `splineRide != null` mean "actively walking": kept, a finished path would read as walking
+      // for ever and the gait would never return to Stand.
+      if (ride.finalFacing !== null) {
+        this.rotation.z = ride.finalFacing;
+      }
+      this.splineRide = null;
+    }
   }
 
-  setMovingData(currentMovingTime: number, points: Vector3[], totalMovingTime?: number) {
-    // A spline is per-frame motion this client integrates itself, so displacement becomes a real
-    // measurement again and locomotion must resume. Without this, a creature that took one snapped
-    // `MSG_MOVE_*` position before its spline arrived would stay locomotion-silent for life. See
-    // `wireDriven`: the most recent kind of motion decides.
+  /**
+   * Take a server-dictated path. `timePassedMs > 0` joins a walk already in progress, which is what
+   * a create block's spline tail carries.
+   *
+   * A spline is per-frame motion this client integrates itself, so displacement becomes a real
+   * measurement again and locomotion must resume -- see `wireDriven`, and note that a unit driven
+   * by a spline is no longer driven by `remoteMotion`: whichever kind of motion arrived most
+   * recently owns the body, and having both write `view.position` in one frame is the one thing
+   * that must not happen.
+   */
+  setSplinePath(
+    points: { x: number; y: number; z: number }[],
+    durationMs: number,
+    flying: boolean,
+    options: { timePassedMs?: number; id?: number; finalFacing?: number | null } = {},
+  ) {
+    // Cleared FIRST, and unconditionally: the server has just told us this unit's motion is
+    // spline-driven, which is true of a stop as much as of a walk. A degenerate path that returned
+    // early before clearing would leave a creature latched `wireDriven` for the rest of its life --
+    // the exact failure `wireDriven`'s own docs describe.
     this.wireDriven = false;
+    this.remoteMotion = null;
 
-    this.currentMovingTime = currentMovingTime;
-    if (totalMovingTime) {
-      this.totalMovingTime = totalMovingTime;
-    }
-
-    if (!points.length) {
+    const ride = makeSplineRide(points, durationMs, flying, performance.now(), options);
+    if (!ride) {
+      // Not a walk: a stop, a zero duration, or a degenerate path. Clearing rather than ignoring is
+      // deliberate -- a `Stop` is the server telling us this unit has stopped where it is.
+      this.splineRide = null;
       return;
     }
+    this.splineRide = ride;
+    // Kept in sync so the debug panel and anything else reading the old pair still says something
+    // true; nothing in the motion path reads them any more.
+    this.totalMovingTime = durationMs / 1000;
+    this.currentMovingTime = (options.timePassedMs ?? 0) / 1000;
+  }
 
-    this.spline = new THREE.CatmullRomCurve3(points, true, 'chordal');
-    // console.log('splines', this.spline);
+  /** The server says this unit has stopped where it is: end the walk, hold the pose. */
+  clearSplinePath() {
+    this.splineRide = null;
+  }
+
+  /**
+   * Take one `MSG_MOVE_*` position for a peer, and interpolate towards it rather than snapping.
+   *
+   * `wireDriven` is CLEARED here, unlike the snapped write this replaces. That flag exists because a
+   * peer whose `view.position` was written only on the frames a message landed was unmeasurable --
+   * quiet frames read as standing and catch-up frames as teleports, so the gait flip-flopped at
+   * packet rate. Interpolation removes the premise: the position now advances every single frame,
+   * so the measured displacement IS the peer's speed and `updateLocomotion` can pick his gait the
+   * same way it picks a creature's. The teleport guard still covers the relocation case, which
+   * `acceptRemoteState` snaps rather than interpolates.
+   */
+  applyRemoteState(
+    to: { x: number; y: number; z: number },
+    facing: number,
+    flags: number,
+  ) {
+    if (!this.remoteMotion) {
+      this.remoteMotion = createRemoteMotion();
+    }
+    // A peer who sends his own movement is no longer riding a spline; the two must never both own
+    // the body. (The reverse case is handled in `setSplinePath`.)
+    this.splineRide = null;
+    this.wireDriven = false;
+
+    const snap = acceptRemoteState(
+      this.remoteMotion,
+      this.position,
+      this.rotation.z,
+      to,
+      facing,
+      flags,
+      performance.now(),
+    );
+    if (snap) {
+      this.position.set(to.x, to.y, to.z);
+      this.rotation.z = facing;
+    }
+  }
+
+  /** Advance a peer one frame along his interpolation window. */
+  updateRemoteMotion() {
+    if (!this.remoteMotion) {
+      return;
+    }
+    this.rotation.z = advanceRemote(this.remoteMotion, performance.now(), this.position);
   }
 
   // public calculateOrientation() {

@@ -7,6 +7,7 @@ import { characterIdentityFor } from './character-identity';
 import { GameHandler } from '../../handler';
 import GamePacket from '../../packet';
 import { getUpdateFieldName, ObjectType, UpdateFlags, UpdateType } from '../enums';
+import { readMovementInfo } from '../../movement-info';
 
 export class UpdateObjectHandler extends EventEmitter {
   private game: GameHandler;
@@ -68,9 +69,12 @@ export class UpdateObjectHandler extends EventEmitter {
             pack.newObject = this.parseUpdateValues(packet);
             break;
           case UpdateType.Movement:
-            console.log('Update movement')
+            // A movement-only update: no values block, just a new `MovementInfo` for an object we
+            // already have. It was PARSED and then thrown away, so a unit whose only motion came
+            // through this door never moved. Routed to the same peer interpolator as `MSG_MOVE_*`.
             pack.guid = packet.readPackedGUID();
             pack.movement = this.parseMovement(packet);
+            this.applyMovementOnly(pack);
             break;
           case UpdateType.CreateObject1:
           case UpdateType.CreateObject2:
@@ -123,6 +127,29 @@ export class UpdateObjectHandler extends EventEmitter {
     // console.log('Final obj', packs);
   }
 
+  /**
+   * `UpdateType.Movement`: a position for an object that already exists. Interpolated exactly like a
+   * `MSG_MOVE_*` relay -- it is the same `MovementInfo`, arriving through the update stream instead
+   * of as its own message -- except for the spline tail, which is a whole path and takes over.
+   */
+  applyMovementOnly(pack: any) {
+    const unit = this.game.world.entities.get(pack.guid);
+    if (!unit || unit === this.game.world.player) {
+      return;
+    }
+    const m = pack.movement;
+    if (m.spline && Array.isArray(m.spline.splines) && m.spline.splines.length >= 2) {
+      unit.setSplinePath(m.spline.splines, m.spline.fullTime, false, {
+        timePassedMs: m.spline.currentTime,
+        finalFacing: typeof m.spline.rotation === 'number' ? m.spline.rotation : null,
+      });
+      return;
+    }
+    if (typeof m.x === 'number') {
+      unit.applyRemoteState({ x: m.x, y: m.y, z: m.z }, m.facing ?? unit.rotation.z, m.flags ?? 0);
+    }
+  }
+
   async applyUpdates(pack: any) {
     // if (!pack.movement.spline) return;
     // let unit: Unit = this.game.units.get(pack.guid);
@@ -168,20 +195,29 @@ export class UpdateObjectHandler extends EventEmitter {
     }
     // unit.displayId = 21976;
 
-    const {x, y, z, runSpeed} = pack.movement;
+    const {x, y, z, runSpeed, facing} = pack.movement;
 
     if (!isOurself) {
       unit.position.set(x, y, z);
+      if (typeof facing === 'number') {
+        unit.rotation.z = facing;
+      }
     }
     unit.moveSpeed = runSpeed;
+
+    // THE WALK THIS UNIT IS ALREADY RIDING when it streams into view -- the create block's
+    // MOVEMENTFLAG_SPLINE_ENABLED tail. Its points are absolute and its `currentTime` is how much
+    // of the ride the server has ALREADY covered, so the ride is back-dated by that much and the
+    // unit joins the walk in progress instead of restarting it from the top. Restarting it (which
+    // is what the previous `setMovingData(currentTime, ...)` did, since nothing downstream read
+    // `currentTime` as a time at all) puts a creature back where it was seconds ago, and its next
+    // `SMSG_MONSTER_MOVE` then snaps it forward.
     const splineData = pack.movement.spline;
-    const splines: THREE.Vector3[] = [];
-    if (splineData) {
-      splineData.splines.forEach((p: any) => {
-        splines.push(new THREE.Vector3(p.x, p.y, p.z))
+    if (splineData && !isOurself && Array.isArray(splineData.splines)) {
+      unit.setSplinePath(splineData.splines, splineData.fullTime, false, {
+        timePassedMs: splineData.currentTime,
+        finalFacing: typeof splineData.rotation === 'number' ? splineData.rotation : null,
       });
-    
-      unit.setMovingData(splineData.currentTime, splines, splineData.fullTime);
     }
   }
 
@@ -201,51 +237,14 @@ export class UpdateObjectHandler extends EventEmitter {
 
     movement.updateFlags = packet.readUnsignedShort();
     if ((movement.updateFlags & UpdateFlags.UPDATEFLAG_LIVING) >= 1) { // UPDATEFLAG_LIVING
-      movement.flags = packet.readUnsignedInt();
-      movement.flags2 = packet.readUnsignedShort();
-      movement.timeStamp = packet.readUnsignedInt();
-      movement.x = packet.readFloat();
-      movement.y = packet.readFloat();
-      movement.z = packet.readFloat();
-      movement.facing = packet.readFloat();
-      
-      // MOVEMENTFLAG_ONTRANSPORT. NOT a fixed 21 bytes: the transport guid is PACKED, so the block is
-      // 1..9 bytes of guid, four floats, a uint32 and an int8 -- plus one more uint32 when
-      // MOVEMENTFLAG2_INTERPOLATED_MOVEMENT (0x0400) is set. TrinityCore 3.3.5a
-      // `WorldPackets::Movement` / `Object::BuildMovementUpdate` writes exactly this order.
-      if ((movement.flags & 0x00000200) >= 1) {
-        movement.transport.guid = packet.readPackedGUID();
-        movement.transport.position = packet.readVector3();
-        movement.transport.facing = packet.readFloat();
-        movement.transport.time = packet.readUnsignedInt();
-        movement.transport.seat = packet.readByte();
-
-        if ((movement.flags2 & 0x0400) >= 1) { // MOVEMENTFLAG2_INTERPOLATED_MOVEMENT
-          movement.transport.time2 = packet.readUnsignedInt();
-        }
-      }
-
-      if (((movement.flags & 0x00200000) >= 1) || // swiming
-          ((movement.flags & 0x02000000) >= 1) || // flying
-          ((movement.flags2 & 0x0020) >= 1)) { // AlwaysAllowPitching
-        movement.pitch = packet.readFloat();
-      }
-
-      movement.fallTime = packet.readUnsignedInt(); //lastfalltime
-
-      // MOVEMENTFLAG_FALLING: four floats, in the server's order -- jump velocity, then sin, then cos,
-      // then the horizontal speed (TrinityCore `MovementInfo::JumpInfo`: zspeed, sinAngle, cosAngle,
-      // xyspeed). The sin/cos labels were the wrong way round here as well as the wrong width.
-      if ((movement.flags & 0x00001000) >= 1) {
-        movement.fallVelocity = packet.readFloat();
-        movement.fallSinAngle = packet.readFloat();
-        movement.fallCosAngle = packet.readFloat();
-        movement.fallSpeed = packet.readFloat();
-      }
-
-      if ((movement.flags & 0x04000000) >= 1) { // SPLINEELEVATION
-          movement.splineElevation = packet.readFloat();
-      }
+      // The `MovementInfo` head, which is byte-for-byte the body of every `MSG_MOVE_*` message and
+      // is now decoded in ONE place (`network/game/movement-info.ts`). The two used to be separate
+      // transcriptions of the same structure and only this one had the optional blocks.
+      //
+      // `false`: the guid was already read as this update block's own head. Reading a second one
+      // here would eat the flags word.
+      const info = readMovementInfo(packet, false);
+      Object.assign(movement, info, { transport: info.transport ?? movement.transport });
 
       // packet.readByte(32); // all of speeds
       movement.walkSpeed = packet.readFloat();

@@ -785,14 +785,14 @@ describe('Unit#wireDriven lifecycle', () => {
    * Kills: setting `wireDriven` without ever clearing it. The unit stays on Stand; the correct code
    * measures its displacement again and runs.
    */
-  it('setMovingData hands a spline creature back to locomotion', () => {
+  it('setSplinePath hands a spline creature back to locomotion', () => {
     const u = locoUnit(gaits(), false);
-    u.setMovingData = (Unit as any).prototype.setMovingData;
+    u.setSplinePath = (Unit as any).prototype.setSplinePath;
     u.wireDriven = true;
 
     // Snapped wire position, then a spline takes over.
     u.updateLocomotion(0.016);
-    u.setMovingData(0, []);
+    u.setSplinePath([], 0, false);
     expect(u.wireDriven).toBe(false);
 
     // Now a real, integrated per-frame displacement: 0.16 yd in 16 ms is 10 yd/s.

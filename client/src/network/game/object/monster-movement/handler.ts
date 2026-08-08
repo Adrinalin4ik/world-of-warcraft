@@ -1,122 +1,71 @@
 import EventEmitter from 'events';
-import SplineType from './../spline-type';
-import SplineFlag from './../spline-flag';
 import { GameHandler } from '../../handler';
-import GamePacket from '../../packet';
-import Unit from '../../../../game/classes/unit';
-import * as THREE from 'three';
 import GameOpcode from '../../opcode';
+import GamePacket from '../../packet';
+import { readMonsterMove } from './decode';
 
+/**
+ * `SMSG_MONSTER_MOVE` and `SMSG_MONSTER_MOVE_TRANSPORT` -- the creature half of movement, and by
+ * volume almost all of it: 94 of the 309 packets in the recorded entry burst, and 642 in a 75 s
+ * live capture at Northshire.
+ *
+ * THIS HANDLER WAS NEVER SUBSCRIBED. Both `game.on(...)` lines in its constructor were commented
+ * out, so every one of those packets was decoded by nobody and every creature in the world stood
+ * exactly where its create block put it. That is the whole of "the world does not move".
+ *
+ * The decode now lives in `./decode.ts`, established from those 642 real packets rather than from
+ * documentation -- read its header before changing a byte of it.
+ */
 export class MonsterMovementtHandler extends EventEmitter {
   private game: GameHandler;
 
-  // Creates a new character handler
+  /** Counters the world-state probe reads. `dropped` is a decode that did not fit; see `decode.ts`. */
+  public stats = { moves: 0, stops: 0, dropped: 0, unknownUnits: 0, applied: 0 };
+
   constructor(gameHandler: GameHandler) {
     super();
-
-    // Holds session
     this.game = gameHandler;
-    // Listen for character list
-    // this.game.on('packet:receive:SMSG_MONSTER_MOVE', this.handleMonsterMove.bind(this));
-    // this.game.on('packet:receive:SMSG_MONSTER_MOVE_TRANSPORT', this.handleMonsterMove.bind(this));
+    this.game.on('packet:receive:SMSG_MONSTER_MOVE', this.handleMonsterMove.bind(this));
+    this.game.on('packet:receive:SMSG_MONSTER_MOVE_TRANSPORT', this.handleMonsterMove.bind(this));
   }
 
   handleMonsterMove(packet: GamePacket) {
-    const pack: any ={};
-    pack.guid = packet.readPackedGUID();
+    const move = readMonsterMove(
+      packet,
+      packet.opcode === GameOpcode.SMSG_MONSTER_MOVE_TRANSPORT,
+    );
+    if (!move) {
+      this.stats.dropped += 1;
+      return;
+    }
+    this.stats.moves += 1;
 
-    if (packet.opcode === GameOpcode.SMSG_MONSTER_MOVE_TRANSPORT) {
-      pack.transportGUID = packet.readPackedGUID();
-      pack.transportSeat = packet.readByte();
+    const unit = this.game.world.entities.get(move.guid);
+    if (!unit) {
+      // The server moves units whose create block has not arrived (or never will, because they are
+      // outside our update range but inside someone else's). Nothing to draw.
+      this.stats.unknownUnits += 1;
+      return;
     }
 
-    pack.unk1 = packet.readByte();
-
-    pack.currentPosition = packet.readVector3();
-    pack.ticksCount = packet.readUnsignedInt();
-
-    pack.splineType = packet.readByte();
-
-    switch(pack.splineType) {
-      case SplineType.Normal:
-        break;
-      case SplineType.Stop:
-        return;
-      case SplineType.FacingSpot:
-        pack.facingPoint = packet.readVector3();
-        break;
-      case SplineType.FacingTarget:
-        pack.FacingTarget = packet.readByte(8);
-        break;
-      case SplineType.FacingAngle:
-        pack.facingAngle = packet.readFloat();
-        break;
-      default: break;
-    }
-
-    pack.splineFlags = packet.readUnsignedInt();
-
-    if ((pack.splineFlag & SplineFlag.Unknown3) > 1) {
-      pack.animationType =  packet.readByte();
-      pack.animationTime = packet.readUnsignedInt();
-    }
-
-    pack.currentTime = packet.readUnsignedInt();
-    
-    if ((pack.splineFlag & SplineFlag.Trajectory) > 1) {
-      pack.unk_float_0x800 = packet.readFloat();
-      pack.unk_int_0x800 = packet.readUnsignedInt();
-    }
-
-    pack.splinesCount = packet.readUnsignedInt();
-    pack.splines = [];
-    if ((pack.splineFlags & SplineFlag.Flying) > 1 || (pack.splineFlags & SplineFlag.CatmullRom) > 1) {
-      pack.startPosition = packet.readVector3();
-
-      if (pack.splinesCount > 1) {
-        for (let i=0; i< pack.splinesCount - 1; i++) {
-          pack.splines.push(packet.readVector3());
-        }
+    if (move.stop || move.path.length < 2) {
+      // A `Stop` states a position and nothing else: the unit is standing there, now.
+      this.stats.stops += 1;
+      unit.clearSplinePath();
+      unit.position.set(move.start.x, move.start.y, move.start.z);
+      if (move.facing.kind === 'angle') {
+        unit.rotation.z = move.facing.angle as number;
       }
-    } else {
-      pack.destination = packet.readVector3();
-      pack.mid = new THREE.Vector3();
-
-      pack.mid.x = (pack.currentPosition.x + pack.destination.x) * 0.5;
-      pack.mid.y = (pack.currentPosition.y + pack.destination.y) * 0.5;
-      pack.mid.z = (pack.currentPosition.z + pack.destination.z) * 0.5;
-
-      if (pack.splinesCount > 1) {
-        for (let i=0; i< pack.splinesCount - 1; i++) {
-          pack.packedOffset = packet.readUnsignedInt();
-
-          const x = ((pack.packedOffset & 0x7FF) << 21 >> 21) * 0.25;
-          const y = ((((pack.packedOffset >> 11) & 0x7FF) << 21) >> 21) * 0.25;
-          const z = ((pack.packedOffset >> 22 << 22) >> 22) * 0.25;
-
-          pack.splines.push(new THREE.Vector3(pack.mid.x + x, pack.mid.y + y, pack.mid.z + z));
-
-          // перепроверка
-          let packed = 0;
-          packed |= ((x / 0.25) & 0x7FF);
-          packed |= ((y / 0.25) & 0x7FF) << 11;
-          packed |= ((z / 0.25) & 0x3FF) << 22;
-
-          if (pack.packedOffset !== packed) {
-            console.error("Not equal!");
-          }
-        }
-      }
+      return;
     }
-    
-    this.applyUpdates(pack);
-  }
 
-  applyUpdates(pack:any) {
-    const unit = this.game.world.entities.get(pack.guid);
-    if (unit) {
-      unit.position.set(pack.currentPosition.x, pack.currentPosition.y, pack.currentPosition.z);
-      unit.setMovingData(pack.currentTime, pack.splines);
-    }
+    // The path's first point IS the server's idea of where the unit is right now, so an
+    // out-of-position unit is corrected by starting the walk rather than by a separate snap.
+    unit.position.set(move.start.x, move.start.y, move.start.z);
+    unit.setSplinePath(move.path, move.durationMs, move.flying, {
+      id: move.splineId,
+      finalFacing: move.facing.kind === 'angle' ? (move.facing.angle as number) : null,
+    });
+    this.stats.applied += 1;
   }
 }
