@@ -1,31 +1,21 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-var _entity = require('../entity');
-
-var _entity2 = _interopRequireDefault(_entity);
-
-var _stringRef = require('../string-ref');
-
-var _stringRef2 = _interopRequireDefault(_stringRef);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = (0, _entity2.default)({
-  id: _restructure2.default.uint32le,
-  name: _stringRef2.default,
-  weaponFlags: _restructure2.default.uint32le,
-  bodyFlags: _restructure2.default.uint32le,
-  flags: _restructure2.default.uint32le,
-  fallbackID: _restructure2.default.uint32le,
-  behaviorID: _restructure2.default.uint32le,
-  behaviorTier: _restructure2.default.uint32le
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+var _entity = _interopRequireDefault(require("../entity"));
+var _stringRef = _interopRequireDefault(require("../string-ref"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _default = (0, _entity["default"])({
+  id: _restructure["default"].uint32le,
+  name: _stringRef["default"],
+  weaponFlags: _restructure["default"].uint32le,
+  bodyFlags: _restructure["default"].uint32le,
+  flags: _restructure["default"].uint32le,
+  fallbackID: _restructure["default"].uint32le,
+  behaviorID: _restructure["default"].uint32le,
+  behaviorTier: _restructure["default"].uint32le
 });
-module.exports = exports['default'];
+exports["default"] = _default;

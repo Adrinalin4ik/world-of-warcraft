@@ -1,9 +1,22 @@
+import { vec4, mat4 } from 'gl-matrix';
 import * as THREE from 'three';
-import { PlaneHelper } from '../../../utils/plane-helper';
-import { FrustumHelper } from '../../../utils/frustum-helper';
 import THREEUtil from '../../../utils/three-util';
-import {vec4, vec3} from 'gl-matrix';
-import DebugPanel from '../../../../pages/game/debug/debug'
+import {
+  clipPolygonToNearPlane,
+  FULL_SCREEN_RECT,
+  intersectRect,
+  ON_PLANE_EPS,
+  rectFromClipPolygon,
+} from './rect';
+
+// Clip-space scratch, grown on demand. Portal polygons are small (4-8 vertices in practice) and
+// this runs per portal per frame, so the buffer is reused rather than rebuilt.
+const SCRATCH_CLIP = [];
+
+// Reused across localToWorld conversions. These run per portal vertex, per portal, per frame; a
+// fresh Vector3 per vertex was the single largest allocator in the cull pass.
+const SCRATCH_VERTEX = new THREE.Vector3();
+
 class WMOPortalView extends THREE.Mesh {
 
   constructor(portal, geometry, material) {
@@ -12,8 +25,12 @@ class WMOPortalView extends THREE.Mesh {
     this.matrixAutoUpdate = false;
 
     this.portal = portal;
-    this.geometry = geometry;
+    this.legacyGeometry = geometry;
     this.material = material;
+
+    this.geometry = geometry.toBufferGeometry();
+    // this.geometry.computeBoundsTree();
+    this.geometry.computeBoundingBox();
   }
 
   clone() {
@@ -27,8 +44,8 @@ class WMOPortalView extends THREE.Mesh {
     // let local = this.worldToLocal(origin);
     // local = new THREE.Vector3(-local.x, -local.y, local.z)
     // Obtain vertices in world space
-    for (let vindex = 0, vcount = this.geometry.vertices.length; vindex < vcount; ++vindex) {
-      const local = this.geometry.vertices[vindex].clone();
+    for (let vindex = 0, vcount = this.legacyGeometry.vertices.length; vindex < vcount; ++vindex) {
+      const local = this.legacyGeometry.vertices[vindex].clone();
       const world = this.localToWorld(local);
       const {x, y, z} = world;
       vertices.push([x, y, z]);
@@ -45,7 +62,7 @@ class WMOPortalView extends THREE.Mesh {
 
     var visible = true;
     for (let i = 0; visible && i < frustumPlanes.length; i++) {
-        visible = visible && THREEUtil.planeCull(thisPortalVerticesCopy, frustumPlanes);
+      visible = visible && THREEUtil.planeCull(thisPortalVerticesCopy, frustumPlanes);
     }
 
     if (!visible) return null;
@@ -88,56 +105,28 @@ class WMOPortalView extends THREE.Mesh {
    *
    */
   createFrustum(camera, frustum, flip = false) {
-    // return frustum
     const planes = [];
     const vertices = [];
-    const origin = camera.position.clone();
-    // let local = this.worldToLocal(origin);
-    // local = new THREE.Vector3(-local.x, -local.y, local.z)
+
+    const origin = camera.position;
+
     // Obtain vertices in world space
-    for (let vindex = 0, vcount = this.geometry.vertices.length; vindex < vcount; ++vindex) {
-      const local = this.geometry.vertices[vindex].clone();
-      const world = this.localToWorld(local);
+    // These world-space vertices are retained by the clipper, so each needs its own Vector3 -- but
+    // the intermediate copy does not.
+    for (let vindex = 0, vcount = this.legacyGeometry.vertices.length; vindex < vcount; ++vindex) {
+      const world = new THREE.Vector3().copy(this.legacyGeometry.vertices[vindex]);
+      this.localToWorld(world);
       vertices.push(world);
     }
 
-    // for (var i = 0; i < vertices.length; ++i) {
-    //     var i2 = (i + 1) % vertices.length;
-
-    //     // var n = mathHelper.createPlaneFromEyeAndVertexes(cameraVec4, thisPortalVerticesCopy[i], thisPortalVerticesCopy[i2]);
-    //     const eye = origin;
-    //     const vertex1 = vertices[i]
-    //     const vertex2 = vertices[i2]
-    //     var edgeDir1 = new THREE.Vector3();
-    //     edgeDir1.subVectors(vertex1, eye)
-        
-    //     var edgeDir2 = new THREE.Vector3();
-    //     edgeDir2.subVectors(vertex2, eye)
-        
-    //     const normVector = new THREE.Vector3();
-    //     normVector.cross(edgeDir2, edgeDir1);
-    //     normVector.normalize();
-    //     const distToPlane = normVector.distanceTo(eye);
-    //     normVector.z = -distToPlane;
-
-    //     const planeNorm = new THREE.Plane(normVector);
-
-    //     if (flip) {
-    //       planeNorm.negate();
-    //     }
-    //     // console.warn('here', planeNorm)
-    //     planes.push(planeNorm);
-    // }
-
     // Check distance to portal
-    const distance = this.portal.plane.distanceToPoint(this.worldToLocal(origin));
-    const close = distance > 1.0 && distance < -1.0;
-    // console.log(distance)
-    /* 
-      If the portal is very close, use the portal vertices unedited; otherwise, clip the portal
-      vertices by the provided frustum.
-    */
-    const clipped = THREEUtil.clipVerticesByFrustum(vertices, frustum)//close ? vertices : THREEUtil.clipVerticesByFrustum(vertices, frustum);
+    SCRATCH_VERTEX.copy(origin);
+    const distance = this.portal.plane.distanceToPoint(this.worldToLocal(SCRATCH_VERTEX));
+    const close = distance < 1.0 && distance > -1.0;
+
+    // If the portal is very close, use the portal vertices unedited; otherwise, clip the portal
+    // vertices by the provided frustum.
+    const clipped = close ? vertices : THREEUtil.clipVerticesByFrustum(vertices, frustum);
 
     // If clipping the portal vertices resulted in a polygon with fewer than 3 vertices, return
     // null to indicate a new frustum couldn't be produced.
@@ -150,8 +139,8 @@ class WMOPortalView extends THREE.Mesh {
       const vertex1 = clipped[vindex];
       const vertex2 = clipped[(vindex + 1) % vcount];
 
-      const plane = new THREE.Plane().setFromCoplanarPoints(vertex1, vertex2, origin);
-      // if (flip) plane.negate();
+      const plane = new THREE.Plane().setFromCoplanarPoints(origin, vertex1, vertex2);
+      if (flip) plane.negate();
       planes.push(plane);
     }
 
@@ -159,29 +148,72 @@ class WMOPortalView extends THREE.Mesh {
     const farPlaneIndex = frustum.planes.length - 1;
     const farPlane = frustum.planes[farPlaneIndex];
     planes.push(farPlane);
-    // this.add(new THREE.PlaneHelper( farPlane, 1, 0xff0000 ));
+
     // Create a near plane matching the portal
     const nearPlane = new THREE.Plane().setFromCoplanarPoints(clipped[0], clipped[1], clipped[2]);
-    // if (flip) nearPlane.negate();
+    if (flip) nearPlane.negate();
     planes.push(nearPlane);
-    // let h = new PlaneHelper( nearPlane, 10, 0x0000ff );
-    // this.add(h);
-    // const planeHelper = new PlaneHelper( nearPlane, 10, 0xff0000 );
-    // planeHelper.position.set(
-    //   this.parent.position.x, 
-    //   this.parent.position.y, 
-    //   this.parent.position.z)
-    // console.log(this.parent.parent.parent)
-    // this.add(planeHelper);
+
     const newFrustum = { planes };
-    // DebugPanel.test3 = DebugPanel.frustumToString(newFrustum.planes);
-    // const fr = new THREE.Frustum(...planes);
-    // const h = new FrustumHelper(fr);
-    // console.log(h)
-    // this.parent.add(h)
-    this.material.color = new THREE.Color(0xff0000);
-    // this.material.opacity = 1;
+
     return newFrustum;
+  }
+
+  /**
+   * Project this portal into the screen rect the flood should carry through it.
+   *
+   * Returns the incoming rect narrowed by this portal's screen-space AABB, or null when the branch
+   * dies -- the portal is entirely behind the eye, or the narrowed rect collapsed below the
+   * client's zero-area epsilon. That collapse is the mechanism: it is why a room behind a doorway
+   * you cannot see through stops being drawn.
+   *
+   * The polygon is clipped against the NEAR PLANE before projecting. See
+   * `rect.ts::clipPolygonToNearPlane` for why skipping that step silently drops visible rooms.
+   *
+   * The reference's special case (client `0x6b46f0`): an eye within ON_PLANE_EPS of the portal's
+   * plane gets the full screen rect for that portal, because the projection is degenerate there.
+   *
+   * @param viewProjection  projection * matrixWorldInverse for the main camera
+   * @param incoming        the rect this branch arrived with
+   * @param cameraLocal     camera position in THIS portal view's local space
+   */
+  projectToRect(viewProjection, incoming, cameraLocal) {
+    if (Math.abs(this.portal.plane.distanceToPoint(cameraLocal)) <= ON_PLANE_EPS) {
+      return intersectRect(incoming, FULL_SCREEN_RECT);
+    }
+
+    const vertices = this.legacyGeometry.vertices;
+    const count = vertices.length;
+    const e = viewProjection.elements;
+
+    for (let vindex = 0; vindex < count; ++vindex) {
+      SCRATCH_VERTEX.copy(vertices[vindex]);
+      this.localToWorld(SCRATCH_VERTEX);
+      const { x, y, z } = SCRATCH_VERTEX;
+
+      let clip = SCRATCH_CLIP[vindex];
+      if (!clip) {
+        clip = SCRATCH_CLIP[vindex] = [0, 0, 0, 0];
+      }
+
+      // THREE.Matrix4 stores column-major, so column n starts at element 4n.
+      clip[0] = e[0] * x + e[4] * y + e[8] * z + e[12];
+      clip[1] = e[1] * x + e[5] * y + e[9] * z + e[13];
+      clip[2] = e[2] * x + e[6] * y + e[10] * z + e[14];
+      clip[3] = e[3] * x + e[7] * y + e[11] * z + e[15];
+    }
+
+    const clipped = clipPolygonToNearPlane(SCRATCH_CLIP.slice(0, count));
+    if (clipped.length < 3) {
+      return null;
+    }
+
+    const projected = rectFromClipPolygon(clipped);
+    if (!projected) {
+      return null;
+    }
+
+    return intersectRect(incoming, projected);
   }
 
   /**
@@ -195,7 +227,7 @@ class WMOPortalView extends THREE.Mesh {
    */
   intersectFrustum(frustum) {
     const planes = frustum.planes;
-    const vertices = this.geometry.vertices;
+    const vertices = this.legacyGeometry.vertices;
 
     for (let pindex = 0, pcount = planes.length; pindex < pcount; ++pindex) {
       const plane = planes[pindex];
@@ -207,8 +239,9 @@ class WMOPortalView extends THREE.Mesh {
       let inside = 0;
 
       for (let vindex = 0, vcount = vertices.length; vindex < vcount; ++vindex) {
-        const vertex = this.localToWorld(vertices[vindex].clone());
-        const distance = plane.distanceToPoint(vertex);
+        SCRATCH_VERTEX.copy(vertices[vindex]);
+        this.localToWorld(SCRATCH_VERTEX);
+        const distance = plane.distanceToPoint(SCRATCH_VERTEX);
 
         if (distance >= 0.0) {
           inside++;

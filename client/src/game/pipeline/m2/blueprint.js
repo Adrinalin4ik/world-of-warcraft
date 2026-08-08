@@ -1,12 +1,24 @@
-import WorkerPool from '../worker/pool';
-import M2 from './';
-import ColliderManager from '../../world/collider-manager';
 import gameSettings from '../../settings';
+import { collisionWorld } from '../../collision/collision-world';
+import { frameTrace, traceStage } from '../../perf/frame-trace';
+import WorkerPool from '../worker/pool';
+import { externalAnims } from './anim/external-anim-binder';
+import M2 from './';
+
+/** Chrome's `performance.memory.usedJSHeapSize` in MB, or NaN where the extension is absent. */
+function heapUsedMB() {
+  const mem = performance.memory;
+  return mem ? mem.usedJSHeapSize / 1048576 : NaN;
+}
 
 class M2Blueprint {
 
   static cache = new Map();
-  static animationUpdateTargets = new Map();
+
+  // Per-model animation data, keyed by the same normalised path `cache` uses. Built once, by the
+  // source M2, and shared by every clone; kept here so callers that hold no M2 (the doodad
+  // variation cycler, debug readouts) can still reach a model's sequence table.
+  static modelAnims = new Map();
 
   static references = new Map();
   static pendingUnload = new Set();
@@ -37,17 +49,47 @@ class M2Blueprint {
       this.cache.set(path, WorkerPool.enqueue('M2', path).then((args) => {
         const [data, skinData] = args;
 
-        const m2 = new M2(path, data, skinData);
-        if (m2.receivesAnimationUpdates) {
-          this.animationUpdateTargets.set(path, m2);
-        }
+        // TIMED. `new M2` is the first-sight cost that is unavoidably on the main thread: the parse
+        // ran in the worker, but building the BufferGeometry, assembling the skeleton from the bind
+        // pose, creating the batches and their materials all happen here, once per model PATH. It is
+        // therefore the leading suspect for "only a NEW KIND of mob hitches", and the mark is how
+        // that suspicion becomes a number instead of an argument. See `perf/frame-trace.ts`.
+        const m2 = traceStage('m2.build', path, () => new M2(path, data, skinData));
+
+        this.modelAnims.set(path, m2.modelAnim);
+
+        // Fetch and merge whatever sibling `.anim` files this model's quarantined sequences need.
+        // Fire and forget, and off the load promise on purpose: the model must not wait on them.
+        // Each merge lifts the quarantine for its own sequence when it lands, and until it does the
+        // sequence stays exactly as unplayable as it was -- so an `.anim` that is slow, missing or
+        // corrupt costs nothing but the animation it carried. A model with no external sequence
+        // (nearly every placed doodad) does no work here at all.
+        externalAnims.ensure(path, m2.modelAnim);
 
         return m2;
       }));
     }
 
     return this.cache.get(path).then((m2) => {
-      return m2.clone();
+      // TIMED too, and separately: this is the PER-INSTANCE half. A `canInstance` model shares the
+      // source's geometry and batches and the clone is nearly free; a character/creature model that
+      // animates does not, and rebuilds its own batches and materials here. Splitting the two marks
+      // is what distinguishes "the first of a kind is expensive" from "every one of them is".
+      // Gated, like every other read in this instrument. The comment below claimed it was "read
+      // only while the trace is on" while this line read it on all 1101 clones of a walk.
+      const heapBefore = frameTrace.enabled ? heapUsedMB() : 0;
+      const clone = traceStage('m2.clone', path, () => m2.clone());
+
+      // The RETAINED heap step across one clone, in MB, recorded through the mark's `ms` slot (see
+      // `frameTrace.mark`). It is the other half of the clone-versus-GC question: a clone whose cost
+      // is real work leaves a step roughly proportional to what it built, while a clone that merely
+      // hosted a collection can come out FLAT OR NEGATIVE despite having taken hundreds of ms.
+      // `performance.memory` is Chrome-only and quantised; it is read only while the trace is on.
+      if (frameTrace.enabled) {
+        frameTrace.mark('m2.clone.heapMB', heapUsedMB() - heapBefore, path);
+      }
+
+      return clone;
     });
   }
 
@@ -61,7 +103,7 @@ class M2Blueprint {
     let refCount = this.references.get(path) || 1;
     
     --refCount;
-    ColliderManager.collidableMeshList.delete(m2.boundingMesh.uuid);
+    collisionWorld.doodads.remove(m2.boundingMesh);
 
     if (refCount === 0) {
       this.pendingUnload.add(path);
@@ -80,7 +122,7 @@ class M2Blueprint {
       }
 
       this.cache.delete(path);
-      this.animationUpdateTargets.delete(path);
+      this.modelAnims.delete(path);
       this.references.delete(path);
       this.pendingUnload.delete(path);
     });
@@ -88,14 +130,14 @@ class M2Blueprint {
     setTimeout(this.backgroundUnload.bind(this), this.UNLOAD_INTERVAL);
   }
 
-  static animate(delta) {
-    this.animationUpdateTargets.forEach((m2) => {
-      // Handle delta updates for instanced M2s (which share animation managers).
-      if (m2.animations.length > 0) {
-        m2.animations.update(delta);
-      }
-    });
-  }
+  /**
+   * There is deliberately no `animate(delta)` here any more.
+   *
+   * Global sequences advance on world time alone -- there is nothing per-instance to tick. The old
+   * `animate(delta)` walked every loaded model to push a delta into a shared AnimationMixer;
+   * instances now read `worldClockMs` directly, so the method is gone. Instance posing lives in the
+   * per-frame doodad pass (`DoodadManager#animate`), added in Task 13.
+   */
 
 }
 

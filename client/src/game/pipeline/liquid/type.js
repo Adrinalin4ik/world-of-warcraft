@@ -8,6 +8,8 @@ class LiquidType {
 
   constructor(data) {
     this.data = data;
+    // Default blend mode for liquids (0 = Combiners_Mod - multiply)
+    this.blendMode = 0;
     this.material = new LiquidMaterial(this);
     this.constructor.materials.add(this.material);
     this.textures = [];

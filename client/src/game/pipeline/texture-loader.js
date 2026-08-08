@@ -1,8 +1,32 @@
 import * as THREE from 'three';
 import gameSettings from '../settings';
+import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
+import WorkerPool, { PRIORITY } from './worker/pool';
 
-const loader = new THREE.TextureLoader();
+const THREE_FORMAT = {
+  [BLP_IMAGE_FORMAT.IMAGE_DXT1]: THREE.RGBA_S3TC_DXT1_Format,
+  [BLP_IMAGE_FORMAT.IMAGE_DXT3]: THREE.RGBA_S3TC_DXT3_Format,
+  [BLP_IMAGE_FORMAT.IMAGE_DXT5]: THREE.RGBA_S3TC_DXT5_Format,
+  [BLP_IMAGE_FORMAT.IMAGE_ABGR8888]: THREE.RGBAFormat
+};
 
+const COMPRESSED_FORMATS = new Set([
+  BLP_IMAGE_FORMAT.IMAGE_DXT1,
+  BLP_IMAGE_FORMAT.IMAGE_DXT3,
+  BLP_IMAGE_FORMAT.IMAGE_DXT5
+]);
+
+/**
+ * Loads BLP textures straight from the asset host.
+ *
+ * Decoding happens in a worker and DXT levels reach the GPU still compressed, so `load` is async and
+ * hands back a promise. Callers that need something to render in the meantime can put `PLACEHOLDER`
+ * in the slot and swap in the real texture when it arrives.
+ *
+ * Orientation is deliberately uniform: every texture is created with `flipY = false`, because
+ * three.js cannot flip a compressed upload and a DXT texture would otherwise disagree with a
+ * palettized one. Surfaces that want the opposite V direction flip it in their vertex shader.
+ */
 class TextureLoader {
 
   static cache = new Map();
@@ -12,11 +36,55 @@ class TextureLoader {
 
   static UNLOAD_INTERVAL = gameSettings.texture.unloadInterval;
 
-  static load(rawPath, wrapS = THREE.RepeatWrapping, wrapT = THREE.RepeatWrapping, flipY = true) {
+  static _placeholder = null;
+
+  /**
+   * Shared empty texture for slots whose real texture has not arrived yet. Never mutate it: it is
+   * shared by every material that is still waiting.
+   */
+  static get PLACEHOLDER() {
+    if (!this._placeholder) {
+      this._placeholder = new THREE.Texture();
+      this._placeholder.name = 'placeholder';
+    }
+    return this._placeholder;
+  }
+
+  /**
+   * `priority` reaches the worker queue and NOTHING else -- it is not part of `textureKey`, and it
+   * must not be: two callers wanting the same texture at different urgencies still want the same
+   * texture, and keying on it would decode the same BLP twice and hand out two GPU uploads.
+   *
+   * The consequence, stated rather than hidden: a path already in flight at BACKGROUND is not
+   * re-prioritised when a character asks for it. The queued task cannot be found from here (the
+   * cache holds the promise, not the task), so raising it would mean a handle this class does not
+   * keep. Measured impact is nil on the path that matters -- `Character\...` and
+   * `Item\ObjectComponents\...` are asked for by units and by nothing else, so the first asker is
+   * already a unit -- and the case where it would bite is a terrain tileset a character happens to
+   * share, of which the world holds none.
+   */
+  /**
+   * The cache/reference key for a path and its wrap settings.
+   *
+   * Exposed because a reference can outlive the knowledge of which TEXTURE it belongs to: a slot
+   * still showing `PLACEHOLDER` has taken a reference but has no `textureKey` to release it by. A
+   * caller that remembers the KEY it asked for can always give it back; a caller that remembers only
+   * the texture object cannot. See `releaseKey`.
+   */
+  static keyFor(rawPath, wrapS = THREE.RepeatWrapping, wrapT = THREE.RepeatWrapping) {
+    return `${rawPath.toUpperCase()};ws:${wrapS.toString()};wt:${wrapT.toString()}`;
+  }
+
+  static load(
+    rawPath,
+    wrapS = THREE.RepeatWrapping,
+    wrapT = THREE.RepeatWrapping,
+    priority = PRIORITY.BACKGROUND,
+  ) {
     const path = rawPath.toUpperCase();
 
     // Ensure we cache based on texture settings. Some textures are reused with different settings.
-    const textureKey = `${path};ws:${wrapS.toString()};wt:${wrapT.toString()};fy:${flipY}`;
+    const textureKey = this.keyFor(path, wrapS, wrapT);
 
     // Prevent unintended unloading.
     if (this.pendingUnload.has(textureKey)) {
@@ -34,32 +102,86 @@ class TextureLoader {
     ++refCount;
     this.references.set(textureKey, refCount);
 
-    const encodedPath = encodeURI(`pipeline/${path}.png`);
-
     if (!this.cache.has(textureKey)) {
-      // TODO: Promisify THREE's TextureLoader callbacks
-      this.cache.set(textureKey, loader.load(encodedPath, function(texture) {
-        texture.sourceFile = path;
-        texture.textureKey = textureKey;
+      const loading = WorkerPool.enqueueAt(priority, 'BLP', path).then((spec) => {
+        if (!spec) {
+          throw new Error(`Failed to decode texture: ${path}`);
+        }
 
-        texture.wrapS = wrapS;
-        texture.wrapT = wrapT;
-        texture.flipY = flipY;
+        return this.createTexture(path, textureKey, spec, wrapS, wrapT);
+      });
 
-        texture.needsUpdate = true;
-      }));
+      this.cache.set(textureKey, loading);
     }
 
     return this.cache.get(textureKey);
   }
 
+  static createTexture(path, textureKey, spec, wrapS, wrapT) {
+    const format = THREE_FORMAT[spec.format];
+
+    if (format === undefined) {
+      throw new Error(`Unsupported texture format ${spec.format}: ${path}`);
+    }
+
+    const mipmaps = spec.mipmaps;
+    let texture;
+
+    if (COMPRESSED_FORMATS.has(spec.format)) {
+      texture = new THREE.CompressedTexture(mipmaps, spec.width, spec.height, format);
+    } else {
+      texture = new THREE.DataTexture(mipmaps[0].data, spec.width, spec.height, format);
+      texture.mipmaps = mipmaps;
+    }
+
+    // A mip chain we supply ourselves must not be regenerated. Where the BLP carries only one level
+    // there is no chain to sample, so mipmap filtering would leave the texture incomplete and it
+    // would render black.
+    texture.generateMipmaps = false;
+    texture.minFilter = mipmaps.length > 1 ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+
+    texture.wrapS = wrapS;
+    texture.wrapT = wrapT;
+    texture.flipY = false;
+    texture.anisotropy = 16;
+
+    texture.name = path;
+    texture.sourceFile = path;
+    texture.textureKey = textureKey;
+
+    texture.needsUpdate = true;
+
+    return texture;
+  }
+
   static unload(texture) {
-    const textureKey = texture.textureKey;
+    if (!texture) return;
+    this.releaseKey(texture.textureKey);
+  }
 
-    let refCount = this.references.get(textureKey) || 1;
-    --refCount;
+  /**
+   * Give back ONE reference taken for `textureKey`.
+   *
+   * The key-based release, and the one `unload` now delegates to. Two things it fixes over the
+   * texture-based form it replaces:
+   *
+   *  * A reference taken for a slot that is still `PLACEHOLDER` can be released at all. It could not
+   *    be before -- `unload` reads `texture.textureKey`, which the shared placeholder does not carry
+   *    -- so a material disposed while its textures were still decoding released nothing.
+   *  * The count is written on the way to zero. The old branch left the stale count in `references`
+   *    when it reached 0 and only added the key to `pendingUnload`; if `load` then resurrected the
+   *    key before the background sweep ran, it read that stale count and came back at 2 instead of
+   *    1, permanently one high. Deleting the entry makes the resurrection path (`get(key) || 0`)
+   *    exact.
+   */
+  static releaseKey(textureKey) {
+    if (!textureKey) return;
 
-    if (refCount === 0) {
+    const refCount = (this.references.get(textureKey) || 1) - 1;
+
+    if (refCount <= 0) {
+      this.references.delete(textureKey);
       this.pendingUnload.add(textureKey);
     } else {
       this.references.set(textureKey, refCount);
@@ -68,8 +190,12 @@ class TextureLoader {
 
   static backgroundUnload() {
     this.pendingUnload.forEach((textureKey) => {
-      if (this.cache.has(textureKey)) {
-        this.cache.get(textureKey).dispose();
+      const loading = this.cache.get(textureKey);
+
+      if (loading) {
+        // The cache holds promises, so a texture can be dropped while it is still decoding. Dispose
+        // once it settles, and swallow a rejection here: whoever asked for it already saw the error.
+        loading.then((texture) => texture.dispose()).catch(() => {});
       }
 
       this.cache.delete(textureKey);
@@ -80,6 +206,13 @@ class TextureLoader {
     setTimeout(this.backgroundUnload.bind(this), this.UNLOAD_INTERVAL);
   }
 
+}
+
+// Reachable from a probe. The reference table is the only place the over-referencing described in
+// `M2Material#updateCharacterTextures` is visible at all -- from outside, a leaked reference and a
+// live one look identical.
+if (typeof window !== 'undefined') {
+  window.textureLoader = TextureLoader;
 }
 
 export default TextureLoader;

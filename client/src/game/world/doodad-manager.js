@@ -1,4 +1,11 @@
+import { animCounters } from '../pipeline/m2/anim/counters';
+import { BoneBudget } from '../pipeline/m2/anim/gating';
+import { externalMergeEpoch } from '../pipeline/m2/anim/model-anim';
+import { poseGatedInstance } from '../pipeline/m2/anim/pose-gate';
+import { armDoodad, cycleDoodad } from '../pipeline/m2/anim/variation-cycle';
+import { worldClock } from '../pipeline/m2/anim/world-clock';
 import M2Blueprint from '../pipeline/m2/blueprint';
+import { beginAnimSection, endAnimSection } from '../perf/anim-section';
 import gameSettings from '../settings';
 
 class DoodadManager {
@@ -18,9 +25,24 @@ class DoodadManager {
     this.zeropoint = zeropoint;
 
     this.chunkRefs = new Map();
+    this.mapLight = null;
 
     this.doodads = new Map();
     this.animatedDoodads = new Map();
+
+    // Dense, monotonically increasing slot handed to each animated doodad at registration. This is
+    // the phase input for `shouldPose`'s decimation stagger, and it deliberately is NOT the doodad's
+    // entry id: entry ids are sparse, large, and clustered by map chunk, so `id % period` can put a
+    // whole chunk's worth of props on one phase -- which is the single-phase pile-up the stagger
+    // exists to prevent, and a worse worst frame than not decimating at all.
+    this.nextPoseSlot = 0;
+
+    // The global external-`.anim` merge epoch this manager last rescanned at. -1 rather than the
+    // live value so the first frame always scans -- at that point `doodads` is empty or nearly so,
+    // and starting in step would mean a merge that landed BEFORE the first frame was never adopted.
+    this.lastMergeEpoch = -1;
+
+    this.boneBudget = new BoneBudget(gameSettings.m2.boneBudgetPerFrame);
 
     this.entriesPendingLoad = new Map();
     this.entriesPendingUnload = new Map();
@@ -128,22 +150,86 @@ class DoodadManager {
 
       this.placeDoodad(doodad, entry.position, entry.rotation, entry.scale);
 
-      if (doodad.animated) {
-        this.enableDoodadAnimations(entry, doodad);
+      this.map.materialRegistry.addFrom(doodad);
+
+      if (this.map.particleManager) {
+        this.map.particleManager.register(doodad);
+      }
+
+      // TWO independent reasons to be in the per-frame set, and they must both be asked.
+      //
+      // `doodad.animated` comes from `ModelAnim.classify()`, which answers "is there anything to
+      // SAMPLE?" -- the right question for posing, and deliberately blind to billboarding. The
+      // parser's older `data.animated` getter folded `|| billboarded` in
+      // (`wow-data-parser/m2/index.js:63-67`), so gating on `animated` alone would silently drop a
+      // doodad whose only moving part is a billboarded bone: it would stop being turned to face the
+      // camera AND stop getting the forced `updateMatrixWorld` in `World#updateDynamicMatrices`,
+      // freezing it in bind orientation.
+      //
+      // The answer is NOT final, either: `doodad.animated` is `ModelAnim.classify()` over the
+      // INLINE slots only, so a model whose real authoring lives in sibling `.anim` files reads
+      // static here and becomes animated later, when the merge lands. `adoptMergedAnimations`
+      // below is what re-asks; without it such a doodad would stand in bind pose for ever with
+      // correct keys in the table beside it.
+      if (doodad.animated || doodad.billboards.length > 0) {
+        this.enableDoodadAnimations(entry.id, doodad);
       }
     });
   }
 
-  enableDoodadAnimations(entry, doodad) {
+  /**
+   * Re-ask the membership question for every STATIC doodad, but only when an external `.anim` merge
+   * has actually landed somewhere since the last time we asked.
+   *
+   * `loadDoodad` decides membership once, from `doodad.animated`, in the load callback. That is the
+   * right answer for the overwhelming majority of models and the wrong one for a model whose only
+   * real authoring is external: it classifies static, allocates no `InstanceAnim`, joins no
+   * per-frame set, and nothing on this path ever re-asks -- the exact silent failure
+   * `M2#syncMergedAnimation` exists to prevent, which until now only the unit path pulled on.
+   *
+   * Reachability in 3.3.5a is low (external ids are emotes and specials on creature models), but
+   * `externalAnims.ensure` runs for EVERY model from `M2Blueprint.load`, so the machinery is live
+   * here and the failure mode is the silent kind.
+   *
+   * COST. Gated on the global epoch (`externalMergeEpoch`), not on any per-doodad state: the steady
+   * state is one integer compare per frame, and the O(loaded doodads) walk happens only on frames a
+   * merge landed on. Called BEFORE the `animatedDoodads` walk in `animate` on purpose -- it inserts
+   * into that map, and a `Map` grown during its own `forEach` visits the new entries with a
+   * `poseFrame` and `poseSlot` assigned microseconds earlier.
+   */
+  adoptMergedAnimations() {
+    const epoch = externalMergeEpoch();
+    if (epoch === this.lastMergeEpoch) {
+      return;
+    }
+    this.lastMergeEpoch = epoch;
+
+    this.doodads.forEach((doodad, entryID) => {
+      if (this.animatedDoodads.has(entryID)) {
+        return;
+      }
+      // One boolean compare for a doodad that has nothing to adopt. Only ever flips one way.
+      if (doodad.syncMergedAnimation && doodad.syncMergedAnimation()) {
+        this.enableDoodadAnimations(entryID, doodad);
+      }
+    });
+  }
+
+  enableDoodadAnimations(entryID, doodad) {
     // Maintain separate entries for animated doodads to avoid excessive iterations on each
     // call to animate() during the render loop.
-    this.animatedDoodads.set(entry.id, doodad);
+    this.animatedDoodads.set(entryID, doodad);
 
-    // Auto-play animation index 0 in doodad, if animations are present.
-    // TODO: Properly manage doodad animations.
-    if (doodad.animations.length > 0) {
-      doodad.animations.playAnimation(0);
-      doodad.animations.playAllSequences();
+    doodad.poseSlot = this.nextPoseSlot++;
+
+    // Last frame on which this doodad's bones were actually written. Read by
+    // `World#updateDynamicMatrices` to skip the scene walk for everything the gates rejected.
+    doodad.poseFrame = -1;
+
+    // Membership in this map does NOT imply `instanceAnim` is non-null -- a billboard-only doodad
+    // is here purely for `applyBillboards`, and never allocates an instance at all.
+    if (doodad.instanceAnim) {
+      armDoodad(doodad.instanceAnim, worldClock.ms);
     }
   }
 
@@ -179,10 +265,18 @@ class DoodadManager {
 
   unloadDoodad(entry) {
     const doodad = this.doodads.get(entry.id);
+
+    if (this.map.particleManager) {
+      this.map.particleManager.unregister(doodad);
+    }
+
     this.doodads.delete(entry.id);
     this.animatedDoodads.delete(entry.id);
     this.view.remove(doodad);
 
+    // Materials are intentionally left in the registry: M2 materials are cached and shared across
+    // placements (M2Blueprint.cache), so removing them here would darken every other placement of
+    // the same model still on screen.
     M2Blueprint.unload(doodad);
   }
 
@@ -205,10 +299,16 @@ class DoodadManager {
     const quat = doodad.quaternion;
     quat.set(quat.x, quat.y, quat.z, -quat.w);
 
+    const scaleFloat = scale / 1024;
+
     if (scale !== 1024) {
-      const scaleFloat = scale / 1024;
       doodad.scale.set(scaleFloat, scaleFloat, scaleFloat);
     }
+
+    // World bounding-sphere radius = authored M2 radius x placement scale, matching the reference's
+    // `rec+0x68` (`FUN_006952a0`: radius x scale). Read by the distance-fade cull; see
+    // pipeline/m2/fade/laws.ts.
+    doodad.worldFadeRadius = (doodad.vertexRadius || 0) * scaleFloat;
 
     // Add doodad to world map.
     doodad.updateMatrix();
@@ -222,21 +322,134 @@ class DoodadManager {
       return;
     }
 
+    // One of the three `'anim'` span call sites (the others are `World#animateEntities` and
+    // `WMOManager#animate`). `CpuSections` sums same-named spans within a frame, so the three
+    // report one `anim` total -- the number the plan's <= 2 ms gate is stated against.
+    beginAnimSection();
+
+    // Before the walk below, and inside the span: adopting a merge is animation work.
+    this.adoptMergedAnimations();
+
+    // Clock-INDEXED, never delta-accumulated, and shared with every other animation consumer -- see
+    // `anim/world-clock.ts` and `InstanceAnim`. `delta` is untouched here on purpose.
+    const worldClockMs = worldClock.ms;
+    const frameIndex = worldClock.frameIndex;
+
+    this.boneBudget.beginFrame();
+
+    const camPos = camera.position;
+
     this.animatedDoodads.forEach((doodad) => {
+      // A member of this map has EITHER keyframes to sample OR billboarded bones, and possibly only
+      // the latter -- in which case `instanceAnim` is null and every pose step below is skipped
+      // while the billboard step at the bottom still runs.
+      const inst = doodad.instanceAnim;
+
+      if (inst) {
+        animCounters.resident++;
+
+        // RESIDENCY gate: the variation cycle runs for every loaded doodad, drawn or not.
+        // Deliberately separate from the pose gate below -- benilla `doodad_anim.rs:20-25`. A doodad
+        // behind the camera keeps cycling; it just stops being posed. Because sampling is
+        // clock-indexed that costs nothing and drifts nothing.
+        cycleDoodad(inst, worldClockMs);
+      }
+
+      // DRAW gate: only what is actually drawn gets posed or turned.
       if (!doodad.visible) {
+        if (inst) {
+          animCounters.skipped++;
+        }
         return;
       }
 
-      if (doodad.receivesAnimationUpdates && doodad.animations.length > 0) {
-        doodad.animations.update(delta);
+      // `touched` drives the scene walk in `World#updateDynamicMatrices`. Only a doodad whose bones
+      // actually moved this frame needs its subtree re-accumulated, and that walk is O(bones) --
+      // comparable to `solveBones` itself, so leaving it ungated would have handed back most of
+      // what the gates above just saved.
+      let touched = false;
+
+      // NON-BONE channels: UV scroll, transparency, vertex colour.
+      //
+      // Deliberately NOT inside `poseDoodad`. That path is behind the `useSkinning` test below AND
+      // behind the distance-decimation and bone-budget gates, and neither applies here: a scrolling
+      // waterfall or a pulsing glow often has no animated bone at all (so `useSkinning` is false),
+      // and a doodad the bone gates denied still has to keep scrolling -- there are no bones to
+      // budget for these three channels, only a handful of scalar samples.
+      //
+      // Behind the DRAW gate above, though. The values are only read per draw
+      // (`applyAnimatedUniformsBeforeRender`), and sampling is clock-indexed, so an undrawn doodad
+      // that resumes samples the value the shared clock dictates rather than a stale one.
+      if (inst) {
+        animCounters.materialsEvaluated++;
+        doodad.evaluateMaterialChannels(worldClockMs);
+      }
+
+      // BONE-MESH gate. `classify()` returns true for UV, transparency and vertex-colour animation
+      // with no bone tracks at all, but `useSkinning` is driven only by `boneDef.animated`, and
+      // `createMesh` parents the root bones ONLY on the skinning branch. For such a model the bones
+      // are orphaned from the scene graph, so solving them charges the bone budget and writes into
+      // objects nothing reads. The instance must still be resident and must still cycle -- Task 14
+      // needs its clock for the UV and transparency channels -- so this gates the BONE work only,
+      // never the membership.
+      if (inst && doodad.useSkinning) {
+        touched = this.poseDoodad(doodad, inst, camPos, frameIndex, worldClockMs);
+      } else if (inst) {
+        animCounters.skipped++;
       }
 
       if (cameraMoved && doodad.billboards.length > 0) {
         doodad.applyBillboards(camera);
+        touched = true;
+      }
+
+      if (touched) {
+        doodad.poseFrame = frameIndex;
       }
 
       if (doodad.skeletonHelper) {
         doodad.skeletonHelper.update();
+      }
+    });
+
+    endAnimSection();
+  }
+
+  /**
+   * Distance-decimate, budget, solve and apply one visible instance's pose.
+   *
+   * The gate itself now lives in `anim/pose-gate.ts`, shared with the WMO-interior doodads and the
+   * units Task 16 added: it turns on two details (measure from `matrixWorld`, phase on a dense
+   * `poseSlot`) that a second hand-written copy gets wrong quietly. This wrapper is what supplies
+   * THIS manager's bone budget.
+   */
+  poseDoodad(doodad, inst, camPos, frameIndex, worldClockMs) {
+    return poseGatedInstance(doodad, inst, camPos, frameIndex, worldClockMs, this.boneBudget);
+  }
+
+  /**
+   * Set the map light system
+   */
+  setMapLight(mapLight) {
+    this.mapLight = mapLight;
+    
+    // Propagate to all existing doodads
+    this.doodads.forEach((doodad) => {
+      if (doodad.setMapLight) {
+        doodad.setMapLight(mapLight);
+      }
+    });
+  }
+
+  /**
+   * Update lighting for all doodads
+   */
+  updateLighting() {
+    if (!this.mapLight) return;
+    
+    this.doodads.forEach((doodad) => {
+      if (doodad.updateLighting) {
+        doodad.updateLighting();
       }
     });
   }

@@ -1,7 +1,7 @@
 import r from 'restructure';
 
-import Chunk from '../chunked/chunk';
 import Chunked from '../chunked';
+import Chunk from '../chunked/chunk';
 import MWMO from '../chunked/mwmo';
 
 const MPHD = Chunk({

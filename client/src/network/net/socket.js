@@ -1,0 +1,125 @@
+import ByteBuffer from 'byte-buffer';
+import EventEmitter from 'events';
+import { gameSocketUrl } from '../gateway';
+
+// Base-class for any socket including signals and host/port management
+class Socket extends EventEmitter {
+
+  // Maximum buffer capacity
+  // TODO: Arbitrarily chosen, determine this cap properly
+  static BUFFER_CAP = 2048;
+
+  // Creates a new socket
+  constructor() {
+    super();
+
+    // Holds the host, port and uri currently connected to (if any)
+    this.host = null;
+    this.port = NaN;
+    this.uri = null;
+
+    // Holds the actual socket
+    this.socket = null;
+
+    // Holds buffered data
+    this.buffer = null;
+
+    // Holds incoming packet's remaining size in bytes (false if no packet is being handled)
+    this.remaining = false;
+  }
+
+  // Whether this socket is currently connected
+  get connected() {
+    return this.socket && this.socket.readyState === WebSocket.OPEN;
+  }
+
+  // Connects to given host through given port (if any; default port is implementation specific)
+  //
+  // `host`/`port` name the TCP target -- a logon or realm server. They are NOT what the WebSocket
+  // opens: a browser cannot speak TCP, so the socket is opened at the gateway with the target named
+  // in the URL. `network/gateway.ts` owns that translation and is the only place that builds a URL.
+  connect(host, port = NaN) {
+    if (!this.connected) {
+      this.host = host;
+      this.port = port;
+      this.uri = gameSocketUrl(this.host, this.port);
+
+      this.buffer = new ByteBuffer(0, ByteBuffer.LITTLE_ENDIAN);
+      this.remaining = false;
+
+      // 'binary' is websockify's own contract, which `ws-proxy/server.js` inherited: it answers
+      // 'binary' (raw frames) or 'base64', and its relay reads `client.protocol` to decide which. Ask
+      // for it explicitly. Offering nothing happens to work only because `ws` skips its
+      // `handleProtocols` callback entirely when the client names no subprotocol -- so the gateway's
+      // "must offer binary or base64" refusal is bypassed rather than satisfied, and a stricter server
+      // or a future `ws` would drop the handshake.
+      this.socket = new WebSocket(this.uri, 'binary');
+      this.socket.binaryType = 'arraybuffer';
+
+      this.socket.onopen = (e) => {
+        this.emit('connect', e);
+      };
+
+      this.socket.onclose = (e) => {
+        this.emit('disconnect', e);
+      };
+
+      this.socket.onmessage = (e) => {
+        const index = this.buffer.index;
+        this.buffer.end().append(e.data.byteLength).write(e.data);
+        this.buffer.index = index;
+
+        this.emit('data:receive', this);
+
+        if (this.buffer.available === 0 && this.buffer.length > this.constructor.BUFFER_CAP) {
+          this.buffer.clip();
+        }
+      };
+
+      this.socket.onerror = function(e) {
+        console.error(e);
+      };
+    }
+
+    return this;
+  }
+
+  // Attempts to reconnect to cached host and port
+  reconnect() {
+    if (!this.connected && this.host && this.port) {
+      this.connect(this.host, this.port);
+    }
+    return this;
+  }
+
+  // Disconnects this socket
+  disconnect() {
+    if (this.connected) {
+      this.socket.close();
+    }
+    return this;
+  }
+
+  // Finalizes and sends given packet
+  send(packet) {
+    if (this.connected) {
+
+      packet.finalize();
+
+      console.log('⟸', packet.toString());
+      // console.debug packet.toHex()
+      // console.debug packet.toASCII()
+
+      this.socket.send(packet.buffer);
+
+      this.emit('packet:send', packet);
+
+      return true;
+    }
+
+    return false;
+  }
+
+}
+
+export default Socket;

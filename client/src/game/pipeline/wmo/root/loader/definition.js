@@ -9,17 +9,132 @@ class WMORootDefinition {
     };
 
     this.groupInfo = data.MOGI.groups;
-
+    console.log('Definition', data)
     this.materials = data.MOMT.materials;
     this.texturePaths = data.MOTX.filenames;
 
     this.doodadSets = data.MODS.sets;
     this.doodadEntries = data.MODD.doodads;
 
+    // The WMO skybox (celestial-sky plan, Task 6 Step 2, `MOSB`) -- the painted sky a building swaps
+    // in when a flood-reached group carries MOGP/MOGI SHOW_SKYBOX (see
+    // `pipeline/sky/skybox/wmo-resolve.ts`). Not every root's MOSB is even a model path (Sunken
+    // Temple's is the literal string "the temple of atal'hakkar"); this loader carries the raw string
+    // through unfiltered -- the resolver is what decides whether a group ever actually asks for it,
+    // and the model loader is what discovers a non-M2 string can't be decoded.
+    this.skybox = this.readSkybox(data);
+
     this.summarizeGroups(data);
 
     this.createPortals(data);
+    this.createLights(data);
+    this.createFogs(data);
     this.createBoundingBox(data.MOHD);
+  }
+
+  /**
+   * MFOG records, staged into the shape `fog.ts`'s `stageMfog`/`WmoFogRamp` consume
+   * (`{ color: [r,g,b] 0..1, end, startScalar }`).
+   *
+   * Each MFOG record packs TWO fog blocks -- index 0 is FOG, index 1 is UWFOG (underwater).
+   * This client has no submersion state, so underwater fog is out of scope; only block 0 is
+   * read. Kept positionally aligned with MFOG (one entry per record, none skipped) since a
+   * group's MOGP.fogOffsets indexes this array directly -- see WMOGroupDefinition.fogOffsets.
+   * Resolving those offsets against this array (including what an all-zero or out-of-range
+   * index means) is the camera-in-interior fog consumer's job, not this loader's.
+   *
+   * `pos`/`radiusInner`/`radiusOuter`/`flags` are carried through un-transformed -- WMO local
+   * space, matching MOLT (see `createLights` above) -- because the selection law
+   * (`samples/benilla/crates/benilla/src/wmo_portal/fog.rs::select_wmo_fog`, ported as
+   * `fog.ts`'s `selectWmoFogTarget`) needs the camera position and each record's radius band to
+   * pick which positioned record engages, not just the first offset that happens to resolve.
+   */
+  createFogs(data) {
+    const fogs = this.fogs = [];
+
+    if (!data.MFOG || !data.MFOG.fogs) {
+      return;
+    }
+
+    for (const record of data.MFOG.fogs) {
+      const fog = record.fogs[0];
+
+      // CImVector is {b, g, r, a} in memory, so as a little-endian uint32 red lands at >> 16.
+      // Same unpacking createLights uses above for MOLT colour.
+      const r = (fog.color >> 16) & 0xff;
+      const g = (fog.color >> 8) & 0xff;
+      const b = fog.color & 0xff;
+
+      fogs.push({
+        color: [r / 255, g / 255, b / 255],
+        end: fog.end,
+        startScalar: fog.start_scalar,
+        pos: { x: record.pos.x, y: record.pos.y, z: record.pos.z },
+        radiusInner: record.smaller_radius,
+        radiusOuter: record.larger_radius,
+        flags: record.flag_infinite_radius
+      });
+    }
+  }
+
+  /**
+   * MOLT point lights, converted once into the shape the renderer wants.
+   *
+   * Kept in WMO local space -- the handler transforms them to world space when the root view exists,
+   * since only then is the placement known. Types other than omni are skipped: spot and directional
+   * lights need cone/orientation handling the shaders do not have, and ambient lights are already
+   * covered by the group's baked vertex colours.
+   */
+  createLights(data) {
+    const lights = this.lights = [];
+
+    if (!data.MOLT || !data.MOLT.lights) {
+      return;
+    }
+
+    // A WMO group's MOLR chunk references lights by their raw index into THIS MOLT array. To keep
+    // those refs valid, `lights` stays positionally aligned with MOLT -- a light this loop skips
+    // pushes `null` rather than being omitted, leaving a hole instead of shifting every index after
+    // it. Consumers (wmo-lights.ts, MapLight) skip the holes themselves.
+    for (const light of data.MOLT.lights) {
+      // Omni only (type 0).
+      if (light.type !== 0) {
+        lights.push(null);
+        continue;
+      }
+
+      // CImVector is {b, g, r, a} in memory, so as a little-endian uint32 red lands at >> 16.
+      // Same unpacking MapLight uses for the light band colours.
+      const r = (light.color >> 16) & 0xff;
+      const g = (light.color >> 8) & 0xff;
+      const b = light.color & 0xff;
+
+      // A zero attenuation end would light the entire model uniformly, so treat it as disabled.
+      if (!(light.attenEnd > 0)) {
+        lights.push(null);
+        continue;
+      }
+
+      lights.push({
+        position: { x: light.position.x, y: light.position.y, z: light.position.z },
+        color: { r: r / 255, g: g / 255, b: b / 255 },
+        intensity: light.intensity,
+        attenStart: light.attenStart,
+        attenEnd: light.attenEnd
+      });
+    }
+  }
+
+  /** `MOSB` is optional -- most roots have no skybox chunk at all -- and its string is fixed-width,
+   * null-padded to the chunk's own byte size, so trim at the first NUL rather than trusting the
+   * decoder to have done it. An empty (or all-whitespace) result is treated the same as "no chunk". */
+  readSkybox(data) {
+    if (!data.MOSB || !data.MOSB.skybox) {
+      return null;
+    }
+
+    const raw = String(data.MOSB.skybox).replace(/\0.*$/, '').trim();
+    return raw.length > 0 ? raw : null;
   }
 
   createBoundingBox(mohd) {
@@ -96,7 +211,7 @@ class WMORootDefinition {
     // load before interior groups.
     for (let index = 0; index < this.groupCount; ++index) {
       const group = data.MOGI.groups[index];
-
+      
       if (group.interior) {
         this.interiorGroupIndices.push(index);
         this.interiorGroupCount++;

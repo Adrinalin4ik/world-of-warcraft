@@ -1,42 +1,32 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-var _entity = require('../entity');
-
-var _entity2 = _interopRequireDefault(_entity);
-
-var _stringRef = require('../string-ref');
-
-var _stringRef2 = _interopRequireDefault(_stringRef);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = (0, _entity2.default)({
-  id: _restructure2.default.uint32le,
-  name: _stringRef2.default,
-  flags: _restructure2.default.uint32le,
-  type: _restructure2.default.uint32le,
-  soundEntryID: _restructure2.default.uint32le,
-  spellID: _restructure2.default.uint32le,
-  maxDarkenDepth: _restructure2.default.floatle,
-  fogDarkenIntensity: _restructure2.default.floatle,
-  ambDarkenIntensity: _restructure2.default.floatle,
-  dirDarkenIntensity: _restructure2.default.floatle,
-  lightID: _restructure2.default.uint32le,
-  particleScale: _restructure2.default.floatle,
-  particleMovement: _restructure2.default.uint32le,
-  particleTexSlots: _restructure2.default.uint32le,
-  liquidMaterialID: _restructure2.default.uint32le,
-  textures: new _restructure2.default.Array(_stringRef2.default, 6),
-  colors: new _restructure2.default.Array(_restructure2.default.uint32le, 2),
-  shaderFloatAttributes: new _restructure2.default.Array(_restructure2.default.floatle, 18),
-  shaderIntAttributes: new _restructure2.default.Array(_restructure2.default.uint32le, 4)
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+var _entity = _interopRequireDefault(require("../entity"));
+var _stringRef = _interopRequireDefault(require("../string-ref"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _default = (0, _entity["default"])({
+  id: _restructure["default"].uint32le,
+  name: _stringRef["default"],
+  flags: _restructure["default"].uint32le,
+  type: _restructure["default"].uint32le,
+  soundEntryID: _restructure["default"].uint32le,
+  spellID: _restructure["default"].uint32le,
+  maxDarkenDepth: _restructure["default"].floatle,
+  fogDarkenIntensity: _restructure["default"].floatle,
+  ambDarkenIntensity: _restructure["default"].floatle,
+  dirDarkenIntensity: _restructure["default"].floatle,
+  lightID: _restructure["default"].uint32le,
+  particleScale: _restructure["default"].floatle,
+  particleMovement: _restructure["default"].uint32le,
+  particleTexSlots: _restructure["default"].uint32le,
+  liquidMaterialID: _restructure["default"].uint32le,
+  textures: new _restructure["default"].Array(_stringRef["default"], 6),
+  colors: new _restructure["default"].Array(_restructure["default"].uint32le, 2),
+  shaderFloatAttributes: new _restructure["default"].Array(_restructure["default"].floatle, 18),
+  shaderIntAttributes: new _restructure["default"].Array(_restructure["default"].uint32le, 4)
 });
-module.exports = exports['default'];
+exports["default"] = _default;

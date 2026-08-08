@@ -1,9 +1,8 @@
 import r from 'restructure';
 
+import { color16, compfixed16array4, float32array2, float32array3, Vec3Float } from '../types';
 import AnimationBlock from './animation-block';
 import Nofs from './nofs';
-import { Vec3Float } from '../types';
-import { color16, compfixed16, compfixed16array4, float32array2, float32array3 } from '../types';
 
 const Animation = new r.Struct({
   id: r.uint16le,
@@ -76,7 +75,7 @@ const Texture = new r.Struct({
   type: r.uint32le,
   flags: r.uint32le,
   length: r.uint32le,
-  filename: new r.Pointer(r.uint32le, new r.String(null), 'global')
+  filename: new r.Pointer(r.uint32le, new r.String(null), {type: 'global'})
 });
 
 const Vertex = new r.Struct({

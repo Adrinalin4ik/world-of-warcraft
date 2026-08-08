@@ -1,25 +1,18 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-var _entity = require('../entity');
-
-var _entity2 = _interopRequireDefault(_entity);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = (0, _entity2.default)({
-  id: _restructure2.default.uint32le,
-  raceID: _restructure2.default.uint32le,
-  gender: _restructure2.default.uint32le,
-  hairType: _restructure2.default.uint32le,
-  geoset: _restructure2.default.uint32le,
-  bald: new _restructure2.default.Boolean(_restructure2.default.uint32le)
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+var _entity = _interopRequireDefault(require("../entity"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _default = (0, _entity["default"])({
+  id: _restructure["default"].uint32le,
+  raceID: _restructure["default"].uint32le,
+  gender: _restructure["default"].uint32le,
+  hairType: _restructure["default"].uint32le,
+  geoset: _restructure["default"].uint32le,
+  bald: new _restructure["default"].Boolean(_restructure["default"].uint32le)
 });
-module.exports = exports['default'];
+exports["default"] = _default;

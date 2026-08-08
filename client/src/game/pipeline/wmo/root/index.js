@@ -1,13 +1,14 @@
 import * as THREE from 'three';
 
-import WMORootView from './view';
-import WMOPortal from '../portal';
 import WMOMaterial from '../material';
 import WMOMaterialDefinition from '../material/loader/definition';
+import WMOPortal from '../portal';
+import WMORootView from './view';
 
 class WMORoot {
 
   constructor(def) {
+    console.log('WMOROOT', def)
     this.path = def.path;
     this.id = def.rootID;
     this.header = def.header;
@@ -22,7 +23,9 @@ class WMORoot {
 
     this.doodadSets = def.doodadSets;
     this.doodadEntries = def.doodadEntries;
-
+    // No `this.view` here, on purpose. `WMORootLoader` caches roots by FILENAME, so a root is shared
+    // by every placement of the building; a view owned here is one scene node for all of them, and an
+    // Object3D has one parent. See `WMOGroup#createView` for what that cost.
     this.caches = {
       material: new Map()
     };
@@ -38,10 +41,23 @@ class WMORoot {
     this.createBoundingBox(def.boundingBox);
     // console.log(def)
     this.createMaterialDefs(def.materials, def.texturePaths);
-
+    
     this.createPortals(def.portals, def.portalNormals, def.portalConstants, def.portalVertices);
 
     this.portalRefs = def.portalRefs;
+
+    // MOLT point lights, still in WMO local space. The WMO handler converts them to world space when
+    // it hands them to a doodad, since only then is the placement known.
+    this.lights = def.lights || [];
+
+    // MFOG records, staged into the shape `fog.ts` consumes (`WMORootDefinition.createFogs`). Not
+    // resolved here -- that is the camera-in-interior fog consumer's job (`MapLight`) -- just carried
+    // through so `location.wmo.root.fogs` is reachable the same way `location.wmo.root.lights` is.
+    this.fogs = def.fogs || [];
+
+    // The WMO skybox (celestial-sky plan, Task 6 Step 2, `MOSB`) -- carried through unresolved, same
+    // reasoning as `fogs` above. `null` when this root has no MOSB chunk (the overwhelming majority).
+    this.skybox = def.skybox || null;
   }
 
   createView() {
@@ -70,28 +86,43 @@ class WMORoot {
   // thread to reduce the cost of transferring the definition off of the worker thread.
   createMaterialDefs(materials, texturePaths) {
     const defs = this.defs.material;
-
     for (let mindex = 0, mcount = materials.length; mindex < mcount; ++mindex) {
       const data = materials[mindex];
+      
       const { flags, blendMode, shader } = data;
       const textures = [];
-
-      for (let tindex = 0, tcount = data.textures.length; tindex < tcount; ++tindex) {
-        const textureData = data.textures[tindex];
+      const textureDefs = [
+        data.texture1,
+        data.texture2,
+      ]
+  
+      for (let tindex = 0, tcount = textureDefs.length; tindex < tcount; ++tindex) {
+        const textureData = textureDefs[tindex];
         const texturePath = texturePaths[textureData.offset];
 
         if (texturePath) {
-          textures.push({ path: texturePath });
+          textures.push({
+            textureData,
+            path: texturePath 
+          });
         }
       }
-
-      const def = new WMOMaterialDefinition(mindex, flags, blendMode, shader, textures);
+      // data.texture1.color IS the MOMT sidnColor word, and it is present whether or not that
+      // slot's texture path resolved — unlike anything reachable through the filtered list above.
+      const def = new WMOMaterialDefinition(
+        mindex,
+        flags,
+        blendMode,
+        shader,
+        textures,
+        data.texture1.color,
+      );
 
       defs.set(mindex, def);
     }
   }
 
-  loadMaterials(refs) {
+  loadMaterials(refs, groupData) {
     const materials = [];
     for (let rindex = 0, rcount = refs.length; rindex < rcount; ++rindex) {
       const ref = refs[rindex];
@@ -103,7 +134,7 @@ class WMORoot {
       let material = this.caches.material.get(def.key);
 
       if (!material) {
-        material = new WMOMaterial(def);
+        material = new WMOMaterial(def, groupData);
         this.caches.material.set(def.key, material);
       }
 
@@ -153,8 +184,12 @@ class WMORoot {
         vertices: vertices.subarray(vindex, vindex + vlen),
         normal: normals.subarray(nindex, nindex + nlen),
         constant: constants[index]
-      });
-      
+      // No parent view: the root owns none, and `WMOPortal` only stores this and never reads it. The
+      // visibility flood works off the PLACEMENT's own portal views (`wmo.views.portals`, made per
+      // instance in `WMO#loadPortals`) and the placement's group view for `worldToLocal` -- so portal
+      // world space was already per placement and needs nothing from here.
+      }, null);
+
       portals.push(portal);
     }
   }
