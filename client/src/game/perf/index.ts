@@ -6,7 +6,9 @@ import { PerfHud, PerfPayload } from './hud';
 
 export { FRAME_BUDGET_MS, FrameStats } from './frame-stats';
 export { CpuSections } from './cpu-sections';
-export { ANIM_SECTION, beginAnimSection, endAnimSection, setAnimSectionSink } from './anim-section';
+export {
+  ANIM_SECTION, beginAnimSection, endAnimSection, setAnimSectionSink, beginSection, endSection,
+} from './anim-section';
 export { GpuTimer } from './gpu-timer';
 export { PerfHud, HUD_REPAINT_MS } from './hud';
 export type { FrameSummary } from './frame-stats';

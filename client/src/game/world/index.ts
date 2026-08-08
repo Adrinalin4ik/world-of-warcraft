@@ -8,7 +8,9 @@ import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
 import { collisionDebugView } from "../collision/debug-view";
-import { beginAnimSection, endAnimSection } from "../perf/anim-section";
+import {
+  beginAnimSection, endAnimSection, beginSection, endSection,
+} from "../perf/anim-section";
 import { animCounters } from "../pipeline/m2/anim/counters";
 import { poseGatedInstance } from "../pipeline/m2/anim/pose-gate";
 import { worldClock } from "../pipeline/m2/anim/world-clock";
@@ -408,18 +410,38 @@ export default class World extends EventEmitter {
     // for why this is not a per-manager field.
     worldClock.advance(delta);
 
+    // THE BREAKDOWN. `world.animate` was a single span holding everything below it, and Task 9's
+    // movement round recorded that the number could not be reasoned about until its parts were
+    // separated (five samples of one unchanged build spanned 7.3-15.5 ms). These five sub-spans are
+    // that separation, and they are deliberately EXHAUSTIVE of `animate` -- every statement below
+    // sits inside exactly one of them, so `w.entities + w.vis + w.map + w.sky + w.debug +
+    // w.matrices` reconstructs `world.animate` to within the timestamp overhead. If a statement is
+    // ever added outside all six, the sum stops matching the total and that is the intended tell.
+    //
+    // `w.vis` is separate from `w.map` on purpose: it is the only one gated on `cameraMoved`, so it
+    // reads ~0 on a still frame and its true cost is invisible in any average that mixes the two.
+    // That gating is also why the HUD's `chunks` row reads 0 on a still frame -- see the report.
+    beginSection('w.entities');
     this.animateEntities(delta, camera, cameraMoved);
+    endSection('w.entities');
 
     if (this.map !== null) {
       if (cameraMoved) {
+        beginSection('w.vis');
         this.map.locateCamera(camera);
         this.map.updateVisibility(camera);
+        endSection('w.vis');
       }
       // `map.animate` itself calls `updateWorldTime` first thing, with the real per-frame `delta` --
       // a separate call here (as there used to be, with no delta) invoked MapLight.update() twice a
       // frame. Harmless while MapLight ignored everything past `camera`, but the interior-fog
       // crossfade now needs a real dt and would have advanced twice as fast for it.
+      // Holds MapLight's per-frame pass, the portal flood, and the doodad and WMO animation loops --
+      // so it OVERLAPS the `anim` span, which those two loops also open. `anim` is the cross-cutting
+      // total; `w.map` is the positional one. Both are correct and they are not additive.
+      beginSection('w.map');
       this.map.animate(delta, camera, cameraMoved);
+      endSection('w.map');
     }
 
     // Update sky system. `setMapLight` every frame (not once) because `changeMap` swaps in a brand
@@ -431,12 +453,21 @@ export default class World extends EventEmitter {
     // project has already shipped a duplicated per-frame `MapLight.update()` that halved a crossfade
     // rate by measuring `dt` twice; reusing `delta` here rather than a fresh clock is that fix
     // applying here too.
+    beginSection('w.sky');
     this.skyManager.setMapLight(this.mapLight);
     // Task 6 Step 2: the WMO skybox's flood-reached predicate reads this frame's portal-flood
     // visibility flags off the WMOs `this.map.wmoManager` owns -- see `skybox/wmo-resolve.ts`. Cheap
     // reference hand-off, same reasoning as `setMapLight` just above.
     this.skyManager.setWmoManager(this.map?.wmoManager ?? null);
     this.skyManager.update(camera, this.map?.mapID || 0, delta);
+    endSection('w.sky');
+
+    // The four debug syncs below are grouped under one span because they share one question: what
+    // does the instrumentation cost when nothing is switched on? Every one of them is a no-op with
+    // its own overlay disabled, and this span is what proves it rather than assuming it. The
+    // collision overlay in particular is NOT free when enabled, which is why the round's baseline
+    // is taken with it off.
+    beginSection('w.debug');
 
     // No M2Blueprint.animate here any more: global sequences are a pure function of world time and
     // instances are clock-indexed, so there is no shared timeline left to tick. See M2Blueprint.
@@ -456,10 +487,13 @@ export default class World extends EventEmitter {
     // `fogParams` from MapLight, so neutralising fog before it would be overwritten immediately.
     fogDebug.sync(this.map as any);
     lightDebug.sync(this.map as any);
+    endSection('w.debug');
 
     // LAST: everything above may have moved something. See the constructor for why the renderer no
     // longer does this itself.
+    beginSection('w.matrices');
     this.updateDynamicMatrices();
+    endSection('w.matrices');
   }
 
   /**

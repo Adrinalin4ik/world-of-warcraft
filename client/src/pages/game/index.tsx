@@ -203,7 +203,13 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     const nowMs = performance.now();
     if (this.debugPanel.current && nowMs - this.lastDebugPanelPaint >= HUD_REPAINT_MS) {
       this.lastDebugPanelPaint = nowMs;
+      // Spanned because it is the one thing in this loop that runs a full React reconciliation, and
+      // because a span that is open on 1 frame in 7 and closed on the rest reports its cost AVERAGED
+      // over nothing -- the HUD samples whichever frame it lands on, so this row reads either ~0 or
+      // the whole reconciliation. Both readings are informative and neither is an average.
+      this.perf.sections.begin('ui.panel');
       this.debugPanel.current.forceUpdate();
+      this.perf.sections.end('ui.panel');
     }
 
     // Task 4 Step 3: converge the backdrop on the row-7 fog colour, so nothing shows through where the
@@ -245,7 +251,12 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       this.prevCameraPosition.copy(this.camera.position);
       this.hasPrevCamera = true;
       if (this.controls.current) {
+        // The mover: input, gravity, the collision casts. Inside the measured frame and, until this
+        // span, inside NONE of its named parts -- `world.animate` and `render` together accounted
+        // for well under half of p50, and this was one of the places the rest was hiding.
+        this.perf.sections.begin('controls');
         this.controls.current.update(delta);
+        this.perf.sections.end('controls');
       }
 
       const info = this.renderer.info;

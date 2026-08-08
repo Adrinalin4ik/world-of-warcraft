@@ -1,3 +1,4 @@
+import { beginSection, endSection } from '../../../game/perf/anim-section';
 import React from 'react';
 import * as THREE from 'three';
 
@@ -266,9 +267,11 @@ class Controls extends React.Component<IProp> {
       }
     }
 
+    beginSection('ctl.move');
     movementFrame(player.move, deps, {
       moving, dir, speed, wantJump: this.jumpPressed, jumpPressed: this.jumpPressed,
     }, delta, now);
+    endSection('ctl.move');
     this.jumpPressed = false;
 
     // The other half of the same fix: a body that fell out of the world anyway is put back on it.
@@ -304,6 +307,7 @@ class Controls extends React.Component<IProp> {
     const head = player.move.pos.clone();
     head.z += CAPSULE_HEIGHT - CAPSULE_RADIUS;
 
+    beginSection('ctl.cam');
     const seat = seatCamera(this.rig, {
       feet: player.move.pos,
       head,
@@ -311,6 +315,8 @@ class Controls extends React.Component<IProp> {
       cast: collisionWorld.castFor(CollisionLayer.Camera, CAM_COLLISION_RADIUS, 0),
       dt: delta,
     });
+
+    endSection('ctl.cam');
 
     this.camera.position.copy(seat.position);
     this.camera.quaternion.copy(seat.quaternion);
