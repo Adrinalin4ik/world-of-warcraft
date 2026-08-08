@@ -172,7 +172,32 @@ export function installUnitsApi(vm: LuaVM): void {
   fn('UnitHealth', (args) => [withUnit(args[0], 0, (u) => u.health)]);
   fn('UnitHealthMax', (args) => [withUnit(args[0], 0, (u) => u.maxHealth)]);
 
-  fn('UnitPowerType', (args) => [withUnit(args[0], 0, (u) => u.powerType)]);
+  /**
+   * `UnitPowerType(unit)` returns `powerType, powerToken, altR, altG, altB` -- FIVE values, and the
+   * SECOND is load-bearing.
+   *
+   * This returned the number alone, which is a defect the snapshot survey could not see because
+   * nothing called it. `UnitFrameManaBar_UpdateType` (unitframe.lua:161-164) does:
+   *
+   *     local powerType, powerToken, altR, altG, altB = UnitPowerType(manaBar.unit);
+   *     local prefix = _G[powerToken];
+   *     local info = PowerBarColor[powerToken];
+   *
+   * `_G[nil]` raises "table index is nil" and takes the whole mana-bar update with it, so a
+   * one-value answer means no power bar at all -- not merely a wrongly coloured one. With the token
+   * present, `PowerBarColor["RAGE"]` is the red the bar is drawn in and `prefix` is the localized
+   * word its text is prefixed with.
+   *
+   * The tokens are `Constants.lua`'s own `PowerBarColor` keys, in `UnitPowerType`'s numeric order:
+   * 0 MANA, 1 RAGE, 2 FOCUS, 3 ENERGY, 4 HAPPINESS, 5 RUNES, 6 RUNIC_POWER. `altR/G/B` are the
+   * alternate-power colour override, which only vehicle power buses carry; nil here, which is the
+   * branch `UnitFrameManaBar_UpdateType` already handles (`if ( not altR )`).
+   */
+  const POWER_TOKENS = ['MANA', 'RAGE', 'FOCUS', 'ENERGY', 'HAPPINESS', 'RUNES', 'RUNIC_POWER'];
+  fn('UnitPowerType', (args) => {
+    const type = withUnit(args[0], 0, (u) => u.powerType);
+    return [type, POWER_TOKENS[type] ?? 'MANA'];
+  });
   // `UnitPower(unit [, type])`: an explicit type argument selects a bar this snapshot does not carry
   // (a druid's mana while in cat form), so it is honoured only when it MATCHES the active type and
   // otherwise answers 0 -- which is what the engine answers for a power the unit does not have. It is
@@ -218,7 +243,13 @@ export function installUnitsApi(vm: LuaVM): void {
   // above is friendly, and neutral is neither.
   fn('UnitIsEnemy', (args) => [withUnit(pickToken(args), false, (u) => u.reaction < 4)]);
   fn('UnitIsFriend', (args) => [withUnit(pickToken(args), false, (u) => u.reaction > 4)]);
-  fn('UnitCanAttack', (args) => [withUnit(pickToken(args), false, (u) => u.reaction < 4)]);
+  // `UnitCanAttack` IS NOT `UnitIsEnemy`. It was written as the same test -- strictly hostile -- and
+  // that is wrong at the neutral point: a neutral unit (every critter, every unaggressive beast) can
+  // be attacked in this game and simply does not attack back. The reference states the boundary
+  // explicitly at `benilla/src/target/click.rs:98`: the Attack cursor is "alive + reaction <= neutral".
+  // With the strict form, right-clicking a chicken did nothing and `TargetFrame_CheckLevel` coloured a
+  // neutral target's level as if it were unattackable.
+  fn('UnitCanAttack', (args) => [withUnit(pickToken(args), false, (u) => u.reaction <= 4)]);
 
   // `UnitIsUnit(a, b)` is called seven times by TargetFrame.lua and is pure token algebra -- it needs
   // no field at all, only whether two tokens name the same unit. Compared by NAME because that is the
@@ -238,6 +269,37 @@ export function installUnitsApi(vm: LuaVM): void {
   // `false` (the honest-looking option) would make `TargetFrame_Update` print "Offline" over every
   // target, which is a worse lie.
   fn('UnitIsConnected', (args) => [withUnit(args[0], false, () => true)]);
+
+  /**
+   * `UnitIsVisible(unit)` -- is the unit within visible range?
+   *
+   * REAL, not a gap, and the answer is the same argument `UnitIsConnected` makes: a token is only
+   * occupied while the host has a live unit for it, and the host only has one while the server is
+   * streaming that unit to us. "In range" is precisely what being in the object registry MEANS -- a
+   * unit that leaves range arrives as an out-of-range block and is removed
+   * (`update-object/handler.ts`, `UpdateType.FarObjects`).
+   *
+   * FOUND BY MEASUREMENT, not by reading a list: with it absent, `PlayerFrame_ToPlayerArt` -- the
+   * first thing `PlayerFrame_OnEvent` does on `PLAYER_ENTERING_WORLD` -- died at `PetFrame.lua:41`,
+   * so `PlayerFrame_Update()` two lines later never ran and the player's LEVEL was never written.
+   */
+  fn('UnitIsVisible', (args) => [withUnit(args[0], false, () => true)]);
+
+  /**
+   * `GetUnitName(unit [, showServerName])` -- the name `UnitFrame_Update` actually calls
+   * (unitframe.lua:84,86,107), NOT `UnitName`.
+   *
+   * It is registered here because `FrameXML.toc` does not define it: grepped across the manifest's
+   * Lua at build 12340 and it appears only as a CALLER. In 3.3.5a it is an engine global, and an
+   * absent one meant `self.name:SetText(GetUnitName(self.unit))` raised on the first line of every
+   * unit frame's update -- which is a second, independent reason `PlayerFrame` had no name.
+   *
+   * The server-name half is nil: this client reads one realm and `SMSG_NAME_QUERY_RESPONSE`'s realm
+   * string is empty on it (`network/game/handler.js#handleName` reads and discards it). The engine
+   * appends "-Realm" only when the flag is set AND the unit is from another realm, so the two agree
+   * here for the only case that exists.
+   */
+  fn('GetUnitName', (args) => [withUnit(args[0], null, (u) => u.name)]);
   fn('UnitPlayerControlled', (args) => [withUnit(args[0], false, (u) => u.isPlayer)]);
 
   // Gaps, declared. Each of these has NO source in this client today: there is no threat table, no
@@ -284,6 +346,80 @@ export function installUnitsApi(vm: LuaVM): void {
     // reads `local inInstance, instanceType = IsInInstance()`, so the pair must be returned together
     // or the destructuring assigns nil to both.
     ['IsInInstance', 'no instance state is read from the wire', [false, 'none']],
+    // `GetInstanceInfo()` returns `name, type, difficultyIndex, difficultyName, maxPlayers, ...`.
+    // `UnitPopup.lua:245` destructures it, so the shape matters more than the values; this is what
+    // the engine answers standing in the open world.
+    ['GetInstanceInfo', 'no instance state is read from the wire', ['', 'none', 1, 'Normal', 0]],
+    // `IsPartyLeader()` -- OURS, no argument, the twin of `UnitIsPartyLeader` above. Its absence was
+    // the single most expensive missing global on this path: `UnitPopup.lua:469` calls it while
+    // building a unit dropdown, which `TargetFrame_OnLoad` reaches, which took out the whole of
+    // `TargetFrame`'s inline `<OnLoad>` -- including the `self:RegisterEvent("PLAYER_TARGET_CHANGED")`
+    // three lines further down (TargetFrame.xml:654). So `TargetFrame` was never registered for the
+    // one event that shows it, and no amount of correct unit data would have made it appear. It also
+    // killed `PlayerFrame_Update` at `PlayerFrame.lua:63`, which is why the player's level was blank.
+    // False is the honest answer with no party: `GetNumPartyMembers` answers 0 beside it.
+    ['IsPartyLeader', 'no party roster is fed', [false]],
+    // The rest of the same chain, all found the same way -- by running the manifest and reading which
+    // call the OnLoad died on NEXT. `UnitPopup_HideButtons` (unitpopup.lua:455-485) alone needs
+    // `IsInInstance`, `GetNumPartyMembers`, `GetNumRaidMembers`, `IsPartyLeader`, `IsRaidOfficer`,
+    // `UnitInBattleground` and `UnitCanCooperate` before it reaches its first menu row, and
+    // `PlayerFrame_UpdatePartyLeader` (playerframe.lua:62-83) needs `HasLFGRestrictions` and
+    // `GetLootMethod`. Every one of them has no source in this client and every one answers the
+    // "nothing here" value, which is also the true value for a solo player outside an instance.
+    //
+    // `GetLootMethod` returns TWO values and the second is compared to a NUMBER
+    // (`lootMaster == 0`), so a one-value stub leaves `lootMaster` nil and the master-looter icon
+    // decision reads `nil == 0`. Answering `'freeforall', nil` is what a party-less client is.
+    ['IsRaidOfficer', 'no raid roster is fed', [false]],
+    ['UnitInBattleground', 'no battleground state is read from the wire', [null]],
+    ['UnitCanCooperate', 'no group or faction cooperation state is fed', [false]],
+    ['HasLFGRestrictions', 'no LFG state is read from the wire', [false]],
+    ['GetLootMethod', 'no group loot state is read from the wire', ['freeforall', null]],
+    // The remainder of the same walk, each found by re-running the manifest and reading the next
+    // failing call. THE VALUES ARE NOT ARBITRARY: three of them are compared to numbers rather than
+    // tested for truth, so nil would change a branch rather than skip one.
+    //  - `GetLootThreshold` indexes a string table: `_G["ITEM_QUALITY"..GetLootThreshold().."_DESC"]`
+    //    (unitpopup.lua:226). 2 is Uncommon, the game's own default.
+    //  - `GetDungeonDifficulty`/`GetRaidDifficulty` are compared `== 1` (unitpopup.lua:700,704).
+    //    1 is Normal / 10-player, which is what a client with no instance state is in.
+    //  - `UnitHasVehicleUI` gates three separate branches of `PlayerFrame_UpdateStatus`,
+    //    `PlayerFrame_UpdateLayout` and `PlayerFrame_ToPlayerArt` (playerframe.lua:433 and on). There
+    //    are no vehicles in this client and false is the only branch that can be drawn.
+    //  - `IsResting` decides the rest glow; there is no `PLAYER_UPDATE_RESTING` feed here.
+    ['GetLootThreshold', 'no group loot state is read from the wire', [2]],
+    ['GetDungeonDifficulty', 'no instance state is read from the wire', [1]],
+    ['GetRaidDifficulty', 'no instance state is read from the wire', [1]],
+    ['UnitHasVehicleUI', 'this client has no vehicles', [false]],
+    ['UnitInVehicle', 'this client has no vehicles', [false]],
+    ['IsResting', 'no resting state is read from the wire', [false]],
+    ['GetOptOutOfLoot', 'no group loot state is read from the wire', [false]],
+    // `GetSummonFriendCooldown()` -> `start, duration`, immediately arithmetic:
+    // `local remaining = start + duration - GetTime()` (unitpopup.lua:264). Two ZEROS, not nil --
+    // nil there is an arithmetic error, not a skipped branch.
+    ['GetSummonFriendCooldown', 'no refer-a-friend state is read from the wire', [0, 0]],
+    ['CanSummonFriend', 'no refer-a-friend state is read from the wire', [false]],
+    ['CanChangePlayerDifficulty', 'no instance state is read from the wire', [false]],
+    ['GetRaidTargetIndex', 'no raid target icons are read from the wire', [null]],
+    ['UnitPlayerOrPetInParty', 'no party roster is fed', [false]],
+    ['UnitPlayerOrPetInRaid', 'no raid roster is fed', [false]],
+    ['UnitIsSameServer', 'this client reads one realm', [true]],
+    ['UnitGroupRolesAssigned', 'no party roster is fed', ['NONE']],
+    ['UnitIsRaidOfficer', 'no raid roster is fed', [false]],
+    ['UnitIsInMyGuild', 'no guild roster is fed', [false]],
+    ['IsGuildLeader', 'no guild roster is fed', [false]],
+    ['CheckInteractDistance', 'no interact-distance test exists in this client', [false]],
+    // `UnitAura(unit, index, filter)` is the ARRAY form `BuffFrame_Update` walks (bufffframe.lua:125);
+    // `UnitBuff`/`UnitDebuff` above are the same gap by their other two names. Answering nothing
+    // terminates the walk at index 1, which is what a unit with no auras looks like.
+    ['UnitAura', 'auras are not read out of the update fields yet', []],
+    // `ComboFrame.lua:20`, reached from `PlayerFrame_ToPlayerArt`. Zero is what a warrior has and
+    // what any class has out of combat, so it is also the true answer here far more often than not.
+    ['GetComboPoints', 'no combo-point state is read from the wire', [0]],
+    // The Chinese anti-addiction play-time pair, which `PlayerFrame_UpdatePlaytime` calls
+    // unconditionally (playerframe.lua:507). Both false is "no play-time restriction", which is what
+    // every non-CN realm reports.
+    ['PartialPlayTime', 'no play-time restriction state is read from the wire', [false]],
+    ['NoPlayTime', 'no play-time restriction state is read from the wire', [false]],
     ['GetPartyMember', 'no party roster is fed', [false]],
     ['GetNumPartyMembers', 'no party roster is fed', [0]],
     ['GetNumRaidMembers', 'no raid roster is fed', [0]],
@@ -296,6 +432,43 @@ export function installUnitsApi(vm: LuaVM): void {
     ['IsModifiedClick', 'input.ts tracks no modifier-key state', [false]],
     ['GetBindingKey', 'no keybinding table exists in this client', []],
     ['GetMoney', 'PLAYER_FIELD_COINAGE is not read yet', [0]],
+  );
+
+  /**
+   * `GetQuestDifficultyColor(level)` -- the colour a level NUMBER is drawn in, and the one global on
+   * this path that must return a TABLE (`color.r`, `color.g`, `color.b`).
+   *
+   * `TargetFrame_CheckLevel` (targetframe.lua:246-251) does
+   * `local color = GetQuestDifficultyColor(targetLevel); self.levelText:SetVertexColor(color.r, ...)`,
+   * so a nil here is not a missing colour -- it is an error that stops `TargetFrame_Update` before
+   * the classification and dead checks. `notImplemented` cannot answer it: its results are plain
+   * values and this needs a table.
+   *
+   * WRITTEN IN LUA, and deliberately: the five colours are the client's OWN
+   * `QuestDifficultyColors` table (`Constants.lua`), so reading them there rather than transcribing
+   * them into TypeScript means there is one copy and it is the game's. Registered before the manifest
+   * runs but resolved at CALL time, which is after `Constants.lua` has defined the table; the
+   * fallback exists only for a VM where it somehow has not.
+   *
+   * THE GREEN RANGE IS NOT PINNED. The engine's `GetQuestGreenRange()` is a level-dependent constant
+   * this client has no source for, so anything below the yellow band is green rather than fading to
+   * grey at low relative level. Said plainly rather than approximated with an invented table: the
+   * visible consequence is that a much lower-level unit's number is green where the real client would
+   * grey it.
+   */
+  vm.run(
+    `function GetQuestDifficultyColor(level)
+      local colors = QuestDifficultyColors
+      local diff = (level or 0) - (UnitLevel("player") or 0)
+      local key
+      if diff >= 5 then key = "impossible"
+      elseif diff >= 3 then key = "verydifficult"
+      elseif diff >= -2 then key = "difficult"
+      else key = "standard" end
+      if colors and colors[key] then return colors[key] end
+      return { r = 1.0, g = 0.82, b = 0.0 }
+    end`,
+    'units-api.lua',
   );
 
   for (const [name, reason, results] of gaps) {

@@ -41,6 +41,8 @@ import { GlueRenderer } from './renderer';
 import { resolveSprite } from './sprite';
 import { FontStringTextures, loadGlueFonts, measureText } from './text';
 import { DrawItem, WidgetRoot } from './widget';
+import { attachUnitBridge } from './unit-bridge';
+import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
 
 /** The offscreen target's clear colour. Fully transparent, so only what the UI draws is composited. */
@@ -155,11 +157,25 @@ export class WorldUiHost {
 
   private readonly sections: UiSections;
 
+  /**
+   * The world whose units feed the unit frames, or null.
+   *
+   * OPTIONAL because two callers have no world to give: the jest suites, and any future host that
+   * wants the tree without a session. A null world simply means no token is ever occupied, which is
+   * the same state `TargetFrame` is correctly hidden in today.
+   */
+  private readonly world: World | null;
+
+  /** `attachUnitBridge`'s teardown, held so `dispose` can run it. */
+  private detachUnits: (() => void) | null = null;
+
   constructor(
     renderer: THREE.WebGLRenderer,
     canvas: HTMLCanvasElement,
     sections?: UiSections,
+    world?: World | null,
   ) {
+    this.world = world ?? null;
     this.renderer = renderer;
     // PREMULTIPLIED, because this pass draws into a transparent offscreen target -- see
     // `renderer.ts#GlueRenderer.premultiplied` and `composite` below.
@@ -171,6 +187,16 @@ export class WorldUiHost {
   /** The live runtime, or null while it is still booting. For the console handle and the report. */
   get loaded(): WorldRuntime | null {
     return this.runtime;
+  }
+
+  /**
+   * The widget under the pointer, or null when the pointer is over the world.
+   *
+   * The world's click-to-target path asks this before picking a unit; see `GlueInput#pointerWidget`
+   * for why the router's own hit is the right source rather than a second test.
+   */
+  get pointerWidget(): unknown {
+    return this.input.pointerWidget;
   }
 
   /**
@@ -203,6 +229,13 @@ export class WorldUiHost {
       return;
     }
     this.runtime = runtime;
+    // THE UNIT FEED, attached the instant the tree exists and not before: `attachUnitBridge` fires
+    // `PLAYER_ENTERING_WORLD` on the way in, and a frame that has not been built yet cannot have
+    // registered for it. The world is optional so `/game?offline=1&ui=lua` -- which has units but no
+    // server, and is where every UI measurement is taken -- still boots.
+    if (this.world) {
+      this.detachUnits = attachUnitBridge(runtime.vm, this.world);
+    }
     reportLoad(runtime);
     // The console handle, exactly as the glue side has one. `worldRuntime.vm.run('...')` against the
     // tree that is on screen is the only way to interrogate a frame a screenshot cannot answer for.
@@ -387,6 +420,8 @@ export class WorldUiHost {
    */
   dispose(): void {
     this.stopped = true;
+    this.detachUnits?.();
+    this.detachUnits = null;
     this.input.detach();
     this.runtime?.dispose();
     this.runtime = null;

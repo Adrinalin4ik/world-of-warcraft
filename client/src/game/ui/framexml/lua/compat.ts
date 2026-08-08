@@ -56,6 +56,21 @@ export function installCompat(vm: LuaVM): void {
     random = math.random
     tinsert = table.insert
     tremove = table.remove
+    -- wipe(t) / table.wipe(t): WoW's own table extension -- empty the table IN PLACE and return it.
+    -- Not a Lua version difference either; there is no standard-library equivalent in any version.
+    -- IN PLACE is the whole point: FrameXML wipes tables other frames hold references to, so
+    -- replacing the table would leave every holder looking at the old contents.
+    --
+    -- Only reachable in the WORLD manifest, which is why the glue boot never missed it:
+    -- BuffFrame.lua:84 calls table.wipe(...) from BuffFrame_Update, which PlayerFrame_ToPlayerArt
+    -- reaches -- so its absence took out the first thing PlayerFrame_OnEvent does on
+    -- PLAYER_ENTERING_WORLD. (No backticks in this shim: it is a JS TEMPLATE LITERAL.)
+    function wipe(t)
+      for k in pairs(t) do t[k] = nil end
+      return t
+    end
+    table.wipe = wipe
+
     -- WoW's mod() is the C fmod, not Lua 5.3's integer-flavoured '%': gluetemplates.lua's scroll math
     -- and glueparent.lua's fade math both pass floats.
     mod = math.fmod
