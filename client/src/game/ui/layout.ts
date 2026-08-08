@@ -189,7 +189,14 @@ function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect)
  * quest frame when a quest is shown) drew its gold/silver/copper coins over the sky, and
  * `ChatChannelDropDown` and `ChatBNPlayerDropDown` (chatframe.xml:172-173, `UIDropDownMenuTemplate`
  * with no anchors -- `ToggleDropDownMenu` positions them when a menu opens) drew a whole dropdown
- * control there. 32 of the 41 unanchored widgets in the live tree were of that shape.
+ * control there. MEASURED on `/game?offline=1&ui=lua`: 41 drawn widgets had no anchors at all, 15 of
+ * them frames of that shape; the other 26 were regions, and those are the loader's business
+ * (`framexml/loader.ts#applyRegionLayout`), not this function's.
+ *
+ * COST: a fixpoint over the node list, so worst case O(nodes x anchors x depth). At the 306 nodes the
+ * world tree draws it is not measurable -- `ui.layout` p50 was 0.4 ms before and 0.5 ms after, inside
+ * run-to-run spread. It would need rethinking if the node set ever became the whole 4225-frame tree
+ * rather than the visible part of it.
  *
  * The propagation is the second half and it is not optional: `QuestInfoRequiredMoneyDisplay` anchors
  * LEFT to a font string INSIDE the unplaceable frame, so dropping the frame alone would leave the

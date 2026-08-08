@@ -63,9 +63,12 @@ export class PerfHud {
    * The gate is the display, not the measurement: `PerfMonitor` still pushes every frame into
    * `FrameStats`, still closes every `CpuSections` span and still polls the GPU query, so
    * `window.GameScreen.perf` answers exactly the same numbers with the HUD off as with it on. What
-   * stops is one `textContent` write at 4 Hz and the `format()` that builds its string -- measured at
-   * 0.02-0.05 ms per paint, i.e. under 0.2 ms per second of wall clock, which is why hiding it is a
-   * cosmetic change and not a performance one.
+   * stops is one `textContent` write at 4 Hz and the `format()` that builds its string. MEASURED
+   * (`scratchpad/d12-hudcost.js`, 400 forced paints with the real payload on the live page): p50
+   * **0.0 ms**, p99 **0.1 ms** -- and 0.1 ms is the `performance.now()` resolution the page gets, so
+   * that is an upper bound rather than a reading. Four of those a second. **Hiding the HUD is a
+   * cosmetic change, not a performance one**, and anyone who reads a frame-time difference into
+   * `?debug=true` is reading noise.
    */
   constructor(doc: Document, visible = true) {
     if (!visible) {

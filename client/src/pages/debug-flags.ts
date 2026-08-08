@@ -4,8 +4,12 @@
  * The same shape as every other flag this app reads off the query string (`?ui=lua` in
  * `game/ui/world-ui.ts:120` and `pages/glue/index.tsx:26`, `?offline=1` in
  * `network/offline-session.ts`, `?realmlist=`/`?gateway=` in `network/gateway.ts`): one
- * `URLSearchParams` read of `window.location.search`, taken at the point of use rather than stored,
- * so a route change that preserves the search preserves the flag.
+ * `URLSearchParams` read of `window.location.search`.
+ *
+ * Its one caller reads it ONCE, at `GameScreen`'s construction, and holds the answer -- see
+ * `pages/game/index.tsx#showDebug` for why (four overlay decisions that must agree with each other).
+ * A route change therefore takes effect on the next mount, which is exactly when the overlays are
+ * built or not built anyway.
  *
  * That preservation is not incidental. Both route transitions carry `window.location.search`
  * verbatim -- `pages/glue/index.tsx#enterWorld` (`navigate({ pathname: '/game', search:

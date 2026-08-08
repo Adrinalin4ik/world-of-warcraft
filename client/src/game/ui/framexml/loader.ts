@@ -928,8 +928,10 @@ class DocumentLoader {
    * `<Anchors>`**, inside two nested `<Frame setAllPoints="true">`. Without a default it resolved to
    * a 0x0 rect: the health bar, the mana bar, the name and the level drew, and the art that is meant
    * to surround them did not, which is exactly the "data outside its frames" report. It is not one
-   * texture either -- 105 regions across the 133 XML files of `FrameXML.toc` are authored with no
-   * anchors, and the ones that were visibly missing include every `ActionButton<n>Icon`
+   * texture either -- **at least** 105 regions across the 133 XML files reachable from
+   * `FrameXML.toc` are authored with no anchors (68 with no `<Size>` either; the count EXCLUDES
+   * anything with an `inherits=`, whose anchors may come from its template, so it is a floor and not
+   * a total), and the ones that were visibly missing include every `ActionButton<n>Icon`
    * (actionbuttontemplate.xml `$parentIcon`), `MainMenuBarBackpackButtonIconTexture` and the four
    * `CharacterBag<n>SlotIconTexture`s (itembuttontemplate.xml `$parentIconTexture`), and
    * `MinimapBorder` (minimap.xml).
