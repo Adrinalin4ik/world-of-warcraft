@@ -16,7 +16,18 @@ const _down = new THREE.Vector3(0, 0, -1);
 /** The election snap's probe reach and what it found -- trace fodder. */
 export interface SnapTrace {
   reach: number;
+  /** The nearest WALKABLE contact -- what the snap acts on. */
   hit: { distance: number; normalZ: number } | null;
+  /**
+   * The nearest contact of ANY kind, recorded only while `moveTrace.enabled`.
+   *
+   * Without this the trace would be blind to the defect it was used to find. `hit` is now
+   * walkable-filtered, so a steep face shadowing the floor at distance zero -- 727 of 744 latch
+   * frames in the `JW2` capture -- can no longer appear in it at all. `nearest` differing from
+   * `hit` is precisely "something non-walkable is closer than the floor", which is the reading that
+   * diagnosed this and would diagnose its return.
+   */
+  nearest?: { distance: number; normalZ: number } | null;
 }
 
 /** What one grounded walk step resolved against the world came out as. */
@@ -122,6 +133,15 @@ export function groundedStep(
     reach,
     hit: hit ? { distance: hit.distance, normalZ: hit.normal.z } : null,
   };
+
+  // Diagnostic only, and it costs a second cast -- so it runs ONLY while the trace is on, which is
+  // never in a normal session. See `SnapTrace#nearest`.
+  if (moveTrace.enabled) {
+    const nearest = cast(slid, _down, reach, SKIN_WIDTH);
+    snap.nearest = nearest
+      ? { distance: nearest.distance, normalZ: nearest.normal.z }
+      : null;
+  }
 
   // Kept alongside the filter for the same reason the grounded test keeps its own -- see `step`.
   let ground: object | null = null;

@@ -75,7 +75,9 @@ class M2Blueprint {
       // source's geometry and batches and the clone is nearly free; a character/creature model that
       // animates does not, and rebuilds its own batches and materials here. Splitting the two marks
       // is what distinguishes "the first of a kind is expensive" from "every one of them is".
-      const heapBefore = heapUsedMB();
+      // Gated, like every other read in this instrument. The comment below claimed it was "read
+      // only while the trace is on" while this line read it on all 1101 clones of a walk.
+      const heapBefore = frameTrace.enabled ? heapUsedMB() : 0;
       const clone = traceStage('m2.clone', path, () => m2.clone());
 
       // The RETAINED heap step across one clone, in MB, recorded through the mark's `ms` slot (see

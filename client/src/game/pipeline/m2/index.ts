@@ -581,7 +581,7 @@ class M2 extends THREE.Group {
     // 800 ms character clone: real O(submeshes x vertices) work spreads the total evenly across
     // `built` builds, while a garbage collection landing inside the clone concentrates it in one.
     // Per-build marks would have been 61 rows per character and would have flushed the ring.
-    const geomTimes: number[] = frameTrace.enabled ? [] : (null as any);
+    const geomTimes: number[] | null = frameTrace.enabled ? [] : null;
 
     for (let submeshIndex = 0; submeshIndex < subLen; ++submeshIndex) {
       const submeshDef = submeshes[submeshIndex];
