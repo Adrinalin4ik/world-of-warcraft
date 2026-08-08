@@ -63,6 +63,18 @@ class TextureLoader {
    * already a unit -- and the case where it would bite is a terrain tileset a character happens to
    * share, of which the world holds none.
    */
+  /**
+   * The cache/reference key for a path and its wrap settings.
+   *
+   * Exposed because a reference can outlive the knowledge of which TEXTURE it belongs to: a slot
+   * still showing `PLACEHOLDER` has taken a reference but has no `textureKey` to release it by. A
+   * caller that remembers the KEY it asked for can always give it back; a caller that remembers only
+   * the texture object cannot. See `releaseKey`.
+   */
+  static keyFor(rawPath, wrapS = THREE.RepeatWrapping, wrapT = THREE.RepeatWrapping) {
+    return `${rawPath.toUpperCase()};ws:${wrapS.toString()};wt:${wrapT.toString()}`;
+  }
+
   static load(
     rawPath,
     wrapS = THREE.RepeatWrapping,
@@ -72,7 +84,7 @@ class TextureLoader {
     const path = rawPath.toUpperCase();
 
     // Ensure we cache based on texture settings. Some textures are reused with different settings.
-    const textureKey = `${path};ws:${wrapS.toString()};wt:${wrapT.toString()}`;
+    const textureKey = this.keyFor(path, wrapS, wrapT);
 
     // Prevent unintended unloading.
     if (this.pendingUnload.has(textureKey)) {
@@ -145,12 +157,31 @@ class TextureLoader {
 
   static unload(texture) {
     if (!texture) return;
-    const textureKey = texture.textureKey;
+    this.releaseKey(texture.textureKey);
+  }
 
-    let refCount = this.references.get(textureKey) || 1;
-    --refCount;
+  /**
+   * Give back ONE reference taken for `textureKey`.
+   *
+   * The key-based release, and the one `unload` now delegates to. Two things it fixes over the
+   * texture-based form it replaces:
+   *
+   *  * A reference taken for a slot that is still `PLACEHOLDER` can be released at all. It could not
+   *    be before -- `unload` reads `texture.textureKey`, which the shared placeholder does not carry
+   *    -- so a material disposed while its textures were still decoding released nothing.
+   *  * The count is written on the way to zero. The old branch left the stale count in `references`
+   *    when it reached 0 and only added the key to `pendingUnload`; if `load` then resurrected the
+   *    key before the background sweep ran, it read that stale count and came back at 2 instead of
+   *    1, permanently one high. Deleting the entry makes the resurrection path (`get(key) || 0`)
+   *    exact.
+   */
+  static releaseKey(textureKey) {
+    if (!textureKey) return;
 
-    if (refCount === 0) {
+    const refCount = (this.references.get(textureKey) || 1) - 1;
+
+    if (refCount <= 0) {
+      this.references.delete(textureKey);
       this.pendingUnload.add(textureKey);
     } else {
       this.references.set(textureKey, refCount);

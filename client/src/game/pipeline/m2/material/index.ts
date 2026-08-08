@@ -529,10 +529,33 @@ class M2Material extends THREE.ShaderMaterial {
    */
   texturePriority = PRIORITY.BACKGROUND;
 
+  /**
+   * The loader keys this material currently holds a reference for -- one per slot that went through
+   * `TextureLoader.load`, in the order the slots were walked.
+   *
+   * WHY KEYS AND NOT THE TEXTURE OBJECTS. `loadTextures()` takes a fresh reference for every def it
+   * walks and it can be called more than once on the same material: the three character/creature
+   * setters below each call it again once the appearance is known. Releasing the previous round from
+   * the `textures` ARRAY is impossible, because a slot that has not finished decoding still holds
+   * `PLACEHOLDER`, which carries no `textureKey` -- so the reference it took could not be named, let
+   * alone given back. Remembering the keys removes that dependency entirely.
+   *
+   * MEASURED, before this was written and on a real entry at Northshire: 3627 materials took 4634
+   * `loadTextures()` calls between them -- 981 called twice, three called three times, one seven and
+   * two eight -- for 1007 redundant calls and **728 loader references that were never released**,
+   * against 7752 live references over 770 keys. Those 728 can never reach zero, so `backgroundUnload`
+   * never disposes them and the GPU memory for a zone is not reclaimed when it unloads. That is ~9.4%
+   * of live references, NOT the 7011 "excess over one reference per key" the aggregate table shows --
+   * most of that excess is legitimate sharing (one flame texture is genuinely referenced by 1303
+   * doodad placements) and is not a leak at all.
+   */
+  private referencedKeys: string[] = [];
+
   loadTextures() {
     const textureDefs = this.textureDefs;
 
     const textures = [];
+    const nextKeys: string[] = [];
 
     textureDefs.forEach((textureDef, index) => {
       // A slot the runtime supplies as a TEXTURE rather than as a path -- today only the composited
@@ -557,6 +580,10 @@ class M2Material extends THREE.ShaderMaterial {
       // replaced in place once the texture has been fetched and decoded.
       textures[index] = TextureLoader.PLACEHOLDER;
 
+      // Recorded BEFORE the fetch, because the reference is taken by `load()` synchronously and a
+      // material can be disposed while the decode is still in flight. See `referencedKeys`.
+      nextKeys.push(TextureLoader.keyFor(path, THREE.RepeatWrapping, THREE.RepeatWrapping));
+
       // `texturePriority` is BACKGROUND for every material until one of the three character/creature
       // setters below raises it. See `worker/pool.js#PRIORITY` for why a visible unit's texture
       // outranks a terrain tile, and the measurement that made it necessary.
@@ -570,6 +597,20 @@ class M2Material extends THREE.ShaderMaterial {
           console.error(`Failed to load M2 texture ${path}:`, error);
         });
     });
+
+    // RELEASE AFTER TAKING, never before, and this order is the whole safety argument.
+    //
+    // A repeat call usually asks for most of the same paths again. Releasing first would drop each
+    // shared key to zero, push it onto `pendingUnload`, and expose it to a background sweep landing
+    // in between -- which disposes a GPU texture the very next `load()` is about to hand straight
+    // back. Taking first means every key that survives the re-supply never falls below one, and only
+    // the keys this material genuinely stopped using reach zero. `TextureLoader.load` also removes a
+    // key from `pendingUnload` on the way in, so even the interleaved case is covered twice.
+    const previousKeys = this.referencedKeys;
+    this.referencedKeys = nextKeys;
+    for (let i = 0; i < previousKeys.length; ++i) {
+      TextureLoader.releaseKey(previousKeys[i]);
+    }
 
     this.textures = textures;
 
@@ -707,17 +748,19 @@ class M2Material extends THREE.ShaderMaterial {
   dispose() {
     super.dispose();
 
-    this.textures.forEach((texture) => {
-      // Only textures this material took THROUGH the loader may be released to it. A `textureKey` is
-      // what `TextureLoader.load` stamps on, so its absence marks the two kinds it never issued: the
-      // shared `PLACEHOLDER`, and a runtime-supplied texture such as the composited body skin, whose
-      // owner is `body-composite.ts`'s cache. Unloading either used to push `undefined` into
-      // `pendingUnload` and decrement a reference count that does not exist.
-      if (!texture?.textureKey) {
-        return;
-      }
-      TextureLoader.unload(texture);
-    });
+    // BY KEY, replacing a walk of `this.textures` guarded on `texture.textureKey`.
+    //
+    // That guard was there for a real reason -- the shared `PLACEHOLDER` and a runtime-supplied
+    // texture such as the composited body skin were never issued by the loader and must not be
+    // released to it -- but it also meant a material disposed while its textures were still decoding
+    // released NOTHING, because every slot was still the placeholder. `referencedKeys` records
+    // exactly the slots that went through `TextureLoader.load` and nothing else, so both kinds are
+    // excluded by construction rather than by inspecting what happens to be in the array now.
+    const keys = this.referencedKeys;
+    this.referencedKeys = [];
+    for (let i = 0; i < keys.length; ++i) {
+      TextureLoader.releaseKey(keys[i]);
+    }
   }
 
   // `setFadeAlpha(alpha)` used to sit here. Deleted, not deprecated: it had zero callers, and it
