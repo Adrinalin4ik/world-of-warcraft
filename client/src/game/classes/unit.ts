@@ -390,8 +390,22 @@ class Unit extends Entity {
    * dressed character would be replaced by an undressed one the moment the server re-sent it.
    */
   get hasCharacterLook(): boolean {
-    return this.characterLookToken > 0;
+    return this.characterLookApplied;
   }
+
+  /**
+   * Set ONLY once a look has actually been applied to a model -- never merely because one was asked
+   * for.
+   *
+   * This is separate from `characterLookToken` and the separation is load-bearing. The first version
+   * derived `hasCharacterLook` from `characterLookToken > 0`, and the token is bumped BEFORE the async
+   * DBC resolve. So a character whose race the client's own DBCs do not describe -- the one case
+   * `resolveCharacterLook` is written to report rather than throw on -- would leave the flag true with
+   * no model, and `displayId`'s own arm would then decline for ever on the grounds that a look already
+   * owned the body. The result would be an INVISIBLE unit, produced by the very branch that exists to
+   * fall back gracefully. Found in self-review, not by a test.
+   */
+  private characterLookApplied = false;
 
   /** Which `setCharacterLook` call the in-flight load belongs to. Monotonic, like the glue scene's. */
   private characterLookToken = 0;
@@ -452,11 +466,12 @@ class Unit extends Entity {
     if (key === this.characterLookKey) {
       return true; // already wearing exactly this; see `characterLookKey`
     }
-    this.characterLookKey = key;
     const token = ++this.characterLookToken;
 
     const look = await resolveCharacterLook(identity);
     if (!look) {
+      // The key is NOT recorded on this path, so a later attempt for the same identity retries rather
+      // than short-circuiting on a look that was never built.
       return false;
     }
     if (this.characterLookToken !== token) {
@@ -499,6 +514,11 @@ class Unit extends Entity {
     if (previous && previous !== loaded.model) {
       M2Blueprint.unload(previous);
     }
+
+    // BOTH only now, and only together: the look is on the model, so it is true that this unit is
+    // drawn from one, and true that re-asking for the same key would be redundant.
+    this.characterLookApplied = true;
+    this.characterLookKey = key;
 
     attachCharacterItems(
       loaded.model,
