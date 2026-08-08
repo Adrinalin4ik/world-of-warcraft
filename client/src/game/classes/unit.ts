@@ -19,6 +19,7 @@ import {
 } from "../character/dress";
 import { compositeCacheKey } from "../ui/scene/body-composite";
 import { CharacterIdentity, resolveCharacterLook } from "../ui/scene/character-look";
+import { resolveNpcLook } from "../ui/scene/npc-look";
 import Entity from "./entity";
 
 enum SlopeType {
@@ -335,50 +336,103 @@ class Unit extends Entity {
     if (!displayId) {
       return;
     }
+    this.resolveDisplay(displayId).catch(console.error);
+  }
 
-    DBC.load("CreatureDisplayInfo", displayId).then((displayInfo: DBC) => {
-      this._displayId = displayId;
-      this.displayInfo = displayInfo;
-      const modelID = displayInfo.modelID;
-      return DBC.load("CreatureModelData", modelID).then((modelData: DBC) => {
-        this.modelData = modelData;
-        this.modelData.path = this.modelData.file.match(/^(.+?)(?:[^\\]+)$/)[1];
-        this.displayInfo!.modelData = this.modelData;
-        // The unit's OWN collision height -- what every swim depth line is a fraction of, which is
-        // why a gnome floats with her head out and a night elf sits deeper. NOT the movement
-        // capsule height, which is a constant feel knob. Falls back to the client's own
-        // empty-world default when the row carries no usable value, because at zero every depth
-        // line collapses and the avatar swims on dry land.
-        const rawHeight = (modelData as any).collisionHeight;
-        const displayScale = (displayInfo as any).scale || (modelData as any).scale || 1;
-        this.collisionHeight = rawHeight > 0
-          ? rawHeight * displayScale
-          : DEFAULT_COLLISION_HEIGHT;
-        this.move.collisionHeight = this.collisionHeight;
+  /**
+   * Which `resolveDisplay` call owns the body, and which display id it finished drawing.
+   *
+   * The token is the same law `characterLookToken` is: the resolve is four awaits deep and the server
+   * re-sends a create-object for the same unit every time it re-enters our grid, so without it two
+   * in-flight resolves could land in either order. `appliedDisplayId` is the DEDUPE -- a repeat of the
+   * id already on the body costs nothing at all, which matters because a zone of npcs now means an
+   * `.m2` clone, a DBC chain and a texture fetch per repeat rather than just the first two.
+   */
+  private displayToken = 0;
+  private appliedDisplayId = 0;
 
-        return M2Blueprint.load(this.modelData.file).then((m2: M2) => {
-          // A CHARACTER LOOK OUTRANKS A DISPLAY ID, whichever lands last. `Player`'s constructor kicks
-          // off the placeholder `displayId = 21976` at session construction, and the server's
-          // create-object assigns `unit_field_displayid` too; either could resolve after a look has
-          // dressed the body, and either would then draw an undressed race model over it. The handler
-          // already declines to ASSIGN a display id to a dressed unit; this is the same rule for an
-          // assignment that was already in flight.
-          if (this.hasCharacterLook) {
-            M2Blueprint.unload(m2);
-            return null;
-          }
-          this.model = m2;
-          this.model.displayInfo = this.displayInfo;
-          this.model.visible = true;
+  /**
+   * Resolve a `CreatureDisplayInfo` id onto this unit -- TWO PATHS, and which one is taken is the
+   * row's own `extraInfoID`.
+   *
+   * Measured on the live 3.3.5a table: 8 811 of 24 262 rows have `extraInfoID = 0` and take their skin
+   * from the row's texture-variation columns (the wolves and rabbits, which already worked); 15 451
+   * have a non-zero one, are CHARACTER models, and need the runtime texture slots and geoset selection
+   * that only the character path supplies. `ui/scene/npc-look.ts` documents the split and its evidence.
+   *
+   * The npc path is a strict improvement rather than a gamble: if the extra row cannot be resolved it
+   * falls through to the display-id path below, which is exactly what it would have done before.
+   */
+  private async resolveDisplay(displayId: number): Promise<void> {
+    if (displayId === this.appliedDisplayId) {
+      return;
+    }
+    const token = ++this.displayToken;
 
-          // Assigning displayInfo above kicks off texture loads, which are deliberately
-          // fire-and-forget: each one fills its slot in the material's texture array when it
-          // resolves and handles its own errors. Bluebird cannot tell that apart from a forgotten
-          // return and warns about it, so say explicitly that nothing is being chained.
-          return null;
-        });
-      });
-    }).catch(console.error);
+    const displayInfo: DBC = await DBC.load('CreatureDisplayInfo', displayId);
+    this._displayId = displayId;
+    this.displayInfo = displayInfo;
+
+    const modelData: DBC = await DBC.load('CreatureModelData', displayInfo.modelID);
+    this.modelData = modelData;
+    this.modelData.path = this.modelData.file.match(/^(.+?)(?:[^\\]+)$/)[1];
+    this.displayInfo!.modelData = this.modelData;
+    // The unit's OWN collision height -- what every swim depth line is a fraction of, which is
+    // why a gnome floats with her head out and a night elf sits deeper. NOT the movement
+    // capsule height, which is a constant feel knob. Falls back to the client's own
+    // empty-world default when the row carries no usable value, because at zero every depth
+    // line collapses and the avatar swims on dry land.
+    const rawHeight = (modelData as any).collisionHeight;
+    const displayScale = (displayInfo as any).scale || (modelData as any).scale || 1;
+    this.collisionHeight = rawHeight > 0 ? rawHeight * displayScale : DEFAULT_COLLISION_HEIGHT;
+    this.move.collisionHeight = this.collisionHeight;
+
+    // A CHARACTER LOOK OUTRANKS A DISPLAY ID, whichever lands last. `Player`'s constructor kicks
+    // off the placeholder `displayId = 21976` at session construction, and the server's
+    // create-object assigns `unit_field_displayid` too; either could resolve after a look has
+    // dressed the body, and either would then draw an undressed race model over it. The handler
+    // already declines to ASSIGN a display id to a dressed unit; this is the same rule for an
+    // assignment that was already in flight.
+    if (this.hasCharacterLook || this.displayToken !== token) {
+      return;
+    }
+
+    if ((displayInfo as any).extraInfoID) {
+      const look = await resolveNpcLook(displayInfo as any, modelData as any);
+      if (this.displayToken !== token) {
+        return;
+      }
+      if (look && (await this.wearLook(look, ++this.characterLookToken))) {
+        // DELIBERATELY NOT `characterLookApplied`. That flag means "this body is a PLAYER's character
+        // look and a display id must not stomp it"; here the display id IS the source, so setting it
+        // would make the unit deaf to a server-side morph. `appliedDisplayId` is the dedupe instead.
+        this.appliedDisplayId = displayId;
+        return;
+      }
+      // Fell through on purpose: an unresolvable extra row draws the plain display-id body below,
+      // which is what this unit would have drawn anyway.
+    }
+
+    const m2: M2 = await M2Blueprint.load(this.modelData.file);
+    if (this.hasCharacterLook || this.displayToken !== token) {
+      M2Blueprint.unload(m2);
+      return;
+    }
+    this.model = m2;
+    this.model.displayInfo = this.displayInfo;
+    // AFTER the setter, which writes `rotation.z` and bakes `matrix` itself: `M2` sets
+    // `matrixAutoUpdate = false` on itself (`pipeline/m2/index.ts`), so `scale.setScalar` is INERT
+    // without the `updateMatrix()` that follows it. Creatures come in many sizes and this was
+    // measured missing -- Northshire's wolves carry `CreatureDisplayInfo.scale` 0.40 and 0.55 and were
+    // drawing at 1.0, i.e. roughly twice life size.
+    this.model.scale.setScalar((displayInfo as any).scale || 1);
+    this.model.updateMatrix();
+    this.model.visible = true;
+    this.appliedDisplayId = displayId;
+
+    // Assigning displayInfo above kicks off texture loads, which are deliberately
+    // fire-and-forget: each one fills its slot in the material's texture array when it
+    // resolves and handles its own errors.
   }
 
   /**
@@ -488,6 +542,32 @@ class Unit extends Entity {
       this.move.collisionHeight = this.collisionHeight;
     }
 
+    if (!(await this.wearLook(look, token))) {
+      return false;
+    }
+
+    // BOTH only now, and only together: the look is on the model, so it is true that this unit is
+    // drawn from one, and true that re-asking for the same key would be redundant.
+    this.characterLookApplied = true;
+    this.characterLookKey = key;
+
+    return true;
+  }
+
+  /**
+   * Put a resolved look on the body: load, swap the model, apply, attach. The whole of what a player
+   * look and a humanoid-npc look have in common, which is everything except who is allowed to stomp it.
+   *
+   * SHARED RATHER THAN COPIED, and that is the point of the extraction: `setCharacterLook` and
+   * `resolveDisplay`'s npc branch differ only in where the look came from and in which flags they set
+   * afterwards. A second copy of these twenty lines would have drifted at the first bug fixed in one
+   * of them -- the same argument `character/dress.ts` was created under.
+   *
+   * `token` is the caller's `characterLookToken` value; it is re-checked after every await and passed
+   * into `attachCharacterItems`' `stillWanted`, so a look superseded mid-flight releases what it
+   * loaded instead of hanging it on the next look's skeleton.
+   */
+  private async wearLook(look: any, token: number): Promise<boolean> {
     const loaded = await loadCharacter(look);
     if (this.characterLookToken !== token) {
       M2Blueprint.unload(loaded.model);
@@ -514,11 +594,6 @@ class Unit extends Entity {
     if (previous && previous !== loaded.model) {
       M2Blueprint.unload(previous);
     }
-
-    // BOTH only now, and only together: the look is on the model, so it is true that this unit is
-    // drawn from one, and true that re-asking for the same key would be redundant.
-    this.characterLookApplied = true;
-    this.characterLookKey = key;
 
     attachCharacterItems(
       loaded.model,
