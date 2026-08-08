@@ -172,6 +172,42 @@ describe('DoodadProvider', () => {
     expect(atNew).toHaveLength(12);
   });
 
+  // THE EXACTNESS OF THE WORLD-BOUNDS CACHE, which is the one way it could go wrong.
+  //
+  // `worldBoundsOf` reuses a hull's world AABB whenever the matrix and geometry that produced it are
+  // unchanged -- the skip that took doodad `gather` from 4.37 ms to 1.70 ms per cast. If the
+  // invalidation is wrong, a doodad that moves keeps colliding where it used to be, and the failure
+  // is invisible in the world until someone walks through a tree.
+  //
+  // The existing 'moves without an explicit matrix update' case above does NOT cover this: it moves
+  // the placement before the first gather, so the cache is populated with the new matrix and is
+  // never asked to notice a change. This moves it AFTER a gather has already cached the old bounds,
+  // which is the only ordering that can produce a stale box.
+  it('re-gathers a placement that moves after its bounds were already cached', () => {
+    const provider = new DoodadProvider();
+    const mesh = hull();
+    const placement = new THREE.Object3D();
+    placement.add(mesh);
+    provider.add(mesh);
+
+    // Gather once at the origin: this is what populates the cache with the ORIGINAL matrix.
+    const before: Triangle[] = [];
+    provider.gather(boxAt(0, 0, 0, 2), before);
+    expect(before).toHaveLength(12);
+
+    placement.position.set(300, 0, 0);
+    placement.updateMatrix();
+
+    const atOld: Triangle[] = [];
+    const atNew: Triangle[] = [];
+    provider.gather(boxAt(0, 0, 0, 2), atOld);
+    provider.gather(boxAt(300, 0, 0, 2), atNew);
+
+    // Same frame, not the next one: the cache miss and the recompute both happen inside the gather.
+    expect(atOld).toHaveLength(0);
+    expect(atNew).toHaveLength(12);
+  });
+
   it('ignores a mesh with no position attribute rather than throwing', () => {
     const provider = new DoodadProvider();
     provider.add(new THREE.Mesh(new THREE.BufferGeometry()));
