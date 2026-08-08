@@ -1,5 +1,6 @@
 import ByteBuffer from 'byte-buffer';
 import GUID from '../game/guid';
+import { GUID_BYTES, guidBytes, guidHex, normaliseGuid } from '../guid-hex';
 window['ByteBuffer'] = ByteBuffer;
 class Packet extends ByteBuffer {
   
@@ -82,12 +83,32 @@ class Packet extends ByteBuffer {
   //     end;
   //   end;
 
+  /**
+   * Write a guid in the server's packed form: a one-byte mask, then only the non-zero bytes.
+   *
+   * TAKES THE NORMALISED HEX STRING (`network/guid-hex.ts`), which is what every guid in this client
+   * now is. The previous body took a `{low, high}` pair and wrote a FIXED eight-byte blob --
+   * `[3, raw[0], raw[1], 1, raw[5], raw[6], 0, 0]` -- whose mask bytes and payload bytes did not
+   * correspond to each other at all, and whose only caller (`player/movement.ts:116`) hands it
+   * `world.player.guid`, a STRING. So `guid.low` was `undefined`, `writeUnsignedInt(undefined)` wrote
+   * garbage, and the mask claimed bytes 0 and 1 plus a stray `1`/`0` pair. It could never have
+   * produced a guid the server would accept. Movement networking is not in scope here, but the
+   * REPRESENTATION is, and leaving one half of it converted would have been worse than either state.
+   *
+   * The mask is `1 << i` per non-zero byte, low byte first, exactly as `readPackedGUID` reads it and
+   * as the Pascal reference transcribed above writes it.
+   */
   writePackedGUID(guid) {
-    const buffer = new ByteBuffer(8, -1);
-    buffer.writeUnsignedInt(guid.low);
-    buffer.writeUnsignedInt(guid.high);
-
-    this.write([3, buffer.raw[0], buffer.raw[1], 1, buffer.raw[5], buffer.raw[6], 0, 0])
+    const bytes = guidBytes(typeof guid === 'string' ? guid : normaliseGuid(guid));
+    let mask = 0;
+    const payload = [];
+    for (let i = 0; i < GUID_BYTES; ++i) {
+      if (bytes[i] !== 0) {
+        mask |= 1 << i;
+        payload.push(bytes[i]);
+      }
+    }
+    this.write([mask, ...payload]);
     return this;
   }
 
@@ -96,25 +117,37 @@ class Packet extends ByteBuffer {
   // readPackedGUID: ->
   //   return null
 
+  /**
+   * Read a packed guid and answer the NORMALISED HEX STRING, not a number.
+   *
+   * WHAT WAS WRONG, and it is the blocker two prior reports named. The body used to accumulate
+   * `guid |= bit << (i * 8)` into a `var guid = 0`. `|` coerces both operands to **int32**, so:
+   *   - byte 3 with its high bit set produced a NEGATIVE guid (`-250601794` is in the owner's log);
+   *   - `bit << 24` for i >= 4 shifts by 32/40/... which JS masks to `& 31`, i.e. bytes 4..7 were
+   *     folded back over bytes 0..3 -- a silent collision, not a truncation;
+   *   - so `World#entities` (`Map<string, Unit>`) was keyed by these numbers while the player was
+   *     keyed by the roster's hex string, they could never match, and the server's create-object for
+   *     our own character made a SECOND `Unit` beside the one the world had placed. That is the
+   *     duplicate player, and this line is its whole cause.
+   *
+   * Bytes the mask does not select are ZERO, which is exactly `guidHex`'s zero-extension.
+   */
   readPackedGUID() {
-      var guidMark = this.readUnsignedByte();
+      const guidMark = this.readUnsignedByte();
+      const bytes = new Uint8Array(GUID_BYTES);
 
-      var guid = 0;
-
-      var i;
-      for (i = 0; i < 8; ++i)
+      for (let i = 0; i < GUID_BYTES; ++i)
       {
           if(guidMark & (1 << i))
           {
-              if(this.index + 1 > this.length) 
-                  throw "Buffer exception "+this.index+" >= "+this.lenght;
+              if(this.index + 1 > this.length)
+                  throw new Error(`Buffer exception ${this.index} >= ${this.length}`);
 
-              var bit = this.readUnsignedByte();
-              guid |= (bit << (i * 8));
+              bytes[i] = this.readUnsignedByte();
           }
       }
 
-      return guid;
+      return guidHex(bytes);
   }
 
   // readPackedGUID() {
