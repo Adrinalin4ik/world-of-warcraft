@@ -686,6 +686,10 @@ class M2Material extends THREE.ShaderMaterial {
         )
           .then((texture) => {
             textures[index] = texture;
+            // Writing `textures[index]` mutates the array the uniform already holds, so nothing
+            // about this assignment is visible to three. See the `uniformsNeedUpdate` block at the
+            // bottom of this method for the renderer contract and for what this is and is not.
+            this.uniformsNeedUpdate = true;
             return null;
           })
           .catch((error) => {
@@ -714,6 +718,29 @@ class M2Material extends THREE.ShaderMaterial {
     // Update shader uniforms to reflect loaded textures.
     this.uniforms.textures = { value: textures };
     this.uniforms.textureCount = { value: textures.length };
+
+    // AND TELL THREE THEY CHANGED -- the renderer contract this whole class lives under.
+    //
+    // A `ShaderMaterial` owns its `uniforms` object and `WebGLRenderer` pushes it to the program
+    // only on a material/program refresh or when `uniformsNeedUpdate` is set (three 0.185.1,
+    // `build/three.cjs:78725-78729`: `if (material.isShaderMaterial && material.uniformsNeedUpdate
+    // === true)`). Every value written after a material's first draw is invisible until something
+    // raises that flag. `submesh.js#applyUniformsBeforeRender` raises it when an animated UV /
+    // transparency / vertex-colour slot or a fade alpha CHANGES -- which covers doodads, creatures
+    // and character bodies by accident, and covers nothing at all for a model that animates none of
+    // them. An `Item\ObjectComponents\` weapon, pauldron or helm animates nothing and never fades,
+    // so a texture supplied AFTER construction (`setObjectTexture`, from `attachCharacterItems`)
+    // had no guaranteed route to the GPU.
+    //
+    // HONEST SCOPE: this is a latent hazard found while diagnosing the white item models, NOT the
+    // cause of them -- that was the unset fog uniforms (`world/index.ts#adoptAttachedModel`), proved
+    // by rewriting these materials' fragment output in the browser: sampling `textures[0]` directly
+    // drew the correct Stormwind plate, and the same sample put through `applyFog` alone drew flat
+    // white. So the texture was reaching the shader on that build. It is raised here anyway because
+    // nothing guarantees it: the flag costs one re-upload per texture that actually lands, which is
+    // bounded by the number of slots the material has, and the alternative is a slot that is right
+    // in JS and wrong on screen with nothing to point at.
+    this.uniformsNeedUpdate = true;
 
     if (pending.length === 0) {
       return Promise.resolve(NO_TEXTURE_FAILURES);

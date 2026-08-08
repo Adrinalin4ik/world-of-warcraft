@@ -10,6 +10,16 @@ import { readMovementInfo } from '../../movement-info';
 import { GUID_BYTES, guidHex } from '../../../guid-hex';
 import { objectTrace } from './trace';
 
+/**
+ * One reusable 4-byte window for reinterpreting a float update field's raw bits.
+ *
+ * `parseUpdateValues` reads every field with `readUnsignedInt`, which is right for the great
+ * majority of them and wrong for the handful that are floats on the wire. Module scope rather than
+ * per-packet so a grid full of units does not allocate two typed arrays each.
+ */
+const SCALE_BITS = new Uint32Array(1);
+const SCALE_FLOAT = new Float32Array(SCALE_BITS.buffer);
+
 export class UpdateObjectHandler extends EventEmitter {
   private game: GameHandler;
 
@@ -258,6 +268,25 @@ export class UpdateObjectHandler extends EventEmitter {
       const identity = await characterIdentityFor(pack.newObject);
       if (identity) {
         await unit.setCharacterLook(identity);
+      }
+    }
+
+    // OBJECT_FIELD_SCALE_X -- the unit's render scale, and the ONLY thing the reference client sizes
+    // a unit by (`benilla/crates/benilla/src/entities/attach/mod.rs:711-717`; see `Unit#objectScale`
+    // for the quotation and for the measurement that settled it against this realm). Reinterpreted
+    // rather than converted: `parseUpdateValues` reads every field with `readUnsignedInt`, so a float
+    // column arrives as its IEEE-754 bit pattern and `Number` conversion would give ~1.06e9 for 1.0.
+    //
+    // BEFORE the display-id assignment on purpose. `set displayId` starts the resolve that applies
+    // the scale, so a scale that arrived in the same values block must already be on the unit; a
+    // scale that arrives LATER, in a values-only update for a body already drawn, is handled by the
+    // `applyRenderScale()` call in the setter below.
+    if (typeof pack.newObject.object_field_scale_x === 'number') {
+      SCALE_BITS[0] = pack.newObject.object_field_scale_x >>> 0;
+      const scale = SCALE_FLOAT[0];
+      if (Number.isFinite(scale) && scale > 0) {
+        unit.objectScale = scale;
+        unit.applyRenderScale();
       }
     }
 

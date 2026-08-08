@@ -49,6 +49,12 @@ export default class World extends EventEmitter {
    */
   private readonly modelChangeHandler = (unit: Unit, oldModel: any, newModel: any) =>
     this.changeModel(unit, oldModel, newModel);
+  // Stored for the same reason as `modelChangeHandler` above, and the reason is worth repeating
+  // because these two arrived on a branch that had not seen that fix: `bind` returns a NEW function
+  // object every call, so `removeListener(..., this.f.bind(this))` removes nothing at all. These
+  // fire per stream-out, which is exactly when a listener that cannot be removed becomes a leak.
+  private readonly modelAttachHandler = (unit: Unit, item: any) => this.adoptAttachedModel(unit, item);
+  private readonly modelDetachHandler = (unit: Unit, item: any) => this.releaseAttachedModel(unit, item);
   // private skybox: THREE.Mesh;
   constructor(game: GameHandler) {
     super();
@@ -286,6 +292,12 @@ export default class World extends EventEmitter {
       // this.scene.add(entity.arrow);
 
       entity.on('model:change', this.modelChangeHandler);
+      // The SECOND door into the same registry, and it exists because the first one closes too
+      // early. `model:change` fires when the body lands; a weapon, pauldron pair or helm is parented
+      // to one of that body's BONES several fetches later (`character/dress.ts#attachCharacterItems`),
+      // so it was never in the model `changeModel` walked. See `adoptAttachedModel`.
+      entity.on('model:attach', this.modelAttachHandler);
+      entity.on('model:detach', this.modelDetachHandler);
     }
   }
 
@@ -322,12 +334,61 @@ export default class World extends EventEmitter {
       // live `model:change` subscription calling back into this world for ever. Harmless while
       // nothing was ever removed; a per-stream-out leak now that units come and go.
       entity.removeListener('model:change', this.modelChangeHandler);
+      entity.removeListener('model:attach', this.modelAttachHandler);
+      entity.removeListener('model:detach', this.modelDetachHandler);
     }
     // Hand the outgoing model's materials back out of the map's light/fog registry, the same way
     // `changeModel` does for a model being replaced -- otherwise the registry accumulates materials
     // for units that are gone and re-uniforms them every frame.
     this.changeModel(entity, entity.model, null);
     entity.release();
+  }
+
+  /**
+   * Hand ONE attached item model's materials to the map's light + fog registry.
+   *
+   * THIS IS THE FIX FOR "SHOULDERS, HELMS AND WEAPONS RENDER PURE WHITE", and it is `changeModel`'s
+   * own failure mode arriving one seam later. That method's doc already spells the mechanism out for
+   * a unit's BODY: nothing else hands a unit's materials fog uniforms, so `fogParams` stays all-zero
+   * and `fogColor` stays at its constructor default -- and `new THREE.Color()` is **white**. With
+   * `fogParams = (0,0,0,0)` the shader's `f4 = min(max(d*0 + 0, 0), 1)` is 0, so `fogFactor` is
+   * `(1 - 0) * fogModifier = 1`, and `applyFog`'s first branch is `color.rgb = mix(color.rgb,
+   * fogRgb, 1.0)` -- the fragment is replaced by that white outright, at every distance, whatever
+   * the texture says.
+   *
+   * `changeModel` fixed exactly this for the body and could not fix it for the attachments: it runs
+   * on `model:change`, which `Unit`'s `model` setter emits the instant the body is swapped in, while
+   * `attachCharacterItems` parents the helm and the two pauldrons to that body's bones one `.m2`
+   * fetch later. The registry walk had already happened and never saw them.
+   *
+   * MEASURED, on a Stormwind guard (`CreatureDisplayInfo` 3167, `HELM_PLATE_B_01STORMWIND_HUM.M2` +
+   * `L/RSHOULDER_PLATE_B_01.M2`) in Northshire, by rewriting those materials' fragment output in the
+   * browser: `gl_FragColor = texture2D(textures[0], coordinates[0])` drew the correct blue-plumed
+   * Stormwind helm, and `gl_FragColor = applyFog(<that same sample>)` drew flat 255-white. So the
+   * texture, the UVs, the geometry and the sampler were all already right and fog alone was the
+   * whitener. The same guard's tabard, gloves and boots were correct throughout because they are
+   * painted into the BODY atlas, and the body is registered.
+   */
+  adoptAttachedModel(_unit: Unit, item: any) {
+    // No map yet is not a failure: `changeMap`'s `adoptEntityMaterials` re-registers every live
+    // entity's whole model subtree, and by then the attachment is a child of it.
+    this.map?.materialRegistry?.addFrom(item);
+  }
+
+  /** Drop one attached item model's materials, mirroring `changeModel`'s release of an old body. */
+  releaseAttachedModel(_unit: Unit, item: any) {
+    const registry = this.map?.materialRegistry;
+    if (!registry || !item?.traverse) {
+      return;
+    }
+    item.traverse((child: any) => {
+      const material = child.material;
+      if (!material) {
+        return;
+      }
+      const materials = Array.isArray(material) ? material : [material];
+      materials.forEach((entry: any) => registry.delete(entry));
+    });
   }
 
   /**

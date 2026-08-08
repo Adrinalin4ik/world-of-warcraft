@@ -14,9 +14,34 @@ import { clientTicks, encodeTimeSyncResponse } from './time-sync';
 import World from '../../game/world';
 import { Camera } from 'three';
 
-export class GameHandler extends Socket {
+/**
+ * The keepalive period. The reference client's, and benilla's
+ * (`samples/benilla/crates/benilla/src/net/io.rs:87`, `PING_INTERVAL = 30 s`, itself verified against
+ * the real client's 30 000 ms ping timer at `0x537ff0`).
+ */
+const PING_INTERVAL_MS = 30000;
 
-  static pingRecv = true;
+/**
+ * The floor a `CMSG_PING` may never cross, and it is a SERVER rule, not a preference.
+ *
+ * The mangos family's `WorldSocket::_HandlePing` counts every ping that arrives less than 27 s after
+ * the previous one on the same socket and closes the connection once the count passes
+ * `MAX_OVERSPEED_PINGS` (2). benilla records the same constant and the same reason at `net/io.rs:81-84`
+ * ("vmangos *kicks* a player socket whose pings repeat faster than 27 s apart more than twice").
+ *
+ * MEASURED on `logon.gladewow.ru`, twice, on two different accounts (`scratchpad/S4-net.txt`,
+ * `S7-net.txt`): with pings forced to 10-15 s apart, pings 1-3 were answered with `SMSG_PONG` and
+ * ping 4 was not -- the realm sent its FIN 2.12 s and 2.15 s later, close code 1005, `wasClean=true`,
+ * with `target disconnected` logged BEFORE `client disconnected` by an instrumented gateway. Total
+ * elapsed differed (47.2 s and 32.2 s); the ping COUNT did not. That is the overspeed rule and
+ * nothing else.
+ *
+ * 27 exactly, not a rounder number, because 27 is the server's own comparison and a client that aims
+ * at 30 already has only 3 s of margin.
+ */
+const PING_MIN_GAP_MS = 27000;
+
+export class GameHandler extends Socket {
 
   // Creates a new game handler
   constructor(session) {
@@ -38,6 +63,24 @@ export class GameHandler extends Socket {
      * it unheld cost. Per-instance, not static: two handlers must not share one timer.
      */
     this.pingTimer = null;
+
+    /**
+     * `performance.now()` of the last `CMSG_PING` actually put on the wire, or null while none has
+     * been. Read by `ping()` against `PING_MIN_GAP_MS`; cleared with the connection, because the
+     * server's overspeed counter is per SOCKET.
+     */
+    this.lastPingAt = null;
+
+    /**
+     * Whether the last ping was answered. PER INSTANCE.
+     *
+     * It was `static pingRecv = true` on the class, which no instance ever read: `this.pingRecv` on a
+     * `GameHandler` does not see a static class field, so the first `ping()` of a session compared
+     * `undefined === false` and the guard was dead until `handlePong` had written an instance field
+     * of the same name. Declaring it here is the whole of the fix; a class-level default would also
+     * have been shared by every handler, which is the same mistake `pingTimer` above records.
+     */
+    this.pingRecv = true;
 
     // A CONNECTION's state is not a HANDLER's state, and this handler is built once per
     // `GameSession` (session.ts:18) and outlives every socket it opens. See `resetConnection`.
@@ -240,6 +283,23 @@ export class GameHandler extends Socket {
       return;
     }
 
+    // THE OVERSPEED FLOOR. See `PING_MIN_GAP_MS`: a ping less than 27 s after the previous one on this
+    // socket increments the server's overspeed counter, and the third such ping ends the session. A
+    // skipped ping costs nothing -- the timer fires again in 30 s and the server's own idle window is
+    // far wider than that -- so refusing is strictly safer than sending.
+    //
+    // `pingRecv` is deliberately NOT cleared on this path: no packet went out, so there is no pong to
+    // wait for, and clearing it would make the NEXT tick read "the last ping went unanswered" and
+    // disconnect us for the server's silence about a packet we never sent.
+    const now = performance.now();
+    if (this.lastPingAt !== null && now - this.lastPingAt < PING_MIN_GAP_MS) {
+      console.warn(
+        `ping suppressed: ${Math.round(now - this.lastPingAt)} ms since the last one, floor is`
+        + ` ${PING_MIN_GAP_MS} ms -- see PING_MIN_GAP_MS.`,
+      );
+      return;
+    }
+
     // HEADER_SIZE_OUTGOING + the real body, which is 8 bytes: two uint32s.
     //
     // It was `OPCODE_SIZE_INCOMING + 64` -- the INCOMING opcode width (2) against an OUTGOING packet
@@ -253,6 +313,7 @@ export class GameHandler extends Socket {
     app.writeUnsignedInt(10);     // latency, 10ms for now
 
     this.pingRecv = false;
+    this.lastPingAt = now;
 
     this.send(app);
   }
@@ -331,10 +392,22 @@ export class GameHandler extends Socket {
     // interval uncomfortably close to the world socket's idle window -- the same window that killed
     // the session at ~58 s until `SMSG_TIME_SYNC_REQ` was answered -- and a keepalive whose period is
     // most of the timeout it exists to prevent has no margin for a slow frame.
+    //
+    // The stop-and-rearm stays, and so does its hazard, stated rather than guarded against here: this
+    // restarts the ping PHASE from zero, so a second arrival on the same socket could put the next
+    // ping less than 27 s after the last one and walk into the overspeed kick `PING_MIN_GAP_MS`
+    // documents. `ping()`'s floor is what makes that safe, which is the right place for it -- the
+    // floor is the rule the server actually measures, and it holds however the timer is armed.
+    //
+    // Whether a second `SMSG_LOGIN_VERIFY_WORLD` can even reach one socket was CHECKED and is not
+    // established: the reference decodes it as the initial-login map announcement only
+    // (`benilla-protocol/src/events/decode.rs:540-547`, `needs_ack: false`) and routes a cross-map
+    // transfer through `SMSG_NEW_WORLD` instead. So there is no known path, and no guard is added for
+    // one that has not been shown to exist.
     this.stopPing();
     this.pingTimer = setInterval(() => {
       this.ping();
-    }, 30000);
+    }, PING_INTERVAL_MS);
 
     this.joinWorldChannel();
     this.emit('join');
@@ -362,6 +435,11 @@ export class GameHandler extends Socket {
    */
   resetConnection() {
     this.stopPing();
+    // The server's overspeed counter is per SOCKET (`WorldSocket::m_LastPingTime`), so a new
+    // connection starts with a clean one and must not inherit this one's last-ping stamp -- a
+    // reconnect within 27 s of the previous ping would otherwise have its FIRST ping suppressed.
+    this.lastPingAt = null;
+    this.pingRecv = true;
     this._crypt = null;
     this.authenticated = false;
     this.remaining = false;

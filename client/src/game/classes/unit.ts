@@ -518,6 +518,75 @@ class Unit extends Entity {
   private appliedDisplayId = 0;
 
   /**
+   * `OBJECT_FIELD_SCALE_X` as the server sent it, or null while it has not been decoded.
+   *
+   * **THIS IS THE UNIT'S RENDER SCALE, AND IT IS THE WHOLE OF IT.** The reference states the law and
+   * says where it verified it (`benilla/crates/benilla/src/entities/attach/mod.rs:711-717`): "Final
+   * size = the server's per-object scale (`OBJECT_FIELD_SCALE_X`) alone. The server already folds the
+   * unit's DBC scale (`CreatureModelData.modelScale x CreatureDisplayInfo.scale`, or an explicit
+   * per-spawn override) into this field, and the real client renders units at the field alone
+   * (verified: wow-re `world_model_scale` `0x613ef0`, vmangos `Unit::GetScaleForDisplayId`).
+   * Multiplying our own DBC scale on top double-applies it -- `native^2`, worst for the sub-1.0
+   * starting-zone scales."
+   *
+   * MEASURED ON THE LIVE SERVER, because that quotation alone would not settle what THIS realm sends.
+   * A Northshire entry with the update-values handler wrapped: every unit in the grid -- the player,
+   * the guards, the rabbits, the deer and both wolf displays -- arrives with
+   * `OBJECT_FIELD_SCALE_X = 1.0` exactly. The realm folds nothing in. So the reference client draws
+   * these wolves at 1.0 and this client was drawing them at `CreatureDisplayInfo.scale`, which is
+   * **0.40** for display 31049 and **0.55** for 31048 (read out of the live `CreatureDisplayInfo.dbc`;
+   * `CreatureModelData.modelScale` for `Creature\Wolf\Wolf.mdx` (model 43) is **1.0**, so the product
+   * the brief expected to be the missing factor is the same number). Measured world-space heights on
+   * that entry: player 2.128, wolf at 0.40 -> **0.748**, wolf at 0.55 -> 1.028. 0.748 against a 2.128
+   * human is knee-and-boot height, which is exactly what the owner reported; at 1.0 the same wolf is
+   * 1.87, whose back and shoulder sit at waist height.
+   *
+   * `null` and not `1` so that a unit whose create-object has not been parsed yet keeps the old
+   * behaviour instead of being forced to 1.0 by a value nobody sent.
+   *
+   * DELIBERATELY NOT WIRED INTO THE DRESSED PATH (`wearLook` -> `applyCharacterLook`), which keeps
+   * using `CharacterLook.scale`. Two reasons, and neither is that the law differs: the glue stage
+   * shares that path and has no wire value at all, so it would need the DBC scale anyway; and the
+   * only playable race whose column is not 1.0 is Gnome at 1.15, which nothing in this round can
+   * verify against the reference client. Left as a stated inconsistency rather than an unverified
+   * change to how every peer is sized.
+   */
+  objectScale: number | null = null;
+
+  /**
+   * The scale the body should be drawn at: the server's field when we have it, the DBC scale when we
+   * do not.
+   *
+   * The fallback is not a hedge, it is the pre-existing behaviour kept for the one case that cannot
+   * reach the wire value -- a model resolved from a display id assigned locally rather than from a
+   * create-object (`Player`'s constructor arms the placeholder `displayId = 21976`).
+   */
+  private renderScale(displayInfo: any): number {
+    return this.objectScale ?? ((displayInfo as any)?.scale || 1);
+  }
+
+  /**
+   * Re-apply the render scale to a body that is already on screen.
+   *
+   * Needed because the two inputs do not arrive in a fixed order: `OBJECT_FIELD_SCALE_X` and
+   * `UNIT_FIELD_DISPLAYID` come out of the same values block, but the model behind the display id is
+   * four awaits away, and a later values-only update can carry a new scale for a body that is already
+   * drawn (a growth aura, a mount transition).
+   *
+   * `updateMatrix()` IS THE LOAD-BEARING LINE. `M2` sets `matrixAutoUpdate = false` on itself
+   * (`pipeline/m2/index.ts`), so `scale.setScalar` alone writes a field nothing reads -- the trap that
+   * kept gnomes at human size and wolves at 1.0 through several rounds.
+   */
+  applyRenderScale(): void {
+    const model = this._model;
+    if (!model) {
+      return;
+    }
+    model.scale.setScalar(this.renderScale(this.displayInfo));
+    model.updateMatrix();
+  }
+
+  /**
    * Resolve a `CreatureDisplayInfo` id onto this unit -- TWO PATHS, and which one is taken is the
    * row's own `extraInfoID`.
    *
@@ -548,8 +617,13 @@ class Unit extends Entity {
     // capsule height, which is a constant feel knob. Falls back to the client's own
     // empty-world default when the row carries no usable value, because at zero every depth
     // line collapses and the avatar swims on dry land.
+    //
+    // THROUGH `renderScale`, so the collision box is the size of the body that is drawn. It used to
+    // read `displayInfo.scale || modelData.scale || 1`, an OR of two columns that are a PRODUCT in
+    // every source that states the law (`benilla-formats/src/creatures.rs:7`), and neither of them is
+    // what a unit is rendered at -- see `objectScale`.
     const rawHeight = (modelData as any).collisionHeight;
-    const displayScale = (displayInfo as any).scale || (modelData as any).scale || 1;
+    const displayScale = this.renderScale(displayInfo);
     this.collisionHeight = rawHeight > 0 ? rawHeight * displayScale : DEFAULT_COLLISION_HEIGHT;
     this.move.collisionHeight = this.collisionHeight;
 
@@ -599,11 +673,15 @@ class Unit extends Entity {
     const textures = this.model.setDisplayInfo(this.displayInfo);
     // AFTER the setter, which writes `rotation.z` and bakes `matrix` itself: `M2` sets
     // `matrixAutoUpdate = false` on itself (`pipeline/m2/index.ts`), so `scale.setScalar` is INERT
-    // without the `updateMatrix()` that follows it. Creatures come in many sizes and this was
-    // measured missing -- Northshire's wolves carry `CreatureDisplayInfo.scale` 0.40 and 0.55 and were
-    // drawing at 1.0, i.e. roughly twice life size.
-    this.model.scale.setScalar((displayInfo as any).scale || 1);
-    this.model.updateMatrix();
+    // without the `updateMatrix()` that follows it. That is `applyRenderScale`'s whole body and the
+    // reason it is a method: the scale also has to be re-applied when the wire value arrives after
+    // the model does, and a second copy of these two lines would have lost the `updateMatrix()` the
+    // way every earlier round did.
+    //
+    // A PREVIOUS ROUND PUT `CreatureDisplayInfo.scale` HERE AND THAT WAS THE REGRESSION the owner is
+    // looking at: it took Northshire's wolves to 0.40/0.55 when the server is telling us 1.0 for
+    // every unit in the grid. See `objectScale` for the reference's law and for the measurement.
+    this.applyRenderScale();
     // Not a plain `visible = true`: the first render of a model kind this session has to compile its
     // GLSL programs, MEASURED at 37.8 ms mean against 12.7 ms on a frame that compiles nothing, and
     // it is what the owner sees as a hitch when a group of unfamiliar mobs comes into view. This
@@ -811,7 +889,16 @@ class Unit extends Entity {
       loaded.model,
       look,
       () => this.characterLookToken === token && this._model === loaded.model,
-      (item) => this.attachedItems.push(item),
+      (item) => {
+        this.attachedItems.push(item);
+        // ANNOUNCED, not just remembered. An attached item model reaches the scene as a child of one
+        // of this body's bones, long after `model:change` fired -- so the world's light + fog
+        // registry has already walked the body without it, and a material with no fog uniforms
+        // renders as a flat white silhouette. See `world/index.ts#adoptAttachedModel` for the
+        // measurement. The glue stage needs no equivalent: `GlueSceneView#render` traverses its
+        // whole scene each frame and reaches a bone child on the way.
+        this.emit("model:attach", this, item);
+      },
     );
 
     return true;
@@ -841,6 +928,9 @@ class Unit extends Entity {
   /** Release every attached item model, off its BONE and off the blueprint's reference count. */
   private dropAttachedItems(): void {
     for (const item of this.attachedItems) {
+      // Before the unparent, so the listener can still walk the subtree it is releasing -- the
+      // mirror of the `model:attach` emit in `wearLook`.
+      this.emit("model:detach", this, item);
       item.parent?.remove(item);
       M2Blueprint.unload(item);
     }
