@@ -22,10 +22,21 @@
 import { bodyLayersFor, CharSectionsRow } from '../character-look';
 import { compositeBody } from '../body-composite';
 
-jest.mock('../../../pipeline/worker/pool', () => ({
-  __esModule: true,
-  default: { enqueue: jest.fn() },
-}));
+// `enqueueAt` delegates to `enqueue` with the priority dropped, so every expectation below keeps
+// reading `(kind, path)` at the positions it always did. The bake asks at CHARACTER priority (see
+// `worker/pool.js#PRIORITY`); WHICH priority is a scheduling decision the pool owns and tests, and
+// is not what this suite is about.
+jest.mock('../../../pipeline/worker/pool', () => {
+  const enqueue = jest.fn();
+  return {
+    __esModule: true,
+    PRIORITY: { BACKGROUND: 0, CHARACTER: 1 },
+    default: {
+      enqueue,
+      enqueueAt: (_priority: number, ...args: unknown[]) => enqueue(...args),
+    },
+  };
+});
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const WorkerPool = require('../../../pipeline/worker/pool').default;

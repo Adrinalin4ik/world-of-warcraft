@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import gameSettings from '../settings';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
-import WorkerPool from './worker/pool';
+import WorkerPool, { PRIORITY } from './worker/pool';
 
 const THREE_FORMAT = {
   [BLP_IMAGE_FORMAT.IMAGE_DXT1]: THREE.RGBA_S3TC_DXT1_Format,
@@ -50,7 +50,25 @@ class TextureLoader {
     return this._placeholder;
   }
 
-  static load(rawPath, wrapS = THREE.RepeatWrapping, wrapT = THREE.RepeatWrapping) {
+  /**
+   * `priority` reaches the worker queue and NOTHING else -- it is not part of `textureKey`, and it
+   * must not be: two callers wanting the same texture at different urgencies still want the same
+   * texture, and keying on it would decode the same BLP twice and hand out two GPU uploads.
+   *
+   * The consequence, stated rather than hidden: a path already in flight at BACKGROUND is not
+   * re-prioritised when a character asks for it. The queued task cannot be found from here (the
+   * cache holds the promise, not the task), so raising it would mean a handle this class does not
+   * keep. Measured impact is nil on the path that matters -- `Character\...` and
+   * `Item\ObjectComponents\...` are asked for by units and by nothing else, so the first asker is
+   * already a unit -- and the case where it would bite is a terrain tileset a character happens to
+   * share, of which the world holds none.
+   */
+  static load(
+    rawPath,
+    wrapS = THREE.RepeatWrapping,
+    wrapT = THREE.RepeatWrapping,
+    priority = PRIORITY.BACKGROUND,
+  ) {
     const path = rawPath.toUpperCase();
 
     // Ensure we cache based on texture settings. Some textures are reused with different settings.
@@ -73,7 +91,7 @@ class TextureLoader {
     this.references.set(textureKey, refCount);
 
     if (!this.cache.has(textureKey)) {
-      const loading = WorkerPool.enqueue('BLP', path).then((spec) => {
+      const loading = WorkerPool.enqueueAt(priority, 'BLP', path).then((spec) => {
         if (!spec) {
           throw new Error(`Failed to decode texture: ${path}`);
         }
@@ -157,6 +175,13 @@ class TextureLoader {
     setTimeout(this.backgroundUnload.bind(this), this.UNLOAD_INTERVAL);
   }
 
+}
+
+// Reachable from a probe. The reference table is the only place the over-referencing described in
+// `M2Material#updateCharacterTextures` is visible at all -- from outside, a leaked reference and a
+// live one look identical.
+if (typeof window !== 'undefined') {
+  window.textureLoader = TextureLoader;
 }
 
 export default TextureLoader;

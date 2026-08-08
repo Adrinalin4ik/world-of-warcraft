@@ -25,7 +25,7 @@
  */
 import * as THREE from 'three';
 
-import WorkerPool from '../../pipeline/worker/pool';
+import WorkerPool, { PRIORITY } from '../../pipeline/worker/pool';
 import { BLP_IMAGE_FORMAT } from '../../../wow-data-parser/blp/const';
 import { CharacterAppearance } from '../../../network/protocol/types';
 
@@ -310,7 +310,13 @@ async function loadLayerSource(layer: BodyLayer): Promise<BlpSpec | null> {
   const candidates = [layer.path, ...(layer.alternates ?? [])];
   for (const candidate of candidates) {
     try {
-      const spec = (await WorkerPool.enqueue('BLP', candidate.toUpperCase(), true)) as
+      // CHARACTER priority: these are the layers of a visible character's skin, and the atlas
+      // cannot be composited until the LAST of them arrives -- so one layer stuck behind a
+      // terrain burst holds the whole bake, and the character stands in his base skin until it
+      // clears. See `worker/pool.js#PRIORITY`.
+      const spec = (await WorkerPool.enqueueAt(
+        PRIORITY.CHARACTER, 'BLP', candidate.toUpperCase(), true,
+      )) as
         | BlpSpec
         | null
         | undefined;

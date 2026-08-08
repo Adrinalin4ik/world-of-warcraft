@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import M2 from '..';
 import MapLight from '../../../world/light/MapLight';
 import TextureLoader from '../../texture-loader';
+import { PRIORITY } from '../../worker/pool';
 
 // Shader sources are assembled HERE, in JS, rather than with `#pragma glslify: import(...)`.
 //
@@ -517,6 +518,17 @@ class M2Material extends THREE.ShaderMaterial {
     }
   }
 
+  /**
+   * Fetch priority for every path this material asks the loader for.
+   *
+   * Raised, never lowered, and only by the three setters that exist solely to dress a character, a
+   * creature or an attached item (`updateSkinTextures`, `updateCharacterTextures`,
+   * `updateObjectTexture`). Once a material has been identified as a unit's, it stays one -- a
+   * later re-supply must not drop it back into the background stream behind the terrain burst,
+   * which is the exact failure this is here to prevent.
+   */
+  texturePriority = PRIORITY.BACKGROUND;
+
   loadTextures() {
     const textureDefs = this.textureDefs;
 
@@ -545,7 +557,12 @@ class M2Material extends THREE.ShaderMaterial {
       // replaced in place once the texture has been fetched and decoded.
       textures[index] = TextureLoader.PLACEHOLDER;
 
-      TextureLoader.load(path, THREE.RepeatWrapping, THREE.RepeatWrapping)
+      // `texturePriority` is BACKGROUND for every material until one of the three character/creature
+      // setters below raises it. See `worker/pool.js#PRIORITY` for why a visible unit's texture
+      // outranks a terrain tile, and the measurement that made it necessary.
+      TextureLoader.load(
+        path, THREE.RepeatWrapping, THREE.RepeatWrapping, this.texturePriority,
+      )
         .then((texture) => {
           textures[index] = texture;
         })
@@ -639,6 +656,8 @@ class M2Material extends THREE.ShaderMaterial {
     this.skins.skin2 = skin2;
     this.skins.skin3 = skin3;
 
+    // A creature's skin. See `texturePriority`.
+    this.texturePriority = PRIORITY.CHARACTER;
     this.loadTextures();
   }
 
@@ -661,6 +680,9 @@ class M2Material extends THREE.ShaderMaterial {
     this.skins.hair = hair;
     this.skins.object = cape;
 
+    // A player character's body, hair and cloak. See `texturePriority` -- these are the three slots
+    // whose 6.8 s and 8.4 s queue waits were measured on a real entry.
+    this.texturePriority = PRIORITY.CHARACTER;
     this.loadTextures();
   }
 
@@ -677,6 +699,8 @@ class M2Material extends THREE.ShaderMaterial {
   updateObjectTexture(path) {
     this.skins.object = path;
 
+    // An attached item model's skin -- a weapon in a visible character's hand. See `texturePriority`.
+    this.texturePriority = PRIORITY.CHARACTER;
     this.loadTextures();
   }
 
