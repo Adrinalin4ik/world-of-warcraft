@@ -38,14 +38,13 @@ import {
   verticalFov,
 } from './scene-rig';
 import { CharacterLook } from './character-look';
-import { cachedComposite } from './body-composite';
+import {
+  applyCharacterLook,
+  armStand,
+  attachCharacterItems,
+  loadCharacter,
+} from '../../character/dress';
 import { GlueScene, scenePath, sceneToken } from './tokens';
-
-/**
- * `AnimationData.dbc` id 0 -- Stand. The same id `classes/unit.ts` arms a freshly loaded unit with,
- * and the id `resolve` falls back to for anything a model does not carry.
- */
-const STAND_ANIMATION_ID = 0;
 
 /** The scene's own root, so the character can yaw without the stage yawing with it. */
 export class GlueSceneView {
@@ -141,88 +140,30 @@ export class GlueSceneView {
       return;
     }
 
-    // The model and the body composite in parallel: the composite's sources are 8 independent HTTP
-    // fetches through the same worker pool the `.m2` uses, and measured they are the slow half (p50
-    // 57 ms per cold source against 1.3 ms to decode one). Awaiting them in sequence would add the
-    // whole fetch to the time before anything stands on the stage.
-    //
-    // The bake arm CANNOT be allowed to reject. `Promise.all` rejects as a whole, and this pair is
-    // what owns the loaded `.m2`: a rejection would skip the handler below, so the model would never
-    // be added to the scene and never be unloaded either -- a leak plus an invisible character, for a
-    // texture problem. `compositeBody` already answers null for every failure it can name; this
-    // catch is for the one it cannot.
-    Promise.all([
-      M2Blueprint.load(look.modelPath),
-      cachedComposite(look.compositeKey, look.bodyLayers).catch((error) => {
-        console.warn('glue character: the body composite threw; falling back to the raw skin', error);
-        return null;
-      }),
-    ]).then(([model, composite]) => {
+    // THE MODEL AND THE BAKE ARE `loadCharacter`'s, and everything that reads the pair is
+    // `applyCharacterLook`'s -- both in `game/character/dress.ts`, shared verbatim with the world's
+    // own avatar. See that file's header for what stayed here and why: placement, cancellation,
+    // lighting and posing are all things the glue stage and the world disagree about, and nothing that
+    // differs was lifted.
+    loadCharacter(look).then((loaded) => {
       // A different character (or none) was asked for while this was in flight.
       if (this.characterToken !== token) {
-        M2Blueprint.unload(model);
+        M2Blueprint.unload(loaded.model);
         return;
       }
 
+      const model = loaded.model;
       this.character = model;
       this.characterRoot.add(model);
-      // Same reason as the stage's own line: `M2` constructs itself hidden and there is no
-      // visibility manager here to turn it on.
+      // Same reason as the stage's own line: `M2` constructs itself hidden and there is no visibility
+      // manager here to turn it on.
       model.visible = true;
-      model.scale.setScalar(look.scale);
-      // `updateMatrix()` or the scale above reaches nothing: `M2` sets `matrixAutoUpdate = false` on
-      // itself (`pipeline/m2/index.ts:163`), so `updateMatrixWorld` skips `updateMatrix` and composes
-      // the parent's world matrix with a `matrix` that is still the identity it was constructed with.
-      // The line was written without this and was therefore inert -- every race drew at scale 1.0,
-      // which is right for the ten races whose `CreatureDisplayInfo.scale` is 1.0 and wrong for exactly
-      // one: Gnome male display 1563 is **1.15** (measured), and `Gfsa` on the live roster is a gnome.
-      // Found while adding attachments, which need the same call for the same reason -- see
-      // `M2#attachTo`.
-      model.updateMatrix();
-
-      // A character `.m2` carries every hairstyle, glove, boot and cloak at once -- 61 submeshes on
-      // `humanmale00.skin` for 54 geoset ids. Without this the body wears all of them simultaneously.
-      model.setVisibleGeosets(look.geosets);
-      // Texture slots 1 (body), 6 (hair) and 2 (cloak), in one supply. `hairTexture` is null for a
-      // bald look --
-      // `CharSections` BaseSection 3 VariationIndex 0 carries empty strings and there is no hair mesh
-      // to sample them, so that is the right value, not a missed assignment.
-      //
-      // The body slot takes the baked COMPOSITE -- a `THREE.DataTexture` this process owns, not a
-      // path -- which is why `M2Material#loadTextures` takes a texture there without going through
-      // `TextureLoader`. `look.bodyTexture` (the raw base skin path) is the fallback for a bake that
-      // could not happen at all: no base row, a fetch that failed, or a compressed base skin. It
-      // draws the blank-faced body that shipped before the compositor, which is a worse picture but
-      // not a wrong one.
-      const body = composite?.texture ?? look.bodyTexture;
-      if (composite) {
-        console.debug(
-          `glue character: composited ${composite.layers} layers in ` +
-            `${composite.bakeMs.toFixed(1)} ms (sources ${composite.fetchMs.toFixed(1)} ms)`,
-        );
-      } else if (look.bodyLayers.length > 0) {
-        console.warn(
-          'glue character: the body composite could not be baked; binding the raw base skin',
-        );
-      }
-      if (body || look.hairTexture || look.capeTexture) {
-        model.characterTextures = { body, hair: look.hairTexture, cape: look.capeTexture };
-      }
-
-      // The looping Stand, through `resolve` and not a raw slot: `resolve` follows the alias chain and
-      // falls back to the first sequence whose keyframes are actually in the `.m2`. Measured on
-      // `humanmale.m2`: 156 sequences, 104 with inline keys and 52 external (`.anim` siblings), and
-      // AnimationData id 0 has four variations in slots 0, 22, 23 and 136, all inline, all flags
-      // 0x20 -- so bit 0 is clear and `sequenceLoops` makes them loops. Slot 0, length 2667 ms, is
-      // what `resolve(0)` lands on.
-      const sequence = model.modelAnim?.resolve?.(STAND_ANIMATION_ID) ?? null;
-      if (sequence && model.instanceAnim) {
-        model.instanceAnim.arm(sequence, worldClock.ms);
-      } else {
-        console.warn(
-          `glue character: ${look.modelPath} has no playable Stand sequence; it stands in bind pose`,
-        );
-      }
+      // Scale, geosets and the three texture slots. `applyCharacterLook` calls `updateMatrix()` for
+      // the scale, which is NOT optional: `M2` sets `matrixAutoUpdate = false` on itself, so
+      // `scale.setScalar` alone reaches nothing and every race drew at 1.0 -- right for ten races and
+      // wrong for exactly one, Gnome male at 1.15, which `Gfsa` on the live roster is.
+      applyCharacterLook(model, look, loaded);
+      armStand(model, look.modelPath);
 
       this.placeCharacter();
       this.attachItems(model, look, token);
@@ -246,37 +187,12 @@ export class GlueSceneView {
    * character's hand -- or on nothing at all, since `this.character` has by then been replaced.
    */
   private attachItems(body: any, look: CharacterLook, token: number): void {
-    for (const item of look.attachments) {
-      M2Blueprint.load(item.modelPath)
-        .then((model: any) => {
-          if (this.characterToken !== token || this.character !== body) {
-            M2Blueprint.unload(model);
-            return;
-          }
-          if (!body.attachTo(item.attachId, model)) {
-            // Not an error and not a guess: the reference's world path has the same rule -- "the body
-            // has no such attach point -- hold nothing" (`attach/glue_preview.rs:325-326`). It cannot
-            // fire for the six ids piece 9 uses on any playable 3.3.5a character (all six were dumped
-            // out of `HumanMale.m2`), so if it ever does, the model is the news.
-            console.warn(
-              `glue character: ${body.name ?? 'the body'} has no attachment ${item.attachId} ` +
-                `for ${item.kind} -- ${item.modelPath} draws nothing`,
-            );
-            M2Blueprint.unload(model);
-            return;
-          }
-          this.attached.push(model);
-          // Same reason as the body's and the stage's: `M2` constructs itself hidden and there is no
-          // visibility manager on this screen.
-          model.visible = true;
-          // Texture type 2, the item model's only runtime slot. Null when the row names no texture,
-          // which leaves the shared `PLACEHOLDER` -- a visibly flat item rather than a missing one.
-          model.objectTexture = item.texturePath;
-        })
-        .catch((error) => {
-          console.warn(`glue character: ${item.modelPath} did not load`, error);
-        });
-    }
+    attachCharacterItems(
+      body,
+      look,
+      () => this.characterToken === token && this.character === body,
+      (model) => this.attached.push(model),
+    );
   }
 
   /** Sit the character on `stageSpot` and turn it by `yaw`. Cheap; called per frame from `update`. */

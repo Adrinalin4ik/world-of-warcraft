@@ -12,6 +12,13 @@ import ColliderManager from "../world/collider-manager";
 import { collisionWorld } from "../collision/collision-world";
 import { DEFAULT_COLLISION_HEIGHT, SETTLE_TIMEOUT } from "../movement/constants";
 import { createPlayerMoveState } from "../movement/player-state";
+import {
+  applyCharacterLook,
+  attachCharacterItems,
+  loadCharacter,
+} from "../character/dress";
+import { compositeCacheKey } from "../ui/scene/body-composite";
+import { CharacterIdentity, resolveCharacterLook } from "../ui/scene/character-look";
 import Entity from "./entity";
 
 enum SlopeType {
@@ -350,6 +357,16 @@ class Unit extends Entity {
         this.move.collisionHeight = this.collisionHeight;
 
         return M2Blueprint.load(this.modelData.file).then((m2: M2) => {
+          // A CHARACTER LOOK OUTRANKS A DISPLAY ID, whichever lands last. `Player`'s constructor kicks
+          // off the placeholder `displayId = 21976` at session construction, and the server's
+          // create-object assigns `unit_field_displayid` too; either could resolve after a look has
+          // dressed the body, and either would then draw an undressed race model over it. The handler
+          // already declines to ASSIGN a display id to a dressed unit; this is the same rule for an
+          // assignment that was already in flight.
+          if (this.hasCharacterLook) {
+            M2Blueprint.unload(m2);
+            return null;
+          }
           this.model = m2;
           this.model.displayInfo = this.displayInfo;
           this.model.visible = true;
@@ -362,6 +379,144 @@ class Unit extends Entity {
         });
       });
     }).catch(console.error);
+  }
+
+  /**
+   * Is this unit drawn from a CHARACTER look rather than from a `CreatureDisplayInfo` display id?
+   *
+   * Read by the update-object handler, which otherwise assigns `unit.displayId` on every create-object
+   * it sees -- and for a player that field holds the RACE's display id (49 for a Human male), which
+   * resolves to the same `.m2` but with every geoset visible, no composite and no equipment. So a
+   * dressed character would be replaced by an undressed one the moment the server re-sent it.
+   */
+  get hasCharacterLook(): boolean {
+    return this.characterLookToken > 0;
+  }
+
+  /** Which `setCharacterLook` call the in-flight load belongs to. Monotonic, like the glue scene's. */
+  private characterLookToken = 0;
+  /**
+   * The item `.m2`s hanging off this unit's bones -- weapons, a shield, the shoulder pair, the helm.
+   *
+   * Tracked separately from the body even though they are its scene-graph descendants, for the same
+   * reason `GlueSceneView` tracks its own: `M2Blueprint.unload` is a reference-counted release against
+   * a path, and the graph cannot be walked for it. Without this list a redress would leak one reference
+   * per item, for ever, per character.
+   */
+  private attachedItems: any[] = [];
+  /**
+   * The appearance+equipment key the currently-drawn look was built from, or null.
+   *
+   * A DEDUPE, and it is load-bearing rather than an optimisation. The server re-sends a create-object
+   * for the same player whenever it re-enters our grid, and each one would otherwise cost a fresh `.m2`
+   * clone, a fresh 512x512 bake and up to five item fetches -- measured at 6.9 ms of main thread for
+   * the bake alone, per repeat, per player. `compositeCacheKey` is reused rather than a key of our own
+   * because it already folds exactly the inputs a look depends on (race, gender, the five dials and
+   * every worn display id), so a GEAR CHANGE still redresses and nothing else does.
+   */
+  private characterLookKey: string | null = null;
+
+  /**
+   * Draw this unit as an actual CHARACTER: its race and gender model, its geosets, its composited body
+   * texture and its equipment, instead of a bare `CreatureDisplayInfo` display id.
+   *
+   * THIS IS THE WORLD END OF THE SEAM. Everything it does is `game/character/dress.ts`' -- the same
+   * functions the character-select stage calls, in the same order -- and the only thing that is this
+   * file's own is what a unit in the world disagrees with a glue stage about:
+   *
+   *  - the model goes through `this.model =`, so `Unit`'s own setter still runs: the 180-degree body
+   *    yaw, the removal of the body's hull from the collision world (a unit that collides with itself
+   *    collapses the camera boom into first person), the `model:change` emit the visibility manager and
+   *    the world's dynamic-matrix pass listen for, and the initial `startAnimation`;
+   *  - `updateMatrix()` is called AFTER that setter, because the setter writes `rotation.z` and calls
+   *    `updateMatrix()` itself -- and `applyCharacterLook`'s scale write would otherwise be composed
+   *    into a matrix that had already been baked. `model.scale.setScalar()` is inert under
+   *    `matrixAutoUpdate = false`, which `M2` sets on itself, so the ORDER of these two calls is the
+   *    whole of whether a gnome is gnome-sized;
+   *  - no `armStand`: the setter above already armed `currentAnimationId`, and from the next frame the
+   *    gait driver (`updateLocomotion`) owns the body. Arming a third time would say two things own one
+   *    clock.
+   *
+   * Answers whether a look could be resolved at all. A null look is a DATA problem -- a race the
+   * client's own DBCs do not describe -- which `resolveCharacterLook` has already named on the console;
+   * the caller's fallback is the display-id path it would have taken anyway, which is why this reports
+   * rather than throws.
+   */
+  async setCharacterLook(identity: CharacterIdentity): Promise<boolean> {
+    const key = compositeCacheKey(
+      identity.race,
+      identity.gender,
+      identity.appearance,
+      identity.equipment,
+    );
+    if (key === this.characterLookKey) {
+      return true; // already wearing exactly this; see `characterLookKey`
+    }
+    this.characterLookKey = key;
+    const token = ++this.characterLookToken;
+
+    const look = await resolveCharacterLook(identity);
+    if (!look) {
+      return false;
+    }
+    if (this.characterLookToken !== token) {
+      return false;
+    }
+
+    // The unit's OWN collision height, which every swim depth line is a fraction of. Same two DBC rows
+    // the `displayId` path reads it from, resolved once inside `resolveCharacterLook` rather than
+    // fetched again here. Zero means the row carried nothing usable, in which case the client's own
+    // empty-world default stands -- at zero every depth line collapses and the avatar swims on dry
+    // land.
+    if (look.collisionHeight > 0) {
+      this.collisionHeight = look.collisionHeight;
+      this.move.collisionHeight = this.collisionHeight;
+    }
+
+    const loaded = await loadCharacter(look);
+    if (this.characterLookToken !== token) {
+      M2Blueprint.unload(loaded.model);
+      return false;
+    }
+
+    this.dropAttachedItems();
+
+    // RELEASE the model we are replacing. `set model` only removes it from the view -- it does not
+    // release the blueprint reference, because its other caller (the `displayId` path) has always
+    // leaked one and fixing that there would change every unit's lifetime under a gate that cannot see
+    // it. Here the leak is not theoretical and not one-off: the player is constructed with the
+    // placeholder `displayId = 21976`, so every world entry replaces exactly one model, and a peer
+    // redressed on a gear change replaces one more each time.
+    const previous = this._model;
+
+    this.model = loaded.model;
+    applyCharacterLook(loaded.model, look, loaded);
+    // AFTER the setter and AFTER `applyCharacterLook`, because both write into `matrix` and the last
+    // writer wins under `matrixAutoUpdate = false`. See the doc above.
+    loaded.model.updateMatrix();
+    loaded.model.visible = true;
+
+    if (previous && previous !== loaded.model) {
+      M2Blueprint.unload(previous);
+    }
+
+    attachCharacterItems(
+      loaded.model,
+      look,
+      () => this.characterLookToken === token && this._model === loaded.model,
+      (item) => this.attachedItems.push(item),
+    );
+
+    return true;
+  }
+
+  /** Release every attached item model, off its BONE and off the blueprint's reference count. */
+  private dropAttachedItems(): void {
+    for (const item of this.attachedItems) {
+      item.parent?.remove(item);
+      M2Blueprint.unload(item);
+    }
+    this.attachedItems = [];
   }
 
   get view() {

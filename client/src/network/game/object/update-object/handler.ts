@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import zlib from 'zlib-browserify';
 import Unit from '../../../../game/classes/unit';
 import Packet from '../../../net/packet';
+import { characterIdentityFor } from './character-identity';
 import { GameHandler } from '../../handler';
 import GamePacket from '../../packet';
 import { getUpdateFieldName, ObjectType, UpdateFlags, UpdateType } from '../enums';
@@ -133,16 +134,45 @@ export class UpdateObjectHandler extends EventEmitter {
       this.game.world.add(unit);
     }
 
-    if (pack.obj_type === ObjectType.Player) {
-      console.log('Player', pack);
+    // OUR OWN CHARACTER, and this branch is the second half of killing the duplicate.
+    //
+    // `readPackedGUID` now answers the same normalised hex string the roster does
+    // (`network/guid-hex.ts`), so the lookup above FINDS the player the world already placed instead of
+    // constructing a second `Unit` beside him. Finding him is not enough on its own, though: the two
+    // writes below would then undo him.
+    //
+    //  - `unit.displayId` would replace the dressed character with the RACE's bare display model. For a
+    //    player, `unit_field_displayid` holds `ChrRaces.maleDisplayID` (49 for a Human male) -- the same
+    //    `.m2`, but resolved through the creature path, so every geoset draws at once, the body texture
+    //    is the raw base skin and nothing is worn. That is exactly the placeholder this piece exists to
+    //    remove, and the server re-sends the create-object every time we re-enter our own grid.
+    //  - `unit.position.set` writes `view.position` while the MOVER owns position
+    //    (`syncViewFromMove`), so it is undone on the next frame anyway -- and it would fight the
+    //    post-teleport settle hold that keeps the body from falling through terrain that has not
+    //    streamed in. The roster's position, which the world already used, is byte-identical to what
+    //    this packet carries (measured: `world-entry-gate.js`).
+    const isOurself = unit === this.game.world.player;
+
+    if (pack.obj_type === ObjectType.Player && !isOurself) {
+      // ANOTHER PLAYER. Same seam, driven from this object's own appearance fields rather than from a
+      // roster row -- see `characterIdentityFor` for the field layout and for the one thing the wire
+      // cannot give us that the roster can.
+      const identity = await characterIdentityFor(pack.newObject);
+      if (identity) {
+        await unit.setCharacterLook(identity);
+      }
     }
 
-    unit.displayId = pack.newObject.unit_field_displayid;
+    if (!isOurself && !unit.hasCharacterLook) {
+      unit.displayId = pack.newObject.unit_field_displayid;
+    }
     // unit.displayId = 21976;
 
     const {x, y, z, runSpeed} = pack.movement;
 
-    unit.position.set(x, y, z);
+    if (!isOurself) {
+      unit.position.set(x, y, z);
+    }
     unit.moveSpeed = runSpeed;
     const splineData = pack.movement.spline;
     const splines: THREE.Vector3[] = [];

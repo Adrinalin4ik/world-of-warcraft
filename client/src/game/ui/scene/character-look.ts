@@ -46,12 +46,36 @@ import {
   wornEquipmentFor,
 } from './character-equipment';
 
-/** Everything `GlueSceneView#setCharacter` needs, and nothing it does not. */
+/**
+ * The four fields a look is resolved from, and the whole of the interface between "who is this" and
+ * "what does it draw".
+ *
+ * A `Pick` of `CharacterRecord` rather than the record itself, because there are now TWO suppliers and
+ * only one of them is a roster row: the glue screens pass `ProtocolSession`'s `CharacterRecord`
+ * straight through, and the world passes a `Unit`'s update-object fields
+ * (`network/game/object/update-object/handler.ts#characterIdentityFor`). Narrowing the parameter is
+ * what let the world reuse this file instead of growing a second copy of it -- the name, level, guild
+ * and position on a roster row are none of a look's business and a world unit has no roster row to
+ * fake them from.
+ */
+export type CharacterIdentity = Pick<CharacterRecord, 'race' | 'gender' | 'appearance' | 'equipment'>;
+
+/** Everything a character consumer needs, and nothing it does not. */
 export type CharacterLook = {
   /** `CreatureModelData.file`, as the DBC spells it -- `M2Blueprint.load` rewrites `.mdx` itself. */
   modelPath: string;
   /** `CreatureDisplayInfo.scale`. Measured 1.0 for both Human display ids, 1.15 for Gnome male. */
   scale: number;
+  /**
+   * `CreatureModelData.collisionHeight x scale`, or 0 when the row carries nothing usable.
+   *
+   * ONLY THE WORLD READS THIS, and it reads it for the same reason `Unit#displayId` already computed
+   * it off the same two rows: it is what every swim depth line is a fraction of, so a gnome floats
+   * with her head out and a night elf sits deeper. The glue stage has no water and ignores it. Zero
+   * rather than a default here on purpose -- the default belongs to `movement/constants.ts`, and this
+   * file has no business owning a movement number.
+   */
+  collisionHeight: number;
   /**
    * `CharSections` BaseSection 0 `TextureName[0]`, or null if the table has no row for this look.
    *
@@ -531,7 +555,7 @@ export function facialGeosetsFor(
  * exception through the glue frame loop.
  */
 export async function resolveCharacterLook(
-  character: CharacterRecord,
+  character: CharacterIdentity,
 ): Promise<CharacterLook | null> {
   const raceRow: ChrRacesRow | undefined = await DBC.load('ChrRaces', character.race);
   if (!raceRow) {
@@ -630,6 +654,9 @@ export async function resolveCharacterLook(
     // `|| 1`, not `?? 1`: a zero scale is as unusable as a missing one, and the DBC's float column
     // reads 0 for a row that carries nothing.
     scale: displayInfo.scale || 1,
+    // `|| 0` for the same reason `scale` uses `|| 1`: the DBC's float column reads 0 for a row that
+    // carries nothing, and 0 is exactly the "no usable value" the world's fallback tests for.
+    collisionHeight: (modelData.collisionHeight || 0) * (displayInfo.scale || 1),
     bodyTexture,
     hairTexture,
     capeTexture: capeTextureFor(worn),
@@ -668,7 +695,7 @@ function capeTextureFor(worn: WornEquipment | null): string | null {
  * The table is loaded ONCE per session and shared -- `DBC.load`'s cache is a static keyed by table
  * name -- so the cost is paid by whichever roster row is selected first and by no other.
  */
-async function resolveWornEquipment(character: CharacterRecord): Promise<WornEquipment | null> {
+async function resolveWornEquipment(character: CharacterIdentity): Promise<WornEquipment | null> {
   if (wearsNothing(character.equipment)) {
     return null;
   }

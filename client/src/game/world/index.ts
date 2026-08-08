@@ -122,6 +122,35 @@ export default class World extends EventEmitter {
   }
 
   run() {
+    // THE ENTERED CHARACTER IS RESOLVED FIRST, ahead of `add`, because `World#entities` is keyed by
+    // guid and the player's own key has to be his REAL guid before he is filed under it. He was
+    // constructed with the literal string `'Player'` (`network/session.ts:15`), so the server's own
+    // create-object for him could never have matched -- see `add` for the other half.
+    //
+    // `session.offline` short-circuits ahead of the `protocol` getter, so `/game?offline=1` never
+    // constructs a transport: reading `session.protocol` there would build them (which opens nothing --
+    // see `network/session.ts` -- but the offline route's whole contract is that it never touches them).
+    const entered = this.session.offline ? null : this.session.protocol.enteredCharacter;
+    if (entered) {
+      this.player.guid = entered.guid;
+      this.player.name = entered.name;
+      // HIS OWN BODY, in his own clothes, through the same `game/character/dress.ts` the
+      // character-select stage uses -- see `Unit#setCharacterLook`. The ROSTER row is the source and not
+      // the update-object, deliberately: `SMSG_CHAR_ENUM` carries equipment DISPLAY ids while the
+      // update-object carries item ENTRY ids that need `Item.dbc` to become display ids, and the roster
+      // has already arrived and been verified against the live server on the glue screen. Fire and
+      // forget: it is an async DBC+`.m2`+bake chain, and until it lands the placeholder from `Player`'s
+      // constructor stands in.
+      this.player.setCharacterLook(entered).then((dressed) => {
+        if (!dressed) {
+          console.warn(
+            `world: could not resolve a character look for ${entered.name} (race ${entered.race}, ` +
+              `gender ${entered.gender}) -- the placeholder display model stands`,
+          );
+        }
+      });
+    }
+
     this.add(this.player);
     // if (this.game.authenticated) {
     //   this.player = this.session.player;
@@ -163,16 +192,9 @@ export default class World extends EventEmitter {
     // starts on the frame the world route mounts rather than waiting on a compressed update-object,
     // and the packets that follow are checkable against a position we knew independently.
     //
-    // `session.offline` short-circuits first so `/game?offline=1` is unchanged: reading
-    // `session.protocol` there would construct the transports (which opens nothing -- see
-    // `network/session.ts` -- but the offline route's whole contract is that it never touches them).
-    const entered = this.session.offline ? null : this.session.protocol.enteredCharacter;
+    // `entered` itself is resolved at the top of this method, because the guid and the character look
+    // both have to be in place before `add`.
     if (entered) {
-      // The name only. NOT the guid: `Player`'s is a string (`"0x59a6"` shape, as `CharacterRecord`
-      // carries it) while `Packet#readPackedGUID` yields a NUMBER, so `world.entities` cannot match
-      // the two however it is keyed and the server's own update-object for the player still creates a
-      // second `Unit`. Reconciling those two guid representations is piece 11's work, not a rename.
-      this.player.name = entered.name;
       console.info(
         `world: entering as ${entered.name} on map ${entered.mapId} (zone ${entered.zoneId}) at`,
         entered.position,
@@ -236,6 +258,18 @@ export default class World extends EventEmitter {
   }
 
   add(entity: Unit) {
+    // ONE UNIT PER GUID, and the eviction is not hypothetical. `applyUpdates` creates a `Unit` for any
+    // guid it has not seen, and the world route mounts and the first compressed update-object arrive in
+    // an order nothing guarantees -- so the server's create-object for our own character can land BEFORE
+    // `run()` files the player. Without this the map entry would be overwritten and the earlier `Unit`
+    // would stay in the scene with nothing referencing it: a second, undressed copy of the player,
+    // standing in the same spot, for ever. Replacing the key silently was how a duplicate could exist
+    // at all.
+    const existing = this.entities.get(entity.guid);
+    if (existing && existing !== entity) {
+      console.warn(`world: guid ${entity.guid} already had a unit; removing the earlier one`);
+      this.remove(existing);
+    }
     this.entities.set(entity.guid, entity);
     if (entity.view) {
       this.scene.add(entity.view);
