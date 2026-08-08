@@ -98,9 +98,28 @@ class GlueHost extends React.Component<Props> {
  */
 const GlueRoute: React.FC<{ session: GameSession }> = ({ session }) => {
   const navigate = useNavigate();
+  // WITH the query string, for the reason `pages/game/index.tsx:415-421` gives about the trip BACK.
+  // That comment is only half a fix while this half throws the query away, and the round that added
+  // it measured the consequence without recognising it: after a world disconnect, `window.glueRuntime`
+  // never returned on `?ui=lua`.
+  //
+  // MEASURED (`scratchpad/G1-glue.png`, one real world entry as `Gdsh` followed by
+  // `session.game.disconnect()`): the page came back to `/` and drew a complete, interactive login
+  // screen -- which is why nobody caught it -- but the screen it drew was the HAND-WRITTEN
+  // transcription (`game/ui/screens/login.ts:280` is the only "Server Address" label in the client),
+  // not the FrameXML one. `GlueHost#componentDidMount` picks the screen set from
+  // `wantsLuaUi(window.location.search)`, so a `/game` with no search means a `/` with no search
+  // means no `FrameXmlGlueScreen`, no Lua VM and no `window.glueRuntime`, for ever. The load report
+  // for the second boot never appeared on the console because there was no second boot.
+  //
+  // `?realmlist=` and `?gateway=` ride along for the same reason: both are read PER CONNECT, off
+  // `window.location.search`, by `network/gateway.ts#currentSettings` ->
+  // `protocol/connection-settings.ts:113,146`. So a `/game` without them silently sends every socket
+  // this route opens -- including a reconnect -- to the default logon host and the default gateway,
+  // not to the ones the session was started against.
   const enterWorld = React.useCallback(() => {
     console.info('glue: entering the world; leaving the glue route');
-    navigate('/game');
+    navigate({ pathname: '/game', search: window.location.search });
   }, [navigate]);
 
   return <GlueHost session={session} onEnterWorld={enterWorld} />;
