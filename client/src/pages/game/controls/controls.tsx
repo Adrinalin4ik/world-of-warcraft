@@ -14,6 +14,7 @@ import {
   capsuleHalfSegment,
 } from '../../../game/movement/constants';
 import { movementFrame } from '../../../game/movement/frame';
+import { streamMovement } from '../../../game/movement/outbound';
 import { rescueFromVoid } from '../../../game/movement/void-rescue';
 import Player from '../../../game/classes/player';
 
@@ -291,6 +292,12 @@ class Controls extends React.Component<IProp> {
     }
 
     player.syncViewFromMove();
+
+    // 6b. Tell the server. AFTER the frame and the heading, so the position and facing we send are
+    // the ones we just drew -- a pre-frame send is a systematic one-frame lag in everything the
+    // server and every other player sees. A no-op when nothing has entered the world
+    // (`/game?offline=1`, and every movement test), because no sink is attached then.
+    streamMovement(player.move, { forward, strafe, turning }, now);
 
     // 7. Seat the camera. Its cast uses the CAMERA face set, not the walking one, so it stops at
     // overhangs the player walks under and threads railings the player stands on.
