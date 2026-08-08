@@ -18,7 +18,11 @@ import {
   loadCharacter,
 } from "../character/dress";
 import { compositeCacheKey } from "../ui/scene/body-composite";
-import { CharacterIdentity, resolveCharacterLook } from "../ui/scene/character-look";
+import {
+  CharacterIdentity,
+  CharacterLook,
+  resolveCharacterLook,
+} from "../ui/scene/character-look";
 import { resolveNpcLook } from "../ui/scene/npc-look";
 import Entity from "./entity";
 
@@ -402,11 +406,17 @@ class Unit extends Entity {
       if (this.displayToken !== token) {
         return;
       }
-      if (look && (await this.wearLook(look, ++this.characterLookToken))) {
-        // DELIBERATELY NOT `characterLookApplied`. That flag means "this body is a PLAYER's character
-        // look and a display id must not stomp it"; here the display id IS the source, so setting it
-        // would make the unit deaf to a server-side morph. `appliedDisplayId` is the dedupe instead.
-        this.appliedDisplayId = displayId;
+      // DELIBERATELY NOT `characterLookApplied`. That flag means "this body is a PLAYER's character
+      // look and a display id must not stomp it"; here the display id IS the source, so setting it
+      // would make the unit deaf to a server-side morph. `appliedDisplayId` is the dedupe instead, and
+      // it is written through `onApplied` -- in the same tick as the model swap -- for the same reason
+      // `setCharacterLook`'s pair is.
+      const dressed =
+        look !== null &&
+        (await this.wearLook(look, ++this.characterLookToken, () => {
+          this.appliedDisplayId = displayId;
+        }));
+      if (dressed) {
         return;
       }
       // Fell through on purpose: an unresolvable extra row draws the plain display-id body below,
@@ -542,16 +552,18 @@ class Unit extends Entity {
       this.move.collisionHeight = this.collisionHeight;
     }
 
-    if (!(await this.wearLook(look, token))) {
-      return false;
-    }
-
-    // BOTH only now, and only together: the look is on the model, so it is true that this unit is
+    // BOTH only when the look is on the model, and only together: it is then true that this unit is
     // drawn from one, and true that re-asking for the same key would be redundant.
-    this.characterLookApplied = true;
-    this.characterLookKey = key;
-
-    return true;
+    //
+    // Through `onApplied` and NOT after the await, because the two are not the same instant. `wearLook`
+    // returns a promise, so anything after `await` runs a microtask later -- and a `resolveDisplay`
+    // already parked past its own awaits would see `hasCharacterLook` false in that gap and take the
+    // body. The callback fires in the same tick as the model swap, which is where this write has
+    // always been.
+    return this.wearLook(look, token, () => {
+      this.characterLookApplied = true;
+      this.characterLookKey = key;
+    });
   }
 
   /**
@@ -566,8 +578,15 @@ class Unit extends Entity {
    * `token` is the caller's `characterLookToken` value; it is re-checked after every await and passed
    * into `attachCharacterItems`' `stillWanted`, so a look superseded mid-flight releases what it
    * loaded instead of hanging it on the next look's skeleton.
+   *
+   * `onApplied` runs SYNCHRONOUSLY between the model swap and the attachment loads -- see
+   * `setCharacterLook` for why that instant and not "after the await" is the one that matters.
    */
-  private async wearLook(look: any, token: number): Promise<boolean> {
+  private async wearLook(
+    look: CharacterLook,
+    token: number,
+    onApplied?: () => void,
+  ): Promise<boolean> {
     const loaded = await loadCharacter(look);
     if (this.characterLookToken !== token) {
       M2Blueprint.unload(loaded.model);
@@ -594,6 +613,8 @@ class Unit extends Entity {
     if (previous && previous !== loaded.model) {
       M2Blueprint.unload(previous);
     }
+
+    onApplied?.();
 
     attachCharacterItems(
       loaded.model,
