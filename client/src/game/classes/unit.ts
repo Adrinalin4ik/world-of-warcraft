@@ -681,7 +681,16 @@ class Unit extends Entity {
       loaded.model,
       look,
       () => this.characterLookToken === token && this._model === loaded.model,
-      (item) => this.attachedItems.push(item),
+      (item) => {
+        this.attachedItems.push(item);
+        // ANNOUNCED, not just remembered. An attached item model reaches the scene as a child of one
+        // of this body's bones, long after `model:change` fired -- so the world's light + fog
+        // registry has already walked the body without it, and a material with no fog uniforms
+        // renders as a flat white silhouette. See `world/index.ts#adoptAttachedModel` for the
+        // measurement. The glue stage needs no equivalent: `GlueSceneView#render` traverses its
+        // whole scene each frame and reaches a bone child on the way.
+        this.emit("model:attach", this, item);
+      },
     );
 
     return true;
@@ -690,6 +699,9 @@ class Unit extends Entity {
   /** Release every attached item model, off its BONE and off the blueprint's reference count. */
   private dropAttachedItems(): void {
     for (const item of this.attachedItems) {
+      // Before the unparent, so the listener can still walk the subtree it is releasing -- the
+      // mirror of the `model:attach` emit in `wearLook`.
+      this.emit("model:detach", this, item);
       item.parent?.remove(item);
       M2Blueprint.unload(item);
     }
