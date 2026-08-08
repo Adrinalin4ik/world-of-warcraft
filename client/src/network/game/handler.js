@@ -10,6 +10,7 @@ import Socket from '../net/socket';
 import ChatEnum from './chat/chatEnum';
 import config from '../config';
 import { ObjectHandler } from './object/handler';
+import { clientTicks, encodeTimeSyncResponse } from './time-sync';
 import World from '../../game/world';
 import { Camera } from 'three';
 
@@ -41,6 +42,7 @@ export class GameHandler extends Socket {
     this.on('packet:receive:SMSG_AUTH_RESPONSE', this.handleAuthResponse.bind(this));
     this.on('packet:receive:SMSG_LOGIN_VERIFY_WORLD', this.handleWorldLogin.bind(this));
     this.on('packet:receive:SMSG_NAME_QUERY_RESPONSE', this.handleName.bind(this));
+    this.on('packet:receive:SMSG_TIME_SYNC_REQ', this.handleTimeSyncRequest.bind(this));
     this.camera = null;
     this.world = new World(this);
   }
@@ -176,6 +178,31 @@ export class GameHandler extends Socket {
 
     this.session.game.send(app);
     return true;
+  }
+
+  /**
+   * SMSG_TIME_SYNC_REQ (0x390) -> CMSG_TIME_SYNC_RESP (0x391).
+   *
+   * The server asks on a ten-second beat from world entry onwards and this client answered none of
+   * them; `game/time-sync.ts` carries the measurement that made this the suspect. The request body is
+   * the counter alone (the packet is 8 bytes: a 4-byte incoming header and a 4-byte body).
+   *
+   * The read cursor is where the framing left it -- `Packet`'s constructor seeks past the header --
+   * and no other listener is registered for this opcode, so no rewind is needed here. (The adapter in
+   * `protocol/wotlk/world.ts` rewinds because it SHARES packets with the handlers above it; that
+   * hazard is real and is why this note exists.)
+   */
+  handleTimeSyncRequest(gp) {
+    const counter = gp.readUnsignedInt();
+    const body = encodeTimeSyncResponse(counter, clientTicks());
+
+    const app = new GamePacket(
+      GameOpcode.CMSG_TIME_SYNC_RESP,
+      GamePacket.HEADER_SIZE_OUTGOING + body.length,
+    );
+    app.write(Array.from(body));
+
+    this.send(app);
   }
 
   // Pong handler (SMSG_PONG)
