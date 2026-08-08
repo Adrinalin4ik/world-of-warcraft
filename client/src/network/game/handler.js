@@ -33,6 +33,17 @@ export class GameHandler extends Socket {
 
     this.units = new Map();
 
+    /**
+     * The keepalive interval handle, so it can be stopped. See `handleWorldLogin` for what leaving
+     * it unheld cost. Per-instance, not static: two handlers must not share one timer.
+     */
+    this.pingTimer = null;
+
+    // The keepalive must not outlive the socket. `ping()` disconnects when a pong did not arrive, so
+    // a timer left running against a closed socket is not merely wasted work -- it is a disconnect
+    // call on a dead handler, fired every 30 s for the lifetime of the page.
+    this.on('disconnect', () => this.stopPing());
+
     // Listen for incoming data
     this.on('data:receive', this.dataReceived.bind(this));
 
@@ -215,10 +226,25 @@ export class GameHandler extends Socket {
   ping() {
     console.log('ping');
     if (this.pingRecv === false) {
+      // STOP, and do not also send. The old code disconnected and then fell through to build and
+      // transmit a ping on the socket it had just closed -- `Socket#send` guards on `connected`,
+      // which is still true until the close event lands, so the write really could go out. Stopping
+      // the timer here as well as on the `disconnect` event covers the case where the socket was
+      // already down and `disconnect()` therefore emits nothing.
+      this.stopPing();
       this.disconnect();
+      return;
     }
 
-    const app = new GamePacket(GameOpcode.CMSG_PING, GamePacket.OPCODE_SIZE_INCOMING + 64);
+    // HEADER_SIZE_OUTGOING + the real body, which is 8 bytes: two uint32s.
+    //
+    // It was `OPCODE_SIZE_INCOMING + 64` -- the INCOMING opcode width (2) against an OUTGOING packet
+    // whose header is 6, for a 66-byte buffer of which 14 are written. `BasePacket` derives the
+    // declared body length from the buffer, so the header announced 60 bytes and 52 of them were
+    // uninitialised slack. This server tolerates it; the same defect has already been fixed on the
+    // movement and chat packets, and it is fixed here for the same reason -- a length field that is
+    // not the length is a trap for the next reader of the wire, not a working feature.
+    const app = new GamePacket(GameOpcode.CMSG_PING, GamePacket.HEADER_SIZE_OUTGOING + 8);
     app.writeUnsignedInt(1);      // ping ( unknown value)
     app.writeUnsignedInt(10);     // latency, 10ms for now
 
@@ -292,13 +318,30 @@ export class GameHandler extends Socket {
 
   // World login handler (SMSG_LOGIN_VERIFY_WORLD)
   handleWorldLogin(_gp) {
-
-    setInterval(() => {
+    // KEPT, so it can be stopped. This interval was started and never cleared: every world login
+    // added another one, and they outlived the session -- a relog left the previous session's timer
+    // still calling `ping()` on a disconnected handler, and `ping()` calls `disconnect()` when a pong
+    // did not arrive. Re-entering also stacked them, so the ping rate doubled per login.
+    //
+    // 30 s, not 50: that is the reference client's `CMSG_PING` cadence. The 50 s value put the
+    // interval uncomfortably close to the world socket's idle window -- the same window that killed
+    // the session at ~58 s until `SMSG_TIME_SYNC_REQ` was answered -- and a keepalive whose period is
+    // most of the timeout it exists to prevent has no margin for a slow frame.
+    this.stopPing();
+    this.pingTimer = setInterval(() => {
       this.ping();
-    }, 50000);
+    }, 30000);
 
     this.joinWorldChannel();
     this.emit('join');
+  }
+
+  /** Stop the keepalive. Idempotent, and safe before the first login. */
+  stopPing() {
+    if (this.pingTimer !== null && this.pingTimer !== undefined) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
   }
 
   joinWorldChannel() {
