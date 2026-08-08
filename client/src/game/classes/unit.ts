@@ -13,13 +13,22 @@ import ColliderManager from "../world/collider-manager";
 import { collisionWorld } from "../collision/collision-world";
 import { DEFAULT_COLLISION_HEIGHT, SETTLE_TIMEOUT } from "../movement/constants";
 import { createPlayerMoveState } from "../movement/player-state";
+import { peerTrace } from "../movement/peer-trace";
 import {
+  ANY_MOVE,
+  DEFAULT_MOVE_SPEEDS,
+  MoveFlag,
+  MoveSpeeds,
+  RUNAWAY_SILENCE_MS,
+  REMOTE_SNAP_DISTANCE,
   RemoteMotion,
+  RemoteMove,
   SplineRide,
-  acceptRemoteState,
   advanceRemote,
+  applyRemoteMove,
   createRemoteMotion,
   makeSplineRide,
+  remoteSilentMs,
   sampleSpline,
 } from "../movement/net-motion";
 import {
@@ -90,39 +99,101 @@ const DEATH = 1;
 // Ported from the reference selector, `samples/benilla/crates/benilla/src/creature_anim/select.rs`
 // (`gait_candidates`, lines 395-506). Ids are `AnimationData.dbc` ids, NOT sequence-table slots.
 
+/**
+ * The `AnimationData.dbc` ids the gait cascade names. Every one is cited to the reference's own
+ * table, which is transcribed from the client's `0x5fd100` / `0x5fd8b0` chain.
+ */
 /** Stand. DBC name column row 0 = `Stand`; slot 0 of every model parsed for this task. */
 const STAND = 0;
+/** `ShuffleLeft` / `ShuffleRight` -- the turn-in-place foot shuffle (`select.rs:491-495`). */
+const SHUFFLE_LEFT = 11;
+const SHUFFLE_RIGHT = 12;
+/** `WalkBackwards` -- the backpedal, which OUTRANKS strafe on the ground (`select.rs:463`). */
+const WALK_BACKWARDS = 13;
 /** Walk. DBC row 4 -- its own fallback column is empty, i.e. Walk falls back to Stand. */
 const WALK = 4;
 /** Run. DBC name column row 5 = `Run`; wolf and kobold both carry it inline (flags `0x20`). */
 const RUN = 5;
+/** `Sprint`, taken above `FAST_RUN_SPEED` (`select.rs:481`). */
+const SPRINT = 143;
+/** The jump bracket and the free fall (`select.rs:307-308`, `:318-319`, `:368-376`). */
+const JUMP_START = 37;
+const JUMP_HANG = 38;
+const JUMP_END = 39;
+const FALL = 40;
+const JUMP_LAND_RUN = 187;
+/** The swim family (`select.rs:439-452`). `SWIM_IDLE` is the tread-water idle, not Stand. */
+const SWIM_IDLE = 41;
+const SWIM = 42;
+const SWIM_LEFT = 43;
+const SWIM_RIGHT = 44;
+const SWIM_BACKWARDS = 45;
 
 /**
  * Gait candidate lists, most specific first -- the reference picks a LIST, not an id, so a model
  * that lacks the ideal clip steps DOWN one rung rather than snapping straight to Stand
- * (`select.rs:450-455`). This matters here because `ModelAnim#resolve` falls back to sequence 0 and
+ * (`select.rs:426-537`). This matters here because `ModelAnim#resolve` falls back to sequence 0 and
  * nothing else: asking it for Run on a model that only walks would yield Stand, which is a creature
  * sliding along the ground. Walking it instead is both correct and what the reference does.
  *
- * Module-level and frozen: `updateLocomotion` runs per unit per frame and must not allocate.
+ * Module-level and frozen: `gaitCandidates` runs per unit per frame and must not allocate, and
+ * `updateLocomotion` memoises against LIST IDENTITY, so a freshly built array would defeat the memo
+ * and re-run the resolve scan every frame.
  */
+const GAIT_SPRINT: readonly number[] = [SPRINT, RUN, WALK, STAND];
 const GAIT_RUN: readonly number[] = [RUN, WALK, STAND];
 const GAIT_WALK: readonly number[] = [WALK, STAND];
 const GAIT_STAND: readonly number[] = [STAND];
+const GAIT_BACKWARD: readonly number[] = [WALK_BACKWARDS, WALK, STAND];
+const GAIT_SHUFFLE_LEFT: readonly number[] = [SHUFFLE_LEFT, STAND];
+const GAIT_SHUFFLE_RIGHT: readonly number[] = [SHUFFLE_RIGHT, STAND];
+const GAIT_SWIM_IDLE: readonly number[] = [SWIM_IDLE, STAND];
+const GAIT_SWIM: readonly number[] = [SWIM, SWIM_IDLE, STAND];
+const GAIT_SWIM_LEFT: readonly number[] = [SWIM_LEFT, SWIM, SWIM_IDLE, STAND];
+const GAIT_SWIM_RIGHT: readonly number[] = [SWIM_RIGHT, SWIM, SWIM_IDLE, STAND];
+const GAIT_SWIM_BACK: readonly number[] = [SWIM_BACKWARDS, SWIM_IDLE, STAND];
+/** Airborne. `Fall` is entered directly, with no entry one-shot (`select.rs:308`). */
+const GAIT_FALL: readonly number[] = [FALL, STAND];
+const GAIT_JUMP_HANG: readonly number[] = [JUMP_HANG, FALL, STAND];
 
 /**
- * Is this id a GAIT rather than a state?
+ * Every id the cascade can select. Membership means "a gait", and a gait request never takes the
+ * body away from the gait driver, whoever sent it.
  *
- * A gait request never takes the body away from the gait driver, whoever sent it. Without this, a
- * wire-sent Stand -- which the peer handler does send, and which the server sends constantly --
- * would latch `externalSeq` onto a LOOPING sequence, and a looping owner never releases: the
- * unit would stand still for the rest of the session no matter how far it walked. The reference
- * draws the same line, between its `Special` / `Mode` states and the gait itself
+ * Without this, a wire-sent Stand -- which the peer handler does send, and which the server sends
+ * constantly -- would latch `externalSeq` onto a LOOPING sequence, and a looping owner never
+ * releases: the unit would stand still for the rest of the session no matter how far it walked. The
+ * reference draws the same line, between its `Special` / `Mode` states and the gait itself
  * (`select.rs:280+`).
+ *
+ * The jump/land one-shots (37, 39, 187) are deliberately NOT here: they are entries and exits that
+ * must own the body for their window, which is exactly what the latch is for.
  */
+const GAIT_IDS = new Set<number>([
+  STAND, WALK, RUN, SPRINT, WALK_BACKWARDS, SHUFFLE_LEFT, SHUFFLE_RIGHT,
+  SWIM_IDLE, SWIM, SWIM_LEFT, SWIM_RIGHT, SWIM_BACKWARDS, JUMP_HANG, FALL,
+]);
+
 function isGaitId(id: number): boolean {
-  return id === STAND || id === WALK || id === RUN;
+  return GAIT_IDS.has(id);
 }
+
+/**
+ * The ids whose playback rate is scaled by ground speed -- the reference's `RATE_SCALED`
+ * (`select.rs:965`), which is a WHITELIST and not a property of the clip. Everything else (Stand,
+ * Fall, SwimIdle, every emote and every swing) plays at 1x however fast the body is moving.
+ */
+const RATE_SCALED = new Set<number>([
+  WALK, RUN, SHUFFLE_LEFT, SHUFFLE_RIGHT, WALK_BACKWARDS,
+  JUMP_START, JUMP_HANG, JUMP_END, SWIM, SWIM_LEFT, SWIM_RIGHT, SWIM_BACKWARDS,
+  135 /* Fly */, SPRINT, JUMP_LAND_RUN,
+]);
+
+/**
+ * Ground speed (yd/s) at or above which the cascade takes `Sprint` -- `select.rs:13`'s
+ * `FAST_RUN_SPEED`. Nothing in 3.3.5a reaches it on foot; a speed buff or a mount does.
+ */
+const FAST_RUN_SPEED = 11.0;
 
 /**
  * Below this ground speed (yd/s) a unit counts as standing still -- `select.rs:19`'s
@@ -131,12 +202,12 @@ function isGaitId(id: number): boolean {
 const MOVING_EPSILON = 0.1;
 
 /**
- * Fallback walk speed (yd/s) -- `select.rs:12`'s `DEFAULT_WALK_SPEED`, vanilla's default creature
- * walk. The run boundary is STRICTLY above 2x this (`RecomputeBaseAnim`, so 5.0 yd/s is still a
- * walk and 5.1 runs). Per-unit walk speeds arrive on the `LIVING` movement block; until the wire
- * carries them, every unit shares this one. See the report's follow-ups.
+ * The walk speed the run boundary is measured against is now PER UNIT (`Unit#speeds.walk`, seeded
+ * from `DEFAULT_MOVE_SPEEDS` and overwritten by `MSG_MOVE_SET_WALK_SPEED`), which is what
+ * `select.rs:487`'s `walk_speed` is. The old module-level `DEFAULT_WALK_SPEED` constant is gone
+ * rather than kept beside it: two walk speeds, one of them stale, is how a boundary silently stops
+ * agreeing with the reference.
  */
-const DEFAULT_WALK_SPEED = 2.5;
 
 /**
  * Displacement speed (yd/s) above which a measured frame is a TELEPORT, not locomotion.
@@ -228,7 +299,66 @@ class Unit extends Entity {
   public collisionHeight: number = DEFAULT_COLLISION_HEIGHT;
 
   public rotateSpeed: number = 2;
-  public moveSpeed: number = 100; //10
+
+  /**
+   * This unit's wire speed set, yd/s -- what the peer dead-reckon integrates with and what the gait
+   * selector's walk/run boundary is measured against.
+   *
+   * Per unit, not shared: `DEFAULT_MOVE_SPEEDS` is spread, not aliased, or one `MSG_MOVE_SET_RUN_SPEED`
+   * would re-speed every unit in the world.
+   */
+  public speeds: MoveSpeeds = { ...DEFAULT_MOVE_SPEEDS };
+
+  private _moveSpeed: number = 100; //10
+
+  /**
+   * TWO DIFFERENT THINGS SHARE THIS NAME, which is why it is an accessor rather than a field.
+   *
+   * The 100 is a legacy debug scalar for `updatePlayer` -- a yd/s figure no character has ever
+   * moved at, from the pre-mover movement code whose only call site is commented out
+   * (`update()`: `// this.updatePlayer(delta)`). But the packet layer ALSO writes this field with
+   * the real wire run speed (`network/game/object/player/movement.ts:303,336`, from
+   * `MSG_MOVE_SET_RUN_SPEED` and `SMSG_FORCE_RUN_SPEED_CHANGE`).
+   *
+   * So a dead-reckon that read `moveSpeed` as "the run speed" would extrapolate a peer at 100 yd/s
+   * until his first speed packet arrived -- fourteen times too fast. `speeds.run` starts at the real
+   * 7.0 and this setter forwards the wire value into it, which keeps the packet layer's existing
+   * write correct without changing it (that file is owned by another agent this round).
+   */
+  public get moveSpeed(): number {
+    return this._moveSpeed;
+  }
+
+  public set moveSpeed(value: number) {
+    this._moveSpeed = value;
+    // VALIDATED, because this value now integrates a body rather than just being reported.
+    //
+    // MEASURED, live, two accounts in Elwynn: the walking peer's run speed arrived as
+    // -3.689e19 (-2^65, the shape of a misaligned float read), and the dead reckoning duly carried
+    // him 3.7e19 yd in one frame. Interpolating between wire positions -- what this replaced --
+    // could not be hurt by a wrong speed, so the wire has never been checked here.
+    //
+    // The ceiling is `TELEPORT_SPEED`, the same 100 yd/s that already means "this is not locomotion"
+    // for the measured leg. Vanilla's fastest is the 32 yd/s flight speed, so no real speed comes
+    // near it. A rejected value leaves `speeds.run` alone -- the previous good speed, or the 7.0
+    // default -- rather than substituting a guess, and says so once.
+    if (Number.isFinite(value) && value > 0 && value <= TELEPORT_SPEED) {
+      this.speeds.run = value;
+      return;
+    }
+    if (this.rejectedSpeed !== value) {
+      this.rejectedSpeed = value;
+      console.warn(
+        `movement: ignoring an impossible run speed ${value} for ${this.guid} --`
+        + ` keeping ${this.speeds.run} yd/s. A speed this far outside 0..${TELEPORT_SPEED} is a`
+        + ' misread float on the wire, not a buff.',
+      );
+    }
+  }
+
+  /** The last speed value rejected above, so the warning fires once per distinct bad value. */
+  private rejectedSpeed: number | null = null;
+
   public flySpeed: number = 100; //10
   public gravity: number = -30; //10;
   public jumpVelocityConst: number = 16;
@@ -1177,6 +1307,15 @@ class Unit extends Entity {
   private locoMergeVersion = -1;
 
   /**
+   * The previous frame's movement flags, for the jump bracket's two EDGES.
+   *
+   * Stored even on the frames locomotion bails early (no model yet, no instance): a unit whose model
+   * streams in while it is already airborne must not then play a JumpStart for a take-off that
+   * happened before we could draw it.
+   */
+  private locoPrevFlags = 0;
+
+  /**
    * This frame's horizontal ground speed (yd/s) -- the gait threshold's only input.
    *
    * TWO LEGS, mirroring the reference's `select::unify` (`select.rs:931-965`):
@@ -1210,6 +1349,19 @@ class Unit extends Entity {
       return this.move.swimming ? this.move.swimStrokeSpeed : this.move.horizVel.length();
     }
 
+    // A PEER's speed is not measured either: it is the speed his own flags picked, which is what the
+    // dead-reckon is applying to him this frame (`net-motion.ts#advanceRemote` writes it). This is
+    // the reference's remote leg of `unify` -- `RemoteMotion::speed`, read by the selector exactly
+    // as a spline's speed is read for a creature (`select.rs:1069-1103`).
+    //
+    // Measuring a peer's displacement instead is what made the gait flicker at packet cadence, and
+    // it would still be wrong now that the motion is continuous: a peer held against a wall by his
+    // own client keeps reporting FORWARD with an unchanged position, and his run cycle should keep
+    // playing, exactly as it does for the player (`move.horizVel` is the INTENDED velocity above).
+    if (this.remoteMotion) {
+      return this.remoteMotion.speed;
+    }
+
     // The FIRST measured frame has no previous position to difference against -- the unit spawned
     // wherever it spawned, and `0 -> spawn point` is a teleport-sized delta.
     if (first || delta <= 0) {
@@ -1221,18 +1373,106 @@ class Unit extends Entity {
   }
 
   /**
-   * The gait candidate list for a speed. See `GAIT_*` above for why this returns a list.
+   * This unit's live movement flags -- the reference's `select::unify` (`select.rs:1069-1103`), whose
+   * precedence is self > remote > spline > stationary.
    *
-   * Standing is a SPEED test here, not the flag test the reference uses for a player with wire
-   * flags (`select.rs:447`), because this client has no movement flags on the unit -- Controls
-   * computes them locally and does not publish them. The reference does exactly this same
-   * substitution on the one leg that also lacks flags, its spline creatures (`select.rs:958-962`).
+   * Each leg is a different KIND of knowledge and they are not interchangeable:
+   *
+   *  - the PLAYER's flags are the ones the mover computed and the wire carries this frame
+   *    (`movement/outbound.ts#movementFlagsFor` stores them on `state.moveFlags`);
+   *  - a PEER's are his own, relayed verbatim -- the direction he last reported pressing;
+   *  - a SPLINE creature has none, ever. The server sends it a path, not a keypress. The reference
+   *    SYNTHESISES `FORWARD` for exactly this leg (`select.rs:958-962`) so the cascade's flag tests
+   *    have something true to read, and the speed tail then does the real work. Note this correctly
+   *    denies a walking creature the backpedal and shuffle branches, which it can never be in.
    */
-  gaitFor(speed: number): readonly number[] {
-    if (speed <= MOVING_EPSILON) {
-      return GAIT_STAND;
+  locomotionFlags(): number {
+    if (this.isPlayer) {
+      return this.move.moveFlags;
     }
-    return speed > 2 * DEFAULT_WALK_SPEED ? GAIT_RUN : GAIT_WALK;
+    if (this.remoteMotion) {
+      return this.remoteMotion.flags;
+    }
+    if (this.splineRide) {
+      return MoveFlag.FORWARD;
+    }
+    return 0;
+  }
+
+  /**
+   * The gait candidate list. A port of the reference's `gait_candidates`
+   * (`select.rs:426-537`), in its order, which is the order of the client's own `0x5fd100` chain.
+   *
+   * The order is the content. Swimming outranks everything, because a swimmer pressing forward is
+   * swimming and not running; the backpedal outranks strafe, because there IS no ground strafe gait
+   * (the reference expresses strafing as a body-yaw offset instead, `select.rs:228-243` -- not
+   * ported, and named in the report); and the turn-in-place shuffle is reachable only when nothing
+   * is translating, which is why it sits BELOW the speed tail rather than beside it.
+   *
+   * The airborne branch is the reference's `Special` (`select.rs:885-899`) folded in at the top of
+   * the ground half: `FALLING_FAR` is a real fall, a plain `FALLING` is the jump hang. The bracket's
+   * ENTRY and EXIT one-shots are not here -- they are edges, not states, and `updateLocomotion`
+   * arms them through the ownership latch.
+   *
+   * See `GAIT_*` for why this returns a list rather than an id, and why the lists are frozen.
+   */
+  gaitCandidates(flags: number, speed: number): readonly number[] {
+    if ((flags & MoveFlag.SWIMMING) !== 0) {
+      if ((flags & (MoveFlag.TURN_LEFT | MoveFlag.TURN_RIGHT)) !== 0) return GAIT_SWIM_IDLE;
+      if ((flags & MoveFlag.STRAFE_LEFT) !== 0) return GAIT_SWIM_LEFT;
+      if ((flags & MoveFlag.STRAFE_RIGHT) !== 0) return GAIT_SWIM_RIGHT;
+      if ((flags & MoveFlag.BACKWARD) !== 0) return GAIT_SWIM_BACK;
+      if ((flags & MoveFlag.FORWARD) !== 0) return GAIT_SWIM;
+      return GAIT_SWIM_IDLE;
+    }
+
+    if ((flags & MoveFlag.FALLING) !== 0) {
+      return (flags & MoveFlag.FALLING_FAR) !== 0 ? GAIT_FALL : GAIT_JUMP_HANG;
+    }
+
+    if ((flags & MoveFlag.BACKWARD) !== 0) {
+      return GAIT_BACKWARD;
+    }
+
+    if ((flags & ANY_MOVE) !== 0 || speed > MOVING_EPSILON) {
+      if (speed >= FAST_RUN_SPEED) return GAIT_SPRINT;
+      // STRICTLY above twice the walk speed, so 5.0 yd/s still walks and 5.1 runs. That boundary is
+      // the reference's, pinned by its own test (`select/tests.rs:47`).
+      return speed > 2 * this.speeds.walk ? GAIT_RUN : GAIT_WALK;
+    }
+
+    if ((flags & MoveFlag.TURN_LEFT) !== 0) return GAIT_SHUFFLE_LEFT;
+    if ((flags & MoveFlag.TURN_RIGHT) !== 0) return GAIT_SHUFFLE_RIGHT;
+
+    return GAIT_STAND;
+  }
+
+  /**
+   * The playback rate for a chosen gait -- the reference's `scaled_rate` (`select.rs:1053-1056`).
+   *
+   * This is what stops the feet skating. A walk cycle is AUTHORED for a particular ground speed
+   * (`Sequence.moveSpeed`), so playing it at 1x while the body moves at some other speed slides the
+   * contact point along the ground; dividing the two makes the cycle keep up.
+   *
+   * Two guards, both load-bearing and both the reference's:
+   *
+   *  - `moveSpeed > 0` STRICTLY, never `Math.abs`. A backwards gait is authored NEGATIVE, and the
+   *    reference documents this with a real model (`RidingKodo.m2` WalkBackwards, `-2.5`). So an
+   *    authored backpedal plays at a flat 1x, while a model that has no backpedal and falls back to
+   *    forward Walk (`+2.5`) IS scaled -- which is the behaviour that looks right in both cases.
+   *  - the `RATE_SCALED` whitelist. Rate is a property of the ID, not of the clip: Stand, Fall and
+   *    every emote play at 1x however fast the body is moving.
+   *
+   * NOT ported: the reference multiplies the divisor by the rendered model scale, so a bigger
+   * creature cycles its legs slower for the same ground speed (decision 0903, `driver.rs:475-478`).
+   * Creature scaling is another change's ground this round and a wrong scale here would be a wrong
+   * rate on every creature, so this uses 1 and says so.
+   */
+  locomotionRate(seq: Sequence, speed: number): number {
+    if (!RATE_SCALED.has(seq.id) || !(seq.moveSpeed > 0)) {
+      return 1;
+    }
+    return speed / seq.moveSpeed;
   }
 
   /**
@@ -1260,16 +1500,43 @@ class Unit extends Entity {
     }
 
     const speed = this.locomotionSpeed(delta);
+    const flags = this.locomotionFlags();
 
     const model = this.model;
     if (!model) {
+      // Still record the flags: the jump bracket below keys on the EDGE, and a model that streamed
+      // in mid-air must not then play a JumpStart it never took off for.
+      this.locoPrevFlags = flags;
       return;
     }
 
     const inst = model.instanceAnim;
     const modelAnim = model.modelAnim;
     if (!inst || !modelAnim) {
+      this.locoPrevFlags = flags;
       return;
+    }
+
+    // THE JUMP BRACKET's two edges. The reference plays JumpStart 37 -> the Jump 38 hang loop ->
+    // JumpEnd 39 / JumpLandRun 187 (`select.rs:307`, `:318`, `:365-376`); the hang and the fall are
+    // STATES and live in the cascade, but the entry and the exit are one-shots that must own the
+    // body for their window, which is exactly what `setAnimation`'s ownership latch does. Arming
+    // them here rather than inside the cascade is what keeps the cascade a pure function of state.
+    //
+    // The landing PICK is the reference's `jump_land_pick` (`select.rs:365-376`) verbatim: no clip
+    // at all while swimming, JumpEnd when the touchdown is stationary, JumpLandRun when it is still
+    // running, and nothing for a backpedal or a walk -- those go straight back to their gait.
+    const wasAirborne = (this.locoPrevFlags & MoveFlag.FALLING) !== 0;
+    const airborne = (flags & MoveFlag.FALLING) !== 0;
+    this.locoPrevFlags = flags;
+    if (airborne && !wasAirborne && (flags & MoveFlag.SWIMMING) === 0) {
+      this.setAnimation(JUMP_START, true, 0);
+    } else if (wasAirborne && !airborne && (flags & MoveFlag.SWIMMING) === 0) {
+      if ((flags & ANY_MOVE) === 0) {
+        this.setAnimation(JUMP_END, true, 0);
+      } else if ((flags & (MoveFlag.BACKWARD | MoveFlag.WALK_MODE)) === 0) {
+        this.setAnimation(JUMP_LAND_RUN, true, 0);
+      }
     }
 
     // An externally-armed STATE owns the body until it gives it back. See `externalSeq` for the
@@ -1288,7 +1555,7 @@ class Unit extends Entity {
       }
     }
 
-    const candidates = this.gaitFor(speed);
+    const candidates = this.gaitCandidates(flags, speed);
 
     // Step down the list, taking the first rung the model actually OWNS -- `resolve(id, false)`
     // withholds the Stand consolation precisely so "absent" is distinguishable from "present".
@@ -1328,12 +1595,23 @@ class Unit extends Entity {
       return;
     }
 
+    // The rate is re-synced EVERY frame, including the frame the gait does not change -- a unit
+    // accelerating out of a walk changes speed continuously and its cycle has to follow. That is the
+    // reference's `sync_base_rate`, which likewise runs over whatever the base slot holds rather
+    // than only over a fresh arm (`play.rs:206-231`, called from `driver.rs:1098`). `setRate`
+    // re-anchors the clock so this does not jump the pose; see its docs.
+    const rate = this.locomotionRate(this.locoSeq, speed);
+
     if (this.locoSeq.loops && inst.current === this.locoSeq) {
+      inst.setRate(rate, worldClock.ms);
       return;
     }
 
     // `startAnimation` clears the ownership latch for us: the target is always a gait id.
     this.setAnimation(this.locoTarget);
+    if (inst.current === this.locoSeq) {
+      inst.setRate(rate, worldClock.ms);
+    }
   }
 
   clear() {
@@ -1375,7 +1653,7 @@ class Unit extends Entity {
     // The two network motion legs, mutually exclusive by construction (`setSplinePath` and
     // `applyRemoteState` each clear the other), so at most one writes `view.position` per frame.
     this.updateSplineFollowing(delta);
-    this.updateRemoteMotion();
+    this.updateRemoteMotion(delta);
     // this.updatePlayer(delta);
     this.clear();
     // const m = ObjectsManager;
@@ -1648,15 +1926,14 @@ class Unit extends Entity {
   }
 
   /**
-   * Take one `MSG_MOVE_*` position for a peer, and interpolate towards it rather than snapping.
+   * Take one `MSG_MOVE_*` message for a peer: snap the pose and re-seed the dead-reckon.
    *
    * `wireDriven` is CLEARED here, unlike the snapped write this replaces. That flag exists because a
-   * peer whose `view.position` was written only on the frames a message landed was unmeasurable --
-   * quiet frames read as standing and catch-up frames as teleports, so the gait flip-flopped at
-   * packet rate. Interpolation removes the premise: the position now advances every single frame,
-   * so the measured displacement IS the peer's speed and `updateLocomotion` can pick his gait the
-   * same way it picks a creature's. The teleport guard still covers the relocation case, which
-   * `acceptRemoteState` snaps rather than interpolates.
+   * peer whose `view.position` was written only on the frames a message landed was unmeasurable.
+   * Dead reckoning removes the premise twice over: the position advances every single frame, AND
+   * the gait no longer comes from a measurement at all -- `locomotionFlags` reads the peer's own
+   * wire flags and `locomotionSpeed` reads the speed the extrapolation is applying, which is the
+   * reference's remote leg of `select::unify` (`select.rs:1069-1103`).
    */
   applyRemoteState(
     to: { x: number; y: number; z: number },
@@ -1671,27 +1948,110 @@ class Unit extends Entity {
     this.splineRide = null;
     this.wireDriven = false;
 
-    const snap = acceptRemoteState(
-      this.remoteMotion,
-      this.position,
-      this.rotation.z,
-      to,
-      facing,
+    const move: RemoteMove = {
+      x: to.x, y: to.y, z: to.z, facing, flags,
+    };
+    const nowMs = performance.now();
+    const sinceMs = this.remoteMotion.fresh ? 0 : nowMs - this.remoteMotion.lastApplyMs;
+    const gap = applyRemoteMove(this.remoteMotion, move, nowMs);
+    this.position.copy(this.remoteMotion.pos);
+    this.rotation.z = this.remoteMotion.orientation;
+
+    peerTrace.record({
+      at: nowMs,
+      kind: 'packet',
+      guid: this.guid,
       flags,
-      performance.now(),
-    );
-    if (snap) {
-      this.position.set(to.x, to.y, to.z);
-      this.rotation.z = facing;
+      x: to.x,
+      y: to.y,
+      z: to.z,
+      facing,
+      sinceMs,
+      stepYd: gap,
+      speed: 0,
+      gaitSpeed: this.remoteMotion.speed,
+    });
+
+    // Reported, not acted on: a packet always snaps, so there is no interpolation to suppress. A
+    // routine correction is centimetres -- that it stays small is the evidence the dead-reckon is
+    // tracking him. Anything past `REMOTE_SNAP_DISTANCE` is a worldport or a re-entry into our grid.
+    if (gap > REMOTE_SNAP_DISTANCE) {
+      this.remoteRelocations += 1;
     }
   }
 
-  /** Advance a peer one frame along his interpolation window. */
-  updateRemoteMotion() {
-    if (!this.remoteMotion) {
+  /** How many times a peer's packet moved him further than travel could explain. Diagnostic only. */
+  public remoteRelocations = 0;
+
+  /** Whole seconds of runaway already reported for this peer, so the warning is once a second. */
+  private runawayWarnedS = -1;
+
+  /**
+   * Advance a peer one frame of dead reckoning.
+   *
+   * `delta` is the frame's own seconds, not a wall-clock difference: this is an INTEGRATION, and it
+   * has to advance by exactly the time the rest of the frame advanced by or the peer's position and
+   * everything else in the scene disagree about what "now" means.
+   */
+  updateRemoteMotion(delta: number) {
+    const motion = this.remoteMotion;
+    if (!motion) {
       return;
     }
-    this.rotation.z = advanceRemote(this.remoteMotion, performance.now(), this.position);
+    const beforeX = motion.pos.x;
+    const beforeY = motion.pos.y;
+    const beforeZ = motion.pos.z;
+    this.rotation.z = advanceRemote(motion, this.speeds, delta, this.position);
+
+    if (peerTrace.enabled) {
+      const stepYd = Math.hypot(
+        motion.pos.x - beforeX,
+        motion.pos.y - beforeY,
+        motion.pos.z - beforeZ,
+      );
+      peerTrace.record({
+        at: performance.now(),
+        kind: 'frame',
+        guid: this.guid,
+        flags: motion.flags,
+        x: motion.pos.x,
+        y: motion.pos.y,
+        z: motion.pos.z,
+        facing: motion.orientation,
+        sinceMs: delta * 1000,
+        stepYd,
+        speed: delta > 0 ? stepYd / delta : 0,
+        gaitSpeed: motion.speed,
+      });
+    }
+
+    // The runaway watch, the reference's `trace_runaway` (`remote.rs:158-178`). A moving peer is fed
+    // at worst every 500 ms by his own heartbeat, so seconds of silence with a direction flag still
+    // set means we are inventing motion the server never described -- a lost STOP, or a socket that
+    // died with nobody noticing. REPORTING ONLY: the reference does not correct the pose here either,
+    // and a peer frozen by a guard would be a different wrong answer, not a right one.
+    if ((motion.flags & ANY_MOVE) === 0) {
+      this.runawayWarnedS = -1;
+      return;
+    }
+    const silent = remoteSilentMs(motion, performance.now());
+    if (silent <= RUNAWAY_SILENCE_MS) {
+      this.runawayWarnedS = -1;
+      return;
+    }
+    const silentS = Math.floor(silent / 1000);
+    if (silentS !== this.runawayWarnedS) {
+      this.runawayWarnedS = silentS;
+      const drift = Math.hypot(
+        motion.pos.x - motion.lastApplyPos.x,
+        motion.pos.y - motion.lastApplyPos.y,
+      );
+      console.warn(
+        `movement: peer ${this.guid} RUNAWAY -- flags 0x${motion.flags.toString(16)}, silent`
+        + ` ${silentS}s, ${drift.toFixed(1)} yd carried on dead reckoning alone since the last`
+        + ' packet. Either his STOP never arrived or the world socket is dead.',
+      );
+    }
   }
 
   // public calculateOrientation() {

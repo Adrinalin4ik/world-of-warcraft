@@ -9,6 +9,7 @@ import Unit from '../unit';
 import { InstanceAnim } from '../../pipeline/m2/anim/instance-anim';
 import { ModelAnim } from '../../pipeline/m2/anim/model-anim';
 import { worldClock } from '../../pipeline/m2/anim/world-clock';
+import { DEFAULT_MOVE_SPEEDS } from '../../movement/net-motion';
 
 /**
  * `0x20` = "keyframes are inline in this .m2", as wolf Stand/Walk/Run really carry.
@@ -257,9 +258,13 @@ function locoUnit(animations: any[], isPlayer: boolean = true) {
     isPlayer,
     wireDriven: false,
     move: {
-      swimming: false, swimStrokeSpeed: 0,
+      swimming: false, swimStrokeSpeed: 0, moveFlags: 0,
       horizVel: new THREE.Vector3(), pos: new THREE.Vector3(),
     },
+    speeds: { ...DEFAULT_MOVE_SPEEDS },
+    remoteMotion: null,
+    splineRide: null,
+    locoPrevFlags: 0,
     view: { position: pos, rotation: {} },
     position: pos,
     model: { modelAnim, instanceAnim },
@@ -277,7 +282,9 @@ function locoUnit(animations: any[], isPlayer: boolean = true) {
     setAnimation: proto.setAnimation,
     startAnimation: proto.startAnimation,
     locomotionSpeed: proto.locomotionSpeed,
-    gaitFor: proto.gaitFor,
+    locomotionFlags: proto.locomotionFlags,
+    gaitCandidates: proto.gaitCandidates,
+    locomotionRate: proto.locomotionRate,
     updateLocomotion: proto.updateLocomotion,
     teleportTo: proto.teleportTo,
   };
@@ -358,17 +365,23 @@ describe('Unit#updateLocomotion gait selection', () => {
 
   /**
    * Kills: `>=` in place of `>` on the run boundary, and a boundary at any value other than
-   * `2 x DEFAULT_WALK_SPEED`. The reference pins exactly these three points
+   * twice the unit's own walk speed. The reference pins exactly these three points
    * (`creature_anim/select/tests.rs:46-63`): 4.9 Walk, 5.0 Walk, 5.1 Run.
    */
   it('puts the run boundary strictly above twice the walk speed', () => {
-    expect((Unit as any).prototype.gaitFor.call({}, 4.9)[0]).toBe(4);
-    expect((Unit as any).prototype.gaitFor.call({}, 5.0)[0]).toBe(4);
-    expect((Unit as any).prototype.gaitFor.call({}, 5.1)[0]).toBe(5);
+    // `gaitCandidates` reads `this.speeds.walk`, so the receiver carries the same default speed set
+    // a real Unit is constructed with.
+    const self = { speeds: { ...DEFAULT_MOVE_SPEEDS } };
+    const gait = (speed: number, flags = 0) =>
+      (Unit as any).prototype.gaitCandidates.call(self, flags, speed)[0];
+
+    expect(gait(4.9)).toBe(4);
+    expect(gait(5.0)).toBe(4);
+    expect(gait(5.1)).toBe(5);
 
     // And the standing epsilon, likewise a `<=`: a near-zero residual is not a walk.
-    expect((Unit as any).prototype.gaitFor.call({}, 0.1)[0]).toBe(0);
-    expect((Unit as any).prototype.gaitFor.call({}, 0.11)[0]).toBe(4);
+    expect(gait(0.1)).toBe(0);
+    expect(gait(0.11)).toBe(4);
   });
 
   /**

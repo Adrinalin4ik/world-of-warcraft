@@ -663,10 +663,26 @@ export default class World extends EventEmitter {
     this.entities.forEach(entity => {
       const { model } = entity;
 
+      // MOTION FIRST, AND UNGATED. `entity.update` is where a unit's network motion is integrated --
+      // the spline sampler for a creature, the dead reckoning for a peer player -- and NONE of that
+      // is animation. It used to sit below the `model.animated` gate, and the consequence was
+      // measured live rather than reasoned about: two accounts in Elwynn, one walking toward the
+      // other, 185 relayed `MSG_MOVE_*` reaching the observer and ZERO integration frames for the
+      // mover. Every one of those packets was drawn as a snap, 0.93 yd apart, at the sender's ragged
+      // cadence (measured arrival gaps 139, 112, 210, 72, 223, 91, 176, 107, 279, 41, 198, 157, 391,
+      // 0, 32 ms) -- a peer that teleports forward a yard at a time and stands still in between,
+      // which is the reported stall-and-rush at its most extreme.
+      //
+      // It bit a peer because a character's model is not `animated` until it has streamed AND been
+      // classified, which is seconds after the first movement packet arrives; the earlier report
+      // named the same hazard for any unit with a static model. A body's position must not depend on
+      // whether its skeleton has keyframes.
+      entity.update(delta);
+
       // Same two-part test `DoodadManager#loadDoodad` documents: `model.animated` is the POSING
       // predicate (ModelAnim.classify), and billboarding is a separate reason to need a per-frame
-      // visit. A billboard-only model would otherwise skip `entity.update(delta)` and
-      // `applyBillboards` both, and freeze facing bind orientation.
+      // visit. A billboard-only model would otherwise skip `applyBillboards` and freeze facing bind
+      // orientation.
       if (model === null || model === undefined) {
         return;
       }
@@ -684,8 +700,6 @@ export default class World extends EventEmitter {
       if (!model.animated && model.billboards.length === 0) {
         return;
       }
-
-      entity.update(delta);
 
       // Gait selection, AFTER `entity.update` (the spline follower writes `view.position` in there,
       // and the non-player speed leg differences that position) and BEFORE anything samples the

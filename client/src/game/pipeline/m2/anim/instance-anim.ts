@@ -150,21 +150,54 @@ export class InstanceAnim {
    *
    * The clock law is resolved once, here, from the sequence's own loop flag -- never per sample.
    */
-  arm(seq: Sequence, worldClockMs: number): void {
+  arm(seq: Sequence, worldClockMs: number, rate: number = 1): void {
     this.ensureBuffers();
     this.current = seq;
     this.armedAtMs = worldClockMs;
     this.periodMs = seq.lengthMs;
+    this.rate = rate;
     // A sequence-timeline channel: `globalSequenceID` -1 defers to the sequence's loop flag.
     this.law = clockLaw({ interpolationType: 1, globalSequenceID: -1, tracks: [] }, seq.loops);
   }
+
+  /**
+   * Playback rate. 1 is the authored speed; the locomotion driver scales a gait by
+   * `groundSpeed / sequence.moveSpeed` so a walk cycle's feet match the ground
+   * (`Unit#locomotionRate`, the reference's `scaled_rate`, `select.rs:1053-1056`).
+   *
+   * Read through `setRate`, never assigned: the cursor is `(clock - armedAt) * rate`, so changing
+   * the multiplier without re-anchoring `armedAtMs` would jump the whole elapsed time and snap the
+   * pose. A run that gradually accelerates changes rate on most frames.
+   */
+  private rate = 1;
+
+  /** Change the playback rate, holding the pose: re-anchor so the current cursor is unchanged. */
+  setRate(rate: number, worldClockMs: number): void {
+    if (rate === this.rate) {
+      return;
+    }
+    const elapsed = (worldClockMs - this.armedAtMs) * this.rate;
+    // A zero rate freezes the pose where it stands (the reference's airborne snapshot). Re-anchoring
+    // through a division by it is the one case that has no inverse, so anchor from the old elapsed.
+    this.armedAtMs = rate !== 0 ? worldClockMs - elapsed / rate : worldClockMs;
+    if (rate === 0) {
+      this.frozenElapsedMs = elapsed;
+    }
+    this.rate = rate;
+  }
+
+  /** The elapsed time held while `rate` is 0, so a frozen pose does not collapse to the first key. */
+  private frozenElapsedMs = 0;
 
   /** Where this instance's own sequence clock stands at `worldClockMs`. */
   cursor(worldClockMs: number): number {
     if (this.current === null) {
       return 0;
     }
-    return cursorMs(this.law, worldClockMs - this.armedAtMs, this.periodMs);
+    const elapsed = this.rate === 0
+      ? this.frozenElapsedMs
+      : (worldClockMs - this.armedAtMs) * this.rate;
+    return cursorMs(this.law, elapsed, this.periodMs);
   }
 
   /**
@@ -183,7 +216,13 @@ export class InstanceAnim {
     if (this.current === null || this.periodMs <= 0) {
       return false;
     }
-    return worldClockMs - this.armedAtMs >= this.periodMs;
+    // Scaled by `rate` for the same reason `cursor` is: a one-shot played at half speed has not
+    // finished when half its authored length has passed. A frozen clip never elapses, which is what
+    // "frozen" means.
+    if (this.rate === 0) {
+      return false;
+    }
+    return (worldClockMs - this.armedAtMs) * this.rate >= this.periodMs;
   }
 
   /**
