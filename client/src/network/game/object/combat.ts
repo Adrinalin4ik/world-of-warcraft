@@ -32,7 +32,6 @@
  */
 import EventEmitter from 'events';
 
-import Unit from '../../../game/classes/unit';
 import { GameHandler } from '../handler';
 import GameOpcode from '../opcode';
 import GamePacket from '../packet';
@@ -151,7 +150,20 @@ export class CombatHandler extends EventEmitter {
    * batched.
    */
   queryCreature(entry: number, guid: string): void {
-    if (!entry || this.asked.has(entry)) {
+    if (!entry) {
+      return;
+    }
+    // ALREADY ANSWERED: apply it rather than returning, and this is not an optimisation.
+    // `asked` and `creatures` outlive a world session (this handler is built once per `GameHandler`),
+    // so after a reconnect every unit is a fresh `Unit` with no name while the template is still in
+    // the cache -- a bare `asked.has` guard would skip the query AND never write the name, leaving
+    // every creature "<unknown>" for the rest of the second session.
+    const known = this.creatures.get(entry);
+    if (known) {
+      this.applyCreatureInfo(entry, known);
+      return;
+    }
+    if (this.asked.has(entry)) {
       return;
     }
     this.asked.add(entry);
@@ -194,14 +206,24 @@ export class CombatHandler extends EventEmitter {
     gp.readUnsignedInt(); // family
     const rank = gp.readUnsignedInt() >>> 0;
 
-    this.creatures.set(entry, { name, rank });
+    const info = { name, rank };
+    this.creatures.set(entry, info);
+    this.applyCreatureInfo(entry, info);
+  }
 
-    // Every unit already streamed in that shares this template. A query is per TEMPLATE and the
-    // answer applies to all eleven wolves, not only to the one that provoked it.
+  /**
+   * Write a template's name and classification onto every unit that shares it.
+   *
+   * PER TEMPLATE, not per unit: one query answers for all eleven wolves in a camp, not only for the
+   * one that provoked it. Announced through the same `unit:fields` event the descriptor path uses, so
+   * the UI bridge's diff decides whether anything is actually re-drawn.
+   */
+  private applyCreatureInfo(entry: number, info: CreatureInfo): void {
+    const classification = classificationWord(info.rank);
     for (const unit of this.game.world.entities.values()) {
-      if (unit.fields.entry === entry) {
-        unit.name = name;
-        unit.classification = classificationWord(rank);
+      if (unit.fields.entry === entry && (unit.name !== info.name || unit.classification !== classification)) {
+        unit.name = info.name;
+        unit.classification = classification;
         this.game.world.emit('unit:fields', unit);
       }
     }
@@ -291,6 +313,3 @@ export class CombatHandler extends EventEmitter {
     return guidHex(bytes);
   }
 }
-
-/** Re-exported so callers do not reach through this module into `game/classes`. */
-export type { Unit };
