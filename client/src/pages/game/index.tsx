@@ -16,6 +16,7 @@ import { animCounters } from '../../game/pipeline/m2/anim/counters';
 import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-warm';
 import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
 import { pickUnit } from '../../game/world/pick';
+import { wantsDebugPanels } from '../debug-flags';
 import { REACTION_NEUTRAL, primeFactionTemplates, reactionFor } from '../../game/world/faction';
 import './index.scss';
 
@@ -57,8 +58,20 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   // `forceUpdate()` in the render loop has silently never fired. Wiring it up actually connects it.
   private canvas = React.createRef<HTMLCanvasElement>()
   private debugCanvas = React.createRef<HTMLCanvasElement>()
-  private stats: any = new Stats();
-  private perf: PerfMonitor = new PerfMonitor();
+  /**
+   * `?debug=true`. Read ONCE, at construction, so every overlay decision in this component agrees --
+   * a per-call read would let a route change part-way through a frame leave the stats panel up and
+   * the perf HUD down.
+   *
+   * What it gates: the stats-js FPS meter (top-left), the perf HUD (top-right), the red accordion
+   * `DebugPanel` (down the left) and the teleport `<select>`. All four are development surfaces, and
+   * all four were on unconditionally -- which is why a screenshot of this client has never been a
+   * screenshot of the game. See `pages/debug-flags.ts`; the measurement behind the HUD is NOT gated.
+   */
+  private readonly showDebug = wantsDebugPanels(window.location.search);
+  /** Null when `?debug=true` is absent -- nothing constructs it and nothing appends its DOM. */
+  private stats: any = null;
+  private perf: PerfMonitor;
   private lastDebugPanelPaint = 0;
   /** The rAF handle, so `componentWillUnmount` can stop a loop that otherwise never ends. */
   private frameHandle = 0;
@@ -103,9 +116,16 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     const browser = Bowser.getParser(window.navigator.userAgent);
     this.isMobile = browser.getPlatform().type === 'mobile';
 
-    document.body.appendChild(this.stats.dom);
-    this.stats.showPanel(0);
-    
+    // The perf monitor exists either way -- it owns the frame ring and the CPU spans, which every
+    // capture in this repo's performance record is taken from. Only its HUD is gated.
+    this.perf = new PerfMonitor(document, this.showDebug);
+
+    if (this.showDebug) {
+      this.stats = new Stats();
+      document.body.appendChild(this.stats.dom);
+      this.stats.showPanel(0);
+    }
+
     this.camera = new THREE.PerspectiveCamera(45, this.aspectRatio, 2, 500);
     this.camera.name = 'MainCamera';
     this.camera.up.set(0, 0, 1);
@@ -311,7 +331,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.ui?.dispose();
     this.ui = null;
     this.game.world.scene.remove(this.cameraHelper);
-    this.stats.dom.parentNode?.removeChild(this.stats.dom);
+    this.stats?.dom.parentNode?.removeChild(this.stats.dom);
     this.renderer?.dispose();
     this.debugRenderer?.dispose();
     this.renderer = null;
@@ -348,7 +368,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   }
 
   animate() {
-    this.stats.begin();
+    this.stats?.begin();
     if (!this.renderer) {
       return;
     }
@@ -474,7 +494,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         animMaterialsEvaluated: animCounters.materialsEvaluated,
       });
 
-      this.stats.end();
+      this.stats?.end();
     }
     
     setLocation(locationId: string | number) {
@@ -504,20 +524,26 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
             onWorldClick={this.onWorldClick}
             onWorldRightClick={this.onWorldRightClick}
           />
-          { !this.isMobile && <DebugPanel ref={this.debugPanel} renderer={renderer} game={this.game}></DebugPanel>}
-          <select className="location_select" onChange={(e) => this.setLocation(e.target.value)}>
-            {
-              spots.map(x => {
-                return (
-                  <option 
-                    key={x.id}
-                    value={x.id}>
-                      {x.title}
-                  </option>
-                )
-              })
-            }
-          </select>
+          { this.showDebug && !this.isMobile && <DebugPanel ref={this.debugPanel} renderer={renderer} game={this.game}></DebugPanel>}
+          { this.showDebug &&
+            // The teleport list. A development control, not a game one -- it worldports the player to
+            // a hard-coded spot from `game/world/spots.ts` -- so it belongs behind the same switch as
+            // the panels. It is also the loose `<select>` in the corner of every screenshot this
+            // project has produced.
+            <select className="location_select" onChange={(e) => this.setLocation(e.target.value)}>
+              {
+                spots.map(x => {
+                  return (
+                    <option
+                      key={x.id}
+                      value={x.id}>
+                        {x.title}
+                    </option>
+                  )
+                })
+              }
+            </select>
+          }
       </div>
     );
   }

@@ -53,8 +53,14 @@ export class PerfMonitor {
   /** End of the previous frame, so `frame-trace.ts` can report the gap the user actually feels. */
   private lastFrameEnd = 0;
 
-  constructor(doc: Document = document) {
-    this.hud = new PerfHud(doc);
+  /**
+   * `hudVisible` false hides the overlay and CHANGES NOTHING ELSE: the frame ring, the CPU spans and
+   * the GPU query all run exactly as before, so `endFrame`'s payload is identical and anything
+   * reading `sections`/`frames` off this object -- a probe, `frameTrace`, a future in-game readout --
+   * sees the same numbers. See `PerfHud`'s constructor for what the hidden path actually skips.
+   */
+  constructor(doc: Document = document, hudVisible = true) {
+    this.hud = new PerfHud(doc, hudVisible);
     // Hand the animation loops a way to open the `'anim'` span without any of them knowing about
     // this object. See `anim-section.ts` for why this is a registration and not a second monitor.
     setAnimSectionSink(this.sections);

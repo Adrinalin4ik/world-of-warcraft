@@ -52,11 +52,26 @@ export interface PerfPayload {
  * writes `textContent` on one preallocated node, at 4 Hz.
  */
 export class PerfHud {
-  private readonly root: HTMLDivElement;
+  /** Null when the HUD is not being shown -- see the `visible` constructor argument. */
+  private readonly root: HTMLDivElement | null;
   private lastPaint = Number.NEGATIVE_INFINITY;
   private painted = false;
 
-  constructor(doc: Document) {
+  /**
+   * `visible` false builds NO DOM node at all and makes `update` a return.
+   *
+   * The gate is the display, not the measurement: `PerfMonitor` still pushes every frame into
+   * `FrameStats`, still closes every `CpuSections` span and still polls the GPU query, so
+   * `window.GameScreen.perf` answers exactly the same numbers with the HUD off as with it on. What
+   * stops is one `textContent` write at 4 Hz and the `format()` that builds its string -- measured at
+   * 0.02-0.05 ms per paint, i.e. under 0.2 ms per second of wall clock, which is why hiding it is a
+   * cosmetic change and not a performance one.
+   */
+  constructor(doc: Document, visible = true) {
+    if (!visible) {
+      this.root = null;
+      return;
+    }
     this.root = doc.createElement('div');
     this.root.setAttribute('data-perf-hud', '');
     this.root.style.cssText = [
@@ -69,7 +84,7 @@ export class PerfHud {
   }
 
   update(nowMs: number, payload: PerfPayload): void {
-    if (this.painted && nowMs - this.lastPaint < HUD_REPAINT_MS) {
+    if (this.root === null || (this.painted && nowMs - this.lastPaint < HUD_REPAINT_MS)) {
       return;
     }
     this.lastPaint = nowMs;
@@ -78,7 +93,7 @@ export class PerfHud {
   }
 
   dispose(): void {
-    this.root.remove();
+    this.root?.remove();
   }
 }
 
