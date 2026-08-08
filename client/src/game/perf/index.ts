@@ -1,5 +1,6 @@
 import { setAnimSectionSink } from './anim-section';
 import { CpuSections } from './cpu-sections';
+import { frameTrace } from './frame-trace';
 import { FrameStats } from './frame-stats';
 import { GpuTimer } from './gpu-timer';
 import { PerfHud, PerfPayload } from './hud';
@@ -11,6 +12,8 @@ export {
 } from './anim-section';
 export { GpuTimer } from './gpu-timer';
 export { PerfHud, HUD_REPAINT_MS } from './hud';
+export { frameTrace, traceStage } from './frame-trace';
+export type { FrameTraceRow } from './frame-trace';
 export type { FrameSummary } from './frame-stats';
 export type { PerfPayload } from './hud';
 
@@ -47,6 +50,8 @@ export class PerfMonitor {
   private gpu: GpuTimer | null = null;
   private lastGpuMs: number | null = null;
   private frameStart = 0;
+  /** End of the previous frame, so `frame-trace.ts` can report the gap the user actually feels. */
+  private lastFrameEnd = 0;
 
   constructor(doc: Document = document) {
     this.hud = new PerfHud(doc);
@@ -75,20 +80,40 @@ export class PerfMonitor {
 
   endFrame(counters: SceneCounters): void {
     const now = performance.now();
-    this.frames.push(now - this.frameStart);
+    const frameMs = now - this.frameStart;
+    this.frames.push(frameMs);
 
     const resolved = this.gpu?.poll() ?? null;
     if (resolved !== null) {
       this.lastGpuMs = resolved;
     }
 
+    const sections = this.sections.totals();
     const payload: PerfPayload = {
       frame: this.frames.summary(),
       gpuMs: this.gpu ? this.lastGpuMs : null,
-      sections: this.sections.totals(),
+      sections,
       ...counters,
     };
     this.hud.update(now, payload);
+
+    // The per-frame row, for the questions a percentile cannot answer. Off by default; see
+    // `frame-trace.ts`. Deliberately AFTER the HUD, so the trace never lengthens a frame the HUD is
+    // about to report on.
+    if (frameTrace.enabled) {
+      frameTrace.push({
+        at: now,
+        ms: frameMs,
+        gap: this.lastFrameEnd === 0 ? frameMs : now - this.lastFrameEnd,
+        sections: Object.fromEntries(sections),
+        programs: counters.programs,
+        calls: counters.calls,
+        triangles: counters.triangles,
+        geometries: counters.geometries,
+        textures: counters.textures,
+      });
+    }
+    this.lastFrameEnd = now;
   }
 
   dispose(): void {

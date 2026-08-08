@@ -8,6 +8,7 @@ import type { Sequence } from "../pipeline/m2/anim/model-anim";
 import { worldClock } from "../pipeline/m2/anim/world-clock";
 import M2Blueprint from "../pipeline/m2/blueprint";
 import { failedTexturePaths } from "../pipeline/m2/material";
+import { revealWhenWarm } from "../pipeline/program-warm";
 import ColliderManager from "../world/collider-manager";
 import { collisionWorld } from "../collision/collision-world";
 import { DEFAULT_COLLISION_HEIGHT, SETTLE_TIMEOUT } from "../movement/constants";
@@ -473,7 +474,12 @@ class Unit extends Entity {
     // drawing at 1.0, i.e. roughly twice life size.
     this.model.scale.setScalar((displayInfo as any).scale || 1);
     this.model.updateMatrix();
-    this.model.visible = true;
+    // Not a plain `visible = true`: the first render of a model kind this session has to compile its
+    // GLSL programs, MEASURED at 37.8 ms mean against 12.7 ms on a frame that compiles nothing, and
+    // it is what the owner sees as a hitch when a group of unfamiliar mobs comes into view. This
+    // issues the compile off the render frame and reveals the body when it is ready -- with a hard
+    // deadline, so a creature is never left invisible. See `pipeline/program-warm.ts`.
+    revealWhenWarm(this.model);
     this.appliedDisplayId = displayId;
 
     // The texture loads `setDisplayInfo` started, now that everything that must NOT wait for them has
@@ -660,7 +666,10 @@ class Unit extends Entity {
     // AFTER the setter and AFTER `applyCharacterLook`, because both write into `matrix` and the last
     // writer wins under `matrixAutoUpdate = false`. See the doc above.
     loaded.model.updateMatrix();
-    loaded.model.visible = true;
+    // Same warm-then-reveal as the display-id path above, and for the same measured reason. This is
+    // the arm that dresses PLAYERS and humanoid NPCs, whose character materials are the ones with the
+    // most program variants in this client.
+    revealWhenWarm(loaded.model);
 
     if (previous && previous !== loaded.model) {
       M2Blueprint.unload(previous);

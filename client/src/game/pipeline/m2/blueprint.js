@@ -1,5 +1,6 @@
 import gameSettings from '../../settings';
 import { collisionWorld } from '../../collision/collision-world';
+import { traceStage } from '../../perf/frame-trace';
 import WorkerPool from '../worker/pool';
 import { externalAnims } from './anim/external-anim-binder';
 import M2 from './';
@@ -42,7 +43,12 @@ class M2Blueprint {
       this.cache.set(path, WorkerPool.enqueue('M2', path).then((args) => {
         const [data, skinData] = args;
 
-        const m2 = new M2(path, data, skinData);
+        // TIMED. `new M2` is the first-sight cost that is unavoidably on the main thread: the parse
+        // ran in the worker, but building the BufferGeometry, assembling the skeleton from the bind
+        // pose, creating the batches and their materials all happen here, once per model PATH. It is
+        // therefore the leading suspect for "only a NEW KIND of mob hitches", and the mark is how
+        // that suspicion becomes a number instead of an argument. See `perf/frame-trace.ts`.
+        const m2 = traceStage('m2.build', path, () => new M2(path, data, skinData));
 
         this.modelAnims.set(path, m2.modelAnim);
 
@@ -59,7 +65,11 @@ class M2Blueprint {
     }
 
     return this.cache.get(path).then((m2) => {
-      return m2.clone();
+      // TIMED too, and separately: this is the PER-INSTANCE half. A `canInstance` model shares the
+      // source's geometry and batches and the clone is nearly free; a character/creature model that
+      // animates does not, and rebuilds its own batches and materials here. Splitting the two marks
+      // is what distinguishes "the first of a kind is expensive" from "every one of them is".
+      return traceStage('m2.clone', path, () => m2.clone());
     });
   }
 

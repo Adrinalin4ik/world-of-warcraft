@@ -12,6 +12,7 @@ import Controls from './controls/controls';
 import DebugPanel from './debug/debug';
 import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
 import { animCounters } from '../../game/pipeline/m2/anim/counters';
+import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-warm';
 import './index.scss';
 
 interface IGameProps {
@@ -121,6 +122,19 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     console.log('Renderer', renderer);
 
     this.perf.attach(renderer.getContext() as WebGL2RenderingContext);
+
+    // Hand the asset path a way to warm a new body's GLSL programs without any of it knowing about
+    // this renderer. A REGISTRATION, the same shape `perf/anim-section.ts` uses and for the same
+    // reason: the renderer is owned by this page and must not become a singleton to be reachable from
+    // `game/classes/unit.ts`. Nothing registered -> `revealWhenWarm` is a plain `visible = true`,
+    // which is the state in every test and in `/game?offline=1`.
+    //
+    // `compileAsync(object, camera, scene)`: three treats the first argument as the subtree whose
+    // MATERIALS to initialise and the third as the scene to gather LIGHTS from, which is exactly the
+    // split needed here -- the body is already parented into the world scene, and its programs must be
+    // built against that scene's lights or the warm-up compiles a variant the real render would not
+    // use. (`three/build/three.module.js:17374` for `compile`'s two traversals.)
+    setProgramWarmer((object) => renderer.compileAsync(object, this.camera, this.game.world.scene));
 
     // window['depthPass'] = this.depthPass = new DepthPass(this.game.world.scene, this.camera);
     // this.depthPass.renderToScreen = false;
@@ -233,6 +247,15 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.perf.sections.begin('world.animate');
     this.game.world.animate(delta, this.camera, cameraMoved);
     this.perf.sections.end('world.animate');
+
+    // Issue GLSL compiles for bodies that have just been built, and reveal the ones whose programs
+    // are ready. BEFORE `render`, so a body revealed this frame is drawn this frame and nothing waits
+    // an extra one. Spanned because a compile issued here is real main-thread work -- it is moved off
+    // the driver's blocking link, not conjured away -- and the span is how anyone checks that.
+    // Measured cost and the whole argument: `game/pipeline/program-warm.ts`.
+    this.perf.sections.begin('warm');
+    pumpProgramWarm();
+    this.perf.sections.end('warm');
 
     this.perf.sections.begin('render');
     this.perf.gpuBegin();
