@@ -13,13 +13,22 @@ import ColliderManager from "../world/collider-manager";
 import { collisionWorld } from "../collision/collision-world";
 import { DEFAULT_COLLISION_HEIGHT, SETTLE_TIMEOUT } from "../movement/constants";
 import { createPlayerMoveState } from "../movement/player-state";
+import { peerTrace } from "../movement/peer-trace";
 import {
+  ANY_MOVE,
+  DEFAULT_MOVE_SPEEDS,
+  MoveFlag,
+  MoveSpeeds,
+  RUNAWAY_SILENCE_MS,
+  REMOTE_SNAP_DISTANCE,
   RemoteMotion,
+  RemoteMove,
   SplineRide,
-  acceptRemoteState,
   advanceRemote,
+  applyRemoteMove,
   createRemoteMotion,
   makeSplineRide,
+  remoteSilentMs,
   sampleSpline,
 } from "../movement/net-motion";
 import {
@@ -228,7 +237,41 @@ class Unit extends Entity {
   public collisionHeight: number = DEFAULT_COLLISION_HEIGHT;
 
   public rotateSpeed: number = 2;
-  public moveSpeed: number = 100; //10
+
+  /**
+   * This unit's wire speed set, yd/s -- what the peer dead-reckon integrates with and what the gait
+   * selector's walk/run boundary is measured against.
+   *
+   * Per unit, not shared: `DEFAULT_MOVE_SPEEDS` is spread, not aliased, or one `MSG_MOVE_SET_RUN_SPEED`
+   * would re-speed every unit in the world.
+   */
+  public speeds: MoveSpeeds = { ...DEFAULT_MOVE_SPEEDS };
+
+  private _moveSpeed: number = 100; //10
+
+  /**
+   * TWO DIFFERENT THINGS SHARE THIS NAME, which is why it is an accessor rather than a field.
+   *
+   * The 100 is a legacy debug scalar for `updatePlayer` -- a yd/s figure no character has ever
+   * moved at, from the pre-mover movement code whose only call site is commented out
+   * (`update()`: `// this.updatePlayer(delta)`). But the packet layer ALSO writes this field with
+   * the real wire run speed (`network/game/object/player/movement.ts:303,336`, from
+   * `MSG_MOVE_SET_RUN_SPEED` and `SMSG_FORCE_RUN_SPEED_CHANGE`).
+   *
+   * So a dead-reckon that read `moveSpeed` as "the run speed" would extrapolate a peer at 100 yd/s
+   * until his first speed packet arrived -- fourteen times too fast. `speeds.run` starts at the real
+   * 7.0 and this setter forwards the wire value into it, which keeps the packet layer's existing
+   * write correct without changing it (that file is owned by another agent this round).
+   */
+  public get moveSpeed(): number {
+    return this._moveSpeed;
+  }
+
+  public set moveSpeed(value: number) {
+    this._moveSpeed = value;
+    this.speeds.run = value;
+  }
+
   public flySpeed: number = 100; //10
   public gravity: number = -30; //10;
   public jumpVelocityConst: number = 16;
@@ -1189,6 +1232,19 @@ class Unit extends Entity {
       return this.move.swimming ? this.move.swimStrokeSpeed : this.move.horizVel.length();
     }
 
+    // A PEER's speed is not measured either: it is the speed his own flags picked, which is what the
+    // dead-reckon is applying to him this frame (`net-motion.ts#advanceRemote` writes it). This is
+    // the reference's remote leg of `unify` -- `RemoteMotion::speed`, read by the selector exactly
+    // as a spline's speed is read for a creature (`select.rs:1069-1103`).
+    //
+    // Measuring a peer's displacement instead is what made the gait flicker at packet cadence, and
+    // it would still be wrong now that the motion is continuous: a peer held against a wall by his
+    // own client keeps reporting FORWARD with an unchanged position, and his run cycle should keep
+    // playing, exactly as it does for the player (`move.horizVel` is the INTENDED velocity above).
+    if (this.remoteMotion) {
+      return this.remoteMotion.speed;
+    }
+
     // The FIRST measured frame has no previous position to difference against -- the unit spawned
     // wherever it spawned, and `0 -> spawn point` is a teleport-sized delta.
     if (first || delta <= 0) {
@@ -1354,7 +1410,7 @@ class Unit extends Entity {
     // The two network motion legs, mutually exclusive by construction (`setSplinePath` and
     // `applyRemoteState` each clear the other), so at most one writes `view.position` per frame.
     this.updateSplineFollowing(delta);
-    this.updateRemoteMotion();
+    this.updateRemoteMotion(delta);
     // this.updatePlayer(delta);
     this.clear();
     // const m = ObjectsManager;
@@ -1627,15 +1683,14 @@ class Unit extends Entity {
   }
 
   /**
-   * Take one `MSG_MOVE_*` position for a peer, and interpolate towards it rather than snapping.
+   * Take one `MSG_MOVE_*` message for a peer: snap the pose and re-seed the dead-reckon.
    *
    * `wireDriven` is CLEARED here, unlike the snapped write this replaces. That flag exists because a
-   * peer whose `view.position` was written only on the frames a message landed was unmeasurable --
-   * quiet frames read as standing and catch-up frames as teleports, so the gait flip-flopped at
-   * packet rate. Interpolation removes the premise: the position now advances every single frame,
-   * so the measured displacement IS the peer's speed and `updateLocomotion` can pick his gait the
-   * same way it picks a creature's. The teleport guard still covers the relocation case, which
-   * `acceptRemoteState` snaps rather than interpolates.
+   * peer whose `view.position` was written only on the frames a message landed was unmeasurable.
+   * Dead reckoning removes the premise twice over: the position advances every single frame, AND
+   * the gait no longer comes from a measurement at all -- `locomotionFlags` reads the peer's own
+   * wire flags and `locomotionSpeed` reads the speed the extrapolation is applying, which is the
+   * reference's remote leg of `select::unify` (`select.rs:1069-1103`).
    */
   applyRemoteState(
     to: { x: number; y: number; z: number },
@@ -1650,27 +1705,110 @@ class Unit extends Entity {
     this.splineRide = null;
     this.wireDriven = false;
 
-    const snap = acceptRemoteState(
-      this.remoteMotion,
-      this.position,
-      this.rotation.z,
-      to,
-      facing,
+    const move: RemoteMove = {
+      x: to.x, y: to.y, z: to.z, facing, flags,
+    };
+    const nowMs = performance.now();
+    const sinceMs = this.remoteMotion.fresh ? 0 : nowMs - this.remoteMotion.lastApplyMs;
+    const gap = applyRemoteMove(this.remoteMotion, move, nowMs);
+    this.position.copy(this.remoteMotion.pos);
+    this.rotation.z = this.remoteMotion.orientation;
+
+    peerTrace.record({
+      at: nowMs,
+      kind: 'packet',
+      guid: this.guid,
       flags,
-      performance.now(),
-    );
-    if (snap) {
-      this.position.set(to.x, to.y, to.z);
-      this.rotation.z = facing;
+      x: to.x,
+      y: to.y,
+      z: to.z,
+      facing,
+      sinceMs,
+      stepYd: gap,
+      speed: 0,
+      gaitSpeed: this.remoteMotion.speed,
+    });
+
+    // Reported, not acted on: a packet always snaps, so there is no interpolation to suppress. A
+    // routine correction is centimetres -- that it stays small is the evidence the dead-reckon is
+    // tracking him. Anything past `REMOTE_SNAP_DISTANCE` is a worldport or a re-entry into our grid.
+    if (gap > REMOTE_SNAP_DISTANCE) {
+      this.remoteRelocations += 1;
     }
   }
 
-  /** Advance a peer one frame along his interpolation window. */
-  updateRemoteMotion() {
-    if (!this.remoteMotion) {
+  /** How many times a peer's packet moved him further than travel could explain. Diagnostic only. */
+  public remoteRelocations = 0;
+
+  /** Whole seconds of runaway already reported for this peer, so the warning is once a second. */
+  private runawayWarnedS = -1;
+
+  /**
+   * Advance a peer one frame of dead reckoning.
+   *
+   * `delta` is the frame's own seconds, not a wall-clock difference: this is an INTEGRATION, and it
+   * has to advance by exactly the time the rest of the frame advanced by or the peer's position and
+   * everything else in the scene disagree about what "now" means.
+   */
+  updateRemoteMotion(delta: number) {
+    const motion = this.remoteMotion;
+    if (!motion) {
       return;
     }
-    this.rotation.z = advanceRemote(this.remoteMotion, performance.now(), this.position);
+    const beforeX = motion.pos.x;
+    const beforeY = motion.pos.y;
+    const beforeZ = motion.pos.z;
+    this.rotation.z = advanceRemote(motion, this.speeds, delta, this.position);
+
+    if (peerTrace.enabled) {
+      const stepYd = Math.hypot(
+        motion.pos.x - beforeX,
+        motion.pos.y - beforeY,
+        motion.pos.z - beforeZ,
+      );
+      peerTrace.record({
+        at: performance.now(),
+        kind: 'frame',
+        guid: this.guid,
+        flags: motion.flags,
+        x: motion.pos.x,
+        y: motion.pos.y,
+        z: motion.pos.z,
+        facing: motion.orientation,
+        sinceMs: delta * 1000,
+        stepYd,
+        speed: delta > 0 ? stepYd / delta : 0,
+        gaitSpeed: motion.speed,
+      });
+    }
+
+    // The runaway watch, the reference's `trace_runaway` (`remote.rs:158-178`). A moving peer is fed
+    // at worst every 500 ms by his own heartbeat, so seconds of silence with a direction flag still
+    // set means we are inventing motion the server never described -- a lost STOP, or a socket that
+    // died with nobody noticing. REPORTING ONLY: the reference does not correct the pose here either,
+    // and a peer frozen by a guard would be a different wrong answer, not a right one.
+    if ((motion.flags & ANY_MOVE) === 0) {
+      this.runawayWarnedS = -1;
+      return;
+    }
+    const silent = remoteSilentMs(motion, performance.now());
+    if (silent <= RUNAWAY_SILENCE_MS) {
+      this.runawayWarnedS = -1;
+      return;
+    }
+    const silentS = Math.floor(silent / 1000);
+    if (silentS !== this.runawayWarnedS) {
+      this.runawayWarnedS = silentS;
+      const drift = Math.hypot(
+        motion.pos.x - motion.lastApplyPos.x,
+        motion.pos.y - motion.lastApplyPos.y,
+      );
+      console.warn(
+        `movement: peer ${this.guid} RUNAWAY -- flags 0x${motion.flags.toString(16)}, silent`
+        + ` ${silentS}s, ${drift.toFixed(1)} yd carried on dead reckoning alone since the last`
+        + ' packet. Either his STOP never arrived or the world socket is dead.',
+      );
+    }
   }
 
   // public calculateOrientation() {
