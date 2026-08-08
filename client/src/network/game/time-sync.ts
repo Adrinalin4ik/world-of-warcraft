@@ -13,8 +13,8 @@
  *
  * The body is the counter echoed back, then the client's own tick count in milliseconds. The server
  * subtracts the two to learn the client's clock offset, which is why an unanswered request is not
- * cosmetic: every timestamp in an inbound `MovementInfo` is in the client's timebase, and the server
- * cannot check a single one of ours until it has this.
+ * cosmetic even apart from the disconnect: every timestamp in a `MovementInfo` WE SEND is in our own
+ * timebase, and the server cannot check one of them against its own clock until it has this.
  *
  * `clientTicks` is a uint32 of milliseconds. It is taken from a monotonic origin captured when this
  * module loads rather than from `Date.now()`, whose low 32 bits are an arbitrary point in 1970-epoch
