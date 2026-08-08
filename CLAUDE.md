@@ -33,7 +33,13 @@ otherwise. Cite its file and line when you take a decision from it.
 Port what it actually does. Do not substitute an approximation, and do not rule something out of
 scope without a stated reason.
 
-One thing it is *not* the authority on: benilla **never loads `FrameXML.toc` or `GlueXML.toc`** —
+**benilla is 1.12.1, and this client is 3.3.5a.** It is authoritative on *structure* — how a document
+loads, how a template expands, how a model is dressed, how a spline is followed, how a unit's scale is
+chosen. It is **not** authoritative on any version-numbered value. Update-field offsets are the sharp
+case: benilla puts health at 22 and level at 34; here they are 24 and 54. Take mechanism from the
+reference and take numbers from the game's own data.
+
+One thing it is *not* the authority on either: benilla **never loads `FrameXML.toc` or `GlueXML.toc`** —
 it runs its own authored XML and Lua (`crates/benilla-ui/.../ui_script/mod.rs:399-411`). So the rule
 it demonstrates is "the UI is XML and Lua executed by the runtime", not "load Blizzard's manifest".
 This client already loads the real manifest further than benilla attempts, so on manifest loading we
