@@ -1,11 +1,13 @@
 import EventEmitter from 'events';
+import * as THREE from 'three';
 import { setMovementSink } from '../../../../game/movement/outbound';
+import { clientTicks } from '../../time-sync';
 import { PlayerMoveState } from '../../../../game/movement/player-state';
 import { GameHandler } from '../../handler';
 import GameOpcode from '../../opcode';
 import GamePacket from '../../packet';
 import {
-  MovementFlag, movementInfoSize, packedGuidSize, readMovementInfo, writeMovementInfo,
+  MovementFlag, movementInfoSize, packedGuidSize, readMovementInfo, wireFacing, writeMovementInfo,
 } from '../../movement-info';
 
 /**
@@ -37,8 +39,83 @@ import {
 /** How often a moving character re-states its position. The reference client's cadence is ~500 ms. */
 const HEARTBEAT_MS = 500;
 
-/** Facing change (radians) below which a turn is not worth a packet. ~0.6 degrees. */
-const FACING_EPSILON = 0.01;
+/**
+ * The outbound wire recorder -- the instrument that made this file's defects visible.
+ *
+ * Off by default and allocating nothing while off, exactly like `game/movement/move-trace.ts`. Turn
+ * it on with `window.moveWire.enabled = true` and read `window.moveWire.history()`; each row is one
+ * packet AS SENT, so what it shows is what an observing client has to extrapolate from.
+ *
+ * It exists because the only symptom available for this class of defect is somebody else's screen.
+ * The owner watched this character from the real 3.3.5a client and reported a jerk every 250-500 ms;
+ * nothing on our own screen shows that, because our own body is drawn from the local mover and never
+ * from the wire. The recorder is what turned "it looks jerky over there" into the capture in
+ * `task-9-report.md`: walking forward for 14.4 s while turning the mouse 154 degrees put THIRTY
+ * packets on the wire at a p50 of 509.9 ms apart, and not one of them was a `MSG_MOVE_SET_FACING`.
+ */
+export interface MoveWireRow {
+  /** `performance.now()` at the send, ms. Differencing consecutive rows gives the real cadence. */
+  at: number;
+  opcode: string;
+  flags: number;
+  flags2: number;
+  /** The `MovementInfo.time` field actually written, in the client's own tick base. */
+  timeStamp: number;
+  x: number;
+  y: number;
+  z: number;
+  facing: number;
+  fallTime: number;
+  /** Bytes of body, i.e. what `movementInfoSize` computed. */
+  bodyBytes: number;
+}
+
+class MoveWireTrace {
+  enabled = false;
+
+  private rows: MoveWireRow[] = [];
+
+  private limit = 4000;
+
+  record(row: MoveWireRow): void {
+    if (!this.enabled) {
+      return;
+    }
+    this.rows.push(row);
+    if (this.rows.length > this.limit) {
+      this.rows.shift();
+    }
+  }
+
+  history(): readonly MoveWireRow[] {
+    return this.rows;
+  }
+
+  clear(): void {
+    this.rows.length = 0;
+  }
+}
+
+export const moveWire = new MoveWireTrace();
+
+if (typeof window !== 'undefined') {
+  (window as any).moveWire = moveWire;
+}
+
+/** Opcode number -> name, for the recorder only. Built once, lazily. */
+let opcodeNames: Map<number, string> | null = null;
+function opcodeName(opcode: number): string {
+  if (opcodeNames === null) {
+    opcodeNames = new Map();
+    Object.getOwnPropertyNames(GameOpcode).forEach((key) => {
+      const value = (GameOpcode as any)[key];
+      if (typeof value === 'number' && !opcodeNames!.has(value)) {
+        opcodeNames!.set(value, key);
+      }
+    });
+  }
+  return opcodeNames.get(opcode) ?? `0x${opcode.toString(16)}`;
+}
 
 /** Flags whose edges are announced with their own opcode, and which opcode. */
 const START_OPCODES: [number, number][] = [
@@ -53,6 +130,17 @@ const START_OPCODES: [number, number][] = [
 const TRANSLATE_MASK = MovementFlag.FORWARD | MovementFlag.BACKWARD;
 const STRAFE_MASK = MovementFlag.STRAFE_LEFT | MovementFlag.STRAFE_RIGHT;
 const TURN_MASK = MovementFlag.TURN_LEFT | MovementFlag.TURN_RIGHT;
+
+/**
+ * The bits that mean the body is genuinely in motion, so its position is EXPECTED to change every
+ * frame and the at-rest reconcile must stay quiet. The reference's `IN_MOTION`
+ * (`movement_net.rs:78-88`). Turning in place is deliberately absent -- a keyboard turn moves
+ * nothing, so a drift under it is still news.
+ */
+const IN_MOTION = TRANSLATE_MASK | STRAFE_MASK
+  | MovementFlag.FALLING | MovementFlag.FALLING_FAR
+  | MovementFlag.SWIMMING | MovementFlag.ASCENDING | MovementFlag.DESCENDING
+  | MovementFlag.ONTRANSPORT;
 
 /** The inbound relays this client acts on. All of them decode identically; see the class docs. */
 const RELAYED = [
@@ -127,9 +215,17 @@ export class PlayerMovementHandler extends EventEmitter {
   /** Last flag word actually sent, so only EDGES produce a packet. */
   private sentFlags = 0;
 
+  /** The facing as it went on the wire (normalised), i.e. what the previous frame's facing was. */
   private lastSentFacing = 0;
 
   private lastHeartbeatMs = 0;
+
+  /**
+   * The position the server was last told. Not `state.pos` itself -- that object is mutated in
+   * place by the mover every frame, so holding a reference would make every comparison trivially
+   * equal. `Vector3#equals` is the exact float compare the server's own `positionChanged` test uses.
+   */
+  private lastSentPos = new THREE.Vector3(NaN, NaN, NaN);
 
   /** Counters the world-state probe reads to prove the outbound stream is real. */
   public sent = { total: 0, heartbeats: 0, starts: 0, stops: 0, facings: 0, jumps: 0, lands: 0 };
@@ -278,8 +374,44 @@ export class PlayerMovementHandler extends EventEmitter {
   // --------------------------------------------------------------------------------------- outbound
 
   /**
-   * One frame of our own movement, from `game/movement/outbound.ts`. Sends at most one packet per
-   * frame: an edge if there is one, else a heartbeat if one is due, else nothing.
+   * One frame of our own movement, from `game/movement/outbound.ts`.
+   *
+   * THE SEND LAW, and why it is not "one packet per frame".
+   *
+   * The reference (`samples/benilla/crates/benilla/src/player/movement_net.rs#stream_self_movement`)
+   * models this as THREE INDEPENDENT EMITTERS that can all fire on the same frame, not one
+   * prioritised channel:
+   *
+   *  1. the move-state broadcaster -- one `MSG_MOVE_*` per movement-AXIS transition;
+   *  2. the facing report -- one `MSG_MOVE_SET_FACING` on every frame the facing changed, whether or
+   *     not we are moving, excluded only while a TURN flag is set;
+   *  3. the ~500 ms heartbeat, and the at-rest position reconcile.
+   *
+   * This client had only (1) and a crippled (3), and (2) was gated on `flags === 0` -- so it sent a
+   * facing update only while STANDING STILL. That is the defect the owner saw from the real client:
+   * walking forward while turning with the mouse (which is how anyone actually turns; A/D is the
+   * only input that raises a TURN flag here, see `Controls#update` step 3 vs `look.turnsCharacter`)
+   * put NO orientation on the wire for up to 500 ms. An observer dead-reckons a moving unit along
+   * the orientation it was last told, so it walked our character in the stale direction for half a
+   * second and then snapped him to the heartbeat's position. Once every heartbeat. Exactly the
+   * reported 250-500 ms jerk.
+   *
+   * The reference's evidence for (2) being frame-cadence rather than an epsilon-gated afterthought
+   * is a real 1.12.1 sniff, quoted at `movement_net.rs:314-330`: 179 of 336 client-sent movement
+   * packets are `SET_FACING` -- more than every other movement opcode combined -- at a median 41 ms
+   * apart, and 116 of the 179 carry a direction bit (`Forward` x68, `Backward` x12,
+   * `Forward+StrafeRight` x9, ...). There is no rate limit and no angular epsilon: the change
+   * detector is an EXACT comparison, so a frame that did not move the mouse sends nothing. The old
+   * `FACING_EPSILON = 0.01` here is therefore gone; `faceYaw` is only ever written by real input, so
+   * the exact test neither floods nor misses.
+   *
+   * `MSG_MOVE_SET_FACING` is NOT gated on whether a transition already went out this frame -- the
+   * same sniff repeatedly shows the two sharing a millisecond.
+   *
+   * Raising the heartbeat rate was considered and rejected: the reference's 500 ms is
+   * binary-verified (`movement_net.rs:38-41`, the local-player send deadline at `mgr+0x130` armed to
+   * `clientTime + 500 ms`, `0x615b80`), the real client is smooth to observers at it, and a higher
+   * rate would only paper over the missing facing.
    */
   streamMovement(state: PlayerMoveState, flags: number, nowSeconds: number) {
     const player = this.game.world && this.game.world.player;
@@ -296,38 +428,64 @@ export class PlayerMovementHandler extends EventEmitter {
     }
 
     const nowMs = performance.now();
+    const facing = wireFacing(state.faceYaw);
     const changed = flags ^ this.sentFlags;
+    let sent = false;
 
+    // (1) The move-state broadcaster: one packet per movement-axis transition.
     if (changed !== 0) {
       const opcode = this.opcodeForEdge(flags, changed);
       if (opcode !== null) {
-        this.send(opcode, state, flags, nowSeconds);
-        this.sentFlags = flags;
-        this.lastHeartbeatMs = nowMs;
-        this.lastSentFacing = state.faceYaw;
-        return;
+        this.send(opcode, state, flags, facing, nowSeconds);
+        sent = true;
       }
-      // A flag changed that has no opcode of its own (FALLING_FAR latching, say). Fold it into the
-      // next heartbeat rather than inventing a packet for it.
+      // A flag with no opcode of its own (FALLING_FAR latching, say) just rides the next packet.
       this.sentFlags = flags;
     }
 
-    if (flags !== 0 && nowMs - this.lastHeartbeatMs >= HEARTBEAT_MS) {
-      this.send(GameOpcode.MSG_MOVE_HEARTBEAT, state, flags, nowSeconds);
-      this.sent.heartbeats += 1;
-      this.lastHeartbeatMs = nowMs;
-      this.lastSentFacing = state.faceYaw;
-      return;
+    // (2) The facing report -- see the send law above. Independent of (1), and of whether we are
+    // moving. Excluded only on the TURN axis: a keyboard turn is fully described by its flag, since
+    // observers rotate the mover at its turn rate for as long as the flag is set, and the STOP_TURN
+    // carries the final angle. (Not one SET_FACING in the reference's sniff carries a turn bit.)
+    if ((flags & TURN_MASK) === 0 && facing !== this.lastSentFacing) {
+      this.send(GameOpcode.MSG_MOVE_SET_FACING, state, flags, facing, nowSeconds);
+      this.sent.facings += 1;
+      sent = true;
     }
 
-    // Standing still and turning on the spot: the position has not changed but the FACING has, and
-    // a server that never hears about it draws us facing the wrong way to everyone else.
-    if (flags === 0 && Math.abs(wrapPi(state.faceYaw - this.lastSentFacing)) > FACING_EPSILON) {
-      this.send(GameOpcode.MSG_MOVE_SET_FACING, state, flags, nowSeconds);
-      this.sent.facings += 1;
-      this.lastSentFacing = state.faceYaw;
+    // (3a) The heartbeat, when nothing else went out. NOT while FALLING: the JUMP packet seeded the
+    // whole ballistic arc and an observer integrates it locally, so the real client sends no mid-air
+    // packet at all -- each extra one is a smoothing-free snap-apply over there
+    // (`movement_net.rs:341-353`, sniff-verified).
+    const falling = (flags & MovementFlag.FALLING) !== 0;
+    if (!sent && flags !== 0 && !falling && nowMs - this.lastHeartbeatMs >= HEARTBEAT_MS) {
+      this.send(GameOpcode.MSG_MOVE_HEARTBEAT, state, flags, facing, nowSeconds);
+      this.sent.heartbeats += 1;
+      sent = true;
+    }
+
+    // (3b) The at-rest position reconcile (`movement_net.rs:356-380`, the reference's decision 0907).
+    // The server's copy of where we are may never go stale. Our own resolver settles a body that is
+    // already at rest by a fraction of a millimetre AFTER the packet that reported the rest -- a
+    // landing reports the touchdown pose and the next frame's snap takes a little off it; a login
+    // lands on a server-authored position our collision resolves a hair differently. While standing
+    // still nothing else goes out, so the delta accumulates and the next packet of any kind delivers
+    // it all at once, which the server reads as movement on an EXACT float compare and which cancels
+    // a cast. Reporting it when it happens -- at rest, so once per settle rather than per frame --
+    // keeps the two copies identical.
+    if (!sent && (flags & IN_MOTION) === 0 && !this.lastSentPos.equals(state.pos)) {
+      this.send(GameOpcode.MSG_MOVE_HEARTBEAT, state, flags, facing, nowSeconds);
+      this.sent.heartbeats += 1;
+      sent = true;
+    }
+
+    if (sent) {
       this.lastHeartbeatMs = nowMs;
     }
+    // The change detector's reference is the PREVIOUS FRAME's facing, not the last one reported: a
+    // turn-axis frame deliberately sends nothing, and must not leave a catch-up SET_FACING behind
+    // for the frame the key releases.
+    this.lastSentFacing = facing;
   }
 
   /**
@@ -370,14 +528,18 @@ export class PlayerMovementHandler extends EventEmitter {
     return null;
   }
 
-  private send(opcode: number, state: PlayerMoveState, flags: number, nowSeconds: number) {
+  private send(
+    opcode: number,
+    state: PlayerMoveState,
+    flags: number,
+    facing: number,
+    nowSeconds: number,
+  ) {
     const player = this.game.world.player;
+    const bodyBytes = movementInfoSize(player.guid, flags, 0);
     // EXACTLY sized: see `movementInfoSize`. A `GamePacket` allocated with slack sends the slack,
     // declared as payload, because `GameHandler#send` measures the ALLOCATED length.
-    const packet = new GamePacket(
-      opcode,
-      GamePacket.HEADER_SIZE_OUTGOING + movementInfoSize(player.guid, flags, 0),
-    );
+    const packet = new GamePacket(opcode, GamePacket.HEADER_SIZE_OUTGOING + bodyBytes);
 
     // The wire's `fallTime` is milliseconds since this airborne phase began. `airborneSince` is
     // stamped in the same elapsed-SECONDS clock `nowSeconds` comes from, which is the only reason
@@ -386,33 +548,49 @@ export class PlayerMovementHandler extends EventEmitter {
       ? Math.max(0, Math.round((nowSeconds - state.airborneSince) * 1000))
       : 0;
 
+    // `GetMSTime()`: a client-relative millisecond tick, not a wall clock. It MUST be the same tick
+    // base `CMSG_TIME_SYNC_RESP` reports, because the server subtracts the two to learn our clock
+    // offset and then adds that offset to every `MovementInfo.time` we send. `clientTicks()` counts
+    // from a module-load origin; this used to send raw `performance.now()`, so the two disagreed by
+    // however many milliseconds elapsed between page load and that module's first import.
+    const timeStamp = clientTicks();
+
     writeMovementInfo(packet, {
       guid: player.guid,
       flags,
       flags2: 0,
-      // `GetMSTime()`: a client-relative millisecond tick, not a wall clock. The server only ever
-      // differences consecutive values of it.
-      timeStamp: Math.round(performance.now()) >>> 0,
+      timeStamp,
       x: state.pos.x,
       y: state.pos.y,
       z: state.pos.z,
-      facing: state.faceYaw,
+      facing,
       pitch: state.swimPitch,
       fallTime,
       // The jump block, present exactly when MOVEMENTFLAG_FALLING is: vertical speed, then the
       // sin/cos of the take-off heading, then the horizontal speed.
       fallVelocity: state.velZ,
-      fallSinAngle: Math.sin(state.faceYaw),
-      fallCosAngle: Math.cos(state.faceYaw),
+      fallSinAngle: Math.sin(facing),
+      fallCosAngle: Math.cos(facing),
       fallSpeed: Math.hypot(state.horizVel.x, state.horizVel.y),
     });
 
     this.game.send(packet);
     this.sent.total += 1;
+    this.lastSentPos.set(state.pos.x, state.pos.y, state.pos.z);
+
+    moveWire.record({
+      at: performance.now(),
+      opcode: opcodeName(opcode),
+      flags,
+      flags2: 0,
+      timeStamp,
+      x: state.pos.x,
+      y: state.pos.y,
+      z: state.pos.z,
+      facing,
+      fallTime,
+      bodyBytes,
+    });
   }
 }
 
-/** Shortest signed angle. Local copy: this file must not depend on the camera rig. */
-function wrapPi(angle: number): number {
-  return Math.atan2(Math.sin(angle), Math.cos(angle));
-}

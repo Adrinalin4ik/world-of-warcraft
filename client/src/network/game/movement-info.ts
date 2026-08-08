@@ -171,6 +171,34 @@ export function readMovementInfo(packet: Packet, hasGuid: boolean = true): Movem
   return info;
 }
 
+/**
+ * The facing as the wire wants it: normalised into `[0, 2*pi)`.
+ *
+ * `PlayerMoveState.faceYaw` is an UNBOUNDED accumulator -- `Controls#update` does
+ * `player.move.faceYaw += look.yawDelta` on every mouse-look frame and `+= turning * rate * delta`
+ * on every A/D frame, and nothing ever wrapped it. MEASURED on the wire before this: a 14 s walk
+ * with a mouse turn sent orientations from `-0.0090` down to `-2.7000`, and the following stand-and-
+ * turn reached `-3.9060` -- every one of them outside `[0, 2*pi)`, and still accumulating.
+ *
+ * Two more full turns of the mouse would have taken it past 4*pi, and the reference is explicit
+ * about what happens then (benilla `crates/benilla/src/player/movement_net.rs:145-151`):
+ * "vmangos's `VerifyMovementInfo` -> `IsValidMapCoord` rejects any movement packet with
+ * `|o| > 4*pi`. Past that bound every packet -- including the Stop/StopTurn that ends a run or turn
+ * -- is silently dropped, stranding observers on the last-relayed flags (a phantom spin or run-off
+ * that only clears once we turn back in range and emit a fresh transition)."
+ *
+ * The real client always sends a normalised orientation, so this is fidelity as much as safety.
+ */
+export function wireFacing(faceYaw: number): number {
+  const tau = Math.PI * 2;
+  const wrapped = faceYaw % tau;
+  // `-0 % tau` is `-0`, and `-0 < 0` is false, so the sign check alone would let `-0` through. It
+  // serialises identically to `+0` so nothing breaks, but returning it would make the exact-equality
+  // facing-change detector in `PlayerMovementHandler#streamMovement` compare `-0 !== 0` -- which is
+  // FALSE in JS, so this is harmless either way. Added to `0` for a canonical result regardless.
+  return wrapped < 0 ? wrapped + tau : wrapped + 0;
+}
+
 /** Everything `writeMovementInfo` needs; the optional blocks default to absent. */
 export interface OutgoingMovement {
   guid: string;
