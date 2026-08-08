@@ -113,12 +113,17 @@ export function groundedStep(
   // slope the approach rate along the surface is ~1e-3, small but not zero, so the face is never
   // skipped. Four iterations, no movement. A skin gap makes the same sweep clear the floor by a
   // wide margin.
-  const hit = cast(slid, _down, reach, SKIN_WIDTH);
+  // Walkable-filtered for the same reason the grounded test is (see `step`): this asks where the
+  // FLOOR is, and taking the nearest hit instead let a steep face touching the capsule at distance
+  // zero refuse the snap, leaving the body up to the slide's ride-lift above the ground it is
+  // standing on -- which is the other half of what latched it airborne.
+  const hit = cast(slid, _down, reach, SKIN_WIDTH, GROUND_COS);
   const snap: SnapTrace = {
     reach,
     hit: hit ? { distance: hit.distance, normalZ: hit.normal.z } : null,
   };
 
+  // Kept alongside the filter for the same reason the grounded test keeps its own -- see `step`.
   let ground: object | null = null;
   if (hit && hit.normal.z >= GROUND_COS) {
     slid.z -= hit.distance;
@@ -216,7 +221,29 @@ export function step(
   // walking probe would end the arc up to 0.2 yd early and close the gap with a same-frame snap --
   // the visible pop at every silent landing.
   const groundReach = state.airborneSince !== null ? LAND_PROBE : GROUND_PROBE;
-  const classify = cast(center, _down, groundReach);
+  // "Is there walkable ground under me", NOT "is the nearest thing under me walkable". The two
+  // differ exactly where this defect lived. `castCapsuleAgainstTriangles` reports `distance: 0` for
+  // any face already touching the capsule that the probe is driving into, and for a downward probe
+  // that is every face with `n.z > 0` -- so a near-vertical wall the capsule's flank is brushing
+  // wins the minimum at zero distance and HIDES the grass under the feet. The old form then read
+  // `normal.z = 0.08 < GROUND_COS`, called it not walkable, and latched the body airborne.
+  //
+  // MEASURED, walking four bearings as `Gesf` with `moveTrace` on: 744 frames reported
+  // `onWalkable: false`, and 727 of them had the snap probe finding a face at distance 0.000 with
+  // `normalZ = 0.080`. ZERO of the 744 had no hit at all, i.e. not one was a real ledge, and 731 of
+  // them did not descend. Two of those latches reached the wire as `MSG_MOVE_JUMP` /
+  // `MSG_MOVE_FALL_LAND` pairs 214 ms and 85 ms apart with dz -0.126 and 0.000 -- a character who
+  // an observer sees hop while walking. The previous round's capture has the same fingerprint at a
+  // different spot: two pairs 23 ms apart with dz +0.001 and -0.003 (`B1-wire.json`).
+  //
+  // Passing the walkability threshold INTO the cast keeps this at one probe per frame. Nothing is
+  // suppressed: a body with no walkable face within reach still latches airborne and still sends
+  // the jump, which is what the phase-B jumps in the same capture confirm.
+  // The `>= GROUND_COS` test is KEPT rather than left to the filter. `minNormalZ` is a hint to a
+  // `CastFn`, and a CastFn is an interface -- every movement unit test supplies its own, and none of
+  // them honour it. The rule must live where it can be tested, and the filter must not be the only
+  // thing standing between a steep face and "grounded".
+  const classify = cast(center, _down, groundReach, 0, GROUND_COS);
   const onWalkable = !!classify && classify.normal.z >= GROUND_COS;
   let groundEntity: object | null = onWalkable && classify ? classify.source : null;
 

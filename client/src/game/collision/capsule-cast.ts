@@ -124,6 +124,14 @@ function planeTimeOfImpact(
  *
  * `skin` is subtracted from the reported distance so the caller stops that far off the surface; the
  * result is clamped at 0. Returns null when nothing is reached within `maxDist`.
+ *
+ * `minNormalZ` restricts the minimum to faces whose CONTACT normal points up at least that much,
+ * i.e. it answers "where is the floor" instead of "what is nearest". Defaulting to `-Infinity`
+ * leaves every existing caller exactly as it was. It exists because "nearest" is the wrong question
+ * for the grounded test: a face already touching the capsule reports `distance: 0` whenever the
+ * probe is driving into it (the `gap <= CAPSULE_CAST_EPS` branch above), and for a DOWNWARD probe
+ * that is every face with `n.z > 0` -- including a near-vertical wall the capsule's flank is
+ * brushing. Such a face wins the minimum at zero distance and hides the floor under the feet.
  */
 export function castCapsuleAgainstTriangles(
   from: THREE.Vector3,
@@ -133,6 +141,7 @@ export function castCapsuleAgainstTriangles(
   halfSegment: number,
   triangles: Triangle[],
   skin = 0,
+  minNormalZ = -Infinity,
 ): CastHit | null {
   if (triangles.length === 0 || maxDist <= 0) {
     return null;
@@ -148,6 +157,17 @@ export function castCapsuleAgainstTriangles(
     const solution = planeTimeOfImpact(from, dir, maxDist, radius, halfSegment, triangle);
     if (solution === null || solution.t >= bestT) {
       continue;
+    }
+
+    // `minNormalZ` turns "what do I hit first" into "what is the first thing I hit OF THIS KIND",
+    // and the only caller that wants it is the mover asking WHERE THE FLOOR IS. It is applied to
+    // the CONTACT normal -- the one this function is about to report, oriented by `side` -- not to
+    // the triangle's stored normal, which carries no reliable outward direction (see the header).
+    if (minNormalZ > -Infinity) {
+      const contactNormalZ = solution.side > 0 ? triangle.normal.z : -triangle.normal.z;
+      if (contactNormalZ < minNormalZ) {
+        continue;
+      }
     }
 
     // The plane is infinite; the face is not. Confirm the capsule actually meets THIS triangle at

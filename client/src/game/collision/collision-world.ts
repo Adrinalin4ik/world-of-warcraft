@@ -8,13 +8,14 @@ import { CastHit, CollisionLayer, LiquidClaim, Triangle } from './types';
 import { WmoProvider } from './wmo-provider';
 
 /**
- * A configured swept cast: origin (capsule centre), unit direction, max distance, optional skin.
+ * A configured swept cast: origin (capsule centre), unit direction, max distance, optional skin,
+ * and an optional floor filter (`minNormalZ`, see `capsule-cast.ts`).
  *
  * This is what every mover and camera function is handed -- never the world itself. That is what
  * keeps the whole movement stack testable against synthetic geometry with nothing loaded.
  */
 export type CastFn = (
-  from: THREE.Vector3, dir: THREE.Vector3, maxDist: number, skin?: number,
+  from: THREE.Vector3, dir: THREE.Vector3, maxDist: number, skin?: number, minNormalZ?: number,
 ) => CastHit | null;
 
 const _box = new THREE.Box3();
@@ -51,7 +52,7 @@ export class CollisionWorld {
    * candidates for the swept volume, then runs the swept capsule over them.
    */
   castFor(layer: CollisionLayer, radius: number, halfSegment: number): CastFn {
-    return (from, dir, maxDist, skin = 0) => {
+    return (from, dir, maxDist, skin = 0, minNormalZ = -Infinity) => {
       const candidates = this.candidates;
       candidates.length = 0;
 
@@ -69,7 +70,7 @@ export class CollisionWorld {
       this.doodads.gather(_box, candidates);
 
       return castCapsuleAgainstTriangles(
-        from, dir, maxDist, radius, halfSegment, candidates, skin,
+        from, dir, maxDist, radius, halfSegment, candidates, skin, minNormalZ,
       );
     };
   }
