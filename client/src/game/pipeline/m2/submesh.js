@@ -211,6 +211,16 @@ class Submesh extends THREE.Group {
 
     // Preserve the geometry for use in applying batches.
     this.geometry = opts.geometry;
+
+    /**
+     * Whether this submesh's M2 BUILT that geometry or merely borrowed it from the model path's
+     * prototype (`M2#ownsGeometry`).
+     *
+     * Every placement of a model path now shares one set of submesh buffers, and every placement's
+     * batch meshes point at the same object again -- so `dispose()` below has to know whose it is.
+     * Defaults to true so a caller that does not pass the flag keeps the old behaviour.
+     */
+    this.ownsGeometry = opts.ownsGeometry !== false;
   }
 
   /**
@@ -389,10 +399,14 @@ class Submesh extends THREE.Group {
   }
 
   dispose() {
-    this.geometry.dispose();
+    // Every batch mesh below was constructed with `this.geometry` (see `applyBatches`), so the
+    // child loop was disposing the SAME BufferGeometry once more per batch even before placements
+    // began sharing it. One call, and only when the buffers are ours to free.
+    if (this.ownsGeometry) {
+      this.geometry.dispose();
+    }
 
     this.children.forEach((child) => {
-      child.geometry.dispose();
       child.material.dispose();
     });
   }

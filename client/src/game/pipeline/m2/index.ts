@@ -22,6 +22,7 @@ import { buildBoneHierarchy, modelSpaceBindMatrix, normalizeBoneWeights, poseBin
 import M2Material, { collectTextureLoads, TextureLoad } from './material';
 import { isParticleTemplate } from './particle/template';
 import Submesh from './submesh';
+import { frameTrace, traceStage } from '../../perf/frame-trace';
 
 // Module-level scratch for `applySphericalBillboard` / `applyCylindricalZBillboard`.
 //
@@ -111,6 +112,20 @@ class M2 extends THREE.Group {
   // this.batches. Instanced/cloned M2s share the source's this.batches (see the constructor's
   // `instance` branch and clone()) and must not dispose materials they merely borrowed.
   ownsBatches: boolean;
+  /**
+   * True only for the M2 that actually built `this.geometry` and `this.submeshGeometries`.
+   *
+   * Geometry is a PURE FUNCTION of `data` and `skinData` -- nothing in this tree writes to a
+   * submesh's buffers per placement -- so every placement of a model path shares one set, whether or
+   * not `canInstance` is true. `canInstance` answers a different question (it is false the moment any
+   * bone is animated, `wow-data-parser/m2/index.js:169-179`), and gating geometry on it made every
+   * character and creature rebuild buffers identical to the ones already in memory.
+   *
+   * The flag is what makes that safe. `M2Blueprint.unload` calls `dispose()` on every
+   * non-instanceable M2 the moment its placement goes away, so without an ownership test the first
+   * character to walk out of range would free the buffers every other character is drawing from.
+   */
+  ownsGeometry: boolean;
   boundingMesh: THREE.Mesh;
   /**
    * Dense per-instance phase slot for `shouldPose`'s decimation stagger, or -1 while unregistered.
@@ -227,7 +242,7 @@ class M2 extends THREE.Group {
     this.animated = this.modelAnim.animated;
     this.instanceAnim = this.animated ? new InstanceAnim(this.modelAnim) : null;
 
-    this.createSkeleton(data.bones);
+    traceStage('m2.skeleton', path, () => this.createSkeleton(data.bones));
 
     // PER PLACEMENT, outside the `instance` branch below on purpose. These are this placement's own
     // sampled UV / transparency / colour slots, not shared state: an instanced clone took the
@@ -236,7 +251,7 @@ class M2 extends THREE.Group {
     // every clone of an instanceable model kept empty arrays -- and `canInstance` is false only when
     // a BONE is animated, so the models that clone are exactly the UV/transparency-animated ones
     // this task exists for. Their animation would have been dropped on the floor.
-    this.createTextureAnimations(data);
+    traceStage('m2.texAnim', path, () => this.createTextureAnimations(data));
 
     // BEFORE createBatches, which needs the per-submesh answer to set each batch material's skinning
     // flag, and before createSubmeshes, which needs it to pick the mesh class.
@@ -254,24 +269,35 @@ class M2 extends THREE.Group {
     // optimization it was documented as.
     this.submeshSkinning = (instance && instance.submeshSkinning)
       ? instance.submeshSkinning
-      : this.computeSubmeshSkinning(data, skinData);
+      : traceStage('m2.skinScope', path, () => this.computeSubmeshSkinning(data, skinData));
 
-    // Instanced M2s can share geometries and texture units.
-    if (instance) {
+    // Geometry and batches are now TWO independent sharing decisions, because they answer two
+    // different questions. Buffers are the same for every placement of a path and are never written
+    // per placement, so they are always shared. MATERIALS are not: a character's batch materials
+    // carry THAT character's composited skin, hair and cape (`Submesh#setCharacterTextures`), so
+    // they may only be shared for an instanceable model, which is what `instance.batches` means.
+    if (instance && instance.batches) {
       this.batches = instance.batches;
-      this.geometry = instance.geometry;
-      this.submeshGeometries = instance.submeshGeometries;
       this.ownsBatches = false;
     } else {
-      this.createBatches();
-      this.createGeometry(data.vertices);
+      traceStage('m2.batches', path, () => this.createBatches());
       this.ownsBatches = true;
     }
 
+    if (instance && instance.geometry) {
+      this.geometry = instance.geometry;
+      this.submeshGeometries = instance.submeshGeometries;
+      this.ownsGeometry = false;
+    } else {
+      traceStage('m2.geometry', path, () => this.createGeometry(data.vertices));
+      this.ownsGeometry = true;
+    }
+
     this.createMesh(this.geometry, this.skeleton, this.rootBones);
-    this.createSubmeshes(data, skinData);
+    traceStage('m2.submeshes', path, () => this.createSubmeshes(data, skinData));
     this.geometry.computeBoundingBox();
-    this.boundingMesh = this.createBoundingMesh(this.boundingVertices);
+    this.boundingMesh = traceStage('m2.hull', path,
+      () => this.createBoundingMesh(this.boundingVertices));
 
     ObjectsManager.push(this);
   }
@@ -441,39 +467,69 @@ class M2 extends THREE.Group {
     this.batches = batches;
   }
 
+  /**
+   * The ROOT mesh's geometry: every vertex of the model, no faces.
+   *
+   * BUILT STRAIGHT INTO TYPED ARRAYS, and that is the whole point of this method. It used to go
+   * through the legacy `Geometry` (`utils/geometry.ts`) and `toBufferGeometry()`, and a face-less
+   * geometry takes a path in there that nobody meant to be on:
+   *
+   *     // DirectGeometry#fromGeometry, utils/geometry.ts:1886-1896
+   *     if ( vertices.length > 0 && faces.length === 0 ) {
+   *       const triangles = THREE.ShapeUtils.triangulateShape ( vertices, holes );
+   *
+   * -- so every vertex of the model was handed to an EAR-CLIPPING POLYGON TRIANGULATOR as if the
+   * vertex list were the outline of a 2D shape. `triangulateShape` is quadratic in the contour
+   * length, and a character model's contour is 4-6 thousand points. MEASURED, walking, ANGLE
+   * backend: `m2.geometry` took 712.5 / 610.3 / 598.7 / 423.7 / 367.9 ms on the five character-model
+   * constructions in one 43 s walk -- 88 to 92 % of a whole `m2.clone`, which is where the 813 ms
+   * per character came from. The triangles it produced were meaningless (an arbitrary 3D point set
+   * is not a polygon) and were never drawn: `createMesh` sets `mesh.visible = false`, the SUBMESHES
+   * carry everything that reaches the screen, and this geometry exists only to host the skeleton
+   * bind and to supply `boundingBox` to `visibility-manager.js#refreshWorldBoundingBox`.
+   *
+   * One O(vertices) pass, no intermediate objects, no faces, no triangulation.
+   *
+   * The transform is the SAME one the old two-step applied, composed by hand. Source order is
+   * (X, Z, -Y), then `makeScale(-1, -1, 1)`, then `rotateX(-PI/2)` which maps (x, y, z) to
+   * (x, z, -y); composing the three gives (-position[0], -position[1], position[2]). It must stay
+   * identical to `createSubmeshGeometry`, which still goes the legacy route because it has real
+   * faces and real UVs to carry.
+   *
+   * The bounding box that comes out is now the box of EVERY vertex. The old one was the box of
+   * whatever subset the triangulator's output happened to reference, which is a subset -- so a
+   * model's world bounds can only have grown, never shrunk, and can only cull less eagerly.
+   */
   createGeometry(vertices) {
-    const geometry = new Geometry();
+    const count = vertices.length;
+    const positions = new Float32Array(count * 3);
+    const skinIndices = new Float32Array(count * 4);
+    const skinWeights = new Float32Array(count * 4);
 
-    for (let vertexIndex = 0, len = vertices.length; vertexIndex < len; ++vertexIndex) {
-      const vertex = vertices[vertexIndex];
+    for (let i = 0; i < count; ++i) {
+      const vertex = vertices[i];
+      const { position, boneIndices } = vertex;
 
-      const { position } = vertex;
-
-      geometry.vertices.push(
-        // Provided as (X, Z, -Y)
-        new THREE.Vector3(position[0], position[2], -position[1])
-      );
-
-      geometry.skinIndices.push(
-        new THREE.Vector4(...vertex.boneIndices)
-      );
+      positions[i * 3] = -position[0];
+      positions[i * 3 + 1] = -position[1];
+      positions[i * 3 + 2] = position[2];
 
       // M2 stores bone weights as four bytes summing to 255; three's skinning expects them to sum
       // to 1. Handing over the raw bytes scales every vertex by ~255.
-      geometry.skinWeights.push(
-        new THREE.Vector4(...normalizeBoneWeights(vertex.boneWeights))
-      );
+      const weights = normalizeBoneWeights(vertex.boneWeights);
+
+      for (let j = 0; j < 4; ++j) {
+        skinIndices[i * 4 + j] = boneIndices[j];
+        skinWeights[i * 4 + j] = weights[j];
+      }
     }
 
-    // Mirror geometry over X and Y axes and rotate
-    const matrix = new THREE.Matrix4();
-    matrix.makeScale(-1, -1, 1);
-    geometry.applyMatrix4(matrix);
-    geometry.rotateX(-Math.PI / 2);
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('skinIndex', new THREE.BufferAttribute(skinIndices, 4));
+    geometry.setAttribute('skinWeight', new THREE.BufferAttribute(skinWeights, 4));
 
-    // Preserve the geometry
-    this.geometry = geometry.toBufferGeometry();
-    // this.geometry.computeBoundsTree();
+    this.geometry = geometry;
   }
 
   createMesh(bufferGeometry: THREE.BufferGeometry, skeleton, rootBones) {
@@ -520,13 +576,27 @@ class M2 extends THREE.Group {
 
     const subLen = submeshes.length;
 
+    // Per-submesh geometry-build timings, gathered ONLY while the trace is on, and reported as one
+    // mark at the end. This is the instrument that separates the two candidate explanations for the
+    // 800 ms character clone: real O(submeshes x vertices) work spreads the total evenly across
+    // `built` builds, while a garbage collection landing inside the clone concentrates it in one.
+    // Per-build marks would have been 61 rows per character and would have flushed the ring.
+    const geomTimes: number[] = frameTrace.enabled ? [] : (null as any);
+
     for (let submeshIndex = 0; submeshIndex < subLen; ++submeshIndex) {
       const submeshDef = submeshes[submeshIndex];
 
       // Bring up relevant batches and geometry.
       const submeshBatches = this.batches.get(submeshIndex);
-      const submeshGeometry = this.submeshGeometries.get(submeshIndex) ||
-        this.createSubmeshGeometry(submeshDef, indices, triangles, vertices);
+      let submeshGeometry = this.submeshGeometries.get(submeshIndex);
+
+      if (!submeshGeometry) {
+        const t0 = geomTimes ? performance.now() : 0;
+        submeshGeometry = this.createSubmeshGeometry(submeshDef, indices, triangles, vertices);
+        if (geomTimes) {
+          geomTimes.push(performance.now() - t0);
+        }
+      }
 
       if (this.isTemplateSubmesh(submeshGeometry, emitterCount, submeshCount)) {
         if (submeshBatches) {
@@ -549,6 +619,20 @@ class M2 extends THREE.Group {
       this.submeshGeometries.set(submeshIndex, submeshGeometry);
 
       this.add(submesh);
+    }
+
+    if (geomTimes && geomTimes.length > 0) {
+      let total = 0;
+      let max = 0;
+      for (let i = 0; i < geomTimes.length; ++i) {
+        total += geomTimes[i];
+        max = Math.max(max, geomTimes[i]);
+      }
+      frameTrace.mark(
+        'm2.submeshGeom',
+        total,
+        `${this.path} built=${geomTimes.length}/${subLen} verts=${vertices.length} max=${max.toFixed(1)}`,
+      );
     }
   }
 
@@ -680,7 +764,8 @@ class M2 extends THREE.Group {
       rootBone,
       useSkinning: scope.skinned,
       soleBoneIndex: scope.soleBone,
-      matrixAutoUpdate: this.matrixAutoUpdate
+      matrixAutoUpdate: this.matrixAutoUpdate,
+      ownsGeometry: this.ownsGeometry,
     };
 
     const submesh = new Submesh(opts);
@@ -1128,9 +1213,16 @@ class M2 extends THREE.Group {
 
   dispose() {
     collisionWorld.doodads.remove(this.boundingMesh);
+    // The hull is built per placement (see `createBoundingMesh`), so it is always ours to free.
     this.boundingMesh.geometry.dispose();
-    this.geometry.dispose();
-    this.mesh.geometry.dispose();
+
+    // `this.mesh.geometry` IS `this.geometry` -- `createMesh` is handed the same object -- so the
+    // second call was always a double dispose. Now it is one call, and only from the M2 that built
+    // the buffers; see `ownsGeometry`.
+    if (this.ownsGeometry) {
+      this.geometry.dispose();
+    }
+
     this.submeshes.forEach((submesh) => {
       submesh.dispose();
     });
@@ -1146,19 +1238,17 @@ class M2 extends THREE.Group {
   }
 
   clone() {
-    let instance: any = {};
+    // ALWAYS shared, whatever `canInstance` says: buffers and the skinning table are pure functions
+    // of `data`/`skinData` and are read-only after construction. See `ownsGeometry`.
+    const instance: any = {
+      geometry: this.geometry,
+      submeshGeometries: this.submeshGeometries,
+      submeshSkinning: this.submeshSkinning,
+    };
 
+    // Materials only when the model is instanceable. See the constructor's split.
     if (this.canInstance) {
-      instance.geometry = this.geometry;
-      instance.submeshGeometries = this.submeshGeometries;
       instance.batches = this.batches;
-      // Read-only after construction and derived only from the shared `data`/`skinData`, so it is
-      // safe to share. NOT a whole-model triangle walk saved, as this used to claim: reaching here
-      // means `canInstance`, which means no animated bone, which means the table is all-static and
-      // was built without walking a single triangle. See the constructor.
-      instance.submeshSkinning = this.submeshSkinning;
-    } else {
-      instance = null;
     }
     collisionWorld.doodads.remove(this.boundingMesh);
     // `this.modelAnim` goes to every clone, instanceable or not -- see the constructor's doc for

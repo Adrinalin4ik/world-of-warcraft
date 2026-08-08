@@ -1,9 +1,15 @@
 import gameSettings from '../../settings';
 import { collisionWorld } from '../../collision/collision-world';
-import { traceStage } from '../../perf/frame-trace';
+import { frameTrace, traceStage } from '../../perf/frame-trace';
 import WorkerPool from '../worker/pool';
 import { externalAnims } from './anim/external-anim-binder';
 import M2 from './';
+
+/** Chrome's `performance.memory.usedJSHeapSize` in MB, or NaN where the extension is absent. */
+function heapUsedMB() {
+  const mem = performance.memory;
+  return mem ? mem.usedJSHeapSize / 1048576 : NaN;
+}
 
 class M2Blueprint {
 
@@ -69,7 +75,19 @@ class M2Blueprint {
       // source's geometry and batches and the clone is nearly free; a character/creature model that
       // animates does not, and rebuilds its own batches and materials here. Splitting the two marks
       // is what distinguishes "the first of a kind is expensive" from "every one of them is".
-      return traceStage('m2.clone', path, () => m2.clone());
+      const heapBefore = heapUsedMB();
+      const clone = traceStage('m2.clone', path, () => m2.clone());
+
+      // The RETAINED heap step across one clone, in MB, recorded through the mark's `ms` slot (see
+      // `frameTrace.mark`). It is the other half of the clone-versus-GC question: a clone whose cost
+      // is real work leaves a step roughly proportional to what it built, while a clone that merely
+      // hosted a collection can come out FLAT OR NEGATIVE despite having taken hundreds of ms.
+      // `performance.memory` is Chrome-only and quantised; it is read only while the trace is on.
+      if (frameTrace.enabled) {
+        frameTrace.mark('m2.clone.heapMB', heapUsedMB() - heapBefore, path);
+      }
+
+      return clone;
     });
   }
 
