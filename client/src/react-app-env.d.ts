@@ -40,7 +40,14 @@ declare module 'byte-buffer' {
     readUnsignedInt(order?):number;
     readFloat(order?):number;
     readDouble(order?):number;
-    readCString(order?):number;
+    // A STRING, not a number. This was declared `number`, which is what the implementation returns
+    // for `writeCString` (a byte count) and never for the read: `byte-buffer.js:371-390` walks to the
+    // NUL and returns `this.readString(length)`. The wrong declaration is invisible until something
+    // assigns the result somewhere typed -- the first caller to do so was
+    // `network/game/object/combat.ts`'s creature-query name, and it failed to compile rather than
+    // quietly stringifying, which is the good outcome.
+    readCString(): string;
+    readString(length?: number): string;
     writeByte(number: number):number;
     writeUnsignedByte(number: number):number;
     writeUnsignedByte(number: number):number;

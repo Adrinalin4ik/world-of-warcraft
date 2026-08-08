@@ -9,6 +9,7 @@ import { getUpdateFieldName, ObjectType, UpdateFlags, UpdateType } from '../enum
 import { readMovementInfo } from '../../movement-info';
 import { GUID_BYTES, guidHex } from '../../../guid-hex';
 import { objectTrace } from './trace';
+import { applyUnitFields, isDead } from './unit-fields';
 
 /**
  * One reusable 4-byte window for reinterpreting a float update field's raw bits.
@@ -111,8 +112,16 @@ export class UpdateObjectHandler extends EventEmitter {
         pack.updateType = packet.readByte();
         switch(pack.updateType) {
           case UpdateType.Values:
+            // A VALUES-ONLY update carries no object type of its own -- only the create block does.
+            // An update-mask index means a DIFFERENT field for each type
+            // (`enums.ts#getUpdateFieldName`), so decoding one of these without the type produced an
+            // object keyed by bare NUMBERS, which is why nothing could ever read a health change.
+            // The type is taken from the unit the create block already registered; a values block
+            // for a guid we have never seen is undecodable by construction and stays numeric.
             pack.guid = packet.readPackedGUID();
-            pack.newObject = this.parseUpdateValues(packet);
+            pack.objType = this.game.world.entities.get(pack.guid)?.objectType;
+            pack.newObject = this.parseUpdateValues(packet, pack.objType);
+            this.applyValues(pack);
             break;
           case UpdateType.Movement:
             // A movement-only update: no values block, just a new `MovementInfo` for an object we
@@ -201,6 +210,34 @@ export class UpdateObjectHandler extends EventEmitter {
   }
 
   /**
+   * `UpdateType.Values`: the descriptor fields of an object we already have.
+   *
+   * THIS IS WHERE A UNIT DIES, LOSES HEALTH OR SPENDS MANA. It is the door every unit-frame number
+   * comes through after first sight, and it did not exist: `handleUpdateObjectPacket` parsed the
+   * block into `pack.newObject` and dropped the object on the floor.
+   *
+   * Only announces when something actually changed -- see `applyUnitFields`' return value for why
+   * that matters to the frame budget.
+   */
+  applyValues(pack: any) {
+    const unit = this.game.world.entities.get(pack.guid);
+    if (!unit || pack.objType === undefined) {
+      return;
+    }
+    if (pack.objType !== ObjectType.Unit && pack.objType !== ObjectType.Player) {
+      // Items, game objects and corpses have descriptor fields too; none of them is a unit and none
+      // has a `fields` bag to write. Decoding them costs nothing and reading them would be a lie.
+      return;
+    }
+    if (applyUnitFields(unit, pack.newObject, pack.objType, false)) {
+      // DEATH, and this is the only place it can be seen. `isDead` is health 0 against a real max;
+      // `setDead` is edge-triggered so a corpse's continuing updates do not restart the fall.
+      unit.setDead(isDead(unit));
+      this.game.world.emit('unit:fields', unit);
+    }
+  }
+
+  /**
    * `UpdateType.Movement`: a position for an object that already exists. Interpolated exactly like a
    * `MSG_MOVE_*` relay -- it is the same `MovementInfo`, arriving through the update stream instead
    * of as its own message -- except for the spline tail, which is a whole path and takes over.
@@ -241,6 +278,25 @@ export class UpdateObjectHandler extends EventEmitter {
       existing,
       visible: unit.view.visible,
     });
+
+    // THE DESCRIPTOR FIELDS, at last -- see `unit-fields.ts` for every offset and its citation.
+    //
+    // Before the appearance work below, not after: `setCharacterLook` awaits a model load, and a
+    // create block whose fields were applied only after that await left the unit with no level, no
+    // health and no faction for however long the M2 took. The fields are also what the selection
+    // path and the death check read, and both can fire while a model is still streaming.
+    //
+    // The TYPE is remembered on the unit here and nowhere else; every later values-only update is
+    // decoded against it (`applyValues`).
+    unit.objectType = pack.obj_type;
+    if (pack.obj_type === ObjectType.Unit || pack.obj_type === ObjectType.Player) {
+      if (applyUnitFields(unit, pack.newObject, pack.obj_type, true)) {
+        // A unit can stream into view ALREADY DEAD -- a corpse that has not decayed yet. Same edge
+        // check as the values path; the one-shot plays once and the ownership latch holds the pose.
+        unit.setDead(isDead(unit));
+        this.game.world.emit('unit:fields', unit);
+      }
+    }
 
     // OUR OWN CHARACTER, and this branch is the second half of killing the duplicate.
     //

@@ -44,6 +44,9 @@ import {
 } from "../ui/scene/character-look";
 import { resolveNpcLook } from "../ui/scene/npc-look";
 import Entity from "./entity";
+// TYPE-ONLY, and deliberately: `unit-fields.ts` imports `Unit` back for its own signatures, so a
+// value import either way round would be a runtime cycle. `import type` is erased entirely.
+import type { UnitFieldUpdate } from "../../network/game/object/update-object/unit-fields";
 
 enum SlopeType {
   sliding,
@@ -227,6 +230,65 @@ class Unit extends Entity {
   public mana: number = 0;
 
   public isPlayer: boolean = false;
+
+  /**
+   * THE UNIT DESCRIPTOR FIELDS the wire actually sent, as sent.
+   *
+   * A bag rather than a widening of the four scalars above, for two reasons. Partial updates are the
+   * normal case -- a values-only packet carries only what changed -- so "absent" and "zero" must stay
+   * distinguishable, and `undefined` is the only honest spelling of absent. And a unit frame needs
+   * seven of these together; a caller holding one object cannot read a half-written set.
+   *
+   * Written ONLY by `network/game/object/update-object/unit-fields.ts#applyUnitFields`, which is also
+   * where every offset is cited. The four scalars above are mirrored from it for the callers that
+   * predate it.
+   */
+  public fields: UnitFieldUpdate = {};
+
+  /**
+   * `ObjectType` from the create block (3 Unit, 4 Player, ...).
+   *
+   * Kept because a VALUES-ONLY update carries no type of its own, and an update mask index means a
+   * different field for each type (`enums.ts#getUpdateFieldName`). Without remembering it, every
+   * post-create field would have to be decoded against a guess.
+   */
+  public objectType: number = 3;
+
+  /**
+   * `SMSG_CREATURE_QUERY_RESPONSE.rank`, mapped by `lua/api/units.ts#classificationWord`.
+   *
+   * NOT a descriptor field -- there is no `UNIT_FIELD_CLASSIFICATION`. It arrives only in the
+   * creature query reply, which is why a freshly-seen creature is `normal` until the reply lands.
+   */
+  public classification: string = 'normal';
+
+  /**
+   * The client's 1..8 reaction scale toward the local player, or null while unknown.
+   *
+   * Derived from `unit_field_factiontemplate` through `FactionTemplate.dbc`
+   * (`game/world/faction.ts`), which is an async DBC load -- hence nullable rather than defaulted to
+   * neutral, so "not resolved yet" and "genuinely neutral" stay different.
+   */
+  public reaction: number | null = null;
+
+  /**
+   * In melee auto-attack, from the `SMSG_ATTACKSTART` .. `SMSG_ATTACKSTOP` bracket
+   * (`network/game/object/combat.ts`). NOT a descriptor field -- the attack edges are packets.
+   */
+  public inCombat: boolean = false;
+
+  /** Who this unit is swinging at, as a guid, while `inCombat`. */
+  public combatTarget: string | null = null;
+
+  /**
+   * The equipped weapon ENTRY ids the swing clip is picked from -- see `combat-anim.ts` for the two
+   * different descriptor fields these come out of and why a creature's and a player's differ.
+   */
+  public equippedMainhand: number = 0;
+  public equippedOffhand: number = 0;
+
+  /** Whether the death one-shot is armed. Written only by `setDead`, which is edge-triggered. */
+  public dead: boolean = false;
 
   /**
    * This unit's animation comes off the wire, so LOCOMOTION MUST NOT RUN FOR IT.
@@ -1079,6 +1141,41 @@ class Unit extends Entity {
     }
 
     this.startAnimation(id, repetitions);
+  }
+
+  /**
+   * The unit died, or stopped being dead.
+   *
+   * DEATH IS A DESCRIPTOR STATE, NOT A PACKET. It arrives as `UNIT_FIELD_HEALTH` reaching zero with
+   * a real max (`update-object/unit-fields.ts#isDead`, benilla `fields/unit.rs:73-75`), so this is
+   * called from the values path and from nowhere else. There is no `SMSG_UNIT_DIED`.
+   *
+   * EDGE-TRIGGERED, and that is load-bearing: a corpse keeps sending values updates, and re-arming
+   * `DEATH` on each of them would restart the fall from the top for as long as the body lay there.
+   *
+   * The arm is `setAnimation(DEATH, interrupt, 0)` -- a one-shot -- and `startAnimation`'s ownership
+   * latch then holds the body for good, because `updateLocomotion`'s release explicitly never fires
+   * for `DEATH` ("a corpse doesn't transition", `driver.rs:351`). That is what stops the corpse
+   * standing back up when the clip's window elapses, and it already existed: this method is the
+   * caller it never had.
+   *
+   * REVIVING clears the latch by hand. Nothing else can: the latch's own release refuses to drop a
+   * `DEATH` owner, so leaving it would freeze a resurrected unit in its death pose for ever.
+   */
+  setDead(dead: boolean): void {
+    if (dead === this.dead) {
+      return;
+    }
+    this.dead = dead;
+    if (dead) {
+      this.setAnimation(DEATH, true, 0);
+      return;
+    }
+    this.externalSeq = null;
+    // Nothing is armed in its place -- the next `updateLocomotion` frame picks a gait, which for a
+    // unit standing still is Stand. Arming Stand here would be the same thing one frame earlier and
+    // would take ownership of a loop, which is the permanent freeze `externalSeq` documents.
+    this.locoCandidates = null;
   }
 
   /** Arm unconditionally. `setAnimation` is the guarded entry point; this is the raw one. */

@@ -573,29 +573,64 @@ export const CorpseField = {
   corpse_end: ObjectField.object_end + 0x001e
 }
 
-const groups: Map<ObjectType, any> = new Map()
-groups.set(ObjectType.Object, ObjectField);
-groups.set(ObjectType.Item, ItemField);
-groups.set(ObjectType.Container, ContainerField);
-groups.set(ObjectType.Unit, UnitField);
-groups.set(ObjectType.Player, PlayerField);
-groups.set(ObjectType.GameObject, GameObjectField);
-groups.set(ObjectType.DynamicObject, DynamicObjectField);
-groups.set(ObjectType.Corpse, CorpseField);
+/**
+ * THE INHERITANCE CHAIN each object type's descriptor array actually is.
+ *
+ * An update mask index is only meaningful RELATIVE TO A TYPE. Every group above restarts its
+ * numbering at `ObjectField.object_end`, so index 24 is `UNIT_FIELD_HEALTH` on a unit and
+ * `ITEM_FIELD_ENCHANTMENT_1_3` on an item -- the same number, two different fields. The server's own
+ * descriptors are built by inheritance (`UpdateFields.h`: `Item : Object`, `Container : Item`,
+ * `Unit : Object`, `Player : Unit`), so the resolvable names for a type are its own group plus every
+ * group it inherits from, and NOTHING else.
+ */
+const CHAINS: Map<ObjectType, Array<Record<string, number>>> = new Map([
+  [ObjectType.Object, [ObjectField]],
+  [ObjectType.Item, [ObjectField, ItemField]],
+  [ObjectType.Container, [ObjectField, ItemField, ContainerField]],
+  [ObjectType.Unit, [ObjectField, UnitField]],
+  [ObjectType.Player, [ObjectField, UnitField, PlayerField]],
+  [ObjectType.GameObject, [ObjectField, GameObjectField]],
+  [ObjectType.DynamicObject, [ObjectField, DynamicObjectField]],
+  [ObjectType.Corpse, [ObjectField, CorpseField]],
+]);
 
-const allGroups = Object.entries(Array.from(groups.values()).reduce((obj, x) => {
-  return {...obj, ...x}
-}, {}));
-
-export const getUpdateFieldName = (index: number, type: ObjectType) => {
-  
-  const gr = groups.get(type);
-  if (gr) {
-    const result = allGroups.find(([key, value]) => index === value);
-    if (result) {
-      return result[0];
+/**
+ * index -> field name, per type, built once.
+ *
+ * THIS REPLACES A LOOKUP THAT IGNORED ITS `type` ARGUMENT. The previous implementation merged every
+ * group into one flat list and answered with the FIRST entry whose value matched, in
+ * `Object -> Item -> Container -> Unit -> Player -> ...` insertion order. `ItemField` therefore shadowed
+ * `UnitField` at every colliding index, and the collisions are exactly the fields a unit frame needs:
+ *
+ *   | index | wanted                       | answered instead                 |
+ *   | 24    | `unit_field_health`          | `item_field_enchantment_1_3`     |
+ *   | 25    | `unit_field_power1`          | `item_field_enchantment_2_1`     |
+ *   | 54    | `unit_field_level`           | `item_field_enchantment_11_3`    |
+ *   | 55    | `unit_field_factiontemplate` | `item_field_enchantment_12_1`    |
+ *   | 59    | `unit_field_flags`           | `item_field_random_properties_id`|
+ *
+ * (Computed from this file's own tables; `parseUpdateValues` keys its result object by the returned
+ * name, so every one of those arrived under a name nothing would ever read.) `unit_field_displayid`
+ * (67), `unit_field_maxhealth` (32), `unit_field_bytes_0` (23), `unit_dynamic_flags` (79) and
+ * `object_field_scale_x` (4) happened NOT to collide, which is why creature display and scale worked
+ * and made the decoder look sound.
+ *
+ * An unknown index still answers the NUMBER, which is what the old code did and what
+ * `parseUpdateValues` relies on to keep an unmodelled field addressable.
+ */
+const NAMES_BY_TYPE = new Map<ObjectType, Map<number, string>>();
+for (const [type, chain] of CHAINS) {
+  const byIndex = new Map<number, string>();
+  for (const group of chain) {
+    for (const [name, index] of Object.entries(group)) {
+      // Later groups in the chain win, which is right: a `*_end` marker from the parent group and a
+      // real field of the child share an index, and the child's name is the meaningful one.
+      byIndex.set(index, name);
     }
   }
+  NAMES_BY_TYPE.set(type, byIndex);
+}
 
-  return index;
+export const getUpdateFieldName = (index: number, type: ObjectType): string | number => {
+  return NAMES_BY_TYPE.get(type)?.get(index) ?? index;
 }
