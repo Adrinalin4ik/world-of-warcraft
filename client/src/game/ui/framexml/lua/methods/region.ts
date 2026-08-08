@@ -224,6 +224,22 @@ const REGION: MethodTable = {
   // The widget's OWN flag, not the ancestor chain -- `IsVisible` below is the one that walks up.
   IsShown: (ctx, self) => [widgetOf(ctx, self).shown],
   IsVisible: (ctx, self) => [widgetOf(ctx, self).visible],
+  /**
+   * `IsMouseOver()` -- answered from the INPUT ROUTER's hit, not from a rect test.
+   *
+   * `Widget#hovered` is what `GlueInput` sets on the single topmost widget the pointer is over
+   * (`ui/input.ts#onPointerMove`), which is what the callers in this manifest mean: every one of them
+   * is inside an `OnMouseUp`/`OnEnter` on the frame itself, deciding whether the release landed on
+   * the button -- `MainMenuBarMicroButtons.xml:CharacterMicroButton`'s `OnMouseUp` is the one that
+   * found this method missing, and its whole body is guarded on it.
+   *
+   * It is NOT identical to the engine's, and the difference is worth stating: the engine tests the
+   * cursor against this frame's rect whether or not another frame is on top and whether or not this
+   * frame takes the mouse, so a frame UNDER the pointer but beneath another one answers true there
+   * and false here. Closing that gap needs a rect the frame keeps outside the draw list, which it
+   * does not have.
+   */
+  IsMouseOver: (ctx, self) => [widgetOf(ctx, self).hovered],
   GetName: (ctx, self) => [ctx.registry.nameOf(self)],
   GetParent: (ctx, self) => {
     const parent = ctx.registry.parentOf(self);
