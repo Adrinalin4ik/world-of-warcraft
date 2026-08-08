@@ -7,9 +7,26 @@
  */
 import { DrawItem, Widget } from './widget';
 
+/**
+ * The rect this item is CLICKABLE in: the drawn rect shrunk by `SetHitRectInsets`.
+ *
+ * Positive insets shrink, negative grow -- and `top`/`bottom` are in the same screen-down sense as
+ * `Rect`, so `top` moves the upper edge DOWN. Zero on every side (the default, and every widget built
+ * before the field existed) leaves the rect exactly as drawn.
+ *
+ * `TargetFrame_OnLoad`'s `SetHitRectInsets(20, 35, 10, 25)` is the reason this is not cosmetic: the
+ * target frame's art is a portrait plate much wider than the unit frame proper, and without the inset
+ * the clickable area covers a strip of screen the player expects to click THROUGH.
+ */
 function contains(item: DrawItem, x: number, y: number): boolean {
   const { left, top, width, height } = item.rect;
-  return x >= left && x < left + width && y >= top && y < top + height;
+  const insets = item.widget.hitRectInsets;
+  return (
+    x >= left + insets.left &&
+    x < left + width - insets.right &&
+    y >= top + insets.top &&
+    y < top + height - insets.bottom
+  );
 }
 
 /**

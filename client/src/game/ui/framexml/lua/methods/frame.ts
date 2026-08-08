@@ -12,6 +12,7 @@
  * worth the confusion of two tasks touching the same name for different reasons.
  */
 import { MethodTable, onFrameTeardown, registerMethods } from '../object';
+import { invokeScriptHandler } from '../scripts';
 import { NO_TINT } from '../../../backdrop';
 import type { BackdropTint, Insets } from '../../../backdrop';
 import { Layer } from '../../../widget';
@@ -27,6 +28,17 @@ import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
 const frameIds = new Map<number, number>();
 
 /**
+ * `SetAttribute`/`GetAttribute` storage, per frame, keyed by LOWER-CASED attribute name.
+ *
+ * A side table for the same reason `frameIds` is one: an attribute is a pure Lua-surface concept with
+ * no rendering or layout meaning, so it does not belong on `Widget`.
+ */
+const frameAttributes = new Map<number, Map<string, unknown>>();
+
+/** `RegisterForDrag`'s button set, per frame. See the method for why it is stored but not acted on. */
+const dragButtons = new Map<number, string[]>();
+
+/**
  * The `(r, g, b [, a])` argument list the two backdrop-colour setters share. Non-numeric arguments
  * fall back to the untinted channel rather than to `NaN`, which would blank the piece entirely.
  */
@@ -38,6 +50,8 @@ function tintOf(args: unknown[]): BackdropTint {
 /** A released frame takes its numeric tag with it -- see `object.ts`'s `FRAME_TEARDOWN`. */
 onFrameTeardown((_ctx, id) => {
   frameIds.delete(id);
+  frameAttributes.delete(id);
+  dragButtons.delete(id);
 });
 
 const FRAME: MethodTable = {
@@ -93,6 +107,114 @@ const FRAME: MethodTable = {
 
   EnableMouse: (ctx, self, args) => {
     widgetOf(ctx, self).mouseEnabled = Boolean(args[0]);
+    return [];
+  },
+
+  /**
+   * `SetHitRectInsets(left, right, top, bottom)` -- shrink (positive) or grow (negative) the rect the
+   * frame is CLICKABLE in, without moving the rect it DRAWS in.
+   *
+   * Real, not a stub, and the reason is that it is load-bearing on the very first frame of the
+   * in-world UI: `TargetFrame_OnLoad` calls `self:SetHitRectInsets(20, 35, 10, 25)`
+   * (`Interface\FrameXML\TargetFrame.xml`, `<OnLoad>`), and with the method missing that `OnLoad`
+   * RAISES and takes the rest of the handler -- the unit-frame registration, the border art -- with
+   * it. It was one of only two errors `TargetFrame.xml` produced in the FrameXML load survey.
+   *
+   * Stored on the widget rather than applied to `width`/`height`: the two rects are genuinely
+   * different, and folding the insets into the layout rect would move the art. benilla keeps the same
+   * split (`crates/benilla-ui/src/widget/mod.rs:236`, applied in `widget/propagation.rs:269`) and
+   * exposes it both from XML (`loader/geometry.rs:46-61`) and from Lua
+   * (`script/object/frame_state.rs:365`).
+   *
+   * NOTE the argument order: left, right, TOP, BOTTOM -- not the CSS order.
+   */
+  SetHitRectInsets: (ctx, self, args) => {
+    const side = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+    widgetOf(ctx, self).hitRectInsets = {
+      left: side(args[0]),
+      right: side(args[1]),
+      top: side(args[2]),
+      bottom: side(args[3]),
+    };
+    return [];
+  },
+  GetHitRectInsets: (ctx, self) => {
+    const insets = widgetOf(ctx, self).hitRectInsets;
+    return [insets.left, insets.right, insets.top, insets.bottom];
+  },
+
+  /**
+   * `SetAttribute(name, value)` / `GetAttribute(name)` -- the per-frame attribute table.
+   *
+   * REAL STORAGE, and the split between what this does and what it does not is the whole point.
+   *
+   * An attribute is just a named value on a frame. What makes attributes SPECIAL in 3.3.5a is the
+   * secure-handler system built on top of them: `SecureHandlers.lua` compiles restricted Lua snippets
+   * stored in attributes like `_onclick`, and the engine runs those snippets in a sandbox during
+   * combat when ordinary code is locked out. That second half is NOT here, and its absence is
+   * declared at `lua/api/secure.ts` rather than faked. Nothing in this client is combat-locked,
+   * because nothing here is protected in the first place.
+   *
+   * The storage half is what the manifest actually needs at LOAD time, and it is 87 of the load
+   * errors in the survey's TargetFrame prefix -- the largest single cause. `UIDropDownMenu.lua:42`
+   * calls `self:SetAttribute("UIDropDownMenu", true)` from `UIDropDownMenu_Initialize`, which
+   * `TargetFrame_OnLoad` reaches through its right-click unit menu; without the method that `OnLoad`
+   * raises and the target frame never finishes loading.
+   *
+   * `OnAttributeChanged(self, name, value)` fires on every set, INCLUDING one that writes the value
+   * the attribute already had -- the engine does not dedup, and `UpdateUIPanelPositions` (which
+   * `UIParent.xml` installs as an `OnAttributeChanged`) relies on being told.
+   *
+   * The name is LOWER-CASED on both set and get: the engine's attribute table is case-insensitive,
+   * and FrameXML relies on it -- `SecureButton_GetModifiedAttribute` builds names by concatenating a
+   * prefix, a button name and a suffix whose cases do not agree.
+   */
+  SetAttribute: (ctx, self, args) => {
+    const name = String(args[0] ?? '').toLowerCase();
+    if (name === '') {
+      return [];
+    }
+    let table = frameAttributes.get(self);
+    if (table === undefined) {
+      table = new Map();
+      frameAttributes.set(self, table);
+    }
+    const value = args[1] ?? null;
+    table.set(name, value);
+    // Fired AFTER the write, so a handler that reads the attribute back sees the new value.
+    invokeScriptHandler(ctx, self, 'OnAttributeChanged', [name, value]);
+    return [];
+  },
+  GetAttribute: (ctx, self, args) => {
+    const name = String(args[0] ?? '').toLowerCase();
+    const value = frameAttributes.get(self)?.get(name);
+    return value === undefined || value === null ? [] : [value];
+  },
+
+  /**
+   * `RegisterForDrag("LeftButton", ...)` -- which buttons begin a drag on this frame.
+   *
+   * Stored, not acted on, and the two halves are separated deliberately. The SET is real: it is what
+   * `if frame:GetAttribute(...)`-style introspection and any later drag router would read, and it is
+   * 11 of the prefix's load errors. The DRAG ITSELF is not implemented -- `input.ts` has no drag
+   * gesture and `widget.ts` has no movable frame -- so nothing will ever fire `OnDragStart`.
+   *
+   * Registered on FRAME rather than on BUTTON because any Frame can be a drag source in this API, not
+   * only a Button; benilla puts it on the shared frame table for the same reason
+   * (`crates/benilla-ui/src/script/object/events_regions.rs:68-82`), and replaces the whole set on
+   * each call, with an empty argument list clearing it.
+   */
+  RegisterForDrag: (_ctx, self, args) => {
+    const buttons = args.filter((arg): arg is string => typeof arg === 'string' && arg !== '');
+    if (buttons.length === 0) {
+      dragButtons.delete(self);
+    } else {
+      dragButtons.set(self, buttons);
+    }
+    warnOnce(
+      'RegisterForDrag: the registration is stored but no drag gesture exists in this input router,'
+        + ' so OnDragStart/OnDragStop never fire',
+    );
     return [];
   },
 
@@ -205,6 +327,23 @@ const FRAME: MethodTable = {
     return [ctx.wrapper(id)];
   },
 
+  /**
+   * `RaiseFrameLevel()` / `RaiseFrameLevelByTwo()` / `LowerFrameLevel()` -- relative level nudges.
+   *
+   * Real, and they are simply `SetFrameLevel` with arithmetic: the client offers them because the
+   * idiom `frame:SetFrameLevel(frame:GetFrameLevel() + 1)` is everywhere and the round trip through
+   * Lua is not free. `UIDropDownMenu.lua` and the unit-frame border code both use them, and they were
+   * 41 of the FrameXML prefix's load errors between them.
+   *
+   * Each goes through the same `restamp()`-on-change rule `SetFrameLevel` above documents, so a nudge
+   * that lands on the level the frame already had does not move it in its draw bucket. A nudge always
+   * changes the value by design, so in practice the guard never fires -- it is there so that the two
+   * paths cannot drift apart.
+   */
+  RaiseFrameLevel: (ctx, self) => nudgeLevel(ctx, self, 1),
+  RaiseFrameLevelByTwo: (ctx, self) => nudgeLevel(ctx, self, 2),
+  LowerFrameLevel: (ctx, self) => nudgeLevel(ctx, self, -1),
+
   // Our draw order has one live-list axis (`linkStamp`) rather than the client's separate "raised"
   // flag; moving to the tail of the bucket is the same visible effect `Raise()` has -- above every
   // sibling at the same strata and level that has not itself been raised or shown since.
@@ -213,6 +352,18 @@ const FRAME: MethodTable = {
     return [];
   },
 };
+
+/** The shared body of `RaiseFrameLevel`/`RaiseFrameLevelByTwo`/`LowerFrameLevel`. */
+function nudgeLevel(ctx: Parameters<MethodTable[string]>[0], self: number, delta: number): unknown[] {
+  const widget = widgetOf(ctx, self);
+  const level = widget.frameLevel + delta;
+  if (widget.frameLevel === level) {
+    return [];
+  }
+  widget.frameLevel = level;
+  widget.restamp();
+  return [];
+}
 
 function applyLayer(widget: { layer: Layer }, arg: unknown): void {
   if (typeof arg !== 'string') {

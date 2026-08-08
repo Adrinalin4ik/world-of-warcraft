@@ -67,6 +67,18 @@ import './lua/methods/frame';
 import './lua/methods/kinds';
 import './lua/methods/model';
 import './lua/methods/scroll';
+import './lua/methods/statusbar';
+// `lua/events.ts` registers `RegisterEvent`/`UnregisterEvent` on FRAME, and it was NOT in this list --
+// only `runtime.ts` pulled it in, as a side effect of importing `fireEvent`. So any load that did not
+// go through `runtime.ts` had no `RegisterEvent` at all.
+//
+// That is not hypothetical: it is what the FrameXML load survey measured before the instrument was
+// corrected. `TextStatusBar.lua:3` and `UnitFrame.lua:209` both call `self:RegisterEvent(...)` from an
+// `OnLoad`, so the miss produced 275 load errors across the manifest -- 115 of them in the 71-file
+// prefix that reaches `TargetFrame.xml`, including every health and mana bar's `OnLoad`. Importing it
+// here, beside the other method modules, is what makes "the methods are registered" a property of the
+// loader rather than of whoever happened to boot it.
+import './lua/events';
 
 /**
  * What a load produced.
@@ -1162,17 +1174,16 @@ class DocumentLoader {
       this.applyButton(element, wrapper, tag === 'checkbutton', selfName, dbg);
     } else if (tag === 'editbox') {
       this.applyEditBox(element, wrapper, dbg);
-    } else if (tag === 'statusbar' || tag === 'slider') {
-      // Divergence from the reference, stated: it maps `<StatusBar>`/`<Slider>` LoadXML
-      // (minValue/maxValue/orientation/<BarTexture>/<ThumbTexture>/...) onto a real bar and thumb.
-      // `lua/methods/scroll.ts` now gives SLIDER its VALUE methods -- which is what the client's own
-      // scroll code reads and what eleven of the manifest's load errors turned on -- but nothing in
-      // `widget.ts` draws a slider track or a status bar's fill, and STATUSBAR still has no methods at
-      // all. Emitting the calls would produce a warning per missing method per document; one line
-      // naming the whole gap is the honest version.
+    } else if (tag === 'statusbar') {
+      this.applyStatusBar(element, wrapper, dbg);
+    } else if (tag === 'slider') {
+      // Unchanged, and still a gap: `lua/methods/scroll.ts` gives SLIDER its VALUE methods -- which is
+      // what the client's own scroll code reads and what eleven of the manifest's load errors turned
+      // on -- but nothing in `widget.ts` draws a slider's track or thumb. `<StatusBar>` has moved out
+      // of this branch because its fill IS drawn now (`widget.ts#barFillRect`); a Slider's is not.
       this.warnOnce(
-        `kind:${tag}`,
-        `<${element.tag}> bar/thumb attributes are ignored: nothing in this renderer draws a ${element.tag}'s track or fill${tag === 'slider' ? ' (its value methods are real; only the art is missing)' : ', and this object model registers no StatusBar methods at all'} (first: ${dbg})`,
+        'kind:slider',
+        `<Slider> bar/thumb attributes are ignored: nothing in this renderer draws a Slider's track or fill (its value methods are real; only the art is missing) (first: ${dbg})`,
       );
     } else if (tag === 'model' || tag === 'modelffx' || tag === 'playermodel') {
       this.applyModel(element, wrapper, dbg);
@@ -1476,6 +1487,65 @@ class DocumentLoader {
       if (attrBool(element, name)) {
         this.callMethod(wrapper, method, [true], dbg);
       }
+    }
+  }
+
+  /**
+   * `<StatusBar>`: the value range, the orientation, the fill art and its tint -- all through the
+   * frame's own methods, so XML and Lua go down one path.
+   *
+   * ORDER IS LOAD-BEARING here and is not the document's order. `<BarTexture>` runs BEFORE
+   * `SetMinMaxValues`/`SetValue` because `SetStatusBarColor` tints the bar texture and
+   * `SetStatusBarTexture` (the colour overload) replaces it -- and `<BarColor>` must land on the art
+   * `<BarTexture>` named, not create a solid fill that then gets a sprite. `minValue`/`maxValue`
+   * before `defaultValue` for the obvious reason: `SetValue` clamps into the range.
+   *
+   * The `UI.xsd` `StatusBarType` surface is `minValue`, `maxValue`, `defaultValue`, `drawLayer` and
+   * `orientation` as ATTRIBUTES with `<BarTexture>` and `<BarColor>` as CHILDREN. `<BarTexture>` is a
+   * full `<Texture>` element in the schema, but the only thing this reads off it is `file` and
+   * `drawLayer`: a bar texture's own size and anchors are meaningless because the fill takes its
+   * geometry from the frame (`widget.ts#barFillRect`), which is exactly what benilla does
+   * (`crates/benilla-ui/src/extract.rs:69-81`). Anything else authored on it is dropped, and the
+   * warning below says so rather than letting it look honoured.
+   */
+  private applyStatusBar(element: XmlElement, wrapper: LuaRef, dbg: string): void {
+    const barTexture = childrenNamed(element, 'BarTexture')[0];
+    if (barTexture !== undefined) {
+      const file = attr(barTexture, 'file');
+      const layer = attr(barTexture, 'drawLayer') ?? attr(element, 'drawLayer');
+      if (file !== undefined && file !== '') {
+        this.callMethod(wrapper, 'SetStatusBarTexture', [file, layer], dbg);
+      }
+      if (childrenNamed(barTexture, 'Size').length > 0 || childrenNamed(barTexture, 'Anchors').length > 0) {
+        this.warnOnce(
+          'statusbar:bartexture-geometry',
+          `<BarTexture> declares its own <Size>/<Anchors>; both are ignored because a status bar's`
+            + ` fill takes its rect from the frame and its value (first: ${dbg})`,
+        );
+      }
+    }
+
+    const barColor = childrenNamed(element, 'BarColor')[0];
+    if (barColor !== undefined) {
+      this.callMethod(wrapper, 'SetStatusBarColor', colorOf(barColor), dbg);
+    }
+
+    const orientation = attr(element, 'orientation');
+    if (orientation !== undefined && orientation !== '') {
+      this.callMethod(wrapper, 'SetOrientation', [orientation], dbg);
+    }
+
+    // Both bounds are sent whenever EITHER is authored: `SetMinMaxValues` takes a pair, and defaulting
+    // the absent one to the widget's constructed 0..1 (rather than to 0) would make
+    // `<StatusBar maxValue="100">` a 0..1 bar that reads full at 1 hit point.
+    const minValue = num(attr(element, 'minValue'));
+    const maxValue = num(attr(element, 'maxValue'));
+    if (minValue !== undefined || maxValue !== undefined) {
+      this.callMethod(wrapper, 'SetMinMaxValues', [minValue ?? 0, maxValue ?? 0], dbg);
+    }
+    const defaultValue = num(attr(element, 'defaultValue'));
+    if (defaultValue !== undefined) {
+      this.callMethod(wrapper, 'SetValue', [defaultValue], dbg);
     }
   }
 

@@ -249,7 +249,10 @@ export class GlueRenderer {
       // sub-rect a previous frame (or an older build) left on the sheet: the map is shared, so leaving
       // a stale transform on it would shift every widget that samples the same file.
       applyTexCoords(entry.material, null);
-      writeQuadUVs(entry.geometry, item.widget.texCoords ?? resolved.texCoords ?? null);
+      // `item.texCoords` outranks the widget's own: it is the per-frame crop a StatusBar's fill needs
+      // (`widget.ts#barFillTexCoords`), which is a function of the live value and so cannot be stored
+      // on the widget. Absent on every other item, so the precedence below is unchanged for them.
+      writeQuadUVs(entry.geometry, item.texCoords ?? item.widget.texCoords ?? resolved.texCoords ?? null);
 
       const { left, top, width, height } = item.rect;
 
