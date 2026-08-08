@@ -39,6 +39,77 @@ export type WidgetKind =
 
 export type ButtonState = 'up' | 'down' | 'disabled';
 
+/**
+ * A `<StatusBar>`'s value state and the texture that draws its fill.
+ *
+ * `bar` is a child TEXTURE of the status-bar frame, created lazily by the first `SetStatusBarTexture`
+ * or by the loader's `<BarTexture>` -- benilla's `ensure_bar`
+ * (`crates/benilla-ui/src/script/statusbar.rs:59-101`). It is a real child widget rather than a field
+ * on the frame so that draw layer, vertex colour and the art table all work on it unchanged.
+ *
+ * The bar carries NO ANCHORS on purpose; see `barFillRect` for what owns its geometry instead.
+ */
+export interface StatusBarState {
+  min: number;
+  max: number;
+  value: number;
+  /** `SetOrientation("VERTICAL")`. Horizontal fills left-to-right, vertical bottom-to-top. */
+  vertical: boolean;
+  bar: Widget | null;
+}
+
+/** `0` when the range is empty, so a bar that never had `SetMinMaxValues` draws nothing rather than NaN. */
+export function statusBarFraction(sb: StatusBarState): number {
+  const span = sb.max - sb.min;
+  if (!(span > 0)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(1, (sb.value - sb.min) / span));
+}
+
+/**
+ * The bar-fill rect: the OWNING FRAME's resolved rect scaled by the value fraction -- rightward from
+ * the left edge (horizontal) or upward from the bottom (vertical).
+ *
+ * Ported from benilla `crates/benilla-ui/src/extract.rs:264-277` (`bar_fill_rect`). The bar region
+ * deliberately skips the ordinary anchor/size precedence chain and takes its geometry from the frame:
+ * that is what makes an unanchored `<BarTexture>` correct rather than a 0x0 rect.
+ */
+export function barFillRect(owner: Rect, sb: StatusBarState): Rect {
+  const f = statusBarFraction(sb);
+  if (sb.vertical) {
+    // `Rect.top` grows DOWNWARD, so "upward from the bottom" is a shrinking height with the bottom
+    // edge pinned -- i.e. the top edge slides down as the bar empties.
+    const height = owner.height * f;
+    return { left: owner.left, top: owner.top + owner.height - height, width: owner.width, height };
+  }
+  return { left: owner.left, top: owner.top, width: owner.width * f, height: owner.height };
+}
+
+/**
+ * The bar-fill UV rect. THE CLIENT CROPS THE ART, IT DOES NOT SQUEEZE IT.
+ *
+ * Ported from benilla `crates/benilla-ui/src/extract.rs:279-295` (`bar_fill_uv`), which records the
+ * client evidence: `SetValue` (`0x7cc450` -> `0x7833c0`) drives `0x770410`, which rewrites the
+ * four-corner UV block (`+0x104..+0x120`) so that `right = left + frac * width`.
+ *
+ * This is not a refinement. `Interface\TargetingFrame\UI-StatusBar` is a left-to-right ramp; a naive
+ * port that merely shrinks the quad and keeps `0..1` UVs squeezes the whole ramp into the filled part
+ * and the bar visibly changes colour as it drains.
+ */
+export function barFillTexCoords(base: TexCoords | null, sb: StatusBarState): TexCoords {
+  const u0 = base?.u0 ?? 0;
+  const u1 = base?.u1 ?? 1;
+  const v0 = base?.v0 ?? 0;
+  const v1 = base?.v1 ?? 1;
+  const f = statusBarFraction(sb);
+  if (sb.vertical) {
+    // `v1` is the BOTTOM edge (see `TexCoords`), so a vertical bar grows from `v1` toward `v0`.
+    return { u0, u1, v0: v1 - (v1 - v0) * f, v1 };
+  }
+  return { u0, u1: u0 + (u1 - u0) * f, v0, v1 };
+}
+
 export interface FontSpec {
   /** A font family registered by `text.ts` -- e.g. 'FRIZQT', 'MORPHEUS', 'SKURRI'. */
   family: string;
@@ -125,6 +196,15 @@ export class Widget {
    * own `SetLighting` drive the 3D scene without a notification channel through the object model.
    */
   modelRig: ModelRig | null = null;
+  /**
+   * A `<StatusBar>`'s value state, for the `STATUSBAR` Lua class.
+   *
+   * Lazily created by the first `SetMinMaxValues`/`SetValue`/`SetStatusBarTexture` the frame receives
+   * (`framexml/lua/methods/statusbar.ts`), so an ordinary Frame keeps it null -- the same rule
+   * `modelRig` above follows, and for the same reason: a per-widget slot the DRAW pass reads
+   * (`drawList` below) rather than a side table the renderer could not see.
+   */
+  statusBar: StatusBarState | null = null;
   blend: Blend = 'ALPHA';
   /** Multiplied into the sprite, as `#rrggbb`. */
   vertexColor = '#ffffff';
@@ -148,6 +228,15 @@ export class Widget {
    * `SetTextInsets` has to be able to re-apply, and because the caret needs the same rect.
    */
   textInsets: Insets = { left: 0, right: 0, top: 0, bottom: 0 };
+  /**
+   * `SetHitRectInsets` -- the rect this frame is CLICKABLE in, as an inset from the rect it draws in.
+   * Positive shrinks, negative grows. Zero on every side (the default) means the two rects are the
+   * same, which is what every widget built before this field existed assumed.
+   *
+   * Read by `hit.ts#hitTest`, never by the renderer: the whole point is that the clickable rect and
+   * the drawn rect differ.
+   */
+  hitRectInsets: Insets = { left: 0, right: 0, top: 0, bottom: 0 };
   /**
    * The FontString an EditBox draws its typed text in -- the client's engine-owned "special" font
    * string, which FrameXML declares as an unnamed, unanchored direct `<FontString>` child of the box
@@ -374,6 +463,14 @@ export interface DrawItem {
   rect: Rect;
   /** The widget's alpha multiplied down the ancestor chain. */
   alpha: number;
+  /**
+   * A texture sub-rect that OVERRIDES `widget.texCoords` for this frame only.
+   *
+   * Set for exactly one thing today: a StatusBar's bar-fill region, whose UVs are a function of the
+   * bar's live value and so cannot be stored on the widget without writing to it every frame. See
+   * `barFillTexCoords`.
+   */
+  texCoords?: TexCoords;
 }
 
 /**
@@ -446,10 +543,30 @@ export class WidgetRoot {
 
     return flat
       .sort((a, b) => compareOrder(orderKey(a), orderKey(b)))
-      .map((entry) => ({
-        widget: entry.widget,
-        rect: rects.get(entry.widget.id)!,
-        alpha: entry.alpha,
-      }));
+      .map((entry) => {
+        // THE STATUS-BAR FILL, and the one place the anchor solver is deliberately overruled.
+        //
+        // A `<BarTexture>` is authored with no anchors and no size -- the engine gives it the frame's
+        // rect cropped to the value. Resolving it through `resolveAnchors` like any other region
+        // would give it a 0x0 rect at its parent's centre, so the bar would simply not exist. Benilla
+        // does exactly this override, and states the reason: "the bar region carries no anchors and
+        // deliberately skips the whole region-rect precedence chain -- it owns its geometry off the
+        // frame's resolved rect" (`crates/benilla-ui/src/extract.rs:69-81`).
+        const owner = entry.widget.parent;
+        const sb = owner?.statusBar ?? null;
+        if (sb !== null && sb.bar === entry.widget) {
+          return {
+            widget: entry.widget,
+            rect: barFillRect(rects.get(owner!.id)!, sb),
+            alpha: entry.alpha,
+            texCoords: barFillTexCoords(entry.widget.texCoords, sb),
+          };
+        }
+        return {
+          widget: entry.widget,
+          rect: rects.get(entry.widget.id)!,
+          alpha: entry.alpha,
+        };
+      });
   }
 }
