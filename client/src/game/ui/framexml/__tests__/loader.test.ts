@@ -360,3 +360,40 @@ describe('loadDocument', () => {
     vm.dispose();
   });
 });
+
+describe('the parent= attribute', () => {
+  it('builds a top-level frame under the frame it names, so the owner\'s Hide() reaches it', () => {
+    const { vm, root, registry, rt } = runtime();
+
+    // The shape `paperdollframe.xml:229` has: an OWNER declared `hidden="true"`
+    // (`characterframe.xml:4`) and a separate top-level frame claiming it as its parent. Before
+    // `parent=` was honoured the second was built at the document root, so it drew over the world
+    // although nobody had opened the character sheet.
+    const report = loadDocument(
+      rt,
+      parseXml(`
+        <Ui>
+          <Frame name="CharacterFrame" hidden="true">
+            <Size><AbsDimension x="384" y="512"/></Size>
+            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+          </Frame>
+          <Frame name="PaperDollFrame" setAllPoints="true" parent="CharacterFrame"/>
+        </Ui>
+      `),
+      noFiles,
+      'CharacterFrame.xml',
+    );
+
+    expect(report.errors).toEqual([]);
+    const owner = registry.widget(registry.byName('CharacterFrame')!)!;
+    const child = registry.widget(registry.byName('PaperDollFrame')!)!;
+    expect(child.parent).toBe(owner);
+    // `visible` walks the shown chain, which is what the draw list uses.
+    expect(child.visible).toBe(false);
+    // ...and `setAllPoints` now pins it to the owner's rect rather than the whole screen.
+    expect(root.drawList(VIEWPORT).some((item) => item.widget === child)).toBe(false);
+
+    registry.reset();
+    vm.dispose();
+  });
+});

@@ -14,6 +14,7 @@ import DebugPanel from './debug/debug';
 import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
 import { animCounters } from '../../game/pipeline/m2/anim/counters';
 import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-warm';
+import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
 import './index.scss';
 
 interface IGameProps {
@@ -73,6 +74,16 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   };
 
   private isMobile: boolean = false;
+
+  /**
+   * The world's UI host -- the client's own FrameXML, drawn over the 3D pass.
+   *
+   * Null on plain `/game`, which keeps the world exactly as it was: `?ui=lua` is the same switch
+   * `pages/glue/index.tsx` gates the Lua glue screens behind, and the world half of it had no
+   * consumer until this round. Gating it matters more here than there -- the manifest is 139 entries
+   * against the glue's 17, and every measurement in this repo's perf record was taken without it.
+   */
+  private ui: WorldUiHost | null = null;
 
   public depthPass: DepthPass;
 
@@ -193,6 +204,23 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
 
     this.game.world.run();
 
+    // THE UI HOST. Started here rather than in the constructor because it needs the renderer and the
+    // canvas, and both exist only from this point. Fire-and-forget: the boot fetches 264 files and
+    // runs them, tens of seconds on a cold cache, and `render(dt)` is a no-op until it lands -- so
+    // awaiting it would be awaiting it in the frame loop.
+    if (wantsLuaUi(window.location.search)) {
+      this.ui = new WorldUiHost(
+        renderer,
+        this.canvas.current as HTMLCanvasElement,
+        this.perf.sections,
+      );
+      void this.ui.start().catch((error) => {
+        // A boot that fails outright is the one thing `bootWorldRuntime` does not turn into a report
+        // line, so it must not vanish into an unhandled rejection.
+        console.error('framexml(world): the runtime failed to boot', error);
+      });
+    }
+
     // Offline debug entry: nothing will ever send us a login-verify, so place the character now.
     if (this.props.session.offline) {
       const spot = offlineSpot();
@@ -220,6 +248,10 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // goes away. `program-warm.ts` documents this as the reason a null warmer flushes the queue;
     // this is the caller it was written for.
     setProgramWarmer(null);
+    // Before the renderer goes: the host holds pooled meshes, geometries and materials made against
+    // it, and its own `dispose` deliberately does NOT free the renderer it was merely lent.
+    this.ui?.dispose();
+    this.ui = null;
     this.game.world.scene.remove(this.cameraHelper);
     this.stats.dom.parentNode?.removeChild(this.stats.dom);
     this.renderer?.dispose();
@@ -318,6 +350,19 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.renderer.render(this.game.world.scene, this.camera);
     this.perf.gpuEnd();
     this.perf.sections.end('render');
+
+    // THE UI PASS, over the world and into the same buffer. See `game/ui/world-ui.ts` for why it is
+    // after the world render and not before: the world pass clears (it sets the clear colour from
+    // the map's fog every frame above), so a UI pass in front of it would be erased.
+    //
+    // Spanned as its own row because a per-frame pass over 4211 frames is exactly the shape of thing
+    // that eats a 16.7 ms budget, and the only honest way to say what the interface costs is to
+    // measure it separately from `render`. NOT inside the `gpuBegin`/`gpuEnd` pair: that query wraps
+    // the world draw, and reopening it would attribute one span's GPU time to the other. So this row
+    // is CPU only -- the quads it issues show up in `render.calls`, not here.
+    this.perf.sections.begin('ui.framexml');
+    this.ui?.render(delta);
+    this.perf.sections.end('ui.framexml');
 
       if (this.debugRenderer) {
         this.debugCamera.position.set(this.camera.position.x,

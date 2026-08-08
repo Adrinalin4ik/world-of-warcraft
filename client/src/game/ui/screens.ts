@@ -18,6 +18,7 @@ import { clientStateForStage } from './screens/login-state';
 import { installFramexmlDebug } from './framexml/debug';
 import { GlueInput } from './input';
 import { GlueRenderer, ResolvedSprite } from './renderer';
+import { resolveSprite } from './sprite';
 import { resolveCharacterLook } from './scene/character-look';
 import { clearCompositeCache } from './scene/body-composite';
 import { GlueSceneView } from './scene/glue-scene';
@@ -432,50 +433,15 @@ export class GlueApp {
     return this.solidTexture;
   }
 
-  /** A widget's texture: a font string rasterizes, everything else comes from the art table. */
+  /**
+   * A widget's texture. THE RULES ARE `ui/sprite.ts`'s, shared with the world UI host -- this is the
+   * binding of them to this app's own art table, font cache and caret texel.
+   */
   private resolveSprite(item: DrawItem, scale: number): ResolvedSprite | null {
-    const widget = item.widget;
-
-    if (widget.kind === 'fontstring') {
-      // `displayText`, not `text`: password masking (`Widget#displayText`) lives here, at the one
-      // place a fontstring's content actually turns into glyphs.
-      return widget.font ? this.fonts.get(widget.displayText, widget.font, scale) : null;
-    }
-
-    // A flat colour quad -- the caret. `vertexColor` does the colouring; the texel is just a carrier.
-    if (widget.solid) {
-      return { texture: this.solid() };
-    }
-
-    // A `Backdrop` carries two sheets and is drawn as nine pieces by the renderer, so it resolves
-    // both rather than one `sprite`.
-    //
-    // Keyed off the DEF, never off `kind`. In FrameXML a `Backdrop` is a PROPERTY of a frame, and a
-    // frame of any type may carry one -- the login screen's are on three `EditBox`es and one `Frame`.
-    // Gating this on `kind === 'backdrop'` meant all three edit boxes (kind `editbox`, carrying a
-    // Backdrop) fell through to the sprite path, where their `sprite` is null, so this returned null
-    // and the renderer skipped the widget: no border on screen and no warning anywhere, because
-    // nothing had failed to load. The `backdrop` WidgetKind is only "a frame that is nothing BUT its
-    // Backdrop" (the dialog); it is not what selects this path.
-    if (widget.backdrop) {
-      const def = widget.backdrop;
-      const background = def.bgSprite ? this.art.texture(def.bgSprite) : null;
-      const edge = def.edgeSprite ? this.art.texture(def.edgeSprite) : null;
-      if (!background && !edge) {
-        return null;
-      }
-      return { backdrop: { background, edge } };
-    }
-
-    const texture = widget.sprite ? this.art.texture(widget.sprite) : null;
-    if (!texture) {
-      return null;
-    }
-
-    // The sub-rect travels with the SPRITE, not the widget: `GlueButtonTemplateBlue` names one
-    // region of `Glue-Panel-Button-Up-Blue` for every button that inherits it, so the art table is
-    // where it belongs. Without this the whole 256x64 sheet stretched into the widget's rect and
-    // every glue button drew as a thin bar of blue with two thirds of the quad empty.
-    return { texture, texCoords: this.art.def(widget.sprite as string)?.texCoords ?? null };
+    return resolveSprite(item, scale, {
+      art: this.art,
+      fonts: this.fonts,
+      solid: () => this.solid(),
+    });
   }
 }

@@ -487,10 +487,56 @@ class DocumentLoader {
     parentName: string,
     sourceName: string,
   ): number | null {
-    // 1 - CreateFrame(type, resolvedName, parent), through the Lua global.
-    const resolvedName = resolveName(attr(element, 'name'), parentName);
+    // `parent="Name"` -- the LoadXML attribute that says whose child a DOCUMENT-TOP-LEVEL frame is.
+    //
+    // It was ignored, and that was the single biggest visual defect in the world: every frame
+    // declared at the top of its file with `parent="UIParent"` or `parent="CharacterFrame"` was built
+    // under the document root instead, so it inherited neither its owner's SHOWN state nor its rect.
+    // MEASURED (`W9-census.txt`, `/game?offline=1&ui=lua`): `PaperDollFrame`
+    // (`paperdollframe.xml:229`, `parent="CharacterFrame"`) drew over the world although
+    // `CharacterFrame` carries `hidden="true"` (`characterframe.xml:4`), and so did the whole of
+    // `VideoOptionsFrame` and `AudioOptionsFrame`, which inherit `hidden="true"` from
+    // `OptionsFrameTemplate` (`optionsframetemplates.xml:333`). 752 draw items, of which several
+    // hundred were panels the player had not opened.
+    //
+    // Resolved through the Lua GLOBAL of that name, because that is exactly what the attribute means:
+    // a named frame is a global, and the engine looks it up the same way. An unresolvable name is a
+    // report line and the frame stays at the root -- a document that names a parent declared later in
+    // the manifest is a real possibility and must not be silently reparented to nothing.
+    //
+    // TOP LEVEL ONLY (`parent === null`). A `parent=` on a NESTED element also has meaning in the
+    // engine -- it is how a dropdown list escapes its owner -- and is deliberately still ignored
+    // here, because a nested element's `$parent` name resolution and its `<Anchors>` are written
+    // against the element it is nested in, and moving both at once is a second change with its own
+    // failure mode. Declared, not forgotten.
+    let effectiveParent = parent;
+    let effectiveParentName = parentName;
+    let borrowedParent: LuaRef | null = null;
+    const declaredParent = parent === null ? attr(element, 'parent') : undefined;
+    if (declaredParent !== undefined && declaredParent !== '') {
+      const global = this.rt.vm.getGlobal(declaredParent);
+      if (this.rt.vm.isRef(global)) {
+        borrowedParent = global;
+        effectiveParent = global;
+        effectiveParentName = declaredParent;
+      } else {
+        this.report.warnings.push(
+          `${sourceName}:${attr(element, 'name') ?? `<${element.tag}>`}: ` +
+            `parent="${declaredParent}" names no frame yet; built at the root instead`,
+        );
+      }
+    }
+
+    // 1 - CreateFrame(type, resolvedName, parent), through the Lua global. AFTER the parent is
+    // settled, because `$parent` in this frame's own name substitutes against it.
+    const resolvedName = resolveName(attr(element, 'name'), effectiveParentName);
     const dbg = `${sourceName}:${resolvedName ?? `<${element.tag}>`}`;
-    const wrapper = this.create(element.tag, resolvedName ?? null, parent, dbg);
+    const wrapper = this.create(element.tag, resolvedName ?? null, effectiveParent, dbg);
+    if (borrowedParent !== null) {
+      // The handle is only needed for the `CreateFrame` call: the registry owns the parent frame and
+      // its permanent Lua table, and this was a `getGlobal` result.
+      this.rt.vm.unref(borrowedParent);
+    }
     if (wrapper === null) {
       return null;
     }
@@ -502,10 +548,10 @@ class DocumentLoader {
 
     // An unnamed frame passes the nearest named ancestor through unchanged, so a region inside it
     // still resolves `$parent` to something addressable.
-    const selfName = resolvedName ?? parentName;
+    const selfName = resolvedName ?? effectiveParentName;
 
     try {
-      this.decorate(element, wrapper, parentName, selfName, sourceName, dbg);
+      this.decorate(element, wrapper, effectiveParentName, selfName, sourceName, dbg);
     } finally {
       // The wrapper handle lives exactly as long as this frame's own subtree build. The frame itself
       // and its permanent Lua table are owned by `FrameRegistry`; this was a call-result handle.

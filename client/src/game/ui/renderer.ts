@@ -51,7 +51,42 @@ type Pooled = {
   mesh: THREE.Mesh;
   material: THREE.MeshBasicMaterial;
   geometry: THREE.BufferGeometry;
+  /**
+   * What was last WRITTEN to this entry, so an unchanged frame writes nothing.
+   *
+   * MEASURED, and this is the single most expensive thing the widget layer does. The three writes
+   * below were unconditional, which was invisible on a glue screen's ~100 draw items and is not on
+   * the world's: with `FrameXML.toc` loaded the draw list is ~900 items and `ui.draw` measured
+   * **11.9 ms of a 12.2 ms UI pass** against a 16.7 ms budget (`W2-world.png`).
+   *
+   *  - `material.needsUpdate = true` makes three.js re-derive the program key and re-run
+   *    `WebGLPrograms.getParameters` for that material on the next render
+   *    (`three/build/three.module.js`, `WebGLRenderer#getProgram`). Once per material per frame,
+   *    900 times, is the bulk of it. It is only actually REQUIRED when something structural changes
+   *    -- here, the map or the blending mode. Opacity and colour are uniforms and need none.
+   *  - `uv.needsUpdate = true` re-uploads a 4-vertex attribute buffer to the GPU. Cheap once, 900
+   *    times a frame is not, and a widget's sub-rect is constant for almost all of them.
+   *  - `Color#set(string)` parses `#rrggbb` with a regex every call.
+   *
+   * Compared by VALUE, not trusted from a flag: the fields below are exactly the inputs of the three
+   * writes they gate, so a change to any of them is caught. A stale cache here would draw the wrong
+   * texture, so this is the one place in the file where correctness depends on the comparison being
+   * complete.
+   */
+  lastMap: THREE.Texture | null;
+  lastBlending: THREE.Blending | null;
+  lastColor: string | null;
+  /** The four numbers `writeQuadUVs` last wrote, or null for the identity rect. */
+  lastTexCoords: TexCoords | null;
 };
+
+/** Whether two sub-rects are the same rectangle, including "both absent". */
+function sameTexCoords(a: TexCoords | null, b: TexCoords | null): boolean {
+  if (a === null || b === null) {
+    return a === b;
+  }
+  return a.u0 === b.u0 && a.v0 === b.v0 && a.u1 === b.u1 && a.v1 === b.v1;
+}
 
 /**
  * One drawn piece of a backdrop. Each carries its OWN geometry, and that is the whole point.
@@ -233,16 +268,37 @@ export class GlueRenderer {
         const mesh = new THREE.Mesh(geometry, material);
         mesh.frustumCulled = false;
         this.scene.add(mesh);
-        entry = { mesh, material, geometry };
+        entry = {
+          mesh,
+          material,
+          geometry,
+          lastMap: null,
+          lastBlending: null,
+          lastColor: null,
+          // Not `null`: `PlaneGeometry`'s own uvs ARE the identity rect, so a first frame that wants
+          // the identity rect must not be told the geometry already has something else. The literal
+          // makes "what is in the buffer" true from the start.
+          lastTexCoords: { u0: 0, v0: 0, u1: 1, v1: 1 },
+        };
         this.pool.set(item.widget.id, entry);
       }
 
-      entry.material.map = texture;
-      entry.material.blending =
+      const blending =
         item.widget.blend === 'ADD' ? THREE.AdditiveBlending : THREE.NormalBlending;
+      // ONLY the structural writes flip `needsUpdate` -- see `Pooled.lastMap` for the measurement.
+      if (entry.lastMap !== texture || entry.lastBlending !== blending) {
+        entry.material.map = texture;
+        entry.material.blending = blending;
+        entry.material.needsUpdate = true;
+        entry.lastMap = texture;
+        entry.lastBlending = blending;
+      }
+      // Uniforms. No `needsUpdate`: three uploads these per draw from the material object.
       entry.material.opacity = item.alpha;
-      entry.material.color.set(item.widget.vertexColor);
-      entry.material.needsUpdate = true;
+      if (entry.lastColor !== item.widget.vertexColor) {
+        entry.material.color.set(item.widget.vertexColor);
+        entry.lastColor = item.widget.vertexColor;
+      }
       // The widget's own sub-rect wins when it sets one; otherwise the sprite's, from the art table.
       // In this mesh's OWN uv attribute -- see `writeQuadUVs` for why the shared texture's
       // offset/repeat cannot carry it. `applyTexCoords(material, null)` still runs, to clear any
@@ -252,7 +308,14 @@ export class GlueRenderer {
       // `item.texCoords` outranks the widget's own: it is the per-frame crop a StatusBar's fill needs
       // (`widget.ts#barFillTexCoords`), which is a function of the live value and so cannot be stored
       // on the widget. Absent on every other item, so the precedence below is unchanged for them.
-      writeQuadUVs(entry.geometry, item.texCoords ?? item.widget.texCoords ?? resolved.texCoords ?? null);
+      const wanted = item.texCoords ?? item.widget.texCoords ?? resolved.texCoords ?? null;
+      if (!sameTexCoords(entry.lastTexCoords, wanted)) {
+        writeQuadUVs(entry.geometry, wanted);
+        // A COPY, not the caller's object: `barFillTexCoords` returns a fresh literal each frame but
+        // `Widget#texCoords` is mutated in place by `SetTexCoord`, and holding that reference would
+        // compare an object against itself and never redraw.
+        entry.lastTexCoords = wanted === null ? null : { ...wanted };
+      }
 
       const { left, top, width, height } = item.rect;
 

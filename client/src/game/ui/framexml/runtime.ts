@@ -43,15 +43,14 @@
  * call sites in `update` below, as FOUR and FIVE. Adding a third is a decision, not a pattern to
  * follow: every one of these is a frame whose tick is load-bearing and whose cost is one call.
  */
-import Loader from '../../net/loader';
 import { GlueArt } from '../art';
 import { ProtocolSession } from '../../../network/protocol/session';
 import { CharacterRecord } from '../../../network/protocol/types';
 import { Viewport } from '../layout';
 import { Widget } from '../widget';
-import { caretOffset } from '../text';
 import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
-import { parseToc } from './toc';
+import { cacheKey, prefetchManifest, registerTreeArt } from './manifest';
+import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret } from './tick';
 import { parseXml } from './xml';
 import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
@@ -159,79 +158,6 @@ export interface GlueRuntime {
   dispose(): void;
 }
 
-/** `Interface\GlueXML\...` paths, as the one key a cached file is looked up by. */
-function cacheKey(path: string): string {
-  return path.trim().replace(/\\/g, '/').toLowerCase();
-}
-
-/**
- * Fetches the manifest and every file it (transitively) names, up to and including `stopAfter`.
- *
- * Returns the load order and a text cache. A file that cannot be fetched is simply absent from the
- * cache: the loader reports the miss itself, per reference, and one missing include costs an include
- * rather than the screen.
- */
-async function prefetch(
-  stopAfter: string,
-): Promise<{ order: string[]; texts: Map<string, string>; tocMissing: boolean }> {
-  const texts = new Map<string, string>();
-  const missing = new Set<string>();
-
-  const fetchText = async (path: string): Promise<string | null> => {
-    const key = cacheKey(path);
-    const cached = texts.get(key);
-    if (cached !== undefined) {
-      return cached;
-    }
-    if (missing.has(key)) {
-      return null;
-    }
-    try {
-      const bytes = await new Loader().load(GLUE_DIR + path);
-      const text = new TextDecoder('utf-8').decode(bytes);
-      texts.set(key, text);
-      return text;
-    } catch {
-      missing.add(key);
-      return null;
-    }
-  };
-
-  const tocText = await fetchText(TOC);
-  if (tocText === null) {
-    return { order: [], texts, tocMissing: true };
-  }
-
-  const all = parseToc(tocText).files;
-  const stop = all.findIndex((file) => cacheKey(file) === cacheKey(stopAfter));
-  const order = stop === -1 ? all : all.slice(0, stop + 1);
-
-  // The referenced-file closure. Depth-first over `<Include>`, since an included document may include
-  // another, and `<Script file=>` targets are leaves.
-  const seen = new Set<string>();
-  const walk = async (path: string): Promise<void> => {
-    const key = cacheKey(path);
-    if (seen.has(key)) {
-      return;
-    }
-    seen.add(key);
-    const text = await fetchText(path);
-    if (text === null || !/\.xml$/i.test(path)) {
-      return;
-    }
-    for (const item of parseXml(text).items) {
-      if (item.kind === 'include' || item.kind === 'script') {
-        await walk(item.path);
-      }
-    }
-  };
-  for (const file of order) {
-    await walk(file);
-  }
-
-  return { order, texts, tocMissing: false };
-}
-
 /**
  * Boots the client's glue interface onto `options.root` and returns the live runtime.
  *
@@ -240,7 +166,7 @@ async function prefetch(
  */
 export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<GlueRuntime> {
   const stopAfter = options.stopAfter ?? 'CharacterSelect.xml';
-  const { order, texts, tocMissing } = await prefetch(stopAfter);
+  const { order, texts, tocMissing } = await prefetchManifest(GLUE_DIR, TOC, stopAfter);
 
   const vm = new LuaVM();
   // The queue is module-level (see `scripts.ts`), so anything a PREVIOUS runtime's last cascade left
@@ -451,151 +377,4 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
   };
 }
 
-/**
- * The caret, OURS.
- *
- * The client's edit-box caret is drawn by its engine with no XML behind it, so there is nothing in the
- * document to materialize and nothing here is cited: a one-unit bar, lit for half a second and dark for
- * half a second. `screens/login.ts` draws the same thing by hand for the transcription, with the same
- * two constants -- and this lives in the runtime rather than per screen precisely because every
- * `<EditBox>` on every glue screen needs it and none of them declares it.
- */
-const CARET_WIDTH = 1;
-const CARET_BLINK_SECONDS = 0.5;
 
-/** An edit box and the caret bar built for it. */
-interface CaretBox {
-  box: Widget;
-  /** Null for a box with no adopted text region -- there is no font to size a caret from. */
-  caret: Widget | null;
-}
-
-/**
- * Every `editbox` widget in the tree, each with a caret region built under it. Collected once; the tree
- * is not rebuilt.
- *
- * The caret is created THROUGH THE REGISTRY (`create('Texture', ...)`), not as a loose `Widget`, so it
- * is torn down by the same `reset()` as everything else and cannot outlive the screen. It is anchored to
- * the box's TEXT REGION rather than to the box, which is what makes the authored `<TextInsets>` apply
- * for free -- `kinds.ts#anchorTextRegion` has already inset that region, so the caret starts where the
- * first character does without repeating the arithmetic.
- */
-function collectEditBoxes(registry: FrameRegistry, root: Widget): CaretBox[] {
-  const boxes: CaretBox[] = [];
-  const walk = (widget: Widget): void => {
-    if (widget.kind === 'editbox') {
-      boxes.push({ box: widget, caret: buildCaret(registry, widget) });
-    }
-    // A copy: `buildCaret` adds a child to the box, and walking the live array would then descend into
-    // the caret it just made.
-    [...widget.children].forEach(walk);
-  };
-  walk(root);
-  return boxes;
-}
-
-function buildCaret(registry: FrameRegistry, box: Widget): Widget | null {
-  const region = box.textRegion;
-  const boxId = registry.idOfWidget(box);
-  if (region === null || boxId === null) {
-    return null;
-  }
-  const caret = registry.widget(registry.create('Texture', null, boxId));
-  if (caret === null) {
-    return null;
-  }
-  caret.layer = 'OVERLAY';
-  caret.solid = true;
-  caret.vertexColor = region.font?.color ?? '#ffffff';
-  caret.setSize(CARET_WIDTH, region.font?.size ?? 12).setAnchors({
-    point: 'LEFT',
-    relativeTo: region.id,
-    relativePoint: 'LEFT',
-    x: 0,
-    y: 0,
-  });
-  caret.shown = false;
-  return caret;
-}
-
-/**
- * Put the caret where the next character will land, and blink it, for the focused box only.
- *
- * Measured against `displayText`, so a password box positions against the MASKED string: measuring the
- * real one would put the caret at the real characters' widths and leak them on screen -- the same rule
- * `screens/login.ts#placeCaret` states. Measured at scale 1 because `caretOffset` returns logical units,
- * which the layout scale divides back out anyway.
- *
- * `shown` is assigned rather than `show()`/`hide()` called: a blink is twice a second, and `show()`
- * re-stamps the draw order.
- */
-function placeCaret(box: Widget, caret: Widget | null, input: FocusSink | null, lit: boolean): void {
-  if (caret === null) {
-    return;
-  }
-  if (!lit || input === null || input.focused !== box) {
-    caret.shown = false;
-    return;
-  }
-  const spec = box.textRegion?.font ?? null;
-  if (spec === null) {
-    caret.shown = false;
-    return;
-  }
-  caret.anchors[0].x = caretOffset(box.displayText, spec, 1, box.caret);
-  caret.shown = true;
-}
-
-/**
- * Every BUTTON/CHECKBUTTON frame id in the tree, for the per-frame art poll.
- *
- * WALKED PER TICK, not collected once at boot -- and it used to be the latter, on the grounds that a
- * frame created from Lua after the load got none of its template's regions and so had no state textures
- * to repaint. `CreateFrame`'s template argument is real now (`loader.ts#applyTemplate`), so that ground
- * is gone: `GlueDropDownMenu_AddButton` and `RealmList_UpdateTabs` build real templated BUTTONs with
- * real `<NormalTexture>`/`<HighlightTexture>` regions, long after the load, and a boot-time snapshot
- * would leave every one of them a painted picture that never lights or presses.
- *
- * The cost is one array walk of the widget tree per frame, beside the one `drawList` already does.
- */
-function collectButtons(registry: FrameRegistry, root: Widget): number[] {
-  const ids: number[] = [];
-  const walk = (widget: Widget): void => {
-    if (widget.kind === 'button' || widget.kind === 'checkbutton') {
-      const id = registry.idOfWidget(widget);
-      if (id !== null) {
-        ids.push(id);
-      }
-    }
-    widget.children.forEach(walk);
-  };
-  walk(root);
-  return ids;
-}
-
-/**
- * Registers every art path the finished tree names, keyed by the path itself, and fetches them.
- *
- * A `Backdrop`'s `bgFile` is registered as TILED, because that is the only thing a backdrop background
- * is ever used for (`backdropPieces` repeats it at `tileSize`) -- and the seam-bleed hazard that makes
- * REPEAT opt-in for ordinary sprites does not apply, since a background samples its whole sheet.
- */
-async function registerTreeArt(art: GlueArt, root: Widget): Promise<void> {
-  const walk = (widget: Widget): void => {
-    if (widget.sprite) {
-      art.register(widget.sprite, { path: widget.sprite });
-    }
-    const backdrop = widget.backdrop;
-    if (backdrop) {
-      if (backdrop.bgSprite) {
-        art.register(backdrop.bgSprite, { path: backdrop.bgSprite, tile: true });
-      }
-      if (backdrop.edgeSprite) {
-        art.register(backdrop.edgeSprite, { path: backdrop.edgeSprite });
-      }
-    }
-    widget.children.forEach(walk);
-  };
-  walk(root);
-  await art.load();
-}
