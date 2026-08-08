@@ -282,6 +282,28 @@ export default class World extends EventEmitter {
     }
   }
 
+  /**
+   * Drop every unit the server streamed to us, keeping our own player.
+   *
+   * `entities` is the session's guid-keyed registry and nothing else ever empties it, so without
+   * this a second connection on the same page starts with the previous one's creatures standing in
+   * the scene at their last known positions, animating, under guids the new connection is about to
+   * re-create -- which `add`'s duplicate eviction would then have to untangle one at a time, and
+   * which `animateEntities` pays for every frame in between.
+   *
+   * The player stays: `World#run` files him once (index.ts:156) and the world route may remount
+   * without him ever having left.
+   */
+  clearRemoteEntities() {
+    const doomed: Unit[] = [];
+    this.entities.forEach((entity) => {
+      if (entity !== this.player) {
+        doomed.push(entity);
+      }
+    });
+    doomed.forEach((entity) => this.remove(entity));
+  }
+
   remove(entity: Unit) {
     this.entities.delete(entity.guid);
     if (entity.view) {

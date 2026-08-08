@@ -2,7 +2,7 @@ import React from 'react';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import './app.scss';
 import { sessionForSearch } from './network/offline-session';
-import GameScreen from './pages/game';
+import GameRoute from './pages/game';
 import GlueHost from './pages/glue';
 
 
@@ -22,7 +22,7 @@ const App: React.FC = () => {
     },
     {
       path: "/game",
-      element: <GameScreen session={gameSession} />
+      element: <GameRoute session={gameSession} />
     },
     {
       // Kept as an alias of "/" so existing links and bookmarks still work.

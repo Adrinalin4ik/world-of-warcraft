@@ -39,10 +39,9 @@ export class GameHandler extends Socket {
      */
     this.pingTimer = null;
 
-    // The keepalive must not outlive the socket. `ping()` disconnects when a pong did not arrive, so
-    // a timer left running against a closed socket is not merely wasted work -- it is a disconnect
-    // call on a dead handler, fired every 30 s for the lifetime of the page.
-    this.on('disconnect', () => this.stopPing());
+    // A CONNECTION's state is not a HANDLER's state, and this handler is built once per
+    // `GameSession` (session.ts:18) and outlives every socket it opens. See `resetConnection`.
+    this.on('disconnect', () => this.resetConnection());
 
     // Listen for incoming data
     this.on('data:receive', this.dataReceived.bind(this));
@@ -62,6 +61,11 @@ export class GameHandler extends Socket {
   connect(host, realm) {
     this.realm = realm;
     if (!this.connected) {
+      // Also here, not only on the `disconnect` event. The reset must not depend on a close having
+      // been delivered -- a socket that errored without closing, or a handler whose previous socket
+      // was replaced by `Socket#dropSocket` (which deliberately silences it), would otherwise carry
+      // the old connection's crypt into this handshake.
+      this.resetConnection();
       super.connect(host, realm.port);
       console.info('connecting to game-server @', this.host, ':', this.port);
     }
@@ -334,6 +338,39 @@ export class GameHandler extends Socket {
 
     this.joinWorldChannel();
     this.emit('join');
+  }
+
+  /**
+   * Drop everything that belonged to the connection that just ended. Idempotent.
+   *
+   * `_crypt` is the one that breaks the NEXT login outright, and it is not a key -- it is a pair of
+   * live RC4 KEYSTREAMS. `Crypt`'s `set key` (crypto/crypt.js:35-56) builds both from the session
+   * key and then advances each by 1024 bytes, and every header encrypted or decrypted afterwards
+   * advances them further, so a `Crypt` carries a POSITION, not just a secret.
+   *
+   * `SMSG_AUTH_CHALLENGE` -- the first packet of the next connection -- arrives in PLAINTEXT, but
+   * `dataReceived` decrypts an incoming header whenever `_crypt` is truthy (line 126). A retained
+   * crypt therefore XORs the new connection's first header against wherever the previous
+   * connection's stream had got to. The 2-byte big-endian size that falls out is garbage,
+   * `remaining` is set from it, and the framing loop never resynchronises: the second connection
+   * cannot parse a single packet, so the handshake is never answered and every promise waiting on
+   * one hangs. Measured on a live page: `_crypt` still set after `disconnect()` and still set on the
+   * next login attempt.
+   *
+   * `authenticated` and `remaining` go with it for the same reason -- both describe a socket, and
+   * `remaining` in particular is a half-read packet length from a stream that no longer exists.
+   */
+  resetConnection() {
+    this.stopPing();
+    this._crypt = null;
+    this.authenticated = false;
+    this.remaining = false;
+    // The units the ended session streamed in. Guid-keyed and never otherwise emptied -- see
+    // `World#clearRemoteEntities`. Guarded because `World` is constructed at the end of this
+    // constructor, after the `disconnect` subscription above is registered.
+    if (this.world) {
+      this.world.clearRemoteEntities();
+    }
   }
 
   /** Stop the keepalive. Idempotent, and safe before the first login. */

@@ -1,5 +1,6 @@
 import * as Bowser from "bowser";
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import Stats from 'stats-js';
 // import * as THREE from 'three';
 import { DepthPass, EffectComposer } from 'postprocessing';
@@ -17,6 +18,12 @@ import './index.scss';
 
 interface IGameProps {
   session: GameSession;
+  /**
+   * The world connection ended. The host performs the transition, exactly as `GlueApp#onEnterWorld`
+   * does in the other direction -- this component owns a canvas, a renderer and a frame loop, not a
+   * router.
+   */
+  onDisconnected?: () => void;
 }
 interface IGameScreenState {
   renderer: THREE.WebGLRenderer | null;
@@ -50,6 +57,20 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private stats: any = new Stats();
   private perf: PerfMonitor = new PerfMonitor();
   private lastDebugPanelPaint = 0;
+  /** The rAF handle, so `componentWillUnmount` can stop a loop that otherwise never ends. */
+  private frameHandle = 0;
+  private stopped = false;
+  /** Held bound, because `removeEventListener` needs the SAME function object `add` was given. */
+  private readonly onResize = () => this.resize();
+  private readonly onWorldDisconnect = () => {
+    // Once, and only forward. The socket emits `disconnect` and `Socket#dropSocket` can silence a
+    // replaced one, but a double delivery must not navigate twice.
+    if (this.stopped) {
+      return;
+    }
+    console.warn('world: connection lost; leaving the world route');
+    this.props.onDisconnected?.();
+  };
 
   private isMobile: boolean = false;
 
@@ -164,7 +185,11 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     
     this.callFrame();
 
-    window.addEventListener('resize', this.resize.bind(this));
+    window.addEventListener('resize', this.onResize);
+    // The one thing that can end this route from below. Nothing listened for it, so a dropped world
+    // socket left the player looking at a frozen world with no way back to the login screen short of
+    // reloading the page -- which is half of "I cannot connect a second time".
+    this.game.on('disconnect', this.onWorldDisconnect);
 
     this.game.world.run();
 
@@ -176,13 +201,44 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     }
   }
 
+  /**
+   * Everything this component put somewhere that outlives it.
+   *
+   * There was no unmount at all, and until this round nothing ever unmounted the world route, so
+   * that cost nothing. It does now: a disconnect navigates away, and a second world entry remounts.
+   * Without this the page would carry a second `requestAnimationFrame` loop rendering the same
+   * scene (both of which advance `worldClock` -- the exact double-advance `game/ui/screens.ts:118`
+   * warns about), a second stats panel and camera helper, and a stale program warmer holding a
+   * renderer that has been disposed.
+   */
+  componentWillUnmount() {
+    this.stopped = true;
+    window.cancelAnimationFrame(this.frameHandle);
+    window.removeEventListener('resize', this.onResize);
+    this.game.removeListener('disconnect', this.onWorldDisconnect);
+    // Reveals anything still queued for a GLSL warm-up before the renderer it would compile against
+    // goes away. `program-warm.ts` documents this as the reason a null warmer flushes the queue;
+    // this is the caller it was written for.
+    setProgramWarmer(null);
+    this.game.world.scene.remove(this.cameraHelper);
+    this.stats.dom.parentNode?.removeChild(this.stats.dom);
+    this.renderer?.dispose();
+    this.debugRenderer?.dispose();
+    this.renderer = null;
+  }
+
   // No forceUpdate here. This component's state (renderer, composer, currentLocation) changes at
   // mount and on explicit user action; re-rendering the subtree at 60 Hz cost a full React
   // reconciliation per frame for nothing. Per-frame numbers go to the perf HUD, which writes DOM
   // directly at 4 Hz (see game/perf/hud.ts).
   callFrame() {
+    // The guard is not belt and braces: a frame already scheduled when `componentWillUnmount` ran
+    // has been cancelled, but one that is mid-callback has not, and it would schedule the next.
+    if (this.stopped) {
+      return;
+    }
     this.animate();
-    window.requestAnimationFrame(this.callFrame.bind(this));
+    this.frameHandle = window.requestAnimationFrame(this.callFrame.bind(this));
   }
 
   get aspectRatio() {
@@ -346,4 +402,27 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   }
 }
 
-export default GameScreen;
+/**
+ * The route element: `GameScreen` plus the one thing it needs the router for.
+ *
+ * The mirror image of `GlueRoute` (`pages/glue/index.tsx:99-107`), and a ROUTER navigation for the
+ * same reason it is one there: the `GameSession` is created once in `App` and handed to both routes,
+ * so a document navigation would drop the session, its handlers and the world it holds. Keeping the
+ * session is the whole point here -- it is what makes a reconnect possible without reloading.
+ */
+const GameRoute: React.FC<{ session: GameSession }> = ({ session }) => {
+  const navigate = useNavigate();
+  // WITH the query string. `?ui=lua` selects the FrameXML glue screens and `?realmlist=` names the
+  // server to dial (`network/session.ts:33`, `network/gateway.ts:38`); dropping them would land the
+  // player back on a differently-configured login screen -- a plain `navigate('/')` silently swaps
+  // the Lua UI for the transcription and forgets which realmlist this session was started against.
+  const disconnected = React.useCallback(
+    () => navigate({ pathname: '/', search: window.location.search }),
+    [navigate],
+  );
+
+  return <GameScreen session={session} onDisconnected={disconnected} />;
+};
+
+export { GameScreen };
+export default GameRoute;
