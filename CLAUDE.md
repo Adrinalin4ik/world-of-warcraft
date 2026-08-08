@@ -83,6 +83,16 @@ A comment that invents a source, or that still describes a gap now closed, is tr
 
 - **The dev server needs Node 18** (`node-sass`'s binding is Node-18 ABI). `node scripts/start.js`
   from `client/`. The first cold load takes well over 30 s to boot `window.glueRuntime`.
+- **The asset host CORS-allowlists `localhost:3000` and nothing else.** A dev server on any other
+  port loads no terrain, no doodads and no models — so the page comes up, the world is empty, and
+  nothing announces why. This silently voided one agent's whole performance comparison (half the
+  doodads, 40% of the triangles) and can make a broken screen look fixed. Verify on 3000, or use
+  `scratchpad/asset-proxy.js` with a gitignored `.env.development.local`. **State which port
+  produced a screenshot.** This makes an isolated worktree unverifiable in a browser on its own —
+  merge first, then verify.
+- In a `.claude/worktrees/...` path, `node scripts/test.js` reports success while finding **0
+  tests**: the `.claude` component breaks micromatch's `<rootDir>` glob. Check the suite and test
+  counts, or pass an explicit `--testMatch`.
 - `ws-proxy/server.js` (port 9000) must run for any game connection. It answers plain HTTP with
   **426 Upgrade Required** — that means healthy.
 - The FrameXML UI is behind **`?ui=lua`**. Plain `/` deliberately still serves the hand-written
