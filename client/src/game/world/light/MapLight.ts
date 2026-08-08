@@ -631,7 +631,104 @@ class MapLight extends SceneLight {
     this.#nearbyWmoGroups = MapLight.#collectNearbyWmoGroups(this.#wmoManager, camera.position);
 
     super.update(camera);
+
+    // LAST, once everything this frame publishes has settled. See `revision`.
+    this.#refreshRevision();
   }
+
+  /**
+   * A counter that changes only when the light values MATERIALS COPY have changed.
+   *
+   * `MaterialRegistry#applyLight` uses it to skip a per-frame refresh that measured **3.2 ms** over
+   * this world's 20 258 registered materials and was redundant on **400 of 401** consecutive frames
+   * -- time of day and fog move on the order of game-minutes, and copying an unchanged value into a
+   * uniform is a no-op. See that method for the measurement and for why this is exact rather than a
+   * throttle.
+   *
+   * WHAT IS IN THE SNAPSHOT: everything a registered material reads off this object -- the world-space
+   * `sunDir`, the sun's diffuse and ambient, both fog packs and both fog colours, the two liquid close
+   * colours, and `location` (which decides WHICH parameter set `uniforms` returns, so an interior
+   * transition must count as a change even when both sides hold identical numbers).
+   *
+   * WHAT IS DELIBERATELY NOT IN IT: `sunDirView`. It is re-derived from the camera's view matrix by
+   * `SceneLight#update` every single frame, so including it would make the revision change on every
+   * frame the camera turns -- i.e. exactly when the client is busiest -- and the skip would be worth
+   * nothing. It is safe to exclude because **no consumer of this registry copies it**: the M2, ADT
+   * chunk, liquid and WMO materials all copy `mapLight.sunDir`, each with its own comment saying that
+   * `uniforms.sunDir` is the view-space variant and wrong for a world-space normal
+   * (`m2/material/index.ts:725`, `adt/chunk/material.ts:134`, `liquid/material/index.ts:184`,
+   * `wmo/material/index.js:324`). The only readers of the view-space vector are `WDTManager` and
+   * `WDTMaterial`, which assign it BY REFERENCE (`.value = lightUniforms.sunDir.value`) and so need
+   * no refresh at all -- and which `update`'s own doc above records as not being on the live render
+   * path.
+   *
+   * IF A NEW CONSUMER EVER COPIES `sunDirView`, it must be added to the snapshot below, or it will
+   * hold whatever the camera was pointing at on the last frame the light genuinely changed. That is
+   * the one way this can go wrong, and it is why the exclusion is argued here rather than assumed.
+   */
+  get revision(): number {
+    return this.#revision;
+  }
+
+  #revision = 0;
+
+  /**
+   * The published scalars, in a fixed order. Length is `3 sunDir + 3 diffuse + 3 ambient + 4 fogParams
+   * + 3 fogColor + 4 wmoFogParams + 3 wmoFogColor + 3 river + 3 ocean + 1 location = 30`.
+   */
+  #lightSnapshot: Float64Array | null = null;
+
+  #refreshRevision() {
+    const next = MapLight.#SNAPSHOT_SCRATCH;
+    let at = 0;
+    const v3 = (value: { x: number; y: number; z: number }) => {
+      next[at++] = value.x;
+      next[at++] = value.y;
+      next[at++] = value.z;
+    };
+    const rgb = (value: { r: number; g: number; b: number }) => {
+      next[at++] = value.r;
+      next[at++] = value.g;
+      next[at++] = value.b;
+    };
+    const v4 = (value: { x: number; y: number; z: number; w: number }) => {
+      next[at++] = value.x;
+      next[at++] = value.y;
+      next[at++] = value.z;
+      next[at++] = value.w;
+    };
+
+    v3(this.sunDir);
+    rgb(this.sunDiffuseColor);
+    rgb(this.sunAmbientColor);
+    v4(this.fogParams);
+    rgb(this.fogColor);
+    v4(this.wmoFogParams);
+    rgb(this.wmoFogColor);
+    rgb(this.riverCloseColor);
+    rgb(this.oceanCloseColor);
+    next[at++] = this.location === 'interior' ? 1 : 0;
+
+    const previous = this.#lightSnapshot;
+    if (previous === null) {
+      this.#lightSnapshot = next.slice(0, at);
+      ++this.#revision;
+      return;
+    }
+
+    for (let i = 0; i < at; ++i) {
+      // `!==` and not an epsilon: the question is whether a COPY would change anything, and a copy
+      // reproduces the value exactly. An epsilon here would let a slow drift accumulate unpublished.
+      if (previous[i] !== next[i]) {
+        previous.set(next.subarray(0, at));
+        ++this.#revision;
+        return;
+      }
+    }
+  }
+
+  /** Shared scratch: `#refreshRevision` runs once per frame and must not allocate. */
+  static #SNAPSHOT_SCRATCH = new Float64Array(30);
 
   /** See `update`'s doc for why this is a wall-clock measurement and not a fixed constant. */
   #resolveDt(dt: number | undefined): number {

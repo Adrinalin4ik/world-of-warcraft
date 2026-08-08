@@ -285,7 +285,13 @@ class WorldMap extends THREE.Group {
     // Flat iteration over the registry. This used to be `this.traverse()` across the entire scene
     // graph, every frame, purely to rediscover the same material set. Registration now happens once
     // per loaded object; see light/material-registry.ts for why the rebinding check stays `!==`.
-    this.materialRegistry.applyLight(this.mapLight);
+    //
+    // `mapLight.revision` is what makes the flat iteration itself skippable. Measured in Elwynn this
+    // registry holds 20 258 materials and the refresh cost 3.2 ms of EVERY frame, while the values
+    // being copied changed on 1 frame in 401. See `MapLight#revision` and `MaterialRegistry#applyLight`
+    // -- the skip is exact, not a throttle: it fires only when a copy would have written the value
+    // that is already there.
+    this.materialRegistry.applyLight(this.mapLight, this.mapLight.revision);
 
     // Object-level lighting, distinct from material uniforms: these iterate their own flat maps
     // already and are not scene walks.

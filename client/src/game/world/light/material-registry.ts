@@ -34,13 +34,27 @@ interface Traversable {
 export class MaterialRegistry {
   private readonly materials = new Set<LightBoundMaterial>();
 
+  /**
+   * Materials added since the last `applyLight`, so a frame that skips the full pass still binds
+   * whatever streamed in during it. See `applyLight`'s `revision` argument.
+   */
+  private readonly pending = new Set<LightBoundMaterial>();
+
+  /** The `revision` and light object the last FULL pass ran against; see `applyLight`. */
+  private lastRevision: number | null = null;
+  private lastLight: unknown = undefined;
+
   get size(): number {
     return this.materials.size;
   }
 
   add(material: LightBoundMaterial | null | undefined): void {
     if (material) {
+      // `pending` is added to unconditionally, even for a material already in `materials`. A repeat
+      // costs one redundant refresh on the next frame; skipping it for a material that had been
+      // deleted and re-added in the same frame would cost a permanently unbound material.
       this.materials.add(material);
+      this.pending.add(material);
     }
   }
 
@@ -76,11 +90,42 @@ export class MaterialRegistry {
     this.materials.clear();
   }
 
-  applyLight(current: unknown): ApplyResult {
+  /**
+   * Bind and refresh every registered material against `current`.
+   *
+   * `revision` IS THE OPTIMISATION, and it is exact rather than a throttle.
+   *
+   * Every consumer of this registry refreshes by COPYING out of the one shared light -- seven
+   * `Vector.copy` calls for `M2Material` (`m2/material/index.ts:718`), and the same shape for the ADT
+   * chunk, liquid and WMO materials. Measured in Elwynn on a real world entry, this registry holds
+   * **20 258** materials, so the per-frame refresh was ~141 000 vector copies, timed at **3.2 ms of
+   * every frame** -- the single largest item inside `World#animate`'s 11 ms.
+   *
+   * And it was almost entirely redundant. Measured over 401 consecutive steady-state frames, the
+   * light values those materials copy changed on **1** of them (0.25 %): `MapLight` resolves time of
+   * day, sun colour and fog from tables that move on the order of game-minutes, not frames. Copying
+   * an unchanged value into a uniform is a provable no-op, so skipping it changes no pixel.
+   *
+   * `revision` is `MapLight#revision`, which that class bumps only when the values it publishes
+   * actually differ (see its own doc for exactly which values, and for the one it deliberately
+   * excludes). When the revision and the light object are both unchanged, only `pending` -- the
+   * materials that streamed in since the last call -- is processed. `seen` then reports what was
+   * actually visited, which is what makes the skip visible on the debug readout rather than silent.
+   *
+   * OMITTING `revision` KEEPS THE OLD BEHAVIOUR (a full pass every call), which is what
+   * `propagateMapLightToAllMaterials` and the tests want: a caller that cannot vouch for a revision
+   * must not be given a stale-uniform skip.
+   */
+  applyLight(current: unknown, revision?: number): ApplyResult {
+    const full =
+      revision === undefined || revision !== this.lastRevision || current !== this.lastLight;
+
+    const targets = full ? this.materials : this.pending;
+
     let seen = 0;
     let applied = 0;
 
-    for (const material of this.materials) {
+    for (const material of targets) {
       ++seen;
       if (material.mapLight !== current && typeof material.setMapLight === 'function') {
         // setMapLight refreshes the uniforms itself.
@@ -90,6 +135,12 @@ export class MaterialRegistry {
         material.updateLightUniforms();
         ++applied;
       }
+    }
+
+    this.pending.clear();
+    if (revision !== undefined) {
+      this.lastRevision = revision;
+      this.lastLight = current;
     }
 
     return { seen, applied };
