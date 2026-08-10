@@ -59,6 +59,24 @@ jobs:
           cache: yarn
           cache-dependency-path: client/yarn.lock
 
+      # One dependency is a git dependency, not a registry package: `jsbn` is pinned to
+      # `timkurvers/jsbn.git#wowser` (the Wowser fork, for the SRP6 bignum arithmetic the logon
+      # handshake needs), and yarn.lock records it as `git+ssh://git@github.com/...`. So `yarn install`
+      # runs `git ls-remote ssh://git@github.com/timkurvers/jsbn.git`, a runner has no SSH key, and the
+      # install died at "Fetching packages" with `Permission denied (publickey)` and exit 128 -- before
+      # any build step could run.
+      #
+      # Rewriting the transport is the fix that leaves the lockfile alone: yarn's recorded resolution
+      # string is untouched, so `--frozen-lockfile` below stays a real check. Changing package.json to
+      # an https URL instead would rewrite the lock entry for a repository that is public either way.
+      # Both spellings are covered because either can appear in a lockfile.
+      - name: Fetch git dependencies over https, not ssh
+        run: |
+          git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+          # --add, because `insteadOf` is multi-valued and a plain `git config` would REPLACE the rule
+          # above rather than sit beside it, leaving only the second spelling covered.
+          git config --global --add url."https://github.com/".insteadOf git@github.com:
+
       # The client carries BOTH a yarn.lock and a package-lock.json. Yarn is what the project is
       # actually developed and tested with, so the lockfile that governs CI is yarn's -- and
       # --frozen-lockfile makes a drifted lockfile fail here rather than silently resolving
