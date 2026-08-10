@@ -1,7 +1,8 @@
-import ContentQueue from '../utils/content-queue';
+import { beginAnimSection, endAnimSection } from '../perf/anim-section';
+import { BoneBudget } from '../pipeline/m2/anim/gating';
 import WMO from '../pipeline/wmo';
 import gameSettings from '../settings';
-
+import ContentQueue from '../utils/content-queue';
 class WMOManager {
 
   static LOAD_ENTRY_INTERVAL = gameSettings.wmo.loadInterval;
@@ -15,6 +16,7 @@ class WMOManager {
     this.zeropoint = zeropoint;
 
     this.chunkRefs = new Map();
+    this.mapLight = null;
 
     this.counters = {
       loadingEntries: 0,
@@ -27,6 +29,16 @@ class WMOManager {
     };
 
     this.entries = new Map();
+
+    // ONE budget for every building's interior doodads, reset here and passed down into each
+    // `WMO#animate`. Owning it per WMO would multiply the per-frame ceiling by the number of loaded
+    // buildings -- 113 visible groups were measured in Stormwind -- which is not a ceiling.
+    //
+    // Still SEPARATE from `DoodadManager`'s budget of the same size, so the true worst-frame ceiling
+    // is currently 2x `boneBudgetPerFrame` (units are exempt from both; see `World#animateEntities`).
+    // Unifying them means one budget object shared across managers with a single begin-frame, which
+    // is Task 20's job once the HUD says what the real numbers are.
+    this.boneBudget = new BoneBudget(gameSettings.m2.boneBudgetPerFrame);
 
     this.pendingUnloads = new Map();
 
@@ -185,7 +197,7 @@ class WMOManager {
   }
 
   processLoadEntry(entry) {
-    const wmo = new WMO(entry.filename, entry.doodadSet, entry.id, this.counters);
+    const wmo = new WMO(entry.filename, entry.doodadSet, entry.id, this.counters, this.view.particleManager, this.view.materialRegistry);
 
     this.entries.set(entry.id, wmo);
 
@@ -222,9 +234,49 @@ class WMOManager {
     this.view.add(view);
   }
 
+  /**
+   * Third of the three `'anim'` span call sites -- `World#animateEntities` and
+   * `DoodadManager#animate` are the others, and `CpuSections` sums same-named spans within a frame
+   * so the three report one `anim` total. The span is opened HERE rather than inside `WMO#animate`
+   * so a city's worth of buildings costs one begin/end pair rather than one per building; the total
+   * would be identical either way.
+   */
   animate(delta, camera, cameraMoved) {
+    beginAnimSection();
+
+    this.boneBudget.beginFrame();
+
     this.entries.forEach((wmo) => {
-      wmo.animate(delta, camera, cameraMoved);
+      wmo.animate(delta, camera, cameraMoved, this.boneBudget);
+    });
+
+    endAnimSection();
+  }
+
+  /**
+   * Set the map light system
+   */
+  setMapLight(mapLight) {
+    this.mapLight = mapLight;
+    
+    // Propagate to all existing WMO entries
+    this.entries.forEach((wmo) => {
+      if (wmo.setMapLight) {
+        wmo.setMapLight(mapLight);
+      }
+    });
+  }
+
+  /**
+   * Update lighting for all WMO entries
+   */
+  updateLighting() {
+    if (!this.mapLight) return;
+    
+    this.entries.forEach((wmo) => {
+      if (wmo.updateLighting) {
+        wmo.updateLighting();
+      }
     });
   }
 

@@ -38,8 +38,9 @@ vec4 fragCombinersWrath1Pass(sampler2D texture1, vec2 uv1) {
   // Apply animated transparency (defaults to 1.0)
   c1.a *= animatedTransparency;
 
-  // Blend with vertex color
-  c1.rgb *= (animatedVertexColor.rgb * animatedVertexColor.a);
+  // Blend with vertex color using BGR channel swapping (WoW style)
+  vec3 vertexColorBGR = animatedVertexColor.bgr;
+  c1.rgb *= (vertexColorBGR * animatedVertexColor.a);
 
   // Restore full color intensity after blending with vertexColor
   c1.rgb *= 2.0;
@@ -72,8 +73,9 @@ vec4 fragCombinersWrath2Pass(sampler2D texture1, vec2 uv1, sampler2D texture2, v
   // Blend texture alphas
   c1.a *= c2.a;
 
-  // Blend with vertex color
-  c1.rgb *= (animatedVertexColor.rgb * animatedVertexColor.a);
+  // Blend with vertex color using BGR channel swapping (WoW style)
+  vec3 vertexColorBGR = animatedVertexColor.bgr;
+  c1.rgb *= (vertexColorBGR * animatedVertexColor.a);
 
   // Restore full color intensity after blending with vertexColor
   c1.rgb *= 2.0;
@@ -83,13 +85,35 @@ vec4 fragCombinersWrath2Pass(sampler2D texture1, vec2 uv1, sampler2D texture2, v
   return outputColor;
 }
 
+vec3 createSpecularLight(vec3 normal, vec3 direction, vec3 viewDirection, vec3 specularColor, float shininess) {
+  // direction points FROM sun TO surface, so we need -direction for light direction
+  vec3 lightDirection = -direction;
+  vec3 halfVector = normalize(lightDirection + viewDirection);
+  float specularFactor = pow(max(dot(normalize(normal), halfVector), 0.0), shininess);
+  
+  // Make specular more dramatic and responsive to camera angle
+  specularFactor = pow(specularFactor, 0.5); // Square root to make it more spread out
+  
+  return specularColor * specularFactor;
+}
+
 vec4 applyDiffuseLighting(vec4 color) {
-  vec3 lightDirection = vec3(1, 1, -1);
+  // Use dynamic sun direction from WorldLight system
+  vec3 sunDir = sunParams.xyz;
+  vec3 sunLight = sunDiffuseColor.rgb;
+  vec3 viewDirection = normalize(cameraPosition - vertexWorldPosition);
+  
+  float light = clamp(dot(vertexWorldNormal, normalize(-sunDir)), 0.0, 1.0);
 
-  float light = clamp(dot(vertexWorldNormal, normalize(-lightDirection)), 0.0, 1.0);
-
-  vec3 diffusion = diffuseLight.rgb * light;
-  diffusion += ambientLight.rgb;
+  vec3 diffusion = sunLight * light;
+  diffusion += sunAmbientColor.rgb;
+  
+  // Add specular highlights for model glints
+  vec3 specularColor = vec3(0.3, 0.28, 0.25); // Subtle warm white for realistic glints
+  float shininess = 32.0; // Realistic shininess for character/object surfaces
+  vec3 specular = createSpecularLight(vertexWorldNormal, sunDir, viewDirection, specularColor, shininess);
+  
+  diffusion += specular;
   diffusion = clamp(diffusion, 0.0, 1.0);
 
   color.rgb *= diffusion;
@@ -98,18 +122,21 @@ vec4 applyDiffuseLighting(vec4 color) {
 }
 
 vec4 applyFog(vec4 color) {
+  // Use consistent fog calculation with the lighting system
+  vec3 fogColorVec = fogColor;
+  
   float fogFactor = (fogEnd - cameraDistance) / (fogEnd - fogStart);
   fogFactor = 1.0 - clamp(fogFactor, 0.0, 1.0);
   float fogColorFactor = fogFactor * fogModifier;
 
   // Only mix fog color for simple blending modes.
   if (blendingMode <= 2) {
-    color.rgb = mix(color.rgb, fogColor.rgb, fogColorFactor);
+    color.rgb = mix(color.rgb, fogColorVec, fogColorFactor);
   }
 
   // Ensure certain blending mode pixels become fully opaque by fog end.
   if (cameraDistance >= fogEnd) {
-    color.rgb = fogColor.rgb;
+    color.rgb = fogColorVec;
     color.a = 1.0;
   }
 
@@ -150,3 +177,28 @@ void main() {
 
   gl_FragColor = color;
 }
+
+// same name and type as VS
+// varying vec3 vNormal;
+
+// void main() {
+
+//   // calc the dot product and clamp
+//   // 0 -> 1 rather than -1 -> 1
+//   vec3 light = vec3(0.5, 0.2, 1.0);
+
+//   // ensure it's normalized
+//   light = normalize(light);
+
+//   // calculate the dot product of
+//   // the light to the vertex normal
+//   float dProd = max(0.0,
+//                     dot(vNormal, light));
+
+//   // feed into our frag colour
+//   gl_FragColor = vec4(dProd, // R
+//                       dProd, // G
+//                       dProd, // B
+//                       1.0);  // A
+
+// }

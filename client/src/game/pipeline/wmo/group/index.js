@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 
+import BSPTree from '../../../utils/bsp-tree';
+import WMOLiquid from '../../liquid/wmo-liquid';
 import WMORootFlags from '../root/flags';
 import WMOGroupView from './view';
-import BSPTree from '../../../utils/bsp-tree';
-import ColliderManager from '../../../world/collider-manager';
 
 class WMOGroup {
 
@@ -13,8 +13,15 @@ class WMOGroup {
     this.index = def.index;
     this.id = def.groupID;
     this.header = def.header;
+    this.def = def;
+    this.interior = def.interior;
+    this.lightingInterior = def.lightingInterior;
+    // See WMOGroupDefinition.fogOffsets -- indices into root.fogs, resolved by the
+    // camera-in-interior fog consumer, not here.
+    this.fogOffsets = def.fogOffsets;
 
     this.doodadRefs = def.doodadRefs;
+    this.lightRefs = def.lightRefs;
 
     this.createPortals(root, def);
 
@@ -23,16 +30,26 @@ class WMOGroup {
     this.createGeometry(def.attributes, def.batches);
     this.createBoundingBox(def.boundingBox);
     this.createBSPTree(def.bspNodes, def.bspPlaneIndices, def.attributes);
-    this.view = null;
+    
+    // Create liquid meshes if liquid data is present
+    this.liquid = this.createLiquid(def.liquidData);
   }
 
-  // Produce a new WMOGroupView suitable for placement in a scene.
+  /**
+   * A FRESH view, per placement. The group owns no view of its own.
+   *
+   * `WMOGroupLoader` caches groups by path, so a group object is shared by every placement of the
+   * building in the world. It used to hold `this.view` and hand the same object out to all of them --
+   * and an Object3D has ONE parent, so re-parenting moved it: only the last placement existed, and
+   * every earlier copy of that building was simply absent. Measured in game: two placements of
+   * NIGHTELFSMALLHOUSE_WSG reported byte-identical world bounding boxes, which two buildings in
+   * different places cannot have.
+   *
+   * Geometry and materials stay shared -- they are the expensive part and they are placement
+   * independent. Only the scene node is per placement.
+   */
   createView() {
-    if (this.view) {
-      ColliderManager.collidableMeshList.delete(this.view.uuid);
-    }
-    this.view = new WMOGroupView(this, this.geometry, this.materials);
-    return this.view;
+    return new WMOGroupView(this, this.geometry, this.materials);
   }
 
   createPortals(root, def) {
@@ -56,7 +73,7 @@ class WMOGroup {
   // Materials are created on the root blueprint to take advantage of sharing materials across
   // multiple groups (when possible).
   createMaterial(materialRefs) {
-    this.materials = this.root.loadMaterials(materialRefs);
+    this.materials = this.root.loadMaterials(materialRefs, this);
   }
 
   createGeometry(attributes, batches) {
@@ -67,11 +84,19 @@ class WMOGroup {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    geometry.setAttribute('acolor', new THREE.BufferAttribute(colors, 4));
+    const colorAttribute = new THREE.BufferAttribute(colors, 4);
+    geometry.setAttribute('acolor', colorAttribute);
+    // The SAME buffer under three's own attribute name, so a `vertexColors: true` material can read
+    // MOCV without any shader of ours in the path -- see world/wmo-debug.ts. Costs nothing: one extra
+    // attribute record over shared memory, and the WMO shader keeps reading `acolor` explicitly, so
+    // nothing about the real draw changes.
+    geometry.setAttribute('color', colorAttribute);
 
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     // geometry.computeBoundingBox();
     this.assignBatches(geometry, batches);
+    
+    geometry.computeBoundsTree();
 
     return geometry;
   }
@@ -109,6 +134,23 @@ class WMOGroup {
     const { indices, positions } = attributes;
 
     this.bspTree = new BSPTree(nodes, planeIndices, indices, positions);
+
+    // MOPY flags, one byte per triangle, indexed by the SAME triangle index MOBR's entries carry.
+    // That shared indexing is what lets the walk face set (minus DETAIL) and the camera face set
+    // (minus NOCAMCOLLIDE) come out of one shared BSP instead of two bakes.
+    this.triangleFlags = attributes.triangleFlags;
+  }
+
+  createLiquid(liquidData) {
+    if (!liquidData) {
+      return null;
+    }
+
+    console.log('Creating WMO liquid mesh for WMO group:', this.path, this.index);
+    console.log('Liquid data:', liquidData);
+
+    // Create WMO-specific liquid mesh
+    return new WMOLiquid(liquidData);
   }
 
   /**
@@ -130,33 +172,44 @@ class WMOGroup {
 
     let shortestDistance = max;
 
-    const result = {
-      portal: null,
-      portalRef: null,
-      distance: null
-    };
 
+
+    const portals = [];
     for (let index = 0, count = this.portals.length; index < count; ++index) {
       const portal = this.portals[index];
       const portalRef = this.portalRefs[index];
+      const projectedPoint = new THREE.Vector3();
+      portal.plane.projectPoint(point, projectedPoint);
 
-      const point = new THREE.Vector3();
-      portal.plane.projectPoint(point, point);
-      const distance = point.clamp(portal.boundingBox.min, portal.boundingBox.max)
+      
+      const distance = projectedPoint.clamp(portal.boundingBox.min, portal.boundingBox.max)
         .distanceTo(point);
 
-      if (shortestDistance === null || distance < shortestDistance) {
-        shortestDistance = distance;
+      // if (shortestDistance === null || distance < shortestDistance) {
+      //   shortestDistance = distance;
 
         const sign = portal.plane.distanceToPoint(point) < 0.0 ? -1 : 1;
 
-        result.portal = portal;
-        result.portalRef = portalRef;
-        result.distance = distance * sign;
-      }
+        const result = {
+          portal,
+          portalRef,
+          distance: distance,
+          sign
+        };
+        
+        // if (portalRef.side * distance >= 0.0 && result.distance > 0) {
+        // console.log(portal.index, distance, sign, portalRef.side);
+        if ((portalRef.side === 1 && distance * sign > 0) || (portalRef.side === -1 && distance * sign <= 0)) {
+          portals.push(result);
+        }
+      // }
     }
 
-    return (result.portal === null) ? null : result;
+    portals.sort((a,b) => a.distance - b.distance);
+
+    return portals[0] || null;
+
+    // return (result.portal === null) ? null : result;
   }
 
   attenuateVertexColors(root, attributes, batches) {

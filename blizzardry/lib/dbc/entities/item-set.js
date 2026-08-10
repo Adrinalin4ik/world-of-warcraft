@@ -1,30 +1,20 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-var _entity = require('../entity');
-
-var _entity2 = _interopRequireDefault(_entity);
-
-var _localizedStringRef = require('../localized-string-ref');
-
-var _localizedStringRef2 = _interopRequireDefault(_localizedStringRef);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = (0, _entity2.default)({
-  id: _restructure2.default.uint32le,
-  name: _localizedStringRef2.default,
-  itemIDs: new _restructure2.default.Array(_restructure2.default.uint32le, 17),
-  spellIDs: new _restructure2.default.Array(_restructure2.default.uint32le, 8),
-  spellThresholds: new _restructure2.default.Array(_restructure2.default.uint32le, 8),
-  requiredSkillID: _restructure2.default.uint32le,
-  requiredSkillRank: _restructure2.default.uint32le
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+var _entity = _interopRequireDefault(require("../entity"));
+var _localizedStringRef = _interopRequireDefault(require("../localized-string-ref"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _default = (0, _entity["default"])({
+  id: _restructure["default"].uint32le,
+  name: _localizedStringRef["default"],
+  itemIDs: new _restructure["default"].Array(_restructure["default"].uint32le, 17),
+  spellIDs: new _restructure["default"].Array(_restructure["default"].uint32le, 8),
+  spellThresholds: new _restructure["default"].Array(_restructure["default"].uint32le, 8),
+  requiredSkillID: _restructure["default"].uint32le,
+  requiredSkillRank: _restructure["default"].uint32le
 });
-module.exports = exports['default'];
+exports["default"] = _default;

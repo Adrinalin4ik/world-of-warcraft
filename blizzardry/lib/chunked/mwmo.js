@@ -1,20 +1,13 @@
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _restructure = require('restructure');
-
-var _restructure2 = _interopRequireDefault(_restructure);
-
-var _chunk = require('./chunk');
-
-var _chunk2 = _interopRequireDefault(_chunk);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-exports.default = (0, _chunk2.default)({
-  filenames: new _restructure2.default.Array(new _restructure2.default.String(null), 'size', 'bytes')
+exports["default"] = void 0;
+var _restructure = _interopRequireDefault(require("restructure"));
+var _chunk = _interopRequireDefault(require("./chunk"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+var _default = (0, _chunk["default"])({
+  filenames: new _restructure["default"].Array(new _restructure["default"].String(null), 'size', 'bytes')
 });
-module.exports = exports['default'];
+exports["default"] = _default;

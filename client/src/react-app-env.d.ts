@@ -3,6 +3,78 @@
 /// <reference types="react-dom" />
 /// <reference types="three" />
 
+declare global {
+  interface Window { safePrint: any; }
+}
+
+declare module '*.glsl' {
+  const value: string;
+  export default value;
+}
+
+declare module '*.frag' {
+  const value: string
+  export default value
+}
+declare module '*.vert' {
+  const value: string
+  export default value
+}
+
+declare module 'browserify-zlib';
+
+declare module 'byte-buffer' {
+  export default class ByteBuffer {
+    static HEADER_SIZE: number;
+    static LITTLE_ENDIAN: number;
+    static BIG_ENDIAN: number;
+    constructor(source?:ArrayBuffer, order?: number, implicitGrowth?: boolean)
+    buffer: ArrayBuffer;
+    view: NodeJS.ArrayBufferView;
+    raw: Uint8Array[];
+    readByte(order?):number;
+    readUnsignedByte(order?):number;
+    readShort(order?):number;
+    readUnsignedShort(order?):number;
+    readInt(order?):number;
+    readUnsignedInt(order?):number;
+    readFloat(order?):number;
+    readDouble(order?):number;
+    // A STRING, not a number. This was declared `number`, which is what the implementation returns
+    // for `writeCString` (a byte count) and never for the read: `byte-buffer.js:371-390` walks to the
+    // NUL and returns `this.readString(length)`. The wrong declaration is invisible until something
+    // assigns the result somewhere typed -- the first caller to do so was
+    // `network/game/object/combat.ts`'s creature-query name, and it failed to compile rather than
+    // quietly stringifying, which is the good outcome.
+    readCString(): string;
+    readString(length?: number): string;
+    writeByte(number: number):number;
+    writeUnsignedByte(number: number):number;
+    writeUnsignedByte(number: number):number;
+    writeShort(number: number):number;
+    writeUnsignedShort(number: number):number;
+    writeInt(number: number):number;
+    writeUnsignedInt(number: number):number;
+    writeFloat(number: number):number;
+    writeDouble(number: number):number;
+    writeCString(str: string): number;
+    toHex(spacer: string):string;
+    toASCII(spacer: string, align: boolean, unknown: string):string;
+    clone(): ByteBuffer;
+    clip(begin: number, end: number): ByteBuffer;
+    append(bytes: number): ByteBuffer;
+    // Reads `bytes` bytes (defaults to everything available) and returns a NEW ByteBuffer wrapping
+    // that slice -- not the raw bytes themselves. `new Uint8Array(someByteBuffer)` does not read
+    // through it; the slice's own `.buffer` is what holds the bytes that were read.
+    read(bytes?: number): ByteBuffer;
+    // Accepts a byte sequence (a plain array, a typed array, or another ByteBuffer) -- not a single
+    // number. `auth/handler.js` passes a plain array.
+    write(sequence: ArrayLike<number> | ByteBuffer): number;
+    available: number;
+    length: number;
+  }
+}
+
 declare namespace NodeJS {
   interface ProcessEnv {
     readonly NODE_ENV: 'development' | 'production' | 'test';
@@ -67,6 +139,9 @@ declare module '*.module.sass' {
 
 declare module 'easy-mediasoup-v3-client';
 declare module 'react-joystick';
+// fengari ships no type declarations of its own; game/ui/framexml/lua/vm.ts is the only caller
+// and narrows the untyped surface itself as it uses it.
+declare module 'fengari';
 // Type definitions for Physijs
 // Project: http://chandlerprall.github.io/Physijs/
 // Definitions by: Satoru Kimura <https://github.com/gyohk>

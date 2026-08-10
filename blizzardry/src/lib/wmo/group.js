@@ -100,6 +100,16 @@ const MOBR = Chunk({
   indices: new r.Array(r.int16le, 'size', 'bytes')
 });
 
+// const MLIQ = Chunk({
+//   xverts: r.uint32le,
+//   yverts: r.uint32le,
+//   xtiles: r.uint32le,
+//   ytiles: r.uint32le,
+//   x: Vec3Float,
+//   y: Vec3Float,
+//   materialId: r.uint32le
+// });
+
 export default Chunked({
   MOGP: MOGP,
   MOPY: MOPY,
@@ -128,7 +138,9 @@ export default Chunked({
   MOCV: new r.Optional(MOCV, function() {
     return this.flags & 0x4;
   }),
-
+  // MLIQ: new r.Optional(MLIQ, function() {
+  //   return this.flags & 0x4;
+  // }),
   interior: function() {
     return (this.flags & 0x2000) !== 0 && (this.flags & 0x8) === 0;
   }

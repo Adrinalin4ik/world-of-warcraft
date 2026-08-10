@@ -5,10 +5,13 @@ export default {
     }
   },
   texture: {
-    unloadInterval: 5000
+    unloadInterval: 30000
   },
   m2: {
-    unloadInterval: 5000
+    unloadInterval: 5 * 60 * 1000,
+    // Hard ceiling on bone evaluations per frame. Instances beyond it hold last frame's pose.
+    // Sized against the 16.67 ms budget; tune from the HUD's animBonesSolved row.
+    boneBudgetPerFrame: 4000
   },
   doodad: {
     // Proportion of pending doodads to load or unload in a given tick.

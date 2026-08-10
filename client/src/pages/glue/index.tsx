@@ -1,0 +1,129 @@
+/**
+ * The glue host: a full-window canvas and nothing else.
+ *
+ * React's entire role in the pre-world screens is this component. Widgets, input and state live in
+ * `game/ui`, so there is no React state here to keep in step with the glue tree.
+ */
+import React from 'react';
+import { useNavigate } from 'react-router-dom';
+
+import { GameSession } from '../../network/session';
+import { ClientState, GlueApp } from '../../game/ui/screens';
+import { CharacterStubScreen } from '../../game/ui/screens/character-stub';
+import { FrameXmlGlueScreen } from '../../game/ui/screens/framexml-screen';
+import { LoginScreen } from '../../game/ui/screens/login';
+import { RealmListScreen } from '../../game/ui/screens/realms';
+
+/**
+ * `?ui=lua` mounts the glue screen the FrameXML runtime builds from the client's own GlueXML manifest --
+ * `AccountLogin.xml` and `RealmList.xml` both, from one Lua VM; anything else keeps the hand-written
+ * transcriptions.
+ *
+ * The DEFAULT stays the transcription deliberately. It is the screen that matches the reference
+ * screenshots, and it is the ORACLE the runtime is being compared against -- so it holds `/` until the
+ * side-by-side diff is clean, not until the runtime merely looks right.
+ */
+function wantsLuaUi(search: string): boolean {
+  return new URLSearchParams(search).get('ui') === 'lua';
+}
+
+interface Props {
+  session: GameSession;
+  /** Leave the glue layer for the world route -- see `GlueApp#onEnterWorld`. */
+  onEnterWorld?: () => void;
+}
+
+class GlueHost extends React.Component<Props> {
+  private canvas = React.createRef<HTMLCanvasElement>();
+  private app: GlueApp | null = null;
+
+  componentDidMount(): void {
+    const canvas = this.canvas.current;
+    if (!canvas) {
+      return;
+    }
+
+    this.app = new GlueApp(canvas, this.props.session, this.props.onEnterWorld);
+    if (wantsLuaUi(window.location.search)) {
+      // ONE instance for both glue states, and that is the whole wiring of the realm list: the
+      // manifest this screen loads already contains `RealmList.xml`, the client's own
+      // `RealmList_OnEvent` shows it on `OPEN_REALM_LIST` (which `lua/api/realms.ts` fires from the
+      // session), and `GlueApp#enter` skips the remount for a screen it is already showing. Registering
+      // two instances instead would reboot the Lua VM between the two, and registering NOTHING for
+      // `RealmList` would work by accident -- `onSessionState` skips a state with no screen -- while
+      // leaving the machine claiming the login screen was still up.
+      const glue = new FrameXmlGlueScreen();
+      this.app.register(ClientState.Login, glue);
+      this.app.register(ClientState.RealmList, glue);
+      // ...and CharSelect, on the same instance and for the same reason. `CharacterSelect.xml` is
+      // inside the manifest this screen loads now, and the client's own `SET_GLUE_SCREEN` ->
+      // `GlueScreenExit` -> `SetGlueScreen("charselect")` path shows it. A second instance here would
+      // reboot the Lua VM at exactly the moment the roster arrives.
+      this.app.register(ClientState.CharSelect, glue);
+    } else {
+      this.app.register(ClientState.Login, new LoginScreen());
+      this.app.register(ClientState.RealmList, new RealmListScreen());
+      this.app.register(ClientState.CharSelect, new CharacterStubScreen());
+    }
+    void this.app.start(ClientState.Login);
+  }
+
+  componentWillUnmount(): void {
+    this.app?.stop();
+    this.app = null;
+  }
+
+  render(): React.ReactNode {
+    return (
+      <canvas
+        ref={this.canvas}
+        style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', display: 'block' }}
+      />
+    );
+  }
+}
+
+/**
+ * The route element: `GlueHost` plus the one thing it needs the router for.
+ *
+ * A ROUTER navigation, not `window.location`. The `GameSession` -- and with it the live world socket
+ * the handshake opened, its RC4 crypt state and `GameHandler`'s packet listeners -- is created once in
+ * `App` and handed to both routes; a document navigation would drop all of it and the world route
+ * would come up on a session that had never connected. `App`'s body does not re-run on a router
+ * navigation, so the same session instance reaches `GameScreen`.
+ *
+ * A function component wrapper because `useNavigate` is a hook and `GlueHost` is a class; keeping the
+ * class means its `componentWillUnmount` still runs `GlueApp#stop()`, which is what stops the glue
+ * frame loop before the world's starts.
+ */
+const GlueRoute: React.FC<{ session: GameSession }> = ({ session }) => {
+  const navigate = useNavigate();
+  // WITH the query string, for the reason `pages/game/index.tsx:415-421` gives about the trip BACK.
+  // That comment is only half a fix while this half throws the query away, and the round that added
+  // it measured the consequence without recognising it: after a world disconnect, `window.glueRuntime`
+  // never returned on `?ui=lua`.
+  //
+  // MEASURED (`scratchpad/G1-glue.png`, one real world entry as `Gdsh` followed by
+  // `session.game.disconnect()`): the page came back to `/` and drew a complete, interactive login
+  // screen -- which is why nobody caught it -- but the screen it drew was the HAND-WRITTEN
+  // transcription (`game/ui/screens/login.ts:280` is the only "Server Address" label in the client),
+  // not the FrameXML one. `GlueHost#componentDidMount` picks the screen set from
+  // `wantsLuaUi(window.location.search)`, so a `/game` with no search means a `/` with no search
+  // means no `FrameXmlGlueScreen`, no Lua VM and no `window.glueRuntime`, for ever. The load report
+  // for the second boot never appeared on the console because there was no second boot.
+  //
+  // `?realmlist=` and `?gateway=` ride along for the same reason: both are read PER CONNECT, off
+  // `window.location.search`, by `network/gateway.ts#currentSettings` ->
+  // `protocol/connection-settings.ts:113,146`. So a `/game` without them silently sends every socket
+  // this route opens -- including a reconnect -- to the default logon host and the default gateway,
+  // not to the ones the session was started against.
+  const enterWorld = React.useCallback(() => {
+    console.info('glue: entering the world; leaving the glue route');
+    navigate({ pathname: '/game', search: window.location.search });
+  }, [navigate]);
+
+  return <GlueHost session={session} onEnterWorld={enterWorld} />;
+};
+
+export { GlueHost };
+export default GlueRoute;

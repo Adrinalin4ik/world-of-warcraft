@@ -1,33 +1,33 @@
 import React from 'react';
-import Game from '../../../game';
+import * as THREE from 'three';
+import { GameHandler } from '../../../network/game/handler';
+import CollapsibleSection from './collapsible-section';
+import CollisionControls from './collision-controls';
+import ModelReadout from './model-readout';
+import MoveReadout from './move-readout';
+import SavedCoords from './saved-coords';
+import WmoControls from './wmo-controls';
+import FogControls from './fog-controls';
+import LightControls from './light-controls';
+import { wmoDebug } from '../../../game/world/wmo-debug';
+import { fogDebug } from '../../../game/world/fog-debug';
+import { lightDebug } from '../../../game/world/light-debug';
+import { modelProbe } from '../../../game/pipeline/m2/model-probe';
+import LightingControls from './lighting-controls';
+import LightingReadouts from './lighting-readouts';
 import './debug.scss';
 
 interface IProp {
-  game: Game | null,
+  game: GameHandler | null,
   renderer: THREE.WebGLRenderer | null
 }
 
 class DebugPanel extends React.Component<IProp> {
 
-  private game: Game | null;
-  private renderer: THREE.WebGLRenderer | null;
-  
-  private static test1: string = "";
-  private static test2: string = "";
-  private static test3: string = "";
 
-  constructor(props: IProp) {
-    super(props);
-    this.game = props.game;
-    this.renderer = props.renderer;
-    console.log("Debug component", this)
-  }
-
-  getSnapshotBeforeUpdate(prevProps:IProp, _prevState:any) {
-    this.renderer = prevProps.renderer;
-    this.game = prevProps.game;
-    return null;
-  }
+  public static test1: string = "";
+  public static test2: string = "";
+  public static test3: string = "";
 
   static vector3ToString(v: {x: number, y: number, z: number}) {
     return `${v.x}, ${v.y}, ${v.z}`
@@ -43,8 +43,8 @@ class DebugPanel extends React.Component<IProp> {
   }
 
   playerStats() {
-    if (!this.game) return;
-    const player = this.game.world.player;
+    if (!this.props.game) return;
+    const player = this.props.game.world.player;
     
     return (
       <div>
@@ -62,47 +62,29 @@ class DebugPanel extends React.Component<IProp> {
           z: { Math.round(player.position.z) }
         </p>
         <p>
-          Ground distance: { player.groundDistance.toFixed(2) }
+          facing: { (player.move.faceYaw * 180 / Math.PI).toFixed(1) }&deg;
+          &nbsp;body: { (player.move.modelYaw * 180 / Math.PI).toFixed(1) }&deg;
         </p>
         <p>
-          On ground: { player.isOnGround.toString() }
+          vz: { player.move.velZ.toFixed(2) }
+          &nbsp;horiz: { player.move.horizVel.length().toFixed(2) }
         </p>
         <p>
-          Jump: { player.isJump.toString() }
+          airborne: { player.move.airborneSince === null ? 'no' : 'yes' }
+          &nbsp;fallFar: { player.move.fallFar.toString() }
+          &nbsp;wedged: { player.move.wedged.toString() }
         </p>
         <p>
-          Jump velocity: { player.jumpVelocity.toFixed(2) }
+          swimming: { player.move.swimming.toString() }
+          &nbsp;pitch: { (player.move.swimPitch * 180 / Math.PI).toFixed(1) }&deg;
+          &nbsp;stroke: { player.move.swimStrokeSpeed.toFixed(2) }
         </p>
         <p>
-          Slope type: { player.slopeType === 0 ? 'sliding' : 'climbing' }
+          collision height: { player.collisionHeight.toFixed(3) }
         </p>
-        <p>
-          Slope ang: { player.slopeAng.toFixed(2) }
-        </p>
-        <p>
-          Is moving: { player.isMoving.toString() }
-        </p>
-        <p>
-          Moving forward: { player.moving.forward.toString() }
-        </p>
-        <p>
-          Moving backward: { player.moving.backward.toString() }
-        </p>
-        <p>
-          Moving right: { player.moving.strafeRight.toString() }
-        </p>
-        <p>
-          Moving left: { player.moving.strafeLeft.toString() }
-        </p>
-        <p>
-          Rotate right: { player.moving.rotateRight.toString() }
-        </p>
-        <p>
-          Rotate left: { player.moving.rotateLeft.toString() }
-        </p>
-        <p>
-          Animation index: { player.currentAnimationIndex.toString() }
-        </p>
+        <MoveReadout />
+        <div className="divider"></div>
+        <SavedCoords player={ player } />
         <div className="divider"></div>
         {/* <p>
           Collides: { player.isCollide() ? 'true' : 'false' }
@@ -112,9 +94,9 @@ class DebugPanel extends React.Component<IProp> {
   }
 
   mapStats() {
-    if (!this.game) return;
+    if (!this.props.game) return;
 
-    const map = this.game.world.map;
+    const map = this.props.game.world.map;
 
     return (
       <div>
@@ -172,27 +154,54 @@ class DebugPanel extends React.Component<IProp> {
   }
 
   render() {
-    if (!this.game || !this.renderer) return null;
+    if (!this.props.game || !this.props.renderer) return null;
 
-    const renderer = this.renderer;
+    const renderer = this.props.renderer;
 
-    const map = this.game.world.map;
+    const map = this.props.game.world.map;
 
     const { memory, programs } = renderer.info;
     return (
       <div className="stats">
-        <h2>Tests</h2>
-        <p>
-          Test1: {DebugPanel.test1}
-        </p>
-        <p>
-          Test2: {DebugPanel.test2}
-        </p>
-        <p>
-          Test3: {DebugPanel.test3}
-        </p>
-        <h2>Player</h2>
-        { this.playerStats() }
+        <CollapsibleSection title="Tests" storageKey="tests" defaultCollapsed={true}>
+          <p>
+            Test1: {DebugPanel.test1}
+          </p>
+          <p>
+            Test2: {DebugPanel.test2}
+          </p>
+          <p>
+            Test3: {DebugPanel.test3}
+          </p>
+        </CollapsibleSection>
+        <CollapsibleSection title="Player" storageKey="player" defaultCollapsed={true}>
+          { this.playerStats() }
+        </CollapsibleSection>
+        <CollapsibleSection title="Player model" storageKey="player-model" defaultCollapsed={true}>
+          <ModelReadout
+            probe={ modelProbe }
+            camera={ this.props.game.camera }
+            renderer={ this.props.renderer }
+          />
+        </CollapsibleSection>
+        <CollapsibleSection title="WMO surfaces" storageKey="wmo-surfaces" defaultCollapsed={true}>
+          <WmoControls wmo={ wmoDebug } />
+        </CollapsibleSection>
+        <CollapsibleSection title="Collisions" storageKey="collisions" defaultCollapsed={true}>
+          <CollisionControls view={ this.props.game.world.collisionDebug } />
+        </CollapsibleSection>
+        <CollapsibleSection title="Lighting" storageKey="lighting" defaultCollapsed={false}>
+          <FogControls fog={ fogDebug } />
+          <LightControls light={ lightDebug } />
+          <div className="divider"></div>
+          <LightingControls mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null } />
+        </CollapsibleSection>
+        <CollapsibleSection title="Lighting resolve" storageKey="lighting-resolve" defaultCollapsed={false}>
+          <LightingReadouts
+            mapLight={ this.props.game.world.map ? this.props.game.world.map.mapLight : null }
+            cloudReadout={ this.props.game.world.skyManager.getCloudReadout() }
+          />
+        </CollapsibleSection>
         {/* <h2>Memory</h2>
         <div className="divider"></div>
         <p>

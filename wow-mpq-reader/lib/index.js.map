@@ -1,0 +1,1 @@
+{"version":3,"file":"index.js","names":[],"sources":["../src/lib/index.js"],"sourcesContent":["export * as restructure from './restructure';\n"],"mappings":""}

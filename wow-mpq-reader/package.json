@@ -1,0 +1,33 @@
+{
+  "name": "wow-mpq-reader",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "babel --delete-dir-on-start --out-dir lib src/lib --source-maps",
+    "test": "istanbul test ./node_modules/mocha/bin/_mocha -- ./src/spec --recursive --experimental-modules"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ffi-napi": "^4.0.3",
+    "ref-napi": "^3.0.3",
+    "ref-struct-napi": "^1.1.1",
+    "restructure": "^3.0.0",
+    "temp": "^0.9.4",
+    "xtend": "^4.0.2"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.21.0",
+    "@babel/core": "^7.21.0",
+    "@babel/node": "^7.20.7",
+    "@babel/preset-env": "^7.20.2",
+    "chai": "^4.3.7",
+    "istanbul": "^0.4.5",
+    "mocha": "^10.2.0",
+    "nodemon": "^2.0.21",
+    "sinon": "^15.0.1",
+    "sinon-chai": "^3.7.0"
+  }
+}

@@ -1,0 +1,447 @@
+/**
+ * The client lifecycle machine and the glue app loop.
+ *
+ * `ClientState` mirrors the reference's own (benilla `char_select/mod.rs`): the pre-world glue
+ * layer and the world are STATES, not routes -- which is why a screen never navigates, it asks the
+ * machine to change state.
+ *
+ * A screen is a plain module. It knows nothing about React, routing, or the other screens.
+ */
+import * as THREE from 'three';
+
+import { worldClock } from '../pipeline/m2/anim/world-clock';
+import { GameSession } from '../../network/session';
+import { ProtocolSession, SessionState } from '../../network/protocol/session';
+import { CharacterRecord } from '../../network/protocol/types';
+import { GlueArt } from './art';
+import { clientStateForStage } from './screens/login-state';
+import { installFramexmlDebug } from './framexml/debug';
+import { GlueInput } from './input';
+import { GlueRenderer, ResolvedSprite } from './renderer';
+import { resolveSprite } from './sprite';
+import { resolveCharacterLook } from './scene/character-look';
+import { clearCompositeCache } from './scene/body-composite';
+import { GlueSceneView } from './scene/glue-scene';
+import type { ModelRig } from './scene/scene-rig';
+import { GlueScene } from './scene/tokens';
+import { GlueStrings } from './strings';
+import { FontStringTextures, loadGlueFonts, measureText } from './text';
+import { DrawItem, WidgetRoot } from './widget';
+import { screenScale } from './layout';
+
+export enum ClientState {
+  Login = 'Login',
+  RealmList = 'RealmList',
+  CharSelect = 'CharSelect',
+  CharCreate = 'CharCreate',
+  InWorld = 'InWorld',
+}
+
+export interface GlueContext {
+  root: WidgetRoot;
+  art: GlueArt;
+  strings: GlueStrings;
+  input: GlueInput;
+  /** The session facade (§4.7) -- the same `GameSession` every other route is handed. Nothing in
+   * this spec consumes it yet; the login screen (spec 3) is the first screen that will. */
+  session: GameSession;
+  /** The typed pre-world session (spec 2). The login screen (spec 3) is its first consumer. */
+  protocol: ProtocolSession;
+  /** Show a glue background scene, or null to tear it down. */
+  setScene(scene: GlueScene | null): void;
+  /**
+   * Hand the 3D stage a MODEL frame's own state -- what `SetSequence`, `SetCamera`, `SetFog*`,
+   * `SetGlow` and `Add*Light` left on it -- or null for a screen that has none.
+   *
+   * Only the FrameXML screen ever calls this, because only it runs the client's Lua. The two
+   * hand-written screens pass nothing and the scene view falls back accordingly (see
+   * `GlueSceneView#applyRig`), which is what keeps plain `/` on its transcribed values.
+   */
+  setModelRig(rig: ModelRig | null): void;
+  /**
+   * Stand a character on the current scene's stage spot, or null to take it off.
+   *
+   * Takes a `CharacterRecord` off the session rather than a model path: which `.m2`, which body skin
+   * and which geosets a character resolves to is a four-DBC question (`scene/character-look.ts`), and
+   * a screen has no business answering it. Fire-and-forget -- the DBC reads and the `.m2` fetch are
+   * async and the character appears when they land.
+   */
+  setCharacter(character: CharacterRecord | null): void;
+  /**
+   * Turn the character on the stage. DEGREES -- `SetCharacterSelectFacing`'s own unit; see
+   * `framexml/runtime.ts#GlueRuntimeOptions.onSetCharacterFacing` for the two constants that fix it.
+   */
+  setCharacterFacing(degrees: number): void;
+  /** Request a state change; takes effect before the next frame. */
+  go(state: ClientState): void;
+}
+
+export interface GlueScreen {
+  mount(ctx: GlueContext): void;
+  update(dt: number): void;
+  unmount(): void;
+}
+
+export class GlueApp {
+  private readonly canvas: HTMLCanvasElement;
+  private readonly renderer: THREE.WebGLRenderer;
+  private readonly ui: GlueRenderer;
+  private readonly fonts = new FontStringTextures();
+  private readonly art = new GlueArt();
+  private readonly input: GlueInput;
+  private readonly sceneView: GlueSceneView;
+  private readonly session: GameSession;
+
+  private strings: GlueStrings | null = null;
+  private screens = new Map<ClientState, GlueScreen>();
+  private current: { state: ClientState; screen: GlueScreen; root: WidgetRoot } | null = null;
+  private pending: ClientState | null = null;
+  /** The session subscription's unsubscribe, held so `stop()` can drop it. */
+  private unsubscribeSession: (() => void) | null = null;
+  /**
+   * Set by `stop()`. `start()` awaits font and string loading, so a route change during that await
+   * runs `stop()` first and `start()` resumes afterwards into a torn-down app -- subscribing a
+   * listener nothing will ever drop and arming a frame loop nothing will ever cancel.
+   */
+  private stopped = false;
+
+  private frame = 0;
+  private lastTime = 0;
+  /** The last stage-render failure reported, so a per-frame throw is one console line and not a flood. */
+  private lastSceneError: string | null = null;
+
+  /**
+   * The one thing this app cannot do itself: leave the glue layer for the world.
+   *
+   * `InWorld` is the only `ClientState` with no `GlueScreen`, and that is correct rather than a gap --
+   * the world is a different React route with its own canvas, renderer and frame loop. So the glue
+   * app reports the transition and the HOST performs it (`pages/glue/index.tsx` navigates), which
+   * also means the host's unmount runs `stop()` and the glue frame loop halts before `World#animate`
+   * starts. `screens.ts#tick` requires exactly that ordering: both loops advance `worldClock`, and
+   * running them concurrently would double-advance every animation clock in the client.
+   *
+   * Fired at most once per app: `enteredWorld` latches. `ProtocolSession` notifies on every stage
+   * change and several land in one turn, and navigating twice would remount the world route.
+   */
+  private onEnterWorld: (() => void) | null = null;
+  private enteredWorld = false;
+
+  constructor(canvas: HTMLCanvasElement, session: GameSession, onEnterWorld?: () => void) {
+    this.canvas = canvas;
+    this.session = session;
+    this.onEnterWorld = onEnterWorld ?? null;
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    // The gamma-passthrough lane this whole client runs on, the same line `pages/game/index.tsx`
+    // sets for the world renderer. BLP texels and the client's shaders are already sRGB-encoded, and
+    // r152 changed the default to `SRGBColorSpace`, which converts linear->sRGB on output and so
+    // brightens every already-encoded texel: the glue scene washed out to milky cyan, `-Blue` button
+    // art that is dark navy in the sheet drew pale, and the font rasters lost their contrast (which
+    // reads as blur). Nothing here is authored in linear space, so there is nothing to convert.
+    this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.ui = new GlueRenderer(this.renderer);
+    this.input = new GlueInput(canvas);
+    this.sceneView = new GlueSceneView(this.renderer);
+  }
+
+  register(state: ClientState, screen: GlueScreen): void {
+    this.screens.set(state, screen);
+  }
+
+  async start(initial: ClientState): Promise<void> {
+    this.resize();
+    window.addEventListener('resize', this.resize);
+    this.input.attach();
+
+    // The FrameXML document layer has no callers until the Lua runtime lands, so this console hook is
+    // the only way to run it against the client's real files rather than against test fixtures.
+    // Same idea as `skyDebug`, and the same place to remove it from when the loader makes it moot.
+    installFramexmlDebug();
+
+    // A console handle on the 3D stage, beside `glueRuntime` and `glueSession` and for the same
+    // reason: the questions this layer raises -- is a character loaded, where is it standing, which
+    // geosets are visible, which sequence is armed, what did texture slot 1 resolve to -- are not
+    // answerable from a screenshot, and a screenshot alone is how three separate rounds of "the
+    // character is on the stage" turned out not to reproduce.
+    (window as never as Record<string, unknown>).glueScene = this.sceneView;
+
+    // Fonts and strings first: a screen that mounts before them draws unreadable labels.
+    await Promise.all([loadGlueFonts(), GlueStrings.load().then((s) => (this.strings = s))]);
+
+    if (this.stopped) {
+      return;
+    }
+
+    this.enter(initial);
+
+    // THE path past the login screen. Nothing else advances this machine: the session is the only
+    // thing that knows a login succeeded, a realm was joined or the roster arrived, so without this
+    // subscription a correct login would sit on the login screen forever. Subscribed AFTER the initial
+    // `enter`, so the first emission compares against a real current state rather than against
+    // nothing and immediately re-entering the screen just mounted.
+    this.unsubscribeSession = this.session.protocol.on(this.onSessionState);
+
+    this.lastTime = performance.now();
+    this.frame = requestAnimationFrame(this.tick);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    cancelAnimationFrame(this.frame);
+    window.removeEventListener('resize', this.resize);
+    this.input.detach();
+    // One leaked listener per mounted app is a real leak, and a listener left on a live session would
+    // go on asking a torn-down app to change screens.
+    this.unsubscribeSession?.();
+    this.unsubscribeSession = null;
+    this.current?.screen.unmount();
+    this.current = null;
+    // Cancels any pending 3 s login retry and stops the machine reacting further -- otherwise a
+    // timer scheduled by a login attempt in flight when this app is torn down fires into a dead
+    // object.
+    this.session.protocol.stop();
+    this.sceneView.dispose();
+    // The body composites are cached across roster selections and their owner is that cache, not the
+    // material that samples them -- so nothing else would ever free them.
+    clearCompositeCache();
+    this.ui.dispose();
+    this.fonts.dispose();
+    this.art.dispose();
+    this.solidTexture?.dispose();
+    this.solidTexture = null;
+    this.renderer.dispose();
+  }
+
+  private resize = (): void => {
+    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+  };
+
+  /**
+   * The session moved: mount whatever state that stage means.
+   *
+   * Only when it DIFFERS from what is already up or already queued. The session emits on every stage
+   * change, and several land in one turn (`Connecting` then `Authenticating`); re-requesting the state
+   * already showing would rebuild that screen under the player -- losing focus, typed text and the
+   * dialog -- on every emission.
+   */
+  private onSessionState = (state: SessionState): void => {
+    const target = clientStateForStage(state.stage);
+
+    // BEFORE the two early-outs below, both of which would swallow it. `InWorld` has no registered
+    // screen, so the `screens.has` guard rejects it; and it is reached from `CharSelect`, which
+    // `clientStateForStage` also maps `EnteringWorld` to, so the "same as what is already up" guard
+    // rejects it too. See `onEnterWorld` for why the host and not this app performs the transition.
+    if (target === ClientState.InWorld && !this.enteredWorld) {
+      this.enteredWorld = true;
+      this.onEnterWorld?.();
+      return;
+    }
+
+    if (target === (this.pending ?? this.current?.state)) {
+      return;
+    }
+    // A state with no screen registered has nowhere to go, and `enter` leaves `current` where it was.
+    // Queueing it anyway would re-queue on every later emission and warn once per emission, since the
+    // guard above would never see it as current.
+    if (!this.screens.has(target)) {
+      return;
+    }
+    this.pending = target;
+  };
+
+  private enter(state: ClientState): void {
+    const screen = this.screens.get(state);
+    if (!screen) {
+      console.warn(`no glue screen registered for ${state}`);
+      return;
+    }
+
+    // ONE screen instance may be registered for SEVERAL states, and then a transition between them is
+    // not a remount.
+    //
+    // This is the glue layer's own shape, not a convenience. In the client there is one screen hosting
+    // every glue frame and `GlueParent` shows or hides `AccountLogin`, `RealmList`, `CharacterSelect` in
+    // turn -- `RealmList` is not even a `GlueScreenInfo` entry (glueparent.lua:11-19): it is a
+    // `frameStrata="DIALOG"` frame that `RealmList_OnEvent` shows over the login screen when
+    // `OPEN_REALM_LIST` arrives. A screen that serves both states therefore has nothing to rebuild, and
+    // rebuilding it would be actively wrong: the FrameXML screen's whole Lua VM would be torn down and
+    // rebooted, every `OnLoad` would re-run, and the saved account name and every Lua-side field
+    // (`RealmList.selectedCategory`, `RealmList.offset`) would be lost for a transition the client does
+    // with two `Show`/`Hide` calls.
+    //
+    // Identity, not equality of state: the hand-written screens register a DIFFERENT instance per state,
+    // so `/` takes the unmount-and-remount path below exactly as it always has.
+    if (this.current !== null && this.current.screen === screen) {
+      this.current.state = state;
+      return;
+    }
+
+    this.current?.screen.unmount();
+    this.input.reset();
+
+    const root = new WidgetRoot();
+    const ctx: GlueContext = {
+      root,
+      art: this.art,
+      strings: this.strings!,
+      input: this.input,
+      session: this.session,
+      protocol: this.session.protocol,
+      setScene: (scene) => this.sceneView.setScene(scene),
+      setModelRig: (rig) => this.sceneView.applyRig(rig),
+      setCharacter: (character) => this.showCharacter(character),
+      // Degrees in, radians on the group. A bare field write plus a quaternion, per the reference's
+      // own yaw fast path: the drag writes this every frame it moves and it must not touch the model,
+      // the texture or the DBC lookups.
+      setCharacterFacing: (degrees) => {
+        this.sceneView.yaw = THREE.MathUtils.degToRad(degrees);
+      },
+      go: (next) => {
+        this.pending = next;
+      },
+    };
+
+    // A screen that wants no scene gets none, and a screen that wants one asks on mount. The MODEL
+    // rig goes with it: a screen change past the early-out above is a different screen INSTANCE, so
+    // whatever model frame supplied the last rig no longer exists, and letting it stand would fog the
+    // new screen's stage from a torn-down frame's state.
+    this.sceneView.setScene(null);
+    this.sceneView.applyRig(null);
+    screen.mount(ctx);
+    this.current = { state, screen, root };
+  }
+
+  /**
+   * Resolve a roster row to a look and hand it to the scene view.
+   *
+   * The token guard is the same one `setScene` and `setCharacter` use, for the same reason at one
+   * remove: `resolveCharacterLook` awaits up to four DBC loads, and on a cold cache the FIRST one is
+   * hundreds of milliseconds -- easily long enough for two more selection clicks. Without it, three
+   * clicks resolve in whatever order their fetches settle and the LAST one to land wins, which is not
+   * the one the player picked.
+   *
+   * `characterLookToken` is bumped for a null request too, so "take the character off" cannot be
+   * overtaken by a look still resolving from the row that was selected before it.
+   */
+  private characterLookToken = 0;
+
+  private showCharacter(character: CharacterRecord | null): void {
+    const token = ++this.characterLookToken;
+
+    if (!character) {
+      this.sceneView.setCharacter(null);
+      return;
+    }
+
+    void resolveCharacterLook(character)
+      .then((look) => {
+        if (token !== this.characterLookToken) {
+          return;
+        }
+        // A null look means a DBC row was missing, and `resolveCharacterLook` has already said which
+        // on the console. Leaving the previous body up would attribute it to the newly selected
+        // character, so the stage is cleared instead.
+        this.sceneView.setCharacter(look);
+      })
+      .catch((error) => {
+        console.error('glue: could not resolve the selected character\'s look', error);
+      });
+  }
+
+  private tick = (now: number): void => {
+    this.frame = requestAnimationFrame(this.tick);
+
+    const dt = (now - this.lastTime) / 1000;
+    this.lastTime = now;
+
+    // `world-clock.ts` documents `World#animate` as the clock's one advance site, but the glue app
+    // is a SEPARATE frame loop that never runs concurrently with the world -- they are different
+    // routes, and the glue app is torn down before the game screen mounts. This is the glue side's
+    // own advance site: the scene view arms instances against `worldClock.ms` and would otherwise
+    // sample a permanently frozen clock, since `World#animate` never runs while a glue screen is up.
+    // NOTE for whoever wires the `InWorld` transition: that non-concurrency is true today but
+    // UNENFORCED -- nothing stops both loops running at once. Do not start `World#animate` before
+    // this loop has stopped (`GlueApp#stop`), or the clock will be double-advanced.
+    worldClock.advance(dt);
+
+    if (this.pending) {
+      const next = this.pending;
+      this.pending = null;
+      this.enter(next);
+    }
+
+    if (!this.current) {
+      return;
+    }
+
+    this.current.screen.update(dt);
+
+    this.renderer.clear();
+    // THE 3D STAGE MAY NOT TAKE THE UI DOWN WITH IT.
+    //
+    // The UI pass runs after the stage pass in the same callback, so an exception here used to abort
+    // the rest of the tick -- and the whole 2D interface vanished while the partly-drawn stage stayed
+    // on screen, with nothing on it to say why. That was not hypothetical: `UI_Human`, the character
+    // screen's own stage, has two batches (the GROUNDSHADOW decals on submeshes 1 and 2) that resolve
+    // to the `Diffuse_T2` vertex shader, which had no entry in `M2Material.VERTEX_SHADERS`. Their
+    // material reached three.js with `vertexShader === undefined` and `WebGLProgram` threw on every
+    // frame, so `/?ui=lua` reached character select with a correct 368-frame widget tree, correct
+    // rects and not one pixel of UI drawn.
+    //
+    // That specific gap is closed (`m2/material/vertex/diffuse-t2.glsl`), and a measured sweep of all
+    // eleven `UI_*` glue stages says none of them names any other missing shader. This guard stays
+    // anyway: it is not about `Diffuse_T2`, it is about the stage pass and the UI pass sharing one
+    // callback, and the next stage the client asks for may not be one of those eleven.
+    //
+    // Warned ONCE by message, because a per-frame throw is a per-frame console line otherwise, and the
+    // one line that matters is drowned by its own repetition. The underlying M2 gap is a
+    // pipeline-layer fix and is deliberately NOT made here; this only stops one layer's failure from
+    // being reported as the other layer's.
+    try {
+      this.sceneView.update(dt);
+      this.sceneView.render();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (this.lastSceneError !== message) {
+        this.lastSceneError = message;
+        console.error(`glue: the background stage failed to render; the UI still draws. ${message}`);
+      }
+    }
+
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    // `measureText` is what fills in an unsized FONT STRING's rect (`widget.ts#deriveSize`) -- the
+    // same measurement `resolveSprite` below rasterizes at, so what is anchored to a label and what
+    // is painted for it cannot disagree.
+    const items = this.current.root.drawList(viewport, measureText);
+    this.input.setDrawList(items);
+
+    this.ui.render(items, (item) => this.resolveSprite(item, screenScale(viewport.height)));
+  };
+
+  /**
+   * A 1x1 white texel, for a `solid` widget (the edit-box caret). Lazy, shared, and disposed with
+   * the app -- it is not `GlueArt`'s because it is not client art: it is the minimum a
+   * `MeshBasicMaterial` needs in order to draw a flat `vertexColor` quad.
+   */
+  private solidTexture: THREE.DataTexture | null = null;
+
+  private solid(): THREE.DataTexture {
+    if (!this.solidTexture) {
+      this.solidTexture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+      this.solidTexture.needsUpdate = true;
+    }
+    return this.solidTexture;
+  }
+
+  /**
+   * A widget's texture. THE RULES ARE `ui/sprite.ts`'s, shared with the world UI host -- this is the
+   * binding of them to this app's own art table, font cache and caret texel.
+   */
+  private resolveSprite(item: DrawItem, scale: number): ResolvedSprite | null {
+    return resolveSprite(item, scale, {
+      art: this.art,
+      fonts: this.fonts,
+      solid: () => this.solid(),
+    });
+  }
+}

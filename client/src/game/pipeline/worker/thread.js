@@ -1,5 +1,5 @@
 // eslint-disable-next-line import/no-webpack-loader-syntax
-import Worker from 'worker-loader!./'
+import Worker from 'worker-loader!./';
 class Thread {
 
   constructor() {
@@ -30,7 +30,23 @@ class Thread {
     if (result.success) {
       this.task.resolve(result.value);
     } else {
-      this.task.reject(result.value);
+      // Rebuild a real Error from the structure `worker/index.js#reject` sends. Rejecting with the
+      // raw payload is what made every worker failure surface as "a promise was rejected with a
+      // non-error" with no stack -- see that function for the whole of it. The fallback covers a
+      // worker that predates the structure (or a browser that dropped a field): still an Error.
+      const payload = result.value;
+      const error = new Error(
+        payload && payload.message ? payload.message : String(payload),
+      );
+      if (payload && payload.name) {
+        error.name = payload.name;
+      }
+      if (payload && payload.stack) {
+        // The worker's own stack, kept: it names the loader that actually failed, which this thread
+        // cannot.
+        error.workerStack = payload.stack;
+      }
+      this.task.reject(error);
     }
 
     this.task = null;

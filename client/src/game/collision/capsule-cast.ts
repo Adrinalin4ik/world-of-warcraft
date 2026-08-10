@@ -1,0 +1,195 @@
+import * as THREE from 'three';
+import { ExtendedTriangle } from 'three-mesh-bvh';
+
+import { CastHit, Triangle } from './types';
+
+/** Convergence tolerance for the advance loop (yards). */
+export const CAPSULE_CAST_EPS = 1e-4;
+
+/**
+ * How far off a face the verification pass still counts as a contact.
+ *
+ * The plane solution is exact; this only absorbs the float error of re-evaluating the distance at
+ * the solved time, plus the sliver at a shared edge where neither adjacent face contains the
+ * contact point cleanly.
+ */
+const CONTACT_TOLERANCE = 1e-3;
+
+// `closestPointToSegment` lives on three-mesh-bvh's ExtendedTriangle, not core THREE.Triangle.
+const _tri = new ExtendedTriangle();
+const _line = new THREE.Line3();
+const _closestOnTri = new THREE.Vector3();
+const _closestOnSeg = new THREE.Vector3();
+const _probe = new THREE.Vector3();
+const _toTri = new THREE.Vector3();
+
+/**
+ * Distance from the capsule's AXIS SEGMENT to a triangle, minus the radius: the signed gap between
+ * the capsule SURFACE and the face. Negative while they overlap.
+ *
+ * `base` is the capsule centre; the axis runs +/- `halfSegment` along Z from it.
+ */
+export function closestDistanceCapsuleTriangle(
+  base: THREE.Vector3,
+  halfSegment: number,
+  radius: number,
+  triangle: Triangle,
+  separationOut?: THREE.Vector3,
+): number {
+  _line.start.set(base.x, base.y, base.z - halfSegment);
+  _line.end.set(base.x, base.y, base.z + halfSegment);
+
+  _tri.a.copy(triangle.a);
+  _tri.b.copy(triangle.b);
+  _tri.c.copy(triangle.c);
+  _tri.needsUpdate = true;
+
+  const distance = _tri.closestPointToSegment(_line, _closestOnTri, _closestOnSeg);
+
+  if (separationOut) {
+    // Points from the face toward the capsule. Which SIDE we are on, derived from geometry rather
+    // than from winding -- collision faces must block from both sides, and WoW's do not guarantee
+    // a consistent outward normal.
+    separationOut.subVectors(_closestOnSeg, _closestOnTri);
+  }
+
+  return distance - radius;
+}
+
+/**
+ * Time of impact of the swept capsule against ONE triangle's plane, or null.
+ *
+ * Exact, closed form, no iteration: the capsule's support along the face normal is
+ * `radius + halfSegment * |n.z|`, so the gap along the normal shrinks linearly with travel and the
+ * contact time is a single division. This is the semantics the reference gets from its physics
+ * engine's shape cast -- an exact time of impact per collider, minimum taken over the set.
+ *
+ * The plane solution is then VERIFIED against the real capsule-triangle distance, because a plane
+ * is infinite and a triangle is not: a sweep can reach the plane well outside the face. One
+ * distance evaluation settles it, and neighbouring faces of a closed mesh cover the edges.
+ */
+function planeTimeOfImpact(
+  from: THREE.Vector3,
+  dir: THREE.Vector3,
+  maxDist: number,
+  radius: number,
+  halfSegment: number,
+  triangle: Triangle,
+): { t: number; side: number } | null {
+  const n = triangle.normal;
+
+  // How far the capsule reaches along the face normal: the radius, plus the axis projected onto it.
+  const support = radius + halfSegment * Math.abs(n.z);
+
+  _toTri.subVectors(from, triangle.a);
+  const centreDistance = _toTri.dot(n);
+  const side = centreDistance >= 0 ? 1 : -1;
+  const gap = side * centreDistance - support;
+
+  // Closing speed along the normal, from whichever side we are on.
+  const closing = -side * dir.dot(n);
+
+  if (gap <= CAPSULE_CAST_EPS) {
+    // Already touching or overlapping. A contact only counts if we are still driving into the face;
+    // otherwise a body resting on the floor could never cast away from it.
+    return closing > 1e-9 ? { t: 0, side } : null;
+  }
+
+  if (closing <= 1e-9) {
+    return null; // parallel, or receding -- can never be reached
+  }
+
+  const t = gap / closing;
+
+  return t <= maxDist ? { t, side } : null;
+}
+
+/**
+ * Sweep a vertical capsule from `from` along unit `dir` for at most `maxDist`, returning the first
+ * contact. The one world primitive the whole movement and camera stack is built on.
+ *
+ * **Exact time of impact, minimum over the set** -- the semantics the reference gets from its
+ * physics engine's `cast_move`. Each face contributes a closed-form contact time; the nearest wins.
+ * There is no iteration and therefore no iteration ceiling.
+ *
+ * That ceiling is what the earlier conservative-advancement version died on. It advanced by the
+ * smallest free gap, so a single grazing face -- of which a WMO interior offers hundreds -- throttled
+ * every step down to the convergence epsilon, the step budget ran out, and the sweep reported NO
+ * HIT. Measured in a real building: 776 walk faces and 1446 camera faces within six yards. The
+ * camera flew through walls and the body could not climb a stair, both from the same cause.
+ *
+ * **Side comes from geometry, not winding.** Collision faces must block from both sides and WoW's
+ * carry no reliable outward normal, so the contact normal is oriented by which side of the plane the
+ * capsule is on, and the reported normal always opposes the approach.
+ *
+ * `skin` is subtracted from the reported distance so the caller stops that far off the surface; the
+ * result is clamped at 0. Returns null when nothing is reached within `maxDist`.
+ *
+ * `minNormalZ` restricts the minimum to faces whose CONTACT normal points up at least that much,
+ * i.e. it answers "where is the floor" instead of "what is nearest". Defaulting to `-Infinity`
+ * leaves every existing caller exactly as it was. It exists because "nearest" is the wrong question
+ * for the grounded test: a face already touching the capsule reports `distance: 0` whenever the
+ * probe is driving into it (the `gap <= CAPSULE_CAST_EPS` branch above), and for a DOWNWARD probe
+ * that is every face with `n.z > 0` -- including a near-vertical wall the capsule's flank is
+ * brushing. Such a face wins the minimum at zero distance and hides the floor under the feet.
+ */
+export function castCapsuleAgainstTriangles(
+  from: THREE.Vector3,
+  dir: THREE.Vector3,
+  maxDist: number,
+  radius: number,
+  halfSegment: number,
+  triangles: Triangle[],
+  skin = 0,
+  minNormalZ = -Infinity,
+): CastHit | null {
+  if (triangles.length === 0 || maxDist <= 0) {
+    return null;
+  }
+
+  let bestT = Infinity;
+  let best: Triangle | null = null;
+  let bestSide = 1;
+
+  for (let i = 0, len = triangles.length; i < len; ++i) {
+    const triangle = triangles[i];
+
+    const solution = planeTimeOfImpact(from, dir, maxDist, radius, halfSegment, triangle);
+    if (solution === null || solution.t >= bestT) {
+      continue;
+    }
+
+    // `minNormalZ` turns "what do I hit first" into "what is the first thing I hit OF THIS KIND",
+    // and the only caller that wants it is the mover asking WHERE THE FLOOR IS. It is applied to
+    // the CONTACT normal -- the one this function is about to report, oriented by `side` -- not to
+    // the triangle's stored normal, which carries no reliable outward direction (see the header).
+    if (minNormalZ > -Infinity) {
+      const contactNormalZ = solution.side > 0 ? triangle.normal.z : -triangle.normal.z;
+      if (contactNormalZ < minNormalZ) {
+        continue;
+      }
+    }
+
+    // The plane is infinite; the face is not. Confirm the capsule actually meets THIS triangle at
+    // that time rather than its plane somewhere off the edge.
+    _probe.copy(dir).multiplyScalar(solution.t).add(from);
+    const gap = closestDistanceCapsuleTriangle(_probe, halfSegment, radius, triangle);
+    if (gap > CONTACT_TOLERANCE) {
+      continue;
+    }
+
+    bestT = solution.t;
+    best = triangle;
+    bestSide = solution.side;
+  }
+
+  if (best === null) {
+    return null;
+  }
+
+  return {
+    distance: Math.max(0, bestT - skin),
+    normal: bestSide > 0 ? best.normal.clone() : best.normal.clone().negate(),
+    source: best.source,
+  };
+}

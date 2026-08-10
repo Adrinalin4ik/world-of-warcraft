@@ -1,5 +1,5 @@
-import * as DBC from 'blizzardry/lib/dbc/entities';
-import { DecodeStream } from 'blizzardry/lib/restructure';
+import { DecodeStream } from 'restructure';
+import * as DBC from '../../../wow-data-parser/dbc/entities';
 
 import Loader from '../../net/loader';
 
@@ -12,11 +12,10 @@ export default function(name) {
   return loader.load(path).then((raw) => {
     const buffer = new Buffer(new Uint8Array(raw));
     const stream = new DecodeStream(buffer);
-    const data = entity.dbc.decode(stream);
 
+    const data = entity.default.dbc.decode(stream);
     // TODO: This property breaks web worker communication for some reason!
     delete data.entity;
-
     return data;
   });
 }

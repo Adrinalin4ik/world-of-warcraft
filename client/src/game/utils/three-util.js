@@ -255,6 +255,55 @@ class THREEUtil {
     return vec4Points.length > 2;
   }
 
+  static getFrustumClipsFromMatrix(mat) {
+    var planes = new Array(6);
+    // Right clipping plane.
+    planes[0] = vec4.fromValues(mat[3] - mat[0],
+        mat[7] - mat[4],
+        mat[11] - mat[8],
+        mat[15] - mat[12]);
+    // Left clipping plane.
+    planes[1] = vec4.fromValues(mat[3] + mat[0],
+        mat[7] + mat[4],
+        mat[11] + mat[8],
+        mat[15] + mat[12]);
+    // Bottom clipping plane.
+    planes[2] = vec4.fromValues(mat[3] + mat[1],
+        mat[7] + mat[5],
+        mat[11] + mat[9],
+        mat[15] + mat[13]);
+    // Top clipping plane.
+    planes[3] = vec4.fromValues(mat[3] - mat[1],
+        mat[7] - mat[5],
+        mat[11] - mat[9],
+        mat[15] - mat[13]);
+    // Far clipping plane.
+    planes[4] = vec4.fromValues(mat[3] - mat[2],
+        mat[7] - mat[6],
+        mat[11] - mat[10],
+        mat[15] - mat[14]);
+    // Near clipping plane.
+    planes[5] = vec4.fromValues(mat[3] + mat[2],
+        mat[7] + mat[6],
+        mat[11] + mat[10],
+        mat[15] + mat[14]);
+
+    for (var i = 0; i < 6; i++) {
+        //Hand made normalize
+        var invVecLength = 1 / vec3.length(planes[i]);
+        vec4.scale(planes[i], planes[i], invVecLength);
+    }
+
+    return planes;
+  }
+
+  static fixNearPlane(planes, camera) {
+      var nearPlane = planes[5];
+      var cameraVec4 = vec4.fromValues(camera[0], camera[1],camera[2],1);
+      var dist = vec4.dot(nearPlane, cameraVec4);
+      nearPlane[3] -= dist;
+  }
+
   static clipVerticesByPlane(vertices, plane) {
     const clipped = [];
 
@@ -274,18 +323,26 @@ class THREEUtil {
         clipped.push(v1);
       } else if (d1 > 0) {
         clipped.push(v1);
-        clipped.push(line.at(intersection));
+        const tmpVector = new THREE.Vector3();
+        line.at(intersection, tmpVector)
+        clipped.push(tmpVector);
       } else {
-        clipped.push(line.at(intersection));
+        const tmpVector = new THREE.Vector3();
+        line.at(intersection, tmpVector)
+        clipped.push(tmpVector);
       }
 
       // if (d1 > 0 && d2 > 0) {
       //   clipped.push(v2);
       // } else if (d1 > 0 && d2 < 0) {
-      //   // clipped.push(v1);
-      //   clipped.push(line.at(intersection));
+      //   clipped.push(v1);
+      //   const tmpVector = new THREE.Vector3();
+      //   line.at(intersection, tmpVector)
+      //   clipped.push(tmpVector);
       // } else if (d1 < 0 && d2 > 0) {
-      //   clipped.push(line.at(intersection));
+      //   const tmpVector = new THREE.Vector3();
+      //   line.at(intersection, tmpVector)
+      //   clipped.push(tmpVector);
       //   clipped.push(v2)
       // }
     }

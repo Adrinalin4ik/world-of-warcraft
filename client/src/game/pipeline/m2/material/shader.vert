@@ -1,9 +1,11 @@
 precision highp float;
+#define MAX_BONES 200
 
 varying vec2 uv1;
 varying vec2 uv2;
 
 varying float cameraDistance;
+
 
 varying vec3 vertexWorldNormal;
 
@@ -15,7 +17,7 @@ uniform mat4 animatedUVs[4];
 varying vec4 animatedVertexColor;
 
 uniform float billboarded;
-
+varying vec3 vNormal;
 #ifdef USE_SKINNING
 	uniform mat4 bindMatrix;
 	uniform mat4 bindMatrixInverse;
@@ -89,11 +91,17 @@ void main() {
   	skinned = bindMatrixInverse * skinned;
   #endif
 
-  #ifdef USE_SKINNING
-  	vec4 mvPosition = modelViewMatrix * skinned;
-  #else
+  // #ifdef USE_SKINNING
+  // 	vec4 mvPosition = modelViewMatrix * skinned;
+  // #else
   	vec4 mvPosition = modelViewMatrix * vec4(transformed, 1.0);
-  #endif
+  // #endif
+
+	vNormal = normal;
 
   gl_Position = projectionMatrix * mvPosition;
+
+	// gl_Position = projectionMatrix *
+  //               modelViewMatrix *
+  //               vec4(position, 1.0);
 }
