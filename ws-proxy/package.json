@@ -1,0 +1,13 @@
+{
+  "name": "ws-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebSocket-to-TCP gateway: one listen port, the TCP target named per connection by the URL",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
