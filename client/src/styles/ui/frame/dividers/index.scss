@@ -1,9 +1,11 @@
+// Relative urls, and images beside this file, for the reason given in `../index.scss`: a root-absolute
+// url breaks the moment the app is served from a sub-path such as GitHub Pages'.
 .wowser .divider {
   border-style: solid;&, &.horizontal {
     border-width: 3px 5px 0 5px;
-    border-image: url('/assets/images/dividers/horizontal.png') 3 5 0 5 repeat;&.thick {
+    border-image: url('./images/horizontal.png') 3 5 0 5 repeat;&.thick {
       border-width: 11px 5px 0 5px;
-      border-image: url('/assets/images/dividers/thick-horizontal.png') 11 5 0 5 repeat;
+      border-image: url('./images/thick-horizontal.png') 11 5 0 5 repeat;
     }
   }
 }

@@ -82,6 +82,26 @@ jobs:
           # on those would mean fixing hundreds of unrelated warnings before anything ships, so the
           # build runs with CI unset. The typecheck and test steps above are the real gates.
           CI: ''
+          # Where the deployed page fetches game data from, and the one setting that decides whether
+          # this deployment shows a world or an empty screen.
+          #
+          # The default host serves the files but sends `Access-Control-Allow-Origin` for
+          # `http://localhost:3000` and nothing else -- measured 2026-08-10: a GET carrying
+          # `Origin: https://<owner>.github.io` comes back 200 with no ACAO header at all, and a
+          # preflight OPTIONS is answered 403. From a Pages origin the browser therefore blocks every
+          # asset fetch, and it does so silently: the app boots, the login screen draws from its own
+          # bundle, and the world is empty with nothing on screen saying why.
+          #
+          # So a Pages deployment needs an asset origin that allows its own origin. Set the repository
+          # variable `REACT_APP_DATA_URI` (Settings -> Secrets and variables -> Actions -> Variables)
+          # to such a host -- `deploy/asset-proxy/` is a ready-to-deploy Cloudflare Worker that mirrors
+          # the default host and adds the header. The fallback below keeps the build reproducible and
+          # is deliberately the plain host: without the variable this deploys a client that renders
+          # but loads no data.
+          #
+          # This cannot live in `client/.env.production` -- that path is gitignored
+          # (`client/.gitignore:20`), so CI never sees the developer's copy of it.
+          REACT_APP_DATA_URI: ${{ vars.REACT_APP_DATA_URI || 'https://data-direct.spelunkerdb.com/12340' }}
 
       - uses: actions/configure-pages@v5
 
