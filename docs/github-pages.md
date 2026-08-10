@@ -52,13 +52,31 @@ Two ways out:
 
 ## What still will not work on Pages, and why
 
-- **Connecting to a game server.** The client talks to realmd/worldd through `ws-proxy/server.js`, a
-  WebSocket-to-TCP gateway. Pages cannot host a process, so nothing listens; the login screen dials and
-  times out. A visitor with a gateway of their own reaches it with `?gateway=wss://host:9000` and
-  `?realmlist=host:3724` (see `applyGatewayOverride` / `applyRealmlistOverride`), and the page being
-  https means the gateway must be `wss://` — a browser refuses `ws://` from an https page before any
-  request is made.
-- **`/game?offline=1`** is therefore the route that works unattended: a real world map, no server.
+- **`/game?offline=1`** needs nothing at all: a real world map, no server.
+- **Connecting to a game server needs a gateway that Pages cannot host.** The client talks to
+  realmd/worldd through `ws-proxy/server.js`, a WebSocket-to-TCP gateway, because a browser cannot open
+  a TCP socket. Pages hosts static files only, so the derived default (`wss://<the page's host>:9000`,
+  from `servedGatewayUrl()`) points at nothing and the login screen times out.
+
+## Pointing the client at a deployed gateway
+
+[`render.yaml`](../render.yaml) deploys `ws-proxy` on Render's free plan, which terminates TLS — the
+reason a hosted gateway is needed at all is that an https page may not open a `ws://` socket, so a
+gateway on your own machine is unreachable from the deployed client no matter what. Then:
+
+```
+https://<owner>.github.io/world-of-warcraft/?ui=lua&realmlist=logon.example.com:3724&gateway=wss://wow-ws-gateway.onrender.com
+```
+
+`?gateway=` takes the **base URL only** — `gatewaySocketUrl()` appends `/tcp/<host>:<port>` itself from
+`?realmlist=`, so passing a `/tcp/...` path yourself produces it twice. Both overrides are read by
+`applyGatewayOverride` / `applyRealmlistOverride`, and the URL wins for the session it is in; logging in
+saves it.
+
+Two things about the free plan that look like client bugs: the service spins down after 15 minutes idle
+and takes ~1 minute to wake, so the first attempt after a pause can time out where the second succeeds;
+and the gateway refuses any target not in `$ALLOWED_TARGETS` with a `403` naming it, which is what you
+will see if a realm's world server arrives as an IP that isn't listed yet.
 
 ## Verifying a deployment
 
