@@ -14,10 +14,12 @@ compatibility_date = "2024-11-01"
 # client's REACT_APP_DATA_URI, not here, so one worker can serve more than one build.
 UPSTREAM = "https://data-direct.spelunkerdb.com"
 
-# Comma-separated page origins this proxy answers for. Scheme and host, no trailing slash. Replace
-# `<owner>` with the GitHub account the Pages site is published under; add a dev origin if you want
-# to use the mirror locally too.
-#   ALLOWED_ORIGINS = "https://<owner>.github.io,http://localhost:3000"
+# Comma-separated page origins this proxy answers for. Scheme and host, no trailing slash.
+#
+# The GitHub Pages origin is the reason this worker exists. `localhost:3000` is here as well so the
+# dev server can use the mirror too -- the upstream already allows that one origin directly, but a
+# developer reproducing a Pages-only asset bug wants to be reading the same path the site reads.
+#
 # `*` is accepted and means any origin -- an open proxy in front of someone else's bandwidth, so
-# prefer the explicit list.
-ALLOWED_ORIGINS = ""
+# prefer the explicit list. An empty value refuses every browser request with a 403 that says so.
+ALLOWED_ORIGINS = "https://adrinalin4ik.github.io,http://localhost:3000"

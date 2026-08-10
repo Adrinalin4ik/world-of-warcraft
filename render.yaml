@@ -1,0 +1,46 @@
+# Render blueprint for the WebSocket-to-TCP gateway (`ws-proxy/`).
+#
+# Why this is deployed at all: GitHub Pages serves static files, so it cannot host a process, and the
+# client cannot open a TCP socket from a browser. Every byte between the client and a 3.3.5 server
+# crosses this gateway. It also has to be reachable over `wss://` -- an https page may not open a
+# `ws://` socket, the browser blocks it as mixed content before any request -- and Render terminates
+# TLS for us, which is the whole reason it is here rather than a bare VPS.
+#
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repository. Render reads this file.
+#
+# This blueprint must live at the repository ROOT; Render looks for `render.yaml` there and nowhere
+# else, which is why it is not filed under `deploy/` beside the asset proxy.
+
+services:
+  - type: web
+    name: wow-ws-gateway
+    runtime: node
+    # 750 instance-hours a month covers one always-on service (~730), so this fits inside the free
+    # allowance with room to spare. The free plan's real cost is the spin-down below, not the hours.
+    plan: free
+    # Frankfurt because latency here is two hops that both matter: browser -> gateway -> game server.
+    # The realm this is aimed at (`logon.gladewow.ru`, 109.173.22.120) is in Russia, so a European
+    # region keeps the second hop short. Change it if your server is elsewhere.
+    region: frankfurt
+    rootDir: ws-proxy
+    # `npm ci` and not `npm install`: package-lock.json is committed, and ci fails on a drifted
+    # lockfile instead of quietly resolving something else. One dependency (`ws`).
+    buildCommand: npm ci
+    # Render supplies $PORT and the server already prefers it over its 9000 default
+    # (`server.js`'s parseArgs), so no arguments are needed and none should be added -- a hardcoded
+    # --port would bind the wrong one and Render would never see the service come up.
+    startCommand: node server.js
+    # A plain GET to `/` answers 426 Upgrade Required, which is this gateway being healthy and would
+    # read to Render as a dead service to be restarted forever. `/healthz` returns 200 for exactly
+    # this reason.
+    healthCheckPath: /healthz
+    envVars:
+      # WITHOUT THIS THE SERVICE IS AN OPEN TCP RELAY. A public URL with no allowlist lets anyone on
+      # the internet reach any host and port through it. Bare host means any port on that host, which
+      # is what realms need -- the client learns a realm's port at runtime from the realm list, so it
+      # cannot be enumerated here in advance.
+      #
+      # Realm addresses often arrive as bare IPs rather than names, and an IP not listed here is
+      # refused with a 403 naming it. Add what that message shows, comma-separated.
+      - key: ALLOWED_TARGETS
+        value: logon.gladewow.ru,109.173.22.120
