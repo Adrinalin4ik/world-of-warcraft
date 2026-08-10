@@ -1,3 +1,10 @@
+// The border-image files live in `./images/` beside this file rather than in `public/assets/`, and
+// the urls below are relative for that reason. A root-absolute `/assets/images/panel/thin.png`
+// resolves against the SERVER root, which is right on a dev server and wrong on GitHub Pages, where
+// the app is served from `/world-of-warcraft/` -- there every one of these 404s and the panels lose
+// their borders. Sass cannot read `PUBLIC_URL`, but a relative url is rewritten by css-loader into a
+// webpack asset whose emitted URL carries `output.publicPath` -- set in both configs, and the one the
+// production build reads is `config2/webpack.config.js:222` -- so the sub-path is applied for us.
 @import './dividers';
 
 .wowser {
@@ -20,7 +27,7 @@
   }
   .frame {
     border-width: 5px;
-    border-image: url('/assets/images/panel/thin.png') 5 5 5 5 repeat;
+    border-image: url('./images/thin.png') 5 5 5 5 repeat;
     border-style: solid;
     .divider {
       &.horizontal {
@@ -30,7 +37,7 @@
     }
     &.thick {
       border-width: 11px;
-      border-image: url('/assets/images/panel/thick.png') 11 11 11 11 repeat;
+      border-image: url('./images/thick.png') 11 11 11 11 repeat;
       .divider {
         &.horizontal {
           margin-left: -5px;
@@ -41,7 +48,7 @@
   }
   .panel {
     border-width: 23px;
-    border-image: url('/assets/images/panel/panel.png') 23 23 23 23 repeat;
+    border-image: url('./images/panel.png') 23 23 23 23 repeat;
     border-style: solid;.icon.portrait {
       position: absolute;
       top: -30px;
@@ -57,7 +64,7 @@
     }
     &.headless {
       border-width: 11px 23px 23px 23px;
-      border-image: url('/assets/images/panel/panel-headless.png') 11 23 23 23 repeat;.icon.portrait {
+      border-image: url('./images/panel-headless.png') 11 23 23 23 repeat;.icon.portrait {
         top: -20px;
       }
     }

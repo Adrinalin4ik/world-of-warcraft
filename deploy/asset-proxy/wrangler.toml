@@ -1,0 +1,23 @@
+# Cloudflare Worker config for the CORS-adding game-data mirror. See `README.md` beside it.
+#
+# `wrangler deploy` from this directory. Both vars below are meant to be edited: ALLOWED_ORIGINS is
+# empty on purpose, and until it names your Pages origin the worker answers every browser request 403.
+
+name = "wow-asset-proxy"
+main = "worker.js"
+
+# Workers runtime date. Any recent value works -- this worker uses nothing version-dependent.
+compatibility_date = "2024-11-01"
+
+[vars]
+# The host being mirrored, scheme and host only -- the build sub-path (`/12340`) belongs in the
+# client's REACT_APP_DATA_URI, not here, so one worker can serve more than one build.
+UPSTREAM = "https://data-direct.spelunkerdb.com"
+
+# Comma-separated page origins this proxy answers for. Scheme and host, no trailing slash. Replace
+# `<owner>` with the GitHub account the Pages site is published under; add a dev origin if you want
+# to use the mirror locally too.
+#   ALLOWED_ORIGINS = "https://<owner>.github.io,http://localhost:3000"
+# `*` is accepted and means any origin -- an open proxy in front of someone else's bandwidth, so
+# prefer the explicit list.
+ALLOWED_ORIGINS = ""

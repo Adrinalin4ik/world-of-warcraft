@@ -59,6 +59,24 @@ jobs:
           cache: yarn
           cache-dependency-path: client/yarn.lock
 
+      # One dependency is a git dependency, not a registry package: `jsbn` is pinned to
+      # `timkurvers/jsbn.git#wowser` (the Wowser fork, for the SRP6 bignum arithmetic the logon
+      # handshake needs), and yarn.lock records it as `git+ssh://git@github.com/...`. So `yarn install`
+      # runs `git ls-remote ssh://git@github.com/timkurvers/jsbn.git`, a runner has no SSH key, and the
+      # install died at "Fetching packages" with `Permission denied (publickey)` and exit 128 -- before
+      # any build step could run.
+      #
+      # Rewriting the transport is the fix that leaves the lockfile alone: yarn's recorded resolution
+      # string is untouched, so `--frozen-lockfile` below stays a real check. Changing package.json to
+      # an https URL instead would rewrite the lock entry for a repository that is public either way.
+      # Both spellings are covered because either can appear in a lockfile.
+      - name: Fetch git dependencies over https, not ssh
+        run: |
+          git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+          # --add, because `insteadOf` is multi-valued and a plain `git config` would REPLACE the rule
+          # above rather than sit beside it, leaving only the second spelling covered.
+          git config --global --add url."https://github.com/".insteadOf git@github.com:
+
       # The client carries BOTH a yarn.lock and a package-lock.json. Yarn is what the project is
       # actually developed and tested with, so the lockfile that governs CI is yarn's -- and
       # --frozen-lockfile makes a drifted lockfile fail here rather than silently resolving
@@ -82,6 +100,26 @@ jobs:
           # on those would mean fixing hundreds of unrelated warnings before anything ships, so the
           # build runs with CI unset. The typecheck and test steps above are the real gates.
           CI: ''
+          # Where the deployed page fetches game data from, and the one setting that decides whether
+          # this deployment shows a world or an empty screen.
+          #
+          # The default host serves the files but sends `Access-Control-Allow-Origin` for
+          # `http://localhost:3000` and nothing else -- measured 2026-08-10: a GET carrying
+          # `Origin: https://<owner>.github.io` comes back 200 with no ACAO header at all, and a
+          # preflight OPTIONS is answered 403. From a Pages origin the browser therefore blocks every
+          # asset fetch, and it does so silently: the app boots, the login screen draws from its own
+          # bundle, and the world is empty with nothing on screen saying why.
+          #
+          # So a Pages deployment needs an asset origin that allows its own origin. Set the repository
+          # variable `REACT_APP_DATA_URI` (Settings -> Secrets and variables -> Actions -> Variables)
+          # to such a host -- `deploy/asset-proxy/` is a ready-to-deploy Cloudflare Worker that mirrors
+          # the default host and adds the header. The fallback below keeps the build reproducible and
+          # is deliberately the plain host: without the variable this deploys a client that renders
+          # but loads no data.
+          #
+          # This cannot live in `client/.env.production` -- that path is gitignored
+          # (`client/.gitignore:20`), so CI never sees the developer's copy of it.
+          REACT_APP_DATA_URI: ${{ vars.REACT_APP_DATA_URI || 'https://data-direct.spelunkerdb.com/12340' }}
 
       - uses: actions/configure-pages@v5
 
