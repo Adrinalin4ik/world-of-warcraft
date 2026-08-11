@@ -44,6 +44,15 @@ export const SCRIPT_HANDLERS: ReadonlySet<string> = new Set([
   // `<OnDoubleClick>` joins the realm its `<OnClick>` just selected (realmlist.xml:234). It was missing
   // here, so loading RealmList.xml printed an "unknown script handler" line for a handler that both the
   // client and `Widget#onDoubleClick` support.
+  // THE CLICK TRIPLE. A Button's click fires `PreClick`, then `OnClick`, then `PostClick`, and the two
+  // outer ones are as real as the middle one: `ActionBarButtonTemplate` declares
+  // `<PostClick>ActionButton_UpdateState(self, button, down);</PostClick>` (`ActionBarFrame.xml:16-18`),
+  // which is what re-checks the auto-attack button after a click, and `SecureActionButtonTemplate`
+  // declares `<PreClick>` for the same reason. Both were absent here, so loading the action bar printed
+  // "unknown script handler 'PostClick'" and the handler never ran. See `CLICK_SEQUENCE` below for how
+  // one pointer click reaches all three.
+  'PreClick',
+  'PostClick',
   'OnDoubleClick',
   'OnMouseDown',
   'OnMouseUp',
@@ -112,6 +121,10 @@ const SCRIPT_PARAMS: ReadonlyMap<string, readonly string[]> = new Map([
   ['OnEnter', ['motion']],
   ['OnLeave', ['motion']],
   ['OnClick', ['button', 'down']],
+  // The engine passes a `PreClick`/`PostClick` body the same two arguments it passes `OnClick`, and
+  // `ActionBarFrame.xml:17` reads both by name (`ActionButton_UpdateState(self, button, down)`).
+  ['PreClick', ['button', 'down']],
+  ['PostClick', ['button', 'down']],
   ['OnDoubleClick', ['button']],
   ['OnMouseDown', ['button']],
   ['OnMouseUp', ['button']],
@@ -343,8 +356,21 @@ type CallbackBinder = (widget: Widget, fire: ((args?: unknown[]) => void) | null
 /** The mouse button the engine reports for a left click, which is the only one this router routes. */
 const LEFT_BUTTON = 'LeftButton';
 
+/**
+ * The engine's click order on a Button, in one place: `PreClick`, `OnClick`, `PostClick`.
+ *
+ * `Widget#onClick` is ONE callback, so all three names bind that same slot and the callback fires
+ * whichever of them the frame actually has, in this order -- which is why `bindInputCallback` cannot
+ * simply clear the slot when the name it was called for has no handler (a frame with a `PostClick` and
+ * no `OnClick` still has to be clickable; `ActionBarButtonTemplate` has both, inherited from two
+ * different templates, and they are installed by separate `SetScript` calls).
+ */
+const CLICK_SEQUENCE = ['PreClick', 'OnClick', 'PostClick'] as const;
+
 const CALLBACK_BINDERS = new Map<string, CallbackBinder>([
   ['OnClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
+  ['PreClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
+  ['PostClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
   ['OnDoubleClick', (w, f) => { w.onDoubleClick = f === null ? null : () => f([LEFT_BUTTON]); }],
   ['OnMouseDown', (w, f) => { w.onMouseDown = f === null ? null : () => f([LEFT_BUTTON]); }],
   ['OnMouseUp', (w, f) => { w.onMouseUp = f === null ? null : () => f([LEFT_BUTTON]); }],
@@ -384,6 +410,28 @@ function bindInputCallback(ctx: MethodContext, self: number, name: string): void
   }
   const widget = ctx.registry.widget(self);
   if (widget === null) {
+    return;
+  }
+  // A CLICK is three handler names sharing one callback slot (see `CLICK_SEQUENCE`): the slot stays
+  // bound while ANY of them is set, and one click fires each that exists, in the engine's order.
+  const clickNames = (CLICK_SEQUENCE as readonly string[]).includes(name)
+    ? CLICK_SEQUENCE
+    : null;
+  if (clickNames !== null) {
+    const present = clickNames.filter((handler) => getScriptHandler(self, handler) !== null);
+    if (present.length === 0) {
+      binder(widget, null);
+      return;
+    }
+    binder(widget, (args = []) => {
+      // Re-read the handler set at CLICK time, not at bind time, so a `SetScript` between the two takes
+      // effect -- the same rule the single-handler path relies on by firing through `invokeScriptHandler`.
+      for (const handler of clickNames) {
+        if (getScriptHandler(self, handler) !== null) {
+          fireFromInput(ctx, self, handler, args);
+        }
+      }
+    });
     return;
   }
   if (getScriptHandler(self, name) === null) {

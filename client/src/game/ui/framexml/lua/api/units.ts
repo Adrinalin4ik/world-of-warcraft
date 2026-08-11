@@ -467,6 +467,16 @@ export function installUnitsApi(vm: LuaVM): void {
     ['UnitInVehicle', 'this client has no vehicles', [false]],
     ['IsResting', 'no resting state is read from the wire', [false]],
     ['GetOptOutOfLoot', 'no group loot state is read from the wire', [false]],
+    // `GetWatchedFactionInfo()` -> `name, standing, min, max, value`, and NIL for `name` is a real
+    // answer, not a placeholder: it is what the engine returns when no faction is being watched, which
+    // is every character that has not ticked the box. `ReputationWatchBar_Update`'s first line reads it
+    // (`ReputationFrame.lua:324`), so its ABSENCE made that function raise -- and that function is the
+    // only thing in 3.3.5a's whole manifest that ever shows `MainMenuExpBar` again once it has hidden
+    // itself. Declared here rather than left missing so the reputation path cannot take down the
+    // experience bar's owner a second time. (The bar no longer DEPENDS on it -- the seeded snapshot
+    // stops the bar hiding in the first place; see `ui/unit-bridge.ts#seedUnitSnapshots`.)
+    ['GetWatchedFactionInfo', 'no reputation feed: SMSG_INITIALIZE_FACTIONS is not decoded, so no '
+      + 'faction is watched and the reputation half of the bar draws nothing', [null]],
     // `GetSummonFriendCooldown()` -> `start, duration`, immediately arithmetic:
     // `local remaining = start + duration - GetTime()` (unitpopup.lua:264). Two ZEROS, not nil --
     // nil there is an arithmetic error, not a skipped branch.

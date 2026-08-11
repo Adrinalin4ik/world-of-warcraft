@@ -11,6 +11,11 @@ import { parseXml } from '../xml';
 import { WidgetRoot } from '../../widget';
 import { Viewport } from '../../layout';
 import { installUnitsApi, setUnit, emptySnapshot } from '../lua/api/units';
+import { installActionsApi, setBonusBarOffset } from '../lua/api/actions';
+import { readUnitFields } from '../../../../network/game/object/update-object/unit-fields';
+// Side-effect import: registers the STATUSBAR method table, whose `OnValueChanged` dispatch is what
+// the first test below covers.
+import '../lua/methods/statusbar';
 
 const VIEWPORT: Viewport = { width: 1024, height: 768 };
 
@@ -107,5 +112,63 @@ describe('unit engine globals', () => {
 
     setUnit(vm, 'target', null);
     expect(vm.run('assert(UnitExists("target") == false)', 'check')).toBeNull();
+  });
+});
+
+/**
+ * The two mechanisms that were the whole of "the action bar is empty and the XP bar is invisible".
+ * One test each, happy path, per this file's own header.
+ */
+describe('the action bar the server actually sent', () => {
+  it('fires OnValueChanged only when the value moves, which is what re-shows a TextStatusBar', () => {
+    const { vm, rt } = runtime();
+    const report = loadDocument(
+      rt,
+      parseXml(`
+        <Ui>
+          <StatusBar name="XpBar">
+            <Size><AbsDimension x="100" y="10"/></Size>
+            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+            <Scripts>
+              <OnValueChanged>
+                fired = (fired or 0) + 1
+                lastValue = value
+              </OnValueChanged>
+            </Scripts>
+          </StatusBar>
+        </Ui>
+      `),
+      () => null,
+      'onvaluechanged.test',
+    );
+    expect(report.errors).toEqual([]);
+
+    // `MainMenuExpBar_Update`'s own two calls (`MainMenuBar.lua:9-10`), in order.
+    expect(vm.run('XpBar:SetMinMaxValues(0, 400) XpBar:SetValue(280)', 'check')).toBeNull();
+    expect(vm.run('assert(lastValue == 280, "lastValue " .. tostring(lastValue))', 'check')).toBeNull();
+
+    // Re-setting the SAME value fires nothing: the change gate is what stops a scrollbar's
+    // OnValueChanged/SetValue pair recursing, and what keeps a 60 Hz bar from repainting text.
+    const before = vm.run('countBefore = fired', 'check');
+    expect(before).toBeNull();
+    expect(vm.run('XpBar:SetValue(280) assert(fired == countBefore, "fired again")', 'check')).toBeNull();
+  });
+
+  it('reads the shapeshift form out of UNIT_FIELD_BYTES_2 byte 3, which picks the bonus bar', () => {
+    // Battle Stance is form 17 and `SpellShapeshiftForm.dbc` gives it `bonusActionBar` 1, so an
+    // `isBonus` button lands on 1-based slots 73-84 -- where the server put this build's warrior
+    // buttons. The byte offset is TrinityCore 3.3.5's `UNIT_BYTES_2_OFFSET_SHAPESHIFT_FORM = 3`.
+    const fields = readUnitFields({ unit_field_bytes_2: (17 << 24) | 0x01 });
+    expect(fields.shapeshiftForm).toBe(17);
+
+    // And the engine global the client's own `ActionButton_CalculateAction` multiplies by: pushed by
+    // the host, 0 until then.
+    const vm = new LuaVM();
+    installActionsApi(vm);
+    expect(vm.run('assert(GetBonusBarOffset() == 0)', 'check')).toBeNull();
+    expect(setBonusBarOffset(vm, 1)).toBe(true);
+    expect(vm.run('assert(GetBonusBarOffset() == 1)', 'check')).toBeNull();
+    // Same value again is not a change -- the host fires `UPDATE_BONUS_ACTIONBAR` off this answer.
+    expect(setBonusBarOffset(vm, 1)).toBe(false);
   });
 });

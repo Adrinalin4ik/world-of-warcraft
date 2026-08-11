@@ -141,6 +141,7 @@ export * as SpellMechanic from './spell-mechanic';
 export * as SpellRadius from './spell-radius';
 export * as SpellRange from './spell-range';
 export * as SpellRuneCost from './spell-rune-cost';
+export * as SpellShapeshiftForm from './spell-shapeshift-form';
 export * as SpellVisual from './spell-visual';
 export * as SpellVisualEffectName from './spell-visual-effect-name';
 export * as SpellVisualKit from './spell-visual-kit';

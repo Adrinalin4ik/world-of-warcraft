@@ -75,6 +75,16 @@ interface ActionState {
   slots: ActionSnapshot[];
   /** `CURRENT_ACTIONBAR_PAGE`'s engine half; `GetActionBarPage` answers it. 1-based. */
   page: number;
+  /**
+   * `GetBonusBarOffset()` -- which BONUS bar the player's shapeshift form has switched to, or 0.
+   *
+   * THE FIELD THAT DECIDES WHETHER A WARRIOR'S BAR HAS ANYTHING ON IT. `ActionButton_CalculateAction`
+   * gives an `isBonus` button `page = NUM_ACTIONBAR_PAGES + offset` (`ActionButton.lua:139-144`), so
+   * offset 1 makes `BonusActionButton1..12` read 1-based slots 73-84 -- which is exactly where the
+   * server put this character's buttons (measured; see `ui/action-bridge.ts`). Written by the host from
+   * the form byte and `SpellShapeshiftForm.dbc`; 0 with no host, which is "no bonus bar".
+   */
+  bonusBarOffset: number;
   /** What `UseAction` should do. Set by the host; a VM with no host casts nothing. */
   use: ((action: number) => void) | null;
 }
@@ -88,6 +98,7 @@ function stateOf(vm: LuaVM): ActionState {
     state = {
       slots: Array.from({ length: ACTION_SLOTS }, emptyAction),
       page: 1,
+      bonusBarOffset: 0,
       use: null,
     };
     stateByVm.set(vm, state);
@@ -114,6 +125,25 @@ export function getAction(vm: LuaVM, action: number): ActionSnapshot | null {
     return null;
   }
   return stateOf(vm).slots[action - 1] ?? null;
+}
+
+/**
+ * THE push door for the bonus bar. Answers whether the value moved, so the host can fire
+ * `UPDATE_BONUS_ACTIONBAR` only for a real change (see `action-bridge.ts` on why an event costs a
+ * whole UI pass).
+ */
+export function setBonusBarOffset(vm: LuaVM, offset: number): boolean {
+  const state = stateOf(vm);
+  const next = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+  if (state.bonusBarOffset === next) {
+    return false;
+  }
+  state.bonusBarOffset = next;
+  return true;
+}
+
+export function getBonusBarOffset(vm: LuaVM): number {
+  return stateOf(vm).bonusBarOffset;
 }
 
 /** The host's cast door: what `UseAction` calls. */
@@ -211,10 +241,19 @@ export function installActionsApi(vm: LuaVM): void {
     return [];
   });
 
-  // Both are offsets into the BONUS bars -- a druid's forms, a rogue's stealth bar, a vehicle. There is
-  // no shapeshift or vehicle feed in this client, so the honest answer is 0 (no bonus bar active), which
-  // is also what `ActionButton_CalculateAction` needs to leave the page arithmetic alone.
-  fn('GetBonusBarOffset', () => [0]);
+  /**
+   * `GetBonusBarOffset()` -- the bonus bar the player's FORM has switched to, 0 for none.
+   *
+   * This answered a hard-coded 0 with the comment "there is no shapeshift feed in this client", and
+   * that hard 0 was the whole reason the action bar looked empty: the server's action words for a
+   * warrior sit in the bonus blocks (1-based slots 73-108), and with offset 0 no button ever addressed
+   * them. There IS a feed now -- `UNIT_FIELD_BYTES_2` byte 3 through `SpellShapeshiftForm.dbc`
+   * (`ui/action-bridge.ts`) -- so this reads what the host pushed.
+   */
+  fn('GetBonusBarOffset', () => [state.bonusBarOffset]);
+  // The MULTI-CAST bar is a shaman's totem bar, which has no feed (`SMSG_MULTIPLE_...`/totem slots are
+  // not decoded) and is not this character's bar in any case. Still 0, and still honest: 0 is "no
+  // multi-cast bar active", which is true for every class but a shaman.
   fn('GetMultiCastBarOffset', () => [0]);
 
   /**
@@ -240,6 +279,33 @@ export function installActionsApi(vm: LuaVM): void {
       'no usability feed: returns usable=true, notEnoughMana=false unconditionally, so an '
         + 'unaffordable or form-gated ability is drawn at full brightness (ActionButton_UpdateUsable)',
       [true, false],
+    ],
+    [
+      // The TAIL of every action-button click: `SecureActionButton_OnClick:537` reads
+      // `if ( SpellCanTargetItem() )` after it has dispatched the action, to route a spell that needs an
+      // item target (an enchant, a poison) at a bag slot. Its absence raised on EVERY click -- measured,
+      // `BonusActionButton2: OnClick: SecureTemplates.lua:537: attempt to call a nil value` -- after the
+      // cast had already been dispatched, so it cost an error line rather than the cast. False is the
+      // true answer for a click that is not awaiting an item target, which is every click here: nothing
+      // in this client puts the cursor into spell-targeting mode.
+      'SpellCanTargetItem',
+      'no spell-targeting cursor state exists in this client, so a click is never awaiting an item '
+        + 'target (SecureTemplates.lua:537)',
+      [false],
+    ],
+    [
+      // Called 10 times across `BonusActionBarFrame.lua`, `PetActionBarFrame.lua`, `MainMenuBar.lua`,
+      // `UIParent.lua` and `FloatingChatFrame.lua`, and its absence was aborting
+      // `ShapeshiftBar_OnLoad` outright (`BonusActionBarFrame.lua:126`). 0 means "this character has no
+      // stance bar", which hides `ShapeshiftBarFrame` (`ShapeshiftBar_Update:145`) -- and that is the
+      // honest answer: the player's CURRENT form is read (see `GetBonusBarOffset`), but the LIST of
+      // forms a class has needs the known-spell set cross-referenced against `SpellShapeshiftForm.dbc`,
+      // which is not done, and `GetShapeshiftFormInfo`/`GetShapeshiftFormCooldown` with it. So the
+      // stance BUTTONS are absent rather than wrong.
+      'GetNumShapeshiftForms',
+      'no stance-bar feed: the current form is known but the list of a class\'s forms is not, so '
+        + 'ShapeshiftBarFrame stays hidden and the three stance buttons are not drawn',
+      [0],
     ],
     [
       'GetBindingKey',

@@ -42,7 +42,7 @@ import { resolveSprite } from './sprite';
 import { FontStringTextures, loadGlueFonts, measureText } from './text';
 import { DrawItem, WidgetRoot } from './widget';
 import { attachActionBridge } from './action-bridge';
-import { attachUnitBridge } from './unit-bridge';
+import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
 
@@ -225,6 +225,11 @@ export class WorldUiHost {
       root: this.root.root,
       art: this.art,
       input: this.input,
+      // The player's snapshot BEFORE the manifest runs, because several documents read unit state in
+      // their `OnLoad` and one of them (`MainMenuExpBar`) hides itself for good on a zero. See
+      // `unit-bridge.ts#seedUnitSnapshots`. Snapshots only -- the events still come from the bridges
+      // below, which need the tree to exist.
+      seed: this.world ? (vm) => seedUnitSnapshots(vm, this.world as World) : undefined,
     });
     if (this.stopped) {
       // Superseded by a teardown that ran while the manifest was loading. This boot's runtime is
@@ -252,6 +257,12 @@ export class WorldUiHost {
     // The console handle, exactly as the glue side has one. `worldRuntime.vm.run('...')` against the
     // tree that is on screen is the only way to interrogate a frame a screenshot cannot answer for.
     (window as never as Record<string, unknown>).worldRuntime = runtime;
+    // THE ART TABLE, as a second handle, because "the icon is not on screen" has three distinct causes
+    // that no screenshot separates: the Lua never set a sprite, the sprite was set but never registered
+    // (see `manifest.ts#registerTreeArt` -- registration runs once, after the load), or it was
+    // registered and the BLP failed to fetch. `worldUiArt.def(path)` and `worldUiArt.texture(path)`
+    // answer the second and third directly. This is how the empty action bar was found.
+    (window as never as Record<string, unknown>).worldUiArt = this.art;
   }
 
   /**
@@ -276,6 +287,12 @@ export class WorldUiHost {
     const items = this.root.drawList(viewport, measureText);
     this.sections.end('ui.layout');
     this.input.setDrawList(items);
+    // THE LAST DRAW LIST, as a console handle. The router hit-tests this exact array, so it is the only
+    // authoritative answer to "is that widget on screen, and where" -- a screenshot cannot say whether a
+    // quad is missing or merely transparent, and `registry.widget(id)` has no rect (the layout pass
+    // computes rects, it does not store them). It is what let a probe put a REAL pointer click on
+    // `BonusActionButton2` instead of calling its handler directly. One reference assignment per frame.
+    (window as never as Record<string, unknown>).worldUiDrawList = items;
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');
@@ -453,6 +470,8 @@ export class WorldUiHost {
     this.solidTexture?.dispose();
     this.solidTexture = null;
     delete (window as never as Record<string, unknown>).worldRuntime;
+    delete (window as never as Record<string, unknown>).worldUiArt;
+    delete (window as never as Record<string, unknown>).worldUiDrawList;
   }
 }
 

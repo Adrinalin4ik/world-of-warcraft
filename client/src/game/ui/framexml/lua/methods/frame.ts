@@ -185,9 +185,54 @@ const FRAME: MethodTable = {
     invokeScriptHandler(ctx, self, 'OnAttributeChanged', [name, value]);
     return [];
   },
+  /**
+   * `GetAttribute(name)` -- and `GetAttribute(prefix, name, suffix)`, WHICH IS A DIFFERENT LOOKUP.
+   *
+   * The three-argument form was missing, and that is exactly why clicking an action button did
+   * nothing. `SecureActionButton_OnClick` decides what a click DOES with
+   *
+   *     local actionType = SecureButton_GetModifiedAttribute(self, "type", button);
+   *
+   * and that function's body is `frame:GetAttribute(prefix, name, suffix)`
+   * (`SecureTemplates.lua:153-172`), with `prefix` the modifier prefix (`""`, `"shift-"`, ...) and
+   * `suffix` the button number (`"1"` for LeftButton, `SecureButton_GetButtonSuffix:83-87`). Reading
+   * `args[0]` alone made that a lookup for the attribute literally named `""`, so `actionType` was nil,
+   * so `SECURE_ACTIONS.action` -- the ONE path that calls `UseAction` -- was never selected. MEASURED
+   * before the fix: `BonusActionButton2:GetAttribute("type")` = `"action"` while
+   * `SecureButton_GetModifiedAttribute(b, "type", "LeftButton")` = nil.
+   *
+   * The candidate order is the engine's documented one, and the client's own files show why it must
+   * have both ends: `ActionButton_OnLoad:84` stores the plain name (`SetAttribute("type", "action")`),
+   * which only the bare-`name` fallback can find, while `SecureUnitButton_OnLoad:555-556` stores
+   * `"*type1"`/`"*type2"`, which only the wildcard-prefix form can. The two middle candidates are the
+   * same pattern with the wildcard on the other side; that pair is from the documented API rather than
+   * from a use in this manifest, and is stated as such.
+   *
+   * `ATTRIBUTE_NOOP` is the empty string (`SecureTemplates.lua:17`) and the CALLER folds it to nil, so
+   * nothing is done about it here.
+   */
   GetAttribute: (ctx, self, args) => {
-    const name = String(args[0] ?? '').toLowerCase();
-    const value = frameAttributes.get(self)?.get(name);
+    const table = frameAttributes.get(self);
+    const read = (key: string): unknown => table?.get(key.toLowerCase());
+    if (args.length >= 3) {
+      const prefix = String(args[0] ?? '');
+      const name = String(args[1] ?? '');
+      const suffix = String(args[2] ?? '');
+      for (const key of [
+        `${prefix}${name}${suffix}`,
+        `*${name}${suffix}`,
+        `${prefix}${name}*`,
+        `*${name}*`,
+        name,
+      ]) {
+        const value = read(key);
+        if (value !== undefined && value !== null) {
+          return [value];
+        }
+      }
+      return [];
+    }
+    const value = read(String(args[0] ?? ''));
     return value === undefined || value === null ? [] : [value];
   },
 

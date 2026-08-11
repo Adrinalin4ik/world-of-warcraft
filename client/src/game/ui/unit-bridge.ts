@@ -79,6 +79,34 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
 }
 
 /**
+ * SEED the tokens before a single line of the manifest runs. No events -- there are no frames yet.
+ *
+ * THIS IS AN ORDERING FIX, and the experience bar is what found it. The real client has the player's
+ * data before FrameXML loads, so a document's `OnLoad` that reads unit state gets real numbers. Ours
+ * loaded the manifest first and attached the feed afterwards, so every load-time reader saw zeroes --
+ * and one of those readers HIDES ITSELF on a zero and cannot recover:
+ *
+ *   `CharacterFrame_OnLoad:58` calls `TextStatusBar_UpdateTextString(MainMenuExpBar)`, which hides a
+ *   status bar whose max is 0 (`TextStatusBar.lua:80-84`), and `MainMenuExpBar`'s own
+ *   `<OnValueChanged>` opens with `if (not self:IsShown()) then return; end`
+ *   (`MainMenuBar.xml:160-165`) -- so once hidden at load, no value change can ever bring it back. In
+ *   3.3.5a the ONLY thing that shows it again is `ReputationWatchBar_Update` on `UPDATE_FACTION`
+ *   (`ReputationFrame.lua:399-401`), which needs a reputation feed this client does not have.
+ *
+ * So the bar was invisible with 280/400 xp behind it, and no engine global was missing: the DATA was
+ * late. Seeding is the fix that matches the reference client's own ordering, and it is deliberately
+ * only the SNAPSHOTS -- the events still come from `attachUnitBridge` after the tree exists.
+ */
+export function seedUnitSnapshots(vm: LuaVM, world: World): void {
+  if (world.player) {
+    setUnit(vm, 'player', snapshotOf(world.player, world.player));
+  }
+  if (world.target) {
+    setUnit(vm, 'target', snapshotOf(world.target, world.player));
+  }
+}
+
+/**
  * Push `snapshot` onto `token` and fire exactly the events whose fields moved.
  *
  * `previous` null means the token had no unit -- a fresh target -- and everything is announced.

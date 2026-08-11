@@ -73,6 +73,21 @@ export interface UnitFieldUpdate {
    * * MainMenuExpBar:GetWidth()`, so it is xp-denominated and added to current xp.
    */
   restXp?: number;
+
+  /**
+   * `UNIT_FIELD_BYTES_2`'s byte **3** -- the unit's SHAPESHIFT FORM (a `SpellShapeshiftForm.dbc` id).
+   *
+   * The byte offset is TrinityCore 3.3.5's own (`Unit.h`:
+   * `UNIT_BYTES_2_OFFSET_SHEATH_STATE 0`, `_PVP_FLAG 1`, `_PET_FLAGS 2`, `_SHAPESHIFT_FORM 3`, written
+   * by `Unit::SetShapeshiftForm`), and the value is checked against the served
+   * `SpellShapeshiftForm.dbc`: a warrior in Battle Stance reads **17**, whose `bonusActionBar` is 1.
+   *
+   * Why a unit frame does not read it but the ACTION BAR does: form decides which 12-slot block of the
+   * server's 144 action slots the buttons address (`ActionButton.lua:139-144`), so for a warrior this
+   * one byte is the difference between twelve empty buttons and his real bar. See
+   * `game/ui/action-bridge.ts`.
+   */
+  shapeshiftForm?: number;
 }
 
 /**
@@ -134,6 +149,13 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
   const bytes0 = u32('unit_field_bytes_0');
   if (bytes0 !== undefined) {
     out.powerType = (bytes0 >>> 24) & 0xff;
+  }
+
+  // THE SHAPESHIFT FORM, byte 3 of `UNIT_FIELD_BYTES_2`. Unit-scope, not player-scope: a creature in a
+  // form carries it too. See the field's own comment for the byte offset's source.
+  const bytes2 = u32('unit_field_bytes_2');
+  if (bytes2 !== undefined) {
+    out.shapeshiftForm = (bytes2 >>> 24) & 0xff;
   }
 
   // The experience pair and the rested pool. Present only on our own character's updates -- these are
@@ -220,6 +242,7 @@ export function applyUnitFields(
   // `readUnitFields`), and `changed` is what gates the event that repaints the bar -- so an xp value
   // that has not moved costs nothing, which matters because the bar's repaint dirties the draw-list
   // fingerprint (`world-ui.ts#drawListSignature`).
+  set('shapeshiftForm', fields.shapeshiftForm);
   set('xp', fields.xp);
   set('maxXp', fields.maxXp);
   set('restXp', fields.restXp);

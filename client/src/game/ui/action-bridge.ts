@@ -30,11 +30,14 @@ import World from '../world';
 import { GlueArt } from './art';
 import {
   ACTION_SLOTS, ActionSnapshot, emptyAction, getAction, setAction, setActionUseHandler,
+  setBonusBarOffset,
 } from './framexml/lua/api/actions';
 import { SPELL_AUTO_ATTACK, SpellHandler } from '../../network/game/object/spells';
 import { fireEvent } from './framexml/lua/events';
 import { spellData } from '../pipeline/dbc/spell-data';
+import { shapeshiftData } from '../pipeline/dbc/shapeshift-data';
 import { LuaVM } from './framexml/lua/vm';
+import type Unit from '../classes/unit';
 
 /**
  * Subscribe a VM to the server's action bar. Returns the teardown.
@@ -46,7 +49,7 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   const spells: SpellHandler = world.game.objectHandler.spellHandler;
 
   /** How many pushes and events this bridge has made, for the frame-cost measurement. */
-  const stats = { pushes: 0, events: 0, artLoads: 0 };
+  const stats = { pushes: 0, events: 0, artLoads: 0, form: 0, bonusBar: 0 };
 
   /** Build the snapshot for one 1-based slot from the handler and the DBC tables. */
   const snapshotFor = (action: number): ActionSnapshot => {
@@ -123,6 +126,51 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     stats.events += 1;
   };
 
+  /**
+   * THE BONUS BAR, and this is what "the twelve buttons were empty" actually was.
+   *
+   * MEASURED on the live wire for `Gesf` (level-2 human warrior, `SMSG_ACTION_BUTTONS` body 577 B, the
+   * five filled words at 0-based slot indices **72, 73, 82, 84, 96**):
+   *
+   *   1-based 73 = 6603 Auto Attack, 74 = 78 Heroic Strike, 83 = 59752 Every Man for Himself,
+   *   85 = 6603, 97 = 6603.
+   *
+   * Slots 1-72 are the main bar's six pages (`ActionButton.lua:2`, `NUM_ACTIONBAR_PAGES = 6`), so his
+   * bar holds NOTHING a main-bar button can address -- and `ActionButton1..12` reading empty slots and
+   * hiding themselves is the correct behaviour for that data, not the bug. The three filled blocks
+   * (73-84, 85-96, 97-108) are the three BONUS bars, one per warrior stance, and `SpellShapeshiftForm.dbc`
+   * says exactly that: form 17 Battle Stance -> `bonusActionBar` 1, 18 Defensive -> 2, 19 Berserker -> 3.
+   * The DBC and the wire corroborate each other.
+   *
+   * So the missing engine value was `GetBonusBarOffset()`, which answered a hard 0. With the real
+   * offset, `BonusActionButton1..12` (which carry `self.isBonus = 1`, `BonusActionBarFrame.xml:10`)
+   * compute `page = 6 + offset` and read 73-84 (`ActionButton.lua:139-144`), `BonusActionBar_OnEvent`
+   * slides the bonus bar up over the main bar, and the icons are the ones the server sent.
+   *
+   * `UPDATE_BONUS_ACTIONBAR` is the event for it -- `BonusActionBar_OnLoad:10` and the bonus buttons'
+   * own `OnLoad` register it, and `ActionButton_OnEvent:369` routes it to `ActionButton_UpdateAction`,
+   * which is precisely "recompute my slot, then update me". Fired only on a CHANGE, for the frame-cost
+   * reason in this file's header.
+   */
+  const pushBonusBar = (): void => {
+    const player = world.player;
+    const form = player?.fields.shapeshiftForm ?? 0;
+    stats.form = form;
+    const offset = shapeshiftData.bonusBar(form);
+    if (offset === null) {
+      // The 4.9 KB table is not in yet. Leaving the offset alone is right: 0 is "no bonus bar", the
+      // pre-existing state, and `ensureLoaded().then(pushBonusBar)` below re-runs this when it lands.
+      return;
+    }
+    if (!setBonusBarOffset(vm, offset)) {
+      return;
+    }
+    stats.bonusBar = offset;
+    stats.pushes += 1;
+    fireEvent(vm, 'UPDATE_BONUS_ACTIONBAR');
+    stats.events += 1;
+  };
+
   /** Only the auto-attack button's checked state moved, so only the state event is needed. */
   const pushAutoAttack = (): void => {
     let changed = false;
@@ -174,9 +222,21 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
 
   setActionUseHandler(vm, use);
 
+  /**
+   * A form change arrives as an ordinary values update on the player, so the bonus bar rides
+   * `unit:fields` -- the same event `unit-bridge.ts` listens to. Gated on the player, because a
+   * creature's form is nobody's action bar, and `pushBonusBar` diffs anyway.
+   */
+  const onFields = (unit: Unit): void => {
+    if (unit === world.player) {
+      pushBonusBar();
+    }
+  };
+
   spells.on('actionsChanged', pushAll);
   spells.on('spellsChanged', pushAll);
   spells.on('autoAttackChanged', pushAutoAttack);
+  world.on('unit:fields', onFields);
 
   // Both entry packets arrive while the manifest is still loading -- `SMSG_ACTION_BUTTONS` is in the
   // login burst and the FrameXML load takes 8-22 s -- so the first push is made here rather than waited
@@ -197,12 +257,19 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
    */
   void spellData.ensureLoaded().then(pushAll);
 
+  // The bonus bar's own table is 4,890 bytes and is deliberately NOT behind the 49 MB one (see
+  // `shapeshift-data.ts`): which slots the buttons address must not wait on the icons. Pushed on attach
+  // as well, because the player's form byte arrived in his create block long before this attached.
+  void shapeshiftData.ensureLoaded().then(pushBonusBar);
+  pushBonusBar();
+
   (window as unknown as Record<string, unknown>).actionBridgeStats = stats;
 
   return () => {
     spells.removeListener('actionsChanged', pushAll);
     spells.removeListener('spellsChanged', pushAll);
     spells.removeListener('autoAttackChanged', pushAutoAttack);
+    world.removeListener('unit:fields', onFields);
     delete (window as unknown as Record<string, unknown>).actionBridgeStats;
   };
 }

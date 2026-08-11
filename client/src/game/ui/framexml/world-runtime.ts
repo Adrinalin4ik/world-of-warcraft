@@ -56,7 +56,9 @@ import { installSecureApi } from './lua/api/secure';
 import { installSoundApi } from './lua/api/sound';
 import { installStubApi } from './lua/api/stubs';
 import { installActionsApi } from './lua/api/actions';
+import { installAccountApi } from './lua/api/account';
 import { installUnitsApi } from './lua/api/units';
+import { invokeScriptHandler } from './lua/scripts';
 import type { FileReport } from './runtime';
 
 const FRAMEXML_DIR = 'Interface\\FrameXML\\';
@@ -75,6 +77,18 @@ export interface WorldRuntimeOptions {
    */
   stopAfter?: string;
   viewport?: () => Viewport;
+  /**
+   * Called once the engine globals are installed and BEFORE the first manifest file runs, so a host can
+   * put real world state behind them.
+   *
+   * The reference client has the player's data before FrameXML loads and several documents read unit
+   * state in their `OnLoad`. One of them cannot recover from a zero -- `MainMenuExpBar` hides itself on
+   * a zero max and its own `<OnValueChanged>` returns early while hidden -- so "load first, feed after"
+   * is not merely late, it is permanent. See `ui/unit-bridge.ts#seedUnitSnapshots`.
+   *
+   * Snapshots only. Events belong to the bridges, which attach after the tree exists.
+   */
+  seed?: (vm: LuaVM) => void;
 }
 
 export interface WorldRuntime {
@@ -120,6 +134,12 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // The action bar's globals. Safe with no host feed at all: every slot is empty, so `HasAction` is
   // false everywhere and all 12 buttons stay hidden -- which is exactly the state before this existed.
   installActionsApi(vm);
+  // The account's expansion, which is what `ReputationFrame_OnLoad` turns into `MAX_PLAYER_LEVEL`.
+  // Installed BEFORE the load for that reason: it is read by a handler the load itself fires.
+  installAccountApi(vm);
+
+  // BEFORE the first file runs -- see `WorldRuntimeOptions#seed` for why the order is load-bearing.
+  options.seed?.(vm);
 
   const runtime = createFrameXmlRuntime(vm, ctx);
   const resolve = (path: string): string | null => texts.get(cacheKey(path)) ?? null;
@@ -173,6 +193,23 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   await registerTreeArt(options.art, options.root);
 
   const editBoxes = collectEditBoxes(registry, options.root);
+
+  /**
+   * ONE named frame's `<OnUpdate>`, and only that one: `BonusActionBarFrame`.
+   *
+   * The header above declines a GENERAL `OnUpdate` dispatch at 4904 frames and that still stands. This
+   * is the same exception `runtime.ts:324-365` makes for four named glue frames, and it is needed for
+   * the same kind of reason -- the frame's entire POSITION lives in its `OnUpdate`:
+   * `ShowBonusActionBar` only sets `mode = "show"` and a `slideTimer`, and `BonusActionBar_OnUpdate`
+   * (`BonusActionBarFrame.lua:31-65`) is what walks the bar from `y = 0` (below the screen, at
+   * `MainMenuBar`'s BOTTOMLEFT) to `y = BONUSACTIONBAR_YPOS = 43`, over the main bar, and then sets
+   * `state = "top"`. Without the tick a warrior's bar is shown at the bottom edge, mostly off screen.
+   *
+   * It costs nothing in the steady state, which is why one named frame is affordable: the body returns
+   * on its first line once `completed == 1` (:47-49), so it dirties the draw-list fingerprint for the
+   * 0.15 s of the slide and never again until the form changes.
+   */
+  const bonusBarId = registry.byName('BonusActionBarFrame');
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
   let caretClock = 0;
@@ -199,6 +236,11 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
       // prunes the same subtrees -- so this is the same set of pixels for a fraction of the walk.
       for (const id of collectButtons(registry, options.root, false)) {
         syncInteractiveArt(ctx, id);
+      }
+      // The bonus bar's slide -- see `bonusBarId`. Only while it is shown: hidden, its own body would
+      // still run the `completed` check, and a frame nobody can see has no position worth integrating.
+      if (bonusBarId !== null && registry.widget(bonusBarId)?.shown) {
+        invokeScriptHandler(ctx, bonusBarId, 'OnUpdate', [dt]);
       }
     },
     dispose: () => {

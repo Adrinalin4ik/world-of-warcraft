@@ -51,6 +51,34 @@ export function installCompat(vm: LuaVM): void {
     strlen = string.len
     strupper = string.upper
     floor = math.floor
+    -- THE WORLD MANIFEST'S OWN SET, and its absence was a whole-manifest defect rather than a cosmetic
+    -- one: an alias missing here is nil, a nil called at FILE SCOPE aborts the chunk, and every function
+    -- the rest of that file would have defined is then undefined for the whole session.
+    -- SpellBookFrame.lua:4 (MAX_SPELL_PAGES = ceil(MAX_SPELLS / SPELLS_PER_PAGE)) is the one that
+    -- exposed it -- ceil was absent, so SpellBookFrame_OnLoad, SpellButton_OnLoad and the other 30
+    -- functions in that file never existed, and the load report showed
+    -- 'function="SpellBookFrame_OnLoad" is not a defined global' for a file whose XML had loaded fine.
+    -- ChatFrame.lua:630 did the same on strlower, LFDFrame.lua:1 on GetExpansionLevel, and
+    -- PetActionBarFrame.lua:384 on gsub (12 handler failures).
+    --
+    -- COUNTED over the 264 files the world manifest actually loads (a grep for each name over the
+    -- served .lua and .xml), not guessed: gsub 87, strlower 55, ceil 52, strmatch 43, strfind 27,
+    -- abs 14, date 5, sqrt 3, time 3, gmatch 2. Each is an EXACT standard-library equivalent under a
+    -- 5.0-era flat name. (No backticks anywhere in this shim: it is a JS template literal.)
+    ceil = math.ceil
+    abs = math.abs
+    sqrt = math.sqrt
+    strlower = string.lower
+    strfind = string.find
+    strmatch = string.match
+    gsub = string.gsub
+    gmatch = string.gmatch
+    date = os.date
+    time = os.time
+    -- NOT aliased, deliberately, because they are engine functions with no standard-library twin and
+    -- their exact semantics are not sourced here: strsplit (18 calls -- its first argument is a SET of
+    -- delimiter characters and it returns a tuple), strjoin (2), strtrim (12). Each still aborts its
+    -- chunk where it is called at file scope, and the load report names it.
     min = math.min
     max = math.max
     random = math.random
