@@ -7,11 +7,14 @@
  * run on the VM, and re-registering it here would shadow that one with a worse one.
  */
 import { LuaVM } from '../vm';
-import { Viewport } from '../../../layout';
+import { Viewport, viewportUnits } from '../../../layout';
 import config from '../../../../../network/config';
 
 export interface ScreenApiOptions {
-  /** Device-pixel window size `GetScreenWidth`/`GetScreenHeight` read. Defaults to the real window. */
+  /**
+   * The window in DEVICE pixels. `GetScreenWidth`/`GetScreenHeight` convert it to logical units
+   * through `viewportUnits`; `GetScreenResolutions` reports it as-is. Defaults to the real window.
+   */
   viewport?: () => Viewport;
   /** AccountLogin_Exit -- what "leave the client" means outside a real OS process to end. */
   onQuitGame?: () => void;
@@ -101,9 +104,51 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
   ensureModifierTracker();
   ensureCursorTracker();
 
-  // GlueParent_OnLoad: the letterbox-bar math, which needs the real device pixels, not authored units.
-  vm.registerFunction('GetScreenWidth', () => [viewport().width]);
-  vm.registerFunction('GetScreenHeight', () => [viewport().height]);
+  /**
+   * `GetScreenWidth()`/`GetScreenHeight()` -- **LOGICAL (authored) UNITS, not device pixels.**
+   *
+   * These returned `viewport().width/height` in DEVICE PIXELS, and the comment here asserted that was
+   * wanted. It is not, and the game's own files say so three separate ways:
+   *
+   * - `uiparent.lua:2243-2245` -- `elseif ( right > GetScreenWidth() ) then newAnchorX =
+   *   GetScreenWidth() - frame:GetWidth();`. The result is subtracted from a widget's `GetWidth()` and
+   *   used as a `SetPoint` OFFSET, both of which are authored units. Mixing device pixels in here is
+   *   dimensionally impossible.
+   * - `uiparent.lua:2907-2914` -- `GetScreenHeightScale()` is `GetScreenHeight()/768` and
+   *   `GetScreenWidthScale()` is `GetScreenWidth()/1024`, against those two LITERALS. 1024x768 is the
+   *   authored virtual screen, so these are ratios against the reference layout and read 1.0 there.
+   *   Divided into device pixels they would mean nothing.
+   * - `worldmapframe.lua:90-98` -- `local width = GetScreenWidth()` ... `BlackoutWorld:SetWidth(width)`,
+   *   straight into `SetWidth`. (Block-commented in 12340, but it is still the client's own intent.)
+   *
+   * ## What the device-pixel version actually broke
+   *
+   * `GlueParent_OnLoad` (`interface/gluexml/glueparent.lua:174-184`) letterboxes the glue screen to 16:9:
+   *
+   *     local width, height = GetScreenWidth(), GetScreenHeight();
+   *     if ( width / height > 16 / 9) then
+   *       local barWidth = ( width - height * 16 / 9 ) / 2;
+   *       self:ClearAllPoints();
+   *       self:SetPoint("TOPLEFT", barWidth, 0);
+   *       self:SetPoint("BOTTOMRIGHT", -barWidth, 0);
+   *
+   * `barWidth` goes into `SetPoint`, whose units are authored -- so a device-pixel `barWidth` is
+   * over-applied by exactly `screenScale` (`ui/layout.ts`). MEASURED on :3000 at 1920x900 before this
+   * fix: `GlueParent`'s anchors read x = +/-160, and 160 authored units at scale 900/768 = 1.171875 is
+   * **187.5 device px** of inset per side where the correct answer is **160**.
+   *
+   * The RATIO test is scale-invariant, so this never changed WHETHER the letterbox fires -- only how
+   * wide the bars are. That matters for reading the bug report: at 1382x911 (ratio 1.517 < 16/9) the
+   * letterbox does not fire at all and the glue screen already filled the window, measured, with
+   * `GlueParent`'s anchors at zero offsets. So the device-pixel confusion is the whole of the EXCESS
+   * inset and none of the inset itself; a window wider than 16:9 gets black bars from the real 3.3.5a
+   * client too, and this fix makes ours the same width as the client's rather than removing them.
+   *
+   * `GetScreenResolutions` below deliberately keeps DEVICE pixels: it reports a display MODE, which is a
+   * genuinely physical thing, and its only consumer computes an aspect ratio.
+   */
+  vm.registerFunction('GetScreenWidth', () => [viewportUnits(viewport()).width]);
+  vm.registerFunction('GetScreenHeight', () => [viewportUnits(viewport()).height]);
 
   /**
    * `GetScreenResolutions()` and `GetCurrentResolution()` -- THE BLOCKER THAT STOPPED EVERY MANAGED FRAME
