@@ -461,7 +461,8 @@ export class CombatHandler extends EventEmitter {
       // `interrupt` true: a swing must restart even if the previous swing's window has not elapsed,
       // which at a fast weapon speed it often has not. Repetitions 0 -- a swing is a ONE-SHOT, and
       // `startAnimation`'s ownership latch gives the body back to locomotion when its window ends.
-      unit.setAnimation(swingAnimation(unit, offhand) ?? ATTACK_UNARMED, true, 0);
+      const swingId = swingAnimation(unit, offhand) ?? ATTACK_UNARMED;
+      unit.setAnimation(swingId, true, 0);
 
       // THE SWING RATE: the clip is stretched (or compressed) to fill the WEAPON'S OWN interval.
       //
@@ -480,9 +481,17 @@ export class CombatHandler extends EventEmitter {
       //
       // STATE IS STILL THE PACKET'S. This only ever touches the rate of a clip the wire already armed
       // -- the `|zspeed| > 0` hover bug was a rate deciding a state, and nothing here decides anything.
+      // ONLY WHEN THE ARM ACTUALLY LANDED ON THE SWING, and this guard is the defect my own self-review
+      // found in this diff. `setAnimation` goes through `resolve`, which falls back to the first inline
+      // sequence -- normally the looping Stand -- for any id the model does not own, and it also returns
+      // early leaving whatever was playing in place. Without `armed.id === swingId`, a creature with no
+      // swing clip (a wolf owns only `AttackUnarmed 16`; nothing owns all eight) would have had the rate
+      // written onto its RUNNING GAIT LOOP -- and `updateLocomotion`'s "never re-arm a running loop"
+      // guard means a 0.46x run would then persist for the rest of that unit's life. Exactly the class
+      // of bug the `setScalar`-under-`matrixAutoUpdate` and hover-magnitude traps are.
       const attackMs = offhand ? unit.fields.attackTimeOff : unit.fields.attackTimeMain;
       const inst = unit.model?.instanceAnim ?? null;
-      const armed = inst?.current ?? null;
+      const armed = inst?.current?.id === swingId ? inst.current : null;
       if (inst && armed && attackMs !== undefined
         && attackMs >= MIN_ATTACK_TIME_MS && attackMs <= MAX_ATTACK_TIME_MS
         && armed.lengthMs > 0) {
@@ -500,7 +509,10 @@ export class CombatHandler extends EventEmitter {
       // After the arm AND after the swing-time scaling above, and MULTIPLICATIVE on it: half of the
       // weapon's own pace, not a flat 0.5x that would make a claymore's whiff faster than its hit.
       // Through `setRate`, which re-anchors the clock and therefore does not jump the pose.
-      if (victimState !== null && isWhiff(victimState) && inst) {
+      // `armed`, not `inst` alone -- the same guard, and the whiff needed it too: this line predates
+      // this round and would slow a gait loop to half speed for ever on any unit whose model has no
+      // swing clip. A miss on a clipless attacker now slows nothing, which is the honest answer.
+      if (victimState !== null && isWhiff(victimState) && inst && armed) {
         inst.setRate(inst.playbackRate * 0.5, worldClock.ms);
       }
     }
