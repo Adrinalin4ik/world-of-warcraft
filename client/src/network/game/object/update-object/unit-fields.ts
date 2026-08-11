@@ -52,21 +52,6 @@ export interface UnitFieldUpdate {
   dynamicFlags?: number;
   /** `OBJECT_FIELD_ENTRY` -- the creature template id `CMSG_CREATURE_QUERY` is asked about. */
   entry?: number;
-  /**
-   * `UNIT_FIELD_BASEATTACKTIME` -- the MAIN-HAND weapon-swing interval in MILLISECONDS.
-   *
-   * 3.3.5a index 62 (`UnitField.unit_field_baseattacktime`, `object_end + 0x0038`), and the version
-   * rule bites here: benilla puts the same field at 126 (`benilla-protocol/src/messages/
-   * update_object/fields/mod.rs:135`, "OBJECT_END+0x78"). Two slots, main then offhand.
-   *
-   * READ BECAUSE THE SWING CLIP HAS TO FIT IT. `humanmale.m2`'s swing clips are 1000-1500 ms
-   * one-shots while a real weapon swings every 2000-3400 ms, so playing them at their authored rate
-   * leaves the character finishing his swing and standing idle for the rest of the interval -- the
-   * owner's "анимация атаки не соответствует swing time". See `combat.ts#handleAttackerState`.
-   */
-  attackTimeMain?: number;
-  /** `UNIT_FIELD_BASEATTACKTIME + 1` -- the OFF-HAND interval, ms. See `attackTimeMain`. */
-  attackTimeOff?: number;
 }
 
 /**
@@ -120,14 +105,6 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
   out.factionTemplate = u32('unit_field_factiontemplate');
   out.unitFlags = u32('unit_field_flags');
   out.dynamicFlags = u32('unit_dynamic_flags');
-
-  // THE TWO ATTACK-TIME SLOTS. The main hand has a name in `UnitField`; the offhand is the next index
-  // up and the table calls it `unit_field_unk63`, which is what `getUpdateFieldName` will have keyed it
-  // by -- so both that name and the bare index are tried rather than assuming which one a values block
-  // produced. (Same reason `applyUnitFields` reads the virtual-item offhand by number.)
-  out.attackTimeMain = u32('unit_field_baseattacktime');
-  out.attackTimeOff = u32('unit_field_unk63')
-    ?? u32(String(UnitField.unit_field_baseattacktime + 1));
 
   // THE POWER TYPE is the high byte of `UNIT_FIELD_BYTES_0` (`race | class | gender | powerType`),
   // benilla `fields/unit.rs` and this build's own `UnitField` table agree on the packing even though
@@ -209,8 +186,6 @@ export function applyUnitFields(
   set('unitFlags', fields.unitFlags);
   set('dynamicFlags', fields.dynamicFlags);
   set('powerType', fields.powerType);
-  set('attackTimeMain', fields.attackTimeMain);
-  set('attackTimeOff', fields.attackTimeOff);
 
   // AFTER the power type is settled, using whatever the unit now knows -- see `readPower`.
   const power = readPower(values, unit.fields.powerType ?? 0);

@@ -60,22 +60,4 @@ describe('unit fields', () => {
     expect(applyUnitFields(unit, { unit_field_health: 0 }, ObjectType.Player, false)).toBe(false);
   });
 
-  /**
-   * The two attack-time slots, which the swing-clip rate divides by. This is the version-numbered half
-   * of that change and the half a wrong number would ruin silently: 3.3.5a has main at 62 and offhand at
-   * 63, where benilla's 1.12 tables have 126/127.
-   */
-  it('reads both base attack times off the 3.3.5a indices', () => {
-    expect(UnitField.unit_field_baseattacktime).toBe(62);
-    expect(getUpdateFieldName(UnitField.unit_field_baseattacktime, ObjectType.Unit))
-      .toBe('unit_field_baseattacktime');
-
-    const unit = new Unit('0x59a6');
-    applyUnitFields(unit, {
-      unit_field_baseattacktime: 2900,
-      unit_field_unk63: 1500,
-    }, ObjectType.Player, true);
-    expect(unit.fields.attackTimeMain).toBe(2900);
-    expect(unit.fields.attackTimeOff).toBe(1500);
-  });
 });

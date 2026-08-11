@@ -45,6 +45,7 @@ import {
 } from '../../../game/classes/combat-anim';
 import { combatWire } from '../../../game/classes/combat-wire';
 import { worldClock } from '../../../game/pipeline/m2/anim/world-clock';
+import { windowElapsedOrInstant } from '../../../game/pipeline/m2/anim/instance-anim';
 
 /**
  * `HitInfo` bit `0x4` marks an OFFHAND swing and `0x10000` suppresses the animation entirely
@@ -65,20 +66,6 @@ const HIT_INFO_NO_ANIMATION = 0x10000;
  */
 const HIT_INFO_ANY_ABSORB = 0x20 | 0x40;
 const HIT_INFO_ANY_RESIST = 0x80 | 0x100;
-
-/**
- * The band a `UNIT_FIELD_BASEATTACKTIME` has to fall in before the swing clip is scaled by it, and the
- * clamp on the resulting rate. See `handleAttackerState`.
- *
- * 300 ms is below every real weapon (the fastest daggers are 1300) and 20 s above every one, so the
- * guard only ever rejects a misread field -- the same "a named field arriving with a plausible-looking
- * number" caution `unit-fields.ts#UnitFieldSample` was written for. The RATE clamp is a judgement and
- * is not derived from anything: below about a quarter speed a swing stops reading as a swing.
- */
-const MIN_ATTACK_TIME_MS = 300;
-const MAX_ATTACK_TIME_MS = 20000;
-const SWING_RATE_MIN = 0.25;
-const SWING_RATE_MAX = 4;
 
 /** One creature template's UI-visible head, as far as a unit frame needs it. */
 export interface CreatureInfo {
@@ -112,21 +99,20 @@ export class CombatHandler extends EventEmitter {
     this.game.on('packet:receive:SMSG_ATTACKSTOP', this.handleAttackStop.bind(this));
     this.game.on('packet:receive:SMSG_ATTACKERSTATEUPDATE', this.handleAttackerState.bind(this));
 
-    // THE FOUR SWING REFUSALS, which were unread and therefore SILENT -- and that silence is why
-    // "auto-attack does not work" had no diagnosis for three rounds.
+    // THE FOUR SWING REFUSALS, which were unread and therefore SILENT.
     //
-    // MEASURED (`WF1`, one account, a wolf at 2.2 yd): we sent one `CMSG_ATTACKSWING`, the server
-    // replied with exactly ONE `SMSG_ATTACKERSTATEUPDATE` for us at t=0, and then nothing for 18 s --
-    // while the wolf's own swings arrived every ~2 s and our `inCombat` stayed true for all 119
-    // samples. So the server never STOPPED our attack; it kept refusing each swing. A refusal resets
-    // the attack timer without ending the attack, which is exactly that shape, and the only thing that
-    // distinguishes range from facing from a bad target is one of these four opcodes.
+    // THE STORY THAT USED TO BE HERE WAS WRONG, and it is left corrected rather than deleted because it
+    // cost three rounds. It said: the server accepts the attack and then refuses every swing, resetting
+    // the weapon timer without ending the attack, so the fix is a target-facing law. MEASURED instead
+    // (`scratchpad/pj-swing.js` and `pj-fight.js`, :3000): at melee range auto-attack lands SIX swings
+    // 2.8 s apart with `swingRefusals` empty, and the failing captures were a REJECTION -- one
+    // `SMSG_ATTACKSTOP` naming us and the target, no `SMSG_ATTACKSTART` at all (see `handleAttackStop`).
+    // The only refusal ever observed is `NOTINRANGE`, once, from 10.3 and 21.9 yd, and it arrives with
+    // `SMSG_ATTACKSTART` and the Ready stance -- i.e. exactly as the opcode's name says.
     //
-    // Warned rather than acted on, deliberately: the FIX for a bad facing is to turn toward the target
-    // while auto-attacking, which is a movement behaviour this client does not have at all (nothing
-    // faces a target -- `net/motion/facing.rs#face_target` is the reference's, and it is unported), and
-    // guessing at it from here would be inventing a control law. This makes the failure legible; the
-    // behaviour is the follow-up, and it is now a named one instead of a mystery.
+    // So these handlers are instrumentation that WORKS and had nothing to report, which is a different
+    // thing from a mystery. `facing.rs#face_target` was never the fix and could not have been: it
+    // excludes the local player by construction (`net/motion/facing.rs:85-88`, `Without<SelfPlayer>`).
     ([
       'SMSG_ATTACKSWING_NOTINRANGE',
       'SMSG_ATTACKSWING_BADFACING',
@@ -458,48 +444,57 @@ export class CombatHandler extends EventEmitter {
     const unit = this.game.world.entities.get(attacker);
     if (unit) {
       const offhand = (hitInfo & HIT_INFO_OFFHAND) !== 0;
-      // `interrupt` true: a swing must restart even if the previous swing's window has not elapsed,
-      // which at a fast weapon speed it often has not. Repetitions 0 -- a swing is a ONE-SHOT, and
-      // `startAnimation`'s ownership latch gives the body back to locomotion when its window ends.
       const swingId = swingAnimation(unit, offhand) ?? ATTACK_UNARMED;
-      unit.setAnimation(swingId, true, 0);
 
-      // THE SWING RATE: the clip is stretched (or compressed) to fill the WEAPON'S OWN interval.
+      // THE SWING PLAYS AT ITS AUTHORED RATE, AND THE TIMER GOVERNS THE NEXT ONE -- not this one's
+      // pace. The previous commit had it backwards: it stretched the clip to fill
+      // `UNIT_FIELD_BASEATTACKTIME`, so `seq 19` ran at 0.46x for the whole 2.9 s and the owner reported
+      // "атакует очень медленно, на протяжении всего свинг тайма, однако атака должна происходить
+      // быстрее чем свинг тайм, но после атаки происходит ожидание завершения свинга". So the swing is a
+      // fast one-shot and the Ready idle fills the remainder of the timer, which the ownership latch
+      // already does for free: `startAnimation` latches `externalSeq`, `updateLocomotion` releases it
+      // when the window elapses, and the engaged cascade's next pick is the Ready rung.
       //
-      // The owner's report is "анимация атаки не соответствует swing time", and the arithmetic is
-      // plain: `humanmale.m2`'s swing clips (17/18/19/85/87/88) are 1000-1500 ms one-shots, while
-      // `UNIT_FIELD_BASEATTACKTIME` for a real weapon is 2000-3400 ms. Played at 1x, the swing
-      // finishes and the body stands in the Ready idle for the rest of the interval; a fast dagger has
-      // the opposite problem. Same mechanism as the locomotion rate (`Unit#locomotionRate`, the
-      // reference's `scaled_rate`, `select.rs:1053-1056`) -- an authored duration divided by the real
-      // one -- and only the source of the interval differs.
+      // Nothing writes a rate on the normal path any more. `setAnimation` -> `startAnimation` -> `arm`
+      // starts every swing at 1x, which is what the reference does too: it scales gaits by ground speed
+      // (`select.rs:1053-1056`) and NEVER scales a combat one-shot by the weapon timer.
       //
-      // UNSOURCED IN THE REFERENCE, stated plainly rather than dressed up: benilla reads
-      // `unit_base_attack_time` for the character sheet and for the ranged cooldown pad (`ui_char.rs:
-      // 371-372`, `cooldowns.rs:214`) and does NOT scale the swing clip with it, so this law is ours.
-      // What is taken from the reference is the shape.
+      // THE ONE CASE WHERE THE TIMER IS SHORTER THAN THE CLIP has a byte-verified answer in the
+      // reference, and it is not a computed compression: the COMBAT FAST-PATH
+      // (`creature_anim/driver.rs:864-872`, the client's `0x5fe43c`-`0x5fe48b`, wow-re
+      // `combat-anim-fastpath.md`, decision 0406) -- "a combat clip requested while another combat clip
+      // is playing is NOT armed: the CURRENT clip's rate doubles (op6 2.0f re-times its remainder,
+      // pose-continuous) and the request parks in the `+0xd60` cache to play afterwards ... consecutive
+      // swings don't hard-cut each other". A flat 2x, not `clip / timer`.
       //
-      // STATE IS STILL THE PACKET'S. This only ever touches the rate of a clip the wire already armed
-      // -- the `|zspeed| > 0` hover bug was a rate deciding a state, and nothing here decides anything.
-      // ONLY WHEN THE ARM ACTUALLY LANDED ON THE SWING, and this guard is the defect my own self-review
-      // found in this diff. `setAnimation` goes through `resolve`, which falls back to the first inline
-      // sequence -- normally the looping Stand -- for any id the model does not own, and it also returns
-      // early leaving whatever was playing in place. Without `armed.id === swingId`, a creature with no
-      // swing clip (a wolf owns only `AttackUnarmed 16`; nothing owns all eight) would have had the rate
-      // written onto its RUNNING GAIT LOOP -- and `updateLocomotion`'s "never re-arm a running loop"
-      // guard means a 0.46x run would then persist for the rest of that unit's life. Exactly the class
-      // of bug the `setScalar`-under-`matrixAutoUpdate` and hover-magnitude traps are.
-      const attackMs = offhand ? unit.fields.attackTimeOff : unit.fields.attackTimeMain;
+      // The DOUBLING is ported here. The PARK is not: the deferred cache needs a drain point in the
+      // locomotion release and a swing dropped this way is a swing not drawn, so it is named rather
+      // than faked. Reachable only with haste on an already-fast weapon (the shortest authored swing
+      // clips are ~1000 ms and the fastest weapon timer is 1300), which is why it is not urgent.
+      //
+      // This also replaces `interrupt: true`, which was a HARD CUT of the in-flight swing -- the exact
+      // thing the reference says the fast-path exists to prevent.
+      const live = unit.model?.instanceAnim ?? null;
+      const inFlight = live && live.current && live.current.id === swingId
+        && !windowElapsedOrInstant(live, live.current, worldClock.ms);
+      if (inFlight && live) {
+        live.setRate(2, worldClock.ms);
+      } else {
+        // Repetitions 0 -- a swing is a ONE-SHOT, and `startAnimation`'s ownership latch gives the body
+        // back to locomotion when its window ends.
+        unit.setAnimation(swingId, true, 0);
+      }
+
+      // ONLY WHEN THE ARM ACTUALLY LANDED ON THE SWING, and this guard was the defect a self-review of
+      // the previous commit found. `setAnimation` goes through `resolve`, which falls back to the first
+      // inline sequence -- normally the looping Stand -- for any id the model does not own, and it also
+      // returns early leaving whatever was playing in place. Without `armed.id === swingId`, a creature
+      // with no swing clip (a wolf owns only `AttackUnarmed 16`; nothing owns all eight) would have had
+      // a rate written onto its RUNNING GAIT LOOP -- and `updateLocomotion`'s "never re-arm a running
+      // loop" guard means that rate would then persist for the rest of that unit's life. Exactly the
+      // class of bug the `setScalar`-under-`matrixAutoUpdate` and hover-magnitude traps are.
       const inst = unit.model?.instanceAnim ?? null;
       const armed = inst?.current?.id === swingId ? inst.current : null;
-      if (inst && armed && attackMs !== undefined
-        && attackMs >= MIN_ATTACK_TIME_MS && attackMs <= MAX_ATTACK_TIME_MS
-        && armed.lengthMs > 0) {
-        // Clamped: a 300 ms clip against a 3.4 s claymore would otherwise crawl at 0.09x, which reads
-        // as a frozen pose rather than a slow swing. The band is a judgement, not a measurement.
-        const rate = Math.min(SWING_RATE_MAX, Math.max(SWING_RATE_MIN, armed.lengthMs / attackMs));
-        inst.setRate(rate, worldClock.ms);
-      }
 
       // THE WHIFF SLOW-DOWN (`impact.rs:73-76`, the client's `0x712910`, decision 0279): a swing that
       // contacted nothing -- miss, dodge, evade -- runs the rest of its arc at half speed. That IS what
