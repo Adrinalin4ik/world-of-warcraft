@@ -159,15 +159,25 @@ function hasOwn(object: object, key: string): boolean {
 }
 
 /**
- * The class chain, exported for `Region:IsObjectType` -- which asks the same question the method
- * dispatcher asks and must get the same answer.
+ * `Region:IsObjectType(name)`'s answer: is `cls` that class, or descended from it?
  *
- * Exported rather than duplicated on purpose: `IsObjectType("frame")` answering differently from the
- * dispatcher's own inheritance walk is the sort of divergence that shows up as a frame FrameXML believes
- * is not a Frame while every Frame method on it works.
+ * Lives here rather than in `methods/region.ts` so it uses the SAME two functions the rest of the object
+ * model does -- `parseClass` for the name and `chainOf` for the inheritance walk. `IsObjectType("frame")`
+ * answering differently from the method dispatcher's own walk is the kind of divergence that shows up as a
+ * frame FrameXML believes is not a Frame while every Frame method on it works.
+ *
+ * Going through `parseClass` is what makes it CASE-INSENSITIVE and ALIAS-AWARE, and both matter:
+ *  - case, because `uiparent.lua:1301` passes lowercase `"frame"` while the engine's own `GetObjectType`
+ *    returns `"Frame"`, so the engine cannot be comparing the strings as given;
+ *  - aliases, because `MODELFFX` and `PLAYERMODEL` are both the `MODEL` class here, and a bare uppercase
+ *    lookup would tell a `ModelFFX` widget it is not a `ModelFFX`.
+ *
+ * An unknown name is `false`, not an error -- which is what the engine answers for a type that does not
+ * exist, and is the safe direction for a caller using this to feature-detect.
  */
-export function classChainOf(cls: WidgetClass): WidgetClass[] {
-  return chainOf(cls);
+export function isObjectType(cls: WidgetClass, name: string): boolean {
+  const wanted = parseClass(name);
+  return wanted !== null && chainOf(cls).includes(wanted);
 }
 
 /** The lookup order for a class: itself, then each ancestor. */

@@ -14,7 +14,7 @@
  *     SetTexCoord, SetDrawLayer -- the client's own LayeredRegion base class).
  *   - TEXTURE / FONTSTRING: everything else, on the leaf it actually belongs to.
  */
-import { FrameMethod, MethodContext, MethodTable, classChainOf, registerMethods } from '../object';
+import { FrameMethod, MethodContext, MethodTable, isObjectType, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
 import { Layer, Widget, deriveSize } from '../../../widget';
@@ -270,9 +270,8 @@ const REGION: MethodTable = {
    * `uiparent.lua:1806` and NOT ONE managed frame is ever moved.
    */
   IsObjectType: (ctx, self, args) => {
-    const wanted = String(args[0] ?? '').toUpperCase();
     const cls = ctx.registry.classOf(self);
-    return [cls !== null && classChainOf(cls).includes(wanted as never)];
+    return [cls !== null && isObjectType(cls, String(args[0] ?? ''))];
   },
   /**
    * `IsUserPlaced()` -- has the player dragged this frame to a position of his own?
