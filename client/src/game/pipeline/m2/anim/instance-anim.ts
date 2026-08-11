@@ -139,6 +139,20 @@ export class InstanceAnim {
    * The outgoing clip keeps RUNNING as it fades (its own cursor advances off its own `armedAt` and
    * rate), which is what makes a walk fading into a run look like a change of pace rather than a
    * freeze-and-swap.
+   *
+   * TWO LIMITS, from a self-review of this diff rather than from a guess:
+   *
+   *  - A FADE INTERRUPTED BY A FADE does not chain. Arm A, then B, then C before B's fade ends, and C
+   *    fades from B's own pure sample rather than from the A/B mixture that was actually on screen -- a
+   *    pop of whatever the unconverged residual was. It needs a third slot or a pose snapshot to fix
+   *    properly, and the case is a gait change inside 150 ms of another one.
+   *  - ONLY BONES ARE BLENDED. Material and texture channels (`material-channels.ts`) sample `current`
+   *    on their own path, so a clip change that also changes a texture transform still pops there. Not
+   *    reachable on the gaits this was built for, which animate bones only.
+   *
+   * A GATED instance retires its fade correctly and needs no help: `blendWeight` is clock-indexed like
+   * everything else here, so an instance skipped for a second resumes with the weight already at 1
+   * rather than replaying a stale fade.
    */
   private prev: Sequence | null = null;
 
