@@ -66,6 +66,20 @@ const HIT_INFO_NO_ANIMATION = 0x10000;
 const HIT_INFO_ANY_ABSORB = 0x20 | 0x40;
 const HIT_INFO_ANY_RESIST = 0x80 | 0x100;
 
+/**
+ * The band a `UNIT_FIELD_BASEATTACKTIME` has to fall in before the swing clip is scaled by it, and the
+ * clamp on the resulting rate. See `handleAttackerState`.
+ *
+ * 300 ms is below every real weapon (the fastest daggers are 1300) and 20 s above every one, so the
+ * guard only ever rejects a misread field -- the same "a named field arriving with a plausible-looking
+ * number" caution `unit-fields.ts#UnitFieldSample` was written for. The RATE clamp is a judgement and
+ * is not derived from anything: below about a quarter speed a swing stops reading as a swing.
+ */
+const MIN_ATTACK_TIME_MS = 300;
+const MAX_ATTACK_TIME_MS = 20000;
+const SWING_RATE_MIN = 0.25;
+const SWING_RATE_MAX = 4;
+
 /** One creature template's UI-visible head, as far as a unit frame needs it. */
 export interface CreatureInfo {
   name: string;
@@ -294,17 +308,52 @@ export class CombatHandler extends EventEmitter {
     this.emit('attack:start', attacker, victim);
   }
 
-  /** `SMSG_ATTACKSTOP`: two PACKED guids and a `u32` dead flag (`attack.rs:86-92`). */
+  /**
+   * `SMSG_ATTACKSTOP`: two PACKED guids and a `u32` dead flag (`attack.rs:86-92`).
+   *
+   * THE VICTIM IS READ AND CARRIED, and that is this round's whole diagnosis. Three rounds took
+   * "auto-attack does not work" to be the server REFUSING each swing (bad facing, out of range) and
+   * built a follow-up around porting a target-facing law. Measured on the wire instead
+   * (`scratchpad/pj-swing.js`, one account, a Northshire wolf), the reply to our `CMSG_ATTACKSWING`
+   * is this packet and nothing else:
+   *
+   *   03 a6 59 | db 73 26 2b 01 30 f1 | 00 00 00 00
+   *   attacker = 0x59a6 (ourselves)     victim = 0xf13000012b002673 (the wolf)    dead = 0
+   *
+   * and NONE of the four `SMSG_ATTACKSWING_*` refusals ever arrived (`swingRefusals` stayed `{}`).
+   * The attack never STARTED. A server has two arms that answer a swing request this way and they
+   * differ only in this field -- an unresolved guid answers with victim 0 (`SendAttackStop(NULL)`),
+   * an invalid target answers with the victim named -- so throwing the victim away, which this method
+   * used to do, made the two indistinguishable and made "the attack was rejected outright" look like
+   * "the attack started and then every swing was refused". The victim is named here so the next round
+   * starts from bytes.
+   */
   handleAttackStop(gp: GamePacket) {
     const attacker = gp.readPackedGUID();
-    gp.readPackedGUID();
+    const victim = gp.readPackedGUID();
     const unit = this.game.world.entities.get(attacker);
     if (unit) {
       unit.inCombat = false;
       unit.combatTarget = null;
     }
-    this.emit('attack:stop', attacker);
+    // OUR OWN attack being stopped with a victim named, when we never had a swing land, is a
+    // REJECTION and not the end of a fight. Said once per victim so a real disengage is quiet.
+    if (attacker === this.game.world.player?.guid && victim !== '0x0'
+      && !this.warnedRejection.has(victim)) {
+      this.warnedRejection.add(victim);
+      console.warn(
+        `combat: the server answered our CMSG_ATTACKSWING at ${victim} with SMSG_ATTACKSTOP --`
+        + ' the attack was rejected outright rather than started, and NO SMSG_ATTACKSWING_* refusal'
+        + ' arrived. A named victim means the guid resolved and the target was judged invalid'
+        + ' (dead attacker, dead or unattackable target); victim 0x0 would mean the guid did not'
+        + ' resolve. Read window.combatWire.history() and swingRefusals.',
+      );
+    }
+    this.emit('attack:stop', attacker, victim);
   }
+
+  /** One warning per victim -- see `handleAttackStop`. */
+  private warnedRejection = new Set<string>();
 
   /**
    * `SMSG_ATTACKERSTATEUPDATE` -- ONE COMPLETED SWING, and the animation driver.
@@ -397,18 +446,45 @@ export class CombatHandler extends EventEmitter {
       // `startAnimation`'s ownership latch gives the body back to locomotion when its window ends.
       unit.setAnimation(swingAnimation(unit, offhand) ?? ATTACK_UNARMED, true, 0);
 
+      // THE SWING RATE: the clip is stretched (or compressed) to fill the WEAPON'S OWN interval.
+      //
+      // The owner's report is "анимация атаки не соответствует swing time", and the arithmetic is
+      // plain: `humanmale.m2`'s swing clips (17/18/19/85/87/88) are 1000-1500 ms one-shots, while
+      // `UNIT_FIELD_BASEATTACKTIME` for a real weapon is 2000-3400 ms. Played at 1x, the swing
+      // finishes and the body stands in the Ready idle for the rest of the interval; a fast dagger has
+      // the opposite problem. Same mechanism as the locomotion rate (`Unit#locomotionRate`, the
+      // reference's `scaled_rate`, `select.rs:1053-1056`) -- an authored duration divided by the real
+      // one -- and only the source of the interval differs.
+      //
+      // UNSOURCED IN THE REFERENCE, stated plainly rather than dressed up: benilla reads
+      // `unit_base_attack_time` for the character sheet and for the ranged cooldown pad (`ui_char.rs:
+      // 371-372`, `cooldowns.rs:214`) and does NOT scale the swing clip with it, so this law is ours.
+      // What is taken from the reference is the shape.
+      //
+      // STATE IS STILL THE PACKET'S. This only ever touches the rate of a clip the wire already armed
+      // -- the `|zspeed| > 0` hover bug was a rate deciding a state, and nothing here decides anything.
+      const attackMs = offhand ? unit.fields.attackTimeOff : unit.fields.attackTimeMain;
+      const inst = unit.model?.instanceAnim ?? null;
+      const armed = inst?.current ?? null;
+      if (inst && armed && attackMs !== undefined
+        && attackMs >= MIN_ATTACK_TIME_MS && attackMs <= MAX_ATTACK_TIME_MS
+        && armed.lengthMs > 0) {
+        // Clamped: a 300 ms clip against a 3.4 s claymore would otherwise crawl at 0.09x, which reads
+        // as a frozen pose rather than a slow swing. The band is a judgement, not a measurement.
+        const rate = Math.min(SWING_RATE_MAX, Math.max(SWING_RATE_MIN, armed.lengthMs / attackMs));
+        inst.setRate(rate, worldClock.ms);
+      }
+
       // THE WHIFF SLOW-DOWN (`impact.rs:73-76`, the client's `0x712910`, decision 0279): a swing that
       // contacted nothing -- miss, dodge, evade -- runs the rest of its arc at half speed. That IS what
       // a missed swing looks like; there is no victim clip for a miss, so this is the whole of it. A
       // parry or a block still contacts, so neither slows.
       //
-      // After the arm, so it lands on the swing just armed, and through `setRate`, which re-anchors the
-      // clock and therefore does not jump the pose.
-      if (victimState !== null && isWhiff(victimState)) {
-        const inst = unit.model?.instanceAnim ?? null;
-        if (inst) {
-          inst.setRate(0.5, worldClock.ms);
-        }
+      // After the arm AND after the swing-time scaling above, and MULTIPLICATIVE on it: half of the
+      // weapon's own pace, not a flat 0.5x that would make a claymore's whiff faster than its hit.
+      // Through `setRate`, which re-anchors the clock and therefore does not jump the pose.
+      if (victimState !== null && isWhiff(victimState) && inst) {
+        inst.setRate(inst.playbackRate * 0.5, worldClock.ms);
       }
     }
 

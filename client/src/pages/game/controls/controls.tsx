@@ -10,7 +10,8 @@ import { headHeight } from '../../../game/camera/pivot';
 import { collisionWorld } from '../../../game/collision/collision-world';
 import { CollisionLayer } from '../../../game/collision/types';
 import {
-  CAPSULE_HEIGHT, CAPSULE_RADIUS, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO, RUN_SPEED,
+  CAPSULE_HEIGHT, CAPSULE_RADIUS, MOUSELOOK_BODY_TURN_RATE, MOUSELOOK_PITCH_CLAMP,
+  RUN_BACK_RATIO, RUN_SPEED,
   SETTLE_STREAM_TIMEOUT, SETTLE_TIMEOUT, STATIONARY_CHASE_RATE, TURN_RATE, TURN_RATE_MOVING,
   capsuleHalfSegment,
 } from '../../../game/movement/constants';
@@ -416,7 +417,16 @@ class Controls extends React.Component<IProp> {
       const gap = wrapPi(yaw - player.move.modelYaw);
       // The CEILING: however the aim moves, the body is never left more than 90 degrees off it, so a
       // steering turn drags the shoulders along only once the head has led that far.
-      let step = Math.max(0, Math.abs(gap) - Math.PI / 2);
+      //
+      // RATE-CAPPED, which the reference does not do -- see `MOUSELOOK_BODY_TURN_RATE`. A fast flick
+      // moves the aim tens of degrees in one frame, and an uncapped ceiling term hands the whole of
+      // that to the body in that frame: the shoulders snap round as fast as the hand moved. Capped at
+      // the character's own turn rate the body follows a flick at pi rad/s and finishes with the
+      // release sweep, which is the owner's "медленнее". A slow turn is under the cap and is unchanged.
+      let step = Math.min(
+        Math.max(0, Math.abs(gap) - Math.PI / 2),
+        MOUSELOOK_BODY_TURN_RATE * delta,
+      );
       if (!steering) {
         // The RELEASE SWEEP: once steering stops, the body closes on the aim at `turnRate x 8`.
         step += STATIONARY_CHASE_RATE * TURN_RATE * delta;

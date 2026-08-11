@@ -49,6 +49,26 @@ export const MOUSELOOK_PITCH_CLAMP = 1.553343;
  */
 export const STATIONARY_CHASE_RATE = 8.0;
 
+/**
+ * The ceiling on how fast the STANDING body may be dragged round by a mouse-look turn (rad/s).
+ *
+ * THE REFERENCE HAS NO SUCH LIMIT, and that is said here rather than implied. Its right-drag weld is an
+ * absolute assignment of the camera yaw onto the aim (`benilla/src/player/camera.rs:352`,
+ * `*face_yaw = cam.yaw`) and its standing body chase applies ONLY the 90-degree ceiling
+ * (`player/gait.rs:58-63`), whose own doc says "the lag mechanism is the freeze, not a slow rate". So a
+ * fast flick of the mouse rotates the body at whatever rate the camera turned, capped only by never
+ * being left more than 90 degrees behind -- which is the owner's "он это должен делать медленнее".
+ *
+ * This cap is therefore a DIRECTOR'S CALL at his request, applied to the ceiling term only. The value
+ * is the character's own turn rate: `TURN_RATE` (pi rad/s, the unit's 6th movement speed), so a mouse
+ * turn cannot rotate the body faster than holding A or D does. Nothing in the binary is claimed for the
+ * choice of where to cap -- only for the number, which is the same one the keyboard turn uses.
+ *
+ * The release sweep is deliberately NOT capped: it is the reference's `turnRate x 8` catch-up and
+ * capping it would leave the body permanently askew after every turn.
+ */
+export const MOUSELOOK_BODY_TURN_RATE = Math.PI;
+
 // -- Character-controller feel knobs -------------------------------------------------------------
 // Binary-derived values kept because they give the WoW feel cheaply. TUNABLE, not fidelity targets:
 // the mechanism is a thin kinematic controller over the swept cast, and refinements (accel/decel
