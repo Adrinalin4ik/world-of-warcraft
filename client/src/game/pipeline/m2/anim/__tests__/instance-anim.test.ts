@@ -465,3 +465,52 @@ describe('the unarmed instance solves from a non-slot, not slot 0', () => {
     expect(new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 0)).x).toBeCloseTo(-3, 4);
   });
 });
+
+/**
+ * THE CROSS-FADE, which is what `blendTime` was parsed for and what nothing read until now. One test:
+ * the weight ramp at three points, on a bone the two sequences translate to different places.
+ */
+describe('the second weighted track', () => {
+  /**
+   * Kills a hard cut (the pose would be B's at t=0), a fade in the wrong direction (A's at t=150), a
+   * weight taken off the wrong clock, and a fade that outlives its blend time.
+   *
+   * Slot 0 holds the bone at x=100 for its whole length, slot 1 at x=0 -- so the blended x IS the
+   * weight, read directly, with no interpolation of A or B to reason about.
+   */
+  it('ramps from the outgoing pose to the incoming one over blendTime', () => {
+    const m = model({
+      animations: [
+        animation({ length: 1000 }),
+        animation({ length: 1000, blendTime: 150 }),
+      ],
+      bones: [bone({
+        translation: {
+          interpolationType: 1,
+          globalSequenceID: -1,
+          tracks: [
+            { animationIndex: 0, timestamps: [0, 1000], values: [[100, 0, 0], [100, 0, 0]] },
+            { animationIndex: 1, timestamps: [0, 1000], values: [[0, 0, 0], [0, 0, 0]] },
+          ],
+        },
+      })],
+    });
+    const inst = new InstanceAnim(m);
+    const x = (t: number) => {
+      inst.solveBones(t);
+      return new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 0)).x;
+    };
+
+    inst.arm(m.sequences[0], 0);
+    expect(x(0)).toBeCloseTo(100, 4);
+
+    // Arm the second at t=1000. At the instant of the arm the body must still be entirely in the
+    // OUTGOING pose, and at the end of the 150 ms blend entirely in the incoming one.
+    inst.arm(m.sequences[1], 1000);
+    expect(x(1000)).toBeCloseTo(100, 4);
+    expect(x(1075)).toBeCloseTo(50, 4);
+    expect(x(1150)).toBeCloseTo(0, 4);
+    // And it stays there: a retired fade must not resurrect.
+    expect(x(2000)).toBeCloseTo(0, 4);
+  });
+});

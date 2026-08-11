@@ -8,6 +8,11 @@ const scratchPos = new THREE.Vector3();
 const scratchQuat = new THREE.Quaternion();
 const scratchScale = new THREE.Vector3();
 const scratchPivot = new THREE.Vector3();
+// The OUTGOING sequence's sample, for the cross-fade. Module-level for the same reason the three
+// above are: this runs per bone per instance per frame.
+const blendPos = new THREE.Vector3();
+const blendQuat = new THREE.Quaternion();
+const blendScale = new THREE.Vector3();
 const scratchLocal = new THREE.Matrix4();
 const scratchPivotTo = new THREE.Matrix4();
 const scratchPivotBack = new THREE.Matrix4();
@@ -29,6 +34,32 @@ export const LOCAL_TRS_STRIDE = 10;
  * It is the one index that cannot itself be quarantined, now or after Task 20.
  */
 export const UNARMED_SLOT = -1;
+
+/**
+ * The ceiling on a cross-fade, in ms.
+ *
+ * `AnimationData`'s own `blendTime` is the source and it is what is used -- 0, 150 and 250 are the
+ * values that actually appear on the gaits this matters for. The cap only rejects a garbage value: a
+ * blend longer than half a second is a smear rather than a transition, and a sequence whose
+ * `blendTime` decoded wrongly would otherwise hold two poses mixed on screen indefinitely. A
+ * judgement, not a measurement, and stated as one.
+ */
+const BLEND_MAX_MS = 500;
+
+/**
+ * The cross-fade's A/B switch: `window.blendControl.enabled = false` restores the hard cuts.
+ *
+ * Here for the same reason the reference keeps `WOW_REMOTE_SNAP=1` and `WOW_REMOTE_FLAT=1`, and the
+ * same reason `frameTrace` is on `window`: a second weighted track is exactly the change that can
+ * double per-bone work, and the only honest way to price it is A/B *within one session* on one
+ * machine, interleaved -- this project has had a whole performance comparison voided by comparing two
+ * runs. Read ONCE per solve (in `solveBones`), never per bone.
+ */
+export const blendControl = { enabled: true };
+
+if (typeof window !== 'undefined') {
+  (window as unknown as Record<string, unknown>).blendControl = blendControl;
+}
 
 /**
  * Per-placement animation state: a clock, and nothing else that could have lived on the model.
@@ -85,6 +116,53 @@ export class InstanceAnim {
   /** Cached from `current`, so the per-frame path does not re-derive it. */
   private law: ClockLaw = 0;
   private periodMs = 0;
+
+  /**
+   * THE SECOND WEIGHTED TRACK -- the OUTGOING sequence, kept alive only for the length of a
+   * cross-fade, with everything its own clock needs.
+   *
+   * WHY THIS EXISTS. `blendTimeMs` has been parsed off every sequence since the table was written
+   * (`model-anim.ts:374`, from `AnimationData`'s `blendTime`) and NOTHING READ IT, so every animation
+   * change in this client was a hard cut between two unrelated poses. Mostly invisible -- Stand to
+   * Walk share a silhouette -- and unmistakable where the poses are far apart, which is the owner's
+   * report: "при прыжке назад не хватает плавного перехода в бег назад". MEASURED as `13 WalkBackwards
+   * -> 37 JumpStart -> 13` with no landing clip between them (this round's report, section 6), against
+   * the forward jump's `5 -> 37 -> 40 -> 187 -> 5`. The cascade is the reference's own `jump_land_pick`
+   * and is correct; the missing thing is the transition itself.
+   *
+   * A FADE, NOT A GENERAL TWO-TRACK MIXER, and that distinction is the frame budget. The outgoing slot
+   * exists only between `arm()` and `armedAt + blendMs`, so a unit in a steady gait samples exactly one
+   * sequence per bone as before and only the handful mid-transition pay for two. A persistent second
+   * track -- which is what the sword grip's masked `HandsClosed` overlay needs -- would double the
+   * per-bone work for every unit for ever, and is deliberately NOT what this is.
+   *
+   * The outgoing clip keeps RUNNING as it fades (its own cursor advances off its own `armedAt` and
+   * rate), which is what makes a walk fading into a run look like a change of pace rather than a
+   * freeze-and-swap.
+   */
+  private prev: Sequence | null = null;
+
+  private prevArmedAtMs = 0;
+
+  private prevRate = 1;
+
+  private prevLaw: ClockLaw = 0;
+
+  private prevPeriodMs = 0;
+
+  private prevFrozenElapsedMs = 0;
+
+  /** `worldClock.ms` at which the current cross-fade began, and how long it lasts. */
+  private blendStartMs = 0;
+
+  private blendMs = 0;
+
+  /**
+   * This frame's blend weight, resolved ONCE per solve rather than per bone: 1 means "no fade, sample
+   * only `current`". Held on the instance because `solveBone` recurses and threading it through would
+   * add a parameter to the hottest call in the renderer.
+   */
+  private frameBlend = 1;
 
   /**
    * Bone matrices relative to bind pose, 16 floats each, RAW M2 model axes.
@@ -152,6 +230,27 @@ export class InstanceAnim {
    */
   arm(seq: Sequence, worldClockMs: number, rate: number = 1): void {
     this.ensureBuffers();
+
+    // OPEN A CROSS-FADE from whatever was playing. `blendTimeMs` is the INCOMING sequence's, which is
+    // how the file expresses it: `AnimationData.blendTime` answers "how long does it take to blend INTO
+    // this animation". Zero means a deliberate hard cut and is respected as one -- a death, and any
+    // sequence the authors gave 0 -- so this never invents a transition the data did not ask for.
+    //
+    // Re-arming the SAME sequence never opens a fade: that is a restart of a one-shot (a swing at the
+    // next weapon tick), and fading a clip into itself would ghost the first frames against the last.
+    if (this.current !== null && this.current !== seq && seq.blendTimeMs > 0) {
+      this.prev = this.current;
+      this.prevArmedAtMs = this.armedAtMs;
+      this.prevRate = this.rate;
+      this.prevLaw = this.law;
+      this.prevPeriodMs = this.periodMs;
+      this.prevFrozenElapsedMs = this.frozenElapsedMs;
+      this.blendStartMs = worldClockMs;
+      this.blendMs = Math.min(seq.blendTimeMs, BLEND_MAX_MS);
+    } else {
+      this.prev = null;
+    }
+
     this.current = seq;
     this.armedAtMs = worldClockMs;
     this.periodMs = seq.lengthMs;
@@ -206,6 +305,35 @@ export class InstanceAnim {
   }
 
   /**
+   * Where the OUTGOING sequence's own clock stands -- the same arithmetic as `cursor`, against the
+   * clock state stashed at `arm`. Split out rather than parameterised on `cursor` because the two are
+   * read from different places and a shared helper with six arguments reads worse than this.
+   */
+  private prevCursor(worldClockMs: number): number {
+    const elapsed = this.prevRate === 0
+      ? this.prevFrozenElapsedMs
+      : (worldClockMs - this.prevArmedAtMs) * this.prevRate;
+    return cursorMs(this.prevLaw, elapsed, this.prevPeriodMs);
+  }
+
+  /**
+   * How much of the INCOMING sequence to show: 0 at the moment of the arm, 1 once `blendTimeMs` has
+   * passed. 1 whenever there is nothing to fade from.
+   *
+   * LINEAR, and that is a stated gap: the reference cross-fades with its own envelope
+   * (`creature_anim/driver.rs`'s overlay fade and `WOUND_AMPLITUDE`), which this does not transcribe.
+   * A linear ramp over the file's own blend time is what removes the hard cut; the shape of the ramp is
+   * the next refinement, not this one.
+   */
+  private blendWeight(worldClockMs: number): number {
+    if (this.prev === null || this.blendMs <= 0) {
+      return 1;
+    }
+    const w = (worldClockMs - this.blendStartMs) / this.blendMs;
+    return w >= 1 ? 1 : (w <= 0 ? 0 : w);
+  }
+
+  /**
    * Has the current one-shot or loop reached the end of its play window?
    *
    * `periodMs <= 0` answers FALSE, and that is load-bearing rather than an oversight: this is also
@@ -242,6 +370,14 @@ export class InstanceAnim {
 
     const count = this.model.boneDefs.length;
     this.solved.fill(0);
+
+    // ONCE PER SOLVE, not once per bone -- and the fade is RETIRED here rather than in `cursor`, so a
+    // finished blend costs exactly one comparison per solve and then nothing at all. A unit that is not
+    // mid-transition samples one sequence per bone, exactly as before this existed.
+    this.frameBlend = blendControl.enabled ? this.blendWeight(worldClockMs) : 1;
+    if (this.frameBlend >= 1) {
+      this.prev = null;
+    }
 
     for (let i = 0; i < count; ++i) {
       this.solveBone(i, worldClockMs);
@@ -290,6 +426,46 @@ export class InstanceAnim {
     const scaling = trackFor(def.scaling, seqIndex);
     if (scaling) {
       sampleVec3(scaling, isStep(def.scaling), t, scratchScale);
+    }
+
+    // THE CROSS-FADE. The outgoing sequence is sampled from ITS OWN slot at ITS OWN cursor and mixed
+    // toward the incoming one by this frame's weight. `1 - w` is the alpha because three's `lerp`/`slerp`
+    // move the RECEIVER toward the argument, and the receiver here already holds the incoming pose --
+    // so at w=0 the result is entirely `prev` and at w=1 entirely `current`.
+    //
+    // A bone with no track in one of the two slots still blends correctly: its scratch holds the
+    // identity (bind pose) for that slot, which is exactly what "this sequence does not animate this
+    // bone" means, and is why the fade also smooths a change between clips that animate different bones.
+    //
+    // ALL OF THIS BEFORE THE PARENT RECURSION BELOW, for the reason that recursion's own comment gives:
+    // every scratch object here is module-level and the recursive call overwrites all six.
+    const prevSeq = this.prev;
+    if (prevSeq !== null) {
+      const w = this.frameBlend;
+      const pt = this.prevCursor(worldClockMs);
+      const ps = prevSeq.index;
+
+      blendPos.set(0, 0, 0);
+      blendQuat.set(0, 0, 0, 1);
+      blendScale.set(1, 1, 1);
+
+      const prevTranslation = trackFor(def.translation, ps);
+      if (prevTranslation) {
+        sampleVec3(prevTranslation, isStep(def.translation), pt, blendPos);
+      }
+      const prevRotation = trackFor(def.rotation, ps);
+      if (prevRotation) {
+        sampleQuat(prevRotation, isStep(def.rotation), pt, blendQuat);
+      }
+      const prevScaling = trackFor(def.scaling, ps);
+      if (prevScaling) {
+        sampleVec3(prevScaling, isStep(def.scaling), pt, blendScale);
+      }
+
+      const alpha = 1 - w;
+      scratchPos.lerp(blendPos, alpha);
+      scratchQuat.slerp(blendQuat, alpha);
+      scratchScale.lerp(blendScale, alpha);
     }
 
     // Record the un-composed local TRS BEFORE recursing into the parent -- the scratch objects are
