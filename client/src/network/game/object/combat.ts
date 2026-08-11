@@ -300,6 +300,14 @@ export class CombatHandler extends EventEmitter {
     if (victimUnit) {
       victimUnit.attackedBy.add(attacker);
     }
+    // OUR OWN auto-attack going on, for the action button that holds spell 6603 "Auto Attack". Emitted
+    // from the SERVER's packet rather than from our `CMSG_ATTACKSWING` send, because a swing request the
+    // server refuses must leave the button un-checked -- and `handleAttackStop` below documents that a
+    // refusal is exactly what a rejected swing looks like here. `ObjectHandler` forwards this to
+    // `SpellHandler#setAutoAttack`.
+    if (attacker === this.game.world.player?.guid) {
+      this.emit('autoAttack', true);
+    }
     this.emit('attack:start', attacker, victim);
   }
 
@@ -351,6 +359,11 @@ export class CombatHandler extends EventEmitter {
         + ' (dead attacker, dead or unattackable target); victim 0x0 would mean the guid did not'
         + ' resolve. Read window.combatWire.history() and swingRefusals.',
       );
+    }
+    // Our auto-attack is off -- whether this is a real disengage or the outright rejection warned about
+    // just above. Both leave us not swinging, so both un-check the button.
+    if (attacker === this.game.world.player?.guid) {
+      this.emit('autoAttack', false);
     }
     this.emit('attack:stop', attacker, victim);
   }

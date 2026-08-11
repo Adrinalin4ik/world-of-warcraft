@@ -64,8 +64,18 @@ export default Entity({
 
   effectIDs: new r.Array(r.uint32le, 3),
   effectDieSides: new r.Array(r.int32le, 3),
-  effectBaseDices: new r.Array(r.uint32le, 3),
-  effectDicesPerLevel: new r.Array(r.uint32le, 3),
+  // `EffectBaseDice` and `EffectDicePerLevel` (3 columns each) existed through 2.4.3 and were REMOVED
+  // in 3.x. Keeping them here cost 6 uint32 of width and shifted every later column by 6, which put
+  // `iconID` inside the Name locale block and made every icon lookup read a string offset.
+  //
+  // Measured against the served file rather than argued: `dbfilesclient/spell.dbc` has
+  // `fieldCount = 234`, `recordSize = 936` (234 * 4, so every column is 4 bytes and the field index IS
+  // the offset / 4). Scanning spell 133's record for the column that resolves to the string "Fireball"
+  // gives index 136, and for the column whose value is a `SpellIcon.dbc` id naming Spell_Fire_FlameBolt
+  // gives index 133 -- exactly 6 below where this definition previously placed `name` (142) and
+  // `iconID` (139). Ten known spells (133 Fireball, 168 Frost Armor, 2098 Eviscerate, 78 Heroic Strike,
+  // 6603 Auto Attack, 6673 Battle Shout, 100 Charge, 25046 Arcane Torrent, 585 Smite, 772 Rend) all
+  // decode with correct name, rank and icon under the layout below.
   effectRealPointsPerLevel: new r.Array(r.floatle, 3),
   effectBasePoints: new r.Array(r.int32le, 3),
   effectMechanicIDs: new r.Array(r.uint32le, 3),
@@ -114,5 +124,9 @@ export default Entity({
   powerDisplayID: r.uint32le,
   effectBonusMultipliers: new r.Array(r.floatle, 3),
 
-  unknown3: new r.Reserved(r.uint32le)
+  // The last two columns, 232 and 233. A single `unknown3` here left the definition one column short
+  // of the file's 234: 239 columns as previously written, minus the 6 removed dice columns, is 233.
+  // 3.3.5a names them `SpellDescriptionVariableID` and `SpellDifficultyID`.
+  descriptionVariablesID: r.uint32le,
+  difficultyID: r.uint32le
 });

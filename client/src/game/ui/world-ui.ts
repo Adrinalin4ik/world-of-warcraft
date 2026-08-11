@@ -41,6 +41,7 @@ import { GlueRenderer } from './renderer';
 import { resolveSprite } from './sprite';
 import { FontStringTextures, loadGlueFonts, measureText } from './text';
 import { DrawItem, WidgetRoot } from './widget';
+import { attachActionBridge } from './action-bridge';
 import { attachUnitBridge } from './unit-bridge';
 import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
@@ -166,6 +167,9 @@ export class WorldUiHost {
    */
   private readonly world: World | null;
 
+  /** `attachActionBridge`'s teardown, held so `dispose` can run it. */
+  private detachActions: (() => void) | null = null;
+
   /** `attachUnitBridge`'s teardown, held so `dispose` can run it. */
   private detachUnits: (() => void) | null = null;
 
@@ -235,6 +239,14 @@ export class WorldUiHost {
     // server, and is where every UI measurement is taken -- still boots.
     if (this.world) {
       this.detachUnits = attachUnitBridge(runtime.vm, this.world);
+      // THE ACTION FEED. Gated on a real session as well as a world: `/game?offline=1&ui=lua` has units
+      // but no protocol, and `session.offline` short-circuits ahead of the `protocol` getter -- reading
+      // `game.objectHandler` there would construct transports the offline route contracts never to
+      // touch. An offline world therefore keeps its 12 buttons hidden, which is honest: there is no
+      // server to have sent an action bar.
+      if (!this.world.session.offline) {
+        this.detachActions = attachActionBridge(runtime.vm, this.world, this.art);
+      }
     }
     reportLoad(runtime);
     // The console handle, exactly as the glue side has one. `worldRuntime.vm.run('...')` against the
@@ -422,6 +434,8 @@ export class WorldUiHost {
     this.stopped = true;
     this.detachUnits?.();
     this.detachUnits = null;
+    this.detachActions?.();
+    this.detachActions = null;
     this.input.detach();
     this.runtime?.dispose();
     this.runtime = null;

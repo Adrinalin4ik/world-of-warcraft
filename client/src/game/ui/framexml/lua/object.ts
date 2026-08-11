@@ -53,6 +53,7 @@ export type WidgetClass =
   | 'SLIDER'
   | 'STATUSBAR'
   | 'SIMPLEHTML'
+  | 'COOLDOWN'
   | 'BACKDROP';
 
 const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
@@ -69,6 +70,13 @@ const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
   SLIDER: 'FRAME',
   STATUSBAR: 'FRAME',
   SIMPLEHTML: 'FRAME',
+  // A real client type, declared in `Interface\FrameXML\Cooldown.xml` as
+  // `<Cooldown name="CooldownFrameTemplate" setAllPoints="true" hidden="true" virtual="true"/>` and
+  // instantiated as `<Cooldown name="$parentCooldown" inherits="CooldownFrameTemplate">` inside
+  // `ActionButtonTemplate` (`ActionButtonTemplate.xml`), every multi-bar button, and the aura frames.
+  // Missing, it was the single largest error source in the FrameXML load -- 671 lines, each one
+  // `CreateFrame("Cooldown")` throwing and taking the element's whole subtree with it.
+  COOLDOWN: 'FRAME',
   // OURS, not the client's: `backdrop` is a Widget kind this project invented for a nine-slice
   // frame. It behaves as a Frame and has no methods of its own today.
   BACKDROP: 'FRAME',
@@ -97,6 +105,9 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   SLIDER: 'frame',
   STATUSBAR: 'frame',
   SIMPLEHTML: 'frame',
+  // `frame`, not a new kind: the sweep itself is not drawn (see `methods/cooldown.ts` for why, and
+  // for the frame-budget measurement that decided it).
+  COOLDOWN: 'frame',
 };
 
 /**
@@ -126,6 +137,9 @@ const CREATE_FRAME_CLASSES: WidgetClass[] = [
   'SLIDER',
   'STATUSBAR',
   'SIMPLEHTML',
+  // `CreateFrame("Cooldown", ...)` is legal in the real client and addons do it; the manifest reaches
+  // this class through `<Cooldown>` XML elements, which the loader also funnels through `CreateFrame`.
+  'COOLDOWN',
   'BACKDROP',
 ];
 

@@ -66,6 +66,25 @@ export interface UnitSnapshot {
   classification: string;
   isPlayer: boolean;
   dead: boolean;
+
+  /**
+   * `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP` -- what `UnitXP`/`UnitXPMax` answer.
+   *
+   * Only ever non-zero for `"player"`: they are PLAYER-scope update fields, so a creature's update
+   * never carries them (`update-object/unit-fields.ts`). Zero for every other token, which is what
+   * `MainMenuExpBar_Update` wants -- `SetMinMaxValues(min(0, currXP), nextXP)`.
+   */
+  xp: number;
+  maxXp: number;
+
+  /**
+   * `PLAYER_REST_STATE_EXPERIENCE` -- the banked rested-xp pool `GetXPExhaustion()` returns, in xp.
+   *
+   * A SEPARATE field from `xp`, and a separate segment on the bar: `ExhaustionTick_OnEvent` places
+   * `ExhaustionLevelFillBar` at `((xp + restXp) / maxXp) * width` (`MainMenuBar.lua:325`), so it is
+   * drawn as the lighter region to the RIGHT of current xp, not as part of it.
+   */
+  restXp: number;
 }
 
 /** A unit that exists but about which nothing has arrived yet. */
@@ -82,6 +101,9 @@ export function emptySnapshot(): UnitSnapshot {
     classification: 'normal',
     isPlayer: false,
     dead: false,
+    xp: 0,
+    maxXp: 0,
+    restXp: 0,
   };
 }
 
@@ -213,6 +235,58 @@ export function installUnitsApi(vm: LuaVM): void {
   // aliases here rather than a second code path that could disagree.
   fn('UnitMana', (args) => [withUnit(args[0], 0, (u) => u.power)]);
   fn('UnitManaMax', (args) => [withUnit(args[0], 0, (u) => u.maxPower)]);
+
+  /**
+   * THE EXPERIENCE BAR. `MainMenuExpBar_Update` (`MainMenuBar.lua:6-10`) is nothing but
+   * `SetMinMaxValues(min(0, UnitXP("player")), UnitXPMax("player"))` then `SetValue(UnitXP("player"))`,
+   * so these two globals are the whole of the bar's progress and neither existed.
+   */
+  fn('UnitXP', (args) => [withUnit(args[0], 0, (u) => u.xp)]);
+  fn('UnitXPMax', (args) => [withUnit(args[0], 0, (u) => u.maxXp)]);
+
+  /**
+   * `GetXPExhaustion()` -> the banked rested-xp pool, or **nil** when there is none.
+   *
+   * nil and not 0, and this is load-bearing: `ExhaustionTick_OnEvent` branches on
+   * `if (not exhaustionThreshold) then ExhaustionTick:Hide(); ExhaustionLevelFillBar:Hide()`
+   * (`MainMenuBar.lua:322-324`), and 0 is TRUTHY in Lua. Returning 0 would take the other branch and
+   * place the rested segment at exactly current-xp -- a zero-width fill bar and a visible tick marker
+   * sitting on the bar's fill edge, for a character with no rested xp at all.
+   */
+  fn('GetXPExhaustion', () => {
+    const player = units.get('player');
+    const rest = player?.restXp ?? 0;
+    return [rest > 0 ? rest : null];
+  });
+
+  /**
+   * `GetRestState()` -> `exhaustionStateID, exhaustionStateName, exhaustionStateMultiplier`.
+   *
+   * **1 is RESTED and 2 is NORMAL**, and that pair is what colours the bar -- `ExhaustionTick_OnEvent`
+   * paints `SetStatusBarColor(0.0, 0.39, 0.88)` (blue) for state 1 and `(0.58, 0.0, 0.55)` (magenta) for
+   * state 2 (`MainMenuBar.lua:350-357`).
+   *
+   * That is worth stating plainly because it corrects a diagnosis: **a magenta XP bar is the CORRECT
+   * 3.3.5a appearance for a character with no rested experience**, not a sign of an unresolved texture.
+   * `MainMenuExpBar` declares no `<BarTexture>` at all in `MainMenuBar.xml` -- its fill is a flat tint
+   * and this function is what chooses the colour. The 3.3.5a XP bar is purple when you are not rested.
+   *
+   * The name and multiplier are the values the real client supplies; the multiplier is 1 in both states
+   * on this build (rested xp is spent as a separate pool, not as a kill-xp multiplier), and the name is
+   * the untranslated token because there is no `GlobalStrings` lookup for it in the engine.
+   */
+  fn('GetRestState', () => {
+    const player = units.get('player');
+    const rested = (player?.restXp ?? 0) > 0;
+    return rested ? [1, 'rested', 1] : [2, 'normal', 1];
+  });
+
+  /**
+   * `IsXPUserDisabled()` -- the "stop gaining xp" toggle, which does not exist on this build's server
+   * and is not a 3.3.5a player-visible feature. Genuinely false rather than a stub; it only gates
+   * whether the exhaustion tick is hidden (`MainMenuBar.lua:342`).
+   */
+  fn('IsXPUserDisabled', () => [false]);
 
   fn('UnitReaction', (args) => [withUnit(args[0], null, (u) => u.reaction)]);
   fn('UnitClassification', (args) => [withUnit(args[0], 'normal', (u) => u.classification)]);

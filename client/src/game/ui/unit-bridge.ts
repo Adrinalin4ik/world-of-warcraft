@@ -63,6 +63,13 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   snapshot.isPlayer = unit.isPlayer;
   snapshot.dead = unit.dead;
 
+  // The experience pair and the rested pool. PLAYER-scope update fields, so they are only ever present
+  // on our own character and stay 0 for every creature -- which is what keeps `UnitXP("target")` at 0
+  // with no special casing here.
+  snapshot.xp = unit.fields.xp ?? 0;
+  snapshot.maxXp = unit.fields.maxXp ?? 0;
+  snapshot.restXp = unit.fields.restXp ?? 0;
+
   // The reaction, resolved lazily and cached on the unit by `reactionFor`: `FactionTemplate.dbc` is
   // an async load and the first units stream in before it lands. `REACTION_NEUTRAL` is the stand-in
   // until then -- stated rather than hidden, and the honest one of the three, because painting an
@@ -114,6 +121,15 @@ function pushUnit(
     if (event) fire(event);
   }
   if (snapshot.level !== previous.level) fire('UNIT_LEVEL');
+  // `PLAYER_XP_UPDATE` is what `MainMenuExpBar`'s own `<OnEvent>` listens for (`MainMenuBar.xml:127`,
+  // which calls `MainMenuExpBar_Update()`), and `ExhaustionTick` listens for it too. It takes a UNIT
+  // argument in 3.3.5a even though only the player ever has xp.
+  if (snapshot.xp !== previous.xp || snapshot.maxXp !== previous.maxXp) fire('PLAYER_XP_UPDATE');
+  // A SEPARATE event for the rested pool, because a separate frame draws it: `ExhaustionTick` registers
+  // `UPDATE_EXHAUSTION` and it is the only event that re-runs the bar's COLOUR choice
+  // (`MainMenuBar.lua:347-358`). Firing only `PLAYER_XP_UPDATE` would move the fill and leave the bar
+  // the wrong colour after resting.
+  if (snapshot.restXp !== previous.restXp) fire('UPDATE_EXHAUSTION');
   if (snapshot.name !== previous.name) fire('UNIT_NAME_UPDATE');
   if (snapshot.reaction !== previous.reaction) fire('UNIT_FACTION');
   if (snapshot.classification !== previous.classification) fire('UNIT_CLASSIFICATION_CHANGED');

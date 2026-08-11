@@ -3,6 +3,7 @@ import { CombatHandler } from './combat';
 import { GameHandler } from '../handler';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
+import { SpellHandler } from './spells';
 import { UpdateObjectHandler } from './update-object/handler';
 
 export class ObjectHandler extends EventEmitter {
@@ -22,6 +23,14 @@ export class ObjectHandler extends EventEmitter {
   public monsterMovementHandler: MonsterMovementtHandler;
 
   public playerMovementHandler: PlayerMovementHandler;
+
+  /**
+   * The spell book, the action bar's 144 slots and `CMSG_CAST_SPELL`. PUBLIC for the same reason
+   * `combatHandler` is: the world UI bridge reads it to answer `HasAction`/`GetActionTexture` and drives
+   * it to cast, and it owns the only send of `CMSG_CAST_SPELL`.
+   */
+  public spellHandler: SpellHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -32,5 +41,11 @@ export class ObjectHandler extends EventEmitter {
     this.monsterMovementHandler = new MonsterMovementtHandler(this.game);
     this.playerMovementHandler = new PlayerMovementHandler(this.game);
     this.combatHandler = new CombatHandler(this.game);
+    this.spellHandler = new SpellHandler(this.game);
+
+    // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
+    // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and
+    // the in-combat mark; this is the same two events observed for the button.
+    this.combatHandler.on('autoAttack', (on: boolean) => this.spellHandler.setAutoAttack(on));
   }
 }

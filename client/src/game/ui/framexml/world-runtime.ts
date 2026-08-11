@@ -55,6 +55,7 @@ import { installScreenApi } from './lua/api/screen';
 import { installSecureApi } from './lua/api/secure';
 import { installSoundApi } from './lua/api/sound';
 import { installStubApi } from './lua/api/stubs';
+import { installActionsApi } from './lua/api/actions';
 import { installUnitsApi } from './lua/api/units';
 import type { FileReport } from './runtime';
 
@@ -116,6 +117,9 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // The two that landed with the `TargetFrame` survey and had no caller until this host existed.
   installSecureApi(vm);
   installUnitsApi(vm);
+  // The action bar's globals. Safe with no host feed at all: every slot is empty, so `HasAction` is
+  // false everywhere and all 12 buttons stay hidden -- which is exactly the state before this existed.
+  installActionsApi(vm);
 
   const runtime = createFrameXmlRuntime(vm, ctx);
   const resolve = (path: string): string | null => texts.get(cacheKey(path)) ?? null;

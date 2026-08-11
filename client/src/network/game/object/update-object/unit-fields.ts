@@ -52,6 +52,27 @@ export interface UnitFieldUpdate {
   dynamicFlags?: number;
   /** `OBJECT_FIELD_ENTRY` -- the creature template id `CMSG_CREATURE_QUERY` is asked about. */
   entry?: number;
+
+  /**
+   * `PLAYER_XP` (634) and `PLAYER_NEXT_LEVEL_XP` (635) -- the experience bar's two numbers.
+   *
+   * PLAYER-scope, not unit-scope, so they only ever arrive for our own character; a creature's update
+   * never carries them and they stay undefined. Indices come from `enums.ts#PlayerField`
+   * (`unit_end + 0x01e6` and `+ 0x01e7`, where `unit_end` is 0x94), which is this build's own table --
+   * NOT from the reference, whose player block sits at different offsets entirely.
+   */
+  xp?: number;
+  maxXp?: number;
+
+  /**
+   * `PLAYER_REST_STATE_EXPERIENCE` (1169) -- rested experience, a SEPARATE field from `xp`.
+   *
+   * This is the "how much bonus xp is banked" pool that `GetXPExhaustion()` returns and that
+   * `ExhaustionTick_OnEvent` (`MainMenuBar.lua:314`) turns into the second segment on the bar. It is not
+   * a fraction and not a level: `exhaustionTickSet = ((playerCurrXP + exhaustionThreshold) / playerMaxXP)
+   * * MainMenuExpBar:GetWidth()`, so it is xp-denominated and added to current xp.
+   */
+  restXp?: number;
 }
 
 /**
@@ -114,6 +135,14 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
   if (bytes0 !== undefined) {
     out.powerType = (bytes0 >>> 24) & 0xff;
   }
+
+  // The experience pair and the rested pool. Present only on our own character's updates -- these are
+  // PLAYER-scope indices, and `getUpdateFieldName` only answers `player_*` names for `ObjectType.Player`
+  // (that type argument was ignored until the round that fixed it; see this function's header). So a
+  // creature's update leaves all three undefined, which is what keeps `UnitXP("target")` answering 0.
+  out.xp = u32('player_xp');
+  out.maxXp = u32('player_next_level_xp');
+  out.restXp = u32('player_rest_state_experience');
 
   return out;
 }
@@ -186,6 +215,14 @@ export function applyUnitFields(
   set('unitFlags', fields.unitFlags);
   set('dynamicFlags', fields.dynamicFlags);
   set('powerType', fields.powerType);
+
+  // The experience pair and the rested pool. Only our own character's updates carry them (see
+  // `readUnitFields`), and `changed` is what gates the event that repaints the bar -- so an xp value
+  // that has not moved costs nothing, which matters because the bar's repaint dirties the draw-list
+  // fingerprint (`world-ui.ts#drawListSignature`).
+  set('xp', fields.xp);
+  set('maxXp', fields.maxXp);
+  set('restXp', fields.restXp);
 
   // AFTER the power type is settled, using whatever the unit now knows -- see `readPower`.
   const power = readPower(values, unit.fields.powerType ?? 0);

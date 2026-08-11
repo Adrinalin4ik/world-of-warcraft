@@ -63,6 +63,7 @@ import {
 // SOMETHING has to, and this is the module that cannot function without the whole surface -- a
 // forgotten import would show up as a document that materializes and then does nothing at all.
 // Registering after a VM is installed is safe (`registerMethods` flushes the dispatch cache).
+import './lua/methods/cooldown';
 import './lua/methods/frame';
 import './lua/methods/kinds';
 import './lua/methods/model';
