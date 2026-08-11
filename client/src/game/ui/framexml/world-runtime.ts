@@ -43,7 +43,7 @@ import { Viewport } from '../layout';
 import { Widget } from '../widget';
 import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
 import { cacheKey, prefetchManifest, registerTreeArt } from './manifest';
-import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret } from './tick';
+import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret, placeSelection } from './tick';
 import { parseXml } from './xml';
 import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
@@ -336,11 +336,12 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     update: (dt: number) => {
       caretClock += dt;
       const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
-      for (const { box, caret } of editBoxes) {
+      for (const { box, caret, selection } of editBoxes) {
         if (box.textRegion !== null) {
           box.textRegion.text = box.displayText;
         }
         placeCaret(box, caret, input, litCaret);
+        placeSelection(box, selection, input);
       }
       // VISIBLE buttons only. `runtime.ts` walks the whole glue tree because 432 widgets is nothing;
       // this tree is 4211 frames and the great majority of them are hidden panels (the spellbook, the

@@ -313,6 +313,64 @@ export class GlueInput {
       return;
     }
 
+    /**
+     * THE CLIPBOARD AND SELECT-ALL CHORDS, which were the whole of what a keyboard could not do here.
+     *
+     * Measured on :3000 before this block (`scratchpad/t13-edit.js`, `?ui=lua`, the real
+     * `AccountLoginAccountEdit`): typing "abcd" gave text "a","ab","abc","abcd", Backspace gave "abc",
+     * and Shift+ArrowLeft gave caret 2 / anchor 3 -- so per-character editing and the selection MODEL
+     * were already correct. `Ctrl+A` left caret and anchor untouched and `Ctrl+C`/`Ctrl+V` moved no
+     * text. Those three, plus a selection nothing drew (`framexml/tick.ts#placeSelection`), are the
+     * defect; "any edit clears the field" is the select-all-on-focus described there, not a lost edit.
+     *
+     * Handled BEFORE the printable-character branch below, which already excluded `ctrlKey`, so these
+     * keys previously fell through its `else { return; }` without `preventDefault` -- which is why
+     * `Ctrl+V` still worked: the browser went on to fire its own `paste` event, and `onPaste` takes it.
+     * `Ctrl+V` is therefore deliberately NOT handled here; intercepting it would mean reading the
+     * clipboard asynchronously, and `navigator.clipboard.readText()` needs a permission a `paste` event
+     * does not.
+     *
+     * `metaKey` alongside `ctrlKey` because the same chords are Cmd-based on a Mac and `config.os` is
+     * `OSX`, so a Mac user reaches this code.
+     */
+    if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+      const chord = event.key.toLowerCase();
+      if (chord === 'a') {
+        // The client's own `HighlightText()` with no arguments: anchor at 0, caret at the end
+        // (`lua/methods/kinds.ts#HighlightText`). Written directly rather than by calling into the Lua
+        // method, because this router must not know a VM exists -- the same rule `keyBinding` follows.
+        target.selectionAnchor = 0;
+        target.caret = target.text.length;
+        event.preventDefault();
+        return;
+      }
+      if (chord === 'c' || chord === 'x') {
+        // A PASSWORD BOX IS NEVER COPIED. `displayText` masks the value on screen for exactly this
+        // reason, and putting the real password on the system clipboard would defeat that from a
+        // keystroke the player cannot see the effect of. The real client does not copy out of a
+        // password box either.
+        if (!this.hasSelection(target) || target.password) {
+          event.preventDefault();
+          return;
+        }
+        const selected = target.text.slice(this.selectionStart(target), this.selectionEnd(target));
+        // Fire-and-forget: the write is async and there is nothing to do with a rejection but ignore
+        // it (a browser that refuses clipboard-write leaves the selection exactly as it was).
+        void navigator.clipboard?.writeText(selected).catch(() => undefined);
+        if (chord === 'x') {
+          const before = target.text;
+          this.deleteSelection(target);
+          if (target.text !== before) {
+            target.onTextChanged?.();
+          }
+        }
+        event.preventDefault();
+        return;
+      }
+      // Every other chord -- Ctrl+V included, and Ctrl+R, Ctrl+Shift+I -- is left to the browser.
+      return;
+    }
+
     // Read before the edit, compared after it: FrameXML's `OnTextChanged` fires when the text really
     // changed, and every branch below has a case that leaves it alone (Backspace at position 0, an
     // arrow key, an insert with no room left). One comparison at the end covers all of them and cannot

@@ -50,7 +50,7 @@ import { Viewport } from '../layout';
 import { Widget } from '../widget';
 import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
 import { cacheKey, prefetchManifest, registerTreeArt } from './manifest';
-import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret } from './tick';
+import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret, placeSelection } from './tick';
 import { parseXml } from './xml';
 import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
@@ -312,11 +312,14 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
       // that lights and presses and one that is a painted picture of a button.
       caretClock += dt;
       const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
-      for (const { box, caret } of editBoxes) {
+      for (const { box, caret, selection } of editBoxes) {
         if (box.textRegion !== null) {
           box.textRegion.text = box.displayText;
         }
         placeCaret(box, caret, input, litCaret);
+        // TWO(b): the selection highlight, also ours and also engine-drawn in the real client. NOT
+        // blinked -- only the caret blinks; a flashing selection is not a thing the client does.
+        placeSelection(box, selection, input);
       }
       for (const id of collectButtons(registry, options.root)) {
         syncInteractiveArt(ctx, id);
