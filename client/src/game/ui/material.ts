@@ -9,15 +9,84 @@ import * as THREE from 'three';
 
 import { Blend, TexCoords } from './widget';
 
+/**
+ * THE BLACK SQUARE ROUND THE CAST BAR, and it was a blend function, not a missing texture.
+ *
+ * ## What the owner saw
+ *
+ * A black rectangle behind and beside the cast bar, wider than the bar itself. The bar is 195x13 and
+ * `CastingBarFrameSpark` is a **32x32** texture anchored `CENTER` and slid along it
+ * (`castingbarframe.xml:62-69`, positioned at `castingbarframe.lua:279`), so it overhangs the bar by ~9 px
+ * top and bottom and hangs off its left end early in a cast. That is the reported geometry exactly.
+ *
+ * ## Why an ADD texture came out opaque black
+ *
+ * `UI-CastingBar-Spark.blp` is DXT1 with **`alphaSize = 0`** -- opaque over its whole 32x32 -- and 82% of its
+ * pixels are near-black. That is normal for 3.3.5a's additive art: the blend mode is what was supposed to
+ * discard the black background, so the art never needed an alpha mask.
+ *
+ * The world UI renders into a TRANSPARENT OFFSCREEN TARGET and composites it over the 3D scene, so its
+ * materials are premultiplied (`world-ui.ts` builds its `GlueRenderer` with `premultipliedAlpha` true; the
+ * glue pass builds one with false, which is why the login screen's additive art never showed this). three's
+ * `AdditiveBlending` with `premultipliedAlpha` resolves to an UN-SEPARATED `gl.blendFunc(ONE, ONE)`, and
+ * un-separated means it applies to the ALPHA channel too:
+ *
+ *     dstA = srcA + dstA  ->  1 + dstA  ->  saturates to 1
+ *
+ * while the spark's own RGB contribution is about 0.05. The composite then reads that alpha
+ * (`premultipliedAlpha` NormalBlending, i.e. `ONE, ONE_MINUS_SRC_ALPHA`):
+ *
+ *     out = targetRGB + world * (1 - targetA)  ->  0.05 + world * 0  ->  near-black, and it MASKS THE WORLD
+ *
+ * So the additive quad punched an opaque hole in the interface layer. Nothing was wrong with the art or the
+ * anchors: `UI-CastingBar-Border.blp` loads (HTTP 200, DXT3, `alphaSize = 8`) and every region in
+ * `castingbarframe.xml` declares anchors, so this is NOT a third member of the no-anchor family that
+ * `PlayerFrameTexture` and the anchorless-frame defect belonged to. The one authored solid black quad in
+ * that file -- `castingbarframe.xml:7-9`, `setAllPoints` with `<Color r=0 g=0 b=0 a=0.5>` -- is the bar's own
+ * background and is correct at 195x13.
+ *
+ * ## The fix
+ *
+ * Separate the alpha blend so an additive quad adds COLOUR and leaves the destination alpha alone:
+ * `blendSrcAlpha = ZERO`, `blendDstAlpha = ONE` gives `dstA = 0 * srcA + 1 * dstA`, unchanged. three has no
+ * preset for the separated form, so this is `CustomBlending`. Only the premultiplied pass needs it: in the
+ * straight-alpha glue pass the destination is the opaque canvas and its alpha is never read.
+ *
+ * **This is a FAMILY, not one texture.** Every ADD-mode texture in 3.3.5a is authored opaque-with-black, so
+ * the same two lines were blackening `ButtonHilight-Square` (`alphaSize = 0`, 64x64) on a hovered action
+ * button, `CheckButtonHilight` on a checked one, and `UI-ActionButton-Border`
+ * (`actionbuttontemplate.xml:48,87,88`). One fix, several symptoms.
+ */
+function applyBlend(
+  material: THREE.MeshBasicMaterial,
+  blend: Blend,
+  premultipliedAlpha: boolean,
+): void {
+  if (blend !== 'ADD') {
+    material.blending = THREE.NormalBlending;
+    return;
+  }
+  if (!premultipliedAlpha) {
+    material.blending = THREE.AdditiveBlending;
+    return;
+  }
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.AddEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.AddEquation;
+  material.blendSrcAlpha = THREE.ZeroFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+}
+
 export function createQuadMaterial(
   blend: Blend,
   premultipliedAlpha = false,
 ): THREE.MeshBasicMaterial {
-  return new THREE.MeshBasicMaterial({
+  const material = new THREE.MeshBasicMaterial({
     transparent: true,
     depthTest: false,
     depthWrite: false,
-    blending: blend === 'ADD' ? THREE.AdditiveBlending : THREE.NormalBlending,
     // Straight alpha by DEFAULT, which is what drawing over an opaque 3D stage wants: the note this
     // replaces said "premultiplied would double-darken the client's straight-alpha art", and that is
     // only half true -- three's `premultipliedAlpha` makes the SHADER multiply rgb by a and then
@@ -35,6 +104,26 @@ export function createQuadMaterial(
     // nothing to gain from single-sided culling anyway.
     side: THREE.DoubleSide,
   });
+  // AFTER construction, because the separated-alpha form needs six fields the constructor's `blending`
+  // shorthand cannot express. `setBlend` below is the same call for a material already in the pool.
+  applyBlend(material, blend, premultipliedAlpha);
+  return material;
+}
+
+/**
+ * Re-blend a POOLED material whose widget's blend mode changed.
+ *
+ * The renderer pools one material per widget and only touches it when something structural moves
+ * (`renderer.ts#Pooled.lastMap`), so this must set exactly what `createQuadMaterial` sets -- including
+ * clearing the custom factors' effect by naming a preset again. Going through the same `applyBlend` is what
+ * guarantees that: a pooled quad flipping ADD -> NORMAL must not keep the separated alpha equation.
+ */
+export function setBlend(
+  material: THREE.MeshBasicMaterial,
+  blend: Blend,
+  premultipliedAlpha: boolean,
+): void {
+  applyBlend(material, blend, premultipliedAlpha);
 }
 
 /**

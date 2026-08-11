@@ -158,6 +158,18 @@ function hasOwn(object: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
 
+/**
+ * The class chain, exported for `Region:IsObjectType` -- which asks the same question the method
+ * dispatcher asks and must get the same answer.
+ *
+ * Exported rather than duplicated on purpose: `IsObjectType("frame")` answering differently from the
+ * dispatcher's own inheritance walk is the sort of divergence that shows up as a frame FrameXML believes
+ * is not a Frame while every Frame method on it works.
+ */
+export function classChainOf(cls: WidgetClass): WidgetClass[] {
+  return chainOf(cls);
+}
+
 /** The lookup order for a class: itself, then each ancestor. */
 function chainOf(cls: WidgetClass): WidgetClass[] {
   const chain: WidgetClass[] = [];

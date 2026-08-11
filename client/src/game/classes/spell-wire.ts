@@ -46,6 +46,10 @@ export interface SpellWireRow {
     // `SMSG_SPELL_FAILURE` (0x133) -- a cast that had STARTED was broken, which is a different thing from
     // `CAST_FAILED` (0x130), the server refusing one up front. The cast bar colours them differently.
     | 'SPELL_FAILURE'
+    // `SMSG_SPELL_DELAYED` (0x1E2) -- CAST PUSHBACK. The server's own revised timing for a cast that was
+    // interrupted-but-not-broken by a hit; `detail.delayMs` is how much later it now finishes. Its own
+    // kind because it is the one spell opcode that neither starts nor ends a cast.
+    | 'SPELL_DELAYED'
     /**
      * Not a packet: the one row `spell-data.ts` writes when the four DBC tables finish loading, with
      * their row counts and the elapsed ms.

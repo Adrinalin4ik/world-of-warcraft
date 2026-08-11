@@ -1343,6 +1343,29 @@ class Unit extends Entity {
     this.emit("animation:play", id, repetitions);
   }
 
+  /**
+   * Give the body back to locomotion, dropping whatever externally-armed state owns it.
+   *
+   * THE ONE CASE THE LATCH CANNOT HANDLE ITSELF. `externalSeq`'s release is checked at the top of
+   * `updateLocomotion` and, by design, "a LOOP never releases" -- which is what makes a looping emote or
+   * a held cast pose hold. A looping owner therefore has no window that can elapse, so an owner armed for
+   * something that may be CANCELLED needs an explicit way out or the unit stands in that pose for the
+   * rest of the session.
+   *
+   * The caller is the cast pose: `network/game/object/spells.ts` arms `precastAnimationFor` at
+   * `SMSG_SPELL_START` and calls this from `SMSG_SPELL_FAILURE` and `SMSG_CAST_FAILED`. A cast that
+   * SUCCEEDS does not need it -- the release clip armed at `SMSG_SPELL_GO` replaces the latch, and being a
+   * one-shot it releases on its own.
+   *
+   * Nothing is armed in its place, for the same reason `setDead(false)` arms nothing: the next
+   * `updateLocomotion` frame picks a gait, which for a unit standing still is Stand. Arming Stand here
+   * would be that one frame earlier AND would take ownership of a loop -- the permanent freeze again.
+   */
+  releaseAnimationLatch(): void {
+    this.externalSeq = null;
+    this.locoCandidates = null;
+  }
+
   stopAnimation(id?: number) {
     const animationId = id === undefined ? this.currentAnimationId : id;
     this.emit("animation:stop", animationId);

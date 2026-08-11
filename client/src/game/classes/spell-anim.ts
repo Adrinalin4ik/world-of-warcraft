@@ -6,19 +6,44 @@
  * `AnimationData.dbc` id the CASTER's skeleton plays, which is a single field of the kit and the only
  * part of the visual system a character's own animation depends on.
  *
- * ## When it is armed
+ * ## A CAST HAS TWO CLIPS, and for two rounds this file only played the second one
  *
- * At `SMSG_SPELL_GO`, not at `SMSG_SPELL_START`. That is the reference's own rule, byte-verified against
- * the client: "**`SpellCastOmni` (54) is armed at SPELL_GO**"
- * (`samples/benilla/crates/benilla/src/creature_anim/driver.rs:616`, and its test at
- * `driver/tests.rs:2454`). START is the wind-up and would be the cast BAR's event; GO is the release.
+ * The owner's report was "нет анимации во время каста, только финальная часть каста" -- nothing for 1.5 s
+ * and then a release. That was correct and the cause was a column, not a timing bug. `SMSG_SPELL_GO` is
+ * the END of a cast, and the only clip armed was the one `castKitID` names, so a 1.5 s Healing Wave stood
+ * still and then discharged.
  *
- * ## Where the id comes from
+ * The real client holds a pose and then releases, and `SpellVisual.dbc` carries both:
  *
- * `Spell.dbc.visualIDs[0]` -> `SpellVisual.dbc.castKitID` -> `SpellVisualKit.dbc.animID`. Resolved by
- * `spellData.castAnimation` (`game/pipeline/dbc/spell-data.ts`), where the chain and its verification
- * against the served 3.3.5a files are recorded -- spell 133 Fireball resolves to anim **53**
- * (`SpellCastDirected`), which is exactly the value benilla's own byte-verified example gives.
+ * - **`precastKitID` (field 1) is the HELD pose**, armed at `SMSG_SPELL_START`. For Healing Wave (331)
+ *   it resolves to anim **52 `ReadySpellOmni`**.
+ * - **`castKitID` (field 2) is the RELEASE**, armed at `SMSG_SPELL_GO` as it always was. For Healing Wave
+ *   it resolves to anim **54 `SpellCastOmni`** -- which is why the reference's rule, "`SpellCastOmni` (54)
+ *   is armed at SPELL_GO" (`samples/benilla/crates/benilla/src/creature_anim/driver.rs:616`, test at
+ *   `driver/tests.rs:2454`), was right about the clip it names and was never a statement about the whole
+ *   cast. Its example is a creature's instant.
+ *
+ * Which field is which is MEASURED off the served DBCs, not assumed -- the measurement, the anim-name
+ * distribution across all 9406 visuals, and the five spells it was checked on are recorded on
+ * `spellData.precastAnimation` (`game/pipeline/dbc/spell-data.ts`).
+ *
+ * **An instant spell shows only the release, and the DBC is what makes that automatic.** An instant sends
+ * no `SMSG_SPELL_START`, so nothing arms a pose -- and independently its visual carries precast kit **0**
+ * (78 Heroic Strike, 1752 Sinister Strike, 2098 Eviscerate all measured at 0), so even a START would
+ * resolve to nothing. The two facts agree, which is the corroboration this project asks for.
+ *
+ * ## How the pose is HELD rather than played
+ *
+ * No new machinery. `ReadySpellOmni` is a looping sequence, and `Unit#externalSeq`'s latch "never
+ * releases" a loop (`unit.ts:1590-1591`) -- so arming it hands the body to the pose and locomotion stands
+ * off until something else is armed. The release at GO is that something else: a one-shot, which the same
+ * latch holds for its window and then gives back to locomotion. The blend layer (`InstanceAnim` keeps the
+ * outgoing sequence alive for `blendTimeMs` and lerps per bone) makes both transitions a fade.
+ *
+ * The one thing the latch cannot do by itself is give the body back when a cast NEVER completes -- a
+ * looping owner has no window to elapse. `SMSG_SPELL_FAILURE` and `SMSG_CAST_FAILED` therefore call
+ * `Unit#releaseAnimationLatch` explicitly (`network/game/object/spells.ts`), or an interrupted caster
+ * would stand in his cast pose for the rest of the session.
  *
  * ## The fallback, and why it is narrow
  *
@@ -70,4 +95,28 @@ export function castAnimationFor(unit: Unit, spellId: number): number | null {
     return SPELL_CAST_DIRECTED;
   }
   return null;
+}
+
+/**
+ * The pose `unit` HOLDS while it casts `spellId`, or null when there is none it can hold.
+ *
+ * Null is the common and correct answer -- an instant's visual carries precast kit 0, and so do plenty of
+ * timed spells' -- and the caller must arm nothing rather than substitute. See the header for why this
+ * has no `SPELL_CAST_DIRECTED`-style fallback where `castAnimationFor` does: a wrong pose is held for the
+ * whole cast, where a wrong release is over in a moment.
+ */
+export function precastAnimationFor(unit: Unit, spellId: number): number | null {
+  const modelAnim = unit.model?.modelAnim ?? null;
+  if (modelAnim === null) {
+    return null;
+  }
+  const fromKit = spellData.precastAnimation(spellId);
+  if (fromKit === null) {
+    return null;
+  }
+  // `resolve(id, false)` -- WITHOUT the Stand consolation, for the reason the header gives: `resolve`
+  // falls back to the first inline sequence for an id a model lacks, and that sequence is normally a
+  // LOOPING Stand. Latching the cast pose onto a looping Stand would freeze the unit for good, because
+  // `externalSeq`'s release never fires for a loop.
+  return modelAnim.resolve(fromKit, false) !== null ? fromKit : null;
 }

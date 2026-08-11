@@ -489,6 +489,50 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     stats.events += 1;
   };
 
+  /**
+   * CAST PUSHBACK: `SMSG_SPELL_DELAYED` -> a revised snapshot -> `UNIT_SPELLCAST_DELAYED`.
+   *
+   * **The revised timing comes from the SERVER, not from a local rule.** `network/game/object/spells.ts`
+   * records the evidence for that; what this half owes is the arithmetic on the snapshot.
+   *
+   * BOTH ends shift forward by `delayMs`, which keeps `endTime - startTime` -- and therefore the bar's
+   * `maxValue` -- unchanged while moving `value` BACKWARDS. That is the client's own behaviour and it falls
+   * straight out of what the frame computes (`castingbarframe.lua:165-175`):
+   *
+   *     self.value    = (GetTime() - (startTime / 1000));
+   *     self.maxValue = (endTime - startTime) / 1000;
+   *
+   * so a bar that has been pushed back is the SAME LENGTH and less full -- the fill visibly jumps left and
+   * the spark with it. Extending only `endTime` would instead lengthen the bar and leave the fill where it
+   * was, which is a different and wrong picture. The server's model agrees: a pushback adds to the cast's
+   * remaining timer and does not touch its total cast time.
+   *
+   * The ANIMATION needs nothing: the pose armed at START is a loop and the release is armed at GO, which the
+   * server sends when the cast actually finishes. A delayed cast therefore holds its pose longer and
+   * releases later without this bridge doing anything about it.
+   *
+   * Guarded on a cast being live -- `getCast` null means the bar is not up, and `CastingBarFrame`'s own
+   * DELAYED branch opens with `if ( self:IsShown() )` for the same reason.
+   */
+  const onSpellDelayed = (decoded: { caster: string; delayMs: number }): void => {
+    if (decoded.caster !== world.player?.guid) {
+      return;
+    }
+    const cast = getCast(vm, 'player');
+    if (cast === null) {
+      return;
+    }
+    setCast(vm, 'player', {
+      ...cast,
+      startTimeMs: cast.startTimeMs + decoded.delayMs,
+      endTimeMs: cast.endTimeMs + decoded.delayMs,
+    });
+    // Push then fire, as everywhere else here: the frame's DELAYED branch re-reads `UnitCastingInfo` on its
+    // first line and hides itself if the name is gone.
+    fireEvent(vm, 'UNIT_SPELLCAST_DELAYED', ['player', cast.name, 0, 0]);
+    stats.events += 1;
+  };
+
   const onSpellGo = (decoded: { caster: string }): void => {
     if (decoded.caster === world.player?.guid) {
       endCast('UNIT_SPELLCAST_STOP');
@@ -508,6 +552,7 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   };
 
   spells.on('spellStart', onSpellStart);
+  spells.on('spellDelayed', onSpellDelayed);
   spells.on('spellGo', onSpellGo);
   spells.on('castFailed', onCastFailed);
   spells.on('spellFailure', onSpellFailure);
@@ -551,6 +596,7 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     spells.removeListener('autoAttackChanged', pushAutoAttack);
     spells.removeListener('cooldownsChanged', pushCooldowns);
     spells.removeListener('spellStart', onSpellStart);
+    spells.removeListener('spellDelayed', onSpellDelayed);
     spells.removeListener('spellGo', onSpellGo);
     spells.removeListener('castFailed', onCastFailed);
     spells.removeListener('spellFailure', onSpellFailure);

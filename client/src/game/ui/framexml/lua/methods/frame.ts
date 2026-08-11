@@ -12,7 +12,7 @@
  * worth the confusion of two tasks touching the same name for different reasons.
  */
 import { MethodTable, onFrameTeardown, registerMethods } from '../object';
-import { invokeScriptHandler } from '../scripts';
+import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { NO_TINT } from '../../../backdrop';
 import type { BackdropTint, Insets } from '../../../backdrop';
 import { Layer } from '../../../widget';
@@ -182,7 +182,20 @@ const FRAME: MethodTable = {
     const value = args[1] ?? null;
     table.set(name, value);
     // Fired AFTER the write, so a handler that reads the attribute back sees the new value.
-    invokeScriptHandler(ctx, self, 'OnAttributeChanged', [name, value]);
+    //
+    // AND ITS FAILURE IS REPORTED, which it was not. Discarding this return value hid a whole broken
+    // subsystem for two rounds: `UIParent_ManageFramePositions()` is nothing but
+    // `FramePositionDelegate:SetAttribute("uiparent-manage", true)` (`uiparent.lua:1949-1952`), so the
+    // ENTIRE managed-frame-position pass runs inside this one dispatch. It was raising on its first
+    // statement (a nil `GetScreenResolutions`, `uiparent.lua:1170`) and the error died here -- `vm.run`
+    // returned null, `drainScriptErrors` had nothing, the load report was clean, and the observable
+    // symptom was a cast bar 40 units low with a pass that "ran". `methods/region.ts:168-172` and
+    // `methods/statusbar.ts:114-117` already did this correctly; this call site was the outlier.
+    const error = invokeScriptHandler(ctx, self, 'OnAttributeChanged', [name, value]);
+    if (error !== null) {
+      const frameName = ctx.registry.nameOf(self) ?? String(self);
+      reportScriptError(`${frameName}: OnAttributeChanged(${name})`, error.message);
+    }
     return [];
   },
   /**

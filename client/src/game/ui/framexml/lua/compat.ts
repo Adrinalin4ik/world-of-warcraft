@@ -122,6 +122,81 @@ export function installCompat(vm: LuaVM): void {
     -- and glueparent.lua's fade math both pass floats.
     mod = math.fmod
 
+    -- THE bit LIBRARY, and it was killing Constants.lua -- the second file the world manifest runs.
+    --
+    -- STATE.md listed bit as "still absent on purpose (a whole library)", with AutoComplete.lua and
+    -- TalentFrameBase.lua as the casualties. MEASURED against the served files, the cost was much larger
+    -- and in a much worse place: constants.lua:280 is
+    --
+    --     COMBATLOG_OBJECT_RAIDTARGET_MASK = bit.bor(COMBATLOG_OBJECT_RAIDTARGET1, ...)
+    --
+    -- AT FILE SCOPE, in a 478-line file, so lines 280-478 never ran. That is where QuestDifficultyColors
+    -- (line 403) lives -- the table api/units.ts GetQuestDifficultyColor reads and, until now, never found
+    -- -- along with the TOTEM_*, CALENDAR_*, ACHIEVEMENT_* and GMTICKET_* blocks and
+    -- TEXTURE_ITEM_QUEST_BANG. VERIFIED LIVE: with FillLocalizedClassList added but this still absent, the
+    -- per-file report read exactly one error, "Constants.lua:280: attempt to index a nil value (global
+    -- 'bit')", QuestDifficultyColors was nil, and NUM_BAG_SLOTS (line 214) was 4 -- so the file was dying
+    -- at 280 and not before it.
+    --
+    -- NOT UNSOURCED, which is why this is now written rather than declared as a gap. 3.3.5a ships Reuben
+    -- Thomas's BitLib, whose operations are all defined on 32-BIT INTEGERS -- a fully specified domain,
+    -- unlike strsplit's delimiter-set semantics, which is why THAT one is still deliberately absent.
+    -- rshift is LOGICAL and arshift ARITHMETIC; that split is BitLib's and is why both names exist.
+    --
+    -- RESULTS ARE UNSIGNED, in 0 .. 2^32-1, and that is a deliberate choice worth stating because BitLib
+    -- itself hands back a SIGNED int32 for a result whose top bit is set. Unsigned agrees with how the
+    -- client's own file writes these values: constants.lua:278 is COMBATLOG_OBJECT_NONE = 0x80000000, a
+    -- POSITIVE literal, not -2147483648 -- so a mask folded here compares equal to the constants it was
+    -- folded from. Every use in the loaded manifest is either band(flags, MASK) ~= 0 or an equality
+    -- against another such constant, and both are sign-agnostic; nothing does arithmetic or an ordered
+    -- comparison on a bit result, which is what would make the difference observable. Said plainly rather
+    -- than left for someone to discover.
+    --
+    -- Written in Lua over Lua's own numbers rather than bridged to JS: this shim already runs in the VM,
+    -- and a bridge would convert every operand across the boundary for a bitwise AND.
+    -- (NO BACKTICKS anywhere in this block: it is a JS TEMPLATE LITERAL, as the notes above warn. One
+    -- backtick here broke the whole module until tsc named it.)
+    bit = {}
+    function bit.bnot(a) return 4294967295 - (a % 4294967296) end
+    -- The pairwise core, walking the 32 bits. Thirty-two iterations of arithmetic is not fast and does not
+    -- need to be: the callers are constant folding at LOAD time (Constants.lua's masks) and combat-log
+    -- filtering, neither in a per-frame path. Lua 5.1 has no integer type, so any cleverer form has to
+    -- defend against the same float truncation anyway.
+    local function bitwise(a, b, op)
+      local x, y, result, shift = a % 4294967296, b % 4294967296, 0, 1
+      for _ = 1, 32 do
+        local abit, bbit = x % 2, y % 2
+        if op(abit, bbit) then result = result + shift end
+        x, y, shift = (x - abit) / 2, (y - bbit) / 2, shift * 2
+      end
+      return result
+    end
+    local function fold(op, ...)
+      local n = select('#', ...)
+      if n == 0 then return 0 end
+      local acc = select(1, ...) % 4294967296
+      for i = 2, n do acc = bitwise(acc, select(i, ...), op) end
+      return acc
+    end
+    -- VARIADIC, all three: constants.lua:280 passes EIGHT arguments to bit.bor in one call, so a
+    -- two-argument implementation would silently drop raid targets 3-8 out of the mask.
+    function bit.band(...) return fold(function(p, q) return p == 1 and q == 1 end, ...) end
+    function bit.bor(...) return fold(function(p, q) return p == 1 or q == 1 end, ...) end
+    function bit.bxor(...) return fold(function(p, q) return p ~= q end, ...) end
+    function bit.lshift(a, n) return ((a % 4294967296) * 2 ^ (n % 32)) % 4294967296 end
+    -- LOGICAL: zeros shifted in at the top. math.floor after the divide because Lua 5.1 division is float
+    -- division, and a fractional result here would poison every later bitwise call silently.
+    function bit.rshift(a, n) return math.floor((a % 4294967296) / 2 ^ (n % 32)) end
+    -- ARITHMETIC: the sign bit is replicated. Kept separate from rshift because BitLib keeps them separate,
+    -- and a caller that wanted sign extension and got zero-fill cannot tell on a positive value.
+    function bit.arshift(a, n)
+      local x, shift = a % 4294967296, n % 32
+      local value = math.floor(x / 2 ^ shift)
+      if x >= 2147483648 and shift > 0 then value = value + (4294967296 - 2 ^ (32 - shift)) end
+      return value
+    end
+    bit.mod = math.fmod
+
     -- seterrorhandler(handler): the engine's hook for "a script errored". gluebasiccontrols.xml
     -- installs FrameXML's own _ERRORMESSAGE through it in an INLINE script, so a missing global
     -- aborted that chunk -- taking the message() global it also defines with it. Nothing in this

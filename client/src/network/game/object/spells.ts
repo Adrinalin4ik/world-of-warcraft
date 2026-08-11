@@ -46,7 +46,7 @@ import { GameHandler } from '../handler';
 import GameOpcode from '../opcode';
 import GamePacket from '../packet';
 import { GUID_BYTES, guidBytes } from '../../guid-hex';
-import { castAnimationFor } from '../../../game/classes/spell-anim';
+import { castAnimationFor, precastAnimationFor } from '../../../game/classes/spell-anim';
 import { spellData } from '../../../game/pipeline/dbc/spell-data';
 import { spellWire } from '../../../game/classes/spell-wire';
 // `GetTime()`'s clock. A cooldown's `start` is what the client's own Lua compares against, so the wire
@@ -155,6 +155,72 @@ export class SpellHandler extends EventEmitter {
     this.game.on('packet:receive:SMSG_COOLDOWN_EVENT', this.handleCooldownEvent.bind(this));
     this.game.on('packet:receive:SMSG_CLEAR_COOLDOWN', this.handleClearCooldown.bind(this));
     this.game.on('packet:receive:SMSG_SPELL_FAILURE', this.handleSpellFailure.bind(this));
+    this.game.on('packet:receive:SMSG_SPELL_DELAYED', this.handleSpellDelayed.bind(this));
+  }
+
+  /**
+   * `SMSG_SPELL_DELAYED` (0x1E2): CAST PUSHBACK. Being hit while casting delays the cast, and **the
+   * server tells us by how much** -- this is not a rule the client applies for itself.
+   *
+   * That is the answer to "is pushback local or on the wire", and the wire is what settles it: the opcode
+   * exists in 3.3.5a's own enum, it is sent unprompted, and the 3.3.5a client's own FrameXML has a handler
+   * waiting for it -- `CastingBarFrame_OnLoad` registers `UNIT_SPELLCAST_DELAYED`
+   * (`castingbarframe.lua:10`) and its branch at `castingbarframe.lua:163-175` RE-READS
+   * `UnitCastingInfo(unit)` and recomputes `self.value` and `self.maxValue` from the new `startTime` and
+   * `endTime`. A client computing a delay locally would have no reason to re-read a snapshot it had just
+   * written, and no reason for a dedicated event at all. There is nothing client-side to derive a delay
+   * FROM either: the pushback amount depends on the school, the damage, the caster's talents and
+   * resilience and how many pushbacks this cast has already taken, none of which is on the client.
+   *
+   * 3.3.5a body: `pguid caster`, `u32 delayMs`. Self-checking on the `combatWire` principle -- a delay
+   * outside a plausible range means the layout is wrong, and it is recorded rather than applied.
+   *
+   * **The ANIMATION needs nothing here and that is by construction, not an omission.** The held pose is a
+   * loop armed at START and the release is armed at GO, which the server sends when the cast ACTUALLY
+   * completes -- so a delayed cast holds its pose longer and releases later with no arithmetic on our side.
+   * Pushback moves the bar; the animation was already following the server.
+   */
+  private handleSpellDelayed(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    let caster = '0x0';
+    let delayMs = 0;
+    try {
+      caster = gp.readPackedGUID();
+      delayMs = gp.readUnsignedInt();
+    } catch (error) {
+      spellWire.record({
+        at: Date.now(),
+        kind: 'SPELL_DELAYED',
+        spellId: 0,
+        caster: null,
+        detail: { error: String(error) },
+        bodySize,
+        consumed: gp.index - gp.headerSize,
+      });
+      return;
+    }
+    // A pushback in 3.3.5a is 500 ms per hit, halved by each Spell Focus rank and reduced by resilience,
+    // and the server caps the total at the cast's own length -- so a single packet's value is small. The
+    // bound is generous rather than tight (it is a layout check, not a game rule): anything at or beyond
+    // a minute is a misaligned read, most likely a guid whose packed length we got wrong.
+    const plausible = delayMs > 0 && delayMs < 60000;
+    spellWire.record({
+      at: Date.now(),
+      kind: 'SPELL_DELAYED',
+      spellId: 0,
+      caster,
+      detail: { delayMs, plausible: plausible ? 1 : 0 },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    if (!plausible) {
+      console.warn(
+        `SPELL_DELAYED: delayMs ${delayMs} is not a plausible cast pushback -- the layout is probably wrong`,
+      );
+      return;
+    }
+    this.emit('spellDelayed', { caster, delayMs });
   }
 
   /**
@@ -192,7 +258,31 @@ export class SpellHandler extends EventEmitter {
     // A cast that broke never reaches GO, so its id must be dropped here or it would suppress the
     // global cooldown of the next INSTANT cast of the same spell (see `castStarted`).
     this.castStarted.delete(spellId);
+    // AND the held pose must be given up, or the caster stands in it for the rest of the session: the pose
+    // is a LOOP and `externalSeq`'s release "never releases a loop" by design. GO is what normally takes
+    // the latch back, and a broken cast never gets there. Gated on this spell having armed a pose so a
+    // failure cannot drop a latch belonging to something else.
+    this.releaseCastPose(caster, spellId);
     this.emit('spellFailure', { caster, spellId });
+  }
+
+  /**
+   * Hand the body back after a cast that will never reach `SMSG_SPELL_GO`.
+   *
+   * The held pose armed at START is a LOOP, and `Unit#externalSeq`'s release never fires for a loop -- that
+   * is what holds the pose, and it is also why a cancelled cast needs an explicit way out. Without this an
+   * interrupted caster stands in his cast pose until something else arms an animation, which for a unit
+   * standing still is never.
+   *
+   * GATED on the spell having armed a pose at all. Releasing unconditionally would drop a latch this cast
+   * never took -- most sharply `DEATH`'s, which `unit.ts#externalSeq` says must never be released from
+   * outside because a corpse would stand back up.
+   */
+  private releaseCastPose(casterGuid: string, spellId: number): void {
+    const unit = this.game.world.entities.get(casterGuid);
+    if (unit && precastAnimationFor(unit, spellId) !== null) {
+      unit.releaseAnimationLatch();
+    }
   }
 
   /** `GetActionCooldown`'s two numbers for one spell, or null when nothing is running. */
@@ -509,6 +599,27 @@ export class SpellHandler extends EventEmitter {
         this.announceCooldowns();
       }
     }
+
+    // THE HELD CAST POSE. This is the half that was missing, and it is why the owner saw "no animation
+    // during the cast, only the final part". The clip armed at GO is `castKitID`'s, and GO is the moment
+    // the cast ENDS -- so a 1.5 s Healing Wave stood still for 1.5 s and then discharged. The pose comes
+    // from `SpellVisual.dbc`'s OTHER kit column, `precastKitID`; see `spell-anim.ts` for which field is
+    // which and how that was measured.
+    //
+    // For ANY caster, not just ourselves -- a peer casting beside us holds the same pose, exactly as
+    // `handleSpellGo` already arms a peer's release. Same plain `entities` lookup the swing uses.
+    //
+    // `interrupt` true and `repetitions` -1: the pose is a LOOP (`ReadySpellOmni`/`ReadySpellDirected`),
+    // and `Unit#externalSeq`'s latch never releases a loop, which is what HOLDS it. The release armed at
+    // GO replaces the latch; `releaseAnimationLatch` below is the way out when the cast never gets there.
+    const caster = this.game.world.entities.get(decoded.caster);
+    if (caster) {
+      const pose = precastAnimationFor(caster, decoded.spellId);
+      if (pose !== null) {
+        caster.setAnimation(pose, true, -1);
+      }
+    }
+
     this.emit('spellStart', decoded);
   }
 
@@ -527,18 +638,29 @@ export class SpellHandler extends EventEmitter {
       return;
     }
 
-    // THE CASTER'S OWN CLIP. Armed here, at GO, which is the reference's rule -- see `spell-anim.ts`.
+    // THE RELEASE. `castKitID`'s clip, armed here at GO -- which is the reference's rule
+    // (`SpellCastOmni` at SPELL_GO) and is correct for what it names: GO is the completion of the cast.
+    // What was WRONG for two rounds is that this was the ONLY clip; the held pose that runs for the cast's
+    // duration is `precastKitID`'s and is armed at START. See `spell-anim.ts`.
+    //
     // The caster may be a peer as easily as ourselves, so this is the same plain `entities` lookup the
     // swing and the defense reaction use in `combat.ts`.
     const unit = this.game.world.entities.get(decoded.caster);
     if (unit) {
       const anim = castAnimationFor(unit, decoded.spellId);
       if (anim !== null) {
-        // A ONE-SHOT (repetitions 0) with `interrupt` true, exactly as a swing is armed: `setAnimation`'s
-        // ownership latch hands the body back to locomotion when the clip's window ends, so a cast does
-        // not need a release of its own. The blend layer that landed recently is what makes the entry
-        // into it a fade rather than a snap.
+        // A ONE-SHOT (repetitions 0) with `interrupt` true, exactly as a swing is armed. Arming it is also
+        // what RELEASES the held pose: `startAnimation` re-latches `externalSeq` onto whatever it just
+        // armed, and a one-shot's latch gives the body back to locomotion when the clip's window ends. So
+        // pose -> release -> stand needs no bookkeeping, and the blend layer makes both edges a fade.
         unit.setAnimation(anim, true, 0);
+      } else if (precastAnimationFor(unit, decoded.spellId) !== null) {
+        // NO release clip, but this spell DID arm a pose -- a visual whose precast kit resolves and whose
+        // cast kit does not. Nothing would then take the latch off a LOOPING pose and the caster would hold
+        // it for ever. Gated on the pose having existed rather than released unconditionally: an
+        // unconditional release here would also drop a latch this cast never took, and `DEATH`'s latch is
+        // one that must never be dropped from outside (`unit.ts#externalSeq`).
+        unit.releaseAnimationLatch();
       }
     }
 
@@ -682,6 +804,13 @@ export class SpellHandler extends EventEmitter {
     // Same reason as in `handleSpellFailure`: a refused cast never reaches GO, so its id must not be left
     // in `castStarted` to suppress a later instant's global cooldown.
     this.castStarted.delete(spellId);
+    // `SMSG_CAST_FAILED`'s body names no caster -- the server only refuses OUR casts -- so the pose to
+    // release is the player's. Ordinarily there is none to release: a refused cast gets no START either,
+    // so no pose was ever armed. The case this covers is a cast that STARTED and was then refused.
+    const self = this.game.world.player?.guid;
+    if (self !== undefined) {
+      this.releaseCastPose(self, spellId);
+    }
     this.emit('castFailed', { spellId, result });
   }
 

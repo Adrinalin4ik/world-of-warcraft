@@ -139,6 +139,15 @@ class SpellData {
   /** `SpellVisual.dbc` id -> its cast-stage kit id. */
   private castKits: Map<number, number> | null = null;
 
+  /**
+   * `SpellVisual.dbc` id -> its PRECAST-stage kit id -- the held pose, not the release.
+   *
+   * See `precastAnimation` for the measurement that establishes field 1 as the held pose and field 2 as
+   * the release. This is a separate map rather than a second lookup on `castKits` because the two
+   * columns answer two different questions at two different moments of one cast.
+   */
+  private precastKits: Map<number, number> | null = null;
+
   /** `SpellVisualKit.dbc` id -> its `animID`, sentinels already folded away. */
   private kitAnims: Map<number, number> | null = null;
 
@@ -203,9 +212,15 @@ class SpellData {
     }
 
     this.castKits = new Map<number, number>();
+    this.precastKits = new Map<number, number>();
     for (const record of (visuals as any).records ?? []) {
       if (record && record.castKitID) {
         this.castKits.set(record.id, record.castKitID);
+      }
+      // `0xFFFFFFFF` as well as 0 -- the same dual none-sentinel the kit table carries, and it appears
+      // in this column too: a visual with no precast stage writes either form.
+      if (record && record.precastKitID && record.precastKitID !== 0xffffffff) {
+        this.precastKits.set(record.id, record.precastKitID);
       }
     }
 
@@ -363,6 +378,61 @@ class SpellData {
       return null;
     }
     const kit = this.castKits?.get(row.visualID);
+    if (!kit) {
+      return null;
+    }
+    return this.kitAnims?.get(kit) ?? null;
+  }
+
+  /**
+   * The `AnimationData.dbc` id the caster's body HOLDS for the duration of a cast, or null.
+   *
+   * `Spell.dbc.visualIDs[0]` -> `SpellVisual.dbc.`**`precastKitID`** (field 1) -> `SpellVisualKit.animID`.
+   * The same chain `castAnimation` walks, one column to its left, and that column is the whole reason the
+   * cast animation used to appear only at the END of a cast: field 2 is the RELEASE.
+   *
+   * ## WHICH FIELD IS WHICH, measured rather than assumed
+   *
+   * Read out of the served `dbfilesclient/spellvisual.dbc` (9406 records, fieldCount 32, recordSize 128)
+   * joined to `spellvisualkit.dbc` (8663 / 38 / 152) and named through `animationdata.dbc` (506 rows).
+   * Two independent facts settle it, and neither needs benilla's naming taken on trust:
+   *
+   * 1. **The animation NAMES the two columns resolve to are held poses on one side and strikes on the
+   *    other.** Across every visual in the table, field 1's top anims are `ReadySpellOmni` (879),
+   *    `ReadySpellDirected` (703), `ReadyThrown` (322), `UseStandingLoop` (188), `HoldRifle` (33),
+   *    `HoldThrown` (29), `LoadBow` (19) -- Ready/Hold/Load/Loop, every one a pose. Field 2's top anims
+   *    are `SpellCastOmni` (1091), `SpellCastDirected` (957), `AttackThrown` (517),
+   *    `ChannelCastDirected` (131), `Special1H` (76), `Attack1H` (72) -- every one a discharge.
+   * 2. **A spell that is INSTANT carries precast kit 0 and only a cast kit.** Measured: 78 Heroic Strike
+   *    (visual 39) field 1 = 0, field 2 = kit 324 -> `Special1H`; 1752 Sinister Strike (253) field 1 = 0,
+   *    field 2 = 399 -> `Attack1H`; 2098 Eviscerate (671) field 1 = 0, field 2 = 733 -> `Special1H`.
+   *    An instant has no cast phase to hold and the table says so, which is why this method needs no
+   *    special case for one -- it answers null and only the release plays.
+   *
+   * The timed spells on the test characters read, on the same files:
+   *
+   *     spell  133 Fireball      visual  67  precast kit  30 -> 51 ReadySpellDirected  cast kit  38 -> 53 SpellCastDirected
+   *     spell  331 Healing Wave  visual  58  precast kit 100 -> 52 ReadySpellOmni      cast kit 183 -> 54 SpellCastOmni
+   *     spell  403 Lightning Bolt visual 173 precast kit 124 -> 51 ReadySpellDirected  cast kit  72 -> 53 SpellCastDirected
+   *     spell  585 Smite         visual 128  precast kit 184 -> 51 ReadySpellDirected  cast kit 119 -> 53 SpellCastDirected
+   *     spell 2054 Heal          visual 135  precast kit  99 -> 52 ReadySpellOmni      cast kit 270 -> 54 SpellCastOmni
+   *
+   * So Healing Wave holds `ReadySpellOmni` for its 1.5 s and releases `SpellCastOmni` -- which is exactly
+   * what the real client shows, and exactly what benilla's own byte-verified Fireball example ("precast
+   * 30 / cast 38", `benilla-formats/src/spell_visual/mod.rs:78`) reads as on this build's file too.
+   *
+   * NOTE what is deliberately absent: there is NO fallback. `castAnimation`'s caller substitutes
+   * `SpellCastDirected` for a spell whose chain yields nothing, because a cast with no visible release is
+   * worse than a generic one; a HELD pose has the opposite trade. Parking a caster in a `ReadySpell` clip
+   * a kit never asked for would freeze him there for the cast's whole length, and a frozen wrong pose is
+   * more misleading than no pose at all.
+   */
+  precastAnimation(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    const kit = this.precastKits?.get(row.visualID);
     if (!kit) {
       return null;
     }
