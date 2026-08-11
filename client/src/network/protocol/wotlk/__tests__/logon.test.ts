@@ -22,6 +22,7 @@ const CONFIG = {
 function fakeIo() {
   const sent: Uint8Array[] = [];
   let listener: ((bytes: Uint8Array) => void) | null = null;
+  let dropped: (() => void) | null = null;
 
   return {
     sent,
@@ -33,11 +34,18 @@ function fakeIo() {
     onMessage(next: (bytes: Uint8Array) => void) {
       listener = next;
     },
+    onDisconnect(next: () => void) {
+      dropped = next;
+    },
     close() {
       this.closed = true;
     },
     reply(bytes: Uint8Array) {
       listener!(bytes);
+    },
+    /** Simulate the socket going away on its own, which is what `onDisconnect` exists for. */
+    drop() {
+      dropped!();
     },
   };
 }
@@ -149,6 +157,29 @@ describe('WotlkLogonTransport', () => {
 
     expect(srp.validate).toHaveBeenCalled();
     expect(Array.from(result.sessionKey)).toEqual(new Array(40).fill(0x22));
+  });
+
+  it('a dropped socket ends the attempt, so the next authenticate() can start', async () => {
+    const io = fakeIo();
+    const transport = new WotlkLogonTransport(io, CONFIG);
+
+    const first = transport.authenticate('tester', 'secret');
+    await Promise.resolve();
+    io.drop();
+
+    // Before this behaviour existed the drop reached nothing: the attempt hung, the slot stayed held,
+    // and every later login threw "already in progress" instead of dialing -- one bad attempt made the
+    // page unusable until it was reloaded, however correct the credentials were.
+    await expect(first).rejects.toThrow(/logon socket closed/i);
+
+    // The point of the test: the slot is free, so this dials instead of throwing. It is left pending
+    // (nothing has replied), which is correct -- `connect` having run twice is the observable part.
+    const second = transport.authenticate('tester', 'secret');
+    await Promise.resolve();
+    expect(io.connect).toHaveBeenCalledTimes(2);
+
+    io.drop(); // settle it, so the test leaves no unhandled rejection behind
+    await expect(second).rejects.toThrow(/logon socket closed/i);
   });
 
   it('rejects a second authenticate() call issued in the same synchronous turn, without leaving the first unsettled', async () => {
