@@ -41,6 +41,16 @@ const ATTACK_OFF = 87;
 const ATTACK_OFF_PIERCE = 88;
 const ATTACK_UNARMED_OFF = 117;
 
+/**
+ * The four `AnimationData` Ready idles -- the engaged standing guard, one per weapon bucket
+ * (`select.rs:867-877`). NOT combat one-shots: they are looping STATE ids and the gait cascade
+ * selects them, which is why they live beside the swing table rather than in it.
+ */
+const READY_UNARMED = 25;
+const READY_1H = 26;
+const READY_2H = 27;
+const READY_2HL = 28;
+
 /** `ItemClass::WEAPON`. Anything else in the hand swings unarmed. */
 const ITEM_CLASS_WEAPON = 2;
 /** `ItemSubclassWeapon::DAGGER`, the one subclass with its own pierce clips. */
@@ -98,6 +108,39 @@ function offFor(subclass: number | undefined): number {
     return ATTACK_OFF_PIERCE;
   }
   return subclass === undefined ? ATTACK_UNARMED_OFF : ATTACK_OFF;
+}
+
+/**
+ * The ENGAGED STANDING IDLE -- the weapon-class Ready pick, `ready_anim` (`select.rs:867-877`,
+ * decision 0073, the client's `0x5fd360` arm at `0x5fcdc0`).
+ *
+ * A THIRD weapon bucketing, and deliberately not `mainFor`'s: the reference's own comment says "the
+ * buckets differ from the swing table: fist **and** dagger ready as 1H". So a dagger, which stabs
+ * with its own pierce clip when it swings, holds the ordinary one-handed guard when it is idle.
+ *
+ * The subclass numbers transfer from the reference's 1.12 table unchanged, checked one by one against
+ * 3.3.5a `ItemSubclassWeapon`: 1H is axe1H 0, mace1H 4, sword1H 7, exotic 11, fist 13, misc 14,
+ * dagger 15; 2H is axe2H 1, mace2H 5, sword2H 8, exotic2 12; 2H-LONG is polearm 6, staff 10, spear 17.
+ * Everything else -- bow, gun, crossbow, wand, fishing pole, obsolete(9) -- is `ReadyUnarmed`, which
+ * is also what an empty hand gets.
+ *
+ * Gated on ENGAGEMENT and never on sheath state: the client's arm tests the auto-attack-target guid.
+ * See `Unit#readyIdle` for where engagement comes from.
+ */
+export function readyAnimation(unit: Unit): number {
+  void primeItems();
+  const entry = unit.equippedMainhand;
+  const subclass = entry ? weaponSubclass.get(entry) : undefined;
+  switch (subclass) {
+    case 0x0: case 0x4: case 0x7: case 0xb: case 0xd: case 0xe: case 0xf:
+      return READY_1H;
+    case 0x1: case 0x5: case 0x8: case 0xc:
+      return READY_2H;
+    case 0x6: case 0xa: case 0x11:
+      return READY_2HL;
+    default:
+      return READY_UNARMED;
+  }
 }
 
 /**

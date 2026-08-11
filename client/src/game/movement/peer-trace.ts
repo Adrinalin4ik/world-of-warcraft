@@ -60,6 +60,34 @@ export interface PeerTraceRow {
   /** `render` only: the `AnimationData` id playing, and its playback rate. -1 when nothing is armed. */
   seqId?: number;
   rate?: number;
+  /**
+   * `render` only: the TERRAIN height under the unit's own XY, and the unit's rendered Z minus it.
+   *
+   * THE ABSOLUTE ERROR, and the reason this field exists is a defect every other number on this row
+   * was blind to. `dz` and `dxy` are DIFFERENCES: a peer gliding perfectly smoothly a yard and a half
+   * BELOW the ground satisfies "no step exceeds 0.06 yd" and "p99 is zero" exactly as well as one
+   * standing on it does. This round reported those percentiles as the jump being fixed, and the owner
+   * then watched a peer jump in the official client and be buried to the chest for the whole arc.
+   *
+   * Third time on this project that a metric passed while the screen was wrong, and the third time the
+   * fault was in the frame of reference rather than in the arithmetic: first `hypot(dx,dy,dz)` hid a Z
+   * staircase inside an XY glide, then an input was measured instead of the transform, and now a
+   * derivative instead of a value. A step size cannot see a constant offset. This can.
+   *
+   * `null` when the terrain under the unit has not streamed (`TerrainProvider#heightAt` answers only
+   * for a registered chunk), which is a different statement from "the error is zero".
+   */
+  groundZ?: number | null;
+  groundErr?: number | null;
+  /**
+   * `packet` only: the wire's jump tail as it ARRIVED, unmodified.
+   *
+   * `zSpeed` is recorded raw and uninterpreted on purpose: its SIGN convention is the thing in dispute
+   * (`applyRemoteMove`), it is version-dependent, and no amount of reasoning substitutes for reading
+   * what a real client actually put on the wire.
+   */
+  zSpeed?: number;
+  fallTime?: number;
 }
 
 const HISTORY = 8000;
@@ -119,6 +147,7 @@ class PeerTrace {
     gaitSpeed: number,
     seqId: number,
     rate: number,
+    groundZ: number | null,
   ): void {
     if (!this.enabled) {
       return;
@@ -156,6 +185,8 @@ class PeerTrace {
       gaitSpeed,
       seqId,
       rate,
+      groundZ,
+      groundErr: groundZ === null ? null : z - groundZ,
     });
   }
 

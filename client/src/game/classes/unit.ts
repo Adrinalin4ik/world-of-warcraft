@@ -23,6 +23,7 @@ import { snapToGround } from "../movement/mover";
 import { shouldPose } from "../pipeline/m2/anim/gating";
 import { createPlayerMoveState } from "../movement/player-state";
 import { peerTrace } from "../movement/peer-trace";
+import { readyAnimation } from "./combat-anim";
 import {
   ANY_MOVE,
   DEFAULT_MOVE_SPEEDS,
@@ -168,6 +169,17 @@ const GAIT_SWIM: readonly number[] = [SWIM, SWIM_IDLE, STAND];
 const GAIT_SWIM_LEFT: readonly number[] = [SWIM_LEFT, SWIM, SWIM_IDLE, STAND];
 const GAIT_SWIM_RIGHT: readonly number[] = [SWIM_RIGHT, SWIM, SWIM_IDLE, STAND];
 const GAIT_SWIM_BACK: readonly number[] = [SWIM_BACKWARDS, SWIM_IDLE, STAND];
+/**
+ * THE ENGAGED STANDING IDLES, one list per weapon bucket -- `gait_candidates`' Ready rung
+ * (`select.rs:497-506`). Each falls back through `ReadyUnarmed` 25 before Stand, because a model may
+ * own the unarmed guard and not the two-handed one.
+ */
+const READY_UNARMED = 25;
+const GAIT_READY_UNARMED: readonly number[] = [READY_UNARMED, STAND];
+const GAIT_READY_1H: readonly number[] = [26, READY_UNARMED, STAND];
+const GAIT_READY_2H: readonly number[] = [27, READY_UNARMED, STAND];
+const GAIT_READY_2HL: readonly number[] = [28, READY_UNARMED, STAND];
+
 /** Airborne. `Fall` is entered directly, with no entry one-shot (`select.rs:308`). */
 const GAIT_FALL: readonly number[] = [FALL, STAND];
 const GAIT_JUMP_HANG: readonly number[] = [JUMP_HANG, FALL, STAND];
@@ -197,6 +209,9 @@ const GAIT_IDS = new Set<number>([
   STAND, WALK, RUN, SPRINT, WALK_BACKWARDS, SHUFFLE_LEFT, SHUFFLE_RIGHT,
   SWIM_IDLE, SWIM, SWIM_LEFT, SWIM_RIGHT, SWIM_BACKWARDS, JUMP_HANG, FALL,
   JUMP_END, JUMP_LAND_RUN,
+  // The Ready idles are GAITS, not combat one-shots: they are looping states the cascade selects, and
+  // a latch on one would never release (`externalSeq`'s "a looping owner never releases").
+  READY_UNARMED, 26, 27, 28,
 ]);
 
 function isGaitId(id: number): boolean {
@@ -1673,7 +1688,7 @@ class Unit extends Entity {
    *
    * See `GAIT_*` for why this returns a list rather than an id, and why the lists are frozen.
    */
-  gaitCandidates(flags: number, speed: number): readonly number[] {
+  gaitCandidates(flags: number, speed: number, ready: number = 0): readonly number[] {
     if ((flags & MoveFlag.SWIMMING) !== 0) {
       if ((flags & (MoveFlag.TURN_LEFT | MoveFlag.TURN_RIGHT)) !== 0) return GAIT_SWIM_IDLE;
       if ((flags & MoveFlag.STRAFE_LEFT) !== 0) return GAIT_SWIM_LEFT;
@@ -1700,6 +1715,31 @@ class Unit extends Entity {
 
     if ((flags & MoveFlag.TURN_LEFT) !== 0) return GAIT_SHUFFLE_LEFT;
     if ((flags & MoveFlag.TURN_RIGHT) !== 0) return GAIT_SHUFFLE_RIGHT;
+
+    // STANDING AND ENGAGED: the weapon-class Ready guard instead of Stand (`select.rs:497-506`).
+    //
+    // BELOW the turn-in-place shuffles and ABOVE Stand, which is the reference's order exactly -- a
+    // fighter who pivots still shuffles his feet -- and reachable only here, so "not moving" needs no
+    // test of its own: every translating branch has already returned.
+    //
+    // This is the owner's report "после каждого удара он проигрывает анимацию как будто он стоит вне
+    // боя". The swing is a one-shot; when its window elapsed the cascade had nothing between it and
+    // Stand, so every strike ended in the relaxed idle.
+    //
+    // AND IT IS A PEER'S REPORT, which is what decides where engagement comes from -- and the answer
+    // is that it was already there. `Unit#inCombat` is set by `SMSG_ATTACKSTART` and cleared by
+    // `SMSG_ATTACKSTOP` (`network/game/object/combat.ts:247,259`), which the server relays for every
+    // unit we can see, keyed by the attacker's guid, so it is true of another player exactly as it is
+    // of us. Those are the same two opcodes the reference derives `Engaged` from
+    // (`net/apply/combat.rs:26,40`; `creature_anim.rs:113-117`: "the client's `0x5fd360` arm gates on
+    // the auto-attack-target GUID being set, i.e. engagement, **not** sheath state"). No unit FIELD and
+    // no new bit was needed -- `inCombat` has had a writer since the combat round and NOTHING READ IT.
+    // The weapon bucket comes from `equippedMainhand`, which the values path already fills from
+    // `PLAYER_VISIBLE_ITEM_16_ENTRYID` for a player.
+    if (ready === 26) return GAIT_READY_1H;
+    if (ready === 27) return GAIT_READY_2H;
+    if (ready === 28) return GAIT_READY_2HL;
+    if (ready !== 0) return GAIT_READY_UNARMED;
 
     return GAIT_STAND;
   }
@@ -1864,7 +1904,12 @@ class Unit extends Entity {
       }
     }
 
-    const candidates = this.gaitCandidates(flags, speed);
+    // ENGAGEMENT for the Ready rung, read INLINE rather than through a method: every locomotion unit
+    // test drives this with `.call()` on a hand-built double, where a method that is not on the double
+    // is a `TypeError` rather than a falsy value. `this.inCombat` on a double is `undefined`, which is
+    // exactly "not engaged". Same degradation the landing pick's truthy test documents.
+    const ready = this.inCombat ? readyAnimation(this) : 0;
+    const candidates = this.gaitCandidates(flags, speed, ready);
 
     // Step down the list, taking the first rung the model actually OWNS -- `resolve(id, false)`
     // withholds the Stand consolation precisely so "absent" is distinguishable from "present".
@@ -2302,6 +2347,9 @@ class Unit extends Entity {
       dyaw: wasFresh ? 0 : wrapPi(facing - snapFromFacing),
       speed: 0,
       gaitSpeed: this.remoteMotion.speed,
+      // RAW, uninterpreted: the sign convention is the thing in dispute. See `PeerTraceRow#zSpeed`.
+      zSpeed: tail.jump ? tail.jump.zSpeed : 0,
+      fallTime: tail.fallTime ?? 0,
     });
 
     // Reported, not acted on: a packet always snaps, so there is no interpolation to suppress. A

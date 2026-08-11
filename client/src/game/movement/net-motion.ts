@@ -403,9 +403,31 @@ export function easeDisplayYaw(
 /** The jump tail a `MSG_MOVE_JUMP` carries, when it carries one. */
 export interface RemoteJumpInfo {
   /**
-   * The wire's vertical speed. **DOWN-POSITIVE**: the real client sends a NEGATIVE value for a
-   * RISING jump, so the take-off up-speed is `-zSpeed` (reference `jump_seed`, `remote.rs:627-640`,
-   * whose sign was corrected there by a vanilla sniff rather than assumed).
+   * The wire's vertical speed for this airborne phase. **READ AS A MAGNITUDE, because its SIGN
+   * CONVENTION IS NOT SETTLED FOR 3.3.5a AND WE DO NOT NEED IT.**
+   *
+   * The reference documents down-positive -- a NEGATIVE value for a rising jump -- and says so on the
+   * strength of a vanilla sniff (`remote.rs:629-634`, `jump_seed`). That is 1.12 evidence, and
+   * `CLAUDE.md`'s rule is to take mechanism from the reference and version-numbered values from the
+   * game's own data. A sign is a value.
+   *
+   * TAKING IT ON TRUST COST A ROUND. `-zSpeed` was used verbatim, and the owner then watched a peer
+   * jump in the official 3.3.5a client and be drawn buried to the chest for the whole arc. MEASURED,
+   * by making our own sender emit the opposite convention on an otherwise unchanged path (the observed
+   * peer's rendered Z minus the terrain height under his own XY, per frame): the airborne error ran to
+   * -1.5 .. -3.9 yd, p05 -2.04, against +1.64 yd of clean rise when the signs agreed. Nothing else in
+   * the capture moved -- grounded error stayed at p50 +0.014 yd either way.
+   *
+   * WHY THE MAGNITUDE IS CORRECT WITHOUT SETTLING THE CONVENTION: an airborne phase in WoW never
+   * LAUNCHES downward. A jump and a knockback launch upward; a step off a ledge is the walk election's
+   * `StartFalling(0)` and launches at exactly zero. There is no fourth case. So `|zspeed|` is the
+   * take-off up-speed under either convention, and `|zspeed| - g * fallTime` is the current one --
+   * which is also why `fallTime` has to be the arc's own age and why `zspeed` has to be the arc's
+   * LAUNCH value rather than its live velocity (the second half of the outbound bug this round fixed).
+   *
+   * A sender that emitted its LIVE vertical velocity instead of the launch value would defeat this,
+   * since mid-fall its magnitude is a descent. This client was that sender until this round; a real
+   * client is not, because `fallTime` is meaningless unless `zspeed` is the constant.
    */
   zSpeed: number;
   sinAngle: number;
@@ -446,13 +468,18 @@ export function applyRemoteMove(
   // mover resumes flag-driven walking.
   if (move.jump) {
     const t = (move.fallTime ?? 0) / 1000;
-    motion.verticalVelocity = Math.max(-TERMINAL_VELOCITY, -move.jump.zSpeed - GRAVITY * t);
+    // THE MAGNITUDE, NOT THE SIGN, AND THAT IS THE FIX. See `RemoteJumpInfo#zSpeed` for the whole
+    // argument and the measurement; in one line: an airborne phase never LAUNCHES downward in WoW's
+    // movement model, so `|zspeed|` is the take-off up-speed under either wire convention, and the
+    // current up-speed is that minus gravity over the arc's own `fallTime`.
+    const launchUp = Math.abs(move.jump.zSpeed);
+    motion.verticalVelocity = Math.max(-TERMINAL_VELOCITY, launchUp - GRAVITY * t);
     motion.jumpVelX = move.jump.cosAngle * move.jump.xySpeed;
     motion.jumpVelY = move.jump.sinAngle * move.jump.xySpeed;
-    // A LAUNCH is a negative wire `zSpeed` (down-positive; see `RemoteJumpInfo`). A step-off fall
-    // also carries this block once it is airborne, with `zSpeed` already positive -- so the sign is
-    // what separates "he jumped" from "he walked off a ledge", and only the first plays JumpStart.
-    motion.jumped = move.jump.zSpeed < 0;
+    // A LAUNCH has a non-zero take-off speed; a step off a ledge is the walk election's
+    // `StartFalling(0)` and carries EXACTLY zero, whichever sign the sender uses for the rest. That is
+    // what separates "he jumped" from "he walked off a kerb", and only the first plays JumpStart.
+    motion.jumped = launchUp > 1e-3;
   } else {
     motion.verticalVelocity = 0;
     motion.jumpVelX = 0;
