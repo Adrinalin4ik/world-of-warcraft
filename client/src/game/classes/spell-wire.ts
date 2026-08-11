@@ -37,7 +37,17 @@ export interface SpellWireRow {
     | 'SPELL_START'
     | 'SPELL_GO'
     | 'CAST_FAILED'
-    | 'CAST_SENT';
+    | 'CAST_SENT'
+    /**
+     * Not a packet: the one row `spell-data.ts` writes when the four DBC tables finish loading, with
+     * their row counts and the elapsed ms.
+     *
+     * It has its OWN kind rather than borrowing `INITIAL_SPELLS`, which is what it did first. That
+     * conflated "the spell book arrived" with "the tables loaded" in one `kind`, and the giveaway was
+     * that the unit test had to filter on `consumed > 0` to tell them apart -- a test working around
+     * an instrument is the instrument's defect, not the test's.
+     */
+    | 'TABLES_LOADED';
   /** The spell this row is about, or 0 where the packet is not about one spell. */
   spellId: number;
   /** Caster guid where the packet names one. */

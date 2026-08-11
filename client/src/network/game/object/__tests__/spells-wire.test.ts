@@ -80,7 +80,7 @@ test('SMSG_INITIAL_SPELLS (329 B) and SMSG_ACTION_BUTTONS (577 B) decode whole',
   (handler as any).handleActionButtons(incoming(GameOpcode.SMSG_ACTION_BUTTONS, buttonsBody));
 
   // BOTH bodies consumed to the last byte. A wrong layout lands somewhere arbitrary instead.
-  const rows = spellWire.history().filter((row) => row.consumed > 0);
+  const rows = spellWire.history();
   expect(rows.map((row) => [row.kind, row.bodySize, row.consumed])).toEqual([
     ['INITIAL_SPELLS', 329, 329],
     ['ACTION_BUTTONS', 577, 577],

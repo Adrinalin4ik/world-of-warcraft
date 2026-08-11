@@ -424,14 +424,34 @@ export class SpellHandler extends EventEmitter {
     return this.slots[action - 1] ?? null;
   }
 
-  /** The spell in a slot, or null when the slot is empty or holds a macro/item/companion. */
+  /**
+   * The spell in a slot, or null when the slot is empty or holds a macro/item/companion.
+   *
+   * A slot holding something this client cannot act on is NAMED once rather than silently skipped -- a
+   * macro or an item on the bar would otherwise be indistinguishable from an empty slot, and a button
+   * that is empty for a reason nobody stated is how a screen renders plausibly and wrongly.
+   */
   spellInSlot(action: number): number | null {
     const slot = this.slot(action);
-    if (slot === null || slot.action === 0 || slot.type !== ACTION_BUTTON_SPELL) {
+    if (slot === null || slot.action === 0) {
+      return null;
+    }
+    if (slot.type !== ACTION_BUTTON_SPELL) {
+      const key = `${slot.type}`;
+      if (!this.warnedTypes.has(key)) {
+        this.warnedTypes.add(key);
+        console.warn(
+          `action bar: slot ${action} holds a ${SpellHandler.typeName(slot.type)}, which this client `
+          + 'cannot show or use -- only ACTION_BUTTON_SPELL is handled. The button stays empty.',
+        );
+      }
       return null;
     }
     return slot.action;
   }
+
+  /** One warning per unsupported slot TYPE, not per slot -- a full macro bar would print twelve. */
+  private warnedTypes = new Set<string>();
 
   knownSpells(): ReadonlySet<number> {
     return this.known;

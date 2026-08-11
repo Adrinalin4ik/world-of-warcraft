@@ -18,9 +18,16 @@
  *
  * The 49 MB DOWNLOAD is unavoidable and is not hidden: a DBC has no index, so there is no way to reach
  * record N without the bytes before it, and the file is only sorted by id by convention. It is fetched
- * ONCE, lazily, off the entry path (`ensureLoaded` is fired when the spell handler first has something
- * to resolve, and every consumer tolerates "not yet"), and the browser caches it. The real client reads
- * this table out of a local MPQ, so there is no upstream design to copy here.
+ * ONCE and the browser caches it. The real client reads this table out of a local MPQ, so there is no
+ * upstream design to copy here.
+ *
+ * **WHO calls `ensureLoaded` is load-bearing, and it is NOT the packet handler.** Firing it from
+ * `SMSG_INITIAL_SPELLS` -- which arrives in the login burst -- put this 49 MB fetch in contention with
+ * `FrameXML.toc`'s 264 small fetches over the same connection and STARVED them: measured, the FrameXML
+ * boot did not finish in 240 s and `window.worldRuntime` never appeared, with nothing logged anywhere.
+ * The caller is `ui/action-bridge.ts`, which attaches only after the manifest is loaded. Every consumer
+ * tolerates "not yet" and the bridge re-pushes when this settles, so the bar comes up with the right
+ * shape first and the icons land a moment later.
  *
  * `SpellIcon` (152 KB), `SpellVisual` (1.2 MB) and `SpellVisualKit` (1.3 MB) DO go through `DBC.load`,
  * because their entity definitions are deliberately narrow (`entities/spell-visual.js`,
@@ -144,11 +151,10 @@ class SpellData {
 
     spellWire.record({
       at: Date.now(),
-      kind: 'INITIAL_SPELLS',
+      kind: 'TABLES_LOADED',
       spellId: 0,
       caster: null,
       detail: {
-        note: 'spellData tables loaded',
         spells: this.spells.size,
         icons: this.icons.size,
         castKits: this.castKits.size,
