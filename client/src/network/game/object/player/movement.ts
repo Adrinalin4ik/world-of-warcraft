@@ -7,7 +7,8 @@ import { GameHandler } from '../../handler';
 import GameOpcode from '../../opcode';
 import GamePacket from '../../packet';
 import {
-  MovementFlag, movementInfoSize, packedGuidSize, readMovementInfo, wireFacing, writeMovementInfo,
+  MovementFlag, MovementInfo, movementInfoSize, packedGuidSize, readMovementInfo, wireFacing,
+  writeMovementInfo,
 } from '../../movement-info';
 
 /**
@@ -173,6 +174,38 @@ const RELAYED = [
 ];
 
 /**
+ * The parts of a relayed `MovementInfo` past the pose that a peer's dead reckoning needs.
+ *
+ * `readMovementInfo` has decoded all of this since it was written and NOTHING PASSED IT ON: every
+ * relay reached `Unit#applyRemoteState` as position + facing + flags alone. The consequences were
+ * both visible and both the owner's report:
+ *
+ *  - the jump tail never arrived, so `applyRemoteMove`'s ballistic seed -- the branch that gives an
+ *    airborne peer his arc -- was UNREACHABLE in production. An observed jump had zero vertical AND
+ *    zero horizontal velocity between packets: the peer hung motionless in the air and was then
+ *    teleported along the arc by each heartbeat, which is "прыжок начинается с середины";
+ *  - the swim pitch never arrived, so a diving swimmer slid flat between packets.
+ *
+ * `fallTime` matters even without a jump block: it is how far into the arc the seed is
+ * (`-zspeed - g*t`), so a peer first seen mid-jump starts from the right vertical speed instead of
+ * from his take-off one.
+ */
+function remoteTail(info: MovementInfo) {
+  return {
+    pitch: info.pitch,
+    fallTime: info.fallTime,
+    jump: (info.flags & MovementFlag.FALLING) !== 0
+      ? {
+        zSpeed: info.fallVelocity,
+        sinAngle: info.fallSinAngle,
+        cosAngle: info.fallCosAngle,
+        xySpeed: info.fallSpeed,
+      }
+      : null,
+  };
+}
+
+/**
  * The speed relays. `MSG_MOVE_SET_*_SPEED` is a peer's speed change (5 of them landed in the
  * recorded entry burst); `SMSG_FORCE_*_SPEED_CHANGE` is OUR speed being set and MUST be acked or
  * the server resends it and eventually treats us as unresponsive.
@@ -273,7 +306,9 @@ export class PlayerMovementHandler extends EventEmitter {
       return;
     }
 
-    unit.applyRemoteState({ x: info.x, y: info.y, z: info.z }, info.facing, info.flags);
+    unit.applyRemoteState(
+      { x: info.x, y: info.y, z: info.z }, info.facing, info.flags, remoteTail(info),
+    );
   }
 
   private speeds: Partial<Record<string, number>> = {};
@@ -297,7 +332,9 @@ export class PlayerMovementHandler extends EventEmitter {
     // is `SMSG_SPLINE_SET_*_SPEED`), but five of them landed in the recorded entry burst and a
     // mis-addressed one would have stopped a creature dead in the middle of its patrol.
     if (unit !== this.game.world.player && !unit.splineRide) {
-      unit.applyRemoteState({ x: info.x, y: info.y, z: info.z }, info.facing, info.flags);
+      unit.applyRemoteState(
+        { x: info.x, y: info.y, z: info.z }, info.facing, info.flags, remoteTail(info),
+      );
     }
     if (key === 'run') {
       unit.moveSpeed = speed;
@@ -555,6 +592,17 @@ export class PlayerMovementHandler extends EventEmitter {
     // however many milliseconds elapsed between page load and that module's first import.
     const timeStamp = clientTicks();
 
+    // The jump block's take-off HEADING, from the horizontal velocity the arc froze at launch rather
+    // than from this frame's facing. They differ whenever the jump was taken strafing (the body's
+    // heading is not its travel direction) or the mouse moved in mid-air, and it is the TRAVEL
+    // direction the block describes: the reader reconstructs the frozen velocity as
+    // `(cosAngle, sinAngle) * xySpeed` (`net-motion.ts#applyRemoteMove`, the reference's
+    // `jump_seed`). A standstill jump has no direction, so it falls back to the facing.
+    const jumpSpeed = Math.hypot(state.horizVel.x, state.horizVel.y);
+    const jumpAngle = jumpSpeed > 1e-4
+      ? Math.atan2(state.horizVel.y, state.horizVel.x)
+      : facing;
+
     writeMovementInfo(packet, {
       guid: player.guid,
       flags,
@@ -568,10 +616,24 @@ export class PlayerMovementHandler extends EventEmitter {
       fallTime,
       // The jump block, present exactly when MOVEMENTFLAG_FALLING is: vertical speed, then the
       // sin/cos of the take-off heading, then the horizontal speed.
-      fallVelocity: state.velZ,
-      fallSinAngle: Math.sin(facing),
-      fallCosAngle: Math.cos(facing),
-      fallSpeed: Math.hypot(state.horizVel.x, state.horizVel.y),
+      //
+      // `zspeed` IS DOWN-POSITIVE AND IT IS THE LAUNCH SPEED, NOT THIS FRAME'S. Two corrections in
+      // one field, and both were live defects:
+      //
+      //  - SIGN. The real client sends -7.955547 for a RISING jump (VERIFIED by a vanilla sniff,
+      //    `samples/benilla/.../remote.rs:629-634`; vmangos likewise forces +7.958 UP from the wire's
+      //    negative). We sent `+state.velZ`, i.e. the sign inverted, so any observer reconstructing
+      //    the arc as `-zspeed` drove our jump straight into the ground.
+      //  - CONSTANCY. The reader derives the CURRENT vertical speed as `-zspeed - g * fallTime`, so
+      //    `zspeed` has to be the value the arc launched with and stay that way for the whole arc.
+      //    Sending the live `velZ` double-counted gravity, since `fallTime` grows beside it.
+      //
+      // `state.jumpZSpeed` is exactly that launch snapshot: `JUMP_SPEED` for a jump and EXACTLY 0 for
+      // a step off a ledge (`movement/mover.ts`), which is also how a reader tells the two apart.
+      fallVelocity: -state.jumpZSpeed,
+      fallSinAngle: Math.sin(jumpAngle),
+      fallCosAngle: Math.cos(jumpAngle),
+      fallSpeed: jumpSpeed,
     });
 
     this.game.send(packet);

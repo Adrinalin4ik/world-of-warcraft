@@ -8,6 +8,7 @@ import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
 import { collisionDebugView } from "../collision/debug-view";
+import { peerTrace } from "../movement/peer-trace";
 import {
   beginAnimSection, endAnimSection, beginSection, endSection,
 } from "../perf/anim-section";
@@ -641,6 +642,30 @@ export default class World extends EventEmitter {
     beginSection('w.matrices');
     this.updateDynamicMatrices();
     endSection('w.matrices');
+
+    // THE RENDERED TRANSFORM, sampled after the matrices are final and nowhere earlier.
+    //
+    // This is the instrument the previous movement round did not have, and its absence is why a
+    // measurement that came out numerically perfect coexisted with a visibly teleporting peer: that
+    // round sampled the dead-reckon's own output, which is an INPUT to the transform. Anything between
+    // the two -- a ground resolve, a yaw ease, a second writer -- is invisible from there. `peerTrace`
+    // reads `view.matrixWorld` here instead, which is the matrix the draw call uses.
+    //
+    // Free when the trace is off: `recordRender` returns on its first line, and the loop is behind the
+    // same flag so a session that never enables it does not even walk the entity map.
+    if (peerTrace.enabled) {
+      this.entities.forEach((entity) => {
+        const inst = entity.model?.instanceAnim ?? null;
+        peerTrace.recordRender(
+          entity.guid,
+          entity.view.matrixWorld,
+          entity.locomotionFlags(),
+          entity.isPlayer ? entity.locomotionSpeed(delta) : (entity.remoteMotion?.speed ?? 0),
+          inst?.current?.id ?? -1,
+          inst?.playbackRate ?? 0,
+        );
+      });
+    }
   }
 
   /**

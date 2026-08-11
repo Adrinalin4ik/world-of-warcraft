@@ -171,6 +171,11 @@ export class InstanceAnim {
    */
   private rate = 1;
 
+  /** The live playback multiplier, for the instrumentation. Written only through `setRate`/`arm`. */
+  get playbackRate(): number {
+    return this.rate;
+  }
+
   /** Change the playback rate, holding the pose: re-anchor so the current cursor is unchanged. */
   setRate(rate: number, worldClockMs: number): void {
     if (rate === this.rate) {

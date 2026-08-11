@@ -306,6 +306,15 @@ export interface RemoteMotion {
   /** Horizontal velocity frozen at a jump's launch (world XY yd/s). Zero on the ground. */
   jumpVelX: number;
   jumpVelY: number;
+  /**
+   * This airborne phase began with a `MSG_MOVE_JUMP` (a jump tail on the wire), not with a step off
+   * a ledge.
+   *
+   * The animation layer needs the distinction and cannot infer it: the reference plays JumpStart 37
+   * only for an arc that LAUNCHED, and a step-off fall keeps its current gait until `FALLING_FAR`
+   * latches (`select.rs:288-292`). Both arrive here carrying `FALLING`.
+   */
+  jumped: boolean;
   /** `performance.now()` of the last applied packet, and where it put him: the dead-reckon's anchor. */
   lastApplyMs: number;
   lastApplyPos: THREE.Vector3;
@@ -323,6 +332,7 @@ export function createRemoteMotion(): RemoteMotion {
     verticalVelocity: 0,
     jumpVelX: 0,
     jumpVelY: 0,
+    jumped: false,
     lastApplyMs: 0,
     lastApplyPos: new THREE.Vector3(),
     fresh: true,
@@ -332,6 +342,62 @@ export function createRemoteMotion(): RemoteMotion {
 /** Shortest signed angle, so a facing never eases the long way round. */
 export function wrapPi(angle: number): number {
   return Math.atan2(Math.sin(angle), Math.cos(angle));
+}
+
+/**
+ * How fast a rendered body yaw eases toward its target heading, rad/s of exponential rate.
+ *
+ * The client blends the DISPLAY facing a quarter of the remaining gap per frame (`0x607ed0` tail,
+ * `x0.25` `[0x8029b0]`); at 60 fps that is the continuous rate `-ln(0.75) x 60 = 17.26 /s`. The
+ * time-based form is taken rather than the frame-rate-dependent quarter, exactly as the reference
+ * does (`samples/benilla/crates/benilla/src/creature_anim/select.rs:199-204`, `STRAFE_BLEND_RATE`).
+ */
+export const DISPLAY_YAW_BLEND_RATE = 17.26;
+
+/**
+ * The rendered body-yaw OFFSET a strafing unit holds, radians, left-positive.
+ *
+ * There is no ground strafe GAIT in WoW -- the run cycle keeps playing and the whole strafe is
+ * expressed by yawing the body off the aim, which is why `gaitCandidates` has no strafe rung. A pure
+ * strafe is a right angle; a strafe held together with forward or back is 45 degrees, and a
+ * backpedalling strafe mirrors (you still lead with the same shoulder).
+ *
+ * Verbatim from `samples/benilla/crates/benilla/src/creature_anim/select.rs:228-243`
+ * (`strafe_body_offset`), whose sign table is pinned by `select/tests.rs:631-647`:
+ * `LEFT -> +pi/2`, `RIGHT -> -pi/2`, `LEFT|FORWARD -> +pi/4`, `LEFT|BACKWARD -> -pi/4`, and
+ * `LEFT|RIGHT` (both held) -> 0.
+ */
+export function strafeBodyOffset(flags: number): number {
+  const left = (flags & MoveFlag.STRAFE_LEFT) !== 0;
+  const right = (flags & MoveFlag.STRAFE_RIGHT) !== 0;
+  if (left === right) {
+    return 0;
+  }
+  const diagonal = (flags & (MoveFlag.FORWARD | MoveFlag.BACKWARD)) !== 0;
+  const magnitude = diagonal ? Math.PI / 4 : Math.PI / 2;
+  const back = (flags & MoveFlag.BACKWARD) !== 0;
+  return left !== back ? magnitude : -magnitude;
+}
+
+/**
+ * One frame of the display-facing blend: ease `current` toward `aim + offset`.
+ *
+ * Done in AIM-RELATIVE offset space rather than on absolute yaw, and that is the whole trick -- the
+ * reference's `ease_strafe_yaw` (`select.rs:213-217`). Easing absolute yaws makes a left-to-right
+ * strafe flip a `+90 -> -90` transition whose shortest arc is a 180-degree tie, so the body swings
+ * through the BACK as often as through the front. In offset space the same flip is `+90 -> -90`
+ * about the aim, which always passes through 0 -- through the front.
+ */
+export function easeDisplayYaw(
+  current: number,
+  aim: number,
+  offset: number,
+  dt: number,
+  rate: number = DISPLAY_YAW_BLEND_RATE,
+): number {
+  const cur = wrapPi(current - aim);
+  const eased = cur + (offset - cur) * (1 - Math.exp(-rate * (dt > 0 ? dt : 0)));
+  return wrapPi(aim + eased);
 }
 
 /** The jump tail a `MSG_MOVE_JUMP` carries, when it carries one. */
@@ -383,10 +449,15 @@ export function applyRemoteMove(
     motion.verticalVelocity = Math.max(-TERMINAL_VELOCITY, -move.jump.zSpeed - GRAVITY * t);
     motion.jumpVelX = move.jump.cosAngle * move.jump.xySpeed;
     motion.jumpVelY = move.jump.sinAngle * move.jump.xySpeed;
+    // A LAUNCH is a negative wire `zSpeed` (down-positive; see `RemoteJumpInfo`). A step-off fall
+    // also carries this block once it is airborne, with `zSpeed` already positive -- so the sign is
+    // what separates "he jumped" from "he walked off a ledge", and only the first plays JumpStart.
+    motion.jumped = move.jump.zSpeed < 0;
   } else {
     motion.verticalVelocity = 0;
     motion.jumpVelX = 0;
     motion.jumpVelY = 0;
+    motion.jumped = false;
   }
 
   motion.pos.set(move.x, move.y, move.z);
