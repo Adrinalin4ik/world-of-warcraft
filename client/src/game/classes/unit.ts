@@ -359,6 +359,51 @@ class Unit extends Entity {
   public combatTarget: string | null = null;
 
   /**
+   * WHO IS SWINGING AT THIS UNIT -- the other end of the same `SMSG_ATTACKSTART` .. `SMSG_ATTACKSTOP`
+   * bracket, keyed by attacker guid.
+   *
+   * THE OWNER'S REPORT, and it is the local character as much as a peer: "a mob is biting him and he
+   * stands in the out-of-combat idle". MEASURED (`scratchpad/pj-fight.js`, account 2, `Gdsh` beside a
+   * Diseased Timber Wolf at 0.9 yd): after we send `CMSG_ATTACKSTOP`, our `inCombat` goes false and our
+   * armed sequence drops to **Stand 0 for 55 samples / 8.2 s** while the wolf holds `AttackUnarmed 16`,
+   * its own `inCombat` true and its `combatTarget` our guid, and our health falls 51 -> 41. So the
+   * victim is in a fight the animation layer cannot see.
+   *
+   * AND THE FLAGS ARE NOT THE ROUTE -- now measured rather than assumed. `UNIT_FIELD_FLAGS` read
+   * `0x8` (PVP_ATTACKABLE) identically in all three phases: standing idle, swinging, and being bitten
+   * without swinging; `UNIT_DYNAMIC_FLAGS` stayed `0x0` throughout (`FL1-report.json`). Whatever this
+   * server re-sends on entering combat, it is not either flag word, so `UNIT_FLAG_IN_COMBAT` cannot be
+   * the source and the opcode bracket is the only one there is.
+   *
+   * A STATED DEVIATION FROM THE REFERENCE. benilla marks `Engaged` on the ATTACKER only
+   * (`benilla/src/net/apply/combat.rs:22-28`: `if let Some(&e) = index.0.get(&attacker) { ... insert(
+   * Engaged) }`, with the note that the client's arm "gates on the auto-attack-target GUID being set"),
+   * so a victim who has not swung is not engaged there either. That is 1.12 and it is the mechanism for
+   * an ATTACKER; nothing in it argues that a mauled player should stand relaxed, and the real client
+   * does not. Both ends of the bracket are therefore marked here, from the same two packets, with no
+   * new wire surface.
+   *
+   * A SET rather than a boolean because three wolves are three brackets: the guard drops when the LAST
+   * of them stops. KNOWN LIMIT, stated: an attacker that despawns without an `SMSG_ATTACKSTOP` leaves
+   * its guid here, and the victim then holds the Ready idle until something else clears it. `died()`
+   * clears the victim's own set; a stale attacker is not pruned and would show as a unit guarding
+   * nothing.
+   */
+  public attackedBy: Set<string> = new Set();
+
+  /**
+   * Is this unit in a fight -- swinging, or being swung at? The one engagement test, so the gait
+   * cascade and any later reader cannot disagree about it. See `attackedBy`.
+   *
+   * Both halves are written as explicit tests rather than as truthiness because every locomotion unit
+   * test drives `updateLocomotion` with `.call()` on a hand-built double, where a missing field is
+   * `undefined` rather than `false` and a missing Set is `undefined` rather than empty.
+   */
+  public get engaged(): boolean {
+    return this.inCombat === true || (this.attackedBy ? this.attackedBy.size > 0 : false);
+  }
+
+  /**
    * The equipped weapon ENTRY ids the swing clip is picked from -- see `combat-anim.ts` for the two
    * different descriptor fields these come out of and why a creature's and a player's differ.
    */
@@ -1245,6 +1290,13 @@ class Unit extends Entity {
       return;
     }
     this.dead = dead;
+    // A CORPSE IS IN NO FIGHT, at either end. The server does send `SMSG_ATTACKSTOP` when its victim
+    // dies (that is the `u32` dead flag the packet carries), but a death that arrives first would
+    // otherwise leave a corpse marked as guarding -- and `engaged` is read on every locomotion frame,
+    // including a revived unit's first.
+    this.inCombat = false;
+    this.combatTarget = null;
+    this.attackedBy.clear();
     if (dead) {
       this.setAnimation(DEATH, true, 0);
       return;
@@ -1924,11 +1976,16 @@ class Unit extends Entity {
       }
     }
 
-    // ENGAGEMENT for the Ready rung, read INLINE rather than through a method: every locomotion unit
-    // test drives this with `.call()` on a hand-built double, where a method that is not on the double
-    // is a `TypeError` rather than a falsy value. `this.inCombat` on a double is `undefined`, which is
-    // exactly "not engaged". Same degradation the landing pick's truthy test documents.
-    const ready = this.inCombat ? readyAnimation(this) : 0;
+    // ENGAGEMENT for the Ready rung -- `engaged`, which is "swinging OR being swung at" and not
+    // `inCombat` alone. A GETTER, deliberately, and safe for the same reason the inline read was: every
+    // locomotion unit test drives this with `.call()` on a hand-built double, and a getter that is not
+    // on the double reads `undefined`, which is exactly "not engaged". A METHOD would have been a
+    // `TypeError` there; that is the distinction, and it is why this is a property and not `isEngaged()`.
+    //
+    // The one-sided version of this test is the owner's report: `inCombat` is written from
+    // `SMSG_ATTACKSTART` keyed by the ATTACKER, so a player being mauled who had not swung was never
+    // marked and stood in the relaxed idle for the whole fight. See `Unit#attackedBy` for the capture.
+    const ready = this.engaged ? readyAnimation(this) : 0;
     const candidates = this.gaitCandidates(flags, speed, ready);
 
     // Step down the list, taking the first rung the model actually OWNS -- `resolve(id, false)`

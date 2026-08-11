@@ -305,6 +305,15 @@ export class CombatHandler extends EventEmitter {
       unit.inCombat = true;
       unit.combatTarget = victim;
     }
+    // BOTH ENDS OF THE BRACKET. The victim is in this fight too, and until now nothing said so: a
+    // player being bitten who had not swung was never marked engaged and stood in the out-of-combat
+    // idle for the whole fight (measured -- see `Unit#attackedBy`, which also records why the unit flag
+    // words are not the route and where this deviates from the reference). Either party may be a peer,
+    // hence the same plain `entities` lookup the defense reaction uses.
+    const victimUnit = this.game.world.entities.get(victim);
+    if (victimUnit) {
+      victimUnit.attackedBy.add(attacker);
+    }
     this.emit('attack:start', attacker, victim);
   }
 
@@ -335,6 +344,14 @@ export class CombatHandler extends EventEmitter {
     if (unit) {
       unit.inCombat = false;
       unit.combatTarget = null;
+    }
+    // The victim's end of the bracket. Keyed by ATTACKER guid, so a unit fighting three wolves keeps
+    // its guard until the last of the three stops. A victim guid of 0 (`SendAttackStop(NULL)`) resolves
+    // to no unit and clears nothing, which is right: that reply is about a guid the server could not
+    // find, not about a fight ending.
+    const stoppedVictim = this.game.world.entities.get(victim);
+    if (stoppedVictim) {
+      stoppedVictim.attackedBy.delete(attacker);
     }
     // OUR OWN attack being stopped with a victim named, when we never had a swing land, is a
     // REJECTION and not the end of a fight. Said once per victim so a real disengage is quiet.
