@@ -10,10 +10,20 @@ import M2Blueprint from "../pipeline/m2/blueprint";
 import { failedTexturePaths } from "../pipeline/m2/material";
 import { revealWhenWarm } from "../pipeline/program-warm";
 import ColliderManager from "../world/collider-manager";
-import { collisionWorld } from "../collision/collision-world";
-import { DEFAULT_COLLISION_HEIGHT, SETTLE_TIMEOUT } from "../movement/constants";
+import { CastFn, collisionWorld } from "../collision/collision-world";
+import { CollisionLayer } from "../collision/types";
+import {
+  CAPSULE_HEIGHT,
+  CAPSULE_RADIUS,
+  DEFAULT_COLLISION_HEIGHT,
+  SETTLE_TIMEOUT,
+  capsuleHalfSegment,
+} from "../movement/constants";
+import { snapToGround } from "../movement/mover";
+import { shouldPose } from "../pipeline/m2/anim/gating";
 import { createPlayerMoveState } from "../movement/player-state";
 import { peerTrace } from "../movement/peer-trace";
+import { readyAnimation } from "./combat-anim";
 import {
   ANY_MOVE,
   DEFAULT_MOVE_SPEEDS,
@@ -21,15 +31,19 @@ import {
   MoveSpeeds,
   RUNAWAY_SILENCE_MS,
   REMOTE_SNAP_DISTANCE,
+  RemoteJumpInfo,
   RemoteMotion,
   RemoteMove,
   SplineRide,
   advanceRemote,
   applyRemoteMove,
   createRemoteMotion,
+  easeDisplayYaw,
   makeSplineRide,
   remoteSilentMs,
   sampleSpline,
+  strafeBodyOffset,
+  wrapPi,
 } from "../movement/net-motion";
 import {
   applyCharacterLook,
@@ -155,6 +169,17 @@ const GAIT_SWIM: readonly number[] = [SWIM, SWIM_IDLE, STAND];
 const GAIT_SWIM_LEFT: readonly number[] = [SWIM_LEFT, SWIM, SWIM_IDLE, STAND];
 const GAIT_SWIM_RIGHT: readonly number[] = [SWIM_RIGHT, SWIM, SWIM_IDLE, STAND];
 const GAIT_SWIM_BACK: readonly number[] = [SWIM_BACKWARDS, SWIM_IDLE, STAND];
+/**
+ * THE ENGAGED STANDING IDLES, one list per weapon bucket -- `gait_candidates`' Ready rung
+ * (`select.rs:497-506`). Each falls back through `ReadyUnarmed` 25 before Stand, because a model may
+ * own the unarmed guard and not the two-handed one.
+ */
+const READY_UNARMED = 25;
+const GAIT_READY_UNARMED: readonly number[] = [READY_UNARMED, STAND];
+const GAIT_READY_1H: readonly number[] = [26, READY_UNARMED, STAND];
+const GAIT_READY_2H: readonly number[] = [27, READY_UNARMED, STAND];
+const GAIT_READY_2HL: readonly number[] = [28, READY_UNARMED, STAND];
+
 /** Airborne. `Fall` is entered directly, with no entry one-shot (`select.rs:308`). */
 const GAIT_FALL: readonly number[] = [FALL, STAND];
 const GAIT_JUMP_HANG: readonly number[] = [JUMP_HANG, FALL, STAND];
@@ -169,12 +194,24 @@ const GAIT_JUMP_HANG: readonly number[] = [JUMP_HANG, FALL, STAND];
  * reference draws the same line, between its `Special` / `Mode` states and the gait itself
  * (`select.rs:280+`).
  *
- * The jump/land one-shots (37, 39, 187) are deliberately NOT here: they are entries and exits that
- * must own the body for their window, which is exactly what the latch is for.
+ * `JUMP_START` 37 is deliberately NOT here: the jump ENTRY is a non-preemptible one-shot that must
+ * own the body until its window elapses, which is exactly what the latch is for
+ * (`select.rs:283-287`, `Mode::Entering`).
+ *
+ * THE LANDING CLIPS 39 / 187 ARE HERE, and that changed this round. The reference's landing is
+ * `Mode::Land` -- "a plain, FREELY-OVERWRITTEN pick" that "re-picks the instant any movement flag
+ * changes" (`select.rs:388-397`) -- i.e. a gait-level choice, not a bracket. Latched, JumpEnd's
+ * authored second rooted the avatar in his landing crouch while the player was already pressing
+ * forward. `updateLocomotion`'s `locoLand` is the pick; membership here is what stops the arm taking
+ * ownership away from the gait driver.
  */
 const GAIT_IDS = new Set<number>([
   STAND, WALK, RUN, SPRINT, WALK_BACKWARDS, SHUFFLE_LEFT, SHUFFLE_RIGHT,
   SWIM_IDLE, SWIM, SWIM_LEFT, SWIM_RIGHT, SWIM_BACKWARDS, JUMP_HANG, FALL,
+  JUMP_END, JUMP_LAND_RUN,
+  // The Ready idles are GAITS, not combat one-shots: they are looping states the cascade selects, and
+  // a latch on one would never release (`externalSeq`'s "a looping owner never releases").
+  READY_UNARMED, 26, 27, 28,
 ]);
 
 function isGaitId(id: number): boolean {
@@ -220,6 +257,47 @@ const MOVING_EPSILON = 0.1;
  * (vanilla MOVE_RUN is 7) and well below any real relocation.
  */
 const TELEPORT_SPEED = 100;
+
+/**
+ * The swept cast a PEER's dead-reckoned step is resolved against, and the scratch it needs.
+ *
+ * One closure for every peer in the world, built on first use: the capsule shape is a constant
+ * (`CAPSULE_RADIUS` / `capsuleHalfSegment`, the same pair `Controls` hands the local mover), so a
+ * per-unit closure would be a per-unit allocation for identical behaviour. Built lazily rather than
+ * at module load because `collisionWorld` is a singleton every movement test would then touch.
+ *
+ * The `Walk` audience, not `Camera`: this asks where a BODY can stand.
+ */
+let _remoteCast: CastFn | null = null;
+function remoteCast(): CastFn {
+  if (_remoteCast === null) {
+    _remoteCast = collisionWorld.castFor(
+      CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment(),
+    );
+  }
+  return _remoteCast;
+}
+const _remoteFrom = new THREE.Vector3();
+
+/**
+ * Is this unit's Z far enough from the terrain under it to be worth a swept cast?
+ *
+ * The cheap half of the ground snap. `TerrainProvider#heightAt` is a heightmap interpolation at
+ * 0.065 ms; the swept capsule cast that follows is 0.92 ms (both measured directly on loaded
+ * Northshire). A unit already standing on the ground -- which is most units, most frames -- answers
+ * here and pays nothing more.
+ *
+ * `null` (no registered chunk) answers TRUE: an unstreamed tile is not evidence that the pose is
+ * right, and the cast may still find a WMO floor the heightmap knows nothing about.
+ *
+ * The threshold is a hair over the cast's own skin: below it, the snap could not move the body
+ * meaningfully anyway.
+ */
+const GROUND_SNAP_EPSILON = 0.03;
+function needsGroundSnap(pos: THREE.Vector3): boolean {
+  const floor = collisionWorld.terrain.heightAt(pos.x, pos.y);
+  return floor === null || Math.abs(pos.z - floor) > GROUND_SNAP_EPSILON;
+}
 
 class Unit extends Entity {
   public guid: string;
@@ -279,6 +357,51 @@ class Unit extends Entity {
 
   /** Who this unit is swinging at, as a guid, while `inCombat`. */
   public combatTarget: string | null = null;
+
+  /**
+   * WHO IS SWINGING AT THIS UNIT -- the other end of the same `SMSG_ATTACKSTART` .. `SMSG_ATTACKSTOP`
+   * bracket, keyed by attacker guid.
+   *
+   * THE OWNER'S REPORT, and it is the local character as much as a peer: "a mob is biting him and he
+   * stands in the out-of-combat idle". MEASURED (`scratchpad/pj-fight.js`, account 2, `Gdsh` beside a
+   * Diseased Timber Wolf at 0.9 yd): after we send `CMSG_ATTACKSTOP`, our `inCombat` goes false and our
+   * armed sequence drops to **Stand 0 for 55 samples / 8.2 s** while the wolf holds `AttackUnarmed 16`,
+   * its own `inCombat` true and its `combatTarget` our guid, and our health falls 51 -> 41. So the
+   * victim is in a fight the animation layer cannot see.
+   *
+   * AND THE FLAGS ARE NOT THE ROUTE -- now measured rather than assumed. `UNIT_FIELD_FLAGS` read
+   * `0x8` (PVP_ATTACKABLE) identically in all three phases: standing idle, swinging, and being bitten
+   * without swinging; `UNIT_DYNAMIC_FLAGS` stayed `0x0` throughout (`FL1-report.json`). Whatever this
+   * server re-sends on entering combat, it is not either flag word, so `UNIT_FLAG_IN_COMBAT` cannot be
+   * the source and the opcode bracket is the only one there is.
+   *
+   * A STATED DEVIATION FROM THE REFERENCE. benilla marks `Engaged` on the ATTACKER only
+   * (`benilla/src/net/apply/combat.rs:22-28`: `if let Some(&e) = index.0.get(&attacker) { ... insert(
+   * Engaged) }`, with the note that the client's arm "gates on the auto-attack-target GUID being set"),
+   * so a victim who has not swung is not engaged there either. That is 1.12 and it is the mechanism for
+   * an ATTACKER; nothing in it argues that a mauled player should stand relaxed, and the real client
+   * does not. Both ends of the bracket are therefore marked here, from the same two packets, with no
+   * new wire surface.
+   *
+   * A SET rather than a boolean because three wolves are three brackets: the guard drops when the LAST
+   * of them stops. KNOWN LIMIT, stated: an attacker that despawns without an `SMSG_ATTACKSTOP` leaves
+   * its guid here, and the victim then holds the Ready idle until something else clears it. `died()`
+   * clears the victim's own set; a stale attacker is not pruned and would show as a unit guarding
+   * nothing.
+   */
+  public attackedBy: Set<string> = new Set();
+
+  /**
+   * Is this unit in a fight -- swinging, or being swung at? The one engagement test, so the gait
+   * cascade and any later reader cannot disagree about it. See `attackedBy`.
+   *
+   * Both halves are written as explicit tests rather than as truthiness because every locomotion unit
+   * test drives `updateLocomotion` with `.call()` on a hand-built double, where a missing field is
+   * `undefined` rather than `false` and a missing Set is `undefined` rather than empty.
+   */
+  public get engaged(): boolean {
+    return this.inCombat === true || (this.attackedBy ? this.attackedBy.size > 0 : false);
+  }
 
   /**
    * The equipped weapon ENTRY ids the swing clip is picked from -- see `combat-anim.ts` for the two
@@ -1167,6 +1290,13 @@ class Unit extends Entity {
       return;
     }
     this.dead = dead;
+    // A CORPSE IS IN NO FIGHT, at either end. The server does send `SMSG_ATTACKSTOP` when its victim
+    // dies (that is the `u32` dead flag the packet carries), but a death that arrives first would
+    // otherwise leave a corpse marked as guarding -- and `engaged` is read on every locomotion frame,
+    // including a revived unit's first.
+    this.inCombat = false;
+    this.combatTarget = null;
+    this.attackedBy.clear();
     if (dead) {
       this.setAnimation(DEATH, true, 0);
       return;
@@ -1211,6 +1341,52 @@ class Unit extends Entity {
     this.externalSeq = (!isGaitId(id) && seq.id === id) ? seq : null;
 
     this.emit("animation:play", id, repetitions);
+  }
+
+  /**
+   * Give the body back to locomotion -- but ONLY if `animId` is still the state that owns it.
+   *
+   * THE ONE CASE THE LATCH CANNOT HANDLE ITSELF. `externalSeq`'s release is checked at the top of
+   * `updateLocomotion` and, by design, "a LOOP never releases" -- which is what makes a looping emote or
+   * a held cast pose hold. A looping owner therefore has no window that can elapse, so an owner armed for
+   * something that may be CANCELLED needs an explicit way out or the unit stands in that pose for the
+   * rest of the session.
+   *
+   * **THE `animId` GUARD IS THE WHOLE SAFETY OF THIS METHOD, and it is not belt-and-braces.** The first
+   * version took no argument and released unconditionally, and self-review found two live ways to break a
+   * unit with it:
+   *
+   *  - **A corpse would stand back up.** `setDead(true)` arms `DEATH` and re-latches `externalSeq` onto it,
+   *    and that latch is the ONLY thing holding the body down -- `updateLocomotion`'s release explicitly
+   *    never fires for `DEATH` ("a corpse doesn't transition", `driver.rs:351`). Dying mid-cast, or pressing
+   *    a spell while dead, reached the unconditional release and dropped it.
+   *  - **A live cast pose was dropped mid-cast.** Any second spell pressed during a 1.5 s cast is refused
+   *    with `SMSG_CAST_FAILED`, and that refusal released the pose the FIRST cast was still holding --
+   *    reintroducing the exact symptom this whole change exists to fix.
+   *
+   * Comparing the id makes the release an assertion about what is actually latched rather than a guess from
+   * the caller's side, and the caller pairs it with its own identity check (see
+   * `network/game/object/spells.ts#releaseCastPose`, which also requires the failing spell to be the one
+   * whose pose is in flight -- two spells can share a pose clip, so the id alone is not sufficient).
+   *
+   * Nothing is armed in its place, for the same reason `setDead(false)` arms nothing: the next
+   * `updateLocomotion` frame picks a gait, which for a unit standing still is Stand. Arming Stand here
+   * would be that one frame earlier AND would take ownership of a loop -- the permanent freeze again.
+   *
+   * Returns whether it released, so a caller can tell "handed back" from "somebody else owns it now".
+   */
+  releaseAnimationLatch(animId: number): boolean {
+    if (this.externalSeq === null || this.externalSeq.id !== animId) {
+      return false;
+    }
+    this.externalSeq = null;
+    this.locoCandidates = null;
+    return true;
+  }
+
+  /** Whether an externally-armed state currently owns this unit's body, for a caller that must not stomp it. */
+  get animationLatchId(): number | null {
+    return this.externalSeq?.id ?? null;
   }
 
   stopAnimation(id?: number) {
@@ -1503,6 +1679,33 @@ class Unit extends Entity {
   private locoPrevFlags = 0;
 
   /**
+   * The landing clip this unit is playing, and the movement flags it was PICKED from.
+   *
+   * The reference's `Mode::Land { id, flags }` (`select.rs:388-397`): a landing is not a bracket and
+   * must not own the body -- it is a gait-level pick that survives only while the input that chose it
+   * holds. Cleared by a flag change, by the clip's window elapsing, and by leaving the ground again.
+   */
+  private locoLand: { id: number; flags: number } | null = null;
+
+  /**
+   * Did this airborne phase LAUNCH (a jump), or is the unit merely falling off something?
+   *
+   * `FALLING` is set for both, so nothing in the flag word answers this -- and the reference needs the
+   * answer twice: only a launched arc plays JumpStart 37 (`select.rs:288-292`), and the two
+   * `FALLINGFAR` legs are exclusive on the same value (`constants.ts#FALL_FAR_DROP`).
+   *
+   * Each leg reads the launch snapshot its own motion source keeps: the mover's `jumpZSpeed`
+   * (`JUMP_SPEED` for a jump, EXACTLY 0 for a step-off) for us, and the wire's jump tail for a peer
+   * (`RemoteMotion#jumped`, seeded from a negative `zspeed`). A spline creature never jumps.
+   */
+  airborneFromJump(): boolean {
+    if (this.isPlayer) {
+      return this.move.jumpZSpeed !== 0;
+    }
+    return this.remoteMotion !== null && this.remoteMotion.jumped;
+  }
+
+  /**
    * This frame's horizontal ground speed (yd/s) -- the gait threshold's only input.
    *
    * TWO LEGS, mirroring the reference's `select::unify` (`select.rs:931-965`):
@@ -1603,7 +1806,7 @@ class Unit extends Entity {
    *
    * See `GAIT_*` for why this returns a list rather than an id, and why the lists are frozen.
    */
-  gaitCandidates(flags: number, speed: number): readonly number[] {
+  gaitCandidates(flags: number, speed: number, ready: number = 0): readonly number[] {
     if ((flags & MoveFlag.SWIMMING) !== 0) {
       if ((flags & (MoveFlag.TURN_LEFT | MoveFlag.TURN_RIGHT)) !== 0) return GAIT_SWIM_IDLE;
       if ((flags & MoveFlag.STRAFE_LEFT) !== 0) return GAIT_SWIM_LEFT;
@@ -1630,6 +1833,31 @@ class Unit extends Entity {
 
     if ((flags & MoveFlag.TURN_LEFT) !== 0) return GAIT_SHUFFLE_LEFT;
     if ((flags & MoveFlag.TURN_RIGHT) !== 0) return GAIT_SHUFFLE_RIGHT;
+
+    // STANDING AND ENGAGED: the weapon-class Ready guard instead of Stand (`select.rs:497-506`).
+    //
+    // BELOW the turn-in-place shuffles and ABOVE Stand, which is the reference's order exactly -- a
+    // fighter who pivots still shuffles his feet -- and reachable only here, so "not moving" needs no
+    // test of its own: every translating branch has already returned.
+    //
+    // This is the owner's report "после каждого удара он проигрывает анимацию как будто он стоит вне
+    // боя". The swing is a one-shot; when its window elapsed the cascade had nothing between it and
+    // Stand, so every strike ended in the relaxed idle.
+    //
+    // AND IT IS A PEER'S REPORT, which is what decides where engagement comes from -- and the answer
+    // is that it was already there. `Unit#inCombat` is set by `SMSG_ATTACKSTART` and cleared by
+    // `SMSG_ATTACKSTOP` (`network/game/object/combat.ts:247,259`), which the server relays for every
+    // unit we can see, keyed by the attacker's guid, so it is true of another player exactly as it is
+    // of us. Those are the same two opcodes the reference derives `Engaged` from
+    // (`net/apply/combat.rs:26,40`; `creature_anim.rs:113-117`: "the client's `0x5fd360` arm gates on
+    // the auto-attack-target GUID being set, i.e. engagement, **not** sheath state"). No unit FIELD and
+    // no new bit was needed -- `inCombat` has had a writer since the combat round and NOTHING READ IT.
+    // The weapon bucket comes from `equippedMainhand`, which the values path already fills from
+    // `PLAYER_VISIBLE_ITEM_16_ENTRYID` for a player.
+    if (ready === 26) return GAIT_READY_1H;
+    if (ready === 27) return GAIT_READY_2H;
+    if (ready === 28) return GAIT_READY_2HL;
+    if (ready !== 0) return GAIT_READY_UNARMED;
 
     return GAIT_STAND;
   }
@@ -1704,26 +1932,57 @@ class Unit extends Entity {
       return;
     }
 
-    // THE JUMP BRACKET's two edges. The reference plays JumpStart 37 -> the Jump 38 hang loop ->
-    // JumpEnd 39 / JumpLandRun 187 (`select.rs:307`, `:318`, `:365-376`); the hang and the fall are
-    // STATES and live in the cascade, but the entry and the exit are one-shots that must own the
-    // body for their window, which is exactly what `setAnimation`'s ownership latch does. Arming
-    // them here rather than inside the cascade is what keeps the cascade a pure function of state.
+    // THE JUMP BRACKET. The reference plays JumpStart 37 -> the Jump 38 hang loop -> JumpEnd 39 /
+    // JumpLandRun 187 (`select.rs:307`, `:318`, `:365-376`), and its two ends are NOT the same kind
+    // of thing -- which is what this round corrected.
     //
-    // The landing PICK is the reference's `jump_land_pick` (`select.rs:365-376`) verbatim: no clip
-    // at all while swimming, JumpEnd when the touchdown is stationary, JumpLandRun when it is still
-    // running, and nothing for a backpedal or a walk -- those go straight back to their gait.
+    // THE ENTRY is a non-preemptible one-shot: `Mode::Entering(Jump)` settles into the hang loop when
+    // 37's own 833 ms window elapses, and nothing overrides it (`select.rs:283-287`). The ownership
+    // latch is exactly that, so it stays.
+    //
+    // ONLY A LAUNCHED ARC ENTERS IT. "A step-off fall never enters here -- its gait freezes until
+    // FALLINGFAR latches" (`select.rs:288-292`). Both arrive carrying `FALLING`, so the flags alone
+    // cannot tell them apart and this used to play JumpStart for every kerb the avatar walked off.
+    // `airborneFromJump` is the launch test, and it reads the mover's own take-off snapshot for us
+    // and the wire's jump tail for a peer.
+    //
+    // THE LANDING IS NOT A BRACKET -- and treating it as one is the defect behind "his own jump is
+    // wrong". The reference's `Mode::Land` is "a plain, FREELY-OVERWRITTEN pick ... re-picks the
+    // instant any movement flag changes, so land-then-press runs immediately, land-then-release
+    // stands immediately" (`select.rs:388-397`). Armed through the ownership latch instead, JumpEnd
+    // held the body for its full authored second: land, press forward, and the avatar stood rooted in
+    // the landing crouch for a second before the run started. So the landing clip now lives in
+    // `locoLand` -- a gait-level pick this cascade consults and drops the moment the flags move.
     const wasAirborne = (this.locoPrevFlags & MoveFlag.FALLING) !== 0;
     const airborne = (flags & MoveFlag.FALLING) !== 0;
+    const swimming = (flags & MoveFlag.SWIMMING) !== 0;
     this.locoPrevFlags = flags;
-    if (airborne && !wasAirborne && (flags & MoveFlag.SWIMMING) === 0) {
-      this.setAnimation(JUMP_START, true, 0);
-    } else if (wasAirborne && !airborne && (flags & MoveFlag.SWIMMING) === 0) {
-      if ((flags & ANY_MOVE) === 0) {
-        this.setAnimation(JUMP_END, true, 0);
-      } else if ((flags & (MoveFlag.BACKWARD | MoveFlag.WALK_MODE)) === 0) {
-        this.setAnimation(JUMP_LAND_RUN, true, 0);
+    if (airborne) {
+      // Any airborne frame invalidates a landing pick: the body is off the ground again.
+      this.locoLand = null;
+      if (!wasAirborne && !swimming && this.airborneFromJump()) {
+        this.setAnimation(JUMP_START, true, 0);
       }
+    } else if (wasAirborne && !swimming) {
+      // `jump_land_pick` (`select.rs:365-376`) verbatim: no clip while swimming, JumpEnd when the
+      // touchdown is stationary, JumpLandRun when it is still running forward, and NOTHING for a
+      // backpedal or a walk -- those drop straight into their gait, because 187 is a forward-run
+      // footplant and playing it backward is the "forward run flash after jump-then-hold-S" bug.
+      if ((flags & ANY_MOVE) === 0) {
+        this.locoLand = { id: JUMP_END, flags };
+      } else if ((flags & (MoveFlag.BACKWARD | MoveFlag.WALK_MODE)) === 0) {
+        this.locoLand = { id: JUMP_LAND_RUN, flags };
+      } else {
+        this.locoLand = null;
+      }
+      // TRUTHY, not `!== null`: every locomotion unit test drives this method with `.call()` on a
+      // hand-built double, where an unset field is `undefined` rather than `null`. Same degradation
+      // `InstanceAnim#armable` documents for the same reason.
+    } else if (this.locoLand && this.locoLand.flags !== flags) {
+      // The input moved. Re-pick means, for every case a landing clip can reach, "stop playing it":
+      // the pick is made from the flags AT TOUCHDOWN, and any change is the player asking for the
+      // gait instead.
+      this.locoLand = null;
     }
 
     // An externally-armed STATE owns the body until it gives it back. See `externalSeq` for the
@@ -1742,7 +2001,38 @@ class Unit extends Entity {
       }
     }
 
-    const candidates = this.gaitCandidates(flags, speed);
+    // THE LANDING PICK, ahead of the cascade and below the ownership latch: it outranks the gait
+    // while it lasts, and it lasts until the flags move (above) or the clip finishes (here). Nothing
+    // else may hold it -- `windowElapsedOrInstant` is the same helper the latch's own release uses, so
+    // a zero-length landing clip is treated as already finished rather than as a permanent freeze.
+    if (this.locoLand) {
+      const landSeq = modelAnim.resolve(this.locoLand.id, false);
+      if (landSeq === null) {
+        // The model has no landing clip. Nothing to play; the gait takes the frame.
+        this.locoLand = null;
+      } else if (inst.current === landSeq
+        && windowElapsedOrInstant(inst, landSeq, worldClock.ms)) {
+        this.locoLand = null;
+      } else {
+        this.setAnimation(this.locoLand.id);
+        // The memo is invalidated: the next gait frame must re-resolve rather than believe the
+        // candidate list it had before the landing interrupted it.
+        this.locoCandidates = null;
+        return;
+      }
+    }
+
+    // ENGAGEMENT for the Ready rung -- `engaged`, which is "swinging OR being swung at" and not
+    // `inCombat` alone. A GETTER, deliberately, and safe for the same reason the inline read was: every
+    // locomotion unit test drives this with `.call()` on a hand-built double, and a getter that is not
+    // on the double reads `undefined`, which is exactly "not engaged". A METHOD would have been a
+    // `TypeError` there; that is the distinction, and it is why this is a property and not `isEngaged()`.
+    //
+    // The one-sided version of this test is the owner's report: `inCombat` is written from
+    // `SMSG_ATTACKSTART` keyed by the ATTACKER, so a player being mauled who had not swung was never
+    // marked and stood in the relaxed idle for the whole fight. See `Unit#attackedBy` for the capture.
+    const ready = this.engaged ? readyAnimation(this) : 0;
+    const candidates = this.gaitCandidates(flags, speed, ready);
 
     // Step down the list, taking the first rung the model actually OWNS -- `resolve(id, false)`
     // withholds the Stand consolation precisely so "absent" is distinguishable from "present".
@@ -1830,7 +2120,7 @@ class Unit extends Entity {
     this.emit("position:change", this.position, this.view.rotation);
   }
 
-  update(delta: number) {
+  update(delta: number, viewerPos?: THREE.Vector3) {
     // The player's frame is driven from Controls, which owns the input and the camera heading and
     // calls `movementFrame` + `syncViewFromMove` itself. Only non-player units integrate here.
     if (this.isPlayer) {
@@ -1840,7 +2130,7 @@ class Unit extends Entity {
     // The two network motion legs, mutually exclusive by construction (`setSplinePath` and
     // `applyRemoteState` each clear the other), so at most one writes `view.position` per frame.
     this.updateSplineFollowing(delta);
-    this.updateRemoteMotion(delta);
+    this.updateRemoteMotion(delta, viewerPos);
     // this.updatePlayer(delta);
     this.clear();
     // const m = ObjectsManager;
@@ -2126,6 +2416,7 @@ class Unit extends Entity {
     to: { x: number; y: number; z: number },
     facing: number,
     flags: number,
+    tail: { pitch?: number; fallTime?: number; jump?: RemoteJumpInfo | null } = {},
   ) {
     if (!this.remoteMotion) {
       this.remoteMotion = createRemoteMotion();
@@ -2137,12 +2428,28 @@ class Unit extends Entity {
 
     const move: RemoteMove = {
       x: to.x, y: to.y, z: to.z, facing, flags,
+      pitch: tail.pitch,
+      fallTime: tail.fallTime,
+      jump: tail.jump ?? null,
     };
     const nowMs = performance.now();
+    const wasFresh = this.remoteMotion.fresh;
     const sinceMs = this.remoteMotion.fresh ? 0 : nowMs - this.remoteMotion.lastApplyMs;
+    // Read BEFORE the apply overwrites them: the snap is measured from where we had him drawn.
+    const snapFromX = this.remoteMotion.pos.x;
+    const snapFromY = this.remoteMotion.pos.y;
+    const snapFromZ = this.remoteMotion.pos.z;
+    const snapFromFacing = this.remoteMotion.orientation;
     const gap = applyRemoteMove(this.remoteMotion, move, nowMs);
     this.position.copy(this.remoteMotion.pos);
-    this.rotation.z = this.remoteMotion.orientation;
+    // NOT the rendered yaw any more, except on FIRST SIGHT. `motion.orientation` is authoritative and
+    // snaps here; the BODY yaw eases onto it in `updateRemoteMotion` (the client's display-facing
+    // blend). Snapping the render too put a visible yaw step on every arriving packet, which for a
+    // mouse-turning peer is every ~33 ms of his turn. First sight has nothing to ease from -- yaw 0
+    // is not a heading he ever held -- so it snaps.
+    if (wasFresh) {
+      this.rotation.z = this.remoteMotion.orientation;
+    }
 
     peerTrace.record({
       at: nowMs,
@@ -2155,8 +2462,17 @@ class Unit extends Entity {
       facing,
       sinceMs,
       stepYd: gap,
+      // DECOMPOSED, and this is the split the previous round's aggregate hid: `snapXY` is the dead
+      // reckoning's real tracking error and `snapZ` was, before the ground resolve, the whole height
+      // staircase arriving in one step.
+      dxy: wasFresh ? 0 : Math.hypot(to.x - snapFromX, to.y - snapFromY),
+      dz: wasFresh ? 0 : to.z - snapFromZ,
+      dyaw: wasFresh ? 0 : wrapPi(facing - snapFromFacing),
       speed: 0,
       gaitSpeed: this.remoteMotion.speed,
+      // RAW, uninterpreted: the sign convention is the thing in dispute. See `PeerTraceRow#zSpeed`.
+      zSpeed: tail.jump ? tail.jump.zSpeed : 0,
+      fallTime: tail.fallTime ?? 0,
     });
 
     // Reported, not acted on: a packet always snaps, so there is no interpolation to suppress. A
@@ -2180,7 +2496,7 @@ class Unit extends Entity {
    * has to advance by exactly the time the rest of the frame advanced by or the peer's position and
    * everything else in the scene disagree about what "now" means.
    */
-  updateRemoteMotion(delta: number) {
+  updateRemoteMotion(delta: number, viewerPos?: THREE.Vector3) {
     const motion = this.remoteMotion;
     if (!motion) {
       return;
@@ -2188,14 +2504,144 @@ class Unit extends Entity {
     const beforeX = motion.pos.x;
     const beforeY = motion.pos.y;
     const beforeZ = motion.pos.z;
-    this.rotation.z = advanceRemote(motion, this.speeds, delta, this.position);
+    const beforeYaw = this.rotation.z;
+    const orientation = advanceRemote(motion, this.speeds, delta, this.position);
+
+    // THE INVENTED STEP MEETS THE WORLD -- the reference's decision 0626
+    // (`net/motion/remote.rs:461-524`, `extrapolate_remote_units`), and the answer to the defect the
+    // previous round's "numerically perfect" measurement could not see.
+    //
+    // `advanceRemote` NEVER MOVES A GROUNDED PEER'S Z (`net-motion.ts#advanceRemote`: `dz` is zero
+    // unless he is swimming), so his height changed only where a PACKET put it. A peer running
+    // straight sends nothing but his 500 ms heartbeat -- `MSG_MOVE_SET_FACING` only goes out while he
+    // turns -- so a straight run drew a continuous XY glide under a 2 Hz HEIGHT STAIRCASE. On ground
+    // that rises under him that sinks him into the hillside; on ground that falls away it floats him.
+    // The reference names both symptoms in exactly those words (`remote.rs:389-399`), and they are
+    // the owner's "прыгает на новую координату" and "немного утопает в земле".
+    //
+    // THE PREVIOUS MEASUREMENT MISSED IT because it recorded one scalar per frame --
+    // `hypot(dx, dy, dz)` over the integration -- and the integration's dz is identically zero. The
+    // staircase lives entirely in the PACKET rows, where it was reported as a 0.019-0.58 yd
+    // "residual" and read as evidence the dead reckoning was tracking well. Decomposed, most of that
+    // residual was Z. `peerTrace` now records the axes separately for that reason.
+    //
+    // The resolve is the LOCAL controller's own election snap, under the same reach law and the same
+    // walkable filter, so height comes off the surface every frame instead of standing frozen at the
+    // last packet's Z. Excluded:
+    //  - a SWIMMER: his wire Z is a depth in a water volume, not a surface to stand on;
+    //  - an AIRBORNE peer: the ballistic arc owns its Z, which is the whole point of a jump.
+    //
+    // WHAT A PEER DOES NOT GET, and why: the step-up and the swept slide. The reference runs a remote's
+    // step through its whole controller (decision 0626) and the first version of this did too; measured
+    // on one live session with 83 entities and ONE peer, interleaved A/B, that cost `anim` p50
+    // 1.5 -> 7.2 ms and `world.animate` p50 4.9 -> 10.8 ms. `snapToGround`'s own doc has the whole
+    // measurement and the reason (six to eight casts versus one, on a collision world with no
+    // persistent BVH). So an invented step is NOT stopped by our walls -- the remaining half of the
+    // reference's `WOW_REMOTE_FLAT` -- and that is a knowing trade against a frame budget, not an
+    // oversight.
+    //
+    // AND IT IS DECIMATED BY DISTANCE, on the same law the pose gate uses (`anim/gating.ts#shouldPose`
+    // -- every frame inside 40 yd, every second to 120, every fourth beyond, staggered per unit so the
+    // periods do not pile onto one frame). One cast is not cheap here: MEASURED directly, on loaded
+    // Northshire terrain with 441 chunks, 301 WMO groups and 4600 doodad hulls, one downward capsule
+    // cast costs 0.92 ms, because `DoodadProvider#gather` walks every registered hull per cast (its own
+    // doc measures the same thing from the other side). At 40+ yd a fifth of a yard of height error is
+    // invisible and a 66 ms correction period is not worth 0.9 ms a frame.
+    //
+    // WHAT IS STILL LINEAR, stated rather than hidden: nearby peers. Ten players inside 40 yd is ten
+    // casts, ~9 ms, and this gate does nothing about it. The real fix is a broadphase for the doodad
+    // hulls -- which would also give the LOCAL mover back most of its ~2.7 ms, since it issues about
+    // 2.9 of these casts every frame -- and that is a collision-layer change, not a movement one.
+    const airborne = (motion.flags & MoveFlag.FALLING) !== 0;
+    const swimming = (motion.flags & MoveFlag.SWIMMING) !== 0;
+    const due = viewerPos === undefined
+      || shouldPose(worldClock.frameIndex, this.model?.poseSlot ?? 0, viewerPos.distanceTo(motion.pos));
+    //
+    // A STATIONARY PEER IS SNAPPED TOO, and the round that skipped him was wrong -- this is the
+    // regression that made every standing peer and every standing creature HOVER. The reasoning behind
+    // the skip ("he has invented nothing, so his own reported Z is the authority") is true about the
+    // WIRE and false about the SCREEN: the server's Z and the height our terrain actually draws
+    // disagree by up to a yard and a half, and what the eye judges is the grass under his feet. The
+    // snap only ever LOWERS a body onto the floor it is standing above, so withholding it from a unit
+    // that is not moving is exactly "leave him wherever the disagreement puts him". The reference has
+    // no such exemption: `extrapolate_remote_units` resolves every remote every frame regardless of
+    // motion.
+    //
+    // Cost is handled by a PRE-GATE rather than by an exemption: a heightmap lookup is 0.065 ms against
+    // the cast's 0.92 (both measured), so ask the cheap question first -- is this unit's Z even in
+    // disagreement with the ground? -- and pay for the cast only when it is. A unit already standing on
+    // the terrain costs the lookup and nothing else, which is the case the exemption was trying to buy
+    // and gets it without the hover.
+    const travel = Math.hypot(motion.pos.x - beforeX, motion.pos.y - beforeY);
+
+    // THE AIRBORNE FLOOR CLAMP. A descending arc gets no resolve at all above -- a jump owns its Z --
+    // and nothing ends it until `MSG_MOVE_FALL_LAND` arrives, which is up to a packet interval after
+    // the body has actually touched down. MEASURED on the ground-relative capture (`PK7`), that tail
+    // put a peer 2.118 yd UNDER the grass at the end of one arc in eight, descending smoothly through
+    // the surface: the owner's "buried" symptom in miniature, and the last of it.
+    //
+    // A CLAMP, not a resolve, and from the HEIGHTMAP rather than a cast: it only ever refuses to let an
+    // invented arc pass through the floor, it costs 0.065 ms against a cast's 0.92 (both measured), and
+    // it runs only while airborne AND descending, which is a few frames per jump. The reference stops
+    // the arc with its own swept `airborne_step` (decision 0627, so a jump into a building is stopped
+    // by the wall too); that is the six-cast version this client cannot afford per peer per frame, and
+    // the difference -- walls, not floors -- is stated at `snapToGround`.
+    //
+    // Deliberately NOT applied while rising: the heightmap is not the only thing a jump can leave from
+    // (a WMO floor, a bridge), and clamping upward would shove a peer who jumped off a balcony up onto
+    // the terrain far below him.
+    if (!this.isPlayer && airborne && motion.verticalVelocity < 0 && !peerTrace.flatExtrapolation) {
+      const floor = collisionWorld.terrain.heightAt(motion.pos.x, motion.pos.y);
+      if (floor !== null && motion.pos.z < floor) {
+        motion.pos.z = floor;
+        this.position.z = floor;
+        // The arc is over as far as our drawing is concerned. Zeroing the vertical stops it burrowing
+        // further on every later frame of the same silence; the peer's own FALL_LAND still decides when
+        // he is grounded, because the flags are his to send and not ours to invent.
+        motion.verticalVelocity = 0;
+      }
+    }
+    if (!this.isPlayer && !swimming && !airborne && due && !peerTrace.flatExtrapolation
+      && needsGroundSnap(motion.pos)) {
+      const half = CAPSULE_HEIGHT * 0.5;
+      _remoteFrom.set(motion.pos.x, motion.pos.y, motion.pos.z + half);
+      // Skin ZERO: a peer sits exactly on the surface, so the height tracks every frame instead of
+      // living in a 0.02 yd dead band. See `snapToGround`'s `skin` note for the measurement.
+      const drop = snapToGround(remoteCast(), _remoteFrom, travel, 0);
+      if (drop !== null) {
+        // Written back onto the ANCHOR, not just onto the render: the next frame extrapolates from the
+        // resolved pose, so the correction is not re-derived from a stale base every frame. The
+        // reference does the same (`remote.rs:578`, `rm.wow_pos = pos`). A MISS leaves him where the
+        // packet put him, which is right: no floor within reach means the terrain under him has not
+        // streamed yet, or he really is over a drop his own client is falling down.
+        // `drop` is how far the CAPSULE CENTRE may descend before contact, so the feet fall by exactly
+        // the same amount -- `groundedStep` lowers its own centre by `hit.distance` and derives the
+        // feet from it identically. An earlier version wrote `+= half - drop`, which added the
+        // half-height on top and made the peer bounce: measured, |dz| p50 0.71 yd PER FRAME against
+        // 0.005 for the correct form.
+        motion.pos.z -= drop;
+        this.position.z = motion.pos.z;
+      }
+    }
+
+    // THE RENDERED BODY YAW, eased -- the client's display-facing blend, the same law the strafing
+    // avatar's body takes (`net-motion.ts#easeDisplayYaw`). Two things it buys:
+    //  - a strafing peer renders his body 45/90 degrees off his aim, which is how WoW shows a strafe
+    //    (there is no strafe gait: `remote.rs:592-609`);
+    //  - the per-packet yaw SNAP is absorbed. `motion.orientation` is authoritative and still snaps
+    //    at arrival; what the eye sees is this chase converging on it inside ~40 ms.
+    //
+    // DEVIATION, stated: the reference smooths a remote's facing with a pre-fire lerp toward the NEXT
+    // queued packet's facing (`remote.rs:536-549`), which needs the replay schedule this client does
+    // not have -- we apply at arrival, the reference's own `WOW_REMOTE_SNAP=1` mode. With no future
+    // target to converge on, the display blend is what is left, and its rate is the client's own.
+    const offset = swimming ? 0 : strafeBodyOffset(motion.flags);
+    this.rotation.z = easeDisplayYaw(this.rotation.z, orientation, offset, delta);
 
     if (peerTrace.enabled) {
-      const stepYd = Math.hypot(
-        motion.pos.x - beforeX,
-        motion.pos.y - beforeY,
-        motion.pos.z - beforeZ,
-      );
+      const dxy = Math.hypot(motion.pos.x - beforeX, motion.pos.y - beforeY);
+      const dz = motion.pos.z - beforeZ;
+      const stepYd = Math.hypot(dxy, dz);
       peerTrace.record({
         at: performance.now(),
         kind: 'frame',
@@ -2207,6 +2653,9 @@ class Unit extends Entity {
         facing: motion.orientation,
         sinceMs: delta * 1000,
         stepYd,
+        dxy,
+        dz,
+        dyaw: wrapPi(this.rotation.z - beforeYaw),
         speed: delta > 0 ? stepYd / delta : 0,
         gaitSpeed: motion.speed,
       });

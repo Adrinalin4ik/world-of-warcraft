@@ -989,3 +989,38 @@ describe('Unit#updateLocomotion across an external merge', () => {
     spy.mockRestore();
   });
 });
+
+/**
+ * The VICTIM's end of the engagement bracket -- the one thing a unit test can hold that a live capture
+ * could not be made to reproduce twice (see this round's report: the defect was captured on a real
+ * fight, the fix was not).
+ */
+describe('Unit#engaged', () => {
+  /**
+   * Kills the one-sided condition: `inCombat` alone, which is written from `SMSG_ATTACKSTART` keyed by
+   * the ATTACKER, so a unit being swung at scored false and the gait cascade gave it the relaxed Stand.
+   * Also kills a boolean `attackedBy`, which would drop the guard on the first of three wolves to stop.
+   */
+  it('follows both ends of the attack bracket and clears on death', () => {
+    const u = new Unit('0x59ab');
+    expect(u.engaged).toBe(false);
+
+    // Being swung at by two attackers, neither of which we answer.
+    u.attackedBy.add('0xwolf1');
+    u.attackedBy.add('0xwolf2');
+    expect(u.engaged).toBe(true);
+
+    u.attackedBy.delete('0xwolf1');
+    expect(u.engaged).toBe(true); // the second wolf is still on us
+    u.attackedBy.delete('0xwolf2');
+    expect(u.engaged).toBe(false);
+
+    // And our own swing, the end that already worked.
+    u.inCombat = true;
+    expect(u.engaged).toBe(true);
+
+    // A corpse is in no fight at either end.
+    u.setDead(true);
+    expect(u.engaged).toBe(false);
+  });
+});

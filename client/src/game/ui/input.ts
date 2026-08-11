@@ -17,6 +17,7 @@
  * the frame's Lua handler. Those hooks are null on every transcribed screen, which is why adding them
  * changed nothing about how `/` behaves.
  */
+import { keyToken } from './framexml/bindings';
 import { focusChain, hitTest, nextFocus } from './hit';
 import { viewportUnits } from './layout';
 import { DrawItem, Widget } from './widget';
@@ -106,11 +107,25 @@ export class GlueInput {
     this.lastClick = null;
   }
 
+  /**
+   * THE BINDING SINK: a key that no focused widget wanted goes here.
+   *
+   * Set by the world UI host to `dispatchBinding` against its VM (`world-ui.ts`), and left null on the
+   * glue screens, which have no binding table and no world to act on. Returns true when the key WAS
+   * bound, which is what decides whether the browser's own handling of it is suppressed -- an unbound
+   * key must still reach the page, or F5 and Ctrl+R stop working.
+   *
+   * A function slot rather than an import, for the same reason `FocusSink` is one: this router is shared
+   * with the glue screens and must not know that a Lua VM exists.
+   */
+  keyBinding: ((token: string, down: boolean) => boolean) | null = null;
+
   attach(): void {
     this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
     window.addEventListener('pointerup', this.onPointerUp);
     window.addEventListener('keydown', this.onKeyDown);
+    window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('paste', this.onPaste);
   }
 
@@ -119,8 +134,27 @@ export class GlueInput {
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('paste', this.onPaste);
   }
+
+  /**
+   * A key RELEASE, which exists only for the binding table.
+   *
+   * No edit box cares about a release, so this handler does nothing else -- and the release is where an
+   * action button actually casts: `ActionButtonDown` pushes the button in and `ActionButtonUp` is the one
+   * that reaches `SecureActionButton_OnClick` (`actionbutton.lua:29-43`). A keydown-only router would
+   * light every button and fire nothing.
+   */
+  private onKeyUp = (event: KeyboardEvent): void => {
+    if (this.keyBinding === null || this.focus !== null) {
+      return;
+    }
+    const token = keyToken(event);
+    if (token !== null && this.keyBinding(token, false)) {
+      event.preventDefault();
+    }
+  };
 
   /** Canvas-relative pixels to logical units. */
   private toUnits(event: PointerEvent): { x: number; y: number } {
@@ -237,6 +271,19 @@ export class GlueInput {
 
     const target = this.focus;
     if (!target) {
+      // NOTHING FOCUSED, so the key belongs to the binding table -- the client's own rule, and the
+      // reason it is tested here rather than first: a key typed into an edit box must reach the box and
+      // not cast a spell, which is what `keystate`-bound `ACTIONBUTTON1` on the `1` key would otherwise
+      // do to anyone typing in the chat frame.
+      //
+      // `event.repeat` is dropped: the browser auto-repeats a held key at ~30 Hz and the real client
+      // fires a binding once per physical press. Repeating would send one `CMSG_CAST_SPELL` per repeat.
+      if (this.keyBinding !== null && !event.repeat) {
+        const token = keyToken(event);
+        if (token !== null && this.keyBinding(token, true)) {
+          event.preventDefault();
+        }
+      }
       return;
     }
 
@@ -263,6 +310,64 @@ export class GlueInput {
     }
 
     if (target.kind !== 'editbox') {
+      return;
+    }
+
+    /**
+     * THE CLIPBOARD AND SELECT-ALL CHORDS, which were the whole of what a keyboard could not do here.
+     *
+     * Measured on :3000 before this block (`scratchpad/t13-edit.js`, `?ui=lua`, the real
+     * `AccountLoginAccountEdit`): typing "abcd" gave text "a","ab","abc","abcd", Backspace gave "abc",
+     * and Shift+ArrowLeft gave caret 2 / anchor 3 -- so per-character editing and the selection MODEL
+     * were already correct. `Ctrl+A` left caret and anchor untouched and `Ctrl+C`/`Ctrl+V` moved no
+     * text. Those three, plus a selection nothing drew (`framexml/tick.ts#placeSelection`), are the
+     * defect; "any edit clears the field" is the select-all-on-focus described there, not a lost edit.
+     *
+     * Handled BEFORE the printable-character branch below, which already excluded `ctrlKey`, so these
+     * keys previously fell through its `else { return; }` without `preventDefault` -- which is why
+     * `Ctrl+V` still worked: the browser went on to fire its own `paste` event, and `onPaste` takes it.
+     * `Ctrl+V` is therefore deliberately NOT handled here; intercepting it would mean reading the
+     * clipboard asynchronously, and `navigator.clipboard.readText()` needs a permission a `paste` event
+     * does not.
+     *
+     * `metaKey` alongside `ctrlKey` because the same chords are Cmd-based on a Mac and `config.os` is
+     * `OSX`, so a Mac user reaches this code.
+     */
+    if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+      const chord = event.key.toLowerCase();
+      if (chord === 'a') {
+        // The client's own `HighlightText()` with no arguments: anchor at 0, caret at the end
+        // (`lua/methods/kinds.ts#HighlightText`). Written directly rather than by calling into the Lua
+        // method, because this router must not know a VM exists -- the same rule `keyBinding` follows.
+        target.selectionAnchor = 0;
+        target.caret = target.text.length;
+        event.preventDefault();
+        return;
+      }
+      if (chord === 'c' || chord === 'x') {
+        // A PASSWORD BOX IS NEVER COPIED. `displayText` masks the value on screen for exactly this
+        // reason, and putting the real password on the system clipboard would defeat that from a
+        // keystroke the player cannot see the effect of. The real client does not copy out of a
+        // password box either.
+        if (!this.hasSelection(target) || target.password) {
+          event.preventDefault();
+          return;
+        }
+        const selected = target.text.slice(this.selectionStart(target), this.selectionEnd(target));
+        // Fire-and-forget: the write is async and there is nothing to do with a rejection but ignore
+        // it (a browser that refuses clipboard-write leaves the selection exactly as it was).
+        void navigator.clipboard?.writeText(selected).catch(() => undefined);
+        if (chord === 'x') {
+          const before = target.text;
+          this.deleteSelection(target);
+          if (target.text !== before) {
+            target.onTextChanged?.();
+          }
+        }
+        event.preventDefault();
+        return;
+      }
+      // Every other chord -- Ctrl+V included, and Ctrl+R, Ctrl+Shift+I -- is left to the browser.
       return;
     }
 

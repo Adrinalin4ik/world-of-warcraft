@@ -673,6 +673,59 @@ const EDITBOX: MethodTable = {
     return [];
   },
   GetNumLetters: (ctx, self) => [widgetOf(ctx, self).text.length],
+
+  /**
+   * `SetCursorPosition(pos)` / `GetCursorPosition()` -- the caret's write and read halves.
+   *
+   * The `Widget.caret` field these move has existed all along (the input router edits through it and
+   * `tick.ts#placeCaret` draws it); what was missing was the Lua door onto it. Clamped to the text,
+   * which is what the engine does with an out-of-range position.
+   *
+   * `SetCursorPosition` COLLAPSES the selection, and that is the difference between it and
+   * `HighlightText`: moving the caret is what a click or an arrow key does, and neither leaves a range
+   * behind. `HighlightText(a, b)` above is the call that makes one.
+   *
+   * NOTE ON REACH: nothing in the loaded GLUE manifest calls either -- grepped `accountlogin.xml`,
+   * `accountlogin.lua` and `characterselect.lua`, whose only edit-box calls are `HighlightText(0, 0)`
+   * and `HighlightText()` (accountlogin.xml:216-220, 293-297, 355-359, 1174-1177). They are here
+   * because they are the read/write pair of a model that is now real, and because an addon reaching a
+   * nil `SetCursorPosition` is the class of one-missing-global failure that has killed three whole
+   * FrameXML files on this project. `GetCursorPosition` on an EditBox is a DIFFERENT function from the
+   * global mouse `GetCursorPosition` in `api/screen.ts`; a method and a global cannot collide.
+   */
+  SetCursorPosition: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const position = Math.max(0, Math.min(widget.text.length, Number(args[0] ?? 0)));
+    widget.caret = position;
+    widget.selectionAnchor = position;
+    return [];
+  },
+  GetCursorPosition: (ctx, self) => [widgetOf(ctx, self).caret],
+
+  /**
+   * `GetTextInsets()` -> `left, right, top, bottom`. The read half of `SetTextInsets` above, over the
+   * same `Widget.textInsets` field, so the two cannot disagree.
+   */
+  GetTextInsets: (ctx, self) => {
+    const { left, right, top, bottom } = widgetOf(ctx, self).textInsets;
+    return [left, right, top, bottom];
+  },
+
+  /**
+   * `GetUTF8CursorPosition` is a REAL call site and is deliberately not implemented.
+   *
+   * `chatframe.lua:3869` calls it (`AutoComplete_Update(self, target, self:GetUTF8CursorPosition() -
+   * strlenutf8(command) - 1)`), so this is a gap the client can reach rather than a hypothetical one.
+   * What is not sourced is whether it counts UTF-8 BYTES or CHARACTERS -- the arithmetic there subtracts
+   * a `strlenutf8`, which is a character count, but that does not settle the other operand, and our
+   * `caret` is a UTF-16 index that coincides with both only for ASCII. Guessing would be right on every
+   * login name and wrong the moment a non-ASCII character is typed, silently and off by the byte
+   * difference. Chat cannot run anyway: `ScrollingMessageFrame` is still a missing frame TYPE.
+   */
+  GetUTF8CursorPosition: notImplemented(
+    'GetUTF8CursorPosition',
+    'whether the engine counts UTF-8 bytes or characters here is not sourced, and our caret is a UTF-16 index that agrees with both only for ASCII (chatframe.lua:3869 is the one call site)',
+  ),
 };
 
 registerMethods('BUTTON', BUTTON);

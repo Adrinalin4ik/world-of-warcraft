@@ -59,4 +59,5 @@ describe('unit fields', () => {
     // No change means no announcement -- the gate that keeps the UI's offscreen target valid.
     expect(applyUnitFields(unit, { unit_field_health: 0 }, ObjectType.Player, false)).toBe(false);
   });
+
 });

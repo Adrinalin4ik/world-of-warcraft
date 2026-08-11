@@ -13,8 +13,8 @@ import * as THREE from 'three';
 
 import { BackdropPiece, backdropPieces } from './backdrop';
 import { viewportUnits } from './layout';
-import { applyTexCoords, createQuadMaterial } from './material';
-import { DrawItem, TexCoords } from './widget';
+import { applyBlend, applyTexCoords, createQuadMaterial } from './material';
+import { Blend, DrawItem, TexCoords } from './widget';
 
 /** A `Backdrop`'s two resolved sheets, plus the def whose geometry they are drawn with. */
 export type ResolvedBackdrop = {
@@ -74,7 +74,16 @@ type Pooled = {
    * complete.
    */
   lastMap: THREE.Texture | null;
-  lastBlending: THREE.Blending | null;
+  /**
+   * The WIDGET's blend token, not the resolved `THREE.Blending` constant.
+   *
+   * It used to be the three constant, and that would have half-defeated the additive-alpha fix: in the
+   * premultiplied pass both ADD and NORMAL now have to go through `setBlend`, and ADD resolves to
+   * `CustomBlending` -- so caching the constant would compare `CustomBlending` against itself for two
+   * genuinely different blend modes if a third ever mapped to it. The widget's own token is the actual
+   * input to the decision, which is what this cache is supposed to be keyed on.
+   */
+  lastBlend: Blend | null;
   lastColor: string | null;
   /** The four numbers `writeQuadUVs` last wrote, or null for the identity rect. */
   lastTexCoords: TexCoords | null;
@@ -290,7 +299,7 @@ export class GlueRenderer {
           material,
           geometry,
           lastMap: null,
-          lastBlending: null,
+          lastBlend: null,
           lastColor: null,
           // Not `null`: `PlaneGeometry`'s own uvs ARE the identity rect, so a first frame that wants
           // the identity rect must not be told the geometry already has something else. The literal
@@ -300,15 +309,16 @@ export class GlueRenderer {
         this.pool.set(item.widget.id, entry);
       }
 
-      const blending =
-        item.widget.blend === 'ADD' ? THREE.AdditiveBlending : THREE.NormalBlending;
       // ONLY the structural writes flip `needsUpdate` -- see `Pooled.lastMap` for the measurement.
-      if (entry.lastMap !== texture || entry.lastBlending !== blending) {
+      if (entry.lastMap !== texture || entry.lastBlend !== item.widget.blend) {
         entry.material.map = texture;
-        entry.material.blending = blending;
+        // Through `applyBlend`, not a bare `material.blending =`: in the premultiplied pass an ADD quad needs
+        // the SEPARATED alpha equation (six fields) or it writes destination alpha and punches an opaque
+        // hole in the composited interface -- the black square round the cast bar. See `material.ts`.
+        applyBlend(entry.material, item.widget.blend, this.premultiplied);
         entry.material.needsUpdate = true;
         entry.lastMap = texture;
-        entry.lastBlending = blending;
+        entry.lastBlend = item.widget.blend;
       }
       // Uniforms. No `needsUpdate`: three uploads these per draw from the material object.
       entry.material.opacity = item.alpha;
@@ -426,8 +436,9 @@ export class GlueRenderer {
       }
 
       pooled.material.map = texture;
-      pooled.material.blending =
-        item.widget.blend === 'ADD' ? THREE.AdditiveBlending : THREE.NormalBlending;
+      // Same reason as the quad path above: an ADD backdrop piece in the premultiplied pass must not write
+      // destination alpha. `applyBlend` is the one place that decision lives (`material.ts`).
+      applyBlend(pooled.material, item.widget.blend, this.premultiplied);
       // The backdrop's own tint MULTIPLIES the widget's, exactly as the engine's
       // `SetBackdropColor`/`SetBackdropBorderColor` do: they darken the sheet rather than replacing
       // it, so `Glue-Tooltip-Background` at (0.09, 0.09, 0.09, 0.85) is a dark translucent pane and

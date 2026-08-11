@@ -11,6 +11,7 @@ import ChatEnum from './chat/chatEnum';
 import config from '../config';
 import { ObjectHandler } from './object/handler';
 import { clientTicks, encodeTimeSyncResponse } from './time-sync';
+import { readAuthResponseExpansion } from './account-info';
 import World from '../../game/world';
 import { Camera } from 'three';
 
@@ -371,6 +372,12 @@ export class GameHandler extends Socket {
     // the character list on a connection the server was already closing. The full table is
     // `WORLD_RESULT_STRINGS` in `network/protocol/stages.ts`, and the two codes named here were also
     // mislabelled: 0x15 is AUTH_UNKNOWN_ACCOUNT, not "account in use".
+    // THE EXPANSION BYTE, before the result branch consumes anything else: the body is
+    // `code, u32, u8, u32, expansion` (measured -- see `account-info.ts`), and the UI needs the last
+    // byte during the FrameXML load to know the level cap. Read off the raw bytes rather than through
+    // the cursor so the branch below is untouched.
+    readAuthResponseExpansion(new Uint8Array(gp.raw ?? []).subarray(gp.headerSize));
+
     const result = gp.readUnsignedByte();
     if (result !== 0x0c) {
       console.warn(`world handshake refused: 0x${result.toString(16)}`);

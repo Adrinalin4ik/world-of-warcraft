@@ -63,12 +63,49 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   snapshot.isPlayer = unit.isPlayer;
   snapshot.dead = unit.dead;
 
+  // The experience pair and the rested pool. PLAYER-scope update fields, so they are only ever present
+  // on our own character and stay 0 for every creature -- which is what keeps `UnitXP("target")` at 0
+  // with no special casing here.
+  snapshot.xp = unit.fields.xp ?? 0;
+  snapshot.maxXp = unit.fields.maxXp ?? 0;
+  snapshot.restXp = unit.fields.restXp ?? 0;
+  // Base mana, for `IsUsableAction`'s percentage-cost spells. See `UnitSnapshot#baseMana`.
+  snapshot.baseMana = unit.fields.baseMana ?? 0;
+
   // The reaction, resolved lazily and cached on the unit by `reactionFor`: `FactionTemplate.dbc` is
   // an async load and the first units stream in before it lands. `REACTION_NEUTRAL` is the stand-in
   // until then -- stated rather than hidden, and the honest one of the three, because painting an
   // unknown unit hostile red or friendly green would both be assertions we cannot make yet.
   snapshot.reaction = reactionFor(unit, self) ?? REACTION_NEUTRAL;
   return snapshot;
+}
+
+/**
+ * SEED the tokens before a single line of the manifest runs. No events -- there are no frames yet.
+ *
+ * THIS IS AN ORDERING FIX, and the experience bar is what found it. The real client has the player's
+ * data before FrameXML loads, so a document's `OnLoad` that reads unit state gets real numbers. Ours
+ * loaded the manifest first and attached the feed afterwards, so every load-time reader saw zeroes --
+ * and one of those readers HIDES ITSELF on a zero and cannot recover:
+ *
+ *   `CharacterFrame_OnLoad:58` calls `TextStatusBar_UpdateTextString(MainMenuExpBar)`, which hides a
+ *   status bar whose max is 0 (`TextStatusBar.lua:80-84`), and `MainMenuExpBar`'s own
+ *   `<OnValueChanged>` opens with `if (not self:IsShown()) then return; end`
+ *   (`MainMenuBar.xml:160-165`) -- so once hidden at load, no value change can ever bring it back. In
+ *   3.3.5a the ONLY thing that shows it again is `ReputationWatchBar_Update` on `UPDATE_FACTION`
+ *   (`ReputationFrame.lua:399-401`), which needs a reputation feed this client does not have.
+ *
+ * So the bar was invisible with 280/400 xp behind it, and no engine global was missing: the DATA was
+ * late. Seeding is the fix that matches the reference client's own ordering, and it is deliberately
+ * only the SNAPSHOTS -- the events still come from `attachUnitBridge` after the tree exists.
+ */
+export function seedUnitSnapshots(vm: LuaVM, world: World): void {
+  if (world.player) {
+    setUnit(vm, 'player', snapshotOf(world.player, world.player));
+  }
+  if (world.target) {
+    setUnit(vm, 'target', snapshotOf(world.target, world.player));
+  }
 }
 
 /**
@@ -114,6 +151,15 @@ function pushUnit(
     if (event) fire(event);
   }
   if (snapshot.level !== previous.level) fire('UNIT_LEVEL');
+  // `PLAYER_XP_UPDATE` is what `MainMenuExpBar`'s own `<OnEvent>` listens for (`MainMenuBar.xml:127`,
+  // which calls `MainMenuExpBar_Update()`), and `ExhaustionTick` listens for it too. It takes a UNIT
+  // argument in 3.3.5a even though only the player ever has xp.
+  if (snapshot.xp !== previous.xp || snapshot.maxXp !== previous.maxXp) fire('PLAYER_XP_UPDATE');
+  // A SEPARATE event for the rested pool, because a separate frame draws it: `ExhaustionTick` registers
+  // `UPDATE_EXHAUSTION` and it is the only event that re-runs the bar's COLOUR choice
+  // (`MainMenuBar.lua:347-358`). Firing only `PLAYER_XP_UPDATE` would move the fill and leave the bar
+  // the wrong colour after resting.
+  if (snapshot.restXp !== previous.restXp) fire('UPDATE_EXHAUSTION');
   if (snapshot.name !== previous.name) fire('UNIT_NAME_UPDATE');
   if (snapshot.reaction !== previous.reaction) fire('UNIT_FACTION');
   if (snapshot.classification !== previous.classification) fire('UNIT_CLASSIFICATION_CHANGED');

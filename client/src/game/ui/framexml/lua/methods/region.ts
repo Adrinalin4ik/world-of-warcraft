@@ -14,7 +14,7 @@
  *     SetTexCoord, SetDrawLayer -- the client's own LayeredRegion base class).
  *   - TEXTURE / FONTSTRING: everything else, on the leaf it actually belongs to.
  */
-import { FrameMethod, MethodContext, MethodTable, registerMethods } from '../object';
+import { FrameMethod, MethodContext, MethodTable, isObjectType, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
 import { Layer, Widget, deriveSize } from '../../../widget';
@@ -22,6 +22,15 @@ import { familyForFontFile, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
 
 const warned = new Set<string>();
+
+/**
+ * Frames the player has placed himself, for `IsUserPlaced`/`SetUserPlaced`.
+ *
+ * A `WeakSet` on the WIDGET rather than a `Set` of frame ids: ids are minted per registry, so a module-level
+ * id set would leak one runtime's user-placed frames into the next one's by number collision -- and a torn
+ * down and rebuilt screen is the ordinary case here, not an edge one.
+ */
+const userPlaced = new WeakSet<Widget>();
 
 /** Logs a stub's absence exactly once per message, so a busy screen does not spam the console. */
 export function warnOnce(message: string): void {
@@ -241,6 +250,51 @@ const REGION: MethodTable = {
    */
   IsMouseOver: (ctx, self) => [widgetOf(ctx, self).hovered],
   GetName: (ctx, self) => [ctx.registry.nameOf(self)],
+  /**
+   * `IsObjectType(name)` -- is this widget of that class, or descended from it?
+   *
+   * THE CLASS CHAIN, not an equality test, and the chain is the one the method dispatcher already walks
+   * (`object.ts#chainOf`, `CLASS_PARENT`). A Button IS a Frame IS a Region, and FrameXML relies on that:
+   * this method's caller here asks a CastingBarFrame, a ChatFrame and a GroupLootFrame alike whether each
+   * `IsObjectType("frame")`, and a StatusBar answering false would be excluded from the managed pass.
+   *
+   * CASE-INSENSITIVE, and that is read off the call site rather than assumed: `uiparent.lua:1301` passes
+   * the LOWERCASE `"frame"` while the engine's own `GetObjectType` returns `"Frame"`, so the engine cannot
+   * be comparing the strings as given.
+   *
+   * WHY IT MATTERS OUT OF PROPORTION TO ITS SIZE: `uiparent.lua:1301` is
+   * `if ( frame ~= ChatFrame2 and not(frame:IsObjectType("frame") and frame:IsUserPlaced()) ) then
+   * frame:SetPoint(...)`. Missing, this resolves to nil (`object.ts`'s `__index` returns nil for a name no
+   * class carries, rather than an error stub), so the call raises -- and `securecall` in this runtime is a
+   * plain call, not a `pcall` (`lua/api/secure.ts:38-54`), so the raise aborts the whole `for` loop at
+   * `uiparent.lua:1806` and NOT ONE managed frame is ever moved.
+   */
+  IsObjectType: (ctx, self, args) => {
+    const cls = ctx.registry.classOf(self);
+    return [cls !== null && isObjectType(cls, String(args[0] ?? ''))];
+  },
+  /**
+   * `IsUserPlaced()` -- has the player dragged this frame to a position of his own?
+   *
+   * FALSE for everything, and that is the TRUE answer rather than a stub: a frame becomes user-placed only
+   * through `SetUserPlaced(true)`, which the engine persists in the layout cache across sessions, and this
+   * client has no layout cache and no frame the player can drag. `SetUserPlaced` is registered beside it so
+   * a caller that sets the flag is answered honestly instead of being ignored -- the pair is what makes
+   * this an implementation and not a placeholder.
+   *
+   * The consequence at `uiparent.lua:1301` is the one that matters: false is what lets the managed pass
+   * position the frame at all. A frame the player has placed himself is deliberately left alone.
+   */
+  IsUserPlaced: (ctx, self) => [userPlaced.has(widgetOf(ctx, self))],
+  SetUserPlaced: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    if (args[0] === false || args[0] === undefined || args[0] === null) {
+      userPlaced.delete(widget);
+    } else {
+      userPlaced.add(widget);
+    }
+    return [];
+  },
   GetParent: (ctx, self) => {
     const parent = ctx.registry.parentOf(self);
     return [parent === null ? null : ctx.wrapper(parent)];
@@ -347,6 +401,27 @@ const LAYEREDREGION: MethodTable = {
       Number(args[2] ?? 1),
     );
     return [];
+  },
+  /**
+   * `GetVertexColor()` -> `r, g, b` as 0..1 floats.
+   *
+   * The read half of `SetVertexColor`, and it was absent. No 3.3.5a FrameXML file calls it -- the tint is
+   * only ever written -- but its absence made the action bar's usable/unusable colour UNOBSERVABLE from
+   * outside the renderer, which meant "the button is greyed" could not be checked without comparing
+   * pixels. `alpha` is not returned: `Widget#vertexColor` is `#rrggbb` and carries none, and the region's
+   * alpha is a separate field that `GetAlpha` already answers.
+   */
+  GetVertexColor: (ctx, self) => {
+    const hex = widgetOf(ctx, self).vertexColor;
+    const value = Number.parseInt(hex.replace('#', ''), 16);
+    if (!Number.isFinite(value)) {
+      return [1, 1, 1];
+    }
+    return [
+      ((value >> 16) & 0xff) / 255,
+      ((value >> 8) & 0xff) / 255,
+      (value & 0xff) / 255,
+    ];
   },
   SetTexCoord: (ctx, self, args) => {
     // The 8-argument (quad-corner) form is the client's general case; the 4-argument

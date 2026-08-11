@@ -306,6 +306,15 @@ export interface RemoteMotion {
   /** Horizontal velocity frozen at a jump's launch (world XY yd/s). Zero on the ground. */
   jumpVelX: number;
   jumpVelY: number;
+  /**
+   * This airborne phase began with a `MSG_MOVE_JUMP` (a jump tail on the wire), not with a step off
+   * a ledge.
+   *
+   * The animation layer needs the distinction and cannot infer it: the reference plays JumpStart 37
+   * only for an arc that LAUNCHED, and a step-off fall keeps its current gait until `FALLING_FAR`
+   * latches (`select.rs:288-292`). Both arrive here carrying `FALLING`.
+   */
+  jumped: boolean;
   /** `performance.now()` of the last applied packet, and where it put him: the dead-reckon's anchor. */
   lastApplyMs: number;
   lastApplyPos: THREE.Vector3;
@@ -323,6 +332,7 @@ export function createRemoteMotion(): RemoteMotion {
     verticalVelocity: 0,
     jumpVelX: 0,
     jumpVelY: 0,
+    jumped: false,
     lastApplyMs: 0,
     lastApplyPos: new THREE.Vector3(),
     fresh: true,
@@ -334,12 +344,90 @@ export function wrapPi(angle: number): number {
   return Math.atan2(Math.sin(angle), Math.cos(angle));
 }
 
+/**
+ * How fast a rendered body yaw eases toward its target heading, rad/s of exponential rate.
+ *
+ * The client blends the DISPLAY facing a quarter of the remaining gap per frame (`0x607ed0` tail,
+ * `x0.25` `[0x8029b0]`); at 60 fps that is the continuous rate `-ln(0.75) x 60 = 17.26 /s`. The
+ * time-based form is taken rather than the frame-rate-dependent quarter, exactly as the reference
+ * does (`samples/benilla/crates/benilla/src/creature_anim/select.rs:199-204`, `STRAFE_BLEND_RATE`).
+ */
+export const DISPLAY_YAW_BLEND_RATE = 17.26;
+
+/**
+ * The rendered body-yaw OFFSET a strafing unit holds, radians, left-positive.
+ *
+ * There is no ground strafe GAIT in WoW -- the run cycle keeps playing and the whole strafe is
+ * expressed by yawing the body off the aim, which is why `gaitCandidates` has no strafe rung. A pure
+ * strafe is a right angle; a strafe held together with forward or back is 45 degrees, and a
+ * backpedalling strafe mirrors (you still lead with the same shoulder).
+ *
+ * Verbatim from `samples/benilla/crates/benilla/src/creature_anim/select.rs:228-243`
+ * (`strafe_body_offset`), whose sign table is pinned by `select/tests.rs:631-647`:
+ * `LEFT -> +pi/2`, `RIGHT -> -pi/2`, `LEFT|FORWARD -> +pi/4`, `LEFT|BACKWARD -> -pi/4`, and
+ * `LEFT|RIGHT` (both held) -> 0.
+ */
+export function strafeBodyOffset(flags: number): number {
+  const left = (flags & MoveFlag.STRAFE_LEFT) !== 0;
+  const right = (flags & MoveFlag.STRAFE_RIGHT) !== 0;
+  if (left === right) {
+    return 0;
+  }
+  const diagonal = (flags & (MoveFlag.FORWARD | MoveFlag.BACKWARD)) !== 0;
+  const magnitude = diagonal ? Math.PI / 4 : Math.PI / 2;
+  const back = (flags & MoveFlag.BACKWARD) !== 0;
+  return left !== back ? magnitude : -magnitude;
+}
+
+/**
+ * One frame of the display-facing blend: ease `current` toward `aim + offset`.
+ *
+ * Done in AIM-RELATIVE offset space rather than on absolute yaw, and that is the whole trick -- the
+ * reference's `ease_strafe_yaw` (`select.rs:213-217`). Easing absolute yaws makes a left-to-right
+ * strafe flip a `+90 -> -90` transition whose shortest arc is a 180-degree tie, so the body swings
+ * through the BACK as often as through the front. In offset space the same flip is `+90 -> -90`
+ * about the aim, which always passes through 0 -- through the front.
+ */
+export function easeDisplayYaw(
+  current: number,
+  aim: number,
+  offset: number,
+  dt: number,
+  rate: number = DISPLAY_YAW_BLEND_RATE,
+): number {
+  const cur = wrapPi(current - aim);
+  const eased = cur + (offset - cur) * (1 - Math.exp(-rate * (dt > 0 ? dt : 0)));
+  return wrapPi(aim + eased);
+}
+
 /** The jump tail a `MSG_MOVE_JUMP` carries, when it carries one. */
 export interface RemoteJumpInfo {
   /**
-   * The wire's vertical speed. **DOWN-POSITIVE**: the real client sends a NEGATIVE value for a
-   * RISING jump, so the take-off up-speed is `-zSpeed` (reference `jump_seed`, `remote.rs:627-640`,
-   * whose sign was corrected there by a vanilla sniff rather than assumed).
+   * The wire's vertical speed for this airborne phase. **READ AS A MAGNITUDE, because its SIGN
+   * CONVENTION IS NOT SETTLED FOR 3.3.5a AND WE DO NOT NEED IT.**
+   *
+   * The reference documents down-positive -- a NEGATIVE value for a rising jump -- and says so on the
+   * strength of a vanilla sniff (`remote.rs:629-634`, `jump_seed`). That is 1.12 evidence, and
+   * `CLAUDE.md`'s rule is to take mechanism from the reference and version-numbered values from the
+   * game's own data. A sign is a value.
+   *
+   * TAKING IT ON TRUST COST A ROUND. `-zSpeed` was used verbatim, and the owner then watched a peer
+   * jump in the official 3.3.5a client and be drawn buried to the chest for the whole arc. MEASURED,
+   * by making our own sender emit the opposite convention on an otherwise unchanged path (the observed
+   * peer's rendered Z minus the terrain height under his own XY, per frame): the airborne error ran to
+   * -1.5 .. -3.9 yd, p05 -2.04, against +1.64 yd of clean rise when the signs agreed. Nothing else in
+   * the capture moved -- grounded error stayed at p50 +0.014 yd either way.
+   *
+   * WHY THE MAGNITUDE IS CORRECT WITHOUT SETTLING THE CONVENTION: an airborne phase in WoW never
+   * LAUNCHES downward. A jump and a knockback launch upward; a step off a ledge is the walk election's
+   * `StartFalling(0)` and launches at exactly zero. There is no fourth case. So `|zspeed|` is the
+   * take-off up-speed under either convention, and `|zspeed| - g * fallTime` is the current one --
+   * which is also why `fallTime` has to be the arc's own age and why `zspeed` has to be the arc's
+   * LAUNCH value rather than its live velocity (the second half of the outbound bug this round fixed).
+   *
+   * A sender that emitted its LIVE vertical velocity instead of the launch value would defeat this,
+   * since mid-fall its magnitude is a descent. This client was that sender until this round; a real
+   * client is not, because `fallTime` is meaningless unless `zspeed` is the constant.
    */
   zSpeed: number;
   sinAngle: number;
@@ -380,13 +468,26 @@ export function applyRemoteMove(
   // mover resumes flag-driven walking.
   if (move.jump) {
     const t = (move.fallTime ?? 0) / 1000;
-    motion.verticalVelocity = Math.max(-TERMINAL_VELOCITY, -move.jump.zSpeed - GRAVITY * t);
+    // THE MAGNITUDE, NOT THE SIGN, AND THAT IS THE FIX. See `RemoteJumpInfo#zSpeed` for the whole
+    // argument and the measurement; in one line: an airborne phase never LAUNCHES downward in WoW's
+    // movement model, so `|zspeed|` is the take-off up-speed under either wire convention, and the
+    // current up-speed is that minus gravity over the arc's own `fallTime`.
+    const launchUp = Math.abs(move.jump.zSpeed);
+    motion.verticalVelocity = Math.max(-TERMINAL_VELOCITY, launchUp - GRAVITY * t);
     motion.jumpVelX = move.jump.cosAngle * move.jump.xySpeed;
     motion.jumpVelY = move.jump.sinAngle * move.jump.xySpeed;
+    // A LAUNCH is an AIRBORNE PHASE with a non-zero take-off speed. Both halves, and the flag comes
+    // FIRST: `|zspeed| > 0` alone lets the magnitude decide the STATE, and a nonzero `zspeed` on a
+    // packet that is not a take-off -- a descent already under way, a field the server fills whenever
+    // its flag set includes falling -- would then read as a jump. The flag is the state; the magnitude
+    // is only ever the speed. A step off a ledge is the walk election's `StartFalling(0)` and carries
+    // exactly zero, which is what separates it from a jump once the flag has said "airborne".
+    motion.jumped = (move.flags & MoveFlag.FALLING) !== 0 && launchUp > 1e-3;
   } else {
     motion.verticalVelocity = 0;
     motion.jumpVelX = 0;
     motion.jumpVelY = 0;
+    motion.jumped = false;
   }
 
   motion.pos.set(move.x, move.y, move.z);

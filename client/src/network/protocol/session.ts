@@ -213,6 +213,11 @@ export class ProtocolSession {
     // A new login supersedes whatever an earlier one obtained: a session key left standing here
     // would let a stale disconnect from the old connection read it and fake a live realm list.
     this.sessionKey = null;
+    // Every login starts from a closed transport, so the socket is established afresh. Without this a
+    // first attempt that ended badly left its slot held and its socket open, and `authenticate` refuses
+    // to start while a slot is held -- so one bad attempt made every later one throw instead of dial,
+    // no matter how correct the credentials were.
+    this.logon.close();
     this.credentials = { account, password };
     this.endpoint = endpoint ?? null;
     this.refusal_ = null;

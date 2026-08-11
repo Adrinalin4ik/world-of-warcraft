@@ -87,8 +87,13 @@ A comment that invents a source, or that still describes a gap now closed, is tr
 
 ## Environment
 
-- **The dev server needs Node 18** (`node-sass`'s binding is Node-18 ABI). `node scripts/start.js`
-  from `client/`. The first cold load takes well over 30 s to boot `window.glueRuntime`.
+- **The dev server needs Node 18** (`node-sass`'s binding is Node-18 ABI), and **`node` on PATH is not
+  reliably 18** — it has reported 18.20.8 and 20.19.4 in the same session. Name the binary:
+  `"$LOCALAPPDATA/nvm/v18.20.8/node.exe" scripts/start.js` from `client/`. Started under Node 20 the
+  server still **serves a 9 MB bundle and answers 200**, with a `resolve-url-loader` failure on
+  `app.scss` baked into it, so the page loads and `window.session` is never defined. A healthy port is
+  not a healthy app: check that `session` exists, not that the bundle downloads. The first cold
+  compile takes about a minute, and the first page load well over 30 s more.
 - **The asset host CORS-allowlists `localhost:3000` and nothing else.** A dev server on any other
   port loads no terrain, no doodads and no models — so the page comes up, the world is empty, and
   nothing announces why. This silently voided one agent's whole performance comparison (half the
@@ -116,3 +121,10 @@ A comment that invents a source, or that still describes a gap now closed, is tr
 - three's `projectObject` returns before walking children when `visible === false`.
 - Guids: a 64-bit guid does not survive a JS number. `network/guid-hex.ts` is the single formatter.
 - A `#pragma glslify: import(...)` chunk is invisible to webpack's watcher.
+- **No backticks inside `lua/compat.ts`'s 5.1 shim** — it is a JS template literal, so one backtick-quoted
+  identifier in a Lua comment terminates the string and yields ~25 nonsense TS errors pointing at Lua.
+- The UI canvas has no `preserveDrawingBuffer`: `drawImage`-ing it into a 2D context reads a **cleared**
+  buffer, so a pixel probe returns black whatever is on screen. Screenshot instead.
+- An `ADD` widget in the world UI must not write destination alpha. The world pass is premultiplied, and
+  three's `AdditiveBlending` there is an un-separated `blendFunc(ONE, ONE)` that saturates the offscreen
+  target's alpha and masks the world out — an opaque black quad. `material.ts#applyBlend` is the one place.

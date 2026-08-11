@@ -7,11 +7,14 @@
  * run on the VM, and re-registering it here would shadow that one with a worse one.
  */
 import { LuaVM } from '../vm';
-import { Viewport } from '../../../layout';
+import { Viewport, viewportUnits } from '../../../layout';
 import config from '../../../../../network/config';
 
 export interface ScreenApiOptions {
-  /** Device-pixel window size `GetScreenWidth`/`GetScreenHeight` read. Defaults to the real window. */
+  /**
+   * The window in DEVICE pixels. `GetScreenWidth`/`GetScreenHeight` convert it to logical units
+   * through `viewportUnits`; `GetScreenResolutions` reports it as-is. Defaults to the real window.
+   */
   viewport?: () => Viewport;
   /** AccountLogin_Exit -- what "leave the client" means outside a real OS process to end. */
   onQuitGame?: () => void;
@@ -32,23 +35,42 @@ function defaultViewport(): Viewport {
   return { width: window.innerWidth, height: window.innerHeight };
 }
 
-/** Real, live Shift-key state, tracked from the DOM -- not a poll, so it has to be a listener. */
+/**
+ * Real, live MODIFIER state, tracked from the DOM -- not a poll, so it has to be a listener.
+ *
+ * All three, not just Shift, and they are read off the event's own modifier FLAGS rather than off
+ * `event.key`: `event.shiftKey`/`ctrlKey`/`altKey` are correct on every keydown and keyup including the
+ * ones for other keys, so a modifier held while another key is pressed and released stays true. Watching
+ * `event.key === 'Shift'` alone -- which is what this did -- also loses the release when the window loses
+ * focus mid-chord, so `blur` clears all three.
+ *
+ * `IsShiftKeyDown` USED TO BE REGISTERED TWICE, here and as a hard `false` in `api/units.ts`, and units.ts
+ * is installed second (`world-runtime.ts:139` then `:144`) -- so in the world the real tracker was shadowed
+ * and shift state never reached the Lua. The duplicate is removed there; this is now the only registration
+ * of the three.
+ */
 let shiftDown = false;
-let shiftTrackerInstalled = false;
-function ensureShiftTracker(): void {
-  if (shiftTrackerInstalled || typeof window === 'undefined') {
+let ctrlDown = false;
+let altDown = false;
+let modifierTrackerInstalled = false;
+function ensureModifierTracker(): void {
+  if (modifierTrackerInstalled || typeof window === 'undefined') {
     return;
   }
-  shiftTrackerInstalled = true;
-  window.addEventListener('keydown', (event) => {
-    if (event.key === 'Shift') {
-      shiftDown = true;
-    }
-  });
-  window.addEventListener('keyup', (event) => {
-    if (event.key === 'Shift') {
-      shiftDown = false;
-    }
+  modifierTrackerInstalled = true;
+  const sync = (event: KeyboardEvent): void => {
+    shiftDown = event.shiftKey;
+    ctrlDown = event.ctrlKey;
+    altDown = event.altKey;
+  };
+  window.addEventListener('keydown', sync);
+  window.addEventListener('keyup', sync);
+  // A modifier released while the page is not focused never produces a keyup, which would leave the flag
+  // stuck true for the rest of the session -- and a stuck Shift silently changes what every click does.
+  window.addEventListener('blur', () => {
+    shiftDown = false;
+    ctrlDown = false;
+    altDown = false;
   });
 }
 
@@ -79,14 +101,107 @@ function ensureCursorTracker(): void {
 /** Installs the screen/environment globals on `vm`. */
 export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): void {
   const viewport = options.viewport ?? defaultViewport;
-  ensureShiftTracker();
+  ensureModifierTracker();
   ensureCursorTracker();
 
-  // GlueParent_OnLoad: the letterbox-bar math, which needs the real device pixels, not authored units.
-  vm.registerFunction('GetScreenWidth', () => [viewport().width]);
-  vm.registerFunction('GetScreenHeight', () => [viewport().height]);
+  /**
+   * `GetScreenWidth()`/`GetScreenHeight()` -- **LOGICAL (authored) UNITS, not device pixels.**
+   *
+   * These returned `viewport().width/height` in DEVICE PIXELS, and the comment here asserted that was
+   * wanted. It is not, and the game's own files say so three separate ways:
+   *
+   * - `uiparent.lua:2243-2245` -- `elseif ( right > GetScreenWidth() ) then newAnchorX =
+   *   GetScreenWidth() - frame:GetWidth();`. The result is subtracted from a widget's `GetWidth()` and
+   *   used as a `SetPoint` OFFSET, both of which are authored units. Mixing device pixels in here is
+   *   dimensionally impossible.
+   * - `uiparent.lua:2907-2914` -- `GetScreenHeightScale()` is `GetScreenHeight()/768` and
+   *   `GetScreenWidthScale()` is `GetScreenWidth()/1024`, against those two LITERALS. 1024x768 is the
+   *   authored virtual screen, so these are ratios against the reference layout and read 1.0 there.
+   *   Divided into device pixels they would mean nothing.
+   * - `worldmapframe.lua:90-98` -- `local width = GetScreenWidth()` ... `BlackoutWorld:SetWidth(width)`,
+   *   straight into `SetWidth`. (Block-commented in 12340, but it is still the client's own intent.)
+   *
+   * ## What the device-pixel version actually broke
+   *
+   * `GlueParent_OnLoad` (`interface/gluexml/glueparent.lua:174-184`) letterboxes the glue screen to 16:9:
+   *
+   *     local width, height = GetScreenWidth(), GetScreenHeight();
+   *     if ( width / height > 16 / 9) then
+   *       local barWidth = ( width - height * 16 / 9 ) / 2;
+   *       self:ClearAllPoints();
+   *       self:SetPoint("TOPLEFT", barWidth, 0);
+   *       self:SetPoint("BOTTOMRIGHT", -barWidth, 0);
+   *
+   * `barWidth` goes into `SetPoint`, whose units are authored -- so a device-pixel `barWidth` is
+   * over-applied by exactly `screenScale` (`ui/layout.ts`). MEASURED on :3000 at 1920x900 before this
+   * fix: `GlueParent`'s anchors read x = +/-160, and 160 authored units at scale 900/768 = 1.171875 is
+   * **187.5 device px** of inset per side where the correct answer is **160**.
+   *
+   * The RATIO test is scale-invariant, so this never changed WHETHER the letterbox fires -- only how
+   * wide the bars are. That matters for reading the bug report: at 1382x911 (ratio 1.517 < 16/9) the
+   * letterbox does not fire at all and the glue screen already filled the window, measured, with
+   * `GlueParent`'s anchors at zero offsets. So the device-pixel confusion is the whole of the EXCESS
+   * inset and none of the inset itself; a window wider than 16:9 gets black bars from the real 3.3.5a
+   * client too, and this fix makes ours the same width as the client's rather than removing them.
+   *
+   * `GetScreenResolutions` below deliberately keeps DEVICE pixels: it reports a display MODE, which is a
+   * genuinely physical thing, and its only consumer computes an aspect ratio.
+   */
+  vm.registerFunction('GetScreenWidth', () => [viewportUnits(viewport()).width]);
+  vm.registerFunction('GetScreenHeight', () => [viewportUnits(viewport()).height]);
+
+  /**
+   * `GetScreenResolutions()` and `GetCurrentResolution()` -- THE BLOCKER THAT STOPPED EVERY MANAGED FRAME
+   * POSITION, including the cast bar's.
+   *
+   * `uiparent.lua:1749` makes `UpdateMenuBarTop()` the FIRST statement of
+   * `FramePositionDelegate:UIParentManageFramePositions`, and its whole body is `uiparent.lua:1168-1174`:
+   *
+   *     menuBarTop = 55;
+   *     local width, height = string.match((({GetScreenResolutions()})[GetCurrentResolution()] or ""), "(%d+).-(%d+)");
+   *     if ( tonumber(width) / tonumber(height) > 4/3 ) then menuBarTop = 75; end
+   *
+   * Both globals were absent, so line 1170 raised on the first line of the pass and NOTHING after it ran --
+   * no flag gathering, no `securecall` loop, not one `SetPoint`. That is why the cast bar sat at its
+   * authored `BOTTOM, y = 55` (`castingbarframe.xml`) with the managed pass apparently "running": the pass
+   * was entered and died immediately. The raise was invisible because `SetAttribute`'s
+   * `OnAttributeChanged` dispatch discarded the error (now fixed, `methods/frame.ts`).
+   *
+   * ## The shape, read off that call site
+   *
+   * `GetScreenResolutions` returns a VARARG of strings and `GetCurrentResolution` a 1-based index into it:
+   * `{...}` wraps the varargs into a table and the index subscripts it. The strings are matched with
+   * `"(%d+).-(%d+)"`, so `"1920x1080"` yields 1920 and 1080 -- `%d+` is greedy, so the second capture takes
+   * the whole `1080` and not just its leading `1`.
+   *
+   * ## Why ONE resolution, and why device pixels
+   *
+   * A browser client has exactly one "resolution" -- its window -- and no mode list to enumerate and no way
+   * to change modes, so a one-entry list at index 1 is the complete and honest answer, not a stub. Device
+   * pixels rather than authored units because that is what the real call reports and because the only thing
+   * computed from it is an ASPECT RATIO, which is identical either way -- so this cannot be the units trap
+   * that `GetScreenWidth` above falls into.
+   *
+   * ## THE CONSEQUENCE, and a correction to what was expected
+   *
+   * A browser window is essentially always wider than 4:3, so `menuBarTop` is **75**, not 55. With
+   * `UIPARENT_MANAGED_FRAME_POSITIONS["CastingBarFrame"]`'s `baseY = true` (meaning "use menuBarTop") and
+   * `yOffset = 40` (`uiparent.lua:1186`), the managed y is **75 + 40 = 115** -- not the 95 that was
+   * predicted from the 4:3 value of `menuBarTop`. `bottomEither`/`pet`/`reputation`/`tutorialAlert` add
+   * nothing on these characters: `reputation` needs BOTH `ReputationWatchBar:IsShown()` and
+   * `MainMenuExpBar:IsShown()` (`uiparent.lua:1787`) and there is no reputation feed, and no multi-bar,
+   * pet bar or tutorial alert is shown. Returning a 4:3 pair to make the number come out at 95 would be a
+   * fabricated answer to a question the window already answers.
+   */
+  vm.registerFunction('GetScreenResolutions', () => {
+    const { width, height } = viewport();
+    return [`${Math.round(width)}x${Math.round(height)}`];
+  });
+  vm.registerFunction('GetCurrentResolution', () => [1]);
 
   vm.registerFunction('IsShiftKeyDown', () => [shiftDown]);
+  vm.registerFunction('IsControlKeyDown', () => [ctrlDown]);
+  vm.registerFunction('IsAltKeyDown', () => [altDown]);
 
   // CharacterSelectFrame's drag-to-rotate (characterselect.lua:479,492,494).
   vm.registerFunction('GetCursorPosition', () => [cursorX, cursorY]);

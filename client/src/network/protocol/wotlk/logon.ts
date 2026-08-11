@@ -23,6 +23,17 @@ export interface LogonIo {
   connect(host: string, port: number): Promise<void>;
   send(bytes: Uint8Array): void;
   onMessage(listener: (bytes: Uint8Array) => void): void;
+  /**
+   * The socket went away without the transport asking it to.
+   *
+   * This exists because its absence had a nasty shape: every path that ENDS an authentication --
+   * success, refusal, a failed connect -- clears the promise slot, but a socket that simply dropped
+   * mid-handshake reached none of them. The attempt then hung for ever, and because `authenticate`
+   * refuses to start while a slot is held, EVERY later login threw "already in progress" instead of
+   * dialing. One failed attempt poisoned the page: exactly the "second time it never loads even with
+   * correct credentials" the owner reported.
+   */
+  onDisconnect(listener: () => void): void;
   close(): void;
 }
 
@@ -78,6 +89,25 @@ export class WotlkLogonTransport implements LogonTransport {
     this.config = config;
     this.srpFactory = srpFactory;
     this.io.onMessage((bytes) => this.receive(bytes));
+    // The socket dropping is a terminal outcome for whatever was in flight, and until this existed it
+    // was the ONE terminal outcome nothing observed -- see `LogonIo#onDisconnect`.
+    this.io.onDisconnect(() => this.settleInFlight(new Error('logon socket closed')));
+  }
+
+  /**
+   * Reject anything awaiting this transport and release the slots.
+   *
+   * Separate from `close()` because a socket that dropped on its own has already gone: calling
+   * `io.close()` from inside its own disconnect notification would be circular. `close()` is this plus
+   * closing the IO.
+   */
+  private settleInFlight(error: Error): void {
+    this.authReject?.(error);
+    this.authResolve = null;
+    this.authReject = null;
+    this.realmsReject?.(error);
+    this.realmsResolve = null;
+    this.realmsReject = null;
   }
 
   async authenticate(
@@ -151,14 +181,7 @@ export class WotlkLogonTransport implements LogonTransport {
   close(): void {
     // A caller awaiting a login or a realm list deserves to learn it will never arrive, rather
     // than hang forever on a promise nothing will ever settle now that the IO is going away.
-    const closedError = new Error('logon transport closed');
-    this.authReject?.(closedError);
-    this.authResolve = null;
-    this.authReject = null;
-    this.realmsReject?.(closedError);
-    this.realmsResolve = null;
-    this.realmsReject = null;
-
+    this.settleInFlight(new Error('logon transport closed'));
     this.io.close();
   }
 
@@ -251,14 +274,36 @@ export class WotlkLogonTransport implements LogonTransport {
 export function createSocketLogonIo(socket: Socket = new Socket()): LogonIo {
   return {
     connect(host: string, port: number) {
+      // Every attempt dials FRESH. A logon socket left open from a previous attempt is the other half
+      // of the poisoned-page bug described on `onDisconnect`: `Socket#connect` will reconnect an open
+      // socket now, but the realmd handshake is stateful (SRP6 B, salt and the account it was started
+      // for all live on the transport), so continuing on a connection that already carries a half-run
+      // handshake is not something the server has any reason to accept.
+      if (socket.connected) {
+        socket.disconnect();
+      }
       return new Promise<void>((resolve, reject) => {
-        socket.once('connect', () => resolve());
-        socket.once('disconnect', () => reject(new Error('logon socket closed')));
+        // Named, and removed on the way out. `once` leaves the loser of the race registered: the
+        // `disconnect` listener of a SUCCESSFUL connect stayed live for the socket's whole life,
+        // accumulating one dead listener per attempt and calling `reject` on a settled promise.
+        const onConnect = () => {
+          socket.removeListener('disconnect', onFail);
+          resolve();
+        };
+        const onFail = () => {
+          socket.removeListener('connect', onConnect);
+          reject(new Error('logon socket closed'));
+        };
+        socket.once('connect', onConnect);
+        socket.once('disconnect', onFail);
         socket.connect(host, port);
       });
     },
     send(bytes: Uint8Array) {
       socket.socket.send(bytes);
+    },
+    onDisconnect(listener: () => void) {
+      socket.on('disconnect', () => listener());
     },
     onMessage(listener: (bytes: Uint8Array) => void) {
       socket.on('data:receive', () => {

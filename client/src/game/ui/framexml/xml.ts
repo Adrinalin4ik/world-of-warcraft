@@ -139,6 +139,25 @@ function classify(element: XmlElement): TopLevel | null {
   return { kind: 'instance', element };
 }
 
+/**
+ * A whole document as ONE owned element, root included -- for a document that is not FrameXML.
+ *
+ * `parseXml` below classifies each root CHILD into the FrameXML vocabulary (include / script / font /
+ * template / instance), which is exactly wrong for `Interface\FrameXML\Bindings.xml`: its root is
+ * `<Bindings>` and its children are `<Binding>` elements, which would every one of them be filed as an
+ * `instance` and handed to `CreateFrame`. So the binding loader takes the raw tree and reads it itself
+ * (`bindings.ts#parseBindings`), and this is the one function they share -- the DOM-to-`XmlElement`
+ * materializer, which nothing outside this module should have to reimplement.
+ */
+export function parseXmlRoot(text: string): { root: XmlElement | null; errors: string[] } {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  const failure = doc.querySelector('parsererror');
+  if (failure || !doc.documentElement) {
+    return { root: null, errors: [`XML parse failed: ${failure?.textContent?.trim() ?? 'no root'}`] };
+  }
+  return { root: own(doc.documentElement), errors: [] };
+}
+
 export function parseXml(text: string): ParsedDocument {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
 

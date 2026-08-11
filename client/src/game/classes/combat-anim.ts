@@ -41,6 +41,41 @@ const ATTACK_OFF = 87;
 const ATTACK_OFF_PIERCE = 88;
 const ATTACK_UNARMED_OFF = 117;
 
+/**
+ * The four `AnimationData` Ready idles -- the engaged standing guard, one per weapon bucket
+ * (`select.rs:867-877`). NOT combat one-shots: they are looping STATE ids and the gait cascade
+ * selects them, which is why they live beside the swing table rather than in it.
+ */
+const READY_UNARMED = 25;
+const READY_1H = 26;
+const READY_2H = 27;
+const READY_2HL = 28;
+
+/**
+ * `VictimState`, the outcome word `SMSG_ATTACKERSTATEUPDATE` carries after its sub-damage block.
+ *
+ * Values cross-checked against the reference's own two independent uses -- the combat-text picker
+ * (`combat_text/law.rs:149-156`, "victim states 2 dodge / 3 parry / 5 block") and the defense-anim
+ * table (`select.rs:587-603`) -- and against the blood gate, which spurts only for 1 and 4
+ * (`creature_anim/blood.rs:83-84`). They agree, and the numbering is not version-dependent the way a
+ * `HitInfo` bit is.
+ */
+const VICTIM_MISS = 0;
+const VICTIM_HIT = 1;
+const VICTIM_DODGE = 2;
+const VICTIM_PARRY = 3;
+const VICTIM_BLOCK = 5;
+const VICTIM_EVADE = 6;
+const VICTIM_DEFLECT = 8;
+
+/** The defense one-shots -- `defense_anim`'s output ids (`select.rs:587-603`). */
+const PARRY_UNARMED = 20;
+const PARRY_1H = 21;
+const PARRY_2H = 22;
+const PARRY_2HL = 23;
+const SHIELD_BLOCK = 24;
+const DODGE = 30;
+
 /** `ItemClass::WEAPON`. Anything else in the hand swings unarmed. */
 const ITEM_CLASS_WEAPON = 2;
 /** `ItemSubclassWeapon::DAGGER`, the one subclass with its own pierce clips. */
@@ -98,6 +133,98 @@ function offFor(subclass: number | undefined): number {
     return ATTACK_OFF_PIERCE;
   }
   return subclass === undefined ? ATTACK_UNARMED_OFF : ATTACK_OFF;
+}
+
+/**
+ * The ENGAGED STANDING IDLE -- the weapon-class Ready pick, `ready_anim` (`select.rs:867-877`,
+ * decision 0073, the client's `0x5fd360` arm at `0x5fcdc0`).
+ *
+ * A THIRD weapon bucketing, and deliberately not `mainFor`'s: the reference's own comment says "the
+ * buckets differ from the swing table: fist **and** dagger ready as 1H". So a dagger, which stabs
+ * with its own pierce clip when it swings, holds the ordinary one-handed guard when it is idle.
+ *
+ * The subclass numbers transfer from the reference's 1.12 table unchanged, checked one by one against
+ * 3.3.5a `ItemSubclassWeapon`: 1H is axe1H 0, mace1H 4, sword1H 7, exotic 11, fist 13, misc 14,
+ * dagger 15; 2H is axe2H 1, mace2H 5, sword2H 8, exotic2 12; 2H-LONG is polearm 6, staff 10, spear 17.
+ * Everything else -- bow, gun, crossbow, wand, fishing pole, obsolete(9) -- is `ReadyUnarmed`, which
+ * is also what an empty hand gets.
+ *
+ * Gated on ENGAGEMENT and never on sheath state: the client's arm tests the auto-attack-target guid.
+ * See `Unit#readyIdle` for where engagement comes from.
+ */
+export function readyAnimation(unit: Unit): number {
+  void primeItems();
+  const entry = unit.equippedMainhand;
+  const subclass = entry ? weaponSubclass.get(entry) : undefined;
+  switch (subclass) {
+    case 0x0: case 0x4: case 0x7: case 0xb: case 0xd: case 0xe: case 0xf:
+      return READY_1H;
+    case 0x1: case 0x5: case 0x8: case 0xc:
+      return READY_2H;
+    case 0x6: case 0xa: case 0x11:
+      return READY_2HL;
+    default:
+      return READY_UNARMED;
+  }
+}
+
+/**
+ * THE VICTIM'S DEFENSE REACTION, from `SMSG_ATTACKERSTATEUPDATE`'s `VictimState` -- `defense_anim`
+ * (`select.rs:587-603`, decision 0279, the client's `$CPP` dispatch `0x624a01`).
+ *
+ * A dodge or a deflect is one clip; a block is the shield; a PARRY depends on what the victim is
+ * holding, because you parry with your own weapon. Note the bucketing is the SWING table's here and
+ * not the Ready table's -- a dagger parries with the 1H clip and a fist has its own ParryUnarmed --
+ * which is the third and fourth weapon bucketings in this file and the reason each one is separate.
+ *
+ * `null` for every other outcome, and TWO of those are worth naming because they are asked about:
+ *  - a MISS (state 0) plays NO victim animation at all. Nothing dodges, nothing flinches: the attacker
+ *    simply contacts nothing, which is why the reference expresses a miss as the ATTACKER's swing
+ *    dropping to half speed (`whiffSlowdown`) plus the floating "Miss" text, and not as a victim clip.
+ *  - an EVADE (6) likewise.
+ * So "промахов" is the attacker's animation and not the victim's, and it is handled there.
+ */
+export function defenseAnimation(victimState: number, victim: Unit): number | null {
+  if (victimState === VICTIM_DODGE || victimState === VICTIM_DEFLECT) {
+    return DODGE;
+  }
+  if (victimState === VICTIM_BLOCK) {
+    return SHIELD_BLOCK;
+  }
+  if (victimState !== VICTIM_PARRY) {
+    return null;
+  }
+  void primeItems();
+  const entry = victim.equippedMainhand;
+  const subclass = entry ? weaponSubclass.get(entry) : undefined;
+  switch (subclass) {
+    case 0x0: case 0x4: case 0x7: case 0xb: case 0xe: case 0xf:
+      return PARRY_1H;
+    case 0x1: case 0x5: case 0x8: case 0xc:
+      return PARRY_2H;
+    case 0x6: case 0xa: case 0x11:
+      return PARRY_2HL;
+    case 0xd:
+      return PARRY_UNARMED;
+    default:
+      // Ranged, obsolete, an oddball, or an empty hand: the reference bails rather than substituting a
+      // clip, and so does this. You cannot parry with a bow.
+      return null;
+  }
+}
+
+/**
+ * Does this outcome mean the attacker's weapon contacted NOTHING? -- `is_whiff` (`impact.rs:108-110`,
+ * the client's gate `0x624ca0`).
+ *
+ * Miss, dodge and evade. A parry or a block still CONTACTS -- steel meets steel or shield -- so
+ * neither slows the swing. The reference's consequence is the whiff slow-down: the attacker's
+ * in-flight swing drops to half speed for its remainder (`0x712910`, decision 0279), which is what a
+ * missed swing looks like.
+ */
+export function isWhiff(victimState: number): boolean {
+  return victimState === VICTIM_MISS || victimState === VICTIM_DODGE
+    || victimState === VICTIM_EVADE;
 }
 
 /**

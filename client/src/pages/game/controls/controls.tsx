@@ -3,19 +3,21 @@ import React from 'react';
 import * as THREE from 'three';
 
 import {
-  CAM_COLLISION_RADIUS, CameraControl, advanceZoom, applyZoomScroll, createCameraControl,
-  createPendingClicks, runLookSession, seatCamera,
+  CAM_COLLISION_RADIUS, CLICK_DRAG_THRESHOLD, CameraControl, advanceZoom, applyZoomScroll,
+  createCameraControl, createPendingClicks, runLookSession, seatCamera,
 } from '../../../game/camera/rig';
 import { headHeight } from '../../../game/camera/pivot';
 import { collisionWorld } from '../../../game/collision/collision-world';
 import { CollisionLayer } from '../../../game/collision/types';
 import {
-  CAPSULE_HEIGHT, CAPSULE_RADIUS, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO, RUN_SPEED,
+  CAPSULE_HEIGHT, CAPSULE_RADIUS, MOUSELOOK_BODY_TURN_RATE, MOUSELOOK_PITCH_CLAMP,
+  RUN_BACK_RATIO, RUN_SPEED,
   SETTLE_STREAM_TIMEOUT, SETTLE_TIMEOUT, STATIONARY_CHASE_RATE, TURN_RATE, TURN_RATE_MOVING,
   capsuleHalfSegment,
 } from '../../../game/movement/constants';
 import { movementFrame } from '../../../game/movement/frame';
-import { streamMovement } from '../../../game/movement/outbound';
+import { easeDisplayYaw, strafeBodyOffset } from '../../../game/movement/net-motion';
+import { movementFlagsFor, streamMovement } from '../../../game/movement/outbound';
 import { rescueFromVoid } from '../../../game/movement/void-rescue';
 import Player from '../../../game/classes/player';
 
@@ -216,8 +218,33 @@ class Controls extends React.Component<IProp> {
       this.lockRequested = false;
     }
 
-    if (look.turnsCharacter) {
-      player.move.faceYaw += look.yawDelta;
+    // MOUSE-LOOK: the body IS the camera heading, by ABSOLUTE assignment.
+    //
+    // `faceYaw += look.yawDelta` -- what this was -- keeps the two only as parallel as they already
+    // were, and a left-drag orbit is precisely what makes them diverge: the camera swings round to
+    // your side, the body does not, and from then on the two disagree by the orbit. Then you hold the
+    // right button, and in the real client the character SNAPS to face where the camera is looking and
+    // stays welded to it -- so W walks exactly where you are looking. Ours kept walking off at the old
+    // heading. That is the owner's items 8 and 9, and both are this one line.
+    //
+    // The reference is unambiguous that it is an assignment and not an increment
+    // (`samples/benilla/crates/benilla/src/player/camera.rs:342-353`):
+    //   `if active == LookButton::Right || both_buttons { *face_yaw = cam.yaw; }`
+    // with the same comment: "Right-drag also turns the character (its facing tracks the camera yaw);
+    // left-drag leaves the character facing."
+    // GATED ON A REAL DRAG, not on the button being down. `runLookSession` sets `rig.look = 'right'`
+    // INSTANTLY on press (`rig.ts:326`, "instant on press") because a right-drag must turn from the
+    // first pixel -- so keying the weld off `rig.look` alone made every right CLICK snap the body to
+    // the camera for the frames the button was held. A right click is how this client starts auto
+    // attack (`pages/game/index.tsx:306`) and how it would interact, and spinning the character every
+    // time you click a wolf is not what the real client does. `pendingRight` is the same accumulated
+    // drag distance the session's own click-versus-drag test uses, so the two cannot disagree about
+    // what a click is.
+    const rightDragging = this.rig.look === 'right'
+      && (this.pending.right === null || this.pending.right >= CLICK_DRAG_THRESHOLD);
+    const mouselook = rightDragging || look.bothButtonsRun;
+    if (mouselook) {
+      player.move.faceYaw = this.rig.yaw;
     }
 
     // THE TARGET SELECT. `leftClick` is a press and release that never dragged, which is exactly the
@@ -256,22 +283,44 @@ class Controls extends React.Component<IProp> {
     advanceZoom(this.rig, delta);
 
     // 3. Keyboard. A/D TURN in vanilla rather than strafing; Q/E strafe.
+    //
+    // EXCEPT UNDER MOUSE-LOOK, where A/D become STRAFE and turn nothing -- the mouse owns the heading
+    // while it is held, so a turn key would fight it (`player.rs:663-709`: `side_axis = E - Q + if
+    // mouselook { D - A }`, and `turning = !mouselook && ...`). Without this, holding the right button
+    // and pressing A both turned the body away from the camera and then had it snapped back next
+    // frame by the mouse-look lock above -- the key did nothing at all, visibly.
     const forward = (this.held('KeyW', 'ArrowUp') || look.bothButtonsRun ? 1 : 0)
       - (this.held('KeyS', 'ArrowDown') ? 1 : 0);
-    const strafe = (this.held('KeyQ') ? 1 : 0) - (this.held('KeyE') ? 1 : 0);
-    const turning = (this.held('KeyA', 'ArrowLeft') ? 1 : 0)
+    const strafeKeys = (this.held('KeyQ') ? 1 : 0) - (this.held('KeyE') ? 1 : 0);
+    const turnKeys = (this.held('KeyA', 'ArrowLeft') ? 1 : 0)
       - (this.held('KeyD', 'ArrowRight') ? 1 : 0);
+    const strafe = mouselook ? strafeKeys + turnKeys : strafeKeys;
+    const turning = mouselook ? 0 : turnKeys;
 
     if (turning !== 0) {
       const rate = TURN_RATE * (this.isTranslating(forward, strafe) ? TURN_RATE_MOVING : 1);
-      player.move.faceYaw += turning * rate * delta;
+      const turnDelta = turning * rate * delta;
+      player.move.faceYaw += turnDelta;
+      // A KEYBOARD TURN CARRIES THE CAMERA. `rig.look` is null here by construction (a turn key only
+      // turns when the mouse is not looking), and the reference moves the camera with the body on
+      // exactly that condition -- `camera.rs:417-419`, `if rig.look.is_none() { cam.yaw += turn_delta }`.
+      // Without it, A/D swung the body while the camera stayed put, so the view drifted round to the
+      // character's flank and every subsequent right-click snapped him somewhere he had not asked for.
+      this.rig.yaw += turnDelta;
     }
 
     // 4. Movement direction, expressed in the facing basis.
+    //
+    // The SIGN of each axis, not its magnitude: under mouse-look `strafe` is the sum of two key pairs
+    // and can reach +/-2, which would weight the strafe axis double against forward and send a
+    // Q-plus-A diagonal out at 63 degrees instead of 45. The reference takes "one step per netted axis
+    // sign" (`player.rs:710-728`).
     const yaw = player.move.faceYaw;
+    const fwdAxis = Math.sign(forward);
+    const sideAxis = Math.sign(strafe);
     const dir = new THREE.Vector3(
-      Math.cos(yaw) * forward - Math.sin(yaw) * strafe,
-      Math.sin(yaw) * forward + Math.cos(yaw) * strafe,
+      Math.cos(yaw) * fwdAxis - Math.sin(yaw) * sideAxis,
+      Math.sin(yaw) * fwdAxis + Math.cos(yaw) * sideAxis,
       0,
     );
     const moving = forward !== 0 || strafe !== 0;
@@ -337,13 +386,54 @@ class Controls extends React.Component<IProp> {
       console.warn('movement: fell out of the world, replaced on the terrain at', player.move.pos);
     }
 
-    // 6. The rendered body heading. Moving without a strafe snaps to the aim; standing, it chases.
-    if (moving && strafe === 0) {
+    // 6. THE RENDERED BODY HEADING -- the client's display-facing blend, ported from the reference's
+    // body-heading driver (`samples/benilla/crates/benilla/src/player/gait.rs:36-77`).
+    //
+    // A STRAFE IS A BODY YAW, NOT A GAIT. WoW has no ground strafe animation at all: the run cycle
+    // keeps playing and the whole strafe is expressed by turning the body off the aim -- a right angle
+    // for a pure strafe, 45 degrees when forward or back is held too, mirrored when backpedalling
+    // (`strafeBodyOffset`). Until now the strafing branch of this `if` did NOTHING: `moving && strafe
+    // !== 0` fell through every arm, so the body kept whatever heading it last had and the avatar
+    // side-stepped facing dead ahead. That is the owner's item 7, and the 45 degrees he asked for is
+    // the diagonal case.
+    //
+    // Swimming SNAPS the display facing to the aim -- no offset, no ease. That is the client's own
+    // facing-snap list (dead or swimming), the same gate the peer path applies.
+    //
+    // The standing branch is a FROZEN chase with a 90-degree ceiling while steering, which is what
+    // produces WoW's head-leads-then-body-follows turn in place -- `constants.ts#STATIONARY_CHASE_RATE`
+    // has described this since it was written and the code chased unconditionally instead, so a
+    // standing mouse-turn dragged the body round rigidly with the camera.
+    const flagsNow = movementFlagsFor(player.move, { forward, strafe, turning });
+    const bodyOffset = player.move.swimming ? 0 : strafeBodyOffset(flagsNow);
+    const steering = turning !== 0 || mouselook;
+    if (player.move.swimming) {
       player.move.modelYaw = yaw;
-    } else if (!moving) {
+    } else if (bodyOffset !== 0) {
+      player.move.modelYaw = easeDisplayYaw(player.move.modelYaw, yaw, bodyOffset, delta);
+    } else if (moving || player.move.airborneSince !== null) {
+      player.move.modelYaw = yaw;
+    } else {
       const gap = wrapPi(yaw - player.move.modelYaw);
-      const chase = Math.min(1, (STATIONARY_CHASE_RATE * TURN_RATE * delta) / Math.PI);
-      player.move.modelYaw += gap * chase;
+      // The CEILING: however the aim moves, the body is never left more than 90 degrees off it, so a
+      // steering turn drags the shoulders along only once the head has led that far.
+      //
+      // RATE-CAPPED, which the reference does not do -- see `MOUSELOOK_BODY_TURN_RATE`. A fast flick
+      // moves the aim tens of degrees in one frame, and an uncapped ceiling term hands the whole of
+      // that to the body in that frame: the shoulders snap round as fast as the hand moved. Capped at
+      // the character's own turn rate the body follows a flick at pi rad/s and finishes with the
+      // release sweep, which is the owner's "медленнее". A slow turn is under the cap and is unchanged.
+      let step = Math.min(
+        Math.max(0, Math.abs(gap) - Math.PI / 2),
+        MOUSELOOK_BODY_TURN_RATE * delta,
+      );
+      if (!steering) {
+        // The RELEASE SWEEP: once steering stops, the body closes on the aim at `turnRate x 8`.
+        step += STATIONARY_CHASE_RATE * TURN_RATE * delta;
+      }
+      player.move.modelYaw = wrapPi(
+        player.move.modelYaw + Math.sign(gap) * Math.min(step, Math.abs(gap)),
+      );
     }
 
     player.syncViewFromMove();

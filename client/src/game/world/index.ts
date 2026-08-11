@@ -7,7 +7,9 @@ import spots from "./spots";
 import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
 import { GameSession } from '../../network/session';
+import { collisionWorld } from "../collision/collision-world";
 import { collisionDebugView } from "../collision/debug-view";
+import { peerTrace } from "../movement/peer-trace";
 import {
   beginAnimSection, endAnimSection, beginSection, endSection,
 } from "../perf/anim-section";
@@ -641,6 +643,48 @@ export default class World extends EventEmitter {
     beginSection('w.matrices');
     this.updateDynamicMatrices();
     endSection('w.matrices');
+
+    // THE RENDERED TRANSFORM, sampled after the matrices are final and nowhere earlier.
+    //
+    // This is the instrument the previous movement round did not have, and its absence is why a
+    // measurement that came out numerically perfect coexisted with a visibly teleporting peer: that
+    // round sampled the dead-reckon's own output, which is an INPUT to the transform. Anything between
+    // the two -- a ground resolve, a yaw ease, a second writer -- is invisible from there. `peerTrace`
+    // reads `view.matrixWorld` here instead, which is the matrix the draw call uses.
+    //
+    // Free when the trace is off: `recordRender` returns on its first line, and the loop is behind the
+    // same flag so a session that never enables it does not even walk the entity map.
+    if (peerTrace.enabled) {
+      this.entities.forEach((entity) => {
+        // PEERS AND OURSELVES ONLY, and the restriction is not thrift -- it is what makes the ring
+        // usable. The first capture sampled all 83 streamed entities and filled the 8000-row history
+        // in under two seconds, evicting every packet row before the run ended: an instrument that
+        // measured itself out of existence. Creatures are the spline path's business and have their
+        // own capture.
+        if (!entity.isPlayer && entity.remoteMotion === null) {
+          return;
+        }
+        const inst = entity.model?.instanceAnim ?? null;
+        // `move.horizVel` DIRECTLY for the player, never `locomotionSpeed()`. That method MUTATES --
+        // it advances `locoPrevX/Y` and sets `locoTracking`, which is the baseline the measured-
+        // displacement leg differences against. Calling it from an instrument would make the
+        // instrument change what it measures, which is the exact failure mode `CLAUDE.md` warns about
+        // and which this project has already shipped once. The player's own leg returns this value.
+        peerTrace.recordRender(
+          entity.guid,
+          entity.view.matrixWorld,
+          entity.locomotionFlags(),
+          entity.isPlayer ? entity.move.horizVel.length() : (entity.remoteMotion?.speed ?? 0),
+          inst?.current?.id ?? -1,
+          inst?.playbackRate ?? 0,
+          // The TERRAIN height under the unit's OWN xy, from the heightmap rather than a cast: this is
+          // the reference point the round's step-size percentiles did not have, and a heightmap lookup
+          // costs 0.065 ms against a cast's 0.92 (both measured). It answers `null` for an unstreamed
+          // chunk, which the row keeps distinct from "the error is zero".
+          collisionWorld.terrain.heightAt(entity.view.position.x, entity.view.position.y),
+        );
+      });
+    }
   }
 
   /**
@@ -785,7 +829,7 @@ export default class World extends EventEmitter {
       // classified, which is seconds after the first movement packet arrives; the earlier report
       // named the same hazard for any unit with a static model. A body's position must not depend on
       // whether its skeleton has keyframes.
-      entity.update(delta);
+      entity.update(delta, camPos);
 
       // Same two-part test `DoodadManager#loadDoodad` documents: `model.animated` is the POSING
       // predicate (ModelAnim.classify), and billboarding is a separate reason to need a per-frame

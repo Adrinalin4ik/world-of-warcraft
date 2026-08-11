@@ -66,6 +66,35 @@ export interface UnitSnapshot {
   classification: string;
   isPlayer: boolean;
   dead: boolean;
+
+  /**
+   * `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP` -- what `UnitXP`/`UnitXPMax` answer.
+   *
+   * Only ever non-zero for `"player"`: they are PLAYER-scope update fields, so a creature's update
+   * never carries them (`update-object/unit-fields.ts`). Zero for every other token, which is what
+   * `MainMenuExpBar_Update` wants -- `SetMinMaxValues(min(0, currXP), nextXP)`.
+   */
+  xp: number;
+  maxXp: number;
+
+  /**
+   * `PLAYER_REST_STATE_EXPERIENCE` -- the banked rested-xp pool `GetXPExhaustion()` returns, in xp.
+   *
+   * A SEPARATE field from `xp`, and a separate segment on the bar: `ExhaustionTick_OnEvent` places
+   * `ExhaustionLevelFillBar` at `((xp + restXp) / maxXp) * width` (`MainMenuBar.lua:325`), so it is
+   * drawn as the lighter region to the RIGHT of current xp, not as part of it.
+   */
+  restXp: number;
+
+  /**
+   * `UNIT_FIELD_BASE_MANA` -- mana before gear, which is what a percentage spell cost is a percentage OF.
+   *
+   * Here rather than derived from `maxPower` because `Spell.dbc`'s `ManaCostPercentage` (column 204) is
+   * how most caster spells state their cost -- Fireball 8%, Healing Wave 13%, both with `manaCost` 0 --
+   * and `maxPower` is a different, larger number for any geared character. `IsUsableAction` reads it;
+   * nothing else does.
+   */
+  baseMana: number;
 }
 
 /** A unit that exists but about which nothing has arrived yet. */
@@ -82,6 +111,10 @@ export function emptySnapshot(): UnitSnapshot {
     classification: 'normal',
     isPlayer: false,
     dead: false,
+    xp: 0,
+    maxXp: 0,
+    restXp: 0,
+    baseMana: 0,
   };
 }
 
@@ -213,6 +246,58 @@ export function installUnitsApi(vm: LuaVM): void {
   // aliases here rather than a second code path that could disagree.
   fn('UnitMana', (args) => [withUnit(args[0], 0, (u) => u.power)]);
   fn('UnitManaMax', (args) => [withUnit(args[0], 0, (u) => u.maxPower)]);
+
+  /**
+   * THE EXPERIENCE BAR. `MainMenuExpBar_Update` (`MainMenuBar.lua:6-10`) is nothing but
+   * `SetMinMaxValues(min(0, UnitXP("player")), UnitXPMax("player"))` then `SetValue(UnitXP("player"))`,
+   * so these two globals are the whole of the bar's progress and neither existed.
+   */
+  fn('UnitXP', (args) => [withUnit(args[0], 0, (u) => u.xp)]);
+  fn('UnitXPMax', (args) => [withUnit(args[0], 0, (u) => u.maxXp)]);
+
+  /**
+   * `GetXPExhaustion()` -> the banked rested-xp pool, or **nil** when there is none.
+   *
+   * nil and not 0, and this is load-bearing: `ExhaustionTick_OnEvent` branches on
+   * `if (not exhaustionThreshold) then ExhaustionTick:Hide(); ExhaustionLevelFillBar:Hide()`
+   * (`MainMenuBar.lua:322-324`), and 0 is TRUTHY in Lua. Returning 0 would take the other branch and
+   * place the rested segment at exactly current-xp -- a zero-width fill bar and a visible tick marker
+   * sitting on the bar's fill edge, for a character with no rested xp at all.
+   */
+  fn('GetXPExhaustion', () => {
+    const player = units.get('player');
+    const rest = player?.restXp ?? 0;
+    return [rest > 0 ? rest : null];
+  });
+
+  /**
+   * `GetRestState()` -> `exhaustionStateID, exhaustionStateName, exhaustionStateMultiplier`.
+   *
+   * **1 is RESTED and 2 is NORMAL**, and that pair is what colours the bar -- `ExhaustionTick_OnEvent`
+   * paints `SetStatusBarColor(0.0, 0.39, 0.88)` (blue) for state 1 and `(0.58, 0.0, 0.55)` (magenta) for
+   * state 2 (`MainMenuBar.lua:350-357`).
+   *
+   * That is worth stating plainly because it corrects a diagnosis: **a magenta XP bar is the CORRECT
+   * 3.3.5a appearance for a character with no rested experience**, not a sign of an unresolved texture.
+   * `MainMenuExpBar` declares no `<BarTexture>` at all in `MainMenuBar.xml` -- its fill is a flat tint
+   * and this function is what chooses the colour. The 3.3.5a XP bar is purple when you are not rested.
+   *
+   * The name and multiplier are the values the real client supplies; the multiplier is 1 in both states
+   * on this build (rested xp is spent as a separate pool, not as a kill-xp multiplier), and the name is
+   * the untranslated token because there is no `GlobalStrings` lookup for it in the engine.
+   */
+  fn('GetRestState', () => {
+    const player = units.get('player');
+    const rested = (player?.restXp ?? 0) > 0;
+    return rested ? [1, 'rested', 1] : [2, 'normal', 1];
+  });
+
+  /**
+   * `IsXPUserDisabled()` -- the "stop gaining xp" toggle, which does not exist on this build's server
+   * and is not a 3.3.5a player-visible feature. Genuinely false rather than a stub; it only gates
+   * whether the exhaustion tick is hidden (`MainMenuBar.lua:342`).
+   */
+  fn('IsXPUserDisabled', () => [false]);
 
   fn('UnitReaction', (args) => [withUnit(args[0], null, (u) => u.reaction)]);
   fn('UnitClassification', (args) => [withUnit(args[0], 'normal', (u) => u.classification)]);
@@ -393,6 +478,16 @@ export function installUnitsApi(vm: LuaVM): void {
     ['UnitInVehicle', 'this client has no vehicles', [false]],
     ['IsResting', 'no resting state is read from the wire', [false]],
     ['GetOptOutOfLoot', 'no group loot state is read from the wire', [false]],
+    // `GetWatchedFactionInfo()` -> `name, standing, min, max, value`, and NIL for `name` is a real
+    // answer, not a placeholder: it is what the engine returns when no faction is being watched, which
+    // is every character that has not ticked the box. `ReputationWatchBar_Update`'s first line reads it
+    // (`ReputationFrame.lua:324`), so its ABSENCE made that function raise -- and that function is the
+    // only thing in 3.3.5a's whole manifest that ever shows `MainMenuExpBar` again once it has hidden
+    // itself. Declared here rather than left missing so the reputation path cannot take down the
+    // experience bar's owner a second time. (The bar no longer DEPENDS on it -- the seeded snapshot
+    // stops the bar hiding in the first place; see `ui/unit-bridge.ts#seedUnitSnapshots`.)
+    ['GetWatchedFactionInfo', 'no reputation feed: SMSG_INITIALIZE_FACTIONS is not decoded, so no '
+      + 'faction is watched and the reputation half of the bar draws nothing', [null]],
     // `GetSummonFriendCooldown()` -> `start, duration`, immediately arithmetic:
     // `local remaining = start + duration - GetTime()` (unitpopup.lua:264). Two ZEROS, not nil --
     // nil there is an arithmetic error, not a skipped branch.
@@ -423,13 +518,35 @@ export function installUnitsApi(vm: LuaVM): void {
     ['GetPartyMember', 'no party roster is fed', [false]],
     ['GetNumPartyMembers', 'no party roster is fed', [0]],
     ['GetNumRaidMembers', 'no raid roster is fed', [0]],
-    // The modifier keys. `input.ts` tracks no modifier state at all today, so these answer false --
-    // which is the safe direction: every FrameXML caller uses them to ADD behaviour (ctrl-click to
-    // dressing-room, shift-click to link), so false is "the plain action" rather than a wrong action.
-    ['IsControlKeyDown', 'input.ts tracks no modifier-key state', [false]],
-    ['IsShiftKeyDown', 'input.ts tracks no modifier-key state', [false]],
-    ['IsAltKeyDown', 'input.ts tracks no modifier-key state', [false]],
-    ['IsModifiedClick', 'input.ts tracks no modifier-key state', [false]],
+    // `uiparent.lua:1927`, called UNGUARDED in the tail of the managed-frame-position pass and then
+    // compared with `> 0`. Zero is the true answer -- there is no arena and no `ArenaEnemyFrames` fed --
+    // and it must be a NUMBER, because a nil would raise on the comparison and truncate the rest of the
+    // pass (WatchFrame, the durability frames, the container anchors). It is after the `securecall` loop,
+    // so this was never what held the cast bar up; see `api/screen.ts#GetScreenResolutions` for that.
+    ['GetNumArenaOpponents', 'no arena roster is fed', [0]],
+    /**
+     * `RegisterStaticConstants(STATIC_CONSTANTS)` -- `Constants.lua:469`, AT FILE SCOPE.
+     *
+     * The engine fills the table it is handed with a name-to-value translation table. Nothing in the loaded
+     * manifest reads `STATIC_CONSTANTS`, and what the engine puts in it is not sourced here, so it is left
+     * EMPTY -- but it has to exist, because a nil here raises at file scope and takes the last ten lines of
+     * `Constants.lua` with it: `TEXTURE_ITEM_QUEST_BANG`, `TEXTURE_ITEM_QUEST_BORDER`,
+     * `SHOW_SEARCH_BAR_NUM_FRIENDS` and the faction block. Declared through `notImplemented` so the load
+     * report names it rather than a silent no-op leaving an empty table nobody knows is empty.
+     */
+    ['RegisterStaticConstants', 'the engine\'s name-to-value constant table is not sourced, so '
+      + 'STATIC_CONSTANTS is left empty; nothing in the loaded manifest reads it', []],
+    // THE MODIFIER KEYS. `IsShiftKeyDown` is deliberately NOT here any more, and the removal is the fix:
+    // `api/screen.ts` registers a REAL one tracked off the DOM, and this file is installed AFTER it
+    // (`world-runtime.ts:139` then `:144`), so this hard `false` was silently shadowing the real answer in
+    // the world. STATE.md recorded the double registration as "which wins depends on install order"; the
+    // order is now measured and it was this one, which is why shift state never reached the Lua.
+    // `IsControlKeyDown` and `IsAltKeyDown` moved to `screen.ts` beside it for the same reason.
+    //
+    // `IsModifiedClick` stays a gap: it is not a key query but a lookup of which modifier a NAMED action is
+    // bound to (`"CHATLINK"`, `"DRESSUP"`, ...) through the client's binding table, and that mapping is not
+    // sourced here. False is the safe direction -- every caller uses it to ADD behaviour.
+    ['IsModifiedClick', 'the modifier-to-action binding table (CHATLINK, DRESSUP, ...) is not read', [false]],
     ['GetBindingKey', 'no keybinding table exists in this client', []],
     ['GetMoney', 'PLAYER_FIELD_COINAGE is not read yet', [0]],
   );
@@ -467,6 +584,64 @@ export function installUnitsApi(vm: LuaVM): void {
       else key = "standard" end
       if colors and colors[key] then return colors[key] end
       return { r = 1.0, g = 0.82, b = 0.0 }
+    end`,
+    'units-api.lua',
+  );
+
+  /**
+   * `FillLocalizedClassList(table, isFemale)` -- AND IT WAS KILLING `Constants.lua` AT FILE SCOPE.
+   *
+   * ## This is the `UIParent.lua:102` defect again, one file earlier and much larger
+   *
+   * `Constants.lua` is the SECOND real entry in `FrameXML.toc` (after `GlobalStrings.lua`), and lines 85-88
+   * are, at file scope:
+   *
+   *     LOCALIZED_CLASS_NAMES_MALE = {};
+   *     LOCALIZED_CLASS_NAMES_FEMALE = {};
+   *     FillLocalizedClassList(LOCALIZED_CLASS_NAMES_MALE, false);
+   *     FillLocalizedClassList(LOCALIZED_CLASS_NAMES_FEMALE, true);
+   *
+   * Read off the served `interface/framexml/constants.lua` (13,223 B, 478 lines). The global was absent, so
+   * line 87 raised and **lines 87-478 of a 478-line file never ran** -- and `world-runtime.ts` records a
+   * raising chunk as one error line for the file with no partial execution, so this cost one line in the load
+   * report and roughly 170 globals in the runtime. Among them, all measured by their line being below 87:
+   * `CLASS_ICON_TCOORDS` (every class icon), the 21 `INVSLOT_*`, `NUM_BAG_SLOTS`/`BACKPACK_CONTAINER`/
+   * `BANK_CONTAINER` and the container block, the `SPELL_POWER_*` ids the power bars colour by, the
+   * `ITEM_QUALITY_*` constants, the 40 `COMBATLOG_OBJECT_*`/`COMBATLOG_FILTER_*` names, `TOTEM_PRIORITIES`
+   * and the totem block, and the `CALENDAR_*`/`ACHIEVEMENT_*`/`GMTICKET_*` blocks.
+   *
+   * **It also silently disabled a function in THIS FILE.** `GetQuestDifficultyColor` above reads the client's
+   * own `QuestDifficultyColors`, and that table is `constants.lua:403` -- below the kill. Its comment says
+   * the hard-coded fallback "exists only for a VM where it somehow has not" been defined; in fact the
+   * fallback was the only path ever taken, so every level number drew in one colour. That is exactly the
+   * hazard `CLAUDE.md` names: a comment that describes a gap as closed when it is not.
+   *
+   * ## Why this is a real implementation and not a stub
+   *
+   * It MUTATES its first argument -- it is not a getter, and a getter-shaped stub returning a table would
+   * leave `LOCALIZED_CLASS_NAMES_MALE` empty while looking correct. Written in Lua for the same reason
+   * `GetQuestDifficultyColor` is: the caller hands in a live Lua table and this fills it in place.
+   *
+   * The keys are `ChrClasses.dbc`'s `classFile` tokens and the values its `name` column, enUS, build 12340 --
+   * the same table `api/characters.ts#CLASS_NAMES` carries, keyed differently on purpose: that one is keyed
+   * by the numeric class id because the wire sends an id, this one by token because FrameXML indexes by
+   * token (`LOCALIZED_CLASS_NAMES_MALE[select(2, UnitClass(unit))]`). There is no class 10 in 3.3.5a.
+   *
+   * `isFemale` is accepted and IGNORED, and that is correct for this client rather than lazy: enUS class
+   * names are not gendered, so `ChrClasses.dbc`'s male and female name columns hold identical strings and
+   * the real client fills both tables the same way. In a gendered locale they differ; this client serves
+   * enUS only. Said plainly here so nobody reads the ignored argument as an oversight.
+   */
+  vm.run(
+    `local WOW_CLASS_NAMES = {
+      WARRIOR = "Warrior", PALADIN = "Paladin", HUNTER = "Hunter", ROGUE = "Rogue",
+      PRIEST = "Priest", DEATHKNIGHT = "Death Knight", SHAMAN = "Shaman", MAGE = "Mage",
+      WARLOCK = "Warlock", DRUID = "Druid",
+    }
+    function FillLocalizedClassList(t, isFemale)
+      if type(t) ~= "table" then return end
+      for token, name in pairs(WOW_CLASS_NAMES) do t[token] = name end
+      return t
     end`,
     'units-api.lua',
   );

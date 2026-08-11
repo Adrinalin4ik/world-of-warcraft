@@ -24,11 +24,32 @@ import { FocusSink, FrameRegistry } from './lua/object';
 const CARET_WIDTH = 1;
 export const CARET_BLINK_SECONDS = 0.5;
 
-/** An edit box and the caret bar built for it. */
+/**
+ * The SELECTION HIGHLIGHT's colour, and it is OURS -- unsourced, exactly like the caret above.
+ *
+ * The client's engine draws an edit box's selection itself; there is no XML, no texture path and no
+ * FrameXML colour constant behind it (grepped the loaded glue manifest: the only `HighlightText` call
+ * sites are `accountlogin.xml:216-220,293-297,355-359` and they pass ranges, never a colour). So this
+ * is a plain blue chosen to read as a selection against the client's dark edit boxes, and it is not
+ * claimed to match the shipped client's pixel value.
+ *
+ * IT IS NOT COSMETIC, which is why it is worth having at all. Every login box declares
+ * `<OnEditFocusGained> self:HighlightText(); </OnEditFocusGained>` (accountlogin.xml:218-220), so a
+ * click into a box that already holds text SELECTS ALL of it, and the next printable key replaces the
+ * lot. That is the real client's behaviour too -- but the real client DRAWS the selection, so the
+ * replacement is something the player asked for. Drawn nowhere, the same keystroke looks exactly like
+ * "the field reset itself", which is the defect as it was reported.
+ */
+const SELECTION_COLOR = '#2b5fa8';
+const SELECTION_ALPHA = 0.75;
+
+/** An edit box and the two engine-drawn regions built for it. */
 export interface CaretBox {
   box: Widget;
   /** Null for a box with no adopted text region -- there is no font to size a caret from. */
   caret: Widget | null;
+  /** The selection highlight, null for the same reason as `caret`. */
+  selection: Widget | null;
 }
 
 /**
@@ -45,7 +66,11 @@ export function collectEditBoxes(registry: FrameRegistry, root: Widget): CaretBo
   const boxes: CaretBox[] = [];
   const walk = (widget: Widget): void => {
     if (widget.kind === 'editbox') {
-      boxes.push({ box: widget, caret: buildCaret(registry, widget) });
+      // Build order between these two does NOT matter: the caret is `OVERLAY` and the highlight is
+      // `BACKGROUND`, so the LAYERS decide which draws over which and creation order never enters into
+      // it. (An earlier version of this comment claimed the opposite and was wrong.)
+      const selection = buildSelection(registry, widget);
+      boxes.push({ box: widget, caret: buildCaret(registry, widget), selection });
     }
     // A copy: `buildCaret` adds a child to the box, and walking the live array would then descend into
     // the caret it just made.
@@ -77,6 +102,75 @@ function buildCaret(registry: FrameRegistry, box: Widget): Widget | null {
   });
   caret.shown = false;
   return caret;
+}
+
+/**
+ * The selection highlight quad, built the same way and for the same reason as the caret: the client's
+ * engine draws it with nothing in the document behind it.
+ *
+ * `BACKGROUND` rather than the caret's `OVERLAY` -- it has to sit BEHIND the glyphs. The adopted text
+ * region declares no layer (`accountlogin.xml:157-238`'s `<FontString inherits="GlueEditBoxFont"/>`),
+ * so it defaults to `ARTWORK`, and a highlight in `OVERLAY` would paint over the very text it is
+ * selecting. Anchored to the TEXT REGION, like the caret, so the authored `<TextInsets>` apply without
+ * restating the arithmetic.
+ */
+function buildSelection(registry: FrameRegistry, box: Widget): Widget | null {
+  const region = box.textRegion;
+  const boxId = registry.idOfWidget(box);
+  if (region === null || boxId === null) {
+    return null;
+  }
+  const selection = registry.widget(registry.create('Texture', null, boxId));
+  if (selection === null) {
+    return null;
+  }
+  selection.layer = 'BACKGROUND';
+  selection.solid = true;
+  selection.vertexColor = SELECTION_COLOR;
+  selection.alpha = SELECTION_ALPHA;
+  selection.setSize(0, region.font?.size ?? 12).setAnchors({
+    point: 'LEFT',
+    relativeTo: region.id,
+    relativePoint: 'LEFT',
+    x: 0,
+    y: 0,
+  });
+  selection.shown = false;
+  return selection;
+}
+
+/**
+ * Span the selected character range, for the focused box only.
+ *
+ * Measured with `caretOffset` against `displayText`, at scale 1 -- the SAME call, the same string and
+ * the same scale the caret uses, which is what guarantees the two agree. Against the real text a
+ * password box's highlight would be the width of the real characters and would leak their identity.
+ *
+ * An EMPTY selection (anchor == caret) hides the quad rather than drawing a zero-width one: a collapsed
+ * selection is what a plain arrow key leaves behind and it must show nothing but the caret.
+ *
+ * COST, because the draw fingerprint is easy to spoil here (see the report's frame-budget section): the
+ * guard below returns BEFORE either `caretOffset` call for every box that is not the focused one holding
+ * a live range, so the canvas text measurement runs for at most one box per frame and usually none. And
+ * it adds no dirty frames: a selection's rect is static while it stands, and the CARET beside it already
+ * dirties the fingerprint twice a second by blinking. The highlight itself deliberately does not blink.
+ */
+export function placeSelection(box: Widget, selection: Widget | null, input: FocusSink | null): void {
+  if (selection === null) {
+    return;
+  }
+  const spec = box.textRegion?.font ?? null;
+  if (spec === null || input === null || input.focused !== box || box.selectionAnchor === box.caret) {
+    selection.shown = false;
+    return;
+  }
+  const start = Math.min(box.selectionAnchor, box.caret);
+  const end = Math.max(box.selectionAnchor, box.caret);
+  const left = caretOffset(box.displayText, spec, 1, start);
+  const right = caretOffset(box.displayText, spec, 1, end);
+  selection.anchors[0].x = left;
+  selection.setSize(Math.max(0, right - left), spec.size ?? 12);
+  selection.shown = true;
 }
 
 /**

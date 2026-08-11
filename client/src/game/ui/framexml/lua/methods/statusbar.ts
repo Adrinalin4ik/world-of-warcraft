@@ -24,6 +24,7 @@
  * the load report names it rather than a silent no-op swallowing it.
  */
 import { MethodContext, MethodTable, registerMethods } from '../object';
+import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { StatusBarState, Widget } from '../../../widget';
 import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
 
@@ -64,10 +65,56 @@ function ensureBar(ctx: MethodContext, self: number): Widget | null {
   return bar;
 }
 
-/** `SetValue`'s clamp: into `[min, max]`, with `max` never below `min`. benilla `store_value`, statusbar.rs:49-55. */
-function storeValue(state: StatusBarState, raw: number): void {
+/**
+ * `SetValue`'s clamp: into `[min, max]`, with `max` never below `min`. benilla `store_value`,
+ * statusbar.rs:49-55. Answers whether the stored value actually MOVED -- see `fireValueChanged`.
+ */
+function storeValue(state: StatusBarState, raw: number): boolean {
   const value = Number.isFinite(raw) ? raw : state.min;
-  state.value = Math.max(state.min, Math.min(Math.max(state.max, state.min), value));
+  const clamped = Math.max(state.min, Math.min(Math.max(state.max, state.min), value));
+  if (clamped === state.value) {
+    return false;
+  }
+  state.value = clamped;
+  return true;
+}
+
+/**
+ * `OnValueChanged(self, value)` -- fired ONLY when the value actually changed.
+ *
+ * THIS WAS MISSING, and its absence is why the experience bar was invisible with real xp behind it.
+ * `TextStatusBar_UpdateTextString` (`TextStatusBar.lua:32-88`) HIDES a status bar whose `valueMax` is 0
+ * -- which is correct and which is what happens at load, since `CharacterFrame_OnLoad:58` calls it on
+ * `MainMenuExpBar` before any xp has arrived. The only thing that ever un-hides it is that same
+ * function running again, and the only thing that runs it again is the bar's own
+ * `<OnValueChanged>TextStatusBar_OnValueChanged(self, value)</OnValueChanged>`
+ * (`TextStatusBar.xml:23`). With `SetValue` firing nothing, `MainMenuExpBar_Update`'s
+ * `SetMinMaxValues(0, 400)` + `SetValue(280)` moved the fill and left the frame hidden for ever. The
+ * same silence also left every unit frame's "1234 / 5678" text stale.
+ *
+ * benilla is the authority and does exactly this: `store_value` returns the new value only on a real
+ * change and both `SetValue` and `SetMinMaxValues` route through `fire_value_changed`
+ * (`crates/benilla-ui/src/script/statusbar.rs:47-55, 105-129, 238-250`).
+ *
+ * ONLY-ON-CHANGE is load-bearing twice over. benilla's own reason (slider.rs:13-17) is recursion: the
+ * scrollbar template wires `OnValueChanged -> SetVerticalScroll` and `OnVerticalScroll -> SetValue`
+ * back again, so a fire-always `SetValue` never terminates. Here it is also the frame budget --
+ * `world-ui.ts` re-renders the UI target when a fingerprint of the draw list changes, and a handler
+ * that re-ran on every `SetValue(sameValue)` would repaint text for a number that did not move.
+ *
+ * A raising handler must not abort the caller: the engine hands a script error to the error handler and
+ * lets the `SetValue` return, and this is reached from `UnitFrameHealthBar_Update` deep inside another
+ * handler. So it goes through `reportScriptError`, like `region.ts`'s `Show`/`Hide` cascade.
+ */
+function fireValueChanged(ctx: MethodContext, self: number, changed: boolean): void {
+  if (!changed) {
+    return;
+  }
+  const value = stateOf(widgetOf(ctx, self)).value;
+  const error = invokeScriptHandler(ctx, self, 'OnValueChanged', [value]);
+  if (error !== null) {
+    reportScriptError(`${ctx.registry.nameOf(self) ?? `frame ${self}`}: OnValueChanged`, error.message);
+  }
 }
 
 const STATUSBAR: MethodTable = {
@@ -88,7 +135,9 @@ const STATUSBAR: MethodTable = {
     }
     state.min = min;
     state.max = max;
-    storeValue(state, state.value);
+    // A value the caller did not set explicitly but that the new RANGE moved is still a change, and it
+    // fires -- benilla `statusbar.rs:105-118` ("a move fires OnValueChanged").
+    fireValueChanged(ctx, self, storeValue(state, state.value));
     return [];
   },
   GetMinMaxValues: (ctx, self) => {
@@ -97,7 +146,7 @@ const STATUSBAR: MethodTable = {
   },
 
   SetValue: (ctx, self, args) => {
-    storeValue(stateOf(widgetOf(ctx, self)), Number(args[0] ?? 0));
+    fireValueChanged(ctx, self, storeValue(stateOf(widgetOf(ctx, self)), Number(args[0] ?? 0)));
     return [];
   },
   GetValue: (ctx, self) => [stateOf(widgetOf(ctx, self)).value],

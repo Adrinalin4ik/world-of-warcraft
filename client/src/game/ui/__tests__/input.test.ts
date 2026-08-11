@@ -241,3 +241,28 @@ describe('GlueInput EditBox selection', () => {
     expect(box.text).toBe('Aello');
   });
 });
+
+/**
+ * Ctrl+A, the chord the owner reported as dead. It IS the client's own `HighlightText()` with no
+ * arguments -- anchor 0, caret at the end -- which is what every login box's `<OnEditFocusGained>`
+ * calls (accountlogin.xml:218-220), so this also covers the range the selection highlight draws.
+ *
+ * Measured dead before the fix on :3000 against the real `AccountLoginAccountEdit`: Ctrl+A left
+ * caret 2 / anchor 3 untouched (`scratchpad/t13-edit.js`).
+ */
+describe('GlueInput edit-box chords', () => {
+  it('Ctrl+A selects the whole value', () => {
+    const input = new GlueInput(document.createElement('canvas'));
+    const box = focusedEditBox(input, 'hello');
+
+    pressKey(input, 'Home'); // collapse to 0,0 so the select-all is a real change
+    expect(box.selectionAnchor).toBe(box.caret);
+
+    pressKey(input, 'a', { ctrlKey: true });
+
+    expect(box.selectionAnchor).toBe(0);
+    expect(box.caret).toBe(5);
+    // And Ctrl+A must not be mistaken for typing the letter "a" over the selection.
+    expect(box.text).toBe('hello');
+  });
+});
