@@ -3,8 +3,8 @@ import React from 'react';
 import * as THREE from 'three';
 
 import {
-  CAM_COLLISION_RADIUS, CameraControl, advanceZoom, applyZoomScroll, createCameraControl,
-  createPendingClicks, runLookSession, seatCamera,
+  CAM_COLLISION_RADIUS, CLICK_DRAG_THRESHOLD, CameraControl, advanceZoom, applyZoomScroll,
+  createCameraControl, createPendingClicks, runLookSession, seatCamera,
 } from '../../../game/camera/rig';
 import { headHeight } from '../../../game/camera/pivot';
 import { collisionWorld } from '../../../game/collision/collision-world';
@@ -231,7 +231,17 @@ class Controls extends React.Component<IProp> {
     //   `if active == LookButton::Right || both_buttons { *face_yaw = cam.yaw; }`
     // with the same comment: "Right-drag also turns the character (its facing tracks the camera yaw);
     // left-drag leaves the character facing."
-    const mouselook = this.rig.look === 'right' || look.bothButtonsRun;
+    // GATED ON A REAL DRAG, not on the button being down. `runLookSession` sets `rig.look = 'right'`
+    // INSTANTLY on press (`rig.ts:326`, "instant on press") because a right-drag must turn from the
+    // first pixel -- so keying the weld off `rig.look` alone made every right CLICK snap the body to
+    // the camera for the frames the button was held. A right click is how this client starts auto
+    // attack (`pages/game/index.tsx:306`) and how it would interact, and spinning the character every
+    // time you click a wolf is not what the real client does. `pendingRight` is the same accumulated
+    // drag distance the session's own click-versus-drag test uses, so the two cannot disagree about
+    // what a click is.
+    const rightDragging = this.rig.look === 'right'
+      && (this.pending.right === null || this.pending.right >= CLICK_DRAG_THRESHOLD);
+    const mouselook = rightDragging || look.bothButtonsRun;
     if (mouselook) {
       player.move.faceYaw = this.rig.yaw;
     }

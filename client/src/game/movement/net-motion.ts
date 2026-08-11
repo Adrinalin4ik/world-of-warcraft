@@ -476,10 +476,13 @@ export function applyRemoteMove(
     motion.verticalVelocity = Math.max(-TERMINAL_VELOCITY, launchUp - GRAVITY * t);
     motion.jumpVelX = move.jump.cosAngle * move.jump.xySpeed;
     motion.jumpVelY = move.jump.sinAngle * move.jump.xySpeed;
-    // A LAUNCH has a non-zero take-off speed; a step off a ledge is the walk election's
-    // `StartFalling(0)` and carries EXACTLY zero, whichever sign the sender uses for the rest. That is
-    // what separates "he jumped" from "he walked off a kerb", and only the first plays JumpStart.
-    motion.jumped = launchUp > 1e-3;
+    // A LAUNCH is an AIRBORNE PHASE with a non-zero take-off speed. Both halves, and the flag comes
+    // FIRST: `|zspeed| > 0` alone lets the magnitude decide the STATE, and a nonzero `zspeed` on a
+    // packet that is not a take-off -- a descent already under way, a field the server fills whenever
+    // its flag set includes falling -- would then read as a jump. The flag is the state; the magnitude
+    // is only ever the speed. A step off a ledge is the walk election's `StartFalling(0)` and carries
+    // exactly zero, which is what separates it from a jump once the flag has said "airborne".
+    motion.jumped = (move.flags & MoveFlag.FALLING) !== 0 && launchUp > 1e-3;
   } else {
     motion.verticalVelocity = 0;
     motion.jumpVelX = 0;

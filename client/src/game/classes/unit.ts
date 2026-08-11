@@ -279,6 +279,26 @@ function remoteCast(): CastFn {
 }
 const _remoteFrom = new THREE.Vector3();
 
+/**
+ * Is this unit's Z far enough from the terrain under it to be worth a swept cast?
+ *
+ * The cheap half of the ground snap. `TerrainProvider#heightAt` is a heightmap interpolation at
+ * 0.065 ms; the swept capsule cast that follows is 0.92 ms (both measured directly on loaded
+ * Northshire). A unit already standing on the ground -- which is most units, most frames -- answers
+ * here and pays nothing more.
+ *
+ * `null` (no registered chunk) answers TRUE: an unstreamed tile is not evidence that the pose is
+ * right, and the cast may still find a WMO floor the heightmap knows nothing about.
+ *
+ * The threshold is a hair over the cast's own skin: below it, the snap could not move the body
+ * meaningfully anyway.
+ */
+const GROUND_SNAP_EPSILON = 0.03;
+function needsGroundSnap(pos: THREE.Vector3): boolean {
+  const floor = collisionWorld.terrain.heightAt(pos.x, pos.y);
+  return floor === null || Math.abs(pos.z - floor) > GROUND_SNAP_EPSILON;
+}
+
 class Unit extends Entity {
   public guid: string;
   public name: string = "<unknown>";
@@ -2434,14 +2454,22 @@ class Unit extends Entity {
     const due = viewerPos === undefined
       || shouldPose(worldClock.frameIndex, this.model?.poseSlot ?? 0, viewerPos.distanceTo(motion.pos));
     //
-    // A STATIONARY peer is skipped too, and that is correctness before thrift: this exists to correct
-    // what the DEAD RECKONING INVENTED, and a peer who is not translating has invented nothing -- his Z
-    // is the one his own client reported, which is the authority. Snapping him anyway would drag him
-    // onto OUR terrain height wherever the two disagree, and would also run a 0.92 ms cast every frame
-    // for every unit that ever took a `MSG_MOVE_SET_*_SPEED` and then stood still for the rest of its
-    // life.
+    // A STATIONARY PEER IS SNAPPED TOO, and the round that skipped him was wrong -- this is the
+    // regression that made every standing peer and every standing creature HOVER. The reasoning behind
+    // the skip ("he has invented nothing, so his own reported Z is the authority") is true about the
+    // WIRE and false about the SCREEN: the server's Z and the height our terrain actually draws
+    // disagree by up to a yard and a half, and what the eye judges is the grass under his feet. The
+    // snap only ever LOWERS a body onto the floor it is standing above, so withholding it from a unit
+    // that is not moving is exactly "leave him wherever the disagreement puts him". The reference has
+    // no such exemption: `extrapolate_remote_units` resolves every remote every frame regardless of
+    // motion.
+    //
+    // Cost is handled by a PRE-GATE rather than by an exemption: a heightmap lookup is 0.065 ms against
+    // the cast's 0.92 (both measured), so ask the cheap question first -- is this unit's Z even in
+    // disagreement with the ground? -- and pay for the cast only when it is. A unit already standing on
+    // the terrain costs the lookup and nothing else, which is the case the exemption was trying to buy
+    // and gets it without the hover.
     const travel = Math.hypot(motion.pos.x - beforeX, motion.pos.y - beforeY);
-    const translating = travel > 1e-4 || (motion.flags & ANY_MOVE) !== 0;
 
     // THE AIRBORNE FLOOR CLAMP. A descending arc gets no resolve at all above -- a jump owns its Z --
     // and nothing ends it until `MSG_MOVE_FALL_LAND` arrives, which is up to a packet interval after
@@ -2470,8 +2498,8 @@ class Unit extends Entity {
         motion.verticalVelocity = 0;
       }
     }
-    if (!this.isPlayer && !swimming && !airborne && translating && due
-      && !peerTrace.flatExtrapolation) {
+    if (!this.isPlayer && !swimming && !airborne && due && !peerTrace.flatExtrapolation
+      && needsGroundSnap(motion.pos)) {
       const half = CAPSULE_HEIGHT * 0.5;
       _remoteFrom.set(motion.pos.x, motion.pos.y, motion.pos.z + half);
       // Skin ZERO: a peer sits exactly on the surface, so the height tracks every frame instead of
