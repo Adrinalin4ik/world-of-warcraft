@@ -40,19 +40,20 @@ export const SCRIPT_HANDLERS: ReadonlySet<string> = new Set([
   'OnEnter',
   'OnLeave',
   'OnClick',
+  // THE CLICK TRIPLE. A Button's click fires `PreClick`, then `OnClick`, then `PostClick`, and the two
+  // outer ones are as real as the middle one. Grepped across the 264 files this manifest loads:
+  // `<PostClick>` in `actionbarframe.xml:15-17` (`ActionButton_UpdateState(self, button, down)` -- what
+  // re-checks the auto-attack button's checked state after a click) and in
+  // `multicastactionbarframe.xml:65-67`; `<PreClick>` in `petactionbarframe.xml:45-47` and
+  // `spellbookframe.xml:150-152`. NOT on `SecureActionButtonTemplate`, which declares only `<OnClick>`.
+  // Both names were absent here, so loading the action bar printed "unknown script handler 'PostClick'"
+  // and the handler never ran. See `CLICK_SEQUENCE` for how one pointer click reaches all three.
+  'PreClick',
+  'PostClick',
   // Real in 3.3.5 and used by the manifest this runtime loads -- `RealmListRealmButtonTemplate`'s
   // `<OnDoubleClick>` joins the realm its `<OnClick>` just selected (realmlist.xml:234). It was missing
   // here, so loading RealmList.xml printed an "unknown script handler" line for a handler that both the
   // client and `Widget#onDoubleClick` support.
-  // THE CLICK TRIPLE. A Button's click fires `PreClick`, then `OnClick`, then `PostClick`, and the two
-  // outer ones are as real as the middle one: `ActionBarButtonTemplate` declares
-  // `<PostClick>ActionButton_UpdateState(self, button, down);</PostClick>` (`ActionBarFrame.xml:16-18`),
-  // which is what re-checks the auto-attack button after a click, and `SecureActionButtonTemplate`
-  // declares `<PreClick>` for the same reason. Both were absent here, so loading the action bar printed
-  // "unknown script handler 'PostClick'" and the handler never ran. See `CLICK_SEQUENCE` below for how
-  // one pointer click reaches all three.
-  'PreClick',
-  'PostClick',
   'OnDoubleClick',
   'OnMouseDown',
   'OnMouseUp',
@@ -122,7 +123,7 @@ const SCRIPT_PARAMS: ReadonlyMap<string, readonly string[]> = new Map([
   ['OnLeave', ['motion']],
   ['OnClick', ['button', 'down']],
   // The engine passes a `PreClick`/`PostClick` body the same two arguments it passes `OnClick`, and
-  // `ActionBarFrame.xml:17` reads both by name (`ActionButton_UpdateState(self, button, down)`).
+  // `actionbarframe.xml:16` reads both by name (`ActionButton_UpdateState(self, button, down)`).
   ['PreClick', ['button', 'down']],
   ['PostClick', ['button', 'down']],
   ['OnDoubleClick', ['button']],

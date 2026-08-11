@@ -206,7 +206,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    * `state = "top"`. Without the tick a warrior's bar is shown at the bottom edge, mostly off screen.
    *
    * It costs nothing in the steady state, which is why one named frame is affordable: the body returns
-   * on its first line once `completed == 1` (:47-49), so it dirties the draw-list fingerprint for the
+   * on its first line once `completed == 1` (:48-50), so it dirties the draw-list fingerprint for the
    * 0.15 s of the slide and never again until the form changes.
    */
   const bonusBarId = registry.byName('BonusActionBarFrame');

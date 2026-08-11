@@ -79,8 +79,11 @@ export interface UnitFieldUpdate {
    *
    * The byte offset is TrinityCore 3.3.5's own (`Unit.h`:
    * `UNIT_BYTES_2_OFFSET_SHEATH_STATE 0`, `_PVP_FLAG 1`, `_PET_FLAGS 2`, `_SHAPESHIFT_FORM 3`, written
-   * by `Unit::SetShapeshiftForm`), and the value is checked against the served
-   * `SpellShapeshiftForm.dbc`: a warrior in Battle Stance reads **17**, whose `bonusActionBar` is 1.
+   * by `Unit::SetShapeshiftForm`) -- that is a SERVER SOURCE, not a file in this repo, so it is
+   * corroborated twice against the live wire rather than trusted: both warriors on the test account read
+   * **17** here (and the login burst casts spell 2457 Battle Stance on them), `SpellShapeshiftForm.dbc`
+   * gives form 17 `bonusActionBar` **1**, and bonus bar 1 is exactly where their filled action slots are
+   * (1-based 73-84). The two non-warriors carry no `bytes_2` form at all and their slots are 1-4.
    *
    * Why a unit frame does not read it but the ACTION BAR does: form decides which 12-slot block of the
    * server's 144 action slots the buttons address (`ActionButton.lua:139-144`), so for a warrior this
