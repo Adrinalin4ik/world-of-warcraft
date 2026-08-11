@@ -664,11 +664,16 @@ export default class World extends EventEmitter {
           return;
         }
         const inst = entity.model?.instanceAnim ?? null;
+        // `move.horizVel` DIRECTLY for the player, never `locomotionSpeed()`. That method MUTATES --
+        // it advances `locoPrevX/Y` and sets `locoTracking`, which is the baseline the measured-
+        // displacement leg differences against. Calling it from an instrument would make the
+        // instrument change what it measures, which is the exact failure mode `CLAUDE.md` warns about
+        // and which this project has already shipped once. The player's own leg returns this value.
         peerTrace.recordRender(
           entity.guid,
           entity.view.matrixWorld,
           entity.locomotionFlags(),
-          entity.isPlayer ? entity.locomotionSpeed(delta) : (entity.remoteMotion?.speed ?? 0),
+          entity.isPlayer ? entity.move.horizVel.length() : (entity.remoteMotion?.speed ?? 0),
           inst?.current?.id ?? -1,
           inst?.playbackRate ?? 0,
         );

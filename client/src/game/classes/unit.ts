@@ -2385,10 +2385,19 @@ class Unit extends Entity {
     const swimming = (motion.flags & MoveFlag.SWIMMING) !== 0;
     const due = viewerPos === undefined
       || shouldPose(worldClock.frameIndex, this.model?.poseSlot ?? 0, viewerPos.distanceTo(motion.pos));
-    if (!this.isPlayer && !swimming && !airborne && due && !peerTrace.flatExtrapolation) {
+    //
+    // A STATIONARY peer is skipped too, and that is correctness before thrift: this exists to correct
+    // what the DEAD RECKONING INVENTED, and a peer who is not translating has invented nothing -- his Z
+    // is the one his own client reported, which is the authority. Snapping him anyway would drag him
+    // onto OUR terrain height wherever the two disagree, and would also run a 0.92 ms cast every frame
+    // for every unit that ever took a `MSG_MOVE_SET_*_SPEED` and then stood still for the rest of its
+    // life.
+    const travel = Math.hypot(motion.pos.x - beforeX, motion.pos.y - beforeY);
+    const translating = travel > 1e-4 || (motion.flags & ANY_MOVE) !== 0;
+    if (!this.isPlayer && !swimming && !airborne && translating && due
+      && !peerTrace.flatExtrapolation) {
       const half = CAPSULE_HEIGHT * 0.5;
       _remoteFrom.set(motion.pos.x, motion.pos.y, motion.pos.z + half);
-      const travel = Math.hypot(motion.pos.x - beforeX, motion.pos.y - beforeY);
       // Skin ZERO: a peer sits exactly on the surface, so the height tracks every frame instead of
       // living in a 0.02 yd dead band. See `snapToGround`'s `skin` note for the measurement.
       const drop = snapToGround(remoteCast(), _remoteFrom, travel, 0);
