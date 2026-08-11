@@ -121,3 +121,10 @@ A comment that invents a source, or that still describes a gap now closed, is tr
 - three's `projectObject` returns before walking children when `visible === false`.
 - Guids: a 64-bit guid does not survive a JS number. `network/guid-hex.ts` is the single formatter.
 - A `#pragma glslify: import(...)` chunk is invisible to webpack's watcher.
+- **No backticks inside `lua/compat.ts`'s 5.1 shim** — it is a JS template literal, so one backtick-quoted
+  identifier in a Lua comment terminates the string and yields ~25 nonsense TS errors pointing at Lua.
+- The UI canvas has no `preserveDrawingBuffer`: `drawImage`-ing it into a 2D context reads a **cleared**
+  buffer, so a pixel probe returns black whatever is on screen. Screenshot instead.
+- An `ADD` widget in the world UI must not write destination alpha. The world pass is premultiplied, and
+  three's `AdditiveBlending` there is an un-separated `blendFunc(ONE, ONE)` that saturates the offscreen
+  target's alpha and masks the world out — an opaque black quad. `material.ts#applyBlend` is the one place.
