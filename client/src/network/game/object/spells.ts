@@ -49,6 +49,9 @@ import { GUID_BYTES, guidBytes } from '../../guid-hex';
 import { castAnimationFor } from '../../../game/classes/spell-anim';
 import { spellData } from '../../../game/pipeline/dbc/spell-data';
 import { spellWire } from '../../../game/classes/spell-wire';
+// `GetTime()`'s clock. A cooldown's `start` is what the client's own Lua compares against, so the wire
+// side has to stamp it on the SAME clock -- see `lua/compat.ts#gameTime`.
+import { gameTime } from '../../../game/ui/framexml/lua/compat';
 
 /**
  * 3.3.5a `MAX_ACTION_BUTTONS`: 12 buttons x 12 pages. Load-bearing -- it is what makes the recorded
@@ -108,6 +111,38 @@ export class SpellHandler extends EventEmitter {
    */
   private autoAttacking = false;
 
+  /**
+   * THE COOLDOWN TABLE: spell id -> when it started and how long it runs, in `GetTime()` seconds.
+   *
+   * Two sources, and they are different in kind:
+   *
+   *  - **The global cooldown is computed here, not received.** Nothing on the wire carries it. When the
+   *    server CONFIRMS one of our casts, the 3.3.5a client puts `Spell.dbc.StartRecoveryTime` (column 206,
+   *    measured -- see `spell-data.ts`) on every spell sharing the cast spell's `StartRecoveryCategory`.
+   *    That is what makes the whole bar dim at once on a cast. The confirmation is `SMSG_SPELL_START` for
+   *    a timed cast and `SMSG_SPELL_GO` for an instant, which sends no START at all -- see
+   *    `handleSpellStart` for why START rather than GO, and `castStarted` for how the two are kept from
+   *    stamping the same cast twice.
+   *  - **Real cooldowns come from the server**, through `SMSG_SPELL_COOLDOWN` (0x134) and
+   *    `SMSG_COOLDOWN_EVENT` (0x135), and are cleared by `SMSG_CLEAR_COOLDOWN` (0x1DE). The DBC's own
+   *    `RecoveryTime` is a fallback for the confirmed cast, since the server does not always send a
+   *    packet for a cooldown the client can derive.
+   *
+   * Entries are never swept on a timer: an expired entry is simply in the past, and `GetActionCooldown`
+   * and the sweep pass both read the numbers rather than a boolean. `pruneCooldowns` drops them on the
+   * next update so the map cannot grow without bound over a long session.
+   */
+  private cooldowns = new Map<number, { start: number; duration: number }>();
+
+  /**
+   * Spells of ours for which a `SMSG_SPELL_START` has been seen and the matching GO has not.
+   *
+   * Exists only to stop the global cooldown being stamped twice for one cast -- once at START and again
+   * at GO. See `handleSpellStart` and `handleSpellGo`. Cleared on GO, and on a failure/interrupt, so a
+   * cast that never completes cannot leave an id in here and suppress the next instant's GCD.
+   */
+  private castStarted = new Set<number>();
+
   constructor(gameHandler: GameHandler) {
     super();
     this.game = gameHandler;
@@ -116,6 +151,223 @@ export class SpellHandler extends EventEmitter {
     this.game.on('packet:receive:SMSG_SPELL_START', this.handleSpellStart.bind(this));
     this.game.on('packet:receive:SMSG_SPELL_GO', this.handleSpellGo.bind(this));
     this.game.on('packet:receive:SMSG_CAST_FAILED', this.handleCastFailed.bind(this));
+    this.game.on('packet:receive:SMSG_SPELL_COOLDOWN', this.handleSpellCooldown.bind(this));
+    this.game.on('packet:receive:SMSG_COOLDOWN_EVENT', this.handleCooldownEvent.bind(this));
+    this.game.on('packet:receive:SMSG_CLEAR_COOLDOWN', this.handleClearCooldown.bind(this));
+    this.game.on('packet:receive:SMSG_SPELL_FAILURE', this.handleSpellFailure.bind(this));
+  }
+
+  /**
+   * `SMSG_SPELL_FAILURE` (0x133): a cast that had already STARTED was stopped.
+   *
+   * The distinct opcode matters and is why an interrupt is not inferred from silence, which is what the
+   * cast bar would otherwise have to do. `SMSG_CAST_FAILED` (0x130) is the server REFUSING a cast up
+   * front -- it never began, and the bar was never shown. This one is a cast that was running and was
+   * broken: a stun, a knockback, moving while casting. `CastingBarFrame` distinguishes them, turning red
+   * with `FAILED` for one and `INTERRUPTED` for the other (`castingbarframe.lua:139-160`).
+   *
+   * 3.3.5a body: `pguid caster`, `u8 castCount`, `u32 spellId`, `u8 result`.
+   */
+  private handleSpellFailure(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    let caster = '0x0';
+    let spellId = 0;
+    try {
+      caster = gp.readPackedGUID();
+      gp.readUnsignedByte();
+      spellId = gp.readUnsignedInt();
+    } catch (error) {
+      return;
+    }
+    spellWire.record({
+      at: Date.now(),
+      kind: 'SPELL_FAILURE',
+      spellId,
+      caster,
+      detail: { name: spellData.spell(spellId)?.name ?? null },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    // A cast that broke never reaches GO, so its id must be dropped here or it would suppress the
+    // global cooldown of the next INSTANT cast of the same spell (see `castStarted`).
+    this.castStarted.delete(spellId);
+    this.emit('spellFailure', { caster, spellId });
+  }
+
+  /** `GetActionCooldown`'s two numbers for one spell, or null when nothing is running. */
+  cooldownOf(spellId: number): { start: number; duration: number } | null {
+    const entry = this.cooldowns.get(spellId);
+    if (entry === undefined) {
+      return null;
+    }
+    if (entry.start + entry.duration <= gameTime()) {
+      this.cooldowns.delete(spellId);
+      return null;
+    }
+    return entry;
+  }
+
+  /**
+   * Record a cooldown. `durationMs` of 0 or less CLEARS, which is what `SMSG_CLEAR_COOLDOWN` means.
+   *
+   * A SHORTER cooldown never replaces a longer one that is still running: a global cooldown landing on a
+   * spell that is on a 30-second cooldown of its own must not cut it to 1.5 s. The real client keeps the
+   * later expiry for exactly this reason -- every cast puts the GCD on every spell on the bar.
+   */
+  private setCooldown(spellId: number, durationMs: number, startAt = gameTime()): boolean {
+    if (spellId <= 0) {
+      return false;
+    }
+    if (durationMs <= 0) {
+      return this.cooldowns.delete(spellId);
+    }
+    const duration = durationMs / 1000;
+    const existing = this.cooldowns.get(spellId);
+    if (existing !== undefined && existing.start + existing.duration > startAt + duration) {
+      return false;
+    }
+    this.cooldowns.set(spellId, { start: startAt, duration });
+    return true;
+  }
+
+  /** Drop entries whose expiry has passed, so a long session's map stays the size of the live set. */
+  private pruneCooldowns(): void {
+    const now = gameTime();
+    for (const [spellId, entry] of this.cooldowns) {
+      if (entry.start + entry.duration <= now) {
+        this.cooldowns.delete(spellId);
+      }
+    }
+  }
+
+  /**
+   * THE GLOBAL COOLDOWN, applied on our own confirmed cast.
+   *
+   * Applied at `SMSG_SPELL_GO` and not at the click, deliberately: a cast the server refuses
+   * (`SMSG_CAST_FAILED`) triggers no GCD in the real client, and `Gesf` -- who is refused every cast --
+   * would otherwise show a full bar of sweeps for a cast that never happened. GO is the server's
+   * confirmation, and it is also where this file already arms the caster's animation.
+   *
+   * The GCD goes on every KNOWN spell sharing the category, which is the client's rule and is why the
+   * whole bar dims at once. Spells not known are skipped -- they cannot be on a button.
+   */
+  private applyGlobalCooldown(spellId: number): boolean {
+    const cast = spellData.spell(spellId);
+    if (cast === null || cast.startRecoveryCategory === 0 || cast.startRecoveryTimeMs <= 0) {
+      // Off-GCD, and correctly so for Heroic Strike (78) and Auto Attack (6603) -- both read category 0
+      // and time 0 on the served file. `spellData` being absent also lands here, which is honest: with
+      // no table there is no GCD to compute and the bar simply shows none.
+      return false;
+    }
+    const at = gameTime();
+    let changed = false;
+    for (const known of this.known) {
+      const row = spellData.spell(known);
+      if (row === null || row.startRecoveryCategory !== cast.startRecoveryCategory) {
+        continue;
+      }
+      if (this.setCooldown(known, cast.startRecoveryTimeMs, at)) {
+        changed = true;
+      }
+    }
+    // The cast spell's OWN cooldown, from the DBC, for the same reason: the server does not send a packet
+    // for a cooldown the client can derive from its own tables.
+    if (cast.recoveryTimeMs > 0 && this.setCooldown(spellId, cast.recoveryTimeMs, at)) {
+      changed = true;
+    }
+    if (cast.categoryRecoveryTimeMs > 0 && cast.category !== 0) {
+      for (const known of this.known) {
+        const row = spellData.spell(known);
+        if (row === null || row.category !== cast.category) {
+          continue;
+        }
+        if (this.setCooldown(known, cast.categoryRecoveryTimeMs, at)) {
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * `SMSG_SPELL_COOLDOWN` (0x134): the server's own cooldown list for a unit.
+   *
+   * 3.3.5a body: `u64 guid`, `u8 flags`, then `{ u32 spellId, u32 cooldownMs }` repeated to the end of
+   * the body. Only OUR OWN guid matters -- a pet's or another unit's cooldowns are not on our bar.
+   */
+  private handleSpellCooldown(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    const guid = gp.readGUID();
+    gp.readUnsignedByte();
+    let changed = false;
+    const pairs: Array<[number, number]> = [];
+    while (gp.available >= 8) {
+      const spellId = gp.readUnsignedInt();
+      const ms = gp.readUnsignedInt();
+      pairs.push([spellId, ms]);
+      if (this.setCooldown(spellId, ms)) {
+        changed = true;
+      }
+    }
+    spellWire.record({
+      at: Date.now(),
+      kind: 'SPELL_COOLDOWN',
+      spellId: pairs[0]?.[0] ?? 0,
+      caster: String(guid),
+      detail: {
+        count: pairs.length,
+        firstSpell: pairs[0]?.[0] ?? null,
+        firstMs: pairs[0]?.[1] ?? null,
+      },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    if (changed) {
+      this.announceCooldowns();
+    }
+  }
+
+  /**
+   * `SMSG_COOLDOWN_EVENT` (0x135): one spell's cooldown STARTED, with no duration in the packet.
+   *
+   * 3.3.5a body: `u32 spellId`, `u64 guid`. The duration is the client's own to look up, which is why
+   * `Spell.dbc`'s `RecoveryTime` is read here rather than waited for on the wire.
+   */
+  private handleCooldownEvent(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    const spellId = gp.readUnsignedInt();
+    const guid = gp.readGUID();
+    const row = spellData.spell(spellId);
+    const ms = row?.recoveryTimeMs ?? 0;
+    spellWire.record({
+      at: Date.now(),
+      kind: 'COOLDOWN_EVENT',
+      spellId,
+      caster: String(guid),
+      detail: { recoveryTimeMs: ms, name: row?.name ?? null },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    if (ms > 0 && this.setCooldown(spellId, ms)) {
+      this.announceCooldowns();
+    }
+  }
+
+  /** `SMSG_CLEAR_COOLDOWN` (0x1DE): `u32 spellId`, `u64 guid`. The cooldown is over early. */
+  private handleClearCooldown(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const spellId = gp.readUnsignedInt();
+    if (this.cooldowns.delete(spellId)) {
+      this.announceCooldowns();
+    }
+  }
+
+  private announceCooldowns(): void {
+    this.pruneCooldowns();
+    this.emit('cooldownsChanged');
   }
 
   // -- Reads --------------------------------------------------------------------------------------
@@ -220,18 +472,44 @@ export class SpellHandler extends EventEmitter {
   }
 
   /**
-   * `SMSG_SPELL_START` (0x131): a cast BEGAN. Read for the record; nothing acts on it.
+   * `SMSG_SPELL_START` (0x131): a cast BEGAN. **This is what drives the cast bar.**
    *
-   * A cast bar is deferred (`CastingBarFrame` is correctly hidden today), and the caster's animation is
-   * armed at SPELL_GO rather than here -- which is the reference's own rule: "**`SpellCastOmni` (54) is
-   * armed at SPELL_GO**" (`benilla/src/creature_anim/driver.rs:616`). So this handler exists to prove the
-   * layout and to give the deferred cast bar a place to land.
+   * The caster's animation is still armed at SPELL_GO rather than here -- the reference's own rule,
+   * "`SpellCastOmni` (54) is armed at SPELL_GO" (`benilla/src/creature_anim/driver.rs:616`).
+   *
+   * **A correction to `STATE.md`, which said the cast duration "IS decoded and emitted".** It was not.
+   * `readCastHead` stopped after `castFlags` and never read the trailing `u32`, so `spellStart` carried
+   * no duration at all and a cast bar had nothing to size itself from. That word is the cast length in
+   * milliseconds -- ONE word, not two; see `readCastHead` for the measurement that settled the count.
+   *
+   * The wire's number is a better source than `Spell.dbc`'s `CastingTimeIndex`, and is why that table is
+   * not read: the server's value already has haste, talents and every aura folded into it, where the DBC
+   * carries only the unmodified base. Measured for Healing Wave (331) on a level-70 shaman: **1500 ms**.
    */
   private handleSpellStart(gp: GamePacket): void {
     const decoded = this.readCastHead(gp, 'SPELL_START');
-    if (decoded !== null) {
-      this.emit('spellStart', decoded);
+    if (decoded === null) {
+      return;
     }
+    // THE GLOBAL COOLDOWN STARTS HERE for a spell with a cast time, not at GO -- and this was measured
+    // wrong the first way round. Applying it only at GO put the sweep AFTER the 1.5 s cast instead of
+    // during it: sampled live, the cast bar filled from t=300 ms to t=1700 ms and the three sweeps
+    // appeared at t=1698 ms, which is the moment the cast ENDED. The real client runs the bar and the
+    // global cooldown together.
+    //
+    // START is a safe trigger for the same reason GO was chosen originally: the server only sends it for
+    // a cast it has ACCEPTED. A refused cast gets `SMSG_CAST_FAILED` and no START -- which is what makes
+    // this correct for `Gesf`, whose every cast is refused and who must show no sweep at all.
+    //
+    // `castStarted` then suppresses the GO-time application, or the same cast would stamp the cooldown
+    // twice and the second stamp -- being later -- would win and double the GCD.
+    if (decoded.caster === this.game.world.player?.guid) {
+      this.castStarted.add(decoded.spellId);
+      if (this.applyGlobalCooldown(decoded.spellId)) {
+        this.announceCooldowns();
+      }
+    }
+    this.emit('spellStart', decoded);
   }
 
   /**
@@ -264,16 +542,29 @@ export class SpellHandler extends EventEmitter {
       }
     }
 
+    // THE GLOBAL COOLDOWN for an INSTANT spell, which is the only kind that reaches here without having
+    // been stamped already. An instant sends no `SMSG_SPELL_START` at all -- so `castStarted` is empty for
+    // it and this is its one chance -- while a timed cast was stamped at START and is skipped here, or the
+    // later stamp would win and double the GCD. `world.player` is the authority on which guid is ours; a
+    // peer's confirmed cast must not put a cooldown on our bar.
+    if (decoded.caster === this.game.world.player?.guid) {
+      if (this.castStarted.delete(decoded.spellId)) {
+        // Timed cast: already stamped at START. Nothing to do.
+      } else if (this.applyGlobalCooldown(decoded.spellId)) {
+        this.announceCooldowns();
+      }
+    }
+
     this.emit('spellGo', decoded);
   }
 
   /**
    * The shared head of `SMSG_SPELL_START` and `SMSG_SPELL_GO`.
    *
-   * `pguid item-or-caster`, `pguid caster`, `u8 castCount`, `u32 spellId`, `u32 castFlags`, `u32` (the
-   * remaining cast time on START, `getMSTime` on GO). The first guid is the CAST ITEM's when one is in
-   * play and the caster's own otherwise; the second is always the casting unit, so the second is the one
-   * to animate (`spells.rs:143-146`).
+   * `pguid item-or-caster`, `pguid caster`, `u8 castCount`, `u32 spellId`, `u32 castFlags`, then on START
+   * `u32 timer` (ms remaining) and `u32 castTime` (the full length) and on GO one `u32 getMSTime()`. The
+   * first guid is the CAST ITEM's when one is in play and the caster's own otherwise; the second is always
+   * the casting unit, so the second is the one to animate (`spells.rs:143-146`).
    *
    * SELF-CHECKING, on the `combatWire` principle: a `spellId` of 0, or one absurdly out of range, means
    * the layout is wrong -- most likely the reference's 1.12 form, which lands the id one byte early. The
@@ -282,19 +573,45 @@ export class SpellHandler extends EventEmitter {
   private readCastHead(
     gp: GamePacket,
     kind: 'SPELL_START' | 'SPELL_GO',
-  ): { caster: string; spellId: number; castFlags: number } | null {
+  ): { caster: string; spellId: number; castFlags: number; timerMs: number; castTimeMs: number } | null {
     gp.index = gp.headerSize;
     const bodySize = gp.length - gp.headerSize;
 
     let caster = '0x0';
     let spellId = 0;
     let castFlags = 0;
+    let timerMs = 0;
+    let castTimeMs = 0;
     try {
       gp.readPackedGUID();
       caster = gp.readPackedGUID();
       gp.readUnsignedByte();
       spellId = gp.readUnsignedInt();
       castFlags = gp.readUnsignedInt();
+      // THE WORD THE CAST BAR NEEDS, which was described in this comment for two rounds and never read.
+      // ONE `u32`, and that count is MEASURED rather than taken from a server source.
+      //
+      // The first attempt at this read two words -- `m_timer` then `m_casttime`, which is the shape
+      // TrinityCore's `SendSpellStart` suggests -- and the live wire refuted it immediately. For a
+      // shaman's Healing Wave (331) the two words came back **1500 and 2**. If both fields existed they
+      // would both be 1500 (`m_timer` is initialised to `m_casttime` when a cast is prepared), and 2 is
+      // exactly `TARGET_FLAG_UNIT`, the first word of the `SpellCastTargets` block that follows. So
+      // there is one `u32` here and the next thing on the wire is the target mask.
+      //
+      // Corroborated on `SPELL_GO` for the same cast, where the single word read **18448130** -- a
+      // `getMSTime()` millisecond counter, not a duration, which is what the reference says GO carries.
+      //
+      // At the START of a cast the remaining time and the full length are the same number, so this one
+      // word serves as both: `castTimeMs` is the bar's length and `timerMs` the part still to run. A
+      // `SMSG_SPELL_START` for a cast ALREADY IN PROGRESS (entering the world beside a casting unit)
+      // would carry only the remainder and would draw a bar that is too short -- named here rather than
+      // guessed at, because nothing in this client can currently observe that case.
+      if (gp.available >= 4) {
+        timerMs = gp.readUnsignedInt();
+        if (kind === 'SPELL_START') {
+          castTimeMs = timerMs;
+        }
+      }
     } catch (error) {
       spellWire.record({
         at: Date.now(),
@@ -322,6 +639,8 @@ export class SpellHandler extends EventEmitter {
         castFlags,
         plausible: plausible ? 1 : 0,
         name: spellData.spell(spellId)?.name ?? null,
+        timerMs,
+        castTimeMs,
       },
       bodySize,
       consumed: gp.index - gp.headerSize,
@@ -332,7 +651,9 @@ export class SpellHandler extends EventEmitter {
       );
       return null;
     }
-    return { caster, spellId, castFlags };
+    return {
+      caster, spellId, castFlags, timerMs, castTimeMs,
+    };
   }
 
   /**
@@ -358,6 +679,9 @@ export class SpellHandler extends EventEmitter {
       bodySize,
       consumed: gp.index - gp.headerSize,
     });
+    // Same reason as in `handleSpellFailure`: a refused cast never reaches GO, so its id must not be left
+    // in `castStarted` to suppress a later instant's global cooldown.
+    this.castStarted.delete(spellId);
     this.emit('castFailed', { spellId, result });
   }
 

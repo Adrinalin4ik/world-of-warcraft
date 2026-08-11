@@ -85,6 +85,16 @@ export interface UnitSnapshot {
    * drawn as the lighter region to the RIGHT of current xp, not as part of it.
    */
   restXp: number;
+
+  /**
+   * `UNIT_FIELD_BASE_MANA` -- mana before gear, which is what a percentage spell cost is a percentage OF.
+   *
+   * Here rather than derived from `maxPower` because `Spell.dbc`'s `ManaCostPercentage` (column 204) is
+   * how most caster spells state their cost -- Fireball 8%, Healing Wave 13%, both with `manaCost` 0 --
+   * and `maxPower` is a different, larger number for any geared character. `IsUsableAction` reads it;
+   * nothing else does.
+   */
+  baseMana: number;
 }
 
 /** A unit that exists but about which nothing has arrived yet. */
@@ -104,6 +114,7 @@ export function emptySnapshot(): UnitSnapshot {
     xp: 0,
     maxXp: 0,
     restXp: 0,
+    baseMana: 0,
   };
 }
 

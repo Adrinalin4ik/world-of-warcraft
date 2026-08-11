@@ -105,6 +105,30 @@ export function installStubApi(vm: LuaVM): void {
   vm.registerFunction('IsAddonVersionCheckEnabled', () => [false]);
   vm.registerFunction('SetAddonVersionCheck', () => []);
 
+  /**
+   * `IsMacClient()` -- and `false` is the TRUE answer here, not a stub's convenience: this client is a
+   * browser, not Blizzard's Mac build, so no Mac-specific key name applies.
+   *
+   * It is in this file because its absence had a disproportionate effect, and finding that is worth
+   * recording. `UIParent.lua:3095` defines the client's OWN `GetBindingText`, and its body opens with
+   * `if ( IsMacClient() ) then` -- so with this global absent **every call to `GetBindingText` raised**,
+   * which is `ActionButton_UpdateHotkeys`'s second line. The visible symptom was an action bar whose
+   * hotkey labels were empty strings while the keys themselves worked perfectly.
+   *
+   * That only became reachable once `GetItemQualityColor` landed (`api/items.ts`): before it,
+   * `UIParent.lua` died at line 102 and never got as far as defining `GetBindingText` at all, so the
+   * engine's own fallback in `api/bindings.ts` was answering and the labels drew. Fixing one file-scope
+   * error exposed the next one 3000 lines further down -- which is the shape of this whole area, and the
+   * reason a load report with 330 errors still has plenty in it worth reading.
+   *
+   * The client's own `GetBindingText` correctly SHADOWS the engine one registered in `api/bindings.ts`.
+   * That is the right outcome by `CLAUDE.md`'s first rule -- its version localises through `KEY_*` and
+   * `*_KEY_TEXT` globals and builds the modifier prefix in the same ALT-CTRL-SHIFT order
+   * (`uiparent.lua:3113-3122`) that `bindings.ts#keyToken` produces. Ours remains as the pre-`UIParent`
+   * fallback, which is the window `ActionButton_OnLoad` would otherwise fire in.
+   */
+  vm.registerFunction('IsMacClient', () => [false]);
+
   // `SetCharSelectBackground` and `SetCharCustomizeBackground` were here as no-ops and are now real,
   // in `api/characters.ts` -- they are the two calls `SetBackgroundModel` (glueparent.lua:374-386)
   // bottoms out in, so stubbing them was what pinned character select to the login screen's stage.

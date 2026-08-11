@@ -38,6 +38,14 @@ export interface SpellWireRow {
     | 'SPELL_GO'
     | 'CAST_FAILED'
     | 'CAST_SENT'
+    // The three cooldown opcodes. `SPELL_COOLDOWN` (0x134) carries a whole list, `COOLDOWN_EVENT` (0x135)
+    // one spell with no duration; both are on the wire and neither carries the GLOBAL cooldown, which the
+    // client computes from `Spell.dbc` column 206 (`object/spells.ts#applyGlobalCooldown`).
+    | 'SPELL_COOLDOWN'
+    | 'COOLDOWN_EVENT'
+    // `SMSG_SPELL_FAILURE` (0x133) -- a cast that had STARTED was broken, which is a different thing from
+    // `CAST_FAILED` (0x130), the server refusing one up front. The cast bar colours them differently.
+    | 'SPELL_FAILURE'
     /**
      * Not a packet: the one row `spell-data.ts` writes when the four DBC tables finish loading, with
      * their row counts and the elapsed ms.

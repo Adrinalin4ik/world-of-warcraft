@@ -91,6 +91,15 @@ export interface UnitFieldUpdate {
    * `game/ui/action-bridge.ts`.
    */
   shapeshiftForm?: number;
+
+  /**
+   * `UNIT_FIELD_BASE_MANA` (`enums.ts`: `object_end + 0x0072`) -- mana BEFORE gear and buffs.
+   *
+   * Not decoration and not the same as `maxPower`: `Spell.dbc`'s `ManaCostPercentage` is a percentage of
+   * THIS, and it is how most caster spells state their cost (`manaCost` reads 0 for Fireball, Healing
+   * Wave and Smite alike). See the read below for why substituting `maxPower` would be wrong.
+   */
+  baseMana?: number;
 }
 
 /**
@@ -168,6 +177,14 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
   out.xp = u32('player_xp');
   out.maxXp = u32('player_next_level_xp');
   out.restXp = u32('player_rest_state_experience');
+
+  // BASE MANA, and the reason it is read at all: most caster spells in 3.3.5a store no absolute
+  // `manaCost` -- they store `ManaCostPercentage` (`Spell.dbc` column 204, measured: Fireball 8,
+  // Healing Wave 13, Smite 9, all with `manaCost` 0) -- and that percentage is of BASE mana, not of
+  // maximum mana. Approximating it with `maxPower` would grey a button EARLY by however much mana the
+  // character's gear adds, which is exactly the "visible lie" a wrong tint would be. The wire carries
+  // the real number, so `IsUsableAction` uses it (`game/ui/framexml/lua/api/actions.ts`).
+  out.baseMana = u32('unit_field_base_mana');
 
   return out;
 }
@@ -249,6 +266,7 @@ export function applyUnitFields(
   set('xp', fields.xp);
   set('maxXp', fields.maxXp);
   set('restXp', fields.restXp);
+  set('baseMana', fields.baseMana);
 
   // AFTER the power type is settled, using whatever the unit now knows -- see `readPower`.
   const power = readPower(values, unit.fields.powerType ?? 0);

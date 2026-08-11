@@ -207,6 +207,19 @@ export class Widget {
    * (`drawList` below) rather than a side table the renderer could not see.
    */
   statusBar: StatusBarState | null = null;
+  /**
+   * A `<Cooldown>`'s running sweep, or null. Written only by `SetCooldown`.
+   *
+   * This lived in a `WeakMap` in `methods/cooldown.ts` with the stated rule "if a later round draws the
+   * sweep, this moves onto `Widget` -- that is the signal that it should". This round draws it, so it has
+   * moved: the sweep is rendered from the draw list (`world-ui.ts#drawSweeps`), and a `WeakMap` in a
+   * methods module is not reachable from the draw pass.
+   *
+   * `start` is a `GetTime()`-based timestamp in seconds and `duration` is seconds -- the contract
+   * `GetActionCooldown` returns and `CooldownFrame_SetTimer` passes straight through
+   * (`actionbutton.lua:345-349`).
+   */
+  cooldown: { start: number; duration: number } | null = null;
   blend: Blend = 'ALPHA';
   /** Multiplied into the sprite, as `#rrggbb`. */
   vertexColor = '#ffffff';

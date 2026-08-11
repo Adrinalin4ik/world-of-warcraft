@@ -57,6 +57,33 @@ export interface ActionSnapshot {
   /** `GetActionCooldown`'s `start` and `duration`, in `GetTime()` seconds. Both 0 for no cooldown. */
   cooldownStart: number;
   cooldownDuration: number;
+
+  /**
+   * `IsUsableAction`'s first return. False greys the icon to (0.4, 0.4, 0.4).
+   *
+   * "Usable" here means AFFORDABLE, and only that. The real client's `isUsable` also folds in form gating,
+   * reagents, required equipment and required stance -- none of which this client evaluates -- so a spell
+   * that is unaffordable is greyed and one that is merely form-gated is not. That is the honest half:
+   * the half that IS computed is computed from the real numbers, and the half that is not leaves the
+   * button bright rather than guessing it dark. See `ui/action-bridge.ts#usability` for the arithmetic.
+   */
+  usable: boolean;
+  /**
+   * `IsUsableAction`'s second return. Tints the icon (0.5, 0.5, 1.0) -- a washed BLUE, not red.
+   *
+   * Only meaningful when `usable` is false; `ActionButton_UpdateUsable` tests them in that order
+   * (`actionbutton.lua:313-328`).
+   */
+  notEnoughPower: boolean;
+  /**
+   * `IsActionInRange`'s return: `null` (no range to speak of, or no target), `0` OUT of range, `1` in.
+   *
+   * The three are not interchangeable. `ActionButton_OnUpdate:461-488` hides the range indicator on
+   * `nil`, paints it RED `(1.0, 0.1, 0.1)` on `0` and grey `(0.6, 0.6, 0.6)` on `1` -- so `nil` and `1`
+   * differ in whether the dot is drawn at all, and returning `1` for "we do not know" would put a grey
+   * dot on every button for ever.
+   */
+  inRange: number | null;
 }
 
 export function emptyAction(): ActionSnapshot {
@@ -68,6 +95,11 @@ export function emptyAction(): ActionSnapshot {
     isCurrent: false,
     cooldownStart: 0,
     cooldownDuration: 0,
+    // An EMPTY slot is usable and in no particular range. `ActionButton_Update` hides a button with no
+    // action before either value is read, so these are the values that cannot cause a visible claim.
+    usable: true,
+    notEnoughPower: false,
+    inRange: null,
   };
 }
 
@@ -267,19 +299,32 @@ export function installActionsApi(vm: LuaVM): void {
    * deferred the condition set explicitly. A grey icon that should be bright is a visible lie; a bright
    * icon on a build with no usability feed is a stated gap.
    */
+  /**
+   * `IsUsableAction(action)` -> `isUsable, notEnoughMana`.
+   *
+   * Both come from the host's snapshot, computed in `ui/action-bridge.ts#usability` from the player's
+   * live power and the spell's cost. This was a declared gap returning a hard `true, false`, which
+   * painted every ability at full brightness whatever the player could afford.
+   *
+   * An EMPTY slot answers `true, false` -- `ActionButton_Update` hides a button with no action before
+   * ever calling this, so the values are unobservable and `true` is the one that asserts nothing.
+   */
+  fn('IsUsableAction', (args) => {
+    const slot = slotOf(args[0]);
+    if (slot === null || slot.spellId === 0) {
+      return [true, false];
+    }
+    return [slot.usable, slot.notEnoughPower];
+  });
+
+  /**
+   * `IsActionInRange(action)` -> `nil` / `0` / `1`. See `ActionSnapshot#inRange` on why the three differ.
+   *
+   * This was a declared gap returning a hard `nil`, which hid the range indicator on every button.
+   */
+  fn('IsActionInRange', (args) => [slotOf(args[0])?.inRange ?? null]);
+
   const gaps: Array<[string, string, unknown[]]> = [
-    [
-      'IsActionInRange',
-      'no range feed: SpellRange.dbc is not read and there is no per-frame distance check, so the '
-        + 'range indicator on a hotkey cannot be coloured (ActionButton_OnUpdate:467)',
-      [null],
-    ],
-    [
-      'IsUsableAction',
-      'no usability feed: returns usable=true, notEnoughMana=false unconditionally, so an '
-        + 'unaffordable or form-gated ability is drawn at full brightness (ActionButton_UpdateUsable)',
-      [true, false],
-    ],
     [
       // The TAIL of every action-button click: `SecureActionButton_OnClick:537` reads
       // `if ( SpellCanTargetItem() )` after it has dispatched the action, to route a spell that needs an

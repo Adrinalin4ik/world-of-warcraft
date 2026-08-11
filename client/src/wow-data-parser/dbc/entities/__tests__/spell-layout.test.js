@@ -31,6 +31,21 @@ const NAME_COLUMN = 136;
 const ICON_ID = 185; // SpellIcon.dbc 185 = Interface\Icons\Spell_Fire_FlameBolt
 const SPELL_ID = 133; // Fireball
 
+/**
+ * THE GLOBAL COOLDOWN's two columns, guarded for the same reason as the two above: a shift here is
+ * invisible. A wrong `StartRecoveryTime` still decodes as a plausible number, and the only symptom is a
+ * cooldown sweep of the wrong length -- or, if it reads a zero, no sweep at all.
+ *
+ * Both were verified against the served file by HTTP range request over the first 2000 records: spell 133
+ * Fireball, 331 Healing Wave, 403 Lightning Bolt and 585 Smite all read category **133** and time
+ * **1500 ms**; 1752 Sinister Strike and 2098 Eviscerate read 133 and **1000**; 78 Heroic Strike and
+ * 6603 Auto Attack read **0 and 0**, which is correct -- both are genuinely off the global cooldown.
+ */
+const GCD_CATEGORY_COLUMN = 205;
+const GCD_TIME_COLUMN = 206;
+const GCD_CATEGORY = 133;
+const GCD_TIME_MS = 1500;
+
 /** A one-record `Spell.dbc` whose id, icon and name sit at the measured columns. */
 function buildSpellDbc() {
   const name = 'Fireball';
@@ -58,6 +73,8 @@ function buildSpellDbc() {
   column(0, SPELL_ID);
   column(ICON_COLUMN, ICON_ID);
   column(NAME_COLUMN, nameOffset);
+  column(GCD_CATEGORY_COLUMN, GCD_CATEGORY);
+  column(GCD_TIME_COLUMN, GCD_TIME_MS);
 
   bytes.set(stringBlock, 20 + RECORD_SIZE);
   return buffer;
@@ -78,4 +95,9 @@ test('Spell.dbc decodes iconID at column 133 and name at column 136', () => {
   // is right. Before the fix `iconID` read column 139 and `name` column 142.
   expect(record.iconID).toBe(ICON_ID);
   expect(record.name).toBe('Fireball');
+  // The global cooldown, which the action bar's sweep is sized from. These sit 69 and 70 columns PAST
+  // `iconID`, through four `LocalizedStringRef` blocks (17 columns each), so they are the strongest
+  // available check that the definition's total width is right all the way to the tail.
+  expect(record.startRecoveryCategory).toBe(GCD_CATEGORY);
+  expect(record.startRecoveryTime).toBe(GCD_TIME_MS);
 });

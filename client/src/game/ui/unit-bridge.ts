@@ -69,6 +69,8 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   snapshot.xp = unit.fields.xp ?? 0;
   snapshot.maxXp = unit.fields.maxXp ?? 0;
   snapshot.restXp = unit.fields.restXp ?? 0;
+  // Base mana, for `IsUsableAction`'s percentage-cost spells. See `UnitSnapshot#baseMana`.
+  snapshot.baseMana = unit.fields.baseMana ?? 0;
 
   // The reaction, resolved lazily and cached on the unit by `reactionFor`: `FactionTemplate.dbc` is
   // an async load and the first units stream in before it lands. `REACTION_NEUTRAL` is the stand-in

@@ -41,31 +41,40 @@
  * registered below through `notImplemented` because addons duck-type them (`if cd.SetReverse then`)
  * and because a silent no-op is how a wrong sweep direction becomes invisible.
  *
- * ## Why nothing is DRAWN
+ * ## The sweep IS drawn now, and how the two objections were answered
  *
- * The state is stored and readable; the radial sweep is deliberately not rendered, and this is the
- * honest version of that decision rather than an oversight.
+ * This file used to declare `Cooldown:sweep` through `notImplemented`, for two reasons that were both
+ * true and are both now void. They are worth recording because the way out was a rendering decision,
+ * not a compromise on fidelity.
  *
- * The in-world UI renders to an offscreen target that is redrawn only when a fingerprint of the draw
- * list changes (`world-ui.ts#drawListSignature`). That single change took `ui.framexml` from ~10 ms to
- * ~1 ms per frame. A sweep is a wedge whose geometry changes every frame, so it would dirty the
- * fingerprint on every frame of every cooldown and hand the entire saving back -- for 12+ buttons, on
- * every global cooldown, which is to say almost always in combat. `STATE.md`'s frame-budget section
- * names this specific hazard.
+ *  1. **"The widget layer draws axis-aligned quads only, so there is no mesh for a radial wedge."**
+ *     Correct about the mesh, wrong about what a wedge needs. A radial wedge over a square button is a
+ *     FRAGMENT test, not a geometry problem: on one axis-aligned quad covering the button, the shader
+ *     computes each pixel's angle about the centre and discards it if the angle is already past the
+ *     sweep. So the wedge is drawn on the quad the widget layer already has, and no new mesh type,
+ *     triangle fan or vertex path exists. `world-ui.ts#sweepMaterial` is the whole of it.
  *
- * Two further reasons it is not merely a budget trade: the sweep is a radial wedge, and this widget
- * layer draws axis-aligned textured quads only (`widget.ts#drawList`) -- there is no mesh for it. And
- * the live sweep and the global cooldown were both explicitly deferred by the owner to a later round.
+ *  2. **"It would dirty the draw-list fingerprint every frame for 12+ buttons on every GCD."** This was
+ *     the real cost, and it is avoided by not putting the sweep in the fingerprinted list at all. The
+ *     offscreen target holds the INTERFACE; the sweeps are drawn in a separate pass afterwards, over the
+ *     composite, straight into the canvas. Nothing about the fingerprint changes as a cooldown runs --
+ *     a `<Cooldown>` frame is a `frame` widget with no sprite, so its rect, alpha and colour are all
+ *     constant while it counts down, and `drawListSignature` reads nothing else. **The fingerprint cost
+ *     of a running sweep is therefore exactly zero**, and the per-frame cost is the sweep pass's own
+ *     draw calls: one quad per ACTIVE cooldown, bounded by the number of buttons.
  *
- * So `SetCooldown` records `start`/`duration` and the frame's own `Show()`/`Hide()` from
- * `CooldownFrame_SetTimer` still run, which is what makes a button on cooldown distinguishable at all.
- * The un-drawn wedge is declared once through `notImplemented` under the name `Cooldown:sweep` so the
- * load report names the gap instead of it passing as clean -- the same adaptation `api/units.ts` makes
- * to reuse the name registration for something that is not literally a method call.
+ *     The number that matters is already measured in this tree (`world-ui.ts:334-346`, the owner's
+ *     RTX 4070 at 1382x911): a UI draw call costs **~35 us**, and the pass is linear in the quad count.
+ *     So 12 sweeping buttons cost about **0.4 ms** per frame while they sweep, against the ~12 ms a full
+ *     re-render of the interface costs -- which is what dirtying the fingerprint every frame would have
+ *     bought instead.
+ *
+ * `SetCooldown` therefore records `start`/`duration` onto the widget and the frame's own
+ * `Show()`/`Hide()` from `CooldownFrame_SetTimer` still decide whether it is drawn at all.
  */
 import { MethodContext, MethodTable, registerMethods } from '../object';
 import { Widget } from '../../../widget';
-import { notImplemented, warnOnce } from './region';
+import { notImplemented } from './region';
 
 /**
  * What `SetCooldown` was told.
@@ -80,20 +89,14 @@ export interface CooldownState {
 }
 
 /**
- * Held in a `WeakMap` rather than as a `Widget` field, unlike `Widget#statusBar`.
+ * The cooldown a frame is showing, or null. Read by tests and by the draw pass.
  *
- * `statusBar` lives on the widget because the RENDERER reads it -- `barFillRect` needs the value to
- * size the fill. Nothing draws a cooldown (see the header), so no draw-pass code needs to reach this,
- * and putting it on `Widget` would imply otherwise. A `WeakMap` also cannot outlive a registry
- * `reset()`, which a widget field would have to be cleared by hand.
- *
- * If a later round draws the sweep, this moves onto `Widget` -- that is the signal that it should.
+ * This used to be a module-level `WeakMap`, on the stated grounds that nothing drew a cooldown so no
+ * draw-pass code needed to reach it -- with the note that drawing the sweep is the signal to move it
+ * onto `Widget`. The sweep is drawn now, so it has moved (`Widget#cooldown`).
  */
-const STATE = new WeakMap<Widget, CooldownState>();
-
-/** The cooldown a frame is showing, or null. Read by `api/actions.ts` and by tests. */
 export function cooldownStateOf(widget: Widget): CooldownState | null {
-  return STATE.get(widget) ?? null;
+  return widget.cooldown;
 }
 
 const COOLDOWN: MethodTable = {
@@ -112,50 +115,46 @@ const COOLDOWN: MethodTable = {
     const start = Number(args[0] ?? 0);
     const duration = Number(args[1] ?? 0);
     if (!Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0) {
-      STATE.delete(widget);
+      widget.cooldown = null;
       return [];
     }
-    STATE.set(widget, { start, duration });
-    // Named once per session, not per call: this is the un-drawn wedge, and 12 buttons on a shared
-    // global cooldown would otherwise print on every swing.
-    warnOnce(
-      'Cooldown:sweep: not implemented -- SetCooldown records start/duration and the frame still ' +
-        'shows and hides, but the radial sweep is not drawn (see methods/cooldown.ts for the ' +
-        'frame-budget and geometry reasons)',
-    );
+    widget.cooldown = { start, duration };
     return [];
   },
 
   /**
    * Registered so the class duck-types correctly, with zero call sites in 3.3.5a's FrameXML (grepped
-   * across all 256 manifest and script files). Each would only matter once a sweep is drawn.
+   * across all 256 manifest and script files). Addons duck-type them (`if cd.SetReverse then`).
+   *
+   * Still gaps now that the sweep IS drawn, and the reasons have changed: the sweep pass draws one
+   * direction (clockwise from twelve o'clock, the client's own) and one shape (a wedge with no bright
+   * leading edge), so `SetReverse` and `SetDrawEdge` have a real effect to ask for and are not merely
+   * decorative. A silent no-op on either is how a wrong sweep direction becomes invisible.
    */
   SetReverse: notImplemented(
     'SetReverse',
-    'the cooldown sweep is not drawn, so its direction has nothing to reverse',
+    'the sweep pass draws one direction only (clockwise from twelve o\'clock), so a reversed sweep '
+      + 'would need a second uniform and a branch in world-ui.ts#sweepMaterial',
   ),
   GetReverse: notImplemented(
     'GetReverse',
-    'the cooldown sweep is not drawn, so its direction has nothing to report',
+    'the sweep pass draws one direction only, so there is no per-frame reverse flag to report',
     [false],
   ),
   SetDrawEdge: notImplemented(
     'SetDrawEdge',
-    'the cooldown sweep is not drawn, so it has no leading edge to draw',
+    'the sweep pass draws the darkened wedge but not the bright leading edge the real client sweeps '
+      + 'with, so there is no edge to switch on',
   ),
   GetDrawEdge: notImplemented(
     'GetDrawEdge',
-    'the cooldown sweep is not drawn, so it has no leading edge to report',
+    'the sweep pass draws no leading edge, so there is none to report',
     [false],
   ),
 };
 
-/**
- * `Cooldown:sweep` is not a method, so `notImplemented` is called for its NAME ONLY and the returned
- * function is discarded. What is wanted is the entry in `NOT_IMPLEMENTED`, which is what
- * `loader.ts#callRaw` and the load report read; `api/units.ts:474-480` makes the same reuse for gaps
- * that are globals rather than methods.
- */
-notImplemented('Cooldown:sweep', 'declared in methods/cooldown.ts, warned on first SetCooldown');
+// `Cooldown:sweep` was declared here through `notImplemented` for the load report. It has been REMOVED
+// rather than left in place: the sweep is drawn (see the header), and a gap the report still names after
+// it is closed is a defect by this project's own rule on comments.
 
 registerMethods('COOLDOWN', COOLDOWN);

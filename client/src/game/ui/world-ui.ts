@@ -36,13 +36,15 @@ import * as THREE from 'three';
 
 import { GlueArt } from './art';
 import { GlueInput } from './input';
-import { screenScale } from './layout';
+import { screenScale, viewportUnits } from './layout';
 import { GlueRenderer } from './renderer';
 import { resolveSprite } from './sprite';
 import { FontStringTextures, loadGlueFonts, measureText } from './text';
 import { DrawItem, WidgetRoot } from './widget';
 import { attachActionBridge } from './action-bridge';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
+import { dispatchBinding } from './framexml/lua/api/bindings';
+import { gameTime } from './framexml/lua/compat';
 import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
 
@@ -173,6 +175,39 @@ export class WorldUiHost {
   /** `attachUnitBridge`'s teardown, held so `dispose` can run it. */
   private detachUnits: (() => void) | null = null;
 
+  /**
+   * THE DRAW INSTRUMENT, on `window.uiDrawStats`.
+   *
+   * `STATE.md` recorded the fingerprint's own cost as the oldest unmeasured claim in the action-bar area
+   * -- two rounds asserted it and neither measured it. These are the four numbers that settle it:
+   *
+   *  - `items` / `signatureMs`: what `drawListSignature` walks and what walking it costs.
+   *  - `dirtyFrames` vs `frames`: how often the interface is re-rendered at all. With no cooldown running
+   *    this should sit at the `FULL_DRAW_EVERY` floor (one frame in twelve, plus real changes); if
+   *    drawing a sweep dirtied the fingerprint it would climb to `frames`, and that is exactly the
+   *    hypothesis the sweep pass is built to refute.
+   *  - `fullDrawMs`: the last full interface re-render.
+   *  - `sweeps` / `sweepMs`: how many wedges the sweep pass drew and what it cost.
+   *
+   * Cumulative counters are raw, not ratios -- a ratio hides a step change in either term. Reset with
+   * `uiDrawStats.reset()`, which is what an A/B needs.
+   */
+  private readonly drawStats = {
+    frames: 0,
+    dirtyFrames: 0,
+    items: 0,
+    signatureMs: 0,
+    signatureMsTotal: 0,
+    fullDrawMs: 0,
+    sweeps: 0,
+    sweepMs: 0,
+    reset(): void {
+      this.frames = 0;
+      this.dirtyFrames = 0;
+      this.signatureMsTotal = 0;
+    },
+  };
+
   constructor(
     renderer: THREE.WebGLRenderer,
     canvas: HTMLCanvasElement,
@@ -238,6 +273,10 @@ export class WorldUiHost {
       return;
     }
     this.runtime = runtime;
+    // THE KEYBOARD, into the client's own Lua. The router owns no knowledge of bindings and this VM owns
+    // no knowledge of the DOM; this line is the whole seam. See `lua/api/bindings.ts#dispatchBinding` for
+    // what a bound key actually runs (a `Bindings.xml` command, not a call into TypeScript).
+    this.input.keyBinding = (token, down) => dispatchBinding(runtime.vm, token, down);
     // THE UNIT FEED, attached the instant the tree exists and not before: `attachUnitBridge` fires
     // `PLAYER_ENTERING_WORLD` on the way in, and a frame that has not been built yet cannot have
     // registered for it. The world is optional so `/game?offline=1&ui=lua` -- which has units but no
@@ -263,6 +302,8 @@ export class WorldUiHost {
     // registered and the BLP failed to fetch. `worldUiArt.def(path)` and `worldUiArt.texture(path)`
     // answer the second and third directly. This is how the empty action bar was found.
     (window as never as Record<string, unknown>).worldUiArt = this.art;
+    // The draw instrument -- see `drawStats` for what each number answers.
+    (window as never as Record<string, unknown>).uiDrawStats = this.drawStats;
   }
 
   /**
@@ -298,12 +339,28 @@ export class WorldUiHost {
     this.sections.begin('ui.draw');
     // Re-render the OFFSCREEN target only when the interface actually changed; composite it every
     // frame with one quad. See `signature` and `target` for the measurement that forced this.
+    const signatureStarted = performance.now();
     const signature = drawListSignature(items);
+    const signatureMs = performance.now() - signatureStarted;
     const target = this.target();
-    if (
+    const dirty =
       target !== null &&
-      (signature !== this.lastSignature || this.framesSinceFullDraw >= FULL_DRAW_EVERY)
-    ) {
+      (signature !== this.lastSignature || this.framesSinceFullDraw >= FULL_DRAW_EVERY);
+    // THE INSTRUMENT, built before the sweep was drawn and deliberately not blinded by it: it counts the
+    // full re-renders SEPARATELY from the sweep pass, so "the sweep dirties the fingerprint" is a
+    // question this can answer rather than one the code has to be trusted about. `STATE.md` recorded the
+    // fingerprint's own cost as the oldest unmeasured claim in this area; `window.uiDrawStats` is it.
+    // A number confirming a hypothesis deserves the more scepticism, so `dirtyFrames` is reported raw
+    // and not as a ratio.
+    const stats = this.drawStats;
+    stats.frames += 1;
+    stats.items = items.length;
+    stats.signatureMs = signatureMs;
+    stats.signatureMsTotal += signatureMs;
+    if (dirty) {
+      stats.dirtyFrames += 1;
+    }
+    if (dirty) {
       this.lastSignature = signature;
       this.framesSinceFullDraw = 0;
       const previousTarget = this.renderer.getRenderTarget();
@@ -320,10 +377,16 @@ export class WorldUiHost {
       // (`pages/game/index.tsx#animate`), so nothing has to be restored here -- but leaving a
       // transparent clear colour behind would be a trap for anything that clears between the two.
       this.renderer.setClearColor(this.savedClearColor, this.savedClearAlpha);
+      stats.fullDrawMs = performance.now() - signatureStarted - signatureMs;
     } else {
       this.framesSinceFullDraw += 1;
     }
     this.composite();
+    // THE COOLDOWN SWEEPS, after the composite and straight into the canvas -- which is the whole reason
+    // a running cooldown costs no re-render. See `drawSweeps`.
+    const sweepStarted = performance.now();
+    stats.sweeps = this.drawSweeps(items, viewport);
+    stats.sweepMs = performance.now() - sweepStarted;
     this.sections.end('ui.draw');
   }
 
@@ -399,6 +462,184 @@ export class WorldUiHost {
     return this.renderTarget;
   }
 
+  // -----------------------------------------------------------------------------------------------
+  // THE COOLDOWN SWEEP PASS.
+  //
+  // A `<Cooldown>` frame is a plain `frame` widget (`lua/object.ts:110`, `COOLDOWN: 'frame'`) with no
+  // sprite, so the interface pass draws nothing for it and the fingerprint sees only its rect, alpha and
+  // colour -- none of which move while it counts down. That is what makes this affordable: the sweeps are
+  // drawn HERE, after the composite, direct to the canvas, and the offscreen target is never touched.
+  // A cooldown running for 30 seconds costs zero re-renders of the interface.
+  //
+  // The wedge is a fragment test on one axis-aligned quad, not geometry -- `sweepMaterial` computes each
+  // pixel's angle about the quad's centre and keeps it only if the sweep has not yet passed it. So the
+  // "no mesh for a radial wedge" objection in `methods/cooldown.ts` never needed a mesh.
+  //
+  // Cost: one draw call per ACTIVE cooldown. At the ~35 us per UI draw call measured above, 12 buttons
+  // sharing a global cooldown are ~0.4 ms, against ~12 ms for a full interface re-render.
+
+  private sweepScene: THREE.Scene | null = null;
+  /**
+   * Pooled quads, grown to the high-water mark of simultaneous cooldowns and never shrunk.
+   *
+   * Reused rather than rebuilt per frame for the reason `renderer.ts` gives about its own pool: a new
+   * `Mesh` per cooldown per frame would allocate through a GCD and hand three's own bookkeeping a
+   * different object graph every frame.
+   */
+  private sweepQuads: THREE.Mesh[] = [];
+
+  /**
+   * The radial wedge, as a fragment shader on a unit quad.
+   *
+   * `uElapsed` is how much of the cooldown has PASSED, 0 at the start and 1 at the end. The dark wedge
+   * covers everything the sweep has not reached yet, so its leading edge travels clockwise from twelve
+   * o'clock and the icon is uncovered behind it -- the client's own direction.
+   *
+   * The colour is the real client's cooldown shade: `Interface\Cooldown\` art is a black wedge at
+   * roughly 55% alpha over the icon. That value is NOT read from a file -- it is chosen to match the
+   * screenshot and is unexplained beyond that, which is worth stating rather than dressing up. What IS
+   * from the client is the shape and the direction.
+   */
+  private sweepMaterialCache: THREE.ShaderMaterial | null = null;
+
+  private sweepMaterial(): THREE.ShaderMaterial {
+    if (this.sweepMaterialCache === null) {
+      // NOTE for anyone editing the GLSL below: no BACKTICKS in the shader comments. They terminate the
+      // template literal, and the failure is a wall of TS1005 parse errors 20 lines further down that
+      // says nothing about a shader.
+      this.sweepMaterialCache = new THREE.ShaderMaterial({
+        uniforms: { uElapsed: { value: 0 } },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          precision mediump float;
+          varying vec2 vUv;
+          uniform float uElapsed;
+          void main() {
+            // Centre the quad's UV so the angle is measured about its middle. A button is square in
+            // screen space, so no aspect correction is needed.
+            vec2 p = vUv - 0.5;
+            // atan(x, y), NOT atan(y, x). With three's plane UVs (v up), this returns 0 straight up,
+            // +PI/2 to the right, +/-PI down and -PI/2 to the left -- which is angle measured CLOCKWISE
+            // FROM TWELVE O'CLOCK, exactly where the client's sweep starts and the way it turns. fract
+            // folds the negative left half up into 0.75..1, giving up=0, right=0.25, down=0.5, left=0.75.
+            float a = fract(atan(p.x, p.y) / 6.2831853);
+            // Darken only what the sweep has NOT yet uncovered. uElapsed grows 0 -> 1, so the leading
+            // edge travels clockwise from twelve o'clock and the icon is revealed behind it -- which is
+            // the client's direction. Discarding on the other side of this test would shrink the wedge
+            // back towards twelve instead, and look like a cooldown running backwards.
+            if (a <= uElapsed) {
+              discard;
+            }
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 0.55);
+          }
+        `,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+    }
+    return this.sweepMaterialCache;
+  }
+
+  /**
+   * Draw a wedge over every shown `<Cooldown>` frame with time left. Returns how many were drawn.
+   *
+   * `gameTime()` is `GetTime()`, THE clock `SetCooldown`'s `start` was recorded against
+   * (`lua/compat.ts`). Reading `performance.now()` or `Date.now()` here instead would be a different
+   * epoch and would put every sweep at a wrong fraction without erroring -- both are plausible-looking
+   * seconds. The epoch was made module-level in `compat.ts` precisely so this pass could share it.
+   *
+   * A cooldown that has RUN OUT clears itself here. That is not the client's job: `CooldownFrame_SetTimer`
+   * only ever gets called again on an event, and nothing fires when a cooldown merely expires, so a
+   * finished sweep would otherwise sit at a full wedge for ever.
+   */
+  private drawSweeps(items: DrawItem[], viewport: { width: number; height: number }): number {
+    const now = gameTime();
+    // Screen units -> device pixels for this frame's canvas, the same conversion the composite camera's
+    // NDC needs. `drawList` rects are in logical units against `viewportUnits`.
+    const units = viewportUnits(viewport);
+
+    let drawn = 0;
+    for (const item of items) {
+      const cd = item.widget.cooldown;
+      if (cd === null) {
+        continue;
+      }
+      const remaining = cd.start + cd.duration - now;
+      if (remaining <= 0) {
+        // Expired. Cleared so the wedge stops being drawn; the FRAME is left shown, because hiding it is
+        // `CooldownFrame_SetTimer`'s decision and taking it here would fight the client's own Lua.
+        item.widget.cooldown = null;
+        continue;
+      }
+      if (remaining > cd.duration) {
+        // `start` in the future -- a server cooldown stamped ahead of our clock. Nothing to draw yet.
+        continue;
+      }
+
+      const quad = this.sweepQuad(drawn);
+      // NDC, on the same orthographic camera the composite uses (-0.5..0.5 both axes, y up).
+      const cx = (item.rect.left + item.rect.width / 2) / units.width - 0.5;
+      const cy = 0.5 - (item.rect.top + item.rect.height / 2) / units.height;
+      quad.position.set(cx, cy, 0);
+      quad.scale.set(item.rect.width / units.width, item.rect.height / units.height, 1);
+      // `updateMatrix()` BY HAND, because `matrixAutoUpdate` is false on these -- `position`/`scale`
+      // writes are inert without it. That is a trap this codebase has already been bitten by once
+      // (`CLAUDE.md`: "`model.scale.setScalar()` is inert under `matrixAutoUpdate = false`").
+      quad.updateMatrix();
+      quad.visible = true;
+      // Each pooled quad carries its OWN cloned material, so the fraction can be set per quad and the
+      // whole set drawn in one `renderer.render` below. Sharing one material would upload the LAST
+      // fraction for every quad -- three uploads uniforms at draw time.
+      (quad.material as THREE.ShaderMaterial).uniforms.uElapsed.value = 1 - remaining / cd.duration;
+      drawn += 1;
+    }
+
+    // Hide the tail of the pool: last frame may have had more cooldowns than this one.
+    for (let i = drawn; i < this.sweepQuads.length; i += 1) {
+      this.sweepQuads[i].visible = false;
+    }
+    if (drawn === 0) {
+      return 0;
+    }
+
+    const previousAutoClear = this.renderer.autoClear;
+    this.renderer.autoClear = false;
+    this.renderer.render(this.sweepSceneOf(), this.compositeCamera);
+    this.renderer.autoClear = previousAutoClear;
+    return drawn;
+  }
+
+  /** The pooled quad at `index`, built on first use. Each carries its OWN material -- see `drawSweeps`. */
+  private sweepQuad(index: number): THREE.Mesh {
+    let quad = this.sweepQuads[index];
+    if (quad === undefined) {
+      quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.sweepMaterial().clone());
+      quad.frustumCulled = false;
+      quad.matrixAutoUpdate = false;
+      quad.visible = false;
+      this.sweepQuads[index] = quad;
+      this.sweepSceneOf().add(quad);
+    }
+    return quad;
+  }
+
+  /** The scene every pooled quad is added to, once. */
+  private sweepSceneOf(): THREE.Scene {
+    if (this.sweepScene === null) {
+      this.sweepScene = new THREE.Scene();
+      this.sweepScene.name = 'WorldUiCooldownSweep';
+    }
+    return this.sweepScene;
+  }
+
   /** One fullscreen quad of the target, over the world, premultiplied. */
   private composite(): void {
     if (this.renderTarget === null) {
@@ -465,6 +706,17 @@ export class WorldUiHost {
     }
     this.compositeScene = null;
     this.compositeMesh = null;
+    // The cooldown sweep pool. Each quad owns its OWN geometry and a CLONED material (see `sweepQuad`),
+    // so both have to be freed per quad -- caught in this round's own diff review, which is exactly the
+    // leak the composite mesh above is freed to avoid.
+    for (const quad of this.sweepQuads) {
+      quad.geometry.dispose();
+      (quad.material as THREE.Material).dispose();
+    }
+    this.sweepQuads = [];
+    this.sweepMaterialCache?.dispose();
+    this.sweepMaterialCache = null;
+    this.sweepScene = null;
     this.fonts.dispose();
     this.art.dispose();
     this.solidTexture?.dispose();
@@ -472,6 +724,7 @@ export class WorldUiHost {
     delete (window as never as Record<string, unknown>).worldRuntime;
     delete (window as never as Record<string, unknown>).worldUiArt;
     delete (window as never as Record<string, unknown>).worldUiDrawList;
+    delete (window as never as Record<string, unknown>).uiDrawStats;
   }
 }
 

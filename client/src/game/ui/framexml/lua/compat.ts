@@ -11,13 +11,32 @@
  */
 import { LuaVM } from './vm';
 
-export function installCompat(vm: LuaVM): void {
-  const startedAt = Date.now();
+/**
+ * THE game clock, in `GetTime()` seconds, shared by the Lua and by everything on the host side that has
+ * to agree with it.
+ *
+ * The epoch used to be a LOCAL captured per `installCompat` call -- "seconds since the VM was created" --
+ * and that was fine while `GetTime` was only ever read from inside the Lua. It is not fine now: a
+ * cooldown is a `GetTime()`-based `start` that the ACTION BRIDGE stamps and the DRAW PASS compares
+ * against (`ui/action-bridge.ts`, `ui/world-ui.ts#drawSweeps`), and neither of those can reach a local in
+ * this function. Two clocks with different epochs would have put every sweep at a wildly wrong fraction --
+ * silently, since both are plausible seconds-since-something.
+ *
+ * Module load rather than VM creation, so the epoch is the same for the glue VM and the world VM. The
+ * difference between the two is the few seconds of a page load, and nothing measures across it.
+ */
+const EPOCH = Date.now();
 
+/** `GetTime()`, callable from the host. The ONE clock a cooldown's `start` is measured on. */
+export function gameTime(): number {
+  return (Date.now() - EPOCH) / 1000;
+}
+
+export function installCompat(vm: LuaVM): void {
   // GetTime(): Blizzard's glue uses this for animation and timeout logic. fengari has no notion of
   // a game clock, so this reads the one thing the runtime actually advances -- the wall clock --
-  // as seconds since the VM was created.
-  vm.registerFunction('GetTime', () => [(Date.now() - startedAt) / 1000]);
+  // as seconds since the module was loaded. See `gameTime` for why the epoch is not per-VM.
+  vm.registerFunction('GetTime', () => [gameTime()]);
 
   // GetLocale(): several glue files branch on the client's locale. We are not localizing, so a
   // fixed 'enUS' keeps that branch deterministic instead of undefined.

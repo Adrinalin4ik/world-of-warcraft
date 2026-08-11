@@ -17,6 +17,7 @@
  * the frame's Lua handler. Those hooks are null on every transcribed screen, which is why adding them
  * changed nothing about how `/` behaves.
  */
+import { keyToken } from './framexml/bindings';
 import { focusChain, hitTest, nextFocus } from './hit';
 import { viewportUnits } from './layout';
 import { DrawItem, Widget } from './widget';
@@ -106,11 +107,25 @@ export class GlueInput {
     this.lastClick = null;
   }
 
+  /**
+   * THE BINDING SINK: a key that no focused widget wanted goes here.
+   *
+   * Set by the world UI host to `dispatchBinding` against its VM (`world-ui.ts`), and left null on the
+   * glue screens, which have no binding table and no world to act on. Returns true when the key WAS
+   * bound, which is what decides whether the browser's own handling of it is suppressed -- an unbound
+   * key must still reach the page, or F5 and Ctrl+R stop working.
+   *
+   * A function slot rather than an import, for the same reason `FocusSink` is one: this router is shared
+   * with the glue screens and must not know that a Lua VM exists.
+   */
+  keyBinding: ((token: string, down: boolean) => boolean) | null = null;
+
   attach(): void {
     this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
     window.addEventListener('pointerup', this.onPointerUp);
     window.addEventListener('keydown', this.onKeyDown);
+    window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('paste', this.onPaste);
   }
 
@@ -119,8 +134,27 @@ export class GlueInput {
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('paste', this.onPaste);
   }
+
+  /**
+   * A key RELEASE, which exists only for the binding table.
+   *
+   * No edit box cares about a release, so this handler does nothing else -- and the release is where an
+   * action button actually casts: `ActionButtonDown` pushes the button in and `ActionButtonUp` is the one
+   * that reaches `SecureActionButton_OnClick` (`actionbutton.lua:29-43`). A keydown-only router would
+   * light every button and fire nothing.
+   */
+  private onKeyUp = (event: KeyboardEvent): void => {
+    if (this.keyBinding === null || this.focus !== null) {
+      return;
+    }
+    const token = keyToken(event);
+    if (token !== null && this.keyBinding(token, false)) {
+      event.preventDefault();
+    }
+  };
 
   /** Canvas-relative pixels to logical units. */
   private toUnits(event: PointerEvent): { x: number; y: number } {
@@ -237,6 +271,19 @@ export class GlueInput {
 
     const target = this.focus;
     if (!target) {
+      // NOTHING FOCUSED, so the key belongs to the binding table -- the client's own rule, and the
+      // reason it is tested here rather than first: a key typed into an edit box must reach the box and
+      // not cast a spell, which is what `keystate`-bound `ACTIONBUTTON1` on the `1` key would otherwise
+      // do to anyone typing in the chat frame.
+      //
+      // `event.repeat` is dropped: the browser auto-repeats a held key at ~30 Hz and the real client
+      // fires a binding once per physical press. Repeating would send one `CMSG_CAST_SPELL` per repeat.
+      if (this.keyBinding !== null && !event.repeat) {
+        const token = keyToken(event);
+        if (token !== null && this.keyBinding(token, true)) {
+          event.preventDefault();
+        }
+      }
       return;
     }
 

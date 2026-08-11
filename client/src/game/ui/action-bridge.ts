@@ -34,6 +34,8 @@ import {
 } from './framexml/lua/api/actions';
 import { SPELL_AUTO_ATTACK, SpellHandler } from '../../network/game/object/spells';
 import { fireEvent } from './framexml/lua/events';
+import { getCast, setCast } from './framexml/lua/api/casting';
+import { gameTime } from './framexml/lua/compat';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { shapeshiftData } from '../pipeline/dbc/shapeshift-data';
 import { LuaVM } from './framexml/lua/vm';
@@ -51,6 +53,90 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   /** How many pushes and events this bridge has made, for the frame-cost measurement. */
   const stats = { pushes: 0, events: 0, artLoads: 0, form: 0, bonusBar: 0 };
 
+  /**
+   * WHAT A SPELL COSTS, and whether the player can pay it -- `IsUsableAction`'s two returns.
+   *
+   * `Spell.dbc` states a cost two different ways and BOTH have to be read:
+   *
+   *  - `manaCost` (column 42), an absolute amount. Rage and energy abilities use this. Rage is stored
+   *    x10 in the DBC *and* x10 on the wire, so Heroic Strike's 150 compares directly against
+   *    `UNIT_FIELD_POWER2` with no scaling -- that correspondence is what `spell-data.ts`'s header cites
+   *    as independent corroboration of the column.
+   *  - `manaCostPercentage` (column 204), a percentage of BASE mana. Most caster spells use this and
+   *    leave `manaCost` at 0: measured on the served file, Fireball is 8%, Healing Wave 13%, Smite 9%,
+   *    all with `manaCost` 0. The base is `UNIT_FIELD_BASE_MANA` off the wire and NOT `maxPower` --
+   *    substituting max mana would overstate the cost by whatever the character's gear adds and grey the
+   *    button early, which is the "visible lie" this project's rules warn about.
+   *
+   * The `powerType` must MATCH: a rage ability read against a shaman's mana would be trivially
+   * affordable and a mana spell read against a warrior's rage never affordable. A cost stated in a power
+   * the player does not have leaves the button bright (nothing is asserted) rather than dark.
+   *
+   * WHAT IS NOT CHECKED, stated rather than implied by the code's silence: form/stance gating, reagents,
+   * required equipment, required target aura, and cooldown. `ActionButton_UpdateUsable` is only ever
+   * asked "affordable?" here, so a form-gated ability is drawn bright. The cooldown is deliberate --
+   * the real client's `isUsable` ignores cooldowns too, because the sweep already shows one.
+   */
+  const usability = (spellId: number): { usable: boolean; notEnoughPower: boolean } => {
+    const row = spellData.spell(spellId);
+    const player = world.player;
+    if (row === null || player === undefined || player === null) {
+      // No table or no player: nothing is asserted, so the button stays bright.
+      return { usable: true, notEnoughPower: false };
+    }
+    const playerPowerType = player.fields.powerType ?? 0;
+    if (row.powerType !== playerPowerType) {
+      return { usable: true, notEnoughPower: false };
+    }
+    let cost = row.manaCost;
+    if (cost === 0 && row.manaCostPercentage > 0) {
+      const base = player.fields.baseMana ?? 0;
+      if (base === 0) {
+        // `UNIT_FIELD_BASE_MANA` has not arrived. Bright rather than a guess off `maxPower`.
+        return { usable: true, notEnoughPower: false };
+      }
+      cost = Math.floor((base * row.manaCostPercentage) / 100);
+    }
+    if (cost <= 0) {
+      return { usable: true, notEnoughPower: false };
+    }
+    const power = player.fields.power ?? 0;
+    const affordable = power >= cost;
+    // `notEnoughPower` is the SECOND return and only read when the first is false
+    // (`actionbutton.lua:313-328`), so the pair is "affordable" and "the reason is power".
+    return { usable: affordable, notEnoughPower: !affordable };
+  };
+
+  /**
+   * `IsActionInRange`'s three-valued answer -- `null` / 0 / 1. See `ActionSnapshot#inRange`.
+   *
+   * `null` for every case where there is nothing to say: no target, a spell with no range in
+   * `SpellRange.dbc` (melee and self-cast both read 0 there), or a table still loading. That is what
+   * keeps the range dot off a melee button, which is the real client's behaviour.
+   *
+   * The distance is measured in the world's own units, which are YARDS -- the same units
+   * `SpellRange.dbc` stores. It is a 3D distance including height, which is what the server checks.
+   */
+  const rangeOf = (spellId: number): number | null => {
+    const yards = spellData.maxRange(spellId);
+    if (yards === null) {
+      return null;
+    }
+    const player = world.player;
+    const targetGuid = world.game.objectHandler.combatHandler.selection;
+    if (!player || targetGuid === null) {
+      return null;
+    }
+    const target = world.entities.get(targetGuid);
+    if (!target) {
+      return null;
+    }
+    const dx = target.position.x - player.position.x;
+    const dy = target.position.y - player.position.y;
+    const dz = target.position.z - player.position.z;
+    return Math.sqrt(dx * dx + dy * dy + dz * dz) <= yards ? 1 : 0;
+  };
+
   /** Build the snapshot for one 1-based slot from the handler and the DBC tables. */
   const snapshotFor = (action: number): ActionSnapshot => {
     const spellId = spells.spellInSlot(action);
@@ -58,6 +144,12 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       return emptyAction();
     }
     const row = spellData.spell(spellId);
+    // The cooldown, in `GetTime()` seconds. `null` is "none running", which zeroes make
+    // `CooldownFrame_SetTimer` hide (`Cooldown.lua` needs start > 0 AND duration > 0 AND enable > 0).
+    // The GLOBAL cooldown is in here too: `SpellHandler` puts it on every known spell in the cast's
+    // `StartRecoveryCategory` when the server confirms a cast, which is why one cast dims the whole bar.
+    const cooldown = spells.cooldownOf(spellId);
+    const { usable, notEnoughPower } = usability(spellId);
     return {
       spellId,
       texture: spellData.iconPath(spellId),
@@ -65,11 +157,11 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       isAttack: spellId === SPELL_AUTO_ATTACK,
       // Only auto-attack drives "current" today; see `api/actions.ts`'s `IsCurrentAction`.
       isCurrent: spellId === SPELL_AUTO_ATTACK && spells.autoAttackOn,
-      // No per-cast cooldown feed exists yet, and `SMSG_INITIAL_SPELLS` reported none on entry. Zeroes
-      // make `CooldownFrame_SetTimer` hide the sweep, which is the honest answer -- see
-      // `framexml/lua/methods/cooldown.ts` for why nothing is drawn even when a cooldown IS known.
-      cooldownStart: 0,
-      cooldownDuration: 0,
+      cooldownStart: cooldown?.start ?? 0,
+      cooldownDuration: cooldown?.duration ?? 0,
+      usable,
+      notEnoughPower,
+      inRange: rangeOf(spellId),
     };
   };
 
@@ -81,6 +173,9 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     && a.isCurrent === b.isCurrent
     && a.cooldownStart === b.cooldownStart
     && a.cooldownDuration === b.cooldownDuration
+    && a.usable === b.usable
+    && a.notEnoughPower === b.notEnoughPower
+    && a.inRange === b.inRange
   );
 
   /**
@@ -227,15 +322,199 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
    * `unit:fields` -- the same event `unit-bridge.ts` listens to. Gated on the player, because a
    * creature's form is nobody's action bar, and `pushBonusBar` diffs anyway.
    */
-  const onFields = (unit: Unit): void => {
-    if (unit === world.player) {
-      pushBonusBar();
+  /**
+   * THE RED / GREY TINT's push: re-evaluate usability and range and fire `ACTIONBAR_UPDATE_USABLE`.
+   *
+   * `ACTIONBAR_UPDATE_USABLE` and NOT `ACTIONBAR_SLOT_CHANGED`, for the cost reason this file's header
+   * gives: `ActionButton_OnEvent:415` routes it to `ActionButton_UpdateUsable` alone, which sets two
+   * vertex colours and touches nothing else (`actionbutton.lua:313-328`).
+   *
+   * Note what `UpdateUsable` actually paints, because the shorthand "the red mask" is misleading:
+   * usable -> white, `notEnoughMana` -> **(0.5, 0.5, 1.0), a washed blue**, otherwise -> (0.4, 0.4, 0.4)
+   * grey. The only RED in 3.3.5a's action bar is the range indicator, `(1.0, 0.1, 0.1)` on the HotKey
+   * region in `ActionButton_OnUpdate:471`. There is no red overlay on the icon anywhere in this build's
+   * FrameXML -- grepped.
+   */
+  const pushUsable = (): void => {
+    let changed = false;
+    for (let action = 1; action <= ACTION_SLOTS; action += 1) {
+      const previous = getAction(vm, action);
+      if (previous === null || previous.spellId === 0) {
+        continue;
+      }
+      const { usable, notEnoughPower } = usability(previous.spellId);
+      const next = {
+        ...previous, usable, notEnoughPower, inRange: rangeOf(previous.spellId),
+      };
+      if (same(previous, next)) {
+        continue;
+      }
+      setAction(vm, action, next);
+      changed = true;
+      stats.pushes += 1;
+    }
+    if (changed) {
+      fireEvent(vm, 'ACTIONBAR_UPDATE_USABLE');
+      stats.events += 1;
     }
   };
 
+  const onFields = (unit: Unit): void => {
+    if (unit === world.player) {
+      pushBonusBar();
+      // A power change is what makes an ability affordable or not, and it arrives as an ordinary values
+      // update. `pushUsable` diffs, so a field update that did not move the power costs one pass over 144
+      // slots and fires nothing.
+      pushUsable();
+    }
+  };
+
+  /**
+   * THE RANGE POLL, and the one piece of per-frame-ish work this bridge has.
+   *
+   * Range is a function of POSITION, and nothing emits an event when the player walks. The real client
+   * polls it from `ActionButton_OnUpdate` every `TOOLTIP_UPDATE_TIME` (0.2 s, `Constants.lua`), so this
+   * polls at the same rate rather than every frame -- and `pushUsable` diffs, so a poll that finds the
+   * range unchanged fires no event and dirties no fingerprint. Only a real crossing of the range boundary
+   * costs a UI pass, which is a handful per approach rather than 60 a second.
+   */
+  const RANGE_POLL_MS = 200;
+  const rangeTimer = window.setInterval(pushUsable, RANGE_POLL_MS);
+
+  /**
+   * A cooldown started or ended: push the two numbers and fire the client's own cooldown event.
+   *
+   * `ACTIONBAR_UPDATE_COOLDOWN` and NOT `ACTIONBAR_SLOT_CHANGED`, which matters for cost:
+   * `ActionButton_OnEvent:396` routes it to `ActionButton_UpdateCooldown` ALONE -- which reads
+   * `GetActionCooldown` and calls `CooldownFrame_SetTimer`, and touches no texture, no count and no
+   * hotkey. A slot-changed event would re-run the whole `ActionButton_Update` on 12 buttons for a
+   * number the sweep pass reads directly.
+   *
+   * Fired ONCE per cooldown change, not per frame. The sweep itself is animated by the draw pass with no
+   * Lua involvement at all (`world-ui.ts#drawSweeps`), which is the whole reason a running cooldown
+   * costs no interface re-render.
+   */
+  const pushCooldowns = (): void => {
+    let changed = false;
+    for (let action = 1; action <= ACTION_SLOTS; action += 1) {
+      const previous = getAction(vm, action);
+      if (previous === null || previous.spellId === 0) {
+        continue;
+      }
+      const cooldown = spells.cooldownOf(previous.spellId);
+      const next = {
+        ...previous,
+        cooldownStart: cooldown?.start ?? 0,
+        cooldownDuration: cooldown?.duration ?? 0,
+      };
+      if (same(previous, next)) {
+        continue;
+      }
+      setAction(vm, action, next);
+      changed = true;
+      stats.pushes += 1;
+    }
+    if (changed) {
+      fireEvent(vm, 'ACTIONBAR_UPDATE_COOLDOWN');
+      stats.events += 1;
+    }
+  };
+
+  /**
+   * THE CAST BAR's feed: `SMSG_SPELL_START` -> a cast snapshot -> `UNIT_SPELLCAST_START`.
+   *
+   * Only OUR OWN casts, and only the `"player"` token. `CastingBarFrame` is constructed with
+   * `unit = "player"` (`castingbarframe.xml`) and returns immediately for any other unit
+   * (`castingbarframe.lua:65-67`, `if ( arg1 ~= unit ) then return; end`), so a peer's cast has no frame
+   * to land on -- `TargetFrameSpellBar` is a separate `CastingBarFrame` on `"target"` and is left for a
+   * later round rather than half-fed.
+   *
+   * An INSTANT cast is skipped, and that is the client's own behaviour rather than a shortcut: a zero
+   * `castTime` gives `maxValue = 0`, and `CastingBarFrame_OnUpdate` would divide the spark position by it.
+   * The real client sends no `SMSG_SPELL_START` for an instant cast at all -- only `SMSG_SPELL_GO` -- so
+   * a `castTimeMs` of 0 here means the server chose to announce a cast with no duration, and there is
+   * nothing to fill.
+   */
+  const onSpellStart = (decoded: {
+    caster: string; spellId: number; castTimeMs: number; timerMs: number;
+  }): void => {
+    if (decoded.caster !== world.player?.guid || decoded.castTimeMs <= 0) {
+      return;
+    }
+    const row = spellData.spell(decoded.spellId);
+    // MILLISECONDS on the `GetTime()` clock -- `UnitCastingInfo`'s contract, and the one pair in this
+    // runtime that is not in seconds. See `lua/api/casting.ts`.
+    //
+    // `timerMs` is what REMAINS, not the whole cast, so the start is back-dated by however much of the
+    // cast the packet says has already elapsed. For a cast we just began those are equal and the
+    // subtraction is a no-op; for a cast already running when we entered the world it is the difference
+    // between a bar that starts correctly part-full and one that restarts from zero.
+    const nowMs = gameTime() * 1000;
+    const elapsedMs = Math.max(0, decoded.castTimeMs - decoded.timerMs);
+    const startTimeMs = nowMs - elapsedMs;
+    setCast(vm, 'player', {
+      name: row?.name ?? '',
+      texture: spellData.iconPath(decoded.spellId),
+      startTimeMs,
+      endTimeMs: startTimeMs + decoded.castTimeMs,
+      castID: 0,
+      channeling: false,
+      // Unsourced: `castFlags`' interrupt bit position in 3.3.5a is not established here, and
+      // `CastingBarFrame` is built with `showShield` false for the player's own bar, so the value is not
+      // drawn. False rather than a guess.
+      notInterruptible: false,
+    });
+    // Push THEN fire -- `CastingBarFrame_OnEvent` re-reads `UnitCastingInfo` on the first line of its
+    // START branch and hides itself if it answers nil.
+    fireEvent(vm, 'UNIT_SPELLCAST_START', ['player', row?.name ?? '', 0, 0]);
+    stats.events += 1;
+  };
+
+  /**
+   * The cast ended. `SMSG_SPELL_GO` is the success case and `SMSG_CAST_FAILED` the refusal, and the two
+   * fire DIFFERENT events because the frame colours itself differently: `UNIT_SPELLCAST_STOP` turns the
+   * bar green and fades it, `UNIT_SPELLCAST_FAILED` turns it red and writes `FAILED` into its text
+   * (`castingbarframe.lua:120-160`).
+   *
+   * The 4th event argument is `castID` and is MATCHED against the frame's own
+   * (`select(4, ...) == self.castID`), so it has to be the same 0 the START pushed -- a mismatched id
+   * leaves the bar running for ever.
+   */
+  const endCast = (event: string): void => {
+    if (getCast(vm, 'player') === null) {
+      return;
+    }
+    setCast(vm, 'player', null);
+    fireEvent(vm, event, ['player', '', 0, 0]);
+    stats.events += 1;
+  };
+
+  const onSpellGo = (decoded: { caster: string }): void => {
+    if (decoded.caster === world.player?.guid) {
+      endCast('UNIT_SPELLCAST_STOP');
+    }
+  };
+  const onCastFailed = (): void => endCast('UNIT_SPELLCAST_FAILED');
+  /**
+   * `SMSG_SPELL_FAILURE` -> `UNIT_SPELLCAST_INTERRUPTED`, which is a DIFFERENT event from FAILED and is
+   * why the interrupt is read off its own opcode rather than inferred from the cast bar going quiet.
+   * The frame writes `INTERRUPTED` into its text for one and `FAILED` for the other
+   * (`castingbarframe.lua:147-153`). Without this a broken cast would leave the bar filling to the end.
+   */
+  const onSpellFailure = (decoded: { caster: string }): void => {
+    if (decoded.caster === world.player?.guid) {
+      endCast('UNIT_SPELLCAST_INTERRUPTED');
+    }
+  };
+
+  spells.on('spellStart', onSpellStart);
+  spells.on('spellGo', onSpellGo);
+  spells.on('castFailed', onCastFailed);
+  spells.on('spellFailure', onSpellFailure);
   spells.on('actionsChanged', pushAll);
   spells.on('spellsChanged', pushAll);
   spells.on('autoAttackChanged', pushAutoAttack);
+  spells.on('cooldownsChanged', pushCooldowns);
   world.on('unit:fields', onFields);
 
   // Both entry packets arrive while the manifest is still loading -- `SMSG_ACTION_BUTTONS` is in the
@@ -266,9 +545,15 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   (window as unknown as Record<string, unknown>).actionBridgeStats = stats;
 
   return () => {
+    window.clearInterval(rangeTimer);
     spells.removeListener('actionsChanged', pushAll);
     spells.removeListener('spellsChanged', pushAll);
     spells.removeListener('autoAttackChanged', pushAutoAttack);
+    spells.removeListener('cooldownsChanged', pushCooldowns);
+    spells.removeListener('spellStart', onSpellStart);
+    spells.removeListener('spellGo', onSpellGo);
+    spells.removeListener('castFailed', onCastFailed);
+    spells.removeListener('spellFailure', onSpellFailure);
     world.removeListener('unit:fields', onFields);
     delete (window as unknown as Record<string, unknown>).actionBridgeStats;
   };

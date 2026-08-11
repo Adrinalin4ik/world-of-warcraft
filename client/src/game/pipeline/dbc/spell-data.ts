@@ -45,6 +45,32 @@
  * `manaCost` corroborates independently: Heroic Strike rank 1 reads 150 and Battle Shout rank 1 reads
  * 100, which are 15 and 10 rage -- rage is stored x10 -- and both carry `powerType = 1` (rage) while
  * Eviscerate carries `powerType = 3` (energy).
+ *
+ * ## THE GLOBAL COOLDOWN's column, measured
+ *
+ * `StartRecoveryTime` is **column 206** and `StartRecoveryCategory` is **205**. Derived from
+ * `wow-data-parser/dbc/entities/spell.js` -- which the four indices above already corroborate, and whose
+ * total is exactly the file's 234 -- and then verified by reading the served `spell.dbc` directly
+ * (header + the first 2000 records, over an HTTP range request):
+ *
+ *     spell  133 Fireball        col 205 = 133   col 206 = 1500
+ *     spell  331 Healing Wave    col 205 = 133   col 206 = 1500
+ *     spell  403 Lightning Bolt  col 205 = 133   col 206 = 1500
+ *     spell 1752 Sinister Strike col 205 = 133   col 206 = 1000
+ *     spell 2098 Eviscerate      col 205 = 133   col 206 = 1000
+ *     spell   78 Heroic Strike   col 205 = 0     col 206 = 0
+ *     spell 6603 Auto Attack     col 205 = 0     col 206 = 0
+ *
+ * That is the 3.3.5a rule reading back exactly: 1.5 s for a spell, 1.0 s for an energy ability, and
+ * ZERO for Heroic Strike and Auto Attack, which are on-next-swing and genuinely off the global cooldown.
+ * Category 133 is the shared GCD group; category 0 is "this spell triggers no GCD".
+ *
+ * **The GCD is not on the wire.** Nothing the server sends carries it -- `SMSG_SPELL_GO` has
+ * `castFlags` and a timestamp and no recovery field, and `SMSG_SPELL_COOLDOWN` (0x134) carries only real
+ * per-spell cooldowns. The 3.3.5a client computes the global cooldown ITSELF from this column when a cast
+ * is confirmed, which is why it appears instantly in the real client and why this is a DBC read and not a
+ * packet decode. `recoveryTimeMs` (29) and `categoryRecoveryTimeMs` (30) are the real cooldowns and read
+ * 0 for every spell sampled above, so on these characters the GCD is the only cooldown to be seen.
  */
 import DBC from './index';
 import Loader from '../../net/loader';
@@ -53,9 +79,23 @@ import { spellWire } from '../../classes/spell-wire';
 /** `Spell.dbc` column indices for 3.3.5a build 12340. See the header for how each was established. */
 const COL = {
   id: 0,
+  /** `Category` -- the shared-cooldown group `CategoryRecoveryTime` applies across. */
+  category: 1,
   castingTimeIndex: 28,
+  /** `RecoveryTime` (ms): this spell's OWN cooldown. */
+  recoveryTime: 29,
+  /** `CategoryRecoveryTime` (ms): the cooldown put on every spell sharing `category`. */
+  categoryRecoveryTime: 30,
   powerType: 41,
   manaCost: 42,
+  /** `rangeIndex` -> `SpellRange.dbc`, which is what `IsActionInRange` needs. */
+  rangeIndex: 46,
+  /** `ManaCostPercentage` -- a PERCENT OF BASE MANA, used instead of `manaCost` by most caster spells. */
+  manaCostPercentage: 204,
+  /** `StartRecoveryCategory`: 133 is the shared global-cooldown group; 0 means the spell is off-GCD. */
+  startRecoveryCategory: 205,
+  /** `StartRecoveryTime` (ms) -- THE GLOBAL COOLDOWN. See the header for the measurement. */
+  startRecoveryTime: 206,
   /** `SpellVisualID[0]`. `[1]` at 132 is the second visual and is not read. */
   visual: 131,
   iconID: 133,
@@ -75,6 +115,20 @@ export interface SpellRow {
   castingTimeIndex: number;
   powerType: number;
   manaCost: number;
+  /** `Category`. 0 for a spell in no shared-cooldown group. */
+  category: number;
+  /** This spell's own cooldown, in MILLISECONDS. 0 for a spell with none. */
+  recoveryTimeMs: number;
+  /** The cooldown put on every spell sharing `category`, in milliseconds. */
+  categoryRecoveryTimeMs: number;
+  /** The GLOBAL COOLDOWN this spell triggers, in milliseconds. 0 for an off-GCD spell. */
+  startRecoveryTimeMs: number;
+  /** The GCD group. 133 is 3.3.5a's shared category; 0 means this spell triggers no GCD. */
+  startRecoveryCategory: number;
+  /** `SpellRange.dbc` id. */
+  rangeIndex: number;
+  /** Percent of BASE mana, used where `manaCost` is 0. See `spellCost` for why both are needed. */
+  manaCostPercentage: number;
 }
 
 class SpellData {
@@ -87,6 +141,9 @@ class SpellData {
 
   /** `SpellVisualKit.dbc` id -> its `animID`, sentinels already folded away. */
   private kitAnims: Map<number, number> | null = null;
+
+  /** `SpellRange.dbc` id -> `maxRangeHostile`, in YARDS. What `IsActionInRange` is judged against. */
+  private ranges: Map<number, number> | null = null;
 
   private pending: Promise<void> | null = null;
 
@@ -113,12 +170,28 @@ class SpellData {
 
   private async load(): Promise<void> {
     const startedAt = Date.now();
-    const [spells, icons, visuals, kits] = await Promise.all([
+    // `SpellRange` rides with these four rather than getting a module of its own like
+    // `shapeshift-data.ts` did, and the difference is which table its consumer needs FIRST: the bonus bar
+    // must not wait on 49 MB because it decides which slots the buttons address, whereas a range check is
+    // useless without `Spell.dbc`'s own `rangeIndex` anyway. It is 6 KB behind a fetch that is already
+    // happening.
+    const [spells, icons, visuals, kits, ranges] = await Promise.all([
       this.loadSpells(),
       DBC.load('SpellIcon'),
       DBC.load('SpellVisual'),
       DBC.load('SpellVisualKit'),
+      DBC.load('SpellRange'),
     ]);
+
+    this.ranges = new Map<number, number>();
+    for (const record of (ranges as any).records ?? []) {
+      // `maxRangeHostile` is the one a cast at an enemy is judged by; `maxRangeFriendly` differs only for
+      // a handful of spells and the client uses the hostile value for the indicator. Both are YARDS, as
+      // floats (`wow-data-parser/dbc/entities/spell-range.js`).
+      if (record && typeof record.maxRangeHostile === 'number') {
+        this.ranges.set(record.id, record.maxRangeHostile);
+      }
+    }
 
     this.spells = spells;
 
@@ -220,6 +293,13 @@ class SpellData {
         castingTimeIndex: col(COL.castingTimeIndex),
         powerType: col(COL.powerType),
         manaCost: col(COL.manaCost),
+        category: col(COL.category),
+        recoveryTimeMs: col(COL.recoveryTime),
+        categoryRecoveryTimeMs: col(COL.categoryRecoveryTime),
+        startRecoveryTimeMs: col(COL.startRecoveryTime),
+        startRecoveryCategory: col(COL.startRecoveryCategory),
+        rangeIndex: col(COL.rangeIndex),
+        manaCostPercentage: col(COL.manaCostPercentage),
       });
     }
     return rows;
@@ -237,6 +317,24 @@ class SpellData {
    * Returned WITHOUT an extension, which is what `SpellIcon.dbc` stores and what the art layer wants:
    * `art.ts#load` appends `.blp` itself when a path carries no `.`.
    */
+  /**
+   * A spell's maximum range in YARDS, or null when it has none to check.
+   *
+   * Null for three distinct cases that all mean "no range indicator": the tables are not loaded, the
+   * spell is unknown, or its range is 0 -- which is `SpellRange.dbc` id 1 ("Self Only") and id 2 ("Combat
+   * Range", whose max is 0 because melee reach is computed from the two units' bounding radii and not
+   * from this table). Melee therefore reports no range rather than a wrong one, which is correct
+   * behaviour and not a gap: the real client shows no range dot on Heroic Strike either.
+   */
+  maxRange(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null) {
+      return null;
+    }
+    const yards = this.ranges?.get(row.rangeIndex) ?? null;
+    return yards !== null && yards > 0 ? yards : null;
+  }
+
   iconPath(spellId: number): string | null {
     const row = this.spell(spellId);
     if (row === null) {

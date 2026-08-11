@@ -348,6 +348,27 @@ const LAYEREDREGION: MethodTable = {
     );
     return [];
   },
+  /**
+   * `GetVertexColor()` -> `r, g, b` as 0..1 floats.
+   *
+   * The read half of `SetVertexColor`, and it was absent. No 3.3.5a FrameXML file calls it -- the tint is
+   * only ever written -- but its absence made the action bar's usable/unusable colour UNOBSERVABLE from
+   * outside the renderer, which meant "the button is greyed" could not be checked without comparing
+   * pixels. `alpha` is not returned: `Widget#vertexColor` is `#rrggbb` and carries none, and the region's
+   * alpha is a separate field that `GetAlpha` already answers.
+   */
+  GetVertexColor: (ctx, self) => {
+    const hex = widgetOf(ctx, self).vertexColor;
+    const value = Number.parseInt(hex.replace('#', ''), 16);
+    if (!Number.isFinite(value)) {
+      return [1, 1, 1];
+    }
+    return [
+      ((value >> 16) & 0xff) / 255,
+      ((value >> 8) & 0xff) / 255,
+      (value & 0xff) / 255,
+    ];
+  },
   SetTexCoord: (ctx, self, args) => {
     // The 8-argument (quad-corner) form is the client's general case; the 4-argument
     // (left, right, top, bottom) form used everywhere in GlueXML is the axis-aligned special case of
