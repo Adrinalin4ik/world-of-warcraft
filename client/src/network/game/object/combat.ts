@@ -97,6 +97,30 @@ export class CombatHandler extends EventEmitter {
     this.game.on('packet:receive:SMSG_ATTACKSTART', this.handleAttackStart.bind(this));
     this.game.on('packet:receive:SMSG_ATTACKSTOP', this.handleAttackStop.bind(this));
     this.game.on('packet:receive:SMSG_ATTACKERSTATEUPDATE', this.handleAttackerState.bind(this));
+
+    // THE FOUR SWING REFUSALS, which were unread and therefore SILENT -- and that silence is why
+    // "auto-attack does not work" had no diagnosis for three rounds.
+    //
+    // MEASURED (`WF1`, one account, a wolf at 2.2 yd): we sent one `CMSG_ATTACKSWING`, the server
+    // replied with exactly ONE `SMSG_ATTACKERSTATEUPDATE` for us at t=0, and then nothing for 18 s --
+    // while the wolf's own swings arrived every ~2 s and our `inCombat` stayed true for all 119
+    // samples. So the server never STOPPED our attack; it kept refusing each swing. A refusal resets
+    // the attack timer without ending the attack, which is exactly that shape, and the only thing that
+    // distinguishes range from facing from a bad target is one of these four opcodes.
+    //
+    // Warned rather than acted on, deliberately: the FIX for a bad facing is to turn toward the target
+    // while auto-attacking, which is a movement behaviour this client does not have at all (nothing
+    // faces a target -- `net/motion/facing.rs#face_target` is the reference's, and it is unported), and
+    // guessing at it from here would be inventing a control law. This makes the failure legible; the
+    // behaviour is the follow-up, and it is now a named one instead of a mystery.
+    ([
+      'SMSG_ATTACKSWING_NOTINRANGE',
+      'SMSG_ATTACKSWING_BADFACING',
+      'SMSG_ATTACKSWING_DEADTARGET',
+      'SMSG_ATTACKSWING_CANT_ATTACK',
+    ] as const).forEach((name) => {
+      this.game.on(`packet:receive:${name}`, () => this.handleSwingRefused(name));
+    });
   }
 
   // -- Selection ----------------------------------------------------------------------------------
@@ -408,11 +432,46 @@ export class CombatHandler extends EventEmitter {
       const victimUnit = this.game.world.entities.get(victim);
       if (victimUnit && !victimUnit.dead) {
         const reaction = defenseAnimation(victimState, victimUnit);
-        if (reaction !== null) {
+        // ONLY IF THE MODEL OWNS IT -- `resolve(id, false)` withholds the Stand consolation precisely so
+        // "absent" is distinguishable from "present", and that distinction is load-bearing here.
+        //
+        // MEASURED, and it is why this guard exists: a wolf's own table (`creature/wolf/wolf.m2`, 39
+        // sequences, cross-read against `AnimationData.dbc`) has NO Dodge 30, no ShieldBlock 24 and no
+        // Parry 20-23. Arming one anyway would have gone through `resolve`'s fallback to the first
+        // inline sequence -- Stand -- with `interrupt` true, so a dodging wolf would have SNAPPED out of
+        // its bite into a one-frame Stand and back. `startAnimation` would not even latch it (the arm
+        // did not land on the requested id), so the cascade would re-arm the next frame: a flicker, not
+        // a reaction. Creatures dodge with no clip at all, which is the honest answer for a model that
+        // has none.
+        const modelAnim = victimUnit.model?.modelAnim ?? null;
+        if (reaction !== null && modelAnim && modelAnim.resolve(reaction, false) !== null) {
           victimUnit.setAnimation(reaction, true, 0);
         }
       }
     }
+  }
+
+  /**
+   * How many times each swing refusal has arrived, and the last one seen.
+   *
+   * Counted rather than only logged, because the useful reading is a RATIO: one `BADFACING` while you
+   * turn is normal, and two hundred of them with zero swings landing is the defect. Readable as
+   * `window.session.protocol.game.objectHandler.combatHandler.swingRefusals`.
+   */
+  public swingRefusals: Record<string, number> = {};
+
+  private handleSwingRefused(name: string): void {
+    this.swingRefusals[name] = (this.swingRefusals[name] ?? 0) + 1;
+    // Once per opcode. The server repeats these at the weapon-timer rate for as long as the condition
+    // holds, so an unthrottled log is a flood, and the count above carries the rate anyway.
+    if (this.swingRefusals[name] === 1) {
+      console.warn(
+        `combat: the server REFUSED our melee swing -- ${name}. Auto-attack stays on and no swing`
+        + ' lands, so this looks exactly like "auto-attack is broken". Nothing in this client turns'
+        + ' the character toward its auto-attack target; see the constructor.',
+      );
+    }
+    this.emit('attack:refused', name, this.swingRefusals[name]);
   }
 
   /** Once per distinct shape, so a mis-decode is loud but not a per-swing flood. */
