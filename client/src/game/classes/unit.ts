@@ -2442,6 +2442,34 @@ class Unit extends Entity {
     // life.
     const travel = Math.hypot(motion.pos.x - beforeX, motion.pos.y - beforeY);
     const translating = travel > 1e-4 || (motion.flags & ANY_MOVE) !== 0;
+
+    // THE AIRBORNE FLOOR CLAMP. A descending arc gets no resolve at all above -- a jump owns its Z --
+    // and nothing ends it until `MSG_MOVE_FALL_LAND` arrives, which is up to a packet interval after
+    // the body has actually touched down. MEASURED on the ground-relative capture (`PK7`), that tail
+    // put a peer 2.118 yd UNDER the grass at the end of one arc in eight, descending smoothly through
+    // the surface: the owner's "buried" symptom in miniature, and the last of it.
+    //
+    // A CLAMP, not a resolve, and from the HEIGHTMAP rather than a cast: it only ever refuses to let an
+    // invented arc pass through the floor, it costs 0.065 ms against a cast's 0.92 (both measured), and
+    // it runs only while airborne AND descending, which is a few frames per jump. The reference stops
+    // the arc with its own swept `airborne_step` (decision 0627, so a jump into a building is stopped
+    // by the wall too); that is the six-cast version this client cannot afford per peer per frame, and
+    // the difference -- walls, not floors -- is stated at `snapToGround`.
+    //
+    // Deliberately NOT applied while rising: the heightmap is not the only thing a jump can leave from
+    // (a WMO floor, a bridge), and clamping upward would shove a peer who jumped off a balcony up onto
+    // the terrain far below him.
+    if (!this.isPlayer && airborne && motion.verticalVelocity < 0 && !peerTrace.flatExtrapolation) {
+      const floor = collisionWorld.terrain.heightAt(motion.pos.x, motion.pos.y);
+      if (floor !== null && motion.pos.z < floor) {
+        motion.pos.z = floor;
+        this.position.z = floor;
+        // The arc is over as far as our drawing is concerned. Zeroing the vertical stops it burrowing
+        // further on every later frame of the same silence; the peer's own FALL_LAND still decides when
+        // he is grounded, because the flags are his to send and not ours to invent.
+        motion.verticalVelocity = 0;
+      }
+    }
     if (!this.isPlayer && !swimming && !airborne && translating && due
       && !peerTrace.flatExtrapolation) {
       const half = CAPSULE_HEIGHT * 0.5;
