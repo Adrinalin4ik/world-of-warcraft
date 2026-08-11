@@ -13,7 +13,7 @@ import * as THREE from 'three';
 
 import { BackdropPiece, backdropPieces } from './backdrop';
 import { viewportUnits } from './layout';
-import { applyTexCoords, createQuadMaterial, setBlend } from './material';
+import { applyBlend, applyTexCoords, createQuadMaterial } from './material';
 import { Blend, DrawItem, TexCoords } from './widget';
 
 /** A `Backdrop`'s two resolved sheets, plus the def whose geometry they are drawn with. */
@@ -312,10 +312,10 @@ export class GlueRenderer {
       // ONLY the structural writes flip `needsUpdate` -- see `Pooled.lastMap` for the measurement.
       if (entry.lastMap !== texture || entry.lastBlend !== item.widget.blend) {
         entry.material.map = texture;
-        // Through `setBlend`, not a bare `material.blending =`: in the premultiplied pass an ADD quad needs
+        // Through `applyBlend`, not a bare `material.blending =`: in the premultiplied pass an ADD quad needs
         // the SEPARATED alpha equation (six fields) or it writes destination alpha and punches an opaque
         // hole in the composited interface -- the black square round the cast bar. See `material.ts`.
-        setBlend(entry.material, item.widget.blend, this.premultiplied);
+        applyBlend(entry.material, item.widget.blend, this.premultiplied);
         entry.material.needsUpdate = true;
         entry.lastMap = texture;
         entry.lastBlend = item.widget.blend;
@@ -437,8 +437,8 @@ export class GlueRenderer {
 
       pooled.material.map = texture;
       // Same reason as the quad path above: an ADD backdrop piece in the premultiplied pass must not write
-      // destination alpha. `setBlend` is the one place that decision lives (`material.ts`).
-      setBlend(pooled.material, item.widget.blend, this.premultiplied);
+      // destination alpha. `applyBlend` is the one place that decision lives (`material.ts`).
+      applyBlend(pooled.material, item.widget.blend, this.premultiplied);
       // The backdrop's own tint MULTIPLIES the widget's, exactly as the engine's
       // `SetBackdropColor`/`SetBackdropBorderColor` do: they darken the sheet rather than replacing
       // it, so `Glue-Tooltip-Background` at (0.09, 0.09, 0.09, 0.85) is a dark translucent pane and

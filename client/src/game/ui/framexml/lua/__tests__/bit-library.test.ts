@@ -11,7 +11,7 @@ import { installCompat } from '../compat';
  * raid targets and a client that looks fine.
  *
  * The expected value is arithmetic, not transcribed: raid targets 1-8 are `0x00100000` through
- * `0x08000000` (`constants.lua:269-277`), whose OR is `0x0FF00000` = 267386880 -- which is also what the
+ * `0x08000000` (`constants.lua:270-277`), whose OR is `0x0FF00000` = 267386880 -- which is also what the
  * live runtime answered for `COMBATLOG_OBJECT_RAIDTARGET_MASK` after this landed.
  */
 describe('the bit library', () => {
@@ -24,16 +24,21 @@ describe('the bit library', () => {
                       0x01000000, 0x02000000, 0x04000000, 0x08000000)
        anded = bit.band(0xFF00, 0x0FF0)
        notted = bit.bnot(0)
-       shifted = bit.lshift(1, 31)`,
+       shifted = bit.lshift(1, 31)
+       sameAsLiteral = (bit.bnot(0x7FFFFFFF) == 0x80000000)`,
       'bit-test',
     );
 
     expect(error).toBeNull();
     expect(vm.getGlobal('mask')).toBe(0x0ff00000);
     expect(vm.getGlobal('anded')).toBe(0x0f00);
-    // UNSIGNED, which is this implementation's stated choice -- see the block in `compat.ts` for why the
-    // client's own positive `0x80000000` literals make unsigned the agreeing convention.
-    expect(vm.getGlobal('notted')).toBe(0xffffffff);
-    expect(vm.getGlobal('shifted')).toBe(0x80000000);
+    // SIGNED 32-bit, which is BitLib's own convention and this VM's: fengari is Lua 5.3 with 32-BIT
+    // integers (`math.maxinteger` is 2147483647), so a result with the top bit set is negative -- and
+    // `0x80000000` written in a chunk is likewise -2147483648. An earlier draft returned unsigned values,
+    // which made `bit.bnot(0x7FFFFFFF) == 0x80000000` silently FALSE. That equality is asserted below
+    // precisely because it is the property the unsigned version broke without raising.
+    expect(vm.getGlobal('notted')).toBe(-1);
+    expect(vm.getGlobal('shifted')).toBe(-2147483648);
+    expect(vm.getGlobal('sameAsLiteral')).toBe(true);
   });
 });

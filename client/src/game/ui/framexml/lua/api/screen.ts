@@ -144,7 +144,7 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
    * `yOffset = 40` (`uiparent.lua:1186`), the managed y is **75 + 40 = 115** -- not the 95 that was
    * predicted from the 4:3 value of `menuBarTop`. `bottomEither`/`pet`/`reputation`/`tutorialAlert` add
    * nothing on these characters: `reputation` needs BOTH `ReputationWatchBar:IsShown()` and
-   * `MainMenuExpBar:IsShown()` (`uiparent.lua:1786`) and there is no reputation feed, and no multi-bar,
+   * `MainMenuExpBar:IsShown()` (`uiparent.lua:1787`) and there is no reputation feed, and no multi-bar,
    * pet bar or tutorial alert is shown. Returning a 4:3 pair to make the number come out at 95 would be a
    * fabricated answer to a question the window already answers.
    */

@@ -21,7 +21,10 @@
  *   it resolves to anim **54 `SpellCastOmni`** -- which is why the reference's rule, "`SpellCastOmni` (54)
  *   is armed at SPELL_GO" (`samples/benilla/crates/benilla/src/creature_anim/driver.rs:616`, test at
  *   `driver/tests.rs:2454`), was right about the clip it names and was never a statement about the whole
- *   cast. Its example is a creature's instant.
+ *   cast. **Its example is a mount summon**, and an earlier draft of this comment called it "a creature's
+ *   instant", which is wrong: the mount-summon visuals whose cast kit is 1604/1607 are 1703/1706, and their
+ *   PRECAST kit is 358 -> anim 123 `UseStandingLoop` -- a held pose. So the reference's own example has a
+ *   precast stage too; it simply had no reason to arm it, because what it was modelling is the release.
  *
  * Which field is which is MEASURED off the served DBCs, not assumed -- the measurement, the anim-name
  * distribution across all 9406 visuals, and the five spells it was checked on are recorded on
@@ -34,16 +37,20 @@
  *
  * ## How the pose is HELD rather than played
  *
- * No new machinery. `ReadySpellOmni` is a looping sequence, and `Unit#externalSeq`'s latch "never
- * releases" a loop (`unit.ts:1590-1591`) -- so arming it hands the body to the pose and locomotion stands
+ * No new machinery. `ReadySpellOmni` is a looping sequence, and `Unit#externalSeq`'s latch "never releases"
+ * a loop (see that field's own docstring) -- so arming it hands the body to the pose and locomotion stands
  * off until something else is armed. The release at GO is that something else: a one-shot, which the same
  * latch holds for its window and then gives back to locomotion. The blend layer (`InstanceAnim` keeps the
  * outgoing sequence alive for `blendTimeMs` and lerps per bone) makes both transitions a fade.
  *
- * The one thing the latch cannot do by itself is give the body back when a cast NEVER completes -- a
- * looping owner has no window to elapse. `SMSG_SPELL_FAILURE` and `SMSG_CAST_FAILED` therefore call
- * `Unit#releaseAnimationLatch` explicitly (`network/game/object/spells.ts`), or an interrupted caster
- * would stand in his cast pose for the rest of the session.
+ * The one thing the latch cannot do by itself is give the body back when a cast NEVER completes -- a looping
+ * owner has no window to elapse. `SMSG_SPELL_FAILURE` and `SMSG_CAST_FAILED` therefore release it
+ * explicitly, through `SpellHandler#releaseCastPose` (`network/game/object/spells.ts`), or an interrupted
+ * caster would stand in his cast pose for the rest of the session. **That release is guarded twice** -- the
+ * failing spell must be the one whose pose is in flight, AND the clip must still be the latched one -- and
+ * self-review is what put both guards there: the first version released on the failing spell's DBC row
+ * alone, which dropped a live pose whenever a SECOND spell was pressed mid-cast (every such press is refused
+ * with `SMSG_CAST_FAILED`) and dropped a corpse's `DEATH` latch when a caster died mid-cast.
  *
  * ## The fallback, and why it is narrow
  *
@@ -108,6 +115,13 @@ export function castAnimationFor(unit: Unit, spellId: number): number | null {
 export function precastAnimationFor(unit: Unit, spellId: number): number | null {
   const modelAnim = unit.model?.modelAnim ?? null;
   if (modelAnim === null) {
+    // A KNOWN GAP, named rather than papered over: a caster whose M2 has not loaded yet gets NO pose, and
+    // never gets one later either. `setAnimation` records `currentAnimationId` before its own model check
+    // precisely so the model setter can replay a request that beat the load home (`unit.ts`), but this
+    // returns null before `setAnimation` is ever called, so there is nothing to replay. It costs a peer his
+    // cast pose during the ~9 s his model takes to arm after entry, which is the ordinary case for a peer
+    // and never the case for the player, whose model is up long before he can press a button. Closing it
+    // means deferring the KIT lookup rather than the arm, which is a bigger change than this round's.
     return null;
   }
   const fromKit = spellData.precastAnimation(spellId);

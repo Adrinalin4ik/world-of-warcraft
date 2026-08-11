@@ -189,8 +189,8 @@ const FRAME: MethodTable = {
     // ENTIRE managed-frame-position pass runs inside this one dispatch. It was raising on its first
     // statement (a nil `GetScreenResolutions`, `uiparent.lua:1170`) and the error died here -- `vm.run`
     // returned null, `drainScriptErrors` had nothing, the load report was clean, and the observable
-    // symptom was a cast bar 40 units low with a pass that "ran". `methods/region.ts:168-172` and
-    // `methods/statusbar.ts:114-117` already did this correctly; this call site was the outlier.
+    // symptom was a cast bar 40 units low with a pass that "ran". `methods/region.ts`'s own
+    // `cascadeVisibility` and `methods/statusbar.ts:114-117` already did this correctly; this was the outlier.
     const error = invokeScriptHandler(ctx, self, 'OnAttributeChanged', [name, value]);
     if (error !== null) {
       const frameName = ctx.registry.nameOf(self) ?? String(self);

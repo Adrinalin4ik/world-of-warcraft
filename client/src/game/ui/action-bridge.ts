@@ -497,7 +497,7 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
    *
    * BOTH ends shift forward by `delayMs`, which keeps `endTime - startTime` -- and therefore the bar's
    * `maxValue` -- unchanged while moving `value` BACKWARDS. That is the client's own behaviour and it falls
-   * straight out of what the frame computes (`castingbarframe.lua:165-175`):
+   * straight out of what the frame computes (`castingbarframe.lua:171-172`, inside its 163-188 branch):
    *
    *     self.value    = (GetTime() - (startTime / 1000));
    *     self.maxValue = (endTime - startTime) / 1000;

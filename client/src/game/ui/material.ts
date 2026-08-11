@@ -57,7 +57,7 @@ import { Blend, TexCoords } from './widget';
  * button, `CheckButtonHilight` on a checked one, and `UI-ActionButton-Border`
  * (`actionbuttontemplate.xml:48,87,88`). One fix, several symptoms.
  */
-function applyBlend(
+export function applyBlend(
   material: THREE.MeshBasicMaterial,
   blend: Blend,
   premultipliedAlpha: boolean,
@@ -105,26 +105,14 @@ export function createQuadMaterial(
     side: THREE.DoubleSide,
   });
   // AFTER construction, because the separated-alpha form needs six fields the constructor's `blending`
-  // shorthand cannot express. `setBlend` below is the same call for a material already in the pool.
+  // shorthand cannot express. `renderer.ts` calls the same function on a material already in its pool, so a
+  // quad that flips ADD -> ALPHA cannot keep the separated alpha equation: naming `NormalBlending` is enough,
+  // because three's own `setBlending` never reads the custom factors on a preset branch and resets its cache
+  // of them (`three.cjs`, `WebGLState.setBlending`).
   applyBlend(material, blend, premultipliedAlpha);
   return material;
 }
 
-/**
- * Re-blend a POOLED material whose widget's blend mode changed.
- *
- * The renderer pools one material per widget and only touches it when something structural moves
- * (`renderer.ts#Pooled.lastMap`), so this must set exactly what `createQuadMaterial` sets -- including
- * clearing the custom factors' effect by naming a preset again. Going through the same `applyBlend` is what
- * guarantees that: a pooled quad flipping ADD -> NORMAL must not keep the separated alpha equation.
- */
-export function setBlend(
-  material: THREE.MeshBasicMaterial,
-  blend: Blend,
-  premultipliedAlpha: boolean,
-): void {
-  applyBlend(material, blend, premultipliedAlpha);
-}
 
 /**
  * Point a material's map at a sub-rectangle of its sheet.

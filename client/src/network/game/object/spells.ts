@@ -143,6 +143,24 @@ export class SpellHandler extends EventEmitter {
    */
   private castStarted = new Set<number>();
 
+  /**
+   * THE POSE CURRENTLY HELD, per caster guid: which spell armed it and which clip it is.
+   *
+   * Needed because releasing the held cast pose is only safe when BOTH halves match, and self-review found
+   * that neither alone is enough:
+   *
+   *  - **the spell must be the one in flight.** Any second spell pressed during a 1.5 s cast is refused with
+   *    `SMSG_CAST_FAILED`, and keying the release off the refused spell's own DBC row released the pose the
+   *    FIRST cast was still holding -- reintroducing the very symptom the pose exists to fix.
+   *  - **the clip must still be the latched one.** Two spells can share a pose (`ReadySpellOmni` is the
+   *    precast of 879 visuals), and more sharply, a caster who DIES mid-cast has `DEATH` latched instead --
+   *    which must never be released from outside or the corpse stands up.
+   *
+   * Keyed by guid, not a single field: a peer's cast and ours can be in flight at the same time. Cleared at
+   * GO, at a failure, and at an interrupt, so it holds at most one entry per actively-casting unit.
+   */
+  private castPose = new Map<string, { spellId: number; animId: number }>();
+
   constructor(gameHandler: GameHandler) {
     super();
     this.game = gameHandler;
@@ -176,9 +194,15 @@ export class SpellHandler extends EventEmitter {
    * outside a plausible range means the layout is wrong, and it is recorded rather than applied.
    *
    * **The ANIMATION needs nothing here and that is by construction, not an omission.** The held pose is a
-   * loop armed at START and the release is armed at GO, which the server sends when the cast ACTUALLY
-   * completes -- so a delayed cast holds its pose longer and releases later with no arithmetic on our side.
+   * loop armed at START and the release is armed at GO, which for a CAST is when the server says it
+   * completed -- so a delayed cast holds its pose longer and releases later with no arithmetic on our side.
    * Pushback moves the bar; the animation was already following the server.
+   *
+   * **NOT true for a CHANNEL, and that is a named gap rather than an oversight.** A channelled spell sends
+   * START then GO immediately and then `MSG_CHANNEL_START` (0x139), so the pose is armed and released within
+   * a frame or two and the caster stands still for the whole channel, where the real client holds
+   * `ChannelCastDirected`/`ChannelCastOmni` (131 and 63 occurrences in `castKitID`). Closing it needs the
+   * channel opcodes decoded, which is the same missing feed `lua/api/casting.ts` declares for the bar.
    */
   private handleSpellDelayed(gp: GamePacket): void {
     gp.index = gp.headerSize;
@@ -274,15 +298,24 @@ export class SpellHandler extends EventEmitter {
    * interrupted caster stands in his cast pose until something else arms an animation, which for a unit
    * standing still is never.
    *
-   * GATED on the spell having armed a pose at all. Releasing unconditionally would drop a latch this cast
-   * never took -- most sharply `DEATH`'s, which `unit.ts#externalSeq` says must never be released from
-   * outside because a corpse would stand back up.
+   * TWO GUARDS, and the first version had neither -- it asked `precastAnimationFor` whether the failing
+   * spell HAS a pose, which is a DBC question and not a question about this unit at this moment. See
+   * `castPose` for the two live failures that found:
+   *
+   *  1. the recorded in-flight cast must be THIS spell, or a second spell's refusal drops the first cast's
+   *     pose mid-cast;
+   *  2. `Unit#releaseAnimationLatch` must find that clip still latched, or a caster who died mid-cast has
+   *     his `DEATH` latch dropped and the corpse stands up.
+   *
+   * A no-op is the common and correct outcome: most refusals concern a spell that never started.
    */
   private releaseCastPose(casterGuid: string, spellId: number): void {
-    const unit = this.game.world.entities.get(casterGuid);
-    if (unit && precastAnimationFor(unit, spellId) !== null) {
-      unit.releaseAnimationLatch();
+    const pose = this.castPose.get(casterGuid);
+    if (pose === undefined || pose.spellId !== spellId) {
+      return;
     }
+    this.castPose.delete(casterGuid);
+    this.game.world.entities.get(casterGuid)?.releaseAnimationLatch(pose.animId);
   }
 
   /** `GetActionCooldown`'s two numbers for one spell, or null when nothing is running. */
@@ -564,8 +597,10 @@ export class SpellHandler extends EventEmitter {
   /**
    * `SMSG_SPELL_START` (0x131): a cast BEGAN. **This is what drives the cast bar.**
    *
-   * The caster's animation is still armed at SPELL_GO rather than here -- the reference's own rule,
-   * "`SpellCastOmni` (54) is armed at SPELL_GO" (`benilla/src/creature_anim/driver.rs:616`).
+   * **AND IT ARMS THE HELD CAST POSE.** This comment used to say the animation "is still armed at SPELL_GO
+   * rather than here"; that was true for two rounds and is the half that was wrong. GO is the END of a cast,
+   * so the clip armed there is the RELEASE -- which is what the reference's rule names. The pose that runs
+   * FOR the cast is `SpellVisual.dbc`'s `precastKitID` and is armed below. See `spell-anim.ts`.
    *
    * **A correction to `STATE.md`, which said the cast duration "IS decoded and emitted".** It was not.
    * `readCastHead` stopped after `castFlags` and never read the trailing `u32`, so `spellStart` carried
@@ -617,6 +652,8 @@ export class SpellHandler extends EventEmitter {
       const pose = precastAnimationFor(caster, decoded.spellId);
       if (pose !== null) {
         caster.setAnimation(pose, true, -1);
+        // RECORDED so a later failure can tell this pose from any other latch -- see `castPose`.
+        this.castPose.set(decoded.caster, { spellId: decoded.spellId, animId: pose });
       }
     }
 
@@ -654,14 +691,14 @@ export class SpellHandler extends EventEmitter {
         // armed, and a one-shot's latch gives the body back to locomotion when the clip's window ends. So
         // pose -> release -> stand needs no bookkeeping, and the blend layer makes both edges a fade.
         unit.setAnimation(anim, true, 0);
-      } else if (precastAnimationFor(unit, decoded.spellId) !== null) {
-        // NO release clip, but this spell DID arm a pose -- a visual whose precast kit resolves and whose
-        // cast kit does not. Nothing would then take the latch off a LOOPING pose and the caster would hold
-        // it for ever. Gated on the pose having existed rather than released unconditionally: an
-        // unconditional release here would also drop a latch this cast never took, and `DEATH`'s latch is
-        // one that must never be dropped from outside (`unit.ts#externalSeq`).
-        unit.releaseAnimationLatch();
+      } else {
+        // NO release clip. If this spell armed a pose, nothing else would ever take the latch off it -- a
+        // LOOP has no window to elapse -- so the caster would hold it for good. Through `releaseCastPose`
+        // rather than a bare release, so both identity guards apply here too.
+        this.releaseCastPose(decoded.caster, decoded.spellId);
       }
+      // The release clip re-latched `externalSeq` onto itself, so the pose record is spent either way.
+      this.castPose.delete(decoded.caster);
     }
 
     // THE GLOBAL COOLDOWN for an INSTANT spell, which is the only kind that reaches here without having

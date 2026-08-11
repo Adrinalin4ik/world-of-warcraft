@@ -212,14 +212,19 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   }
 
   /**
-   * THE FRAME-POSITION PASS, and it is what put the cast bar 40 px too low.
+   * THE FRAME-POSITION PASS, and it is what put the cast bar 60 units too low.
    *
    * `CastingBarFrame`'s XML anchor is `BOTTOM, y = 55` (`castingbarframe.xml:101-112`) and that is NOT
    * where the real client draws it. Its position is MANAGED: `UIPARENT_MANAGED_FRAME_POSITIONS`
-   * (`uiparent.lua:1186`) gives it `baseY = true` -- meaning `menuBarTop`, which is **55**
-   * (`uiparent.lua:1164`) -- plus `yOffset = 40`, so the managed y is **95**. The authored 55 is only the
-   * pre-managed fallback. The owner's report that the bar sits too low is therefore exactly right, and
-   * exactly 40 px, and the anchors were resolving correctly all along -- what was missing was this call.
+   * (`uiparent.lua:1186`) gives it `baseY = true` -- meaning `menuBarTop` -- plus `yOffset = 40`. The
+   * authored 55 is only the pre-managed fallback, and the anchors were resolving correctly all along.
+   *
+   * **`menuBarTop` is 75 HERE, not the 55 this comment used to give, so the managed y is 115 and the bar was
+   * 60 units low rather than 40.** 55 is only its initial value (`uiparent.lua:1169`); `UpdateMenuBarTop`
+   * raises it to **75** for any aspect ratio wider than 4:3 (`uiparent.lua:1171-1174`), which a browser
+   * window essentially always is. Measured live after this call: the bar's bottom edge is at 115 in 768
+   * units, up from 55. See `lua/api/screen.ts#GetScreenResolutions`, which is the global whose absence made
+   * `UpdateMenuBarTop` -- and therefore this whole pass -- raise on its first statement.
    *
    * It is engine behaviour, which is why it belongs here beside the login events rather than being
    * triggered from a bridge: the real client runs the layout pass once the interface is up. Fifteen

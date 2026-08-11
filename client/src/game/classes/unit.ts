@@ -1344,7 +1344,7 @@ class Unit extends Entity {
   }
 
   /**
-   * Give the body back to locomotion, dropping whatever externally-armed state owns it.
+   * Give the body back to locomotion -- but ONLY if `animId` is still the state that owns it.
    *
    * THE ONE CASE THE LATCH CANNOT HANDLE ITSELF. `externalSeq`'s release is checked at the top of
    * `updateLocomotion` and, by design, "a LOOP never releases" -- which is what makes a looping emote or
@@ -1352,18 +1352,41 @@ class Unit extends Entity {
    * something that may be CANCELLED needs an explicit way out or the unit stands in that pose for the
    * rest of the session.
    *
-   * The caller is the cast pose: `network/game/object/spells.ts` arms `precastAnimationFor` at
-   * `SMSG_SPELL_START` and calls this from `SMSG_SPELL_FAILURE` and `SMSG_CAST_FAILED`. A cast that
-   * SUCCEEDS does not need it -- the release clip armed at `SMSG_SPELL_GO` replaces the latch, and being a
-   * one-shot it releases on its own.
+   * **THE `animId` GUARD IS THE WHOLE SAFETY OF THIS METHOD, and it is not belt-and-braces.** The first
+   * version took no argument and released unconditionally, and self-review found two live ways to break a
+   * unit with it:
+   *
+   *  - **A corpse would stand back up.** `setDead(true)` arms `DEATH` and re-latches `externalSeq` onto it,
+   *    and that latch is the ONLY thing holding the body down -- `updateLocomotion`'s release explicitly
+   *    never fires for `DEATH` ("a corpse doesn't transition", `driver.rs:351`). Dying mid-cast, or pressing
+   *    a spell while dead, reached the unconditional release and dropped it.
+   *  - **A live cast pose was dropped mid-cast.** Any second spell pressed during a 1.5 s cast is refused
+   *    with `SMSG_CAST_FAILED`, and that refusal released the pose the FIRST cast was still holding --
+   *    reintroducing the exact symptom this whole change exists to fix.
+   *
+   * Comparing the id makes the release an assertion about what is actually latched rather than a guess from
+   * the caller's side, and the caller pairs it with its own identity check (see
+   * `network/game/object/spells.ts#releaseCastPose`, which also requires the failing spell to be the one
+   * whose pose is in flight -- two spells can share a pose clip, so the id alone is not sufficient).
    *
    * Nothing is armed in its place, for the same reason `setDead(false)` arms nothing: the next
    * `updateLocomotion` frame picks a gait, which for a unit standing still is Stand. Arming Stand here
    * would be that one frame earlier AND would take ownership of a loop -- the permanent freeze again.
+   *
+   * Returns whether it released, so a caller can tell "handed back" from "somebody else owns it now".
    */
-  releaseAnimationLatch(): void {
+  releaseAnimationLatch(animId: number): boolean {
+    if (this.externalSeq === null || this.externalSeq.id !== animId) {
+      return false;
+    }
     this.externalSeq = null;
     this.locoCandidates = null;
+    return true;
+  }
+
+  /** Whether an externally-armed state currently owns this unit's body, for a caller that must not stomp it. */
+  get animationLatchId(): number | null {
+    return this.externalSeq?.id ?? null;
   }
 
   stopAnimation(id?: number) {

@@ -217,8 +217,13 @@ class SpellData {
       if (record && record.castKitID) {
         this.castKits.set(record.id, record.castKitID);
       }
-      // `0xFFFFFFFF` as well as 0 -- the same dual none-sentinel the kit table carries, and it appears
-      // in this column too: a visual with no precast stage writes either form.
+      // ZERO is the only none-sentinel in this column, and that is MEASURED, not assumed: scanned across
+      // all 9406 records of the served `spellvisual.dbc`, field 1 has 6592 zeros and field 2 has 4230, and
+      // NEITHER column contains a single `0xFFFFFFFF` or any value at or above 2^31. The dual sentinel
+      // benilla documents (`spell_visual/mod.rs:66-77`) is on `SpellVisualKit`'s own anim column, not here.
+      // The `0xffffffff` test is kept as a cheap guard against a future file, and it is labelled as a guard
+      // rather than as evidence -- an earlier draft of this comment claimed the form appears here, which it
+      // does not.
       if (record && record.precastKitID && record.precastKitID !== 0xffffffff) {
         this.precastKits.set(record.id, record.precastKitID);
       }
@@ -246,6 +251,7 @@ class SpellData {
         spells: this.spells.size,
         icons: this.icons.size,
         castKits: this.castKits.size,
+        precastKits: this.precastKits.size,
         kitAnims: this.kitAnims.size,
         ms: Date.now() - startedAt,
       },
@@ -397,12 +403,26 @@ class SpellData {
    * joined to `spellvisualkit.dbc` (8663 / 38 / 152) and named through `animationdata.dbc` (506 rows).
    * Two independent facts settle it, and neither needs benilla's naming taken on trust:
    *
-   * 1. **The animation NAMES the two columns resolve to are held poses on one side and strikes on the
-   *    other.** Across every visual in the table, field 1's top anims are `ReadySpellOmni` (879),
-   *    `ReadySpellDirected` (703), `ReadyThrown` (322), `UseStandingLoop` (188), `HoldRifle` (33),
-   *    `HoldThrown` (29), `LoadBow` (19) -- Ready/Hold/Load/Loop, every one a pose. Field 2's top anims
-   *    are `SpellCastOmni` (1091), `SpellCastDirected` (957), `AttackThrown` (517),
-   *    `ChannelCastDirected` (131), `Special1H` (76), `Attack1H` (72) -- every one a discharge.
+   * 1. **The animation NAMES the two columns resolve to are held poses on one side and discharges on the
+   *    other.** The top eight of each, in order, with nothing omitted:
+   *
+   *        field 1  ReadySpellOmni 879, ReadySpellDirected 703, ReadyThrown 322, UseStandingLoop 188,
+   *                 SpellCastOmni 39, SpellCastDirected 33, HoldRifle 33, HoldThrown 29
+   *        field 2  SpellCastOmni 1091, SpellCastDirected 957, AttackThrown 517, ChannelCastDirected 131,
+   *                 BattleRoar 112, AttackUnarmed 101, Special1H 76, SpecialUnarmed 76
+   *
+   *    **Field 1's 5th and 6th entries are NOT poses**, and they are listed rather than dropped -- an earlier
+   *    draft of this comment stopped at the fourth entry, which is evidence with its counterexamples
+   *    removed, the thing this project's rules forbid. Counted over the WHOLE table rather than the top
+   *    eight, which is the honest form of the claim and is also much the stronger one:
+   *
+   *        field 1  2628 rows resolve to an anim: 2235 are Ready/Hold/Load/*Loop (85%),  84 are SpellCast*
+   *        field 2  4173 rows resolve to an anim:   57 are Ready/Hold/Load/*Loop,      2120 are SpellCast*
+   *
+   *    So field 1 is 27x more likely to name a held pose than a `SpellCast*` clip and field 2 is 37x more
+   *    likely to name the reverse. The 84 visuals that use a discharge clip as their wind-up do not weaken
+   *    the reading -- a visual is free to do that -- and they are why this method has no fallback: what the
+   *    kit names is what gets armed.
    * 2. **A spell that is INSTANT carries precast kit 0 and only a cast kit.** Measured: 78 Heroic Strike
    *    (visual 39) field 1 = 0, field 2 = kit 324 -> `Special1H`; 1752 Sinister Strike (253) field 1 = 0,
    *    field 2 = 399 -> `Attack1H`; 2098 Eviscerate (671) field 1 = 0, field 2 = 733 -> `Special1H`.
