@@ -66,9 +66,9 @@ export function collectEditBoxes(registry: FrameRegistry, root: Widget): CaretBo
   const boxes: CaretBox[] = [];
   const walk = (widget: Widget): void => {
     if (widget.kind === 'editbox') {
-      // The selection FIRST, so it is created before the caret and the caret draws over it -- within a
-      // layer this runtime's draw order is creation order, and a caret hidden behind its own highlight
-      // is invisible exactly when the box is being edited.
+      // Build order between these two does NOT matter: the caret is `OVERLAY` and the highlight is
+      // `BACKGROUND`, so the LAYERS decide which draws over which and creation order never enters into
+      // it. (An earlier version of this comment claimed the opposite and was wrong.)
       const selection = buildSelection(registry, widget);
       boxes.push({ box: widget, caret: buildCaret(registry, widget), selection });
     }
@@ -148,6 +148,12 @@ function buildSelection(registry: FrameRegistry, box: Widget): Widget | null {
  *
  * An EMPTY selection (anchor == caret) hides the quad rather than drawing a zero-width one: a collapsed
  * selection is what a plain arrow key leaves behind and it must show nothing but the caret.
+ *
+ * COST, because the draw fingerprint is easy to spoil here (see the report's frame-budget section): the
+ * guard below returns BEFORE either `caretOffset` call for every box that is not the focused one holding
+ * a live range, so the canvas text measurement runs for at most one box per frame and usually none. And
+ * it adds no dirty frames: a selection's rect is static while it stands, and the CARET beside it already
+ * dirties the fingerprint twice a second by blinking. The highlight itself deliberately does not blink.
  */
 export function placeSelection(box: Widget, selection: Widget | null, input: FocusSink | null): void {
   if (selection === null) {
