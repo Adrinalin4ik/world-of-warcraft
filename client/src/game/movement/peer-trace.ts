@@ -72,6 +72,23 @@ function wrapPi(angle: number): number {
 class PeerTrace {
   enabled = false;
 
+  /**
+   * A/B SWITCH: skip the world resolve on a peer's dead-reckoned step, restoring the pre-fix
+   * behaviour on demand (`Unit#updateRemoteMotion` reads it).
+   *
+   * The reference keeps the same switch for the same reason -- `flat_extrapolation()`,
+   * `samples/benilla/crates/benilla/src/net/motion/remote.rs:225-230`, whose doc says it "restores
+   * both defects on demand (a watched player sinking into rising ground and floating over falling
+   * ground; a mover marching into the wall its own client is stopped at), which is what makes the fix
+   * measurable side by side rather than asserted".
+   *
+   * That is not a nicety here. The terrain a peer happens to be walking over decides how big the
+   * height staircase is, so a before-run and an after-run on different ground are not comparable, and
+   * this project has already had one movement claim voided by exactly that. Interleaving the two modes
+   * inside ONE session over the SAME ground is the only honest comparison, and it needs a switch.
+   */
+  flatExtrapolation = false;
+
   private rows: PeerTraceRow[] = [];
 
   /** Previous `render` sample per guid, so `render` rows carry their own deltas. */

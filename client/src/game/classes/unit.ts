@@ -19,7 +19,8 @@ import {
   SETTLE_TIMEOUT,
   capsuleHalfSegment,
 } from "../movement/constants";
-import { airborneStep, groundedStep } from "../movement/mover";
+import { snapToGround } from "../movement/mover";
+import { shouldPose } from "../pipeline/m2/anim/gating";
 import { createPlayerMoveState } from "../movement/player-state";
 import { peerTrace } from "../movement/peer-trace";
 import {
@@ -262,7 +263,6 @@ function remoteCast(): CastFn {
   return _remoteCast;
 }
 const _remoteFrom = new THREE.Vector3();
-const _remoteVel = new THREE.Vector3();
 
 class Unit extends Entity {
   public guid: string;
@@ -1952,7 +1952,7 @@ class Unit extends Entity {
     this.emit("position:change", this.position, this.view.rotation);
   }
 
-  update(delta: number) {
+  update(delta: number, viewerPos?: THREE.Vector3) {
     // The player's frame is driven from Controls, which owns the input and the camera heading and
     // calls `movementFrame` + `syncViewFromMove` itself. Only non-player units integrate here.
     if (this.isPlayer) {
@@ -1962,7 +1962,7 @@ class Unit extends Entity {
     // The two network motion legs, mutually exclusive by construction (`setSplinePath` and
     // `applyRemoteState` each clear the other), so at most one writes `view.position` per frame.
     this.updateSplineFollowing(delta);
-    this.updateRemoteMotion(delta);
+    this.updateRemoteMotion(delta, viewerPos);
     // this.updatePlayer(delta);
     this.clear();
     // const m = ObjectsManager;
@@ -2325,7 +2325,7 @@ class Unit extends Entity {
    * has to advance by exactly the time the rest of the frame advanced by or the peer's position and
    * everything else in the scene disagree about what "now" means.
    */
-  updateRemoteMotion(delta: number) {
+  updateRemoteMotion(delta: number, viewerPos?: THREE.Vector3) {
     const motion = this.remoteMotion;
     if (!motion) {
       return;
@@ -2354,38 +2354,58 @@ class Unit extends Entity {
     // "residual" and read as evidence the dead reckoning was tracking well. Decomposed, most of that
     // residual was Z. `peerTrace` now records the axes separately for that reason.
     //
-    // The resolve is the LOCAL controller's own, on the same swept capsule and the same walkable
-    // filter, because the reference drives every mover through one controller: grounded gets the
-    // step-vs-fall election (so height comes off the surface every frame) and airborne gets the
-    // slide alone (a jump owns its Z). A swimmer is excluded -- his wire Z is a depth in a water
-    // volume, not a surface to stand on.
+    // The resolve is the LOCAL controller's own election snap, under the same reach law and the same
+    // walkable filter, so height comes off the surface every frame instead of standing frozen at the
+    // last packet's Z. Excluded:
+    //  - a SWIMMER: his wire Z is a depth in a water volume, not a surface to stand on;
+    //  - an AIRBORNE peer: the ballistic arc owns its Z, which is the whole point of a jump.
+    //
+    // WHAT A PEER DOES NOT GET, and why: the step-up and the swept slide. The reference runs a remote's
+    // step through its whole controller (decision 0626) and the first version of this did too; measured
+    // on one live session with 83 entities and ONE peer, interleaved A/B, that cost `anim` p50
+    // 1.5 -> 7.2 ms and `world.animate` p50 4.9 -> 10.8 ms. `snapToGround`'s own doc has the whole
+    // measurement and the reason (six to eight casts versus one, on a collision world with no
+    // persistent BVH). So an invented step is NOT stopped by our walls -- the remaining half of the
+    // reference's `WOW_REMOTE_FLAT` -- and that is a knowing trade against a frame budget, not an
+    // oversight.
+    //
+    // AND IT IS DECIMATED BY DISTANCE, on the same law the pose gate uses (`anim/gating.ts#shouldPose`
+    // -- every frame inside 40 yd, every second to 120, every fourth beyond, staggered per unit so the
+    // periods do not pile onto one frame). One cast is not cheap here: MEASURED directly, on loaded
+    // Northshire terrain with 441 chunks, 301 WMO groups and 4600 doodad hulls, one downward capsule
+    // cast costs 0.92 ms, because `DoodadProvider#gather` walks every registered hull per cast (its own
+    // doc measures the same thing from the other side). At 40+ yd a fifth of a yard of height error is
+    // invisible and a 66 ms correction period is not worth 0.9 ms a frame.
+    //
+    // WHAT IS STILL LINEAR, stated rather than hidden: nearby peers. Ten players inside 40 yd is ten
+    // casts, ~9 ms, and this gate does nothing about it. The real fix is a broadphase for the doodad
+    // hulls -- which would also give the LOCAL mover back most of its ~2.7 ms, since it issues about
+    // 2.9 of these casts every frame -- and that is a collision-layer change, not a movement one.
     const airborne = (motion.flags & MoveFlag.FALLING) !== 0;
     const swimming = (motion.flags & MoveFlag.SWIMMING) !== 0;
-    if (!this.isPlayer && !swimming) {
-      const cast = remoteCast();
+    const due = viewerPos === undefined
+      || shouldPose(worldClock.frameIndex, this.model?.poseSlot ?? 0, viewerPos.distanceTo(motion.pos));
+    if (!this.isPlayer && !swimming && !airborne && due && !peerTrace.flatExtrapolation) {
       const half = CAPSULE_HEIGHT * 0.5;
-      _remoteFrom.set(beforeX, beforeY, beforeZ + half);
-      // The frame's velocity BY CONSTRUCTION, from what the dead reckoning just invented. Grounded
-      // it is purely horizontal (see above); airborne the arc's vertical rides along so the sweep
-      // sees the real displacement.
-      if (delta > 1e-6) {
-        _remoteVel.set(
-          (motion.pos.x - beforeX) / delta,
-          (motion.pos.y - beforeY) / delta,
-          (motion.pos.z - beforeZ) / delta,
-        );
-      } else {
-        _remoteVel.set(0, 0, 0);
+      _remoteFrom.set(motion.pos.x, motion.pos.y, motion.pos.z + half);
+      const travel = Math.hypot(motion.pos.x - beforeX, motion.pos.y - beforeY);
+      // Skin ZERO: a peer sits exactly on the surface, so the height tracks every frame instead of
+      // living in a 0.02 yd dead band. See `snapToGround`'s `skin` note for the measurement.
+      const drop = snapToGround(remoteCast(), _remoteFrom, travel, 0);
+      if (drop !== null) {
+        // Written back onto the ANCHOR, not just onto the render: the next frame extrapolates from the
+        // resolved pose, so the correction is not re-derived from a stale base every frame. The
+        // reference does the same (`remote.rs:578`, `rm.wow_pos = pos`). A MISS leaves him where the
+        // packet put him, which is right: no floor within reach means the terrain under him has not
+        // streamed yet, or he really is over a drop his own client is falling down.
+        // `drop` is how far the CAPSULE CENTRE may descend before contact, so the feet fall by exactly
+        // the same amount -- `groundedStep` lowers its own centre by `hit.distance` and derives the
+        // feet from it identically. An earlier version wrote `+= half - drop`, which added the
+        // half-height on top and made the peer bounce: measured, |dz| p50 0.71 yd PER FRAME against
+        // 0.005 for the correct form.
+        motion.pos.z -= drop;
+        this.position.z = motion.pos.z;
       }
-      const resolved = airborne
-        ? airborneStep(cast, _remoteFrom, _remoteVel, delta)
-        : groundedStep(cast, _remoteFrom, _remoteVel, delta).center;
-      resolved.z -= half;
-      // Written back onto the ANCHOR, not just onto the render: the next frame extrapolates from the
-      // resolved pose, so the resolve is not re-derived from a stale base every frame. The reference
-      // does the same (`remote.rs:578`, `rm.wow_pos = pos`).
-      motion.pos.copy(resolved);
-      this.position.copy(resolved);
     }
 
     // THE RENDERED BODY YAW, eased -- the client's display-facing blend, the same law the strafing

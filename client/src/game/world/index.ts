@@ -655,6 +655,14 @@ export default class World extends EventEmitter {
     // same flag so a session that never enables it does not even walk the entity map.
     if (peerTrace.enabled) {
       this.entities.forEach((entity) => {
+        // PEERS AND OURSELVES ONLY, and the restriction is not thrift -- it is what makes the ring
+        // usable. The first capture sampled all 83 streamed entities and filled the 8000-row history
+        // in under two seconds, evicting every packet row before the run ended: an instrument that
+        // measured itself out of existence. Creatures are the spline path's business and have their
+        // own capture.
+        if (!entity.isPlayer && entity.remoteMotion === null) {
+          return;
+        }
         const inst = entity.model?.instanceAnim ?? null;
         peerTrace.recordRender(
           entity.guid,
@@ -810,7 +818,7 @@ export default class World extends EventEmitter {
       // classified, which is seconds after the first movement packet arrives; the earlier report
       // named the same hazard for any unit with a static model. A body's position must not depend on
       // whether its skeleton has keyframes.
-      entity.update(delta);
+      entity.update(delta, camPos);
 
       // Same two-part test `DoodadManager#loadDoodad` documents: `model.animated` is the POSING
       // predicate (ModelAnim.classify), and billboarding is a separate reason to need a per-frame

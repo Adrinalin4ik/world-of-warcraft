@@ -52,6 +52,58 @@ export interface GroundedStep {
 }
 
 /**
+ * The election snap's probe REACH for a step that travelled `travelXY` yards horizontally.
+ *
+ * Extracted so the peer path can run the snap alone (`snapToGround`) under the same law the local
+ * mover's full step uses. Two copies of this expression is how the two silently stop agreeing.
+ */
+export function snapReach(travelXY: number): number {
+  return travelXY * STEP_SLOPE_RATIO + STEP_SNAP_SLACK + CAPSULE_HEIGHT;
+}
+
+/**
+ * THE ELECTION SNAP ALONE: how far below `center` the walkable floor is, or null if none is in reach.
+ *
+ * One cast. This is the cheap half of `groundedStep` and it is the half that supplies HEIGHT -- the
+ * step-vs-fall election that makes a walker follow a slope and a step down instead of holding the last
+ * height it was told.
+ *
+ * WHY IT EXISTS SEPARATELY, measured rather than assumed. A peer's dead-reckoned step was first run
+ * through the whole of `groundedStep`, as the reference does (decision 0626). Interleaved A/B on one
+ * live session, 83 entities and ONE observed peer: `anim` p50 1.5 -> 7.2 ms and `world.animate` p50
+ * 4.9 -> 10.8 ms, i.e. 5.7 ms of frame time for one peer. `groundedStep` is six to eight swept casts
+ * (step-up's rise/advance/settle, the slide's up-to-four iterations, then this snap) and every cast
+ * re-gathers candidate triangles over its own broadphase box; the reference pays for that on Avian's
+ * persistent BVH and this client does not have one. Five peers would have eaten the whole frame.
+ *
+ * So a peer gets THIS and nothing else, and what that costs him is stated plainly at the call site:
+ * no step-up and no swept slide, so our invented step is not stopped by our walls. That is the other
+ * half of the reference's own `WOW_REMOTE_FLAT` behaviour and it is knowingly retained -- the owner
+ * reported the height (a peer "teleporting" every half second and sinking into the ground), not a peer
+ * inside a building, and the height is what one cast buys.
+ *
+ * `skin` DEFAULTS to `SKIN_WIDTH` for the local mover, which wants to rest a hair above the floor --
+ * resting at a zero gap is what dead-stopped every uphill step (see `groundedStep`). A peer wants ZERO,
+ * and the difference is measurable: with a 0.02 yd skin the cast returns distance 0 for any frame whose
+ * ground change is smaller than the skin, so a walker on a gentle slope accumulates height error inside
+ * that dead band until a packet clears it -- measured, the rendered Z's per-frame p50 was exactly 0 and
+ * the tail still carried 0.89 yd steps at packet arrivals. A peer does no horizontal sweep here, so the
+ * dead-stop the skin protects against cannot arise for him.
+ */
+export function snapToGround(
+  cast: CastFn,
+  center: THREE.Vector3,
+  travelXY: number,
+  skin: number = SKIN_WIDTH,
+): number | null {
+  const hit = cast(center, _down, snapReach(travelXY), skin, GROUND_COS);
+  if (!hit || hit.normal.z < GROUND_COS) {
+    return null;
+  }
+  return hit.distance;
+}
+
+/**
  * ONE GROUNDED WALK STEP, resolved against the world -- step-up, then slide, then the election
  * snap.
  *
@@ -115,7 +167,7 @@ export function groundedStep(
   // every frame and takes out the small float a raw position leaves.
   const dx = slid.x - center.x;
   const dy = slid.y - center.y;
-  const reach = Math.hypot(dx, dy) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK + CAPSULE_HEIGHT;
+  const reach = snapReach(Math.hypot(dx, dy));
   // SKIN_WIDTH, so the body settles a hair ABOVE the floor rather than exactly on it.
   //
   // Resting at a zero gap is what dead-stopped every uphill step: the horizontal sweep reported a
