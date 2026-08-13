@@ -138,6 +138,17 @@ export interface FontSpec {
 let nextWidgetId = 0;
 /** Backs `Widget#linkStamp` -- see its doc comment. */
 let nextLinkStamp = 0;
+/**
+ * Bumped by every `add`/`remove` anywhere in any tree: the invalidation stamp for
+ * `WidgetRoot#addHiddenTargets`' id index, which is an O(tree) walk nothing else needs per frame.
+ *
+ * Deliberately GLOBAL and deliberately coarse. A per-root counter would need the child to know which
+ * root it is under -- a widget is `add`ed before it is parented into one -- and the only cost of a
+ * false invalidation is one extra walk. Anchors are NOT counted: an id-to-widget index cannot go stale
+ * when a `SetPoint` changes which id a node points at, and `SetPoint` is the call FrameXML makes
+ * constantly (`ActionButton_UpdateHotkeys`, every dropdown) where an `add` is a load-time event.
+ */
+let treeStructure = 0;
 
 export class Widget {
   readonly id: string;
@@ -372,6 +383,7 @@ export class Widget {
     const isRegion = child.kind === 'texture' || child.kind === 'fontstring';
     child.frameLevel = isRegion ? this.frameLevel : this.frameLevel + 1;
     this.children.push(child);
+    treeStructure += 1;
     return child;
   }
 
@@ -380,6 +392,7 @@ export class Widget {
     if (index >= 0) {
       this.children.splice(index, 1);
       child.parent = null;
+      treeStructure += 1;
     }
   }
 
@@ -559,6 +572,107 @@ export class WidgetRoot {
    * that a caller with no text at all (`layout.ts`'s and `hit.ts`'s tests) needs nothing; the app
    * always passes it (`screens.ts`), which is what makes layout and paint agree.
    */
+  private index: Map<string, Widget> | null = null;
+  private indexStructure = -1;
+
+  /**
+   * Every widget in this tree by id, REBUILT ONLY WHEN THE TREE CHANGED SHAPE.
+   *
+   * The walk is O(whole tree) -- 4225 frames in the world -- and `addHiddenTargets` needs it on every
+   * frame where any anchor target is hidden, which in the world is every frame (`TemporaryEnchantFrame`
+   * anchors to the hidden `ConsolidatedBuffs` from load). MEASURED: walking it per frame took
+   * `ui.layout` p50 from **0.4 ms to 2.2 ms** at 257 draw items, against a ±1 ms run-to-run spread --
+   * a real regression, not noise, and the reason this cache exists rather than the obvious inline walk.
+   * `treeStructure` invalidates it, so the cost is paid once per `CreateFrame`, not once per frame.
+   */
+  private idIndex(): Map<string, Widget> {
+    if (this.index !== null && this.indexStructure === treeStructure) {
+      return this.index;
+    }
+    const byId = new Map<string, Widget>();
+    const walk = (widget: Widget): void => {
+      byId.set(widget.id, widget);
+      for (const child of widget.children) {
+        walk(child);
+      }
+    };
+    walk(this.root);
+    this.index = byId;
+    this.indexStructure = treeStructure;
+    return byId;
+  }
+
+  /**
+   * A HIDDEN FRAME STILL HAS A RECT, and everything anchored to one depends on it.
+   *
+   * `walk` above skips a hidden subtree whole, which is right for the DRAW list and wrong for the
+   * LAYOUT graph: the engine resolves geometry for the whole frame tree and `Hide()` only stops the
+   * frame being painted. `samples/benilla/crates/benilla-ui/src/layout.rs` resolves rects off the frame
+   * graph with no reference to visibility at all -- the only thing that makes a rect unresolvable there
+   * is a frame with no anchor points (`layout.rs:1254`) or a dependent of one (`:1282`).
+   *
+   * MEASURED, and it is the owner's report: `ActionButton6..12` each anchor `LEFT` to the previous
+   * button's `RIGHT` (`actionbarframe.xml:96-176`), and `ActionButton_Update` HIDES a slot with no
+   * action. On a character with slots 1-4 and 7 filled, `ActionButton7` resolved to **left 0, top 0**
+   * -- the window's corner -- through `resolveAnchors`' lenient fallback, while during a drag it read
+   * **left 331, top 728** with the rest of the bar, because `ACTIONBAR_SHOWGRID` had shown 5 and 6 and
+   * put them back in the node set. "It shows correctly while I drag and goes to the corner otherwise"
+   * is exactly that. `TemporaryEnchantFrame` (0,0, anchored to the hidden `ConsolidatedBuffs`,
+   * buffframe.xml:118-125) is the same defect and is fixed by the same lines.
+   *
+   * ONLY THE CLOSURE, not the whole 4225-frame tree. A hidden widget's rect is observable only through
+   * something that depends on it, so this adds the transitive anchor-target closure of the nodes
+   * already in the set and nothing else. That keeps the cost where it was measured (`ui.layout` p50
+   * 0.4 ms at 257 draw items) instead of taking the node set to the whole tree, whose per-frame
+   * `deriveSize` would put a canvas `measureText` behind every hidden font string. The full-tree
+   * version is the same SEMANTICS with a bill nobody has measured; if a future case needs a rect for a
+   * hidden frame nothing visible references, this is the function to widen.
+   *
+   * A target that is not in the tree at all is left alone: that is the "destroyed, or never built"
+   * case `resolveAnchors` reports, and reporting it is the point.
+   */
+  private addHiddenTargets(nodes: LayoutNode[], scale: number, measure?: MeasureText): void {
+    const wanted: string[] = [];
+    for (const node of nodes) {
+      for (const anchor of node.anchors) {
+        if (anchor.relativeTo !== undefined) {
+          wanted.push(anchor.relativeTo);
+        }
+      }
+    }
+    if (wanted.length === 0) {
+      return;
+    }
+
+    const present = new Set(nodes.map((node) => node.id));
+    const missing = wanted.filter((id) => !present.has(id));
+    if (missing.length === 0) {
+      return;
+    }
+
+    const byId = this.idIndex();
+
+    const queue = missing;
+    while (queue.length > 0) {
+      const id = queue.pop() as string;
+      if (present.has(id)) {
+        continue;
+      }
+      const widget = byId.get(id);
+      if (widget === undefined) {
+        continue;
+      }
+      present.add(id);
+      const size = deriveSize(widget, scale, measure);
+      nodes.push({ id, width: size.width, height: size.height, anchors: widget.anchors });
+      for (const anchor of widget.anchors) {
+        if (anchor.relativeTo !== undefined && !present.has(anchor.relativeTo)) {
+          queue.push(anchor.relativeTo);
+        }
+      }
+    }
+  }
+
   drawList(viewport: Viewport, measure?: MeasureText): DrawItem[] {
     const flat: Array<{ widget: Widget; alpha: number; sequence: number }> = [];
     const nodes: LayoutNode[] = [];
@@ -586,6 +700,7 @@ export class WidgetRoot {
     };
 
     walk(this.root, 1);
+    this.addHiddenTargets(nodes, scale, measure);
 
     const rects = resolveAnchors(nodes, viewport);
     // The client's own resolver drops a frame with no anchor points, and everything anchored to it;

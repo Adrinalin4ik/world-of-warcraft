@@ -17,6 +17,40 @@ describe('WidgetRoot#drawList', () => {
 
     expect(ids.indexOf('dialog')).toBeGreaterThan(ids.indexOf('behind'));
   });
+
+  /**
+   * THE ACTION BAR'S CORNERED SLOTS. `ActionButton6..12` each anchor LEFT to the previous button's RIGHT
+   * (`actionbarframe.xml:96-176`) and `ActionButton_Update` HIDES a slot with no action, so one empty slot
+   * used to strand every button after it at the window's corner -- correct only while a drag's
+   * `ACTIONBAR_SHOWGRID` had the empty ones shown. A hidden frame still has a rect.
+   */
+  it('places a shown widget anchored to a HIDDEN one against the hidden one\'s rect', () => {
+    const root = new WidgetRoot();
+
+    const first = root.root.add(new Widget('button', 'slot1'));
+    first.layer = 'ARTWORK';
+    first.setSize(36, 36).setAnchors({ point: 'BOTTOMLEFT', x: 8, y: 4 });
+
+    const empty = root.root.add(new Widget('button', 'slot2'));
+    empty.layer = 'ARTWORK';
+    empty.setSize(36, 36)
+      .setAnchors({ point: 'LEFT', relativeTo: 'slot1', relativePoint: 'RIGHT', x: 6, y: 0 });
+    empty.hide();
+
+    const after = root.root.add(new Widget('button', 'slot3'));
+    after.layer = 'ARTWORK';
+    after.setSize(36, 36)
+      .setAnchors({ point: 'LEFT', relativeTo: 'slot2', relativePoint: 'RIGHT', x: 6, y: 0 });
+
+    const items = root.drawList({ width: 1024, height: 768 });
+    const rect = items.find((item) => item.widget.id === 'slot3')!.rect;
+
+    // 8 + (36+6) + (36+6) = 92, on the bar's own row -- not 0,0.
+    expect(rect.left).toBe(92);
+    expect(rect.top).toBe(768 - 4 - 36);
+    // ... and the hidden slot itself is still not drawn.
+    expect(items.some((item) => item.widget.id === 'slot2')).toBe(false);
+  });
 });
 
 /**
