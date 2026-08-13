@@ -23,9 +23,17 @@ const FONT_FILES: Record<string, string> = {
 };
 
 /**
- * Padding around rasterized text.
- * HORIZONTAL: clearance for stroke width (lineWidth=2, so 1px on each side) plus room for subpixel positioning.
- * VERTICAL: clearance for stroke width plus extra for centered textBaseline.
+ * Padding around rasterized text, in DEVICE pixels at dpr 1.
+ *
+ * HORIZONTAL: clearance for the outline stroke (lineWidth 2, so 1px each side).
+ * VERTICAL: the same, plus room for the centred `textBaseline`'s ascender/descender.
+ *
+ * IT IS RASTER BLEED AND NOTHING ELSE. It used to be reported as part of the string's SIZE, which
+ * put it into the widget's layout rect -- see `measureText`. That was the bug behind "the checkbox
+ * sits oddly against its label" and it got WORSE THE SMALLER THE WINDOW, because the padding is a
+ * fixed count of device pixels and the rect is in logical units: `PADDING_V / scale` is 5.1 units at
+ * 1382x911 (scale 1.186) and **8.4 units at 630x551** (scale 0.717), against a `<FontHeight>` of 10.
+ * An 84% overshoot on the height of every auto-sized label, varying with the window.
  */
 const PADDING_H = 4;
 const PADDING_V = 6;
@@ -176,7 +184,23 @@ function lineHeight(spec: FontSpec): number {
   return spec.size + (spec.spacing ?? 0);
 }
 
-/** Logical-unit size of a rendered string, including padding. Same units `get()`'s `size` reports. */
+/**
+ * Logical-unit size of the GLYPHS of a rendered string -- the box the engine calls the font string's
+ * rect, and the box everything anchored to that string is anchored to.
+ *
+ * **NO PADDING.** This used to add `PADDING_H`/`PADDING_V` and it was wrong twice over. It is the
+ * function that fills in an unsized `<FontString>`'s width and height (`widget.ts#deriveSize`), so a
+ * padded answer inflated the LAYOUT rect with the rasterizer's stroke clearance -- and the client's
+ * own documents anchor to those edges. `accountlogin.xml:551-556` is the case that found it:
+ * `<CheckButton name="AccountLoginSaveAccountName">` anchors its RIGHT to
+ * `AccountLoginSaveAccountNameText`'s LEFT at offset (0,0), i.e. edge to edge, so a rect 4 device px
+ * too wide left a visible gap between the box and its label. The vertical error was much larger --
+ * see `PADDING_V` -- and both grew as the window shrank, which is why a 630x551 window looks
+ * "misaligned" while 1382x911 looks nearly right.
+ *
+ * The padding still exists in the RASTER: `FontStringTextures#get` reports it separately as `pad`,
+ * and `renderer.ts` inflates the quad about the glyph box's centre so no stroke is clipped.
+ */
 export function measureText(
   text: string,
   spec: FontSpec,
@@ -185,21 +209,17 @@ export function measureText(
   const pixelScale = density(scale);
   const context = optionalMeasureContext();
   const lines = wrapLines(text, spec, scale);
+  const blockHeight =
+    lines.length > 1
+      ? lines.length * spec.size + (lines.length - 1) * (spec.spacing ?? 0)
+      : spec.size;
   if (!context) {
-    return { width: 0, height: spec.size + PADDING_V / scale };
+    return { width: 0, height: blockHeight };
   }
   context.font = cssFont(spec, pixelScale);
   const widest = Math.max(...lines.map((line) => context.measureText(line).width));
-  // Padding is rasterized at `pixelScale` (device pixels) below, so it has to come back out at the
-  // same rate it went in -- `PADDING_H` scaled by the density's DPR factor, then the whole width
-  // divided by `pixelScale`, not `scale`, to land back in logical units.
-  return {
-    width: (widest + PADDING_H * (pixelScale / scale)) / pixelScale,
-    height:
-      lines.length > 1
-        ? lines.length * spec.size + (lines.length - 1) * (spec.spacing ?? 0) + PADDING_V / scale
-        : spec.size + PADDING_V / scale,
-  };
+  // `pixelScale`, not `scale`: the measurement was taken at the device-pixel font size.
+  return { width: widest / pixelScale, height: blockHeight };
 }
 
 /**
@@ -227,12 +247,15 @@ export function caretOffset(
     return 0;
   }
   context.font = cssFont(spec, pixelScale);
-  const inset = (PADDING_H * devicePixelDensity()) / 2;
+  // NO INSET. It used to add half the horizontal padding, because the quad's left edge was the padded
+  // canvas's left edge and offset 0 had to skip the pad. `renderer.ts` now centres the padded quad on
+  // the GLYPH box, so the region's left edge IS the first glyph's cell -- and the caret is anchored to
+  // the region. Keeping the inset would put the caret half a pad right of the first character.
   const prefix = text.slice(0, Math.max(0, Math.min(caret, text.length)));
-  return (inset + context.measureText(prefix).width) / pixelScale;
+  return context.measureText(prefix).width / pixelScale;
 }
 
-/** A rasterized string: the texture plus the logical (layout-unit) size the renderer draws it at. */
+/** A rasterized string: the texture, the glyph box, and the raster pad around it. All logical units. */
 type Entry = ResolvedSprite & { texture: THREE.CanvasTexture };
 
 export class FontStringTextures {
@@ -289,11 +312,15 @@ export class FontStringTextures {
     const width = Math.ceil(widest) + paddingH;
     // A single line keeps EXACTLY the height it always had, so no existing caption's quad moves;
     // only a wrapped string takes the multi-line path.
-    const height =
+    // The glyph block in DEVICE pixels -- what the quad's `size` reports (divided back to logical) and
+    // what the padded canvas is grown from. Same arithmetic as `measureText`'s `blockHeight`, in the
+    // other unit, so the measured rect and the drawn quad cannot disagree about the block.
+    const glyphBlockHeight = Math.ceil(
       lines.length > 1
-        ? Math.ceil(lineHeight(spec) * (lines.length - 1) * pixelScale + spec.size * pixelScale) +
-          paddingV
-        : Math.ceil(spec.size * pixelScale) + paddingV;
+        ? lineHeight(spec) * (lines.length - 1) * pixelScale + spec.size * pixelScale
+        : spec.size * pixelScale,
+    );
+    const height = glyphBlockHeight + paddingV;
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(width, 1);
@@ -354,11 +381,23 @@ export class FontStringTextures {
       // ERROR rather than a silent stretch-to-rect. It shipped flat once, and because `size` is
       // optional and excess properties are not checked on a returned value, every string on screen
       // was quietly stretched to its widget rect until a screenshot caught it.
+      //
+      // `size` is the GLYPH box and `pad` the raster bleed around it, reported separately for the
+      // reason `measureText` gives at length: the glyph box is what the layout and every anchor into
+      // this string mean, and the pad is the rasterizer's own stroke clearance. The renderer draws a
+      // quad of `size + pad` centred on the glyph box.
       size: {
         // Logical units: the raster is denser (`pixelScale` includes `dpr`) but the quad it draws
         // onto must stay the same on-screen size regardless of display density.
-        width: canvas.width / pixelScale,
-        height: canvas.height / pixelScale,
+        width: widest / pixelScale,
+        height: glyphBlockHeight / pixelScale,
+      },
+      // TOTAL extra on each axis, not per side. Very nearly symmetric -- the only asymmetry is the
+      // `Math.ceil` on the canvas width, at most one device pixel on the right -- so the renderer
+      // splits it in half and no glyph moves by more than half a device pixel.
+      pad: {
+        x: (canvas.width - widest) / pixelScale,
+        y: (canvas.height - glyphBlockHeight) / pixelScale,
       },
     };
     this.cache.set(key, entry);

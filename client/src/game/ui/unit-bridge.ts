@@ -212,10 +212,18 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
    * the player is looking at anything else. Both guids are knowable only here, which is why
    * `api/units.ts` takes a plain number and says so.
    *
-   * Fired as `UNIT_COMBO_POINTS`, which is the event `ComboFrame` itself registers
-   * (`comboframe.xml`'s `<OnLoad>` -> `ComboFrame_OnLoad`), and AFTER the push, per this file's header.
-   * Diffed, because an event here re-runs `ComboFrame_Update`, which moves five textures and dirties
-   * the draw fingerprint -- the same rule `action-bridge.ts` states.
+   * Fired as `UNIT_COMBO_POINTS` with `"player"` as its argument, and BOTH halves are read off the
+   * client's own file rather than remembered: `comboframe.xml:115-121`'s inline `<OnLoad>` registers
+   * `PLAYER_TARGET_CHANGED` and `UNIT_COMBO_POINTS`, and `ComboFrame_OnEvent` (`comboframe.lua:8-17`)
+   * takes the first vararg and acts only `if ( unit == PlayerFrame.unit )` -- so an event with no
+   * argument, or with a guid, would be silently ignored. (A first draft of this comment cited a
+   * `ComboFrame_OnLoad` function; there is no such function, the registration is inline.)
+   * `ComboFrame_Update`'s own read is `GetComboPoints(PlayerFrame.unit, "target")`
+   * (`comboframe.lua:20`), which is what "the only shape asked" above means.
+   *
+   * AFTER the push, per this file's header. Diffed, because an event here re-runs
+   * `ComboFrame_Update`, which shows or hides five points and cross-fades their highlights -- so it
+   * dirties the draw fingerprint, the rule `action-bridge.ts` states.
    */
   const pushCombo = (): void => {
     const combo = spells.comboState;

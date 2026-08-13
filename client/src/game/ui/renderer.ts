@@ -31,6 +31,17 @@ export type ResolvedSprite = {
   /** Absent for a backdrop, which carries its own two sheets in `backdrop` instead. */
   texture?: THREE.Texture;
   size?: { width: number; height: number };
+  /**
+   * A font string's RASTER BLEED, in logical units, total per axis -- the stroke clearance `text.ts`
+   * grows its canvas by beyond the glyph box `size` reports.
+   *
+   * Its own field rather than folded into `size` because the two mean different things to different
+   * consumers: `size` is the layout rect (`widget.ts#deriveSize` fills an unsized FontString from the
+   * same measurement, and the client's documents anchor to those edges), while this is only ever the
+   * amount to inflate the drawn quad by so the outline is not clipped. Folding them is exactly the bug
+   * `text.ts#measureText` documents -- the pad ended up in the layout and moved every neighbour.
+   */
+  pad?: { x: number; y: number };
   /** The sprite's own sub-rect, from the art table. A widget's own `texCoords` overrides it. */
   texCoords?: TexCoords | null;
   /** Set instead of `texture` for a `backdrop` widget. */
@@ -269,6 +280,11 @@ export class GlueRenderer {
     // rasterizes at `window.devicePixelRatio`, and if the two ever disagree no amount of snapping
     // makes the raster 1:1 anyway.
     const devicePerUnit = (size.y / units.height) * this.renderer.getPixelRatio();
+    // Hoisted out of the per-item loop: both captures are loop-invariant, and this file's own
+    // `Pooled.lastMap` comment records that the per-item work here is the most expensive thing the
+    // widget layer does. A closure allocated per text item per frame is small, but it is free not to.
+    const snap = (value: number): number =>
+      snapEnabled ? Math.round(value * devicePerUnit) / devicePerUnit : value;
 
     // Y-DOWN: top = 0, bottom = height. Logical units, so widget rects map 1:1.
     this.camera.left = 0;
@@ -293,7 +309,7 @@ export class GlueRenderer {
         return;
       }
 
-      const { texture, size } = resolved;
+      const { texture, size, pad } = resolved;
       if (!texture) {
         return;
       }
@@ -365,7 +381,14 @@ export class GlueRenderer {
         // A font string draws at its rasterized size, not stretched to the widget's rect: text.ts
         // sizes the canvas to the glyphs' actual extent, so a fixed-size quad would squash or
         // stretch every letter. Position within the rect by the font's horizontal alignment and
-        // always vertically centred -- there is no vertical-align concept in GlueXML fontstrings.
+        // always vertically centred.
+        //
+        // "There is no vertical-align concept in GlueXML fontstrings" is what this comment used to
+        // say, and it is FALSE: `justifyV` exists and its FrameXML default is MIDDLE
+        // (`benilla-ui/src/script/types.rs:186-198`). Centring is therefore right for the default and
+        // right for every string in the loaded manifest that does not override it -- but an explicit
+        // `justifyV="TOP"` (e.g. `AchievementDescriptionFont`, fontstyles.xml:278) is still ignored,
+        // which is the same gap `SetJustifyV`'s `notImplemented` entry names.
         // CENTER, not LEFT: the FrameXML `JustifyH` default. See `region.ts#ensureFont` -- a
         // `FontSpec` always carries an align, so this fallback is only for a font string that never
         // went through `ensureFont` at all, and it must agree with that default or the two disagree
@@ -393,10 +416,16 @@ export class GlueRenderer {
         // (`benilla/src/ui_text/atlas.rs:135-140`).
         // ART QUADS ARE DELIBERATELY NOT SNAPPED: a texture is stretched to its authored rect, so
         // rounding its edges would change its SIZE, and the engine does not place art on a pixel grid.
-        const snap = (value: number) =>
-          snapEnabled ? Math.round(value * devicePerUnit) / devicePerUnit : value;
+        // The mesh is centred on the GLYPH BOX and merely INFLATED by the raster pad, which is why
+        // `size` here is the glyph box and the pad never enters the alignment arithmetic above. The
+        // pad is symmetric to within the canvas-width `Math.ceil` (`text.ts#get`), so splitting it in
+        // half moves no glyph by more than half a device pixel -- while folding it into `size` moved
+        // every LEFT-aligned string by a full half-pad and every neighbour anchored to it by a whole
+        // one.
+        const padX = pad?.x ?? 0;
+        const padY = pad?.y ?? 0;
         entry.mesh.position.set(snap(quadLeft) + size.width / 2, snap(quadTop) + size.height / 2, 0);
-        entry.mesh.scale.set(size.width, size.height, 1);
+        entry.mesh.scale.set(size.width + padX, size.height + padY, 1);
       } else {
         entry.mesh.position.set(left + width / 2, top + height / 2, 0);
         entry.mesh.scale.set(width, height, 1);
