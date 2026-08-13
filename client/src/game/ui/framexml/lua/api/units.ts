@@ -543,10 +543,10 @@ export function installUnitsApi(vm: LuaVM): void {
     // order is now measured and it was this one, which is why shift state never reached the Lua.
     // `IsControlKeyDown` and `IsAltKeyDown` moved to `screen.ts` beside it for the same reason.
     //
-    // `IsModifiedClick` stays a gap: it is not a key query but a lookup of which modifier a NAMED action is
-    // bound to (`"CHATLINK"`, `"DRESSUP"`, ...) through the client's binding table, and that mapping is not
-    // sourced here. False is the safe direction -- every caller uses it to ADD behaviour.
-    ['IsModifiedClick', 'the modifier-to-action binding table (CHATLINK, DRESSUP, ...) is not read', [false]],
+    // `IsModifiedClick` is NO LONGER HERE either, and for the same shadowing reason: it is real in
+    // `api/screen.ts` beside the three key trackers it reads, because the shift-gated action bar needs it
+    // (`actionbarframe.xml:19`). A hard `false` here would have shadowed it in the world, which is exactly
+    // the defect the three keys above suffered.
     ['GetBindingKey', 'no keybinding table exists in this client', []],
     ['GetMoney', 'PLAYER_FIELD_COINAGE is not read yet', [0]],
   );
