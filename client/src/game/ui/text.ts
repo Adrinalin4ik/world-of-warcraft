@@ -280,6 +280,11 @@ export class FontStringTextures {
       spec.size,
       spec.color,
       spec.outline ? 'o' : '-',
+      // The shadow is part of the RASTER, so it has to key it -- without this a font object that gains
+      // or loses a shadow (a `SetShadowColor` from Lua, a per-state font swap) serves the old bitmap.
+      spec.shadowOffset ? `${spec.shadowOffset.x},${spec.shadowOffset.y}` : '-',
+      spec.shadowColor ?? '-',
+      spec.shadowAlpha ?? '-',
       spec.align,
       // Wrapping changes the raster, so it has to key it: the same string at two widths is two
       // different textures, and without this the first width served the second.
@@ -303,8 +308,21 @@ export class FontStringTextures {
     const font = cssFont(spec, pixelScale);
     const context = sharedMeasureContext();
     context.font = font;
-    const paddingH = PADDING_H * dpr;
-    const paddingV = PADDING_V * dpr;
+    // THE SHADOW'S OFFSET IN DEVICE PIXELS, ROUNDED, and the rounding is not optional: the glyph quad
+    // is snapped to the device grid (`renderer.ts`), so a shadow at a fractional device offset would
+    // reintroduce exactly the bilinear smear that snapping removed -- on the darkest, highest-contrast
+    // ink on the screen. `Math.round` on the whole product, once, so the shadow keeps its authored
+    // direction at every window scale (at scale 0.717 the authored 1 unit rounds to 1 device px, not 0).
+    // **Y IS FLIPPED HERE**: `FontSpec.shadowOffset` keeps FrameXML's `+y` UP and a canvas is `+y` DOWN,
+    // and this is the one place that flip happens.
+    const shadowDx = spec.shadowOffset ? Math.round(spec.shadowOffset.x * pixelScale) : 0;
+    const shadowDy = spec.shadowOffset ? -Math.round(spec.shadowOffset.y * pixelScale) : 0;
+    // The canvas grows by TWICE the shadow's reach on each axis so the glyph block stays CENTRED in it.
+    // That is what keeps `pad` symmetric, which is the invariant `renderer.ts` relies on to inflate the
+    // quad about the glyph box's centre -- an asymmetric pad would shift every shadowed string by half
+    // the shadow. Costs a few device pixels of empty canvas on the side the shadow does not fall.
+    const paddingH = PADDING_H * dpr + 2 * Math.abs(shadowDx);
+    const paddingV = PADDING_V * dpr + 2 * Math.abs(shadowDy);
     const inset = paddingH / 2;
 
     const lines = wrapLines(text, spec, scale);
@@ -345,6 +363,18 @@ export class FontStringTextures {
           : spec.align === 'RIGHT'
             ? inset + (widest - lineWidth)
             : inset;
+
+      // THE SHADOW GOES FIRST -- it is BEHIND the glyphs -- and it is a FILL ONLY, never stroked.
+      // The reference is explicit about that: the drop-shadow pass "must lay out IDENTICALLY to its
+      // (possibly outlined) fill but never paints halos -- an outlined shadow would be a muddy black
+      // blob" (`benilla/src/ui_text/layout/mod.rs:59-62`). `SystemFont_Shadow_Outline_Huge2`
+      // (fonts.xml:138-143) is the font that makes the distinction observable: it authors BOTH.
+      if (spec.shadowOffset && (shadowDx !== 0 || shadowDy !== 0)) {
+        target.globalAlpha = spec.shadowAlpha ?? 1;
+        target.fillStyle = spec.shadowColor ?? '#000000';
+        target.fillText(line, x + shadowDx, y + shadowDy);
+        target.globalAlpha = 1;
+      }
 
       if (spec.outline) {
         // The client's baked ring: one device pixel, drawn as a real stroke -- scaled by `dpr` along

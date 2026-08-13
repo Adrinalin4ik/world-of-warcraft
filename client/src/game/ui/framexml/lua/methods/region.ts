@@ -608,6 +608,15 @@ export function applyFontResolution(widget: Widget, resolved: FontResolution, db
   if (align === 'LEFT' || align === 'CENTER' || align === 'RIGHT') {
     spec.align = align;
   }
+  // PARTIAL, like every other channel here: a font object that declares no `<Shadow>` leaves whatever
+  // the chain already gave, so `GameFontNormalSmall`'s inherited shadow survives a leaf that overrides
+  // only `<Color>` (there are 20 of those in `gluefontstyles.xml`).
+  if (resolved.shadow !== undefined) {
+    const [r, g, b, a] = resolved.shadow.color;
+    spec.shadowOffset = { x: resolved.shadow.x, y: resolved.shadow.y };
+    spec.shadowColor = toHex(r, g, b);
+    spec.shadowAlpha = a;
+  }
 }
 
 const FONTSTRING: MethodTable = {
@@ -633,6 +642,35 @@ const FONTSTRING: MethodTable = {
       Number(args[1] ?? 1),
       Number(args[2] ?? 1),
     );
+    return [];
+  },
+  /**
+   * `SetShadowOffset(x, y)` / `SetShadowColor(r, g, b, a)` -- the Lua half of `<Shadow>`.
+   *
+   * Both are real API on a FontString and both are what the loader now goes through for an authored
+   * `<Shadow>`, so an XML-declared shadow and a Lua-set one land in one place. The OFFSET KEEPS
+   * FRAMEXML'S `+y` UP convention exactly as authored -- `text.ts` is the single place that flips it
+   * for the screen, and translating here would leave two conventions in `FontSpec` with no way to tell
+   * which a given widget carried.
+   *
+   * `SetShadowColor` alone leaves the offset absent and therefore draws NOTHING, which is right: the
+   * engine's shadow is at (0,0) until an offset says otherwise, and a shadow exactly under the glyph is
+   * invisible either way.
+   */
+  SetShadowOffset: (ctx, self, args) => {
+    ensureFont(widgetOf(ctx, self)).shadowOffset = {
+      x: Number(args[0] ?? 0),
+      y: Number(args[1] ?? 0),
+    };
+    return [];
+  },
+  SetShadowColor: (ctx, self, args) => {
+    const spec = ensureFont(widgetOf(ctx, self));
+    spec.shadowColor = toHex(Number(args[0] ?? 0), Number(args[1] ?? 0), Number(args[2] ?? 0));
+    // The alpha channel `#rrggbb` cannot hold. Unlike `SetTextColor`'s dropped alpha -- which has no
+    // field and would collide with `GetAlpha` -- this one has a field of its own, and it is load-bearing:
+    // `SystemFont_InverseShadow_Small` authors `a=".75"` (fonts.xml:47).
+    spec.shadowAlpha = args[3] === undefined ? 1 : Number(args[3]);
     return [];
   },
   SetFont: (ctx, self, args) => {

@@ -133,6 +133,21 @@ export interface FontSpec {
    * `wrapWidth`, since a single line has no gap to space.
    */
   spacing?: number;
+  /**
+   * `<Shadow>` -- a dark offset copy of the glyphs drawn BEHIND them, and the reason the client's text
+   * survives a bright background. Authored, never chosen here: `SystemFont_Shadow_Small`
+   * (`fonts.xml:31-40`) is `<Offset><AbsDimension x="1" y="-1"/></Offset>` with `<Color r="0" g="0"
+   * b="0"/>`, and that is `GameFontNormalSmall`'s chain, i.e. the target and player name fonts.
+   *
+   * `offset` keeps FRAMEXML'S CONVENTION -- logical units, **`+y` UP** -- so the authored `y="-1"` is
+   * one unit DOWN the screen. `text.ts` is the one place that flips it, next to the flip it already
+   * documents for anchors. Absent means the font declares no shadow, which is the true answer for
+   * every `SystemFont_*` without `Shadow` in its name.
+   */
+  shadowOffset?: { x: number; y: number };
+  /** The shadow's colour as `#rrggbb`, with `shadowAlpha` carrying the channel `#rrggbb` cannot. */
+  shadowColor?: string;
+  shadowAlpha?: number;
 }
 
 let nextWidgetId = 0;

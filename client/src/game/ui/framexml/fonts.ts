@@ -16,7 +16,7 @@
  * below would drift, and the drift would be silent.
  */
 import { TemplateRegistry } from './templates';
-import { XmlElement, absValue, attr, childrenNamed, colorOf } from './xml';
+import { XmlElement, absDimension, absValue, attr, childrenNamed, colorOf } from './xml';
 
 /** The font values a `<Font>` chain, or a `<FontString>` layered over one, comes out with. */
 export interface FontResolution {
@@ -26,6 +26,15 @@ export interface FontResolution {
   outline?: string;
   color?: [number, number, number, number];
   justifyH?: string;
+  /**
+   * `<Shadow>` -- the dark offset copy behind each glyph, which is what makes the client's text
+   * readable on a bright bar. `offset` is in FrameXML's own convention, **`+y` UP**, so the authored
+   * `y="-1"` means one unit DOWN.
+   *
+   * `undefined` means the chain declares no shadow (correct for `SystemFont_Small`, say); a shadow is
+   * never invented.
+   */
+  shadow?: { x: number; y: number; color: [number, number, number, number] };
 }
 
 /** A live name -> font-values lookup, as the object model sees it (`MethodContext.fontObject`). */
@@ -42,9 +51,12 @@ export type FontObjectLookup = (name: string) => FontResolution | null;
  * occurrence is the override. Reading the first match silently gives you the root's value; that is
  * why every read below indexes `length - 1`.
  *
- * `<Shadow>` is read by nobody: `FontSpec` has an outline ring and no shadow channel, so a shadowed
- * font's shadow is dropped rather than approximated. Named here because the merge rule applies to it
- * identically and the next person to add the channel should not have to rediscover that.
+ * `<Shadow>` IS read now, and it takes the same last-occurrence rule. It carries its own `<Offset>`
+ * and `<Color>` children, and both are authored: over `fonts.xml`'s 17 `<Shadow>` elements the offset
+ * is `<AbsDimension x="1" y="-1"/>` in 16 of them and `x="2" y="-2"` in the one outlined huge font
+ * (`SystemFont_Shadow_Outline_Huge2`, fonts.xml:138-143), and the colour is black in 14, with
+ * `SystemFont_InverseShadow_Small` at `(.4,.4,.4,.75)` (fonts.xml:42-47) and `QuestFont_Shadow_Huge`
+ * at `(0.49,0.35,0.05)` (fonts.xml:219-224). Nothing here chooses any of those.
  */
 export function readFontObject(
   fonts: TemplateRegistry,
@@ -90,6 +102,21 @@ export function readFontObject(
   const justifyH = attr(merged, 'justifyH');
   if (justifyH !== undefined) {
     resolution.justifyH = justifyH;
+  }
+  // `<Shadow>`, LAST occurrence, same rule as `<FontHeight>` and `<Color>` above. An `<Offset>` with
+  // no `<Color>` is a BLACK shadow -- `colorOf` on an absent element would be wrong to call, so the
+  // default is spelled out here; and a `<Shadow>` with no `<Offset>` is (0, 0), which is what the
+  // element literally says rather than a guess.
+  const shadows = childrenNamed(merged, 'Shadow');
+  if (shadows.length > 0) {
+    const shadow = shadows[shadows.length - 1];
+    const { x, y } = absDimension(childrenNamed(shadow, 'Offset')[0] ?? shadow);
+    const colorElement = childrenNamed(shadow, 'Color')[0];
+    resolution.shadow = {
+      x: x ?? 0,
+      y: y ?? 0,
+      color: colorElement === undefined ? [0, 0, 0, 1] : colorOf(colorElement),
+    };
   }
   return resolution;
 }

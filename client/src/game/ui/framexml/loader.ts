@@ -48,6 +48,7 @@ import { FontResolution, outlineFlags, readFontObject } from './fonts';
 import {
   ParsedDocument,
   XmlElement,
+  absDimension,
   absValue,
   attr,
   attrBool,
@@ -221,12 +222,6 @@ export function loadDocument(
     loader.finish();
   }
   return loader.report;
-}
-
-/** A parsed `x`/`y` pair: an `<AbsDimension>` child if there is one, else the element's own attrs. */
-function absDim(element: XmlElement): { x?: number; y?: number } {
-  const source = childrenNamed(element, 'AbsDimension')[0] ?? element;
-  return { x: num(attr(source, 'x')), y: num(attr(source, 'y')) };
 }
 
 /**
@@ -765,7 +760,7 @@ class DocumentLoader {
    */
   private applySize(element: XmlElement, wrapper: LuaRef, dbg: string): void {
     for (const size of childrenNamed(element, 'Size')) {
-      const { x, y } = absDim(size);
+      const { x, y } = absDimension(size);
       if (x !== undefined) {
         this.callMethod(wrapper, 'SetWidth', [x], dbg);
       }
@@ -809,7 +804,7 @@ class DocumentLoader {
         const relativePoint = attr(anchor, 'relativePoint') ?? point;
         const relativeTo = resolveName(attr(anchor, 'relativeTo'), parentName) ?? null;
         const offset = childrenNamed(anchor, 'Offset')[0];
-        const { x, y } = offset === undefined ? {} : absDim(offset);
+        const { x, y } = offset === undefined ? {} : absDimension(offset);
         this.callMethod(
           wrapper,
           'SetPoint',
@@ -1093,6 +1088,14 @@ class DocumentLoader {
     if (resolved.justifyH !== undefined) {
       this.callMethod(wrapper, 'SetJustifyH', [resolved.justifyH], dbg);
     }
+    // `<Shadow>`, through the same two Lua methods a script would call, so the XML path and the Lua
+    // path cannot diverge. Colour BEFORE offset for no functional reason -- neither reads the other --
+    // but offset is what makes the shadow visible, so it goes last and a half-applied pair never draws.
+    if (resolved.shadow !== undefined) {
+      const [r, g, b, a] = resolved.shadow.color;
+      this.callMethod(wrapper, 'SetShadowColor', [r, g, b, a], dbg);
+      this.callMethod(wrapper, 'SetShadowOffset', [resolved.shadow.x, resolved.shadow.y], dbg);
+    }
   }
 
   /** The element's own font values layered over its inherited font object's. */
@@ -1132,6 +1135,23 @@ class DocumentLoader {
     const outline = attr(region, 'outline');
     if (outline !== undefined) {
       resolution.outline = outline;
+    }
+    // The element's OWN `<Shadow>`, layered over the inherited font object's -- and FontStrings really
+    // do declare one: `accountlogin.xml:541-546` gives `AccountLoginSaveAccountNameText` an
+    // `<Offset><AbsDimension x="1" y="-1"/></Offset>` and a black `<Color>` of its own, and
+    // `targetframe.xml` does the same for several. Read with the same last-occurrence and
+    // absent-Color-is-black rules `fonts.ts#readFontObject` documents; the reading is shared through
+    // `absDimension`, and only the SOURCE element differs.
+    const shadows = childrenNamed(region, 'Shadow');
+    if (shadows.length > 0) {
+      const shadow = shadows[shadows.length - 1];
+      const { x, y } = absDimension(childrenNamed(shadow, 'Offset')[0] ?? shadow);
+      const colorElement = childrenNamed(shadow, 'Color')[0];
+      resolution.shadow = {
+        x: x ?? 0,
+        y: y ?? 0,
+        color: colorElement === undefined ? [0, 0, 0, 1] : colorOf(colorElement),
+      };
     }
     return resolution;
   }
