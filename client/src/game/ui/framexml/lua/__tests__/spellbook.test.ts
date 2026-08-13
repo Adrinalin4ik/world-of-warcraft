@@ -23,6 +23,7 @@ function book(): SpellbookSnapshot {
     spellId,
     name,
     subName,
+    description: '',
     texture: `Interface\\Icons\\Icon_${spellId}`,
     passive: false,
     cooldownStart: 0,

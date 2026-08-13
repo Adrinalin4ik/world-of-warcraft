@@ -483,10 +483,46 @@ const BUTTON: MethodTable = {
   },
 };
 
+/**
+ * `SetChecked`'s argument, and a plain `Boolean()` on it was making EVERY SPELL IN THE BOOK look pressed.
+ *
+ * `SpellButton_UpdateSelection` is the whole evidence, and it is conclusive because it passes BOTH forms
+ * from the two branches of one decision (`spellbookframe.lua:409-413`):
+ *
+ *     if ( IsSelectedSpell(id, SpellBookFrame.bookType) ) then
+ *         self:SetChecked("true");
+ *     else
+ *         self:SetChecked("false");
+ *     end
+ *
+ * -- with a third `self:SetChecked("false")` on the no-such-spell path at `:405`. `Boolean("false")` is
+ * `true` in JS and `"false"` is truthy in Lua too, so every one of the twelve `SpellButton`s came back
+ * CHECKED whatever the answer was, and `SpellButtonTemplate`'s `<CheckedTexture
+ * file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>` (`spellbookframe.xml:191`) drew over all
+ * of them. That is the owner's "every spell renders as if pressed".
+ *
+ * So the engine cannot be doing `lua_toboolean` on this argument: if it were, those two branches would be
+ * identical and a spellbook button could never un-check, which is not what the real client does. The
+ * client's own file is the oracle and it says a STRING is parsed.
+ *
+ * WHAT IS SOURCED and what is not: `"true"` and `"false"` are the only quoted arguments anywhere in the
+ * 264 loaded manifest files (grepped -- every other call site passes `1`, `0`, `nil`, `true`, `false` or a
+ * variable), so those two are the measured cases. `""`, `"0"` and `"nil"` are folded in with `"false"` as
+ * the same class of spelling; that extension is NOT sourced and is written down here as a guess, made in
+ * the direction that cannot invent a checked state.
+ */
+function checkedArg(value: unknown): boolean {
+  if (typeof value === 'string') {
+    const lowered = value.trim().toLowerCase();
+    return !(lowered === '' || lowered === 'false' || lowered === 'nil' || lowered === '0');
+  }
+  return Boolean(value);
+}
+
 const CHECKBUTTON: MethodTable = {
   SetChecked: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
-    widget.checked = Boolean(args[0]);
+    widget.checked = checkedArg(args[0]);
     const id = checkedTextures.get(self);
     if (id !== undefined) {
       ctx.registry.widget(id)!.shown = widget.checked;
