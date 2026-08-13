@@ -254,6 +254,21 @@ export class GlueRenderer {
   render(items: DrawItem[], resolve: SpriteResolver): void {
     const size = this.renderer.getSize(new THREE.Vector2());
     const units = viewportUnits({ width: size.x, height: size.y });
+    // THE CONTROL ARM for the glyph snap below, in the shape `window.blendControl` already uses: a
+    // sharpness claim about a screenshot is worthless without the same string drawn the OLD way in
+    // the same build and the same window. `window.uiTextSnap = false` turns it off. One property read
+    // per text item per frame.
+    const snapEnabled =
+      typeof window === 'undefined' ||
+      (window as never as Record<string, unknown>).uiTextSnap !== false;
+    // Logical units -> DEVICE pixels, the grid a rasterized glyph has to land on. `getSize` is CSS
+    // pixels and `size.y / units.height` is exactly `screenScale`, so one more factor of the
+    // renderer's pixel ratio gets to the drawing buffer -- which is also the offscreen target's size
+    // in the world pass (`world-ui.ts#target`), and that target composites 1:1. `getPixelRatio()`
+    // rather than `window.devicePixelRatio` because it is what actually sizes the buffer; `text.ts`
+    // rasterizes at `window.devicePixelRatio`, and if the two ever disagree no amount of snapping
+    // makes the raster 1:1 anyway.
+    const devicePerUnit = (size.y / units.height) * this.renderer.getPixelRatio();
 
     // Y-DOWN: top = 0, bottom = height. Logical units, so widget rects map 1:1.
     this.camera.left = 0;
@@ -351,7 +366,11 @@ export class GlueRenderer {
         // sizes the canvas to the glyphs' actual extent, so a fixed-size quad would squash or
         // stretch every letter. Position within the rect by the font's horizontal alignment and
         // always vertically centred -- there is no vertical-align concept in GlueXML fontstrings.
-        const align = item.widget.font?.align ?? 'LEFT';
+        // CENTER, not LEFT: the FrameXML `JustifyH` default. See `region.ts#ensureFont` -- a
+        // `FontSpec` always carries an align, so this fallback is only for a font string that never
+        // went through `ensureFont` at all, and it must agree with that default or the two disagree
+        // for the same widget depending on which one ran.
+        const align = item.widget.font?.align ?? 'CENTER';
         const quadLeft =
           align === 'CENTER'
             ? left + (width - size.width) / 2
@@ -359,7 +378,24 @@ export class GlueRenderer {
               ? left + width - size.width
               : left;
         const quadTop = top + (height - size.height) / 2;
-        entry.mesh.position.set(quadLeft + size.width / 2, quadTop + size.height / 2, 0);
+        // SNAP TO THE DEVICE-PIXEL GRID. `text.ts` rasterizes a string at `screenScale *
+        // devicePixelRatio`, so its canvas is already an integer number of device pixels wide and the
+        // quad below is exactly 1 texel : 1 device pixel in SCALE -- but its left/top edge is an
+        // arbitrary fraction of a pixel, and a 1:1 bilinear fetch at a fractional offset blends every
+        // glyph with its neighbour. That is the "нечёткие" half of the owner's report: measured live at
+        // 1382x911 (scale 1.186, dpr 1), the fractional part of the left edge was 0.061 for
+        // `PlayerName`, 0.491 for `PlayerLevelText`, 0.746 for `MainMenuBarPageNumber` and 0.784 for
+        // `ActionButton1HotKey` -- i.e. every string on screen (`scratchpad/t17-out.txt`).
+        // The reference does exactly this: its glyphs are baked at device resolution and their
+        // positions are snapped "to the physical-pixel grid; the net effect is a bitmap rasterized at
+        // device resolution and drawn 1 texel : 1 physical pixel (crisp), not a half-resolution bitmap
+        // upscaled by the retina framebuffer (the pre-DPI blur)"
+        // (`benilla/src/ui_text/atlas.rs:135-140`).
+        // ART QUADS ARE DELIBERATELY NOT SNAPPED: a texture is stretched to its authored rect, so
+        // rounding its edges would change its SIZE, and the engine does not place art on a pixel grid.
+        const snap = (value: number) =>
+          snapEnabled ? Math.round(value * devicePerUnit) / devicePerUnit : value;
+        entry.mesh.position.set(snap(quadLeft) + size.width / 2, snap(quadTop) + size.height / 2, 0);
         entry.mesh.scale.set(size.width, size.height, 1);
       } else {
         entry.mesh.position.set(left + width / 2, top + height / 2, 0);

@@ -508,7 +508,19 @@ const TEXTURE: MethodTable = {
  */
 export function ensureFont(widget: Widget) {
   if (!widget.font) {
-    widget.font = { family: 'FRIZQT', size: 12, color: '#ffffff', outline: false, align: 'LEFT' };
+    // `align: 'CENTER'` -- THE FRAMEXML DEFAULT, and getting this wrong was the owner's "the target's
+    // name is drawn over itself and unreadable". The engine's `JustifyH` field defaults to CENTER
+    // (`benilla-ui/src/script/types.rs:176-183`, and `loader/mod.rs:388` / `region.rs:542` both fall
+    // back to `JustifyH::Center` for an unrecognised value), so a `<FontString>` that declares no
+    // `justifyH` and inherits a font object that declares none either -- which is most of them --
+    // centres its text in its own rect. `TargetFrameTextureFrameName` is the sharp case: 100x10,
+    // anchored CENTER at (-50, 19) (`targetframe.xml:248-259`), inheriting `GameFontNormalSmall`
+    // whose whole chain to `SystemFont_Shadow_Small` (`fonts.xml:31`) declares no justification. Flush
+    // LEFT it starts 50 units left of where the client puts it, on top of the health bar's left cap.
+    // Measured live as `Sgh` targeting a Vale Moth (`scratchpad/t17b-real-name.png`).
+    // The client's own files corroborate the default: `targetframe.xml:516` spells `justifyH="LEFT"`
+    // out explicitly and `:81` spells `"RIGHT"`, which authors would not need if either were default.
+    widget.font = { family: 'FRIZQT', size: 12, color: '#ffffff', outline: false, align: 'CENTER' };
   }
   return widget.font;
 }

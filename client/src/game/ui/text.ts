@@ -336,6 +336,15 @@ export class FontStringTextures {
     const texture = new THREE.CanvasTexture(canvas);
     // Match the BLP convention so `applyTexCoords` needs no special case: row 0 is v = 0.
     texture.flipY = false;
+    // NO MIPMAPS ON TEXT. `CanvasTexture` defaults to `generateMipmaps = true` and
+    // `minFilter = LinearMipmapLinearFilter`, and a string is drawn at exactly 1 texel : 1 device
+    // pixel (`renderer.ts` snaps the quad to the device grid, and the canvas is sized in device
+    // pixels here) -- so the mip chain can never be the right level and any LOD the driver picks
+    // above 0 is a half-resolution glyph blurred back up. It also costs a full pyramid per cached
+    // string. `LinearFilter` on both is the exact fetch at the 1:1 scale the quad is drawn at.
+    texture.generateMipmaps = false;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
     texture.needsUpdate = true;
 
     const entry: Entry = {
