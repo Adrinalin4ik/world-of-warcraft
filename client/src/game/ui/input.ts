@@ -151,6 +151,9 @@ export class GlueInput {
     // origin that would make the next press look like it had already moved.
     this.pressOrigin = null;
     this.dragging = null;
+    // The last pointer position goes too: it is what the cursor-attachment pass draws at, and a stale one
+    // would put a dragged icon wherever the pointer was on the retired screen until the next move.
+    this.pointerUnits = null;
   }
 
   /**
@@ -234,8 +237,11 @@ export class GlueInput {
     }
 
     if (this.pressed) {
-      // Pressed art follows the pointer being over the widget, but guards against disabled.
-      if (this.pressed.state !== 'disabled') {
+      // Pressed art follows the pointer being over the widget, but guards against disabled -- and NOT
+      // once a drag is in progress. Self-review caught that: `maybeBeginDrag` pops the button back out when
+      // the drag starts, and this line would push it in again on any later move that passed back over the
+      // source, so dragging an ability in a circle re-depressed its own button mid-flight.
+      if (this.pressed.state !== 'disabled' && this.dragging === null) {
         this.pressed.state = this.pressed === hit ? 'down' : 'up';
       }
       this.maybeBeginDrag(x, y);
@@ -366,7 +372,12 @@ export class GlueInput {
      */
     if (dragging !== null) {
       dragging.onDragStop?.();
-      released?.onReceiveDrag?.();
+      // A DISABLED frame is not a drop target, the same rule the click path below applies to a press. An
+      // empty `SpellButton` is disabled by `SpellButton_UpdateButton` (`spellbookframe.lua:432`), so
+      // without this a drop on a blank half of the book would run its `OnReceiveDrag`.
+      if (released !== null && released.state !== 'disabled') {
+        released.onReceiveDrag?.();
+      }
       return;
     }
 

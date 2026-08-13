@@ -466,8 +466,14 @@ export class WorldUiHost {
 
     const units = viewportUnits(viewport);
     const quad = this.cursorQuadOf();
-    (quad.material as THREE.MeshBasicMaterial).map = map;
-    (quad.material as THREE.MeshBasicMaterial).needsUpdate = true;
+    const material = quad.material as THREE.MeshBasicMaterial;
+    // ONLY on a real change. Self-review caught this assigning `map` and setting `needsUpdate = true` every
+    // frame of the drag: `needsUpdate` on a material forces three to re-evaluate its program, so a held
+    // ability would have paid a shader recompile check per frame for a texture that never changes.
+    if (material.map !== map) {
+      material.map = map;
+      material.needsUpdate = true;
+    }
     // Centred on the pointer, which is where the real client holds a picked-up icon. NDC on the composite
     // camera, the same two lines `drawSweeps` uses.
     quad.position.set(pointer.x / units.width - 0.5, 0.5 - pointer.y / units.height, 0);

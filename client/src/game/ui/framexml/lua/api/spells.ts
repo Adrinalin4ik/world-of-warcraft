@@ -169,7 +169,7 @@ export const BOOKTYPE_SPELL = 'spell';
  * The bound `GetSpellTabInfo` answers zeroes WITHIN and nothing OUTSIDE; see that function for the load
  * error that forced the distinction.
  */
-const MAX_SKILLLINE_TABS = 8;
+export const MAX_SKILLLINE_TABS = 8;
 
 export function installSpellsApi(vm: LuaVM): void {
   const state = stateOf(vm);

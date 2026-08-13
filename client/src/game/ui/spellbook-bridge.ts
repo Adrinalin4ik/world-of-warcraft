@@ -41,8 +41,8 @@
 import World from '../world';
 import { GlueArt } from './art';
 import {
-  SpellbookEntry, SpellbookSnapshot, SpellbookTab, emptySpellbook, getSpellbook, setSpellCastHandler,
-  setSpellbook,
+  MAX_SKILLLINE_TABS, SpellbookEntry, SpellbookSnapshot, SpellbookTab, emptySpellbook, getSpellbook,
+  setSpellCastHandler, setSpellbook,
 } from './framexml/lua/api/spells';
 import { CursorPayload, setCursorHandlers } from './framexml/lua/api/cursor';
 import { SPELL_AUTO_ATTACK, SpellHandler } from '../../network/game/object/spells';
@@ -50,9 +50,6 @@ import { fireEvent } from './framexml/lua/events';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { skillData } from '../pipeline/dbc/skill-data';
 import { LuaVM } from './framexml/lua/vm';
-
-/** `MAX_SKILLLINE_TABS` (`spellbookframe.lua:2`). The book has exactly 8 tab buttons in its XML. */
-const MAX_SKILLLINE_TABS = 8;
 
 /**
  * `GENERAL_SPELLS` -- the first tab's name, and it is the client's own global string, not a literal
@@ -369,9 +366,47 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
     spells.castSpell(entry.spellId, target);
   });
 
+  /**
+   * A COOLDOWN CHANGE updates two numbers per entry and fires `SPELL_UPDATE_COOLDOWN` -- it does NOT
+   * rebuild the book and does NOT fire `SPELLS_CHANGED`.
+   *
+   * Self-review caught the first draft doing both, and it was the frame-budget trap this project's own
+   * notes warn about. Every confirmed cast stamps the global cooldown on every known spell, so
+   * `cooldownsChanged` fires constantly; routing that through `push` re-sorted 45 spells through
+   * `localeCompare`, found the cooldown fields different (they always are), and fired `SPELLS_CHANGED` --
+   * which re-runs `SpellBookFrame_Update` over 12 buttons and 8 tabs and rewrites every texture, dirtying
+   * the draw fingerprint. `world-ui.ts`'s note is explicit that anything dirtying it repeatedly gives the
+   * whole offscreen-target saving back.
+   *
+   * `SPELL_UPDATE_COOLDOWN` is the right event and not a cheaper substitute for one: `SpellButton_OnShow`
+   * registers it alongside `SPELLS_CHANGED` (`spellbookframe.lua:312`) and `SpellButton_OnEvent` routes
+   * both to `SpellButton_UpdateButton` (`:296-298`). Exactly the split `action-bridge.ts#pushCooldowns`
+   * already makes for the same reason.
+   */
+  const pushCooldowns = (): void => {
+    const book = getSpellbook(vm);
+    let changed = false;
+    for (const entry of book.all) {
+      const cooldown = spells.cooldownOf(entry.spellId);
+      const start = cooldown?.start ?? 0;
+      const duration = cooldown?.duration ?? 0;
+      if (entry.cooldownStart === start && entry.cooldownDuration === duration) {
+        continue;
+      }
+      // Mutated in place. `all` and `high` SHARE their entry objects (`high` holds references to members
+      // of `all`, see `build`), so one write updates both views -- which is the point of sharing them.
+      entry.cooldownStart = start;
+      entry.cooldownDuration = duration;
+      changed = true;
+    }
+    if (changed) {
+      fireEvent(vm, 'SPELL_UPDATE_COOLDOWN');
+      stats.events += 1;
+    }
+  };
+
   spells.on('spellsChanged', push);
-  spells.on('actionsChanged', push);
-  spells.on('cooldownsChanged', push);
+  spells.on('cooldownsChanged', pushCooldowns);
 
   // `SMSG_INITIAL_SPELLS` is in the login burst and the manifest load takes 8-22 s, so the spells are
   // already in hand when this attaches. Same reason `action-bridge.ts` pushes on attach.
@@ -387,8 +422,7 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
 
   return () => {
     spells.removeListener('spellsChanged', push);
-    spells.removeListener('actionsChanged', push);
-    spells.removeListener('cooldownsChanged', push);
+    spells.removeListener('cooldownsChanged', pushCooldowns);
     delete (window as unknown as Record<string, unknown>).spellbookStats;
   };
 }
