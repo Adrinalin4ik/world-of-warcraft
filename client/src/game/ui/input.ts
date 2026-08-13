@@ -28,6 +28,17 @@ import { DrawItem, Widget } from './widget';
  */
 const DOUBLE_CLICK_MS = 500;
 
+/**
+ * How far the pointer must travel, in LOGICAL UNITS, before a press becomes a drag.
+ *
+ * OURS: the real client's threshold is not published and a browser exposes none. 4 units at the 768-unit
+ * reference height is about 5 device pixels on a 911-tall window -- far enough that the jitter in a
+ * deliberate click does not start a drag, close enough that a drag feels immediate. It is deliberately
+ * NOT zero: a zero threshold turns every click whose pointer moves one pixel into a drag, and since a
+ * drag SUPPRESSES the click that would make casting from the action bar intermittent.
+ */
+const DRAG_THRESHOLD_UNITS = 4;
+
 export class GlueInput {
   private readonly canvas: HTMLCanvasElement;
   private items: DrawItem[] = [];
@@ -36,6 +47,28 @@ export class GlueInput {
   private focus: Widget | null = null;
   /** The last completed click, for `onDoubleClick`. */
   private lastClick: { widget: Widget; time: number } | null = null;
+
+  /**
+   * Where the live press began, in logical units, or null when nothing is pressed.
+   *
+   * Kept separately from `pressed` rather than as a field on it, for the reason `region.ts`'s `userPlaced`
+   * WeakSet gives: a widget outlives one gesture and a screen teardown must not leave a stale origin on it.
+   */
+  private pressOrigin: { x: number; y: number } | null = null;
+
+  /** The widget a drag is currently in progress FROM, or null. Set once the threshold is crossed. */
+  private dragging: Widget | null = null;
+
+  /**
+   * The pointer's last position in LOGICAL UNITS, for the host's cursor-attachment pass.
+   *
+   * Exposed from here rather than from a second `pointermove` listener because there must be exactly one
+   * coordinate convention: `api/screen.ts`'s `GetCursorPosition` tracker deliberately reports CSS pixels
+   * with Y measured UP from the bottom (the engine's convention, which the client's own Lua divides by
+   * `GetEffectiveScale()`), while the draw list, `hitTest` and `toUnits` all work in logical units with Y
+   * DOWN from the top. An icon drawn from the wrong one of those two lands mirrored vertically.
+   */
+  private pointerUnits: { x: number; y: number } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -64,6 +97,15 @@ export class GlueInput {
    */
   get pointerWidget(): Widget | null {
     return this.hovered;
+  }
+
+  /**
+   * The pointer's last position in LOGICAL UNITS, or null before the first move. See `pointerUnits`.
+   *
+   * Read by `world-ui.ts#drawCursorIcon` to put the dragged ability's icon under the cursor.
+   */
+  get pointerPosition(): { x: number; y: number } | null {
+    return this.pointerUnits;
   }
 
   setFocus(widget: Widget | null): void {
@@ -105,6 +147,10 @@ export class GlueInput {
     this.focus = null;
     // A click on the retired screen must not pair with the first click on the new one.
     this.lastClick = null;
+    // ... and a drag in progress across the transition must not drop onto the new screen, nor leave an
+    // origin that would make the next press look like it had already moved.
+    this.pressOrigin = null;
+    this.dragging = null;
   }
 
   /**
@@ -166,6 +212,7 @@ export class GlueInput {
 
   private onPointerMove = (event: PointerEvent): void => {
     const { x, y } = this.toUnits(event);
+    this.pointerUnits = { x, y };
     const hit = hitTest(this.items, x, y);
 
     // Hover skips disabled widgets.
@@ -191,8 +238,38 @@ export class GlueInput {
       if (this.pressed.state !== 'disabled') {
         this.pressed.state = this.pressed === hit ? 'down' : 'up';
       }
+      this.maybeBeginDrag(x, y);
     }
   };
+
+  /**
+   * A press that has travelled past `DRAG_THRESHOLD_UNITS` becomes a drag: FrameXML's `OnDragStart`.
+   *
+   * Gated on `dragRegistered`, which is `RegisterForDrag`'s doing -- an unregistered frame can never start
+   * a drag and therefore keeps its click, which is the engine's rule. Fires ONCE per press: `dragging` is
+   * the latch, so continuing to move does not re-fire `OnDragStart`.
+   *
+   * The pressed art is released here. A frame being dragged is not a frame being held down, and the real
+   * client pops the button back out the moment the drag begins -- leaving it depressed for the length of
+   * the drag reads as a stuck button.
+   */
+  private maybeBeginDrag(x: number, y: number): void {
+    const pressed = this.pressed;
+    const origin = this.pressOrigin;
+    if (pressed === null || origin === null || this.dragging !== null || !pressed.dragRegistered) {
+      return;
+    }
+    const dx = x - origin.x;
+    const dy = y - origin.y;
+    if (dx * dx + dy * dy < DRAG_THRESHOLD_UNITS * DRAG_THRESHOLD_UNITS) {
+      return;
+    }
+    this.dragging = pressed;
+    if (pressed.state !== 'disabled') {
+      pressed.state = 'up';
+    }
+    pressed.onDragStart?.();
+  }
 
   private onPointerDown = (event: PointerEvent): void => {
     const { x, y } = this.toUnits(event);
@@ -202,6 +279,33 @@ export class GlueInput {
 
     if (hit && hit.state !== 'disabled') {
       this.pressed = hit;
+      // The drag origin, for `maybeBeginDrag`. Recorded for every press, not only a registered one: the
+      // registration can change between press and move (`SetScript`/`RegisterForDrag` are callable from a
+      // handler), and an origin costs one object.
+      this.pressOrigin = { x, y };
+      /**
+       * POINTER CAPTURE, and it is what makes a drag work at all rather than a nicety.
+       *
+       * `pointermove` is bound to the CANVAS (see `attach`), so any element that ends up over the canvas
+       * mid-gesture takes the moves and the router simply stops being told where the pointer is -- it keeps
+       * the last position it saw and drops the drag there. MEASURED: during a drag from `ActionButton1`
+       * towards `ActionButton4`, `window` received ten `pointermove` events and the canvas received **one**,
+       * so the release resolved to the source button and `OnReceiveDrag` fired on the wrong frame.
+       *
+       * `setPointerCapture` is the platform's own answer: every subsequent event for this pointer id is
+       * retargeted to the canvas until the pointer is released, whatever is painted on top. It also fixes
+       * the case the router could never handle -- a drag that leaves the canvas and comes back -- and it
+       * covers the dev server's intermittent full-page overlay iframe, which has eaten clicks here before.
+       *
+       * Guarded because the API is absent in jsdom, where the unit tests run.
+       */
+      if (typeof this.canvas.setPointerCapture === 'function' && event.pointerId !== undefined) {
+        try {
+          this.canvas.setPointerCapture(event.pointerId);
+        } catch {
+          // A pointer that is already gone throws `NotFoundError`. Nothing to capture, nothing to do.
+        }
+      }
       hit.state = 'down';
       // FrameXML's `OnMouseDown`, which is NOT the click: it fires on the press itself, and a press
       // that drags off and releases elsewhere still had one.
@@ -211,7 +315,19 @@ export class GlueInput {
 
   private onPointerUp = (event: PointerEvent): void => {
     const pressed = this.pressed;
+    const dragging = this.dragging;
     this.pressed = null;
+    this.pressOrigin = null;
+    this.dragging = null;
+    // Release the capture taken on the press, whatever happens below -- a capture left held would send
+    // every later move to the canvas even with no button down, and hover would freeze for the next press.
+    if (
+      typeof this.canvas.releasePointerCapture === 'function'
+      && event.pointerId !== undefined
+      && this.canvas.hasPointerCapture?.(event.pointerId)
+    ) {
+      this.canvas.releasePointerCapture(event.pointerId);
+    }
     if (!pressed) {
       return;
     }
@@ -227,7 +343,34 @@ export class GlueInput {
     pressed.onMouseUp?.();
 
     const { x, y } = this.toUnits(event as PointerEvent);
-    if (hitTest(this.items, x, y) !== pressed) {
+    this.pointerUnits = { x, y };
+    const released = hitTest(this.items, x, y);
+
+    /**
+     * THE DROP, and it must be handled BEFORE the released-off-the-widget return below -- that return is
+     * exactly the case a drag needs, because a drop's whole purpose is to land somewhere else.
+     *
+     * `OnDragStop` goes to the SOURCE and `OnReceiveDrag` to whatever is under the cursor, which the
+     * engine fires in that order. A drop on nothing (the world, or a frame with no handler) still stops
+     * the drag -- `ClearCursor` is not called for it, so the ability stays on the cursor, which is the
+     * real client's behaviour for a drop on an invalid target.
+     *
+     * The target gets `OnReceiveDrag` even when it IS the source: dropping an ability back on the slot it
+     * came from is a real gesture, and the client's own Lua ends it by calling `PlaceAction(self.action)`
+     * with the same slot, which `api/cursor.ts#place` treats as a no-op that clears the cursor. Without
+     * this the cursor would keep the ability after a cancelled move.
+     *
+     * A drag SUPPRESSES the click, which is why this returns rather than falling through: releasing a
+     * drag over the button it started on must not also cast the ability, and `lastClick` must not be
+     * updated or the next real click would pair with a drag and fire `OnDoubleClick`.
+     */
+    if (dragging !== null) {
+      dragging.onDragStop?.();
+      released?.onReceiveDrag?.();
+      return;
+    }
+
+    if (released !== pressed) {
       return; // Released off the widget: no click.
     }
 

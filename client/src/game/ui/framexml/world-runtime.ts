@@ -61,6 +61,8 @@ import { installUnitsApi } from './lua/api/units';
 import { installBindingsApi, setBindingTable } from './lua/api/bindings';
 import { installCastingApi } from './lua/api/casting';
 import { installItemsApi } from './lua/api/items';
+import { installSpellsApi } from './lua/api/spells';
+import { installCursorApi } from './lua/api/cursor';
 import { DEFAULT_BINDINGS, fetchBindings } from './bindings';
 import { invokeScriptHandler } from './lua/scripts';
 import type { FileReport } from './runtime';
@@ -161,6 +163,22 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // FILE SCOPE, taking `ShowUIPanel`, `HideUIPanel`, `ToggleFrame`, `UIParent_OnLoad` and the whole
   // `UIPARENT_MANAGED_FRAME_POSITIONS` table with it. See `lua/api/items.ts` for the measurement.
   installItemsApi(vm);
+  /**
+   * THE SPELLBOOK's globals, and they must exist BEFORE the load rather than after it.
+   *
+   * `SpellBookFrame_OnLoad` runs during the manifest load and reaches `GetSpellTabInfo` on its way through
+   * `SpellBookSkillLineTab_OnClick(nil, 1)` (`spellbookframe.lua:51` -> `:566` -> `:657`), so a set
+   * installed afterwards would leave `SpellBookFrame.selectedSkillLineOffset` nil for ever -- and
+   * `SpellBook_GetSpellID` adds that value to a button id, so every slot would be nil-indexed. The book is
+   * EMPTY at this point (the bridge attaches after the load and pushes then), which is fine: an empty book
+   * makes `GetNumSpellTabs` 0 and `GetSpellTabInfo` answer nothing, which is what
+   * `SpellBookFrame_Update`'s `i <= numSkillLineTabs` guard is for.
+   */
+  installSpellsApi(vm);
+  // The cursor. Before the load because `SpellButton_OnLoad` calls `RegisterForDrag` on all 12 buttons
+  // during it, and because `installCursorApi` is what makes `PickupSpell` exist for those buttons' handlers
+  // to be bound against.
+  installCursorApi(vm);
 
   // BEFORE the first file runs -- see `WorldRuntimeOptions#seed` for why the order is load-bearing.
   options.seed?.(vm);

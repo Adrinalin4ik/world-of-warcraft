@@ -1,0 +1,394 @@
+/**
+ * THE SEAM between the character's known spells and the client's own `SpellBookFrame`, and the seam
+ * between the cursor and the wire.
+ *
+ * `lua/api/spells.ts` holds the spellbook snapshot and `lua/api/cursor.ts` holds the cursor, and both say
+ * at the top that they contain no world, no network and no DBCs. This is the host for both. It is the
+ * exact counterpart of `action-bridge.ts` and follows its two rules: **push then fire**, and **fire only
+ * for what changed**, because an event here re-runs `SpellBookFrame_Update` over 12 buttons and 8 tabs and
+ * every texture it rewrites dirties the draw fingerprint (`world-ui.ts#drawListSignature`).
+ *
+ * ## Building the book: three sorts and one join
+ *
+ * `SMSG_INITIAL_SPELLS` gives a flat, unordered set of spell ids -- 54 of them for the shaman test
+ * character. `SpellBookFrame` needs them grouped into tabs, and inside a tab ordered so that a page of 12
+ * is a sensible page. The whole derivation:
+ *
+ *  1. **Group.** `skillData.classLineOf(spellId)` joins through `SkillLineAbility.dbc` to the spell's
+ *     `SkillLine`, keeping only `categoryID == 7` (class skills). A spell no class line claims -- a
+ *     racial, First Aid, an armour proficiency, Auto Attack -- goes in the **General** tab.
+ *     See `pipeline/dbc/skill-data.ts` for the measured columns and the whole category partition.
+ *  2. **Order the tabs.** General first, then the class lines by ascending `SkillLine.id`. The second
+ *     half is OURS and is known to differ from the real client -- see `skill-data.ts`'s header, which
+ *     states it rather than leaving it to look deliberate.
+ *  3. **Order inside a tab.** By spell NAME, then by `spellLevel`, then by id. Name first so every rank of
+ *     one spell is contiguous, which is what makes the "highest rank only" view a contiguous slice too;
+ *     `spellLevel` second because it is what ascends with rank (measured -- see
+ *     `spell-data.ts#COL.spellLevel`, and note the obvious column `SkillLineAbility.forward_spellid` was
+ *     measured to be 0 for every rank member and is NOT the rank chain).
+ *
+ * The `high` list is then the last member of each name group per tab, and `knownSlotOfHigh` records where
+ * each of those sits in the full list -- which is precisely what `GetKnownSlotFromHighestRankSlot` answers.
+ *
+ * ## Why the icons are registered here
+ *
+ * The same `registerTreeArt` hazard `action-bridge.ts`'s header documents: `registerTreeArt` walks the
+ * finished tree ONCE after the load, and every spellbook icon path is set later, from
+ * `SpellButton_UpdateButton`'s `iconTexture:SetTexture(texture)`. An unregistered key makes
+ * `art.texture()` return null for ever and the quad is silently skipped -- an empty book with no
+ * explanation. So this bridge registers each path and re-`load()`s, exactly as the action bridge does.
+ */
+import World from '../world';
+import { GlueArt } from './art';
+import {
+  SpellbookEntry, SpellbookSnapshot, SpellbookTab, emptySpellbook, getSpellbook, setSpellCastHandler,
+  setSpellbook,
+} from './framexml/lua/api/spells';
+import { CursorPayload, setCursorHandlers } from './framexml/lua/api/cursor';
+import { SPELL_AUTO_ATTACK, SpellHandler } from '../../network/game/object/spells';
+import { fireEvent } from './framexml/lua/events';
+import { spellData } from '../pipeline/dbc/spell-data';
+import { skillData } from '../pipeline/dbc/skill-data';
+import { LuaVM } from './framexml/lua/vm';
+
+/** `MAX_SKILLLINE_TABS` (`spellbookframe.lua:2`). The book has exactly 8 tab buttons in its XML. */
+const MAX_SKILLLINE_TABS = 8;
+
+/**
+ * `GENERAL_SPELLS` -- the first tab's name, and it is the client's own global string, not a literal
+ * invented here: `globalstrings.lua:3792`, `GENERAL_SPELLS = "General"`.
+ *
+ * Read out of the VM rather than hardcoded, so a localised build gets its own word. Falls back to the
+ * enUS value only if the global is missing, which would mean `GlobalStrings.lua` did not load at all.
+ */
+const GENERAL_TAB_FALLBACK = 'General';
+
+/**
+ * The General tab's icon. `INV_Misc_QuestionMark` is the engine's own "no particular icon" art and is
+ * what the real client's General tab shows; unlike a class line, the General tab has no `SkillLine` row
+ * and therefore no `spellIconID` to resolve, so this one path is OURS.
+ */
+const GENERAL_TAB_ICON = 'Interface\\Icons\\INV_Misc_QuestionMark';
+
+interface Grouped {
+  /** null is the General tab. */
+  lineId: number | null;
+  name: string;
+  texture: string | null;
+  entries: SpellbookEntry[];
+}
+
+export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): () => void {
+  const spells: SpellHandler = world.game.objectHandler.spellHandler;
+
+  const stats = { builds: 0, events: 0, tabs: 0, spells: 0, picks: 0, places: 0, moves: 0 };
+
+  const entryFor = (spellId: number): SpellbookEntry => {
+    const row = spellData.spell(spellId);
+    const cooldown = spells.cooldownOf(spellId);
+    return {
+      spellId,
+      name: row?.name ?? '',
+      // `''` and never null -- `SpellbookEntry#subName` says why.
+      subName: row?.subName ?? '',
+      texture: spellData.iconPath(spellId),
+      passive: row?.passive ?? false,
+      cooldownStart: cooldown?.start ?? 0,
+      cooldownDuration: cooldown?.duration ?? 0,
+    };
+  };
+
+  /** The general string, from the VM's own globals. See `GENERAL_TAB_FALLBACK`. */
+  const generalName = (): string => {
+    const value = vm.getGlobal('GENERAL_SPELLS');
+    return typeof value === 'string' && value !== '' ? value : GENERAL_TAB_FALLBACK;
+  };
+
+  /**
+   * Build the whole snapshot. See the file header for the three sorts and the join.
+   *
+   * Tolerant of every table being absent, and that tolerance is the design rather than a guard: the boot
+   * order puts this bridge before `Spell.dbc`'s 49 MB fetch resolves, so the FIRST book is built with no
+   * names and no icons. It still has the right SHAPE -- one General tab holding every known spell -- and
+   * the rebuild when the tables land fills it in. A book that appears empty until 49 MB arrives would look
+   * broken; a book with the right number of buttons and blank labels looks like it is loading, which it is.
+   */
+  const build = (): SpellbookSnapshot => {
+    const known = [...spells.knownSpells()];
+    if (known.length === 0) {
+      return emptySpellbook();
+    }
+
+    // 1. GROUP by class skill line; null is General.
+    const groups = new Map<number | null, Grouped>();
+    for (const spellId of known) {
+      const line = skillData.classLineOf(spellId);
+      const key = line?.id ?? null;
+      let group = groups.get(key);
+      if (group === undefined) {
+        group = {
+          lineId: key,
+          name: line?.name ?? generalName(),
+          texture: line === null
+            ? GENERAL_TAB_ICON
+            : spellData.icon(line.spellIconID) ?? GENERAL_TAB_ICON,
+          entries: [],
+        };
+        groups.set(key, group);
+      }
+      group.entries.push(entryFor(spellId));
+    }
+
+    // 2. ORDER the tabs: General first, then class lines by ascending SkillLine.id.
+    const ordered = [...groups.values()].sort((a, b) => {
+      if (a.lineId === null) {
+        return -1;
+      }
+      if (b.lineId === null) {
+        return 1;
+      }
+      return a.lineId - b.lineId;
+    });
+
+    // `MAX_SKILLLINE_TABS` is a hard limit in the XML -- there are 8 `SpellBookSkillLineTab` buttons and
+    // `SpellBookFrame_Update` indexes `_G["SpellBookSkillLineTab"..i]` up to it, so a 9th tab would be a
+    // nil index. Truncation happens HERE rather than in `api/spells.ts` so the Lua side never sees a book
+    // it cannot draw. No test character comes near it (a shaman has 4 tabs including General).
+    if (ordered.length > MAX_SKILLLINE_TABS) {
+      console.warn(
+        `spellbook: ${ordered.length} tabs but the book has only ${MAX_SKILLLINE_TABS} tab buttons; `
+        + `the last ${ordered.length - MAX_SKILLLINE_TABS} skill line(s) and their spells are not shown`,
+      );
+      ordered.length = MAX_SKILLLINE_TABS;
+    }
+
+    // 3. ORDER inside a tab, and build both lists.
+    const tabs: SpellbookTab[] = [];
+    const all: SpellbookEntry[] = [];
+    const high: SpellbookEntry[] = [];
+    const knownSlotOfHigh: number[] = [];
+
+    for (const group of ordered) {
+      group.entries.sort((a, b) => (
+        a.name.localeCompare(b.name)
+        || (spellData.spell(a.spellId)?.spellLevel ?? 0) - (spellData.spell(b.spellId)?.spellLevel ?? 0)
+        || a.spellId - b.spellId
+      ));
+
+      const offset = all.length;
+      const highestRankOffset = high.length;
+      for (let i = 0; i < group.entries.length; i += 1) {
+        const entry = group.entries[i];
+        all.push(entry);
+        // The HIGHEST rank of a name group is its LAST member, because the sort above put the group
+        // together and ordered it by ascending `spellLevel`. So an entry is a top rank exactly when the
+        // next entry in the tab has a different name (or there is no next entry).
+        const next = group.entries[i + 1];
+        if (next === undefined || next.name !== entry.name) {
+          high.push(entry);
+          // 1-based on both sides: `all.length` is already this entry's 1-based index, since it was just
+          // pushed.
+          knownSlotOfHigh.push(all.length);
+        }
+      }
+
+      tabs.push({
+        name: group.name,
+        texture: group.texture,
+        offset,
+        numSpells: all.length - offset,
+        highestRankOffset,
+        highestRankNumSpells: high.length - highestRankOffset,
+      });
+    }
+
+    stats.builds += 1;
+    stats.tabs = tabs.length;
+    stats.spells = all.length;
+    return { tabs, all, high, knownSlotOfHigh };
+  };
+
+  /** Cheap equality: the book is rebuilt from scratch, so this decides whether to ANNOUNCE it. */
+  const same = (a: SpellbookSnapshot, b: SpellbookSnapshot): boolean => {
+    if (a.all.length !== b.all.length || a.tabs.length !== b.tabs.length) {
+      return false;
+    }
+    for (let i = 0; i < a.tabs.length; i += 1) {
+      const x = a.tabs[i];
+      const y = b.tabs[i];
+      if (x.name !== y.name || x.texture !== y.texture || x.offset !== y.offset
+        || x.numSpells !== y.numSpells || x.highestRankOffset !== y.highestRankOffset
+        || x.highestRankNumSpells !== y.highestRankNumSpells) {
+        return false;
+      }
+    }
+    for (let i = 0; i < a.all.length; i += 1) {
+      const x = a.all[i];
+      const y = b.all[i];
+      if (x.spellId !== y.spellId || x.name !== y.name || x.subName !== y.subName
+        || x.texture !== y.texture || x.passive !== y.passive
+        || x.cooldownStart !== y.cooldownStart || x.cooldownDuration !== y.cooldownDuration) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const push = (): void => {
+    const next = build();
+    if (same(getSpellbook(vm), next)) {
+      return;
+    }
+    // Register the tab and icon art BEFORE the event, so the `SetTexture` calls the event provokes name
+    // keys that at least have a def -- see the file header on the `registerTreeArt` hazard.
+    const paths = new Set<string>();
+    for (const tab of next.tabs) {
+      if (tab.texture !== null) {
+        paths.add(tab.texture);
+      }
+    }
+    for (const entry of next.all) {
+      if (entry.texture !== null) {
+        paths.add(entry.texture);
+      }
+    }
+    for (const path of paths) {
+      art.register(path, { path });
+    }
+    if (paths.size > 0) {
+      void art.load();
+    }
+
+    setSpellbook(vm, next);
+    // `SPELLS_CHANGED` is what `SpellBookFrame_OnLoad` registers (`spellbookframe.lua:35`) and what
+    // `SpellButton_OnShow` registers on every button (`:311`). One event re-reads the whole book, which is
+    // one fingerprint change rather than one per button.
+    fireEvent(vm, 'SPELLS_CHANGED');
+    stats.events += 1;
+  };
+
+  // -- The cursor's host half ------------------------------------------------------------------------
+
+  /** The spellbook slot a spell sits in, or null -- `GetCursorInfo`'s payload. See `CursorPayload`. */
+  const bookSlotOf = (spellId: number): number | null => {
+    const book = getSpellbook(vm);
+    const index = book.all.findIndex((entry) => entry.spellId === spellId);
+    return index < 0 ? null : index + 1;
+  };
+
+  setCursorHandlers(vm, {
+    /** `PickupAction` -- what is in a bar slot. */
+    pick: (action: number): CursorPayload | null => {
+      const spellId = spells.spellInSlot(action);
+      if (spellId === null) {
+        return null;
+      }
+      stats.picks += 1;
+      return {
+        kind: 'action',
+        spellId,
+        bookSlot: bookSlotOf(spellId),
+        sourceSlot: action,
+        texture: spellData.iconPath(spellId),
+      };
+    },
+
+    /** `PickupSpell` -- what is in a spellbook slot. */
+    pickSpell: (slot: number): CursorPayload | null => {
+      const entry = getSpellbook(vm).all[slot - 1];
+      if (entry === undefined || entry.spellId === 0) {
+        return null;
+      }
+      // A PASSIVE spell cannot go on the action bar -- there is nothing to activate. The real client
+      // refuses the pickup rather than letting a dead icon be placed, and `SpellButton_OnDrag` has already
+      // filtered the obvious case (a passive still has an icon, so its own `IsShown` guard does not).
+      if (entry.passive) {
+        return null;
+      }
+      stats.picks += 1;
+      return {
+        kind: 'spell',
+        spellId: entry.spellId,
+        bookSlot: slot,
+        sourceSlot: null,
+        texture: entry.texture,
+      };
+    },
+
+    /**
+     * `PlaceAction` -- commit the drop, and TELL THE SERVER.
+     *
+     * A bar-to-bar drag SWAPS (`moveActionButton`); a book-to-bar drag overwrites (`assignActionButton`).
+     * Both go through `SpellHandler`, which owns the slot array and the socket, and both emit
+     * `actionsChanged` -- which `action-bridge.ts` is already subscribed to, so the bar redraws through
+     * the path it always used rather than a second one invented here.
+     *
+     * Returns false for a no-op so `PlaceAction` leaves the ability on the cursor rather than losing it.
+     */
+    place: (destination: number, payload: CursorPayload): boolean => {
+      if (payload.kind === 'action' && payload.sourceSlot !== null) {
+        if (payload.sourceSlot === destination) {
+          // Dropped back where it came from. Nothing changed, nothing is sent, and the cursor is still
+          // cleared -- the gesture is over. True, not false: false would leave the player carrying it.
+          return true;
+        }
+        spells.moveActionButton(payload.sourceSlot, destination);
+        stats.moves += 1;
+        return true;
+      }
+      if (payload.spellId === 0) {
+        return false;
+      }
+      spells.assignActionButton(destination, payload.spellId);
+      stats.places += 1;
+      return true;
+    },
+  });
+
+  /**
+   * `CastSpell(slot)` -- clicking a spell in the book.
+   *
+   * Auto Attack is special-cased for the same reason `action-bridge.ts#use` special-cases it: 6603 is a
+   * spell by identity and an opcode by mechanism, and sending it through `CMSG_CAST_SPELL` is refused.
+   * A PASSIVE spell is not cast at all -- there is nothing to send, and the server would refuse it.
+   */
+  setSpellCastHandler(vm, (slot: number): void => {
+    const entry = getSpellbook(vm).all[slot - 1];
+    if (entry === undefined || entry.spellId === 0 || entry.passive) {
+      return;
+    }
+    const target = world.game.objectHandler.combatHandler.selection;
+    if (entry.spellId === SPELL_AUTO_ATTACK) {
+      if (spells.autoAttackOn) {
+        world.game.objectHandler.combatHandler.stopAttack();
+      } else if (target !== null) {
+        world.game.objectHandler.combatHandler.startAttack(target);
+      }
+      return;
+    }
+    spells.castSpell(entry.spellId, target);
+  });
+
+  spells.on('spellsChanged', push);
+  spells.on('actionsChanged', push);
+  spells.on('cooldownsChanged', push);
+
+  // `SMSG_INITIAL_SPELLS` is in the login burst and the manifest load takes 8-22 s, so the spells are
+  // already in hand when this attaches. Same reason `action-bridge.ts` pushes on attach.
+  push();
+
+  // Both tables are re-pushed when they land. `Spell.dbc` is NOT fetched here -- `action-bridge.ts` owns
+  // that call for the starvation reason its header documents, and `ensureLoaded` is idempotent, so this
+  // rides the same promise rather than starting a second 49 MB fetch.
+  void spellData.ensureLoaded().then(push);
+  void skillData.ensureLoaded().then(push);
+
+  (window as unknown as Record<string, unknown>).spellbookStats = stats;
+
+  return () => {
+    spells.removeListener('spellsChanged', push);
+    spells.removeListener('actionsChanged', push);
+    spells.removeListener('cooldownsChanged', push);
+    delete (window as unknown as Record<string, unknown>).spellbookStats;
+  };
+}

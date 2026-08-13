@@ -42,8 +42,10 @@ import { resolveSprite } from './sprite';
 import { FontStringTextures, loadGlueFonts, measureText } from './text';
 import { DrawItem, WidgetRoot } from './widget';
 import { attachActionBridge } from './action-bridge';
+import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import { dispatchBinding } from './framexml/lua/api/bindings';
+import { getCursor } from './framexml/lua/api/cursor';
 import { gameTime } from './framexml/lua/compat';
 import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
@@ -61,6 +63,19 @@ const TRANSPARENT = new THREE.Color(0, 0, 0);
  * per frame amortised at the ~8 ms a full pass measures.
  */
 const FULL_DRAW_EVERY = 12;
+
+/**
+ * The dragged ability's icon, in LOGICAL UNITS square.
+ *
+ * 36 is `ActionButtonTemplate`'s own authored size -- `Interface\FrameXML\ActionButtonTemplate.xml:4-6`,
+ * `<Size><AbsDimension x="36" y="36"/></Size>` -- so a picked-up ability is exactly the size of the slot
+ * it is heading for, which is what the real client shows. Not a guess and not a tuned value.
+ *
+ * The spellbook end differs slightly and is deliberately not matched: `SpellButtonTemplate` is 37x37
+ * (`spellbookframe.xml:80-82`). The icon is sized to the DESTINATION rather than the source because every
+ * drop target in this client is an action button, and a one-unit change mid-drag would be visible.
+ */
+const CURSOR_ICON_UNITS = 36;
 
 /**
  * A cheap value fingerprint of the whole draw list.
@@ -174,6 +189,9 @@ export class WorldUiHost {
 
   /** `attachUnitBridge`'s teardown, held so `dispose` can run it. */
   private detachUnits: (() => void) | null = null;
+
+  /** `attachSpellbookBridge`'s teardown, held so `dispose` can run it. */
+  private detachSpellbook: (() => void) | null = null;
 
   /**
    * THE DRAW INSTRUMENT, on `window.uiDrawStats`.
@@ -290,6 +308,12 @@ export class WorldUiHost {
       // server to have sent an action bar.
       if (!this.world.session.offline) {
         this.detachActions = attachActionBridge(runtime.vm, this.world, this.art);
+        // THE SPELLBOOK AND THE CURSOR. After the action bridge, because both read `spellData` and the
+        // action bridge is the one that OWNS the 49 MB `Spell.dbc` fetch (see its header on why that call
+        // must not be made from the packet handler); `ensureLoaded` is idempotent, so this rides the same
+        // promise rather than starting a second one. Gated on a real session for the same reason: there is
+        // no spell book without `SMSG_INITIAL_SPELLS`.
+        this.detachSpellbook = attachSpellbookBridge(runtime.vm, this.world, this.art);
       }
     }
     reportLoad(runtime);
@@ -304,6 +328,17 @@ export class WorldUiHost {
     (window as never as Record<string, unknown>).worldUiArt = this.art;
     // The draw instrument -- see `drawStats` for what each number answers.
     (window as never as Record<string, unknown>).uiDrawStats = this.drawStats;
+    /**
+     * THE INPUT ROUTER, as a handle -- new with the drag work, and it was needed within one round.
+     *
+     * `worldUiDrawList` says where a widget IS and the registry says what it is called, but neither answers
+     * "which widget does the router believe the pointer is over", and that is the question a drag fails on:
+     * a probe that converts a rect to device pixels with its own arithmetic is asking a DIFFERENT question
+     * from the one `input.ts#toUnits` answers, and the two disagreeing is invisible. `pointerWidget` and
+     * `pointerPosition` are the router's own answers, so a probe can compare them against the widget it
+     * meant to hit instead of trusting a coordinate conversion it duplicated.
+     */
+    (window as never as Record<string, unknown>).worldUiInput = this.input;
   }
 
   /**
@@ -387,7 +422,97 @@ export class WorldUiHost {
     const sweepStarted = performance.now();
     stats.sweeps = this.drawSweeps(items, viewport);
     stats.sweepMs = performance.now() - sweepStarted;
+    // THE DRAGGED ABILITY'S ICON, in the same after-the-composite pass and for exactly the same reason.
+    this.drawCursorIcon(viewport);
     this.sections.end('ui.draw');
+  }
+
+  /**
+   * THE ICON ATTACHED TO THE CURSOR while an ability is being dragged.
+   *
+   * **Drawn here, after the composite, and NOT as a widget in the tree** -- the same decision
+   * `drawSweeps` documents, and here the argument is even sharper. `drawList` is a pure flatten of the
+   * widget tree, so the only way to get a quad into it is to put a real `Widget` in the tree; and
+   * `drawListSignature` mixes every item's `rect.left/top/width/height`. A widget that follows the mouse
+   * would therefore change the fingerprint on EVERY frame the pointer moves, forcing a full ~4-12 ms
+   * re-render of the whole interface for the entire length of the drag -- which is precisely the
+   * "anything that dirties the fingerprint every frame gives the whole saving back" trap. Drawn straight
+   * to the canvas it costs **one draw call while a drag is live and nothing at all otherwise**, and the
+   * fingerprint never sees it.
+   *
+   * The pointer comes from the ROUTER (`GlueInput#pointerPosition`), not from `api/screen.ts`'s
+   * `GetCursorPosition` tracker, and the two are not interchangeable: the router works in logical units
+   * with Y DOWN from the top -- the same space `drawList` rects and `hitTest` use -- while the Lua global
+   * deliberately reports CSS pixels with Y measured UP from the bottom. Reading the wrong one puts the
+   * icon mirrored vertically and at the wrong scale.
+   *
+   * Returns nothing: the cursor is either carrying something drawable or it is not, and there is no count
+   * worth instrumenting the way the sweeps' was.
+   */
+  private drawCursorIcon(viewport: { width: number; height: number }): void {
+    const runtime = this.runtime;
+    const held = runtime === null ? null : getCursor(runtime.vm);
+    const pointer = this.input.pointerPosition;
+    const texture = held?.texture ?? null;
+    const map = texture === null ? null : this.art.texture(texture);
+    // Four distinct nothing-to-draw cases, all of them ordinary: no drag, a spell whose icon path is not
+    // resolved (the 49 MB `Spell.dbc` has not landed), a BLP still in flight, and no pointer move yet.
+    if (held === null || pointer === null || map === null) {
+      if (this.cursorQuad !== null) {
+        this.cursorQuad.visible = false;
+      }
+      return;
+    }
+
+    const units = viewportUnits(viewport);
+    const quad = this.cursorQuadOf();
+    (quad.material as THREE.MeshBasicMaterial).map = map;
+    (quad.material as THREE.MeshBasicMaterial).needsUpdate = true;
+    // Centred on the pointer, which is where the real client holds a picked-up icon. NDC on the composite
+    // camera, the same two lines `drawSweeps` uses.
+    quad.position.set(pointer.x / units.width - 0.5, 0.5 - pointer.y / units.height, 0);
+    quad.scale.set(CURSOR_ICON_UNITS / units.width, CURSOR_ICON_UNITS / units.height, 1);
+    // BY HAND -- `matrixAutoUpdate` is false, so the two writes above are otherwise inert.
+    quad.updateMatrix();
+    quad.visible = true;
+
+    const previousAutoClear = this.renderer.autoClear;
+    this.renderer.autoClear = false;
+    this.renderer.render(this.cursorSceneOf(), this.compositeCamera);
+    this.renderer.autoClear = previousAutoClear;
+  }
+
+  private cursorScene: THREE.Scene | null = null;
+
+  private cursorQuad: THREE.Mesh | null = null;
+
+  /** One quad, built on first use. Same recipe as `sweepQuad`. */
+  private cursorQuadOf(): THREE.Mesh {
+    if (this.cursorQuad === null) {
+      const material = new THREE.MeshBasicMaterial({
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        // The composite is premultiplied and this quad is drawn into the same canvas after it, so the
+        // icon's own alpha must be premultiplied too or a soft edge reads as a bright halo.
+        premultipliedAlpha: true,
+      });
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+      quad.frustumCulled = false;
+      quad.matrixAutoUpdate = false;
+      quad.visible = false;
+      this.cursorQuad = quad;
+      this.cursorSceneOf().add(quad);
+    }
+    return this.cursorQuad;
+  }
+
+  private cursorSceneOf(): THREE.Scene {
+    if (this.cursorScene === null) {
+      this.cursorScene = new THREE.Scene();
+      this.cursorScene.name = 'WorldUiCursorIcon';
+    }
+    return this.cursorScene;
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -694,6 +819,8 @@ export class WorldUiHost {
     this.detachUnits = null;
     this.detachActions?.();
     this.detachActions = null;
+    this.detachSpellbook?.();
+    this.detachSpellbook = null;
     this.input.detach();
     this.runtime?.dispose();
     this.runtime = null;

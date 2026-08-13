@@ -38,6 +38,16 @@ export interface SpellWireRow {
     | 'SPELL_GO'
     | 'CAST_FAILED'
     | 'CAST_SENT'
+    /**
+     * `CMSG_SET_ACTION_BUTTON` (0x128) as SENT -- one action slot written to the server, which is what
+     * makes a dragged ability survive a relog.
+     *
+     * OUTBOUND, like `CAST_SENT`, and its own kind for the same reason: the server sends no
+     * acknowledgement for this opcode, so this row is the only record that the move reached the wire at
+     * all. `detail.wireSlot` is the 0-based slot actually written and `detail.packed` the word, so a
+     * suspected layout error can be read back without a packet capture.
+     */
+    | 'SET_ACTION_BUTTON'
     // The three cooldown opcodes. `SPELL_COOLDOWN` (0x134) carries a whole list, `COOLDOWN_EVENT` (0x135)
     // one spell with no duration; both are on the wire and neither carries the GLOBAL cooldown, which the
     // client computes from `Spell.dbc` column 206 (`object/spells.ts#applyGlobalCooldown`).

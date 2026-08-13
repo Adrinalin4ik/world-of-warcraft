@@ -81,7 +81,44 @@ const COL = {
   id: 0,
   /** `Category` -- the shared-cooldown group `CategoryRecoveryTime` applies across. */
   category: 1,
+  /**
+   * `Attributes` -- the first attribute word. Bit `0x40` is `SPELL_ATTR0_PASSIVE`, which is what
+   * `IsPassiveSpell` answers and what makes a spellbook entry draw a black button border and a grey
+   * name instead of a clickable icon (`spellbookframe.lua:496-506`).
+   *
+   * MEASURED on the served file, and it discriminates cleanly on ten samples -- four known passives read
+   * the bit and six known actives do not:
+   *
+   *      674 Dual Wield        attrs 0x00000050  passive 1   (NameSubtext "Passive")
+   *      750 Plate Mail        attrs 0x000000c0  passive 1
+   *     8737 Mail              attrs 0x000000c0  passive 1
+   *    20579 Shadow Resistance attrs 0x00000050  passive 1   (NameSubtext "Racial Passive")
+   *      331 Healing Wave      attrs 0x00010000  passive 0
+   *      403 Lightning Bolt    attrs 0x00010000  passive 0
+   *       78 Heroic Strike     attrs 0x00050014  passive 0
+   *    20594 Stoneform         attrs 0x00040100  passive 0   (NameSubtext "Racial", and NOT passive)
+   *
+   * The last pair is the useful one: "Racial" and "Racial Passive" differ in the subtext by one word, so
+   * a reader that guessed passiveness from the NAME would get Stoneform wrong. The attribute bit does not.
+   */
+  attributes: 4,
   castingTimeIndex: 28,
+  /**
+   * `SpellLevel` -- the character level this rank of the spell is learned at.
+   *
+   * Read for ONE purpose: deciding which member of a rank family is the HIGHEST rank, which the
+   * spellbook needs because `ShowAllSpellRanks` is off by default and the book then lists only the top
+   * rank of each spell. It ascends monotonically with rank, measured across two families:
+   *
+   *     Lightning Bolt  403 r1 lvl 1,  529 r2 lvl 8,  548 r3 lvl 14,  915 r4 lvl 20,  943 r5 lvl 26
+   *     Healing Wave    331 r1 lvl 1,  332 r2 lvl 6,  547 r3 lvl 12
+   *
+   * **`SkillLineAbility`'s `forward_spellid` (its column 8) is NOT the rank chain in 3.3.5a, and that was
+   * measured rather than assumed** -- it reads **0** for all eight of the spells above, and its 1059
+   * non-zero rows cluster on skill lines 134 Feral Combat, 253 Assassination and 256 Fury, which is
+   * talent forwarding and not ranks. So the obvious column does not work and this one is what does.
+   */
+  spellLevel: 39,
   /** `RecoveryTime` (ms): this spell's OWN cooldown. */
   recoveryTime: 29,
   /** `CategoryRecoveryTime` (ms): the cooldown put on every spell sharing `category`. */
@@ -102,12 +139,40 @@ const COL = {
   activeIconID: 134,
   /** First locale slot of the `Name` block; 3.3.5a localised strings are 16 locales + a flags word. */
   name: 136,
+  /**
+   * `NameSubtext` -- THE RANK STRING, and `GetSpellName`'s second return (`subSpellName`).
+   *
+   * Derived from the block chain and then read back off the served file. The chain closes exactly, which
+   * is the corroboration: `Name` at 136 + 17 = **153** `NameSubtext`, + 17 = 170 `Description`,
+   * + 17 = 187 `AuraDescription`, + 17 = **204**, which is `manaCostPercentage` -- a column that was
+   * already established independently two rounds ago. Four localised blocks of 17 land exactly on a known
+   * column, so no index in the run can be off by one.
+   *
+   * Read back, it is what the spellbook draws under a spell's name: "Rank 1", "Rank 2", "Rank 3" for the
+   * Lightning Bolt family, "Passive" for 674 Dual Wield, "Racial Passive" for 20579 Shadow Resistance,
+   * "Racial" for 20594 Stoneform, and the EMPTY string for 750 Plate Mail and 8737 Mail.
+   *
+   * The empty case is load-bearing: `SpellButton_UpdateButton` compares `subSpellName ~= ""` to decide
+   * where to anchor the name label (`spellbookframe.lua:510-514`), so this must reach Lua as `""` and
+   * never as nil -- a nil there makes the comparison true and shifts the label by two units for every
+   * rankless spell.
+   */
+  nameSubtext: 153,
 } as const;
 
 /** The head of a `Spell.dbc` row -- only what a button, a cast and a tooltip line need. */
 export interface SpellRow {
   id: number;
   name: string;
+  /**
+   * `NameSubtext` -- the rank label ("Rank 3", "Passive", or `''`). Never null; see `COL.nameSubtext`
+   * for why the empty string rather than nil is the load-bearing case.
+   */
+  subName: string;
+  /** True when `Attributes` carries `SPELL_ATTR0_PASSIVE` (0x40) -- what `IsPassiveSpell` answers. */
+  passive: boolean;
+  /** `SpellLevel`: which rank of a family this is. See `COL.spellLevel`. */
+  spellLevel: number;
   iconID: number;
   /** `SpellVisual.dbc` id, or 0 for a spell with no visual (spell 6603 Auto Attack is one). */
   visualID: number;
@@ -309,6 +374,10 @@ class SpellData {
       rows.set(id, {
         id,
         name: readString(col(COL.name)),
+        subName: readString(col(COL.nameSubtext)),
+        // `SPELL_ATTR0_PASSIVE`. See `COL.attributes` for the ten-sample measurement.
+        passive: (col(COL.attributes) & 0x40) !== 0,
+        spellLevel: col(COL.spellLevel),
         iconID: col(COL.iconID),
         visualID: col(COL.visual),
         castingTimeIndex: col(COL.castingTimeIndex),
@@ -362,6 +431,17 @@ class SpellData {
       return null;
     }
     return this.icons?.get(row.iconID) ?? null;
+  }
+
+  /**
+   * A `SpellIcon.dbc` id straight to its path, without going through a spell.
+   *
+   * Exists for the spellbook's TABS: a tab's art is `SkillLine.dbc`'s `spellIconID` (column 37, measured
+   * -- `pipeline/dbc/skill-data.ts`), which is a `SpellIcon` id belonging to no spell, so `iconPath` has
+   * no way to reach it.
+   */
+  icon(iconID: number): string | null {
+    return this.icons?.get(iconID) ?? null;
   }
 
   /**

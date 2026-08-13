@@ -947,6 +947,110 @@ export class SpellHandler extends EventEmitter {
     return this.known;
   }
 
+  /**
+   * `CMSG_SET_ACTION_BUTTON` (**0x128**): TELL THE SERVER an action slot changed.
+   *
+   * This is what stops a rearranged bar reverting on relog, and it is the outbound half of the drag work:
+   * moving an ability is a real change to the character, not a client-side display choice.
+   *
+   * **Body: `u8 slot` + `u32 packedData`**, 5 bytes. The slot is **0-BASED** -- the same indexing
+   * `SMSG_ACTION_BUTTONS` uses for its 144-word array -- so a 1-based Lua action becomes `action - 1`
+   * here, at the one place that conversion happens for the outbound direction (`slot()` is the inbound one).
+   * `packedData` is `(type << 24) | (action & 0x00FFFFFF)`, the identical packing `handleActionButtons`
+   * decodes, and **`packedData == 0` is the REMOVE form** -- the server drops the button rather than
+   * storing an empty one.
+   *
+   * ## What is evidence and what is not, stated plainly
+   *
+   * The PACKING is corroborated in this client: `handleActionButtons` reads exactly this layout out of
+   * `SMSG_ACTION_BUTTONS`, and it was confirmed against a real 577-byte body whose five filled words
+   * decoded to sensible spells at the slots `SpellShapeshiftForm.dbc` independently predicted. So the word
+   * format is measured, not guessed.
+   *
+   * The `u8 slot` PREFIX is not: it comes from the server implementations this build's protocol is shared
+   * with (TrinityCore 3.3.5's `WorldSession::HandleSetActionButtonOpcode` reads `uint8 button` then
+   * `uint32 packetData` and treats a zero payload as a removal; vmangos is the same), and this client has
+   * no capture of the opcode being sent. **It is verified only to the extent that the round trip works** --
+   * the server answers a correct write by storing it, which shows up as the bar surviving a relog. A wrong
+   * prefix width would put the action in the wrong slot or be rejected outright, so the failure is visible
+   * rather than silent, which is why sending it is better than leaving the move client-only.
+   *
+   * `>>> 0` on the packed word for the reason `handleActionButtons` uses `>>> 24`: a type byte of 0x80
+   * makes the value exceed 2^31, and `writeUnsignedInt` must be handed an unsigned number.
+   */
+  setActionButton(action: number, spellId: number | null): void {
+    if (!Number.isFinite(action) || action < 1 || action > MAX_ACTION_BUTTONS) {
+      return;
+    }
+    // `packedData` 0 is the server's REMOVE form; a spell keeps type `ACTION_BUTTON_SPELL` (0x00), so the
+    // packed word for a spell is just its id.
+    const packed = spellId === null || spellId === 0
+      ? 0
+      : (((ACTION_BUTTON_SPELL << 24) | (spellId & ACTION_MASK)) >>> 0);
+
+    const app = new GamePacket(GameOpcode.CMSG_SET_ACTION_BUTTON, GamePacket.HEADER_SIZE_OUTGOING + 1 + 4);
+    app.writeUnsignedByte(action - 1);
+    app.writeUnsignedInt(packed);
+    this.game.send(app);
+
+    // The LOCAL slot is updated too, and it must be: `SMSG_ACTION_BUTTONS` is sent once at login and the
+    // server sends no acknowledgement for this opcode, so nothing would ever tell the bar what it now
+    // holds. The array is grown if the login packet was short (a non-zero `packetType` can carry no
+    // slots), so a write cannot land on a hole.
+    while (this.slots.length < MAX_ACTION_BUTTONS) {
+      this.slots.push({ action: 0, type: ACTION_BUTTON_SPELL });
+    }
+    this.slots[action - 1] = {
+      action: spellId ?? 0,
+      type: ACTION_BUTTON_SPELL,
+    };
+
+    spellWire.record({
+      at: Date.now(),
+      kind: 'SET_ACTION_BUTTON',
+      spellId: spellId ?? 0,
+      caster: null,
+      detail: {
+        slot: action,
+        wireSlot: action - 1,
+        packed,
+        name: spellId === null ? null : (spellData.spell(spellId)?.name ?? null),
+      },
+      bodySize: 5,
+      consumed: 5,
+    });
+  }
+
+  /**
+   * Move an action from one slot to another, SWAPPING with whatever is already in the destination.
+   *
+   * A swap and not an overwrite, because that is what the real client does with a bar-to-bar drag: the
+   * displaced ability lands where the dragged one came from rather than being destroyed. Two packets, one
+   * per slot, because the opcode addresses a single button -- there is no swap opcode.
+   *
+   * `actionsChanged` is emitted ONCE, after both writes, so `action-bridge.ts#pushAll` sees a consistent
+   * pair. Emitting per write would hand the UI a moment in which the same ability was in both slots.
+   */
+  moveActionButton(from: number, to: number): void {
+    if (from === to) {
+      return;
+    }
+    const source = this.spellInSlot(from);
+    const destination = this.spellInSlot(to);
+    if (source === null) {
+      return;
+    }
+    this.setActionButton(to, source);
+    this.setActionButton(from, destination);
+    this.emit('actionsChanged');
+  }
+
+  /** Put a spell into a slot, replacing whatever was there. The spellbook-to-bar drag. */
+  assignActionButton(action: number, spellId: number): void {
+    this.setActionButton(action, spellId);
+    this.emit('actionsChanged');
+  }
+
   /** Named types for anything a slot holds that this client cannot act on, for the load report. */
   static typeName(type: number): string {
     return ACTION_BUTTON_TYPE_NAMES[type] ?? `unknown(0x${type.toString(16)})`;

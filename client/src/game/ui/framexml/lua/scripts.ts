@@ -129,6 +129,8 @@ const SCRIPT_PARAMS: ReadonlyMap<string, readonly string[]> = new Map([
   ['OnDoubleClick', ['button']],
   ['OnMouseDown', ['button']],
   ['OnMouseUp', ['button']],
+  // `spellbookframe.xml:167` reads it by name: `SpellButton_OnDrag(self, button)`.
+  ['OnDragStart', ['button']],
   ['OnMouseWheel', ['delta']],
   ['OnValueChanged', ['value']],
   ['OnChar', ['text']],
@@ -383,6 +385,13 @@ const CALLBACK_BINDERS = new Map<string, CallbackBinder>([
   ['OnTextChanged', (w, f) => { w.onTextChanged = f === null ? null : () => f(); }],
   ['OnEditFocusGained', (w, f) => { w.onEditFocusGained = f === null ? null : () => f(); }],
   ['OnEditFocusLost', (w, f) => { w.onEditFocusLost = f === null ? null : () => f(); }],
+  // THE DRAG GESTURE. `OnDragStart` takes the button as a named parameter -- `spellbookframe.xml:167` is
+  // `SpellButton_OnDrag(self, button)` -- so it gets `LEFT_BUTTON` like the click handlers, and for the
+  // same reason: the router accepts any pointer button and always reports it as the left one.
+  // `OnDragStop` and `OnReceiveDrag` take none in 3.3.5a.
+  ['OnDragStart', (w, f) => { w.onDragStart = f === null ? null : () => f([LEFT_BUTTON]); }],
+  ['OnDragStop', (w, f) => { w.onDragStop = f === null ? null : () => f(); }],
+  ['OnReceiveDrag', (w, f) => { w.onReceiveDrag = f === null ? null : () => f(); }],
 ]);
 
 /**

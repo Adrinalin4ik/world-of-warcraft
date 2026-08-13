@@ -170,6 +170,18 @@ export class Widget {
   mouseEnabled = false;
   focusable = false;
 
+  /**
+   * Whether this frame called `RegisterForDrag` with at least one button -- i.e. whether it is a drag
+   * SOURCE. Set by `lua/methods/frame.ts#RegisterForDrag`, read by `ui/input.ts`.
+   *
+   * A boolean here rather than the router reading the button SET, and the reason is the router's own
+   * limitation rather than a simplification for its own sake: `input.ts#onPointerDown` never inspects
+   * `event.button` and `scripts.ts` reports every press as `"LeftButton"` (the same constraint
+   * `RegisterForClicks` is a declared gap for), so "which buttons" is a question nothing downstream could
+   * answer differently. The full set is still stored, on the frame id, for introspection.
+   */
+  dragRegistered = false;
+
   /** Sprite key resolved by `GlueArt`; null draws nothing. */
   sprite: string | null = null;
   texCoords: TexCoords | null = null;
@@ -325,6 +337,23 @@ export class Widget {
   /** FrameXML's `OnEditFocusGained`/`OnEditFocusLost`, fired by the router's own focus transition. */
   onEditFocusGained: (() => void) | null = null;
   onEditFocusLost: (() => void) | null = null;
+
+  /**
+   * FrameXML's `OnDragStart`/`OnDragStop`/`OnReceiveDrag` -- the drag gesture.
+   *
+   * A drag is not a click with extra state: the engine fires `OnDragStart` on the frame the press began
+   * on once the pointer has moved past a threshold, `OnDragStop` on that same frame when the button is
+   * released, and `OnReceiveDrag` on whatever frame is UNDER THE CURSOR at the release -- which is a
+   * different frame, and is the whole point of the gesture. A click fires on neither if a drag happened.
+   *
+   * `onDragStart`/`onDragStop` are only fired on a widget that called `RegisterForDrag`
+   * (`methods/frame.ts`), which is the engine's rule and matters: every Frame has these handler slots
+   * available but only a registered one is a drag SOURCE, so an unregistered frame keeps its click.
+   * `onReceiveDrag` needs no registration -- a drop target is any frame with the handler.
+   */
+  onDragStart: (() => void) | null = null;
+  onDragStop: (() => void) | null = null;
+  onReceiveDrag: (() => void) | null = null;
 
   constructor(kind: WidgetKind, id?: string) {
     this.kind = kind;
