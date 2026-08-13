@@ -154,6 +154,9 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       spellId,
       texture: spellData.iconPath(spellId),
       name: row?.name ?? '',
+      // Both for the tooltip. `''` rather than null, which is the contract both fields declare.
+      subName: row?.subName ?? '',
+      description: row?.description ?? '',
       isAttack: spellId === SPELL_AUTO_ATTACK,
       // Only auto-attack drives "current" today; see `api/actions.ts`'s `IsCurrentAction`.
       isCurrent: spellId === SPELL_AUTO_ATTACK && spells.autoAttackOn,

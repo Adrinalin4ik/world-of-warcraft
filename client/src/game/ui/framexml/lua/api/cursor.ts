@@ -48,6 +48,7 @@
  * than a copy, and nothing in Lua needs to see it.
  */
 import { LuaVM } from '../vm';
+import { fireEvent } from '../events';
 import { notImplemented } from '../methods/region';
 import { BOOKTYPE_SPELL } from './spells';
 
@@ -124,6 +125,31 @@ export function installCursorApi(vm: LuaVM): void {
   };
 
   /**
+   * THE EMPTY-SLOT GRID, and it is what makes an ability droppable on a slot that has nothing in it.
+   *
+   * `ActionButton_Update` HIDES a button with no action, so it is not in the draw list and `hit.ts` cannot
+   * find it -- a drop over an empty slot landed on the world. The real client reveals the empty buttons for
+   * the length of the drag, and the mechanism is a pair of events:
+   *
+   *     ActionButton.lua:92-93   self:RegisterEvent("ACTIONBAR_SHOWGRID");
+   *                              self:RegisterEvent("ACTIONBAR_HIDEGRID");
+   *     ActionButton.lua:373-380 ACTIONBAR_SHOWGRID -> ActionButton_ShowGrid(self)
+   *                              ACTIONBAR_HIDEGRID -> ActionButton_HideGrid(self)
+   *
+   * **The ENGINE is what fires them**, which is why they belong here: grepped across all 264 loaded
+   * manifest files, `actionbutton.lua` is the ONLY file that mentions either name, and it only registers
+   * and handles them. Nothing in the client's own Lua raises them, so nothing did.
+   *
+   * ONE of each per gesture, which keeps `ActionButton_ShowGrid`'s counter balanced -- it does
+   * `SetAttribute("showgrid", GetAttribute("showgrid") + 1)` and `HideGrid` decrements, hiding the button
+   * only back at zero (`actionbutton.lua:340-366`). So a pickup fires SHOWGRID once and every way of
+   * putting the ability down again -- a successful `PlaceAction` or a `ClearCursor` -- fires HIDEGRID once.
+   */
+  const grid = (show: boolean): void => {
+    fireEvent(vm, show ? 'ACTIONBAR_SHOWGRID' : 'ACTIONBAR_HIDEGRID');
+  };
+
+  /**
    * `PickupAction(action)` -- start carrying whatever is in an action slot.
    *
    * **The source slot is deliberately NOT emptied here, and that is a stated deviation from the real
@@ -144,6 +170,9 @@ export function installCursorApi(vm: LuaVM): void {
     const payload = state.pick(action);
     if (payload !== null) {
       state.held = payload;
+      // Reveal the empty slots -- see `grid`. Only on a real pickup: a pickup that found nothing has
+      // started no drag, and an unbalanced SHOWGRID would leave the grid up for good.
+      grid(true);
     }
     return [];
   });
@@ -166,6 +195,7 @@ export function installCursorApi(vm: LuaVM): void {
     const payload = state.pickSpell(slot);
     if (payload !== null) {
       state.held = payload;
+      grid(true);
     }
     return [];
   });
@@ -189,6 +219,10 @@ export function installCursorApi(vm: LuaVM): void {
     }
     if (state.place(action, held)) {
       state.held = null;
+      // The gesture is over, so the revealed empty slots go away again. Paired with the SHOWGRID that
+      // `PickupAction`/`PickupSpell` fired; a REFUSED placement leaves both the ability and the grid up,
+      // which is right -- the player is still carrying it.
+      grid(false);
     }
     return [];
   });
@@ -222,7 +256,14 @@ export function installCursorApi(vm: LuaVM): void {
    * ability cannot be REMOVED from the bar by dragging it off, only moved or overwritten.
    */
   fn('ClearCursor', () => {
+    // Only when something was actually being carried, so the SHOWGRID/HIDEGRID counter stays balanced:
+    // `ClearCursor` is called defensively from several of the client's handlers on an already-empty cursor,
+    // and each of those would otherwise decrement the grid counter towards a negative.
+    const wasHolding = state.held !== null;
     state.held = null;
+    if (wasHolding) {
+      grid(false);
+    }
     return [];
   });
 

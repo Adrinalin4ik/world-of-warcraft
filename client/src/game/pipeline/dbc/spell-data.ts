@@ -100,6 +100,14 @@ const COL = {
    *
    * The last pair is the useful one: "Racial" and "Racial Passive" differ in the subtext by one word, so
    * a reader that guessed passiveness from the NAME would get Stoneform wrong. The attribute bit does not.
+   *
+   * **Bit `0x80` in the same word is the DO-NOT-DISPLAY flag**, and it is the whole of the spellbook's
+   * filter. See `SpellRow#hiddenInSpellbook` for the measurement.
+   *
+   * The 8-word layout is confirmed two ways rather than assumed: `wow-data-parser/dbc/entities/spell.js:12`
+   * declares `attributes: new r.Array(r.uint32le, 8)` right after `id, categoryID, dispelID, mechanicID`,
+   * so columns **4-11** are `Attributes` + `AttributesEx1..Ex7` and column 12 is `stances` -- and the served
+   * file agrees, column 12's maximum being `0xf807e0ff`, a shapeshift-form mask and not an attribute word.
    */
   attributes: 4,
   castingTimeIndex: 28,
@@ -158,6 +166,22 @@ const COL = {
    * rankless spell.
    */
   nameSubtext: 153,
+  /**
+   * `Description` -- the spell's tooltip body, and the third block in the chain `nameSubtext` documents:
+   * `Name` 136 + 17 = 153 `NameSubtext` + 17 = **170** `Description` + 17 = 187 `AuraDescription` + 17 =
+   * 204 `manaCostPercentage`, a column established independently. No index in that run can be off by one.
+   *
+   * Read for the tooltip, which had nothing to say (`GameTooltip:SetSpell`/`SetAction`).
+   *
+   * **The `$`-VARIABLES ARE NOT EXPANDED and that is a stated gap.** A 3.3.5a description carries the
+   * engine's own substitution tokens -- `$s1` for effect 1's value, `$d` for the duration, `$/1000;s2`
+   * for a scaled one -- which the real client resolves from `Spell.dbc`'s effect columns, the caster's
+   * level and his spell power. None of those columns is read here, so the raw string reaches the tooltip
+   * with its tokens visible. That is deliberately not hidden behind a regex that strips them: a stripped
+   * token reads as a finished sentence with a number missing, which is the silent-wrong-answer shape this
+   * project's rules forbid, while a visible `$s1` says exactly what has not been computed.
+   */
+  description: 170,
 } as const;
 
 /** The head of a `Spell.dbc` row -- only what a button, a cast and a tooltip line need. */
@@ -169,8 +193,64 @@ export interface SpellRow {
    * for why the empty string rather than nil is the load-bearing case.
    */
   subName: string;
+  /**
+   * `Description` (column 170) -- the tooltip body, with the engine's `$` tokens UNEXPANDED. `''` for a
+   * spell with none. See `COL.description`.
+   */
+  description: string;
   /** True when `Attributes` carries `SPELL_ATTR0_PASSIVE` (0x40) -- what `IsPassiveSpell` answers. */
   passive: boolean;
+  /**
+   * `Attributes` (column 4) bit **`0x80`** -- DO NOT DISPLAY. True for a spell the real client keeps OUT
+   * of the spellbook, and this is the one filter that decides it.
+   *
+   * MEASURED across the whole served file (49,839 records, `fieldCount` 234, `recordSize` 936, byte
+   * address `20 + record*936 + 16`); the bit is set on 10,243 spells, 20.6%. What the owner saw listed:
+   *
+   *     21184 Rogue Passive (DND)   0x000500d0   HIDE
+   *       203 Unarmed               0x000000c0   HIDE
+   *       204 Defense               0x000000c0   HIDE
+   *      2567 Thrown                0x000000c0   HIDE
+   *       202 Two-Handed Swords     0x000000c0   HIDE
+   *       750 Plate Mail            0x000000c0   HIDE
+   *       331 Healing Wave          0x00010000   show
+   *       403 Lightning Bolt        0x00010000   show
+   *       674 Dual Wield            0x00000050   show
+   *      2764 Throw                 0x00410012   show
+   *      3018 Shoot                 0x00400012   show
+   *      6603 Auto Attack           0x00000010   show
+   *
+   * **It is NOT the `(DND)` NAME, and the name would have been wrong twice.** There is no spell called
+   * `RoguePassive`: a raw scan of the 2.3 MB string block for that byte sequence returns ZERO hits, and the
+   * spell is 21184 `"Rogue Passive (DND)"`, with a space. And of the 170 spells whose name ends in `(DND)`
+   * only 97 carry the bit -- the other 73 have no `SkillLineAbility` row at all, so they are not learnable
+   * and never reach a spellbook to be filtered.
+   *
+   * **It is NOT a `SkillLine` category either, and that hypothesis was tested and refuted.** The WEAPON
+   * category is `SkillLine.dbc` col 1 == **6** (18 lines: Swords, Axes, Bows, ... 162 Unarmed, 176 Thrown,
+   * ...), and `Unarmed` and `Throw` do both live there. But excluding category 6 would delete four things
+   * the real client SHOWS: 674 `Dual Wield` is on category-6 line 118, and Dodge/Block/Parry are on
+   * category-6 line 95. Measured over all 10,219 `SkillLineAbility` rows, 24 of the 32 category-6 spells
+   * carry `0x80` and the 8 that do not are exactly Dodge, Block, Parry, Spirit Weapons, Dual Wield, Throw
+   * and the two `Shoot` variants -- i.e. the bit separates them and the category cannot. (The
+   * category-6 and category-7 spell sets are also DISJOINT, intersection 0, so nothing was leaking into
+   * the class tabs by a bad join.)
+   *
+   * **`SkillLineAbility` carries no display flag**, also measured: 14 columns, of which `excludeRaces`(5),
+   * `excludeClasses`(6) and both `characterPoints`(12,13) are entirely zero across all 10,219 rows, and
+   * `AcquireMethod`(9) takes values 0/1/2 each of which contains both shown and hidden spells (Fireball
+   * and Unarmed share `acq=2`).
+   *
+   * **It eats no real spell.** Of the 5,881 spells reachable through a category-7 class line, 2,257 carry
+   * the bit and 2,215 of those are ALSO passive (0x40) -- talent ranks, which live in the talent frame and
+   * never in the book. The remaining 42 are internal effect spells (`Vanished`, `Curse of Doom Effect`,
+   * the `Metamorphosis` internals). No castable spellbook entry is in the set.
+   *
+   * One thing NOT sourced: the constant's NAME. 3.3.5a cores call this bit
+   * `SPELL_ATTR0_DO_NOT_DISPLAY`/`SPELL_ATTR0_HIDDEN_CLIENTSIDE`, and that name is external knowledge --
+   * the served file proves the DISCRIMINATION, which is all the filter needs.
+   */
+  hiddenInSpellbook: boolean;
   /** `SpellLevel`: which rank of a family this is. See `COL.spellLevel`. */
   spellLevel: number;
   iconID: number;
@@ -375,8 +455,12 @@ class SpellData {
         id,
         name: readString(col(COL.name)),
         subName: readString(col(COL.nameSubtext)),
+        description: readString(col(COL.description)),
         // `SPELL_ATTR0_PASSIVE`. See `COL.attributes` for the ten-sample measurement.
         passive: (col(COL.attributes) & 0x40) !== 0,
+        // Bit 0x80 of the SAME word. See `SpellRow#hiddenInSpellbook` for the measurement that
+        // establishes it and rules out both the `(DND)` name and the weapon skill CATEGORY.
+        hiddenInSpellbook: (col(COL.attributes) & 0x80) !== 0,
         spellLevel: col(COL.spellLevel),
         iconID: col(COL.iconID),
         visualID: col(COL.visual),

@@ -88,6 +88,7 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
       name: row?.name ?? '',
       // `''` and never null -- `SpellbookEntry#subName` says why.
       subName: row?.subName ?? '',
+      description: row?.description ?? '',
       texture: spellData.iconPath(spellId),
       passive: row?.passive ?? false,
       cooldownStart: cooldown?.start ?? 0,
@@ -119,6 +120,25 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
     // 1. GROUP by class skill line; null is General.
     const groups = new Map<number | null, Grouped>();
     for (const spellId of known) {
+      /**
+       * THE BOOK'S ONE FILTER: `Spell.dbc` column 4 bit **0x80**, DO NOT DISPLAY.
+       *
+       * This is what was putting `Rogue Passive (DND)`, `Unarmed`, `Thrown`, `Defense`, `Two-Handed
+       * Swords`, `Plate Mail` and the rest of the weapon and armour PROFICIENCIES in the book -- the
+       * server sends them in `SMSG_INITIAL_SPELLS` because the character genuinely knows them, and the
+       * real client hides them here rather than the server withholding them.
+       *
+       * `SpellRow#hiddenInSpellbook` carries the measurement, including why the `(DND)` NAME and the
+       * weapon SKILL CATEGORY were both tested and are both wrong -- category 6 would delete `Dual
+       * Wield`, `Dodge`, `Block`, `Parry`, `Throw` and `Shoot`, which the real client shows.
+       *
+       * A spell whose row is not loaded yet is KEPT, not dropped: until the 49 MB `Spell.dbc` fetch lands
+       * every row is null, and dropping on a null would build the first book empty and then repopulate it,
+       * which is the opposite of the "right shape, blank labels" behaviour this function is written for.
+       */
+      if (spellData.spell(spellId)?.hiddenInSpellbook === true) {
+        continue;
+      }
       const line = skillData.classLineOf(spellId);
       const key = line?.id ?? null;
       let group = groups.get(key);

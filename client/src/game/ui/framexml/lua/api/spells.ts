@@ -78,6 +78,12 @@ export interface SpellbookEntry {
    * spell. `GetSpellName`'s contract has the same requirement.
    */
   subName: string;
+  /**
+   * `Spell.dbc`'s `Description` (column 170, measured) -- the tooltip body, with the engine's `$s1`/`$d`
+   * substitution tokens UNEXPANDED. `''` for a spell with none, and `''` for every spell until the 49 MB
+   * fetch lands. Read by `GameTooltip:SetSpell`; see `pipeline/dbc/spell-data.ts#COL.description`.
+   */
+  description: string;
   /** Extensionless icon path from `SpellIcon.dbc`, or null until the 49 MB `Spell.dbc` fetch lands. */
   texture: string | null;
   /** `SPELL_ATTR0_PASSIVE` (`Spell.dbc` column 4, bit 0x40). Draws a black border and a grey name. */

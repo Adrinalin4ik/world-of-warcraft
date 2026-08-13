@@ -180,6 +180,26 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // to be bound against.
   installCursorApi(vm);
 
+  /**
+   * `SHOW_NEWBIE_TIPS` -- an ENGINE global, not a FrameXML one, and the micro buttons' tooltips need it.
+   *
+   * Nothing in the 264 loaded files ever ASSIGNS it; three of them only read it
+   * (`gametooltip.lua:200`, `friendsframe.xml:210,380`), which is the signature of a value the engine
+   * publishes from its config. So it has to come from here.
+   *
+   * **The value is OURS and unsourced**, and the reasoning is worth stating because a nil would look
+   * harmless. `GameTooltip_AddNewbieTip`'s two branches are not symmetrical
+   * (`gametooltip.lua:199-215`): the `== "1"` branch ends in `GameTooltip:Show()` and the ELSE branch
+   * calls `SetOwner` and `SetText` and never shows anything. A micro button's `<OnEnter>` calls nothing
+   * but `GameTooltip_AddNewbieTip` and then `AddLine(" ")`
+   * (`mainmenubarmicrobuttons.xml:12-21`) -- its own `GameTooltip:Show()` sits inside an
+   * `IsEnabled() == 0 and self.minLevel` branch that a normal enabled button never takes. So with this
+   * unset or "0", NO micro button could ever display a tooltip, which contradicts what the client
+   * demonstrably does. "1" is the value that makes the client's own code path complete, and that is the
+   * whole of the evidence for it.
+   */
+  vm.setGlobal('SHOW_NEWBIE_TIPS', '1');
+
   // BEFORE the first file runs -- see `WorldRuntimeOptions#seed` for why the order is load-bearing.
   options.seed?.(vm);
 

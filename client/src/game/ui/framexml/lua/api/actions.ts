@@ -48,6 +48,18 @@ export interface ActionSnapshot {
   texture: string | null;
   name: string;
   /**
+   * The spell's RANK label (`Spell.dbc` `NameSubtext`, column 153) -- "Rank 3", "Passive" or `''`.
+   *
+   * Added for `GameTooltip:SetAction`, which draws it as line 1's RIGHT text the way the real client does.
+   * Never null; `''` is the no-rank answer, the same contract `SpellbookEntry#subName` documents.
+   */
+  subName: string;
+  /**
+   * `Spell.dbc`'s `Description` (column 170, measured) -- the tooltip body, `$` tokens UNEXPANDED. `''`
+   * until the 49 MB fetch lands. See `pipeline/dbc/spell-data.ts#COL.description`.
+   */
+  description: string;
+  /**
    * True for spell 6603 "Auto Attack" -- what `IsAttackAction` reports, and what makes the button
    * flash while swinging (`ActionButton_UpdateFlash`).
    */
@@ -91,6 +103,8 @@ export function emptyAction(): ActionSnapshot {
     spellId: 0,
     texture: null,
     name: '',
+    subName: '',
+    description: '',
     isAttack: false,
     isCurrent: false,
     cooldownStart: 0,

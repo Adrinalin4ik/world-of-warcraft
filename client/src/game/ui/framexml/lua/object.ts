@@ -54,6 +54,7 @@ export type WidgetClass =
   | 'STATUSBAR'
   | 'SIMPLEHTML'
   | 'COOLDOWN'
+  | 'GAMETOOLTIP'
   | 'BACKDROP';
 
 const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
@@ -77,6 +78,15 @@ const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
   // Missing, it was the single largest error source in the FrameXML load -- 671 lines, each one
   // `CreateFrame("Cooldown")` throwing and taking the element's whole subtree with it.
   COOLDOWN: 'FRAME',
+  // A real client type, declared in `Interface\FrameXML\GameTooltipTemplate.xml:3` as
+  // `<GameTooltip name="GameTooltipTemplate" frameStrata="TOOLTIP" clampedToScreen="true" hidden="true"
+  // virtual="true">` and instantiated four times in `GameTooltip.xml` -- `GameTooltip` itself plus the
+  // three `ShoppingTooltip`s. Missing, `CreateFrame` threw for each and the loader dropped the element
+  // and its whole subtree, so the global `GameTooltip` was NIL: 110 of the load report's errors mentioned
+  // it, the spellbook had no hover descriptions, the action bar and the micro buttons had no tooltips at
+  // all, and `ActionButton_ShowGrid` -- the path that makes an EMPTY action slot droppable -- died on
+  // `actionbutton.lua:265`'s `if ( GameTooltip:GetOwner() == self )`. See `methods/gametooltip.ts`.
+  GAMETOOLTIP: 'FRAME',
   // OURS, not the client's: `backdrop` is a Widget kind this project invented for a nine-slice
   // frame. It behaves as a Frame and has no methods of its own today.
   BACKDROP: 'FRAME',
@@ -108,6 +118,11 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   // `frame`, not a new kind: the sweep itself is not drawn (see `methods/cooldown.ts` for why, and
   // for the frame-budget measurement that decided it).
   COOLDOWN: 'frame',
+  // A tooltip IS a frame with a `<Backdrop>` and a stack of `<FontString>`s, all of which the widget
+  // layer already draws -- `methods/gametooltip.ts` only has to fill and size them. Note the KIND is
+  // `frame` and not `backdrop`: the loader turns an element carrying a `<Backdrop>` into the nine-slice
+  // kind itself (`loader.ts#applyBackdrop`), the same way it does for any `<Frame>` with one.
+  GAMETOOLTIP: 'frame',
 };
 
 /**
@@ -140,6 +155,11 @@ const CREATE_FRAME_CLASSES: WidgetClass[] = [
   // `CreateFrame("Cooldown", ...)` is legal in the real client and addons do it; the manifest reaches
   // this class through `<Cooldown>` XML elements, which the loader also funnels through `CreateFrame`.
   'COOLDOWN',
+  // REQUIRED, not a courtesy: the loader funnels every XML element through `CreateFrame`, so without this
+  // entry `<GameTooltip name="GameTooltip" ...>` still throws "unknown frame type" even though the class
+  // now parses -- which is the whole defect this class was added for. `CreateFrame("GameTooltip", ...)` is
+  // legal in the real client too and addons do it.
+  'GAMETOOLTIP',
   'BACKDROP',
 ];
 
