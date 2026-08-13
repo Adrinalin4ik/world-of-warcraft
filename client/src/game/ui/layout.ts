@@ -49,6 +49,8 @@ export interface LayoutNode {
   width: number;
   height: number;
   anchors: Anchor[];
+  /** `clampedToScreen="true"` -- see `clampToScreen` and `Widget#clampedToScreen`. */
+  clamped?: boolean;
 }
 
 /** The window in device pixels. */
@@ -243,6 +245,39 @@ export function unplaceableNodes(nodes: LayoutNode[]): Set<string> {
   return unplaceable;
 }
 
+/**
+ * `clampedToScreen`: SHIFT a rect back inside the window, never resize it.
+ *
+ * The client's own attribute, declared on the frames that need it -- `GameTooltipTemplate`
+ * (`gametooltiptemplate.xml:3`), the three `ShoppingTooltip`s (`gametooltip.xml:6-8`),
+ * `ConsolidatedBuffsTooltip` (`buffframe.xml:141`) -- and issued by the loader since it was written
+ * (`framexml/loader.ts:731` calls `SetClampedToScreen(true)`). Nothing implemented the method, so a
+ * tooltip anchored to a button near the bottom of the screen resolved half off it and the body was cut
+ * off: the owner's first screenshot. This is the engine honouring a declaration, not a clamp invented in
+ * TypeScript -- the frame's own XML asks for exactly this.
+ *
+ * A frame WIDER or TALLER than the window keeps its top-left corner on screen and overflows the far edge,
+ * because `Math.min` is applied after `Math.max`: there is no position that satisfies both and the
+ * near edge is the one a reader starts at.
+ */
+function clampToScreen(rect: Rect, screen: Rect): Rect {
+  return {
+    ...rect,
+    left: Math.max(0, Math.min(rect.left, screen.width - rect.width)),
+    top: Math.max(0, Math.min(rect.top, screen.height - rect.height)),
+  };
+}
+
+/**
+ * `resolveOne` plus the frame's own `clampedToScreen`. One function so both of `resolveAnchors`' paths --
+ * the ordinary one and the deadlock fallback -- clamp identically, and so a DEPENDENT of a clamped frame
+ * sees the clamped rect: the resolver stores what this returns and everything anchored to it reads that.
+ */
+function place(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect): Rect {
+  const rect = resolveOne(node, resolved, screen);
+  return node.clamped ? clampToScreen(rect, screen) : rect;
+}
+
 /** Layout complaints already reported, so a per-frame one is a single console line. */
 const warned = new Set<string>();
 
@@ -287,13 +322,13 @@ export function resolveAnchors(nodes: LayoutNode[], viewport: Viewport): Map<str
         const usable = node.anchors.filter(
           (anchor) => !anchor.relativeTo || resolved.has(anchor.relativeTo),
         );
-        resolved.set(node.id, resolveOne({ ...node, anchors: usable }, resolved, screen));
+        resolved.set(node.id, place({ ...node, anchors: usable }, resolved, screen));
       }
       return resolved;
     }
 
     for (const node of ready) {
-      resolved.set(node.id, resolveOne(node, resolved, screen));
+      resolved.set(node.id, place(node, resolved, screen));
     }
 
     pending = pending.filter((node) => !resolved.has(node.id));

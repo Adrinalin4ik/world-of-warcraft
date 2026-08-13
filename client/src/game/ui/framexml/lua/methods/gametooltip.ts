@@ -185,6 +185,46 @@ function resize(ctx: MethodContext, self: number): void {
   }
   widget.width = Math.max(state.minWidth, width + INSET * 2);
   widget.height = height + INSET * 2;
+  placeRightColumns(ctx, self, state.lines, widget);
+}
+
+/**
+ * THE RIGHT COLUMN IS THE ENGINE'S TO PLACE, and honouring its authored anchor literally is what drew
+ * text over text -- the owner's second screenshot, "Racial Passive" on top of "Mace Specialization".
+ *
+ * `$parentTextRight<n>` is authored `point="RIGHT" relativeTo="$parentTextLeft<n>"
+ * relativePoint="LEFT" x="40"` (gametooltiptemplate.xml:26-33), i.e. its RIGHT edge sits 40 units to the
+ * right of the LEFT string's LEFT edge -- so on any tooltip whose name is wider than 40 units the two
+ * strings occupy the same space. That anchor cannot be what the client shows; it is the placeholder the
+ * engine overwrites, and the 40 survives as the MINIMUM GAP, which is exactly how `resize` above already
+ * uses it (`DOUBLE_LINE_GAP`, and the frame is widened to `left + 40 + right`).
+ *
+ * So the engine's rule, applied here: the right column is flush with the tooltip's right inset, on the
+ * same top edge as its own left string. Two anchors, and the pair relies on `layout.ts#resolveOne`'s
+ * documented precedence -- `TOP` gives the top EDGE and a centre-x that is then ignored, `RIGHT` gives the
+ * right EDGE and a centre-y that is then ignored -- so neither axis is over-constrained.
+ *
+ * Same class of override as the `<BarTexture>` one `widget.ts#drawList` documents: a region whose geometry
+ * the engine owns rather than the document. Done in `resize` because the tooltip's width is what the right
+ * edge is measured from, and that width is only known once every line has been measured.
+ */
+function placeRightColumns(
+  ctx: MethodContext,
+  self: number,
+  lines: number,
+  tooltip: Widget,
+): void {
+  for (let line = 1; line <= lines; line += 1) {
+    const right = regionOf(ctx, self, `TextRight${line}`);
+    const left = regionOf(ctx, self, `TextLeft${line}`);
+    if (right === null || left === null || !right.shown || right.text === '') {
+      continue;
+    }
+    right.setAnchors(
+      { point: 'TOP', relativeTo: left.id, relativePoint: 'TOP', x: 0, y: 0 },
+      { point: 'RIGHT', relativeTo: tooltip.id, relativePoint: 'RIGHT', x: -INSET, y: 0 },
+    );
+  }
 }
 
 /** Hide every line slot from `from` upward, so a shorter tooltip does not keep the last one's tail. */

@@ -193,6 +193,22 @@ export class Widget {
    */
   dragRegistered = false;
 
+  /**
+   * `clampedToScreen="true"` -- the frame keeps itself INSIDE the window whatever its anchors say.
+   *
+   * The client's own declaration, not a policy of ours: `GameTooltipTemplate` carries it
+   * (`gametooltiptemplate.xml:3`) and so do the three `ShoppingTooltip`s (`gametooltip.xml:6-8`),
+   * `ConsolidatedBuffsTooltip` (`buffframe.xml:141`) and a dozen other frames. `loader.ts:731` has always
+   * ISSUED it as `SetClampedToScreen(true)`; nothing implemented the method, so the attribute did nothing
+   * and a tooltip near the bottom edge had its body cut off -- the owner's first screenshot.
+   *
+   * A SHIFT, never a resize: `layout.ts#resolveAnchors` moves the resolved rect back inside the screen and
+   * leaves its width and height alone, which is what the engine does (the frame is not re-flowed, it is
+   * nudged). A frame LARGER than the screen is left pinned to the top-left corner rather than being made
+   * to fit.
+   */
+  clampedToScreen = false;
+
   /** Sprite key resolved by `GlueArt`; null draws nothing. */
   sprite: string | null = null;
   texCoords: TexCoords | null = null;
@@ -664,7 +680,10 @@ export class WidgetRoot {
       }
       present.add(id);
       const size = deriveSize(widget, scale, measure);
-      nodes.push({ id, width: size.width, height: size.height, anchors: widget.anchors });
+      nodes.push({
+        id, width: size.width, height: size.height, anchors: widget.anchors,
+        clamped: widget.clampedToScreen,
+      });
       for (const anchor of widget.anchors) {
         if (anchor.relativeTo !== undefined && !present.has(anchor.relativeTo)) {
           queue.push(anchor.relativeTo);
@@ -692,6 +711,7 @@ export class WidgetRoot {
         width: size.width,
         height: size.height,
         anchors: widget.anchors,
+        clamped: widget.clampedToScreen,
       });
 
       for (const child of widget.children) {

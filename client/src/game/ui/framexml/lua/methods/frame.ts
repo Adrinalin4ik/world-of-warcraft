@@ -121,6 +121,22 @@ const FRAME: MethodTable = {
   },
 
   /**
+   * `SetClampedToScreen(clamped)` / `IsClampedToScreen()` -- keep the frame inside the window.
+   *
+   * `loader.ts:731` has issued this for every `clampedToScreen="true"` element since it was written and
+   * the method did not exist, so the attribute did nothing: a `GameTooltip` (which declares it,
+   * `gametooltiptemplate.xml:3`) anchored to a button near the bottom of the screen resolved half off it
+   * and its body was cut off. `layout.ts#clampToScreen` is the geometry; this is only the flag, and it is
+   * `Boolean(args[0])` rather than Lua truthiness because both spellings the loader and FrameXML use are
+   * real booleans here.
+   */
+  SetClampedToScreen: (ctx, self, args) => {
+    widgetOf(ctx, self).clampedToScreen = Boolean(args[0]);
+    return [];
+  },
+  IsClampedToScreen: (ctx, self) => [widgetOf(ctx, self).clampedToScreen],
+
+  /**
    * `SetHitRectInsets(left, right, top, bottom)` -- shrink (positive) or grow (negative) the rect the
    * frame is CLICKABLE in, without moving the rect it DRAWS in.
    *
