@@ -396,4 +396,48 @@ describe('the parent= attribute', () => {
     registry.reset();
     vm.dispose();
   });
+  it('parentKey publishes a region and a child frame on their parent Lua table', () => {
+    const { vm, rt } = runtime();
+
+    // The shape `targetframe.xml:215` uses, which is the one that was silently dropped: a region
+    // addressed ONLY as `self.nameBackground` (targetframe.lua:263,268), plus the child-frame form.
+    const report = loadDocument(
+      rt,
+      parseXml(`
+        <Ui>
+          <Frame name="TargetFrame">
+            <Size><AbsDimension x="232" y="100"/></Size>
+            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+            <Layers>
+              <Layer level="BACKGROUND">
+                <Texture name="$parentNameBackground" parentKey="nameBackground">
+                  <Size><AbsDimension x="119" y="19"/></Size>
+                  <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+              </Layer>
+            </Layers>
+            <Frames>
+              <Frame name="$parentTextureFrame" parentKey="textureFrame" setAllPoints="true"/>
+            </Frames>
+          </Frame>
+        </Ui>
+      `),
+      noFiles,
+      'TargetFrame.xml',
+    );
+
+    expect(report.errors).toEqual([]);
+    // Through the Lua, not the registry: the whole point is that the client's own code reaches these
+    // by key and nothing else.
+    const read = (expr: string) => vm.runExpr(`return ${expr}`, 'parentKey.test');
+    expect(read('type(TargetFrame.nameBackground)')).toEqual({ value: 'table' });
+    expect(read('TargetFrame.nameBackground:GetName()')).toEqual({
+      value: 'TargetFrameNameBackground',
+    });
+    expect(read('TargetFrame.textureFrame:GetName()')).toEqual({
+      value: 'TargetFrameTextureFrame',
+    });
+
+    vm.dispose();
+  });
 });

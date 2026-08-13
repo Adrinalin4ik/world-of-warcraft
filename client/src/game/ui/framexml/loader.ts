@@ -534,6 +534,14 @@ class DocumentLoader {
     const resolvedName = resolveName(attr(element, 'name'), effectiveParentName);
     const dbg = `${sourceName}:${resolvedName ?? `<${element.tag}>`}`;
     const wrapper = this.create(element.tag, resolvedName ?? null, effectiveParent, dbg);
+    // `parentKey` HERE, not next to `decorate`, and the reason is ownership rather than order:
+    // `borrowedParent` is released two lines down, so `effectiveParent` is a dangling handle after
+    // that point for the `parent="Name"` case. This is also before `decorate`, which is what the
+    // engine does -- the key exists for the whole subtree build, so a child's own `OnLoad` reaching
+    // `self:GetParent().someKey` cannot race it.
+    if (wrapper !== null) {
+      this.applyParentKey(element, wrapper, effectiveParent, dbg);
+    }
     if (borrowedParent !== null) {
       // The handle is only needed for the `CreateFrame` call: the registry owns the parent frame and
       // its permanent Lua table, and this was a `getGlobal` result.
@@ -850,6 +858,7 @@ class DocumentLoader {
               this.applyFontStringFont(region, regionWrapper, dbg);
             }
             this.applyRegionVisual(region, regionWrapper, isTexture, dbg);
+            this.applyParentKey(region, regionWrapper, wrapper, dbg);
           } finally {
             this.rt.vm.unref(regionWrapper);
           }
@@ -1418,6 +1427,9 @@ class DocumentLoader {
           // button's normal texture under that one global and warn about the clash for all but the
           // first. Only a name the element declares ITSELF is a name.
           this.publishRegion(raw, region, selfName, dbg);
+          // The EXPANDED element here, `texture`, not `raw` -- see `applyParentKey` for why the two
+          // attributes take opposite sides of that choice.
+          this.applyParentKey(texture, region, wrapper, dbg);
         } finally {
           this.rt.vm.unref(region);
         }
@@ -1518,6 +1530,50 @@ class DocumentLoader {
    * name while the global belonged to something else would have `reset()` null out a stranger's
    * global -- a FrameXML function, in the case the warning below exists for.
    */
+  /**
+   * `parentKey="name"` -- publish this element on its PARENT's Lua table as `parent.name`.
+   *
+   * A 3.x addition, so the reference is silent on it (`benilla-ui` has no `parent_key` at all; its one
+   * hit is the unrelated `$parentKey` name substitution, `framexml.rs:371`) and the game's own files are
+   * the only oracle. They are unambiguous about what it is for: `targetframe.xml:215` declares
+   * `<Texture name="$parentNameBackground" ... parentKey="nameBackground">` and `targetframe.lua:263,268`
+   * addresses it as `self.nameBackground` and NOTHING ELSE. It was being dropped, so
+   * `TargetFrame_CheckFaction` raised `attempt to index a nil value (field 'nameBackground')` at line
+   * 268 -- measured live (`scratchpad/t17k-nb.js`) -- which is why the target frame's name strip stayed
+   * FULL WHITE however good `UnitSelectionColor` got. One dropped attribute, and the visible symptom was
+   * a mis-coloured bar.
+   *
+   * FROM THE EXPANDED element, unlike `name` (see `publishRegion` for why a name must come from the raw
+   * one). The two attributes differ in kind: a `name` inherited from a template would publish every
+   * inheritor's region under ONE global and clash, whereas a `parentKey` inherited from a template is
+   * exactly what the engine does -- each inheritor gets the key on ITS OWN table, so there is no clash
+   * and dropping the inherited case would lose the templated frames that are the attribute's main use.
+   *
+   * A parent-less element (a document-top-level frame with no `parent=`) has nowhere to put the key and
+   * is reported rather than silently skipped: the client would have assigned it to `UIParent`, and
+   * guessing that here would put a key on a frame the document did not name.
+   */
+  private applyParentKey(
+    element: XmlElement,
+    child: LuaRef,
+    parent: LuaRef | null,
+    dbg: string,
+  ): void {
+    const key = attr(element, 'parentKey');
+    if (key === undefined || key === '') {
+      return;
+    }
+    if (parent === null) {
+      this.report.warnings.push(
+        `${dbg}: parentKey="${key}" on an element with no parent frame; the key was not published`,
+      );
+      return;
+    }
+    // `setTableField` pushes the referenced value INTO the table, so the table holds its own reference
+    // and the caller's handle can be released as it always was.
+    this.rt.vm.setTableField(parent, key, child);
+  }
+
   private publishRegion(element: XmlElement, region: LuaRef, selfName: string, dbg: string): void {
     const name = resolveName(attr(element, 'name'), selfName);
     if (name === undefined) {

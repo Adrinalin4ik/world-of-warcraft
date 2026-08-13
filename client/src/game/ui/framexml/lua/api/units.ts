@@ -174,6 +174,33 @@ export function getUnit(vm: LuaVM, token: string): UnitSnapshot | null {
   return unitsOf(vm).get(token) ?? null;
 }
 
+/**
+ * COMBO POINTS -- a per-VM scalar, not a unit field, because that is what it is on the wire.
+ *
+ * They arrive on their OWN opcode, `SMSG_UPDATE_COMBO_POINTS` (**0x39D**, already in `opcode.js` and
+ * until now with no subscriber), whose body is `pguid comboTarget` + `u8 comboPoints` -- see
+ * `network/game/object/spells.ts#handleComboPoints` for the decode and for what is and is not sourced
+ * about that layout. There is no `UNIT_FIELD_COMBO_POINTS`, so this cannot ride `UnitSnapshot`.
+ *
+ * `GetComboPoints(unit, target)` (`ComboFrame.lua:20`, reached from `PlayerFrame_ToPlayerArt`) is
+ * answered from here, and it is A QUESTION ABOUT A PAIR: points are banked against ONE unit and the
+ * real client answers zero when you are looking at a different one. That comparison is the HOST's,
+ * not this file's -- this module's header promises no world, no network and NO GUIDS, and the combo
+ * target is a guid. So the host pushes the number the current pair is worth (`unit-bridge.ts`), which
+ * is the same division of labour `UnitSnapshot.reaction` already uses.
+ */
+const comboByVm = new WeakMap<LuaVM, number>();
+
+/** The push door: the combo points the CURRENT player/target pair is worth. */
+export function setComboPoints(vm: LuaVM, points: number): void {
+  comboByVm.set(vm, points);
+}
+
+/** What the host last pushed. Exposed for the host's own diffing, like `getUnit`. */
+export function getComboPoints(vm: LuaVM): number {
+  return comboByVm.get(vm) ?? 0;
+}
+
 /** Installs every `Unit*` global on `vm`. Safe with no host feed at all: every token simply does not exist. */
 export function installUnitsApi(vm: LuaVM): void {
   const units = unitsOf(vm);
@@ -300,6 +327,76 @@ export function installUnitsApi(vm: LuaVM): void {
   fn('IsXPUserDisabled', () => [false]);
 
   fn('UnitReaction', (args) => [withUnit(args[0], null, (u) => u.reaction)]);
+
+  /**
+   * `UnitSelectionColor(unit)` -> `r, g, b, a` -- the reaction palette, and it was the target frame's
+   * BRIGHT SILVER NAME BAR.
+   *
+   * `TargetFrame_CheckFaction`'s else-branch is `self.nameBackground:SetVertexColor(UnitSelectionColor
+   * (self.unit))` (`targetframe.lua:268`) over `UI-TargetingFrame-LevelBackground`
+   * (`targetframe.xml:215`). This was a declared gap answering `1, 1, 1, 1`, so the strip drew at full
+   * white -- the owner's "the target's health bar looks wrong". Measured live as `Sgh` on a Vale Moth:
+   * `scratchpad/t17c-real-name.png`.
+   *
+   * THE PALETTE IS THE REFERENCE'S, read off the client's own selector `0x605960`
+   * (`benilla/src/target/ring.rs:115-118, 186-223`), on the raw reaction RANK -- which is
+   * `UnitReaction`'s 1..8 scale minus one, so rank <= 1 is reaction <= 2:
+   *   reaction <= 2 hostile RED, 3 unfriendly ORANGE, 4 neutral YELLOW, >= 5 friendly GREEN.
+   *
+   * A PLAYER-CONTROLLED unit branches first in that selector and reads soft blue
+   * (`RING_PLAYER`, ring.rs:119) unless its rank is already hostile. The selector's further legs --
+   * PvP-flagged green, pale for a party member -- need `UnitIsPVP` and a party roster, both declared
+   * gaps here, so those two refinements are NOT applied and a PvP-flagged enemy player reads blue
+   * rather than green. Stated rather than guessed.
+   *
+   * ALSO NOT APPLIED: the selector's DEAD grey (`RING_DEAD`). That is the ground RING's rule and
+   * extending it to the name background is an extrapolation this has no evidence for; the tapped-grey
+   * case the name background really does have is the client's OWN first branch
+   * (`targetframe.lua:262-264`), which it takes without asking us.
+   *
+   * A unit whose reaction is still unresolved -- `FactionTemplate.dbc` in flight -- already reads
+   * NEUTRAL before it gets here: `unit-bridge.ts:79` is `reactionFor(unit, self) ?? REACTION_NEUTRAL`,
+   * so `UnitSnapshot.reaction` is never null and there is nothing to defend against a second time.
+   * That collapse is the reference's own fallback (`ring.rs:598`,
+   * `resolved.unwrap_or(Reaction::Neutral)`).
+   */
+  fn('UnitSelectionColor', (args) => {
+    const white: unknown[] = [1, 1, 1, 1];
+    if (typeof args[0] !== 'string') {
+      return white;
+    }
+    const unit = units.get(args[0]);
+    if (unit === undefined) {
+      return white;
+    }
+    const reaction = unit.reaction;
+    if (reaction <= 2) {
+      return [1, 0, 0, 1];
+    }
+    if (unit.isPlayer) {
+      return [0.376, 0.376, 1, 1];
+    }
+    if (reaction === 3) {
+      return [1, 0.502, 0, 1];
+    }
+    if (reaction === 4) {
+      return [1, 1, 0, 1];
+    }
+    return [0, 1, 0, 1];
+  });
+  /**
+   * `GetComboPoints(unit, target)` -- `ComboFrame.lua:20`, reached from `PlayerFrame_ToPlayerArt`.
+   *
+   * The arguments are NOT inspected, and that is deliberate rather than lazy: the host already
+   * resolved the pair when it pushed (see `setComboPoints`), and the only pair the 3.3.5a manifest
+   * ever asks about is `("player", "target")` -- `ComboFrame_Update` is the sole caller. Reading a
+   * token here would need a guid, which this module does not have and must not acquire.
+   *
+   * Zero when nothing has been pushed, which is the true answer for every class but a rogue or a
+   * druid in Cat Form, and for those two out of combat.
+   */
+  fn('GetComboPoints', () => [getComboPoints(vm)]);
+
   fn('UnitClassification', (args) => [withUnit(args[0], 'normal', (u) => u.classification)]);
   fn('UnitIsPlayer', (args) => [withUnit(args[0], false, (u) => u.isPlayer)]);
   fn('UnitIsDead', (args) => [withUnit(args[0], false, (u) => u.dead)]);
@@ -409,7 +506,6 @@ export function installUnitsApi(vm: LuaVM): void {
     ['UnitInParty', 'no party roster is fed', [false]],
     ['UnitInRaid', 'no raid roster is fed', []],
     ['UnitIsPartyLeader', 'no party roster is fed', [false]],
-    ['UnitSelectionColor', 'the reaction palette is not ported yet', [1, 1, 1, 1]],
     ['UnitClass', 'no class is read out of UNIT_FIELD_BYTES_0 yet', []],
   ];
   // NOT `Unit*`, but on the same path and found the same way -- by loading the manifest and reading
@@ -518,9 +614,6 @@ export function installUnitsApi(vm: LuaVM): void {
      * client does not decode at all.
      */
     ['GetWeaponEnchantInfo', 'no item data is decoded, so no weapon enchant is known', []],
-    // `ComboFrame.lua:20`, reached from `PlayerFrame_ToPlayerArt`. Zero is what a warrior has and
-    // what any class has out of combat, so it is also the true answer here far more often than not.
-    ['GetComboPoints', 'no combo-point state is read from the wire', [0]],
     // The Chinese anti-addiction play-time pair, which `PlayerFrame_UpdatePlaytime` calls
     // unconditionally (playerframe.lua:507). Both false is "no play-time restriction", which is what
     // every non-CN realm reports.

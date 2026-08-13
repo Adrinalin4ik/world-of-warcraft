@@ -60,6 +60,12 @@ export interface SpellWireRow {
     // interrupted-but-not-broken by a hit; `detail.delayMs` is how much later it now finishes. Its own
     // kind because it is the one spell opcode that neither starts nor ends a cast.
     | 'SPELL_DELAYED'
+    // `SMSG_UPDATE_COMBO_POINTS` (0x39D) -- a rogue's or a Cat Form druid's banked combo points.
+    // `detail.points` is the count and `caster` carries the COMBO TARGET's guid (the packet's only
+    // guid; the field is named for the common case). Its own kind because its body layout is the one
+    // thing on this wire taken from the server implementations rather than measured, so a wrong read
+    // has to be visible as itself -- see `spells.ts#handleComboPoints`.
+    | 'COMBO_POINTS'
     /**
      * Not a packet: the one row `spell-data.ts` writes when the four DBC tables finish loading, with
      * their row counts and the elapsed ms.

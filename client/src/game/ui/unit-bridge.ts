@@ -36,7 +36,9 @@
 import Unit from '../classes/unit';
 import World from '../world';
 import { REACTION_NEUTRAL, reactionFor } from '../world/faction';
-import { UnitSnapshot, emptySnapshot, getUnit, setUnit } from './framexml/lua/api/units';
+import {
+  UnitSnapshot, emptySnapshot, getComboPoints, getUnit, setComboPoints, setUnit,
+} from './framexml/lua/api/units';
 import { fireEvent } from './framexml/lua/events';
 import { LuaVM } from './framexml/lua/vm';
 
@@ -176,6 +178,7 @@ function pushUnit(
 export function attachUnitBridge(vm: LuaVM, world: World): () => void {
   /** How many events this bridge has fired, for the frame-cost measurement. */
   const stats = { pushes: 0, events: 0 };
+  const spells = world.game.objectHandler.spellHandler;
 
   const push = (token: string, unit: Unit | null): boolean => {
     if (unit === null) {
@@ -201,15 +204,46 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
     }
   };
 
+  /**
+   * COMBO POINTS, resolved as the PAIR they are.
+   *
+   * `SMSG_UPDATE_COMBO_POINTS` banks points against a specific unit (`spells.ts#handleComboPoints`),
+   * and `GetComboPoints("player", "target")` -- `ComboFrame.lua:20`'s only shape -- must read ZERO when
+   * the player is looking at anything else. Both guids are knowable only here, which is why
+   * `api/units.ts` takes a plain number and says so.
+   *
+   * Fired as `UNIT_COMBO_POINTS`, which is the event `ComboFrame` itself registers
+   * (`comboframe.xml`'s `<OnLoad>` -> `ComboFrame_OnLoad`), and AFTER the push, per this file's header.
+   * Diffed, because an event here re-runs `ComboFrame_Update`, which moves five textures and dirties
+   * the draw fingerprint -- the same rule `action-bridge.ts` states.
+   */
+  const pushCombo = (): void => {
+    const combo = spells.comboState;
+    const points =
+      combo.target !== null && world.target !== null && world.target.guid === combo.target
+        ? combo.points
+        : 0;
+    if (points === getComboPoints(vm)) {
+      return;
+    }
+    setComboPoints(vm, points);
+    fireEvent(vm, 'UNIT_COMBO_POINTS', ['player']);
+    stats.events += 1;
+  };
+
   const onTargetChange = (unit: Unit | null): void => {
     push('target', unit);
     // AFTER the push. See the header.
     fireEvent(vm, 'PLAYER_TARGET_CHANGED');
     stats.events += 1;
+    // The pair changed even though the packet did not: points banked on the unit we just stopped
+    // looking at have to go to zero, and points on the one we just picked up have to come back.
+    pushCombo();
   };
 
   world.on('unit:fields', onFields);
   world.on('target:change', onTargetChange);
+  spells.on('comboPoints', pushCombo);
 
   // The player is already in the world when this attaches -- his create block arrived while the
   // manifest was still loading -- so the first push is made here rather than waited for. Without it
@@ -223,6 +257,7 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
   return () => {
     world.removeListener('unit:fields', onFields);
     world.removeListener('target:change', onTargetChange);
+    spells.removeListener('comboPoints', pushCombo);
     delete (window as unknown as Record<string, unknown>).unitBridgeStats;
   };
 }

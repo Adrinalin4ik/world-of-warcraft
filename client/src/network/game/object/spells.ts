@@ -161,6 +161,15 @@ export class SpellHandler extends EventEmitter {
    */
   private castPose = new Map<string, { spellId: number; animId: number }>();
 
+  /**
+   * The last `SMSG_UPDATE_COMBO_POINTS`: how many points, and WHICH unit they are banked against.
+   *
+   * PUBLIC because `unit-bridge.ts` has to compare `target` with what the player is looking at --
+   * `GetComboPoints` is a question about a pair, and the pair is only knowable where both guids are.
+   * See `handleComboPoints`.
+   */
+  public comboState: { points: number; target: string | null } = { points: 0, target: null };
+
   constructor(gameHandler: GameHandler) {
     super();
     this.game = gameHandler;
@@ -174,6 +183,71 @@ export class SpellHandler extends EventEmitter {
     this.game.on('packet:receive:SMSG_CLEAR_COOLDOWN', this.handleClearCooldown.bind(this));
     this.game.on('packet:receive:SMSG_SPELL_FAILURE', this.handleSpellFailure.bind(this));
     this.game.on('packet:receive:SMSG_SPELL_DELAYED', this.handleSpellDelayed.bind(this));
+    this.game.on('packet:receive:SMSG_UPDATE_COMBO_POINTS', this.handleComboPoints.bind(this));
+  }
+
+  /**
+   * `SMSG_UPDATE_COMBO_POINTS` (**0x39D**): where combo points come from, and the answer is that they
+   * come on their own opcode and nowhere else.
+   *
+   * Established by ELIMINATION as much as by reading: there is no `UNIT_FIELD_COMBO_POINTS` in 3.3.5a's
+   * update-field enum (`network/game/object/enums.ts` decodes the whole unit block and has no such
+   * field), so a client cannot read them off a snapshot. The opcode was already in `opcode.js:927` --
+   * present in the build's own enum -- with **no subscriber at all**, which is exactly the shape
+   * `SMSG_SPELL_DELAYED` was in before it was wired.
+   *
+   * Body: `pguid comboTarget`, `u8 comboPoints`. **The layout is NOT sourced from the client or from a
+   * capture** -- it is the server implementations' shape, the same class of evidence as the `u8` slot
+   * prefix on `CMSG_SET_ACTION_BUTTON`, and it is labelled here rather than presented as measured.
+   * It is SELF-CHECKING on the `combatWire` principle: the body must be consumed WHOLE and the count
+   * must be 0..5 (3.3.5a's maximum, and Ruthlessness cannot exceed it), or the packet is recorded and
+   * DROPPED rather than believed. If the layout is wrong, `spellWire` says so instead of the combo
+   * frame lighting five points for a misread byte.
+   *
+   * **NOT VERIFIED LIVE, and it cannot be here**: neither test account has a rogue or a druid, and no
+   * other class is ever sent this packet. `spellWire` will carry the first real one.
+   */
+  private handleComboPoints(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    let target = '0x0';
+    let points = 0;
+    try {
+      target = gp.readPackedGUID();
+      points = gp.readUnsignedByte();
+    } catch (error) {
+      spellWire.record({
+        at: Date.now(),
+        kind: 'COMBO_POINTS',
+        spellId: 0,
+        caster: null,
+        detail: { error: String(error) },
+        bodySize,
+        consumed: gp.index - gp.headerSize,
+      });
+      return;
+    }
+    const consumed = gp.index - gp.headerSize;
+    const plausible = points <= 5 && consumed === bodySize;
+    spellWire.record({
+      at: Date.now(),
+      kind: 'COMBO_POINTS',
+      spellId: 0,
+      caster: target,
+      detail: { points, plausible: plausible ? 1 : 0 },
+      bodySize,
+      consumed,
+    });
+    if (!plausible) {
+      console.warn(
+        `UPDATE_COMBO_POINTS: ${points} points and ${consumed} of ${bodySize} bytes consumed -- the layout is probably wrong`,
+      );
+      return;
+    }
+    // A zero count carries no combo target in the real client's own bookkeeping (the points are gone),
+    // so it is normalised to null here and the bridge does not have to special-case a stale guid.
+    this.comboState = points === 0 ? { points: 0, target: null } : { points, target };
+    this.emit('comboPoints', this.comboState);
   }
 
   /**
