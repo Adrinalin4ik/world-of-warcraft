@@ -17,7 +17,7 @@
 import { FrameMethod, MethodContext, MethodTable, isObjectType, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
-import { Layer, Widget, deriveSize } from '../../../widget';
+import { Layer, Widget, deriveSize, effectiveFont } from '../../../widget';
 import { familyForFontFile, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
 
@@ -506,6 +506,14 @@ const TEXTURE: MethodTable = {
  * Exported for `kinds.ts#GetTextWidth`, which measures a BUTTON's caption the same way
  * `GetStringWidth` measures a font string's own text -- one measurement rule, not two.
  */
+/**
+ * LUA TRUTHINESS for a boolean-ish argument: only `false` and `nil` are falsey, so `0` and `""` are
+ * TRUE. `Boolean(0)` in JS is false and would invert `SetWordWrap(0)`.
+ */
+function luaFlag(value: unknown): boolean {
+  return !(value === false || value === undefined || value === null);
+}
+
 export function ensureFont(widget: Widget) {
   if (!widget.font) {
     // `align: 'CENTER'` -- THE FRAMEXML DEFAULT, and getting this wrong was the owner's "the target's
@@ -657,6 +665,41 @@ const FONTSTRING: MethodTable = {
    * engine's shadow is at (0,0) until an offset says otherwise, and a shadow exactly under the glyph is
    * invisible either way.
    */
+  /**
+   * `SetWordWrap(flag)` / `SetNonSpaceWrap(flag)` / `SetMaxLines(n)` -- the wrap controls.
+   *
+   * **NOTHING IN THE MANIFEST AUTHORS `wordwrap` OR `nonspacewrap`** -- 0 occurrences across
+   * `fonts.xml`, `fontstyles.xml`, `spellbookframe.xml`, `targetframe.xml`, `playerframe.xml` and
+   * `accountlogin.xml` -- so these exist as overrides that nothing currently exercises, and the
+   * DEFAULTS (wrap on, no mid-word breaking) are the only observable behaviour. **Those defaults are
+   * UNSOURCED**: FrameXML never states them and benilla (1.12.1) has no `word_wrap` at all. Written as
+   * overrides rather than as a law, and labelled so.
+   *
+   * `SetMaxLines` is the door for the `maxLines` XML attribute, which has no public FontString setter in
+   * 3.3.5a -- so the METHOD NAME is ours and unsourced, while the attribute it carries
+   * (`spellbookframe.xml:100`, `maxLines="3"`) is the client's own. It goes through a method rather than
+   * the loader writing the widget directly so the XML path and any future Lua caller share one route,
+   * which is this file's whole contract.
+   *
+   * `luaFlag`, not `Boolean()`: in Lua only `false` and `nil` are falsey, so `0` and `""` are TRUE. A
+   * plain `Boolean(0)` would read `SetWordWrap(0)` as "off" when the engine reads it as "on". This is
+   * the same family of defect as `SetChecked("false")` (see `kinds.ts#checkedArg`), coming from the
+   * other direction.
+   */
+  SetWordWrap: (ctx, self, args) => {
+    ensureFont(widgetOf(ctx, self)).wordWrap = luaFlag(args[0]);
+    return [];
+  },
+  SetNonSpaceWrap: (ctx, self, args) => {
+    ensureFont(widgetOf(ctx, self)).nonSpaceWrap = luaFlag(args[0]);
+    return [];
+  },
+  SetMaxLines: (ctx, self, args) => {
+    const n = Number(args[0]);
+    ensureFont(widgetOf(ctx, self)).maxLines =
+      Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+    return [];
+  },
   SetShadowOffset: (ctx, self, args) => {
     ensureFont(widgetOf(ctx, self)).shadowOffset = {
       x: Number(args[0] ?? 0),
@@ -698,6 +741,17 @@ const FONTSTRING: MethodTable = {
     }
     applyFontObject(ctx, widgetOf(ctx, self), name);
     return [];
+  },
+  /**
+   * `GetStringHeight()` -- the twin of `GetStringWidth`, and what a frame that grows to fit its text
+   * reads. Through the EFFECTIVE font (`widget.ts#effectiveFont`) or a wrapped string reports one
+   * line's height and whatever sizes itself from it comes out short. Nothing in the loaded manifest
+   * calls it today (the load report has no `GetStringHeight` error), so it is the twin landing beside
+   * its sibling rather than a gap being closed.
+   */
+  GetStringHeight: (ctx, self) => {
+    const widget = widgetOf(ctx, self);
+    return [measureText(widget.text, effectiveFont(widget) ?? ensureFont(widget), 1).height];
   },
   GetStringWidth: (ctx, self) => {
     const widget = widgetOf(ctx, self);

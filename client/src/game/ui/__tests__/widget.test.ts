@@ -1,4 +1,4 @@
-import { FontSpec, MeasureText, Widget, WidgetRoot } from '../widget';
+import { FontSpec, MeasureText, Widget, WidgetRoot, effectiveFont } from '../widget';
 
 describe('WidgetRoot#drawList', () => {
   it('draws a DIALOG-strata frame over a MEDIUM frame whatever their layers say', () => {
@@ -111,5 +111,35 @@ describe('an unsized font string', () => {
     // width left of the anchor point, where a 0-wide label used to put both of them.
     expect(check.left + check.width).toBe(label.left);
     expect(label.left).toBe(10 + VIEWPORT.width / 2 - label.width / 2);
+  });
+});
+
+describe('effectiveFont', () => {
+  const spec = (): FontSpec => ({
+    family: 'FRIZQT', size: 12, color: '#ffffff', outline: false, align: 'LEFT',
+  });
+
+  it('gives a wrap budget to a bounded FontString and nothing to a fixed-height one', () => {
+    // The spellbook's own shape: 103 wide, height DERIVED (spellbookframe.xml:100-104). A derived
+    // height is the document saying "grow to fit the text", so this is the one that wraps.
+    const wraps = new Widget('fontstring', 'name');
+    wraps.font = spec();
+    wraps.width = 103;
+    wraps.height = 0;
+    expect(effectiveFont(wraps)!.wrapWidth).toBe(103);
+
+    // `TargetFrameTextureFrameName`'s shape: 100x10, exactly one line (targetframe.xml:248-252). A
+    // second line would be drawn outside the rect, so it must NOT wrap -- and the spec object comes
+    // back BY IDENTITY, which is what keeps the common case allocation-free.
+    const fixed = new Widget('fontstring', 'target');
+    fixed.font = spec();
+    fixed.width = 100;
+    fixed.height = 10;
+    expect(effectiveFont(fixed)).toBe(fixed.font);
+
+    // No authored width: nothing to wrap at.
+    const unbounded = new Widget('fontstring', 'level');
+    unbounded.font = spec();
+    expect(effectiveFont(unbounded)).toBe(unbounded.font);
   });
 });

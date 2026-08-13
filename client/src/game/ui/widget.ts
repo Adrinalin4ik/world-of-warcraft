@@ -148,6 +148,32 @@ export interface FontSpec {
   /** The shadow's colour as `#rrggbb`, with `shadowAlpha` carrying the channel `#rrggbb` cannot. */
   shadowColor?: string;
   shadowAlpha?: number;
+  /**
+   * `maxLines` -- the hard cap on wrapped lines. `spellbookframe.xml:100` authors `maxLines="3"` on
+   * `$parentSpellName` and it is the ONLY occurrence in the files read for this
+   * (`fonts.xml`, `fontstyles.xml`, `spellbookframe.xml`, `targetframe.xml`, `playerframe.xml`,
+   * `accountlogin.xml`). Absent means no cap.
+   *
+   * An element ATTRIBUTE rather than a font property, carried on the spec because the spec is what the
+   * rasterizer sees -- the same reason `wrapWidth` lives here.
+   */
+  maxLines?: number;
+  /**
+   * `SetWordWrap(false)` -- draw on one line however narrow the rect. **Nothing in the manifest
+   * authors it**: 0 occurrences of `wordwrap` or `nonspacewrap` across every file read for this, so
+   * the default is the only behaviour that can be observed, and `true` (wrap) is what makes the
+   * client's own bounded paragraphs paragraphs. **The DEFAULT VALUES ARE UNSOURCED** -- FrameXML never
+   * states them and benilla (1.12.1) has no `word_wrap` at all -- so this is written as an override
+   * that nothing currently exercises rather than as a law.
+   */
+  wordWrap?: boolean;
+  /**
+   * `SetNonSpaceWrap(true)` -- allow a break INSIDE a word that is wider than the rect. Default false,
+   * which is what `wrapLines` already did: an overlong word is left overhanging its own line rather
+   * than split, because hyphenating an account name or a URL is worse than overflowing. Also
+   * UNSOURCED; see `wordWrap`.
+   */
+  nonSpaceWrap?: boolean;
 }
 
 let nextWidgetId = 0;
@@ -520,6 +546,38 @@ export type MeasureText = (
  * Empty text keeps 0 on both axes -- `FontStringTextures#get` returns null for it and the renderer
  * draws nothing, so a rect the size of bare padding would be a hit target over nothing.
  */
+/**
+ * A font string's spec with its WRAP BUDGET filled in from its own authored geometry.
+ *
+ * THE RULE, and it is read off the manifest rather than chosen: a FontString wraps at its authored
+ * WIDTH when its HEIGHT IS DERIVED (authored 0 or absent), because a derived height is the document
+ * saying "grow to fit the text", while a fixed height is the document saying "one line's worth".
+ *
+ * CENSUSED over the whole loaded world tree before it was written (`scratchpad/t17p-wrapcensus.js`),
+ * because a rule that wrapped every string with a width would have been a worse defect than the
+ * overflow it fixes -- of **5151** font strings, **3877 have no authored width** (nothing to wrap at,
+ * untouched), **1017 have a width AND a fixed height** (a second line would be drawn outside the rect
+ * -- `TargetFrameTextureFrameName` is 100x10, exactly one line, and must stay one line), and **256
+ * have a width and a derived height**. That last set is the one this grows, and it is coherent:
+ * `SpellButtonNSpellName` 103x0 (`spellbookframe.xml:100-111`), `QuestProgressText` 275x0,
+ * `SkillDetailDescriptionText` 275x0, `ReputationDetailFactionDescription` 170x0, `TutorialFrameText`
+ * 300x0 -- every one a paragraph the real client wraps.
+ *
+ * Returns the widget's own spec object UNCHANGED when there is nothing to add, so the common case
+ * allocates nothing and the identity comparisons the raster cache relies on are undisturbed.
+ */
+export function effectiveFont(widget: Widget): FontSpec | null {
+  const spec = widget.font;
+  if (spec === null) {
+    return null;
+  }
+  const wraps = widget.width > 0 && widget.height === 0;
+  if (!wraps || spec.wrapWidth !== undefined) {
+    return spec;
+  }
+  return { ...spec, wrapWidth: widget.width };
+}
+
 export function deriveSize(
   widget: Widget,
   scale: number,
@@ -539,7 +597,11 @@ export function deriveSize(
     return { width: widget.width, height: widget.height };
   }
 
-  const measured = measure(content, widget.font, scale);
+  // THE EFFECTIVE font, so the derived HEIGHT is the wrapped block's height. This is what makes the
+  // spellbook's rank subtext follow a two-line name down: `$parentSubSpellName` anchors TOPLEFT to
+  // `$parentSpellName`'s BOTTOMLEFT (`spellbookframe.xml:116-121`), so the client's own anchor moves it
+  // the moment this height grows -- there is nothing to write for that.
+  const measured = measure(content, effectiveFont(widget) ?? widget.font, scale);
   return {
     width: widget.width === 0 ? measured.width : widget.width,
     height: widget.height === 0 ? measured.height : widget.height,

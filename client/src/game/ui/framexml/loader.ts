@@ -1096,6 +1096,16 @@ class DocumentLoader {
       this.callMethod(wrapper, 'SetShadowColor', [r, g, b, a], dbg);
       this.callMethod(wrapper, 'SetShadowOffset', [resolved.shadow.x, resolved.shadow.y], dbg);
     }
+    // `maxLines` -- an ELEMENT attribute, not a font-object value, so it is read from the region rather
+    // than from `resolveFont`. `spellbookframe.xml:100` is the only occurrence in the files read for
+    // this, and it caps the spell name at 3 lines.
+    const maxLines = num(attr(region, 'maxLines'));
+    if (maxLines !== undefined) {
+      this.callMethod(wrapper, 'SetMaxLines', [maxLines], dbg);
+    }
+    // `wordwrap`/`nonspacewrap` are NOT read: zero elements in the manifest author either (see
+    // `region.ts#SetWordWrap`), so there is nothing to read and a reader would be dead code claiming
+    // coverage it does not have. The Lua setters exist.
   }
 
   /** The element's own font values layered over its inherited font object's. */

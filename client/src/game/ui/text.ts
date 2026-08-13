@@ -148,7 +148,9 @@ function optionalMeasureContext(): CanvasRenderingContext2D | null {
  */
 export function wrapLines(text: string, spec: FontSpec, scale: number): string[] {
   const paragraphs = text.split('\n');
-  if (!spec.wrapWidth || spec.wrapWidth <= 0) {
+  // `wordWrap === false` is `SetWordWrap(false)`: one line however narrow the rect. Nothing in the
+  // manifest authors it (see `FontSpec.wordWrap`), so this is an override with no current exerciser.
+  if (!spec.wrapWidth || spec.wrapWidth <= 0 || spec.wordWrap === false) {
     return paragraphs.length > 1 ? paragraphs : [text];
   }
 
@@ -176,6 +178,12 @@ export function wrapLines(text: string, spec: FontSpec, scale: number): string[]
     lines.push(line);
   }
 
+  // `maxLines` -- the authored hard cap (`spellbookframe.xml:100`, `maxLines="3"`). The overflow is
+  // DROPPED, not ellipsised: the real client has no ellipsis here and inventing one would be a
+  // different behaviour presented as a fix. Absent means no cap, which is every other string.
+  if (spec.maxLines !== undefined && spec.maxLines > 0 && lines.length > spec.maxLines) {
+    return lines.slice(0, spec.maxLines);
+  }
   return lines;
 }
 
@@ -289,6 +297,9 @@ export class FontStringTextures {
       // Wrapping changes the raster, so it has to key it: the same string at two widths is two
       // different textures, and without this the first width served the second.
       spec.wrapWidth ?? 0,
+      // Both change the LINE BREAKING, so both change the raster and must key it.
+      spec.maxLines ?? 0,
+      spec.wordWrap === false ? 'nw' : '-',
       spec.spacing ?? 0,
       // The cache key must carry the RASTER density, not just the layout scale -- a display change
       // (a window dragged between monitors of different `devicePixelRatio`) must not serve a stale
@@ -354,15 +365,24 @@ export class FontStringTextures {
     const step = lineHeight(spec) * pixelScale;
     const glyphHeight = spec.size * pixelScale;
     lines.forEach((line, row) => {
-      const y =
-        lines.length > 1 ? paddingV / 2 + row * step + glyphHeight / 2 : canvas.height / 2;
+      // EVERY LINE'S ORIGIN IS ROUNDED, not just the first, and that is the multi-line half of the
+      // device-grid discipline `renderer.ts` starts. `step` is `(size + spacing) * pixelScale`, a
+      // float, so line 2 of a wrapped block landed at a fractional offset and smeared exactly the way
+      // an unsnapped quad did -- and `canvas.height / 2` is fractional whenever the height is odd.
+      // Rounding INSIDE the canvas IS rounding to the device grid: the quad's own origin is snapped
+      // and the draw is 1 texel : 1 device pixel, so an integer canvas coordinate is an integer device
+      // pixel. `x` is rounded for the same reason -- CENTER and RIGHT both divide by two.
+      const y = Math.round(
+        lines.length > 1 ? paddingV / 2 + row * step + glyphHeight / 2 : canvas.height / 2,
+      );
       const lineWidth = context.measureText(line).width;
-      const x =
+      const x = Math.round(
         spec.align === 'CENTER'
           ? inset + (widest - lineWidth) / 2
           : spec.align === 'RIGHT'
             ? inset + (widest - lineWidth)
-            : inset;
+            : inset,
+      );
 
       // THE SHADOW GOES FIRST -- it is BEHIND the glyphs -- and it is a FILL ONLY, never stroked.
       // The reference is explicit about that: the drop-shadow pass "must lay out IDENTICALLY to its

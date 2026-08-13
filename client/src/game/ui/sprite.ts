@@ -14,7 +14,7 @@ import * as THREE from 'three';
 import { GlueArt } from './art';
 import { ResolvedSprite } from './renderer';
 import { FontStringTextures } from './text';
-import { DrawItem } from './widget';
+import { DrawItem, effectiveFont } from './widget';
 
 /** What `resolveSprite` needs from its host, so it needs no host. */
 export interface SpriteSources {
@@ -35,7 +35,11 @@ export function resolveSprite(
   if (widget.kind === 'fontstring') {
     // `displayText`, not `text`: password masking (`Widget#displayText`) lives here, at the one
     // place a fontstring's content actually turns into glyphs.
-    return widget.font ? sources.fonts.get(widget.displayText, widget.font, scale) : null;
+    // THE EFFECTIVE font, so a bounded string rasterizes as the same wrapped block the layout pass
+    // measured (`widget.ts#effectiveFont`). Two notions of a label's line count is the bug, not the fix
+    // -- the same argument `deriveSize` makes about its size.
+    const spec = effectiveFont(widget);
+    return spec ? sources.fonts.get(widget.displayText, spec, scale) : null;
   }
 
   // A flat colour quad -- the caret. `vertexColor` does the colouring; the texel is just a carrier.
