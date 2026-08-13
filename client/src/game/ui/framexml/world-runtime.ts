@@ -360,6 +360,26 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     }
   }
 
+  /**
+   * A FOURTH named `<OnUpdate>`: `TemporaryEnchantFrame`, and it exists to HIDE something.
+   *
+   * `TempEnchant1`/`TempEnchant2` are `<Button>`s with no `hidden` attribute (`buffframe.xml:201-217`),
+   * so they are born SHOWN and the only thing that ever hides them is
+   * `TemporaryEnchantFrame_OnUpdate` -> `TemporaryEnchantFrame_Hide` (`buffframe.lua:380-405`), whose
+   * early exit is "not hasMainHandEnchant and not hasOffHandEnchant". Nothing ticked that frame, so two
+   * bordered 32x32 squares were drawn for weapon buffs this character does not have -- the artifact
+   * `STATE.md` recorded at the window's top-left, which the hidden-widget-rect fix moved to its real
+   * place under `ConsolidatedBuffs` at the top RIGHT. Right place, still wrong to be drawn at all.
+   *
+   * Cost is one call per frame and no fingerprint churn: with `BuffFrame.numEnchants` at 0
+   * (`buffframe.lua:37`) the body skips `BuffFrame_Update`, `Hide()` on an already-hidden widget does not
+   * restamp, and the `BuffFrame:SetPoint` it re-issues is the same anchor with the same values.
+   *
+   * NOT gated on `shown`, unlike the three above: this frame is always shown and it is its CHILDREN that
+   * are being hidden.
+   */
+  const tempEnchantId = registry.byName('TemporaryEnchantFrame');
+
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
   let caretClock = 0;
@@ -396,6 +416,10 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
       // The cast bar's fill and spark -- see `castingBarId`. Shown only during a cast and its fade.
       if (castingBarId !== null && registry.widget(castingBarId)?.shown) {
         invokeScriptHandler(ctx, castingBarId, 'OnUpdate', [dt]);
+      }
+      // The weapon-enchant slots hiding themselves -- see `tempEnchantId`.
+      if (tempEnchantId !== null) {
+        invokeScriptHandler(ctx, tempEnchantId, 'OnUpdate', [dt]);
       }
       // The range indicator and the attack flash -- see `actionButtonIds`. Shown buttons only, which is
       // however many slots the character has filled.

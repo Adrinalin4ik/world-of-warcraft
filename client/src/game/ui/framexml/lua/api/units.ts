@@ -507,6 +507,17 @@ export function installUnitsApi(vm: LuaVM): void {
     // `UnitBuff`/`UnitDebuff` above are the same gap by their other two names. Answering nothing
     // terminates the walk at index 1, which is what a unit with no auras looks like.
     ['UnitAura', 'auras are not read out of the update fields yet', []],
+    /**
+     * `GetWeaponEnchantInfo()` -> `hasMainHand, mainExpiration, mainCharges, hasOffHand, ...`.
+     *
+     * Answering NOTHING is what makes `TemporaryEnchantFrame_OnUpdate` take its early exit and HIDE the
+     * two weapon-buff squares (`buffframe.lua:400-405`); they are authored shown (`buffframe.xml:201-217`)
+     * and nothing else hides them. So this gap has a visible effect the moment it is declared, which is
+     * why it is declared rather than left nil -- a nil raised inside that handler and the squares stayed.
+     * The real feed is the main/off-hand temporary-enchant fields of the player's item data, which this
+     * client does not decode at all.
+     */
+    ['GetWeaponEnchantInfo', 'no item data is decoded, so no weapon enchant is known', []],
     // `ComboFrame.lua:20`, reached from `PlayerFrame_ToPlayerArt`. Zero is what a warrior has and
     // what any class has out of combat, so it is also the true answer here far more often than not.
     ['GetComboPoints', 'no combo-point state is read from the wire', [0]],
