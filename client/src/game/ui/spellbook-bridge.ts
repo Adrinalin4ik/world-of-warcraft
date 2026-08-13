@@ -78,7 +78,12 @@ interface Grouped {
 export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): () => void {
   const spells: SpellHandler = world.game.objectHandler.spellHandler;
 
-  const stats = { builds: 0, events: 0, tabs: 0, spells: 0, picks: 0, places: 0, moves: 0 };
+  // `discards` is new with the world-drop gesture: it is the only counter that says a slot was EMPTIED
+  // rather than moved, which is what separates "the drop cleared the wrong slot" from "the drop never
+  // reached the engine at all".
+  const stats = {
+    builds: 0, events: 0, tabs: 0, spells: 0, picks: 0, places: 0, moves: 0, discards: 0,
+  };
 
   const entryFor = (spellId: number): SpellbookEntry => {
     const row = spellData.spell(spellId);
@@ -359,6 +364,16 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
       spells.assignActionButton(destination, payload.spellId);
       stats.places += 1;
       return true;
+    },
+
+    /**
+     * The DISCARD -- an ability dropped on the world. `clearActionButton` sends
+     * `CMSG_SET_ACTION_BUTTON` with `packedData == 0` (the opcode's own remove form) and emits
+     * `actionsChanged`, so the button empties through the same path a move redraws through.
+     */
+    discard: (sourceSlot: number): void => {
+      spells.clearActionButton(sourceSlot);
+      stats.discards += 1;
     },
   });
 

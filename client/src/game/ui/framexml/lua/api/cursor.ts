@@ -82,6 +82,13 @@ interface CursorState {
   pick: ((action: number) => CursorPayload | null) | null;
   /** Resolves a spellbook slot to what is in it, for `PickupSpell`. Null with no host. */
   pickSpell: ((slot: number) => CursorPayload | null) | null;
+  /**
+   * The host's DISCARD door: an action slot to be emptied, both locally and on the server.
+   *
+   * Only reached by `dropCursorOnWorld` -- see it for why a drop on the world deletes and an abandoned
+   * drag does not.
+   */
+  discard: ((sourceSlot: number) => void) | null;
 }
 
 const stateByVm = new WeakMap<LuaVM, CursorState>();
@@ -89,7 +96,7 @@ const stateByVm = new WeakMap<LuaVM, CursorState>();
 function stateOf(vm: LuaVM): CursorState {
   let state = stateByVm.get(vm);
   if (state === undefined) {
-    state = { held: null, place: null, pick: null, pickSpell: null };
+    state = { held: null, place: null, pick: null, pickSpell: null, discard: null };
     stateByVm.set(vm, state);
   }
   return state;
@@ -100,16 +107,78 @@ export function getCursor(vm: LuaVM): CursorPayload | null {
   return stateOf(vm).held;
 }
 
-/** The host's three doors. See `CursorState` for why `place` answers a boolean. */
+/** The host's four doors. See `CursorState` for why `place` answers a boolean. */
 export function setCursorHandlers(vm: LuaVM, handlers: {
   place: (destination: number, payload: CursorPayload) => boolean;
   pick: (action: number) => CursorPayload | null;
   pickSpell: (slot: number) => CursorPayload | null;
+  discard: (sourceSlot: number) => void;
 }): void {
   const state = stateOf(vm);
   state.place = handlers.place;
   state.pick = handlers.pick;
   state.pickSpell = handlers.pickSpell;
+  state.discard = handlers.discard;
+}
+
+/**
+ * PUT THE CURSOR DOWN, and the one place that ever empties it.
+ *
+ * `deleteSource` is the whole difference between the two ways a gesture can end, and both are engine
+ * behaviour: grepped across all 264 loaded manifest files, `WorldFrame` declares NO `OnReceiveDrag` and
+ * no `OnMouseUp` (`worldframe.xml:23-77`), and no file clears the cursor on Escape either -- the seven
+ * `ClearCursor()` call sites are container/equipment/static-popup paths (`containerframe.lua:703,706`,
+ * `equipmentmanager.lua:74,95,118,259,324`, `staticpopup.lua:159..1644`). So there is no Lua to run for
+ * either exit; the engine is what does it, which is why this lives here and not in a script.
+ *
+ * The HIDEGRID is fired for the same reason `ClearCursor` fires it -- `ActionButton_ShowGrid` keeps a
+ * counter (`actionbutton.lua:340-366`) and every pickup's SHOWGRID needs exactly one partner.
+ */
+function putDown(vm: LuaVM, deleteSource: boolean): boolean {
+  const state = stateOf(vm);
+  const held = state.held;
+  if (held === null) {
+    return false;
+  }
+  state.held = null;
+  if (deleteSource && held.kind === 'action' && held.sourceSlot !== null && state.discard !== null) {
+    state.discard(held.sourceSlot);
+  }
+  fireEvent(vm, 'ACTIONBAR_HIDEGRID');
+  return true;
+}
+
+/**
+ * A DROP THAT LANDED ON THE WORLD: the gesture the owner reported missing -- "I cannot drop the spell
+ * to the empty place to discard action or remove the skill from the panel".
+ *
+ * The real client empties the slot at PICKUP and a drop on the world simply leaves it empty; this client
+ * empties it here instead, at the drop, so the visible result of THIS gesture is the same and an
+ * abandoned drag still leaves the bar untouched (see `PickupAction`'s note, which stays true). What
+ * tells the server is `CMSG_SET_ACTION_BUTTON` with `packedData == 0`, the remove form the opcode
+ * already had (`network/game/object/spells.ts#setActionButton`).
+ *
+ * A payload from the SPELLBOOK has no slot to empty, so this is only the cursor being put down.
+ */
+export function dropCursorOnWorld(vm: LuaVM): boolean {
+  return putDown(vm, true);
+}
+
+/**
+ * ESCAPE, and it exists because a cursor that cannot be emptied is a trap: "драг ломается если я отпущу
+ * мышь во время драга. После этого я больше не могу отпустить захваченный скил."
+ *
+ * Holding an action after a release on an invalid target is the real client's behaviour (see
+ * `input.ts`'s drop branch), so what was broken was never the holding -- it was that nothing could end
+ * it. This is `ClearCursor`'s semantics exactly, NOT the deleting form: an abandoned drag must not
+ * destroy a slot, so the ability goes back to being just where it still is on the bar.
+ *
+ * UNSOURCED, and stated as such: the 264 manifest files contain no Escape handling for the cursor at all
+ * (it is engine, like the drop above), so "Escape puts the cursor down" is taken from the real client's
+ * observed behaviour and not from a file in this build.
+ */
+export function cancelCursor(vm: LuaVM): boolean {
+  return putDown(vm, false);
 }
 
 export function installCursorApi(vm: LuaVM): void {
@@ -248,22 +317,19 @@ export function installCursorApi(vm: LuaVM): void {
   });
 
   /**
-   * `ClearCursor()` -- stop carrying.
+   * `ClearCursor()` -- stop carrying, WITHOUT deleting.
    *
-   * In the real client, clearing a cursor that holds an action DELETES that action from its slot (which
-   * is what dropping an ability on the world does). That half is deliberately absent -- see
-   * `PickupAction` -- so this only forgets the payload. The consequence is stated rather than hidden: an
-   * ability cannot be REMOVED from the bar by dragging it off, only moved or overwritten.
+   * In the real client the slot is already empty by the time this runs (the pickup blanked it), so
+   * "clear" and "delete" are the same act there and different here: this client blanks nothing at
+   * pickup, so `ClearCursor` leaves the ability where it still is on the bar. The DELETING form is
+   * `dropCursorOnWorld`, which is the gesture that means "throw this away".
+   *
+   * `putDown` is shared with both engine exits so the three cannot drift, and it no-ops on an empty
+   * cursor -- which keeps the SHOWGRID/HIDEGRID counter balanced, since several of the client's own
+   * handlers call `ClearCursor` defensively on a cursor that holds nothing.
    */
   fn('ClearCursor', () => {
-    // Only when something was actually being carried, so the SHOWGRID/HIDEGRID counter stays balanced:
-    // `ClearCursor` is called defensively from several of the client's handlers on an already-empty cursor,
-    // and each of those would otherwise decrement the grid counter towards a negative.
-    const wasHolding = state.held !== null;
-    state.held = null;
-    if (wasHolding) {
-      grid(false);
-    }
+    cancelCursor(vm);
     return [];
   });
 

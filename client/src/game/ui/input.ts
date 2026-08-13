@@ -203,10 +203,30 @@ export class GlueInput {
    */
   keyBinding: ((token: string, down: boolean) => boolean) | null = null;
 
+  /**
+   * A DRAG RELEASED OVER NOTHING -- no mouse-enabled widget under the cursor, i.e. the world.
+   *
+   * The world is where an ability is thrown away, and `WorldFrame` has no `OnReceiveDrag` to run
+   * (`worldframe.xml:23-77`), so unlike every other drop this one has no Lua handler to reach and needs
+   * a door of its own. Set by the world UI host to `api/cursor.ts#dropCursorOnWorld`; null on the glue
+   * screens, which have no cursor payload and no world.
+   */
+  dropOnWorld: (() => void) | null = null;
+
+  /**
+   * ESCAPE with nothing focused: the way out of a cursor that is carrying something.
+   *
+   * Consulted BEFORE the binding table, because Escape is bound to `TOGGLEGAMEMENU` and the real client
+   * puts the cursor down rather than opening the menu when it has something in hand. Returns true when
+   * it consumed the key. Set by the world UI host to `api/cursor.ts#cancelCursor`.
+   */
+  cancelCursor: (() => boolean) | null = null;
+
   attach(): void {
     this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
     window.addEventListener('pointerup', this.onPointerUp);
+    window.addEventListener('pointercancel', this.onPointerCancel);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('paste', this.onPaste);
@@ -216,6 +236,7 @@ export class GlueInput {
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
     window.removeEventListener('pointerup', this.onPointerUp);
+    window.removeEventListener('pointercancel', this.onPointerCancel);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('paste', this.onPaste);
@@ -421,6 +442,11 @@ export class GlueInput {
       // without this a drop on a blank half of the book would run its `OnReceiveDrag`.
       if (released !== null && released.state !== 'disabled') {
         released.onReceiveDrag?.();
+      } else if (released === null) {
+        // RELEASED OVER THE WORLD, which is the discard gesture -- see `dropOnWorld`. A release over a
+        // DISABLED widget is deliberately not this case: the frame swallowed the mouse (the same rule
+        // `pressHit` follows), so the ability was not thrown at the world and stays in hand.
+        this.dropOnWorld?.();
       }
       return;
     }
@@ -451,6 +477,28 @@ export class GlueInput {
     }
   };
 
+  /**
+   * `pointercancel`: the press is over and NO `pointerup` is coming.
+   *
+   * The platform fires it when it takes the pointer away -- a browser gesture claiming it, the device
+   * going away, a capture the page loses. Without this the press stays latched: `pressed` keeps a widget
+   * depressed, `pressHit` keeps the world shut out of the camera for good, and `dragging` being non-null
+   * makes `maybeBeginDrag` refuse every later drag AND makes the next release be read as this drag's
+   * drop. `OnDragStop` fires because the drag really did stop; nothing receives it, so a cancelled drag
+   * leaves the ability on the cursor exactly as a release over the world's UI-less parts would.
+   */
+  private onPointerCancel = (): void => {
+    const dragging = this.dragging;
+    if (this.pressed && this.pressed.state !== 'disabled') {
+      this.pressed.state = 'up';
+    }
+    this.pressed = null;
+    this.pressOrigin = null;
+    this.pressHit = null;
+    this.dragging = null;
+    dragging?.onDragStop?.();
+  };
+
   private onKeyDown = (event: KeyboardEvent): void => {
     if (event.key === 'Tab') {
       event.preventDefault();
@@ -469,6 +517,13 @@ export class GlueInput {
 
     const target = this.focus;
     if (!target) {
+      // ESCAPE FIRST, and only while the cursor is carrying something: `cancelCursor` answers false with
+      // an empty cursor, so Escape still reaches `TOGGLEGAMEMENU` in the ordinary case. This is the one
+      // exit from a cursor that has picked an ability up -- see `api/cursor.ts#cancelCursor`.
+      if (event.key === 'Escape' && !event.repeat && this.cancelCursor?.()) {
+        event.preventDefault();
+        return;
+      }
       // NOTHING FOCUSED, so the key belongs to the binding table -- the client's own rule, and the
       // reason it is tested here rather than first: a key typed into an edit box must reach the box and
       // not cast a spell, which is what `keystate`-bound `ACTIONBUTTON1` on the `1` key would otherwise

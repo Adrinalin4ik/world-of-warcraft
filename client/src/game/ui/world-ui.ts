@@ -45,7 +45,7 @@ import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import { dispatchBinding } from './framexml/lua/api/bindings';
-import { getCursor } from './framexml/lua/api/cursor';
+import { cancelCursor, dropCursorOnWorld, getCursor } from './framexml/lua/api/cursor';
 import { gameTime } from './framexml/lua/compat';
 import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
@@ -318,6 +318,11 @@ export class WorldUiHost {
     // no knowledge of the DOM; this line is the whole seam. See `lua/api/bindings.ts#dispatchBinding` for
     // what a bound key actually runs (a `Bindings.xml` command, not a call into TypeScript).
     this.input.keyBinding = (token, down) => dispatchBinding(runtime.vm, token, down);
+    // THE TWO WAYS A CARRIED ABILITY IS PUT DOWN, neither of which has any Lua to run: `WorldFrame`
+    // declares no `OnReceiveDrag` (`worldframe.xml:23-77`) and nothing in the 264 manifest files touches
+    // the cursor on Escape. See `api/cursor.ts#dropCursorOnWorld` / `#cancelCursor`.
+    this.input.dropOnWorld = () => { dropCursorOnWorld(runtime.vm); };
+    this.input.cancelCursor = () => cancelCursor(runtime.vm);
     // THE UNIT FEED, attached the instant the tree exists and not before: `attachUnitBridge` fires
     // `PLAYER_ENTERING_WORLD` on the way in, and a frame that has not been built yet cannot have
     // registered for it. The world is optional so `/game?offline=1&ui=lua` -- which has units but no

@@ -1051,6 +1051,23 @@ export class SpellHandler extends EventEmitter {
     this.emit('actionsChanged');
   }
 
+  /**
+   * EMPTY a slot: an ability dragged off the bar and dropped on the world.
+   *
+   * `setActionButton(action, null)` is already the remove form -- `packedData == 0`, which the server
+   * treats as "drop this button" -- so this adds only the `actionsChanged` the UI redraws on. Without the
+   * emit the server forgets the action and the bar keeps drawing it until the next relog, which is
+   * measurably what happened when a probe called `setActionButton` directly: `HasAction(7)` still read
+   * true afterwards.
+   */
+  clearActionButton(action: number): void {
+    if (this.spellInSlot(action) === null) {
+      return;
+    }
+    this.setActionButton(action, null);
+    this.emit('actionsChanged');
+  }
+
   /** Named types for anything a slot holds that this client cannot act on, for the load report. */
   static typeName(type: number): string {
     return ACTION_BUTTON_TYPE_NAMES[type] ?? `unknown(0x${type.toString(16)})`;
