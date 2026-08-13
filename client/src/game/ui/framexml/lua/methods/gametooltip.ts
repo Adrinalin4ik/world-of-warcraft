@@ -234,6 +234,21 @@ function writeSide(
   return true;
 }
 
+/**
+ * LUA TRUTHINESS for a boolean argument -- everything except nil and false.
+ *
+ * Not `=== true`, and self-review caught the difference LIVE rather than on paper. FrameXML spells its
+ * booleans as `1` at least as often as `true`, and the tooltip's own callers are the proof:
+ * `GameTooltip_AddNewbieTip` passes `1` for `AddLine`'s wrap flag and `1, 1` for `SetText`'s alpha and
+ * wrap (`gametooltip.lua:203,206`). A `=== true` test read those as false, so the micro button's newbie
+ * line -- a 147-character sentence -- was measured on ONE line and the tooltip came out **801 logical
+ * units wide**, nearly the whole 1024-unit reference width. Measured on :3000; that is what this exists
+ * for.
+ */
+function flag(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== false;
+}
+
 /** `(r, g, b)` from an argument triple, or undefined when the first of them is absent. */
 function colourArg(args: unknown[], at: number): { r: number; g: number; b: number } | undefined {
   if (typeof args[at] !== 'number') {
@@ -395,14 +410,14 @@ const GAMETOOLTIP: MethodTable = {
     const state = stateOf(widgetOf(ctx, self));
     state.lines = 0;
     clearFrom(ctx, self, 1);
-    appendLine(ctx, self, String(args[0] ?? ''), null, colourArg(args, 1), undefined, args[5] === true);
+    appendLine(ctx, self, String(args[0] ?? ''), null, colourArg(args, 1), undefined, flag(args[5]));
     resize(ctx, self);
     return [];
   },
 
   /** `AddLine(text, r, g, b, wrapText)`. */
   AddLine: (ctx, self, args) => {
-    appendLine(ctx, self, String(args[0] ?? ''), null, colourArg(args, 1), undefined, args[4] === true);
+    appendLine(ctx, self, String(args[0] ?? ''), null, colourArg(args, 1), undefined, flag(args[4]));
     resize(ctx, self);
     return [];
   },

@@ -40,7 +40,7 @@ describe('the checked state', () => {
           <CheckedTexture file="Interface\\Buttons\\CheckButtonHilight"/>
         </CheckButton>
       </Ui>
-    `), 'test.xml');
+    `), () => null, 'gametooltip.test');
 
     expect(vm.run('SpellButtonX:SetChecked("true");', 't')).toBeNull();
     expect(vm.runExpr('return SpellButtonX:GetChecked()', 't')).toEqual({ value: true });
@@ -83,7 +83,7 @@ describe('GameTooltip', () => {
           </Layers>
         </GameTooltip>
       </Ui>
-    `), 'test.xml');
+    `), () => null, 'gametooltip.test');
 
     expect(vm.run('GameTooltip:SetOwner(OwnerButton, "ANCHOR_RIGHT");', 't')).toBeNull();
     expect(vm.runExpr('return GameTooltip:GetOwner() == OwnerButton', 't')).toEqual({ value: true });
