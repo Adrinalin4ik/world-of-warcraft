@@ -257,6 +257,29 @@ export class WorldUiHost {
   }
 
   /**
+   * The NAME of the widget that consumed the live press, or null when the press went to the world.
+   *
+   * `pages/game/controls` reads this on its own `mousedown` and refuses the button when it is non-null,
+   * which is what stops the camera orbiting while an ability is being dragged. See
+   * `GlueInput#capturedPress` for why one press has one owner and why the UI is in front.
+   *
+   * A NAME rather than the widget, for two reasons: the caller is a React component that has no business
+   * holding a `Widget`, and the name is what makes the capture decision READABLE in an instrument -- the
+   * gate on this round is "a press on a spell button was claimed by the UI and `controls` never saw it",
+   * and "SpellButton3" says that where an object identity does not. An unnamed frame falls back to its
+   * registry id (`lua:3256`), so a non-null answer always means "claimed" and never "unnamed".
+   */
+  get capturedPress(): string | null {
+    const widget = this.input.capturedPress;
+    if (widget === null) {
+      return null;
+    }
+    const registry = this.runtime?.registry ?? null;
+    const id = registry === null ? null : registry.idOfWidget(widget);
+    return (id === null ? null : registry?.nameOf(id) ?? null) ?? widget.id;
+  }
+
+  /**
    * Load the fonts and boot the client's own `FrameXML.toc` onto this host's root.
    *
    * The dynamic `import()` is `framexml-screen.ts`'s decision repeated for the same reason: the

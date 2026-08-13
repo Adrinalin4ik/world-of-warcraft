@@ -268,6 +268,20 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    * A click on nothing CLEARS the target, which is the reference's behaviour
    * (`benilla/src/target/click.rs`: "clicked nothing targetable -> deselect").
    */
+  /**
+   * Which of the client's own frames took the live press, or null when the press is the world's.
+   *
+   * The PRESS half of the gate `onWorldClick` below already applies to the CLICK, and it had been
+   * missing: `pointerWidget` stopped a click on an action button from also selecting a unit, but nothing
+   * stopped the same press from latching `Controls#buttons` and orbiting the camera. That is the owner's
+   * "камера тоже двигается и не получается в итоге передвинуть способность" -- and it also broke the drag
+   * outright, because the orbit takes a POINTER LOCK and a lock freezes `clientX/clientY`.
+   *
+   * Plain `/game` has no host, so `this.ui` null means the world owns every press -- the same fallback the
+   * click gate takes.
+   */
+  private uiCapturedPress = (): string | null => this.ui?.capturedPress ?? null;
+
   private onWorldClick = (ndc: { x: number; y: number }) => {
     if (this.ui?.pointerWidget) {
       return;
@@ -523,6 +537,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
             camera={this.camera}
             onWorldClick={this.onWorldClick}
             onWorldRightClick={this.onWorldRightClick}
+            uiCapturedPress={this.uiCapturedPress}
           />
           { this.showDebug && !this.isMobile && <DebugPanel ref={this.debugPanel} renderer={renderer} game={this.game}></DebugPanel>}
           { this.showDebug &&

@@ -40,7 +40,51 @@ interface IProp {
    * interact, ...)"). Same NDC convention as `onWorldClick`.
    */
   onWorldRightClick?: (ndc: { x: number; y: number }) => void;
+  /**
+   * The name of the widget that CONSUMED this press, or null when the press belongs to the world.
+   *
+   * Asked once per `mousedown`, before anything is latched. A non-null answer means the UI took the
+   * press -- the player is clicking, or starting a drag on, one of the client's own frames -- and the
+   * camera must not see the button at all: not the orbit, not the mouse-look weld, not the pointer lock.
+   *
+   * THE POINTER LOCK IS WHY THIS IS NOT COSMETIC. `update` asks for one the moment `rig.look` is set,
+   * and under a lock `clientX/clientY` FREEZE (see `onMouseMove`). So a left-press on an action button
+   * used to start an orbit, take the lock, and freeze the very coordinates the UI router's drag needs --
+   * the camera swung and the ability could never be dropped anywhere, which is the owner's report.
+   *
+   * A function rather than a boolean prop because the answer must be read AT the press: a prop would
+   * carry whatever the last React render saw, and nothing re-renders this component on a pointer event.
+   */
+  uiCapturedPress?: () => string | null;
 }
+
+/** One press, as `captureLog` records it. */
+export interface CaptureRecord {
+  /** `performance.now()` at the press. */
+  time: number;
+  /** `MouseEvent.button`: 0 left, 2 right. */
+  button: number;
+  /** The widget that claimed it, or null for a press on the world. */
+  claimedBy: string | null;
+  /** Whether `controls` latched the button -- i.e. whether the camera saw this press. */
+  controlsSaw: boolean;
+}
+
+/**
+ * THE CAPTURE INSTRUMENT: who claimed each press, and whether the camera also saw it.
+ *
+ * Built because the question cannot be answered any other way in this environment. `page.mouse` cannot
+ * hold a button and move the pointer in this headless Chrome (measured four ways -- see STATE.md), so a
+ * synthetic drag proves nothing about Chrome's own event generation, which is exactly the link the
+ * camera-during-drag bug lives on. Two independent readings per press instead: what the UI router
+ * decided, and what `controls` then did about it. `claimedBy` non-null with `controlsSaw` false IS the
+ * fix working, and either half alone would not say so.
+ *
+ * A bounded ring, because a play session presses the mouse thousands of times.
+ */
+const CAPTURE_LOG_LIMIT = 200;
+
+const captureLog: CaptureRecord[] = [];
 
 /** Shortest signed angle, so a chase never takes the long way round. */
 function wrapPi(angle: number): number {
@@ -103,6 +147,9 @@ class Controls extends React.Component<IProp> {
   }
 
   componentDidMount() {
+    // `window.uiCaptureLog` -- see `captureLog`. Published from the mount rather than at module scope so
+    // it exists only while something is actually reading the mouse.
+    (window as never as Record<string, unknown>).uiCaptureLog = captureLog;
     this.element.addEventListener('mousedown', this.onMouseDown);
     window.addEventListener('mouseup', this.onMouseUp);
     this.element.addEventListener('mousemove', this.onMouseMove);
@@ -128,6 +175,30 @@ class Controls extends React.Component<IProp> {
   }
 
   private onMouseDown(event: MouseEvent) {
+    /**
+     * THE UI GETS THE PRESS FIRST, and a press it took is not a press for the camera.
+     *
+     * `pointerdown` on the canvas has already run by the time this fires -- the compatibility mouse
+     * event follows the pointer event for the same press -- so `uiCapturedPress()` reads a decision the
+     * router made from the same coordinates, through the same `hitTest` on the same draw list the frame
+     * was drawn from. Asking the router rather than hit-testing again here is the rule
+     * `pages/game/index.tsx#onWorldClick` already follows for the CLICK: a second, independent test is
+     * a second answer that can differ, invisibly.
+     *
+     * Returning BEFORE `this.pointer` is updated as well as before the button latch. The pointer is the
+     * pick point for a world click, and a press the world never saw must not move where the next one
+     * picks.
+     */
+    const claimedBy = this.props.uiCapturedPress?.() ?? null;
+    if (captureLog.length >= CAPTURE_LOG_LIMIT) {
+      captureLog.shift();
+    }
+    captureLog.push({
+      time: performance.now(), button: event.button, claimedBy, controlsSaw: claimedBy === null,
+    });
+    if (claimedBy !== null) {
+      return;
+    }
     this.pointer.x = event.clientX;
     this.pointer.y = event.clientY;
     if (event.button === 0) this.buttons.left = true;

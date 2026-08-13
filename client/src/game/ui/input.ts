@@ -60,6 +60,16 @@ export class GlueInput {
   private dragging: Widget | null = null;
 
   /**
+   * The mouse-enabled widget the LIVE press landed on, or null when it landed on the world.
+   *
+   * Kept apart from `pressed`, which is the widget being HELD: `pressed` is only set for a widget that
+   * was enabled at press time, and a DISABLED frame still swallows the mouse in the real client -- the
+   * frame is mouse-enabled, so the world behind it never sees the button at all. Basing the world's gate
+   * on `pressed` would let a press on a greyed-out spell button orbit the camera.
+   */
+  private pressHit: Widget | null = null;
+
+  /**
    * The pointer's last position in LOGICAL UNITS, for the host's cursor-attachment pass.
    *
    * Exposed from here rather than from a second `pointermove` listener because there must be exactly one
@@ -97,6 +107,28 @@ export class GlueInput {
    */
   get pointerWidget(): Widget | null {
     return this.hovered;
+  }
+
+  /**
+   * THE WORLD DRAG PATH'S GATE: the widget that CONSUMED the live press, or null.
+   *
+   * `pointerWidget` already stopped a click on a button from also selecting a unit, but a click is only
+   * half of what a press starts. `pages/game/controls` latches `buttons.left`/`buttons.right` on its own
+   * `mousedown` (on `document.body`, so every press on the canvas bubbles to it) and from there
+   * `runLookSession` orbits the camera and asks for a pointer lock -- all of it from the SAME press this
+   * router is using to drag an ability. The owner's report is exactly that: "камера тоже двигается и не
+   * получается в итоге передвинуть способность". Once the lock is granted `clientX/clientY` FREEZE, so
+   * the drag's own `pointermove`s stop advancing and the release resolves back onto the source button.
+   *
+   * So a press that lands on a mouse-enabled widget is CONSUMED here and must never be seen by the
+   * camera. This getter is how the world asks. Same rule and same reason as `input.ts`'s focus
+   * precedence: one press has ONE owner, and the UI is in front.
+   *
+   * It reports the press HIT rather than `pressed` -- see `pressHit` for why a disabled frame still
+   * counts -- and it is live for the whole gesture, cleared on the release and by `reset`.
+   */
+  get capturedPress(): Widget | null {
+    return this.pressHit;
   }
 
   /**
@@ -144,6 +176,8 @@ export class GlueInput {
     }
     this.hovered = null;
     this.pressed = null;
+    // ... and the world's gate must not stay shut on a widget from the retired screen.
+    this.pressHit = null;
     this.focus = null;
     // A click on the retired screen must not pair with the first click on the new one.
     this.lastClick = null;
@@ -281,6 +315,13 @@ export class GlueInput {
     const { x, y } = this.toUnits(event);
     const hit = hitTest(this.items, x, y);
 
+    // BEFORE the enabled test below and outside it: this is what `capturedPress` answers, and the world
+    // must be shut out by a press on a disabled frame too. `pointerdown` completes its whole propagation
+    // before the compatibility `mousedown` is dispatched (UI Events / Pointer Events: the mouse event
+    // follows the pointer event for the same press), so `controls`' body-level `mousedown` handler always
+    // reads a value this line has already written.
+    this.pressHit = hit;
+
     this.setFocus(hit && hit.focusable ? hit : null);
 
     if (hit && hit.state !== 'disabled') {
@@ -325,6 +366,9 @@ export class GlueInput {
     this.pressed = null;
     this.pressOrigin = null;
     this.dragging = null;
+    // The press is over, so the world may have the next one. Cleared here rather than at the end because
+    // every path below returns and one of them would leave the world shut out for good.
+    this.pressHit = null;
     // Release the capture taken on the press, whatever happens below -- a capture left held would send
     // every later move to the canvas even with no button down, and hover would freeze for the next press.
     if (
