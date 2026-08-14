@@ -15,7 +15,9 @@ import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
 import { animCounters } from '../../game/pipeline/m2/anim/counters';
 import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-warm';
 import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
-import { pickUnit } from '../../game/world/pick';
+import { pickUnit, pickUnitReport } from '../../game/world/pick';
+import { collisionWorld } from '../../game/collision/collision-world';
+import { CollisionLayer } from '../../game/collision/types';
 import { wantsDebugPanels } from '../debug-flags';
 import { REACTION_NEUTRAL, primeFactionTemplates, reactionFor } from '../../game/world/faction';
 import './index.scss';
@@ -212,6 +214,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       });
       this.debugRenderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     }
+    this.installPickInstrument();
+
     console.log("componentDidMount", this)
     this.forceUpdate();
     this.resize();
@@ -282,12 +286,126 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    */
   private uiCapturedPress = (): string | null => this.ui?.capturedPress ?? null;
 
+  /**
+   * The pick's options, built per click.
+   *
+   * The cast is a ZERO-RADIUS camera-layer cast -- the occlusion leg's whole geometry, and the same
+   * terrain + WMO + doodad set the camera boom already sweeps (`collision-world.ts#castFor`). Built
+   * here rather than inside `pick.ts` because that module is deliberately world-agnostic: every unit
+   * test of the pick drives it against synthetic geometry with nothing registered, which is the rule
+   * `collision-world.ts` states for `CastFn` in the first place.
+   *
+   * The two `window` switches are the SAME-BUILD CONTROL ARMS. A pick claim cannot be checked across
+   * two builds because the units move between them; these let one run measure both arms over the same
+   * geometry. `window.uiTextSnap` is the shape.
+   */
+  private pickOptions() {
+    const flags = window as unknown as Record<string, unknown>;
+    return {
+      cast: collisionWorld.castFor(CollisionLayer.Camera, 0, 0),
+      narrow: flags.worldPickNarrow !== false,
+      occlude: flags.worldPickOcclude !== false,
+    };
+  }
+
+  /**
+   * `window.worldPick(clientX, clientY)` and `window.worldUnits()` -- THE PICK INSTRUMENT.
+   *
+   * A pick cannot be judged from a screenshot: "the click selected the wolf" and "the click selected
+   * the wolf from three yards off its flank" look identical, and the second is the whole bug. This
+   * reports, per broad-phase candidate, the sphere the old pick used, the hull the new one uses, and
+   * which of the two rejected it -- through `pickUnitReport`, which calls the SAME `pickUnit`
+   * production does rather than a second copy of the rule.
+   *
+   * `document.body.getBoundingClientRect()` is not a convenience: it is the exact element
+   * `controls/controls.tsx` measures its own NDC against (`this.element = document.body`, `:106`), so
+   * this instrument and a real click cannot disagree about where the pointer is. That is the trap
+   * `STATE.md` records against a probe doing its own coordinate arithmetic.
+   *
+   * `worldUnits()` reports every unit's SCREEN position in CSS pixels, which is what lets a probe put
+   * a real `page.mouse.click` a stated number of pixels off a mob instead of guessing at one.
+   */
+  private installPickInstrument(): void {
+    const flags = window as unknown as Record<string, unknown>;
+    const toNdc = (clientX: number, clientY: number) => {
+      const bounds = document.body.getBoundingClientRect();
+      return {
+        x: ((clientX - bounds.left) / bounds.width) * 2 - 1,
+        y: -(((clientY - bounds.top) / bounds.height) * 2 - 1),
+      };
+    };
+    flags.worldPick = (clientX: number, clientY: number) => {
+      const world = this.game.world;
+      const ndc = toNdc(clientX, clientY);
+      const report = pickUnitReport(
+        world.entities.values(), this.camera, ndc, world.player, this.pickOptions(),
+      );
+      return { ndc, ...report };
+    };
+    // The camera's own numbers, so a probe can turn a PIXEL margin into a YARD margin at a stated
+    // depth instead of asserting one. `2 * d * tan(fov/2) / heightPx` yards per pixel.
+    flags.worldCamera = () => ({
+      fov: this.camera.fov,
+      aspect: this.camera.aspect,
+      position: this.camera.position.toArray(),
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    });
+    flags.worldUnits = () => {
+      const world = this.game.world;
+      const bounds = document.body.getBoundingClientRect();
+      const point = new THREE.Vector3();
+      const out: unknown[] = [];
+      world.entities.forEach((unit) => {
+        if (unit === world.player) {
+          return;
+        }
+        // The unit's MIDRIFF, half a collision height up -- the same point `pick.ts#pickSphere`
+        // centres its sphere on, so a click aimed here is a click at the centre of the old volume.
+        point.copy(unit.view.position);
+        point.z += Math.max(unit.collisionHeight, 0.1) * 0.5;
+        const model = unit.model;
+        const distance = point.distanceTo(this.camera.position);
+        point.project(this.camera);
+        out.push({
+          guid: unit.guid,
+          name: unit.name ?? null,
+          objectType: unit.objectType,
+          dead: unit.dead,
+          distance,
+          collisionHeight: unit.collisionHeight,
+          vertexRadius: model ? model.vertexRadius : null,
+          modelScale: model ? model.scale.x : null,
+          hullTriangles: this.hullTriangleCount(unit),
+          visible: unit.view.visible,
+          screen: {
+            x: bounds.left + ((point.x + 1) / 2) * bounds.width,
+            y: bounds.top + ((1 - point.y) / 2) * bounds.height,
+            behind: point.z > 1,
+          },
+        });
+      });
+      return out;
+    };
+  }
+
+  /** How many triangles a unit's authored collision hull has -- 0 when its M2 ships none. */
+  private hullTriangleCount(unit: { model?: { boundingMesh?: THREE.Mesh } }): number {
+    const geometry = unit.model?.boundingMesh?.geometry as THREE.BufferGeometry | undefined;
+    if (!geometry) {
+      return 0;
+    }
+    const index = geometry.getIndex();
+    const position = geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+    const count = index ? index.count : (position?.count ?? 0);
+    return Math.floor(count / 3);
+  }
+
   private onWorldClick = (ndc: { x: number; y: number }) => {
     if (this.ui?.pointerWidget) {
       return;
     }
     const world = this.game.world;
-    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player);
+    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
     world.setTarget(hit);
   };
 
@@ -310,7 +428,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       return;
     }
     const world = this.game.world;
-    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player);
+    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
     if (!hit) {
       return;
     }
