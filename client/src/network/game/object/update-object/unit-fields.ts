@@ -52,6 +52,31 @@ export interface UnitFieldUpdate {
   factionTemplate?: number;
   unitFlags?: number;
   dynamicFlags?: number;
+
+  /**
+   * `UNIT_NPC_FLAGS` (`enums.ts`: `object_end + 0x004c`) -- the SERVICE word the world cursor's
+   * classifier ladder switches on.
+   *
+   * It was in `enums.ts` and read by nothing, which is why the hover cursor's whole service leg was
+   * dead code before this round. The BITS are 3.3.5a's and they are NOT the reference's: benilla's
+   * table is vmangos 1.12 (`target/cursor_mode.rs:145-163`, VENDOR 0x4, FLIGHTMASTER 0x8, INNKEEPER
+   * 0x80) and the enum was renumbered for WotLK, so a 1.12 value here would read a vendor as a
+   * flight master. See `game/world/cursor-mode.ts#NPC_FLAG`, which carries the values, states that
+   * their only source is a server implementation, and records what they were corroborated against
+   * live.
+   */
+  npcFlags?: number;
+
+  /**
+   * `UNIT_FIELD_COMBATREACH` (`enums.ts`: `object_end + 0x003c`) -- a FLOAT on the wire, like
+   * `attackPowerMultiplier` and unlike every integer here.
+   *
+   * The melee interact reach both the SKIN and LOOT cursor legs gray on is
+   * `max(reachA + reachB + 1.3333, 5.0)` (`game/world/cursor-mode.ts`), so this is one of its two
+   * terms. Read here rather than approximated because the alternative was a function returning 0 with
+   * a paragraph explaining itself.
+   */
+  combatReach?: number;
   /** `OBJECT_FIELD_ENTRY` -- the creature template id `CMSG_CREATURE_QUERY` is asked about. */
   entry?: number;
 
@@ -239,6 +264,8 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
   out.factionTemplate = u32('unit_field_factiontemplate');
   out.unitFlags = u32('unit_field_flags');
   out.dynamicFlags = u32('unit_dynamic_flags');
+  out.npcFlags = u32('unit_npc_flags');
+  out.combatReach = f32('unit_field_combatreach');
 
   // THE POWER TYPE is the high byte of `UNIT_FIELD_BYTES_0` (`race | class | gender | powerType`),
   // benilla `fields/unit.rs` and this build's own `UnitField` table agree on the packing even though
@@ -395,6 +422,8 @@ export function applyUnitFields(
   set('factionTemplate', fields.factionTemplate);
   set('unitFlags', fields.unitFlags);
   set('dynamicFlags', fields.dynamicFlags);
+  set('npcFlags', fields.npcFlags);
+  set('combatReach', fields.combatReach);
   set('powerType', fields.powerType);
   set('gender', fields.gender);
 

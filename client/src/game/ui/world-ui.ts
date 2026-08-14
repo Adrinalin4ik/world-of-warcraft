@@ -266,6 +266,18 @@ export class WorldUiHost {
   }
 
   /**
+   * Is the mouse cursor CARRYING something -- an ability picked up off the bar or out of the book.
+   *
+   * The world cursor's first precedence rung: while a drag is live, `drawCursorIcon` below is already
+   * drawing that ability's icon at the pointer, so the OS cursor must stay the plain arrow rather than
+   * turn into a sword over whatever the drag happens to pass across. One reader
+   * (`pages/game/index.tsx#updateHoverCursor`), which is why this is a boolean and not the cursor.
+   */
+  get heldCursorItem(): boolean {
+    return this.runtime !== null && getCursor(this.runtime.vm) !== null;
+  }
+
+  /**
    * The NAME of the widget that consumed the live press, or null when the press went to the world.
    *
    * `pages/game/controls` reads this on its own `mousedown` and refuses the button when it is non-null,

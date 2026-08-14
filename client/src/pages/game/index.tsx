@@ -15,6 +15,8 @@ import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
 import { animCounters } from '../../game/pipeline/m2/anim/counters';
 import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-warm';
 import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
+import { WorldCursorDriver } from '../../game/ui/world-cursor';
+import { CURSOR_POINT, classifyUnitCursor, cursorStem } from '../../game/world/cursor-mode';
 import { pickUnit, pickUnitReport, drawnWorldBox } from '../../game/world/pick';
 import { collisionWorld } from '../../game/collision/collision-world';
 import { CollisionLayer } from '../../game/collision/types';
@@ -215,6 +217,14 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       this.debugRenderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     }
     this.installPickInstrument();
+
+    // THE HOVER CURSOR. On `document.body` because `cursor` is an inherited property and the world
+    // canvas, the UI canvas and the debug panel are all its descendants -- one write covers the route.
+    this.cursorDriver = new WorldCursorDriver(document.body);
+    document.body.addEventListener('pointermove', this.onCursorPointerMove);
+    (window as unknown as Record<string, unknown>).worldCursorArt = () =>
+      this.cursorDriver?.cursorArtReport() ?? null;
+    (window as unknown as Record<string, unknown>).worldCursorStats = () => this.cursorStats;
 
     console.log("componentDidMount", this)
     this.forceUpdate();
@@ -424,6 +434,152 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     return Math.floor(count / 3);
   }
 
+  // -- The hover cursor -----------------------------------------------------------------------------
+
+  private cursorDriver: WorldCursorDriver | null = null;
+
+  /**
+   * The last pointer position in CLIENT pixels, or null before the pointer has moved.
+   *
+   * Its own listener rather than the router's `pointerPosition`, and that is deliberate: the router
+   * works in logical 768-space with Y down, so reading it here would mean converting back -- and
+   * `STATE.md` records a probe that did its own coordinate arithmetic and asked a different question
+   * from the one the router answers, invisibly. `clientX`/`clientY` is the space `pickUnit`'s callers
+   * and `controls.tsx` both already work in.
+   */
+  private cursorPointer: { x: number; y: number } | null = null;
+
+  /**
+   * The shift key as of the last pointer move -- the loot leg's Pickup/LootAll split.
+   *
+   * The EVENT'S OWN `shiftKey` flag and not a `keydown` of `'Shift'`, which is the trap
+   * `api/screen.ts`'s key trackers record: a modifier held across another key never fires its own
+   * keydown again and a key-name tracker loses it.
+   */
+  private cursorShift = false;
+
+  private onCursorPointerMove = (event: PointerEvent) => {
+    this.cursorPointer = { x: event.clientX, y: event.clientY };
+    this.cursorShift = event.shiftKey;
+  };
+
+  /**
+   * THE CADENCE, and it is a budget decision with a number behind it rather than a default.
+   *
+   * The classifier needs to know which unit is under the pointer, and that is the full pick --
+   * measured at **1.0-2.4 ms per call** in round 21 (926-1645 posed triangles plus the occlusion
+   * cast). Run every frame at 60 Hz that is 60-144 ms of every second, i.e. 6-14% of the frame
+   * budget, and it would hand back more than the whole 4-7.5 ms saving the offscreen UI target exists
+   * for. So it is thrown at a fixed cadence.
+   *
+   * **100 ms.** Two things bound the choice from opposite sides. The cheap side: 10 picks/s is
+   * 10-24 ms/s, under 2.4% of a second, which is inside the +-1 ms per-frame spread once amortised
+   * and is reported raw by `worldCursorStats` so it need not be taken on trust. The expensive side:
+   * what the classifier's OUTPUT can do in 100 ms. Its boundaries are the range gates -- 5.5556 yd
+   * for a service and 10.45 yd for attack -- and a unit closing at a run (7 yd/s) crosses one in
+   * ~14 ms of travel either side, so 100 ms is the smallest interval at which a gate flip could be
+   * mistimed, by at most 0.7 yd of the other party's movement. Against that, the pointer moving from
+   * one unit to another is the common case and 100 ms is at the edge of perceptible.
+   *
+   * `TOOLTIP_UPDATE_TIME` (200 ms), which `IsActionInRange` already uses in this tree, was the other
+   * candidate and is rejected on the second bound only: it halves the cost again but doubles the lag
+   * on the change a user actually sees. `window.worldCursorCadenceMs` makes both arms measurable in
+   * one build, and `window.worldCursorEnabled = false` is the off arm.
+   */
+  private static readonly CURSOR_CADENCE_MS = 100;
+
+  private lastCursorAt = 0;
+
+  /** `window.worldCursorStats` -- the cadence's own cost, reported raw. */
+  private cursorStats = {
+    picks: 0,
+    pickMs: 0,
+    pickMsTotal: 0,
+    /** Frames the cadence declined to pick on -- the denominator that makes `picks` mean anything. */
+    skipped: 0,
+    stem: 'Point',
+    /** Why the last resolution was Point: `widget`, `held`, `nopick`, or `` when a unit answered. */
+    reason: '',
+  };
+
+  /**
+   * One cadence tick of the world cursor.
+   *
+   * PRECEDENCE IS THE PRESS'S OWN ORDER, which is what keeps the cursor honest about what a click
+   * would do: a held cursor item first (a drag is already drawing its own icon at the pointer, and
+   * `world-ui.ts#drawCursorIcon` owns that), then `pointerWidget` -- the router's own current hit, so
+   * a widget over a wolf reads as the widget exactly as a CLICK on it would (`onWorldClick`'s gate) --
+   * then the world pick, then Point.
+   */
+  private updateHoverCursor(): void {
+    const driver = this.cursorDriver;
+    if (driver === null) {
+      return;
+    }
+    const flags = window as unknown as Record<string, unknown>;
+    if (flags.worldCursorEnabled === false) {
+      return;
+    }
+    const now = performance.now();
+    const cadence = typeof flags.worldCursorCadenceMs === 'number'
+      ? (flags.worldCursorCadenceMs as number)
+      : GameScreen.CURSOR_CADENCE_MS;
+    if (now - this.lastCursorAt < cadence) {
+      this.cursorStats.skipped += 1;
+      return;
+    }
+    this.lastCursorAt = now;
+
+    const stats = this.cursorStats;
+    const pointer = this.cursorPointer;
+    // A held ability, or a widget under the pointer: neither is a question about the world, and
+    // neither costs a pick.
+    if (this.ui?.heldCursorItem) {
+      stats.reason = 'held';
+      stats.stem = 'Point';
+      driver.reset();
+      return;
+    }
+    if (pointer === null || this.ui?.pointerWidget) {
+      stats.reason = pointer === null ? 'nopointer' : 'widget';
+      stats.stem = 'Point';
+      driver.reset();
+      return;
+    }
+
+    const world = this.game.world;
+    const bounds = document.body.getBoundingClientRect();
+    const ndc = {
+      x: ((pointer.x - bounds.left) / bounds.width) * 2 - 1,
+      y: -(((pointer.y - bounds.top) / bounds.height) * 2 - 1),
+    };
+    const started = performance.now();
+    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
+    const pickMs = performance.now() - started;
+    stats.picks += 1;
+    stats.pickMs = pickMs;
+    stats.pickMsTotal += pickMs;
+
+    let mode = CURSOR_POINT;
+    if (hit !== null && world.player) {
+      const distanceSq = hit.position.distanceToSquared(world.player.position);
+      mode = classifyUnitCursor(hit, world.player, {
+        distanceSq,
+        // Shift alone, which the reference says IS the whole 1.12 mechanism -- there is no auto-loot
+        // CVar here because there is no loot code for one to configure.
+        autoLoot: this.cursorShift,
+        // DECLARED FALSE: nothing in this client decodes a learned profession, so the question "has
+        // this character learned Skinning" has no answer. The reference's own rule is that a
+        // non-skinner gets NO knife, so false is the arm that shows nothing rather than the arm that
+        // shows a knife a click cannot honour.
+        knowsSkinning: false,
+      }) ?? CURSOR_POINT;
+    }
+    stats.reason = hit === null ? 'nopick' : '';
+    stats.stem = cursorStem(mode);
+    driver.apply(mode);
+  }
+
   private onWorldClick = (ndc: { x: number; y: number }) => {
     if (this.ui?.pointerWidget) {
       return;
@@ -483,6 +639,14 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     for (const key of GameScreen.PICK_INSTRUMENT_KEYS) {
       delete flags[key];
     }
+    // THE CURSOR GOES BACK. Left alone, an inline `cursor: url(...)` on `document.body` would outlive
+    // this route and follow the user onto the login screen -- and the two instrument handles here
+    // capture `this` exactly as the pick's do, so they answer about a dead driver after a remount.
+    document.body.removeEventListener('pointermove', this.onCursorPointerMove);
+    this.cursorDriver?.dispose();
+    this.cursorDriver = null;
+    delete flags.worldCursorArt;
+    delete flags.worldCursorStats;
     window.cancelAnimationFrame(this.frameHandle);
     window.removeEventListener('resize', this.onResize);
     this.game.removeListener('disconnect', this.onWorldDisconnect);
@@ -617,6 +781,13 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.perf.sections.begin('ui.framexml');
     this.ui?.render(delta);
     this.perf.sections.end('ui.framexml');
+
+    // THE HOVER CURSOR, after the UI pass because it asks the router which widget the pointer is over
+    // and that answer is set by the pass that just ran. Cadence-gated -- see `updateHoverCursor`, which
+    // does nothing at all on ~5 frames in 6.
+    this.perf.sections.begin('ui.cursor');
+    this.updateHoverCursor();
+    this.perf.sections.end('ui.cursor');
 
       if (this.debugRenderer) {
         this.debugCamera.position.set(this.camera.position.x,
