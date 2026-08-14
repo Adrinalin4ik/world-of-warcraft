@@ -711,21 +711,35 @@ class Renderer {
     if (assignment === null) {
       return null;
     }
+    // THE GUARD MUST SPAN THE FALLBACK TOO, and a first draft dropped it one line early -- caught in
+    // self-review, not by a test. `delete` sat immediately after `expand`, so the `evaluate` fallback
+    // below re-entered `parseAt` -> `$<name>` -> `variable(name)` with `resolving` already cleared and
+    // no memo entry yet, which recurses without bound on a row that references ITSELF (`$a=$<a>`). No
+    // served row does that today -- the sweep over 22,602 descriptions threw nothing -- but the file is
+    // data we do not control, and an unbounded recursion here takes the whole tooltip out.
     this.resolving.add(name);
     let rendered: string | null = this.expand(assignment[1]);
-    this.resolving.delete(name);
-    if (rendered !== null && /\$/.test(rendered)) {
-      // The rhs still contains a token, so it did not resolve. `$base=($pl-1)*3+10` (variables row
-      // 181) is the other shape: a BARE expression with no `${}` around it, which `expand` leaves as
-      // arithmetic text. Try it as an expression before giving up.
-      const value = this.evaluate(assignment[1]);
-      rendered = value === null ? null : formatNumber(value);
-    } else if (rendered !== null && !/^\s*-?\d/.test(rendered)) {
-      const value = this.evaluate(assignment[1]);
-      if (value !== null) {
-        rendered = formatNumber(value);
+    if (rendered !== null && !/\$\?/.test(assignment[1])) {
+      // A BARE expression right-hand side, with no `${}` around it: `$base=($pl-1)*3+10` (variables row
+      // 181). `expand` leaves that as arithmetic text, so it is evaluated directly -- but only when the
+      // rhs is NOT a conditional. Trying it on a `$?s...[a][b]` rhs would fail in `evaluate` and file a
+      // `${...} unparsed` row against a `$<name>` failure, which is the ledger telling a small lie
+      // about what is missing.
+      const unresolved = /\$/.test(rendered);
+      const notANumber = !/^\s*-?[\d.]/.test(rendered);
+      if (unresolved || notANumber) {
+        const value = this.evaluate(assignment[1]);
+        if (value !== null) {
+          rendered = formatNumber(value);
+        } else if (unresolved) {
+          rendered = null;
+        }
       }
+    } else if (rendered !== null && /\$/.test(rendered)) {
+      // A conditional rhs that still carries a token -- the branch it chose did not resolve.
+      rendered = null;
     }
+    this.resolving.delete(name);
     this.variables.set(name, rendered);
     return rendered;
   }
