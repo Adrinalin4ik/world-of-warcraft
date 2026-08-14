@@ -21,7 +21,8 @@ import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
 import { fogDebug } from "./fog-debug";
 import { lightDebug } from "./light-debug";
-import { reactionFor } from "./faction";
+import { reactionFor, REACTION_NEUTRAL } from "./faction";
+import { SelectionRing } from "./selection-ring";
 import { readMark } from "./saved-mark";
 import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
@@ -43,6 +44,8 @@ export default class World extends EventEmitter {
   public skyManager: SkyManager;
   /** The collision wireframe overlay, driven from `animate` and toggled from the debug panel. */
   public collisionDebug = collisionDebugView;
+  /** The ground selection ring under the current target. Built in the constructor, ticked in `animate`. */
+  public selectionRing: SelectionRing;
   private skyDebug: SkyDebug;
   /**
    * Dense phase slot counter for unit models -- the same role `DoodadManager#nextPoseSlot` plays.
@@ -93,6 +96,17 @@ export default class World extends EventEmitter {
     // Added once and left in place: it is invisible and draws nothing until enabled, and its
     // vertices are already world-space, so it wants the scene root rather than any placed subtree.
     this.scene.add(this.collisionDebug.object);
+
+    // THE GROUND SELECTION RING. Same reasoning as the collision overlay directly above: its vertices
+    // are world-space (it is a projected decal, `world/decal.ts`), so it belongs to the scene ROOT and
+    // not to any placed subtree, and it draws nothing at all until something is targeted.
+    this.selectionRing = new SelectionRing(this.scene);
+    // `window.worldRing()` -- the ring instrument: what the last projection emitted, plus the raw
+    // world-space vertices the gate measures against the terrain heightmap. See `SelectionRing#vertices`.
+    window['worldRing'] = () => ({
+      ...this.selectionRing.stats,
+      positions: this.selectionRing.vertices(),
+    });
 
     this.game = game;
     this.session = game.session;
@@ -361,6 +375,36 @@ export default class World extends EventEmitter {
     return reactionFor(unit, this.player);
   }
 
+  /**
+   * What the ground selection ring needs about the current target, or null when nothing is selected.
+   *
+   * The RADIUS is `M2#ringFootprint x the scale the body is actually DRAWN at`. `model.scale.x` rather
+   * than a second call to `Unit#renderScale`: the scale field is the value `applyRenderScale` wrote and
+   * `updateMatrix` baked, so reading it cannot disagree with the size on screen -- and it already folds
+   * in the wire-value-vs-DBC decision that method documents. A unit whose model has not arrived reports
+   * null and the ring takes its own fallback radius, which is the reference's model-less path.
+   *
+   * REACTION collapses to NEUTRAL while `FactionTemplate.dbc` is in flight, which is the reference's own
+   * fall-through (`ring.rs:598`, `resolved.unwrap_or(Reaction::Neutral)`) and the same collapse
+   * `unit-bridge.ts` already applies to the target frame's palette. The ring is yellow for a beat rather
+   * than absent.
+   */
+  private ringTarget() {
+    const unit = this.target;
+    if (unit === null) {
+      return null;
+    }
+    const model = unit.model;
+    const footprint = model ? model.ringFootprint : 0;
+    return {
+      position: unit.position,
+      reaction: this.reactionFor(unit) ?? REACTION_NEUTRAL,
+      isPlayer: unit.isPlayer,
+      dead: unit.dead,
+      worldRadius: footprint > 0 ? footprint * (model.scale.x || 1) : null,
+    };
+  }
+
   setTarget(unit: Unit | null) {
     if (this.target === unit) {
       return;
@@ -567,11 +611,13 @@ export default class World extends EventEmitter {
 
     // THE BREAKDOWN. `world.animate` was a single span holding everything below it, and Task 9's
     // movement round recorded that the number could not be reasoned about until its parts were
-    // separated (five samples of one unchanged build spanned 7.3-15.5 ms). These five sub-spans are
+    // separated (five samples of one unchanged build spanned 7.3-15.5 ms). These sub-spans are
     // that separation, and they are deliberately EXHAUSTIVE of `animate` -- every statement below
-    // sits inside exactly one of them, so `w.entities + w.vis + w.map + w.sky + w.debug +
+    // sits inside exactly one of them, so `w.entities + w.ring + w.vis + w.map + w.sky + w.debug +
     // w.matrices` reconstructs `world.animate` to within the timestamp overhead. If a statement is
-    // ever added outside all six, the sum stops matching the total and that is the intended tell.
+    // ever added outside all SEVEN, the sum stops matching the total and that is the intended tell.
+    // (`w.ring` is the newest, added with the ground selection ring; the sum rule is why it got its own
+    // span instead of hiding inside `w.entities`.)
     //
     // `w.vis` is separate from `w.map` on purpose: it is the only one gated on `cameraMoved`, so it
     // reads ~0 on a still frame and its true cost is invisible in any average that mixes the two.
@@ -579,6 +625,14 @@ export default class World extends EventEmitter {
     beginSection('w.entities');
     this.animateEntities(delta, camera, cameraMoved);
     endSection('w.entities');
+
+    // AFTER the entity pass, so the target's `position` is this frame's and the ring cannot lag a
+    // walking mob by a frame. Its own span, because a projected decal is not free and an unnamed cost
+    // inside `w.entities` would be invisible -- the same argument the five spans below were separated
+    // for. Note the six-span exhaustiveness note above: this is a SEVENTH, deliberately named.
+    beginSection('w.ring');
+    this.selectionRing.update(this.ringTarget(), camera);
+    endSection('w.ring');
 
     if (this.map !== null) {
       if (cameraMoved) {

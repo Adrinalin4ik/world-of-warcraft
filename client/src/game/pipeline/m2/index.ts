@@ -41,6 +41,67 @@ const billboardRight = new THREE.Vector3();
 const billboardUp = new THREE.Vector3();
 const billboardMatrix = new THREE.Matrix4();
 
+/**
+ * The GROUND SELECTION RING's model-local radius -- `sqrt(0.5 * sqrt(dx^2 + dy^2))` over the **Stand**
+ * sequence's own bounding box, horizontal extents only.
+ *
+ * SOURCE. The reference states this byte-traced and Unicorn-emulated, reproducing the real client's
+ * measured ring radii to ~1 mm: draw `0x608e00`, sizer `0x60aee0`
+ * (`benilla-formats/src/models/bounds.rs:60-116` and the pinning test
+ * `benilla-formats/tests/selection_ring_radius.rs`, which holds Chicken 0.572 / HumanFemale 0.731 /
+ * HumanMale 0.841 / Horse 1.295 at scale 1). The world radius is this x `OBJECT_FIELD_SCALE_X`, which
+ * is `Unit#renderScale`.
+ *
+ * IT IS **NOT** THE BOUNDING SPHERE, and the reference says why: `0.5 * renderSphere` is the CORPSE
+ * decal's input (`0x5d6fe0`), and it over-sizes a tall human and under-sizes a squat chicken because a
+ * sphere folds height in. The nested sqrt compresses the range instead. That test asserts the two do
+ * not coincide, so a regression to the sphere cannot slip through unnoticed.
+ *
+ * WHICH TWO COMPONENTS ARE HORIZONTAL, established here rather than assumed. The M2 file's own frame
+ * is Z UP: `createSubmeshGeometry` composes `(p0, p2, -p1)` then `makeScale(-1, -1, 1)` then
+ * `rotateX(-PI/2)`, which is `(-p0, -p1, p2)` -- exactly what `createGeometry` spells out by hand at
+ * its own doc comment -- into a world whose up axis is Z (`pages/game/index.tsx:133`). So components 0
+ * and 1 are the horizontal pair and component 2 is height, and the extents feed the formula unswizzled,
+ * the same two the reference reads.
+ *
+ * THE FALLBACK IS THE **VERTEX** BOX, not the collision box. The reference falls back to its
+ * `bounding_box_min/max`, and our parser's names for those two boxes are SWAPPED relative to benilla's
+ * (see the `vertexRadius` comment in the constructor): `minVertexBox`/`maxVertexBox` is the authored
+ * RENDER box, `minBoundingBox`/`maxBoundingBox` is the collision hull's. Reading the collision box here
+ * would silently size the ring off a 0.76-yd post -- round 21's finding about the pick's narrow phase.
+ *
+ * Returns 0 when nothing can be read; the ring then falls back to its own radius, exactly as the
+ * reference does for a model-less unit.
+ */
+function ringFootprintOf(data: any, modelAnim: ModelAnim): number {
+  const footprint = (dx: number, dy: number) => Math.sqrt(0.5 * Math.sqrt(dx * dx + dy * dy));
+
+  // Stand is animation id 0. `resolve(0, false)` refuses to console a missing id with the first
+  // playable sequence, which is what we want -- a model with no Stand must reach the header box below
+  // rather than take some other clip's footprint.
+  const stand = modelAnim.resolve(0, false);
+  const record = stand === null ? null : (data.animations || [])[stand.index];
+  if (record && record.minBoundingBox && record.maxBoundingBox) {
+    const dx = record.maxBoundingBox.x - record.minBoundingBox.x;
+    const dy = record.maxBoundingBox.y - record.minBoundingBox.y;
+    if (Number.isFinite(dx) && Number.isFinite(dy) && (dx !== 0 || dy !== 0)) {
+      return footprint(dx, dy);
+    }
+  }
+
+  const min = data.minVertexBox;
+  const max = data.maxVertexBox;
+  if (min && max) {
+    const dx = max.x - min.x;
+    const dy = max.y - min.y;
+    if (Number.isFinite(dx) && Number.isFinite(dy)) {
+      return footprint(dx, dy);
+    }
+  }
+
+  return 0;
+}
+
 class M2 extends THREE.Group {
   static CacheManager = CacheManager;
   static cache = {};
@@ -56,6 +117,12 @@ class M2 extends THREE.Group {
   boundingNormals: [];
   boundingTriangles: [];
   vertexRadius: number;
+  /**
+   * MODEL-LOCAL (pre-scale) radius of the ground SELECTION RING -- `sqrt(0.5 * sqrt(dx^2 + dy^2))`
+   * over the **Stand** sequence's own bounding box, horizontal extents only. Computed in
+   * `ringFootprintOf`; see that function for the source and for why it is not the bounding sphere.
+   */
+  ringFootprint: number;
   /**
    * MODEL-GLOBAL: does this model have any animated bone at all?
    *
@@ -241,6 +308,9 @@ class M2 extends THREE.Group {
 
     this.animated = this.modelAnim.animated;
     this.instanceAnim = this.animated ? new InstanceAnim(this.modelAnim) : null;
+
+    // After `modelAnim`, because the Stand sequence is resolved through it.
+    this.ringFootprint = ringFootprintOf(data, this.modelAnim);
 
     traceStage('m2.skeleton', path, () => this.createSkeleton(data.bones));
 

@@ -28,6 +28,10 @@
  */
 import { LuaVM } from '../vm';
 import { notImplemented } from '../methods/region';
+// A PURE TABLE, not a world handle -- `selectionColor` takes three plain values and returns three
+// numbers. The "no world, no network, no guids" rule above is intact: nothing here can reach a `World`
+// through it. It lives beside the ground ring because the ring is the selector's other surface.
+import { selectionColor } from '../../../../world/selection-color';
 
 /**
  * What the host knows about one unit, at one instant.
@@ -369,20 +373,13 @@ export function installUnitsApi(vm: LuaVM): void {
     if (unit === undefined) {
       return white;
     }
-    const reaction = unit.reaction;
-    if (reaction <= 2) {
-      return [1, 0, 0, 1];
-    }
-    if (unit.isPlayer) {
-      return [0.376, 0.376, 1, 1];
-    }
-    if (reaction === 3) {
-      return [1, 0.502, 0, 1];
-    }
-    if (reaction === 4) {
-      return [1, 1, 0, 1];
-    }
-    return [0, 1, 0, 1];
+    // ONE LAW, ONE FUNCTION -- `world/selection-color.ts` is the selector, shared with the ground
+    // selection ring. The palette used to be spelled out here; the reference records what happens when
+    // the two surfaces the selector feeds keep separate copies (`ring.rs:137-145`: the ring gained the
+    // PvP legs, the name's copy did not, and a flagged player drew a green ring under a blue name).
+    // `dead` is left at its default here -- see that file for why the gray is the ring's rule alone.
+    const [r, g, b] = selectionColor(unit.reaction, unit.isPlayer);
+    return [r, g, b, 1];
   });
   /**
    * `GetComboPoints(unit, target)` -- `ComboFrame.lua:20`, reached from `PlayerFrame_ToPlayerArt`.
