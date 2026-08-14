@@ -182,6 +182,51 @@ const COL = {
    * project's rules forbid, while a visible `$s1` says exactly what has not been computed.
    */
   description: 170,
+
+  // -- THE EFFECT BLOCK and its neighbours: everything a `$` token in a description resolves through.
+  //
+  // WHERE THESE INDICES COME FROM. Not one of them is guessed and none is new evidence: they are read
+  // straight off `wow-data-parser/dbc/entities/spell.js`, whose declared widths, summed in order, come
+  // to exactly the file's **234** columns -- and five of the columns in that sum are already
+  // established INDEPENDENTLY against the served bytes (133 `iconID`, 136 `Name`, 153 `NameSubtext`,
+  // 170 `Description`, 204 `manaCostPercentage`, 205/206 the GCD pair; see the comments above). A run
+  // that lands on five known columns cannot be off by one anywhere between them, and the effect block
+  // at 71..121 sits inside that run.
+  //
+  // Each is the FIRST of three per-effect words; effect n (1-based) is `COL.x + n - 1`.
+  /** `EffectDieSides[0..2]`. With `effectBasePoints`, this is the min/max pair -- see `effectMin`. */
+  effectDieSides: 74,
+  /** `EffectRealPointsPerLevel[0..2]`, a FLOAT. The per-level growth term; 0 for most player spells. */
+  effectRealPointsPerLevel: 77,
+  /** `EffectBasePoints[0..2]`, SIGNED. Stores value-1: the minimum is `basePoints + 1`. See `effectMin`. */
+  effectBasePoints: 80,
+  /** `EffectRadiusIndex[0..2]` -> `SpellRadius.dbc`. `$a<n>`. */
+  effectRadiusIndex: 92,
+  /** `EffectAmplitude[0..2]`, MILLISECONDS between ticks of a periodic effect. `$t<n>`. */
+  effectAmplitude: 98,
+  /** `EffectChainTarget[0..2]`. `$x<n>`. */
+  effectChainTargets: 104,
+  /** `EffectPointsPerComboPoint[0..2]`, a FLOAT. `$b<n>` -- Eviscerate's 5.0 per combo point. */
+  effectPointsPerComboPoint: 119,
+  /** `DurationIndex` -> `SpellDuration.dbc`. `$d`. */
+  durationIndex: 40,
+  /** `ProcChance`. `$h`. */
+  procChance: 35,
+  /** `StackAmount`. `$n`. */
+  stackAmount: 49,
+  /** `MaxAffectedTargets`. `$u`. */
+  maxAffectedTargets: 212,
+  /** `BaseLevel` and `MaxLevel`, the clamp either side of the per-level term. See `effectMin`. */
+  baseLevel: 38,
+  maxLevel: 37,
+  /** `SchoolMask` -- which of the seven schools `$SP` should read. */
+  schoolMask: 225,
+  /**
+   * `SpellDescriptionVariableID` -> `SpellDescriptionVariables.dbc`, where `$<mult>` and `$<percent>`
+   * actually live. The LAST-but-one column, and the one that closes the 234 (see the file's tail
+   * comment in `entities/spell.js`).
+   */
+  descriptionVariablesID: 232,
 } as const;
 
 /** The head of a `Spell.dbc` row -- only what a button, a cast and a tooltip line need. */
@@ -274,6 +319,96 @@ export interface SpellRow {
   rangeIndex: number;
   /** Percent of BASE mana, used where `manaCost` is 0. See `spellCost` for why both are needed. */
   manaCostPercentage: number;
+
+  /**
+   * The three effects' columns, index 0 = effect 1. See `COL.effectDieSides` for where they come from
+   * and `effectRange` for the min/max identity they define.
+   */
+  effectBasePoints: number[];
+  effectDieSides: number[];
+  effectRealPointsPerLevel: number[];
+  effectPointsPerComboPoint: number[];
+  effectRadiusIndex: number[];
+  effectAmplitudeMs: number[];
+  effectChainTargets: number[];
+
+  /** `DurationIndex` (`$d`), `ProcChance` (`$h`), `StackAmount` (`$n`), `MaxAffectedTargets` (`$u`). */
+  durationIndex: number;
+  procChance: number;
+  stackAmount: number;
+  maxAffectedTargets: number;
+
+  /** The clamp either side of the per-level term. See `effectRange`. */
+  baseLevel: number;
+  maxLevel: number;
+
+  /** `SchoolMask` -- which school's `GetSpellBonusDamage` `$SP` reads. */
+  schoolMask: number;
+
+  /** `SpellDescriptionVariableID`: 0, or a row of `SpellDescriptionVariables.dbc`. */
+  descriptionVariablesID: number;
+}
+
+/**
+ * The min and max an effect can roll, at a given caster level -- the identity every numeric token in a
+ * description is built out of.
+ *
+ * ## The identity, and how it was checked
+ *
+ * `min = EffectBasePoints + 1` and `max = EffectBasePoints + EffectDieSides`. The column stores
+ * value-1, which is why the `+1`. Verified against two spells whose real 3.3.5a tooltips the owner
+ * himself photographed, both chosen because their `EffectRealPointsPerLevel` is **0**, so the level
+ * term below cannot be hiding an error:
+ *
+ *     1752 Sinister Strike r1  effect 1 basePoints 2, dieSides 1  -> min 3, max 3
+ *          description "An instant strike that causes $m1 damage ... Awards $s2 combo $lpoint:points;."
+ *          effect 2 basePoints 0, dieSides 1 -> $s2 = 1, i.e. "3 damage ... Awards 1 combo point."
+ *     2098 Eviscerate r1       effect 1 basePoints 0, dieSides 5, pointsPerComboPoint 5.0
+ *          description "1 point: ${$m1+(($b1*1)+$AP*0.03)*$<mult>}-${$M1+(($b1*1)+$AP*0.07)*$<mult>}"
+ *          -> m1 = 1, M1 = 5, b1 = 5, and with mult 1 and AP 0 that is **6-10 damage**, which is
+ *          Eviscerate rank 1 at one combo point.
+ *
+ * Both fall out of the same two columns with no free parameter, which is the whole of the check: a
+ * different reading (`basePoints` alone, or `basePoints + dieSides` as the single value) gets one of
+ * the two wrong.
+ *
+ * ## The level term, and it is the part that is NOT verified here
+ *
+ * `level` is clamped into `[BaseLevel, MaxLevel]` (`MaxLevel = 0` meaning no cap), `SpellLevel` is
+ * subtracted, and `RealPointsPerLevel` multiplies the remainder, truncated. That shape is
+ * **TrinityCore 3.3.5's `SpellInfo::Effect::CalcValue`** -- a SERVER source, not a file in this repo
+ * and not the client's own -- and nothing served here corroborates the choice of `SpellLevel` over
+ * `BaseLevel` as the subtrahend, or truncation over rounding. It is labelled rather than hidden.
+ *
+ * What limits the damage: `RealPointsPerLevel` is 0 for the great majority of player abilities,
+ * including BOTH spells above and every rogue ability in the owner's examples, so the term vanishes
+ * and the identity that IS verified is what renders. Where it is non-zero (Fireball r1 carries 0.6
+ * with `MaxLevel` 5) the number can be off by the truncation and the wrong-subtrahend risk, and that
+ * is a known, stated limit rather than a silent one.
+ */
+export function effectRange(
+  row: SpellRow,
+  effectIndex: number,
+  casterLevel: number,
+): { min: number; max: number } {
+  const basePoints = row.effectBasePoints[effectIndex] ?? 0;
+  const dieSides = row.effectDieSides[effectIndex] ?? 0;
+  const perLevel = row.effectRealPointsPerLevel[effectIndex] ?? 0;
+
+  let level = casterLevel;
+  if (row.maxLevel > 0 && level > row.maxLevel) {
+    level = row.maxLevel;
+  }
+  if (level < row.baseLevel) {
+    level = row.baseLevel;
+  }
+  const growth = Math.trunc((level - row.spellLevel) * perLevel);
+
+  // `dieSides` 0 means the effect has no roll at all: min and max are both `basePoints + 1`, which is
+  // what the stored value-1 encoding makes the single value. Folding 0 to 1 here rather than
+  // special-casing keeps one expression for all three cases (0, 1, n).
+  const sides = dieSides > 0 ? dieSides : 1;
+  return { min: basePoints + growth + 1, max: basePoints + growth + sides };
 }
 
 class SpellData {
@@ -298,6 +433,36 @@ class SpellData {
 
   /** `SpellRange.dbc` id -> `maxRangeHostile`, in YARDS. What `IsActionInRange` is judged against. */
   private ranges: Map<number, number> | null = null;
+
+  /** `SpellDuration.dbc` id -> `baseDuration` in MILLISECONDS. `$d`'s source. */
+  private durations: Map<number, number> | null = null;
+
+  /** `SpellRadius.dbc` id -> `radius` in YARDS. `$a<n>`'s source. */
+  private radii: Map<number, number> | null = null;
+
+  /**
+   * `SpellDescriptionVariables.dbc` id -> its raw `Variables` string. **THIS IS WHERE `$<mult>` AND
+   * `$<percent>` LIVE**, and neither is a constant to hard-code.
+   *
+   * The file is 2,787 bytes: **30 records, 2 fields, recordSize 8**, column 1 a `StringRef`
+   * (`wow-data-parser/dbc/entities/spell-description-variables.js`), selected by `Spell.dbc` column
+   * 232. Read off the served file, the two rows the owner's own examples select are:
+   *
+   *     id 169 (2098 Eviscerate)
+   *       $mult1=$?s14162[${1.07}][${1.0}]
+   *       $mult2=$?s14163[${1.14}][${$<mult1>}]
+   *       $mult=$?s14164[${1.2}][${$<mult2>}]
+   *     id 171 (1752 Sinister Strike)
+   *       $aggression1=$?s18427[${103}][${100}]
+   *       ... four more ...
+   *       $percent=$?s61331[${115}][${$<aggression4>}]
+   *
+   * So both named variables are TALENT LADDERS: each line asks whether the player knows a talent spell
+   * and falls back to the previous rung. With no talents, `$<mult>` is **1.0** and `$<percent>` is
+   * **100** -- values that are computed from the served table and the player's own known-spell set, not
+   * chosen. `spell-description.ts` evaluates them; see `$?s` there for the predicate.
+   */
+  private descVarRows: Map<number, string> | null = null;
 
   private pending: Promise<void> | null = null;
 
@@ -329,13 +494,49 @@ class SpellData {
     // must not wait on 49 MB because it decides which slots the buttons address, whereas a range check is
     // useless without `Spell.dbc`'s own `rangeIndex` anyway. It is 6 KB behind a fetch that is already
     // happening.
-    const [spells, icons, visuals, kits, ranges] = await Promise.all([
+    // `SpellDuration` (2.1 KB), `SpellRadius` (0.9 KB) and `SpellDescriptionVariables` (2.8 KB) ride
+    // along for the same reason `SpellRange` does: together they are under 6 KB behind a 49 MB fetch
+    // that is already in flight, and none of them is useful without `Spell.dbc`'s own index columns.
+    const [spells, icons, visuals, kits, ranges, durations, radii, descVars] = await Promise.all([
       this.loadSpells(),
       DBC.load('SpellIcon'),
       DBC.load('SpellVisual'),
       DBC.load('SpellVisualKit'),
       DBC.load('SpellRange'),
+      DBC.load('SpellDuration'),
+      DBC.load('SpellRadius'),
+      DBC.load('SpellDescriptionVariables'),
     ]);
+
+    this.durations = new Map<number, number>();
+    for (const record of (durations as any).records ?? []) {
+      // `baseDuration` is MILLISECONDS and is SIGNED -- **-1 means "no natural end"** (row 21 of the
+      // served file), which `spell-description.ts#formatDuration` renders through the client's own
+      // `SPELL_DURATION_UNTIL_CANCELLED`. `entities/spell-duration.js` carries the measurement and why
+      // reading it unsigned printed "4294967.295 sec".
+      //
+      // `perLevel`/`maxDuration` are not read: the client's `$d` prints the base duration, and applying
+      // a per-level term would be a guess at a formula nothing served states. Where the two differ the
+      // printed number is the base one, and that is a stated limit -- 13 of the 130 rows have a base
+      // above their own max.
+      if (record && typeof record.baseDuration === 'number') {
+        this.durations.set(record.id, record.baseDuration);
+      }
+    }
+
+    this.radii = new Map<number, number>();
+    for (const record of (radii as any).records ?? []) {
+      if (record && typeof record.radius === 'number') {
+        this.radii.set(record.id, record.radius);
+      }
+    }
+
+    this.descVarRows = new Map<number, string>();
+    for (const record of (descVars as any).records ?? []) {
+      if (record && typeof record.variables === 'string' && record.variables !== '') {
+        this.descVarRows.set(record.id, record.variables);
+      }
+    }
 
     this.ranges = new Map<number, number>();
     for (const record of (ranges as any).records ?? []) {
@@ -447,6 +648,11 @@ class SpellData {
     for (let i = 0; i < recordCount; i += 1) {
       const at = HEADER + i * recordSize;
       const col = (index: number) => view.getUint32(at + index * 4, true);
+      // `EffectBasePoints` is SIGNED (a heal's cost effect and every debuff store negatives) and both
+      // per-level columns are IEEE FLOATS -- reading either as a uint gives 1065353216 for 1.0.
+      const int = (index: number) => view.getInt32(at + index * 4, true);
+      const flt = (index: number) => view.getFloat32(at + index * 4, true);
+      const three = (base: number, read: (i: number) => number) => [read(base), read(base + 1), read(base + 2)];
       const id = col(COL.id);
       if (id === 0) {
         continue;
@@ -474,6 +680,24 @@ class SpellData {
         startRecoveryCategory: col(COL.startRecoveryCategory),
         rangeIndex: col(COL.rangeIndex),
         manaCostPercentage: col(COL.manaCostPercentage),
+
+        // THE EFFECT BLOCK -- what every `$` token in a description resolves through. See
+        // `COL.effectDieSides` for the indices and `effectRange` for what the first two mean.
+        effectBasePoints: three(COL.effectBasePoints, int),
+        effectDieSides: three(COL.effectDieSides, int),
+        effectRealPointsPerLevel: three(COL.effectRealPointsPerLevel, flt),
+        effectPointsPerComboPoint: three(COL.effectPointsPerComboPoint, flt),
+        effectRadiusIndex: three(COL.effectRadiusIndex, col),
+        effectAmplitudeMs: three(COL.effectAmplitude, col),
+        effectChainTargets: three(COL.effectChainTargets, col),
+        durationIndex: col(COL.durationIndex),
+        procChance: col(COL.procChance),
+        stackAmount: col(COL.stackAmount),
+        maxAffectedTargets: col(COL.maxAffectedTargets),
+        baseLevel: col(COL.baseLevel),
+        maxLevel: col(COL.maxLevel),
+        schoolMask: col(COL.schoolMask),
+        descriptionVariablesID: col(COL.descriptionVariablesID),
       });
     }
     return rows;
@@ -507,6 +731,21 @@ class SpellData {
     }
     const yards = this.ranges?.get(row.rangeIndex) ?? null;
     return yards !== null && yards > 0 ? yards : null;
+  }
+
+  /** `SpellDuration.dbc` base duration in MILLISECONDS, or null. `$d`'s lookup. */
+  durationMs(durationIndex: number): number | null {
+    return durationIndex > 0 ? this.durations?.get(durationIndex) ?? null : null;
+  }
+
+  /** `SpellRadius.dbc` radius in YARDS, or null. `$a<n>`'s lookup. */
+  radiusYards(radiusIndex: number): number | null {
+    return radiusIndex > 0 ? this.radii?.get(radiusIndex) ?? null : null;
+  }
+
+  /** The raw `SpellDescriptionVariables.dbc` assignment block, or null. See the field's comment. */
+  descriptionVariables(variablesId: number): string | null {
+    return variablesId > 0 ? this.descVarRows?.get(variablesId) ?? null : null;
   }
 
   iconPath(spellId: number): string | null {
