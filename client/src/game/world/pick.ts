@@ -5,34 +5,69 @@
  *
  * The reference does this in two phases (`samples/benilla/crates/benilla/src/target/hover.rs:1-6`,
  * `:69-80`): a **broad phase** of the cursor ray against the current animation's bounding SPHERE,
- * then a **narrow phase** of the ray against the unit's POSED render mesh, triangle by triangle,
+ * then a **narrow phase** of the ray against the unit's **POSED RENDER MESH**, triangle by triangle,
  * with a +1-model-unit halo retry when nothing hits exactly.
  *
- * **The broad phase is the sphere below. The narrow phase is the M2's own AUTHORED COLLISION HULL**
- * (`boundingVertices` / `boundingTriangles`, which `pipeline/m2/index.ts#createBoundingMesh` already
- * meshes as `BoundingMesh` and `collision/doodad-provider.ts` already reads triangles off for every
- * doodad in the world). It is a handful of triangles, it is on the CPU, and it needs no skinning --
- * so the narrow phase costs a ray against ~12 triangles per candidate and no readback.
+ * **Both are ported now. The narrow phase is the DRAWN geometry, posed** -- every visible batch mesh
+ * under every visible `Submesh`, through three's own `Mesh#raycast`, which for a `SkinnedMesh` reads
+ * each vertex through `getVertexPosition` -> `applyBoneTransform` (`three.core.js:23990-23996`,
+ * `:24095`). That skins on the CPU out of `skeleton.bones[i].matrixWorld` and `boneInverses`, which
+ * are CPU-side rows the renderer already maintains.
  *
- * **This is NOT the reference's narrow phase and the difference is stated.** The reference tests the
- * posed RENDER mesh; the hull is authored, static in model space, and coarse -- a box for a humanoid.
- * So a click at the tip of a raised sword still misses, and a click inside the hull but beside the
- * animated body still hits. What it does fix is the reported defect: the SPHERE's radius is the
- * model's whole render bounding-sphere radius, which for a quadruped is half its body LENGTH taken
- * as a radius in every direction, so a click a body-length above or beside a wolf was inside it.
- * A unit whose model has not streamed in yet, or whose M2 ships no collision geometry at all (many
- * do not -- see `createBoundingMesh`), keeps the SPHERE as its volume rather than becoming
- * unclickable; `PickTraceRow.fallback` reports that per candidate so the generosity is visible
- * instead of assumed.
+ * **ROUND 20 USED THE M2'S AUTHORED COLLISION HULL HERE AND IT WAS THE WRONG ORACLE**, which is the
+ * owner's "если тыкаю на заднюю часть волка, не выделяется, а если на голову, срабатывает". Two
+ * independent reasons, and the second is the sharp one:
+ *
+ *  1. The hull is 12 triangles -- a BOX -- authored in model space and static, so it cannot follow a
+ *     posed quadruped whose body extends behind its origin.
+ *  2. **The hull and the drawn geometry are built in DIFFERENT VERTEX SPACES.**
+ *     `pipeline/m2/index.ts#createSubmeshGeometry` emits the drawn vertices as
+ *     `(position[0], position[2], -position[1])` (`:672`) -- the engine-axis swizzle -- while
+ *     `#createBoundingMesh` emits `(x, y, -z)` and then applies `makeScale(-1, 1, 1)` and
+ *     `rotateX(-PI)` (`:315`, `:327-330`), which composes to `(-x, -y, z)`: a 180-degree turn about
+ *     Z with no swizzle at all. Neither `boundingVertices` nor `vertices[].position` is swizzled by
+ *     the parser (`wow-data-parser/m2/index.js:83-89`, `:222`, both raw `float32` triples), so the
+ *     two really are in different frames and the hull cannot align with the body it belongs to.
+ *     `PickReport` carries `hullBox` and `posedBox` per candidate so this is a measurement and not an
+ *     argument -- see the round-21 numbers in `task-9-report.md`.
+ *
+ * **This is also a live suspicion about DOODAD COLLISION and it is NOT touched here**:
+ * `collision/doodad-provider.ts` reads the same hull, so if the frames really do disagree then every
+ * doodad in the world collides in a rotated volume. That is a separate subsystem with its own
+ * verification (walking, the camera boom), and STATE.md already carries an unexplained "collision
+ * stall after 30-40 yd of walking". Reported, not changed.
+ *
+ * A unit whose model has not streamed in, or that draws nothing yet, keeps the SPHERE as its volume
+ * rather than becoming unclickable (peers sit at `seq -1` for 9.2-9.5 s), and
+ * `PickTraceRow.fallback` reports that per candidate so the generosity is visible instead of assumed.
+ *
+ * NOT ported, and named: the reference's **pass-2 halo** -- the same posed mesh with every vertex
+ * displaced one model unit along its skinned normal, tried only when pass 1 hits nothing anywhere
+ * (`hover.rs:69-80`). It needs a per-vertex normal skin and a second full pass; the measured
+ * first-miss margin without it is 0.5-0.8 yd off the body, which is already tighter than the
+ * complaint. If the owner reports a click ON the animal missing, this is the piece to add.
+ *
+ * ## Range: the mouse pick is UNBOUNDED, and 41 yd was ours
+ *
+ * `PICK_RANGE` is `targetNearestDistance`, a **TAB** law (`target/scan.rs:96-98`), and round 20 let it
+ * govern the mouse pick too -- so a mob further than 41 yd could not be clicked. That is the owner's
+ * "если моб слишком далеко, то не могу выбрать его", and the narrow phase made it worse rather than
+ * causing it: the SPHERE's entry point sits up to a radius (7.11 yd measured) nearer than the body,
+ * so the old pick effectively reached 41 yd PLUS the radius. The reference's mouse pick has no range
+ * at all -- "both object picks below run **unbounded** and post-compare against" the world occlusion
+ * (`hover.rs:29-33`). So there is no range test here now. `PICK_RANGE` stays exported for `scan.ts`,
+ * which is where it belongs.
  *
  * ## Occlusion
  *
- * The reference's occlusion leg (`hover.rs#update_pick_occlusion` -- discard an object the terrain
- * hides) IS ported: one zero-radius cast from the camera to the accepted hit point through
- * `collisionWorld`, the same terrain + WMO + doodad set the camera boom already sweeps. It is
- * possible here only because a unit's OWN hull is not in that set -- `Unit`'s `set model`
- * deliberately removes it (`classes/unit.ts:1150-1156`), so a cast toward a wolf cannot be occluded
- * by the wolf.
+ * `hover.rs#update_pick_occlusion`: ONE ray through the occluder set (terrain, WMO faces, static
+ * doodad hulls -- deliberately NOT net entities, "a chest must not occlude itself"), and the object
+ * hit is discarded **iff the world hit is strictly nearer** ("`0x480eb4`: tie keeps the object").
+ * Ported with that structure: one zero-radius `CollisionLayer.Camera` cast per pick, reaching as far
+ * as the FARTHEST surviving candidate, then a distance compare. It is possible at all only because a
+ * unit's own hull is not in that set -- `Unit`'s `set model` removes it (`classes/unit.ts:1150-1156`).
+ * A contact within `CAMERA_INSIDE_EPS` of the camera is the camera being INSIDE geometry and does not
+ * occlude anything (OURS: without it a camera clipped into a hillside makes every unit unclickable).
  *
  * ## The control arms
  *
@@ -54,7 +89,11 @@ import * as THREE from 'three';
 import Unit from '../classes/unit';
 import type { CastFn } from '../collision/collision-world';
 
-/** Nothing beyond this is pickable. The reference keeps 1.12's `targetNearestDistance` 41 yd. */
+/**
+ * TAB's targeting range (yd) -- 1.12's byte-verified `targetNearestDistance` default
+ * (`target/scan.rs:96-98`). **It is NOT the mouse pick's range**; see the header. `scan.ts` is the
+ * only consumer.
+ */
 export const PICK_RANGE = 41;
 
 /** `ObjectType.Unit` / `ObjectType.Player`, by value so this module does not depend on `network/`. */
@@ -62,14 +101,16 @@ const OBJECT_TYPE_UNIT = 3;
 const OBJECT_TYPE_PLAYER = 4;
 
 /**
- * How much closer than the hit point an occluder has to be to count (yards). OURS, not sourced.
+ * Float slack on the occlusion compare (yards). OURS, and much smaller than round 20's 0.25.
  *
- * The hull's own surface is routinely embedded in the ground -- a creature's authored volume starts
- * at its feet -- so the terrain triangle the unit is standing on sits within float error of the
- * accepted hit point on any downward-looking click. A quarter yard is the smallest clearance that
- * covers that without letting a real wall this close to the target through.
+ * The reference's rule is "discard iff the world hit is STRICTLY nearer -- tie keeps the object"
+ * (`hover.rs:29-33`), and with the narrow phase on the posed RENDER mesh the hit point is on the drawn
+ * surface, so the ground the unit stands on is genuinely BEHIND it and no geometric clearance is
+ * needed. What is left is float noise between two different intersection routines, which is what this
+ * covers. Round 20 needed 0.25 because it tested the AUTHORED HULL, whose surface is routinely
+ * embedded in the ground.
  */
-const OCCLUSION_SKIN = 0.25;
+const OCCLUSION_SLACK = 0.02;
 
 /**
  * A cast that reports contact this close to the camera is the camera being INSIDE geometry, not an
@@ -81,12 +122,12 @@ const CAMERA_INSIDE_EPS = 0.1;
 const rayOrigin = new THREE.Vector3();
 const rayDirection = new THREE.Vector3();
 const toCentre = new THREE.Vector3();
-const _inverse = new THREE.Matrix4();
-const _localRay = new THREE.Ray();
-const _a = new THREE.Vector3();
-const _b = new THREE.Vector3();
-const _c = new THREE.Vector3();
-const _point = new THREE.Vector3();
+const _scratchBox = new THREE.Box3();
+const _unionBox = new THREE.Box3();
+
+/** Reused across picks. three's raycast contract is a `Raycaster` carrying the ray plus near/far. */
+const raycaster = new THREE.Raycaster();
+const meshHits: THREE.Intersection[] = [];
 
 /** The pick sphere's centre (written into `out`) and radius for one unit. */
 function pickSphere(unit: Unit, out: THREE.Vector3): number {
@@ -104,12 +145,23 @@ export interface PickTraceRow {
   guid: string;
   sphereRadius: number;
   sphereEntry: number;
-  /** How many triangles the M2's authored hull has. 0 means there is none to test. */
-  hullTriangles: number;
-  /** The hull's nearest hit along the ray, or null when the ray misses every triangle. */
-  hullEntry: number | null;
-  /** True when the sphere stood in for a missing hull (no model yet, or an M2 with no hull). */
+  /** How many triangles of DRAWN, posed geometry the narrow phase tested. */
+  meshTriangles: number;
+  /** How many visible batch meshes it walked. 0 means there is nothing drawn to test yet. */
+  meshes: number;
+  /** The posed render mesh's nearest hit along the ray, or null when the ray misses it. */
+  meshEntry: number | null;
+  /** True when the sphere stood in because nothing was drawn yet. */
   fallback: boolean;
+  /**
+   * The DRAWN geometry's world box and the AUTHORED HULL's world box, `[minx,miny,minz,maxx,maxy,maxz]`.
+   *
+   * Reported, and the hull one is used by NOTHING. Comparing them is what convicts the hull as the
+   * wrong oracle -- "measure the RENDERED geometry, not a model-space proxy", which is the whole reason
+   * these two fields exist rather than a claim in a comment.
+   */
+  drawnBox: number[] | null;
+  hullBox: number[] | null;
   /** How far the occluder was, when one rejected this candidate. */
   occludedAt: number | null;
   /** What the pick used for this candidate, or null when it was rejected. */
@@ -156,56 +208,168 @@ function resolveOptions(options: PickOptions): { narrow: boolean; occlude: boole
 }
 
 /**
- * The ray's nearest hit against a unit's authored collision hull, or null.
+ * The ray's nearest hit against a unit's DRAWN, POSED geometry -- the reference's narrow phase.
  *
- * The test runs in the hull's LOCAL space -- one inverse matrix per candidate instead of
- * transforming every vertex, which is `doodad-provider.ts#gatherOne`'s own argument. The returned
- * POINT is then taken back to world space and projected on the world ray, so the distance is a world
- * distance even under a non-uniform model scale (three's `Ray#applyMatrix4` normalises the direction
- * it transforms, so the local parameter `t` is not a world one -- the point is).
+ * Walks the model's `Submesh` groups and their batch meshes, skipping anything not `visible`, so a
+ * hidden geoset (a character's unworn hair, a suppressed particle template) is not clickable -- which
+ * is the reason to walk the DRAW graph rather than the merged `M2#geometry`. That merged geometry also
+ * carries NO index buffer (`pipeline/m2/index.ts:527-531` sets position, skinIndex and skinWeight and
+ * nothing else), so raycasting it would read the vertex list as a triangle soup and hit surfaces the
+ * model does not have.
+ *
+ * `mesh.raycast` is three's own, and for a `SkinnedMesh` it poses every vertex it tests
+ * (`three.core.js:23990-23996` -> `applyBoneTransform` at `:24095`, which reads
+ * `skeleton.bones[i].matrixWorld` and `boneInverses` -- CPU-side rows the renderer already maintains,
+ * so "there is no CPU skinning path to read the pose back through" was wrong).
+ * Two consequences worth naming:
+ *
+ *  - its early reject is the geometry's BIND-POSE bounding sphere transformed by `matrixWorld`
+ *    (`three.core.js:23527-23540`), so a pose that throws a limb outside the bind sphere could reject
+ *    a legitimate hit. Not observed, and our own broad phase is far larger; named because it is the
+ *    one place this narrow phase could still be too tight.
+ *  - `matrixWorld` has to be current. Every mesh here is built with `matrixAutoUpdate = false`
+ *    (`m2/index.ts:337`, `submesh.js:186`) and the scene root does not walk static subtrees, so this
+ *    refreshes the subtree first -- the same argument `doodad-provider.ts#gatherOne` makes for a hull
+ *    left at the origin. `updateWorldMatrix` only recomputes `matrixWorld` from parents; it cannot
+ *    disturb the animation's own local matrices.
+ *
+ * Geometries are de-duplicated because a submesh with two batches draws the same geometry twice under
+ * the same transform (`submesh.js#applyBatches`), and a second identical raycast buys nothing.
  */
-function hullEntry(unit: Unit): { entry: number | null; triangles: number } {
-  const mesh = unit.model?.boundingMesh;
-  const geometry = mesh?.geometry as THREE.BufferGeometry | undefined;
-  const positions = geometry?.getAttribute('position') as THREE.BufferAttribute | undefined;
-  const index = geometry?.getIndex() ?? null;
-  const count = index ? index.count : (positions?.count ?? 0);
-  if (!mesh || !positions || count < 3) {
-    return { entry: null, triangles: 0 };
+function posedMeshEntry(unit: Unit): {
+  entry: number | null; triangles: number; meshes: number; box: number[] | null;
+} {
+  const model = unit.model;
+  const submeshes = model
+    ? (model as unknown as { submeshes?: THREE.Object3D[] }).submeshes
+    : undefined;
+  if (!model || !submeshes || submeshes.length === 0) {
+    return { entry: null, triangles: 0, meshes: 0, box: null };
   }
 
-  // The same refresh `doodad-provider.ts` documents: a hull is a child built at M2 construction with
-  // `matrixAutoUpdate` copied from its model, and the scene root does not walk static subtrees.
-  mesh.updateWorldMatrix(true, false);
-  _inverse.copy(mesh.matrixWorld).invert();
-  _localRay.origin.copy(rayOrigin);
-  _localRay.direction.copy(rayDirection);
-  _localRay.applyMatrix4(_inverse);
+  model.updateWorldMatrix(true, true);
+  raycaster.set(rayOrigin, rayDirection);
+  raycaster.near = 0;
+  raycaster.far = Infinity;
 
   let nearest: number | null = null;
-  for (let i = 0; i + 2 < count; i += 3) {
-    const i0 = index ? index.getX(i) : i;
-    const i1 = index ? index.getX(i + 1) : i + 1;
-    const i2 = index ? index.getX(i + 2) : i + 2;
-    _a.fromBufferAttribute(positions, i0);
-    _b.fromBufferAttribute(positions, i1);
-    _c.fromBufferAttribute(positions, i2);
-    // BACKFACES COUNT. WoW's collision hulls carry no guaranteed outward winding (the same reason
-    // `capsule-cast.ts` derives its side from geometry), and a camera sitting inside a hull sees only
-    // its far faces.
-    if (_localRay.intersectTriangle(_a, _b, _c, false, _point) === null) {
+  let triangles = 0;
+  let meshes = 0;
+  const seen = new Set<THREE.BufferGeometry>();
+  _unionBox.makeEmpty();
+
+  for (const submesh of submeshes) {
+    if (!submesh.visible) {
       continue;
     }
-    _point.applyMatrix4(mesh.matrixWorld).sub(rayOrigin);
-    const along = _point.dot(rayDirection);
-    if (along < 0) {
-      continue;
-    }
-    if (nearest === null || along < nearest) {
-      nearest = along;
+    for (const child of submesh.children) {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.visible || (mesh as { isMesh?: boolean }).isMesh !== true) {
+        continue;
+      }
+      const geometry = mesh.geometry as THREE.BufferGeometry;
+      if (!geometry || seen.has(geometry)) {
+        continue;
+      }
+      seen.add(geometry);
+      meshes += 1;
+      const index = geometry.getIndex();
+      const position = geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+      triangles += Math.floor((index ? index.count : (position ? position.count : 0)) / 3);
+      // The DRAWN world box, for the instrument only.
+      if (geometry.boundingBox === null) {
+        geometry.computeBoundingBox();
+      }
+      if (geometry.boundingBox) {
+        _unionBox.union(_scratchBox.copy(geometry.boundingBox).applyMatrix4(mesh.matrixWorld));
+      }
+
+      meshHits.length = 0;
+      mesh.raycast(raycaster, meshHits);
+      for (const hit of meshHits) {
+        if (hit.distance >= 0 && (nearest === null || hit.distance < nearest)) {
+          nearest = hit.distance;
+        }
+      }
     }
   }
-  return { entry: nearest, triangles: Math.floor(count / 3) };
+  meshHits.length = 0;
+  return {
+    entry: nearest,
+    triangles,
+    meshes,
+    box: _unionBox.isEmpty() ? null : boxArray(_unionBox),
+  };
+}
+
+/** `Box3` -> the six numbers a probe can compare. */
+function boxArray(box: THREE.Box3): number[] {
+  return [box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z];
+}
+
+/**
+ * The DRAWN geometry's world box for one unit, or null while it draws nothing.
+ *
+ * Exported for the instrument. `worldUnits()` aimed its probe clicks at the unit's MIDRIFF -- feet plus
+ * half a collision height, the point `pickSphere` centres on -- and for a FLYING creature that is below
+ * the body it draws: measured on a Vale Moth, a click at the midriff missed while the same click 20-40
+ * px higher hit. An instrument that aims at a model-space proxy cannot judge a pick against the rendered
+ * geometry, which is the whole lesson of the earlier text rounds.
+ */
+export function drawnWorldBox(unit: Unit): number[] | null {
+  const model = unit.model;
+  const submeshes = model
+    ? (model as unknown as { submeshes?: THREE.Object3D[] }).submeshes
+    : undefined;
+  if (!model || !submeshes || submeshes.length === 0) {
+    return null;
+  }
+  model.updateWorldMatrix(true, true);
+  _unionBox.makeEmpty();
+  for (const submesh of submeshes) {
+    if (!submesh.visible) {
+      continue;
+    }
+    for (const child of submesh.children) {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.visible || (mesh as { isMesh?: boolean }).isMesh !== true) {
+        continue;
+      }
+      const geometry = mesh.geometry as THREE.BufferGeometry;
+      if (!geometry) {
+        continue;
+      }
+      if (geometry.boundingBox === null) {
+        geometry.computeBoundingBox();
+      }
+      if (geometry.boundingBox) {
+        _unionBox.union(_scratchBox.copy(geometry.boundingBox).applyMatrix4(mesh.matrixWorld));
+      }
+    }
+  }
+  return _unionBox.isEmpty() ? null : boxArray(_unionBox);
+}
+
+/**
+ * The world box of the M2's AUTHORED COLLISION HULL -- reported by the instrument, used by NOTHING.
+ *
+ * This is the measurement that convicts the hull: against `posedMeshEntry`'s box, a hull in the same
+ * frame as the drawn body overlaps it and a hull in a different frame does not. See the header.
+ */
+function hullBoxOf(unit: Unit): number[] | null {
+  const mesh = unit.model ? unit.model.boundingMesh : null;
+  const geometry = mesh ? (mesh.geometry as THREE.BufferGeometry) : null;
+  if (!mesh || !geometry) {
+    return null;
+  }
+  mesh.updateWorldMatrix(true, false);
+  if (geometry.boundingBox === null) {
+    geometry.computeBoundingBox();
+  }
+  if (!geometry.boundingBox || geometry.boundingBox.isEmpty()) {
+    return null;
+  }
+  return boxArray(_scratchBox.copy(geometry.boundingBox).applyMatrix4(mesh.matrixWorld));
 }
 
 /**
@@ -271,50 +435,61 @@ export function pickUnit(
       guid: unit.guid,
       sphereRadius: radius,
       sphereEntry,
-      hullTriangles: 0,
-      hullEntry: null,
+      meshTriangles: 0,
+      meshes: 0,
+      meshEntry: null,
       fallback: false,
       occludedAt: null,
       entry: null,
+      drawnBox: null,
+      hullBox: trace ? hullBoxOf(unit) : null,
     };
     if (trace) {
       trace.push(row);
     }
-    if (sphereEntry < 0 || sphereEntry >= PICK_RANGE) {
+    // NO RANGE TEST. `PICK_RANGE` is TAB's law and the reference's mouse pick is unbounded; see the
+    // header. A sphere entirely behind the camera is still out, which is what this keeps.
+    if (sphereEntry < 0) {
       continue;
     }
 
     let entry = sphereEntry;
     if (narrow) {
-      const hull = hullEntry(unit);
-      row.hullTriangles = hull.triangles;
-      row.hullEntry = hull.entry;
-      if (hull.triangles === 0) {
-        // No authored hull to be precise with -- see the header. The sphere stands in, and the row
-        // says so.
+      const posed = posedMeshEntry(unit);
+      row.meshTriangles = posed.triangles;
+      row.meshes = posed.meshes;
+      row.meshEntry = posed.entry;
+      row.drawnBox = posed.box;
+      if (posed.meshes === 0) {
+        // Nothing drawn yet -- the sphere stands in, and the row says so.
         row.fallback = true;
-      } else if (hull.entry === null) {
-        // A hull the ray missed is a MISS. This is the whole of the reported defect.
+      } else if (posed.entry === null) {
+        // The ray missed every drawn triangle. This is the whole of the reported defect.
         continue;
       } else {
-        entry = hull.entry;
+        entry = posed.entry;
       }
     }
     survivors.push({ unit, entry, row });
   }
 
   survivors.sort((x, y) => x.entry - y.entry);
+
   for (const candidate of survivors) {
-    // `PICK_RANGE`, not a shrinking best-so-far: the list is already sorted, so the first survivor
-    // inside the range and not occluded IS the answer. A first draft carried a `bestDistance` that it
-    // wrote and then immediately broke out of the loop -- a dead assignment that read like a running
-    // minimum, which is worse than none.
-    if (candidate.entry >= PICK_RANGE) {
-      break;
-    }
+    // OCCLUSION, LAZILY AND ONLY AS FAR AS THIS CANDIDATE. The reference casts once per FRAME to
+    // `f32::MAX` because it re-hovers every frame (`hover.rs#update_pick_occlusion`); a click can do
+    // better, and the semantics are identical -- a world hit BEYOND the candidate cannot occlude it,
+    // so bounding the cast at the candidate's own distance answers the same question. That matters
+    // here because the cast's reach sizes the broadphase box that gathers terrain triangles: a cast
+    // to the farthest survivor (100 yd on a real screen) gathers the county, and measured it took the
+    // whole pick from 0.5 ms to 3.6 ms. The loop breaks on the first candidate it accepts, so the
+    // common case is one short cast.
     if (occlude && options.cast) {
-      const reach = candidate.entry - OCCLUSION_SKIN;
-      const hit = reach > 0 ? options.cast(rayOrigin, rayDirection, reach) : null;
+      const hit = candidate.entry > 0
+        ? options.cast(rayOrigin, rayDirection, candidate.entry - OCCLUSION_SLACK)
+        : null;
+      // "Discard iff the world hit is STRICTLY nearer -- tie keeps the object" (`hover.rs:29-33`),
+      // with `OCCLUSION_SLACK` the float margin and `CAMERA_INSIDE_EPS` the camera-in-geometry case.
       if (hit !== null && hit.distance > CAMERA_INSIDE_EPS) {
         candidate.row.occludedAt = hit.distance;
         continue;

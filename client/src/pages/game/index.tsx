@@ -15,7 +15,7 @@ import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
 import { animCounters } from '../../game/pipeline/m2/anim/counters';
 import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-warm';
 import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
-import { pickUnit, pickUnitReport } from '../../game/world/pick';
+import { pickUnit, pickUnitReport, drawnWorldBox } from '../../game/world/pick';
 import { collisionWorld } from '../../game/collision/collision-world';
 import { CollisionLayer } from '../../game/collision/types';
 import { wantsDebugPanels } from '../debug-flags';
@@ -357,6 +357,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       const world = this.game.world;
       const bounds = document.body.getBoundingClientRect();
       const point = new THREE.Vector3();
+      const body = new THREE.Vector3();
       const out: unknown[] = [];
       world.entities.forEach((unit) => {
         if (unit === world.player) {
@@ -385,6 +386,26 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
             y: bounds.top + ((1 - point.y) / 2) * bounds.height,
             behind: point.z > 1,
           },
+          // THE RENDERED BODY'S CENTRE, which is where a probe must aim. The midriff above is a
+          // model-space proxy (feet + half a collision height) and for a FLYING creature it sits
+          // BELOW the drawn body -- measured on a Vale Moth, a click there missed while the same
+          // click 20-40 px higher hit. `screen` is kept because it is what `pickSphere` uses.
+          screenBody: (() => {
+            const box = drawnWorldBox(unit);
+            if (box === null) {
+              return null;
+            }
+            body.set((box[0] + box[3]) / 2, (box[1] + box[4]) / 2, (box[2] + box[5]) / 2);
+            const bodyDistance = body.distanceTo(this.camera.position);
+            body.project(this.camera);
+            return {
+              x: bounds.left + ((body.x + 1) / 2) * bounds.width,
+              y: bounds.top + ((1 - body.y) / 2) * bounds.height,
+              behind: body.z > 1,
+              distance: bodyDistance,
+              size: [box[3] - box[0], box[4] - box[1], box[5] - box[2]],
+            };
+          })(),
         });
       });
       return out;
