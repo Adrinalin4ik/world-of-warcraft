@@ -39,7 +39,7 @@ import { GlueInput } from './input';
 import { screenScale, viewportUnits } from './layout';
 import { GlueRenderer } from './renderer';
 import { resolveSprite } from './sprite';
-import { FontStringTextures, loadGlueFonts, measureText, wrapLines } from './text';
+import { FontStringTextures, layoutScale, loadGlueFonts, measureText, wrapLines } from './text';
 import { DrawItem, WidgetRoot, effectiveFont } from './widget';
 import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
@@ -316,7 +316,10 @@ export class WorldUiHost {
     // DEVICE pixels, so scale 1 asks a different question. `linesAtScale1` is kept beside it on purpose:
     // the two differing is the measurement of how scale-invariant the breaking actually is, which round
     // 17 claimed and nothing had checked at a non-unit scale.
-    const scale = screenScale(window.innerHeight);
+    // `layoutScale()`, not a second `screenScale(window.innerHeight)` -- self-review caught the
+    // duplicate. Two expressions for one scale is the same class of defect as two notions of a label's
+    // size, and this is an instrument: if it ever disagreed with the pass it measures, it would lie.
+    const scale = layoutScale();
     const lines = spec === null ? [] : wrapLines(widget.displayText, spec, scale);
     const linesAtScale1 = spec === null ? [] : wrapLines(widget.displayText, spec, 1);
     const size = spec === null ? null : measureText(widget.displayText, spec, scale);
