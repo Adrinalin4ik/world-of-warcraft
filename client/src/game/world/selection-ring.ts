@@ -315,7 +315,11 @@ export class SelectionRing {
 
     this.stats.radius = local;
     this.stats.reaction = target.reaction;
-    this.stats.tint = [r, g, b];
+    // WRITTEN IN PLACE, not reassigned: a fresh 3-element array here would be one allocation per frame
+    // for the whole time anything is targeted, on a path that exists to be cheap.
+    this.stats.tint[0] = r;
+    this.stats.tint[1] = g;
+    this.stats.tint[2] = b;
     this.stats.fadeAngle = fadeAngle;
     this.stats.noGround = !projected;
     this.stats.vertices = this.decal.count;
@@ -401,6 +405,14 @@ export class SelectionRing {
     this.stats.vertices = 0;
     this.stats.triangles = 0;
     this.stats.noGround = false;
+    // AND THE PER-TARGET VALUES, because a stale `radius`/`tint` in an instrument is this project's
+    // "distrust a constant as much as a zero" trap: the first live run reported `radius 1.464` with
+    // nothing selected, which is the last target's number and reads like a live one.
+    this.stats.radius = 0;
+    this.stats.reaction = 0;
+    this.stats.tint[0] = 0;
+    this.stats.tint[1] = 0;
+    this.stats.tint[2] = 0;
     // Drop the key so re-selecting the same unit at the same spot re-projects rather than trusting a
     // slice built who-knows-when: a tile can have streamed out in between.
     this.key = null;

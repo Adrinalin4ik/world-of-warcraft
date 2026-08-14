@@ -99,16 +99,21 @@ for (let i = 0; i < 16; ++i) {
 }
 
 const _corner = new THREE.Vector3();
+/** The four corner selectors, reused: `gatherBox` runs once per projection and allocates nothing. */
+const _cornerX = [0, 0, 0, 0];
+const _cornerY = [0, 0, 0, 0];
 
 /** The world-axis-aligned gather box bounding the rotated frame (the broad phase). */
 function gatherBox(frame: DecalFrame): THREE.Box3 {
   _box.makeEmpty();
-  const xs = [frame.minX, frame.minX, frame.maxX, frame.maxX];
-  const ys = [frame.minY, frame.maxY, frame.minY, frame.maxY];
+  _cornerX[0] = frame.minX; _cornerY[0] = frame.minY;
+  _cornerX[1] = frame.minX; _cornerY[1] = frame.maxY;
+  _cornerX[2] = frame.maxX; _cornerY[2] = frame.minY;
+  _cornerX[3] = frame.maxX; _cornerY[3] = frame.maxY;
   for (let i = 0; i < 4; ++i) {
     // Inverse of `inFrame`: world offset = R(-theta) . (x', y').
-    const dx = xs[i] * frame.cos + ys[i] * frame.sin;
-    const dy = ys[i] * frame.cos - xs[i] * frame.sin;
+    const dx = _cornerX[i] * frame.cos + _cornerY[i] * frame.sin;
+    const dy = _cornerY[i] * frame.cos - _cornerX[i] * frame.sin;
     _box.expandByPoint(
       _corner.set(frame.centre.x + dx, frame.centre.y + dy, frame.centre.z + frame.minZ),
     );
