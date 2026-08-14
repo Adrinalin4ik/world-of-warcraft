@@ -748,6 +748,24 @@ const FONTSTRING: MethodTable = {
    * line's height and whatever sizes itself from it comes out short. Nothing in the loaded manifest
    * calls it today (the load report has no `GetStringHeight` error), so it is the twin landing beside
    * its sibling rather than a gap being closed.
+   *
+   * **THE PAIR IS STILL ASYMMETRIC, AND ROUND 19 MEASURED WHAT THAT COSTS instead of leaving it as a
+   * label.** Two differences, both deliberate for now:
+   *
+   *  1. `GetStringHeight` goes through `effectiveFont` and `GetStringWidth` does not, so a wrapped
+   *     string reports its wrapped HEIGHT and its unwrapped WIDTH. Whether the engine's own
+   *     `GetStringWidth` ignores wrapping is not sourced anywhere in the game's files, and nothing in
+   *     the manifest reads it on a wrapped string, so guessing would be a change with no oracle.
+   *  2. Both measure at **scale 1**, while the raster measures at the live layout scale
+   *     (`text.ts#layoutScale`). That is not cosmetic: it is exactly the defect that made the tooltip
+   *     overflow its frame (`methods/gametooltip.ts#lineSize` has the numbers -- 221.08 against
+   *     259.43 for one string at 1382x911). It is NOT changed here because the difference for an
+   *     UNWRAPPED string is sub-pixel (measured: `VideoOptionsResolutionPanelTitle` 79.296 at scale 1
+   *     against 79.383 live) and every verified glue-screen anchor was checked against the scale-1
+   *     answers. The tooltip is fixed at the one place that SIZES A FRAME from the number.
+   *
+   * `effectiveFont` is called with no `boundedWidth` here on purpose: a Lua getter has no rect, and the
+   * third wrap case (a paragraph bounded by two opposing anchors) is only knowable at draw time.
    */
   GetStringHeight: (ctx, self) => {
     const widget = widgetOf(ctx, self);

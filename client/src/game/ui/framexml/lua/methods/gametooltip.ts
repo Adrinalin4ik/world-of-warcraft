@@ -61,7 +61,7 @@ import { Widget } from '../../../widget';
 import { ensureFont, notImplemented, warnOnce, widgetOf } from './region';
 import { getAction } from '../api/actions';
 import { getSpellbook } from '../api/spells';
-import { measureText } from '../../../text';
+import { layoutScale, measureText } from '../../../text';
 
 /**
  * How many lines a tooltip can hold: the eight `$parentTextLeft<n>` slots `GameTooltipTemplate` authors.
@@ -157,10 +157,20 @@ function lineSize(region: Widget | null): { width: number; height: number } {
   if (region === null || !region.shown || region.text === '') {
     return { width: 0, height: 0 };
   }
-  // Scale 1: a widget's size is in logical units and the live layout scale divides out. Same call and
-  // same argument `region.ts`'s `GetWidth`/`GetStringWidth` make, so the two cannot disagree about how
-  // wide a string is.
-  return measureText(region.text, ensureFont(region), 1);
+  // **THE LIVE LAYOUT SCALE, NOT 1, AND THAT WAS THE OWNER'S TOOLTIP OVERFLOW.**
+  //
+  // A widget's size is in logical units and the scale divides out again, so scale 1 looks harmless --
+  // and it is, for an unwrapped label. For a WRAPPED one it is not: `wrapLines` measures against a
+  // device-pixel budget, so the same 260-unit `wrapWidth` breaks the string differently at a different
+  // density, and the widest resulting line differs. Measured live at 1382x911 (scale 1.18620) on
+  // Eviscerate's real description: the raster broke after "combo" and gave a widest line of **259.43**
+  // units, while this call at scale 1 broke after "per" and reported **221.08**. `resize` then sized
+  // the frame from 221.08 + 20, so the body was drawn 28.35 units PAST the frame's right edge -- "the
+  // first body line reaches and passes the right edge", exactly as reported. The frame and the raster
+  // have to be measured at one scale, and the raster's is the one that is on screen.
+  //
+  // `region.ts`'s `GetWidth`/`GetStringWidth` still answer at scale 1; that asymmetry is named there.
+  return measureText(region.text, ensureFont(region), layoutScale());
 }
 
 /**

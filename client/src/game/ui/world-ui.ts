@@ -39,8 +39,8 @@ import { GlueInput } from './input';
 import { screenScale, viewportUnits } from './layout';
 import { GlueRenderer } from './renderer';
 import { resolveSprite } from './sprite';
-import { FontStringTextures, loadGlueFonts, measureText } from './text';
-import { DrawItem, WidgetRoot } from './widget';
+import { FontStringTextures, loadGlueFonts, measureText, wrapLines } from './text';
+import { DrawItem, WidgetRoot, effectiveFont } from './widget';
 import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
@@ -161,6 +161,11 @@ export class WorldUiHost {
   private readonly art = new GlueArt();
   private readonly fonts = new FontStringTextures();
   private readonly root = new WidgetRoot();
+  /**
+   * The last draw list, for `textExtent` -- the same array published as `window.worldUiDrawList`.
+   * A reference, not a copy: it is replaced whole every frame.
+   */
+  private lastItems: DrawItem[] = [];
 
   private runtime: WorldRuntime | null = null;
   /**
@@ -280,6 +285,70 @@ export class WorldUiHost {
   }
 
   /**
+   * DOES THIS STRING FIT ITS FRAME -- the whole question, answered by the draw pass's own arithmetic.
+   *
+   * Built because the last round nearly reported a tooltip clipping defect off a tight CROP that the
+   * numbers refuted (221.08 of text in a 241.08 frame), and because the reverse mistake is just as easy:
+   * a paragraph can overrun its panel by 60 units and still look plausible in a screenshot. A crop
+   * cannot separate "the text is too wide" from "the frame is drawn narrow".
+   *
+   * Every value comes from the SAME calls `resolveSprite` rasterizes through -- `effectiveFont(widget,
+   * rect.width)` and `measureText` -- so this cannot agree with itself while disagreeing with the
+   * screen. That is deliberate: an instrument with its own copy of the wrap rule would confirm whatever
+   * the rule already believed. `rect` is the resolved layout rect, straight out of the last draw list.
+   *
+   * `overflowX` is the number that matters: the widest rendered line minus the rect's width. Positive
+   * means ink outside the rect.
+   */
+  textExtent(name: string): unknown {
+    const registry = this.runtime?.registry ?? null;
+    const id = registry === null ? null : registry.byName(name);
+    const widget = id === null ? null : registry?.widget(id) ?? null;
+    if (!widget) {
+      return { name, found: false };
+    }
+    const item = this.lastItems.find((entry) => entry.widget === widget) ?? null;
+    const rect = item?.rect ?? null;
+    const spec = effectiveFont(widget, rect?.width);
+    // THE LIVE SCALE, not 1, and the first version of this used 1 -- which reported a DIFFERENT set of
+    // lines from the ones on screen (the Eviscerate body broke after "per" here and after "combo" in the
+    // raster). `resolveSprite` rasterizes at `screenScale(viewport.height)` and `wrapLines` measures in
+    // DEVICE pixels, so scale 1 asks a different question. `linesAtScale1` is kept beside it on purpose:
+    // the two differing is the measurement of how scale-invariant the breaking actually is, which round
+    // 17 claimed and nothing had checked at a non-unit scale.
+    const scale = screenScale(window.innerHeight);
+    const lines = spec === null ? [] : wrapLines(widget.displayText, spec, scale);
+    const linesAtScale1 = spec === null ? [] : wrapLines(widget.displayText, spec, 1);
+    const size = spec === null ? null : measureText(widget.displayText, spec, scale);
+    return {
+      name,
+      found: true,
+      drawn: item !== null,
+      shown: widget.shown,
+      text: widget.displayText,
+      authored: { width: widget.width, height: widget.height },
+      rect,
+      font: spec === null
+        ? null
+        : {
+          size: spec.size,
+          wrapWidth: spec.wrapWidth ?? null,
+          maxLines: spec.maxLines ?? null,
+          nonSpaceWrap: spec.nonSpaceWrap ?? null,
+          align: spec.align,
+        },
+      scale,
+      lines,
+      /** Same breaking asked at scale 1 -- equal to `lines` iff the breaking really is scale-invariant. */
+      linesAtScale1,
+      scaleInvariant: JSON.stringify(lines) === JSON.stringify(linesAtScale1),
+      measured: size,
+      overflowX: rect === null || size === null ? null : size.width - rect.width,
+      overflowY: rect === null || size === null ? null : size.height - rect.height,
+    };
+  }
+
+  /**
    * Load the fonts and boot the client's own `FrameXML.toc` onto this host's root.
    *
    * The dynamic `import()` is `framexml-screen.ts`'s decision repeated for the same reason: the
@@ -367,6 +436,13 @@ export class WorldUiHost {
      * meant to hit instead of trusting a coordinate conversion it duplicated.
      */
     (window as never as Record<string, unknown>).worldUiInput = this.input;
+    /**
+     * THE OVERFLOW INSTRUMENT -- `uiTextExtent('VideoOptionsResolutionPanelSubText')`. See `textExtent`
+     * for why a crop cannot answer this and why it borrows the draw pass's own calls rather than
+     * re-deriving them.
+     */
+    (window as never as Record<string, unknown>).uiTextExtent = (name: string) =>
+      this.textExtent(name);
   }
 
   /**
@@ -397,6 +473,7 @@ export class WorldUiHost {
     // computes rects, it does not store them). It is what let a probe put a REAL pointer click on
     // `BonusActionButton2` instead of calling its handler directly. One reference assignment per frame.
     (window as never as Record<string, unknown>).worldUiDrawList = items;
+    this.lastItems = items;
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');
@@ -886,6 +963,8 @@ export class WorldUiHost {
     delete (window as never as Record<string, unknown>).worldUiArt;
     delete (window as never as Record<string, unknown>).worldUiDrawList;
     delete (window as never as Record<string, unknown>).uiDrawStats;
+    delete (window as never as Record<string, unknown>).uiTextExtent;
+    this.lastItems = [];
   }
 }
 

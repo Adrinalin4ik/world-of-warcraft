@@ -231,10 +231,17 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
               'it is not a SkillLine row, so there is no spellIconID; the engine supplies this one '
               + 'and no file in the manifest states it (see GENERAL_TAB_ICON)',
             )
-            : spellData.icon(line.spellIconID) ?? declareTabIconGap(
-              line.name,
-              `SkillLine ${line.id} spellIconID ${line.spellIconID} did not resolve to a path`,
-            ),
+            // GATED ON `spellData.ready`, and the first version was not -- which made the ledger LIE.
+            // `SpellIcon.dbc` rides with the 49 MB `Spell.dbc` fetch, so a book built before that lands
+            // resolves NO tab icon, and measured live all three of the shaman's class tabs filed a gap
+            // row and then drew their real icons a moment later. A ledger that records a transient as a
+            // defect is the round-18 gap-ledger defect again.
+            : spellData.icon(line.spellIconID) ?? (spellData.ready
+              ? declareTabIconGap(
+                line.name,
+                `SkillLine ${line.id} spellIconID ${line.spellIconID} is not in SpellIcon.dbc`,
+              )
+              : null),
           entries: [],
         };
         groups.set(key, group);

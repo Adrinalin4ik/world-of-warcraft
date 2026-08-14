@@ -12,6 +12,7 @@ import * as THREE from 'three';
 
 import Loader from '../net/loader';
 import { ResolvedSprite } from './renderer';
+import { screenScale } from './layout';
 import { FontSpec } from './widget';
 
 /** The client's shipped faces, by the family name widgets ask for. */
@@ -104,6 +105,33 @@ function devicePixelDensity(): number {
 
 function density(scale: number): number {
   return scale * devicePixelDensity();
+}
+
+/**
+ * The LAYOUT SCALE the draw pass is currently using -- for the callers that have to measure a string
+ * but hold no viewport.
+ *
+ * A pure function of the window height by the layout law itself (`layout.ts#screenScale`), which is
+ * exactly how `world-ui.ts#render` and `screens.ts` derive the scale they pass to `drawList`. So this
+ * is not a second source of truth; it is the same law read from the same input.
+ *
+ * **IT EXISTS BECAUSE A SCALE-1 MEASUREMENT AND THE RASTER DISAGREE, and that was a real defect the
+ * numbers found**: `wrapLines` measures in DEVICE pixels, so the same 260-unit budget breaks a string
+ * differently at different densities. Measured live at 1382x911 (scale 1.18620), Eviscerate's tooltip
+ * body broke after "combo" in the raster and after "per" at scale 1, making the widest rendered line
+ * **259.43** units against the **221.08** a scale-1 measurement reported -- and
+ * `gametooltip.ts#resize` had sized the frame from the smaller number, so the body overran the frame's
+ * right edge by 28.35 units. Round 17's "line breaking is scale-invariant" was checked at 630x551 and
+ * 1382x911 by comparing RECTS of derived-size strings, which move together; it does not hold for a
+ * fixed budget, and `uiTextExtent`'s `scaleInvariant` field reports it per string now.
+ *
+ * Falls back to 1 where there is no window or the height is 0 -- jsdom, and the unit tests.
+ */
+export function layoutScale(): number {
+  if (typeof window === 'undefined' || !window.innerHeight) {
+    return 1;
+  }
+  return screenScale(window.innerHeight);
 }
 
 function cssFont(spec: FontSpec, pixelScale: number): string {
