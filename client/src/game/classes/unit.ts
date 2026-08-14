@@ -410,6 +410,13 @@ class Unit extends Entity {
   public equippedMainhand: number = 0;
   public equippedOffhand: number = 0;
 
+  /**
+   * `GetSpellBonusDamage(school)` for the seven spell schools -- `$SP`'s source. Empty until a values
+   * block carries the block; see `update-object/unit-fields.ts#SPELL_SCHOOL_COUNT` for why it sits here
+   * beside the weapons rather than inside `fields`.
+   */
+  public spellDamage: number[] = [];
+
   /** Whether the death one-shot is armed. Written only by `setDead`, which is edge-triggered. */
   public dead: boolean = false;
 

@@ -37,7 +37,7 @@
  * unit on every damage tick.
  */
 import type Unit from '../../../../game/classes/unit';
-import { ObjectType, UnitField } from '../enums';
+import { ObjectType, PlayerField, UnitField } from '../enums';
 
 /** What one values block said about a unit. Every field optional -- see the header. */
 export interface UnitFieldUpdate {
@@ -45,6 +45,8 @@ export interface UnitFieldUpdate {
   health?: number;
   maxHealth?: number;
   powerType?: number;
+  /** `UNIT_FIELD_BYTES_0` byte 2 -- 0 male, 1 female. Read for a description's `$g<male>:<female>;`. */
+  gender?: number;
   power?: number;
   maxPower?: number;
   factionTemplate?: number;
@@ -100,7 +102,75 @@ export interface UnitFieldUpdate {
    * Wave and Smite alike). See the read below for why substituting `maxPower` would be wrong.
    */
   baseMana?: number;
+
+  /**
+   * THE ATTACK-POWER TRIPLE -- `$AP`'s three inputs, and the reason a spell description could not be
+   * evaluated before this round.
+   *
+   * `UNIT_FIELD_ATTACK_POWER` (`enums.ts`: `object_end + 0x0075`), `..._MODS` (+0x0076) and
+   * `..._MULTIPLIER` (+0x0077). Three fields and not one, because the CLIENT'S OWN character sheet
+   * says so: `PaperDollFrame_SetAttackPower` (`paperdollframe.lua:657-659`) reads
+   * `local base, posBuff, negBuff = UnitAttackPower(unit)` and shows `base+posBuff+negBuff`. So the
+   * engine global returns a base plus a signed modifier split into its halves, which is this block --
+   * and the multiplier is the third word the same block carries.
+   *
+   * **THE MULTIPLIER IS A FLOAT ON THE WIRE**, unlike every other field this file reads: see `f32` in
+   * `readUnitFields`. Read as a uint it comes back 1065353216 for the value 1.0.
+   *
+   * `attackPowerMods` is a SIGNED int32 -- a debuff drives it negative -- so it goes through `i32`.
+   */
+  attackPower?: number;
+  attackPowerMods?: number;
+  attackPowerMultiplier?: number;
+
+  /** The ranged triple, `$RAP`'s inputs: `+0x0078 / +0x0079 / +0x007a`. Same shape as the melee one. */
+  rangedAttackPower?: number;
+  rangedAttackPowerMods?: number;
+  rangedAttackPowerMultiplier?: number;
+
+  /**
+   * `$MWS` -- the MAIN-HAND weapon speed, in MILLISECONDS.
+   *
+   * `UNIT_FIELD_BASEATTACKTIME` (`object_end + 0x0038`) is the first of two words (main hand, then off
+   * hand); only the first is read. **`enums.ts` is this build's own table and NOT benilla's**, which is
+   * the mismatch `CLAUDE.md` names by number: the reference's base attack time is at 62/63 counted from
+   * its own object block, and taking that index here would read `unit_field_aurastate`.
+   */
+  baseAttackTimeMs?: number;
+
+  /**
+   * `$bh` -- `GetSpellBonusHealing()`, i.e. `PLAYER_FIELD_MOD_HEALING_DONE_POS`
+   * (`enums.ts`: `unit_end + 0x0414`).
+   *
+   * ONE number, not seven: the client's own character sheet reads it with no school argument at all
+   * (`PaperDollFrame_SetSpellBonusHealing`, `paperdollframe.lua:975`, `local bonusHealing =
+   * GetSpellBonusHealing()`), which is the difference between this field and the seven-word spell-power
+   * block beside it. Named by `Spell.dbc` 48165's own legend as `$bh` -- "healing: ${$bh}".
+   */
+  healingDone?: number;
 }
+
+/**
+ * `$SP` -- `GetSpellBonusDamage(school)` for each of the seven spell schools, already netted
+ * (positive block minus negative block), returned alongside `UnitFieldUpdate` rather than inside it.
+ *
+ * SEVEN NUMBERS AND NOT ONE, because a spell's `$SP` is its OWN school's bonus. The client's own
+ * character sheet reads the whole block one school at a time and only then reduces it, taking the
+ * MINIMUM across schools 2..7 for its single "Bonus Damage" label
+ * (`PaperDollFrame_SetSpellBonusDamage`, `paperdollframe.lua:917-928`). That reduction is a display
+ * choice for one label; storing only the minimum here would make a Fire spell's `$SP` read the
+ * player's WORST school, so the seven are kept and the caller picks by `Spell.dbc`'s `schoolMask`.
+ *
+ * The index IS the school index -- 0 physical, 1 holy, 2 fire, 3 nature, 4 frost, 5 shadow, 6 arcane --
+ * which is the order `PLAYER_FIELD_MOD_DAMAGE_DONE_POS`'s seven consecutive words are in, and which the
+ * character sheet corroborates: its loop starts at `holySchool = 2`, a 1-BASED Lua index into the same
+ * seven, i.e. holy, skipping physical.
+ *
+ * Kept OFF `UnitFieldUpdate` deliberately: that interface is scalars run through `applyUnitFields`'
+ * change diff, which drives the unit-frame event fan-out. No frame in this client reads spell power, so
+ * seven more diffed keys would cost a comparison per packet and announce nothing.
+ */
+export const SPELL_SCHOOL_COUNT = 7;
 
 /**
  * Ring buffer of what the wire actually delivered, so the layout above is a MEASUREMENT and not a
@@ -145,6 +215,22 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
     // non-negative number; `undefined` is the only "absent" it can produce.
     return typeof raw === 'number' && Number.isFinite(raw) ? raw >>> 0 : undefined;
   };
+  // SIGNED and FLOAT reinterpretations of the same 32 bits. Every field above happens to be a count
+  // that cannot go negative; the attack-power MODS can (a debuff) and the MULTIPLIER is an IEEE float,
+  // so both need the wire's bits read as something other than a uint. `| 0` is the int32 cast and
+  // `SCRATCH` the float one -- no allocation per call, which matters because this runs per packet.
+  const i32 = (name: string): number | undefined => {
+    const raw = u32(name);
+    return raw === undefined ? undefined : raw | 0;
+  };
+  const f32 = (name: string): number | undefined => {
+    const raw = u32(name);
+    if (raw === undefined) {
+      return undefined;
+    }
+    SCRATCH_U32[0] = raw;
+    return SCRATCH_F32[0];
+  };
 
   out.entry = u32('object_field_entry');
   out.level = u32('unit_field_level');
@@ -161,6 +247,11 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
   const bytes0 = u32('unit_field_bytes_0');
   if (bytes0 !== undefined) {
     out.powerType = (bytes0 >>> 24) & 0xff;
+    // GENDER is byte 2 of the same word -- the packing is `race | class | gender | powerType`, which is
+    // benilla's reading of the block (`fields/unit.rs`) and is the same packing the power type above
+    // already relies on; only the INDEX of the word is version-specific, and that comes from our own
+    // `UnitField` table. Read for `$g<male>:<female>;` in a spell description and nothing else.
+    out.gender = (bytes0 >>> 16) & 0xff;
   }
 
   // THE SHAPESHIFT FORM, byte 3 of `UNIT_FIELD_BYTES_2`. Unit-scope, not player-scope: a creature in a
@@ -186,6 +277,54 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
   // the real number, so `IsUsableAction` uses it (`game/ui/framexml/lua/api/actions.ts`).
   out.baseMana = u32('unit_field_base_mana');
 
+  // THE STAT BLOCK a spell DESCRIPTION needs: `$AP`, `$RAP` and `$MWS`. Unit-scope, so a creature
+  // carries them too, but only the player's are ever read -- a description is always rendered for the
+  // caster. See the fields' own comments for where each index and each shape comes from.
+  out.attackPower = i32('unit_field_attack_power');
+  out.attackPowerMods = i32('unit_field_attack_power_mods');
+  out.attackPowerMultiplier = f32('unit_field_attack_power_multiplier');
+  out.rangedAttackPower = i32('unit_field_ranged_attack_power');
+  out.rangedAttackPowerMods = i32('unit_field_ranged_attack_power_mods');
+  out.rangedAttackPowerMultiplier = f32('unit_field_ranged_attack_power_multiplier');
+  out.baseAttackTimeMs = u32('unit_field_baseattacktime');
+  out.healingDone = i32('player_field_mod_healing_done_pos');
+
+  return out;
+}
+
+/** See `f32` in `readUnitFields`: one buffer, reused, for reinterpreting a wire word as an IEEE float. */
+const SCRATCH_U32 = new Uint32Array(1);
+const SCRATCH_F32 = new Float32Array(SCRATCH_U32.buffer);
+
+/**
+ * `GetSpellBonusDamage(school)` for all seven schools -- see `SPELL_SCHOOL_COUNT`.
+ *
+ * Returns null when the positive block is absent, which is the normal case: these are PLAYER-scope
+ * fields, so every creature's update leaves them undefined, and a values-only update that did not touch
+ * spell power leaves them undefined too. Null means "leave whatever we knew alone".
+ *
+ * Only the FIRST word of each seven-word block is named in `PlayerField`
+ * (`player_field_mod_damage_done_pos` / `_neg`); schools 1..6 are the next six indices and are read by
+ * NUMBER, which is the same idiom `applyUnitFields` already uses for the off-hand virtual item slot.
+ */
+export function readSpellDamage(values: Record<string, number>): number[] | null {
+  const posBase = values['player_field_mod_damage_done_pos'];
+  if (typeof posBase !== 'number') {
+    return null;
+  }
+  const out: number[] = [];
+  for (let school = 0; school < SPELL_SCHOOL_COUNT; school += 1) {
+    const pos = school === 0
+      ? posBase
+      : values[String(PlayerField.player_field_mod_damage_done_pos + school)];
+    const neg = school === 0
+      ? values['player_field_mod_damage_done_neg']
+      : values[String(PlayerField.player_field_mod_damage_done_neg + school)];
+    // `GetSpellBonusDamage` is the NET of the two blocks. An absent word is 0 rather than "leave
+    // alone": the whole array is rewritten together or not at all (the null above), so a partial
+    // block genuinely means those schools carry no modifier.
+    out.push(((typeof pos === 'number' ? pos : 0) | 0) - ((typeof neg === 'number' ? neg : 0) | 0));
+  }
   return out;
 }
 
@@ -257,6 +396,7 @@ export function applyUnitFields(
   set('unitFlags', fields.unitFlags);
   set('dynamicFlags', fields.dynamicFlags);
   set('powerType', fields.powerType);
+  set('gender', fields.gender);
 
   // The experience pair and the rested pool. Only our own character's updates carry them (see
   // `readUnitFields`), and `changed` is what gates the event that repaints the bar -- so an xp value
@@ -267,6 +407,38 @@ export function applyUnitFields(
   set('maxXp', fields.maxXp);
   set('restXp', fields.restXp);
   set('baseMana', fields.baseMana);
+
+  // THE STAT BLOCK. It goes through `set` like everything else, so a stat that moved does announce --
+  // no frame listens today, but the alternative (writing behind the diff) would make the first frame
+  // that does silently stale.
+  set('attackPower', fields.attackPower);
+  set('attackPowerMods', fields.attackPowerMods);
+  set('attackPowerMultiplier', fields.attackPowerMultiplier);
+  set('rangedAttackPower', fields.rangedAttackPower);
+  set('rangedAttackPowerMods', fields.rangedAttackPowerMods);
+  set('rangedAttackPowerMultiplier', fields.rangedAttackPowerMultiplier);
+  set('baseAttackTimeMs', fields.baseAttackTimeMs);
+  set('healingDone', fields.healingDone);
+
+  // SPELL POWER is seven numbers and lives beside `fields`, not in it -- see `SPELL_SCHOOL_COUNT`.
+  const spellDamage = readSpellDamage(values);
+  if (spellDamage !== null) {
+    unit.spellDamage = spellDamage;
+  } else if (create && type === ObjectType.Player && unit.spellDamage.length === 0) {
+    // ON A CREATE BLOCK, ABSENT MEANS ZERO -- and that distinction is why this branch exists.
+    //
+    // An update mask is sparse: the server writes only the fields it has a non-zero value for, so a
+    // character with no spell power at all never sends the seven words. Measured live as a level-2
+    // character: `attackPower` arrived (24) and the whole `player_field_mod_damage_done_pos` block did
+    // not, so `spellDamage` stayed `[]` and 94 spells' `$SPH` stayed a visible token -- when the true
+    // answer is 0.
+    //
+    // Gated on all three of `create`, PLAYER scope and "we have never had a value", so it can only ever
+    // fill in the initial state and can never overwrite a real reading with zeroes: a later values-only
+    // packet that omits the block still means "unchanged" and takes the null path above. A creature is
+    // excluded because these are player-scope indices it would never carry anyway.
+    unit.spellDamage = new Array<number>(SPELL_SCHOOL_COUNT).fill(0);
+  }
 
   // AFTER the power type is settled, using whatever the unit now knows -- see `readPower`.
   const power = readPower(values, unit.fields.powerType ?? 0);
