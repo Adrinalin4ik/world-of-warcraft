@@ -34,9 +34,11 @@
  * manufactures a Lua *method*; there is no method here to register.
  *
  * Measured over the whole served table with the evaluator running live (probe
- * `scratchpad/t18c-sweep.js`): of the **22,602** described spells carrying a token, **21,910 render with
- * no `$` left** and 692 do not, with **zero exceptions thrown**. What the 692 are, each with the
- * measurement behind the refusal:
+ * `scratchpad/t18-tip.js`, `t18c-sweep.js`): of the **22,602** described spells carrying a token,
+ * **21,760 render with no `$` left** (96.3%) and **842** do not, with **ZERO exceptions thrown**. The
+ * counts here are the FINAL run's -- an earlier draft of this comment carried 21,910/692 from a
+ * mid-round measurement, which is the sort of stale number this project treats as a defect. What the
+ * 842 are, each with the measurement behind the refusal:
  *
  *  - **`$?(s56810|s25306|!((!a48165)|a66109))[..]?!a66109[..] [..]`** -- the conditional's full BOOLEAN
  *    form: parentheses, `|`, `!`, and a trailing bare `[else]`. The simple `$?s<id>[a][b]` /
@@ -51,8 +53,10 @@
  *  - **`$r<n>`** (43) -- see `tokenValue`'s `r` case; `$r` with no index IS implemented.
  *  - **`$e`** (48), **`$q<n>`** (30, and 2006 Resurrection's effect 2 is measured all-zero so the mana
  *    it names is not on the row), **`$z`, `$v`, `$f`, `$bc2`** -- no served file states what these mean.
- *  - **`$mwb`/`$MWB`/`$rwb`** -- weapon base damage. `UNIT_FIELD_MINDAMAGE`/`MAXDAMAGE` exist in
- *    `enums.ts` and are not decoded; a field each, next round.
+ *  - **`$mw`/`$MW` (100 uses, the largest remaining), `$mwb`/`$MWB` (44), `$rwb`/`$RWB` (60)** --
+ *    WEAPON DAMAGE. `UNIT_FIELD_MINDAMAGE`/`MAXDAMAGE`/`MINOFFHANDDAMAGE`/`MINRANGEDDAMAGE` are all in
+ *    `enums.ts` already and none is decoded, so this is four fields and a naming decision (`$mw` vs
+ *    `$mwb`), not new research. The obvious next piece of work.
  *  - **`$pa`/`$pfi`/`$pfr`/`$ph`/`$pn`/`$ps`/`$pbh`/`$pbhd`** -- the PERCENT modifier family
  *    (`PLAYER_FIELD_MOD_DAMAGE_DONE_PCT`), 6 uses, all in one developer test spell.
  *  - **`${...}` containing a FUNCTION CALL** -- `$gt`, `$gte`, `$eq`, `$max`, `$cond`, `$FLOOR`, `$CO`.
