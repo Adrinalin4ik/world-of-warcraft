@@ -16,7 +16,8 @@ import type { BackdropDef, Insets } from './backdrop';
 // this file must stay WebGL-free so `layout`/`hit` tests can exercise it without a GL context.
 import type { ModelRig } from './scene/scene-rig';
 import {
-  Anchor, LayoutNode, Rect, resolveAnchors, screenScale, unplaceableNodes, Viewport,
+  Anchor, LayoutNode, Rect, boundsBothHorizontalEdges, resolveAnchors, screenScale,
+  unplaceableNodes, Viewport,
 } from './layout';
 import { DrawLayer, OrderKey, Strata, compareOrder } from './framexml/order';
 
@@ -149,10 +150,11 @@ export interface FontSpec {
   shadowColor?: string;
   shadowAlpha?: number;
   /**
-   * `maxLines` -- the hard cap on wrapped lines. `spellbookframe.xml:100` authors `maxLines="3"` on
-   * `$parentSpellName` and it is the ONLY occurrence in the files read for this
-   * (`fonts.xml`, `fontstyles.xml`, `spellbookframe.xml`, `targetframe.xml`, `playerframe.xml`,
-   * `accountlogin.xml`). Absent means no cap.
+   * `maxLines` -- the hard cap on wrapped lines. Counted over the 127 XML files `framexml.toc` lists:
+   * **24 occurrences in 5 files** -- `interfaceoptionspanels.xml` 17, `videooptionspanels.xml` 3,
+   * `audiooptionspanels.xml` 2, `chatframe.xml` 1, and `spellbookframe.xml:100`'s `maxLines="3"` on
+   * `$parentSpellName`. (Round 17 called that last one the only occurrence, having read six files.)
+   * Absent means no cap from the DOCUMENT -- `effectiveFont` may still impose one from a fixed height.
    *
    * An element ATTRIBUTE rather than a font property, carried on the spec because the spec is what the
    * rasterizer sees -- the same reason `wrapWidth` lives here.
@@ -160,18 +162,21 @@ export interface FontSpec {
   maxLines?: number;
   /**
    * `SetWordWrap(false)` -- draw on one line however narrow the rect. **Nothing in the manifest
-   * authors it**: 0 occurrences of `wordwrap` or `nonspacewrap` across every file read for this, so
-   * the default is the only behaviour that can be observed, and `true` (wrap) is what makes the
-   * client's own bounded paragraphs paragraphs. **The DEFAULT VALUES ARE UNSOURCED** -- FrameXML never
-   * states them and benilla (1.12.1) has no `word_wrap` at all -- so this is written as an override
-   * that nothing currently exercises rather than as a law.
+   * authors `wordwrap`**: 0 occurrences across all 127 XML files `framexml.toc` lists (round 17 said
+   * the same of `nonspacewrap` below, from 6 files, and that half was wrong). So the default is the
+   * only behaviour that can be observed, and `true` (wrap) is what makes the client's own bounded
+   * paragraphs paragraphs. **The DEFAULT VALUE IS UNSOURCED** -- FrameXML never states it and benilla
+   * (1.12.1) has no `word_wrap` at all -- so this is written as an override nothing exercises.
    */
   wordWrap?: boolean;
   /**
-   * `SetNonSpaceWrap(true)` -- allow a break INSIDE a word that is wider than the rect. Default false,
-   * which is what `wrapLines` already did: an overlong word is left overhanging its own line rather
-   * than split, because hyphenating an account name or a URL is worse than overflowing. Also
-   * UNSOURCED; see `wordWrap`.
+   * `SetNonSpaceWrap(true)` -- allow a break INSIDE a run wider than the rect.
+   * **AUTHORED, 31 times across 10 of the manifest's 127 XML files**, and read by the loader:
+   * `interfaceoptionspanels.xml` 17, `macoptionsframe.xml` 3, `videooptionspanels.xml` 3,
+   * `audiooptionspanels.xml` 2, `helpframe.xml` 2, `minimap.xml` 2, and one each in `basiccontrols.xml`,
+   * `chatframe.xml`, `mailframe.xml`, `questlogframe.xml`. Every options-panel description paragraph
+   * carries it -- the client's own guarantee that those strings cannot run out of their panel.
+   * The DEFAULT (false: an overlong run overhangs rather than splitting) is still unsourced.
    */
   nonSpaceWrap?: boolean;
 }
@@ -547,35 +552,96 @@ export type MeasureText = (
  * draws nothing, so a rect the size of bare padding would be a hit target over nothing.
  */
 /**
+ * How many whole lines of `spec` fit in `height` logical units, 0 if not even one does.
+ *
+ * The inverse of `text.ts#measureText`'s own block height -- `n * size + (n - 1) * spacing` -- solved
+ * for `n`, so "the height admits three lines" here and "these three lines are this tall" there cannot
+ * disagree. That is the whole point: this number is used as a LINE CAP, and a cap the renderer
+ * disagreed with would put the last line outside the rect, which is the thing being avoided.
+ */
+export function linesThatFit(spec: FontSpec, height: number): number {
+  const spacing = spec.spacing ?? 0;
+  if (!(height > 0) || !(spec.size > 0)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor((height + spacing) / (spec.size + spacing)));
+}
+
+/**
  * A font string's spec with its WRAP BUDGET filled in from its own authored geometry.
  *
- * THE RULE, and it is read off the manifest rather than chosen: a FontString wraps at its authored
- * WIDTH when its HEIGHT IS DERIVED (authored 0 or absent), because a derived height is the document
- * saying "grow to fit the text", while a fixed height is the document saying "one line's worth".
+ * THREE CASES, all read off the manifest rather than chosen. `boundedWidth` is the widget's RESOLVED
+ * rect width, which only the draw pass knows (`sprite.ts`); omit it and only the authored width is
+ * available.
  *
- * CENSUSED over the whole loaded world tree before it was written (`scratchpad/t17p-wrapcensus.js`),
- * because a rule that wrapped every string with a width would have been a worse defect than the
- * overflow it fixes -- of **5151** font strings, **3877 have no authored width** (nothing to wrap at,
- * untouched), **1017 have a width AND a fixed height** (a second line would be drawn outside the rect
- * -- `TargetFrameTextureFrameName` is 100x10, exactly one line, and must stay one line), and **256
- * have a width and a derived height**. That last set is the one this grows, and it is coherent:
- * `SpellButtonNSpellName` 103x0 (`spellbookframe.xml:100-111`), `QuestProgressText` 275x0,
- * `SkillDetailDescriptionText` 275x0, `ReputationDetailFactionDescription` 170x0, `TutorialFrameText`
- * 300x0 -- every one a paragraph the real client wraps.
+ * 1. **No width budget** -- no authored width and no pair of opposing horizontal anchors. There is
+ *    nothing to wrap at, so the string is measured and drawn on one line exactly as before. 3877 of
+ *    the 5151 font strings in the loaded world tree.
+ * 2. **A width budget and a DERIVED height** (authored 0 or absent) -- the document saying "grow to
+ *    fit the text". Wraps at the budget, uncapped, and the rect grows with it (`deriveSize`). 256
+ *    strings, every one a paragraph: `SpellButtonNSpellName` 103x0 (`spellbookframe.xml:100-111`),
+ *    `QuestProgressText` 275x0, `TutorialFrameText` 300x0.
+ * 3. **A width budget and a FIXED height that admits TWO OR MORE LINES** -- wraps, capped to the
+ *    number of lines that fit. This case is round 18's, and it is where round 17's rule was wrong.
+ *
+ * **WHAT ROUND 17 GOT WRONG, and it was a reading of the height, not a counting error.** Its rule was
+ * "a width and a fixed height means ONE LINE'S WORTH", justified on 1017 such strings and on
+ * `TargetFrameTextureFrameName` being 100x10. But 100x10 is one line's worth *because 10 is one line
+ * of a 10-unit font* -- the height was read as a prohibition when it is a BOUND. Counted over the 127
+ * XML files `framexml.toc` actually lists (round 17 read ~6 of them, which is why it also recorded
+ * `nonspacewrap` and `maxLines` as unauthored; both are wrong -- see `FontSpec.nonSpaceWrap`), 29
+ * fixed-height strings with an authored width are 20 units or taller, and they are paragraphs to a
+ * one: `ArenaFrameZoneDescription` 293x115, `MovieFrameSubtitleString` 800x138,
+ * `StaticPopup1Text` 103x38, `DressUpFrameDescriptionText` 260x36, `GuildFrameNotesText` 315x45,
+ * `MerchantItem1Name` 90x30. The CAP is what answers round 17's objection ("a second line would be
+ * drawn outside the rect") instead of trading it away: at most `linesThatFit` lines are ever drawn, so
+ * a 10-unit rect still shows exactly one line and nothing lands outside any rect.
+ *
+ * **AND THE OPTIONS PANELS' PARAGRAPHS HAVE NO AUTHORED WIDTH AT ALL** -- the owner's second
+ * screenshot, "These options allow you to change the size and detail...", which is
+ * `RESOLUTION_SUBTEXT` (`globalstrings.lua:6124`). All 22 of them are `<Size y="32" x="0"/>` with
+ * `TOPLEFT` to their panel's title and `RIGHT` at -32 from the panel's edge
+ * (`videooptionspanels.xml:37-51`, `interfaceoptionspanels.xml:64-79`, `audiooptionspanels.xml:67`),
+ * so the budget is the RESOLVED width and `boundsBothHorizontalEdges` is what finds it. Their own
+ * `maxLines="3"` agrees with `linesThatFit(size 10, 32) == 3` exactly, which is the strongest evidence
+ * here that a fixed height is meant to be read in lines: the author wrote the same bound twice.
+ *
+ * The cap is `min(authored maxLines, linesThatFit)` when both exist -- neither may be exceeded.
  *
  * Returns the widget's own spec object UNCHANGED when there is nothing to add, so the common case
  * allocates nothing and the identity comparisons the raster cache relies on are undisturbed.
  */
-export function effectiveFont(widget: Widget): FontSpec | null {
+export function effectiveFont(widget: Widget, boundedWidth?: number): FontSpec | null {
   const spec = widget.font;
   if (spec === null) {
     return null;
   }
-  const wraps = widget.width > 0 && widget.height === 0;
-  if (!wraps || spec.wrapWidth !== undefined) {
+  // An explicit budget from Lua wins: `GameTooltip` sets `wrapWidth` on the region's own font
+  // (`methods/gametooltip.ts#writeSide`) and its line slots are unsized, so nothing here may overrule it.
+  if (spec.wrapWidth !== undefined) {
     return spec;
   }
-  return { ...spec, wrapWidth: widget.width };
+  const budget =
+    widget.width > 0
+      ? widget.width
+      : boundedWidth !== undefined &&
+        boundedWidth > 0 &&
+        boundsBothHorizontalEdges(widget.anchors)
+        ? boundedWidth
+        : 0;
+  if (budget <= 0) {
+    return spec;
+  }
+  if (widget.height > 0) {
+    const fits = linesThatFit(spec, widget.height);
+    if (fits < 2) {
+      return spec;
+    }
+    const cap =
+      spec.maxLines !== undefined && spec.maxLines > 0 ? Math.min(spec.maxLines, fits) : fits;
+    return { ...spec, wrapWidth: budget, maxLines: cap };
+  }
+  return { ...spec, wrapWidth: budget };
 }
 
 export function deriveSize(

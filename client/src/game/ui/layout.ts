@@ -93,6 +93,33 @@ const VERTICAL: Record<AnchorPoint, number> = {
   BOTTOMLEFT: 1, BOTTOM: 1, BOTTOMRIGHT: 1,
 };
 
+/**
+ * Do these anchors constrain BOTH horizontal edges?
+ *
+ * The same question `resolveOne` below answers when it SIZES an axis from its anchors
+ * (`width = right - left`), asked separately because the widget layer needs it for a different
+ * purpose: a FontString whose left AND right edges are both pinned has been given a width budget by
+ * the document even though its `<Size>` says `x="0"` -- which is exactly how the options panels
+ * author their description paragraphs (`interfaceoptionspanels.xml:64-79`: `<Size y="32" x="0"/>`,
+ * `TOPLEFT` to the title and `RIGHT` at -32 from the panel edge). See `widget.ts#effectiveFont`.
+ *
+ * Edge points only, and for the same reason `resolveOne` gives: `TOP`/`CENTER`/`BOTTOM` pin the
+ * horizontal CENTRE, which places a node without bounding it.
+ */
+export function boundsBothHorizontalEdges(anchors: Anchor[]): boolean {
+  let left = false;
+  let right = false;
+  for (const anchor of anchors) {
+    const h = HORIZONTAL[anchor.point];
+    if (h === 0) {
+      left = true;
+    } else if (h === 1) {
+      right = true;
+    }
+  }
+  return left && right;
+}
+
 /** The absolute position of one point on a rect. */
 function pointOf(rect: Rect, point: AnchorPoint): { x: number; y: number } {
   return {

@@ -668,12 +668,12 @@ const FONTSTRING: MethodTable = {
   /**
    * `SetWordWrap(flag)` / `SetNonSpaceWrap(flag)` / `SetMaxLines(n)` -- the wrap controls.
    *
-   * **NOTHING IN THE MANIFEST AUTHORS `wordwrap` OR `nonspacewrap`** -- 0 occurrences across
-   * `fonts.xml`, `fontstyles.xml`, `spellbookframe.xml`, `targetframe.xml`, `playerframe.xml` and
-   * `accountlogin.xml` -- so these exist as overrides that nothing currently exercises, and the
-   * DEFAULTS (wrap on, no mid-word breaking) are the only observable behaviour. **Those defaults are
-   * UNSOURCED**: FrameXML never states them and benilla (1.12.1) has no `word_wrap` at all. Written as
-   * overrides rather than as a law, and labelled so.
+   * **`nonspacewrap` IS AUTHORED and the loader now reads it** -- 31 occurrences across 10 of the 127
+   * XML files `framexml.toc` lists, 22 of them the options panels' description paragraphs (see
+   * `widget.ts#FontSpec.nonSpaceWrap` for the per-file counts). The round-17 note this replaces said 0,
+   * counted over six files; `wordwrap` really is 0 across all 127 and stays an unexercised override.
+   * The DEFAULTS (wrap on, no mid-run breaking) are still **UNSOURCED**: FrameXML never states them and
+   * benilla (1.12.1) has no `word_wrap` at all.
    *
    * `SetMaxLines` is the door for the `maxLines` XML attribute, which has no public FontString setter in
    * 3.3.5a -- so the METHOD NAME is ours and unsourced, while the attribute it carries

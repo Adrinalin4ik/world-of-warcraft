@@ -142,4 +142,30 @@ describe('effectiveFont', () => {
     unbounded.font = spec();
     expect(effectiveFont(unbounded)).toBe(unbounded.font);
   });
+
+  it('wraps an options-panel paragraph at its RESOLVED width, capped to the lines that fit', () => {
+    // The shape all 22 options subtexts author (`videooptionspanels.xml:37-51`): `<Size y="32"
+    // x="0"/>`, `TOPLEFT` to the panel title and `RIGHT` to the panel edge. No authored width at all,
+    // so the budget can only come from the resolved rect -- and a fixed height of 32 admits 3 lines
+    // of a 10-unit font, which is exactly the `maxLines="3"` the same element authors.
+    const subText = new Widget('fontstring', 'subtext');
+    subText.font = { ...spec(), size: 10 };
+    subText.width = 0;
+    subText.height = 32;
+    subText.setAnchors(
+      { point: 'TOPLEFT', relativeTo: 'title', relativePoint: 'BOTTOMLEFT', x: 0, y: -8 },
+      { point: 'RIGHT', x: -32, y: 0 },
+    );
+    const resolved = effectiveFont(subText, 456)!;
+    expect(resolved.wrapWidth).toBe(456);
+    expect(resolved.maxLines).toBe(3);
+
+    // THE CONTROL ARM: the same widget with only ONE horizontal edge pinned is not bounded by the
+    // document, so the resolved width is its own text's width and must not become a budget.
+    const oneEdge = new Widget('fontstring', 'oneEdge');
+    oneEdge.font = { ...spec(), size: 10 };
+    oneEdge.height = 32;
+    oneEdge.setAnchors({ point: 'TOPLEFT', x: 0, y: 0 });
+    expect(effectiveFont(oneEdge, 456)).toBe(oneEdge.font);
+  });
 });

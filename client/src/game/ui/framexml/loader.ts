@@ -1097,15 +1097,25 @@ class DocumentLoader {
       this.callMethod(wrapper, 'SetShadowOffset', [resolved.shadow.x, resolved.shadow.y], dbg);
     }
     // `maxLines` -- an ELEMENT attribute, not a font-object value, so it is read from the region rather
-    // than from `resolveFont`. `spellbookframe.xml:100` is the only occurrence in the files read for
-    // this, and it caps the spell name at 3 lines.
+    // than from `resolveFont`. COUNTED over the 127 XML files `framexml.toc` lists: 24 occurrences in
+    // 5 files -- `interfaceoptionspanels.xml` 17, `videooptionspanels.xml` 3, `audiooptionspanels.xml`
+    // 2, `chatframe.xml` 1 and `spellbookframe.xml:100` 1. (Round 17 recorded the last as the ONLY one;
+    // it had read six files.)
     const maxLines = num(attr(region, 'maxLines'));
     if (maxLines !== undefined) {
       this.callMethod(wrapper, 'SetMaxLines', [maxLines], dbg);
     }
-    // `wordwrap`/`nonspacewrap` are NOT read: zero elements in the manifest author either (see
-    // `region.ts#SetWordWrap`), so there is nothing to read and a reader would be dead code claiming
-    // coverage it does not have. The Lua setters exist.
+    // `nonspacewrap` IS authored -- 31 occurrences across 10 of the 127 manifest XML files, and 22 of
+    // them are the options panels' description paragraphs, i.e. exactly the strings the owner reported
+    // running out of their panel (`videooptionspanels.xml:37`, `interfaceoptionspanels.xml:64`, ...).
+    // Read through the same method a script would call, like `maxLines` above.
+    // A real BOOLEAN, not the attribute string: `SetNonSpaceWrap` applies Lua truthiness (`luaFlag`),
+    // under which the string `"false"` is TRUE -- the `SetChecked("false")` defect again.
+    // `wordwrap` is still NOT read: 0 occurrences across the same 127 files, so a reader would be dead
+    // code. The Lua setter exists.
+    if (attr(region, 'nonspacewrap') !== undefined) {
+      this.callMethod(wrapper, 'SetNonSpaceWrap', [attrBool(region, 'nonspacewrap')], dbg);
+    }
   }
 
   /** The element's own font values layered over its inherited font object's. */

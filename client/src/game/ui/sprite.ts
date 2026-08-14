@@ -38,7 +38,12 @@ export function resolveSprite(
     // THE EFFECTIVE font, so a bounded string rasterizes as the same wrapped block the layout pass
     // measured (`widget.ts#effectiveFont`). Two notions of a label's line count is the bug, not the fix
     // -- the same argument `deriveSize` makes about its size.
-    const spec = effectiveFont(widget);
+    // `item.rect.width` is the third case's budget: the options panels' paragraphs author `x="0"` and
+    // take their width from two opposing anchors, so only the RESOLVED rect knows how wide they are.
+    // This is the one call site that has it -- `deriveSize` runs before `resolveAnchors`, and a
+    // string in that case has no derived width to compute anyway (both its edges are pinned, so
+    // `layout.ts#resolveOne` ignores `node.width` outright).
+    const spec = effectiveFont(widget, item.rect.width);
     return spec ? sources.fonts.get(widget.displayText, spec, scale) : null;
   }
 

@@ -143,8 +143,9 @@ function optionalMeasureContext(): CanvasRenderingContext2D | null {
  * One line unless `spec.wrapWidth` is set. Wrapping breaks on SPACES, as the client's own does: a
  * word longer than the width is left overlong on its own line rather than split mid-word, because
  * hyphenating an account name or a URL (`RESPONSE_FAILED_TO_CONNECT` contains one) would be worse
- * than overflowing. Explicit newlines in the string are honoured first -- `gluestrings.lua` escapes
- * some -- so a `\n` always starts a line whatever the width.
+ * than overflowing -- UNLESS the element authors `nonspacewrap="true"`, which is the client asking for
+ * exactly that break; see `breakRun` below. Explicit newlines in the string are honoured first --
+ * `gluestrings.lua` escapes some -- so a `\n` always starts a line whatever the width.
  */
 export function wrapLines(text: string, spec: FontSpec, scale: number): string[] {
   const paragraphs = text.split('\n');
@@ -163,6 +164,25 @@ export function wrapLines(text: string, spec: FontSpec, scale: number): string[]
   // The wrap width is a logical-unit budget; measurement happens in device pixels.
   const budget = spec.wrapWidth * pixelScale;
 
+  // `nonspacewrap="true"` -- break INSIDE a run with no space in it, once the run alone is over
+  // budget. Authored on 31 elements across 10 manifest files (`loader.ts`), 22 of them the options
+  // panels' description paragraphs, so this is the client's own instruction for those strings and not
+  // a policy. Breaks at the character that crosses the budget, never below one character per line.
+  const breakRun = (run: string): string[] => {
+    const parts: string[] = [];
+    let chunk = '';
+    for (const ch of run) {
+      const candidate = chunk + ch;
+      if (chunk && context.measureText(candidate).width > budget) {
+        parts.push(chunk);
+        chunk = ch;
+      } else {
+        chunk = candidate;
+      }
+    }
+    return chunk ? [...parts, chunk] : parts;
+  };
+
   const lines: string[] = [];
   for (const paragraph of paragraphs) {
     let line = '';
@@ -173,6 +193,13 @@ export function wrapLines(text: string, spec: FontSpec, scale: number): string[]
         line = word;
       } else {
         line = candidate;
+      }
+      // Only reachable when a single space-free run is itself wider than the budget: any line with a
+      // break opportunity in it was already pushed above.
+      if (spec.nonSpaceWrap && context.measureText(line).width > budget) {
+        const parts = breakRun(line);
+        lines.push(...parts.slice(0, -1));
+        line = parts[parts.length - 1] ?? '';
       }
     }
     lines.push(line);
