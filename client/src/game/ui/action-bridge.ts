@@ -462,6 +462,8 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     const startTimeMs = nowMs - elapsedMs;
     setCast(vm, 'player', {
       name: row?.name ?? '',
+      // Carried so `SpellStopCasting` can name the spell in `CMSG_CANCEL_CAST`; see `api/casting.ts`.
+      spellId: decoded.spellId,
       texture: spellData.iconPath(decoded.spellId),
       startTimeMs,
       endTimeMs: startTimeMs + decoded.castTimeMs,

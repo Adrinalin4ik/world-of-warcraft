@@ -511,6 +511,21 @@ export class GlueInput {
         focused.onTabPressed();
         return;
       }
+      // TAB IS A BINDING WHEN NOTHING IS FOCUSED, and this early return was the whole of "Tab does not
+      // select the nearest enemy": the focus ring below claimed every press before the binding table
+      // was consulted, so `TARGETNEARESTENEMY` could never fire however well it was bound. The gate is
+      // the reference's own -- `target/scan.rs:501` refuses the press only while `UiKeyboardCapture` is
+      // set, i.e. while an EditBox owns the keyboard.
+      //
+      // The FALL-THROUGH is what keeps the glue screens working: `dispatch` answers false for a key no
+      // command holds, and the glue runtime installs no binding table at all, so Tab there still walks
+      // the focus chain exactly as before.
+      if (focused === null && this.keyBinding !== null && !event.repeat) {
+        const token = keyToken(event);
+        if (token !== null && this.keyBinding(token, true)) {
+          return;
+        }
+      }
       this.setFocus(nextFocus(focusChain(this.items), this.focus, event.shiftKey));
       return;
     }

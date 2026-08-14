@@ -978,6 +978,37 @@ export class SpellHandler extends EventEmitter {
     });
   }
 
+  /**
+   * `CMSG_CANCEL_CAST` (0x12F): stop the cast in flight. Escape's own leg -- see
+   * `game/ui/target-bridge.ts#SpellStopCasting` for the precedence it sits in.
+   *
+   * 3.3.5a body: `u8 castCount`, `u32 spellId`. **The layout is the SERVER IMPLEMENTATIONS' shape, not
+   * measured off a capture** -- the same standing this file's `CMSG_SET_ACTION_BUTTON` note takes:
+   * TrinityCore's `HandleCancelCastOpcode` reads and discards a leading counter byte and then the
+   * spell id. It is labelled rather than asserted because nothing here can observe the difference: a
+   * cancel the server rejects is silent.
+   *
+   * `castCount` is the same value `castSpell` sent (0 for every cast this client makes), echoed so a
+   * server that does match them matches this one.
+   */
+  cancelCast(spellId: number, castCount: number): void {
+    const body = 1 + 4;
+    const app = new GamePacket(GameOpcode.CMSG_CANCEL_CAST, GamePacket.HEADER_SIZE_OUTGOING + body);
+    app.writeUnsignedByte(castCount & 0xff);
+    app.writeUnsignedInt(spellId);
+    this.game.send(app);
+
+    spellWire.record({
+      at: Date.now(),
+      kind: 'CANCEL_SENT',
+      spellId,
+      caster: null,
+      detail: { castCount },
+      bodySize: body,
+      consumed: body,
+    });
+  }
+
   // -- What the Lua side reads --------------------------------------------------------------------
 
   /** `action` is Lua's 1-based slot number, as `ActionButton.lua` computes it. */

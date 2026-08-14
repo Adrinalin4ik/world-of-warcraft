@@ -37,6 +37,12 @@ import { notImplemented } from '../methods/region';
 export interface CastSnapshot {
   /** The spell's name from `Spell.dbc`. `nil` here is what makes the frame hide itself. */
   name: string;
+  /**
+   * The spell id. Not part of `UnitCastingInfo`'s return shape -- it is here because
+   * `CMSG_CANCEL_CAST` names the spell it is cancelling, and this snapshot is the only record of
+   * which cast is in flight. See `ui/target-bridge.ts#SpellStopCasting`.
+   */
+  spellId: number;
   /** The icon path, or null. `CastingBarFrame`'s own `Icon` region is hidden at load, so this is unused
    * by the default bar and is carried because `UnitCastingInfo`'s contract has it and addons read it. */
   texture: string | null;
@@ -148,19 +154,8 @@ export function installCastingApi(vm: LuaVM): void {
       + 'decoded, so a channel shows no cast bar rather than a wrong one (it would drain, not fill)',
   );
 
-  /**
-   * A declared gap: interrupting somebody else's cast.
-   *
-   * `CastingBarFrame` does not call it; `TargetFrame`'s spell bar does, to decide whether to draw the
-   * shield. Registered by name so the report carries it, because `SMSG_SPELL_START`'s `castFlags` is
-   * decoded but the interrupt bit's position in 3.3.5a is not sourced -- guessing it would draw or omit
-   * a shield on every target cast with equal confidence.
-   */
-  const stub = notImplemented(
-    'SpellStopCasting',
-    'no cast can be cancelled from the client: CMSG_CANCEL_CAST is not sent, so a cast always runs '
-      + 'to the server\'s own conclusion',
-    [],
-  );
-  fn('SpellStopCasting', () => stub(null as never, 0, []));
+  // `SpellStopCasting` USED TO BE DECLARED HERE and is now real -- it sends `CMSG_CANCEL_CAST` and is
+  // the leg that makes Escape cancel a cast (`uiparent.lua:2893`). It needs a `World` to reach the
+  // wire, which this installer does not have, so it lives in `ui/target-bridge.ts` with the other
+  // selection globals. Named here because this is where a reader looks for it.
 }

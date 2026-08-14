@@ -153,6 +153,12 @@ export const DEFAULT_BINDINGS: ReadonlyArray<readonly [string, string]> = [
   ['TOGGLECHARACTER0', 'C'],
   ['TOGGLEBACKPACK', 'B'],
   ['TOGGLEGAMEMENU', 'ESCAPE'],
+  // TAB and SHIFT-TAB. `Bindings.xml:456-461` is the pair -- `TargetNearestEnemy()` and
+  // `TargetNearestEnemy(1)`, whose own comment reads "1 (or "true") means reverse!". The KEYS carry the
+  // same standing as everything else in this table: transcribed from the shipped layout, not read from
+  // any data this project has.
+  ['TARGETNEARESTENEMY', 'TAB'],
+  ['TARGETPREVIOUSENEMY', 'SHIFT-TAB'],
 ];
 
 /**

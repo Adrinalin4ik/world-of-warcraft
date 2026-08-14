@@ -44,6 +44,7 @@ import { DrawItem, WidgetRoot, effectiveFont } from './widget';
 import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
+import { attachTargetBridge } from './target-bridge';
 import { dispatchBinding } from './framexml/lua/api/bindings';
 import { cancelCursor, dropCursorOnWorld, getCursor } from './framexml/lua/api/cursor';
 import { gameTime } from './framexml/lua/compat';
@@ -194,6 +195,9 @@ export class WorldUiHost {
 
   /** `attachUnitBridge`'s teardown, held so `dispose` can run it. */
   private detachUnits: (() => void) | null = null;
+
+  /** `attachTargetBridge`'s teardown, held so `dispose` can run it. */
+  private detachTargets: (() => void) | null = null;
 
   /** `attachSpellbookBridge`'s teardown, held so `dispose` can run it. */
   private detachSpellbook: (() => void) | null = null;
@@ -401,6 +405,11 @@ export class WorldUiHost {
     // server, and is where every UI measurement is taken -- still boots.
     if (this.world) {
       this.detachUnits = attachUnitBridge(runtime.vm, this.world);
+      // THE SELECTION GLOBALS -- `TargetNearestEnemy` (TAB), `ClearTarget` and `SpellStopCasting`
+      // (Escape's own legs). Beside the unit bridge and NOT gated on a live session: an offline world
+      // has units to tab between and a target to clear, and `SpellStopCasting` reaches the wire only
+      // when a cast snapshot exists, which offline it never does.
+      this.detachTargets = attachTargetBridge(runtime.vm, this.world);
       // THE ACTION FEED. Gated on a real session as well as a world: `/game?offline=1&ui=lua` has units
       // but no protocol, and `session.offline` short-circuits ahead of the `protocol` getter -- reading
       // `game.objectHandler` there would construct transports the offline route contracts never to
@@ -931,6 +940,8 @@ export class WorldUiHost {
     this.stopped = true;
     this.detachUnits?.();
     this.detachUnits = null;
+    this.detachTargets?.();
+    this.detachTargets = null;
     this.detachActions?.();
     this.detachActions = null;
     this.detachSpellbook?.();

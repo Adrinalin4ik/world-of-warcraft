@@ -48,6 +48,12 @@ export interface SpellWireRow {
      * suspected layout error can be read back without a packet capture.
      */
     | 'SET_ACTION_BUTTON'
+    /**
+     * `CMSG_CANCEL_CAST` (0x12F) as SENT -- Escape cancelling the cast in flight
+     * (`ui/target-bridge.ts#SpellStopCasting`). OUTBOUND, and its own kind for `SET_ACTION_BUTTON`'s
+     * reason: the server may echo nothing at all, so this row is the only record it went out.
+     */
+    | 'CANCEL_SENT'
     // The three cooldown opcodes. `SPELL_COOLDOWN` (0x134) carries a whole list, `COOLDOWN_EVENT` (0x135)
     // one spell with no duration; both are on the wire and neither carries the GLOBAL cooldown, which the
     // client computes from `Spell.dbc` column 206 (`object/spells.ts#applyGlobalCooldown`).
