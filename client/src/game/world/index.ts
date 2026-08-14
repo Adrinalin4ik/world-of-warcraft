@@ -26,6 +26,12 @@ import { readMark } from "./saved-mark";
 import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
 
+/**
+ * `ObjectType.Unit` -- a CREATURE. `4` is a player, and the combat-facing rule deliberately does not
+ * touch one; see `animateEntities`.
+ */
+const OBJECT_TYPE_CREATURE = 3;
+
 export default class World extends EventEmitter {
   public scene: THREE.Scene;
   public debugScene: THREE.Scene;
@@ -796,15 +802,6 @@ export default class World extends EventEmitter {
    * `animCounters`, so the HUD's `resident` / `posed` / `bonesSolved` rows report that population
    * from this task on -- measure before adding a gate whose failure mode is a stuttering boss.
    */
-  /**
-   * The combat-facing control arm. Read per frame off `window`, which costs one property read per
-   * animated frame and is what every other A/B switch in this client does.
-   */
-  // eslint-disable-next-line class-methods-use-this
-  combatFacingEnabled(): boolean {
-    return (window as unknown as Record<string, unknown>).worldCombatFacing !== false;
-  }
-
   animateEntities(
     delta: number,
     camera: THREE.PerspectiveCamera,
@@ -813,6 +810,12 @@ export default class World extends EventEmitter {
     const worldClockMs = worldClock.ms;
     const frameIndex = worldClock.frameIndex;
     const camPos = camera.position;
+    // THE COMBAT-FACING CONTROL ARM, read ONCE for the frame. `window.worldCombatFacing = false` gives
+    // a mob back the heading its last packet left, which is the "before" the rule is measured against --
+    // a fight is not reproducible across two builds, so this is the only honest A/B. Hoisted out of the
+    // entity loop: inside it, the short-circuit put a `window` property read in front of every unit
+    // every frame (~4800 a second in a busy zone) for a value that cannot change mid-frame.
+    const combatFacing = (window as unknown as Record<string, unknown>).worldCombatFacing !== false;
 
     // One of the three call sites of the `'anim'` CPU span -- the others are `DoodadManager#animate`
     // and `WMOManager#animate`. `CpuSections` SUMS spans of the same name within a frame, so the
@@ -843,14 +846,17 @@ export default class World extends EventEmitter {
       // (`Unit#combatFacingPoint`, and the owner's own rule quoted there). `entities` carries the local
       // player too (`run` files him at :156), so a mob fighting US resolves through the same lookup.
       //
-      // One `Map.get` per unit that is actually in combat and nothing at all for the rest, which is
-      // every unit in a quiet zone.
+      // CREATURES ONLY (`objectType` 3), and that scope is deliberate. The owner's rule is about a MOB;
+      // a PEER PLAYER reports his own facing on the wire (`MSG_MOVE_SET_FACING` while he turns, which
+      // `remoteMotion.orientation` carries), and turning him toward his victim would override what his
+      // own client is showing. A creature has no such authority to override -- measured, its
+      // `remoteMotion` is null, because it moves by splines.
+      //
+      // One `Map.get` per CREATURE actually in combat and nothing at all for the rest, which is every
+      // unit in a quiet zone.
       entity.combatFacingPoint = null;
-      // `window.worldCombatFacing = false` is the SAME-BUILD CONTROL ARM, the shape `worldPickNarrow`
-      // and `uiTextSnap` use: with it off a mob keeps the heading its last packet left, which is the
-      // "before" this rule is measured against. A claim about a turn cannot be checked across two
-      // builds -- the fight is not reproducible.
-      if (this.combatFacingEnabled() && entity.inCombat && entity.combatTarget !== null) {
+      if (combatFacing && entity.objectType === OBJECT_TYPE_CREATURE
+        && entity.inCombat && entity.combatTarget !== null) {
         const foe = this.entities.get(entity.combatTarget);
         if (foe !== undefined && foe !== entity) {
           entity.combatFacingPoint = foe.view.position;
