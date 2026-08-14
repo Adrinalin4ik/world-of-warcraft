@@ -48,6 +48,8 @@ import { CursorPayload, setCursorHandlers } from './framexml/lua/api/cursor';
 import { SPELL_AUTO_ATTACK, SpellHandler } from '../../network/game/object/spells';
 import { fireEvent } from './framexml/lua/events';
 import { spellData } from '../pipeline/dbc/spell-data';
+import { renderSpellDescription } from '../pipeline/dbc/spell-description';
+import { casterStatsFor } from './caster-stats';
 import { skillData } from '../pipeline/dbc/skill-data';
 import { LuaVM } from './framexml/lua/vm';
 
@@ -61,11 +63,39 @@ import { LuaVM } from './framexml/lua/vm';
 const GENERAL_TAB_FALLBACK = 'General';
 
 /**
- * The General tab's icon. `INV_Misc_QuestionMark` is the engine's own "no particular icon" art and is
- * what the real client's General tab shows; unlike a class line, the General tab has no `SkillLine` row
- * and therefore no `spellIconID` to resolve, so this one path is OURS.
+ * THE GENERAL TAB HAS NO ICON, and that is a DECLARED GAP rather than a chosen texture.
+ *
+ * The value here was `Interface\Icons\INV_Misc_QuestionMark`, justified by a comment claiming "this is
+ * what the real client's General tab shows". **That claim was unsourced and is now refuted**, which
+ * under `CLAUDE.md` makes the comment itself the defect -- the owner's report was "вкладка general все
+ * ещё с вопросительным знаком".
+ *
+ * Searched, and the client's own files do not specify it:
+ *
+ *  - `spellbookframe.lua:107-112` sets a tab's art from `GetSpellTabInfo(i)`'s SECOND return
+ *    (`skillLineTab:SetNormalTexture(texture)`), so the path is engine-side for every tab including the
+ *    first. There is no literal anywhere in the file.
+ *  - `SpellBookSkillLineTabTemplate` authors `<NormalTexture/>` -- **EMPTY, no `file` attribute**
+ *    (`spellbookframe.xml:41`). The only art the template carries is the tab FRAME
+ *    (`Interface\SpellBook\SpellBook-SkillLineTab`, `:15`) plus its highlight and checked states.
+ *  - `SkillLine.dbc` has **no row named "General"** at all: scanned all 150 records of the served file
+ *    (56 fields, recordSize 224), and its 39 category-7 rows are the class lines -- Frost, Fire, Arms,
+ *    Combat, Subtlety, Assassination, ... and the 20 `Pet - *` lines. So there is no `spellIconID` to
+ *    resolve, which is why this tab needed a decision at all. Its NAME is the client's own
+ *    `GENERAL_SPELLS`; its icon has no equivalent.
+ *
+ * So `null`: an empty normal texture, which is exactly what the template itself authors. The tab draws
+ * its frame with no icon inside -- visibly incomplete rather than plausibly wrong, which is the
+ * standard this round holds for the description tokens too.
+ *
+ * A class line whose `spellIconID` does not resolve gets the same null for the same reason.
+ *
+ * **TAB ORDER is still ours and still differs from the real client** (ascending `SkillLine.id`). The
+ * rule is not in `spellbookframe.lua` either: `SpellBookFrame_Update:103-122` walks `1..GetNumSpellTabs()`
+ * and asks the engine for each, so the ordering lives entirely behind `GetSpellTabInfo`. Recorded, not
+ * closed.
  */
-const GENERAL_TAB_ICON = 'Interface\\Icons\\INV_Misc_QuestionMark';
+const GENERAL_TAB_ICON = null;
 
 interface Grouped {
   /** null is the General tab. */
@@ -93,7 +123,10 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
       name: row?.name ?? '',
       // `''` and never null -- `SpellbookEntry#subName` says why.
       subName: row?.subName ?? '',
-      description: row?.description ?? '',
+      // THE DESCRIPTION IS EVALUATED HERE, not in the tooltip method: `$s1`/`$AP`/`$<mult>` need the
+      // spell's own effect columns AND the player's live stats, and this is the seam that has both.
+      // A token the evaluator cannot resolve is left VISIBLE -- see `spell-description.ts`.
+      description: row === null ? '' : renderSpellDescription(row, casterStatsFor(world, spells)),
       texture: spellData.iconPath(spellId),
       passive: row?.passive ?? false,
       cooldownStart: cooldown?.start ?? 0,
