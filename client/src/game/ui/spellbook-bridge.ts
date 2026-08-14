@@ -70,23 +70,40 @@ const GENERAL_TAB_FALLBACK = 'General';
  * under `CLAUDE.md` makes the comment itself the defect -- the owner's report was "вкладка general все
  * ещё с вопросительным знаком".
  *
- * Searched, and the client's own files do not specify it:
+ * **RE-SEARCHED IN ROUND 19 OVER THE WHOLE MANIFEST, not a subset, because the owner has now reported
+ * the blank twice** ("вкладка общие теперь без вопросительного знака, однако и иконки нет"). Every XML
+ * file `framexml.toc` lists (**127**) and every Lua file any of them `<Script file=`s (**133**) was
+ * fetched and searched. The client's own files do not specify this texture:
  *
- *  - `spellbookframe.lua:107-112` sets a tab's art from `GetSpellTabInfo(i)`'s SECOND return
+ *  - `spellbookframe.lua:110` sets a tab's art from `GetSpellTabInfo(i)`'s SECOND return
  *    (`skillLineTab:SetNormalTexture(texture)`), so the path is engine-side for every tab including the
  *    first. There is no literal anywhere in the file.
  *  - `SpellBookSkillLineTabTemplate` authors `<NormalTexture/>` -- **EMPTY, no `file` attribute**
  *    (`spellbookframe.xml:41`). The only art the template carries is the tab FRAME
  *    (`Interface\SpellBook\SpellBook-SkillLineTab`, `:15`) plus its highlight and checked states.
- *  - `SkillLine.dbc` has **no row named "General"** at all: scanned all 150 records of the served file
- *    (56 fields, recordSize 224), and its 39 category-7 rows are the class lines -- Frost, Fire, Arms,
- *    Combat, Subtlety, Assassination, ... and the 20 `Pet - *` lines. So there is no `spellIconID` to
- *    resolve, which is why this tab needed a decision at all. Its NAME is the client's own
- *    `GENERAL_SPELLS`; its icon has no equivalent.
+ *  - **`SetNormalTexture("...")` with a literal appears 10 times across the 133 Lua files and not one is
+ *    a skill-line tab** -- `ActionButton.lua:249,254` (`UI-Quickslot2`/`UI-Quickslot`),
+ *    `lfdframe.lua:251,253`, `lfgframe.lua:289,305`, `lfrframe.lua:192,194`,
+ *    `mainmenubarmicrobuttons.lua:5`. `mailframe.lua:824` passes a variable.
+ *  - **`GENERAL_SPELLS` occurs exactly ONCE in the whole manifest** -- its own definition,
+ *    `globalstrings.lua:3792`. Nothing in FrameXML reads it, which is the direct evidence that the
+ *    General tab's NAME comes from the engine; its icon comes from the same place and there is no file
+ *    here that says what it is.
+ *  - `SkillLine.dbc` has **no row named "General"**: all 150 records of the served file re-read
+ *    independently this round (56 fields, recordSize 224, stringBlock 5151). The nearest miss is id
+ *    **183 `GENERIC (DND)`, category 12** -- not category 7, and its name is not the tab's, so it is not
+ *    the General tab under any reading. 75 rows are category 7. There is no `spellIconID` to resolve.
  *
- * So `null`: an empty normal texture, which is exactly what the template itself authors. The tab draws
- * its frame with no icon inside -- visibly incomplete rather than plausibly wrong, which is the
- * standard this round holds for the description tokens too.
+ * `Interface\Spellbook\Spellbook-Icon` was CONSIDERED AND REJECTED: it exists on the asset host (200,
+ * 6660 B) and the client's own file does use it -- but as `SpellBookFrameIcon`, the 58x58 portrait in the
+ * frame's corner (`spellbookframe.xml:211-214`). Nothing connects it to a tab. Picking it would be the
+ * same defect as the question mark: a plausible picture with an invented justification.
+ *
+ * So `null`, and **DECLARED**: `declareTabIconGap` below warns once and records the tab in
+ * `window.spellbookStats.gaps`, so the gap is named rather than silently blank. It does not go through
+ * `notImplemented` for the reason round 18's description gaps do not either -- that factory manufactures
+ * a Lua METHOD, and there is no method here; the tab's texture is a VALUE the engine supplies.
+ * The tab draws its frame with no icon inside -- visibly incomplete rather than plausibly wrong.
  *
  * A class line whose `spellIconID` does not resolve gets the same null for the same reason.
  *
@@ -96,6 +113,26 @@ const GENERAL_TAB_FALLBACK = 'General';
  * closed.
  */
 const GENERAL_TAB_ICON = null;
+
+/**
+ * The tabs that ended up with no icon, one row per reason -- the declared form of the gap above.
+ *
+ * Module level and keyed by reason, so a book rebuilt on every `SPELLS_CHANGED` reports once rather than
+ * per build. Read from the console as `window.spellbookStats.gaps`.
+ */
+const tabIconGaps = new Map<string, { tab: string; reason: string; count: number }>();
+
+function declareTabIconGap(tab: string, reason: string): null {
+  const key = `${tab}|${reason}`;
+  const row = tabIconGaps.get(key);
+  if (row === undefined) {
+    tabIconGaps.set(key, { tab, reason, count: 1 });
+    console.warn(`spellbook: the "${tab}" tab has no icon -- ${reason}`);
+  } else {
+    row.count += 1;
+  }
+  return GENERAL_TAB_ICON;
+}
 
 interface Grouped {
   /** null is the General tab. */
@@ -113,6 +150,10 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
   // reached the engine at all".
   const stats = {
     builds: 0, events: 0, tabs: 0, spells: 0, picks: 0, places: 0, moves: 0, discards: 0,
+    /** Every tab that drew with no icon, with the reason -- see `declareTabIconGap`. */
+    get gaps() {
+      return [...tabIconGaps.values()];
+    },
   };
 
   const entryFor = (spellId: number): SpellbookEntry => {
@@ -185,8 +226,15 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
           lineId: key,
           name: line?.name ?? generalName(),
           texture: line === null
-            ? GENERAL_TAB_ICON
-            : spellData.icon(line.spellIconID) ?? GENERAL_TAB_ICON,
+            ? declareTabIconGap(
+              generalName(),
+              'it is not a SkillLine row, so there is no spellIconID; the engine supplies this one '
+              + 'and no file in the manifest states it (see GENERAL_TAB_ICON)',
+            )
+            : spellData.icon(line.spellIconID) ?? declareTabIconGap(
+              line.name,
+              `SkillLine ${line.id} spellIconID ${line.spellIconID} did not resolve to a path`,
+            ),
           entries: [],
         };
         groups.set(key, group);
