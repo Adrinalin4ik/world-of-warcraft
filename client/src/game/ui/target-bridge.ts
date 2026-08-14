@@ -53,6 +53,14 @@ export function attachTargetBridge(vm: LuaVM, world: World): () => void {
    *
    * The geometry is `world/scan.ts` (the 3.3.5a cone). `setTarget` is the only door to the wire, so a
    * TAB and a click commit identically.
+   *
+   * **A DECLARED DEVIATION, shared with the click and pre-dating this file**: the reference's `commit`
+   * (`target/scan.rs:456-484`, byte-read from `SetSelection 0x493540`) is **stop -> select -> re-swing**
+   * when the selection changes WHILE AUTO-ATTACKING -- `CMSG_ATTACKSTOP`, then the selection, then
+   * `CMSG_ATTACKSWING` at the new target. `World#setTarget` sends the selection alone, so a TAB (or a
+   * click) mid-fight moves the target and leaves the swing where it was. Naming it here rather than
+   * fixing it silently: it needs `Engaged` state at the moment of the switch and a hostile to verify
+   * against, and Northshire is neutral.
    */
   vm.registerFunction('TargetNearestEnemy', (args) => {
     // LUA TRUTHINESS, not `=== true`: the binding passes the NUMBER 1 (`Bindings.xml:460`), and 0

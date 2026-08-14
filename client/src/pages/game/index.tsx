@@ -325,6 +325,9 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    * `worldUnits()` reports every unit's SCREEN position in CSS pixels, which is what lets a probe put
    * a real `page.mouse.click` a stated number of pixels off a mob instead of guessing at one.
    */
+  /** The `window` keys `installPickInstrument` writes, so `componentWillUnmount` can take them back. */
+  private static readonly PICK_INSTRUMENT_KEYS = ['worldPick', 'worldUnits', 'worldCamera'];
+
   private installPickInstrument(): void {
     const flags = window as unknown as Record<string, unknown>;
     const toNdc = (clientX: number, clientY: number) => {
@@ -451,6 +454,14 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    */
   componentWillUnmount() {
     this.stopped = true;
+    // THE INSTRUMENT GOES WITH THE COMPONENT. Each closure captures `this` -- this camera, this world --
+    // so a handle left on `window` after a remount answers about a disposed renderer's camera and reads
+    // as a live measurement. That is this file's own rule two lines down ("Everything this component put
+    // somewhere that outlives it"), and the first version of the instrument broke it.
+    const flags = window as unknown as Record<string, unknown>;
+    for (const key of GameScreen.PICK_INSTRUMENT_KEYS) {
+      delete flags[key];
+    }
     window.cancelAnimationFrame(this.frameHandle);
     window.removeEventListener('resize', this.onResize);
     this.game.removeListener('disconnect', this.onWorldDisconnect);

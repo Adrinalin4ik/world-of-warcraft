@@ -141,6 +141,21 @@ export interface PickOptions {
 }
 
 /**
+ * Which phases are on, in ONE place.
+ *
+ * Both defaults are "on unless explicitly false", and the occlusion leg additionally needs a cast --
+ * a decision `pickUnitReport` has to report and `pickUnit` has to act on. Written twice in a first
+ * draft, which is exactly the duplicated expression round 19's self-review caught elsewhere: the two
+ * copies can disagree and nothing would say so.
+ */
+function resolveOptions(options: PickOptions): { narrow: boolean; occlude: boolean } {
+  return {
+    narrow: options.narrow !== false,
+    occlude: options.occlude !== false && !!options.cast,
+  };
+}
+
+/**
  * The ray's nearest hit against a unit's authored collision hull, or null.
  *
  * The test runs in the hull's LOCAL space -- one inverse matrix per candidate instead of
@@ -212,15 +227,13 @@ export function pickUnit(
   self: Unit | null,
   options: PickOptions = {},
 ): Unit | null {
-  const narrow = options.narrow !== false;
-  const occlude = options.occlude !== false && !!options.cast;
+  const { narrow, occlude } = resolveOptions(options);
   const trace = options.trace;
 
   rayOrigin.setFromMatrixPosition(camera.matrixWorld);
   rayDirection.set(ndc.x, ndc.y, 0.5).unproject(camera).sub(rayOrigin).normalize();
 
   let best: Unit | null = null;
-  let bestDistance = PICK_RANGE;
 
   const centre = new THREE.Vector3();
   // TWO PASSES, because the occlusion cast is the expensive half and must not run for a candidate
@@ -292,7 +305,11 @@ export function pickUnit(
 
   survivors.sort((x, y) => x.entry - y.entry);
   for (const candidate of survivors) {
-    if (candidate.entry >= bestDistance) {
+    // `PICK_RANGE`, not a shrinking best-so-far: the list is already sorted, so the first survivor
+    // inside the range and not occluded IS the answer. A first draft carried a `bestDistance` that it
+    // wrote and then immediately broke out of the loop -- a dead assignment that read like a running
+    // minimum, which is worse than none.
+    if (candidate.entry >= PICK_RANGE) {
       break;
     }
     if (occlude && options.cast) {
@@ -304,7 +321,6 @@ export function pickUnit(
       }
     }
     candidate.row.entry = candidate.entry;
-    bestDistance = candidate.entry;
     best = candidate.unit;
     break;
   }
@@ -333,7 +349,6 @@ export function pickUnitReport(
     guid: unit ? unit.guid : null,
     rows,
     ms: performance.now() - started,
-    narrow: options.narrow !== false,
-    occlude: options.occlude !== false && !!options.cast,
+    ...resolveOptions(options),
   };
 }
