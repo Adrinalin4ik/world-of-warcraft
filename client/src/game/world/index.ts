@@ -796,6 +796,15 @@ export default class World extends EventEmitter {
    * `animCounters`, so the HUD's `resident` / `posed` / `bonesSolved` rows report that population
    * from this task on -- measure before adding a gate whose failure mode is a stuttering boss.
    */
+  /**
+   * The combat-facing control arm. Read per frame off `window`, which costs one property read per
+   * animated frame and is what every other A/B switch in this client does.
+   */
+  // eslint-disable-next-line class-methods-use-this
+  combatFacingEnabled(): boolean {
+    return (window as unknown as Record<string, unknown>).worldCombatFacing !== false;
+  }
+
   animateEntities(
     delta: number,
     camera: THREE.PerspectiveCamera,
@@ -829,6 +838,25 @@ export default class World extends EventEmitter {
       // classified, which is seconds after the first movement packet arrives; the earlier report
       // named the same hazard for any unit with a static model. A body's position must not depend on
       // whether its skeleton has keyframes.
+      // WHO THIS UNIT IS FIGHTING, as a point, before it integrates. A `Unit` cannot resolve a guid --
+      // it holds no registry -- so the world hands it the position and the unit owns the turn
+      // (`Unit#combatFacingPoint`, and the owner's own rule quoted there). `entities` carries the local
+      // player too (`run` files him at :156), so a mob fighting US resolves through the same lookup.
+      //
+      // One `Map.get` per unit that is actually in combat and nothing at all for the rest, which is
+      // every unit in a quiet zone.
+      entity.combatFacingPoint = null;
+      // `window.worldCombatFacing = false` is the SAME-BUILD CONTROL ARM, the shape `worldPickNarrow`
+      // and `uiTextSnap` use: with it off a mob keeps the heading its last packet left, which is the
+      // "before" this rule is measured against. A claim about a turn cannot be checked across two
+      // builds -- the fight is not reproducible.
+      if (this.combatFacingEnabled() && entity.inCombat && entity.combatTarget !== null) {
+        const foe = this.entities.get(entity.combatTarget);
+        if (foe !== undefined && foe !== entity) {
+          entity.combatFacingPoint = foe.view.position;
+        }
+      }
+
       entity.update(delta, camPos);
 
       // Same two-part test `DoodadManager#loadDoodad` documents: `model.animated` is the POSING

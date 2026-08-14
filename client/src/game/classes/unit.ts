@@ -299,6 +299,14 @@ function needsGroundSnap(pos: THREE.Vector3): boolean {
   return floor === null || Math.abs(pos.z - floor) > GROUND_SNAP_EPSILON;
 }
 
+/**
+ * Below this separation (yd^2) a mob keeps its heading instead of facing its victim. OURS.
+ *
+ * A tenth of a yard apart. `atan2(0, 0)` is 0, so a victim standing exactly on the mob would otherwise
+ * snap it to face east; and at zero separation there is no bearing to face in any case.
+ */
+const COMBAT_FACING_MIN_SQ = 0.01;
+
 class Unit extends Entity {
   public guid: string;
   public name: string = "<unknown>";
@@ -357,6 +365,21 @@ class Unit extends Entity {
 
   /** Who this unit is swinging at, as a guid, while `inCombat`. */
   public combatTarget: string | null = null;
+
+  /**
+   * WHERE THIS UNIT SHOULD BE LOOKING because it is fighting whatever stands there, or null.
+   *
+   * The OWNER'S OWN SPECIFICATION of the rule, verbatim: "Это интерполяция. Моб всегда должен
+   * смотреть на цель, которую атакует. Пакеты движения будут лишь корректировать направление когда
+   * будет приходить пакет." So a mob in combat faces its victim CONTINUOUSLY, client-side, and a
+   * movement packet is a CORRECTION rather than the mechanism -- which is why this is a client rule
+   * and not a wire field to decode.
+   *
+   * A world-space point rather than a guid, and filled by `World#animateEntities` each frame, because
+   * a `Unit` cannot resolve a guid: it holds no registry. That is the same division `movement/`
+   * already uses when it takes a `CastFn` instead of the collision world.
+   */
+  public combatFacingPoint: THREE.Vector3 | null = null;
 
   /**
    * WHO IS SWINGING AT THIS UNIT -- the other end of the same `SMSG_ATTACKSTART` .. `SMSG_ATTACKSTOP`
@@ -2138,6 +2161,10 @@ class Unit extends Entity {
     // `applyRemoteState` each clear the other), so at most one writes `view.position` per frame.
     this.updateSplineFollowing(delta);
     this.updateRemoteMotion(delta, viewerPos);
+    // AFTER both motion legs, which is what makes the packet a CORRECTION rather than a competitor:
+    // whatever a spline's `facing` or a remote state's orientation just wrote is this frame's starting
+    // heading, and the ease then carries it on toward the victim. See `updateCombatFacing`.
+    this.updateCombatFacing(delta);
     // this.updatePlayer(delta);
     this.clear();
     // const m = ObjectsManager;
@@ -2365,6 +2392,37 @@ class Unit extends Entity {
       }
       this.splineRide = null;
     }
+  }
+
+  /**
+   * A MOB IN COMBAT TURNS TO FACE WHAT IT IS FIGHTING, interpolated -- the owner's own rule; see
+   * `combatFacingPoint`.
+   *
+   * **This is what was missing, and the diagnosis is in the two lines above it.** A creature moves by
+   * `SMSG_MONSTER_MOVE` splines, and `updateSplineFollowing` writes `rotation.z` only from
+   * `sample.facing` -- so when the path ENDS it drops the ride and nothing writes the heading again.
+   * A wolf that has arrived and is standing there biting keeps whatever yaw its last path ended with,
+   * for ever, however far around it the player runs. That is "моб не поворачивается".
+   *
+   * `easeDisplayYaw` is the client's own display-facing chase, the same law a strafing peer's body and
+   * the local avatar's take (`net-motion.ts:391-401`) -- reused rather than re-invented so a mob's turn
+   * and a peer's turn cannot look different. Offset **0**: `strafeBodyOffset` exists to render a peer
+   * whose AIM and travel disagree, and a mob turning to its victim has no such disagreement.
+   *
+   * Bailing when the two are on top of each other is not cosmetic: `atan2(0, 0)` is 0, so a victim at
+   * the mob's own feet would snap it to face east.
+   */
+  private updateCombatFacing(delta: number): void {
+    const point = this.combatFacingPoint;
+    if (point === null) {
+      return;
+    }
+    const dx = point.x - this.position.x;
+    const dy = point.y - this.position.y;
+    if (dx * dx + dy * dy < COMBAT_FACING_MIN_SQ) {
+      return;
+    }
+    this.rotation.z = easeDisplayYaw(this.rotation.z, Math.atan2(dy, dx), 0, delta);
   }
 
   /**
