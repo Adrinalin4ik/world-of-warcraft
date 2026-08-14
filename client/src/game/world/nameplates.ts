@@ -51,18 +51,30 @@
  *
  * ## Sourced, and not
  *
- * SOURCED: the CVar names and the toggle's logic (`Bindings.xml`); the font, `NAMEPLATE_FONT =
- * "Fonts\FRIZQT__.TTF"` (`fonts.xml:8`, the client's own declaration); the bar's COLOUR, which is
- * `world/selection-color.ts` -- the reference's verdict is that the name's colour comes from
- * `CGUnit::GetSelectionCircleColor 0x605960`, "the SAME selector as the ground selection ring"
- * (`nameplates.rs:14-27`), and a hand-copied second mirror is a mistake that reference already made and
- * recorded; the "the current TARGET shows regardless of the CVars" rescue (`ShouldShowName 0x6070a0`,
- * `nameplates.rs:38-44`) -- which is precisely the owner's "нету имени цели"; the overhead anchor's
- * FALLBACK formula `feet + scale * bbox_z * 1.25` (`entities.rs:171-174`).
+ * SOURCED:
  *
- * NOT SOURCED, and each says so where it is written: every PLATE DIMENSION (bar 110x12 logical units,
- * the fonts' sizes, the gaps), the anchor's extra lift, and the enemy/friendly split's own distance
- * cap. Those are engine constants in the 3.3.5a binary; nothing this project can read states them.
+ *  - **The plate's whole GEOMETRY, decoded out of `interface/tooltips/nameplate-border.blp`** -- the
+ *    frame, the bar's inset hole and the level slot. See `ART`; this replaced a first version that
+ *    invented every dimension and drew a flat rectangle, which is what the owner reported as "В
+ *    оригинале она по другому выглядит".
+ *  - The CVar names and the toggle's logic (`Bindings.xml:544-573`).
+ *  - The font: `NAMEPLATE_FONT = "Fonts\FRIZQT__.TTF"` (`fonts.xml:8`), the client's own declaration.
+ *  - **The BAR's colour**: `world/selection-color.ts`, which the reference states literally is "the SAME
+ *    selector as the ground selection ring" (`nameplates.rs:14-27`) -- and a hand-copied second mirror is
+ *    a mistake that reference already made and recorded. Corroborated against three of the owner's own
+ *    reference crops: neutral yellow, friendly-NPC green, friendly-player blue.
+ *  - **The NAME's colour is WHITE on a nameplate** and reaction-coloured only on a bare overhead name.
+ *    Those are two systems; see the comment at the `nameMaterial` write for the evidence on both sides.
+ *  - **The LEVEL number's colour is the client's own difficulty ramp**, reached through its own
+ *    `GetQuestDifficultyColor` (`uiparent.lua:3358-3371`) rather than a copy -- the call
+ *    `targetframe.lua:246-251` makes for exactly this question. See `NameplateConfig.levelColor`.
+ *  - The "current TARGET shows regardless of the CVars" rescue (`ShouldShowName 0x6070a0`,
+ *    `nameplates.rs:38-44`) -- precisely the owner's "нету имени цели".
+ *  - The overhead anchor's FALLBACK formula `feet + scale * bbox_z * 1.25` (`entities.rs:171-174`).
+ *
+ * NOT SOURCED, and each says so where it is written: the two FONT SIZES, the gap between the name and
+ * the frame, the lift above the anchor, `PLATE_RANGE`, `MAX_PLATES`, and the depleted bar's dark backing
+ * colour. Those are engine constants in the 3.3.5a binary; nothing this project can read states them.
  *
  * NOT PORTED, with reasons: the posed `PlayerName` ATTACHMENT (slot 18, `entities.rs:143-145`) -- our
  * `M2#attachTo` could give it, but it means an `Object3D` per unit inside the skeleton and a per-frame
@@ -74,6 +86,8 @@
 import * as THREE from 'three';
 
 import type Unit from '../classes/unit';
+import TextureLoader from '../pipeline/texture-loader';
+import { PRIORITY } from '../pipeline/worker/pool';
 import { FontStringTextures } from '../ui/text';
 import type { FontSpec } from '../ui/widget';
 import { REACTION_NEUTRAL, reactionFor } from './faction';
@@ -91,27 +105,67 @@ const OBJECT_TYPE_PLAYER = 4;
 const OVERHEAD_FALLBACK_FACTOR = 1.25;
 
 /**
- * The logical (768-space) height a plate's whole stack occupies, and the pieces of it.
+ * THE PLATE'S GEOMETRY, **DECODED OUT OF THE AUTHORED ART** rather than eyeballed from a screenshot.
  *
- * **EVERY NUMBER HERE IS OURS.** A 3.3.5a nameplate's geometry is engine layout: it is not in
- * `worldframe.xml` (2592 bytes, one frame, no regions), it is in no other manifest file, and there is
- * no DBC for it. They are chosen to read like the real plate at 1382x911 and they are labelled rather
- * than dressed up with a citation. `NAMEPLATE_FONT` is the one part that IS sourced (`fonts.xml:8`).
+ * The first version of this file drew a flat rectangle and invented every dimension. The owner's answer
+ * was "В оригинале она по другому выглядит", and he was right: `interface/tooltips/nameplate-border.blp`
+ * is served (200, 6676 B) and it carries the whole layout, the same way `unitselecttexture.blp` turned
+ * out to carry the selection ring's fade. Decoded off the served file (BLP2, `colorEncoding` 2 = DXT,
+ * `alphaSize` 8 with `alphaEncoding` 1 = **DXT3**, 128x32, 8 mip levels):
+ *
+ *  - **Rows 0-14 are entirely EMPTY** -- mean alpha 0 across all 128 columns. The authored frame is the
+ *    BOTTOM **128 x 17** texels of the file, which is why the border sprite carries a sub-rect.
+ *  - Across the middle inked row (y=23) the alpha runs `ink 0..4`, `gap 5..105`, `ink 106..127`. So the
+ *    frame is **two cells**: a wide one whose interior is TRANSPARENT -- the hole the status bar shows
+ *    through -- and a narrow one at the right whose interior is FILLED opaque brass, sampled
+ *    `(139,103,5)` at alpha 238. **That narrow filled cell IS the level slot**, which answers the
+ *    owner's second point: the level belongs inside a boxed cell at the bar's right-hand end, not
+ *    floating outside it. It needed no box of ours.
+ *  - Vertically the transparent interior is rows **20..26** -- 7 texels -- with 5 border rows above and
+ *    5 below. So the fill is inset 5 texels on every side and does NOT reach the frame's edge, which is
+ *    the owner's fourth point and was not guessed at either.
+ *
+ * The plate is drawn at the art's OWN TEXEL SIZE in logical units (128 x 17). That is the one dimension
+ * here that is a choice rather than a measurement -- but it is a choice between the authored size and an
+ * invented one.
+ *
+ * `interface/targetingframe/ui-statusbar.blp` (200, 1532 B) is the fill: BLP2 DXT1, **64x8, `alphaSize`
+ * 0 so fully opaque**, and its 64 columns are identical -- a purely VERTICAL greyscale gradient,
+ * measured down a column as `139, 194, 222, 194, 148, 104, 126, 104`. It carries no colour of its own,
+ * so like the ring's texture it is a shape tinted by the reaction colour.
+ *
+ * Still OURS and labelled: the two font sizes, the gap between name and frame, the lift above the
+ * anchor, `PLATE_RANGE`, `MAX_PLATES`.
  */
+const ART = {
+  /** The file is 128x32; only the bottom 17 rows are inked. */
+  fileHeight: 32,
+  frameWidth: 128,
+  frameHeight: 17,
+  /** The transparent interior, in texels within the 128x17 frame -- the status bar's hole. */
+  barLeft: 5,
+  barTop: 5,
+  barWidth: 101,
+  barHeight: 7,
+  /** The filled brass cell at the right-hand end: the LEVEL SLOT. */
+  slotLeft: 106,
+  slotWidth: 22,
+} as const;
+
 const PLATE = {
-  barWidth: 110,
-  barHeight: 12,
-  /** The bar's dark surround, per side. */
-  barBorder: 1,
   nameSize: 12,
-  levelSize: 11,
-  /** Between the name's baseline block and the top of the bar. */
-  nameGap: 2,
-  /** Between the bar's right edge and the level number. */
-  levelGap: 4,
-  /** How far the bar's bottom edge sits above the overhead anchor. */
+  levelSize: 10,
+  /** Between the name's glyph block and the top of the frame. OURS. */
+  nameGap: 1,
+  /** How far the frame's bottom edge sits above the overhead anchor. OURS. */
   lift: 6,
 } as const;
+
+/** `interface/tooltips/nameplate-border.blp` -- see `ART`. Lowercase: the asset host serves nothing else. */
+const BORDER_TEXTURE = 'interface/tooltips/nameplate-border.blp';
+
+/** `interface/targetingframe/ui-statusbar.blp` -- the bar's own shading. See `ART`. */
+const BAR_TEXTURE = 'interface/targetingframe/ui-statusbar.blp';
 
 /**
  * The nameplate font. `fonts.xml:8` declares `NAMEPLATE_FONT = "Fonts\FRIZQT__.TTF"` -- the client's
@@ -130,11 +184,21 @@ interface Plate {
   level: THREE.Sprite;
   barBack: THREE.Sprite;
   barFill: THREE.Sprite;
+  /** The AUTHORED frame -- `interface/tooltips/nameplate-border.blp`. Drawn OVER the fill; see `ART`. */
+  border: THREE.Sprite;
   /** The strings the two text sprites were last rasterized for, so a static plate re-rasterizes never. */
   builtName: string;
   builtLevel: string;
   /** Was this plate touched this frame? Untouched plates are hidden at the end of the pass. */
   seen: boolean;
+  /**
+   * The health fraction the fill was last sized for, 0..1, or null when the bar is hidden.
+   *
+   * Stored rather than re-derived in `report()`. Self-review's finding: the first version divided the
+   * fill sprite's scale by the BACK sprite's -- which differ by the border -- and the correction term it
+   * carried was meaningless. An instrument reporting a number nobody could check.
+   */
+  fraction: number | null;
 }
 
 /**
@@ -153,7 +217,7 @@ const UNNAMED = '<unknown>';
  * Explicit rather than `''`, which a not-yet-named creature genuinely has (see `UNNAMED`) and which would
  * therefore leave its name sprite un-built for ever once the query answered.
  */
-const NEVER_BUILT = ' never-built';
+const NEVER_BUILT = '<never-built>';
 
 /** What the pass needs to know that is not on a `Unit`. */
 export interface NameplateConfig {
@@ -161,6 +225,32 @@ export interface NameplateConfig {
   showEnemies: boolean;
   /** `GetCVarBool("nameplateShowFriends")`. */
   showFriends: boolean;
+  /**
+   * `GetQuestDifficultyColor(level)` -- the colour the CLIENT'S OWN LUA gives a level number, as
+   * `[r, g, b]`; null when the runtime is not up.
+   *
+   * A DOOR rather than a second copy of the ramp, and that is the point. The ramp is authored in the
+   * client's own Lua: `uiparent.lua:3358-3371` is
+   *
+   *     function GetQuestDifficultyColor(level)
+   *       local levelDiff = level - UnitLevel("player");
+   *       if     ( levelDiff >= 5 )  then return QuestDifficultyColors["impossible"];     -- 1.00,0.10,0.10
+   *       elseif ( levelDiff >= 3 )  then return QuestDifficultyColors["verydifficult"];  -- 1.00,0.50,0.25
+   *       elseif ( levelDiff >= -2 ) then return QuestDifficultyColors["difficult"];      -- 1.00,1.00,0.00
+   *       elseif ( -levelDiff <= GetQuestGreenRange() ) then return ...["standard"];       -- 0.25,0.75,0.25
+   *       else   return QuestDifficultyColors["trivial"];                                 -- 0.50,0.50,0.50
+   *
+   * with the five colours in `constants.lua:403`'s `QuestDifficultyColors`. **`targetframe.lua:246-251`
+   * is the proof this is the right question rather than a plausible one**: the client colours a UNIT'S
+   * LEVEL NUMBER with exactly this call --
+   * `local color = GetQuestDifficultyColor(targetLevel); self.levelText:SetVertexColor(...)` -- and its
+   * `else` branch gives a NON-attackable unit a flat `(1.0, 0.82, 0.0)` instead.
+   *
+   * `lua/api/units.ts` already runs that function in Lua so the colours are read out of the client's own
+   * table rather than transcribed; going through it means there is exactly one copy of the ramp, which
+   * is what the reference records having got wrong for the ring's colour.
+   */
+  levelColor: ((level: number) => [number, number, number] | null) | null;
 }
 
 /**
@@ -233,31 +323,62 @@ export class Nameplates {
     this.stats.rasterized = 0;
     this.stats.showEnemies = config.showEnemies;
     this.stats.showFriends = config.showFriends;
+    // THE RAMP'S OTHER OPERAND, read once per pass. A level-up invalidates every memoized tint, which is
+    // why `levelTint`'s key carries it rather than only the unit's own level.
+    const mine = self?.level ?? 0;
+    if (mine !== this.selfLevel) {
+      this.selfLevel = mine;
+      this.levelTints.clear();
+    }
     this.plates.forEach((plate) => { plate.seen = false; });
 
     // The scale that makes one logical (768-space) unit one logical unit on screen, whatever the depth.
+    // CONSTANT IN PRACTICE -- it depends only on `camera.fov` and the fixed 768, not on the viewport --
+    // which matters because `setText` bakes it into a text sprite's scale and only re-runs when the
+    // STRING changes. A live fov change (nothing here does one; `resize` writes only `aspect`) would
+    // leave existing text at the old scale until its string changed. Named rather than guarded against,
+    // because a guard for a case that cannot happen is a guard nobody can test.
     const unitScale = (2 * Math.tan((camera.fov * Math.PI) / 360)) / 768;
     let shown = 0;
-
-    for (const unit of entities) {
-      if (shown >= MAX_PLATES) {
-        break;
+    const consider = (unit: Unit): void => {
+      if (shown >= MAX_PLATES || this.plates.get(unit.guid)?.seen === true) {
+        return;
       }
       const decision = this.wants(unit, self, target, config);
       if (decision === null) {
-        continue;
+        return;
       }
       shown += 1;
       if (queryName !== null && unit.name === UNNAMED && unit.fields.entry) {
         queryName(unit.fields.entry, unit.guid);
       }
-      this.place(unit, decision.bar, unitScale, self);
+      this.place(unit, decision.bar, unitScale, self, this.levelTint(unit, config));
+    };
+
+    // THE TARGET FIRST, and self-review is what found this: `MAX_PLATES` is a hard break, so a grid with
+    // twenty attackable units ahead of the target in the entity map would have dropped the target's own
+    // plate -- the one plate the reference says shows unconditionally. The `seen` guard in `consider` is
+    // what stops the main loop then drawing it twice.
+    if (target !== null) {
+      consider(target);
+    }
+    for (const unit of entities) {
+      if (shown >= MAX_PLATES) {
+        break;
+      }
+      consider(unit);
     }
 
     let calls = 0;
     this.plates.forEach((plate, guid) => {
       if (plate.seen) {
-        calls += plate.group.children.filter((child) => child.visible).length;
+        // A LOOP, not `children.filter(...).length`: the instrument runs per plate per frame and an array
+        // allocation there is exactly the per-frame garbage round 22's self-review took out of the ring.
+        for (let i = 0; i < plate.group.children.length; ++i) {
+          if (plate.group.children[i].visible) {
+            calls += 1;
+          }
+        }
         return;
       }
       // GONE, not merely out of range: dispose it rather than leaving it hidden. A world session
@@ -315,17 +436,17 @@ export class Nameplates {
   }
 
   /** Build or update one unit's plate and put it where the unit's head is. */
-  private place(unit: Unit, bar: boolean, unitScale: number, self: Unit | null): void {
+  private place(
+    unit: Unit,
+    bar: boolean,
+    unitScale: number,
+    self: Unit | null,
+    levelTint: [number, number, number],
+  ): void {
     const plate = this.plateFor(unit.guid);
     plate.seen = true;
 
-    // THE ANCHOR: the reference's own fallback, `feet + scale * bbox_z * 1.25`. The M2 file's vertical
-    // component is index 2 (round 22 established that the horizontal pair is 0 and 1, which is what
-    // makes `ringFootprint` read the right two), and `minVertexBox`/`maxVertexBox` are the header boxes
-    // -- our parser's two box names are SWAPPED relative to benilla's, so reading `boundingBox` here
-    // would size off the collision post. Falls back to `collisionHeight`, which is the unit's own
-    // measured height, for a unit whose model has not arrived.
-    // `collisionHeight` FIRST and the vertex box only as a backstop, which is a DEPARTURE from the
+    // THE ANCHOR. `collisionHeight` FIRST and the vertex box only as a backstop, which is a DEPARTURE from the
     // reference's `bbox_z` and is measured, not preferred: the M2 header's vertex box bounds EVERY pose
     // the model has, so for a wolf it is the rearing/leaping extent rather than the standing head, and
     // the first capture of this gate put the plate about **1.2 yd above the animal's head**.
@@ -342,6 +463,11 @@ export class Nameplates {
     plate.group.position.set(unit.position.x, unit.position.y, unit.position.z + height);
 
     const reaction = reactionFor(unit, self) ?? REACTION_NEUTRAL;
+    // THE BAR'S colour, from the one selector `selection-color.ts` holds -- the reference's literal claim
+    // is that a plate reads "the SAME selector as the ground selection ring" (`nameplates.rs:14-27`).
+    // Corroborated against three of the owner's own reference crops with nothing tuned: a NEUTRAL wolf
+    // yellow, a FRIENDLY guard green, a friendly PLAYER soft blue -- reactions 4, >=5 and the player
+    // branch, i.e. three rungs of one ladder rather than three cases to special-case.
     const [r, g, b] = selectionColor(reaction, unit.isPlayer, unit.dead);
 
     // TEXT IS RASTERIZED ONLY WHEN IT CHANGES. `FontStringTextures` caches by content, but even a cache
@@ -353,9 +479,26 @@ export class Nameplates {
       this.stats.rasterized += 1;
       this.setText(plate.name, label, plateFont(PLATE.nameSize, '#ffffff'), unitScale);
     }
-    // The NAME's colour is the reaction, through the one selector -- see the header. On the material,
-    // not baked into the raster, so a reaction change costs no re-rasterize.
-    (plate.name.material as THREE.SpriteMaterial).color.setRGB(r, g, b);
+
+    // THE NAME'S COLOUR SPLITS BY WHICH SYSTEM IS DRAWING, and the first version got it wrong by giving
+    // both the reaction colour.
+    //
+    // **A NAMEPLATE'S NAME IS WHITE.** Evidenced by three of the owner's reference crops covering all
+    // three bar colours -- a yellow-barred neutral wolf, a green-barred friendly guard and a blue-barred
+    // friendly player -- and the name is white in every one. Colouring it by reaction is what made ours
+    // read as one yellow mass instead of a label over a bar.
+    //
+    // **A BARE OVERHEAD NAME IS REACTION-COLOURED**, and that is a DIFFERENT SYSTEM rather than an
+    // inconsistency: it is the 1.12 overhead-NAME batch, whose colour the reference byte-verified as
+    // `GetSelectionCircleColor` after an A/B "falsified the earlier 'constant white'"
+    // (`nameplates.rs:14-20`). Here that case is exactly the target rescue -- name, no bar -- so the two
+    // rules never apply to the same thing on screen.
+    const nameMaterial = plate.name.material as THREE.SpriteMaterial;
+    if (bar) {
+      nameMaterial.color.setRGB(1, 1, 1);
+    } else {
+      nameMaterial.color.setRGB(r, g, b);
+    }
 
     const nameSize = plate.name.scale;
     // Stacked with `Sprite#center`, not with world offsets. Every sprite in a plate sits at the SAME
@@ -364,54 +507,76 @@ export class Nameplates {
     // window height. A world-space offset would have to be recomputed from the camera depth every
     // frame and would tilt with the camera's up vector.
     const lift = PLATE.lift * unitScale;
-    const barH = (PLATE.barHeight + 2 * PLATE.barBorder) * unitScale;
+    // THE FRAME, at the art's own texel size. Every offset below is measured off the decoded file; see
+    // `ART`. `frameH` is the 17 INKED rows, not the file's 32.
+    const frameW = ART.frameWidth * unitScale;
+    const frameH = ART.frameHeight * unitScale;
 
     if (bar) {
-      const barW = (PLATE.barWidth + 2 * PLATE.barBorder) * unitScale;
+      plate.border.visible = true;
+      plate.border.scale.set(frameW, frameH, 1);
+      plate.border.center.set(0.5, -lift / frameH);
+
+      // THE BAR'S HOLE in the frame, in measured texels: x 5..105, and rows 5..11 counted DOWN from the
+      // frame's top. Converted to a bottom-up offset because `Sprite#center` is a fraction of the
+      // sprite's own size measured from its bottom-left.
+      const holeW = ART.barWidth * unitScale;
+      const holeH = ART.barHeight * unitScale;
+      const holeLeft = (ART.barLeft - ART.frameWidth / 2) * unitScale;
+      const holeBottom = lift + (ART.frameHeight - ART.barTop - ART.barHeight) * unitScale;
+
       plate.barBack.visible = true;
-      plate.barBack.scale.set(barW, barH, 1);
-      plate.barBack.center.set(0.5, -lift / barH);
+      plate.barBack.scale.set(holeW, holeH, 1);
+      plate.barBack.center.set(-holeLeft / holeW, -holeBottom / holeH);
 
       const maxHealth = unit.fields.maxHealth ?? 0;
       const fraction = maxHealth > 0 ? Math.max(0, Math.min(1, (unit.fields.health ?? 0) / maxHealth)) : 0;
-      const fillW = PLATE.barWidth * unitScale * fraction;
+      plate.fraction = fraction;
+      const fillW = holeW * fraction;
       plate.barFill.visible = fraction > 0;
-      plate.barFill.scale.set(Math.max(fillW, 1e-6), PLATE.barHeight * unitScale, 1);
-      // GROWS FROM THE LEFT, and the sign here is a defect the gate's first screenshot caught: a sprite
+      plate.barFill.scale.set(Math.max(fillW, 1e-6), holeH, 1);
+      // GROWS FROM THE LEFT of the hole. The sign here is a defect an earlier screenshot caught: a sprite
       // with `center.x = c` spans `position.x - c*w` to `position.x + (1-c)*w`, so pinning its LEFT edge
-      // at `-innerWidth/2` needs `c = +innerWidth/(2*w)`. Negative put the fill to the RIGHT of centre
-      // and it read as a bar draining the wrong way.
-      const inner = PLATE.barWidth * unitScale;
-      plate.barFill.center.set(
-        inner / 2 / Math.max(fillW, 1e-6),
-        -(lift + PLATE.barBorder * unitScale) / (PLATE.barHeight * unitScale),
-      );
+      // at `holeLeft` needs `c = -holeLeft/w`. Inverted, the fill sat right of centre and read as a bar
+      // draining the wrong way.
+      plate.barFill.center.set(-holeLeft / Math.max(fillW, 1e-6), -holeBottom / holeH);
       (plate.barFill.material as THREE.SpriteMaterial).color.setRGB(r, g, b);
 
+      // THE LEVEL, CENTRED IN THE ART'S OWN SLOT -- the filled brass cell at texels 106..127. The first
+      // version printed it floating outside the bar's right edge, which was the owner's second point.
       const levelText = unit.level > 0 ? String(unit.level) : '';
       if (levelText !== plate.builtLevel) {
         plate.builtLevel = levelText;
         this.stats.rasterized += 1;
-        this.setText(plate.level, levelText, plateFont(PLATE.levelSize, '#ffd200'), unitScale);
+        this.setText(plate.level, levelText, plateFont(PLATE.levelSize, '#ffffff'), unitScale);
       }
       plate.level.visible = levelText !== '';
       if (plate.level.visible) {
+        // THE LEVEL NUMBER'S COLOUR IS THE CLIENT'S OWN DIFFICULTY RAMP, reached through the client's own
+        // `GetQuestDifficultyColor` rather than a copy of it -- see `NameplateConfig.levelColor`. On the
+        // material, so a level or a player level changing costs no re-rasterize.
+        (plate.level.material as THREE.SpriteMaterial).color.setRGB(
+          levelTint[0], levelTint[1], levelTint[2],
+        );
         const levelW = plate.level.scale.x;
         const levelH = plate.level.scale.y;
+        const slotCentre = (ART.slotLeft + ART.slotWidth / 2 - ART.frameWidth / 2) * unitScale;
         plate.level.center.set(
-          -(barW / 2 + PLATE.levelGap * unitScale) / levelW,
-          -(lift + (barH - levelH) / 2) / levelH,
+          0.5 - slotCentre / levelW,
+          -(lift + (frameH - levelH) / 2) / levelH,
         );
       }
     } else {
       plate.barBack.visible = false;
       plate.barFill.visible = false;
+      plate.border.visible = false;
       plate.level.visible = false;
+      plate.fraction = null;
     }
 
     plate.name.visible = nameSize.x > 0 && label !== '';
     // The name sits above the bar when there is one, and on the anchor when there is not.
-    const nameBottom = lift + (bar ? barH + PLATE.nameGap * unitScale : 0);
+    const nameBottom = lift + (bar ? frameH + PLATE.nameGap * unitScale : 0);
     plate.name.center.set(0.5, -nameBottom / Math.max(nameSize.y, 1e-6));
   }
 
@@ -456,14 +621,19 @@ export class Nameplates {
     }
     const group = new THREE.Group();
     group.matrixAutoUpdate = true;
-    const barBack = this.sprite(0.35, 0, 0, 0);
-    const barFill = this.sprite(1, 1, 1, 1);
-    const name = this.sprite(0, 1, 1, 1, true);
-    const level = this.sprite(0, 1, 1, 1, true);
-    group.add(barBack, barFill, name, level);
+    // ORDER IS DRAW ORDER within the plate (`renderOrder`, set per sprite): the depleted backing, the
+    // fill over it, then the AUTHORED FRAME over both -- the frame's border has to cover the fill's hard
+    // edge, which is what stops the plate reading as a flat rectangle.
+    const barBack = this.sprite({ alpha: 0.7, rgb: [0.06, 0.06, 0.06], order: 0 });
+    const barFill = this.sprite({ alpha: 1, rgb: [1, 1, 1], order: 1, texture: BAR_TEXTURE });
+    const border = this.sprite({ alpha: 1, rgb: [1, 1, 1], order: 2, texture: BORDER_TEXTURE });
+    const name = this.sprite({ alpha: 1, rgb: [1, 1, 1], order: 3, text: true });
+    const level = this.sprite({ alpha: 1, rgb: [1, 1, 1], order: 4, text: true });
+    group.add(barBack, barFill, border, name, level);
     this.group.add(group);
     const plate: Plate = {
-      group, name, level, barBack, barFill, builtName: NEVER_BUILT, builtLevel: NEVER_BUILT, seen: true,
+      group, name, level, barBack, barFill, border,
+      builtName: NEVER_BUILT, builtLevel: NEVER_BUILT, seen: true, fraction: null,
     };
     this.plates.set(guid, plate);
     return plate;
@@ -478,12 +648,23 @@ export class Nameplates {
    * overlap resolve by the transparent pass's own sort rather than clipping each other, which is the
    * same named divergence the reference records for itself.
    */
-  private sprite(alpha: number, r: number, g: number, b: number, textured = false): THREE.Sprite {
+  private sprite(spec: {
+    alpha: number;
+    rgb: [number, number, number];
+    /** Draw order WITHIN the plate -- the frame must land over the fill's hard edge. */
+    order: number;
+    /** An authored sheet to load, for the frame and the bar shading. */
+    texture?: string;
+    /** A sprite whose map is a rasterized string, filled in by `setText`. */
+    text?: boolean;
+  }): THREE.Sprite {
     const material = new THREE.SpriteMaterial({
-      map: textured ? null : this.solidTexture(),
-      color: new THREE.Color(r, g, b),
+      map: spec.texture !== undefined
+        ? this.artTexture(spec.texture)
+        : (spec.text === true ? null : this.solidTexture()),
+      color: new THREE.Color(spec.rgb[0], spec.rgb[1], spec.rgb[2]),
       transparent: true,
-      opacity: textured ? 1 : alpha,
+      opacity: spec.alpha,
       depthTest: true,
       depthWrite: false,
       sizeAttenuation: false,
@@ -492,10 +673,108 @@ export class Nameplates {
     sprite.frustumCulled = false;
     // After the ordinary transparents. The reference biases its name batch to the top rung of its own
     // sort ladder for the same reason (`NAMEPLATE_DEPTH_BIAS`, `nameplates.rs:79-88`): world text that
-    // sorts under a water surface is text nobody can read.
-    sprite.renderOrder = 10000;
+    // sorts under a water surface is text nobody can read. `+ order` resolves the PLATE'S OWN stack:
+    // three breaks equal `renderOrder` by depth, and every sprite in a plate is at the SAME depth, so
+    // without it the frame and the fill would sort by insertion accident.
+    sprite.renderOrder = 10000 + spec.order;
     return sprite;
   }
+
+  /** The two authored sheets, keyed by path. Null until the BLP lands; the sprite then draws nothing. */
+  private readonly art = new Map<string, THREE.Texture | null>();
+
+  /**
+   * One authored sheet, loading it on first ask.
+   *
+   * **CLONED, and FLIPPED WITH A NEGATIVE `repeat.y` -- NOT with `flipY`.** Both sheets are DXT
+   * (`nameplate-border` DXT3, `ui-statusbar` DXT1), and **`flipY` does not apply to a compressed
+   * upload** -- which is the reason `texture-loader.js` sets `flipY = false` on everything in the first
+   * place. `THREE.Sprite`'s built-in geometry runs `v = 0` at the quad's BOTTOM, so a `flipY = false`
+   * sheet lands mirrored.
+   *
+   * The first version set `flipY = true` and read the sub-rect as `offset.y = 0, repeat.y = 17/32`. The
+   * flip was silently ignored, so that span selected the file's **first** 17 rows -- which are the
+   * entirely EMPTY ones (see `ART`) -- and the frame drew nothing at all while every other part of the
+   * plate looked right. `offset.y = 1` with a NEGATIVE `repeat.y` does the flip through the UV transform
+   * instead, which works for compressed and uncompressed alike: the quad's bottom samples the file's last
+   * row and its top samples row 15.
+   *
+   * A clone rather than a mutation of the shared texture: nothing else in this client asks for these two
+   * paths today, but a future caller that did would get a silently upside-down sheet with a sub-rect it
+   * never asked for, and this file must not be the reason.
+   */
+  private artTexture(path: string): THREE.Texture | null {
+    const known = this.art.get(path);
+    if (known !== undefined) {
+      return known;
+    }
+    this.art.set(path, null);
+    TextureLoader.load(
+      path,
+      // `as any`: `texture-loader.js` is untyped JS whose default parameter narrows the inferred type to
+      // `RepeatWrapping` alone -- the cast `game/ui/art.ts:103-107` makes for the same reason.
+      THREE.ClampToEdgeWrapping as any,
+      THREE.ClampToEdgeWrapping as any,
+      PRIORITY.CHARACTER,
+    )
+      .then((texture: THREE.Texture) => {
+        const own = texture.clone();
+        // Explicitly false, matching the loader's uniform choice, so the orientation is decided in ONE
+        // place -- the UV transform below -- whatever three does or does not do with the flag.
+        own.flipY = false;
+        const span = path === BORDER_TEXTURE ? ART.frameHeight / ART.fileHeight : 1;
+        own.offset.set(0, 1);
+        own.repeat.set(1, -span);
+        own.needsUpdate = true;
+        this.art.set(path, own);
+        // Retro-fit the sheet onto every plate already built while it was in flight.
+        this.plates.forEach((plate) => {
+          const sprite = path === BORDER_TEXTURE ? plate.border : plate.barFill;
+          const material = sprite.material as THREE.SpriteMaterial;
+          material.map = own;
+          material.needsUpdate = true;
+        });
+      })
+      .catch(() => {
+        // Both paths were probed at 200 before this was written. A miss leaves the sprite mapless, which
+        // draws NOTHING -- visibly incomplete rather than a hand-drawn substitute for the authored art.
+      });
+    return null;
+  }
+
+  /**
+   * The level number's colour: the client's own difficulty ramp, memoized.
+   *
+   * Goes through `config.levelColor`, i.e. the client's own `GetQuestDifficultyColor` -- see that field
+   * for the authored ramp and for why `targetframe.lua:246-251` makes it the right call rather than a
+   * plausible one. Memoized on `level:playerLevel` because crossing the VM per plate per frame would be
+   * the opposite of what the owner asked for; the key includes the PLAYER'S level because the ramp is a
+   * difference and the cache would otherwise survive a level-up.
+   *
+   * The fallback is `targetframe.lua:249`'s own `else` branch value, `(1.0, 0.82, 0.0)` -- what the client
+   * uses for a unit it will not difficulty-colour. Reached only before the runtime is up.
+   */
+  private readonly levelTints = new Map<string, [number, number, number]>();
+
+  private levelTint(unit: Unit, config: NameplateConfig): [number, number, number] {
+    const mine = this.selfLevel;
+    const key = `${unit.level}:${mine}`;
+    const cached = this.levelTints.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const answered = config.levelColor === null ? null : config.levelColor(unit.level);
+    const tint: [number, number, number] = answered ?? [1.0, 0.82, 0.0];
+    // Only cached once the runtime has actually answered -- caching the fallback would freeze every
+    // plate on it for the session.
+    if (answered !== null) {
+      this.levelTints.set(key, tint);
+    }
+    return tint;
+  }
+
+  /** The local player's level, as of this pass -- the ramp's other operand. See `levelTint`. */
+  private selfLevel = 0;
 
   private solidTexture(): THREE.DataTexture {
     if (this.solid === null) {

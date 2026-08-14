@@ -431,6 +431,26 @@ export class WorldUiHost {
       this.world.nameplateConfig = () => ({
         showEnemies: cvarBool(runtime.vm, 'nameplateShowEnemies'),
         showFriends: cvarBool(runtime.vm, 'nameplateShowFriends'),
+        // THE LEVEL NUMBER'S COLOUR, answered by the CLIENT'S OWN `GetQuestDifficultyColor` -- the same
+        // call `targetframe.lua:246-251` uses to colour a unit's level. Asked for as THREE FORMATTED
+        // NUMBERS rather than as a Lua table: a table would have to cross the VM boundary as a live
+        // handle, which is exactly what `SetAttribute` stored and had freed under it (see `STATE.md`),
+        // and a `string.format` answer cannot be misread. Memoized on the caller's side per
+        // level-vs-player-level pair, so this is a handful of calls per session, not one per plate per
+        // frame.
+        levelColor: (level: number) => {
+          const answer = runtime.vm.runExpr(
+            `local c = GetQuestDifficultyColor(${Math.floor(level)}) `
+            + 'return string.format("%.4f %.4f %.4f", c.r, c.g, c.b)',
+            'nameplate-level.lua',
+          );
+          const parts = String((answer as { value?: unknown } | null)?.value ?? '').split(' ');
+          if (parts.length !== 3) {
+            return null;
+          }
+          const rgb = parts.map((part) => Number(part));
+          return rgb.some((n) => !Number.isFinite(n)) ? null : [rgb[0], rgb[1], rgb[2]];
+        },
       });
       // THE ACTION FEED. Gated on a real session as well as a world: `/game?offline=1&ui=lua` has units
       // but no protocol, and `session.offline` short-circuits ahead of the `protocol` getter -- reading

@@ -669,7 +669,7 @@ export default class World extends EventEmitter {
       this.player,
       this.target,
       camera,
-      this.nameplateConfig?.() ?? { showEnemies: false, showFriends: false },
+      this.nameplateConfig?.() ?? { showEnemies: false, showFriends: false, levelColor: null },
       // Offline has no protocol at all, and `session.offline` short-circuits ahead of the `protocol`
       // getter for the reason `world-ui.ts` states: reaching `game.objectHandler` there constructs
       // transports the offline route contracts never to touch. So an offline plate carries no name,

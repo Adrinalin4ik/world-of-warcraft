@@ -125,9 +125,23 @@ export class WorldCursorDriver {
     this.element.style.cursor = `url(${art.css}) ${HOTSPOT_X} ${HOTSPOT_Y}, default`;
   }
 
-  /** Back to the resting arrow. */
+  /** Back to the resting arrow -- the game's own `Point`, not the browser's. */
   reset(): void {
     this.apply(CURSOR_POINT);
+  }
+
+  /**
+   * Give the element its own cursor back WITHOUT tearing the driver down, so a later `apply` still works.
+   *
+   * This is `window.worldCursorEnabled = false`'s arm. Idempotent: the write happens only when something
+   * of ours is currently on the element, so the off arm is not a style write per frame.
+   */
+  revert(): void {
+    if (this.applied === null) {
+      return;
+    }
+    this.applied = null;
+    this.element.style.cursor = this.savedCursor;
   }
 
   /** Give the element its own cursor back. Called from the world screen's unmount. */

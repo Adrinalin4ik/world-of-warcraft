@@ -498,7 +498,13 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     /** Frames the cadence declined to pick on -- the denominator that makes `picks` mean anything. */
     skipped: 0,
     stem: 'Point',
-    /** Why the last resolution was Point: `widget`, `held`, `nopick`, or `` when a unit answered. */
+    /**
+     * Why the last tick resolved as it did: `held` (a dragged ability), `widget` (a frame under the
+     * pointer), `nopointer` (nothing has moved yet), `nopick` (the pick found no unit), or the EMPTY
+     * STRING when a unit answered -- so an empty `reason` beside a `Point` stem means a real unit
+     * classified as Point, which is a different fact from the pick having missed. The gate's arms turn
+     * on that distinction.
+     */
     reason: '',
   };
 
@@ -518,6 +524,11 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     }
     const flags = window as unknown as Record<string, unknown>;
     if (flags.worldCursorEnabled === false) {
+      // THE OFF ARM MUST ACTUALLY BE OFF, and self-review caught this returning with whatever stem was
+      // last written still on the element -- a control arm that leaves a sword stuck under the pointer
+      // is measuring the ON state and calling it OFF, which is precisely the class of instrument defect
+      // `CLAUDE.md` says to distrust. `revert` puts the element's own cursor back, once.
+      driver.revert();
       return;
     }
     const now = performance.now();
