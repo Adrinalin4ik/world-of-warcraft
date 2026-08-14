@@ -23,6 +23,7 @@ import { fogDebug } from "./fog-debug";
 import { lightDebug } from "./light-debug";
 import { reactionFor, REACTION_NEUTRAL } from "./faction";
 import { SelectionRing } from "./selection-ring";
+import { NameplateConfig, Nameplates } from "./nameplates";
 import { readMark } from "./saved-mark";
 import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
@@ -46,6 +47,23 @@ export default class World extends EventEmitter {
   public collisionDebug = collisionDebugView;
   /** The ground selection ring under the current target. Built in the constructor, ticked in `animate`. */
   public selectionRing: SelectionRing;
+  /**
+   * The overhead name plates. Built in the constructor and ticked in `animate`, like the ring.
+   *
+   * WORLD GEOMETRY, not widgets -- see `nameplates.ts`' header for the reference's own verdict on the
+   * medium and for why a widget would hand back the whole offscreen-target saving.
+   */
+  public nameplates: Nameplates;
+  /**
+   * What the client's own Lua has the two nameplate CVars set to, or null while nothing has answered.
+   *
+   * A REGISTRATION, exactly the shape `pipeline/program-warm.ts#setProgramWarmer` uses and for the same
+   * reason: the switch belongs to the FrameXML runtime (`Bindings.xml`'s `NAMEPLATES` binding writes
+   * `nameplateShowEnemies`) and `World` must not acquire a dependency on the Lua VM to read it.
+   * `WorldUiHost#start` sets it once the runtime exists. Null -- `/game` with no `?ui=lua`, or the
+   * seconds before the manifest lands -- means both plates are off, which is the CVars' own default.
+   */
+  public nameplateConfig: (() => NameplateConfig) | null = null;
   private skyDebug: SkyDebug;
   /**
    * Dense phase slot counter for unit models -- the same role `DoodadManager#nextPoseSlot` plays.
@@ -107,6 +125,13 @@ export default class World extends EventEmitter {
       ...this.selectionRing.stats,
       positions: this.selectionRing.vertices(),
     });
+
+    // THE NAMEPLATES, in the scene ROOT for the same reason as the ring: they are placed in world space
+    // and belong to no subtree. `updateDynamicMatrices` walks every non-static scene child, so the plate
+    // subtree's world matrices are accumulated there -- which matters, because `scene.matrixWorldAutoUpdate
+    // = false` means nothing else would do it and a sprite draws from `matrixWorld`.
+    this.nameplates = new Nameplates(this.scene);
+    window['worldNameplates'] = () => this.nameplates.report();
 
     this.game = game;
     this.session = game.session;
@@ -633,6 +658,27 @@ export default class World extends EventEmitter {
     beginSection('w.ring');
     this.selectionRing.update(this.ringTarget(), camera);
     endSection('w.ring');
+
+    // THE NAMEPLATES, an EIGHTH named span. See the exhaustiveness note above: a statement outside all
+    // of them breaks the sum rule, and that is the tell it exists for. After the entity pass for the
+    // ring's reason (the plate must not lag a walking mob by a frame) and before `w.matrices`, which is
+    // what accumulates the plate subtree's world transforms.
+    beginSection('w.plates');
+    this.nameplates.update(
+      this.entities.values(),
+      this.player,
+      this.target,
+      camera,
+      this.nameplateConfig?.() ?? { showEnemies: false, showFriends: false },
+      // Offline has no protocol at all, and `session.offline` short-circuits ahead of the `protocol`
+      // getter for the reason `world-ui.ts` states: reaching `game.objectHandler` there constructs
+      // transports the offline route contracts never to touch. So an offline plate carries no name,
+      // which is honest -- there is no server to have sent one.
+      this.session.offline
+        ? null
+        : (entry, guid) => this.game.objectHandler.combatHandler.queryCreature(entry, guid),
+    );
+    endSection('w.plates');
 
     if (this.map !== null) {
       if (cameraMoved) {

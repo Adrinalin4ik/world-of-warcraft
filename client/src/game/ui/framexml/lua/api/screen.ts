@@ -343,6 +343,44 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
  * An UNKNOWN name returns nil, exactly as the real `GetCVar` does. Not an error and not an empty
  * string: FrameXML tests the result for nil in places, and `""` would read as a set-but-empty CVar.
  */
+/**
+ * THE CVAR STORES, per VM, so the ENGINE can read a value the client's own Lua wrote.
+ *
+ * The map used to be a pure local of `installCVars` -- correct while every reader was Lua, and a wall
+ * the moment one is not. `Bindings.xml:544-553`'s `NAMEPLATES` binding is entirely the client's own Lua
+ * and does nothing but `SetCVar("nameplateShowEnemies", ...)`; the thing that acts on it is the engine.
+ * That is the real division in 3.3.5a -- a nameplate is engine-created and the CVars are its only
+ * switch -- so this is the door, and it is a WeakMap keyed on the VM rather than a module global for
+ * exactly the reason `installCVars` gives for the local: two runtimes in one process must not inherit
+ * each other's settings.
+ */
+const CVAR_STORES = new WeakMap<LuaVM, Map<string, string>>();
+
+/**
+ * One CVar's value as the client's Lua last left it, or undefined for a name no one has set.
+ *
+ * Case-insensitive, like `GetCVar` -- FrameXML is not consistent about a name's casing between its read
+ * and its write site, and an engine reader must not be the one place that is.
+ */
+export function cvarValue(vm: LuaVM, name: string): string | undefined {
+  const store = CVAR_STORES.get(vm);
+  if (store === undefined) {
+    return undefined;
+  }
+  const wanted = name.toLowerCase();
+  for (const [stored, value] of store) {
+    if (stored.toLowerCase() === wanted) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/** `GetCVarBool`'s rule, for an engine reader: `"1"` is true and everything else, unset included, false. */
+export function cvarBool(vm: LuaVM, name: string): boolean {
+  return cvarValue(vm, name) === '1';
+}
+
 function installCVars(vm: LuaVM): void {
   const cvars = new Map<string, string>([
     // Off by default: this is the launcher/tools checkbox, and there is no launcher to show.
@@ -365,7 +403,23 @@ function installCVars(vm: LuaVM): void {
      * real CVar, so the client's own options panel or a `SetCVar` flips it back with no code change.
      */
     ['lockActionBars', '1'],
+    /**
+     * THE TWO NAMEPLATE SWITCHES, seeded OFF.
+     *
+     * Not decoration: `Bindings.xml:544-573`'s three nameplate bindings do nothing but read and write
+     * this pair, so they are the entire toggle. Seeded rather than left absent because the seeding is
+     * what documents that the names are the CVars the client's own Lua uses -- `GetCVarBool` already
+     * answers false for an unset name, so behaviour is identical either way.
+     *
+     * **OFF is 3.3.5a's own default**, and the evidence is the binding's own shape: the first `V` press
+     * takes the `else` arm and turns enemy plates ON, which is only the right first behaviour if they
+     * start off. (The value in a real install lives in `Config.wtf`, which the asset host does not
+     * serve -- `wtf/config.wtf` 404s -- so this is an inference from the client's Lua, not a read.)
+     */
+    ['nameplateShowEnemies', '0'],
+    ['nameplateShowFriends', '0'],
   ]);
+  CVAR_STORES.set(vm, cvars);
 
   // Case-insensitive, like the client's own CVar table -- FrameXML is not consistent about the casing
   // of a name between the read and the write site, and a case-sensitive map would silently create a

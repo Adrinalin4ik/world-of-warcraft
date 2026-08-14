@@ -47,6 +47,7 @@ import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import { attachTargetBridge } from './target-bridge';
 import { dispatchBinding } from './framexml/lua/api/bindings';
 import { cancelCursor, dropCursorOnWorld, getCursor } from './framexml/lua/api/cursor';
+import { cvarBool } from './framexml/lua/api/screen';
 import { gameTime } from './framexml/lua/compat';
 import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
@@ -422,6 +423,15 @@ export class WorldUiHost {
       // has units to tab between and a target to clear, and `SpellStopCasting` reaches the wire only
       // when a cast snapshot exists, which offline it never does.
       this.detachTargets = attachTargetBridge(runtime.vm, this.world);
+      // THE NAMEPLATE SWITCH. The `V` key is entirely the client's own Lua -- `Bindings.xml:544-553`'s
+      // `NAMEPLATES` binding reads and writes two CVars and does nothing else -- so the engine's whole
+      // part is to read them, which is what this closure is. Registered here because this is the one
+      // place that holds both the world and the VM; `World` keeps a function slot rather than a
+      // dependency on the runtime (the shape `setProgramWarmer` uses).
+      this.world.nameplateConfig = () => ({
+        showEnemies: cvarBool(runtime.vm, 'nameplateShowEnemies'),
+        showFriends: cvarBool(runtime.vm, 'nameplateShowFriends'),
+      });
       // THE ACTION FEED. Gated on a real session as well as a world: `/game?offline=1&ui=lua` has units
       // but no protocol, and `session.offline` short-circuits ahead of the `protocol` getter -- reading
       // `game.objectHandler` there would construct transports the offline route contracts never to
