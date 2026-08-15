@@ -43,6 +43,7 @@ import { FontStringTextures, layoutScale, loadGlueFonts, measureText, wrapLines 
 import { DrawItem, WidgetRoot, effectiveFont } from './widget';
 import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
+import { attachContainerBridge } from './container-bridge';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import { attachTargetBridge } from './target-bridge';
 import { dispatchBinding } from './framexml/lua/api/bindings';
@@ -202,6 +203,9 @@ export class WorldUiHost {
 
   /** `attachSpellbookBridge`'s teardown, held so `dispose` can run it. */
   private detachSpellbook: (() => void) | null = null;
+
+  /** `attachContainerBridge`'s teardown, held so `dispose` can run it. */
+  private detachContainers: (() => void) | null = null;
 
   /**
    * THE DRAW INSTRUMENT, on `window.uiDrawStats`.
@@ -494,6 +498,10 @@ export class WorldUiHost {
         // promise rather than starting a second one. Gated on a real session for the same reason: there is
         // no spell book without `SMSG_INITIAL_SPELLS`.
         this.detachSpellbook = attachSpellbookBridge(runtime.vm, this.world, this.art);
+        // THE BAGS. Gated on a real session for the same reason the two above are: an item's name and
+        // quality come from `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, so an offline world has no bag to draw
+        // and `world.game.objectHandler` must not be touched on that route at all.
+        this.detachContainers = attachContainerBridge(runtime.vm, this.world, this.art);
       }
     }
     reportLoad(runtime);
@@ -1017,6 +1025,8 @@ export class WorldUiHost {
     this.detachActions = null;
     this.detachSpellbook?.();
     this.detachSpellbook = null;
+    this.detachContainers?.();
+    this.detachContainers = null;
     this.input.detach();
     this.runtime?.dispose();
     this.runtime = null;

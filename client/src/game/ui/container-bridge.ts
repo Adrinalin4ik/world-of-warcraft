@@ -1,0 +1,641 @@
+/**
+ * THE BAG GLOBALS -- the engine half of `ContainerFrame`, which is the client's own XML and Lua and
+ * draws itself the moment these answer.
+ *
+ * Nothing is drawn here. `ContainerFrame.xml` declares thirteen frames of item buttons and
+ * `ContainerFrame.lua` fills them; every one of its calls was nil before this file, which is why the
+ * backpack opened onto nothing. The whole deliverable is the answers.
+ *
+ * ## Where a bag slot's contents actually live, which is three joins deep
+ *
+ * There is no "inventory packet". A bag slot is reached by walking descriptor fields:
+ *
+ *   1. **the bag itself** -- `PLAYER_FIELD_INV_SLOT_HEAD + slot*2` on our own character, a u64 item
+ *      guid per inventory slot. Slots 0-18 are worn equipment and **19-22 are the four bag slots**.
+ *   2. **the slot's item** -- for the backpack, `PLAYER_FIELD_PACK_SLOT_1 + (n-1)*2`, also on our own
+ *      character; for a real bag, `CONTAINER_FIELD_SLOT_1 + (n-1)*2` on the CONTAINER object, which is
+ *      a separate object with its own guid and its own create block.
+ *   3. **the item's identity** -- `OBJECT_FIELD_ENTRY` and `ITEM_FIELD_STACK_COUNT` on the item object,
+ *      then `network/game/object/items.ts` for the template and `pipeline/dbc/item-data.ts` for the
+ *      icon.
+ *
+ * **Every count below is READ OFF THIS CLIENT'S OWN FIELD TABLE, not chosen.** `enums.ts:427-431`
+ * puts `player_field_pack_slot_1` at `unit_end + 0x0de` and `player_field_bank_slot_1` at `+ 0x0fe`, a
+ * gap of 0x20 words = **16 backpack slots**; `player_field_keyring_slot_1` at `+ 0x15c` against
+ * `player_field_currencytoken_slot_1` at `+ 0x19c` is 0x40 words = **32 keyring slots**; and
+ * `ContainerField.container_field_slot_1` to `container_end` (`enums.ts:128-133`) is 0x48 words = a
+ * **36-slot** maximum container. Those are the descriptor layout's own numbers.
+ *
+ * ## The field-name trap, and it is a real one
+ *
+ * `parseUpdateValues` keys its result by `getUpdateFieldName(index, type)`, which answers a NAME for a
+ * modelled index and the bare NUMBER for anything else (`enums.ts:634`). The field tables name only
+ * the FIRST entry of each array -- `player_field_pack_slot_1`, `container_field_slot_1` -- so slot 1
+ * arrives under a string key and slots 2..n under numeric ones. Reading `bag.player_field_pack_slot_1`
+ * in a loop would therefore find the first slot and nothing else. `fieldAt` below asks
+ * `getUpdateFieldName` for the key at every index instead, which is correct for both cases and keeps
+ * one copy of the table.
+ *
+ * ## What is NOT here, and why each is named rather than stubbed
+ *
+ * `locked` is a CURSOR state -- an item is locked while it is being moved -- and this client has no
+ * item on its cursor, so it is nil for every slot rather than false-by-guess. The pickup/split family
+ * needs that same cursor and is declared. `GetContainerItemCooldown` needs `SMSG_ITEM_COOLDOWN`, which
+ * has no subscriber. Each goes through `notImplemented` so the load report names it.
+ */
+import type World from '../world';
+import { LuaVM } from './framexml/lua/vm';
+import { notImplemented } from './framexml/lua/methods/region';
+import { fireEvent } from './framexml/lua/events';
+import { GlueArt } from './art';
+import {
+  ContainerField, ItemField, ObjectField, ObjectType, PlayerField,
+  getUpdateFieldName,
+} from '../../network/game/object/enums';
+import { guidHex, GUID_BYTES } from '../../network/guid-hex';
+import { itemData } from '../pipeline/dbc/item-data';
+import type { ItemHandler, ItemTemplate } from '../../network/game/object/items';
+import GameOpcode from '../../network/game/opcode';
+import GamePacket from '../../network/game/packet';
+
+/** `BACKPACK_CONTAINER` (`containerframe.lua` addresses bag 0 as the backpack throughout). */
+const BACKPACK_CONTAINER = 0;
+/** `NUM_BAG_SLOTS` -- the four equipped bag slots, bag ids 1..4. */
+const NUM_BAG_SLOTS = 4;
+/** `KEYRING_CONTAINER`, the id `containerframe.lua:847-882` passes for the keyring. */
+const KEYRING_CONTAINER = -2;
+
+/** 16, and the number is `enums.ts`' own pack-slot block width. See the header. */
+const BACKPACK_SLOTS = (PlayerField.player_field_bank_slot_1
+  - PlayerField.player_field_pack_slot_1) / 2;
+/** 32, from the keyring block's width in the same table. */
+const KEYRING_SLOTS = (PlayerField.player_field_currencytoken_slot_1
+  - PlayerField.player_field_keyring_slot_1) / 2;
+/** 36, from `ContainerField`'s own span. A container never reports more than this. */
+const MAX_CONTAINER_SLOTS = (ContainerField.container_end
+  - ContainerField.container_field_slot_1) / 2;
+
+/**
+ * The first inventory slot a BAG occupies, 0-based, on our own character.
+ *
+ * 19, and it is derived rather than transcribed: `player_field_inv_slot_head` runs to
+ * `player_field_inv_slot_fixme22` -- 23 slots, 0..22 -- and the last four of those are the bag slots,
+ * so the first is 23 - 4 = 19. That agrees with the reference's `SLOT_BAG_FIRST`
+ * (`benilla-protocol/src/messages/items.rs:562`), which is the corroboration rather than the source.
+ */
+const INV_SLOT_BAG_FIRST = ((PlayerField.player_field_pack_slot_1
+  - PlayerField.player_field_inv_slot_head) / 2) - NUM_BAG_SLOTS;
+
+/**
+ * The wire's bag index for "not in a real bag" -- the backpack and the equipped slots.
+ *
+ * 255. From the reference's `BAG_PLAYER_INVENTORY` (`items.rs:558`) and unchanged in 3.3.5a; it is a
+ * SERVER-side convention, not a value any served file states, and is labelled as such here.
+ */
+const BAG_PLAYER_INVENTORY = 255;
+
+/**
+ * The wire's slot number for the first BACKPACK slot, 0-based.
+ *
+ * 23 -- the descriptor slot immediately after the 23 inventory slots, which is exactly where
+ * `player_field_pack_slot_1` sits in the field table. Corroborated by the reference's
+ * `SLOT_PACK_FIRST` (`items.rs:560`).
+ */
+const WIRE_SLOT_PACK_FIRST = (PlayerField.player_field_pack_slot_1
+  - PlayerField.player_field_inv_slot_head) / 2;
+
+/** A decoded descriptor bag, as `ItemHandler` stores one. */
+type FieldBag = Record<string | number, number>;
+
+/**
+ * One descriptor word, addressed by INDEX rather than by name. See the header's field-name trap.
+ *
+ * Absent is 0, which is the right answer for every field here: an empty inventory slot's guid words
+ * are genuinely zero on the wire, and a stack count that has not arrived is not a stack.
+ */
+function fieldAt(bag: FieldBag | null, type: ObjectType, index: number): number {
+  if (bag === null) {
+    return 0;
+  }
+  const value = bag[getUpdateFieldName(index, type) as keyof FieldBag];
+  return typeof value === 'number' ? value >>> 0 : 0;
+}
+
+/**
+ * A u64 guid held as two consecutive descriptor words -> the normalised hex string.
+ *
+ * The low word first, the high word second, both little-endian into the byte array `guidHex` reads.
+ * Assembling this as a Number would be the exact defect `guid-hex.ts` exists to prevent.
+ */
+function guidAt(bag: FieldBag | null, type: ObjectType, index: number): string {
+  const low = fieldAt(bag, type, index);
+  const high = fieldAt(bag, type, index + 1);
+  const bytes = new Uint8Array(GUID_BYTES);
+  for (let i = 0; i < 4; ++i) {
+    bytes[i] = (low >>> (i * 8)) & 0xff;
+    bytes[i + 4] = (high >>> (i * 8)) & 0xff;
+  }
+  return guidHex(bytes);
+}
+
+/** `0x0` is the wire's "nothing here". */
+const EMPTY_GUID = '0x0';
+
+/**
+ * `inventoryType` -> the `INVTYPE_*` token `GetItemInfo` answers ninth.
+ *
+ * **The ORDER is engine-side and is transcribed, not read from a served file** -- said plainly per the
+ * project rule. What IS sourced is the token SET and the fact that these are token names rather than
+ * display strings: `globalstrings.lua` defines `INVTYPE_HEAD`, `INVTYPE_WEAPONMAINHAND` and the rest as
+ * localized strings, and FrameXML looks the API's answer up in `_G` to print it -- so answering a
+ * display string here would print nothing. Index 0 is "not equippable" and answers nil.
+ */
+const INVENTORY_TYPE_TOKENS: ReadonlyArray<string | null> = [
+  null, 'INVTYPE_HEAD', 'INVTYPE_NECK', 'INVTYPE_SHOULDER', 'INVTYPE_BODY', 'INVTYPE_CHEST',
+  'INVTYPE_WAIST', 'INVTYPE_LEGS', 'INVTYPE_FEET', 'INVTYPE_WRIST', 'INVTYPE_HAND', 'INVTYPE_FINGER',
+  'INVTYPE_TRINKET', 'INVTYPE_WEAPON', 'INVTYPE_SHIELD', 'INVTYPE_RANGED', 'INVTYPE_CLOAK',
+  'INVTYPE_2HWEAPON', 'INVTYPE_BAG', 'INVTYPE_TABARD', 'INVTYPE_ROBE', 'INVTYPE_WEAPONMAINHAND',
+  'INVTYPE_WEAPONOFFHAND', 'INVTYPE_HOLDABLE', 'INVTYPE_AMMO', 'INVTYPE_THROWN',
+  'INVTYPE_RANGEDRIGHT', 'INVTYPE_QUIVER', 'INVTYPE_RELIC',
+];
+
+/**
+ * `ITEM_FLAG_LOOTABLE` -- an item that can be opened for loot (a lockbox, a container).
+ *
+ * `0x4`, from the reference's constant (`benilla-protocol/src/messages/items.rs:274`). The bit's value
+ * is a SERVER-side definition and this client has nothing to check it against; it is used only for
+ * `GetContainerItemInfo`'s sixth return, which `containerframe.lua` reads once, so a wrong reading
+ * mislabels a lockbox and nothing else.
+ */
+const ITEM_FLAG_LOOTABLE = 0x4;
+
+/** What one occupied slot resolves to. */
+interface SlotItem {
+  guid: string;
+  entry: number;
+  count: number;
+  template: ItemTemplate | null;
+}
+
+export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): () => void {
+  const items: ItemHandler = world.game.objectHandler.itemHandler;
+
+  // -- Reading the three joins ------------------------------------------------------------------
+
+  /** The equipped bag in bag id 1..4, as an item guid. `0x0` when that slot is empty. */
+  const bagGuid = (bagId: number): string => {
+    if (bagId < 1 || bagId > NUM_BAG_SLOTS) {
+      return EMPTY_GUID;
+    }
+    const slot = INV_SLOT_BAG_FIRST + (bagId - 1);
+    return guidAt(items.player(), ObjectType.Player,
+      PlayerField.player_field_inv_slot_head + slot * 2);
+  };
+
+  /** `GetContainerNumSlots`' answer, per the header's derivation of each number. */
+  const numSlots = (bagId: number): number => {
+    if (bagId === BACKPACK_CONTAINER) {
+      return BACKPACK_SLOTS;
+    }
+    if (bagId === KEYRING_CONTAINER) {
+      return KEYRING_SLOTS;
+    }
+    if (bagId < 1 || bagId > NUM_BAG_SLOTS) {
+      // Bank bags (5..11) are a real part of the id space `containerframe.lua` walks, and this client
+      // decodes no bank. Zero is the honest answer and is what the client's own bag-bar loop
+      // (`containerframe.lua:804`) already tests for.
+      return 0;
+    }
+    const guid = bagGuid(bagId);
+    if (guid === EMPTY_GUID) {
+      return 0;
+    }
+    // The CONTAINER object's own field. The template's `containerSlots` is the same number and is
+    // available earlier, so it stands in until the container object's create block lands -- a bag that
+    // is equipped is always sent, but not necessarily before the first repaint.
+    const declared = fieldAt(items.object(guid), ObjectType.Container,
+      ContainerField.container_field_num_slots);
+    if (declared > 0) {
+      return Math.min(declared, MAX_CONTAINER_SLOTS);
+    }
+    const entry = fieldAt(items.object(guid), ObjectType.Container, ObjectField.object_field_entry);
+    const template = entry > 0 ? items.template(entry, guid) : null;
+    return Math.min(template?.containerSlots ?? 0, MAX_CONTAINER_SLOTS);
+  };
+
+  /** The item guid in one bag slot, 1-based as every FrameXML caller passes it. */
+  const slotGuid = (bagId: number, slot: number): string => {
+    if (slot < 1) {
+      return EMPTY_GUID;
+    }
+    if (bagId === BACKPACK_CONTAINER) {
+      return slot > BACKPACK_SLOTS ? EMPTY_GUID : guidAt(items.player(), ObjectType.Player,
+        PlayerField.player_field_pack_slot_1 + (slot - 1) * 2);
+    }
+    if (bagId === KEYRING_CONTAINER) {
+      return slot > KEYRING_SLOTS ? EMPTY_GUID : guidAt(items.player(), ObjectType.Player,
+        PlayerField.player_field_keyring_slot_1 + (slot - 1) * 2);
+    }
+    const container = bagGuid(bagId);
+    if (container === EMPTY_GUID || slot > numSlots(bagId)) {
+      return EMPTY_GUID;
+    }
+    return guidAt(items.object(container), ObjectType.Container,
+      ContainerField.container_field_slot_1 + (slot - 1) * 2);
+  };
+
+  /**
+   * Resolve one item guid to what a bag row needs.
+   *
+   * `items.template` is the call that ISSUES the query on a cold entry (see its own doc), so this is
+   * where a bag first asks the server for a name -- and it returns null that first time, which is why
+   * `templatesChanged` re-fires `BAG_UPDATE` below.
+   */
+  const itemAt = (guid: string): SlotItem | null => {
+    if (guid === EMPTY_GUID) {
+      return null;
+    }
+    const bag = items.object(guid);
+    if (bag === null) {
+      return null;
+    }
+    const entry = fieldAt(bag, ObjectType.Item, ObjectField.object_field_entry);
+    if (entry === 0) {
+      return null;
+    }
+    return {
+      guid,
+      entry,
+      count: fieldAt(bag, ObjectType.Item, ItemField.item_field_stack_count),
+      template: items.template(entry, guid),
+    };
+  };
+
+  /**
+   * The icon path for an item, wire answer preferred.
+   *
+   * Two roads, both real: the query response's `displayInfoId` is authoritative, and `Item.dbc`'s own
+   * column answers before the query lands. See `item-data.ts`' header.
+   */
+  const iconFor = (item: SlotItem): string | null => {
+    const fromWire = item.template !== null && item.template.displayInfoId > 0
+      ? itemData.iconForDisplayId(item.template.displayInfoId)
+      : null;
+    return fromWire ?? itemData.iconForEntry(item.entry);
+  };
+
+  /**
+   * The `|Hitem:...|h[Name]|h` hyperlink `GetContainerItemLink` and `GetItemInfo` answer.
+   *
+   * The twelve numeric fields after the entry are enchant, three gems, a suffix, a unique id, the
+   * player's level and three reforge/upgrade words. This client decodes none of them and writes zeros,
+   * which is what an unenchanted, ungemmed item's link genuinely is -- so the link is correct for the
+   * common case and understates a socketed one. `HandleModifiedItemClick` and the tooltip parse the
+   * entry out of position 2, which is the part that has to be right.
+   */
+  const itemLink = (item: SlotItem): string | null => {
+    if (item.template === null) {
+      return null;
+    }
+    const quality = item.template.quality;
+    const answer = vm.runExpr(
+      `local _,_,_,hex = GetItemQualityColor(${quality}) return hex`, 'item-link.lua',
+    ) as { value?: unknown } | null;
+    const hex = String(answer?.value ?? '|cffffffff');
+    return `${hex}|Hitem:${item.entry}:0:0:0:0:0:0:0:0:0:0|h[${item.template.name}]|h|r`;
+  };
+
+  // -- The globals --------------------------------------------------------------------------------
+
+  vm.registerFunction('GetContainerNumSlots', (args) => [numSlots(Number(args[0]))]);
+
+  /**
+   * `GetContainerItemInfo(bagID, slot)` -> `texture, itemCount, locked, quality, readable, lootable,
+   * itemLink`.
+   *
+   * SEVEN returns, and the count is read off the client's own two call sites rather than assumed:
+   * `containerframe.lua:281` takes the first five and `:684` takes the seventh
+   * (`refundItemTexture, _, _, _, _, _, refundItemLink`).
+   *
+   * An EMPTY slot answers nothing at all -- not a row of nils. `ContainerFrame_Update:298` branches on
+   * `if ( texture )`, and `PutKeyInKeyRing` (`:882`) finds an empty keyring slot the same way.
+   */
+  vm.registerFunction('GetContainerItemInfo', (args) => {
+    const item = itemAt(slotGuid(Number(args[0]), Number(args[1])));
+    if (item === null) {
+      return [];
+    }
+    const lootable = item.template !== null
+      && (item.template.flags & ITEM_FLAG_LOOTABLE) !== 0;
+    return [
+      iconFor(item),
+      item.count,
+      // `locked` -- see the header. No cursor, so no locked slot; nil rather than a guessed false.
+      null,
+      item.template?.quality ?? null,
+      // `readable` -- a book or a scroll with page text. `pageText` is read off the wire but not kept
+      // (`items.ts#readTemplateBody`), so this is nil rather than wrong.
+      null,
+      lootable ? 1 : null,
+      itemLink(item),
+    ];
+  });
+
+  vm.registerFunction('GetContainerItemLink', (args) => {
+    const item = itemAt(slotGuid(Number(args[0]), Number(args[1])));
+    return [item === null ? null : itemLink(item)];
+  });
+
+  /**
+   * `ContainerIDToInventoryID(bagID)` -> the 1-BASED inventory slot id, i.e. `INVSLOT_BAG1` = 20.
+   *
+   * The off-by-one is the API's, not ours: the descriptor table is 0-based (bag 1 is descriptor slot
+   * 19) and `GetInventoryItemTexture` takes the 1-based id, so the two differ by exactly one and the
+   * conversion has to happen somewhere. It happens here, once.
+   */
+  vm.registerFunction('ContainerIDToInventoryID', (args) => {
+    const bagId = Number(args[0]);
+    if (bagId < 1 || bagId > NUM_BAG_SLOTS) {
+      return [null];
+    }
+    return [INV_SLOT_BAG_FIRST + bagId];
+  });
+
+  /** `GetBagName(bagID)` -> the bag's item name. The backpack has none; `containerframe.lua:506`
+   * sets the frame title from this and the backpack's frame is titled by the XML instead. */
+  vm.registerFunction('GetBagName', (args) => {
+    const bagId = Number(args[0]);
+    if (bagId < 1 || bagId > NUM_BAG_SLOTS) {
+      return [null];
+    }
+    const item = itemAt(bagGuid(bagId));
+    return [item?.template?.name ?? null];
+  });
+
+  /**
+   * `GetInventoryItemTexture(unit, invSlot)` -> the icon for a WORN item.
+   *
+   * Only `"player"` answers: no other unit's inventory guids reach this client (a peer's gear arrives
+   * as `player_visible_item_*` ENTRY ids, which `character-identity.ts` reads for dressing and which
+   * carry no guid at all). The bag bar's four buttons are the caller that matters here.
+   */
+  vm.registerFunction('GetInventoryItemTexture', (args) => {
+    if (String(args[0]).toLowerCase() !== 'player') {
+      return [null];
+    }
+    const invId = Number(args[1]);
+    if (!Number.isFinite(invId) || invId < 1) {
+      return [null];
+    }
+    const item = itemAt(guidAt(items.player(), ObjectType.Player,
+      PlayerField.player_field_inv_slot_head + (invId - 1) * 2));
+    return [item === null ? null : iconFor(item)];
+  });
+
+  /**
+   * `GetItemInfo(itemID|itemLink|itemName)` -> eleven returns.
+   *
+   * Only the ID and the LINK forms resolve. A NAME lookup would need a name->entry index over every
+   * item the server has ever described, and this client has only the entries it has actually seen; a
+   * partial name index would answer for some items and silently not for others, which is worse than
+   * not answering.
+   *
+   * **`itemType` and `itemSubType` (returns 6 and 7) are a DECLARED GAP.** They are the localized
+   * `ItemClass.dbc` / `ItemSubClass.dbc` names, both of which are served and neither of which this
+   * client joins yet. They come back nil rather than as the raw numbers, because the callers
+   * concatenate them into a tooltip line and a number there would read as a wrong name rather than as
+   * a missing one.
+   */
+  vm.registerFunction('GetItemInfo', (args) => {
+    const raw = args[0];
+    let entry = Number(raw);
+    if (!Number.isFinite(entry) || entry <= 0) {
+      const match = /\|Hitem:(\d+)/.exec(String(raw ?? ''));
+      entry = match === null ? 0 : Number(match[1]);
+    }
+    if (entry <= 0) {
+      return [];
+    }
+    const template = items.template(entry);
+    if (template === null) {
+      // Pending or answered-unknown; either way there is nothing to say yet. The caller re-runs on
+      // `BAG_UPDATE`, which `templatesChanged` fires.
+      return [];
+    }
+    const item: SlotItem = { guid: EMPTY_GUID, entry, count: 1, template };
+    return [
+      template.name,
+      itemLink(item),
+      template.quality,
+      template.itemLevel,
+      template.requiredLevel,
+      null, // itemType -- declared gap, see the doc above
+      null, // itemSubType -- ditto
+      template.stackable,
+      INVENTORY_TYPE_TOKENS[template.inventoryType] ?? null,
+      iconFor(item),
+      template.sellPrice,
+    ];
+  });
+
+  /**
+   * `GetItemCount(itemID|link[, includeBank[, includeCharges]])` -> how many the player holds.
+   *
+   * Walks the backpack, the four bags and the keyring. The bank is not decoded, so `includeBank` is
+   * accepted and cannot change the answer -- named here rather than silently ignored.
+   */
+  vm.registerFunction('GetItemCount', (args) => {
+    let entry = Number(args[0]);
+    if (!Number.isFinite(entry) || entry <= 0) {
+      const match = /\|Hitem:(\d+)/.exec(String(args[0] ?? ''));
+      entry = match === null ? 0 : Number(match[1]);
+    }
+    if (entry <= 0) {
+      return [0];
+    }
+    let total = 0;
+    for (const bagId of [BACKPACK_CONTAINER, 1, 2, 3, 4, KEYRING_CONTAINER]) {
+      for (let slot = 1; slot <= numSlots(bagId); ++slot) {
+        const item = itemAt(slotGuid(bagId, slot));
+        if (item !== null && item.entry === entry) {
+          total += Math.max(1, item.count);
+        }
+      }
+    }
+    return [total];
+  });
+
+  /**
+   * `GetContainerNumFreeSlots(bagID)` -> `freeSlots, bagType`.
+   *
+   * `bagType` is the item's `BagFamily`, which `readTemplateBody` reads and does not keep, so it is 0
+   * -- the value that means "holds anything", and the one the backpack genuinely has.
+   * `MainMenuBarBackpackButton` sums the first return across the bags to print the free-bag-slot count.
+   */
+  vm.registerFunction('GetContainerNumFreeSlots', (args) => {
+    const bagId = Number(args[0]);
+    const size = numSlots(bagId);
+    let free = 0;
+    for (let slot = 1; slot <= size; ++slot) {
+      if (slotGuid(bagId, slot) === EMPTY_GUID) {
+        free += 1;
+      }
+    }
+    return [free, 0];
+  });
+
+  /**
+   * `UseContainerItem(bagID, slot)` -- the right-click.
+   *
+   * **Only the EQUIP arm is real, and the other is declared rather than faked.** An equippable item
+   * goes out as `CMSG_AUTOEQUIP_ITEM` (**0x10A**), whose body is two bytes -- the wire bag index and
+   * the wire slot -- and which the server resolves entirely on its own. A CONSUMABLE needs
+   * `CMSG_USE_ITEM` (0x0AB), whose 3.3.5a body carries a cast count, a spell id, the item's full guid,
+   * a glyph index, cast flags and a `SpellCastTargets` block; that is a spell-cast packet wearing an
+   * item's name, and building one on an unverified layout to make a right-click *look* like it worked
+   * is exactly the failure this project keeps recording. It warns once and does nothing.
+   *
+   * The two wire numbers are NOT the Lua ones. The backpack and the equipped slots use bag index 255
+   * with a slot numbered from 23; a real bag uses its own inventory slot (19..22) with a slot numbered
+   * from 0. Both constants are derived from this client's field table above and corroborated against
+   * the reference (`items.rs:558-562`).
+   */
+  vm.registerFunction('UseContainerItem', (args) => {
+    const bagId = Number(args[0]);
+    const slot = Number(args[1]);
+    const item = itemAt(slotGuid(bagId, slot));
+    if (item === null || item.template === null) {
+      return [];
+    }
+    if (item.template.inventoryType === 0) {
+      warnOnce('UseContainerItem(consumable)', 'CMSG_USE_ITEM carries a SpellCastTargets block this '
+        + 'client does not build; only equippable items are usable from a bag');
+      return [];
+    }
+    let wireBag: number;
+    let wireSlot: number;
+    if (bagId === BACKPACK_CONTAINER) {
+      wireBag = BAG_PLAYER_INVENTORY;
+      wireSlot = WIRE_SLOT_PACK_FIRST + (slot - 1);
+    } else if (bagId >= 1 && bagId <= NUM_BAG_SLOTS) {
+      wireBag = INV_SLOT_BAG_FIRST + (bagId - 1);
+      wireSlot = slot - 1;
+    } else {
+      return [];
+    }
+    const gp = new GamePacket(
+      GameOpcode.CMSG_AUTOEQUIP_ITEM, GamePacket.HEADER_SIZE_OUTGOING + 2,
+    );
+    gp.writeUnsignedByte(wireBag & 0xff);
+    gp.writeUnsignedByte(wireSlot & 0xff);
+    world.game.send(gp);
+    return [];
+  });
+
+  // -- The repaint --------------------------------------------------------------------------------
+
+  /**
+   * Re-register the icon art, then announce once per bag.
+   *
+   * `BAG_UPDATE` carries the bag id and `ContainerFrame_OnEvent` compares it to the frame's own
+   * (`containerframe.lua:187-201`), so one event per bag is what the client's own handler expects --
+   * not one per slot. The art goes in FIRST, exactly as `action-bridge.ts#pushAll` does it, so
+   * `SetItemButtonTexture(path)` names a key that at least has a def; the BLP lands a moment later and
+   * the frame that follows has a different fingerprint anyway.
+   *
+   * COALESCED to a microtask. A login delivers one create block per item, each of which emits
+   * `inventoryChanged`, so a full backpack would otherwise fire the whole event set twenty times in one
+   * packet -- twenty repaints of thirteen frames for one arrival.
+   */
+  let queued = false;
+  const pushAll = (): void => {
+    if (queued) {
+      return;
+    }
+    queued = true;
+    void Promise.resolve().then(() => {
+      queued = false;
+      const paths: string[] = [];
+      for (const bagId of [BACKPACK_CONTAINER, 1, 2, 3, 4, KEYRING_CONTAINER]) {
+        for (let slot = 1; slot <= numSlots(bagId); ++slot) {
+          const item = itemAt(slotGuid(bagId, slot));
+          const path = item === null ? null : iconFor(item);
+          if (path !== null) {
+            paths.push(path);
+          }
+        }
+      }
+      if (paths.length > 0) {
+        for (const path of paths) {
+          art.register(path, { path });
+        }
+        void art.load();
+      }
+      for (const bagId of [BACKPACK_CONTAINER, 1, 2, 3, 4, KEYRING_CONTAINER]) {
+        fireEvent(vm, 'BAG_UPDATE', [bagId]);
+      }
+    });
+  };
+
+  items.on('inventoryChanged', pushAll);
+  items.on('templatesChanged', pushAll);
+  // `ItemDisplayInfo.dbc` is 6.7 MB and the icons are null until it lands; this is the repaint that
+  // puts them on screen. Idempotent, and on a dressed character it rides `character-look.ts`' fetch.
+  void itemData.ensureLoaded().then(pushAll);
+  pushAll();
+
+  // -- The declared gaps --------------------------------------------------------------------------
+
+  /**
+   * Everything `ContainerFrame.lua` and its neighbours call that this client cannot answer, each with
+   * the reason the load report will print. A silent no-op here is how a bag renders plausibly and
+   * wrongly -- the whole pickup family in particular would make an item LOOK picked up and then lose
+   * it.
+   */
+  const gaps: Array<[string, string, unknown[]]> = [
+    ['PickupContainerItem', 'there is no item on this client\'s cursor: the cursor carries actions and '
+      + 'spells only (api/cursor.ts), so an item pickup has nowhere to be held', []],
+    ['SplitContainerItem', 'splitting needs the cursor a pickup would put the stack on', []],
+    ['GetContainerItemCooldown', 'SMSG_ITEM_COOLDOWN (0x0B0) has no subscriber, so no item cooldown '
+      + 'is decoded', [0, 0, 0]],
+    ['GetContainerItemQuestInfo', 'no quest log is decoded, so no item can be known to be a quest '
+      + 'item', [null, null, null]],
+    ['GetContainerItemPurchaseInfo', 'the refund window needs vendor state this client has none of',
+      []],
+    ['GetContainerItemPurchaseItem', 'as GetContainerItemPurchaseInfo', []],
+    ['GetInventoryItemLink', 'a worn item resolves to a link, but nothing in the bag path calls this; '
+      + 'it is the character sheet\'s, and that is not this round', [null]],
+    ['SetItemButtonQuality', 'the quality ring on a bag button is drawn by the client\'s own Lua from '
+      + 'GetContainerItemInfo\'s quality; nothing calls this in the manifest', []],
+  ];
+  for (const [name, reason, results] of gaps) {
+    const stub = notImplemented(name, reason, results);
+    vm.registerFunction(name, () => stub(null as never, 0, []));
+  }
+
+  const stats = {
+    numSlots: (bagId: number) => numSlots(bagId),
+    slot: (bagId: number, slot: number) => itemAt(slotGuid(bagId, slot)),
+    bagGuid,
+    guids: () => items.objectGuids(),
+  };
+  (window as unknown as Record<string, unknown>).bagBridge = stats;
+
+  return () => {
+    items.removeListener('inventoryChanged', pushAll);
+    items.removeListener('templatesChanged', pushAll);
+    delete (window as unknown as Record<string, unknown>).bagBridge;
+  };
+}
+
+const warned = new Set<string>();
+
+function warnOnce(what: string, reason: string): void {
+  if (warned.has(what)) {
+    return;
+  }
+  warned.add(what);
+  console.warn(`container-bridge: ${what} not implemented -- ${reason}`);
+}
+
+export default attachContainerBridge;
