@@ -40,7 +40,8 @@ import {
   UnitSnapshot, emptySnapshot, getComboPoints, getUnit, setComboPoints, setUnit,
 } from './framexml/lua/api/units';
 import { fireEvent } from './framexml/lua/events';
-import { combatFeedbackArgs } from '../classes/combat-text';
+import { combatFeedbackArgs, spellFeedbackArgs, spellMissText } from '../classes/combat-text';
+import type { SpellDamageEvent } from '../../network/game/object/combat-log';
 import { LuaVM } from './framexml/lua/vm';
 
 /**
@@ -181,6 +182,7 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
   const stats = { pushes: 0, events: 0 };
   const spells = world.game.objectHandler.spellHandler;
   const combat = world.game.objectHandler.combatHandler;
+  const combatLog = world.game.objectHandler.combatLogHandler;
 
   const push = (token: string, unit: Unit | null): boolean => {
     if (unit === null) {
@@ -291,10 +293,69 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
     stats.events += 1;
   };
 
+  /**
+   * THE SPELL HALF OF THE PORTRAIT INDICATOR -- "не видно урона по себе" for anything but a swing.
+   *
+   * Same event, same frame, same client Lua. The melee arm above filters to `victim === player`; these
+   * do the same, and the filter is ours only in the sense that the CLIENT'S OWN `playerframe.lua:129`
+   * applies it in Lua (`arg1 == self.unit`) -- we raise the event only for the unit that frame acts on
+   * rather than raising it for every unit and letting the comparison discard them, which is the same
+   * decision the melee arm already took and is stated in `combat-text.ts#spellFeedbackArgs`.
+   *
+   * **THIS IS WHY A SPELL HITTING THE PLAYER SHOWED NOTHING AT ALL**: no packet, so no event, so no
+   * indicator. It was never a display filter.
+   */
+  const onSpellDamage = (ev: SpellDamageEvent): void => {
+    if (world.player === null || ev.target !== world.player.guid) {
+      return;
+    }
+    const args = spellFeedbackArgs(ev.amount, ev.absorb, ev.resist, ev.crit, ev.school);
+    if (args === null) {
+      return;
+    }
+    fireEvent(vm, 'UNIT_COMBAT', ['player', args.event, args.flags, args.amount, args.school]);
+    stats.events += 1;
+  };
+
+  /**
+   * A HEAL LANDING ON THE PLAYER -- the client's own `HEAL` action, which `CombatFeedback_OnCombatEvent`
+   * draws GREEN through `PlayerHealIndicator` rather than on the hit indicator
+   * (`combatfeedback.lua:69-77`, `playerframe.xml`'s second indicator string). Nothing is drawn by us;
+   * the action name is the reference's (`net/apply/combat_log.rs:434-440`) and the client's table
+   * resolves it.
+   */
+  const onSpellHeal = (ev: { target: string; amount: number; crit: boolean }): void => {
+    if (world.player === null || ev.target !== world.player.guid) {
+      return;
+    }
+    fireEvent(vm, 'UNIT_COMBAT', ['player', 'HEAL', ev.crit ? 'CRITICAL' : '', ev.amount, 0]);
+    stats.events += 1;
+  };
+
+  /**
+   * A SPELL MISSING THE PLAYER -- his own dodge, parry, resist or immunity to an incoming cast. The word
+   * comes out of `spellMissText`, i.e. the same `WORD_KEY` table the floating word and the melee dodge
+   * use, so all three name an outcome identically by construction.
+   */
+  const onSpellMiss = (ev: { target: string; code: number }): void => {
+    if (world.player === null || ev.target !== world.player.guid) {
+      return;
+    }
+    const text = spellMissText(ev.code);
+    if (text === null || text.wordKey === null) {
+      return;
+    }
+    fireEvent(vm, 'UNIT_COMBAT', ['player', text.wordKey, '', 0, 0]);
+    stats.events += 1;
+  };
+
   world.on('unit:fields', onFields);
   world.on('target:change', onTargetChange);
   spells.on('comboPoints', pushCombo);
   combat.on('attack:swing', onSwing);
+  combatLog.on('spell:damage', onSpellDamage);
+  combatLog.on('spell:heal', onSpellHeal);
+  combatLog.on('spell:miss', onSpellMiss);
 
   // The player is already in the world when this attaches -- his create block arrived while the
   // manifest was still loading -- so the first push is made here rather than waited for. Without it
@@ -310,6 +371,9 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
     world.removeListener('target:change', onTargetChange);
     spells.removeListener('comboPoints', pushCombo);
     combat.removeListener('attack:swing', onSwing);
+    combatLog.removeListener('spell:damage', onSpellDamage);
+    combatLog.removeListener('spell:heal', onSpellHeal);
+    combatLog.removeListener('spell:miss', onSpellMiss);
     delete (window as unknown as Record<string, unknown>).unitBridgeStats;
   };
 }

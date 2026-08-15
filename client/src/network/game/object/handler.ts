@@ -1,5 +1,6 @@
 import EventEmitter from 'events';
 import { CombatHandler } from './combat';
+import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
@@ -31,6 +32,16 @@ export class ObjectHandler extends EventEmitter {
    */
   public spellHandler: SpellHandler;
 
+  /**
+   * THE COMBAT LOG -- spell damage, periodic ticks, heals, energize and the spell-miss list. PUBLIC
+   * for `combatHandler`'s reason exactly: both display media subscribe to it directly, `World` for the
+   * floating number and `ui/unit-bridge.ts` for `UNIT_COMBAT`.
+   *
+   * Separate from `combatHandler` because a swing and a spell are separate wire surfaces; see
+   * `combat-log.ts`' header.
+   */
+  public combatLogHandler: CombatLogHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -42,6 +53,7 @@ export class ObjectHandler extends EventEmitter {
     this.playerMovementHandler = new PlayerMovementHandler(this.game);
     this.combatHandler = new CombatHandler(this.game);
     this.spellHandler = new SpellHandler(this.game);
+    this.combatLogHandler = new CombatLogHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

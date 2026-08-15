@@ -98,6 +98,85 @@ class CombatWire {
 
 export const combatWire = new CombatWire();
 
+/**
+ * THE COMBAT-LOG RING -- `window.combatLogWire.history()` / `.census()`.
+ *
+ * The same instrument, for the five SPELL-side packets (`network/game/object/combat-log.ts`). It
+ * exists for the same reason the melee one does and it is the ONLY oracle those layouts have: no DBC
+ * states a packet body, the client's own Lua is handed already-decoded values, and the reference
+ * parses 1.12 -- where WotLK is known to have inserted an overkill word into the melee twin's body,
+ * which is exactly the class of difference that lands every later field one word out while the packet
+ * still "works".
+ *
+ * **`consumed` against `bodySize` IS THE MEASUREMENT.** A layout that is right consumes the body to a
+ * known remainder; one that is wrong lands somewhere arbitrary. `residual` is the difference, reported
+ * per opcode by `census()` so a single wrong field shows up as a non-zero column rather than as a
+ * plausible-looking number on screen.
+ */
+export interface CombatLogWireRow {
+  at: number;
+  /** The opcode's own name, so one ring carries all five and the census can split them. */
+  opcode: string;
+  target: string;
+  caster: string;
+  spellId: number;
+  amount: number;
+  /** School mask where the packet carries one, else 0. */
+  school: number;
+  absorb: number;
+  resist: number;
+  crit: boolean;
+  /** `SpellMissInfo` for the miss log, else null. */
+  missCode: number | null;
+  bodySize: number;
+  consumed: number;
+}
+
+class CombatLogWire {
+  private rows: CombatLogWireRow[] = [];
+
+  record(row: CombatLogWireRow): void {
+    this.rows.push(row);
+    if (this.rows.length > HISTORY) {
+      this.rows.shift();
+    }
+  }
+
+  history(): readonly CombatLogWireRow[] {
+    return this.rows;
+  }
+
+  /**
+   * Per opcode: how many arrived, and -- the column that matters -- the DISTINCT residuals
+   * (`bodySize - consumed`). A correct layout gives ONE residual value repeated; a set of scattered
+   * residuals is a decode that is guessing, and a residual that grows with the packet is a loop read
+   * at the wrong stride.
+   */
+  census(): unknown {
+    const groups = new Map<string, CombatLogWireRow[]>();
+    for (const row of this.rows) {
+      const list = groups.get(row.opcode) ?? [];
+      list.push(row);
+      groups.set(row.opcode, list);
+    }
+    return [...groups.entries()].map(([opcode, rows]) => ({
+      opcode,
+      packets: rows.length,
+      residuals: [...new Set(rows.map((r) => r.bodySize - r.consumed))].sort((a, b) => a - b),
+      amounts: [...new Set(rows.map((r) => r.amount))].sort((a, b) => a - b).slice(0, 12),
+      crits: rows.filter((r) => r.crit).length,
+      missCodes: [...new Set(rows.map((r) => r.missCode).filter((c) => c !== null))],
+    }));
+  }
+
+  clear(): void {
+    this.rows.length = 0;
+  }
+}
+
+export const combatLogWire = new CombatLogWire();
+
 if (typeof window !== 'undefined') {
   (window as any).combatWire = combatWire;
+  (window as any).combatLogWire = combatLogWire;
 }

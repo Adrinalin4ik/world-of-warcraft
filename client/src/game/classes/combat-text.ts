@@ -205,6 +205,32 @@ const WORD_KEY: readonly string[] = [
   'REFLECT',
 ];
 
+/**
+ * THE EMITTER COLOUR OVERRIDE for a SPELL's damage number -- `law.rs:110-113`, the reference's
+ * hard-init statics at `0x5fa0b0`/`0x5fa0f0`, read at the colour branch `0x6128b0`. A qualifying
+ * source's SPELL damage floats GOLD `0xffffde00`; its MELEE damage has a NULL override and falls to
+ * the category row's own white. That pair is the whole of the reachable colour law here.
+ *
+ * This is a CLIENT-BINARY-derived value carried by the reference, not a server one, and it is not
+ * version-numbered in the way a `HitInfo` bit is -- it is a packed ARGB constant. The owner's own
+ * reference crop is the corroboration: it shows a WHITE number and a YELLOW number over the same unit
+ * at once, which is exactly a melee swing and a spell landing together.
+ *
+ * **The pet legs are still not reachable** (no pet feed) and are named in `world/floating-text.ts`.
+ */
+export const COLOR_SPELL_GOLD = 0xffffde00;
+
+/**
+ * `SPELL_HIT_TYPE_CRIT` -- the crit bit of `SMSG_SPELLNONMELEEDAMAGELOG`'s `HitInfo`, which is a
+ * DIFFERENT word from the melee `HitInfo` above and has its own vocabulary. `0x2`.
+ *
+ * SOURCE: a server implementation (TrinityCore 3.3.5 `SpellHitType`, corroborated by the reference's
+ * own 1.12 reading `SpellDefines.h:179` -- the two agree on this bit, which is worth stating because
+ * the melee crit bit is precisely where they DISAGREE). Nothing in the game's own data states it: the
+ * client's Lua is handed already-decoded strings, exactly as for the melee word.
+ */
+export const SPELL_HIT_TYPE_CRIT = 0x2;
+
 /** Outcome code 1..11 -> `(key, category)`. Category 3 for every word except ABSORB, which is 1 (`law.rs:104-107`). */
 function missWord(code: number): { key: string; category: number } | null {
   const key = WORD_KEY[code - 1];
@@ -327,6 +353,121 @@ export function combatFeedbackArgs(
   // stated there.
   const flags = (hitInfo & HIT_INFO.CRITICALHIT) !== 0 ? 'CRITICAL' : '';
   return { event: 'WOUND', flags, amount: damage, school };
+}
+
+/**
+ * THE SPELL / PERIODIC EMITTER SPLIT -- `law.rs:185-201`, i.e. `0x5e85e0` (direct) and `0x626dd0`
+ * (periodic). The melee twin above is `meleeText`; this is the other half of the same law, and until
+ * now it was NOT PORTED for one stated reason -- "they need `SMSG_SPELLNONMELEEDAMAGELOG` /
+ * `SMSG_PERIODICAURALOG`, which this client does not decode, so a spell's damage floats NOTHING"
+ * (`world/floating-text.ts`' own header). Those packets decode now; see
+ * `network/game/object/combat-log.ts`.
+ *
+ * Landed damage floats the bare number, category 2 on a crit and 0 otherwise. Zero damage floats
+ * ABSORB when any was absorbed, RESIST when any was resisted, and otherwise NOTHING -- a clean spell
+ * miss does not arrive on this packet at all, it arrives on `SMSG_SPELLLOGMISS`, which is why this
+ * function has no MISS default where `meleeText` has one. That asymmetry is the reference's and it is
+ * the reason the miss log had to be decoded as well as the damage log.
+ *
+ * **A PERIODIC TICK NEVER TAKES THE CRIT CATEGORY IN THE REFERENCE** (its caller passes `crit: false`,
+ * "periodic ticks never crit in 1.12"). This client passes the packet's own bit instead, because
+ * `SMSG_PERIODICAURALOG`'s damage arm is read here as carrying a trailing `critical u8` that the 1.12
+ * layout has no room for.
+ *
+ * **THAT TRAILING BYTE IS UNVERIFIED.** Its only source is the same server implementation the rest of
+ * `combat-log.ts`'s layouts come from, and NO periodic tick has been observed on the wire in this
+ * project yet -- the live roster tops out at level 4 in Northshire and owns no damage-over-time spell,
+ * so the packet has never arrived. It is stated here rather than quietly assumed because the exact
+ * failure it invites is the one this file's header is about: a crit bit taken from the wrong version.
+ *
+ * It is CHECKABLE the moment a tick does arrive, and needs no new instrument:
+ * `combat-log.ts#validate` refuses any decode that over-reads its body, so if the byte is not there a
+ * single-tick packet announces NOTHING and warns, rather than printing a plausible number. And
+ * `window.combatLogWire.census()` reports the residual per opcode -- one repeated value means the
+ * layout closes, a scattered set means it does not. Until such a packet is seen, treat a periodic
+ * crit as unproven.
+ */
+export function spellText(
+  damage: number,
+  absorb: number,
+  resist: number,
+  crit: boolean,
+): MeleeText | null {
+  if (damage > 0) {
+    return { category: crit ? CATEGORY_CRIT : CATEGORY_NUMBER, number: String(damage), wordKey: null };
+  }
+  if (absorb > 0) {
+    const word = missWord(10);
+    return word === null ? null : { category: word.category, number: null, wordKey: word.key };
+  }
+  if (resist > 0) {
+    const word = missWord(2);
+    return word === null ? null : { category: word.category, number: null, wordKey: word.key };
+  }
+  return null;
+}
+
+/**
+ * THE SPELL ARMS' `UNIT_COMBAT` TWIN -- the reference's `spell_feedback`
+ * (`net/apply/combat_log.rs:82-99`). A landed amount is a `WOUND` carrying `CRITICAL` on a crit; zero
+ * damage degrades to the full-`ABSORB`/`RESIST` descriptor; nothing otherwise.
+ *
+ * **THIS CHANNEL IS NOT SOURCE-GATED, and that is the answer to "не видно урона по себе".**
+ *
+ * The claim is taken from the CLIENT'S OWN LUA and not from the reference, because it is exactly the
+ * kind of assertion this file's header warns about. `playerframe.lua:14` registers `UNIT_COMBAT` and
+ * `:129-132` acts on it only when **`arg1 == self.unit`**, i.e. only when the event names `"player"`.
+ * A filter written in the Lua is proof the ENGINE does not apply that filter itself -- if the engine
+ * only ever raised the event for the player, that comparison would be dead code, and the same file
+ * spends it on nothing else. So the event is raised per affected unit and the frame selects; there is
+ * no source class in it. `combatfeedback.lua` likewise reads only the outcome and the amount and never
+ * asks who dealt it.
+ *
+ * The floating world number is the opposite, and that asymmetry is the reference's Gate A: a
+ * self-anchored damage text is suppressed unconditionally -- "outgoing damage floats over the victim,
+ * incoming never floats over you" (`net/apply/combat_log.rs:6-8`, the client's own
+ * `0x607140`/`0x6128b0` returning before submit). So damage TAKEN is the portrait indicator's job in
+ * both media by design, and a spell's damage taken showed nothing here purely because no spell packet
+ * was decoded. Melee damage taken already reached it (`ui/unit-bridge.ts#onSwing`), which is why the
+ * owner sees the melee half and nothing else.
+ *
+ * The client's own `CombatFeedback_OnCombatEvent` resolves `"ABSORB"` and `"RESIST"` through its final
+ * `else` arm exactly as it resolves the melee word keys (`combatfeedback.lua:88-90`), so no new key
+ * vocabulary is introduced -- these are `WORD_KEY`'s own entries.
+ */
+export function spellFeedbackArgs(
+  damage: number,
+  absorb: number,
+  resist: number,
+  crit: boolean,
+  school: number,
+): CombatFeedbackArgs | null {
+  if (damage > 0) {
+    return { event: 'WOUND', flags: crit ? 'CRITICAL' : '', amount: damage, school };
+  }
+  if (absorb > 0) {
+    return { event: 'ABSORB', flags: '', amount: 0, school };
+  }
+  if (resist > 0) {
+    return { event: 'RESIST', flags: '', amount: 0, school };
+  }
+  return null;
+}
+
+/**
+ * `SpellMissInfo` code 1..11 -> the outcome word, for `SMSG_SPELLLOGMISS`.
+ *
+ * The SAME table the melee words come out of -- `WORD_KEY` is indexed by exactly this vocabulary and
+ * says so ("the client's `0x86582c` key table, which is bit-for-bit vmangos' `SpellMissInfo`"). So the
+ * spell miss and the melee dodge cannot print different words for the same outcome, which is the whole
+ * reason `meleeText` was written against that numbering rather than against `VictimState` directly.
+ *
+ * Exported because two consumers need it: the floating word and `UNIT_COMBAT`'s action
+ * (`net/apply/combat_log.rs#miss_action`, which is the same table again in the reference).
+ */
+export function spellMissText(code: number): MeleeText | null {
+  const word = missWord(code);
+  return word === null ? null : { category: word.category, number: null, wordKey: word.key };
 }
 
 /**

@@ -38,12 +38,20 @@
  *    `0x6c7cc0`). Two numbers landing in the same 150 ms therefore overlap instead of being pushed
  *    apart. It is a real difference and it is named rather than approximated, because a hand-rolled
  *    "nudge the second one up" is exactly the invented-substitute this project keeps deleting.
- *  - **The spell and periodic emitters** (`spell_text`, `law.rs:185-201`). They need
- *    `SMSG_SPELLNONMELEEDAMAGELOG` / `SMSG_PERIODICAURALOG`, which this client does not decode, so a
- *    spell's damage floats NOTHING. Melee swings are the only feed there is.
  *  - **The pet legs** of the colour branch (`damage_color`, `law.rs:136-146`, orange pet melee / gold
- *    pet spell). There is no pet feed. The one leg that is reachable -- player MELEE -- is the leg whose
- *    override is NULL, i.e. the category row's own white, so nothing is guessed at.
+ *    pet spell). There is no pet feed, so neither pet leg is reachable. The two PLAYER legs both are
+ *    now: melee's override is NULL (the row's own white) and spell's is `COLOR_SPELL_GOLD`.
+ *    **The spell and periodic emitters were listed here as unported** because they needed
+ *    `SMSG_SPELLNONMELEEDAMAGELOG` / `SMSG_PERIODICAURALOG`, "which this client does not decode, so a
+ *    spell's damage floats NOTHING". Those packets decode now
+ *    (`network/game/object/combat-log.ts`) and `combat-text.ts#spellText` is the emitter, so that
+ *    entry is retired rather than left describing a closed gap.
+ *  - **`melee_styled`** (`net/apply/combat_log.rs:66-77`), the leg that makes a ranged BASIC shot --
+ *    Throw, Auto Shot -- float WHITE off the spell packet rather than gold, off `AttributesEx3 & 0x8000`
+ *    or a spell id with no catalog record. `Spell.dbc` column 4's word block is already decoded in this
+ *    client (the spellbook filter reads bit `0x80` of it) but `AttributesEx3` is a DIFFERENT word of that
+ *    block and is not read, so this is NOT implemented: a hunter's Auto Shot will float gold where the
+ *    real client floats it white. Named rather than approximated.
  *  - **Rows 4 and 5** (XP and honor) are in the table because they are part of it; nothing selects them.
  *  - **The per-tick re-raster of a popping crit.** The reference re-renders the glyphs at the new size
  *    every tick; here the string is rasterized ONCE at its settled size and the sprite is SCALED for the
@@ -106,11 +114,21 @@ const SPAWN_LIFT = 0.5;
 /** How the client's own `CombatFeedbackText` keys are turned into real words. See `WORD_SOURCE`. */
 export type WordSource = (key: string) => string | null;
 
-/** What `spawn` is told. Assembled by `World` from `combat-text.ts#meleeText`. */
+/** What `spawn` is told. Assembled by `World` from `combat-text.ts#meleeText`/`#spellText`. */
 export interface FloaterSpawn {
   unit: Unit;
   category: number;
   text: string;
+  /**
+   * THE EMITTER'S COLOUR OVERRIDE, packed ARGB, or `undefined` for the category row's own colour.
+   *
+   * The reference's colour branch (`law.rs:136-146`, the client's `0x6128b0`) picks an override per
+   * (source, melee) pair rather than per category: a qualifying source's SPELL damage is GOLD
+   * `COLOR_SPELL_GOLD`, its MELEE damage has a NULL override and falls through to the row's white. Until
+   * the spell packets were decoded only the melee leg was reachable, which is why this field did not
+   * exist and the header below recorded the colour branch as unported.
+   */
+  color?: number;
 }
 
 export class FloatingCombatText {
@@ -172,7 +190,10 @@ export class FloatingCombatText {
     // THE SETTLED size, which is what the raster is built at -- `t = 1` is past every crit keyframe, so
     // this is `valueHi` for a crit and the constant for every other row.
     const settled = scaleValue(spawn.category, 1);
-    const font = this.font(sizeUnits(settled, aspect), aspect, category.color);
+    // THE OVERRIDE WINS OVER THE ROW, which is the order the reference's branch resolves in: the row
+    // colour is the fallback for a NULL override, not a base to be blended with.
+    const color = spawn.color ?? category.color;
+    const font = this.font(sizeUnits(settled, aspect), aspect, color);
     const resolved = this.fonts.get(spawn.text, font, 1);
     if (resolved?.texture === undefined || resolved.size === undefined) {
       // No raster means no text. Nothing is substituted: a missing glyph run is visibly absent.
@@ -190,9 +211,9 @@ export class FloatingCombatText {
     const sprite = this.pool.pop() ?? this.build();
     const material = sprite.material as THREE.SpriteMaterial;
     material.map = resolved.texture;
-    // The row's own default colour. Only the four melee rows are reachable and all four are white; the
-    // read is kept honest anyway so a future emitter that selects a coloured row gets it right.
-    const [r, g, b] = argbRgb(category.color);
+    // The emitter's override, or the row's own default. The raster above is built in the same colour,
+    // so this multiply is 1.0 and exists only because the pooled material must be reset per spawn.
+    const [r, g, b] = argbRgb(color);
     material.color.setRGB(r, g, b);
     material.opacity = 0;
     material.needsUpdate = true;

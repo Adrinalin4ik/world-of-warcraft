@@ -25,7 +25,10 @@ import { reactionFor, REACTION_NEUTRAL } from "./faction";
 import { SelectionRing } from "./selection-ring";
 import { NameplateConfig, Nameplates } from "./nameplates";
 import { FloaterSpawn, FloatingCombatText, MAX_FLOATERS, WordSource } from "./floating-text";
-import { meleeText } from "../classes/combat-text";
+import {
+  COLOR_SPELL_GOLD, meleeText, spellMissText, spellText,
+} from "../classes/combat-text";
+import type { SpellDamageEvent } from "../../network/game/object/combat-log";
 import { readMark } from "./saved-mark";
 import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
@@ -99,6 +102,25 @@ export default class World extends EventEmitter {
    * built once at load from the localized globals. A MISS is cached too, so a runtime that has not
    * answered is not re-asked forever: `has` rather than a truthiness test is what makes that work.
    */
+  /**
+   * Queue one floater for the next frame, bounded.
+   *
+   * BOUNDED, and a self-review of the melee arm is what found the need: the queue drains in `animate`,
+   * so a tab that stops receiving `requestAnimationFrame` -- backgrounded, or between world sessions --
+   * keeps taking packets and appends for ever. The bound is the pass's own `MAX_FLOATERS`, because
+   * anything past it would be dropped at the spawn anyway; dropping the OLDEST matches what the pass
+   * does with an overflow, so the two agree instead of one silently hoarding.
+   *
+   * Shared by the melee arm and both spell arms so that bound cannot be re-derived differently in three
+   * places -- which is exactly how the two `HitInfo` tables drifted before `combat-text.ts` took them.
+   */
+  private queueCombatText(unit: Unit, category: number, text: string, color?: number): void {
+    if (this.pendingCombatText.length >= MAX_FLOATERS) {
+      this.pendingCombatText.shift();
+    }
+    this.pendingCombatText.push({ unit, category, text, color });
+  }
+
   private combatWordCached(key: string): string | null {
     if (this.combatWords.has(key)) {
       return this.combatWords.get(key) ?? null;
@@ -236,12 +258,68 @@ export default class World extends EventEmitter {
         // taking packets and appends for ever. The bound is the pass's own `MAX_FLOATERS`, because
         // anything past it would be dropped at the spawn anyway; dropping the OLDEST matches what the
         // pass does with an overflow, so the two agree instead of one silently hoarding.
-        if (this.pendingCombatText.length >= MAX_FLOATERS) {
-          this.pendingCombatText.shift();
-        }
-        this.pendingCombatText.push({ unit, category: text.category, text: body });
+        this.queueCombatText(unit, text.category, body);
       },
     );
+
+    // THE SPELL HALF OF THE SAME LAW -- the owner's "От способностей урон не показывается, только от
+    // автоатак". Nothing here is a new display: `spellText` is `combat-text.ts`' port of the reference's
+    // OTHER emitter (`law.rs:185-201`) and it feeds the same queue, the same categories and the same
+    // word table as the swing above. The reason a spell showed nothing was that no spell packet was
+    // decoded; see `network/game/object/combat-log.ts`.
+    //
+    // **GATE A AND THE SOURCE CLASS ARE THE MELEE ARM'S, unchanged**: only damage WE deal floats, and it
+    // floats over the VICTIM. Damage taken by the player is deliberately not floated here -- that is the
+    // portrait indicator's medium in the real client too, and `ui/unit-bridge.ts` is where it lands.
+    //
+    // **THE COLOUR IS THE ONE THING THAT DIFFERS FROM MELEE**, and it is the emitter's override rather
+    // than a category row: a player's spell damage is GOLD. That is what makes the owner's own reference
+    // crop -- a white number and a yellow number over the same unit at once -- reproducible: the white is
+    // a swing and the yellow is a spell.
+    const combatLog = this.game.objectHandler.combatLogHandler;
+    combatLog.on('spell:damage', (ev: SpellDamageEvent) => {
+      if (this.player === null || ev.caster !== this.player.guid) {
+        return;
+      }
+      const unit = this.entities.get(ev.target);
+      if (unit === undefined) {
+        return;
+      }
+      const text = spellText(ev.amount, ev.absorb, ev.resist, ev.crit);
+      if (text === null) {
+        return;
+      }
+      const body = text.number ?? this.combatWordCached(text.wordKey ?? '');
+      if (body === null || body === '') {
+        return;
+      }
+      // A WORD (Absorb / Resist) keeps the row's own white; only a NUMBER takes the gold override. That
+      // is the reference's split -- `damage_color` is consulted on the damage path and the word twin
+      // "keeps the row-default white" (`net/apply/combat_log.rs:519-521`).
+      this.queueCombatText(unit, text.category, body, text.number !== null ? COLOR_SPELL_GOLD : undefined);
+    });
+
+    // THE SPELL MISS LIST -- the owner's "не видно событий типа dodge" for anything but a swing. Same
+    // queue, same word table, and the words come out of the client's own `CombatFeedbackText` exactly as
+    // a dodged swing's do, so the two media cannot disagree.
+    combatLog.on('spell:miss', (ev: { target: string; caster: string; code: number }) => {
+      if (this.player === null || ev.caster !== this.player.guid) {
+        return;
+      }
+      const unit = this.entities.get(ev.target);
+      if (unit === undefined) {
+        return;
+      }
+      const text = spellMissText(ev.code);
+      if (text === null) {
+        return;
+      }
+      const body = this.combatWordCached(text.wordKey ?? '');
+      if (body === null || body === '') {
+        return;
+      }
+      this.queueCombatText(unit, text.category, body);
+    });
 
     // Initialize sky manager
     this.skyManager = new SkyManager(this.scene);
