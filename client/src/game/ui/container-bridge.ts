@@ -47,7 +47,7 @@ import type World from '../world';
 import { LuaVM } from './framexml/lua/vm';
 import { notImplemented } from './framexml/lua/methods/region';
 import { fireEvent } from './framexml/lua/events';
-import { setCoinage } from './framexml/lua/api/items';
+import { setCoinage, setItemTooltipSource, ItemTooltipInfo } from './framexml/lua/api/items';
 import { GlueArt } from './art';
 import {
   ContainerField, ItemField, ObjectField, ObjectType, PlayerField,
@@ -533,6 +533,51 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     return [];
   });
 
+  /**
+   * The tooltip feed -- `GameTooltip:SetBagItem` / `:SetHyperlink`.
+   *
+   * Installed here rather than imported by the method table, because that table has no world; see
+   * `api/items.ts#setItemTooltipSource`. The LOOT bridge chains onto this one for its own `'loot'` kind
+   * (it attaches after this and calls back into what it replaces), so both kinds resolve through one
+   * hook rather than two competing installs.
+   *
+   * The body lines are deliberately SPARSE and that is honest: the real client prints binding, level
+   * requirement, armour, damage, stats and use effects, and this decodes only some of them. Item level
+   * and the sell price are the two that are read straight off the query response with no further join,
+   * so they are the two shown. Adding a "Requires Level" line would mean deciding what to do when the
+   * player already meets it, which is a rule nothing here states.
+   */
+  const bagTooltip = (kind: string, a: number | string, b?: number): ItemTooltipInfo | null => {
+    let template: ItemTemplate | null = null;
+    let count = 1;
+    if (kind === 'bag') {
+      const item = itemAt(slotGuid(Number(a), Number(b)));
+      if (item === null) {
+        return null;
+      }
+      template = item.template;
+      count = item.count;
+    } else if (kind === 'link') {
+      const match = /\|Hitem:(\d+)/.exec(String(a));
+      const entry = match === null ? Number(a) : Number(match[1]);
+      template = Number.isFinite(entry) && entry > 0 ? items.template(entry) : null;
+    } else {
+      return null;
+    }
+    if (template === null) {
+      return null;
+    }
+    const lines: string[] = [];
+    if (template.itemLevel > 0) {
+      lines.push(`Item Level ${template.itemLevel}`);
+    }
+    if (count > 1) {
+      lines.push(`Stack: ${count}`);
+    }
+    return { name: template.name, quality: template.quality, lines };
+  };
+  setItemTooltipSource(vm, bagTooltip as never);
+
   // -- The repaint --------------------------------------------------------------------------------
 
   /**
@@ -646,6 +691,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
   (window as unknown as Record<string, unknown>).bagBridge = stats;
 
   return () => {
+    setItemTooltipSource(vm, null);
     items.removeListener('inventoryChanged', pushAll);
     items.removeListener('templatesChanged', pushAll);
     delete (window as unknown as Record<string, unknown>).bagBridge;

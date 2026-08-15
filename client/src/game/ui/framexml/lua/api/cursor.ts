@@ -369,4 +369,37 @@ export function installCursorApi(vm: LuaVM): void {
     [],
   );
   fn('DropCursorMoney', () => stub(null as never, 0, []));
+
+  /**
+   * THE MOUSE-CURSOR SHAPE SETTERS -- `ResetCursor`, `ShowInspectCursor`, `ShowContainerSellCursor`,
+   * `ShowBuybackSellCursor`, `SetCursor`.
+   *
+   * These change the POINTER's art, not the carried item: the magnifying glass over a readable book,
+   * the coin over a sellable item at a vendor, and the plain arrow everything else resets to. They are
+   * a different mechanism from `PickupSpell` above.
+   *
+   * DECLARED, not written, and the reason is that the world pointer is owned end to end by
+   * `ui/world-cursor.ts#WorldCursorDriver`, which derives its stem from what is UNDER the cursor in the
+   * world (`world/cursor-mode.ts`) and re-applies it every tick -- see `STATE.md` on why the retry per
+   * frame is load-bearing. A setter here would be overwritten on the very next tick, so implementing
+   * one would produce a cursor that flickers rather than one that changes, and that is strictly worse
+   * than being told it is missing.
+   *
+   * `ResetCursor` is the one that MATTERS TODAY: `ContainerFrameItemButton_OnEnter`'s last statement is
+   * a four-way branch ending in `ResetCursor()` (`containerframe.lua:783-790`), so with it nil every
+   * bag tooltip threw AFTER the tooltip had been built -- the handler died one line past its own
+   * point. A declared stub returns, and the handler completes.
+   */
+  const cursorShapeGaps: Array<[string, string]> = [
+    ['ResetCursor', 'the world pointer is driven per-frame by WorldCursorDriver from what is under the '
+      + 'cursor, so a shape set here would be overwritten on the next tick'],
+    ['ShowInspectCursor', 'as ResetCursor -- WorldCursorDriver owns the pointer shape'],
+    ['ShowContainerSellCursor', 'as ResetCursor, and no merchant window exists to sell into'],
+    ['ShowBuybackSellCursor', 'as ShowContainerSellCursor'],
+    ['SetCursor', 'as ResetCursor -- WorldCursorDriver owns the pointer shape'],
+  ];
+  for (const [name, reason] of cursorShapeGaps) {
+    const shapeStub = notImplemented(name, reason, []);
+    fn(name, () => shapeStub(null as never, 0, []));
+  }
 }

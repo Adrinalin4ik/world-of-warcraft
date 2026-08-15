@@ -45,6 +45,7 @@ import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachContainerBridge } from './container-bridge';
 import { attachLootBridge } from './loot-bridge';
+import { publishRects, clearRects } from './rects';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import { attachTargetBridge } from './target-bridge';
 import { dispatchBinding } from './framexml/lua/api/bindings';
@@ -573,6 +574,11 @@ export class WorldUiHost {
     // `BonusActionButton2` instead of calling its handler directly. One reference assignment per frame.
     (window as never as Record<string, unknown>).worldUiDrawList = items;
     this.lastItems = items;
+    // THE RECTS, for `Region:GetLeft/GetRight/GetTop/GetBottom/GetCenter`. Published from the same
+    // array the router hit-tests, so a rect a script reads and a rect a click lands in cannot
+    // disagree. One reference assignment; the id map is built lazily on first lookup. See
+    // `ui/rects.ts` for why nothing else in this client could answer where a widget ended up.
+    publishRects(items, viewportUnits(viewport).height);
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');
@@ -1037,6 +1043,10 @@ export class WorldUiHost {
     this.detachContainers = null;
     this.detachLoot?.();
     this.detachLoot = null;
+    // The rect publication is module-level, so it OUTLIVES this host unless it is cleared -- exactly
+    // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
+    // stale draw list would have a remounted world's scripts reading the previous world's layout.
+    clearRects();
     this.input.detach();
     this.runtime?.dispose();
     this.runtime = null;

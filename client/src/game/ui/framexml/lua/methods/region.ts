@@ -20,6 +20,7 @@ import { Anchor, AnchorPoint } from '../../../layout';
 import { Layer, Widget, deriveSize, effectiveFont } from '../../../widget';
 import { familyForFontFile, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
+import { rectOf, screenHeightUnits } from '../../../rects';
 
 const warned = new Set<string>();
 
@@ -321,6 +322,46 @@ const REGION: MethodTable = {
   // opposing anchors", which only `resolveAnchors` can do.
   GetWidth: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).width],
   GetHeight: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).height],
+
+  /**
+   * `GetLeft` / `GetRight` / `GetTop` / `GetBottom` / `GetCenter` -- where the widget actually ENDED UP.
+   *
+   * **THE Y AXIS IS FLIPPED, and this is the whole subtlety.** FrameXML's screen origin is the
+   * BOTTOM-LEFT with +y UP -- that is why `GetBottom` is the small number and `GetTop` the large one --
+   * while a draw rect's `top` is measured DOWN from the top of the screen. `screenHeightUnits()` is the
+   * conversion, and it is published alongside the rects so the two cannot disagree across a resize.
+   * The same mixing of these two spaces is what mirrored the dragged action icon
+   * (`world-ui.ts`' note on `pointerPosition` vs `GetCursorPosition`).
+   *
+   * `null` -- Lua nil -- when the widget was not in the last draw list, i.e. it is hidden or has
+   * nothing drawable. FrameXML tests these before using them in the paths that matter, and inventing 0
+   * would put a tooltip in the screen's corner rather than saying "not on screen".
+   *
+   * FOUND BY A REAL FAILURE: `ContainerFrameItemButton_OnEnter` reads the button's right edge to pick
+   * the tooltip's side (`containerframe.lua:759`), and with `GetRight` absent every bag tooltip threw
+   * `attempt to call a nil value (method 'GetRight')`.
+   */
+  GetLeft: (ctx, self) => [rectOf(widgetOf(ctx, self).id)?.left ?? null],
+  GetRight: (ctx, self) => {
+    const rect = rectOf(widgetOf(ctx, self).id);
+    return [rect === null ? null : rect.left + rect.width];
+  },
+  GetTop: (ctx, self) => {
+    const rect = rectOf(widgetOf(ctx, self).id);
+    return [rect === null ? null : screenHeightUnits() - rect.top];
+  },
+  GetBottom: (ctx, self) => {
+    const rect = rectOf(widgetOf(ctx, self).id);
+    return [rect === null ? null : screenHeightUnits() - (rect.top + rect.height)];
+  },
+  /** Two returns, `x, y`, in the same bottom-left-origin space as the four edges. */
+  GetCenter: (ctx, self) => {
+    const rect = rectOf(widgetOf(ctx, self).id);
+    if (rect === null) {
+      return [];
+    }
+    return [rect.left + rect.width / 2, screenHeightUnits() - (rect.top + rect.height / 2)];
+  },
   SetPoint: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
     const point = String(args[0]).toUpperCase() as AnchorPoint;

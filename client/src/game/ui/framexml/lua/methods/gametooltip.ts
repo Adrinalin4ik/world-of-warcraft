@@ -62,6 +62,7 @@ import { ensureFont, notImplemented, warnOnce, widgetOf } from './region';
 import { getAction } from '../api/actions';
 import { getSpellbook } from '../api/spells';
 import { layoutScale, measureText } from '../../../text';
+import { getItemTooltipSource, ItemTooltipInfo } from '../api/items';
 
 /**
  * How many lines a tooltip can hold: the eight `$parentTextLeft<n>` slots `GameTooltipTemplate` authors.
@@ -644,5 +645,81 @@ function fillSpellLines(
   resize(ctx, self);
   widgetOf(ctx, self).shown = true;
 }
+
+/**
+ * The item-tooltip body, the twin of `fillSpellLines`.
+ *
+ * The NAME LINE TAKES THE ITEM'S QUALITY COLOUR, which is the one thing that makes an item tooltip
+ * look like an item tooltip rather than a spell's. The colour comes from the client's own
+ * `ITEM_QUALITY_COLORS`, asked of the VM as three formatted numbers -- never as a table handle, which
+ * is what `SetAttribute` stored and had freed under it (see `STATE.md`). A quality the table does not
+ * carry falls back to white rather than failing the whole tooltip.
+ */
+function fillItemLines(ctx: MethodContext, self: number, info: ItemTooltipInfo): void {
+  const state = stateOf(widgetOf(ctx, self));
+  state.lines = 0;
+  clearFrom(ctx, self, 1);
+  let colour = { r: 1, g: 1, b: 1 };
+  const answer = ctx.vm.runExpr(
+    `local c = ITEM_QUALITY_COLORS[${Math.floor(info.quality)}] `
+    + 'if not c then return "" end return string.format("%.4f %.4f %.4f", c.r, c.g, c.b)',
+    'item-tooltip-colour.lua',
+  ) as { value?: unknown } | null;
+  const parts = String(answer?.value ?? '').split(' ');
+  if (parts.length === 3) {
+    const rgb = parts.map((p) => Number(p));
+    if (!rgb.some((n) => !Number.isFinite(n))) {
+      colour = { r: rgb[0], g: rgb[1], b: rgb[2] };
+    }
+  }
+  appendLine(ctx, self, info.name, null, colour, undefined, false);
+  for (const line of info.lines) {
+    appendLine(ctx, self, line, null, { r: 1, g: 1, b: 1 }, undefined, true);
+  }
+  resize(ctx, self);
+  widgetOf(ctx, self).shown = true;
+}
+
+/**
+ * `SetBagItem(bag, slot)` / `SetLootItem(slot)` / `SetHyperlink(link)`.
+ *
+ * **THIS FAMILY WAS ABSENT ON PURPOSE AND THE REASON HAS EXPIRED.** This file's header recorded it as
+ * "absent, not stubbed -- each needs a feed this client has none of". The feed exists now
+ * (`network/game/object/items.ts` and `.../loot.ts`), so they are real; the header's census stands, but
+ * that sentence no longer describes this build.
+ *
+ * They SHOW THEMSELVES, exactly as `SetSpell` and `SetAction` do and for the same measured reason:
+ * `ContainerFrameItemButton_OnEnter` (`containerframe.lua:774`) and `LootItem_OnEnter`
+ * (`lootframe.lua:243`) both call `SetOwner` then the setter, and NEITHER calls `Show()`.
+ *
+ * `true`/`false` is the return contract the bag path reads to decide whether to add a "click to buy
+ * back" line; false means nothing was filled and nothing is shown.
+ */
+const ITEM_SETTERS: MethodTable = {
+  SetBagItem: (ctx, self, args) => fillFromSource(ctx, self, 'bag', Number(args[0]), Number(args[1])),
+  SetLootItem: (ctx, self, args) => fillFromSource(ctx, self, 'loot', Number(args[0])),
+  SetHyperlink: (ctx, self, args) => fillFromSource(ctx, self, 'link', String(args[0] ?? '')),
+};
+
+function fillFromSource(
+  ctx: MethodContext,
+  self: number,
+  kind: 'bag' | 'loot' | 'link',
+  a: number | string,
+  b?: number,
+): unknown[] {
+  const source = getItemTooltipSource(ctx.vm);
+  if (source === null) {
+    return [false];
+  }
+  const info = source(kind, a, b);
+  if (info === null) {
+    return [false];
+  }
+  fillItemLines(ctx, self, info);
+  return [true];
+}
+
+Object.assign(GAMETOOLTIP, ITEM_SETTERS);
 
 registerMethods('GAMETOOLTIP', GAMETOOLTIP);

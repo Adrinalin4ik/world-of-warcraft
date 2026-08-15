@@ -79,6 +79,43 @@ export function setCoinage(vm: LuaVM, copper: number): void {
   coinageByVm.set(vm, copper);
 }
 
+/** What a bag slot or a loot row resolves to for a tooltip. */
+export interface ItemTooltipInfo {
+  name: string;
+  /** 0..7; the name line is drawn in `ITEM_QUALITY_COLORS[quality]`. */
+  quality: number;
+  /** Body lines under the name, already ordered. Empty is legal. */
+  lines: string[];
+}
+
+/**
+ * Resolve `GameTooltip:SetBagItem(bag, slot)` / `:SetLootItem(slot)` / `:SetHyperlink(link)`.
+ *
+ * A VM-KEYED HOOK rather than a direct import, and for the reason the method tables already follow with
+ * `getSpellbook`/`getAction`: `methods/gametooltip.ts` is a method table with no world and no session,
+ * and it must not grow one. The container and loot bridges install this; before they do, the
+ * `Set<Thing>Item` family answers false exactly as it did when it did not exist.
+ */
+export type ItemTooltipSource = (
+  kind: 'bag' | 'loot' | 'link',
+  a: number | string,
+  b?: number,
+) => ItemTooltipInfo | null;
+
+const tooltipSourceByVm = new WeakMap<LuaVM, ItemTooltipSource>();
+
+export function setItemTooltipSource(vm: LuaVM, source: ItemTooltipSource | null): void {
+  if (source === null) {
+    tooltipSourceByVm.delete(vm);
+  } else {
+    tooltipSourceByVm.set(vm, source);
+  }
+}
+
+export function getItemTooltipSource(vm: LuaVM): ItemTooltipSource | null {
+  return tooltipSourceByVm.get(vm) ?? null;
+}
+
 /**
  * Quality -> `[r, g, b]` as 0..1 floats, indexed 0..7.
  *
@@ -143,6 +180,17 @@ export function installItemsApi(vm: LuaVM): void {
    * surfaced `GetMoney`. Fixing them one at a time is what named all three.
    */
   vm.registerFunction('GetPlayerTradeMoney', () => [0]);
+
+  /**
+   * `InRepairMode()` -- false, a TRUE answer rather than a stub: repair mode is a MERCHANT state
+   * (the hammer cursor at an armourer), and no merchant window exists in this client to enter it from.
+   *
+   * `ContainerFrameItemButton_OnEnter` (`containerframe.lua:775`) tests it immediately after
+   * `GameTooltip:SetBagItem` to decide whether to append a repair-cost line, so with it nil every bag
+   * tooltip threw one call AFTER the tooltip had already been filled -- the tooltip was built and then
+   * the handler died before anything else it does could run.
+   */
+  vm.registerFunction('InRepairMode', () => [false]);
 
   /**
    * `GetInventorySlotInfo(slotName)` -> `slotID, textureName, checkRelic`.

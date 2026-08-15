@@ -35,6 +35,7 @@ import { LuaVM } from './framexml/lua/vm';
 import { notImplemented } from './framexml/lua/methods/region';
 import { fireEvent } from './framexml/lua/events';
 import { GlueArt } from './art';
+import { getItemTooltipSource, setItemTooltipSource, ItemTooltipInfo } from './framexml/lua/api/items';
 import { itemData } from '../pipeline/dbc/item-data';
 import type { LootHandler, LootRow } from '../../network/game/object/loot';
 import { LOOT_TYPE_FISHING } from '../../network/game/object/loot';
@@ -259,6 +260,38 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
   loot.on('lootClosed', onClosed);
   items.on('templatesChanged', onTemplates);
 
+  /**
+   * `GameTooltip:SetLootItem(slot)` -- CHAINED onto whatever the container bridge installed.
+   *
+   * Chained, not replaced: both bridges want the same hook and this one attaches second, so replacing
+   * it outright would silently take every bag tooltip away. Anything that is not a loot row falls
+   * through to the previous source. That is the same shape as any other decorator and it is the reason
+   * `world-ui.ts` attaches the loot bridge AFTER the container bridge.
+   */
+  const previous = getItemTooltipSource(vm);
+  const lootTooltip = (kind: string, a: number | string, b?: number): ItemTooltipInfo | null => {
+    if (kind !== 'loot') {
+      return previous === null ? null : previous(kind as never, a as never, b);
+    }
+    const row = rowAt(Number(a));
+    if (row === null || row.kind !== 'item') {
+      return null;
+    }
+    const template = items.template(row.row.itemId);
+    if (template === null) {
+      return null;
+    }
+    const lines: string[] = [];
+    if (template.itemLevel > 0) {
+      lines.push(`Item Level ${template.itemLevel}`);
+    }
+    if (row.row.count > 1) {
+      lines.push(`Stack: ${row.row.count}`);
+    }
+    return { name: template.name, quality: template.quality, lines };
+  };
+  setItemTooltipSource(vm, lootTooltip as never);
+
   // -- The declared gaps --------------------------------------------------------------------------
 
   const gaps: Array<[string, string, unknown[]]> = [
@@ -288,6 +321,7 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
   });
 
   return () => {
+    setItemTooltipSource(vm, previous);
     loot.removeListener('lootOpened', onOpened);
     loot.removeListener('lootRemoved', onRemoved);
     loot.removeListener('lootClosed', onClosed);
