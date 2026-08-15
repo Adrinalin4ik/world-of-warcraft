@@ -425,13 +425,29 @@ export class ProtocolSession {
     this.notify();
   }
 
-  private notify(): void {
-    const state: SessionState = {
+  /**
+   * The state a listener would be handed if `notify()` ran right now.
+   *
+   * EXISTS BECAUSE `on()` IS AN EDGE SUBSCRIPTION AND AN EDGE CAN BE MISSED. A subscriber that
+   * attaches after a stage change has already been emitted has no way to learn it -- there is no
+   * replay and no polling -- so it waits for a transition that has already happened. That is the
+   * world-entry bug: `GlueApp#start` subscribes only after `await`ing the fonts and the string table,
+   * and a login that completes inside that window emitted `InWorld` to nobody. See `screens.ts`.
+   *
+   * `notify` is written in terms of this so there is ONE definition of what the state is; a second
+   * copy here is exactly how the two would drift.
+   */
+  get state(): SessionState {
+    return {
       stage: this.stage_,
       realms: [...this.realms_],
       characters: [...this.characters_],
       refusal: this.refusal_,
     };
+  }
+
+  private notify(): void {
+    const state = this.state;
     this.listeners.forEach((listener) => listener(state));
   }
 }

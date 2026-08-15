@@ -21,10 +21,23 @@ import SkyDebug from "../pipeline/sky/debug";
 import SkyManager from "../pipeline/sky/manager";
 import { fogDebug } from "./fog-debug";
 import { lightDebug } from "./light-debug";
-import { reactionFor } from "./faction";
+import { reactionFor, REACTION_NEUTRAL } from "./faction";
+import { SelectionRing } from "./selection-ring";
+import { NameplateConfig, Nameplates } from "./nameplates";
+import { FloaterSpawn, FloatingCombatText, MAX_FLOATERS, WordSource } from "./floating-text";
+import {
+  COLOR_SPELL_GOLD, meleeText, spellMissText, spellText,
+} from "../classes/combat-text";
+import type { SpellDamageEvent } from "../../network/game/object/combat-log";
 import { readMark } from "./saved-mark";
 import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
+
+/**
+ * `ObjectType.Unit` -- a CREATURE. `4` is a player, and the combat-facing rule deliberately does not
+ * touch one; see `animateEntities`.
+ */
+const OBJECT_TYPE_CREATURE = 3;
 
 export default class World extends EventEmitter {
   public scene: THREE.Scene;
@@ -37,6 +50,90 @@ export default class World extends EventEmitter {
   public skyManager: SkyManager;
   /** The collision wireframe overlay, driven from `animate` and toggled from the debug panel. */
   public collisionDebug = collisionDebugView;
+  /** The ground selection ring under the current target. Built in the constructor, ticked in `animate`. */
+  public selectionRing: SelectionRing;
+  /**
+   * The overhead name plates. Built in the constructor and ticked in `animate`, like the ring.
+   *
+   * WORLD GEOMETRY, not widgets -- see `nameplates.ts`' header for the reference's own verdict on the
+   * medium and for why a widget would hand back the whole offscreen-target saving.
+   */
+  public nameplates: Nameplates;
+  /**
+   * What the client's own Lua has the two nameplate CVars set to, or null while nothing has answered.
+   *
+   * A REGISTRATION, exactly the shape `pipeline/program-warm.ts#setProgramWarmer` uses and for the same
+   * reason: the switch belongs to the FrameXML runtime (`Bindings.xml`'s `NAMEPLATES` binding writes
+   * `nameplateShowEnemies`) and `World` must not acquire a dependency on the Lua VM to read it.
+   * `WorldUiHost#start` sets it once the runtime exists. Null -- `/game` with no `?ui=lua`, or the
+   * seconds before the manifest lands -- means both plates are off, which is the CVars' own default.
+   */
+  public nameplateConfig: (() => NameplateConfig) | null = null;
+
+  /**
+   * THE FLOATING COMBAT TEXT -- the big engine-drawn number over the unit you just hit. Built in the
+   * constructor and ticked in `animate`, like the ring and the plates, and world geometry for the same
+   * three reasons (`floating-text.ts`' header).
+   */
+  public combatText: FloatingCombatText;
+
+  /**
+   * The CLIENT'S OWN word for an outcome -- `CombatFeedbackText[key]` (`combatfeedback.lua:15-26`), which
+   * resolves to the localized `GlobalStrings.lua` value. Null while nothing has answered.
+   *
+   * A REGISTRATION, exactly like `nameplateConfig` above and for the same reason: the words belong to the
+   * client's own Lua and `World` must not acquire a dependency on the VM to read them. There is therefore
+   * ONE copy of the word table in this client and it is the game's own -- the reference hardcodes the
+   * shipped enUS strings only because it has no FrameXML to ask (`combat_text/law.rs:93-100`).
+   * `WorldUiHost#start` sets it. Null means a word outcome floats NOTHING, which is honest: no invented
+   * English goes on screen.
+   */
+  public combatWord: WordSource | null = null;
+
+  /** Swings decoded since the last frame, waiting for a camera. See the `attack:swing` subscription. */
+  private readonly pendingCombatText: FloaterSpawn[] = [];
+
+  /** key -> the client's own word, once asked. There are nine keys, so this is a session's worth of calls. */
+  private readonly combatWords = new Map<string, string | null>();
+
+  /**
+   * Queue one floater for the next frame, bounded.
+   *
+   * BOUNDED, and a self-review of the melee arm is what found the need: the queue drains in `animate`,
+   * so a tab that stops receiving `requestAnimationFrame` -- backgrounded, or between world sessions --
+   * keeps taking packets and appends for ever. The bound is the pass's own `MAX_FLOATERS`, because
+   * anything past it would be dropped at the spawn anyway; dropping the OLDEST matches what the pass
+   * does with an overflow, so the two agree instead of one silently hoarding.
+   *
+   * Shared by the melee arm and both spell arms so that bound cannot be re-derived differently in three
+   * places -- which is exactly how the two `HitInfo` tables drifted before `combat-text.ts` took them.
+   */
+  private queueCombatText(unit: Unit, category: number, text: string, color?: number): void {
+    if (this.pendingCombatText.length >= MAX_FLOATERS) {
+      this.pendingCombatText.shift();
+    }
+    this.pendingCombatText.push({ unit, category, text, color });
+  }
+
+  /**
+   * One outcome word, memoized. Crossing the Lua boundary per swing would be the opposite of what the
+   * owner asked for on cost, and the answer cannot change within a session -- `CombatFeedbackText` is
+   * built once at load from the localized globals. A MISS is cached too, so a runtime that has not
+   * answered is not re-asked forever: `has` rather than a truthiness test is what makes that work.
+   */
+  private combatWordCached(key: string): string | null {
+    if (this.combatWords.has(key)) {
+      return this.combatWords.get(key) ?? null;
+    }
+    // Not cached while nothing can answer -- caching a null before the runtime exists would freeze every
+    // word off for the session, the trap `Nameplates#levelTint` records for the difficulty ramp.
+    if (this.combatWord === null) {
+      return null;
+    }
+    const word = this.combatWord(key);
+    this.combatWords.set(key, word);
+    return word;
+  }
   private skyDebug: SkyDebug;
   /**
    * Dense phase slot counter for unit models -- the same role `DoodadManager#nextPoseSlot` plays.
@@ -88,9 +185,141 @@ export default class World extends EventEmitter {
     // vertices are already world-space, so it wants the scene root rather than any placed subtree.
     this.scene.add(this.collisionDebug.object);
 
+    // THE GROUND SELECTION RING. Same reasoning as the collision overlay directly above: its vertices
+    // are world-space (it is a projected decal, `world/decal.ts`), so it belongs to the scene ROOT and
+    // not to any placed subtree, and it draws nothing at all until something is targeted.
+    this.selectionRing = new SelectionRing(this.scene);
+    // `window.worldRing()` -- the ring instrument: what the last projection emitted, plus the raw
+    // world-space vertices the gate measures against the terrain heightmap. See `SelectionRing#vertices`.
+    window['worldRing'] = () => ({
+      ...this.selectionRing.stats,
+      positions: this.selectionRing.vertices(),
+    });
+
+    // THE NAMEPLATES, in the scene ROOT for the same reason as the ring: they are placed in world space
+    // and belong to no subtree. `updateDynamicMatrices` walks every non-static scene child, so the plate
+    // subtree's world matrices are accumulated there -- which matters, because `scene.matrixWorldAutoUpdate
+    // = false` means nothing else would do it and a sprite draws from `matrixWorld`.
+    this.nameplates = new Nameplates(this.scene);
+    window['worldNameplates'] = () => this.nameplates.report();
+
+    // THE FLOATING COMBAT TEXT, in the scene ROOT for the plates' reason exactly.
+    this.combatText = new FloatingCombatText(this.scene);
+    window['combatText'] = () => this.combatText.report();
+
     this.game = game;
     this.session = game.session;
     this.player = this.session.player;
+
+    // ONE COMPLETED SWING -> ONE FLOATING NUMBER OR WORD.
+    //
+    // Subscribed here because `ObjectHandler` is built before `World` (`network/game/handler.js:52` then
+    // `:101`), so `combatHandler` exists. `attack:swing` had NO subscriber anywhere in this client until
+    // now -- it was emitted and dropped, and it dropped `hitInfo` and `victimState` with it; see
+    // `combat.ts#handleAttackerState`.
+    //
+    // **QUEUED, not spawned here.** The size law needs `camera.aspect` and the constant-screen-size factor
+    // needs `camera.fov`, and a packet arrives outside the frame. Draining in `animate` is also what keeps
+    // the spawn's anchor this frame's rather than one frame stale, which is the ring's and the plates'
+    // own ordering rule.
+    //
+    // **ONLY OUR OWN DAMAGE FLOATS**, which is the reference's emitter gate and not a simplification:
+    // `0x5efea0`'s ownership classes are "the active player itself, or a unit it owns", and every other
+    // source -- other players, their pets, wild units fighting each other -- is suppressed at the emitter
+    // (`combat_text/law.rs:122-129`). The PET leg is unreachable here (no pet feed) and is named in
+    // `floating-text.ts`. Damage taken BY the player is the other medium: `ui/unit-bridge.ts` turns the
+    // same event into `UNIT_COMBAT` and the client's own `CombatFeedback` draws it on the portrait.
+    this.game.objectHandler.combatHandler.on(
+      'attack:swing',
+      (
+        attacker: string, victim: string, damage: number, hitInfo: number,
+        victimState: number | null,
+      ) => {
+        if (this.player === null || attacker !== this.player.guid) {
+          return;
+        }
+        const unit = this.entities.get(victim);
+        if (unit === undefined) {
+          return;
+        }
+        const text = meleeText(hitInfo, victimState, damage);
+        if (text === null) {
+          return;
+        }
+        // A WORD needs the client's own table. With no runtime up there is no word, and nothing is
+        // substituted -- an invented "Dodge" would be exactly the plausible-and-wrong screen the rules
+        // forbid. A NUMBER needs nothing and always floats.
+        const body = text.number ?? this.combatWordCached(text.wordKey ?? '');
+        if (body === null || body === '') {
+          return;
+        }
+        // BOUNDED, and self-review is what found this: the queue drains in `animate`, so a tab that
+        // stops receiving `requestAnimationFrame` -- backgrounded, or between world sessions -- keeps
+        // taking packets and appends for ever. The bound is the pass's own `MAX_FLOATERS`, because
+        // anything past it would be dropped at the spawn anyway; dropping the OLDEST matches what the
+        // pass does with an overflow, so the two agree instead of one silently hoarding.
+        this.queueCombatText(unit, text.category, body);
+      },
+    );
+
+    // THE SPELL HALF OF THE SAME LAW -- the owner's "От способностей урон не показывается, только от
+    // автоатак". Nothing here is a new display: `spellText` is `combat-text.ts`' port of the reference's
+    // OTHER emitter (`law.rs:185-201`) and it feeds the same queue, the same categories and the same
+    // word table as the swing above. The reason a spell showed nothing was that no spell packet was
+    // decoded; see `network/game/object/combat-log.ts`.
+    //
+    // **GATE A AND THE SOURCE CLASS ARE THE MELEE ARM'S, unchanged**: only damage WE deal floats, and it
+    // floats over the VICTIM. Damage taken by the player is deliberately not floated here -- that is the
+    // portrait indicator's medium in the real client too, and `ui/unit-bridge.ts` is where it lands.
+    //
+    // **THE COLOUR IS THE ONE THING THAT DIFFERS FROM MELEE**, and it is the emitter's override rather
+    // than a category row: a player's spell damage is GOLD. That is what makes the owner's own reference
+    // crop -- a white number and a yellow number over the same unit at once -- reproducible: the white is
+    // a swing and the yellow is a spell.
+    const combatLog = this.game.objectHandler.combatLogHandler;
+    combatLog.on('spell:damage', (ev: SpellDamageEvent) => {
+      if (this.player === null || ev.caster !== this.player.guid) {
+        return;
+      }
+      const unit = this.entities.get(ev.target);
+      if (unit === undefined) {
+        return;
+      }
+      const text = spellText(ev.amount, ev.absorb, ev.resist, ev.crit);
+      if (text === null) {
+        return;
+      }
+      const body = text.number ?? this.combatWordCached(text.wordKey ?? '');
+      if (body === null || body === '') {
+        return;
+      }
+      // A WORD (Absorb / Resist) keeps the row's own white; only a NUMBER takes the gold override. That
+      // is the reference's split -- `damage_color` is consulted on the damage path and the word twin
+      // "keeps the row-default white" (`net/apply/combat_log.rs:519-521`).
+      this.queueCombatText(unit, text.category, body, text.number !== null ? COLOR_SPELL_GOLD : undefined);
+    });
+
+    // THE SPELL MISS LIST -- the owner's "не видно событий типа dodge" for anything but a swing. Same
+    // queue, same word table, and the words come out of the client's own `CombatFeedbackText` exactly as
+    // a dodged swing's do, so the two media cannot disagree.
+    combatLog.on('spell:miss', (ev: { target: string; caster: string; code: number }) => {
+      if (this.player === null || ev.caster !== this.player.guid) {
+        return;
+      }
+      const unit = this.entities.get(ev.target);
+      if (unit === undefined) {
+        return;
+      }
+      const text = spellMissText(ev.code);
+      if (text === null) {
+        return;
+      }
+      const body = this.combatWordCached(text.wordKey ?? '');
+      if (body === null || body === '') {
+        return;
+      }
+      this.queueCombatText(unit, text.category, body);
+    });
 
     // Initialize sky manager
     this.skyManager = new SkyManager(this.scene);
@@ -286,7 +515,38 @@ export default class World extends EventEmitter {
     const existing = this.entities.get(entity.guid);
     if (existing && existing !== entity) {
       console.warn(`world: guid ${entity.guid} already had a unit; removing the earlier one`);
+      // CARRY THE DECODED FIELDS ACROSS BEFORE DROPPING IT, or the eviction throws away the only copy
+      // of our own character's descriptor block.
+      //
+      // MEASURED: `world.player` had `fields` = {} (level, health, maxHealth, race, classId, gender
+      // and powerType all undefined) after 30 s in a 42-entity world, while a peer `Unit` in the same
+      // registry carried the complete set. So the decode was fine and the DESTINATION was wrong --
+      // `UnitLevel("player")` read 0, the player frame drew empty bars, and `UnitRace`/`UnitClass`
+      // answered nil because the ids never reached the object the bridge snapshots.
+      //
+      // The race is the one the comment above already describes: `applyUpdates` files a plain `Unit`
+      // for our own guid when the server's create block beats `run()`, `applyUnitFields` decodes into
+      // it, and then `run()` calls `add(this.player)` -- which evicted that unit and put an EMPTY
+      // `Player` in its place. Nothing announced it because the eviction was the intended behaviour;
+      // only the data loss was not.
+      //
+      // Existing values do NOT overwrite anything the incoming entity already knows: the incoming one
+      // is the more recent object, and a field it has set is a field something has already told it
+      // about. `objectType` comes across too -- a values-only update decodes its mask against it, so
+      // a `Player` that reverted to the default 3 would read every later field at the wrong offset.
+      for (const [key, value] of Object.entries(existing.fields)) {
+        if (value !== undefined
+          && (entity.fields as Record<string, unknown>)[key] === undefined) {
+          (entity.fields as Record<string, unknown>)[key] = value;
+        }
+      }
+      if (existing.objectType !== undefined) {
+        entity.objectType = existing.objectType;
+      }
       this.remove(existing);
+      // The bridges snapshot on this, so the frames that were drawn against an empty bag repaint.
+      // Fired AFTER `remove`, so a listener walking the registry cannot see both copies.
+      this.emit('unit:fields', entity);
     }
     this.entities.set(entity.guid, entity);
     if (entity.view) {
@@ -353,6 +613,36 @@ export default class World extends EventEmitter {
    */
   reactionFor(unit: Unit): number | null {
     return reactionFor(unit, this.player);
+  }
+
+  /**
+   * What the ground selection ring needs about the current target, or null when nothing is selected.
+   *
+   * The RADIUS is `M2#ringFootprint x the scale the body is actually DRAWN at`. `model.scale.x` rather
+   * than a second call to `Unit#renderScale`: the scale field is the value `applyRenderScale` wrote and
+   * `updateMatrix` baked, so reading it cannot disagree with the size on screen -- and it already folds
+   * in the wire-value-vs-DBC decision that method documents. A unit whose model has not arrived reports
+   * null and the ring takes its own fallback radius, which is the reference's model-less path.
+   *
+   * REACTION collapses to NEUTRAL while `FactionTemplate.dbc` is in flight, which is the reference's own
+   * fall-through (`ring.rs:598`, `resolved.unwrap_or(Reaction::Neutral)`) and the same collapse
+   * `unit-bridge.ts` already applies to the target frame's palette. The ring is yellow for a beat rather
+   * than absent.
+   */
+  private ringTarget() {
+    const unit = this.target;
+    if (unit === null) {
+      return null;
+    }
+    const model = unit.model;
+    const footprint = model ? model.ringFootprint : 0;
+    return {
+      position: unit.position,
+      reaction: this.reactionFor(unit) ?? REACTION_NEUTRAL,
+      isPlayer: unit.isPlayer,
+      dead: unit.dead,
+      worldRadius: footprint > 0 ? footprint * (model.scale.x || 1) : null,
+    };
   }
 
   setTarget(unit: Unit | null) {
@@ -561,11 +851,13 @@ export default class World extends EventEmitter {
 
     // THE BREAKDOWN. `world.animate` was a single span holding everything below it, and Task 9's
     // movement round recorded that the number could not be reasoned about until its parts were
-    // separated (five samples of one unchanged build spanned 7.3-15.5 ms). These five sub-spans are
+    // separated (five samples of one unchanged build spanned 7.3-15.5 ms). These sub-spans are
     // that separation, and they are deliberately EXHAUSTIVE of `animate` -- every statement below
-    // sits inside exactly one of them, so `w.entities + w.vis + w.map + w.sky + w.debug +
+    // sits inside exactly one of them, so `w.entities + w.ring + w.vis + w.map + w.sky + w.debug +
     // w.matrices` reconstructs `world.animate` to within the timestamp overhead. If a statement is
-    // ever added outside all six, the sum stops matching the total and that is the intended tell.
+    // ever added outside all SEVEN, the sum stops matching the total and that is the intended tell.
+    // (`w.ring` is the newest, added with the ground selection ring; the sum rule is why it got its own
+    // span instead of hiding inside `w.entities`.)
     //
     // `w.vis` is separate from `w.map` on purpose: it is the only one gated on `cameraMoved`, so it
     // reads ~0 on a still frame and its true cost is invisible in any average that mixes the two.
@@ -573,6 +865,53 @@ export default class World extends EventEmitter {
     beginSection('w.entities');
     this.animateEntities(delta, camera, cameraMoved);
     endSection('w.entities');
+
+    // AFTER the entity pass, so the target's `position` is this frame's and the ring cannot lag a
+    // walking mob by a frame. Its own span, because a projected decal is not free and an unnamed cost
+    // inside `w.entities` would be invisible -- the same argument the five spans below were separated
+    // for. Note the six-span exhaustiveness note above: this is a SEVENTH, deliberately named.
+    beginSection('w.ring');
+    this.selectionRing.update(this.ringTarget(), camera);
+    endSection('w.ring');
+
+    // THE NAMEPLATES, an EIGHTH named span. See the exhaustiveness note above: a statement outside all
+    // of them breaks the sum rule, and that is the tell it exists for. After the entity pass for the
+    // ring's reason (the plate must not lag a walking mob by a frame) and before `w.matrices`, which is
+    // what accumulates the plate subtree's world transforms.
+    beginSection('w.plates');
+    this.nameplates.update(
+      this.entities.values(),
+      this.player,
+      this.target,
+      camera,
+      this.nameplateConfig?.() ?? { showEnemies: false, showFriends: false, levelColor: null },
+      // Offline has no protocol at all, and `session.offline` short-circuits ahead of the `protocol`
+      // getter for the reason `world-ui.ts` states: reaching `game.objectHandler` there constructs
+      // transports the offline route contracts never to touch. So an offline plate carries no name,
+      // which is honest -- there is no server to have sent one.
+      this.session.offline
+        ? null
+        : (entry, guid) => this.game.objectHandler.combatHandler.queryCreature(entry, guid),
+    );
+    endSection('w.plates');
+
+    // THE FLOATING COMBAT TEXT, a NINTH named span -- see the exhaustiveness note above; a statement
+    // outside all of them breaks the sum rule, which is the tell it exists for. After the plates so a
+    // spawn's anchor is this frame's, and before `w.matrices`, which accumulates the sprite subtree's
+    // world transforms.
+    beginSection('w.ctext');
+    // The scale that makes one logical (768-space) unit one logical unit on screen at any depth, the same
+    // derivation `Nameplates#update` documents: with `sizeAttenuation` off three multiplies a sprite's
+    // scale by the view depth.
+    const textUnitScale = (2 * Math.tan((camera.fov * Math.PI) / 360)) / 768;
+    for (const spawn of this.pendingCombatText) {
+      this.combatText.spawn(spawn, camera.aspect, textUnitScale);
+    }
+    this.pendingCombatText.length = 0;
+    // `gone` is asked rather than assumed: a floater outlives its victim by up to 1.5 s, and a unit that
+    // died or streamed out is no longer in `entities` -- reading `position` off it would drift or snap.
+    this.combatText.update(delta, (unit) => this.entities.get(unit.guid) !== unit);
+    endSection('w.ctext');
 
     if (this.map !== null) {
       if (cameraMoved) {
@@ -804,6 +1143,12 @@ export default class World extends EventEmitter {
     const worldClockMs = worldClock.ms;
     const frameIndex = worldClock.frameIndex;
     const camPos = camera.position;
+    // THE COMBAT-FACING CONTROL ARM, read ONCE for the frame. `window.worldCombatFacing = false` gives
+    // a mob back the heading its last packet left, which is the "before" the rule is measured against --
+    // a fight is not reproducible across two builds, so this is the only honest A/B. Hoisted out of the
+    // entity loop: inside it, the short-circuit put a `window` property read in front of every unit
+    // every frame (~4800 a second in a busy zone) for a value that cannot change mid-frame.
+    const combatFacing = (window as unknown as Record<string, unknown>).worldCombatFacing !== false;
 
     // One of the three call sites of the `'anim'` CPU span -- the others are `DoodadManager#animate`
     // and `WMOManager#animate`. `CpuSections` SUMS spans of the same name within a frame, so the
@@ -829,6 +1174,28 @@ export default class World extends EventEmitter {
       // classified, which is seconds after the first movement packet arrives; the earlier report
       // named the same hazard for any unit with a static model. A body's position must not depend on
       // whether its skeleton has keyframes.
+      // WHO THIS UNIT IS FIGHTING, as a point, before it integrates. A `Unit` cannot resolve a guid --
+      // it holds no registry -- so the world hands it the position and the unit owns the turn
+      // (`Unit#combatFacingPoint`, and the owner's own rule quoted there). `entities` carries the local
+      // player too (`run` files him at :156), so a mob fighting US resolves through the same lookup.
+      //
+      // CREATURES ONLY (`objectType` 3), and that scope is deliberate. The owner's rule is about a MOB;
+      // a PEER PLAYER reports his own facing on the wire (`MSG_MOVE_SET_FACING` while he turns, which
+      // `remoteMotion.orientation` carries), and turning him toward his victim would override what his
+      // own client is showing. A creature has no such authority to override -- measured, its
+      // `remoteMotion` is null, because it moves by splines.
+      //
+      // One `Map.get` per CREATURE actually in combat and nothing at all for the rest, which is every
+      // unit in a quiet zone.
+      entity.combatFacingPoint = null;
+      if (combatFacing && entity.objectType === OBJECT_TYPE_CREATURE
+        && entity.inCombat && entity.combatTarget !== null) {
+        const foe = this.entities.get(entity.combatTarget);
+        if (foe !== undefined && foe !== entity) {
+          entity.combatFacingPoint = foe.view.position;
+        }
+      }
+
       entity.update(delta, camPos);
 
       // Same two-part test `DoodadManager#loadDoodad` documents: `model.animated` is the POSING

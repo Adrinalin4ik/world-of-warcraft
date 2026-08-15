@@ -129,6 +129,34 @@ export function installStubApi(vm: LuaVM): void {
    */
   vm.registerFunction('IsMacClient', () => [false]);
 
+  /**
+   * `UpdateMicroButtons`' three missing globals, found by opening the SPELLBOOK: `SpellBookFrame_OnShow`
+   * calls `UpdateMicroButtons()` (`spellbookframe.lua:86`), and it raised at
+   * `mainmenubarmicrobuttons.lua:103` on a nil `HasCompletedAnyAchievement`. Measured live.
+   *
+   * The raise came AFTER `SpellBookFrame_Update(1)` on the same handler, so it never cost the book its
+   * contents -- what it cost was every micro button's pushed/normal state and the open sound, for the whole
+   * tail of the function. That is the shape of this whole area: one nil global silently truncating a
+   * handler.
+   *
+   * All three answer "the feature is absent", which is the true answer rather than a convenience:
+   *
+   *  - **Achievements.** `SMSG_ALL_ACHIEVEMENT_DATA` is not decoded and `AchievementFrame` is a missing
+   *    frame TYPE, so there is no achievement UI to open and no data to open it on. `false` from both
+   *    disables `AchievementMicroButton` (`:103-108`), which is exactly right -- clicking it would reach a
+   *    frame that does not exist. A `true` here would enable a button that cannot work.
+   *
+   * **`IsBagOpen` IS NO LONGER HERE, and it was wrong twice.** Its comment read "no container frame
+   * exists in this client (there is no bag/inventory feed at all)", which stopped being true when
+   * `ui/container-bridge.ts` landed. And it was DEAD even before that: `IsBagOpen` is not an engine
+   * global at all -- `containerframe.lua:212-220` DEFINES it, walking the thirteen `ContainerFrame`s for
+   * a shown one with the matching id, and the manifest runs after this install, so the client's own
+   * definition has always shadowed this stub. Registering it here could only ever have masked a real
+   * one; it is deleted rather than corrected.
+   */
+  vm.registerFunction('HasCompletedAnyAchievement', () => [false]);
+  vm.registerFunction('CanShowAchievementUI', () => [false]);
+
   // `SetCharSelectBackground` and `SetCharCustomizeBackground` were here as no-ops and are now real,
   // in `api/characters.ts` -- they are the two calls `SetBackgroundModel` (glueparent.lua:374-386)
   // bottoms out in, so stubbing them was what pinned character select to the login screen's stage.

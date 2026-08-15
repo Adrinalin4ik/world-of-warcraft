@@ -81,7 +81,52 @@ const COL = {
   id: 0,
   /** `Category` -- the shared-cooldown group `CategoryRecoveryTime` applies across. */
   category: 1,
+  /**
+   * `Attributes` -- the first attribute word. Bit `0x40` is `SPELL_ATTR0_PASSIVE`, which is what
+   * `IsPassiveSpell` answers and what makes a spellbook entry draw a black button border and a grey
+   * name instead of a clickable icon (`spellbookframe.lua:496-506`).
+   *
+   * MEASURED on the served file, and it discriminates cleanly on ten samples -- four known passives read
+   * the bit and six known actives do not:
+   *
+   *      674 Dual Wield        attrs 0x00000050  passive 1   (NameSubtext "Passive")
+   *      750 Plate Mail        attrs 0x000000c0  passive 1
+   *     8737 Mail              attrs 0x000000c0  passive 1
+   *    20579 Shadow Resistance attrs 0x00000050  passive 1   (NameSubtext "Racial Passive")
+   *      331 Healing Wave      attrs 0x00010000  passive 0
+   *      403 Lightning Bolt    attrs 0x00010000  passive 0
+   *       78 Heroic Strike     attrs 0x00050014  passive 0
+   *    20594 Stoneform         attrs 0x00040100  passive 0   (NameSubtext "Racial", and NOT passive)
+   *
+   * The last pair is the useful one: "Racial" and "Racial Passive" differ in the subtext by one word, so
+   * a reader that guessed passiveness from the NAME would get Stoneform wrong. The attribute bit does not.
+   *
+   * **Bit `0x80` in the same word is the DO-NOT-DISPLAY flag**, and it is the whole of the spellbook's
+   * filter. See `SpellRow#hiddenInSpellbook` for the measurement.
+   *
+   * The 8-word layout is confirmed two ways rather than assumed: `wow-data-parser/dbc/entities/spell.js:12`
+   * declares `attributes: new r.Array(r.uint32le, 8)` right after `id, categoryID, dispelID, mechanicID`,
+   * so columns **4-11** are `Attributes` + `AttributesEx1..Ex7` and column 12 is `stances` -- and the served
+   * file agrees, column 12's maximum being `0xf807e0ff`, a shapeshift-form mask and not an attribute word.
+   */
+  attributes: 4,
   castingTimeIndex: 28,
+  /**
+   * `SpellLevel` -- the character level this rank of the spell is learned at.
+   *
+   * Read for ONE purpose: deciding which member of a rank family is the HIGHEST rank, which the
+   * spellbook needs because `ShowAllSpellRanks` is off by default and the book then lists only the top
+   * rank of each spell. It ascends monotonically with rank, measured across two families:
+   *
+   *     Lightning Bolt  403 r1 lvl 1,  529 r2 lvl 8,  548 r3 lvl 14,  915 r4 lvl 20,  943 r5 lvl 26
+   *     Healing Wave    331 r1 lvl 1,  332 r2 lvl 6,  547 r3 lvl 12
+   *
+   * **`SkillLineAbility`'s `forward_spellid` (its column 8) is NOT the rank chain in 3.3.5a, and that was
+   * measured rather than assumed** -- it reads **0** for all eight of the spells above, and its 1059
+   * non-zero rows cluster on skill lines 134 Feral Combat, 253 Assassination and 256 Fury, which is
+   * talent forwarding and not ranks. So the obvious column does not work and this one is what does.
+   */
+  spellLevel: 39,
   /** `RecoveryTime` (ms): this spell's OWN cooldown. */
   recoveryTime: 29,
   /** `CategoryRecoveryTime` (ms): the cooldown put on every spell sharing `category`. */
@@ -102,12 +147,157 @@ const COL = {
   activeIconID: 134,
   /** First locale slot of the `Name` block; 3.3.5a localised strings are 16 locales + a flags word. */
   name: 136,
+  /**
+   * `NameSubtext` -- THE RANK STRING, and `GetSpellName`'s second return (`subSpellName`).
+   *
+   * Derived from the block chain and then read back off the served file. The chain closes exactly, which
+   * is the corroboration: `Name` at 136 + 17 = **153** `NameSubtext`, + 17 = 170 `Description`,
+   * + 17 = 187 `AuraDescription`, + 17 = **204**, which is `manaCostPercentage` -- a column that was
+   * already established independently two rounds ago. Four localised blocks of 17 land exactly on a known
+   * column, so no index in the run can be off by one.
+   *
+   * Read back, it is what the spellbook draws under a spell's name: "Rank 1", "Rank 2", "Rank 3" for the
+   * Lightning Bolt family, "Passive" for 674 Dual Wield, "Racial Passive" for 20579 Shadow Resistance,
+   * "Racial" for 20594 Stoneform, and the EMPTY string for 750 Plate Mail and 8737 Mail.
+   *
+   * The empty case is load-bearing: `SpellButton_UpdateButton` compares `subSpellName ~= ""` to decide
+   * where to anchor the name label (`spellbookframe.lua:510-514`), so this must reach Lua as `""` and
+   * never as nil -- a nil there makes the comparison true and shifts the label by two units for every
+   * rankless spell.
+   */
+  nameSubtext: 153,
+  /**
+   * `Description` -- the spell's tooltip body, and the third block in the chain `nameSubtext` documents:
+   * `Name` 136 + 17 = 153 `NameSubtext` + 17 = **170** `Description` + 17 = 187 `AuraDescription` + 17 =
+   * 204 `manaCostPercentage`, a column established independently. No index in that run can be off by one.
+   *
+   * Read for the tooltip, which had nothing to say (`GameTooltip:SetSpell`/`SetAction`).
+   *
+   * **The `$`-VARIABLES ARE NOT EXPANDED and that is a stated gap.** A 3.3.5a description carries the
+   * engine's own substitution tokens -- `$s1` for effect 1's value, `$d` for the duration, `$/1000;s2`
+   * for a scaled one -- which the real client resolves from `Spell.dbc`'s effect columns, the caster's
+   * level and his spell power. None of those columns is read here, so the raw string reaches the tooltip
+   * with its tokens visible. That is deliberately not hidden behind a regex that strips them: a stripped
+   * token reads as a finished sentence with a number missing, which is the silent-wrong-answer shape this
+   * project's rules forbid, while a visible `$s1` says exactly what has not been computed.
+   */
+  description: 170,
+
+  // -- THE EFFECT BLOCK and its neighbours: everything a `$` token in a description resolves through.
+  //
+  // WHERE THESE INDICES COME FROM. Not one of them is guessed and none is new evidence: they are read
+  // straight off `wow-data-parser/dbc/entities/spell.js`, whose declared widths, summed in order, come
+  // to exactly the file's **234** columns -- and five of the columns in that sum are already
+  // established INDEPENDENTLY against the served bytes (133 `iconID`, 136 `Name`, 153 `NameSubtext`,
+  // 170 `Description`, 204 `manaCostPercentage`, 205/206 the GCD pair; see the comments above). A run
+  // that lands on five known columns cannot be off by one anywhere between them, and the effect block
+  // at 71..121 sits inside that run.
+  //
+  // Each is the FIRST of three per-effect words; effect n (1-based) is `COL.x + n - 1`.
+  /** `EffectDieSides[0..2]`. With `effectBasePoints`, this is the min/max pair -- see `effectMin`. */
+  effectDieSides: 74,
+  /** `EffectRealPointsPerLevel[0..2]`, a FLOAT. The per-level growth term; 0 for most player spells. */
+  effectRealPointsPerLevel: 77,
+  /** `EffectBasePoints[0..2]`, SIGNED. Stores value-1: the minimum is `basePoints + 1`. See `effectMin`. */
+  effectBasePoints: 80,
+  /** `EffectRadiusIndex[0..2]` -> `SpellRadius.dbc`. `$a<n>`. */
+  effectRadiusIndex: 92,
+  /** `EffectAmplitude[0..2]`, MILLISECONDS between ticks of a periodic effect. `$t<n>`. */
+  effectAmplitude: 98,
+  /** `EffectChainTarget[0..2]`. `$x<n>`. */
+  effectChainTargets: 104,
+  /** `EffectPointsPerComboPoint[0..2]`, a FLOAT. `$b<n>` -- Eviscerate's 5.0 per combo point. */
+  effectPointsPerComboPoint: 119,
+  /** `DurationIndex` -> `SpellDuration.dbc`. `$d`. */
+  durationIndex: 40,
+  /** `ProcChance`. `$h`. */
+  procChance: 35,
+  /** `StackAmount`. `$n`. */
+  stackAmount: 49,
+  /** `MaxAffectedTargets`. `$u`. */
+  maxAffectedTargets: 212,
+  /** `BaseLevel` and `MaxLevel`, the clamp either side of the per-level term. See `effectMin`. */
+  baseLevel: 38,
+  maxLevel: 37,
+  /** `SchoolMask` -- which of the seven schools `$SP` should read. */
+  schoolMask: 225,
+  /**
+   * `SpellDescriptionVariableID` -> `SpellDescriptionVariables.dbc`, where `$<mult>` and `$<percent>`
+   * actually live. The LAST-but-one column, and the one that closes the 234 (see the file's tail
+   * comment in `entities/spell.js`).
+   */
+  descriptionVariablesID: 232,
 } as const;
 
 /** The head of a `Spell.dbc` row -- only what a button, a cast and a tooltip line need. */
 export interface SpellRow {
   id: number;
   name: string;
+  /**
+   * `NameSubtext` -- the rank label ("Rank 3", "Passive", or `''`). Never null; see `COL.nameSubtext`
+   * for why the empty string rather than nil is the load-bearing case.
+   */
+  subName: string;
+  /**
+   * `Description` (column 170) -- the tooltip body, with the engine's `$` tokens UNEXPANDED. `''` for a
+   * spell with none. See `COL.description`.
+   */
+  description: string;
+  /** True when `Attributes` carries `SPELL_ATTR0_PASSIVE` (0x40) -- what `IsPassiveSpell` answers. */
+  passive: boolean;
+  /**
+   * `Attributes` (column 4) bit **`0x80`** -- DO NOT DISPLAY. True for a spell the real client keeps OUT
+   * of the spellbook, and this is the one filter that decides it.
+   *
+   * MEASURED across the whole served file (49,839 records, `fieldCount` 234, `recordSize` 936, byte
+   * address `20 + record*936 + 16`); the bit is set on 10,243 spells, 20.6%. What the owner saw listed:
+   *
+   *     21184 Rogue Passive (DND)   0x000500d0   HIDE
+   *       203 Unarmed               0x000000c0   HIDE
+   *       204 Defense               0x000000c0   HIDE
+   *      2567 Thrown                0x000000c0   HIDE
+   *       202 Two-Handed Swords     0x000000c0   HIDE
+   *       750 Plate Mail            0x000000c0   HIDE
+   *       331 Healing Wave          0x00010000   show
+   *       403 Lightning Bolt        0x00010000   show
+   *       674 Dual Wield            0x00000050   show
+   *      2764 Throw                 0x00410012   show
+   *      3018 Shoot                 0x00400012   show
+   *      6603 Auto Attack           0x00000010   show
+   *
+   * **It is NOT the `(DND)` NAME, and the name would have been wrong twice.** There is no spell called
+   * `RoguePassive`: a raw scan of the 2.3 MB string block for that byte sequence returns ZERO hits, and the
+   * spell is 21184 `"Rogue Passive (DND)"`, with a space. And of the 170 spells whose name ends in `(DND)`
+   * only 97 carry the bit -- the other 73 have no `SkillLineAbility` row at all, so they are not learnable
+   * and never reach a spellbook to be filtered.
+   *
+   * **It is NOT a `SkillLine` category either, and that hypothesis was tested and refuted.** The WEAPON
+   * category is `SkillLine.dbc` col 1 == **6** (18 lines: Swords, Axes, Bows, ... 162 Unarmed, 176 Thrown,
+   * ...), and `Unarmed` and `Throw` do both live there. But excluding category 6 would delete four things
+   * the real client SHOWS: 674 `Dual Wield` is on category-6 line 118, and Dodge/Block/Parry are on
+   * category-6 line 95. Measured over all 10,219 `SkillLineAbility` rows, 24 of the 32 category-6 spells
+   * carry `0x80` and the 8 that do not are exactly Dodge, Block, Parry, Spirit Weapons, Dual Wield, Throw
+   * and the two `Shoot` variants -- i.e. the bit separates them and the category cannot. (The
+   * category-6 and category-7 spell sets are also DISJOINT, intersection 0, so nothing was leaking into
+   * the class tabs by a bad join.)
+   *
+   * **`SkillLineAbility` carries no display flag**, also measured: 14 columns, of which `excludeRaces`(5),
+   * `excludeClasses`(6) and both `characterPoints`(12,13) are entirely zero across all 10,219 rows, and
+   * `AcquireMethod`(9) takes values 0/1/2 each of which contains both shown and hidden spells (Fireball
+   * and Unarmed share `acq=2`).
+   *
+   * **It eats no real spell.** Of the 5,881 spells reachable through a category-7 class line, 2,257 carry
+   * the bit and 2,215 of those are ALSO passive (0x40) -- talent ranks, which live in the talent frame and
+   * never in the book. The remaining 42 are internal effect spells (`Vanished`, `Curse of Doom Effect`,
+   * the `Metamorphosis` internals). No castable spellbook entry is in the set.
+   *
+   * One thing NOT sourced: the constant's NAME. 3.3.5a cores call this bit
+   * `SPELL_ATTR0_DO_NOT_DISPLAY`/`SPELL_ATTR0_HIDDEN_CLIENTSIDE`, and that name is external knowledge --
+   * the served file proves the DISCRIMINATION, which is all the filter needs.
+   */
+  hiddenInSpellbook: boolean;
+  /** `SpellLevel`: which rank of a family this is. See `COL.spellLevel`. */
+  spellLevel: number;
   iconID: number;
   /** `SpellVisual.dbc` id, or 0 for a spell with no visual (spell 6603 Auto Attack is one). */
   visualID: number;
@@ -129,6 +319,96 @@ export interface SpellRow {
   rangeIndex: number;
   /** Percent of BASE mana, used where `manaCost` is 0. See `spellCost` for why both are needed. */
   manaCostPercentage: number;
+
+  /**
+   * The three effects' columns, index 0 = effect 1. See `COL.effectDieSides` for where they come from
+   * and `effectRange` for the min/max identity they define.
+   */
+  effectBasePoints: number[];
+  effectDieSides: number[];
+  effectRealPointsPerLevel: number[];
+  effectPointsPerComboPoint: number[];
+  effectRadiusIndex: number[];
+  effectAmplitudeMs: number[];
+  effectChainTargets: number[];
+
+  /** `DurationIndex` (`$d`), `ProcChance` (`$h`), `StackAmount` (`$n`), `MaxAffectedTargets` (`$u`). */
+  durationIndex: number;
+  procChance: number;
+  stackAmount: number;
+  maxAffectedTargets: number;
+
+  /** The clamp either side of the per-level term. See `effectRange`. */
+  baseLevel: number;
+  maxLevel: number;
+
+  /** `SchoolMask` -- which school's `GetSpellBonusDamage` `$SP` reads. */
+  schoolMask: number;
+
+  /** `SpellDescriptionVariableID`: 0, or a row of `SpellDescriptionVariables.dbc`. */
+  descriptionVariablesID: number;
+}
+
+/**
+ * The min and max an effect can roll, at a given caster level -- the identity every numeric token in a
+ * description is built out of.
+ *
+ * ## The identity, and how it was checked
+ *
+ * `min = EffectBasePoints + 1` and `max = EffectBasePoints + EffectDieSides`. The column stores
+ * value-1, which is why the `+1`. Verified against two spells whose real 3.3.5a tooltips the owner
+ * himself photographed, both chosen because their `EffectRealPointsPerLevel` is **0**, so the level
+ * term below cannot be hiding an error:
+ *
+ *     1752 Sinister Strike r1  effect 1 basePoints 2, dieSides 1  -> min 3, max 3
+ *          description "An instant strike that causes $m1 damage ... Awards $s2 combo $lpoint:points;."
+ *          effect 2 basePoints 0, dieSides 1 -> $s2 = 1, i.e. "3 damage ... Awards 1 combo point."
+ *     2098 Eviscerate r1       effect 1 basePoints 0, dieSides 5, pointsPerComboPoint 5.0
+ *          description "1 point: ${$m1+(($b1*1)+$AP*0.03)*$<mult>}-${$M1+(($b1*1)+$AP*0.07)*$<mult>}"
+ *          -> m1 = 1, M1 = 5, b1 = 5, and with mult 1 and AP 0 that is **6-10 damage**, which is
+ *          Eviscerate rank 1 at one combo point.
+ *
+ * Both fall out of the same two columns with no free parameter, which is the whole of the check: a
+ * different reading (`basePoints` alone, or `basePoints + dieSides` as the single value) gets one of
+ * the two wrong.
+ *
+ * ## The level term, and it is the part that is NOT verified here
+ *
+ * `level` is clamped into `[BaseLevel, MaxLevel]` (`MaxLevel = 0` meaning no cap), `SpellLevel` is
+ * subtracted, and `RealPointsPerLevel` multiplies the remainder, truncated. That shape is
+ * **TrinityCore 3.3.5's `SpellInfo::Effect::CalcValue`** -- a SERVER source, not a file in this repo
+ * and not the client's own -- and nothing served here corroborates the choice of `SpellLevel` over
+ * `BaseLevel` as the subtrahend, or truncation over rounding. It is labelled rather than hidden.
+ *
+ * What limits the damage: `RealPointsPerLevel` is 0 for the great majority of player abilities,
+ * including BOTH spells above and every rogue ability in the owner's examples, so the term vanishes
+ * and the identity that IS verified is what renders. Where it is non-zero (Fireball r1 carries 0.6
+ * with `MaxLevel` 5) the number can be off by the truncation and the wrong-subtrahend risk, and that
+ * is a known, stated limit rather than a silent one.
+ */
+export function effectRange(
+  row: SpellRow,
+  effectIndex: number,
+  casterLevel: number,
+): { min: number; max: number } {
+  const basePoints = row.effectBasePoints[effectIndex] ?? 0;
+  const dieSides = row.effectDieSides[effectIndex] ?? 0;
+  const perLevel = row.effectRealPointsPerLevel[effectIndex] ?? 0;
+
+  let level = casterLevel;
+  if (row.maxLevel > 0 && level > row.maxLevel) {
+    level = row.maxLevel;
+  }
+  if (level < row.baseLevel) {
+    level = row.baseLevel;
+  }
+  const growth = Math.trunc((level - row.spellLevel) * perLevel);
+
+  // `dieSides` 0 means the effect has no roll at all: min and max are both `basePoints + 1`, which is
+  // what the stored value-1 encoding makes the single value. Folding 0 to 1 here rather than
+  // special-casing keeps one expression for all three cases (0, 1, n).
+  const sides = dieSides > 0 ? dieSides : 1;
+  return { min: basePoints + growth + 1, max: basePoints + growth + sides };
 }
 
 class SpellData {
@@ -153,6 +433,36 @@ class SpellData {
 
   /** `SpellRange.dbc` id -> `maxRangeHostile`, in YARDS. What `IsActionInRange` is judged against. */
   private ranges: Map<number, number> | null = null;
+
+  /** `SpellDuration.dbc` id -> `baseDuration` in MILLISECONDS. `$d`'s source. */
+  private durations: Map<number, number> | null = null;
+
+  /** `SpellRadius.dbc` id -> `radius` in YARDS. `$a<n>`'s source. */
+  private radii: Map<number, number> | null = null;
+
+  /**
+   * `SpellDescriptionVariables.dbc` id -> its raw `Variables` string. **THIS IS WHERE `$<mult>` AND
+   * `$<percent>` LIVE**, and neither is a constant to hard-code.
+   *
+   * The file is 2,787 bytes: **30 records, 2 fields, recordSize 8**, column 1 a `StringRef`
+   * (`wow-data-parser/dbc/entities/spell-description-variables.js`), selected by `Spell.dbc` column
+   * 232. Read off the served file, the two rows the owner's own examples select are:
+   *
+   *     id 169 (2098 Eviscerate)
+   *       $mult1=$?s14162[${1.07}][${1.0}]
+   *       $mult2=$?s14163[${1.14}][${$<mult1>}]
+   *       $mult=$?s14164[${1.2}][${$<mult2>}]
+   *     id 171 (1752 Sinister Strike)
+   *       $aggression1=$?s18427[${103}][${100}]
+   *       ... four more ...
+   *       $percent=$?s61331[${115}][${$<aggression4>}]
+   *
+   * So both named variables are TALENT LADDERS: each line asks whether the player knows a talent spell
+   * and falls back to the previous rung. With no talents, `$<mult>` is **1.0** and `$<percent>` is
+   * **100** -- values that are computed from the served table and the player's own known-spell set, not
+   * chosen. `spell-description.ts` evaluates them; see `$?s` there for the predicate.
+   */
+  private descVarRows: Map<number, string> | null = null;
 
   private pending: Promise<void> | null = null;
 
@@ -184,13 +494,49 @@ class SpellData {
     // must not wait on 49 MB because it decides which slots the buttons address, whereas a range check is
     // useless without `Spell.dbc`'s own `rangeIndex` anyway. It is 6 KB behind a fetch that is already
     // happening.
-    const [spells, icons, visuals, kits, ranges] = await Promise.all([
+    // `SpellDuration` (2.1 KB), `SpellRadius` (0.9 KB) and `SpellDescriptionVariables` (2.8 KB) ride
+    // along for the same reason `SpellRange` does: together they are under 6 KB behind a 49 MB fetch
+    // that is already in flight, and none of them is useful without `Spell.dbc`'s own index columns.
+    const [spells, icons, visuals, kits, ranges, durations, radii, descVars] = await Promise.all([
       this.loadSpells(),
       DBC.load('SpellIcon'),
       DBC.load('SpellVisual'),
       DBC.load('SpellVisualKit'),
       DBC.load('SpellRange'),
+      DBC.load('SpellDuration'),
+      DBC.load('SpellRadius'),
+      DBC.load('SpellDescriptionVariables'),
     ]);
+
+    this.durations = new Map<number, number>();
+    for (const record of (durations as any).records ?? []) {
+      // `baseDuration` is MILLISECONDS and is SIGNED -- **-1 means "no natural end"** (row 21 of the
+      // served file), which `spell-description.ts#formatDuration` renders through the client's own
+      // `SPELL_DURATION_UNTIL_CANCELLED`. `entities/spell-duration.js` carries the measurement and why
+      // reading it unsigned printed "4294967.295 sec".
+      //
+      // `perLevel`/`maxDuration` are not read: the client's `$d` prints the base duration, and applying
+      // a per-level term would be a guess at a formula nothing served states. Where the two differ the
+      // printed number is the base one, and that is a stated limit -- 13 of the 130 rows have a base
+      // above their own max.
+      if (record && typeof record.baseDuration === 'number') {
+        this.durations.set(record.id, record.baseDuration);
+      }
+    }
+
+    this.radii = new Map<number, number>();
+    for (const record of (radii as any).records ?? []) {
+      if (record && typeof record.radius === 'number') {
+        this.radii.set(record.id, record.radius);
+      }
+    }
+
+    this.descVarRows = new Map<number, string>();
+    for (const record of (descVars as any).records ?? []) {
+      if (record && typeof record.variables === 'string' && record.variables !== '') {
+        this.descVarRows.set(record.id, record.variables);
+      }
+    }
 
     this.ranges = new Map<number, number>();
     for (const record of (ranges as any).records ?? []) {
@@ -302,6 +648,11 @@ class SpellData {
     for (let i = 0; i < recordCount; i += 1) {
       const at = HEADER + i * recordSize;
       const col = (index: number) => view.getUint32(at + index * 4, true);
+      // `EffectBasePoints` is SIGNED (a heal's cost effect and every debuff store negatives) and both
+      // per-level columns are IEEE FLOATS -- reading either as a uint gives 1065353216 for 1.0.
+      const int = (index: number) => view.getInt32(at + index * 4, true);
+      const flt = (index: number) => view.getFloat32(at + index * 4, true);
+      const three = (base: number, read: (i: number) => number) => [read(base), read(base + 1), read(base + 2)];
       const id = col(COL.id);
       if (id === 0) {
         continue;
@@ -309,6 +660,14 @@ class SpellData {
       rows.set(id, {
         id,
         name: readString(col(COL.name)),
+        subName: readString(col(COL.nameSubtext)),
+        description: readString(col(COL.description)),
+        // `SPELL_ATTR0_PASSIVE`. See `COL.attributes` for the ten-sample measurement.
+        passive: (col(COL.attributes) & 0x40) !== 0,
+        // Bit 0x80 of the SAME word. See `SpellRow#hiddenInSpellbook` for the measurement that
+        // establishes it and rules out both the `(DND)` name and the weapon skill CATEGORY.
+        hiddenInSpellbook: (col(COL.attributes) & 0x80) !== 0,
+        spellLevel: col(COL.spellLevel),
         iconID: col(COL.iconID),
         visualID: col(COL.visual),
         castingTimeIndex: col(COL.castingTimeIndex),
@@ -321,6 +680,24 @@ class SpellData {
         startRecoveryCategory: col(COL.startRecoveryCategory),
         rangeIndex: col(COL.rangeIndex),
         manaCostPercentage: col(COL.manaCostPercentage),
+
+        // THE EFFECT BLOCK -- what every `$` token in a description resolves through. See
+        // `COL.effectDieSides` for the indices and `effectRange` for what the first two mean.
+        effectBasePoints: three(COL.effectBasePoints, int),
+        effectDieSides: three(COL.effectDieSides, int),
+        effectRealPointsPerLevel: three(COL.effectRealPointsPerLevel, flt),
+        effectPointsPerComboPoint: three(COL.effectPointsPerComboPoint, flt),
+        effectRadiusIndex: three(COL.effectRadiusIndex, col),
+        effectAmplitudeMs: three(COL.effectAmplitude, col),
+        effectChainTargets: three(COL.effectChainTargets, col),
+        durationIndex: col(COL.durationIndex),
+        procChance: col(COL.procChance),
+        stackAmount: col(COL.stackAmount),
+        maxAffectedTargets: col(COL.maxAffectedTargets),
+        baseLevel: col(COL.baseLevel),
+        maxLevel: col(COL.maxLevel),
+        schoolMask: col(COL.schoolMask),
+        descriptionVariablesID: col(COL.descriptionVariablesID),
       });
     }
     return rows;
@@ -356,12 +733,38 @@ class SpellData {
     return yards !== null && yards > 0 ? yards : null;
   }
 
+  /** `SpellDuration.dbc` base duration in MILLISECONDS, or null. `$d`'s lookup. */
+  durationMs(durationIndex: number): number | null {
+    return durationIndex > 0 ? this.durations?.get(durationIndex) ?? null : null;
+  }
+
+  /** `SpellRadius.dbc` radius in YARDS, or null. `$a<n>`'s lookup. */
+  radiusYards(radiusIndex: number): number | null {
+    return radiusIndex > 0 ? this.radii?.get(radiusIndex) ?? null : null;
+  }
+
+  /** The raw `SpellDescriptionVariables.dbc` assignment block, or null. See the field's comment. */
+  descriptionVariables(variablesId: number): string | null {
+    return variablesId > 0 ? this.descVarRows?.get(variablesId) ?? null : null;
+  }
+
   iconPath(spellId: number): string | null {
     const row = this.spell(spellId);
     if (row === null) {
       return null;
     }
     return this.icons?.get(row.iconID) ?? null;
+  }
+
+  /**
+   * A `SpellIcon.dbc` id straight to its path, without going through a spell.
+   *
+   * Exists for the spellbook's TABS: a tab's art is `SkillLine.dbc`'s `spellIconID` (column 37, measured
+   * -- `pipeline/dbc/skill-data.ts`), which is a `SpellIcon` id belonging to no spell, so `iconPath` has
+   * no way to reach it.
+   */
+  icon(iconID: number): string | null {
+    return this.icons?.get(iconID) ?? null;
   }
 
   /**

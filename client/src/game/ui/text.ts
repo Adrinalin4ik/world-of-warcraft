@@ -12,7 +12,9 @@ import * as THREE from 'three';
 
 import Loader from '../net/loader';
 import { ResolvedSprite } from './renderer';
+import { screenScale } from './layout';
 import { FontSpec } from './widget';
+import { parseMarkup, runsFor } from './markup';
 
 /** The client's shipped faces, by the family name widgets ask for. */
 const FONT_FILES: Record<string, string> = {
@@ -23,9 +25,17 @@ const FONT_FILES: Record<string, string> = {
 };
 
 /**
- * Padding around rasterized text.
- * HORIZONTAL: clearance for stroke width (lineWidth=2, so 1px on each side) plus room for subpixel positioning.
- * VERTICAL: clearance for stroke width plus extra for centered textBaseline.
+ * Padding around rasterized text, in DEVICE pixels at dpr 1.
+ *
+ * HORIZONTAL: clearance for the outline stroke (lineWidth 2, so 1px each side).
+ * VERTICAL: the same, plus room for the centred `textBaseline`'s ascender/descender.
+ *
+ * IT IS RASTER BLEED AND NOTHING ELSE. It used to be reported as part of the string's SIZE, which
+ * put it into the widget's layout rect -- see `measureText`. That was the bug behind "the checkbox
+ * sits oddly against its label" and it got WORSE THE SMALLER THE WINDOW, because the padding is a
+ * fixed count of device pixels and the rect is in logical units: `PADDING_V / scale` is 5.1 units at
+ * 1382x911 (scale 1.186) and **8.4 units at 630x551** (scale 0.717), against a `<FontHeight>` of 10.
+ * An 84% overshoot on the height of every auto-sized label, varying with the window.
  */
 const PADDING_H = 4;
 const PADDING_V = 6;
@@ -98,6 +108,33 @@ function density(scale: number): number {
   return scale * devicePixelDensity();
 }
 
+/**
+ * The LAYOUT SCALE the draw pass is currently using -- for the callers that have to measure a string
+ * but hold no viewport.
+ *
+ * A pure function of the window height by the layout law itself (`layout.ts#screenScale`), which is
+ * exactly how `world-ui.ts#render` and `screens.ts` derive the scale they pass to `drawList`. So this
+ * is not a second source of truth; it is the same law read from the same input.
+ *
+ * **IT EXISTS BECAUSE A SCALE-1 MEASUREMENT AND THE RASTER DISAGREE, and that was a real defect the
+ * numbers found**: `wrapLines` measures in DEVICE pixels, so the same 260-unit budget breaks a string
+ * differently at different densities. Measured live at 1382x911 (scale 1.18620), Eviscerate's tooltip
+ * body broke after "combo" in the raster and after "per" at scale 1, making the widest rendered line
+ * **259.43** units against the **221.08** a scale-1 measurement reported -- and
+ * `gametooltip.ts#resize` had sized the frame from the smaller number, so the body overran the frame's
+ * right edge by 28.35 units. Round 17's "line breaking is scale-invariant" was checked at 630x551 and
+ * 1382x911 by comparing RECTS of derived-size strings, which move together; it does not hold for a
+ * fixed budget, and `uiTextExtent`'s `scaleInvariant` field reports it per string now.
+ *
+ * Falls back to 1 where there is no window or the height is 0 -- jsdom, and the unit tests.
+ */
+export function layoutScale(): number {
+  if (typeof window === 'undefined' || !window.innerHeight) {
+    return 1;
+  }
+  return screenScale(window.innerHeight);
+}
+
 function cssFont(spec: FontSpec, pixelScale: number): string {
   return `${Math.round(spec.size * pixelScale)}px "${spec.family}"`;
 }
@@ -135,12 +172,27 @@ function optionalMeasureContext(): CanvasRenderingContext2D | null {
  * One line unless `spec.wrapWidth` is set. Wrapping breaks on SPACES, as the client's own does: a
  * word longer than the width is left overlong on its own line rather than split mid-word, because
  * hyphenating an account name or a URL (`RESPONSE_FAILED_TO_CONNECT` contains one) would be worse
- * than overflowing. Explicit newlines in the string are honoured first -- `gluestrings.lua` escapes
- * some -- so a `\n` always starts a line whatever the width.
+ * than overflowing -- UNLESS the element authors `nonspacewrap="true"`, which is the client asking for
+ * exactly that break; see `breakRun` below. Explicit newlines in the string are honoured first --
+ * `gluestrings.lua` escapes some -- so a `\n` always starts a line whatever the width.
  */
 export function wrapLines(text: string, spec: FontSpec, scale: number): string[] {
+  return wrapPlain(parseMarkup(text).plain, spec, scale);
+}
+
+/**
+ * The wrapping law itself, over text that has ALREADY had its escapes resolved.
+ *
+ * Split out from `wrapLines` when markup arrived, and the split is the whole point: a colour code is
+ * zero-width, so it must never reach a `measureText` here. Measuring `|cffffd200(B)|r` would put nine
+ * invisible characters into a wrap budget and into every derived width -- which is the likeliest way
+ * to regress the owner-confirmed tooltip sizing and grid snap. The body below is unchanged.
+ */
+function wrapPlain(text: string, spec: FontSpec, scale: number): string[] {
   const paragraphs = text.split('\n');
-  if (!spec.wrapWidth || spec.wrapWidth <= 0) {
+  // `wordWrap === false` is `SetWordWrap(false)`: one line however narrow the rect. Nothing in the
+  // manifest authors it (see `FontSpec.wordWrap`), so this is an override with no current exerciser.
+  if (!spec.wrapWidth || spec.wrapWidth <= 0 || spec.wordWrap === false) {
     return paragraphs.length > 1 ? paragraphs : [text];
   }
 
@@ -153,6 +205,25 @@ export function wrapLines(text: string, spec: FontSpec, scale: number): string[]
   // The wrap width is a logical-unit budget; measurement happens in device pixels.
   const budget = spec.wrapWidth * pixelScale;
 
+  // `nonspacewrap="true"` -- break INSIDE a run with no space in it, once the run alone is over
+  // budget. Authored on 31 elements across 10 manifest files (`loader.ts`), 22 of them the options
+  // panels' description paragraphs, so this is the client's own instruction for those strings and not
+  // a policy. Breaks at the character that crosses the budget, never below one character per line.
+  const breakRun = (run: string): string[] => {
+    const parts: string[] = [];
+    let chunk = '';
+    for (const ch of run) {
+      const candidate = chunk + ch;
+      if (chunk && context.measureText(candidate).width > budget) {
+        parts.push(chunk);
+        chunk = ch;
+      } else {
+        chunk = candidate;
+      }
+    }
+    return chunk ? [...parts, chunk] : parts;
+  };
+
   const lines: string[] = [];
   for (const paragraph of paragraphs) {
     let line = '';
@@ -164,10 +235,23 @@ export function wrapLines(text: string, spec: FontSpec, scale: number): string[]
       } else {
         line = candidate;
       }
+      // Only reachable when a single space-free run is itself wider than the budget: any line with a
+      // break opportunity in it was already pushed above.
+      if (spec.nonSpaceWrap && context.measureText(line).width > budget) {
+        const parts = breakRun(line);
+        lines.push(...parts.slice(0, -1));
+        line = parts[parts.length - 1] ?? '';
+      }
     }
     lines.push(line);
   }
 
+  // `maxLines` -- the authored hard cap (`spellbookframe.xml:100`, `maxLines="3"`). The overflow is
+  // DROPPED, not ellipsised: the real client has no ellipsis here and inventing one would be a
+  // different behaviour presented as a fix. Absent means no cap, which is every other string.
+  if (spec.maxLines !== undefined && spec.maxLines > 0 && lines.length > spec.maxLines) {
+    return lines.slice(0, spec.maxLines);
+  }
   return lines;
 }
 
@@ -176,7 +260,23 @@ function lineHeight(spec: FontSpec): number {
   return spec.size + (spec.spacing ?? 0);
 }
 
-/** Logical-unit size of a rendered string, including padding. Same units `get()`'s `size` reports. */
+/**
+ * Logical-unit size of the GLYPHS of a rendered string -- the box the engine calls the font string's
+ * rect, and the box everything anchored to that string is anchored to.
+ *
+ * **NO PADDING.** This used to add `PADDING_H`/`PADDING_V` and it was wrong twice over. It is the
+ * function that fills in an unsized `<FontString>`'s width and height (`widget.ts#deriveSize`), so a
+ * padded answer inflated the LAYOUT rect with the rasterizer's stroke clearance -- and the client's
+ * own documents anchor to those edges. `accountlogin.xml:551-556` is the case that found it:
+ * `<CheckButton name="AccountLoginSaveAccountName">` anchors its RIGHT to
+ * `AccountLoginSaveAccountNameText`'s LEFT at offset (0,0), i.e. edge to edge, so a rect 4 device px
+ * too wide left a visible gap between the box and its label. The vertical error was much larger --
+ * see `PADDING_V` -- and both grew as the window shrank, which is why a 630x551 window looks
+ * "misaligned" while 1382x911 looks nearly right.
+ *
+ * The padding still exists in the RASTER: `FontStringTextures#get` reports it separately as `pad`,
+ * and `renderer.ts` inflates the quad about the glyph box's centre so no stroke is clipped.
+ */
 export function measureText(
   text: string,
   spec: FontSpec,
@@ -185,21 +285,17 @@ export function measureText(
   const pixelScale = density(scale);
   const context = optionalMeasureContext();
   const lines = wrapLines(text, spec, scale);
+  const blockHeight =
+    lines.length > 1
+      ? lines.length * spec.size + (lines.length - 1) * (spec.spacing ?? 0)
+      : spec.size;
   if (!context) {
-    return { width: 0, height: spec.size + PADDING_V / scale };
+    return { width: 0, height: blockHeight };
   }
   context.font = cssFont(spec, pixelScale);
   const widest = Math.max(...lines.map((line) => context.measureText(line).width));
-  // Padding is rasterized at `pixelScale` (device pixels) below, so it has to come back out at the
-  // same rate it went in -- `PADDING_H` scaled by the density's DPR factor, then the whole width
-  // divided by `pixelScale`, not `scale`, to land back in logical units.
-  return {
-    width: (widest + PADDING_H * (pixelScale / scale)) / pixelScale,
-    height:
-      lines.length > 1
-        ? lines.length * spec.size + (lines.length - 1) * (spec.spacing ?? 0) + PADDING_V / scale
-        : spec.size + PADDING_V / scale,
-  };
+  // `pixelScale`, not `scale`: the measurement was taken at the device-pixel font size.
+  return { width: widest / pixelScale, height: blockHeight };
 }
 
 /**
@@ -227,12 +323,15 @@ export function caretOffset(
     return 0;
   }
   context.font = cssFont(spec, pixelScale);
-  const inset = (PADDING_H * devicePixelDensity()) / 2;
+  // NO INSET. It used to add half the horizontal padding, because the quad's left edge was the padded
+  // canvas's left edge and offset 0 had to skip the pad. `renderer.ts` now centres the padded quad on
+  // the GLYPH box, so the region's left edge IS the first glyph's cell -- and the caret is anchored to
+  // the region. Keeping the inset would put the caret half a pad right of the first character.
   const prefix = text.slice(0, Math.max(0, Math.min(caret, text.length)));
-  return (inset + context.measureText(prefix).width) / pixelScale;
+  return context.measureText(prefix).width / pixelScale;
 }
 
-/** A rasterized string: the texture plus the logical (layout-unit) size the renderer draws it at. */
+/** A rasterized string: the texture, the glyph box, and the raster pad around it. All logical units. */
 type Entry = ResolvedSprite & { texture: THREE.CanvasTexture };
 
 export class FontStringTextures {
@@ -257,10 +356,18 @@ export class FontStringTextures {
       spec.size,
       spec.color,
       spec.outline ? 'o' : '-',
+      // The shadow is part of the RASTER, so it has to key it -- without this a font object that gains
+      // or loses a shadow (a `SetShadowColor` from Lua, a per-state font swap) serves the old bitmap.
+      spec.shadowOffset ? `${spec.shadowOffset.x},${spec.shadowOffset.y}` : '-',
+      spec.shadowColor ?? '-',
+      spec.shadowAlpha ?? '-',
       spec.align,
       // Wrapping changes the raster, so it has to key it: the same string at two widths is two
       // different textures, and without this the first width served the second.
       spec.wrapWidth ?? 0,
+      // Both change the LINE BREAKING, so both change the raster and must key it.
+      spec.maxLines ?? 0,
+      spec.wordWrap === false ? 'nw' : '-',
       spec.spacing ?? 0,
       // The cache key must carry the RASTER density, not just the layout scale -- a display change
       // (a window dragged between monitors of different `devicePixelRatio`) must not serve a stale
@@ -280,20 +387,54 @@ export class FontStringTextures {
     const font = cssFont(spec, pixelScale);
     const context = sharedMeasureContext();
     context.font = font;
-    const paddingH = PADDING_H * dpr;
-    const paddingV = PADDING_V * dpr;
+    // THE SHADOW'S OFFSET IN DEVICE PIXELS, ROUNDED, and the rounding is not optional: the glyph quad
+    // is snapped to the device grid (`renderer.ts`), so a shadow at a fractional device offset would
+    // reintroduce exactly the bilinear smear that snapping removed -- on the darkest, highest-contrast
+    // ink on the screen. `Math.round` on the whole product, once, so the shadow keeps its authored
+    // direction at every window scale (at scale 0.717 the authored 1 unit rounds to 1 device px, not 0).
+    // **Y IS FLIPPED HERE**: `FontSpec.shadowOffset` keeps FrameXML's `+y` UP and a canvas is `+y` DOWN,
+    // and this is the one place that flip happens.
+    const shadowDx = spec.shadowOffset ? Math.round(spec.shadowOffset.x * pixelScale) : 0;
+    const shadowDy = spec.shadowOffset ? -Math.round(spec.shadowOffset.y * pixelScale) : 0;
+    // The canvas grows by TWICE the shadow's reach on each axis so the glyph block stays CENTRED in it.
+    // That is what keeps `pad` symmetric, which is the invariant `renderer.ts` relies on to inflate the
+    // quad about the glyph box's centre -- an asymmetric pad would shift every shadowed string by half
+    // the shadow. Costs a few device pixels of empty canvas on the side the shadow does not fall.
+    const paddingH = PADDING_H * dpr + 2 * Math.abs(shadowDx);
+    const paddingV = PADDING_V * dpr + 2 * Math.abs(shadowDy);
     const inset = paddingH / 2;
 
-    const lines = wrapLines(text, spec, scale);
+    // Parse ONCE here rather than calling `wrapLines` (which parses internally): the raster needs the
+    // colour spans as well as the lines, and they have to be indexed into the SAME plain text the
+    // lines were cut from.
+    const { plain, spans } = parseMarkup(text);
+    const lines = wrapPlain(plain, spec, scale);
+    // Where each wrapped line starts in `plain`, so a colour span can be intersected with it.
+    // `wrapPlain` only ever splits -- it never reorders and never inserts -- so every line is a
+    // substring of `plain` and they appear in order, which is what makes a forward scan exact.
+    const lineStarts: number[] = [];
+    {
+      let cursor = 0;
+      for (const line of lines) {
+        const at = plain.indexOf(line, cursor);
+        const start = at === -1 ? cursor : at;
+        lineStarts.push(start);
+        cursor = start + line.length;
+      }
+    }
     const widest = Math.max(...lines.map((line) => context.measureText(line).width));
     const width = Math.ceil(widest) + paddingH;
     // A single line keeps EXACTLY the height it always had, so no existing caption's quad moves;
     // only a wrapped string takes the multi-line path.
-    const height =
+    // The glyph block in DEVICE pixels -- what the quad's `size` reports (divided back to logical) and
+    // what the padded canvas is grown from. Same arithmetic as `measureText`'s `blockHeight`, in the
+    // other unit, so the measured rect and the drawn quad cannot disagree about the block.
+    const glyphBlockHeight = Math.ceil(
       lines.length > 1
-        ? Math.ceil(lineHeight(spec) * (lines.length - 1) * pixelScale + spec.size * pixelScale) +
-          paddingV
-        : Math.ceil(spec.size * pixelScale) + paddingV;
+        ? lineHeight(spec) * (lines.length - 1) * pixelScale + spec.size * pixelScale
+        : spec.size * pixelScale,
+    );
+    const height = glyphBlockHeight + paddingV;
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(width, 1);
@@ -309,15 +450,36 @@ export class FontStringTextures {
     const step = lineHeight(spec) * pixelScale;
     const glyphHeight = spec.size * pixelScale;
     lines.forEach((line, row) => {
-      const y =
-        lines.length > 1 ? paddingV / 2 + row * step + glyphHeight / 2 : canvas.height / 2;
+      // EVERY LINE'S ORIGIN IS ROUNDED, not just the first, and that is the multi-line half of the
+      // device-grid discipline `renderer.ts` starts. `step` is `(size + spacing) * pixelScale`, a
+      // float, so line 2 of a wrapped block landed at a fractional offset and smeared exactly the way
+      // an unsnapped quad did -- and `canvas.height / 2` is fractional whenever the height is odd.
+      // Rounding INSIDE the canvas IS rounding to the device grid: the quad's own origin is snapped
+      // and the draw is 1 texel : 1 device pixel, so an integer canvas coordinate is an integer device
+      // pixel. `x` is rounded for the same reason -- CENTER and RIGHT both divide by two.
+      const y = Math.round(
+        lines.length > 1 ? paddingV / 2 + row * step + glyphHeight / 2 : canvas.height / 2,
+      );
       const lineWidth = context.measureText(line).width;
-      const x =
+      const x = Math.round(
         spec.align === 'CENTER'
           ? inset + (widest - lineWidth) / 2
           : spec.align === 'RIGHT'
             ? inset + (widest - lineWidth)
-            : inset;
+            : inset,
+      );
+
+      // THE SHADOW GOES FIRST -- it is BEHIND the glyphs -- and it is a FILL ONLY, never stroked.
+      // The reference is explicit about that: the drop-shadow pass "must lay out IDENTICALLY to its
+      // (possibly outlined) fill but never paints halos -- an outlined shadow would be a muddy black
+      // blob" (`benilla/src/ui_text/layout/mod.rs:59-62`). `SystemFont_Shadow_Outline_Huge2`
+      // (fonts.xml:138-143) is the font that makes the distinction observable: it authors BOTH.
+      if (spec.shadowOffset && (shadowDx !== 0 || shadowDy !== 0)) {
+        target.globalAlpha = spec.shadowAlpha ?? 1;
+        target.fillStyle = spec.shadowColor ?? '#000000';
+        target.fillText(line, x + shadowDx, y + shadowDy);
+        target.globalAlpha = 1;
+      }
 
       if (spec.outline) {
         // The client's baked ring: one device pixel, drawn as a real stroke -- scaled by `dpr` along
@@ -329,13 +491,41 @@ export class FontStringTextures {
         target.strokeText(line, x, y);
       }
 
-      target.fillStyle = spec.color;
-      target.fillText(line, x, y);
+      // THE SINGLE-RUN PATH IS BIT-FOR-BIT WHAT IT ALWAYS WAS, and that is deliberate: a string with
+      // no colour escape -- which is nearly every string on screen -- must not start taking a
+      // different code path through the rasterizer, because summing per-run advances is not exactly
+      // `measureText` of the whole line (the shaper may kern across the join). Only a line that
+      // genuinely carries a colour run pays that.
+      const pieces = runsFor(spans, lineStarts[row], lineStarts[row] + line.length);
+      if (pieces.length === 1 && pieces[0].color === null) {
+        target.fillStyle = spec.color;
+        target.fillText(line, x, y);
+        return;
+      }
+      let penX = x;
+      for (const piece of pieces) {
+        const runText = plain.slice(piece.start, piece.end);
+        if (runText === '') {
+          continue;
+        }
+        target.fillStyle = piece.color ?? spec.color;
+        target.fillText(runText, penX, y);
+        penX += context.measureText(runText).width;
+      }
     });
 
     const texture = new THREE.CanvasTexture(canvas);
     // Match the BLP convention so `applyTexCoords` needs no special case: row 0 is v = 0.
     texture.flipY = false;
+    // NO MIPMAPS ON TEXT. `CanvasTexture` defaults to `generateMipmaps = true` and
+    // `minFilter = LinearMipmapLinearFilter`, and a string is drawn at exactly 1 texel : 1 device
+    // pixel (`renderer.ts` snaps the quad to the device grid, and the canvas is sized in device
+    // pixels here) -- so the mip chain can never be the right level and any LOD the driver picks
+    // above 0 is a half-resolution glyph blurred back up. It also costs a full pyramid per cached
+    // string. `LinearFilter` on both is the exact fetch at the 1:1 scale the quad is drawn at.
+    texture.generateMipmaps = false;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
     texture.needsUpdate = true;
 
     const entry: Entry = {
@@ -345,11 +535,23 @@ export class FontStringTextures {
       // ERROR rather than a silent stretch-to-rect. It shipped flat once, and because `size` is
       // optional and excess properties are not checked on a returned value, every string on screen
       // was quietly stretched to its widget rect until a screenshot caught it.
+      //
+      // `size` is the GLYPH box and `pad` the raster bleed around it, reported separately for the
+      // reason `measureText` gives at length: the glyph box is what the layout and every anchor into
+      // this string mean, and the pad is the rasterizer's own stroke clearance. The renderer draws a
+      // quad of `size + pad` centred on the glyph box.
       size: {
         // Logical units: the raster is denser (`pixelScale` includes `dpr`) but the quad it draws
         // onto must stay the same on-screen size regardless of display density.
-        width: canvas.width / pixelScale,
-        height: canvas.height / pixelScale,
+        width: widest / pixelScale,
+        height: glyphBlockHeight / pixelScale,
+      },
+      // TOTAL extra on each axis, not per side. Very nearly symmetric -- the only asymmetry is the
+      // `Math.ceil` on the canvas width, at most one device pixel on the right -- so the renderer
+      // splits it in half and no glyph moves by more than half a device pixel.
+      pad: {
+        x: (canvas.width - widest) / pixelScale,
+        y: (canvas.height - glyphBlockHeight) / pixelScale,
       },
     };
     this.cache.set(key, entry);

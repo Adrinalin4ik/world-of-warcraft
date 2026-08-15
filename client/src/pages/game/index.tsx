@@ -15,10 +15,26 @@ import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
 import { animCounters } from '../../game/pipeline/m2/anim/counters';
 import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-warm';
 import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
-import { pickUnit } from '../../game/world/pick';
+import { LoadingScreen } from '../../game/ui/loading-screen';
+import { WorldCursorDriver } from '../../game/ui/world-cursor';
+import { CURSOR_POINT, classifyUnitCursor, cursorStem } from '../../game/world/cursor-mode';
+import { pickUnit, pickUnitReport, drawnWorldBox } from '../../game/world/pick';
+import { collisionWorld } from '../../game/collision/collision-world';
+import { CollisionLayer } from '../../game/collision/types';
 import { wantsDebugPanels } from '../debug-flags';
 import { REACTION_NEUTRAL, primeFactionTemplates, reactionFor } from '../../game/world/faction';
+
 import './index.scss';
+
+/**
+ * `UNIT_DYNFLAG_LOOTABLE` -- bit 0x1 of `UNIT_DYNAMIC_FLAGS`, set on a corpse this player may loot.
+ *
+ * A SERVER-side definition, like the `HitInfo` bits and the NPC service flags: nothing in the game's
+ * own data names it. The reference cites `SharedDefines.h:1153` for the same value
+ * (`benilla-protocol/src/bin/benilla-world/probes/loot.rs:72-73`), which is corroboration from a second
+ * server implementation rather than an independent source.
+ */
+const UNIT_DYNFLAG_LOOTABLE = 0x1;
 
 interface IGameProps {
   session: GameSession;
@@ -99,6 +115,17 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    * against the glue's 17, and every measurement in this repo's perf record was taken without it.
    */
   private ui: WorldUiHost | null = null;
+
+  /** Up from mount until the interface's first draw; null afterwards. See `componentDidMount`. */
+  private loadingScreen: LoadingScreen | null = null;
+
+  /**
+   * Held so `dismissLoadingScreen` can take it off the PLAYER's emitter. The player outlives this
+   * component (it belongs to the world, which belongs to the session, and this client relogs without a
+   * page reload), so a listener left behind would accumulate one dead closure per mount -- each one
+   * pinning a disposed `GameScreen`. Same rule `action-bridge.ts` follows with `removeListener`.
+   */
+  private onMapChange: ((mapId: number) => void) | null = null;
 
   public depthPass: DepthPass;
 
@@ -212,6 +239,16 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       });
       this.debugRenderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     }
+    this.installPickInstrument();
+
+    // THE HOVER CURSOR. On `document.body` because `cursor` is an inherited property and the world
+    // canvas, the UI canvas and the debug panel are all its descendants -- one write covers the route.
+    this.cursorDriver = new WorldCursorDriver(document.body);
+    document.body.addEventListener('pointermove', this.onCursorPointerMove);
+    (window as unknown as Record<string, unknown>).worldCursorArt = () =>
+      this.cursorDriver?.cursorArtReport() ?? null;
+    (window as unknown as Record<string, unknown>).worldCursorStats = () => this.cursorStats;
+
     console.log("componentDidMount", this)
     this.forceUpdate();
     this.resize();
@@ -223,6 +260,48 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // socket left the player looking at a frozen world with no way back to the login screen short of
     // reloading the page -- which is half of "I cannot connect a second time".
     this.game.on('disconnect', this.onWorldDisconnect);
+
+    /**
+     * THE LOADING SCREEN IS ARMED BEFORE `world.run()`, AND THE ORDER IS THE WHOLE BUG IT FIXES.
+     *
+     * `map:change` is an EDGE with no replay (`classes/player.ts:26`), and `World#run` worldports a
+     * real character SYNCHRONOUSLY on the online path -- `const entered = session.offline ? null :
+     * session.protocol.enteredCharacter` and then `player.worldport(entered.mapId, entered.position)`
+     * with nothing awaited in between (`world/index.ts:380,449`). So on a real login the event had
+     * ALREADY fired by the time this component subscribed, the art was never asked for, and the screen
+     * never drew: the owner's "Экран загрузки не видно". The offline route hid it completely, because
+     * there `entered` is null and the worldport happens further down this method -- which is the only
+     * ordering the gate ever exercised.
+     *
+     * Reproduced credential-free before fixing, by moving the offline worldport above the old
+     * subscription point: the screen object existed and NEVER acquired art. Note the first attempt at
+     * that simulation did not reproduce, because DUPLICATING the worldport re-emits -- `worldport`'s
+     * guard is `if (!this.mapId || ...)` and map 0 is falsy, so map 0 always emits twice.
+     *
+     * Subscribing first removes the race outright rather than racing it better, which is the same
+     * shape as `ProtocolSession#state`'s reconcile (`STATE.md`, round 27): an edge subscription with
+     * no replay must be attached before the thing that fires it. `renderer` already exists here.
+     */
+    if (wantsLuaUi(window.location.search)) {
+      this.loadingScreen = new LoadingScreen(renderer);
+      // The instrument: "no picture" has three distinct causes no screenshot separates -- the map id
+      // never arrived, the DBCs named no screen for it, or the BLP never decoded. `ready` answers the
+      // first two, which is what told "never drew" apart from "drew and was not seen".
+      (window as never as Record<string, unknown>).loadingScreen = this.loadingScreen;
+      /**
+       * THE EVENT IS THE ONLY SOURCE, and reading `player.mapId` up front would be WRONG rather than
+       * merely redundant: it is initialised to **0** (`classes/player.ts:4`), which is a real map id
+       * (Eastern Kingdoms), so an eager read on a character who has not been placed yet fetches the
+       * wrong 700 KB screen and then replaces it. With the subscription now ahead of every worldport,
+       * no eager read is needed on either route.
+       */
+      this.onMapChange = (mapId: number) => {
+        void this.loadingScreen
+          ?.load(mapId)
+          .catch((error) => console.warn('loading screen: art unavailable', error));
+      };
+      this.game.world.player.on('map:change', this.onMapChange);
+    }
 
     this.game.world.run();
 
@@ -237,9 +316,17 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         this.perf.sections,
         this.game.world,
       );
-      void this.ui.start().catch((error) => {
+      // The manifest's own file count drives the bar. Nothing invented: see `world-runtime.ts`.
+      this.ui.onLoadProgress = (fraction) => this.loadingScreen?.setProgress(fraction);
+      void this.ui.start().then(() => {
+        // AFTER the boot resolves, not on a timer: `start()` resolves once the tree is built, the art
+        // is registered and the bridges are attached, which is exactly when the interface can draw.
+        this.dismissLoadingScreen();
+      }).catch((error) => {
         // A boot that fails outright is the one thing `bootWorldRuntime` does not turn into a report
-        // line, so it must not vanish into an unhandled rejection.
+        // line, so it must not vanish into an unhandled rejection. The screen comes down either way --
+        // leaving it up would hide a world that is otherwise fine.
+        this.dismissLoadingScreen();
         console.error('framexml(world): the runtime failed to boot', error);
       });
     }
@@ -268,12 +355,332 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    * A click on nothing CLEARS the target, which is the reference's behaviour
    * (`benilla/src/target/click.rs`: "clicked nothing targetable -> deselect").
    */
+  /**
+   * Which of the client's own frames took the live press, or null when the press is the world's.
+   *
+   * The PRESS half of the gate `onWorldClick` below already applies to the CLICK, and it had been
+   * missing: `pointerWidget` stopped a click on an action button from also selecting a unit, but nothing
+   * stopped the same press from latching `Controls#buttons` and orbiting the camera. That is the owner's
+   * "камера тоже двигается и не получается в итоге передвинуть способность" -- and it also broke the drag
+   * outright, because the orbit takes a POINTER LOCK and a lock freezes `clientX/clientY`.
+   *
+   * Plain `/game` has no host, so `this.ui` null means the world owns every press -- the same fallback the
+   * click gate takes.
+   */
+  private uiCapturedPress = (): string | null => this.ui?.capturedPress ?? null;
+
+  /**
+   * The pick's options, built per click.
+   *
+   * The cast is a ZERO-RADIUS camera-layer cast -- the occlusion leg's whole geometry, and the same
+   * terrain + WMO + doodad set the camera boom already sweeps (`collision-world.ts#castFor`). Built
+   * here rather than inside `pick.ts` because that module is deliberately world-agnostic: every unit
+   * test of the pick drives it against synthetic geometry with nothing registered, which is the rule
+   * `collision-world.ts` states for `CastFn` in the first place.
+   *
+   * The two `window` switches are the SAME-BUILD CONTROL ARMS. A pick claim cannot be checked across
+   * two builds because the units move between them; these let one run measure both arms over the same
+   * geometry. `window.uiTextSnap` is the shape.
+   */
+  private pickOptions() {
+    const flags = window as unknown as Record<string, unknown>;
+    return {
+      cast: collisionWorld.castFor(CollisionLayer.Camera, 0, 0),
+      narrow: flags.worldPickNarrow !== false,
+      occlude: flags.worldPickOcclude !== false,
+    };
+  }
+
+  /**
+   * `window.worldPick(clientX, clientY)` and `window.worldUnits()` -- THE PICK INSTRUMENT.
+   *
+   * A pick cannot be judged from a screenshot: "the click selected the wolf" and "the click selected
+   * the wolf from three yards off its flank" look identical, and the second is the whole bug. This
+   * reports, per broad-phase candidate, the sphere the old pick used, the hull the new one uses, and
+   * which of the two rejected it -- through `pickUnitReport`, which calls the SAME `pickUnit`
+   * production does rather than a second copy of the rule.
+   *
+   * `document.body.getBoundingClientRect()` is not a convenience: it is the exact element
+   * `controls/controls.tsx` measures its own NDC against (`this.element = document.body`, `:106`), so
+   * this instrument and a real click cannot disagree about where the pointer is. That is the trap
+   * `STATE.md` records against a probe doing its own coordinate arithmetic.
+   *
+   * `worldUnits()` reports every unit's SCREEN position in CSS pixels, which is what lets a probe put
+   * a real `page.mouse.click` a stated number of pixels off a mob instead of guessing at one.
+   */
+  /** Takes the loading screen down and releases its art. Safe to call twice. */
+  private dismissLoadingScreen(): void {
+    if (this.onMapChange) {
+      this.game.world.player.removeListener('map:change', this.onMapChange);
+      this.onMapChange = null;
+    }
+    this.loadingScreen?.dispose();
+    this.loadingScreen = null;
+    delete (window as never as Record<string, unknown>).loadingScreen;
+  }
+
+  /** The `window` keys `installPickInstrument` writes, so `componentWillUnmount` can take them back. */
+  private static readonly PICK_INSTRUMENT_KEYS = ['worldPick', 'worldUnits', 'worldCamera'];
+
+  private installPickInstrument(): void {
+    const flags = window as unknown as Record<string, unknown>;
+    const toNdc = (clientX: number, clientY: number) => {
+      const bounds = document.body.getBoundingClientRect();
+      return {
+        x: ((clientX - bounds.left) / bounds.width) * 2 - 1,
+        y: -(((clientY - bounds.top) / bounds.height) * 2 - 1),
+      };
+    };
+    flags.worldPick = (clientX: number, clientY: number) => {
+      const world = this.game.world;
+      const ndc = toNdc(clientX, clientY);
+      const report = pickUnitReport(
+        world.entities.values(), this.camera, ndc, world.player, this.pickOptions(),
+      );
+      return { ndc, ...report };
+    };
+    // The camera's own numbers, so a probe can turn a PIXEL margin into a YARD margin at a stated
+    // depth instead of asserting one. `2 * d * tan(fov/2) / heightPx` yards per pixel.
+    flags.worldCamera = () => ({
+      fov: this.camera.fov,
+      aspect: this.camera.aspect,
+      position: this.camera.position.toArray(),
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    });
+    flags.worldUnits = () => {
+      const world = this.game.world;
+      const bounds = document.body.getBoundingClientRect();
+      const point = new THREE.Vector3();
+      const body = new THREE.Vector3();
+      const out: unknown[] = [];
+      world.entities.forEach((unit) => {
+        if (unit === world.player) {
+          return;
+        }
+        // The unit's MIDRIFF, half a collision height up -- the same point `pick.ts#pickSphere`
+        // centres its sphere on, so a click aimed here is a click at the centre of the old volume.
+        point.copy(unit.view.position);
+        point.z += Math.max(unit.collisionHeight, 0.1) * 0.5;
+        const model = unit.model;
+        const distance = point.distanceTo(this.camera.position);
+        point.project(this.camera);
+        out.push({
+          guid: unit.guid,
+          name: unit.name ?? null,
+          objectType: unit.objectType,
+          dead: unit.dead,
+          distance,
+          collisionHeight: unit.collisionHeight,
+          vertexRadius: model ? model.vertexRadius : null,
+          modelScale: model ? model.scale.x : null,
+          hullTriangles: this.hullTriangleCount(unit),
+          visible: unit.view.visible,
+          screen: {
+            x: bounds.left + ((point.x + 1) / 2) * bounds.width,
+            y: bounds.top + ((1 - point.y) / 2) * bounds.height,
+            behind: point.z > 1,
+          },
+          // THE RENDERED BODY'S CENTRE, which is where a probe must aim. The midriff above is a
+          // model-space proxy (feet + half a collision height) and for a FLYING creature it sits
+          // BELOW the drawn body -- measured on a Vale Moth, a click there missed while the same
+          // click 20-40 px higher hit. `screen` is kept because it is what `pickSphere` uses.
+          screenBody: (() => {
+            const box = drawnWorldBox(unit);
+            if (box === null) {
+              return null;
+            }
+            body.set((box[0] + box[3]) / 2, (box[1] + box[4]) / 2, (box[2] + box[5]) / 2);
+            const bodyDistance = body.distanceTo(this.camera.position);
+            body.project(this.camera);
+            return {
+              x: bounds.left + ((body.x + 1) / 2) * bounds.width,
+              y: bounds.top + ((1 - body.y) / 2) * bounds.height,
+              behind: body.z > 1,
+              distance: bodyDistance,
+              size: [box[3] - box[0], box[4] - box[1], box[5] - box[2]],
+            };
+          })(),
+        });
+      });
+      return out;
+    };
+  }
+
+  /** How many triangles a unit's authored collision hull has -- 0 when its M2 ships none. */
+  private hullTriangleCount(unit: { model?: { boundingMesh?: THREE.Mesh } }): number {
+    const geometry = unit.model?.boundingMesh?.geometry as THREE.BufferGeometry | undefined;
+    if (!geometry) {
+      return 0;
+    }
+    const index = geometry.getIndex();
+    const position = geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+    const count = index ? index.count : (position?.count ?? 0);
+    return Math.floor(count / 3);
+  }
+
+  // -- The hover cursor -----------------------------------------------------------------------------
+
+  private cursorDriver: WorldCursorDriver | null = null;
+
+  /**
+   * The last pointer position in CLIENT pixels, or null before the pointer has moved.
+   *
+   * Its own listener rather than the router's `pointerPosition`, and that is deliberate: the router
+   * works in logical 768-space with Y down, so reading it here would mean converting back -- and
+   * `STATE.md` records a probe that did its own coordinate arithmetic and asked a different question
+   * from the one the router answers, invisibly. `clientX`/`clientY` is the space `pickUnit`'s callers
+   * and `controls.tsx` both already work in.
+   */
+  private cursorPointer: { x: number; y: number } | null = null;
+
+  /**
+   * The shift key as of the last pointer move -- the loot leg's Pickup/LootAll split.
+   *
+   * The EVENT'S OWN `shiftKey` flag and not a `keydown` of `'Shift'`, which is the trap
+   * `api/screen.ts`'s key trackers record: a modifier held across another key never fires its own
+   * keydown again and a key-name tracker loses it.
+   */
+  private cursorShift = false;
+
+  private onCursorPointerMove = (event: PointerEvent) => {
+    this.cursorPointer = { x: event.clientX, y: event.clientY };
+    this.cursorShift = event.shiftKey;
+  };
+
+  /**
+   * THE CADENCE, and it is a budget decision with a number behind it rather than a default.
+   *
+   * The classifier needs to know which unit is under the pointer, and that is the full pick --
+   * measured at **1.0-2.4 ms per call** in round 21 (926-1645 posed triangles plus the occlusion
+   * cast). Run every frame at 60 Hz that is 60-144 ms of every second, i.e. 6-14% of the frame
+   * budget, and it would hand back more than the whole 4-7.5 ms saving the offscreen UI target exists
+   * for. So it is thrown at a fixed cadence.
+   *
+   * **100 ms.** Two things bound the choice from opposite sides. The cheap side: 10 picks/s is
+   * 10-24 ms/s, under 2.4% of a second, which is inside the +-1 ms per-frame spread once amortised
+   * and is reported raw by `worldCursorStats` so it need not be taken on trust. The expensive side:
+   * what the classifier's OUTPUT can do in 100 ms. Its boundaries are the range gates -- 5.5556 yd
+   * for a service and 10.45 yd for attack -- and a unit closing at a run (7 yd/s) crosses one in
+   * ~14 ms of travel either side, so 100 ms is the smallest interval at which a gate flip could be
+   * mistimed, by at most 0.7 yd of the other party's movement. Against that, the pointer moving from
+   * one unit to another is the common case and 100 ms is at the edge of perceptible.
+   *
+   * `TOOLTIP_UPDATE_TIME` (200 ms), which `IsActionInRange` already uses in this tree, was the other
+   * candidate and is rejected on the second bound only: it halves the cost again but doubles the lag
+   * on the change a user actually sees. `window.worldCursorCadenceMs` makes both arms measurable in
+   * one build, and `window.worldCursorEnabled = false` is the off arm.
+   */
+  private static readonly CURSOR_CADENCE_MS = 100;
+
+  private lastCursorAt = 0;
+
+  /** `window.worldCursorStats` -- the cadence's own cost, reported raw. */
+  private cursorStats = {
+    picks: 0,
+    pickMs: 0,
+    pickMsTotal: 0,
+    /** Frames the cadence declined to pick on -- the denominator that makes `picks` mean anything. */
+    skipped: 0,
+    stem: 'Point',
+    /**
+     * Why the last tick resolved as it did: `held` (a dragged ability), `widget` (a frame under the
+     * pointer), `nopointer` (nothing has moved yet), `nopick` (the pick found no unit), or the EMPTY
+     * STRING when a unit answered -- so an empty `reason` beside a `Point` stem means a real unit
+     * classified as Point, which is a different fact from the pick having missed. The gate's arms turn
+     * on that distinction.
+     */
+    reason: '',
+  };
+
+  /**
+   * One cadence tick of the world cursor.
+   *
+   * PRECEDENCE IS THE PRESS'S OWN ORDER, which is what keeps the cursor honest about what a click
+   * would do: a held cursor item first (a drag is already drawing its own icon at the pointer, and
+   * `world-ui.ts#drawCursorIcon` owns that), then `pointerWidget` -- the router's own current hit, so
+   * a widget over a wolf reads as the widget exactly as a CLICK on it would (`onWorldClick`'s gate) --
+   * then the world pick, then Point.
+   */
+  private updateHoverCursor(): void {
+    const driver = this.cursorDriver;
+    if (driver === null) {
+      return;
+    }
+    const flags = window as unknown as Record<string, unknown>;
+    if (flags.worldCursorEnabled === false) {
+      // THE OFF ARM MUST ACTUALLY BE OFF, and self-review caught this returning with whatever stem was
+      // last written still on the element -- a control arm that leaves a sword stuck under the pointer
+      // is measuring the ON state and calling it OFF, which is precisely the class of instrument defect
+      // `CLAUDE.md` says to distrust. `revert` puts the element's own cursor back, once.
+      driver.revert();
+      return;
+    }
+    const now = performance.now();
+    const cadence = typeof flags.worldCursorCadenceMs === 'number'
+      ? (flags.worldCursorCadenceMs as number)
+      : GameScreen.CURSOR_CADENCE_MS;
+    if (now - this.lastCursorAt < cadence) {
+      this.cursorStats.skipped += 1;
+      return;
+    }
+    this.lastCursorAt = now;
+
+    const stats = this.cursorStats;
+    const pointer = this.cursorPointer;
+    // A held ability, or a widget under the pointer: neither is a question about the world, and
+    // neither costs a pick.
+    if (this.ui?.heldCursorItem) {
+      stats.reason = 'held';
+      stats.stem = 'Point';
+      driver.reset();
+      return;
+    }
+    if (pointer === null || this.ui?.pointerWidget) {
+      stats.reason = pointer === null ? 'nopointer' : 'widget';
+      stats.stem = 'Point';
+      driver.reset();
+      return;
+    }
+
+    const world = this.game.world;
+    const bounds = document.body.getBoundingClientRect();
+    const ndc = {
+      x: ((pointer.x - bounds.left) / bounds.width) * 2 - 1,
+      y: -(((pointer.y - bounds.top) / bounds.height) * 2 - 1),
+    };
+    const started = performance.now();
+    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
+    const pickMs = performance.now() - started;
+    stats.picks += 1;
+    stats.pickMs = pickMs;
+    stats.pickMsTotal += pickMs;
+
+    let mode = CURSOR_POINT;
+    if (hit !== null && world.player) {
+      const distanceSq = hit.position.distanceToSquared(world.player.position);
+      mode = classifyUnitCursor(hit, world.player, {
+        distanceSq,
+        // Shift alone, which the reference says IS the whole 1.12 mechanism -- there is no auto-loot
+        // CVar here because there is no loot code for one to configure.
+        autoLoot: this.cursorShift,
+        // DECLARED FALSE: nothing in this client decodes a learned profession, so the question "has
+        // this character learned Skinning" has no answer. The reference's own rule is that a
+        // non-skinner gets NO knife, so false is the arm that shows nothing rather than the arm that
+        // shows a knife a click cannot honour.
+        knowsSkinning: false,
+      }) ?? CURSOR_POINT;
+    }
+    stats.reason = hit === null ? 'nopick' : '';
+    stats.stem = cursorStem(mode);
+    driver.apply(mode);
+  }
+
   private onWorldClick = (ndc: { x: number; y: number }) => {
     if (this.ui?.pointerWidget) {
       return;
     }
     const world = this.game.world;
-    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player);
+    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
     world.setTarget(hit);
   };
 
@@ -296,13 +703,29 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       return;
     }
     const world = this.game.world;
-    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player);
+    const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
     if (!hit) {
       return;
     }
     world.setTarget(hit);
+    // A DEAD UNIT'S CONTEXT ACTION IS **LOOT**, not attack, and this is the leg that opens the window.
+    //
+    // The gate is `UNIT_DYNFLAG_LOOTABLE`, bit **0x1** of `UNIT_DYNAMIC_FLAGS` -- the flag the server
+    // sets on a corpse this player is allowed to loot and clears when it is empty. It is already
+    // decoded (`unit-fields.ts` keeps `dynamicFlags`), so this needs no new field. Asking the flag
+    // rather than merely `hit.dead` is what stops a right click on someone else's kill, or on a corpse
+    // already looted, sending a `CMSG_LOOT` the server will only answer with an error.
+    //
+    // (The bit's value is a SERVER-side definition -- `benilla-protocol/.../probes/loot.rs:72-73`
+    // cites `SharedDefines.h` for it -- and is labelled as such, like the `HitInfo` bits.)
+    if (hit.dead) {
+      if (((hit.fields.dynamicFlags ?? 0) & UNIT_DYNFLAG_LOOTABLE) !== 0) {
+        this.game.objectHandler.lootHandler.loot(hit.guid);
+      }
+      return;
+    }
     const reaction = reactionFor(hit, world.player);
-    if (reaction !== null && reaction <= REACTION_NEUTRAL && !hit.dead) {
+    if (reaction !== null && reaction <= REACTION_NEUTRAL) {
       this.game.objectHandler.combatHandler.startAttack(hit.guid);
     }
   };
@@ -319,6 +742,26 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    */
   componentWillUnmount() {
     this.stopped = true;
+    // The loading screen holds a texture reference and a `window` handle, so it goes with the
+    // component for the same reason the pick instrument below does -- a screen that outlived its
+    // renderer would draw through a disposed one.
+    this.dismissLoadingScreen();
+    // THE INSTRUMENT GOES WITH THE COMPONENT. Each closure captures `this` -- this camera, this world --
+    // so a handle left on `window` after a remount answers about a disposed renderer's camera and reads
+    // as a live measurement. That is this file's own rule two lines down ("Everything this component put
+    // somewhere that outlives it"), and the first version of the instrument broke it.
+    const flags = window as unknown as Record<string, unknown>;
+    for (const key of GameScreen.PICK_INSTRUMENT_KEYS) {
+      delete flags[key];
+    }
+    // THE CURSOR GOES BACK. Left alone, an inline `cursor: url(...)` on `document.body` would outlive
+    // this route and follow the user onto the login screen -- and the two instrument handles here
+    // capture `this` exactly as the pick's do, so they answer about a dead driver after a remount.
+    document.body.removeEventListener('pointermove', this.onCursorPointerMove);
+    this.cursorDriver?.dispose();
+    this.cursorDriver = null;
+    delete flags.worldCursorArt;
+    delete flags.worldCursorStats;
     window.cancelAnimationFrame(this.frameHandle);
     window.removeEventListener('resize', this.onResize);
     this.game.removeListener('disconnect', this.onWorldDisconnect);
@@ -454,6 +897,17 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.ui?.render(delta);
     this.perf.sections.end('ui.framexml');
 
+    // THE LOADING SCREEN, over the world AND the interface, and last for that reason. Null once the
+    // boot has resolved, so this costs one property read per frame for the rest of the session.
+    this.loadingScreen?.render(this.renderer);
+
+    // THE HOVER CURSOR, after the UI pass because it asks the router which widget the pointer is over
+    // and that answer is set by the pass that just ran. Cadence-gated -- see `updateHoverCursor`, which
+    // does nothing at all on ~5 frames in 6.
+    this.perf.sections.begin('ui.cursor');
+    this.updateHoverCursor();
+    this.perf.sections.end('ui.cursor');
+
       if (this.debugRenderer) {
         this.debugCamera.position.set(this.camera.position.x,
           this.camera.position.y,
@@ -523,6 +977,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
             camera={this.camera}
             onWorldClick={this.onWorldClick}
             onWorldRightClick={this.onWorldRightClick}
+            uiCapturedPress={this.uiCapturedPress}
           />
           { this.showDebug && !this.isMobile && <DebugPanel ref={this.debugPanel} renderer={renderer} game={this.game}></DebugPanel>}
           { this.showDebug &&

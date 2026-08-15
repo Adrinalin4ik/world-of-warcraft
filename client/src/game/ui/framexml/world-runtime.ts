@@ -34,9 +34,15 @@
  * **No general `OnUpdate` dispatch.** `runtime.ts`'s header declines it for the glue screens at 432
  * frames; here the tree is 4211 and the argument is stronger, not weaker. The four named frames that
  * runtime ticks are glue-specific (the glue fade, drag-to-rotate, the two rotate arrows) and have no
- * counterpart here yet. Anything whose behaviour lives entirely in an `<OnUpdate>` -- the chat-frame
- * fade, the cast bar's sweep, `CombatFeedback` -- therefore does not animate. That is a declared gap
- * with a measured reason (see the report), not an oversight.
+ * counterpart here yet. Anything whose behaviour lives entirely in an `<OnUpdate>` therefore does not
+ * animate -- the chat-frame fade is still in that set. That is a declared gap with a measured reason
+ * (see the report), not an oversight.
+ *
+ * The NAMED exceptions have grown to five, each argued at its own `registry.byName` below:
+ * `BonusActionBarFrame`, `CastingBarFrame`, the 24 action buttons, `TemporaryEnchantFrame` and --
+ * newest -- `PlayerFrame`, which is what makes `CombatFeedback` animate. The cast bar and
+ * `CombatFeedback` are named in this paragraph's older wording as things that do NOT animate; both now
+ * do, and the wording is corrected rather than left describing a closed gap.
  */
 import { GlueArt } from '../art';
 import { Viewport } from '../layout';
@@ -61,6 +67,8 @@ import { installUnitsApi } from './lua/api/units';
 import { installBindingsApi, setBindingTable } from './lua/api/bindings';
 import { installCastingApi } from './lua/api/casting';
 import { installItemsApi } from './lua/api/items';
+import { installSpellsApi } from './lua/api/spells';
+import { installCursorApi } from './lua/api/cursor';
 import { DEFAULT_BINDINGS, fetchBindings } from './bindings';
 import { invokeScriptHandler } from './lua/scripts';
 import type { FileReport } from './runtime';
@@ -93,6 +101,12 @@ export interface WorldRuntimeOptions {
    * Snapshots only. Events belong to the bridges, which attach after the tree exists.
    */
   seed?: (vm: LuaVM) => void;
+  /**
+   * Called during the manifest load with (files executed, total), so a host can drive a real progress
+   * readout. Called only at a YIELD point -- calling it per file would report progress the browser has
+   * no opportunity to draw.
+   */
+  onProgress?: (done: number, total: number) => void;
 }
 
 export interface WorldRuntime {
@@ -103,8 +117,21 @@ export interface WorldRuntime {
   readonly report: LoadReport;
   /** Per file, in load order. */
   readonly files: FileReport[];
-  /** How long the synchronous execution pass took, in ms. Fetching is not counted -- it is async. */
+  /**
+   * Wall clock across the whole execution pass, in ms. Fetching is not counted -- it is async.
+   *
+   * **This is no longer one block.** The loop yields every `YIELD_EVERY` files (see the loop), so this
+   * includes the yields and everything the browser does inside them. `longestBlockMs` is the number
+   * that answers "how long was the screen frozen".
+   */
   readonly loadMs: number;
+  /**
+   * The longest UNBROKEN synchronous span of the execution pass, in ms -- the actual freeze.
+   *
+   * Reported separately because `loadMs` stopped being a block when the yield landed, and a stall
+   * measurement taken from `loadMs` afterwards would silently be measuring something else.
+   */
+  readonly longestBlockMs: number;
   /** Per-frame work the document itself cannot do. Safe to call before/after anything. */
   update(dt: number): void;
   /** THE teardown: `FrameRegistry.reset()` plus the VM itself. */
@@ -161,6 +188,42 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // FILE SCOPE, taking `ShowUIPanel`, `HideUIPanel`, `ToggleFrame`, `UIParent_OnLoad` and the whole
   // `UIPARENT_MANAGED_FRAME_POSITIONS` table with it. See `lua/api/items.ts` for the measurement.
   installItemsApi(vm);
+  /**
+   * THE SPELLBOOK's globals, and they must exist BEFORE the load rather than after it.
+   *
+   * `SpellBookFrame_OnLoad` runs during the manifest load and reaches `GetSpellTabInfo` on its way through
+   * `SpellBookSkillLineTab_OnClick(nil, 1)` (`spellbookframe.lua:51` -> `:566` -> `:657`), so a set
+   * installed afterwards would leave `SpellBookFrame.selectedSkillLineOffset` nil for ever -- and
+   * `SpellBook_GetSpellID` adds that value to a button id, so every slot would be nil-indexed. The book is
+   * EMPTY at this point (the bridge attaches after the load and pushes then), which is fine: an empty book
+   * makes `GetNumSpellTabs` 0 and `GetSpellTabInfo` answer nothing, which is what
+   * `SpellBookFrame_Update`'s `i <= numSkillLineTabs` guard is for.
+   */
+  installSpellsApi(vm);
+  // The cursor. Before the load because `SpellButton_OnLoad` calls `RegisterForDrag` on all 12 buttons
+  // during it, and because `installCursorApi` is what makes `PickupSpell` exist for those buttons' handlers
+  // to be bound against.
+  installCursorApi(vm);
+
+  /**
+   * `SHOW_NEWBIE_TIPS` -- an ENGINE global, not a FrameXML one, and the micro buttons' tooltips need it.
+   *
+   * Nothing in the 264 loaded files ever ASSIGNS it; three of them only read it
+   * (`gametooltip.lua:200`, `friendsframe.xml:210,380`), which is the signature of a value the engine
+   * publishes from its config. So it has to come from here.
+   *
+   * **The value is OURS and unsourced**, and the reasoning is worth stating because a nil would look
+   * harmless. `GameTooltip_AddNewbieTip`'s two branches are not symmetrical
+   * (`gametooltip.lua:199-215`): the `== "1"` branch ends in `GameTooltip:Show()` and the ELSE branch
+   * calls `SetOwner` and `SetText` and never shows anything. A micro button's `<OnEnter>` calls nothing
+   * but `GameTooltip_AddNewbieTip` and then `AddLine(" ")`
+   * (`mainmenubarmicrobuttons.xml:12-21`) -- its own `GameTooltip:Show()` sits inside an
+   * `IsEnabled() == 0 and self.minLevel` branch that a normal enabled button never takes. So with this
+   * unset or "0", NO micro button could ever display a tooltip, which contradicts what the client
+   * demonstrably does. "1" is the value that makes the client's own code path complete, and that is the
+   * whole of the evidence for it.
+   */
+  vm.setGlobal('SHOW_NEWBIE_TIPS', '1');
 
   // BEFORE the first file runs -- see `WorldRuntimeOptions#seed` for why the order is load-bearing.
   options.seed?.(vm);
@@ -174,7 +237,44 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     report.errors.push(`${FRAMEXML_DIR}${TOC}: could not be fetched; nothing was loaded`);
   }
 
+  /**
+   * THE YIELD, and it is what lets the loading screen paint and its bar advance.
+   *
+   * Running the 264 manifest files back to back is a single synchronous task, and nothing paints
+   * inside a task -- so a loading screen presented beforehand would show its FIRST frame and then
+   * freeze solid for the whole load. Awaiting a MACROTASK every `YIELD_EVERY` files gives the browser
+   * a rendering opportunity in between.
+   *
+   * `setTimeout` and not a microtask: a resolved promise drains inside the SAME task, so
+   * `await Promise.resolve()` yields to nothing and would have measured as a fix while changing
+   * nothing on screen.
+   *
+   * **THE TRADE IS REAL AND WAS MEASURED TWICE.** Without a loading screen it was refused: it bought
+   * ~0.7 s off the longest block and cost ~4 s of wall clock, i.e. a LATER interface for a slightly
+   * shorter freeze. With a screen on the glass the same seconds are spent drawing it and streaming the
+   * world rather than staring at nothing, which is why the decision reversed. The extra wall clock is
+   * NOT the timer clamp (16 yields x ~4 ms is ~64 ms); it is the render loop and the asset streaming
+   * getting the main thread back, which is the point.
+   *
+   * Safe between files by construction: the manifest is executed in order either way, and nothing else
+   * touches this VM during the boot -- the bridges attach after `bootWorldRuntime` resolves, and
+   * `WorldUiHost#render` returns immediately while `this.runtime` is unset.
+   *
+   * 16 is ours: ~6% of the manifest, so the bar moves in visible steps.
+   */
+  const YIELD_EVERY = 16;
+  let done = 0;
+  let longestBlockMs = 0;
+  let blockStarted = started;
   for (const file of order) {
+    done += 1;
+    if (done % YIELD_EVERY === 0) {
+      options.onProgress?.(done, order.length);
+      longestBlockMs = Math.max(longestBlockMs, performance.now() - blockStarted);
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise<void>((yielded) => { setTimeout(yielded, 0); });
+      blockStarted = performance.now();
+    }
     const text = resolve(file);
     if (text === null) {
       files.push({ file, kind: 'missing', frames: 0, warnings: [], errors: [`${file}: not found`] });
@@ -245,6 +345,9 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   report.errors.push(...drainScriptErrors());
 
   const loadMs = performance.now() - started;
+  // The tail after the last yield -- the login events and the frame-position pass run in it, so it is
+  // a real candidate for the longest block rather than a rounding detail.
+  longestBlockMs = Math.max(longestBlockMs, performance.now() - blockStarted);
 
   await registerTreeArt(options.art, options.root);
 
@@ -322,6 +425,51 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     }
   }
 
+  /**
+   * A FOURTH named `<OnUpdate>`: `TemporaryEnchantFrame`, and it exists to HIDE something.
+   *
+   * `TempEnchant1`/`TempEnchant2` are `<Button>`s with no `hidden` attribute (`buffframe.xml:201-217`),
+   * so they are born SHOWN and the only thing that ever hides them is
+   * `TemporaryEnchantFrame_OnUpdate` -> `TemporaryEnchantFrame_Hide` (`buffframe.lua:380-405`), whose
+   * early exit is "not hasMainHandEnchant and not hasOffHandEnchant". Nothing ticked that frame, so two
+   * bordered 32x32 squares were drawn for weapon buffs this character does not have -- the artifact
+   * `STATE.md` recorded at the window's top-left, which the hidden-widget-rect fix moved to its real
+   * place under `ConsolidatedBuffs` at the top RIGHT. Right place, still wrong to be drawn at all.
+   *
+   * Cost is one call per frame and no fingerprint churn: with `BuffFrame.numEnchants` at 0
+   * (`buffframe.lua:37`) the body skips `BuffFrame_Update`, `Hide()` on an already-hidden widget does not
+   * restamp, and the `BuffFrame:SetPoint` it re-issues is the same anchor with the same values.
+   *
+   * NOT gated on `shown`, unlike the three above: this frame is always shown and it is its CHILDREN that
+   * are being hidden.
+   */
+  const tempEnchantId = registry.byName('TemporaryEnchantFrame');
+
+  /**
+   * A FIFTH named `<OnUpdate>`: `PlayerFrame`, and it exists so the COMBAT FEEDBACK TEXT can fade.
+   *
+   * The same exception as the cast bar's, for the same kind of reason. `UNIT_COMBAT` -> the client's own
+   * `CombatFeedback_OnCombatEvent` (`combatfeedback.lua:35-105`) only writes the text, its height, its
+   * colour, `feedbackStartTime` and `SetAlpha(0.0)`, then `Show()`s it. **It shows the string at alpha
+   * ZERO** -- the entire fade-in, the hold and the fade-out live in `CombatFeedback_OnUpdate`
+   * (`combatfeedback.lua:107-131`), which `PlayerFrame_OnUpdate` calls as its last statement
+   * (`playerframe.lua:423`). Without the tick the indicator is shown and stays PERMANENTLY at alpha
+   * zero: not "no animation", but no text at all.
+   *
+   * `PlayerFrame_OnUpdate` also runs the resting-status pulse (gated on `PlayerStatusTexture:IsShown()`)
+   * and the PvP timer (gated on `PlayerPVPTimerText.timeLeft` being non-nil), so those come along and both
+   * are already gated in the client's own body.
+   *
+   * NOT gated on `shown` -- `PlayerFrame` is always shown -- but the FEEDBACK's cost is bounded by the
+   * client's own `if ( feedbackText:IsVisible() )` first line, and `CombatFeedback_OnCombatEvent`'s
+   * `Hide()` at the end of the fade closes it. So the fingerprint churns for the 1.2 s of one indicator's
+   * life (`COMBATFEEDBACK_FADEINTIME` 0.2 + `_HOLDTIME` 0.7 + `_FADEOUTTIME` 0.3) and not otherwise,
+   * which is the cast bar's honest cost in a shorter window. That is the difference between this medium
+   * and the floating number: the floating one is world geometry and costs the fingerprint nothing
+   * (`world/floating-text.ts`), and having BOTH is what the owner asked for.
+   */
+  const playerFrameId = registry.byName('PlayerFrame');
+
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
   let caretClock = 0;
@@ -333,6 +481,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     report,
     files,
     loadMs,
+    longestBlockMs,
     update: (dt: number) => {
       caretClock += dt;
       const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
@@ -358,6 +507,14 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
       // The cast bar's fill and spark -- see `castingBarId`. Shown only during a cast and its fade.
       if (castingBarId !== null && registry.widget(castingBarId)?.shown) {
         invokeScriptHandler(ctx, castingBarId, 'OnUpdate', [dt]);
+      }
+      // The combat feedback text's fade-in, hold and fade-out -- see `playerFrameId`.
+      if (playerFrameId !== null) {
+        invokeScriptHandler(ctx, playerFrameId, 'OnUpdate', [dt]);
+      }
+      // The weapon-enchant slots hiding themselves -- see `tempEnchantId`.
+      if (tempEnchantId !== null) {
+        invokeScriptHandler(ctx, tempEnchantId, 'OnUpdate', [dt]);
       }
       // The range indicator and the attack flash -- see `actionButtonIds`. Shown buttons only, which is
       // however many slots the character has filled.

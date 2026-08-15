@@ -28,6 +28,10 @@
  */
 import { LuaVM } from '../vm';
 import { notImplemented } from '../methods/region';
+// A PURE TABLE, not a world handle -- `selectionColor` takes three plain values and returns three
+// numbers. The "no world, no network, no guids" rule above is intact: nothing here can reach a `World`
+// through it. It lives beside the ground ring because the ring is the selector's other surface.
+import { selectionColor } from '../../../../world/selection-color';
 
 /**
  * What the host knows about one unit, at one instant.
@@ -95,6 +99,24 @@ export interface UnitSnapshot {
    * nothing else does.
    */
   baseMana: number;
+
+  /**
+   * What `UnitRace` and `UnitClass` answer, ALREADY RESOLVED TO STRINGS by the host.
+   *
+   * Names and not ids, because this file holds no world, no network and no pipeline -- see the
+   * header. The ids live in `UNIT_FIELD_BYTES_0` bytes 0 and 1 and the join to `ChrRaces.dbc` /
+   * `ChrClasses.dbc` is `unit-bridge.ts`' business, exactly as the `reaction` join already is.
+   *
+   * Each is a PAIR because both globals return two values and the second is not the first: the
+   * second is a token FrameXML keys real tables on (`RAID_CLASS_COLORS`, `CLASS_ICON_TCOORDS` are
+   * both indexed by the uppercase class token), so answering the localized name twice would look
+   * right in a header and break every lookup built on it.
+   *
+   * Null until `bytes_0` has arrived AND the DBC has landed -- `UnitRace` answers nothing rather
+   * than a wrong race.
+   */
+  race: { name: string; token: string } | null;
+  classInfo: { name: string; token: string } | null;
 }
 
 /** A unit that exists but about which nothing has arrived yet. */
@@ -115,6 +137,8 @@ export function emptySnapshot(): UnitSnapshot {
     maxXp: 0,
     restXp: 0,
     baseMana: 0,
+    race: null,
+    classInfo: null,
   };
 }
 
@@ -172,6 +196,33 @@ export function setUnit(vm: LuaVM, token: string, snapshot: UnitSnapshot | null)
 /** What the host last pushed for `token`, or null. Exposed for tests and for the host's own diffing. */
 export function getUnit(vm: LuaVM, token: string): UnitSnapshot | null {
   return unitsOf(vm).get(token) ?? null;
+}
+
+/**
+ * COMBO POINTS -- a per-VM scalar, not a unit field, because that is what it is on the wire.
+ *
+ * They arrive on their OWN opcode, `SMSG_UPDATE_COMBO_POINTS` (**0x39D**, already in `opcode.js` and
+ * until now with no subscriber), whose body is `pguid comboTarget` + `u8 comboPoints` -- see
+ * `network/game/object/spells.ts#handleComboPoints` for the decode and for what is and is not sourced
+ * about that layout. There is no `UNIT_FIELD_COMBO_POINTS`, so this cannot ride `UnitSnapshot`.
+ *
+ * `GetComboPoints(unit, target)` (`ComboFrame.lua:20`, reached from `PlayerFrame_ToPlayerArt`) is
+ * answered from here, and it is A QUESTION ABOUT A PAIR: points are banked against ONE unit and the
+ * real client answers zero when you are looking at a different one. That comparison is the HOST's,
+ * not this file's -- this module's header promises no world, no network and NO GUIDS, and the combo
+ * target is a guid. So the host pushes the number the current pair is worth (`unit-bridge.ts`), which
+ * is the same division of labour `UnitSnapshot.reaction` already uses.
+ */
+const comboByVm = new WeakMap<LuaVM, number>();
+
+/** The push door: the combo points the CURRENT player/target pair is worth. */
+export function setComboPoints(vm: LuaVM, points: number): void {
+  comboByVm.set(vm, points);
+}
+
+/** What the host last pushed. Exposed for the host's own diffing, like `getUnit`. */
+export function getComboPoints(vm: LuaVM): number {
+  return comboByVm.get(vm) ?? 0;
 }
 
 /** Installs every `Unit*` global on `vm`. Safe with no host feed at all: every token simply does not exist. */
@@ -300,6 +351,69 @@ export function installUnitsApi(vm: LuaVM): void {
   fn('IsXPUserDisabled', () => [false]);
 
   fn('UnitReaction', (args) => [withUnit(args[0], null, (u) => u.reaction)]);
+
+  /**
+   * `UnitSelectionColor(unit)` -> `r, g, b, a` -- the reaction palette, and it was the target frame's
+   * BRIGHT SILVER NAME BAR.
+   *
+   * `TargetFrame_CheckFaction`'s else-branch is `self.nameBackground:SetVertexColor(UnitSelectionColor
+   * (self.unit))` (`targetframe.lua:268`) over `UI-TargetingFrame-LevelBackground`
+   * (`targetframe.xml:215`). This was a declared gap answering `1, 1, 1, 1`, so the strip drew at full
+   * white -- the owner's "the target's health bar looks wrong". Measured live as `Sgh` on a Vale Moth:
+   * `scratchpad/t17c-real-name.png`.
+   *
+   * THE PALETTE IS THE REFERENCE'S, read off the client's own selector `0x605960`
+   * (`benilla/src/target/ring.rs:115-118, 186-223`), on the raw reaction RANK -- which is
+   * `UnitReaction`'s 1..8 scale minus one, so rank <= 1 is reaction <= 2:
+   *   reaction <= 2 hostile RED, 3 unfriendly ORANGE, 4 neutral YELLOW, >= 5 friendly GREEN.
+   *
+   * A PLAYER-CONTROLLED unit branches first in that selector and reads soft blue
+   * (`RING_PLAYER`, ring.rs:119) unless its rank is already hostile. The selector's further legs --
+   * PvP-flagged green, pale for a party member -- need `UnitIsPVP` and a party roster, both declared
+   * gaps here, so those two refinements are NOT applied and a PvP-flagged enemy player reads blue
+   * rather than green. Stated rather than guessed.
+   *
+   * ALSO NOT APPLIED: the selector's DEAD grey (`RING_DEAD`). That is the ground RING's rule and
+   * extending it to the name background is an extrapolation this has no evidence for; the tapped-grey
+   * case the name background really does have is the client's OWN first branch
+   * (`targetframe.lua:262-264`), which it takes without asking us.
+   *
+   * A unit whose reaction is still unresolved -- `FactionTemplate.dbc` in flight -- already reads
+   * NEUTRAL before it gets here: `unit-bridge.ts:79` is `reactionFor(unit, self) ?? REACTION_NEUTRAL`,
+   * so `UnitSnapshot.reaction` is never null and there is nothing to defend against a second time.
+   * That collapse is the reference's own fallback (`ring.rs:598`,
+   * `resolved.unwrap_or(Reaction::Neutral)`).
+   */
+  fn('UnitSelectionColor', (args) => {
+    const white: unknown[] = [1, 1, 1, 1];
+    if (typeof args[0] !== 'string') {
+      return white;
+    }
+    const unit = units.get(args[0]);
+    if (unit === undefined) {
+      return white;
+    }
+    // ONE LAW, ONE FUNCTION -- `world/selection-color.ts` is the selector, shared with the ground
+    // selection ring. The palette used to be spelled out here; the reference records what happens when
+    // the two surfaces the selector feeds keep separate copies (`ring.rs:137-145`: the ring gained the
+    // PvP legs, the name's copy did not, and a flagged player drew a green ring under a blue name).
+    // `dead` is left at its default here -- see that file for why the gray is the ring's rule alone.
+    const [r, g, b] = selectionColor(unit.reaction, unit.isPlayer);
+    return [r, g, b, 1];
+  });
+  /**
+   * `GetComboPoints(unit, target)` -- `ComboFrame.lua:20`, reached from `PlayerFrame_ToPlayerArt`.
+   *
+   * The arguments are NOT inspected, and that is deliberate rather than lazy: the host already
+   * resolved the pair when it pushed (see `setComboPoints`), and the only pair the 3.3.5a manifest
+   * ever asks about is `("player", "target")` -- `ComboFrame_Update` is the sole caller. Reading a
+   * token here would need a guid, which this module does not have and must not acquire.
+   *
+   * Zero when nothing has been pushed, which is the true answer for every class but a rogue or a
+   * druid in Cat Form, and for those two out of combat.
+   */
+  fn('GetComboPoints', () => [getComboPoints(vm)]);
+
   fn('UnitClassification', (args) => [withUnit(args[0], 'normal', (u) => u.classification)]);
   fn('UnitIsPlayer', (args) => [withUnit(args[0], false, (u) => u.isPlayer)]);
   fn('UnitIsDead', (args) => [withUnit(args[0], false, (u) => u.dead)]);
@@ -387,6 +501,36 @@ export function installUnitsApi(vm: LuaVM): void {
   fn('GetUnitName', (args) => [withUnit(args[0], null, (u) => u.name)]);
   fn('UnitPlayerControlled', (args) => [withUnit(args[0], false, (u) => u.isPlayer)]);
 
+  /**
+   * `UnitRace(unit)` -> `localizedName, fileName` and `UnitClass(unit)` -> `localizedName, TOKEN`.
+   *
+   * **BOTH RETURN TWO VALUES AND THE SECOND IS NOT THE FIRST.** FrameXML keys real tables on the
+   * second -- `RAID_CLASS_COLORS` and `CLASS_ICON_TCOORDS` are both indexed by the uppercase class
+   * token -- so answering the localized name twice would look right in a header and break every
+   * lookup built on it. See `pipeline/dbc/race-class-data.ts` for which DBC column each comes from.
+   *
+   * THIS IS WHAT THE CHARACTER PANEL'S HEADER WAS BLOCKED ON. `PaperDollFrame_SetLevel`
+   * (`paperdollframe.lua:203`) is a single line calling all three of `UnitLevel`, `UnitRace` and
+   * `UnitClass`; `UnitRace` was registered NOWHERE, so it was a nil global, the line raised, and
+   * `CharacterLevelText` kept the placeholder `paperdollframe.xml:279` authors -- the literal
+   * `"Level level race class"` the owner sees. It was never a string-formatting gap:
+   * `SetFormattedText` has been implemented since `methods/region.ts:685`.
+   *
+   * An EMPTY return (not a nil pair) when the id is 0 or the tables have not landed, because both
+   * callers destructure into two locals and `format` prints "nil" for a nil where it prints nothing
+   * for a missing argument.
+   */
+  const namePair = (
+    token: unknown,
+    read: (u: UnitSnapshot) => { name: string; token: string } | null,
+  ): unknown[] => {
+    const row = withUnit(token, null, read);
+    return row === null ? [] : [row.name, row.token];
+  };
+
+  fn('UnitRace', (args) => namePair(args[0], (u) => u.race));
+  fn('UnitClass', (args) => namePair(args[0], (u) => u.classInfo));
+
   // Gaps, declared. Each of these has NO source in this client today: there is no threat table, no
   // aura array read off the update fields, no cast bar feed, no tap state and no party roster. They
   // are registered so that `TargetFrame.lua` calling them does not raise and take its whole update
@@ -409,8 +553,6 @@ export function installUnitsApi(vm: LuaVM): void {
     ['UnitInParty', 'no party roster is fed', [false]],
     ['UnitInRaid', 'no raid roster is fed', []],
     ['UnitIsPartyLeader', 'no party roster is fed', [false]],
-    ['UnitSelectionColor', 'the reaction palette is not ported yet', [1, 1, 1, 1]],
-    ['UnitClass', 'no class is read out of UNIT_FIELD_BYTES_0 yet', []],
   ];
   // NOT `Unit*`, but on the same path and found the same way -- by loading the manifest and reading
   // which call `UnitFrame_OnLoad` died on next. Each of these is an ENGINE global (no FrameXML file
@@ -507,9 +649,17 @@ export function installUnitsApi(vm: LuaVM): void {
     // `UnitBuff`/`UnitDebuff` above are the same gap by their other two names. Answering nothing
     // terminates the walk at index 1, which is what a unit with no auras looks like.
     ['UnitAura', 'auras are not read out of the update fields yet', []],
-    // `ComboFrame.lua:20`, reached from `PlayerFrame_ToPlayerArt`. Zero is what a warrior has and
-    // what any class has out of combat, so it is also the true answer here far more often than not.
-    ['GetComboPoints', 'no combo-point state is read from the wire', [0]],
+    /**
+     * `GetWeaponEnchantInfo()` -> `hasMainHand, mainExpiration, mainCharges, hasOffHand, ...`.
+     *
+     * Answering NOTHING is what makes `TemporaryEnchantFrame_OnUpdate` take its early exit and HIDE the
+     * two weapon-buff squares (`buffframe.lua:400-405`); they are authored shown (`buffframe.xml:201-217`)
+     * and nothing else hides them. So this gap has a visible effect the moment it is declared, which is
+     * why it is declared rather than left nil -- a nil raised inside that handler and the squares stayed.
+     * The real feed is the main/off-hand temporary-enchant fields of the player's item data, which this
+     * client does not decode at all.
+     */
+    ['GetWeaponEnchantInfo', 'no item data is decoded, so no weapon enchant is known', []],
     // The Chinese anti-addiction play-time pair, which `PlayerFrame_UpdatePlaytime` calls
     // unconditionally (playerframe.lua:507). Both false is "no play-time restriction", which is what
     // every non-CN realm reports.
@@ -543,12 +693,16 @@ export function installUnitsApi(vm: LuaVM): void {
     // order is now measured and it was this one, which is why shift state never reached the Lua.
     // `IsControlKeyDown` and `IsAltKeyDown` moved to `screen.ts` beside it for the same reason.
     //
-    // `IsModifiedClick` stays a gap: it is not a key query but a lookup of which modifier a NAMED action is
-    // bound to (`"CHATLINK"`, `"DRESSUP"`, ...) through the client's binding table, and that mapping is not
-    // sourced here. False is the safe direction -- every caller uses it to ADD behaviour.
-    ['IsModifiedClick', 'the modifier-to-action binding table (CHATLINK, DRESSUP, ...) is not read', [false]],
+    // `IsModifiedClick` is NO LONGER HERE either, and for the same shadowing reason: it is real in
+    // `api/screen.ts` beside the three key trackers it reads, because the shift-gated action bar needs it
+    // (`actionbarframe.xml:19`). A hard `false` here would have shadowed it in the world, which is exactly
+    // the defect the three keys above suffered.
     ['GetBindingKey', 'no keybinding table exists in this client', []],
-    ['GetMoney', 'PLAYER_FIELD_COINAGE is not read yet', [0]],
+    // `GetMoney` IS NO LONGER HERE. `PLAYER_FIELD_COINAGE` is read now -- `ItemHandler` accumulates our
+    // own character's descriptor words -- so it is a REAL global in `ui/container-bridge.ts`, beside the
+    // rest of the inventory. It must not also be declared here: `installUnitsApi` runs during the boot,
+    // before the bridge attaches, but a stub registered later or a name resolved through this table
+    // would shadow the real answer, which is the exact defect the `IsModifiedClick` note above records.
   );
 
   /**

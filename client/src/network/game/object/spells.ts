@@ -161,6 +161,15 @@ export class SpellHandler extends EventEmitter {
    */
   private castPose = new Map<string, { spellId: number; animId: number }>();
 
+  /**
+   * The last `SMSG_UPDATE_COMBO_POINTS`: how many points, and WHICH unit they are banked against.
+   *
+   * PUBLIC because `unit-bridge.ts` has to compare `target` with what the player is looking at --
+   * `GetComboPoints` is a question about a pair, and the pair is only knowable where both guids are.
+   * See `handleComboPoints`.
+   */
+  public comboState: { points: number; target: string | null } = { points: 0, target: null };
+
   constructor(gameHandler: GameHandler) {
     super();
     this.game = gameHandler;
@@ -174,6 +183,71 @@ export class SpellHandler extends EventEmitter {
     this.game.on('packet:receive:SMSG_CLEAR_COOLDOWN', this.handleClearCooldown.bind(this));
     this.game.on('packet:receive:SMSG_SPELL_FAILURE', this.handleSpellFailure.bind(this));
     this.game.on('packet:receive:SMSG_SPELL_DELAYED', this.handleSpellDelayed.bind(this));
+    this.game.on('packet:receive:SMSG_UPDATE_COMBO_POINTS', this.handleComboPoints.bind(this));
+  }
+
+  /**
+   * `SMSG_UPDATE_COMBO_POINTS` (**0x39D**): where combo points come from, and the answer is that they
+   * come on their own opcode and nowhere else.
+   *
+   * Established by ELIMINATION as much as by reading: there is no `UNIT_FIELD_COMBO_POINTS` in 3.3.5a's
+   * update-field enum (`network/game/object/enums.ts` decodes the whole unit block and has no such
+   * field), so a client cannot read them off a snapshot. The opcode was already in `opcode.js:927` --
+   * present in the build's own enum -- with **no subscriber at all**, which is exactly the shape
+   * `SMSG_SPELL_DELAYED` was in before it was wired.
+   *
+   * Body: `pguid comboTarget`, `u8 comboPoints`. **The layout is NOT sourced from the client or from a
+   * capture** -- it is the server implementations' shape, the same class of evidence as the `u8` slot
+   * prefix on `CMSG_SET_ACTION_BUTTON`, and it is labelled here rather than presented as measured.
+   * It is SELF-CHECKING on the `combatWire` principle: the body must be consumed WHOLE and the count
+   * must be 0..5 (3.3.5a's maximum, and Ruthlessness cannot exceed it), or the packet is recorded and
+   * DROPPED rather than believed. If the layout is wrong, `spellWire` says so instead of the combo
+   * frame lighting five points for a misread byte.
+   *
+   * **NOT VERIFIED LIVE, and it cannot be here**: neither test account has a rogue or a druid, and no
+   * other class is ever sent this packet. `spellWire` will carry the first real one.
+   */
+  private handleComboPoints(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    let target = '0x0';
+    let points = 0;
+    try {
+      target = gp.readPackedGUID();
+      points = gp.readUnsignedByte();
+    } catch (error) {
+      spellWire.record({
+        at: Date.now(),
+        kind: 'COMBO_POINTS',
+        spellId: 0,
+        caster: null,
+        detail: { error: String(error) },
+        bodySize,
+        consumed: gp.index - gp.headerSize,
+      });
+      return;
+    }
+    const consumed = gp.index - gp.headerSize;
+    const plausible = points <= 5 && consumed === bodySize;
+    spellWire.record({
+      at: Date.now(),
+      kind: 'COMBO_POINTS',
+      spellId: 0,
+      caster: target,
+      detail: { points, plausible: plausible ? 1 : 0 },
+      bodySize,
+      consumed,
+    });
+    if (!plausible) {
+      console.warn(
+        `UPDATE_COMBO_POINTS: ${points} points and ${consumed} of ${bodySize} bytes consumed -- the layout is probably wrong`,
+      );
+      return;
+    }
+    // A zero count carries no combo target in the real client's own bookkeeping (the points are gone),
+    // so it is normalised to null here and the bridge does not have to special-case a stale guid.
+    this.comboState = points === 0 ? { points: 0, target: null } : { points, target };
+    this.emit('comboPoints', this.comboState);
   }
 
   /**
@@ -904,6 +978,37 @@ export class SpellHandler extends EventEmitter {
     });
   }
 
+  /**
+   * `CMSG_CANCEL_CAST` (0x12F): stop the cast in flight. Escape's own leg -- see
+   * `game/ui/target-bridge.ts#SpellStopCasting` for the precedence it sits in.
+   *
+   * 3.3.5a body: `u8 castCount`, `u32 spellId`. **The layout is the SERVER IMPLEMENTATIONS' shape, not
+   * measured off a capture** -- the same standing this file's `CMSG_SET_ACTION_BUTTON` note takes:
+   * TrinityCore's `HandleCancelCastOpcode` reads and discards a leading counter byte and then the
+   * spell id. It is labelled rather than asserted because nothing here can observe the difference: a
+   * cancel the server rejects is silent.
+   *
+   * `castCount` is the same value `castSpell` sent (0 for every cast this client makes), echoed so a
+   * server that does match them matches this one.
+   */
+  cancelCast(spellId: number, castCount: number): void {
+    const body = 1 + 4;
+    const app = new GamePacket(GameOpcode.CMSG_CANCEL_CAST, GamePacket.HEADER_SIZE_OUTGOING + body);
+    app.writeUnsignedByte(castCount & 0xff);
+    app.writeUnsignedInt(spellId);
+    this.game.send(app);
+
+    spellWire.record({
+      at: Date.now(),
+      kind: 'CANCEL_SENT',
+      spellId,
+      caster: null,
+      detail: { castCount },
+      bodySize: body,
+      consumed: body,
+    });
+  }
+
   // -- What the Lua side reads --------------------------------------------------------------------
 
   /** `action` is Lua's 1-based slot number, as `ActionButton.lua` computes it. */
@@ -945,6 +1050,127 @@ export class SpellHandler extends EventEmitter {
 
   knownSpells(): ReadonlySet<number> {
     return this.known;
+  }
+
+  /**
+   * `CMSG_SET_ACTION_BUTTON` (**0x128**): TELL THE SERVER an action slot changed.
+   *
+   * This is what stops a rearranged bar reverting on relog, and it is the outbound half of the drag work:
+   * moving an ability is a real change to the character, not a client-side display choice.
+   *
+   * **Body: `u8 slot` + `u32 packedData`**, 5 bytes. The slot is **0-BASED** -- the same indexing
+   * `SMSG_ACTION_BUTTONS` uses for its 144-word array -- so a 1-based Lua action becomes `action - 1`
+   * here, at the one place that conversion happens for the outbound direction (`slot()` is the inbound one).
+   * `packedData` is `(type << 24) | (action & 0x00FFFFFF)`, the identical packing `handleActionButtons`
+   * decodes, and **`packedData == 0` is the REMOVE form** -- the server drops the button rather than
+   * storing an empty one.
+   *
+   * ## What is evidence and what is not, stated plainly
+   *
+   * The PACKING is corroborated in this client: `handleActionButtons` reads exactly this layout out of
+   * `SMSG_ACTION_BUTTONS`, and it was confirmed against a real 577-byte body whose five filled words
+   * decoded to sensible spells at the slots `SpellShapeshiftForm.dbc` independently predicted. So the word
+   * format is measured, not guessed.
+   *
+   * The `u8 slot` PREFIX is not: it comes from the server implementations this build's protocol is shared
+   * with (TrinityCore 3.3.5's `WorldSession::HandleSetActionButtonOpcode` reads `uint8 button` then
+   * `uint32 packetData` and treats a zero payload as a removal; vmangos is the same), and this client has
+   * no capture of the opcode being sent. **It is verified only to the extent that the round trip works** --
+   * the server answers a correct write by storing it, which shows up as the bar surviving a relog. A wrong
+   * prefix width would put the action in the wrong slot or be rejected outright, so the failure is visible
+   * rather than silent, which is why sending it is better than leaving the move client-only.
+   *
+   * `>>> 0` on the packed word for the reason `handleActionButtons` uses `>>> 24`: a type byte of 0x80
+   * makes the value exceed 2^31, and `writeUnsignedInt` must be handed an unsigned number.
+   */
+  setActionButton(action: number, spellId: number | null): void {
+    if (!Number.isFinite(action) || action < 1 || action > MAX_ACTION_BUTTONS) {
+      return;
+    }
+    // `packedData` 0 is the server's REMOVE form; a spell keeps type `ACTION_BUTTON_SPELL` (0x00), so the
+    // packed word for a spell is just its id.
+    const packed = spellId === null || spellId === 0
+      ? 0
+      : (((ACTION_BUTTON_SPELL << 24) | (spellId & ACTION_MASK)) >>> 0);
+
+    const app = new GamePacket(GameOpcode.CMSG_SET_ACTION_BUTTON, GamePacket.HEADER_SIZE_OUTGOING + 1 + 4);
+    app.writeUnsignedByte(action - 1);
+    app.writeUnsignedInt(packed);
+    this.game.send(app);
+
+    // The LOCAL slot is updated too, and it must be: `SMSG_ACTION_BUTTONS` is sent once at login and the
+    // server sends no acknowledgement for this opcode, so nothing would ever tell the bar what it now
+    // holds. The array is grown if the login packet was short (a non-zero `packetType` can carry no
+    // slots), so a write cannot land on a hole.
+    while (this.slots.length < MAX_ACTION_BUTTONS) {
+      this.slots.push({ action: 0, type: ACTION_BUTTON_SPELL });
+    }
+    this.slots[action - 1] = {
+      action: spellId ?? 0,
+      type: ACTION_BUTTON_SPELL,
+    };
+
+    spellWire.record({
+      at: Date.now(),
+      kind: 'SET_ACTION_BUTTON',
+      spellId: spellId ?? 0,
+      caster: null,
+      detail: {
+        slot: action,
+        wireSlot: action - 1,
+        packed,
+        name: spellId === null ? null : (spellData.spell(spellId)?.name ?? null),
+      },
+      bodySize: 5,
+      consumed: 5,
+    });
+  }
+
+  /**
+   * Move an action from one slot to another, SWAPPING with whatever is already in the destination.
+   *
+   * A swap and not an overwrite, because that is what the real client does with a bar-to-bar drag: the
+   * displaced ability lands where the dragged one came from rather than being destroyed. Two packets, one
+   * per slot, because the opcode addresses a single button -- there is no swap opcode.
+   *
+   * `actionsChanged` is emitted ONCE, after both writes, so `action-bridge.ts#pushAll` sees a consistent
+   * pair. Emitting per write would hand the UI a moment in which the same ability was in both slots.
+   */
+  moveActionButton(from: number, to: number): void {
+    if (from === to) {
+      return;
+    }
+    const source = this.spellInSlot(from);
+    const destination = this.spellInSlot(to);
+    if (source === null) {
+      return;
+    }
+    this.setActionButton(to, source);
+    this.setActionButton(from, destination);
+    this.emit('actionsChanged');
+  }
+
+  /** Put a spell into a slot, replacing whatever was there. The spellbook-to-bar drag. */
+  assignActionButton(action: number, spellId: number): void {
+    this.setActionButton(action, spellId);
+    this.emit('actionsChanged');
+  }
+
+  /**
+   * EMPTY a slot: an ability dragged off the bar and dropped on the world.
+   *
+   * `setActionButton(action, null)` is already the remove form -- `packedData == 0`, which the server
+   * treats as "drop this button" -- so this adds only the `actionsChanged` the UI redraws on. Without the
+   * emit the server forgets the action and the bar keeps drawing it until the next relog, which is
+   * measurably what happened when a probe called `setActionButton` directly: `HasAction(7)` still read
+   * true afterwards.
+   */
+  clearActionButton(action: number): void {
+    if (this.spellInSlot(action) === null) {
+      return;
+    }
+    this.setActionButton(action, null);
+    this.emit('actionsChanged');
   }
 
   /** Named types for anything a slot holds that this client cannot act on, for the load report. */

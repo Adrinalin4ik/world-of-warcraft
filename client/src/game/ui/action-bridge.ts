@@ -37,6 +37,8 @@ import { fireEvent } from './framexml/lua/events';
 import { getCast, setCast } from './framexml/lua/api/casting';
 import { gameTime } from './framexml/lua/compat';
 import { spellData } from '../pipeline/dbc/spell-data';
+import { renderSpellDescription } from '../pipeline/dbc/spell-description';
+import { casterStatsFor } from './caster-stats';
 import { shapeshiftData } from '../pipeline/dbc/shapeshift-data';
 import { LuaVM } from './framexml/lua/vm';
 import type Unit from '../classes/unit';
@@ -154,6 +156,12 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       spellId,
       texture: spellData.iconPath(spellId),
       name: row?.name ?? '',
+      // Both for the tooltip. `''` rather than null, which is the contract both fields declare.
+      subName: row?.subName ?? '',
+      // THE DESCRIPTION IS EVALUATED HERE, not in the tooltip method: `$s1`/`$AP`/`$<mult>` need the
+      // spell's own effect columns AND the player's live stats, and this is the seam that has both.
+      // A token the evaluator cannot resolve is left VISIBLE -- see `spell-description.ts`.
+      description: row === null ? '' : renderSpellDescription(row, casterStatsFor(world, spells)),
       isAttack: spellId === SPELL_AUTO_ATTACK,
       // Only auto-attack drives "current" today; see `api/actions.ts`'s `IsCurrentAction`.
       isCurrent: spellId === SPELL_AUTO_ATTACK && spells.autoAttackOn,
@@ -454,6 +462,8 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     const startTimeMs = nowMs - elapsedMs;
     setCast(vm, 'player', {
       name: row?.name ?? '',
+      // Carried so `SpellStopCasting` can name the spell in `CMSG_CANCEL_CAST`; see `api/casting.ts`.
+      spellId: decoded.spellId,
       texture: spellData.iconPath(decoded.spellId),
       startTimeMs,
       endTimeMs: startTimeMs + decoded.castTimeMs,
@@ -588,6 +598,10 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   pushBonusBar();
 
   (window as unknown as Record<string, unknown>).actionBridgeStats = stats;
+  // THE DESCRIPTION INSTRUMENT's missing half. `window.spellDescription.explain` needs a `CasterStats`
+  // and the pipeline module has no world; this is the one place that has both. See
+  // `pipeline/dbc/spell-description.ts#explainSpellDescription`.
+  (window as unknown as Record<string, unknown>).casterStats = () => casterStatsFor(world, spells);
 
   return () => {
     window.clearInterval(rangeTimer);
@@ -602,5 +616,6 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     spells.removeListener('spellFailure', onSpellFailure);
     world.removeListener('unit:fields', onFields);
     delete (window as unknown as Record<string, unknown>).actionBridgeStats;
+    delete (window as unknown as Record<string, unknown>).casterStats;
   };
 }

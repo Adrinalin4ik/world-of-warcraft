@@ -38,6 +38,22 @@ export interface SpellWireRow {
     | 'SPELL_GO'
     | 'CAST_FAILED'
     | 'CAST_SENT'
+    /**
+     * `CMSG_SET_ACTION_BUTTON` (0x128) as SENT -- one action slot written to the server, which is what
+     * makes a dragged ability survive a relog.
+     *
+     * OUTBOUND, like `CAST_SENT`, and its own kind for the same reason: the server sends no
+     * acknowledgement for this opcode, so this row is the only record that the move reached the wire at
+     * all. `detail.wireSlot` is the 0-based slot actually written and `detail.packed` the word, so a
+     * suspected layout error can be read back without a packet capture.
+     */
+    | 'SET_ACTION_BUTTON'
+    /**
+     * `CMSG_CANCEL_CAST` (0x12F) as SENT -- Escape cancelling the cast in flight
+     * (`ui/target-bridge.ts#SpellStopCasting`). OUTBOUND, and its own kind for `SET_ACTION_BUTTON`'s
+     * reason: the server may echo nothing at all, so this row is the only record it went out.
+     */
+    | 'CANCEL_SENT'
     // The three cooldown opcodes. `SPELL_COOLDOWN` (0x134) carries a whole list, `COOLDOWN_EVENT` (0x135)
     // one spell with no duration; both are on the wire and neither carries the GLOBAL cooldown, which the
     // client computes from `Spell.dbc` column 206 (`object/spells.ts#applyGlobalCooldown`).
@@ -50,6 +66,12 @@ export interface SpellWireRow {
     // interrupted-but-not-broken by a hit; `detail.delayMs` is how much later it now finishes. Its own
     // kind because it is the one spell opcode that neither starts nor ends a cast.
     | 'SPELL_DELAYED'
+    // `SMSG_UPDATE_COMBO_POINTS` (0x39D) -- a rogue's or a Cat Form druid's banked combo points.
+    // `detail.points` is the count and `caster` carries the COMBO TARGET's guid (the packet's only
+    // guid; the field is named for the common case). Its own kind because its body layout is the one
+    // thing on this wire taken from the server implementations rather than measured, so a wrong read
+    // has to be visible as itself -- see `spells.ts#handleComboPoints`.
+    | 'COMBO_POINTS'
     /**
      * Not a packet: the one row `spell-data.ts` writes when the four DBC tables finish loading, with
      * their row counts and the elapsed ms.

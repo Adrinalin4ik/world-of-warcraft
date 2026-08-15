@@ -422,4 +422,30 @@ describe('ProtocolSession', () => {
     // And joined must still read false: a following mutation must still hit the guard.
     await expect(session.deleteCharacter('0x1')).rejects.toThrow(/joining a realm/);
   });
+
+  /**
+   * THE WORLD-ENTRY BUG. `on()` is an edge subscription with no replay, so a subscriber that attaches
+   * after a stage change has already been emitted used to have no way to learn it -- which is exactly
+   * what `GlueApp#start` does, since it subscribes only after awaiting the fonts and the string table.
+   * A login completing inside that window left the client on the glue screen with an entered world
+   * behind it.
+   *
+   * `state` is the recovery, and this pins the property that makes it safe: what a LATE subscriber
+   * reads must equal what an EARLY subscriber was handed.
+   */
+  it('lets a late subscriber recover the stage it missed', async () => {
+    const session = new ProtocolSession(fakeLogon(), fakeWorld());
+    const early: LoginStage[] = [];
+    session.on((state) => early.push(state.stage));
+
+    await session.login('tester', 'secret');
+
+    // Attaching now: every emission above has already happened and is gone.
+    const late: LoginStage[] = [];
+    session.on((state) => late.push(state.stage));
+    expect(late).toEqual([]);
+
+    expect(session.state.stage).toBe(early[early.length - 1]);
+    expect(session.state.stage).toBe(LoginStage.RealmList);
+  });
 });

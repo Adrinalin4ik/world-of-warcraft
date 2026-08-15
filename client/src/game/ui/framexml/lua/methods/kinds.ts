@@ -229,11 +229,29 @@ function applyStateArg(region: Widget, arg: unknown): void {
  * Recomputes which of Normal/Pushed/Disabled is visible for the button's CURRENT `state`, mutually
  * exclusive.
  *
- * THE RULE the byte-verified client enforces, preserved here on purpose: a disabled button whose
- * Disabled texture was never set draws NOTHING while disabled -- there is no fallback to Normal. That
- * is why this is a straight three-way switch with no "else use normal" branch; an empty equipment
- * slot in the real client is empty for exactly this reason, and adding a fallback here would make
- * every unset Disabled texture look like an enabled button instead of a blank one.
+ * **THE TWO SLOTS DO NOT SHARE A RULE, and treating them alike hid the spellbook tabs' icons.**
+ * The reference states both halves off the byte-verified `SetState 0x779790`
+ * (`benilla-ui/src/widget/kinds/mod.rs:388-418`, `region_visible`):
+ *
+ *  - DISABLED has **no fallback**: a disabled button whose Disabled texture was never set draws
+ *    NOTHING. An empty equipment slot in the real client is empty for exactly this reason, and a
+ *    fallback would make every unset Disabled texture look like an enabled button.
+ *  - PUSHED **falls back to Normal**: `self.pushed.or(self.normal)`, and the reference says why in
+ *    words -- "a pressed button without pushed art keeps its normal art in the reference".
+ *
+ * This function had the disabled rule applied to both, and that was the owner's report: holding the
+ * mouse on a spellbook skill-line tab made its icon vanish and releasing brought it back.
+ * `SpellBookSkillLineTabTemplate` authors **no `<PushedTexture>` at all** and its `<NormalTexture/>` is
+ * the ICON (`spellbookframe.xml:9-44`; `spellbookframe.lua:110` does
+ * `skillLineTab:SetNormalTexture(texture)` from `GetSpellTabInfo`'s second return), so hiding Normal on
+ * the press left only the tab's BACKGROUND frame art -- a visible tab with a hole in it. The same file
+ * gives the SPELL buttons a real `<PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>`
+ * (`:191`), which is the authorship argument on its own: a document that gives one button depress art
+ * and its neighbour none is not asking for the neighbour to blank.
+ *
+ * Keyed on the REGION EXISTING, not on it carrying a sprite -- which is what `Option<RegionHandle>`
+ * means in the reference. A region with a null sprite is skipped by the renderer anyway, so the two
+ * readings agree on screen and this one agrees with the reference's model.
  *
  * `input.ts`'s `onPointerDown`/`onPointerUp` write `widget.state` DIRECTLY on every press and release,
  * the same way they do for every hand-written screen (`screens/login.ts`, `screens/realms.ts`) -- and
@@ -254,8 +272,10 @@ function syncStateTextures(ctx: MethodContext, self: number): void {
       ctx.registry.widget(id)!.shown = visible;
     }
   };
-  show('normal', state === 'up');
-  show('pushed', state === 'down');
+  // `pushed.or(normal)`: a button with no Pushed region keeps its Normal art down through the press.
+  const pushed = state === 'down' && bySlot.pushed !== undefined;
+  show('normal', state === 'up' || (state === 'down' && !pushed));
+  show('pushed', pushed);
   show('disabled', state === 'disabled');
 }
 
@@ -483,10 +503,46 @@ const BUTTON: MethodTable = {
   },
 };
 
+/**
+ * `SetChecked`'s argument, and a plain `Boolean()` on it was making EVERY SPELL IN THE BOOK look pressed.
+ *
+ * `SpellButton_UpdateSelection` is the whole evidence, and it is conclusive because it passes BOTH forms
+ * from the two branches of one decision (`spellbookframe.lua:409-413`):
+ *
+ *     if ( IsSelectedSpell(id, SpellBookFrame.bookType) ) then
+ *         self:SetChecked("true");
+ *     else
+ *         self:SetChecked("false");
+ *     end
+ *
+ * -- with a third `self:SetChecked("false")` on the no-such-spell path at `:405`. `Boolean("false")` is
+ * `true` in JS and `"false"` is truthy in Lua too, so every one of the twelve `SpellButton`s came back
+ * CHECKED whatever the answer was, and `SpellButtonTemplate`'s `<CheckedTexture
+ * file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>` (`spellbookframe.xml:191`) drew over all
+ * of them. That is the owner's "every spell renders as if pressed".
+ *
+ * So the engine cannot be doing `lua_toboolean` on this argument: if it were, those two branches would be
+ * identical and a spellbook button could never un-check, which is not what the real client does. The
+ * client's own file is the oracle and it says a STRING is parsed.
+ *
+ * WHAT IS SOURCED and what is not: `"true"` and `"false"` are the only quoted arguments anywhere in the
+ * 264 loaded manifest files (grepped -- every other call site passes `1`, `0`, `nil`, `true`, `false` or a
+ * variable), so those two are the measured cases. `""`, `"0"` and `"nil"` are folded in with `"false"` as
+ * the same class of spelling; that extension is NOT sourced and is written down here as a guess, made in
+ * the direction that cannot invent a checked state.
+ */
+function checkedArg(value: unknown): boolean {
+  if (typeof value === 'string') {
+    const lowered = value.trim().toLowerCase();
+    return !(lowered === '' || lowered === 'false' || lowered === 'nil' || lowered === '0');
+  }
+  return Boolean(value);
+}
+
 const CHECKBUTTON: MethodTable = {
   SetChecked: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
-    widget.checked = Boolean(args[0]);
+    widget.checked = checkedArg(args[0]);
     const id = checkedTextures.get(self);
     if (id !== undefined) {
       ctx.registry.widget(id)!.shown = widget.checked;

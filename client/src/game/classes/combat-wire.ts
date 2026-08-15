@@ -26,6 +26,8 @@ export interface CombatWireRow {
   damage: number;
   overkill: number;
   subs: number;
+  /** The FIRST sub-block's `SchoolMask` -- `SCHOOL_MASK_PHYSICAL` 0x01 for an ordinary swing. */
+  school: number;
   /** `null` when the decode did not land on a recognised value -- see the header. */
   victimState: number | null;
   bodySize: number;
@@ -49,6 +51,46 @@ class CombatWire {
     return this.rows;
   }
 
+  /**
+   * THE `HitInfo` CENSUS -- `window.combatWire.census()`.
+   *
+   * The instrument that makes 3.3.5a's crit bit CHECKABLE rather than believed. Its value (`0x200`) comes
+   * from a server implementation and cannot be corroborated from the game's own data
+   * (`classes/combat-text.ts`' header says so and why), and the reference's own number for that bit
+   * (`0x80`) is a DIFFERENT bit here -- so a wrong reading would print a resist as a crit and look
+   * entirely plausible.
+   *
+   * What it answers: for each distinct `hitInfo` word observed, how many swings carried it and the
+   * min/mean/max damage those swings did. A crit is the group whose mean is about twice the ordinary
+   * group's, and the two candidate bits are then distinguishable by inspection: if `0x200` is crit, the
+   * doubled group carries it; if the reference's `0x80` were, the doubled group would carry that instead
+   * -- and `0x80` swings should carry damage ZERO here, being a FULL resist.
+   *
+   * Grouped rather than listed because the reading is a RATIO across a population; a single crit proves
+   * nothing about which bit named it.
+   */
+  census(): unknown {
+    const groups = new Map<number, number[]>();
+    for (const row of this.rows) {
+      const list = groups.get(row.hitInfo) ?? [];
+      list.push(row.damage);
+      groups.set(row.hitInfo, list);
+    }
+    return [...groups.entries()]
+      .map(([hitInfo, damages]) => ({
+        hitInfo: `0x${hitInfo.toString(16)}`,
+        swings: damages.length,
+        minDamage: Math.min(...damages),
+        meanDamage: +(damages.reduce((a, b) => a + b, 0) / damages.length).toFixed(2),
+        maxDamage: Math.max(...damages),
+        crit0x200: (hitInfo & 0x200) !== 0,
+        // The reference's 1.12 crit bit, which is 3.3.5a's FULL_RESIST. Reported side by side precisely
+        // so the two readings can be compared against the damage rather than argued about.
+        refCrit0x80: (hitInfo & 0x80) !== 0,
+      }))
+      .sort((a, b) => b.swings - a.swings);
+  }
+
   clear(): void {
     this.rows.length = 0;
   }
@@ -56,6 +98,98 @@ class CombatWire {
 
 export const combatWire = new CombatWire();
 
+/**
+ * THE COMBAT-LOG RING -- `window.combatLogWire.history()` / `.census()`.
+ *
+ * The same instrument, for the five SPELL-side packets (`network/game/object/combat-log.ts`). It
+ * exists for the same reason the melee one does and it is the ONLY oracle those layouts have: no DBC
+ * states a packet body, the client's own Lua is handed already-decoded values, and the reference
+ * parses 1.12 -- where WotLK is known to have inserted an overkill word into the melee twin's body,
+ * which is exactly the class of difference that lands every later field one word out while the packet
+ * still "works".
+ *
+ * **`consumed` against `bodySize` IS THE MEASUREMENT.** A layout that is right consumes the body to a
+ * known remainder; one that is wrong lands somewhere arbitrary. `residual` is the difference, reported
+ * per opcode by `census()` so a single wrong field shows up as a non-zero column rather than as a
+ * plausible-looking number on screen.
+ */
+export interface CombatLogWireRow {
+  at: number;
+  /** The opcode's own name, so one ring carries all five and the census can split them. */
+  opcode: string;
+  target: string;
+  caster: string;
+  spellId: number;
+  amount: number;
+  /** School mask where the packet carries one, else 0. */
+  school: number;
+  absorb: number;
+  resist: number;
+  crit: boolean;
+  /** `SpellMissInfo` for the miss log, else null. */
+  missCode: number | null;
+  bodySize: number;
+  consumed: number;
+}
+
+class CombatLogWire {
+  private rows: CombatLogWireRow[] = [];
+
+  record(row: CombatLogWireRow): void {
+    this.rows.push(row);
+    if (this.rows.length > HISTORY) {
+      this.rows.shift();
+    }
+  }
+
+  history(): readonly CombatLogWireRow[] {
+    return this.rows;
+  }
+
+  /**
+   * Per opcode: how many rows arrived, and -- the column that matters -- the DISTINCT residuals
+   * (`bodySize - consumed`). A correct layout gives ONE residual value repeated; a set of scattered
+   * residuals is a decode that is guessing, and a residual that grows with the packet is a loop read
+   * at the wrong stride.
+   *
+   * TWO SYNTHETIC OPCODE SUFFIXES appear here and both are failures made visible rather than swallowed:
+   * `!THREW` is a decode that ran past its frame (`combat-log.ts#subscribe` caught it), and `!EMPTY` is
+   * a loop-bearing packet whose count came out zero -- the case that would otherwise leave the census
+   * with no row at all, which was this instrument's one blind spot.
+   *
+   * **A CAVEAT ON `consumed` FOR THE LOOP-BEARING OPCODES**: it is read AFTER the loop, so every row of
+   * one packet carries that packet's WHOLE consumption. The distinct-residual set is unaffected (they
+   * collapse), but a per-entry stride error cannot be LOCALISED from this column -- only the aggregate
+   * is visible. Stated so nobody reads more precision out of it than it has.
+   */
+  census(): unknown {
+    const groups = new Map<string, CombatLogWireRow[]>();
+    for (const row of this.rows) {
+      const list = groups.get(row.opcode) ?? [];
+      list.push(row);
+      groups.set(row.opcode, list);
+    }
+    return [...groups.entries()].map(([opcode, rows]) => ({
+      opcode,
+      // ROWS, NOT PACKETS -- and self-review is what corrected the label. The periodic log and the miss
+      // log push ONE ROW PER ENTRY, so a five-tick DoT is five rows from one packet. Calling this
+      // `packets` made an instrument report a number that was not the quantity it named.
+      rows: rows.length,
+      residuals: [...new Set(rows.map((r) => r.bodySize - r.consumed))].sort((a, b) => a - b),
+      amounts: [...new Set(rows.map((r) => r.amount))].sort((a, b) => a - b).slice(0, 12),
+      crits: rows.filter((r) => r.crit).length,
+      missCodes: [...new Set(rows.map((r) => r.missCode).filter((c) => c !== null))],
+    }));
+  }
+
+  clear(): void {
+    this.rows.length = 0;
+  }
+}
+
+export const combatLogWire = new CombatLogWire();
+
 if (typeof window !== 'undefined') {
   (window as any).combatWire = combatWire;
+  (window as any).combatLogWire = combatLogWire;
 }

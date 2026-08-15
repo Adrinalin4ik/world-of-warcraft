@@ -1,6 +1,9 @@
 /**
- * jsdom, not node: importing `pipeline/wmo` pulls in `M2Blueprint` -> `M2` -> `cache-manager`, whose
- * module-level singleton touches `window.indexedDB` at import time.
+ * jsdom is no longer REQUIRED here, and is kept only because changing a green test's environment
+ * buys nothing. The reason it was required -- `pipeline/wmo` -> `M2Blueprint` -> `M2` ->
+ * `cache-manager`, a dead stub whose module-level singleton opened an IndexedDB at import time --
+ * is gone: that stub was deleted when the real asset cache landed in `game/net/asset-cache.ts`.
+ * Measured after the deletion: this file passes under `@jest-environment node`.
  *
  * @jest-environment jsdom
  */

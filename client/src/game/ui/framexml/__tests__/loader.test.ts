@@ -396,4 +396,113 @@ describe('the parent= attribute', () => {
     registry.reset();
     vm.dispose();
   });
+  it('parentKey publishes a region and a child frame on their parent Lua table', () => {
+    const { vm, rt } = runtime();
+
+    // The shape `targetframe.xml:215` uses, which is the one that was silently dropped: a region
+    // addressed ONLY as `self.nameBackground` (targetframe.lua:263,268), plus the child-frame form.
+    const report = loadDocument(
+      rt,
+      parseXml(`
+        <Ui>
+          <Frame name="TargetFrame">
+            <Size><AbsDimension x="232" y="100"/></Size>
+            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+            <Layers>
+              <Layer level="BACKGROUND">
+                <Texture name="$parentNameBackground" parentKey="nameBackground">
+                  <Size><AbsDimension x="119" y="19"/></Size>
+                  <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+              </Layer>
+            </Layers>
+            <Frames>
+              <Frame name="$parentTextureFrame" parentKey="textureFrame" setAllPoints="true"/>
+            </Frames>
+          </Frame>
+        </Ui>
+      `),
+      noFiles,
+      'TargetFrame.xml',
+    );
+
+    expect(report.errors).toEqual([]);
+    // Through the Lua, not the registry: the whole point is that the client's own code reaches these
+    // by key and nothing else.
+    const read = (expr: string) => vm.runExpr(`return ${expr}`, 'parentKey.test');
+    expect(read('type(TargetFrame.nameBackground)')).toEqual({ value: 'table' });
+    expect(read('TargetFrame.nameBackground:GetName()')).toEqual({
+      value: 'TargetFrameNameBackground',
+    });
+    expect(read('TargetFrame.textureFrame:GetName()')).toEqual({
+      value: 'TargetFrameTextureFrame',
+    });
+
+    vm.dispose();
+  });
+  it('a <Shadow> reaches the FontSpec with the LAST occurrence winning', () => {
+    const { registry, rt, vm } = runtime();
+
+    // The real chain's shape: `SystemFont_Shadow_Small` authors offset (1,-1) black
+    // (fonts.xml:31-40) and `GameFontNormalSmall` inherits it and overrides only <Color>
+    // (fontstyles.xml:70-72). The leaf here ALSO re-declares a shadow, so this pins the
+    // last-occurrence rule at the same time as the plain inherited case.
+    const report = loadDocument(
+      rt,
+      parseXml(`
+        <Ui>
+          <Font name="SystemFont_Shadow_Small" font="Fonts\FRIZQT__.TTF" virtual="true">
+            <Shadow>
+              <Offset><AbsDimension x="1" y="-1"/></Offset>
+              <Color r="0" g="0" b="0"/>
+            </Shadow>
+            <FontHeight><AbsValue val="10"/></FontHeight>
+          </Font>
+          <Font name="GameFontNormalSmall" inherits="SystemFont_Shadow_Small" virtual="true">
+            <Color r="1.0" g="0.82" b="0"/>
+          </Font>
+          <Frame name="PlayerFrame">
+            <Size><AbsDimension x="232" y="100"/></Size>
+            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+            <Layers>
+              <Layer level="ARTWORK">
+                <FontString name="PlayerName" inherits="GameFontNormalSmall" text="Sgh">
+                  <Size><AbsDimension x="100" y="12"/></Size>
+                  <Anchors><Anchor point="CENTER"/></Anchors>
+                </FontString>
+                <FontString name="LouderName" inherits="GameFontNormalSmall" text="Sgh">
+                  <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                  <Shadow>
+                    <Offset><AbsDimension x="2" y="-2"/></Offset>
+                    <Color r=".4" g=".4" b=".4" a=".75"/>
+                  </Shadow>
+                </FontString>
+              </Layer>
+            </Layers>
+          </Frame>
+        </Ui>
+      `),
+      noFiles,
+      'PlayerFrame.xml',
+    );
+
+    expect(report.errors).toEqual([]);
+    const font = (name: string) => registry.widget(registry.byName(name)!)!.font;
+    // Inherited: the authored (1,-1) black, and the gold the font object authors -- NOT white.
+    expect(font('PlayerName')).toMatchObject({
+      color: '#ffd100',
+      shadowOffset: { x: 1, y: -1 },
+      shadowColor: '#000000',
+      shadowAlpha: 1,
+    });
+    // The element's own <Shadow> wins, alpha included.
+    expect(font('LouderName')).toMatchObject({
+      shadowOffset: { x: 2, y: -2 },
+      shadowColor: '#666666',
+      shadowAlpha: 0.75,
+    });
+
+    registry.reset();
+    vm.dispose();
+  });
 });

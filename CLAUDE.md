@@ -76,6 +76,9 @@ matters; add a test when something breaks and stays broken. Do not enumerate edg
 
 - `npx tsc --noEmit` and `npm test` are **separate** checks. Babel type-checks nothing, so a fully
   green jest run has repeatedly coexisted with a type error. Run both.
+- **`npm test` defaults to WATCH mode and never exits**, producing empty output and a task that hangs
+  until something reaps it. Use `CI=true node scripts/test.js --watchAll=false`. Two rounds lost
+  measurements to this and read the empty output as a passing suite.
 - Visual claims need a screenshot. Many visual "successes" here did not reproduce when checked.
 - Pixel diffs are useless in the world and on the glue screens: the sky animates, the dragon moves,
   and characters blink.

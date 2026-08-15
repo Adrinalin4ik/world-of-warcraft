@@ -44,28 +44,28 @@ import {
   ATTACK_UNARMED, defenseAnimation, isWhiff, swingAnimation,
 } from '../../../game/classes/combat-anim';
 import { combatWire } from '../../../game/classes/combat-wire';
+import {
+  HIT_INFO, HIT_INFO_ANY_ABSORB, HIT_INFO_ANY_RESIST,
+} from '../../../game/classes/combat-text';
 import { worldClock } from '../../../game/pipeline/m2/anim/world-clock';
 import { windowElapsedOrInstant } from '../../../game/pipeline/m2/anim/instance-anim';
 
 /**
- * `HitInfo` bit `0x4` marks an OFFHAND swing and `0x10000` suppresses the animation entirely
- * (`attack.rs:20-27`). Both are read; nothing else in the word is.
- */
-const HIT_INFO_OFFHAND = 0x4;
-const HIT_INFO_NO_ANIMATION = 0x10000;
-
-/**
- * The absorb and resist PRESENCE bits, which decide whether the trailing per-sub loops are on the wire
- * at all -- `HITINFO_FULL_ABSORB | HITINFO_PARTIAL_ABSORB` and the resist pair.
+ * The `HitInfo` bits this decode reads. **THE TABLE MOVED**, and it moved for a reason:
+ * `classes/combat-text.ts#HIT_INFO` is now the ONE place 3.3.5a's `HitInfo` is written down, because
+ * the combat-text law needs the crit, glancing and crushing bits from the same word and two hand-kept
+ * copies of a version-numbered table is how they drift.
  *
- * 3.3.5a values, and deliberately not taken from the reference: its `wound_anim` reads bit `0x80` as
- * CRITICAL (`select.rs:778`), which on 3.3.5a is `HITINFO_FULL_RESIST`. The same bit means different
- * things in the two builds, so every bit in this word is version-numbered. These two masks decide only
- * a byte count, and the decode VALIDATES its result rather than trusting them -- see
- * `handleAttackerState`.
+ * That file also carries the source line these constants never had. In brief: they are a SERVER
+ * implementation (TrinityCore `Unit.h` `enum HitInfo`, 3.3.5 branch) -- no DBC states them and the
+ * client's own Lua is handed already-decoded strings -- and the reference is NOT usable here, since its
+ * `wound_anim` reads bit `0x80` as CRITICAL (`select.rs:778`) which on 3.3.5a is `HITINFO_FULL_RESIST`.
+ *
+ * The two presence masks decide whether the trailing per-sub loops are on the wire at all, and the
+ * decode VALIDATES its result rather than trusting them -- see `handleAttackerState`.
  */
-const HIT_INFO_ANY_ABSORB = 0x20 | 0x40;
-const HIT_INFO_ANY_RESIST = 0x80 | 0x100;
+const HIT_INFO_OFFHAND = HIT_INFO.OFFHAND;
+const HIT_INFO_NO_ANIMATION = HIT_INFO.NO_ANIMATION;
 
 /** One creature template's UI-visible head, as far as a unit frame needs it. */
 export interface CreatureInfo {
@@ -143,6 +143,37 @@ export class CombatHandler extends EventEmitter {
       return;
     }
     this.selected = guid ?? null;
+
+    // NO TARGET MEANS NO AUTO-ATTACK -- the owner's "Автоатака должна отменяться если цели нет или она
+    // сброшена esc."
+    //
+    // **THIS IS THE ONE CHOKE POINT, and that is why it is here rather than on a key handler.** Every
+    // way of losing a target funnels through `World#setTarget(null)` and therefore through this method:
+    // the client's own `ClearTarget()` (`ui/target-bridge.ts`), which is the leg `Esc` reaches through
+    // the client's own Lua and its established precedence -- a cast cancels first, then this -- and
+    // `World#remove`, which clears the target when the unit dies-and-decays or streams out of range. So
+    // "the target is gone" is handled as ONE condition, and no second competing `Esc` handler is added.
+    //
+    // **ONLY ON A CLEAR, NOT ON A SWITCH.** Selecting a different unit leaves the attack running: the
+    // real client re-aims auto-attack at the new target rather than dropping it, and the owner asked
+    // about the absence of a target, not about changing one.
+    //
+    // **THE SERVER IS TOLD, AND THE SERVER IS WHAT CLEARS THE UI.** `CMSG_ATTACKSTOP` (0x142, this
+    // client's own 3.3.5a table, empty body) goes out here; the button and the combat pose are NOT
+    // touched from this method. They follow from the server's `SMSG_ATTACKSTOP`, which
+    // `handleAttackStop` already turns into `emit('autoAttack', false)` -> `SpellHandler#setAutoAttack`
+    // for the bar and `inCombat = false` for the stance. Driving them locally would be a second source
+    // of truth for a state the server owns, which is the same argument `handleAttackStart` makes for
+    // taking the button's checked state from the wire rather than from our own send.
+    //
+    // That also makes this correct WHETHER OR NOT the server stops the attack by itself on a selection
+    // clear: if it does, our stop is redundant and its reply is the same packet; if it does not, ours is
+    // what ends it. Either way there is exactly one `SMSG_ATTACKSTOP` path into the UI, so the two
+    // cannot disagree -- which is worth more than settling the question, since the answer is a server
+    // implementation detail that could differ between the servers this client is pointed at.
+    if (this.selected === null && this.attacking) {
+      this.stopAttack();
+    }
 
     const app = new GamePacket(GameOpcode.CMSG_SET_SELECTION, 6 + GUID_BYTES);
     // A FULL 8-byte little-endian guid. `guidBytes` is the inverse of the single formatter every
@@ -239,12 +270,18 @@ export class CombatHandler extends EventEmitter {
       return;
     }
     const entry = raw;
-    const name = gp.readCString();
-    gp.readCString();
-    gp.readCString();
-    gp.readCString();
-    gp.readCString(); // SubName
-    gp.readCString(); // IconName -- 3.3.5a only; see above
+    // `readCStr`, NOT `readCString`, AND THIS WAS A LIVE DEFECT -- byte-buffer's reader does not
+    // consume the terminator of an EMPTY string (`net/packet.js#readCStr` carries the measurement).
+    // For an ordinary creature FIVE of these six are empty -- the three unused name slots, the
+    // subname and the icon name -- so `rank` below was read **five bytes early**, out of the middle
+    // of `type_flags`/`type`. `name` is the first string and decodes correctly either way, which is
+    // exactly why this survived: the classification was wrong and the name was right.
+    const name = gp.readCStr();
+    gp.readCStr();
+    gp.readCStr();
+    gp.readCStr();
+    gp.readCStr(); // SubName
+    gp.readCStr(); // IconName -- 3.3.5a only; see above
     gp.readUnsignedInt(); // type_flags
     gp.readUnsignedInt(); // type (CreatureType.dbc)
     gp.readUnsignedInt(); // family
@@ -306,6 +343,7 @@ export class CombatHandler extends EventEmitter {
     // refusal is exactly what a rejected swing looks like here. `ObjectHandler` forwards this to
     // `SpellHandler#setAutoAttack`.
     if (attacker === this.game.world.player?.guid) {
+      this.attacking = true;
       this.emit('autoAttack', true);
     }
     this.emit('attack:start', attacker, victim);
@@ -363,6 +401,7 @@ export class CombatHandler extends EventEmitter {
     // Our auto-attack is off -- whether this is a real disengage or the outright rejection warned about
     // just above. Both leave us not swinging, so both un-check the button.
     if (attacker === this.game.world.player?.guid) {
+      this.attacking = false;
       this.emit('autoAttack', false);
     }
     this.emit('attack:stop', attacker, victim);
@@ -370,6 +409,19 @@ export class CombatHandler extends EventEmitter {
 
   /** One warning per victim -- see `handleAttackStop`. */
   private warnedRejection = new Set<string>();
+
+  /**
+   * Are WE auto-attacking right now?
+   *
+   * Driven from the SERVER's `SMSG_ATTACKSTART`/`SMSG_ATTACKSTOP`, not from our own `CMSG_ATTACKSWING`
+   * send -- the same rule the action button's checked state follows, and for the same reason: a swing
+   * request the server refuses must not leave us believing we are attacking. `handleAttackStop`
+   * documents that an outright rejection arrives as exactly that packet.
+   *
+   * Read only by `select`, to decide whether losing the target has an attack to cancel. Without it a
+   * plain deselect would send `CMSG_ATTACKSTOP` on every click on empty ground.
+   */
+  private attacking = false;
 
   /**
    * `SMSG_ATTACKERSTATEUPDATE` -- ONE COMPLETED SWING, and the animation driver.
@@ -407,8 +459,19 @@ export class CombatHandler extends EventEmitter {
     // which is exactly why this could sit here unnoticed while the swing looked fine.
     const overkill = gp.readUnsignedInt() >>> 0;
     const subs = gp.readUnsignedByte();
+    // THE FIRST SUB-BLOCK'S `SchoolMask` IS NOW KEPT, and it is the one field the display needs out of
+    // this loop: the client's own `CombatFeedback_OnCombatEvent` prints a non-physical wound YELLOW
+    // (`combatfeedback.lua:50-54`), and its `type` argument is exactly this word. FIRST rather than
+    // OR-folded across the subs, because the client's test is `type ~= SCHOOL_MASK_PHYSICAL` -- a single
+    // value, not a mask to be reduced -- and a melee swing carries one school in practice. A multi-school
+    // swing's later schools are dropped, which is stated rather than folded into a value the client's own
+    // comparison would then read as neither physical nor any one school.
+    let school = 0;
     for (let i = 0; i < subs; ++i) {
-      gp.readUnsignedInt(); // SchoolMask
+      const mask = gp.readUnsignedInt() >>> 0; // SchoolMask
+      if (i === 0) {
+        school = mask;
+      }
       gp.readFloat();       // FDamage
       gp.readUnsignedInt(); // Damage
     }
@@ -443,12 +506,22 @@ export class CombatHandler extends EventEmitter {
       damage,
       overkill,
       subs,
+      school,
       victimState,
       bodySize,
       consumed: gp.index - gp.headerSize,
     });
 
-    this.emit('attack:swing', attacker, victim, damage);
+    // THE OUTCOME TRAVELS WITH THE SWING, and it did not until now: this emit carried `damage` alone
+    // while `hitInfo` and `victimState` -- both decoded and both VALIDATED one statement above -- were
+    // dropped on the floor. So a crit, a miss, a dodge and a parry were all indistinguishable to every
+    // subscriber, which is why no combat text could be honest. `school` likewise.
+    //
+    // Emitted RAW rather than pre-interpreted: the display law is
+    // `game/classes/combat-text.ts#meleeText`, shared by the floating world text and the client's own
+    // `CombatFeedback`, and a handler that reads the word straight off the wire is a handler that cannot
+    // have made a different decision from the other medium.
+    this.emit('attack:swing', attacker, victim, damage, hitInfo, victimState, school);
 
     if ((hitInfo & HIT_INFO_NO_ANIMATION) !== 0) {
       return;

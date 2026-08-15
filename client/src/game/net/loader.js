@@ -1,3 +1,5 @@
+import assetCache from './asset-cache';
+
 // Host serving loose, extracted 3.3.5a client files. Overridable so the app can be pointed at a
 // local static directory or a different client build without a code change.
 const DEFAULT_DATA_URI = 'https://data-direct.spelunkerdb.com/12340';
@@ -43,15 +45,36 @@ class Loader {
 
   async load(path) {
     const uri = this.url(path);
+
+    // Persistent store first. `uri` is the full absolute URL, so it already carries the build number
+    // and the whole asset path -- see `asset-cache.ts` for the key, eviction and invalidation policy.
+    // A miss, an unavailable store or a read error all return null, so this can only ever cost a
+    // lookup and never a failed load.
+    const cached = await assetCache.lookup(uri);
+    if (cached) {
+      return cached;
+    }
+
     const response = await fetch(uri);
 
     // A missing asset returns an HTML error page, not an error status the caller would notice on
     // its own. Reject instead, or that markup gets handed to a binary decoder as if it were data.
+    // This is also what keeps that markup out of the cache: nothing below this line runs for it.
     if (!response.ok) {
       throw new Error(`Failed to load asset (${response.status} ${response.statusText}): ${uri}`);
     }
 
-    return response.arrayBuffer();
+    // Read the body to completion FIRST, then hand those bytes to the store -- never a clone taken
+    // before the read. `asset-cache.ts#store` explains why: a clone can commit a truncated asset
+    // under a permanent key while this `await` is still rejecting on the short read.
+    const body = await response.arrayBuffer();
+    assetCache.recordNetworkBytes(body.byteLength);
+
+    // Not awaited -- the write is bookkeeping for the NEXT session, and making every asset wait on a
+    // Cache Storage write would put this round's load time up to buy the next round's down.
+    assetCache.store(uri, body, response);
+
+    return body;
   }
 
 }

@@ -74,6 +74,17 @@ export function absValue(element: XmlElement): number | undefined {
   return num(attr(source, 'val'));
 }
 
+/**
+ * A parsed `x`/`y` pair: an `<AbsDimension>` child if there is one, else the element's own attrs.
+ *
+ * Lives here rather than in `loader.ts` (where it was) because `fonts.ts` needs the identical reading
+ * for a `<Shadow>`'s `<Offset>`, and two copies of "AbsDimension child, else own attrs" would drift.
+ */
+export function absDimension(element: XmlElement): { x?: number; y?: number } {
+  const source = childrenNamed(element, 'AbsDimension')[0] ?? element;
+  return { x: num(attr(source, 'x')), y: num(attr(source, 'y')) };
+}
+
 /** `<Color r= g= b= a=>` as an RGBA tuple. A PRESENT element's missing channels read black, alpha 1. */
 export function colorOf(element: XmlElement): [number, number, number, number] {
   const channel = (key: string, fallback: number) => num(attr(element, key)) ?? fallback;

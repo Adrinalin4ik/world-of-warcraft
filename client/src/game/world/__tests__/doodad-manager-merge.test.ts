@@ -5,8 +5,11 @@
  * structurally identical, which is exactly the situation in which a fix lands on one path and not
  * the other. Everything about the failure mode is documented on the WMO test.
  *
- * jsdom, not node: importing `world/doodad-manager` pulls in `M2Blueprint` -> `M2` ->
- * `cache-manager`, whose module-level singleton touches `window.indexedDB` at import time.
+ * jsdom is no longer REQUIRED here, and is kept only because changing a green test's environment
+ * buys nothing. The reason it was required -- `world/doodad-manager` -> `M2Blueprint` -> `M2` ->
+ * `cache-manager`, a dead stub whose module-level singleton opened an IndexedDB at import time --
+ * is gone: that stub was deleted when the real asset cache landed in `game/net/asset-cache.ts`.
+ * Measured after the deletion: this file passes under `@jest-environment node`.
  *
  * @jest-environment jsdom
  */

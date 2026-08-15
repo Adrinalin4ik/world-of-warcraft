@@ -48,6 +48,18 @@ export interface ActionSnapshot {
   texture: string | null;
   name: string;
   /**
+   * The spell's RANK label (`Spell.dbc` `NameSubtext`, column 153) -- "Rank 3", "Passive" or `''`.
+   *
+   * Added for `GameTooltip:SetAction`, which draws it as line 1's RIGHT text the way the real client does.
+   * Never null; `''` is the no-rank answer, the same contract `SpellbookEntry#subName` documents.
+   */
+  subName: string;
+  /**
+   * `Spell.dbc`'s `Description` (column 170, measured) -- the tooltip body, `$` tokens UNEXPANDED. `''`
+   * until the 49 MB fetch lands. See `pipeline/dbc/spell-data.ts#COL.description`.
+   */
+  description: string;
+  /**
    * True for spell 6603 "Auto Attack" -- what `IsAttackAction` reports, and what makes the button
    * flash while swinging (`ActionButton_UpdateFlash`).
    */
@@ -91,6 +103,8 @@ export function emptyAction(): ActionSnapshot {
     spellId: 0,
     texture: null,
     name: '',
+    subName: '',
+    description: '',
     isAttack: false,
     isCurrent: false,
     cooldownStart: 0,
@@ -119,6 +133,13 @@ interface ActionState {
   bonusBarOffset: number;
   /** What `UseAction` should do. Set by the host; a VM with no host casts nothing. */
   use: ((action: number) => void) | null;
+  /**
+   * `GetActionBarToggles`' five booleans: MultiBar 1-4 and `alwaysShowActionBars`.
+   *
+   * All false, which is what this client draws -- see `GetActionBarToggles` for why that is the true
+   * answer and not a placeholder, and for the options-panel loop one nil global was aborting.
+   */
+  barToggles: [boolean, boolean, boolean, boolean, boolean];
 }
 
 /** Per-VM, because the glue and world runtimes can both be alive during a screen change. */
@@ -132,6 +153,7 @@ function stateOf(vm: LuaVM): ActionState {
       page: 1,
       bonusBarOffset: 0,
       use: null,
+      barToggles: [false, false, false, false, false],
     };
     stateByVm.set(vm, state);
   }
@@ -287,6 +309,43 @@ export function installActionsApi(vm: LuaVM): void {
   // not decoded) and is not this character's bar in any case. Still 0, and still honest: 0 is "no
   // multi-cast bar active", which is true for every class but a shaman.
   fn('GetMultiCastBarOffset', () => [0]);
+
+  /**
+   * `GetActionBarToggles()` / `SetActionBarToggles(b1, b2, b3, b4, alwaysShow)` -- which extra bars are on.
+   *
+   * ONE MISSING GLOBAL WAS BLOCKING THE WHOLE ACTION-BARS OPTIONS PANEL, and with it the LOCKED-BARS
+   * setting the shift-gated drag reads. `BlizzardOptionsPanel_OnEvent` walks a panel's controls on
+   * `PLAYER_ENTERING_WORLD` and `securecall`s `BlizzardOptionsPanel_SetupControl` for each
+   * (`optionspaneltemplates.lua:311-356`), and that is the ONLY thing that copies a CVar into its uvar
+   * (`:373-380` -- `_G[control.uvar] = GetCVar(control.cvar)`). Four of the panel's seven controls declare
+   * `self.GetValue = function () return self.value or ((select(N, GetActionBarToggles()) and "1") or "0"); end`
+   * (`interfaceoptionspanels.xml:1385,1404,1423,1442`), and `securecall` here is a plain call
+   * (`api/secure.ts:38-54`), so a nil global aborted the loop before it reached
+   * `$parentLockActionBars`. MEASURED: firing the event by hand raised
+   * `InterfaceOptionsPanels.xml:...:7: attempt to call a nil value (global 'GetActionBarToggles')` and
+   * `LOCK_ACTIONBAR` stayed at its `"0"` default while `GetCVar("lockActionBars")` read `"1"`.
+   *
+   * ALL FOUR OFF is the true answer, not a placeholder: the real client MIRRORS these from the server
+   * (`uiparent.lua:649` says so in as many words -- "the values GetActionBarToggles() returns are
+   * incorrect if it's called before the client mirrors SetActionBarToggles values from the server") and
+   * this client decodes no such field, so no multi-bar is fed, none is drawn, and `MultiActionBar_Update`
+   * hiding all four is exactly what is on screen. `SetActionBarToggles` stores what the options panel
+   * writes (`interfaceoptionspanels.lua:1193`) so a toggle within one session is not silently discarded;
+   * it is NOT sent to the server, which is the stated gap -- the setting will not survive a relog.
+   */
+  fn('GetActionBarToggles', () => [
+    state.barToggles[0], state.barToggles[1], state.barToggles[2], state.barToggles[3],
+    state.barToggles[4],
+  ]);
+  fn('SetActionBarToggles', (args) => {
+    for (let i = 0; i < 5; i += 1) {
+      // FrameXML spells these as the STRING "1"/nil (the uvars it passes are uvar strings), so anything
+      // truthy that is not the string "0" is on -- the same Lua-truthiness trap `SetChecked("false")` was.
+      const raw = args[i];
+      state.barToggles[i] = raw !== undefined && raw !== null && raw !== false && raw !== '0';
+    }
+    return [];
+  });
 
   /**
    * Declared gaps. Each returns the value that makes the UI behave as if the feature is simply absent,

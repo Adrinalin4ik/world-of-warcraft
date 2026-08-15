@@ -8,7 +8,7 @@ import {
 } from './constants';
 import { moveTrace } from './move-trace';
 import { PlayerMoveState } from './player-state';
-import { airborneHitResponse, groundedHitResponse, moveAndSlide } from './slide';
+import { airborneHitResponse, groundedHitResponse, moveAndSlide, SlideIteration } from './slide';
 import { stepUp, StepUpVerdict } from './step-up';
 
 const _down = new THREE.Vector3(0, 0, -1);
@@ -49,6 +49,8 @@ export interface GroundedStep {
   /** How many contacts the slide resolved, and what the first one was. Trace fodder. */
   contacts: number;
   blockedBy: { normalZ: number; distance: number } | null;
+  /** Per-iteration slide record, populated only while `moveTrace.enabled`. */
+  slide: SlideIteration[] | null;
 }
 
 /**
@@ -142,17 +144,20 @@ export function groundedStep(
         snap: null,
         contacts: 0,
         blockedBy: null,
+        slide: null,
       };
     }
   }
 
   let firstContact: { normalZ: number; distance: number } | null = null;
+  // Allocated only while the trace is on, so a normal frame still allocates nothing here.
+  const iterations: SlideIteration[] | null = moveTrace.enabled ? [] : null;
   const slide = moveAndSlide(cast, center, horizVel, dt, (hit) => {
     if (firstContact === null) {
       firstContact = { normalZ: hit.normal.z, distance: 0 };
     }
     groundedHitResponse(hit);
-  });
+  }, iterations ?? undefined);
   const slid = slide.position;
 
   // Snap onto the surface so we follow downhill slopes and steps down -- the client's step-vs-fall
@@ -204,7 +209,7 @@ export function groundedStep(
 
   return {
     center: slid, ground, climb: null, stepUpVerdict, snap,
-    contacts: slide.contacts, blockedBy: firstContact,
+    contacts: slide.contacts, blockedBy: firstContact, slide: iterations,
   };
 }
 
@@ -365,6 +370,7 @@ export function step(
   let stepUpVerdict: StepUpVerdict | null = null;
   let contacts = 0;
   let blockedBy: { normalZ: number; distance: number } | null = null;
+  let slideIterations: SlideIteration[] | null = null;
 
   if (!held && grounded && !jumped) {
     const resolved = groundedStep(cast, center, state.horizVel, dt);
@@ -374,6 +380,7 @@ export function step(
     stepUpVerdict = resolved.stepUpVerdict;
     contacts = resolved.contacts;
     blockedBy = resolved.blockedBy;
+    slideIterations = resolved.slide;
     if (resolved.ground) {
       groundEntity = resolved.ground;
     }
@@ -456,6 +463,8 @@ export function step(
     stepUpVerdict,
     contacts,
     blockedBy,
+    slide: slideIterations ?? undefined,
+    travelXY: Math.hypot(state.pos.x - (preMove.x), state.pos.y - (preMove.y)),
   });
 
   return {

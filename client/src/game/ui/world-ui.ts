@@ -39,11 +39,19 @@ import { GlueInput } from './input';
 import { screenScale, viewportUnits } from './layout';
 import { GlueRenderer } from './renderer';
 import { resolveSprite } from './sprite';
-import { FontStringTextures, loadGlueFonts, measureText } from './text';
-import { DrawItem, WidgetRoot } from './widget';
+import { FontStringTextures, layoutScale, loadGlueFonts, measureText, wrapLines } from './text';
+import { DrawItem, WidgetRoot, effectiveFont } from './widget';
 import { attachActionBridge } from './action-bridge';
+import { attachSpellbookBridge } from './spellbook-bridge';
+import { attachContainerBridge } from './container-bridge';
+import { attachLootBridge } from './loot-bridge';
+import { publishRects, clearRects } from './rects';
+import { publishArtSink, clearArtSink } from './runtime-art';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
+import { attachTargetBridge } from './target-bridge';
 import { dispatchBinding } from './framexml/lua/api/bindings';
+import { cancelCursor, dropCursorOnWorld, getCursor } from './framexml/lua/api/cursor';
+import { cvarBool } from './framexml/lua/api/screen';
 import { gameTime } from './framexml/lua/compat';
 import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
@@ -61,6 +69,19 @@ const TRANSPARENT = new THREE.Color(0, 0, 0);
  * per frame amortised at the ~8 ms a full pass measures.
  */
 const FULL_DRAW_EVERY = 12;
+
+/**
+ * The dragged ability's icon, in LOGICAL UNITS square.
+ *
+ * 36 is `ActionButtonTemplate`'s own authored size -- `Interface\FrameXML\ActionButtonTemplate.xml:4-6`,
+ * `<Size><AbsDimension x="36" y="36"/></Size>` -- so a picked-up ability is exactly the size of the slot
+ * it is heading for, which is what the real client shows. Not a guess and not a tuned value.
+ *
+ * The spellbook end differs slightly and is deliberately not matched: `SpellButtonTemplate` is 37x37
+ * (`spellbookframe.xml:80-82`). The icon is sized to the DESTINATION rather than the source because every
+ * drop target in this client is an action button, and a one-unit change mid-drag would be visible.
+ */
+const CURSOR_ICON_UNITS = 36;
 
 /**
  * A cheap value fingerprint of the whole draw list.
@@ -146,8 +167,20 @@ export class WorldUiHost {
   private readonly art = new GlueArt();
   private readonly fonts = new FontStringTextures();
   private readonly root = new WidgetRoot();
+  /**
+   * The last draw list, for `textExtent` -- the same array published as `window.worldUiDrawList`.
+   * A reference, not a copy: it is replaced whole every frame.
+   */
+  private lastItems: DrawItem[] = [];
 
   private runtime: WorldRuntime | null = null;
+
+  /**
+   * Where the manifest load's progress goes, as a 0..1 fraction. Set by the host's owner; the loading
+   * screen is the only caller. A slot rather than a constructor argument because the screen is the
+   * page's, not this host's.
+   */
+  onLoadProgress: ((fraction: number) => void) | null = null;
   /**
    * Set by `dispose()`. `start()` awaits fonts and then a 20-second manifest load, so a route change
    * during either resumes into a torn-down host -- the same hazard `GlueApp#stopped` guards, and here
@@ -174,6 +207,18 @@ export class WorldUiHost {
 
   /** `attachUnitBridge`'s teardown, held so `dispose` can run it. */
   private detachUnits: (() => void) | null = null;
+
+  /** `attachTargetBridge`'s teardown, held so `dispose` can run it. */
+  private detachTargets: (() => void) | null = null;
+
+  /** `attachSpellbookBridge`'s teardown, held so `dispose` can run it. */
+  private detachSpellbook: (() => void) | null = null;
+
+  /** `attachContainerBridge`'s teardown, held so `dispose` can run it. */
+  private detachContainers: (() => void) | null = null;
+
+  /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
+  private detachLoot: (() => void) | null = null;
 
   /**
    * THE DRAW INSTRUMENT, on `window.uiDrawStats`.
@@ -239,6 +284,108 @@ export class WorldUiHost {
   }
 
   /**
+   * Is the mouse cursor CARRYING something -- an ability picked up off the bar or out of the book.
+   *
+   * The world cursor's first precedence rung: while a drag is live, `drawCursorIcon` below is already
+   * drawing that ability's icon at the pointer, so the OS cursor must stay the plain arrow rather than
+   * turn into a sword over whatever the drag happens to pass across. One reader
+   * (`pages/game/index.tsx#updateHoverCursor`), which is why this is a boolean and not the cursor.
+   */
+  get heldCursorItem(): boolean {
+    return this.runtime !== null && getCursor(this.runtime.vm) !== null;
+  }
+
+  /**
+   * The NAME of the widget that consumed the live press, or null when the press went to the world.
+   *
+   * `pages/game/controls` reads this on its own `mousedown` and refuses the button when it is non-null,
+   * which is what stops the camera orbiting while an ability is being dragged. See
+   * `GlueInput#capturedPress` for why one press has one owner and why the UI is in front.
+   *
+   * A NAME rather than the widget, for two reasons: the caller is a React component that has no business
+   * holding a `Widget`, and the name is what makes the capture decision READABLE in an instrument -- the
+   * gate on this round is "a press on a spell button was claimed by the UI and `controls` never saw it",
+   * and "SpellButton3" says that where an object identity does not. An unnamed frame falls back to its
+   * registry id (`lua:3256`), so a non-null answer always means "claimed" and never "unnamed".
+   */
+  get capturedPress(): string | null {
+    const widget = this.input.capturedPress;
+    if (widget === null) {
+      return null;
+    }
+    const registry = this.runtime?.registry ?? null;
+    const id = registry === null ? null : registry.idOfWidget(widget);
+    return (id === null ? null : registry?.nameOf(id) ?? null) ?? widget.id;
+  }
+
+  /**
+   * DOES THIS STRING FIT ITS FRAME -- the whole question, answered by the draw pass's own arithmetic.
+   *
+   * Built because the last round nearly reported a tooltip clipping defect off a tight CROP that the
+   * numbers refuted (221.08 of text in a 241.08 frame), and because the reverse mistake is just as easy:
+   * a paragraph can overrun its panel by 60 units and still look plausible in a screenshot. A crop
+   * cannot separate "the text is too wide" from "the frame is drawn narrow".
+   *
+   * Every value comes from the SAME calls `resolveSprite` rasterizes through -- `effectiveFont(widget,
+   * rect.width)` and `measureText` -- so this cannot agree with itself while disagreeing with the
+   * screen. That is deliberate: an instrument with its own copy of the wrap rule would confirm whatever
+   * the rule already believed. `rect` is the resolved layout rect, straight out of the last draw list.
+   *
+   * `overflowX` is the number that matters: the widest rendered line minus the rect's width. Positive
+   * means ink outside the rect.
+   */
+  textExtent(name: string): unknown {
+    const registry = this.runtime?.registry ?? null;
+    const id = registry === null ? null : registry.byName(name);
+    const widget = id === null ? null : registry?.widget(id) ?? null;
+    if (!widget) {
+      return { name, found: false };
+    }
+    const item = this.lastItems.find((entry) => entry.widget === widget) ?? null;
+    const rect = item?.rect ?? null;
+    const spec = effectiveFont(widget, rect?.width);
+    // THE LIVE SCALE, not 1, and the first version of this used 1 -- which reported a DIFFERENT set of
+    // lines from the ones on screen (the Eviscerate body broke after "per" here and after "combo" in the
+    // raster). `resolveSprite` rasterizes at `screenScale(viewport.height)` and `wrapLines` measures in
+    // DEVICE pixels, so scale 1 asks a different question. `linesAtScale1` is kept beside it on purpose:
+    // the two differing is the measurement of how scale-invariant the breaking actually is, which round
+    // 17 claimed and nothing had checked at a non-unit scale.
+    // `layoutScale()`, not a second `screenScale(window.innerHeight)` -- self-review caught the
+    // duplicate. Two expressions for one scale is the same class of defect as two notions of a label's
+    // size, and this is an instrument: if it ever disagreed with the pass it measures, it would lie.
+    const scale = layoutScale();
+    const lines = spec === null ? [] : wrapLines(widget.displayText, spec, scale);
+    const linesAtScale1 = spec === null ? [] : wrapLines(widget.displayText, spec, 1);
+    const size = spec === null ? null : measureText(widget.displayText, spec, scale);
+    return {
+      name,
+      found: true,
+      drawn: item !== null,
+      shown: widget.shown,
+      text: widget.displayText,
+      authored: { width: widget.width, height: widget.height },
+      rect,
+      font: spec === null
+        ? null
+        : {
+          size: spec.size,
+          wrapWidth: spec.wrapWidth ?? null,
+          maxLines: spec.maxLines ?? null,
+          nonSpaceWrap: spec.nonSpaceWrap ?? null,
+          align: spec.align,
+        },
+      scale,
+      lines,
+      /** Same breaking asked at scale 1 -- equal to `lines` iff the breaking really is scale-invariant. */
+      linesAtScale1,
+      scaleInvariant: JSON.stringify(lines) === JSON.stringify(linesAtScale1),
+      measured: size,
+      overflowX: rect === null || size === null ? null : size.width - rect.width,
+      overflowY: rect === null || size === null ? null : size.height - rect.height,
+    };
+  }
+
+  /**
    * Load the fonts and boot the client's own `FrameXML.toc` onto this host's root.
    *
    * The dynamic `import()` is `framexml-screen.ts`'s decision repeated for the same reason: the
@@ -265,6 +412,9 @@ export class WorldUiHost {
       // `unit-bridge.ts#seedUnitSnapshots`. Snapshots only -- the events still come from the bridges
       // below, which need the tree to exist.
       seed: this.world ? (vm) => seedUnitSnapshots(vm, this.world as World) : undefined,
+      // THE LOADING SCREEN'S BAR. A real fraction of the manifest, not a timer: see
+      // `ui/loading-screen.ts` and `world-runtime.ts`'s yield for why it is only called at a yield.
+      onProgress: (done, total) => this.onLoadProgress?.(done / total),
     });
     if (this.stopped) {
       // Superseded by a teardown that ran while the manifest was loading. This boot's runtime is
@@ -277,12 +427,80 @@ export class WorldUiHost {
     // no knowledge of the DOM; this line is the whole seam. See `lua/api/bindings.ts#dispatchBinding` for
     // what a bound key actually runs (a `Bindings.xml` command, not a call into TypeScript).
     this.input.keyBinding = (token, down) => dispatchBinding(runtime.vm, token, down);
+    // THE TWO WAYS A CARRIED ABILITY IS PUT DOWN, neither of which has any Lua to run: `WorldFrame`
+    // declares no `OnReceiveDrag` (`worldframe.xml:23-77`) and nothing in the 264 manifest files touches
+    // the cursor on Escape. See `api/cursor.ts#dropCursorOnWorld` / `#cancelCursor`.
+    this.input.dropOnWorld = () => { dropCursorOnWorld(runtime.vm); };
+    this.input.cancelCursor = () => cancelCursor(runtime.vm);
     // THE UNIT FEED, attached the instant the tree exists and not before: `attachUnitBridge` fires
     // `PLAYER_ENTERING_WORLD` on the way in, and a frame that has not been built yet cannot have
     // registered for it. The world is optional so `/game?offline=1&ui=lua` -- which has units but no
     // server, and is where every UI measurement is taken -- still boots.
     if (this.world) {
       this.detachUnits = attachUnitBridge(runtime.vm, this.world);
+      // THE SELECTION GLOBALS -- `TargetNearestEnemy` (TAB), `ClearTarget` and `SpellStopCasting`
+      // (Escape's own legs). Beside the unit bridge and NOT gated on a live session: an offline world
+      // has units to tab between and a target to clear, and `SpellStopCasting` reaches the wire only
+      // when a cast snapshot exists, which offline it never does.
+      this.detachTargets = attachTargetBridge(runtime.vm, this.world);
+      // THE NAMEPLATE SWITCH. The `V` key is entirely the client's own Lua -- `Bindings.xml:544-553`'s
+      // `NAMEPLATES` binding reads and writes two CVars and does nothing else -- so the engine's whole
+      // part is to read them, which is what this closure is. Registered here because this is the one
+      // place that holds both the world and the VM; `World` keeps a function slot rather than a
+      // dependency on the runtime (the shape `setProgramWarmer` uses).
+      this.world.nameplateConfig = () => ({
+        showEnemies: cvarBool(runtime.vm, 'nameplateShowEnemies'),
+        showFriends: cvarBool(runtime.vm, 'nameplateShowFriends'),
+        // THE LEVEL NUMBER'S COLOUR, answered by the CLIENT'S OWN `GetQuestDifficultyColor` -- the same
+        // call `targetframe.lua:246-251` uses to colour a unit's level. Asked for as THREE FORMATTED
+        // NUMBERS rather than as a Lua table: a table would have to cross the VM boundary as a live
+        // handle, which is exactly what `SetAttribute` stored and had freed under it (see `STATE.md`),
+        // and a `string.format` answer cannot be misread. Memoized on the caller's side per
+        // level-vs-player-level pair, so this is a handful of calls per session, not one per plate per
+        // frame.
+        levelColor: (level: number) => {
+          const answer = runtime.vm.runExpr(
+            `local c = GetQuestDifficultyColor(${Math.floor(level)}) `
+            + 'return string.format("%.4f %.4f %.4f", c.r, c.g, c.b)',
+            'nameplate-level.lua',
+          );
+          const parts = String((answer as { value?: unknown } | null)?.value ?? '').split(' ');
+          if (parts.length !== 3) {
+            return null;
+          }
+          const rgb = parts.map((part) => Number(part));
+          return rgb.some((n) => !Number.isFinite(n)) ? null : [rgb[0], rgb[1], rgb[2]];
+        },
+      });
+
+      /**
+       * THE OUTCOME WORDS for the floating combat text, out of the CLIENT'S OWN TABLE.
+       *
+       * `CombatFeedbackText` (`combatfeedback.lua:15-26`) maps `"MISS"`/`"DODGE"`/`"PARRY"`/... to the
+       * localized `GlobalStrings.lua` values, and it is the same table the client's own
+       * `CombatFeedback_OnCombatEvent` reads for the portrait indicator. Asking it means the floating
+       * word and the unit-frame word are literally the same string and there is ONE copy of the word
+       * list in this client -- the argument the level colour is reached through
+       * `GetQuestDifficultyColor` for. The reference hardcodes the shipped enUS words only because it
+       * has no FrameXML to ask (`combat_text/law.rs:93-100`).
+       *
+       * A STRING is asked for, never a table handle: a handle crossing the boundary is what
+       * `SetAttribute` stored and had freed under it (see `STATE.md`). The key is checked against a
+       * literal set here rather than interpolated blind, because it lands inside a Lua chunk.
+       * `World` memoizes on the caller's side -- see `combatWord` -- so this is at most nine calls a
+       * session.
+       */
+      this.world.combatWord = (key: string) => {
+        if (!/^[A-Z]+$/.test(key)) {
+          return null;
+        }
+        const answer = runtime.vm.runExpr(
+          `return tostring(CombatFeedbackText and CombatFeedbackText["${key}"] or "")`,
+          'combat-word.lua',
+        );
+        const word = String((answer as { value?: unknown } | null)?.value ?? '');
+        return word === '' || word === 'nil' ? null : word;
+      };
       // THE ACTION FEED. Gated on a real session as well as a world: `/game?offline=1&ui=lua` has units
       // but no protocol, and `session.offline` short-circuits ahead of the `protocol` getter -- reading
       // `game.objectHandler` there would construct transports the offline route contracts never to
@@ -290,8 +508,26 @@ export class WorldUiHost {
       // server to have sent an action bar.
       if (!this.world.session.offline) {
         this.detachActions = attachActionBridge(runtime.vm, this.world, this.art);
+        // THE SPELLBOOK AND THE CURSOR. After the action bridge, because both read `spellData` and the
+        // action bridge is the one that OWNS the 49 MB `Spell.dbc` fetch (see its header on why that call
+        // must not be made from the packet handler); `ensureLoaded` is idempotent, so this rides the same
+        // promise rather than starting a second one. Gated on a real session for the same reason: there is
+        // no spell book without `SMSG_INITIAL_SPELLS`.
+        this.detachSpellbook = attachSpellbookBridge(runtime.vm, this.world, this.art);
+        // THE BAGS. Gated on a real session for the same reason the two above are: an item's name and
+        // quality come from `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, so an offline world has no bag to draw
+        // and `world.game.objectHandler` must not be touched on that route at all.
+        this.detachContainers = attachContainerBridge(runtime.vm, this.world, this.art);
+        // THE LOOT WINDOW. After the container bridge, because a taken item lands in a bag and both
+        // read the same `ItemHandler` template cache -- `attachContainerBridge` is the one that first
+        // asks `itemData` to load, and `ensureLoaded` is idempotent so this rides that promise.
+        this.detachLoot = attachLootBridge(runtime.vm, this.world, this.art);
       }
     }
+    // THE RUNTIME ART SINK, before the load report and before anything can script a texture. See
+    // `ui/runtime-art.ts`: a `SetTexture` naming a path the XML never mentioned was silently never
+    // fetched, which is what left the backpack with no backdrop.
+    publishArtSink(this.art);
     reportLoad(runtime);
     // The console handle, exactly as the glue side has one. `worldRuntime.vm.run('...')` against the
     // tree that is on screen is the only way to interrogate a frame a screenshot cannot answer for.
@@ -304,6 +540,24 @@ export class WorldUiHost {
     (window as never as Record<string, unknown>).worldUiArt = this.art;
     // The draw instrument -- see `drawStats` for what each number answers.
     (window as never as Record<string, unknown>).uiDrawStats = this.drawStats;
+    /**
+     * THE INPUT ROUTER, as a handle -- new with the drag work, and it was needed within one round.
+     *
+     * `worldUiDrawList` says where a widget IS and the registry says what it is called, but neither answers
+     * "which widget does the router believe the pointer is over", and that is the question a drag fails on:
+     * a probe that converts a rect to device pixels with its own arithmetic is asking a DIFFERENT question
+     * from the one `input.ts#toUnits` answers, and the two disagreeing is invisible. `pointerWidget` and
+     * `pointerPosition` are the router's own answers, so a probe can compare them against the widget it
+     * meant to hit instead of trusting a coordinate conversion it duplicated.
+     */
+    (window as never as Record<string, unknown>).worldUiInput = this.input;
+    /**
+     * THE OVERFLOW INSTRUMENT -- `uiTextExtent('VideoOptionsResolutionPanelSubText')`. See `textExtent`
+     * for why a crop cannot answer this and why it borrows the draw pass's own calls rather than
+     * re-deriving them.
+     */
+    (window as never as Record<string, unknown>).uiTextExtent = (name: string) =>
+      this.textExtent(name);
   }
 
   /**
@@ -334,6 +588,12 @@ export class WorldUiHost {
     // computes rects, it does not store them). It is what let a probe put a REAL pointer click on
     // `BonusActionButton2` instead of calling its handler directly. One reference assignment per frame.
     (window as never as Record<string, unknown>).worldUiDrawList = items;
+    this.lastItems = items;
+    // THE RECTS, for `Region:GetLeft/GetRight/GetTop/GetBottom/GetCenter`. Published from the same
+    // array the router hit-tests, so a rect a script reads and a rect a click lands in cannot
+    // disagree. One reference assignment; the id map is built lazily on first lookup. See
+    // `ui/rects.ts` for why nothing else in this client could answer where a widget ended up.
+    publishRects(items, viewportUnits(viewport).height);
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');
@@ -387,7 +647,103 @@ export class WorldUiHost {
     const sweepStarted = performance.now();
     stats.sweeps = this.drawSweeps(items, viewport);
     stats.sweepMs = performance.now() - sweepStarted;
+    // THE DRAGGED ABILITY'S ICON, in the same after-the-composite pass and for exactly the same reason.
+    this.drawCursorIcon(viewport);
     this.sections.end('ui.draw');
+  }
+
+  /**
+   * THE ICON ATTACHED TO THE CURSOR while an ability is being dragged.
+   *
+   * **Drawn here, after the composite, and NOT as a widget in the tree** -- the same decision
+   * `drawSweeps` documents, and here the argument is even sharper. `drawList` is a pure flatten of the
+   * widget tree, so the only way to get a quad into it is to put a real `Widget` in the tree; and
+   * `drawListSignature` mixes every item's `rect.left/top/width/height`. A widget that follows the mouse
+   * would therefore change the fingerprint on EVERY frame the pointer moves, forcing a full ~4-12 ms
+   * re-render of the whole interface for the entire length of the drag -- which is precisely the
+   * "anything that dirties the fingerprint every frame gives the whole saving back" trap. Drawn straight
+   * to the canvas it costs **one draw call while a drag is live and nothing at all otherwise**, and the
+   * fingerprint never sees it.
+   *
+   * The pointer comes from the ROUTER (`GlueInput#pointerPosition`), not from `api/screen.ts`'s
+   * `GetCursorPosition` tracker, and the two are not interchangeable: the router works in logical units
+   * with Y DOWN from the top -- the same space `drawList` rects and `hitTest` use -- while the Lua global
+   * deliberately reports CSS pixels with Y measured UP from the bottom. Reading the wrong one puts the
+   * icon mirrored vertically and at the wrong scale.
+   *
+   * Returns nothing: the cursor is either carrying something drawable or it is not, and there is no count
+   * worth instrumenting the way the sweeps' was.
+   */
+  private drawCursorIcon(viewport: { width: number; height: number }): void {
+    const runtime = this.runtime;
+    const held = runtime === null ? null : getCursor(runtime.vm);
+    const pointer = this.input.pointerPosition;
+    const texture = held?.texture ?? null;
+    const map = texture === null ? null : this.art.texture(texture);
+    // Four distinct nothing-to-draw cases, all of them ordinary: no drag, a spell whose icon path is not
+    // resolved (the 49 MB `Spell.dbc` has not landed), a BLP still in flight, and no pointer move yet.
+    if (held === null || pointer === null || map === null) {
+      if (this.cursorQuad !== null) {
+        this.cursorQuad.visible = false;
+      }
+      return;
+    }
+
+    const units = viewportUnits(viewport);
+    const quad = this.cursorQuadOf();
+    const material = quad.material as THREE.MeshBasicMaterial;
+    // ONLY on a real change. Self-review caught this assigning `map` and setting `needsUpdate = true` every
+    // frame of the drag: `needsUpdate` on a material forces three to re-evaluate its program, so a held
+    // ability would have paid a shader recompile check per frame for a texture that never changes.
+    if (material.map !== map) {
+      material.map = map;
+      material.needsUpdate = true;
+    }
+    // Centred on the pointer, which is where the real client holds a picked-up icon. NDC on the composite
+    // camera, the same two lines `drawSweeps` uses.
+    quad.position.set(pointer.x / units.width - 0.5, 0.5 - pointer.y / units.height, 0);
+    quad.scale.set(CURSOR_ICON_UNITS / units.width, CURSOR_ICON_UNITS / units.height, 1);
+    // BY HAND -- `matrixAutoUpdate` is false, so the two writes above are otherwise inert.
+    quad.updateMatrix();
+    quad.visible = true;
+
+    const previousAutoClear = this.renderer.autoClear;
+    this.renderer.autoClear = false;
+    this.renderer.render(this.cursorSceneOf(), this.compositeCamera);
+    this.renderer.autoClear = previousAutoClear;
+  }
+
+  private cursorScene: THREE.Scene | null = null;
+
+  private cursorQuad: THREE.Mesh | null = null;
+
+  /** One quad, built on first use. Same recipe as `sweepQuad`. */
+  private cursorQuadOf(): THREE.Mesh {
+    if (this.cursorQuad === null) {
+      const material = new THREE.MeshBasicMaterial({
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        // The composite is premultiplied and this quad is drawn into the same canvas after it, so the
+        // icon's own alpha must be premultiplied too or a soft edge reads as a bright halo.
+        premultipliedAlpha: true,
+      });
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+      quad.frustumCulled = false;
+      quad.matrixAutoUpdate = false;
+      quad.visible = false;
+      this.cursorQuad = quad;
+      this.cursorSceneOf().add(quad);
+    }
+    return this.cursorQuad;
+  }
+
+  private cursorSceneOf(): THREE.Scene {
+    if (this.cursorScene === null) {
+      this.cursorScene = new THREE.Scene();
+      this.cursorScene.name = 'WorldUiCursorIcon';
+    }
+    return this.cursorScene;
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -692,8 +1048,27 @@ export class WorldUiHost {
     this.stopped = true;
     this.detachUnits?.();
     this.detachUnits = null;
+    this.detachTargets?.();
+    this.detachTargets = null;
     this.detachActions?.();
     this.detachActions = null;
+    this.detachSpellbook?.();
+    this.detachSpellbook = null;
+    // LIFO, AND THE ORDER IS LOAD-BEARING HERE RATHER THAN TIDINESS. The loot bridge CHAINS its
+    // `GameTooltip` item source onto whatever the container bridge installed, capturing it at attach
+    // and restoring it on teardown. Tearing the container bridge down FIRST set the source to null and
+    // then let the loot bridge restore the container's closure over the top -- leaving a dead source
+    // installed after dispose, reading a bridge whose listeners are gone. Unwinding in the reverse of
+    // the attach order is what makes the chain's restore land on something live.
+    this.detachLoot?.();
+    this.detachLoot = null;
+    this.detachContainers?.();
+    this.detachContainers = null;
+    // The rect publication is module-level, so it OUTLIVES this host unless it is cleared -- exactly
+    // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
+    // stale draw list would have a remounted world's scripts reading the previous world's layout.
+    clearRects();
+    clearArtSink();
     this.input.detach();
     this.runtime?.dispose();
     this.runtime = null;
@@ -725,6 +1100,8 @@ export class WorldUiHost {
     delete (window as never as Record<string, unknown>).worldUiArt;
     delete (window as never as Record<string, unknown>).worldUiDrawList;
     delete (window as never as Record<string, unknown>).uiDrawStats;
+    delete (window as never as Record<string, unknown>).uiTextExtent;
+    this.lastItems = [];
   }
 }
 
@@ -742,11 +1119,11 @@ export class WorldUiHost {
 const REPORTED_ERRORS = 40;
 
 function reportLoad(runtime: WorldRuntime): void {
-  const { report, files, loadMs } = runtime;
+  const { report, files, loadMs, longestBlockMs } = runtime;
   console.log(
     `framexml(world): ${report.frames} frames from ${files.length} files, ` +
       `${report.warnings.length} warnings, ${report.errors.length} errors, ` +
-      `${loadMs.toFixed(0)} ms`,
+      `${loadMs.toFixed(0)} ms (longest block ${longestBlockMs.toFixed(0)} ms)`,
   );
   console.table(
     files.map((file) => ({

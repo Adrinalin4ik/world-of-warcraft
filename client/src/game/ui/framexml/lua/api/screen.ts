@@ -203,6 +203,68 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
   vm.registerFunction('IsControlKeyDown', () => [ctrlDown]);
   vm.registerFunction('IsAltKeyDown', () => [altDown]);
 
+  /**
+   * THE MODIFIED-CLICK TABLE: which modifier a NAMED action is bound to, and whether it is held now.
+   *
+   * `IsModifiedClick` was a declared gap until the owner asked for a shift-gated action bar, and it is
+   * what the client's own Lua consults for that: `ActionBarButtonTemplate`'s `<OnDragStart>` is
+   *
+   *     if ( LOCK_ACTIONBAR ~= "1" or IsModifiedClick("PICKUPACTION") ) then PickupAction(self.action);
+   *
+   * (`actionbarframe.xml:19`; the pet bar does the same at `petactionbarframe.lua:296,303,311`). So a
+   * drag requires a modifier exactly when the LOCKED setting is on -- see `installCVars`' `lockActionBars`
+   * for the other half. Nothing here invents a modifier check: the gate, the action name and the
+   * short-circuit are all the client's.
+   *
+   * THE VALUE DOMAIN IS SOURCED: `"ALT"`, `"CTRL"`, `"SHIFT"`, `"NONE"` are the four values the client's
+   * own dropdown offers and writes back through `SetModifiedClick`
+   * (`interfaceoptionspanels.lua:174-215`, one `info.value` per branch).
+   *
+   * THE TABLE'S CONTENTS ARE NOT SOURCED and are marked so. The engine ships this mapping in its own
+   * config, no file in the 264-file manifest declares a default for any action, and the only entry this
+   * client needs is the one the owner asked for. So exactly one is seeded -- `PICKUPACTION` -> `SHIFT`,
+   * which is his requirement -- and every other action name reads `NONE` until `SetModifiedClick` is
+   * called for it, which makes `IsModifiedClick` false there: the safe direction, since every caller uses
+   * it to ADD behaviour to a click.
+   *
+   * `IsModifiedClick()` with NO argument is a fifth caller shape (`containerframe.xml:33`,
+   * `lootframe.xml:52`, `itemref.lua:175`) meaning "was any modifier held". OURS: answered as
+   * shift-or-ctrl-or-alt, which is the only reading those call sites' use as a plain boolean supports.
+   */
+  const modifiedClicks = new Map<string, string>([['PICKUPACTION', 'SHIFT']]);
+  const modifierHeld = (modifier: string): boolean => {
+    if (modifier === 'SHIFT') {
+      return shiftDown;
+    }
+    if (modifier === 'CTRL') {
+      return ctrlDown;
+    }
+    if (modifier === 'ALT') {
+      return altDown;
+    }
+    return false;
+  };
+
+  vm.registerFunction('GetModifiedClick', (args) => [
+    modifiedClicks.get(String(args[0] ?? '').toUpperCase()) ?? 'NONE',
+  ]);
+
+  vm.registerFunction('SetModifiedClick', (args) => {
+    const action = String(args[0] ?? '').toUpperCase();
+    const value = String(args[1] ?? 'NONE').toUpperCase();
+    if (action !== '') {
+      modifiedClicks.set(action, value);
+    }
+    return [];
+  });
+
+  vm.registerFunction('IsModifiedClick', (args) => {
+    if (args[0] === undefined || args[0] === null) {
+      return [shiftDown || ctrlDown || altDown];
+    }
+    return [modifierHeld(modifiedClicks.get(String(args[0]).toUpperCase()) ?? 'NONE')];
+  });
+
   // CharacterSelectFrame's drag-to-rotate (characterselect.lua:479,492,494).
   vm.registerFunction('GetCursorPosition', () => [cursorX, cursorY]);
 
@@ -281,11 +343,83 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
  * An UNKNOWN name returns nil, exactly as the real `GetCVar` does. Not an error and not an empty
  * string: FrameXML tests the result for nil in places, and `""` would read as a set-but-empty CVar.
  */
+/**
+ * THE CVAR STORES, per VM, so the ENGINE can read a value the client's own Lua wrote.
+ *
+ * The map used to be a pure local of `installCVars` -- correct while every reader was Lua, and a wall
+ * the moment one is not. `Bindings.xml:544-553`'s `NAMEPLATES` binding is entirely the client's own Lua
+ * and does nothing but `SetCVar("nameplateShowEnemies", ...)`; the thing that acts on it is the engine.
+ * That is the real division in 3.3.5a -- a nameplate is engine-created and the CVars are its only
+ * switch -- so this is the door, and it is a WeakMap keyed on the VM rather than a module global for
+ * exactly the reason `installCVars` gives for the local: two runtimes in one process must not inherit
+ * each other's settings.
+ */
+const CVAR_STORES = new WeakMap<LuaVM, Map<string, string>>();
+
+/**
+ * One CVar's value as the client's Lua last left it, or undefined for a name no one has set.
+ *
+ * Case-insensitive, like `GetCVar` -- FrameXML is not consistent about a name's casing between its read
+ * and its write site, and an engine reader must not be the one place that is.
+ */
+export function cvarValue(vm: LuaVM, name: string): string | undefined {
+  const store = CVAR_STORES.get(vm);
+  if (store === undefined) {
+    return undefined;
+  }
+  const wanted = name.toLowerCase();
+  for (const [stored, value] of store) {
+    if (stored.toLowerCase() === wanted) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/** `GetCVarBool`'s rule, for an engine reader: `"1"` is true and everything else, unset included, false. */
+export function cvarBool(vm: LuaVM, name: string): boolean {
+  return cvarValue(vm, name) === '1';
+}
+
 function installCVars(vm: LuaVM): void {
   const cvars = new Map<string, string>([
     // Off by default: this is the launcher/tools checkbox, and there is no launcher to show.
     ['showToolsUI', '0'],
+    /**
+     * LOCKED ACTION BARS, which is how the client's own Lua asks for a MODIFIER before a drag:
+     * `if ( LOCK_ACTIONBAR ~= "1" or IsModifiedClick("PICKUPACTION") )` (`actionbarframe.xml:19`).
+     *
+     * `LOCK_ACTIONBAR` is not an engine global -- it is a uvar the client's own options code copies out of
+     * this CVar: `uvarInfo["LOCK_ACTIONBAR"] = { default = "0", cvar = "lockActionBars", ... }`
+     * (`interfaceoptionsframe.lua:311`), seeded to the default by `InterfaceOptionsFrame_InitializeUVars`
+     * (`:352-357`) and then overwritten with `_G[control.uvar] = GetCVar(control.cvar)` by
+     * `BlizzardOptionsPanel_SetupControl` (`optionspaneltemplates.lua:373-380`), which runs on
+     * `PLAYER_ENTERING_WORLD` for the ActionBars panel's `$parentLockActionBars` check button
+     * (`interfaceoptionspanels.xml:1448-1464`).
+     *
+     * **`"1"` IS OURS, and it is the owner's requirement, not the game's default.** `GetCVarDefault`
+     * reports `"0"` in the real client and dragging there needs no modifier out of the box; he asked for
+     * shift-only ("it works all the time, even without shift. It should work with shift only"). It is a
+     * real CVar, so the client's own options panel or a `SetCVar` flips it back with no code change.
+     */
+    ['lockActionBars', '1'],
+    /**
+     * THE TWO NAMEPLATE SWITCHES, seeded OFF.
+     *
+     * Not decoration: `Bindings.xml:544-573`'s three nameplate bindings do nothing but read and write
+     * this pair, so they are the entire toggle. Seeded rather than left absent because the seeding is
+     * what documents that the names are the CVars the client's own Lua uses -- `GetCVarBool` already
+     * answers false for an unset name, so behaviour is identical either way.
+     *
+     * **OFF is 3.3.5a's own default**, and the evidence is the binding's own shape: the first `V` press
+     * takes the `else` arm and turns enemy plates ON, which is only the right first behaviour if they
+     * start off. (The value in a real install lives in `Config.wtf`, which the asset host does not
+     * serve -- `wtf/config.wtf` 404s -- so this is an inference from the client's Lua, not a read.)
+     */
+    ['nameplateShowEnemies', '0'],
+    ['nameplateShowFriends', '0'],
   ]);
+  CVAR_STORES.set(vm, cvars);
 
   // Case-insensitive, like the client's own CVar table -- FrameXML is not consistent about the casing
   // of a name between the read and the write site, and a case-sensitive map would silently create a
@@ -302,6 +436,24 @@ function installCVars(vm: LuaVM): void {
   };
 
   vm.registerFunction('GetCVar', (args) => [lookup(args[0]) ?? null]);
+
+  /**
+   * `GetCVarDefault(name)` -- the value the CVar ships with, which is NOT its current value.
+   *
+   * Needed to reach the lock setting at all: `BlizzardOptionsPanel_OnEvent` calls it for every check
+   * button with a `cvar` on `PLAYER_ENTERING_WORLD` (`optionspaneltemplates.lua:333`) and only then
+   * `securecall`s `BlizzardOptionsPanel_SetupControl` (`:353`), which is the line that copies the CVar
+   * into `LOCK_ACTIONBAR`. Absent, that loop raised on the first panel and no uvar was ever loaded.
+   *
+   * The one default this client can SOURCE is `lockActionBars`' `"0"`
+   * (`interfaceoptionsframe.lua:311`'s `default = "0"`). Anything else answers nil -- the real call's
+   * answer for a name the config does not know -- rather than echoing the current value, which would make
+   * `InterfaceOptionsFrame_LoadUVars`' `cvarValue == setting.default` test always true.
+   */
+  const cvarDefaults = new Map<string, string>([['lockactionbars', '0']]);
+  vm.registerFunction('GetCVarDefault', (args) => [
+    cvarDefaults.get(key(args[0])) ?? null,
+  ]);
 
   vm.registerFunction('SetCVar', (args) => {
     const raw = args[1];

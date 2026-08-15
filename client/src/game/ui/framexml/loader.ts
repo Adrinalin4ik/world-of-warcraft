@@ -48,6 +48,7 @@ import { FontResolution, outlineFlags, readFontObject } from './fonts';
 import {
   ParsedDocument,
   XmlElement,
+  absDimension,
   absValue,
   attr,
   attrBool,
@@ -64,7 +65,9 @@ import {
 // forgotten import would show up as a document that materializes and then does nothing at all.
 // Registering after a VM is installed is safe (`registerMethods` flushes the dispatch cache).
 import './lua/methods/cooldown';
+import './lua/methods/worldframe';
 import './lua/methods/frame';
+import './lua/methods/gametooltip';
 import './lua/methods/kinds';
 import './lua/methods/model';
 import './lua/methods/scroll';
@@ -220,12 +223,6 @@ export function loadDocument(
     loader.finish();
   }
   return loader.report;
-}
-
-/** A parsed `x`/`y` pair: an `<AbsDimension>` child if there is one, else the element's own attrs. */
-function absDim(element: XmlElement): { x?: number; y?: number } {
-  const source = childrenNamed(element, 'AbsDimension')[0] ?? element;
-  return { x: num(attr(source, 'x')), y: num(attr(source, 'y')) };
 }
 
 /**
@@ -533,6 +530,14 @@ class DocumentLoader {
     const resolvedName = resolveName(attr(element, 'name'), effectiveParentName);
     const dbg = `${sourceName}:${resolvedName ?? `<${element.tag}>`}`;
     const wrapper = this.create(element.tag, resolvedName ?? null, effectiveParent, dbg);
+    // `parentKey` HERE, not next to `decorate`, and the reason is ownership rather than order:
+    // `borrowedParent` is released two lines down, so `effectiveParent` is a dangling handle after
+    // that point for the `parent="Name"` case. This is also before `decorate`, which is what the
+    // engine does -- the key exists for the whole subtree build, so a child's own `OnLoad` reaching
+    // `self:GetParent().someKey` cannot race it.
+    if (wrapper !== null) {
+      this.applyParentKey(element, wrapper, effectiveParent, dbg);
+    }
     if (borrowedParent !== null) {
       // The handle is only needed for the `CreateFrame` call: the registry owns the parent frame and
       // its permanent Lua table, and this was a `getGlobal` result.
@@ -756,7 +761,7 @@ class DocumentLoader {
    */
   private applySize(element: XmlElement, wrapper: LuaRef, dbg: string): void {
     for (const size of childrenNamed(element, 'Size')) {
-      const { x, y } = absDim(size);
+      const { x, y } = absDimension(size);
       if (x !== undefined) {
         this.callMethod(wrapper, 'SetWidth', [x], dbg);
       }
@@ -800,7 +805,7 @@ class DocumentLoader {
         const relativePoint = attr(anchor, 'relativePoint') ?? point;
         const relativeTo = resolveName(attr(anchor, 'relativeTo'), parentName) ?? null;
         const offset = childrenNamed(anchor, 'Offset')[0];
-        const { x, y } = offset === undefined ? {} : absDim(offset);
+        const { x, y } = offset === undefined ? {} : absDimension(offset);
         this.callMethod(
           wrapper,
           'SetPoint',
@@ -849,6 +854,7 @@ class DocumentLoader {
               this.applyFontStringFont(region, regionWrapper, dbg);
             }
             this.applyRegionVisual(region, regionWrapper, isTexture, dbg);
+            this.applyParentKey(region, regionWrapper, wrapper, dbg);
           } finally {
             this.rt.vm.unref(regionWrapper);
           }
@@ -1083,6 +1089,34 @@ class DocumentLoader {
     if (resolved.justifyH !== undefined) {
       this.callMethod(wrapper, 'SetJustifyH', [resolved.justifyH], dbg);
     }
+    // `<Shadow>`, through the same two Lua methods a script would call, so the XML path and the Lua
+    // path cannot diverge. Colour BEFORE offset for no functional reason -- neither reads the other --
+    // but offset is what makes the shadow visible, so it goes last and a half-applied pair never draws.
+    if (resolved.shadow !== undefined) {
+      const [r, g, b, a] = resolved.shadow.color;
+      this.callMethod(wrapper, 'SetShadowColor', [r, g, b, a], dbg);
+      this.callMethod(wrapper, 'SetShadowOffset', [resolved.shadow.x, resolved.shadow.y], dbg);
+    }
+    // `maxLines` -- an ELEMENT attribute, not a font-object value, so it is read from the region rather
+    // than from `resolveFont`. COUNTED over the 127 XML files `framexml.toc` lists: 24 occurrences in
+    // 5 files -- `interfaceoptionspanels.xml` 17, `videooptionspanels.xml` 3, `audiooptionspanels.xml`
+    // 2, `chatframe.xml` 1 and `spellbookframe.xml:100` 1. (Round 17 recorded the last as the ONLY one;
+    // it had read six files.)
+    const maxLines = num(attr(region, 'maxLines'));
+    if (maxLines !== undefined) {
+      this.callMethod(wrapper, 'SetMaxLines', [maxLines], dbg);
+    }
+    // `nonspacewrap` IS authored -- 31 occurrences across 10 of the 127 manifest XML files, and 22 of
+    // them are the options panels' description paragraphs, i.e. exactly the strings the owner reported
+    // running out of their panel (`videooptionspanels.xml:37`, `interfaceoptionspanels.xml:64`, ...).
+    // Read through the same method a script would call, like `maxLines` above.
+    // A real BOOLEAN, not the attribute string: `SetNonSpaceWrap` applies Lua truthiness (`luaFlag`),
+    // under which the string `"false"` is TRUE -- the `SetChecked("false")` defect again.
+    // `wordwrap` is still NOT read: 0 occurrences across the same 127 files, so a reader would be dead
+    // code. The Lua setter exists.
+    if (attr(region, 'nonspacewrap') !== undefined) {
+      this.callMethod(wrapper, 'SetNonSpaceWrap', [attrBool(region, 'nonspacewrap')], dbg);
+    }
   }
 
   /** The element's own font values layered over its inherited font object's. */
@@ -1122,6 +1156,23 @@ class DocumentLoader {
     const outline = attr(region, 'outline');
     if (outline !== undefined) {
       resolution.outline = outline;
+    }
+    // The element's OWN `<Shadow>`, layered over the inherited font object's -- and FontStrings really
+    // do declare one: `accountlogin.xml:541-546` gives `AccountLoginSaveAccountNameText` an
+    // `<Offset><AbsDimension x="1" y="-1"/></Offset>` and a black `<Color>` of its own, and
+    // `targetframe.xml` does the same for several. Read with the same last-occurrence and
+    // absent-Color-is-black rules `fonts.ts#readFontObject` documents; the reading is shared through
+    // `absDimension`, and only the SOURCE element differs.
+    const shadows = childrenNamed(region, 'Shadow');
+    if (shadows.length > 0) {
+      const shadow = shadows[shadows.length - 1];
+      const { x, y } = absDimension(childrenNamed(shadow, 'Offset')[0] ?? shadow);
+      const colorElement = childrenNamed(shadow, 'Color')[0];
+      resolution.shadow = {
+        x: x ?? 0,
+        y: y ?? 0,
+        color: colorElement === undefined ? [0, 0, 0, 1] : colorOf(colorElement),
+      };
     }
     return resolution;
   }
@@ -1417,6 +1468,9 @@ class DocumentLoader {
           // button's normal texture under that one global and warn about the clash for all but the
           // first. Only a name the element declares ITSELF is a name.
           this.publishRegion(raw, region, selfName, dbg);
+          // The EXPANDED element here, `texture`, not `raw` -- see `applyParentKey` for why the two
+          // attributes take opposite sides of that choice.
+          this.applyParentKey(texture, region, wrapper, dbg);
         } finally {
           this.rt.vm.unref(region);
         }
@@ -1517,6 +1571,50 @@ class DocumentLoader {
    * name while the global belonged to something else would have `reset()` null out a stranger's
    * global -- a FrameXML function, in the case the warning below exists for.
    */
+  /**
+   * `parentKey="name"` -- publish this element on its PARENT's Lua table as `parent.name`.
+   *
+   * A 3.x addition, so the reference is silent on it (`benilla-ui` has no `parent_key` at all; its one
+   * hit is the unrelated `$parentKey` name substitution, `framexml.rs:371`) and the game's own files are
+   * the only oracle. They are unambiguous about what it is for: `targetframe.xml:215` declares
+   * `<Texture name="$parentNameBackground" ... parentKey="nameBackground">` and `targetframe.lua:263,268`
+   * addresses it as `self.nameBackground` and NOTHING ELSE. It was being dropped, so
+   * `TargetFrame_CheckFaction` raised `attempt to index a nil value (field 'nameBackground')` at line
+   * 268 -- measured live (`scratchpad/t17k-nb.js`) -- which is why the target frame's name strip stayed
+   * FULL WHITE however good `UnitSelectionColor` got. One dropped attribute, and the visible symptom was
+   * a mis-coloured bar.
+   *
+   * FROM THE EXPANDED element, unlike `name` (see `publishRegion` for why a name must come from the raw
+   * one). The two attributes differ in kind: a `name` inherited from a template would publish every
+   * inheritor's region under ONE global and clash, whereas a `parentKey` inherited from a template is
+   * exactly what the engine does -- each inheritor gets the key on ITS OWN table, so there is no clash
+   * and dropping the inherited case would lose the templated frames that are the attribute's main use.
+   *
+   * A parent-less element (a document-top-level frame with no `parent=`) has nowhere to put the key and
+   * is reported rather than silently skipped: the client would have assigned it to `UIParent`, and
+   * guessing that here would put a key on a frame the document did not name.
+   */
+  private applyParentKey(
+    element: XmlElement,
+    child: LuaRef,
+    parent: LuaRef | null,
+    dbg: string,
+  ): void {
+    const key = attr(element, 'parentKey');
+    if (key === undefined || key === '') {
+      return;
+    }
+    if (parent === null) {
+      this.report.warnings.push(
+        `${dbg}: parentKey="${key}" on an element with no parent frame; the key was not published`,
+      );
+      return;
+    }
+    // `setTableField` pushes the referenced value INTO the table, so the table holds its own reference
+    // and the caller's handle can be released as it always was.
+    this.rt.vm.setTableField(parent, key, child);
+  }
+
   private publishRegion(element: XmlElement, region: LuaRef, selfName: string, dbg: string): void {
     const name = resolveName(attr(element, 'name'), selfName);
     if (name === undefined) {

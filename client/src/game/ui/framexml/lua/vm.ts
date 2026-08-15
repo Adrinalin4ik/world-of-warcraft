@@ -13,9 +13,10 @@
  * stack, hand them to a plain JS callback as an array, push whatever it returns back onto the stack.
  *
  * Lua values that aren't JS primitives (tables, functions) can't be copied into a JS value, so they
- * are kept on the Lua side and handed out as `LuaRef` -- an index into the registry table
- * (`LUA_REGISTRYINDEX`), which is itself just a Lua table fengari never garbage-collects out from
- * under us. `newTable`/`setTableField`/`setMetatable` exist because Task 2 (frame wrapper tables with
+ * are kept on the Lua side and handed out as `LuaRef` -- an index into a Lua table this class owns,
+ * itself anchored in the registry (`LUA_REGISTRYINDEX`) and so never garbage-collected out from under
+ * us. It is deliberately NOT `luaL_ref`'s use of the registry table itself; `ref`'s docstring carries
+ * the measurement that decided it. `newTable`/`setTableField`/`setMetatable` exist because Task 2 (frame wrapper tables with
  * a `CreateFrame` metatable) needs to build and shape a table from the JS side, and the brief's
  * original surface -- `run`/`call`/`setGlobal`/`getGlobal`/`registerFunction` -- has no way to create
  * a table or attach a metatable to one at all.
@@ -75,9 +76,24 @@ type LuaState = unknown;
 export class LuaVM {
   private readonly L: LuaState;
 
+  /**
+   * THE HANDLE TABLE: one real fengari registry slot, holding one Lua table that every `LuaRef`
+   * indexes into. `luaL_ref`/`luaL_unref` on `LUA_REGISTRYINDEX` are NOT used for handles, and the
+   * reason is measured rather than stylistic -- see `ref`/`unref` below.
+   */
+  private readonly slotsRef: number;
+
+  /** Freed slots, newest first. Ours, not fengari's: `luaL_unref`'s freelist is the thing being avoided. */
+  private readonly freeSlots: number[] = [];
+
+  /** Next never-used slot. 1-based only so a slot number is never the falsy 0. */
+  private nextSlot = 1;
+
   constructor() {
     this.L = lauxlib.luaL_newstate();
     lualib.luaL_openlibs(this.L);
+    lua.lua_newtable(this.L);
+    this.slotsRef = lauxlib.luaL_ref(this.L, lua.LUA_REGISTRYINDEX);
   }
 
   /** Loads and runs a chunk of Lua source. Never throws -- a load or runtime error comes back as a value. */
@@ -234,8 +250,8 @@ export class LuaVM {
    * Releases a handle, freeing its registry slot for reuse. The Lua value itself lives or dies by
    * ordinary garbage collection afterwards.
    *
-   * This exists because the registry is the one thing here that JS garbage collection cannot help
-   * with: `luaL_ref` stores the value in a table that is a GC root by definition, so an unreleased
+   * This exists because the handle table is the one thing here that JS garbage collection cannot help
+   * with: it is anchored in the registry and so is a GC root by definition, so an unreleased
    * handle pins its value forever. `toJs` mints a fresh handle for EVERY table or function that
    * crosses the boundary -- including every frame passed as an argument to a widget method -- so
    * without this the registry would grow with each such call, not just with each object.
@@ -244,7 +260,7 @@ export class LuaVM {
    * slot may already have been handed to a different value.
    */
   unref(ref: LuaRef): void {
-    lauxlib.luaL_unref(this.L, lua.LUA_REGISTRYINDEX, unbox(ref));
+    this.freeSlot(unbox(ref));
   }
 
   /**
@@ -312,8 +328,10 @@ export class LuaVM {
       // Push the value the slot holds, THEN free the slot -- Lua now has its own reference (the
       // stack, or wherever the caller of `registerFunction`/`call` puts the result), and this
       // registry slot was never going to be used again.
-      lua.lua_rawgeti(this.L, lua.LUA_REGISTRYINDEX, value.transferIndex);
-      lauxlib.luaL_unref(this.L, lua.LUA_REGISTRYINDEX, value.transferIndex);
+      // Through the handle table, not `LUA_REGISTRYINDEX`: a transfer index is a slot number minted by
+      // `ref`, so reading or freeing it against fengari's own registry would address a different table.
+      this.pushRef(box(value.transferIndex));
+      this.freeSlot(value.transferIndex);
     } else if (this.isRef(value)) {
       this.pushRef(value);
     } else {
@@ -348,14 +366,75 @@ export class LuaVM {
     return value;
   }
 
-  /** Stores the value on top of the stack in the registry and returns a handle to it. Pops the stack. */
+  /**
+   * Stores the value on top of the stack in the handle table and returns a handle to it. Pops the stack.
+   *
+   * ## Why this is not `luaL_ref`, and it is the single largest cost in booting the interface
+   *
+   * `luaL_ref`/`luaL_unref` on `LUA_REGISTRYINDEX` are O(NUMBER OF LIVE HANDLES) under fengari, not
+   * O(1) as they are in C Lua. Measured on this machine with fengari 0.1.4 (`node`, a state with N
+   * long-lived handles held, timing 20,000 ref+unref cycles):
+   *
+   * | live handles |  per cycle |
+   * |--------------|------------|
+   * |            0 |    0.65 us |
+   * |        5,000 |   40.26 us |
+   * |       10,000 |   71.56 us |
+   * |       20,000 |  151.27 us |
+   *
+   * The cause is fengari's table representation, not its ref logic. `ltable.js`'s `Table` is backed by
+   * a JS `Map` (`t.strong`); writing nil to a key runs `mark_dead`, which does `strong.delete(hash)`,
+   * and writing a fresh key runs `add`, which does `strong.set(hash, ...)`. `luaL_unref` does
+   * `t[ref] = t[freelist]` and `t[freelist] = ref`, and `luaL_ref` undoes it -- so an alternating
+   * ref/unref pair deletes and re-inserts a key of the registry table on every cycle. **A V8 `Map`'s
+   * delete+set churn is itself O(size)**, measured separately on a bare `Map` with no Lua involved:
+   * 1.36 us at 1,000 entries, 13.59 us at 20,000, 25.24 us at 80,000.
+   *
+   * This client fills the registry with thousands of PERMANENT handles -- `FrameRegistry` holds a
+   * wrapper table for each of the 4,928 frames `FrameXML.toc` builds, plus every `SetScript` handler --
+   * while `toJs` mints and releases a TRANSIENT handle for every table or function that crosses the
+   * boundary, which is several per widget method call. So the two costs multiply, and they did:
+   * `unref` was **6,174 ms of the 10,102 ms** the manifest load blocked the main thread for (V8 CPU
+   * profile, `/game?offline=1&ui=lua`, self time attributed to the nearest non-fengari caller).
+   *
+   * The fix keeps the same O(1)-in-C-Lua contract without patching fengari: a slot is freed by writing
+   * a NON-NIL sentinel (`false`) rather than nil, so the key is never deleted from the backing `Map`
+   * and the next allocation of that slot is a plain overwrite (`luaH_setint`'s `setfrom` fast path).
+   * The freelist lives in JS, where popping an array is genuinely O(1). Re-measured with the same
+   * bench: **0.39 / 0.61 / 0.67 / 0.47 us per cycle at 0 / 5,000 / 20,000 / 80,000 live handles** --
+   * flat, and a handle held across all that churn still reads back as the table it was.
+   *
+   * The sentinel is not a leak: it replaces the value, so what the slot used to hold is unreachable
+   * from the registry and dies by ordinary garbage collection, which is exactly what `luaL_unref`
+   * promises. What survives is the integer key itself, one `Map` entry per slot ever allocated, and
+   * slots are reused.
+   */
   private ref(): LuaRef {
-    return box(lauxlib.luaL_ref(this.L, lua.LUA_REGISTRYINDEX));
+    const slot = this.freeSlots.length > 0 ? (this.freeSlots.pop() as number) : this.nextSlot++;
+    lua.lua_rawgeti(this.L, lua.LUA_REGISTRYINDEX, this.slotsRef);
+    // The table is on top and the value below it; `lua_insert` puts the table under the value so
+    // `lua_rawseti` can consume the value as `table[slot]`.
+    lua.lua_insert(this.L, -2);
+    lua.lua_rawseti(this.L, -2, slot);
+    lua.lua_pop(this.L, 1);
+    return box(slot);
+  }
+
+  /** Releases a slot: see `ref` for why the sentinel is `false` and not nil. */
+  private freeSlot(slot: number): void {
+    lua.lua_rawgeti(this.L, lua.LUA_REGISTRYINDEX, this.slotsRef);
+    lua.lua_pushboolean(this.L, false);
+    lua.lua_rawseti(this.L, -2, slot);
+    lua.lua_pop(this.L, 1);
+    this.freeSlots.push(slot);
   }
 
   /** Pushes the value a `LuaRef` points at onto the stack. */
   private pushRef(ref: LuaRef): void {
-    lua.lua_rawgeti(this.L, lua.LUA_REGISTRYINDEX, unbox(ref));
+    lua.lua_rawgeti(this.L, lua.LUA_REGISTRYINDEX, this.slotsRef);
+    lua.lua_rawgeti(this.L, -1, unbox(ref));
+    // Overwrite the handle table with the value it yielded, so only the value is left.
+    lua.lua_replace(this.L, -2);
   }
 
 }

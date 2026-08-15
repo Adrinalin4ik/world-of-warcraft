@@ -17,9 +17,11 @@
 import { FrameMethod, MethodContext, MethodTable, isObjectType, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
-import { Layer, Widget, deriveSize } from '../../../widget';
+import { Layer, Widget, deriveSize, effectiveFont } from '../../../widget';
 import { familyForFontFile, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
+import { rectOf, screenHeightUnits } from '../../../rects';
+import { ensureArt } from '../../../runtime-art';
 
 const warned = new Set<string>();
 
@@ -321,6 +323,46 @@ const REGION: MethodTable = {
   // opposing anchors", which only `resolveAnchors` can do.
   GetWidth: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).width],
   GetHeight: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).height],
+
+  /**
+   * `GetLeft` / `GetRight` / `GetTop` / `GetBottom` / `GetCenter` -- where the widget actually ENDED UP.
+   *
+   * **THE Y AXIS IS FLIPPED, and this is the whole subtlety.** FrameXML's screen origin is the
+   * BOTTOM-LEFT with +y UP -- that is why `GetBottom` is the small number and `GetTop` the large one --
+   * while a draw rect's `top` is measured DOWN from the top of the screen. `screenHeightUnits()` is the
+   * conversion, and it is published alongside the rects so the two cannot disagree across a resize.
+   * The same mixing of these two spaces is what mirrored the dragged action icon
+   * (`world-ui.ts`' note on `pointerPosition` vs `GetCursorPosition`).
+   *
+   * `null` -- Lua nil -- when the widget was not in the last draw list, i.e. it is hidden or has
+   * nothing drawable. FrameXML tests these before using them in the paths that matter, and inventing 0
+   * would put a tooltip in the screen's corner rather than saying "not on screen".
+   *
+   * FOUND BY A REAL FAILURE: `ContainerFrameItemButton_OnEnter` reads the button's right edge to pick
+   * the tooltip's side (`containerframe.lua:759`), and with `GetRight` absent every bag tooltip threw
+   * `attempt to call a nil value (method 'GetRight')`.
+   */
+  GetLeft: (ctx, self) => [rectOf(widgetOf(ctx, self).id)?.left ?? null],
+  GetRight: (ctx, self) => {
+    const rect = rectOf(widgetOf(ctx, self).id);
+    return [rect === null ? null : rect.left + rect.width];
+  },
+  GetTop: (ctx, self) => {
+    const rect = rectOf(widgetOf(ctx, self).id);
+    return [rect === null ? null : screenHeightUnits() - rect.top];
+  },
+  GetBottom: (ctx, self) => {
+    const rect = rectOf(widgetOf(ctx, self).id);
+    return [rect === null ? null : screenHeightUnits() - (rect.top + rect.height)];
+  },
+  /** Two returns, `x, y`, in the same bottom-left-origin space as the four edges. */
+  GetCenter: (ctx, self) => {
+    const rect = rectOf(widgetOf(ctx, self).id);
+    if (rect === null) {
+      return [];
+    }
+    return [rect.left + rect.width / 2, screenHeightUnits() - (rect.top + rect.height / 2)];
+  },
   SetPoint: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
     const point = String(args[0]).toUpperCase() as AnchorPoint;
@@ -485,8 +527,15 @@ const TEXTURE: MethodTable = {
       }
       return [];
     }
-    widget.sprite = String(first);
+    const path = String(first);
+    widget.sprite = path;
     widget.solid = false;
+    // REGISTER IT. `registerTreeArt` runs ONCE after the load and covers only what a document AUTHORS,
+    // so a path a SCRIPT names later had no def, resolved to null, and painted nothing while laying
+    // out perfectly. That is why the backpack had no backdrop: `ContainerFrame_GenerateFrame` sets
+    // `UI-BackpackBackground` at runtime (`containerframe.lua:375-378`) and that path appears nowhere
+    // in the XML. See `ui/runtime-art.ts`; idempotent, and a no-op for art already in the table.
+    ensureArt(path);
     return [];
   },
   SetBlendMode: (ctx, self, args) => {
@@ -506,9 +555,29 @@ const TEXTURE: MethodTable = {
  * Exported for `kinds.ts#GetTextWidth`, which measures a BUTTON's caption the same way
  * `GetStringWidth` measures a font string's own text -- one measurement rule, not two.
  */
+/**
+ * LUA TRUTHINESS for a boolean-ish argument: only `false` and `nil` are falsey, so `0` and `""` are
+ * TRUE. `Boolean(0)` in JS is false and would invert `SetWordWrap(0)`.
+ */
+function luaFlag(value: unknown): boolean {
+  return !(value === false || value === undefined || value === null);
+}
+
 export function ensureFont(widget: Widget) {
   if (!widget.font) {
-    widget.font = { family: 'FRIZQT', size: 12, color: '#ffffff', outline: false, align: 'LEFT' };
+    // `align: 'CENTER'` -- THE FRAMEXML DEFAULT, and getting this wrong was the owner's "the target's
+    // name is drawn over itself and unreadable". The engine's `JustifyH` field defaults to CENTER
+    // (`benilla-ui/src/script/types.rs:176-183`, and `loader/mod.rs:388` / `region.rs:542` both fall
+    // back to `JustifyH::Center` for an unrecognised value), so a `<FontString>` that declares no
+    // `justifyH` and inherits a font object that declares none either -- which is most of them --
+    // centres its text in its own rect. `TargetFrameTextureFrameName` is the sharp case: 100x10,
+    // anchored CENTER at (-50, 19) (`targetframe.xml:248-259`), inheriting `GameFontNormalSmall`
+    // whose whole chain to `SystemFont_Shadow_Small` (`fonts.xml:31`) declares no justification. Flush
+    // LEFT it starts 50 units left of where the client puts it, on top of the health bar's left cap.
+    // Measured live as `Sgh` targeting a Vale Moth (`scratchpad/t17b-real-name.png`).
+    // The client's own files corroborate the default: `targetframe.xml:516` spells `justifyH="LEFT"`
+    // out explicitly and `:81` spells `"RIGHT"`, which authors would not need if either were default.
+    widget.font = { family: 'FRIZQT', size: 12, color: '#ffffff', outline: false, align: 'CENTER' };
   }
   return widget.font;
 }
@@ -596,6 +665,15 @@ export function applyFontResolution(widget: Widget, resolved: FontResolution, db
   if (align === 'LEFT' || align === 'CENTER' || align === 'RIGHT') {
     spec.align = align;
   }
+  // PARTIAL, like every other channel here: a font object that declares no `<Shadow>` leaves whatever
+  // the chain already gave, so `GameFontNormalSmall`'s inherited shadow survives a leaf that overrides
+  // only `<Color>` (there are 20 of those in `gluefontstyles.xml`).
+  if (resolved.shadow !== undefined) {
+    const [r, g, b, a] = resolved.shadow.color;
+    spec.shadowOffset = { x: resolved.shadow.x, y: resolved.shadow.y };
+    spec.shadowColor = toHex(r, g, b);
+    spec.shadowAlpha = a;
+  }
 }
 
 const FONTSTRING: MethodTable = {
@@ -623,6 +701,97 @@ const FONTSTRING: MethodTable = {
     );
     return [];
   },
+  /**
+   * `SetShadowOffset(x, y)` / `SetShadowColor(r, g, b, a)` -- the Lua half of `<Shadow>`.
+   *
+   * Both are real API on a FontString and both are what the loader now goes through for an authored
+   * `<Shadow>`, so an XML-declared shadow and a Lua-set one land in one place. The OFFSET KEEPS
+   * FRAMEXML'S `+y` UP convention exactly as authored -- `text.ts` is the single place that flips it
+   * for the screen, and translating here would leave two conventions in `FontSpec` with no way to tell
+   * which a given widget carried.
+   *
+   * `SetShadowColor` alone leaves the offset absent and therefore draws NOTHING, which is right: the
+   * engine's shadow is at (0,0) until an offset says otherwise, and a shadow exactly under the glyph is
+   * invisible either way.
+   */
+  /**
+   * `SetWordWrap(flag)` / `SetNonSpaceWrap(flag)` / `SetMaxLines(n)` -- the wrap controls.
+   *
+   * **`nonspacewrap` IS AUTHORED and the loader now reads it** -- 31 occurrences across 10 of the 127
+   * XML files `framexml.toc` lists, 22 of them the options panels' description paragraphs (see
+   * `widget.ts#FontSpec.nonSpaceWrap` for the per-file counts). The round-17 note this replaces said 0,
+   * counted over six files; `wordwrap` really is 0 across all 127 and stays an unexercised override.
+   * The DEFAULTS (wrap on, no mid-run breaking) are still **UNSOURCED**: FrameXML never states them and
+   * benilla (1.12.1) has no `word_wrap` at all.
+   *
+   * `SetMaxLines` is the door for the `maxLines` XML attribute, which has no public FontString setter in
+   * 3.3.5a -- so the METHOD NAME is ours and unsourced, while the attribute it carries
+   * (`spellbookframe.xml:100`, `maxLines="3"`) is the client's own. It goes through a method rather than
+   * the loader writing the widget directly so the XML path and any future Lua caller share one route,
+   * which is this file's whole contract.
+   *
+   * `luaFlag`, not `Boolean()`: in Lua only `false` and `nil` are falsey, so `0` and `""` are TRUE. A
+   * plain `Boolean(0)` would read `SetWordWrap(0)` as "off" when the engine reads it as "on". This is
+   * the same family of defect as `SetChecked("false")` (see `kinds.ts#checkedArg`), coming from the
+   * other direction.
+   */
+  /**
+   * `SetTextHeight(height)` -- the font's pixel height, keeping every other channel of the font object.
+   *
+   * **THIS WAS THE MISSING METHOD THAT MADE THE COMBAT FEEDBACK TEXT INVISIBLE**, and it was found by
+   * measurement rather than by reading: with the `UNIT_COMBAT` event fired and the words resolving,
+   * `PlayerHitIndicator:IsVisible()` stayed false through a whole fight. `CombatFeedback_OnCombatEvent`
+   * calls this as its FIRST write (`combatfeedback.lua:98`) and `SetText`/`SetTextColor`/`SetAlpha`/
+   * `Show()` are the four statements after it -- so an unmodelled method here does not degrade the
+   * indicator, it deletes it.
+   *
+   * Real 3.3.5a API, and the client uses it for exactly what it is for: `CombatFeedback_OnCombatEvent`
+   * scales one authored height (`PlayerFrame.feedbackFontHeight`, 30 -- `playerframe.lua:11`) by 1.5 for
+   * a crit or a crushing blow and 0.75 for a glancing blow or an absorb (`combatfeedback.lua:44-48`).
+   * That is the whole reason a crit's number is bigger on the portrait, and it is the client's own
+   * decision rather than anything of ours.
+   *
+   * A non-finite or non-positive height is IGNORED rather than clamped: the argument is a computed
+   * product in the client's own code, and writing a 0-unit font would silently blank a string that the
+   * caller believes it has just sized.
+   */
+  SetTextHeight: (ctx, self, args) => {
+    const height = Number(args[0]);
+    if (Number.isFinite(height) && height > 0) {
+      ensureFont(widgetOf(ctx, self)).size = height;
+    }
+    return [];
+  },
+  SetWordWrap: (ctx, self, args) => {
+    ensureFont(widgetOf(ctx, self)).wordWrap = luaFlag(args[0]);
+    return [];
+  },
+  SetNonSpaceWrap: (ctx, self, args) => {
+    ensureFont(widgetOf(ctx, self)).nonSpaceWrap = luaFlag(args[0]);
+    return [];
+  },
+  SetMaxLines: (ctx, self, args) => {
+    const n = Number(args[0]);
+    ensureFont(widgetOf(ctx, self)).maxLines =
+      Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+    return [];
+  },
+  SetShadowOffset: (ctx, self, args) => {
+    ensureFont(widgetOf(ctx, self)).shadowOffset = {
+      x: Number(args[0] ?? 0),
+      y: Number(args[1] ?? 0),
+    };
+    return [];
+  },
+  SetShadowColor: (ctx, self, args) => {
+    const spec = ensureFont(widgetOf(ctx, self));
+    spec.shadowColor = toHex(Number(args[0] ?? 0), Number(args[1] ?? 0), Number(args[2] ?? 0));
+    // The alpha channel `#rrggbb` cannot hold. Unlike `SetTextColor`'s dropped alpha -- which has no
+    // field and would collide with `GetAlpha` -- this one has a field of its own, and it is load-bearing:
+    // `SystemFont_InverseShadow_Small` authors `a=".75"` (fonts.xml:47).
+    spec.shadowAlpha = args[3] === undefined ? 1 : Number(args[3]);
+    return [];
+  },
   SetFont: (ctx, self, args) => {
     const family = familyForFontFile(String(args[0] ?? ''));
     if (family === null) {
@@ -648,6 +817,35 @@ const FONTSTRING: MethodTable = {
     }
     applyFontObject(ctx, widgetOf(ctx, self), name);
     return [];
+  },
+  /**
+   * `GetStringHeight()` -- the twin of `GetStringWidth`, and what a frame that grows to fit its text
+   * reads. Through the EFFECTIVE font (`widget.ts#effectiveFont`) or a wrapped string reports one
+   * line's height and whatever sizes itself from it comes out short. Nothing in the loaded manifest
+   * calls it today (the load report has no `GetStringHeight` error), so it is the twin landing beside
+   * its sibling rather than a gap being closed.
+   *
+   * **THE PAIR IS STILL ASYMMETRIC, AND ROUND 19 MEASURED WHAT THAT COSTS instead of leaving it as a
+   * label.** Two differences, both deliberate for now:
+   *
+   *  1. `GetStringHeight` goes through `effectiveFont` and `GetStringWidth` does not, so a wrapped
+   *     string reports its wrapped HEIGHT and its unwrapped WIDTH. Whether the engine's own
+   *     `GetStringWidth` ignores wrapping is not sourced anywhere in the game's files, and nothing in
+   *     the manifest reads it on a wrapped string, so guessing would be a change with no oracle.
+   *  2. Both measure at **scale 1**, while the raster measures at the live layout scale
+   *     (`text.ts#layoutScale`). That is not cosmetic: it is exactly the defect that made the tooltip
+   *     overflow its frame (`methods/gametooltip.ts#lineSize` has the numbers -- 221.08 against
+   *     259.43 for one string at 1382x911). It is NOT changed here because the difference for an
+   *     UNWRAPPED string is sub-pixel (measured: `VideoOptionsResolutionPanelTitle` 79.296 at scale 1
+   *     against 79.383 live) and every verified glue-screen anchor was checked against the scale-1
+   *     answers. The tooltip is fixed at the one place that SIZES A FRAME from the number.
+   *
+   * `effectiveFont` is called with no `boundedWidth` here on purpose: a Lua getter has no rect, and the
+   * third wrap case (a paragraph bounded by two opposing anchors) is only knowable at draw time.
+   */
+  GetStringHeight: (ctx, self) => {
+    const widget = widgetOf(ctx, self);
+    return [measureText(widget.text, effectiveFont(widget) ?? ensureFont(widget), 1).height];
   },
   GetStringWidth: (ctx, self) => {
     const widget = widgetOf(ctx, self);

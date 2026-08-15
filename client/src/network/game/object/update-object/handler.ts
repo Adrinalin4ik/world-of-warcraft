@@ -68,6 +68,10 @@ export class UpdateObjectHandler extends EventEmitter {
     if (unit && unit !== this.game.world.player) {
       this.game.world.remove(unit);
     }
+    // The same message destroys ITEMS -- an item sold, destroyed, or handed over in a trade. It is not
+    // in `World#entities`, so the branch above never sees it; without this the bag would keep drawing
+    // a row for an item that no longer exists.
+    this.game.objectHandler?.itemHandler?.forgetObject(guid);
   }
 
   
@@ -119,7 +123,13 @@ export class UpdateObjectHandler extends EventEmitter {
             // The type is taken from the unit the create block already registered; a values block
             // for a guid we have never seen is undecodable by construction and stays numeric.
             pack.guid = packet.readPackedGUID();
-            pack.objType = this.game.world.entities.get(pack.guid)?.objectType;
+            // THE TYPE, and an item is not in `World#entities`. The unit registry answers for units and
+            // players; `ItemHandler` remembers the type of every item and container it was handed a
+            // create block for. Without the second lookup an item's values block decodes against
+            // `undefined` and comes back keyed by bare NUMBERS -- the same defect the comment below
+            // records for units, one type family later.
+            pack.objType = this.game.world.entities.get(pack.guid)?.objectType
+              ?? this.game.objectHandler?.itemHandler?.objectTypeOf(pack.guid);
             pack.newObject = this.parseUpdateValues(packet, pack.objType);
             this.applyValues(pack);
             break;
@@ -220,14 +230,30 @@ export class UpdateObjectHandler extends EventEmitter {
    * that matters to the frame budget.
    */
   applyValues(pack: any) {
+    if (pack.objType === ObjectType.Item || pack.objType === ObjectType.Container) {
+      // AN ITEM'S STACK COUNT MOVING, and this is the door a bag's number changes through. Items are
+      // not units and are not in `World#entities`; they live in `ItemHandler`, which merges rather
+      // than replaces because a values block carries only the words that moved.
+      this.game.objectHandler?.itemHandler?.noteObject(
+        pack.guid, pack.objType, pack.newObject, false,
+      );
+      return;
+    }
     const unit = this.game.world.entities.get(pack.guid);
     if (!unit || pack.objType === undefined) {
       return;
     }
     if (pack.objType !== ObjectType.Unit && pack.objType !== ObjectType.Player) {
-      // Items, game objects and corpses have descriptor fields too; none of them is a unit and none
-      // has a `fields` bag to write. Decoding them costs nothing and reading them would be a lie.
+      // Game objects and corpses have descriptor fields too; neither is a unit and neither has a
+      // `fields` bag to write. Decoding them costs nothing and reading them would be a lie.
       return;
+    }
+    // OUR OWN character's inventory words, on every values block that carries them. `applyUnitFields`
+    // keeps a NAMED subset (`unit-fields.ts:418-439`) and the inventory is a hundred-odd raw words no
+    // unit frame reads, so they are accumulated separately -- and they must be accumulated, because an
+    // item moving between two bag slots sends only those two words.
+    if (unit === this.game.world.player) {
+      this.game.objectHandler?.itemHandler?.notePlayerFields(pack.newObject);
     }
     if (applyUnitFields(unit, pack.newObject, pack.objType, false)) {
       // DEATH, and this is the only place it can be seen. `isDead` is health 0 against a real max;
@@ -261,6 +287,18 @@ export class UpdateObjectHandler extends EventEmitter {
   }
 
   async applyUpdates(pack: any) {
+    // ITEMS AND CONTAINERS ARE NOT UNITS, and this branch is the correction of a real defect rather
+    // than only the hook the bags need. Every create block below fell through to `new Unit(guid)` and
+    // `world.add(unit)`, so **every item the player owns was inserted into `World#entities` as a
+    // unit** -- a login with a full bag added dozens of them. They carry no model and no position, so
+    // nothing drew, which is exactly why it was never noticed; but they were in the registry the
+    // target scan, the nameplate sweep and `WorldFrame:GetChildren()` all walk.
+    if (pack.obj_type === ObjectType.Item || pack.obj_type === ObjectType.Container) {
+      this.game.objectHandler?.itemHandler?.noteObject(
+        pack.guid, pack.obj_type, pack.newObject, true,
+      );
+      return;
+    }
     // if (!pack.movement.spline) return;
     // let unit: Unit = this.game.units.get(pack.guid);
     let unit = this.game.world.entities.get(pack.guid);
@@ -296,6 +334,12 @@ export class UpdateObjectHandler extends EventEmitter {
         unit.setDead(isDead(unit));
         this.game.world.emit('unit:fields', unit);
       }
+    }
+    // The inventory words out of our own create block -- see the same call in `applyValues` for why
+    // they are kept outside `unit.fields`. This is the one that MATTERS at login: the create block is
+    // where all 23 equipment slots, the four bag slots and the sixteen backpack slots arrive at once.
+    if (unit === this.game.world.player) {
+      this.game.objectHandler?.itemHandler?.notePlayerFields(pack.newObject);
     }
 
     // OUR OWN CHARACTER, and this branch is the second half of killing the duplicate.

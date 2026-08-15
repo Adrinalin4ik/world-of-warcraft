@@ -1,6 +1,9 @@
 import EventEmitter from 'events';
 import { CombatHandler } from './combat';
+import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
+import { ItemHandler } from './items';
+import { LootHandler } from './loot';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
 import { SpellHandler } from './spells';
@@ -31,6 +34,35 @@ export class ObjectHandler extends EventEmitter {
    */
   public spellHandler: SpellHandler;
 
+  /**
+   * THE COMBAT LOG -- spell damage, periodic ticks, heals, energize and the spell-miss list. PUBLIC
+   * for `combatHandler`'s reason exactly: both display media subscribe to it directly, `World` for the
+   * floating number and `ui/unit-bridge.ts` for `UNIT_COMBAT`.
+   *
+   * Separate from `combatHandler` because a swing and a spell are separate wire surfaces; see
+   * `combat-log.ts`' header.
+   */
+  public combatLogHandler: CombatLogHandler;
+
+  /**
+   * ITEM TEMPLATES AND THE INVENTORY DESCRIPTORS. PUBLIC for the reason the two above are: the world
+   * UI bridge reads it to answer `GetContainerItemInfo` and `GetItemInfo`, and it owns the only send
+   * of `CMSG_ITEM_QUERY_SINGLE`.
+   *
+   * It is fed from TWO doors -- the wire, for the query response, and `UpdateObjectHandler`, for every
+   * item/container create and value block. That second door reaches it LAZILY, through
+   * `game.objectHandler.itemHandler` at packet time rather than through a constructor reference, so
+   * the two handlers have no construction-order coupling to get wrong later.
+   */
+  public itemHandler: ItemHandler;
+
+  /**
+   * LOOTING. PUBLIC for the same reason the others are: the world UI bridge reads the open loot to
+   * answer `GetLootSlotInfo`, and this handler owns the only sends of `CMSG_LOOT`,
+   * `CMSG_AUTOSTORE_LOOT_ITEM`, `CMSG_LOOT_MONEY` and `CMSG_LOOT_RELEASE`.
+   */
+  public lootHandler: LootHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -42,6 +74,9 @@ export class ObjectHandler extends EventEmitter {
     this.playerMovementHandler = new PlayerMovementHandler(this.game);
     this.combatHandler = new CombatHandler(this.game);
     this.spellHandler = new SpellHandler(this.game);
+    this.combatLogHandler = new CombatLogHandler(this.game);
+    this.itemHandler = new ItemHandler(this.game);
+    this.lootHandler = new LootHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

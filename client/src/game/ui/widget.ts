@@ -16,7 +16,8 @@ import type { BackdropDef, Insets } from './backdrop';
 // this file must stay WebGL-free so `layout`/`hit` tests can exercise it without a GL context.
 import type { ModelRig } from './scene/scene-rig';
 import {
-  Anchor, LayoutNode, Rect, resolveAnchors, screenScale, unplaceableNodes, Viewport,
+  Anchor, LayoutNode, Rect, boundsBothHorizontalEdges, resolveAnchors, screenScale,
+  unplaceableNodes, Viewport,
 } from './layout';
 import { DrawLayer, OrderKey, Strata, compareOrder } from './framexml/order';
 
@@ -133,11 +134,67 @@ export interface FontSpec {
    * `wrapWidth`, since a single line has no gap to space.
    */
   spacing?: number;
+  /**
+   * `<Shadow>` -- a dark offset copy of the glyphs drawn BEHIND them, and the reason the client's text
+   * survives a bright background. Authored, never chosen here: `SystemFont_Shadow_Small`
+   * (`fonts.xml:31-40`) is `<Offset><AbsDimension x="1" y="-1"/></Offset>` with `<Color r="0" g="0"
+   * b="0"/>`, and that is `GameFontNormalSmall`'s chain, i.e. the target and player name fonts.
+   *
+   * `offset` keeps FRAMEXML'S CONVENTION -- logical units, **`+y` UP** -- so the authored `y="-1"` is
+   * one unit DOWN the screen. `text.ts` is the one place that flips it, next to the flip it already
+   * documents for anchors. Absent means the font declares no shadow, which is the true answer for
+   * every `SystemFont_*` without `Shadow` in its name.
+   */
+  shadowOffset?: { x: number; y: number };
+  /** The shadow's colour as `#rrggbb`, with `shadowAlpha` carrying the channel `#rrggbb` cannot. */
+  shadowColor?: string;
+  shadowAlpha?: number;
+  /**
+   * `maxLines` -- the hard cap on wrapped lines. Counted over the 127 XML files `framexml.toc` lists:
+   * **24 occurrences in 5 files** -- `interfaceoptionspanels.xml` 17, `videooptionspanels.xml` 3,
+   * `audiooptionspanels.xml` 2, `chatframe.xml` 1, and `spellbookframe.xml:100`'s `maxLines="3"` on
+   * `$parentSpellName`. (Round 17 called that last one the only occurrence, having read six files.)
+   * Absent means no cap from the DOCUMENT -- `effectiveFont` may still impose one from a fixed height.
+   *
+   * An element ATTRIBUTE rather than a font property, carried on the spec because the spec is what the
+   * rasterizer sees -- the same reason `wrapWidth` lives here.
+   */
+  maxLines?: number;
+  /**
+   * `SetWordWrap(false)` -- draw on one line however narrow the rect. **Nothing in the manifest
+   * authors `wordwrap`**: 0 occurrences across all 127 XML files `framexml.toc` lists (round 17 said
+   * the same of `nonspacewrap` below, from 6 files, and that half was wrong). So the default is the
+   * only behaviour that can be observed, and `true` (wrap) is what makes the client's own bounded
+   * paragraphs paragraphs. **The DEFAULT VALUE IS UNSOURCED** -- FrameXML never states it and benilla
+   * (1.12.1) has no `word_wrap` at all -- so this is written as an override nothing exercises.
+   */
+  wordWrap?: boolean;
+  /**
+   * `SetNonSpaceWrap(true)` -- allow a break INSIDE a run wider than the rect.
+   * **AUTHORED, 31 times across 10 of the manifest's 127 XML files**, and read by the loader:
+   * `interfaceoptionspanels.xml` 17, `macoptionsframe.xml` 3, `videooptionspanels.xml` 3,
+   * `audiooptionspanels.xml` 2, `helpframe.xml` 2, `minimap.xml` 2, and one each in `basiccontrols.xml`,
+   * `chatframe.xml`, `mailframe.xml`, `questlogframe.xml`. Every options-panel description paragraph
+   * carries it -- the client's own guarantee that those strings cannot run out of their panel.
+   * The DEFAULT (false: an overlong run overhangs rather than splitting) is still unsourced.
+   */
+  nonSpaceWrap?: boolean;
 }
 
 let nextWidgetId = 0;
 /** Backs `Widget#linkStamp` -- see its doc comment. */
 let nextLinkStamp = 0;
+/**
+ * Bumped by every `add`/`remove` anywhere in any tree: the invalidation stamp for
+ * `WidgetRoot#addHiddenTargets`' id index, which is an O(tree) walk nothing else needs per frame.
+ *
+ * Deliberately GLOBAL and deliberately coarse. A per-root counter would need the child to know which
+ * root it is under -- a widget is `add`ed before it is parented into one -- and the only cost of a
+ * false invalidation is one extra walk. Anchors are NOT counted: an id-to-widget index cannot go stale
+ * when a `SetPoint` changes which id a node points at, and `SetPoint` is the call FrameXML makes
+ * constantly (`ActionButton_UpdateHotkeys`, every dropdown) where an `add` is a load-time event.
+ */
+let treeStructure = 0;
 
 export class Widget {
   readonly id: string;
@@ -169,6 +226,34 @@ export class Widget {
   alpha = 1;
   mouseEnabled = false;
   focusable = false;
+
+  /**
+   * Whether this frame called `RegisterForDrag` with at least one button -- i.e. whether it is a drag
+   * SOURCE. Set by `lua/methods/frame.ts#RegisterForDrag`, read by `ui/input.ts`.
+   *
+   * A boolean here rather than the router reading the button SET, and the reason is the router's own
+   * limitation rather than a simplification for its own sake: `input.ts#onPointerDown` never inspects
+   * `event.button` and `scripts.ts` reports every press as `"LeftButton"` (the same constraint
+   * `RegisterForClicks` is a declared gap for), so "which buttons" is a question nothing downstream could
+   * answer differently. The full set is still stored, on the frame id, for introspection.
+   */
+  dragRegistered = false;
+
+  /**
+   * `clampedToScreen="true"` -- the frame keeps itself INSIDE the window whatever its anchors say.
+   *
+   * The client's own declaration, not a policy of ours: `GameTooltipTemplate` carries it
+   * (`gametooltiptemplate.xml:3`) and so do the three `ShoppingTooltip`s (`gametooltip.xml:6-8`),
+   * `ConsolidatedBuffsTooltip` (`buffframe.xml:141`) and a dozen other frames. `loader.ts:731` has always
+   * ISSUED it as `SetClampedToScreen(true)`; nothing implemented the method, so the attribute did nothing
+   * and a tooltip near the bottom edge had its body cut off -- the owner's first screenshot.
+   *
+   * A SHIFT, never a resize: `layout.ts#resolveAnchors` moves the resolved rect back inside the screen and
+   * leaves its width and height alone, which is what the engine does (the frame is not re-flowed, it is
+   * nudged). A frame LARGER than the screen is left pinned to the top-left corner rather than being made
+   * to fit.
+   */
+  clampedToScreen = false;
 
   /** Sprite key resolved by `GlueArt`; null draws nothing. */
   sprite: string | null = null;
@@ -326,6 +411,23 @@ export class Widget {
   onEditFocusGained: (() => void) | null = null;
   onEditFocusLost: (() => void) | null = null;
 
+  /**
+   * FrameXML's `OnDragStart`/`OnDragStop`/`OnReceiveDrag` -- the drag gesture.
+   *
+   * A drag is not a click with extra state: the engine fires `OnDragStart` on the frame the press began
+   * on once the pointer has moved past a threshold, `OnDragStop` on that same frame when the button is
+   * released, and `OnReceiveDrag` on whatever frame is UNDER THE CURSOR at the release -- which is a
+   * different frame, and is the whole point of the gesture. A click fires on neither if a drag happened.
+   *
+   * `onDragStart`/`onDragStop` are only fired on a widget that called `RegisterForDrag`
+   * (`methods/frame.ts`), which is the engine's rule and matters: every Frame has these handler slots
+   * available but only a registered one is a drag SOURCE, so an unregistered frame keeps its click.
+   * `onReceiveDrag` needs no registration -- a drop target is any frame with the handler.
+   */
+  onDragStart: (() => void) | null = null;
+  onDragStop: (() => void) | null = null;
+  onReceiveDrag: (() => void) | null = null;
+
   constructor(kind: WidgetKind, id?: string) {
     this.kind = kind;
     this.id = id ?? `${kind}-${nextWidgetId++}`;
@@ -343,6 +445,7 @@ export class Widget {
     const isRegion = child.kind === 'texture' || child.kind === 'fontstring';
     child.frameLevel = isRegion ? this.frameLevel : this.frameLevel + 1;
     this.children.push(child);
+    treeStructure += 1;
     return child;
   }
 
@@ -351,6 +454,7 @@ export class Widget {
     if (index >= 0) {
       this.children.splice(index, 1);
       child.parent = null;
+      treeStructure += 1;
     }
   }
 
@@ -447,6 +551,99 @@ export type MeasureText = (
  * Empty text keeps 0 on both axes -- `FontStringTextures#get` returns null for it and the renderer
  * draws nothing, so a rect the size of bare padding would be a hit target over nothing.
  */
+/**
+ * How many whole lines of `spec` fit in `height` logical units, 0 if not even one does.
+ *
+ * The inverse of `text.ts#measureText`'s own block height -- `n * size + (n - 1) * spacing` -- solved
+ * for `n`, so "the height admits three lines" here and "these three lines are this tall" there cannot
+ * disagree. That is the whole point: this number is used as a LINE CAP, and a cap the renderer
+ * disagreed with would put the last line outside the rect, which is the thing being avoided.
+ */
+export function linesThatFit(spec: FontSpec, height: number): number {
+  const spacing = spec.spacing ?? 0;
+  if (!(height > 0) || !(spec.size > 0)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor((height + spacing) / (spec.size + spacing)));
+}
+
+/**
+ * A font string's spec with its WRAP BUDGET filled in from its own authored geometry.
+ *
+ * THREE CASES, all read off the manifest rather than chosen. `boundedWidth` is the widget's RESOLVED
+ * rect width, which only the draw pass knows (`sprite.ts`); omit it and only the authored width is
+ * available.
+ *
+ * 1. **No width budget** -- no authored width and no pair of opposing horizontal anchors. There is
+ *    nothing to wrap at, so the string is measured and drawn on one line exactly as before. 3877 of
+ *    the 5151 font strings in the loaded world tree.
+ * 2. **A width budget and a DERIVED height** (authored 0 or absent) -- the document saying "grow to
+ *    fit the text". Wraps at the budget, uncapped, and the rect grows with it (`deriveSize`). 256
+ *    strings, every one a paragraph: `SpellButtonNSpellName` 103x0 (`spellbookframe.xml:100-111`),
+ *    `QuestProgressText` 275x0, `TutorialFrameText` 300x0.
+ * 3. **A width budget and a FIXED height that admits TWO OR MORE LINES** -- wraps, capped to the
+ *    number of lines that fit. This case is round 18's, and it is where round 17's rule was wrong.
+ *
+ * **WHAT ROUND 17 GOT WRONG, and it was a reading of the height, not a counting error.** Its rule was
+ * "a width and a fixed height means ONE LINE'S WORTH", justified on 1017 such strings and on
+ * `TargetFrameTextureFrameName` being 100x10. But 100x10 is one line's worth *because 10 is one line
+ * of a 10-unit font* -- the height was read as a prohibition when it is a BOUND. Counted over the 127
+ * XML files `framexml.toc` actually lists (round 17 read ~6 of them, which is why it also recorded
+ * `nonspacewrap` and `maxLines` as unauthored; both are wrong -- see `FontSpec.nonSpaceWrap`), 29
+ * fixed-height strings with an authored width are 20 units or taller, and they are paragraphs to a
+ * one: `ArenaFrameZoneDescription` 293x115, `MovieFrameSubtitleString` 800x138,
+ * `StaticPopup1Text` 103x38, `DressUpFrameDescriptionText` 260x36, `GuildFrameNotesText` 315x45,
+ * `MerchantItem1Name` 90x30. The CAP is what answers round 17's objection ("a second line would be
+ * drawn outside the rect") instead of trading it away: at most `linesThatFit` lines are ever drawn, so
+ * a 10-unit rect still shows exactly one line and nothing lands outside any rect.
+ *
+ * **AND THE OPTIONS PANELS' PARAGRAPHS HAVE NO AUTHORED WIDTH AT ALL** -- the owner's second
+ * screenshot, "These options allow you to change the size and detail...", which is
+ * `RESOLUTION_SUBTEXT` (`globalstrings.lua:6124`). All 22 of them are `<Size y="32" x="0"/>` with
+ * `TOPLEFT` to their panel's title and `RIGHT` at -32 from the panel's edge
+ * (`videooptionspanels.xml:37-51`, `interfaceoptionspanels.xml:64-79`, `audiooptionspanels.xml:67`),
+ * so the budget is the RESOLVED width and `boundsBothHorizontalEdges` is what finds it. Their own
+ * `maxLines="3"` agrees with `linesThatFit(size 10, 32) == 3` exactly, which is the strongest evidence
+ * here that a fixed height is meant to be read in lines: the author wrote the same bound twice.
+ *
+ * The cap is `min(authored maxLines, linesThatFit)` when both exist -- neither may be exceeded.
+ *
+ * Returns the widget's own spec object UNCHANGED when there is nothing to add, so the common case
+ * allocates nothing and the identity comparisons the raster cache relies on are undisturbed.
+ */
+export function effectiveFont(widget: Widget, boundedWidth?: number): FontSpec | null {
+  const spec = widget.font;
+  if (spec === null) {
+    return null;
+  }
+  // An explicit budget from Lua wins: `GameTooltip` sets `wrapWidth` on the region's own font
+  // (`methods/gametooltip.ts#writeSide`) and its line slots are unsized, so nothing here may overrule it.
+  if (spec.wrapWidth !== undefined) {
+    return spec;
+  }
+  const budget =
+    widget.width > 0
+      ? widget.width
+      : boundedWidth !== undefined &&
+        boundedWidth > 0 &&
+        boundsBothHorizontalEdges(widget.anchors)
+        ? boundedWidth
+        : 0;
+  if (budget <= 0) {
+    return spec;
+  }
+  if (widget.height > 0) {
+    const fits = linesThatFit(spec, widget.height);
+    if (fits < 2) {
+      return spec;
+    }
+    const cap =
+      spec.maxLines !== undefined && spec.maxLines > 0 ? Math.min(spec.maxLines, fits) : fits;
+    return { ...spec, wrapWidth: budget, maxLines: cap };
+  }
+  return { ...spec, wrapWidth: budget };
+}
+
 export function deriveSize(
   widget: Widget,
   scale: number,
@@ -466,7 +663,11 @@ export function deriveSize(
     return { width: widget.width, height: widget.height };
   }
 
-  const measured = measure(content, widget.font, scale);
+  // THE EFFECTIVE font, so the derived HEIGHT is the wrapped block's height. This is what makes the
+  // spellbook's rank subtext follow a two-line name down: `$parentSubSpellName` anchors TOPLEFT to
+  // `$parentSpellName`'s BOTTOMLEFT (`spellbookframe.xml:116-121`), so the client's own anchor moves it
+  // the moment this height grows -- there is nothing to write for that.
+  const measured = measure(content, effectiveFont(widget) ?? widget.font, scale);
   return {
     width: widget.width === 0 ? measured.width : widget.width,
     height: widget.height === 0 ? measured.height : widget.height,
@@ -530,6 +731,110 @@ export class WidgetRoot {
    * that a caller with no text at all (`layout.ts`'s and `hit.ts`'s tests) needs nothing; the app
    * always passes it (`screens.ts`), which is what makes layout and paint agree.
    */
+  private index: Map<string, Widget> | null = null;
+  private indexStructure = -1;
+
+  /**
+   * Every widget in this tree by id, REBUILT ONLY WHEN THE TREE CHANGED SHAPE.
+   *
+   * The walk is O(whole tree) -- 4225 frames in the world -- and `addHiddenTargets` needs it on every
+   * frame where any anchor target is hidden, which in the world is every frame (`TemporaryEnchantFrame`
+   * anchors to the hidden `ConsolidatedBuffs` from load). MEASURED: walking it per frame took
+   * `ui.layout` p50 from **0.4 ms to 2.2 ms** at 257 draw items, against a ±1 ms run-to-run spread --
+   * a real regression, not noise, and the reason this cache exists rather than the obvious inline walk.
+   * `treeStructure` invalidates it, so the cost is paid once per `CreateFrame`, not once per frame.
+   */
+  private idIndex(): Map<string, Widget> {
+    if (this.index !== null && this.indexStructure === treeStructure) {
+      return this.index;
+    }
+    const byId = new Map<string, Widget>();
+    const walk = (widget: Widget): void => {
+      byId.set(widget.id, widget);
+      for (const child of widget.children) {
+        walk(child);
+      }
+    };
+    walk(this.root);
+    this.index = byId;
+    this.indexStructure = treeStructure;
+    return byId;
+  }
+
+  /**
+   * A HIDDEN FRAME STILL HAS A RECT, and everything anchored to one depends on it.
+   *
+   * `walk` above skips a hidden subtree whole, which is right for the DRAW list and wrong for the
+   * LAYOUT graph: the engine resolves geometry for the whole frame tree and `Hide()` only stops the
+   * frame being painted. `samples/benilla/crates/benilla-ui/src/layout.rs` resolves rects off the frame
+   * graph with no reference to visibility at all -- the only thing that makes a rect unresolvable there
+   * is a frame with no anchor points (`layout.rs:1254`) or a dependent of one (`:1282`).
+   *
+   * MEASURED, and it is the owner's report: `ActionButton6..12` each anchor `LEFT` to the previous
+   * button's `RIGHT` (`actionbarframe.xml:96-176`), and `ActionButton_Update` HIDES a slot with no
+   * action. On a character with slots 1-4 and 7 filled, `ActionButton7` resolved to **left 0, top 0**
+   * -- the window's corner -- through `resolveAnchors`' lenient fallback, while during a drag it read
+   * **left 331, top 728** with the rest of the bar, because `ACTIONBAR_SHOWGRID` had shown 5 and 6 and
+   * put them back in the node set. "It shows correctly while I drag and goes to the corner otherwise"
+   * is exactly that. `TemporaryEnchantFrame` (0,0, anchored to the hidden `ConsolidatedBuffs`,
+   * buffframe.xml:118-125) is the same defect and is fixed by the same lines.
+   *
+   * ONLY THE CLOSURE, not the whole 4225-frame tree. A hidden widget's rect is observable only through
+   * something that depends on it, so this adds the transitive anchor-target closure of the nodes
+   * already in the set and nothing else. That keeps the cost where it was measured (`ui.layout` p50
+   * 0.4 ms at 257 draw items) instead of taking the node set to the whole tree, whose per-frame
+   * `deriveSize` would put a canvas `measureText` behind every hidden font string. The full-tree
+   * version is the same SEMANTICS with a bill nobody has measured; if a future case needs a rect for a
+   * hidden frame nothing visible references, this is the function to widen.
+   *
+   * A target that is not in the tree at all is left alone: that is the "destroyed, or never built"
+   * case `resolveAnchors` reports, and reporting it is the point.
+   */
+  private addHiddenTargets(nodes: LayoutNode[], scale: number, measure?: MeasureText): void {
+    const wanted: string[] = [];
+    for (const node of nodes) {
+      for (const anchor of node.anchors) {
+        if (anchor.relativeTo !== undefined) {
+          wanted.push(anchor.relativeTo);
+        }
+      }
+    }
+    if (wanted.length === 0) {
+      return;
+    }
+
+    const present = new Set(nodes.map((node) => node.id));
+    const missing = wanted.filter((id) => !present.has(id));
+    if (missing.length === 0) {
+      return;
+    }
+
+    const byId = this.idIndex();
+
+    const queue = missing;
+    while (queue.length > 0) {
+      const id = queue.pop() as string;
+      if (present.has(id)) {
+        continue;
+      }
+      const widget = byId.get(id);
+      if (widget === undefined) {
+        continue;
+      }
+      present.add(id);
+      const size = deriveSize(widget, scale, measure);
+      nodes.push({
+        id, width: size.width, height: size.height, anchors: widget.anchors,
+        clamped: widget.clampedToScreen,
+      });
+      for (const anchor of widget.anchors) {
+        if (anchor.relativeTo !== undefined && !present.has(anchor.relativeTo)) {
+          queue.push(anchor.relativeTo);
+        }
+      }
+    }
+  }
+
   drawList(viewport: Viewport, measure?: MeasureText): DrawItem[] {
     const flat: Array<{ widget: Widget; alpha: number; sequence: number }> = [];
     const nodes: LayoutNode[] = [];
@@ -549,6 +854,7 @@ export class WidgetRoot {
         width: size.width,
         height: size.height,
         anchors: widget.anchors,
+        clamped: widget.clampedToScreen,
       });
 
       for (const child of widget.children) {
@@ -557,6 +863,7 @@ export class WidgetRoot {
     };
 
     walk(this.root, 1);
+    this.addHiddenTargets(nodes, scale, measure);
 
     const rects = resolveAnchors(nodes, viewport);
     // The client's own resolver drops a frame with no anchor points, and everything anchored to it;

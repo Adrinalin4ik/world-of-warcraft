@@ -120,7 +120,9 @@ class WMOLiquidLayer extends THREE.Mesh {
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geometry.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
 
-    geometry.computeBoundsTree();
+    // NO `computeBoundsTree()` HERE -- see `pipeline/wmo/group/index.js` for the measurement.
+    // `window.bvhBuild` counted 457 trees built and 0 reads on a warm startup, and liquid height is
+    // answered by `collision/liquid-query.ts`'s own registry, not by a raycast against this mesh.
 
     // Load liquid material
     LiquidType.load(this.data.liquidTypeID).then((type) => {

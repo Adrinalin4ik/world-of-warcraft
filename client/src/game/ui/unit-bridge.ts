@@ -36,9 +36,14 @@
 import Unit from '../classes/unit';
 import World from '../world';
 import { REACTION_NEUTRAL, reactionFor } from '../world/faction';
-import { UnitSnapshot, emptySnapshot, getUnit, setUnit } from './framexml/lua/api/units';
+import {
+  UnitSnapshot, emptySnapshot, getComboPoints, getUnit, setComboPoints, setUnit,
+} from './framexml/lua/api/units';
 import { fireEvent } from './framexml/lua/events';
+import { combatFeedbackArgs, spellFeedbackArgs, spellMissText } from '../classes/combat-text';
+import type { SpellDamageEvent } from '../../network/game/object/combat-log';
 import { LuaVM } from './framexml/lua/vm';
+import { raceClassData } from '../pipeline/dbc/race-class-data';
 
 /**
  * `UnitPowerType`'s numeric order -> the event a bar of that power listens for
@@ -77,6 +82,18 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   // until then -- stated rather than hidden, and the honest one of the three, because painting an
   // unknown unit hostile red or friendly green would both be assertions we cannot make yet.
   snapshot.reaction = reactionFor(unit, self) ?? REACTION_NEUTRAL;
+
+  // RACE AND CLASS, joined here for the same reason `reaction` is: `api/units.ts` holds no pipeline,
+  // and the ids are useless to Lua on their own -- `UnitRace`/`UnitClass` each owe a localized name
+  // AND a token. `UNIT_FIELD_BYTES_0` packs `race | class | gender | powerType`, which is
+  // `update-object/unit-fields.ts`' own stated layout and the same packing the power-type and gender
+  // reads there already depend on.
+  //
+  // Null until the DBC lands, which is the honest answer and not a placeholder: `raceClassData`
+  // answers null while its two (small) tables are in flight, and both globals then return NOTHING
+  // rather than a wrong race. `ensureLoaded` is kicked off by `attachUnitBridge`.
+  snapshot.race = unit.fields.race ? raceClassData.race(unit.fields.race) : null;
+  snapshot.classInfo = unit.fields.classId ? raceClassData.class(unit.fields.classId) : null;
   return snapshot;
 }
 
@@ -174,8 +191,16 @@ function pushUnit(
  * not change, so the UI costs one composite.
  */
 export function attachUnitBridge(vm: LuaVM, world: World): () => void {
+  // `ChrRaces.dbc` and `ChrClasses.dbc`, for `UnitRace`/`UnitClass`. A few dozen rows each, next to
+  // the 6.7 MB and 49 MB loads the container and action bridges already start, and `DBC.load` caches.
+  // No repaint is needed after it lands: a snapshot is rebuilt on every field change anyway, so the
+  // names appear on the next push. The character sheet is opened by a keystroke long after load, so
+  // in practice the read is warm by the time anything asks.
   /** How many events this bridge has fired, for the frame-cost measurement. */
   const stats = { pushes: 0, events: 0 };
+  const spells = world.game.objectHandler.spellHandler;
+  const combat = world.game.objectHandler.combatHandler;
+  const combatLog = world.game.objectHandler.combatLogHandler;
 
   const push = (token: string, unit: Unit | null): boolean => {
     if (unit === null) {
@@ -201,15 +226,168 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
     }
   };
 
+  /**
+   * COMBO POINTS, resolved as the PAIR they are.
+   *
+   * `SMSG_UPDATE_COMBO_POINTS` banks points against a specific unit (`spells.ts#handleComboPoints`),
+   * and `GetComboPoints("player", "target")` -- `ComboFrame.lua:20`'s only shape -- must read ZERO when
+   * the player is looking at anything else. Both guids are knowable only here, which is why
+   * `api/units.ts` takes a plain number and says so.
+   *
+   * Fired as `UNIT_COMBO_POINTS` with `"player"` as its argument, and BOTH halves are read off the
+   * client's own file rather than remembered: `comboframe.xml:115-121`'s inline `<OnLoad>` registers
+   * `PLAYER_TARGET_CHANGED` and `UNIT_COMBO_POINTS`, and `ComboFrame_OnEvent` (`comboframe.lua:8-17`)
+   * takes the first vararg and acts only `if ( unit == PlayerFrame.unit )` -- so an event with no
+   * argument, or with a guid, would be silently ignored. (A first draft of this comment cited a
+   * `ComboFrame_OnLoad` function; there is no such function, the registration is inline.)
+   * `ComboFrame_Update`'s own read is `GetComboPoints(PlayerFrame.unit, "target")`
+   * (`comboframe.lua:20`), which is what "the only shape asked" above means.
+   *
+   * AFTER the push, per this file's header. Diffed, because an event here re-runs
+   * `ComboFrame_Update`, which shows or hides five points and cross-fades their highlights -- so it
+   * dirties the draw fingerprint, the rule `action-bridge.ts` states.
+   */
+  const pushCombo = (): void => {
+    const combo = spells.comboState;
+    const points =
+      combo.target !== null && world.target !== null && world.target.guid === combo.target
+        ? combo.points
+        : 0;
+    if (points === getComboPoints(vm)) {
+      return;
+    }
+    setComboPoints(vm, points);
+    fireEvent(vm, 'UNIT_COMBO_POINTS', ['player']);
+    stats.events += 1;
+  };
+
   const onTargetChange = (unit: Unit | null): void => {
     push('target', unit);
     // AFTER the push. See the header.
     fireEvent(vm, 'PLAYER_TARGET_CHANGED');
     stats.events += 1;
+    // The pair changed even though the packet did not: points banked on the unit we just stopped
+    // looking at have to go to zero, and points on the one we just picked up have to come back.
+    pushCombo();
   };
+
+  /**
+   * THE UNIT-FRAME HALF OF THE DAMAGE DISPLAY, and it is entirely the CLIENT'S OWN LUA.
+   *
+   * The owner asked for both media ("По цифрам оба варианта"). The big floating number is engine-drawn
+   * (`world/floating-text.ts`); this is the other one, and nothing here draws anything -- it supplies the
+   * one engine event the client's own `CombatFeedback` is waiting for and then gets out of the way.
+   *
+   * `UNIT_COMBAT` is handled in exactly ONE place in this build's FrameXML, which was measured rather
+   * than remembered: `playerframe.lua:14` registers it and `:129-132` forwards
+   * `CombatFeedback_OnCombatEvent(self, arg2, arg3, arg4, arg5)` when `arg1 == self.unit`.
+   * `targetframe.lua` has no `CombatFeedback` call at all and neither does `unitframe.lua` -- so in
+   * 3.3.5a the unit-frame feedback text is the PLAYER's portrait indicator (`PlayerHitIndicator`,
+   * `playerframe.xml:175`, `NumberFontNormalHuge` at font height 30, `playerframe.lua:11`) and nothing
+   * else. It therefore shows damage the player TAKES, which is the complement of the floating text's
+   * "only our own damage floats" and is why both media are needed to see a fight.
+   *
+   * The five arguments and the outcome mapping are `classes/combat-text.ts#combatFeedbackArgs`, shared
+   * with the floating text so the two can never name the same swing differently.
+   *
+   * The animation is the client's own too -- `COMBATFEEDBACK_FADEINTIME` 0.2 / `_HOLDTIME` 0.7 /
+   * `_FADEOUTTIME` 0.3 (`combatfeedback.lua:1-3`), integrated by `CombatFeedback_OnUpdate` off `GetTime`.
+   * That needs `PlayerFrame`'s `<OnUpdate>` to be ticked, which `world-runtime.ts` now does and says why.
+   */
+  const onSwing = (
+    _attacker: string, victim: string, damage: number, hitInfo: number,
+    victimState: number | null, school: number,
+  ): void => {
+    if (world.player === null || victim !== world.player.guid) {
+      return;
+    }
+    const args = combatFeedbackArgs(hitInfo, victimState, damage, school);
+    if (args === null) {
+      // `victimState` null means the decode did not add up and `handleAttackerState` has already said so.
+      // Nothing is announced, rather than announcing a WOUND of 0 that would print "Miss" over a hit.
+      return;
+    }
+    fireEvent(vm, 'UNIT_COMBAT', ['player', args.event, args.flags, args.amount, args.school]);
+    stats.events += 1;
+  };
+
+  /**
+   * THE SPELL HALF OF THE PORTRAIT INDICATOR -- "не видно урона по себе" for anything but a swing.
+   *
+   * Same event, same frame, same client Lua. The melee arm above filters to `victim === player`; these
+   * do the same, and the filter is ours only in the sense that the CLIENT'S OWN `playerframe.lua:129`
+   * applies it in Lua (`arg1 == self.unit`) -- we raise the event only for the unit that frame acts on
+   * rather than raising it for every unit and letting the comparison discard them, which is the same
+   * decision the melee arm already took and is stated in `combat-text.ts#spellFeedbackArgs`.
+   *
+   * **THIS IS WHY A SPELL HITTING THE PLAYER SHOWED NOTHING AT ALL**: no packet, so no event, so no
+   * indicator. It was never a display filter.
+   */
+  const onSpellDamage = (ev: SpellDamageEvent): void => {
+    if (world.player === null || ev.target !== world.player.guid) {
+      return;
+    }
+    const args = spellFeedbackArgs(ev.amount, ev.absorb, ev.resist, ev.crit, ev.school);
+    if (args === null) {
+      return;
+    }
+    fireEvent(vm, 'UNIT_COMBAT', ['player', args.event, args.flags, args.amount, args.school]);
+    stats.events += 1;
+  };
+
+  /**
+   * A HEAL LANDING ON THE PLAYER -- the client's own `HEAL` action, which `CombatFeedback_OnCombatEvent`
+   * draws GREEN through `PlayerHealIndicator` rather than on the hit indicator
+   * (`combatfeedback.lua:69-77`, `playerframe.xml`'s second indicator string). Nothing is drawn by us;
+   * the action name is the reference's (`net/apply/combat_log.rs:434-440`) and the client's table
+   * resolves it.
+   */
+  const onSpellHeal = (ev: { target: string; amount: number; crit: boolean }): void => {
+    if (world.player === null || ev.target !== world.player.guid) {
+      return;
+    }
+    fireEvent(vm, 'UNIT_COMBAT', ['player', 'HEAL', ev.crit ? 'CRITICAL' : '', ev.amount, 0]);
+    stats.events += 1;
+  };
+
+  /**
+   * A SPELL MISSING THE PLAYER -- his own dodge, parry, resist or immunity to an incoming cast. The word
+   * comes out of `spellMissText`, i.e. the same `WORD_KEY` table the floating word and the melee dodge
+   * use, so all three name an outcome identically by construction.
+   */
+  const onSpellMiss = (ev: { target: string; code: number }): void => {
+    if (world.player === null || ev.target !== world.player.guid) {
+      return;
+    }
+    const text = spellMissText(ev.code);
+    if (text === null || text.wordKey === null) {
+      return;
+    }
+    fireEvent(vm, 'UNIT_COMBAT', ['player', text.wordKey, '', 0, 0]);
+    stats.events += 1;
+  };
+
+  // `ChrRaces.dbc` and `ChrClasses.dbc`, for `UnitRace`/`UnitClass`. A few dozen rows each, and
+  // `DBC.load` caches.
+  //
+  // THE RE-PUSH IS LOAD-BEARING AND ITS ABSENCE WAS A DEFECT OF MINE, caught live: a snapshot is only
+  // rebuilt when a FIELD CHANGES, so "the names will appear on the next push" is false whenever the
+  // DBC lands after the last one -- which is the normal case, since a standing character stops
+  // emitting field updates within a few seconds of entry. Measured that way: `race` 11 and `classId`
+  // 7 were on the unit and `UnitRace`/`UnitClass` still answered nil. Same shape as
+  // `container-bridge.ts`' `void itemData.ensureLoaded().then(pushAll)`, and the same fix.
+  void raceClassData.ensureLoaded().then(() => {
+    push('player', world.player);
+    push('target', world.target);
+  });
 
   world.on('unit:fields', onFields);
   world.on('target:change', onTargetChange);
+  spells.on('comboPoints', pushCombo);
+  combat.on('attack:swing', onSwing);
+  combatLog.on('spell:damage', onSpellDamage);
+  combatLog.on('spell:heal', onSpellHeal);
+  combatLog.on('spell:miss', onSpellMiss);
 
   // The player is already in the world when this attaches -- his create block arrived while the
   // manifest was still loading -- so the first push is made here rather than waited for. Without it
@@ -223,6 +401,11 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
   return () => {
     world.removeListener('unit:fields', onFields);
     world.removeListener('target:change', onTargetChange);
+    spells.removeListener('comboPoints', pushCombo);
+    combat.removeListener('attack:swing', onSwing);
+    combatLog.removeListener('spell:damage', onSpellDamage);
+    combatLog.removeListener('spell:heal', onSpellHeal);
+    combatLog.removeListener('spell:miss', onSpellMiss);
     delete (window as unknown as Record<string, unknown>).unitBridgeStats;
   };
 }

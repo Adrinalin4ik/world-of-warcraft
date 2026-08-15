@@ -35,9 +35,6 @@ const frameIds = new Map<number, number>();
  */
 const frameAttributes = new Map<number, Map<string, unknown>>();
 
-/** `RegisterForDrag`'s button set, per frame. See the method for why it is stored but not acted on. */
-const dragButtons = new Map<number, string[]>();
-
 /**
  * The `(r, g, b [, a])` argument list the two backdrop-colour setters share. Non-numeric arguments
  * fall back to the untinted channel rather than to `NaN`, which would blank the piece entirely.
@@ -47,14 +44,77 @@ function tintOf(args: unknown[]): BackdropTint {
   return { r: channel(args[0]), g: channel(args[1]), b: channel(args[2]), a: channel(args[3]) };
 }
 
-/** A released frame takes its numeric tag with it -- see `object.ts`'s `FRAME_TEARDOWN`. */
-onFrameTeardown((_ctx, id) => {
+/**
+ * A released frame takes its numeric tag with it -- see `object.ts`'s `FRAME_TEARDOWN`.
+ *
+ * Its attribute handles go too, and they must be UNREF'd rather than merely dropped: `SetAttribute`
+ * retains a handle for every table or function value (see it for why), and a `Map.delete` releases the JS
+ * reference while leaving the Lua registry slot pinned for the life of the VM.
+ */
+onFrameTeardown((ctx, id) => {
   frameIds.delete(id);
+  const attributes = frameAttributes.get(id);
+  if (attributes !== undefined) {
+    for (const value of attributes.values()) {
+      if (ctx.vm.isRef(value)) {
+        ctx.vm.unref(value);
+      }
+    }
+  }
   frameAttributes.delete(id);
-  dragButtons.delete(id);
 });
 
+/**
+ * THE TREE WALK -- `GetChildren` / `GetNumChildren` / `GetRegions` / `GetNumRegions`.
+ *
+ * **NONE OF THESE EXISTED ON ANY CLASS**, which self-review caught while checking a claim this round
+ * had just written down. The last round reported that `WorldFrame:GetChildren()` raises "because there
+ * is no `WorldFrame` type"; that was HALF the cause. Adding the type made the global real and the call
+ * still answered nothing, because `GetChildren` was absent everywhere. Both halves are closed here.
+ *
+ * They matter beyond one frame: walking `WorldFrame:GetChildren()` every tick is how every nameplate
+ * addon of this era finds plates, and `GetRegions()` is how it then finds the health bar and the name.
+ * The four are pure reads of the tree the widget layer already holds -- no state of their own, nothing
+ * cached, nothing to keep in step.
+ *
+ * **CHILDREN AND REGIONS ARE THE SAME LIST, SPLIT BY KIND**, which is the client's own division: a
+ * `<Texture>` or `<FontString>` is a REGION and everything else is a child FRAME. `Widget.kind` carries
+ * exactly that, so the split is read off the widget rather than tracked separately -- one list cannot
+ * drift from the other if there is only one list.
+ *
+ * Returned as a VARARG, not a table: the real API is `local a, b, c = f:GetChildren()` and
+ * `select("#", f:GetChildren())`, and `frame_alpha.lua`-style callers index the varargs directly. A
+ * table would break every one of them.
+ */
+const isRegionKind = (kind: string): boolean => kind === 'texture' || kind === 'fontstring';
+
 const FRAME: MethodTable = {
+  GetChildren: (ctx, self) => ctx.registry
+    .childrenOf(self)
+    .filter((id) => {
+      const widget = ctx.registry.widget(id);
+      return widget !== null && widget !== undefined && !isRegionKind(widget.kind);
+    })
+    .map((id) => ctx.wrapper(id)),
+
+  GetNumChildren: (ctx, self) => [ctx.registry.childrenOf(self).filter((id) => {
+    const widget = ctx.registry.widget(id);
+    return widget !== null && widget !== undefined && !isRegionKind(widget.kind);
+  }).length],
+
+  GetRegions: (ctx, self) => ctx.registry
+    .childrenOf(self)
+    .filter((id) => {
+      const widget = ctx.registry.widget(id);
+      return widget !== null && widget !== undefined && isRegionKind(widget.kind);
+    })
+    .map((id) => ctx.wrapper(id)),
+
+  GetNumRegions: (ctx, self) => [ctx.registry.childrenOf(self).filter((id) => {
+    const widget = ctx.registry.widget(id);
+    return widget !== null && widget !== undefined && isRegionKind(widget.kind);
+  }).length],
+
   GetID: (_ctx, self) => [frameIds.get(self) ?? 0],
   SetID: (_ctx, self, args) => {
     frameIds.set(self, Number(args[0] ?? 0));
@@ -109,6 +169,22 @@ const FRAME: MethodTable = {
     widgetOf(ctx, self).mouseEnabled = Boolean(args[0]);
     return [];
   },
+
+  /**
+   * `SetClampedToScreen(clamped)` / `IsClampedToScreen()` -- keep the frame inside the window.
+   *
+   * `loader.ts:731` has issued this for every `clampedToScreen="true"` element since it was written and
+   * the method did not exist, so the attribute did nothing: a `GameTooltip` (which declares it,
+   * `gametooltiptemplate.xml:3`) anchored to a button near the bottom of the screen resolved half off it
+   * and its body was cut off. `layout.ts#clampToScreen` is the geometry; this is only the flag, and it is
+   * `Boolean(args[0])` rather than Lua truthiness because both spellings the loader and FrameXML use are
+   * real booleans here.
+   */
+  SetClampedToScreen: (ctx, self, args) => {
+    widgetOf(ctx, self).clampedToScreen = Boolean(args[0]);
+    return [];
+  },
+  IsClampedToScreen: (ctx, self) => [widgetOf(ctx, self).clampedToScreen],
 
   /**
    * `SetHitRectInsets(left, right, top, bottom)` -- shrink (positive) or grow (negative) the rect the
@@ -168,6 +244,36 @@ const FRAME: MethodTable = {
    * The name is LOWER-CASED on both set and get: the engine's attribute table is case-insensitive,
    * and FrameXML relies on it -- `SecureButton_GetModifiedAttribute` builds names by concatenating a
    * prefix, a button name and a suffix whose cases do not agree.
+   *
+   * ## A TABLE VALUE MUST BE RETAINED, and not doing so was why NO `UIPanel` COULD EVER OPEN
+   *
+   * A Lua table or function crossing this boundary arrives as a `LuaRef`, and **arguments are BORROWED**:
+   * the call boundary releases every handle among them when the method returns
+   * (`object.ts#MethodContext.retain`, and `releaseAll`). Storing `args[1]` raw therefore kept a handle to
+   * a registry slot that was freed a moment later and then REUSED by the next value crossing the
+   * boundary -- so the attribute silently became some unrelated Lua value, with no error anywhere. That is
+   * verbatim the hazard `LuaVM#dup`'s own docstring warns about.
+   *
+   * MEASURED live, and it is what blocked the spellbook after its API existed. `ShowUIPanel`
+   * (`uiparent.lua:1962-1975`) is a two-line dispatch:
+   *
+   *     FramePositionDelegate:SetAttribute("panel-frame", frame);
+   *     FramePositionDelegate:SetAttribute("panel-show", true);
+   *
+   * and the handler reads the frame back out. With the value not retained, `panel-frame` read as nil and
+   * the console said so:
+   *
+   *     8: OnAttributeChanged(panel-show): [string "UIParent.lua"]:55:
+   *     attempt to index a nil value (local 'frame')
+   *
+   * -- `uiparent.lua:54-55` is `GetUIPanelWindowInfo(frame, name)` doing `UIPanelWindows[frame:GetName()]`.
+   * So `ToggleSpellBook("spell")` ran clean, `ShowUIPanel` was reached, and the frame was never shown.
+   * **This was never specific to the spellbook**: every `UIPanel` in the client goes through the same two
+   * lines, so the character sheet, the quest log and the world map were all blocked on it too.
+   *
+   * `ctx.retain` gives this a handle it owns, and the previous value's handle is released on overwrite and
+   * on teardown -- otherwise every `SetAttribute` of a table would pin a registry slot for the session,
+   * and `SecureTemplates` writes attributes constantly.
    */
   SetAttribute: (ctx, self, args) => {
     const name = String(args[0] ?? '').toLowerCase();
@@ -179,8 +285,15 @@ const FRAME: MethodTable = {
       table = new Map();
       frameAttributes.set(self, table);
     }
-    const value = args[1] ?? null;
+    const raw = args[1] ?? null;
+    // Retained BEFORE the old value is released, so `SetAttribute(n, frame:GetAttribute(n))` -- a write of
+    // the value already there -- cannot free the only handle to it in between.
+    const value = ctx.vm.isRef(raw) ? ctx.retain(raw) : raw;
+    const previous = table.get(name);
     table.set(name, value);
+    if (ctx.vm.isRef(previous) && previous !== value) {
+      ctx.vm.unref(previous);
+    }
     // Fired AFTER the write, so a handler that reads the attribute back sees the new value.
     //
     // AND ITS FAILURE IS REPORTED, which it was not. Discarding this return value hid a whole broken
@@ -252,27 +365,39 @@ const FRAME: MethodTable = {
   /**
    * `RegisterForDrag("LeftButton", ...)` -- which buttons begin a drag on this frame.
    *
-   * Stored, not acted on, and the two halves are separated deliberately. The SET is real: it is what
-   * `if frame:GetAttribute(...)`-style introspection and any later drag router would read, and it is
-   * 11 of the prefix's load errors. The DRAG ITSELF is not implemented -- `input.ts` has no drag
-   * gesture and `widget.ts` has no movable frame -- so nothing will ever fire `OnDragStart`.
+   * **NOW ACTED ON.** This used to store the set and warn that no drag gesture existed, which was true
+   * and was why dragging an ability did nothing at all. `ui/input.ts` has the gesture now -- press, a
+   * move past a threshold, then `OnDragStart`; release, then `OnDragStop` on the source and
+   * `OnReceiveDrag` on whatever is under the cursor -- and this method is what marks a frame as a drag
+   * SOURCE for it. An unregistered frame keeps its click and can never start a drag, which is the
+   * engine's rule and is what stops every button on the screen becoming draggable.
+   *
+   * **The button STRINGS are discarded**, and only `widget.dragRegistered` is kept. They were stored in a
+   * per-frame map until this change, on the stated grounds that "a later drag router would read it" -- that
+   * router is now here and it reads the boolean, so the map was state nothing could ever read again. See
+   * the limitation at the bottom of this comment for what honouring the strings would actually take; it is
+   * not a matter of having kept them.
    *
    * Registered on FRAME rather than on BUTTON because any Frame can be a drag source in this API, not
    * only a Button; benilla puts it on the shared frame table for the same reason
    * (`crates/benilla-ui/src/script/object/events_regions.rs:68-82`), and replaces the whole set on
    * each call, with an empty argument list clearing it.
+   *
+   * **The buttons themselves are not honoured**, and that is a real limitation rather than a shortcut:
+   * `ActionBarButtonTemplate` registers `("LeftButton", "RightButton")` and `SpellButtonTemplate` only
+   * `("LeftButton")` (`spellbookframe.lua:291`), but `input.ts#onPointerDown` never inspects
+   * `event.button` and every press reaches Lua as `"LeftButton"` -- the same constraint that makes
+   * `RegisterForClicks` a declared gap in `kinds.ts`. So a RIGHT-button drag on a spell button, which the
+   * real client refuses, is accepted here. Closing it means plumbing `event.button` through the router.
    */
-  RegisterForDrag: (_ctx, self, args) => {
+  RegisterForDrag: (ctx, self, args) => {
     const buttons = args.filter((arg): arg is string => typeof arg === 'string' && arg !== '');
-    if (buttons.length === 0) {
-      dragButtons.delete(self);
-    } else {
-      dragButtons.set(self, buttons);
+    const widget = ctx.registry.widget(self);
+    if (widget !== null) {
+      // The whole set is REPLACED, so an empty argument list clears the registration -- which is the
+      // engine's behaviour and the only way FrameXML has to make a frame undraggable again.
+      widget.dragRegistered = buttons.length > 0;
     }
-    warnOnce(
-      'RegisterForDrag: the registration is stored but no drag gesture exists in this input router,'
-        + ' so OnDragStart/OnDragStop never fire',
-    );
     return [];
   },
 

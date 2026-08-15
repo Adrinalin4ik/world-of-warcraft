@@ -162,18 +162,57 @@ class WMOManager {
       return;
     }
 
-    if (this.pendingUnloads.has(entry.id)) {
+    // THE GUARD WAS INVERTED, so this has never cancelled anything: it returned when an unload WAS
+    // pending, and called `clearTimeout(undefined)` when it was not. A building that left range and
+    // came back inside `UNLOAD_DELAY_INTERVAL` was therefore torn down anyway -- taking its groups
+    // out of `collisionWorld.wmo` (`pipeline/wmo/index.js:369-371`) while the player could still be
+    // standing on its floor.
+    //
+    // The `delete` is not tidying: `scheduleUnloadEntry` early-returns while the id is in this map,
+    // so leaving a cancelled id behind would suppress every future unload of the same building.
+    const pending = this.pendingUnloads.get(entry.id);
+
+    if (pending === undefined) {
       return;
     }
 
-    clearTimeout(this.pendingUnloads.get(entry.id));
+    clearTimeout(pending);
+    this.pendingUnloads.delete(entry.id);
   }
 
   unloadEntry(entry) {
     this.pendingUnloads.delete(entry.id);
 
     const wmo = this.entries.get(entry.id);
-    
+
+    if (!wmo) {
+      return;
+    }
+
+    // STILL LOADING -- RETRY, DO NOT DROP.
+    //
+    // `processLoadEntry` puts the WMO into `entries` SYNCHRONOUSLY and `load()` fills `views.root`
+    // only once the root has arrived (`pipeline/wmo/index.js:119`), so an entry that leaves range
+    // during its own load reaches here with a null root. Reading `.children` off it threw
+    // `Cannot read properties of null (reading 'children')` -- observed twice in one offline session
+    // (round 26). The throw landed AFTER the `pendingUnloads.delete` above, so nothing ever retried
+    // the unload: the entry stayed in `entries`, its root stayed in the scene, and its groups stayed
+    // registered as collision for the rest of the session.
+    //
+    // Rescheduling rather than unloading here, because `wmo.unload()` on a half-loaded WMO is worse:
+    // `load()` would carry on and write `views.root` and the group views onto an object that has
+    // already dropped its loader refcounts. The retry is bounded by the load completing.
+    //
+    // `views.root` is also nulled by `unload()` itself (`index.js:396`), so this covers a double
+    // unload by the same test.
+    if (!wmo.views.root) {
+      this.pendingUnloads.set(
+        entry.id,
+        setTimeout(() => this.unloadEntry(entry), this.constructor.UNLOAD_DELAY_INTERVAL),
+      );
+      return;
+    }
+
     for (const obj of wmo.views.root.children) {
       const colisionIndex = this.view.collidableMeshList.findIndex(x => x.uuid === obj.uuid);
       if (colisionIndex !== -1) {

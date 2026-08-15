@@ -1,4 +1,5 @@
 import { SnapTrace } from './mover';
+import { SlideIteration } from './slide';
 import { StepUpVerdict } from './step-up';
 
 /**
@@ -21,6 +22,10 @@ export interface MoveTraceFrame {
   /** Contacts the slide resolved this frame, and the first blocking face. */
   contacts?: number;
   blockedBy?: { normalZ: number; distance: number } | null;
+  /** Per-iteration record of the grounded slide, recorded only while the trace is on. */
+  slide?: SlideIteration[];
+  /** Horizontal distance the whole grounded step actually achieved (yd). */
+  travelXY?: number;
 }
 
 const HISTORY = 120;

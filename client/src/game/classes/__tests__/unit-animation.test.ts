@@ -1,6 +1,11 @@
 /**
- * jsdom, not node: importing `classes/unit` reaches the debug panel and `cache-manager`, whose
- * module-level singleton touches `window.indexedDB` at import time.
+ * jsdom, not node: `classes/unit` reaches the debug panel, which touches `window`.
+ *
+ * (The `cache-manager` singleton this comment used to also name is gone -- it was a dead stub that
+ * opened an IndexedDB and did nothing, deleted when the real asset cache landed in
+ * `game/net/asset-cache.ts`. Measured after the deletion: this file still fails under `node` with
+ * `ReferenceError: window is not defined` in `Unit#engaged`, so the jsdom requirement is real and
+ * survives on the debug panel alone.)
  *
  * @jest-environment jsdom
  */

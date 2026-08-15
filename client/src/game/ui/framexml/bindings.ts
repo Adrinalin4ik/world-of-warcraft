@@ -153,6 +153,23 @@ export const DEFAULT_BINDINGS: ReadonlyArray<readonly [string, string]> = [
   ['TOGGLECHARACTER0', 'C'],
   ['TOGGLEBACKPACK', 'B'],
   ['TOGGLEGAMEMENU', 'ESCAPE'],
+  // TAB and SHIFT-TAB. `Bindings.xml:456-461` is the pair -- `TargetNearestEnemy()` and
+  // `TargetNearestEnemy(1)`, whose own comment reads "1 (or "true") means reverse!". The KEYS carry the
+  // same standing as everything else in this table: transcribed from the shipped layout, not read from
+  // any data this project has.
+  ['TARGETNEARESTENEMY', 'TAB'],
+  ['TARGETPREVIOUSENEMY', 'SHIFT-TAB'],
+  // NAMEPLATES -> V, the owner's own request ("на букву v должен включаться индикатор здоровья").
+  // The COMMAND is not ours: `Bindings.xml:544-553` is a real `<Binding name="NAMEPLATES">` whose body
+  // reads `GetCVarBool("nameplateShowEnemies")` and writes the two nameplate CVars back, and the engine
+  // reads those CVars. So the whole toggle is the client's own Lua and the engine side is a CVar read
+  // (`game/world/nameplates.ts`). The KEY carries this table's standing note.
+  ['NAMEPLATES', 'V'],
+  // The other two rungs of the same three-way, so shift and ctrl do what the real client does rather
+  // than nothing. `Bindings.xml:554-563` and `:564-573`; FRIENDNAMEPLATES shows friendly plates only and
+  // ALLNAMEPLATES shows both.
+  ['FRIENDNAMEPLATES', 'SHIFT-V'],
+  ['ALLNAMEPLATES', 'CTRL-V'],
 ];
 
 /**
