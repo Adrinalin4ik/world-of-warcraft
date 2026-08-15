@@ -87,6 +87,29 @@ export interface SlideHit {
 export type SlideCallback = (hit: SlideHit) => void;
 
 /**
+ * One iteration of the slide, as the trace records it.
+ *
+ * The loop's whole behaviour is "cast, advance, clip, repeat", and a frame that ends with the body
+ * where it started is only diagnosable per ITERATION: the aggregate `contacts` count cannot say
+ * whether the budget was spent advancing or spent on contacts that advanced nothing. That
+ * distinction is the one this instrument exists for.
+ */
+export interface SlideIteration {
+  /** Speed of the velocity this iteration cast with (yd/s). */
+  speed: number;
+  /** Distance the sweep asked for (yd). */
+  requested: number;
+  /** `hit.distance` -- the distance actually travelled, or null when nothing was hit. */
+  travelled: number | null;
+  /** The contact normal AS REPORTED, before the callback may rewrite it. */
+  normal: [number, number, number] | null;
+  /** The normal the clip finally used -- differs when the steep-wall flatten fired. */
+  clipNormal: [number, number, number] | null;
+  /** Seconds of the frame still unspent when the iteration ended. */
+  remainingTime: number;
+}
+
+/**
  * Collide-and-slide a capsule through the world for one frame.
  *
  * The reference delegates this to its physics engine, so this is the one piece of the mover with no
@@ -102,6 +125,7 @@ export function moveAndSlide(
   velocity: THREE.Vector3,
   dt: number,
   onHit: SlideCallback,
+  iterationsOut?: SlideIteration[],
 ): { position: THREE.Vector3; contacts: number } {
   const position = from.clone();
   const vel = velocity.clone();
@@ -112,7 +136,7 @@ export function moveAndSlide(
   for (let i = 0; i < MAX_SLIDE_ITERATIONS; ++i) {
     const speed = vel.length();
     if (remainingTime <= 1e-9 || speed < 1e-6) {
-      break;
+      return { position, contacts };
     }
 
     const distance = speed * remainingTime;
@@ -121,7 +145,13 @@ export function moveAndSlide(
     const hit = cast(position, dir, distance, SKIN_WIDTH);
     if (!hit) {
       position.addScaledVector(dir, distance);
-      break;
+      if (iterationsOut) {
+        iterationsOut.push({
+          speed, requested: distance, travelled: null, normal: null, clipNormal: null,
+          remainingTime: 0,
+        });
+      }
+      return { position, contacts };
     }
 
     contacts += 1;
@@ -138,6 +168,17 @@ export function moveAndSlide(
     // deliberately returns a velocity already lying IN its plane, so this passes it untouched --
     // which is how the ride keeps full horizontal speed rather than being re-clipped away.
     vel.addScaledVector(slideHit.normal, -vel.dot(slideHit.normal));
+
+    if (iterationsOut) {
+      iterationsOut.push({
+        speed,
+        requested: distance,
+        travelled,
+        normal: [hit.normal.x, hit.normal.y, hit.normal.z],
+        clipNormal: [slideHit.normal.x, slideHit.normal.y, slideHit.normal.z],
+        remainingTime,
+      });
+    }
   }
 
   return { position, contacts };

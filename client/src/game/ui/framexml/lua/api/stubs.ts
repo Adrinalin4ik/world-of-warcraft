@@ -145,14 +145,17 @@ export function installStubApi(vm: LuaVM): void {
    *    frame TYPE, so there is no achievement UI to open and no data to open it on. `false` from both
    *    disables `AchievementMicroButton` (`:103-108`), which is exactly right -- clicking it would reach a
    *    frame that does not exist. A `true` here would enable a button that cannot work.
-   *  - **Bags.** `IsBagOpen` answers nil because no container frame exists in this client (there is no
-   *    bag/inventory feed at all), so no bag and no keyring is open. nil rather than false because the
-   *    engine returns the bag's frame INDEX when one is open, not a boolean, and the caller only tests
-   *    truthiness (`:112`).
+   *
+   * **`IsBagOpen` IS NO LONGER HERE, and it was wrong twice.** Its comment read "no container frame
+   * exists in this client (there is no bag/inventory feed at all)", which stopped being true when
+   * `ui/container-bridge.ts` landed. And it was DEAD even before that: `IsBagOpen` is not an engine
+   * global at all -- `containerframe.lua:212-220` DEFINES it, walking the thirteen `ContainerFrame`s for
+   * a shown one with the matching id, and the manifest runs after this install, so the client's own
+   * definition has always shadowed this stub. Registering it here could only ever have masked a real
+   * one; it is deleted rather than corrected.
    */
   vm.registerFunction('HasCompletedAnyAchievement', () => [false]);
   vm.registerFunction('CanShowAchievementUI', () => [false]);
-  vm.registerFunction('IsBagOpen', () => []);
 
   // `SetCharSelectBackground` and `SetCharCustomizeBackground` were here as no-ops and are now real,
   // in `api/characters.ts` -- they are the two calls `SetBackgroundModel` (glueparent.lua:374-386)

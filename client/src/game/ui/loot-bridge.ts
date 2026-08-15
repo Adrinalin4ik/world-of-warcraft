@@ -294,16 +294,11 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
 
   // -- The declared gaps --------------------------------------------------------------------------
 
+  // THE GROUP-LOOT FAMILY IS NOT HERE. `GroupLootDropDown`'s OnLoad calls `GetMasterLootCandidate`
+  // during the manifest load, and this bridge attaches after the tree is built -- so declaring it here
+  // still left a nil in the load report. It lives in `api/items.ts`, which installs before the
+  // manifest; see the rule stated there.
   const gaps: Array<[string, string, unknown[]]> = [
-    ['GetLootRollItemInfo', 'SMSG_LOOT_START_ROLL / SMSG_LOOT_ROLL are not decoded: group loot has no '
-      + 'feed in this client and a solo looter never rolls', []],
-    ['GetLootRollTimeLeft', 'as GetLootRollItemInfo -- the countdown rides SMSG_LOOT_START_ROLL', [0]],
-    ['RollOnLoot', 'CMSG_LOOT_ROLL is not sent: there is no roll to answer', []],
-    ['GetMasterLootCandidate', 'SMSG_LOOT_MASTER_LIST is not decoded and master loot needs a party',
-      []],
-    ['GiveMasterLoot', 'as GetMasterLootCandidate', []],
-    ['ConfirmLootSlot', 'the bind-on-pickup confirmation needs SMSG_LOOT_ROLL_WON / the LOOT_BIND '
-      + 'popup path, neither of which is fed', []],
     ['LootSlotHasItem', 'superseded in 3.3.5a by LootSlotIsItem, which is what lootframe.lua calls; '
       + 'declared so an addon written against the older name is told rather than misled', [false]],
   ];

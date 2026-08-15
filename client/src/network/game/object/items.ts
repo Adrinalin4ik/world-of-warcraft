@@ -148,6 +148,13 @@ export class ItemHandler extends EventEmitter {
       `packet:receive:${'SMSG_ITEM_QUERY_SINGLE_RESPONSE'}`,
       (gp: GamePacket) => this.handleQueryResponse(gp),
     );
+    // A NEW WORLD ENTRY IS A NEW CHARACTER'S INVENTORY. `SMSG_LOGIN_VERIFY_WORLD` is the one message
+    // that means "you are now in the world", and this client can reach it twice in a page life -- it
+    // reconnects after a disconnect without a reload. Without this, `clearSession` was never called
+    // from anywhere and the second character's bag would be drawn over the first's item objects,
+    // whose guids are still perfectly valid keys. Found in self-review as dead code, which is what it
+    // was; the bug it implies is not theoretical.
+    this.game.on('packet:receive:SMSG_LOGIN_VERIFY_WORLD', () => this.clearSession());
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -441,7 +448,12 @@ export class ItemHandler extends EventEmitter {
     return [...this.objects.keys()];
   }
 
-  /** Dropped on disconnect. Templates survive -- an item definition is stable across sessions. */
+  /**
+   * Dropped on world entry. Templates SURVIVE -- an item definition is stable across sessions and
+   * across characters, which is the reference's reasoning too (`benilla/src/items.rs`' header: "Templates
+   * survive disconnect: item definitions are stable across sessions"). Everything keyed by a guid does
+   * not.
+   */
   clearSession(): void {
     this.objects.clear();
     this.objectTypes.clear();

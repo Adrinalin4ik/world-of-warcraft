@@ -594,13 +594,21 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    * packet -- twenty repaints of thirteen frames for one arrival.
    */
   let queued = false;
+  let disposed = false;
   const pushAll = (): void => {
-    if (queued) {
+    if (queued || disposed) {
       return;
     }
     queued = true;
     void Promise.resolve().then(() => {
       queued = false;
+      // THE COALESCING WINDOW OUTLIVES THE BRIDGE otherwise. Removing the listeners in the teardown
+      // does not cancel a microtask already scheduled, so a teardown between the schedule and the
+      // flush would fire `BAG_UPDATE` into a VM that is being torn down. Found in self-review; the
+      // same class of hazard `clearRects` covers for the published draw list.
+      if (disposed) {
+        return;
+      }
       const paths: string[] = [];
       for (const bagId of [BACKPACK_CONTAINER, 1, 2, 3, 4, KEYRING_CONTAINER]) {
         for (let slot = 1; slot <= numSlots(bagId); ++slot) {
@@ -691,6 +699,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
   (window as unknown as Record<string, unknown>).bagBridge = stats;
 
   return () => {
+    disposed = true;
     setItemTooltipSource(vm, null);
     items.removeListener('inventoryChanged', pushAll);
     items.removeListener('templatesChanged', pushAll);

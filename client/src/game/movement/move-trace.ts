@@ -1,4 +1,5 @@
 import { SnapTrace } from './mover';
+import { SlideIteration } from './slide';
 import { StepUpVerdict } from './step-up';
 
 /**
@@ -21,6 +22,10 @@ export interface MoveTraceFrame {
   /** Contacts the slide resolved this frame, and the first blocking face. */
   contacts?: number;
   blockedBy?: { normalZ: number; distance: number } | null;
+  /** Per-iteration record of the grounded slide, recorded only while the trace is on. */
+  slide?: SlideIteration[];
+  /** Horizontal distance the whole grounded step actually achieved (yd). */
+  travelXY?: number;
 }
 
 const HISTORY = 120;
@@ -34,6 +39,18 @@ const HISTORY = 120;
  */
 class MoveTrace {
   enabled = false;
+
+  /**
+   * THE CONTROL ARM for the slide's final move (`slide.ts#moveAndSlide`).
+   *
+   * Set `window.moveTrace.slideFinalMove = false` and the loop reverts to its pre-fix behaviour --
+   * the budget ends the frame wherever the last contact left the body, discarding the clipped
+   * velocity. Kept because the fix's evidence is an A/B on ONE build at ONE spot: without a control
+   * arm, "he walks past the fence now" is indistinguishable from "the doodads streamed in
+   * differently this run", which is exactly how the stall's first candidate cause survived several
+   * rounds. It is read once per grounded slide -- one boolean, no allocation.
+   */
+  slideFinalMove = true;
 
   private frames: MoveTraceFrame[] = [];
 

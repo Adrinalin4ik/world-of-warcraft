@@ -88,6 +88,10 @@ export class LootHandler extends EventEmitter {
     this.subscribe('SMSG_LOOT_REMOVED', this.handleRemoved);
     this.subscribe('SMSG_LOOT_MONEY_NOTIFY', this.handleMoneyNotify);
     this.subscribe('SMSG_LOOT_CLEAR_MONEY', this.handleClearMoney);
+    // Same reasoning as `ItemHandler`'s: this client reconnects without a page reload, and an open
+    // loot window belongs to the session that opened it. A stale `source` guid would send the next
+    // character's `CMSG_LOOT_RELEASE` at a corpse in a world he is not in.
+    this.game.on('packet:receive:SMSG_LOGIN_VERIFY_WORLD', () => this.close());
   }
 
   /**
@@ -200,6 +204,16 @@ export class LootHandler extends EventEmitter {
    * version-numbered difference from the reference. This client has no loot chat line, so the value is
    * read for the frame and not kept; the READ is what matters, since a missed byte would leave the
    * residual at 1 and mask a real defect later.
+   *
+   * **SELF-REVIEW CAVEAT, and it is the honest kind: the `available > 0` guard DEFEATS THE RESIDUAL
+   * CHECK FOR THIS ONE PACKET.** Written this way the decode consumes whatever is there and the
+   * residual is 0 whether the trailing byte exists or not -- so `itemWire` cannot distinguish "the
+   * WotLK byte is real" from "it is not". Every other arm in this file and in `items.ts` reads a fixed
+   * shape and is genuinely checked. This one is a conditional read and is therefore UNVERIFIED by the
+   * instrument; the trailing byte's existence rests on the server implementation alone. It is written
+   * conditionally rather than unconditionally on purpose -- an unconditional read would THROW on a
+   * server that does not send it, and losing the whole receive loop is worse than losing one row of
+   * evidence -- but the loss of evidence is real and is named rather than left to look like a pass.
    */
   private handleMoneyNotify(gp: GamePacket): void {
     const copper = gp.readUnsignedInt() >>> 0;

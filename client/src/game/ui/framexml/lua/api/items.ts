@@ -58,6 +58,7 @@
  * system down -- which is why this exists at all, and why the shape is the part that was verified.
  */
 import { LuaVM } from '../vm';
+import { notImplemented } from '../methods/region';
 
 /**
  * THE PURSE, in copper, per VM.
@@ -191,6 +192,37 @@ export function installItemsApi(vm: LuaVM): void {
    * the handler died before anything else it does could run.
    */
   vm.registerFunction('InRepairMode', () => [false]);
+
+  /**
+   * THE GROUP-LOOT GAPS, declared HERE rather than on `ui/loot-bridge.ts` -- and the placement is the
+   * point, not an accident of tidying.
+   *
+   * `GroupLootDropDown`'s `OnLoad` calls `GetMasterLootCandidate` (`lootframe.lua:286`), i.e. DURING
+   * the manifest load, and a bridge attaches after the tree is built. **This is the third time this
+   * round that an OnLoad-time global put a nil in the load report** -- `GetMoney`, then
+   * `GetInventorySlotInfo`, then this -- so the rule is worth stating where the next person will hit
+   * it: a global FrameXML calls at OnLoad must be installed before the manifest runs. Only its DATA
+   * may arrive late, through a VM-keyed state slot like `coinageByVm` above.
+   *
+   * Every one of these needs `SMSG_LOOT_START_ROLL` / `SMSG_LOOT_ROLL` / `SMSG_LOOT_ROLL_WON` /
+   * `SMSG_LOOT_MASTER_LIST`, none of which is decoded -- and none of which a SOLO looter can provoke,
+   * so nothing in this client can currently exercise them. Declared, so the load report names them.
+   */
+  const groupLootGaps: Array<[string, string, unknown[]]> = [
+    ['GetMasterLootCandidate', 'SMSG_LOOT_MASTER_LIST is not decoded and master loot needs a party',
+      []],
+    ['GiveMasterLoot', 'as GetMasterLootCandidate', []],
+    ['GetLootRollItemInfo', 'SMSG_LOOT_START_ROLL / SMSG_LOOT_ROLL are not decoded: group loot has no '
+      + 'feed in this client and a solo looter never rolls', []],
+    ['GetLootRollTimeLeft', 'as GetLootRollItemInfo -- the countdown rides SMSG_LOOT_START_ROLL', [0]],
+    ['RollOnLoot', 'CMSG_LOOT_ROLL is not sent: there is no roll to answer', []],
+    ['ConfirmLootSlot', 'the bind-on-pickup confirmation needs the LOOT_BIND popup path, which is not '
+      + 'fed', []],
+  ];
+  for (const [name, reason, results] of groupLootGaps) {
+    const stub = notImplemented(name, reason, results);
+    vm.registerFunction(name, () => stub(null as never, 0, []));
+  }
 
   /**
    * `GetInventorySlotInfo(slotName)` -> `slotID, textureName, checkRelic`.
