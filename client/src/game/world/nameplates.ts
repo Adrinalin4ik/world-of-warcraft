@@ -225,6 +225,14 @@ interface Plate {
    * carried was meaningless. An instrument reporting a number nobody could check.
    */
   fraction: number | null;
+  /**
+   * Squared distance from the camera at the last pass, and the plate's rank in that ordering.
+   *
+   * Held for `report()`, which is how the sort defect was MEASURED rather than guessed at -- see
+   * `PLATE_DEPTH_STRIDE`. Squared because nothing needs the metric distance and a sort does not care.
+   */
+  distanceSq: number;
+  depthRank: number;
 }
 
 /**
@@ -292,10 +300,73 @@ export const PLATE_RANGE = 41;
 /** A plate is at most this many, whatever is in range -- the draw-call bound. OURS. */
 const MAX_PLATES = 20;
 
+/**
+ * THE PLATE-SORT FIX, AND THE MEASUREMENT THAT FOUND IT -- the owner's "Nameplates сортируются не
+ * правильно как будто. Дальние перекрывают ближние."
+ *
+ * **THE CAUSE IS `renderOrder` GRANULARITY, not the depth test, not `depthWrite`, and not a constant
+ * depth.** It is measurable off the code and off `report()`'s `depthRank`/`renderOrders` columns, and
+ * the five candidates the symptom admits are distinguished by one reading:
+ *
+ * Every sprite used to take `renderOrder = 10000 + <index within the plate>`, with the index running
+ * 0..4 for barBack · barFill · border · name · level. That index is INTRA-plate and therefore
+ * IDENTICAL across every plate on screen. three's transparent pass sorts by `renderOrder` FIRST and
+ * only breaks ties by depth -- so the whole screen drew in five global rungs: every plate's bar-back,
+ * then every plate's fill, then every border, then every name, then every level.
+ *
+ * Within a rung the depth tie-break is correct, which is exactly why this looked like a partial defect
+ * rather than a total one: two NAMES sort correctly against each other. But a NEAR plate's border
+ * (10002) is drawn before a FAR plate's name (10003), so **the far plate's name and level overdraw the
+ * near plate's frame and bar**. That is precisely "далние перекрывают ближние", and it cannot be fixed
+ * by nudging the constant -- any single number has the same defect.
+ *
+ * The other four candidates are refuted by the same reading: `depthTest` is ON and working (walls do
+ * occlude plates, which is the reference's rule); `depthWrite` is deliberately OFF and turning it on
+ * would make plates CLIP each other rather than order them; the transparent sort is three's own and is
+ * correct; and the depth is not constant -- `report()` shows distinct `distanceSq` per plate.
+ *
+ * THE FIX: the plate's own DEPTH RANK becomes the high-order term and the intra-plate index the
+ * low-order one. `renderOrder = PLATE_RENDER_BASE + depthRank * PLATE_DEPTH_STRIDE + index`, with the
+ * rank assigned FAR-to-NEAR so a nearer plate always sorts later, i.e. on top, as a whole unit.
+ *
+ * The stride must exceed the number of sprites in a plate (5) or two plates' rungs would interleave
+ * again; 8 is the next power of two and leaves room for a sixth region. `MAX_PLATES` is 20, so the
+ * band spans 10000..10163 and stays clear of the floating combat text, which sorts above it.
+ */
+const PLATE_RENDER_BASE = 10000;
+const PLATE_DEPTH_STRIDE = 8;
+
+/**
+ * How opaque a plate is when its unit is NOT the current target. The target's plate draws at 1.
+ *
+ * The owner: "nameplate должен быть полу прозрачный у невыбранной цели и не прозрачный у выбранной."
+ *
+ * **THIS VALUE IS OURS AND IT IS UNEXPLAINED.** It was searched for and is not authored anywhere, which
+ * is stated here rather than dressed in a citation:
+ *
+ *  - 3.3.5a nameplates are **ENGINE-drawn**. `interface/framexml/nameplate.lua` and `.xml` are **404**
+ *    on the asset host and no nameplate document appears anywhere in `framexml.toc`, so the client's own
+ *    Lua declares nothing about a plate's colour, its bar or its opacity. The only nameplate surface in
+ *    FrameXML is the CVar toggles (`interfaceoptionspanels.lua:1217-1225`) and their option strings --
+ *    all of them booleans about VISIBILITY, none about alpha.
+ *  - The reference has no such value either: its plate material's tint is a flat `[1,1,1,1]`
+ *    (`nameplates.rs:233`) with `alpha_gradient: None` (`:244`), and its live cache keys on
+ *    `(lines, colour)` alone (`:163`) -- there is no per-plate alpha state in it to vary, selected or
+ *    not.
+ *
+ * So the RULE comes from the owner and the NUMBER comes from us. It is applied as a MULTIPLIER on each
+ * sprite's authored base alpha rather than as an assignment, so the bar backing keeps its own 0.7
+ * relationship to the frame instead of every region being flattened to one value.
+ */
+const PLATE_UNSELECTED_ALPHA = 0.6;
+
 export class Nameplates {
   private readonly group = new THREE.Group();
 
   private readonly plates = new Map<string, Plate>();
+
+  /** Reused per frame by the depth sort -- see the sort block in `update`. Never allocated in the pass. */
+  private readonly ranked: Plate[] = [];
 
   private readonly fonts = new FontStringTextures();
 
@@ -378,7 +449,7 @@ export class Nameplates {
       if (queryName !== null && unit.name === UNNAMED && unit.fields.entry) {
         queryName(unit.fields.entry, unit.guid);
       }
-      this.place(unit, decision.bar, unitScale, self, this.levelTint(unit, config));
+      this.place(unit, decision.bar, unitScale, self, this.levelTint(unit, config), unit === target);
     };
 
     // THE TARGET FIRST, and self-review is what found this: `MAX_PLATES` is a hard break, so a grid with
@@ -393,6 +464,40 @@ export class Nameplates {
         break;
       }
       consider(unit);
+    }
+
+    // THE DEPTH SORT -- see `PLATE_DEPTH_STRIDE` for the measurement that found the defect.
+    //
+    // Done HERE rather than in `place` because a rank is a property of the SET: it cannot be known until
+    // every plate this frame has been positioned. The ordering is FAR to NEAR, so rank 0 is the furthest
+    // and draws first.
+    //
+    // The cost is one squared distance per plate and one sort of at most `MAX_PLATES` (20) entries per
+    // frame. The array is a field, reused and truncated rather than allocated, because a per-frame array
+    // in this pass is exactly the garbage a previous self-review took out of the ring.
+    this.ranked.length = 0;
+    const cx = camera.position.x;
+    const cy = camera.position.y;
+    const cz = camera.position.z;
+    this.plates.forEach((plate) => {
+      if (!plate.seen) {
+        return;
+      }
+      const dx = plate.group.position.x - cx;
+      const dy = plate.group.position.y - cy;
+      const dz = plate.group.position.z - cz;
+      plate.distanceSq = dx * dx + dy * dy + dz * dz;
+      this.ranked.push(plate);
+    });
+    this.ranked.sort((a, b) => b.distanceSq - a.distanceSq);
+    for (let rank = 0; rank < this.ranked.length; ++rank) {
+      const plate = this.ranked[rank];
+      plate.depthRank = rank;
+      const band = PLATE_RENDER_BASE + rank * PLATE_DEPTH_STRIDE;
+      for (let i = 0; i < plate.group.children.length; ++i) {
+        const child = plate.group.children[i];
+        child.renderOrder = band + ((child.userData.plateIndex as number | undefined) ?? 0);
+      }
     }
 
     let calls = 0;
@@ -468,9 +573,23 @@ export class Nameplates {
     unitScale: number,
     self: Unit | null,
     levelTint: [number, number, number],
+    /** Is this unit the current target? Drives the plate's opacity -- see `PLATE_UNSELECTED_ALPHA`. */
+    selected: boolean,
   ): void {
     const plate = this.plateFor(unit.guid);
     plate.seen = true;
+
+    // THE SELECTED / UNSELECTED OPACITY. A multiplier on each region's own authored alpha, so the bar
+    // backing keeps its 0.7 relationship to the frame rather than every region collapsing to one value.
+    // Written per frame because the target changes without anything else about the unit changing; it is
+    // a scalar store on a material that is already resident, so it costs no raster and no allocation.
+    const plateAlpha = selected ? 1 : PLATE_UNSELECTED_ALPHA;
+    for (let i = 0; i < plate.group.children.length; ++i) {
+      const child = plate.group.children[i] as THREE.Sprite;
+      const material = child.material as THREE.SpriteMaterial;
+      const base = (child.userData.baseAlpha as number | undefined) ?? 1;
+      material.opacity = base * plateAlpha;
+    }
 
     // THE ANCHOR -- `overheadAnchor`, which is now shared with the floating combat text; the choice and
     // its measurement are documented there.
@@ -495,25 +614,37 @@ export class Nameplates {
       this.setText(plate.name, label, plateFont(PLATE.nameSize, '#ffffff'), unitScale);
     }
 
-    // THE NAME'S COLOUR SPLITS BY WHICH SYSTEM IS DRAWING, and the first version got it wrong by giving
-    // both the reaction colour.
+    // THE NAME TAKES THE REACTION COLOUR, and the `if (bar)` white that used to be here was WRONG.
     //
-    // **A NAMEPLATE'S NAME IS WHITE.** Evidenced by three of the owner's reference crops covering all
-    // three bar colours -- a yellow-barred neutral wolf, a green-barred friendly guard and a blue-barred
-    // friendly player -- and the name is white in every one. Colouring it by reaction is what made ours
-    // read as one yellow mass instead of a label over a bar.
+    // **THE WHITE WAS AN OVER-GENERALISATION FROM A BIASED SAMPLE, and the owner's fourth crop refutes
+    // it.** The previous version read: "A NAMEPLATE'S NAME IS WHITE. Evidenced by three of the owner's
+    // reference crops covering all three bar colours ... and the name is white in every one." Those
+    // three units were a NEUTRAL wolf, a FRIENDLY guard and a friendly PLAYER -- every one of them an
+    // upper rung of the ladder. The fourth crop is a HOSTILE unit and **its name is RED**, matching its
+    // bar. So white was never an authored constant; it is what the upper rungs happen to look like at
+    // that size, and the hostile rung is the one that distinguishes the two rules.
     //
-    // **A BARE OVERHEAD NAME IS REACTION-COLOURED**, and that is a DIFFERENT SYSTEM rather than an
-    // inconsistency: it is the 1.12 overhead-NAME batch, whose colour the reference byte-verified as
-    // `GetSelectionCircleColor` after an A/B "falsified the earlier 'constant white'"
-    // (`nameplates.rs:14-20`). Here that case is exactly the target rescue -- name, no bar -- so the two
-    // rules never apply to the same thing on screen.
+    // The owner states the ladder directly: "Он зависит от того как настроена цель. Желтый если
+    // нейтральна, красный если враждебно" -- hostile red, neutral yellow, and the two friendly rungs
+    // green and blue. That is `selection-color.ts`'s palette exactly, unchanged and untuned.
+    //
+    // **THE REFERENCE INDEPENDENTLY REFUTES THE WHITE**, which is what makes this a correction rather
+    // than a swap of one guess for another: it byte-verified the overhead name's colour as
+    // `GetSelectionCircleColor` -- "the SAME selector as the ground selection ring" -- and records that
+    // an A/B **falsified the earlier 'constant white'** (`nameplates.rs:13-20`). Two independent
+    // sources, the owner's own crop and the reference's own experiment, agree.
+    //
+    // **HONEST RESIDUAL:** three crops still READ as white to the eye at neutral and friendly, and this
+    // change makes those names yellow, green and blue. If the real client genuinely draws the upper
+    // rungs white and only hostiles red, then the rule is not one ladder and this is wrong for three
+    // cases out of four. Nothing in 3.3.5a's own data can settle it -- nameplates are engine-drawn and
+    // `interface/framexml/nameplate.lua` is a 404, so FrameXML declares no plate colour at all. The
+    // owner's screen is the only oracle and the question is worth putting to him directly.
+    //
+    // The glyph texture is rasterized WHITE (`plateFont(..., '#ffffff')`) and tinted by the sprite
+    // material, so changing the colour costs no re-raster -- `stats.rasterized` is unaffected.
     const nameMaterial = plate.name.material as THREE.SpriteMaterial;
-    if (bar) {
-      nameMaterial.color.setRGB(1, 1, 1);
-    } else {
-      nameMaterial.color.setRGB(r, g, b);
-    }
+    nameMaterial.color.setRGB(r, g, b);
 
     const nameSize = plate.name.scale;
     // Stacked with `Sprite#center`, not with world offsets. Every sprite in a plate sits at the SAME
@@ -649,6 +780,9 @@ export class Nameplates {
     const plate: Plate = {
       group, name, level, barBack, barFill, border,
       builtName: NEVER_BUILT, builtLevel: NEVER_BUILT, seen: true, fraction: null,
+      // Overwritten by the depth sort before this plate is ever drawn; a new plate is created inside
+      // `place`, which runs before the sort block in the same pass.
+      distanceSq: 0, depthRank: 0,
     };
     this.plates.set(guid, plate);
     return plate;
@@ -686,12 +820,15 @@ export class Nameplates {
     });
     const sprite = new THREE.Sprite(material);
     sprite.frustumCulled = false;
-    // After the ordinary transparents. The reference biases its name batch to the top rung of its own
-    // sort ladder for the same reason (`NAMEPLATE_DEPTH_BIAS`, `nameplates.rs:79-88`): world text that
-    // sorts under a water surface is text nobody can read. `+ order` resolves the PLATE'S OWN stack:
-    // three breaks equal `renderOrder` by depth, and every sprite in a plate is at the SAME depth, so
-    // without it the frame and the fill would sort by insertion accident.
-    sprite.renderOrder = 10000 + spec.order;
+    // THE AUTHORED BASE ALPHA AND THE INTRA-PLATE INDEX, both needed per frame afterwards: the base
+    // alpha because the selected/unselected opacity is a MULTIPLIER on it (see
+    // `PLATE_UNSELECTED_ALPHA`), and the index because `renderOrder` is now recomputed from the plate's
+    // depth rank every pass (see `PLATE_DEPTH_STRIDE`) and the index is its low-order term.
+    sprite.userData.baseAlpha = spec.alpha;
+    sprite.userData.plateIndex = spec.order;
+    // A starting value only. `update` overwrites it from the depth rank before anything is drawn; it is
+    // set here so a sprite is never in the scene with an unset order.
+    sprite.renderOrder = PLATE_RENDER_BASE + spec.order;
     return sprite;
   }
 
@@ -822,6 +959,18 @@ export class Nameplates {
           ? +(plate.barFill.scale.x / (plate.barBack.scale.x - 2e-6 || 1)).toFixed(3)
           : null,
         at: plate.group.position.toArray().map((v) => +v.toFixed(2)),
+        // THE SORT, MADE CHECKABLE. `distance` and `depthRank` must agree monotonically -- the nearest
+        // plate has the HIGHEST rank -- and `renderOrders` must be disjoint between plates, which is
+        // precisely what the old flat `10000 + index` was not. An instrument that reported only the
+        // rank could not show the interleaving; the raw orders are what make the defect visible.
+        distance: +Math.sqrt(plate.distanceSq).toFixed(2),
+        depthRank: plate.depthRank,
+        renderOrders: plate.group.children.map((c) => c.renderOrder),
+        // The plate's opacity multiplier, read back off the NAME sprite's live material against its own
+        // authored base -- not the value we intended to write. A target reads 1, everything else
+        // `PLATE_UNSELECTED_ALPHA`.
+        alpha: +(((plate.name.material as THREE.SpriteMaterial).opacity)
+          / ((plate.name.userData.baseAlpha as number | undefined) ?? 1)).toFixed(3),
       })),
     };
   }
