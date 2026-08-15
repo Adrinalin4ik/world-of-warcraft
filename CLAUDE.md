@@ -82,6 +82,27 @@ matters; add a test when something breaks and stays broken. Do not enumerate edg
 - Visual claims need a screenshot. Many visual "successes" here did not reproduce when checked.
 - Pixel diffs are useless in the world and on the glue screens: the sky animates, the dragon moves,
   and characters blink.
+- **A gate taken on a convenient route can miss the bug entirely.** The loading screen was gated on
+  `?ui=lua` into the offline world, passed, and never drew on a real login — offline worldports the
+  player *later* in the same method, so it was the one ordering where the race could not lose.
+  Verify on the path the owner actually walks, not the one that was easy to instrument.
+- **The owner will look for you, and has said so.** When something is hard to verify from here —
+  cursors (a Playwright screenshot contains no OS pointer), a colour, a layout, anything where the
+  instrument is the doubtful part — hand it over and ask. That is faster and more honest than a
+  claim propped up by a weak gate.
+
+## The owner's build and this working tree are the same files
+
+**While the owner is testing, no agent may be live in this tree.** The dev server recompiles on every
+save, so an agent's half-written file is served straight into his browser. This has produced a
+"loading never finishes, then it falls back to offline" report that was five mid-edit files and
+nothing else — an hour on a false trail. Stop the agents, then let him look.
+
+For the same reason: **read in-flight work before parking or discarding it.** Stashing an interrupted
+agent's five modified files reverted a finished fix along with the scratch work; `git stash show -p`
+would have separated them in one command. Park with `git stash push -- <paths>`, never a blanket
+reset, and never `git add -A` — a blanket add has already swept one agent's files into another's
+commit, leaving a message that no longer described its contents.
 
 ## Comments are the design record
 
