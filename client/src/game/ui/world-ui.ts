@@ -46,6 +46,7 @@ import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachContainerBridge } from './container-bridge';
 import { attachLootBridge } from './loot-bridge';
 import { publishRects, clearRects } from './rects';
+import { publishArtSink, clearArtSink } from './runtime-art';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import { attachTargetBridge } from './target-bridge';
 import { dispatchBinding } from './framexml/lua/api/bindings';
@@ -513,6 +514,10 @@ export class WorldUiHost {
         this.detachLoot = attachLootBridge(runtime.vm, this.world, this.art);
       }
     }
+    // THE RUNTIME ART SINK, before the load report and before anything can script a texture. See
+    // `ui/runtime-art.ts`: a `SetTexture` naming a path the XML never mentioned was silently never
+    // fetched, which is what left the backpack with no backdrop.
+    publishArtSink(this.art);
     reportLoad(runtime);
     // The console handle, exactly as the glue side has one. `worldRuntime.vm.run('...')` against the
     // tree that is on screen is the only way to interrogate a frame a screenshot cannot answer for.
@@ -1053,6 +1058,7 @@ export class WorldUiHost {
     // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
     // stale draw list would have a remounted world's scripts reading the previous world's layout.
     clearRects();
+    clearArtSink();
     this.input.detach();
     this.runtime?.dispose();
     this.runtime = null;

@@ -98,7 +98,7 @@ export interface ItemTooltipInfo {
  * `Set<Thing>Item` family answers false exactly as it did when it did not exist.
  */
 export type ItemTooltipSource = (
-  kind: 'bag' | 'loot' | 'link',
+  kind: 'bag' | 'loot' | 'link' | 'inventory',
   a: number | string,
   b?: number,
 ) => ItemTooltipInfo | null;
@@ -248,7 +248,17 @@ export function installItemsApi(vm: LuaVM): void {
    * (paladin/druid/shaman), and this client decodes no such class rule. Named rather than faked -- the
    * only effect is which empty-slot art the ranged button shows.
    */
-  const PAPERDOLL = 'Interface\PaperDoll\UI-PaperDoll-Slot-';
+  // DOUBLE backslashes, and the single-backslash version of this line was a real shipped defect.
+  // This is a TS string literal, so `'Interface\PaperDoll\UI-...'` is read by JS as `\P` and `\U` --
+  // neither is a valid escape, so JS DROPS both backslashes and the path becomes
+  // `InterfacePaperDollUI-PaperDoll-Slot-`. That is the owner's
+  // `glue art missing: InterfacePaperDollUI-PaperDoll-Slot-Ammo`, and the `Failed to decode texture`
+  // that follows it is a 404's HTML error page being handed to the BLP decoder -- the fetch failed,
+  // the decode never had a chance, and the message named the wrong layer.
+  //
+  // NOT a general separator bug: `pipeline/dbc/item-data.ts:37`'s `ICON_DIR` is correctly escaped, so
+  // this does not explain the missing BAG icons, which remain a separate open question.
+  const PAPERDOLL = 'Interface\\PaperDoll\\UI-PaperDoll-Slot-';
   const SLOTS: ReadonlyArray<readonly [string, number, string]> = [
     ['AmmoSlot', 0, 'Ammo'],
     ['HeadSlot', 1, 'Head'],

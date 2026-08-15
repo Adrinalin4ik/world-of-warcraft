@@ -699,12 +699,64 @@ const ITEM_SETTERS: MethodTable = {
   SetBagItem: (ctx, self, args) => fillFromSource(ctx, self, 'bag', Number(args[0]), Number(args[1])),
   SetLootItem: (ctx, self, args) => fillFromSource(ctx, self, 'loot', Number(args[0])),
   SetHyperlink: (ctx, self, args) => fillFromSource(ctx, self, 'link', String(args[0] ?? '')),
+  /**
+   * `SetInventoryItem(unit, invSlot)` -- a WORN item, identified by unit and equipment slot rather
+   * than by bag and slot, so it takes the equipped read (`PLAYER_FIELD_INV_SLOT_HEAD + (id-1)*2`)
+   * and not the container read.
+   *
+   * **Its absence was raising inside an `OnEnter`**, which is the worst place for a nil method:
+   * `MainMenuBarBagButtons.lua:85` calls it when the pointer crosses a bag slot button on the main
+   * bar, and the raise killed the handler part-way, leaving the tooltip chain half built.
+   * `'inventory'` is the third kind the container bridge's source answers.
+   */
+  SetInventoryItem: (ctx, self, args) => fillFromSource(
+    ctx, self, 'inventory', String(args[0] ?? 'player'), Number(args[1]),
+  ),
 };
+
+/**
+ * THE REST OF THE `GameTooltip:Set*` FAMILY, CENSUSED AND DECLARED RATHER THAN LEFT NIL.
+ *
+ * Counted across the served FrameXML rather than discovered one hover at a time -- which is how
+ * `SetInventoryItem` arrived, and the point of doing this as a set. The call counts are
+ * `SetOwner` 70, `SetText` 54, **`SetInventoryItem` 7**, `SetMinimumWidth` 6, then a long tail at 1-2:
+ * `SetUnitAura`, `SetSpellByID`, `SetInboxItem`, `SetHyperlink`, `SetBagItem`, `SetUnit`, `SetTotem`,
+ * `SetSpell`, `SetSendMailItem`, `SetQuestLogSpecialItem`, `SetPossession`, `SetPetAction`,
+ * `SetMerchantItem`, `SetLootItem`, `SetLFGDungeonReward`, `SetLFGCompletionReward`,
+ * `SetEquipmentSet`, `SetBuybackItem`, `SetAction`.
+ *
+ * **A nil method that raises inside an `OnEnter` is worse than a named gap** -- it kills the handler
+ * and can leave the tooltip half built -- so every one of the tail that this client has no feed for is
+ * declared here. Each returns FALSE, which is the "nothing was filled" answer its callers already
+ * branch on, and the load report names it.
+ *
+ * Each needs a feed this client does not decode: auras, the mail box, the merchant and buyback lists,
+ * pet actions, possession bars, totems, equipment sets and the LFG reward tables.
+ */
+const TOOLTIP_SETTER_GAPS: Array<[string, string]> = [
+  ['SetUnitAura', 'no aura feed is decoded (SMSG_AURA_UPDATE has no subscriber)'],
+  ['SetSpellByID', 'the spellbook is indexed by SLOT, not by spell id -- see api/spells.ts'],
+  ['SetInboxItem', 'no mail box is decoded'],
+  ['SetSendMailItem', 'as SetInboxItem'],
+  ['SetMerchantItem', 'no merchant window is decoded (SMSG_LIST_INVENTORY has no subscriber)'],
+  ['SetBuybackItem', 'as SetMerchantItem'],
+  ['SetPetAction', 'no pet action bar is decoded (SMSG_PET_SPELLS has no subscriber)'],
+  ['SetPossession', 'no possession bar exists in this client'],
+  ['SetTotem', 'no totem feed is decoded'],
+  ['SetEquipmentSet', 'no equipment manager is decoded'],
+  ['SetQuestLogSpecialItem', 'no quest log is decoded'],
+  ['SetLFGDungeonReward', 'no LFG feed is decoded'],
+  ['SetLFGCompletionReward', 'as SetLFGDungeonReward'],
+  ['SetUnit', 'the unit tooltip needs a hover feed the world pass does not raise'],
+];
+for (const [name, reason] of TOOLTIP_SETTER_GAPS) {
+  ITEM_SETTERS[name] = notImplemented(`GameTooltip:${name}`, reason, [false]);
+}
 
 function fillFromSource(
   ctx: MethodContext,
   self: number,
-  kind: 'bag' | 'loot' | 'link',
+  kind: 'bag' | 'loot' | 'link' | 'inventory',
   a: number | string,
   b?: number,
 ): unknown[] {

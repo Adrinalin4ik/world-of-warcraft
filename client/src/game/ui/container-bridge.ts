@@ -557,6 +557,21 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       }
       template = item.template;
       count = item.count;
+    } else if (kind === 'inventory') {
+      // A WORN item: `a` is the unit token and `b` the 1-based equipment slot id. Only "player"
+      // resolves, for the reason `GetInventoryItemTexture` gives -- no other unit's inventory guids
+      // reach this client. This is the same read the bag-bar buttons need to know which bags are
+      // equipped, so it shares `bagGuid`'s field arithmetic rather than repeating it.
+      if (String(a).toLowerCase() !== 'player' || !Number.isFinite(Number(b)) || Number(b) < 1) {
+        return null;
+      }
+      const item = itemAt(guidAt(items.player(), ObjectType.Player,
+        PlayerField.player_field_inv_slot_head + (Number(b) - 1) * 2));
+      if (item === null) {
+        return null;
+      }
+      template = item.template;
+      count = item.count;
     } else if (kind === 'link') {
       const match = /\|Hitem:(\d+)/.exec(String(a));
       const entry = match === null ? Number(a) : Number(match[1]);

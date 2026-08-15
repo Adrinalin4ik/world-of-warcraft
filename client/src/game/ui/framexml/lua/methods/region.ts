@@ -21,6 +21,7 @@ import { Layer, Widget, deriveSize, effectiveFont } from '../../../widget';
 import { familyForFontFile, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
 import { rectOf, screenHeightUnits } from '../../../rects';
+import { ensureArt } from '../../../runtime-art';
 
 const warned = new Set<string>();
 
@@ -526,8 +527,15 @@ const TEXTURE: MethodTable = {
       }
       return [];
     }
-    widget.sprite = String(first);
+    const path = String(first);
+    widget.sprite = path;
     widget.solid = false;
+    // REGISTER IT. `registerTreeArt` runs ONCE after the load and covers only what a document AUTHORS,
+    // so a path a SCRIPT names later had no def, resolved to null, and painted nothing while laying
+    // out perfectly. That is why the backpack had no backdrop: `ContainerFrame_GenerateFrame` sets
+    // `UI-BackpackBackground` at runtime (`containerframe.lua:375-378`) and that path appears nowhere
+    // in the XML. See `ui/runtime-art.ts`; idempotent, and a no-op for art already in the table.
+    ensureArt(path);
     return [];
   },
   SetBlendMode: (ctx, self, args) => {

@@ -358,6 +358,49 @@ export function installCursorApi(vm: LuaVM): void {
   fn('GetCursorMoney', () => [0]);
 
   /**
+   * `PutItemInBackpack()` / `PutItemInBag(inventorySlot)` -> whether an item was PUT DOWN.
+   *
+   * **FALSE, and these two nils were the whole of "лутать можно, а сумки открыть нельзя".** Measured
+   * live, not reasoned about: `BackpackButton_OnClick` is
+   * `if ( not PutItemInBackpack() ) then ToggleBackpack() end`
+   * (`mainmenubarbagbuttons.lua:52-57`) and `BagSlotButton_OnClick` is the same shape with
+   * `PutItemInBag(id)` (`:15-23`) -- so with the first call nil BOTH handlers threw on their FIRST
+   * line and the toggle underneath was never reached. Probed:
+   *
+   *     ToggleBackpack()              ok=true   frames 0 -> 1
+   *     BackpackButton_OnClick        ok=false  ...nil value (global 'PutItemInBackpack')
+   *     BagSlotButton_OnClick(bag0)   ok=false  ...nil value (global 'PutItemInBag')
+   *
+   * The DATA was never the problem and neither was the frame: `ToggleBackpack()`, `OpenAllBags()` and
+   * the `TOGGLEBACKPACK` key binding all already opened the bag. Only the MOUSE routes were dead,
+   * which is exactly the shape of "I can loot but I cannot open a bag".
+   *
+   * FALSE is a TRUE ANSWER here, not a stub, and it is the same reasoning `CursorHasItem` above is
+   * written on: nothing in this client can put an item on the cursor, so there is never an item to put
+   * down, so these always legitimately place nothing. That is precisely the branch that lets the
+   * client's own `if ( not ... )` fall through to the toggle -- returning TRUE would swallow every
+   * click instead.
+   */
+  fn('PutItemInBackpack', () => [false]);
+  fn('PutItemInBag', () => [false]);
+
+  /**
+   * A declared gap: `PickupBagFromSlot(inventorySlot)` -- dragging an equipped BAG off the bag bar
+   * onto the cursor (`BagSlotButton_OnDrag`, `mainmenubarbagbuttons.lua:33-36`).
+   *
+   * Unlike the two above, this one's honest answer is not "nothing happened": the real call PICKS
+   * something UP, and there is no item cursor to hold it. Declaring it keeps the drag inert and names
+   * it in the load report, where a silent no-op would look like a bag that vanished.
+   */
+  const bagPickupStub = notImplemented(
+    'PickupBagFromSlot',
+    'no item cursor exists in this client, so an equipped bag has nowhere to be picked up to '
+      + '(the same gap PickupContainerItem is declared for)',
+    [],
+  );
+  fn('PickupBagFromSlot', () => bagPickupStub(null as never, 0, []));
+
+  /**
    * A declared gap: money on the cursor, which `ContainerFrame` and `MerchantFrame` both test for
    * (`containerframe.lua:697-705`). Registered by name so the load report carries it, through the same
    * adaptation `api/actions.ts:367-373` documents.
