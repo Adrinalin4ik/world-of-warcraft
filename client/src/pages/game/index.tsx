@@ -119,6 +119,14 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   /** Up from mount until the interface's first draw; null afterwards. See `componentDidMount`. */
   private loadingScreen: LoadingScreen | null = null;
 
+  /**
+   * Held so `dismissLoadingScreen` can take it off the PLAYER's emitter. The player outlives this
+   * component (it belongs to the world, which belongs to the session, and this client relogs without a
+   * page reload), so a listener left behind would accumulate one dead closure per mount -- each one
+   * pinning a disposed `GameScreen`. Same rule `action-bridge.ts` follows with `removeListener`.
+   */
+  private onMapChange: ((mapId: number) => void) | null = null;
+
   public depthPass: DepthPass;
 
   public state: IGameScreenState = {
@@ -276,16 +284,19 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       // The instrument: "no picture" has three distinct causes no screenshot separates -- the map id
       // never arrived, the DBCs named no screen for it, or the BLP never decoded.
       (window as never as Record<string, unknown>).loadingScreen = this.loadingScreen;
-      const loadArt = (mapId: number) => {
+      /**
+       * THE EVENT IS THE ONLY SOURCE, and reading `player.mapId` up front would be WRONG rather than
+       * merely redundant: it is initialised to **0** (`classes/player.ts:4`), which is a real map id
+       * (Eastern Kingdoms), so an eager read on a character who has not been placed yet fetches the
+       * wrong 700 KB screen and then replaces it. `worldport`'s own guard is `if (!this.mapId || ...)`
+       * (`classes/player.ts:24`), so a first placement -- even onto map 0 -- always emits.
+       */
+      this.onMapChange = (mapId: number) => {
         void this.loadingScreen
           ?.load(mapId)
           .catch((error) => console.warn('loading screen: art unavailable', error));
       };
-      const knownMap = this.game.world.player.mapId;
-      if (knownMap !== undefined && knownMap !== null) {
-        loadArt(knownMap);
-      }
-      this.game.world.player.on('map:change', loadArt);
+      this.game.world.player.on('map:change', this.onMapChange);
 
       this.ui = new WorldUiHost(
         renderer,
@@ -387,6 +398,10 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    */
   /** Takes the loading screen down and releases its art. Safe to call twice. */
   private dismissLoadingScreen(): void {
+    if (this.onMapChange) {
+      this.game.world.player.removeListener('map:change', this.onMapChange);
+      this.onMapChange = null;
+    }
     this.loadingScreen?.dispose();
     this.loadingScreen = null;
     delete (window as never as Record<string, unknown>).loadingScreen;
