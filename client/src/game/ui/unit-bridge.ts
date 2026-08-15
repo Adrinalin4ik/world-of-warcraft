@@ -196,8 +196,6 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
   // No repaint is needed after it lands: a snapshot is rebuilt on every field change anyway, so the
   // names appear on the next push. The character sheet is opened by a keystroke long after load, so
   // in practice the read is warm by the time anything asks.
-  void raceClassData.ensureLoaded();
-
   /** How many events this bridge has fired, for the frame-cost measurement. */
   const stats = { pushes: 0, events: 0 };
   const spells = world.game.objectHandler.spellHandler;
@@ -368,6 +366,20 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
     fireEvent(vm, 'UNIT_COMBAT', ['player', text.wordKey, '', 0, 0]);
     stats.events += 1;
   };
+
+  // `ChrRaces.dbc` and `ChrClasses.dbc`, for `UnitRace`/`UnitClass`. A few dozen rows each, and
+  // `DBC.load` caches.
+  //
+  // THE RE-PUSH IS LOAD-BEARING AND ITS ABSENCE WAS A DEFECT OF MINE, caught live: a snapshot is only
+  // rebuilt when a FIELD CHANGES, so "the names will appear on the next push" is false whenever the
+  // DBC lands after the last one -- which is the normal case, since a standing character stops
+  // emitting field updates within a few seconds of entry. Measured that way: `race` 11 and `classId`
+  // 7 were on the unit and `UnitRace`/`UnitClass` still answered nil. Same shape as
+  // `container-bridge.ts`' `void itemData.ensureLoaded().then(pushAll)`, and the same fix.
+  void raceClassData.ensureLoaded().then(() => {
+    push('player', world.player);
+    push('target', world.target);
+  });
 
   world.on('unit:fields', onFields);
   world.on('target:change', onTargetChange);
