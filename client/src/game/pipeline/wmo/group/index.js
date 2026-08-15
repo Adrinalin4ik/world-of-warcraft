@@ -95,8 +95,19 @@ class WMOGroup {
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     // geometry.computeBoundingBox();
     this.assignBatches(geometry, batches);
-    
-    geometry.computeBoundsTree();
+
+    // NO `computeBoundsTree()` HERE, AND THE REMOVAL IS A MEASUREMENT, NOT A JUDGEMENT.
+    // `window.bvhBuild` (index.tsx) counts every build AND every READ of the tree it produced. A warm
+    // offline startup built **457 trees over 793,919 triangles in 1,504-1,563 ms and READ them 0
+    // times** (4 runs, spread 59 ms). Nothing in this client queries a WMO group's BVH: the collision
+    // layer has its own providers and no BVH at all (`collision/collision-world.ts`), the pick's narrow
+    // phase raycasts M2 submesh geometries whose `computeBoundsTree` calls are commented out
+    // (`pipeline/m2/index.ts:402`, `:821`), `location-manager.js` raycasts portal views (same,
+    // `wmo/portal/view.js:32`), and the only `boundsTree` reader in the tree -- `classes/unit.ts:2203`
+    // -- reads `ColliderManager.collidableMesh`, a bare `new THREE.Mesh()` that nothing ever fills
+    // (`world/collider-manager.js`; the one `collidableMeshList.set` is commented out at
+    // `pipeline/wmo/index.js:414`).
+    // If a real consumer appears, build the tree where it is queried -- lazily, on that geometry.
 
     return geometry;
   }
