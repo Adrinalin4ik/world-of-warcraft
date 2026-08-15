@@ -2,6 +2,7 @@ import EventEmitter from 'events';
 import { CombatHandler } from './combat';
 import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
+import { ItemHandler } from './items';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
 import { SpellHandler } from './spells';
@@ -42,6 +43,18 @@ export class ObjectHandler extends EventEmitter {
    */
   public combatLogHandler: CombatLogHandler;
 
+  /**
+   * ITEM TEMPLATES AND THE INVENTORY DESCRIPTORS. PUBLIC for the reason the two above are: the world
+   * UI bridge reads it to answer `GetContainerItemInfo` and `GetItemInfo`, and it owns the only send
+   * of `CMSG_ITEM_QUERY_SINGLE`.
+   *
+   * It is fed from TWO doors -- the wire, for the query response, and `UpdateObjectHandler`, for every
+   * item/container create and value block. That second door reaches it LAZILY, through
+   * `game.objectHandler.itemHandler` at packet time rather than through a constructor reference, so
+   * the two handlers have no construction-order coupling to get wrong later.
+   */
+  public itemHandler: ItemHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -54,6 +67,7 @@ export class ObjectHandler extends EventEmitter {
     this.combatHandler = new CombatHandler(this.game);
     this.spellHandler = new SpellHandler(this.game);
     this.combatLogHandler = new CombatLogHandler(this.game);
+    this.itemHandler = new ItemHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and
