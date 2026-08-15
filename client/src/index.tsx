@@ -30,9 +30,46 @@ installAssetCache();
 // Set before anything constructs a Color, because the flag is read at construction time.
 THREE.ColorManagement.enabled = false;
 
-THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+/**
+ * `window.bvhBuild` -- what every `computeBoundsTree()` in this client costs, and whether anything
+ * ever READS the tree it produced.
+ *
+ * The instrument exists because a CPU profile can only say "`partition` and `computePrimitiveBounds`
+ * are hot" (round 28b measured 7.35 s of a 14.65 s warm startup in exactly those frames). It cannot
+ * say which call site built the tree, nor whether the tree is ever queried afterwards. `reads` is the
+ * decisive number: a BVH nothing reads is pure startup cost.
+ *
+ * `reads` counts GETS of `geometry.boundsTree`, and the accessor is installed only on geometries that
+ * actually built one -- so a raycast against a BVH-less geometry (every M2 submesh; the pick's narrow
+ * phase is all of those) correctly contributes nothing. `acceleratedRaycast` reads this property on
+ * every raycast, so any consumer at all shows up here.
+ *
+ * Kept after the fix on purpose, in the shape round 28's `ref`/`unref` absence took: with the three
+ * dead call sites removed `calls` reads 0, and a non-zero `calls` with `reads` still 0 is the
+ * regression announcing itself.
+ */
+const bvhBuild = { calls: 0, ms: 0, triangles: 0, reads: 0 };
+window['bvhBuild'] = bvhBuild;
+THREE.BufferGeometry.prototype.computeBoundsTree = function computeBoundsTreeTimed(...args) {
+  const started = performance.now();
+  const result = computeBoundsTree.apply(this, args);
+  bvhBuild.ms += performance.now() - started;
+  bvhBuild.calls += 1;
+  const index = this.getIndex();
+  const position = this.getAttribute('position');
+  bvhBuild.triangles += Math.floor((index ? index.count : (position ? position.count : 0)) / 3);
+  let tree = this.boundsTree;
+  delete this.boundsTree;
+  Object.defineProperty(this, 'boundsTree', {
+    configurable: true,
+    get() { bvhBuild.reads += 1; return tree; },
+    set(value) { tree = value; },
+  });
+  return result;
+};
 
 const container = document.getElementById('root');
 if (container) {
