@@ -21,6 +21,16 @@ describe('FrameXML text escapes', () => {
     expect(parseMarkup('1 Empty |4Slot:Slots; (Total)').plain).toBe('1 Empty Slot (Total)');
   });
 
+  it('renders an item link as its bracketed name in the quality colour', () => {
+    // The exact shape `container-bridge.ts#itemLink` builds, which is what a bag tooltip and a loot
+    // row both carry -- a colour run WRAPPING a hyperlink.
+    const link = parseMarkup('|cff9d9d9d|Hitem:7074:0:0:0:0:0:0:0:0:0:0|h[Chipped Claw]|h|r');
+    expect(link.plain).toBe('[Chipped Claw]');
+    expect(link.spans).toEqual([
+      { start: 0, end: 14, color: 'rgb(157, 157, 157)' },
+    ]);
+  });
+
   it('leaves an inline texture visible rather than deleting it', () => {
     // NOT stripped: a silently deleted escape yields a line that looks right and is missing a symbol.
     const marked = parseMarkup('cost |TInterface\\Icons\\Foo:16|t here');
