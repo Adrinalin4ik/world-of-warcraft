@@ -120,7 +120,14 @@ const cacheStorage = (): CacheStorage | null => {
   }
 };
 
-export const isAvailable = (): boolean => cacheStorage() !== null;
+/**
+ * Whether the store can actually be OPENED, which is not the same question as whether `caches`
+ * exists -- and the difference is a measured failure, not a hypothetical. Under a long profile path
+ * Chrome exposes a perfectly normal `caches` object whose every `open()` rejects with
+ * `UnknownError: ... Unexpected internal error`. A presence check answers "yes" there and the whole
+ * cache is silently inert, so this awaits a real open.
+ */
+export const isAvailable = async (): Promise<boolean> => (await open()) !== null;
 
 let openHandle: Promise<Cache | null> | null = null;
 
@@ -137,13 +144,18 @@ const open = (): Promise<Cache | null> => {
 /**
  * Look an asset up. Returns its bytes on a hit and `null` on a miss.
  *
- * Never rejects: a store that cannot be read is a miss, so a broken cache costs a download and not
- * a failed load.
+ * Never rejects: a store that cannot be read is counted as a miss, so a broken cache costs a
+ * download and not a failed load.
+ *
+ * An UNAVAILABLE store counts as a miss too, deliberately. The alternative reads far worse under
+ * the failure that actually happened: an arm that ran with the cache inert reported `misses: 0`
+ * beside 316 real downloads, which looks like "nothing was requested" rather than like a fault.
+ * `census().available` is what says WHY; these counters say what the loader did.
  */
 export const lookup = async (uri: string): Promise<ArrayBuffer | null> => {
   try {
     const cache = await open();
-    if (!cache) { return null; }
+    if (!cache) { stats.misses++; return null; }
 
     const hit = await cache.match(uri);
     if (!hit) {

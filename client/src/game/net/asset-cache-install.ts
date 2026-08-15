@@ -87,10 +87,12 @@ export const installAssetCache = (): void => {
     storage: () => requestPersistence(),
   };
 
-  requestPersistence().then((grant) => {
+  Promise.all([requestPersistence(), assetCache.isAvailable()]).then(([grant, available]) => {
     (window as any).assetCacheStorage = grant;
+    // `available` is awaited off a real `caches.open()`, not off the presence of `caches` -- see
+    // `asset-cache.ts#isAvailable` for the failure that distinction exists to catch.
     console.log(
-      `[asset-cache] available=${assetCache.isAvailable()} persisted=${grant.persisted} ` +
+      `[asset-cache] available=${available} persisted=${grant.persisted} ` +
       `quota=${formatBytes(grant.quota)} usage=${formatBytes(grant.usage)}`
     );
   });
