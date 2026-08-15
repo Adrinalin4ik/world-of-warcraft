@@ -58,20 +58,47 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
   const items: ItemHandler = world.game.objectHandler.itemHandler;
 
   /** Display index (1-based) -> the row it addresses. The ONE place the two numberings meet. */
+  /**
+   * Display index (1-based) -> the row it addresses. The ONE place the two numberings meet.
+   *
+   * **POSITIONAL AND STABLE.** The coin owns display index 1 whenever the loot EVER had money
+   * (`hadMoney`, not `gold > 0`), and item rows follow it in array order including rows already taken.
+   * Indices therefore never move while a window is open, which is exactly what
+   * `LootFrame_UpdateButton`'s `button index -> slot index` mapping assumes
+   * (`lootframe.lua:83-96`). A previous version dropped taken rows from the list, which renumbered
+   * everything below and left an unnamed, never-hidden button behind -- the owner's ghost row.
+   */
   const rowAt = (index: number): Row | null => {
     if (!Number.isFinite(index) || index < 1) {
       return null;
     }
-    const hasMoney = loot.gold > 0;
-    if (hasMoney && index === 1) {
+    if (loot.hadMoney && index === 1) {
       return { kind: 'money' };
     }
-    const itemIndex = (hasMoney ? index - 2 : index - 1);
+    const itemIndex = (loot.hadMoney ? index - 2 : index - 1);
     const row = loot.rows[itemIndex];
     return row === undefined ? null : { kind: 'item', row };
   };
 
-  const numRows = (): number => loot.rows.length + (loot.gold > 0 ? 1 : 0);
+  /**
+   * `GetNumLootItems`' answer: the number of SLOTS, taken ones included.
+   *
+   * Not the number of things still there. `LootFrame_UpdateButton` hides a button whose
+   * `slot > numLootItems` (`lootframe.lua:94`), so shrinking this as items are taken would put a
+   * surviving row's slot outside the count and hide the wrong button -- while an emptied slot is
+   * already hidden by the `LootSlotIsItem`/`LootSlotIsCoin` test one line below it. The count is the
+   * list's length; emptiness is per slot.
+   */
+  const numRows = (): number => loot.rows.length + (loot.hadMoney ? 1 : 0);
+
+  /** Nothing left to take -- every item row taken and the coin gone. */
+  const isEmpty = (): boolean => loot.gold === 0 && loot.rows.every((row) => row.taken);
+
+  /** The 1-based DISPLAY index of an item row, by its wire slot. 0 when it is not in the list. */
+  const displayIndexOfWireSlot = (wireSlot: number): number => {
+    const at = loot.rows.findIndex((row) => row.slot === wireSlot);
+    return at < 0 ? 0 : at + 1 + (loot.hadMoney ? 1 : 0);
+  };
 
   /**
    * An item row's icon, WITHOUT a query round trip.
@@ -88,8 +115,22 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
 
   vm.registerFunction('GetNumLootItems', () => [numRows()]);
 
-  vm.registerFunction('LootSlotIsItem', (args) => [rowAt(Number(args[0]))?.kind === 'item']);
-  vm.registerFunction('LootSlotIsCoin', (args) => [rowAt(Number(args[0]))?.kind === 'money']);
+  /**
+   * A TAKEN row is neither an item nor a coin, and that is what hides its button.
+   *
+   * `LootFrame_UpdateButton`'s show/hide decision is exactly
+   * `if ( (LootSlotIsItem(slot) or LootSlotIsCoin(slot)) and index <= numLootToShow )` else
+   * `button:Hide()` (`lootframe.lua:95-124`). So answering false for an emptied slot IS the hide --
+   * no engine-side hiding is involved and none should be.
+   */
+  vm.registerFunction('LootSlotIsItem', (args) => {
+    const row = rowAt(Number(args[0]));
+    return [row !== null && row.kind === 'item' && !row.row.taken];
+  });
+  vm.registerFunction('LootSlotIsCoin', (args) => {
+    const row = rowAt(Number(args[0]));
+    return [row !== null && row.kind === 'money' && loot.gold > 0];
+  });
 
   /**
    * `GetLootSlotInfo(slot)` -> `texture, item, quantity, quality, locked`.
@@ -107,7 +148,10 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
    */
   vm.registerFunction('GetLootSlotInfo', (args) => {
     const row = rowAt(Number(args[0]));
-    if (row === null) {
+    if (row === null || (row.kind === 'item' && row.row.taken)
+      || (row.kind === 'money' && loot.gold === 0)) {
+      // An emptied slot answers NOTHING, which is what makes the client's own `if ( texture )`-style
+      // branches treat it as absent rather than as a row with blank fields.
       return [];
     }
     if (row.kind === 'money') {
@@ -131,7 +175,7 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
 
   vm.registerFunction('GetLootSlotLink', (args) => {
     const row = rowAt(Number(args[0]));
-    if (row === null || row.kind !== 'item') {
+    if (row === null || row.kind !== 'item' || row.row.taken) {
       return [null];
     }
     const template = items.template(row.row.itemId);
@@ -155,7 +199,11 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
    */
   vm.registerFunction('LootSlot', (args) => {
     const row = rowAt(Number(args[0]));
-    if (row === null) {
+    if (row === null || (row.kind === 'item' && row.row.taken)
+      || (row.kind === 'money' && loot.gold === 0)) {
+      // An emptied slot is inert. The button over it is hidden, so this is only reachable from a
+      // script, but answering it would send a second CMSG_AUTOSTORE_LOOT_ITEM for an item already in
+      // the bag.
       return [];
     }
     if (row.kind === 'money') {
@@ -214,32 +262,51 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
   };
 
   /**
-   * A row went away. `LOOT_SLOT_CLEARED` carries the DISPLAY index, not the wire slot.
+   * A row went away -- **`LOOT_SLOT_CLEARED`, with the DISPLAY index, which is what actually hides the
+   * button.**
    *
-   * `LootFrame_OnEvent`'s handler subtracts the page offset from it and hides `LootButton<n>`
-   * (`lootframe.lua:23-52`), so a wire slot passed here would hide the wrong button -- or none, once
-   * a coin row has shifted everything by one. The display index is computed BEFORE the row is dropped,
-   * which is why the handler emits the wire slot and this closure resolves it against the list as it
-   * was: `LootHandler` fires `lootRemoved` after filtering, so the index is recomputed from what
-   * remains plus one. See the caveat below.
+   * THIS IS THE OWNER'S GHOST-ROW BUG AND THE COMMENT THAT USED TO BE HERE WAS WRONG. The previous
+   * version raised `LOOT_SLOT_CHANGED` for indices 1..newCount and claimed that let "the client's own
+   * updater rebuild". It does not: `LOOT_SLOT_CHANGED` runs `LootFrame_UpdateButton(slot)` for the ONE
+   * index named (`lootframe.lua:53-69`), never `LootFrame_Update()`. With two items and one taken, the
+   * new count was 1, only button 1 was ever named, and **nothing called `Hide()` on button 2** -- so it
+   * kept drawing the row it had. The button was genuinely still shown; this was never a widget-layer
+   * or draw-list problem, and `Hide()` works fine.
+   *
+   * `LOOT_SLOT_CLEARED` is the client's own answer and it hides exactly that button
+   * (`lootframe.lua:23-41`). It takes the DISPLAY index -- its handler subtracts the page offset from
+   * the argument and indexes `LootButton<n>` with the result -- so the wire slot must be converted
+   * first. With rows no longer compacted, that conversion is now stable for the life of the window.
+   *
+   * The reference's note that Blizzard's per-button `LOOT_SLOT_CLEARED` is "deliberately not emitted --
+   * replaced by a full re-snapshot" (`benilla/src/ui_loot.rs:586-624`) describes benilla's OWN authored
+   * UI, which does not run `LootFrame.lua` at all. This client does, so the client's event is the one
+   * to raise. Citing it for the opposite conclusion was the mistake.
    */
-  const onRemoved = (): void => {
-    // A FULL RE-READ rather than a per-button clear. `LOOT_SLOT_CLEARED` needs the display index the
-    // row HAD, and by the time this runs the row is already gone -- reconstructing it would mean
-    // keeping a shadow copy of the list purely to name an index. `LootFrame_Update` re-reads every
-    // button from `GetLootSlotInfo`, so raising `LOOT_SLOT_CHANGED` for each surviving row and letting
-    // the client's own updater rebuild is both simpler and self-correcting. The reference makes the
-    // same choice and says so (`benilla/src/ui_loot.rs:586-624`: Blizzard's per-button
-    // `LOOT_SLOT_CLEARED` is "deliberately not emitted -- replaced by a full re-snapshot").
-    const rows = numRows();
-    if (rows === 0) {
-      // The last row went. The real client closes the window itself -- the server never initiates a
-      // creature-loot release (`ui_loot.rs:143-147`) -- so the release is ours to send.
-      loot.release();
-      return;
+  const onRemoved = (wireSlot: number): void => {
+    const index = displayIndexOfWireSlot(wireSlot);
+    if (index > 0) {
+      fireEvent(vm, 'LOOT_SLOT_CLEARED', [index]);
     }
-    for (let index = 1; index <= rows; ++index) {
-      fireEvent(vm, 'LOOT_SLOT_CHANGED', [index]);
+    closeIfEmpty();
+  };
+
+  /** The coin row emptying. Same event, and its display index is always 1. */
+  const onMoneyCleared = (): void => {
+    fireEvent(vm, 'LOOT_SLOT_CLEARED', [1]);
+    closeIfEmpty();
+  };
+
+  /**
+   * Nothing left to take -> release.
+   *
+   * The server never initiates a creature-loot release (`benilla/src/ui_loot.rs:143-147`), so the
+   * release is ours to send. Gated on `isEmpty()` rather than on the list being short, because the list
+   * no longer shrinks -- a taken row stays in it.
+   */
+  const closeIfEmpty = (): void => {
+    if (isEmpty()) {
+      loot.release();
     }
   };
 
@@ -250,6 +317,8 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
     if (loot.source === null) {
       return;
     }
+    // Every slot, taken ones included: `LootFrame_UpdateButton` is what decides shown-versus-hidden
+    // per index, so naming an index is always safe and never naming one is what leaves a stale button.
     for (let index = 1; index <= numRows(); ++index) {
       fireEvent(vm, 'LOOT_SLOT_CHANGED', [index]);
     }
@@ -257,6 +326,7 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
 
   loot.on('lootOpened', onOpened);
   loot.on('lootRemoved', onRemoved);
+  loot.on('lootMoneyCleared', onMoneyCleared);
   loot.on('lootClosed', onClosed);
   items.on('templatesChanged', onTemplates);
 
@@ -311,14 +381,17 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
     source: loot.source,
     gold: loot.gold,
     lootType: loot.lootType,
+    hadMoney: loot.hadMoney,
     rows: loot.rows,
     displayRows: numRows(),
+    empty: isEmpty(),
   });
 
   return () => {
     setItemTooltipSource(vm, previous);
     loot.removeListener('lootOpened', onOpened);
     loot.removeListener('lootRemoved', onRemoved);
+    loot.removeListener('lootMoneyCleared', onMoneyCleared);
     loot.removeListener('lootClosed', onClosed);
     items.removeListener('templatesChanged', onTemplates);
     delete (window as unknown as Record<string, unknown>).lootBridge;

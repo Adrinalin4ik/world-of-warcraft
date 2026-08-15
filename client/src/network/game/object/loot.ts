@@ -59,6 +59,11 @@ export interface LootRow {
    * (`benilla-protocol/src/messages/loot.rs:37-48`). Only 0 and 3 occur solo.
    */
   slotType: number;
+  /**
+   * Taken. **The row STAYS IN THE LIST, at its position** -- see `handleRemoved` for why removing it
+   * is what produced the owner's ghost row.
+   */
+  taken: boolean;
 }
 
 /** `loot_type` (`loot.rs:58-63`). 3 is what `IsFishingLoot` answers to. */
@@ -72,6 +77,16 @@ export class LootHandler extends EventEmitter {
 
   /** Copper in the pile. 0 once taken. */
   public gold = 0;
+
+  /**
+   * Whether this loot EVER had a coin row.
+   *
+   * The coin occupies display index 1 and every item row sits after it, so once the money is taken its
+   * POSITION must survive or every item below it shifts up by one -- which is exactly the class of bug
+   * `handleRemoved` documents. `gold` says whether the coin is still there; this says whether the slot
+   * exists at all.
+   */
+  public hadMoney = false;
 
   /** The item rows still available, in wire order. */
   public rows: LootRow[] = [];
@@ -159,11 +174,14 @@ export class LootHandler extends EventEmitter {
       gp.readUnsignedInt();
       const randomPropertyId = gp.readUnsignedInt() >>> 0;
       const slotType = gp.readUnsignedByte();
-      rows.push({ slot, itemId, count: rowCount, displayInfoId, randomPropertyId, slotType });
+      rows.push({
+        slot, itemId, count: rowCount, displayInfoId, randomPropertyId, slotType, taken: false,
+      });
     }
     this.source = guid;
     this.lootType = lootType;
     this.gold = gold;
+    this.hadMoney = gold > 0;
     this.rows = rows;
     this.emit('lootOpened');
   }
@@ -184,16 +202,33 @@ export class LootHandler extends EventEmitter {
   /**
    * `SMSG_LOOT_REMOVED` (**0x162**): a single `u8`, the WIRE slot. **No guid** (`loot.rs:393-395`).
    *
-   * The row is filtered out and the surviving rows KEEP their wire slots -- see the header on why
-   * renumbering would lose a player his drop.
+   * **THE ROW IS MARKED `taken`, NOT REMOVED, AND THAT IS THE OWNER'S GHOST-ROW BUG.**
+   *
+   * This used to `filter` the row out of the list. Filtering renumbers every row after it, so with two
+   * items the second one moved from display index 2 to index 1 -- the "shift" the owner saw -- and the
+   * button at index 2 was then outside the new count and was never named by any event, so nothing ever
+   * called `Hide()` on it. The result on screen was the same item drawn twice, the upper copy inert.
+   *
+   * **The client's own Lua says loot slots are STABLE and are not compacted.**
+   * `LootFrame_UpdateButton` maps button `index` straight to slot `index` on page 1 and hides it when
+   * the slot is neither an item nor a coin (`lootframe.lua:83-96`); the `LOOT_SLOT_CLEARED` handler
+   * hides exactly the button at the cleared index and does no recompaction at all
+   * (`lootframe.lua:23-52`). So the real client leaves a GAP where a taken item was. Keeping the row in
+   * place is what lets `GetNumLootItems` keep answering the slot COUNT -- which
+   * `LootFrame_UpdateButton` compares against -- so a surviving row below the gap still maps to its own
+   * button.
+   *
+   * The wire slot was already never renumbered (see the header); now the DISPLAY index is not either,
+   * and the two finally agree.
    */
   private handleRemoved(gp: GamePacket): void {
     const slot = gp.readUnsignedByte();
-    const before = this.rows.length;
-    this.rows = this.rows.filter((row) => row.slot !== slot);
-    if (this.rows.length !== before) {
-      this.emit('lootRemoved', slot);
+    const row = this.rows.find((entry) => entry.slot === slot && !entry.taken);
+    if (row === undefined) {
+      return;
     }
+    row.taken = true;
+    this.emit('lootRemoved', slot);
   }
 
   /**
@@ -227,7 +262,9 @@ export class LootHandler extends EventEmitter {
   private handleClearMoney(): void {
     if (this.gold !== 0) {
       this.gold = 0;
-      this.emit('lootRemoved', -1);
+      // `hadMoney` deliberately STAYS true: the coin's display slot must keep existing or every item
+      // row below it shifts up by one, which is the same defect `handleRemoved` documents.
+      this.emit('lootMoneyCleared');
     }
   }
 
@@ -275,6 +312,7 @@ export class LootHandler extends EventEmitter {
     }
     this.source = null;
     this.gold = 0;
+    this.hadMoney = false;
     this.rows = [];
     this.emit('lootClosed');
   }
