@@ -3,6 +3,7 @@ import { CombatHandler } from './combat';
 import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
 import { ItemHandler } from './items';
+import { LootHandler } from './loot';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
 import { SpellHandler } from './spells';
@@ -55,6 +56,13 @@ export class ObjectHandler extends EventEmitter {
    */
   public itemHandler: ItemHandler;
 
+  /**
+   * LOOTING. PUBLIC for the same reason the others are: the world UI bridge reads the open loot to
+   * answer `GetLootSlotInfo`, and this handler owns the only sends of `CMSG_LOOT`,
+   * `CMSG_AUTOSTORE_LOOT_ITEM`, `CMSG_LOOT_MONEY` and `CMSG_LOOT_RELEASE`.
+   */
+  public lootHandler: LootHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -68,6 +76,7 @@ export class ObjectHandler extends EventEmitter {
     this.spellHandler = new SpellHandler(this.game);
     this.combatLogHandler = new CombatLogHandler(this.game);
     this.itemHandler = new ItemHandler(this.game);
+    this.lootHandler = new LootHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

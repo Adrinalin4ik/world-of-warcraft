@@ -22,7 +22,18 @@ import { collisionWorld } from '../../game/collision/collision-world';
 import { CollisionLayer } from '../../game/collision/types';
 import { wantsDebugPanels } from '../debug-flags';
 import { REACTION_NEUTRAL, primeFactionTemplates, reactionFor } from '../../game/world/faction';
+
 import './index.scss';
+
+/**
+ * `UNIT_DYNFLAG_LOOTABLE` -- bit 0x1 of `UNIT_DYNAMIC_FLAGS`, set on a corpse this player may loot.
+ *
+ * A SERVER-side definition, like the `HitInfo` bits and the NPC service flags: nothing in the game's
+ * own data names it. The reference cites `SharedDefines.h:1153` for the same value
+ * (`benilla-protocol/src/bin/benilla-world/probes/loot.rs:72-73`), which is corroboration from a second
+ * server implementation rather than an independent source.
+ */
+const UNIT_DYNFLAG_LOOTABLE = 0x1;
 
 interface IGameProps {
   session: GameSession;
@@ -624,8 +635,24 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       return;
     }
     world.setTarget(hit);
+    // A DEAD UNIT'S CONTEXT ACTION IS **LOOT**, not attack, and this is the leg that opens the window.
+    //
+    // The gate is `UNIT_DYNFLAG_LOOTABLE`, bit **0x1** of `UNIT_DYNAMIC_FLAGS` -- the flag the server
+    // sets on a corpse this player is allowed to loot and clears when it is empty. It is already
+    // decoded (`unit-fields.ts` keeps `dynamicFlags`), so this needs no new field. Asking the flag
+    // rather than merely `hit.dead` is what stops a right click on someone else's kill, or on a corpse
+    // already looted, sending a `CMSG_LOOT` the server will only answer with an error.
+    //
+    // (The bit's value is a SERVER-side definition -- `benilla-protocol/.../probes/loot.rs:72-73`
+    // cites `SharedDefines.h` for it -- and is labelled as such, like the `HitInfo` bits.)
+    if (hit.dead) {
+      if (((hit.fields.dynamicFlags ?? 0) & UNIT_DYNFLAG_LOOTABLE) !== 0) {
+        this.game.objectHandler.lootHandler.loot(hit.guid);
+      }
+      return;
+    }
     const reaction = reactionFor(hit, world.player);
-    if (reaction !== null && reaction <= REACTION_NEUTRAL && !hit.dead) {
+    if (reaction !== null && reaction <= REACTION_NEUTRAL) {
       this.game.objectHandler.combatHandler.startAttack(hit.guid);
     }
   };
