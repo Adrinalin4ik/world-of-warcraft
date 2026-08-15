@@ -64,7 +64,57 @@ onFrameTeardown((ctx, id) => {
   frameAttributes.delete(id);
 });
 
+/**
+ * THE TREE WALK -- `GetChildren` / `GetNumChildren` / `GetRegions` / `GetNumRegions`.
+ *
+ * **NONE OF THESE EXISTED ON ANY CLASS**, which self-review caught while checking a claim this round
+ * had just written down. The last round reported that `WorldFrame:GetChildren()` raises "because there
+ * is no `WorldFrame` type"; that was HALF the cause. Adding the type made the global real and the call
+ * still answered nothing, because `GetChildren` was absent everywhere. Both halves are closed here.
+ *
+ * They matter beyond one frame: walking `WorldFrame:GetChildren()` every tick is how every nameplate
+ * addon of this era finds plates, and `GetRegions()` is how it then finds the health bar and the name.
+ * The four are pure reads of the tree the widget layer already holds -- no state of their own, nothing
+ * cached, nothing to keep in step.
+ *
+ * **CHILDREN AND REGIONS ARE THE SAME LIST, SPLIT BY KIND**, which is the client's own division: a
+ * `<Texture>` or `<FontString>` is a REGION and everything else is a child FRAME. `Widget.kind` carries
+ * exactly that, so the split is read off the widget rather than tracked separately -- one list cannot
+ * drift from the other if there is only one list.
+ *
+ * Returned as a VARARG, not a table: the real API is `local a, b, c = f:GetChildren()` and
+ * `select("#", f:GetChildren())`, and `frame_alpha.lua`-style callers index the varargs directly. A
+ * table would break every one of them.
+ */
+const isRegionKind = (kind: string): boolean => kind === 'texture' || kind === 'fontstring';
+
 const FRAME: MethodTable = {
+  GetChildren: (ctx, self) => ctx.registry
+    .childrenOf(self)
+    .filter((id) => {
+      const widget = ctx.registry.widget(id);
+      return widget !== null && widget !== undefined && !isRegionKind(widget.kind);
+    })
+    .map((id) => ctx.wrapper(id)),
+
+  GetNumChildren: (ctx, self) => [ctx.registry.childrenOf(self).filter((id) => {
+    const widget = ctx.registry.widget(id);
+    return widget !== null && widget !== undefined && !isRegionKind(widget.kind);
+  }).length],
+
+  GetRegions: (ctx, self) => ctx.registry
+    .childrenOf(self)
+    .filter((id) => {
+      const widget = ctx.registry.widget(id);
+      return widget !== null && widget !== undefined && isRegionKind(widget.kind);
+    })
+    .map((id) => ctx.wrapper(id)),
+
+  GetNumRegions: (ctx, self) => [ctx.registry.childrenOf(self).filter((id) => {
+    const widget = ctx.registry.widget(id);
+    return widget !== null && widget !== undefined && isRegionKind(widget.kind);
+  }).length],
+
   GetID: (_ctx, self) => [frameIds.get(self) ?? 0],
   SetID: (_ctx, self, args) => {
     frameIds.set(self, Number(args[0] ?? 0));

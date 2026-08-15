@@ -65,6 +65,7 @@ import {
 // forgotten import would show up as a document that materializes and then does nothing at all.
 // Registering after a VM is installed is safe (`registerMethods` flushes the dispatch cache).
 import './lua/methods/cooldown';
+import './lua/methods/worldframe';
 import './lua/methods/frame';
 import './lua/methods/gametooltip';
 import './lua/methods/kinds';

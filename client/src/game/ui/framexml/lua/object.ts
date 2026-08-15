@@ -55,6 +55,7 @@ export type WidgetClass =
   | 'SIMPLEHTML'
   | 'COOLDOWN'
   | 'GAMETOOLTIP'
+  | 'WORLDFRAME'
   | 'BACKDROP';
 
 const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
@@ -87,6 +88,24 @@ const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
   // all, and `ActionButton_ShowGrid` -- the path that makes an EMPTY action slot droppable -- died on
   // `actionbutton.lua:265`'s `if ( GameTooltip:GetOwner() == self )`. See `methods/gametooltip.ts`.
   GAMETOOLTIP: 'FRAME',
+  // A real client type, and the ROOT ELEMENT of `Interface\FrameXML\WorldFrame.xml` --
+  // `<WorldFrame name="WorldFrame" movable="true" resizable="true" setAllPoints="true">`, entry 12 of
+  // `FrameXML.toc`. Missing, `parseClass` answered null, `CreateFrame` threw "unknown frame type", and
+  // rule 5 dropped the element AND ITS WHOLE SUBTREE: no `WorldFrame` global at all, and with it no
+  // `FramerateLabel`, `FramerateText`, `ActionStatus` or `ActionStatusText`, and no binding for
+  // `WorldFrame_OnLoad`/`_OnUpdate`/`ActionStatus_OnLoad`/`_OnEvent`/`_OnUpdate`. The same defect
+  // family as COOLDOWN and GAMETOOLTIP above, and found for the same reason: something asked for the
+  // global and got nil.
+  //
+  // **THIS IS WHAT MADE `WorldFrame:GetChildren()` RAISE**, which is how every nameplate addon finds
+  // plates. See `methods/worldframe.ts` for the one method the type adds and for what a
+  // Lua-reachable plate still needs beyond this.
+  //
+  // A CORRECTION WHILE HERE: `world/nameplates.ts`' header said "`worldframe.xml` declares one frame
+  // with no regions". It declares TWO `<FontString>` regions (`FramerateLabel`, `FramerateText`) and a
+  // child `<Frame>` (`ActionStatus`), all authored hidden. The claim it was supporting -- that a
+  // nameplate is engine-created and appears in no manifest file -- is unaffected and still holds.
+  WORLDFRAME: 'FRAME',
   // OURS, not the client's: `backdrop` is a Widget kind this project invented for a nine-slice
   // frame. It behaves as a Frame and has no methods of its own today.
   BACKDROP: 'FRAME',
@@ -123,6 +142,11 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   // `frame` and not `backdrop`: the loader turns an element carrying a `<Backdrop>` into the nine-slice
   // kind itself (`loader.ts#applyBackdrop`), the same way it does for any `<Frame>` with one.
   GAMETOOLTIP: 'frame',
+  // `frame`: a WorldFrame draws no interface art of its own -- the world is rendered BEHIND it, which
+  // is what its own XML comment says ("The world is rendered in the background of the frame"). Here
+  // the world is a separate three.js scene entirely, so this frame is a rect and a parent and nothing
+  // more, which is exactly what an addon walking `GetChildren()` needs it to be.
+  WORLDFRAME: 'frame',
 };
 
 /**
@@ -160,6 +184,11 @@ const CREATE_FRAME_CLASSES: WidgetClass[] = [
   // now parses -- which is the whole defect this class was added for. `CreateFrame("GameTooltip", ...)` is
   // legal in the real client too and addons do it.
   'GAMETOOLTIP',
+  // Legal in the real client only in the sense that the type exists; nothing creates a second one (its
+  // own XML: "There can be only one of these frames!!"). Listed for the reason GAMETOOLTIP is: the
+  // loader funnels every XML element through `CreateFrame`, so without this entry the manifest's own
+  // `<WorldFrame>` still throws even though the class now parses.
+  'WORLDFRAME',
   'BACKDROP',
 ];
 
@@ -545,6 +574,30 @@ export class FrameRegistry {
       return null;
     }
     return this.widgetIds.get(parent) ?? null;
+  }
+
+  /**
+   * The ids of a frame's children, in declaration order -- the tree read `GetChildren`,
+   * `GetNumChildren`, `GetRegions` and `GetNumRegions` are built on.
+   *
+   * A child that is not registered is skipped rather than reported as a hole: `widget.children` holds
+   * every child the widget layer knows about, and the registry holds those the object model gave a Lua
+   * identity to. Those sets are the same today, and a caller counting handles must not be handed a gap
+   * if they ever stop being.
+   */
+  childrenOf(id: number): number[] {
+    const widget = this.entries.get(id)?.widget;
+    if (widget === undefined) {
+      return [];
+    }
+    const out: number[] = [];
+    for (const child of widget.children) {
+      const childId = this.widgetIds.get(child);
+      if (childId !== undefined) {
+        out.push(childId);
+      }
+    }
+    return out;
   }
 
   /** Internal, for `installObjectModel`: the cached Lua table for a frame. */
