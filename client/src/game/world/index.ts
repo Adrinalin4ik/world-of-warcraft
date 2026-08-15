@@ -515,7 +515,38 @@ export default class World extends EventEmitter {
     const existing = this.entities.get(entity.guid);
     if (existing && existing !== entity) {
       console.warn(`world: guid ${entity.guid} already had a unit; removing the earlier one`);
+      // CARRY THE DECODED FIELDS ACROSS BEFORE DROPPING IT, or the eviction throws away the only copy
+      // of our own character's descriptor block.
+      //
+      // MEASURED: `world.player` had `fields` = {} (level, health, maxHealth, race, classId, gender
+      // and powerType all undefined) after 30 s in a 42-entity world, while a peer `Unit` in the same
+      // registry carried the complete set. So the decode was fine and the DESTINATION was wrong --
+      // `UnitLevel("player")` read 0, the player frame drew empty bars, and `UnitRace`/`UnitClass`
+      // answered nil because the ids never reached the object the bridge snapshots.
+      //
+      // The race is the one the comment above already describes: `applyUpdates` files a plain `Unit`
+      // for our own guid when the server's create block beats `run()`, `applyUnitFields` decodes into
+      // it, and then `run()` calls `add(this.player)` -- which evicted that unit and put an EMPTY
+      // `Player` in its place. Nothing announced it because the eviction was the intended behaviour;
+      // only the data loss was not.
+      //
+      // Existing values do NOT overwrite anything the incoming entity already knows: the incoming one
+      // is the more recent object, and a field it has set is a field something has already told it
+      // about. `objectType` comes across too -- a values-only update decodes its mask against it, so
+      // a `Player` that reverted to the default 3 would read every later field at the wrong offset.
+      for (const [key, value] of Object.entries(existing.fields)) {
+        if (value !== undefined
+          && (entity.fields as Record<string, unknown>)[key] === undefined) {
+          (entity.fields as Record<string, unknown>)[key] = value;
+        }
+      }
+      if (existing.objectType !== undefined) {
+        entity.objectType = existing.objectType;
+      }
       this.remove(existing);
+      // The bridges snapshot on this, so the frames that were drawn against an empty bag repaint.
+      // Fired AFTER `remove`, so a listener walking the registry cannot see both copies.
+      this.emit('unit:fields', entity);
     }
     this.entities.set(entity.guid, entity);
     if (entity.view) {
