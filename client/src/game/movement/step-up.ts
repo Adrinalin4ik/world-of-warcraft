@@ -18,7 +18,8 @@ export type StepUpVerdict =
   | 'no-headroom'
   | 'no-floor'
   | 'steep-floor'
-  | 'net-zero';
+  | 'net-zero'
+  | 'no-descent';
 
 export interface StepUpResult {
   /** The resolved capsule centre, non-null only on `'commit'`. */
@@ -98,6 +99,40 @@ export function stepUp(
   }
   if (downHit.normal.z < GROUND_COS) {
     return miss('steep-floor');
+  }
+
+  // A SETTLE THAT DID NOT DESCEND IS NOT A LANDING.
+  //
+  // `distance === 0` does not mean "the floor is exactly here". `castCapsuleAgainstTriangles`
+  // reports zero for any face already within `CAPSULE_CAST_EPS` that the probe is driving into
+  // (`capsule-cast.ts#planeTimeOfImpact`, the `gap <= CAPSULE_CAST_EPS` branch) -- so it means the
+  // RAISED, ADVANCED capsule is already in contact at that height, i.e. rise+advance has put it
+  // somewhere no sweep ever showed to be free. And because the reported normal is oriented toward
+  // the capsule it points UP, sailing through the `GROUND_COS` test above as a perfect floor.
+  //
+  // Committing then hands the body `over` itself: `climb` comes out equal to the full `rise`, which
+  // clears the `net-zero` bar below, and the mover teleports the capsule `rise` yards up INTO the
+  // collider. THIS IS THE COLLISION STALL. Measured in the offline world walking into
+  // `ELWYNNWOODFENCE01`'s hull: two consecutive frames with `climb = 0.7000000000000028` --
+  // bit-for-bit `STEP_UP_HEIGHT`, which forces `downHit.distance === 0` -- lifting the body 1.4 yd
+  // and taking its deepest gap against the plank from 0.000 to -0.134. Inside a thin plank both of
+  // its opposed faces touch, so every horizontal direction is blocked (measured: 0 of 36 bearings
+  // free) and the walk dead-stops for as long as the key is held.
+  //
+  // THIS GUARD IS OURS AND HAS NO SOURCE. The reference's `step_up`
+  // (`samples/benilla/crates/benilla/src/player/mover.rs:602-643`) is structurally identical -- same
+  // rise/advance/settle, same `up_t < 1e-3`, same `down.normal1.y < GROUND_COS`, same `dy <= 0.05`
+  // -- and has NO zero-distance guard. It does not need one: it runs on Avian's shape cast, which
+  // does not report a landing this way. **The reference's step-up assumes a shape cast cannot return
+  // a zero-distance landing; ours can, deliberately, so that a body resting on the floor is still
+  // detected.** That seam is the defect, not a drift in the port.
+  //
+  // The cost of the guard is that a step EXACTLY `STEP_UP_HEIGHT` tall, whose settle legitimately
+  // lands at distance zero, now slides instead of climbing. That is the conservative failure, it is
+  // bounded by a ceiling that is OURS and TUNABLE rather than a game value (`constants.ts`), and
+  // sliding along a 0.7 yd step is a great deal better than being deposited inside a fence.
+  if (downHit.distance <= 0) {
+    return miss('no-descent');
   }
 
   const landed = over.clone().addScaledVector(_down, downHit.distance);

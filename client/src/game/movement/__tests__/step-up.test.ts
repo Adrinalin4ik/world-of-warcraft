@@ -93,6 +93,25 @@ describe('stepUp', () => {
     expect(out.landed!.x).toBeCloseTo(0.12, 5);
   });
 
+  // THE COLLISION STALL. A zero-distance settle is not a landing -- it is the swept cast saying the
+  // RAISED capsule is already in contact (`capsule-cast.ts#planeTimeOfImpact`'s
+  // `gap <= CAPSULE_CAST_EPS` branch), with the normal oriented toward the capsule and therefore
+  // pointing up, so it passes the walkable test. Committing gave `climb === rise` and teleported the
+  // body a full `STEP_UP_HEIGHT` into a fence plank -- measured live at 0.7000000000000028 twice in
+  // consecutive frames.
+  it('refuses a settle that never descended, instead of committing into the collider', () => {
+    const out = stepUp(scriptedCast({
+      ahead: hit(0.05, steepFace()),
+      up: null,                 // full STEP_UP_HEIGHT of headroom
+      forward: null,            // the full travel is clear at the raised height
+      down: hit(0, UP),         // "floor" at distance zero: already touching at the raised height
+    }), v3(0, 0, 0), FWD, 0.12);
+
+    expect(out.verdict).toBe('no-descent');
+    expect(out.landed).toBeNull();
+    expect(out.climb).toBe(0);
+  });
+
   it('slides instead when there is no headroom above', () => {
     const out = stepUp(scriptedCast({
       ahead: hit(0.05, steepFace()),
@@ -145,14 +164,23 @@ describe('stepUp', () => {
     expect(out.verdict).toBe('net-zero');
   });
 
+  // THIS TEST USED TO ASSERT THE DEFECT. It scripted `down: hit(0, UP)` -- "floor exactly at the
+  // raised height" -- and expected a COMMIT with `climb === STEP_UP_HEIGHT`. That is bit-for-bit the
+  // signature measured live when the mover teleported the body into `ELWYNNWOODFENCE01`'s hull: a
+  // zero-distance settle is the swept cast reporting that the raised capsule is ALREADY IN CONTACT,
+  // not that a floor happens to sit exactly there, and `stepUp` now refuses it (`no-descent`).
+  //
+  // The intent -- the rise is capped at STEP_UP_HEIGHT however much headroom there is -- is kept, and
+  // is now expressed with a settle that actually descends. A floor 0.01 below the raised height gives
+  // climb 0.69, which is only reachable if the rise was 0.70 and not more.
   it('never rises further than STEP_UP_HEIGHT, even with unlimited headroom', () => {
     const out = stepUp(scriptedCast({
       ahead: hit(0.05, steepFace()), up: null, forward: null,
-      down: hit(0, UP), // floor exactly at the raised height
+      down: hit(0.01, UP), // floor a hair below the raised height, so the settle really descends
     }), v3(0, 0, 0), FWD, 0.12);
 
     expect(out.verdict).toBe('commit');
-    expect(out.climb).toBeCloseTo(STEP_UP_HEIGHT, 5);
+    expect(out.climb).toBeCloseTo(STEP_UP_HEIGHT - 0.01, 5);
   });
 
   it('advances this frame travel, not a probe-length lunge', () => {
