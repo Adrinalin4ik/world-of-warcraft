@@ -105,6 +105,32 @@ const OBJECT_TYPE_PLAYER = 4;
 const OVERHEAD_FALLBACK_FACTOR = 1.25;
 
 /**
+ * HOW FAR ABOVE A UNIT'S FEET ITS OVERHEAD ANCHOR SITS, in world units.
+ *
+ * `collisionHeight` FIRST and the vertex box only as a backstop, which is a DEPARTURE from the
+ * reference's `bbox_z` and is measured, not preferred: the M2 header's vertex box bounds EVERY pose the
+ * model has, so for a wolf it is the rearing/leaping extent rather than the standing head, and the first
+ * capture of the plate gate put the plate about **1.2 yd above the animal's head**. `collisionHeight` is
+ * `CreatureModelData.collisionHeight x displayScale` (`unit.ts:511-514`) -- the unit's own STANDING
+ * height, the value movement resolves the ground against. The reference does not face this choice
+ * because it reads the posed `PlayerName` attachment, which is the real answer and is not ported (see
+ * this file's header).
+ *
+ * EXPORTED because the floating combat text spawns from the same anchor (`world/floating-text.ts`), and
+ * a second hand-written copy of this choice is how the two would drift apart.
+ */
+export function overheadAnchor(unit: Unit): number {
+  const model = unit.model as unknown as {
+    scale?: THREE.Vector3; data?: { maxVertexBox?: { z: number } };
+  } | null;
+  const boxZ = model?.data?.maxVertexBox?.z ?? 0;
+  const modelScale = model?.scale?.x ?? 1;
+  return unit.collisionHeight > 0
+    ? unit.collisionHeight * OVERHEAD_FALLBACK_FACTOR
+    : boxZ * modelScale * OVERHEAD_FALLBACK_FACTOR;
+}
+
+/**
  * THE PLATE'S GEOMETRY, **DECODED OUT OF THE AUTHORED ART** rather than eyeballed from a screenshot.
  *
  * The first version of this file drew a flat rectangle and invented every dimension. The owner's answer
@@ -446,20 +472,9 @@ export class Nameplates {
     const plate = this.plateFor(unit.guid);
     plate.seen = true;
 
-    // THE ANCHOR. `collisionHeight` FIRST and the vertex box only as a backstop, which is a DEPARTURE from the
-    // reference's `bbox_z` and is measured, not preferred: the M2 header's vertex box bounds EVERY pose
-    // the model has, so for a wolf it is the rearing/leaping extent rather than the standing head, and
-    // the first capture of this gate put the plate about **1.2 yd above the animal's head**.
-    // `collisionHeight` is `CreatureModelData.collisionHeight x displayScale` (`unit.ts:511-514`) -- the
-    // unit's own STANDING height, the value movement resolves the ground against. The reference does not
-    // face this choice because it reads the posed attachment, which is the real answer and is not ported
-    // (see the header).
-    const model = unit.model as unknown as { scale?: THREE.Vector3; data?: { maxVertexBox?: { z: number } } } | null;
-    const boxZ = model?.data?.maxVertexBox?.z ?? 0;
-    const modelScale = model?.scale?.x ?? 1;
-    const height = unit.collisionHeight > 0
-      ? unit.collisionHeight * OVERHEAD_FALLBACK_FACTOR
-      : boxZ * modelScale * OVERHEAD_FALLBACK_FACTOR;
+    // THE ANCHOR -- `overheadAnchor`, which is now shared with the floating combat text; the choice and
+    // its measurement are documented there.
+    const height = overheadAnchor(unit);
     plate.group.position.set(unit.position.x, unit.position.y, unit.position.z + height);
 
     const reaction = reactionFor(unit, self) ?? REACTION_NEUTRAL;

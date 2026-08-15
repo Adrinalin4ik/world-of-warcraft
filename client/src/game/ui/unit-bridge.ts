@@ -40,6 +40,7 @@ import {
   UnitSnapshot, emptySnapshot, getComboPoints, getUnit, setComboPoints, setUnit,
 } from './framexml/lua/api/units';
 import { fireEvent } from './framexml/lua/events';
+import { combatFeedbackArgs } from '../classes/combat-text';
 import { LuaVM } from './framexml/lua/vm';
 
 /**
@@ -179,6 +180,7 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
   /** How many events this bridge has fired, for the frame-cost measurement. */
   const stats = { pushes: 0, events: 0 };
   const spells = world.game.objectHandler.spellHandler;
+  const combat = world.game.objectHandler.combatHandler;
 
   const push = (token: string, unit: Unit | null): boolean => {
     if (unit === null) {
@@ -249,9 +251,50 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
     pushCombo();
   };
 
+  /**
+   * THE UNIT-FRAME HALF OF THE DAMAGE DISPLAY, and it is entirely the CLIENT'S OWN LUA.
+   *
+   * The owner asked for both media ("По цифрам оба варианта"). The big floating number is engine-drawn
+   * (`world/floating-text.ts`); this is the other one, and nothing here draws anything -- it supplies the
+   * one engine event the client's own `CombatFeedback` is waiting for and then gets out of the way.
+   *
+   * `UNIT_COMBAT` is handled in exactly ONE place in this build's FrameXML, which was measured rather
+   * than remembered: `playerframe.lua:14` registers it and `:129-132` forwards
+   * `CombatFeedback_OnCombatEvent(self, arg2, arg3, arg4, arg5)` when `arg1 == self.unit`.
+   * `targetframe.lua` has no `CombatFeedback` call at all and neither does `unitframe.lua` -- so in
+   * 3.3.5a the unit-frame feedback text is the PLAYER's portrait indicator (`PlayerHitIndicator`,
+   * `playerframe.xml:175`, `NumberFontNormalHuge` at font height 30, `playerframe.lua:11`) and nothing
+   * else. It therefore shows damage the player TAKES, which is the complement of the floating text's
+   * "only our own damage floats" and is why both media are needed to see a fight.
+   *
+   * The five arguments and the outcome mapping are `classes/combat-text.ts#combatFeedbackArgs`, shared
+   * with the floating text so the two can never name the same swing differently.
+   *
+   * The animation is the client's own too -- `COMBATFEEDBACK_FADEINTIME` 0.2 / `_HOLDTIME` 0.7 /
+   * `_FADEOUTTIME` 0.3 (`combatfeedback.lua:1-3`), integrated by `CombatFeedback_OnUpdate` off `GetTime`.
+   * That needs `PlayerFrame`'s `<OnUpdate>` to be ticked, which `world-runtime.ts` now does and says why.
+   */
+  const onSwing = (
+    _attacker: string, victim: string, damage: number, hitInfo: number,
+    victimState: number | null, school: number,
+  ): void => {
+    if (world.player === null || victim !== world.player.guid) {
+      return;
+    }
+    const args = combatFeedbackArgs(hitInfo, victimState, damage, school);
+    if (args === null) {
+      // `victimState` null means the decode did not add up and `handleAttackerState` has already said so.
+      // Nothing is announced, rather than announcing a WOUND of 0 that would print "Miss" over a hit.
+      return;
+    }
+    fireEvent(vm, 'UNIT_COMBAT', ['player', args.event, args.flags, args.amount, args.school]);
+    stats.events += 1;
+  };
+
   world.on('unit:fields', onFields);
   world.on('target:change', onTargetChange);
   spells.on('comboPoints', pushCombo);
+  combat.on('attack:swing', onSwing);
 
   // The player is already in the world when this attaches -- his create block arrived while the
   // manifest was still loading -- so the first push is made here rather than waited for. Without it
@@ -266,6 +309,7 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
     world.removeListener('unit:fields', onFields);
     world.removeListener('target:change', onTargetChange);
     spells.removeListener('comboPoints', pushCombo);
+    combat.removeListener('attack:swing', onSwing);
     delete (window as unknown as Record<string, unknown>).unitBridgeStats;
   };
 }

@@ -24,6 +24,8 @@ import { lightDebug } from "./light-debug";
 import { reactionFor, REACTION_NEUTRAL } from "./faction";
 import { SelectionRing } from "./selection-ring";
 import { NameplateConfig, Nameplates } from "./nameplates";
+import { FloaterSpawn, FloatingCombatText, MAX_FLOATERS, WordSource } from "./floating-text";
+import { meleeText } from "../classes/combat-text";
 import { readMark } from "./saved-mark";
 import { wmoDebug } from "./wmo-debug";
 import WorldMap from "./map";
@@ -64,6 +66,52 @@ export default class World extends EventEmitter {
    * seconds before the manifest lands -- means both plates are off, which is the CVars' own default.
    */
   public nameplateConfig: (() => NameplateConfig) | null = null;
+
+  /**
+   * THE FLOATING COMBAT TEXT -- the big engine-drawn number over the unit you just hit. Built in the
+   * constructor and ticked in `animate`, like the ring and the plates, and world geometry for the same
+   * three reasons (`floating-text.ts`' header).
+   */
+  public combatText: FloatingCombatText;
+
+  /**
+   * The CLIENT'S OWN word for an outcome -- `CombatFeedbackText[key]` (`combatfeedback.lua:15-26`), which
+   * resolves to the localized `GlobalStrings.lua` value. Null while nothing has answered.
+   *
+   * A REGISTRATION, exactly like `nameplateConfig` above and for the same reason: the words belong to the
+   * client's own Lua and `World` must not acquire a dependency on the VM to read them. There is therefore
+   * ONE copy of the word table in this client and it is the game's own -- the reference hardcodes the
+   * shipped enUS strings only because it has no FrameXML to ask (`combat_text/law.rs:93-100`).
+   * `WorldUiHost#start` sets it. Null means a word outcome floats NOTHING, which is honest: no invented
+   * English goes on screen.
+   */
+  public combatWord: WordSource | null = null;
+
+  /** Swings decoded since the last frame, waiting for a camera. See the `attack:swing` subscription. */
+  private readonly pendingCombatText: FloaterSpawn[] = [];
+
+  /** key -> the client's own word, once asked. There are nine keys, so this is a session's worth of calls. */
+  private readonly combatWords = new Map<string, string | null>();
+
+  /**
+   * One outcome word, memoized. Crossing the Lua boundary per swing would be the opposite of what the
+   * owner asked for on cost, and the answer cannot change within a session -- `CombatFeedbackText` is
+   * built once at load from the localized globals. A MISS is cached too, so a runtime that has not
+   * answered is not re-asked forever: `has` rather than a truthiness test is what makes that work.
+   */
+  private combatWordCached(key: string): string | null {
+    if (this.combatWords.has(key)) {
+      return this.combatWords.get(key) ?? null;
+    }
+    // Not cached while nothing can answer -- caching a null before the runtime exists would freeze every
+    // word off for the session, the trap `Nameplates#levelTint` records for the difficulty ramp.
+    if (this.combatWord === null) {
+      return null;
+    }
+    const word = this.combatWord(key);
+    this.combatWords.set(key, word);
+    return word;
+  }
   private skyDebug: SkyDebug;
   /**
    * Dense phase slot counter for unit models -- the same role `DoodadManager#nextPoseSlot` plays.
@@ -133,9 +181,67 @@ export default class World extends EventEmitter {
     this.nameplates = new Nameplates(this.scene);
     window['worldNameplates'] = () => this.nameplates.report();
 
+    // THE FLOATING COMBAT TEXT, in the scene ROOT for the plates' reason exactly.
+    this.combatText = new FloatingCombatText(this.scene);
+    window['combatText'] = () => this.combatText.report();
+
     this.game = game;
     this.session = game.session;
     this.player = this.session.player;
+
+    // ONE COMPLETED SWING -> ONE FLOATING NUMBER OR WORD.
+    //
+    // Subscribed here because `ObjectHandler` is built before `World` (`network/game/handler.js:52` then
+    // `:101`), so `combatHandler` exists. `attack:swing` had NO subscriber anywhere in this client until
+    // now -- it was emitted and dropped, and it dropped `hitInfo` and `victimState` with it; see
+    // `combat.ts#handleAttackerState`.
+    //
+    // **QUEUED, not spawned here.** The size law needs `camera.aspect` and the constant-screen-size factor
+    // needs `camera.fov`, and a packet arrives outside the frame. Draining in `animate` is also what keeps
+    // the spawn's anchor this frame's rather than one frame stale, which is the ring's and the plates'
+    // own ordering rule.
+    //
+    // **ONLY OUR OWN DAMAGE FLOATS**, which is the reference's emitter gate and not a simplification:
+    // `0x5efea0`'s ownership classes are "the active player itself, or a unit it owns", and every other
+    // source -- other players, their pets, wild units fighting each other -- is suppressed at the emitter
+    // (`combat_text/law.rs:122-129`). The PET leg is unreachable here (no pet feed) and is named in
+    // `floating-text.ts`. Damage taken BY the player is the other medium: `ui/unit-bridge.ts` turns the
+    // same event into `UNIT_COMBAT` and the client's own `CombatFeedback` draws it on the portrait.
+    this.game.objectHandler.combatHandler.on(
+      'attack:swing',
+      (
+        attacker: string, victim: string, damage: number, hitInfo: number,
+        victimState: number | null,
+      ) => {
+        if (this.player === null || attacker !== this.player.guid) {
+          return;
+        }
+        const unit = this.entities.get(victim);
+        if (unit === undefined) {
+          return;
+        }
+        const text = meleeText(hitInfo, victimState, damage);
+        if (text === null) {
+          return;
+        }
+        // A WORD needs the client's own table. With no runtime up there is no word, and nothing is
+        // substituted -- an invented "Dodge" would be exactly the plausible-and-wrong screen the rules
+        // forbid. A NUMBER needs nothing and always floats.
+        const body = text.number ?? this.combatWordCached(text.wordKey ?? '');
+        if (body === null || body === '') {
+          return;
+        }
+        // BOUNDED, and self-review is what found this: the queue drains in `animate`, so a tab that
+        // stops receiving `requestAnimationFrame` -- backgrounded, or between world sessions -- keeps
+        // taking packets and appends for ever. The bound is the pass's own `MAX_FLOATERS`, because
+        // anything past it would be dropped at the spawn anyway; dropping the OLDEST matches what the
+        // pass does with an overflow, so the two agree instead of one silently hoarding.
+        if (this.pendingCombatText.length >= MAX_FLOATERS) {
+          this.pendingCombatText.shift();
+        }
+        this.pendingCombatText.push({ unit, category: text.category, text: body });
+      },
+    );
 
     // Initialize sky manager
     this.skyManager = new SkyManager(this.scene);
@@ -679,6 +785,24 @@ export default class World extends EventEmitter {
         : (entry, guid) => this.game.objectHandler.combatHandler.queryCreature(entry, guid),
     );
     endSection('w.plates');
+
+    // THE FLOATING COMBAT TEXT, a NINTH named span -- see the exhaustiveness note above; a statement
+    // outside all of them breaks the sum rule, which is the tell it exists for. After the plates so a
+    // spawn's anchor is this frame's, and before `w.matrices`, which accumulates the sprite subtree's
+    // world transforms.
+    beginSection('w.ctext');
+    // The scale that makes one logical (768-space) unit one logical unit on screen at any depth, the same
+    // derivation `Nameplates#update` documents: with `sizeAttenuation` off three multiplies a sprite's
+    // scale by the view depth.
+    const textUnitScale = (2 * Math.tan((camera.fov * Math.PI) / 360)) / 768;
+    for (const spawn of this.pendingCombatText) {
+      this.combatText.spawn(spawn, camera.aspect, textUnitScale);
+    }
+    this.pendingCombatText.length = 0;
+    // `gone` is asked rather than assumed: a floater outlives its victim by up to 1.5 s, and a unit that
+    // died or streamed out is no longer in `entities` -- reading `position` off it would drift or snap.
+    this.combatText.update(delta, (unit) => this.entities.get(unit.guid) !== unit);
+    endSection('w.ctext');
 
     if (this.map !== null) {
       if (cameraMoved) {

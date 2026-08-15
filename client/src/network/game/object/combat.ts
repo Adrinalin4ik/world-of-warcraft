@@ -44,28 +44,28 @@ import {
   ATTACK_UNARMED, defenseAnimation, isWhiff, swingAnimation,
 } from '../../../game/classes/combat-anim';
 import { combatWire } from '../../../game/classes/combat-wire';
+import {
+  HIT_INFO, HIT_INFO_ANY_ABSORB, HIT_INFO_ANY_RESIST,
+} from '../../../game/classes/combat-text';
 import { worldClock } from '../../../game/pipeline/m2/anim/world-clock';
 import { windowElapsedOrInstant } from '../../../game/pipeline/m2/anim/instance-anim';
 
 /**
- * `HitInfo` bit `0x4` marks an OFFHAND swing and `0x10000` suppresses the animation entirely
- * (`attack.rs:20-27`). Both are read; nothing else in the word is.
- */
-const HIT_INFO_OFFHAND = 0x4;
-const HIT_INFO_NO_ANIMATION = 0x10000;
-
-/**
- * The absorb and resist PRESENCE bits, which decide whether the trailing per-sub loops are on the wire
- * at all -- `HITINFO_FULL_ABSORB | HITINFO_PARTIAL_ABSORB` and the resist pair.
+ * The `HitInfo` bits this decode reads. **THE TABLE MOVED**, and it moved for a reason:
+ * `classes/combat-text.ts#HIT_INFO` is now the ONE place 3.3.5a's `HitInfo` is written down, because
+ * the combat-text law needs the crit, glancing and crushing bits from the same word and two hand-kept
+ * copies of a version-numbered table is how they drift.
  *
- * 3.3.5a values, and deliberately not taken from the reference: its `wound_anim` reads bit `0x80` as
- * CRITICAL (`select.rs:778`), which on 3.3.5a is `HITINFO_FULL_RESIST`. The same bit means different
- * things in the two builds, so every bit in this word is version-numbered. These two masks decide only
- * a byte count, and the decode VALIDATES its result rather than trusting them -- see
- * `handleAttackerState`.
+ * That file also carries the source line these constants never had. In brief: they are a SERVER
+ * implementation (TrinityCore `Unit.h` `enum HitInfo`, 3.3.5 branch) -- no DBC states them and the
+ * client's own Lua is handed already-decoded strings -- and the reference is NOT usable here, since its
+ * `wound_anim` reads bit `0x80` as CRITICAL (`select.rs:778`) which on 3.3.5a is `HITINFO_FULL_RESIST`.
+ *
+ * The two presence masks decide whether the trailing per-sub loops are on the wire at all, and the
+ * decode VALIDATES its result rather than trusting them -- see `handleAttackerState`.
  */
-const HIT_INFO_ANY_ABSORB = 0x20 | 0x40;
-const HIT_INFO_ANY_RESIST = 0x80 | 0x100;
+const HIT_INFO_OFFHAND = HIT_INFO.OFFHAND;
+const HIT_INFO_NO_ANIMATION = HIT_INFO.NO_ANIMATION;
 
 /** One creature template's UI-visible head, as far as a unit frame needs it. */
 export interface CreatureInfo {
@@ -407,8 +407,19 @@ export class CombatHandler extends EventEmitter {
     // which is exactly why this could sit here unnoticed while the swing looked fine.
     const overkill = gp.readUnsignedInt() >>> 0;
     const subs = gp.readUnsignedByte();
+    // THE FIRST SUB-BLOCK'S `SchoolMask` IS NOW KEPT, and it is the one field the display needs out of
+    // this loop: the client's own `CombatFeedback_OnCombatEvent` prints a non-physical wound YELLOW
+    // (`combatfeedback.lua:50-54`), and its `type` argument is exactly this word. FIRST rather than
+    // OR-folded across the subs, because the client's test is `type ~= SCHOOL_MASK_PHYSICAL` -- a single
+    // value, not a mask to be reduced -- and a melee swing carries one school in practice. A multi-school
+    // swing's later schools are dropped, which is stated rather than folded into a value the client's own
+    // comparison would then read as neither physical nor any one school.
+    let school = 0;
     for (let i = 0; i < subs; ++i) {
-      gp.readUnsignedInt(); // SchoolMask
+      const mask = gp.readUnsignedInt() >>> 0; // SchoolMask
+      if (i === 0) {
+        school = mask;
+      }
       gp.readFloat();       // FDamage
       gp.readUnsignedInt(); // Damage
     }
@@ -443,12 +454,22 @@ export class CombatHandler extends EventEmitter {
       damage,
       overkill,
       subs,
+      school,
       victimState,
       bodySize,
       consumed: gp.index - gp.headerSize,
     });
 
-    this.emit('attack:swing', attacker, victim, damage);
+    // THE OUTCOME TRAVELS WITH THE SWING, and it did not until now: this emit carried `damage` alone
+    // while `hitInfo` and `victimState` -- both decoded and both VALIDATED one statement above -- were
+    // dropped on the floor. So a crit, a miss, a dodge and a parry were all indistinguishable to every
+    // subscriber, which is why no combat text could be honest. `school` likewise.
+    //
+    // Emitted RAW rather than pre-interpreted: the display law is
+    // `game/classes/combat-text.ts#meleeText`, shared by the floating world text and the client's own
+    // `CombatFeedback`, and a handler that reads the word straight off the wire is a handler that cannot
+    // have made a different decision from the other medium.
+    this.emit('attack:swing', attacker, victim, damage, hitInfo, victimState, school);
 
     if ((hitInfo & HIT_INFO_NO_ANIMATION) !== 0) {
       return;

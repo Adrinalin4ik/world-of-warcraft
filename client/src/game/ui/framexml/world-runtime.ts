@@ -34,9 +34,15 @@
  * **No general `OnUpdate` dispatch.** `runtime.ts`'s header declines it for the glue screens at 432
  * frames; here the tree is 4211 and the argument is stronger, not weaker. The four named frames that
  * runtime ticks are glue-specific (the glue fade, drag-to-rotate, the two rotate arrows) and have no
- * counterpart here yet. Anything whose behaviour lives entirely in an `<OnUpdate>` -- the chat-frame
- * fade, the cast bar's sweep, `CombatFeedback` -- therefore does not animate. That is a declared gap
- * with a measured reason (see the report), not an oversight.
+ * counterpart here yet. Anything whose behaviour lives entirely in an `<OnUpdate>` therefore does not
+ * animate -- the chat-frame fade is still in that set. That is a declared gap with a measured reason
+ * (see the report), not an oversight.
+ *
+ * The NAMED exceptions have grown to five, each argued at its own `registry.byName` below:
+ * `BonusActionBarFrame`, `CastingBarFrame`, the 24 action buttons, `TemporaryEnchantFrame` and --
+ * newest -- `PlayerFrame`, which is what makes `CombatFeedback` animate. The cast bar and
+ * `CombatFeedback` are named in this paragraph's older wording as things that do NOT animate; both now
+ * do, and the wording is corrected rather than left describing a closed gap.
  */
 import { GlueArt } from '../art';
 import { Viewport } from '../layout';
@@ -380,6 +386,31 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    */
   const tempEnchantId = registry.byName('TemporaryEnchantFrame');
 
+  /**
+   * A FIFTH named `<OnUpdate>`: `PlayerFrame`, and it exists so the COMBAT FEEDBACK TEXT can fade.
+   *
+   * The same exception as the cast bar's, for the same kind of reason. `UNIT_COMBAT` -> the client's own
+   * `CombatFeedback_OnCombatEvent` (`combatfeedback.lua:35-105`) only writes the text, its height, its
+   * colour, `feedbackStartTime` and `SetAlpha(0.0)`, then `Show()`s it. **It shows the string at alpha
+   * ZERO** -- the entire fade-in, the hold and the fade-out live in `CombatFeedback_OnUpdate`
+   * (`combatfeedback.lua:107-131`), which `PlayerFrame_OnUpdate` calls as its last statement
+   * (`playerframe.lua:423`). Without the tick the indicator is shown and stays PERMANENTLY at alpha
+   * zero: not "no animation", but no text at all.
+   *
+   * `PlayerFrame_OnUpdate` also runs the resting-status pulse (gated on `PlayerStatusTexture:IsShown()`)
+   * and the PvP timer (gated on `PlayerPVPTimerText.timeLeft` being non-nil), so those come along and both
+   * are already gated in the client's own body.
+   *
+   * NOT gated on `shown` -- `PlayerFrame` is always shown -- but the FEEDBACK's cost is bounded by the
+   * client's own `if ( feedbackText:IsVisible() )` first line, and `CombatFeedback_OnCombatEvent`'s
+   * `Hide()` at the end of the fade closes it. So the fingerprint churns for the 1.2 s of one indicator's
+   * life (`COMBATFEEDBACK_FADEINTIME` 0.2 + `_HOLDTIME` 0.7 + `_FADEOUTTIME` 0.3) and not otherwise,
+   * which is the cast bar's honest cost in a shorter window. That is the difference between this medium
+   * and the floating number: the floating one is world geometry and costs the fingerprint nothing
+   * (`world/floating-text.ts`), and having BOTH is what the owner asked for.
+   */
+  const playerFrameId = registry.byName('PlayerFrame');
+
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
   let caretClock = 0;
@@ -416,6 +447,10 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
       // The cast bar's fill and spark -- see `castingBarId`. Shown only during a cast and its fade.
       if (castingBarId !== null && registry.widget(castingBarId)?.shown) {
         invokeScriptHandler(ctx, castingBarId, 'OnUpdate', [dt]);
+      }
+      // The combat feedback text's fade-in, hold and fade-out -- see `playerFrameId`.
+      if (playerFrameId !== null) {
+        invokeScriptHandler(ctx, playerFrameId, 'OnUpdate', [dt]);
       }
       // The weapon-enchant slots hiding themselves -- see `tempEnchantId`.
       if (tempEnchantId !== null) {

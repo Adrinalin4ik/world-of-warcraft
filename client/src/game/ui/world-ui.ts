@@ -452,6 +452,35 @@ export class WorldUiHost {
           return rgb.some((n) => !Number.isFinite(n)) ? null : [rgb[0], rgb[1], rgb[2]];
         },
       });
+
+      /**
+       * THE OUTCOME WORDS for the floating combat text, out of the CLIENT'S OWN TABLE.
+       *
+       * `CombatFeedbackText` (`combatfeedback.lua:15-26`) maps `"MISS"`/`"DODGE"`/`"PARRY"`/... to the
+       * localized `GlobalStrings.lua` values, and it is the same table the client's own
+       * `CombatFeedback_OnCombatEvent` reads for the portrait indicator. Asking it means the floating
+       * word and the unit-frame word are literally the same string and there is ONE copy of the word
+       * list in this client -- the argument the level colour is reached through
+       * `GetQuestDifficultyColor` for. The reference hardcodes the shipped enUS words only because it
+       * has no FrameXML to ask (`combat_text/law.rs:93-100`).
+       *
+       * A STRING is asked for, never a table handle: a handle crossing the boundary is what
+       * `SetAttribute` stored and had freed under it (see `STATE.md`). The key is checked against a
+       * literal set here rather than interpolated blind, because it lands inside a Lua chunk.
+       * `World` memoizes on the caller's side -- see `combatWord` -- so this is at most nine calls a
+       * session.
+       */
+      this.world.combatWord = (key: string) => {
+        if (!/^[A-Z]+$/.test(key)) {
+          return null;
+        }
+        const answer = runtime.vm.runExpr(
+          `return tostring(CombatFeedbackText and CombatFeedbackText["${key}"] or "")`,
+          'combat-word.lua',
+        );
+        const word = String((answer as { value?: unknown } | null)?.value ?? '');
+        return word === '' || word === 'nil' ? null : word;
+      };
       // THE ACTION FEED. Gated on a real session as well as a world: `/game?offline=1&ui=lua` has units
       // but no protocol, and `session.offline` short-circuits ahead of the `protocol` getter -- reading
       // `game.objectHandler` there would construct transports the offline route contracts never to

@@ -26,6 +26,8 @@ export interface CombatWireRow {
   damage: number;
   overkill: number;
   subs: number;
+  /** The FIRST sub-block's `SchoolMask` -- `SCHOOL_MASK_PHYSICAL` 0x01 for an ordinary swing. */
+  school: number;
   /** `null` when the decode did not land on a recognised value -- see the header. */
   victimState: number | null;
   bodySize: number;
@@ -47,6 +49,46 @@ class CombatWire {
 
   history(): readonly CombatWireRow[] {
     return this.rows;
+  }
+
+  /**
+   * THE `HitInfo` CENSUS -- `window.combatWire.census()`.
+   *
+   * The instrument that makes 3.3.5a's crit bit CHECKABLE rather than believed. Its value (`0x200`) comes
+   * from a server implementation and cannot be corroborated from the game's own data
+   * (`classes/combat-text.ts`' header says so and why), and the reference's own number for that bit
+   * (`0x80`) is a DIFFERENT bit here -- so a wrong reading would print a resist as a crit and look
+   * entirely plausible.
+   *
+   * What it answers: for each distinct `hitInfo` word observed, how many swings carried it and the
+   * min/mean/max damage those swings did. A crit is the group whose mean is about twice the ordinary
+   * group's, and the two candidate bits are then distinguishable by inspection: if `0x200` is crit, the
+   * doubled group carries it; if the reference's `0x80` were, the doubled group would carry that instead
+   * -- and `0x80` swings should carry damage ZERO here, being a FULL resist.
+   *
+   * Grouped rather than listed because the reading is a RATIO across a population; a single crit proves
+   * nothing about which bit named it.
+   */
+  census(): unknown {
+    const groups = new Map<number, number[]>();
+    for (const row of this.rows) {
+      const list = groups.get(row.hitInfo) ?? [];
+      list.push(row.damage);
+      groups.set(row.hitInfo, list);
+    }
+    return [...groups.entries()]
+      .map(([hitInfo, damages]) => ({
+        hitInfo: `0x${hitInfo.toString(16)}`,
+        swings: damages.length,
+        minDamage: Math.min(...damages),
+        meanDamage: +(damages.reduce((a, b) => a + b, 0) / damages.length).toFixed(2),
+        maxDamage: Math.max(...damages),
+        crit0x200: (hitInfo & 0x200) !== 0,
+        // The reference's 1.12 crit bit, which is 3.3.5a's FULL_RESIST. Reported side by side precisely
+        // so the two readings can be compared against the damage rather than argued about.
+        refCrit0x80: (hitInfo & 0x80) !== 0,
+      }))
+      .sort((a, b) => b.swings - a.swings);
   }
 
   clear(): void {

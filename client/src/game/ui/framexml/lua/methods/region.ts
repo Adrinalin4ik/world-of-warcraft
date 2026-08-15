@@ -686,6 +686,33 @@ const FONTSTRING: MethodTable = {
    * the same family of defect as `SetChecked("false")` (see `kinds.ts#checkedArg`), coming from the
    * other direction.
    */
+  /**
+   * `SetTextHeight(height)` -- the font's pixel height, keeping every other channel of the font object.
+   *
+   * **THIS WAS THE MISSING METHOD THAT MADE THE COMBAT FEEDBACK TEXT INVISIBLE**, and it was found by
+   * measurement rather than by reading: with the `UNIT_COMBAT` event fired and the words resolving,
+   * `PlayerHitIndicator:IsVisible()` stayed false through a whole fight. `CombatFeedback_OnCombatEvent`
+   * calls this as its FIRST write (`combatfeedback.lua:98`) and `SetText`/`SetTextColor`/`SetAlpha`/
+   * `Show()` are the four statements after it -- so an unmodelled method here does not degrade the
+   * indicator, it deletes it.
+   *
+   * Real 3.3.5a API, and the client uses it for exactly what it is for: `CombatFeedback_OnCombatEvent`
+   * scales one authored height (`PlayerFrame.feedbackFontHeight`, 30 -- `playerframe.lua:11`) by 1.5 for
+   * a crit or a crushing blow and 0.75 for a glancing blow or an absorb (`combatfeedback.lua:44-48`).
+   * That is the whole reason a crit's number is bigger on the portrait, and it is the client's own
+   * decision rather than anything of ours.
+   *
+   * A non-finite or non-positive height is IGNORED rather than clamped: the argument is a computed
+   * product in the client's own code, and writing a 0-unit font would silently blank a string that the
+   * caller believes it has just sized.
+   */
+  SetTextHeight: (ctx, self, args) => {
+    const height = Number(args[0]);
+    if (Number.isFinite(height) && height > 0) {
+      ensureFont(widgetOf(ctx, self)).size = height;
+    }
+    return [];
+  },
   SetWordWrap: (ctx, self, args) => {
     ensureFont(widgetOf(ctx, self)).wordWrap = luaFlag(args[0]);
     return [];
