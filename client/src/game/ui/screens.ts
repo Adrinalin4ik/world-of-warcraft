@@ -17,6 +17,7 @@ import { GlueArt } from './art';
 import { clientStateForStage } from './screens/login-state';
 import { installFramexmlDebug } from './framexml/debug';
 import { GlueInput } from './input';
+import { WorldCursorDriver } from './world-cursor';
 import { GlueRenderer, ResolvedSprite } from './renderer';
 import { resolveSprite } from './sprite';
 import { resolveCharacterLook } from './scene/character-look';
@@ -126,6 +127,25 @@ export class GlueApp {
   private onEnterWorld: (() => void) | null = null;
   private enteredWorld = false;
 
+  /**
+   * THE CLIENT'S OWN POINTER ON THE GLUE SCREENS -- the owner's "Курсор работает в мире, но не
+   * работает на остальных страницах, на главной на realm selection на char selection."
+   *
+   * The SAME `WorldCursorDriver` the world uses, not a second cursor system. That class takes one
+   * `HTMLElement` and owns nothing world-specific -- no `World`, no `Unit`, no camera -- so it is
+   * reused verbatim; only the CLASSIFIER (`world/cursor-mode.ts`) is world-specific, and on the glue
+   * side there is nothing to classify.
+   *
+   * **`document.body`, not the glue canvas**, matching the world's own choice
+   * (`pages/game/index.tsx:223`): `cursor` inherits, so one element covers the canvas and everything
+   * over it. It is also literally the same node the world driver attaches to -- this is a
+   * single-page app and the glue route navigates without a document load -- which is exactly why the
+   * cursor vanished here: the world driver `revert()`s and disposes on unmount, deliberately, so that
+   * the world's pointer does not follow the user back to the login screen. That left the glue route
+   * with NO driver at all. This is the missing half of that pair, not a change to it.
+   */
+  private cursorDriver: WorldCursorDriver | null = null;
+
   constructor(canvas: HTMLCanvasElement, session: GameSession, onEnterWorld?: () => void) {
     this.canvas = canvas;
     this.session = session;
@@ -152,6 +172,18 @@ export class GlueApp {
     this.resize();
     window.addEventListener('resize', this.resize);
     this.input.attach();
+
+    // THE POINTER. Constructed here rather than in the constructor so it is armed and torn down on the
+    // same edges as the input and the frame loop -- a driver built in the constructor of an app that is
+    // never started would leave `document.body`'s cursor overwritten with nothing to restore it.
+    //
+    // `reset()` applies `CURSOR_POINT`, the ordinary pointer, and that is the WHOLE classification on
+    // the glue side. The world's four-rung ladder -- held item, widget, pick, unit -- collapses here:
+    // there are no units to pick and no world to pick them in, and its widget rung already resolves to
+    // this same `CURSOR_POINT`. So every glue screen is the point cursor, which is what the real client
+    // shows on login, realm select and character select. There is no per-frame work and no cadence:
+    // the world's 100 ms gate exists only to amortize the raycast, and there is no raycast here.
+    this.cursorDriver = new WorldCursorDriver(document.body);
 
     // The FrameXML document layer has no callers until the Lua runtime lands, so this console hook is
     // the only way to run it against the client's real files rather than against test fixtures.
@@ -190,6 +222,10 @@ export class GlueApp {
     cancelAnimationFrame(this.frame);
     window.removeEventListener('resize', this.resize);
     this.input.detach();
+    // RESTORES the saved cursor, so entering the world hands `document.body` back in the state the
+    // world's own driver expects to find it -- the mirror of `pages/game/index.tsx`'s teardown.
+    this.cursorDriver?.dispose();
+    this.cursorDriver = null;
     // One leaked listener per mounted app is a real leak, and a listener left on a live session would
     // go on asking a torn-down app to change screens.
     this.unsubscribeSession?.();
@@ -414,6 +450,18 @@ export class GlueApp {
     // is painted for it cannot disagree.
     const items = this.current.root.drawList(viewport, measureText);
     this.input.setDrawList(items);
+
+    // THE POINTER, per frame -- see `cursorDriver`. It must be RETRIED rather than applied once at
+    // start, and that is measured, not assumed: `apply` returns early while the stem's BLP has not
+    // decoded and deliberately does NOT latch the stem when it does so, so a single call at `start()`
+    // lands before the art exists and never runs again. The first wiring did exactly that and
+    // `getComputedStyle(document.body).cursor` read `auto`.
+    //
+    // Once applied this is a single string comparison and no style write (`apply` is idempotent on the
+    // stem), so a per-frame call costs nothing. The world drives its own cursor from the frame loop for
+    // the same reason; it gates on a 100 ms cadence only to amortize the raycast, which has no analogue
+    // here.
+    this.cursorDriver?.reset();
 
     this.ui.render(items, (item) => this.resolveSprite(item, screenScale(viewport.height)));
   };
