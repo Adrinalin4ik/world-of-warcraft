@@ -261,35 +261,39 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // reloading the page -- which is half of "I cannot connect a second time".
     this.game.on('disconnect', this.onWorldDisconnect);
 
-    this.game.world.run();
-
-    // THE UI HOST. Started here rather than in the constructor because it needs the renderer and the
-    // canvas, and both exist only from this point. Fire-and-forget: the boot fetches 264 files and
-    // runs them, tens of seconds on a cold cache, and `render(dt)` is a no-op until it lands -- so
-    // awaiting it would be awaiting it in the frame loop.
+    /**
+     * THE LOADING SCREEN IS ARMED BEFORE `world.run()`, AND THE ORDER IS THE WHOLE BUG IT FIXES.
+     *
+     * `map:change` is an EDGE with no replay (`classes/player.ts:26`), and `World#run` worldports a
+     * real character SYNCHRONOUSLY on the online path -- `const entered = session.offline ? null :
+     * session.protocol.enteredCharacter` and then `player.worldport(entered.mapId, entered.position)`
+     * with nothing awaited in between (`world/index.ts:380,449`). So on a real login the event had
+     * ALREADY fired by the time this component subscribed, the art was never asked for, and the screen
+     * never drew: the owner's "Экран загрузки не видно". The offline route hid it completely, because
+     * there `entered` is null and the worldport happens further down this method -- which is the only
+     * ordering the gate ever exercised.
+     *
+     * Reproduced credential-free before fixing, by moving the offline worldport above the old
+     * subscription point: the screen object existed and NEVER acquired art. Note the first attempt at
+     * that simulation did not reproduce, because DUPLICATING the worldport re-emits -- `worldport`'s
+     * guard is `if (!this.mapId || ...)` and map 0 is falsy, so map 0 always emits twice.
+     *
+     * Subscribing first removes the race outright rather than racing it better, which is the same
+     * shape as `ProtocolSession#state`'s reconcile (`STATE.md`, round 27): an edge subscription with
+     * no replay must be attached before the thing that fires it. `renderer` already exists here.
+     */
     if (wantsLuaUi(window.location.search)) {
-      /**
-       * THE LOADING SCREEN, started BEFORE the UI host and torn down after the interface's first
-       * draw. Order is the whole point: a blocked main thread paints nothing, so the screen has to be
-       * up before `bootWorldRuntime` runs or it would never appear at all. See
-       * `game/ui/loading-screen.ts` for why this is engine code rather than a FrameXML document.
-       *
-       * WHICH map is not known yet at mount, and that is why this subscribes rather than reads:
-       * `Player#worldport` is what sets `mapId`, and it runs LATER -- below in this method on the
-       * offline route, and on `SMSG_LOGIN_VERIFY_WORLD` online (`world/index.ts:449`). It emits
-       * `map:change` with the id (`classes/player.ts:26`). `mapId` is also read directly, for the case
-       * where it was already set.
-       */
       this.loadingScreen = new LoadingScreen(renderer);
       // The instrument: "no picture" has three distinct causes no screenshot separates -- the map id
-      // never arrived, the DBCs named no screen for it, or the BLP never decoded.
+      // never arrived, the DBCs named no screen for it, or the BLP never decoded. `ready` answers the
+      // first two, which is what told "never drew" apart from "drew and was not seen".
       (window as never as Record<string, unknown>).loadingScreen = this.loadingScreen;
       /**
        * THE EVENT IS THE ONLY SOURCE, and reading `player.mapId` up front would be WRONG rather than
        * merely redundant: it is initialised to **0** (`classes/player.ts:4`), which is a real map id
        * (Eastern Kingdoms), so an eager read on a character who has not been placed yet fetches the
-       * wrong 700 KB screen and then replaces it. `worldport`'s own guard is `if (!this.mapId || ...)`
-       * (`classes/player.ts:24`), so a first placement -- even onto map 0 -- always emits.
+       * wrong 700 KB screen and then replaces it. With the subscription now ahead of every worldport,
+       * no eager read is needed on either route.
        */
       this.onMapChange = (mapId: number) => {
         void this.loadingScreen
@@ -297,7 +301,15 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
           .catch((error) => console.warn('loading screen: art unavailable', error));
       };
       this.game.world.player.on('map:change', this.onMapChange);
+    }
 
+    this.game.world.run();
+
+    // THE UI HOST. Started here rather than in the constructor because it needs the renderer and the
+    // canvas, and both exist only from this point. Fire-and-forget: the boot fetches 264 files and
+    // runs them, tens of seconds on a cold cache, and `render(dt)` is a no-op until it lands -- so
+    // awaiting it would be awaiting it in the frame loop.
+    if (wantsLuaUi(window.location.search)) {
       this.ui = new WorldUiHost(
         renderer,
         this.canvas.current as HTMLCanvasElement,

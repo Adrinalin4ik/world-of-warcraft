@@ -55,6 +55,21 @@
  *
  * ## What survives a blocked main thread, and what does not
  *
+ * ## NO MINIMUM PRESENCE TIME -- A DECLARED GAP, and it will bite as startup gets faster
+ *
+ * The screen is torn down the instant `WorldUiHost#start()` resolves
+ * (`pages/game/index.tsx#dismissLoadingScreen`); there is no floor on how long it stays up and no
+ * fade. Today that is invisible because the covered phase is ~13 s of a ~15 s warm start, but the
+ * covered phase is actively shrinking -- the `vm.ts` fix already took ~8 s out of it and the 7.35 s of
+ * collision-BVH build (`three-mesh-bvh`, measured in `task-9-report.md`) is being worked on. When those
+ * land, this screen can appear and vanish inside a frame or two, and **a flash is worse than nothing**.
+ *
+ * **The real client's loading screen does not flash, but nothing in this build's own data states its
+ * minimum**, and no FrameXML/GlueXML document declares the screen at all (see above), so there is no
+ * file to read it out of. A number invented here would be exactly the kind of unsourced constant this
+ * project treats as a defect, so this is NAMED and left rather than guessed at. Whoever closes it
+ * should say plainly that the value is ours.
+ *
  * A blocked main thread paints nothing, so this screen is only worth anything if it is ON SCREEN
  * BEFORE the blocking work starts. It is drawn from the ordinary render loop, and the browser keeps
  * compositing the last presented framebuffer while the thread is busy -- so the PICTURE survives a
