@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { BufferGeometry } from 'three';
 import { Face3, Geometry } from '../../utils/geometry';
-import CacheManager from '../../world/cache-manager';
 import { collisionWorld } from '../../collision/collision-world';
 import { ObjectsManager } from '../../world/visibility-manager';
 import BatchManager from './batch-manager';
@@ -103,7 +102,6 @@ function ringFootprintOf(data: any, modelAnim: ModelAnim): number {
 }
 
 class M2 extends THREE.Group {
-  static CacheManager = CacheManager;
   static cache = {};
 
   path: string;
