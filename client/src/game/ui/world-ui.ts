@@ -1039,10 +1039,16 @@ export class WorldUiHost {
     this.detachActions = null;
     this.detachSpellbook?.();
     this.detachSpellbook = null;
-    this.detachContainers?.();
-    this.detachContainers = null;
+    // LIFO, AND THE ORDER IS LOAD-BEARING HERE RATHER THAN TIDINESS. The loot bridge CHAINS its
+    // `GameTooltip` item source onto whatever the container bridge installed, capturing it at attach
+    // and restoring it on teardown. Tearing the container bridge down FIRST set the source to null and
+    // then let the loot bridge restore the container's closure over the top -- leaving a dead source
+    // installed after dispose, reading a bridge whose listeners are gone. Unwinding in the reverse of
+    // the attach order is what makes the chain's restore land on something live.
     this.detachLoot?.();
     this.detachLoot = null;
+    this.detachContainers?.();
+    this.detachContainers = null;
     // The rect publication is module-level, so it OUTLIVES this host unless it is cleared -- exactly
     // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
     // stale draw list would have a remounted world's scripts reading the previous world's layout.
