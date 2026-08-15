@@ -144,6 +144,37 @@ export class CombatHandler extends EventEmitter {
     }
     this.selected = guid ?? null;
 
+    // NO TARGET MEANS NO AUTO-ATTACK -- the owner's "Автоатака должна отменяться если цели нет или она
+    // сброшена esc."
+    //
+    // **THIS IS THE ONE CHOKE POINT, and that is why it is here rather than on a key handler.** Every
+    // way of losing a target funnels through `World#setTarget(null)` and therefore through this method:
+    // the client's own `ClearTarget()` (`ui/target-bridge.ts`), which is the leg `Esc` reaches through
+    // the client's own Lua and its established precedence -- a cast cancels first, then this -- and
+    // `World#remove`, which clears the target when the unit dies-and-decays or streams out of range. So
+    // "the target is gone" is handled as ONE condition, and no second competing `Esc` handler is added.
+    //
+    // **ONLY ON A CLEAR, NOT ON A SWITCH.** Selecting a different unit leaves the attack running: the
+    // real client re-aims auto-attack at the new target rather than dropping it, and the owner asked
+    // about the absence of a target, not about changing one.
+    //
+    // **THE SERVER IS TOLD, AND THE SERVER IS WHAT CLEARS THE UI.** `CMSG_ATTACKSTOP` (0x142, this
+    // client's own 3.3.5a table, empty body) goes out here; the button and the combat pose are NOT
+    // touched from this method. They follow from the server's `SMSG_ATTACKSTOP`, which
+    // `handleAttackStop` already turns into `emit('autoAttack', false)` -> `SpellHandler#setAutoAttack`
+    // for the bar and `inCombat = false` for the stance. Driving them locally would be a second source
+    // of truth for a state the server owns, which is the same argument `handleAttackStart` makes for
+    // taking the button's checked state from the wire rather than from our own send.
+    //
+    // That also makes this correct WHETHER OR NOT the server stops the attack by itself on a selection
+    // clear: if it does, our stop is redundant and its reply is the same packet; if it does not, ours is
+    // what ends it. Either way there is exactly one `SMSG_ATTACKSTOP` path into the UI, so the two
+    // cannot disagree -- which is worth more than settling the question, since the answer is a server
+    // implementation detail that could differ between the servers this client is pointed at.
+    if (this.selected === null && this.attacking) {
+      this.stopAttack();
+    }
+
     const app = new GamePacket(GameOpcode.CMSG_SET_SELECTION, 6 + GUID_BYTES);
     // A FULL 8-byte little-endian guid. `guidBytes` is the inverse of the single formatter every
     // guid in this client is normalised by, so what goes out is byte-for-byte what came in.
@@ -306,6 +337,7 @@ export class CombatHandler extends EventEmitter {
     // refusal is exactly what a rejected swing looks like here. `ObjectHandler` forwards this to
     // `SpellHandler#setAutoAttack`.
     if (attacker === this.game.world.player?.guid) {
+      this.attacking = true;
       this.emit('autoAttack', true);
     }
     this.emit('attack:start', attacker, victim);
@@ -363,6 +395,7 @@ export class CombatHandler extends EventEmitter {
     // Our auto-attack is off -- whether this is a real disengage or the outright rejection warned about
     // just above. Both leave us not swinging, so both un-check the button.
     if (attacker === this.game.world.player?.guid) {
+      this.attacking = false;
       this.emit('autoAttack', false);
     }
     this.emit('attack:stop', attacker, victim);
@@ -370,6 +403,19 @@ export class CombatHandler extends EventEmitter {
 
   /** One warning per victim -- see `handleAttackStop`. */
   private warnedRejection = new Set<string>();
+
+  /**
+   * Are WE auto-attacking right now?
+   *
+   * Driven from the SERVER's `SMSG_ATTACKSTART`/`SMSG_ATTACKSTOP`, not from our own `CMSG_ATTACKSWING`
+   * send -- the same rule the action button's checked state follows, and for the same reason: a swing
+   * request the server refuses must not leave us believing we are attacking. `handleAttackStop`
+   * documents that an outright rejection arrives as exactly that packet.
+   *
+   * Read only by `select`, to decide whether losing the target has an attack to cancel. Without it a
+   * plain deselect would send `CMSG_ATTACKSTOP` on every click on empty ground.
+   */
+  private attacking = false;
 
   /**
    * `SMSG_ATTACKERSTATEUPDATE` -- ONE COMPLETED SWING, and the animation driver.
