@@ -43,6 +43,7 @@ import { fireEvent } from './framexml/lua/events';
 import { combatFeedbackArgs, spellFeedbackArgs, spellMissText } from '../classes/combat-text';
 import type { SpellDamageEvent } from '../../network/game/object/combat-log';
 import { LuaVM } from './framexml/lua/vm';
+import { raceClassData } from '../pipeline/dbc/race-class-data';
 
 /**
  * `UnitPowerType`'s numeric order -> the event a bar of that power listens for
@@ -81,6 +82,18 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   // until then -- stated rather than hidden, and the honest one of the three, because painting an
   // unknown unit hostile red or friendly green would both be assertions we cannot make yet.
   snapshot.reaction = reactionFor(unit, self) ?? REACTION_NEUTRAL;
+
+  // RACE AND CLASS, joined here for the same reason `reaction` is: `api/units.ts` holds no pipeline,
+  // and the ids are useless to Lua on their own -- `UnitRace`/`UnitClass` each owe a localized name
+  // AND a token. `UNIT_FIELD_BYTES_0` packs `race | class | gender | powerType`, which is
+  // `update-object/unit-fields.ts`' own stated layout and the same packing the power-type and gender
+  // reads there already depend on.
+  //
+  // Null until the DBC lands, which is the honest answer and not a placeholder: `raceClassData`
+  // answers null while its two (small) tables are in flight, and both globals then return NOTHING
+  // rather than a wrong race. `ensureLoaded` is kicked off by `attachUnitBridge`.
+  snapshot.race = unit.fields.race ? raceClassData.race(unit.fields.race) : null;
+  snapshot.classInfo = unit.fields.classId ? raceClassData.class(unit.fields.classId) : null;
   return snapshot;
 }
 
@@ -178,6 +191,13 @@ function pushUnit(
  * not change, so the UI costs one composite.
  */
 export function attachUnitBridge(vm: LuaVM, world: World): () => void {
+  // `ChrRaces.dbc` and `ChrClasses.dbc`, for `UnitRace`/`UnitClass`. A few dozen rows each, next to
+  // the 6.7 MB and 49 MB loads the container and action bridges already start, and `DBC.load` caches.
+  // No repaint is needed after it lands: a snapshot is rebuilt on every field change anyway, so the
+  // names appear on the next push. The character sheet is opened by a keystroke long after load, so
+  // in practice the read is warm by the time anything asks.
+  void raceClassData.ensureLoaded();
+
   /** How many events this bridge has fired, for the frame-cost measurement. */
   const stats = { pushes: 0, events: 0 };
   const spells = world.game.objectHandler.spellHandler;

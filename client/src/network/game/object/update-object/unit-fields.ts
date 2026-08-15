@@ -47,6 +47,10 @@ export interface UnitFieldUpdate {
   powerType?: number;
   /** `UNIT_FIELD_BYTES_0` byte 2 -- 0 male, 1 female. Read for a description's `$g<male>:<female>;`. */
   gender?: number;
+  /** `UNIT_FIELD_BYTES_0` byte 0 -- the `ChrRaces.dbc` id. What `UnitRace` answers. */
+  race?: number;
+  /** `UNIT_FIELD_BYTES_0` byte 1 -- the `ChrClasses.dbc` id. What `UnitClass` answers. */
+  classId?: number;
   power?: number;
   maxPower?: number;
   factionTemplate?: number;
@@ -279,6 +283,14 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
     // already relies on; only the INDEX of the word is version-specific, and that comes from our own
     // `UnitField` table. Read for `$g<male>:<female>;` in a spell description and nothing else.
     out.gender = (bytes0 >>> 16) & 0xff;
+    // RACE is byte 0 and CLASS byte 1 of the SAME word, by the same packing the two reads above
+    // already depend on and which this function's own comment four lines up states
+    // (`race | class | gender | powerType`) -- so nothing new is being asserted about the layout.
+    // They feed `UnitRace`/`UnitClass`, which `PaperDollFrame_SetLevel` (`paperdollframe.lua:203`)
+    // calls: with `UnitRace` absent that one line raised and left `CharacterLevelText` showing the
+    // placeholder `paperdollframe.xml:279` authors, which is the owner's "Level level race class".
+    out.race = bytes0 & 0xff;
+    out.classId = (bytes0 >>> 8) & 0xff;
   }
 
   // THE SHAPESHIFT FORM, byte 3 of `UNIT_FIELD_BYTES_2`. Unit-scope, not player-scope: a creature in a
@@ -426,6 +438,8 @@ export function applyUnitFields(
   set('combatReach', fields.combatReach);
   set('powerType', fields.powerType);
   set('gender', fields.gender);
+  set('race', fields.race);
+  set('classId', fields.classId);
 
   // The experience pair and the rested pool. Only our own character's updates carry them (see
   // `readUnitFields`), and `changed` is what gates the event that repaints the bar -- so an xp value

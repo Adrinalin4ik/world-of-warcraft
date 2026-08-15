@@ -99,6 +99,24 @@ export interface UnitSnapshot {
    * nothing else does.
    */
   baseMana: number;
+
+  /**
+   * What `UnitRace` and `UnitClass` answer, ALREADY RESOLVED TO STRINGS by the host.
+   *
+   * Names and not ids, because this file holds no world, no network and no pipeline -- see the
+   * header. The ids live in `UNIT_FIELD_BYTES_0` bytes 0 and 1 and the join to `ChrRaces.dbc` /
+   * `ChrClasses.dbc` is `unit-bridge.ts`' business, exactly as the `reaction` join already is.
+   *
+   * Each is a PAIR because both globals return two values and the second is not the first: the
+   * second is a token FrameXML keys real tables on (`RAID_CLASS_COLORS`, `CLASS_ICON_TCOORDS` are
+   * both indexed by the uppercase class token), so answering the localized name twice would look
+   * right in a header and break every lookup built on it.
+   *
+   * Null until `bytes_0` has arrived AND the DBC has landed -- `UnitRace` answers nothing rather
+   * than a wrong race.
+   */
+  race: { name: string; token: string } | null;
+  classInfo: { name: string; token: string } | null;
 }
 
 /** A unit that exists but about which nothing has arrived yet. */
@@ -119,6 +137,8 @@ export function emptySnapshot(): UnitSnapshot {
     maxXp: 0,
     restXp: 0,
     baseMana: 0,
+    race: null,
+    classInfo: null,
   };
 }
 
@@ -481,6 +501,36 @@ export function installUnitsApi(vm: LuaVM): void {
   fn('GetUnitName', (args) => [withUnit(args[0], null, (u) => u.name)]);
   fn('UnitPlayerControlled', (args) => [withUnit(args[0], false, (u) => u.isPlayer)]);
 
+  /**
+   * `UnitRace(unit)` -> `localizedName, fileName` and `UnitClass(unit)` -> `localizedName, TOKEN`.
+   *
+   * **BOTH RETURN TWO VALUES AND THE SECOND IS NOT THE FIRST.** FrameXML keys real tables on the
+   * second -- `RAID_CLASS_COLORS` and `CLASS_ICON_TCOORDS` are both indexed by the uppercase class
+   * token -- so answering the localized name twice would look right in a header and break every
+   * lookup built on it. See `pipeline/dbc/race-class-data.ts` for which DBC column each comes from.
+   *
+   * THIS IS WHAT THE CHARACTER PANEL'S HEADER WAS BLOCKED ON. `PaperDollFrame_SetLevel`
+   * (`paperdollframe.lua:203`) is a single line calling all three of `UnitLevel`, `UnitRace` and
+   * `UnitClass`; `UnitRace` was registered NOWHERE, so it was a nil global, the line raised, and
+   * `CharacterLevelText` kept the placeholder `paperdollframe.xml:279` authors -- the literal
+   * `"Level level race class"` the owner sees. It was never a string-formatting gap:
+   * `SetFormattedText` has been implemented since `methods/region.ts:685`.
+   *
+   * An EMPTY return (not a nil pair) when the id is 0 or the tables have not landed, because both
+   * callers destructure into two locals and `format` prints "nil" for a nil where it prints nothing
+   * for a missing argument.
+   */
+  const namePair = (
+    token: unknown,
+    read: (u: UnitSnapshot) => { name: string; token: string } | null,
+  ): unknown[] => {
+    const row = withUnit(token, null, read);
+    return row === null ? [] : [row.name, row.token];
+  };
+
+  fn('UnitRace', (args) => namePair(args[0], (u) => u.race));
+  fn('UnitClass', (args) => namePair(args[0], (u) => u.classInfo));
+
   // Gaps, declared. Each of these has NO source in this client today: there is no threat table, no
   // aura array read off the update fields, no cast bar feed, no tap state and no party roster. They
   // are registered so that `TargetFrame.lua` calling them does not raise and take its whole update
@@ -503,7 +553,6 @@ export function installUnitsApi(vm: LuaVM): void {
     ['UnitInParty', 'no party roster is fed', [false]],
     ['UnitInRaid', 'no raid roster is fed', []],
     ['UnitIsPartyLeader', 'no party roster is fed', [false]],
-    ['UnitClass', 'no class is read out of UNIT_FIELD_BYTES_0 yet', []],
   ];
   // NOT `Unit*`, but on the same path and found the same way -- by loading the manifest and reading
   // which call `UnitFrame_OnLoad` died on next. Each of these is an ENGINE global (no FrameXML file
