@@ -14,6 +14,7 @@ import Loader from '../net/loader';
 import { ResolvedSprite } from './renderer';
 import { screenScale } from './layout';
 import { FontSpec } from './widget';
+import { parseMarkup, runsFor } from './markup';
 
 /** The client's shipped faces, by the family name widgets ask for. */
 const FONT_FILES: Record<string, string> = {
@@ -176,6 +177,18 @@ function optionalMeasureContext(): CanvasRenderingContext2D | null {
  * `gluestrings.lua` escapes some -- so a `\n` always starts a line whatever the width.
  */
 export function wrapLines(text: string, spec: FontSpec, scale: number): string[] {
+  return wrapPlain(parseMarkup(text).plain, spec, scale);
+}
+
+/**
+ * The wrapping law itself, over text that has ALREADY had its escapes resolved.
+ *
+ * Split out from `wrapLines` when markup arrived, and the split is the whole point: a colour code is
+ * zero-width, so it must never reach a `measureText` here. Measuring `|cffffd200(B)|r` would put nine
+ * invisible characters into a wrap budget and into every derived width -- which is the likeliest way
+ * to regress the owner-confirmed tooltip sizing and grid snap. The body below is unchanged.
+ */
+function wrapPlain(text: string, spec: FontSpec, scale: number): string[] {
   const paragraphs = text.split('\n');
   // `wordWrap === false` is `SetWordWrap(false)`: one line however narrow the rect. Nothing in the
   // manifest authors it (see `FontSpec.wordWrap`), so this is an override with no current exerciser.
@@ -391,7 +404,24 @@ export class FontStringTextures {
     const paddingV = PADDING_V * dpr + 2 * Math.abs(shadowDy);
     const inset = paddingH / 2;
 
-    const lines = wrapLines(text, spec, scale);
+    // Parse ONCE here rather than calling `wrapLines` (which parses internally): the raster needs the
+    // colour spans as well as the lines, and they have to be indexed into the SAME plain text the
+    // lines were cut from.
+    const { plain, spans } = parseMarkup(text);
+    const lines = wrapPlain(plain, spec, scale);
+    // Where each wrapped line starts in `plain`, so a colour span can be intersected with it.
+    // `wrapPlain` only ever splits -- it never reorders and never inserts -- so every line is a
+    // substring of `plain` and they appear in order, which is what makes a forward scan exact.
+    const lineStarts: number[] = [];
+    {
+      let cursor = 0;
+      for (const line of lines) {
+        const at = plain.indexOf(line, cursor);
+        const start = at === -1 ? cursor : at;
+        lineStarts.push(start);
+        cursor = start + line.length;
+      }
+    }
     const widest = Math.max(...lines.map((line) => context.measureText(line).width));
     const width = Math.ceil(widest) + paddingH;
     // A single line keeps EXACTLY the height it always had, so no existing caption's quad moves;
@@ -461,8 +491,27 @@ export class FontStringTextures {
         target.strokeText(line, x, y);
       }
 
-      target.fillStyle = spec.color;
-      target.fillText(line, x, y);
+      // THE SINGLE-RUN PATH IS BIT-FOR-BIT WHAT IT ALWAYS WAS, and that is deliberate: a string with
+      // no colour escape -- which is nearly every string on screen -- must not start taking a
+      // different code path through the rasterizer, because summing per-run advances is not exactly
+      // `measureText` of the whole line (the shaper may kern across the join). Only a line that
+      // genuinely carries a colour run pays that.
+      const pieces = runsFor(spans, lineStarts[row], lineStarts[row] + line.length);
+      if (pieces.length === 1 && pieces[0].color === null) {
+        target.fillStyle = spec.color;
+        target.fillText(line, x, y);
+        return;
+      }
+      let penX = x;
+      for (const piece of pieces) {
+        const runText = plain.slice(piece.start, piece.end);
+        if (runText === '') {
+          continue;
+        }
+        target.fillStyle = piece.color ?? spec.color;
+        target.fillText(runText, penX, y);
+        penX += context.measureText(runText).width;
+      }
     });
 
     const texture = new THREE.CanvasTexture(canvas);
