@@ -213,6 +213,25 @@ export class GlueApp {
     // nothing and immediately re-entering the screen just mounted.
     this.unsubscribeSession = this.session.protocol.on(this.onSessionState);
 
+    // RECONCILE, because the subscription above is an EDGE and this method awaited before reaching it.
+    //
+    // THIS IS THE WORLD-ENTRY BUG, measured rather than reasoned about. `on()` has no replay: a stage
+    // change emitted before this line reaches a listener set that does not contain us, and nothing
+    // ever re-reads the stage. Everything above -- `loadGlueFonts()` and `GlueStrings.load()` -- is a
+    // network fetch, so the window is hundreds of milliseconds wide and widens when the asset host is
+    // slow. A login that completes inside it (a script driving the session, a returning player whose
+    // credentials are saved, a fast realm) sets `InWorld` with nobody listening, and the client sits
+    // on the glue route forever with a fully entered world behind it.
+    //
+    // MEASURED on three consecutive attempts: `enterWorld` resolved in ~1.2 s, `window.GameScreen`
+    // was never constructed, and `location` never left `/?ui=lua` -- while 411 assets loaded with 0
+    // failures and 0 requests pending, which is what rules out the asset stall it had been mistaken
+    // for across three rounds.
+    //
+    // Safe to run unconditionally: `onSessionState` early-outs when the target state is the one just
+    // mounted, and `enteredWorld` latches so a later real emission cannot double-fire the transition.
+    this.onSessionState(this.session.protocol.state);
+
     this.lastTime = performance.now();
     this.frame = requestAnimationFrame(this.tick);
   }
