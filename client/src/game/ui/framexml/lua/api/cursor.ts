@@ -345,6 +345,19 @@ export function installCursorApi(vm: LuaVM): void {
   fn('CursorHasItem', () => [false]);
 
   /**
+   * `GetCursorMoney()` -- 0, and a TRUE answer for the same reason `CursorHasItem` is false: nothing in
+   * this client can put currency on the cursor (`DropCursorMoney` just below is the declared gap that
+   * says so). 0 is what the real client answers with an empty cursor.
+   *
+   * ITS ABSENCE WAS BLOCKING EVERY CONTAINER FRAME, which is why it is here rather than left out.
+   * `MoneyFrame.lua:19` calls it at `MoneyFrame_OnLoad`, and every one of the thirteen
+   * `ContainerFrame<n>MoneyFrame` regions raised
+   * `attempt to call a nil value (global 'GetCursorMoney')` at load -- measured, thirteen errors in the
+   * world load report, one per bag frame.
+   */
+  fn('GetCursorMoney', () => [0]);
+
+  /**
    * A declared gap: money on the cursor, which `ContainerFrame` and `MerchantFrame` both test for
    * (`containerframe.lua:697-705`). Registered by name so the load report carries it, through the same
    * adaptation `api/actions.ts:367-373` documents.

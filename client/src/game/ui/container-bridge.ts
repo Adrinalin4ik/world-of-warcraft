@@ -47,6 +47,7 @@ import type World from '../world';
 import { LuaVM } from './framexml/lua/vm';
 import { notImplemented } from './framexml/lua/methods/region';
 import { fireEvent } from './framexml/lua/events';
+import { setCoinage } from './framexml/lua/api/items';
 import { GlueArt } from './art';
 import {
   ContainerField, ItemField, ObjectField, ObjectType, PlayerField,
@@ -574,6 +575,15 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       for (const bagId of [BACKPACK_CONTAINER, 1, 2, 3, 4, KEYRING_CONTAINER]) {
         fireEvent(vm, 'BAG_UPDATE', [bagId]);
       }
+      // The purse rides the same descriptor flush as the bags (`PLAYER_FIELD_COINAGE` is one word on
+      // the same object), so its event belongs on the same edge. `MoneyFrame.lua` registers
+      // `PLAYER_MONEY` and re-reads `GetMoney` from it; without this the bag's coin line would show
+      // whatever it read at load and never move. Looting money is the case that matters.
+      // The purse's VALUE, pushed to where the global that answers it lives. `GetMoney` is installed
+      // in `api/items.ts` BEFORE the manifest, because `MoneyFrame_OnLoad` calls it during the load;
+      // only the number may arrive this late. See that file's header for the measurement.
+      setCoinage(vm, fieldAt(items.player(), ObjectType.Player, PlayerField.player_field_coinage));
+      fireEvent(vm, 'PLAYER_MONEY');
     });
   };
 
@@ -593,6 +603,20 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    * it.
    */
   const gaps: Array<[string, string, unknown[]]> = [
+    // THE ONE THAT WAS BLOCKING THE WHOLE FRAME, and it was found by pcall-ing the client's own
+    // function rather than guessed: `ToggleBag(0)` threw
+    // `containerframe.lua:507: attempt to call a nil value (global 'SetBagPortraitTexture')`, so
+    // `ContainerFrame_GenerateFrame` never reached the `frame:Show()` below it and the backpack stayed
+    // hidden at the default id 100 with every bag global already answering correctly.
+    //
+    // Declared rather than implemented, and deliberately: it is the PORTRAIT family, whose siblings
+    // `SetPortraitTexture` and `SetPortraitToTexture` are already declared gaps in `api/units.ts:518`
+    // for the same reason -- this client has no portrait render target. The keyring branch two lines
+    // above the call site takes `SetPortraitToTexture`, so implementing one and not the other would
+    // leave the two halves of one decision inconsistent. A declared stub RETURNS, which is all
+    // `GenerateFrame` needs to finish.
+    ['SetBagPortraitTexture', 'no portrait render target exists in this client -- the same gap '
+      + 'SetPortraitTexture/SetPortraitToTexture are declared for in api/units.ts', []],
     ['PickupContainerItem', 'there is no item on this client\'s cursor: the cursor carries actions and '
       + 'spells only (api/cursor.ts), so an item pickup has nowhere to be held', []],
     ['SplitContainerItem', 'splitting needs the cursor a pickup would put the stack on', []],

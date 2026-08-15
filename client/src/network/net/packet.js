@@ -45,6 +45,38 @@ class Packet extends ByteBuffer {
     return this;
   }
 
+  /**
+   * A null-terminated string that ALWAYS consumes its terminator.
+   *
+   * **`byte-buffer`'s own `readCString` does not.** Read it (`byte-buffer/dist/byte-buffer.js:371-388`):
+   * it scans to the null, and when the run length is zero it `return null` WITHOUT advancing the
+   * index. So a non-empty string costs `length + 1` bytes and an EMPTY one costs **zero**. Every
+   * caller that reads a fixed number of strings and then keeps reading is desynced by one byte per
+   * empty string, and the desync is invisible at the first string -- which is always the populated
+   * one, and always the one a developer spot-checks.
+   *
+   * This was MEASURED, not reasoned about. `SMSG_ITEM_QUERY_SINGLE_RESPONSE` carries four name slots
+   * of which the server fills one, and the three empty ones cost 0 bytes instead of 3: Hearthstone's
+   * `displayInfoID` came back `0x12000000` where the true value is `6418 = 0x1912`, i.e. the read
+   * landed exactly three bytes early, and `quality` came back `0x01000019` -- the tail of the display
+   * id with the real quality byte `0x01` sitting in the top byte. The name decoded perfectly in the
+   * same packet, which is precisely why nothing noticed.
+   *
+   * `''`, not `null`, for the empty case: a decoder that reads a name should get a string.
+   */
+  readCStr() {
+    const value = this.readCString();
+    if (value === null) {
+      // The empty case. Consume the terminator byte that `readCString` left behind -- unless the
+      // buffer is genuinely exhausted, where advancing would throw on a packet that simply ended.
+      if (this.available > 0) {
+        this.readUnsignedByte();
+      }
+      return '';
+    }
+    return value;
+  }
+
   // Reads GUID from this packet
   readGUID() {
     return new GUID(this.read(GUID.LENGTH));

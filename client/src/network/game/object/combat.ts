@@ -270,12 +270,18 @@ export class CombatHandler extends EventEmitter {
       return;
     }
     const entry = raw;
-    const name = gp.readCString();
-    gp.readCString();
-    gp.readCString();
-    gp.readCString();
-    gp.readCString(); // SubName
-    gp.readCString(); // IconName -- 3.3.5a only; see above
+    // `readCStr`, NOT `readCString`, AND THIS WAS A LIVE DEFECT -- byte-buffer's reader does not
+    // consume the terminator of an EMPTY string (`net/packet.js#readCStr` carries the measurement).
+    // For an ordinary creature FIVE of these six are empty -- the three unused name slots, the
+    // subname and the icon name -- so `rank` below was read **five bytes early**, out of the middle
+    // of `type_flags`/`type`. `name` is the first string and decodes correctly either way, which is
+    // exactly why this survived: the classification was wrong and the name was right.
+    const name = gp.readCStr();
+    gp.readCStr();
+    gp.readCStr();
+    gp.readCStr();
+    gp.readCStr(); // SubName
+    gp.readCStr(); // IconName -- 3.3.5a only; see above
     gp.readUnsignedInt(); // type_flags
     gp.readUnsignedInt(); // type (CreatureType.dbc)
     gp.readUnsignedInt(); // family

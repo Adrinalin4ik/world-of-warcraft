@@ -60,6 +60,26 @@
 import { LuaVM } from '../vm';
 
 /**
+ * THE PURSE, in copper, per VM.
+ *
+ * `WeakMap<LuaVM, ...>` and not a module-level number, mirroring `api/casting.ts:59-67`: the state
+ * belongs to one VM and must not survive into the next one a relog builds.
+ *
+ * IT LIVES HERE, INSTALLED BEFORE THE MANIFEST, AND THAT PLACEMENT IS THE WHOLE POINT.
+ * `GetMoney` was first written as a real global on `ui/container-bridge.ts`, which attaches AFTER the
+ * tree is built -- and `MoneyFrame.lua:19` calls it from `MoneyFrame_OnLoad`, i.e. DURING the load. The
+ * result was measured: thirteen `attempt to call a nil value (global 'GetMoney')` errors, one per
+ * `ContainerFrame<n>MoneyFrame`, and no bag could show a coin. An engine global a document calls at
+ * OnLoad has to exist before the document does; only its DATA may arrive late.
+ */
+const coinageByVm = new WeakMap<LuaVM, number>();
+
+/** The container bridge pushes the live `PLAYER_FIELD_COINAGE` here on every descriptor flush. */
+export function setCoinage(vm: LuaVM, copper: number): void {
+  coinageByVm.set(vm, copper);
+}
+
+/**
  * Quality -> `[r, g, b]` as 0..1 floats, indexed 0..7.
  *
  * 0 Poor (grey), 1 Common (white), 2 Uncommon (green), 3 Rare (blue), 4 Epic (purple),
@@ -101,5 +121,89 @@ export function installItemsApi(vm: LuaVM): void {
       : 0;
     const [r, g, b] = QUALITY_COLORS[index];
     return [r, g, b, colorCode(r, g, b)];
+  });
+
+  /**
+   * `GetMoney()` -- the purse in COPPER, from `PLAYER_FIELD_COINAGE` (`enums.ts:464`).
+   *
+   * 0 until the container bridge pushes our own character's descriptor words, which is correct rather
+   * than a stub: before the create block lands this client genuinely does not know the purse. This was
+   * a DECLARED GAP in `api/units.ts` reading "PLAYER_FIELD_COINAGE is not read yet"; the field is read
+   * now, so the declaration is gone rather than left describing a gap that has closed.
+   */
+  vm.registerFunction('GetMoney', () => [coinageByVm.get(vm) ?? 0]);
+
+  /**
+   * `GetPlayerTradeMoney()` -- 0, and a TRUE answer rather than a stub: no trade window is decoded, so
+   * no money can be staked in one.
+   *
+   * `MoneyFrame.lua:18` displays `GetMoney() - GetCursorMoney() - GetPlayerTradeMoney()`. All three are
+   * on ONE expression evaluated at `MoneyFrame_OnLoad`, so a single missing one takes the whole line
+   * down -- which is how this was found: closing `GetCursorMoney` surfaced this, and closing this
+   * surfaced `GetMoney`. Fixing them one at a time is what named all three.
+   */
+  vm.registerFunction('GetPlayerTradeMoney', () => [0]);
+
+  /**
+   * `GetInventorySlotInfo(slotName)` -> `slotID, textureName, checkRelic`.
+   *
+   * ANOTHER OnLoad-TIME GLOBAL, which is why it is installed here rather than on the container bridge:
+   * `PaperDollFrame.lua:1130-1136` calls it from `PaperDollItemSlotButton_OnLoad` and immediately
+   * `self:SetID(id)`. With it nil, `CharacterBag0Slot..Bag3Slot` never got an id -- measured, four
+   * errors in the world load report -- and the bag bar's own arithmetic
+   * (`containerframe.lua:804`, `bagButton:GetID() - CharacterBag0Slot:GetID() + 1`) reduces to
+   * nonsense. The caller passes `strsub(slotName, 10)`, i.e. `"CharacterBag0Slot"` -> `"Bag0Slot"`.
+   *
+   * **The IDS are 1-based inventory slots and are the same numbering `GetInventoryItemTexture` reads**
+   * -- `PLAYER_FIELD_INV_SLOT_HEAD + (id - 1) * 2` -- so head is 1, the four bags are 20..23, and ammo
+   * is 0. That self-consistency with this client's own field table is the check on them; the ORDER
+   * itself is engine-side and is transcribed, said plainly.
+   *
+   * **The TEXTURE stems were VERIFIED against the asset host rather than transcribed on trust**: every
+   * `interface/paperdoll/ui-paperdoll-slot-<stem>.blp` below answers 200, and `-back` answers **404**,
+   * which is why `BackSlot` takes the Chest art. That 404 is the only reason to believe the Back entry
+   * rather than guess it.
+   *
+   * `checkRelic` is nil for every slot: it marks the ranged slot of a class whose "ranged" is a relic
+   * (paladin/druid/shaman), and this client decodes no such class rule. Named rather than faked -- the
+   * only effect is which empty-slot art the ranged button shows.
+   */
+  const PAPERDOLL = 'Interface\PaperDoll\UI-PaperDoll-Slot-';
+  const SLOTS: ReadonlyArray<readonly [string, number, string]> = [
+    ['AmmoSlot', 0, 'Ammo'],
+    ['HeadSlot', 1, 'Head'],
+    ['NeckSlot', 2, 'Neck'],
+    ['ShoulderSlot', 3, 'Shoulder'],
+    ['ShirtSlot', 4, 'Shirt'],
+    ['ChestSlot', 5, 'Chest'],
+    ['WaistSlot', 6, 'Waist'],
+    ['LegsSlot', 7, 'Legs'],
+    ['FeetSlot', 8, 'Feet'],
+    ['WristSlot', 9, 'Wrists'],
+    ['HandsSlot', 10, 'Hands'],
+    ['Finger0Slot', 11, 'Finger'],
+    ['Finger1Slot', 12, 'Finger'],
+    ['Trinket0Slot', 13, 'Trinket'],
+    ['Trinket1Slot', 14, 'Trinket'],
+    // `-back` is a 404 on the asset host; the client's back slot uses the Chest art.
+    ['BackSlot', 15, 'Chest'],
+    ['MainHandSlot', 16, 'MainHand'],
+    ['SecondaryHandSlot', 17, 'SecondaryHand'],
+    ['RangedSlot', 18, 'Ranged'],
+    ['TabardSlot', 19, 'Tabard'],
+    ['Bag0Slot', 20, 'Bag'],
+    ['Bag1Slot', 21, 'Bag'],
+    ['Bag2Slot', 22, 'Bag'],
+    ['Bag3Slot', 23, 'Bag'],
+  ];
+  const slotsByName = new Map(SLOTS.map(([name, id, stem]) => [
+    name.toLowerCase(), [id, `${PAPERDOLL}${stem}`] as const,
+  ]));
+  vm.registerFunction('GetInventorySlotInfo', (args) => {
+    const row = slotsByName.get(String(args[0] ?? '').toLowerCase());
+    if (row === undefined) {
+      return [];
+    }
+    return [row[0], row[1], null];
   });
 }

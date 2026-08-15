@@ -649,7 +649,11 @@ export function installUnitsApi(vm: LuaVM): void {
     // (`actionbarframe.xml:19`). A hard `false` here would have shadowed it in the world, which is exactly
     // the defect the three keys above suffered.
     ['GetBindingKey', 'no keybinding table exists in this client', []],
-    ['GetMoney', 'PLAYER_FIELD_COINAGE is not read yet', [0]],
+    // `GetMoney` IS NO LONGER HERE. `PLAYER_FIELD_COINAGE` is read now -- `ItemHandler` accumulates our
+    // own character's descriptor words -- so it is a REAL global in `ui/container-bridge.ts`, beside the
+    // rest of the inventory. It must not also be declared here: `installUnitsApi` runs during the boot,
+    // before the bridge attaches, but a stub registered later or a name resolved through this table
+    // would shadow the real answer, which is the exact defect the `IsModifiedClick` note above records.
   );
 
   /**

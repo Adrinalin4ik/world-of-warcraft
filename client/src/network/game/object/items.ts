@@ -263,12 +263,16 @@ export class ItemHandler extends EventEmitter {
     const itemClass = gp.readUnsignedInt() >>> 0;
     const subClass = gp.readUnsignedInt() >>> 0;
     gp.readInt(); // soundOverrideSubclass -- 2.x insertion, -1 when unset
-    const name = gp.readCString();
+    const name = gp.readCStr();
     // Three empty name slots. The server writes four and fills one (`items.rs:349-351`); this has not
     // changed, and skipping them by count rather than by content is what keeps a localised build that
     // fills name2 from desyncing.
+    //
+    // `readCStr`, NOT `readCString`: byte-buffer's own reader does not consume the terminator of an
+    // EMPTY string, so these three cost zero bytes instead of three and every field below lands three
+    // bytes early. That was measured on this exact packet -- see `net/packet.js#readCStr`.
     for (let i = 0; i < 3; ++i) {
-      gp.readCString();
+      gp.readCStr();
     }
     const displayInfoId = gp.readUnsignedInt() >>> 0;
     const quality = gp.readUnsignedInt() >>> 0;
@@ -329,7 +333,7 @@ export class ItemHandler extends EventEmitter {
       gp.readInt(); // spellCategoryCooldown
     }
     const bonding = gp.readUnsignedInt() >>> 0;
-    const description = gp.readCString();
+    const description = gp.readCStr();
     gp.readUnsignedInt(); // pageText
     gp.readUnsignedInt(); // languageID
     gp.readUnsignedInt(); // pageMaterial
