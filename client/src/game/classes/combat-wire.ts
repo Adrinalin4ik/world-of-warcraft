@@ -147,10 +147,20 @@ class CombatLogWire {
   }
 
   /**
-   * Per opcode: how many arrived, and -- the column that matters -- the DISTINCT residuals
+   * Per opcode: how many rows arrived, and -- the column that matters -- the DISTINCT residuals
    * (`bodySize - consumed`). A correct layout gives ONE residual value repeated; a set of scattered
    * residuals is a decode that is guessing, and a residual that grows with the packet is a loop read
    * at the wrong stride.
+   *
+   * TWO SYNTHETIC OPCODE SUFFIXES appear here and both are failures made visible rather than swallowed:
+   * `!THREW` is a decode that ran past its frame (`combat-log.ts#subscribe` caught it), and `!EMPTY` is
+   * a loop-bearing packet whose count came out zero -- the case that would otherwise leave the census
+   * with no row at all, which was this instrument's one blind spot.
+   *
+   * **A CAVEAT ON `consumed` FOR THE LOOP-BEARING OPCODES**: it is read AFTER the loop, so every row of
+   * one packet carries that packet's WHOLE consumption. The distinct-residual set is unaffected (they
+   * collapse), but a per-entry stride error cannot be LOCALISED from this column -- only the aggregate
+   * is visible. Stated so nobody reads more precision out of it than it has.
    */
   census(): unknown {
     const groups = new Map<string, CombatLogWireRow[]>();
@@ -161,7 +171,10 @@ class CombatLogWire {
     }
     return [...groups.entries()].map(([opcode, rows]) => ({
       opcode,
-      packets: rows.length,
+      // ROWS, NOT PACKETS -- and self-review is what corrected the label. The periodic log and the miss
+      // log push ONE ROW PER ENTRY, so a five-tick DoT is five rows from one packet. Calling this
+      // `packets` made an instrument report a number that was not the quantity it named.
+      rows: rows.length,
       residuals: [...new Set(rows.map((r) => r.bodySize - r.consumed))].sort((a, b) => a - b),
       amounts: [...new Set(rows.map((r) => r.amount))].sort((a, b) => a - b).slice(0, 12),
       crits: rows.filter((r) => r.crit).length,

@@ -66,7 +66,7 @@ import {
 } from '../classes/combat-text';
 import { FontStringTextures } from '../ui/text';
 import type { FontSpec } from '../ui/widget';
-import { overheadAnchor } from './nameplates';
+import { PLATE_RENDER_CEILING, overheadAnchor } from './nameplates';
 
 /**
  * A live text. `unit` is held so the number tracks a walking victim, which the reference does too --
@@ -320,9 +320,15 @@ export class FloatingCombatText {
     });
     const sprite = new THREE.Sprite(material);
     sprite.frustumCulled = false;
-    // ABOVE the plates (10000 + 0..4). A number that sorts under the brass frame it was lifted clear of
-    // would be invisible for the sake of a sort accident.
-    sprite.renderOrder = 10100;
+    // ABOVE EVERY PLATE, derived rather than copied. This was `10100` against a plate band of
+    // `10000 + 0..4`, and when the plates gained a per-plate depth band that literal fell INSIDE it --
+    // a plate at depth rank 13 reaches 10104 and would have drawn over the number. Self-review caught
+    // it in the same round that introduced it. `PLATE_RENDER_CEILING` is the plates' own maximum, so
+    // the separation is now a fact about the code rather than an agreement between two literals.
+    //
+    // A number that sorts under the brass frame it was lifted clear of would be invisible for the sake
+    // of a sort accident -- which is the whole reason this is above them and not merely near them.
+    sprite.renderOrder = PLATE_RENDER_CEILING + 1;
     return sprite;
   }
 

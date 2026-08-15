@@ -51,11 +51,23 @@
  * Because the source is a server implementation, every decode here reports `consumed` against
  * `bodySize` into `classes/combat-wire.ts#combatLogWire`, and `census()` groups the RESIDUAL per
  * opcode. A correct layout consumes each body to ONE repeated residual; a wrong one scatters, and a
- * loop read at the wrong stride produces a residual that grows with the packet. That ring is the only
- * oracle these layouts have and it is the same instrument `handleAttackerState` already validates
- * itself with. A decode whose residual is negative -- it ran off the end -- announces NOTHING and says
- * so once, because a plausible number invented out of a misaligned read is the exact failure mode this
- * project keeps deleting.
+ * loop read at the wrong stride produces a residual that grows with the packet.
+ *
+ * **AN OVER-READ THROWS, IT DOES NOT RETURN GARBAGE, and a first version of this file got that exactly
+ * backwards.** It claimed "every value after the overrun is whatever `ByteBuffer` returned past the
+ * frame" and guarded with `consumed > bodySize`. Both were wrong, and self-review found it:
+ *
+ *  - `bodySize` IS `length - headerSize` (`network/net/packet.js:28-30`) and `index <= length` always,
+ *    so `consumed > bodySize` is an arithmetic impossibility. The guard was DEAD CODE and the warning
+ *    it fronted could never print.
+ *  - `byte-buffer` RAISES on a short read (`dist/byte-buffer.js:584-586`, "Cannot read N byte(s)").
+ *    Nothing caught it, and `GameHandler#dataReceived` (`network/game/handler.js:199-201`) emits with
+ *    no `try`, so a wrong layout would have escaped the receive loop and aborted every packet still
+ *    buffered in that data event -- a far worse failure than the invented number the guard was
+ *    supposed to prevent, and a silent one.
+ *
+ * So the real guard is `subscribe()` below: it CATCHES that throw, announces nothing, and says so once.
+ * The residual is still recorded and is still the oracle for a layout that is wrong but in range.
  */
 import EventEmitter from 'events';
 
@@ -114,11 +126,50 @@ export class CombatLogHandler extends EventEmitter {
   constructor(gameHandler: GameHandler) {
     super();
     this.game = gameHandler;
-    this.game.on('packet:receive:SMSG_SPELLNONMELEEDAMAGELOG', this.handleSpellDamage.bind(this));
-    this.game.on('packet:receive:SMSG_PERIODICAURALOG', this.handlePeriodicAura.bind(this));
-    this.game.on('packet:receive:SMSG_SPELLHEALLOG', this.handleSpellHeal.bind(this));
-    this.game.on('packet:receive:SMSG_SPELLENERGIZELOG', this.handleSpellEnergize.bind(this));
-    this.game.on('packet:receive:SMSG_SPELLLOGMISS', this.handleSpellLogMiss.bind(this));
+    // EVERY ARM GOES THROUGH `subscribe`, which is the layouts' actual safety net -- see the header for
+    // why the arithmetic guard that used to front them could never fire.
+    this.subscribe('SMSG_SPELLNONMELEEDAMAGELOG', this.handleSpellDamage);
+    this.subscribe('SMSG_PERIODICAURALOG', this.handlePeriodicAura);
+    this.subscribe('SMSG_SPELLHEALLOG', this.handleSpellHeal);
+    this.subscribe('SMSG_SPELLENERGIZELOG', this.handleSpellEnergize);
+    this.subscribe('SMSG_SPELLLOGMISS', this.handleSpellLogMiss);
+  }
+
+  /**
+   * Subscribe one arm, with the over-read catch around it.
+   *
+   * `byte-buffer` throws when a read runs past the frame, and this family's layouts come from a server
+   * implementation -- so a wrong one is a REAL possibility rather than a theoretical one. Uncaught, that
+   * throw escapes `GameHandler#dataReceived`'s receive loop and takes every packet still buffered in
+   * that data event with it: the world would stall on a combat-log packet and nothing would say why.
+   * Caught, the packet announces nothing and the shape is named once.
+   */
+  private subscribe(name: string, arm: (gp: GamePacket) => void): void {
+    this.game.on(`packet:receive:${name}`, (gp: GamePacket) => {
+      const bodySize = gp.bodySize;
+      try {
+        arm.call(this, gp);
+      } catch (e) {
+        // The residual is recorded even here, so a layout that over-reads still leaves a census row --
+        // otherwise the failure that matters most would be the one the instrument cannot see.
+        combatLogWire.record({
+          at: performance.now(),
+          opcode: `${name}!THREW`,
+          target: '',
+          caster: '',
+          spellId: 0,
+          amount: 0,
+          school: 0,
+          absorb: 0,
+          resist: 0,
+          crit: false,
+          missCode: null,
+          bodySize,
+          consumed: gp.index - gp.headerSize,
+        });
+        this.warnOnce(name, `read past the ${bodySize} B body -- ${(e as Error).message}`);
+      }
+    });
   }
 
   /**
@@ -162,9 +213,7 @@ export class CombatLogHandler extends EventEmitter {
     // would show up as a positive residual in the census rather than as a wrong number.
     gp.readUnsignedByte();
 
-    if (!this.validate('SMSG_SPELLNONMELEEDAMAGELOG', gp, bodySize)) {
-      return;
-    }
+    this.validate('SMSG_SPELLNONMELEEDAMAGELOG', gp, bodySize);
     combatLogWire.record({
       at: performance.now(),
       opcode: 'SMSG_SPELLNONMELEEDAMAGELOG',
@@ -206,9 +255,11 @@ export class CombatLogHandler extends EventEmitter {
 
     const ticks: PeriodicTick[] = [];
     for (let i = 0; i < count; ++i) {
-      // The body is its own frame, so a count read out of a misaligned offset could be enormous. The
-      // bound is the remaining body, not a chosen constant: no tick payload is under 4 bytes.
-      if (gp.index + 8 > gp.length) {
+      // The body is its own frame, so a count read out of a misaligned offset could be enormous.
+      // **12, NOT 8, and the comment that used to be here had the payload table wrong**: the SMALLEST
+      // entry is `auraType u32` + the energize arm's `power u32 + amount u32` = 12 bytes. Self-review
+      // caught the old "no tick payload is under 4 bytes" against `readPeriodicTick`'s own arms.
+      if (gp.index + 12 > gp.length) {
         this.warnOnce('SMSG_PERIODICAURALOG', `count ${count} runs past the body (${bodySize} B)`);
         return;
       }
@@ -221,8 +272,28 @@ export class CombatLogHandler extends EventEmitter {
       ticks.push(tick);
     }
 
-    if (!this.validate('SMSG_PERIODICAURALOG', gp, bodySize)) {
-      return;
+    this.validate('SMSG_PERIODICAURALOG', gp, bodySize);
+    // A `count` OF ZERO MUST STILL LEAVE A ROW, and self-review found this hole: the records below are
+    // written inside the loop, so a count misread as 0 -- which is exactly what a wrong offset in the
+    // header region produces, a misaligned u32 very often landing on zero bytes -- consumed the wrong
+    // number of bytes, announced nothing and left the census with NOTHING TO SHOW. The instrument built
+    // to catch a wrong-but-in-range layout was blind to the likeliest form of it.
+    if (ticks.length === 0) {
+      combatLogWire.record({
+        at: performance.now(),
+        opcode: 'SMSG_PERIODICAURALOG!EMPTY',
+        target,
+        caster,
+        spellId,
+        amount: 0,
+        school: 0,
+        absorb: 0,
+        resist: 0,
+        crit: false,
+        missCode: null,
+        bodySize,
+        consumed: gp.index - gp.headerSize,
+      });
     }
     for (const tick of ticks) {
       combatLogWire.record({
@@ -346,9 +417,7 @@ export class CombatLogHandler extends EventEmitter {
     const absorb = gp.readUnsignedInt() >>> 0;
     const crit = gp.readUnsignedByte() !== 0;
 
-    if (!this.validate('SMSG_SPELLHEALLOG', gp, bodySize)) {
-      return;
-    }
+    this.validate('SMSG_SPELLHEALLOG', gp, bodySize);
     combatLogWire.record({
       at: performance.now(),
       opcode: 'SMSG_SPELLHEALLOG',
@@ -391,9 +460,7 @@ export class CombatLogHandler extends EventEmitter {
     const power = gp.readUnsignedInt() >>> 0;
     const amount = gp.readUnsignedInt() >>> 0;
 
-    if (!this.validate('SMSG_SPELLENERGIZELOG', gp, bodySize)) {
-      return;
-    }
+    this.validate('SMSG_SPELLENERGIZELOG', gp, bodySize);
     combatLogWire.record({
       at: performance.now(),
       opcode: 'SMSG_SPELLENERGIZELOG',
@@ -441,7 +508,9 @@ export class CombatLogHandler extends EventEmitter {
 
     const misses: { target: string; code: number }[] = [];
     for (let i = 0; i < count; ++i) {
-      if (gp.index + 9 > gp.length) {
+      // 8 (full guid) + 1 (missInfo), and 8 more when `useExtended` widens each entry by two floats --
+      // the guard has to follow the flag it already read, which the first version did not.
+      if (gp.index + (useExtended !== 0 ? 17 : 9) > gp.length) {
         this.warnOnce('SMSG_SPELLLOGMISS', `count ${count} runs past the body (${bodySize} B)`);
         return;
       }
@@ -454,8 +523,24 @@ export class CombatLogHandler extends EventEmitter {
       misses.push({ target, code });
     }
 
-    if (!this.validate('SMSG_SPELLLOGMISS', gp, bodySize)) {
-      return;
+    this.validate('SMSG_SPELLLOGMISS', gp, bodySize);
+    // The same zero-count hole as the periodic log; see there.
+    if (misses.length === 0) {
+      combatLogWire.record({
+        at: performance.now(),
+        opcode: 'SMSG_SPELLLOGMISS!EMPTY',
+        target: '',
+        caster,
+        spellId,
+        amount: 0,
+        school: 0,
+        absorb: 0,
+        resist: 0,
+        crit: false,
+        missCode: null,
+        bodySize,
+        consumed: gp.index - gp.headerSize,
+      });
     }
     for (const miss of misses) {
       combatLogWire.record({
@@ -478,23 +563,34 @@ export class CombatLogHandler extends EventEmitter {
   }
 
   /**
-   * DID THE LAYOUT ADD UP? The only check these server-sourced layouts have.
+   * DID THE LAYOUT ADD UP? Recorded, not enforced -- and the difference matters.
    *
-   * A decode that ran PAST the end of the body announces nothing: every value after the overrun is
-   * whatever `ByteBuffer` returned past the frame, and floating an invented number is worse than
-   * floating none. A decode that stopped SHORT is allowed -- these packets have optional and unread
-   * tails, exactly as `SMSG_CREATURE_QUERY_RESPONSE` does -- but the residual is recorded either way
-   * and `combatLogWire.census()` is where a wrong-but-in-range layout shows itself, as a scattered or
-   * growing residual instead of one repeated value.
+   * **THIS USED TO CLAIM IT CAUGHT AN OVERRUN AND IT COULD NOT.** `consumed > bodySize` is an
+   * arithmetic impossibility (`bodySize` is `length - headerSize` and `index <= length`), so the arm
+   * was dead code. The real overrun path is a THROW from `byte-buffer`, which `subscribe` catches; see
+   * the header. This function is kept because the question it asks is still the right one and the
+   * ANSWER is still the oracle -- it is just an observation rather than a gate.
+   *
+   * A short read is legitimate: these packets have optional and unread tails, exactly as
+   * `SMSG_CREATURE_QUERY_RESPONSE` does. `combatLogWire.census()` is where a wrong-but-in-range layout
+   * shows itself, as a scattered or growing residual instead of one repeated value.
    */
   private validate(opcode: string, gp: GamePacket, bodySize: number): boolean {
     const consumed = gp.index - gp.headerSize;
-    if (consumed > bodySize) {
-      this.warnOnce(opcode, `read ${consumed} B of a ${bodySize} B body -- the layout is wrong and nothing was announced`);
-      return false;
+    if (consumed !== bodySize) {
+      this.residualSeen.add(`${opcode}:${bodySize - consumed}`);
     }
     return true;
   }
+
+  /**
+   * Distinct `opcode:residual` pairs observed, readable beside the census.
+   *
+   * A SET rather than a counter, deliberately: the reading that matters is how MANY distinct residuals
+   * an opcode produced, because one repeated value means the layout closes and a spread means it does
+   * not. A count of non-zero residuals would answer a question nobody asked.
+   */
+  public residualSeen = new Set<string>();
 
   /** One warning per opcode per distinct message -- these repeat at the tick rate of a DoT. */
   private warned = new Set<string>();

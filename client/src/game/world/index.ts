@@ -97,12 +97,6 @@ export default class World extends EventEmitter {
   private readonly combatWords = new Map<string, string | null>();
 
   /**
-   * One outcome word, memoized. Crossing the Lua boundary per swing would be the opposite of what the
-   * owner asked for on cost, and the answer cannot change within a session -- `CombatFeedbackText` is
-   * built once at load from the localized globals. A MISS is cached too, so a runtime that has not
-   * answered is not re-asked forever: `has` rather than a truthiness test is what makes that work.
-   */
-  /**
    * Queue one floater for the next frame, bounded.
    *
    * BOUNDED, and a self-review of the melee arm is what found the need: the queue drains in `animate`,
@@ -121,6 +115,12 @@ export default class World extends EventEmitter {
     this.pendingCombatText.push({ unit, category, text, color });
   }
 
+  /**
+   * One outcome word, memoized. Crossing the Lua boundary per swing would be the opposite of what the
+   * owner asked for on cost, and the answer cannot change within a session -- `CombatFeedbackText` is
+   * built once at load from the localized globals. A MISS is cached too, so a runtime that has not
+   * answered is not re-asked forever: `has` rather than a truthiness test is what makes that work.
+   */
   private combatWordCached(key: string): string | null {
     if (this.combatWords.has(key)) {
       return this.combatWords.get(key) ?? null;

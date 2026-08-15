@@ -330,11 +330,28 @@ const MAX_PLATES = 20;
  * rank assigned FAR-to-NEAR so a nearer plate always sorts later, i.e. on top, as a whole unit.
  *
  * The stride must exceed the number of sprites in a plate (5) or two plates' rungs would interleave
- * again; 8 is the next power of two and leaves room for a sixth region. `MAX_PLATES` is 20, so the
- * band spans 10000..10163 and stays clear of the floating combat text, which sorts above it.
+ * again; 8 is the next power of two and leaves room for a sixth region.
+ *
+ * **THE BAND NOW HAS A CEILING, AND SELF-REVIEW IS WHAT FOUND IT.** The first version of this comment
+ * claimed the band "spans 10000..10163 and stays clear of the floating combat text". Both halves were
+ * wrong: the real maximum is `10000 + 19*8 + 4 = 10156`, and the floating combat text sat at a
+ * hardcoded **10100**, which is INSIDE the band. A plate at depth rank 13 or beyond reaches 10104 and
+ * would have drawn its bar, frame, name and level OVER the damage numbers -- and the nearest plates
+ * are exactly the units being fought, i.e. the ones with numbers over them. That would have been a
+ * regression introduced by the commit that fixed the plate sort, defeating the previous round's own
+ * floater work.
+ *
+ * `PLATE_RENDER_CEILING` is exported and `world/floating-text.ts` sorts ABOVE it by construction, so
+ * the two cannot drift apart again the way a pair of hand-kept constants just did.
  */
 const PLATE_RENDER_BASE = 10000;
 const PLATE_DEPTH_STRIDE = 8;
+
+/**
+ * The highest `renderOrder` any plate sprite can take: the furthest-rank band plus the last region.
+ * Anything that must draw over every plate sorts above THIS, not above a copied literal.
+ */
+export const PLATE_RENDER_CEILING = PLATE_RENDER_BASE + (MAX_PLATES - 1) * PLATE_DEPTH_STRIDE + 8;
 
 /**
  * How opaque a plate is when its unit is NOT the current target. The target's plate draws at 1.
