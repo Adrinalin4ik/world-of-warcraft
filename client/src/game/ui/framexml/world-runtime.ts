@@ -101,6 +101,12 @@ export interface WorldRuntimeOptions {
    * Snapshots only. Events belong to the bridges, which attach after the tree exists.
    */
   seed?: (vm: LuaVM) => void;
+  /**
+   * Called during the manifest load with (files executed, total), so a host can drive a real progress
+   * readout. Called only at a YIELD point -- calling it per file would report progress the browser has
+   * no opportunity to draw.
+   */
+  onProgress?: (done: number, total: number) => void;
 }
 
 export interface WorldRuntime {
@@ -111,8 +117,21 @@ export interface WorldRuntime {
   readonly report: LoadReport;
   /** Per file, in load order. */
   readonly files: FileReport[];
-  /** How long the synchronous execution pass took, in ms. Fetching is not counted -- it is async. */
+  /**
+   * Wall clock across the whole execution pass, in ms. Fetching is not counted -- it is async.
+   *
+   * **This is no longer one block.** The loop yields every `YIELD_EVERY` files (see the loop), so this
+   * includes the yields and everything the browser does inside them. `longestBlockMs` is the number
+   * that answers "how long was the screen frozen".
+   */
   readonly loadMs: number;
+  /**
+   * The longest UNBROKEN synchronous span of the execution pass, in ms -- the actual freeze.
+   *
+   * Reported separately because `loadMs` stopped being a block when the yield landed, and a stall
+   * measurement taken from `loadMs` afterwards would silently be measuring something else.
+   */
+  readonly longestBlockMs: number;
   /** Per-frame work the document itself cannot do. Safe to call before/after anything. */
   update(dt: number): void;
   /** THE teardown: `FrameRegistry.reset()` plus the VM itself. */
@@ -218,7 +237,44 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     report.errors.push(`${FRAMEXML_DIR}${TOC}: could not be fetched; nothing was loaded`);
   }
 
+  /**
+   * THE YIELD, and it is what lets the loading screen paint and its bar advance.
+   *
+   * Running the 264 manifest files back to back is a single synchronous task, and nothing paints
+   * inside a task -- so a loading screen presented beforehand would show its FIRST frame and then
+   * freeze solid for the whole load. Awaiting a MACROTASK every `YIELD_EVERY` files gives the browser
+   * a rendering opportunity in between.
+   *
+   * `setTimeout` and not a microtask: a resolved promise drains inside the SAME task, so
+   * `await Promise.resolve()` yields to nothing and would have measured as a fix while changing
+   * nothing on screen.
+   *
+   * **THE TRADE IS REAL AND WAS MEASURED TWICE.** Without a loading screen it was refused: it bought
+   * ~0.7 s off the longest block and cost ~4 s of wall clock, i.e. a LATER interface for a slightly
+   * shorter freeze. With a screen on the glass the same seconds are spent drawing it and streaming the
+   * world rather than staring at nothing, which is why the decision reversed. The extra wall clock is
+   * NOT the timer clamp (16 yields x ~4 ms is ~64 ms); it is the render loop and the asset streaming
+   * getting the main thread back, which is the point.
+   *
+   * Safe between files by construction: the manifest is executed in order either way, and nothing else
+   * touches this VM during the boot -- the bridges attach after `bootWorldRuntime` resolves, and
+   * `WorldUiHost#render` returns immediately while `this.runtime` is unset.
+   *
+   * 16 is ours: ~6% of the manifest, so the bar moves in visible steps.
+   */
+  const YIELD_EVERY = 16;
+  let done = 0;
+  let longestBlockMs = 0;
+  let blockStarted = started;
   for (const file of order) {
+    done += 1;
+    if (done % YIELD_EVERY === 0) {
+      options.onProgress?.(done, order.length);
+      longestBlockMs = Math.max(longestBlockMs, performance.now() - blockStarted);
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise<void>((yielded) => { setTimeout(yielded, 0); });
+      blockStarted = performance.now();
+    }
     const text = resolve(file);
     if (text === null) {
       files.push({ file, kind: 'missing', frames: 0, warnings: [], errors: [`${file}: not found`] });
@@ -289,6 +345,9 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   report.errors.push(...drainScriptErrors());
 
   const loadMs = performance.now() - started;
+  // The tail after the last yield -- the login events and the frame-position pass run in it, so it is
+  // a real candidate for the longest block rather than a rounding detail.
+  longestBlockMs = Math.max(longestBlockMs, performance.now() - blockStarted);
 
   await registerTreeArt(options.art, options.root);
 
@@ -422,6 +481,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     report,
     files,
     loadMs,
+    longestBlockMs,
     update: (dt: number) => {
       caretClock += dt;
       const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;

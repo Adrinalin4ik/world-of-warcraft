@@ -174,6 +174,13 @@ export class WorldUiHost {
   private lastItems: DrawItem[] = [];
 
   private runtime: WorldRuntime | null = null;
+
+  /**
+   * Where the manifest load's progress goes, as a 0..1 fraction. Set by the host's owner; the loading
+   * screen is the only caller. A slot rather than a constructor argument because the screen is the
+   * page's, not this host's.
+   */
+  onLoadProgress: ((fraction: number) => void) | null = null;
   /**
    * Set by `dispose()`. `start()` awaits fonts and then a 20-second manifest load, so a route change
    * during either resumes into a torn-down host -- the same hazard `GlueApp#stopped` guards, and here
@@ -405,6 +412,9 @@ export class WorldUiHost {
       // `unit-bridge.ts#seedUnitSnapshots`. Snapshots only -- the events still come from the bridges
       // below, which need the tree to exist.
       seed: this.world ? (vm) => seedUnitSnapshots(vm, this.world as World) : undefined,
+      // THE LOADING SCREEN'S BAR. A real fraction of the manifest, not a timer: see
+      // `ui/loading-screen.ts` and `world-runtime.ts`'s yield for why it is only called at a yield.
+      onProgress: (done, total) => this.onLoadProgress?.(done / total),
     });
     if (this.stopped) {
       // Superseded by a teardown that ran while the manifest was loading. This boot's runtime is
@@ -1109,11 +1119,11 @@ export class WorldUiHost {
 const REPORTED_ERRORS = 40;
 
 function reportLoad(runtime: WorldRuntime): void {
-  const { report, files, loadMs } = runtime;
+  const { report, files, loadMs, longestBlockMs } = runtime;
   console.log(
     `framexml(world): ${report.frames} frames from ${files.length} files, ` +
       `${report.warnings.length} warnings, ${report.errors.length} errors, ` +
-      `${loadMs.toFixed(0)} ms`,
+      `${loadMs.toFixed(0)} ms (longest block ${longestBlockMs.toFixed(0)} ms)`,
   );
   console.table(
     files.map((file) => ({

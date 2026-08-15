@@ -15,6 +15,7 @@ import { HUD_REPAINT_MS, PerfMonitor } from '../../game/perf';
 import { animCounters } from '../../game/pipeline/m2/anim/counters';
 import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-warm';
 import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
+import { LoadingScreen } from '../../game/ui/loading-screen';
 import { WorldCursorDriver } from '../../game/ui/world-cursor';
 import { CURSOR_POINT, classifyUnitCursor, cursorStem } from '../../game/world/cursor-mode';
 import { pickUnit, pickUnitReport, drawnWorldBox } from '../../game/world/pick';
@@ -114,6 +115,9 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    * against the glue's 17, and every measurement in this repo's perf record was taken without it.
    */
   private ui: WorldUiHost | null = null;
+
+  /** Up from mount until the interface's first draw; null afterwards. See `componentDidMount`. */
+  private loadingScreen: LoadingScreen | null = null;
 
   public depthPass: DepthPass;
 
@@ -256,15 +260,50 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // runs them, tens of seconds on a cold cache, and `render(dt)` is a no-op until it lands -- so
     // awaiting it would be awaiting it in the frame loop.
     if (wantsLuaUi(window.location.search)) {
+      /**
+       * THE LOADING SCREEN, started BEFORE the UI host and torn down after the interface's first
+       * draw. Order is the whole point: a blocked main thread paints nothing, so the screen has to be
+       * up before `bootWorldRuntime` runs or it would never appear at all. See
+       * `game/ui/loading-screen.ts` for why this is engine code rather than a FrameXML document.
+       *
+       * WHICH map is not known yet at mount, and that is why this subscribes rather than reads:
+       * `Player#worldport` is what sets `mapId`, and it runs LATER -- below in this method on the
+       * offline route, and on `SMSG_LOGIN_VERIFY_WORLD` online (`world/index.ts:449`). It emits
+       * `map:change` with the id (`classes/player.ts:26`). `mapId` is also read directly, for the case
+       * where it was already set.
+       */
+      this.loadingScreen = new LoadingScreen(renderer);
+      // The instrument: "no picture" has three distinct causes no screenshot separates -- the map id
+      // never arrived, the DBCs named no screen for it, or the BLP never decoded.
+      (window as never as Record<string, unknown>).loadingScreen = this.loadingScreen;
+      const loadArt = (mapId: number) => {
+        void this.loadingScreen
+          ?.load(mapId)
+          .catch((error) => console.warn('loading screen: art unavailable', error));
+      };
+      const knownMap = this.game.world.player.mapId;
+      if (knownMap !== undefined && knownMap !== null) {
+        loadArt(knownMap);
+      }
+      this.game.world.player.on('map:change', loadArt);
+
       this.ui = new WorldUiHost(
         renderer,
         this.canvas.current as HTMLCanvasElement,
         this.perf.sections,
         this.game.world,
       );
-      void this.ui.start().catch((error) => {
+      // The manifest's own file count drives the bar. Nothing invented: see `world-runtime.ts`.
+      this.ui.onLoadProgress = (fraction) => this.loadingScreen?.setProgress(fraction);
+      void this.ui.start().then(() => {
+        // AFTER the boot resolves, not on a timer: `start()` resolves once the tree is built, the art
+        // is registered and the bridges are attached, which is exactly when the interface can draw.
+        this.dismissLoadingScreen();
+      }).catch((error) => {
         // A boot that fails outright is the one thing `bootWorldRuntime` does not turn into a report
-        // line, so it must not vanish into an unhandled rejection.
+        // line, so it must not vanish into an unhandled rejection. The screen comes down either way --
+        // leaving it up would hide a world that is otherwise fine.
+        this.dismissLoadingScreen();
         console.error('framexml(world): the runtime failed to boot', error);
       });
     }
@@ -346,6 +385,13 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    * `worldUnits()` reports every unit's SCREEN position in CSS pixels, which is what lets a probe put
    * a real `page.mouse.click` a stated number of pixels off a mob instead of guessing at one.
    */
+  /** Takes the loading screen down and releases its art. Safe to call twice. */
+  private dismissLoadingScreen(): void {
+    this.loadingScreen?.dispose();
+    this.loadingScreen = null;
+    delete (window as never as Record<string, unknown>).loadingScreen;
+  }
+
   /** The `window` keys `installPickInstrument` writes, so `componentWillUnmount` can take them back. */
   private static readonly PICK_INSTRUMENT_KEYS = ['worldPick', 'worldUnits', 'worldCamera'];
 
@@ -669,6 +715,10 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    */
   componentWillUnmount() {
     this.stopped = true;
+    // The loading screen holds a texture reference and a `window` handle, so it goes with the
+    // component for the same reason the pick instrument below does -- a screen that outlived its
+    // renderer would draw through a disposed one.
+    this.dismissLoadingScreen();
     // THE INSTRUMENT GOES WITH THE COMPONENT. Each closure captures `this` -- this camera, this world --
     // so a handle left on `window` after a remount answers about a disposed renderer's camera and reads
     // as a live measurement. That is this file's own rule two lines down ("Everything this component put
@@ -819,6 +869,10 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.perf.sections.begin('ui.framexml');
     this.ui?.render(delta);
     this.perf.sections.end('ui.framexml');
+
+    // THE LOADING SCREEN, over the world AND the interface, and last for that reason. Null once the
+    // boot has resolved, so this costs one property read per frame for the rest of the session.
+    this.loadingScreen?.render(this.renderer);
 
     // THE HOVER CURSOR, after the UI pass because it asks the router which widget the pointer is over
     // and that answer is set by the pass that just ran. Cadence-gated -- see `updateHoverCursor`, which
