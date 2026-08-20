@@ -134,6 +134,14 @@ interface TooltipState {
  */
 const stateByWidget = new WeakMap<Widget, TooltipState>();
 
+/**
+ * Each line slot's colour as its document authored it, so an uncoloured line can be restored to it.
+ *
+ * A `WeakMap` on the WIDGET for the reason `stateByWidget` gives: frame ids are minted per registry, so
+ * a module-level id map would leak one runtime's slots into the next one's by number collision.
+ */
+const AUTHORED_COLOURS = new WeakMap<Widget, string>();
+
 function stateOf(widget: Widget): TooltipState {
   let state = stateByWidget.get(widget);
   if (state === undefined) {
@@ -290,8 +298,26 @@ function writeSide(
   region.text = text;
   region.shown = true;
   const font = ensureFont(region);
+  /**
+   * A COLOURLESS LINE GOES BACK TO THE SLOT'S AUTHORED COLOUR, and it used not to -- it kept whatever
+   * the LAST tooltip left in that slot.
+   *
+   * Caught in a screenshot, not on paper: after an item tooltip had painted its `Use:` line green in
+   * slot 4, a following tooltip's uncoloured line 4 drew green too. The comment below is still right
+   * about the DEFAULT (`GameTooltipHeaderText`/`GameTooltipText` are both white, `fontstyles.xml:247-255`);
+   * what was wrong is that "leave the font alone" is only equivalent to "use the authored colour" on a
+   * slot nobody has coloured yet, and every slot gets coloured eventually.
+   *
+   * The authored value is captured the first time the slot is seen, which is before anything here can
+   * have overwritten it.
+   */
+  if (!AUTHORED_COLOURS.has(region)) {
+    AUTHORED_COLOURS.set(region, font.color);
+  }
   if (colour !== undefined) {
     font.color = toHex(colour.r, colour.g, colour.b);
+  } else {
+    font.color = AUTHORED_COLOURS.get(region)!;
   }
   // Only ever SET, never cleared back to undefined: a slot reused for an unwrapped line would otherwise
   // keep the previous tooltip's wrap. `wrapWidth` of undefined is "measure on one line".
@@ -355,7 +381,8 @@ function ensureLine(ctx: MethodContext, self: number, line: number): boolean {
   if (name === null || first === null || previousLeft === null) {
     return false;
   }
-  const left = ctx.registry.widget(ctx.registry.create('FontString', `${name}TextLeft${line}`, self))!;
+  const leftId = ctx.registry.create('FontString', `${name}TextLeft${line}`, self);
+  const left = ctx.registry.widget(leftId)!;
   left.layer = first.layer;
   left.font = { ...ensureFont(first) };
   left.shown = false;
@@ -366,10 +393,26 @@ function ensureLine(ctx: MethodContext, self: number, line: number): boolean {
   // The right slot is created alongside even though most lines never use one: `placeRightColumns`
   // re-anchors it every resize and `clearFrom` blanks it, and both of those look it up by name -- so a
   // grown line that later gains a right column must not be the one case where the slot is absent.
-  const right = ctx.registry.widget(ctx.registry.create('FontString', `${name}TextRight${line}`, self))!;
+  const rightId = ctx.registry.create('FontString', `${name}TextRight${line}`, self);
+  const right = ctx.registry.widget(rightId)!;
   right.layer = first.layer;
   right.font = { ...ensureFont(first) };
   right.shown = false;
+
+  /**
+   * PUBLISH BOTH TO `_G`, and this was a real defect found by driving the path rather than reading it.
+   *
+   * `ctx.wrapper(id)` is what mints a frame's Lua table and sets `_G[name]` (`object.ts:790-797`), and
+   * it is LAZY -- nothing publishes a name until someone asks for the wrapper. Nothing here ever did, so
+   * the grown slots existed in the registry and drew correctly while `_G["GameTooltipTextLeft9"]` was
+   * nil. Measured live: `GameTooltip:NumLines()` answered 14 and the ninth global did not exist.
+   *
+   * That matters because FrameXML reaches these slots by name and not by method -- `SetTooltipMoney`
+   * and `GameTooltip_AddNewbieTip` both index `_G["GameTooltipTextLeft"..i]` -- so an unpublished slot
+   * is invisible to the client's own Lua and to every addon.
+   */
+  ctx.wrapper(leftId);
+  ctx.wrapper(rightId);
   return true;
 }
 

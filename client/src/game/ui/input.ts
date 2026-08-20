@@ -489,9 +489,6 @@ export class GlueInput {
       return; // Released off the widget: no click.
     }
 
-    if (pressed.kind === 'checkbutton') {
-      pressed.checked = !pressed.checked;
-    }
     /**
      * THE BUTTON IS NOW REAL, AND ITS ABSENCE WAS WHY NOTHING COULD BE EQUIPPED.
      *
@@ -503,11 +500,23 @@ export class GlueInput {
      * The registration gate is the engine's: a frame that never called `RegisterForClicks` takes LEFT
      * only. Applied HERE rather than in `scripts.ts` because it is a routing decision -- the handler is
      * bound once and the button varies per press.
+     *
+     * **THE RETURN COVERS THE CHECKBOX TOGGLE AND THE DOUBLE-CLICK BOOKKEEPING TOO, and self-review
+     * caught that it did not.** With the gate wrapped around `onClick` alone, a right-click on a
+     * left-only CheckButton still flipped `checked` -- a checkbox that toggles visibly and tells its
+     * handler nothing, which is worse than either doing nothing or doing everything. And `lastClick`
+     * was still recorded, so a suppressed right-click could pair with a later left click into a
+     * spurious `OnDoubleClick`. An unregistered button is not a click at all.
      */
     const button = this.pressButton;
-    if ((pressed.clickButtons ?? LEFT_ONLY).has(button)) {
-      pressed.onClick?.(button);
+    if (!(pressed.clickButtons ?? LEFT_ONLY).has(button)) {
+      return;
     }
+
+    if (pressed.kind === 'checkbutton') {
+      pressed.checked = !pressed.checked;
+    }
+    pressed.onClick?.(button);
 
     // FrameXML's `OnDoubleClick`: two clicks on the SAME widget inside the interval. It fires after
     // the second `onClick`, not instead of it, because that is the order the engine's own is
