@@ -77,6 +77,32 @@ export function isCombatId(id: number): boolean {
 }
 
 /**
+ * The client's **CAST** classifier `0x5fcbb0` -- the spell-cast RELEASE anims `{2, 32, 33, 53, 54}`
+ * (`select.rs:623-632`, byte-decoded in wow-re `oneshot-lifecycle.md` section 7).
+ *
+ * **NOT the ReadySpell HOLDS 51/52**, and the reference is explicit about why: those are their own set
+ * (`0x5fde40`) and "a jump over a standing hold really does take the whole body". So a jump during a
+ * held cast pose replaces it, which is what this client already does and must keep doing.
+ *
+ * Together with `isCombatAnim` this is the pair the TRANSPLANT predicate (`0x5feae0`) tests on the
+ * clip currently armed on bone 0.
+ */
+export function isCastAnim(id: number): boolean {
+  return id === 2 || id === 32 || id === 33 || id === 53 || id === 54;
+}
+
+/**
+ * The client's `0x5fcc10` membership again, under the name the FAST PATH and the TRANSPLANT use for it
+ * (`select.rs:619-621`, `is_combat_anim`).
+ *
+ * The reference has two predicates with this identical body -- `is_combat` (which gates the airborne
+ * leg of `route_oneshot`) and `is_combat_anim` (which gates the combat fast-path and the transplant).
+ * They are the SAME table at the same address, so this is an alias rather than a second copy: writing
+ * the ranges twice is how the two would drift.
+ */
+export const isCombatAnim = isCombatId;
+
+/**
  * The forced-full-body carve-outs (`select.rs:984-987`): the Death class `{1,6,131,132}` (`0x5fda90`)
  * and the sit transitions `{57,58,118}` (`0x5fec60`) go to bone 0 whatever the state.
  *

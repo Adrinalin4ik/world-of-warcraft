@@ -48,7 +48,6 @@ import {
   HIT_INFO, HIT_INFO_ANY_ABSORB, HIT_INFO_ANY_RESIST,
 } from '../../../game/classes/combat-text';
 import { worldClock } from '../../../game/pipeline/m2/anim/world-clock';
-import { windowElapsedOrInstant } from '../../../game/pipeline/m2/anim/instance-anim';
 
 /**
  * The `HitInfo` bits this decode reads. **THE TABLE MOVED**, and it moved for a reason:
@@ -560,16 +559,20 @@ export class CombatHandler extends EventEmitter {
       //
       // This also replaces `interrupt: true`, which was a HARD CUT of the in-flight swing -- the exact
       // thing the reference says the fast-path exists to prevent.
-      const live = unit.model?.instanceAnim ?? null;
-      const inFlight = live && live.current && live.current.id === swingId
-        && !windowElapsedOrInstant(live, live.current, worldClock.ms);
-      if (inFlight && live) {
-        live.setRate(2, worldClock.ms);
-      } else {
-        // Repetitions 0 -- a swing is a ONE-SHOT, and `startAnimation`'s ownership latch gives the body
-        // back to locomotion when its window ends.
-        unit.setAnimation(swingId, true, 0);
-      }
+      // THE FAST PATH MOVED, and this is the whole of that change here: it now lives in
+      // `Unit#combatFastPath`, which `setAnimation` consults first. It had to move, because the version
+      // that lived here compared `live.current.id === swingId` -- the SAME id on the BASE slot -- and
+      // that is two-thirds wrong of the client's rule. The client's predicate is
+      // `is_combat_anim(cur) && is_combat_anim(id)` (`driver.rs:871`), ANY combat clip over ANY other,
+      // on whichever slot it is playing: since the masked route landed, a swing thrown while running is
+      // on the OVERLAY and `current` holds the gait, so this test answered "nothing is playing" through
+      // every swing the owner throws while moving -- and it never protected an ABILITY's clip from the
+      // next auto-attack at all, which is the report "Анимация способностей должна быть выше чем
+      // анимация автоатаки". `Unit` is the only place that can see both slots and the parked request.
+      //
+      // Repetitions 0 -- a swing is a ONE-SHOT, and the ownership latch (full body) or the overlay's own
+      // release fade (masked) gives the body back when its window ends.
+      unit.setAnimation(swingId, true, 0);
 
       // ONLY WHEN THE ARM ACTUALLY LANDED ON THE SWING, and this guard was the defect a self-review of
       // the previous commit found. `setAnimation` goes through `resolve`, which falls back to the first

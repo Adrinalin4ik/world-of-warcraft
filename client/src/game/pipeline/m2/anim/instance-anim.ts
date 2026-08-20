@@ -420,6 +420,57 @@ export class InstanceAnim {
     this.overlayLaw = clockLaw({ interpolationType: 1, globalSequenceID: -1, tracks: [] }, seq.loops);
   }
 
+  /**
+   * THE TRANSPLANT (`0x5fe919`) -- move the clip currently on the BASE track up onto the upper body,
+   * **at exactly the frame it was on**, so the base is free for a locomotion request.
+   *
+   * This is the other half of the composition model, and the reference names the case it exists for:
+   * "A base **locomotion** clip requested while bone 0 still plays a live CAST or COMBAT one-shot does
+   * not replace it: the client copies the bone-0 descriptor -- its id, its rate, and `+0x08` the clip's
+   * **live elapsed position** -- onto the key-bone with `blendFlag = 0`, then hands bone 0 the request.
+   * The cast therefore keeps running on the torso *at exactly the frame it was on*, with no cross-fade
+   * and no restart, while the legs take the jump or the run. This is the director's **'jump right after
+   * a cast: the legs jump, the arms finish the cast'**" (`creature_anim/driver.rs:194-208`, wow-re
+   * `oneshot-lifecycle.md` section 3a, decision 0878).
+   *
+   * `blendFlag = 0` is the whole point of the arithmetic here: `overlayBlendMs` is 0 (no ramp -- the
+   * clip is already on screen at full weight, so ramping it up would fade the pose out and back in) and
+   * `overlayArmedAtMs` is BACK-DATED so the overlay's cursor equals the base's cursor this instant. The
+   * clip does not restart, does not jump, and its window still ends when it always would.
+   *
+   * Returns false and changes nothing when there is nothing to move or nowhere to move it: no base
+   * clip, the overlay already occupied (the reference's own no-op -- "`0x5fe912` then jumps straight to
+   * `0x5fe930`: request -> bone 0, key-bone untouched"), or a base clip whose window has already
+   * elapsed (the client's descriptor probe reports a completed slot as id -1, so "the transplant
+   * predicates never see it" -- `driver/mode.rs:313-317`).
+   *
+   * WHICH clips may be moved is NOT decided here -- that is `isCastAnim`/`isCombatAnim` on the caller,
+   * because it is a question about the animation id and this class knows nothing about ids.
+   */
+  transplantToOverlay(mask: Uint8Array, worldClockMs: number): boolean {
+    const seq = this.current;
+    if (seq === null || this.overlaySeq !== null || this.periodMs <= 0) {
+      return false;
+    }
+    if (this.windowElapsed(worldClockMs)) {
+      return false;
+    }
+    const cursor = this.cursor(worldClockMs);
+    const rate = this.rate > 0 ? this.rate : 1;
+
+    this.overlaySeq = seq;
+    this.overlayMask = mask;
+    this.overlayRate = rate;
+    this.overlayPeriodMs = this.periodMs;
+    this.overlayLaw = this.law;
+    // `blendFlag = 0`: no ramp at all. See the doc -- a ramp here would fade a pose that is already
+    // fully on screen.
+    this.overlayBlendMs = 0;
+    // The live elapsed position, expressed the only way a clock-indexed slot can express it.
+    this.overlayArmedAtMs = worldClockMs - cursor / rate;
+    return true;
+  }
+
   /** Change the overlay's playback rate, holding its pose -- `setRate`'s logic on the masked slot. */
   setOverlayRate(rate: number, worldClockMs: number): void {
     if (rate === this.overlayRate || this.overlaySeq === null || rate <= 0) {

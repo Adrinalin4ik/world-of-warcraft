@@ -51,8 +51,13 @@ function unit(animations: any[]) {
     setAnimation: (Unit as any).prototype.setAnimation,
     startAnimation: (Unit as any).prototype.startAnimation,
     // Part of the arming decision since the masked upper-body route landed: `setAnimation` consults
-    // it first. It declines on these doubles (no bones, so no split key-bone) without reading flags.
+    // these first. They decline on these doubles (no bones, so no split key-bone) without reading
+    // flags -- but they have to be PRESENT, because a method missing from a `.call()` double is a
+    // `TypeError` and not a falsy read.
     tryMaskedRoute: (Unit as any).prototype.tryMaskedRoute,
+    combatFastPath: (Unit as any).prototype.combatFastPath,
+    liveCombatSlot: (Unit as any).prototype.liveCombatSlot,
+    tryTransplantUp: (Unit as any).prototype.tryTransplantUp,
   };
 
   return u;
@@ -291,6 +296,10 @@ function locoUnit(animations: any[], isPlayer: boolean = true) {
     startAnimation: proto.startAnimation,
     // Part of the arming decision since the masked upper-body route landed -- see the other double.
     tryMaskedRoute: proto.tryMaskedRoute,
+    combatFastPath: proto.combatFastPath,
+    liveCombatSlot: proto.liveCombatSlot,
+    tryTransplantUp: proto.tryTransplantUp,
+    deferredOneShot: null,
     locomotionSpeed: proto.locomotionSpeed,
     locomotionFlags: proto.locomotionFlags,
     gaitCandidates: proto.gaitCandidates,

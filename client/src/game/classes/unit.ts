@@ -24,7 +24,7 @@ import { shouldPose } from "../pipeline/m2/anim/gating";
 import { createPlayerMoveState } from "../movement/player-state";
 import { peerTrace } from "../movement/peer-trace";
 import { readyAnimation } from "./combat-anim";
-import { OneShotRoute, routeOneShot } from "./oneshot-route";
+import { isCastAnim, isCombatAnim, OneShotRoute, routeOneShot } from "./oneshot-route";
 import {
   ANY_MOVE,
   DEFAULT_MOVE_SPEEDS,
@@ -1360,11 +1360,25 @@ class Unit extends Entity {
       return;
     }
 
-    // THE MASKED UPPER-BODY ROUTE, ahead of everything below: a swing taken while the legs are
-    // committed plays on the torso over the gait instead of replacing the whole body. See
-    // `tryMaskedRoute` for the routing rule and for every case it deliberately declines.
+    // THE COMBAT FAST-PATH, ahead of every other decision, because it decides whether this request is
+    // armed AT ALL. See `combatFastPath`. This is the owner's "Анимация способностей должна
+    // быть выше чем анимация автоатаки": a live combat clip is never cut by another one.
+    if (this.combatFastPath(id, seq, inst)) {
+      return;
+    }
+
+    // THE MASKED UPPER-BODY ROUTE: a swing taken while the legs are committed plays on the torso over
+    // the gait instead of replacing the whole body. See `tryMaskedRoute` for the routing rule and for
+    // every case it deliberately declines.
     if (this.tryMaskedRoute(id, seq, inst, repetitions)) {
       return;
+    }
+
+    // THE TRANSPLANT: this request is a LOCOMOTION clip and something is holding the base. Move that
+    // clip up onto the torso at its live frame rather than letting the request overwrite it, and let
+    // the arm below proceed. This is what makes a jump land under a swing -- see `tryTransplantUp`.
+    if (RATE_SCALED.has(id)) {
+      this.tryTransplantUp(inst);
     }
 
     if (inst.current === seq) {
@@ -1416,6 +1430,11 @@ class Unit extends Entity {
     this.inCombat = false;
     this.combatTarget = null;
     this.attackedBy.clear();
+    // And a corpse throws no parked swing. `DEATH` is not in the fast path's set so nothing can defer
+    // over it, but a swing parked a moment BEFORE the death would otherwise drain onto the corpse the
+    // first frame locomotion ran -- and locomotion never releases a Death owner, so it would sit there
+    // for the session instead.
+    this.deferredOneShot = null;
     if (dead) {
       this.setAnimation(DEATH, true, 0);
       return;
@@ -1425,6 +1444,131 @@ class Unit extends Entity {
     // unit standing still is Stand. Arming Stand here would be the same thing one frame earlier and
     // would take ownership of a loop, which is the permanent freeze `externalSeq` documents.
     this.locoCandidates = null;
+  }
+
+  /**
+   * THE DEFERRED ONE-SHOT -- the client's `+0xd60` cache. An `AnimationData` id, or null.
+   *
+   * Round 32 named this as deliberately NOT ported ("the deferred cache needs a drain point in the
+   * locomotion release and a swing dropped this way is a swing not drawn, so it is named rather than
+   * faked"). It is the drain point that was missing, and `updateLocomotion` is exactly it.
+   */
+  private deferredOneShot: number | null = null;
+
+  /**
+   * Is a COMBAT one-shot on screen right now, and on which slot? `null` when none is.
+   *
+   * Both slots have to be asked, and that is the whole reason this is a helper: since the masked route
+   * landed, a swing thrown while running lives on the OVERLAY while `inst.current` holds the gait. A
+   * combat-liveness test that read `current` alone would answer "nothing is playing" through every
+   * swing the owner actually throws while moving.
+   */
+  private liveCombatSlot(inst: InstanceAnim): 'base' | 'overlay' | null {
+    const overlay = inst.overlay;
+    if (overlay !== null && isCombatAnim(overlay.id) && !inst.overlayWindowElapsed(worldClock.ms)) {
+      return 'overlay';
+    }
+    // `?? null`, not a bare read: every animation test drives these methods with `.call()` on a
+    // hand-built double where an unset field is `undefined`, and `undefined !== null` walks straight
+    // into a `TypeError` on `.loops`. Same degradation `InstanceAnim#armable` documents.
+    const owner = this.externalSeq ?? null;
+    if (owner !== null && !owner.loops && isCombatAnim(owner.id)
+      && inst.current === owner && !windowElapsedOrInstant(inst, owner, worldClock.ms)) {
+      return 'base';
+    }
+    return null;
+  }
+
+  /**
+   * THE COMBAT FAST-PATH (`0x5fe43c`-`0x5fe48b`, wow-re `combat-anim-fastpath.md`, decision 0406):
+   * **a combat clip requested while another combat clip is playing is NOT armed.** The CURRENT clip's
+   * rate doubles (op6 `2.0f` re-times its remainder, pose-continuous) and the request parks in the
+   * `+0xd60` cache to play afterwards. Returns whether the request was swallowed this way.
+   *
+   * THE OWNER'S REPORT IS THE MISSING GENERALITY, not the missing rule. Round 32 ported the doubling
+   * but keyed it on the SAME id on one slot -- `combat.ts` compared `live.current.id === swingId` and
+   * `tryMaskedRoute` compared `inst.overlay.id === id` -- so two consecutive auto-attacks were handled
+   * and **an ability's clip cut by the next auto-attack was not**. The reference's predicate is
+   * `is_combat_anim(cur) && is_combat_anim(id)` (`driver.rs:871`), any combat clip over any other, and
+   * its own comment names the exact symptom: "this is why the **Eviscerate spin survives the
+   * auto-swings its cast triggers** -- sped up, never cut -- and why consecutive swings don't hard-cut
+   * each other."
+   *
+   * So the precedence the owner asked for is not a rank table: it is that **the clip already on screen
+   * finishes**, faster, and the loser plays immediately after instead of being dropped. An ability whose
+   * clip is NOT a combat id (a cast release, `isCastAnim`) is not in this set at all and takes the
+   * normal arm, replacing a swing outright -- also the reference's behaviour, and also "the ability
+   * wins".
+   *
+   * A flat 2x, never `clip / timer`. `seq` is taken rather than re-resolved so this asks about the clip
+   * that would actually have been armed.
+   */
+  private combatFastPath(id: number, seq: Sequence, inst: InstanceAnim): boolean {
+    if (seq.loops || !isCombatAnim(id)) {
+      return false;
+    }
+    const slot = this.liveCombatSlot(inst);
+    if (slot === null) {
+      return false;
+    }
+    // THE SAME-ID DEDUP is deliberately NOT a separate case here (`0x5fdba0`, decision 0280): the
+    // reference notes "combat same-id re-plays never reach it -- the fast-path above catches them
+    // first, the client's head-of-function order". A second identical swing therefore doubles and
+    // parks exactly like a different one, which is what round 32 already did for that case.
+    if (slot === 'overlay') {
+      inst.setOverlayRate(inst.overlayPlaybackRate * 2, worldClock.ms);
+    } else {
+      inst.setRate(inst.playbackRate * 2, worldClock.ms);
+    }
+    this.deferredOneShot = id;
+    return true;
+  }
+
+  /**
+   * Move a live CAST or COMBAT clip off the base and onto the torso, so a locomotion request can have
+   * the legs. Returns whether it moved. See `InstanceAnim#transplantToOverlay` for the mechanism.
+   *
+   * THIS IS "прыжек все еще не работает с атакой". A swing standing still is full body and holds
+   * the ownership latch, and until now that latch simply won: `updateLocomotion` returned early for the
+   * whole clip, so JumpStart was armed over the swing (replacing it) and the gait behind it could not
+   * run at all. The client does neither -- it transplants. `JUMP_START` **37 is a locomotion id** (it is
+   * in `RATE_SCALED`, and the reference states outright that "the same table is the LOCOMOTION
+   * membership the transplant predicates key on", `select.rs:963-971`), so a jump requested over a live
+   * swing moves the swing to the torso and takes the legs.
+   *
+   * THE LATCH IS RELEASED HERE, and it must be: the clip is no longer on the base, so an owner that
+   * still claimed it would block locomotion for the rest of the clip's window -- the very bug this
+   * removes. The overlay retires itself.
+   *
+   * WHAT IT REFUSES, and each refusal is a behaviour already confirmed:
+   *  - **a LOOP** -- the held cast pose (`ReadySpellOmni` 51/52) and a looping emote. The reference
+   *    excludes 51/52 from `isCastAnim` on purpose: "a jump over a standing hold really does take the
+   *    whole body" (`select.rs:628-629`). So jumping mid-cast still replaces the pose, as today.
+   *  - **DEATH** -- not a cast and not a combat id, so it is not in the movable set at all and the
+   *    corpse keeps the body. Nothing here can stand a corpse up.
+   *  - **an id that is neither cast nor combat** -- an emote, a landing clip. Overwritten on the base as
+   *    before.
+   *  - **no split key-bone** on this rig, or an overlay already busy (the reference's own no-op).
+   */
+  private tryTransplantUp(inst: InstanceAnim): boolean {
+    const owner = this.externalSeq ?? null;
+    if (owner === null || owner.loops) {
+      return false;
+    }
+    if (!isCastAnim(owner.id) && !isCombatAnim(owner.id)) {
+      return false;
+    }
+    const modelAnim = this.model?.modelAnim ?? null;
+    const mask = modelAnim && modelAnim.upperBodyMask ? modelAnim.upperBodyMask() : null;
+    if (mask === null) {
+      return false;
+    }
+    if (!inst.transplantToOverlay(mask, worldClock.ms)) {
+      return false;
+    }
+    this.externalSeq = null;
+    this.locoCandidates = null;
+    return true;
   }
 
   /**
@@ -1457,10 +1601,14 @@ class Unit extends Entity {
    *    release ending its own held pose). Masking it would leave the latch holding the body for ever.
    *    This is a DEVIATION from the reference, which would mask a swing taken mid-jump; it costs a
    *    mid-air swing its split and it protects two fixes that were each reported and fixed once.
-   *  - **the overlay already holds this same clip, still in flight** -- then the combat fast-path
-   *    applies instead of a re-arm: "a combat clip requested while another combat clip is playing is
-   *    NOT armed: the CURRENT clip's rate doubles" (`driver.rs:864-872`, the client's
-   *    `0x5fe43c`-`0x5fe48b`). A flat 2x, the same rule `combat.ts` applies on the base track.
+   *  - **the overlay already holds this same clip, still in flight** -- the ARM-LEVEL SAME-ID DEDUP
+   *    (`0x5fdba0`, decision 0280): "a requested id that already occupies its slot and is still playing
+   *    is NOT re-armed" (`driver.rs:888-892`), which is what lets a repeated kit request free-run. It is
+   *    a flat 2x here because it doubles the live clip like the fast path does, and SELF-REVIEW of this
+   *    round corrected what that branch is: no COMBAT id can reach it any more, because
+   *    `combatFastPath` catches every combat-over-combat request before `setAnimation` gets here. What
+   *    is left for this branch is a non-combat same-id re-request -- a repeated cast release, a repeated
+   *    emote.
    *
    * `currentAnimationId` is NOT written here and `externalSeq` is NOT latched: the base track is
    * untouched, so locomotion still owns it and must keep driving the gait. That is the whole point.
@@ -1471,7 +1619,7 @@ class Unit extends Entity {
     inst: InstanceAnim,
     repetitions: number,
   ): boolean {
-    if (seq.loops || seq.id !== id || this.externalSeq !== null) {
+    if (seq.loops || seq.id !== id || (this.externalSeq ?? null) !== null) {
       return false;
     }
     // THE MASK FIRST, and the order is deliberate twice over. It is the cached, per-model half of the
@@ -2163,6 +2311,9 @@ class Unit extends Entity {
       // touchdown is stationary, JumpLandRun when it is still running forward, and NOTHING for a
       // backpedal or a walk -- those drop straight into their gait, because 187 is a forward-run
       // footplant and playing it backward is the "forward run flash after jump-then-hold-S" bug.
+      // A PARK MADE MID-ARC DIES HERE: "it waits -- and dies at the landing play's clear" (§5-verified,
+      // decision 0868). A swing deferred during a jump is not replayed on touchdown.
+      this.deferredOneShot = null;
       if ((flags & ANY_MOVE) === 0) {
         this.locoLand = { id: JUMP_END, flags };
       } else if ((flags & (MoveFlag.BACKWARD | MoveFlag.WALK_MODE)) === 0) {
@@ -2190,9 +2341,47 @@ class Unit extends Entity {
       } else if (owner.loops || owner.id === DEATH) {
         return;
       } else if (!windowElapsedOrInstant(inst, owner, worldClock.ms)) {
-        return;
+        // STILL PLAYING -- but a live cast or combat clip does not get to stop the LEGS. The client
+        // transplants it up onto the torso and hands the base to the gait, and the test for whether it
+        // may is the reference's `gait_is_locomotion` (`select.rs:989-993`): the FIRST candidate of
+        // this frame's gait pick, asked with NO engagement, has to be a locomotion id.
+        //
+        // THAT TEST IS THE COMBAT BRACKET'S PROTECTION, and it is the reference's own hard-won gate,
+        // not a precaution of mine. Standing still the head candidate is `STAND`, which is not a
+        // locomotion id, so a standing swing is never transplanted and keeps the whole body exactly as
+        // the owner confirmed it. The reference paid for this gate: "a stun's root wipes the direction
+        // bits, so the flag change re-arms to **Stand(0)** -- not locomotion -- and the reference
+        // *overwrites* the cast on bone 0 ... Transplanting unconditionally moved it to the torso
+        // instead and froze an arm out" (`driver/mode.rs:318-327`, decision 0894, Ice Block).
+        //
+        // `ready` is 0 on purpose: the reference passes `None` there. An engaged unit standing still
+        // picks a Ready idle, which is not a locomotion id either, so the answer is the same both ways
+        // -- but passing the real `ready` would make this test disagree with the reference for no
+        // reason anyone could later reconstruct.
+        const head = this.gaitCandidates(flags, speed, 0)[0];
+        if (!RATE_SCALED.has(head) || !this.tryTransplantUp(inst)) {
+          return;
+        }
       } else {
         this.externalSeq = null;
+      }
+    }
+
+    // DRAIN THE PARKED ONE-SHOT (the client's `+0xd60` read at the base recompute, `0x5fd392`): the
+    // moment no one-shot is live, the clip the fast path deferred plays. Here, and not at the top of
+    // this method, because "the read sits downstream of the airborne-freeze, so a park made mid-arc
+    // waits" (`driver.rs:846-856`) -- and by this point the ownership latch has already released, which
+    // is exactly the "no one-shot is live" the client tests.
+    //
+    // NEVER MID-AIR, and never with an overlay still running: both would drop the clip into a slot that
+    // is not free. A park that never drains is cleared by the landing pick and by death, so nothing can
+    // hold a stale id for the rest of a session.
+    if (this.deferredOneShot !== null) {
+      const parked = this.deferredOneShot;
+      if (!airborne && this.externalSeq === null && inst.overlay === null) {
+        this.deferredOneShot = null;
+        this.setAnimation(parked, true, 0);
+        return;
       }
     }
 
