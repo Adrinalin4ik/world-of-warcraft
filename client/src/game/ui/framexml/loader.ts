@@ -126,6 +126,21 @@ export interface FrameXmlRuntime {
  * thing to Lua as it does to the loader. A `MethodContext` built without a runtime keeps null and those
  * methods report the gap instead of guessing.
  */
+/**
+ * The handlers whose mere DECLARATION makes a frame mouse-interactive.
+ *
+ * See the mouse-enable step at the end of `applyScripts` for the evidence and the citations. Compared
+ * lower-cased because FrameXML is not consistent about handler-name casing between documents.
+ *
+ * `OnMouseWheel` is deliberately NOT here: the wheel is `EnableMouseWheel`, a separate flag in the
+ * engine (`chatframe.lua:2550` calls it on its own), and nothing in this widget layer routes a wheel
+ * event yet -- adding it would arm a frame for a mouse it does not otherwise take.
+ */
+const MOUSE_SCRIPTS = new Set([
+  'onenter', 'onleave', 'onmousedown', 'onmouseup', 'onclick', 'ondoubleclick',
+  'ondragstart', 'ondragstop', 'onreceivedrag',
+]);
+
 export function createFrameXmlRuntime(vm: LuaVM, ctx: MethodContext): FrameXmlRuntime {
   const fonts = new TemplateRegistry();
   ctx.fontObject = (name) => readFontObject(fonts, name, warnOnce);
@@ -1807,6 +1822,7 @@ class DocumentLoader {
    */
   private applyScripts(element: XmlElement, wrapper: LuaRef, dbg: string): boolean {
     let hasOnLoad = false;
+    let declaresMouseScript = false;
     for (const scripts of childrenNamed(element, 'Scripts')) {
       for (const handler of scripts.children) {
         const name = handler.tag;
@@ -1835,7 +1851,43 @@ class DocumentLoader {
         if (name.toLowerCase() === 'onload') {
           hasOnLoad = true;
         }
+        if (MOUSE_SCRIPTS.has(name.toLowerCase())) {
+          declaresMouseScript = true;
+        }
       }
+    }
+    /**
+     * A FRAME THAT DECLARES A MOUSE SCRIPT IS MOUSE-INTERACTIVE, and not doing this made every such
+     * handler dead code.
+     *
+     * MEASURED, and it is one cause behind three of the owner's reports at once -- no tooltip on a
+     * character-panel stat, none on a resistance icon, none on the experience bar -- while ITEM tooltips
+     * worked. The difference is the widget CLASS, not the frame:
+     *
+     *     StatLike  (Frame,     <OnEnter>) mouseEnabled false  onEnter bound   <- handler never runs
+     *     BarLike   (StatusBar, <OnEnter>) mouseEnabled false  onEnter bound   <- handler never runs
+     *     ButtonLike(Button,    <OnClick>) mouseEnabled TRUE   onClick bound   <- works
+     *
+     * `object.ts:504-508` enables the mouse for `button`/`checkbutton`/`editbox` by class, which is right
+     * as far as it goes, and `loader.ts` applies `enableMouse="true"` when a document declares it.
+     * Neither covers the case the client's own files are full of: `StatFrameTemplate`
+     * (`paperdollframe.xml:170,202-209`), `MagicResistanceFrameTemplate` (`:211,215-224`) and
+     * `MainMenuExpBar` (`mainmenubar.xml:12`) are a Frame, a Frame and a StatusBar, every one of them
+     * declares `<OnEnter>`, and NOT ONE declares `enableMouse` -- `UI.xsd:470` gives that attribute
+     * `default="false"`. All three show tooltips in the real client, and grepping `EnableMouse` over the
+     * served FrameXML finds no call for any of them. So the engine's rule is not the class alone and not
+     * the attribute alone: declaring a mouse handler is what arms the frame.
+     *
+     * `hitTest` only ever answers a `mouseEnabled` widget (`ui/hit.ts:41`), so without this the `OnEnter`
+     * the loader had just bound could never be reached by the router.
+     *
+     * The STARTING VALUE, exactly like the class rule beside it: a later `EnableMouse(false)` still turns
+     * it off, which `watchframe.lua:465` and `friendsframe.lua:896` rely on. An explicit
+     * `enableMouse="false"` on the element is honoured rather than overridden -- the attribute is the
+     * document's own statement and outranks an inference from its scripts.
+     */
+    if (declaresMouseScript && attr(element, 'enableMouse') !== 'false') {
+      this.callMethod(wrapper, 'EnableMouse', [true], dbg);
     }
     return hasOnLoad;
   }
