@@ -148,9 +148,21 @@ export function attachSkillsBridge(vm: LuaVM, world: World): () => void {
    * An out-of-range index answers `""` for the name, which is what makes `SkillFrame_SetStatusBar` hide
    * its bar and return (`:68-73`) rather than raise on a nil.
    *
-   * See the header on why `stepCost` and `rankCost` are nil rather than 0. `isAbandonable` is 0 for
-   * every row: only a profession can be unlearned, `AbandonSkill` is a declared gap, and a truthy value
-   * here would put an unlearn button on a skill this client cannot unlearn.
+   * See the header on why `stepCost` and `rankCost` are nil rather than 0.
+   *
+   * **`isAbandonable` IS `nil`, NOT `0`, AND GETTING THAT WRONG IS THE OWNER'S "unlearn is offered for
+   * skills that cannot be unlearned".** This comment used to end "`isAbandonable` is 0 for every row
+   * ... a truthy value here would put an unlearn button on a skill this client cannot unlearn" -- the
+   * intent was exactly right and the code did the opposite, because **`0` IS TRUTHY IN LUA.**
+   * `SkillDetailFrame_SetStatusBar` is `if ( isAbandonable ) then statusBarUnlearnButton:Show()`
+   * (`skillframe.lua:221-223`), so a `0` showed the button on EVERY row.
+   *
+   * That is the third time this project has hit this trap, and the second time in this file -- the same
+   * round that wrote this line got `stepCost`/`rankCost` right two lines below it. An engine global that
+   * means "no" must answer nil.
+   *
+   * Only a profession can be abandoned and `AbandonSkill` is a declared gap, so nil is also the honest
+   * answer rather than a placeholder.
    */
   fn('GetSkillLineInfo', (args) => {
     const row = rows[Number(args[0]) - 1];
@@ -158,7 +170,8 @@ export function attachSkillsBridge(vm: LuaVM, world: World): () => void {
       return [''];
     }
     if (row.header) {
-      return [row.name, 1, collapsed.has(row.categoryId) ? nil() : 1, 0, 0, 0, 0, 0,
+      // Slot 8 is `isAbandonable` -- nil, not 0. A header is never abandonable either.
+      return [row.name, 1, collapsed.has(row.categoryId) ? nil() : 1, 0, 0, 0, 0, nil(),
         null, null, 0, 0];
     }
     const skill = row.skill!;
@@ -170,7 +183,9 @@ export function attachSkillsBridge(vm: LuaVM, world: World): () => void {
       skill.tempBonus,
       skill.permBonus,
       skill.max,
-      0,
+      // `isAbandonable` -- nil, NOT 0. See the note above: 0 is truthy in Lua and showed the unlearn
+      // button on every skill.
+      nil(),
       null,
       null,
       0,
