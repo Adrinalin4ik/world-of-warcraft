@@ -647,6 +647,10 @@ class DocumentLoader {
     this.applySpecialFontStrings(element, wrapper, selfName, dbg);
     this.applyBackdrop(element, wrapper, dbg);
     this.applyPerKind(element, wrapper, selfName, dbg);
+    // 5b - <Attributes>. BEFORE <Scripts>, so an `OnLoad` that reads one sees it -- and before
+    // `OnAttributeChanged` can be installed, so seeding them fires no spurious dispatch. That is also
+    // the engine's order: attributes are part of the frame's declaration, not a later write.
+    this.applyAttributes(element, wrapper, dbg);
     // 6 - <Scripts>. OnLoad is noted, not fired.
     const hasOnLoad = this.applyScripts(element, wrapper, dbg);
     // 7 - nested <Frames>, whose own OnLoads therefore run first, then <ScrollChild> (which is the
@@ -1820,6 +1824,61 @@ class DocumentLoader {
    * matches what the client does: the observable difference is a child whose `OnLoad` rewires its
    * parent's `OnLoad` before the parent fires, and in that case the client runs the new handler too.
    */
+  /**
+   * `<Attributes><Attribute name= type= value=/></Attributes>` -- and NOTHING read these before.
+   *
+   * **This killed the whole UI-panel layout pass**, and the owner's own console log is the evidence:
+   *
+   *     framexml: OnAttributeChanged(panel-update): [string "UIParent.lua"]:1717:
+   *       attempt to perform arithmetic on a nil value
+   *
+   * `uiparent.lua:1717` is `rightOffset = leftOffset + UIParent:GetAttribute("DEFAULT_FRAME_WIDTH") * 2`,
+   * and `uiparent.xml:5-12` declares that attribute -- along with `TOP_OFFSET`, `LEFT_OFFSET`,
+   * `CENTER_OFFSET`, `RIGHT_OFFSET` and `RIGHT_OFFSET_BUFFER` -- in an `<Attributes>` block. With the
+   * block ignored, all six read nil, `UpdateUIPanelPositions` raised on its first arithmetic, and
+   * everything after that line never ran: `SetAttribute("RIGHT_OFFSET", ...)`, the right-panel
+   * placement, and the slot bookkeeping that decides which panel currently occupies "left".
+   *
+   * There are only **14** of these in the whole loaded manifest, and every one matters:
+   *  - `uiparent.xml` x6 -- the panel geometry above.
+   *  - `multiactionbars.xml` x4 -- `actionpage` on the four bonus bars (`SecureButton_GetModifiedAttribute`
+   *    reads it to decide which page a button acts on).
+   *  - `securetemplates.xml` x4 -- `showParty`/`showRaid` on the secure group headers.
+   *
+   * `type` defaults to `"string"` per `UI.xsd:181`, and the manifest uses `number` (10) and `boolean`
+   * (4). A `number` that does not parse is DROPPED with a report rather than coerced to `NaN`, because
+   * `NaN` propagates silently through exactly the arithmetic this exists to fix.
+   */
+  private applyAttributes(element: XmlElement, wrapper: LuaRef, dbg: string): void {
+    for (const block of childrenNamed(element, 'Attributes')) {
+      for (const item of childrenNamed(block, 'Attribute')) {
+        const name = attr(item, 'name');
+        if (name === undefined || name === '') {
+          this.report.errors.push(`${dbg}: <Attribute> with no name; ignored`);
+          continue;
+        }
+        const raw = attr(item, 'value') ?? '';
+        const kind = (attr(item, 'type') ?? 'string').toLowerCase();
+        let value: unknown = raw;
+        if (kind === 'number') {
+          const parsed = Number(raw);
+          if (!Number.isFinite(parsed)) {
+            this.report.errors.push(
+              `${dbg}: <Attribute name="${name}" type="number" value="${raw}"> is not a number; ignored`,
+            );
+            continue;
+          }
+          value = parsed;
+        } else if (kind === 'boolean') {
+          // The engine's spelling is `value="true"`. Anything else false, rather than truthy-by-string
+          // -- `"false"` is a non-empty string and would otherwise come out TRUE.
+          value = raw.toLowerCase() === 'true' || raw === '1';
+        }
+        this.callMethod(wrapper, 'SetAttribute', [name, value], dbg);
+      }
+    }
+  }
+
   private applyScripts(element: XmlElement, wrapper: LuaRef, dbg: string): boolean {
     let hasOnLoad = false;
     let declaresMouseScript = false;
