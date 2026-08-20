@@ -59,6 +59,7 @@
  */
 import { LuaVM } from '../vm';
 import { notImplemented } from '../methods/region';
+import type { ItemTooltipLine } from '../../../item-tooltip';
 
 /**
  * THE PURSE, in copper, per VM.
@@ -85,8 +86,15 @@ export interface ItemTooltipInfo {
   name: string;
   /** 0..7; the name line is drawn in `ITEM_QUALITY_COLORS[quality]`. */
   quality: number;
-  /** Body lines under the name, already ordered. Empty is legal. */
-  lines: string[];
+  /**
+   * Body lines under the name, already ordered and already coloured. Empty is legal.
+   *
+   * **Was `string[]`, and every line drew white in one column.** `ui/item-tooltip.ts` builds these now:
+   * a requirement the player cannot meet has to be RED and an effect GREEN, and damage/speed is one
+   * line with two columns, so the shape the two bridges hand over had to carry colour and a right
+   * column. `appendLine` already took both -- nothing new was needed at the drawing end.
+   */
+  lines: ItemTooltipLine[];
 }
 
 /**

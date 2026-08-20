@@ -37,6 +37,8 @@ import { fireEvent } from './framexml/lua/events';
 import { GlueArt } from './art';
 import { getItemTooltipSource, setItemTooltipSource, ItemTooltipInfo } from './framexml/lua/api/items';
 import { itemData } from '../pipeline/dbc/item-data';
+import { spellData } from '../pipeline/dbc/spell-data';
+import { itemTooltipLines } from './item-tooltip';
 import type { LootHandler, LootRow } from '../../network/game/object/loot';
 import { LOOT_TYPE_FISHING } from '../../network/game/object/loot';
 import type { ItemHandler } from '../../network/game/object/items';
@@ -351,13 +353,18 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
     if (template === null) {
       return null;
     }
-    const lines: string[] = [];
-    if (template.itemLevel > 0) {
-      lines.push(`Item Level ${template.itemLevel}`);
-    }
-    if (row.row.count > 1) {
-      lines.push(`Stack: ${row.row.count}`);
-    }
+    // THE BODY, from `ui/item-tooltip.ts` -- shared with the other bridge on purpose. The owner saw the
+    // name and nothing under it in BOTH the bag and the loot window, because each bridge had its own
+    // two-line body; one builder is why that cannot drift again.
+    const lines = itemTooltipLines(vm, template, {
+      // The player's own level, so an unmet `Requires Level` goes red. `Unit#level` (`classes/unit.ts:313`)
+      // initialises to 0 and `itemTooltipLines` treats 0 as "do not judge" rather than as level zero --
+      // so a tooltip opened before the descriptor lands paints nothing red instead of everything.
+      playerLevel: world.player.level,
+      // The effect labels' spell names. `spellData` is the same table the action bar reads, so a name
+      // appears once `Spell.dbc` has landed and the label stands alone until then.
+      spellName: (id: number) => spellData.spell(id)?.name ?? null,
+    });
     return { name: template.name, quality: template.quality, lines };
   };
   setItemTooltipSource(vm, lootTooltip as never);

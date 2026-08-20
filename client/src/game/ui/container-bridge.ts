@@ -55,6 +55,8 @@ import {
 } from '../../network/game/object/enums';
 import { guidHex, GUID_BYTES } from '../../network/guid-hex';
 import { itemData } from '../pipeline/dbc/item-data';
+import { spellData } from '../pipeline/dbc/spell-data';
+import { itemTooltipLines } from './item-tooltip';
 import type { ItemHandler, ItemTemplate } from '../../network/game/object/items';
 import GameOpcode from '../../network/game/opcode';
 import GamePacket from '../../network/game/packet';
@@ -541,22 +543,23 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    * (it attaches after this and calls back into what it replaces), so both kinds resolve through one
    * hook rather than two competing installs.
    *
-   * The body lines are deliberately SPARSE and that is honest: the real client prints binding, level
-   * requirement, armour, damage, stats and use effects, and this decodes only some of them. Item level
-   * and the sell price are the two that are read straight off the query response with no further join,
-   * so they are the two shown. Adding a "Requires Level" line would mean deciding what to do when the
-   * player already meets it, which is a rule nothing here states.
+   * **The body was two lines and the owner reported it: the name drew and nothing under it.** It is
+   * built by `ui/item-tooltip.ts` now -- binding, slot, damage and speed, armour, the stat lines, the
+   * requirement in red when unmet, durability, the effect labels, the flavour text and the sell price,
+   * every label being the client's own `GlobalStrings.lua` entry. The paragraph that used to stand here
+   * argued for keeping it sparse; that argument is gone, not merely unmet.
+   *
+   * THE STACK COUNT WAS DROPPED FROM THE TOOLTIP. It was ours -- the real client draws a stack on the
+   * ICON, not in the tooltip -- and it was the only body line that had no client-side source.
    */
   const bagTooltip = (kind: string, a: number | string, b?: number): ItemTooltipInfo | null => {
     let template: ItemTemplate | null = null;
-    let count = 1;
     if (kind === 'bag') {
       const item = itemAt(slotGuid(Number(a), Number(b)));
       if (item === null) {
         return null;
       }
       template = item.template;
-      count = item.count;
     } else if (kind === 'inventory') {
       // A WORN item: `a` is the unit token and `b` the 1-based equipment slot id. Only "player"
       // resolves, for the reason `GetInventoryItemTexture` gives -- no other unit's inventory guids
@@ -571,7 +574,6 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
         return null;
       }
       template = item.template;
-      count = item.count;
     } else if (kind === 'link') {
       const match = /\|Hitem:(\d+)/.exec(String(a));
       const entry = match === null ? Number(a) : Number(match[1]);
@@ -582,13 +584,18 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     if (template === null) {
       return null;
     }
-    const lines: string[] = [];
-    if (template.itemLevel > 0) {
-      lines.push(`Item Level ${template.itemLevel}`);
-    }
-    if (count > 1) {
-      lines.push(`Stack: ${count}`);
-    }
+    // THE BODY, from `ui/item-tooltip.ts` -- shared with the other bridge on purpose. The owner saw the
+    // name and nothing under it in BOTH the bag and the loot window, because each bridge had its own
+    // two-line body; one builder is why that cannot drift again.
+    const lines = itemTooltipLines(vm, template, {
+      // The player's own level, so an unmet `Requires Level` goes red. `Unit#level` (`classes/unit.ts:313`)
+      // initialises to 0 and `itemTooltipLines` treats 0 as "do not judge" rather than as level zero --
+      // so a tooltip opened before the descriptor lands paints nothing red instead of everything.
+      playerLevel: world.player.level,
+      // The effect labels' spell names. `spellData` is the same table the action bar reads, so a name
+      // appears once `Spell.dbc` has landed and the label stands alone until then.
+      spellName: (id: number) => spellData.spell(id)?.name ?? null,
+    });
     return { name: template.name, quality: template.quality, lines };
   };
   setItemTooltipSource(vm, bagTooltip as never);

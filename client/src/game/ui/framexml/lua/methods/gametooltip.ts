@@ -65,14 +65,28 @@ import { layoutScale, measureText } from '../../../text';
 import { getItemTooltipSource, ItemTooltipInfo } from '../api/items';
 
 /**
- * How many lines a tooltip can hold: the eight `$parentTextLeft<n>` slots `GameTooltipTemplate` authors.
+ * The eight `$parentTextLeft<n>` slots `GameTooltipTemplate` authors -- and no longer the ceiling.
  *
- * The real engine CREATES more `FontString`s past the authored eight when a tooltip needs them. This one
- * does not, and a ninth line is dropped with a one-time warning rather than silently: none of the three
- * consumers built here comes near eight (a spell tooltip is name + rank + cost + range + description), so
- * growing the stack would be machinery for a case nothing reaches, and a warning names it if one ever does.
+ * **THIS FILE USED TO STOP AT EIGHT AND ARGUE THAT NOTHING WOULD REACH IT.** The argument was "a spell
+ * tooltip is name + rank + cost + range + description", and it held until the item body landed: a plain
+ * helm is item level, binding, slot, armour, two stats, a blank, the requirement, durability, the
+ * flavour text and the sell price -- ELEVEN lines under the name. Capped at eight, the fix for "items
+ * have no description" would have shown two thirds of one and printed a warning.
+ *
+ * So the stack GROWS, which is what the real engine does: it creates further `FontString`s past the
+ * authored eight on demand. `ensureLine` below does exactly that, copying the authored slots' font and
+ * continuing their anchor chain.
  */
-const MAX_LINES = 8;
+const AUTHORED_LINES = 8;
+
+/**
+ * The ceiling on a grown stack. OURS -- the engine has no documented limit.
+ *
+ * It exists only so a runaway caller cannot mint FontStrings without bound; 30 is comfortably past the
+ * longest real item tooltip (a socketed epic with three effects is high teens) and a line past it is
+ * dropped with the same one-time warning the hard cap used to give.
+ */
+const MAX_LINES = 30;
 
 /**
  * The tooltip's inner padding and line gap, in LOGICAL UNITS -- both read straight off the template.
@@ -309,6 +323,56 @@ function colourArg(args: unknown[], at: number): { r: number; g: number; b: numb
 }
 
 /** Append a line, returning the 1-based index written, or 0 when the tooltip is full. */
+/**
+ * Make sure line slot `line` exists, creating it if the template did not author it.
+ *
+ * The real engine does this; see `AUTHORED_LINES`. What is created is a pair of `FontString`s named
+ * exactly as the authored ones are (`<tooltip>TextLeft9`, `TextRight9`), so `regionOf` finds them by the
+ * same name lookup and nothing else in this file needs to know which slots were authored.
+ *
+ * THREE THINGS ARE COPIED FROM THE AUTHORED SLOTS RATHER THAN CHOSEN:
+ *
+ *  - **The font.** Taken from `TextLeft1`, which inherits `GameTooltipHeaderText`/`GameTooltipText`
+ *    (`gametooltiptemplate.xml:18-24`). A fresh `FontString` would otherwise get `ensureFont`'s
+ *    fallback -- 12pt FRIZQT centred -- and a centred body line under left-aligned ones is visible
+ *    immediately. Copied as a NEW object, not shared: `writeSide` writes `color` and `wrapWidth` per
+ *    line, so a shared spec would give every grown line the last one's colour.
+ *  - **The anchor.** `TOPLEFT` to the previous line's `BOTTOMLEFT` at `0,-LINE_GAP`, which is verbatim
+ *    what the template does for lines 2..8 (`:36-42`).
+ *  - **The layer.** `ARTWORK`, as the authored slots declare.
+ *
+ * Returns false when the tooltip has no authored slots at all -- an addon's bare `CreateFrame`
+ * `GameTooltip` -- because there is then no font and no anchor to continue from, and inventing both is
+ * how a tooltip renders plausibly and wrongly.
+ */
+function ensureLine(ctx: MethodContext, self: number, line: number): boolean {
+  if (regionOf(ctx, self, `TextLeft${line}`) !== null) {
+    return true;
+  }
+  const name = ctx.registry.nameOf(self);
+  const first = regionOf(ctx, self, 'TextLeft1');
+  const previousLeft = regionOf(ctx, self, `TextLeft${line - 1}`);
+  if (name === null || first === null || previousLeft === null) {
+    return false;
+  }
+  const left = ctx.registry.widget(ctx.registry.create('FontString', `${name}TextLeft${line}`, self))!;
+  left.layer = first.layer;
+  left.font = { ...ensureFont(first) };
+  left.shown = false;
+  left.setAnchors({
+    point: 'TOPLEFT', relativeTo: previousLeft.id, relativePoint: 'BOTTOMLEFT', x: 0, y: -LINE_GAP,
+  });
+
+  // The right slot is created alongside even though most lines never use one: `placeRightColumns`
+  // re-anchors it every resize and `clearFrom` blanks it, and both of those look it up by name -- so a
+  // grown line that later gains a right column must not be the one case where the slot is absent.
+  const right = ctx.registry.widget(ctx.registry.create('FontString', `${name}TextRight${line}`, self))!;
+  right.layer = first.layer;
+  right.font = { ...ensureFont(first) };
+  right.shown = false;
+  return true;
+}
+
 function appendLine(
   ctx: MethodContext,
   self: number,
@@ -321,12 +385,17 @@ function appendLine(
   const state = stateOf(widgetOf(ctx, self));
   if (state.lines >= MAX_LINES) {
     warnOnce(
-      `GameTooltip: more than ${MAX_LINES} lines -- GameTooltipTemplate authors exactly that many `
-      + '$parentTextLeft<n> slots and this runtime does not create more, so the extra lines are dropped',
+      `GameTooltip: more than ${MAX_LINES} lines -- that is this runtime's own ceiling on a grown line `
+      + 'stack rather than the eight the template authors, so the extra lines are dropped',
     );
     return 0;
   }
   const line = state.lines + 1;
+  // Past the authored eight, the slot has to be minted first. `ensureLine` returning false means this
+  // tooltip has no authored slots to copy from at all, and `writeSide` below then answers false too.
+  if (line > AUTHORED_LINES) {
+    ensureLine(ctx, self, line);
+  }
   if (!writeSide(ctx, self, `TextLeft${line}`, left, leftColour, wrap)) {
     return 0;
   }
@@ -673,8 +742,16 @@ function fillItemLines(ctx: MethodContext, self: number, info: ItemTooltipInfo):
     }
   }
   appendLine(ctx, self, info.name, null, colour, undefined, false);
+  // Each line carries its own colour and, for damage/speed, a right column -- see
+  // `api/items.ts#ItemTooltipInfo`. `wrap` is per line rather than always on: the flavour text and an
+  // effect sentence want wrapping, and a short stat line wrapped for no reason widens the tooltip.
   for (const line of info.lines) {
-    appendLine(ctx, self, line, null, { r: 1, g: 1, b: 1 }, undefined, true);
+    const rgb = line.colour ?? [1, 1, 1];
+    appendLine(
+      ctx, self, line.left, line.right ?? null,
+      { r: rgb[0], g: rgb[1], b: rgb[2] }, { r: rgb[0], g: rgb[1], b: rgb[2] },
+      line.wrap === true,
+    );
   }
   resize(ctx, self);
   widgetOf(ctx, self).shown = true;
