@@ -327,33 +327,45 @@ export class UpdateObjectHandler extends EventEmitter {
     // The TYPE is remembered on the unit here and nowhere else; every later values-only update is
     // decoded against it (`applyValues`).
     unit.objectType = pack.obj_type;
-    // A REMOTE PLAYER IS A PLAYER, and until this line nothing in the client believed so.
+    // ASK FOR ANOTHER PLAYER'S NAME. A creature is named by `SMSG_CREATURE_QUERY_RESPONSE`, which
+    // `combat.ts#applyCreatureInfo` writes onto every unit sharing the template; a PLAYER is named
+    // only by `SMSG_NAME_QUERY_RESPONSE`, and **nothing was asking for anybody.**
     //
-    // `Unit#isPlayer` (`classes/unit.ts:323`) defaults to `false` and was assigned in exactly ONE
-    // place: `classes/player.ts:14`, our own local character. Every player the server streams is
-    // built as `new Unit(pack.guid)` twenty lines above, so `isPlayer` stayed false for all of them
-    // for the whole session. Two things read it and both were wrong:
+    // 255083b put the ask in `world/index.ts#add` behind `if (entity.isPlayer && entity !== this.player
+    // && ...)`, and that condition is false for ALL inputs. `Unit#isPlayer` (`classes/unit.ts:323`)
+    // defaults to false and is assigned in exactly one place in the tree -- `classes/player.ts:14`, the
+    // constructor of our OWN character -- so it is false for every player the server streams, and the
+    // `entity !== this.player` half excludes the single unit where it is true. All four defects that
+    // commit fixed were real; this fifth one made the fix unreachable, which is why the owner still
+    // saw an empty name. `add` also runs BEFORE the create block's type byte is decoded (twenty lines
+    // above: a bare `new Unit` is added immediately), so nothing there can know a unit is a player.
     //
-    //  - `world/index.ts#add` guards its name query on `entity.isPlayer`, so **the query that
-    //    255083b added was never sent for anybody** -- the guard is false for every remote player and
-    //    the `entity !== this.player` half excludes the one unit where it is true. That is why the
-    //    owner still sees an empty name after that commit: all four defects it fixed were real, and
-    //    the fifth one made the fix unreachable. (`add` also runs BEFORE any of this decode, so the
-    //    guard could not have worked there even with `isPlayer` correct -- the ask belongs here,
-    //    where the wire has just told us the type.)
-    //  - `ui/unit-bridge.ts:68` copies it into the snapshot, so `UnitIsPlayer("target")` answered
-    //    false for a targeted player.
+    // Here, on `pack.obj_type` -- the create block's own `ObjectType` byte, the wire's answer rather
+    // than a guess off the guid's high word. `cursor-mode.ts:290` and `nameplates.ts:561` already test
+    // players this way, and that is not a coincidence:
     //
-    // `pack.obj_type` is the create block's own `ObjectType` byte, which is the wire's answer and not
-    // a guess off the guid's high word. `cursor-mode.ts:290` already tests players this way.
-    if (pack.obj_type === ObjectType.Player) {
-      unit.isPlayer = true;
-      // Only a PLAYER needs `SMSG_NAME_QUERY_RESPONSE`; a creature is named by its template through
-      // `combat.ts#applyCreatureInfo`. `askNameOnce` dedupes on the cache and the in-flight set, so
-      // re-entering our own grid does not re-ask.
-      if (unit !== this.game.world.player
-        && (unit.name === '' || unit.name === '<unknown>')) {
-        this.game.askNameOnce?.(pack.guid);
+    // **`isPlayer` IN THIS CODEBASE MEANS "IS THE LOCALLY-CONTROLLED PLAYER", NOT "IS A PLAYER
+    // CHARACTER"**, and setting it here would have been a real regression. SELF-REVIEW caught it: the
+    // first version of this block did `unit.isPlayer = true`, and eight motion sites read the flag as
+    // the local/remote switch -- `world/index.ts:1051` picks `entity.move.horizVel.length()` over
+    // `entity.remoteMotion.speed` for it, and `unit.ts:3012,3023` gate the peer dead-reckon trace on
+    // `!this.isPlayer`. A peer has no Controls writing `move.horizVel`, so flipping the flag would have
+    // read every other player's speed as 0 and stopped their run cycle -- breaking locomotion, which is
+    // owner-confirmed working, in another agent's area. The flag is left alone.
+    //
+    // `UnitIsPlayer`/`UnitPlayerControlled` DO want "is a player character", and they are wrong for the
+    // same reason; that is fixed where it belongs, in `ui/unit-bridge.ts`, off `objectType`.
+    if (pack.obj_type === ObjectType.Player
+      && unit !== this.game.world.player
+      && (unit.name === '' || unit.name === '<unknown>')) {
+      // `askNameOnce` dedupes on the name cache and the in-flight set, so re-entering our own grid --
+      // which re-sends the create block -- does not re-ask.
+      if (typeof this.game.askNameOnce === 'function') {
+        this.game.askNameOnce(pack.guid);
+      } else {
+        // LOUD, not a silent optional call: a rename on the handler would otherwise turn this off with
+        // no symptom but a blank name, which is the report this code exists to answer.
+        console.warn('applyUpdates: game.askNameOnce is missing -- other players will have no name');
       }
     }
     if (pack.obj_type === ObjectType.Unit || pack.obj_type === ObjectType.Player) {

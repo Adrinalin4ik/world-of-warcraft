@@ -51,6 +51,12 @@ import { raceClassData } from '../pipeline/dbc/race-class-data';
  * own in 3.3.5a's list; a death knight's rune bar is `RuneFrame`, not the mana bar, so it maps to
  * nothing and its changes ride the max/displaypower events.
  */
+/**
+ * `ObjectType.Player`. Declared locally the way `cursor-mode.ts:42`, `nameplates.ts:98` and
+ * `pick.ts:101` each declare it, rather than reaching into the network layer's enum from the UI.
+ */
+const OBJECT_TYPE_PLAYER = 4;
+
 const POWER_EVENT = ['UNIT_MANA', 'UNIT_RAGE', 'UNIT_FOCUS', 'UNIT_ENERGY', 'UNIT_HAPPINESS', null, 'UNIT_RUNIC_POWER'];
 const MAX_POWER_EVENT = ['UNIT_MAXMANA', 'UNIT_MAXRAGE', 'UNIT_MAXFOCUS', 'UNIT_MAXENERGY', 'UNIT_MAXHAPPINESS', null, 'UNIT_MAXRUNIC_POWER'];
 
@@ -65,7 +71,19 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   snapshot.power = unit.fields.power ?? 0;
   snapshot.maxPower = unit.fields.maxPower ?? 0;
   snapshot.classification = unit.classification;
-  snapshot.isPlayer = unit.isPlayer;
+  // `UnitIsPlayer`/`UnitPlayerControlled` ask "is this a player CHARACTER", and `Unit#isPlayer` does
+  // not answer that question. It defaults to false and is assigned in exactly one place in the tree,
+  // `classes/player.ts:14` -- the constructor of our OWN character -- because eight motion sites read
+  // it as the LOCAL-versus-REMOTE switch (`world/index.ts:1051` picks `move.horizVel` over
+  // `remoteMotion.speed` on it; `unit.ts:3012,3023` gate the peer dead-reckon trace on `!isPlayer`).
+  // So it was false for every player the server streams, and `UnitIsPlayer("target")` answered false
+  // for a targeted player -- which also fed `UnitSelectionColor` (`api/units.ts:475`) the creature
+  // ramp for a player.
+  //
+  // `objectType` is the create block's own `ObjectType` byte and the right question to ask.
+  // `cursor-mode.ts:290` and `nameplates.ts:561` already test players this way; the flag is left to
+  // mean what the motion code needs it to mean.
+  snapshot.isPlayer = unit.objectType === OBJECT_TYPE_PLAYER;
   snapshot.dead = unit.dead;
 
   // The experience pair and the rested pool. PLAYER-scope update fields, so they are only ever present
