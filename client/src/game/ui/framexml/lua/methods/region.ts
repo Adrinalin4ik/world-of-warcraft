@@ -18,7 +18,7 @@ import { FrameMethod, MethodContext, MethodTable, isObjectType, registerMethods 
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
 import { Layer, Widget, deriveSize, effectiveFont } from '../../../widget';
-import { familyForFontFile, measureText } from '../../../text';
+import { familyForFontFile, fontFileForFamily, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
 import { rectOf, screenHeightUnits } from '../../../rects';
 import { ensureArt } from '../../../runtime-art';
@@ -817,6 +817,37 @@ const FONTSTRING: MethodTable = {
     // `SystemFont_InverseShadow_Small` authors `a=".75"` (fonts.xml:47).
     spec.shadowAlpha = args[3] === undefined ? 1 : Number(args[3]);
     return [];
+  },
+  /**
+   * `GetFont()` -> `fontFile, height, flags` -- the same triple `SetFont` takes.
+   *
+   * MEASURED ABSENT, not guessed at. Loading the client's own `UIDropDownMenu.xml` through the real
+   * loader in a headless harness reports exactly one error:
+   *
+   *     uidropdownmenu.xml:DropDownList1: OnLoad: attempt to call a nil value (method 'GetFont')
+   *
+   * That `<OnLoad>` is `local fontName, fontHeight, fontFlags =
+   * _G["DropDownList1Button1NormalText"]:GetFont(); UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT = fontHeight;`
+   * (`uidropdownmenu.xml:11-14`), so the raise left `UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT` nil and killed
+   * the rest of that handler.
+   *
+   * Through `effectiveFont`, like `GetStringHeight` and unlike `GetStringWidth`: a font string with no
+   * spec of its own inherits its font object's, and the engine's `GetFont` answers what the string will
+   * actually draw with, not whether it happens to carry a local override.
+   *
+   * The flags string is rebuilt from the spec rather than remembered: `FontSpec` keeps `outline` as a
+   * boolean and nothing else from the flags word, so `"OUTLINE"` or `""` is the whole truthful answer.
+   * `MONOCHROME` and `THICKOUTLINE` are not modelled anywhere in this widget layer, so reporting them
+   * would be inventing a value -- see the project rule about comments that invent a source.
+   */
+  GetFont: (ctx, self) => {
+    const spec = effectiveFont(widgetOf(ctx, self));
+    if (spec === null) {
+      // The real call answers nil for a string that has no font at all, and `UIDropDownMenu.xml`'s
+      // handler tests nothing -- but a nil triple is the honest answer and is what the engine gives.
+      return [];
+    }
+    return [fontFileForFamily(spec.family), spec.size, spec.outline ? 'OUTLINE' : ''];
   },
   SetFont: (ctx, self, args) => {
     const family = familyForFontFile(String(args[0] ?? ''));

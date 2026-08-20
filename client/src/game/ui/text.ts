@@ -44,6 +44,18 @@ const PADDING_V = 6;
 const TEXTURE_CACHE_MAX = 256;
 
 /**
+ * `FONT_FILES` read forwards -- the file path a family name stands for.
+ *
+ * `FontString:GetFont()` answers `fontFile, height, flags`, i.e. the same triple `SetFont` takes, so it
+ * needs this direction. Null for a family that is not one of the four shipped faces, which cannot
+ * happen through `SetFont`/`SetFontObject` (both go through `familyForFontFile` or the `<Font>`
+ * registry) but can through a `FontSpec` built by hand.
+ */
+export function fontFileForFamily(family: string): string | null {
+  return FONT_FILES[family] ?? null;
+}
+
+/**
  * The reverse of `FONT_FILES`: what `FontString:SetFont(fontFile, height, flags)` passes is the file
  * PATH the client ships, not the family name widgets otherwise ask for by name (`FontSpec.family`,
  * `SetFontObject`'s eventual target). Matched case-insensitively and slash-insensitively, since

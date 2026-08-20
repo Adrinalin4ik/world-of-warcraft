@@ -158,8 +158,6 @@ export default class World extends EventEmitter {
   // private skybox: THREE.Mesh;
   constructor(game: GameHandler) {
     super();
-    console.log(game)
-    console.log('WORLD GAME', game)
     window['world'] = this;
     this.scene = new THREE.Scene();
     this.scene.matrixAutoUpdate = false;
