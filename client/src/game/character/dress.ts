@@ -191,6 +191,21 @@ export function attachCharacterItems(
   look: CharacterLook,
   stillWanted: () => boolean,
   onAttached: (model: any) => void,
+  /**
+   * Called once per item after its texture slot has settled -- OPTIONAL, and only the model booth
+   * passes one.
+   *
+   * `onAttached` fires when the model reaches its bone, which is one or more frames BEFORE
+   * `setObjectTexture` resolves: until then the item draws with the shared `PLACEHOLDER` skin. The
+   * world and the glue stage never notice, because both re-render every frame. A model pane bakes
+   * once and stops (`ui/scene/model-booth.ts`), so for it the difference between "attached" and
+   * "dressed" is the difference between a sword and a flat grey sword for ever.
+   *
+   * Fires whether or not the texture LOADED: a 404 leaves the placeholder, which is still a change of
+   * nothing, but the failure has already been reported below and a caller that re-bakes once more for
+   * it pays one small render rather than needing a second signal.
+   */
+  onSettled?: (model: any) => void,
 ): void {
   for (const item of look.attachments) {
     M2Blueprint.load(item.modelPath)
@@ -230,6 +245,11 @@ export function attachCharacterItems(
         return model
           .setObjectTexture(item.texturePath)
           .then((failures: TextureFailure[]) => {
+            // Before the failure report and outside it, so it runs on the successful path too --
+            // which is the only path that changes what the item looks like.
+            if (stillWanted()) {
+              onSettled?.(model);
+            }
             if (failures.length === 0) {
               return;
             }

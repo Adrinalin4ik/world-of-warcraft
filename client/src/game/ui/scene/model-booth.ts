@@ -32,31 +32,40 @@
  *
  * ## The redraw policy, and its whole budget argument
  *
- * A pane is baked ONLY when one of four things is true:
+ * A pane is baked ONLY when one of these is true, and every one of them changes what the picture IS:
  *
  *  1. the frame's rig `revision` moved -- a `SetUnit`, a `RefreshUnit`, or a `SetRotation`;
- *  2. the unit was redressed (`Unit#characterLook` is a new object);
- *  3. the model, its textures or one of its attachments has just landed;
- *  4. the interface was going to be fully re-rendered on this frame anyway.
+ *  2. the unit was redressed (`Unit#characterLook` is a new object), or the pane's subject changed;
+ *  3. the model, its body textures, an attachment or an attachment's texture has just landed;
+ *  4. the pane was resized, or its framing changed.
  *
- * (4) is the safety valve, and it is free by construction: `world-ui.ts` already forces a full
- * interface draw one frame in twelve (`FULL_DRAW_EVERY`) precisely because a texture that arrives
- * late changes no field the fingerprint reads. Baking on exactly those frames adds a small scene
- * render to a frame that was already paying for a full pass, and adds ZERO dirty frames.
+ * THERE IS NO PERIODIC RE-BAKE. There was: the booth used to also bake on the frames `world-ui.ts` was
+ * going to fully re-render anyway (`FULL_DRAW_EVERY`, one in twelve), on the argument that those frames
+ * were already paid for. Free is not the same as right -- a portrait re-baked one frame in twelve
+ * advances the Stand loop by 200 ms each time, which is a 5 fps animation, and the owner asked for a
+ * still: "Я просил не 1 fps а один кадр. Т.е. 2д картинку без анимации." It is gone, and the late
+ * arrivals it used to cover are each signalled directly instead (see (3), and `dress.ts#onSettled`).
  *
- * Everything else is a hard no. Nothing here is baked per frame, and nothing is animated: the figure
- * is frozen at the Stand pose the clock read when it was last baked. That is the reference's own
- * behaviour and it is not a shortcut -- the real client "renders a unit's model once into a tiny
- * (64 squared) off-screen texture and freezes it (re-baked only on model change)"
+ * The POSE is frozen too, and separately: `Pane#poseClock` latches the world clock at the instant the
+ * figure is adopted and every bake solves that same instant, so a legitimate re-bake -- a gear change,
+ * or a drag of the paper doll -- reproduces the same stance rather than whatever frame of the idle the
+ * clock has reached. Sampling the live clock was the actual mechanism of the animation the owner saw.
+ *
+ * This is the reference's own behaviour and not a shortcut: the real client "renders a unit's model
+ * once into a tiny (64 squared) off-screen texture and freezes it (re-baked only on model change)"
  * (`benilla/.../portrait/mod.rs:4-6`), and benilla's own body pane bakes a "fresh throwaway instance
  * ... armed to the model's Stand and frozen, never the unit's live world pose" (`mod.rs:43-48`).
  * `CharacterModelFrame`'s own `<OnUpdate>` is `Model_OnUpdate`, which does nothing but sweep the yaw
  * while a rotate button is held (`uiparent.lua:2847-2865`) -- it never calls `AdvanceTime`. So a
  * breathing idle in the pane is a thing the client's own Lua does not ask for.
  *
- * The measured consequence is in the task report: with the character panel open, `dirtyFrames` is the
- * same one-in-twelve floor with the pane present as without it, and a bake costs one small scene
- * render on those frames only.
+ * The PAPER DOLL IS NOT THE PORTRAITS, and the two policies are deliberately not one. A portrait's rig
+ * never changes rotation, so it bakes once per appearance and then never again. The paper doll's does,
+ * on every mouse-move of a drag and every frame a rotate button is held -- so it re-bakes while it is
+ * being turned, which is the whole of the owner-confirmed drag-to-rotate. Freezing that would be a
+ * regression, not a fix.
+ *
+ * The measured consequence is in the task report.
  *
  * ## What is reused rather than rebuilt
  *
@@ -170,6 +179,64 @@ function paneKey(widgetId: string): string {
 }
 
 /**
+ * LET THIS MODEL'S BATCHES WRITE DESTINATION ALPHA. This is the whole of the missing-hairstyle bug.
+ *
+ * `material/index.ts#applyBlendingModeToMaterial` ends with, for every blending mode >= 1:
+ *
+ *     material.blendSrcAlpha = THREE.ZeroFactor;
+ *     material.blendDstAlpha = THREE.OneFactor;
+ *
+ * i.e. `dstA = 0 * srcA + 1 * dstA` -- the draw is forbidden from touching the framebuffer's alpha
+ * channel at all. That is correct and deliberate for the world: it emulates the reference's OPAQUE
+ * backbuffer, and its own comment records what it bought (three requests a `premultipliedAlpha`
+ * context unconditionally, so any sub-1 alpha left in the canvas gives the fragment a bright halo --
+ * "all of Elwynn's foliage gained a white fringe"). It is FATAL in a pane, because a pane's target is
+ * composited into the interface BY ITS ALPHA: a batch that writes colour and no alpha writes nothing
+ * the viewer can see.
+ *
+ * A character's hair geoset is blending mode 1 (alpha key). Its body is mode 0, which is `NoBlending`
+ * -- the factors are ignored and the shader's own alpha reaches the buffer -- which is exactly why the
+ * body appeared and the hairstyle did not, on a model whose geoset selection, bound texture objects,
+ * skinned bounds, material state and per-batch draw counts are all IDENTICAL to the world's. Measured:
+ * with only the hair geoset visible, the paper-doll target held 983 pixels carrying colour and alpha
+ * <= 8/255, and the sword (mode 0) was the only thing in the pane with alpha at all.
+ *
+ * ONE / ONE-MINUS-SRC-ALPHA, i.e. `dstA = srcA + dstA * (1 - srcA)`: standard coverage accumulation,
+ * and the same "over" rule the RGB factors of mode 2 already use. For mode 1 the shader's alpha is
+ * `vertexColor.a` (`fragment/combiners-opaque.glsl`), so a kept cutout texel stores 1 and the geoset
+ * comes out solid; for the genuinely blended modes the pane's coverage grows with what is drawn into
+ * it, which is what a sprite over panel art needs.
+ *
+ * GUARDED ON `ownsBatches`, and the guard is load-bearing rather than defensive. An instanceable M2
+ * shares its materials with every other placement of the same path (`M2#clone` passes
+ * `instance.batches`, `pipeline/m2/index.ts:348-353`), so writing blend factors on one would change
+ * the world's copy -- the precise mistake the file header claims this subsystem avoids. Characters and
+ * creatures animate, so `canInstance` is false for both and every figure a pane draws owns its
+ * materials; a shared-batch model (a static attached item) keeps the world's rule, which costs it
+ * nothing because such items are mode 0 and already write their alpha.
+ *
+ * Answers whether it did anything, so the caller can say when it did not.
+ */
+export function allowDestinationAlpha(model: any): boolean {
+  if (model?.ownsBatches !== true) {
+    return false;
+  }
+  for (const submesh of model.submeshes ?? []) {
+    for (const batch of submesh.children ?? []) {
+      const material = batch?.material;
+      // Mode 0 is `NoBlending` and writes the shader's alpha directly; nothing to correct, and
+      // touching its factors would be a no-op three still has to re-read.
+      if (material === undefined || material.blending !== THREE.CustomBlending) {
+        continue;
+      }
+      material.blendSrcAlpha = THREE.OneFactor;
+      material.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+    }
+  }
+  return true;
+}
+
+/**
  * The V-FLIPPED whole-texture rect.
  *
  * A `WebGLRenderTarget`'s texture has `v = 0` at the BOTTOM (it is a framebuffer, not an uploaded
@@ -240,6 +307,15 @@ class Pane {
   private revision = -1;
 
   private rotation = 0;
+
+  /**
+   * The world-clock instant every bake of the CURRENT figure is posed at. See `adoptModel`.
+   *
+   * One frame means one frame: this is latched when the model is adopted and never advanced, so two
+   * bakes of the same figure are the same picture. 0 while no model is loaded, which `pose()` never
+   * reaches.
+   */
+  private poseClock = 0;
 
   private framing: 'body' | 'portrait' = 'body';
 
@@ -327,7 +403,13 @@ class Pane {
     }
   }
 
-  /** Force the next `bake` -- the safety valve, and the "a texture just landed" signal. */
+  /**
+   * Force the next `bake`.
+   *
+   * No caller inside this file needs it any more -- the build path sets `dirty` directly. It is kept
+   * because it is the ONLY way an instrument can ask a frozen pane to redraw, and a frozen pane is now
+   * genuinely frozen: probe 23's readback of the pane's own target needed exactly this.
+   */
   touch(): void {
     this.dirty = true;
   }
@@ -453,8 +535,21 @@ class Pane {
         () => this.token === token && this.model === model,
         (item) => {
           this.attached.push(item);
+          // An attached item that owns its own materials needs the same alpha correction the body
+          // does -- a helm with an alpha-keyed feather would otherwise be a hole in the pane. No
+          // warning on the false branch here, unlike the body's: a static item model IS instanceable,
+          // so sharing is the NORMAL case for an attachment and its batches are mode 0.
+          allowDestinationAlpha(item);
           // A frozen pane cannot notice a weapon that lands three frames later, so the arrival is
           // what re-bakes it. Without this the figure holds nothing for ever.
+          this.dirty = true;
+        },
+        // ...and the arrival is not enough on its own. `attachCharacterItems` attaches the model
+        // BEFORE its texture resolves, so the bake above draws the item with the shared placeholder
+        // skin. That used to be corrected by the next safety-valve bake; with the valve gone (see
+        // `ModelBooth#render`) nothing else would ever re-bake it, and a sword would stay flat grey
+        // for the life of the pane.
+        () => {
           this.dirty = true;
         },
       );
@@ -518,6 +613,19 @@ class Pane {
       return null;
     }
     this.model = model;
+    // THE POSE INSTANT, LATCHED. `pose()` used to sample `worldClock.ms`, so every bake solved the
+    // Stand loop at a LATER instant than the one before -- a portrait re-baked on the safety valve was
+    // therefore a 5 fps animation, which is what the owner reported ("Анимация все равно проходит в
+    // превью... Я просил не 1 fps а один кадр"). Freezing the instant is what makes a legitimate
+    // re-bake (a gear change, a drag of the paper doll) reproduce the SAME stance instead of whatever
+    // frame of the idle it happens to land on.
+    //
+    // This value and the one `armStand` arms the sequence with are the same read of the same clock in
+    // the same turn -- `armStand` is called from the caller's next statement -- so the latched instant
+    // is Stand's t = 0, its first keyframe. That is the reference's own choice of frame: benilla's
+    // booth arms "the model's Stand and frozen, never the unit's live world pose"
+    // (`benilla/.../portrait/mod.rs:43-48`).
+    this.poseClock = worldClock.ms;
     this.root.add(model);
     // `M2` constructs itself hidden and there is no visibility manager here -- the same line
     // `glue-scene.ts` needs, and the same silent black frame if it is missing. three's
@@ -526,6 +634,16 @@ class Pane {
     model.visible = true;
     this.scale = scale;
     this.anchors = readAnchors(model);
+    // See `allowDestinationAlpha`: without this the pane draws a character's hair geoset -- and every
+    // other alpha-keyed or alpha-blended batch -- as colour with no coverage, which the interface
+    // composite samples as nothing at all.
+    if (!allowDestinationAlpha(model)) {
+      console.warn(
+        `model booth: ${this.widgetId}'s figure shares its materials with the world (` +
+          `ownsBatches false), so its alpha-keyed batches cannot be made to write pane alpha; ` +
+          'any cutout geoset it carries will be invisible in the pane',
+      );
+    }
     this.dirty = true;
     return model;
   }
@@ -559,7 +677,11 @@ class Pane {
    * descendants.
    */
   private pose(): void {
-    const clock = worldClock.ms;
+    // THE LATCHED INSTANT, not `worldClock.ms`. See `poseClock`: sampling the live clock here made
+    // every re-bake a later frame of the Stand loop, so the pane animated at whatever rate it was
+    // re-baked. The attachments take the same instant as the body -- a sword posed at a different
+    // moment than the hand holding it is the same defect one joint further out.
+    const clock = this.poseClock;
     for (const item of this.attached) {
       poseModel(item, clock);
     }
@@ -793,8 +915,13 @@ export class ModelBooth {
   /**
    * One frame of booth work: find the model frames on screen, take their state, bake what changed.
    *
-   * `valveDue` is the host's own "this frame is a full interface re-render anyway" flag; see the
-   * redraw policy in the file header for why that is the free frame to re-bake on.
+   * THERE IS NO PERIODIC RE-BAKE, and its removal is the point. It used to take the host's "this frame
+   * is a full interface re-render anyway" flag and `touch()` every pane on it -- free in dirty frames,
+   * and wrong: a portrait re-baked one frame in twelve is a 5 fps animation of the Stand loop, which
+   * is what the owner reported and which reads worse than either a still or a live model. The only
+   * things that may re-bake a pane now are the ones that change what the picture IS: a new subject, a
+   * rig revision (`SetUnit`/`RefreshUnit`/`SetRotation`), a resize, and the model / its textures / an
+   * attachment / an attachment's texture arriving.
    *
    * `scale` is `layout.ts#screenScale` and `pixelRatio` is the renderer's, so a pane's target is
    * sized in the same device pixels the interface target is -- the two composite 1:1.
@@ -806,7 +933,7 @@ export class ModelBooth {
     items: DrawItem[],
     art: GlueArt,
     subjectFor: SubjectForUnit,
-    opts: { valveDue: boolean; scale: number; pixelRatio: number },
+    opts: { scale: number; pixelRatio: number },
   ): boolean {
     let baked = false;
 
@@ -840,9 +967,6 @@ export class ModelBooth {
         item.rect.width * opts.scale * opts.pixelRatio,
         item.rect.height * opts.scale * opts.pixelRatio,
       );
-      if (opts.valveDue) {
-        pane.touch();
-      }
       baked = pane.bake(this.renderer) || baked;
 
       // ADOPTED every frame, and idempotent by identity (`art.ts#adopt`): the target's texture object

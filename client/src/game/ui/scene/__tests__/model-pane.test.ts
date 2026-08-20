@@ -13,6 +13,10 @@
  * Everything else about the booth is verified in a real browser on an ordinary online login, which is
  * where a wrong camera or a wrong V flip is a visibly wrong picture rather than a failing expectation.
  */
+import * as THREE from 'three';
+
+import { applyBlendingModeToMaterial } from '../../../pipeline/m2/material';
+import { allowDestinationAlpha } from '../model-booth';
 import { LuaVM } from '../../framexml/lua/vm';
 import { FrameRegistry, installObjectModel } from '../../framexml/lua/object';
 import { installCompat } from '../../framexml/lua/compat';
@@ -123,4 +127,40 @@ describe('the pane camera', () => {
       expect(crown).toBeLessThan(0.95);
     }
   });
+});
+
+/**
+ * THE MISSING HAIRSTYLE, pinned where a screenshot could not attribute it.
+ *
+ * The pane's figure resolved the same geosets, bound the same texture OBJECTS, posed to the same
+ * skinned bounds and issued the same per-batch draws as the character standing in the world -- and its
+ * hair was still absent, because `applyBlendingModeToMaterial` forbids every blending mode >= 1 from
+ * writing destination alpha (to keep the reference's opaque backbuffer) and a pane is composited BY
+ * its alpha. The world's rule is asserted here as the real function computes it, not as a literal, so
+ * this cannot pass against a rule that has since changed.
+ */
+describe('a pane figure and destination alpha', () => {
+  it('lets an alpha-keyed batch write pane alpha, and refuses a model that shares its materials',
+    () => {
+      const material = new THREE.MeshBasicMaterial();
+      // Blending mode 1 -- alpha key. A character's hair geoset is this.
+      applyBlendingModeToMaterial(material, 1);
+      expect(material.blendSrcAlpha).toBe(THREE.ZeroFactor);
+      expect(material.blendDstAlpha).toBe(THREE.OneFactor);
+
+      const model = {
+        ownsBatches: true,
+        submeshes: [{ children: [{ material }] }],
+      };
+      expect(allowDestinationAlpha(model)).toBe(true);
+      expect(material.blendSrcAlpha).toBe(THREE.OneFactor);
+      expect(material.blendDstAlpha).toBe(THREE.OneMinusSrcAlphaFactor);
+
+      // A shared-batch model's materials belong to every placement of its path, world included.
+      const shared = new THREE.MeshBasicMaterial();
+      applyBlendingModeToMaterial(shared, 1);
+      expect(allowDestinationAlpha({ ownsBatches: false, submeshes: [{ children: [{ material: shared }] }] }))
+        .toBe(false);
+      expect(shared.blendSrcAlpha).toBe(THREE.ZeroFactor);
+    });
 });

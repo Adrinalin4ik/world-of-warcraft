@@ -634,14 +634,13 @@ export class WorldUiHost {
     // SHOULD catch. Before the full draw because the pane's texture is drawn INTO the interface target,
     // so a bake that happened after it would not be composited until the next dirty frame.
     //
-    // `valveDue` is the frame the interface was going to be fully re-rendered on anyway (see
-    // `FULL_DRAW_EVERY`), and handing it to the booth is what makes a pane's own safety valve free:
-    // it re-bakes on those frames and on no others. `boothBaked` then forces the full draw, because a
-    // bake changes pixels the fingerprint cannot see.
+    // NO VALVE IS HANDED DOWN. This used to pass `framesSinceFullDraw >= FULL_DRAW_EVERY` so a pane
+    // re-baked on the frames the interface was being fully re-rendered anyway -- free in dirty frames,
+    // but it made every portrait a one-frame-in-twelve animation of the Stand loop. The booth now bakes
+    // only on a real change; see `ModelBooth#render`. `boothBaked` still forces the full draw, because
+    // a bake changes pixels the fingerprint cannot see.
     const paneStarted = performance.now();
-    const valveDue = this.framesSinceFullDraw >= FULL_DRAW_EVERY;
     const boothBaked = this.booth.render(items, this.art, (unit) => this.subjectForUnit(unit), {
-      valveDue,
       scale,
       pixelRatio: this.renderer.getPixelRatio(),
     });
