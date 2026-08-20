@@ -248,14 +248,28 @@ export class GossipHandler extends EventEmitter {
    * `readCStr` earns its keep hardest: fourteen of the sixteen strings are typically empty, so
    * `readCString` would land fourteen bytes short and the last block's emotes would read as garbage.
    *
-   * WHICH block is shown: the first with a nonzero probability, which is what the real client picks
-   * when it has no reason to weight them. The gendered pair collapses to whichever is non-empty --
-   * this client does not read the player's own gender here, and the two are identical for all but a
-   * handful of texts.
+   * WHICH block is shown: **the first with any TEXT**, preferring one that also carries a nonzero
+   * probability. The gendered pair collapses to whichever half is non-empty -- this client does not
+   * read the player's own gender here, and the two are identical for all but a handful of texts.
+   *
+   * **The probability was a HARD filter and it is now only a preference, because measurement could not
+   * clear it.** Live at a Northshire questgiver the packet decoded with residual **0** and yet the
+   * greeting came out null: `titleTextId 50016`, every block rejected. Two explanations fit and this
+   * client cannot separate them -- the server may send no text at all for that row (a private server
+   * with an empty `npc_text` table), or it may send the text with `Probability` left at 0, which the
+   * old rule discarded. Ranking rather than filtering is correct under EITHER, and cannot be worse
+   * than discarding a populated block: if every block really is empty the answer is still null, which
+   * is what `GetGossipText` reports and what leaves the greeting blank rather than inventing one.
+   *
+   * So the greeting being empty at that NPC is NOT yet explained, and this is not a claim that it is
+   * fixed -- it removes the one explanation that was ours. Stated rather than presented as a fix.
    */
   private handleNpcText(gp: GamePacket): void {
     const textId = gp.readUnsignedInt() >>> 0;
-    let chosen: string | null = null;
+    // Two candidates, ranked: the first block that has text AND a probability, and the first that
+    // merely has text. See the doc comment on why the probability is a preference and not a filter.
+    let weighted: string | null = null;
+    let anyText: string | null = null;
     for (let i = 0; i < 8; ++i) {
       const probability = gp.readFloat();
       const male = gp.readCStr();
@@ -266,10 +280,17 @@ export class GossipHandler extends EventEmitter {
         gp.readUnsignedInt(); // emote id
       }
       const text = male !== '' ? male : female;
-      if (chosen === null && probability > 0 && text !== '') {
-        chosen = text;
+      if (text === '') {
+        continue;
+      }
+      if (anyText === null) {
+        anyText = text;
+      }
+      if (weighted === null && probability > 0) {
+        weighted = text;
       }
     }
+    const chosen = weighted ?? anyText;
     if (textId !== this.titleTextId) {
       // A late answer for the PREVIOUS npc. Dropping it is the same guid/id match
       // `LootHandler#handleReleaseResponse` makes, and for the same reason.
