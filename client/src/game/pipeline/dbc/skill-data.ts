@@ -83,6 +83,24 @@ export interface SkillLineRow {
   /** 7 is the CLASS-skill category -- the spellbook's tabs. See the header for the whole partition. */
   categoryID: number;
   name: string;
+  /**
+   * `SkillLine.dbc`'s own description column, field **20** -- what the Skills tab's DETAIL pane prints
+   * under the selected row.
+   *
+   * The owner sent a screenshot of the real client to compare against: selecting a skill reproduces its
+   * row in the lower pane WITH a paragraph beneath it, and ours printed nothing. That pane is not an
+   * artifact to remove -- it is `SkillDetailFrame_SetStatusBar` working with an empty body, because
+   * `GetSkillLineInfo`'s THIRTEENTH return was missing.
+   *
+   * MEASURED on the served file: `skillline.dbc` is `recordCount 150`, `fieldCount 56`,
+   * `recordSize 224`, `stringBlockSize 5151`, and `20 + 150*224 + 5151 = 38771` -- the exact file size.
+   * Field 3 is the name, field 20 the description, field 37 the icon, which is what the entity already
+   * declares. Read back: `95 Defense -> "Higher defense improves your chance to dodge, parry, and
+   * block."`, `356 Fishing -> "Higher fishing skill increases your chance of catching fish"`,
+   * `777 Mounts -> "Your mounts."`. Not every line has one -- a spell-tab line often does not -- so an
+   * empty string is a real answer and not a miss.
+   */
+  description: string;
   /** `SpellIcon.dbc` id, which is why `spellData.icon()` resolves a tab's texture. */
   spellIconID: number;
 }
@@ -208,6 +226,8 @@ class SkillData {
         categoryID: record.categoryID ?? 0,
         // `LocalizedStringRef` returns locale 0, which is enUS on the served files.
         name: typeof record.name === 'string' ? record.name : '',
+        // Decoded by the entity all along and dropped here until the detail pane needed it.
+        description: typeof record.description === 'string' ? record.description : '',
         spellIconID: record.spellIconID ?? 0,
       });
     }

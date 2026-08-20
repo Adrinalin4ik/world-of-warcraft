@@ -141,9 +141,16 @@ export function attachSkillsBridge(vm: LuaVM, world: World): () => void {
    * `GetSkillLineInfo(index)` -> `skillName, header, isExpanded, skillRank, numTempPoints,
    * skillModifier, skillMaxRank, isAbandonable, stepCost, rankCost, minLevel, skillCostType`.
    *
-   * TWELVE returns, read off the client's own destructuring (`skillframe.lua:26`). A thirteenth,
-   * `skillDescription`, is taken by `SkillDetailFrame_SetStatusBar` (`:192`) and is nil here --
-   * `SkillLine.dbc`'s description column is parsed by the entity but the detail pane is not fed.
+   * THIRTEEN returns. The row painter destructures twelve (`skillframe.lua:26`); the DETAIL pane takes
+   * a thirteenth, `skillDescription` (`:192`), and prints it with
+   * `SkillDetailDescriptionText:SetFormattedText(SKILL_DESCRIPTION, skillType, skillDescription)`
+   * (`:261`).
+   *
+   * **THAT THIRTEENTH VALUE WAS MISSING, and it is the whole of "при выборе скила нету подписи снизу".**
+   * The owner sent the real client's Skills tab: selecting a row reproduces it in the lower pane with a
+   * paragraph beneath. Ours printed nothing -- so the pane was never an artifact to remove, it was
+   * working with an empty body. `SkillLine.dbc` field 20 carries the text and the entity had always
+   * decoded it; `skill-data.ts` was dropping it on the floor.
    *
    * An out-of-range index answers `""` for the name, which is what makes `SkillFrame_SetStatusBar` hide
    * its bar and return (`:68-73`) rather than raise on a nil.
@@ -170,9 +177,11 @@ export function attachSkillsBridge(vm: LuaVM, world: World): () => void {
       return [''];
     }
     if (row.header) {
-      // Slot 8 is `isAbandonable` -- nil, not 0. A header is never abandonable either.
+      // Slot 8 is `isAbandonable` -- nil, not 0. A header is never abandonable either. Slot 13 is the
+      // description: a CATEGORY has none, and the detail pane never asks about a header anyway (its own
+      // guard hides the bar for a row it cannot rank).
       return [row.name, 1, collapsed.has(row.categoryId) ? nil() : 1, 0, 0, 0, 0, nil(),
-        null, null, 0, 0];
+        null, null, 0, 0, ''];
     }
     const skill = row.skill!;
     return [
@@ -190,6 +199,10 @@ export function attachSkillsBridge(vm: LuaVM, world: World): () => void {
       null,
       0,
       0,
+      // THIRTEEN: `skillDescription`, from `SkillLine.dbc` field 20. Not every line has one -- a
+      // spell-tab line often does not -- so `''` is a real answer, and it is what the client's own
+      // `SKILL_DESCRIPTION` format string prints as an empty body rather than "nil".
+      skillData.line(skill.id)?.description ?? '',
     ];
   });
 
