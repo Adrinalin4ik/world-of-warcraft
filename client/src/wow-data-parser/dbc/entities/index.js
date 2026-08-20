@@ -43,6 +43,8 @@ export * as DeclinedWordCases from './declined-word-cases';
 export * as DungeonEncounter from './dungeon-encounter';
 export * as DungeonMap from './dungeon-map';
 export * as DungeonMapChunk from './dungeon-map-chunk';
+export * as DurabilityCosts from './durability-costs';
+export * as DurabilityQuality from './durability-quality';
 export * as Emotes from './emotes';
 export * as EmotesText from './emotes-text';
 export * as EmotesTextData from './emotes-text-data';
