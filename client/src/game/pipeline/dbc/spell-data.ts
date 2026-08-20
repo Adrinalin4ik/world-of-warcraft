@@ -194,6 +194,19 @@ const COL = {
   // at 71..121 sits inside that run.
   //
   // Each is the FIRST of three per-effect words; effect n (1-based) is `COL.x + n - 1`.
+  /**
+   * `Effect[0..2]` -- the SPELL_EFFECT_* id of each effect slot, the first word of the block this
+   * comment describes. `effectDieSides: 74` three lines below is what pins it: the block is three
+   * words per column, so `Effect` is `74 - 3 = 71`.
+   *
+   * MEASURED against the served file rather than reasoned about, because one caller depends on the
+   * exact value: spell **7266 "Duel"** (name column 136) reads `Effect[0..2] = 83, 0, 0` in
+   * `12340/dbfilesclient/spell.dbc`. 83 is `SPELL_EFFECT_DUEL`, and `StartDuel` finds the duel spell
+   * by that effect rather than by a hardcoded id -- which is what the reference client does
+   * (`samples/benilla/crates/benilla/src/ui_duel.rs:56-63`, byte-read from WoW.exe `0x4b2605`:
+   * any learned spell whose `SpellRec+0xf4` is `0x53` is stored into the duel-spell global).
+   */
+  effect: 71,
   /** `EffectDieSides[0..2]`. With `effectBasePoints`, this is the min/max pair -- see `effectMin`. */
   effectDieSides: 74,
   /** `EffectRealPointsPerLevel[0..2]`, a FLOAT. The per-level growth term; 0 for most player spells. */
@@ -324,6 +337,11 @@ export interface SpellRow {
    * The three effects' columns, index 0 = effect 1. See `COL.effectDieSides` for where they come from
    * and `effectRange` for the min/max identity they define.
    */
+  /**
+   * `Effect[0..2]` -- each slot's `SPELL_EFFECT_*` id. See `COL.effect`; 83 is `SPELL_EFFECT_DUEL`,
+   * which is how `StartDuel` finds the duel spell in the player's own book.
+   */
+  effect: number[];
   effectBasePoints: number[];
   effectDieSides: number[];
   effectRealPointsPerLevel: number[];
@@ -683,6 +701,7 @@ class SpellData {
 
         // THE EFFECT BLOCK -- what every `$` token in a description resolves through. See
         // `COL.effectDieSides` for the indices and `effectRange` for what the first two mean.
+        effect: three(COL.effect, col),
         effectBasePoints: three(COL.effectBasePoints, int),
         effectDieSides: three(COL.effectDieSides, int),
         effectRealPointsPerLevel: three(COL.effectRealPointsPerLevel, flt),

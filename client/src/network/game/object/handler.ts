@@ -4,6 +4,7 @@ import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
 import { ItemHandler } from './items';
 import { LootHandler } from './loot';
+import { GroupHandler } from './group';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
 import { SpellHandler } from './spells';
@@ -63,6 +64,14 @@ export class ObjectHandler extends EventEmitter {
    */
   public lootHandler: LootHandler;
 
+  /**
+   * GROUPS, DUELS, DUNGEON DIFFICULTY AND INSTANCE RESET. PUBLIC for the same reason the others are:
+   * `ui/group-bridge.ts` reads the roster to answer `GetNumPartyMembers`/`UnitInParty` and owns the
+   * only sends of `CMSG_GROUP_INVITE`, `CMSG_DUEL_ACCEPTED`, `MSG_SET_DUNGEON_DIFFICULTY` and the rest
+   * of the unit-popup family.
+   */
+  public groupHandler: GroupHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -77,6 +86,7 @@ export class ObjectHandler extends EventEmitter {
     this.combatLogHandler = new CombatLogHandler(this.game);
     this.itemHandler = new ItemHandler(this.game);
     this.lootHandler = new LootHandler(this.game);
+    this.groupHandler = new GroupHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

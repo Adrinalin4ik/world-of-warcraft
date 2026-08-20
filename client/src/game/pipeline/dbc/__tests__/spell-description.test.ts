@@ -36,6 +36,7 @@ function emptyRow(id: number, description: string): SpellRow {
     startRecoveryCategory: 0,
     rangeIndex: 0,
     manaCostPercentage: 0,
+    effect: [0, 0, 0],
     effectBasePoints: [0, 0, 0],
     effectDieSides: [0, 0, 0],
     effectRealPointsPerLevel: [0, 0, 0],
