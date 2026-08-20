@@ -278,6 +278,15 @@ export type MethodTable = Record<string, FrameMethod>;
 export interface FocusSink {
   readonly focused: Widget | null;
   setFocus(widget: Widget | null): void;
+  /**
+   * The widget the pointer is currently over, for `GetMouseFocus()`.
+   *
+   * Already implemented by both routers -- `GlueInput#pointerWidget` (`ui/input.ts:172`) serves the
+   * glue screens and the world alike, and `world-ui.ts` publishes the same object as
+   * `window.worldUiInput`. Widening this interface is what makes it reachable from Lua; nothing new
+   * tracks the pointer.
+   */
+  readonly pointerWidget: Widget | null;
 }
 
 export interface MethodContext {
@@ -918,6 +927,31 @@ export function installObjectModel(
     if (callError !== null) {
       throw new Error(`flushing the dispatch cache failed: ${callError.message}`);
     }
+  });
+
+  /**
+   * `GetMouseFocus()` -> the frame the mouse is over, or nil.
+   *
+   * MEASURED absent from the owner's console log: `VehicleMenuBar.lua:846` raised on it inside
+   * `VehicleMenuBarPowerBar: OnValueChanged`, taking that handler down. An ENGINE global -- no FrameXML
+   * file defines it -- and the router has answered this question all along
+   * (`GlueInput#pointerWidget`), so this is a wiring gap and not a feature.
+   *
+   * Registered HERE rather than in an `api/` module because it needs the `MethodContext`: the answer is
+   * a frame WRAPPER, which only `ctx.wrapper` can mint, and only this scope holds both the router and
+   * the registry. `installPortraitApi(vm, ctx, registry)` is the precedent for a ctx-aware global.
+   *
+   * Nil in three cases, all honest: no router threaded in, the pointer over nothing, or the pointer
+   * over a widget the registry does not own (art created outside the object model). The real call
+   * answers nil for a pointer over the world too.
+   */
+  vm.registerFunction('GetMouseFocus', () => {
+    const widget = ctx.input?.pointerWidget ?? null;
+    if (widget === null) {
+      return [null];
+    }
+    const id = registry.idOfWidget(widget);
+    return [id === null ? null : ctx.wrapper(id)];
   });
 
   // CreateFrame(type, name, parent, template).
