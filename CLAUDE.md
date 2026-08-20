@@ -192,6 +192,11 @@ A comment that invents a source, or that still describes a gap now closed, is tr
 
 ## Known traps
 
+- **`0` IS TRUTHY IN LUA**, so an engine global that means "nothing" must return **nil**, not 0. Three
+  occurrences now, twice in `skills-bridge.ts` alone: `stepCost`/`rankCost` rendered every skill row as
+  "Learn <skill>", and `isAbandonable` returning 0 put an Unlearn button on every skill -- with a comment
+  directly above it that already said a truthy value would do exactly that. Writing the warning down is
+  not the same as returning nil.
 - `packet.readByte(N)` does **not** skip N bytes — its argument is the byte ORDER.
 - `zlib.inflate`'s callback in `zlib-browserify` is argument **2**, not 3.
 - `model.scale.setScalar()` is **inert** under `matrixAutoUpdate = false`.

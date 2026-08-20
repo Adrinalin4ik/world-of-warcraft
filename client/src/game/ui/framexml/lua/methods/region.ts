@@ -17,7 +17,7 @@
 import { FrameMethod, MethodContext, MethodTable, isObjectType, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
-import { Layer, Widget, deriveSize, effectiveFont } from '../../../widget';
+import { Layer, Widget, deriveSize, effectiveFont, touchGeometry } from '../../../widget';
 import { familyForFontFile, fontFileForFamily, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
 import { rectOf, screenHeightUnits } from '../../../rects';
@@ -308,10 +308,14 @@ const REGION: MethodTable = {
   GetAlpha: (ctx, self) => [widgetOf(ctx, self).alpha],
   SetWidth: (ctx, self, args) => {
     widgetOf(ctx, self).width = Number(args[0] ?? 0);
+    // `width`/`height` are plain fields, so unlike `setAnchors`/`show` there is no method to bump the
+    // geometry revision from. See `widget.ts#geometryRevision`.
+    touchGeometry();
     return [];
   },
   SetHeight: (ctx, self, args) => {
     widgetOf(ctx, self).height = Number(args[0] ?? 0);
+    touchGeometry();
     return [];
   },
   /**
@@ -330,6 +334,7 @@ const REGION: MethodTable = {
     const widget = widgetOf(ctx, self);
     widget.width = Number(args[0] ?? 0);
     widget.height = Number(args[1] ?? 0);
+    touchGeometry();
     return [];
   },
   // A FONT STRING with a 0 dimension derives it from its text, exactly as the layout does

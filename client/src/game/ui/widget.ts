@@ -197,6 +197,34 @@ let nextLinkStamp = 0;
 let treeStructure = 0;
 
 /**
+ * Bumped whenever anything that can MOVE OR RESIZE a widget changes: its anchors, its shown flag, its
+ * size, or the tree's shape.
+ *
+ * `ui/rects.ts` keys its on-demand rect map on this. That map exists because the client's own Lua
+ * measures a frame in the tick it shows it (`ToggleDropDownMenu`'s `Show()` then `GetCenter()`), and
+ * caching it only until the next `publishRects` was a stale-map hazard the moment a SECOND
+ * Show-then-measure happened in the same frame -- which the unit-popup submenus now do.
+ *
+ * Deliberately COARSE: one counter for the whole tree, not per widget. A geometry change anywhere can
+ * move anything anchored to it transitively, so a per-widget revision would have to walk the anchor
+ * graph to be correct, and that is more expensive than the resolve it would save.
+ *
+ * NOT bumped by `restamp()`, `SetFrameLevel` or alpha: those change draw ORDER or opacity, never a
+ * rect, and bumping on them would throw the map away for nothing on a cooldown sweep.
+ */
+let geometryRevision = 0;
+
+/** See `geometryRevision`. Read by `ui/rects.ts` to decide whether its cached map is still valid. */
+export function layoutRevision(): number {
+  return geometryRevision;
+}
+
+/** Bumped from the few places that write a widget's geometry. See `geometryRevision`. */
+export function touchGeometry(): void {
+  geometryRevision += 1;
+}
+
+/**
  * A mouse button, as FrameXML names it -- the string an `OnClick` handler's `button` argument receives.
  *
  * The five the engine knows. `input.ts` maps a DOM `PointerEvent#button` onto these; anything past
@@ -478,6 +506,7 @@ export class Widget {
     child.frameLevel = isRegion ? this.frameLevel : this.frameLevel + 1;
     this.children.push(child);
     treeStructure += 1;
+    geometryRevision += 1;
     return child;
   }
 
@@ -487,15 +516,20 @@ export class Widget {
       this.children.splice(index, 1);
       child.parent = null;
       treeStructure += 1;
+      geometryRevision += 1;
     }
   }
 
   setAnchors(...anchors: Anchor[]): Widget {
     this.anchors = anchors;
+    // Every `SetPoint`/`ClearAllPoints`/`SetAllPoints` funnels through here, so this one bump covers
+    // all three. See `geometryRevision`.
+    geometryRevision += 1;
     return this;
   }
 
   setSize(width: number, height: number): Widget {
+    geometryRevision += 1;
     this.width = width;
     this.height = height;
     return this;
@@ -511,6 +545,10 @@ export class Widget {
       return;
     }
     this.shown = true;
+    // A newly shown frame has a rect it did not have a moment ago, and `ToggleDropDownMenu` measures
+    // one in this same tick. See `geometryRevision`. Inside the transition guard, so an idempotent
+    // per-tick `show()` on an already-visible widget costs nothing.
+    geometryRevision += 1;
     this.restamp();
   }
 
@@ -520,6 +558,9 @@ export class Widget {
   }
 
   hide(): void {
+    if (this.shown) {
+      geometryRevision += 1;
+    }
     this.shown = false;
   }
 

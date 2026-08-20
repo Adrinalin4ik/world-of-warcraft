@@ -35,14 +35,25 @@
  */
 import type { Rect } from './layout';
 import type { DrawItem } from './widget';
+import { layoutRevision } from './widget';
 
 let items: DrawItem[] | null = null;
 let byId: Map<string, Rect> | null = null;
 let screenHeight = 0;
 /** Resolves the WHOLE tree's rects on demand. See `rectOf`'s fallback. */
 let resolveAll: (() => Map<string, Rect>) | null = null;
-/** The on-demand map, computed at most once per publish. */
+/** The on-demand map. */
 let allRects: Map<string, Rect> | null = null;
+/**
+ * The `layoutRevision()` `allRects` was computed at.
+ *
+ * **Caching only until the next `publishRects` was a stale-map hazard**, and it stopped being
+ * hypothetical when the unit-popup submenus landed: two Show-then-measure sequences on DIFFERENT frames
+ * inside one frame would have had the second answered from a map resolved before the first frame moved.
+ * `widget.ts#geometryRevision` bumps on anchors, shown, size and tree shape -- everything that can move
+ * a rect -- so the cache is now valid exactly as long as the geometry it was built from.
+ */
+let allRectsRevision = -1;
 
 /**
  * Publish the frame's draw list. Called once per frame from the UI host.
@@ -60,6 +71,7 @@ export function publishRects(
   items = list;
   byId = null;
   allRects = null;
+  allRectsRevision = -1;
   resolveAll = resolveEverything ?? null;
   screenHeight = screenHeightUnits;
 }
@@ -106,8 +118,10 @@ export function rectOf(id: string): Rect | null {
    * frame and the draw-list fingerprint is untouched.
    */
   if (resolveAll !== null) {
-    if (allRects === null) {
+    const revision = layoutRevision();
+    if (allRects === null || allRectsRevision !== revision) {
       allRects = resolveAll();
+      allRectsRevision = revision;
     }
     return allRects.get(id) ?? null;
   }
@@ -124,6 +138,7 @@ export function clearRects(): void {
   items = null;
   byId = null;
   allRects = null;
+  allRectsRevision = -1;
   resolveAll = null;
   screenHeight = 0;
 }
