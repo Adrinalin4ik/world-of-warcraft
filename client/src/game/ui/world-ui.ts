@@ -555,6 +555,10 @@ export class WorldUiHost {
     // registered and the BLP failed to fetch. `worldUiArt.def(path)` and `worldUiArt.texture(path)`
     // answer the second and third directly. This is how the empty action bar was found.
     (window as never as Record<string, unknown>).worldUiArt = this.art;
+    // THE MODEL BOOTH, as a handle, for exactly the reason `worldUiArt` is one: "the figure in the pane
+    // is wrong" has several indistinguishable causes and the pane's scene is not the world scene, so
+    // nothing else a probe can traverse reaches the model it is drawing. `worldUiBooth.debug()`.
+    (window as never as Record<string, unknown>).worldUiBooth = this.booth;
     // The draw instrument -- see `drawStats` for what each number answers.
     (window as never as Record<string, unknown>).uiDrawStats = this.drawStats;
     /**
@@ -1180,6 +1184,7 @@ export class WorldUiHost {
     delete (window as never as Record<string, unknown>).worldUiArt;
     delete (window as never as Record<string, unknown>).worldUiDrawList;
     delete (window as never as Record<string, unknown>).uiDrawStats;
+    delete (window as never as Record<string, unknown>).worldUiBooth;
     delete (window as never as Record<string, unknown>).uiTextExtent;
     this.lastItems = [];
   }

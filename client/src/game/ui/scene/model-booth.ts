@@ -274,6 +274,18 @@ class Pane {
   }
 
   /**
+   * The pane's own model, for `window.worldUiBooth`.
+   *
+   * A read handle and nothing else. It exists because "the figure in the pane is missing a geoset" has
+   * no other answer: the pane's scene is not the world scene, so nothing a probe can traverse reaches
+   * it, and a screenshot of a 64-pixel head cannot tell a hidden submesh from an untextured one. This
+   * is the same argument `world-ui.ts` makes for `worldUiArt` and `worldUiDrawList`.
+   */
+  get modelForDebug(): unknown {
+    return this.model;
+  }
+
+  /**
    * Take the frame's current state. Cheap, and called every frame the pane is on screen.
    *
    * Returns nothing: whether a bake is due is `dirty`, and `bake` reads it.
@@ -824,6 +836,17 @@ export class ModelBooth {
     }
 
     return baked;
+  }
+
+  /**
+   * Every live pane, for `window.worldUiBooth`. See `Pane#modelForDebug`.
+   */
+  debug(): unknown[] {
+    return Array.from(this.panes.entries()).map(([id, pane]) => ({
+      id,
+      texture: pane.texture,
+      model: pane.modelForDebug,
+    }));
   }
 
   dispose(): void {
