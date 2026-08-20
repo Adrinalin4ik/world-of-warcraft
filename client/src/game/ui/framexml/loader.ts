@@ -510,6 +510,9 @@ class DocumentLoader {
     let effectiveParent = parent;
     let effectiveParentName = parentName;
     let borrowedParent: LuaRef | null = null;
+    // Set when `parent="Name"` did NOT resolve: the frame is built at the root and then HIDDEN. See
+    // `orphanHidden` below for why hiding it is the honest fallback and not a workaround.
+    let orphaned = false;
     const declaredParent = parent === null ? attr(element, 'parent') : undefined;
     if (declaredParent !== undefined && declaredParent !== '') {
       const global = this.rt.vm.getGlobal(declaredParent);
@@ -518,9 +521,10 @@ class DocumentLoader {
         effectiveParent = global;
         effectiveParentName = declaredParent;
       } else {
+        orphaned = true;
         this.report.warnings.push(
           `${sourceName}:${attr(element, 'name') ?? `<${element.tag}>`}: ` +
-            `parent="${declaredParent}" names no frame yet; built at the root instead`,
+            `parent="${declaredParent}" names no frame; built at the root and HIDDEN`,
         );
       }
     }
@@ -556,8 +560,37 @@ class DocumentLoader {
     // still resolves `$parent` to something addressable.
     const selfName = resolvedName ?? effectiveParentName;
 
+    // AN ORPHAN IS HIDDEN, and this is the honest fallback rather than a workaround.
+    //
+    // `parent="X"` is not decoration: it is where the frame IS and what it is visible WITH. A document
+    // that names a parent this client never built has authored neither a rect nor a shown state we can
+    // honour, and leaving it at the root gives it BOTH -- invented ones. It resolves its `CENTER` anchor
+    // against the screen instead of against its owner and it inherits nothing's hidden state, so it
+    // draws in the middle of the world.
+    //
+    // MEASURED, and it is the owner's "часть какого-то интерфейса" dead centre of the screen:
+    // `CombatLogQuickButtonFrame_Custom` is `parent="ChatFrame2"` with
+    // `<Anchor point="CENTER" relativeTo="ChatFrame2" relativePoint="CENTER">` and `hidden="false"`
+    // (`interface/addons/blizzard_combatlog/blizzard_combatlog.xml:28-36`) -- a 65x24 black 70%-alpha
+    // panel with a 28x28 `UI-MainMenu-ScrollDownButton-Up` filter button, which is exactly the "dark
+    // panel with a gold icon" reported. It appeared now because `Blizzard_CombatLog` genuinely loads at
+    // `PLAYER_LOGIN` (`uiparent.lua:480-483`) and `LoadAddOn` only became real last round.
+    //
+    // **The root cause is one class down, not here**: `ChatFrame2` is a `<ScrollingMessageFrame>`
+    // (`floatingchatframe.xml:991`) and `object.ts` has no such `WidgetClass`, so all seven chat frames
+    // fail to be created -- a gap `STATE.md` already records ("`ScrollingMessageFrame` 10, so no chat").
+    // Adding the class is a task of its own (`AddMessage`, `SetMaxLines`, `ScrollUp` &c. are what
+    // `FloatingChatFrame_OnLoad` then needs) and is NOT done here. What is done here is to stop
+    // inventing a position and a visibility for any frame whose declared owner is absent.
     try {
       this.decorate(element, wrapper, effectiveParentName, selfName, sourceName, dbg);
+      // AFTER `decorate`, not before, and deliberately: the frame's own `<OnLoad>` runs in there and may
+      // `Show()` itself (`Blizzard_CombatLog_QuickButtonFrame_OnLoad` is one). In the real client that
+      // Show is still invisible because the PARENT is hidden, so hiding last is what reproduces the
+      // engine -- hiding first would let a script undo it and put the frame back on screen.
+      if (orphaned) {
+        this.callMethod(wrapper, 'Hide', [], dbg);
+      }
     } finally {
       // The wrapper handle lives exactly as long as this frame's own subtree build. The frame itself
       // and its permanent Lua table are owned by `FrameRegistry`; this was a call-result handle.

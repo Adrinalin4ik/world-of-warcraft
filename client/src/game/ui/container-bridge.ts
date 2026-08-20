@@ -48,6 +48,7 @@ import { LuaVM } from './framexml/lua/vm';
 import { notImplemented } from './framexml/lua/methods/region';
 import { fireEvent } from './framexml/lua/events';
 import { setCoinage, setItemTooltipSource, ItemTooltipInfo } from './framexml/lua/api/items';
+import { CursorItemSource, getCursor, getCursorItem, setCursorItem } from './framexml/lua/api/cursor';
 import { GlueArt } from './art';
 import {
   ContainerField, ItemField, ObjectField, ObjectType, PlayerField,
@@ -106,6 +107,101 @@ const BAG_PLAYER_INVENTORY = 255;
  */
 const WIRE_SLOT_PACK_FIRST = (PlayerField.player_field_pack_slot_1
   - PlayerField.player_field_inv_slot_head) / 2;
+
+/**
+ * THE SENTINEL that folds the player's WORN slots into the same cursor space as a bag's slots.
+ *
+ * -100, and both the value and the reason are the reference's: a `CursorItem` whose `bag` is this
+ * addresses `slot` as a 1-based `GetInventorySlotInfo` id rather than as a bag's contents, and the
+ * number is chosen to be disjoint from every real container id -- including the negative ones
+ * (`BANK_CONTAINER` -1, the keyring -2) which are real API surface
+ * (`benilla-ui/src/script/cursor.rs:26-36`). It never crosses the Lua boundary as a value.
+ *
+ * ONE space rather than two is what lets `PickupContainerItem` and `PickupInventoryItem` share a
+ * transition, so a bag-to-paperdoll drag and a paperdoll-to-bag drag are the same code path.
+ */
+const EQUIPMENT_BAG = -100;
+
+/**
+ * A live-API `(bag, 1-based slot)` to the wire's `(bagIndex, 0-based slot)`, or null when the pair is
+ * not a position on this wire.
+ *
+ * Ported from `benilla/src/ui_items/mod.rs:144-163`, minus the bank and keyring arms this client has no
+ * feed for. The three arms it keeps:
+ *  - bag 0 (the backpack) -> bag index 255, slot `WIRE_SLOT_PACK_FIRST + n - 1`;
+ *  - bags 1..4 -> the equipped bag's own inventory slot `INV_SLOT_BAG_FIRST + bag - 1`, slot `n - 1`;
+ *  - `EQUIPMENT_BAG` -> bag index 255, slot `n - 1` (the worn slots ARE the front of the player array).
+ *
+ * `UseContainerItem` computes the first two inline and predates this; they agree by construction now
+ * that both read the same three constants, and the arithmetic is stated once here.
+ */
+function wirePos(bag: number, slot: number): [number, number] | null {
+  const zero = slot - 1;
+  if (!Number.isInteger(zero) || zero < 0) {
+    return null;
+  }
+  if (bag === BACKPACK_CONTAINER) {
+    return zero < BACKPACK_SLOTS ? [BAG_PLAYER_INVENTORY, WIRE_SLOT_PACK_FIRST + zero] : null;
+  }
+  if (bag >= 1 && bag <= NUM_BAG_SLOTS) {
+    // `MAX_CONTAINER_SLOTS` (36) is the descriptor's own ceiling, not this bag's size: the exact bound
+    // is the equipped bag's `CONTAINER_FIELD_NUM_SLOTS`, and the server refuses a position past it. A
+    // tighter check here would need the bag object, which `wirePos` deliberately does not take.
+    return zero < MAX_CONTAINER_SLOTS ? [INV_SLOT_BAG_FIRST + (bag - 1), zero] : null;
+  }
+  if (bag === EQUIPMENT_BAG) {
+    // 1..23: the nineteen worn slots plus the four equipped-bag icons. Slot 0 is `AmmoSlot`, which is
+    // not a position in the player array at all (`api/items.ts#GetInventorySlotInfo` gives it id 0) and
+    // is loaded by entry through `CMSG_SET_AMMO` -- out of this space, as in the reference.
+    return slot >= 1 && slot <= 23 ? [BAG_PLAYER_INVENTORY, zero] : null;
+  }
+  return null;
+}
+
+/**
+ * Which 1-based inventory slots an item of this `inventoryType` may be EQUIPPED into. Empty = not
+ * equippable.
+ *
+ * Transcribed from `benilla/src/ui_items/mod.rs:735-793`, which itself transcribes the SERVER's own
+ * `Player::FindEquipSlot` / `ItemPrototype::GetAllowedEquipSlots` -- so the authority is the server that
+ * referees the move, and `SMSG_INVENTORY_CHANGE_FAILURE` is what corrects it if a row is wrong. The ids
+ * are the same 1-based numbering `GetInventorySlotInfo` answers (`api/items.ts`'s `SLOTS` table), which
+ * is the check on them: head 1, chest 5, main hand 16, tabard 19, the four bags 20..23.
+ *
+ * INVTYPE_WEAPON (13) offers BOTH hands, which is the reference's stated simplification: whether the
+ * character may actually dual-wield is a class/skill rule this client does not decode, and the server
+ * refuses the move if not. INVTYPE_RELIC (28) and INVTYPE_QUIVER (27) answer empty for the same reason
+ * `UnitHasRelicSlot` is a declared gap.
+ */
+function equipSlotsFor(inventoryType: number): number[] {
+  switch (inventoryType) {
+    case 1: return [1]; // HEAD
+    case 2: return [2]; // NECK
+    case 3: return [3]; // SHOULDERS
+    case 4: return [4]; // BODY -- the shirt
+    case 5: case 20: return [5]; // CHEST / ROBE, the same slot
+    case 6: return [6]; // WAIST
+    case 7: return [7]; // LEGS
+    case 8: return [8]; // FEET
+    case 9: return [9]; // WRISTS
+    case 10: return [10]; // HANDS
+    case 11: return [11, 12]; // FINGER
+    case 12: return [13, 14]; // TRINKET
+    case 13: return [16, 17]; // WEAPON -- both hands, see the note
+    case 14: return [17]; // SHIELD
+    case 15: return [18]; // RANGED
+    case 16: return [15]; // CLOAK -> back
+    case 17: return [16]; // 2HWEAPON -> main hand only
+    case 18: return [20, 21, 22, 23]; // BAG
+    case 19: return [19]; // TABARD
+    case 21: return [16]; // WEAPONMAINHAND
+    case 22: return [17]; // WEAPONOFFHAND
+    case 23: return [17]; // HOLDABLE
+    case 25: return [18]; // THROWN
+    case 26: return [18]; // RANGEDRIGHT
+    default: return [];
+  }
+}
 
 /** A decoded descriptor bag, as `ItemHandler` stores one. */
 type FieldBag = Record<string | number, number>;
@@ -324,17 +420,28 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    * `if ( texture )`, and `PutKeyInKeyRing` (`:882`) finds an empty keyring slot the same way.
    */
   vm.registerFunction('GetContainerItemInfo', (args) => {
-    const item = itemAt(slotGuid(Number(args[0]), Number(args[1])));
+    const bagId = Number(args[0]);
+    const slotId = Number(args[1]);
+    const item = itemAt(slotGuid(bagId, slotId));
     if (item === null) {
       return [];
     }
     const lootable = item.template !== null
       && (item.template.flags & ITEM_FLAG_LOOTABLE) !== 0;
+    // `locked` -- TRUE while this slot is the cursor's SOURCE, which is what dims the icon the instant
+    // the item is picked up. `ContainerFrame_Update` passes it to `SetItemButtonDesaturated`
+    // (`containerframe.lua:281,306`). It used to be nil with the note "no cursor, so no locked slot";
+    // there is a cursor now (see the item-cursor section), and this is the bag twin of
+    // `IsInventoryItemLocked`. Still nil rather than false when nothing is held, because the real
+    // client's own pending-move lock is not modelled and a hard false would assert more than we know.
+    const heldHere = (() => {
+      const held = getCursorItem(vm);
+      return held !== null && held.bag === bagId && held.slot === slotId ? 1 : null;
+    })();
     return [
       iconFor(item),
       item.count,
-      // `locked` -- see the header. No cursor, so no locked slot; nil rather than a guessed false.
-      null,
+      heldHere,
       item.template?.quality ?? null,
       // `readable` -- a book or a scroll with page text. `pageText` is read off the wire but not kept
       // (`items.ts#readTemplateBody`), so this is nil rather than wrong.
@@ -640,6 +747,363 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     return [];
   });
 
+  // -- THE ITEM CURSOR: pick up, put down, and tell the server -----------------------------------
+  //
+  // The owner's report was "drag and drop не работает" -- in the bags and in the character window. The
+  // gesture was never missing: `ui/input.ts` has driven `OnDragStart`/`OnReceiveDrag` since the
+  // action-bar round, and BOTH ends are the client's own Lua on BOTH surfaces --
+  // `containerframe.xml:61-66` routes each to `ContainerFrameItemButton_OnDrag`, which is one line
+  // calling `ContainerFrameItemButton_OnClick(self, "LeftButton")` (`containerframe.lua:623-625`), and
+  // `paperdollframe.xml:57-62` routes both to `PaperDollItemSlotButton_OnClick(self, "LeftButton")`
+  // directly. Each of those ends in `PickupContainerItem` / `PickupInventoryItem`.
+  // What was missing is that `PickupContainerItem` was a DECLARED GAP and `PickupInventoryItem` was
+  // registered nowhere -- there was no item on this client's cursor to pick anything up onto -- so both
+  // the left-click and the drag ended in a stub or a nil global.
+  //
+  // The state and the payload type live in `api/cursor.ts` (one payload space, three kinds); every
+  // transition lives here, because every transition needs the world: the descriptor read that resolves
+  // a slot to an item, and the socket that tells the server. See `api/cursor.ts`' header.
+  //
+  // THE RULES BELOW ARE THE REFERENCE'S, arm for arm
+  // (`benilla-ui/src/script/container.rs:229-297` for the bag seam,
+  // `benilla-ui/src/script/cursor/doll.rs:35-110` for the paperdoll one):
+  //   empty cursor + an occupied slot  -> pick it up
+  //   holding + the SAME slot          -> cancel, put it back
+  //   holding + another slot           -> queue the move and CLEAR (the displaced item does NOT hop
+  //                                       onto the cursor -- bag placements are server-authoritative;
+  //                                       only the ACTION bar hops, which is `api/cursor.ts`' arm)
+  //   holding a spell or an action     -> refuse, keep holding
+
+  /** The picked-up payload for a live item, or null when the slot is empty or unresolved. */
+  const payloadFor = (bag: number, slot: number, item: SlotItem): CursorItemSource => ({
+    bag,
+    slot,
+    itemId: item.entry,
+    link: itemLink(item),
+    equipSlots: item.template === null ? [] : equipSlotsFor(item.template.inventoryType),
+  });
+
+  /**
+   * `ITEM_LOCK_CHANGED(bag, slot)` -- the source slot dims the instant it is picked up.
+   *
+   * `ContainerFrameItemButton_OnEvent` and `PaperDollItemSlotButton_OnEvent` both answer it
+   * (`containerframe.lua`, `paperdollframe.lua:1197-1199`), and the reference fires it on both ends of
+   * every move for the same reason (`benilla/src/ui_items/drain.rs:522-531`). The paperdoll arm reports
+   * the LUA slot id with no bag, which is the shape `PaperDollItemSlotButton_OnEvent` tests
+   * (`not arg2 and arg1 == self:GetID()`).
+   */
+  const lockChanged = (bag: number, slot: number): void => {
+    if (bag === EQUIPMENT_BAG) {
+      fireEvent(vm, 'ITEM_LOCK_CHANGED', [slot]);
+      return;
+    }
+    fireEvent(vm, 'ITEM_LOCK_CHANGED', [bag, slot]);
+  };
+
+  /**
+   * The move, on the wire. Both ends map through `wirePos`; which opcode goes out is decided exactly as
+   * the reference decides it (`benilla/src/ui_items/drain.rs:449-505`):
+   *
+   *  - both ends in the player's own array (bag index 255 -- equipment, the bag buttons and the
+   *    backpack) -> `CMSG_SWAP_INV_ITEM` (**0x10D**);
+   *  - otherwise (either end an equipped bag) -> `CMSG_SWAP_ITEM` (**0x10C**).
+   *
+   * **BOTH BODIES ARE DESTINATION-FIRST, and the first version of this function got `SWAP_INV_ITEM`
+   * backwards -- measured, not reasoned: the packet went out, the server answered nothing at all, and
+   * the sword stayed on the character.** That is the exact signature of a swap whose SOURCE resolved to
+   * an empty slot: `Player::SwapItem` returns silently when `GetItemByPos(src)` is null, so a reversed
+   * body is a no-op with no error.
+   *
+   * The order is 3.3.5a's own, read off the server that referees it -- TrinityCore 3.3.5
+   * `Server/Packets/ItemPackets.cpp` `SwapInvItem::Read` is `_worldPacket >> Slot2 >> Slot1` while
+   * `Handlers/ItemHandler.cpp#HandleSwapInvItemOpcode` computes `src` from **Slot1** and `dst` from
+   * Slot2; `SwapItem::Read` is `>> ContainerSlotB >> SlotB >> ContainerSlotA >> SlotA` with `src` from
+   * **A**. So both are `dst..., src...` on the wire.
+   *
+   * **This is where the reference is version-wrong and CLAUDE.md's rule applies.**
+   * `benilla-protocol/src/messages/items.rs:699-701` builds `swap_inv_item` as `vec![src_slot,
+   * dst_slot]`, verified against vmangos for 1.12.1. Its `swap_item` is already destination-first and
+   * agrees with 3.3.5a. Mechanism from the reference, numbers from this build's own server.
+   *
+   * An empty destination is still a swap on either wire: a move is a swap with nothing on one side.
+   */
+  const sendMove = (from: CursorItemSource, toBag: number, toSlot: number): boolean => {
+    const src = wirePos(from.bag, from.slot);
+    const dst = wirePos(toBag, toSlot);
+    if (src === null || dst === null) {
+      return false;
+    }
+    if (src[0] === BAG_PLAYER_INVENTORY && dst[0] === BAG_PLAYER_INVENTORY) {
+      const gp = new GamePacket(
+        GameOpcode.CMSG_SWAP_INV_ITEM, GamePacket.HEADER_SIZE_OUTGOING + 2,
+      );
+      // DESTINATION FIRST. See the doc comment: `SwapInvItem::Read` is `>> Slot2 >> Slot1` and the
+      // handler's `src` is Slot1.
+      gp.writeUnsignedByte(dst[1] & 0xff);
+      gp.writeUnsignedByte(src[1] & 0xff);
+      world.game.send(gp);
+    } else {
+      const gp = new GamePacket(
+        GameOpcode.CMSG_SWAP_ITEM, GamePacket.HEADER_SIZE_OUTGOING + 4,
+      );
+      gp.writeUnsignedByte(dst[0] & 0xff);
+      gp.writeUnsignedByte(dst[1] & 0xff);
+      gp.writeUnsignedByte(src[0] & 0xff);
+      gp.writeUnsignedByte(src[1] & 0xff);
+      world.game.send(gp);
+    }
+    lockChanged(from.bag, from.slot);
+    lockChanged(toBag, toSlot);
+    return true;
+  };
+
+  /** Put an item on the cursor, or take it off. `null` clears; both fire `CURSOR_UPDATE`. */
+  const holdItem = (source: CursorItemSource | null, texture: string | null): void => {
+    setCursorItem(vm, source === null ? null : {
+      kind: 'item',
+      // 0: an item is not a spell. `api/cursor.ts`'s `GetCursorInfo` reads `item`, never this.
+      spellId: 0,
+      bookSlot: null,
+      sourceSlot: null,
+      // What `world-ui.ts#drawCursorIcon` draws at the pointer -- the item's icon rides for free.
+      texture,
+      item: source,
+    });
+  };
+
+  /**
+   * The ONE transition, shared by both surfaces. `bag`/`slot` is where the click landed.
+   *
+   * Returns nothing: every caller is a Lua global whose own return value the client ignores.
+   */
+  const pickOrPlace = (bag: number, slot: number): void => {
+    if (wirePos(bag, slot) === null) {
+      return;
+    }
+    const held = getCursorItem(vm);
+    if (held === null) {
+      // A SPELL or ACTION payload refuses an item slot outright and stays on the cursor -- the
+      // reference's own final arm. `getCursorItem` answers null for those, so the guard is the
+      // `getCursor` read rather than `held`.
+      if (getCursor(vm) !== null) {
+        return;
+      }
+      const item = itemAt(bag === EQUIPMENT_BAG
+        ? guidAt(items.player(), ObjectType.Player,
+          PlayerField.player_field_inv_slot_head + (slot - 1) * 2)
+        : slotGuid(bag, slot));
+      if (item === null) {
+        return;
+      }
+      holdItem(payloadFor(bag, slot, item), iconFor(item));
+      lockChanged(bag, slot);
+      return;
+    }
+    if (held.bag === bag && held.slot === slot) {
+      // Dropped back where it came from: put it down, send nothing.
+      holdItem(null, null);
+      lockChanged(bag, slot);
+      return;
+    }
+    // A paperdoll destination has to FIT, and the fit rule rides the payload from wherever it was
+    // picked up (`equipSlots`). A bag destination takes anything -- the server sorts out a swap.
+    //
+    // **FAIL-OPEN, and the asymmetry is deliberate**: the rule only refuses when `equipSlots` is
+    // NON-EMPTY and does not contain the slot, i.e. when the item is known to be equippable somewhere
+    // else. An EMPTY list means we could not decide -- the item template has not arrived, or its
+    // `inventoryType` is one `equipSlotsFor` does not map -- and refusing on "do not know" is
+    // indistinguishable, from the player's side, from the drag being broken. The real client has NO
+    // client-side fit check on this path at all: `PaperDollItemSlotButton_OnClick` calls
+    // `PickupInventoryItem` unconditionally (`paperdollframe.lua:1237`) and `CursorCanGoInSlot` exists
+    // only to drive the `CURSOR_UPDATE` highlight, so letting the server referee an undecidable case is
+    // the reference behaviour as well as the safer one.
+    if (bag === EQUIPMENT_BAG && held.equipSlots.length > 0 && !held.equipSlots.includes(slot)) {
+      return;
+    }
+    if (sendMove(held, bag, slot)) {
+      holdItem(null, null);
+    }
+  };
+
+  /**
+   * `PickupContainerItem(bagID, slot)` -- WAS A DECLARED GAP and is the left arm of every bag click and
+   * every bag drag (`containerframe.lua:715`, `containerframe.xml:63`).
+   */
+  vm.registerFunction('PickupContainerItem', (args) => {
+    pickOrPlace(Number(args[0]), Number(args[1]));
+    return [];
+  });
+
+  /**
+   * `PickupInventoryItem(invSlot)` -- the paperdoll slot's left click and drag
+   * (`paperdollframe.lua:1237`, `RegisterForDrag("LeftButton")` at `:1131`). Registered NOWHERE before.
+   */
+  vm.registerFunction('PickupInventoryItem', (args) => {
+    pickOrPlace(EQUIPMENT_BAG, Number(args[0]));
+    return [];
+  });
+
+  /**
+   * `EquipCursorItem(invSlot)` -- the same transition as dropping the held item onto that slot, which is
+   * why it routes there rather than repeating it (`benilla-ui/src/script/cursor/doll.rs:117-119`).
+   */
+  vm.registerFunction('EquipCursorItem', (args) => {
+    pickOrPlace(EQUIPMENT_BAG, Number(args[0]));
+    return [];
+  });
+
+  /**
+   * `PickupBagFromSlot(invSlot)` -- dragging an equipped BAG off the bag bar
+   * (`mainmenubarbagbuttons.lua:33-36`). It was a declared gap for want of an item cursor; a bag is an
+   * item in a worn slot, so it is the paperdoll transition with the bag's own id (20..23), and
+   * `equipSlotsFor(INVTYPE_BAG)` already lets it land on any of the four.
+   */
+  vm.registerFunction('PickupBagFromSlot', (args) => {
+    pickOrPlace(EQUIPMENT_BAG, Number(args[0]));
+    return [];
+  });
+
+  /**
+   * `AutoEquipCursorItem()` -- the paperdoll MODEL pane's drop: equip the held item wherever it goes,
+   * and let the SERVER pick the slot (`CMSG_AUTOEQUIP_ITEM`, whose whole body is the source bag/slot).
+   *
+   * A payload already carried FROM the equipment has nothing for the server to "auto" pick, so it is a
+   * no-op and stays held -- the reference's own guard (`cursor/doll.rs:157-166`).
+   */
+  vm.registerFunction('AutoEquipCursorItem', () => {
+    const held = getCursorItem(vm);
+    if (held === null || held.bag === EQUIPMENT_BAG) {
+      return [];
+    }
+    const src = wirePos(held.bag, held.slot);
+    if (src === null) {
+      return [];
+    }
+    const gp = new GamePacket(
+      GameOpcode.CMSG_AUTOEQUIP_ITEM, GamePacket.HEADER_SIZE_OUTGOING + 2,
+    );
+    gp.writeUnsignedByte(src[0] & 0xff);
+    gp.writeUnsignedByte(src[1] & 0xff);
+    world.game.send(gp);
+    lockChanged(held.bag, held.slot);
+    holdItem(null, null);
+    return [];
+  });
+
+  /**
+   * `CursorCanGoInSlot(invSlot)` -- `CURSOR_UPDATE`'s highlight driver
+   * (`paperdollframe.lua:1203-1208`: lock the slot's highlight if true, unlock it if false).
+   *
+   * Answered straight off the payload's `equipSlots`, which is why that list is captured at pickup: this
+   * is called once per paperdoll slot per `CURSOR_UPDATE`, i.e. nineteen times per pickup.
+   */
+  vm.registerFunction('CursorCanGoInSlot', (args) => {
+    const held = getCursorItem(vm);
+    return [held !== null && held.equipSlots.includes(Number(args[0]))];
+  });
+
+  /**
+   * `IsInventoryItemLocked(invSlot)` -- true while that worn slot is the cursor's SOURCE, so the icon
+   * dims the moment it is picked up with no server round-trip. `PaperDollItemSlotButton_UpdateLock`
+   * (`paperdollframe.lua:1308-1316`) is the only caller and desaturates on true.
+   */
+  vm.registerFunction('IsInventoryItemLocked', (args) => {
+    const held = getCursorItem(vm);
+    return [held !== null && held.bag === EQUIPMENT_BAG && held.slot === Number(args[0])];
+  });
+
+  /**
+   * `GetInventoryItemCount(unit, invSlot)` -- the stack size on a WORN item.
+   *
+   * **Its absence is the whole of "the paperdoll slots draw no item icons".** Measured live:
+   * `PaperDollItemSlotButton_Update`'s second statement is
+   * `SetItemButtonCount(self, GetInventoryItemCount("player", self:GetID()))`
+   * (`paperdollframe.lua:1263`), and every OCCUPIED slot raised there -- after `SetItemButtonTexture`
+   * had run, so the icon was set and then the handler died eleven lines before
+   * `self.ignoreTexture:Hide()` (`:1290-1294`). `paperdollframe.xml:8` authors that texture as
+   * `Interface\PaperDollInfoFrame\UI-GearManager-LeaveItem-Transparent` and SHOWN -- a red circle-slash
+   * -- so every worn item's icon was drawn and then covered by it. That is exactly the owner's
+   * "red circle-slash on several paperdoll slots", and "several" is the count of occupied slots: an
+   * EMPTY slot takes the other branch, reaches the `Hide()`, and only then raises on
+   * `IsInventoryItemLocked` at `:1309`.
+   *
+   * 1 for a worn item, because equipment does not stack: the only stackable thing in an inventory slot
+   * is ammo, and `AmmoSlot` is id 0, outside the descriptor array (see `wirePos`). `ITEM_FIELD_STACK_COUNT`
+   * is read anyway rather than hard-coded, so ammo would answer correctly if it ever reached this call.
+   */
+  vm.registerFunction('GetInventoryItemCount', (args) => {
+    if (String(args[0]).toLowerCase() !== 'player') {
+      return [0];
+    }
+    const slot = Number(args[1]);
+    if (!Number.isFinite(slot) || slot < 1) {
+      return [0];
+    }
+    const item = itemAt(guidAt(items.player(), ObjectType.Player,
+      PlayerField.player_field_inv_slot_head + (slot - 1) * 2));
+    return [item === null ? 0 : item.count];
+  });
+
+  /**
+   * `GetInventoryItemLink(unit, invSlot)` -- WAS A DECLARED GAP whose reason ("nothing in the bag path
+   * calls this; it is the character sheet's") is no longer true: `PaperDollItemSlotButton_OnModifiedClick`
+   * passes it straight to `HandleModifiedItemClick` (`paperdollframe.lua:1252`), which is shift-clicking
+   * a worn item into chat. Same link builder the bag path uses.
+   */
+  vm.registerFunction('GetInventoryItemLink', (args) => {
+    if (String(args[0]).toLowerCase() !== 'player') {
+      return [null];
+    }
+    const slot = Number(args[1]);
+    if (!Number.isFinite(slot) || slot < 1) {
+      return [null];
+    }
+    const item = itemAt(guidAt(items.player(), ObjectType.Player,
+      PlayerField.player_field_inv_slot_head + (slot - 1) * 2));
+    return [item === null ? null : itemLink(item)];
+  });
+
+  /**
+   * `PutItemInBackpack()` / `PutItemInBag(invSlot)` -> whether an item was PUT DOWN.
+   *
+   * RE-REGISTERED over `api/cursor.ts`' empty-cursor `false` (see its note): with an item on the cursor
+   * these place it, which is what makes clicking the bag BUTTON while carrying something drop it in
+   * rather than toggle the bag open. `BackpackButton_OnClick` is
+   * `if ( not PutItemInBackpack() ) then ToggleBackpack() end`
+   * (`mainmenubarbagbuttons.lua:50-55`), so the boolean IS the branch.
+   *
+   * The destination is the first FREE slot of that bag, because the wire has no "anywhere in this bag"
+   * form for a swap: `CMSG_AUTOSTORE_BAG_ITEM` (0x10B) is that form, and it is not used here because it
+   * cannot express "and swap if full". With no free slot the answer is false and the bag toggles, which
+   * is a visible behaviour rather than a silent nothing.
+   */
+  const putInBag = (bag: number): boolean => {
+    const held = getCursorItem(vm);
+    if (held === null) {
+      return false;
+    }
+    const total = numSlots(bag);
+    for (let slot = 1; slot <= total; slot += 1) {
+      if (itemAt(slotGuid(bag, slot)) === null) {
+        if (sendMove(held, bag, slot)) {
+          holdItem(null, null);
+          return true;
+        }
+        return false;
+      }
+    }
+    return false;
+  };
+  vm.registerFunction('PutItemInBackpack', () => [putInBag(BACKPACK_CONTAINER)]);
+  vm.registerFunction('PutItemInBag', (args) => {
+    // The argument is an INVENTORY slot id -- `BagSlotButton_OnClick` passes `self:GetID()` straight
+    // through (`mainmenubarbagbuttons.lua:16-18`), and that id is 20..23 because that is what
+    // `GetInventorySlotInfo("Bag0Slot".."Bag3Slot")` answered at the button's OnLoad. So it converts back
+    // to a bag id the same way `ContainerIDToInventoryID` above converts forward.
+    const bag = Number(args[0]) - INV_SLOT_BAG_FIRST;
+    return [bag >= 1 && bag <= NUM_BAG_SLOTS ? putInBag(bag) : false];
+  });
+
   /**
    * The tooltip feed -- `GameTooltip:SetBagItem` / `:SetHyperlink`.
    *
@@ -797,9 +1261,22 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     // `GenerateFrame` needs to finish.
     ['SetBagPortraitTexture', 'no portrait render target exists in this client -- the same gap '
       + 'SetPortraitTexture/SetPortraitToTexture are declared for in api/units.ts', []],
-    ['PickupContainerItem', 'there is no item on this client\'s cursor: the cursor carries actions and '
-      + 'spells only (api/cursor.ts), so an item pickup has nowhere to be held', []],
-    ['SplitContainerItem', 'splitting needs the cursor a pickup would put the stack on', []],
+    // `PickupContainerItem` USED TO BE DECLARED HERE. It is real now -- see the item-cursor section
+    // above -- and this note stays only because the comment block below still calls the whole pickup
+    // family a gap in one place; the family that remains is the SPLIT and the DESTROY.
+    ['SplitContainerItem', 'a split carry needs StackSplitFrame, whose OnAccept is the only caller, and '
+      + 'CMSG_SPLIT_ITEM; the whole-stack move is real (see the item-cursor section) and a partial one '
+      + 'is deliberately not faked as a whole-stack move', []],
+    ['DeleteCursorItem', 'CMSG_DESTROYITEM is not sent: nothing in this client opens the DELETE_ITEM '
+      + 'static popup, and wiring a destroy to any other gesture would delete the player\'s items on a '
+      + 'mis-aimed drag. api/cursor.ts#dropCursorOnWorld puts an item BACK for this reason', []],
+    ['SocketInventoryItem', 'no socketing UI and no gem data; PaperDollItemSlotButton_OnModifiedClick '
+      + 'reaches it only behind IsModifiedClick("SOCKETITEM")', []],
+    ['GetInventoryItemBroken', 'ITEM_FIELD_DURABILITY is not read out of the item descriptor, so a worn '
+      + 'item cannot be known to be broken; false leaves the icon its normal colour rather than red',
+    [false]],
+    ['GetInventoryItemCooldown', 'as GetContainerItemCooldown -- SMSG_ITEM_COOLDOWN (0x0B0) has no '
+      + 'subscriber', [0, 0, 0]],
     ['GetContainerItemCooldown', 'SMSG_ITEM_COOLDOWN (0x0B0) has no subscriber, so no item cooldown '
       + 'is decoded', [0, 0, 0]],
     ['GetContainerItemQuestInfo', 'no quest log is decoded, so no item can be known to be a quest '
@@ -807,8 +1284,6 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     ['GetContainerItemPurchaseInfo', 'the refund window needs vendor state this client has none of',
       []],
     ['GetContainerItemPurchaseItem', 'as GetContainerItemPurchaseInfo', []],
-    ['GetInventoryItemLink', 'a worn item resolves to a link, but nothing in the bag path calls this; '
-      + 'it is the character sheet\'s, and that is not this round', [null]],
     ['SetItemButtonQuality', 'the quality ring on a bag button is drawn by the client\'s own Lua from '
       + 'GetContainerItemInfo\'s quality; nothing calls this in the manifest', []],
   ];

@@ -117,6 +117,17 @@ export interface UnitSnapshot {
    */
   race: { name: string; token: string } | null;
   classInfo: { name: string; token: string } | null;
+
+  /**
+   * `UnitSex`'s answer: **1 unknown, 2 male, 3 female**.
+   *
+   * The wire has 0 male / 1 female in byte 2 of `UNIT_FIELD_BYTES_0`
+   * (`network/game/object/update-object/unit-fields.ts:281-285`); the Lua API's numbering is the
+   * different one above, which is why the conversion happens in `unit-bridge.ts` and this field carries
+   * the API's value rather than the wire's. 1 (unknown) is the honest value before `bytes_0` lands and
+   * is what the real client answers for a unit whose gender it does not know.
+   */
+  sex: number;
 }
 
 /** A unit that exists but about which nothing has arrived yet. */
@@ -139,6 +150,7 @@ export function emptySnapshot(): UnitSnapshot {
     baseMana: 0,
     race: null,
     classInfo: null,
+    sex: 1,
   };
 }
 
@@ -252,6 +264,68 @@ export function installUnitsApi(vm: LuaVM): void {
   // nil, not "", for a unit with no name yet: `GetUnitName` and every caller in the manifest tests the
   // result for truthiness, and an empty string is truthy in Lua.
   fn('UnitName', (args) => [withUnit(args[0], null, (u) => u.name)]);
+
+  /**
+   * `UnitPVPName(unit)` -- THE CHARACTER PANEL'S TITLE, and its absence is the whole of the owner's
+   * "Name" placeholder.
+   *
+   * `CharacterFrame_OnShow`'s third statement is `CharacterNameText:SetText(UnitPVPName("player"))`
+   * (`characterframe.lua:88`) and `characterframe.xml:48` authors that font string as `text="NAME"`. With
+   * the global nil the handler raised on that line, the placeholder stayed on screen, and **everything
+   * after it in `CharacterFrame_OnShow` never ran either** -- `UpdateMicroButtons`, the five
+   * `showNumeric` assignments and the six `ShowTextStatusBarText` calls (`:89-101`). Measured live:
+   * `CharacterNameText` read `"Name"` and `PaperDollItemSlotButton_Update` was reached only because
+   * `PaperDollFrame_OnShow` is a separate handler.
+   *
+   * **It answers the plain name, and the difference from the real client is stated rather than hidden.**
+   * `UnitPVPName` decorates the name with the player's chosen TITLE, which lives in
+   * `PLAYER_CHOSEN_TITLE` and is formatted through `CharTitles.dbc`; this client decodes neither, and
+   * `PlayerTitleFrame` is not fed. A character with no title -- which is every character here -- gets
+   * exactly the plain name from the real client too, so this is the correct answer today and an
+   * incomplete one only once titles are decoded.
+   */
+  fn('UnitPVPName', (args) => [withUnit(args[0], null, (u) => u.name)]);
+
+  /**
+   * `UnitSex(unit)` -> 1 unknown / 2 male / 3 female. See `UnitSnapshot#sex` for the numbering and where
+   * the conversion from the wire's 0/1 happens.
+   *
+   * `ReputationFrame_Update`'s fifteenth line is `local gender = UnitSex("player")`
+   * (`reputationframe.lua:140`), so with this nil the whole panel raised before its row loop -- one of
+   * the two reasons the Reputation tab showed blank names under the XML's own `text="Revered"`
+   * placeholder (`reputationframe.xml:120`). The other is `GetNumFactions`; see `ui/container-bridge.ts`.
+   */
+  fn('UnitSex', (args) => [withUnit(args[0], 1, (u) => u.sex)]);
+
+  /**
+   * `GetText(key, gender, ordinal)` -> the `GlobalStrings` entry, gender-selected.
+   *
+   * The engine's gendered-string lookup, and it is a real engine global rather than Lua: nothing in the
+   * 264 loaded manifest files defines it, and `ReputationFrame_Update:157` calls it as
+   * `GetText("FACTION_STANDING_LABEL"..standingID, gender)`.
+   *
+   * **The gender argument is IGNORED and that is what enUS does.** The gendered form is
+   * `<key>_MALE`/`<key>_FEMALE`, which the real client prefers when present; `GlobalStrings.lua` on this
+   * build carries `FACTION_STANDING_LABEL1..8` with no gendered twins, so the ungendered key is the
+   * only one there is. The lookup tries the gendered key FIRST anyway, so a locale that does ship them
+   * is served without this needing to change: 2 is male and 3 is female, matching `UnitSex` above.
+   */
+  fn('GetText', (args) => {
+    const key = String(args[0] ?? '');
+    if (key === '') {
+      return [null];
+    }
+    const gender = Number(args[1]);
+    const suffix = gender === 2 ? '_MALE' : (gender === 3 ? '_FEMALE' : null);
+    if (suffix !== null) {
+      const gendered = vm.getGlobal(`${key}${suffix}`);
+      if (typeof gendered === 'string') {
+        return [gendered];
+      }
+    }
+    const plain = vm.getGlobal(key);
+    return [typeof plain === 'string' ? plain : null];
+  });
   fn('UnitLevel', (args) => [withUnit(args[0], 0, (u) => u.level)]);
   fn('UnitHealth', (args) => [withUnit(args[0], 0, (u) => u.health)]);
   fn('UnitHealthMax', (args) => [withUnit(args[0], 0, (u) => u.maxHealth)]);
@@ -727,6 +801,94 @@ export function installUnitsApi(vm: LuaVM): void {
    * visible consequence is that a much lower-level unit's number is green where the real client would
    * grey it.
    */
+  /**
+   * THE CHARACTER SHEET'S OTHER THREE TABS, and each is declared with the value that makes the panel
+   * render EMPTY rather than render placeholders.
+   *
+   * The owner reported blank rows with "Revered" on every one of them in Reputation, and blank rows in
+   * Skills. Neither was a default being returned: `reputationframe.xml:120` authors the standing font
+   * string as `text="Revered"` and `reputationframe.xml:32` authors the row's collapse button with
+   * `Interface\Buttons\UI-MinusButton-UP` as its NormalTexture, both SHOWN. So what the owner saw was
+   * the client's own XML, untouched, because the routine that fills the rows never ran:
+   * `ReputationFrame_Update` raised on its FIRST line, `local numFactions = GetNumFactions()`
+   * (`reputationframe.lua:124`) -- measured live, that exact error string. `SkillFrame_UpdateSkills`
+   * raises the same way on `GetNumSkillLines()` (`skillframe.lua:403`).
+   *
+   * **0 is the answer that makes the client hide those rows itself.** With `numFactions` 0,
+   * `FauxScrollFrame_Update` reports no rows and the loop's `factionIndex <= numFactions` is false for
+   * every row, which takes the `else` arm that HIDES the row -- placeholder text, minus button and all.
+   * A nil would raise again inside `FauxScrollFrame_Update`; that is why these carry a result and the
+   * `Get*Info` pair does not.
+   *
+   * WHERE THE REAL DATA WOULD COME FROM, so this is a named gap and not a shrug:
+   *  - factions: `SMSG_INITIALIZE_FACTIONS` (0x122) -- 128 (flags, standing) pairs -- joined to
+   *    `Faction.dbc` for the name, parent and reputation index. Neither the opcode nor the DBC is read
+   *    here; `network/game/opcode.js` has no subscriber for it.
+   *  - skills: `PLAYER_SKILL_INFO_1_1`, 128 three-word records on the player descriptor, joined to
+   *    `SkillLine.dbc` for the name and `SkillLineCategory` for the header rows. The descriptor block
+   *    is decoded as raw words today and nothing reads it.
+   *  - the pet tab: `HasPetUI`/`GetNumCompanions`/`UnitCreatureFamily` need a pet unit and
+   *    `SMSG_PET_SPELLS`, and `CreatureFamily.dbc`. With `HasPetUI` false, `PetPaperDollFrame_Update`
+   *    returns on its second line (`petpaperdollframe.lua:467-469`), which is why `PetLevelText` still
+   *    reads its own XML placeholder `text="Level level race class"` (`petpaperdollframe.xml:131`) --
+   *    that placeholder is the client's, not ours, and the honest fix is a pet feed, not a SetText.
+   *
+   * ONE THING THAT IS NOT A DEFECT: the magenta bars at the bottom of the Pets tab are CORRECT. The pet
+   * XP bar is authored `<BarColor r="0.58" g="0.0" b="0.55"/>` (`petpaperdollframe.xml:206`) -- the same
+   * purple `GetRestState` above documents for the player's own unrested XP bar.
+   */
+  gaps.push(
+    ['GetNumFactions', 'SMSG_INITIALIZE_FACTIONS (0x122) has no subscriber and Faction.dbc is not '
+      + 'joined, so no faction is known; 0 is what makes ReputationFrame_Update hide its own rows '
+      + 'instead of raising', [0]],
+    ['GetFactionInfo', 'as GetNumFactions -- with 0 factions this is unreachable', []],
+    ['GetWatchedFactionInfo', 'as GetNumFactions', []],
+    ['CollapseFactionHeader', 'as GetNumFactions -- there is no header to collapse', []],
+    ['ExpandFactionHeader', 'as GetNumFactions', []],
+    ['SetWatchedFactionIndex', 'as GetNumFactions', []],
+    ['GetNumSkillLines', 'PLAYER_SKILL_INFO_1_1 is not decoded and SkillLine.dbc is not joined; 0 is '
+      + 'what makes SkillFrame_UpdateSkills hide its own rows instead of raising', [0]],
+    ['GetSkillLineInfo', 'as GetNumSkillLines -- with 0 skill lines this is unreachable', []],
+    ['GetSelectedSkill', 'as GetNumSkillLines', [0]],
+    ['SetSelectedSkill', 'as GetNumSkillLines', []],
+    ['CollapseSkillHeader', 'as GetNumSkillLines', []],
+    ['ExpandSkillHeader', 'as GetNumSkillLines', []],
+    ['AbandonSkill', 'as GetNumSkillLines', []],
+    ['HasPetUI', 'no pet unit is tracked and SMSG_PET_SPELLS has no subscriber', [false, false]],
+    ['GetNumCompanions', 'SMSG_PET_SPELLS / the companion list are not decoded', [0]],
+    ['GetCompanionInfo', 'as GetNumCompanions', []],
+    ['CallCompanion', 'as GetNumCompanions', []],
+    ['DismissCompanion', 'as GetNumCompanions', []],
+    ['UnitCreatureFamily', 'CreatureFamily.dbc is not joined and no pet unit is tracked', [null]],
+    ['UnitHasRelicSlot', 'no class relic rule is decoded, so the ranged slot cannot be known to be a '
+      + 'relic slot; the only effect is which empty-slot art the ranged button shows', [false]],
+    // The rest of what those three panels reach, each found the same way -- by pcall-ing the client's
+    // own update routine and reading the next call it died on. `GetAdjustedSkillPoints` is the sharp
+    // one: it is `SkillFrame_UpdateSkills`' SECOND line (`skillframe.lua:404`), so with 0 skill lines
+    // and this absent the function still raised BEFORE its "hide unused bars" loop (`:431-434`) -- which
+    // is what left `SkillTypeLabel1` shown over a blank row. A 0 count is only half the fix.
+    ['GetAdjustedSkillPoints', 'no skill points are decoded (PLAYER_SKILL_INFO_1_1 is unread)', [0]],
+    ['UnitCharacterPoints', 'no talent or skill point pool is decoded; the pair is returned together '
+      + 'because SkillFrame_UpdateSkills destructures both (skillframe.lua:436)', [0, 0]],
+    ['GetSelectedFaction', 'as GetNumFactions', [0]],
+    ['SetSelectedFaction', 'as GetNumFactions', []],
+    ['IsFactionInactive', 'as GetNumFactions', [false]],
+    // THE CURRENCY FAMILY, and it is a NEW gap rather than an old one: `Blizzard_CombatLog` is not the
+    // only addon `PLAYER_LOGIN` loads -- `Blizzard_TokenUI` is in the startup set, and its
+    // `BackpackTokenFrame_Update` (`blizzard_tokenui.lua:176-180`) is hooked to the bag frames. With
+    // `GetBackpackCurrencyInfo` nil that raised on **`OpenBackpack()`**, i.e. on opening a bag at all,
+    // which is measured and is why it is declared here beside the panels rather than left for later.
+    ['GetBackpackCurrencyInfo', 'SMSG_INIT_CURRENCY / the currency descriptor block are not decoded, '
+      + 'so no watched token exists; nil is what makes BackpackTokenFrame_Update hide its buttons',
+    []],
+    ['GetCurrencyListSize', 'as GetBackpackCurrencyInfo', [0]],
+    ['GetCurrencyListInfo', 'as GetBackpackCurrencyInfo', []],
+    ['GetNumWatchedTokens', 'as GetBackpackCurrencyInfo', [0]],
+    ['ExpandCurrencyList', 'as GetBackpackCurrencyInfo', []],
+    ['SetCurrencyBackpack', 'as GetBackpackCurrencyInfo', []],
+    ['SetCurrencyUnused', 'as GetBackpackCurrencyInfo', []],
+  );
+
   vm.run(
     `function GetQuestDifficultyColor(level)
       local colors = QuestDifficultyColors

@@ -94,6 +94,12 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   // rather than a wrong race. `ensureLoaded` is kicked off by `attachUnitBridge`.
   snapshot.race = unit.fields.race ? raceClassData.race(unit.fields.race) : null;
   snapshot.classInfo = unit.fields.classId ? raceClassData.class(unit.fields.classId) : null;
+  // THE SEX, converted here and not in `api/units.ts`, because the two numberings differ: the wire's
+  // byte 2 of `UNIT_FIELD_BYTES_0` is 0 male / 1 female
+  // (`network/game/object/update-object/unit-fields.ts:281-285`) and `UnitSex` answers 1 unknown / 2
+  // male / 3 female. `undefined` (no `bytes_0` yet) stays 1, which is the API's "unknown" and not a
+  // guess at male. See `UnitSnapshot#sex`.
+  snapshot.sex = unit.fields.gender === undefined ? 1 : unit.fields.gender + 2;
   return snapshot;
 }
 

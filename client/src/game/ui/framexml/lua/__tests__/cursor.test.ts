@@ -1,6 +1,7 @@
 import { LuaVM } from '../vm';
 import {
-  cancelCursor, dropCursorOnWorld, getCursor, installCursorApi, setCursorHandlers,
+  cancelCursor, dropCursorOnWorld, getCursor, getCursorItem, installCursorApi, setCursorHandlers,
+  setCursorItem,
 } from '../api/cursor';
 
 /**
@@ -48,5 +49,43 @@ describe('the cursor', () => {
     expect(discarded).toEqual([]);
     // ... and an empty cursor answers false, which is what keeps Escape reaching TOGGLEGAMEMENU.
     expect(cancelCursor(vm)).toBe(false);
+  });
+
+  /**
+   * THE ITEM ARM, through the two globals the client's own Lua tests right after a pickup:
+   * `ContainerFrameItemButton_OnClick` does `PickupContainerItem(...); if ( CursorHasItem() ) then`
+   * (`containerframe.lua:715-717`) and `GetCursorInfo`'s first return is what every other branch in that
+   * handler keys on. The TRANSITIONS live in `ui/container-bridge.ts` (they need the world); what this
+   * covers is that the shared payload space reports an item as an item and a spell as a spell.
+   */
+  it('reports an item on the cursor as "item", not as a spell, and Escape puts it back', () => {
+    const { vm, discarded } = vmWithCursor();
+
+    setCursorItem(vm, {
+      kind: 'item',
+      spellId: 0,
+      bookSlot: null,
+      sourceSlot: null,
+      texture: 'Interface\\Icons\\INV_Sword_06',
+      item: {
+        bag: 0, slot: 3, itemId: 25, link: '|Hitem:25|h[Worn Shortsword]|h', equipSlots: [16, 17],
+      },
+    });
+
+    // `runExpr` answers `LuaError | { value }`; a raise in one of these would be the failure itself, so
+    // the read is narrowed rather than asserted around.
+    const value = (src: string): unknown => {
+      const answer = vm.runExpr(src, 't') as { value?: unknown };
+      return answer.value;
+    };
+    expect(value('return CursorHasItem()')).toBe(true);
+    expect(value('return CursorHasSpell()')).toBe(false);
+    expect(value('local t, id = GetCursorInfo() return t .. "/" .. id')).toBe('item/25');
+    expect(getCursorItem(vm)?.equipSlots).toEqual([16, 17]);
+
+    // A put-down never destroys an item -- `discard` is the ACTION arm only. See `dropCursorOnWorld`.
+    expect(dropCursorOnWorld(vm)).toBe(true);
+    expect(getCursorItem(vm)).toBeNull();
+    expect(discarded).toEqual([]);
   });
 });
