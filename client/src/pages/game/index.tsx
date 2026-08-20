@@ -55,7 +55,6 @@ interface IGameScreenState {
 class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private camera: THREE.PerspectiveCamera;
   public debugCamera: THREE.PerspectiveCamera;
-  public cameraHelper: THREE.CameraHelper;
   private prevCameraRotation: THREE.Quaternion = new THREE.Quaternion();
   private prevCameraPosition: THREE.Vector3 = new THREE.Vector3();
   private hasPrevCamera = false;
@@ -159,8 +158,21 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.camera.position.set(15, 0, 7);
     this.game.camera = this.camera;
 
-    this.cameraHelper = new THREE.CameraHelper( this.camera );
-    this.game.world.scene.add(this.cameraHelper);
+    // NO `THREE.CameraHelper` HERE. It used to be built for `this.camera` and added to the world
+    // scene unconditionally, and it was the faint one-pixel full-height line down the exact horizontal
+    // centre of the screen that the owner has been looking at. Rendered THROUGH the very camera it
+    // describes, a frustum wireframe degenerates: the eye-to-target and up-vector segments project
+    // onto the centre column and the near/far rectangles land on the clip boundary, so all that
+    // survives is a vertical hairline at width/2, in the world pass (hence under the interface) and in
+    // no UI draw list.
+    //
+    // MEASURED rather than argued: it was the only visible line primitive in the world scene
+    // (`CollisionDebugView` is hidden), and setting `visible = false` on it live removed the line from
+    // a centre-column screenshot crop (`MB9-before.png` / `MB9-after.png`, round 31).
+    //
+    // It was also dead: the field was assigned, added and removed and read nowhere, and `update()` was
+    // never called after construction, so it did not even describe the camera's current frustum. The
+    // debug-camera pair below is still used by the visibility work; only the helper is gone.
     this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
     this.debugCamera.name = 'DebugCamera';
     this.debugCamera.up.set(0, 0, 1);
@@ -773,7 +785,6 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // it, and its own `dispose` deliberately does NOT free the renderer it was merely lent.
     this.ui?.dispose();
     this.ui = null;
-    this.game.world.scene.remove(this.cameraHelper);
     this.stats?.dom.parentNode?.removeChild(this.stats.dom);
     this.renderer?.dispose();
     this.debugRenderer?.dispose();
