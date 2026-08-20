@@ -20,7 +20,31 @@
 import { keyToken } from './framexml/bindings';
 import { focusChain, hitTest, nextFocus } from './hit';
 import { viewportUnits } from './layout';
-import { DrawItem, Widget } from './widget';
+import { DrawItem, MouseButtonName, Widget } from './widget';
+
+/**
+ * The default click registration: a Button that never called `RegisterForClicks` takes the LEFT button
+ * only, which is the engine's own default. See `Widget#clickButtons`.
+ */
+const LEFT_ONLY: ReadonlySet<MouseButtonName> = new Set<MouseButtonName>(['LeftButton']);
+
+/**
+ * A DOM `PointerEvent#button` as FrameXML names it.
+ *
+ * The DOM order is 0 left, 1 MIDDLE, 2 RIGHT -- middle and right are not adjacent to left in the order
+ * a reader expects, and getting that backwards would send every right-click to the middle button. 3 and
+ * 4 are the back/forward buttons, which FrameXML calls `Button4`/`Button5`. Anything else is reported as
+ * the left button, since the alternative is a click that silently does nothing.
+ */
+function buttonName(event: PointerEvent): MouseButtonName {
+  switch (event.button) {
+    case 2: return 'RightButton';
+    case 1: return 'MiddleButton';
+    case 3: return 'Button4';
+    case 4: return 'Button5';
+    default: return 'LeftButton';
+  }
+}
 
 /**
  * How close two clicks have to be to count as a double click. OURS: the real client reads the host's
@@ -43,6 +67,15 @@ export class GlueInput {
   private readonly canvas: HTMLCanvasElement;
   private items: DrawItem[] = [];
   private pressed: Widget | null = null;
+
+  /**
+   * Which button the live press used, so the release can report it.
+   *
+   * Held on the press rather than read off the release event because a `pointerup` for a chorded release
+   * reports the button that CHANGED, and the press is the one the click belongs to. Defaults to
+   * `LeftButton` so a synthetic release with no press before it behaves as it always did.
+   */
+  private pressButton: MouseButtonName = 'LeftButton';
   private hovered: Widget | null = null;
   private focus: Widget | null = null;
   /** The last completed click, for `onDoubleClick`. */
@@ -333,6 +366,7 @@ export class GlueInput {
   }
 
   private onPointerDown = (event: PointerEvent): void => {
+    this.pressButton = buttonName(event);
     const { x, y } = this.toUnits(event);
     const hit = hitTest(this.items, x, y);
 
@@ -377,7 +411,7 @@ export class GlueInput {
       hit.state = 'down';
       // FrameXML's `OnMouseDown`, which is NOT the click: it fires on the press itself, and a press
       // that drags off and releases elsewhere still had one.
-      hit.onMouseDown?.();
+      hit.onMouseDown?.(this.pressButton);
     }
   };
 
@@ -411,7 +445,7 @@ export class GlueInput {
     pressed.state = 'up';
     // The counterpart of `OnMouseDown`: the engine fires `OnMouseUp` on the frame that took the press
     // wherever the release lands, so this is BEFORE the released-off-the-widget test below.
-    pressed.onMouseUp?.();
+    pressed.onMouseUp?.(this.pressButton);
 
     const { x, y } = this.toUnits(event as PointerEvent);
     this.pointerUnits = { x, y };
@@ -458,7 +492,22 @@ export class GlueInput {
     if (pressed.kind === 'checkbutton') {
       pressed.checked = !pressed.checked;
     }
-    pressed.onClick?.();
+    /**
+     * THE BUTTON IS NOW REAL, AND ITS ABSENCE WAS WHY NOTHING COULD BE EQUIPPED.
+     *
+     * Every click used to reach Lua as `"LeftButton"` regardless of the button pressed, so a RIGHT-click
+     * on a bag slot ran `ContainerFrameItemButton_OnClick`'s LEFT branch -- `PickupContainerItem`, which
+     * is the declared item-cursor gap -- rather than its right branch, `UseContainerItem`, which sends
+     * `CMSG_AUTOEQUIP_ITEM` and was correct all along. See `Widget#clickButtons`.
+     *
+     * The registration gate is the engine's: a frame that never called `RegisterForClicks` takes LEFT
+     * only. Applied HERE rather than in `scripts.ts` because it is a routing decision -- the handler is
+     * bound once and the button varies per press.
+     */
+    const button = this.pressButton;
+    if ((pressed.clickButtons ?? LEFT_ONLY).has(button)) {
+      pressed.onClick?.(button);
+    }
 
     // FrameXML's `OnDoubleClick`: two clicks on the SAME widget inside the interval. It fires after
     // the second `onClick`, not instead of it, because that is the order the engine's own is
@@ -471,7 +520,7 @@ export class GlueInput {
     ) {
       // Cleared, so a third click starts a new pair rather than firing again on every click.
       this.lastClick = null;
-      pressed.onDoubleClick?.();
+      pressed.onDoubleClick?.(this.pressButton);
     } else {
       this.lastClick = { widget: pressed, time: now };
     }
@@ -562,7 +611,10 @@ export class GlueInput {
         // list row -- keeps activating on Enter through `onClick`, where keyboard and pointer
         // activation genuinely mean the same thing.
         const activate = target.onSubmit ?? target.onClick;
-        activate?.();
+        // `'LeftButton'` explicitly: Enter on a button is a LEFT click in the engine, and `onSubmit`
+        // ignores the argument. Passing the last POINTER button here would make a keyboard activation
+        // inherit whichever button was last pressed somewhere else on screen.
+        activate?.('LeftButton');
       }
       event.preventDefault();
       return;

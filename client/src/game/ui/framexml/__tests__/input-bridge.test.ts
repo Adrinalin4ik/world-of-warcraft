@@ -68,7 +68,7 @@ describe('the FrameXML input bridge', () => {
     expect(widget.mouseEnabled).toBe(true);
 
     // What `input.ts` does on a completed click, at the one boundary the bridge owns.
-    widget.onClick!();
+    widget.onClick!('LeftButton');
 
     expect(vm.getGlobal('clicked')).toBe(1);
     expect(vm.getGlobal('clickedWith')).toBe('LeftButton');

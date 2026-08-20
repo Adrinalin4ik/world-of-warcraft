@@ -16,9 +16,16 @@
  */
 import { FocusSink, MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { Anchor } from '../../../layout';
-import { Widget } from '../../../widget';
+import { MouseButtonName, Widget } from '../../../widget';
+
 import { applyFontObject, ensureFont, fontObjectName, notImplemented, warnOnce, widgetOf } from './region';
 import { measureText } from '../../../text';
+
+/** Every button `RegisterForClicks` and `AnyUp`/`AnyDown` can name. */
+const ALL_MOUSE_BUTTONS = [
+  'LeftButton', 'RightButton', 'MiddleButton', 'Button4', 'Button5',
+] as const satisfies readonly MouseButtonName[];
+
 
 /** `0..1` floats to the `#rrggbb` string `Widget` stores colors as -- duplicated from `region.ts`'s
  * private helper of the same shape rather than exported, since it is three lines and not worth a
@@ -369,18 +376,53 @@ const BUTTON: MethodTable = {
     return [measureText(label.text, ensureFont(label), 1).width];
   },
   /**
-   * Which mouse buttons fire `OnClick` -- `RegisterForClicks("LeftButtonDown", ...)`.
+   * `RegisterForClicks("LeftButtonUp", "RightButtonUp", ...)` -- which buttons fire `OnClick`.
    *
-   * A declared gap rather than a stored set, because storing it would be a lie in the other direction:
-   * `ui/input.ts` routes only a LEFT button press and hardcodes `"LeftButton"` (task-9 report, fix
-   * round 2), so nothing downstream could honour a registration for anything else. The two callers in
-   * this manifest are `CharacterSelectRotateLeft`/`Right` (characterselect.xml), whose held-down
-   * rotation is an `<OnUpdate>` this runtime does not dispatch anyway.
+   * **THIS WAS A DECLARED GAP AND THE GAP WAS WHY NOTHING COULD BE EQUIPPED.** Its reason was true when
+   * written -- "`ui/input.ts` routes only a left-button press and hardcodes `LeftButton`, so nothing
+   * downstream could honour a registration" -- and both halves of that are now false: the router reads
+   * `PointerEvent#button` and reports the real one (`ui/input.ts#buttonName`). Its census was also wrong:
+   * it named two callers, and there are **73 registrations across the manifest**, 37 of them exactly
+   * `"LeftButtonUp", "RightButtonUp"`, including `ContainerFrameItemButton_OnLoad`
+   * (`containerframe.lua:614`) -- the bag slot whose right-click is the equip gesture.
+   *
+   * The whole set of forms in the manifest is `<Button>Up`, `<Button>Down`, `AnyUp` and `AnyDown`. Only
+   * the BUTTON half is kept; see `Widget#clickButtons` for why the phase is not honoured and why that is
+   * the safe direction.
+   *
+   * An UNPARSEABLE entry is warned about rather than dropped silently, and it does not poison the rest of
+   * the call: a registration this runtime cannot read must not turn into "no buttons at all", which would
+   * make the frame dead to the mouse.
+   *
+   * **The XML ATTRIBUTE form is NOT wired, and it is one frame.** `registerForClicks=` appears exactly
+   * once in the manifest -- `LFRBrowseButtonTemplate` (`lfrframe.xml:41`) -- and `loader.ts` does not
+   * issue it. Left as a named gap rather than plumbed: the raid browser has no feed in this client, so
+   * the attribute has no reachable effect, and every button that matters registers in Lua.
    */
-  RegisterForClicks: notImplemented(
-    'RegisterForClicks',
-    'ui/input.ts routes only a left-button press, so no other registration could be honoured',
-  ),
+  RegisterForClicks: (ctx, self, args) => {
+    const buttons = new Set<MouseButtonName>();
+    for (const arg of args) {
+      if (typeof arg !== 'string') {
+        continue;
+      }
+      const entry = arg.trim();
+      const phase = /(Up|Down)$/.exec(entry);
+      const name = phase === null ? entry : entry.slice(0, -phase[1].length);
+      if (name === 'Any') {
+        for (const any of ALL_MOUSE_BUTTONS) {
+          buttons.add(any);
+        }
+      } else if ((ALL_MOUSE_BUTTONS as readonly string[]).includes(name)) {
+        buttons.add(name as MouseButtonName);
+      } else {
+        warnOnce(`RegisterForClicks: unrecognised registration '${entry}'`);
+      }
+    }
+    // An empty call is `RegisterForClicks()` with no arguments, which the engine treats as clearing the
+    // registration -- so the frame goes back to the LEFT-only default rather than to "no buttons".
+    widgetOf(ctx, self).clickButtons = buttons.size === 0 ? null : buttons;
+    return [];
+  },
 
   // Each of the five state-moving methods below repaints the CAPTION as well as the art: a caller that
   // disables a button and reads its label back must not have to wait for the next frame's poll, and the
@@ -442,8 +484,11 @@ const BUTTON: MethodTable = {
   },
   // Real `Click()` fires even on a disabled button -- it is a forced simulated click, not a pointer
   // event the input router would refuse.
-  Click: (ctx, self) => {
-    widgetOf(ctx, self).onClick?.();
+  Click: (ctx, self, args) => {
+    // `Click([button])` -- the argument is real FrameXML (`Click("RightButton")` appears in the
+    // manifest) and it defaults to the left button, which is what a bare `Click()` means.
+    const button = typeof args[0] === 'string' ? (args[0] as MouseButtonName) : 'LeftButton';
+    widgetOf(ctx, self).onClick?.(button);
     return [];
   },
 

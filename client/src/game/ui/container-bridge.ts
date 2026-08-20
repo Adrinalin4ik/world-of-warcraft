@@ -53,7 +53,7 @@ import {
   ContainerField, ItemField, ObjectField, ObjectType, PlayerField,
   getUpdateFieldName,
 } from '../../network/game/object/enums';
-import { guidHex, GUID_BYTES } from '../../network/guid-hex';
+import { guidBytes, guidHex, GUID_BYTES } from '../../network/guid-hex';
 import { itemData } from '../pipeline/dbc/item-data';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { itemTooltipLines } from './item-tooltip';
@@ -488,15 +488,116 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
   });
 
   /**
-   * `UseContainerItem(bagID, slot)` -- the right-click.
+   * `CMSG_USE_ITEM` (**0x0AB**) -- the "use" gesture, for anything a right-click does not EQUIP.
    *
-   * **Only the EQUIP arm is real, and the other is declared rather than faked.** An equippable item
-   * goes out as `CMSG_AUTOEQUIP_ITEM` (**0x10A**), whose body is two bytes -- the wire bag index and
-   * the wire slot -- and which the server resolves entirely on its own. A CONSUMABLE needs
-   * `CMSG_USE_ITEM` (0x0AB), whose 3.3.5a body carries a cast count, a spell id, the item's full guid,
-   * a glyph index, cast flags and a `SpellCastTargets` block; that is a spell-cast packet wearing an
-   * item's name, and building one on an unverified layout to make a right-click *look* like it worked
-   * is exactly the failure this project keeps recording. It warns once and does nothing.
+   * ## The layout, and where it comes from
+   *
+   * LABELLED, per this project's rule: the body's field order is transcribed from a SERVER
+   * implementation (TrinityCore 3.3.5's `WorldSession::HandleUseItemOpcode`), the same source the loot
+   * family's layouts are credited to at `network/game/object/loot.ts`. The opcode number itself is this
+   * client's own table (`network/game/opcode.js:173`).
+   *
+   *     u8  bagIndex        the wire bag index -- 255 for the backpack and the equipped slots
+   *     u8  slot            the wire slot within that bag
+   *     u8  castCount       the cast id the server echoes back; any value, and 1 is ours
+   *     u32 spellId         WHICH of the item's five spells to use -- see below
+   *     u64 itemGUID        the item instance, FULL and not packed
+   *     u32 glyphIndex      0 for anything that is not a glyph
+   *     u8  castFlags       0 -- the pending-cast/proc flags, none of which a plain use sets
+   *     ... SpellCastTargets
+   *
+   * ## `SpellCastTargets`, which is the whole reason this was a declared gap
+   *
+   * `SpellCastTargets::Read` begins with a `u32` target MASK and then reads one packed guid or one
+   * coordinate triple per flag set in it -- unit, gameobject, item, corpse, a source location, a
+   * destination location, a string. **A self-cast sets NO flags**: `TARGET_FLAG_SELF` is 0 in 3.3.5a,
+   * so the whole block for "use this on myself" is one zero word, and every conditional read is
+   * skipped. That is what is written here, and it is why the block is four bytes rather than a
+   * structure.
+   *
+   * **What is NOT built is a TARGETED use** -- a bandage on a party member, a key on a chest, an
+   * enchant on an item in a bag. Those set `TARGET_FLAG_UNIT` / `TARGET_FLAG_GAMEOBJECT` /
+   * `TARGET_FLAG_ITEM` and carry a packed guid, and they arrive through the item CURSOR
+   * (`SpellCanTargetItem`, `PickupContainerItem`), which is a separate declared gap. `notImplemented`
+   * names it below.
+   *
+   * ## `spellId` is a lookup, not a constant
+   *
+   * The server checks the id against the item's own five spell blocks and refuses anything else, so it
+   * cannot be 0. The one used is the item's first ON_USE spell -- `spellTrigger == 0`, the same
+   * `ITEM_SPELL_TRIGGER_ONUSE` value `ui/item-tooltip.ts` labels -- and an item with none is not
+   * usable at all, which is why that case sends nothing rather than sending a zero.
+   */
+  const sendUseItem = (
+    wireBag: number,
+    wireSlot: number,
+    guid: string,
+    template: ItemTemplate,
+  ): void => {
+    const onUse = template.spells.find((spell) => spell.trigger === 0);
+    if (onUse === undefined) {
+      // Not a failure and not a gap: an item with no on-use spell has nothing to do when right-clicked,
+      // and the real client does nothing either.
+      return;
+    }
+    const body = 1 + 1 + 1 + 4 + 8 + 4 + 1 + 4;
+    const gp = new GamePacket(
+      GameOpcode.CMSG_USE_ITEM, GamePacket.HEADER_SIZE_OUTGOING + body,
+    );
+    gp.writeUnsignedByte(wireBag & 0xff);
+    gp.writeUnsignedByte(wireSlot & 0xff);
+    // The cast count. OURS: the server only echoes it back in `SMSG_SPELL_START`/`GO`, and nothing here
+    // reads that echo yet, so a constant is honest. 0 is avoided because the client's own casts number
+    // from 1 and a zero would be indistinguishable from an unset field on a capture.
+    gp.writeUnsignedByte(1);
+    gp.writeUnsignedInt(onUse.id >>> 0);
+    // FULL, not packed -- the same reasoning `ItemHandler#requestTemplate` records for its own guid.
+    gp.write(Array.from(guidBytes(guid)));
+    gp.writeUnsignedInt(0); // glyphIndex
+    gp.writeUnsignedByte(0); // castFlags
+    // `SpellCastTargets`: the mask alone, all flags clear = TARGET_FLAG_SELF. See the header.
+    gp.writeUnsignedInt(0);
+    world.game.send(gp);
+  };
+
+  /**
+   * `UseInventoryItem(slot)` -- the right-click on a PAPERDOLL slot, i.e. on a WORN item.
+   *
+   * `PaperDollItemSlotButton_OnClick` calls it (`paperdollframe.lua`) and it was registered NOWHERE, so
+   * the paperdoll right-click raised on a nil global. It is a USE and never an equip: the item is
+   * already worn, so a right-click fires its on-use effect -- a trinket, a tabard toggle -- and an
+   * equipped item with no on-use spell does nothing, which `sendUseItem` already handles.
+   *
+   * The wire pair for a worn item is bag 255 with the ZERO-BASED equipment slot. `slot` arrives 1-based
+   * because that is what `GetInventorySlotInfo` answers and what the button's `SetID` stored (see
+   * `api/items.ts#GetInventorySlotInfo`), so it is the same `- 1` the tooltip's `'inventory'` kind does.
+   */
+  vm.registerFunction('UseInventoryItem', (args) => {
+    const slot = Number(args[0]);
+    if (!Number.isFinite(slot) || slot < 1) {
+      return [];
+    }
+    const item = itemAt(guidAt(items.player(), ObjectType.Player,
+      PlayerField.player_field_inv_slot_head + (slot - 1) * 2));
+    if (item === null || item.template === null) {
+      return [];
+    }
+    sendUseItem(BAG_PLAYER_INVENTORY, slot - 1, item.guid, item.template);
+    return [];
+  });
+
+  /**
+   * `UseContainerItem(bagID, slot)` -- the right-click. BOTH arms are real now.
+   *
+   * **THE EQUIP ARM WAS ALREADY CORRECT AND WAS NEVER REACHED.** The owner reported "вещи не
+   * надеваются" and the diagnosis handed down was the `SpellCastTargets` gap below; it was wrong.
+   * `ContainerFrameItemButton_OnClick` (`containerframe.lua:693`) branches on its `button` argument,
+   * and `ui/input.ts` reported EVERY click as `"LeftButton"` -- so a right-click took the LEFT branch,
+   * `PickupContainerItem`, which is the declared item-cursor gap. `CMSG_AUTOEQUIP_ITEM` was built and
+   * sent by code nothing could call. See `Widget#clickButtons`.
+   *
+   * An equippable item goes out as `CMSG_AUTOEQUIP_ITEM` (**0x10A**), whose body is two bytes -- the
+   * wire bag index and the wire slot -- and which the server resolves entirely on its own.
    *
    * The two wire numbers are NOT the Lua ones. The backpack and the equipped slots use bag index 255
    * with a slot numbered from 23; a real bag uses its own inventory slot (19..22) with a slot numbered
@@ -510,11 +611,9 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     if (item === null || item.template === null) {
       return [];
     }
-    if (item.template.inventoryType === 0) {
-      warnOnce('UseContainerItem(consumable)', 'CMSG_USE_ITEM carries a SpellCastTargets block this '
-        + 'client does not build; only equippable items are usable from a bag');
-      return [];
-    }
+    // THE WIRE PAIR IS COMPUTED BEFORE THE ARMS SPLIT, because both of them need it. `CMSG_USE_ITEM`
+    // takes the same bag/slot pair `CMSG_AUTOEQUIP_ITEM` does -- passing the LUA numbers to one and the
+    // wire numbers to the other would have used the wrong slot for every consumable in the backpack.
     let wireBag: number;
     let wireSlot: number;
     if (bagId === BACKPACK_CONTAINER) {
@@ -524,6 +623,12 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       wireBag = INV_SLOT_BAG_FIRST + (bagId - 1);
       wireSlot = slot - 1;
     } else {
+      return [];
+    }
+    if (item.template.inventoryType === 0) {
+      // The USE arm: a consumable, a quest item, anything not equippable. `CMSG_USE_ITEM` and the
+      // `SpellCastTargets` block it ends with are both built in `sendUseItem` above.
+      sendUseItem(wireBag, wireSlot, item.guid, item.template);
       return [];
     }
     const gp = new GamePacket(
@@ -729,14 +834,8 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
   };
 }
 
-const warned = new Set<string>();
-
-function warnOnce(what: string, reason: string): void {
-  if (warned.has(what)) {
-    return;
-  }
-  warned.add(what);
-  console.warn(`container-bridge: ${what} not implemented -- ${reason}`);
-}
+// `warnOnce` LIVED HERE and is gone with its one caller: it existed only for the consumable arm's
+// "CMSG_USE_ITEM carries a SpellCastTargets block this client does not build", and that block is built
+// now (`sendUseItem`). A warning helper with no caller is a gap that no longer exists.
 
 export default attachContainerBridge;

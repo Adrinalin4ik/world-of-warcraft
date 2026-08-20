@@ -196,6 +196,14 @@ let nextLinkStamp = 0;
  */
 let treeStructure = 0;
 
+/**
+ * A mouse button, as FrameXML names it -- the string an `OnClick` handler's `button` argument receives.
+ *
+ * The five the engine knows. `input.ts` maps a DOM `PointerEvent#button` onto these; anything past
+ * `Button5` has no FrameXML name and is not delivered.
+ */
+export type MouseButtonName = 'LeftButton' | 'RightButton' | 'MiddleButton' | 'Button4' | 'Button5';
+
 export class Widget {
   readonly id: string;
   readonly kind: WidgetKind;
@@ -361,7 +369,30 @@ export class Widget {
    * carrying both meanings that made clicking back into the account box to fix a typo submit the typo.
    * A widget where Enter means something a click does not uses `onSubmit`.
    */
-  onClick: (() => void) | null = null;
+  onClick: ((button: MouseButtonName) => void) | null = null;
+
+  /**
+   * WHICH MOUSE BUTTONS FIRE `onClick`, from `RegisterForClicks`. `null` means the frame never called it.
+   *
+   * **This existed as a declared gap and the gap was the reason nothing could be equipped.** Every click
+   * used to be reported as `"LeftButton"` whatever button was pressed (`scripts.ts:374`, now fixed), so a
+   * RIGHT-click on a bag slot ran `ContainerFrameItemButton_OnClick`'s LEFT branch --
+   * `PickupContainerItem`, the item-cursor gap -- instead of its right branch, `UseContainerItem`. The
+   * equip path was written and correct and simply never reached. `ContainerFrameItemButton_OnLoad`
+   * (`containerframe.lua:614`) registers `"LeftButtonUp", "RightButtonUp"`, which is what this stores.
+   *
+   * `null` means LEFT ONLY, which is the engine's default for a Button and not a convenience: 37 of the
+   * manifest's registrations exist precisely to ADD the right button, and a frame that never asked for
+   * it does not get it.
+   *
+   * **THE Up/Down PHASE IS NOT HONOURED, and that is a stated limitation.** The registration strings
+   * are `LeftButtonUp` / `RightButtonDown` / `AnyUp` and the engine fires on the phase named; this
+   * router fires `onClick` on the RELEASE only, so only the BUTTON half of each entry is kept. A frame
+   * that registers only `...Down` therefore still clicks on release rather than not at all -- which is
+   * where this differs from the engine, and it is the safe direction: the alternative would silence two
+   * of the manifest's registrations entirely.
+   */
+  clickButtons: Set<MouseButtonName> | null = null;
   /**
    * Invoked by Enter, in preference to `onClick`. FrameXML's `OnEnterPressed` -- the login screen's
    * edit boxes submit the form on Enter, and a pointer click on them must not.
@@ -374,7 +405,7 @@ export class Widget {
    * engine does, and what `RealmListRealmButtonTemplate` relies on: its `OnClick` selects a realm
    * and its `OnDoubleClick` joins the one just selected (realmlist.xml:234-239).
    */
-  onDoubleClick: (() => void) | null = null;
+  onDoubleClick: ((button: MouseButtonName) => void) | null = null;
 
   /**
    * The rest of the FrameXML script surface the input router can actually observe.
@@ -393,8 +424,9 @@ export class Widget {
    */
   onEnter: (() => void) | null = null;
   onLeave: (() => void) | null = null;
-  onMouseDown: (() => void) | null = null;
-  onMouseUp: (() => void) | null = null;
+  onMouseDown: ((button: MouseButtonName) => void) | null = null;
+
+  onMouseUp: ((button: MouseButtonName) => void) | null = null;
   /**
    * FrameXML's `OnTabPressed`, and it REPLACES the router's own Tab ring for the widget that has one:
    * `accountlogin.xml`'s account box moves focus to the password box itself, and a document that

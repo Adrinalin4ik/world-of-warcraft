@@ -357,6 +357,18 @@ export function invokeScriptHandler(
 type CallbackBinder = (widget: Widget, fire: ((args?: unknown[]) => void) | null) => void;
 
 /** The mouse button the engine reports for a left click, which is the only one this router routes. */
+/**
+ * The button an `OnClick`/`OnMouseDown`/`OnMouseUp`/`OnDoubleClick` handler receives is now the REAL one
+ * -- `Widget#onClick` takes it from `ui/input.ts` and these binders pass it straight on.
+ *
+ * It used to be this constant, unconditionally, and that is what stopped anything being equipped: a
+ * right-click on a bag slot ran `ContainerFrameItemButton_OnClick`'s LEFT branch. See
+ * `Widget#clickButtons`.
+ *
+ * `OnDragStart` keeps a constant, and deliberately: `ui/input.ts#maybeBeginDrag` has no button of its
+ * own to report and `RegisterForDrag` is stored as a boolean for the reason `Widget#dragRegistered`
+ * gives.
+ */
 const LEFT_BUTTON = 'LeftButton';
 
 /**
@@ -371,12 +383,12 @@ const LEFT_BUTTON = 'LeftButton';
 const CLICK_SEQUENCE = ['PreClick', 'OnClick', 'PostClick'] as const;
 
 const CALLBACK_BINDERS = new Map<string, CallbackBinder>([
-  ['OnClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['PreClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['PostClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['OnDoubleClick', (w, f) => { w.onDoubleClick = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['OnMouseDown', (w, f) => { w.onMouseDown = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['OnMouseUp', (w, f) => { w.onMouseUp = f === null ? null : () => f([LEFT_BUTTON]); }],
+  ['OnClick', (w, f) => { w.onClick = f === null ? null : (button) => f([button]); }],
+  ['PreClick', (w, f) => { w.onClick = f === null ? null : (button) => f([button]); }],
+  ['PostClick', (w, f) => { w.onClick = f === null ? null : (button) => f([button]); }],
+  ['OnDoubleClick', (w, f) => { w.onDoubleClick = f === null ? null : (button) => f([button]); }],
+  ['OnMouseDown', (w, f) => { w.onMouseDown = f === null ? null : (button) => f([button]); }],
+  ['OnMouseUp', (w, f) => { w.onMouseUp = f === null ? null : (button) => f([button]); }],
   ['OnEnter', (w, f) => { w.onEnter = f === null ? null : () => f(); }],
   ['OnLeave', (w, f) => { w.onLeave = f === null ? null : () => f(); }],
   ['OnEnterPressed', (w, f) => { w.onSubmit = f === null ? null : () => f(); }],

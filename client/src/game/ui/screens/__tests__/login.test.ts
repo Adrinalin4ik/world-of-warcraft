@@ -79,7 +79,7 @@ describe('LoginScreen', () => {
     find(root, 'login-account').text = 'tester';
     find(root, 'login-password').text = 'secret';
 
-    find(root, 'login-login').onClick!();
+    find(root, 'login-login').onClick!('LeftButton');
 
     // The endpoint is the next test's business; this one is only about the credentials.
     expect(protocol.login).toHaveBeenCalledWith('tester', 'secret', expect.any(Object));
@@ -97,7 +97,7 @@ describe('LoginScreen', () => {
     find(root, 'login-password').text = 'secret';
     find(root, 'login-server').text = 'logon.example.com:8085';
 
-    find(root, 'login-login').onClick!();
+    find(root, 'login-login').onClick!('LeftButton');
 
     expect(protocol.login).toHaveBeenCalledWith('tester', 'secret', {
       host: 'logon.example.com',
@@ -114,7 +114,7 @@ describe('LoginScreen', () => {
     find(first.root, 'login-account').text = 'tester';
     find(first.root, 'login-password').text = 'secret';
     find(first.root, 'login-save-name').checked = true;
-    find(first.root, 'login-login').onClick!();
+    find(first.root, 'login-login').onClick!('LeftButton');
     screen.unmount();
 
     expect(loadSettings().savedAccount).toBe('tester');
@@ -134,7 +134,7 @@ describe('LoginScreen', () => {
     find(third.root, 'login-account').text = 'someone-else';
     find(third.root, 'login-password').text = 'secret';
     find(third.root, 'login-save-name').checked = false;
-    find(third.root, 'login-login').onClick!();
+    find(third.root, 'login-login').onClick!('LeftButton');
 
     expect(loadSettings().savedAccount).toBeUndefined();
   });
