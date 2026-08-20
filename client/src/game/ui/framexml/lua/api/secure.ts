@@ -14,11 +14,33 @@
  * through `securecall`, `UIDropDownMenu.lua:64`) silently not initialise, which is a behaviour change,
  * not an honest gap.
  *
- * WHAT IS ABSENT, said plainly: `InCombatLockdown`, `IsProtected`, `SetAttribute`/`GetAttribute` and
- * the whole `SecureActionButtonTemplate`/`RestrictedFrames` stack are NOT here. benilla does not have
- * them either and does not stub them (`crates/benilla-ui`, grepped: zero hits) -- it targets 1.12,
- * where the system does not exist. They are the largest single remaining block of FrameXML load
- * errors in this client's survey (78 `SetAttribute`), and closing them is its own piece of work.
+ * WHAT IS ABSENT, said plainly -- **and this paragraph was STALE for several rounds, which by this
+ * project's rules is a defect and not untidiness.** It claimed `SetAttribute`/`GetAttribute` and
+ * `InCombatLockdown` were missing long after they landed, so an agent reading it would believe a whole
+ * subsystem was gone and either rebuild it or route around it. Corrected, and re-checked by grep:
+ *
+ *  - `SetAttribute`/`GetAttribute` are **REAL** (`methods/frame.ts:290,352`), including the
+ *    three-argument `GetAttribute(prefix, name, suffix)` that `SecureButton_GetModifiedAttribute`
+ *    needs -- which is what makes an action button's click resolve at all.
+ *  - `InCombatLockdown` is **REAL** (`ui/group-bridge.ts:673`), answering false: nothing in this client
+ *    is combat-locked because nothing here is protected.
+ *  - `IsProtected` is still absent.
+ *  - The `RestrictedFrames`/`RestrictedExecution`/`SecureHandlers` stack is still absent, and the
+ *    reason is now MEASURED rather than assumed: those three files raise on `newproxy`, a Lua 5.1
+ *    function fengari's 5.3 does not have (`RestrictedFrames.lua:67`, `RestrictedExecution.lua:230`,
+ *    then `rtable` nil at `SecureHandlers.lua:32` because the module above never finished).
+ *    **Do not shim `newproxy` with a table**: `restrictedframes.lua` tests `type(x) == "userdata"` in
+ *    ten places (`:197,211,238,460,489,515,535,...`), so a table would make `IsFrameHandle` reject
+ *    every handle it had just minted -- loading clean and being comprehensively wrong. A real fix needs
+ *    fengari's `lua_newuserdata` through the VM layer and is its own task.
+ *
+ * benilla has none of this and does not stub it (`crates/benilla-ui`, grepped: zero hits) -- it targets
+ * 1.12, where the system does not exist.
+ *
+ * **NO OUTSTANDING COUNT IS QUOTED HERE, deliberately.** This paragraph used to carry "78
+ * `SetAttribute`", and a figure like that goes stale silently: `RegisterForClicks`' gap note claimed 2
+ * callers when there were 73, and a texture-format census was quoted before it was verified. Audit the
+ * load report before relying on any number for this area.
  *
  * `securecall` accepting a STRING as its first argument is not a convenience: the client's own
  * `UIDropDownMenu.lua` and `ChatFrame.lua` both call it as `securecall("UIDropDownMenu_Initialize",
