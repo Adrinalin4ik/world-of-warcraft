@@ -65,6 +65,7 @@ import type { UnitFieldUpdate } from "../../network/game/object/update-object/un
 import {
   CharacterStats, emptyCharacterStats,
 } from "../../network/game/object/update-object/character-stats";
+import type { SkillSlot } from "../../network/game/object/update-object/player-skills";
 
 enum SlopeType {
   sliding,
@@ -455,6 +456,15 @@ class Unit extends Entity {
    * character's resistances genuinely are.
    */
   public characterStats: CharacterStats = emptyCharacterStats();
+
+  /**
+   * THE SKILLS TAB'S ROWS -- `PLAYER_SKILL_INFO_1_1`, keyed by descriptor SLOT (0..127).
+   *
+   * Beside `characterStats` and for the same reason. Keyed by slot rather than by skill id because a
+   * slot is REASSIGNED when a profession is unlearned; see
+   * `update-object/player-skills.ts#mergePlayerSkills`.
+   */
+  public skills: Map<number, SkillSlot> = new Map<number, SkillSlot>();
 
   /** Whether the death one-shot is armed. Written only by `setDead`, which is edge-triggered. */
   public dead: boolean = false;

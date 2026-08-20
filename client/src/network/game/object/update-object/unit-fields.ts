@@ -39,6 +39,7 @@
 import type Unit from '../../../../game/classes/unit';
 import { ObjectType, PlayerField, UnitField } from '../enums';
 import { mergeCharacterStats } from './character-stats';
+import { mergePlayerSkills } from './player-skills';
 
 /** What one values block said about a unit. Every field optional -- see the header. */
 export interface UnitFieldUpdate {
@@ -178,6 +179,8 @@ export interface UnitFieldUpdate {
    * block beside it. Named by `Spell.dbc` 48165's own legend as `$bh` -- "healing: ${$bh}".
    */
   healingDone?: number;
+  /** `player_character_points1` -- talent points. See the read in `readUnitFields`. */
+  talentPoints?: number;
 }
 
 /**
@@ -328,6 +331,10 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
   out.rangedAttackPowerMultiplier = f32('unit_field_ranged_attack_power_multiplier');
   out.baseAttackTimeMs = u32('unit_field_baseattacktime');
   out.healingDone = i32('player_field_mod_healing_done_pos');
+  // TALENT POINTS -- `player_character_points1` (`enums.ts:441`), which is what
+  // `UnitCharacterPoints("player")` answers and `SkillFrame_UpdateSkills` destructures
+  // (`skillframe.lua:436`). A scalar, so it belongs in `fields` rather than beside them.
+  out.talentPoints = u32('player_character_points1');
 
   return out;
 }
@@ -463,12 +470,16 @@ export function applyUnitFields(
   set('rangedAttackPowerMultiplier', fields.rangedAttackPowerMultiplier);
   set('baseAttackTimeMs', fields.baseAttackTimeMs);
   set('healingDone', fields.healingDone);
+  set('talentPoints', fields.talentPoints);
 
   // THE CHARACTER SHEET'S STAT BLOCK -- stats, resistances, the damage range, the percentages, the 25
   // combat ratings. Merged rather than replaced, because an update mask is sparse and one point of
   // agility moves one word; see `character-stats.ts` on why that differs from `readSpellDamage` below.
   // `values` is the same map this function was handed and otherwise discards.
   mergeCharacterStats(unit.characterStats, values, type);
+  // THE SKILLS BLOCK -- 128 triples, merged per slot for the same sparse-mask reason. Player-scope, so
+  // `mergePlayerSkills` returns immediately for a creature. See `player-skills.ts`.
+  mergePlayerSkills(unit.skills, values, type);
 
   // SPELL POWER is seven numbers and lives beside `fields`, not in it -- see `SPELL_SCHOOL_COUNT`.
   const spellDamage = readSpellDamage(values);

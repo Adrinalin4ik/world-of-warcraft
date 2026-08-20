@@ -45,6 +45,7 @@ import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachContainerBridge } from './container-bridge';
 import { attachPaperDollStats } from './paperdoll-stats';
+import { attachSkillsBridge } from './skills-bridge';
 import { attachLootBridge } from './loot-bridge';
 import { publishRects, clearRects } from './rects';
 import { ModelBooth } from './scene/model-booth';
@@ -230,6 +231,9 @@ export class WorldUiHost {
 
   /** `attachPaperDollStats`' teardown, held so `dispose` can run it. */
   private detachStats: (() => void) | null = null;
+
+  /** `attachSkillsBridge`'s teardown, held so `dispose` can run it. */
+  private detachSkills: (() => void) | null = null;
 
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
@@ -548,6 +552,10 @@ export class WorldUiHost {
         // AFTER them for no reason but readability -- it subscribes to `world.on('unit:fields')` and
         // shares nothing with the item bridges.
         this.detachStats = attachPaperDollStats(runtime.vm, this.world);
+        // THE SKILLS TAB. Gated on a real session for the same reason: every row comes off our own
+        // character's descriptor, and an offline world has none. Its DBC join is `skillData`, which the
+        // spellbook already asks for, so this adds no fetch.
+        this.detachSkills = attachSkillsBridge(runtime.vm, this.world);
       }
     }
     // THE RUNTIME ART SINK, before the load report and before anything can script a texture. See
@@ -1157,6 +1165,8 @@ export class WorldUiHost {
     this.detachContainers = null;
     this.detachStats?.();
     this.detachStats = null;
+    this.detachSkills?.();
+    this.detachSkills = null;
     // The rect publication is module-level, so it OUTLIVES this host unless it is cleared -- exactly
     // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
     // stale draw list would have a remounted world's scripts reading the previous world's layout.

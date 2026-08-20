@@ -851,14 +851,14 @@ export function installUnitsApi(vm: LuaVM): void {
     ['CollapseFactionHeader', 'as GetNumFactions -- there is no header to collapse', []],
     ['ExpandFactionHeader', 'as GetNumFactions', []],
     ['SetWatchedFactionIndex', 'as GetNumFactions', []],
-    ['GetNumSkillLines', 'PLAYER_SKILL_INFO_1_1 is not decoded and SkillLine.dbc is not joined; 0 is '
-      + 'what makes SkillFrame_UpdateSkills hide its own rows instead of raising', [0]],
-    ['GetSkillLineInfo', 'as GetNumSkillLines -- with 0 skill lines this is unreachable', []],
-    ['GetSelectedSkill', 'as GetNumSkillLines', [0]],
-    ['SetSelectedSkill', 'as GetNumSkillLines', []],
-    ['CollapseSkillHeader', 'as GetNumSkillLines', []],
-    ['ExpandSkillHeader', 'as GetNumSkillLines', []],
-    ['AbandonSkill', 'as GetNumSkillLines', []],
+    // THE SKILLS TAB'S OWN GLOBALS ARE GONE FROM THIS LIST -- `GetNumSkillLines`, `GetSkillLineInfo`,
+    // `GetSelectedSkill`, `SetSelectedSkill`, `CollapseSkillHeader`, `ExpandSkillHeader`,
+    // `UnitCharacterPoints` and `GetAdjustedSkillPoints` are real (or, for the last, declared) in
+    // `ui/skills-bridge.ts` now. They are deliberately NOT left declared here as well: a stub the
+    // bridge overrides would still put its name in the load report, and a report that names a gap that
+    // has closed is treated as a defect on this project.
+    ['AbandonSkill', 'unlearning a profession needs CMSG_UNLEARN_SKILL, which is not sent -- and '
+      + 'GetSkillLineInfo answers isAbandonable 0 for every row, so nothing offers it', []],
     ['HasPetUI', 'no pet unit is tracked and SMSG_PET_SPELLS has no subscriber', [false, false]],
     ['GetNumCompanions', 'SMSG_PET_SPELLS / the companion list are not decoded', [0]],
     ['GetCompanionInfo', 'as GetNumCompanions', []],
@@ -867,14 +867,8 @@ export function installUnitsApi(vm: LuaVM): void {
     ['UnitCreatureFamily', 'CreatureFamily.dbc is not joined and no pet unit is tracked', [null]],
     ['UnitHasRelicSlot', 'no class relic rule is decoded, so the ranged slot cannot be known to be a '
       + 'relic slot; the only effect is which empty-slot art the ranged button shows', [false]],
-    // The rest of what those three panels reach, each found the same way -- by pcall-ing the client's
-    // own update routine and reading the next call it died on. `GetAdjustedSkillPoints` is the sharp
-    // one: it is `SkillFrame_UpdateSkills`' SECOND line (`skillframe.lua:404`), so with 0 skill lines
-    // and this absent the function still raised BEFORE its "hide unused bars" loop (`:431-434`) -- which
-    // is what left `SkillTypeLabel1` shown over a blank row. A 0 count is only half the fix.
-    ['GetAdjustedSkillPoints', 'no skill points are decoded (PLAYER_SKILL_INFO_1_1 is unread)', [0]],
-    ['UnitCharacterPoints', 'no talent or skill point pool is decoded; the pair is returned together '
-      + 'because SkillFrame_UpdateSkills destructures both (skillframe.lua:436)', [0, 0]],
+    // The rest of what those panels reach, each found the same way -- by pcall-ing the client's own
+    // update routine and reading the next call it died on.
     ['GetSelectedFaction', 'as GetNumFactions', [0]],
     ['SetSelectedFaction', 'as GetNumFactions', []],
     ['IsFactionInactive', 'as GetNumFactions', [false]],
