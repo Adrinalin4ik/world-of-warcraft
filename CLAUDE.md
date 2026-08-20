@@ -67,6 +67,30 @@ blinded. A number that confirms your hypothesis deserves more scepticism than on
 State a noise floor before claiming an improvement. Run-to-run spread has repeatedly covered an
 entire claimed change.
 
+## Performance is a standing requirement, not a phase
+
+The owner has asked for this explicitly and more than once: **always think about performance.** Every
+feature carries a cost question, and it is answered with a number or it is not answered.
+
+What this project has already paid for, and what it bought:
+
+- The interface renders to an **offscreen target redrawn only when a draw-list fingerprint changes** —
+  worth 4-7.5 ms on ~92% of frames. Anything that dirties that every frame hands the whole saving
+  back. The cooldown sweeps, the selection ring and the nameplates each measured a fingerprint cost of
+  **zero** by drawing outside the widget list; that is the pattern to copy.
+- `scene.matrixWorldAutoUpdate = false` took the render section from 8.1 ms to 1.9 ms by not walking
+  31k static nodes every frame.
+- The interface froze for **10.1 s** because fengari's `luaL_ref`/`luaL_unref` are O(live handles) over
+  a JS `Map`. Handles now index our own table, freed with a sentinel so no key is deleted.
+- Startup built **457 collision BVHs over 793,919 triangles and read them 0 times** — 1.5 s of pure
+  waste, found by an instrument that counted reads as well as builds.
+- A persistent asset cache took a warm load from ~2550 requests / ~90 MB to **6 requests / 0.00 MB**.
+
+So: state the cost of what you add, measure the arm without it, and give the noise floor first. A
+feature that is correct and 5 ms slower per frame is not finished. Prefer moving work off the critical
+path or into the existing worker pool over doing less of it — the UI is the client's own Lua and every
+frame must still be built.
+
 ## Tests
 
 **Happy path only, and few.** Two per task at most, one where one will do. Cover the path that
