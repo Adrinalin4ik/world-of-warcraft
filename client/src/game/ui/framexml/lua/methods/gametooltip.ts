@@ -62,7 +62,7 @@ import { ensureFont, notImplemented, warnOnce, widgetOf } from './region';
 import { getAction } from '../api/actions';
 import { getSpellbook } from '../api/spells';
 import { layoutScale, measureText } from '../../../text';
-import { getItemTooltipSource, ItemTooltipInfo } from '../api/items';
+import { getItemTooltipSource, ItemTooltipInfo, ItemTooltipSource } from '../api/items';
 
 /**
  * The eight `$parentTextLeft<n>` slots `GameTooltipTemplate` authors -- and no longer the ceiling.
@@ -883,6 +883,21 @@ const ITEM_SETTERS: MethodTable = {
   SetBuybackItem: (ctx, self, args) => fillFromSource(ctx, self, 'buyback', Number(args[0])),
 
   /**
+   * `SetTrainerService(index)` -- a CLASS TRAINER's row.
+   *
+   * **It is not in the census below and could not have been**: that count was taken over the served
+   * `FrameXML`, and this call site is in an ADDON -- `ClassTrainerSkillIcon`'s `<OnEnter>` in
+   * `Interface\AddOns\Blizzard_TrainerUI\Blizzard_TrainerUI.xml:440-444`. So the census is sound for
+   * what it measured and this is a reminder that the manifest is not the whole interface; the same
+   * lesson `ui/framexml/addons.ts` records for `TokenFrame`.
+   *
+   * Unlike the bag and vendor setters this call site DOES call `Show()` itself, so filling is the whole
+   * job -- `fillFromSource` showing it as well is harmless and keeps the family uniform.
+   * `ui/trainer-bridge.ts` answers the `'trainer'` kind.
+   */
+  SetTrainerService: (ctx, self, args) => fillFromSource(ctx, self, 'trainer', Number(args[0])),
+
+  /**
    * `GetItem()` -> `itemName, itemLink`. **A LIVE DEFECT, found on a Northshire weapon vendor.**
    *
    * `MerchantItemButton_OnEnter` calls `GameTooltip_ShowCompareItem(GameTooltip)` right after the
@@ -1022,7 +1037,9 @@ for (const [name, reason] of TOOLTIP_SETTER_GAPS) {
 function fillFromSource(
   ctx: MethodContext,
   self: number,
-  kind: 'bag' | 'loot' | 'link' | 'inventory' | 'merchant' | 'buyback',
+  // The kind union lives in ONE place -- `api/items.ts`, where the source type is declared -- so adding
+  // a kind cannot leave these two spellings of it disagreeing.
+  kind: Parameters<ItemTooltipSource>[0],
   a: number | string,
   b?: number,
 ): unknown[] {

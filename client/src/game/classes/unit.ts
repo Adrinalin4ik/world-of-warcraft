@@ -66,6 +66,7 @@ import {
   CharacterStats, emptyCharacterStats,
 } from "../../network/game/object/update-object/character-stats";
 import type { SkillSlot } from "../../network/game/object/update-object/player-skills";
+import type { QuestLogSlot } from "../../network/game/object/update-object/quest-log";
 
 enum SlopeType {
   sliding,
@@ -465,6 +466,16 @@ class Unit extends Entity {
    * `update-object/player-skills.ts#mergePlayerSkills`.
    */
   public skills: Map<number, SkillSlot> = new Map<number, SkillSlot>();
+
+  /**
+   * THE QUEST LOG'S SLOTS -- `PLAYER_QUEST_LOG_1_1`, keyed by descriptor SLOT (0..24).
+   *
+   * Beside `skills` and for the same reason. Keyed by slot rather than by quest id because the slot is
+   * what `CMSG_QUESTLOG_REMOVE_QUEST` carries, and because a slot is REUSED the moment a quest is
+   * abandoned; see `update-object/quest-log.ts#mergeQuestLog`, which also records why this -- and not
+   * any packet -- is where the quest log's membership actually lives.
+   */
+  public questLog: Map<number, QuestLogSlot> = new Map<number, QuestLogSlot>();
 
   /** Whether the death one-shot is armed. Written only by `setDead`, which is edge-triggered. */
   public dead: boolean = false;

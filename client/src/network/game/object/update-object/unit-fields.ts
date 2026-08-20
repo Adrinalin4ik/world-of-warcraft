@@ -40,6 +40,7 @@ import type Unit from '../../../../game/classes/unit';
 import { ObjectType, PlayerField, UnitField } from '../enums';
 import { mergeCharacterStats } from './character-stats';
 import { mergePlayerSkills } from './player-skills';
+import { mergeQuestLog } from './quest-log';
 
 /** What one values block said about a unit. Every field optional -- see the header. */
 export interface UnitFieldUpdate {
@@ -480,6 +481,11 @@ export function applyUnitFields(
   // THE SKILLS BLOCK -- 128 triples, merged per slot for the same sparse-mask reason. Player-scope, so
   // `mergePlayerSkills` returns immediately for a creature. See `player-skills.ts`.
   mergePlayerSkills(unit.skills, values, type);
+  // THE QUEST LOG'S SLOTS -- 25 five-word slots, merged per slot for the same sparse-mask reason.
+  // Player-scope, so `mergeQuestLog` returns immediately for a creature. `quest-log.ts`' header is
+  // where the "packets versus descriptor" question is answered: this block is the log's membership and
+  // its objective counters, and the abandon confirmation is a slot going to zero here.
+  mergeQuestLog(unit.questLog, values, type);
 
   // SPELL POWER is seven numbers and lives beside `fields`, not in it -- see `SPELL_SCHOOL_COUNT`.
   const spellDamage = readSpellDamage(values);

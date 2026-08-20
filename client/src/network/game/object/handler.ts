@@ -7,10 +7,13 @@ import { LootHandler } from './loot';
 import { GossipHandler } from './gossip';
 import { MerchantHandler } from './merchant';
 import { ReputationHandler } from './reputation';
+import { QuestHandler } from './quest';
+import { LevelUpHandler } from './level-up';
 import { GroupHandler } from './group';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
 import { SpellHandler } from './spells';
+import { TrainerHandler } from './trainer';
 import { UpdateObjectHandler } from './update-object/handler';
 
 export class ObjectHandler extends EventEmitter {
@@ -92,7 +95,31 @@ export class ObjectHandler extends EventEmitter {
    */
   public merchantHandler: MerchantHandler;
 
+  /**
+   * THE CLASS TRAINER. PUBLIC for the same reason the others are: `ui/trainer-bridge.ts` reads the
+   * service list to answer `GetTrainerServiceInfo`, and this handler owns the only sends of
+   * `CMSG_TRAINER_LIST` and `CMSG_TRAINER_BUY_SPELL`.
+   *
+   * Like the merchant, the door in is the GOSSIP hello -- the server answers a trainer's hello with
+   * `SMSG_TRAINER_LIST` directly, or with a menu whose training option leads to it -- so nothing here
+   * has to be driven by the world's right click.
+   */
+  public trainerHandler: TrainerHandler;
+
   public reputationHandler: ReputationHandler;
+
+  /**
+   * QUESTS. PUBLIC for the same reason the others are: `ui/quest-bridge.ts` reads the open panel and
+   * the template cache to answer `GetTitleText`/`GetQuestLogTitle`, and this handler owns every send
+   * in the `CMSG_QUESTGIVER_*` family plus `CMSG_QUEST_QUERY` and `CMSG_QUESTLOG_REMOVE_QUEST`.
+   *
+   * The door in is the gossip menu's quest rows and `SMSG_QUESTGIVER_QUEST_LIST`; see `quest.ts`'
+   * header for where the log's own state lives, which is NOT here.
+   */
+  public questHandler: QuestHandler;
+
+  /** LEVELLING UP -- `SMSG_LEVELUP_INFO`, which had no subscriber at all. See `level-up.ts`. */
+  public levelUpHandler: LevelUpHandler;
 
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
@@ -111,9 +138,16 @@ export class ObjectHandler extends EventEmitter {
     this.groupHandler = new GroupHandler(this.game);
     this.gossipHandler = new GossipHandler(this.game);
     this.merchantHandler = new MerchantHandler(this.game);
+    this.trainerHandler = new TrainerHandler(this.game);
     // REPUTATION. `SMSG_INITIALIZE_FACTIONS` (0x122) had no subscriber at all until this line, which
     // is what `api/units.ts` recorded as the reason the whole reputation tab was a declared gap.
     this.reputationHandler = new ReputationHandler(this.game);
+    // QUESTS. The whole `SMSG_QUESTGIVER_*` family had no subscriber until this line, which is what
+    // `gossip-bridge.ts:231` recorded as the reason `SelectGossipAvailableQuest` was a declared gap.
+    this.questHandler = new QuestHandler(this.game);
+    // LEVELLING UP. `SMSG_LEVELUP_INFO` (0x1D4) likewise had no subscriber, so `PLAYER_LEVEL_UP` was
+    // never fired and the client's own congratulation lines never printed.
+    this.levelUpHandler = new LevelUpHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

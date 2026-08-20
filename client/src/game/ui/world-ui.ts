@@ -51,6 +51,7 @@ import { attachLootBridge } from './loot-bridge';
 import { attachGossipBridge } from './gossip-bridge';
 import { attachInteractionWatch } from './interaction-watch';
 import { attachMerchantBridge } from './merchant-bridge';
+import { attachTrainerBridge } from './trainer-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { publishRects, clearRects } from './rects';
 import { ModelBooth } from './scene/model-booth';
@@ -251,6 +252,9 @@ export class WorldUiHost {
 
   /** `attachMerchantBridge`'s teardown, held so `dispose` can run it. */
   private detachMerchant: (() => void) | null = null;
+
+  /** `attachTrainerBridge`'s teardown, held so `dispose` can run it. */
+  private detachTrainer: (() => void) | null = null;
 
   /**
    * THE OPEN-INTERACTION WATCH -- what closes the vendor and the corpse when the player walks off.
@@ -585,6 +589,15 @@ export class WorldUiHost {
         // know the kind.
         this.detachGossip = attachGossipBridge(runtime.vm, this.world, this.art);
         this.detachMerchant = attachMerchantBridge(runtime.vm, this.world, this.art);
+        // THE CLASS TRAINER. **LAST of the tooltip-source chain, and for the reason stated just above
+        // for the merchant**: it adds the `trainer` kind on top of `bag`/`inventory`/`link`/`loot`/
+        // `merchant`/`buyback`, so attaching it earlier would put it under the merchant bridge's
+        // install and every trainer tooltip would fall through to a source that does not know the kind.
+        //
+        // Gated on a real session like its neighbours: a trainer's service list is a packet
+        // (`SMSG_TRAINER_LIST`), so an offline world has none and `world.game.objectHandler` must not
+        // be touched on that route.
+        this.detachTrainer = attachTrainerBridge(runtime.vm, this.world, this.art);
         // WALK AWAY AND THE WINDOW SHUTS -- the vendor's and the corpse's, one mechanism. Attached
         // after both bridges because it drives their handlers, and gated on a real session like they
         // are: an offline world has neither a vendor nor a corpse to walk away from.
@@ -1224,6 +1237,12 @@ export class WorldUiHost {
     // the attach order is what makes the chain's restore land on something live.
     this.detachLoot?.();
     this.detachLoot = null;
+    // THE TRAINER'S FIRST, and the order is load-bearing rather than tidy. The tooltip-source chain has
+    // to unwind in the REVERSE of the order it was built: this teardown restores the merchant's source,
+    // and the merchant's restores the loot bridge's. Disposing the merchant first would leave the
+    // trainer's teardown reinstalling a source belonging to a bridge already gone.
+    this.detachTrainer?.();
+    this.detachTrainer = null;
     this.detachMerchant?.();
     this.detachMerchant = null;
     this.interactionWatch?.dispose();

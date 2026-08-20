@@ -81,7 +81,39 @@ export interface SpellWireRow {
      * that the unit test had to filter on `consumed > 0` to tell them apart -- a test working around
      * an instrument is the instrument's defect, not the test's.
      */
-    | 'TABLES_LOADED';
+    | 'TABLES_LOADED'
+    /**
+     * THE CLASS TRAINER's five, sharing this instrument rather than growing a second one.
+     *
+     * They belong here on the same argument the cooldown opcodes do: every one of them is a
+     * *spell*-shaped packet whose layout comes from a server implementation rather than from the game's
+     * own data (`network/game/object/trainer.ts`), so the reading that matters is the same one --
+     * `consumed` against `bodySize`. `TRAINER_LIST` is the only one exercised live; the three buy rows
+     * are the record that the untested path went out and what came back.
+     *
+     * `!THREW` suffixes appear on these kinds too, written by `TrainerHandler#subscribe`'s catch.
+     */
+    | 'TRAINER_LIST'
+    | 'TRAINER_BUY_SENT'
+    | 'TRAINER_BUY_SUCCEEDED'
+    | 'TRAINER_BUY_FAILED'
+    /**
+     * `SMSG_LEARNED_SPELL` (0x12B) and `SMSG_SUPERCEDED_SPELL` (0x12C) -- how a spell learned AFTER
+     * login reaches the book. Both had no subscriber at all until the trainer round; without them a
+     * bought ability was on the server and absent from our `known` set until the next relog.
+     */
+    | 'LEARNED_SPELL'
+    | 'SUPERCEDED_SPELL'
+    /** `SMSG_REMOVED_SPELL` (0x203) -- the same edge in reverse, for an unlearn. */
+    | 'REMOVED_SPELL'
+    /**
+     * A DECODE THAT THREW, suffixed onto the kind above it -- `'TRAINER_LIST!THREW'` and the like.
+     *
+     * A template-literal member and not a bare `string`: `| string` would collapse the whole union and
+     * silently un-type every kind above, which is the opposite of what this union is for. This keeps
+     * every member checkable while letting `TrainerHandler#subscribe`'s catch name the arm that failed.
+     */
+    | `${string}!THREW`;
   /** The spell this row is about, or 0 where the packet is not about one spell. */
   spellId: number;
   /** Caster guid where the packet names one. */

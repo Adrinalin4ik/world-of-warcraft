@@ -184,6 +184,121 @@ export class SpellHandler extends EventEmitter {
     this.game.on('packet:receive:SMSG_SPELL_FAILURE', this.handleSpellFailure.bind(this));
     this.game.on('packet:receive:SMSG_SPELL_DELAYED', this.handleSpellDelayed.bind(this));
     this.game.on('packet:receive:SMSG_UPDATE_COMBO_POINTS', this.handleComboPoints.bind(this));
+    // THE THREE INCREMENTAL SPELL EDGES, and all three had NO SUBSCRIBER AT ALL until the trainer
+    // round. `SMSG_INITIAL_SPELLS` is a login-burst snapshot, so without these a spell learned DURING
+    // a session -- from a trainer, from a quest reward, from a level-up -- was known to the server and
+    // absent from `this.known` until the next relog. See `handleLearnedSpell`.
+    this.game.on('packet:receive:SMSG_LEARNED_SPELL', this.handleLearnedSpell.bind(this));
+    this.game.on('packet:receive:SMSG_SUPERCEDED_SPELL', this.handleSupercededSpell.bind(this));
+    this.game.on('packet:receive:SMSG_REMOVED_SPELL', this.handleRemovedSpell.bind(this));
+  }
+
+  /**
+   * `SMSG_LEARNED_SPELL` (**0x12B**): `u32 spellId · u16 unk`, 6 bytes.
+   *
+   * The layout is TrinityCore 3.3.5's `Player::SendLearnPacket` shape and is labelled as a server-side
+   * source, exactly as `handleComboPoints` labels its own. The trailing `u16` is written as a literal 0
+   * and its meaning is unstated there, so it is read for the residual and discarded.
+   *
+   * **The residual is the whole check on all three of these arms**: 6 bytes for this one, 8 for
+   * superceded, 4 for removed. A wrong layout would show as a nonzero remainder in
+   * `window.spellWire.history()` rather than as a spell quietly missing from the book.
+   *
+   * `spellsChanged` is emitted only when the set actually CHANGED. The server can and does re-send a
+   * spell the client already has (a rank refresh, a talent reset replay), and `spellbook-bridge.ts#push`
+   * rebuilds and re-sorts the whole book off this event -- so an unconditional emit would pay that walk
+   * for nothing and dirty the interface fingerprint with it.
+   */
+  private handleLearnedSpell(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    const spellId = gp.readUnsignedInt() >>> 0;
+    if (gp.available >= 2) {
+      gp.readUnsignedShort(); // unk -- a literal 0 server-side; read so `consumed` is meaningful
+    }
+    const isNew = spellId !== 0 && !this.known.has(spellId);
+    if (isNew) {
+      this.known.add(spellId);
+    }
+    spellWire.record({
+      at: Date.now(),
+      kind: 'LEARNED_SPELL',
+      spellId,
+      caster: null,
+      detail: { known: this.known.size, isNew: isNew ? 1 : 0 },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    if (isNew) {
+      this.emit('spellsChanged');
+    }
+  }
+
+  /**
+   * `SMSG_SUPERCEDED_SPELL` (**0x12C**): `u32 newSpellId · u32 oldSpellId`, 8 bytes.
+   *
+   * A RANK UP -- what a trainer teaching Rank 2 of an ability sends instead of a plain learn. The old
+   * rank leaves the book as the new one enters, which is why this is one packet and not two: handling
+   * only the learn half would leave both ranks in the spellbook and two buttons that cast the same
+   * ability.
+   *
+   * Order is `new` then `old`, TrinityCore 3.3.5's `Player::SendSupercededSpell`. It is the one field
+   * order here that a residual CANNOT check -- both words are `u32` and either order consumes the body
+   * whole -- so it is called out rather than presented as measured. The consequence of having it
+   * backwards is visible immediately and harmlessly: the spellbook would show the OLD rank and lose the
+   * new one, which the owner would see on the first rank-up.
+   */
+  private handleSupercededSpell(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    const newSpellId = gp.readUnsignedInt() >>> 0;
+    const oldSpellId = gp.readUnsignedInt() >>> 0;
+    let changed = false;
+    if (oldSpellId !== 0 && this.known.delete(oldSpellId)) {
+      changed = true;
+    }
+    if (newSpellId !== 0 && !this.known.has(newSpellId)) {
+      this.known.add(newSpellId);
+      changed = true;
+    }
+    spellWire.record({
+      at: Date.now(),
+      kind: 'SUPERCEDED_SPELL',
+      spellId: newSpellId,
+      caster: null,
+      detail: { oldSpellId, known: this.known.size },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    if (changed) {
+      this.emit('spellsChanged');
+    }
+  }
+
+  /**
+   * `SMSG_REMOVED_SPELL` (**0x203**): `u32 spellId`, 4 bytes.
+   *
+   * The unlearn edge -- a talent reset, or a profession abandoned. Wired with its two siblings because
+   * leaving it out would let the book keep a spell the server has taken away, which is the same class
+   * of staleness the other two fix.
+   */
+  private handleRemovedSpell(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    const spellId = gp.readUnsignedInt() >>> 0;
+    const changed = spellId !== 0 && this.known.delete(spellId);
+    spellWire.record({
+      at: Date.now(),
+      kind: 'REMOVED_SPELL',
+      spellId,
+      caster: null,
+      detail: { known: this.known.size },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    if (changed) {
+      this.emit('spellsChanged');
+    }
   }
 
   /**
