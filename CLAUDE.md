@@ -121,6 +121,15 @@ matters; add a test when something breaks and stays broken. Do not enumerate edg
   cursors (a Playwright screenshot contains no OS pointer), a colour, a layout, anything where the
   instrument is the doubtful part — hand it over and ask. That is faster and more honest than a
   claim propped up by a weak gate.
+- **Visual verification is the OWNER'S, not yours. Do not attempt it.** He has said so three times, the
+  last one flatly: "все визуальное я проверю сам, просто пиши мне список того что нужно проверить."
+  So do not stage a login to look at a frame, do not screenshot a colour, do not build a rig to
+  photograph a menu. **End your round with a numbered list of what he should do and what he should
+  see** — the route, the gesture, the expected result — and spend the round on the work instead. He has
+  checked every round this way and it has been faster and more accurate than any gate built here.
+  The test window is for **measurement**, not for looking: a timing, a residual, a dirty-frame ratio,
+  a packet count, a wire shape. Those are still owed, because they are the half he cannot check by
+  looking.
 - **Two attempts, then ask — and prefer asking sooner.** If a visual check has not worked twice, stop
   and hand it to the owner instead of building a third instrument. He has said so plainly, twice: "Я
   всегда готов помочь, чтобы сэкономить время" and "Don't spend too much on validation. I can check it
