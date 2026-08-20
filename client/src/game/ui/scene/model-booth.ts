@@ -217,9 +217,15 @@ class Pane {
 
   private target: THREE.WebGLRenderTarget | null = null;
 
+  /** The CLAMPED target size, in device pixels. */
   private width = 0;
 
   private height = 0;
+
+  /** The size last ASKED for, rounded -- what `request` compares against. See its comment. */
+  private requestedWidth = 0;
+
+  private requestedHeight = 0;
 
   private model: any = null;
 
@@ -304,7 +310,14 @@ class Pane {
       this.rotation = rotation;
       this.dirty = true;
     }
-    if (widthPx !== this.width || heightPx !== this.height) {
+    // ROUNDED BEFORE COMPARING, caught in this round's own diff review. `widthPx` is a float (a 233-unit
+    // pane at scale 1.186 is 276.38 device pixels) and `this.width` holds the ROUNDED, clamped target
+    // size, so comparing them directly never settled and `resize` was called on every frame for ever.
+    // Harmless -- `resize` bails on the same comparison a second time -- but a per-frame call that can
+    // never succeed is exactly the shape a later reader would take for a bug.
+    if (Math.round(widthPx) !== this.requestedWidth || Math.round(heightPx) !== this.requestedHeight) {
+      this.requestedWidth = Math.round(widthPx);
+      this.requestedHeight = Math.round(heightPx);
       this.resize(widthPx, heightPx);
     }
     const key = subject === null ? null : subject.key;
@@ -340,6 +353,13 @@ class Pane {
 
     const previous = renderer.getRenderTarget();
     const savedAutoClear = renderer.autoClear;
+    // SAVED AND RESTORED, caught in this round's own diff review. The bake runs BEFORE the interface's
+    // own pass, which sets its own clear colour and restores the world's afterwards -- so today a bake
+    // is always followed by that restore and the leak is invisible. It stops being invisible the moment
+    // the interface target does not exist (`world-ui.ts#target` can answer null) or the order changes,
+    // and "the world clears to transparent" is a whole-screen defect for a saved line.
+    const savedClearColor = renderer.getClearColor(new THREE.Color());
+    const savedClearAlpha = renderer.getClearAlpha();
     renderer.setRenderTarget(target);
     // TRANSPARENT, so the panel art behind the pane shows around the figure -- which is what the real
     // client's model pane does. The clear is explicit because `GlueRenderer` runs with
@@ -357,6 +377,7 @@ class Pane {
 
     renderer.autoClear = savedAutoClear;
     renderer.setRenderTarget(previous);
+    renderer.setClearColor(savedClearColor, savedClearAlpha);
     return true;
   }
 
