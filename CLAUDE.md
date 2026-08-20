@@ -122,6 +122,28 @@ matters; add a test when something breaks and stays broken. Do not enumerate edg
   measurement: a number — a count, a timing, a residual, a dirty-frame ratio — is still owed for
   anything performance- or correctness-critical, because that is the part he cannot check by looking.
 
+## Parallel agents write; ONE tests at a time
+
+Agents may write and commit in parallel. **Live testing is serialised.** The dev server recompiles on
+every save, so a second agent saving a file mid-probe reads as a defect in the thing being probed:
+one round lost several probe runs to recompiles and one red test suite to a neighbour's in-flight
+edit, and diagnosed neither until afterwards.
+
+The protocol:
+
+- **No live browser run without a granted test window.** Ask the coordinator, then wait. Batch the
+  round's live work into that one window instead of probing continuously as you go.
+- **While a window is open, everyone else stops writing to disk.** Reading, grepping, planning and
+  decoding files are all fine — a `git status` that changes nothing cannot break a probe.
+- **Say when you are done** so the window closes. A window nobody released is the same stall as no
+  protocol at all.
+- Static work needs no window: `tsc`, the suite, byte-level decoding of a served asset, reading the
+  reference. Only the browser and the game connection are contended.
+
+The coordinator grants windows one at a time and tells the others to hold. If a probe result looks
+impossible, suspect a mid-edit recompile before suspecting the code, and say so rather than working
+around it silently.
+
 ## The owner's build and this working tree are the same files
 
 **While the owner is testing, no agent may be live in this tree.** The dev server recompiles on every
