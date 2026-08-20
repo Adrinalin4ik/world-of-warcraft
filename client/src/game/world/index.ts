@@ -549,6 +549,31 @@ export default class World extends EventEmitter {
       this.emit('unit:fields', entity);
     }
     this.entities.set(entity.guid, entity);
+    // ANOTHER PLAYER'S NAME. A creature is named by `SMSG_CREATURE_QUERY_RESPONSE`, which
+    // `object/combat.ts` already asks for per template; a PLAYER is named only by
+    // `SMSG_NAME_QUERY_RESPONSE`, and nothing ever asked -- the only `askName` callers were three chat
+    // paths. That is the whole of "I don't see players name in target window and in toolbar on top of
+    // the player. But I see mobs names."
+    //
+    // Here rather than at the descriptor decode because this is the one place that runs for every unit
+    // that enters the registry, however it got there. `askNameOnce` dedupes on both the cache and the
+    // in-flight set, so a player standing in view is asked for exactly once.
+    //
+    // **`!entity.name` WOULD NEVER HAVE FIRED**, and self-review caught it before it shipped:
+    // `Unit#name` defaults to the STRING `"<unknown>"` (`classes/unit.ts:317`), which is truthy, so a
+    // falsiness test is false for every unit that has never been named -- exactly the units this is
+    // for. The literal is compared instead, which is what `ui/unit-bridge.ts:60` already does when it
+    // decides whether a snapshot has a real name.
+    if (entity.isPlayer && entity !== this.player
+        && (entity.name === '' || entity.name === '<unknown>')) {
+      if (typeof this.game?.askNameOnce === 'function') {
+        this.game.askNameOnce(entity.guid);
+      } else {
+        // LOUD, not silent: a rename on the handler would otherwise turn this feature off with no
+        // symptom but a blank name, which is the report this code exists to answer.
+        console.warn('World#add: game.askNameOnce is missing -- other players will have no name');
+      }
+    }
     if (entity.view) {
       this.scene.add(entity.view);
       // this.scene.add(entity.collider); // if you want to see the player collider
