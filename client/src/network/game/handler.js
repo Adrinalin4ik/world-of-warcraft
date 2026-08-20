@@ -13,6 +13,7 @@ import { ObjectHandler } from './object/handler';
 import { clientTicks, encodeTimeSyncResponse } from './time-sync';
 import { readAuthResponseExpansion } from './account-info';
 import World from '../../game/world';
+import { guidBytes } from '../guid-hex';
 import { Camera } from 'three';
 
 /**
@@ -250,8 +251,15 @@ export class GameHandler extends Socket {
       // The server does not know this guid. Nothing follows the byte -- see the note above.
       return;
     }
-    const name = gp.readCString();
-    gp.readCString(); // realm name, empty for a same-realm player
+    const name = gp.readCStr();
+    // `readCStr`, NOT `readCString` -- and this was a live off-by-one, not a tidy-up. The realm name
+    // is a lone `uint8(0)` for a same-realm player, and `byte-buffer`'s own `readCString` returns
+    // `null` for an empty run WITHOUT advancing the index (`net/packet.js:47-77` carries the
+    // measurement). So the terminator stayed in the buffer and `race`/`gender`/`playerClass` each
+    // read the byte before their own: race got the realm terminator (0 = an invalid race), gender got
+    // the race, class got the gender. The NAME decoded perfectly either way, which is exactly why
+    // nothing noticed -- the same shape as the `SMSG_ITEM_QUERY_SINGLE_RESPONSE` bug.
+    gp.readCStr(); // realm name, empty for a same-realm player
     const race = gp.readUnsignedByte();
     const gender = gp.readUnsignedByte();
     const playerClass = gp.readUnsignedByte();
@@ -289,10 +297,33 @@ export class GameHandler extends Socket {
     return this.playerNames[guid] !== undefined || this.nameQueriesInFlight.has(guid);
   }
 
+  /**
+   * `CMSG_NAME_QUERY` (0x050) -- a full 8-byte little-endian guid, not a packed one.
+   *
+   * TWO CALLER SHAPES, and the second one **threw**. The three chat callers
+   * (`chat/handler.js:131,162,170`) pass a `GUID` OBJECT, which is what `writeGUID` wants -- it does
+   * `this.write(guid.raw)` (`net/packet.js:86-89`). The unit path passes the normalised hex STRING
+   * every guid in the rest of this client is (`network/guid-hex.ts`), and a string has no `.raw`, so
+   * `writeGUID` reached `byte-buffer`'s `write(undefined)` -- which throws
+   * `TypeError: Cannot write undefined, not a sequence`
+   * (`byte-buffer/dist/byte-buffer.js:167-172`). `items.ts:267` records the same trap for
+   * `CMSG_ITEM_QUERY_SINGLE` and uses `guidBytes`; so does this now.
+   *
+   * The size argument is deliberately left at 64 rather than tightened to `HEADER + 8`. `send`
+   * declares `packet.bodySize`, which is the whole BUFFER length minus the header, so the body has
+   * always gone out as 58 bytes -- 8 of guid and 50 of zeros. TrinityCore's
+   * `HandleNameQueryOpcode` reads the guid and lets `WorldSession::Update` log the unread tail, so
+   * this is tolerated and has been for every chat query this client ever sent; narrowing it is a
+   * separate change and not one to make blind in the same commit as a fix.
+   */
   askName(guid) {
     const app = new GamePacket(GameOpcode.CMSG_NAME_QUERY, 64);
 
-    app.writeGUID(guid);
+    if (typeof guid === 'string') {
+      app.write(Array.from(guidBytes(guid)));
+    } else {
+      app.writeGUID(guid);
+    }
 
     this.session.game.send(app);
     return true;

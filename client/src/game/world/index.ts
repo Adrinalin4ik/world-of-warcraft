@@ -555,9 +555,19 @@ export default class World extends EventEmitter {
     // paths. That is the whole of "I don't see players name in target window and in toolbar on top of
     // the player. But I see mobs names."
     //
-    // Here rather than at the descriptor decode because this is the one place that runs for every unit
-    // that enters the registry, however it got there. `askNameOnce` dedupes on both the cache and the
-    // in-flight set, so a player standing in view is asked for exactly once.
+    // **THIS GUARD NEVER FIRED, AND THE PRIMARY ASK IS NOT HERE.** Corrected after the owner
+    // reported the name still missing: `Unit#isPlayer` was assigned in exactly one place, the local
+    // `Player` constructor (`classes/player.ts:14`), so it was `false` for every player the server
+    // streams -- and the `entity !== this.player` half excludes the single unit where it was true.
+    // The condition was therefore false for all inputs. Worse, `add` runs BEFORE the create block's
+    // type and fields are decoded (`update-object/handler.ts:309-310` constructs a bare `Unit` and
+    // adds it immediately), so nothing here can know a unit is a player in the first place.
+    //
+    // The ask now lives where the wire has just said so, at `update-object/handler.ts`'s
+    // `unit.objectType = pack.obj_type`, which is also where `isPlayer` is now set from the create
+    // block. This block is kept as a second door for a re-`add` of an already-typed unit; it is no
+    // longer load-bearing. `askNameOnce` dedupes on both the cache and the in-flight set, so a player
+    // standing in view is asked for exactly once across both doors.
     //
     // **`!entity.name` WOULD NEVER HAVE FIRED**, and self-review caught it before it shipped:
     // `Unit#name` defaults to the STRING `"<unknown>"` (`classes/unit.ts:317`), which is truthy, so a

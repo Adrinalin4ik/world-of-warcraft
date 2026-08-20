@@ -327,6 +327,35 @@ export class UpdateObjectHandler extends EventEmitter {
     // The TYPE is remembered on the unit here and nowhere else; every later values-only update is
     // decoded against it (`applyValues`).
     unit.objectType = pack.obj_type;
+    // A REMOTE PLAYER IS A PLAYER, and until this line nothing in the client believed so.
+    //
+    // `Unit#isPlayer` (`classes/unit.ts:323`) defaults to `false` and was assigned in exactly ONE
+    // place: `classes/player.ts:14`, our own local character. Every player the server streams is
+    // built as `new Unit(pack.guid)` twenty lines above, so `isPlayer` stayed false for all of them
+    // for the whole session. Two things read it and both were wrong:
+    //
+    //  - `world/index.ts#add` guards its name query on `entity.isPlayer`, so **the query that
+    //    255083b added was never sent for anybody** -- the guard is false for every remote player and
+    //    the `entity !== this.player` half excludes the one unit where it is true. That is why the
+    //    owner still sees an empty name after that commit: all four defects it fixed were real, and
+    //    the fifth one made the fix unreachable. (`add` also runs BEFORE any of this decode, so the
+    //    guard could not have worked there even with `isPlayer` correct -- the ask belongs here,
+    //    where the wire has just told us the type.)
+    //  - `ui/unit-bridge.ts:68` copies it into the snapshot, so `UnitIsPlayer("target")` answered
+    //    false for a targeted player.
+    //
+    // `pack.obj_type` is the create block's own `ObjectType` byte, which is the wire's answer and not
+    // a guess off the guid's high word. `cursor-mode.ts:290` already tests players this way.
+    if (pack.obj_type === ObjectType.Player) {
+      unit.isPlayer = true;
+      // Only a PLAYER needs `SMSG_NAME_QUERY_RESPONSE`; a creature is named by its template through
+      // `combat.ts#applyCreatureInfo`. `askNameOnce` dedupes on the cache and the in-flight set, so
+      // re-entering our own grid does not re-ask.
+      if (unit !== this.game.world.player
+        && (unit.name === '' || unit.name === '<unknown>')) {
+        this.game.askNameOnce?.(pack.guid);
+      }
+    }
     if (pack.obj_type === ObjectType.Unit || pack.obj_type === ObjectType.Player) {
       if (applyUnitFields(unit, pack.newObject, pack.obj_type, true)) {
         // A unit can stream into view ALREADY DEAD -- a corpse that has not decayed yet. Same edge
