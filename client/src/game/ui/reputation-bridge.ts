@@ -177,10 +177,46 @@ export function attachReputationBridge(vm: LuaVM, world: World): () => void {
     const standing = state?.standing ?? 0;
     const band = bandFor(standing);
     const flags = state?.flags ?? 0;
-    // `hasRep` is whether this row has a reputation of its OWN. A header usually does not, and the pane
-    // hides its bar when it does not -- so this must not be forced true for a header that happens to
-    // carry a reputationIndex (`Horde` and `Alliance` both do).
-    const hasRep = state !== undefined;
+    /**
+     * `hasRep` is THE FACTION'S OWN VISIBLE BIT, and getting this wrong put a standing bar on every
+     * category row -- which is what the owner reported: "у категорий не должно быть шкалы, только у
+     * конкретных значений типа ironforge".
+     *
+     * THE CLIENT'S OWN SCRIPT DECIDES BAR-OR-NO-BAR, from two of the values returned here and nothing
+     * else. `ReputationFrame_Update` passes them straight through:
+     *
+     *     ReputationFrame_SetRowType(factionRow, ((isChild and 1 or 0) + (isHeader and 2 or 0)), hasRep)
+     *                                                                          -- reputationframe.lua:216
+     *     if ( (hasRep) or (rowType == 0) or (rowType == 1) ) then
+     *         factionStanding:Show(); factionBar:Show();
+     *     else
+     *         factionStanding:Hide(); factionBar:Hide();
+     *     end                                                                  -- reputationframe.lua:112-120
+     *
+     * So rowType 0 and 1 (not a header) ALWAYS get a bar, and a header (rowType 2 or 3) gets one only
+     * when `hasRep` is true. Nothing here draws or hides anything; the client does, off our booleans.
+     *
+     * WHAT WAS WRONG: this was `state !== undefined`, i.e. "the wire has a slot for this
+     * reputationIndex". The server sends **all 128 slots** whether or not the player has ever met the
+     * faction, and every grouping faction has a real index -- `Classic` is 96, `Alliance` is 11,
+     * `The Burning Crusade` 43, `Wrath of the Lich King` 89 (measured in `faction.dbc`). So the test was
+     * true for every header and the client dutifully showed a bar on each.
+     *
+     * The right question is the one `FACTION_FLAG_VISIBLE` answers -- does the player actually hold a
+     * standing with THIS faction -- which is the same predicate `displayRows` already filters rows on.
+     * A header still APPEARS, because `displayRows` emits it when a descendant is visible; it just has
+     * no reputation of its own.
+     *
+     * This also gets the awkward case right rather than special-casing headers away: `Shattrath City`
+     * (id 936, index 59) is a header WITH children AND its own reputation, and the real client does draw
+     * its bar. That is `rowType == 3` with `hasRep` true, which is exactly why the client bothers to
+     * test `hasRep` for headers instead of hiding them all.
+     *
+     * **NOT the `0`-is-truthy trap**, and worth saying because it was the first guess: this value has
+     * always been a JS boolean and crosses into Lua as `true`/`false`, never as `0`. The defect was
+     * semantic -- the wrong question, answered correctly.
+     */
+    const hasRep = entry.row.index >= 0 && isVisible(entry.row.index);
     return [
       entry.row.name,
       entry.row.description,
