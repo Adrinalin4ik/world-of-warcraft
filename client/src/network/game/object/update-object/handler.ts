@@ -376,6 +376,35 @@ export class UpdateObjectHandler extends EventEmitter {
         this.game.world.emit('unit:fields', unit);
       }
     }
+    /**
+     * A CREATURE'S NAME, asked for HERE and not only on selection.
+     *
+     * Reported by the merchant agent as "every NPC's name reads `<unknown>`", with the diagnosis that
+     * the creature-name QUERY was at fault. The decode is fine; **the query was never sent for most
+     * units.** `CombatHandler#queryCreature` had exactly two callers:
+     *
+     *   - `world/index.ts#setTarget` -- so a unit you TARGET gets named, which is why the owner has
+     *     screenshots of "Kobold Worker" and "Diseased Timber Wolf" in the target frame;
+     *   - the nameplate sweep (`nameplates.ts:425`) -- which is gated on `showEnemies`/`showFriends`,
+     *     and BOTH are seeded `'0'` (`api/screen.ts`, and `nameplates.ts:400-401` defaults them false).
+     *     So that caller does nothing until the owner presses `V`.
+     *
+     * A vendor opened by right-clicking is never targeted and never gets a plate, so nothing ever asked
+     * for its name -- which reconciles the two halves of the evidence that looked contradictory.
+     *
+     * THE COST IS ALREADY ESTABLISHED and is why this can be unconditional: the query is keyed on the
+     * TEMPLATE `entry`, `CombatHandler#asked` dedupes on it, and `applyCreatureInfo` writes the answer
+     * onto EVERY unit sharing that entry. `nameplates.ts:428-433` records the measurement -- "a camp of
+     * eleven identical wolves is ONE round trip and a Northshire grid is a handful". So this is a
+     * handful of packets per grid, paid once per session per template, on a path that already does a DBC
+     * lookup and an M2 fetch.
+     *
+     * AFTER `applyUnitFields`, because `fields.entry` is decoded there and is nil before it.
+     * `ObjectType.Unit` only: a PLAYER has no creature template and is named by the query above.
+     */
+    if (pack.obj_type === ObjectType.Unit && unit.fields.entry) {
+      this.game.objectHandler?.combatHandler?.queryCreature(unit.fields.entry, pack.guid);
+    }
     // The inventory words out of our own create block -- see the same call in `applyValues` for why
     // they are kept outside `unit.fields`. This is the one that MATTERS at login: the create block is
     // where all 23 equipment slots, the four bag slots and the sixteen backpack slots arrive at once.
