@@ -638,6 +638,23 @@ const GAMETOOLTIP: MethodTable = {
     return [];
   },
 
+  /**
+   * `GetMinimumWidth()` -- the twin of the setter below, and **`SetTooltipMoney` dies without it.**
+   *
+   * FOUND LIVE hovering `MerchantRepairAllButton`: the money frame had already been filled and was
+   * showing the right 14 copper, and then
+   * `GameTooltip.lua:135: attempt to call a nil value (method 'GetMinimumWidth')` killed the handler.
+   * That line is `if ( frame:GetMinimumWidth() < moneyFrameWidth ) then frame:SetMinimumWidth(...)` --
+   * the widening that stops a money row from overflowing a narrow tooltip
+   * (`gametooltip.lua:133-136`). So the visible half worked and the layout correction did not, which is
+   * the same shape as the `GetItem` defect two methods up: a nil inside an `OnEnter`, past the point
+   * where the thing being built already looked right.
+   *
+   * The value is already stored -- `SetMinimumWidth` has been writing `state.minWidth` all along; only
+   * the reader was missing. 0 for a tooltip that has never been given one, which is what the real
+   * engine answers and what makes the comparison above take the widening branch.
+   */
+  GetMinimumWidth: (ctx, self) => [stateOf(widgetOf(ctx, self)).minWidth],
   SetMinimumWidth: (ctx, self, args) => {
     stateOf(widgetOf(ctx, self)).minWidth = Number(args[0] ?? 0);
     resize(ctx, self);

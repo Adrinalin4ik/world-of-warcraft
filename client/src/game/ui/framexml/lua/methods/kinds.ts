@@ -18,7 +18,9 @@ import { FocusSink, MethodContext, MethodTable, onFrameTeardown, registerMethods
 import { Anchor } from '../../../layout';
 import { MouseButtonName, Widget } from '../../../widget';
 
-import { applyFontObject, ensureFont, fontObjectName, notImplemented, warnOnce, widgetOf } from './region';
+import {
+  applyFontObject, ensureFont, fontObjectName, formatText, notImplemented, warnOnce, widgetOf,
+} from './region';
 import { measureText } from '../../../text';
 import { effectiveFont } from '../../../widget';
 
@@ -345,6 +347,32 @@ const BUTTON: MethodTable = {
     // The label may have only just been created, with `ensureLabelId`'s FRIZQT 12 white default -- so
     // a font object set BEFORE any caption existed (the loader issues `<NormalFont>` after `SetText`,
     // but a Lua caller has no such order) lands here.
+    applyButtonFont(ctx, self);
+    return [];
+  },
+  /**
+   * `SetFormattedText(format, ...)` -- REAL API on a Button, and **the gossip menu does not draw a
+   * single row without it.**
+   *
+   * FOUND LIVE at a Northshire questgiver. `GossipFrameAvailableQuestsUpdate` and
+   * `GossipFrameActiveQuestsUpdate` both title their row with
+   * `titleButton:SetFormattedText(NORMAL_QUEST_DISPLAY, select(i, ...))`
+   * (`gossipframe.lua:93,96,124,127`) -- on the BUTTON, not on its font string. With the method absent
+   * the raise landed inside the loop that builds the rows, so a questgiver's menu came up with five
+   * buttons shown, all of them blank, and the greeting empty: measured
+   * `options: []`, one available quest decoded off the wire as
+   * `{ questId 18, title "Brotherhood of Thieves" }`, and `GossipTitleButton1:GetText()` empty.
+   *
+   * `GossipFrameOptionsUpdate` uses plain `SetText`, which is why a pure vendor's "Let me browse your
+   * goods" row would have drawn and a questgiver's would not -- the same document, two methods, one
+   * present.
+   *
+   * Delegates through `ensureLabelId` + `applyButtonFont` exactly as `SetText` above does, and shares
+   * `region.ts#formatText` with the FontString version so the two cannot drift on `%s` handling.
+   */
+  SetFormattedText: (ctx, self, args) => {
+    const label = ctx.registry.widget(ensureLabelId(ctx, self))!;
+    label.text = formatText(args);
     applyButtonFont(ctx, self);
     return [];
   },

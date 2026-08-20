@@ -725,6 +725,20 @@ export function applyFontResolution(widget: Widget, resolved: FontResolution, db
   }
 }
 
+/**
+ * `SetFormattedText`'s substitution, shared with `BUTTON`'s own copy of the method.
+ *
+ * `%s`, `%d` and the `%%` escape, positionally. Exported because `Button:SetFormattedText` is REAL API
+ * on a Button too and the gossip menu depends on it -- see `kinds.ts`. Two private copies of a format
+ * routine is exactly the drift `container-bridge.ts` records about the tooltip body.
+ */
+export function formatText(args: unknown[]): string {
+  const format = String(args[0] ?? '');
+  let index = 1;
+  return format.replace(/%[sd%]/g, (token) =>
+    (token === '%%' ? '%' : String(args[index++] ?? '')));
+}
+
 const FONTSTRING: MethodTable = {
   SetText: (ctx, self, args) => {
     widgetOf(ctx, self).text = args[0] === undefined || args[0] === null ? '' : String(args[0]);
@@ -732,11 +746,7 @@ const FONTSTRING: MethodTable = {
   },
   GetText: (ctx, self) => [widgetOf(ctx, self).text],
   SetFormattedText: (ctx, self, args) => {
-    const format = String(args[0] ?? '');
-    let index = 1;
-    widgetOf(ctx, self).text = format.replace(/%[sd%]/g, (token) =>
-      token === '%%' ? '%' : String(args[index++] ?? ''),
-    );
+    widgetOf(ctx, self).text = formatText(args);
     return [];
   },
   // Real `SetTextColor` also takes an alpha channel; `FontSpec.color` is a plain `#rrggbb` with
