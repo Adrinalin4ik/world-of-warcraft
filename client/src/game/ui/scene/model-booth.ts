@@ -109,7 +109,7 @@ import {
 import type { CharacterLook } from './character-look';
 import { BodyAnchors, BustCamera, bodyFrame, portraitFrame } from './booth-framing';
 import { foldRaceLights, modelToRender, RaceLightRow, rigFog } from './scene-rig';
-import type { DrawItem } from '../widget';
+import type { DrawItem, TexCoords } from '../widget';
 import type { GlueArt } from '../art';
 
 /**
@@ -163,6 +163,35 @@ const PORTRAIT_LIGHT: RaceLightRow = [
   1,
   0.85, 0.82, 0.78,
 ];
+
+/**
+ * THE PORTRAIT'S BACKDROP: opaque near-black, and it is the REFERENCE BAKE'S OWN COLOUR.
+ *
+ * `Color::srgb(0.055, 0.045, 0.04)` (`benilla/.../portrait/mod.rs:706-708`), carried with its reason
+ * attached: "The ref bake's opaque near-black backdrop (**the world must never show through the
+ * circle**); the round cut happens at draw time". Those sRGB components are the byte triple
+ * `(14, 11, 10)` = `#0E0B0A`, which is what three's `setClearColor` wants. So the VALUE is sourced,
+ * not a dark grey of ours.
+ *
+ * THE OWNER'S REPORT is that this was missing: "фон не черный, а должен быть. Сейчас он прозрачный."
+ * It appeared with this round's destination-alpha fix -- once a pane composites BY ITS ALPHA (which is
+ * what let the hairstyle survive at all), a target cleared to alpha 0 composites its empty region as
+ * empty, so the world showed through the ring. The fix belongs to what the target is CLEARED to and
+ * NOT to the blend rule: undoing the blend rule would bring the bald head straight back, and the round
+ * stencil needs real alpha to cut with.
+ *
+ * IT DOES NOT FIGHT THE STENCIL. The clear fills the square opaque, the figure draws over it, and the
+ * mask then multiplies alpha to zero outside the circle -- which is precisely the reference's division
+ * of labour ("the round cut happens at draw time"). Inside the circle alpha is 1 everywhere, so the
+ * backdrop is solid and the silhouette has no fringe.
+ *
+ * THE PAPER DOLL IS DELIBERATELY NOT GIVEN ONE. It stays transparent, so the panel art shows around
+ * the figure -- the owner has confirmed that pane as correct ("Превью в окне одевания персонажа тоже
+ * выглядит как надо"), and the reference marks its own near-black body pane as an unsettled choice
+ * rather than the client's: "A transparent float-over-the-frame-art backdrop is a director's-call
+ * follow-up" (`mod.rs:766-769`). Two laws, and the confirmed one is left alone.
+ */
+const PORTRAIT_BACKDROP = 0x0e0b0a;
 
 /**
  * The largest edge a pane's target may have, in device pixels.
@@ -340,6 +369,30 @@ export function allowDestinationAlpha(model: any): boolean {
 const FLIP_V = { u0: 0, v0: 1, u1: 1, v1: 0 };
 
 /**
+ * The same V flip, applied to a crop the CLIENT authored rather than to the whole texture.
+ *
+ * WHY THIS IS NEEDED AT ALL, and it is the bottom-bar defect. `renderer.ts:369` resolves a sprite's
+ * sub-rect as `item.texCoords ?? item.widget.texCoords ?? resolved.texCoords`, so a widget with its
+ * OWN authored `<TexCoords>` outranks the `FLIP_V` the booth hands to `art.adopt` -- and the flip is
+ * simply lost. `MicroButtonPortrait` is exactly that widget: 18x25 with
+ * `<TexCoords left="0.2" right="0.8" top="0.0666" bottom="0.9"/>` (the game's own
+ * `mainmenubarmicrobuttons.xml:43-55`), so the character face on the micro-menu button was drawn
+ * UPSIDE DOWN and cropped to a sub-rect of a squashed render. That is the owner's "превью на нижней
+ * панели непонятное, толи скейл не тот, толи что-то другое" -- both halves of his guess were right.
+ *
+ * A framebuffer's `v = 0` is at the BOTTOM while every authored crop is written against a top-down
+ * image, so the flip is `v -> 1 - v` on whatever rect the client asked for. The whole-texture case
+ * `{0,0,1,1}` comes out as `FLIP_V`, which is what makes this a generalisation rather than a second
+ * rule.
+ */
+export function flipCropV(tc: TexCoords | null | undefined): TexCoords {
+  if (!tc) {
+    return FLIP_V;
+  }
+  return { u0: tc.u0, v0: 1 - tc.v0, u1: tc.u1, v1: 1 - tc.v1 };
+}
+
+/**
  * The direction a character faces, in RENDER space.
  *
  * A character `.m2` faces model +x -- measured, see `booth-framing.ts#BodyAnchors.front` -- and
@@ -352,6 +405,24 @@ const RENDER_FORWARD: readonly [number, number] = (() => {
   const forward = modelToRender([1, 0, 0]);
   return [forward[0], forward[1]];
 })();
+
+/**
+ * The side of a portrait's SQUARE target, in device pixels.
+ *
+ * `max(w / uSpan, h / vSpan)` -- the smallest square whose CROPPED window is at least 1:1 with the
+ * pixels the widget actually shows. See `Pane#resize` for why a portrait's target is square at all.
+ * A span is floored rather than trusted: a degenerate `<TexCoords>` with equal edges would otherwise
+ * divide by zero and ask for an infinite target.
+ */
+export function portraitTargetSide(
+  widthPx: number,
+  heightPx: number,
+  crop: TexCoords | null | undefined,
+): number {
+  const uSpan = crop ? Math.abs(crop.u1 - crop.u0) : 1;
+  const vSpan = crop ? Math.abs(crop.v1 - crop.v0) : 1;
+  return Math.max(widthPx / Math.max(uSpan, 0.01), heightPx / Math.max(vSpan, 0.01));
+}
 
 /** One model frame's booth. */
 class Pane {
@@ -379,6 +450,9 @@ class Pane {
 
   private requestedHeight = 0;
 
+  /** The crop last asked for, flattened -- what the size comparison in `request` tests. */
+  private requestedCrop = '';
+
   private model: any = null;
 
   private attached: any[] = [];
@@ -403,6 +477,9 @@ class Pane {
   private poseClock = 0;
 
   private framing: 'body' | 'portrait' = 'body';
+
+  /** The client's authored crop on this pane's widget, or null. See `request` and `resize`. */
+  private crop: TexCoords | null = null;
 
   private dirty = true;
 
@@ -458,7 +535,15 @@ class Pane {
    * Returns nothing: whether a bake is due is `dirty`, and `bake` reads it.
    */
   request(subject: BoothSubject | null, revision: number, rotation: number,
-    framing: 'body' | 'portrait', widthPx: number, heightPx: number): void {
+    framing: 'body' | 'portrait', widthPx: number, heightPx: number,
+    /**
+     * The crop the CLIENT authored on this widget, or null for the whole texture.
+     *
+     * Read only to SIZE a portrait's square target -- see `resize`. The flip that makes it samplable
+     * is `flipCropV`, applied by `ModelBooth#render`.
+     */
+    crop: TexCoords | null): void {
+    this.crop = crop;
     if (framing !== this.framing) {
       this.framing = framing;
       this.dirty = true;
@@ -476,9 +561,17 @@ class Pane {
     // size, so comparing them directly never settled and `resize` was called on every frame for ever.
     // Harmless -- `resize` bails on the same comparison a second time -- but a per-frame call that can
     // never succeed is exactly the shape a later reader would take for a bug.
-    if (Math.round(widthPx) !== this.requestedWidth || Math.round(heightPx) !== this.requestedHeight) {
+    //
+    // THE CROP IS PART OF THE COMPARISON, because for a portrait it is part of the target's SIZE (see
+    // `resize`). A widget's `<TexCoords>` is authored and so changes at most once -- null on whatever
+    // frame the rig appears before the draw item carries it -- but that once is the frame that decides
+    // how big the square is, and comparing only the rect would keep the first answer for ever.
+    const cropKey = this.crop === null ? '' : `${this.crop.u0},${this.crop.v0},${this.crop.u1},${this.crop.v1}`;
+    if (Math.round(widthPx) !== this.requestedWidth || Math.round(heightPx) !== this.requestedHeight
+      || cropKey !== this.requestedCrop) {
       this.requestedWidth = Math.round(widthPx);
       this.requestedHeight = Math.round(heightPx);
+      this.requestedCrop = cropKey;
       this.resize(widthPx, heightPx);
     }
     const key = subject === null ? null : subject.key;
@@ -528,10 +621,19 @@ class Pane {
     const savedClearColor = renderer.getClearColor(new THREE.Color());
     const savedClearAlpha = renderer.getClearAlpha();
     renderer.setRenderTarget(target);
-    // TRANSPARENT, so the panel art behind the pane shows around the figure -- which is what the real
-    // client's model pane does. The clear is explicit because `GlueRenderer` runs with
-    // `autoClear = false` and nothing else would do it.
-    renderer.setClearColor(0x000000, 0);
+    // A PORTRAIT gets the reference bake's opaque near-black; a BODY pane stays transparent so the
+    // panel art shows around the figure. See `PORTRAIT_BACKDROP` for both halves and their sources.
+    // The clear is explicit because `GlueRenderer` runs with `autoClear = false` and nothing else
+    // would do it.
+    //
+    // GATED ON THERE BEING A FIGURE, and not on the framing alone: a portrait whose unit this client
+    // cannot give a body to (`subject === null`) would otherwise draw an opaque black DISC where it
+    // used to draw nothing at all -- a backdrop exists to back something.
+    if (this.framing === 'portrait' && this.model !== null) {
+      renderer.setClearColor(PORTRAIT_BACKDROP, 1);
+    } else {
+      renderer.setClearColor(0x000000, 0);
+    }
     renderer.autoClear = false;
     renderer.clear(true, true, false);
 
@@ -563,7 +665,33 @@ class Pane {
     this.target = null;
   }
 
-  private resize(widthPx: number, heightPx: number): void {
+  /**
+   * Size the target.
+   *
+   * A PORTRAIT'S TARGET IS SQUARE, and that is the other half of the bottom-bar defect. The size used
+   * to be the widget's own rect, so `MicroButtonPortrait`'s 18x25 slot got an 18x25 render: the bust
+   * was squashed to a 0.72 aspect, and once this round added the round stencil the circle became a
+   * squashed ellipse too. The real client bakes ONE square portrait and lets each widget sample a
+   * sub-rect of it -- which is exactly what that widget's `<TexCoords>` is for -- so a square target is
+   * what its authored crop is written against.
+   *
+   * THE SIDE IS CHOSEN SO THE CROPPED WINDOW IS 1:1 WITH THE WIDGET'S PIXELS: `side = max(w / uSpan,
+   * h / vSpan)`. For the micro button (21x30 device pixels through a 0.6 x 0.833 window) that is 36
+   * squared, where sizing off the rect gave 21x30 -- so the visible face gets MORE pixels, not fewer,
+   * and none of them are stretched. With no authored crop the spans are 1 and this degenerates to
+   * `max(w, h)`, which leaves the 76x76 player portrait exactly as it was.
+   *
+   * A BODY PANE IS UNTOUCHED and keeps taking its rect verbatim: the paper doll is owner-confirmed at
+   * 233x215 -> 276x255 and its aspect is the one `bodyFrame` fits the figure to.
+   */
+  private resize(rawWidthPx: number, rawHeightPx: number): void {
+    let widthPx = rawWidthPx;
+    let heightPx = rawHeightPx;
+    if (this.framing === 'portrait') {
+      const side = portraitTargetSide(rawWidthPx, rawHeightPx, this.crop);
+      widthPx = side;
+      heightPx = side;
+    }
     const longest = Math.max(widthPx, heightPx, 1);
     const factor = longest > MAX_PANE_PIXELS ? MAX_PANE_PIXELS / longest : 1;
     const width = Math.max(1, Math.round(widthPx * factor));
@@ -1059,6 +1187,7 @@ export class ModelBooth {
         rig.framing,
         item.rect.width * opts.scale * opts.pixelRatio,
         item.rect.height * opts.scale * opts.pixelRatio,
+        item.widget.texCoords,
       );
       baked = pane.bake(this.renderer) || baked;
 
@@ -1070,6 +1199,14 @@ export class ModelBooth {
         const key = paneKey(id);
         art.adopt(key, texture, FLIP_V);
         item.widget.sprite = key;
+        // THE FLIP GOES ON THE ITEM, not only on the def, and that is the bottom-bar fix.
+        // `renderer.ts:369` resolves `item.texCoords ?? item.widget.texCoords ?? resolved.texCoords`,
+        // so for any widget carrying its own authored `<TexCoords>` -- `MicroButtonPortrait` is one --
+        // the `FLIP_V` handed to `adopt` never won and the pane was sampled upside down. The per-frame
+        // override is the seam that outranks both, and it is what the StatusBar fill already uses
+        // (`widget.ts:715-721`). `flipCropV` composes the flip WITH the client's crop rather than
+        // replacing it, so the micro button still shows the slice the client asked for.
+        item.texCoords = flipCropV(item.widget.texCoords);
       }
     }
 

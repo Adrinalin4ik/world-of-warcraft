@@ -49,12 +49,18 @@
  * genuinely different. Getting that wrong would put a scene render on every unit event, which is the
  * whole cost this subsystem is built to avoid.
  *
- * ## What is still missing, named rather than hidden
+ * ## The round mask -- CLOSED, and where it lives
  *
- * The ROUND MASK. The real client stamps a circular alpha stencil into the portrait it bakes
- * (`benilla/.../portrait/mod.rs:4-8`). This bakes a square and relies on the unit frame's own art
- * covering the corners, which is what `PlayerFrameTexture` is drawn over the top for. If the corners
- * read as square in a screenshot, a mask in the bake is the fix and not a crop here.
+ * This used to record the mask as missing, on the argument that the bake was square and the unit
+ * frame's own art covered the corners. It did not: the owner reported the target portrait spilling its
+ * bounds, and of the 1228 pixels outside a 76x76 portrait's inscribed circle, 570 carried alpha.
+ * `scene/model-booth.ts#portraitMask` now stamps the circular alpha stencil the real client stamps
+ * (`benilla/.../portrait/mod.rs:4-5`), in the BAKE and not as a crop here -- which is what the old
+ * note predicted the fix would be. The backdrop inside the circle is the reference bake's opaque
+ * near-black (`PORTRAIT_BACKDROP`), so the world cannot show through the ring.
+ *
+ * What this module still does not do: nothing known. `rig.framing = 'portrait'` is the whole of its
+ * part, and the two laws it selects between live in the booth.
  */
 import { emptyRig } from './scene/scene-rig';
 import type { FrameRegistry, MethodContext } from './framexml/lua/object';

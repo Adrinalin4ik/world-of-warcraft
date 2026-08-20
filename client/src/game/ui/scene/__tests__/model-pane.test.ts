@@ -16,7 +16,7 @@
 import * as THREE from 'three';
 
 import { applyBlendingModeToMaterial } from '../../../pipeline/m2/material';
-import { allowDestinationAlpha } from '../model-booth';
+import { allowDestinationAlpha, flipCropV, portraitTargetSide } from '../model-booth';
 import { LuaVM } from '../../framexml/lua/vm';
 import { FrameRegistry, installObjectModel } from '../../framexml/lua/object';
 import { installCompat } from '../../framexml/lua/compat';
@@ -163,4 +163,39 @@ describe('a pane figure and destination alpha', () => {
         .toBe(false);
       expect(shared.blendSrcAlpha).toBe(THREE.ZeroFactor);
     });
+});
+
+/**
+ * THE BOTTOM-BAR PREVIEW, which the owner raised twice ("толи скейл не тот, толи что-то другое") and
+ * which was two defects in one widget.
+ *
+ * `MicroButtonPortrait` is the character face on the micro-menu button, and the game's own
+ * `mainmenubarmicrobuttons.xml:43-55` gives it a size of 18x25 AND
+ * `<TexCoords left="0.2" right="0.8" top="0.0666" bottom="0.9"/>`. So the client bakes a SQUARE
+ * portrait and that widget samples a slice of it. Sizing the target off the 18x25 rect squashed the
+ * bust; and because `renderer.ts:369` lets a widget's own `<TexCoords>` outrank the `FLIP_V` the booth
+ * gives `art.adopt`, the pane was also sampled upside down.
+ *
+ * Both are pure arithmetic, which is the only part a screenshot of an 18x25 slot could never attribute.
+ */
+describe('a portrait pane behind an authored crop', () => {
+  it("bakes a square big enough for the crop, and keeps the framebuffer flip", () => {
+    // The real widget, at the device scale the live probe measured (21x30 device pixels).
+    const micro = { u0: 0.2, v0: 0.0666, u1: 0.8, v1: 0.9 };
+
+    // 21 / 0.6 = 35, 30 / 0.8334 = 36 -- the square is the larger, so neither axis is stretched and
+    // the visible face gets MORE pixels than the 21x30 it used to get.
+    expect(Math.round(portraitTargetSide(21, 30, micro))).toBe(36);
+    // No crop: the square is just the longer edge, which leaves a 76x76 portrait untouched.
+    expect(portraitTargetSide(76, 76, null)).toBe(76);
+
+    // The flip is composed WITH the crop, not replaced by it: u is untouched, v is mirrored.
+    const flipped = flipCropV(micro);
+    expect(flipped.u0).toBe(0.2);
+    expect(flipped.u1).toBe(0.8);
+    expect(flipped.v0).toBeCloseTo(1 - 0.0666, 6);
+    expect(flipped.v1).toBeCloseTo(0.1, 6);
+    // ...and the whole-texture case still degenerates to the plain V flip the booth used before.
+    expect(flipCropV(null)).toEqual({ u0: 0, v0: 1, u1: 1, v1: 0 });
+  });
 });
