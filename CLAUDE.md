@@ -64,6 +64,13 @@ And check the instrument itself. This codebase has produced: two debug panels th
 the world is fine, a "pixel-identical" measurement that was not, and an instrument a fix would have
 blinded. A number that confirms your hypothesis deserves more scepticism than one that refutes it.
 
+And distrust a NEGATIVE the same way. A probe that reports the feature broken deserves the same
+scepticism as one that reports it fixed: two rounds here wrote up "the right-click never arrives" and
+"the classifier is silent" when the code was fine — the first because Playwright's `mouse.click(...,
+{button:'right'})` does not reach our handler while a separated move/down/up does, the second because
+the probe read a property off something that was a function. A negative that confirms your worry is
+still a number that agreed with you.
+
 State a noise floor before claiming an improvement. Run-to-run spread has repeatedly covered an
 entire claimed change.
 
@@ -186,6 +193,9 @@ A comment that invents a source, or that still describes a gap now closed, is tr
 - The FrameXML UI is behind **`?ui=lua`**. Plain `/` deliberately still serves the hand-written
   transcription, which is the oracle the runtime is compared against.
 - `/game?offline=1` loads a real world map with no server.
+- **`python` works; `python3` does NOT.** `python --version` is 3.13.5, while `python3` hits the Windows
+  Microsoft-Store alias stub and prints an install advert to stdout -- which looks like a broken script,
+  not a missing binary. Two people lost time to this in one session. `py` is absent too.
 - Game data: `https://data-direct.spelunkerdb.com/12340` — the host rejects some user agents, so use
   `curl`, not urllib.
 - Never write credentials into a committed file; pass them via argv.
