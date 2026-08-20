@@ -68,8 +68,20 @@ export function repairCostOf(items: ItemHandler, guid: string | null): number | 
   const entry = fieldAt(bag, ObjectType.Item, ObjectField.object_field_entry);
   const template = entry === 0 ? null : items.template(entry, guid);
   if (template === null) {
-    // The query is still in flight. UNKNOWN, not free.
-    return null;
+    // **SELF-REVIEW: A SERVER-CONFIRMED-UNKNOWN TEMPLATE IS 0, NOT null, AND THE DIFFERENCE IS A
+    // PERMANENTLY GREYED REPAIR BUTTON.**
+    //
+    // `items.template` answers null for two different situations and only one of them is temporary:
+    // the query is in flight (it resolves), or the server has ANSWERED with the miss word, in which
+    // case `templateAnsweredUnknown` is true and it never resolves. Returning null for the second
+    // case makes `GetRepairAllCost`'s total null forever -- so ONE item the server has no template
+    // for would disable repair-all for the whole session, and nothing would say why.
+    //
+    // Nobody can price an item whose template does not exist, this client least of all. Answering 0
+    // under-counts that one item and leaves every other item repairable, which is strictly better than
+    // the alternative. The in-flight case still answers null, which is what keeps the total honest
+    // while the queries land.
+    return items.templateAnsweredUnknown(entry) ? 0 : null;
   }
   return durabilityData.repairCost({
     lostDurability: lost,

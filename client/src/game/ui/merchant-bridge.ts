@@ -131,6 +131,11 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
   // The repair tables are 36 KB and 149 bytes together -- see `durability-data.ts#ensureLoaded` on why
   // they are fetched here rather than at the first vendor.
   void durabilityData.ensureLoaded();
+  // `Item.dbc` + `ItemDisplayInfo.dbc`, for the row icons. The container bridge asks for the same pair
+  // and attaches first, and `ensureLoaded` is idempotent -- so this rides that promise rather than
+  // starting a second fetch. Asked for HERE anyway so this bridge does not silently depend on another
+  // one's attach order for a table it needs.
+  void itemData.ensureLoaded();
 
   // -- Reading the vendor's rows -----------------------------------------------------------------
 
@@ -279,6 +284,14 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
    * than offering a total that is quietly too low.
    */
   let repairCache: { total: number | null } | null = null;
+
+  /**
+   * The total as last announced through `UPDATE_INVENTORY_DURABILITY`. `undefined` means never.
+   *
+   * Distinct from `repairCache` on purpose -- see the self-review note in `onInventory`. `null` is a
+   * meaningful VALUE here (the total is unknown), so it cannot double as "no value".
+   */
+  let lastAnnounced: number | null | undefined;
   const repairAllCost = (): number | null => {
     if (repairCache === null) {
       let total = 0;
@@ -391,6 +404,14 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
    * arm passes no second argument (`merchantframe.lua:404`), and the split-stack arm passes the split
    * (`:369`). The wire needs the row's MuID as well as the entry -- see `merchant.ts#buy` on why a
    * client that omits it is silently dropped rather than misread.
+   *
+   * STACKS is the server's reading and it is checked: `BuyItemFromVendorSlot` names the argument
+   * `count`, assigns `uint32 stacks = count`, and gates stock on `GetBuyCount() * count`
+   * (`Player.cpp:21410` and the two checks below it). **The SPLIT-STACK path is therefore ambiguous in
+   * Blizzard's own arithmetic, and that is named rather than smoothed over**:
+   * `MerchantItemButton_OnModifiedClick` bounds the dialogue by `GetMerchantItemMaxStack`, i.e. the
+   * template's stack size, which counts ITEMS -- so a split of 5 on a row that sells 20 at a time buys
+   * 100. The plain right click, which is the path that matters, is quantity 1 and is exact.
    *
    * Nothing is changed locally. `SMSG_BUY_ITEM` updates the stock and `UPDATE_OBJECT` delivers the
    * item, which is the same server-authoritative law `LootSlot` follows.
@@ -683,10 +704,19 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
     setUnit(vm, 'NPC', snapshot);
   };
 
-  const onShow = (): void => {
-    if (disposed) {
-      return;
-    }
+  /**
+   * Register whatever icons the rows currently resolve to.
+   *
+   * Called on the OPEN and on every UPDATE, because `iconFor` answers null until
+   * `ItemDisplayInfo.dbc` is in memory -- so a shop opened during that fetch would otherwise have
+   * registered nothing and never come back for it. `art.register` is idempotent and `art.load` only
+   * fetches defs with no texture, so the repeat costs a `Map` lookup per row.
+   *
+   * Belt and braces rather than the only thing holding the icons up: `ui/runtime-art.ts` is the sink
+   * that catches a `SetTexture` naming an unregistered path, which is the general fix. This is the
+   * same hand-registration `action-bridge.ts#pushAll` and `container-bridge.ts#pushAll` keep.
+   */
+  const registerRowArt = (): void => {
     const paths = merchant.rows
       .map((row) => iconFor(row))
       .filter((path): path is string => path !== null);
@@ -694,6 +724,13 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
       art.register(path, { path });
     }
     void art.load();
+  };
+
+  const onShow = (): void => {
+    if (disposed) {
+      return;
+    }
+    registerRowArt();
     // Ask for every row's template up front. `items.template` is what ISSUES the query, and the answer
     // re-enters through `templatesChanged` -- so the shop opens with icons and prices and the names
     // fill in a moment later rather than the whole window waiting on a round trip.
@@ -706,6 +743,7 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
 
   const onUpdate = (): void => {
     if (!disposed && merchant.source !== null) {
+      registerRowArt();
       fireEvent(vm, 'MERCHANT_UPDATE');
     }
   };
@@ -739,10 +777,21 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
     if (disposed) {
       return;
     }
-    const before = repairCache?.total ?? undefined;
     repairCache = null;
     const after = repairAllCost();
-    if (before !== after) {
+    // **SELF-REVIEW: THIS COMPARISON WAS `repairCache?.total ?? undefined` AND IT FIRED EVERY FLUSH.**
+    //
+    // `?? undefined` collapsed the two states that matter. A cached total of `null` -- the normal state
+    // while ANY template query is in flight, i.e. all through a login -- came out of that expression as
+    // `undefined`, while `after` was `null`, so `undefined !== null` held on EVERY inventory flush. The
+    // event whose whole purpose is to fire only on a real change would have fired on every loot, every
+    // purchase and every stack merge, redrawing `DurabilityFrame` and both repair buttons each time --
+    // exactly the churn the memoisation above exists to avoid.
+    //
+    // A separate `lastAnnounced` slot, with its own `undefined` for "never announced", keeps `null`
+    // meaning `null`, so null -> null is correctly no change.
+    if (lastAnnounced !== after) {
+      lastAnnounced = after;
       fireEvent(vm, 'UPDATE_INVENTORY_DURABILITY');
     }
     // The buyback slots are player fields on the same flush, so a sale changes the tab's contents
