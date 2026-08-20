@@ -7,10 +7,16 @@
  * (`tick.ts`), the loader, the object model, the widget layer. What differs is exactly three things,
  * and each is a real difference rather than a copy that drifted:
  *
- *  1. **The manifest and the directory.** `Interface\FrameXML\FrameXML.toc`, 139 entries, loaded
- *     ENTIRE -- no `stopAfter`. The glue runtime stops after `CharacterCreate.xml` because the glue
- *     documents past it name screens this client has no state for; the world manifest has no such
- *     natural cut, and cutting it arbitrarily would drop the frames the player is here to see.
+ *  1. **The manifest and the directory -- and there are now TWO roots.**
+ *     `Interface\FrameXML\FrameXML.toc`, 139 entries, loaded ENTIRE -- no `stopAfter`. The glue
+ *     runtime stops after `CharacterCreate.xml` because the glue documents past it name screens this
+ *     client has no state for; the world manifest has no such natural cut, and cutting it arbitrarily
+ *     would drop the frames the player is here to see.
+ *
+ *     The second root is `Interface\AddOns\Blizzard_*`, which the real client also loads and this
+ *     one did not. Its startup set is ONE addon (`addons.ts` has the census and the `## LoadOnDemand`
+ *     reading), and without it `TokenFrame` is nil and the character sheet cannot open at all. It runs
+ *     after the manifest and before the login events, in the addon pass below.
  *
  *  2. **The engine API set.** `installLoginApi`/`installRealmsApi`/`installCharactersApi` are the
  *     PRE-WORLD session's surface (`AccountLogin`, `RealmList`, `CharacterSelect`) and have no
@@ -48,6 +54,7 @@ import { GlueArt } from '../art';
 import { Viewport } from '../layout';
 import { Widget } from '../widget';
 import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
+import { prefetchStartupAddOns } from './addons';
 import { cacheKey, prefetchManifest, registerTreeArt } from './manifest';
 import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret, placeSelection } from './tick';
 import { parseXml } from './xml';
@@ -69,6 +76,7 @@ import { installCastingApi } from './lua/api/casting';
 import { installItemsApi } from './lua/api/items';
 import { installSpellsApi } from './lua/api/spells';
 import { installCursorApi } from './lua/api/cursor';
+import { installAddOnsApi, markAddOnLoaded } from './lua/api/addons';
 import { DEFAULT_BINDINGS, fetchBindings } from './bindings';
 import { invokeScriptHandler } from './lua/scripts';
 import type { FileReport } from './runtime';
@@ -132,6 +140,14 @@ export interface WorldRuntime {
    * measurement taken from `loadMs` afterwards would silently be measuring something else.
    */
   readonly longestBlockMs: number;
+  /**
+   * Wall clock for the `Interface\AddOns\Blizzard_*` startup pass only, in ms -- execution, not fetch.
+   *
+   * Reported apart from `loadMs` on purpose. Rounds 28 and 28b spent themselves getting the interface's
+   * first draw down, and adding a second manifest root is exactly the kind of change that gives some of
+   * that back without anyone noticing. A separate number is the detector.
+   */
+  readonly addOnsMs: number;
   /** Per-frame work the document itself cannot do. Safe to call before/after anything. */
   update(dt: number): void;
   /** THE teardown: `FrameRegistry.reset()` plus the VM itself. */
@@ -149,9 +165,18 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // manifest's 264, so it costs nothing here -- and it has to be in hand before the first file runs, for
   // the reason `installBindingsApi` is called early below. Fetching it after the load would be the
   // `Spell.dbc` mistake in miniature (`ui/action-bridge.ts`): a fetch that starves the boot.
-  const [{ order, texts, tocMissing }, bindingCommands] = await Promise.all([
+  const [{ order, texts, tocMissing }, bindingCommands, addOns] = await Promise.all([
     prefetchManifest(FRAMEXML_DIR, TOC, options.stopAfter),
     fetchBindings(),
+    // THE `Interface\AddOns\Blizzard_*` STARTUP SET, fetched alongside the manifest for the same
+    // reason `Bindings.xml` is: it is 23 `.toc` probes plus one addon's three files against the
+    // manifest's 264, and it has to be in hand before the load ends so the addons can run in the
+    // client's own order -- FrameXML, then addons, then the login events.
+    //
+    // `options.stopAfter` SUPPRESSES it. That option exists so a measurement can bisect the manifest,
+    // and an addon executed on top of a deliberately truncated FrameXML would inherit templates that
+    // were never registered -- so a bisect run would report the addon's failures as its own.
+    options.stopAfter === undefined ? prefetchStartupAddOns() : Promise.resolve([]),
   ]);
 
   const started = performance.now();
@@ -204,6 +229,9 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // during it, and because `installCursorApi` is what makes `PickupSpell` exist for those buttons' handlers
   // to be bound against.
   installCursorApi(vm);
+  // `IsAddOnLoaded` (read by `uiparent.lua:325` during `VARIABLES_LOADED`) and the `LoadAddOn` gap.
+  // Before the load because the addon files run inside the same pass, below.
+  installAddOnsApi(vm);
 
   /**
    * `SHOW_NEWBIE_TIPS` -- an ENGINE global, not a FrameXML one, and the micro buttons' tooltips need it.
@@ -294,6 +322,66 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     const fileReport = loadDocument(runtime, parseXml(text), resolve, file);
     files.push({ file, kind: 'xml', ...fileReport });
   }
+
+  /**
+   * THE ADDONS, after the whole manifest and before the login events -- the client's own order.
+   *
+   * `Interface\AddOns\Blizzard_TokenUI` is the only member of the startup set (see `addons.ts` for
+   * the census and the `## LoadOnDemand` reading), and it is not optional decoration:
+   * `CHARACTERFRAME_SUBFRAMES` (`characterframe.lua:1`) lists `TokenFrame`, and
+   * `CharacterFrame_ShowSubFrame` walks that table doing `_G[value]:Hide()` at
+   * `characterframe.lua:28`. With the addon unloaded that is an index of nil, so the character sheet
+   * could not open by ANY tab -- which is the owner's report.
+   *
+   * AFTER the manifest, not interleaved: the addon's XML inherits `HybridScrollFrameTemplate`
+   * (`blizzard_tokenui.xml:211`), `SmallMoneyFrameTemplate` (:237), `UIPanelButtonTemplate` (:244) and
+   * `OptionsSmallCheckButtonTemplate` (:314), all registered by FrameXML documents, and a template is
+   * only resolvable once its own file has run.
+   *
+   * `ADDON_LOADED` is fired per addon with the addon's name, which is the engine's contract for it --
+   * and BEFORE `VARIABLES_LOADED`, since a frame the addon creates has to exist before
+   * `LocalizeFrames` walks the tree.
+   *
+   * No yield inside this loop, unlike the manifest's: it is three files, and the yield is there to let
+   * the loading screen's bar advance across 264.
+   */
+  const addOnsStarted = performance.now();
+  for (const addOn of addOns) {
+    if (addOn.manifest.tocMissing) {
+      report.errors.push(`${addOn.dir}${addOn.name}.toc: could not be fetched; the addon was skipped`);
+      continue;
+    }
+    // A resolver over the ADDON's own file closure, falling back to FrameXML's. The fallback is not
+    // theoretical tidiness: `<Include>` and `<Script file=>` inside an addon are relative to the addon
+    // directory, and keeping the two maps separate is what stops a shared basename resolving to the
+    // wrong tree's file -- `Localization.lua` exists in both.
+    const resolveAddOn = (path: string): string | null =>
+      addOn.manifest.texts.get(cacheKey(path)) ?? texts.get(cacheKey(path)) ?? null;
+    for (const file of addOn.manifest.order) {
+      // Labelled with the addon name so a file report cannot be confused with a FrameXML entry.
+      const label = `${addOn.name}\${file}`;
+      const text = resolveAddOn(file);
+      if (text === null) {
+        files.push({ file: label, kind: 'missing', frames: 0, warnings: [], errors: [`${label}: not found`] });
+        continue;
+      }
+      if (/\.lua$/i.test(file)) {
+        const error = vm.run(text, label);
+        files.push({
+          file: label,
+          kind: 'lua',
+          frames: 0,
+          warnings: [],
+          errors: error === null ? [] : [`${label}: ${error.message}`],
+        });
+        continue;
+      }
+      files.push({ file: label, kind: 'xml', ...loadDocument(runtime, parseXml(text), resolveAddOn, label) });
+    }
+    markAddOnLoaded(vm, addOn.name);
+    fireEvent(vm, 'ADDON_LOADED', [addOn.name]);
+  }
+  const addOnsMs = performance.now() - addOnsStarted;
 
   for (const entry of files) {
     report.frames += entry.frames;
@@ -482,6 +570,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     files,
     loadMs,
     longestBlockMs,
+    addOnsMs,
     update: (dt: number) => {
       caretClock += dt;
       const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
