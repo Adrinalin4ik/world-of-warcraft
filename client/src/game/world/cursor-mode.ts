@@ -183,6 +183,23 @@ function combatReach(unit: Unit | null): number {
 }
 
 /**
+ * The SQUARED melee interact reach between two units -- `max(reachA + reachB + 1.3333, 5.0)` squared.
+ *
+ * Extracted and exported rather than left inline because a SECOND consumer arrived:
+ * `ui/interaction-watch.ts` closes an open loot window when the player walks out of exactly this
+ * radius, and the cursor greys the Pickup pouch at exactly this radius. Those two must agree or the
+ * window shuts while the client's own cursor still says the corpse is lootable -- so there is one
+ * function and not two copies of the arithmetic.
+ *
+ * `classifyUnitCursor` below calls it, so the grey gate and the close gate are literally the same
+ * expression evaluated twice.
+ */
+export function interactReachSq(self: Unit | null, unit: Unit | null): number {
+  const reach = Math.max(combatReach(unit) + combatReach(self) + MELEE_OFFSET, MELEE_FLOOR);
+  return reach * reach;
+}
+
+/**
  * The per-bit service ladder (`0x482336..0x4824e3`, statically unrolled), **lowest bit wins**.
  *
  * Row for row the reference's `service_cursor` (`cursor_mode.rs:428-457`), with its own folding of
@@ -269,9 +286,9 @@ export function classifyUnitCursor(
 ): WorldCursorMode | null {
   const { distanceSq } = inputs;
   // The melee interact reach: both units' combat reach plus the offset, FLOORED at 5 yd. See
-  // `combatReach` for why both terms are currently 0 and what that does and does not affect.
-  const reach = Math.max(combatReach(unit) + combatReach(self) + MELEE_OFFSET, MELEE_FLOOR);
-  const inMelee = distanceSq <= reach * reach;
+  // `combatReach` for why both terms are currently 0 and what that does and does not affect, and
+  // `interactReachSq` for why the arithmetic lives in a shared function now.
+  const inMelee = distanceSq <= interactReachSq(self, unit);
 
   if (unit.dead) {
     if (((unit.fields.dynamicFlags ?? 0) & DYNFLAG_LOOTABLE) !== 0) {

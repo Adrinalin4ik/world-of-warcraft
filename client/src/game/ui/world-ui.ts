@@ -49,6 +49,7 @@ import { attachSkillsBridge } from './skills-bridge';
 import { attachReputationBridge } from './reputation-bridge';
 import { attachLootBridge } from './loot-bridge';
 import { attachGossipBridge } from './gossip-bridge';
+import { attachInteractionWatch } from './interaction-watch';
 import { attachMerchantBridge } from './merchant-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { publishRects, clearRects } from './rects';
@@ -250,6 +251,15 @@ export class WorldUiHost {
 
   /** `attachMerchantBridge`'s teardown, held so `dispose` can run it. */
   private detachMerchant: (() => void) | null = null;
+
+  /**
+   * THE OPEN-INTERACTION WATCH -- what closes the vendor and the corpse when the player walks off.
+   *
+   * Held as a pair rather than a teardown alone because it is the only bridge with a POLL: nothing
+   * else in the interface has to notice the world moving. See `ui/interaction-watch.ts` on why the
+   * engine owns this (neither the server nor the documents do) and why 250 ms.
+   */
+  private interactionWatch: { poll: (nowMs: number) => void; dispose: () => void } | null = null;
 
   /** `attachGroupBridge`'s teardown, held so `dispose` can run it. */
   private detachGroup: (() => void) | null = null;
@@ -575,6 +585,10 @@ export class WorldUiHost {
         // know the kind.
         this.detachGossip = attachGossipBridge(runtime.vm, this.world, this.art);
         this.detachMerchant = attachMerchantBridge(runtime.vm, this.world, this.art);
+        // WALK AWAY AND THE WINDOW SHUTS -- the vendor's and the corpse's, one mechanism. Attached
+        // after both bridges because it drives their handlers, and gated on a real session like they
+        // are: an offline world has neither a vendor nor a corpse to walk away from.
+        this.interactionWatch = attachInteractionWatch(this.world);
         // THE CHARACTER SHEET'S STAT PANES. Gated on a real session like the three above: every number
         // it answers is a descriptor word off our own character, and an offline world has no descriptor.
         // AFTER them for no reason but readability -- it subscribes to `world.on('unit:fields')` and
@@ -650,6 +664,11 @@ export class WorldUiHost {
     }
     this.sections.begin('ui.tick');
     this.runtime.update(dt);
+    // THE OPEN-INTERACTION POLL, inside the tick section it belongs to. Self-throttled to 250 ms and
+    // a pair of null checks when nothing is open, so on the overwhelming majority of frames this is
+    // one comparison against a deadline. `performance.now()` rather than accumulating `dt`: a poll
+    // measured in frames would fire eight times as often on a fast machine.
+    this.interactionWatch?.poll(performance.now());
     this.sections.end('ui.tick');
 
     const viewport = { width: window.innerWidth, height: window.innerHeight };
@@ -1207,6 +1226,8 @@ export class WorldUiHost {
     this.detachLoot = null;
     this.detachMerchant?.();
     this.detachMerchant = null;
+    this.interactionWatch?.dispose();
+    this.interactionWatch = null;
     this.detachGossip?.();
     this.detachGossip = null;
     this.detachGroup?.();
