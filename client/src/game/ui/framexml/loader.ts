@@ -1389,13 +1389,18 @@ class DocumentLoader {
     } else if (tag === 'statusbar') {
       this.applyStatusBar(element, wrapper, dbg);
     } else if (tag === 'slider') {
-      // Unchanged, and still a gap: `lua/methods/scroll.ts` gives SLIDER its VALUE methods -- which is
-      // what the client's own scroll code reads and what eleven of the manifest's load errors turned
-      // on -- but nothing in `widget.ts` draws a slider's track or thumb. `<StatusBar>` has moved out
-      // of this branch because its fill IS drawn now (`widget.ts#barFillRect`); a Slider's is not.
+      // `<ThumbTexture>` IS APPLIED NOW, and its absence is why no scrollbar in the client had a
+      // visible thumb. It is a first-class element on a `<Slider>` and the state-texture list in
+      // `applyButton` stops at Checked -- so it was read by nothing. Six exist in the manifest and two
+      // are in `uipaneltemplates.xml`, the scrollbar template every scroll frame inherits.
+      this.applySliderThumb(element, wrapper, selfName, dbg);
+      // The remaining gap is narrower than this line used to claim: a Slider's VALUE methods are real
+      // (`lua/methods/scroll.ts`, and `SetValue` now fires `OnValueChanged`, which is what makes the
+      // arrows scroll), and its thumb ART is applied above. What is still missing is thumb TRAVEL --
+      // nothing moves the thumb as the value changes, because `widget.ts` models no slider geometry.
       this.warnOnce(
         'kind:slider',
-        `<Slider> bar/thumb attributes are ignored: nothing in this renderer draws a Slider's track or fill (its value methods are real; only the art is missing) (first: ${dbg})`,
+        `<Slider> thumb art is applied but does not TRACK the value: this renderer models no thumb travel, so the thumb sits where its XML anchors put it (first: ${dbg})`,
       );
     } else if (tag === 'model' || tag === 'modelffx' || tag === 'playermodel') {
       this.applyModel(element, wrapper, dbg);
@@ -1824,6 +1829,49 @@ class DocumentLoader {
    * matches what the client does: the observable difference is a child whose `OnLoad` rewires its
    * parent's `OnLoad` before the parent fires, and in that case the client runs the new handler too.
    */
+  /**
+   * `<ThumbTexture>` on a `<Slider>`.
+   *
+   * EXPANDED first, exactly like `applyButton`'s slots and for the same reason: a thumb routinely
+   * carries no `file=` of its own and inherits a virtual `<Texture>` that does. `UIPanelScrollFrame`'s
+   * is `<ThumbTexture name="$parentThumbTexture" file="Interface\Buttons\UI-ScrollBar-Knob">`, which
+   * does carry one, but `colorpickerframe.xml` and `optionspaneltemplates.xml` are not guaranteed to.
+   *
+   * The region is reached through `SetThumbTexture`/`GetThumbTexture` (`methods/scroll.ts`) so the
+   * object model owns the slot, then decorated by the SAME `applyRegion` path a `<Layers>` texture
+   * takes -- so its `<Size>`, `<Anchors>`, `<TexCoords>` and `<Color>` all work without a second
+   * implementation.
+   */
+  private applySliderThumb(
+    element: XmlElement,
+    wrapper: LuaRef,
+    selfName: string,
+    dbg: string,
+  ): void {
+    for (const raw of childrenNamed(element, 'ThumbTexture')) {
+      const thumb = this.expandRegion(raw);
+      const file = attr(thumb, 'file');
+      // The setter runs even with an empty file: it is what CREATES the slot. Same contract the button
+      // state textures use.
+      this.callMethod(wrapper, 'SetThumbTexture', [file ?? ''], dbg);
+      const region = this.callForWidget(wrapper, 'GetThumbTexture', [], dbg);
+      if (region === null) {
+        continue;
+      }
+      try {
+        const texCoords = texCoordsOf(thumb);
+        if (texCoords !== null) {
+          this.callMethod(region, 'SetTexCoord', texCoords, dbg);
+        }
+        // The SAME layout path a `<Layers>` texture takes, so `<Size>` and `<Anchors>` need no second
+        // implementation here.
+        this.applyRegionLayout(thumb, region, selfName, dbg);
+      } finally {
+        this.rt.vm.unref(region);
+      }
+    }
+  }
+
   /**
    * `<Attributes><Attribute name= type= value=/></Attributes>` -- and NOTHING read these before.
    *

@@ -23,15 +23,27 @@
  * child (0 -- there is nothing to scroll), and it is the value the `floor(yrange) == 0` branch in
  * `GlueScrollFrame_OnScrollRangeChanged` needs in order to hide a scrollbar that is not needed.
  *
- * NO EVENT DISPATCH from these setters, though the engine has some. Real `SetValue` fires
- * `OnValueChanged` and real `SetVerticalScroll` fires `OnVerticalScroll`, and both of those handlers
- * read their argument as a NAMED PARAMETER in the client's own XML (`GlueScrollBarTemplate`'s
- * `<OnValueChanged>` is `self:GetParent():SetVerticalScroll(value)`). `lua/scripts.ts` compiles a
- * handler body as `function(self, ...)`, so `value` would resolve to a nil global and the dispatch
- * would push nil straight back through this file. That is the same convention gap `runtime.ts`
- * declines to fire `OnUpdate` over; firing here would be the same mistake in a smaller place.
+ * **THIS HEADER USED TO SAY THESE SETTERS FIRE NOTHING, and that rationale is now STALE** -- the same
+ * class of defect as `api/secure.ts`'s header, which claimed a live subsystem was missing. It argued
+ * that a handler reading `value` as a NAMED PARAMETER would see a nil global because `lua/scripts.ts`
+ * compiles bodies as `function(self, ...)`. That is no longer true: `scripts.ts:135` binds
+ * `['value']` for `OnValueChanged` and `:141` binds `['offset']` for `OnVerticalScroll`, and
+ * `methods/statusbar.ts:148-151` has been dispatching `OnValueChanged` this way all along -- which is
+ * how every unit frame's health bar updates.
+ *
+ * So `SetValue` DOES fire `OnValueChanged` now, and not firing it was the whole of "скролла у нас нет"
+ * being more than cosmetic: `FauxScrollFrameTemplate`'s scrollbar carries
+ * `<OnValueChanged>FauxScrollFrame_OnVerticalScroll(...)</OnValueChanged>`, and its arrow buttons do
+ * nothing but `scrollBar:SetValue(scrollBar:GetValue() -/+ scrollBar:GetValueStep())`. Without the
+ * dispatch, an arrow click moved a number and **nothing re-rendered the list** -- so no scroll frame in
+ * the client could be scrolled at all, not just the Skills tab.
+ *
+ * `SetVerticalScroll` still fires nothing, and that one is a real remaining gap rather than a stale
+ * note: this file does not move the scroll child (see above), so an `OnVerticalScroll` dispatch would
+ * announce a scroll that did not happen.
  */
 import { MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
+import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { widgetOf } from './region';
 
 interface ScrollState {
@@ -144,9 +156,21 @@ const SCROLLFRAME: MethodTable = {
 const SLIDER: MethodTable = {
   // Clamped, like the scroll offsets above and for the same reason: `GlueScrollFrame_Update` and both
   // arrow-button handlers push the value past an end and read it back.
-  SetValue: (_ctx, self, args) => {
+  SetValue: (ctx, self, args) => {
     const state = sliderState(self);
-    state.value = Math.max(state.min, Math.min(state.max, Number(args[0] ?? 0)));
+    const wanted = Math.max(state.min, Math.min(state.max, Number(args[0] ?? 0)));
+    if (wanted === state.value) {
+      // ON THE TRANSITION ONLY, like `statusbar.ts`: the arrow handlers push a value past an end and
+      // read it back, so an unchanged write is the ordinary case and must not re-run the handler.
+      return [];
+    }
+    state.value = wanted;
+    const error = invokeScriptHandler(ctx, self, 'OnValueChanged', [state.value]);
+    if (error !== null) {
+      reportScriptError(
+        `${ctx.registry.nameOf(self) ?? `frame ${self}`}: OnValueChanged`, error.message,
+      );
+    }
     return [];
   },
   GetValue: (_ctx, self) => [sliderState(self).value],
@@ -175,7 +199,47 @@ const SLIDER: MethodTable = {
     return [];
   },
   GetOrientation: (_ctx, self) => [sliderState(self).orientation],
+  /**
+   * `SetThumbTexture` / `GetThumbTexture` -- the draggable part of a scrollbar, and NOTHING created it.
+   *
+   * `<ThumbTexture>` is a first-class XML element on a `<Slider>` and `loader.ts` had no handling for
+   * it at all (its state-texture list covers Normal/Pushed/Disabled/Highlight/Checked and stops). Six
+   * exist in the loaded manifest, and **two of them are in `uipaneltemplates.xml`** -- the scrollbar
+   * template every scroll frame in the client inherits -- so no scrollbar anywhere had a visible thumb.
+   *
+   * The region is created as a child Texture and left for the loader to size and anchor from the
+   * element, exactly as `applyButton` does for its slots. **It is NOT positioned by the slider's
+   * value**: this widget layer models no thumb travel, so the thumb sits where the XML anchors it. That
+   * is a real and stated limit -- the arrows and the mouse wheel scroll correctly through
+   * `OnValueChanged` (see the header), and it is the thumb's POSITION that lags, not the list.
+   */
+  SetThumbTexture: (ctx, self, args) => {
+    const id = ensureThumbTextureId(ctx, self);
+    const region = ctx.registry.widget(id);
+    if (region === undefined) {
+      return [];
+    }
+    const arg = args[0];
+    if (typeof arg === 'string') {
+      region.sprite = arg;
+      region.solid = false;
+    }
+    return [];
+  },
+  GetThumbTexture: (ctx, self) => [ctx.wrapper(ensureThumbTextureId(ctx, self))],
 };
+
+/** The slider's thumb region, created on first use. Keyed by frame id, like the button state slots. */
+const thumbTextures = new Map<number, number>();
+
+function ensureThumbTextureId(ctx: MethodContext, self: number): number {
+  let id = thumbTextures.get(self);
+  if (id === undefined) {
+    id = ctx.registry.create('Texture', null, self);
+    thumbTextures.set(self, id);
+  }
+  return id;
+}
 
 registerMethods('SCROLLFRAME', SCROLLFRAME);
 registerMethods('SLIDER', SLIDER);
