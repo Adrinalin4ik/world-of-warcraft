@@ -70,6 +70,23 @@ const EVENT_METHODS: MethodTable = {
     return [];
   },
 
+  /**
+   * `IsEventRegistered(eventName)` -> whether THIS frame is in that event's list.
+   *
+   * Added as an INSTRUMENT as much as an API: the character sheet's stat panes are blank because
+   * `PaperDollFrame` does not receive `VARIABLES_LOADED` at login even though its `OnEvent` is bound and
+   * a manual replay of the handler fills both panes correctly (measured -- see
+   * `ui/paperdoll-stats.ts`). Without this method there was no way to ask, from Lua, whether the frame
+   * was registered at all, so the question could not be separated from "the event was not fired".
+   *
+   * It is real API too: `IsEventRegistered` exists in 3.3.5a, and reading back a list this file already
+   * owns asserts nothing new.
+   */
+  IsEventRegistered: (_ctx, self, args) => {
+    const list = framesByEvent.get(String(args[0] ?? ''));
+    return [list !== undefined && list.includes(self)];
+  },
+
   // UnregisterEvent(eventName). Removing in place (not replacing the array) matters for the same
   // reason `fireEvent` re-reads by index below: if this ever fires from inside a dispatch of the same
   // event, the in-progress walk has to see the shorter list, not a stale reference to the old one.

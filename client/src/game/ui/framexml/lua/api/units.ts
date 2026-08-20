@@ -892,6 +892,27 @@ export function installUnitsApi(vm: LuaVM): void {
     ['ExpandCurrencyList', 'as GetBackpackCurrencyInfo', []],
     ['SetCurrencyBackpack', 'as GetBackpackCurrencyInfo', []],
     ['SetCurrencyUnused', 'as GetBackpackCurrencyInfo', []],
+    // THE TITLE PICKER -- the empty select at the top of the Character tab.
+    //
+    // **0 titles is what makes the client HIDE the control itself**, which is why these carry values.
+    // `PlayerTitleFrame_UpdateTitles` counts the known titles and ends
+    // `if ( titleCount < 2 ) then PlayerTitleFrame:Hide(); PlayerTitlePickerFrame:Hide();`
+    // (`paperdollframe.lua:2619-2621`) -- so with `GetNumTitles` answering 0 the whole picker goes away
+    // rather than sitting there empty. It was sitting there empty because the routine raised on its own
+    // FIRST line, `GetCurrentTitle()` (`:2593`), and never reached the hide.
+    //
+    // `IsTitleKnown` is compared `~= 0` (`:2605`), not tested for truth, so 0 is the value and false
+    // would read as "known" in Lua. `GetCurrentTitle` answers 0, which the same routine maps to the
+    // `PAPERDOLL_SELECT_TITLE` caption -- unreachable here, since the hide comes first.
+    //
+    // The feed: `PLAYER_CHOSEN_TITLE` on the descriptor plus the known-title bitmask in
+    // `PLAYER__FIELD_KNOWN_TITLES`, joined to `CharTitles.dbc`. None of the three is read.
+    ['GetNumTitles', 'the known-title bitmask (PLAYER__FIELD_KNOWN_TITLES) and CharTitles.dbc are not '
+      + 'read, so no title is known; 0 is what makes the client hide its own picker', [0]],
+    ['GetCurrentTitle', 'PLAYER_CHOSEN_TITLE is not read', [0]],
+    ['IsTitleKnown', 'as GetNumTitles -- compared against 0, so 0 and not false', [0]],
+    ['GetTitleName', 'as GetNumTitles -- CharTitles.dbc is not joined', []],
+    ['SetCurrentTitle', 'CMSG_SET_TITLE is not sent; with no title known there is none to choose', []],
   );
 
   vm.run(

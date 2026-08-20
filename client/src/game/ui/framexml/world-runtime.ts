@@ -66,6 +66,7 @@ import { syncInteractiveArt } from './lua/methods/kinds';
 import { tickMessageFrames } from './lua/methods/messageframe';
 import { LuaVM } from './lua/vm';
 import { installScreenApi } from './lua/api/screen';
+import { raceClassData } from '../../pipeline/dbc/race-class-data';
 import { installSecureApi } from './lua/api/secure';
 import { installSoundApi } from './lua/api/sound';
 import { installStubApi } from './lua/api/stubs';
@@ -203,6 +204,15 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   const ctx = installObjectModel(vm, registry, options.input ?? null);
 
   installScreenApi(vm, { viewport: options.viewport });
+  // `ChrRaces.dbc` / `ChrClasses.dbc`, KICKED HERE rather than at `attachUnitBridge` (which runs after
+  // this whole function returns). Not awaited: nothing in the load needs it and `UnitRace`/`UnitClass`
+  // already document that they answer nil until it lands. Moved earlier because the client's own
+  // `VARIABLES_LOADED` handlers read `UnitClass("player")` and a ~20-second manifest load is plenty of
+  // time for a two-table DBC -- so this costs nothing and removes a race rather than papering over one.
+  //
+  // It is HALF the fix for the blank stat panes -- the other half is re-seeding the snapshot after it
+  // lands, because the seed that runs before the manifest caches a null class. See the await below.
+  void raceClassData.ensureLoaded();
   installSoundApi(vm);
   installStubApi(vm);
   // The two that landed with the `TargetFrame` survey and had no caller until this host existed.
@@ -439,8 +449,39 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     return addOn === undefined ? false : runAddOn(addOn);
   });
 
+
   /**
-   * A KNOWN ORDERING HAZARD, NAMED AND NOT FIXED HERE.
+   * THE STAT PANES' ONE-SHOT, AND WHY IT NEEDED BOTH AN AWAIT **AND** A RE-SEED.
+   *
+   * `PaperDollFrame_OnEvent`'s `VARIABLES_LOADED` arm writes the two stat-pane CVars exactly once, off
+   * `local temp, classFileName = UnitClass("player")` then `strupper(classFileName)`
+   * (`paperdollframe.lua:164-165`). A nil class raises `strupper` and the handler dies before its
+   * `SetCVar` calls -- and `UpdatePaperdollStats` is a five-way `if index == "PLAYERSTAT_*"` chain with
+   * no else, so both panes then keep their placeholders for the whole session.
+   *
+   * **Measured, in three steps, and the first two diagnoses were wrong:**
+   *  1. seeding the CVars empty (`api/screen.ts`) was necessary -- `nil == ""` is false in Lua -- and
+   *     not sufficient;
+   *  2. awaiting `ChrClasses.dbc` here alone did NOT help, measured: both CVars still read `""`;
+   *  3. `PaperDollFrame:IsEventRegistered("VARIABLES_LOADED")` answers **true** and a manual replay of
+   *     the handler fills both panes and both dropdown labels. So the event was delivered and the
+   *     handler ran -- and the only thing that differs between then and the replay is `UnitClass`.
+   *
+   * The missing link is that **the DBC landing does not refresh the snapshot**. `options.seed` runs
+   * before the manifest and computes `classInfo` from `raceClassData`, which answers null until its
+   * tables land (`unit-bridge.ts:96`); nothing re-pushes that snapshot until `attachUnitBridge`, which
+   * is after this function returns. So awaiting the fetch fixed the DATA and left the SNAPSHOT stale.
+   * Both are needed: await the tables, then re-run the seed, then fire.
+   *
+   * The await is free because the fetch was kicked before the manifest (see `installScreenApi` above),
+   * and `ensureLoaded` catches its own failure (`race-class-data.ts:52-57`) so a 404 cannot reject here.
+   * Re-seeding is idempotent -- `seedUnitSnapshots` only calls `setUnit` with a fresh snapshot.
+   */
+  await raceClassData.ensureLoaded();
+  options.seed?.(vm);
+
+  /**
+   * THE REST OF THE ORDERING HAZARD, NAMED AND NOT FIXED HERE.
    *
    * These handlers read unit state, and one of them cannot recover from reading it early:
    * `PaperDollFrame_OnEvent`'s `VARIABLES_LOADED` arm writes the two stat-pane CVars exactly once, off
@@ -450,12 +491,9 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    * true (see `api/screen.ts`), and the globals the panes read are all real
    * (`ui/paperdoll-stats.ts`), but the panes were still measured blank after a full login.
    *
-   * An `await` on `raceClassData.ensureLoaded()` was tried here and REMOVED: it puts a DBC fetch on the
-   * critical path of the entire interface, where a hang costs the whole UI rather than two labels, and
-   * three attempts to observe whether it helped lost the world runtime to an unrelated recompile. The
-   * glue runtime already loads that DBC for the character-select screen, so it is probably warm by
-   * here and `UnitClass` is probably NOT the failing call -- which is exactly why this is recorded as
-   * an open question rather than fixed on a guess.
+   * Every OTHER login handler that reads unit state reads it out of the snapshots `options.seed` put
+   * in before the manifest, which is the seam that exists for exactly this. `UnitClass` is the
+   * exception only because its answer needs a DBC as well as a snapshot.
    */
   // The client's own login sequence -- see decision 3 in the header for what each one does and where.
   // A handler that raises must not abort the rest, so `fireEvent` queues and this drains once after.
