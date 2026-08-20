@@ -10,12 +10,10 @@ describe('CMSG_NAME_QUERY', () => {
   // THE DEFECT: the unit path passes the normalised hex STRING every guid in this client is, and
   // `writeGUID` writes `guid.raw` -- undefined for a string, which `byte-buffer` THROWS on. So the
   // very first name query from a unit would have taken out its caller rather than reaching the wire.
-  it('writeGUID throws on a hex-string guid, which is why askName converts instead', () => {
-    const app = new GamePacket(GameOpcode.CMSG_NAME_QUERY, 64);
-    expect(() => app.writeGUID('0000000000000102' as never)).toThrow(/not a sequence/);
-  });
+  it('writeGUID throws on a hex string; guidBytes writes 8 LE bytes after the header', () => {
+    expect(() => new GamePacket(GameOpcode.CMSG_NAME_QUERY, 64)
+      .writeGUID('0000000000000102' as never)).toThrow(/not a sequence/);
 
-  it('writes the guid as 8 little-endian bytes straight after the outgoing header', () => {
     const app = new GamePacket(GameOpcode.CMSG_NAME_QUERY, 64);
     app.write(Array.from(guidBytes('0807060504030201')));
 
@@ -34,9 +32,11 @@ describe('SMSG_NAME_QUERY_RESPONSE tail', () => {
   it('reads race, gender and class after an empty realm name', () => {
     const gp = new GamePacket(GameOpcode.SMSG_NAME_QUERY_RESPONSE, 64);
     gp.index = 0;
-    gp.writeString('Fdsh');
-    gp.writeUnsignedByte(0); // name terminator
-    gp.writeUnsignedByte(0); // realm name: an empty C-string
+    // `writeCString` writes the bytes AND the terminator. NOT `writeString`, which exists on the
+    // `byte-buffer` object at runtime but not in its type declarations -- jest passed on it while
+    // `tsc` failed, which is exactly the split `CLAUDE.md` says to run both checks for.
+    gp.writeCString('Fdsh');
+    gp.writeUnsignedByte(0); // realm name: an empty C-string, i.e. the terminator alone
     gp.writeUnsignedByte(1); // race   -- Human
     gp.writeUnsignedByte(0); // gender -- male
     gp.writeUnsignedByte(4); // class  -- Rogue
