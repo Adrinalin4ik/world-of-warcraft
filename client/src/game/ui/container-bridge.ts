@@ -1028,8 +1028,70 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    *
    * Returns nothing: every caller is a Lua global whose own return value the client ignores.
    */
+  /**
+   * REPAIR MODE: mend the item in this slot instead of doing anything else with it. True when handled.
+   *
+   * `MerchantRepairItemButton` toggles the mode (`merchantframe.xml:453-461`), the bag tooltip already
+   * prices the slot from it (`GameTooltip:SetBagItem`'s second return), and this is the click that
+   * spends the money. Gated on a merchant being open as well as on the mode, because the mode is a
+   * per-VM flag and a stale true would send `CMSG_REPAIR_ITEM` at nobody.
+   *
+   * An item with nothing to repair is left alone and answers FALSE, so a click on a potion in repair
+   * mode falls through to its ordinary behaviour rather than being swallowed. `repairCostOf` answers 0
+   * for that (a fact about the item) and null while a template is in flight (a fact about this client);
+   * only a positive cost is worth a packet.
+   */
+  const repairHeldItem = (bag: number, slot: number): boolean => {
+    if (!getRepairMode(vm)) {
+      return false;
+    }
+    const merchant = world.game.objectHandler.merchantHandler;
+    if (merchant.source === null) {
+      return false;
+    }
+    const item = itemAt(bag === EQUIPMENT_BAG
+      ? guidAt(items.player(), ObjectType.Player,
+        PlayerField.player_field_inv_slot_head + (slot - 1) * 2)
+      : slotGuid(bag, slot));
+    if (item === null) {
+      return false;
+    }
+    const cost = readRepairCost(items, item.guid);
+    if (cost === null || cost <= 0) {
+      return false;
+    }
+    merchant.repair(item.guid, false);
+    return true;
+  };
+
+  /**
+   * The remaining half of `PickupMerchantItem`: lifting a SHOP item onto the cursor.
+   *
+   * Narrowed from the whole global to this one direction -- see `PickupMerchantItem` below. It needs a
+   * fourth cursor payload kind that `GetCursorInfo` answers as `"merchant"`.
+   */
+  const pickupMerchantStub = notImplemented(
+    'PickupMerchantItem(index >= 1)',
+    'lifting a SHOP item onto the cursor needs a fourth cursor payload kind, which GetCursorInfo must '
+      + 'answer as "merchant" for containerframe.lua\'s type == "merchant" branch; the SELL direction '
+      + '(an item already held, index 0) is implemented',
+    [],
+  );
+
   const pickOrPlace = (bag: number, slot: number): void => {
     if (wirePos(bag, slot) === null) {
+      return;
+    }
+    // REPAIR MODE TAKES THE LEFT CLICK AS WELL AS THE RIGHT, and the owner's "the repair hammer does
+    // not work" was this: the arm was in `UseContainerItem` only, i.e. on the RIGHT click, and the
+    // hammer gesture in the real client is a LEFT click on the item you want mended.
+    //
+    // BOTH buttons are handled rather than one, deliberately. Which button the real engine listens on
+    // is not stated by any served file -- `ContainerFrameItemButton_OnClick` has no repair branch at
+    // all, so the choice is engine-side and invisible to us -- and in repair mode there is no other
+    // useful action on a bag slot: picking the item up would drop the hammer for no reason. So both
+    // gestures mean "repair this", which cannot be the wrong answer for either.
+    if (repairHeldItem(bag, slot)) {
       return;
     }
     const held = getCursorItem(vm);
@@ -1084,6 +1146,70 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    */
   vm.registerFunction('PickupContainerItem', (args) => {
     pickOrPlace(Number(args[0]), Number(args[1]));
+    return [];
+  });
+
+  /**
+   * `PickupMerchantItem(index)` -- **THE BAG-TO-MERCHANT DROP, which is how the owner tried to sell.**
+   *
+   * This was a declared gap on `ui/merchant-bridge.ts` whose stated reason was that a merchant item
+   * needs a FOURTH cursor payload kind. That reason was half right, and the half it got wrong is the
+   * half the owner actually uses.
+   *
+   * The global is BIDIRECTIONAL, and the client's own XML shows both ends:
+   *
+   *  - `MerchantFrame`'s `<OnReceiveDrag>` is `MerchantItemButton_OnClick(self, "LeftButton")`
+   *    (`merchantframe.xml:803-805`), which with the merchant tab selected reaches
+   *    `PickupMerchantItem(self:GetID())` -- and `MerchantFrame:GetID()` is **0**. Its `<OnMouseUp>`
+   *    calls `PickupMerchantItem(0)` outright (`:794-802`). So dropping a held bag item onto the shop
+   *    window arrives here as index 0 with an item ON THE CURSOR, and means SELL IT.
+   *  - index >= 1 with an EMPTY cursor is the other direction -- lifting a shop item onto the cursor to
+   *    drop into a chosen bag slot. THAT is the one needing a fourth payload kind, because
+   *    `GetCursorInfo` has to answer the type string `"merchant"` for
+   *    `ContainerFrameItemButton_OnClick`'s `type == "merchant"` branch (`containerframe.lua:707`).
+   *    Still declared, and now declared for the narrower reason.
+   *
+   * So the sell direction needs NOTHING new: the cursor already holds a real item with its bag and slot,
+   * which is all `CMSG_SELL_ITEM` wants. It lives here rather than on the merchant bridge because this
+   * is where the item cursor and `slotGuid` are, and because the sell send is already here for
+   * `UseContainerItem`.
+   *
+   * The cursor is cleared on the send and the row is NOT removed locally -- the item's descriptor
+   * leaving and `PLAYER_FIELD_COINAGE` rising through `UPDATE_OBJECT` are what update the bags, the same
+   * server-authoritative law the right-click sell follows.
+   */
+  vm.registerFunction('PickupMerchantItem', (args) => {
+    const index = Number(args[0]);
+    const held = getCursorItem(vm);
+    const merchant = world.game.objectHandler.merchantHandler;
+    if (held !== null) {
+      if (merchant.source === null) {
+        // Holding an item with no shop open. Keep holding it: dropping it would be a silent
+        // destruction, and there is nothing to sell it to.
+        return [];
+      }
+      const item = itemAt(held.bag === EQUIPMENT_BAG
+        ? guidAt(items.player(), ObjectType.Player,
+          PlayerField.player_field_inv_slot_head + (held.slot - 1) * 2)
+        : slotGuid(held.bag, held.slot));
+      if (item === null) {
+        // The slot emptied under the cursor. Put the cursor down rather than sending a guid we no
+        // longer believe in.
+        holdItem(null, null);
+        return [];
+      }
+      // 0 = the whole stack, the same meaning the right-click sell uses and the same the server
+      // documents as "special case at auto sell (sell all)".
+      merchant.sell(item.guid, 0);
+      holdItem(null, null);
+      lockChanged(held.bag, held.slot);
+      return [];
+    }
+    if (index >= 1) {
+      pickupMerchantStub(null as never, 0, []);
+    }
+    // Index 0 with an empty cursor is a bare click on the shop's background. Nothing, which is what the
+    // real client does.
     return [];
   });
 

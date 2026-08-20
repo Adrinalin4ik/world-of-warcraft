@@ -429,25 +429,17 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
     return [];
   });
 
-  /**
-   * `PickupMerchantItem(index)` -- put the shop's item on the cursor to drop into a bag.
-   *
-   * A DECLARED GAP, and the reason is specific rather than general: the cursor's payload space
-   * (`api/cursor.ts`) has three kinds -- an item, a spell, an action -- and a merchant item is a
-   * FOURTH, distinguished by `GetCursorInfo` answering the type string `"merchant"`, which
-   * `ContainerFrameItemButton_OnClick` branches on to complete the purchase into a chosen slot
-   * (`containerframe.lua:707-714`). Adding a kind means teaching every existing transition to refuse
-   * it, and the buy path already works through the right click, so this is named rather than
-   * half-built. Left-clicking a shop row therefore does nothing instead of doing something wrong.
-   */
-  const pickupStub = notImplemented(
-    'PickupMerchantItem',
-    'the cursor payload space has three kinds (item, spell, action) and a merchant item is a fourth '
-      + 'that GetCursorInfo must answer as "merchant"; buying works through the right click, so the '
-      + 'drag-into-a-chosen-slot path is declared rather than half-built',
-    [],
-  );
-  vm.registerFunction('PickupMerchantItem', () => pickupStub(null as never, 0, []));
+  // `PickupMerchantItem` IS NOT REGISTERED HERE ANY MORE, and the move is the fix rather than tidying.
+  //
+  // It was a declared gap whose reason -- "a merchant item is a fourth cursor payload kind" -- was only
+  // true of one of its two directions, and the OTHER direction is how the owner tried to sell: the
+  // MerchantFrame's own `<OnReceiveDrag>` and `<OnMouseUp>` reach `PickupMerchantItem(0)` with a bag
+  // item already on the cursor, meaning "sell what I am holding". That needs no new payload kind, so it
+  // is real now and lives in `ui/container-bridge.ts` with the rest of the item cursor.
+  //
+  // It MUST NOT be registered here as well: this bridge attaches after the container bridge, so a stub
+  // here would silently replace the working implementation -- the exact hazard the tooltip-source
+  // chaining note above exists for.
 
   /**
    * `CloseMerchant()` -- `MerchantFrame_OnHide`'s first statement (`merchantframe.lua:51`).

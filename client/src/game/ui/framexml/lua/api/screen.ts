@@ -231,7 +231,26 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
    * `lootframe.xml:52`, `itemref.lua:175`) meaning "was any modifier held". OURS: answered as
    * shift-or-ctrl-or-alt, which is the only reading those call sites' use as a plain boolean supports.
    */
-  const modifiedClicks = new Map<string, string>([['PICKUPACTION', 'SHIFT']]);
+  const modifiedClicks = new Map<string, string>([
+    ['PICKUPACTION', 'SHIFT'],
+    /**
+     * `SPLITSTACK` -> SHIFT. **The owner's second requirement of this table, and the reason
+     * shift-clicking a vendor's stackable did nothing.**
+     *
+     * `MerchantItemButton_OnModifiedClick` opens the quantity dialogue only behind
+     * `IsModifiedClick("SPLITSTACK")` (`merchantframe.lua:415`), and `ContainerFrameItemButton_OnModifiedClick`
+     * gates `SplitContainerItem` the same way (`containerframe.lua:754`). With the action unbound this
+     * read `NONE`, `IsModifiedClick` answered false, and the click fell through to nothing -- which is
+     * exactly what the owner reported.
+     *
+     * SOURCED THE SAME WAY `PICKUPACTION` IS, AND NO BETTER: the engine ships this default in its own
+     * config, and the client's own options panel exposes only `AUTOLOOTTOGGLE`, `SELFCAST` and
+     * `FOCUSCAST` through `SetModifiedClick` (grepped `interfaceoptionspanels.lua`) -- so no served file
+     * states a default for `SPLITSTACK` either. SHIFT is the owner's requirement, recorded as a
+     * requirement and not as a reading of the game's data.
+     */
+    ['SPLITSTACK', 'SHIFT'],
+  ]);
   const modifierHeld = (modifier: string): boolean => {
     if (modifier === 'SHIFT') {
       return shiftDown;
