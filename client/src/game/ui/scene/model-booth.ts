@@ -179,6 +179,91 @@ function paneKey(widgetId: string): string {
 }
 
 /**
+ * THE ROUND ALPHA STENCIL a portrait is masked by, and the pass that stamps it.
+ *
+ * THE REFERENCE'S OWN STEP, and the real client's: "The real 1.12 client renders a unit's model once
+ * into a tiny (64 squared) off-screen texture and freezes it (re-baked only on model change), **then
+ * stamps a round alpha stencil into it**" (`benilla/.../portrait/mod.rs:4-5`). It is also explicit that
+ * the body pane is NOT masked -- "The UI samples it *square*, not through the circular mask"
+ * (`mod.rs:17-18`) -- which is why this runs on `framing === 'portrait'` and nothing else.
+ *
+ * THE OWNER'S REPORT IS ITS ABSENCE. "The preview goes out of the bounds", on the target frame, with
+ * the player's frame in the same shot correct. Measured before writing anything, with a target up: of
+ * the 1228 pixels of a 76x76 portrait target lying OUTSIDE the inscribed circle, 570 carried alpha --
+ * a square render of a head that fills its frame, spilling past the round ring art. A narrow human
+ * face happens to sit inside the circle and so looked contained; a wide muzzle does not.
+ *
+ * A MULTIPLY, not a draw. `dstA = dstA * srcA` and RGB untouched: `blendSrc`/`blendDst` are
+ * `Zero`/`One` (the destination colour is kept verbatim) and `blendSrcAlpha`/`blendDstAlpha` are
+ * `Zero`/`SrcAlpha`, since three's blend equation is `src * srcFactor + dst * dstFactor`. That is a
+ * stencil rather than a black ring, so the mask cannot darken the face it trims and the pane keeps
+ * showing the panel art around it.
+ *
+ * STRETCHED OVER THE QUAD, so a pane that is not square gets an inscribed ELLIPSE. That is what a
+ * texture-space stencil does, it matches the reference (which stamps the stencil into the texture, not
+ * into a circle of screen pixels), and every round portrait the client authors is square anyway.
+ *
+ * The mask, the quad, the camera and the scene are all MODULE-LEVEL and shared by every pane: none of
+ * them holds per-pane state, and a portrait bake is now a rare event rather than a per-frame one, so a
+ * copy per pane would be pure allocation. Built lazily, because a client that never shows a portrait
+ * should not pay for a canvas.
+ */
+const MASK_PIXELS = 128;
+
+let maskPass: { scene: THREE.Scene; camera: THREE.OrthographicCamera } | null = null;
+
+function portraitMask(): { scene: THREE.Scene; camera: THREE.OrthographicCamera } {
+  if (maskPass !== null) {
+    return maskPass;
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = MASK_PIXELS;
+  canvas.height = MASK_PIXELS;
+  const ctx = canvas.getContext('2d')!;
+  // White at full alpha inside the circle, nothing outside. The RGB is never read -- the blend keeps
+  // the destination's -- but a fully transparent fill still has to be cleared first, or the canvas's
+  // default is undefined in some engines.
+  ctx.clearRect(0, 0, MASK_PIXELS, MASK_PIXELS);
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  // A radius one pixel inside the edge, so the anti-aliased rim of the circle is itself inside the
+  // texture rather than clamped against its border.
+  ctx.arc(MASK_PIXELS / 2, MASK_PIXELS / 2, MASK_PIXELS / 2 - 1, 0, Math.PI * 2);
+  ctx.fill();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.name = 'ModelBooth:portrait-mask';
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  // The pane samples its target with `flipY = false` conventions (see `FLIP_V`), but this quad is
+  // rendered THROUGH the same camera the figure is, so it needs no flip of its own -- the mask is
+  // symmetric about both axes in any case, which is why this is stated rather than tested for.
+  texture.needsUpdate = true;
+
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.ZeroFactor,
+    blendDst: THREE.OneFactor,
+    blendSrcAlpha: THREE.ZeroFactor,
+    blendDstAlpha: THREE.SrcAlphaFactor,
+  });
+  const scene = new THREE.Scene();
+  scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material));
+  // The whole target, in clip space: the quad is 2x2 about the origin and the camera frames exactly
+  // that, so the mask covers the pane whatever its pixel size is.
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  camera.position.set(0, 0, 1);
+
+  maskPass = { scene, camera };
+  return maskPass;
+}
+
+/**
  * LET THIS MODEL'S BATCHES WRITE DESTINATION ALPHA. This is the whole of the missing-hairstyle bug.
  *
  * `material/index.ts#applyBlendingModeToMaterial` ends with, for every blending mode >= 1:
@@ -455,6 +540,14 @@ class Pane {
       this.aim();
       this.light();
       renderer.render(this.scene, this.camera);
+      // The round stencil, over the figure. AFTER the figure and never before it: it multiplies the
+      // alpha that is already in the target, so an empty target would be masked to nothing. Portraits
+      // only -- the body pane is sampled square, which is the reference's own split
+      // (`portraitMask`, and `benilla/.../portrait/mod.rs:17-18`).
+      if (this.framing === 'portrait') {
+        const mask = portraitMask();
+        renderer.render(mask.scene, mask.camera);
+      }
     }
 
     renderer.autoClear = savedAutoClear;
