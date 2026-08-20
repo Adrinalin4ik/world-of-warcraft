@@ -123,6 +123,19 @@ interface TooltipState {
   lines: number;
   /** `SetMinimumWidth`'s value, in logical units. 0 for none. */
   minWidth: number;
+
+  /**
+   * The NAME and LINK of whatever `Set<Thing>Item` last filled this tooltip -- what
+   * `GameTooltip:GetItem()` answers. About the tooltip's CURRENT CONTENTS, not about a widget, which
+   * is why they live here and are cleared by `SetOwner`.
+   */
+  itemName?: string | null;
+  itemLink?: string | null;
+  /**
+   * The anchor `SetOwner` was given, kept so `GetAnchorType` can answer it. Not new state -- the value
+   * was already received and already mapped through `ANCHORS`; it was simply thrown away.
+   */
+  anchorType?: string;
 }
 
 /**
@@ -489,6 +502,12 @@ const GAMETOOLTIP: MethodTable = {
     state.owner = ctx.frameIdOf(args[0]);
     state.lines = 0;
     state.minWidth = 0;
+    // A NEW TOOLTIP HAS NO ITEM YET. `GameTooltip:GetItem` is about the current contents, so the
+    // previous owner's item must not survive into this one -- otherwise hovering a vendor row and then
+    // a micro button would still answer the sword.
+    state.itemName = null;
+    state.itemLink = null;
+    state.anchorType = String(args[1] ?? 'ANCHOR_NONE').toUpperCase();
     clearFrom(ctx, self, 1);
     resize(ctx, self);
 
@@ -845,6 +864,87 @@ const ITEM_SETTERS: MethodTable = {
    */
   SetMerchantItem: (ctx, self, args) => fillFromSource(ctx, self, 'merchant', Number(args[0])),
   SetBuybackItem: (ctx, self, args) => fillFromSource(ctx, self, 'buyback', Number(args[0])),
+
+  /**
+   * `GetItem()` -> `itemName, itemLink`. **A LIVE DEFECT, found on a Northshire weapon vendor.**
+   *
+   * `MerchantItemButton_OnEnter` calls `GameTooltip_ShowCompareItem(GameTooltip)` right after the
+   * setter (`merchantframe.lua:436`), and that function opens with
+   * `local item, link = self:GetItem(); if ( not link ) then return; end` (`gametooltip.lua:217-222`).
+   * With this absent, every hover over a vendor row printed
+   * `GameTooltip.lua:221: attempt to call a nil value (method 'GetItem')` and died INSIDE the OnEnter --
+   * one line past the point where the tooltip had already been built, so the tooltip looked perfect
+   * and `MerchantFrame.itemHover = button:GetID()` on the next line never ran.
+   *
+   * Answers whatever the last `Set<Thing>Item` filled, which is the engine's own contract: the getter
+   * is about the tooltip's CURRENT CONTENTS, not about a widget.
+   *
+   * Both returns are honest. The link is the real hyperlink the bridges already build for
+   * `GetMerchantItemLink`/`GetContainerItemLink`, so the guard above is PASSED and the comparison path
+   * is entered -- see `SetHyperlinkCompareItem` and `GetAnchorType` below on why that is now safe.
+   * Withholding the link to make the client take its own early return was the other option and was
+   * rejected: it would have been a lie about a value this client knows.
+   */
+  GetItem: (ctx, self) => {
+    const state = stateOf(widgetOf(ctx, self));
+    return [state.itemName ?? null, state.itemLink ?? null];
+  },
+
+  /**
+   * `SetHyperlinkCompareItem(link, slot, shift, owner)` -- a DECLARED GAP returning false.
+   *
+   * The three `shoppingTooltip`s this fills are the side-by-side comparison against what the player
+   * has EQUIPPED in the same slot. That needs the equipped item for a given inventory type as well as
+   * a link-to-item resolve, and nothing in this client compares two items. False is the answer
+   * `GameTooltip_ShowCompareItem` already branches on (`gametooltip.lua:232-240`), and with all three
+   * false every subsequent block in that function is skipped -- so the vendor tooltip draws, no
+   * comparison appears, and nothing raises.
+   */
+  SetHyperlinkCompareItem: notImplemented(
+    'GameTooltip:SetHyperlinkCompareItem',
+    'the side-by-side comparison needs the equipped item for a given inventory type and a '
+      + 'link-to-item resolve; nothing in this client compares two items',
+    [false],
+  ),
+
+  /**
+   * `GetAnchorType()` and `SetAnchorType(anchor, x, y)` -- the anchor `SetOwner` was already given.
+   *
+   * REAL, not stubs, and they HAD to be: `GameTooltip_ShowCompareItem` reads
+   * `if ( self:GetAnchorType() and self:GetAnchorType() ~= "ANCHOR_PRESERVE" )`
+   * (`gametooltip.lua:261`) unconditionally, PAST the `link` guard. So closing `GetItem` on its own
+   * would have moved the identical raise forty lines down the identical function -- which is why this
+   * landed as a set of three rather than as one. `SetAnchorType` is reachable in the same breath: the
+   * right-hand overflow test is `rightPos + totalWidth > GetScreenWidth()`, and that is true for a
+   * tooltip near the right edge even with `totalWidth` zero.
+   *
+   * Neither is new state. `SetOwner` already receives the anchor and already maps it through
+   * `ANCHORS`; it was simply thrown away. `SetAnchorType` re-applies it with the caller's offset
+   * through the SAME `ANCHORS` table and the same `setAnchors` call, so there is one anchoring rule
+   * here and not two.
+   */
+  GetAnchorType: (ctx, self) => [stateOf(widgetOf(ctx, self)).anchorType ?? 'ANCHOR_NONE'],
+  SetAnchorType: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const state = stateOf(widget);
+    const anchorType = String(args[0] ?? 'ANCHOR_NONE').toUpperCase();
+    state.anchorType = anchorType;
+    const pair = ANCHORS[anchorType];
+    const ownerWidget = state.owner === null ? null : ctx.registry.widget(state.owner);
+    if (pair === undefined || ownerWidget === null) {
+      // `ANCHOR_NONE`, `ANCHOR_CURSOR` and an unresolved owner all mean "the caller positions it",
+      // which is what `SetOwner` does with the same three cases.
+      return [];
+    }
+    widget.setAnchors({
+      point: pair[0] as never,
+      relativePoint: pair[1] as never,
+      relativeTo: ownerWidget.id,
+      x: Number(args[1] ?? 0),
+      y: Number(args[2] ?? 0),
+    });
+    return [];
+  },
 };
 
 /**
@@ -918,6 +1018,11 @@ function fillFromSource(
     return [false];
   }
   fillItemLines(ctx, self, info);
+  // Remembered for `GetItem`, which `GameTooltip_ShowCompareItem` reads one line after every one of
+  // these setters is called.
+  const state = stateOf(widgetOf(ctx, self));
+  state.itemName = info.name;
+  state.itemLink = info.link ?? null;
   return [true, info.repairCost ?? null];
 }
 

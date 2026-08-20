@@ -425,7 +425,16 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
       // appears once `Spell.dbc` has landed and the label stands alone until then.
       spellName: (id: number) => spellData.spell(id)?.name ?? null,
     });
-    return { name: template.name, quality: template.quality, lines };
+    return {
+      name: template.name,
+      quality: template.quality,
+      lines,
+      // `GameTooltip:GetItem`'s second return. `LootItem_OnEnter` does not call
+      // `GameTooltip_ShowCompareItem`, so nothing reads this on a loot row today -- it is supplied so
+      // the three tooltip sources answer the same shape and an addon calling `GetItem()` over the loot
+      // window is not told the row has no item.
+      link: `|Hitem:${row.row.itemId}:0:0:0:0:0:0:0:0:0:0|h[${template.name}]|h|r`,
+    };
   };
   setItemTooltipSource(vm, lootTooltip as never);
 

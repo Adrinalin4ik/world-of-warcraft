@@ -676,7 +676,14 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
       playerLevel: world.player.level,
       spellName: (id: number) => spellData.spell(id)?.name ?? null,
     });
-    return { name: template.name, quality: template.quality, lines };
+    return {
+      name: template.name,
+      quality: template.quality,
+      lines,
+      // `GameTooltip:GetItem`'s second return -- the same link `GetMerchantItemLink` answers, so the
+      // compare path gets the identical string the client would have got from the API.
+      link: linkFor(template),
+    };
   };
   setItemTooltipSource(vm, merchantTooltip as never);
 

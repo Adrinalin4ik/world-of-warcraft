@@ -135,6 +135,19 @@ export interface ItemTooltipInfo {
    * next global that copies this shape.
    */
   repairCost?: number;
+
+  /**
+   * The item's hyperlink -- `GameTooltip:GetItem`'s SECOND return.
+   *
+   * **A MEASURED NEED, not symmetry.** `MerchantItemButton_OnEnter` calls
+   * `GameTooltip_ShowCompareItem(GameTooltip)` immediately after the setter
+   * (`merchantframe.lua:436`), and that function's first act is
+   * `local item, link = self:GetItem()` (`gametooltip.lua:221`). With `GetItem` absent, every hover
+   * over a vendor row raised INSIDE the OnEnter, one line after the tooltip had been filled -- so the
+   * tooltip looked right and `MerchantFrame.itemHover` was never set. Seen live on a Northshire weapon
+   * vendor, not reasoned about.
+   */
+  link?: string | null;
 }
 
 /**
