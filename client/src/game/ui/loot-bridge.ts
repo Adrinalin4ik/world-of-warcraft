@@ -44,13 +44,58 @@ import { LOOT_TYPE_FISHING } from '../../network/game/object/loot';
 import type { ItemHandler } from '../../network/game/object/items';
 
 /**
- * The coin row's texture.
+ * THE COIN ROW'S ICON, chosen by denomination.
  *
- * `Interface\Icons\INV_Misc_Coin_01` -- the stem is the client's own and its BLP is confirmed present
- * on the asset host. The real client picks between several coin icons by denomination; this one is the
- * gold coin and is used for every pile, which is a stated simplification rather than a claim.
+ * The owner, once the amount was right: "icon for copper is different." It was a CONSTANT here -- the
+ * gold `Interface\Icons\INV_Misc_Coin_01` for every pile -- which the old comment called a stated
+ * simplification. With the words now reading "4 Copper" beside a gold coin the simplification was
+ * visibly wrong, so it is gone.
+ *
+ * **THE THREE PATHS ARE THE GAME'S OWN DATA, not remembered names.** They are exactly the icons the
+ * client's own money strings embed: `COPPER_AMOUNT_TEXTURE` is
+ * `"%d|TInterface\MoneyFrame\UI-CopperIcon:%d:%d:2:0|t"` (`globalstrings.lua:1862`), and
+ * `SILVER_AMOUNT_TEXTURE` / `GOLD_AMOUNT_TEXTURE` name theirs the same way (`:6323`, `:3845`). Probed
+ * on the asset host rather than assumed: all three answer **200, 1540 bytes, 16x16 DXT5**.
+ * That naming is what makes them safe to choose between -- `INV_Misc_Coin_01..17` are NUMBERED with no
+ * denomination in the name, so picking among those would have been a guess, which is the trap that cost
+ * a previous round six 404ing cursor stems.
+ *
+ * A second, equally sourced option was `Interface\MoneyFrame\UI-MoneyIcons` (200, 64x16), one sheet
+ * holding all three at `TexCoords` `0..0.25` gold, `0.25..0.5` silver, `0.5..0.75` copper
+ * (`coinpickupframe.xml:29,41,53`). The standalone files win because `GetLootSlotInfo` answers a PATH
+ * and the client does `LootButtonNIconTexture:SetTexture(texture)` -- there is nowhere in that call to
+ * carry a sub-rect.
+ *
+ * **The RULE is ours; the icons are not.** `coinpickupframe.lua:47-64` chooses per denomination for a
+ * SINGLE-denomination pickup (`multiplier == 1` copper, `== COPPER_PER_SILVER` silver,
+ * `== COPPER_PER_GOLD` gold), which does not say what a MIXED pile shows. "Largest non-zero
+ * denomination" is this client's choice and is labelled as such. The icons are 16x16 against a 37x37
+ * loot icon slot, so they draw magnified -- also stated, since the real client's loot row may use a
+ * different art family entirely and that is not settled by any served file.
  */
-const COIN_TEXTURE = 'Interface\\Icons\\INV_Misc_Coin_01';
+const BS = String.fromCharCode(92);
+
+const COIN_TEXTURES = {
+  gold: ['Interface', 'MoneyFrame', 'UI-GoldIcon'].join(BS),
+  silver: ['Interface', 'MoneyFrame', 'UI-SilverIcon'].join(BS),
+  copper: ['Interface', 'MoneyFrame', 'UI-CopperIcon'].join(BS),
+};
+
+/**
+ * The icon for a pile, by its largest non-zero denomination. See `COIN_TEXTURES`.
+ *
+ * 10000 copper to the gold and 100 to the silver -- `moneyframe.lua`'s own arithmetic, the same
+ * constants `item-tooltip.ts#moneyText` divides by.
+ */
+function coinTexture(copper: number): string {
+  if (copper >= 10000) {
+    return COIN_TEXTURES.gold;
+  }
+  if (copper >= 100) {
+    return COIN_TEXTURES.silver;
+  }
+  return COIN_TEXTURES.copper;
+}
 
 /** What one display row resolves to: the coin, or an item row. */
 type Row = { kind: 'money' } | { kind: 'item'; row: LootRow };
@@ -171,8 +216,9 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
       // inline textures and `|T` is a named gap in `ui/markup.ts` that is deliberately left VISIBLE, so
       // the texture form would print its own markup into the row. That is the one deviation from the
       // real client here and it is the words instead of the coin icons, not a wrong amount.
-      const text = copperAsWords(vm, Math.floor(loot.gold));
-      return [COIN_TEXTURE, text ?? String(loot.gold), 0, 1, false];
+      const amount = Math.floor(loot.gold);
+      const text = copperAsWords(vm, amount);
+      return [coinTexture(amount), text ?? String(amount), 0, 1, false];
     }
     const template = items.template(row.row.itemId);
     return [
@@ -260,7 +306,10 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
    */
   const onOpened = (): void => {
     const paths = loot.rows.map((row) => iconFor(row)).filter((p): p is string => p !== null);
-    paths.push(COIN_TEXTURE);
+    // ALL THREE coin icons, not only the one this pile needs: the amount changes while the window is
+    // open (taking the coins zeroes it) and `art.register` is idempotent, so registering the set once is
+    // cheaper than deciding per repaint and cannot miss a denomination.
+    paths.push(COIN_TEXTURES.gold, COIN_TEXTURES.silver, COIN_TEXTURES.copper);
     for (const path of paths) {
       art.register(path, { path });
     }
