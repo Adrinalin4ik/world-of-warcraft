@@ -45,6 +45,58 @@ export function hitTest(items: DrawItem[], x: number, y: number): Widget | null 
   return null;
 }
 
+/**
+ * The MODEL PANE a press at this point should spin, or null -- and it deliberately ignores
+ * `mouseEnabled`.
+ *
+ * A `<PlayerModel>`'s drag-to-rotate is not a FrameXML script. Grepped the whole loaded world manifest:
+ * `CharacterModelFrame`'s only mouse handlers are `<OnMouseUp>` and `<OnReceiveDrag>`, both
+ * `CharacterModelFrame_OnMouseUp` -> `AutoEquipCursorItem()` (paperdollframe.xml:479-481,
+ * paperdollframe.lua:149-153), and no file anywhere binds a press-and-move handler to a model frame.
+ * Yet the real client rotates the paper doll when you drag on it, so that behaviour belongs to the
+ * ENGINE's model widget -- which is why it is answered here rather than by a script.
+ *
+ * `mouseEnabled` governs SCRIPT dispatch (`hitTest` above), and `CharacterModelFrame` authors no
+ * `enableMouse` attribute, so it is false for us. Gating the engine's own drag on it would make the
+ * behaviour depend on a flag that describes something else. (That the frame is not mouse-enabled for
+ * us is also why its `OnMouseUp` equip-from-cursor never fires -- a separate defect, in the equipment
+ * area rather than this one, and reported rather than fixed here.)
+ *
+ * ## Z-ORDER, and it is the whole of the function
+ *
+ * ONE backwards walk that stops at the first thing it recognises, which is what makes this a
+ * z-order rule rather than two independent tests. The first version asked `hitTest` for null and only
+ * then looked for a pane -- and it never fired once, because `CharacterFrame` IS
+ * `enableMouse="true"` (it is a movable panel) and sits UNDER the pane, so `hitTest` always answered
+ * the panel and the pane was never reached. MEASURED: an 80-pixel drag across the middle of the pane
+ * left `CharacterModelFrame.rotation` at `Model_OnLoad`'s 0.61.
+ *
+ * Stopping at the first recognised item gets both cases right for the same reason the renderer does:
+ * the two rotate BUTTONS are children of the pane and therefore draw after it, so they are found
+ * first and this answers null (a script owns that press); the panel behind the pane is found later
+ * and never reached.
+ */
+export function paneAt(items: DrawItem[], x: number, y: number): Widget | null {
+  for (let index = items.length - 1; index >= 0; --index) {
+    const item = items[index];
+    if (!contains(item, x, y)) {
+      continue;
+    }
+    const rig = item.widget.modelRig;
+    // `framing === 'body'` and not merely "has a rig": a PORTRAIT is a `<Texture>` region carrying a
+    // rig too (`ui/portrait-bridge.ts`), and dragging on a unit frame's face must not spin it -- the
+    // real client's portrait does not rotate.
+    if (rig !== null && rig.unit !== null && rig.framing === 'body') {
+      return item.widget;
+    }
+    if (item.widget.mouseEnabled) {
+      // Something scriptable is on top of (or is) whatever is here. Its press is not a pane spin.
+      return null;
+    }
+  }
+  return null;
+}
+
 /** Focusable, non-disabled widgets in draw order -- the Tab ring. */
 export function focusChain(items: DrawItem[]): Widget[] {
   return items

@@ -633,13 +633,18 @@ export function installUnitsApi(vm: LuaVM): void {
   // defines them), so an absent one is not a load-order problem that will fix itself later.
   //
   //  - `SetPortraitTexture(texture, unit)` (UnitFrame.lua:97) renders a unit's 3D portrait into a
-  //    texture. This client has no portrait render target at all, so there is nothing to point it at.
+  //    texture. NO LONGER A GAP and deliberately not listed below: `ui/portrait-bridge.ts` registers it
+  //    for real against the model booth (`ui/scene/model-booth.ts`). It is registered from a bridge
+  //    rather than here because it needs `ctx.frameIdOf` to turn its texture argument back into a
+  //    widget, and this installer is handed a bare VM. The GLUE runtime therefore does not get it,
+  //    which is right: no GlueXML file calls it.
+  //  - `SetPortraitToTexture(texture, path)` stays a gap, and it is a different call -- it takes a FILE
+  //    and applies the engine's circular crop to it. The booth renders models, not crops.
   //  - `IsThreatWarningEnabled()` (UnitFrame.lua:437) gates the threat glow. There is no threat table
   //    on the wire here (see `UnitThreatSituation` above), so answering true would light a glow with
   //    no data behind it.
   gaps.push(
-    ['SetPortraitTexture', 'no portrait render target exists in this client', []],
-    ['SetPortraitToTexture', 'no portrait render target exists in this client', []],
+    ['SetPortraitToTexture', 'the engine applies a circular crop to a FILE; the booth renders models', []],
     ['IsThreatWarningEnabled', 'no threat table is read from the wire', [false]],
     ['GetThreatStatusColor', 'no threat table is read from the wire', [1, 1, 1]],
     // The world-state globals the same chain reaches next, each found by re-measuring rather than

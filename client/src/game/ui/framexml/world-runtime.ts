@@ -71,6 +71,7 @@ import { installStubApi } from './lua/api/stubs';
 import { installActionsApi } from './lua/api/actions';
 import { installAccountApi } from './lua/api/account';
 import { installUnitsApi } from './lua/api/units';
+import { installPortraitApi } from '../portrait-bridge';
 import { installBindingsApi, setBindingTable } from './lua/api/bindings';
 import { installCastingApi } from './lua/api/casting';
 import { installItemsApi } from './lua/api/items';
@@ -206,6 +207,15 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // The two that landed with the `TargetFrame` survey and had no caller until this host existed.
   installSecureApi(vm);
   installUnitsApi(vm);
+  // `SetPortraitTexture(texture, unit)` -- the unit frames' 3D faces, against the model booth.
+  //
+  // BEFORE the load, and that is the whole of whether a portrait ever appears: `UnitFrame_Initialize`
+  // asks for it exactly once, from every unit frame's own `<OnLoad>` (`unitframe.lua:51`), and nothing
+  // asks again -- `PlayerFrame`'s `<OnEvent>` does not handle `UNIT_PORTRAIT_UPDATE`, so the event that
+  // line registers is delivered to a handler that ignores it. Installed after the load (as a bridge, its
+  // first shape) the global existed for every caller except the only one that matters. See
+  // `ui/portrait-bridge.ts` for the measurement.
+  installPortraitApi(vm, ctx, registry);
   // The action bar's globals. Safe with no host feed at all: every slot is empty, so `HasAction` is
   // false everywhere and all 12 buttons stay hidden -- which is exactly the state before this existed.
   installActionsApi(vm);
@@ -614,6 +624,28 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    */
   const playerFrameId = registry.byName('PlayerFrame');
 
+  /**
+   * A SIXTH named `<OnUpdate>`: `CharacterModelFrame`, and it exists because the rotate buttons are
+   * unusable without it.
+   *
+   * The owner's report was "it's hard to rotate using buttons", and that is precisely what the client's
+   * own arithmetic predicts if only the click path runs. A CLICK steps the yaw by
+   * `rotationIncrement = 0.03` radians -- 1.7 degrees, so a full turn is 209 clicks
+   * (`Model_RotateLeft`, `uiparent.lua:2829-2837`). The usable path is the HELD one:
+   * `Model_OnUpdate` sweeps `elapsedTime * 2 * PI * ROTATIONS_PER_SECOND` for as long as a rotate
+   * button reads `PUSHED`, and `ROTATIONS_PER_SECOND = .5` (`uiparent.lua:2`), i.e. 180 degrees per
+   * second. Both numbers are the client's own.
+   *
+   * It needs nothing else from us: `GetButtonState()` already answers `"PUSHED"` off `Widget#state`,
+   * which the input router writes on press (`ui/input.ts#onPointerDown`), and both rotate buttons
+   * declare `RegisterForClicks("LeftButtonDown", "LeftButtonUp")` in their own `<OnLoad>`
+   * (paperdollframe.xml:490-493). So the whole gap was the tick.
+   *
+   * Gated on `shown`, like the bonus bar and the cast bar: the character panel is hidden most of the
+   * time, and `Model_OnUpdate`'s body does two `_G` lookups and two `GetButtonState` calls per frame.
+   */
+  const characterModelId = registry.byName('CharacterModelFrame');
+
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
   let caretClock = 0;
@@ -656,6 +688,10 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
       // The combat feedback text's fade-in, hold and fade-out -- see `playerFrameId`.
       if (playerFrameId !== null) {
         invokeScriptHandler(ctx, playerFrameId, 'OnUpdate', [dt]);
+      }
+      // The paper doll's rotate buttons, while one is held -- see `characterModelId`.
+      if (characterModelId !== null && registry.widget(characterModelId)?.shown) {
+        invokeScriptHandler(ctx, characterModelId, 'OnUpdate', [dt]);
       }
       // The weapon-enchant slots hiding themselves -- see `tempEnchantId`.
       if (tempEnchantId !== null) {

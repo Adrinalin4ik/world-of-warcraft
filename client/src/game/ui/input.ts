@@ -18,9 +18,10 @@
  * changed nothing about how `/` behaves.
  */
 import { keyToken } from './framexml/bindings';
-import { focusChain, hitTest, nextFocus } from './hit';
+import { focusChain, hitTest, nextFocus, paneAt } from './hit';
 import { viewportUnits } from './layout';
 import { DrawItem, MouseButtonName, Widget } from './widget';
+import type { ModelRig } from './scene/scene-rig';
 
 /**
  * The default click registration: a Button that never called `RegisterForClicks` takes the LEFT button
@@ -51,6 +52,24 @@ function buttonName(event: PointerEvent): MouseButtonName {
  * double-click interval, and a browser exposes no such setting -- `dblclick` has its own hidden one.
  */
 const DOUBLE_CLICK_MS = 500;
+
+/**
+ * How far the mouse turns a model pane, in RADIANS PER LOGICAL UNIT of horizontal travel.
+ *
+ * DERIVED from the client's own drag rate and not chosen: `CHARACTER_ROTATION_CONSTANT = 0.6`
+ * (characterselect.lua:4) is what `CharacterSelectFrame_OnUpdate` multiplies the cursor's horizontal
+ * travel by, and the value it feeds is `SetCharacterSelectFacing`, which is in DEGREES
+ * (`api/characters.ts:142-148`: "as radians the same drag would be 57 revolutions"). A model frame's
+ * `SetRotation` is in radians, so the same rate is `0.6 * PI / 180`.
+ *
+ * WHAT IS OURS about it: the client's own paper-doll drag is engine behaviour with no script and no
+ * constant we can read (see `hit.ts#paneAt`), so the CHOICE to reuse the glue screen's rate for it is
+ * this project's, not the client's. The unit is also not identical -- the glue Lua reads
+ * `GetCursorPosition()` in CSS pixels while this reads logical units -- so on a window taller than 768
+ * the same physical drag turns the figure slightly less than the glue screen would. Named rather than
+ * hidden; if the owner reports the drag as too slow or too fast, this is the number.
+ */
+const MODEL_DRAG_RADIANS_PER_UNIT = (0.6 * Math.PI) / 180;
 
 /**
  * How far the pointer must travel, in LOGICAL UNITS, before a press becomes a drag.
@@ -91,6 +110,18 @@ export class GlueInput {
 
   /** The widget a drag is currently in progress FROM, or null. Set once the threshold is crossed. */
   private dragging: Widget | null = null;
+
+  /**
+   * A model pane being spun by the mouse: its rig, where the press started and what the yaw was then.
+   *
+   * ABSOLUTE from the press rather than accumulated per move, which is not how the client's own glue
+   * drag is written (`CharacterSelectFrame_OnUpdate` re-bases its start on every tick,
+   * characterselect.lua:490-496) and is deliberate: that shape only works because it runs in an
+   * `OnUpdate` at a fixed cadence, while this runs on `pointermove`, whose events coalesce. Summing
+   * per-event deltas would make the same physical drag turn the figure by a different amount depending
+   * on how many moves the browser chose to deliver.
+   */
+  private rotating: { rig: ModelRig; startX: number; startRotation: number } | null = null;
 
   /**
    * The mouse-enabled widget the LIVE press landed on, or null when it landed on the world.
@@ -218,6 +249,7 @@ export class GlueInput {
     // origin that would make the next press look like it had already moved.
     this.pressOrigin = null;
     this.dragging = null;
+    this.rotating = null;
     // The last pointer position goes too: it is what the cursor-attachment pass draws at, and a stale one
     // would put a dragged icon wherever the pointer was on the retired screen until the next move.
     this.pointerUnits = null;
@@ -324,6 +356,20 @@ export class GlueInput {
       hoverTarget?.onEnter?.();
     }
 
+    // THE MODEL PANE'S SPIN, before the press bookkeeping and independent of it: a pane is not a
+    // pressed widget (see `hit.ts#paneAt`), so nothing below would run for it.
+    if (this.rotating !== null) {
+      const rig = this.rotating.rig;
+      const wanted = this.rotating.startRotation
+        + (x - this.rotating.startX) * MODEL_DRAG_RADIANS_PER_UNIT;
+      // Only on a real change: a `pointermove` with no horizontal travel (a vertical drag) would
+      // otherwise bump the revision and cost a bake plus a full interface re-render for nothing.
+      if (wanted !== rig.rotation) {
+        rig.rotation = wanted;
+        rig.revision += 1;
+      }
+    }
+
     if (this.pressed) {
       // Pressed art follows the pointer being over the widget, but guards against disabled -- and NOT
       // once a drag is in progress. Self-review caught that: `maybeBeginDrag` pops the button back out when
@@ -379,6 +425,17 @@ export class GlueInput {
 
     this.setFocus(hit && hit.focusable ? hit : null);
 
+    // A PRESS ON A MODEL PANE. `paneAt` owns the z-order decision -- it answers null when anything
+    // scriptable is on top, which is what keeps the two rotate buttons inside the pane's own rect
+    // working as buttons. NOT gated on `hit === null` here: `CharacterFrame` is mouse-enabled and sits
+    // under the pane, so `hitTest` always answers the panel and this branch never ran.
+    const pane = paneAt(this.items, x, y);
+    const paneRig = pane?.modelRig ?? null;
+    if (paneRig !== null) {
+      this.rotating = { rig: paneRig, startX: x, startRotation: paneRig.rotation };
+      this.capturePointer(event);
+    }
+
     if (hit && hit.state !== 'disabled') {
       this.pressed = hit;
       // The drag origin, for `maybeBeginDrag`. Recorded for every press, not only a registered one: the
@@ -401,13 +458,7 @@ export class GlueInput {
        *
        * Guarded because the API is absent in jsdom, where the unit tests run.
        */
-      if (typeof this.canvas.setPointerCapture === 'function' && event.pointerId !== undefined) {
-        try {
-          this.canvas.setPointerCapture(event.pointerId);
-        } catch {
-          // A pointer that is already gone throws `NotFoundError`. Nothing to capture, nothing to do.
-        }
-      }
+      this.capturePointer(event);
       hit.state = 'down';
       // FrameXML's `OnMouseDown`, which is NOT the click: it fires on the press itself, and a press
       // that drags off and releases elsewhere still had one.
@@ -415,7 +466,31 @@ export class GlueInput {
     }
   };
 
+  /**
+   * Retarget every later event for this pointer to the canvas until it is released.
+   *
+   * Extracted so the model-pane spin gets it too, and it is not a nicety: `pointermove` is bound to the
+   * CANVAS, so any element that ends up over it mid-gesture takes the moves and the router simply stops
+   * being told where the pointer is. MEASURED on the ability drag it was written for: during a drag from
+   * `ActionButton1` towards `ActionButton4`, `window` received ten `pointermove` events and the canvas
+   * received **one**, so the release resolved back to the source button. It also covers a drag that
+   * leaves the canvas and comes back, and the dev server's intermittent full-page overlay iframe, which
+   * has eaten clicks here before.
+   *
+   * Guarded because the API is absent in jsdom, where the unit tests run.
+   */
+  private capturePointer(event: PointerEvent): void {
+    if (typeof this.canvas.setPointerCapture === 'function' && event.pointerId !== undefined) {
+      try {
+        this.canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // A pointer that is already gone throws `NotFoundError`. Nothing to capture, nothing to do.
+      }
+    }
+  }
+
   private onPointerUp = (event: PointerEvent): void => {
+    this.rotating = null;
     const pressed = this.pressed;
     const dragging = this.dragging;
     this.pressed = null;

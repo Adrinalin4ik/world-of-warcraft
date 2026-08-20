@@ -969,6 +969,58 @@ class Unit extends Entity {
   private characterLookKey: string | null = null;
 
   /**
+   * The resolved look this unit is currently DRESSED from, or null.
+   *
+   * Written by `wearLook` (the one place a look reaches a body) and read by the model booth
+   * (`ui/scene/model-booth.ts`), which builds a second, frozen instance of the same look for a
+   * `<PlayerModel>` pane. It is exposed as the look OBJECT rather than as a key or a copy for two
+   * reasons:
+   *
+   *  - **Identity is the change signal.** `resolveCharacterLook` builds a fresh object per resolve, so
+   *    `look !== lastLook` is exactly "this unit has been redressed" -- a gear change, a race change,
+   *    a re-create. The booth needs no event and no second dedupe key, and it cannot drift from what
+   *    is standing in the world, which is the reference's own reason for mirroring the live look
+   *    rather than a display cache (`benilla/crates/benilla/src/portrait/mod.rs:20-23`).
+   *  - **It carries `compositeKey`,** so the booth's own `loadCharacter` hits the SAME 512x512 body
+   *    composite this unit baked (`ui/scene/body-composite.ts#cachedComposite` is keyed on it) instead
+   *    of baking a second one. That bake is measured at 4.7 ms naked / 6.3 ms dressed on the main
+   *    thread (`character/dress.ts` header), and paying it twice for one character was the specific
+   *    thing not to do.
+   *
+   * Read-only to the outside: nothing but `wearLook` may write it, or the pane and the body would
+   * disagree about who is wearing what.
+   */
+  get characterLook(): CharacterLook | null {
+    return this._characterLook;
+  }
+
+  private _characterLook: CharacterLook | null = null;
+
+  /**
+   * What a model booth needs to build a second instance of a CREATURE's body -- a unit drawn from a
+   * `CreatureDisplayInfo` row rather than from a character look.
+   *
+   * The two are exclusive by construction: `resolveDisplay` takes the character path for a row with an
+   * `extraInfoID` (15 451 of 24 262 rows -- the humanoid NPCs) and this one for the other 8 811 (the
+   * wolves and the rabbits), and `characterLook` above is what the first path writes. So a caller asks
+   * for a look first and falls back here, and a unit answers exactly one of them.
+   *
+   * `displayInfo` is handed out as the ROW, because `M2#setDisplayInfo` is what turns it into texture
+   * variations and there is no smaller thing that call accepts. `unknown` rather than the `DBC` type so
+   * the booth needs no DBC import for a value it only passes through.
+   */
+  get creatureDisplay(): { modelPath: string; displayInfo: unknown; scale: number } | null {
+    if (this._characterLook !== null || this.displayInfo === null || this.modelData === null) {
+      return null;
+    }
+    const path = (this.modelData as any).file;
+    if (typeof path !== 'string' || path === '') {
+      return null;
+    }
+    return { modelPath: path, displayInfo: this.displayInfo, scale: this.renderScale(this.displayInfo) };
+  }
+
+  /**
    * Draw this unit as an actual CHARACTER: its race and gender model, its geosets, its composited body
    * texture and its equipment, instead of a bare `CreatureDisplayInfo` display id.
    *
@@ -1078,6 +1130,10 @@ class Unit extends Entity {
     const previous = this._model;
 
     this.model = loaded.model;
+    // The look this body is now wearing, for the model booth -- see `characterLook`. Written HERE and
+    // not before the token re-check above, so a look that lost the race never becomes the answer to
+    // "what is this unit wearing".
+    this._characterLook = look;
     // DELIBERATELY NOT AWAITED, and this is the one place in the pattern where that is the right
     // answer. `wearLook`'s result is awaited by `update-object/handler.ts`, which places a PEER's
     // body from the same packet immediately afterwards -- waiting here for a composite and a cloak

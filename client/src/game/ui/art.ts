@@ -23,6 +23,15 @@ export interface SpriteDef {
    * sprite rather than the default: see `load()`.
    */
   tile?: boolean;
+  /**
+   * This key's texture is SUPPLIED, not fetched -- see `adopt`.
+   *
+   * `load()` skips it (there is no file to get) and `dispose()` does not release it (the owner that
+   * made it releases it). The only supplier today is the model booth's render target
+   * (`scene/model-booth.ts`), and the flag rather than a second table is what keeps `resolveSprite`
+   * unchanged: a pane's pixels reach the draw pass by exactly the route every other sprite's do.
+   */
+  external?: boolean;
 }
 
 export class GlueArt {
@@ -56,6 +65,41 @@ export class GlueArt {
   }
 
   /**
+   * Publish a texture this table did not fetch, under a key the draw pass can name.
+   *
+   * The one caller is the model booth: a `<PlayerModel>` pane's pixels are a render target, not a
+   * BLP, and `resolveSprite` resolves a widget's pixels through `art.texture(widget.sprite)` and
+   * nothing else. Adopting the target under a key is therefore what lets a rendered model take part
+   * in the ordinary draw list -- at the pane's real draw layer, under the tooltips and over the panel
+   * art -- instead of being stamped over the finished composite the way the cooldown sweeps and the
+   * cursor icon are. Those two are drawn late because they MOVE every frame; a pane does not (see
+   * `model-booth.ts` on the redraw policy), so it can afford to be a real sprite.
+   *
+   * `texCoords` is the caller's, and the booth passes a V-FLIPPED rect: a `WebGLRenderTarget`'s
+   * texture has v = 0 at the BOTTOM, while every texture in this renderer loads `flipY = false` so
+   * `v = 0` is the top row (`renderer.ts#writeQuadUVs`). Reversed coordinates are supported all the
+   * way to the `uv` attribute -- the client's own `CharacterSelectRotateLeft` mirrors a sheet exactly
+   * that way -- so the flip is one def field rather than a texture clone or a negated `repeat.y`.
+   *
+   * Idempotent by identity: re-adopting the same texture under the same key is a no-op, which is what
+   * lets the booth call this every frame without churning `defs`.
+   */
+  adopt(key: string, texture: THREE.Texture, texCoords?: TexCoords): void {
+    if (this.textures.get(key) === texture) {
+      return;
+    }
+    // A key that previously held a FETCHED texture has to give its reference back before it is
+    // repurposed -- the same rule `load()` applies when a key's art changes.
+    const stale = this.textures.get(key);
+    if (stale && !this.defs.get(key)?.external) {
+      TextureLoader.unload(stale);
+    }
+    this.defs.set(key, { path: key, external: true, texCoords });
+    this.textures.set(key, texture);
+    this.loadedFrom.delete(key);
+  }
+
+  /**
    * Glue art paths are conventionally extensionless, as declared in the game's GlueXML.
    * The engine supplies `.blp` at load time. This helper appends it when absent, leaving
    * paths that already carry an extension untouched (some client data does specify `.blp`
@@ -85,6 +129,11 @@ export class GlueArt {
 
     await Promise.all(
       Array.from(this.defs.entries()).map(async ([key, def]) => {
+        // An ADOPTED texture has no file behind it; fetching `def.path` would 404 on the key's own
+        // name and, worse, the failure branch would drop the live target out of `textures`.
+        if (def.external) {
+          return;
+        }
         const path = this.appendBLP(def.path);
         if (this.textures.has(key)) {
           if (this.loadedFrom.get(key) === path) {
@@ -136,10 +185,19 @@ export class GlueArt {
    * `unload` (reference-counted) rather than `texture.dispose()` -- some other part of the client
    * (or another `GlueArt` instance) may still hold the same BLP, and disposing it out from under
    * that reference would blank a texture that is still on screen elsewhere.
+   *
+   * An ADOPTED texture is skipped: `TextureLoader` never counted a reference for it, so unloading it
+   * would decrement a count this table never took -- and its real owner (`model-booth.ts`) disposes
+   * the render target itself.
    */
   dispose(): void {
     this.generation++;
-    this.textures.forEach((texture) => TextureLoader.unload(texture));
+    this.textures.forEach((texture, key) => {
+      if (this.defs.get(key)?.external) {
+        return;
+      }
+      TextureLoader.unload(texture);
+    });
     this.textures.clear();
     this.loadedFrom.clear();
     this.defs.clear();

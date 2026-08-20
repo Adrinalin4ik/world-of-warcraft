@@ -46,6 +46,7 @@ import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachContainerBridge } from './container-bridge';
 import { attachLootBridge } from './loot-bridge';
 import { publishRects, clearRects } from './rects';
+import { ModelBooth } from './scene/model-booth';
 import { publishArtSink, clearArtSink } from './runtime-art';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import { attachTargetBridge } from './target-bridge';
@@ -55,6 +56,7 @@ import { cvarBool } from './framexml/lua/api/screen';
 import { gameTime } from './framexml/lua/compat';
 import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
+import type { BoothSubject } from './scene/model-booth';
 
 /** The offscreen target's clear colour. Fully transparent, so only what the UI draws is composited. */
 const TRANSPARENT = new THREE.Color(0, 0, 0);
@@ -165,6 +167,13 @@ export class WorldUiHost {
   private readonly ui: GlueRenderer;
   private readonly input: GlueInput;
   private readonly art = new GlueArt();
+
+  /**
+   * THE MODEL BOOTH -- what draws a `<PlayerModel>` pane's figure. See `scene/model-booth.ts` for how
+   * a model reaches a texture and for the redraw policy; the host's whole part is the call in `render`
+   * and the boolean it answers.
+   */
+  private readonly booth: ModelBooth;
   private readonly fonts = new FontStringTextures();
   private readonly root = new WidgetRoot();
   /**
@@ -211,6 +220,7 @@ export class WorldUiHost {
   /** `attachTargetBridge`'s teardown, held so `dispose` can run it. */
   private detachTargets: (() => void) | null = null;
 
+
   /** `attachSpellbookBridge`'s teardown, held so `dispose` can run it. */
   private detachSpellbook: (() => void) | null = null;
 
@@ -246,10 +256,16 @@ export class WorldUiHost {
     fullDrawMs: 0,
     sweeps: 0,
     sweepMs: 0,
+    /** `paneBakes` vs `dirtyFrames`: what the model panes cost, and whether they cost a dirty frame. */
+    paneBakes: 0,
+    paneMs: 0,
+    paneMsTotal: 0,
     reset(): void {
       this.frames = 0;
       this.dirtyFrames = 0;
       this.signatureMsTotal = 0;
+      this.paneBakes = 0;
+      this.paneMsTotal = 0;
     },
   };
 
@@ -265,6 +281,7 @@ export class WorldUiHost {
     // `renderer.ts#GlueRenderer.premultiplied` and `composite` below.
     this.ui = new GlueRenderer(renderer, true);
     this.input = new GlueInput(canvas);
+    this.booth = new ModelBooth(renderer);
     this.sections = sections ?? { begin: () => undefined, end: () => undefined };
   }
 
@@ -597,6 +614,25 @@ export class WorldUiHost {
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');
+    // THE MODEL PANES, BEFORE the fingerprint and before the full draw.
+    //
+    // Before the fingerprint because this is where a pane's `sprite` is set, and the fingerprint has to
+    // see it -- a pane appearing changes the interface exactly once, which is a change the signature
+    // SHOULD catch. Before the full draw because the pane's texture is drawn INTO the interface target,
+    // so a bake that happened after it would not be composited until the next dirty frame.
+    //
+    // `valveDue` is the frame the interface was going to be fully re-rendered on anyway (see
+    // `FULL_DRAW_EVERY`), and handing it to the booth is what makes a pane's own safety valve free:
+    // it re-bakes on those frames and on no others. `boothBaked` then forces the full draw, because a
+    // bake changes pixels the fingerprint cannot see.
+    const paneStarted = performance.now();
+    const valveDue = this.framesSinceFullDraw >= FULL_DRAW_EVERY;
+    const boothBaked = this.booth.render(items, this.art, (unit) => this.subjectForUnit(unit), {
+      valveDue,
+      scale,
+      pixelRatio: this.renderer.getPixelRatio(),
+    });
+    const paneMs = performance.now() - paneStarted;
     // Re-render the OFFSCREEN target only when the interface actually changed; composite it every
     // frame with one quad. See `signature` and `target` for the measurement that forced this.
     const signatureStarted = performance.now();
@@ -605,7 +641,7 @@ export class WorldUiHost {
     const target = this.target();
     const dirty =
       target !== null &&
-      (signature !== this.lastSignature || this.framesSinceFullDraw >= FULL_DRAW_EVERY);
+      (signature !== this.lastSignature || boothBaked || this.framesSinceFullDraw >= FULL_DRAW_EVERY);
     // THE INSTRUMENT, built before the sweep was drawn and deliberately not blinded by it: it counts the
     // full re-renders SEPARATELY from the sweep pass, so "the sweep dirties the fingerprint" is a
     // question this can answer rather than one the code has to be trusted about. `STATE.md` recorded the
@@ -617,6 +653,11 @@ export class WorldUiHost {
     stats.items = items.length;
     stats.signatureMs = signatureMs;
     stats.signatureMsTotal += signatureMs;
+    stats.paneMs = paneMs;
+    stats.paneMsTotal += paneMs;
+    if (boothBaked) {
+      stats.paneBakes += 1;
+    }
     if (dirty) {
       stats.dirtyFrames += 1;
     }
@@ -650,6 +691,44 @@ export class WorldUiHost {
     // THE DRAGGED ABILITY'S ICON, in the same after-the-composite pass and for exactly the same reason.
     this.drawCursorIcon(viewport);
     this.sections.end('ui.draw');
+  }
+
+  /**
+   * A `SetUnit`/`SetPortraitTexture` token to the BODY the booth should build, or null.
+   *
+   * The whole of the host's part in the model booth, and deliberately the narrowest thing that could
+   * work: the booth knows nothing about units and this knows nothing about rendering.
+   *
+   * Only `"player"` and `"target"` resolve, and that is not a shortcut -- those are the only two units
+   * this client tracks at all (`unit-bridge.ts:31`: "`pet`, `focus`, `targettarget` and the party/raid
+   * tokens are NOT"). The paper doll passes `"player"` (`paperdollframe.lua:159`) and so do the
+   * dress-up and tabard panes; `UnitFrame_Update` passes whichever unit its frame is bound to, so a
+   * party or pet portrait asks for a token nothing here can answer and the booth reports it once.
+   *
+   * A unit answers exactly one of the two supplies -- see `BoothSubject` -- and the KEY is what the
+   * booth compares. For a character it is the look object itself, because `resolveCharacterLook` builds
+   * a fresh one per redress and identity therefore means "this unit's gear changed". For a creature it
+   * is the display id, because `creatureDisplay` builds its descriptor on every read and comparing
+   * THAT by identity would re-bake the portrait on every frame.
+   */
+  private subjectForUnit(unit: string): BoothSubject | null {
+    const world = this.world;
+    if (world === null) {
+      return null;
+    }
+    const target = unit === 'player' ? world.player : unit === 'target' ? world.target : null;
+    if (!target) {
+      return null;
+    }
+    const look = target.characterLook;
+    if (look !== null) {
+      return { key: look, look, creature: null };
+    }
+    const creature = target.creatureDisplay;
+    if (creature !== null) {
+      return { key: target.displayId, look: null, creature };
+    }
+    return null;
   }
 
   /**
@@ -1073,6 +1152,7 @@ export class WorldUiHost {
     this.runtime?.dispose();
     this.runtime = null;
     this.ui.dispose();
+    this.booth.dispose();
     this.renderTarget?.dispose();
     this.renderTarget = null;
     if (this.compositeMesh) {

@@ -98,6 +98,21 @@ export function installCompat(vm: LuaVM): void {
     -- their exact semantics are not sourced here: strsplit (18 calls -- its first argument is a SET of
     -- delimiter characters and it returns a tuple), strjoin (2), strtrim (12). Each still aborts its
     -- chunk where it is called at file scope, and the load report names it.
+    -- PI: an engine CONSTANT, not a function, and the only one on this list.
+    --
+    -- Defined in no FrameXML file at all -- GameTime.lua:16 is literally "local PI = PI", which caches
+    -- an engine global. Its absence is a silent killer rather than a missing feature, because every
+    -- caller uses it in ARITHMETIC: Model_OnUpdate's held-rotate-button sweep is
+    -- "elapsedTime * 2 * PI * rotationsPerSecond" (UIParent.lua:2851), so with PI nil the handler
+    -- raised on multiplication the moment a rotate button read PUSHED -- which is exactly the owner's
+    -- "it's hard to rotate using buttons": only the per-click 0.03 step survived. MEASURED live before
+    -- this line: PI read nil, GetButtonState read PUSHED, and 600 ms of holding moved the yaw by one
+    -- 0.03 step instead of 108 degrees.
+    --
+    -- Three callers in the world manifest and no others: UIParent.lua (Model_OnUpdate),
+    -- TabardFrame.lua:62,69 (the same held-button sweep) and GameTime.lua (the minimap clock's hands).
+    -- Fully specified, unlike strsplit -- it is math.pi.
+    PI = math.pi
     min = math.min
     max = math.max
     random = math.random
