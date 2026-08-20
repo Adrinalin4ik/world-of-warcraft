@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import DBC from "../pipeline/dbc";
 import M2 from "../pipeline/m2";
-import { windowElapsedOrInstant } from "../pipeline/m2/anim/instance-anim";
+import { InstanceAnim, windowElapsedOrInstant } from "../pipeline/m2/anim/instance-anim";
 import type { Sequence } from "../pipeline/m2/anim/model-anim";
 import { worldClock } from "../pipeline/m2/anim/world-clock";
 import M2Blueprint from "../pipeline/m2/blueprint";
@@ -24,6 +24,7 @@ import { shouldPose } from "../pipeline/m2/anim/gating";
 import { createPlayerMoveState } from "../movement/player-state";
 import { peerTrace } from "../movement/peer-trace";
 import { readyAnimation } from "./combat-anim";
+import { OneShotRoute, routeOneShot } from "./oneshot-route";
 import {
   ANY_MOVE,
   DEFAULT_MOVE_SPEEDS,
@@ -1349,6 +1350,13 @@ class Unit extends Entity {
       return;
     }
 
+    // THE MASKED UPPER-BODY ROUTE, ahead of everything below: a swing taken while the legs are
+    // committed plays on the torso over the gait instead of replacing the whole body. See
+    // `tryMaskedRoute` for the routing rule and for every case it deliberately declines.
+    if (this.tryMaskedRoute(id, seq, inst, repetitions)) {
+      return;
+    }
+
     if (inst.current === seq) {
       // A LOOP that is already running is never re-armed, `interrupt` or not -- see above. A
       // one-shot still inside its play window is left alone unless the caller says to interrupt it;
@@ -1407,6 +1415,82 @@ class Unit extends Entity {
     // unit standing still is Stand. Arming Stand here would be the same thing one frame earlier and
     // would take ownership of a loop, which is the permanent freeze `externalSeq` documents.
     this.locoCandidates = null;
+  }
+
+  /**
+   * "THE LEGS RUN, THE UPPER BODY FIGHTS." Try to play `seq` on the masked upper-body slot; return
+   * whether it was taken, in which case `setAnimation` must do nothing else.
+   *
+   * THE ROUTE IS `oneshot-route.ts#routeOneShot` -- the client's own per-play decision, keyed on the
+   * live movement flags, NOT on the animation id. The same Attack1H is full body standing and masked
+   * running (`creature_anim/select.rs:941-961`). That single fact is what fixes the report: nothing
+   * about which clip is chosen changes, only where it is played.
+   *
+   * FIVE THINGS THIS DECLINES, each for a reason and each of them a behaviour the owner has already
+   * confirmed:
+   *
+   *  - **the split key-bone is absent** -- `upperBodyMask()` null is the client's `-1` sentinel and its
+   *    documented fallback is full body (`benilla-assets/src/model/anims.rs:72-73`). Every creature in
+   *    Northshire is in this class or not, per rig; a wolf that has no SpineLow swings full body as it
+   *    always did.
+   *  - **`seq.id !== id`** -- the arm did not land on what was asked for. `resolve` falls back to the
+   *    first inline sequence (normally a looping Stand) for an id a model lacks, and masking THAT onto
+   *    a torso is a wrong pose held over a correct gait. Same test, same reason, as the ownership
+   *    latch in `startAnimation`.
+   *  - **a LOOP** -- the overlay retires on "window elapsed, then 150 ms", which a loop never reaches.
+   *    The held cast pose (`ReadySpellOmni`, a loop) and any looping emote therefore keep the base
+   *    track and the `externalSeq` latch, which is what `SpellHandler#releaseCastPose` releases. The
+   *    reference DOES mask a moving cast hold (`driver.rs:1136`) and that remains a gap, stated: it
+   *    needs an explicit stow on the overlay, which is a round of its own.
+   *  - **an external state already owns the base** -- a cast pose, a death, a jump entry. This client
+   *    has ONE latch, and a request arriving over it is normally the thing meant to replace it (a cast
+   *    release ending its own held pose). Masking it would leave the latch holding the body for ever.
+   *    This is a DEVIATION from the reference, which would mask a swing taken mid-jump; it costs a
+   *    mid-air swing its split and it protects two fixes that were each reported and fixed once.
+   *  - **the overlay already holds this same clip, still in flight** -- then the combat fast-path
+   *    applies instead of a re-arm: "a combat clip requested while another combat clip is playing is
+   *    NOT armed: the CURRENT clip's rate doubles" (`driver.rs:864-872`, the client's
+   *    `0x5fe43c`-`0x5fe48b`). A flat 2x, the same rule `combat.ts` applies on the base track.
+   *
+   * `currentAnimationId` is NOT written here and `externalSeq` is NOT latched: the base track is
+   * untouched, so locomotion still owns it and must keep driving the gait. That is the whole point.
+   */
+  private tryMaskedRoute(
+    id: number,
+    seq: Sequence,
+    inst: InstanceAnim,
+    repetitions: number,
+  ): boolean {
+    if (seq.loops || seq.id !== id || this.externalSeq !== null) {
+      return false;
+    }
+    // THE MASK FIRST, and the order is deliberate twice over. It is the cached, per-model half of the
+    // decision (`ModelAnim#upperBodyMask`, built once), where `locomotionFlags()` reads live state; and
+    // it means a rig with no split key-bone declines without ever reaching the flags -- which is what
+    // keeps this safe on the hand-built `.call()` doubles every animation test uses, where a method
+    // that is not on the double is a `TypeError` rather than a falsy read.
+    const modelAnim = this.model?.modelAnim ?? null;
+    const mask = modelAnim && modelAnim.upperBodyMask ? modelAnim.upperBodyMask() : null;
+    if (mask === null) {
+      return false;
+    }
+    if (routeOneShot(id, this.locomotionFlags()) !== OneShotRoute.Masked) {
+      return false;
+    }
+
+    if (inst.overlay !== null && inst.overlay.id === id
+      && !inst.overlayWindowElapsed(worldClock.ms)) {
+      inst.setOverlayRate(inst.overlayPlaybackRate * 2, worldClock.ms);
+    } else {
+      inst.armOverlay(seq, mask, worldClock.ms);
+    }
+
+    // Emitted so every listener sees the same thing it would have seen on the full-body route.
+    // `currentAnimationId` is NOT written here: `setAnimation`'s own first statement already recorded
+    // it before the model check, and writing it again would only restate that -- SELF-REVIEW caught a
+    // redundant assignment here that read as if the masked path had its own bookkeeping.
+    this.emit('animation:play', id, repetitions);
+    return true;
   }
 
   /** Arm unconditionally. `setAnimation` is the guarded entry point; this is the raw one. */

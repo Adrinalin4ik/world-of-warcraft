@@ -47,3 +47,16 @@ class WorldClock {
 }
 
 export const worldClock = new WorldClock();
+
+/**
+ * Readable as `window.worldClock`, alongside `window.animCounters` and `window.overlayControl`.
+ *
+ * Every animation probe on this project has to name a time, because everything here is clock-indexed
+ * (`cursor = worldClock - armedAt`) -- and `performance.now()` is NOT that clock: this one stops
+ * advancing across a suspended tab and skips a non-finite delta, so a probe using the wall clock
+ * reads a cursor the solver never sampled. Exposed read-only in practice; nothing in the client reads
+ * it back off `window`, and `advance` stays owned by `World#animate`.
+ */
+if (typeof window !== 'undefined') {
+  (window as unknown as Record<string, unknown>).worldClock = worldClock;
+}

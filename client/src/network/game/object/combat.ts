@@ -580,7 +580,15 @@ export class CombatHandler extends EventEmitter {
       // loop" guard means that rate would then persist for the rest of that unit's life. Exactly the
       // class of bug the `setScalar`-under-`matrixAutoUpdate` and hover-magnitude traps are.
       const inst = unit.model?.instanceAnim ?? null;
-      const armed = inst?.current?.id === swingId ? inst.current : null;
+      // WHICH SLOT THE SWING LANDED IN. A swing taken while the legs are committed is routed onto the
+      // MASKED upper-body overlay instead of the base track (`Unit#tryMaskedRoute`,
+      // `game/classes/oneshot-route.ts`), so `inst.current` is then the GAIT and reading only it would
+      // have silently dropped the whiff slow-down for every swing thrown while running -- the same
+      // class of miss as the `armed.id === swingId` guard below it.
+      const onOverlay = inst?.overlay?.id === swingId;
+      const armed = onOverlay
+        ? inst!.overlay
+        : (inst?.current?.id === swingId ? inst.current : null);
 
       // THE WHIFF SLOW-DOWN (`impact.rs:73-76`, the client's `0x712910`, decision 0279): a swing that
       // contacted nothing -- miss, dodge, evade -- runs the rest of its arc at half speed. That IS what
@@ -594,7 +602,11 @@ export class CombatHandler extends EventEmitter {
       // this round and would slow a gait loop to half speed for ever on any unit whose model has no
       // swing clip. A miss on a clipless attacker now slows nothing, which is the honest answer.
       if (victimState !== null && isWhiff(victimState) && inst && armed) {
-        inst.setRate(inst.playbackRate * 0.5, worldClock.ms);
+        if (onOverlay) {
+          inst.setOverlayRate(inst.overlayPlaybackRate * 0.5, worldClock.ms);
+        } else {
+          inst.setRate(inst.playbackRate * 0.5, worldClock.ms);
+        }
       }
     }
 
@@ -607,13 +619,18 @@ export class CombatHandler extends EventEmitter {
     // ownership latch gives the body back when its window ends -- which for an engaged victim is back to
     // the Ready stance.
     //
-    // KNOWN DEVIATION, stated: the reference plays this on a MASKED overlay at 0.75 weight with a decay
-    // envelope (`WOUND_AMPLITUDE`, `wound_full_body`), so the victim's legs keep walking. This client has
-    // one track, so it plays FULL BODY. The reference's own rule is that the full-body case is precisely
-    // a victim whose base pose is a combat-ready stance {25..29} -- which, now that an engaged unit
-    // holds a Ready idle, is the common combat case -- so the approximation is right where it matters and
-    // wrong for a victim who is walking. The masked version needs the second weighted track that
-    // `blendTime` and the weapon grip are also waiting on.
+    // A MOVING VICTIM'S LEGS NOW KEEP WALKING. This went through `setAnimation` before and reached the
+    // full-body route always, because there was no masked slot to reach; the note here said so and said
+    // it needed "the second weighted track that `blendTime` and the weapon grip are also waiting on".
+    // That track exists (`InstanceAnim#armOverlay`), and a dodge/parry/block is a CLASS_A one-shot, so a
+    // victim who is running when he is hit now flinches on the torso over his run -- routed by the same
+    // `route_oneshot` the swing is. A STANDING victim is still full body, which is the reference's own
+    // rule and not a shortcut: `route_oneshot` masks only a committed lower body.
+    //
+    // STILL NOT PORTED, stated: the reference's wound overlay carries a 0.75 weight and a decay envelope
+    // (`WOUND_AMPLITUDE`, `wound_full_body`); ours plays the clip at full weight on the subtree and
+    // retires it over the client's fixed 150 ms release fade. The envelope is the shape of the recoil,
+    // not whether there is one.
     if (victimState !== null) {
       const victimUnit = this.game.world.entities.get(victim);
       if (victimUnit && !victimUnit.dead) {

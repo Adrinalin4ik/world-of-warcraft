@@ -1,5 +1,6 @@
 import { mergeExternalAnim, MergeableBlock, MERGE_REJECTED } from './external-anim-data';
 import { AnimBlock, cursorMs, WRAP } from './tracks';
+import { upperBodyMask } from './upper-body';
 
 /** One entry of the model's sequence table, off the parsed `Animation` struct. */
 export interface Sequence {
@@ -346,6 +347,27 @@ export class ModelAnim {
 
   /** The parsed data, kept so `animated` can be recomputed after a merge. Same object, not a copy. */
   private readonly data: M2AnimData;
+
+  /**
+   * The upper-body split mask, built at most once per MODEL. `undefined` = not asked yet, `null` =
+   * asked and this rig has no split key-bone (the client's `-1` sentinel).
+   *
+   * Cached here rather than on the instance because it is a property of the skeleton: a zone with
+   * forty humanoids shares one mask, and it is read per bone per frame only for the handful of units
+   * that actually have an overlay in flight.
+   */
+  private upperMask: Uint8Array | null | undefined = undefined;
+
+  /**
+   * Which bones a masked upper-body overlay drives -- see `anim/upper-body.ts` for where the
+   * boundary comes from and the 3.3.5a measurement that pins it. `null` for a rig with no split.
+   */
+  upperBodyMask(): Uint8Array | null {
+    if (this.upperMask === undefined) {
+      this.upperMask = upperBodyMask(this.boneDefs);
+    }
+    return this.upperMask;
+  }
 
   /** Every block that can carry per-sequence keys. Built on first merge, never per frame. */
   private blocks: MergeableBlock[] | null = null;

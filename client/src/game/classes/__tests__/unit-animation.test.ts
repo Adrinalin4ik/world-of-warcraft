@@ -50,6 +50,9 @@ function unit(animations: any[]) {
     emit(...args: any[]) { u.emitted.push(args); },
     setAnimation: (Unit as any).prototype.setAnimation,
     startAnimation: (Unit as any).prototype.startAnimation,
+    // Part of the arming decision since the masked upper-body route landed: `setAnimation` consults
+    // it first. It declines on these doubles (no bones, so no split key-bone) without reading flags.
+    tryMaskedRoute: (Unit as any).prototype.tryMaskedRoute,
   };
 
   return u;
@@ -286,6 +289,8 @@ function locoUnit(animations: any[], isPlayer: boolean = true) {
     emit(...args: any[]) { u.emitted.push(args); },
     setAnimation: proto.setAnimation,
     startAnimation: proto.startAnimation,
+    // Part of the arming decision since the masked upper-body route landed -- see the other double.
+    tryMaskedRoute: proto.tryMaskedRoute,
     locomotionSpeed: proto.locomotionSpeed,
     locomotionFlags: proto.locomotionFlags,
     gaitCandidates: proto.gaitCandidates,

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { animCounters } from './counters';
 import { ModelAnim, Sequence } from './model-anim';
 import { ClockLaw, clockLaw, cursorMs, isStep, sampleQuat, sampleVec3, trackFor } from './tracks';
 
@@ -57,8 +58,44 @@ const BLEND_MAX_MS = 500;
  */
 export const blendControl = { enabled: true };
 
+/**
+ * THE MASKED UPPER-BODY OVERLAY'S A/B SWITCH: `window.overlayControl.enabled = false` makes the
+ * overlay contribute NOTHING to the pose.
+ *
+ * PRECISELY what it does, because a first draft of this comment claimed it "sends every one-shot back
+ * down the full-body route" and it does not -- SELF-REVIEW: the routing on `Unit` never reads this
+ * flag, so with it off a masked swing is armed into a slot that is not sampled and the torso keeps the
+ * gait. That is exactly the arm a cost A/B wants (the same frame's work minus the overlay's share) and
+ * exactly NOT a "what would it look like without the feature" switch. It is a measurement control.
+ *
+ * A switch of its own rather than sharing `blendControl`, for the reason `blendControl` exists: the
+ * overlay is a THIRD sampled track on the bones it covers and the only honest way to price it is A/B
+ * within one session, interleaved. Sharing the flag would have made "the overlay costs X" and "the
+ * cross-fade costs Y" the same measurement, which is exactly the kind of instrument this project has
+ * been burned by. Read ONCE per solve, never per bone.
+ */
+export const overlayControl = { enabled: true };
+
+/**
+ * THE MASKED OVERLAY'S RELEASE FADE, in ms -- how long a FINISHED upper-body one-shot takes to hand
+ * the torso back to the gait.
+ *
+ * A FIXED 150 ms, and deliberately NOT the sequence's own `blendTime`: the reference states exactly
+ * that (`creature_anim/driver.rs:63-73`, decision 0878, wow-re `oneshot-lifecycle.md` §5.4) -- the
+ * client's `CGUnit::OnAnimationFinished 0x5fc920` calls op4 with `param_3 = -1`, which seeds
+ * `+0x100 = clock + 150`, `+0x104 = 1/150`, `+0x108 = 1.0` and disarms the primary "so the bone
+ * inherits bone 0 again". `blendTime` is used only on the ARM path, which is what `armOverlay` does.
+ *
+ * WHAT THIS FADES AGAINST IS A STATED DEVIATION. The client snapshots the clip's held final frame
+ * into the bone's secondary slot and decays that; this fades the LIVE overlay (whose clamp law holds
+ * that same final frame -- `cursorMs`'s `CLAMP` leg) against the LIVE base. Same two poses, one of
+ * them re-sampled rather than snapshotted, so no snapshot buffer per instance.
+ */
+const OVERLAY_RELEASE_FADE_MS = 150;
+
 if (typeof window !== 'undefined') {
   (window as unknown as Record<string, unknown>).blendControl = blendControl;
+  (window as unknown as Record<string, unknown>).overlayControl = overlayControl;
 }
 
 /**
@@ -200,6 +237,69 @@ export class InstanceAnim {
    */
   localTRS: Float32Array = EMPTY_F32;
 
+  /**
+   * THE PERSISTENT MASKED SLOT -- a one-shot playing on the UPPER BODY ONLY, beside whatever the base
+   * is doing. This is "the legs run, the upper body fights".
+   *
+   * WHY IT IS A THIRD SLOT AND NOT THE FADE ABOVE. `prev` is a time-limited, globally weighted
+   * cross-fade: it covers every bone and it converges to nothing. This one covers a SUBSET of bones,
+   * holds its weight for the length of a clip, and the base keeps playing underneath it the whole
+   * time. `STATE.md` recorded that distinction as the reason the sword grip could not ride the blend
+   * layer ("a masked `HandsClosed` needs a persistent per-bone weighted slot"); this is that slot.
+   *
+   * THE MECHANISM IS THE CLIENT'S, not an approximation of it. A requested one-shot is routed per
+   * play from the unit's live state -- masked when the lower body is committed (moving / turning /
+   * swimming / seated, or a combat id while airborne), full-body when standing idle -- which is
+   * `route_oneshot` (`creature_anim/select.rs:941-961`, the client's `esi` decision
+   * `0x5fe6c8..0x5fe74d`, decision 0087). The routing lives on `Unit`, which is where the live flags
+   * are; this class only holds the slot and mixes it.
+   *
+   * ON THE MASKED BONES THE OVERLAY REPLACES THE BASE at full weight, and that is the CLIENT's
+   * behaviour rather than the reference's: the reference blends base and overlay at an 8:1 weight and
+   * says so explicitly -- "the base clip is *not* masked out of that subtree ... this makes the
+   * overlay dominate approximately 8:1 ..., a small bleed the cost of Bevy's weighted blend"
+   * (`driver.rs:53-59`). Our solver samples per bone, so it can do what the client does: arm the
+   * key-bone's primary slot, and the subtree stops inheriting bone 0 until the release fade disarms
+   * it (`driver.rs:66-72`). No bleed, and one fewer weighted lerp per bone.
+   *
+   * COST. Zero for an instance with no overlay: `overlaySeq === null` is one comparison per solve
+   * (the retire/weight resolve) plus one per bone, the same shape as the `prev` check beside it. An
+   * instance WITH one pays a second sample on the masked bones only, for the length of one clip.
+   *
+   * LIMITS, stated:
+   *  - ONE overlay slot. A swing arriving over a live swing does not chain; the arm blends from
+   *    whatever the subtree holds, which is the same limit the cross-fade documents above.
+   *  - ONE-SHOTS ONLY, because retirement is "the clip's window elapsed, then 150 ms". A LOOPING
+   *    masked clip -- the reference's moving cast hold (`driver.rs:1136`) and the weapon grip -- has
+   *    no window, so it needs an explicit stow the callers do not have yet. `Unit` refuses to route
+   *    a loop here for exactly that reason.
+   *  - Material and texture channels are not masked (they are not per bone at all), same as the
+   *    cross-fade.
+   */
+  private overlaySeq: Sequence | null = null;
+
+  private overlayArmedAtMs = 0;
+
+  private overlayRate = 1;
+
+  private overlayLaw: ClockLaw = 0;
+
+  private overlayPeriodMs = 0;
+
+  private overlayBlendMs = 0;
+
+  /**
+   * The bones the overlay drives -- `ModelAnim#upperBodyMask()`, one byte per bone. Held by
+   * reference: it is one shared array per model, never per instance.
+   */
+  private overlayMask: Uint8Array | null = null;
+
+  /** This frame's overlay weight, resolved ONCE per solve. 0 means "no overlay this frame". */
+  private frameOverlay = 0;
+
+  /** This frame's overlay cursor, resolved once per solve beside its weight. Valid only when > 0. */
+  private overlayCursorMs = 0;
+
   /** Per-bone "already solved this frame" flags, cleared at the top of each solve. */
   private solved: Uint8Array = EMPTY_U8;
 
@@ -271,6 +371,131 @@ export class InstanceAnim {
     this.rate = rate;
     // A sequence-timeline channel: `globalSequenceID` -1 defers to the sequence's loop flag.
     this.law = clockLaw({ interpolationType: 1, globalSequenceID: -1, tracks: [] }, seq.loops);
+  }
+
+  /** The masked one-shot currently on the upper body, or null. Read by the router and the probe. */
+  get overlay(): Sequence | null {
+    return this.overlaySeq;
+  }
+
+  /** The overlay's live playback multiplier -- the whiff slow-down reads it to halve it. */
+  get overlayPlaybackRate(): number {
+    return this.overlayRate;
+  }
+
+  /**
+   * The overlay's weight as of the LAST SOLVE -- 0 when there is none.
+   *
+   * For the instrument, and it is the one number that says the split is actually on screen: a probe
+   * that reads `overlay` alone cannot tell an armed slot from a contributing one. Read only, resolved
+   * during `solveBones`, so asking costs nothing and cannot change what the frame did (this project
+   * has shipped an instrument a fix would have blinded; a getter over the value the solver already
+   * used cannot be that).
+   */
+  get overlayWeightLastSolve(): number {
+    return this.frameOverlay;
+  }
+
+  /**
+   * Arm a one-shot on the UPPER BODY, leaving the base track -- the gait -- running underneath.
+   *
+   * `mask` is the model's split mask (`ModelAnim#upperBodyMask()`); a caller with `null` there has a
+   * rig with no split key-bone and must route full body instead, which is the client's `-1` sentinel
+   * behaviour and is enforced at the call site rather than silently here.
+   *
+   * The arm is BLENDED over the INCOMING clip's own `blendTime`, which is where that field is used and
+   * the only place it is: "the re-arm is **blended** (op4 `blendFlag = 1`) ... this clip rises over its
+   * own blendTime (`0x7125f2` -- the INCOMING sequence's `M2Sequence+0x20`), so a masked swing never
+   * swaps the torso in one frame" (`creature_anim/driver.rs:929-934`). A clip authored `blendTime 0`
+   * is a deliberate hard cut and gets one, exactly as on the base path.
+   */
+  armOverlay(seq: Sequence, mask: Uint8Array, worldClockMs: number): void {
+    this.ensureBuffers();
+    this.overlaySeq = seq;
+    this.overlayMask = mask;
+    this.overlayArmedAtMs = worldClockMs;
+    this.overlayRate = 1;
+    this.overlayPeriodMs = seq.lengthMs;
+    this.overlayBlendMs = Math.min(Math.max(seq.blendTimeMs, 0), BLEND_MAX_MS);
+    this.overlayLaw = clockLaw({ interpolationType: 1, globalSequenceID: -1, tracks: [] }, seq.loops);
+  }
+
+  /** Change the overlay's playback rate, holding its pose -- `setRate`'s logic on the masked slot. */
+  setOverlayRate(rate: number, worldClockMs: number): void {
+    if (rate === this.overlayRate || this.overlaySeq === null || rate <= 0) {
+      return;
+    }
+    const elapsed = (worldClockMs - this.overlayArmedAtMs) * this.overlayRate;
+    this.overlayArmedAtMs = worldClockMs - elapsed / rate;
+    this.overlayRate = rate;
+  }
+
+  /**
+   * Has the masked one-shot finished its play window? True when there is no overlay at all.
+   *
+   * The combat fast-path asks this: a swing requested while the SAME swing is still in flight doubles
+   * the in-flight clip's rate rather than re-arming it (`driver.rs:864-872`, the client's
+   * `0x5fe43c`-`0x5fe48b`).
+   */
+  overlayWindowElapsed(worldClockMs: number): boolean {
+    if (this.overlaySeq === null) {
+      return true;
+    }
+    return worldClockMs >= this.overlayEndMs();
+  }
+
+  /**
+   * When the overlay's window closes, on the WORLD clock -- derived, never stored, so a rate change
+   * and a gated frame both come out right (the same reason every clock here is `clock - armedAt`).
+   *
+   * A zero-length clip ends the instant it is armed, which is "already finished" and is what
+   * `windowElapsedOrInstant` says about it on the base path too.
+   */
+  private overlayEndMs(): number {
+    // A NON-POSITIVE RATE IS UNREACHABLE and the guard stays anyway: `armOverlay` always sets 1 and
+    // `setOverlayRate` refuses anything <= 0, so nothing today can divide by zero here. Said plainly
+    // rather than left to read as a live case -- the base track's `setRate` DOES accept 0 (the
+    // reference's airborne freeze), and someone extending that to the overlay would land here.
+    if (this.overlayRate <= 0) {
+      return Infinity;
+    }
+    return this.overlayArmedAtMs + this.overlayPeriodMs / this.overlayRate;
+  }
+
+  /**
+   * The overlay's weight this frame, and its RETIREMENT.
+   *
+   * Three phases: rise over the incoming clip's `blendTime`, hold at 1 for the clip, then the fixed
+   * 150 ms release fade (`OVERLAY_RELEASE_FADE_MS`). Past the fade the slot is dropped here -- the one
+   * place that knows the fade is over -- so a retired overlay costs one null check per bone again.
+   *
+   * Called ONCE per solve. It mutates on retirement, which is why it is not a getter.
+   */
+  private overlayWeight(worldClockMs: number): number {
+    if (this.overlaySeq === null) {
+      return 0;
+    }
+    const end = this.overlayEndMs();
+    if (worldClockMs >= end) {
+      const fading = worldClockMs - end;
+      if (fading >= OVERLAY_RELEASE_FADE_MS) {
+        this.overlaySeq = null;
+        this.overlayMask = null;
+        return 0;
+      }
+      return 1 - fading / OVERLAY_RELEASE_FADE_MS;
+    }
+    const rising = worldClockMs - this.overlayArmedAtMs;
+    if (this.overlayBlendMs > 0 && rising < this.overlayBlendMs) {
+      return rising <= 0 ? 0 : rising / this.overlayBlendMs;
+    }
+    return 1;
+  }
+
+  /** Where the overlay's own clock stands -- `cursor`'s arithmetic on the masked slot. */
+  private overlayCursor(worldClockMs: number): number {
+    const elapsed = (worldClockMs - this.overlayArmedAtMs) * this.overlayRate;
+    return cursorMs(this.overlayLaw, elapsed, this.overlayPeriodMs);
   }
 
   /**
@@ -393,6 +618,15 @@ export class InstanceAnim {
       this.prev = null;
     }
 
+    // The masked overlay, resolved the same way and for the same reason: once per solve, and the slot
+    // is RETIRED inside `overlayWeight` so a finished one-shot stops costing anything at all. The A/B
+    // switch is read here and nowhere per-bone.
+    this.frameOverlay = overlayControl.enabled ? this.overlayWeight(worldClockMs) : 0;
+    if (this.frameOverlay > 0) {
+      this.overlayCursorMs = this.overlayCursor(worldClockMs);
+      animCounters.overlays += 1;
+    }
+
     for (let i = 0; i < count; ++i) {
       this.solveBone(i, worldClockMs);
     }
@@ -480,6 +714,52 @@ export class InstanceAnim {
       scratchPos.lerp(blendPos, alpha);
       scratchQuat.slerp(blendQuat, alpha);
       scratchScale.lerp(blendScale, alpha);
+    }
+
+    // THE MASKED UPPER-BODY OVERLAY. On a bone inside the split subtree the overlay REPLACES the base
+    // at full weight once its arm blend has risen -- the client arms the key-bone's primary slot and
+    // the subtree stops inheriting bone 0 until the release fade disarms it (`driver.rs:66-72`). Outside
+    // the subtree the mask is 0 and this costs one array read: that is what leaves the legs on the gait.
+    //
+    // AFTER the cross-fade above, so a torso mid-gait-transition still gets its swing: the two mix in
+    // the order the client's slots do -- the base (including its own outgoing fade) is what the overlay
+    // is composed over. Reuses the same three module-level scratch objects the fade just finished with.
+    const ovSeq = this.overlaySeq;
+    const ovMask = this.overlayMask;
+    if (ovSeq !== null && this.frameOverlay > 0 && ovMask !== null && ovMask[index] !== 0) {
+      const ot = this.overlayCursorMs;
+      const os = ovSeq.index;
+
+      blendPos.set(0, 0, 0);
+      blendQuat.set(0, 0, 0, 1);
+      blendScale.set(1, 1, 1);
+
+      const ovTranslation = trackFor(def.translation, os);
+      if (ovTranslation) {
+        sampleVec3(ovTranslation, isStep(def.translation), ot, blendPos);
+      }
+      const ovRotation = trackFor(def.rotation, os);
+      if (ovRotation) {
+        sampleQuat(ovRotation, isStep(def.rotation), ot, blendQuat);
+      }
+      const ovScaling = trackFor(def.scaling, os);
+      if (ovScaling) {
+        sampleVec3(ovScaling, isStep(def.scaling), ot, blendScale);
+      }
+
+      // Toward the OVERLAY by its weight -- the opposite direction from the cross-fade above, where the
+      // receiver already held the incoming pose. Here the receiver holds the base and the overlay is
+      // the argument, so weight 1 is entirely the overlay and 0 entirely the base.
+      const w = this.frameOverlay;
+      if (w >= 1) {
+        scratchPos.copy(blendPos);
+        scratchQuat.copy(blendQuat);
+        scratchScale.copy(blendScale);
+      } else {
+        scratchPos.lerp(blendPos, w);
+        scratchQuat.slerp(blendQuat, w);
+        scratchScale.lerp(blendScale, w);
+      }
     }
 
     // Record the un-composed local TRS BEFORE recursing into the parent -- the scratch objects are
