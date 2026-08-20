@@ -20,6 +20,7 @@ import { MouseButtonName, Widget } from '../../../widget';
 
 import { applyFontObject, ensureFont, fontObjectName, notImplemented, warnOnce, widgetOf } from './region';
 import { measureText } from '../../../text';
+import { effectiveFont } from '../../../widget';
 
 /** Every button `RegisterForClicks` and `AnyUp`/`AnyDown` can name. */
 const ALL_MOUSE_BUTTONS = [
@@ -374,6 +375,39 @@ const BUTTON: MethodTable = {
     }
     const label = ctx.registry.widget(id)!;
     return [measureText(label.text, ensureFont(label), 1).width];
+  },
+  /**
+   * `GetTextHeight()` -- the twin of `GetTextWidth`, and **a blocker for the gossip menu rather than a
+   * symmetry exercise.**
+   *
+   * `GossipResize(titleButton)` is one line -- `titleButton:SetHeight(titleButton:GetTextHeight() + 2)`
+   * (`gossipframe.lua:171-173`) -- and it runs for EVERY row of a gossip menu, from all three of
+   * `GossipFrameAvailableQuestsUpdate`, `GossipFrameActiveQuestsUpdate` and
+   * `GossipFrameOptionsUpdate`. A nil method there raises inside the loop that is building the buttons,
+   * so the menu would have come up with NO ROWS AT ALL -- including "Let me browse your goods", which
+   * is how most vendors in the game are opened. `questframe.lua:239,279` calls it the same way.
+   *
+   * Found by a static sweep of every name `MerchantFrame`/`GossipFrame` calls against what this client
+   * registers, not by a click. It is the one genuine gap that sweep turned up: `SetDesaturation` looked
+   * like a second, and is not -- it is FrameXML's own (`uiparent.lua:2799`), and it reads the RESULT of
+   * `texture:SetDesaturated`, which is a declared gap here answering nothing, so the client's own
+   * `if ( not shaderSupported )` fallback takes over and greys the icon with `SetVertexColor` instead.
+   * That is exactly what the real client does on hardware without the shader, so the gap composes
+   * correctly and needed no change.
+   *
+   * Through `effectiveFont` and NOT through `ensureFont`, which is the one place this differs from its
+   * sibling above -- the same asymmetry `region.ts#GetStringHeight` documents, and here it is
+   * load-bearing rather than incidental: a gossip option long enough to wrap is precisely the case
+   * `GossipResize` exists for, and `ensureFont` would report one line's height and collapse a two-line
+   * option onto one row. Measured at scale 1, for the reason `GetTextWidth` gives.
+   */
+  GetTextHeight: (ctx, self) => {
+    const id = buttonLabels.get(self);
+    if (id === undefined) {
+      return [0];
+    }
+    const label = ctx.registry.widget(id)!;
+    return [measureText(label.text, effectiveFont(label) ?? ensureFont(label), 1).height];
   },
   /**
    * `RegisterForClicks("LeftButtonUp", "RightButtonUp", ...)` -- which buttons fire `OnClick`.
