@@ -32,13 +32,24 @@
  * set is one addon, three files (`Blizzard_TokenUI.lua`, `Blizzard_TokenUI.xml`, `Localization.lua`),
  * and every other Blizzard addon is correctly absent until something asks for it.
  *
- * ## What is deliberately not here
+ * ## `LoadAddOn()` -- REAL, and the timing is the whole design
  *
- * `LoadAddOn()` -- the on-demand half -- is a NAMED GAP, declared through `notImplemented` in
- * `lua/api/addons.ts`. The blocker is structural rather than missing work: a Lua global is
- * synchronous and fetching an addon's files is not, and `loadDocument`'s resolver is synchronous by
- * design (see `manifest.ts`'s header). Prefetching all twenty-two to make it synchronous is exactly the
- * cost the on-demand flag exists to avoid.
+ * A Lua global returns synchronously and fetching an addon's files does not, so demand loading needs
+ * every candidate's text in hand before the first `LoadAddOn` call. Two measurements make that
+ * affordable:
+ *
+ *  - **The whole on-demand set is 53 files and 780,575 bytes**, against the manifest's 264 files. It is
+ *    not the "load the interface twice" cost the flag exists to avoid.
+ *  - **The boot spends ~5 s EXECUTING the manifest after fetching it**, so these closures are fetched
+ *    concurrently with that execution and awaited only just before the login events fire. In the common
+ *    case the await costs nothing; it exists so the behaviour is DETERMINISTIC rather than depending on
+ *    whether a fetch happened to win a race.
+ *
+ * That is not theoretical tidiness. `UIParent_OnEvent`'s `PLAYER_LOGIN` arm calls `CombatLog_LoadUI()`
+ * unconditionally (`uiparent.lua:481`), so an addon IS demand-loaded during the boot on every login --
+ * and while `LoadAddOn` was a declared gap that put a modal "Couldn't load Blizzard_...: Unknown load
+ * problem" dialog on screen, photographed on a live login. `UIParentLoadAddOn` (`uiparent.lua:234-243`)
+ * turns any failure into `message(...)`, so a declared gap here is anything but quiet.
  */
 import Loader from '../../net/loader';
 import { PrefetchedManifest, prefetchManifest } from './manifest';
@@ -92,13 +103,16 @@ export interface PrefetchedAddOn {
  * The tocs are fetched in PARALLEL because they are the only serial step and there are 23 of them;
  * the closures then follow only for the survivors, which today is one addon.
  *
- * An addon whose `.toc` cannot be fetched is dropped silently here and named by the caller's report,
+ * An addon whose `.toc` cannot be fetched is dropped from BOTH sets and named by the caller's report,
  * the same contract `prefetchManifest` has for a missing include: one absent addon costs an addon,
  * not the interface.
+ *
+ * Returns the startup set RESOLVED and the on-demand set as a PENDING promise -- see the header for why
+ * that asymmetry is the design and not an oversight.
  */
 export async function prefetchStartupAddOns(
   names: readonly string[] = BLIZZARD_ADDONS,
-): Promise<PrefetchedAddOn[]> {
+): Promise<{ startup: PrefetchedAddOn[]; demand: Promise<Map<string, PrefetchedAddOn>> }> {
   const tocs = await Promise.all(names.map(async (name): Promise<[string, Toc | null]> => {
     // NOT `prefetchManifest` with a `stopAfter`: an entry it cannot find in the manifest means "the
     // WHOLE manifest" by design (see its doc comment), so probing that way would fetch all 23
@@ -108,11 +122,20 @@ export async function prefetchStartupAddOns(
     return [name, text === null ? null : parseToc(text)];
   }));
 
-  const startup = tocs.filter(([, toc]) => toc !== null && !isLoadOnDemand(toc));
-  return Promise.all(startup.map(async ([name]): Promise<PrefetchedAddOn> => {
+  const closure = async ([name]: [string, Toc | null]): Promise<PrefetchedAddOn> => {
     const dir = `${ADDONS_DIR}${name}\\`;
     return { name, dir, manifest: await prefetchManifest(dir, `${name}.toc`) };
-  }));
+  };
+
+  const served = tocs.filter(([, toc]) => toc !== null);
+  // THE ON-DEMAND CLOSURES ARE NOT AWAITED HERE, and that is the point -- see the header. The promise
+  // is started now so the fetches overlap the manifest's EXECUTION pass, and the caller awaits it just
+  // before the login events, which is the first moment an addon can actually be asked for.
+  const demand = Promise.all(served.filter(([, toc]) => isLoadOnDemand(toc)).map(closure))
+    .then((all) => new Map(all.map((addOn) => [addOn.name.toLowerCase(), addOn])));
+
+  const startup = await Promise.all(served.filter(([, toc]) => !isLoadOnDemand(toc)).map(closure));
+  return { startup, demand };
 }
 
 /**

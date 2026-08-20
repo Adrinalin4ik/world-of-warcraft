@@ -54,7 +54,7 @@ import { GlueArt } from '../art';
 import { Viewport } from '../layout';
 import { Widget } from '../widget';
 import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
-import { prefetchStartupAddOns } from './addons';
+import { PrefetchedAddOn, prefetchStartupAddOns } from './addons';
 import { cacheKey, prefetchManifest, registerTreeArt } from './manifest';
 import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret, placeSelection } from './tick';
 import { parseXml } from './xml';
@@ -82,6 +82,16 @@ import { invokeScriptHandler } from './lua/scripts';
 import type { FileReport } from './runtime';
 
 const FRAMEXML_DIR = 'Interface\\FrameXML\\';
+
+/**
+ * The separator between an addon's name and its file in a report label -- one backslash, matching the
+ * manifest paths the rest of the report prints.
+ *
+ * A named constant because writing it inline as a template literal silently produced the LITERAL
+ * text "Blizzard_TokenUI${file}" in every addon's file report: the escape needed to get a backslash
+ * next to a `$` also escaped the interpolation. Caught on a live run, not on paper.
+ */
+const ADDON_LABEL_SEP = '\\';
 const TOC = 'FrameXML.toc';
 
 export interface WorldRuntimeOptions {
@@ -165,7 +175,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // manifest's 264, so it costs nothing here -- and it has to be in hand before the first file runs, for
   // the reason `installBindingsApi` is called early below. Fetching it after the load would be the
   // `Spell.dbc` mistake in miniature (`ui/action-bridge.ts`): a fetch that starves the boot.
-  const [{ order, texts, tocMissing }, bindingCommands, addOns] = await Promise.all([
+  const [{ order, texts, tocMissing }, bindingCommands, { startup: addOns, demand }] = await Promise.all([
     prefetchManifest(FRAMEXML_DIR, TOC, options.stopAfter),
     fetchBindings(),
     // THE `Interface\AddOns\Blizzard_*` STARTUP SET, fetched alongside the manifest for the same
@@ -176,7 +186,9 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     // `options.stopAfter` SUPPRESSES it. That option exists so a measurement can bisect the manifest,
     // and an addon executed on top of a deliberately truncated FrameXML would inherit templates that
     // were never registered -- so a bisect run would report the addon's failures as its own.
-    options.stopAfter === undefined ? prefetchStartupAddOns() : Promise.resolve([]),
+    options.stopAfter === undefined
+      ? prefetchStartupAddOns()
+      : Promise.resolve({ startup: [] as PrefetchedAddOn[], demand: Promise.resolve(new Map()) }),
   ]);
 
   const started = performance.now();
@@ -324,32 +336,13 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   }
 
   /**
-   * THE ADDONS, after the whole manifest and before the login events -- the client's own order.
-   *
-   * `Interface\AddOns\Blizzard_TokenUI` is the only member of the startup set (see `addons.ts` for
-   * the census and the `## LoadOnDemand` reading), and it is not optional decoration:
-   * `CHARACTERFRAME_SUBFRAMES` (`characterframe.lua:1`) lists `TokenFrame`, and
-   * `CharacterFrame_ShowSubFrame` walks that table doing `_G[value]:Hide()` at
-   * `characterframe.lua:28`. With the addon unloaded that is an index of nil, so the character sheet
-   * could not open by ANY tab -- which is the owner's report.
-   *
-   * AFTER the manifest, not interleaved: the addon's XML inherits `HybridScrollFrameTemplate`
-   * (`blizzard_tokenui.xml:211`), `SmallMoneyFrameTemplate` (:237), `UIPanelButtonTemplate` (:244) and
-   * `OptionsSmallCheckButtonTemplate` (:314), all registered by FrameXML documents, and a template is
-   * only resolvable once its own file has run.
-   *
-   * `ADDON_LOADED` is fired per addon with the addon's name, which is the engine's contract for it --
-   * and BEFORE `VARIABLES_LOADED`, since a frame the addon creates has to exist before
-   * `LocalizeFrames` walks the tree.
-   *
-   * No yield inside this loop, unlike the manifest's: it is three files, and the yield is there to let
-   * the loading screen's bar advance across 264.
+   * Run ONE addon's files. Shared by the startup pass and by `LoadAddOn`, deliberately: a second copy
+   * would be a second place for the label, the resolver and the `ADDON_LOADED` fire to drift.
    */
-  const addOnsStarted = performance.now();
-  for (const addOn of addOns) {
+  const runAddOn = (addOn: PrefetchedAddOn): boolean => {
     if (addOn.manifest.tocMissing) {
       report.errors.push(`${addOn.dir}${addOn.name}.toc: could not be fetched; the addon was skipped`);
-      continue;
+      return false;
     }
     // A resolver over the ADDON's own file closure, falling back to FrameXML's. The fallback is not
     // theoretical tidiness: `<Include>` and `<Script file=>` inside an addon are relative to the addon
@@ -358,8 +351,9 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     const resolveAddOn = (path: string): string | null =>
       addOn.manifest.texts.get(cacheKey(path)) ?? texts.get(cacheKey(path)) ?? null;
     for (const file of addOn.manifest.order) {
-      // Labelled with the addon name so a file report cannot be confused with a FrameXML entry.
-      const label = `${addOn.name}\${file}`;
+      // Labelled with the addon name so a file report cannot be confused with a FrameXML entry of the
+      // same basename. See `ADDON_LABEL_SEP` for why the separator is a constant.
+      const label = [addOn.name, file].join(ADDON_LABEL_SEP);
       const text = resolveAddOn(file);
       if (text === null) {
         files.push({ file: label, kind: 'missing', frames: 0, warnings: [], errors: [`${label}: not found`] });
@@ -380,9 +374,77 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     }
     markAddOnLoaded(vm, addOn.name);
     fireEvent(vm, 'ADDON_LOADED', [addOn.name]);
+    return true;
+  };
+
+  /**
+   * THE ADDONS, after the whole manifest and before the login events -- the client's own order.
+   *
+   * `Interface\AddOns\Blizzard_TokenUI` is the only member of the startup set (see `addons.ts` for
+   * the census and the `## LoadOnDemand` reading), and it is not optional decoration:
+   * `CHARACTERFRAME_SUBFRAMES` (`characterframe.lua:1`) lists `TokenFrame`, and
+   * `CharacterFrame_ShowSubFrame` walks that table doing `_G[value]:Hide()` at
+   * `characterframe.lua:28`. With the addon unloaded that is an index of nil, so the character sheet
+   * could not open by ANY tab -- which is the owner's report.
+   *
+   * AFTER the manifest, not interleaved: the addon's XML inherits `HybridScrollFrameTemplate`
+   * (`blizzard_tokenui.xml:211`), `SmallMoneyFrameTemplate` (:237), `UIPanelButtonTemplate` (:244) and
+   * `OptionsSmallCheckButtonTemplate` (:314), all registered by FrameXML documents, and a template is
+   * only resolvable once its own file has run.
+   *
+   * `ADDON_LOADED` is fired per addon with the addon's name, which is the engine's contract for it --
+   * and BEFORE `VARIABLES_LOADED`, since a frame the addon creates has to exist before
+   * `LocalizeFrames` walks the tree.
+   *
+   * No yield inside this loop, unlike the manifest's: the startup set is three files, and the yield
+   * exists to let the loading screen's bar advance across 264.
+   *
+   * `addOnsMs` covers the STARTUP set only. An addon `LoadAddOn` pulls in later -- `Blizzard_CombatLog`
+   * during `PLAYER_LOGIN`, on every login -- runs through the same `runAddOn` and lands in `files` and
+   * in the report, but not in this number, because it is not a startup cost.
+   */
+  const addOnsStarted = performance.now();
+  for (const addOn of addOns) {
+    runAddOn(addOn);
   }
   const addOnsMs = performance.now() - addOnsStarted;
 
+  /**
+   * THE ON-DEMAND SET, AWAITED HERE AND NOWHERE ELSE.
+   *
+   * This is the last moment before the login events, and `UIParent_OnEvent`'s `PLAYER_LOGIN` arm calls
+   * `CombatLog_LoadUI()` unconditionally (`uiparent.lua:481`) -- so `LoadAddOn` is used during the boot
+   * itself and its files have to be in hand by now. The fetches were started before the execution pass
+   * (`addons.ts#prefetchStartupAddOns`), which takes seconds, so this await is expected to cost nothing.
+   * It is here so that "did the fetch win the race" is not a question anyone has to ask.
+   *
+   * `installAddOnsApi` is called a SECOND time, now with the loader. The first call had to happen before
+   * the manifest, because `IsAddOnLoaded` is read during the load and this map did not exist yet;
+   * re-registering `LoadAddOn` over its own declared gap is cheaper than deferring the whole set.
+   */
+  const onDemand = await demand;
+  installAddOnsApi(vm, (name: string): boolean => {
+    const addOn = onDemand.get(name.toLowerCase());
+    return addOn === undefined ? false : runAddOn(addOn);
+  });
+
+  // The client's own login sequence -- see decision 3 in the header for what each one does and where.
+  // A handler that raises must not abort the rest, so `fireEvent` queues and this drains once after.
+  for (const event of ['VARIABLES_LOADED', 'PLAYER_LOGIN', 'PLAYER_ENTERING_WORLD']) {
+    fireEvent(vm, event);
+  }
+
+  /**
+   * THE REPORT IS AGGREGATED HERE, AFTER THE LOGIN EVENTS, and the move was forced by a measurement.
+   *
+   * It used to run before them, which was fine while `files` could only grow during the manifest pass.
+   * It cannot any more: `PLAYER_LOGIN` calls `CombatLog_LoadUI()` (`uiparent.lua:481`), so
+   * `Blizzard_CombatLog` is demand-loaded DURING this sequence and appends its own file reports. With
+   * the aggregation before the events, its `Blizzard_CombatLog.lua:275: attempt to call a nil value
+   * (global 'getfenv')` was present in `files` and ABSENT from `report.errors` -- an error that only
+   * showed up because a live probe happened to print the per-file list. An instrument that cannot see a
+   * real failure is the thing this project keeps writing rules about.
+   */
   for (const entry of files) {
     report.frames += entry.frames;
     for (const warning of entry.warnings) {
@@ -391,12 +453,6 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
       }
     }
     report.errors.push(...entry.errors);
-  }
-
-  // The client's own login sequence -- see decision 3 in the header for what each one does and where.
-  // A handler that raises must not abort the rest, so `fireEvent` queues and this drains once after.
-  for (const event of ['VARIABLES_LOADED', 'PLAYER_LOGIN', 'PLAYER_ENTERING_WORLD']) {
-    fireEvent(vm, event);
   }
 
   /**

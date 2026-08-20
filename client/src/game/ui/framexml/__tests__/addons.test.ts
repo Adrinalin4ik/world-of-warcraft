@@ -45,10 +45,15 @@ jest.mock('../../../net/loader', () => {
 });
 
 describe('prefetchStartupAddOns', () => {
-  it('keeps the addon with no ## LoadOnDemand and its files, and drops the one that has it', async () => {
-    const addOns = await prefetchStartupAddOns(['Blizzard_TalentUI', 'Blizzard_TokenUI']);
+  it('runs the addon with no ## LoadOnDemand at startup and DEFERS the one that has it', async () => {
+    const { startup: addOns, demand } = await prefetchStartupAddOns([
+      'Blizzard_TalentUI', 'Blizzard_TokenUI',
+    ]);
 
     expect(addOns.map((addOn) => addOn.name)).toEqual(['Blizzard_TokenUI']);
+    // The LoadOnDemand one is not dropped, it is deferred -- fetched in parallel with the manifest's
+    // execution and awaited before the login events. See `addons.ts`' header.
+    expect([...(await demand).keys()]).toEqual(['blizzard_talentui']);
     // In MANIFEST order -- `Localization.lua` last is the addon's own contract ("This file is executed
     // at the end of addon load" is that file's only line).
     expect(addOns[0].manifest.order).toEqual([

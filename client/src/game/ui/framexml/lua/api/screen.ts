@@ -418,6 +418,25 @@ function installCVars(vm: LuaVM): void {
      */
     ['nameplateShowEnemies', '0'],
     ['nameplateShowFriends', '0'],
+    /**
+     * `lastTalkedToGM`, EMPTY -- and its absence put a modal error dialog on the owner's screen.
+     *
+     * `UIParent_OnEvent`'s `VARIABLES_LOADED` arm reads it and branches on
+     * `if ( lastTalkedToGM ~= "" )` (`uiparent.lua:471`), taking the branch that calls
+     * `GMChatFrame_LoadUI()` -> `UIParentLoadAddOn("Blizzard_GMChatUI")`. **In Lua `nil ~= ""` is
+     * TRUE**, so an ABSENT CVar takes the same branch a real conversation with a GM would, on every
+     * login -- and the popup reading "Couldn't load Blizzard_GMChatUI: Unknown load problem" was
+     * photographed on a live login before this line existed.
+     *
+     * The empty string is the game's own default and the comparison is the evidence for it: the client
+     * would not test a CVar against `""` unless `""` were its unset value. Seeding it is what makes the
+     * branch behave as it does in a real client -- not taken.
+     *
+     * This is why an unknown-CVar nil is dangerous rather than harmless, and it qualifies the paragraph
+     * above about `nil` being the faithful answer for an unknown name: it is faithful for a name the
+     * client does not know, and WRONG for one it does.
+     */
+    ['lastTalkedToGM', ''],
   ]);
   CVAR_STORES.set(vm, cvars);
 

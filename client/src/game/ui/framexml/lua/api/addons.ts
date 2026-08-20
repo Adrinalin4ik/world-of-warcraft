@@ -22,21 +22,22 @@
  * handler part-way. It reads the set the boot actually executed, keyed per VM, because this client
  * relogs without a page reload and a second boot's answer must not be the first boot's.
  *
- * ## The named gap
+ * ## `LoadAddOn`
  *
- * `LoadAddOn` is declared, not implemented, and the blocker is structural. Fetching an addon's files
- * is asynchronous; a Lua global returns synchronously; and `loadDocument`'s resolver is synchronous by
- * design (`manifest.ts`'s header). Prefetching all 23 addons at boot to make it synchronous is exactly
- * the cost `## LoadOnDemand` exists to avoid -- 22 of the 23 carry it.
+ * Real, and it delegates: this file knows nothing about fetching or about documents. `world-runtime.ts`
+ * installs a `loader` that executes one prefetched addon's files and answers whether it could
+ * (`framexml/addons.ts`' header has the timing argument for why the files are already in hand).
  *
- * **The RETURN SHAPE is load-bearing and is taken from the client's own caller, not invented.**
+ * **THE RETURN SHAPE IS LOAD-BEARING AND COMES FROM THE CLIENT'S OWN CALLER, not from invention.**
  * `UIParentLoadAddOn` (`uiparent.lua:234-243`) does `local loaded, reason = LoadAddOn(name)` and, on
- * failure, `format(ADDON_LOAD_FAILED, name, _G["ADDON_"..reason])` -- so `reason` must be a STRING
- * whose `ADDON_`-prefixed global exists, or the concatenation itself raises and takes the caller's
- * whole handler with it. `UNKNOWN_ERROR` is chosen from the 21 `ADDON_*` strings `GlobalStrings.lua`
- * ships (`ADDON_UNKNOWN_ERROR` is one of them) because it is the only one of the set that is TRUE of
- * us: the addon is not disabled, missing, corrupt, banned or version-mismatched -- this engine simply
- * cannot demand-load. Returning `nil` for the reason would look harmless and would raise.
+ * failure, `format(ADDON_LOAD_FAILED, name, _G["ADDON_"..reason])` -- so `reason` must be a STRING whose
+ * `ADDON_`-prefixed global exists, or the concatenation raises and takes the caller's whole handler with
+ * it. `MISSING` is used for a name this build does not serve, and `UNKNOWN_ERROR` when the loader itself
+ * refused; both are among the 21 `ADDON_*` strings `GlobalStrings.lua` ships. Returning `nil` for the
+ * reason would look harmless and would raise.
+ *
+ * An addon already loaded answers `true` without re-running its files -- the engine's own behaviour, and
+ * what stops `GMChatFrame_LoadUI`'s guard from rebuilding a frame tree on every whisper.
  */
 import { LuaVM } from '../vm';
 import { notImplemented } from '../methods/region';
@@ -59,7 +60,15 @@ export function markAddOnLoaded(vm: LuaVM, name: string): void {
   set.add(name.toLowerCase());
 }
 
-export function installAddOnsApi(vm: LuaVM): void {
+/**
+ * How `LoadAddOn` actually loads. Returns true once the addon's files have run.
+ *
+ * Injected rather than imported so this file stays a method/global table with no loader and no world,
+ * the same division `api/items.ts#setItemTooltipSource` documents.
+ */
+export type AddOnLoader = (name: string) => boolean;
+
+export function installAddOnsApi(vm: LuaVM, loader: AddOnLoader | null = null): void {
   /**
    * `IsAddOnLoaded(name)` -> `loaded, finished`.
    *
@@ -72,15 +81,32 @@ export function installAddOnsApi(vm: LuaVM): void {
   vm.registerFunction('IsAddOnLoaded', (args) => {
     const name = typeof args[0] === 'string' ? args[0].toLowerCase() : '';
     const loaded = loadedByVm.get(vm)?.has(name) === true;
-    return loaded ? [1, 1] : [];
+    // `[null, null]` and not `[]` for the negative. Returning NOTHING is not the same as returning nil
+    // in Lua: `tostring(IsAddOnLoaded("Blizzard_TalentUI"))` raised "bad argument #1 to 'tostring'
+    // (value expected)" on the live run, because zero results means the call contributed no argument at
+    // all. Every `if IsAddOnLoaded(...)` site is happy either way; a site that passes the result on is
+    // not, and the real API returns nil.
+    return loaded ? [1, 1] : [null, null];
   });
 
-  // See the header for why the reason string is `UNKNOWN_ERROR` and why it may not be nil.
-  const loadAddOn = notImplemented(
+  // With no loader installed at all this is still a declared gap rather than a silent false -- the glue
+  // runtime has no addon machinery and never will, and a screen that calls `LoadAddOn` there should be
+  // named in the report.
+  const noLoader = notImplemented(
     'LoadAddOn',
-    'demand-loading needs an ASYNCHRONOUS fetch and a Lua global returns synchronously; the 22 '
-      + 'LoadOnDemand addons are correctly absent until this is built',
+    'no addon loader is installed on this runtime -- only the world runtime has one',
     [false, 'UNKNOWN_ERROR'],
   );
-  vm.registerFunction('LoadAddOn', () => loadAddOn(null as never, 0, []));
+  vm.registerFunction('LoadAddOn', (args) => {
+    const name = typeof args[0] === 'string' ? args[0] : '';
+    if (loader === null) {
+      return noLoader(null as never, 0, []);
+    }
+    if (loadedByVm.get(vm)?.has(name.toLowerCase()) === true) {
+      return [true, null];
+    }
+    // See the header on the reason strings. `loader` returning false means the name is not one this
+    // build serves; anything it did load, it recorded through `markAddOnLoaded`.
+    return loader(name) ? [true, null] : [false, 'MISSING'];
+  });
 }
