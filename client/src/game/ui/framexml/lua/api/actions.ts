@@ -385,6 +385,38 @@ export function installActionsApi(vm: LuaVM): void {
 
   const gaps: Array<[string, string, unknown[]]> = [
     [
+      // **THE FIRST STATEMENT OF EVERY RIGHT-CLICK ON A UNIT PORTRAIT, AND ITS ABSENCE WAS THE WHOLE
+      // OF "правый клик не работает, совсем. Не появляется меню".**
+      //
+      // `SecureUnitButton_OnLoad` sets `*type2 = "menu"` (`SecureTemplates.lua:557`), so a right-click
+      // on PlayerFrame/TargetFrame/PartyMemberFrame enters `SecureUnitButton_OnClick`, whose body opens:
+      //
+      //     local type = SecureButton_GetModifiedAttribute(self, "type", button);
+      //     if ( type == "menu" ) then
+      //         if ( SpellIsTargeting() ) then          -- SecureTemplates.lua:565
+      //
+      // MEASURED, not reasoned about -- the console line, from a separated right-click on PlayerFrame:
+      //   `framexml: PlayerFrame: OnClick: [string "SecureTemplates.lua"]:565: attempt to call a nil
+      //    value (global 'SpellIsTargeting')`
+      // The handler died there, BEFORE `SecureActionButton_OnClick` ran, so `rawget(self, "menu")` was
+      // never reached and no menu could ever appear.
+      //
+      // THIS IS ALSO THE ASYMMETRY WITH THE STAT DROPDOWNS, which DO open: their arrow is a plain
+      // Button whose `OnClick` calls `ToggleDropDownMenu` directly (`paperdollframe.lua`), so it never
+      // touches the secure-button path. The unit popup is the only menu in the client that does. It was
+      // therefore neither the dropdown rect, nor `SetFrameLevel`, nor hit-testing -- all three of which
+      // were fixed in neighbouring rounds and none of which was reached.
+      //
+      // `SpellCanTargetItem` below was declared for the TAIL of the same file's
+      // `SecureActionButton_OnClick` (line 537) and by the same reasoning; this is its head. Both are
+      // FALSE for the same true reason: nothing in this client puts the cursor into spell-targeting
+      // mode, so a click is never awaiting a spell target.
+      'SpellIsTargeting',
+      'no spell-targeting cursor state exists in this client, so a click is never awaiting a spell '
+        + 'target (SecureTemplates.lua:565, and SECURE_ACTIONS.target at :403)',
+      [false],
+    ],
+    [
       // The TAIL of every action-button click: `SecureActionButton_OnClick:537` reads
       // `if ( SpellCanTargetItem() )` after it has dispatched the action, to route a spell that needs an
       // item target (an enchant, a poison) at a bag slot. Its absence raised on EVERY click -- measured,

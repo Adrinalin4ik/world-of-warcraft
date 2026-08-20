@@ -524,6 +524,24 @@ export function installUnitsApi(vm: LuaVM): void {
   // neutral target's level as if it were unattackable.
   fn('UnitCanAttack', (args) => [withUnit(pickToken(args), false, (u) => u.reaction <= 4)]);
 
+  /**
+   * `UnitCanAssist(a, b)` -- the OTHER half of `SecureActionButton_OnClick`'s disposition test, and the
+   * SECOND missing global on the right-click-a-portrait path.
+   *
+   *     if ( UnitCanAttack("player", unit) ) then ...
+   *     elseif ( UnitCanAssist("player", unit) ) then ...     -- SecureTemplates.lua:493
+   *
+   * Right-clicking our OWN portrait takes the `elseif`: our reaction to ourselves is FRIENDLY, so
+   * `UnitCanAttack` is false and this is evaluated on every such click. It raised second, behind
+   * `SpellIsTargeting` (`api/actions.ts`), which is why only the first showed in the console.
+   *
+   * `reaction > 4` -- strictly friendly -- and the boundary is deliberately the MIRROR of
+   * `UnitCanAttack`'s `<= 4` above, so the two are exhaustive and a neutral unit is attackable and not
+   * assistable. That is the same neutral-point ruling the comment above cites from
+   * `benilla/src/target/click.rs:98`, applied to the complement rather than restated.
+   */
+  fn('UnitCanAssist', (args) => [withUnit(pickToken(args), false, (u) => u.reaction > 4)]);
+
   // `UnitIsUnit(a, b)` is called seven times by TargetFrame.lua and is pure token algebra -- it needs
   // no field at all, only whether two tokens name the same unit. Compared by NAME because that is the
   // only identity a snapshot carries; a host that later puts a guid on the snapshot should compare
