@@ -843,14 +843,13 @@ export function installUnitsApi(vm: LuaVM): void {
    * purple `GetRestState` above documents for the player's own unrested XP bar.
    */
   gaps.push(
-    ['GetNumFactions', 'SMSG_INITIALIZE_FACTIONS (0x122) has no subscriber and Faction.dbc is not '
-      + 'joined, so no faction is known; 0 is what makes ReputationFrame_Update hide its own rows '
-      + 'instead of raising', [0]],
-    ['GetFactionInfo', 'as GetNumFactions -- with 0 factions this is unreachable', []],
-    ['GetWatchedFactionInfo', 'as GetNumFactions', []],
-    ['CollapseFactionHeader', 'as GetNumFactions -- there is no header to collapse', []],
-    ['ExpandFactionHeader', 'as GetNumFactions', []],
-    ['SetWatchedFactionIndex', 'as GetNumFactions', []],
+    // THE REPUTATION TAB'S GLOBALS ARE GONE FROM THIS LIST -- `GetNumFactions`, `GetFactionInfo`,
+    // `GetWatchedFactionInfo`, `SetWatchedFactionIndex`, `CollapseFactionHeader`,
+    // `ExpandFactionHeader` and `IsFactionInactive` are real in `ui/reputation-bridge.ts` now, fed by
+    // `network/game/object/reputation.ts` (the 0x122/0x123/0x124 subscriber this list used to say did
+    // not exist) joined to `pipeline/dbc/faction-data.ts`. Deliberately NOT left declared here as
+    // well, for the reason the skills block below gives: a stub the bridge overrides would still put
+    // its name in the load report, and a report naming a gap that has closed is treated as a defect.
     // THE SKILLS TAB'S OWN GLOBALS ARE GONE FROM THIS LIST -- `GetNumSkillLines`, `GetSkillLineInfo`,
     // `GetSelectedSkill`, `SetSelectedSkill`, `CollapseSkillHeader`, `ExpandSkillHeader`,
     // `UnitCharacterPoints` and `GetAdjustedSkillPoints` are real (or, for the last, declared) in
@@ -869,9 +868,13 @@ export function installUnitsApi(vm: LuaVM): void {
       + 'relic slot; the only effect is which empty-slot art the ranged button shows', [false]],
     // The rest of what those panels reach, each found the same way -- by pcall-ing the client's own
     // update routine and reading the next call it died on.
-    ['GetSelectedFaction', 'as GetNumFactions', [0]],
-    ['SetSelectedFaction', 'as GetNumFactions', []],
-    ['IsFactionInactive', 'as GetNumFactions', [false]],
+    // `IsFactionInactive` has LEFT this list -- `ui/reputation-bridge.ts` answers it from the wire's
+    // own `FACTION_FLAG_INACTIVE` bit. The selection pair stays, and the reason is no longer "as
+    // GetNumFactions" (which is real now): the reputation pane tracks its selected row in ENGINE state
+    // that nothing in the manifest reads back, so neither has an observable effect here. 0 is the
+    // "nothing selected" answer `ReputationFrame_Update` treats as no highlight.
+    ['GetSelectedFaction', 'the selected reputation row is engine state nothing reads back', [0]],
+    ['SetSelectedFaction', 'as GetSelectedFaction -- the write half of a value nothing reads', []],
     // THE CURRENCY FAMILY, and it is a NEW gap rather than an old one: `Blizzard_CombatLog` is not the
     // only addon `PLAYER_LOGIN` loads -- `Blizzard_TokenUI` is in the startup set, and its
     // `BackpackTokenFrame_Update` (`blizzard_tokenui.lua:176-180`) is hooked to the bag frames. With

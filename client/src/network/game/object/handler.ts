@@ -6,6 +6,7 @@ import { ItemHandler } from './items';
 import { LootHandler } from './loot';
 import { GossipHandler } from './gossip';
 import { MerchantHandler } from './merchant';
+import { ReputationHandler } from './reputation';
 import { GroupHandler } from './group';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
@@ -91,6 +92,8 @@ export class ObjectHandler extends EventEmitter {
    */
   public merchantHandler: MerchantHandler;
 
+  public reputationHandler: ReputationHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -108,6 +111,9 @@ export class ObjectHandler extends EventEmitter {
     this.groupHandler = new GroupHandler(this.game);
     this.gossipHandler = new GossipHandler(this.game);
     this.merchantHandler = new MerchantHandler(this.game);
+    // REPUTATION. `SMSG_INITIALIZE_FACTIONS` (0x122) had no subscriber at all until this line, which
+    // is what `api/units.ts` recorded as the reason the whole reputation tab was a declared gap.
+    this.reputationHandler = new ReputationHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

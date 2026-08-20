@@ -46,6 +46,7 @@ import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachContainerBridge } from './container-bridge';
 import { attachPaperDollStats } from './paperdoll-stats';
 import { attachSkillsBridge } from './skills-bridge';
+import { attachReputationBridge } from './reputation-bridge';
 import { attachLootBridge } from './loot-bridge';
 import { attachGossipBridge } from './gossip-bridge';
 import { attachMerchantBridge } from './merchant-bridge';
@@ -237,6 +238,9 @@ export class WorldUiHost {
 
   /** `attachSkillsBridge`'s teardown, held so `dispose` can run it. */
   private detachSkills: (() => void) | null = null;
+
+  /** `attachReputationBridge`'s teardown, held so `dispose` can run it. */
+  private detachReputation: (() => void) | null = null;
 
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
@@ -580,6 +584,11 @@ export class WorldUiHost {
         // character's descriptor, and an offline world has none. Its DBC join is `skillData`, which the
         // spellbook already asks for, so this adds no fetch.
         this.detachSkills = attachSkillsBridge(runtime.vm, this.world);
+        // THE REPUTATION TAB. Gated on a real session for the same reason as the skills tab: every
+        // standing comes from `SMSG_INITIALIZE_FACTIONS`, and an offline world receives none -- with no
+        // packet the pane shows an empty list, which is what it showed before this existed. Its DBC
+        // join (`faction-data.ts`) is kicked by the bridge itself and is a table nothing else fetches.
+        this.detachReputation = attachReputationBridge(runtime.vm, this.world);
         // THE UNIT RIGHT-CLICK MENUS -- groups, duels, dungeon difficulty, instance reset. Gated on a
         // real session like the rest: every answer is a packet, and an offline world has no roster, no
         // duel and no instance to reset. AFTER the spellbook bridge, because `StartDuel` finds the duel
@@ -1208,6 +1217,8 @@ export class WorldUiHost {
     this.detachStats = null;
     this.detachSkills?.();
     this.detachSkills = null;
+    this.detachReputation?.();
+    this.detachReputation = null;
     // The rect publication is module-level, so it OUTLIVES this host unless it is cleared -- exactly
     // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
     // stale draw list would have a remounted world's scripts reading the previous world's layout.
