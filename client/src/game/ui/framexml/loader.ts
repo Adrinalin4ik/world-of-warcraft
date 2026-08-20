@@ -69,6 +69,8 @@ import './lua/methods/worldframe';
 import './lua/methods/frame';
 import './lua/methods/gametooltip';
 import './lua/methods/kinds';
+import './lua/methods/messageframe';
+import { setMessageFrameDuration, setMessageFrameInsertMode } from './lua/methods/messageframe';
 import './lua/methods/model';
 import './lua/methods/scroll';
 import './lua/methods/statusbar';
@@ -736,6 +738,19 @@ class DocumentLoader {
   private applyAttrs(element: XmlElement, wrapper: LuaRef, dbg: string): void {
     if (attrBool(element, 'hidden')) {
       this.callMethod(wrapper, 'Hide', [], dbg);
+    }
+    // `<MessageFrame displayDuration="5" insertMode="TOP">` -- `uierrorsframe.xml:4`, the only
+    // MessageFrame in the manifest. Applied HERE because these are LoadXML attributes like every other
+    // one in this method, and NOT through a Lua method because the class has none: nothing in the
+    // manifest calls `SetTimeVisible` or `SetInsertMode`, so inventing them to carry an attribute would
+    // add API surface that no file has ever pinned. See `methods/messageframe.ts`' header.
+    const displayDuration = num(attr(element, 'displayDuration'));
+    if (displayDuration !== undefined) {
+      setMessageFrameDuration(this.rt.ctx.frameIdOf(wrapper), displayDuration);
+    }
+    const insertMode = attr(element, 'insertMode');
+    if (insertMode !== undefined) {
+      setMessageFrameInsertMode(this.rt.ctx.frameIdOf(wrapper), insertMode);
     }
     const strata = attr(element, 'frameStrata');
     if (strata !== undefined) {

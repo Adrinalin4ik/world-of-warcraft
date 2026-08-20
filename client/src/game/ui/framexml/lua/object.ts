@@ -56,6 +56,7 @@ export type WidgetClass =
   | 'COOLDOWN'
   | 'GAMETOOLTIP'
   | 'WORLDFRAME'
+  | 'MESSAGEFRAME'
   | 'BACKDROP';
 
 const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
@@ -106,6 +107,10 @@ const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
   // child `<Frame>` (`ActionStatus`), all authored hidden. The claim it was supporting -- that a
   // nameplate is engine-created and appears in no manifest file -- is unaffected and still holds.
   WORLDFRAME: 'FRAME',
+  // A MessageFrame IS a Frame that prints lines -- `UIErrorsFrame` inherits `RegisterEvent`,
+  // `UnregisterEvent` and `GetFrameLevel` from here and adds exactly `AddMessage`. See
+  // `methods/messageframe.ts` for why that one method is the whole surface.
+  MESSAGEFRAME: 'FRAME',
   // OURS, not the client's: `backdrop` is a Widget kind this project invented for a nine-slice
   // frame. It behaves as a Frame and has no methods of its own today.
   BACKDROP: 'FRAME',
@@ -147,6 +152,9 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   // the world is a separate three.js scene entirely, so this frame is a rect and a parent and nothing
   // more, which is exactly what an addon walking `GetChildren()` needs it to be.
   WORLDFRAME: 'frame',
+  // `frame`: the lines are real FontString children under it, so the frame itself draws nothing of its
+  // own -- exactly like GAMETOOLTIP above.
+  MESSAGEFRAME: 'frame',
 };
 
 /**
@@ -189,6 +197,10 @@ const CREATE_FRAME_CLASSES: WidgetClass[] = [
   // loader funnels every XML element through `CreateFrame`, so without this entry the manifest's own
   // `<WorldFrame>` still throws even though the class now parses.
   'WORLDFRAME',
+  // Listed for the same reason as the two above -- the loader funnels every XML element through
+  // `CreateFrame`, so `<MessageFrame name="UIErrorsFrame" ...>` (`uierrorsframe.xml:4`) throws without
+  // it. That throw is why `UIErrorsFrame` did not exist and no refusal could be printed on screen.
+  'MESSAGEFRAME',
   'BACKDROP',
 ];
 

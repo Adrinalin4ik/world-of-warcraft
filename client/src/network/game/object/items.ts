@@ -175,6 +175,43 @@ export class ItemHandler extends EventEmitter {
     // whose guids are still perfectly valid keys. Found in self-review as dead code, which is what it
     // was; the bug it implies is not theoretical.
     this.game.on('packet:receive:SMSG_LOGIN_VERIFY_WORLD', () => this.clearSession());
+    this.game.on(
+      `packet:receive:${'SMSG_INVENTORY_CHANGE_FAILURE'}`,
+      (gp: GamePacket) => this.handleEquipError(gp),
+    );
+  }
+
+  /**
+   * `SMSG_INVENTORY_CHANGE_FAILURE` (**0x112**) -- WHY the server refused an item action.
+   *
+   * The owner: "there're not alerts when I'm trying to do something restrictive, like wearing a mail
+   * while mage etc." This is the packet that says so, and it had no subscriber at all: every refusal
+   * arrived and was dropped, so a rule of the game and a bug in this client looked identical. That has
+   * already cost one false report.
+   *
+   * **Only the FIRST BYTE is consumed, and that is deliberate.** The body is `u8 reason` and then, for
+   * every reason but 0, two item guids, a bag-subclass byte and a per-reason tail (TrinityCore 3.3.5
+   * `Player::SendEquipError`). The reason byte's position is the one part of that layout no version
+   * disagrees about, and it is the whole of what the message needs; reading the tail would mean pinning
+   * a conditional layout for the sake of one string's `%d`. So `ERR_CANT_EQUIP_LEVEL_I` and
+   * `ERR_PURCHASE_LEVEL_TOO_LOW` keep their raw `%d` -- see `ui/container-bridge.ts`, which is where
+   * that is handled and said out loud.
+   *
+   * Reason **0** (`EQUIP_ERR_OK`) is not a refusal and is dropped here rather than downstream: the
+   * server sends it as a bare two-byte "nothing went wrong" and there is no message for it.
+   */
+  private handleEquipError(gp: GamePacket): void {
+    try {
+      const reason = gp.readUnsignedByte();
+      if (reason === 0) {
+        return;
+      }
+      this.emit('equipError', reason);
+    } catch (e) {
+      // Same contract as `loot.ts#subscribe`: `byte-buffer` THROWS past the frame and an uncaught throw
+      // escapes `GameHandler#dataReceived`'s receive loop, taking every packet still buffered with it.
+      console.warn(`items: SMSG_INVENTORY_CHANGE_FAILURE did not decode -- ${(e as Error).message}`);
+    }
   }
 
   // ---------------------------------------------------------------------------------------------

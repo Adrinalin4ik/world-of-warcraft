@@ -63,6 +63,7 @@ import { fireEvent } from './lua/events';
 import { drainScriptErrors } from './lua/scripts';
 import { FocusSink, FrameRegistry, MethodContext, installObjectModel } from './lua/object';
 import { syncInteractiveArt } from './lua/methods/kinds';
+import { tickMessageFrames } from './lua/methods/messageframe';
 import { LuaVM } from './lua/vm';
 import { installScreenApi } from './lua/api/screen';
 import { installSecureApi } from './lua/api/secure';
@@ -660,6 +661,9 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     longestBlockMs,
     addOnsMs,
     update: (dt: number) => {
+      // `UIErrorsFrame`'s messages expiring. FREE when nothing is on screen -- one `Map.size` test --
+      // which is almost always; see `methods/messageframe.ts` on why there is no per-frame fade.
+      tickMessageFrames(dt);
       caretClock += dt;
       const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
       for (const { box, caret, selection } of editBoxes) {

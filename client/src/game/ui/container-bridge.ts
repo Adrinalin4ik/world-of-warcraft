@@ -203,6 +203,100 @@ function equipSlotsFor(inventoryType: number): number[] {
   }
 }
 
+/**
+ * THE REFUSAL MESSAGE: `SMSG_INVENTORY_CHANGE_FAILURE`'s reason byte -> the client's own GlobalStrings
+ * key, resolved to text through the VM's own `GlobalStrings.lua` and never written here.
+ *
+ * The owner: "there're not alerts when I'm trying to do something restrictive, like wearing a mail while
+ * mage etc." Wearing mail as a mage is reason **8**, `EQUIP_ERR_PROFICIENCY_NEEDED`, and the line the
+ * game prints is `ERR_PROFICIENCY_NEEDED` = "You do not have the required proficiency for that item."
+ * (`globalstrings.lua:3401`).
+ *
+ * ## The table is the enum, and the key is derived rather than transcribed
+ *
+ * Below is TrinityCore 3.3.5's `InventoryResult` (`Entities/Item/ItemDefines.h`) with the `EQUIP_ERR_`
+ * prefix dropped, in wire order, index == value. The GlobalStrings key is `'ERR_' + name`, and that
+ * derivation is not a guess: **21 of 22 spot-checked names resolve to a real key in the served
+ * `globalstrings.lua`**, including the awkward ones -- `ERR_ITEM_MAX_LIMIT_CATEGORY_COUNT_EXCEEDED_IS`,
+ * `ERR_SHAPESHIFT_FORM_CANNOT_EQUIP`, `ERR_2HANDED_EQUIPPED`, `ERR_INV_FULL`. The one that does not is
+ * `ERR_OK`, which is right: reason 0 is not a refusal and never reaches here.
+ *
+ * **The `_2`/`_3`/`_4`/`_5` suffixes are the enum's ALIASES, not separate messages.**
+ * `EQUIP_ERR_BAG_FULL_2` has no `ERR_BAG_FULL_2` string (checked: absent), and the real client prints
+ * "That bag is full." for all of them -- so a trailing `_<digit>` is stripped and the base key tried.
+ * Verified absent for `_2` on BAG_FULL, WRONG_BAG_TYPE, NO_SLOT_AVAILABLE, ITEM_NOT_FOUND,
+ * CANT_EQUIP_EVER, VENDOR_SOLD_OUT, CANT_STACK and INTERNAL_BAG_ERROR, and for `_3`/`_5` on BAG_FULL.
+ *
+ * ## Silence is what an unresolvable key does, and that is the mechanism rather than an accident
+ *
+ * This is the reference's law, ported (`benilla/src/ui_items/equip_error.rs:14-24`): the engine maps the
+ * reason through a table and calls its display sink unconditionally, and the sink returns on an empty
+ * string. So reasons whose key is simply not in `GlobalStrings.lua` print nothing WITHOUT any
+ * control-flow special case -- and the one that matters is **83, `EQUIP_ERR_NONE`**, which the server
+ * sends as a pure "clear the item's grey pending lock" sentinel ALONGSIDE a real message. `ERR_NONE` is
+ * absent from the served strings (checked), so it is silent for free. `ERR_CANT_BE_DISENCHANTED` (59)
+ * and `ERR_EVENT_AUTOEQUIP_BIND_CONFIRM` (81) are absent too, and are meant to be.
+ *
+ * **benilla's own numbering is NOT used and must not be**: its table is the 67-wide 1.12 enum, where
+ * `PROFICIENCY_NEEDED` is 8 by coincidence but `INV_FULL` is 50 against a different neighbourhood, and
+ * its reason 59 is the sentinel that is 83 here. Mechanism from the reference, numbers from this build.
+ *
+ * ## What is NOT read off the wire
+ *
+ * Two strings carry a format specifier the packet's tail would fill -- `ERR_CANT_EQUIP_LEVEL_I` ("You
+ * must reach level %d to use that item.") and `ERR_PURCHASE_LEVEL_TOO_LOW`. `handleEquipError` consumes
+ * only the reason byte (see its own note), so those two print with the specifier still in them. Stated
+ * rather than papered over: substituting a number this client has not read would be worse than showing
+ * the format.
+ */
+const EQUIP_ERR_NAMES: readonly string[] = [
+  'OK', 'CANT_EQUIP_LEVEL_I', 'CANT_EQUIP_SKILL', 'WRONG_SLOT', 'BAG_FULL', 'BAG_IN_BAG',
+  'TRADE_EQUIPPED_BAG', 'AMMO_ONLY', 'PROFICIENCY_NEEDED', 'NO_SLOT_AVAILABLE', 'CANT_EQUIP_EVER',
+  'CANT_EQUIP_EVER_2', 'NO_SLOT_AVAILABLE_2', '2HANDED_EQUIPPED', '2HSKILLNOTFOUND', 'WRONG_BAG_TYPE',
+  'WRONG_BAG_TYPE_2', 'ITEM_MAX_COUNT', 'NO_SLOT_AVAILABLE_3', 'CANT_STACK', 'NOT_EQUIPPABLE', 'CANT_SWAP',
+  'SLOT_EMPTY', 'ITEM_NOT_FOUND', 'DROP_BOUND_ITEM', 'OUT_OF_RANGE', 'TOO_FEW_TO_SPLIT', 'SPLIT_FAILED',
+  'SPELL_FAILED_REAGENTS_GENERIC', 'NOT_ENOUGH_MONEY', 'NOT_A_BAG', 'DESTROY_NONEMPTY_BAG', 'NOT_OWNER',
+  'ONLY_ONE_QUIVER', 'NO_BANK_SLOT', 'NO_BANK_HERE', 'ITEM_LOCKED', 'GENERIC_STUNNED', 'PLAYER_DEAD',
+  'CLIENT_LOCKED_OUT', 'INTERNAL_BAG_ERROR', 'ONLY_ONE_BOLT', 'ONLY_ONE_AMMO', 'CANT_WRAP_STACKABLE',
+  'CANT_WRAP_EQUIPPED', 'CANT_WRAP_WRAPPED', 'CANT_WRAP_BOUND', 'CANT_WRAP_UNIQUE', 'CANT_WRAP_BAGS',
+  'LOOT_GONE', 'INV_FULL', 'BANK_FULL', 'VENDOR_SOLD_OUT', 'BAG_FULL_2', 'ITEM_NOT_FOUND_2',
+  'CANT_STACK_2', 'BAG_FULL_3', 'VENDOR_SOLD_OUT_2', 'OBJECT_IS_BUSY', 'CANT_BE_DISENCHANTED',
+  'NOT_IN_COMBAT', 'NOT_WHILE_DISARMED', 'BAG_FULL_4', 'CANT_EQUIP_RANK', 'CANT_EQUIP_REPUTATION',
+  'TOO_MANY_SPECIAL_BAGS', 'LOOT_CANT_LOOT_THAT_NOW', 'ITEM_UNIQUE_EQUIPPABLE', 'VENDOR_MISSING_TURNINS',
+  'NOT_ENOUGH_HONOR_POINTS', 'NOT_ENOUGH_ARENA_POINTS', 'ITEM_MAX_COUNT_SOCKETED', 'MAIL_BOUND_ITEM',
+  'INTERNAL_BAG_ERROR_2', 'BAG_FULL_5', 'ITEM_MAX_COUNT_EQUIPPED_SOCKETED',
+  'ITEM_UNIQUE_EQUIPPABLE_SOCKETED', 'TOO_MUCH_GOLD', 'NOT_DURING_ARENA_MATCH', 'TRADE_BOUND_ITEM',
+  'CANT_EQUIP_RATING', 'EVENT_AUTOEQUIP_BIND_CONFIRM', 'NOT_SAME_ACCOUNT', 'NONE',
+  'ITEM_MAX_LIMIT_CATEGORY_COUNT_EXCEEDED_IS', 'ITEM_MAX_LIMIT_CATEGORY_SOCKETED_EXCEEDED_IS',
+  'SCALING_STAT_ITEM_LEVEL_EXCEEDED', 'PURCHASE_LEVEL_TOO_LOW', 'CANT_EQUIP_NEED_TALENT',
+  'ITEM_MAX_LIMIT_CATEGORY_EQUIPPED_EXCEEDED_IS', 'SHAPESHIFT_FORM_CANNOT_EQUIP',
+  'ITEM_INVENTORY_FULL_SATCHEL',
+];
+
+/**
+ * The `ERR_*` text for a refusal reason, out of the VM's own GlobalStrings, or null.
+ *
+ * Null for an unknown reason and for a key the strings do not define -- both mean "print nothing", which
+ * is the engine's own behaviour. See `EQUIP_ERR_NAMES`.
+ */
+function equipErrorText(vm: LuaVM, reason: number): string | null {
+  const name = EQUIP_ERR_NAMES[reason];
+  if (name === undefined) {
+    return null;
+  }
+  const exact = vm.getGlobal(`ERR_${name}`);
+  if (typeof exact === 'string' && exact !== '') {
+    return exact;
+  }
+  // An alias -- `BAG_FULL_2` and friends. See the header.
+  const base = name.replace(/_\d+$/, '');
+  if (base === name) {
+    return null;
+  }
+  const aliased = vm.getGlobal(`ERR_${base}`);
+  return typeof aliased === 'string' && aliased !== '' ? aliased : null;
+}
+
 /** A decoded descriptor bag, as `ItemHandler` stores one. */
 type FieldBag = Record<string | number, number>;
 
@@ -905,21 +999,22 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       lockChanged(bag, slot);
       return;
     }
-    // A paperdoll destination has to FIT, and the fit rule rides the payload from wherever it was
-    // picked up (`equipSlots`). A bag destination takes anything -- the server sorts out a swap.
+    // **THERE IS NO CLIENT-SIDE FIT CHECK ON A PLACEMENT, and its removal is the point.**
     //
-    // **FAIL-OPEN, and the asymmetry is deliberate**: the rule only refuses when `equipSlots` is
-    // NON-EMPTY and does not contain the slot, i.e. when the item is known to be equippable somewhere
-    // else. An EMPTY list means we could not decide -- the item template has not arrived, or its
-    // `inventoryType` is one `equipSlotsFor` does not map -- and refusing on "do not know" is
-    // indistinguishable, from the player's side, from the drag being broken. The real client has NO
-    // client-side fit check on this path at all: `PaperDollItemSlotButton_OnClick` calls
-    // `PickupInventoryItem` unconditionally (`paperdollframe.lua:1237`) and `CursorCanGoInSlot` exists
-    // only to drive the `CURSOR_UPDATE` highlight, so letting the server referee an undecidable case is
-    // the reference behaviour as well as the safer one.
-    if (bag === EQUIPMENT_BAG && held.equipSlots.length > 0 && !held.equipSlots.includes(slot)) {
-      return;
-    }
+    // Two earlier versions of this line refused a paperdoll drop whose `equipSlots` did not contain the
+    // slot -- first outright, then fail-open when the list was empty. Both were wrong for one reason:
+    // **a refusal this client invents is a refusal with nothing to say.** The player sees the item snap
+    // back and cannot tell a rule of the game from a bug in the client, which is exactly the confusion
+    // the owner reported ("there're not alerts when I'm trying to do something restrictive") and which
+    // has already cost this project one false bug report.
+    //
+    // The real client does not check either: `PaperDollItemSlotButton_OnClick` calls
+    // `PickupInventoryItem` unconditionally (`paperdollframe.lua:1237`), and `CursorCanGoInSlot` exists
+    // only to drive `CURSOR_UPDATE`'s slot highlight -- which is still what `equipSlots` is carried for.
+    // The server referees, and `SMSG_INVENTORY_CHANGE_FAILURE` comes back with a reason that
+    // `EQUIP_ERR_NAMES` turns into the game's own red line: a belt on the head slot answers
+    // `EQUIP_ERR_WRONG_SLOT` -> "That item does not go in that slot." That is strictly more information
+    // than a silent snap-back, and none of the text is ours.
     if (sendMove(held, bag, slot)) {
       holdItem(null, null);
     }
@@ -1231,6 +1326,31 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     });
   };
 
+  /**
+   * THE RED LINE ON SCREEN. `ItemHandler` decodes the reason byte, this turns it into the client's own
+   * string and fires the event the client's own frame is listening for.
+   *
+   * `UIErrorsFrame_OnLoad` registers `UI_ERROR_MESSAGE` (`uierrorsframe.lua:5`) and its handler is one
+   * line: `self:AddMessage(arg1, 1.0, 0.1, 0.1, 1.0)` (`:14-15`). So the ENGINE's whole job is the
+   * event and its text -- the colour, the position, the font and the hold are all the document's, which
+   * is why nothing here draws anything. `MessageFrame` had to become a real widget class for that to
+   * land at all; see `lua/methods/messageframe.ts`.
+   *
+   * A reason with no string in `GlobalStrings.lua` fires nothing, which is the engine's own behaviour --
+   * see `EQUIP_ERR_NAMES`.
+   */
+  const onEquipError = (reason: number): void => {
+    if (disposed) {
+      return;
+    }
+    const text = equipErrorText(vm, Number(reason));
+    if (text === null) {
+      return;
+    }
+    fireEvent(vm, 'UI_ERROR_MESSAGE', [text]);
+  };
+  items.on('equipError', onEquipError);
+
   items.on('inventoryChanged', pushAll);
   items.on('templatesChanged', pushAll);
   // `ItemDisplayInfo.dbc` is 6.7 MB and the icons are null until it lands; this is the repaint that
@@ -1305,6 +1425,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     setItemTooltipSource(vm, null);
     items.removeListener('inventoryChanged', pushAll);
     items.removeListener('templatesChanged', pushAll);
+    items.removeListener('equipError', onEquipError);
     delete (window as unknown as Record<string, unknown>).bagBridge;
   };
 }
