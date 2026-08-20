@@ -160,7 +160,23 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
    */
   const onInvite = (inviter: string) => fireEvent(vm, 'PARTY_INVITE_REQUEST', [inviter]);
 
-  const onDeclined = () => fireEvent(vm, 'PARTY_INVITE_CANCEL');
+  /**
+   * SELF-REVIEW FIX: `SMSG_GROUP_DECLINE` IS NOT `PARTY_INVITE_CANCEL`, and firing it here was wrong.
+   *
+   * The two events are opposite ends of the invitation. `PARTY_INVITE_CANCEL` means the INVITER
+   * withdrew, and its only consumer hides the popup that is currently up (`uiparent.lua:548-551`) --
+   * so on a decline of OUR OWN invitation it fires with no popup showing, and would hide a genuine
+   * incoming invitation if one arrived in the same breath.
+   *
+   * What the reference client does with a decline is print `ERR_DECLINE_GROUP_S` as a system chat
+   * line. There is no chat sink in this client, so this is a NAMED GAP rather than a silent no-op or
+   * a wrong event: the console line is the honest placeholder, and the name is the payload the chat
+   * line will want when there is somewhere to put it.
+   */
+  const onDeclined = (name: string) => {
+    console.info(`group: ${name} declined the invitation `
+      + '(no chat sink yet, so ERR_DECLINE_GROUP_S has nowhere to print)');
+  };
 
   /**
    * `DUEL_REQUESTED` with the challenger's name -- but only when the challenger is not US.
@@ -431,13 +447,29 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
    * file exists to avoid.
    */
   fn('StartDuel', (args) => {
+    // SELF-REVIEW FIX: this ignored its argument and always duelled the CURRENT TARGET. The menu
+    // reaches it as `StartDuel(unit, 1)` where `unit` is the dropdown's token, which is `"target"` from
+    // the target frame but `"party1".."party4"` from a party member frame -- so duelling a party member
+    // challenged whoever happened to be selected instead. The token is resolved to a NAME and the name
+    // to a live entity, which is the same two-step `TargetUnit` takes.
     const token = typeof args[0] === 'string' && args[0] !== '' ? args[0] : 'target';
-    // Only the CURRENT TARGET can be duelled from here: the cast needs a guid, and a guid comes from
-    // the world rather than from a snapshot. A DECLARED LIMIT -- `StartDuel("party1")` on a member out
-    // of visual range does nothing, which is also what the server would answer (10 yd range).
-    const unit = token === 'player' ? null
-      : (world.target ?? null);
-    const targetGuid = unit?.guid ?? null;
+    const wanted = getUnit(vm, token)?.name ?? null;
+    let targetGuid: string | null = null;
+    if (wanted !== null) {
+      for (const candidate of world.entities.values()) {
+        if (candidate.name === wanted) {
+          targetGuid = candidate.guid;
+          break;
+        }
+      }
+    }
+    // The token had no snapshot, or the named unit is not streamed. Falling back to the selection is
+    // right for `"target"` (the snapshot and the selection are the same unit by construction) and is
+    // the honest nothing for a party member out of range -- the duel spell's range is 10 yd, so the
+    // server would refuse it anyway.
+    if (targetGuid === null && token === 'target') {
+      targetGuid = world.target?.guid ?? null;
+    }
     if (targetGuid === null) {
       return [];
     }
@@ -603,6 +635,18 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
    * The focus is a pure CLIENT concept -- no packet at all -- so it is a token like any other: writing
    * the snapshot IS the implementation, and `FocusFrame` (`targetframe.xml`) draws itself off
    * `UnitExists("focus")` exactly as `TargetFrame` does off `"target"`.
+   */
+  /**
+   * SELF-REVIEW, DECLARED RATHER THAN FIXED: the focus is a SNAPSHOT TAKEN AT THE MOMENT OF SETTING
+   * and does not follow the unit afterwards.
+   *
+   * `setUnit` stores the object it is handed, and `getUnit` hands back the token's live object, so
+   * `focus` and `target` share one snapshot until `target` is replaced -- after which `focus` keeps the
+   * old values. So a focused unit's health bar freezes where it was. Making it track would mean
+   * re-snapshotting on `world.on('unit:fields')` for whichever entity the focus names, which is a
+   * per-unit subscription this bridge does not own and the unit bridge does. Named here rather than
+   * left to be discovered: the focus FRAME appears with the right unit, and its numbers are as of the
+   * click.
    */
   fn('FocusUnit', (args) => {
     const token = typeof args[0] === 'string' ? args[0] : null;
