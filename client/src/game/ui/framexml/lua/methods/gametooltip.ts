@@ -832,6 +832,19 @@ const ITEM_SETTERS: MethodTable = {
   SetInventoryItem: (ctx, self, args) => fillFromSource(
     ctx, self, 'inventory', String(args[0] ?? 'player'), Number(args[1]),
   ),
+  /**
+   * `SetMerchantItem(index)` / `SetBuybackItem(index)` -- a VENDOR row and a sold-back row.
+   *
+   * **Both were in `TOOLTIP_SETTER_GAPS` below with the reason "no merchant window is decoded
+   * (SMSG_LIST_INVENTORY has no subscriber)". It has one now** (`network/game/object/merchant.ts`),
+   * so they are real and the declaration is removed rather than left describing a closed gap.
+   *
+   * `MerchantItemButton_OnEnter` calls `SetOwner` then one of these and never `Show()`
+   * (`merchantframe.lua:434-448`), which is the same contract `SetBagItem` and `SetLootItem` answer --
+   * so they show themselves through `fillFromSource`.
+   */
+  SetMerchantItem: (ctx, self, args) => fillFromSource(ctx, self, 'merchant', Number(args[0])),
+  SetBuybackItem: (ctx, self, args) => fillFromSource(ctx, self, 'buyback', Number(args[0])),
 };
 
 /**
@@ -850,16 +863,16 @@ const ITEM_SETTERS: MethodTable = {
  * declared here. Each returns FALSE, which is the "nothing was filled" answer its callers already
  * branch on, and the load report names it.
  *
- * Each needs a feed this client does not decode: auras, the mail box, the merchant and buyback lists,
- * pet actions, possession bars, totems, equipment sets and the LFG reward tables.
+ * Each needs a feed this client does not decode: auras, the mail box, pet actions, possession bars,
+ * totems, equipment sets and the LFG reward tables. **The merchant and buyback lists were on that
+ * sentence and are not any more** -- they moved up into `ITEM_SETTERS` when
+ * `network/game/object/merchant.ts` landed; the census above still stands as a census.
  */
 const TOOLTIP_SETTER_GAPS: Array<[string, string]> = [
   ['SetUnitAura', 'no aura feed is decoded (SMSG_AURA_UPDATE has no subscriber)'],
   ['SetSpellByID', 'the spellbook is indexed by SLOT, not by spell id -- see api/spells.ts'],
   ['SetInboxItem', 'no mail box is decoded'],
   ['SetSendMailItem', 'as SetInboxItem'],
-  ['SetMerchantItem', 'no merchant window is decoded (SMSG_LIST_INVENTORY has no subscriber)'],
-  ['SetBuybackItem', 'as SetMerchantItem'],
   ['SetPetAction', 'no pet action bar is decoded (SMSG_PET_SPELLS has no subscriber)'],
   ['SetPossession', 'no possession bar exists in this client'],
   ['SetTotem', 'no totem feed is decoded'],
@@ -873,10 +886,26 @@ for (const [name, reason] of TOOLTIP_SETTER_GAPS) {
   ITEM_SETTERS[name] = notImplemented(`GameTooltip:${name}`, reason, [false]);
 }
 
+/**
+ * Fill from whichever bridge owns this kind, and answer the TWO returns the client reads.
+ *
+ * `local hasCooldown, repairCost = GameTooltip:SetBagItem(bag, slot)`
+ * (`containerframe.lua:774`) -- so the second return is the per-item repair cost, and
+ * `ContainerFrameItemButton_OnEnter` uses it on the very next line to append `REPAIR_COST` and a
+ * `SetTooltipMoney` when the player is in repair mode.
+ *
+ * The FIRST return keeps its existing meaning: false means nothing was filled and nothing is shown,
+ * which is what every caller of this family branches on. That happens to coincide with `hasCooldown`,
+ * which no call site in the manifest reads -- grepped -- so the two contracts do not collide.
+ *
+ * `info.repairCost` is `undefined` for every kind but a bag, and `undefined` crosses into Lua as nil,
+ * which is what the real engine answers for a row that has no repair cost. See
+ * `ItemTooltipInfo.repairCost` on why nil rather than 0 even though `0 > 0` would also be false.
+ */
 function fillFromSource(
   ctx: MethodContext,
   self: number,
-  kind: 'bag' | 'loot' | 'link' | 'inventory',
+  kind: 'bag' | 'loot' | 'link' | 'inventory' | 'merchant' | 'buyback',
   a: number | string,
   b?: number,
 ): unknown[] {
@@ -889,7 +918,7 @@ function fillFromSource(
     return [false];
   }
   fillItemLines(ctx, self, info);
-  return [true];
+  return [true, info.repairCost ?? null];
 }
 
 Object.assign(GAMETOOLTIP, ITEM_SETTERS);

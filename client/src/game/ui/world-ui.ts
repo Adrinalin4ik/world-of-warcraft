@@ -47,6 +47,8 @@ import { attachContainerBridge } from './container-bridge';
 import { attachPaperDollStats } from './paperdoll-stats';
 import { attachSkillsBridge } from './skills-bridge';
 import { attachLootBridge } from './loot-bridge';
+import { attachGossipBridge } from './gossip-bridge';
+import { attachMerchantBridge } from './merchant-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { publishRects, clearRects } from './rects';
 import { ModelBooth } from './scene/model-booth';
@@ -238,6 +240,12 @@ export class WorldUiHost {
 
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
+
+  /** `attachGossipBridge`'s teardown, held so `dispose` can run it. */
+  private detachGossip: (() => void) | null = null;
+
+  /** `attachMerchantBridge`'s teardown, held so `dispose` can run it. */
+  private detachMerchant: (() => void) | null = null;
 
   /** `attachGroupBridge`'s teardown, held so `dispose` can run it. */
   private detachGroup: (() => void) | null = null;
@@ -551,6 +559,18 @@ export class WorldUiHost {
         // read the same `ItemHandler` template cache -- `attachContainerBridge` is the one that first
         // asks `itemData` to load, and `ensureLoaded` is idempotent so this rides that promise.
         this.detachLoot = attachLootBridge(runtime.vm, this.world, this.art);
+        // TALKING TO AN NPC, then BUYING AND SELLING. Gated on a real session for the reason the item
+        // bridges are: a vendor's stock and a gossip menu are both packets, so an offline world has
+        // neither and `world.game.objectHandler` must not be touched on that route.
+        //
+        // **THE MERCHANT BRIDGE MUST BE LAST OF THE THREE ITEM BRIDGES, and the order is load-bearing
+        // rather than tidy.** All three install `setItemTooltipSource`, and each CHAINS onto what it
+        // replaces: the container bridge owns `bag`/`inventory`/`link`, the loot bridge adds `loot`,
+        // and this one adds `merchant`/`buyback`. Attaching it earlier would put it under the loot
+        // bridge's install and every merchant tooltip would fall through to a source that does not
+        // know the kind.
+        this.detachGossip = attachGossipBridge(runtime.vm, this.world, this.art);
+        this.detachMerchant = attachMerchantBridge(runtime.vm, this.world, this.art);
         // THE CHARACTER SHEET'S STAT PANES. Gated on a real session like the three above: every number
         // it answers is a descriptor word off our own character, and an offline world has no descriptor.
         // AFTER them for no reason but readability -- it subscribes to `world.on('unit:fields')` and
@@ -1172,6 +1192,10 @@ export class WorldUiHost {
     // the attach order is what makes the chain's restore land on something live.
     this.detachLoot?.();
     this.detachLoot = null;
+    this.detachMerchant?.();
+    this.detachMerchant = null;
+    this.detachGossip?.();
+    this.detachGossip = null;
     this.detachGroup?.();
     this.detachGroup = null;
     this.detachContainers?.();

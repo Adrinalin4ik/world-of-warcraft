@@ -47,7 +47,9 @@ import type World from '../world';
 import { LuaVM } from './framexml/lua/vm';
 import { notImplemented } from './framexml/lua/methods/region';
 import { fireEvent } from './framexml/lua/events';
-import { setCoinage, setItemTooltipSource, ItemTooltipInfo } from './framexml/lua/api/items';
+import {
+  setCoinage, setItemTooltipSource, ItemTooltipInfo, getRepairMode,
+} from './framexml/lua/api/items';
 import { CursorItemSource, getCursor, getCursorItem, setCursorItem } from './framexml/lua/api/cursor';
 import { GlueArt } from './art';
 import {
@@ -58,6 +60,7 @@ import { guidBytes, guidHex, GUID_BYTES } from '../../network/guid-hex';
 import { itemData } from '../pipeline/dbc/item-data';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { itemTooltipLines } from './item-tooltip';
+import { durabilityOf as readDurability, repairCostOf as readRepairCost } from './repair-cost';
 import type { ItemHandler, ItemTemplate } from '../../network/game/object/items';
 import GameOpcode from '../../network/game/opcode';
 import GamePacket from '../../network/game/packet';
@@ -306,7 +309,7 @@ type FieldBag = Record<string | number, number>;
  * Absent is 0, which is the right answer for every field here: an empty inventory slot's guid words
  * are genuinely zero on the wire, and a stack count that has not arrived is not a stack.
  */
-function fieldAt(bag: FieldBag | null, type: ObjectType, index: number): number {
+export function fieldAt(bag: FieldBag | null, type: ObjectType, index: number): number {
   if (bag === null) {
     return 0;
   }
@@ -320,7 +323,7 @@ function fieldAt(bag: FieldBag | null, type: ObjectType, index: number): number 
  * The low word first, the high word second, both little-endian into the byte array `guidHex` reads.
  * Assembling this as a Number would be the exact defect `guid-hex.ts` exists to prevent.
  */
-function guidAt(bag: FieldBag | null, type: ObjectType, index: number): string {
+export function guidAt(bag: FieldBag | null, type: ObjectType, index: number): string {
   const low = fieldAt(bag, type, index);
   const high = fieldAt(bag, type, index + 1);
   const bytes = new Uint8Array(GUID_BYTES);
@@ -331,8 +334,14 @@ function guidAt(bag: FieldBag | null, type: ObjectType, index: number): string {
   return guidHex(bytes);
 }
 
-/** `0x0` is the wire's "nothing here". */
-const EMPTY_GUID = '0x0';
+/**
+ * `0x0` is the wire's "nothing here".
+ *
+ * EXPORTED alongside `fieldAt` and `guidAt` so `ui/merchant-bridge.ts` reads the buyback slots and
+ * walks the repair-all set through the SAME three primitives rather than growing its own copies --
+ * the drift argument this file already makes about the tooltip body.
+ */
+export const EMPTY_GUID = '0x0';
 
 /**
  * `inventoryType` -> the `INVTYPE_*` token `GetItemInfo` answers ninth.
@@ -826,6 +835,44 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     } else {
       return [];
     }
+    // THE SELL ARM COMES FIRST, AND THE CLIENT'S OWN LUA IS WHY IT HAS TO.
+    //
+    // `ContainerFrameItemButton_OnClick`'s right-button branch ends in `UseContainerItem` with NO
+    // merchant argument of any kind (`containerframe.lua:722-733`): all it does first is refuse when
+    // the BUYBACK tab is selected, and let `ContainerFrame_GetExtendedPriceString` put up a
+    // confirmation for a refundable purchase. So "right-clicking a bag item at a vendor sells it" is
+    // an ENGINE decision taken inside this global, exactly as "right-clicking an equippable item
+    // equips it" already is -- there is no separate `SellContainerItem` for the document to call.
+    //
+    // Ordered ahead of both other arms because it MUST win: at a vendor, a right click on a potion
+    // sells the potion rather than drinking it, and on a sword sells the sword rather than wielding
+    // it. Putting this last would have made every consumable in the bag unsellable and every weapon
+    // equip itself instead.
+    //
+    // ONE HAZARD, NAMED because it is currently unreachable rather than because it is impossible:
+    // `ContainerFrameItemButton_OnClick`'s LEFT-button branch also ends here, when
+    // `SpellCanTargetItem()` is true (`containerframe.lua:697-700`) -- an enchant applied to a bag
+    // slot. At a vendor that would sell the item instead of enchanting it. `SpellCanTargetItem` is a
+    // declared gap in `api/actions.ts` and answers false, so the branch cannot be taken today; when it
+    // becomes real, this arm needs a pending-spell test ahead of it.
+    //
+    // `count = 0` is the whole stack, which is what a plain right click means -- the reference states
+    // the same law for its own sell affordance (`benilla/src/ui_items/drain.rs:177`: "CMSG_SELL_ITEM,
+    // count 0 = the whole stack"). A partial sale needs the split dialogue, which routes elsewhere.
+    //
+    // REPAIR MODE OUTRANKS EVEN THAT. `MerchantRepairItemButton` puts the player in a mode where the
+    // next bag item clicked is mended rather than sold (`merchantframe.xml:453-461` toggles it), and
+    // selling an item the player meant to repair is not recoverable through anything but buyback. The
+    // flag is `api/items.ts`' one slot, written by `ui/merchant-bridge.ts`.
+    const merchant = world.game.objectHandler.merchantHandler;
+    if (merchant.source !== null) {
+      if (getRepairMode(vm)) {
+        merchant.repair(item.guid, false);
+        return [];
+      }
+      merchant.sell(item.guid, 0);
+      return [];
+    }
     if (item.template.inventoryType === 0) {
       // The USE arm: a consumable, a quest item, anything not equippable. `CMSG_USE_ITEM` and the
       // `SpellCastTargets` block it ends with are both built in `sendUseItem` above.
@@ -1271,14 +1318,35 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    * THE STACK COUNT WAS DROPPED FROM THE TOOLTIP. It was ours -- the real client draws a stack on the
    * ICON, not in the tooltip -- and it was the only body line that had no client-side source.
    */
+  /**
+   * The instance's CURRENT durability for the tooltip line, and what mending it would cost.
+   *
+   * Both are one-line doors onto `ui/repair-cost.ts`, which exists so this bridge and the merchant
+   * bridge cannot drift on the arithmetic -- see its header.
+   */
+  const durabilityOf = (guid: string | null): number | null =>
+    readDurability(items, guid)?.current ?? null;
+  const repairCostOf = (guid: string | null): number | null => {
+    const cost = readRepairCost(items, guid);
+    // 0 becomes UNDEFINED at the tooltip's edge: `ContainerFrameItemButton_OnEnter` tests
+    // `repairCost and repairCost > 0`, and while `0 > 0` is false either way, nil is what the real
+    // engine answers and 0 is truthy in Lua -- so the next global that copies this shape is not
+    // taught the wrong lesson.
+    return cost === null || cost === 0 ? null : cost;
+  };
+
   const bagTooltip = (kind: string, a: number | string, b?: number): ItemTooltipInfo | null => {
     let template: ItemTemplate | null = null;
+    // The INSTANCE guid, where this kind has one. `'link'` never does -- a hyperlink names a template
+    // -- so it stays null there and the durability line falls back to `max / max`, which is right.
+    let guid: string | null = null;
     if (kind === 'bag') {
       const item = itemAt(slotGuid(Number(a), Number(b)));
       if (item === null) {
         return null;
       }
       template = item.template;
+      guid = item.guid;
     } else if (kind === 'inventory') {
       // A WORN item: `a` is the unit token and `b` the 1-based equipment slot id. Only "player"
       // resolves, for the reason `GetInventoryItemTexture` gives -- no other unit's inventory guids
@@ -1293,6 +1361,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
         return null;
       }
       template = item.template;
+      guid = item.guid;
     } else if (kind === 'link') {
       const match = /\|Hitem:(\d+)/.exec(String(a));
       const entry = match === null ? Number(a) : Number(match[1]);
@@ -1314,8 +1383,22 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       // The effect labels' spell names. `spellData` is the same table the action bar reads, so a name
       // appears once `Spell.dbc` has landed and the label stands alone until then.
       spellName: (id: number) => spellData.spell(id)?.name ?? null,
+      // THE INSTANCE'S OWN DURABILITY, so a worn sword reads `38 / 55` instead of `55 / 55`.
+      // `item-tooltip.ts`' header listed this as a gap and ended "the caller has the instance and
+      // could pass it"; this is the caller and this is the pass. Undefined for a kind with no guid.
+      durability: durabilityOf(guid) ?? undefined,
     });
-    return { name: template.name, quality: template.quality, lines };
+    return {
+      name: template.name,
+      quality: template.quality,
+      lines,
+      // `GameTooltip:SetBagItem`'s SECOND return, which
+      // `ContainerFrameItemButton_OnEnter` reads to append `REPAIR_COST` + `SetTooltipMoney` while the
+      // player is in repair mode (`containerframe.lua:774-779`). UNDEFINED and not 0 when there is
+      // nothing to charge -- the client tests the value for truth before comparing it, and nil is what
+      // the real engine answers. Only the merchant bridge knows the cost, so the read is a door.
+      repairCost: repairCostOf(guid) ?? undefined,
+    };
   };
   setItemTooltipSource(vm, bagTooltip as never);
 

@@ -4,6 +4,8 @@ import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
 import { ItemHandler } from './items';
 import { LootHandler } from './loot';
+import { GossipHandler } from './gossip';
+import { MerchantHandler } from './merchant';
 import { GroupHandler } from './group';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
@@ -72,6 +74,23 @@ export class ObjectHandler extends EventEmitter {
    */
   public groupHandler: GroupHandler;
 
+  /**
+   * TALKING TO AN NPC. PUBLIC for the same reason the others are: `ui/gossip-bridge.ts` reads the menu
+   * to answer `GetGossipOptions`, and this handler owns the only sends of `CMSG_GOSSIP_HELLO`,
+   * `CMSG_GOSSIP_SELECT_OPTION` and `CMSG_NPC_TEXT_QUERY`.
+   *
+   * The hello is also the door every OTHER npc service comes through, so the world's right click
+   * drives this one and not the merchant handler -- see `object/gossip.ts`' header.
+   */
+  public gossipHandler: GossipHandler;
+
+  /**
+   * BUYING AND SELLING. PUBLIC for the same reason: `ui/merchant-bridge.ts` reads the vendor's stock to
+   * answer `GetMerchantItemInfo`, and this handler owns the only sends of `CMSG_LIST_INVENTORY`,
+   * `CMSG_BUY_ITEM`, `CMSG_SELL_ITEM`, `CMSG_BUYBACK_ITEM` and `CMSG_REPAIR_ITEM`.
+   */
+  public merchantHandler: MerchantHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -87,6 +106,8 @@ export class ObjectHandler extends EventEmitter {
     this.itemHandler = new ItemHandler(this.game);
     this.lootHandler = new LootHandler(this.game);
     this.groupHandler = new GroupHandler(this.game);
+    this.gossipHandler = new GossipHandler(this.game);
+    this.merchantHandler = new MerchantHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

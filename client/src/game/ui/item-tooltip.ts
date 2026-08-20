@@ -62,9 +62,11 @@
  * - **`Unique` / `Unique-Equipped`.** `ITEM_UNIQUE`/`ITEM_UNIQUE_EQUIPPABLE` exist, but which `flags`
  *   bit means which is not established from anything this project has, and a wrong bit prints "Unique"
  *   on an ordinary item. Left out rather than guessed.
- * - **The real DURABILITY.** `ITEM_FIELD_DURABILITY` is a per-INSTANCE descriptor word and this builder
- *   sees only the template, so the line reads `max / max`. A worn item therefore shows full durability.
- *   Stated rather than hidden -- the caller has the instance and could pass it.
+ * - **The real DURABILITY -- CLOSED, and this entry is kept to record that it was open.** The line read
+ *   `max / max` because the builder saw only the template; `ItemTooltipContext.durability` is how the
+ *   caller passes the instance's own `ITEM_FIELD_DURABILITY`, which the bag seam now does. A loot row
+ *   and a vendor row still show `max / max` and that is correct for them: they are describing a
+ *   template, not an object.
  */
 import { LuaVM } from './framexml/lua/vm';
 import type { ItemTemplate } from '../../network/game/object/items';
@@ -245,6 +247,16 @@ export interface ItemTooltipContext {
   playerLevel?: number;
   /** A spell id -> name lookup for the effect labels. Absent means the labels stand alone. */
   spellName?: (id: number) => string | null;
+  /**
+   * This INSTANCE's `ITEM_FIELD_DURABILITY`, so the line can read `current / max` instead of
+   * `max / max`.
+   *
+   * The header used to list the real durability as a gap and end "the caller has the instance and
+   * could pass it". It does now, from the bag and paperdoll seams, which are the two that have a guid.
+   * Absent still means the template-only reading -- a loot row and a vendor row genuinely have no
+   * instance, and for those `max / max` is the right answer rather than a fallback.
+   */
+  durability?: number;
 }
 
 /**
@@ -343,9 +355,11 @@ export function itemTooltipLines(
     const unmet = level > 0 && level < template.requiredLevel;
     push(formatGlobal(vm, 'ITEM_MIN_LEVEL', [template.requiredLevel]), unmet ? RED : WHITE);
   }
-  // `max / max`: the current value is a per-instance descriptor this builder does not see. Header gap.
+  // `current / max` where the caller had the instance, `max / max` where it genuinely has none -- a
+  // loot row and a vendor row are looking at a template, not at an object. See `context.durability`.
   if (template.maxDurability > 0) {
-    push(formatGlobal(vm, 'DURABILITY_TEMPLATE', [template.maxDurability, template.maxDurability]));
+    const current = context.durability ?? template.maxDurability;
+    push(formatGlobal(vm, 'DURABILITY_TEMPLATE', [current, template.maxDurability]));
   }
 
   // The spell effects: the client's own label, then the spell's name where the caller has one. The

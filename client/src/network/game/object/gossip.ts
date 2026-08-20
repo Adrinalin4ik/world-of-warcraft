@@ -7,26 +7,32 @@
  *
  * ## Why gossip exists at all in a merchant round
  *
- * Right-clicking a friendly service NPC sends `CMSG_GOSSIP_HELLO` -- ONE opcode for every service.
- * What comes back depends on what the server has for that creature:
+ * Right-clicking a friendly service NPC opens EITHER the gossip menu or the service directly, and
+ * which one is decided CLIENT-side by the NPC's service flags. The reference states the rule and this
+ * client ports it: "a vendor-only NPC opens the vendor list directly (`CMSG_LIST_INVENTORY`); any
+ * other service NPC -- gossip, and the out-of-scope banker/trainer/innkeeper/flightmaster -- opens via
+ * the universal `CMSG_GOSSIP_HELLO`" (`benilla/src/target/click.rs:124-139`, and its
+ * `interact_command` at `:628-647` is the dispatch, keyed off the already-classified cursor kind).
+ * `pages/game/index.tsx` dispatches off the same `classifyUnitCursor` result the hover cursor uses.
  *
- *  - a creature with a gossip menu answers `SMSG_GOSSIP_MESSAGE`, and the player picks "Let me browse
- *    your goods" (a `GOSSIP_OPTION_VENDOR` option), which sends `CMSG_GOSSIP_SELECT_OPTION` and THEN
- *    gets `SMSG_LIST_INVENTORY`;
- *  - a creature with NO gossip menu and a single service answers that service's packet DIRECTLY --
- *    `SMSG_LIST_INVENTORY` with no gossip step at all.
+ * **AND HERE THE REFERENCE'S REASON IS 1.12's, WHILE 3.3.5a's IS STRICTER -- which makes the direct
+ * branch load-bearing rather than an optimisation.** `click.rs:622-624` says the hello "works on any
+ * interactable creature (verified: the server passes `UNIT_NPC_FLAG_NONE`)". That is vmangos.
+ * TrinityCore 3.3.5's `HandleGossipHelloOpcode` passes **`UNIT_NPC_FLAG_GOSSIP`**
+ * (`Handlers/NPCHandler.cpp:150`) and returns silently when the creature does not carry bit 0x1. So on
+ * 3.3.5a a hello at a pure vendor is answered with NOTHING, and routing every service through the
+ * hello -- which is what a straight port of the reference's stated reason would suggest is safe --
+ * would leave the plainest vendors in the game unopenable with no error anywhere.
  *
- * Both paths therefore have to work, and neither is a special case of the other. That is why
- * `pages/game/index.tsx`'s right click sends `CMSG_GOSSIP_HELLO` and does NOT send
- * `CMSG_LIST_INVENTORY`: sending the inventory request directly would work on the plain vendors and
- * would skip the menu on every NPC that has one (which is most quest-giving vendors), and worse, it
- * would ask a flight master for a shop.
+ * Once past that gate the server may still shortcut: `SendPreparedGossip` sends the single service's
+ * own packet when a creature has one service option and no gossip text, which is how a
+ * gossip-flagged vendor still reaches `SMSG_LIST_INVENTORY` in one round trip. So BOTH paths end in
+ * the same place and both must work.
  *
- * The reference records what happens when a client sends `CMSG_GOSSIP_HELLO` at an NPC with nothing to
- * say: "the server answered with eight literal `Greetings $N` blocks"
- * (`benilla/src/target/cursor_mode.rs:399-420`, quoted in `task-9-report.md`). So the hello is cheap
- * and safe, and the gate on sending it is the NPC service ladder that
- * `game/world/cursor-mode.ts#NPC_FLAG` already decodes for the hover cursors.
+ * The reference also records what a hello at an NPC with nothing to say cost it: "the server answered
+ * with eight literal `Greetings $N` blocks" (`benilla/src/target/cursor_mode.rs:399-420`, quoted in
+ * `task-9-report.md`). That is why the send is gated on the service ladder
+ * `game/world/cursor-mode.ts` already decodes rather than fired at anything friendly.
  *
  * ## THE LAYOUTS COME FROM A SERVER IMPLEMENTATION, AND THE RESIDUAL IS THEIR ORACLE
  *

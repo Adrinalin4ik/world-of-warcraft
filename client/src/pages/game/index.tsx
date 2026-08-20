@@ -23,6 +23,8 @@ import { collisionWorld } from '../../game/collision/collision-world';
 import { CollisionLayer } from '../../game/collision/types';
 import { wantsDebugPanels } from '../debug-flags';
 import { REACTION_NEUTRAL, primeFactionTemplates, reactionFor } from '../../game/world/faction';
+import type World from '../../game/world';
+import type Unit from '../../game/classes/unit';
 
 import './index.scss';
 
@@ -706,9 +708,11 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    *
    * The reaction gate is `UnitCanAttack`'s and it INCLUDES NEUTRAL -- `benilla/src/target/click.rs:98`
    * gives the Attack cursor as "alive + reaction <= neutral". A critter or an unaggressive beast is
-   * attackable and simply does not fight back; only a FRIENDLY unit is not. A friendly NPC's right
-   * click is an INTERACT in the real client (gossip, vendor, flight master), which this client has no
-   * wire path for at all -- so it does nothing here rather than swinging at a guard.
+   * attackable and simply does not fight back; only a FRIENDLY unit is not.
+   *
+   * A FRIENDLY NPC'S RIGHT CLICK IS AN INTERACT, and this method used to end by saying that "this
+   * client has no wire path for at all". It has one now -- see `interactCommand` -- so the sentence is
+   * replaced rather than left standing over working code.
    */
   private onWorldRightClick = (ndc: { x: number; y: number }) => {
     if (this.ui?.pointerWidget) {
@@ -739,8 +743,78 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     const reaction = reactionFor(hit, world.player);
     if (reaction !== null && reaction <= REACTION_NEUTRAL) {
       this.game.objectHandler.combatHandler.startAttack(hit.guid);
+      return;
     }
+    this.interactWith(hit, world);
   };
+
+  /**
+   * A FRIENDLY SERVICE NPC'S RIGHT CLICK -- the interact, and the door the merchant window comes
+   * through.
+   *
+   * **The dispatch is the CURSOR's own classification, not a second reading of the flags.** The
+   * reference does exactly this: `interact_command(kind, guid, npc_flags)` switches on the already
+   * resolved `CursorKind` (`benilla/src/target/click.rs:628-647`), so the picture under the pointer and
+   * the packet the click sends can never disagree. `classifyUnitCursor` is the same call the hover path
+   * two methods up already makes, with the same options.
+   *
+   * Two branches, and the reference states the rule
+   * (`click.rs:124-139`): a **vendor-only** NPC -- which the ladder classifies `Pickup`, the pouch --
+   * opens the stock list directly with `CMSG_LIST_INVENTORY`; every other service kind opens the
+   * universal `CMSG_GOSSIP_HELLO` and the client's own `GossipFrame` shows whatever menu comes back.
+   *
+   * **AND THE DIRECT BRANCH IS LOAD-BEARING ON 3.3.5a, WHERE THE REFERENCE SAYS IT NEED NOT BE.**
+   * `click.rs:622-624` justifies routing anything through the hello with "`CMSG_GOSSIP_HELLO` works on
+   * any interactable creature (verified: the server passes `UNIT_NPC_FLAG_NONE`)". That is vmangos.
+   * TrinityCore 3.3.5's `HandleGossipHelloOpcode` passes **`UNIT_NPC_FLAG_GOSSIP`**
+   * (`Handlers/NPCHandler.cpp:150`) and returns silently for a creature without bit 0x1 -- so on this
+   * build a hello at a pure vendor is answered with nothing at all, and taking the reference's stated
+   * reason at face value would have left the plainest vendors unopenable with no error anywhere.
+   *
+   * THE RANGE GATE IS THE CURSOR'S. `classifyUnitCursor` marks a service beyond 5.5556 yd `unable`,
+   * and nothing is sent then -- there is no auto-approach in this client, so a send would be refused by
+   * the server and look like a broken click. The selection still lands, which is the reference's
+   * behaviour too (`click.rs:141-143`). A `Point` is not a service and sends nothing.
+   */
+  private interactWith(hit: Unit, world: World) {
+    const distanceSq = hit.position.distanceToSquared(world.player.position);
+    const mode = classifyUnitCursor(hit, world.player, {
+      distanceSq,
+      autoLoot: this.cursorShift,
+      // DECLARED FALSE, as on the hover path: nothing decodes a learned profession. It only affects
+      // the Skin leg, which is not a service and sends nothing here either way.
+      knowsSkinning: false,
+    });
+    if (mode === null || mode.unable) {
+      return;
+    }
+    const handlers = this.game.objectHandler;
+    switch (mode.kind) {
+      case 'Pickup':
+        // A VENDOR-ONLY NPC. `Pickup` is also the lootable-corpse mode, but a corpse never reaches
+        // here -- the dead branch above returns first, which is the same ordering the reference notes.
+        handlers.merchantHandler.listInventory(hit.guid);
+        break;
+      case 'Speak':
+      case 'Interact':
+      case 'Buy':
+      case 'Trainer':
+        // Gossip, questgiver, innkeeper, banker, auctioneer, trainer. The banker's and trainer's own
+        // windows are separate arcs; the generic hello is faithful and shows whatever menu the server
+        // has, which for most vendors in the game includes "Let me browse your goods".
+        handlers.gossipHandler.hello(hit.guid);
+        break;
+      case 'Taxi':
+        // The flight master. `CMSG_TAXIQUERYAVAILABLENODES` and the taxi map are their own arc, and the
+        // gossip taxi option reaches the same place server-side -- so the hello is the honest send
+        // here rather than nothing.
+        handlers.gossipHandler.hello(hit.guid);
+        break;
+      default:
+        // `Point`, `Attack`, `Skin`, `LootAll` -- not services. Attack was handled above.
+        break;
+    }
+  }
 
   /**
    * Everything this component put somewhere that outlives it.
