@@ -436,12 +436,38 @@ const REGION: MethodTable = {
 };
 
 const LAYEREDREGION: MethodTable = {
+  /**
+   * `SetVertexColor(r, g, b)` -- and on a FONTSTRING it must SET the glyph colour, not tint it.
+   *
+   * **This was the owner's "we need right colors for the items titles" in the loot window, and it is a
+   * WIDGET-LAYER gap rather than a loot one.** `LootFrame_UpdateButton` colours the row with
+   * `text:SetVertexColor(color.r, color.g, color.b)` off `ITEM_QUALITY_COLORS[quality]`
+   * (`lootframe.lua:98,111`). A font string is rasterized here at `FontSpec.color` and drawn as a quad
+   * whose material colour is `widget.vertexColor` (`ui/renderer.ts:356-358`), so a vertex colour
+   * MULTIPLIES the glyphs that are already painted. `LootButtonNText` inherits `GameFontNormal`, which
+   * is the client's GOLD -- so quality 1 (Common, pure white) multiplied gold by 1 and left it gold,
+   * and quality 0 (Poor, 0.62 grey) darkened the gold into something muddy. Two wrong colours, one
+   * cause, and exactly what his screenshot shows.
+   *
+   * A TEXTURE keeps the multiply, which is what a vertex colour means for art -- that is how one
+   * greyscale sheet is tinted per state, and `SetItemButtonNameFrameVertexColor` depends on it. For
+   * TEXT the engine's own behaviour is a replacement: `SetVertexColor` and `SetTextColor` are the same
+   * operation on a font string, which is why the client's own Lua uses them interchangeably
+   * (`lootframe.lua:111` uses one, `paperdollframe.lua:249` the other, on the same kind of label).
+   *
+   * The alpha argument is dropped for the same reason `SetTextColor` above drops it.
+   */
   SetVertexColor: (ctx, self, args) => {
-    widgetOf(ctx, self).vertexColor = toHex(
-      Number(args[0] ?? 1),
-      Number(args[1] ?? 1),
-      Number(args[2] ?? 1),
-    );
+    const widget = widgetOf(ctx, self);
+    const color = toHex(Number(args[0] ?? 1), Number(args[1] ?? 1), Number(args[2] ?? 1));
+    if (widget.kind === 'fontstring') {
+      ensureFont(widget).color = color;
+      // The quad's tint stays neutral, or the replacement above would be multiplied by a stale one --
+      // a second `SetVertexColor` would then darken the text twice.
+      widget.vertexColor = '#ffffff';
+      return [];
+    }
+    widget.vertexColor = color;
     return [];
   },
   /**

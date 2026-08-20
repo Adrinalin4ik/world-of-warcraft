@@ -421,7 +421,18 @@ function statLine(
  *
  * 10000 copper to the gold and 100 to the silver: this client's own `moneyframe.lua` arithmetic, which
  * divides by 10000 then by 100 in `MoneyFrame_Update`.
+ *
+ * **EXPORTED because the loot window needs the same string, and the owner's "when looting it shows gold
+ * when it should show copper" was exactly what happened without it.** `ui/loot-bridge.ts` asked the VM
+ * for `GetCoinTextureString(copper)` -- a global that exists in the real engine and is called by
+ * NOTHING in the 268 loaded manifest files, so it was never registered here -- and fell back to
+ * `String(copper)`. A five-copper pile therefore read as a bare "5" beside the gold coin icon. One
+ * formatter, one place, so the loot row, the tooltip's sell price and anything later cannot drift.
  */
+export function copperAsWords(vm: LuaVM, copper: number): string | null {
+  return moneyText(vm, copper);
+}
+
 function moneyText(vm: LuaVM, copper: number): string | null {
   const gold = Math.floor(copper / 10000);
   const silver = Math.floor((copper % 10000) / 100);

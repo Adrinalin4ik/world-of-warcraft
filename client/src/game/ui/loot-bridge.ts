@@ -38,7 +38,7 @@ import { GlueArt } from './art';
 import { getItemTooltipSource, setItemTooltipSource, ItemTooltipInfo } from './framexml/lua/api/items';
 import { itemData } from '../pipeline/dbc/item-data';
 import { spellData } from '../pipeline/dbc/spell-data';
-import { itemTooltipLines } from './item-tooltip';
+import { copperAsWords, itemTooltipLines } from './item-tooltip';
 import type { LootHandler, LootRow } from '../../network/game/object/loot';
 import { LOOT_TYPE_FISHING } from '../../network/game/object/loot';
 import type { ItemHandler } from '../../network/game/object/items';
@@ -157,11 +157,22 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
       return [];
     }
     if (row.kind === 'money') {
-      const answer = vm.runExpr(
-        `return GetCoinTextureString(${Math.floor(loot.gold)})`, 'loot-coin.lua',
-      ) as { value?: unknown } | null;
-      const text = String(answer?.value ?? '');
-      return [COIN_TEXTURE, text === '' || text === 'nil' ? String(loot.gold) : text, 0, 1, false];
+      // THE OWNER'S "when looting it shows gold when it should show copper", and it was this line.
+      //
+      // It used to ask the VM for `GetCoinTextureString(copper)`. That global exists in the real engine
+      // -- and is called by NOTHING in the 268 loaded manifest files (grepped), so nothing had ever
+      // registered it here. The fallback beside it printed `String(copper)`, so a five-copper pile read
+      // as a bare "5" next to the gold coin icon: no denomination anywhere, and the only visible unit
+      // was the icon, which is gold.
+      //
+      // `copperAsWords` is the SAME formatter the tooltip's sell price uses (`ui/item-tooltip.ts`), so
+      // the two cannot drift, and every string in it is the client's own `GOLD_AMOUNT`/`SILVER_AMOUNT`/
+      // `COPPER_AMOUNT`. Not the `*_AMOUNT_TEXTURE` forms: those embed `|TInterface\MoneyFrame\...|t`
+      // inline textures and `|T` is a named gap in `ui/markup.ts` that is deliberately left VISIBLE, so
+      // the texture form would print its own markup into the row. That is the one deviation from the
+      // real client here and it is the words instead of the coin icons, not a wrong amount.
+      const text = copperAsWords(vm, Math.floor(loot.gold));
+      return [COIN_TEXTURE, text ?? String(loot.gold), 0, 1, false];
     }
     const template = items.template(row.row.itemId);
     return [
