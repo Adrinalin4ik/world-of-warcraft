@@ -221,7 +221,16 @@ function putDown(vm: LuaVM, deleteSource: boolean): boolean {
   if (deleteSource && held.kind === 'action' && held.sourceSlot !== null && state.discard !== null) {
     state.discard(held.sourceSlot);
   }
-  fireEvent(vm, 'ACTIONBAR_HIDEGRID');
+  // HIDEGRID ONLY FOR A SPELL OR AN ACTION, and this is a SELF-REVIEW FIX rather than a nicety.
+  // `ActionButton_ShowGrid` keeps a COUNTER (`actionbutton.lua:340-366`) and hides the button only back
+  // at zero, so every HIDEGRID needs a partner SHOWGRID. An item pickup fires no SHOWGRID -- `PlaceAction`
+  // refuses an item payload, so revealing the empty bar slots would invite a drop that does nothing --
+  // and firing HIDEGRID here anyway would have driven that counter NEGATIVE. The next real ability pickup
+  // would then have raised it to zero or below and shown no grid at all: dragging one item and pressing
+  // Escape would have broken the action bar's empty-slot grid for the rest of the session.
+  if (held.kind !== 'item') {
+    fireEvent(vm, 'ACTIONBAR_HIDEGRID');
+  }
   // Every payload transition fires this -- see `setCursorItem`. An ITEM put down here is put back, never
   // destroyed: `deleteSource` is the ACTION arm's meaning only. See `dropCursorOnWorld`.
   fireEvent(vm, 'CURSOR_UPDATE');
