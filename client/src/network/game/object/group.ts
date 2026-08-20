@@ -584,14 +584,35 @@ export class GroupHandler extends EventEmitter {
 /**
  * The byte cost of `writeCString(s)` -- the UTF-8 encoding PLUS the terminator.
  *
- * NOT `s.length + 1`, and this is not pedantry: `GamePacket` is a fixed-size `ByteBuffer` with
+ * NOT `s.length + 1`, and not pedantry: `GamePacket` is a fixed-size `ByteBuffer` with
  * `implicitGrowth` off, so a name whose UTF-8 form is longer than its JS length (any non-ASCII
- * character -- a Cyrillic character name is two bytes) writes past the end and byte-buffer THROWS.
- * `writeString` is a UTF-8 encoder (`byte-buffer/dist/byte-buffer.js:316-368`), so the encoder's own
- * count is the only correct size.
+ * character -- a Cyrillic character name is two bytes each) writes past the end and byte-buffer THROWS
+ * out of the send.
+ *
+ * TRANSCRIBED FROM `writeCString`'s OWN ENCODER rather than delegated to `TextEncoder`, for two
+ * reasons. The branch boundaries must be byte-identical to the thing doing the writing
+ * (`byte-buffer/dist/byte-buffer.js:316-368`: 1 byte to 0x7F, 2 to 0x7FF, 3 for a non-surrogate BMP
+ * code unit, 4 for a surrogate PAIR consuming two units) -- and `TextEncoder` is NOT DEFINED in this
+ * project's jsdom test environment, so depending on it makes the send untestable. The unpaired-surrogate
+ * case the encoder throws on is counted as 4 here; it cannot occur in a character name and the encoder
+ * would reject the write before the size mattered.
  */
 function cstrBytes(value: string): number {
-  return new TextEncoder().encode(value).length + 1;
+  let bytes = 1; // the terminator
+  for (let i = 0; i < value.length; ++i) {
+    const c = value.charCodeAt(i);
+    if (c <= 0x7f) {
+      bytes += 1;
+    } else if (c <= 0x7ff) {
+      bytes += 2;
+    } else if (c <= 0xd7ff || (c >= 0xe000 && c <= 0xffff)) {
+      bytes += 3;
+    } else {
+      bytes += 4;
+      ++i; // the low surrogate, consumed by the same four-byte sequence
+    }
+  }
+  return bytes;
 }
 
 /**

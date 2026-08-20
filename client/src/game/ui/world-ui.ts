@@ -47,6 +47,7 @@ import { attachContainerBridge } from './container-bridge';
 import { attachPaperDollStats } from './paperdoll-stats';
 import { attachSkillsBridge } from './skills-bridge';
 import { attachLootBridge } from './loot-bridge';
+import { attachGroupBridge } from './group-bridge';
 import { publishRects, clearRects } from './rects';
 import { ModelBooth } from './scene/model-booth';
 import { publishArtSink, clearArtSink } from './runtime-art';
@@ -237,6 +238,9 @@ export class WorldUiHost {
 
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
+
+  /** `attachGroupBridge`'s teardown, held so `dispose` can run it. */
+  private detachGroup: (() => void) | null = null;
 
   /**
    * THE DRAW INSTRUMENT, on `window.uiDrawStats`.
@@ -556,6 +560,13 @@ export class WorldUiHost {
         // character's descriptor, and an offline world has none. Its DBC join is `skillData`, which the
         // spellbook already asks for, so this adds no fetch.
         this.detachSkills = attachSkillsBridge(runtime.vm, this.world);
+        // THE UNIT RIGHT-CLICK MENUS -- groups, duels, dungeon difficulty, instance reset. Gated on a
+        // real session like the rest: every answer is a packet, and an offline world has no roster, no
+        // duel and no instance to reset. AFTER the spellbook bridge, because `StartDuel` finds the duel
+        // spell in the player's own book by its `Effect[0]` and that bridge is the one that OWNS the
+        // `Spell.dbc` fetch -- `ensureLoaded` is idempotent, so this rides the same promise rather than
+        // starting a second one.
+        this.detachGroup = attachGroupBridge(runtime.vm, this.world);
       }
     }
     // THE RUNTIME ART SINK, before the load report and before anything can script a texture. See
@@ -1161,6 +1172,8 @@ export class WorldUiHost {
     // the attach order is what makes the chain's restore land on something live.
     this.detachLoot?.();
     this.detachLoot = null;
+    this.detachGroup?.();
+    this.detachGroup = null;
     this.detachContainers?.();
     this.detachContainers = null;
     this.detachStats?.();
