@@ -164,6 +164,18 @@ const FRAME: MethodTable = {
   // warn-once no-op -- just on the right class now.
   SetScale: notImplemented('SetScale', 'widget.ts has no per-widget scale field yet'),
   GetEffectiveScale: notImplemented('GetEffectiveScale', 'reporting the only scale that exists today (1)', [1]),
+  /**
+   * `GetScale()` -- 1, and a TRUE ANSWER rather than a stub, which is why it is not beside the two
+   * above: this widget layer has exactly one scale, so 1 is what a frame's scale IS here, not what we
+   * are guessing it to be. `SetScale` is the gap; reading back the value nothing can change is not.
+   *
+   * **ITS ABSENCE WAS THE WHOLE OF "I don't see options in selects".** `ToggleDropDownMenu`'s third
+   * statement is `local uiParentScale = UIParent:GetScale()` (`uidropdownmenu.lua:621`), and it runs
+   * BEFORE the loop that adds the menu's buttons -- so every dropdown in the client opened to a list
+   * frame carrying nothing but its own scroll arrows. Measured: `shownButtons=3`, the first of them
+   * "Scroll Up", and the toggle raising on this method.
+   */
+  GetScale: () => [1],
 
   EnableMouse: (ctx, self, args) => {
     widgetOf(ctx, self).mouseEnabled = Boolean(args[0]);

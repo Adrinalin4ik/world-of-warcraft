@@ -61,6 +61,9 @@ import Entity from "./entity";
 // TYPE-ONLY, and deliberately: `unit-fields.ts` imports `Unit` back for its own signatures, so a
 // value import either way round would be a runtime cycle. `import type` is erased entirely.
 import type { UnitFieldUpdate } from "../../network/game/object/update-object/unit-fields";
+import {
+  CharacterStats, emptyCharacterStats,
+} from "../../network/game/object/update-object/character-stats";
 
 enum SlopeType {
   sliding,
@@ -439,6 +442,18 @@ class Unit extends Entity {
    * beside the weapons rather than inside `fields`.
    */
   public spellDamage: number[] = [];
+
+  /**
+   * THE CHARACTER SHEET'S STAT BLOCK -- stats, resistances, the damage range, the percentages and the
+   * 25 combat ratings. Beside `spellDamage` and for the same reason: arrays, not scalars, so they do not
+   * belong in `fields`.
+   *
+   * Always present rather than empty-until-filled, unlike `spellDamage`: every member is MERGED from a
+   * sparse update mask (`update-object/character-stats.ts`), so there has to be something to merge onto
+   * from the first packet. Zeroes read as "the server has not told us", which is also what a level-1
+   * character's resistances genuinely are.
+   */
+  public characterStats: CharacterStats = emptyCharacterStats();
 
   /** Whether the death one-shot is armed. Written only by `setDead`, which is edge-triggered. */
   public dead: boolean = false;

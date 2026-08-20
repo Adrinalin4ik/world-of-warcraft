@@ -44,6 +44,7 @@ import { DrawItem, WidgetRoot, effectiveFont } from './widget';
 import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachContainerBridge } from './container-bridge';
+import { attachPaperDollStats } from './paperdoll-stats';
 import { attachLootBridge } from './loot-bridge';
 import { publishRects, clearRects } from './rects';
 import { ModelBooth } from './scene/model-booth';
@@ -226,6 +227,9 @@ export class WorldUiHost {
 
   /** `attachContainerBridge`'s teardown, held so `dispose` can run it. */
   private detachContainers: (() => void) | null = null;
+
+  /** `attachPaperDollStats`' teardown, held so `dispose` can run it. */
+  private detachStats: (() => void) | null = null;
 
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
@@ -539,6 +543,11 @@ export class WorldUiHost {
         // read the same `ItemHandler` template cache -- `attachContainerBridge` is the one that first
         // asks `itemData` to load, and `ensureLoaded` is idempotent so this rides that promise.
         this.detachLoot = attachLootBridge(runtime.vm, this.world, this.art);
+        // THE CHARACTER SHEET'S STAT PANES. Gated on a real session like the three above: every number
+        // it answers is a descriptor word off our own character, and an offline world has no descriptor.
+        // AFTER them for no reason but readability -- it subscribes to `world.on('unit:fields')` and
+        // shares nothing with the item bridges.
+        this.detachStats = attachPaperDollStats(runtime.vm, this.world);
       }
     }
     // THE RUNTIME ART SINK, before the load report and before anything can script a texture. See
@@ -1147,6 +1156,8 @@ export class WorldUiHost {
     this.detachLoot = null;
     this.detachContainers?.();
     this.detachContainers = null;
+    this.detachStats?.();
+    this.detachStats = null;
     // The rect publication is module-level, so it OUTLIVES this host unless it is cleared -- exactly
     // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
     // stale draw list would have a remounted world's scripts reading the previous world's layout.

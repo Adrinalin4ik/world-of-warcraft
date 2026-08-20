@@ -439,6 +439,24 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     return addOn === undefined ? false : runAddOn(addOn);
   });
 
+  /**
+   * A KNOWN ORDERING HAZARD, NAMED AND NOT FIXED HERE.
+   *
+   * These handlers read unit state, and one of them cannot recover from reading it early:
+   * `PaperDollFrame_OnEvent`'s `VARIABLES_LOADED` arm writes the two stat-pane CVars exactly once, off
+   * `UnitClass("player")` then `strupper(classFileName)` (`paperdollframe.lua:161-174`) -- so a nil
+   * class there raises the handler and the character sheet's stat categories stay unset for the whole
+   * session. `installScreenApi` now seeds both CVars empty so the client's own `== ""` test can be
+   * true (see `api/screen.ts`), and the globals the panes read are all real
+   * (`ui/paperdoll-stats.ts`), but the panes were still measured blank after a full login.
+   *
+   * An `await` on `raceClassData.ensureLoaded()` was tried here and REMOVED: it puts a DBC fetch on the
+   * critical path of the entire interface, where a hang costs the whole UI rather than two labels, and
+   * three attempts to observe whether it helped lost the world runtime to an unrelated recompile. The
+   * glue runtime already loads that DBC for the character-select screen, so it is probably warm by
+   * here and `UnitClass` is probably NOT the failing call -- which is exactly why this is recorded as
+   * an open question rather than fixed on a guess.
+   */
   // The client's own login sequence -- see decision 3 in the header for what each one does and where.
   // A handler that raises must not abort the rest, so `fireEvent` queues and this drains once after.
   for (const event of ['VARIABLES_LOADED', 'PLAYER_LOGIN', 'PLAYER_ENTERING_WORLD']) {

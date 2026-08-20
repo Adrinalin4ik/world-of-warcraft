@@ -38,6 +38,7 @@
  */
 import type Unit from '../../../../game/classes/unit';
 import { ObjectType, PlayerField, UnitField } from '../enums';
+import { mergeCharacterStats } from './character-stats';
 
 /** What one values block said about a unit. Every field optional -- see the header. */
 export interface UnitFieldUpdate {
@@ -462,6 +463,12 @@ export function applyUnitFields(
   set('rangedAttackPowerMultiplier', fields.rangedAttackPowerMultiplier);
   set('baseAttackTimeMs', fields.baseAttackTimeMs);
   set('healingDone', fields.healingDone);
+
+  // THE CHARACTER SHEET'S STAT BLOCK -- stats, resistances, the damage range, the percentages, the 25
+  // combat ratings. Merged rather than replaced, because an update mask is sparse and one point of
+  // agility moves one word; see `character-stats.ts` on why that differs from `readSpellDamage` below.
+  // `values` is the same map this function was handed and otherwise discards.
+  mergeCharacterStats(unit.characterStats, values, type);
 
   // SPELL POWER is seven numbers and lives beside `fields`, not in it -- see `SPELL_SCHOOL_COUNT`.
   const spellDamage = readSpellDamage(values);

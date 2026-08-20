@@ -437,6 +437,29 @@ function installCVars(vm: LuaVM): void {
      * client does not know, and WRONG for one it does.
      */
     ['lastTalkedToGM', ''],
+    /**
+     * THE TWO STAT-PANE CATEGORIES, EMPTY -- and their absence is the whole of "I don't see character
+     * stats under the preview and don't see options in selects there".
+     *
+     * Exactly the `lastTalkedToGM` case above, with the comparison the other way round.
+     * `PaperDollFrame_OnEvent`'s `VARIABLES_LOADED` arm is
+     * `if ( GetCVar("playerStatLeftDropdown") == "" or GetCVar("playerStatRightDropdown") == "" ) then`
+     * and its body picks the defaults per CLASS -- `PLAYERSTAT_BASE_STATS` on the left, and on the
+     * right `PLAYERSTAT_SPELL_COMBAT` for a mage/priest/warlock/druid, `PLAYERSTAT_RANGED_COMBAT` for a
+     * hunter, `PLAYERSTAT_MELEE_COMBAT` for everyone else (`paperdollframe.lua:161-174`).
+     *
+     * **In Lua `nil == ""` is FALSE**, so an absent CVar skipped that whole block: neither category was
+     * ever chosen, and `UpdatePaperdollStats(prefix, index)` is a five-way `if index == "PLAYERSTAT_*"`
+     * chain with **no else** (`:1680`), so every branch was skipped and both panes kept their authored
+     * placeholders. The same nil then went to `UIDropDownMenu_SetSelectedValue`, which is why the two
+     * category selects read blank as well -- one cause, three symptoms.
+     *
+     * The empty string is the game's own default and the client's own `== ""` test is the evidence, the
+     * same argument `lastTalkedToGM` above is seeded on. Seeding is all that is needed: **the client
+     * picks the actual categories itself**, per class, which is why nothing here names a category.
+     */
+    ['playerStatLeftDropdown', ''],
+    ['playerStatRightDropdown', ''],
   ]);
   CVAR_STORES.set(vm, cvars);
 
