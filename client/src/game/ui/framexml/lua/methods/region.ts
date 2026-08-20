@@ -314,6 +314,24 @@ const REGION: MethodTable = {
     widgetOf(ctx, self).height = Number(args[0] ?? 0);
     return [];
   },
+  /**
+   * `SetSize(width, height)` -- exactly `SetWidth` then `SetHeight`, and it was absent.
+   *
+   * MEASURED from the owner's own console log, not guessed: `TutorialFrame` calls it as a method and
+   * the log carries the raise. It is one of 46 "attempt to call a nil value" entries in that boot and
+   * one of only two that are WIDGET-LAYER gaps rather than missing content globals -- the rest need a
+   * feed this client has no wire path for.
+   *
+   * The same two field writes as `SetWidth`/`SetHeight` rather than a composite of the two Lua calls:
+   * each of those is one assignment, so routing through `callMethod` would add two boundary crossings
+   * for nothing.
+   */
+  SetSize: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    widget.width = Number(args[0] ?? 0);
+    widget.height = Number(args[1] ?? 0);
+    return [];
+  },
   // A FONT STRING with a 0 dimension derives it from its text, exactly as the layout does
   // (`widget.ts#deriveSize`) and for the same reason: `GlueDialogText` is authored `<Size x="450"
   // y="0">` and `gluedialog.lua:610,677` sizes the whole dialog panel from its `GetHeight()`, which
@@ -796,6 +814,25 @@ const FONTSTRING: MethodTable = {
     ensureFont(widgetOf(ctx, self)).nonSpaceWrap = luaFlag(args[0]);
     return [];
   },
+  /**
+   * `SetSpacing(pixels)` -- the extra leading between a wrapped string's lines.
+   *
+   * MEASURED absent from the owner's console log: `BNToastFrame` calls it and the call raised. The
+   * field already existed -- `FontSpec.spacing`, which `<Font spacing="2">` authors and the wrap pass
+   * reads -- so this is the setter for a value the layer already honours, not new machinery.
+   *
+   * **HONEST LIMIT, and it is the field's own:** `spacing` is only reachable through `wrapWidth`,
+   * because a single-line string has no gap to space (see `FontSpec.spacing`). So this call is a no-op
+   * in appearance for an unwrapped string -- which is what `BNToastFrame` is. It is registered because
+   * the raise took out the rest of that handler, and the value is stored truthfully rather than being
+   * dropped on the floor.
+   */
+  SetSpacing: (ctx, self, args) => {
+    const value = Number(args[0] ?? 0);
+    ensureFont(widgetOf(ctx, self)).spacing = Number.isFinite(value) ? value : 0;
+    return [];
+  },
+  GetSpacing: (ctx, self) => [ensureFont(widgetOf(ctx, self)).spacing ?? 0],
   SetMaxLines: (ctx, self, args) => {
     const n = Number(args[0]);
     ensureFont(widgetOf(ctx, self)).maxLines =
