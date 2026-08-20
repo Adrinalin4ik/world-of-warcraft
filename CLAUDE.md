@@ -90,6 +90,9 @@ matters; add a test when something breaks and stays broken. Do not enumerate edg
   cursors (a Playwright screenshot contains no OS pointer), a colour, a layout, anything where the
   instrument is the doubtful part — hand it over and ask. That is faster and more honest than a
   claim propped up by a weak gate.
+- **Two attempts, then ask.** If a visual check has not worked twice, stop and hand it to the owner
+  instead of building a third instrument. He has said plainly he would rather look than have the time
+  spent: "Я всегда готов помочь, чтобы сэкономить время."
 
 ## The owner's build and this working tree are the same files
 
