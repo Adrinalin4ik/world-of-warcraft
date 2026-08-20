@@ -874,6 +874,17 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     slot,
     itemId: item.entry,
     link: itemLink(item),
+    // The two `DELETE_ITEM_CONFIRM` arguments, captured HERE and not at the drop -- see
+    // `CursorItemSource`.
+    //
+    // **A LIMITATION, STATED: quality 0 for an unresolved template DOWNGRADES the prompt.** The stern
+    // "type DELETE" dialogue is chosen on `>= 3` (`uiparent.lua:611`), so an item whose template has
+    // not arrived gets the plain Yes/No instead. That window is small -- the row cannot be drawn
+    // without its template, so anything the player can see and pick up has one -- but it is real, and
+    // the alternative (defaulting to 3 so the stern prompt always wins) would make every grey item ask
+    // the player to type a word, which is not the game's behaviour either. Not papered over.
+    name: item.template?.name ?? null,
+    quality: item.template?.quality ?? 0,
     equipSlots: item.template === null ? [] : equipSlotsFor(item.template.inventoryType),
   });
 
@@ -1189,6 +1200,50 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     }
     return false;
   };
+  /**
+   * `DeleteCursorItem()` -- DESTROY the held item. `CMSG_DESTROYITEM` (**0x111**).
+   *
+   * **This is only ever reached from the client's own confirmation dialogue**, and that is the point.
+   * `api/cursor.ts#dropCursorOnWorld` fires `DELETE_ITEM_CONFIRM` and KEEPS the item on the cursor;
+   * `UIParent_OnEvent` picks `DELETE_GOOD_ITEM` when the quality is `>= 3` and `DELETE_ITEM` otherwise
+   * (`uiparent.lua:609-616`); and only those dialogues' `OnAccept` -- or the stern one's
+   * `EditBoxOnEnterPressed`, once "DELETE" has been typed -- calls this
+   * (`staticpopup.lua:1576-1578`, `:1600-1602`, `:1628-1633`). So the confirmation GATES the destroy
+   * and cannot follow it. Every string, the `>= 3` threshold and the typed word
+   * (`DELETE_ITEM_CONFIRM_STRING = "DELETE"`, `globalstrings.lua:1971`) are the client's own.
+   *
+   * The body is `u8 bag, u8 slot, u8 count` -- exactly three fields, read off the server that acts on
+   * it: TrinityCore 3.3.5 `Server/Packets/ItemPackets.cpp`'s `DestroyItem::Read` is
+   * `>> ContainerId >> SlotNum >> Count`. **`count = 0` means the WHOLE STACK**, the wire's own
+   * convention and what the reference records for the same opcode
+   * (`benilla-protocol/src/messages/items.rs:711-719`); that reference builds a 6-byte body for 1.12
+   * with three trailing bytes the server discards, and those are deliberately NOT sent here because
+   * this build's own reader does not name them.
+   *
+   * The cursor is cleared only after the send, and the source slot's lock is announced so the bag
+   * repaints the row it just gave up.
+   */
+  vm.registerFunction('DeleteCursorItem', () => {
+    const held = getCursorItem(vm);
+    if (held === null) {
+      return [];
+    }
+    const src = wirePos(held.bag, held.slot);
+    if (src === null) {
+      return [];
+    }
+    const gp = new GamePacket(
+      GameOpcode.CMSG_DESTROYITEM, GamePacket.HEADER_SIZE_OUTGOING + 3,
+    );
+    gp.writeUnsignedByte(src[0] & 0xff);
+    gp.writeUnsignedByte(src[1] & 0xff);
+    gp.writeUnsignedByte(0); // count 0 = the whole stack
+    world.game.send(gp);
+    lockChanged(held.bag, held.slot);
+    holdItem(null, null);
+    return [];
+  });
+
   vm.registerFunction('PutItemInBackpack', () => [putInBag(BACKPACK_CONTAINER)]);
   vm.registerFunction('PutItemInBag', (args) => {
     // The argument is an INVENTORY slot id -- `BagSlotButton_OnClick` passes `self:GetID()` straight
@@ -1387,9 +1442,6 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     ['SplitContainerItem', 'a split carry needs StackSplitFrame, whose OnAccept is the only caller, and '
       + 'CMSG_SPLIT_ITEM; the whole-stack move is real (see the item-cursor section) and a partial one '
       + 'is deliberately not faked as a whole-stack move', []],
-    ['DeleteCursorItem', 'CMSG_DESTROYITEM is not sent: nothing in this client opens the DELETE_ITEM '
-      + 'static popup, and wiring a destroy to any other gesture would delete the player\'s items on a '
-      + 'mis-aimed drag. api/cursor.ts#dropCursorOnWorld puts an item BACK for this reason', []],
     ['SocketInventoryItem', 'no socketing UI and no gem data; PaperDollItemSlotButton_OnModifiedClick '
       + 'reaches it only behind IsModifiedClick("SOCKETITEM")', []],
     ['GetInventoryItemBroken', 'ITEM_FIELD_DURABILITY is not read out of the item descriptor, so a worn '

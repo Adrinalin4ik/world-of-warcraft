@@ -91,6 +91,18 @@ export interface CursorItemSource {
   /** The item link -- `GetCursorInfo`'s `itemLink`. Null when the template has not landed. */
   link: string | null;
   /**
+   * The plain name and the quality, captured AT PICKUP for `DELETE_ITEM_CONFIRM`.
+   *
+   * The event's two arguments are the `%s` of `DELETE_ITEM`/`DELETE_GOOD_ITEM` and the number
+   * `UIParent_OnEvent` compares against 3 to choose between them (`uiparent.lua:609-616`). Carried on
+   * the payload rather than looked up at the drop for the reason the reference gives for the same field
+   * -- "carried so DELETE_ITEM_CONFIRM (a world drop) can report it without a container round-trip"
+   * (`benilla-ui/src/script/cursor.rs:72-74`) -- and because by the time the popup's Yes is clicked the
+   * source slot may already be locked.
+   */
+  name: string | null;
+  quality: number;
+  /**
    * The 1-based inventory slots this item may be EQUIPPED into, empty when it is not equippable.
    *
    * Captured at PICKUP rather than recomputed at the drop, exactly as the reference does
@@ -249,15 +261,30 @@ function putDown(vm: LuaVM, deleteSource: boolean): boolean {
  *
  * A payload from the SPELLBOOK has no slot to empty, so this is only the cursor being put down.
  *
- * **AN ITEM DROPPED ON THE WORLD IS PUT BACK, NOT DESTROYED, and that is a stated deviation.** The real
- * client raises the `DELETE_ITEM`/`DELETE_GOOD_ITEM` static popup and only `DeleteCursorItem` --
- * `CMSG_DESTROYITEM`, the reference's `drain_container_destroys`
- * (`benilla/src/ui_items/drain.rs:544-575`) -- actually destroys anything. Nothing in this client opens
- * that popup, so wiring the world drop straight to a destroy would silently delete the player's items
- * on a mis-aimed drag. `DeleteCursorItem` is therefore a declared gap in `ui/container-bridge.ts` and
- * this exit is a plain put-back: `putDown`'s `deleteSource` only ever means an ACTION slot.
+ * **AN ITEM DROPPED ON THE WORLD ASKS FIRST AND DESTROYS NOTHING HERE.** It fires
+ * `DELETE_ITEM_CONFIRM(name, quality)` and **leaves the item on the cursor**, which is the whole of the
+ * engine's part: `UIParent_OnEvent` answers that event by choosing between the two static popups on
+ * `arg2 >= 3` (`uiparent.lua:609-616`), and only the popup's own `OnAccept` calls `DeleteCursorItem`
+ * (`staticpopup.lua:1576-1578`, `:1600-1602`). Cancel calls `ClearCursor`, and the dialog's `OnUpdate`
+ * hides itself the moment `CursorHasItem()` goes false -- so keeping the item held is not incidental,
+ * it is what the client's own dialogue is written against.
+ *
+ * **The confirmation therefore GATES the destroy and can never follow it**, which matters more here
+ * than anywhere else in this client: it is the one action a player cannot undo. An earlier version of
+ * this function put the item back instead, on the grounds that nothing opened the popup; the popup
+ * opens now, so the put-back would silently swallow the gesture.
+ *
+ * A payload from the SPELLBOOK or the BAR still takes `deleteSource` -- see `putDown`.
  */
 export function dropCursorOnWorld(vm: LuaVM): boolean {
+  const held = stateOf(vm).held;
+  if (held !== null && held.kind === 'item') {
+    // ASK, and hold on to it. `arg1` is the `%s` of "Do you want to destroy %s?" and `arg2` is the
+    // quality `UIParent_OnEvent` tests against 3. A null name still fires: the dialogue with an empty
+    // `%s` is a worse prompt but a far better outcome than a silent destroy or a silent no-op.
+    fireEvent(vm, 'DELETE_ITEM_CONFIRM', [held.item?.name ?? '', held.item?.quality ?? 0]);
+    return true;
+  }
   return putDown(vm, true);
 }
 

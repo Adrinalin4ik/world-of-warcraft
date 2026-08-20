@@ -68,7 +68,14 @@ describe('the cursor', () => {
       sourceSlot: null,
       texture: 'Interface\\Icons\\INV_Sword_06',
       item: {
-        bag: 0, slot: 3, itemId: 25, link: '|Hitem:25|h[Worn Shortsword]|h', equipSlots: [16, 17],
+        bag: 0,
+        slot: 3,
+        itemId: 25,
+        link: '|Hitem:25|h[Worn Shortsword]|h',
+        // Captured at pickup for `DELETE_ITEM_CONFIRM` -- see `CursorItemSource`.
+        name: 'Worn Shortsword',
+        quality: 1,
+        equipSlots: [16, 17],
       },
     });
 
@@ -83,9 +90,16 @@ describe('the cursor', () => {
     expect(value('local t, id = GetCursorInfo() return t .. "/" .. id')).toBe('item/25');
     expect(getCursorItem(vm)?.equipSlots).toEqual([16, 17]);
 
-    // A put-down never destroys an item -- `discard` is the ACTION arm only. See `dropCursorOnWorld`.
+    // A WORLD DROP ASKS FIRST AND KEEPS THE ITEM, which is the contract the client's own dialogue is
+    // written against: `DELETE_ITEM`'s `OnUpdate` hides itself the moment `CursorHasItem()` goes false
+    // (`staticpopup.lua:1582-1586`), so clearing the cursor here would dismiss the very prompt it
+    // raised. Only the dialogue's `OnAccept` -> `DeleteCursorItem` destroys anything, and `discarded`
+    // staying empty is the proof that nothing was destroyed on the way past.
     expect(dropCursorOnWorld(vm)).toBe(true);
-    expect(getCursorItem(vm)).toBeNull();
+    expect(getCursorItem(vm)).not.toBeNull();
     expect(discarded).toEqual([]);
+    // ...and Escape still puts it down without destroying it.
+    expect(cancelCursor(vm)).toBe(true);
+    expect(getCursorItem(vm)).toBeNull();
   });
 });

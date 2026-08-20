@@ -41,7 +41,8 @@ describe('SetVertexColor', () => {
           </Frame>
         </Ui>
       `),
-      'vertex.xml',
+      () => null,
+      'vertex-color.test',
     );
     expect(report.errors).toEqual([]);
 

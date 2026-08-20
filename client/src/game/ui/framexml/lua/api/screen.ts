@@ -268,6 +268,21 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
   // CharacterSelectFrame's drag-to-rotate (characterselect.lua:479,492,494).
   vm.registerFunction('GetCursorPosition', () => [cursorX, cursorY]);
 
+  /**
+   * `InCinematic()` -- false, and it gates EVERY static popup in the client.
+   *
+   * `StaticPopup_Show`'s third guard is `if ( InCinematic() and not info.interruptCinematic )`
+   * (`staticpopup.lua:2956`), so with this nil **no dialogue could open at all** -- not the delete
+   * confirmation, not the logout prompt, not a quest confirmation. It was found while wiring the
+   * item-destroy dialogue and is the only engine global on that function's path that was missing
+   * (`UnitIsDeadOrGhost` beside it already answers).
+   *
+   * FALSE is a true answer rather than a stub: this client plays no cinematics -- there is no
+   * `CinematicFrame` feed and `SMSG_TRIGGER_CINEMATIC` has no subscriber -- so the player is never in
+   * one, and that is precisely the value that lets every popup through.
+   */
+  vm.registerFunction('InCinematic', () => [false]);
+
   vm.registerFunction('IsWindowsClient', () => {
     const ua =
       (typeof navigator !== 'undefined' && (navigator.platform || navigator.userAgent)) || '';
