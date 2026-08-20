@@ -475,6 +475,28 @@ function installCVars(vm: LuaVM): void {
      */
     ['playerStatLeftDropdown', ''],
     ['playerStatRightDropdown', ''],
+    /**
+     * `showNewbieTips`, "1" -- THE GAME'S OWN DEFAULT, and its absence was why the experience bar had
+     * no tooltip.
+     *
+     * `interfaceoptionsframe.lua:310` is the source and it gives both halves:
+     *
+     *     ["SHOW_NEWBIE_TIPS"] = { default = "1", cvar = "showNewbieTips", event = "SHOW_NEWBIE_TIPS_TEXT" }
+     *
+     * `world-runtime.ts` already sets the uvar `SHOW_NEWBIE_TIPS` to "1" before the load -- but
+     * `BlizzardOptionsPanel_SetupControl` then does `_G[control.uvar] = GetCVar(control.cvar)`
+     * (`optionspaneltemplates.lua:373-380`) on `PLAYER_ENTERING_WORLD`, and with this CVar unknown that
+     * **overwrote the "1" with nil.** MEASURED live: `SHOW_NEWBIE_TIPS` read nil in the world.
+     *
+     * What that cost: `MainMenuExpBar`'s `<OnEnter>` ends in
+     * `GameTooltip_AddNewbieTip(self, XPBAR_LABEL, 1, 1, 1, NEWBIE_TOOLTIP_XPBAR, 1)`
+     * (`mainmenubar.xml:46-52`), and the trailing `1` is `noNormalText` -- so in the `~= "1"` branch
+     * `GameTooltip_AddNewbieTip` shows NOTHING AT ALL (`gametooltip.lua:199-215`). The owner's "missing
+     * tooltip on exp bar" is exactly that branch. The same nil silenced every micro button, which is
+     * the case `world-runtime.ts` reasoned its way to before this CVar existed -- correctly, and now
+     * with a real source instead of an inference.
+     */
+    ['showNewbieTips', '1'],
   ]);
   CVAR_STORES.set(vm, cvars);
 
@@ -507,7 +529,13 @@ function installCVars(vm: LuaVM): void {
    * answer for a name the config does not know -- rather than echoing the current value, which would make
    * `InterfaceOptionsFrame_LoadUVars`' `cvarValue == setting.default` test always true.
    */
-  const cvarDefaults = new Map<string, string>([['lockactionbars', '0']]);
+  const cvarDefaults = new Map<string, string>([
+    ['lockactionbars', '0'],
+    // `interfaceoptionsframe.lua:310`'s `default = "1"`, the same line the CVar above is seeded from.
+    // `InterfaceOptionsFrame_LoadUVars` compares `cvarValue == setting.default`, so a nil here would
+    // make that test false for a CVar whose value IS the default.
+    ['shownewbietips', '1'],
+  ]);
   vm.registerFunction('GetCVarDefault', (args) => [
     cvarDefaults.get(key(args[0])) ?? null,
   ]);

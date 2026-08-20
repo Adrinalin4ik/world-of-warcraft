@@ -273,7 +273,15 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    * (`gametooltip.lua:200`, `friendsframe.xml:210,380`), which is the signature of a value the engine
    * publishes from its config. So it has to come from here.
    *
-   * **The value is OURS and unsourced**, and the reasoning is worth stating because a nil would look
+   * **THE VALUE IS NOW SOURCED, and the seed here is no longer sufficient on its own.**
+   * `interfaceoptionsframe.lua:310` is `["SHOW_NEWBIE_TIPS"] = { default = "1", cvar =
+   * "showNewbieTips" }`, so "1" is the game's own default rather than our inference -- and
+   * `BlizzardOptionsPanel_SetupControl` OVERWRITES this global with `GetCVar("showNewbieTips")` on
+   * `PLAYER_ENTERING_WORLD`, which read nil until `api/screen.ts` seeded that CVar. Measured live:
+   * `SHOW_NEWBIE_TIPS` was nil in the world despite this line. Both are needed; this one covers the
+   * window before the options panel runs.
+   *
+   * The reasoning below is kept because it is still why a nil is not harmless
    * harmless. `GameTooltip_AddNewbieTip`'s two branches are not symmetrical
    * (`gametooltip.lua:199-215`): the `== "1"` branch ends in `GameTooltip:Show()` and the ELSE branch
    * calls `SetOwner` and `SetText` and never shows anything. A micro button's `<OnEnter>` calls nothing
