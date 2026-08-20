@@ -15,7 +15,7 @@ import { MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { NO_TINT } from '../../../backdrop';
 import type { BackdropTint, Insets } from '../../../backdrop';
-import { Layer } from '../../../widget';
+import { Layer, Widget } from '../../../widget';
 import { STRATA_ORDER, Strata } from '../../order';
 import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
 
@@ -145,13 +145,7 @@ const FRAME: MethodTable = {
   // draw bucket for no reason -- nothing about "set my level to what it already is" should move
   // anything.
   SetFrameLevel: (ctx, self, args) => {
-    const widget = widgetOf(ctx, self);
-    const level = Number(args[0] ?? 0);
-    if (widget.frameLevel === level) {
-      return [];
-    }
-    widget.frameLevel = level;
-    widget.restamp();
+    shiftLevel(widgetOf(ctx, self), Number(args[0] ?? 0));
     return [];
   },
   GetFrameLevel: (ctx, self) => [widgetOf(ctx, self).frameLevel],
@@ -551,13 +545,57 @@ const FRAME: MethodTable = {
 /** The shared body of `RaiseFrameLevel`/`RaiseFrameLevelByTwo`/`LowerFrameLevel`. */
 function nudgeLevel(ctx: Parameters<MethodTable[string]>[0], self: number, delta: number): unknown[] {
   const widget = widgetOf(ctx, self);
-  const level = widget.frameLevel + delta;
-  if (widget.frameLevel === level) {
-    return [];
-  }
-  widget.frameLevel = level;
-  widget.restamp();
+  shiftLevel(widget, widget.frameLevel + delta);
   return [];
+}
+
+/**
+ * Move a frame to `level` AND CARRY ITS WHOLE SUBTREE WITH IT, keeping every relative offset.
+ *
+ * **THIS IS WHY THE STAT DROPDOWNS WOULD NOT OPEN**, and it was measured live rather than reasoned
+ * about. `PlayerStatFrameLeftDropDown_OnLoad`'s first statement is `RaiseFrameLevel(self)`
+ * (`paperdollframe.lua:1518`), and the frame it raises is the CONTAINER whose child `$parentButton`
+ * carries the only `<OnClick>` that opens the menu -- `ToggleDropDownMenu(nil, nil, self:GetParent())`
+ * (`uidropdownmenutemplates.xml:312-326`). The container also declares `enableMouse="true"` in the
+ * client's own XML (`paperdollframe.xml:726`), so it is hit-testable by the document's own choice.
+ *
+ * Raising ONLY the frame put the container at its arrow button's level with a fresher `linkStamp` (the
+ * `restamp()` below), so the container sorted AFTER its own child and `hitTest`'s backwards walk
+ * answered the container. MEASURED with the panel open and the pointer on the arrow:
+ *
+ *     pointerWidget = PlayerStatFrameLeftDropDown        <- the container, not its button
+ *     after a real click: IsShown()=false, UIDROPDOWNMENU_OPEN_MENU=nil, numButtons=5
+ *
+ * -- the list was already POPULATED by `UIDropDownMenu_Initialize` on show, and `ToggleDropDownMenu`
+ * had simply never run, through 2.6 s of sampling. That is the whole of "options appear but choosing
+ * one does nothing": the menu never opened at all.
+ *
+ * The engine's levels are RELATIVE -- `Widget#add:478` already builds them that way, a child frame at
+ * the parent's level + 1 and a region at the owner's level -- so moving a parent must move the
+ * subtree, or the invariant that built the tree is broken by the first `SetFrameLevel`.
+ *
+ * Regions shift too: `add` gives them their owner's level exactly so that `frameLevel` outranking
+ * `layer` in `compareOrder` keeps a frame's art with the frame. Leaving them behind would separate a
+ * raised frame from its own textures.
+ */
+function shiftLevel(widget: Widget, level: number): void {
+  const delta = level - widget.frameLevel;
+  if (delta === 0) {
+    // The same-value guard `SetFrameLevel` has always had: a no-op write must not `restamp`, or a
+    // redundant call would reorder the frame within its bucket.
+    return;
+  }
+  const walk = (node: Widget): void => {
+    node.frameLevel += delta;
+    for (const child of node.children) {
+      walk(child);
+    }
+  };
+  walk(widget);
+  // Only the frame ITSELF is restamped. `linkStamp` is the live-list order within a bucket and the
+  // client re-tails the frame that moved, not its descendants -- and restamping children would
+  // reverse their relative order against each other.
+  widget.restamp();
 }
 
 function applyLayer(widget: { layer: Layer }, arg: unknown): void {

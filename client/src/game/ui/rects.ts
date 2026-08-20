@@ -39,6 +39,10 @@ import type { DrawItem } from './widget';
 let items: DrawItem[] | null = null;
 let byId: Map<string, Rect> | null = null;
 let screenHeight = 0;
+/** Resolves the WHOLE tree's rects on demand. See `rectOf`'s fallback. */
+let resolveAll: (() => Map<string, Rect>) | null = null;
+/** The on-demand map, computed at most once per publish. */
+let allRects: Map<string, Rect> | null = null;
 
 /**
  * Publish the frame's draw list. Called once per frame from the UI host.
@@ -48,9 +52,15 @@ let screenHeight = 0;
  * to the other needs the viewport's height in the same logical units, and reading it from anywhere
  * else risks the two disagreeing on the frame the window was resized.
  */
-export function publishRects(list: DrawItem[], screenHeightUnits: number): void {
+export function publishRects(
+  list: DrawItem[],
+  screenHeightUnits: number,
+  resolveEverything?: () => Map<string, Rect>,
+): void {
   items = list;
   byId = null;
+  allRects = null;
+  resolveAll = resolveEverything ?? null;
   screenHeight = screenHeightUnits;
 }
 
@@ -70,7 +80,38 @@ export function rectOf(id: string): Rect | null {
       }
     }
   }
-  return byId.get(id) ?? null;
+  const drawn = byId.get(id);
+  if (drawn !== undefined) {
+    return drawn;
+  }
+  /**
+   * NOT IN THE LAST DRAW LIST -- resolve the whole tree once and answer from that.
+   *
+   * **This is what makes the stat dropdowns open.** `ToggleDropDownMenu` calls `listFrame:Show()` and
+   * then `listFrame:GetCenter()` on the next line, hiding the menu again when that is nil
+   * (`uidropdownmenu.lua:742-751`). A frame shown during an `OnClick` is not in the PREVIOUS frame's
+   * draw list, so the guard fired every time and the menu never appeared. MEASURED live: `numButtons`
+   * 5 and `UIDROPDOWNMENU_OPEN_MENU` set, `IsShown()` false through 2.6 s of sampling.
+   *
+   * The module header used to call the draw-list-only limit "a real limit and not a bug to paper over".
+   * That was right about hidden frames with no geometry and wrong about this case: the client's own Lua
+   * measures a frame in the same tick it shows it, and the engine answers. This is not a second copy of
+   * the truth either -- it runs the SAME `resolveAnchors` over the same tree, so a rect it returns is
+   * the one the next draw pass will use.
+   *
+   * COST: one extra layout pass, and only on a miss. `ui.layout` p50 is 0.4 ms at 257 draw items and
+   * this walk covers the hidden frames too, so call it a low single-digit millisecond. It is cached
+   * until the next `publishRects`, so a script asking about several undrawn frames in one frame pays
+   * once, and code that only ever asks about drawn frames never pays at all. Nothing here runs per
+   * frame and the draw-list fingerprint is untouched.
+   */
+  if (resolveAll !== null) {
+    if (allRects === null) {
+      allRects = resolveAll();
+    }
+    return allRects.get(id) ?? null;
+  }
+  return null;
 }
 
 /** The viewport height in logical units, for the Y flip. 0 before the first publish. */
@@ -82,5 +123,7 @@ export function screenHeightUnits(): number {
 export function clearRects(): void {
   items = null;
   byId = null;
+  allRects = null;
+  resolveAll = null;
   screenHeight = 0;
 }

@@ -662,7 +662,11 @@ export class WorldUiHost {
     // array the router hit-tests, so a rect a script reads and a rect a click lands in cannot
     // disagree. One reference assignment; the id map is built lazily on first lookup. See
     // `ui/rects.ts` for why nothing else in this client could answer where a widget ended up.
-    publishRects(items, viewportUnits(viewport).height);
+    // The third argument is the ON-DEMAND resolver, for a script that measures a frame in the same tick
+    // it shows it -- `ToggleDropDownMenu`'s `Show()` then `GetCenter()`. A closure, not a precomputed
+    // map: it runs only if `rectOf` misses, which for every existing caller is never.
+    publishRects(items, viewportUnits(viewport).height,
+      () => this.root.layoutRects(viewport, measureText));
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');

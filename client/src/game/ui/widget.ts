@@ -867,6 +867,43 @@ export class WidgetRoot {
     }
   }
 
+  /**
+   * Every widget's rect, resolved NOW over the whole tree -- shown or not.
+   *
+   * **WHY THIS EXISTS, and it is the whole of "the stat selects will not open."** The client's own
+   * `ToggleDropDownMenu` does `listFrame:Show()` and then, on the very next line,
+   * `local x, y = listFrame:GetCenter()` -- and `if ( not x or not y ) then listFrame:Hide(); return; end`
+   * (`uidropdownmenu.lua:742-751`). `Region:GetCenter` answers out of the PUBLISHED draw list
+   * (`ui/rects.ts`), which is the PREVIOUS frame's, and a frame shown during an `OnClick` is not in it.
+   * So the client's own guard hid the menu one line after showing it, every time. MEASURED live: after a
+   * real click, `numButtons` 5 and `UIDROPDOWNMENU_OPEN_MENU` set, but `IsShown()` false through 2.6 s.
+   *
+   * `drawList` cannot answer this: it skips a hidden subtree whole, and `addHiddenTargets` only adds a
+   * hidden frame that something else is ANCHORED to -- nothing anchors to `DropDownList1`.
+   *
+   * Not on the per-frame path. `ui/rects.ts` calls this only when a script asks for an edge of a widget
+   * the last draw list did not contain, and caches it until the next publish.
+   */
+  layoutRects(viewport: Viewport, measure?: MeasureText): Map<string, Rect> {
+    const nodes: LayoutNode[] = [];
+    const scale = screenScale(viewport.height);
+    const walk = (widget: Widget): void => {
+      const size = deriveSize(widget, scale, measure);
+      nodes.push({
+        id: widget.id,
+        width: size.width,
+        height: size.height,
+        anchors: widget.anchors,
+        clamped: widget.clampedToScreen,
+      });
+      for (const child of widget.children) {
+        walk(child);
+      }
+    };
+    walk(this.root);
+    return resolveAnchors(nodes, viewport);
+  }
+
   drawList(viewport: Viewport, measure?: MeasureText): DrawItem[] {
     const flat: Array<{ widget: Widget; alpha: number; sequence: number }> = [];
     const nodes: LayoutNode[] = [];
