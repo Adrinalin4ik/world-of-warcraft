@@ -114,9 +114,13 @@ matters; add a test when something breaks and stays broken. Do not enumerate edg
   cursors (a Playwright screenshot contains no OS pointer), a colour, a layout, anything where the
   instrument is the doubtful part — hand it over and ask. That is faster and more honest than a
   claim propped up by a weak gate.
-- **Two attempts, then ask.** If a visual check has not worked twice, stop and hand it to the owner
-  instead of building a third instrument. He has said plainly he would rather look than have the time
-  spent: "Я всегда готов помочь, чтобы сэкономить время."
+- **Two attempts, then ask — and prefer asking sooner.** If a visual check has not worked twice, stop
+  and hand it to the owner instead of building a third instrument. He has said so plainly, twice: "Я
+  всегда готов помочь, чтобы сэкономить время" and "Don't spend too much on validation. I can check it
+  for you." So do not build a rig to photograph something he can see in a second — spend the round on
+  the work, and name precisely what you want him to look at and on what route. This does **not** relax
+  measurement: a number — a count, a timing, a residual, a dirty-frame ratio — is still owed for
+  anything performance- or correctness-critical, because that is the part he cannot check by looking.
 
 ## The owner's build and this working tree are the same files
 
