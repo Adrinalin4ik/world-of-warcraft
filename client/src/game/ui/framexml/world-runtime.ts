@@ -379,6 +379,21 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     // wrong tree's file -- `Localization.lua` exists in both.
     const resolveAddOn = (path: string): string | null =>
       addOn.manifest.texts.get(cacheKey(path)) ?? texts.get(cacheKey(path)) ?? null;
+    /**
+     * HOW MANY OF THE ADDON's FILES ACTUALLY RAN, and it is what this function's `true` now means.
+     *
+     * **SELF-REVIEW, round 30: `runAddOn` returned `true` whenever the `.toc` had been fetched --
+     * even when every file it named was missing, and even when it named none at all.** That made
+     * `LoadAddOn`'s success a lie in exactly the shape a round had already reported and not chased
+     * ("returns true and the addon does not load"): `UIParentLoadAddOn` branches on that boolean and
+     * turns a false into a visible `message(ADDON_LOAD_FAILED, ...)`, so a true with nothing loaded is
+     * a SILENT failure -- the one thing `CLAUDE.md` says a gap may never be.
+     *
+     * The rule is deliberately conservative: false only when NOTHING ran. A partly-fetched addon still
+     * counts as loaded, because the real client would have loaded it too and each individual miss is
+     * already named in `files`. Zero is the case that cannot be anything but broken.
+     */
+    let ran = 0;
     for (const file of addOn.manifest.order) {
       // Labelled with the addon name so a file report cannot be confused with a FrameXML entry of the
       // same basename. See `ADDON_LABEL_SEP` for why the separator is a constant.
@@ -388,6 +403,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
         files.push({ file: label, kind: 'missing', frames: 0, warnings: [], errors: [`${label}: not found`] });
         continue;
       }
+      ran += 1;
       if (/\.lua$/i.test(file)) {
         const error = vm.run(text, label);
         files.push({
@@ -400,6 +416,17 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
         continue;
       }
       files.push({ file: label, kind: 'xml', ...loadDocument(runtime, parseXml(text), resolveAddOn, label) });
+    }
+    if (ran === 0) {
+      // NOT marked loaded and NOT announced: `ADDON_LOADED` is a promise that the addon's frames and
+      // functions now exist, and `IsAddOnLoaded` answering 1 for an addon that ran nothing would make
+      // every guard in the manifest (`if ( IsAddOnLoaded("Blizzard_GMChatUI") )`) skip a load that
+      // never happened. See `ran`.
+      report.errors.push(
+        `${addOn.dir}: the toc was fetched but none of its ${addOn.manifest.order.length} file(s)`
+        + ' could be resolved; the addon did NOT load and LoadAddOn answers false',
+      );
+      return false;
     }
     markAddOnLoaded(vm, addOn.name);
     fireEvent(vm, 'ADDON_LOADED', [addOn.name]);

@@ -27,6 +27,15 @@
  * on this project found it silently wrong about four numbers, so it is not consulted for a body here at
  * all.
  *
+ * **NO REAL PACKET HAS BEEN DECODED YET, AND THE UNIT TEST DOES NOT CHANGE THAT.** The world was
+ * unreachable for this round (the test account returned zero characters), so the 38-byte stride has
+ * never met a live `SMSG_TRAINER_LIST`. `__tests__/trainer-wire.test.ts` builds its body from the SAME
+ * widths this file reads, so it proves self-consistency and the empty-greeting terminator and nothing
+ * about 3.3.5a. **The first real trainer settles it in one reading:** a `TRAINER_LIST` row in
+ * `window.spellWire.history()` whose `consumed` equals its `bodySize`, or a `TRAINER_LIST!THREW`. A
+ * wrong stride cannot hide -- the trailing greeting would come out as garbage or the read would run off
+ * the frame -- which is exactly why the greeting is the last field and is checked.
+ *
  * **THE ROW IS SELF-CHECKING AND THAT IS WHY IT CAN BE TRUSTED.** The layout below is
  * `4+1+4+4+4+1+4+4+4*3 = 38` bytes, and the server's own packet reserve is
  * `8 + 4 + 4 + spellList.size() * 38 + title.size() + 1` -- an INDEPENDENT statement of 38 in the same
@@ -342,9 +351,22 @@ export class TrainerHandler extends EventEmitter {
   /**
    * `CMSG_TRAINER_BUY_SPELL` (**0x1B2**): `u64 guid · u32 spellId`, 12 bytes.
    *
-   * **BY SPELL ID, not by list index** -- `HandleTrainerBuySpellOpcode` is `recvData >> guid >> spellId`
-   * and then looks the spell up in the trainer's own list, which is why a filtered display list costs
-   * nothing here. IMPLEMENTED AND UNEXERCISED: see the header on why the buy was not tested.
+   * **BY SPELL ID, not by list index** -- `HandleTrainerBuySpellOpcode`'s READ order is
+   * `recvData >> guid >> spellId` (read off the `Read`, not off a declaration), and it then looks the
+   * spell up in the trainer's own list, which is why a filtered display list costs nothing here.
+   *
+   * **IF THIS PRODUCES SILENCE, SUSPECT THE WIDTH BEFORE ANYTHING ELSE.** Six defects in the item area
+   * were a field widened between 1.12 and 3.3.5a, and every one of them looked like an inert gesture
+   * rather than a refusal: a short body makes the server read past the end of the frame and DISCARD the
+   * packet, so no reply of any kind comes back (`CLAUDE.md`'s trap list). This send is 12 bytes, and
+   * later expansions added a `trainerId` word that 3.3.5a does not have -- so 12 is the number to
+   * re-derive first if a purchase does nothing.
+   *
+   * That is diagnosable rather than silent BECAUSE of the `TRAINER_BUY_SENT` row below: a
+   * `TRAINER_BUY_SENT` in `window.spellWire.history()` with no `TRAINER_BUY_SUCCEEDED` and no
+   * `TRAINER_BUY_FAILED` after it is the signature of a discarded frame, not of a refused purchase.
+   *
+   * IMPLEMENTED AND UNEXERCISED: see the header on why the buy was not tested.
    */
   buy(spellId: number): void {
     const guid = this.source;

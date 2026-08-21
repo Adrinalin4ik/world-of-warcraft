@@ -627,10 +627,33 @@ export function attachTrainerBridge(vm: LuaVM, world: World, art: GlueArt): () =
     fireEvent(vm, 'TRAINER_DESCRIPTION_UPDATE');
   });
 
+  /**
+   * A SPELL WAS LEARNED WHILE THE TRAINER IS OPEN -- re-ask for the list.
+   *
+   * **SELF-REVIEW: this closes a hole in the purchase path that the `SMSG_TRAINER_BUY_SUCCEEDED`
+   * re-list does not cover.** That re-list is the primary refresh (`object/trainer.ts#handleBuySucceeded`),
+   * but it depends on the server actually sending that opcode -- and the buy path is the one arm this
+   * round could not exercise, so "the server sends it" is an assumption and not a measurement. The
+   * learned-spell edge is INDEPENDENT of it: `SMSG_LEARNED_SPELL`/`SMSG_SUPERCEDED_SPELL` are how the
+   * spell reaches the book at all, so if the player got the ability, this fires.
+   *
+   * Only while a window is open, and it CANNOT loop: a list arrival raises `trainerUpdate`, which
+   * changes no spells, so nothing re-enters here. Cost is one packet per spell learned at a trainer,
+   * and zero at every other time.
+   */
+  const spells = world.game.objectHandler.spellHandler;
+  const onSpellsChanged = (): void => {
+    if (disposed || trainer.source === null) {
+      return;
+    }
+    trainer.list(trainer.source);
+  };
+
   trainer.on('trainerShow', onShow);
   trainer.on('trainerUpdate', onUpdate);
   trainer.on('trainerClosed', onClosed);
   trainer.on('trainerBuyFailed', onBuyFailed);
+  spells.on('spellsChanged', onSpellsChanged);
 
   (window as unknown as Record<string, unknown>).trainerBridge = () => ({
     source: trainer.source,
@@ -641,7 +664,13 @@ export function attachTrainerBridge(vm: LuaVM, world: World, art: GlueArt): () =
     filter: { ...filter },
     selectedSpell,
     selectionIndex: selectionIndex(),
-    spellTablesReady: spellData.spell(1) !== null,
+    // **SELF-REVIEW: THIS WAS `spellData.spell(1) !== null` AND IT WAS AN INSTRUMENT DEFECT.** It
+    // probed readiness by asking for spell id 1 -- a specific row whose existence in this build's
+    // `Spell.dbc` nobody had checked. If id 1 is absent the panel reports "tables not ready" for ever,
+    // which is precisely the shape `CLAUDE.md` warns about: a debug panel reading zero while the world
+    // is fine. `spellData.ready` is the table's own answer and is what `spellbook-bridge.ts:234` gates
+    // its ledger on.
+    spellTablesReady: spellData.ready,
     lastError: trainer.lastError,
     // The whole display list as the interface would read it -- one place to check a row's name, cost,
     // type and requirement without driving the Lua.
@@ -668,6 +697,7 @@ export function attachTrainerBridge(vm: LuaVM, world: World, art: GlueArt): () =
     trainer.removeListener('trainerUpdate', onUpdate);
     trainer.removeListener('trainerClosed', onClosed);
     trainer.removeListener('trainerBuyFailed', onBuyFailed);
+    spells.removeListener('spellsChanged', onSpellsChanged);
     delete (window as unknown as Record<string, unknown>).trainerBridge;
   };
 }
