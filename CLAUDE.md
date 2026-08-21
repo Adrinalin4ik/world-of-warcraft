@@ -216,6 +216,20 @@ A comment that invents a source, or that still describes a gap now closed, is tr
   "Learn <skill>", and `isAbandonable` returning 0 put an Unlearn button on every skill -- with a comment
   directly above it that already said a truthy value would do exactly that. Writing the warning down is
   not the same as returning nil.
+- **A field widened between 1.12 and 3.3.5a fails SILENTLY, with no reply at all.** Six have been found
+  in the item area alone: the vendor row (7 words → 8), `CMSG_SELL_ITEM`'s count (`u8` → `u32`),
+  `CMSG_REPAIR_ITEM` (16 B → 17), `BUYBACK_SLOT_START` (69 → 74), `CMSG_SPLIT_ITEM`'s count
+  (`u8` → `i32`) and `CMSG_DESTROYITEM`'s (`u8` → `u32`). A short body makes the server's `ByteBuffer`
+  read past the end and throw; the packet is discarded and **nothing comes back**, so the gesture looks
+  inert rather than refused — and no `SMSG_*_FAILURE` will ever explain it. When a send produces
+  silence, suspect a width before suspecting the handler.
+- **Prefer the reference's BYTES over the reference's RATIONALE when the two can be separated.** A
+  comment here trimmed three "trailing bytes the server discards" as 1.12 slack; in 3.3.5a they are the
+  high three bytes of a `u32` count. The reference's byte sequence would have worked verbatim — a `u8` 0
+  plus three zeros *is* a little-endian `u32` 0 — so the explanation broke a packet that had been
+  correct by accident.
+- **Read a packet's `Read()` order, never its declaration order.** `CMSG_SPLIT_ITEM` is source-first
+  while `CMSG_SWAP_INV_ITEM` in the same handler is destination-first.
 - `packet.readByte(N)` does **not** skip N bytes — its argument is the byte ORDER.
 - `zlib.inflate`'s callback in `zlib-browserify` is argument **2**, not 3.
 - `model.scale.setScalar()` is **inert** under `matrixAutoUpdate = false`.
