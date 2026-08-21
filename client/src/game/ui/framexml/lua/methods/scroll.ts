@@ -195,6 +195,10 @@ const SCROLLFRAME: MethodTable = {
       return [];
     }
     state.vertical = wanted;
+    // THE CHILD ACTUALLY MOVES NOW. `drawList` offsets the clipped subtree by this, which is the half of
+    // a real `<ScrollFrame>` this file's header called "a real remaining gap". Inert for a faux frame:
+    // its scroll child has no drawable descendants (see `Widget#scrollOffset`).
+    widgetOf(ctx, self).scrollOffset.y = wanted;
     fireScroll(ctx, self, 'OnVerticalScroll', wanted);
     return [];
   },
@@ -208,6 +212,7 @@ const SCROLLFRAME: MethodTable = {
       return [];
     }
     state.horizontal = wanted;
+    widgetOf(ctx, self).scrollOffset.x = wanted;
     fireScroll(ctx, self, 'OnHorizontalScroll', wanted);
     return [];
   },

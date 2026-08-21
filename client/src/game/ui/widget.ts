@@ -299,6 +299,22 @@ export class Widget {
    * `clipRect`.
    */
   clippedBy: Widget | null = null;
+
+  /**
+   * How far this `<ScrollFrame>` has scrolled its child, in logical units. Written by
+   * `SetVerticalScroll`/`SetHorizontalScroll`; read by `drawList` when it offsets the clipped subtree.
+   *
+   * On the FRAME, not the child, so one lookup serves the clip and the offset -- they are two halves of
+   * one behaviour. The clip decides what is inside the viewport; this decides which part of the child the
+   * viewport is over.
+   *
+   * **INERT FOR A FAUX SCROLL FRAME, and that is a fact about the client's own files rather than a
+   * special case here.** A faux frame recomputes a ROW OFFSET and repaints; its rows are not children of
+   * its scroll child at all -- `SkillRankFrame1` is outside `skillframe.xml`'s `<ScrollChild>` block, as
+   * are reputation's and the spellbook's. So the scroll child a faux frame declares has nothing drawable
+   * under it and offsetting it moves nothing. Nothing needs to distinguish the two kinds.
+   */
+  scrollOffset: { x: number; y: number } = { x: 0, y: 0 };
   focusable = false;
 
   /**
@@ -883,6 +899,7 @@ function clipRect(
   clip: Widget | null,
   rects: Map<string, Rect>,
   unplaceable: Set<string>,
+  offset: { x: number; y: number },
 ): Rect | null {
   let out: Rect | null = null;
   let node: Widget | null = clip;
@@ -913,6 +930,11 @@ function clipRect(
     if (rect === undefined || rect.width <= 0 || rect.height <= 0) {
       return null;
     }
+    // ACCUMULATED with the clip, because they are two halves of one behaviour: this frame decides both
+    // what part of the child is over its viewport and which of that survives. Summed up the chain so a
+    // scroll frame nested in another scrolls by both.
+    offset.x += node.scrollOffset.x;
+    offset.y += node.scrollOffset.y;
     if (out === null) {
       out = rect;
     } else {
@@ -1204,8 +1226,38 @@ export class WidgetRoot {
       // THE SCROLLFRAME CROP. Last, so it sees the final rect -- including a StatusBar fill's
       // overridden one. `clipItem` passes through, narrows, or DROPS: the item count can only fall.
       .map((item) => {
-        const clip = clipRect(itemClip.get(item.widget) ?? null, rects, unplaceable);
-        return clip === null ? item : clipItem(item, clip);
+        const owner = itemClip.get(item.widget) ?? null;
+        if (owner === null) {
+          return item;
+        }
+        const offset = { x: 0, y: 0 };
+        const clip = clipRect(owner, rects, unplaceable, offset);
+        if (clip === null) {
+          return item;
+        }
+        /**
+         * SCROLLED, THEN CLIPPED -- in that order, and the order is the whole behaviour.
+         *
+         * Offsetting first is what brings the next lines INTO the viewport; clipping second is what
+         * keeps the ones that scrolled past the top edge out of it. Done here at DRAW time rather than by
+         * moving the child's anchors, so the rect map and `resolveAnchors` are untouched: a scroll costs
+         * one subtraction per already-clipped item and never a re-layout.
+         *
+         * `top - y` because `Rect.top` grows downward while a scroll offset grows as the view descends,
+         * so a positive offset lifts the content.
+         */
+        const shifted = offset.x === 0 && offset.y === 0
+          ? item
+          : {
+            ...item,
+            rect: {
+              left: item.rect.left - offset.x,
+              top: item.rect.top - offset.y,
+              width: item.rect.width,
+              height: item.rect.height,
+            },
+          };
+        return clipItem(shifted, clip);
       })
       .filter((item): item is DrawItem => item !== null);
   }
