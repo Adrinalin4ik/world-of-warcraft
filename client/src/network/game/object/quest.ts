@@ -1098,13 +1098,27 @@ export class QuestHandler extends EventEmitter {
     this.game.send(gp);
   }
 
-  /** Forget every open panel. Called by `CloseQuest` and on a world change. */
+  /**
+   * Forget every open panel. Called by `CloseQuest` and on a world change.
+   *
+   * **THE EMIT IS GUARDED ON SOMETHING HAVING BEEN OPEN, and that guard is a self-review fix rather
+   * than tidiness.** `QuestFrame_OnHide` calls `CloseQuest()` (`questframe.lua:297`) and the
+   * `questFinished` emit fires `QUEST_FINISHED`, which `QuestFrame_OnEvent` answers with
+   * `HideUIPanel(QuestFrame)` (`questframe.lua:18-21`). Unguarded that is a hide feeding a hide: it
+   * terminates only because the second `HideUIPanel` finds the frame already hidden, which is a
+   * property of `HideUIPanel` and not of this file. Emitting only on a real close removes the loop
+   * instead of relying on someone else's early-out.
+   */
   closePanels(): void {
+    const wasOpen = this.details !== null || this.offer !== null
+      || this.progress !== null || this.greeting !== null;
     this.details = null;
     this.offer = null;
     this.progress = null;
     this.greeting = null;
-    this.emit('questFinished');
+    if (wasOpen) {
+      this.emit('questFinished');
+    }
   }
 
   // -- Readers ------------------------------------------------------------------------------------

@@ -51,6 +51,8 @@ import { attachLootBridge } from './loot-bridge';
 import { attachGossipBridge } from './gossip-bridge';
 import { attachInteractionWatch } from './interaction-watch';
 import { attachMerchantBridge } from './merchant-bridge';
+import { attachQuestBridge } from './quest-bridge';
+import { attachLevelUpBridge } from './level-up-bridge';
 import { attachTrainerBridge } from './trainer-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { publishRects, clearRects } from './rects';
@@ -252,6 +254,12 @@ export class WorldUiHost {
 
   /** `attachMerchantBridge`'s teardown, held so `dispose` can run it. */
   private detachMerchant: (() => void) | null = null;
+
+  /** `attachQuestBridge`'s teardown, held so `dispose` can run it. */
+  private detachQuest: (() => void) | null = null;
+
+  /** `attachLevelUpBridge`'s teardown, held so `dispose` can run it. */
+  private detachLevelUp: (() => void) | null = null;
 
   /** `attachTrainerBridge`'s teardown, held so `dispose` can run it. */
   private detachTrainer: (() => void) | null = null;
@@ -589,6 +597,20 @@ export class WorldUiHost {
         // know the kind.
         this.detachGossip = attachGossipBridge(runtime.vm, this.world, this.art);
         this.detachMerchant = attachMerchantBridge(runtime.vm, this.world, this.art);
+        // QUESTS. **AFTER the gossip bridge, and the order is load-bearing rather than tidy.**
+        // `gossip-bridge.ts` registers `SelectGossipAvailableQuest`/`SelectGossipActiveQuest` as
+        // declared gaps -- "no quest frame is decoded" -- and `quest-bridge.ts` registers the working
+        // versions under the same names. A later `registerFunction` wins, so attaching this first would
+        // put the stubs back on top and a quest row in a gossip menu would warn and do nothing. That
+        // also keeps `gossip-bridge.ts` owned by the merchant path: nothing in it had to change.
+        //
+        // Gated on a real session for the reason the item bridges are: every quest panel, the template
+        // cache and the log's descriptor slots are all packets, so an offline world has no quest to
+        // show and `world.game.objectHandler` must not be touched on that route.
+        this.detachQuest = attachQuestBridge(runtime.vm, this.world, this.art);
+        // THE LEVEL-UP. `SMSG_LEVELUP_INFO` and the burst on the character; see `level-up-bridge.ts`
+        // for why there is no frame to draw on 3.3.5a.
+        this.detachLevelUp = attachLevelUpBridge(runtime.vm, this.world);
         // THE CLASS TRAINER. **LAST of the tooltip-source chain, and for the reason stated just above
         // for the merchant**: it adds the `trainer` kind on top of `bag`/`inventory`/`link`/`loot`/
         // `merchant`/`buyback`, so attaching it earlier would put it under the merchant bridge's
@@ -1245,6 +1267,10 @@ export class WorldUiHost {
     this.detachTrainer = null;
     this.detachMerchant?.();
     this.detachMerchant = null;
+    this.detachQuest?.();
+    this.detachQuest = null;
+    this.detachLevelUp?.();
+    this.detachLevelUp = null;
     this.interactionWatch?.dispose();
     this.interactionWatch = null;
     this.detachGossip?.();

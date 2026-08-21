@@ -240,6 +240,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
         });
       }
     }
+    revision += 1;
     const same = next.length === entries.length
       && next.every((row, i) => row.isHeader === entries[i].isHeader
         && row.questId === entries[i].questId
@@ -253,6 +254,18 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   const selected = (): LogEntry | null => {
     const row = entryAt(selection);
     return row !== null && !row.isHeader ? row : null;
+  };
+
+  /** The template for an explicit entry index, or for the selection when none is given. */
+  const templateAt = (index?: number): QuestTemplate | null => {
+    const row = entryAt(index === undefined ? selection : index);
+    return row === null || row.isHeader ? null : templateOf(row.questId);
+  };
+
+  /** The descriptor slot for an explicit entry index, or for the selection when none is given. */
+  const slotAt = (index?: number): QuestLogSlot | null => {
+    const row = entryAt(index === undefined ? selection : index);
+    return row === null || row.isHeader ? null : world.player.questLog.get(row.slot) ?? null;
   };
 
   const selectedTemplate = (): QuestTemplate | null => {
@@ -735,6 +748,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   /** `SelectQuestLogEntry(index)` / `GetQuestLogSelection()` -- engine state, see `selection`. */
   fn('SelectQuestLogEntry', (args) => {
     selection = Number(args[0]) || 0;
+    revision += 1;
     return [];
   });
 
@@ -759,20 +773,53 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * objectives with a nonzero count, in that order -- which is the order `GetQuestLogLeaderBoard`
    * indexes and the order the four objective TEXTS belong to.
    */
-  const leaderBoards = (): Array<{
+  interface LeaderBoardRow {
     kind: 'monster' | 'item';
     name: string | null;
     have: number;
     need: number;
-  }> => {
-    const template = selectedTemplate();
-    const slot = selectedSlot();
+  }
+
+  /**
+   * MEMOISED, and this is a performance fix from the self-review rather than a flourish.
+   *
+   * `QuestInfo_ShowObjectives` calls `GetNumQuestLeaderBoards()` once and `GetQuestLogLeaderBoard(i)`
+   * once per objective (`questinfo.lua:112-117`), and the tracker does the same per WATCHED quest. Each
+   * call rebuilt the whole row list, and each item row inside it ran a `vm.runExpr` for `GetItemCount`
+   * -- so a six-objective quest cost 7 rebuilds and 42 VM round trips per repaint. The cache turns that
+   * into one rebuild and six.
+   *
+   * Invalidated by `revision`, which every writer bumps: the descriptor edge, a template landing, a
+   * selection change and a header collapse. A BAG change is covered by the descriptor edge because the
+   * inventory slots are player fields, so `unit:fields` fires for them too -- which is what makes an
+   * item objective un-tick when the item is destroyed.
+   */
+  let revision = 0;
+  let boardCache: { revision: number; index: number; rows: LeaderBoardRow[] } | null = null;
+
+  const leaderBoards = (index?: number): LeaderBoardRow[] => {
+    // `GetNumQuestLeaderBoards([questIndex])` and `GetQuestLogLeaderBoard(i[, questIndex])` BOTH take
+    // an optional entry index, and the objective TRACKER always passes one
+    // (`watchframe.lua:805,839`). Answering the selection's objectives for a watched quest would show
+    // one quest's progress under every other quest's title -- found in the self-review, not live.
+    const at = index === undefined || index === 0 ? selection : index;
+    if (boardCache !== null && boardCache.revision === revision && boardCache.index === at) {
+      return boardCache.rows;
+    }
+    const rows = buildLeaderBoards(at);
+    boardCache = { revision, index: at, rows };
+    return rows;
+  };
+
+  const buildLeaderBoards = (index: number): LeaderBoardRow[] => {
+    const entry = entryAt(index);
+    const target = entry !== null && !entry.isHeader ? entry : null;
+    const template = target === null ? null : templateOf(target.questId);
+    const slot = target === null ? null : world.player.questLog.get(target.slot) ?? null;
     if (template === null) {
       return [];
     }
-    const rows: Array<{
-      kind: 'monster' | 'item'; name: string | null; have: number; need: number;
-    }> = [];
+    const rows: LeaderBoardRow[] = [];
     template.objectives.forEach((objective, i) => {
       if (objective.requiredCount === 0) {
         return;
@@ -807,7 +854,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     return rows;
   };
 
-  fn('GetNumQuestLeaderBoards', () => [leaderBoards().length]);
+  fn('GetNumQuestLeaderBoards', (args) => [leaderBoards(Number(args[0]) || undefined).length]);
 
   /**
    * `GetQuestLogLeaderBoard(index)` -> `text, type, finished`.
@@ -821,7 +868,8 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * resolvable name degrades to `"have/need"`, which is stated in the header.
    */
   fn('GetQuestLogLeaderBoard', (args) => {
-    const row = leaderBoards()[Number(args[0]) - 1];
+    // TWO arguments: the objective index and an OPTIONAL quest-log index. See `leaderBoards`.
+    const row = leaderBoards(Number(args[1]) || undefined)[Number(args[0]) - 1];
     if (row === undefined) {
       return [];
     }
@@ -848,8 +896,8 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * the wall clock -- and it is clamped at 0, because a quest whose timer has run out is a FAILED quest
    * whose slot has not been rewritten yet, not a quest with negative time.
    */
-  fn('GetQuestLogTimeLeft', () => {
-    const expiry = selectedSlot()?.expiry ?? 0;
+  fn('GetQuestLogTimeLeft', (args) => {
+    const expiry = slotAt(Number(args[0]) || undefined)?.expiry ?? 0;
     if (expiry === 0) {
       return [null];
     }
@@ -863,8 +911,9 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * The template's `rewOrReqMoney` is ONE signed field for both directions -- positive is a payout,
    * negative is a cost -- so the requirement is the negated value when it is negative and 0 otherwise.
    */
-  fn('GetQuestLogRequiredMoney', () => {
-    const money = selectedTemplate()?.money ?? 0;
+  fn('GetQuestLogRequiredMoney', (args) => {
+    // Takes an OPTIONAL entry index -- the tracker passes one (`watchframe.lua:804`).
+    const money = templateAt(Number(args[0]) || undefined)?.money ?? 0;
     return [money < 0 ? -money : 0];
   });
 
@@ -908,8 +957,10 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     const template = items.template(row.itemId);
     const icon = iconForEntry(row.itemId);
     if (icon !== null) {
+      // REGISTER ONLY. `art.load()` used to be here and that was a promise per row per repaint -- the
+      // sink that actually fetches a late path is `ui/runtime-art.ts`, and the batch loads happen on
+      // the panel and template edges below. Self-review fix.
       art.register(icon, { path: icon });
-      void art.load();
     }
     return [template?.name ?? null, icon, row.count, template?.quality ?? 1, true];
   };
@@ -1152,6 +1203,108 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   );
   fn('GetMapInfo', () => mapGap(null as never, 0, []));
   fn('GetCurrentMapDungeonLevel', () => [0]);
+
+  // -- THE OBJECTIVE TRACKER ----------------------------------------------------------------------
+
+  /**
+   * **`WatchFrame` IS ON THE QUEST LOG'S PAINT PATH, AND THESE WERE MISSING.** Found by sweeping
+   * `watchframe.lua` in the self-review, not live -- and it is the same class of defect as
+   * `GetMapInfo` above: `QuestLog_Update` ends in `WatchFrame_Update()`, `WatchFrame_Update` calls
+   * `GetCurrentMapZone()` unconditionally before its handler loop (`watchframe.lua:789`), and its
+   * handlers run in the order "quest timers, achievements, quests" (`:354`) -- so a nil global in
+   * ANY of the first two aborts the loop before the quest tracker runs.
+   *
+   * Three of these are REAL answers rather than gaps:
+   *
+   *  - `GetQuestTimers()` returning nothing makes `WatchFrame_DisplayQuestTimers` take its
+   *    `numTimers == 0` early return (`:472-483`). No quest in the log has a timer unless its slot
+   *    carries an expiry, and the timed-quest tracker is a separate display from the log's own timer
+   *    line, which `GetQuestLogTimeLeft` already answers.
+   *  - `GetTrackedAchievements()` returning nothing is TRUE: no achievement feed is decoded, so none
+   *    is tracked. It is registered here only because it sits between the timers and the quests in
+   *    that handler list; the achievement subsystem is not this file's.
+   *  - The watch family is real state -- `watched` already holds it.
+   */
+  const watchOrder = (): number[] => entries
+    .map((row, i) => (!row.isHeader && watched.has(row.questId) ? i + 1 : 0))
+    .filter((index) => index !== 0);
+
+  /** `GetQuestIndexForWatch(watchIndex)` -> the quest log ENTRY index, or nil. */
+  fn('GetQuestIndexForWatch', (args) => {
+    const index = watchOrder()[Number(args[0]) - 1];
+    return [index === undefined ? null : index];
+  });
+
+  /** `GetQuestWatchIndex(questLogIndex)` -> the watch index, or nil. The inverse of the above. */
+  fn('GetQuestWatchIndex', (args) => {
+    const at = watchOrder().indexOf(Number(args[0]));
+    return [at < 0 ? null : at + 1];
+  });
+
+  /**
+   * `SortQuestWatches()` / `ShiftQuestWatches(...)` -- ordering the tracker's rows.
+   *
+   * No-ops, and the consequence is stated: `watchOrder` returns watches in QUEST LOG order, which is
+   * a stable order and the one the log itself shows. The real engine keeps a separate user-draggable
+   * order; nothing stores it here, so there is nothing to sort or shift.
+   */
+  fn('SortQuestWatches', () => []);
+  fn('ShiftQuestWatches', () => []);
+
+  /** `GetQuestSortIndex(questIndex)` -- the row's header group. 0 is "no special sort". */
+  fn('GetQuestSortIndex', () => [0]);
+
+  /**
+   * `GetQuestLogCompletionText(questIndex)` -- the "return to X" line the tracker shows on a quest
+   * that is ready to turn in. The template's fifth string, which is WotLK's own addition to
+   * `SMSG_QUEST_QUERY_RESPONSE` and empty on most quests -- so nil rather than "" for the empty case,
+   * because the tracker tests it for truth.
+   */
+  fn('GetQuestLogCompletionText', (args) => {
+    const text = templateAt(Number(args[0]) || undefined)?.completedText ?? '';
+    return [text === '' ? null : text];
+  });
+
+  /** See the block comment: nothing, and both are TRUE answers rather than stubs. */
+  fn('GetQuestTimers', () => []);
+  fn('GetQuestIndexForTimer', () => [null]);
+  fn('GetTrackedAchievements', () => []);
+  fn('GetNumTrackedAchievements', () => [0]);
+
+  /**
+   * The quest-item button on a tracker row -- the "use this to complete the quest" icon.
+   *
+   * A DECLARED GAP. The item is the template's `srcItemId`, but whether it is USABLE and whether it is
+   * in range are both engine questions with no feed here, and answering nothing keeps the button
+   * hidden rather than showing one that does nothing.
+   */
+  const specialItemGap = notImplemented(
+    'GetQuestLogSpecialItemInfo',
+    'a quest item button needs a usability and range answer that nothing here decodes',
+    [],
+  );
+  fn('GetQuestLogSpecialItemInfo', () => specialItemGap(null as never, 0, []));
+  fn('GetQuestLogSpecialItemCooldown', () => []);
+  fn('IsQuestLogSpecialItemInRange', () => [null]);
+  fn('UseQuestLogSpecialItem', () => []);
+
+  /** `QuestLogPushQuest()` -- the Share button's send. False from `GetQuestLogPushable` keeps the
+   * button hidden, so this is unreachable; registered so a hidden path cannot raise. */
+  fn('QuestLogPushQuest', () => []);
+
+  /**
+   * The quest POI (point-of-interest) family, and `GetCurrentMapZone`/`SetMapToCurrentZone`.
+   *
+   * All world-map globals, all on the tracker's unconditional path, none of them this file's subject
+   * -- registered for `GetMapInfo`'s reason exactly. `GetCurrentMapZone` answering 0 is the client's
+   * own "no zone selected" value and `WatchFrame_Update` uses it only as a table key.
+   */
+  fn('GetCurrentMapZone', () => [0]);
+  fn('SetMapToCurrentZone', () => []);
+  fn('QuestMapUpdateAllQuests', () => []);
+  fn('QuestPOIGetQuestIDByVisibleIndex', () => [0]);
+  fn('GetQuestIDByVisibleIndex', () => [0]);
+  fn('GetNumQuestPOIs', () => [0]);
 
   // -- The "questnpc" unit token ------------------------------------------------------------------
 
