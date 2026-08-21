@@ -68,6 +68,8 @@ import { notImplemented } from './framexml/lua/methods/region';
 import { fireEvent } from './framexml/lua/events';
 import { emptySnapshot, getUnit, setUnit } from './framexml/lua/api/units';
 import { snapshotOf } from './unit-bridge';
+import { resolveUnitToken } from '../world/unit-tokens';
+import type Unit from '../classes/unit';
 import { REACTION_FRIENDLY } from '../world/faction';
 import { spellData } from '../pipeline/dbc/spell-data';
 
@@ -219,6 +221,36 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
   const onDuelIn = () => fireEvent(vm, 'DUEL_INBOUNDS');
   const onDifficulty = () => fireEvent(vm, 'PLAYER_DIFFICULTY_CHANGED');
   const onInstanceReset = () => fireEvent(vm, 'UPDATE_INSTANCE_INFO');
+
+  /**
+   * KEEP THE FOCUS SNAPSHOT LIVE while its unit changes.
+   *
+   * `unit-bridge.ts`'s own `onFields` pushes `player` and `target` and says in its header that `focus`
+   * is not pushed "because there is no focus in this client" -- true when it was written, false now. It
+   * is done here rather than there because this bridge is the one that owns the focus and knows which
+   * entity it is; adding a third arm over there would need it to import that knowledge back.
+   *
+   * Gated on identity, so a field change on any other unit costs one reference comparison. The events
+   * fired are the diff, not the whole set: `TargetFrame_OnEvent` re-reads on each, so firing all of
+   * them on every packet would run the frame's handler several times for one change.
+   */
+  const onFocusFields = (unit: Unit): void => {
+    if (world.focus === null || unit !== world.focus) {
+      return;
+    }
+    const before = getUnit(vm, 'focus');
+    const after = snapshotOf(unit, world.player);
+    setUnit(vm, 'focus', after);
+    if (before === null) {
+      return;
+    }
+    if (after.health !== before.health) fireEvent(vm, 'UNIT_HEALTH', ['focus']);
+    if (after.maxHealth !== before.maxHealth) fireEvent(vm, 'UNIT_MAXHEALTH', ['focus']);
+    if (after.power !== before.power) fireEvent(vm, 'UNIT_MANA', ['focus']);
+    if (after.level !== before.level) fireEvent(vm, 'UNIT_LEVEL', ['focus']);
+    if (after.reaction !== before.reaction) fireEvent(vm, 'UNIT_FACTION', ['focus']);
+  };
+  world.on('unit:fields', onFocusFields);
 
   group.on('rosterChanged', onRoster);
   group.on('inviteRequest', onInvite);
@@ -667,25 +699,44 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
    * `UnitExists("focus")` exactly as `TargetFrame` does off `"target"`.
    */
   /**
-   * SELF-REVIEW, DECLARED RATHER THAN FIXED: the focus is a SNAPSHOT TAKEN AT THE MOMENT OF SETTING
-   * and does not follow the unit afterwards.
+   * `FocusUnit(unit)` / `ClearFocus()` -- SET_FOCUS and CLEAR_FOCUS, the FIRST entry of most menus in
+   * the file (12 of the 25 open with one of them, `unitpopup.lua:138-155`).
    *
-   * `setUnit` stores the object it is handed, and `getUnit` hands back the token's live object, so
-   * `focus` and `target` share one snapshot until `target` is replaced -- after which `focus` keeps the
-   * old values. So a focused unit's health bar freezes where it was. Making it track would mean
-   * re-snapshotting on `world.on('unit:fields')` for whichever entity the focus names, which is a
-   * per-unit subscription this bridge does not own and the unit bridge does. Named here rather than
-   * left to be discovered: the focus FRAME appears with the right unit, and its numbers are as of the
-   * click.
+   * THE FOCUS IS TWO THINGS AND BOTH ARE WRITTEN HERE, because this is the only site that knows both.
+   *
+   *  1. THE SNAPSHOT, for `UnitExists("focus")` and every `Unit*` the frame reads. No packet is
+   *     involved -- the focus is a pure client concept -- so writing the snapshot IS the implementation,
+   *     and `FocusFrame` (`targetframe.xml:658`) shows itself off `UnitExists("focus")` exactly as
+   *     `TargetFrame` does off `"target"`.
+   *  2. THE ENTITY, on `World#focus`, for the PORTRAIT. `world/unit-tokens.ts` resolves a token to a
+   *     body so the booth can bake a face, and it cannot resolve this one on its own: `focus` is set
+   *     from ANOTHER TOKEN's snapshot, and a snapshot deliberately carries no guid
+   *     (`framexml/lua/api/units.ts:11`). So the entity is known only here, at the moment of the click.
+   *     Without this the `FocusFrame` portrait resolved to nothing and drew nothing.
+   *
+   * **THE ENTITY IS THE LIVE ONE AND THE SNAPSHOT NOW FOLLOWS IT. That is the client's own behaviour,
+   * not a choice of ours**, and it retires the frozen-snapshot limitation an earlier self-review of
+   * mine declared: `FocusFrame` inherits `TargetFrameTemplate`, whose `OnLoad` registers `UNIT_HEALTH`,
+   * `UNIT_LEVEL`, `UNIT_FACTION`, `UNIT_AURA` and `UNIT_CLASSIFICATION_CHANGED`
+   * (`targetframe.lua:63-78`), with three more added on `FocusFrame` itself (`:1045-1047`). A frame
+   * that registers those and never receives them is a frame whose bars lie, so `onFocusFields` below
+   * re-pushes the snapshot while the focused unit lives.
    */
   fn('FocusUnit', (args) => {
     const token = typeof args[0] === 'string' ? args[0] : null;
+    // The SNAPSHOT is copied from the source token rather than re-derived, so `focus` says exactly what
+    // the frame the player clicked said at that instant.
     setUnit(vm, 'focus', token === null ? null : getUnit(vm, token));
+    // The ENTITY, through the one resolver, which lowercases for us -- `SET_FOCUS` passes whatever the
+    // dropdown's `unit` field holds (`"player"`, `"target"`, a party token) and case is not ours to
+    // police.
+    world.focus = token === null ? null : resolveUnitToken(token, world);
     fireEvent(vm, 'PLAYER_FOCUS_CHANGED');
     return [];
   });
   fn('ClearFocus', () => {
     setUnit(vm, 'focus', null);
+    world.focus = null;
     fireEvent(vm, 'PLAYER_FOCUS_CHANGED');
     return [];
   });
@@ -883,6 +934,9 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
   }
 
   return () => {
+    world.removeListener('unit:fields', onFocusFields);
+    // The focus does not outlive the bridge that owns it.
+    world.focus = null;
     group.off('rosterChanged', onRoster);
     group.off('inviteRequest', onInvite);
     group.off('inviteDeclined', onDeclined);

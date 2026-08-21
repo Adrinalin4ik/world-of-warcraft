@@ -649,6 +649,20 @@ export default class World extends EventEmitter {
    */
   private readonly hoverHighlight = new HoverHighlight();
 
+  /**
+   * The FOCUSED entity, or null -- the body behind the `focus` unit token.
+   *
+   * Written only by `ui/group-bridge.ts#FocusUnit`/`ClearFocus`, because `focus` is a pure client
+   * concept set from another token's SNAPSHOT and a snapshot carries no guid by design
+   * (`framexml/lua/api/units.ts:11`). `world/unit-tokens.ts` reads it so a portrait can be baked for
+   * `FocusFrame`; without it that portrait resolved to nothing and drew nothing.
+   *
+   * Plain and public rather than the getter/setter pair `hovered` has: nothing inside `World` derives
+   * from a focus change -- the lighting and ring legs that make `hovered` interesting have no focus
+   * counterpart -- so a setter would be ceremony.
+   */
+  public focus: Unit | null = null;
+
   /** Backing field for `hovered`. */
   private _hovered: Unit | null = null;
 
@@ -756,6 +770,14 @@ export default class World extends EventEmitter {
     // keep painting a unit that is no longer in the scene, and `TargetFrame` would never hide.
     if (this.target === entity) {
       this.setTarget(null);
+    }
+    // AND THE SAME FOR THE FOCUS. `focus` is the only token whose ENTITY this class holds across
+    // streaming, so a despawned focus would leave `unit-tokens.ts` resolving a body no longer in the
+    // scene and the booth baking a portrait of it. The Lua-side snapshot is deliberately left alone:
+    // `FocusFrame` hides itself off `UnitExists("focus")`, which is the bridge's business, and clearing
+    // that from here would need a VM this class does not hold.
+    if (this.focus === entity) {
+      this.focus = null;
     }
     this.entities.delete(entity.guid);
     if (entity.view) {

@@ -46,6 +46,12 @@ export interface TokenWorld {
   target: Unit | null;
   entities: Map<string, Unit>;
   hovered?: Unit | null;
+  /**
+   * The focused entity, or null. Written by `ui/group-bridge.ts#FocusUnit` -- the one site that knows
+   * it, because `focus` is set from ANOTHER TOKEN's snapshot and a snapshot carries no guid by design.
+   * Shaped exactly like `hovered` above for the same reason: the world holds it, this file reads it.
+   */
+  focus?: Unit | null;
   game?: {
     objectHandler?: {
       gossipHandler?: { source: string | null };
@@ -82,11 +88,14 @@ function npcGuid(world: TokenWorld): string | null {
  *
  * WHAT IS NOT HERE, named rather than silently answered:
  *
- *  - **`focus`.** It is a pure client concept with no packet (`ui/group-bridge.ts:665`) and it is set
- *    from ANOTHER TOKEN's snapshot, so the entity behind it is only known at the moment
- *    `SetFocus` runs. Resolving it needs one call from that site -- `world.aliasUnitToken('focus',
- *    token)` or equivalent -- and that file belongs to another agent this round. Until then a
- *    `FocusFrame` portrait resolves to nothing and draws nothing.
+ *  - **`focus` IS ANSWERED NOW**, and the call this comment asked for exists: `FocusUnit` resolves the
+ *    token it is given to an entity and stores it on `World#focus`, which is read below. It is set from
+ *    another token's snapshot and a snapshot carries no guid, so that site is the only one that can
+ *    know it. **The LIVE entity, not a frozen one, and that is the client's own behaviour rather than
+ *    our choice**: `FocusFrame` inherits `TargetFrameTemplate`, whose `OnLoad` registers `UNIT_HEALTH`,
+ *    `UNIT_LEVEL`, `UNIT_FACTION`, `UNIT_AURA` and `UNIT_CLASSIFICATION_CHANGED`
+ *    (`targetframe.lua:63-78`), plus three more on `FocusFrame` itself (`:1045-1047`) -- so the real
+ *    client's focus frame tracks its unit as it changes.
  *  - **`pet`, `party1..4`, `raid*`, `targettarget`.** `api/units.ts` records that this client does not
  *    track them at all, so there is no entity to find. The pet pane is on the same list.
  *  - **`mouseover`.** Answered, because the hover pick already resolves it for the cursor and the
@@ -104,6 +113,8 @@ export function resolveUnitToken(token: string, world: TokenWorld | null): Unit 
       return world.target ?? null;
     case 'mouseover':
       return world.hovered ?? null;
+    case 'focus':
+      return world.focus ?? null;
     case 'npc': {
       const guid = npcGuid(world);
       return guid === null ? null : world.entities.get(guid) ?? null;
