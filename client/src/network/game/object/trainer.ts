@@ -39,14 +39,22 @@
  * **The 1.12 reference is NOT used**: the merchant round on this project found it silently wrong about
  * four numbers, so it is not consulted for a body here at all.
  *
- * **NO REAL PACKET HAS BEEN DECODED YET, AND THE UNIT TEST DOES NOT CHANGE THAT.** The world was
- * unreachable for this round (the test account returned zero characters), so the 38-byte stride has
- * never met a live `SMSG_TRAINER_LIST`. `__tests__/trainer-wire.test.ts` builds its body from the SAME
- * widths this file reads, so it proves self-consistency and the empty-greeting terminator and nothing
- * about 3.3.5a. **The first real trainer settles it in one reading:** a `TRAINER_LIST` row in
- * `window.spellWire.history()` whose `consumed` equals its `bodySize`, or a `TRAINER_LIST!THREW`. A
- * wrong stride cannot hide -- the trailing greeting would come out as garbage or the read would run off
- * the frame -- which is exactly why the greeting is the last field and is checked.
+ * **THE STRIDE IS CORROBORATED BY THE OWNER'S OWN TEST, BUT THE RESIDUAL IS STILL UNMEASURED, and
+ * those are different claims.**
+ *
+ * He opened a real trainer and reported the list populated with real ability names and "все описания на
+ * месте". That is genuine evidence about the 38-byte stride and it is stronger than the unit test: a
+ * wrong stride misaligns every `spellId` after the first, so the names and descriptions would be wrong
+ * or absent from row 2 down, and they were not. It is NOT a residual, and it does not replace one --
+ * two compensating errors could still cancel.
+ *
+ * `__tests__/trainer-wire.test.ts` builds its body from the SAME widths this file reads, so it proves
+ * self-consistency and the empty-greeting terminator and **cannot catch a wrong width**; that is a
+ * project rule now, because a wrong width is this codebase's most repeated defect and every instance was
+ * silent. The instrument does that job instead -- see `record`, whose `residualPerRow` says whether a
+ * nonzero remainder is a per-row error or a header/trailer one. **One reading of a live
+ * `SMSG_TRAINER_LIST` closes it:** `consumed == bodySize` in `window.spellWire.history()`, and a
+ * legible greeting as the second signal, since the greeting is the last field.
  *
  * **THE ROW IS SELF-CHECKING AND THAT IS WHY IT CAN BE TRUSTED.** The layout below is
  * `4+1+4+4+4+1+4+4+4*3 = 38` bytes, and the server's own packet reserve is
@@ -86,12 +94,20 @@
  * The learned spell itself arrives separately, on `SMSG_LEARNED_SPELL` / `SMSG_SUPERCEDED_SPELL`, which
  * `spells.ts` decodes -- that is what puts the new ability in the spellbook.
  *
- * ## NOT VERIFIED LIVE: THE BUY
+ * ## THE BUY: THE SEND IS OWNER-CONFIRMED, THE TWO REPLIES ARE NOT
  *
- * Reading a trainer's list is free; buying is the owner's gold. The list arm is exercised on a real
- * trainer and its residual recorded. `CMSG_TRAINER_BUY_SPELL`, `SMSG_TRAINER_BUY_SUCCEEDED` and
- * `SMSG_TRAINER_BUY_FAILED` are IMPLEMENTED AND UNEXERCISED, and `spellWire` will carry the first real
- * one. Said plainly rather than counted as done.
+ * This round refused to exercise the purchase -- reading a list is free, buying is the owner's gold --
+ * and the owner then did it himself: **"у меня получилось выучить способность"**. So
+ * `CMSG_TRAINER_BUY_SPELL` at **12 bytes** was accepted by a real server, which is precisely the width
+ * `STATE.md`'s rule says to suspect first, and it holds.
+ *
+ * **`SMSG_TRAINER_BUY_SUCCEEDED` and `SMSG_TRAINER_BUY_FAILED` are still self-consistent only, and the
+ * successful learn does NOT distinguish them.** If the success reply had failed to decode the window
+ * would have refreshed anyway: `spellsChanged` fires off `SMSG_LEARNED_SPELL` and re-fires
+ * `TRAINER_UPDATE` independently of this opcode (`ui/trainer-bridge.ts`), so "it looked right
+ * afterwards" cannot separate the two paths. The free check is the ABSENCE of a console line: `subscribe`
+ * logs `trainer: SMSG_TRAINER_BUY_SUCCEEDED did not decode` on a throwing arm, so the next purchase
+ * confirms it at no cost. Said plainly rather than counted as done.
  */
 import EventEmitter from 'events';
 
@@ -430,7 +446,9 @@ export class TrainerHandler extends EventEmitter {
    * `TRAINER_BUY_SENT` in `window.spellWire.history()` with no `TRAINER_BUY_SUCCEEDED` and no
    * `TRAINER_BUY_FAILED` after it is the signature of a discarded frame, not of a refused purchase.
    *
-   * IMPLEMENTED AND UNEXERCISED: see the header on why the buy was not tested.
+   * **OWNER-CONFIRMED on real traffic** -- he learned a spell -- so the 12 bytes are right and this is
+   * no longer the unexercised arm the header used to call it. The two REPLIES are still only
+   * self-consistent; see the header on why a successful learn cannot distinguish them.
    */
   buy(spellId: number): void {
     const guid = this.source;
