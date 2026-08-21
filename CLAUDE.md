@@ -220,6 +220,10 @@ A comment that invents a source, or that still describes a gap now closed, is tr
 - **`python` works; `python3` does NOT.** `python --version` is 3.13.5, while `python3` hits the Windows
   Microsoft-Store alias stub and prints an install advert to stdout -- which looks like a broken script,
   not a missing binary. Two people lost time to this in one session. `py` is absent too.
+- **The asset host is CASE-SENSITIVE.** `Spells/LevelUp/LevelUp.m2` 404s where the all-lowercase path
+  answers 200. The client`s own files name paths in mixed case with backslashes, so a lookup that does
+  not lowercase looks exactly like a missing asset — and a 404 returns an HTML page, which downstream
+  code then fails to *decode*, naming the wrong subsystem twice over.
 - Game data: `https://data-direct.spelunkerdb.com/12340` — the host rejects some user agents, so use
   `curl`, not urllib.
 - Never write credentials into a committed file; pass them via argv.
