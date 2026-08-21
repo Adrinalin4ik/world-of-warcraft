@@ -477,10 +477,10 @@ export function applyUnitFields(
   // combat ratings. Merged rather than replaced, because an update mask is sparse and one point of
   // agility moves one word; see `character-stats.ts` on why that differs from `readSpellDamage` below.
   // `values` is the same map this function was handed and otherwise discards.
-  mergeCharacterStats(unit.characterStats, values, type);
+  changed = mergeCharacterStats(unit.characterStats, values, type) || changed;
   // THE SKILLS BLOCK -- 128 triples, merged per slot for the same sparse-mask reason. Player-scope, so
   // `mergePlayerSkills` returns immediately for a creature. See `player-skills.ts`.
-  mergePlayerSkills(unit.skills, values, type);
+  changed = mergePlayerSkills(unit.skills, values, type) || changed;
   // THE QUEST LOG'S SLOTS -- 25 five-word slots, merged per slot for the same sparse-mask reason.
   // Player-scope, so `mergeQuestLog` returns immediately for a creature. `quest-log.ts`' header is
   // where the "packets versus descriptor" question is answered: this block is the log's membership and
@@ -501,11 +501,12 @@ export function applyUnitFields(
   // tree: no World, no descriptor, no bridges. It validates the client's Lua and our layout, which is
   // exactly where the fixes that DID land live -- and it cannot see a data path at all.
   //
-  // `mergeQuestLog` is the only one of the three block merges that reports a change;
-  // `mergeCharacterStats` and `mergePlayerSkills` return their containers. **The same silence is latent
-  // for them**: a lone skill-point tick or a lone stat change writes only its own words, so it too
-  // would fire no event. Named rather than fixed here -- those blocks belong to the character panel and
-  // its bridges may repaint on other edges -- but it is the same defect waiting.
+  // ALL THREE block merges now report a change, and the other two were the same defect waiting. They
+  // returned their containers -- truthy, so read as a flag they would say "always changed", and
+  // discarded they said "never" -- and a lone skill-point tick or a lone stat change writes only its own
+  // words, so neither fired an event. Fixed in `character-stats.ts` and `player-skills.ts`, and the flag
+  // each returns is a real comparison against the stored value rather than "a word arrived": a create
+  // block resends every stat a character has, so gating on arrival would fire on every create.
   changed = mergeQuestLog(unit.questLog, values, type) || changed;
 
   // SPELL POWER is seven numbers and lives beside `fields`, not in it -- see `SPELL_SCHOOL_COUNT`.

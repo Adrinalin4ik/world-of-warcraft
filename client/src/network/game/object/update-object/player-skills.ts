@@ -75,16 +75,23 @@ export function emptySkills(): Map<number, SkillSlot> {
  * A slot whose id word arrives as 0 is DELETED from the map rather than stored: that is how the server
  * says a skill is gone, and leaving a zero-id entry would put a nameless row in the list.
  *
- * Returns the same map it was given, mutated -- the caller owns it (it hangs off the `Unit`).
+ * Mutates the map it was given -- the caller owns it (it hangs off the `Unit`).
+ *
+ * **Returns WHETHER ANYTHING CHANGED, and it used to return the map.** Same reason as
+ * `character-stats.ts#mergeCharacterStats`: `readUnitFields` or-s this into the flag
+ * `update-object/handler.ts:267,381` gates `world.emit('unit:fields', unit)` on, and a skill-point tick
+ * writes only its own slot's words. With the map returned instead, that packet fired no event and the
+ * Skills tab kept the previous reading until something else moved.
  */
 export function mergePlayerSkills(
   into: Map<number, SkillSlot>,
   values: Record<string, number>,
   type: ObjectType,
-): Map<number, SkillSlot> {
+): boolean {
   if (type !== ObjectType.Player) {
-    return into;
+    return false;
   }
+  let changed = false;
   const at = (index: number): number | undefined => {
     const raw = values[getUpdateFieldName(index, type)];
     return typeof raw === 'number' ? raw : undefined;
@@ -102,7 +109,9 @@ export function mergePlayerSkills(
       continue;
     }
     if (idWord !== undefined && low(idWord) === 0) {
-      into.delete(slot);
+      // `delete` answers whether the slot was actually there, which is the change: a zero id for a slot
+      // we never held is the server describing an empty slot, not a skill being unlearned.
+      changed = into.delete(slot) || changed;
       continue;
     }
     const existing = into.get(slot);
@@ -126,7 +135,13 @@ export function mergePlayerSkills(
       // the name comes from the id. Dropped rather than kept as a nameless row.
       continue;
     }
+    if (existing === undefined
+      || existing.id !== next.id || existing.step !== next.step
+      || existing.value !== next.value || existing.max !== next.max
+      || existing.tempBonus !== next.tempBonus || existing.permBonus !== next.permBonus) {
+      changed = true;
+    }
     into.set(slot, next);
   }
-  return into;
+  return changed;
 }

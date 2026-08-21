@@ -126,14 +126,23 @@ const SCRATCH_F32 = new Float32Array(SCRATCH_U32.buffer);
  * (`enums.ts`), so a creature's update contributes only the unit-scope half -- which is correct, and is
  * the same reason `readUnitFields` passes the type through.
  *
- * Returns the SAME object it was given, mutated. The caller owns it (it hangs off the `Unit`), and a
- * fresh object per packet would make "unchanged means keep" impossible to express.
+ * Mutates the object it was given -- the caller owns it (it hangs off the `Unit`), and a fresh object
+ * per packet would make "unchanged means keep" impossible to express.
+ *
+ * **Returns WHETHER ANYTHING CHANGED, and it used to return the container.** `readUnitFields` or-s this
+ * into the `changed` flag that `update-object/handler.ts:267,381` gates `world.emit('unit:fields', unit)`
+ * on, so a container return read as truthy or discarded means a packet carrying ONLY stat words fires no
+ * event and every consumer that rebuilds on that edge keeps its previous answer. That is exactly what
+ * cost the quest log its rows when `mergeQuestLog`'s boolean was discarded, and this block was the same
+ * defect waiting -- named in `unit-fields.ts`' own comment before it was fixed. A stat change with no
+ * health tick beside it is the ordinary case on the character sheet: one point of agility from a buff
+ * falling off writes one word.
  */
 export function mergeCharacterStats(
   into: CharacterStats,
   values: Record<string, number>,
   type: ObjectType,
-): CharacterStats {
+): boolean {
   /**
    * One descriptor word by INDEX, or undefined.
    *
@@ -146,60 +155,77 @@ export function mergeCharacterStats(
     const raw = values[getUpdateFieldName(index, type)];
     return typeof raw === 'number' ? raw : undefined;
   };
-  const int = (index: number, write: (value: number) => void): void => {
+  /**
+   * Both writers take a READER as well, and that is what makes the return value a real changed flag
+   * rather than "a word arrived". An update mask is sparse but not minimal -- a full create block resends
+   * every stat a character has -- so gating the event on arrival alone would fire on every create and
+   * teach the bridges nothing.
+   */
+  let changed = false;
+  const int = (index: number, read: () => number, write: (value: number) => void): void => {
     const raw = at(index);
-    if (raw !== undefined) {
-      write(raw | 0);
+    if (raw === undefined) {
+      return;
+    }
+    const next = raw | 0;
+    if (read() !== next) {
+      write(next);
+      changed = true;
     }
   };
-  const float = (index: number, write: (value: number) => void): void => {
+  const float = (index: number, read: () => number, write: (value: number) => void): void => {
     const raw = at(index);
-    if (raw !== undefined) {
-      SCRATCH_U32[0] = raw >>> 0;
-      write(SCRATCH_F32[0]);
+    if (raw === undefined) {
+      return;
+    }
+    SCRATCH_U32[0] = raw >>> 0;
+    const next = SCRATCH_F32[0];
+    if (read() !== next) {
+      write(next);
+      changed = true;
     }
   };
 
   for (let i = 0; i < STAT_COUNT; i += 1) {
-    int(UnitField.unit_field_stat0 + i, (v) => { into.stats[i] = v; });
-    int(UnitField.unit_field_posstat0 + i, (v) => { into.statsPos[i] = v; });
-    int(UnitField.unit_field_negstat0 + i, (v) => { into.statsNeg[i] = v; });
+    int(UnitField.unit_field_stat0 + i, () => into.stats[i], (v) => { into.stats[i] = v; });
+    int(UnitField.unit_field_posstat0 + i, () => into.statsPos[i], (v) => { into.statsPos[i] = v; });
+    int(UnitField.unit_field_negstat0 + i, () => into.statsNeg[i], (v) => { into.statsNeg[i] = v; });
   }
   for (let i = 0; i < RESISTANCE_COUNT; i += 1) {
-    int(UnitField.unit_field_resistances_armor + i, (v) => { into.resistances[i] = v; });
+    int(UnitField.unit_field_resistances_armor + i, () => into.resistances[i], (v) => { into.resistances[i] = v; });
     int(UnitField.unit_field_resistancebuffmodspositive_armor + i,
-      (v) => { into.resistPos[i] = v; });
+      () => into.resistPos[i], (v) => { into.resistPos[i] = v; });
     int(UnitField.unit_field_resistancebuffmodsnegative_armor + i,
-      (v) => { into.resistNeg[i] = v; });
+      () => into.resistNeg[i], (v) => { into.resistNeg[i] = v; });
   }
 
-  float(UnitField.unit_field_mindamage, (v) => { into.minDamage = v; });
-  float(UnitField.unit_field_maxdamage, (v) => { into.maxDamage = v; });
-  float(UnitField.unit_field_minoffhanddamage, (v) => { into.minOffhandDamage = v; });
-  float(UnitField.unit_field_maxoffhanddamage, (v) => { into.maxOffhandDamage = v; });
-  float(UnitField.unit_field_minrangeddamage, (v) => { into.minRangedDamage = v; });
-  float(UnitField.unit_field_maxrangeddamage, (v) => { into.maxRangedDamage = v; });
+  float(UnitField.unit_field_mindamage, () => into.minDamage, (v) => { into.minDamage = v; });
+  float(UnitField.unit_field_maxdamage, () => into.maxDamage, (v) => { into.maxDamage = v; });
+  float(UnitField.unit_field_minoffhanddamage, () => into.minOffhandDamage, (v) => { into.minOffhandDamage = v; });
+  float(UnitField.unit_field_maxoffhanddamage, () => into.maxOffhandDamage, (v) => { into.maxOffhandDamage = v; });
+  float(UnitField.unit_field_minrangeddamage, () => into.minRangedDamage, (v) => { into.minRangedDamage = v; });
+  float(UnitField.unit_field_maxrangeddamage, () => into.maxRangedDamage, (v) => { into.maxRangedDamage = v; });
 
   if (type !== ObjectType.Player) {
-    return into;
+    return changed;
   }
 
-  float(PlayerField.player_block_percentage, (v) => { into.blockPercent = v; });
-  float(PlayerField.player_dodge_percentage, (v) => { into.dodgePercent = v; });
-  float(PlayerField.player_parry_percentage, (v) => { into.parryPercent = v; });
-  float(PlayerField.player_crit_percentage, (v) => { into.critPercent = v; });
-  float(PlayerField.player_ranged_crit_percentage, (v) => { into.rangedCritPercent = v; });
-  float(PlayerField.player_offhand_crit_percentage, (v) => { into.offhandCritPercent = v; });
+  float(PlayerField.player_block_percentage, () => into.blockPercent, (v) => { into.blockPercent = v; });
+  float(PlayerField.player_dodge_percentage, () => into.dodgePercent, (v) => { into.dodgePercent = v; });
+  float(PlayerField.player_parry_percentage, () => into.parryPercent, (v) => { into.parryPercent = v; });
+  float(PlayerField.player_crit_percentage, () => into.critPercent, (v) => { into.critPercent = v; });
+  float(PlayerField.player_ranged_crit_percentage, () => into.rangedCritPercent, (v) => { into.rangedCritPercent = v; });
+  float(PlayerField.player_offhand_crit_percentage, () => into.offhandCritPercent, (v) => { into.offhandCritPercent = v; });
   for (let school = 0; school < RESISTANCE_COUNT; school += 1) {
     float(PlayerField.player_spell_crit_percentage1 + school,
-      (v) => { into.spellCritPercent[school] = v; });
+      () => into.spellCritPercent[school], (v) => { into.spellCritPercent[school] = v; });
   }
-  int(PlayerField.player_expertise, (v) => { into.expertise = v; });
-  int(PlayerField.player_offhand_expertise, (v) => { into.offhandExpertise = v; });
-  int(PlayerField.player_shield_block, (v) => { into.shieldBlock = v; });
+  int(PlayerField.player_expertise, () => into.expertise, (v) => { into.expertise = v; });
+  int(PlayerField.player_offhand_expertise, () => into.offhandExpertise, (v) => { into.offhandExpertise = v; });
+  int(PlayerField.player_shield_block, () => into.shieldBlock, (v) => { into.shieldBlock = v; });
   for (let rating = 0; rating < COMBAT_RATING_COUNT; rating += 1) {
     int(PlayerField.player_field_combat_rating_1 + rating,
-      (v) => { into.combatRatings[rating] = v; });
+      () => into.combatRatings[rating], (v) => { into.combatRatings[rating] = v; });
   }
-  return into;
+  return changed;
 }
