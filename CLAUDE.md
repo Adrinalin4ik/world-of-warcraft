@@ -307,6 +307,18 @@ recent round.
 - `model.scale.setScalar()` is **inert** under `matrixAutoUpdate = false`.
 - three's `projectObject` returns before walking children when `visible === false`.
 - Guids: a 64-bit guid does not survive a JS number. `network/guid-hex.ts` is the single formatter.
+- **Every orientation defect here has been TWO CONVENTIONS MEETING, never a wrong texture — three for
+  three — and none was fixed by negating a coordinate.** The loading screen came out upside down
+  because `flipY = false` and a Y-down camera cancelled; the micro-button portrait because a widget's
+  authored `TexCoords` outranked the `FLIP_V` given to `adopt`; the cursor icon because it drew an
+  uploaded BLP through the **framebuffer** camera (Y-up, correct for drawing a render target) instead
+  of the interface's own (Y-down, where an uploaded BLP is upright with three's default UVs). Each fix
+  adopted the right camera or composed the two crops. **Negating a UV would have looked right and
+  disagreed with every other texture path in the renderer.**
+- **An in-flight/dedupe set must release on the FAILURE path too.** A thrown template decode left its
+  id in `queried` for ever, so that quest could never be asked for again — a permanent silent failure
+  from one bad packet. Put the release in a `finally`. That is the second time a dedupe set has hidden
+  a defect here.
 - A `#pragma glslify: import(...)` chunk is invisible to webpack's watcher.
 - **No backticks inside `lua/compat.ts`'s 5.1 shim** — it is a JS template literal, so one backtick-quoted
   identifier in a Lua comment terminates the string and yields ~25 nonsense TS errors pointing at Lua.
