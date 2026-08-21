@@ -88,7 +88,7 @@ import { snapshotOf } from './unit-bridge';
 import { itemData } from '../pipeline/dbc/item-data';
 import DBC from '../pipeline/dbc';
 import type {
-  QuestHandler, QuestTemplate, QuestItemTriple, QuestLogSlotView,
+  QuestHandler, QuestTemplate, QuestItemTriple,
 } from '../../network/game/object/quest';
 import { QUEST_FLAGS } from '../../network/game/object/quest';
 import { QUEST_STATE, QuestLogSlot } from '../../network/game/object/update-object/quest-log';
@@ -1246,7 +1246,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
       return;
     }
     fireEvent(vm, 'QUEST_LOG_UPDATE');
-    fireEvent(vm, 'UNIT_QUEST_LOG_CHANGED', 'player');
+    fireEvent(vm, 'UNIT_QUEST_LOG_CHANGED', ['player']);
   };
 
   const onUpdate = (): void => {
