@@ -89,6 +89,16 @@ still a number that agreed with you.
   and slept instead produced two panes of placeholder art and a ratio measured against nothing; it was
   declared void, which is the only honest end for it. Poll `entities.size` (or whatever the arm
   actually depends on) and say `VOID` when the world never populated.
+- **This runtime fires no general `OnUpdate` — it hand-picks named frames. So any client code whose
+  RECOVERY from a temporary state lives in an `<OnUpdate>` leaves that state PERMANENT.** The quest
+  detail page was blank because `QuestInfo_ShowFadingFrame` unconditionally does `SetAlpha(0)` plus
+  `acceptButton:Disable()` and only `QuestInfoFadingFrame_OnUpdate` undoes either — so the panel sat at
+  alpha 0 for ever, and the panel it blanked is the one the objectives, the group line and the whole
+  reward block get parented into. It read as "no animation"; it was "no panel". Three more instances
+  were closed in the same round by forcing `QUEST_FADING_DISABLE`, whose default hands recovery to a
+  *different* unfired `OnUpdate`.
+  **So before concluding a blank frame is a missing global, grep it for `SetAlpha(0)` and `:Disable()`
+  in an `OnShow` or a display path**, and check what is supposed to undo them.
 - **A silent gap is indistinguishable from a bug, and the load report is not where the owner looks.**
   Fifteen unit-popup rows read as broken when 26 of them were honest `notImplemented` gaps. An
   **action** the owner invoked should say so where he already sees refusals — `UIErrorsFrame`, the
