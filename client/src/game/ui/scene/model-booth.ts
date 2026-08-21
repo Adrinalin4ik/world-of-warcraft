@@ -76,7 +76,13 @@
  * world's `Unit` is wearing (`classes/unit.ts#characterLook`), so the key hits. The M2 itself is a
  * second clone of an already-parsed model (`M2Blueprint` caches per path), and a character clone
  * rebuilds its own batches and materials -- which is what makes it safe to push booth lighting into
- * them without relighting the body standing in the world.
+ * the BODY without relighting the one standing in the world.
+ *
+ * **IT IS NOT SAFE FOR THE ATTACHMENTS, and this header used to claim otherwise.** A helm, a pauldron
+ * and a weapon are static models, so `canInstance` is true and `M2#clone` hands them the SOURCE's
+ * materials -- shared with every placement of that item path, the world's included. Pushing booth light
+ * into those lit the character's own helm and shoulders permanently, which is the defect
+ * `Pane#saveBorrowedLighting` exists to undo; read that before changing anything in `light()`.
  *
  * The LIGHT is the reference widget's own, not a studio invention: benilla's `model_pane_light_rows`
  * (`benilla/.../portrait/light.rs:154-196`) reads it out of the client binary --
@@ -424,6 +430,20 @@ export function portraitTargetSide(
   return Math.max(widthPx / Math.max(uSpan, 0.01), heightPx / Math.max(vSpan, 0.01));
 }
 
+/**
+ * One material's lighting values, held across a bake so the world gets them back. See
+ * `Pane#saveBorrowedLighting` for why an attachment's material is not the pane's to keep.
+ */
+interface BorrowedLighting {
+  material: any;
+  sunIntensity: number;
+  interiorProbe: number;
+  interiorFog: number;
+  probeCoeffs: Float32Array;
+  fogColor: THREE.Color;
+  fogParams: number[];
+}
+
 /** One model frame's booth. */
 class Pane {
   private readonly scene = new THREE.Scene();
@@ -640,6 +660,10 @@ class Pane {
     if (this.model !== null) {
       this.pose();
       this.aim();
+      // BORROWED, NOT OWNED: an attached item's materials are shared with every placement of that item
+      // path in the world, so the booth's studio light has to be handed back the moment this bake is
+      // done. See `saveBorrowedLighting` -- this is the "helm and shoulders are always bright" fix.
+      const borrowed = this.saveBorrowedLighting();
       this.light();
       renderer.render(this.scene, this.camera);
       // The round stencil, over the figure. AFTER the figure and never before it: it multiplies the
@@ -650,6 +674,9 @@ class Pane {
         const mask = portraitMask();
         renderer.render(mask.scene, mask.camera);
       }
+      // AFTER the draw and before anything else renders, so the world's own helm and shoulders are
+      // never drawn with the booth's light.
+      this.restoreBorrowedLighting(borrowed);
     }
 
     renderer.autoClear = savedAutoClear;
@@ -886,6 +913,81 @@ class Pane {
     this.anchors = null;
     // The target still holds the last figure until the next bake clears it, so this is NOT `blank`.
     this.blank = false;
+  }
+
+  /**
+   * The lighting values the booth is about to overwrite on materials it DOES NOT OWN, so they can be
+   * put back.
+   *
+   * THIS IS THE FIX FOR "THE HELM AND SHOULDERS ARE ALWAYS BRIGHT" -- the owner's
+   * "Плечи и шлем всегда выглядят так как будто наведен курсор. Более светлое чем все остальное."
+   *
+   * The mechanism, and this file's own header was WRONG about it. It claimed "a character clone
+   * rebuilds its own batches and materials -- which is what makes it safe to push booth lighting into
+   * them". True for the BODY, false for the ATTACHMENTS: a helm, a pauldron and a weapon are static
+   * models, so `canInstance` is true, so `M2#clone` passes `instance.batches` and their materials are
+   * SHARED with every other placement of that item path -- including the ones on the character standing
+   * in the world. `Pane#light` traverses the whole pane scene, so it was writing the booth's interior
+   * studio probe (`interior: true`, `sunIntensity: 1`, ambient 0.7 grey) straight into the world's helm
+   * and shoulders.
+   *
+   * And the world does not correct it. `WorldMap#updateAllMaterialsWithLight` is skipped by
+   * `MapLight.revision` -- deliberately, because it was 3.2 ms per frame over 20 258 materials to copy
+   * values that changed on 1 frame in 401 -- so the booth's write stays until the zone's light happens
+   * to move, and `applyLight` does not own the per-object probe lane anyway. Hence PERMANENTLY brighter,
+   * and only on the attachment set, which is exactly the report.
+   *
+   * SAVE AND RESTORE rather than skip, so both pictures stay right: the pane draws its items under the
+   * widget's own light (which is the reference's law for a booth) and the world gets its own values back
+   * before anything else renders. It is the same pattern `bake` already uses for the renderer's clear
+   * colour, and it was the right answer there for the same reason.
+   *
+   * Only `pointLights: []` is passed by `light()`, so `wmoLightPosition`/`wmoLightColor` are never
+   * written and are not saved -- `applyPerObjectLighting` only touches slots below `count`, and count
+   * comes out 0.
+   */
+  private saveBorrowedLighting(): BorrowedLighting[] {
+    const saved: BorrowedLighting[] = [];
+    for (const item of this.attached) {
+      // A model that OWNS its batches has private materials and wants the booth's light kept.
+      if (item?.ownsBatches === true) {
+        continue;
+      }
+      for (const submesh of item?.submeshes ?? []) {
+        for (const batch of submesh.children ?? []) {
+          const u = batch?.material?.uniforms;
+          if (u === undefined || u.probeCoeffs === undefined) {
+            continue;
+          }
+          saved.push({
+            material: batch.material,
+            sunIntensity: u.sunIntensity.value,
+            interiorProbe: u.interiorProbe.value,
+            interiorFog: u.interiorFog.value,
+            probeCoeffs: Float32Array.from(u.probeCoeffs.value),
+            fogColor: u.fogColor.value.clone(),
+            fogParams: u.fogParams.value.toArray(),
+          });
+        }
+      }
+    }
+    return saved;
+  }
+
+  /** Put back what `saveBorrowedLighting` took, and raise the flag that makes it reach the GPU. */
+  private restoreBorrowedLighting(saved: BorrowedLighting[]): void {
+    for (const entry of saved) {
+      const u = entry.material.uniforms;
+      u.sunIntensity.value = entry.sunIntensity;
+      u.interiorProbe.value = entry.interiorProbe;
+      u.interiorFog.value = entry.interiorFog;
+      u.probeCoeffs.value.set(entry.probeCoeffs);
+      u.fogColor.value.copy(entry.fogColor);
+      u.fogParams.value.fromArray(entry.fogParams);
+      // Without this the restore never reaches the GPU: three re-uploads a `ShaderMaterial`'s uniforms
+      // only on a program swap or when this is set -- the same line `applyPerObjectLighting` ends with.
+      entry.material.uniformsNeedUpdate = true;
+    }
   }
 
   /**

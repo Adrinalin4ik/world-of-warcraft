@@ -50,9 +50,23 @@
  * made the selection ring and the nameplates cost zero extra dirty frames. Measured, not assumed; the
  * number is in the task report.
  *
- * ## Scope, stated because it is the one choice that is ours
+ * ## What is lifted, and what is not -- both stated because they are choices of ours
  *
- * Units only. The reference brightens any hoverable `CGObject` with a model -- "GameObjects when they
+ * **THE BODY ONLY, NOT ITS ATTACHMENTS -- a declared gap, with the reason.** The reference lifts "every
+ * lit material of the model *and* its attachments", and I wrote that a hovered unit's weapon and
+ * shoulders would brighten with it. **They do not, and they never did:** `applyHighlight` walks
+ * `model.submeshes`, and a helm, a pauldron or a weapon is parented to a BONE, so it is not in that
+ * list. Correcting the claim rather than leaving it standing.
+ *
+ * It is not an oversight that is one line from fixed, either. An attached item is a static model, so
+ * `canInstance` is true and `M2#clone` hands it the SOURCE's materials -- shared with every placement
+ * of that item path in the world. Writing the lift there would brighten every copy of that helm on
+ * every character in the zone, which is exactly the defect
+ * `ui/scene/model-booth.ts#saveBorrowedLighting` had to undo for the booth's studio light. Covering
+ * attachments needs the per-draw push this deliberately avoided (a parent walk per batch), scoped to
+ * the hovered unit's own subtree; that is a real piece of work and it is not started.
+ *
+ * **Units only.** The reference brightens any hoverable `CGObject` with a model -- "GameObjects when they
  * become hoverable" (`highlight.rs:18-19`) -- and this client's pick resolves units and nothing else,
  * so there is no GameObject hover to answer yet. A doodad could not take this route anyway: a static
  * model IS instanceable, so its materials are shared with every other placement of its path and
