@@ -508,6 +508,36 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
   // value from the menu entry's own name with `tonumber(strsub(button, 19, 19))`.
   fn('GetDungeonDifficulty', () => [group.dungeonDifficulty]);
   fn('GetRaidDifficulty', () => [group.raidDifficulty]);
+  /**
+   * `SetDungeonDifficulty(n)` -- and **THERE IS NO OFF-BY-ONE HERE, WHICH WAS MEASURED AFTER I NEARLY
+   * "FIXED" ONE THAT DID NOT EXIST.**
+   *
+   * The symptom on a live login as `Gesf` (level 4): the value never changes and the server never
+   * echoes. The obvious hypothesis was that the Lua API is 1-based (1 Normal / 2 Heroic) while the wire
+   * is 0-based, so `SetDungeonDifficulty(2)` would trip TrinityCore's
+   * `if (mode >= MAX_DUNGEON_DIFFICULTY) return`.
+   *
+   * THE BYTES REFUTE IT. Raw words captured in both directions:
+   *
+   *   incoming, at login:  MSG_SET_DUNGEON_DIFFICULTY  body 12  words [1, 1, 0]
+   *                        SMSG_INSTANCE_DIFFICULTY    body  8  words [0, 0]
+   *   outgoing:            MSG_SET_DUNGEON_DIFFICULTY  body  4  words [2] then [0] then [1]
+   *   echo, in all three cases:  NONE. GetDungeonDifficulty() stayed 1 throughout.
+   *
+   * The server's OWN first word is **1**, so the wire agrees with the Lua API and this send is right.
+   * And 0 and 1 got no echo either -- an off-by-one would have made one of them work.
+   *
+   * What is actually happening is a SILENT REFUSAL, and all three cases fit it:
+   * `HandleSetDungeonDifficultyOpcode` returns without sending anything when the mode is out of range
+   * (2), when it equals the current difficulty (1), and **when the player is below
+   * `LEVELREQUIREMENT_HEROIC`** (0, and 2 as well) -- `Gesf` is level 4. That is the same rule the
+   * client's own menu already applies at the other end: `unitpopup.lua:699-706` hides both difficulty
+   * submenus while `UnitLevel("player") < 65`. So the feature is coherent on both sides and there is
+   * nothing to fix; a low-level character cannot change dungeon difficulty and is not offered the row.
+   *
+   * ABSENCE OF A REPLY IS NOT FAILURE in this protocol family -- the same shape the quest area found,
+   * where accept and abandon carry no acknowledgement at all.
+   */
   fn('SetDungeonDifficulty', (args) => {
     group.setDungeonDifficulty(typeof args[0] === 'number' ? args[0] : 1);
     return [];
