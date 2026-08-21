@@ -160,10 +160,15 @@ export function attachAuraBridge(vm: LuaVM, world: World, art: GlueArt): () => v
    * `CMSG_CANCEL_AURA`, which is not read. Ignoring a restriction shows MORE auras than the real client
    * would, never fewer, so nothing disappears; stated here rather than left to the code's silence.
    */
-  const parseFilter = (raw: unknown): { harmful: boolean; playerOnly: boolean } => {
+  const parseFilter = (raw: unknown, harmful?: boolean): { harmful: boolean; playerOnly: boolean } => {
     const text = typeof raw === 'string' ? raw.toUpperCase() : '';
     return {
-      harmful: text.includes('HARMFUL'),
+      // `harmful` FORCED is what `UnitBuff`/`UnitDebuff` pass, and forcing it is the point: those two
+      // are named by their filter, so `UnitBuff(unit, i, "PLAYER")` must stay helpful. An earlier version
+      // built the filter by string concatenation and `UnitDebuff`'s "HARMFUL" prefix could be re-read
+      // out of a caller's own argument -- self-review caught it; the comment said the name won and the
+      // code let the argument win.
+      harmful: harmful ?? text.includes('HARMFUL'),
       playerOnly: text.includes('PLAYER'),
     };
   };
@@ -216,13 +221,18 @@ export function attachAuraBridge(vm: LuaVM, world: World, art: GlueArt): () => v
   const unitOf = (token: unknown): Unit | null =>
     (typeof token === 'string' ? resolveUnitToken(token, world) : null);
 
-  const entryAt = (token: unknown, index: unknown, filter: unknown): AuraEntry | null => {
+  const entryAt = (
+    token: unknown,
+    index: unknown,
+    filter: unknown,
+    forced?: boolean,
+  ): AuraEntry | null => {
     const unit = unitOf(token);
     const i = Number(index);
     if (unit === null || !Number.isFinite(i) || i < 1) {
       return null;
     }
-    const { harmful, playerOnly } = parseFilter(filter);
+    const { harmful, playerOnly } = parseFilter(filter, forced);
     return auraList(unit.guid, harmful, playerOnly)[i - 1] ?? null;
   };
 
@@ -259,9 +269,14 @@ export function attachAuraBridge(vm: LuaVM, world: World, art: GlueArt): () => v
    * on nothing. `shouldConsolidate` is a `Spell.dbc` attribute bit that is not read; nil skips
    * `buffframe.lua:220`'s branch entirely, which with `CONSOLIDATE_BUFFS` unset it would skip anyway.
    */
-  const auraReturns = (token: unknown, index: unknown, filter: unknown): unknown[] => {
+  const auraReturns = (
+    token: unknown,
+    index: unknown,
+    filter: unknown,
+    forced?: boolean,
+  ): unknown[] => {
     const unit = unitOf(token);
-    const entry = entryAt(token, index, filter);
+    const entry = entryAt(token, index, filter, forced);
     if (unit === null || entry === null) {
       return [];
     }
@@ -290,8 +305,8 @@ export function attachAuraBridge(vm: LuaVM, world: World, art: GlueArt): () => v
   // `UnitBuff`/`UnitDebuff` are the same call with the filter FIXED -- and the third argument is still
   // read, because `UnitBuff(unit, i, "PLAYER")` is a real call shape. The helpful/harmful half of a
   // filter string passed here is ignored, which is what the engine does: the function name wins.
-  fn('UnitBuff', (args) => auraReturns(args[0], args[1], `HELPFUL ${String(args[2] ?? '')}`));
-  fn('UnitDebuff', (args) => auraReturns(args[0], args[1], `HARMFUL ${String(args[2] ?? '')}`));
+  fn('UnitBuff', (args) => auraReturns(args[0], args[1], args[2], false));
+  fn('UnitDebuff', (args) => auraReturns(args[0], args[1], args[2], true));
 
   /**
    * `CancelUnitBuff(unit, index|name, filter|rank)` -- a right click on one of our own buffs
@@ -379,9 +394,13 @@ export function attachAuraBridge(vm: LuaVM, world: World, art: GlueArt): () => v
 
   const shapeshiftForms = (): ShapeshiftForm[] => {
     const known = spells.knownSpells();
-    // The known set plus whether the DBC has landed. `spellData.spell` answers null until it does, so a
-    // key that ignored that would freeze an empty list in place.
-    const key = `${known.size}|${spellData.spell(1) === null ? 0 : 1}`;
+    // The known-spell COUNT is the key, and the two things it cannot see are both invalidated
+    // explicitly: the 49 MB `Spell.dbc` landing (`ensureLoaded().then` below) and a RANK-UP, which
+    // removes one spell and adds another so the count does not move (`onSpells`). An earlier version
+    // probed `spellData.spell(1)` to detect the DBC -- self-review removed it: whether spell id 1 exists
+    // in this build's file was never checked, so it was a guess standing in for a signal that was
+    // already wired.
+    const key = String(known.size);
     if (key === formCacheKey) {
       return formCache;
     }

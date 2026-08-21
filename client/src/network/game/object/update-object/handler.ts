@@ -72,6 +72,11 @@ export class UpdateObjectHandler extends EventEmitter {
     // in `World#entities`, so the branch above never sees it; without this the bag would keep drawing
     // a row for an item that no longer exists.
     this.game.objectHandler?.itemHandler?.forgetObject(guid);
+    // And its AURAS, for the same reason and through the same lazy door: `AuraHandler` keeps a sparse
+    // slot map per guid, so without this a mob that despawned mid-debuff would keep its entry for the
+    // rest of the session. Nothing would DISPLAY it -- `UnitAura` only ever asks about a resolved token
+    // -- so this is a leak rather than a wrong screen, which is why it is one line and not a subscription.
+    this.game.objectHandler?.auraHandler?.forget(guid);
   }
 
   
