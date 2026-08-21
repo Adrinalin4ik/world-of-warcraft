@@ -744,6 +744,38 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    */
   const characterModelId = registry.byName('CharacterModelFrame');
 
+  /**
+   * A SEVENTH named `<OnUpdate>`: `QuestInfoFadingFrame`, and WITHOUT IT EVERY QUEST PANEL IS BLANK
+   * WITH ACCEPT GREYED OUT.
+   *
+   * This is the owner's own report -- "the quest detail page is completely blank, Accept greyed" -- and
+   * it was NOT a missing global. `QuestInfo_ShowFadingFrame` (`questinfo.lua:482-491`) is element 3 of
+   * `QUEST_TEMPLATE_DETAIL1` and its body is, unconditionally:
+   *
+   *     QuestInfoFadingFrame:SetAlpha(0);
+   *     QuestInfoFrame.acceptButton:Disable();
+   *     QuestInfoFadingFrame.fading = 1;
+   *
+   * and the ONLY code that undoes either is `QuestInfoFadingFrame_OnUpdate` (`questinfo.lua:3-16`),
+   * which ends the fade and calls `acceptButton:Enable()`. `QuestFrameDetailPanel_OnShow` then runs
+   * `QuestInfo_Display(QUEST_TEMPLATE_DETAIL2, QuestInfoFadingFrame, ...)`, so the objectives, the
+   * suggested-group line and **the whole reward block are parented INTO the frame held at alpha 0**.
+   * No tick, no panel -- permanently, not just unanimated.
+   *
+   * **MEASURED, in a headless harness rather than a browser**: the real manifest through the real VM
+   * with the quest globals stubbed in Lua, `QuestInfo_Display(QUEST_TEMPLATE_DETAIL1)` reporting `ok`
+   * and then `fadingAlpha=0`, `acceptEnabled=false`. That also refuted the diagnosis this round
+   * started with -- a fourth nil aborting the element loop -- which the loop reporting `ok` disproves.
+   *
+   * Gated on `shown`, like the bonus bar, the cast bar and the paper doll: the quest frame is hidden
+   * almost always. While it IS shown the client's own body early-outs on `if ( self.fading )` after the
+   * first tick, so the steady cost is one Lua call per frame and the fingerprint churns for that single
+   * frame rather than continuously. `QUEST_FADING_DISABLE` is forced to `"1"` in
+   * `ui/quest-bridge.ts` so that first tick lands on `self:SetAlpha(1)` instead of handing the recovery
+   * to `UIFrameFadeIn`, whose own driver is another `OnUpdate` this runtime does not fire.
+   */
+  const questFadingId = registry.byName('QuestInfoFadingFrame');
+
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
   let caretClock = 0;
@@ -793,6 +825,10 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
       // The paper doll's rotate buttons, while one is held -- see `characterModelId`.
       if (characterModelId !== null && registry.widget(characterModelId)?.shown) {
         invokeScriptHandler(ctx, characterModelId, 'OnUpdate', [dt]);
+      }
+      // The quest panels' fade, which is what ENABLES ACCEPT -- see `questFadingId`.
+      if (questFadingId !== null && registry.widget(questFadingId)?.shown) {
+        invokeScriptHandler(ctx, questFadingId, 'OnUpdate', [dt]);
       }
       // The weapon-enchant slots hiding themselves -- see `tempEnchantId`.
       if (tempEnchantId !== null) {

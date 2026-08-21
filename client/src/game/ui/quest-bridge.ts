@@ -1464,6 +1464,29 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     })),
   });
 
+  /**
+   * `QUEST_FADING_DISABLE = "1"` -- FORCED, and it is a correctness fix rather than a preference.
+   *
+   * The client's own uvar, default `"0"`, `cvar = "questFadingDisable"`
+   * (`interfaceoptionsframe.lua:315`). Four quest panels branch on it and every branch hands the
+   * recovery from alpha 0 to `UIFrameFadeIn` when it reads `"0"`:
+   * `QuestFrameRewardPanel_OnShow`, `QuestFrameProgressPanel_OnShow`,
+   * `QuestFrameGreetingPanel_OnShow` (`questframe.lua:77-80,137-140,204-207`) each do
+   * `SetAlpha(0)` then `UIFrameFadeIn(...)`, and `QuestInfoFadingFrame_OnUpdate` does the same on the
+   * detail panel.
+   *
+   * **`UIFrameFadeIn` is driven by ANOTHER `<OnUpdate>` this runtime does not fire**
+   * (`UIParent`'s `UIFrameFade_OnUpdate`), so on `"0"` those three panels would be set to alpha 0 and
+   * never raised -- the same permanent blankness the detail panel had. On `"1"` they never drop to 0 at
+   * all, and the detail panel's single tick lands on `self:SetAlpha(1)`.
+   *
+   * Set here rather than in the loader because the manifest's own options code assigns it during load;
+   * the bridge attaches afterwards, so this wins. It is a TRUE answer for this renderer: there is no
+   * per-glyph alpha gradient in `ui/text.ts`, which is also why
+   * `methods/region.ts#SetAlphaGradient` reports the gradient as already complete.
+   */
+  vm.runExpr('QUEST_FADING_DISABLE = "1" return 1', 'quest-fading.lua');
+
   primeSortNames();
   rebuild();
 
