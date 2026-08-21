@@ -429,20 +429,12 @@ export function installActionsApi(vm: LuaVM): void {
         + 'target (SecureTemplates.lua:537)',
       [false],
     ],
-    [
-      // Called 10 times across `BonusActionBarFrame.lua`, `PetActionBarFrame.lua`, `MainMenuBar.lua`,
-      // `UIParent.lua` and `FloatingChatFrame.lua`, and its absence was aborting
-      // `ShapeshiftBar_OnLoad` outright (`BonusActionBarFrame.lua:126`). 0 means "this character has no
-      // stance bar", which hides `ShapeshiftBarFrame` (`ShapeshiftBar_Update:145`) -- and that is the
-      // honest answer: the player's CURRENT form is read (see `GetBonusBarOffset`), but the LIST of
-      // forms a class has needs the known-spell set cross-referenced against `SpellShapeshiftForm.dbc`,
-      // which is not done, and `GetShapeshiftFormInfo`/`GetShapeshiftFormCooldown` with it. So the
-      // stance BUTTONS are absent rather than wrong.
-      'GetNumShapeshiftForms',
-      'no stance-bar feed: the current form is known but the list of a class\'s forms is not, so '
-        + 'ShapeshiftBarFrame stays hidden and the three stance buttons are not drawn',
-      [0],
-    ],
+    // `GetNumShapeshiftForms` HAS LEFT THIS LIST. Its note read "the list of a class's forms is not
+    // known", and that is what kept `ShapeshiftBarFrame` hidden -- `ShapeshiftBar_Update` hides the bar
+    // on 0 (`bonusactionbarframe.lua:145-146`), which is where 3.3.5a's stance bar actually lives; there
+    // is no `ShapeshiftBar.xml` in `FrameXML.toc`. The list is real now: a known spell with an
+    // `SPELL_AURA_MOD_SHAPESHIFT` effect IS a form, and `ui/aura-bridge.ts#shapeshiftForms` builds it
+    // with `GetShapeshiftFormInfo`, `GetShapeshiftFormCooldown` and `CastShapeshiftForm` beside it.
     [
       'GetBindingKey',
       'no keybinding table in this client, so no hotkey text is drawn on a button',

@@ -23,7 +23,7 @@
  * WHICH GLOBALS ARE HERE was decided by reading what the client's own files call, not from a list:
  * `TargetFrame.lua`, `UnitFrame.lua` and `TextStatusBar.lua` between them call 37 distinct `Unit*`
  * functions. The ones with a real field behind them are real below; the ones whose feed does not
- * exist yet (threat, auras, casting, tap state) go through `notImplemented` so the load report names
+ * exist yet (threat, casting, tap state) go through `notImplemented` so the load report names
  * them, per the rule that a gap is declared and never silently answered.
  */
 import { LuaVM } from '../vm';
@@ -648,8 +648,6 @@ export function installUnitsApi(vm: LuaVM): void {
   const gaps: Array<[string, string, unknown[]]> = [
     ['UnitThreatSituation', 'no threat table is read from the wire', [null]],
     ['UnitDetailedThreatSituation', 'no threat table is read from the wire', [null]],
-    ['UnitBuff', 'auras are not read out of the update fields yet', []],
-    ['UnitDebuff', 'auras are not read out of the update fields yet', []],
     ['UnitCastingInfo', 'no cast bar feed exists', []],
     ['UnitChannelInfo', 'no cast bar feed exists', []],
     ['UnitIsTapped', 'UNIT_DYNAMIC_FLAGS is not read yet', [false]],
@@ -760,10 +758,12 @@ export function installUnitsApi(vm: LuaVM): void {
     ['UnitIsInMyGuild', 'no guild roster is fed', [false]],
     ['IsGuildLeader', 'no guild roster is fed', [false]],
     ['CheckInteractDistance', 'no interact-distance test exists in this client', [false]],
-    // `UnitAura(unit, index, filter)` is the ARRAY form `BuffFrame_Update` walks (bufffframe.lua:125);
-    // `UnitBuff`/`UnitDebuff` above are the same gap by their other two names. Answering nothing
-    // terminates the walk at index 1, which is what a unit with no auras looks like.
-    ['UnitAura', 'auras are not read out of the update fields yet', []],
+    // `UnitAura`, `UnitBuff` and `UnitDebuff` HAVE LEFT THIS LIST. Their note read "auras are not read
+    // out of the update fields yet" and **the note's own premise was wrong for this build**: 3.3.5a has
+    // no aura update fields at all -- they were removed after 1.12 and replaced by `SMSG_AURA_UPDATE`
+    // (0x496) / `SMSG_AURA_UPDATE_ALL` (0x495), which had no subscriber. They are real now, in
+    // `ui/aura-bridge.ts`, over `network/game/object/auras.ts`. See that file's header for the two checks
+    // that establish the version difference.
     /**
      * `GetWeaponEnchantInfo()` -> `hasMainHand, mainExpiration, mainCharges, hasOffHand, ...`.
      *

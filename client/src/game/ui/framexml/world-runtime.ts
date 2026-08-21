@@ -745,6 +745,47 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   const characterModelId = registry.byName('CharacterModelFrame');
 
   /**
+   * A SEVENTH named `<OnUpdate>`: `BuffFrame`, and an EIGHTH set that is looked up LAZILY -- the aura
+   * buttons.
+   *
+   * `BuffFrame_OnUpdate` (`buffframe.lua:50-78`) does two things and neither is expressible as an event:
+   * it runs the 0.75 s on / 0.75 s off FLASH used by every buff about to expire, and it counts down
+   * `BuffFrameUpdateTime`, the tooltip-refresh timer. Without the tick `BuffFrame.BuffAlphaValue` stays
+   * at its `OnLoad` value of 1 for ever, so an expiring buff never flashes and
+   * `AuraButton_OnUpdate`'s `self:SetAlpha(BuffFrame.BuffAlphaValue)` writes a constant.
+   *
+   * **Its fingerprint cost is ZERO**, and that is structural rather than lucky: the body writes only
+   * Lua table fields on `BuffFrame` itself (`BuffFrameUpdateTime`, `BuffFrameFlashTime`,
+   * `BuffFrameFlashState`, `BuffAlphaValue`). It touches no rect, no colour, no alpha and no text, so
+   * `drawListSignature` cannot see it change. NOT gated on `shown` -- `BuffFrame` is always shown.
+   *
+   * THE BUTTONS are the set that actually costs something, and they cannot be resolved at boot: they do
+   * not exist until `AuraButton_Update` calls `CreateFrame("Button", "BuffButton"..i, ...)` on the first
+   * `UNIT_AURA` (`buffframe.lua:141-147`). Their handler is attached from Lua, not from XML --
+   * `buff:SetScript("OnUpdate", AuraButton_OnUpdate)`, and only for an aura that HAS a duration
+   * (`:189-200`), with `SetScript("OnUpdate", nil)` when it loses one. So the tick has to be driven by
+   * name over the 32 + 16 possible buttons, resolving each id once and then gating on `shown`, and
+   * `invokeScriptHandler` is a no-op for a button whose `OnUpdate` the client has cleared.
+   *
+   * Cost, stated: 48 `Map` lookups per frame in the steady state once resolved (a `byName` per
+   * still-unresolved name until it exists), then one `invokeScriptHandler` per SHOWN button, which is
+   * however many auras the character has. The body's own fingerprint churn is bounded to auras with
+   * under `BUFF_WARNING_TIME` = 31 s left -- above that it writes `SetAlpha(1.0)` on a widget already at
+   * 1.0 and `Hide()` on an already-hidden duration string, neither of which restamps. See
+   * `ui/aura-bridge.ts`' cost section.
+   */
+  const buffFrameId = registry.byName('BuffFrame');
+  const auraButtonNames: string[] = [];
+  for (let i = 1; i <= 32; i += 1) {
+    auraButtonNames.push(`BuffButton${i}`);
+  }
+  for (let i = 1; i <= 16; i += 1) {
+    auraButtonNames.push(`DebuffButton${i}`);
+  }
+  /** Resolved ids, filled in as the client creates the buttons. A name stays here once found. */
+  const auraButtonIds = new Map<string, number>();
+
+  /**
    * A SEVENTH named `<OnUpdate>`: `QuestInfoFadingFrame`, and WITHOUT IT EVERY QUEST PANEL IS BLANK
    * WITH ACCEPT GREYED OUT.
    *
@@ -829,6 +870,26 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
       // The quest panels' fade, which is what ENABLES ACCEPT -- see `questFadingId`.
       if (questFadingId !== null && registry.widget(questFadingId)?.shown) {
         invokeScriptHandler(ctx, questFadingId, 'OnUpdate', [dt]);
+      }
+      // The buff flash clock -- see `buffFrameId`. Zero fingerprint cost; it writes Lua fields only.
+      if (buffFrameId !== null) {
+        invokeScriptHandler(ctx, buffFrameId, 'OnUpdate', [dt]);
+      }
+      // The aura buttons' countdown and expiry flash -- see `auraButtonIds`. Resolved lazily because the
+      // client creates these frames from Lua on the first `UNIT_AURA`, then gated on `shown`.
+      for (const name of auraButtonNames) {
+        let id = auraButtonIds.get(name);
+        if (id === undefined) {
+          const found = registry.byName(name);
+          if (found === null) {
+            continue;
+          }
+          id = found;
+          auraButtonIds.set(name, id);
+        }
+        if (registry.widget(id)?.shown) {
+          invokeScriptHandler(ctx, id, 'OnUpdate', [dt]);
+        }
       }
       // The weapon-enchant slots hiding themselves -- see `tempEnchantId`.
       if (tempEnchantId !== null) {

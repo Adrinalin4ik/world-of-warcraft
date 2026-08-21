@@ -82,6 +82,20 @@ const COL = {
   /** `Category` -- the shared-cooldown group `CategoryRecoveryTime` applies across. */
   category: 1,
   /**
+   * `DispelType` -> `SpellDispelType.dbc`, which is what a DEBUFF's border colour is keyed by.
+   *
+   * VERIFIED AGAINST THE GAME'S OWN DATA rather than taken from an enum header: the served
+   * `DBFilesClient/SpellDispelType.dbc` is 12 rows and its name column reads, in id order, `None`,
+   * `Magic`, `Curse`, `Disease`, `Poison`, `Stealth`, `Invisibility`, `All(M+C+D+P)`,
+   * `Special - npc only`, `Enrage`, `ZG Trinkets`, `ZZOLD UNUSED`. The client's own
+   * `DebuffTypeColor` table is keyed by exactly four of those strings -- Magic, Curse, Disease, Poison
+   * (`buffframe.lua:16-21`) -- so 1..4 are the only ids `UnitAura`'s fifth return may name, and
+   * anything else must come back nil (see `ui/aura-bridge.ts#dispelName`).
+   *
+   * Column 2, between `Category` and `Mechanic`, per `wow-data-parser/dbc/entities/spell.js:9`.
+   */
+  dispelType: 2,
+  /**
    * `Attributes` -- the first attribute word. Bit `0x40` is `SPELL_ATTR0_PASSIVE`, which is what
    * `IsPassiveSpell` answers and what makes a spellbook entry draw a black button border and a grey
    * name instead of a clickable icon (`spellbookframe.lua:496-506`).
@@ -219,6 +233,32 @@ const COL = {
   effectAmplitude: 98,
   /** `EffectChainTarget[0..2]`. `$x<n>`. */
   effectChainTargets: 104,
+  /**
+   * `EffectApplyAuraName[0..2]` -- the `AuraType` an `SPELL_EFFECT_APPLY_AURA` effect applies.
+   *
+   * Read for exactly one thing here: `SPELL_AURA_MOD_SHAPESHIFT` (36) is what makes a known spell a
+   * STANCE, which is how `GetNumShapeshiftForms` is built (`ui/aura-bridge.ts`). The 36 is the same
+   * `AuraType` vocabulary `network/game/object/combat-log.ts` already carries and labels.
+   *
+   * The INDEX is derived, not guessed, and it is checkable from the two neighbours already in this
+   * table: `wow-data-parser/dbc/entities/spell.js:84` puts `effectAurasIDs` (3 columns) immediately
+   * after `effectRadiusIDs` (3 columns, index 92 here) and immediately before `effectAmplitudes`
+   * (index 98 here). 92 + 3 = 95 and 95 + 3 = 98, so 95 is the only value consistent with both.
+   */
+  effectApplyAuraName: 95,
+  /**
+   * `EffectMiscValue[0..2]` -- for a shapeshift effect, the `SpellShapeshiftForm.dbc` FORM id.
+   *
+   * SIGNED (`spell.js:89` reads `int32le`), and it must be: plenty of effects store a negative here.
+   *
+   * The index is derived the same way as `effectApplyAuraName`: `spell.js` runs
+   * `effectItemTypes` (3) then `effectMiscValues` (**6** -- `EffectMiscValue[3]` and
+   * `EffectMiscValueB[3]` in one array) then `effectTriggerSpells` (3) then
+   * `effectPointsPerComboPoint`, which this table already fixes at 119. Walking back from 119:
+   * 119 - 3 = 116 (`effectTriggerSpells`), 116 - 6 = **110**. `EffectMiscValueB` therefore starts at
+   * 113, which is why only the first three columns are read.
+   */
+  effectMiscValue: 110,
   /** `EffectPointsPerComboPoint[0..2]`, a FLOAT. `$b<n>` -- Eviscerate's 5.0 per combo point. */
   effectPointsPerComboPoint: 119,
   /** `DurationIndex` -> `SpellDuration.dbc`. `$d`. */
@@ -349,6 +389,10 @@ export interface SpellRow {
   effectRadiusIndex: number[];
   effectAmplitudeMs: number[];
   effectChainTargets: number[];
+  /** `EffectApplyAuraName[0..2]`. 36 is `SPELL_AURA_MOD_SHAPESHIFT` -- see `COL.effectApplyAuraName`. */
+  effectApplyAuraName: number[];
+  /** `EffectMiscValue[0..2]`, SIGNED. The FORM id for a shapeshift effect. */
+  effectMiscValue: number[];
 
   /** `DurationIndex` (`$d`), `ProcChance` (`$h`), `StackAmount` (`$n`), `MaxAffectedTargets` (`$u`). */
   durationIndex: number;
@@ -365,6 +409,11 @@ export interface SpellRow {
 
   /** `SpellDescriptionVariableID`: 0, or a row of `SpellDescriptionVariables.dbc`. */
   descriptionVariablesID: number;
+  /**
+   * `DispelType` -- 1 Magic, 2 Curse, 3 Disease, 4 Poison, 0 none. See `COL.dispelType` for the DBC
+   * that was read to establish those four, and `ui/aura-bridge.ts` for why anything else answers nil.
+   */
+  dispelType: number;
 }
 
 /**
@@ -709,6 +758,9 @@ class SpellData {
         effectRadiusIndex: three(COL.effectRadiusIndex, col),
         effectAmplitudeMs: three(COL.effectAmplitude, col),
         effectChainTargets: three(COL.effectChainTargets, col),
+        effectApplyAuraName: three(COL.effectApplyAuraName, col),
+        // SIGNED -- see `COL.effectMiscValue`.
+        effectMiscValue: three(COL.effectMiscValue, int),
         durationIndex: col(COL.durationIndex),
         procChance: col(COL.procChance),
         stackAmount: col(COL.stackAmount),
@@ -717,6 +769,7 @@ class SpellData {
         maxLevel: col(COL.maxLevel),
         schoolMask: col(COL.schoolMask),
         descriptionVariablesID: col(COL.descriptionVariablesID),
+        dispelType: col(COL.dispelType),
       });
     }
     return rows;

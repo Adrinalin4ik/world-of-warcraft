@@ -60,6 +60,7 @@ import { MethodContext, MethodTable, registerMethods } from '../object';
 import { Widget } from '../../../widget';
 import { ensureFont, notImplemented, warnOnce, widgetOf } from './region';
 import { getAction } from '../api/actions';
+import { getAuraTooltipSource, getShapeshiftTooltipSource } from '../api/auras';
 import { getSpellbook } from '../api/spells';
 import { layoutScale, measureText } from '../../../text';
 import { getItemTooltipSource, ItemTooltipInfo, ItemTooltipSource } from '../api/items';
@@ -910,6 +911,70 @@ const GAMETOOLTIP: MethodTable = {
   },
 
   /**
+   * `SetUnitAura(unit, index, filter)` -> true when the tooltip was filled.
+   *
+   * TWO call sites and both are HOVER-REFRESH paths rather than the initial hover:
+   * `AuraButton_Update` re-fills it when the aura changes under the cursor (`buffframe.lua:216-218`)
+   * and `AuraButton_OnUpdate` re-fills it on the tooltip timer (`:247-249`), both guarded by
+   * `GameTooltip:IsOwned(buff)`. The FIRST hover comes through `BuffButtonTemplate`'s own
+   * `<OnEnter>`, which calls this method too (`buffframe.xml`), so all three go through here.
+   *
+   * It SHOWS ITSELF for `SetSpell`'s measured reason: none of those call sites calls `Show()`.
+   *
+   * The body is `fillSpellLines`, unchanged -- an aura's tooltip in 3.3.5a is the spell's name, its rank
+   * and its description. What the real client also puts there and this does NOT, stated rather than
+   * approximated: the "N seconds remaining" line and the caster's name. The remaining time is already on
+   * screen on the icon itself when durations are on, and the caster needs a name lookup for a guid that
+   * may belong to a unit outside our own object map.
+   */
+  SetUnitAura: (ctx, self, args) => {
+    const source = getAuraTooltipSource(ctx.vm);
+    if (source === null) {
+      return [false];
+    }
+    const unit = String(args[0] ?? '');
+    const index = Number(args[1]);
+    // `nil` is a real filter and it means HELPFUL -- `UnitAura`'s own default. `TargetFrame` passes
+    // nothing for a buff and "HARMFUL" for a debuff.
+    const filter = args[2] === undefined || args[2] === null ? 'HELPFUL' : String(args[2]);
+    if (!Number.isFinite(index) || index < 1) {
+      return [false];
+    }
+    const aura = source(unit, index, filter);
+    if (aura === null) {
+      return [false];
+    }
+    fillSpellLines(ctx, self, aura.name, aura.rank, aura.description);
+    return [true];
+  },
+
+  /**
+   * `SetShapeshift(index)` -> true when the tooltip was filled. The STANCE button's hover.
+   *
+   * ONE call site and it is UNGUARDED: `ShapeshiftButtonTemplate`'s own `<OnEnter>`
+   * (`bonusactionbarframe.xml:34`) calls `GameTooltip:SetShapeshift(self:GetID())` with nothing around
+   * it, so a nil method here raises inside the handler and the hover shows nothing at all. That is why
+   * it is real rather than a declared gap: the gap list's members are all reached through a caller that
+   * branches on the false, and this one is not.
+   *
+   * The ARGUMENT is a stance-bar POSITION (1..`GetNumShapeshiftForms()`), the same index
+   * `GetShapeshiftFormInfo` takes -- not a form id and not a spell id.
+   */
+  SetShapeshift: (ctx, self, args) => {
+    const source = getShapeshiftTooltipSource(ctx.vm);
+    const index = Number(args[0]);
+    if (source === null || !Number.isFinite(index) || index < 1) {
+      return [false];
+    }
+    const form = source(index);
+    if (form === null) {
+      return [false];
+    }
+    fillSpellLines(ctx, self, form.name, form.rank, form.description);
+    return [true];
+  },
+
+  /**
    * `SetAction(actionSlot)` -> true when the tooltip was filled. See `SetSpell` for why it shows itself.
    *
    * An EMPTY slot answers false and shows nothing, which is what makes `ActionButton_ShowGrid`'s revealed
@@ -1205,13 +1270,14 @@ const ITEM_SETTERS: MethodTable = {
  * declared here. Each returns FALSE, which is the "nothing was filled" answer its callers already
  * branch on, and the load report names it.
  *
- * Each needs a feed this client does not decode: auras, the mail box, pet actions, possession bars,
- * totems, equipment sets and the LFG reward tables. **The merchant and buyback lists were on that
+ * Each needs a feed this client does not decode: the mail box, pet actions, possession bars, totems,
+ * equipment sets and the LFG reward tables. **`SetUnitAura` HAS LEFT THIS LIST** -- its note read "no
+ * aura feed is decoded (SMSG_AURA_UPDATE has no subscriber)" and that stopped being true when
+ * `network/game/object/auras.ts` picked the pair up; it is real below. **The merchant and buyback lists were on that
  * sentence and are not any more** -- they moved up into `ITEM_SETTERS` when
  * `network/game/object/merchant.ts` landed; the census above still stands as a census.
  */
 const TOOLTIP_SETTER_GAPS: Array<[string, string]> = [
-  ['SetUnitAura', 'no aura feed is decoded (SMSG_AURA_UPDATE has no subscriber)'],
   ['SetSpellByID', 'the spellbook is indexed by SLOT, not by spell id -- see api/spells.ts'],
   ['SetInboxItem', 'no mail box is decoded'],
   ['SetSendMailItem', 'as SetInboxItem'],

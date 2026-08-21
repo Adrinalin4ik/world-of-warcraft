@@ -1,5 +1,6 @@
 import EventEmitter from 'events';
 import { CombatHandler } from './combat';
+import { AuraHandler } from './auras';
 import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
 import { ItemHandler } from './items';
@@ -131,6 +132,17 @@ export class ObjectHandler extends EventEmitter {
   /** LEVELLING UP -- `SMSG_LEVELUP_INFO`, which had no subscriber at all. See `level-up.ts`. */
   public levelUpHandler: LevelUpHandler;
 
+  /**
+   * BUFFS AND DEBUFFS. PUBLIC for the same reason every handler above is: `ui/aura-bridge.ts` reads the
+   * per-unit slot map to answer `UnitAura`, and this handler owns the only send of `CMSG_CANCEL_AURA`.
+   *
+   * `SMSG_AURA_UPDATE` (0x496) and `SMSG_AURA_UPDATE_ALL` (0x495) had no subscriber at all until this
+   * line, which is what `api/units.ts` recorded as the reason `UnitAura`/`UnitBuff`/`UnitDebuff` were
+   * declared gaps -- with a comment blaming the update fields, which in 3.3.5a do not carry auras at
+   * all. See `auras.ts`' header for the version difference.
+   */
+  public auraHandler: AuraHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -159,6 +171,9 @@ export class ObjectHandler extends EventEmitter {
     // LEVELLING UP. `SMSG_LEVELUP_INFO` (0x1D4) likewise had no subscriber, so `PLAYER_LEVEL_UP` was
     // never fired and the client's own congratulation lines never printed.
     this.levelUpHandler = new LevelUpHandler(this.game);
+    // AURAS. The pair had no subscriber, so every buff and debuff the server sent was framed, emitted
+    // and dropped -- the owner's "ауры и бафы с дебафами не отображаются".
+    this.auraHandler = new AuraHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

@@ -516,6 +516,22 @@ function installCVars(vm: LuaVM): void {
      * with a real source instead of an inference.
      */
     ['showNewbieTips', '1'],
+    /**
+     * `buffDurations` -- whether the buff icons carry a "2m" line under them.
+     *
+     * `interfaceoptionsframe.lua:312` is the source and gives both halves:
+     *
+     *     ["SHOW_BUFF_DURATIONS"] = { default = "0", cvar = "buffDurations", event = "SHOW_BUFF_DURATION_TEXT" }
+     *
+     * It is here for the reason `showNewbieTips` is: `BlizzardOptionsPanel_SetupControl` runs
+     * `_G[control.uvar] = GetCVar(control.cvar)` on `PLAYER_ENTERING_WORLD`
+     * (`optionspaneltemplates.lua:373-380`), so an unknown CVar OVERWRITES the uvar with nil.
+     * `SHOW_BUFF_DURATIONS` nil and `SHOW_BUFF_DURATIONS == "0"` happen to take the same branch
+     * everywhere in `buffframe.lua`, so this changes no pixel today -- it exists so the value is the
+     * client's own shipped default rather than an accident, and so `BuffFrame_UpdatePositions`'
+     * `BUFF_ROW_SPACING` arm has a defined value to compare.
+     */
+    ['buffDurations', '0'],
   ]);
   CVAR_STORES.set(vm, cvars);
 
@@ -554,6 +570,8 @@ function installCVars(vm: LuaVM): void {
     // `InterfaceOptionsFrame_LoadUVars` compares `cvarValue == setting.default`, so a nil here would
     // make that test false for a CVar whose value IS the default.
     ['shownewbietips', '1'],
+    // `interfaceoptionsframe.lua:312`'s `default = "0"`, the same line the CVar above is seeded from.
+    ['buffdurations', '0'],
   ]);
   vm.registerFunction('GetCVarDefault', (args) => [
     cvarDefaults.get(key(args[0])) ?? null,

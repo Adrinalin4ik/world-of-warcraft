@@ -53,6 +53,7 @@ import { attachInteractionWatch } from './interaction-watch';
 import { attachMerchantBridge } from './merchant-bridge';
 import { attachQuestBridge } from './quest-bridge';
 import { attachLevelUpBridge } from './level-up-bridge';
+import { attachAuraBridge } from './aura-bridge';
 import { attachTrainerBridge } from './trainer-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { attachChatBridge } from './chat-bridge';
@@ -259,6 +260,9 @@ export class WorldUiHost {
 
   /** `attachQuestBridge`'s teardown, held so `dispose` can run it. */
   private detachQuest: (() => void) | null = null;
+
+  /** `attachAuraBridge`'s teardown, held so `dispose` can run it. */
+  private detachAuras: (() => void) | null = null;
 
   /** `attachLevelUpBridge`'s teardown, held so `dispose` can run it. */
   private detachLevelUp: (() => void) | null = null;
@@ -670,6 +674,14 @@ export class WorldUiHost {
         // no server to have said anything. AFTER the group bridge for no reason but readability -- they
         // share nothing, though the duel and party lines this unblocks are the group bridge's.
         this.detachChat = attachChatBridge(runtime.vm, this.world);
+        // BUFFS, DEBUFFS AND THE STANCE BAR. Gated on a real session like the rest: every aura arrives
+        // as `SMSG_AURA_UPDATE`, and an offline world sends none -- with no packet the buff row is empty,
+        // which is what it was before this existed. AFTER the action bridge, and that ordering is not
+        // cosmetic: the action bridge OWNS the 49 MB `Spell.dbc` fetch and starting a second one would
+        // starve the manifest (see its own header). `ensureLoaded` is idempotent, so this rides the same
+        // promise. It takes `this.art` because a buff icon is a BLP that has to be registered before
+        // `icon:SetTexture(path)` names it.
+        this.detachAuras = attachAuraBridge(runtime.vm, this.world, this.art);
       }
     }
     // THE RUNTIME ART SINK, before the load report and before anything can script a texture. See
@@ -1318,6 +1330,8 @@ export class WorldUiHost {
     this.detachGroup = null;
     this.detachChat?.();
     this.detachChat = null;
+    this.detachAuras?.();
+    this.detachAuras = null;
     this.detachContainers?.();
     this.detachContainers = null;
     this.detachStats?.();
