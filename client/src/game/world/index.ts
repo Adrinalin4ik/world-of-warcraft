@@ -649,6 +649,9 @@ export default class World extends EventEmitter {
    */
   private readonly hoverHighlight = new HoverHighlight();
 
+  /** Backing field for `hovered`. */
+  private _hovered: Unit | null = null;
+
   /**
    * Pick a unit (or null to clear), tell the server, and announce it.
    *
@@ -726,7 +729,19 @@ export default class World extends EventEmitter {
    * compare.
    */
   setHovered(unit: Unit | null) {
+    this._hovered = unit;
     this.hoverHighlight.setHovered(unit);
+  }
+
+  /**
+   * The unit under the pointer, or null -- the client's own `"mouseover"` token.
+   *
+   * Held here rather than asked of `HoverHighlight` because it is a fact about the WORLD that two
+   * consumers want: the brighten, and `world/unit-tokens.ts` resolving `"mouseover"` for a portrait.
+   * The highlight owns what to DO with it, not what it is.
+   */
+  get hovered(): Unit | null {
+    return this._hovered;
   }
 
   remove(entity: Unit) {
@@ -734,6 +749,9 @@ export default class World extends EventEmitter {
     // unit's model alive, and the lift itself is not worth clearing on materials about to be
     // disposed. `setTarget(null)` below covers the UI side of losing a target; this covers the glow.
     this.hoverHighlight.forget(entity);
+    if (this._hovered === entity) {
+      this._hovered = null;
+    }
     // A target that streams out or dies-and-decays stops being a target. Without this the UI would
     // keep painting a unit that is no longer in the scene, and `TargetFrame` would never hide.
     if (this.target === entity) {

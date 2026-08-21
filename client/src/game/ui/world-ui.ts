@@ -57,6 +57,7 @@ import { attachTrainerBridge } from './trainer-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { publishRects, clearRects } from './rects';
 import { ModelBooth } from './scene/model-booth';
+import { resolveUnitToken } from '../world/unit-tokens';
 import { publishArtSink, clearArtSink } from './runtime-art';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import { attachTargetBridge } from './target-bridge';
@@ -817,11 +818,12 @@ export class WorldUiHost {
    * The whole of the host's part in the model booth, and deliberately the narrowest thing that could
    * work: the booth knows nothing about units and this knows nothing about rendering.
    *
-   * Only `"player"` and `"target"` resolve, and that is not a shortcut -- those are the only two units
-   * this client tracks at all (`unit-bridge.ts:31`: "`pet`, `focus`, `targettarget` and the party/raid
-   * tokens are NOT"). The paper doll passes `"player"` (`paperdollframe.lua:159`) and so do the
-   * dress-up and tabard panes; `UnitFrame_Update` passes whichever unit its frame is bound to, so a
-   * party or pet portrait asks for a token nothing here can answer and the booth reports it once.
+   * WHICH TOKENS RESOLVE is `world/unit-tokens.ts`' business, not this method's, and that file states
+   * what it answers and what it declines. Today: `player`, `target`, `mouseover`, and `npc` -- the last
+   * from the guid the opening packet carried, which the gossip, merchant and trainer handlers each
+   * already keep as `source`. A token it cannot answer resolves to null and the pane draws nothing,
+   * which is why the booth's opaque portrait backdrop is gated on there being a figure rather than on
+   * the framing.
    *
    * A unit answers exactly one of the two supplies -- see `BoothSubject` -- and the KEY is what the
    * booth compares. For a character it is the look object itself, because `resolveCharacterLook` builds
@@ -834,7 +836,13 @@ export class WorldUiHost {
     if (world === null) {
       return null;
     }
-    const target = unit === 'player' ? world.player : unit === 'target' ? world.target : null;
+    // ONE PLACE resolves a token to an entity -- `world/unit-tokens.ts`. This used to be a ternary over
+    // `player` and `target`, which is why every NPC window's portrait was blank: the client asks for
+    // `"NPC"` (`merchantframe.lua:74`, `blizzard_trainerui.lua:75`, `gossipframe.lua`) and nothing
+    // answered. It is a module and not a third arm because the two sides need different things: the
+    // bridges push a `UnitSnapshot`, which carries NO GUID by design, while a portrait has to be baked
+    // from an entity's `characterLook` or `creatureDisplay`.
+    const target = resolveUnitToken(unit, world);
     if (!target) {
       return null;
     }
