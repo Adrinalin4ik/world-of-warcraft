@@ -95,6 +95,42 @@ export function installChatApi(vm: LuaVM): void {
   });
 
   /**
+   * `GetChatWindowMessages(index)` -> the message GROUPS that window subscribes to.
+   *
+   * REAL, and it is the difference between a chat frame that exists and one that ever shows anything.
+   * `ChatFrame_OnEvent`'s `UPDATE_CHAT_WINDOWS` arm does
+   * `ChatFrame_RegisterForMessages(self, GetChatWindowMessages(self:GetID()))`
+   * (`chatframe.lua:2510`), and `ChatFrame_RegisterForMessages` is the ONLY thing that calls
+   * `self:RegisterEvent` for a `CHAT_MSG_*` event (`:2297-2310`). Returning nothing therefore left every
+   * frame subscribed to nothing, and MEASURED: two real `SMSG_MESSAGECHAT` bodies decoded at login with
+   * zero residual and `DEFAULT_CHAT_FRAME:GetNumMessages()` stayed 0. The decode was never the problem.
+   *
+   * THE GROUP NAMES ARE THE CLIENT'S -- every one below is a key of `ChatTypeGroup`
+   * (`chatframe.lua:109` and on; 44 keys exist and a name that is not one is silently skipped by
+   * `ChatFrame_RegisterForMessages`, so a typo here would be invisible). THE SELECTION IS OURS, stated
+   * as such: it is the default General window's set, minus the groups whose feed this client does not
+   * have. Nothing is persisted here, so every load is a fresh install and this is what a fresh install
+   * shows.
+   *
+   * Window 1 only. Window 2 is the Combat Log in the real client and its groups come from
+   * `ChatFrame_ActivateCombatMessages` (`chatframe.lua:4376-4384`), whose feeds -- xp, honor, faction,
+   * tradeskills, pet info -- are composed client-side from other opcodes that this client does not turn
+   * into chat lines yet. Giving window 2 those groups would subscribe it to events nothing fires.
+   */
+  vm.registerFunction('GetChatWindowMessages', (args) => {
+    if (args[0] !== 1) {
+      return [];
+    }
+    return [
+      'SAY', 'EMOTE', 'YELL', 'WHISPER', 'PARTY', 'PARTY_LEADER', 'RAID', 'RAID_LEADER',
+      'RAID_WARNING', 'GUILD', 'OFFICER', 'MONSTER_SAY', 'MONSTER_YELL', 'MONSTER_EMOTE',
+      'MONSTER_WHISPER', 'MONSTER_BOSS_EMOTE', 'MONSTER_BOSS_WHISPER', 'SYSTEM', 'ERRORS',
+      'CHANNEL', 'AFK', 'DND', 'IGNORED', 'BG_NEUTRAL', 'BG_ALLIANCE', 'BG_HORDE',
+      'BATTLEGROUND', 'BATTLEGROUND_LEADER', 'ACHIEVEMENT', 'GUILD_ACHIEVEMENT',
+    ];
+  });
+
+  /**
    * The rest of what the chat chunk reaches, declared so the load report names each one.
    *
    * THE VALUES ARE NOT ARBITRARY -- each is what a client with no chat backend truthfully answers, and
@@ -117,7 +153,6 @@ export function installChatApi(vm: LuaVM): void {
       + 'authored size', []],
     ['GetChatWindowSavedPosition', 'no chat window layout is persisted, so each frame keeps its '
       + 'authored anchor', []],
-    ['GetChatWindowMessages', 'no chat settings are persisted', []],
     ['GetChatWindowChannels', 'no chat settings are persisted', []],
     ['AddChatWindowMessages', 'no chat settings are persisted', []],
     ['RemoveChatWindowMessages', 'no chat settings are persisted', []],

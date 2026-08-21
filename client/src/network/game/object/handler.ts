@@ -10,6 +10,7 @@ import { ReputationHandler } from './reputation';
 import { QuestHandler } from './quest';
 import { LevelUpHandler } from './level-up';
 import { GroupHandler } from './group';
+import { ChatMessageHandler } from './chat';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
 import { SpellHandler } from './spells';
@@ -79,6 +80,15 @@ export class ObjectHandler extends EventEmitter {
   public groupHandler: GroupHandler;
 
   /**
+   * CHAT. PUBLIC for the reason the others are: `ui/chat-bridge.ts` reads its lines to raise the
+   * client's own `CHAT_MSG_*` events, and this handler owns the only send of `CMSG_MESSAGECHAT`.
+   *
+   * NOT `network/game/chat/handler.js`, which is never constructed and has four independent faults
+   * that stop it running at all -- see `object/chat.ts`' header.
+   */
+  public chatHandler: ChatMessageHandler;
+
+  /**
    * TALKING TO AN NPC. PUBLIC for the same reason the others are: `ui/gossip-bridge.ts` reads the menu
    * to answer `GetGossipOptions`, and this handler owns the only sends of `CMSG_GOSSIP_HELLO`,
    * `CMSG_GOSSIP_SELECT_OPTION` and `CMSG_NPC_TEXT_QUERY`.
@@ -136,6 +146,7 @@ export class ObjectHandler extends EventEmitter {
     this.itemHandler = new ItemHandler(this.game);
     this.lootHandler = new LootHandler(this.game);
     this.groupHandler = new GroupHandler(this.game);
+    this.chatHandler = new ChatMessageHandler(this.game);
     this.gossipHandler = new GossipHandler(this.game);
     this.merchantHandler = new MerchantHandler(this.game);
     this.trainerHandler = new TrainerHandler(this.game);
