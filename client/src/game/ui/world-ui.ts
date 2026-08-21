@@ -55,7 +55,8 @@ import { attachQuestBridge } from './quest-bridge';
 import { attachLevelUpBridge } from './level-up-bridge';
 import { attachTrainerBridge } from './trainer-bridge';
 import { attachGroupBridge } from './group-bridge';
-import { publishRects, clearRects } from './rects';
+import { attachChatBridge } from './chat-bridge';
+import { publishRects, clearRects, setRectResolver, rectStats } from './rects';
 import { ModelBooth } from './scene/model-booth';
 import { resolveUnitToken } from '../world/unit-tokens';
 import { publishArtSink, clearArtSink } from './runtime-art';
@@ -277,6 +278,9 @@ export class WorldUiHost {
   /** `attachGroupBridge`'s teardown, held so `dispose` can run it. */
   private detachGroup: (() => void) | null = null;
 
+  /** `attachChatBridge`'s teardown, held so `dispose` can run it. */
+  private detachChat: (() => void) | null = null;
+
   /**
    * THE DRAW INSTRUMENT, on `window.uiDrawStats`.
    *
@@ -467,6 +471,22 @@ export class WorldUiHost {
     if (this.stopped) {
       return;
     }
+    /**
+     * THE RECT RESOLVER, INSTALLED BEFORE THE MANIFEST RUNS -- not on the first drawn frame.
+     *
+     * The client lays frames out during their own `OnLoad`, long before anything is rendered:
+     * `FCF_UpdateButtonSide` does `GetScreenWidth() - chatFrame:GetRight()`
+     * (`floatingchatframe.lua:1281`) from a chat frame's load path (`:167`). `rectOf` used to return null
+     * whenever no draw list had been published, so every such query answered nil and that line was
+     * arithmetic on nil -- which killed six of the seven chat windows.
+     *
+     * The viewport is read at CALL time, not captured here, so a resize before the first render still
+     * resolves against the real screen.
+     */
+    setRectResolver(() => this.root.layoutRects(
+      { width: window.innerWidth, height: window.innerHeight },
+      measureText,
+    ));
     const runtime = await bootWorldRuntime({
       root: this.root.root,
       art: this.art,
@@ -646,6 +666,10 @@ export class WorldUiHost {
         // `Spell.dbc` fetch -- `ensureLoaded` is idempotent, so this rides the same promise rather than
         // starting a second one.
         this.detachGroup = attachGroupBridge(runtime.vm, this.world);
+        // CHAT. Gated on a real session like the rest: every line is a packet, and an offline world has
+        // no server to have said anything. AFTER the group bridge for no reason but readability -- they
+        // share nothing, though the duel and party lines this unblocks are the group bridge's.
+        this.detachChat = attachChatBridge(runtime.vm, this.world);
       }
     }
     // THE RUNTIME ART SINK, before the load report and before anything can script a texture. See
@@ -679,6 +703,12 @@ export class WorldUiHost {
      * meant to hit instead of trusting a coordinate conversion it duplicated.
      */
     (window as never as Record<string, unknown>).worldUiInput = this.input;
+    /**
+     * `window.uiRectStats` -- how many whole-tree rect resolves the on-demand fallback has done and how
+     * long they took. The fallback is not free and the tree grows under it during the load, so this is
+     * the number that says whether it costs anything worth caring about.
+     */
+    (window as never as Record<string, unknown>).uiRectStats = rectStats;
     /**
      * THE OVERFLOW INSTRUMENT -- `uiTextExtent('VideoOptionsResolutionPanelSubText')`. See `textExtent`
      * for why a crop cannot answer this and why it borrows the draw pass's own calls rather than
@@ -729,8 +759,9 @@ export class WorldUiHost {
     // The third argument is the ON-DEMAND resolver, for a script that measures a frame in the same tick
     // it shows it -- `ToggleDropDownMenu`'s `Show()` then `GetCenter()`. A closure, not a precomputed
     // map: it runs only if `rectOf` misses, which for every existing caller is never.
-    publishRects(items, viewportUnits(viewport).height,
-      () => this.root.layoutRects(viewport, measureText));
+    // The resolver is installed once at boot (see `setRectResolver` above), not per frame -- it has to
+    // outlive the gap before the first draw, which is exactly where the chat frames were failing.
+    publishRects(items, viewportUnits(viewport).height);
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');
@@ -1285,6 +1316,8 @@ export class WorldUiHost {
     this.detachGossip = null;
     this.detachGroup?.();
     this.detachGroup = null;
+    this.detachChat?.();
+    this.detachChat = null;
     this.detachContainers?.();
     this.detachContainers = null;
     this.detachStats?.();
@@ -1296,6 +1329,7 @@ export class WorldUiHost {
     // The rect publication is module-level, so it OUTLIVES this host unless it is cleared -- exactly
     // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
     // stale draw list would have a remounted world's scripts reading the previous world's layout.
+    setRectResolver(null);
     clearRects();
     clearArtSink();
     this.input.detach();

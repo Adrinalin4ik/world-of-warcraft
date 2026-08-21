@@ -6,11 +6,14 @@
  * until the next `publishRects` was safe for one such sequence per frame and wrong for two -- which the
  * unit-popup submenus now do. It is keyed on `widget.ts#geometryRevision` instead.
  */
-import { publishRects, rectOf, clearRects } from '../rects';
+import { publishRects, rectOf, clearRects, setRectResolver } from '../rects';
 import { Widget, WidgetRoot } from '../widget';
 
 describe('the on-demand rect map', () => {
-  afterEach(() => clearRects());
+  afterEach(() => {
+    setRectResolver(null);
+    clearRects();
+  });
 
   it('re-resolves after a frame moves, instead of answering from the pre-move map', () => {
     const root = new WidgetRoot();
@@ -28,7 +31,10 @@ describe('the on-demand rect map', () => {
 
     // Nothing is in the DRAW list here -- these frames carry no art -- so every lookup below takes the
     // on-demand path, which is exactly the path under test.
-    publishRects([], viewport.height, () => root.layoutRects(viewport));
+    // The resolver is installed separately now -- `publishRects` must not carry it, or a frame with
+    // no third argument would null it. See `publishRects`.
+    setRectResolver(() => root.layoutRects(viewport));
+    publishRects([], viewport.height);
 
     const first = rectOf('a');
     expect(first).not.toBeNull();

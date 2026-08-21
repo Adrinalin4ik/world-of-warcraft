@@ -42,6 +42,40 @@ let byId: Map<string, Rect> | null = null;
 let screenHeight = 0;
 /** Resolves the WHOLE tree's rects on demand. See `rectOf`'s fallback. */
 let resolveAll: (() => Map<string, Rect>) | null = null;
+
+/**
+ * How many on-demand resolves have happened, and how long they took in total.
+ *
+ * Published so the cost of the fallback is a NUMBER rather than a claim -- `resolveAnchors` over the
+ * whole tree is not free, and during the manifest load the tree grows under it so the cache invalidates
+ * often. Read via `window.uiRectStats`.
+ */
+export const rectStats = { resolves: 0, ms: 0 };
+
+/**
+ * Install the whole-tree resolver, SEPARATELY from `publishRects`.
+ *
+ * **This is what makes a rect answerable before the first frame is ever drawn**, and that turned out to
+ * matter more than the hidden/shown question it was reported as. `rectOf` used to return null whenever no
+ * draw list had been published yet, so EVERY geometry query during the manifest load answered nil --
+ * including `FCF_UpdateButtonSide`'s `GetScreenWidth() - chatFrame:GetRight()`
+ * (`floatingchatframe.lua:1281`), reached from a chat frame's own load path (`:167`), which is arithmetic
+ * on nil and killed six of the seven chat windows.
+ *
+ * The reported symptom was "a HIDDEN frame answers nil". Hidden was never the cause: `layoutRects` walks
+ * the whole tree regardless of `shown`, and `resolveAnchors` emits a rect for every node it is given
+ * (including an unanchored one -- `unplaceableNodes` filters the DRAW list, not the rect map). The cause
+ * was the `items === null` early return, i.e. "asked before anything was drawn".
+ *
+ * **THIS CANNOT PUT A FRAME IN THE DRAW LIST**, which is the constraint that matters: `layoutRects`
+ * returns a `Map` and never touches `drawList`, so the `items` count -- the offscreen target's whole
+ * basis -- is untouched by construction, not merely by intention.
+ */
+export function setRectResolver(resolveEverything: (() => Map<string, Rect>) | null): void {
+  resolveAll = resolveEverything;
+  allRects = null;
+  allRectsRevision = -1;
+}
 /** The on-demand map. */
 let allRects: Map<string, Rect> | null = null;
 /**
@@ -63,25 +97,29 @@ let allRectsRevision = -1;
  * to the other needs the viewport's height in the same logical units, and reading it from anywhere
  * else risks the two disagreeing on the frame the window was resized.
  */
-export function publishRects(
-  list: DrawItem[],
-  screenHeightUnits: number,
-  resolveEverything?: () => Map<string, Rect>,
-): void {
+export function publishRects(list: DrawItem[], screenHeightUnits: number): void {
   items = list;
   byId = null;
-  allRects = null;
-  allRectsRevision = -1;
-  resolveAll = resolveEverything ?? null;
   screenHeight = screenHeightUnits;
+  /**
+   * **THIS MUST NOT TOUCH THE RESOLVER, AND A TEST CAUGHT IT DOING SO.** The resolver used to arrive as
+   * a third argument here, so once it moved to `setRectResolver` this function was still assigning
+   * `resolveAll = undefined ?? null` on every frame -- nulling at the first render the very thing
+   * installed at boot. The chat frames would have been fixed during the manifest load and broken again
+   * the moment anything drew, which is a worse failure than the original because it looks fixed.
+   *
+   * `allRects` is NOT cleared either: it is keyed on `layoutRevision()`, which is the honest invalidator.
+   * A new draw list does not move a rect, so throwing the map away per frame would just pay for a
+   * re-resolve that returns the same answers.
+   */
 }
 
 /** The last resolved rect for a widget id, or null when it was not drawn. */
 export function rectOf(id: string): Rect | null {
-  if (items === null) {
-    return null;
-  }
-  if (byId === null) {
+  // NO EARLY RETURN ON A MISSING DRAW LIST. That return is what made every geometry query during the
+  // manifest load answer nil; see `setRectResolver`. With no draw list there is simply nothing drawn to
+  // prefer, so the on-demand resolve below is the only answer -- and it is a real one.
+  if (items !== null && byId === null) {
     byId = new Map();
     // FIRST occurrence wins: a StatusBar contributes its frame and its bar-fill region under related
     // ids, and the outer frame is pushed first. Nothing today collides on an identical id, and if
@@ -92,7 +130,7 @@ export function rectOf(id: string): Rect | null {
       }
     }
   }
-  const drawn = byId.get(id);
+  const drawn = byId === null ? undefined : byId.get(id);
   if (drawn !== undefined) {
     return drawn;
   }
@@ -120,8 +158,11 @@ export function rectOf(id: string): Rect | null {
   if (resolveAll !== null) {
     const revision = layoutRevision();
     if (allRects === null || allRectsRevision !== revision) {
+      const started = performance.now();
       allRects = resolveAll();
       allRectsRevision = revision;
+      rectStats.resolves += 1;
+      rectStats.ms += performance.now() - started;
     }
     return allRects.get(id) ?? null;
   }
