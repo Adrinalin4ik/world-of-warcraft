@@ -192,6 +192,17 @@ export class TrainerHandler extends EventEmitter {
   /** The last refusal, for the instrument and a console line. Cleared when a list arrives. */
   public lastError: { code: number; spellId: number; guid: string } | null = null;
 
+  /**
+   * WHAT `SMSG_TRAINER_LIST`'s HEADER SAID, stashed the instant it is read and BEFORE the row loop.
+   *
+   * Its only purpose is the residual diagnostic in `record`, and the "before the row loop" placement is
+   * the whole point: if the row stride is wrong the loop either over-reads and THROWS or under-reads
+   * and leaves a remainder, and in the throwing case the count is the one thing still needed to tell
+   * those two apart. Reading it out of `this.services.length` afterwards would give the wrong number in
+   * exactly the case that matters.
+   */
+  private lastHeader: { count: number; greetingBytes: number } | null = null;
+
   constructor(gameHandler: GameHandler) {
     super();
     // `this.game` FIRST -- `subscribe` reads it. Same order as `MerchantHandler`'s constructor.
@@ -231,8 +242,34 @@ export class TrainerHandler extends EventEmitter {
     });
   }
 
-  /** One `spellWire` row. The trainer opcodes share that instrument rather than growing a second. */
+  /**
+   * One `spellWire` row -- and for `SMSG_TRAINER_LIST` it does not merely report the residual, it says
+   * WHICH KIND OF LAYOUT ERROR a nonzero one is.
+   *
+   * **THIS IS THE DISCRIMINATOR THE COORDINATOR ASKED FOR, and it is arithmetic rather than judgement.**
+   * A widened field and an inserted field need different fixes, and the residual tells them apart in one
+   * reading, because the body is `16 + count * stride + greeting + 1` and only the row term scales:
+   *
+   *  - **`residualPerRow` is a whole number** -> the error is INSIDE THE ROW and it is that many bytes
+   *    per row. A field widened (`u8` -> `u32` is +3) or one was inserted (+4 for a word). Fix: the row.
+   *  - **`residualPerRow` is null** (the residual does not divide by the count) -> the row stride is
+   *    right and something in the HEADER or the TRAILER moved. Fix: the 16-byte header or the greeting.
+   *  - **the kind ends `!THREW`** -> we over-read, so our stride is too LARGE, which the two cases above
+   *    cannot express. `count` is still recorded because it was stashed before the loop.
+   *
+   * A second, independent signal is free: `greeting` is the LAST field, so a wrong stride garbles it.
+   * A residual of 0 with a legible greeting is the layout being right; a residual of 0 with a garbled
+   * greeting would mean two errors cancelling, which is worth knowing is possible.
+   *
+   * This exists because the round's own unit test cannot catch a wrong width -- it builds its body from
+   * the same widths the decoder reads, so it proves self-consistency and nothing else. Eleven silent
+   * width defects on this project say the instrument has to do that job instead.
+   */
   private record(kind: WireKind, bodySize: number, consumed: number): void {
+    const residual = bodySize - consumed;
+    const count = this.lastHeader?.count ?? 0;
+    // Only meaningful for the list, and only when there were rows to divide by.
+    const perRow = residual !== 0 && count > 0 && residual % count === 0 ? residual / count : null;
     spellWire.record({
       at: Date.now(),
       kind,
@@ -241,7 +278,14 @@ export class TrainerHandler extends EventEmitter {
       detail: {
         services: this.services.length,
         trainerType: this.trainerType,
+        // Kept SHORT but kept: a garbled greeting is the second signal that the stride is wrong.
         greeting: this.greeting.slice(0, 40),
+        wireCount: count,
+        residual,
+        // `null` is a real answer here and not "unknown" -- see the doc comment. It means the residual
+        // is not a per-row error.
+        residualPerRow: perRow,
+        greetingBytes: this.lastHeader?.greetingBytes ?? 0,
       },
       bodySize,
       consumed,
@@ -265,6 +309,9 @@ export class TrainerHandler extends EventEmitter {
     const guid = this.readFullGuid(gp);
     const trainerType = gp.readUnsignedInt() >>> 0;
     const count = gp.readUnsignedInt() >>> 0;
+    // BEFORE the row loop, so the residual diagnostic in `record` has the count even if the loop
+    // throws. See `lastHeader`.
+    this.lastHeader = { count, greetingBytes: 0 };
     const services: TrainerService[] = [];
     for (let i = 0; i < count; ++i) {
       const spellId = gp.readUnsignedInt() >>> 0;
@@ -298,6 +345,9 @@ export class TrainerHandler extends EventEmitter {
       });
     }
     const greeting = gp.readCStr();
+    // The terminator counts: the trailer is `greeting + 1`, which is what makes `16 + count * 38 +
+    // greetingBytes` add up to the body when the layout is right.
+    this.lastHeader = { count, greetingBytes: greeting.length + 1 };
 
     const reopened = this.source !== null && this.source === guid;
     this.source = guid;
