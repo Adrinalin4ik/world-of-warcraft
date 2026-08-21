@@ -743,8 +743,25 @@ export default class World extends EventEmitter {
    * compare.
    */
   setHovered(unit: Unit | null) {
+    /**
+     * ON THE TRANSITION ONLY, and that guard is a performance requirement rather than tidiness.
+     *
+     * The pick runs on a 100 ms cadence and calls this every time, so without the guard everything
+     * downstream churns ten times a second whether or not the pointer moved between units -- including
+     * the `mouseover` token push and the tooltip below, which would dirty the interface draw-list
+     * fingerprint and hand back the 4-7.5 ms the offscreen target buys on ~92% of frames.
+     */
+    if (this._hovered === unit) {
+      return;
+    }
     this._hovered = unit;
     this.hoverHighlight.setHovered(unit);
+    /**
+     * The client's own `"mouseover"` token changed. `ui/unit-bridge.ts` listens and is what pushes the
+     * snapshot and drives `GameTooltip:SetUnit` -- the same division `target:change` already uses, so
+     * this class keeps no VM and no tooltip knowledge.
+     */
+    this.emit('hover:change', unit);
   }
 
   /**

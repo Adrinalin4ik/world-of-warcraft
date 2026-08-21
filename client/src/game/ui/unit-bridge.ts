@@ -60,6 +60,16 @@ const OBJECT_TYPE_PLAYER = 4;
 const POWER_EVENT = ['UNIT_MANA', 'UNIT_RAGE', 'UNIT_FOCUS', 'UNIT_ENERGY', 'UNIT_HAPPINESS', null, 'UNIT_RUNIC_POWER'];
 const MAX_POWER_EVENT = ['UNIT_MAXMANA', 'UNIT_MAXRAGE', 'UNIT_MAXFOCUS', 'UNIT_MAXENERGY', 'UNIT_MAXHAPPINESS', null, 'UNIT_MAXRUNIC_POWER'];
 
+/** The hover tooltip's failure, said once. A mouse-move must not spam the console. */
+let hoverTooltipWarned = false;
+function warnHoverTooltipOnce(message: string): void {
+  if (hoverTooltipWarned) {
+    return;
+  }
+  hoverTooltipWarned = true;
+  console.warn(`the world hover tooltip raised: ${message}`);
+}
+
 /** A unit's live state as one snapshot. Pure -- it reads, it does not write. */
 export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   const snapshot = emptySnapshot();
@@ -241,6 +251,50 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
     return fired;
   };
 
+  /**
+   * THE WORLD HOVER TOOLTIP -- "При наведении на юнита должен появляться тултип."
+   *
+   * `"mouseover"` is pushed here, and the tooltip is driven through the CLIENT'S OWN globals.
+   *
+   * **There is no FrameXML driver for this and that is not an omission on our part.** Grepped the whole
+   * served manifest: no `UPDATE_MOUSEOVER_UNIT` handler exists and nothing outside `unitframe.lua` calls
+   * `GameTooltip:SetUnit`. In the real client the ENGINE fills and shows this tooltip when the cursor
+   * rests on a unit, so being the engine is exactly our job here -- and it is done by calling
+   * `GameTooltip_SetDefaultAnchor` and `GameTooltip:SetUnit`, both of which the client defines
+   * (`gametooltip.lua:72`, `methods/gametooltip.ts`), rather than by drawing anything.
+   *
+   * `UPDATE_MOUSEOVER_UNIT` is fired too. Nothing in the manifest handles it, so it changes nothing
+   * today -- it is fired because an ADDON is entitled to it and running addons is the point of this
+   * runtime.
+   *
+   * ## Cost
+   *
+   * `World#setHovered` guards on the transition, so this runs on a real hover CHANGE and not on the
+   * pick's 100 ms cadence. The tooltip lands at `GameTooltip_SetDefaultAnchor`'s fixed position -- the
+   * bottom-right of `UIParent`, which is where the real client puts a world unit's tooltip -- so it does
+   * NOT follow the pointer and therefore does not dirty the draw-list fingerprint per frame. Two dirty
+   * frames per hover: one to show, one to hide.
+   */
+  const onHoverChange = (unit: Unit | null): void => {
+    push('mouseover', unit);
+    fireEvent(vm, 'UPDATE_MOUSEOVER_UNIT');
+    // `GameTooltip` may not exist yet -- the bridges attach before the manifest finishes on some
+    // paths -- so this is guarded rather than assumed, the same way the token pushes are.
+    const error = vm.run(
+      unit === null
+        ? 'if GameTooltip then GameTooltip:Hide() end'
+        : 'if GameTooltip and GameTooltip_SetDefaultAnchor then'
+          + ' GameTooltip_SetDefaultAnchor(GameTooltip, UIParent);'
+          + ' if GameTooltip:SetUnit("mouseover") then GameTooltip:Show() end'
+          + ' end',
+      'hover-tooltip',
+    );
+    if (error !== null) {
+      // Reported once rather than every hover: a broken tooltip must not spam the console on mouse move.
+      warnHoverTooltipOnce(error.message);
+    }
+  };
+
   const onFields = (unit: Unit): void => {
     if (unit === world.player) {
       push('player', unit);
@@ -406,6 +460,7 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
   });
 
   world.on('unit:fields', onFields);
+  world.on('hover:change', onHoverChange);
   world.on('target:change', onTargetChange);
   spells.on('comboPoints', pushCombo);
   combat.on('attack:swing', onSwing);
@@ -424,6 +479,7 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
 
   return () => {
     world.removeListener('unit:fields', onFields);
+    world.removeListener('hover:change', onHoverChange);
     world.removeListener('target:change', onTargetChange);
     spells.removeListener('comboPoints', pushCombo);
     combat.removeListener('attack:swing', onSwing);

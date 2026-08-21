@@ -63,6 +63,7 @@ import { getAction } from '../api/actions';
 import { getSpellbook } from '../api/spells';
 import { layoutScale, measureText } from '../../../text';
 import { getItemTooltipSource, ItemTooltipInfo, ItemTooltipSource } from '../api/items';
+import { getUnit } from '../api/units';
 
 /**
  * The eight `$parentTextLeft<n>` slots `GameTooltipTemplate` authors -- and no longer the ceiling.
@@ -588,6 +589,106 @@ const GAMETOOLTIP: MethodTable = {
    * The `alpha` argument (slot 4) is dropped: `FontSpec.color` is an `#rrggbb` string with nowhere to put
    * a channel, the same reason `region.ts`'s `FONTSTRING.SetTextColor` drops it.
    */
+  /**
+   * `GameTooltip:SetUnit(unit, hideStatus)` -> whether it filled anything.
+   *
+   * Owner: "При наведении на юнита должен появляться тултип." This is the engine method behind BOTH the
+   * world hover and a unit FRAME's hover -- `UnitFrame_UpdateTooltip` is
+   * `GameTooltip_SetDefaultAnchor(GameTooltip, self); if ( GameTooltip:SetUnit(self.unit, ...) )`
+   * (`unitframe.lua:144-154`), and it colours line 1 itself afterwards with `GameTooltip_UnitColor`.
+   *
+   * **THE WORLD HOVER HAS NO FrameXML DRIVER AT ALL**, and that is worth writing down because it is the
+   * opposite of what this project usually finds. Grepped the whole served manifest: there is no
+   * `UPDATE_MOUSEOVER_UNIT` handler anywhere and no caller of `GameTooltip:SetUnit` outside
+   * `unitframe.lua`. In the real client the ENGINE fills and shows this tooltip when the cursor rests on
+   * a unit. So the host must drive it -- and it drives it by calling the client's own globals rather
+   * than drawing anything, because there is no script to defer to.
+   *
+   * ## The line content, and which parts are authored
+   *
+   * The FORMAT STRINGS are the client's own, read out of the VM at call time so a localised
+   * `GlobalStrings.lua` is honoured and nothing here hardcodes English:
+   *
+   *     PLAYER_LEVEL               = "Level %s %s %s"   globalstrings.lua:5678
+   *     UNIT_TYPE_LEVEL_TEMPLATE   = "Level %d %s"      :7892
+   *     UNIT_LEVEL_TEMPLATE        = "Level %d"         :7858
+   *     UNIT_LETHAL_LEVEL_TEMPLATE = "Level ??"         :7856
+   *
+   * `PLAYER_LEVEL` is the same string `PaperDollFrame_SetLevel` uses for the character sheet, with the
+   * same three substitutions in the same order, so the player line is not a choice at all.
+   *
+   * **WHAT IS OURS, stated as earlier rounds stated the item tooltip's line order:** that line 1 is the
+   * name and line 2 the level line, and that a creature's second substitution is its CLASSIFICATION
+   * word rather than its creature TYPE. The ordering is in no served file -- the engine owns it -- so it
+   * is taken from what the real client displays. The classification substitution is a FORCED choice, not
+   * a preference: `UNIT_TYPE_LEVEL_TEMPLATE`'s `%s` is the creature type in the real client, and **this
+   * client has no creature type.** `SMSG_CREATURE_QUERY_RESPONSE` gives us `name` and `rank` only
+   * (`object/combat.ts:70-74`), so `UnitCreatureType` has no source and is deliberately NOT registered
+   * -- inventing "Humanoid" would be the plausible-and-wrong failure the rules forbid. An elite reads
+   * "Level 12 Elite"; a normal creature falls back to `UNIT_LEVEL_TEMPLATE`, "Level 12".
+   *
+   * The `??` case is reachable and not decoration: `UNIT_LETHAL_LEVEL_TEMPLATE` is what the engine shows
+   * when the level is unknowable, signalled as a NEGATIVE `UnitLevel`. Ours cannot produce one today
+   * (`UnitLevel` floors at 0 from `fields.level`), so the branch is there for the day it can rather than
+   * being faked.
+   *
+   * Returns `[false]` for a token nothing occupies, which is what makes `UnitFrame_UpdateTooltip` clear
+   * `self.UpdateTooltip` instead of polling a tooltip that will never fill.
+   */
+  SetUnit: (ctx, self, args) => {
+    const token = String(args[0] ?? '');
+    const unit = getUnit(ctx.vm, token);
+    if (unit === null || unit.name === null || unit.name === '') {
+      return [false];
+    }
+    const state = stateOf(widgetOf(ctx, self));
+    state.lines = 0;
+    clearFrom(ctx, self, 1);
+    appendLine(ctx, self, unit.name, null, undefined, undefined, false);
+
+    // The client's own strings, read live. A missing one means `GlobalStrings.lua` did not load, and the
+    // line is SKIPPED rather than guessed -- a tooltip with a name and no level beats one reading
+    // "Level %d".
+    const str = (name: string): string | null => {
+      const value = ctx.vm.getGlobal(name);
+      return typeof value === 'string' && value !== '' ? value : null;
+    };
+    // `%d` and `%s` only, positionally -- the four templates above use nothing else.
+    const fmt = (template: string, ...values: Array<string | number>): string => {
+      let index = 0;
+      return template.replace(/%[ds]/g, () => {
+        const value = values[index] ?? '';
+        index += 1;
+        return String(value);
+      });
+    };
+
+    const level = unit.level;
+    let line: string | null = null;
+    if (level < 0) {
+      line = str('UNIT_LETHAL_LEVEL_TEMPLATE');
+    } else if (unit.isPlayer) {
+      const template = str('PLAYER_LEVEL');
+      // Race and class are the same pair the character sheet substitutes, and both answer nil until
+      // `ChrRaces`/`ChrClasses` land -- in which case an empty substitution is the honest one.
+      line = template === null ? null
+        : fmt(template, level, unit.race?.name ?? '', unit.classInfo?.name ?? '').trim();
+    } else if (unit.classification !== 'normal') {
+      // The classification word is the client's own too: `ELITE`, `RARE`, `BOSS` are GlobalStrings.
+      const word = str(unit.classification.toUpperCase()) ?? unit.classification;
+      const template = str('UNIT_TYPE_LEVEL_TEMPLATE');
+      line = template === null ? null : fmt(template, level, word);
+    } else {
+      const template = str('UNIT_LEVEL_TEMPLATE');
+      line = template === null ? null : fmt(template, level);
+    }
+    if (line !== null && line !== '') {
+      appendLine(ctx, self, line, null, undefined, undefined, false);
+    }
+    resize(ctx, self);
+    return [true];
+  },
+
   SetText: (ctx, self, args) => {
     const state = stateOf(widgetOf(ctx, self));
     state.lines = 0;
@@ -1012,7 +1113,8 @@ const TOOLTIP_SETTER_GAPS: Array<[string, string]> = [
   ['SetQuestLogSpecialItem', 'no quest log is decoded'],
   ['SetLFGDungeonReward', 'no LFG feed is decoded'],
   ['SetLFGCompletionReward', 'as SetLFGDungeonReward'],
-  ['SetUnit', 'the unit tooltip needs a hover feed the world pass does not raise'],
+  // `SetUnit` has LEFT this list -- it is real below. Its note used to read "needs a hover feed the
+  // world pass does not raise"; the pick has raised one since the cursor work.
 ];
 for (const [name, reason] of TOOLTIP_SETTER_GAPS) {
   ITEM_SETTERS[name] = notImplemented(`GameTooltip:${name}`, reason, [false]);
