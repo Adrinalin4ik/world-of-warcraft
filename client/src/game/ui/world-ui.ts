@@ -59,6 +59,7 @@ import { attachGroupBridge } from './group-bridge';
 import { attachChatBridge } from './chat-bridge';
 import { publishRects, clearRects, setRectResolver, rectStats } from './rects';
 import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
+import { createQuadMaterial } from './material';
 import { ModelBooth } from './scene/model-booth';
 import { resolveUnitToken } from '../world/unit-tokens';
 import { publishArtSink, clearArtSink } from './runtime-art';
@@ -984,14 +985,24 @@ export class WorldUiHost {
   /** One quad, built on first use. Same recipe as `sweepQuad`. */
   private cursorQuadOf(): THREE.Mesh {
     if (this.cursorQuad === null) {
-      const material = new THREE.MeshBasicMaterial({
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-        // The composite is premultiplied and this quad is drawn into the same canvas after it, so the
-        // icon's own alpha must be premultiplied too or a soft edge reads as a bright halo.
-        premultipliedAlpha: true,
-      });
+      // THROUGH THE SHARED FACTORY, and that is the fix for the icon VANISHING rather than a tidy-up.
+      //
+      // This used to hand-build a `MeshBasicMaterial`. That was survivable while the icon drew through
+      // the Y-UP composite camera and merely came out flipped; the moment it moved to `cursorCamera`
+      // -- Y-DOWN, which is what makes an uploaded BLP upright -- it disappeared completely, because a
+      // Y-down projection has a NEGATIVE Y scale, a mirror reverses triangle winding, three compensates
+      // only for winding flips from an OBJECT's world-matrix determinant and never from the camera's,
+      // and a hand-built material defaults to `FrontSide`. So the quad presented its back face and was
+      // culled: "draw calls are issued, triangles are counted, and not one pixel lands" --
+      // `material.ts:98-104`, which documents this exact failure for every other UI quad and is why
+      // `createQuadMaterial` has set `DoubleSide` all along.
+      //
+      // Taking the factory rather than adding `side` here is the point: the Y-down camera's
+      // requirements now live in ONE place for this quad too, so the next hand-built material cannot
+      // reintroduce it. `'ALPHA'` is the icon's blend and `premultipliedAlpha` is true for the reason
+      // that comment already gives -- this draws into the same canvas the premultiplied composite just
+      // wrote, so straight alpha would read as a bright halo on a soft edge.
+      const material = createQuadMaterial('ALPHA', true);
       const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
       quad.frustumCulled = false;
       quad.matrixAutoUpdate = false;
