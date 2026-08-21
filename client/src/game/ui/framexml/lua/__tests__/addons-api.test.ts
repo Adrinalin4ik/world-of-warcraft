@@ -14,7 +14,7 @@ import { installAddOnsApi, markAddOnLoaded } from '../api/addons';
  * shape, are the whole of what the client depends on -- and they are asserted from Lua rather than from
  * TypeScript so the test exercises the same multiple-return path the client does.
  *
- * **Written because round 30 fixed a silent lie one layer below this**: `world-runtime.ts#runAddOn`
+ * **Written because round 36 (trainers) fixed a silent lie one layer below this**: `world-runtime.ts#runAddOn`
  * answered `true` whenever an addon's `.toc` had been fetched, even when none of the files it named
  * could be resolved -- which is the reported-and-unchased shape "returns true and the addon does not
  * load". It now answers false in that case, and false HAS to arrive here as a usable reason string,

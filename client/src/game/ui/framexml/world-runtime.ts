@@ -382,7 +382,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     /**
      * HOW MANY OF THE ADDON's FILES ACTUALLY RAN, and it is what this function's `true` now means.
      *
-     * **SELF-REVIEW, round 30: `runAddOn` returned `true` whenever the `.toc` had been fetched --
+     * **SELF-REVIEW, round 36 (trainers): `runAddOn` returned `true` whenever the `.toc` had been fetched --
      * even when every file it named was missing, and even when it named none at all.** That made
      * `LoadAddOn`'s success a lie in exactly the shape a round had already reported and not chased
      * ("returns true and the addon does not load"): `UIParentLoadAddOn` branches on that boolean and
