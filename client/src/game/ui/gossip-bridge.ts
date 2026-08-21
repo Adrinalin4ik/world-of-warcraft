@@ -47,6 +47,7 @@ import { GlueArt } from './art';
 import { setUnit } from './framexml/lua/api/units';
 import { snapshotOf } from './unit-bridge';
 import type { GossipHandler } from '../../network/game/object/gossip';
+import { expandTextTokens } from './text-tokens';
 
 /**
  * `GOSSIP_ICON_*` -> the stem `GossipFrameOptionsUpdate` concatenates. See the header on how the set
@@ -141,7 +142,15 @@ export function attachGossipBridge(vm: LuaVM, world: World, art: GlueArt): () =>
    * be a claim that the NPC said nothing, which is different from not knowing yet. The text arrives on
    * `SMSG_NPC_TEXT_UPDATE` and `GOSSIP_SHOW` re-fires when it does.
    */
-  vm.registerFunction('GetGossipText', () => [gossip.greeting]);
+  vm.registerFunction('GetGossipText', () => [
+    // Tokens expanded here and NOT in the handler, because the raw text is what the server sent and
+    // is what a residual is checked against. `$c` in a greeting is what the owner reported seeing.
+    //
+    // NIL IS PRESERVED DELIBERATELY. `expandTextTokens` answers '' for a nullish input, and the
+    // header above explains why that would be wrong here: an empty string claims the NPC said
+    // nothing, which is not the same as not knowing yet while the second round trip is out.
+    gossip.greeting == null ? gossip.greeting : expandTextTokens(vm, gossip.greeting),
+  ]);
 
   vm.registerFunction('GetNumGossipOptions', () => [gossip.options.length]);
 
