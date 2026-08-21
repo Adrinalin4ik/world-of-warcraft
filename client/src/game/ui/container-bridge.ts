@@ -1502,13 +1502,38 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    * and cannot follow it. Every string, the `>= 3` threshold and the typed word
    * (`DELETE_ITEM_CONFIRM_STRING = "DELETE"`, `globalstrings.lua:1971`) are the client's own.
    *
-   * The body is `u8 bag, u8 slot, u8 count` -- exactly three fields, read off the server that acts on
-   * it: TrinityCore 3.3.5 `Server/Packets/ItemPackets.cpp`'s `DestroyItem::Read` is
-   * `>> ContainerId >> SlotNum >> Count`. **`count = 0` means the WHOLE STACK**, the wire's own
-   * convention and what the reference records for the same opcode
-   * (`benilla-protocol/src/messages/items.rs:711-719`); that reference builds a 6-byte body for 1.12
-   * with three trailing bytes the server discards, and those are deliberately NOT sent here because
-   * this build's own reader does not name them.
+   * ## THE BODY IS SIX BYTES, NOT THREE, AND THE THREE-BYTE VERSION DESTROYED NOTHING AT ALL
+   *
+   * The owner: "также не могу выкинуть предметы из инвентаря." The confirmation appeared, Accept
+   * dispatched, this global sent its packet -- and the item stayed. **The packet was malformed and the
+   * server dropped it without a word.**
+   *
+   * `u8 ContainerId, u8 SlotNum, u32 Count` -- read off `DestroyItem::Read` together with
+   * `ItemPackets.h:169-171`, where `Count` is a **`uint32`**. Six bytes. This used to write three, so
+   * the server's `ByteBuffer >> uint32` read past the end of the body, threw, and the whole packet was
+   * discarded -- no `SMSG_INVENTORY_CHANGE_FAILURE`, no reply of any kind, which is exactly why the
+   * gesture looked inert rather than refused.
+   *
+   * **AND THE PREVIOUS COMMENT HERE REASONED ITS WAY INTO THE BUG, which is worth preserving.** It
+   * said: the reference "builds a 6-byte body for 1.12 with three trailing bytes the server discards,
+   * and those are deliberately NOT sent here because this build's own reader does not name them." The
+   * reference does exactly that -- `vec![bag, slot, count, 0, 0, 0]` (`items.rs:711-719`), with
+   * `count` a `u8` and three bytes vmangos reads and throws away.
+   *
+   * They are not padding in 3.3.5a. **They are the high three bytes of the `u32` count.** So the
+   * reference's own six bytes would have worked verbatim -- with `count = 0` a `u8` plus three zeros is
+   * byte-identical to a little-endian `u32` zero -- and trimming what looked like 1.12 slack is what
+   * broke it. The lesson is the inverse of the usual one: here the reference's BYTES were right and its
+   * EXPLANATION of them was wrong for this build, so a change made on the strength of the explanation
+   * regressed a packet that would otherwise have been correct by accident.
+   *
+   * This is the **sixth** silently-widened count in this area (the vendor row's word count,
+   * `CMSG_SELL_ITEM`, `CMSG_REPAIR_ITEM`'s trailing byte, `BUYBACK_SLOT_START`, `CMSG_SPLIT_ITEM`'s
+   * `i32`, and now this). WotLK widened its counts and every widening is silent: the body is simply
+   * short and nothing complains.
+   *
+   * **`count = 0` still means the WHOLE STACK** -- the wire's own convention, unchanged, and what the
+   * reference records for the same opcode.
    *
    * The cursor is cleared only after the send, and the source slot's lock is announced so the bag
    * repaints the row it just gave up.
@@ -1523,11 +1548,12 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       return [];
     }
     const gp = new GamePacket(
-      GameOpcode.CMSG_DESTROYITEM, GamePacket.HEADER_SIZE_OUTGOING + 3,
+      GameOpcode.CMSG_DESTROYITEM, GamePacket.HEADER_SIZE_OUTGOING + 2 + 4,
     );
     gp.writeUnsignedByte(src[0] & 0xff);
     gp.writeUnsignedByte(src[1] & 0xff);
-    gp.writeUnsignedByte(0); // count 0 = the whole stack
+    // A u32, NOT a u8 -- see the doc comment. 0 = the whole stack.
+    gp.writeUnsignedInt(0);
     world.game.send(gp);
     lockChanged(held.bag, held.slot);
     holdItem(null, null);
