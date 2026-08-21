@@ -76,7 +76,10 @@ still a number that agreed with you.
   between reads. This has now voided four measurement arms: a `uiDrawStats` replaced mid-run, a
   portrait cost arm that captured 2 frames, a `GetScript` that read `nil` then `function`, and a
   `UIErrorsFrame` arm that went "in draw list" → "not registered" and tore the VM down. A handle that
-  changes answer between two reads is the host settling, not the feature.
+  changes answer between two reads is the host settling, not the feature. Capture the reference AFTER the mount
+  settles, and validate one you are holding by running a trivial chunk through it: a disposed copy
+  keeps its object graph but its `lua_State` is gone, so touching it dies inside fengari rather than
+  returning an error.
 - **A silent gap is indistinguishable from a bug, and the load report is not where the owner looks.**
   Fifteen unit-popup rows read as broken when 26 of them were honest `notImplemented` gaps. An
   **action** the owner invoked should say so where he already sees refusals — `UIErrorsFrame`, the
