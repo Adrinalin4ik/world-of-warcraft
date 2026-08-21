@@ -283,6 +283,20 @@ export class QuestHandler extends EventEmitter {
   /** questId -> template, once the query has answered. */
   public templates = new Map<number, QuestTemplate>();
 
+  /**
+   * questId -> its TITLE, seeded by any giver panel that carried one.
+   *
+   * **This exists because the owner's log counted 1 and listed nothing.** The list is built from the
+   * template cache, so a quest whose `CMSG_QUEST_QUERY` has not answered yet -- or whose answer was
+   * lost -- was counted by the descriptor and omitted from the entry list, which the quest log renders
+   * as "No Active Quests" beside a header reading "Quests: 1/25". The accept panel already carried the
+   * title, so the log can name a freshly accepted quest with no round trip at all.
+   *
+   * A title is enough to LIST a quest; the description and the objectives still need the template, and
+   * a row with no detail is honest (it says which quest you have) where an absent row is not.
+   */
+  public titles = new Map<number, string>();
+
   /** Quest ids whose query is in flight, so the same quest is asked for once. */
   private queried = new Set<number>();
 
@@ -426,6 +440,18 @@ export class QuestHandler extends EventEmitter {
     const questId = gp.readUnsignedInt() >>> 0;
     this.lastQuestId = questId;
     this.lastTitle = '';
+    // **RELEASED WHATEVER HAPPENS BELOW.** `queryTemplate` dedupes on `queried`, so an arm that threw
+    // half-way used to leave the id in it for ever -- one bad decode and that quest could never be
+    // asked for again, which the quest log renders as a permanently missing row. The `finally` makes a
+    // failure retryable on the next descriptor edge instead of terminal.
+    try {
+      this.decodeTemplate(gp, questId);
+    } finally {
+      this.queried.delete(questId);
+    }
+  }
+
+  private decodeTemplate(gp: GamePacket, questId: number): void {
     const method = gp.readUnsignedInt() >>> 0;
     // SIGNED: a quest level of -1 means "scales to the player", the same marker `gossip.ts` reads
     // signed for exactly this reason.
@@ -548,7 +574,9 @@ export class QuestHandler extends EventEmitter {
       );
     }
     this.templates.set(questId, template);
-    this.queried.delete(questId);
+    if (template.title !== '') {
+      this.titles.set(questId, template.title);
+    }
     this.emit('questTemplate', template);
   }
 
@@ -662,6 +690,9 @@ export class QuestHandler extends EventEmitter {
     gp.index = chosen.cursor;
     this.awaiting.delete(chosen.questId);
 
+    if (chosen.title !== '') {
+      this.titles.set(chosen.questId, chosen.title);
+    }
     this.source = chosen.npc;
     this.details = chosen;
     this.offer = null;
@@ -805,6 +836,9 @@ export class QuestHandler extends EventEmitter {
     gp.index = chosen.cursor;
     this.awaiting.delete(chosen.questId);
 
+    if (chosen.title !== '') {
+      this.titles.set(chosen.questId, chosen.title);
+    }
     this.source = chosen.npc;
     this.offer = chosen;
     this.details = null;
@@ -962,6 +996,9 @@ export class QuestHandler extends EventEmitter {
       );
     }
 
+    if (title !== '') {
+      this.titles.set(questId, title);
+    }
     this.source = npc;
     this.progress = {
       npc, questId, title, requestText, requiredMoney, requiredItems, isComplete,
@@ -1004,6 +1041,9 @@ export class QuestHandler extends EventEmitter {
       const level = gp.readInt();
       gp.readUnsignedByte(); // flags -- WotLK; the repeatable/daily marker
       const title = gp.readCStr();
+      if (title !== '') {
+        this.titles.set(questId, title);
+      }
       quests.push({ questId, icon, level, title });
     }
     this.lastQuestId = 0;

@@ -178,3 +178,60 @@ test('every outgoing quest body is the width 3.3.5a reads', () => {
   expect(widthOf(GameOpcode.CMSG_QUESTGIVER_CANCEL)).toBe(0);
   expect(widthOf(GameOpcode.CMSG_QUEST_QUERY)).toBe(4);
 });
+
+/**
+ * A GIVER PANEL NAMES THE QUEST, so the log can list it before `CMSG_QUEST_QUERY` answers.
+ *
+ * The owner's log read **"Quests: 1/25"** beside **"No Active Quests"**: the header counts the
+ * descriptor and the list was built from the TEMPLATE cache, so a query that had not answered -- or
+ * whose answer was lost -- produced a count with no rows, an unopenable row and an empty objectives
+ * tracker, all from one gap.
+ *
+ * Two things are asserted, and both are what make that impossible rather than merely unlikely:
+ *
+ *  1. `SMSG_QUESTGIVER_QUEST_DETAILS` seeds `titles`, so the quest the player just accepted is
+ *     nameable with no round trip.
+ *  2. A template decode that THROWS releases the in-flight id, so the quest can be asked for again on
+ *     the next descriptor edge. It used to stay in `queried` for ever, which made one bad decode a
+ *     permanently missing row.
+ */
+test('a giver panel seeds the title, and a failed template query stays retryable', () => {
+  const game = fakeGame();
+  const handler = new QuestHandler(game);
+  const npc = '0xf130000337003477';
+
+  // The accept panel, in the 3.3.5a shape: two guids, then the id and the three strings.
+  const guid8 = [0x77, 0x34, 0x00, 0x37, 0x03, 0x00, 0x30, 0xf1];
+  handler.queryQuest(18, npc);
+  game.emit('packet:receive:SMSG_QUESTGIVER_QUEST_DETAILS', incoming(
+    GameOpcode.SMSG_QUESTGIVER_QUEST_DETAILS,
+    [
+      // The sharer guid is a FULL u64 -- eight bytes, not four. Writing it short made the decode read
+      // the quest id out of the title ("Brot" = 1953460802), which is the fixture making the same class
+      // of mistake the layouts themselves are guarded against.
+      ...guid8, ...u32(0), ...u32(0), ...u32(18),
+      ...cstr('Brotherhood of Thieves'), ...cstr('Bandanas, please.'), ...cstr('Bring 8.'),
+      0, ...u32(0), ...u32(0), 0,
+      ...u32(0), // no choices
+      ...u32(0), // no rewards
+      ...u32(0), // money
+      ...u32(250), // xp
+    ],
+  ));
+  expect(handler.details?.questId).toBe(18);
+  // (1) The title is now known WITHOUT the template.
+  expect(handler.templates.has(18)).toBe(false);
+  expect(handler.titles.get(18)).toBe('Brotherhood of Thieves');
+
+  // (2) A truncated query response throws inside the arm; the id must still be released.
+  handler.queryTemplate(4242);
+  expect(game.sent.some((p: GamePacket) => p.opcode === GameOpcode.CMSG_QUEST_QUERY)).toBe(true);
+  const before = game.sent.length;
+  game.emit('packet:receive:SMSG_QUEST_QUERY_RESPONSE', incoming(
+    GameOpcode.SMSG_QUEST_QUERY_RESPONSE, [...u32(4242), ...u32(2)],
+  ));
+  expect(handler.templates.has(4242)).toBe(false);
+  // Retryable: the second ask goes out, where before the `queried` entry blocked it for ever.
+  handler.queryTemplate(4242);
+  expect(game.sent.length).toBe(before + 1);
+});

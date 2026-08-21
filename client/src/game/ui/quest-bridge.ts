@@ -80,7 +80,7 @@
  */
 import type World from '../world';
 import { LuaVM } from './framexml/lua/vm';
-import { notImplemented } from './framexml/lua/methods/region';
+import { notImplemented, warnOnce } from './framexml/lua/methods/region';
 import { fireEvent } from './framexml/lua/events';
 import { GlueArt } from './art';
 import { setUnit } from './framexml/lua/api/units';
@@ -101,6 +101,13 @@ import { QUEST_STATE, QuestLogSlot } from '../../network/game/object/update-obje
  * `1..numEntries` and branches on the fifth return (`questlogframe.lua:401-430`). So the header rows
  * are the ENGINE's, built here; nothing on the wire carries them.
  */
+/**
+ * The `zoneOrSort` bucket for a quest whose template has not landed. Not a real zone id -- the field is
+ * signed and small in practice, so a large negative cannot collide with an `AreaTable` or `QuestSort`
+ * row.
+ */
+const NO_ZONE = -999999;
+
 interface LogEntry {
   isHeader: boolean;
   /** Header rows: the zone or sort name. Quest rows: unused. */
@@ -154,6 +161,20 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     .sort((a, b) => a.slot - b.slot);
 
   const templateOf = (questId: number): QuestTemplate | null => quest.templates.get(questId) ?? null;
+
+  /**
+   * The quest's title from ANY source: the template when it has landed, else whatever giver panel named
+   * it. Null when this client genuinely does not know the quest's name, which is the only case where
+   * omitting it from the list is honest.
+   */
+  const titleOf = (questId: number): string | null => {
+    const fromTemplate = templateOf(questId)?.title;
+    if (typeof fromTemplate === 'string' && fromTemplate !== '') {
+      return fromTemplate;
+    }
+    const seeded = quest.titles.get(questId);
+    return typeof seeded === 'string' && seeded !== '' ? seeded : null;
+  };
 
   /**
    * `zoneOrSort` -> the header label.
@@ -213,13 +234,24 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     for (const row of rows) {
       quest.queryTemplate(row.questId);
     }
-    const known = rows.filter((row) => templateOf(row.questId) !== null);
+    // **A TITLE IS THE BAR FOR LISTING, NOT A WHOLE TEMPLATE, and that is the fix for the owner's
+    // "Quests: 1/25" beside "No Active Quests".** Requiring the template made the entry list and the
+    // header count read different sources -- `GetNumQuestLogEntries` returns `entries.length` and
+    // `world.player.questLog.size` -- so any lost or slow `CMSG_QUEST_QUERY` produced a count of 1 and
+    // an empty list, with no way to open the row and nothing for the objectives tracker to read.
+    //
+    // `quest.titles` is seeded by every giver panel, so a quest accepted a moment ago is named with no
+    // round trip at all. The description and objectives still come from the template and fill in when
+    // it lands; a row that names the quest and lacks its detail is honest, an absent row is not.
+    const known = rows.filter((row) => titleOf(row.questId) !== null);
     // Group by `zoneOrSort`, keeping each group's quests in descriptor order and the groups in the
     // order their first quest appears. The real client sorts alphabetically by header; this keeps the
     // log stable across repaints, which is what matters for a selection held by index.
     const groups = new Map<number, QuestLogSlot[]>();
     for (const row of known) {
-      const zone = templateOf(row.questId)!.zoneOrSort;
+      // NO TEMPLATE YET means no zone yet. `NO_ZONE` groups those together and its header is
+      // suppressed below rather than drawn blank.
+      const zone = templateOf(row.questId)?.zoneOrSort ?? NO_ZONE;
       const bucket = groups.get(zone);
       if (bucket === undefined) {
         groups.set(zone, [row]);
@@ -229,9 +261,15 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     }
     const next: LogEntry[] = [];
     for (const [zone, bucket] of groups) {
-      next.push({
-        isHeader: true, header: headerFor(zone), slot: -1, questId: 0, zoneOrSort: zone,
-      });
+      // A header row is only worth a line when it has a NAME. A quest whose zone is unknown -- no
+      // template yet, or a `zoneOrSort` neither DBC names -- lists without one, which the client's own
+      // loop handles (it branches on the fifth return, and a headerless run is just quests).
+      const header = zone === NO_ZONE ? '' : headerFor(zone);
+      if (header !== '') {
+        next.push({
+          isHeader: true, header, slot: -1, questId: 0, zoneOrSort: zone,
+        });
+      }
       if (collapsed.has(zone)) {
         continue;
       }
@@ -240,6 +278,18 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
           isHeader: false, header: '', slot: row.slot, questId: row.questId, zoneOrSort: zone,
         });
       }
+    }
+    // THE DISAGREEMENT CAN NEVER BE SILENT AGAIN. This is exactly the symptom the owner reported and
+    // there was nothing in the console about it: the header counts the descriptor and the list counts
+    // what could be named, so a gap between them is a real defect and says which quest ids are missing.
+    const listed = next.filter((row) => !row.isHeader).length;
+    if (listed < rows.length) {
+      const missing = rows.filter((row) => titleOf(row.questId) === null).map((row) => row.questId);
+      warnOnce(
+        `quest log: ${rows.length} quests in the descriptor and ${listed} listed -- no title yet for `
+        + `${missing.join(', ')}. The header will read a higher count than the list shows until `
+        + 'SMSG_QUEST_QUERY_RESPONSE lands for them.',
+      );
     }
     revision += 1;
     const same = next.length === entries.length
@@ -623,8 +673,37 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
 
   // -- The giver panels: actions ------------------------------------------------------------------
 
+  /**
+   * `AcceptQuest()` -- and then BACK TO THE GIVER'S PAGE.
+   *
+   * The owner: accepting should return to the gossip list, as it does in the real client; ours closed
+   * and stopped. **Nothing in the client's own Lua re-opens it** -- grepped `questframe.lua`, whose
+   * only `Gossip` references are the six icon paths in the greeting panel -- and the server's reply is
+   * `SMSG_GOSSIP_COMPLETE`, which by design CLOSES the window (`object/gossip.ts#close`). So the
+   * re-show is the engine's, and it is done here by re-sending the hello the menu was opened with.
+   *
+   * **Gated on the door actually having been a gossip menu.** `gossip.source` is non-null only while a
+   * menu is open, and it is captured BEFORE the accept because `SMSG_GOSSIP_COMPLETE` clears it. A
+   * quest reached from `SMSG_QUESTGIVER_QUEST_LIST` (a giver with no gossip text) has no gossip session
+   * to return to, and one reached from a quest item has no giver at all; both correctly do nothing.
+   *
+   * `gossipHandler.hello` is called rather than re-implemented -- that send belongs to the merchant
+   * path's file and there is one copy of it. This is a read of their public API and changes nothing in
+   * it.
+   *
+   * **Labelled honestly: the re-send is matched to the owner's observation of the real client, not to a
+   * cited file.** 3.3.5a's own `HandleQuestgiverAcceptQuestOpcode` ends in `SendCloseGossip()`, so the
+   * SERVER closes the window; how the retail client comes back to the list is not something this
+   * project can read. A second hello is the mechanism that produces the observed behaviour with the
+   * packets we have, and it costs one round trip on a gesture the player just made.
+   */
   fn('AcceptQuest', () => {
+    const gossip = world.game.objectHandler.gossipHandler;
+    const giver = gossip.source;
     quest.acceptQuest();
+    if (giver !== null) {
+      gossip.hello(giver);
+    }
     return [];
   });
 
@@ -754,7 +833,9 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
       complete = 1;
     }
     return [
-      template?.title ?? null,
+      // The same any-source title `rebuild` listed the row on -- these two must never disagree, or the
+      // list would show a row whose title reads nil and `QuestLogTitleButton_Resize` would raise on it.
+      titleOf(row.questId),
       template?.level ?? 0,
       // `questTag` is the "Elite"/"Dungeon"/"PvP" suffix, from the template's `type`. Nil rather than
       // an invented string: the mapping is `QuestInfo.dbc`, which is not loaded, and
