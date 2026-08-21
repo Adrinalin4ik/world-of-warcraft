@@ -228,6 +228,11 @@ A comment that invents a source, or that still describes a gap now closed, is tr
   "Learn <skill>", and `isAbandonable` returning 0 put an Unlearn button on every skill -- with a comment
   directly above it that already said a truthy value would do exactly that. Writing the warning down is
   not the same as returning nil.
+- **A wire test that builds its fixture from the widths it reads proves SELF-CONSISTENCY, not
+  correctness.** It cannot catch a wrong width, which is the most repeated defect class in this project
+  — eleven instances across items, merchants and quests, every one silent. Only a **residual against
+  real traffic** settles a layout: decode a captured body and assert nothing is left over. Until a
+  packet has been through that, say "self-consistent" rather than "verified".
 - **A field widened between 1.12 and 3.3.5a fails SILENTLY, with no reply at all.** Six have been found
   in the item area alone: the vendor row (7 words → 8), `CMSG_SELL_ITEM`'s count (`u8` → `u32`),
   `CMSG_REPAIR_ITEM` (16 B → 17), `BUYBACK_SLOT_START` (69 → 74), `CMSG_SPLIT_ITEM`'s count
