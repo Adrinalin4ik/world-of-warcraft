@@ -37,6 +37,11 @@ function emptyRow(id: number, description: string): SpellRow {
     rangeIndex: 0,
     manaCostPercentage: 0,
     effect: [0, 0, 0],
+    // Three columns another round added to `SpellRow` after this fixture was written; zeroed like the
+    // rest, because a fixture states only what its test is about.
+    effectApplyAuraName: [0, 0, 0],
+    effectMiscValue: [0, 0, 0],
+    dispelType: 0,
     effectBasePoints: [0, 0, 0],
     effectDieSides: [0, 0, 0],
     effectRealPointsPerLevel: [0, 0, 0],

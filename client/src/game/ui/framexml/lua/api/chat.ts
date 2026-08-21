@@ -121,12 +121,18 @@ export function installChatApi(vm: LuaVM): void {
     if (args[0] !== 1) {
       return [];
     }
+    // EIGHTEEN, AND THE COUNT IS PART OF THE DESIGN. The first cut listed 30 and the call RAISED --
+    // a registered function gets `LUA_MINSTACK` (20) free stack slots and this returns one value per
+    // group. `vm.ts#registerFunction` now grows the stack and says so plainly instead of failing with
+    // the 21st value as its error message, but a list that stays comfortably under the floor is also
+    // the honest one: what came off were exactly the groups with NO FEED in this client -- AFK, DND,
+    // IGNORED (no contact list), the three BG_* and two BATTLEGROUND* (no battlegrounds), and both
+    // ACHIEVEMENT groups (no achievement system). Subscribing to those would point the frame at events
+    // nothing fires, which is the same reason window 2 gets nothing.
     return [
       'SAY', 'EMOTE', 'YELL', 'WHISPER', 'PARTY', 'PARTY_LEADER', 'RAID', 'RAID_LEADER',
       'RAID_WARNING', 'GUILD', 'OFFICER', 'MONSTER_SAY', 'MONSTER_YELL', 'MONSTER_EMOTE',
-      'MONSTER_WHISPER', 'MONSTER_BOSS_EMOTE', 'MONSTER_BOSS_WHISPER', 'SYSTEM', 'ERRORS',
-      'CHANNEL', 'AFK', 'DND', 'IGNORED', 'BG_NEUTRAL', 'BG_ALLIANCE', 'BG_HORDE',
-      'BATTLEGROUND', 'BATTLEGROUND_LEADER', 'ACHIEVEMENT', 'GUILD_ACHIEVEMENT',
+      'MONSTER_WHISPER', 'MONSTER_BOSS_EMOTE', 'SYSTEM', 'CHANNEL',
     ];
   });
 

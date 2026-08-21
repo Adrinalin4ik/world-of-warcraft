@@ -91,6 +91,12 @@ interface MessageFrameState {
    * screen.
    */
   buffer: { text: string; color: string | null; id: number | null }[];
+  /**
+   * The outline/monochrome flags string, remembered but not styled -- `FontSpec` has no field for it.
+   * Kept because `FCF_SetChatWindowFontSize` reads it with `GetFont` and writes it back with `SetFont`,
+   * so dropping it would reset a style the player chose every time the size changed.
+   */
+  fontFlags: string;
 }
 
 /**
@@ -132,7 +138,7 @@ function stateOf(frameId: number): MessageFrameState {
   if (state === undefined) {
     state = {
       frameId, lines: [], regions: [], holdSeconds: 5, insertTop: true,
-      maxLines: MAX_LINES, scrollOffset: 0, fading: true, buffer: [],
+      maxLines: MAX_LINES, scrollOffset: 0, fading: true, buffer: [], fontFlags: '',
     };
     stateByFrame.set(frameId, state);
   }
@@ -542,6 +548,79 @@ const SCROLLINGMESSAGEFRAME: MethodTable = {
     return [];
   },
   GetTimeVisible: (ctx, self) => [stateOf(self).holdSeconds],
+
+  /**
+   * `GetFont()` -> `file, size, flags` and `SetFont(file, size, flags)` -- **FRAME-LEVEL on this class,
+   * and their absence was the last thing standing between a decoded message and a visible line.**
+   *
+   * MEASURED. `ChatFrame_OnEvent`'s `UPDATE_CHAT_WINDOWS` arm reads:
+   *
+   *     local fontFile, unused, fontFlags = self:GetFont();      -- chatframe.lua:2503
+   *     self:SetFont(fontFile, fontSize, fontFlags);
+   *     ...
+   *     ChatFrame_RegisterForMessages(self, GetChatWindowMessages(self:GetID()));   -- :2510
+   *
+   * so the raise at 2503 happened SEVEN LINES BEFORE the registration, and
+   * `ChatFrame_RegisterForMessages` is the only thing in the client that registers a frame for a
+   * `CHAT_MSG_*` event. Every earlier fix in this area -- the widget class, `GetChatTypeIndex`, a real
+   * `GetChatWindowMessages`, firing `UPDATE_CHAT_WINDOWS` -- was necessary and none of them was
+   * sufficient, because this arm never got past its third line. The console said
+   * `attempt to call a nil value (method 'GetFont')` and nothing else did.
+   *
+   * A `ScrollingMessageFrame` is not a FontString, so this is not the `FontString:GetFont` another
+   * round added: on this class the font belongs to the frame and every line region inherits it. The
+   * PROTOTYPE region is the store -- `regionsOf` copies its `FontSpec` into each new line, so writing
+   * the prototype is what makes the next line use the new font. Existing lines are re-fonted too,
+   * because the real client's font change is immediate and a half-restyled scrollback would be worse
+   * than either state.
+   *
+   * TWO DELIBERATE DEVIATIONS, both stated rather than hidden. The engine's first return is a font
+   * FILE PATH; this returns the `FontSpec` FAMILY (`FRIZQT`, ...), because that is what this renderer
+   * keys fonts by and the only consumer round-trips the value straight back into `SetFont`. And of the
+   * `flags` string only `OUTLINE` is applied -- it is the one styling bit `FontSpec` can express;
+   * `MONOCHROME` and `THICKOUTLINE` have no field and are remembered in `fontFlags` so that
+   * `FCF_SetChatWindowFontSize`'s read-modify-write does not reset a style the player chose.
+   */
+  GetFont: (ctx, self) => {
+    const state = stateOf(self);
+    const regions = regionsOf(ctx, state);
+    const font = regions[0]?.font ?? null;
+    if (font === null) {
+      // The engine answers nothing for a frame with no font yet, and `chatframe.lua:2502` guards the
+      // whole block on `fontSize > 0`, so nothing here divides by it.
+      return [];
+    }
+    return [font.family ?? '', font.size ?? 14, state.fontFlags];
+  },
+  SetFont: (ctx, self, args) => {
+    const state = stateOf(self);
+    const regions = regionsOf(ctx, state);
+    const file = typeof args[0] === 'string' ? args[0] : null;
+    const size = typeof args[1] === 'number' && args[1] > 0 ? args[1] : null;
+    if (typeof args[2] === 'string') {
+      state.fontFlags = args[2];
+    }
+    for (const region of regions) {
+      if (region.font === null) {
+        continue;
+      }
+      if (file !== null) {
+        region.font.family = file;
+      }
+      if (size !== null) {
+        region.font.size = size;
+      }
+      // OUTLINE is the one flag `FontSpec` can actually express, so it is applied rather than only
+      // remembered. `MONOCHROME` and `THICKOUTLINE` have no field and ride along in `fontFlags`.
+      if (typeof args[2] === 'string') {
+        region.font.outline = /OUTLINE/i.test(args[2]);
+      }
+    }
+    // The line height changed, so the window onto the buffer holds a different number of lines.
+    windowInto(state, regions);
+    reflow(state, regions);
+    return [];
+  },
 
   /** `SetInsertMode("TOP"|"BOTTOM")` -- the method form of the XML attribute. */
   SetInsertMode: (ctx, self, args) => {

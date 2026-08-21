@@ -152,6 +152,27 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
     pending.push(...still);
   };
 
+  /**
+   * **FIRE `UPDATE_CHAT_WINDOWS` ONCE, BECAUSE THE ENGINE DOES AND NOTHING HERE DID.**
+   *
+   * MEASURED: with `GetChatWindowMessages` returning a real group list, `ChatFrame1.messageTypeList`
+   * was still empty and `ChatFrame1:IsEventRegistered("CHAT_MSG_SAY")` was FALSE -- so two real
+   * `SMSG_MESSAGECHAT` bodies decoded with zero residual and reached nothing. The return value was
+   * never the blocker; the TRIGGER was.
+   *
+   * `ChatFrame_RegisterForMessages` is the only thing that registers a frame for a `CHAT_MSG_*` event
+   * (`chatframe.lua:2297-2310`), and its only caller is `ChatFrame_OnEvent`'s `UPDATE_CHAT_WINDOWS`
+   * arm (`:2510`). That event is engine-fired at login, alongside `UPDATE_CHAT_COLOR`. Both are fired
+   * here, once, when the bridge attaches -- which is after the manifest has built the frames, so every
+   * `ChatFrame<N>` is present to receive it.
+   *
+   * The same ordering lesson as `unit-bridge.ts#seedUnitSnapshots`: the real client has this state
+   * before the UI asks, and a bridge that attaches later has to say so explicitly rather than wait for
+   * an edge that will never come.
+   */
+  fireEvent(vm, 'UPDATE_CHAT_COLOR');
+  fireEvent(vm, 'UPDATE_CHAT_WINDOWS');
+
   chat.on('line', onLine);
   // `unit:fields` is what `applyPlayerName` ends with, so it is the edge a resolved name arrives on --
   // the same door `unit-bridge.ts` and the nameplate walker already listen at, rather than a new one.

@@ -116,6 +116,14 @@ const EVENT_SUFFIX = new Map<number, string>(
   Object.entries(ChatMsg).map(([name, value]) => [value as number, name]),
 );
 
+/**
+ * `LANG_COMMON`. See `send` for why this is not `LANG_UNIVERSAL` (0) and why that mattered.
+ *
+ * From `Languages.dbc`'s own id space, which the reference also uses (`benilla-protocol`'s chat module
+ * sends a real language rather than 0). Alliance only -- Horde is `LANG_ORCISH` (1).
+ */
+const LANG_COMMON = 7;
+
 /** The types whose sender prefix is `u32 len` + name, then the receiver guid. */
 const NAMED_SENDER = new Set<number>([
   ChatMsg.MONSTER_SAY, ChatMsg.MONSTER_PARTY, ChatMsg.MONSTER_YELL, ChatMsg.MONSTER_WHISPER,
@@ -285,9 +293,20 @@ export class ChatMessageHandler extends EventEmitter {
     const body = 4 + 4 + cstrBytes(prefix) + cstrBytes(text);
     const gp = new GamePacket(GameOpcode.CMSG_MESSAGECHAT, GamePacket.HEADER_SIZE_OUTGOING + body);
     gp.writeUnsignedInt(type);
-    // LANG_UNIVERSAL. A race language needs `Languages.dbc` joined to the player's race, which this
-    // client does not read; universal is what every server accepts and what a GM client sends.
-    gp.writeUnsignedInt(0);
+    // **LANG_COMMON (7), NOT LANG_UNIVERSAL (0), AND THAT DISTINCTION WAS MEASURED.**
+    //
+    // A `/say` sent with language 0 produced NO ECHO AT ALL -- and a say is echoed to its own sender,
+    // so silence means the server discarded the packet. `LANG_UNIVERSAL` is not a language any player
+    // KNOWS; TrinityCore checks the sender can speak the language before it broadcasts, and a failed
+    // check returns without a reply. That is the same "no reply at all" signature this project has
+    // been bitten by eleven times over a wrong width, arriving here from a wrong VALUE instead.
+    //
+    // 7 is Common. **A DECLARED LIMIT: this is the ALLIANCE language.** Horde speaks Orcish (1), and
+    // choosing correctly needs the player's race joined to `Languages.dbc`, which this client does not
+    // read -- the same gap `api/chat.ts#GetDefaultLanguage` declares while answering `Common, 7`. A
+    // Horde character will have their say refused until that join exists, which is honest and visible
+    // rather than silent, because the refusal is total.
+    gp.writeUnsignedInt(LANG_COMMON);
     if (prefix !== null) {
       gp.writeCString(prefix);
     }
