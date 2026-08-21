@@ -491,7 +491,21 @@ export function attachTrainerBridge(vm: LuaVM, world: World, art: GlueArt): () =
       + ' the service list is flat and there is nothing to collapse',
       [],
     );
-    fn(name, () => stub(null as never, 0, []));
+    fn(name, () => {
+      stub(null as never, 0, []);
+      // **AND IT SAYS SO ON SCREEN, because these are reached by a BUTTON.**
+      // `ClassTrainerCollapseAllButton` is enabled whenever the trainer has a service, and its
+      // `OnClick` calls one of these with 0 ("all"), so a silent return is a button that visibly does
+      // nothing -- indistinguishable from a bug, which `CLAUDE.md` forbids. Getters stay silent; an
+      // action the player chose does not. The wording is ours because 3.3.5a ships no string for
+      // "this client produces no headers".
+      vm.run(
+        'if UIErrorsFrame then UIErrorsFrame:AddMessage('
+        + '"This trainer list has no groups to collapse.", 1.0, 0.1, 0.1, 1.0) end',
+        'trainer-collapse-gap.lua',
+      );
+      return [];
+    });
   }
 
   // -- The tooltip --------------------------------------------------------------------------------
@@ -601,11 +615,41 @@ export function attachTrainerBridge(vm: LuaVM, world: World, art: GlueArt): () =
     fireEvent(vm, 'TRAINER_CLOSED');
   };
 
+  /**
+   * THE SERVER REFUSED TO TEACH, AND IT NOW SAYS SO ON SCREEN.
+   *
+   * **A REFUSAL THE PLAYER CAUSED BY CLICKING MUST NOT BE SILENT, and this was a `console.warn` only.**
+   * Nothing in the interface handles this event -- `ClassTrainerFrame_OnLoad` registers just
+   * `TRAINER_UPDATE` and `TRAINER_DESCRIPTION_UPDATE` -- so pressing Train and having the server
+   * decline looked exactly like a broken button. That is the failure mode that made fifteen menu rows
+   * read as bugs for a whole round.
+   *
+   * `UIErrorsFrame:AddMessage` is the client's own red refusal line, the same door
+   * `group-bridge.ts:717` and `quest-bridge.ts:652` already use.
+   *
+   * **The words for reason 1 are the CLIENT'S OWN**: `ERR_NOT_ENOUGH_MONEY`, "You don't have enough
+   * money." (`globalstrings.lua:3307`), read through the global so the localisation is the game's
+   * rather than ours. **No served string names reasons 0 and 2** (grepped `globalstrings.lua` for every
+   * `ERR_*` naming a skill, a learn or an unavailable spell), so those fall back to a plain sentence
+   * instead of a faked GlobalString -- said here rather than hidden.
+   *
+   * The reason CODES are sourced: `Trainer::FailReason` is `Unavailable = 0, NotEnoughMoney = 1,
+   * NotEnoughSkill = 2` (TrinityCore 3.3.5 `Entities/Creature/Trainer.h:46-51`), read rather than
+   * recalled, and each is raised from a named branch of `Trainer::TeachSpell`.
+   */
   const onBuyFailed = (payload: { code: number; spellId: number }): void => {
     console.warn(
       `trainer: the server refused to teach spell ${payload.spellId} -- reason ${payload.code}`
-      + ` (${BUY_FAILED_REASON[payload.code] ?? 'unmapped'}). The reason MAPPING is a server-side`
-      + ' source; the number is the wire\'s. See ui/trainer-bridge.ts.',
+      + ` (${BUY_FAILED_REASON[payload.code] ?? 'unmapped'}).`,
+    );
+    // The global NAME is chosen here; the TEXT comes out of the client's own table. The `or` covers a
+    // build that spells the global differently, so this can never print "nil" at the player.
+    const named = payload.code === 1 ? 'ERR_NOT_ENOUGH_MONEY or ' : '';
+    const fallback = (BUY_FAILED_REASON[payload.code] ?? 'the trainer refused').replace(/"/g, '');
+    vm.run(
+      `if UIErrorsFrame then UIErrorsFrame:AddMessage(${named}`
+      + `"Cannot learn: ${fallback}.", 1.0, 0.1, 0.1, 1.0) end`,
+      'trainer-buy-failed.lua',
     );
     onUpdate();
   };
@@ -628,25 +672,24 @@ export function attachTrainerBridge(vm: LuaVM, world: World, art: GlueArt): () =
   });
 
   /**
-   * A SPELL WAS LEARNED WHILE THE TRAINER IS OPEN -- re-ask for the list.
+   * A SPELL WAS LEARNED WHILE THE TRAINER IS OPEN -- re-fire the update, and send NOTHING.
    *
-   * **SELF-REVIEW: this closes a hole in the purchase path that the `SMSG_TRAINER_BUY_SUCCEEDED`
-   * re-list does not cover.** That re-list is the primary refresh (`object/trainer.ts#handleBuySucceeded`),
-   * but it depends on the server actually sending that opcode -- and the buy path is the one arm this
-   * round could not exercise, so "the server sends it" is an assumption and not a measurement. The
-   * learned-spell edge is INDEPENDENT of it: `SMSG_LEARNED_SPELL`/`SMSG_SUPERCEDED_SPELL` are how the
-   * spell reaches the book at all, so if the player got the ability, this fires.
+   * **SELF-REVIEW, AND THE FIRST VERSION OF THIS SENT A SECOND `CMSG_TRAINER_LIST`.** It was added as
+   * belt-and-braces on the assumption that `SMSG_TRAINER_BUY_SUCCEEDED` might not arrive. It does:
+   * `Trainer::TeachSpell` ends with `player->LearnSpell(...)` and then `SendTeachSucceeded(...)`,
+   * unconditionally (TrinityCore 3.3.5 `Entities/Creature/Trainer.cpp:112-117`) -- READ, not recalled.
+   * So both edges fire on every purchase, and re-listing from both meant **two `CMSG_TRAINER_LIST` per
+   * learn, two replies and two full window redraws** -- exactly the churn the offscreen target exists
+   * to avoid.
    *
-   * Only while a window is open, and it CANNOT loop: a list arrival raises `trainerUpdate`, which
-   * changes no spells, so nothing re-enters here. Cost is one packet per spell learned at a trainer,
-   * and zero at every other time.
+   * So this sends nothing. It only re-fires `TRAINER_UPDATE`, which is still worth doing: the
+   * ability-prerequisite answers (`GetTrainerServiceAbilityReq`'s `hasReq`) come out of the known set,
+   * so they change on a learn even when no service's state byte does. The authoritative refresh -- the
+   * state bytes -- stays with the single re-list in `object/trainer.ts#handleBuySucceeded`.
    */
   const spells = world.game.objectHandler.spellHandler;
   const onSpellsChanged = (): void => {
-    if (disposed || trainer.source === null) {
-      return;
-    }
-    trainer.list(trainer.source);
+    onUpdate();
   };
 
   trainer.on('trainerShow', onShow);

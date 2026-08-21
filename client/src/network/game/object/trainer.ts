@@ -21,11 +21,23 @@
  * ## THE LAYOUTS ARE 3.3.5a's, READ OFF A SERVER IMPLEMENTATION, AND LABELLED AS SUCH
  *
  * Same class of source and same caveat as `merchant.ts`, `gossip.ts`, `items.ts` and `loot.ts`: nothing
- * in the game's own data states a packet body, so these come from **TrinityCore's `3.3.5` branch**
- * (`game/Handlers/NPCHandler.cpp`, `WorldSession::SendTrainerList` and
- * `WorldSession::HandleTrainerBuySpellOpcode`). **The 1.12 reference is NOT used**: the merchant round
- * on this project found it silently wrong about four numbers, so it is not consulted for a body here at
- * all.
+ * in the game's own data states a packet body. **These were READ, not recalled** -- TrinityCore's
+ * `3.3.5` branch, and specifically:
+ *
+ *  - `game/Server/Packets/NPCPackets.h:108-117` -- `struct TrainerListSpell`, the field list and their
+ *    declared widths;
+ *  - `game/Server/Packets/NPCPackets.cpp:96-117` -- `TrainerList::Write()`, the field ORDER, which is
+ *    what actually goes on the wire;
+ *  - `game/Server/Packets/NPCPackets.cpp:130-134` -- `TrainerBuySpell::Read()`, i.e. the READ order and
+ *    not a declaration order (`STATE.md`'s own rule after `CMSG_SPLIT_ITEM`);
+ *  - `game/Server/Packets/NPCPackets.cpp:136-151` -- the two buy replies;
+ *  - `game/Entities/Creature/Trainer.h:31-51` -- `Trainer::Type`, `Trainer::SpellState` and
+ *    `Trainer::FailReason`, so all three enums below are quoted rather than reconstructed;
+ *  - `game/Entities/Creature/Trainer.cpp:80-118` -- `TeachSpell`, which is where the reputation
+ *    discount is applied and where the success reply is sent from.
+ *
+ * **The 1.12 reference is NOT used**: the merchant round on this project found it silently wrong about
+ * four numbers, so it is not consulted for a body here at all.
  *
  * **NO REAL PACKET HAS BEEN DECODED YET, AND THE UNIT TEST DOES NOT CHANGE THAT.** The world was
  * unreachable for this round (the test account returned zero characters), so the 38-byte stride has
@@ -137,16 +149,18 @@ export interface TrainerService {
    * `GetTrainerServiceCost` answers `moneyCost, cpCost1, cpCost2` and
    * `blizzard_trainerui.lua:352-365` uses them as: `cpCost2 > 0` -> show the confirmation dialog, and
    * `cp2 < cpCost2` -> disable Train, where `cp2` is `UnitCharacterPoints("player")`'s second return,
-   * i.e. the profession slots left. So the word compared against the PROFESSION pool has to be
-   * `cpCost2`, and that is the one the server writes second (`primary_prof_first_rank ? 1 : 0`, whose
-   * own comment is "must be equal prev. field to have learn button in enabled state").
+   * i.e. the profession slots left.
    *
-   * The first word ("primary prof. learn confirmation dialog") is therefore `cpCost1`. It is never
-   * independently decisive: the server writes it as `first_rank && can_learn`, so a nonzero first word
-   * implies a nonzero second, and the Lua tests `cpCost2` first. **This mapping is INFERRED from the
-   * two files together and is labelled as inference** -- for a CLASS trainer both words are always 0,
-   * which is the whole of this round's deliverable, so a wrong guess here costs nothing until
-   * professions are attempted.
+   * **THE SERVER'S OWN DECLARATION CORROBORATES THE PAIRING, and it is quoted rather than inferred
+   * now.** `NPCPackets.h:113` is `std::array<int32, 2> PointCost = { }; // compared with
+   * PLAYER_CHARACTER_POINTS in Lua` -- so these two words ARE the two character-point pools in order,
+   * which is exactly what `UnitCharacterPoints` returns. What remains an inference is only WHICH of the
+   * two the Lua calls `cpCost1` and which `cpCost2`, and the Lua settles that too: the word compared
+   * against the profession pool has to be the second, because that is the one its `cp2` test uses.
+   *
+   * For a CLASS trainer both words are 0 (`Trainer::Spell` only sets them for a primary profession's
+   * first rank), which is the whole of this round's deliverable -- so this pairing cannot be wrong in
+   * a way that matters until professions are attempted.
    */
   cpCost1: number;
   cpCost2: number;
