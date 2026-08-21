@@ -69,6 +69,19 @@ module.exports = function (proxy, allowedHost) {
         ignored: ignoredFiles(paths.appSrc),
       },
     },
+    // HMR is OFF by default, and that is deliberate.
+    //
+    // The owner's browser and the agents' working tree are the same files: this server recompiles on
+    // every save, so a half-written file used to be hot-swapped straight into whatever he was testing.
+    // That produced a "loading never finishes, then it falls back to offline" report which was five
+    // mid-edit files and nothing else -- an hour on a false trail -- and it cost several probe rounds
+    // to neighbours' recompiles. See CLAUDE.md, "The owner's build and this working tree are the same
+    // files".
+    //
+    // With both off, a save still recompiles and the error overlay still reports, but the page changes
+    // only when someone reloads it. Set HMR=true to get the old behaviour back for a session.
+    hot: process.env.HMR === 'true',
+    liveReload: process.env.HMR === 'true',
     client: {
       webSocketURL: {
         // Enable custom sockjs pathname for websocket connection to hot reloading server.
