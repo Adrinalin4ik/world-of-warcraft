@@ -172,7 +172,14 @@ export class HoverHighlight {
     }
   }
 
-  /** Drop every lift. For a world teardown, so a disposed model is not left in the list. */
+  /**
+   * Drop every lift.
+   *
+   * NO CALLER TODAY, and the honest reason is that `World` has no teardown to call it from -- when a
+   * world goes, this goes with it. Kept because `forget` covers one unit and this covers the state,
+   * and because the day a world is torn down without being dropped, the alternative is a list holding
+   * disposed models.
+   */
   clear(): void {
     this.hovered = null;
     this.targeted = null;
@@ -180,6 +187,13 @@ export class HoverHighlight {
   }
 
   private sync(): void {
+    // THE COMMON CASE IS NOTHING LIT AND NOTHING TO LIGHT, and `refresh()` is called from
+    // `World#changeModel` -- i.e. once per unit stream-in and once per redress, for every unit in the
+    // grid. Without this the pointer sitting over empty ground would still pay a walk of the whole
+    // want/lit bookkeeping on each of them. Caught in this round's own diff review.
+    if (this.hovered === null && this.targeted === null && this.lit.length === 0) {
+      return;
+    }
     const want: any[] = [];
     for (const unit of [this.hovered, this.targeted]) {
       const model = unit?.model ?? null;
