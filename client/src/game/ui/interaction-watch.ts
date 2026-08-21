@@ -1,10 +1,14 @@
 /**
- * WALK AWAY AND THE WINDOW SHUTS -- the vendor's and the corpse's, through ONE mechanism.
+ * WALK AWAY AND THE WINDOW SHUTS -- the vendor's, the trainer's and the corpse's, through ONE
+ * mechanism.
  *
- * The owner reported both, separately: "walking away from the vendor does not close the window" and the
- * same of the loot window. They are not two bugs. Nothing in this client was watching an open
- * interaction at all, so every window opened by walking up to something stayed open until it was
- * dismissed by hand.
+ * The owner reported the first two separately -- "walking away from the vendor does not close the
+ * window" and the same of the loot window -- and the trainer arrived later by the same report. They are
+ * not three bugs. Nothing in this client was watching an open interaction at all, so every window
+ * opened by walking up to something stayed open until it was dismissed by hand.
+ *
+ * The trainer needed no new radius and no new rule, which is the check on the shape of this file: it is
+ * one more row in the `services` table below, and nothing else changed.
  *
  * ## WHOSE JOB IS THIS? Neither the server's nor the document's -- so it is the engine's, i.e. ours
  *
@@ -67,6 +71,7 @@ import type World from '../world';
 import { SERVICE_RANGE_SQ, interactReachSq } from '../world/cursor-mode';
 import type { MerchantHandler } from '../../network/game/object/merchant';
 import type { LootHandler } from '../../network/game/object/loot';
+import type { TrainerHandler } from '../../network/game/object/trainer';
 
 /**
  * How often the open interaction is checked, in milliseconds.
@@ -110,6 +115,7 @@ export function attachInteractionWatch(world: World): {
 } {
   const merchant: MerchantHandler = world.game.objectHandler.merchantHandler;
   const loot: LootHandler = world.game.objectHandler.lootHandler;
+  const trainer: TrainerHandler = world.game.objectHandler.trainerHandler;
 
   let nextPollAt = 0;
   /** Guids we have successfully resolved to an entity while their window was open. */
@@ -125,23 +131,56 @@ export function attachInteractionWatch(world: World): {
     return unit.position.distanceToSquared(world.player.position);
   };
 
+  /**
+   * THE SERVICE-SHAPED SOURCES: a window opened by walking up to an NPC and refused by the server at
+   * `INTERACTION_DISTANCE`.
+   *
+   * A TRAINER IS THE SAME SHAPE AS A VENDOR in all four ways this watch cares about, which is why it
+   * takes the same radius rather than a new one:
+   *
+   *  1. the server gates it on the same distance, and this was read rather than assumed:
+   *     `HandleTrainerListOpcode` is
+   *     `GetNPCIfCanInteractWith(packet.Unit, UNIT_NPC_FLAG_TRAINER)` (`NPCHandler.cpp:92`) -- the
+   *     identical call the vendor path makes with `..._VENDOR`, and the `INTERACTION_DISTANCE` test
+   *     lives inside it. So inside `SERVICE_RANGE_SQ` every button works and outside it every button
+   *     is refused, which is what makes closing exactly there the only radius that cannot lie;
+   *  2. there is no close opcode either way (`TrainerHandler#close`: the trainer family is 0x1B0..0x1B4
+   *     and none of them is a close), so `close()` is the whole action;
+   *  3. its close is the client's own, the same way `MERCHANT_CLOSED` is -- the handler emits, the
+   *     bridge raises, the document hides itself;
+   *  4. its source is a UNIT we hold an entity for, so `gone` means what it means for a vendor.
+   *
+   * A table rather than three copies of the block, because the next service window -- a banker, an
+   * innkeeper, an auctioneer -- is the same four facts again, and the loop below should not have to
+   * grow for it. The CORPSE is deliberately NOT in here: its radius is different and its close sends a
+   * packet, which is the whole reason it is handled separately.
+   */
+  const services: Array<{ name: string; handler: { source: string | null; close: () => void } }> = [
+    { name: 'merchant', handler: merchant },
+    { name: 'trainer', handler: trainer },
+  ];
+
   const poll = (nowMs: number): void => {
     if (nowMs < nextPollAt) {
       return;
     }
     nextPollAt = nowMs + INTERACTION_POLL_MS;
 
-    const vendor = merchant.source;
-    if (vendor !== null) {
-      const verdict = verdictFor(distanceSqTo(vendor), SERVICE_RANGE_SQ, seen.has(vendor));
-      if (verdict !== 'keep') {
-        // Both arms are the same call: 3.3.5a has no close-merchant opcode, so there is nothing to
-        // tell the server either way. `close()` emits `merchantClosed`, the bridge raises
-        // `MERCHANT_CLOSED`, and `MerchantFrame_OnEvent` answers it with `HideUIPanel(self)` --
-        // whose `OnHide` calls `CloseMerchant()` straight back into a handler whose source is now
-        // null, which is a no-op. No loop.
-        seen.delete(vendor);
-        merchant.close();
+    // EVERY SERVICE-SHAPED SOURCE, one loop. A trainer is the same shape as a vendor in all four ways
+    // that matter here -- see the `services` table.
+    for (const service of services) {
+      const guid = service.handler.source;
+      if (guid === null) {
+        continue;
+      }
+      if (verdictFor(distanceSqTo(guid), SERVICE_RANGE_SQ, seen.has(guid)) !== 'keep') {
+        // `far` and `gone` are the same call: 3.3.5a has no close opcode for either window, so there is
+        // nothing to tell the server. `close()` emits the handler's own closed event, the bridge raises
+        // the document's (`MERCHANT_CLOSED` / `TRAINER_CLOSED`), and the frame answers it with
+        // `HideUIPanel(self)` -- whose `OnHide` calls `CloseMerchant()`/`CloseTrainer()` straight back
+        // into a handler whose source is now null, which is a no-op. No loop.
+        seen.delete(guid);
+        service.handler.close();
       }
     }
 
@@ -170,14 +209,17 @@ export function attachInteractionWatch(world: World): {
   /** A window closing by any other route must not leave its guid remembered as "seen". */
   const forget = (): void => { seen.clear(); };
   merchant.on('merchantClosed', forget);
+  trainer.on('trainerClosed', forget);
   loot.on('lootClosed', forget);
 
   (window as unknown as Record<string, unknown>).interactionWatch = () => ({
     vendor: merchant.source,
+    trainer: trainer.source,
     corpse: loot.source,
     seen: [...seen],
     pollMs: INTERACTION_POLL_MS,
     vendorDistanceSq: merchant.source === null ? null : distanceSqTo(merchant.source),
+    trainerDistanceSq: trainer.source === null ? null : distanceSqTo(trainer.source),
     corpseDistanceSq: loot.source === null ? null : distanceSqTo(loot.source),
     serviceRangeSq: SERVICE_RANGE_SQ,
   });
@@ -186,6 +228,7 @@ export function attachInteractionWatch(world: World): {
     poll,
     dispose: () => {
       merchant.removeListener('merchantClosed', forget);
+      trainer.removeListener('trainerClosed', forget);
       loot.removeListener('lootClosed', forget);
       delete (window as unknown as Record<string, unknown>).interactionWatch;
     },
