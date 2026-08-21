@@ -98,6 +98,12 @@ export const QUEST_REPUTATIONS_COUNT = 5;
 export const QUEST_EMOTE_COUNT = 4;
 
 /**
+ * `MAX_REQUIRED_ITEMS` -- the client's own constant, `questframe.lua:3`, and the alignment check on
+ * `SMSG_QUESTGIVER_REQUEST_ITEMS`. Six buttons exist; a count above six cannot be real.
+ */
+export const MAX_REQUIRED_ITEMS = 6;
+
+/**
  * `DIALOG_STATUS_*` -- what `SMSG_QUESTGIVER_STATUS` carries per NPC, and what decides the `!` or `?`
  * over a giver's head. A SERVER-side definition (`QuestDef.h`), labelled as such, and the same ladder
  * benilla records for 1.12 (`quest/giver.rs:32-42`) with WotLK's two additions at the top.
@@ -280,6 +286,26 @@ export class QuestHandler extends EventEmitter {
   /** Quest ids whose query is in flight, so the same quest is asked for once. */
   private queried = new Set<number>();
 
+  /**
+   * Quest ids we have just ASKED a giver about -- the oracle that picks between the two candidate
+   * prefixes of `SMSG_QUESTGIVER_QUEST_DETAILS`. See `handleDetails`.
+   *
+   * A set rather than one value because the client can send several before any answer arrives (a
+   * greeting panel with four rows, clicked quickly). Entries are removed when matched, and the set is
+   * cleared on a world change with everything else.
+   */
+  private awaiting = new Set<number>();
+
+  /**
+   * Which candidate prefix the last accept panel decoded under. THE instrument for the sharer-guid
+   * question: the answer is a fact about this server and it should be readable rather than
+   * re-derived by the next person.
+   */
+  public detailsShape = '';
+
+  /** Which candidate `autoLaunched` width the last reward panel decoded under. See `handleOfferReward`. */
+  public offerShape = '';
+
   /** NPC guid -> `DIALOG_STATUS`. What the `!` over a giver's head is drawn from. */
   public status = new Map<string, number>();
 
@@ -314,6 +340,7 @@ export class QuestHandler extends EventEmitter {
     this.game.on('packet:receive:SMSG_LOGIN_VERIFY_WORLD', () => {
       this.closePanels();
       this.status.clear();
+      this.awaiting.clear();
     });
   }
 
@@ -553,56 +580,149 @@ export class QuestHandler extends EventEmitter {
    * the panel is built out of.
    */
   private handleDetails(gp: GamePacket): void {
-    const npc = this.readFullGuid(gp);
-    this.readFullGuid(gp); // sharerGuid -- WotLK; nonzero only for a party-shared quest
-    const questId = gp.readUnsignedInt() >>> 0;
-    this.lastQuestId = questId;
-    const title = gp.readCStr();
-    this.lastTitle = title;
-    const details = gp.readCStr();
-    const objectives = gp.readCStr();
-    const autoLaunched = gp.readUnsignedByte() !== 0;
-    const flags = gp.readUnsignedInt() >>> 0;
-    const suggestedPlayers = gp.readUnsignedInt() >>> 0;
-    gp.readUnsignedByte(); // isFinished -- sent and unused by the real client too
-    const choices = this.readTripleBlock(gp);
-    const rewards = this.readTripleBlock(gp);
-    const money = gp.readInt();
-    const xp = gp.readUnsignedInt() >>> 0;
+    const base = gp.index;
 
-    // -- the tolerant tail
-    const honor = this.tailU32(gp);
-    this.tailU32(gp); // honorMultiplier -- a float, read as a word for its width only
-    const rewardSpell = this.tailU32(gp);
-    this.tailU32(gp); // rewSpellCast
-    const charTitleId = this.tailU32(gp);
-    const bonusTalents = this.tailU32(gp);
-    const arenaPoints = this.tailU32(gp);
+    // TWO CANDIDATE PREFIXES, AND THE QUEST ID WE ASKED FOR PICKS BETWEEN THEM.
+    //
+    // **This exists because the owner got a BLANK accept panel and my residual could not see it.**
+    // The tolerant tail reads only while four bytes remain, so a prefix that consumes EIGHT BYTES TOO
+    // MANY simply leaves nothing for the tail and the residual comes out 0 -- the decode announces
+    // success while the title, the description and the objectives are all read out of the middle of
+    // some other field. That is an instrument my own fix had blinded, which is a named failure mode in
+    // this project, and this is the correction.
+    //
+    // The sharer guid is the whole doubt. TrinityCore 3.3.5 writes `GetDivider()` as a second `u64`
+    // and 1.12 writes one guid (`benilla-protocol/.../quest/giver.rs:265-271`); nothing available here
+    // settles which this server does, and picking wrong is silent. So BOTH are decoded and the one
+    // whose echoed quest id matches the id `CMSG_QUESTGIVER_QUERY_QUEST` just asked for wins.
+    //
+    // That is the same class of answer as the status width being derived from `bodySize`: a value the
+    // FRAME decides rather than one this file asserts. It is stronger here, because the oracle is a
+    // number we chose ourselves and the server echoed back -- a wrong prefix cannot match it by luck.
+    const withSharer = this.tryDetails(gp, base, true);
+    const withoutSharer = this.tryDetails(gp, base, false);
+    const asked = (d: (QuestGiverDetails & { cursor: number }) | null): boolean =>
+      d !== null && this.awaiting.has(d.questId);
 
-    this.source = npc;
-    this.details = {
-      npc,
-      questId,
-      title,
-      details,
-      objectives,
-      autoLaunched,
-      flags,
-      suggestedPlayers,
-      choices,
-      rewards,
-      money,
-      xp,
-      honor,
-      rewardSpell,
-      charTitleId,
-      bonusTalents,
-      arenaPoints,
-    };
+    let chosen: (QuestGiverDetails & { cursor: number }) | null;
+    let shape: string;
+    if (asked(withSharer) && !asked(withoutSharer)) {
+      chosen = withSharer;
+      shape = 'two guids';
+    } else if (asked(withoutSharer) && !asked(withSharer)) {
+      chosen = withoutSharer;
+      shape = 'ONE guid';
+    } else if (withSharer !== null && withSharer.title !== '') {
+      // Neither matched (an unsolicited offer -- a quest-starting item, an area trigger, a party
+      // share) or both did (not possible in practice, the ids differ). Fall back to the documented
+      // 3.3.5a shape, then sanity-check it: a real quest always has a title, so an EMPTY one means the
+      // prefix is wrong even with no id to compare against.
+      chosen = withSharer;
+      shape = 'two guids (unsolicited)';
+    } else if (withoutSharer !== null && withoutSharer.title !== '') {
+      chosen = withoutSharer;
+      shape = 'ONE guid (unsolicited, chosen on a non-empty title)';
+    } else {
+      chosen = withSharer;
+      shape = 'two guids (neither candidate produced a title)';
+    }
+
+    if (chosen === null) {
+      throw new Error('SMSG_QUESTGIVER_QUEST_DETAILS: neither candidate prefix decoded');
+    }
+    this.lastQuestId = chosen.questId;
+    this.lastTitle = chosen.title;
+    this.detailsShape = shape;
+    if (chosen.title === '') {
+      // LOUD. A blank accept panel is what this looks like on screen, and it looked like a missing Lua
+      // method for a whole round.
+      console.warn(
+        'quest: SMSG_QUESTGIVER_QUEST_DETAILS decoded an EMPTY title under both candidate prefixes'
+        + ' (chose "' + shape + '", questId ' + chosen.questId + ', body ' + gp.bodySize + ').'
+        + ' The accept panel will draw blank. Read window.itemWire.census().',
+      );
+    }
+    // Leave the cursor where the CHOSEN decode left it, so `subscribe`'s residual is that decode's and
+    // not the second candidate's.
+    gp.index = chosen.cursor;
+    this.awaiting.delete(chosen.questId);
+
+    this.source = chosen.npc;
+    this.details = chosen;
     this.offer = null;
     this.progress = null;
     this.greeting = null;
     this.emit('questDetail', this.details);
+  }
+
+  /**
+   * One candidate decode of `SMSG_QUESTGIVER_QUEST_DETAILS`, from `base`, with or without the WotLK
+   * sharer guid. Returns null when it runs off the frame, which is itself evidence against the shape.
+   *
+   * See `handleDetails` for why there are two and what chooses between them. The layout is otherwise
+   * the one this file's header documents:
+   *
+   *     u64 npcGuid | [u64 sharerGuid] | u32 questId
+   *     cstr title | cstr details | cstr objectives
+   *     u8 autoLaunched | u32 flags | u32 suggestedPlayers | u8 isFinished
+   *     u32 choiceCount | triples | u32 rewardCount | triples | i32 money | u32 xp
+   *     [tolerant tail] honor | honorMultiplier | rewSpell | rewSpellCast | charTitleId
+   *                     | bonusTalents | arenaPoints
+   */
+  private tryDetails(
+    gp: GamePacket, base: number, sharerGuid: boolean,
+  ): (QuestGiverDetails & { cursor: number }) | null {
+    gp.index = base;
+    try {
+      const npc = this.readFullGuid(gp);
+      if (sharerGuid) {
+        this.readFullGuid(gp);
+      }
+      const questId = gp.readUnsignedInt() >>> 0;
+      const title = gp.readCStr();
+      const details = gp.readCStr();
+      const objectives = gp.readCStr();
+      const autoLaunched = gp.readUnsignedByte() !== 0;
+      const flags = gp.readUnsignedInt() >>> 0;
+      const suggestedPlayers = gp.readUnsignedInt() >>> 0;
+      gp.readUnsignedByte(); // isFinished -- sent and unused by the real client too
+      const choices = this.readTripleBlock(gp);
+      const rewards = this.readTripleBlock(gp);
+      const money = gp.readInt();
+      const xp = gp.readUnsignedInt() >>> 0;
+      const honor = this.tailU32(gp);
+      this.tailU32(gp); // honorMultiplier -- a float, read as a word for its width only
+      const rewardSpell = this.tailU32(gp);
+      this.tailU32(gp); // rewSpellCast
+      const charTitleId = this.tailU32(gp);
+      const bonusTalents = this.tailU32(gp);
+      const arenaPoints = this.tailU32(gp);
+      return {
+        npc,
+        questId,
+        title,
+        details,
+        objectives,
+        autoLaunched,
+        flags,
+        suggestedPlayers,
+        choices,
+        rewards,
+        money,
+        xp,
+        honor,
+        rewardSpell,
+        charTitleId,
+        bonusTalents,
+        arenaPoints,
+        cursor: gp.index,
+      };
+    } catch (e) {
+      // Ran off the frame. `readTripleBlock` is the usual place: a misaligned count word reads as a
+      // huge number and its loop over-reads. That is EVIDENCE, not an error -- the other candidate is
+      // very likely the right one.
+      return null;
+    }
   }
 
   /**
@@ -631,57 +751,139 @@ export class QuestHandler extends EventEmitter {
    * from that panel's -- which is itself the thing this cannot check without a live packet.
    */
   private handleOfferReward(gp: GamePacket): void {
-    const npc = this.readFullGuid(gp);
-    const questId = gp.readUnsignedInt() >>> 0;
-    this.lastQuestId = questId;
-    const title = gp.readCStr();
-    this.lastTitle = title;
-    const offerText = gp.readCStr();
-    const autoLaunched = gp.readUnsignedByte() !== 0;
-    const flags = gp.readUnsignedInt() >>> 0;
-    const suggestedPlayers = gp.readUnsignedInt() >>> 0;
-    const emoteCount = gp.readUnsignedInt() >>> 0;
-    for (let i = 0; i < emoteCount; ++i) {
-      gp.readUnsignedInt(); // delay FIRST here -- reversed against the detail panel
-      gp.readUnsignedInt(); // emote
+    const base = gp.index;
+
+    // TWO CANDIDATE WIDTHS FOR `autoLaunched`, DISCRIMINATED BY `emoteCount`.
+    //
+    // Same lesson as `handleDetails`, applied before it costs a round: 1.12 writes `autoFinish` as a
+    // `u32` (`benilla-protocol/.../quest/giver.rs:302-306`) and 3.3.5 writes a `u8`, and a wrong width
+    // here does NOT corrupt the quest id -- that field is already past -- so the id oracle cannot see
+    // it. What it corrupts is everything from the emote block on: the title and the offer text survive
+    // and the REWARD ITEMS do not, which on screen is a reward panel with text and no items.
+    //
+    // `emoteCount` is the discriminator and it is a strong one: the server writes at most
+    // `QUEST_EMOTE_COUNT` (4) of them, so a value above that is proof the cursor is misaligned. Three
+    // bytes of slack read as part of a following word gives a number in the millions, not in 0..4.
+    const narrow = this.tryOffer(gp, base, 1);
+    const wide = this.tryOffer(gp, base, 4);
+    let chosen = narrow;
+    let shape = 'u8 autoLaunched';
+    if (narrow === null || narrow.emoteCount > QUEST_EMOTE_COUNT) {
+      if (wide !== null && wide.emoteCount <= QUEST_EMOTE_COUNT) {
+        chosen = wide;
+        shape = 'u32 autoLaunched (the 1.12 width)';
+      }
     }
-    const choices = this.readTripleBlock(gp);
-    const rewards = this.readTripleBlock(gp);
-    const money = gp.readInt();
-    const xp = gp.readUnsignedInt() >>> 0;
+    if (chosen === null) {
+      throw new Error('SMSG_QUESTGIVER_OFFER_REWARD: neither candidate width decoded');
+    }
+    this.lastQuestId = chosen.questId;
+    this.lastTitle = chosen.title;
+    this.offerShape = shape;
+    if (chosen.title === '' || chosen.emoteCount > QUEST_EMOTE_COUNT) {
+      console.warn(
+        'quest: SMSG_QUESTGIVER_OFFER_REWARD looks misaligned (chose "' + shape + '", title "'
+        + chosen.title + '", emoteCount ' + chosen.emoteCount + ', body ' + gp.bodySize
+        + '). The reward panel may draw without its items. Read window.itemWire.census().',
+      );
+    }
+    gp.index = chosen.cursor;
+    this.awaiting.delete(chosen.questId);
 
-    // -- the tolerant tail
-    const charTitleId = this.tailU32(gp);
-    const bonusTalents = this.tailU32(gp);
-    const arenaPoints = this.tailU32(gp);
-    this.tailU32(gp); // unk
-    const rewardSpell = this.tailU32(gp);
-    this.tailU32(gp); // rewSpellCast
-    const honor = this.tailU32(gp);
-
-    this.source = npc;
-    this.offer = {
-      npc,
-      questId,
-      title,
-      offerText,
-      autoLaunched,
-      flags,
-      suggestedPlayers,
-      choices,
-      rewards,
-      money,
-      xp,
-      honor,
-      rewardSpell,
-      charTitleId,
-      bonusTalents,
-      arenaPoints,
-    };
+    this.source = chosen.npc;
+    this.offer = chosen;
     this.details = null;
     this.progress = null;
     this.greeting = null;
     this.emit('questOfferReward', this.offer);
+  }
+
+  /**
+   * One candidate decode of `SMSG_QUESTGIVER_OFFER_REWARD`, with `autoLaunched` read as `autoBytes`
+   * bytes. See `handleOfferReward` for what chooses.
+   *
+   * `emoteCount` is returned rather than discarded precisely because it is the alignment check; the
+   * pairs themselves are `{delay, emote}` here and `{emote, delay}` on the detail panel, which is
+   * benilla's own recorded asymmetry (`quest/giver.rs:14-15`) and costs nothing because they are
+   * consumed for alignment only.
+   */
+  private tryOffer(
+    gp: GamePacket, base: number, autoBytes: 1 | 4,
+  ): (QuestGiverOfferReward & { cursor: number; emoteCount: number }) | null {
+    gp.index = base;
+    try {
+      const npc = this.readFullGuid(gp);
+      const questId = gp.readUnsignedInt() >>> 0;
+      const title = gp.readCStr();
+      const offerText = gp.readCStr();
+      const autoLaunched = autoBytes === 1
+        ? gp.readUnsignedByte() !== 0
+        : (gp.readUnsignedInt() >>> 0) !== 0;
+      const flags = gp.readUnsignedInt() >>> 0;
+      const suggestedPlayers = gp.readUnsignedInt() >>> 0;
+      const emoteCount = gp.readUnsignedInt() >>> 0;
+      if (emoteCount > QUEST_EMOTE_COUNT) {
+        // Bail rather than loop: an implausible count is the whole signal, and looping on a
+        // multi-million count would over-read the frame in a hot handler.
+        return {
+          npc,
+          questId,
+          title,
+          offerText,
+          autoLaunched,
+          flags,
+          suggestedPlayers,
+          choices: [],
+          rewards: [],
+          money: 0,
+          xp: 0,
+          honor: 0,
+          rewardSpell: 0,
+          charTitleId: 0,
+          bonusTalents: 0,
+          arenaPoints: 0,
+          cursor: gp.index,
+          emoteCount,
+        };
+      }
+      for (let i = 0; i < emoteCount; ++i) {
+        gp.readUnsignedInt(); // delay FIRST here -- reversed against the detail panel
+        gp.readUnsignedInt(); // emote
+      }
+      const choices = this.readTripleBlock(gp);
+      const rewards = this.readTripleBlock(gp);
+      const money = gp.readInt();
+      const xp = gp.readUnsignedInt() >>> 0;
+      const charTitleId = this.tailU32(gp);
+      const bonusTalents = this.tailU32(gp);
+      const arenaPoints = this.tailU32(gp);
+      this.tailU32(gp); // unk
+      const rewardSpell = this.tailU32(gp);
+      this.tailU32(gp); // rewSpellCast
+      const honor = this.tailU32(gp);
+      return {
+        npc,
+        questId,
+        title,
+        offerText,
+        autoLaunched,
+        flags,
+        suggestedPlayers,
+        choices,
+        rewards,
+        money,
+        xp,
+        honor,
+        rewardSpell,
+        charTitleId,
+        bonusTalents,
+        arenaPoints,
+        cursor: gp.index,
+        emoteCount,
+      };
+    } catch (e) {
+      return null;
+    }
   }
 
   /**
@@ -723,6 +925,27 @@ export class QuestHandler extends EventEmitter {
       flagWords.push(gp.readUnsignedInt() >>> 0);
     }
     const isComplete = (flagWords[1] ?? 0) !== 0;
+
+    // LOUD WHEN IMPLAUSIBLE, because this arm cannot use the quest-id oracle: the id is read before
+    // the two WotLK words that are in doubt, so a wrong prefix still echoes the right id. The two
+    // checks that DO discriminate are the required-item count -- the client's own `MAX_REQUIRED_ITEMS`
+    // is 6 (`questframe.lua:3`), so anything above that is proof of misalignment -- and the flag-word
+    // count, which is 4 in 1.12 and 5 in 3.3.5 and can be neither only if the cursor is wrong.
+    //
+    // A warning rather than a second candidate decode: unlike the detail and reward panels there is no
+    // clean alternate shape to try here (dropping `flags`/`suggestedPlayers` shifts the money and the
+    // count into each other's slots, and both would still look like small numbers), so guessing a
+    // second layout would be inventing one. Naming it is the honest half.
+    if (title === '' || requiredItems.length > MAX_REQUIRED_ITEMS
+      || (flagWords.length !== 4 && flagWords.length !== 5)) {
+      console.warn(
+        'quest: SMSG_QUESTGIVER_REQUEST_ITEMS looks misaligned (title "' + title + '", '
+        + requiredItems.length + ' required items, ' + flagWords.length + ' trailing flag words,'
+        + ' body ' + gp.bodySize + '). Expected at most ' + MAX_REQUIRED_ITEMS + ' items and 4 or 5'
+        + ' flag words. The progress panel may draw blank or refuse to complete.'
+        + ' Read window.itemWire.census().',
+      );
+    }
 
     this.source = npc;
     this.progress = {
@@ -977,6 +1200,9 @@ export class QuestHandler extends EventEmitter {
     gp.writeUnsignedInt(questId >>> 0);
     gp.writeUnsignedByte(0); // startCheat
     this.source = guid;
+    // REMEMBERED so the reply's own echo of it can pick between the two candidate prefixes -- see
+    // `handleDetails`. Bounded: cleared on a match and on a world change.
+    this.awaiting.add(questId >>> 0);
     this.game.send(gp);
   }
 
@@ -1125,6 +1351,9 @@ export class QuestHandler extends EventEmitter {
 
   /** The shared `{u64 guid, u32 questId}` body of the four simple questgiver sends. */
   private send(opcode: number, guid: string, questId: number): void {
+    // Same oracle as `queryQuest`: `CMSG_QUESTGIVER_COMPLETE_QUEST` and `..._REQUEST_REWARD` are also
+    // answered with a panel that echoes the quest id back.
+    this.awaiting.add(questId >>> 0);
     const gp = new GamePacket(opcode, GamePacket.HEADER_SIZE_OUTGOING + GUID_BYTES + 4);
     gp.write(Array.from(guidBytes(guid)));
     gp.writeUnsignedInt(questId >>> 0);

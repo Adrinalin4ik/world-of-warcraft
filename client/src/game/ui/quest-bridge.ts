@@ -1419,6 +1419,51 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   quest.on('questRewarded', onFinished);
   world.on('unit:fields', onFields);
 
+  /**
+   * `window.questShapes()` -- WHICH CANDIDATE LAYOUT EACH GIVER PANEL DECODED UNDER, plus what it
+   * decoded. One call answers "is the accept panel blank because the wire is misread or because the
+   * frame did not draw", which cost a whole round to ask the slow way.
+   *
+   * Always on, like `itemWire`: these are two strings and a handful of scalars, and the next person to
+   * meet a blank quest panel should be able to read the answer instead of re-deriving it.
+   */
+  (window as unknown as Record<string, unknown>).questShapes = () => ({
+    detailsShape: quest.detailsShape,
+    offerShape: quest.offerShape,
+    details: quest.details === null ? null : {
+      questId: quest.details.questId,
+      title: quest.details.title,
+      detailsLen: quest.details.details.length,
+      objectivesLen: quest.details.objectives.length,
+      choices: quest.details.choices.length,
+      rewards: quest.details.rewards.length,
+      autoLaunched: quest.details.autoLaunched,
+      flags: quest.details.flags,
+      money: quest.details.money,
+      xp: quest.details.xp,
+    },
+    offer: quest.offer === null ? null : {
+      questId: quest.offer.questId,
+      title: quest.offer.title,
+      offerTextLen: quest.offer.offerText.length,
+      choices: quest.offer.choices.length,
+      rewards: quest.offer.rewards.length,
+    },
+    progress: quest.progress === null ? null : {
+      questId: quest.progress.questId,
+      title: quest.progress.title,
+      requiredItems: quest.progress.requiredItems.length,
+      isComplete: quest.progress.isComplete,
+    },
+    greeting: quest.greeting === null ? null : quest.greeting.quests.length,
+    logSlots: Array.from(world.player.questLog.values()).map((row) => ({
+      slot: row.slot, questId: row.questId, state: row.state, counters: row.counters,
+    })),
+    templates: Array.from(quest.templates.values()).map((t) => ({
+      id: t.questId, exact: t.exact, title: t.title,
+    })),
+  });
+
   primeSortNames();
   rebuild();
 
