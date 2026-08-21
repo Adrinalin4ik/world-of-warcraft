@@ -246,8 +246,10 @@ A comment that invents a source, or that still describes a gap now closed, is tr
   is the arm a self-built fixture cannot be.
 - **A field widened between 1.12 and 3.3.5a fails SILENTLY, with no reply at all.** Six have been found
   in the item area alone: the vendor row (7 words → 8), `CMSG_SELL_ITEM`'s count (`u8` → `u32`),
-  `CMSG_REPAIR_ITEM` (16 B → 17), `BUYBACK_SLOT_START` (69 → 74), `CMSG_SPLIT_ITEM`'s count
-  (`u8` → `i32`) and `CMSG_DESTROYITEM`'s (`u8` → `u32`). A short body makes the server's `ByteBuffer`
+  `CMSG_REPAIR_ITEM` (16 B → 17), `CMSG_SPLIT_ITEM`'s count (`u8` → `i32`) and
+  `CMSG_DESTROYITEM`'s (`u8` → `u32`) — plus six more in the quest area, one of which makes a 1.12
+  read land its strings 8 bytes early. (A sibling trap in the same area is NOT a width and does not
+  fail silently: `BUYBACK_SLOT_START` moved 69 → 74.) A short body makes the server's `ByteBuffer`
   read past the end and throw; the packet is discarded and **nothing comes back**, so the gesture looks
   inert rather than refused — and no `SMSG_*_FAILURE` will ever explain it. When a send produces
   silence, suspect a width before suspecting the handler.
