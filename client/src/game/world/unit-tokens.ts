@@ -27,6 +27,23 @@
  * stale, because the same handler that set the guid clears it. It is also the RIGHT guid rather than a
  * proxy: it is the one the server named, not "the last unit we clicked".
  *
+ * ## Which tokens the manifest actually asks with -- read, not guessed
+ *
+ * Every `SetPortraitTexture` call in the shipped 3.3.5a FrameXML, grepped from the game's own files
+ * rather than assumed, uses one of exactly three things:
+ *
+ *  - **`"npc"` / `"NPC"`** -- `gossipframe.lua`, `merchantframe.lua`, `bankframe.lua`,
+ *    `tabardframe.lua`, `taxiframe.lua`, `guildregistrarframe.lua` (the case is inconsistent across
+ *    those files, which is why this module lowercases);
+ *  - **`"questnpc"`** -- `questframe.lua:65`, and it is the ONLY file that uses it;
+ *  - **`self.unit`** -- `unitframe.lua:97`, i.e. whatever unit the frame was initialised with:
+ *    `player`, `target`, `pet`, `focus`, party and raid tokens.
+ *
+ * So the set below is complete for portraits as the client ships them. The `npc` askers this client has
+ * no handler for -- bank, tabard, taxi, guild registrar -- resolve through the same three window guids
+ * as everything else, which for them is null: those features do not exist here, so their frames never
+ * open and their portraits are never asked for.
+ *
  * ## Case
  *
  * Tokens are lowercased here. The client's own files use BOTH spellings for the same unit --
@@ -90,6 +107,11 @@ function npcGuid(world: TokenWorld): string | null {
     ?? null;
 }
 
+/** The entity a guid names, or null for a null guid and for a guid no longer in the grid. */
+function entityFor(world: TokenWorld, guid: string | null): Unit | null {
+  return guid === null ? null : world.entities.get(guid) ?? null;
+}
+
 /**
  * Resolve one unit token to the entity behind it, or null.
  *
@@ -127,10 +149,18 @@ export function resolveUnitToken(token: string, world: TokenWorld | null): Unit 
       return world.hovered ?? null;
     case 'focus':
       return world.focus ?? null;
-    case 'npc': {
-      const guid = npcGuid(world);
-      return guid === null ? null : world.entities.get(guid) ?? null;
-    }
+    case 'npc':
+      return entityFor(world, npcGuid(world));
+    // THE QUEST GIVER, AND IT IS ITS OWN TOKEN. `QuestFrame_SetPortrait` asks with `"questnpc"`, not
+    // `"npc"` -- `SetPortraitTexture(QuestFramePortrait, "questnpc")`, the game's own
+    // `questframe.lua:62-68` -- so the quest detail page had no portrait while gossip, merchant and
+    // trainer all had one. That was the owner's report twice over, and the round that added
+    // `QuestHandler.source` to the `npc` chain did not fix it because the quest frame never asks that
+    // token. Read straight from the quest handler rather than through `npcGuid`: `"questnpc"` MEANS
+    // the giver, so falling back to a vendor or a trainer guid would be answering a different
+    // question.
+    case 'questnpc':
+      return entityFor(world, world.game?.objectHandler?.questHandler?.source ?? null);
     default:
       return null;
   }

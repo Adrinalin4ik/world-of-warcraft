@@ -50,7 +50,17 @@ describe('resolving a FrameXML unit token to an entity', () => {
     const chat = world({ gossip: '0xF130000123' });
     expect(resolveUnitToken('npc', chat.world)).toBe(chat.npc);
 
-    // THE QUEST DETAIL PAGE, which was the owner's second report: the portrait showed on the gossip
+    // THE QUEST DETAIL PAGE, and it is its OWN TOKEN: `questframe.lua:65` asks with `"questnpc"`, not
+    // `"npc"`. Adding the quest handler to the `npc` chain (commit 6b7b7d4) therefore did not fix the
+    // missing portrait, because the quest frame never asks that token. This is the arm that does.
+    const giver = world({ quest: '0xF130000123' });
+    expect(resolveUnitToken('questnpc', giver.world)).toBe(giver.npc);
+    expect(resolveUnitToken('QUESTNPC', giver.world)).toBe(giver.npc);
+    // `questnpc` MEANS the giver, so it does not fall back to a vendor's or a trainer's guid.
+    expect(resolveUnitToken('questnpc', world({ merchant: '0xF130000123' }).world)).toBeNull();
+    expect(resolveUnitToken('questnpc', world({ trainer: '0xF130000123' }).world)).toBeNull();
+
+    // THE QUEST GIVER ON THE `npc` CHAIN, which was the owner's second report: the portrait showed on the gossip
     // page and vanished when he clicked a quest row, because the quest frame takes over, gossip clears
     // its own `source`, and the giver's guid lives in `QuestHandler.source`.
     const quest = world({ quest: '0xF130000123' });
