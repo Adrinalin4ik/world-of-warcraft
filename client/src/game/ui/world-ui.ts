@@ -58,6 +58,7 @@ import { attachTrainerBridge } from './trainer-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { attachChatBridge } from './chat-bridge';
 import { publishRects, clearRects, setRectResolver, rectStats } from './rects';
+import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
 import { ModelBooth } from './scene/model-booth';
 import { resolveUnitToken } from '../world/unit-tokens';
 import { publishArtSink, clearArtSink } from './runtime-art';
@@ -774,6 +775,18 @@ export class WorldUiHost {
     // The resolver is installed once at boot (see `setRectResolver` above), not per frame -- it has to
     // outlive the gap before the first draw, which is exactly where the chat frames were failing.
     publishRects(items, viewportUnits(viewport).height);
+    /**
+     * THE SCROLL RANGES, announced from our layout pass because that is where the engine announces them.
+     *
+     * `ScrollFrame_OnScrollRangeChanged` is the only thing that gives a scrollbar its min/max
+     * (`uipaneltemplates.lua:275-285`), and nothing fired it -- so every real scroll frame had a 0..0
+     * range and its arrows, drag and thumb were all dead. AFTER `publishRects`, because the range is
+     * measured from resolved rects. Gated internally on `layoutRevision()`: on a frame where nothing
+     * moved this is one integer comparison for the whole client.
+     */
+    if (this.runtime !== null) {
+      reconcileScrollRanges(this.runtime.ctx);
+    }
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');
@@ -947,9 +960,12 @@ export class WorldUiHost {
       material.map = map;
       material.needsUpdate = true;
     }
-    // Centred on the pointer, which is where the real client holds a picked-up icon. NDC on the composite
-    // camera, the same two lines `drawSweeps` uses.
-    quad.position.set(pointer.x / units.width - 0.5, 0.5 - pointer.y / units.height, 0);
+    // Centred on the pointer, which is where the real client holds a picked-up icon. In `cursorCamera`'s
+    // space, which is unit-sized and Y DOWN -- the same space `pointerPosition` already reports in, so
+    // the mapping is a plain divide with no inversion. It used to be `0.5 - y` into the Y-UP composite
+    // camera, and that inversion was the icon's flip: see `cursorCamera` for why the two cameras exist
+    // and which one an uploaded BLP belongs to.
+    quad.position.set(pointer.x / units.width, pointer.y / units.height, 0);
     quad.scale.set(CURSOR_ICON_UNITS / units.width, CURSOR_ICON_UNITS / units.height, 1);
     // BY HAND -- `matrixAutoUpdate` is false, so the two writes above are otherwise inert.
     quad.updateMatrix();
@@ -957,7 +973,7 @@ export class WorldUiHost {
 
     const previousAutoClear = this.renderer.autoClear;
     this.renderer.autoClear = false;
-    this.renderer.render(this.cursorSceneOf(), this.compositeCamera);
+    this.renderer.render(this.cursorSceneOf(), this.cursorCamera);
     this.renderer.autoClear = previousAutoClear;
   }
 
@@ -1036,6 +1052,37 @@ export class WorldUiHost {
   private renderTarget: THREE.WebGLRenderTarget | null = null;
   private compositeScene: THREE.Scene | null = null;
   private compositeCamera = new THREE.OrthographicCamera(-0.5, 0.5, 0.5, -0.5, -1, 1);
+
+  /**
+   * The cursor icon's camera: unit space with **Y DOWN**, and that is the whole of the upside-down-icon
+   * fix.
+   *
+   * "Если выбрать предмет левой кнопкой мыши он схватится и иконка будет перевёрнутой." A picked-up item
+   * icon was drawn mirrored vertically, and so was every ability icon before it -- nobody noticed on a
+   * spell glyph, and a sword is unmistakable.
+   *
+   * WHY, and it is the loading screen's defect a second time. This renderer has TWO conventions and they
+   * are both correct in their own place:
+   *
+   *  - `GlueRenderer`'s camera is `OrthographicCamera(0, 1, 0, 1)` -- top 0, bottom 1, so **Y DOWN**.
+   *    `PlaneGeometry`'s own UVs put `v = 1` at local +y, which that camera puts at the BOTTOM of the
+   *    screen, and `v = 0` is the sheet's top row because textures load `flipY = false`. So an uploaded
+   *    BLP comes out upright with three's default UVs and nothing has to be negated
+   *    (`renderer.ts:148-151`).
+   *  - `compositeCamera` is `(-0.5, 0.5, 0.5, -0.5)` -- top +0.5, so **Y UP**. That is right for what it
+   *    exists to draw: the interface's own RENDER TARGET, whose texture is a framebuffer with `v = 0` at
+   *    the bottom.
+   *
+   * `drawCursorIcon` was drawing an uploaded BLP through the framebuffer camera, so the two conventions
+   * did not cancel and the icon came out flipped. The fix is to draw it through a camera whose convention
+   * its geometry already matches -- the same fix the upside-down loading screen took, where the answer
+   * was to adopt the existing camera rather than negate a UV. Nothing here mirrors a coordinate, and no
+   * texture is mutated.
+   *
+   * The sweeps keep the composite camera and are untouched: `sweepMaterial` is a `ShaderMaterial` with
+   * no `map` at all -- a fragment wedge test -- so there is no image convention for it to disagree with.
+   */
+  private cursorCamera = new THREE.OrthographicCamera(0, 1, 0, 1, -1, 1);
   private compositeMesh: THREE.Mesh | null = null;
   private savedClearColor = new THREE.Color();
   private savedClearAlpha = 1;
