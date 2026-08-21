@@ -71,6 +71,18 @@ scepticism as one that reports it fixed: two rounds here wrote up "the right-cli
 the probe read a property off something that was a function. A negative that confirms your worry is
 still a number that agreed with you.
 
+- **The world UI host can be double-mounted with one copy disposed, so `window` handles go stale
+  mid-probe.** Hold the runtime reference you were given and never re-read `window.worldRuntime`
+  between reads. This has now voided four measurement arms: a `uiDrawStats` replaced mid-run, a
+  portrait cost arm that captured 2 frames, a `GetScript` that read `nil` then `function`, and a
+  `UIErrorsFrame` arm that went "in draw list" → "not registered" and tore the VM down. A handle that
+  changes answer between two reads is the host settling, not the feature.
+- **A silent gap is indistinguishable from a bug, and the load report is not where the owner looks.**
+  Fifteen unit-popup rows read as broken when 26 of them were honest `notImplemented` gaps. An
+  **action** the owner invoked should say so where he already sees refusals — `UIErrorsFrame`, the
+  client's own red line. A **getter** must stay silent: `UnitPopup_HideButtons` calls them on every
+  open, so a notice there reddens the screen once per right-click.
+
 State a noise floor before claiming an improvement. Run-to-run spread has repeatedly covered an
 entire claimed change.
 
