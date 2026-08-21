@@ -130,6 +130,20 @@ export class MerchantHandler extends EventEmitter {
   /** The last refusal, for the instrument and for a console line. Cleared when a window opens. */
   public lastError: { kind: 'sell' | 'buy'; code: number; guid: string } | null = null;
 
+  /**
+   * WHAT `SMSG_LIST_INVENTORY`'s HEADER SAID, stashed the instant it is read and BEFORE the row loop.
+   *
+   * Its only purpose is the residual discriminator in `subscribe` -- see `ItemWireRow.residualPerRow`.
+   * The placement is the point: if the 32-byte row stride is ever wrong the loop either over-reads and
+   * THROWS or under-reads and leaves a remainder, and in the throwing case this count is the one thing
+   * still needed to tell those two apart. Reading it off `this.rows.length` afterwards would give the
+   * wrong number in exactly the case that matters.
+   *
+   * `null` for every other opcode in this file, all of which are fixed-shape and have no count to
+   * divide by.
+   */
+  private lastCount: number | null = null;
+
   constructor(gameHandler: GameHandler) {
     super();
     // `this.game` FIRST -- `subscribe` reads it. Same order as `LootHandler`'s constructor.
@@ -154,15 +168,9 @@ export class MerchantHandler extends EventEmitter {
       const bodySize = gp.bodySize;
       try {
         arm.call(this, gp);
-        itemWire.record({
-          at: performance.now(), opcode: name, entry: 0, name: '',
-          bodySize, consumed: gp.index - gp.headerSize,
-        });
+        this.recordWire(name, bodySize, gp.index - gp.headerSize);
       } catch (e) {
-        itemWire.record({
-          at: performance.now(), opcode: `${name}!THREW`, entry: 0, name: '',
-          bodySize, consumed: gp.index - gp.headerSize,
-        });
+        this.recordWire(`${name}!THREW`, bodySize, gp.index - gp.headerSize);
         console.warn(
           `merchant: ${name} did not decode -- ${(e as Error).message}. These layouts come from a`
           + ' SERVER implementation (see the header of network/game/object/merchant.ts) and are'
@@ -170,6 +178,46 @@ export class MerchantHandler extends EventEmitter {
         );
       }
     });
+  }
+
+  /**
+   * One `itemWire` row, and for `SMSG_LIST_INVENTORY` it says WHICH KIND of layout error a nonzero
+   * residual is rather than merely that there is one.
+   *
+   * The vendor list is `9 + count * 32` bytes (`u64 guid`, `u8 count`, then eight words a row), plus a
+   * lone trailing reason byte when the count is 0 -- so only the row term scales with the count and
+   * `residual / count` separates a row-level error from a header or trailer one. The full reading is on
+   * `ItemWireRow.residualPerRow`; it is the trainer round's discriminator (`2690666`) applied to the
+   * one packet in this file whose body has that shape.
+   *
+   * **It applies HERE of all places because this row is already the odd one out**: it is eight words
+   * where the 1.12 reference says seven, and a future build that appends a ninth would show up as
+   * `residualPerRow: 4` -- naming both the location and the size of the change instead of leaving a
+   * bare nonzero residual to be puzzled over. Live it currently measures residual 0 over real traffic,
+   * so this is an instrument for the next change rather than a diagnosis of a present one.
+   *
+   * `lastCount` is cleared after every read so a later fixed-shape packet cannot inherit a stale
+   * divisor and invent a per-row error for a body that has no rows.
+   */
+  private recordWire(opcode: string, bodySize: number, consumed: number): void {
+    const residual = bodySize - consumed;
+    const count = this.lastCount;
+    itemWire.record({
+      at: performance.now(),
+      opcode,
+      entry: 0,
+      name: '',
+      bodySize,
+      consumed,
+      ...(count === null ? {} : {
+        wireCount: count,
+        // `null` is a real answer: it means the residual is NOT a per-row error. See the field's doc.
+        residualPerRow: residual !== 0 && count > 0 && residual % count === 0
+          ? residual / count
+          : null,
+      }),
+    });
+    this.lastCount = null;
   }
 
   // -- Incoming -----------------------------------------------------------------------------------
@@ -192,6 +240,8 @@ export class MerchantHandler extends EventEmitter {
   private handleListInventory(gp: GamePacket): void {
     const guid = this.readFullGuid(gp);
     const count = gp.readUnsignedByte();
+    // BEFORE the row loop -- see `lastCount`. A throwing loop still leaves this set.
+    this.lastCount = count;
     const rows: VendorRow[] = [];
     for (let i = 0; i < count; ++i) {
       const muid = gp.readUnsignedInt() >>> 0;
