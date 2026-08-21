@@ -7,7 +7,9 @@
  */
 import { resolveUnitToken } from '../unit-tokens';
 
-function world(source: { gossip?: string | null; merchant?: string | null; trainer?: string | null }) {
+function world(source: {
+  gossip?: string | null; merchant?: string | null; trainer?: string | null; quest?: string | null;
+}) {
   const npc = { name: 'Llane Beshere' } as never;
   const player = { name: 'Gesf' } as never;
   const wolf = { name: 'Mangy Wolf' } as never;
@@ -23,6 +25,7 @@ function world(source: { gossip?: string | null; merchant?: string | null; train
           gossipHandler: { source: source.gossip ?? null },
           merchantHandler: { source: source.merchant ?? null },
           trainerHandler: { source: source.trainer ?? null },
+          questHandler: { source: source.quest ?? null },
         },
       },
     },
@@ -46,6 +49,15 @@ describe('resolving a FrameXML unit token to an entity', () => {
     // ...and so does a plain gossip menu.
     const chat = world({ gossip: '0xF130000123' });
     expect(resolveUnitToken('npc', chat.world)).toBe(chat.npc);
+
+    // THE QUEST DETAIL PAGE, which was the owner's second report: the portrait showed on the gossip
+    // page and vanished when he clicked a quest row, because the quest frame takes over, gossip clears
+    // its own `source`, and the giver's guid lives in `QuestHandler.source`.
+    const quest = world({ quest: '0xF130000123' });
+    expect(resolveUnitToken('npc', quest.world)).toBe(quest.npc);
+    // And the handover itself: gossip has closed, the quest page is up, and the portrait survives.
+    const handover = world({ gossip: null, quest: '0xF130000123' });
+    expect(resolveUnitToken('NPC', handover.world)).toBe(handover.npc);
 
     // Every window closed: each handler nulls its own `source`, so this self-clears.
     expect(resolveUnitToken('npc', world({}).world)).toBeNull();

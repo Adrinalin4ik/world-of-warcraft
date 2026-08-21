@@ -57,6 +57,7 @@ export interface TokenWorld {
       gossipHandler?: { source: string | null };
       merchantHandler?: { source: string | null };
       trainerHandler?: { source: string | null };
+      questHandler?: { source: string | null };
     };
   };
 }
@@ -64,15 +65,26 @@ export interface TokenWorld {
 /**
  * The guid of the NPC whose window is open, or null.
  *
- * ORDER IS DELIBERATE and it is the order a window can shadow another: a trainer or a vendor is
- * normally reached THROUGH a gossip menu, so while the trainer list is up the gossip handler may still
- * be holding the same guid -- they agree, and asking gossip first is therefore harmless. Where they
- * could disagree, the more specific window is the one on screen, so it wins. Each handler nulls its own
- * `source` when its window closes, which is what makes this self-clearing.
+ * GOSSIP IS LAST, and that is the whole ordering rule. A quest page, a trainer list and a vendor list
+ * are each normally reached THROUGH a gossip menu, so gossip may still be holding the same guid -- in
+ * which case they agree -- and where they could disagree, the more specific panel is the one on screen.
+ * Each handler nulls its own `source` when its window closes, which is what makes this self-clearing.
+ *
+ * THE QUEST GIVER WAS THE MISSING ONE, and its absence was the owner's second report: the portrait
+ * appeared on the gossip page and vanished the moment he clicked a quest row. The quest frame takes
+ * over, `GossipHandler` clears its own `source`, and the giver's guid lives in
+ * `QuestHandler.source` -- "The giver whose panel is open" (`network/game/object/quest.ts:262-263`),
+ * public, set from the giver packets and cleared with the panels -- which nothing here was reading.
+ *
+ * Among the three SPECIFIC panels the order is ARBITRARY, and this says so rather than pretending to be
+ * derived: only one of them can be on screen at a time, because the client's own `ShowUIPanel` closes
+ * the others, so two of these fields holding DIFFERENT guids at once is not a state the UI can reach.
+ * Quest is first because it is the deepest in the flow the defect came from.
  */
 function npcGuid(world: TokenWorld): string | null {
   const handlers = world.game?.objectHandler;
-  return handlers?.trainerHandler?.source
+  return handlers?.questHandler?.source
+    ?? handlers?.trainerHandler?.source
     ?? handlers?.merchantHandler?.source
     ?? handlers?.gossipHandler?.source
     ?? null;
