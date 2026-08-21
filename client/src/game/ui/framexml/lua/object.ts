@@ -57,6 +57,7 @@ export type WidgetClass =
   | 'GAMETOOLTIP'
   | 'WORLDFRAME'
   | 'MESSAGEFRAME'
+  | 'SCROLLINGMESSAGEFRAME'
   | 'BACKDROP';
 
 const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
@@ -111,6 +112,19 @@ const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
   // `UnregisterEvent` and `GetFrameLevel` from here and adds exactly `AddMessage`. See
   // `methods/messageframe.ts` for why that one method is the whole surface.
   MESSAGEFRAME: 'FRAME',
+  // A real client type, and the ROOT of every chat window: `ChatFrame1..7` are
+  // `<ScrollingMessageFrame>` (`chatframe.xml:4` for `ChatFrameTemplate`, `floatingchatframe.xml:871`
+  // and on for the instances). Missing, `parseClass` answered null, `CreateFrame` threw and rule 5
+  // dropped each element AND ITS SUBTREE -- so `ChatFrame1` was nil, `DEFAULT_CHAT_FRAME` was never
+  // assigned (`floatingchatframe.xml:886`), and FOUR features had nowhere to print: the Whisper menu
+  // row, the level-up congratulation lines, the duel countdown/winner lines, and
+  // `SMSG_PARTY_COMMAND_RESULT`'s reason codes. Fourth of exactly this defect family after COOLDOWN,
+  // GAMETOOLTIP and WORLDFRAME above.
+  //
+  // PARENT IS 'FRAME', NOT 'MESSAGEFRAME', and that is not an oversight: in the real API both derive
+  // from Frame, so `IsObjectType("MessageFrame")` on a chat frame must answer FALSE. The shared
+  // `AddMessage` is composed in `methods/messageframe.ts` instead.
+  SCROLLINGMESSAGEFRAME: 'FRAME',
   // OURS, not the client's: `backdrop` is a Widget kind this project invented for a nine-slice
   // frame. It behaves as a Frame and has no methods of its own today.
   BACKDROP: 'FRAME',
@@ -155,6 +169,9 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   // `frame`: the lines are real FontString children under it, so the frame itself draws nothing of its
   // own -- exactly like GAMETOOLTIP above.
   MESSAGEFRAME: 'frame',
+  // `frame`, same as MESSAGEFRAME and for the same reason: the lines are real FontString children under
+  // it, so the frame itself draws nothing of its own.
+  SCROLLINGMESSAGEFRAME: 'frame',
 };
 
 /**
@@ -201,6 +218,10 @@ const CREATE_FRAME_CLASSES: WidgetClass[] = [
   // `CreateFrame`, so `<MessageFrame name="UIErrorsFrame" ...>` (`uierrorsframe.xml:4`) throws without
   // it. That throw is why `UIErrorsFrame` did not exist and no refusal could be printed on screen.
   'MESSAGEFRAME',
+  // Required for the same reason as MESSAGEFRAME above -- the loader funnels every XML element through
+  // `CreateFrame`. `FCF_OpenTemporaryWindow` also calls `CreateFrame("ScrollingMessageFrame", ...)`
+  // directly for a whisper pop-out (`floatingchatframe.lua`), so addons and the client both need it.
+  'SCROLLINGMESSAGEFRAME',
   'BACKDROP',
 ];
 

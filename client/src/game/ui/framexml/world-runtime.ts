@@ -73,6 +73,7 @@ import { installStubApi } from './lua/api/stubs';
 import { installActionsApi } from './lua/api/actions';
 import { installAccountApi } from './lua/api/account';
 import { installUnitsApi } from './lua/api/units';
+import { installChatApi } from './lua/api/chat';
 import { installPortraitApi } from '../portrait-bridge';
 import { installBindingsApi, setBindingTable } from './lua/api/bindings';
 import { installCastingApi } from './lua/api/casting';
@@ -218,6 +219,11 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // The two that landed with the `TargetFrame` survey and had no caller until this host existed.
   installSecureApi(vm);
   installUnitsApi(vm);
+  // THE CHAT ENGINE GLOBALS, and this one is load-ORDER-critical rather than merely present:
+  // `ChatFrame.lua` calls `GetChatTypeIndex` at FILE SCOPE (line 2273), so without it that chunk raises
+  // partway through and every function below the raise -- `ChatFrame_OnLoad`, `ChatFrame_OnEvent`, the
+  // whole `ChatEdit_*` family -- is never defined. Installed before the manifest runs, like the rest.
+  installChatApi(vm);
   // `SetPortraitTexture(texture, unit)` -- the unit frames' 3D faces, against the model booth.
   //
   // BEFORE the load, and that is the whole of whether a portrait ever appears: `UnitFrame_Initialize`

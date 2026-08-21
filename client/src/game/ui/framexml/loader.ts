@@ -70,7 +70,9 @@ import './lua/methods/frame';
 import './lua/methods/gametooltip';
 import './lua/methods/kinds';
 import './lua/methods/messageframe';
-import { setMessageFrameDuration, setMessageFrameInsertMode } from './lua/methods/messageframe';
+import {
+  setMessageFrameDuration, setMessageFrameInsertMode, setMessageFrameMaxLines,
+} from './lua/methods/messageframe';
 import './lua/methods/model';
 import './lua/methods/scroll';
 import './lua/methods/statusbar';
@@ -766,6 +768,13 @@ class DocumentLoader {
     const displayDuration = num(attr(element, 'displayDuration'));
     if (displayDuration !== undefined) {
       setMessageFrameDuration(this.rt.ctx.frameIdOf(wrapper), displayDuration);
+    }
+    // `<ScrollingMessageFrame maxLines="128">` (`chatframe.xml:4`). It is the scrollback DEPTH, not the
+    // number of lines on screen, and it is also the signal that separates a chat frame from an error
+    // frame at load time -- see `setMessageFrameMaxLines`, which turns fading off with it.
+    const maxLines = num(attr(element, 'maxLines'));
+    if (maxLines !== undefined) {
+      setMessageFrameMaxLines(this.rt.ctx.frameIdOf(wrapper), maxLines);
     }
     const insertMode = attr(element, 'insertMode');
     if (insertMode !== undefined) {

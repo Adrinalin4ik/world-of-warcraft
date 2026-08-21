@@ -157,6 +157,13 @@ const FRAME: MethodTable = {
   // per-widget scale that cascades the way `frameLevel` does at `Widget#add`, so this is still a
   // warn-once no-op -- just on the right class now.
   SetScale: notImplemented('SetScale', 'widget.ts has no per-widget scale field yet'),
+  // `SetClampRectInsets(left, right, top, bottom)` -- how far a clamped frame may go PAST the screen
+  // edge. `SetClampedToScreen` below is real; this is the inset it clamps to, and `widget.ts` has no
+  // field for it. MEASURED as the only remaining load error in `ChatFrame1`'s own OnLoad
+  // (`floatingchatframe.xml:883`, relative line 13), which mattered because a raise there skips the
+  // rest of that OnLoad.
+  SetClampRectInsets: notImplemented('SetClampRectInsets',
+    'widget.ts has no clamp-inset field; SetClampedToScreen clamps to the bare screen rect'),
   GetEffectiveScale: notImplemented('GetEffectiveScale', 'reporting the only scale that exists today (1)', [1]),
   /**
    * `GetScale()` -- 1, and a TRUE ANSWER rather than a stub, which is why it is not beside the two

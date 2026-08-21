@@ -118,6 +118,11 @@ export function installCompat(vm: LuaVM): void {
     random = math.random
     tinsert = table.insert
     tremove = table.remove
+    -- sort(t, comparator): the 5.0-era global alias for table.sort, which WoW keeps.
+    -- ChatFrame.lua:4293 (OnMenuLoad) is the caller, and it is reached from the OnLoad of BOTH
+    -- EmoteMenu and VoiceMacroMenu -- so its absence was two load errors and two dead menus.
+    -- (No backticks in this shim: it is a JS TEMPLATE LITERAL.)
+    sort = table.sort
     -- wipe(t) / table.wipe(t): WoW's own table extension -- empty the table IN PLACE and return it.
     -- Not a Lua version difference either; there is no standard-library equivalent in any version.
     -- IN PLACE is the whole point: FrameXML wipes tables other frames hold references to, so

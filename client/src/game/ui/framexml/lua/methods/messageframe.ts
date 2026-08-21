@@ -64,6 +64,33 @@ interface MessageFrameState {
   holdSeconds: number;
   /** `insertMode="TOP"`: the newest message is drawn topmost. */
   insertTop: boolean;
+  /**
+   * `maxLines` -- how many messages the BUFFER keeps, which is NOT how many are on screen.
+   *
+   * `MessageFrame` has no such attribute and keeps `MAX_LINES`; `ScrollingMessageFrame` declares it
+   * (`chatframe.xml:4`, `maxLines="128"`) and the distinction is the whole difference between the two
+   * classes: an error frame shows everything it holds, a chat frame holds a scrollback and shows a
+   * window onto it.
+   */
+  maxLines: number;
+  /**
+   * How far back the visible window is scrolled, in lines. 0 = the newest message is at the bottom.
+   *
+   * Only `ScrollingMessageFrame` moves this; a `MessageFrame` leaves it at 0 forever, which makes the
+   * shared `reflow` below correct for both without a branch.
+   */
+  scrollOffset: number;
+  /** Lines never expire on a scrolling frame -- see `SetFading`. */
+  fading: boolean;
+  /**
+   * THE SCROLLBACK, for `ScrollingMessageFrame` only, and separate from `lines` on purpose.
+   *
+   * `lines` is what is ON SCREEN and each entry owns a region from the pool. This is what the frame
+   * REMEMBERS -- up to `maxLines` entries of pure data, no widgets. Conflating the two is exactly the
+   * defect `AddMessage` below documents: a buffer made of screen regions cannot be deeper than the
+   * screen.
+   */
+  buffer: { text: string; color: string | null; id: number | null }[];
 }
 
 /**
@@ -103,7 +130,10 @@ export function setMessageFrameInsertMode(frameId: number, mode: string): void {
 function stateOf(frameId: number): MessageFrameState {
   let state = stateByFrame.get(frameId);
   if (state === undefined) {
-    state = { frameId, lines: [], regions: [], holdSeconds: 5, insertTop: true };
+    state = {
+      frameId, lines: [], regions: [], holdSeconds: 5, insertTop: true,
+      maxLines: MAX_LINES, scrollOffset: 0, fading: true, buffer: [],
+    };
     stateByFrame.set(frameId, state);
   }
   return state;
@@ -136,7 +166,7 @@ function regionsOf(ctx: MethodContext, state: MessageFrameState): Widget[] {
   if (authored !== null) {
     state.regions.push(authored);
   }
-  while (state.regions.length < MAX_LINES) {
+  while (state.regions.length < visibleCap(ctx, state)) {
     const id = ctx.registry.create('FontString', null, state.frameId);
     const region = ctx.registry.widget(id);
     if (region === undefined) {
@@ -201,7 +231,10 @@ export function tickMessageFrames(dt: number): void {
   // closure over a mutable outer binding in a loop is a hazard, and one read per tick is also cheaper.
   const now = clock;
   for (const state of stateByFrame.values()) {
-    if (state.lines.length === 0) {
+    // A SCROLLING frame does not fade: its scrollback is the point, and expiring lines out of it would
+    // make the scrollbar walk backwards while the player reads. `FCF_SetFading` writes this per frame,
+    // and a frame declaring `maxLines` is created with fading off -- see `setMessageFrameMaxLines`.
+    if (state.lines.length === 0 || !state.fading) {
       continue;
     }
     const live = state.lines.filter((line) => line.expiresAt > now);
@@ -209,6 +242,39 @@ export function tickMessageFrames(dt: number): void {
       state.lines = live;
       reflow(state, state.regions);
     }
+  }
+}
+
+/**
+ * How many lines FIT on screen -- the frame's height over one line's height, at least one.
+ *
+ * `MessageFrame` stays at `MAX_LINES` because its box is authored to hold three; a
+ * `ScrollingMessageFrame` is whatever its own rect allows. Asked per call rather than cached: a chat
+ * frame is RESIZABLE (`chatframe.xml:4`) and `FCF_SetWindowSize` moves it at runtime, so a cached count
+ * would go stale exactly when the player dragged the corner.
+ */
+function visibleCap(ctx: MethodContext, state: MessageFrameState): number {
+  if (state.maxLines === MAX_LINES) {
+    return MAX_LINES;
+  }
+  const frame = ctx.registry.widget(state.frameId);
+  const lineHeight = state.regions[0]?.font?.size ?? 14;
+  const height = frame?.height ?? 0;
+  if (height <= 0 || lineHeight <= 0) {
+    return MAX_LINES;
+  }
+  return Math.max(1, Math.min(state.maxLines, Math.floor(height / lineHeight)));
+}
+
+/** `<ScrollingMessageFrame maxLines="128">` -- the loader hook, beside the two above. */
+export function setMessageFrameMaxLines(frameId: number, lines: number): void {
+  if (Number.isFinite(lines) && lines > 0) {
+    const state = stateOf(frameId);
+    state.maxLines = Math.floor(lines);
+    // A frame that declares `maxLines` is a scrollback, and a scrollback does not fade. Set here because
+    // the attribute is the only signal available at load time that separates the two classes --
+    // `registerMethods` does not tell a method table which frames wear it.
+    state.fading = false;
   }
 }
 
@@ -259,3 +325,231 @@ const MESSAGEFRAME: MethodTable = {
 };
 
 registerMethods('MESSAGEFRAME', MESSAGEFRAME);
+
+/**
+ * Fill the on-screen list from the SCROLLBACK, honouring `scrollOffset`.
+ *
+ * `reflow` lays out `state.lines`; this is what decides WHICH buffer entries those are. Split so that
+ * `MessageFrame` -- whose buffer is always empty because it writes `lines` directly -- is untouched and
+ * pays nothing.
+ *
+ * THE SLICE IS OLDEST-FIRST AND THAT IS WHY A CHAT FRAME READS CORRECTLY with `insertTop` left at its
+ * default: `reflow` puts `lines[0]` at the TOP, so oldest at the top and newest at the bottom, which is
+ * how chat reads. `UIErrorsFrame` sets `insertMode="TOP"` and reverses that for itself, and it never
+ * reaches this function anyway.
+ *
+ * `regions.length` IS the visible cap -- `regionsOf` builds exactly that many -- so no `MethodContext`
+ * is needed here.
+ */
+function windowInto(state: MessageFrameState, regions: Widget[]): void {
+  if (state.buffer.length === 0) {
+    return;
+  }
+  const cap = Math.max(1, regions.length);
+  // Measured from the BOTTOM: offset 0 means the newest entry is the last one shown.
+  const end = state.buffer.length - state.scrollOffset;
+  const start = Math.max(0, end - cap);
+  const slice = state.buffer.slice(start, end);
+  state.lines = slice.map((entry, index) => {
+    const region = regions[index];
+    region.text = entry.text;
+    if (region.font !== null && entry.color !== null) {
+      region.font.color = entry.color;
+    }
+    // `expiresAt` is far in the future rather than absent: a scrolling frame has `fading` off so the
+    // tick never inspects it, and a sentinel keeps `MessageLine` one shape for both classes.
+    return { region, expiresAt: Number.POSITIVE_INFINITY };
+  });
+}
+
+/** Clamp a scroll offset into the buffer and re-lay the window. Returns whether anything moved. */
+function scrollTo(ctx: MethodContext, self: number, offset: number): boolean {
+  const state = stateOf(self);
+  const regions = regionsOf(ctx, state);
+  const cap = visibleCap(ctx, state);
+  const highest = Math.max(0, state.buffer.length - cap);
+  const wanted = Math.max(0, Math.min(highest, Math.floor(offset)));
+  if (wanted === state.scrollOffset) {
+    return false;
+  }
+  state.scrollOffset = wanted;
+  windowInto(state, regions);
+  reflow(state, regions);
+  return true;
+}
+
+/**
+ * `SCROLLINGMESSAGEFRAME` -- the class behind every `ChatFrame`, and its ABSENCE was the whole of
+ * "chat is dead at load".
+ *
+ * `ChatFrame1..7` are declared `<ScrollingMessageFrame>` (`chatframe.xml:4` for `ChatFrameTemplate`,
+ * `floatingchatframe.xml:871,991,...` for the instances). The class was not in `WidgetClass`, so
+ * `parseClass` answered null, `CreateFrame` threw "unknown frame type", and the loader dropped each
+ * element AND ITS WHOLE SUBTREE -- the same defect family as COOLDOWN, GAMETOOLTIP and WORLDFRAME
+ * before it (`object.ts#CLASS_PARENT` records all three). That is why `ChatFrame1` was nil, why
+ * `DEFAULT_CHAT_FRAME` was never assigned (`floatingchatframe.xml:886`), and why four separate features
+ * had no listener: the Whisper menu row, the level-up congratulation lines, the duel countdown and
+ * winner lines, and `SMSG_PARTY_COMMAND_RESULT`'s reason codes.
+ *
+ * IT IS NOT A SUBCLASS OF `MessageFrame`, deliberately: in the real API both derive from Frame, so
+ * `IsObjectType("MessageFrame")` on a chat frame answers FALSE. The two share this file's state, region
+ * pool and layout by COMPOSITION -- the table below spreads `MESSAGEFRAME`'s `AddMessage` -- rather than
+ * by inheritance, which keeps `object.ts#chainOf` honest while keeping one implementation of what they
+ * genuinely share.
+ *
+ * WHAT IS REAL AND WHAT IS NOT. The line buffer, `maxLines`, the visible window, the scroll offset and
+ * every scroll verb are real and operate on the buffer. `SetHyperlinksEnabled` and `UpdateColorByID` are
+ * accepted and recorded but change no drawing: hyperlink hit-testing inside a line and
+ * per-message-id recolouring both need the text layer to expose per-run rects, which it does not. Named
+ * here rather than left to be discovered.
+ */
+const SCROLLINGMESSAGEFRAME: MethodTable = {
+  ...MESSAGEFRAME,
+
+  /**
+   * `AddMessage(text, r, g, b, messageId)` -- push one line onto the SCROLLBACK.
+   *
+   * **THIS OVERRIDES `MESSAGEFRAME`'s, AND SHARING IT WAS A REAL DEFECT THE PROBE CAUGHT.** That one
+   * recycles a fixed pool -- `if (state.lines.length >= regions.length) state.lines.shift()` -- where
+   * `regions.length` is the number of lines that FIT ON SCREEN. Inherited here it made the buffer
+   * physically incapable of holding more than the visible window: 14 messages added, `GetNumMessages()`
+   * answered **8**, `AtTop()` was permanently true and `ScrollUp` had nothing to scroll. A scrollback
+   * that cannot exceed its own window is not a scrollback.
+   *
+   * So the buffer is its own list, capped at `maxLines` (128 from `chatframe.xml:4`), and `reflow`
+   * shows a WINDOW onto it chosen by `scrollOffset`.
+   *
+   * **THE FIFTH ARGUMENT DIFFERS BETWEEN THE TWO CLASSES**, which is worth stating because the
+   * `MESSAGEFRAME` docstring above reasons about it as an alpha and is right for its own class only. On
+   * a `ScrollingMessageFrame` it is the MESSAGE ID: `chatframe.lua:2568` passes `info.r, info.g, info.b,
+   * info.id`, and `UpdateColorByID(id, r, g, b)` (`:2522`) later recolours every line carrying that id.
+   * The id is stored per line so that recolour becomes possible; it is not used for anything yet, and
+   * `UpdateColorByID` is a named gap because recolouring needs per-line colour the text layer keeps but
+   * the region pool overwrites on reflow.
+   *
+   * **STAYING AT THE BOTTOM IS CONDITIONAL, and that is the engine's behaviour**: a new message scrolls
+   * the view only if the player was already at the bottom. Scrolled back to read something, he keeps his
+   * place -- otherwise arriving chat would yank the view away mid-sentence.
+   */
+  AddMessage: (ctx, self, args) => {
+    const text = args[0];
+    if (typeof text !== 'string' || text === '') {
+      return [];
+    }
+    const state = stateOf(self);
+    const regions = regionsOf(ctx, state);
+    if (regions.length === 0) {
+      return [];
+    }
+    const wasAtBottom = state.scrollOffset === 0;
+    state.buffer.push({
+      text,
+      color: typeof args[1] === 'number'
+        ? toHex(Number(args[1]), Number(args[2]), Number(args[3]))
+        : null,
+      id: typeof args[4] === 'number' ? args[4] : null,
+    });
+    // The OLDEST line goes when the scrollback is full -- the newest message is the one the player
+    // needs, which is the same reasoning `MESSAGEFRAME` applies to its three-line pool.
+    while (state.buffer.length > state.maxLines) {
+      state.buffer.shift();
+      // The view is measured from the bottom, so dropping the oldest line moves everything the player
+      // is looking at one step closer to it. Without this a scrolled-back reader drifts.
+      if (state.scrollOffset > 0) {
+        state.scrollOffset -= 1;
+      }
+    }
+    if (wasAtBottom) {
+      state.scrollOffset = 0;
+    }
+    windowInto(state, regions);
+    reflow(state, regions);
+    return [];
+  },
+
+  /** `Clear()` -- drop the whole scrollback. `FCF_Clear` and the `/clear` command both reach it. */
+  Clear: (ctx, self) => {
+    const state = stateOf(self);
+    state.buffer = [];
+    state.lines = [];
+    state.scrollOffset = 0;
+    reflow(state, regionsOf(ctx, state));
+    return [];
+  },
+
+  /** `GetNumMessages()` -- lines in the BUFFER, not lines on screen. */
+  GetNumMessages: (ctx, self) => [stateOf(self).buffer.length],
+
+  SetMaxLines: (ctx, self, args) => {
+    if (typeof args[0] === 'number') {
+      setMessageFrameMaxLines(self, args[0]);
+    }
+    return [];
+  },
+  GetMaxLines: (ctx, self) => [stateOf(self).maxLines],
+
+  /** `GetNumLinesDisplayed()` -- the height of the window onto the buffer. */
+  GetNumLinesDisplayed: (ctx, self) => [visibleCap(ctx, stateOf(self))],
+
+  // The scroll verbs: ONE line for the arrows, one window for the page keys -- the engine's own step
+  // sizes, and what `FCF_ScrollUp` and `ChatFrame_OnMouseWheel` expect.
+  ScrollUp: (ctx, self) => { scrollTo(ctx, self, stateOf(self).scrollOffset + 1); return []; },
+  ScrollDown: (ctx, self) => { scrollTo(ctx, self, stateOf(self).scrollOffset - 1); return []; },
+  PageUp: (ctx, self) => {
+    const state = stateOf(self);
+    scrollTo(ctx, self, state.scrollOffset + visibleCap(ctx, state));
+    return [];
+  },
+  PageDown: (ctx, self) => {
+    const state = stateOf(self);
+    scrollTo(ctx, self, state.scrollOffset - visibleCap(ctx, state));
+    return [];
+  },
+  ScrollToTop: (ctx, self) => { scrollTo(ctx, self, Number.MAX_SAFE_INTEGER); return []; },
+  ScrollToBottom: (ctx, self) => { scrollTo(ctx, self, 0); return []; },
+  SetScrollOffset: (ctx, self, args) => {
+    scrollTo(ctx, self, typeof args[0] === 'number' ? args[0] : 0);
+    return [];
+  },
+  GetScrollOffset: (ctx, self) => [stateOf(self).scrollOffset],
+
+  /**
+   * `AtTop()` / `AtBottom()` -- what the scroll arrows' enabled state is gated on.
+   *
+   * BOTH ARE TRUE ON AN EMPTY OR UNDER-FULL BUFFER, which is the engine's answer and not a shortcut: a
+   * frame holding fewer lines than it can show is at the top and the bottom of its own scrollback at
+   * once, and that is what correctly disables both arrows.
+   */
+  AtTop: (ctx, self) => {
+    const state = stateOf(self);
+    return [state.scrollOffset >= Math.max(0, state.buffer.length - visibleCap(ctx, state))];
+  },
+  AtBottom: (ctx, self) => [stateOf(self).scrollOffset === 0],
+
+  /**
+   * `SetFading(on)` / `SetTimeVisible(s)` / `GetTimeVisible()` -- real, and they matter: with fading ON
+   * the tick expires lines out of the buffer, which on a chat frame would shrink the scrollback while
+   * the player reads it. `FCF_SetFading` writes this per frame from the interface options.
+   */
+  SetFading: (ctx, self, args) => {
+    stateOf(self).fading = args[0] !== undefined && args[0] !== null && args[0] !== false;
+    return [];
+  },
+  SetTimeVisible: (ctx, self, args) => {
+    if (typeof args[0] === 'number' && args[0] > 0) {
+      stateOf(self).holdSeconds = args[0];
+    }
+    return [];
+  },
+  GetTimeVisible: (ctx, self) => [stateOf(self).holdSeconds],
+
+  /** `SetInsertMode("TOP"|"BOTTOM")` -- the method form of the XML attribute. */
+  SetInsertMode: (ctx, self, args) => {
+    if (typeof args[0] === 'string') {
+      setMessageFrameInsertMode(self, args[0]);
+    }
+    return [];
+  },
+};
+
+registerMethods('SCROLLINGMESSAGEFRAME', SCROLLINGMESSAGEFRAME);

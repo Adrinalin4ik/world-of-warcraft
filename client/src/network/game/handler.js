@@ -281,8 +281,23 @@ export class GameHandler extends Socket {
     // Through the SHARED applier, so the packet path and the cache-hit path in `askNameOnce` cannot
     // drift apart -- they are the same two lines and one of them used to be missing entirely.
     this.applyPlayerName(guid);
-
-    this.session.chat.emit('message', null); // to refresh
+    // WHAT WAS HERE, and why it is gone: `this.session.chat.emit('message', null); // to refresh`.
+    //
+    // **`session.chat` IS ASSIGNED NOWHERE** -- one reference in the whole repo, and no writer -- so
+    // every name query that RESOLVED threw `Cannot read properties of undefined (reading 'emit')`. That
+    // was the two page errors on every login: the two boot-time name queries.
+    //
+    // The refresh it wanted is already done, by the line above it. `applyPlayerName` ends with the same
+    // two lines `applyCreatureInfo` does, which is the event the unit bridges and the nameplate walker
+    // already listen to -- the comment directly above says exactly that. So this was a "to refresh"
+    // whose feed had been replaced, and `CLAUDE.md` treats a comment whose rationale has expired as a
+    // defect in its own right.
+    //
+    // ONE CORRECTION to how this was reported to me: it is the handler's LAST statement, so nothing in
+    // `handleName` was skipped by the throw. The real harm is upstream -- an uncaught throw escapes
+    // `GameHandler#dataReceived`'s receive loop and takes every packet still buffered in that SAME data
+    // event with it, which is the hazard `object/loot.ts#subscribe` exists to contain. A name response
+    // sharing a TCP read with anything else could therefore drop it, silently and unreproducibly.
   }
 
   /**
