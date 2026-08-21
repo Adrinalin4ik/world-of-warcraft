@@ -1,4 +1,6 @@
 import { ObjectType, PlayerField, getUpdateFieldName } from '../../enums';
+import { applyUnitFields } from '../unit-fields';
+import type Unit from '../../../../../game/classes/unit';
 import { emptyQuestLog, mergeQuestLog, QUEST_STATE } from '../quest-log';
 
 /**
@@ -48,4 +50,46 @@ test('a quest log slot arrives, survives an unrelated packet, and is deleted by 
   // (3) The abandon: the id word goes to zero and the slot is gone.
   expect(mergeQuestLog(log, { [key(BASE + 0)]: 0 }, ObjectType.Player)).toBe(true);
   expect(log.size).toBe(0);
+});
+
+/**
+ * A PACKET CARRYING ONLY QUEST-LOG WORDS REPORTS A CHANGE.
+ *
+ * **This is the defect behind "Quests: 1/25" beside "No Active Quests".** `applyUnitFields`' return is
+ * what `update-object/handler.ts:267,381` gates `world.emit('unit:fields', unit)` on, and only the
+ * NAMED SCALARS were feeding it -- `mergeQuestLog`'s return was discarded. Accepting a quest writes
+ * only `PLAYER_QUEST_LOG_*`, so the map filled, the event never fired, and every consumer that rebuilds
+ * on that edge kept its previous answer: the log's header reads the map live and said 1, its list reads
+ * an array rebuilt only on the event and stayed empty, and the objectives tracker reads the same array.
+ *
+ * Asserted on the RETURN rather than on the map, because the map was always right -- that is precisely
+ * why the symptom looked like a display bug. And asserted here rather than in a harness: a VM plus a
+ * widget tree has no World, no descriptor and no bridges, so no headless run could have seen it.
+ */
+test('a values-only update carrying only quest-log words reports a change', () => {
+  // The fields `applyUnitFields` touches, and nothing more -- a real `Unit` drags in three.js.
+  const unit = {
+    fields: {},
+    characterStats: {},
+    skills: new Map(),
+    questLog: emptyQuestLog(),
+    spellDamage: [],
+  } as unknown as Unit;
+
+  const base = PlayerField.player_quest_log_1_1;
+  const key = (index: number) => getUpdateFieldName(index, ObjectType.Player) as string;
+
+  // Exactly what the server sends when a quest is accepted: the slot's words and nothing else.
+  const changed = applyUnitFields(unit, {
+    [key(base + 0)]: 18,
+    [key(base + 1)]: 0,
+  }, ObjectType.Player, false);
+
+  expect(unit.questLog.get(0)?.questId).toBe(18);
+  // THE ASSERTION. False here is the whole bug: no event, so no rebuild, so no rows.
+  expect(changed).toBe(true);
+
+  // And a packet that says nothing about the log must NOT claim a change, or the quest log would
+  // repaint on every health tick and hand back the offscreen-target saving.
+  expect(applyUnitFields(unit, {}, ObjectType.Player, false)).toBe(false);
 });

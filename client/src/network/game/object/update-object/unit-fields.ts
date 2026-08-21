@@ -485,7 +485,28 @@ export function applyUnitFields(
   // Player-scope, so `mergeQuestLog` returns immediately for a creature. `quest-log.ts`' header is
   // where the "packets versus descriptor" question is answered: this block is the log's membership and
   // its objective counters, and the abandon confirmation is a slot going to zero here.
-  mergeQuestLog(unit.questLog, values, type);
+  //
+  // **ITS RETURN IS OR-ED INTO `changed`, AND DISCARDING IT WAS THE WHOLE OF "Quests: 1/25 with no
+  // rows".**
+  //
+  // `changed` is what `update-object/handler.ts:267,381` gates `world.emit('unit:fields', unit)` on,
+  // and only the `set(...)` calls above -- the NAMED SCALARS -- were feeding it. Accepting a quest
+  // writes ONLY `PLAYER_QUEST_LOG_*` words, so the map below was filled, `changed` stayed false, the
+  // event never fired, and every consumer that rebuilds on that edge kept its previous answer. The
+  // quest log's header reads `world.player.questLog.size` LIVE and said 1; its list reads an array
+  // rebuilt only on the event and stayed empty; the objectives tracker reads the same array. Three
+  // symptoms, one dropped boolean.
+  //
+  // **This is also why a headless harness could not have caught it.** The harness is a VM plus a widget
+  // tree: no World, no descriptor, no bridges. It validates the client's Lua and our layout, which is
+  // exactly where the fixes that DID land live -- and it cannot see a data path at all.
+  //
+  // `mergeQuestLog` is the only one of the three block merges that reports a change;
+  // `mergeCharacterStats` and `mergePlayerSkills` return their containers. **The same silence is latent
+  // for them**: a lone skill-point tick or a lone stat change writes only its own words, so it too
+  // would fire no event. Named rather than fixed here -- those blocks belong to the character panel and
+  // its bridges may repaint on other edges -- but it is the same defect waiting.
+  changed = mergeQuestLog(unit.questLog, values, type) || changed;
 
   // SPELL POWER is seven numbers and lives beside `fields`, not in it -- see `SPELL_SCHOOL_COUNT`.
   const spellDamage = readSpellDamage(values);
