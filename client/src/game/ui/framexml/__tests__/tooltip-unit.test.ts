@@ -28,6 +28,11 @@ const DOC = `
         <FontString name="$parentTextLeft3"/>
         <FontString name="$parentTextRight3"/>
       </Layer></Layers>
+      <Frames>
+        <StatusBar name="$parentStatusBar" hidden="true">
+          <Size><AbsDimension x="0" y="8"/></Size>
+        </StatusBar>
+      </Frames>
     </GameTooltip>
   </Ui>
 `;
@@ -107,5 +112,36 @@ describe('GameTooltip:SetUnit', () => {
     // A token nothing occupies must answer false -- that is what clears `self.UpdateTooltip`.
     expect(vm.run('empty = GameTooltip:SetUnit("target")', 't')).toBeNull();
     expect(vm.getGlobal('empty')).toBe(false);
+  });
+
+  /**
+   * THE BAR IS PART OF `SetOwner`'S RESET, and its absence put a health strip on every tooltip.
+   *
+   * The owner's screenshot was the XP Bar tooltip -- plain text, no unit -- carrying the green strip.
+   * Every tooltip path enters through `SetOwner` (`GameTooltip_SetDefaultAnchor`'s first line,
+   * `gametooltip.lua:72-76`), so that is where the previous tooltip's unit state has to go.
+   */
+  it('hides the health bar and forgets the unit when the tooltip is re-owned', () => {
+    const { vm } = boot();
+    const snapshot = emptySnapshot();
+    snapshot.name = 'Gesf';
+    snapshot.level = 4;
+    snapshot.health = 60;
+    snapshot.maxHealth = 100;
+    setUnit(vm, 'mouseover', snapshot);
+
+    expect(vm.run('GameTooltip:SetUnit("mouseover")', 't')).toBeNull();
+    expect(vm.run('shown = GameTooltipStatusBar:IsShown(); isU = GameTooltip:IsUnit("mouseover")', 't'))
+      .toBeNull();
+    expect(vm.getGlobal('shown')).toBe(true);
+    expect(vm.getGlobal('isU')).toBe(true);
+
+    // The next tooltip is a plain one: `GameTooltip_AddNewbieTip` reaches `SetOwner` for the XP bar.
+    expect(vm.run('GameTooltip:SetOwner(UIParent, "ANCHOR_NONE"); GameTooltip:SetText("XP Bar")', 't'))
+      .toBeNull();
+    expect(vm.run('shown = GameTooltipStatusBar:IsShown(); isU = GameTooltip:IsUnit("mouseover")', 't'))
+      .toBeNull();
+    expect(vm.getGlobal('shown')).toBe(false);
+    expect(vm.getGlobal('isU')).toBe(false);
   });
 });

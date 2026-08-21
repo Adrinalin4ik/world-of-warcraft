@@ -514,6 +514,33 @@ const GAMETOOLTIP: MethodTable = {
     state.owner = ctx.frameIdOf(args[0]);
     state.lines = 0;
     state.minWidth = 0;
+    /**
+     * THE UNIT STATE IS PART OF THE RESET, and leaving it out put a health bar on every tooltip.
+     *
+     * Owner: "сейчас все тултипы имеют полоску здоровья, а она нужна только при наведении на цель." His
+     * screenshot is the XP Bar tooltip -- plain text, no unit -- carrying the green strip.
+     *
+     * **NO RULE OF OURS IS ADDED HERE.** `GameTooltipStatusBar` is named NOWHERE in the served manifest
+     * (grepped: zero hits in any `.lua` or `.xml`), so the engine owns showing AND hiding it -- there is
+     * no client call to honour. What the client does have is a universal reset point, and every tooltip
+     * path goes through it: `GameTooltip_SetDefaultAnchor`'s first line is
+     * `tooltip:SetOwner(parent, "ANCHOR_NONE")` (`gametooltip.lua:72-76`), which is how the XP-bar
+     * tooltip arrives via `GameTooltip_AddNewbieTip`. `SetOwner` already resets the lines, the owner, the
+     * minimum width and the anchors here. The bar and the unit token were simply missing from that list,
+     * so this COMPLETES an existing reset rather than layering a new lifecycle over the client's.
+     *
+     * `unitToken` is cleared for the same reason and it is the same bug one step further on: left set, a
+     * plain tooltip would answer `IsUnit("mouseover")` true and the client's own `<OnTooltipSetUnit>`
+     * would recolour a line that has nothing to do with a unit.
+     */
+    state.unitToken = null;
+    const name = ctx.registry.nameOf(self);
+    if (name !== null) {
+      ctx.vm.run(
+        `if _G["${name}StatusBar"] then _G["${name}StatusBar"]:Hide() end`,
+        'tooltip-status-bar-reset',
+      );
+    }
     // A NEW TOOLTIP HAS NO ITEM YET. `GameTooltip:GetItem` is about the current contents, so the
     // previous owner's item must not survive into this one -- otherwise hovering a vendor row and then
     // a micro button would still answer the sword.
