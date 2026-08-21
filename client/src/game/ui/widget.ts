@@ -255,6 +255,31 @@ export class Widget {
    */
   linkStamp = nextLinkStamp++;
   anchors: Anchor[] = [];
+
+  /**
+   * Whether `anchors` is the loader's DEFAULT placement rather than something the document declared.
+   *
+   * **THE ENGINE'S DEFAULT PLACEMENT IS NOT AN ANCHOR SET, and conflating the two is a real defect.**
+   * `loader.ts#applyRegionLayout` gives an anchorless `<Layer>` region the parent's rect, which is
+   * right -- an anchorless `$parentIcon` does fill its button in the real client. But it did so by
+   * writing four ANCHORS, and the client's own Lua then adds a fifth with `SetPoint` and no
+   * `ClearAllPoints`:
+   *
+   *     shownFrame:SetPoint("TOPLEFT", lastFrame, "BOTTOMLEFT", ...)   questinfo.lua:73
+   *     shownFrame:SetPoint("TOPLEFT", parentFrame, "TOPLEFT", ...)    :75
+   *
+   * Four fill anchors plus that one give OPPOSING edges, so `QuestInfoTitleHeader` resolved to the
+   * whole 295x324 viewport instead of its text height -- and every element the client chains below its
+   * `BOTTOMLEFT` then started below the fold, where the scroll-frame clip correctly dropped it. One
+   * cause, both of "the quest text is missing" and "the scroll does nothing".
+   *
+   * In the real engine a region with no `SetPoint` has a default POSITION, and the first real
+   * `SetPoint` replaces it rather than combining with it -- which is why the client never needs
+   * `ClearAllPoints` there. This flag is that distinction: the fill stays for anything never
+   * positioned from Lua (a parchment, a background, an icon), and vanishes the moment something
+   * places the region itself.
+   */
+  anchorsAreDefault = false;
   width = 0;
   height = 0;
 
@@ -535,6 +560,9 @@ export class Widget {
 
   setAnchors(...anchors: Anchor[]): Widget {
     this.anchors = anchors;
+    // Any explicit call is an authored placement, so it stops being the loader's default. `loader.ts`
+    // re-sets the flag straight after its own fill.
+    this.anchorsAreDefault = false;
     // Every `SetPoint`/`ClearAllPoints`/`SetAllPoints` funnels through here, so this one bump covers
     // all three. See `geometryRevision`.
     geometryRevision += 1;

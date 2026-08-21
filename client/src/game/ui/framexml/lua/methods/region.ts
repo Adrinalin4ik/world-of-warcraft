@@ -555,9 +555,22 @@ const REGION: MethodTable = {
     if (relativeToId !== undefined) {
       anchor.relativeTo = relativeToId;
     }
+    /**
+     * A DEFAULT PLACEMENT IS REPLACED, NOT STACKED ON, and that distinction is the quest page's blank
+     * body. See `Widget#anchorsAreDefault`: the loader gives an anchorless `<Layer>` region the
+     * parent's rect, and `QuestInfo_Display` then adds ONE `SetPoint` with no `ClearAllPoints`
+     * (`questinfo.lua:73,75`). Stacked, the four fill anchors plus that one gave opposing edges and
+     * `QuestInfoTitleHeader` resolved to the whole 295x324 viewport instead of its text height.
+     *
+     * The real engine's default position is not an anchor set, so the first explicit `SetPoint`
+     * supersedes it. Anything never positioned from Lua keeps the fill.
+     */
+    const existing = widget.anchorsAreDefault
+      ? []
+      : widget.anchors.filter((candidate) => candidate.point !== point);
     // Replace only the anchor at this POINT -- FrameXML stacks a TOPLEFT and a BOTTOMRIGHT call to
     // stretch a frame, and a second SetPoint("TOPLEFT", ...) is meant to move that corner, not add one.
-    widget.setAnchors(...widget.anchors.filter((existing) => existing.point !== point), anchor);
+    widget.setAnchors(...existing, anchor);
     return [];
   },
   ClearAllPoints: (ctx, self) => {

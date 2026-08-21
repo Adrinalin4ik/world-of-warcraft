@@ -1039,10 +1039,29 @@ class DocumentLoader {
    * the two opposing anchors. That is the same precedence benilla pins for an explicit
    * `setAllPoints` ("size present, but setAllPoints wins", `script/tests/regions.rs:131`). Most of
    * them are positioned from Lua later -- `TutorialFrame`'s arrows, `GameTooltipTemplate`'s ten
-   * `$parentTexture<n>` slots -- and a later `SetPoint` at a NEW point stacks on top of the fill
-   * rather than replacing it, so those keep the owner's rect until something calls `ClearAllPoints`.
-   * Both frames are hidden by default and `GameTooltip` is not a frame type this runtime has yet, so
-   * nothing observable rests on it today; it is written down rather than guessed at.
+   * `$parentTexture<n>` slots.
+   *
+   * **THE STACKING THIS PARAGRAPH PREDICTED HAS NOW COST SOMETHING, so the prediction is replaced by
+   * what happened.** It used to end "a later `SetPoint` at a NEW point stacks on top of the fill rather
+   * than replacing it ... nothing observable rests on it today". `QuestInfo_Display` positions every
+   * element of the quest page with a single `SetPoint` and no `ClearAllPoints` (`questinfo.lua:73,75`),
+   * so `QuestInfoTitleHeader` -- authored with a `<Size>` and no `<Anchors>` (`questinfo.xml:251-255`)
+   * -- got four fill anchors plus one more, resolved to the whole 295x324 viewport instead of its text
+   * height, and pushed everything chained below its `BOTTOMLEFT` under the fold where the scroll clip
+   * dropped it. Blank body, dead scroll, one cause.
+   *
+   * The fill is now marked `Widget#anchorsAreDefault` and the first explicit `SetPoint` REPLACES it,
+   * which is what the engine does with a default position. A region nothing positions still fills.
+   *
+   * **AND THE DEFAULT ITSELF IS OURS, not the reference's.** `regions.rs:131` is cited above for the
+   * size-versus-`setAllPoints` PRECEDENCE and covers only the explicit `setAllPoints="true"` attribute;
+   * benilla has no default for an ABSENT `<Anchors>` block at all. Two facts from the manifest bound the
+   * question and they point opposite ways: **44** anchorless textures write `setAllPoints="true"`
+   * explicitly, which would be redundant if anchorless already filled -- yet
+   * `actionbuttontemplate.xml`'s `$parentIcon` is anchorless with no size and no attribute and
+   * demonstrably fills its button. So the engine's real rule is probably narrower than this one, the
+   * evidence does not settle where, and the default is kept as OURS rather than removed on a guess --
+   * **58** bare anchorless textures currently draw because of it.
    */
   private applyRegionLayout(
     region: XmlElement,
@@ -1056,6 +1075,23 @@ class DocumentLoader {
     );
     if (!declaresAnchors && !attrBool(region, 'setAllPoints')) {
       this.callMethod(wrapper, 'SetAllPoints', [], dbg);
+      /**
+       * MARKED AS A DEFAULT, which is what the paragraph above predicted would matter one day.
+       *
+       * It said "a later `SetPoint` at a NEW point stacks on top of the fill rather than replacing it
+       * ... nothing observable rests on it today". Something did: `QuestInfo_Display` positions every
+       * element with a single `SetPoint` and no `ClearAllPoints` (`questinfo.lua:73,75`), so
+       * `QuestInfoTitleHeader` ended up with five anchors and the whole viewport's rect. See
+       * `Widget#anchorsAreDefault` -- the flag is set AFTER the call, because `setAnchors` clears it.
+       *
+       * An explicit `setAllPoints="true"` is NOT marked: that is the document's own statement, and 44
+       * textures in the manifest make it deliberately.
+       */
+      const frameId = this.rt.ctx.frameIdOf(wrapper);
+      const widget = frameId === null ? undefined : this.rt.ctx.registry.widget(frameId);
+      if (widget !== undefined) {
+        widget.anchorsAreDefault = true;
+      }
     }
     const justifyH = attr(region, 'justifyH');
     if (justifyH !== undefined) {
