@@ -202,6 +202,13 @@ commit, leaving a message that no longer described its contents.
 Cite real file, line, DBC column or opcode evidence — or write plainly that a value is unexplained.
 A comment that invents a source, or that still describes a gap now closed, is treated as a defect.
 
+The sharper version, and it has now happened five times with three by one agent: **a commit message
+that asserts a correction never made.** One said "that sentence is now false and the header says so"
+while the header still carried the old claim, untouched. A comment can go stale by neglect; a commit
+message is the permanent record and lies on purpose. **Re-read the file against your own message
+before committing** — that is how all five were caught, and the same habit found a defect in every
+recent round.
+
 ## Environment
 
 - **The dev server needs Node 18** (`node-sass`'s binding is Node-18 ABI), and **`node` on PATH is not
