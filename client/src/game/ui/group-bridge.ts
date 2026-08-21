@@ -688,6 +688,76 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
   // rule that a gap is declared and never silently answered. THE RETURN VALUES ARE NOT ARBITRARY:
   // where `UnitPopup.lua` feeds a result into a comparison or a table index rather than a truthiness
   // test, the value is what a client with that system switched off answers.
+  /**
+   * A gap the player REACHED BY CLICKING A MENU ENTRY, made visible on screen.
+   *
+   * THE OWNER'S REPORT IS WHY THIS EXISTS: "все остальные опции не работают". Every one of those rows
+   * dispatches correctly -- measured per row, `UnitPopup_OnClick` runs and calls its global for all of
+   * them -- and most of them then reach one of the declared gaps below. For a GETTER that is right and
+   * silent. For an ACTION the player deliberately chose, a silent return is indistinguishable from a
+   * bug, and `CLAUDE.md`'s rule is that a gap must never read as one.
+   *
+   * So an action gap ALSO prints a line in `UIErrorsFrame` -- the client's own red refusal frame, its
+   * own `AddMessage` method, exactly the door `quest-bridge.ts:637-644` already uses for
+   * `ERR_QUEST_MUST_CHOOSE_ITEM`. No new channel is invented and no GlobalString is faked: the text
+   * says plainly that this client does not have the feature, because there IS no 3.3.5a string for
+   * "your client was not finished".
+   *
+   * GETTERS DELIBERATELY DO NOT DO THIS. `UnitPopup_HideButtons` calls them on every menu open, so a
+   * message there would paint the screen red once per right-click.
+   */
+  const gapAction = (name: string, feature: string, reason: string): void => {
+    const stub = notImplemented(name, reason, []);
+    fn(name, () => {
+      stub(null as never, 0, []);
+      // Escaped as a Lua string literal: `feature` is ours, never user input, but a stray quote here
+      // would be a syntax error inside the client rather than a bad message.
+      const text = `${feature} is not implemented in this client yet.`.replace(/"/g, '');
+      vm.run(
+        `if UIErrorsFrame then UIErrorsFrame:AddMessage("${text}", 1.0, 0.1, 0.1, 1.0) end`,
+        'group-gap-notice.lua',
+      );
+      return [];
+    });
+  };
+
+  /**
+   * The ACTION gaps, each with the words the player sees. Every one of these is reachable from a row
+   * the owner can click, and every one was silent before.
+   */
+  const actionGaps: [string, string, string][] = [
+    ['SetPVP', 'Toggling the PvP flag', 'PLAYER_FLAGS is not read, so a write would have no reader to confirm it'],
+    ['SetRaidTarget', 'Raid target marks', 'no raid target icon is drawn on any frame or nameplate yet, and the server refuses the update outside a group'],
+    ['InitiateTrade', 'Trading', 'no trade window or SMSG_TRADE_STATUS decoder exists yet'],
+    ['InspectAchievements', 'Comparing achievements', 'no achievement system exists in this client'],
+    ['FollowUnit', 'Follow', 'no client-side follow state exists yet'],
+    ['ReportPlayerIsPVPAFK', 'Reporting AFK', 'no battleground state is read from the wire'],
+    ['SummonFriend', 'Summoning a friend', 'no refer-a-friend state is read from the wire'],
+    ['GrantLevel', 'Granting a level', 'no refer-a-friend state is read from the wire'],
+    ['PromoteToAssistant', 'Promoting to assistant', 'no raid roster capture exists to pin CMSG_GROUP_ASSISTANT_LEADER against'],
+    ['DemoteAssistant', 'Demoting an assistant', 'no raid roster capture exists to pin CMSG_GROUP_ASSISTANT_LEADER against'],
+    ['SetPartyAssignment', 'Main tank and main assist', 'no raid main-tank/assist state is read from the wire'],
+    ['ClearPartyAssignment', 'Main tank and main assist', 'no raid main-tank/assist state is read from the wire'],
+    ['RemoveFriend', 'The friends list', 'no contact list is read from the wire'],
+    ['AddOrDelIgnore', 'The ignore list', 'no contact list is read from the wire'],
+    ['PetDismiss', 'Pets', 'no pet unit is tracked'],
+    ['VehicleExit', 'Vehicles', 'this client has no vehicles'],
+    ['AddMute', 'Voice chat', 'this client has no voice transport'],
+    ['DelMute', 'Voice chat', 'this client has no voice transport'],
+    ['ChannelSilenceVoice', 'Voice chat', 'this client has no voice transport'],
+    ['ChannelUnSilenceVoice', 'Voice chat', 'this client has no voice transport'],
+    ['ChannelModerator', 'Chat channel moderation', 'this client has no chat channels'],
+    ['ChannelUnmoderator', 'Chat channel moderation', 'this client has no chat channels'],
+    ['ChannelKick', 'Chat channel moderation', 'this client has no chat channels'],
+    ['ChannelBan', 'Chat channel moderation', 'this client has no chat channels'],
+    ['SetChannelOwner', 'Chat channel moderation', 'this client has no chat channels'],
+    ['BNSetToonBlocked', 'Battle.net', 'there is no Battle.net on this realm'],
+  ];
+  const actionGapNames = new Set(actionGaps.map(([name]) => name));
+  for (const [name, feature, reason] of actionGaps) {
+    gapAction(name, feature, reason);
+  }
+
   const gaps: [string, string, unknown[]][] = [
     // VOICE CHAT (16). `voicechat.lua` is in the manifest but there is no voice transport, and
     // `IsVoiceChatEnabled` FALSE is what hides all sixteen of its menu rows in one go
@@ -763,6 +833,12 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
     ['SetRaidTarget', 'no raid target icon is drawn on any frame or nameplate yet', []],
   ];
   for (const [name, reason, results] of gaps) {
+    // The action gaps are already registered above, with a VISIBLE notice. Registering them again here
+    // would silently replace that with the quiet version -- `registerFunction` ends in `lua_setglobal`,
+    // so last writer wins.
+    if (actionGapNames.has(name)) {
+      continue;
+    }
     const stub = notImplemented(name, reason, results);
     // `notImplemented` builds a FRAME METHOD (ctx, self, args); a global takes only args. The same
     // adaptation `api/units.ts` makes and for the same reason -- what is reused is the NAME
