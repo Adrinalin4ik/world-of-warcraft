@@ -73,6 +73,8 @@
 import { MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { widgetOf } from './region';
+import { layoutRectOf } from '../../../rects';
+import { layoutRevision } from '../../../widget';
 import type { Widget } from '../../../widget';
 
 interface ScrollState {
@@ -98,6 +100,10 @@ const sliderStates = new Map<number, SliderState>();
 onFrameTeardown((_ctx, id) => {
   scrollStates.delete(id);
   sliderStates.delete(id);
+  scrollRanges.delete(id);
+  // A rebuilt screen must re-announce: the revision is a global counter, so without this a new runtime
+  // whose tree happens to settle at the same revision would never fire its first range.
+  reconciledAt = -1;
 });
 
 function scrollState(self: number): ScrollState {
@@ -126,6 +132,47 @@ function sliderState(self: number): SliderState {
  * Zero with no scroll child, which is both the honest answer and the one that makes the client's
  * `floor(yrange) == 0` branch hide a scrollbar for content that does not overflow.
  */
+/**
+ * How far the scroll child's CONTENT extends past its own declared box, in logical units.
+ *
+ * **THIS IS WHY NOTHING SCROLLED, and it is upstream of every input path.**
+ * `QuestDetailScrollChildFrame` is authored 300x334 inside a 300x334 viewport
+ * (`questframe.xml:344-348`) and **nothing ever resizes it** -- `QuestInfo_Display` positions its
+ * elements with `SetPoint` chains and never touches the child's height (`questinfo.lua:68-80`). So a
+ * range measured from the child's own `height` is structurally **0**, whatever the text does.
+ *
+ * With a 0 range the slider's max is 0, `SetValue` clamps every value to 0, the transition guard then
+ * returns early, and the arrows, the drag and the thumb's travel are all correctly dead. One cause, three
+ * symptoms -- which is what the coordinator suspected from three inputs failing at once.
+ *
+ * The real engine measures the scroll child's actual EXTENT, descendants included, which is how 334 of
+ * box holds 600 of text and yields a 266 range. Measured here from the resolved rects, which is the same
+ * layout the draw pass uses -- and `rects.ts` answers before the first frame is drawn now, so a panel
+ * opening mid-load is measurable too.
+ */
+function contentExtent(ctx: MethodContext, child: Widget, axis: 'height' | 'width'): number {
+  const base = layoutRectOf(child.id);
+  if (base === null) {
+    return child[axis];
+  }
+  const start = axis === 'height' ? base.top : base.left;
+  let far = axis === 'height' ? base.top + base.height : base.left + base.width;
+  const walk = (node: Widget): void => {
+    for (const kid of node.children) {
+      const rect = layoutRectOf(kid.id);
+      if (rect !== null) {
+        const edge = axis === 'height' ? rect.top + rect.height : rect.left + rect.width;
+        if (edge > far) {
+          far = edge;
+        }
+      }
+      walk(kid);
+    }
+  };
+  walk(child);
+  return Math.max(child[axis], far - start);
+}
+
 function rangeOf(ctx: MethodContext, self: number, axis: 'height' | 'width'): number {
   const child = scrollState(self).child;
   if (child === null) {
@@ -135,7 +182,7 @@ function rangeOf(ctx: MethodContext, self: number, axis: 'height' | 'width'): nu
   if (childWidget === null) {
     return 0;
   }
-  return Math.max(0, childWidget[axis] - widgetOf(ctx, self)[axis]);
+  return Math.max(0, contentExtent(ctx, childWidget, axis) - widgetOf(ctx, self)[axis]);
 }
 
 /**
@@ -153,6 +200,57 @@ function fireScroll(ctx: MethodContext, self: number, script: string, offset: nu
   }
 }
 
+/**
+ * Every frame that has been given a scroll child, and the range each was last told about.
+ *
+ * Keyed by frame ID and cleared by `onFrameTeardown` below -- NOT a bare module `Map` left to leak, which
+ * is the mistake `thumbTextures` made when ids restarted from 1 between registries.
+ */
+const scrollRanges = new Map<number, { x: number; y: number }>();
+
+/** The `layoutRevision()` the ranges were last reconciled at. See `reconcileScrollRanges`. */
+let reconciledAt = -1;
+
+/**
+ * Fire `OnScrollRangeChanged` on any scroll frame whose range has moved.
+ *
+ * **THE ENGINE FIRES THIS FROM ITS LAYOUT PASS and nothing in this client fired it at all**, so
+ * `ScrollFrame_OnScrollRangeChanged` -- the only thing that calls `scrollbar:SetMinMaxValues(0, yrange)`
+ * (`uipaneltemplates.lua:275-285`) -- never ran. A scrollbar with a 0..0 range clamps every `SetValue` to
+ * 0, so the arrows, the drag and the thumb's travel were all dead at once.
+ *
+ * Called once per frame by the UI host, which is our layout pass. **Gated on `layoutRevision()`, so in
+ * steady state it is a single integer comparison for the whole client** -- the walk over a scroll child's
+ * subtree happens only on a frame where something actually moved or resized. Firing Lua per frame
+ * unconditionally is exactly what the offscreen target cannot afford; this fires only on a real change.
+ */
+export function reconcileScrollRanges(ctx: MethodContext): void {
+  const revision = layoutRevision();
+  if (revision === reconciledAt) {
+    return;
+  }
+  reconciledAt = revision;
+  for (const [frameId, last] of scrollRanges) {
+    const widget = ctx.registry.widget(frameId);
+    if (widget === undefined) {
+      continue;
+    }
+    const y = rangeOf(ctx, frameId, 'height');
+    const x = rangeOf(ctx, frameId, 'width');
+    if (x === last.x && y === last.y) {
+      continue;
+    }
+    last.x = x;
+    last.y = y;
+    const error = invokeScriptHandler(ctx, frameId, 'OnScrollRangeChanged', [x, y]);
+    if (error !== null) {
+      reportScriptError(
+        `${ctx.registry.nameOf(frameId) ?? `frame ${frameId}`}: OnScrollRangeChanged`, error.message,
+      );
+    }
+  }
+}
+
 const SCROLLFRAME: MethodTable = {
   SetScrollChild: (ctx, self, args) => {
     const id = ctx.frameIdOf(args[0]);
@@ -160,6 +258,9 @@ const SCROLLFRAME: MethodTable = {
       throw new Error('SetScrollChild: the scroll child must be a frame');
     }
     scrollState(self).child = id;
+    // Registered for the range pass. Seeded with -1 so the FIRST reconcile always announces, which is
+    // what gives the scrollbar its initial min/max.
+    scrollRanges.set(self, { x: -1, y: -1 });
     /**
      * THE CLIP LINK, and it is what makes a real `<ScrollFrame>` behave like one.
      *

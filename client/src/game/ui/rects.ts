@@ -169,6 +169,33 @@ export function rectOf(id: string): Rect | null {
   return null;
 }
 
+/**
+ * The UNCLIPPED layout rect for a widget id -- always from the resolver, never from the draw list.
+ *
+ * **`rectOf` IS WRONG FOR MEASURING CONTENT, and that is an interaction between two features of mine.**
+ * It prefers the published draw list, whose rects have been CLIPPED to their scroll frame
+ * (`widget.ts#clipItem`). So measuring a scroll child's content through it reports the viewport's own
+ * height and the scroll range collapses to 0 -- exactly when clipping is doing its job. Caught by a test
+ * that asserted the range before the first publish (266, correct) and again after it (0).
+ *
+ * `rectOf` keeps its draw-list preference, which is right for its callers: `GetRight` and friends must
+ * answer what is on SCREEN. Anything asking "how big is this really" wants this instead.
+ */
+export function layoutRectOf(id: string): Rect | null {
+  if (resolveAll === null) {
+    return null;
+  }
+  const revision = layoutRevision();
+  if (allRects === null || allRectsRevision !== revision) {
+    const started = performance.now();
+    allRects = resolveAll();
+    allRectsRevision = revision;
+    rectStats.resolves += 1;
+    rectStats.ms += performance.now() - started;
+  }
+  return allRects.get(id) ?? null;
+}
+
 /** The viewport height in logical units, for the Y flip. 0 before the first publish. */
 export function screenHeightUnits(): number {
   return screenHeight;
