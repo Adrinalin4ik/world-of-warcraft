@@ -44,7 +44,7 @@
  * `SMSG_QUESTGIVER_QUEST_DETAILS` alone: a second guid (the quest sharer), `questFlags`,
  * `suggestedPlayers`, an `isFinished` byte, a reward-XP word, honor and its multiplier, a cast-spell
  * word, a char-title word, bonus talents, arena points and three five-long reputation arrays -- and it
- * narrowed `autoLaunched` from a `u32` to a `u8`. Reading the 1.12 shape against a 3.3.5a packet
+ * narrowed `activateAccept` from a `u32` to a `u8`. Reading the 1.12 shape against a 3.3.5a packet
  * desyncs before the title. This is the same class of trap the merchant round measured four times over
  * (an 8-word vendor row, a `u32` sell count, repair's trailing byte, buyback base 74).
  *
@@ -200,7 +200,7 @@ export interface QuestGiverDetails {
   title: string;
   details: string;
   objectives: string;
-  autoLaunched: boolean;
+  activateAccept: boolean;
   flags: number;
   suggestedPlayers: number;
   choices: QuestItemTriple[];
@@ -220,7 +220,7 @@ export interface QuestGiverOfferReward {
   questId: number;
   title: string;
   offerText: string;
-  autoLaunched: boolean;
+  activateAccept: boolean;
   flags: number;
   suggestedPlayers: number;
   choices: QuestItemTriple[];
@@ -303,7 +303,7 @@ export class QuestHandler extends EventEmitter {
    */
   public detailsShape = '';
 
-  /** Which candidate `autoLaunched` width the last reward panel decoded under. See `handleOfferReward`. */
+  /** Which candidate `activateAccept` width the last reward panel decoded under. See `handleOfferReward`. */
   public offerShape = '';
 
   /** NPC guid -> `DIALOG_STATUS`. What the `!` over a giver's head is drawn from. */
@@ -557,7 +557,7 @@ export class QuestHandler extends EventEmitter {
    *
    *     u64 npcGuid · u64 sharerGuid · u32 questId
    *     cstr title · cstr details · cstr objectives
-   *     u8 autoLaunched · u32 flags · u32 suggestedPlayers · u8 isFinished
+   *     u8 activateAccept · u32 flags · u32 suggestedPlayers · u8 isFinished
    *     u32 choiceCount · choiceCount x { u32 itemId · u32 count · u32 displayId }
    *     u32 rewardCount · rewardCount x { same triple }
    *     i32 money · u32 xp
@@ -571,7 +571,22 @@ export class QuestHandler extends EventEmitter {
    * puts the quest id eight bytes early and the title in the middle of it. 1.12 has one guid
    * (`benilla-protocol/.../quest/giver.rs:265-271`).
    *
-   * **`autoLaunched` is a `u8` here and a `u32` in 1.12.** `QuestGetAutoAccept()` is what the client
+   * **`activateAccept` is a `u8` here and a `u32` in 1.12, AND IT IS NOT `QuestGetAutoAccept`.**
+   *
+   * It was called `autoLaunched` and bound to that global, and that pair of mistakes is what made the
+   * owner's Accept button do nothing and his Decline button vanish. TrinityCore 3.3.5 names this
+   * parameter **`activateAccept`** (`PlayerMenu::SendQuestGiverQuestDetails(quest, guid,
+   * activateAccept)`) and `HandleQuestgiverQueryQuestOpcode` passes **`true`** -- so on every quest a
+   * player clicks at a giver, this byte is 1. It means "the Accept button is live", not "this quest was
+   * accepted for you".
+   *
+   * The proof that the two cannot be the same is the real client's own behaviour: if
+   * `QuestGetAutoAccept()` were this byte, the real client would hide Decline and make Accept a no-op
+   * on every ordinary quest too (`questframe.lua:319-325,331-336`). It does neither. See
+   * `ui/quest-bridge.ts#QuestGetAutoAccept` for what that global actually answers here.
+   *
+   * Kept and decoded because the width is still load-bearing for everything after it; the FRAMES just
+   * do not read it. `QuestGetAutoAccept()` is what the client
    * reads it as, and it decides whether the Decline button is hidden (`questframe.lua:319-325`).
    *
    * Everything from `honor` on is the TOLERANT TAIL -- see the file header. The four strings, the two
@@ -664,7 +679,7 @@ export class QuestHandler extends EventEmitter {
    *
    *     u64 npcGuid | [u64 sharerGuid] | u32 questId
    *     cstr title | cstr details | cstr objectives
-   *     u8 autoLaunched | u32 flags | u32 suggestedPlayers | u8 isFinished
+   *     u8 activateAccept | u32 flags | u32 suggestedPlayers | u8 isFinished
    *     u32 choiceCount | triples | u32 rewardCount | triples | i32 money | u32 xp
    *     [tolerant tail] honor | honorMultiplier | rewSpell | rewSpellCast | charTitleId
    *                     | bonusTalents | arenaPoints
@@ -682,7 +697,7 @@ export class QuestHandler extends EventEmitter {
       const title = gp.readCStr();
       const details = gp.readCStr();
       const objectives = gp.readCStr();
-      const autoLaunched = gp.readUnsignedByte() !== 0;
+      const activateAccept = gp.readUnsignedByte() !== 0;
       const flags = gp.readUnsignedInt() >>> 0;
       const suggestedPlayers = gp.readUnsignedInt() >>> 0;
       gp.readUnsignedByte(); // isFinished -- sent and unused by the real client too
@@ -703,7 +718,7 @@ export class QuestHandler extends EventEmitter {
         title,
         details,
         objectives,
-        autoLaunched,
+        activateAccept,
         flags,
         suggestedPlayers,
         choices,
@@ -729,7 +744,7 @@ export class QuestHandler extends EventEmitter {
    * `SMSG_QUESTGIVER_OFFER_REWARD` (**0x18D**) -- the reward panel. Fires `QUEST_COMPLETE`.
    *
    *     u64 npcGuid · u32 questId · cstr title · cstr offerText
-   *     u8 autoLaunched · u32 flags · u32 suggestedPlayers
+   *     u8 activateAccept · u32 flags · u32 suggestedPlayers
    *     u32 emoteCount · emoteCount x { u32 delay · u32 emote }
    *     u32 choiceCount · triples · u32 rewardCount · triples
    *     i32 money · u32 xp
@@ -753,7 +768,7 @@ export class QuestHandler extends EventEmitter {
   private handleOfferReward(gp: GamePacket): void {
     const base = gp.index;
 
-    // TWO CANDIDATE WIDTHS FOR `autoLaunched`, DISCRIMINATED BY `emoteCount`.
+    // TWO CANDIDATE WIDTHS FOR `activateAccept`, DISCRIMINATED BY `emoteCount`.
     //
     // Same lesson as `handleDetails`, applied before it costs a round: 1.12 writes `autoFinish` as a
     // `u32` (`benilla-protocol/.../quest/giver.rs:302-306`) and 3.3.5 writes a `u8`, and a wrong width
@@ -767,11 +782,11 @@ export class QuestHandler extends EventEmitter {
     const narrow = this.tryOffer(gp, base, 1);
     const wide = this.tryOffer(gp, base, 4);
     let chosen = narrow;
-    let shape = 'u8 autoLaunched';
+    let shape = 'u8 activateAccept';
     if (narrow === null || narrow.emoteCount > QUEST_EMOTE_COUNT) {
       if (wide !== null && wide.emoteCount <= QUEST_EMOTE_COUNT) {
         chosen = wide;
-        shape = 'u32 autoLaunched (the 1.12 width)';
+        shape = 'u32 activateAccept (the 1.12 width)';
       }
     }
     if (chosen === null) {
@@ -799,7 +814,7 @@ export class QuestHandler extends EventEmitter {
   }
 
   /**
-   * One candidate decode of `SMSG_QUESTGIVER_OFFER_REWARD`, with `autoLaunched` read as `autoBytes`
+   * One candidate decode of `SMSG_QUESTGIVER_OFFER_REWARD`, with `activateAccept` read as `autoBytes`
    * bytes. See `handleOfferReward` for what chooses.
    *
    * `emoteCount` is returned rather than discarded precisely because it is the alignment check; the
@@ -816,7 +831,7 @@ export class QuestHandler extends EventEmitter {
       const questId = gp.readUnsignedInt() >>> 0;
       const title = gp.readCStr();
       const offerText = gp.readCStr();
-      const autoLaunched = autoBytes === 1
+      const activateAccept = autoBytes === 1
         ? gp.readUnsignedByte() !== 0
         : (gp.readUnsignedInt() >>> 0) !== 0;
       const flags = gp.readUnsignedInt() >>> 0;
@@ -830,7 +845,7 @@ export class QuestHandler extends EventEmitter {
           questId,
           title,
           offerText,
-          autoLaunched,
+          activateAccept,
           flags,
           suggestedPlayers,
           choices: [],
@@ -866,7 +881,7 @@ export class QuestHandler extends EventEmitter {
         questId,
         title,
         offerText,
-        autoLaunched,
+        activateAccept,
         flags,
         suggestedPlayers,
         choices,

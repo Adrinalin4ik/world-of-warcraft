@@ -598,14 +598,28 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   fn('QuestFlagsPVP', () => [((quest.details?.flags ?? 0) & QUEST_FLAGS.PVP) !== 0]);
 
   /**
-   * `QuestGetAutoAccept()` -- the accept panel's `autoLaunched` byte.
+   * `QuestGetAutoAccept()` -- **FALSE, and it is a TRUE answer rather than a stub.**
    *
-   * True hides the Decline button and turns Accept into a plain close (`questframe.lua:319-325`,
-   * `:331-336`), because the quest is ALREADY accepted -- it is the shape a quest-starting item or an
-   * area trigger produces. Reading the wrong width for that byte (it is a `u32` in 1.12) would make
-   * every ordinary quest look auto-accepted and its Accept button send nothing.
+   * **This returning true is what made the owner's Accept button do nothing and his Decline button
+   * disappear, and it was one cause for both symptoms.** `QuestFrameDetailPanel_OnShow` does
+   * `QuestFrameDeclineButton:Hide()` and `QuestFrame.autoQuest = true` on a true
+   * (`questframe.lua:319-325`), and `QuestDetailAcceptButton_OnClick` then takes
+   * `HideUIPanel(QuestFrame)` instead of `AcceptQuest()` (`:331-336`) -- so the page loses its Decline
+   * button AND its Accept button silently closes the window without sending a packet. Exactly the
+   * report.
+   *
+   * It used to read `SMSG_QUESTGIVER_QUEST_DETAILS`' byte, which this client had named `autoLaunched`.
+   * That byte is TrinityCore's **`activateAccept`** and `HandleQuestgiverQueryQuestOpcode` passes
+   * `true`, so it is 1 for every quest clicked at a giver. The name carried the error: two different
+   * ideas under one word.
+   *
+   * FALSE is the honest answer for **every path this client can reach.** An auto-accepted quest is one
+   * the player never chose -- started by an item, an area trigger, or a party share -- and this client
+   * implements none of those: every detail panel it opens is the answer to a
+   * `CMSG_QUESTGIVER_QUERY_QUEST` the player's own click sent. The day one of those paths exists, it
+   * will know it from its own opener rather than from a byte that means something else.
    */
-  fn('QuestGetAutoAccept', () => [quest.details?.autoLaunched ?? false]);
+  fn('QuestGetAutoAccept', () => [false]);
 
   // -- The giver panels: actions ------------------------------------------------------------------
 
@@ -1449,7 +1463,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
       objectivesLen: quest.details.objectives.length,
       choices: quest.details.choices.length,
       rewards: quest.details.rewards.length,
-      autoLaunched: quest.details.autoLaunched,
+      activateAccept: quest.details.activateAccept,
       flags: quest.details.flags,
       money: quest.details.money,
       xp: quest.details.xp,
