@@ -38,9 +38,29 @@
  * dispatch, an arrow click moved a number and **nothing re-rendered the list** -- so no scroll frame in
  * the client could be scrolled at all, not just the Skills tab.
  *
- * `SetVerticalScroll` still fires nothing, and that one is a real remaining gap rather than a stale
- * note: this file does not move the scroll child (see above), so an `OnVerticalScroll` dispatch would
- * announce a scroll that did not happen.
+ * **`SetVerticalScroll` FIRES `OnVerticalScroll` NOW, and declining to was wrong for the case that
+ * matters.** The previous note here reasoned that dispatching would "announce a scroll that did not
+ * happen" because this file does not move the scroll child. That is true of a real scroll frame and
+ * FALSE of a FAUX one -- and every scrolling list in this client is faux. The whole point of
+ * `FauxScrollFrameTemplate` is that no child moves: the handler recomputes a ROW OFFSET and re-renders.
+ *
+ * The chain, end to end, from the client's own files:
+ *
+ *   1. arrow `<OnClick>`  -> `scrollBar:SetValue(GetValue() -/+ GetValueStep())`
+ *   2. slider `<OnValueChanged>` -> `self:GetParent():SetVerticalScroll(value)`   uipaneltemplates.xml:203-205
+ *   3. scroll frame `<OnVerticalScroll>` -> `FauxScrollFrame_OnVerticalScroll(self, offset, ...)`
+ *                                                                              skillframe.xml:508-510
+ *   4. that sets `self.offset = floor(value / itemHeight + 0.5)` and calls the update function
+ *                                                                        uipaneltemplates.lua:236-243
+ *   5. `SkillFrame_UpdateSkills` re-reads `FauxScrollFrame_GetOffset` and repaints the rows
+ *
+ * Step 3 was the break. Steps 1 and 2 already worked once `SetValue` dispatched, so the value moved and
+ * **no row ever repainted** -- which is exactly "скрол не работает", reported twice, on Skills AND
+ * Reputation, because both are faux frames going through this same step.
+ *
+ * NO INFINITE LOOP, and it is worth stating because the chain is genuinely circular: step 4 ends in
+ * `scrollbar:SetValue(value)`, which re-enters step 1. Both setters here dispatch ONLY on a real change,
+ * so the second pass finds the value already stored and stops. That guard is load-bearing, not tidiness.
  */
 import { MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
@@ -109,6 +129,21 @@ function rangeOf(ctx: MethodContext, self: number, axis: 'height' | 'width'): nu
   return Math.max(0, childWidget[axis] - widgetOf(ctx, self)[axis]);
 }
 
+/**
+ * Dispatch `OnVerticalScroll`/`OnHorizontalScroll`, reporting a failure instead of raising.
+ *
+ * `scripts.ts:141-142` binds `['offset']` for both, so the client's own
+ * `FauxScrollFrame_OnVerticalScroll(self, offset, ...)` reads its argument by name. Same treatment
+ * `statusbar.ts#fireValueChanged` gives `OnValueChanged`: a broken handler must not take out the caller,
+ * which here is an arrow-button click.
+ */
+function fireScroll(ctx: MethodContext, self: number, script: string, offset: number): void {
+  const error = invokeScriptHandler(ctx, self, script, [offset]);
+  if (error !== null) {
+    reportScriptError(`${ctx.registry.nameOf(self) ?? `frame ${self}`}: ${script}`, error.message);
+  }
+}
+
 const SCROLLFRAME: MethodTable = {
   SetScrollChild: (ctx, self, args) => {
     const id = ctx.frameIdOf(args[0]);
@@ -128,14 +163,27 @@ const SCROLLFRAME: MethodTable = {
   // stop it there, then reads the value back to decide whether to disable the arrow.
   SetVerticalScroll: (ctx, self, args) => {
     const range = rangeOf(ctx, self, 'height');
-    scrollState(self).vertical = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
+    const state = scrollState(self);
+    const wanted = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
+    if (wanted === state.vertical) {
+      // The transition only -- see the header on why this guard stops the circular chain.
+      return [];
+    }
+    state.vertical = wanted;
+    fireScroll(ctx, self, 'OnVerticalScroll', wanted);
     return [];
   },
   GetVerticalScroll: (ctx, self) => [scrollState(self).vertical],
   GetVerticalScrollRange: (ctx, self) => [rangeOf(ctx, self, 'height')],
   SetHorizontalScroll: (ctx, self, args) => {
     const range = rangeOf(ctx, self, 'width');
-    scrollState(self).horizontal = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
+    const state = scrollState(self);
+    const wanted = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
+    if (wanted === state.horizontal) {
+      return [];
+    }
+    state.horizontal = wanted;
+    fireScroll(ctx, self, 'OnHorizontalScroll', wanted);
     return [];
   },
   GetHorizontalScroll: (ctx, self) => [scrollState(self).horizontal],
