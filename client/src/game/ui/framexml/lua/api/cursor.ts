@@ -110,6 +110,26 @@ export interface CursorItemSource {
    * second template lookup per slot per event.
    */
   equipSlots: number[];
+
+  /**
+   * How many of the stack are on the cursor, when this is a **partial** pick-up. Absent = the whole
+   * stack.
+   *
+   * **The payload could not express this before, and that was the actual blocker for splitting a
+   * stack** -- not the modifier (already resolved) and not the dialogue (the client's own, and already
+   * working at a vendor). `SplitContainerItem(bag, slot, count)` lifts `count` items onto the cursor
+   * and the DROP is what tells the server; without a count on the payload the drop had no way to know
+   * it was moving part of a stack rather than all of it, and would have sent `CMSG_SWAP_ITEM` and moved
+   * the lot.
+   *
+   * It is deliberately OPTIONAL rather than defaulted to the stack size: `container-bridge.ts#sendMove`
+   * branches on its PRESENCE to choose between `CMSG_SWAP_ITEM` and `CMSG_SPLIT_ITEM`, so "absent"
+   * carries the meaning "this is a whole-stack move" that a number could not.
+   *
+   * NOT reported by `GetCursorInfo`, which answers `type, itemID, itemLink` for an item and has no
+   * count in its contract.
+   */
+  splitCount?: number;
 }
 
 /** What the cursor is carrying. */

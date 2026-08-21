@@ -985,6 +985,44 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     if (src === null || dst === null) {
       return false;
     }
+    // A PARTIAL STACK IS ITS OWN OPCODE, and it comes first because both of the arms below would
+    // move the WHOLE stack.
+    //
+    // `CMSG_SPLIT_ITEM` (**0x10E**) reads `u8 FromPackSlot, u8 FromSlot, u8 ToPackSlot, u8 ToSlot,
+    // i32 Quantity` -- eight bytes (`Server/Packets/ItemPackets.cpp`'s `SplitItem::Read`, and
+    // `ItemHandler.cpp:36-63` for what the server does with them). Source first here, which is the
+    // OPPOSITE of `CMSG_SWAP_INV_ITEM` two lines down; that is not a slip, it is what the two `Read`
+    // bodies say, and reading the declaration order instead of the read order is exactly the trap
+    // `SwapInvItem` is famous for in this file -- its class lists `Slot2` before `Slot1` and reads them
+    // in that order, while `SplitItem`'s class lists `ToSlot` first and reads `FromPackSlot` first.
+    //
+    // **THE COUNT IS AN i32 AND THE 1.12 REFERENCE SAYS u8** -- `benilla-protocol/.../items.rs:705-712`
+    // builds a five-byte body and its own test asserts `vec![255, 23, 255, 24, 5]`. Eight bytes here.
+    // That is the FIFTH silently-wrong number the reference has had in this area (the vendor row's
+    // word count, `CMSG_SELL_ITEM`'s count, `CMSG_REPAIR_ITEM`'s trailing byte, `BUYBACK_SLOT_START`,
+    // and now this), so the pattern is worth naming: **1.12 widened its counts in WotLK, and every one
+    // of those widenings is silent on the wire.**
+    //
+    // A zero count is refused locally as well as by the server (`if (!splitItem.Quantity) return;` --
+    // it calls that a fake packet), because a split that sends nothing looks to the player exactly
+    // like a split that lost the items.
+    if (from.splitCount !== undefined) {
+      if (from.splitCount <= 0) {
+        return false;
+      }
+      const gp = new GamePacket(
+        GameOpcode.CMSG_SPLIT_ITEM, GamePacket.HEADER_SIZE_OUTGOING + 4 + 4,
+      );
+      gp.writeUnsignedByte(src[0] & 0xff);
+      gp.writeUnsignedByte(src[1] & 0xff);
+      gp.writeUnsignedByte(dst[0] & 0xff);
+      gp.writeUnsignedByte(dst[1] & 0xff);
+      gp.writeInt(Math.floor(from.splitCount));
+      world.game.send(gp);
+      lockChanged(from.bag, from.slot);
+      lockChanged(toBag, toSlot);
+      return true;
+    }
     if (src[0] === BAG_PLAYER_INVENTORY && dst[0] === BAG_PLAYER_INVENTORY) {
       const gp = new GamePacket(
         GameOpcode.CMSG_SWAP_INV_ITEM, GamePacket.HEADER_SIZE_OUTGOING + 2,
@@ -1146,6 +1184,70 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    */
   vm.registerFunction('PickupContainerItem', (args) => {
     pickOrPlace(Number(args[0]), Number(args[1]));
+    return [];
+  });
+
+  /**
+   * `SplitContainerItem(bag, slot, count)` -- **take PART of a stack onto the cursor.**
+   *
+   * The owner: "Выбор количества предметов работает у торговца, но не работает в сумке. Если вот нужно
+   * отделить один предмет и переложить в другой слот его." Two of the three pieces were already there
+   * and that is why only this one was missing: the modifier resolves (`SPLITSTACK` -> SHIFT, the fix
+   * that made the vendor case work) and the dialogue is the client's own `StackSplitFrame`. What was
+   * absent is the split itself.
+   *
+   * **IT IS A PICK-UP, NOT A MOVE**, and getting that backwards would have needed a destination this
+   * global is never given. The client's own chain is
+   *
+   *     ContainerFrameItemButton_OnModifiedClick -> self.SplitStack = function(button, split)
+   *         SplitContainerItem(button:GetParent():GetID(), button:GetID(), split) end
+   *     -> OpenStackSplitFrame(itemCount, self, ...)          (containerframe.lua:748-751)
+   *     -> StackSplitFrameOkay_Click -> owner.SplitStack(owner, StackSplitFrame.split)
+   *                                                            (stacksplitframe.lua:170-174)
+   *
+   * -- three arguments, none of them a destination. So this lifts `count` items onto the cursor and the
+   * DROP sends the packet, which is why `CursorItemSource` had to learn `splitCount` and why
+   * `sendMove` branches on it. That also makes the whole gesture cancellable exactly like an ordinary
+   * pick-up: dropping back on the source slot sends nothing at all.
+   *
+   * The guards are the same shape as the rest of this family and each has a reason:
+   *  - a cursor that is already carrying something refuses, rather than silently swapping payloads;
+   *  - `count` at or above the stack is the WHOLE stack, so it degrades to an ordinary pick-up with no
+   *    `splitCount` -- otherwise a "split" of everything would send `CMSG_SPLIT_ITEM` for a move the
+   *    server would rather see as a swap;
+   *  - a count below 1 does nothing.
+   *
+   * There is no client-side check that the destination can accept a partial stack: the server referees
+   * and `SMSG_INVENTORY_CHANGE_FAILURE` says why, which is this file's standing rule about refusals we
+   * would otherwise invent with nothing to say.
+   */
+  vm.registerFunction('SplitContainerItem', (args) => {
+    const bag = Number(args[0]);
+    const slot = Number(args[1]);
+    const count = Number(args[2]);
+    if (!Number.isFinite(count) || count < 1) {
+      return [];
+    }
+    if (getCursor(vm) !== null) {
+      // Already carrying something. Refuse rather than replace what is held -- the same guard
+      // `pickOrPlace` makes for a spell or action payload.
+      return [];
+    }
+    if (wirePos(bag, slot) === null) {
+      return [];
+    }
+    const item = itemAt(slotGuid(bag, slot));
+    if (item === null) {
+      return [];
+    }
+    const whole = count >= item.count;
+    holdItem(
+      whole
+        ? payloadFor(bag, slot, item)
+        : { ...payloadFor(bag, slot, item), splitCount: Math.floor(count) },
+      iconFor(item),
+    );
+    lockChanged(bag, slot);
     return [];
   });
 
@@ -1648,9 +1750,6 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     // `PickupContainerItem` USED TO BE DECLARED HERE. It is real now -- see the item-cursor section
     // above -- and this note stays only because the comment block below still calls the whole pickup
     // family a gap in one place; the family that remains is the SPLIT and the DESTROY.
-    ['SplitContainerItem', 'a split carry needs StackSplitFrame, whose OnAccept is the only caller, and '
-      + 'CMSG_SPLIT_ITEM; the whole-stack move is real (see the item-cursor section) and a partial one '
-      + 'is deliberately not faked as a whole-stack move', []],
     ['SocketInventoryItem', 'no socketing UI and no gem data; PaperDollItemSlotButton_OnModifiedClick '
       + 'reaches it only behind IsModifiedClick("SOCKETITEM")', []],
     ['GetInventoryItemBroken', 'ITEM_FIELD_DURABILITY is not read out of the item descriptor, so a worn '
