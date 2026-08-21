@@ -395,7 +395,33 @@ class Controls extends React.Component<IProp> {
       0,
     );
     const moving = forward !== 0 || strafe !== 0;
-    const speed = forward < 0 ? RUN_SPEED * RUN_BACK_RATIO : RUN_SPEED;
+    // THE SERVER'S SPEED, NOT THE CONSTANT -- and this is the owner's "не работают способности,
+    // которые связаны с передвижением ... дух стаи".
+    //
+    // `RUN_SPEED`'s own docstring says it is "the fallback until server speeds stream in"
+    // (`movement/constants.ts:22-25`), and NOTHING EVER STREAMED IT IN: the avatar moved at the
+    // compile-time 7.0 whatever the wire said. So every movement-speed effect in the game was
+    // inert on the player -- an Aspect-of-the-Pack style aura, a Sprint, a mount, a daze, a
+    // snare. Not refused, not mis-drawn: applied to a number nobody read.
+    //
+    // The wire half was already complete and correct, which is why this is one expression and not
+    // a feature: `MSG_MOVE_SET_RUN_SPEED` and `SMSG_FORCE_RUN_SPEED_CHANGE` are both decoded, the
+    // force form is ACKED with the server's own change counter (the server resends and eventually
+    // drops an unresponsive client otherwise), and `Unit#moveSpeed`'s setter validates the float
+    // against `TELEPORT_SPEED` before forwarding it into `speeds.run`
+    // (`network/game/object/player/movement.ts:339-341, 371-374`; `classes/unit.ts:592-617`).
+    // `speeds` starts as a spread of `DEFAULT_MOVE_SPEEDS`, so before any packet arrives this reads
+    // the same 7.0 it always did.
+    //
+    // BACKPEDAL TAKES THE WIRE'S OWN `runBack`, not `run * RUN_BACK_RATIO`. The ratio is vanilla's
+    // 4.5/7.0 and is only correct while both are at their defaults -- a buff that scales `run`
+    // leaves `runBack` alone on the wire, so deriving it would invent a backpedal speed the server
+    // is not simulating and desync the position it checks. The ratio stays as the fallback for a
+    // `runBack` that has not arrived.
+    const speeds = player.speeds;
+    const speed = forward < 0
+      ? (speeds.runBack > 0 ? speeds.runBack : RUN_SPEED * RUN_BACK_RATIO)
+      : (speeds.run > 0 ? speeds.run : RUN_SPEED);
 
     // 5. One movement frame. The claim is outdoor-only for now; see the note in Task 22.
     const claim = { wmoGroup: null };
