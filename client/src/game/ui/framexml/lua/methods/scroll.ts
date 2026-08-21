@@ -151,6 +151,23 @@ const SCROLLFRAME: MethodTable = {
       throw new Error('SetScrollChild: the scroll child must be a frame');
     }
     scrollState(self).child = id;
+    /**
+     * THE CLIP LINK, and it is what makes a real `<ScrollFrame>` behave like one.
+     *
+     * This file's header used to predict the consequence of not having it: "nothing in `widget.ts` clips
+     * a frame's children, so an offset scroll child would draw outside its viewport rather than being
+     * scrolled inside it". The trainer round then measured it -- a rank string beginning at x=295 inside
+     * a 296-wide viewport, which the real client hides by clipping and we drew in full.
+     *
+     * Set on the CHILD, not on the frame: the scrollbar is also a child of the ScrollFrame
+     * (`uipaneltemplates.xml:287`) and lives outside the viewport, so clipping every child would delete
+     * it. Only the one frame `SetScrollChild` names is clipped, which is exactly the engine's rule.
+     */
+    const frame = widgetOf(ctx, self);
+    const child = ctx.registry.widget(id);
+    if (child !== undefined) {
+      child.clippedBy = frame;
+    }
     return [];
   },
   GetScrollChild: (ctx, self) => {

@@ -261,6 +261,19 @@ export class Widget {
   shown = true;
   alpha = 1;
   mouseEnabled = false;
+
+  /**
+   * The `<ScrollFrame>` that CLIPS this widget's subtree, or null.
+   *
+   * Set by `SetScrollChild` on the scroll CHILD -- never on the scroll frame and never on its other
+   * children, which is the whole precision of it: `UIPanelScrollFrameTemplate` makes
+   * `$parentScrollBar` a `<Frames>` child of the ScrollFrame too, and the scrollbar sits OUTSIDE the
+   * viewport to the right. Clipping every child would delete it.
+   *
+   * `drawList` carries this down the subtree and intersects each item's rect with the frame's. See
+   * `clipRect`.
+   */
+  clippedBy: Widget | null = null;
   focusable = false;
 
   /**
@@ -768,6 +781,97 @@ export interface DrawItem {
  * (this walk's DFS index) rides along as `declarationSeq` -- a defensive tie-break only, since
  * `linkStamp` is a global monotonic counter and two widgets sharing one is not expected to happen.
  */
+/**
+ * Crop `item` to `clip`, or null when it falls entirely outside.
+ *
+ * **THE ENGINE'S SCROLLFRAME CLIPS, AND OURS DID NOT.** `methods/scroll.ts`' header predicted exactly
+ * this consequence -- "nothing in `widget.ts` clips a frame's children, so an offset scroll child would
+ * draw outside its viewport rather than being scrolled inside it" -- and the trainer round then measured
+ * it: a rank string beginning at **x = 295 inside a 296-wide viewport**, which the real client hides by
+ * clipping and we drew in full.
+ *
+ * **THE ANCHOR IS NOT TOUCHED, and that was a deliberate rejection.** Nudging the child's offset would
+ * invent a number the game's own file does not contain, and would still spill for any other overflowing
+ * row. Clipping is what the engine does, and it is also what makes a real scroll frame actually SCROLL
+ * rather than spill.
+ *
+ * ## The UVs move with the rect, or the crop would squash instead of cut
+ *
+ * A sprite's quad samples `u0..u1` across its width. Shrinking the rect alone would draw the WHOLE
+ * texture into a narrower box -- a squash, not a clip, and a subtler wrong than the overflow it
+ * replaced. So each edge's fractional travel is applied to the matching UV edge. Reversed coordinates
+ * survive this untouched: the interpolation is a plain lerp between `u0` and `u1`, which is how
+ * `renderer.ts:208-213` already treats a mirrored crop.
+ *
+ * ## Cost: the item count can only FALL
+ *
+ * This is the constraint that matters, because `items.length` is the offscreen target's whole basis.
+ * Nothing is added here: an item is passed through, narrowed, or DROPPED. A clipped scroll box therefore
+ * makes the draw list shorter than it was, never longer, and the fingerprint cheaper rather than dearer.
+ */
+function clipItem(item: DrawItem, clip: Rect): DrawItem | null {
+  const left = Math.max(item.rect.left, clip.left);
+  const top = Math.max(item.rect.top, clip.top);
+  const right = Math.min(item.rect.left + item.rect.width, clip.left + clip.width);
+  const bottom = Math.min(item.rect.top + item.rect.height, clip.top + clip.height);
+  if (right <= left || bottom <= top) {
+    // Entirely outside the viewport. The trainer's x=295 rank string in a 296-wide box is all but this.
+    return null;
+  }
+  if (left === item.rect.left && top === item.rect.top
+    && right === item.rect.left + item.rect.width
+    && bottom === item.rect.top + item.rect.height) {
+    // Wholly inside: the common case, and it must allocate nothing.
+    return item;
+  }
+  const rect: Rect = { left, top, width: right - left, height: bottom - top };
+  const base = item.texCoords ?? item.widget.texCoords ?? null;
+  let texCoords = item.texCoords;
+  if (base !== null && item.rect.width > 0 && item.rect.height > 0) {
+    const fx0 = (left - item.rect.left) / item.rect.width;
+    const fx1 = (right - item.rect.left) / item.rect.width;
+    const fy0 = (top - item.rect.top) / item.rect.height;
+    const fy1 = (bottom - item.rect.top) / item.rect.height;
+    texCoords = {
+      u0: base.u0 + fx0 * (base.u1 - base.u0),
+      u1: base.u0 + fx1 * (base.u1 - base.u0),
+      v0: base.v0 + fy0 * (base.v1 - base.v0),
+      v1: base.v0 + fy1 * (base.v1 - base.v0),
+    };
+  }
+  return texCoords === undefined
+    ? { widget: item.widget, rect, alpha: item.alpha }
+    : { widget: item.widget, rect, alpha: item.alpha, texCoords };
+}
+
+/**
+ * The intersected clip rect for a widget's chain of clipping ancestors, or null when it has none.
+ *
+ * Walks up rather than taking only the innermost: a scroll frame nested inside another is clipped by
+ * both, and the engine applies each independently. The walk is over CLIPPING ancestors only, so it runs
+ * once per clipped item and is a no-op for everything else.
+ */
+function clipRect(clip: Widget | null, rects: Map<string, Rect>): Rect | null {
+  let out: Rect | null = null;
+  let node: Widget | null = clip;
+  while (node !== null) {
+    const rect = rects.get(node.id);
+    if (rect !== undefined) {
+      if (out === null) {
+        out = rect;
+      } else {
+        const left = Math.max(out.left, rect.left);
+        const top = Math.max(out.top, rect.top);
+        const right = Math.min(out.left + out.width, rect.left + rect.width);
+        const bottom = Math.min(out.top + out.height, rect.top + rect.height);
+        out = { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+      }
+    }
+    node = node.clippedBy ?? (node.parent === null ? null : node.parent.clippedBy);
+  }
+  return out;
+}
+
 const orderKey = (entry: { widget: Widget; sequence: number }): OrderKey => ({
   strata: entry.widget.strata,
   frameLevel: entry.widget.frameLevel,
@@ -946,18 +1050,24 @@ export class WidgetRoot {
   }
 
   drawList(viewport: Viewport, measure?: MeasureText): DrawItem[] {
-    const flat: Array<{ widget: Widget; alpha: number; sequence: number }> = [];
+    const flat: Array<{
+      widget: Widget; alpha: number; sequence: number; clip: Widget | null;
+    }> = [];
     const nodes: LayoutNode[] = [];
     let sequence = 0;
     const scale = screenScale(viewport.height);
 
-    const walk = (widget: Widget, alpha: number): void => {
+    const walk = (widget: Widget, alpha: number, clip: Widget | null): void => {
       if (!widget.shown) {
         return;
       }
 
       const cumulative = alpha * widget.alpha;
-      flat.push({ widget, alpha: cumulative, sequence: sequence++ });
+      // The innermost `<ScrollFrame>` clipping this widget, inherited down the subtree. `clippedBy` is
+      // set only on a scroll CHILD (`methods/scroll.ts#SetScrollChild`), so a scrollbar -- also a child
+      // of the frame, and deliberately outside its viewport -- is never clipped.
+      const clipping = widget.clippedBy ?? clip;
+      flat.push({ widget, alpha: cumulative, sequence: sequence++, clip: clipping });
       const size = deriveSize(widget, scale, measure);
       nodes.push({
         id: widget.id,
@@ -968,11 +1078,11 @@ export class WidgetRoot {
       });
 
       for (const child of widget.children) {
-        walk(child, cumulative);
+        walk(child, cumulative, clipping);
       }
     };
 
-    walk(this.root, 1);
+    walk(this.root, 1, null);
     this.addHiddenTargets(nodes, scale, measure);
 
     const rects = resolveAnchors(nodes, viewport);
@@ -982,6 +1092,15 @@ export class WidgetRoot {
     // doomed nodes stay in it), so a dependent is judged by its target's real state rather than by
     // the target having been withheld.
     const unplaceable = unplaceableNodes(nodes);
+    // Which clipping frame each widget inherited, carried out of the walk so the crop stage can find it
+    // after `resolveAnchors` has given every clip frame a rect. Empty for a tree with no scroll child,
+    // which is the ordinary case.
+    const itemClip = new Map<Widget, Widget | null>();
+    for (const entry of flat) {
+      if (entry.clip !== null) {
+        itemClip.set(entry.widget, entry.clip);
+      }
+    }
 
     return flat
       .filter((entry) => {
@@ -1020,6 +1139,13 @@ export class WidgetRoot {
           rect: rects.get(entry.widget.id)!,
           alpha: entry.alpha,
         };
-      });
+      })
+      // THE SCROLLFRAME CROP. Last, so it sees the final rect -- including a StatusBar fill's
+      // overridden one. `clipItem` passes through, narrows, or DROPS: the item count can only fall.
+      .map((item) => {
+        const clip = clipRect(itemClip.get(item.widget) ?? null, rects);
+        return clip === null ? item : clipItem(item, clip);
+      })
+      .filter((item): item is DrawItem => item !== null);
   }
 }
