@@ -80,6 +80,15 @@ still a number that agreed with you.
   settles, and validate one you are holding by running a trivial chunk through it: a disposed copy
   keeps its object graph but its `lua_State` is gone, so touching it dies inside fengari rather than
   returning an error.
+  Three faces of this have now cost arms, and one rule covers all of them: **existence at boot proves
+  nothing; ticking at the moment of use is the only test that has held.** Assert the handle is the
+  right *type*, read its counter twice, and require it to have **advanced** — then report `VOID`
+  rather than a number if it has not.
+- **World population varies by spawn, so poll it — never sleep a guessed amount.** The same probe at
+  the same elapsed time saw **1** entity in one run and **72** in the next. An arm that needed an NPC
+  and slept instead produced two panes of placeholder art and a ratio measured against nothing; it was
+  declared void, which is the only honest end for it. Poll `entities.size` (or whatever the arm
+  actually depends on) and say `VOID` when the world never populated.
 - **A silent gap is indistinguishable from a bug, and the load report is not where the owner looks.**
   Fifteen unit-popup rows read as broken when 26 of them were honest `notImplemented` gaps. An
   **action** the owner invoked should say so where he already sees refusals — `UIErrorsFrame`, the
