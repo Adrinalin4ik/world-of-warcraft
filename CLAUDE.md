@@ -312,6 +312,15 @@ recent round.
   identifier in a Lua comment terminates the string and yields ~25 nonsense TS errors pointing at Lua.
 - The UI canvas has no `preserveDrawingBuffer`: `drawImage`-ing it into a 2D context reads a **cleared**
   buffer, so a pixel probe returns black whatever is on screen. Screenshot instead.
+- **A SHARED material is not yours to write.** This has now cost three rounds. An attachment — a helm,
+  a pauldron, a weapon — is a static model, so it instances, and a character clone hands it the
+  **shared** batches: the same materials every copy of that item path in the zone is drawing. Writing
+  one from a pane, a highlight or any pass outside the world's own light is a write into the world.
+  It produced the missing hair (a blend rule right for the world, fatal in a pane), a portrait bake
+  leaving the booth's studio light on the world's helm and shoulders **permanently** (the world's light
+  refresh is revision-skipped by design, so it never takes them back), and the reason a hover highlight
+  cannot reach an attachment at all. **`ownsBatches` is the test.** If you must borrow one, save and
+  restore rather than skip — the pattern `model-booth.ts` already uses for the clear colour.
 - An `ADD` widget in the world UI must not write destination alpha. The world pass is premultiplied, and
   three's `AdditiveBlending` there is an un-separated `blendFunc(ONE, ONE)` that saturates the offscreen
   target's alpha and masks the world out — an opaque black quad. `material.ts#applyBlend` is the one place.
