@@ -16,6 +16,7 @@ function world(source: { gossip?: string | null; merchant?: string | null; train
       player,
       target: wolf,
       hovered: null,
+      focus: null,
       entities: new Map<string, never>([['0xF130000123', npc]]),
       game: {
         objectHandler: {
@@ -55,7 +56,10 @@ describe('resolving a FrameXML unit token to an entity', () => {
     // the pane draws nothing rather than a black disc.
     expect(resolveUnitToken('player', open.world)).toBe(open.player);
     expect(resolveUnitToken('target', open.world)).toBe(open.wolf);
+    // `focus` has a real producer now -- `World#focus` holds the entity, written by group-bridge's
+    // `FocusUnit`/`ClearFocus` -- so it resolves when one is set and nulls when it is not.
     expect(resolveUnitToken('focus', open.world)).toBeNull();
+    expect(resolveUnitToken('focus', { ...open.world, focus: open.npc })).toBe(open.npc);
     expect(resolveUnitToken('party1', open.world)).toBeNull();
     expect(resolveUnitToken('npc', null)).toBeNull();
   });
