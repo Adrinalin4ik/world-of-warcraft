@@ -1219,7 +1219,34 @@ export class QuestHandler extends EventEmitter {
     if (guid === null || id === 0) {
       return;
     }
-    this.send(GameOpcode.CMSG_QUESTGIVER_ACCEPT_QUEST, guid, id);
+    // **16 BYTES, NOT 12, AND THIS IS WHY "Принять квест тоже не получается".**
+    //
+    // 1.12 reads `u64 guid, u32 quest` (`benilla-protocol/.../quest/giver.rs:165-168`, the shared
+    // `guid_quest` body). TrinityCore 3.3.5's `HandleQuestgiverAcceptQuestOpcode` reads
+    // **`guid >> questId >> startCheat`** with `startCheat` a `u32` -- so a 12-byte send makes the
+    // server's `ByteBuffer` read four bytes past the end and throw, the packet is DISCARDED, and
+    // nothing at all comes back. The button looks inert rather than refused, and no `SMSG_*` will ever
+    // explain it. That is the project's most-repeated defect class, eleven-plus instances across four
+    // areas, and this is the twelfth.
+    //
+    // **A SEPARATE BODY FROM `send()` ON PURPOSE.** `CMSG_QUESTGIVER_COMPLETE_QUEST` and
+    // `..._REQUEST_REWARD` genuinely read 12, so widening the shared helper would have "fixed" this
+    // one and broken those two -- the opposite mistake, and equally silent.
+    //
+    // **AND THE WIDTH IS SAFE UNDER BOTH HYPOTHESES, which is what settles it without a capture.**
+    // A `ByteBuffer` throws only on an UNDER-read; trailing bytes the server never reads are simply
+    // ignored. So if `startCheat` is really there, 16 is required; if it is not, 16 is harmless. 12 is
+    // fatal in the first case. That asymmetry is the same reasoning `CLAUDE.md` records for preferring
+    // the reference's BYTES over its rationale -- a `u8` 0 plus three zero bytes IS a little-endian
+    // `u32` 0.
+    const gp = new GamePacket(
+      GameOpcode.CMSG_QUESTGIVER_ACCEPT_QUEST,
+      GamePacket.HEADER_SIZE_OUTGOING + GUID_BYTES + 8,
+    );
+    gp.write(Array.from(guidBytes(guid)));
+    gp.writeUnsignedInt(id >>> 0);
+    gp.writeUnsignedInt(0); // startCheat -- the GM "start it regardless" flag; the server reads it
+    this.game.send(gp);
   }
 
   /**
@@ -1350,9 +1377,16 @@ export class QuestHandler extends EventEmitter {
   // -- Readers ------------------------------------------------------------------------------------
 
   /** The shared `{u64 guid, u32 questId}` body of the four simple questgiver sends. */
+  /**
+   * The shared `{u64 guid, u32 questId}` body -- **`CMSG_QUESTGIVER_COMPLETE_QUEST` and
+   * `..._REQUEST_REWARD` ONLY.**
+   *
+   * `CMSG_QUESTGIVER_ACCEPT_QUEST` used to come through here and that was the bug: it reads a third
+   * word in 3.3.5a. See `acceptQuest` for the width and for why it does not share this.
+   */
   private send(opcode: number, guid: string, questId: number): void {
-    // Same oracle as `queryQuest`: `CMSG_QUESTGIVER_COMPLETE_QUEST` and `..._REQUEST_REWARD` are also
-    // answered with a panel that echoes the quest id back.
+    // Same oracle as `queryQuest`: both of these are answered with a panel that echoes the quest id
+    // back.
     this.awaiting.add(questId >>> 0);
     const gp = new GamePacket(opcode, GamePacket.HEADER_SIZE_OUTGOING + GUID_BYTES + 4);
     gp.write(Array.from(guidBytes(guid)));

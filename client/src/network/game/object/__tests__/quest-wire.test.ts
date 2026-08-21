@@ -126,3 +126,55 @@ test('SMSG_QUEST_QUERY_RESPONSE consumes its body exactly and orders its strings
   expect(template!.objectives[0].requiredCount).toBe(8);
   expect(template!.rewards[0]).toEqual({ itemId: 1234, count: 1 });
 });
+
+/**
+ * EVERY OUTGOING BODY IS THE WIDTH 3.3.5a's OWN `Read()` CONSUMES.
+ *
+ * The owner: "Принять квест тоже не получается" -- the Accept button enabled, the click doing nothing.
+ * `CMSG_QUESTGIVER_ACCEPT_QUEST` was going out at **12 bytes** where TrinityCore 3.3.5's
+ * `HandleQuestgiverAcceptQuestOpcode` reads `guid >> questId >> startCheat` -- **16**. A short body
+ * makes the server's `ByteBuffer` read past the end and throw; the packet is discarded and NOTHING
+ * comes back, so the gesture is inert rather than refused. Eleven-plus instances of this class already
+ * in this project, every one silent.
+ *
+ * This asserts the whole family at once rather than only the one that broke, because the sharp edge is
+ * that `ACCEPT` needs 16 while `COMPLETE_QUEST` and `REQUEST_REWARD` -- the two that shared its helper
+ * -- genuinely need 12. Widening the helper would have fixed one and broken two, equally silently.
+ *
+ * Asserted at the SEND, which is this client's whole half: accept has no acknowledgement at all (the
+ * descriptor slot is the only confirmation), so there is no reply to assert against and a test that
+ * waited for one would hang on a protocol that never answers.
+ */
+test('every outgoing quest body is the width 3.3.5a reads', () => {
+  const game = fakeGame();
+  const handler = new QuestHandler(game);
+  const npc = '0xf130000337003477';
+
+  // The accept needs a giver, which `queryQuest` latches. 13 bytes: guid + questId + a u8 startCheat,
+  // which is 12 in 1.12 -- the same family, a different width, and both are checked here.
+  handler.queryQuest(18, npc);
+  handler.acceptQuest(18);
+  handler.completeQuest(18);
+  handler.requestReward(18);
+  handler.chooseReward(0, 18);
+  handler.removeQuest(3);
+  handler.cancel();
+  handler.queryTemplate(4242);
+
+  const bodies = game.sent.map((p: GamePacket) => ({
+    opcode: p.opcode,
+    body: p.length - GamePacket.HEADER_SIZE_OUTGOING,
+  }));
+  const widthOf = (opcode: number) => bodies.find((b: { opcode: number }) => b.opcode === opcode)?.body;
+
+  expect(widthOf(GameOpcode.CMSG_QUESTGIVER_QUERY_QUEST)).toBe(13);
+  // THE ONE THAT BROKE. 8 + 4 + 4.
+  expect(widthOf(GameOpcode.CMSG_QUESTGIVER_ACCEPT_QUEST)).toBe(16);
+  // And the two that must STAY at 12, which is why the helper was not widened.
+  expect(widthOf(GameOpcode.CMSG_QUESTGIVER_COMPLETE_QUEST)).toBe(12);
+  expect(widthOf(GameOpcode.CMSG_QUESTGIVER_REQUEST_REWARD)).toBe(12);
+  expect(widthOf(GameOpcode.CMSG_QUESTGIVER_CHOOSE_REWARD)).toBe(16);
+  expect(widthOf(GameOpcode.CMSG_QUESTLOG_REMOVE_QUEST)).toBe(1);
+  expect(widthOf(GameOpcode.CMSG_QUESTGIVER_CANCEL)).toBe(0);
+  expect(widthOf(GameOpcode.CMSG_QUEST_QUERY)).toBe(4);
+});
