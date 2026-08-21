@@ -851,21 +851,54 @@ function clipItem(item: DrawItem, clip: Rect): DrawItem | null {
  * both, and the engine applies each independently. The walk is over CLIPPING ancestors only, so it runs
  * once per clipped item and is a no-op for everything else.
  */
-function clipRect(clip: Widget | null, rects: Map<string, Rect>): Rect | null {
+function clipRect(
+  clip: Widget | null,
+  rects: Map<string, Rect>,
+  unplaceable: Set<string>,
+): Rect | null {
   let out: Rect | null = null;
   let node: Widget | null = clip;
+  let guard = 0;
   while (node !== null) {
+    /**
+     * IT FAILS OPEN, NOT CLOSED, and that is the whole point of these two guards.
+     *
+     * A clip that cannot establish where its viewport IS must not conclude that the content is
+     * off-screen. Clipping is the only stage in `drawList` that can DROP an item, so a viewport whose
+     * rect we got wrong turns a misplaced panel into a BLANK one -- and blank is much harder to
+     * diagnose than misplaced, because there is nothing left on screen to reason about.
+     *
+     *  - **UNPLACEABLE**: the frame has no resolvable anchor chain, so `resolveAnchors` placed it by
+     *    fallback rather than by its document. `unplaceableNodes` already knows; `drawList` computes it
+     *    two lines above for its own filter.
+     *  - **DEGENERATE**: zero or negative width or height. A frame sized by a script that has not run
+     *    yet reads 0, and `drawList` runs every frame from the first one -- so this is reachable during
+     *    the load for any frame whose size the client sets in Lua.
+     *
+     * In both cases the item is passed through unclipped: overflowing content is a visible, reportable
+     * defect, and an empty panel is not.
+     */
+    if (unplaceable.has(node.id)) {
+      return null;
+    }
     const rect = rects.get(node.id);
-    if (rect !== undefined) {
-      if (out === null) {
-        out = rect;
-      } else {
-        const left = Math.max(out.left, rect.left);
-        const top = Math.max(out.top, rect.top);
-        const right = Math.min(out.left + out.width, rect.left + rect.width);
-        const bottom = Math.min(out.top + out.height, rect.top + rect.height);
-        out = { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
-      }
+    if (rect === undefined || rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    if (out === null) {
+      out = rect;
+    } else {
+      const left = Math.max(out.left, rect.left);
+      const top = Math.max(out.top, rect.top);
+      const right = Math.min(out.left + out.width, rect.left + rect.width);
+      const bottom = Math.min(out.top + out.height, rect.top + rect.height);
+      out = { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+    }
+    // Bounded: `clippedBy` is a graph this file does not own, and a cycle in it would hang the draw
+    // pass rather than merely mis-clip. Four is past any real nesting.
+    guard += 1;
+    if (guard > 4) {
+      return out;
     }
     node = node.clippedBy ?? (node.parent === null ? null : node.parent.clippedBy);
   }
@@ -1143,7 +1176,7 @@ export class WidgetRoot {
       // THE SCROLLFRAME CROP. Last, so it sees the final rect -- including a StatusBar fill's
       // overridden one. `clipItem` passes through, narrows, or DROPS: the item count can only fall.
       .map((item) => {
-        const clip = clipRect(itemClip.get(item.widget) ?? null, rects);
+        const clip = clipRect(itemClip.get(item.widget) ?? null, rects, unplaceable);
         return clip === null ? item : clipItem(item, clip);
       })
       .filter((item): item is DrawItem => item !== null);
