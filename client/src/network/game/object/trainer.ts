@@ -306,6 +306,29 @@ export class TrainerHandler extends EventEmitter {
       bodySize,
       consumed,
     });
+    /**
+     * A NONZERO RESIDUAL SAYS SO IN THE CONSOLE, and until now it did not.
+     *
+     * **FOUND BY A PROBE THAT NEVER REACHED THE PACKET.** The throwing path warns (see `subscribe`), but
+     * an UNDER-read is not a throw: it decoded "successfully", left bytes on the floor, and said nothing
+     * -- so a wrong width would sit there until somebody thought to read `window.spellWire` by hand. That
+     * is the silent failure mode this project has paid for eleven times, reproduced inside the very
+     * instrument built to catch it.
+     *
+     * Warned on the LIST only, and only when nonzero, so the useful property is the ABSENCE of the line
+     * -- the same absence-is-the-signal check the buy replies use. A trainer visit costs no console noise
+     * when the layout is right.
+     */
+    if (residual !== 0 && kind === 'TRAINER_LIST') {
+      console.warn(
+        `trainer: SMSG_TRAINER_LIST left ${residual} byte(s) of ${bodySize} unread over ${count} row(s)`
+        + ` -- residualPerRow ${perRow === null ? 'null (so the row stride is right and the HEADER or the'
+          + ' trailing greeting moved)' : `${perRow} (so the error is INSIDE the row, that many bytes:`
+          + ' a field widened or one was inserted)'}`
+        + `. Greeting read as "${this.greeting.slice(0, 30)}" -- garbled means the stride is wrong.`
+        + ' See network/game/object/trainer.ts#record.',
+      );
+    }
   }
 
   // -- Incoming -----------------------------------------------------------------------------------
