@@ -236,6 +236,14 @@ A comment that invents a source, or that still describes a gap now closed, is tr
   — eleven instances across items, merchants and quests, every one silent. Only a **residual against
   real traffic** settles a layout: decode a captured body and assert nothing is left over. Until a
   packet has been through that, say "self-consistent" rather than "verified".
+  Better still, make the residual **name the error instead of only reporting one**. For a body shaped
+  `header + count * stride + tail`, divide the remainder by the wire count: a whole number puts the
+  error **inside the row and says by how many bytes** (a `u8` read where a `u32` sits is +3, an
+  inserted word +4); `null` with a nonzero remainder means the stride is right and the header or tail
+  moved; a throw means we over-read, so the stride is too large — which neither of the others can
+  express. Stash the header **before** the row loop, the only placement that survives a throwing one.
+  And feed the diagnostic two deliberately wrong bodies: a fixture that only ever sees correct input
+  is the arm a self-built fixture cannot be.
 - **A field widened between 1.12 and 3.3.5a fails SILENTLY, with no reply at all.** Six have been found
   in the item area alone: the vendor row (7 words → 8), `CMSG_SELL_ITEM`'s count (`u8` → `u32`),
   `CMSG_REPAIR_ITEM` (16 B → 17), `BUYBACK_SLOT_START` (69 → 74), `CMSG_SPLIT_ITEM`'s count
