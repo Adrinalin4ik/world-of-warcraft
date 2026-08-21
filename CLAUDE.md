@@ -307,6 +307,19 @@ recent round.
 - `model.scale.setScalar()` is **inert** under `matrixAutoUpdate = false`.
 - three's `projectObject` returns before walking children when `visible === false`.
 - Guids: a 64-bit guid does not survive a JS number. `network/guid-hex.ts` is the single formatter.
+- **A DRAW CALL IS NOT A PIXEL, AND A REGISTERED HANDLER IS NOT A DISPATCHED ONE.** Four fixes by three
+  agents once landed in the owner's build and did nothing, each having passed a headless harness — and
+  the one that was diagnosed proved why the harness could not have caught it: `quad.visible` was true,
+  the render call executed, the draw call was issued, the triangles were counted, and **not one pixel
+  landed**, because the UI's Y-down camera mirrors the projection and three compensates winding only
+  for an object's own matrix, never for the camera's. Every piece of *state* was right; only the
+  *effect* was missing. So a harness that asserts a handler ran, a value was set or a range was
+  announced is asserting state. **When a fix is live and inert, look at the LAST HOP** — where the
+  value reaches the thing that actually renders or dispatches — not at the state you already verified.
+- **Adopting a camera means adopting its whole convention, including the MATERIAL.** A hand-built
+  `MeshBasicMaterial` defaults to `FrontSide` and is culled under the Y-down UI camera; the shared
+  quad-material factory is where that requirement lives. Grep for a convention's existing home before
+  moving anything onto it — the answer was three files away and one search would have found it.
 - **Every orientation defect here has been TWO CONVENTIONS MEETING, never a wrong texture — three for
   three — and none was fixed by negating a coordinate.** The loading screen came out upside down
   because `flipY = false` and a Y-down camera cancelled; the micro-button portrait because a widget's
