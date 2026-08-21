@@ -1207,7 +1207,19 @@ export class QuestHandler extends EventEmitter {
   }
 
   /**
-   * `CMSG_QUESTGIVER_ACCEPT_QUEST` (**0x189**): `u64 guid · u32 questId`, 12 bytes.
+   * `CMSG_QUESTGIVER_ACCEPT_QUEST` (**0x189**): `u64 guid · u32 questId · u32 startCheat`,
+   * **16 bytes**.
+   *
+   * The third word is `startCheat` in TrinityCore 3.3.5's `HandleQuestgiverAcceptQuestOpcode` -- a
+   * SERVER implementation's own name for it, labelled as such like every other value in this file
+   * whose only source is one, and the GM "start the quest regardless of its requirements" flag. Always
+   * sent as 0.
+   *
+   * **This docstring said "12 bytes" until after the fix below landed, which made it the stale half of
+   * a closed gap pointing readers at the wrong number** -- `send()` correctly told them to come here
+   * for the width while here still described the bug. Recorded rather than quietly corrected, because
+   * a comment that still describes a gap now closed is treated as a defect on this project and this was
+   * one of mine.
    *
    * The quest is in the log when a `PLAYER_QUEST_LOG_*` slot carries its id, and by no other signal
    * -- see `update-object/quest-log.ts`. The server also sends `SMSG_GOSSIP_COMPLETE`, which closes

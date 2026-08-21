@@ -395,7 +395,18 @@ const REGION: MethodTable = {
     // cross-reference (`QuestInfoReputationsFrame` anchors to its anchor argument, and half of
     // `questframe.lua` anchors one region to another by name) and must survive untouched.
     const previous = widget.parent;
-    if (previous !== null && target !== null && previous !== target) {
+    // **NOT A DEFAULT FILL, and skipping it is what keeps `Widget#anchorsAreDefault` alive.**
+    //
+    // Found by re-running my own harness after the loader's fill became a DEFAULT (`684b68b`): the
+    // quest title was STILL resolving to the whole 295x324 viewport, and the reason was this method.
+    // `setAnchors` clears `anchorsAreDefault` by design -- "any explicit call is an authored
+    // placement" (`widget.ts:563-565`) -- so re-pointing a default fill turned it into an EXPLICIT
+    // anchor set, and the `SetPoint("TOPLEFT")` that `QuestInfo_Display` issues two statements later
+    // then MERGED with it instead of replacing it. My fix was defeating theirs.
+    //
+    // A default fill needs no re-pointing anyway: it exists only until something places the region,
+    // and the first explicit `SetPoint` discards the whole set. So the correct action here is none.
+    if (previous !== null && target !== null && previous !== target && !widget.anchorsAreDefault) {
       const repointed = widget.anchors.map((anchor) => (
         anchor.relativeTo === previous.id ? { ...anchor, relativeTo: target.id } : anchor
       ));
