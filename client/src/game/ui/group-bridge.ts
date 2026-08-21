@@ -97,6 +97,41 @@ const GROUP_TYPE_RAID = 0x01;
 const MEMBER_FLAG_ASSISTANT = 0x01;
 
 /**
+ * `PartyResult` -> the client's OWN GlobalString that reports it.
+ *
+ * The CODES are TrinityCore 3.3.5's `PartyResult` enum, labelled as a server implementation like every
+ * other number in this area. THE STRINGS ARE THE CLIENT'S -- every name below was checked to exist
+ * verbatim in the served `GlobalStrings.lua`, and the `_S` suffix is the client's own marker for one
+ * that takes the member name through `format`:
+ *
+ *     ERR_BAD_PLAYER_NAME_S      "Cannot find player '%s'."
+ *     ERR_ALREADY_IN_GROUP_S     "%s is already in a group."
+ *     ERR_IGNORING_YOU_S         "%s is ignoring you."
+ *     ERR_GROUP_FULL             "Your party is full."
+ *     ERR_NOT_LEADER             "You are not the party leader."
+ *
+ * 0 is OK and prints nothing -- a successful invite is reported by the roster arriving, not by a line.
+ */
+const PARTY_RESULT_STRING: Record<number, string> = {
+  1: 'ERR_BAD_PLAYER_NAME_S',
+  2: 'ERR_TARGET_NOT_IN_GROUP_S',
+  3: 'ERR_TARGET_NOT_IN_INSTANCE_S',
+  4: 'ERR_GROUP_FULL',
+  5: 'ERR_ALREADY_IN_GROUP_S',
+  6: 'ERR_NOT_IN_GROUP',
+  7: 'ERR_NOT_LEADER',
+  8: 'ERR_PLAYER_WRONG_FACTION',
+  9: 'ERR_IGNORING_YOU_S',
+  12: 'ERR_LFG_PENDING',
+  13: 'ERR_INVITE_RESTRICTED',
+  14: 'ERR_GROUP_SWAP_FAILED',
+  15: 'ERR_INVITE_UNKNOWN_REALM',
+  16: 'ERR_INVITE_NO_PARTY_SERVER',
+  17: 'ERR_INVITE_PARTY_BUSY',
+  18: 'ERR_PARTY_TARGET_AMBIGUOUS',
+};
+
+/**
  * Register the group/duel/difficulty globals against a live world. Returns the teardown.
  *
  * Attached beside the other world bridges and gated on a real session for the same reason they are:
@@ -175,9 +210,63 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
    * a wrong event: the console line is the honest placeholder, and the name is the payload the chat
    * line will want when there is somewhere to put it.
    */
-  const onDeclined = (name: string) => {
-    console.info(`group: ${name} declined the invitation `
-      + '(no chat sink yet, so ERR_DECLINE_GROUP_S has nowhere to print)');
+  /**
+   * Print one line as SYSTEM chat, through the client's own door.
+   *
+   * 3.3.5a has no `ChatFrame_DisplaySystemMessageInPrimary` -- checked, zero hits across the manifest --
+   * so the idiom is the one `chatframe.lua:1441` and its neighbours use for their own system lines:
+   * `DEFAULT_CHAT_FRAME:AddMessage(text, info.r, info.g, info.b, info.id)` with
+   * `ChatTypeInfo["SYSTEM"]`. Nothing is composed here that the client would compose itself: the
+   * FORMAT STRING is looked up by name in `_G` so it is the client's own localized text, and `format`
+   * is the client's own.
+   *
+   * Guarded on the frame existing, because this can fire before the manifest has built it -- a name
+   * query answering during the boot is exactly that case.
+   */
+  const systemLine = (globalStringName: string, argument: string | null): void => {
+    // A WHITELIST, not an escape: the name is spliced into a Lua string literal below, and a
+    // quote or backslash in it would end that literal early. Character names are word characters.
+    const arg = (argument ?? '').replace(/[^A-Za-z0-9_ -]/g, '');
+    vm.run(
+      'if DEFAULT_CHAT_FRAME and _G["' + globalStringName + '"] then'
+      + '  local info = ChatTypeInfo and ChatTypeInfo["SYSTEM"]'
+      + '  local text = _G["' + globalStringName + '"]'
+      + '  if string.find(text, "%%s") then text = format(text, "' + arg + '") end'
+      + '  DEFAULT_CHAT_FRAME:AddMessage(text, info and info.r or 1, info and info.g or 1,'
+      + '    info and info.b or 0, info and info.id or 1)'
+      + 'end',
+      'group-system-line.lua',
+    );
+  };
+
+  /**
+   * `SMSG_GROUP_DECLINE` -- now a real line rather than the named gap it was.
+   *
+   * The gap existed only because there was no chat sink; `ERR_DECLINE_GROUP_S`
+   * ("%s declines your group invitation.") is in the client's own `GlobalStrings.lua` and this is what
+   * the reference client prints for it.
+   */
+  const onDeclined = (name: string) => systemLine('ERR_DECLINE_GROUP_S', name);
+
+  /**
+   * `SMSG_PARTY_COMMAND_RESULT` -- the reason codes, printed at last.
+   *
+   * This is the packet whose arrival was MEASURED on a live invite (body 16, consumed 16, zero
+   * residual) while its contents went nowhere. Result 0 is success and prints nothing: the roster
+   * arriving is the report.
+   */
+  const onCommandResult = ({ member, result }: { operation: number; member: string; result: number }) => {
+    if (result === 0) {
+      return;
+    }
+    const name = PARTY_RESULT_STRING[result];
+    if (name === undefined) {
+      // An unmapped code. Named on the console rather than swallowed: it means the enum above is
+      // missing a value this server sends, which is the thing worth learning.
+      console.warn(`group: SMSG_PARTY_COMMAND_RESULT result ${result} has no GlobalString mapped`);
+      return;
+    }
+    systemLine(name, member);
   };
 
   /**
@@ -255,6 +344,7 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
   group.on('rosterChanged', onRoster);
   group.on('inviteRequest', onInvite);
   group.on('inviteDeclined', onDeclined);
+  group.on('commandResult', onCommandResult);
   group.on('duelRequested', onDuelRequested);
   group.on('duelComplete', onDuelComplete);
   group.on('duelOutOfBounds', onDuelOut);
@@ -940,6 +1030,7 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
     group.off('rosterChanged', onRoster);
     group.off('inviteRequest', onInvite);
     group.off('inviteDeclined', onDeclined);
+    group.off('commandResult', onCommandResult);
     group.off('duelRequested', onDuelRequested);
     group.off('duelComplete', onDuelComplete);
     group.off('duelOutOfBounds', onDuelOut);
