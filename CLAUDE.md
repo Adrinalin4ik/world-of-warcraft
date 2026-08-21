@@ -283,6 +283,18 @@ recent round.
   read past the end and throw; the packet is discarded and **nothing comes back**, so the gesture looks
   inert rather than refused — and no `SMSG_*_FAILURE` will ever explain it. When a send produces
   silence, suspect a width before suspecting the handler.
+  **When a send produces silence and you cannot capture the wire, prefer the LONGER body.** A server
+  `ByteBuffer` throws only on an under-read; trailing bytes it never reads are ignored. So 16 bytes is
+  required if a third word exists and harmless if it does not, while 12 is fatal in the first case —
+  the asymmetry is free. But check the shared helpers: two quest sends must **stay** at 12, and
+  widening the helper would have fixed one send while silently breaking two.
+- **When two agents fix one cascade from different ends, the second can consume a flag the first
+  depends on — and both authors' tests still pass, because neither covers the pair.** A `SetParent`
+  re-point marked the loader's default fill as an authored placement, which is exactly what the other
+  fix relied on being unmarked; two correct changes cancelled. **The tell was that the symptom did not
+  move after a fix that should have moved it.** So re-run your own instrument after someone else lands
+  in your area, not only after your own change — and when a fix provably lands and changes nothing,
+  suspect a neighbour before suspecting your diagnosis.
 - **Prefer the reference's BYTES over the reference's RATIONALE when the two can be separated.** A
   comment here trimmed three "trailing bytes the server discards" as 1.12 slack; in 3.3.5a they are the
   high three bytes of a `u32` count. The reference's byte sequence would have worked verbatim — a `u8` 0
