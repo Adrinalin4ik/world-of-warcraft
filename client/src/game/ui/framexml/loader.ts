@@ -1569,6 +1569,18 @@ class DocumentLoader {
       try {
         this.applyRegionLayout(buttonText, label, selfName, dbg);
         this.publishRegion(buttonText, label, selfName, dbg);
+        // `parentKey` ON A `<ButtonText>` -- the ONE region path that was missing it, and measured
+        // live rather than reasoned about: the quest log printed
+        // `QuestLogFrame.lua:190: attempt to index a nil value (local 'questNormalText')`, which is
+        // `QuestLogTitleButton_Resize` reading `questLogTitle.normalText` off
+        // `<ButtonText name="$parentNormalText" parentKey="normalText">` (questlogframe.xml:86).
+        //
+        // `applyParentKey` was already called for a `<Layers>` region (:924) and for a button's state
+        // textures (:1545), so the gap was this loop alone -- and `publishRegion` publishes only the
+        // GLOBAL name, which is why the `$parentNormalText` global existed while the key did not. A
+        // caller that uses the key rather than the global therefore saw nil, and
+        // `QuestLogTitleButton_Resize` runs for every row of the log.
+        this.applyParentKey(buttonText, label, wrapper, dbg);
       } finally {
         this.rt.vm.unref(label);
       }

@@ -76,6 +76,20 @@ export class LevelUpEffect {
   /** `Spells\LevelUp\LevelUp.mdl` with the standard `.m2` rename. See the header. */
   static MODEL = 'spells\\levelup\\levelup.m2';
 
+  /**
+   * Why the last `play` loaded nothing, or null. THE INSTRUMENT -- see the catch in `play`.
+   *
+   * A one-shot effect fails asynchronously and off the render path, so without this the only symptom
+   * is an absence, which is the hardest thing to diagnose from a probe. A silent catch here already
+   * cost one probe run: the burst reported zero live entries and nothing at all about why.
+   */
+  public lastError: string | null = null;
+
+  /** How many bursts are live. For the instrument; `live` itself is private. */
+  public get liveCount(): number {
+    return this.live.length;
+  }
+
   constructor(scene: THREE.Scene) {
     this.scene = scene;
   }
@@ -111,9 +125,11 @@ export class LevelUpEffect {
         }
         this.live.push({ model, manager: particleManager, remaining: LevelUpEffect.DURATION_MS });
       })
-      .catch(() => {
+      .catch((e) => {
         // `M2Blueprint.load` logs its own failure. A missing effect model is a missing burst, not a
         // broken level-up: the chat lines and the XP bar come from the client's own Lua either way.
+        // The reason is KEPT rather than swallowed -- see `lastError`.
+        this.lastError = e instanceof Error ? e.name + ': ' + e.message : String(e);
       });
   }
 

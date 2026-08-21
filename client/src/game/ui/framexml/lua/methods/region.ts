@@ -301,6 +301,95 @@ const REGION: MethodTable = {
     const parent = ctx.registry.parentOf(self);
     return [parent === null ? null : ctx.wrapper(parent)];
   },
+  /**
+   * `SetParent(frameOrNameOrNil)` -- RE-PARENT a live widget.
+   *
+   * **This was absent from the runtime entirely and it is not a small gap.** Measured live: the quest
+   * log printed `QuestLogFrame.lua:848: attempt to call a nil value (method 'SetParent')` on its
+   * `OnShow` and `:819` on its `OnHide`, and the far worse consumer is `QuestInfo_Display` --
+   * `shownFrame:SetParent(parentFrame)` is the FIRST statement of its element loop
+   * (`questinfo.lua:71`), and that loop is the shared body of ALL FOUR questgiver panels and the
+   * quest log's detail pane. A nil there kills every one of them before the title is placed.
+   *
+   * It is REGION-level, not frame-level, because the client calls it on `ScrollFrame`s
+   * (`QuestLogDetailFrame_DetachFromQuestLog`) as well as `Frame`s, and `GetParent` already lives
+   * here.
+   *
+   * The registry does not keep its own parent map -- `Registry#parentOf` reads
+   * `entry.widget.parent` -- so moving the Widget is the whole operation and `GetParent` follows for
+   * free.
+   *
+   * `Widget#add` re-derives `strata` and `frameLevel` from the new parent, which is what the real
+   * `SetParent` does. It does NOT walk the subtree, so that is done here: a re-parented panel's own
+   * children have to move with it or a reward button would draw at the old strata. The walk is
+   * `add`'s own rule applied recursively -- a REGION keeps its owner's level, a child FRAME sits one
+   * above; see `widget.ts#add` for why that asymmetry exists.
+   *
+   * `SetParent(nil)` DETACHES rather than re-homing to `UIParent`. The engine's own behaviour, and
+   * nothing in the loaded manifest calls it that way; a detached widget simply stops being reached by
+   * the draw walk.
+   */
+  SetParent: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const value = args[0];
+
+    let target: Widget | null = null;
+    if (value !== undefined && value !== null) {
+      let id: number | null;
+      if (typeof value === 'string') {
+        id = ctx.registry.byName(value);
+        if (id === null) {
+          warnOnce(`SetParent: no frame named '${value}' -- the parent is left unchanged`);
+          return [];
+        }
+      } else {
+        id = ctx.frameIdOf(value);
+        if (id === null) {
+          warnOnce('SetParent: the argument is not a frame -- the parent is left unchanged');
+          return [];
+        }
+      }
+      target = ctx.registry.widget(id) ?? null;
+      if (target === null) {
+        return [];
+      }
+    }
+
+    if (target === widget) {
+      // A frame cannot parent itself. The engine ignores it; so does this.
+      return [];
+    }
+    // A CYCLE would make the draw walk non-terminating, which a browser cannot afford -- the same
+    // reasoning `SHOW_REENTRY_LIMIT` in this file gives for its own guard. Refusing is the engine's
+    // behaviour too.
+    for (let node: Widget | null = target; node !== null; node = node.parent) {
+      if (node === widget) {
+        warnOnce('SetParent: refused -- the new parent is a descendant, which would cycle');
+        return [];
+      }
+    }
+    if (widget.parent === target) {
+      return [];
+    }
+
+    widget.parent?.remove(widget);
+    if (target !== null) {
+      target.add(widget);
+      // The subtree, by `add`'s own rule. Only reached on a real re-parent, which happens on a panel
+      // show and not per frame.
+      const walk = (node: Widget): void => {
+        for (const child of node.children) {
+          child.strata = node.strata;
+          const isRegion = child.kind === 'texture' || child.kind === 'fontstring';
+          child.frameLevel = isRegion ? node.frameLevel : node.frameLevel + 1;
+          walk(child);
+        }
+      };
+      walk(widget);
+    }
+    touchGeometry();
+    return [];
+  },
   SetAlpha: (ctx, self, args) => {
     widgetOf(ctx, self).alpha = Number(args[0] ?? 1);
     return [];
@@ -740,6 +829,32 @@ export function formatText(args: unknown[]): string {
 }
 
 const FONTSTRING: MethodTable = {
+  /**
+   * `SetAlphaGradient(start, length)` -> whether the gradient is still PARTIAL.
+   *
+   * A FontString method that fades a run of text in character by character -- the "quest text writes
+   * itself onto the parchment" effect. This renderer rasterizes whole glyph runs onto a 2D context
+   * (`ui/text.ts`) and has no per-character alpha, so there is no gradient to model.
+   *
+   * **FALSE, and the return value is the entire point of this entry.** It was measured live: without
+   * it, `QuestInfo_ShowDescriptionText` raised on its LAST statement (`questinfo.lua:107`), and
+   * because `QuestInfo_Display`'s element loop calls each element function directly
+   * (`questinfo.lua:69-77`) that raise aborted the whole loop -- so in `QUEST_TEMPLATE_LOG` the
+   * description is 8th of 10 and the REWARD BLOCK never placed. The probe read
+   * `reward buttons shown: 0` against `GetNumQuestLogChoices() == 5`, which looked like a reward bug
+   * and was this.
+   *
+   * And FALSE specifically, never true: `QuestInfoFadingFrame_OnUpdate` does
+   * `if ( not QuestInfoDescriptionText:SetAlphaGradient(...) ) then ... acceptButton:Enable() end`
+   * (`questinfo.lua:3-16`). A truthy answer means "still fading", so it would leave the fade running
+   * forever and **the Accept button DISABLED on every quest in the game**. False means "finished",
+   * which ends the fade on its first update and enables the button -- the same end state
+   * `QUEST_FADING_DISABLE == "1"` produces in the real client.
+   *
+   * The visible consequence, stated: quest text appears at once instead of writing itself on. The
+   * text itself is complete and correct.
+   */
+  SetAlphaGradient: () => [false],
   SetText: (ctx, self, args) => {
     widgetOf(ctx, self).text = args[0] === undefined || args[0] === null ? '' : String(args[0]);
     return [];
