@@ -647,12 +647,18 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       stats.reason = 'held';
       stats.stem = 'Point';
       driver.reset();
+      // Nothing is hovered while an ability or an item is on the cursor, so nothing stays lit. Beside
+      // `driver.reset()` because it answers the same question the cursor just answered.
+      this.game.world.setHovered(null);
       return;
     }
     if (pointer === null || this.ui?.pointerWidget) {
       stats.reason = pointer === null ? 'nopointer' : 'widget';
       stats.stem = 'Point';
       driver.reset();
+      // The pointer left the world (onto a frame, or off the window): the unit under it stops being
+      // hovered, so the brighten drops. Without this a unit would stay lit behind an open panel.
+      this.game.world.setHovered(null);
       return;
     }
 
@@ -684,6 +690,10 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         knowsSkinning: false,
       }) ?? CURSOR_POINT;
     }
+    // THE MOUSEOVER MODEL BRIGHTEN, off the pick this method already made -- a second consumer of one
+    // pick rather than a second pick. `World#setHovered` is idempotent, so a cadence tick that lands
+    // on the same unit costs one reference compare. See `world/hover-highlight.ts`.
+    this.game.world.setHovered(hit);
     stats.reason = hit === null ? 'nopick' : '';
     stats.stem = cursorStem(mode);
     driver.apply(mode);

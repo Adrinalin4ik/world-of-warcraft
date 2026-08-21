@@ -22,7 +22,9 @@ import SkyManager from "../pipeline/sky/manager";
 import { fogDebug } from "./fog-debug";
 import { lightDebug } from "./light-debug";
 import { reactionFor, REACTION_NEUTRAL } from "./faction";
+import { HoverHighlight } from "./hover-highlight";
 import { SelectionRing } from "./selection-ring";
+import { LevelUpEffect } from "./level-up-effect";
 import { NameplateConfig, Nameplates } from "./nameplates";
 import { FloaterSpawn, FloatingCombatText, MAX_FLOATERS, WordSource } from "./floating-text";
 import {
@@ -52,6 +54,16 @@ export default class World extends EventEmitter {
   public collisionDebug = collisionDebugView;
   /** The ground selection ring under the current target. Built in the constructor, ticked in `animate`. */
   public selectionRing: SelectionRing;
+
+  /**
+   * THE LEVEL-UP BURST. `Spells\LevelUp\LevelUp.m2`, which `SpellVisualEffectName.dbc` row 21 names
+   * `HARDCODED Unit Level Up` -- see `level-up-effect.ts` for the whole source trail and for why the
+   * idle cost is one array-length compare.
+   *
+   * Public so `ui/level-up-bridge.ts` can play it: the packet arrives on the network thread of the
+   * session, not in the render loop, and the effect has to be started from there.
+   */
+  public levelUpEffect: LevelUpEffect;
   /**
    * The overhead name plates. Built in the constructor and ticked in `animate`, like the ring.
    *
@@ -187,6 +199,9 @@ export default class World extends EventEmitter {
     // are world-space (it is a projected decal, `world/decal.ts`), so it belongs to the scene ROOT and
     // not to any placed subtree, and it draws nothing at all until something is targeted.
     this.selectionRing = new SelectionRing(this.scene);
+    // THE LEVEL-UP BURST, on the scene ROOT for the selection ring's reason directly above: its
+    // position is world-space and it belongs to no placed subtree. Draws nothing until a level lands.
+    this.levelUpEffect = new LevelUpEffect(this.scene);
     // `window.worldRing()` -- the ring instrument: what the last projection emitted, plus the raw
     // world-space vertices the gate measures against the terrain heightmap. See `SelectionRing#vertices`.
     window['worldRing'] = () => ({
@@ -629,6 +644,12 @@ export default class World extends EventEmitter {
   public target: Unit | null = null;
 
   /**
+   * The mouseover/target model brighten. See `world/hover-highlight.ts` for what it is in the real
+   * client and why it costs nothing per frame.
+   */
+  private readonly hoverHighlight = new HoverHighlight();
+
+  /**
    * Pick a unit (or null to clear), tell the server, and announce it.
    *
    * FIRES `target:change` AFTER the state is written and after the query is asked for, which is
@@ -683,6 +704,12 @@ export default class World extends EventEmitter {
       return;
     }
     this.target = unit;
+    // The TARGET half of the model brighten. Hover and target STACK in the reference, so this is a
+    // second reason and not a second highlight -- `hover-highlight.ts` folds them. The selection ring
+    // is untouched and unrelated: it is a projected decal that marks the target, this lifts the
+    // lighting sum of whatever is hovered OR targeted, and both are true at once on a unit that is
+    // both.
+    this.hoverHighlight.setTargeted(unit);
     this.game.objectHandler.combatHandler.select(unit ? unit.guid : null);
     if (unit && unit.fields.entry) {
       this.game.objectHandler.combatHandler.queryCreature(unit.fields.entry, unit.guid);
@@ -690,7 +717,23 @@ export default class World extends EventEmitter {
     this.emit('target:change', unit);
   }
 
+  /**
+   * The unit under the pointer, or null -- the MOUSEOVER half of the model brighten.
+   *
+   * Driven from the world screen's existing 100 ms hover pick (`pages/game/index.tsx`), which already
+   * resolves this unit for the cursor: the highlight is a second consumer of one pick, not a second
+   * pick. Idempotent, so calling it on every cadence tick with the same answer costs a reference
+   * compare.
+   */
+  setHovered(unit: Unit | null) {
+    this.hoverHighlight.setHovered(unit);
+  }
+
   remove(entity: Unit) {
+    // Before anything is released: neither the hover nor the target reason may keep a departing
+    // unit's model alive, and the lift itself is not worth clearing on materials about to be
+    // disposed. `setTarget(null)` below covers the UI side of losing a target; this covers the glow.
+    this.hoverHighlight.forget(entity);
     // A target that streams out or dies-and-decays stops being a target. Without this the UI would
     // keep painting a unit that is no longer in the scene, and `TargetFrame` would never hide.
     if (this.target === entity) {
@@ -821,6 +864,13 @@ export default class World extends EventEmitter {
    * white silhouette rather than a textured model.)
    */
   changeModel(_unit: Unit, oldModel: any, newModel: any) {
+    // A REPLACED BODY ARRIVES UNLIT. The hovered unit is the same object across a redress or a
+    // display-id change, so the highlight's own idempotence would short-circuit and the new clone --
+    // with fresh materials at zero -- would stand dark under the pointer until the pointer moved.
+    // Before the early return below, because that return is about the material registry and this is
+    // not.
+    this.hoverHighlight.refresh();
+
     const registry = this.map?.materialRegistry;
     if (!registry) {
       // No map yet -- the player's model resolves before the first zone finishes loading. The
@@ -906,6 +956,13 @@ export default class World extends EventEmitter {
     beginSection('w.ring');
     this.selectionRing.update(this.ringTarget(), camera);
     endSection('w.ring');
+
+    // THE LEVEL-UP BURST. Inside `w.ring`'s neighbourhood rather than its own span on purpose: with
+    // nothing live this is a single `length === 0` compare, and a named span for a statement that
+    // costs a compare would be more expensive than the statement. The moment it has work it is one
+    // `updateMatrixWorld` on one node; the particles themselves are already counted in `w.map`, which
+    // is where `ParticleManager#animate` runs.
+    this.levelUpEffect.update(delta * 1000);
 
     // THE NAMEPLATES, an EIGHTH named span. See the exhaustiveness note above: a statement outside all
     // of them breaks the sum rule, and that is the tell it exists for. After the entity pass for the

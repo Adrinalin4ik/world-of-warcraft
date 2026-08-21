@@ -29,6 +29,25 @@ uniform int interiorFog;
 
 uniform float animatedTransparency;
 
+// The MOUSEOVER / TARGET model brighten -- the real client's per-model HIGHLIGHT EMISSIVE, as a flat
+// additive lift on the lighting sum. 0 for everything that is not lit up.
+//
+// A CM2 instance carries it beside its fade alpha: an additive highlight emissive at
+// `model+0x190/194/198` (setter `0x710d40`, default 0,0,0), pushed by `SetHighlight 0x614550` /
+// `ClearHighlight 0x6144f0` and added by the animate kernel to the material emissive through
+// `glMaterialfv(GL_EMISSION)` (`samples/benilla/.../instance_tint.rs:5-10` and
+// `.../target/highlight.rs:1-10`, wow-re `selection-circle.md` PART 2 §5). The shipped config default
+// is `0xff404040`, i.e. **+64/255 per channel** -- see `world/hover-highlight.ts#HIGHLIGHT_LIFT`, which
+// is where that number lives.
+//
+// WHERE it is added is the whole of getting this right, and `applyDiffuseLighting` does it: GL_EMISSION
+// lands INSIDE the lighting sum, which is clamped to [0,1] BEFORE the texture modulates it. So darks
+// lift toward fully-lit and already-bright spots saturate -- the reference's own shader says exactly
+// that ("darks lift toward fully-lit, already-bright spots saturate",
+// `benilla/.../wow_model.wgsl:785-790`). Adding it after the clamp, or to the final colour, would be a
+// wash rather than a brighten.
+uniform float highlight;
+
 // The per-object distance-fade alpha (pipeline/m2/fade/laws.ts -- the size-bucketed law from
 // FUN_00683f80). 1.0 is opaque; the cull drops the object entirely at 0.0, so only the feathering
 // band 0 < a < 1 ever reaches here.
@@ -167,9 +186,17 @@ vec4 applyDiffuseLighting(vec4 result) {
     // point lights are added in above; the interior probe's own docstring says the same). Clamping
     // BOTH ends matters -- a bare min() would leave the sun lobe's negative dip in place, and that
     // negative factor would darken the albedo below black once multiplied through.
+    // The mouseover/target brighten, INSIDE the sum and BEFORE the clamp -- see `highlight`'s own
+    // declaration for why that placement is the whole fidelity of it.
+    light += highlight;
+
     light = clamp(light, 0.0, 1.0);
     light = mix(light, vec3(1.0, 1.0, 1.0), 1.0 - materialParams.y);
   #else
+    // NO HIGHLIGHT ON AN UNLIT BATCH, and that is faithful rather than an omission: with GL_LIGHTING
+    // off the client's own GL_EMISSION is dead, so a glow card or an eye flare does not brighten with
+    // the body ("the fullbright/UNLIT path below faithfully never receives it",
+    // `benilla/.../wow_model.wgsl:788-789`).
     vec3 light = vec3(1.0, 1.0, 1.0);
   #endif
 

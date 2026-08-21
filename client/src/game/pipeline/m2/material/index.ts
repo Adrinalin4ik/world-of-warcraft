@@ -382,6 +382,11 @@ class M2Material extends THREE.ShaderMaterial {
       // Animated transparency
       animatedTransparency: { value: 1.0 },
 
+      // The mouseover/target model brighten (world/hover-highlight.ts). 0 until this instance's
+      // model is the one under the pointer or the one selected; see the uniform's declaration in
+      // `fragment/common-header.glsl` for the reference's own placement of it.
+      highlight: { value: 0.0 },
+
       // Per-object distance-fade alpha (fade/laws.ts). 1.0 until a doodad enters its fade band.
       fadeAlpha: { value: 1.0 },
 
