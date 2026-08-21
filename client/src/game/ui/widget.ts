@@ -527,6 +527,17 @@ export class Widget {
   onMouseDown: ((button: MouseButtonName) => void) | null = null;
 
   onMouseUp: ((button: MouseButtonName) => void) | null = null;
+
+  /**
+   * FrameXML's `OnMouseWheel`, which was delivered NOWHERE -- `ui/input.ts` had no wheel listener at
+   * all, so no frame in the client could be scrolled by the wheel.
+   *
+   * `delta` is the engine's sign convention: **+1 is up / away from the user, -1 is down**, which is what
+   * `ScrollFrameTemplate_OnMouseWheel`'s `if ( value > 0 )` branch subtracts from the scroll value with
+   * (`uipaneltemplates.lua:158-165`). A DOM `wheel` event's `deltaY` is the opposite sign, so the router
+   * negates it.
+   */
+  onMouseWheel: ((delta: number) => void) | null = null;
   /**
    * FrameXML's `OnTabPressed`, and it REPLACES the router's own Tab ring for the widget that has one:
    * `accountlogin.xml`'s account box moves focus to the password box itself, and a document that

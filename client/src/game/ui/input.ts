@@ -290,6 +290,8 @@ export class GlueInput {
   attach(): void {
     this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
+    // NOT passive: a frame that handles the wheel must be able to stop the page scrolling with it.
+    this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
     window.addEventListener('pointerup', this.onPointerUp);
     window.addEventListener('pointercancel', this.onPointerCancel);
     window.addEventListener('keydown', this.onKeyDown);
@@ -300,6 +302,7 @@ export class GlueInput {
   detach(): void {
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
+    this.canvas.removeEventListener('wheel', this.onWheel);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('pointercancel', this.onPointerCancel);
     window.removeEventListener('keydown', this.onKeyDown);
@@ -332,6 +335,37 @@ export class GlueInput {
     const scale = bounds.height / units.height;
     return { x: (event.clientX - bounds.left) / scale, y: (event.clientY - bounds.top) / scale };
   }
+
+  /**
+   * FrameXML's `OnMouseWheel`, which reached NOTHING before -- this listener did not exist, so no frame
+   * in the client could be scrolled by the wheel.
+   *
+   * The handler is looked up on the frame under the pointer and then **up its ancestors**, because that
+   * is where the client puts it: `UIPanelScrollFrameTemplate` binds `<OnMouseWheel>` on the SCROLL FRAME
+   * (`uipaneltemplates.xml:327-329`) while the pointer is over the scroll child's content. Stopping at
+   * the hit widget would find nothing on almost every real wheel event.
+   *
+   * `preventDefault` only when a handler actually took it, so a wheel over the world still reaches
+   * whatever else wants it.
+   *
+   * SIGN: the engine's `delta` is +1 up / -1 down -- `ScrollFrameTemplate_OnMouseWheel`'s
+   * `if ( value > 0 )` branch SUBTRACTS from the scroll value (`uipaneltemplates.lua:158-165`), i.e.
+   * wheel-up scrolls toward the top. A DOM `deltaY` is positive scrolling down, so it is negated.
+   */
+  private onWheel = (event: WheelEvent): void => {
+    const { x, y } = this.toUnits(event as unknown as PointerEvent);
+    this.pointerUnits = { x, y };
+    const hit = hitTest(this.items, x, y);
+    let node: Widget | null = hit;
+    while (node !== null) {
+      if (node.onMouseWheel !== null) {
+        event.preventDefault();
+        node.onMouseWheel(event.deltaY > 0 ? -1 : 1);
+        return;
+      }
+      node = node.parent;
+    }
+  };
 
   private onPointerMove = (event: PointerEvent): void => {
     const { x, y } = this.toUnits(event);
