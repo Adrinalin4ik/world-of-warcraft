@@ -126,4 +126,40 @@ describe('SetScript and the calling convention', () => {
 
     vm.dispose();
   });
+
+  /**
+   * A SECOND runtime's frame 1 must not reach the first runtime's handle.
+   *
+   * The world UI host mounts twice with one copy disposed, frame ids restart at 1 per `FrameRegistry`,
+   * and a `LuaRef` indexes ONE VM's handle table. With the store keyed by frame id alone, this second
+   * `setScriptHandler` found the first VM's handle at the same key and released it -- `vm2.unref` against
+   * `vm1`'s index -- which freed whatever slot the new VM held there, usually the handler this very call
+   * was about to store. A freed slot holds the free-list sentinel, so the dispatch reached a TABLE:
+   * "attempt to call a table value", with the handler registered and `GetScript` answering non-nil.
+   */
+  it('a handler on a second VM with the same frame id still dispatches', () => {
+    const first = new LuaVM();
+    const firstRegistry = new FrameRegistry();
+    installObjectModel(first, firstRegistry);
+    const firstId = firstRegistry.create('Frame', 'Detail', null);
+    const firstHandler = compileScriptHandler(first, 'OnEvent', 'ran = 1;', null, 'first.xml');
+    expect(firstHandler).not.toBeNull();
+    setScriptHandler(first, firstId, 'OnEvent', firstHandler!);
+
+    // The remount: a fresh VM and registry, so the same id and very likely the same handle index.
+    const second = new LuaVM();
+    const secondRegistry = new FrameRegistry();
+    const secondCtx = installObjectModel(second, secondRegistry);
+    const secondId = secondRegistry.create('Frame', 'Detail', null);
+    expect(secondId).toBe(firstId);
+    const secondHandler = compileScriptHandler(second, 'OnEvent', 'ran = 2;', null, 'second.xml');
+    expect(secondHandler).not.toBeNull();
+    setScriptHandler(second, secondId, 'OnEvent', secondHandler!);
+
+    expect(invokeScriptHandler(secondCtx, secondId, 'OnEvent', [])).toBeNull();
+    expect(second.getGlobal('ran')).toBe(2);
+
+    second.dispose();
+    first.dispose();
+  });
 });

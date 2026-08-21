@@ -196,6 +196,41 @@ function cascadeVisibility(ctx: MethodContext, widget: Widget, handler: 'OnShow'
   }
 }
 
+/**
+ * Write a FontString's text, and TELL THE GEOMETRY if that can have moved it.
+ *
+ * **TEXT IS GEOMETRY FOR A DERIVED FONT STRING, and not saying so made four landed fixes inert.**
+ * `deriveSize` measures a FontString's text whenever a dimension is 0, and the client authors exactly
+ * that: `QuestInfoDescriptionText` and its siblings are `<Size x="285" y="0">`
+ * (`questinfo.xml:251-262`). So filling a quest description changes real heights -- and nothing bumped
+ * `widget.ts#geometryRevision`, which is what invalidates `rects.ts`' resolved-rect cache AND what
+ * `reconcileScrollRanges` gates on.
+ *
+ * The live consequence, which no harness reproduced: the manifest loads and the ranges reconcile once at
+ * revision N with no text; the player opens a quest; `SetText` fills it; the revision stays N; so
+ * `OnScrollRangeChanged` never fires again, the scrollbar keeps its 0..0 range, and the arrows, the drag
+ * and the wheel are all correctly dead. My own tests passed because they called `reconcileScrollRanges`
+ * manually AFTER building, inside the epoch where the geometry was already final.
+ *
+ * It is wider than the scrollbar: `rectOf`'s on-demand map is keyed on the same revision, so ANY
+ * `GetRight`/`GetCenter`/`GetHeight` asked after a `SetText` could read a pre-text rect.
+ *
+ * TWO GUARDS, so this does not become per-frame churn -- `SetText` is called constantly by unit frames
+ * and cooldowns:
+ *  - only on a REAL change, because repainting the same string is the common case;
+ *  - only when a dimension is DERIVED (0). A FontString with both dimensions authored cannot change its
+ *    own rect by changing its text, so its text is not geometry.
+ */
+function writeText(widget: Widget, next: string): void {
+  if (widget.text === next) {
+    return;
+  }
+  widget.text = next;
+  if (widget.width === 0 || widget.height === 0) {
+    touchGeometry();
+  }
+}
+
 const REGION: MethodTable = {
   // The TRANSITION is what dispatches, not the call. `Widget#show` already guards on an unchanged
   // flag (per-frame code calls it idempotently), and the same guard has to be visible here: an
@@ -912,12 +947,12 @@ const FONTSTRING: MethodTable = {
    */
   SetAlphaGradient: () => [false],
   SetText: (ctx, self, args) => {
-    widgetOf(ctx, self).text = args[0] === undefined || args[0] === null ? '' : String(args[0]);
+    writeText(widgetOf(ctx, self), args[0] === undefined || args[0] === null ? '' : String(args[0]));
     return [];
   },
   GetText: (ctx, self) => [widgetOf(ctx, self).text],
   SetFormattedText: (ctx, self, args) => {
-    widgetOf(ctx, self).text = formatText(args);
+    writeText(widgetOf(ctx, self), formatText(args));
     return [];
   },
   // Real `SetTextColor` also takes an alpha channel; `FontSpec.color` is a plain `#rrggbb` with
@@ -1078,11 +1113,17 @@ const FONTSTRING: MethodTable = {
       warnOnce(`SetFont: unknown font file '${args[0]}'`);
       return [false];
     }
-    const spec = ensureFont(widgetOf(ctx, self));
+    const widget = widgetOf(ctx, self);
+    const spec = ensureFont(widget);
     spec.family = family;
     spec.size = Number(args[1] ?? spec.size);
     const flags = String(args[2] ?? '').toUpperCase();
     spec.outline = flags.includes('OUTLINE');
+    // The FONT changes measured text as surely as the text does. Same derived-dimension guard as
+    // `writeText`: a fully sized FontString cannot move its own rect by changing face.
+    if (widget.width === 0 || widget.height === 0) {
+      touchGeometry();
+    }
     return [true];
   },
   // REAL now: `ctx.fontObject` is the live name -> font-values lookup the loader installs over its
@@ -1095,7 +1136,11 @@ const FONTSTRING: MethodTable = {
       warnOnce('SetFontObject: the argument is neither a font object nor a <Font> name; ignored');
       return [];
     }
-    applyFontObject(ctx, widgetOf(ctx, self), name);
+    const widget = widgetOf(ctx, self);
+    applyFontObject(ctx, widget, name);
+    if (widget.width === 0 || widget.height === 0) {
+      touchGeometry();
+    }
     return [];
   },
   /**
