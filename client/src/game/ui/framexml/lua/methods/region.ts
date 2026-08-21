@@ -372,6 +372,38 @@ const REGION: MethodTable = {
       return [];
     }
 
+    // RE-POINT THE ANCHORS THAT NAMED THE OLD PARENT, and this is the whole reason the owner's quest
+    // page was blank while its Accept button was fine.
+    //
+    // MEASURED, in the headless harness: `QuestInfoTitleHeader` carried
+    // `BOTTOMRIGHT -> QuestInfoFrame` (its AUTHORING parent) alongside the `TOPLEFT ->
+    // QuestDetailScrollChildFrame` that `QuestInfo_Display` had just set -- so the top resolved
+    // BELOW the bottom and the rect came out `272 x -95`. A negative-height rect intersects no
+    // viewport, so the ScrollFrame crop dropped it, and the description, the objectives and the whole
+    // reward block with it. The parchment and the Accept button, which are not reparented, drew fine.
+    // That is the screenshot exactly, including the scroll doing nothing because nothing was left
+    // inside to move.
+    //
+    // The real engine cannot hit this because an anchor with no explicit `relativeTo` means "relative
+    // to MY PARENT" and follows the frame around. Our loader materialises that implicit reference as
+    // the parent's concrete id (`layout.ts` resolves against ids), so re-parenting has to carry it --
+    // otherwise a `<Layer>` region that inherits default anchors from its authoring frame keeps
+    // pointing at a frame it no longer belongs to. `QuestInfo_Display` reparents ten such regions on
+    // every panel show, which is why quests met it first and hardest.
+    //
+    // Only anchors naming the OLD parent are touched. One naming a third frame is a deliberate
+    // cross-reference (`QuestInfoReputationsFrame` anchors to its anchor argument, and half of
+    // `questframe.lua` anchors one region to another by name) and must survive untouched.
+    const previous = widget.parent;
+    if (previous !== null && target !== null && previous !== target) {
+      const repointed = widget.anchors.map((anchor) => (
+        anchor.relativeTo === previous.id ? { ...anchor, relativeTo: target.id } : anchor
+      ));
+      if (repointed.some((a, i) => a !== widget.anchors[i])) {
+        widget.setAnchors(...repointed);
+      }
+    }
+
     widget.parent?.remove(widget);
     if (target !== null) {
       target.add(widget);

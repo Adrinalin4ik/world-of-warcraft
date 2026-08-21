@@ -86,6 +86,7 @@ import { GlueArt } from './art';
 import { setUnit } from './framexml/lua/api/units';
 import { snapshotOf } from './unit-bridge';
 import { itemData } from '../pipeline/dbc/item-data';
+import { expandTextTokens } from './text-tokens';
 import DBC from '../pipeline/dbc';
 import type {
   QuestHandler, QuestTemplate, QuestItemTriple,
@@ -324,24 +325,35 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * All four panels share it, so it reads whichever is open. `QuestInfo_ShowTitle` uses it only on the
    * NON-log branch (`questinfo.lua:93`).
    */
+  /**
+   * Every server-authored string goes through the token pass -- `$n`, `$c`, `$b`,
+   * `$g male:female;`. See `ui/text-tokens.ts` for the evidence behind each binding and for the one
+   * token deliberately left visible.
+   *
+   * At the GETTER rather than at the decode, so the substitution follows the character rather than the
+   * packet: the same quest text read by two characters must name each of them, and the template cache
+   * outlives a character change.
+   */
+  const tok = (text: string | null | undefined): string => expandTextTokens(vm, text);
+
   fn('GetTitleText', () => [
-    quest.details?.title ?? quest.offer?.title ?? quest.progress?.title ?? '',
+    tok(quest.details?.title ?? quest.offer?.title ?? quest.progress?.title ?? ''),
   ]);
 
   /** `GetQuestText()` -- the accept panel's description. `QuestInfo_ShowDescriptionText`. */
-  fn('GetQuestText', () => [quest.details?.details ?? '']);
+  fn('GetQuestText', () => [tok(quest.details?.details)]);
 
   /** `GetObjectiveText()` -- the accept panel's objectives line. `QuestInfo_ShowObjectivesText`. */
-  fn('GetObjectiveText', () => [quest.details?.objectives ?? '']);
+  fn('GetObjectiveText', () => [tok(quest.details?.objectives)]);
 
   /** `GetProgressText()` -- the progress panel's "bring me these" text. */
-  fn('GetProgressText', () => [quest.progress?.requestText ?? '']);
+  fn('GetProgressText', () => [tok(quest.progress?.requestText)]);
 
   /** `GetRewardText()` -- the reward panel's turn-in text. */
-  fn('GetRewardText', () => [quest.offer?.offerText ?? '']);
+  fn('GetRewardText', () => [tok(quest.offer?.offerText)]);
 
   /** `GetGreetingText()` -- the multi-quest greeting panel's blurb. */
-  fn('GetGreetingText', () => [quest.greeting?.greeting ?? '']);
+  fn('GetGreetingText', () => [tok(quest.greeting?.greeting)]);
 
   // -- The greeting panel -------------------------------------------------------------------------
 
@@ -763,7 +775,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    */
   fn('GetQuestLogQuestText', () => {
     const template = selectedTemplate();
-    return [template?.details ?? '', template?.objectivesText ?? ''];
+    return [tok(template?.details), tok(template?.objectivesText)];
   });
 
   /**
