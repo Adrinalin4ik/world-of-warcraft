@@ -278,11 +278,9 @@ export class GameHandler extends Socket {
     // frame and the nameplate both refresh through the path they already refresh on. This is the answer
     // to "does anything repaint when the name lands asynchronously": yes, and it is the event the
     // bridges and the plate walker already listen to, not a new one.
-    const unit = this.world && this.world.entities.get(guid);
-    if (unit && unit.name !== name) {
-      unit.name = name;
-      this.world.emit('unit:fields', unit);
-    }
+    // Through the SHARED applier, so the packet path and the cache-hit path in `askNameOnce` cannot
+    // drift apart -- they are the same two lines and one of them used to be missing entirely.
+    this.applyPlayerName(guid);
 
     this.session.chat.emit('message', null); // to refresh
   }
@@ -336,11 +334,55 @@ export class GameHandler extends Socket {
    * OBJECT, while the unit path has a hex string. Keeping both means neither caller changes shape.
    */
   askNameOnce(guid) {
+    /**
+     * ALREADY ANSWERED: APPLY IT rather than just returning, and this is not an optimisation.
+     *
+     * Owner: "имена персонажей выбранных в цель не всегда прогружаются. Если персонаж стоял рядом в
+     * момент прогрузки, то работает, а если пришел позже и его взяли в цель, то имя не видно."
+     *
+     * `playerNames` outlives a unit. It is filled by three chat paths as well as by this one, and it is
+     * deliberately NOT cleared between sessions (a name does not change with a socket). So a guid can be
+     * in the cache BEFORE its unit exists -- someone speaks in `/say`, or he streams out and back in --
+     * and the old body returned `false` here and wrote nothing. The name was known and the unit stayed
+     * `<unknown>` for as long as it lived, with no further packet coming to fix it, because
+     * `hasNameFor` is exactly what stops one being asked for.
+     *
+     * `CombatHandler#queryCreature` has carried this same branch, with this same reasoning, since the
+     * creature path was written: "ALREADY ANSWERED: apply it rather than returning, and this is not an
+     * optimisation." The player path simply never got its half.
+     *
+     * MEASURED before writing this: a late-arriving player IS asked about and IS cached and named
+     * (probe on a live realm -- `Plantin` arrived after load, `cached=true`, `name="Plantin"`), so the
+     * ask and the answer are sound and the remaining hole is this one -- the case where no ask is due.
+     */
     if (this.hasNameFor(guid)) {
+      this.applyPlayerName(guid);
       return false;
     }
     this.nameQueriesInFlight.add(guid);
     return this.askName(guid);
+  }
+
+  /**
+   * Write a cached name onto the unit that owns `guid`, and announce it.
+   *
+   * The same two lines `handleName` ends with, factored out so the cache-hit path above cannot drift
+   * from the packet path. `unit:fields` is the edge the unit bridge repaints on, and the nameplate picks
+   * `unit.name` up on its next frame regardless.
+   */
+  applyPlayerName(guid) {
+    const entry = this.playerNames[guid];
+    const name = entry && typeof entry.name === 'string' ? entry.name : null;
+    if (name === null || name === '') {
+      // A chat path seeds `playerNames[low] = { name: <the raw guid number> }` as a placeholder before
+      // its query answers. That is not a name; writing it would replace "<unknown>" with a number.
+      return;
+    }
+    const unit = this.world && this.world.entities.get(guid);
+    if (unit && unit.name !== name) {
+      unit.name = name;
+      this.world.emit('unit:fields', unit);
+    }
   }
 
   /**
