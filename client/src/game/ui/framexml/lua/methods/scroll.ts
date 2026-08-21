@@ -11,12 +11,20 @@
  *
  * WHAT IS AND IS NOT REAL HERE. The VALUES are real: a scroll offset, a range, a slider's
  * value/min/max/step are all stored per frame and read back exactly, which is all the client's Lua
- * does with them (disable an arrow at the end of the range, clamp a value, size a child). The
- * PIXELS are not: nothing in `widget.ts` clips a frame's children, so an offset scroll child would
- * draw outside its viewport rather than being scrolled inside it, and nothing draws a slider track
- * or moves a thumb. So the child is deliberately NOT moved, and `loader.ts#applyPerKind` carries one
- * report line per class saying exactly that -- an honest gap in the report beats a screen with
- * content spilling out of every scroll box.
+ * does with them (disable an arrow at the end of the range, clamp a value, size a child).
+ *
+ * **THE CLIPPING HALF OF THIS PARAGRAPH IS NO LONGER TRUE, and it predicted its own defect.** It used
+ * to read "nothing in `widget.ts` clips a frame's children, so an offset scroll child would draw
+ * outside its viewport rather than being scrolled inside it ... an honest gap in the report beats a
+ * screen with content spilling out of every scroll box." The trainer round then measured exactly that
+ * spill -- a rank string beginning at x=295 inside a 296-wide viewport, drawn in full where the real
+ * client clips it. `widget.ts#clipItem` clips now, keyed off `Widget#clippedBy` which `SetScrollChild`
+ * below sets, and the draw list gets SHORTER for it (63 items to 18 on a 60-row list in a 220-unit
+ * viewport).
+ *
+ * What is still absent is the SLIDER's pixels: nothing moves a thumb along its track, so a scrollbar's
+ * thumb sits where its XML anchors put it. `loader.ts#applyPerKind` carries that one report line, and
+ * only that one -- the clipping line is gone from it in spirit and the wording there says so.
  *
  * `GetVerticalScrollRange` is DERIVED, not stored: the scroll child's height minus the viewport's,
  * floored at zero. That is the engine's own definition, it is truthful for a runtime with no scroll
