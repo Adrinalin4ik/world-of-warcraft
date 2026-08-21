@@ -619,6 +619,44 @@ class Unit extends Entity {
   /** The last speed value rejected above, so the warning fires once per distinct bad value. */
   private rejectedSpeed: number | null = null;
 
+  /**
+   * Store one wire speed on `speeds`, validated exactly as the run speed is.
+   *
+   * WHY THIS EXISTS: **only `run` was ever stored.** `MSG_MOVE_SET_*_SPEED` and
+   * `SMSG_FORCE_*_SPEED_CHANGE` are decoded for all nine rates and the force forms are all acked, and
+   * then eight of the nine were dropped on the floor -- `player/movement.ts` had a single
+   * `if (key === 'run')` / `if (ackOpcode === ...RUN...)` arm. Nothing noticed, because until this
+   * round the mover read compile-time constants and `speeds` was consulted only by the peer
+   * dead-reckon, which needs `run` alone.
+   *
+   * That made the swim and backpedal halves of the speed fix INERT: they read `speeds.swim` and
+   * `speeds.runBack`, which no code path ever wrote, so they always fell back to their defaults. Found
+   * by checking the write side after fixing the read side rather than by a probe.
+   *
+   * The validation is the run setter's and the reasoning is identical -- see `moveSpeed`. `turnRate` is
+   * radians/s rather than yd/s, so the `TELEPORT_SPEED` ceiling is not a meaningful bound for it; it is
+   * applied anyway because pi is nowhere near 100 and a separate limit would be an invented number.
+   */
+  setWireSpeed(field: keyof MoveSpeeds, value: number): void {
+    if (field === 'run') {
+      // Through the accessor, which also keeps the legacy `_moveSpeed` in step for `updatePlayer`.
+      this.moveSpeed = value;
+      return;
+    }
+    if (Number.isFinite(value) && value > 0 && value <= TELEPORT_SPEED) {
+      this.speeds[field] = value;
+      return;
+    }
+    if (this.rejectedSpeed !== value) {
+      this.rejectedSpeed = value;
+      console.warn(
+        `movement: ignoring an impossible ${field} speed ${value} for ${this.guid} --`
+        + ` keeping ${this.speeds[field]}. A value outside 0..${TELEPORT_SPEED} is a misread float`
+        + ' on the wire, not a buff.',
+      );
+    }
+  }
+
   public flySpeed: number = 100; //10
   public gravity: number = -30; //10;
   public jumpVelocityConst: number = 16;

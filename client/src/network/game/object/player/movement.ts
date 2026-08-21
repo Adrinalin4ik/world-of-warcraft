@@ -10,6 +10,7 @@ import {
   MovementFlag, MovementInfo, movementInfoSize, packedGuidSize, readMovementInfo, wireFacing,
   writeMovementInfo,
 } from '../../movement-info';
+import { MoveSpeeds } from '../../../../game/movement/net-motion';
 
 /**
  * The `MSG_MOVE_*` family, both directions.
@@ -222,6 +223,29 @@ const SPEED_RELAYS: [string, keyof SpeedSet][] = [
   ['MSG_MOVE_SET_PITCH_RATE', 'pitch'],
 ];
 
+/**
+ * Relay key -> the `MoveSpeeds` member it belongs in. `flight`, `flightBack` and `pitch` are absent on
+ * purpose: `MoveSpeeds` has no member for them and no consumer, so there is nowhere honest to put them.
+ */
+const SPEED_FIELD: Partial<Record<keyof SpeedSet, keyof MoveSpeeds>> = {
+  walk: 'walk',
+  run: 'run',
+  runBack: 'runBack',
+  swim: 'swim',
+  swimBack: 'swimBack',
+  turn: 'turnRate',
+};
+
+/** The same mapping for the FORCE forms, keyed by the ack opcode this handler already switches on. */
+const FORCE_FIELD: Partial<Record<number, keyof MoveSpeeds>> = {
+  [GameOpcode.CMSG_FORCE_WALK_SPEED_CHANGE_ACK]: 'walk',
+  [GameOpcode.CMSG_FORCE_RUN_SPEED_CHANGE_ACK]: 'run',
+  [GameOpcode.CMSG_FORCE_RUN_BACK_SPEED_CHANGE_ACK]: 'runBack',
+  [GameOpcode.CMSG_FORCE_SWIM_SPEED_CHANGE_ACK]: 'swim',
+  [GameOpcode.CMSG_FORCE_SWIM_BACK_SPEED_CHANGE_ACK]: 'swimBack',
+  [GameOpcode.CMSG_FORCE_TURN_RATE_CHANGE_ACK]: 'turnRate',
+};
+
 interface SpeedSet {
   walk: number; run: number; runBack: number; swim: number; swimBack: number;
   flight: number; flightBack: number; turn: number; pitch: number;
@@ -336,8 +360,13 @@ export class PlayerMovementHandler extends EventEmitter {
         { x: info.x, y: info.y, z: info.z }, info.facing, info.flags, remoteTail(info),
       );
     }
-    if (key === 'run') {
-      unit.moveSpeed = speed;
+    // EVERY rate the unit can hold, not just `run`. See `Unit#setWireSpeed` for what dropping the
+    // other eight cost. `SPEED_FIELD` maps the relay key onto the field; a key with no home (flight,
+    // flightBack, pitch -- `MoveSpeeds` has no member for them and nothing reads one) is skipped
+    // rather than invented.
+    const field = SPEED_FIELD[key];
+    if (field) {
+      unit.setWireSpeed(field, speed);
     }
   }
 
@@ -369,8 +398,13 @@ export class PlayerMovementHandler extends EventEmitter {
     this.game.send(ack);
 
     const unit = this.game.world.entities.get(guid);
-    if (unit && speed !== null && ackOpcode === GameOpcode.CMSG_FORCE_RUN_SPEED_CHANGE_ACK) {
-      unit.moveSpeed = speed;
+    if (unit && speed !== null) {
+      // Same completion as the relay path above: the run arm was the only one, so a forced walk, swim,
+      // backpedal or turn rate was acked and then discarded.
+      const field = FORCE_FIELD[ackOpcode];
+      if (field) {
+        unit.setWireSpeed(field, speed);
+      }
     }
   }
 
