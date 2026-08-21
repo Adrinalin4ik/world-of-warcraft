@@ -468,6 +468,8 @@ class Controls extends React.Component<IProp> {
     beginSection('ctl.move');
     movementFrame(player.move, deps, {
       moving, dir, speed, wantJump: this.jumpPressed, jumpPressed: this.jumpPressed,
+      // The swim pair travels the same way the run speed does, and for the same reason.
+      swimSpeed: speeds.swim, swimBackSpeed: speeds.swimBack,
     }, delta, now);
     endSection('ctl.move');
     this.jumpPressed = false;

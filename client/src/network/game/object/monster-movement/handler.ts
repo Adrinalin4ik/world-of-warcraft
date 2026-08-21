@@ -19,8 +19,16 @@ import { readMonsterMove } from './decode';
 export class MonsterMovementtHandler extends EventEmitter {
   private game: GameHandler;
 
-  /** Counters the world-state probe reads. `dropped` is a decode that did not fit; see `decode.ts`. */
-  public stats = { moves: 0, stops: 0, dropped: 0, unknownUnits: 0, applied: 0 };
+  /**
+   * Counters the world-state probe reads. `dropped` is a decode that did not fit; see `decode.ts`.
+   *
+   * `selfMoves` is the OWNER'S REPORT "не работают способности, которые связаны с передвижением ...
+   * например charge": a spline the server addressed to OUR OWN guid. See `handleMonsterMove`.
+   */
+  public stats = { moves: 0, stops: 0, dropped: 0, unknownUnits: 0, applied: 0, selfMoves: 0 };
+
+  /** So the warning below fires once per session rather than once per charge. */
+  private warnedSelfMove = false;
 
   constructor(gameHandler: GameHandler) {
     super();
@@ -57,6 +65,38 @@ export class MonsterMovementtHandler extends EventEmitter {
         unit.rotation.z = move.facing.angle as number;
       }
       return;
+    }
+
+    // A SPLINE ADDRESSED TO US IS A SILENT NO-OP, AND IT MUST SAY SO. This is the honest half of the
+    // owner's "charge does nothing", and it was the one displacement path that failed without a word:
+    //
+    //  - `MSG_MOVE_TELEPORT_ACK` warns "acked but NOT APPLIED" (`player/movement.ts#handleTeleport`);
+    //  - `SMSG_MOVE_KNOCK_BACK` warns "no knockback arc in this client" (`#handleKnockBack`);
+    //  - a `SMSG_MONSTER_MOVE` naming OUR guid took the ordinary creature path below, set
+    //    `splineRide`, and was then ignored completely -- because `Unit#update` returns immediately
+    //    for `isPlayer` (`classes/unit.ts:2527-2531`), so `updateSplineFollowing` never runs on the
+    //    player, and `Controls` re-copies `move.pos` over `view.position` through `syncViewFromMove`
+    //    on the very next frame. Even the start snap two lines below is erased within one frame.
+    //
+    // So a charge lands in one of three holes and only this one was quiet. Counted and named rather
+    // than faked: making the player FOLLOW a server spline means giving the spline authority over
+    // `move.pos` (the mover's own position, not the view) and suspending input prediction while it
+    // runs, which is the real client's server-controlled-movement state and a change to the movement
+    // authority the confirmed locomotion depends on. It needs the wire shape established first --
+    // this counter is what establishes it.
+    if (unit === this.game.world.player) {
+      this.stats.selfMoves += 1;
+      if (!this.warnedSelfMove) {
+        this.warnedSelfMove = true;
+        console.warn(
+          'movement: the server sent a SPLINE for OUR OWN character'
+          + ` (${move.path.length} points over ${move.durationMs} ms) and this client cannot follow`
+          + ' it -- the player is driven by the local mover and never integrates a spline. This is'
+          + ' what a charge, a knockback path or any server-driven displacement looks like when it'
+          + ' does nothing. Count: window.session.protocol.game.objectHandler'
+          + '.monsterMovementHandler.stats.selfMoves',
+        );
+      }
     }
 
     // The path's first point IS the server's idea of where the unit is right now, so an
