@@ -68,6 +68,12 @@ export interface UnitSnapshot {
   reaction: number;
   /** `"normal" | "elite" | "rare" | "rareelite" | "worldboss"` -- see `classificationWord`. */
   classification: string;
+  /**
+   * The localised `CreatureType.dbc` word -- "Beast", "Humanoid" -- or null for a player, an unknown
+   * type, or before the table lands. What `UnitCreatureType` answers and what the tooltip's level line
+   * substitutes.
+   */
+  creatureType: string | null;
   isPlayer: boolean;
   dead: boolean;
 
@@ -142,6 +148,7 @@ export function emptySnapshot(): UnitSnapshot {
     maxPower: 0,
     reaction: 4,
     classification: 'normal',
+    creatureType: null,
     isPlayer: false,
     dead: false,
     xp: 0,
@@ -489,6 +496,17 @@ export function installUnitsApi(vm: LuaVM): void {
   fn('GetComboPoints', () => [getComboPoints(vm)]);
 
   fn('UnitClassification', (args) => [withUnit(args[0], 'normal', (u) => u.classification)]);
+  /**
+   * `UnitCreatureType(unit)` -- the localised word from `CreatureType.dbc`.
+   *
+   * REAL now, and it was previously not registered at all on a stated belief that the wire did not carry
+   * the type. It does: `object/combat.ts` had been reading the word and discarding it. See
+   * `pipeline/dbc/creature-type-data.ts` for the measurement and for why the earlier claim was wrong.
+   *
+   * nil rather than a placeholder for a player or an unresolved type, because `0` IS TRUTHY IN LUA and a
+   * caller testing `if ( UnitCreatureType(unit) )` must get a false answer when there is none.
+   */
+  fn('UnitCreatureType', (args) => [withUnit(args[0], null, (u) => u.creatureType)]);
   fn('UnitIsPlayer', (args) => [withUnit(args[0], false, (u) => u.isPlayer)]);
   fn('UnitIsDead', (args) => [withUnit(args[0], false, (u) => u.dead)]);
   fn('UnitIsDeadOrGhost', (args) => [withUnit(args[0], false, (u) => u.dead)]);

@@ -71,6 +71,16 @@ export interface CreatureInfo {
   name: string;
   /** `rank` -- 0 normal, 1 elite, 2 rare-elite, 3 world boss, 4 rare. See `classificationWord`. */
   rank: number;
+  /**
+   * `CreatureType.dbc` id -- 1 Beast, 7 Humanoid, and so on. 0 when unknown.
+   *
+   * READ ALL ALONG AND THROWN AWAY. `handleCreatureQuery` has always consumed this word (its comment
+   * even named the table) and never stored it, and I then claimed the packet "gives us name and rank
+   * only" -- a statement about this interface mistaken for one about the wire. The owner's screenshot
+   * of the real client's "Животное 1-го уровня" is what disproved it. `pipeline/dbc/creature-type-data.ts`
+   * turns it into the word.
+   */
+  type: number;
 }
 
 export class CombatHandler extends EventEmitter {
@@ -282,11 +292,13 @@ export class CombatHandler extends EventEmitter {
     gp.readCStr(); // SubName
     gp.readCStr(); // IconName -- 3.3.5a only; see above
     gp.readUnsignedInt(); // type_flags
-    gp.readUnsignedInt(); // type (CreatureType.dbc)
+    // KEPT NOW, not skipped: this is the word behind a tooltip's "Level 1 Beast", joined through
+    // `CreatureType.dbc`. See `CreatureInfo.type` for why it sat here unread for so long.
+    const type = gp.readUnsignedInt() >>> 0;
     gp.readUnsignedInt(); // family
     const rank = gp.readUnsignedInt() >>> 0;
 
-    const info = { name, rank };
+    const info = { name, rank, type };
     this.creatures.set(entry, info);
     this.applyCreatureInfo(entry, info);
   }
@@ -301,9 +313,11 @@ export class CombatHandler extends EventEmitter {
   private applyCreatureInfo(entry: number, info: CreatureInfo): void {
     const classification = classificationWord(info.rank);
     for (const unit of this.game.world.entities.values()) {
-      if (unit.fields.entry === entry && (unit.name !== info.name || unit.classification !== classification)) {
+      if (unit.fields.entry === entry && (unit.name !== info.name
+        || unit.classification !== classification || unit.creatureType !== info.type)) {
         unit.name = info.name;
         unit.classification = classification;
+        unit.creatureType = info.type;
         this.game.world.emit('unit:fields', unit);
       }
     }

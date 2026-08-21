@@ -64,6 +64,7 @@ import { getSpellbook } from '../api/spells';
 import { layoutScale, measureText } from '../../../text';
 import { getItemTooltipSource, ItemTooltipInfo, ItemTooltipSource } from '../api/items';
 import { getUnit } from '../api/units';
+import { invokeScriptHandler } from '../scripts';
 
 /**
  * The eight `$parentTextLeft<n>` slots `GameTooltipTemplate` authors -- and no longer the ceiling.
@@ -126,6 +127,15 @@ interface TooltipState {
   minWidth: number;
 
   /**
+   * The token `SetUnit` was last given, lower-cased, or null.
+   *
+   * What `GameTooltip:IsUnit(token)` answers -- and `GameTooltip`'s own `<OnTooltipSetUnit>` is
+   * `if ( self:IsUnit("mouseover") ) then ... GameTooltip_UnitColor("mouseover") end`
+   * (`gametooltip.xml:14-18`), so without this the client cannot colour its own first line.
+   */
+  unitToken: string | null;
+
+  /**
    * The NAME and LINK of whatever `Set<Thing>Item` last filled this tooltip -- what
    * `GameTooltip:GetItem()` answers. About the tooltip's CURRENT CONTENTS, not about a widget, which
    * is why they live here and are cleared by `SetOwner`.
@@ -159,7 +169,7 @@ const AUTHORED_COLOURS = new WeakMap<Widget, string>();
 function stateOf(widget: Widget): TooltipState {
   let state = stateByWidget.get(widget);
   if (state === undefined) {
-    state = { owner: null, lines: 0, minWidth: 0 };
+    state = { owner: null, lines: 0, minWidth: 0, unitToken: null };
     stateByWidget.set(widget, state);
   }
   return state;
@@ -643,6 +653,8 @@ const GAMETOOLTIP: MethodTable = {
     }
     const state = stateOf(widgetOf(ctx, self));
     state.lines = 0;
+    // What `IsUnit` answers, and therefore what lets the client colour its own first line.
+    state.unitToken = token.toLowerCase();
     clearFrom(ctx, self, 1);
     appendLine(ctx, self, unit.name, null, undefined, undefined, false);
 
@@ -664,21 +676,36 @@ const GAMETOOLTIP: MethodTable = {
     };
 
     const level = unit.level;
+    const type = unit.creatureType;
     let line: string | null = null;
     if (level < 0) {
-      line = str('UNIT_LETHAL_LEVEL_TEMPLATE');
+      // `UNIT_TYPE_LETHAL_LEVEL_TEMPLATE = "Level ?? %s"` when a type is known, else the bare "Level ??".
+      const template = type === null
+        ? str('UNIT_LETHAL_LEVEL_TEMPLATE')
+        : str('UNIT_TYPE_LETHAL_LEVEL_TEMPLATE');
+      line = template === null ? null : fmt(template, type ?? '');
     } else if (unit.isPlayer) {
       const template = str('PLAYER_LEVEL');
       // Race and class are the same pair the character sheet substitutes, and both answer nil until
       // `ChrRaces`/`ChrClasses` land -- in which case an empty substitution is the honest one.
       line = template === null ? null
         : fmt(template, level, unit.race?.name ?? '', unit.classInfo?.name ?? '').trim();
-    } else if (unit.classification !== 'normal') {
-      // The classification word is the client's own too: `ELITE`, `RARE`, `BOSS` are GlobalStrings.
-      const word = str(unit.classification.toUpperCase()) ?? unit.classification;
-      const template = str('UNIT_TYPE_LEVEL_TEMPLATE');
-      line = template === null ? null : fmt(template, level, word);
+    } else if (type !== null) {
+      /**
+       * BOTH of these are the client's own strings, so the elite wording is authored and not ours:
+       *
+       *     UNIT_TYPE_LEVEL_TEMPLATE      = "Level %d %s"        globalstrings.lua:7892
+       *     UNIT_TYPE_PLUS_LEVEL_TEMPLATE = "Level %d Elite %s"  :7893
+       *
+       * The `+` in the name is historical; 3.3.5a's string spells the word out. An earlier version of
+       * this method substituted the CLASSIFICATION word into `UNIT_TYPE_LEVEL_TEMPLATE` because the
+       * creature type was believed unobtainable -- it is not, and that guess is gone.
+       */
+      const elite = unit.classification !== 'normal' && unit.classification !== 'rare';
+      const template = str(elite ? 'UNIT_TYPE_PLUS_LEVEL_TEMPLATE' : 'UNIT_TYPE_LEVEL_TEMPLATE');
+      line = template === null ? null : fmt(template, level, type);
     } else {
+      // No type word yet -- the creature query has not answered. "Level 12" alone rather than a guess.
       const template = str('UNIT_LEVEL_TEMPLATE');
       line = template === null ? null : fmt(template, level);
     }
@@ -686,8 +713,93 @@ const GAMETOOLTIP: MethodTable = {
       appendLine(ctx, self, line, null, undefined, undefined, false);
     }
     resize(ctx, self);
+
+    const name = ctx.registry.nameOf(self);
+
+    /**
+     * THE FIRST LINE'S COLOUR IS THE CLIENT'S OWN, and firing this is what lets it do the colouring.
+     *
+     * `GameTooltip`'s instance carries
+     *
+     *     <OnTooltipSetUnit>
+     *       if ( self:IsUnit("mouseover") ) then
+     *         _G[self:GetName().."TextLeft1"]:SetTextColor(GameTooltip_UnitColor("mouseover"));
+     *       end
+     *     </OnTooltipSetUnit>                                              gametooltip.xml:14-18
+     *
+     * so the reaction ladder (`GameTooltip_UnitColor`, `gametooltip.lua:7`) is applied by the client
+     * off `UnitPlayerControlled`/`UnitCanAttack`/`UnitReaction`, all of which are real. Nothing here
+     * chooses a colour -- the engine's job is to fire the script, which is what the real engine does.
+     * `IsUnit` below is the other half; without it that `if` is false and the line stays white.
+     */
+    invokeScriptHandler(ctx, self, 'OnTooltipSetUnit', []);
+
+    /**
+     * THE LEVEL LINE'S COLOUR, and this half IS ours -- stated rather than implied.
+     *
+     * No script colours it: `<OnTooltipSetUnit>` touches `TextLeft1` only. In the real client the engine
+     * applies the difficulty ramp, so the choice to apply it is ours -- but the RAMP is not: it is the
+     * client's own `GetQuestDifficultyColor` (`uiparent.lua:3358-3371`), called rather than copied, which
+     * is exactly how `nameplates.ts` reaches the same question (`NameplateConfig.levelColor`) and how
+     * `targetframe.lua:246-251` colours the target frame's level text.
+     *
+     * Skipped for a player (his line is race and class, not a difficulty) and when the level is unknown.
+     */
+    if (name !== null && line !== null && line !== '' && !unit.isPlayer && level > 0) {
+      ctx.vm.run(
+        `local c = GetQuestDifficultyColor and GetQuestDifficultyColor(${level});`
+        + ` local t = _G["${name}TextLeft2"];`
+        + ' if c and t then t:SetTextColor(c.r, c.g, c.b) end',
+        'tooltip-level-colour',
+      );
+    }
+
+    /**
+     * THE HEALTH BAR, which is a frame the template already authors -- not something to draw.
+     *
+     * `GameTooltipTemplate` carries `<StatusBar name="$parentStatusBar" hidden="true">` anchored across
+     * the tooltip's bottom edge, with its own `<BarTexture>` and an `<OnValueChanged>` calling
+     * `HealthBar_OnValueChanged` (`gametooltiptemplate.xml:214-236`). So this shows it and feeds it, and
+     * the client owns its art and its green.
+     *
+     * `hideStatus` is `SetUnit`'s second argument -- `self.hideStatusOnTooltip` at the call site
+     * (`unitframe.lua:146`) -- and honouring it is why a unit frame's own tooltip can suppress the bar.
+     *
+     * **SET ONCE PER HOVER, NOT PER FRAME, and that is a deliberate divergence with a stated reason.**
+     * The real client re-reads this bar from `GameTooltip_OnUpdate`. Doing that here would change a
+     * StatusBar's fill every frame, and a fill width is part of the interface draw-list fingerprint --
+     * it would dirty the offscreen target continuously and hand back the 4-7.5 ms it buys on ~92% of
+     * frames, for a bar on a unit whose health is not even streaming while it is merely hovered. The
+     * bar therefore shows the health as it was when the pointer arrived. If live tracking is wanted it
+     * belongs on the `unit:fields` edge, not on a per-frame poll.
+     */
+    if (name !== null) {
+      const bar = `_G["${name}StatusBar"]`;
+      const maxHealth = unit.maxHealth;
+      ctx.vm.run(
+        flag(args[1]) || maxHealth <= 0
+          ? `if ${bar} then ${bar}:Hide() end`
+          : `if ${bar} then ${bar}:SetMinMaxValues(0, ${maxHealth});`
+            + ` ${bar}:SetValue(${unit.health}); ${bar}:Show() end`,
+        'tooltip-status-bar',
+      );
+    }
     return [true];
   },
+
+  /**
+   * `GameTooltip:IsUnit(token)` -- whether this tooltip currently describes that unit.
+   *
+   * The other half of the client colouring its own first line: `<OnTooltipSetUnit>` opens with
+   * `if ( self:IsUnit("mouseover") )` (`gametooltip.xml:15`), so without this the reaction colour is
+   * never applied. Compared case-insensitively because the client's own files spell tokens both ways --
+   * `UnitName("NPC")` in `merchantframe.lua:75` against `UnitName("npc")` in `gossipframe.lua:42`.
+   */
+  IsUnit: (ctx, self, args) => {
+    const token = String(args[0] ?? '').toLowerCase();
+    return [stateOf(widgetOf(ctx, self)).unitToken === token];
+  },
+
 
   SetText: (ctx, self, args) => {
     const state = stateOf(widgetOf(ctx, self));
@@ -839,16 +951,13 @@ const GAMETOOLTIP: MethodTable = {
       + 'call sites are item or aura tooltips whose own Set* method is absent too',
   ),
   /**
-   * `IsUnit`/`IsEquippedItem` are read by `GameTooltip.xml`'s own `<OnTooltipSetUnit>` and
-   * `<OnTooltipSetItem>` handlers (`gametooltip.xml:16,23`). Those fire only from `SetUnit`/`SetItem`
-   * paths, which are absent -- so neither is reachable today, and both are declared rather than assumed
-   * unreachable.
+   * `IsEquippedItem` is read by `GameTooltip.xml`'s `<OnTooltipSetItem>` (`gametooltip.xml:23`), which
+   * fires only from a `SetItem` path this file does not have.
+   *
+   * **`IsUnit` HAS LEFT THIS BLOCK** -- it is real above, and its old note ("no Set* method here fills a
+   * UNIT tooltip") stopped being true the moment `SetUnit` landed. It is the half that lets
+   * `<OnTooltipSetUnit>` colour the tooltip's first line with the client's own `GameTooltip_UnitColor`.
    */
-  IsUnit: notImplemented(
-    'IsUnit',
-    'no Set* method here fills a UNIT tooltip, so the tooltip never has a unit to compare against',
-    [false],
-  ),
   IsEquippedItem: notImplemented(
     'IsEquippedItem',
     'there is no item feed in this client, so no tooltip ever holds an item',

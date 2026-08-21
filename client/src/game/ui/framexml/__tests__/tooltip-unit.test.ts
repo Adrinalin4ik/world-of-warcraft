@@ -44,8 +44,8 @@ function boot() {
   vm.run(`
     PLAYER_LEVEL = "Level %s %s %s";
     UNIT_TYPE_LEVEL_TEMPLATE = "Level %d %s";
+    UNIT_TYPE_PLUS_LEVEL_TEMPLATE = "Level %d Elite %s";
     UNIT_LEVEL_TEMPLATE = "Level %d";
-    ELITE = "Elite";
   `, 'strings');
   return { vm };
 }
@@ -75,15 +75,34 @@ describe('GameTooltip:SetUnit', () => {
     wolf.name = 'Diseased Timber Wolf';
     wolf.level = 12;
     wolf.isPlayer = false;
+    // The word `CreatureType.dbc` gives id 1 -- the owner's "Животное" beside our missing line.
+    wolf.creatureType = 'Beast';
     setUnit(vm, 'mouseover', wolf);
 
     expect(vm.run('GameTooltip:SetUnit("mouseover")', 't')).toBeNull();
     expect(vm.run('l1 = GameTooltipTextLeft1:GetText(); l2 = GameTooltipTextLeft2:GetText()', 't'))
       .toBeNull();
     expect(vm.getGlobal('l1')).toBe('Diseased Timber Wolf');
-    // No creature TYPE exists in this client, so a normal creature takes the type-less template rather
-    // than a made-up "Humanoid". An elite would read "Level 12 Elite".
-    expect(vm.getGlobal('l2')).toBe('Level 12');
+    // `UNIT_TYPE_LEVEL_TEMPLATE`, with the type the packet carried all along.
+    expect(vm.getGlobal('l2')).toBe('Level 12 Beast');
+
+    // An elite takes the client's OWN other string, `UNIT_TYPE_PLUS_LEVEL_TEMPLATE`, so the wording is
+    // authored and not ours.
+    const elite = emptySnapshot();
+    elite.name = 'Ravager';
+    elite.level = 12;
+    elite.creatureType = 'Beast';
+    elite.classification = 'elite';
+    setUnit(vm, 'mouseover', elite);
+    expect(vm.run('GameTooltip:SetUnit("mouseover")', 't')).toBeNull();
+    expect(vm.run('l2 = GameTooltipTextLeft2:GetText()', 't')).toBeNull();
+    expect(vm.getGlobal('l2')).toBe('Level 12 Elite Beast');
+
+    // `IsUnit` is what lets the client's own <OnTooltipSetUnit> colour line 1.
+    expect(vm.run('same = GameTooltip:IsUnit("MOUSEOVER"); other = GameTooltip:IsUnit("target")', 't'))
+      .toBeNull();
+    expect(vm.getGlobal('same')).toBe(true);
+    expect(vm.getGlobal('other')).toBe(false);
 
     // A token nothing occupies must answer false -- that is what clears `self.UpdateTooltip`.
     expect(vm.run('empty = GameTooltip:SetUnit("target")', 't')).toBeNull();

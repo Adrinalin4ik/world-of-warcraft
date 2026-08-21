@@ -355,6 +355,14 @@ class Unit extends Entity {
   public classification: string = 'normal';
 
   /**
+   * `CreatureType.dbc` id from `SMSG_CREATURE_QUERY_RESPONSE`, or 0 for unknown / for a player.
+   *
+   * Written only by `object/combat.ts#applyCreatureInfo`, beside `classification`, and turned into a
+   * word by `pipeline/dbc/creature-type-data.ts` -- the tooltip's "Level 1 Beast".
+   */
+  public creatureType: number = 0;
+
+  /**
    * The client's 1..8 reaction scale toward the local player, or null while unknown.
    *
    * Derived from `unit_field_factiontemplate` through `FactionTemplate.dbc`

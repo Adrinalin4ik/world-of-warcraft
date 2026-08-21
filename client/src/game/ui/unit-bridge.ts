@@ -44,6 +44,7 @@ import { combatFeedbackArgs, spellFeedbackArgs, spellMissText } from '../classes
 import type { SpellDamageEvent } from '../../network/game/object/combat-log';
 import { LuaVM } from './framexml/lua/vm';
 import { raceClassData } from '../pipeline/dbc/race-class-data';
+import { creatureTypeData } from '../pipeline/dbc/creature-type-data';
 
 /**
  * `UnitPowerType`'s numeric order -> the event a bar of that power listens for
@@ -81,6 +82,10 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   snapshot.power = unit.fields.power ?? 0;
   snapshot.maxPower = unit.fields.maxPower ?? 0;
   snapshot.classification = unit.classification;
+  // The WORD, resolved here rather than on the unit: `Unit` holds the `CreatureType.dbc` id that the
+  // packet carried, and turning an id into a localised string is a DBC join, which is this layer's job
+  // (the same division `race`/`classInfo` already use). Null until the table lands.
+  snapshot.creatureType = unit.creatureType > 0 ? creatureTypeData.name(unit.creatureType) : null;
   // `UnitIsPlayer`/`UnitPlayerControlled` ask "is this a player CHARACTER", and `Unit#isPlayer` does
   // not answer that question. It defaults to false and is assigned in exactly one place in the tree,
   // `classes/player.ts:14` -- the constructor of our OWN character -- because eight motion sites read
@@ -456,6 +461,12 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
   // `container-bridge.ts`' `void itemData.ensureLoaded().then(pushAll)`, and the same fix.
   void raceClassData.ensureLoaded().then(() => {
     push('player', world.player);
+    push('target', world.target);
+  });
+  // `CreatureType.dbc`, 1127 bytes, for the tooltip's "Level 1 Beast". Kicked, not awaited, and it
+  // re-pushes the TARGET only: a hovered unit is re-pushed on the next hover change anyway, and the
+  // player has no creature type.
+  void creatureTypeData.ensureLoaded().then(() => {
     push('target', world.target);
   });
 
