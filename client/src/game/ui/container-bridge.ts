@@ -1240,7 +1240,22 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     if (item === null) {
       return [];
     }
-    const whole = count >= item.count;
+    // **SELF-REVIEW: `count >= item.count` DEGRADES A PARTIAL SPLIT INTO A WHOLE-STACK MOVE WHEN THE
+    // STACK SIZE IS UNKNOWN.** `item.count` is `ITEM_FIELD_STACK_COUNT` through `fieldAt`, which
+    // answers **0** for a descriptor word that has not arrived -- and `count >= 0` is true for every
+    // count, so an unresolved stack would have taken the whole-stack arm and moved the lot while the
+    // player had asked for one item. The wrong direction, and silent.
+    //
+    // The degradation is only correct when we actually KNOW the stack size, so it is gated on that.
+    // With an unknown size the caller's count is trusted and the split is sent -- the server validates
+    // the quantity against the real stack and refuses with `SMSG_INVENTORY_CHANGE_FAILURE`, which is
+    // strictly better than moving items nobody asked to move.
+    //
+    // (Reachable only narrowly today, because the dialogue's own maximum comes from
+    // `GetContainerItemInfo`'s count, i.e. the same field -- so a 0 there would offer a maximum of 0
+    // and be refused by the `count < 1` guard above. Fixed anyway: the guard above is the only thing
+    // standing between this line and a silent whole-stack move, and it is not this function's to keep.)
+    const whole = item.count > 0 && count >= item.count;
     holdItem(
       whole
         ? payloadFor(bag, slot, item)
