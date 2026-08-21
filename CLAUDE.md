@@ -307,6 +307,20 @@ recent round.
 - `model.scale.setScalar()` is **inert** under `matrixAutoUpdate = false`.
 - three's `projectObject` returns before walking children when `visible === false`.
 - Guids: a 64-bit guid does not survive a JS number. `network/guid-hex.ts` is the single formatter.
+- **STATE WHICH LAYER A MEASUREMENT COVERS, AND NEVER GENERALISE A GREEN RESULT PAST IT.** The headless
+  harness here is a `LuaVM` + a `WidgetRoot` + `loadDocument`: **no World, no descriptor, no packets, no
+  bridges**, every game global a stub. It is authoritative for — does a document load, a template
+  expand, a script bind, an element loop run, a rect resolve, a method exist. It is authoritative for
+  **nothing** involving a packet, a descriptor, a bridge or an event edge. The record split exactly on
+  that line: four harness-validated fixes worked live, and the two symptoms it never touched stayed
+  inert. **The harness was not lying; it was answering a different question.** A fix in the data half
+  needs a live probe or a unit test on the data path itself.
+- **A DISCARDED RETURN HIDES A DEFECT — twice here now.** `applyUnitFields`' boolean gates the
+  `unit:fields` emit, and only the named scalars fed it while `mergeQuestLog`'s return was thrown away.
+  Accepting a quest writes only quest-log words, so: map correct, `changed` false, no event, no
+  rebuild, empty list — and the map being right throughout is exactly why it read as a display bug.
+  `mergeCharacterStats` and `mergePlayerSkills` return their containers and are the same defect waiting.
+  **Assert the return, not the state it wrote.**
 - **A DRAW CALL IS NOT A PIXEL, AND A REGISTERED HANDLER IS NOT A DISPATCHED ONE.** Four fixes by three
   agents once landed in the owner's build and did nothing, each having passed a headless harness — and
   the one that was diagnosed proved why the harness could not have caught it: `quad.visible` was true,
