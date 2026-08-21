@@ -315,6 +315,24 @@ export class Widget {
    * under it and offsetting it moves nothing. Nothing needs to distinguish the two kinds.
    */
   scrollOffset: { x: number; y: number } = { x: 0, y: 0 };
+
+  /**
+   * The `<Slider>` this texture is the THUMB of, or null. Set by `SetThumbTexture`.
+   *
+   * A thumb's position is the engine's to choose, not the document's: `<ThumbTexture>` carries a `<Size>`
+   * and no `<Anchors>` at all (`uipaneltemplates.xml:207-211`), so it has nothing to be placed by. Under
+   * the loader's anchorless default it inherited the whole TRACK's rect -- a knob stretched over the full
+   * bar rather than a knob. `drawList` overrides its rect from the track and the slider's value.
+   */
+  thumbOf: Widget | null = null;
+
+  /**
+   * Where this `<Slider>`'s thumb sits along its track: `fraction` in 0..1, and the axis it travels on.
+   *
+   * Written by `SetValue`/`SetMinMaxValues`/`SetOrientation`. Vertical by default, which is what every
+   * scrollbar in the client is.
+   */
+  sliderTravel: { fraction: number; vertical: boolean } = { fraction: 0, vertical: true };
   focusable = false;
 
   /**
@@ -1226,6 +1244,49 @@ export class WidgetRoot {
       // THE SCROLLFRAME CROP. Last, so it sees the final rect -- including a StatusBar fill's
       // overridden one. `clipItem` passes through, narrows, or DROPS: the item count can only fall.
       .map((item) => {
+        /**
+         * A SLIDER'S THUMB IS PLACED BY THE ENGINE, not by its document.
+         *
+         * `<ThumbTexture>` carries a `<Size>` and no `<Anchors>` at all
+         * (`uipaneltemplates.xml:207-211`), so under the loader's anchorless default it inherited the
+         * whole TRACK's rect -- a knob stretched over the full bar instead of a knob. The owner's
+         * side-by-side shows the real client's scrollbar with a visible thumb and ours with none.
+         *
+         * Overridden here rather than by writing anchors, for the reason the scroll offset is: the rect
+         * map stays untouched, so a slider that moves costs one arithmetic per frame and never a
+         * re-layout. The travel is `trackLength - thumbLength`, which is the engine's rule -- a thumb at
+         * `fraction` 1 sits flush with the far end rather than half off it.
+         */
+        const slider = item.widget.thumbOf;
+        if (slider !== null) {
+          const track = rects.get(slider.id);
+          if (track !== undefined) {
+            const size = deriveSize(item.widget, scale, measure);
+            const travel = slider.sliderTravel;
+            if (travel.vertical) {
+              const span = Math.max(0, track.height - size.height);
+              return {
+                ...item,
+                rect: {
+                  left: track.left + (track.width - size.width) / 2,
+                  top: track.top + travel.fraction * span,
+                  width: size.width,
+                  height: size.height,
+                },
+              };
+            }
+            const span = Math.max(0, track.width - size.width);
+            return {
+              ...item,
+              rect: {
+                left: track.left + travel.fraction * span,
+                top: track.top + (track.height - size.height) / 2,
+                width: size.width,
+                height: size.height,
+              },
+            };
+          }
+        }
         const owner = itemClip.get(item.widget) ?? null;
         if (owner === null) {
           return item;

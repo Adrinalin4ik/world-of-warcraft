@@ -32,7 +32,7 @@ describe('Slider', () => {
       <Ui>
         <Slider name="Bar" minValue="0" maxValue="100">
           <Size><AbsDimension x="16" y="200"/></Size>
-          <ThumbTexture name="$parentThumbTexture" file="Interface\Buttons\UI-ScrollBar-Knob">
+          <ThumbTexture name="$parentThumbTexture" file="Interface/Buttons/UI-ScrollBar-Knob">
             <Size><AbsDimension x="16" y="24"/></Size>
           </ThumbTexture>
         </Slider>
@@ -79,5 +79,47 @@ describe('Slider', () => {
     // The arrow handlers push past an end and read back, so an unchanged write must not re-fire.
     expect(vm.run('Scroller:SetValue(40)', 't')).toBeNull();
     expect(vm.getGlobal('fired')).toBe(1);
+  });
+
+  /**
+   * THE THUMB TRAVELS with the value. The owner's side-by-side shows the real client's scrollbar with a
+   * visible thumb and ours with none: `<ThumbTexture>` has a `<Size>` and no `<Anchors>`, so under the
+   * loader's anchorless default it inherited the whole TRACK's rect -- a knob stretched over the bar.
+   */
+  it('places the thumb along its track from the value, not over the whole track', () => {
+    const { vm, root, registry } = load(`
+      <Ui>
+        <Slider name="Bar">
+          <Size><AbsDimension x="16" y="200"/></Size>
+          <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+          <ThumbTexture name="$parentThumbTexture" file="Interface/Buttons/UI-ScrollBar-Knob">
+            <Size><AbsDimension x="16" y="24"/></Size>
+          </ThumbTexture>
+        </Slider>
+      </Ui>
+    `);
+    // Located by its back-link, not by name: `SetThumbTexture` creates the region unnamed, exactly as
+    // `ensureStateTextureId` does for a button's state textures. The XML calls it
+    // `$parentThumbTexture`, so reaching it from Lua by name is a separate (pre-existing) gap and is
+    // not what this test is about.
+    const slider = registry.widget(registry.byName('Bar')!) as Widget;
+    const at = () => root.drawList({ width: 1024, height: 768 })
+      .find((item) => item.widget.thumbOf === slider);
+
+    expect(vm.run('Bar:SetMinMaxValues(0, 100); Bar:SetValue(0)', 't')).toBeNull();
+    // eslint-disable-next-line no-console
+    const top = at();
+    expect(top).toBeDefined();
+    // Its authored 24, not the track's 200 -- that difference is the whole bug.
+    expect(Math.round(top!.rect.height)).toBe(24);
+    expect(Math.round(top!.rect.top)).toBe(0);
+
+    // Halfway: the travel is `track - thumb` = 176, so the midpoint is 88.
+    expect(vm.run('Bar:SetValue(50)', 't')).toBeNull();
+    expect(Math.round(at()!.rect.top)).toBe(88);
+
+    // Flush with the far end at full value, not half off it.
+    expect(vm.run('Bar:SetValue(100)', 't')).toBeNull();
+    expect(Math.round(at()!.rect.top)).toBe(176);
   });
 });

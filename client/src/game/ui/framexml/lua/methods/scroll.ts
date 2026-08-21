@@ -73,6 +73,7 @@
 import { MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { widgetOf } from './region';
+import type { Widget } from '../../../widget';
 
 interface ScrollState {
   vertical: number;
@@ -243,6 +244,7 @@ const SLIDER: MethodTable = {
       return [];
     }
     state.value = wanted;
+    syncThumb(ctx, self);
     const error = invokeScriptHandler(ctx, self, 'OnValueChanged', [state.value]);
     if (error !== null) {
       reportScriptError(
@@ -252,7 +254,7 @@ const SLIDER: MethodTable = {
     return [];
   },
   GetValue: (_ctx, self) => [sliderState(self).value],
-  SetMinMaxValues: (_ctx, self, args) => {
+  SetMinMaxValues: (ctx, self, args) => {
     const state = sliderState(self);
     state.min = Number(args[0] ?? 0);
     state.max = Number(args[1] ?? 0);
@@ -260,6 +262,9 @@ const SLIDER: MethodTable = {
     // position outside the range it just declared -- which is exactly what
     // `GlueScrollFrame_OnScrollRangeChanged` is written to avoid doing by hand.
     state.value = Math.max(state.min, Math.min(state.max, state.value));
+    // The RANGE moves the thumb as surely as the value does: `FauxScrollFrame_Update` sets the range
+    // every refresh, and a thumb sized against a stale range would sit at the wrong place.
+    syncThumb(ctx, self);
     return [];
   },
   GetMinMaxValues: (_ctx, self) => {
@@ -271,9 +276,10 @@ const SLIDER: MethodTable = {
     return [];
   },
   GetValueStep: (_ctx, self) => [sliderState(self).step],
-  SetOrientation: (_ctx, self, args) => {
+  SetOrientation: (ctx, self, args) => {
     sliderState(self).orientation =
       String(args[0] ?? '').toUpperCase() === 'HORIZONTAL' ? 'HORIZONTAL' : 'VERTICAL';
+    syncThumb(ctx, self);
     return [];
   },
   GetOrientation: (_ctx, self) => [sliderState(self).orientation],
@@ -307,16 +313,47 @@ const SLIDER: MethodTable = {
   GetThumbTexture: (ctx, self) => [ctx.wrapper(ensureThumbTextureId(ctx, self))],
 };
 
-/** The slider's thumb region, created on first use. Keyed by frame id, like the button state slots. */
-const thumbTextures = new Map<number, number>();
+/**
+ * The slider's thumb region, created on first use.
+ *
+ * **A `WeakMap` ON THE WIDGET, not a `Map` on the frame id, and the first version got this wrong.**
+ * Frame ids are minted per REGISTRY and restart from 1, so a module-level id map leaks one runtime's
+ * thumbs into the next one's by number collision -- and a torn-down and rebuilt screen is the ordinary
+ * case here (glue -> world). The stale id then resolves to nothing in the new registry, so the thumb is
+ * never created and the scrollbar has no knob.
+ *
+ * `methods/gametooltip.ts#stateByWidget` records this hazard verbatim for the same reason. Mine
+ * reproduced it: two sliders in one jest file, the second one silently thumbless because the first had
+ * already claimed frame id 1.
+ */
+const thumbTextures = new WeakMap<Widget, number>();
 
 function ensureThumbTextureId(ctx: MethodContext, self: number): number {
-  let id = thumbTextures.get(self);
+  const slider = widgetOf(ctx, self);
+  let id = thumbTextures.get(slider);
   if (id === undefined) {
     id = ctx.registry.create('Texture', null, self);
-    thumbTextures.set(self, id);
+    thumbTextures.set(slider, id);
+    // The back-link `drawList` needs to place it. A thumb's position is the engine's to choose --
+    // `<ThumbTexture>` carries no `<Anchors>` at all -- so it must not be left to the loader's
+    // anchorless fill, which gave it the whole track's rect.
+    const thumb = ctx.registry.widget(id);
+    if (thumb !== undefined) {
+      thumb.thumbOf = slider;
+    }
   }
   return id;
+}
+
+/** Recompute where the thumb sits, from the live value and range. See `Widget#sliderTravel`. */
+function syncThumb(ctx: MethodContext, self: number): void {
+  const state = sliderState(self);
+  const span = state.max - state.min;
+  const widget = widgetOf(ctx, self);
+  widget.sliderTravel.fraction = span > 0
+    ? Math.max(0, Math.min(1, (state.value - state.min) / span))
+    : 0;
+  widget.sliderTravel.vertical = state.orientation === 'VERTICAL';
 }
 
 registerMethods('SCROLLFRAME', SCROLLFRAME);
