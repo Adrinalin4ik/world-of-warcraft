@@ -555,7 +555,8 @@ export class QuestMarkers {
       if (landed !== null && landed !== 'noimage') {
         this.textureSettled = true;
         // eslint-disable-next-line no-console
-        console.log(`questmarkers: texture LANDED after ${this.textureFrames} moved frames -- ${landed}`);
+        console.log(`questmarkers: texture LANDED after ${this.textureFrames} moved frames -- ${landed}`
+          + `; ${this.materialShape()}`);
       } else if (this.textureFrames === 300) {
         this.textureSettled = true;
         // eslint-disable-next-line no-console
@@ -596,6 +597,49 @@ export class QuestMarkers {
         }
       }
     }
+  }
+
+  /**
+   * The drawn batch's shading state, for the colour question.
+   *
+   * The texture is bound and 64x64 and the marker is still white, so what is left is HOW it is shaded.
+   * Three things decide that and all three are on the material: which `materialParams` it carries (its
+   * `y` is the lighting switch -- the shader does `light = mix(light, vec3(1.0), 1.0 - y)`, so `y = 0`
+   * is unlit and `y = 1` is lit, and the three material classes in this pipeline DEFAULT DIFFERENTLY),
+   * how many samplers it thinks it has, and which program it compiled -- a combiner this client does not
+   * implement can fall through to vertex colour, which is white.
+   */
+  private materialShape(): string {
+    const rows: string[] = [];
+    for (const marker of this.live.values()) {
+      (marker.model as unknown as THREE.Object3D).traverse((node) => {
+        const mat = (node as unknown as { material?: unknown }).material;
+        const list = Array.isArray(mat) ? mat : [mat];
+        list.forEach((one) => {
+          const m = one as {
+            type?: string;
+            name?: string;
+            uniforms?: { materialParams?: { value?: unknown }; textureCount?: { value?: unknown } };
+            defines?: Record<string, unknown>;
+          } | null;
+          if (m === null || m.uniforms?.materialParams === undefined) {
+            return;
+          }
+          const params = m.uniforms.materialParams.value as
+            { x?: number; y?: number; z?: number; w?: number } | number[] | undefined;
+          const shown = Array.isArray(params)
+            ? params.join(',')
+            : `${String(params?.x)},${String(params?.y)},${String(params?.z)},${String(params?.w)}`;
+          rows.push(`${m.type ?? '?'}/${m.name || 'unnamed'} params=[${shown}] `
+            + `texCount=${String(m.uniforms.textureCount?.value)} `
+            + `defines=${Object.keys(m.defines ?? {}).join('+') || 'none'}`);
+        });
+      });
+      if (rows.length > 0) {
+        break;
+      }
+    }
+    return rows.join(' | ');
   }
 
   /** The first bound texture's `WxH`, `'noimage'` for the placeholder, or null when there is none. */
