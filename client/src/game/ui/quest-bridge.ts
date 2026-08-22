@@ -108,6 +108,15 @@ import { QUEST_STATE, QuestLogSlot } from '../../network/game/object/update-obje
  */
 const NO_ZONE = -999999;
 
+/**
+ * Minimum gap between two `CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY` sends.
+ *
+ * UNSOURCED and said so: no file states a rate. It exists because the re-ask edge includes
+ * `unit:fields`, which a health tick in combat also fires, and one small packet per second is the
+ * cheapest bound that still refreshes a marker promptly after a quest is taken.
+ */
+const REASK_MIN_MS = 1000;
+
 interface LogEntry {
   isHeader: boolean;
   /** Header rows: the zone or sort name. Quest rows: unused. */
@@ -127,6 +136,55 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   let disposed = false;
 
   void itemData.ensureLoaded();
+
+  /**
+   * THE MARKERS' DATA FEED, and THE RE-ASK LAW.
+   *
+   * `world.questMarkerStatuses` is handed the handler's live status map, which is what
+   * `world/quest-markers.ts` draws from. Installed from here because this bridge is only attached on a
+   * real session; an offline world leaves it null and the marker pass early-outs.
+   *
+   * **THE SERVER ONLY EVER ANSWERS, NEVER PUSHES, so every refresh point is ours to trigger** -- the
+   * reference's phrasing is that "a status that is never re-asked for is a marker frozen at first
+   * sight" (`benilla-app/src/quest_markers/query.rs:4-8`). Its law is a descriptor FIELD WATCH: six
+   * self-player watches plus four packet handlers, and each firing sweeps every visible object with
+   * one query apiece (`query.rs:25-46`).
+   *
+   * **3.3.5a collapses that whole sweep into ONE packet, and that is a version difference worth
+   * stating rather than a simplification.** WotLK added
+   * `CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY` (0x417), which asks for every nearby giver at once; the
+   * 1.12 client has only the per-guid `CMSG_QUESTGIVER_STATUS_QUERY`, which is why the reference needs
+   * an asked-set, a per-unit key and a prune. So the mechanism ported here is the reference's SWEEP --
+   * re-ask when any input to the server's answer moves -- and the implementation is one send.
+   *
+   * The edges are the reference's, mapped onto what this client can see:
+   *
+   *  - **our own descriptor changed** -> `unit:fields` for the player. That is the reference's
+   *    six field watches collapsed the same way: it recomputes only when its store actually changed,
+   *    and this fires only on that edge.
+   *  - **a quest event** -> accepted, turned in, abandoned, or an objective ticked. The reference's
+   *    four packet handlers.
+   *  - **entering the world** -> the attach below.
+   *
+   * THROTTLED, because `unit:fields` is not rare: a health tick in combat is that edge too. One send
+   * per `REASK_MIN_MS` at most, which makes the worst case one small packet a second while something
+   * about us is changing continuously, and zero when nothing is.
+   */
+  world.questMarkerStatuses = quest.status;
+
+  let lastReaskMs = 0;
+  const reaskStatuses = (): void => {
+    if (disposed) {
+      return;
+    }
+    const now = performance.now();
+    if (now - lastReaskMs < REASK_MIN_MS) {
+      return;
+    }
+    lastReaskMs = now;
+    quest.queryStatusMultiple();
+  };
+
 
   // -- Engine state ------------------------------------------------------------------------------
 
@@ -1507,6 +1565,8 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     }
     fireEvent(vm, 'QUEST_LOG_UPDATE');
     fireEvent(vm, 'UNIT_QUEST_LOG_CHANGED', ['player']);
+    // Our own state moved, so every nearby giver's answer could have -- the reference's sweep.
+    reaskStatuses();
   };
 
   const onUpdate = (): void => {
@@ -1514,6 +1574,8 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
       return;
     }
     fireEvent(vm, 'QUEST_WATCH_UPDATE');
+    // An objective ticked or a quest failed: the giver's `!`/`?` may have flipped.
+    reaskStatuses();
   };
 
   quest.on('questDetail', onDetail);
@@ -1524,6 +1586,9 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   quest.on('questTemplate', onTemplate);
   quest.on('questUpdate', onUpdate);
   quest.on('questRewarded', onFinished);
+  // A turn-in changes the giver's own marker immediately, and this is the one edge where the player is
+  // looking straight at it.
+  quest.on('questRewarded', reaskStatuses);
   world.on('unit:fields', onFields);
 
   /**
@@ -1596,6 +1661,8 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
 
   primeSortNames();
   rebuild();
+  // ENTERING THE WORLD. The reference's create-path query, once, for everything in view.
+  reaskStatuses();
 
   return () => {
     disposed = true;
@@ -1607,7 +1674,12 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     quest.off('questTemplate', onTemplate);
     quest.off('questUpdate', onUpdate);
     quest.off('questRewarded', onFinished);
+    quest.off('questRewarded', reaskStatuses);
     world.off('unit:fields', onFields);
+    // The markers are the world's, but their FEED is this bridge's -- so it goes when the bridge does,
+    // or a disposed session's statuses would keep drawing over the next one's units.
+    world.questMarkerStatuses = null;
+    world.questMarkers.dispose();
   };
 }
 

@@ -344,6 +344,18 @@ export class QuestHandler extends EventEmitter {
     this.subscribe('SMSG_QUEST_FORCE_REMOVED', this.handleForceRemoved);
     this.subscribe('SMSG_QUESTGIVER_STATUS', this.handleStatus);
     this.subscribe('SMSG_QUESTGIVER_STATUS_MULTIPLE', this.handleStatusMultiple);
+    // **THE SERVER ENDING THE CONVERSATION CLOSES THE QUEST PANEL TOO, and nothing was doing that.**
+    //
+    // The owner: accepting a quest leaves the window open. `QuestFrame_OnEvent` hides the frame on
+    // `QUEST_FINISHED` (`questframe.lua:18-21`), which this handler fires from `closePanels` -- and
+    // `closePanels` was reached only from `CloseQuest` and a world change. The reply to an accept is
+    // `SMSG_GOSSIP_COMPLETE`: the server is saying the whole conversation is over, so the giver panel
+    // has to go with the gossip menu.
+    //
+    // A SECOND subscriber on that opcode, beside `GossipHandler`'s own. Both are correct and neither
+    // needs to know about the other -- an `EventEmitter` fans out, and the gossip file stays owned by
+    // the merchant path.
+    this.subscribe('SMSG_GOSSIP_COMPLETE', this.handleGossipComplete);
 
     // An open panel belongs to the session that opened it -- the same reasoning `LootHandler`,
     // `MerchantHandler` and `GossipHandler` state for their own `SMSG_LOGIN_VERIFY_WORLD` hooks. A
@@ -1082,6 +1094,18 @@ export class QuestHandler extends EventEmitter {
     this.emit('questRewarded', {
       questId, xp, money, honor, talents, arenaPoints,
     });
+  }
+
+  /**
+   * `SMSG_GOSSIP_COMPLETE` (**0x17E**): an EMPTY body, and it closes the giver panel.
+   *
+   * `closePanels` is a no-op with nothing open, so this costs a comparison on every gossip close that
+   * had no quest panel behind it.
+   */
+  private handleGossipComplete(): void {
+    this.lastQuestId = 0;
+    this.lastTitle = '';
+    this.closePanels();
   }
 
   /** `SMSG_QUESTGIVER_QUEST_INVALID` (**0x18F**): one `u32` `INVALIDREASON_*` code. */

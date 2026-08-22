@@ -25,6 +25,7 @@ import { reactionFor, REACTION_NEUTRAL } from "./faction";
 import { HoverHighlight } from "./hover-highlight";
 import { SelectionRing } from "./selection-ring";
 import { LevelUpEffect } from "./level-up-effect";
+import { QuestMarkers } from "./quest-markers";
 import { NameplateConfig, Nameplates } from "./nameplates";
 import { FloaterSpawn, FloatingCombatText, MAX_FLOATERS, WordSource } from "./floating-text";
 import {
@@ -64,6 +65,23 @@ export default class World extends EventEmitter {
    * session, not in the render loop, and the effect has to be started from there.
    */
   public levelUpEffect: LevelUpEffect;
+
+  /**
+   * THE `!` AND `?` OVER A QUESTGIVER'S HEAD -- models on a bone, not sprites. See
+   * `world/quest-markers.ts` for the whole render law and for why the nameplate band is not involved.
+   */
+  public questMarkers: QuestMarkers = new QuestMarkers();
+
+  /**
+   * The guid -> `DIALOG_STATUS` map the markers are drawn from, or null.
+   *
+   * INSTALLED BY THE BRIDGE rather than read from here, deliberately: `game/ui/quest-bridge.ts` owns
+   * the handler and is only attached on a real session, so an offline world leaves this null and the
+   * marker pass early-outs. Reaching into `game.objectHandler` from the world would touch transports
+   * the offline route contracts never to construct -- the same rule `world-ui.ts` states for its own
+   * gated bridges.
+   */
+  public questMarkerStatuses: Map<string, number> | null = null;
   /**
    * The overhead name plates. Built in the constructor and ticked in `animate`, like the ring.
    *
@@ -1129,6 +1147,21 @@ export default class World extends EventEmitter {
     beginSection('w.matrices');
     this.updateDynamicMatrices();
     endSection('w.matrices');
+
+    // THE QUESTGIVER MARKERS, and the placement is load-bearing: AFTER `w.matrices`.
+    //
+    // The one-time `1/L` counter-scale reads the attach bone's WORLD matrix, and this scene has
+    // `matrixWorldAutoUpdate = false` -- so before `updateDynamicMatrices` has run, that matrix is
+    // still the identity it was constructed with and `L` reads ~1. Baking there is the reference's
+    // documented case A: no counter-scale at all, permanently, and invisible on an unscaled unit.
+    // Running here means a marker attached this frame is baked on the next one, with a real basis.
+    //
+    // No named span: with no statuses (offline, or before the first
+    // `SMSG_QUESTGIVER_STATUS_MULTIPLE`) this is one null check, and with statuses it is a walk over
+    // a handful of markers.
+    if (this.questMarkerStatuses !== null) {
+      this.questMarkers.update(this.entities, this.questMarkerStatuses);
+    }
 
     // THE RENDERED TRANSFORM, sampled after the matrices are final and nowhere earlier.
     //
