@@ -878,7 +878,10 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     if (row.isHeader) {
       return [
         row.header, 0, null, 0, 1, collapsed.has(row.zoneOrSort) ? 1 : null,
-        null, null, 0, 0,
+        // `questID` and `displayQuestID` are NIL, not 0. A header owns no quest, and **0 IS TRUTHY IN
+        // LUA** -- `questlogframe.lua:427` is `if (questID and displayQuestID)`, so a pair of zeroes
+        // reads as "print the id" just as loudly as a real id does.
+        null, null, null, null,
       ];
     }
     const template = templateOf(row.questId);
@@ -906,7 +909,19 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
       ((template?.flags ?? 0) & QUEST_FLAGS.DAILY) !== 0
         || ((template?.flags ?? 0) & QUEST_FLAGS.WEEKLY) !== 0,
       row.questId,
-      row.questId,
+      /**
+       * `displayQuestID` is NIL, and returning the id here put the number in every row's label.
+       *
+       * The owner's screenshot read "783 - A Threat Within". `questlogframe.lua:427` is
+       * `if (questID and displayQuestID) then title = questID.." - "..title; end` -- it is the client's
+       * own *debug* option for showing quest ids, off unless the player turned it on. The tenth return
+       * is that flag, not a second copy of the ninth; the two happen to sit next to each other in the
+       * destructure at `:401`, which is exactly how they got confused.
+       *
+       * Nothing here can ever turn it on: there is no CVar or slash command in this client that would,
+       * so nil is the whole of the correct answer rather than a placeholder.
+       */
+      null,
     ];
   });
 
