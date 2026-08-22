@@ -72,6 +72,9 @@ export default class World extends EventEmitter {
    */
   public questMarkers: QuestMarkers = new QuestMarkers();
 
+  /** See the instrument beside `questMarkers.update` -- published once, not per frame. */
+  private questMarkerProbePublished = false;
+
   /**
    * The guid -> `DIALOG_STATUS` map the markers are drawn from, or null.
    *
@@ -1161,6 +1164,31 @@ export default class World extends EventEmitter {
     // a handful of markers.
     if (this.questMarkerStatuses !== null) {
       this.questMarkers.update(this.entities, this.questMarkerStatuses);
+    }
+
+    /**
+     * THE MARKER INSTRUMENT, and its absence is why "no `!` appears" could not be diagnosed at all.
+     *
+     * `quest-markers.ts:152` already claimed `window.worldQuestMarkers()` read its counters and
+     * **nothing registered that handle** -- so the subsystem shipped with an instrument that did not
+     * exist, and a comment asserting it did. Both halves are defects by this project's own rules.
+     *
+     * `feed` is the first field to read and it separates two completely different failures: `null`
+     * means the bridge never installed the status map, so the `update` above has never run once and
+     * every counter below is zero for a reason that has nothing to do with markers, models or
+     * attachment slots. A number means statuses are arriving and the counters are then meaningful --
+     * `noSlot` in particular is the reference's render-nothing case, which is silent by design.
+     *
+     * Published ONCE, not per frame: the closure would otherwise be allocated on every tick, and this
+     * is a console handle rather than a per-frame reading.
+     */
+    if (!this.questMarkerProbePublished) {
+      this.questMarkerProbePublished = true;
+      (window as unknown as Record<string, unknown>).worldQuestMarkers = () => ({
+        feed: this.questMarkerStatuses === null ? null : this.questMarkerStatuses.size,
+        live: this.questMarkers.liveCount,
+        ...this.questMarkers.stats,
+      });
     }
 
     // THE RENDERED TRANSFORM, sampled after the matrices are final and nowhere earlier.
