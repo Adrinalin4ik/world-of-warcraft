@@ -92,6 +92,7 @@ import type {
   QuestHandler, QuestTemplate, QuestItemTriple,
 } from '../../network/game/object/quest';
 import { QUEST_FLAGS } from '../../network/game/object/quest';
+import { NPC_FLAG } from '../world/cursor-mode';
 import { QUEST_STATE, QuestLogSlot } from '../../network/game/object/update-object/quest-log';
 
 /**
@@ -1572,7 +1573,37 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * it against `"player"` (`questlogframe.lua:253`), so it is fired with the argument rather than bare.
    */
   const onFields = (unit: unknown): void => {
-    if (disposed || unit !== world.player) {
+    if (disposed) {
+      return;
+    }
+    if (unit !== world.player) {
+      /**
+       * **A GIVER CAME INTO VIEW, and this edge was MISSING -- which was the whole of "я их не вижу".**
+       *
+       * Every other re-ask edge here is a QUEST event: accepted, turned in, an objective ticked. Plus
+       * one sweep when the bridge attaches, which is before the player has any NPC near him. So walking
+       * up to a questgiver triggered nothing at all: no query went out, no status came back, no marker
+       * was drawn -- and not one error anywhere, because the server only ever ANSWERS and never pushes.
+       * That is exactly the failure the reference names: "a status that is never re-asked for is a
+       * marker frozen at first sight" (`benilla-app/src/quest_markers/query.rs:4-8`).
+       *
+       * The set of nearby givers IS an input to the server's answer, so it belongs among the edges by
+       * the same law the others follow. `unit:fields` is the signal this client has for it: it fires on
+       * a real field change, and a newly created unit's first application changes everything.
+       *
+       * GATED ON THE QUESTGIVER FLAG, so this is not a packet per second per moving creature.
+       * `NPC_FLAG.QUESTGIVER` is 3.3.5a's bit and is corroborated live against Northshire's own NPCs
+       * (`world/cursor-mode.ts:84-99`). A zone full of critters and guards therefore costs nothing here;
+       * only a giver's arrival does, and `reaskStatuses` still throttles that to one small packet a
+       * second.
+       *
+       * The player's own branch below keeps its `rebuild()` gate: that one is about the quest LOG, and
+       * re-asking there is already covered by the same call at its end.
+       */
+      const flags = (unit as { fields?: { npcFlags?: number } } | null)?.fields?.npcFlags ?? 0;
+      if ((flags & NPC_FLAG.QUESTGIVER) !== 0) {
+        reaskStatuses();
+      }
       return;
     }
     if (!rebuild()) {
