@@ -549,6 +549,30 @@ export class QuestMarkers {
      * Bounded: checked on the frames the camera moves, and reported at most twice -- once if it lands, once
      * if it has not after 300 such frames. No allocation on the common path.
      */
+    /**
+     * FENCED, and the fence is the lesson rather than a precaution.
+     *
+     * This block is a DIAGNOSTIC and it runs inside the render loop. A nullish slip in it -- checking
+     * `=== null` where a missing material yields `undefined` -- threw and froze the owner's client at 0
+     * fps: an instrument taking down the thing it was measuring, which is strictly worse than the defect
+     * it was there to find. The guard is not there because the code below is expected to fail; it is there
+     * because NOTHING that only reports may be allowed to stop a frame.
+     */
+    try {
+      this.watchTexture();
+    } catch (error) {
+      this.textureSettled = true;
+      // eslint-disable-next-line no-console
+      console.warn('questmarkers: the texture watch threw and has been switched off', error);
+    }
+    if (!cameraMoved) {
+      return;
+    }
+    this.turnAndFace(camera);
+  }
+
+  /** See `animate`'s fence. Split out so the fence wraps a named call rather than a block. */
+  private watchTexture(): void {
     if (!this.textureSettled && this.live.size > 0) {
       this.textureFrames += 1;
       const landed = this.firstTextureSize();
@@ -564,9 +588,10 @@ export class QuestMarkers {
           + 'placeholder, so the decoded texture is going to a material this marker is not drawing');
       }
     }
-    if (!cameraMoved) {
-      return;
-    }
+  }
+
+  /** See `animate`. The billboard turn, split out so the diagnostic fence cannot wrap it. */
+  private turnAndFace(camera: THREE.Camera): void {
     for (const marker of this.live.values()) {
       const model = marker.model as unknown as {
         billboards?: unknown[]; applyBillboards?: (camera: THREE.Camera) => void;
@@ -622,7 +647,11 @@ export class QuestMarkers {
             uniforms?: { materialParams?: { value?: unknown }; textureCount?: { value?: unknown } };
             defines?: Record<string, unknown>;
           } | null;
-          if (m === null || m.uniforms?.materialParams === undefined) {
+          // NULLISH, not `=== null`: a node with no material yields `[undefined]` from the wrap above,
+          // and `undefined !== null`. That threw inside the per-frame pass and froze the owner's client
+          // at 0 fps -- a diagnostic taking the whole render loop down with it, which is worse than the
+          // defect it was measuring. Both traversals in this file are guarded the same way now.
+          if (m == null || m.uniforms?.materialParams === undefined) {
             return;
           }
           const params = m.uniforms.materialParams.value as
@@ -653,7 +682,7 @@ export class QuestMarkers {
         const mat = (node as unknown as { material?: unknown }).material;
         const list = Array.isArray(mat) ? mat : [mat];
         list.forEach((one) => {
-          const bound = (one as { uniforms?: { textures?: { value?: unknown } } } | null)
+          const bound = (one as { uniforms?: { textures?: { value?: unknown } } } | null | undefined)
             ?.uniforms?.textures?.value;
           if (!Array.isArray(bound) || bound.length === 0) {
             return;
