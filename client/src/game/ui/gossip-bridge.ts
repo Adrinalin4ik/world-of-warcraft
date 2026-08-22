@@ -47,6 +47,7 @@ import { GlueArt } from './art';
 import { setUnit } from './framexml/lua/api/units';
 import { snapshotOf } from './unit-bridge';
 import type { GossipHandler, GossipQuest } from '../../network/game/object/gossip';
+import { QUEST_STATE } from '../../network/game/object/update-object/quest-log';
 import { expandTextTokens } from './text-tokens';
 
 /**
@@ -108,6 +109,7 @@ export function attachGossipBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   const quest = world.game.objectHandler.questHandler;
 
   let disposed = false;
+  let announcedSelect = false;
 
   // The ten icons, registered once. `art.register` is idempotent and the whole set is ten 16x16-ish
   // BLPs, so registering all of them on attach is cheaper than deciding per menu and cannot miss the
@@ -198,11 +200,37 @@ export function attachGossipBridge(vm: LuaVM, world: World, art: GlueArt): () =>
    * rows. See `object/gossip.ts#handleMessage`.
    */
   vm.registerFunction('GetNumGossipActiveQuests', () => [gossip.activeQuests.length]);
+  /**
+   * `isComplete` COMES FROM THE QUEST LOG, not from the wire byte -- the owner's grey `?` is why.
+   *
+   * `GossipFrameActiveQuestsUpdate` picks the icon off the fourth value: truthy draws
+   * `ActiveQuestIcon`, the gold `?`, and falsy draws `IncompleteQuestIcon`, the grey one
+   * (`gossipframe.lua:133-137`). We were passing the row's trailing wire byte, and in 3.3.5's gossip
+   * message that byte is a literal `0` for "repeatable" -- so every active row was permanently grey,
+   * including a quest the player had already finished.
+   *
+   * The player's own log is the right source and the engine's own: whether a held quest is complete is
+   * client-side state, carried in the descriptor slot's COMPLETE bit. That is a DIFFERENT use of the log
+   * from the one the reference forbids -- it rejects deriving the active/available POOL from log
+   * membership (an auto-complete quest is never in the log), and says nothing against reading the
+   * completion of a quest that demonstrably is in it. A row that is active but absent from the log is
+   * exactly the auto-complete case, and it answers false, which draws the grey icon the real client
+   * draws for it too.
+   */
+  const questIsComplete = (questId: number): boolean => {
+    for (const slot of world.player.questLog.values()) {
+      if (slot.questId === questId) {
+        return (slot.state & QUEST_STATE.COMPLETE) !== 0;
+      }
+    }
+    return false;
+  };
+
   vm.registerFunction('GetGossipActiveQuests', () => {
     const flat: unknown[] = [];
     for (const quest of gossip.activeQuests) {
       flat.push(
-        quest.title, quest.level, isTrivial(), quest.marker,
+        quest.title, quest.level, isTrivial(), questIsComplete(quest.questId),
       );
     }
     return flat;
@@ -253,6 +281,15 @@ export function attachGossipBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     const npc = gossip.source;
     if (row === undefined || npc === null || npc === undefined) {
       return;
+    }
+    // ONE LINE, once per session: the owner reported a click that produced nothing visible and a
+    // `CMSG_QUESTGIVER_QUERY_QUEST` on the wire where an active row must send COMPLETE_QUEST. Which of
+    // the two ran is not visible from the screen, and this says it outright.
+    if (!announcedSelect) {
+      announcedSelect = true;
+      // eslint-disable-next-line no-console
+      console.log(`gossip: row ${row.questId} active=${active} icon=${row.icon} -> `
+        + `${active || row.icon === 0 ? 'COMPLETE_QUEST 0x18A' : 'QUERY_QUEST 0x186'}`);
     }
     if (active || row.icon === 0) {
       quest.completeQuest(row.questId, npc);
