@@ -279,18 +279,30 @@ export function attachGossipBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   const selectQuestRow = (rows: GossipQuest[], at: number, active: boolean): void => {
     const row = Number.isFinite(at) && at >= 1 ? rows[at - 1] : undefined;
     const npc = gossip.source;
-    if (row === undefined || npc === null || npc === undefined) {
-      return;
-    }
-    // ONE LINE, once per session: the owner reported a click that produced nothing visible and a
-    // `CMSG_QUESTGIVER_QUERY_QUEST` on the wire where an active row must send COMPLETE_QUEST. Which of
-    // the two ran is not visible from the screen, and this says it outright.
+    /**
+     * AT THE TOP, BEFORE THE GUARDS -- and the previous placement was my own diagnostic error.
+     *
+     * The line used to sit after the early return, so a missing row or a null giver guid produced no
+     * output at all. The owner then reported a click with no line and no packet, which is exactly what
+     * that hole looks like, and it cost a round: `GetMouseFocus()` names this button, its `type` is
+     * `Active`, its `GetID()` is 1 and its `OnClick` is registered, so the remaining question was
+     * whether this function is entered at all -- and the instrument could not answer it.
+     *
+     * Placed here, silence means the click is never dispatched to the handler (a registered handler is
+     * not a dispatched one), and a line with `row=undefined` or `npc=null` names the guard instead.
+     */
     if (!announcedSelect) {
       announcedSelect = true;
       // eslint-disable-next-line no-console
-      console.log(`gossip: row ${row.questId} active=${active} icon=${row.icon} -> `
-        + `${active || row.icon === 0 ? 'COMPLETE_QUEST 0x18A' : 'QUERY_QUEST 0x186'}`);
+      console.log(`gossip: SELECT active=${active} at=${at} rows=${rows.length} `
+        + `row=${row === undefined ? 'undefined' : row.questId} npc=${String(npc)}`);
     }
+    if (row === undefined || npc === null || npc === undefined) {
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.log(`gossip: row ${row.questId} icon=${row.icon} -> `
+      + `${active || row.icon === 0 ? 'COMPLETE_QUEST 0x18A' : 'QUERY_QUEST 0x186'}`);
     if (active || row.icon === 0) {
       quest.completeQuest(row.questId, npc);
     } else {
