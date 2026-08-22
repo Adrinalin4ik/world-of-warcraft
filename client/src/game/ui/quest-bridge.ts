@@ -716,12 +716,27 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   const questTooltip = (
     kind: string, a: number | string, b?: number,
   ): ItemTooltipInfo | null => {
-    if (kind !== 'quest') {
+    if (kind !== 'quest' && kind !== 'questlog') {
       return previousTooltipSource === null
         ? null
         : previousTooltipSource(kind as never, a as never, b);
     }
-    const triple = questTripleAt(String(a), Number(b));
+    /**
+     * TWO KINDS, because the client asks two different questions of two different sources.
+     *
+     * `QuestInfoRewardItemTemplate`'s `OnEnter` branches on `QuestInfoFrame.questLog`: the LOG calls
+     * `SetQuestLogItem` and a giver panel calls `SetQuestItem` (`questinfo.xml:12-16`). That is the same
+     * split this file's header already records for the info accessors -- the giver family reads the OPEN
+     * PANEL, which is self-contained on the wire, and the log family reads the TEMPLATE CACHE joined to
+     * the descriptor slots. Routing both through one resolver would name the wrong item whenever the log
+     * is open over a different quest than the last giver panel showed.
+     *
+     * The owner's console named the missing half: `QuestInfoItem2: OnEnter: attempt to call a nil value
+     * (method 'SetQuestLogItem')`.
+     */
+    const triple = kind === 'questlog'
+      ? logTripleAt(String(a), Number(b))
+      : questTripleAt(String(a), Number(b));
     const template = triple === undefined ? null : items.template(triple.itemId);
     if (template === null) {
       return null;
@@ -736,6 +751,20 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     };
   };
   setItemTooltipSource(vm, questTooltip as never);
+
+  /**
+   * The LOG's `{itemId, count, displayId}` for a `type`/`index` pair -- the template cache, not the open
+   * panel. Declared here and defined against `logRewards`/`logChoices` further down, which are the same
+   * readers `GetQuestLogRewardInfo`/`GetQuestLogChoiceInfo` answer from, so the tooltip and the row can
+   * never disagree.
+   *
+   * Typed by the ONE field the tooltip needs: a template's reward rows are `QuestItemPair`s and carry no
+   * `displayId` -- only the wire's giver panels do -- so widening them to a triple here would be a lie
+   * about the data rather than a convenience.
+   */
+  const logTripleAt = (kind: string, oneBased: number): { itemId: number } | undefined => (
+    kind === 'choice' ? logChoices()[oneBased - 1] : logRewards()[oneBased - 1]
+  );
 
   /** The `{itemId, count, displayId}` a `type`/`index` pair names. One reader for the row and the tooltip. */
   function questTripleAt(kind: string, oneBased: number): QuestItemTriple | undefined {

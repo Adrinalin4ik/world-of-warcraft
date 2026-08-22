@@ -1178,6 +1178,26 @@ const ITEM_SETTERS: MethodTable = {
     ctx, self, 'quest', String(args[0] ?? ''), Number(args[1]),
   ),
   /**
+   * `SetQuestLogItem(type, index)` -- the LOG's own reward and choice rows, and a SECOND setter rather
+   * than an argument to the one above.
+   *
+   * `QuestInfoRewardItemTemplate`'s `OnEnter` branches on `QuestInfoFrame.questLog` and calls one or the
+   * other (`questinfo.xml:12-16`), because the two read different sources: a giver panel's items are
+   * self-contained on the wire and the log's come from the template cache joined to the player's
+   * descriptor slots. One resolver for both would name the wrong item whenever the log is open over a
+   * different quest than the last giver panel showed.
+   *
+   * The owner's console named it: `QuestInfoItem2: OnEnter: attempt to call a nil value (method
+   * 'SetQuestLogItem')`.
+   *
+   * Worth recording alongside: the ACCEPT panel legitimately shows no tooltip at all. Its template is
+   * `QUEST_TEMPLATE_DETAIL1`, whose `tooltip` field is nil (`questinfo.lua:508`), and the handler starts
+   * `local tooltip = _G[QuestInfoFrame.tooltip]` and does nothing when that is absent. Not a gap here.
+   */
+  SetQuestLogItem: (ctx, self, args) => fillFromSource(
+    ctx, self, 'questlog', String(args[0] ?? ''), Number(args[1]),
+  ),
+  /**
    * `SetInventoryItem(unit, invSlot)` -- a WORN item, identified by unit and equipment slot rather
    * than by bag and slot, so it takes the equipped read (`PLAYER_FIELD_INV_SLOT_HEAD + (id-1)*2`)
    * and not the container read.
