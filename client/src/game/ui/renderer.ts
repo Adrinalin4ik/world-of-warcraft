@@ -446,23 +446,56 @@ export class GlueRenderer {
           const keptTop = Math.max(quadY, crop.top);
           const keptRight = Math.min(quadX + quadWidth, crop.left + crop.width);
           const keptBottom = Math.min(quadY + quadHeight, crop.top + crop.height);
-          if (keptRight <= keptLeft || keptBottom <= keptTop) {
+          // NOTHING ACTUALLY CUT -- leave the geometry and the UVs exactly as the uncropped path set
+          // them. `clipItem` hands a font string the whole viewport rather than the overlap, so an item
+          // well inside it arrives here with a crop that trims nothing, and re-deriving its position and
+          // UVs from the crop would only cost it the device-pixel snapping below for no benefit.
+          const cuts = quadX < crop.left - 0.01
+            || quadY < crop.top - 0.01
+            || quadX + quadWidth > crop.left + crop.width + 0.01
+            || quadY + quadHeight > crop.top + crop.height + 0.01;
+          if (!cuts) {
+            // The uncropped path already placed it; only the UV cache may need putting back, because a
+            // previous frame of THIS mesh may have written a crop into its geometry.
+            if (entry.lastTexCoords !== null) {
+              writeQuadUVs(entry.geometry, null);
+              entry.lastTexCoords = null;
+            }
+          } else if (keptRight <= keptLeft || keptBottom <= keptTop) {
             // `clipItem` drops an item by its RECT; a text quad is inflated past its rect by the raster
             // pad, so this is the residue that survives that test rather than a case it missed.
             entry.mesh.scale.set(0, 0, 1);
           } else {
-            entry.mesh.position.set((keptLeft + keptRight) / 2, (keptTop + keptBottom) / 2, 0);
-            entry.mesh.scale.set(keptRight - keptLeft, keptBottom - keptTop, 1);
+            /**
+             * SNAPPED, like the uncropped placement above and for the same reason it gives: the quad is
+             * 1 texel : 1 device pixel, and a fractional edge makes a bilinear fetch blend every glyph
+             * with its neighbour. My first version of this branch set the centre from the raw
+             * intersection and so threw that away for exactly the strings a scroll frame holds -- the
+             * ones the owner is reading.
+             *
+             * The UVs are computed from the SNAPPED edges, not the raw ones, or the texel the quad
+             * samples would no longer be the texel it covers.
+             */
+            const snappedTop = snap(keptTop);
+            const snappedBottom = snap(keptBottom);
+            const snappedLeft = snap(keptLeft);
+            const snappedRight = snap(keptRight);
+            entry.mesh.position.set(
+              (snappedLeft + snappedRight) / 2,
+              (snappedTop + snappedBottom) / 2,
+              0,
+            );
+            entry.mesh.scale.set(snappedRight - snappedLeft, snappedBottom - snappedTop, 1);
             // `writeQuadUVs` puts `v1` on the TOP vertices -- `fy` is 1 there -- and a text canvas is
             // sampled unflipped, so the quad's top edge is `uv.y = 1` and uv.y DECREASES downward.
             // Hence `1 - fractionFromTop`, not the fraction. Getting this backwards would scroll the
             // glyphs the wrong way inside a stationary box, which is the failure this project has hit
             // three times; it is derived from the vertex order rather than guessed.
             const cropped = {
-              u0: (keptLeft - quadX) / quadWidth,
-              u1: (keptRight - quadX) / quadWidth,
-              v0: 1 - (keptBottom - quadY) / quadHeight,
-              v1: 1 - (keptTop - quadY) / quadHeight,
+              u0: (snappedLeft - quadX) / quadWidth,
+              u1: (snappedRight - quadX) / quadWidth,
+              v0: 1 - (snappedBottom - quadY) / quadHeight,
+              v1: 1 - (snappedTop - quadY) / quadHeight,
             };
             writeQuadUVs(entry.geometry, cropped);
             // The cache MUST be written, or the precedence block above will not restore full UVs when
