@@ -76,7 +76,7 @@ import { repairCostOf } from './repair-cost';
 import { itemData } from '../pipeline/dbc/item-data';
 import { durabilityData } from '../pipeline/dbc/durability-data';
 import { spellData } from '../pipeline/dbc/spell-data';
-import { itemTooltipLines } from './item-tooltip';
+import { itemLink, itemTooltipLines } from './item-tooltip';
 import { ObjectType, ObjectField, ItemField, PlayerField, ContainerField } from '../../network/game/object/enums';
 import { NPC_FLAG } from '../world/cursor-mode';
 import type { MerchantHandler, VendorRow } from '../../network/game/object/merchant';
@@ -163,17 +163,12 @@ export function attachMerchantBridge(vm: LuaVM, world: World, art: GlueArt): () 
   const iconFor = (row: VendorRow): string | null => itemData.iconForDisplayId(row.displayInfoId)
     ?? itemData.iconForEntry(row.entry);
 
-  /** An item hyperlink, coloured by the client's own `GetItemQualityColor`. */
-  const linkFor = (template: ItemTemplate | null): string | null => {
-    if (template === null) {
-      return null;
-    }
-    const colour = vm.runExpr(
-      `local _,_,_,hex = GetItemQualityColor(${template.quality}) return hex`, 'merchant-link.lua',
-    ) as { value?: unknown } | null;
-    const hex = String(colour?.value ?? '|cffffffff');
-    return `${hex}|Hitem:${template.entry}:0:0:0:0:0:0:0:0:0:0|h[${template.name}]|h|r`;
-  };
+  /**
+   * An item hyperlink. MOVED to `item-tooltip.ts#itemLink` when the quest panels needed the identical
+   * string for `GetQuestItemLink` -- two copies of a link format is exactly the kind of thing that
+   * drifts, and the compare path reads it back.
+   */
+  const linkFor = (template: ItemTemplate | null): string | null => itemLink(vm, template);
 
   // -- Reading the buyback slots ------------------------------------------------------------------
 

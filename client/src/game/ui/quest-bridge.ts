@@ -93,7 +93,7 @@ import type {
 } from '../../network/game/object/quest';
 import { QUEST_FLAGS } from '../../network/game/object/quest';
 import { NPC_FLAG } from '../world/cursor-mode';
-import { itemTooltipLines } from './item-tooltip';
+import { itemLink, itemTooltipLines } from './item-tooltip';
 import { spellData } from '../pipeline/dbc/spell-data';
 import {
   getItemTooltipSource, setItemTooltipSource, ItemTooltipInfo,
@@ -748,6 +748,22 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     }
     return (quest.offer ?? quest.details)?.rewards[index];
   }
+
+  /**
+   * `GetQuestItemLink(type, index)` -- the shift-click that puts a quest item into chat.
+   *
+   * MEASURED, the owner's console:
+   *
+   *     QuestProgressItem1: OnClick: [string "QuestFrame.xml:QuestProgressItem1:OnClick"]:8:
+   *     attempt to call a nil value (global 'GetQuestItemLink')
+   *
+   * Same triple the row and the tooltip read, and the same link format the merchant rows answer -- which
+   * is why `itemLink` moved into `item-tooltip.ts` rather than being written a second time here.
+   */
+  fn('GetQuestItemLink', (args) => {
+    const triple = questTripleAt(String(args[0] ?? ''), Number(args[1]));
+    return [triple === undefined ? null : itemLink(vm, items.template(triple.itemId))];
+  });
 
   fn('GetQuestItemInfo', (args) => {
     const triple = questTripleAt(String(args[0] ?? ''), Number(args[1]));
@@ -1777,6 +1793,28 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     reaskStatuses();
   };
 
+  /**
+   * A TEMPLATE LANDED, so every quest item row can now be named -- and until this existed the panel drew
+   * once, before the answer, and never again.
+   *
+   * MEASURED by the owner twice over: a progress panel whose required item showed an icon and no name,
+   * and which was correct the second time it was opened; and no tooltip on that row at all, because the
+   * tooltip source resolves through the same template and answered null.
+   *
+   * `QUEST_ITEM_UPDATE` is the client's OWN event for exactly this, and it refreshes whichever panel is
+   * up: rewards on the detail and reward panels, the required-item row on the progress panel
+   * (`questframe.lua:48-56`). `merchant-bridge.ts` already solves the identical race the identical way
+   * -- its own comment says "the NAME still needs the query, which is why `MERCHANT_UPDATE` re-fires
+   * when a template lands".
+   */
+  const onTemplates = (): void => {
+    if (disposed) {
+      return;
+    }
+    fireEvent(vm, 'QUEST_ITEM_UPDATE');
+  };
+  items.on('templatesChanged', onTemplates);
+
   quest.on('questDetail', onDetail);
   quest.on('questProgress', onProgress);
   quest.on('questOfferReward', onOffer);
@@ -1875,6 +1913,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     quest.off('questRewarded', onFinished);
     quest.off('questRewarded', reaskStatuses);
     world.off('unit:fields', onFields);
+    items.off('templatesChanged', onTemplates);
     // The markers are the world's, but their FEED is this bridge's -- so it goes when the bridge does,
     // or a disposed session's statuses would keep drawing over the next one's units.
     world.questMarkerStatuses = null;

@@ -443,6 +443,26 @@ function statLine(
  * `String(copper)`. A five-copper pile therefore read as a bare "5" beside the gold coin icon. One
  * formatter, one place, so the loot row, the tooltip's sell price and anything later cannot drift.
  */
+/**
+ * An item HYPERLINK, coloured by the client's own `GetItemQualityColor`.
+ *
+ * SHARED because two bridges need the identical string and a second copy would drift: the merchant rows
+ * answer it from `GetMerchantItemLink`, and a quest panel's item rows from `GetQuestItemLink`, which
+ * `QuestProgressItem_OnClick` shift-clicks into chat. The colour escape comes from the client's own
+ * global rather than from a table here, so a document that overrides `GetItemQualityColor` is obeyed.
+ */
+export function itemLink(vm: LuaVM, template: { entry: number; name: string; quality: number } | null):
+string | null {
+  if (template === null) {
+    return null;
+  }
+  const colour = vm.runExpr(
+    `local _,_,_,hex = GetItemQualityColor(${template.quality}) return hex`, 'item-link.lua',
+  ) as { value?: unknown } | null;
+  const hex = String(colour?.value ?? '|cffffffff');
+  return `${hex}|Hitem:${template.entry}:0:0:0:0:0:0:0:0:0:0|h[${template.name}]|h|r`;
+}
+
 export function copperAsWords(vm: LuaVM, copper: number): string | null {
   return moneyText(vm, copper);
 }
