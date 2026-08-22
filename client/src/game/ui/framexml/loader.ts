@@ -1916,6 +1916,34 @@ class DocumentLoader {
         continue;
       }
       try {
+        /**
+         * **THE NAME, AND DROPPING IT KILLED THE WHOLE SCROLLBAR -- arrows, drag and wheel at once.**
+         *
+         * The comment above this method already quoted `name="$parentThumbTexture"`
+         * (`uipaneltemplates.xml:207`) and then read only `file=`, so the thumb existed in our object
+         * model and had no global. The client indexes it by that global in the one function that gives a
+         * scrollbar its limits: `ScrollFrame_OnScrollRangeChanged` does
+         * `_G[scrollbar:GetName().."ThumbTexture"]:Hide()` at `uipaneltemplates.lua:300` and `:Show()` at
+         * `:305`, on the zero-range and non-zero-range branches respectively -- so EVERY announcement
+         * raised, whatever the range.
+         *
+         * The owner's console named it exactly: `WorldMapQuestScrollFrame: OnScrollRangeChanged:
+         * [string "UIPanelTemplates.lua"]:300: attempt to index a nil value (field '?')`.
+         *
+         * What that truncation costs is the whole symptom, and it is why all three input routes died
+         * together while the range itself was computed correctly. `:284` sets the bar's min/max and runs
+         * BEFORE the throw, so the limits were right and every static check of the range chain passed.
+         * Everything after the throw never ran: `:311`'s `ScrollDownButton:Enable()`, so both arrows
+         * stayed disabled from `ScrollFrame_OnLoad`'s `:255-256`, and `:305`'s `ThumbTexture:Show()`, so
+         * there was no thumb to drag.
+         *
+         * FROM THE RAW element, not the expanded one -- `publishRegion`'s own contract: a `name`
+         * inherited from a template would publish every inheritor's thumb under ONE global and clash.
+         * `parentKey` takes the expanded one, for the opposite reason. Same split, and the same two
+         * calls, as the button state textures at `:1587-1590`.
+         */
+        this.publishRegion(raw, region, selfName, dbg);
+        this.applyParentKey(thumb, region, wrapper, dbg);
         const texCoords = texCoordsOf(thumb);
         if (texCoords !== null) {
           this.callMethod(region, 'SetTexCoord', texCoords, dbg);
