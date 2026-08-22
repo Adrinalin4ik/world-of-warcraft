@@ -1841,6 +1841,24 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
       return;
     }
     fireEvent(vm, 'QUEST_ITEM_UPDATE');
+    /**
+     * AND THE LOG, which does not listen to the event above.
+     *
+     * `QuestLogFrame` registers `QUEST_LOG_UPDATE` and not `QUEST_ITEM_UPDATE`
+     * (`questlogframe.lua:239-242`), and its handler does both halves: `QuestLog_Update()` for the list
+     * and, when the detail page is visible, `QuestLog_UpdateQuestDetails(false)` -- which re-runs
+     * `QuestInfo_Display` and so re-reads every reward row (`:254-259`). Firing only the item event left
+     * the log needing a second open, which is what the owner reported after the giver panels were fixed.
+     *
+     * `rebuild()` cannot cover this: it fires `QUEST_LOG_UPDATE` only when the ENTRY LIST changed, and a
+     * template landing for a quest already listed by title -- every giver-panel quest -- changes no
+     * entry while making its reward names available for the first time.
+     *
+     * Cost: `templatesChanged` fires per query batch, which is a handful on login and one per newly
+     * accepted quest. The client's own handler early-outs on `IsVisible` for the expensive half, so a
+     * closed log pays for the list walk only.
+     */
+    fireEvent(vm, 'QUEST_LOG_UPDATE');
   };
   items.on('templatesChanged', onTemplates);
 
