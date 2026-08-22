@@ -379,6 +379,16 @@ export class GlueInput {
     const target = wheelTargetAt(this.items, x, y);
     if (target !== null) {
       event.preventDefault();
+      /**
+       * STOP THE BUBBLE, or the camera zooms while the panel scrolls -- the owner saw both happen at
+       * once. `preventDefault` only suppresses the browser's default action; it does not stop the event
+       * reaching another listener. `pages/game/controls/controls.tsx:156` registers its own `wheel`
+       * handler on `document.body` (`:106`), which is an ANCESTOR of this canvas, so the event arrives
+       * here in the target phase and at the camera afterwards by bubbling. Stopping propagation is
+       * therefore enough, and it puts the wheel under the same rule as a press: the UI is in front, and
+       * one gesture has one owner (`GlueInput#capturedPress`).
+       */
+      event.stopPropagation();
       target.onMouseWheel?.(event.deltaY > 0 ? -1 : 1);
     }
   };
