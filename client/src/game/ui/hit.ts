@@ -46,6 +46,41 @@ export function hitTest(items: DrawItem[], x: number, y: number): Widget | null 
 }
 
 /**
+ * The frame an `OnMouseWheel` at this point belongs to, or null.
+ *
+ * **NOT `hitTest` plus an ancestor walk, and that is why the wheel reached nothing on the quest page.**
+ * `hitTest` answers the topmost MOUSE-ENABLED item, and over the quest text that is `QuestFrame` itself
+ * -- a movable panel, so `enableMouse="true"`. Walking up from there goes `QuestFrame` -> `UIParent`,
+ * while `QuestDetailScrollFrame`, the frame that actually binds `<OnMouseWheel>`
+ * (`uipaneltemplates.xml:327-329`), is a DESCENDANT of the hit and therefore never consulted. The
+ * arrows and the drag were dead for an unrelated reason (`loader.ts#applySliderThumb`); this is the
+ * wheel's own.
+ *
+ * So the search is the engine's: `mouseEnabled` is not consulted at all, because the wheel is
+ * `EnableMouseWheel` -- a separate flag, as `framexml/loader.ts:137` already records. Backwards over the
+ * draw list is the z-order rule (the same walk `hitTest` and `paneAt` use), and from each item that
+ * contains the point we climb to the nearest ancestor carrying a handler: the quest text is drawn after
+ * the panel, so it is reached first and its climb finds the scroll frame.
+ *
+ * Cost is not on the critical path -- this runs once per physical wheel notch, never per frame, and the
+ * common case exits on the first few items rather than walking the list.
+ */
+export function wheelTargetAt(items: DrawItem[], x: number, y: number): Widget | null {
+  for (let index = items.length - 1; index >= 0; --index) {
+    const item = items[index];
+    if (!contains(item, x, y)) {
+      continue;
+    }
+    for (let node: Widget | null = item.widget; node !== null; node = node.parent) {
+      if (node.onMouseWheel !== null) {
+        return node;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * The MODEL PANE a press at this point should spin, or null -- and it deliberately ignores
  * `mouseEnabled`.
  *

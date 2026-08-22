@@ -18,7 +18,7 @@
  * changed nothing about how `/` behaves.
  */
 import { keyToken } from './framexml/bindings';
-import { focusChain, hitTest, nextFocus, paneAt } from './hit';
+import { focusChain, hitTest, wheelTargetAt, nextFocus, paneAt } from './hit';
 import { viewportUnits } from './layout';
 import { DrawItem, MouseButtonName, Widget } from './widget';
 import type { ModelRig } from './scene/scene-rig';
@@ -355,15 +355,12 @@ export class GlueInput {
   private onWheel = (event: WheelEvent): void => {
     const { x, y } = this.toUnits(event as unknown as PointerEvent);
     this.pointerUnits = { x, y };
-    const hit = hitTest(this.items, x, y);
-    let node: Widget | null = hit;
-    while (node !== null) {
-      if (node.onMouseWheel !== null) {
-        event.preventDefault();
-        node.onMouseWheel(event.deltaY > 0 ? -1 : 1);
-        return;
-      }
-      node = node.parent;
+    // `wheelTargetAt`, NOT `hitTest` and a climb: over the quest text `hitTest` answers `QuestFrame`,
+    // whose ancestors do not include the scroll frame that binds the handler. See `hit.ts`.
+    const target = wheelTargetAt(this.items, x, y);
+    if (target !== null) {
+      event.preventDefault();
+      target.onMouseWheel?.(event.deltaY > 0 ? -1 : 1);
     }
   };
 
