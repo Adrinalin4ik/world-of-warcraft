@@ -65,32 +65,36 @@ import { DIALOG_STATUS } from './quest';
 /**
  * An active (held) gossip quest row, from the wire icon alone.
  *
- * **MECHANISM FROM THE REFERENCE, NUMBERS FROM 3.3.5a**, and the two genuinely differ here. The
- * reference verified the split at the bytes as `icon == 3 || icon == 4` -> ACTIVE, every other `u32`
- * -> AVAILABLE, a flat two-way test with no range and no third arm
- * (`benilla-app/src/ui_quest.rs#row_is_active`, split at `0x5dbbfe-0x5dbc08`; the gossip packet's rows
- * use the identical test at `0x4e2430`/`0x4e2580`). Its 3 and 4 are 1.12's `DIALOG_STATUS_INCOMPLETE`
- * and `DIALOG_STATUS_REWARD_REP` -- and WotLK INSERTED the three `LOW_LEVEL_*` values ahead of them, so
- * the same two names are **5 and 6** here (see `DIALOG_STATUS` in `quest.ts`). Taking the reference's
- * literal 3 and 4 would test LOW_LEVEL_REWARD_REP and LOW_LEVEL_AVAILABLE_REP instead -- the exact
- * class of defect this repo's rules single out.
+ * **`icon == 3 || icon == 4`, and this MEASUREMENT reversed my own "version correction".**
  *
- * `LOW_LEVEL_REWARD_REP` is included as a third value on its NAME: it is `REWARD_REP` for a quest below
- * the player's level, so the player holds it and it is handed in the same way. Said plainly because it
- * is a name-based inference and not a byte the reference could verify -- 1.12 has no such value. The
- * cost of getting it wrong is one-directional: excluded, a low-level turn-in becomes un-handable, which
- * is precisely the failure this whole predicate exists to prevent.
+ * The reference verified the predicate at the bytes as exactly this -- a flat two-way test, no range
+ * and no third arm (`benilla-app/src/ui_quest.rs#row_is_active`, split at `0x5dbbfe-0x5dbc08`; the
+ * gossip rows use the same test at `0x4e2430`/`0x4e2580`). I changed it to 5 and 6, reasoning that its
+ * 3 and 4 were 1.12's `DIALOG_STATUS_INCOMPLETE`/`REWARD_REP` and that WotLK's inserted `LOW_LEVEL_*`
+ * values had shifted the same names. That reasoning was wrong, and the owner's console settled it in one
+ * line:
+ *
+ *     gossip: 1 quest rows -- 783:icon=4 (active=0, available=1)
+ *
+ * Quest 783 was in his log and COMPLETE, so its row is active by definition -- and it arrived as 4.
+ * In this file's own `DIALOG_STATUS`, 4 is `LOW_LEVEL_AVAILABLE_REP`, which that quest is not. **So the
+ * field is not a `DIALOG_STATUS` on this wire at all**: 3.3.5-era cores write their own `QuestMenu`
+ * icon constants here -- 4 for a held quest (complete or incomplete alike) and 2 for an offer -- while
+ * 1.12 wrote status values that happened to collide with the same two numbers. The client's test is 3
+ * or 4 either way, which is why the reference's literal numbers are right here and a name-based
+ * translation of them was not.
+ *
+ * The lesson is the repo's own rule read the other way round: take the number from the DATA. I took it
+ * from a name, and the name was the thing that moved.
  *
  * **THE QUEST LOG IS NOT CONSULTED, deliberately.** The reference tried that and reversed it: an
  * auto-complete quest is never in the log -- that is what auto-complete means -- yet the server marks
- * it REWARD_REP so the client asks for the reward. Deriving the pool from log membership made every
+ * its row active so the client asks for the reward. Deriving the pool from log membership made every
  * such quest permanently un-turn-in-able and drew its empty detail as a blank window (its ledger B95,
  * decision 0758).
  */
 export function rowIsActive(icon: number): boolean {
-  return icon === DIALOG_STATUS.INCOMPLETE
-    || icon === DIALOG_STATUS.REWARD_REP
-    || icon === DIALOG_STATUS.LOW_LEVEL_REWARD_REP;
+  return icon === 3 || icon === 4;
 }
 
 export interface GossipOption {
@@ -264,27 +268,6 @@ export class GossipHandler extends EventEmitter {
      */
     this.availableQuests = available;
     this.activeQuests = active;
-    /**
-     * THE ICONS, ANNOUNCED -- because two server generations put different things in this field and
-     * choosing between them by argument is exactly what this repo's rules forbid.
-     *
-     * 1.12 writes `__QuestGiverStatus` values here, which is what the reference verified its `3 || 4`
-     * against. 3.3.5-era cores write their own `QuestMenu` icon constants instead. The two overlap
-     * numerically and mean different things, so the predicate cannot be settled without seeing what
-     * THIS server sends -- the owner's screenshot shows a held, completed quest still drawn with the
-     * available `!`, so whatever it sends is not what `rowIsActive` currently tests.
-     *
-     * Once per menu open, and only while something is still misclassified: a menu carries a handful of
-     * rows, so this is a single short line and not a per-frame cost.
-     */
-    if (questCount > 0) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `gossip: ${questCount} quest rows -- `
-        + `${[...active, ...available].map((q) => `${q.questId}:icon=${q.icon}`).join(' ')} `
-        + `(active=${active.length}, available=${available.length})`,
-      );
-    }
     // The greeting is a second round trip. Cleared first so a stale one from the previous NPC cannot
     // be drawn under this one's buttons.
     this.greeting = null;
