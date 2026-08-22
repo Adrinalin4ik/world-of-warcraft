@@ -46,7 +46,7 @@ import { fireEvent } from './framexml/lua/events';
 import { GlueArt } from './art';
 import { setUnit } from './framexml/lua/api/units';
 import { snapshotOf } from './unit-bridge';
-import type { GossipHandler } from '../../network/game/object/gossip';
+import type { GossipHandler, GossipQuest } from '../../network/game/object/gossip';
 import { expandTextTokens } from './text-tokens';
 
 /**
@@ -105,6 +105,7 @@ const QUEST_FLAGS_WEEKLY = 0x8000;
 
 export function attachGossipBridge(vm: LuaVM, world: World, art: GlueArt): () => void {
   const gossip: GossipHandler = world.game.objectHandler.gossipHandler;
+  const quest = world.game.objectHandler.questHandler;
 
   let disposed = false;
 
@@ -228,26 +229,46 @@ export function attachGossipBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   });
 
   /**
-   * The two quest selections. DECLARED, and named rather than silent.
+   * The two quest selections -- **REAL now, and the paragraph that stood here was stale and costly.**
    *
-   * Both would send `CMSG_QUESTGIVER_QUERY_QUEST` / `CMSG_QUESTGIVER_CHOOSE_REWARD` and be answered by
-   * the `SMSG_QUESTGIVER_*` family, none of which this client decodes -- there is no quest frame to
-   * put the answer in. Registered so the load report names them, because a nil here raises inside
-   * `GossipTitleButton_OnClick` and would take out the whole click, including the vendor option that
-   * happens to sit below a quest in the same menu.
+   * It said both "would send `CMSG_QUESTGIVER_QUERY_QUEST` / `CMSG_QUESTGIVER_CHOOSE_REWARD` and be
+   * answered by the `SMSG_QUESTGIVER_*` family, none of which this client decodes -- there is no quest
+   * frame to put the answer in". That has not been true since the quest bridge landed: `quest-bridge.ts`
+   * subscribes to the detail, progress and offer-reward packets and drives the client's own giver panel
+   * off them. So these two warned to the console and did nothing, and the owner's report was exactly
+   * that -- "сдать кстати тоже не получается".
+   *
+   * THE OPCODE LAW IS THE REFERENCE'S, byte-verified: `SelectActiveQuest` (`0x501320`) sends
+   * COMPLETE_QUEST **unconditionally**, and an AVAILABLE row sends COMPLETE_QUEST when its icon is 0 --
+   * the "one-click" flag stored at the pool record's `+0x48` and read at `0x5012db` to pick `0x18a` over
+   * `0x186` -- else QUERY_QUEST (`benilla-app/src/ui_quest.rs:280,557`,
+   * `ui_gossip.rs:430-433#row_is_one_click`).
+   *
+   * The GUID is the GOSSIP's giver, passed explicitly rather than left to `QuestHandler#source`: that
+   * field is only set once a quest packet has arrived, so on a freshly opened menu it is null or still
+   * the previous NPC.
    */
-  const questGaps: Array<[string, string]> = [
-    ['SelectGossipAvailableQuest', 'no quest frame is decoded -- the SMSG_QUESTGIVER_* family has no '
-      + 'subscriber, so there is nowhere to show the quest this would ask for'],
-    ['SelectGossipActiveQuest', 'as SelectGossipAvailableQuest'],
-  ];
-  for (const [name, reason] of questGaps) {
-    // eslint-disable-next-line @typescript-eslint/no-loop-func
-    vm.registerFunction(name, () => {
-      console.warn(`${name}: not implemented -- ${reason}`);
-      return [];
-    });
-  }
+  const selectQuestRow = (rows: GossipQuest[], at: number, active: boolean): void => {
+    const row = Number.isFinite(at) && at >= 1 ? rows[at - 1] : undefined;
+    const npc = gossip.source;
+    if (row === undefined || npc === null || npc === undefined) {
+      return;
+    }
+    if (active || row.icon === 0) {
+      quest.completeQuest(row.questId, npc);
+    } else {
+      quest.queryQuest(row.questId, npc);
+    }
+  };
+
+  vm.registerFunction('SelectGossipAvailableQuest', (args) => {
+    selectQuestRow(gossip.availableQuests, Number(args[0]), false);
+    return [];
+  });
+  vm.registerFunction('SelectGossipActiveQuest', (args) => {
+    selectQuestRow(gossip.activeQuests, Number(args[0]), true);
+    return [];
+  });
 
   /**
    * `CloseGossip()` -- `GossipFrame_OnEvent`'s bail-out and `GossipFrameCloseButton`'s click.

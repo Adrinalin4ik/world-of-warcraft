@@ -59,8 +59,40 @@ import GamePacket from '../packet';
 import GameOpcode from '../opcode';
 import { guidBytes, guidHex, GUID_BYTES } from '../../guid-hex';
 import { itemWire } from '../../../game/classes/item-wire';
+import { DIALOG_STATUS } from './quest';
 
 /** One row of the gossip menu's option list. */
+/**
+ * An active (held) gossip quest row, from the wire icon alone.
+ *
+ * **MECHANISM FROM THE REFERENCE, NUMBERS FROM 3.3.5a**, and the two genuinely differ here. The
+ * reference verified the split at the bytes as `icon == 3 || icon == 4` -> ACTIVE, every other `u32`
+ * -> AVAILABLE, a flat two-way test with no range and no third arm
+ * (`benilla-app/src/ui_quest.rs#row_is_active`, split at `0x5dbbfe-0x5dbc08`; the gossip packet's rows
+ * use the identical test at `0x4e2430`/`0x4e2580`). Its 3 and 4 are 1.12's `DIALOG_STATUS_INCOMPLETE`
+ * and `DIALOG_STATUS_REWARD_REP` -- and WotLK INSERTED the three `LOW_LEVEL_*` values ahead of them, so
+ * the same two names are **5 and 6** here (see `DIALOG_STATUS` in `quest.ts`). Taking the reference's
+ * literal 3 and 4 would test LOW_LEVEL_REWARD_REP and LOW_LEVEL_AVAILABLE_REP instead -- the exact
+ * class of defect this repo's rules single out.
+ *
+ * `LOW_LEVEL_REWARD_REP` is included as a third value on its NAME: it is `REWARD_REP` for a quest below
+ * the player's level, so the player holds it and it is handed in the same way. Said plainly because it
+ * is a name-based inference and not a byte the reference could verify -- 1.12 has no such value. The
+ * cost of getting it wrong is one-directional: excluded, a low-level turn-in becomes un-handable, which
+ * is precisely the failure this whole predicate exists to prevent.
+ *
+ * **THE QUEST LOG IS NOT CONSULTED, deliberately.** The reference tried that and reversed it: an
+ * auto-complete quest is never in the log -- that is what auto-complete means -- yet the server marks
+ * it REWARD_REP so the client asks for the reward. Deriving the pool from log membership made every
+ * such quest permanently un-turn-in-able and drew its empty detail as a blank window (its ledger B95,
+ * decision 0758).
+ */
+export function rowIsActive(icon: number): boolean {
+  return icon === DIALOG_STATUS.INCOMPLETE
+    || icon === DIALOG_STATUS.REWARD_REP
+    || icon === DIALOG_STATUS.LOW_LEVEL_REWARD_REP;
+}
+
 export interface GossipOption {
   /** The server's own index, and what `CMSG_GOSSIP_SELECT_OPTION` carries back. */
   index: number;
@@ -198,6 +230,7 @@ export class GossipHandler extends EventEmitter {
 
     const questCount = gp.readUnsignedInt() >>> 0;
     const available: GossipQuest[] = [];
+    const active: GossipQuest[] = [];
     for (let i = 0; i < questCount; ++i) {
       const questId = gp.readUnsignedInt() >>> 0;
       const icon = gp.readUnsignedInt() >>> 0;
@@ -207,21 +240,30 @@ export class GossipHandler extends EventEmitter {
       const flags = gp.readUnsignedInt() >>> 0;
       const marker = gp.readUnsignedByte() !== 0;
       const title = gp.readCStr();
-      available.push({ questId, icon, level, flags, marker, title });
+      (rowIsActive(icon) ? active : available).push({ questId, icon, level, flags, marker, title });
     }
 
     this.source = guid;
     this.menuId = menuId;
     this.titleTextId = titleTextId;
     this.options = options;
-    // **THE QUEST LIST IS ALL "AVAILABLE" AND THAT IS THE WIRE'S OWN SHAPE, not a simplification of
-    // ours.** `SMSG_GOSSIP_MESSAGE` has ONE quest array; the split into available and active is the
-    // server's choice of which quests to put in it, and 3.3.5a's gossip message carries only the
-    // available ones (active quests reach the client through `SMSG_QUESTGIVER_QUEST_LIST`, which this
-    // client does not decode). `activeQuests` therefore stays empty, and
-    // `GetNumGossipActiveQuests` answering 0 is correct rather than a gap.
+    /**
+     * ONE ARRAY ON THE WIRE, SPLIT BY THE ICON -- and the paragraph that stood here said the opposite.
+     *
+     * It claimed "3.3.5a's gossip message carries only the available ones (active quests reach the
+     * client through `SMSG_QUESTGIVER_QUEST_LIST`)" and that an empty `activeQuests` was therefore
+     * correct rather than a gap. The owner's screenshot disproved it in one frame: a quest already in
+     * his log, complete, listed in Marshal McBride's gossip window under a yellow `!`. The server does
+     * put held quests in this array.
+     *
+     * What that cost was not cosmetic. `GossipFrame` sends a DIFFERENT opcode per pool -- an available
+     * row asks for the offer, an active row asks for the reward -- so with every row landing in
+     * "available" the quest could not be handed in at all. Owner: "сдать кстати тоже не получается".
+     *
+     * See `rowIsActive` for the predicate and for why the quest LOG must never be consulted here.
+     */
     this.availableQuests = available;
-    this.activeQuests = [];
+    this.activeQuests = active;
     // The greeting is a second round trip. Cleared first so a stale one from the previous NPC cannot
     // be drawn under this one's buttons.
     this.greeting = null;

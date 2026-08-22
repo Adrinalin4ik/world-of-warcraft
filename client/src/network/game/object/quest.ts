@@ -1346,8 +1346,11 @@ export class QuestHandler extends EventEmitter {
    * "Show me the turn-in panel" -- answered by `SMSG_QUESTGIVER_REQUEST_ITEMS` when the quest wants
    * items or money, and by `SMSG_QUESTGIVER_OFFER_REWARD` when it is ready to pay out.
    */
-  completeQuest(questId?: number): void {
-    const guid = this.source;
+  completeQuest(questId?: number, npc?: string): void {
+    // `npc` EXPLICIT, mirroring `queryQuest`: a gossip menu's row is handed in against the GOSSIP's
+    // giver, and `this.source` is only set once a quest packet has arrived -- so on a fresh menu it is
+    // null or, worse, the previous giver. `gossip-bridge.ts`' quest rows pass their own guid.
+    const guid = npc ?? this.source;
     const id = questId ?? this.progress?.questId ?? this.details?.questId ?? 0;
     if (guid === null || id === 0) {
       return;
