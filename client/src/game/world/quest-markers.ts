@@ -253,10 +253,43 @@ export class QuestMarkers {
           this.announcedBake = true;
           const bone = marker.model.parent;
           const m = bone === null ? null : bone.matrixWorld.elements;
+          /**
+           * THE TEXTURE, REPORTED HERE AND NOT AT ATTACH -- because at attach it cannot be anything but
+           * the placeholder.
+           *
+           * `M2Material#loadTextures` claims the slot with `TextureLoader.PLACEHOLDER` SYNCHRONOUSLY so
+           * the uniform array keeps its shape, and swaps the real texture in once the fetch decodes
+           * (`pipeline/m2/material/index.ts:679`). My first report ran in the `load` continuation, so
+           * `texCount=1 textures=1` was guaranteed and said nothing -- a claimed slot, not a bound
+           * image. The bake happens at least a frame later, so this one can tell them apart.
+           *
+           * Also worth naming: that fetch is queued at BACKGROUND priority for every material until a
+           * character/creature setter raises it, so a marker's texture sits behind terrain and every
+           * visible unit. A marker that is white for a while and then correct is that queue; one that
+           * stays white is not.
+           */
+          const sizes: string[] = [];
+          (marker.model as unknown as THREE.Object3D).traverse((node) => {
+            const mat = (node as unknown as { material?: unknown }).material;
+            const list = Array.isArray(mat) ? mat : [mat];
+            list.forEach((one) => {
+              const u = (one as { uniforms?: { textures?: { value?: unknown } } } | null)?.uniforms;
+              const bound = u?.textures?.value;
+              if (!Array.isArray(bound)) {
+                return;
+              }
+              bound.forEach((tex) => {
+                const image = (tex as { image?: { width?: number; height?: number } } | null)?.image;
+                sizes.push(image === undefined || image === null ? 'noimage'
+                  : `${String(image.width)}x${String(image.height)}`);
+              });
+            });
+          });
           // eslint-disable-next-line no-console
           console.log(`questmarkers: BAKED -- scale=${marker.model.scale.x.toFixed(4)}, `
             + `bone world pos=${m === null ? 'none'
-              : `${m[12].toFixed(1)},${m[13].toFixed(1)},${m[14].toFixed(1)}`}`);
+              : `${m[12].toFixed(1)},${m[13].toFixed(1)},${m[14].toFixed(1)}`}`
+            + `, textures=[${sizes.join(' ')}] (the real one is 64x64)`);
         }
       } else {
         pending += 1;
