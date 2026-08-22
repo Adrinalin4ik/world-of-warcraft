@@ -91,6 +91,46 @@ describe('ScrollFrame clipping', () => {
    * because nothing is left on screen to reason about. Two ways a viewport goes unresolvable, and both
    * pass the content through unclipped.
    */
+  /**
+   * A FONT STRING IS CROPPED, NOT NARROWED, and the distinction is the whole of the owner's report.
+   *
+   * `renderer.ts` draws a string at its RASTERIZED size centred in its rect, not stretched to it. So
+   * shrinking the rect re-centres the text in a smaller box and keeps its full height: the block drifts
+   * further the more of it is cropped, blocks at different crops appear to move at different speeds and
+   * collide, and the quad spills past the viewport. "нижняя часть движется быстрее и заходит поверх
+   * другого текста" + "текст уходит за пределы бокса", one cause.
+   *
+   * So the rect must survive untouched and the viewport must ride along as `crop`.
+   */
+  it('leaves a partially clipped font string its rect and carries the crop instead', () => {
+    const root = new WidgetRoot();
+    const frame = new Widget('frame', 'Viewport');
+    frame.setSize(300, 100);
+    frame.setAnchors({ point: 'TOPLEFT', relativePoint: 'TOPLEFT', x: 0, y: 0 });
+    root.root.add(frame);
+
+    const child = new Widget('frame', 'ScrollChild');
+    child.setSize(300, 400);
+    child.setAnchors({ point: 'TOPLEFT', relativePoint: 'TOPLEFT', x: 0, y: 0 });
+    child.clippedBy = frame;
+    frame.add(child);
+
+    // Straddling the bottom edge: 40 units tall starting 80 down a 100-tall viewport.
+    const text = new Widget('fontstring', 'Body');
+    text.setSize(285, 40);
+    text.setAnchors({ point: 'TOPLEFT', relativePoint: 'TOPLEFT', x: 0, y: -80 });
+    child.add(text);
+
+    const drawn = root.drawList(VIEWPORT).find((item) => item.widget === text);
+    expect(drawn).toBeDefined();
+
+    // The rect is the UNCROPPED placement -- all 40 units of it.
+    expect(Math.round(drawn!.rect.height)).toBe(40);
+    // And the crop is the part of the viewport it overlaps: 20 units, not 40.
+    expect(drawn!.crop).toBeDefined();
+    expect(Math.round(drawn!.crop!.height)).toBe(20);
+  });
+
   it('does not clip when the viewport is unplaceable or zero-sized', () => {
     const build = (apply: (frame: Widget) => void) => {
       const root = new WidgetRoot();

@@ -861,6 +861,22 @@ export interface DrawItem {
    * `barFillTexCoords`.
    */
   texCoords?: TexCoords;
+  /**
+   * The viewport this item must not draw outside of, when NARROWING ITS RECT CANNOT EXPRESS THE CROP.
+   *
+   * Set for a FONT STRING only, and the reason is `renderer.ts`' text branch: a string draws at its
+   * RASTERIZED size, centred inside its rect (`renderer.ts:396-402`), not stretched to it. So shrinking
+   * a font string's rect does not crop the text -- it RE-CENTRES it in a smaller box and keeps its full
+   * height. The owner saw both halves of that: "нижняя часть движется быстрее и заходит поверх другого
+   * текста" (a block drifts further the more of it is cropped, so blocks at different crops appear to
+   * move at different speeds and collide) and "текст уходит за пределы бокса" (the quad keeps its full
+   * size while its rect shrinks).
+   *
+   * So a clipped font string keeps its UNCROPPED rect -- placement stays exactly what it would be with
+   * no scroll -- and the crop rides along here for the renderer to apply to the text quad, where the
+   * glyph box and the raster pad are known and this file's rect arithmetic cannot reach.
+   */
+  crop?: Rect;
 }
 
 /**
@@ -911,6 +927,14 @@ function clipItem(item: DrawItem, clip: Rect): DrawItem | null {
     && bottom === item.rect.top + item.rect.height) {
     // Wholly inside: the common case, and it must allocate nothing.
     return item;
+  }
+  if (item.widget.kind === 'fontstring') {
+    // See `DrawItem#crop`: the rect is left ALONE, because narrowing it moves the text instead of
+    // cutting it. `left`/`top`/`right`/`bottom` above are the intersection, which is exactly the crop.
+    return {
+      ...item,
+      crop: { left, top, width: right - left, height: bottom - top },
+    };
   }
   const rect: Rect = { left, top, width: right - left, height: bottom - top };
   const base = item.texCoords ?? item.widget.texCoords ?? null;

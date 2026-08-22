@@ -426,6 +426,51 @@ export class GlueRenderer {
         const padY = pad?.y ?? 0;
         entry.mesh.position.set(snap(quadLeft) + size.width / 2, snap(quadTop) + size.height / 2, 0);
         entry.mesh.scale.set(size.width + padX, size.height + padY, 1);
+        /**
+         * THE CROP, for a font string inside a `<ScrollFrame>`.
+         *
+         * `widget.ts#clipItem` deliberately leaves a font string's RECT alone and passes the viewport
+         * here instead, because the placement above is centred in that rect: narrowing it would
+         * re-centre the text in a smaller box and keep its full height, which is what the owner saw as
+         * "нижняя часть движется быстрее" and "текст уходит за пределы бокса". So the text is placed
+         * exactly where it would be with no scroll, and the cut is made on the QUAD -- the only place
+         * the glyph box and the raster pad are known.
+         */
+        const crop = item.crop;
+        if (crop !== undefined) {
+          const quadWidth = size.width + padX;
+          const quadHeight = size.height + padY;
+          const quadX = snap(quadLeft) + size.width / 2 - quadWidth / 2;
+          const quadY = snap(quadTop) + size.height / 2 - quadHeight / 2;
+          const keptLeft = Math.max(quadX, crop.left);
+          const keptTop = Math.max(quadY, crop.top);
+          const keptRight = Math.min(quadX + quadWidth, crop.left + crop.width);
+          const keptBottom = Math.min(quadY + quadHeight, crop.top + crop.height);
+          if (keptRight <= keptLeft || keptBottom <= keptTop) {
+            // `clipItem` drops an item by its RECT; a text quad is inflated past its rect by the raster
+            // pad, so this is the residue that survives that test rather than a case it missed.
+            entry.mesh.scale.set(0, 0, 1);
+          } else {
+            entry.mesh.position.set((keptLeft + keptRight) / 2, (keptTop + keptBottom) / 2, 0);
+            entry.mesh.scale.set(keptRight - keptLeft, keptBottom - keptTop, 1);
+            // `writeQuadUVs` puts `v1` on the TOP vertices -- `fy` is 1 there -- and a text canvas is
+            // sampled unflipped, so the quad's top edge is `uv.y = 1` and uv.y DECREASES downward.
+            // Hence `1 - fractionFromTop`, not the fraction. Getting this backwards would scroll the
+            // glyphs the wrong way inside a stationary box, which is the failure this project has hit
+            // three times; it is derived from the vertex order rather than guessed.
+            const cropped = {
+              u0: (keptLeft - quadX) / quadWidth,
+              u1: (keptRight - quadX) / quadWidth,
+              v0: 1 - (keptBottom - quadY) / quadHeight,
+              v1: 1 - (keptTop - quadY) / quadHeight,
+            };
+            writeQuadUVs(entry.geometry, cropped);
+            // The cache MUST be written, or the precedence block above will not restore full UVs when
+            // this string stops being cropped: it compares `wanted` against `lastTexCoords` and would
+            // see no change from the null it recorded.
+            entry.lastTexCoords = cropped;
+          }
+        }
       } else {
         entry.mesh.position.set(left + width / 2, top + height / 2, 0);
         entry.mesh.scale.set(width, height, 1);
