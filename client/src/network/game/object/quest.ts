@@ -411,8 +411,6 @@ export class QuestHandler extends EventEmitter {
 
   private announcedStatusReply = false;
 
-  private announcedOfferTail = false;
-
   private lastQuestId = 0;
 
   private lastTitle = '';
@@ -797,8 +795,9 @@ export class QuestHandler extends EventEmitter {
    *     u32 emoteCount · emoteCount x { u32 delay · u32 emote }
    *     u32 choiceCount · triples · u32 rewardCount · triples
    *     i32 money · u32 xp
-   *     [tail] u32 charTitleId · u32 bonusTalents · u32 arenaPoints · u32 unk
-   *            u32 rewSpell · i32 rewSpellCast · u32 honor · f32 honorMultiplier
+   *     [tail] u32 honor · f32 honorMultiplier · u32 unused(8) · u32 rewSpellCast · u32 unused
+   *            u32 charTitleId · u32 bonusTalents · u32 arenaPoints · u32 unused
+   *            5 x u32 rewRepFaction · 5 x i32 rewRepValueId · 5 x i32 rewRepValue
    *
    * **The emote pairs are `{delay, emote}` here and `{emote, delay}` on the detail panel.** benilla
    * records the same reversal for 1.12 (`quest/giver.rs:14-15`); this arm consumes them for alignment
@@ -844,28 +843,6 @@ export class QuestHandler extends EventEmitter {
     this.lastQuestId = chosen.questId;
     this.lastTitle = chosen.title;
     this.offerShape = shape;
-    /**
-     * THE TAIL, ONCE, AS RAW WORDS. See `tryOffer`'s note at `tailAt` for why this exists rather than a
-     * corrected order: the layout is unverified, the owner has shown it is wrong, and this repo settles
-     * a layout with bytes off real traffic.
-     */
-    if (!this.announcedOfferTail) {
-      this.announcedOfferTail = true;
-      const words: string[] = [];
-      const save = gp.index;
-      gp.index = chosen.tailAt;
-      try {
-        for (let i = 0; i < 16; ++i) {
-          words.push(String(gp.readUnsignedInt() >>> 0));
-        }
-      } catch {
-        // Ran off the frame; what was collected is still the evidence.
-      }
-      gp.index = save;
-      console.warn(`quest: OFFER_REWARD tail after xp = [${words.join(' ')}] (body ${gp.bodySize}; `
-        + `we read charTitleId=${chosen.charTitleId} bonusTalents=${chosen.bonusTalents} `
-        + `arenaPoints=${chosen.arenaPoints} honor=${chosen.honor})`);
-    }
     if (chosen.title === '' || chosen.emoteCount > QUEST_EMOTE_COUNT) {
       console.warn(
         'quest: SMSG_QUESTGIVER_OFFER_REWARD looks misaligned (chose "' + shape + '", title "'
@@ -898,7 +875,7 @@ export class QuestHandler extends EventEmitter {
    */
   private tryOffer(
     gp: GamePacket, base: number, autoBytes: 1 | 4,
-  ): (QuestGiverOfferReward & { cursor: number; emoteCount: number; tailAt: number }) | null {
+  ): (QuestGiverOfferReward & { cursor: number; emoteCount: number }) | null {
     gp.index = base;
     try {
       const npc = this.readFullGuid(gp);
@@ -915,8 +892,6 @@ export class QuestHandler extends EventEmitter {
         // Bail rather than loop: an implausible count is the whole signal, and looping on a
         // multi-million count would over-read the frame in a hot handler.
         return {
-          // 0: this candidate never reached the tail, and this shape is the one being REJECTED anyway.
-          tailAt: 0,
           npc,
           questId,
           title,
@@ -951,14 +926,38 @@ export class QuestHandler extends EventEmitter {
       // reported from here once (see `handleOfferReward`) -- a residual against real traffic is the only
       // thing that settles a layout in this repo, and reconstructing a server's write order from memory
       // is what cost a round on the gossip icon.
-      const tailAt = gp.index;
+      /**
+       * THE TAIL, NOW PINNED TO REAL BYTES rather than to the guess this method's header used to carry.
+       *
+       * MEASURED off the owner's own turn-in (`window` console, quest 783, body 525), the words after
+       * `xp`:
+       *
+       *     0  0  8  0  0  0  0  0  0  72  0  0  0  0  3  0
+       *
+       * and the tenth word settles it: **72 is Stormwind's faction id**, which is exactly the reputation
+       * a Northshire quest grants. A layout that lands the reward-reputation block on its first word is
+       * the right one, and no other alignment does.
+       *
+       * So the order is: `honor`, `honorMultiplier` (a FLOAT -- read as a word for its width only), a
+       * word the client never uses that the server writes as literal **8**, `rewSpellCast`, another
+       * unused word, `charTitleId`, `bonusTalents`, `arenaPoints`, one more unused word, then
+       * 5 x `rewRepFaction` and the two 5-word reputation-value blocks.
+       *
+       * WHAT THE OLD ORDER COST, since it looked harmless: it read `honor` as `charTitleId` and the
+       * literal 8 as `arenaPoints`, so the reward panel drew "Bonus arena points: 8" on every quest --
+       * `QuestInfo_ShowRewards` shows that row on any nonzero value. The owner reported exactly that,
+       * and the guess had survived because the header admitted it "cannot check [the order] without a
+       * live packet" and nobody had one. wowdev.wiki has no page for this opcode; the bytes were the
+       * only oracle.
+       */
+      const honor = this.tailU32(gp);
+      this.tailU32(gp); // honorMultiplier -- a float, consumed for its width
+      this.tailU32(gp); // unused by the client; the server writes literal 8
+      const rewardSpell = this.tailU32(gp);
+      this.tailU32(gp); // unused
       const charTitleId = this.tailU32(gp);
       const bonusTalents = this.tailU32(gp);
       const arenaPoints = this.tailU32(gp);
-      this.tailU32(gp); // unk
-      const rewardSpell = this.tailU32(gp);
-      this.tailU32(gp); // rewSpellCast
-      const honor = this.tailU32(gp);
       return {
         npc,
         questId,
@@ -976,7 +975,6 @@ export class QuestHandler extends EventEmitter {
         charTitleId,
         bonusTalents,
         arenaPoints,
-        tailAt,
         cursor: gp.index,
         emoteCount,
       };
