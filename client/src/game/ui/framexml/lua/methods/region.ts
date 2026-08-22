@@ -20,7 +20,7 @@ import { Anchor, AnchorPoint } from '../../../layout';
 import { Layer, Widget, deriveSize, effectiveFont, touchGeometry } from '../../../widget';
 import { familyForFontFile, fontFileForFamily, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
-import { rectOf, screenHeightUnits } from '../../../rects';
+import { layoutRectOf, rectOf, screenHeightUnits } from '../../../rects';
 import { ensureArt } from '../../../runtime-art';
 
 const warned = new Set<string>();
@@ -229,6 +229,48 @@ function writeText(widget: Widget, next: string): void {
   if (widget.width === 0 || widget.height === 0) {
     touchGeometry();
   }
+}
+
+/**
+ * `GetWidth`/`GetHeight` on an axis the anchors constrain, which is where all three scrollbar inputs died.
+ *
+ * **THE COMMENT ABOVE `GetWidth` ALREADY NAMED THIS GAP** -- "a FRAME's 0 still means 'derive from the
+ * opposing anchors', which only `resolveAnchors` can do" -- and it turned out to be the whole of
+ * "скрол не работает: ни кнопки, ни драг, ни колесо". `UIPanelScrollBarTemplate` is authored
+ * `<Size x="16" y="0"/>` (`uipaneltemplates.xml:173-175`) and takes its real height from two opposing
+ * anchors on the instance (`:288-299`). So `GetHeight()` answered 0, and the client computes every scroll
+ * step FROM it:
+ *
+ *   - arrow `<OnClick>`: `parent:SetValue(parent:GetValue() + (parent:GetHeight() / 2))`  `:184`, `:196`
+ *   - wheel: `scrollBar:SetValue(scrollBar:GetValue() +/- (scrollBar:GetHeight() / 2))`  `:161-163`
+ *
+ * Both are `SetValue(currentValue + 0)`, and `SetValue` dispatches only on a TRANSITION -- so the value
+ * never moved, `OnValueChanged` never fired, and `SetVerticalScroll` was never called. MEASURED in
+ * `__tests__/scroll-arrow-click.test.ts` before the fix: handlers bound, scroll child present, both
+ * scripts found, and `GetHeight()` = 0.
+ *
+ * ONLY when the derived size is 0 on that axis, which is exactly the case the old comment excluded. Any
+ * widget with an authored or text-derived extent keeps the answer it already gave, so this cannot move a
+ * value that was already right.
+ *
+ * `layoutRectOf` rather than `rectOf`: the on-demand resolve answers for a HIDDEN frame too, and the
+ * engine's `GetHeight()` does not depend on being drawn. It also answers before the first draw, which is
+ * when a panel's `OnLoad` measures itself.
+ *
+ * KNOWN LIMITATION, stated rather than papered over: the resolved rect is in the layout's own units, so
+ * on a SCALED frame this reports the scaled extent where the engine reports the local one. Every scroll
+ * customer in this client is scale 1, so nothing here is wrong today; the reference names the symptom for
+ * when one is not (`benilla-ui/src/script/scrollframe.rs:71-79` -- a scaled scroll frame under-scrolls by
+ * its scale). There is no effective-scale helper in this codebase yet to divide by.
+ */
+function resolvedExtent(ctx: MethodContext, self: number, axis: 'width' | 'height'): number {
+  const widget = widgetOf(ctx, self);
+  const derived = deriveSize(widget, 1, measureText)[axis];
+  if (derived !== 0) {
+    return derived;
+  }
+  const rect = layoutRectOf(widget.id);
+  return rect === null ? derived : rect[axis];
 }
 
 const REGION: MethodTable = {
@@ -509,10 +551,11 @@ const REGION: MethodTable = {
   // y="0">` and `gluedialog.lua:610,677` sizes the whole dialog panel from its `GetHeight()`, which
   // reported 0 and left the panel one text-height short. `GetStringWidth` already measured this way.
   // Measured at scale 1: a widget's size is in logical units, so the live layout scale divides out.
-  // Everything else reports its stored size unchanged -- a FRAME's 0 still means "derive from the
-  // opposing anchors", which only `resolveAnchors` can do.
-  GetWidth: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).width],
-  GetHeight: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).height],
+  // Everything else reports its stored size -- and a FRAME's 0, which means "derive from the opposing
+  // anchors", is now answered from the resolved rect rather than left at 0. See `resolvedExtent`: that
+  // 0 was the whole of the dead scrollbar.
+  GetWidth: (ctx, self) => [resolvedExtent(ctx, self, 'width')],
+  GetHeight: (ctx, self) => [resolvedExtent(ctx, self, 'height')],
 
   /**
    * `GetLeft` / `GetRight` / `GetTop` / `GetBottom` / `GetCenter` -- where the widget actually ENDED UP.
