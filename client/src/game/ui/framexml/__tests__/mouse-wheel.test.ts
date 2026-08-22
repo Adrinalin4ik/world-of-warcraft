@@ -50,13 +50,19 @@ describe('OnMouseWheel', () => {
     /** What `input.ts#onWheel` receives. `deltaY > 0` is scrolling DOWN in the DOM. */
     const wheel = (deltaY: number) => {
       let prevented = false;
+      // `stopped` is not fixture bookkeeping -- it IS a requirement. The camera's own wheel handler sits
+      // on `document.body` (`controls.tsx:106,156`), an ancestor of this canvas, so an event the UI took
+      // and did not stop reaches the camera too and the panel scrolls while the view zooms out. The
+      // owner reported exactly that; `preventDefault` alone does not stop a bubble.
+      let stopped = false;
       (input as unknown as { onWheel: (e: WheelEvent) => void }).onWheel({
         deltaY,
         clientX: 10,
         clientY: 10,
         preventDefault: () => { prevented = true; },
+        stopPropagation: () => { stopped = true; },
       } as unknown as WheelEvent);
-      return prevented;
+      return prevented && stopped;
     };
 
     // The pointer is over `Inner`, which has no handler -- the walk must find `Outer`'s.
