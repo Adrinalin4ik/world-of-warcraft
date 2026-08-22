@@ -149,6 +149,22 @@ export class QuestMarkers {
   /** Guids whose load is in flight, so a slow fetch cannot start a second one. */
   private loading = new Set<string>();
 
+  /**
+   * SELF-ANNOUNCING DIAGNOSIS, at most two lines for the whole session.
+   *
+   * Every static check on this subsystem passes -- the three models and their `.skin` files serve real
+   * bytes, attachment id 18 is present in 3.3.5a's `humanmale.m2`, all four opcodes carry their 3.3.5a
+   * numbers, both guid maps go through `guid-hex.ts`, and the status width is derived from the body
+   * size rather than assumed. So what remains is runtime-only, and asking the owner to run a console
+   * probe has not worked. These two lines put the answer in the console he already reads.
+   *
+   * Bounded by construction: one line the first time a status map arrives non-empty, one line for the
+   * first attach outcome. Never per frame, so this cannot become spam or a cost.
+   */
+  private announcedFeed = false;
+
+  private announcedOutcome = false;
+
   /** `window.worldQuestMarkers()` reads this. `noSlot` is the reference's render-nothing case. */
   public stats = {
     attached: 0, baked: 0, pending: 0, noSlot: 0, dropped: 0,
@@ -173,6 +189,32 @@ export class QuestMarkers {
       if (wanted === null || wanted !== marker.path) {
         this.detach(guid, marker);
       }
+    }
+
+    if (!this.announcedFeed && statuses.size > 0) {
+      this.announcedFeed = true;
+      let matched = 0;
+      let withModel = 0;
+      let wanted = 0;
+      for (const [guid, status] of statuses) {
+        const unit = entities.get(guid);
+        if (unit !== undefined) {
+          matched += 1;
+          if (unit.model) {
+            withModel += 1;
+          }
+        }
+        if (modelFor(status) !== null) {
+          wanted += 1;
+        }
+      }
+      // eslint-disable-next-line no-console
+      console.log(
+        `questmarkers: ${statuses.size} statuses, ${wanted} want a model; `
+        + `entities=${entities.size}, matched=${matched}, withModel=${withModel}; `
+        + `statuses=[${Array.from(statuses.entries()).slice(0, 4)
+          .map(([g, st]) => `${g}:${st}`).join(' ')}]`,
+      );
     }
 
     for (const [guid, status] of statuses) {
@@ -215,10 +257,18 @@ export class QuestMarkers {
           M2Blueprint.unload(model as never);
           return;
         }
+        if (!this.announcedOutcome) {
+          this.announcedOutcome = true;
+          // eslint-disable-next-line no-console
+          console.log(`questmarkers: first attach ${guid} -> slot ${MARKER_ATTACHMENT} `
+            + `${host.attachTo === undefined ? 'NO attachTo' : 'trying'}`);
+        }
         if (!host.attachTo(MARKER_ATTACHMENT, model)) {
           // NO SLOT means NO MARKER -- the reference's own behaviour, not a fallback to another bone
           // or to a world-space position. Counted so the instrument can say how often.
           this.stats.noSlot += 1;
+          // eslint-disable-next-line no-console
+          console.log(`questmarkers: NO SLOT ${MARKER_ATTACHMENT} on ${guid}'s model -- no marker`);
           M2Blueprint.unload(model as never);
           return;
         }
@@ -231,8 +281,10 @@ export class QuestMarkers {
         this.live.set(guid, { path, model, baked: false });
         this.stats.attached += 1;
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         this.loading.delete(guid);
+        // eslint-disable-next-line no-console
+        console.log(`questmarkers: model ${path} failed to load -- no marker`, error);
         // `M2Blueprint.load` logs its own failure. A missing marker model is a missing marker.
       });
   }
