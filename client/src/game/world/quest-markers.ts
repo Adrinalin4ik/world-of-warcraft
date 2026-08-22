@@ -167,6 +167,8 @@ export class QuestMarkers {
 
   private announcedStart = false;
 
+  private announcedMaterials = false;
+
   private announcedBake = false;
 
   private announcedPending = false;
@@ -359,6 +361,40 @@ export class QuestMarkers {
         // ATTACHED, said outright. `attachTo` returning true is the point past which every remaining
         // failure is invisible from the outside -- the model is in the scene graph and simply does not
         // appear -- so this and the bake lines below are the only way to tell them apart.
+        /**
+         * THE MATERIALS, ONCE. The marker now DRAWS -- and white, where its own texture is a pure
+         * yellow-to-orange ramp.
+         *
+         * Verified off the game's own files before instrumenting: `talktome.m2` declares ONE texture,
+         * `type = 0` (the name lives in the model, not supplied at runtime),
+         * `INTERFACE\BUTTONS\YELLOWORANGE64.BLP`; the host serves it lowercase and
+         * `net/loader.js#normalizePath` lowercases every fetch; the BLP is `BLP2`, DXT1, 64x64, opaque,
+         * and its blocks decode to (255,255,0) fading to (255,109,0) -- no white anywhere. The model
+         * carries NO vertex-colour block, so the colour can only come from that texture, and the glyph
+         * shape comes from the GEOMETRY -- which is why an untextured mesh reads as a white `!` rather
+         * than a blank quad.
+         *
+         * So the question is whether a map is bound at all, and that is a property of the loaded model
+         * rather than of anything this file does. Reported here rather than guessed at.
+         */
+        if (!this.announcedMaterials) {
+          this.announcedMaterials = true;
+          const rows: string[] = [];
+          (model as unknown as THREE.Object3D).traverse((node) => {
+            const mat = (node as unknown as { material?: unknown }).material;
+            if (mat === undefined || mat === null) {
+              return;
+            }
+            const list = Array.isArray(mat) ? mat : [mat];
+            list.forEach((one) => {
+              const m = one as { map?: { name?: string; image?: unknown } | null; type?: string };
+              rows.push(`${m.type ?? '?'}:map=${m.map === null || m.map === undefined ? 'NONE'
+                : `${m.map.name || 'unnamed'}${m.map.image === undefined ? '/noimage' : ''}`}`);
+            });
+          });
+          // eslint-disable-next-line no-console
+          console.log(`questmarkers: materials [${rows.join(' | ')}]`);
+        }
         // eslint-disable-next-line no-console
         console.log(`questmarkers: ATTACHED ${guid}; live=${this.live.size} `
           + `attached=${this.stats.attached} noSlot=${this.stats.noSlot}`);
