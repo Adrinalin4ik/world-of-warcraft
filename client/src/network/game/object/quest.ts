@@ -160,6 +160,11 @@ export interface QuestObjective {
 
 /** The full quest template -- `SMSG_QUEST_QUERY_RESPONSE`. */
 export interface QuestTemplate {
+  /**
+   * `xpId` -- the DIFFICULTY BAND, not an amount. `QuestXP.dbc` is keyed by the quest's LEVEL and this
+   * word picks one of that row's ten values (`pipeline/dbc/quest-xp-data.ts`).
+   */
+  xpId: number;
   questId: number;
   method: number;
   level: number;
@@ -481,7 +486,11 @@ export class QuestHandler extends EventEmitter {
     gp.readUnsignedInt(); // repObjectiveFaction2 -- WotLK
     gp.readUnsignedInt(); // repObjectiveValue2 -- WotLK
     const nextQuestInChain = gp.readUnsignedInt() >>> 0;
-    gp.readUnsignedInt(); // xpId -- WotLK; the XP is looked up client-side from QuestXP.dbc, not read
+    // KEPT NOW, not discarded: `QuestXP.dbc` is loaded (`pipeline/dbc/quest-xp-data.ts`) and this word is
+    // the difficulty band it is indexed by, so `GetQuestLogRewardXP` can answer a real figure. The line
+    // that stood here said the XP "is looked up client-side from QuestXP.dbc, not read" -- true about
+    // where the amount comes from, and it made this word look discardable.
+    const xpId = gp.readUnsignedInt() >>> 0; // WotLK
     const money = gp.readInt();
     const moneyMaxLevel = gp.readUnsignedInt() >>> 0;
     const rewardSpell = gp.readUnsignedInt() >>> 0;
@@ -555,6 +564,7 @@ export class QuestHandler extends EventEmitter {
     const template: QuestTemplate = {
       questId,
       method,
+      xpId,
       level,
       minLevel,
       zoneOrSort,

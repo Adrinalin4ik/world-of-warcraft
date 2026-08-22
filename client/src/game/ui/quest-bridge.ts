@@ -95,6 +95,7 @@ import { QUEST_FLAGS } from '../../network/game/object/quest';
 import { NPC_FLAG } from '../world/cursor-mode';
 import { itemLink, itemTooltipLines } from './item-tooltip';
 import { spellData } from '../pipeline/dbc/spell-data';
+import { questXpData } from '../pipeline/dbc/quest-xp-data';
 import {
   getItemTooltipSource, setItemTooltipSource, ItemTooltipInfo,
 } from './framexml/lua/api/items';
@@ -1324,20 +1325,28 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   });
 
   /**
-   * `GetQuestLogRewardXP()` -- a DECLARED GAP that answers 0 rather than a wrong number.
+   * `GetQuestLogRewardXP()` -- REAL now, off `QuestXP.dbc`. The gap note it replaces was accurate and
+   * named exactly what was missing: "the query response carries an `xpId`, not an amount; resolving it
+   * needs QuestXP.dbc".
    *
-   * The query response carries an `xpId`, not an amount: the real client looks the level up in
-   * `QuestXP.dbc` against the player's own level. That DBC is not loaded and joining it is a separate
-   * piece of work; 0 hides the XP row (`QuestInfo_ToggleRewardElement` returns its anchor unchanged for
-   * a 0), which is a missing line rather than a wrong figure. The GIVER panel's `GetRewardXP` is a real
-   * number because `SMSG_QUESTGIVER_QUEST_DETAILS` carries the computed amount.
+   * The GIVER panel's `GetRewardXP` was always a real number because
+   * `SMSG_QUESTGIVER_QUEST_DETAILS` carries the computed amount; only the LOG has to compute it, because
+   * the log reads the template cache. See `pipeline/dbc/quest-xp-data.ts` for the measured layout, the
+   * exact corroboration against the owner's own traffic, and the level-difference reduction that is
+   * deliberately NOT applied.
+   *
+   * **0 for an unknown, not nil**, and that is the opposite of this file's usual rule for a reason:
+   * `QuestInfo_ToggleRewardElement` hides the row for a 0 and would raise on a nil in the arithmetic
+   * that follows. A missing line while the DBC is in flight, then the real figure.
    */
-  const xpGap = notImplemented(
-    'GetQuestLogRewardXP',
-    'the query response carries an xpId, not an amount; resolving it needs QuestXP.dbc',
-    [0],
-  );
-  fn('GetQuestLogRewardXP', () => xpGap(null as never, 0, []));
+  void questXpData.ensureLoaded();
+  fn('GetQuestLogRewardXP', () => {
+    const template = selectedTemplate();
+    if (template === null) {
+      return [0];
+    }
+    return [questXpData.xpFor(template.level, template.xpId) ?? 0];
+  });
 
   fn('GetQuestLogRewardHonor', () => [0]);
   fn('GetQuestLogRewardArenaPoints', () => [selectedTemplate()?.arenaPoints ?? 0]);

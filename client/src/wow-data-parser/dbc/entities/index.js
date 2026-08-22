@@ -112,6 +112,7 @@ export * as PetitionType from './petition-type';
 export * as PowerDisplay from './power-display';
 export * as QuestInfo from './quest-info';
 export * as QuestSort from './quest-sort';
+export * as QuestXP from './quest-xp';
 export * as Resistances from './resistances';
 export * as ScreenEffect from './screen-effect';
 export * as ServerMessages from './server-messages';
