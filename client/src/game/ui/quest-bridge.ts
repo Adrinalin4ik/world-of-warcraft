@@ -93,6 +93,7 @@ import type {
 } from '../../network/game/object/quest';
 import { QUEST_FLAGS } from '../../network/game/object/quest';
 import { NPC_FLAG } from '../world/cursor-mode';
+import type { GossipQuest } from '../../network/game/object/gossip';
 import { QUEST_STATE, QuestLogSlot } from '../../network/game/object/update-object/quest-log';
 
 /**
@@ -548,32 +549,51 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   });
 
   /**
-   * `SelectGossipAvailableQuest(index)` / `SelectGossipActiveQuest(index)` -- the GOSSIP menu's rows.
+   * `SelectGossipAvailableQuest(index)` / `SelectGossipActiveQuest(index)` -- the GOSSIP menu's rows,
+   * and **THE ONLY HOME FOR THEM.**
    *
-   * **These OVERRIDE `gossip-bridge.ts`' declared gaps rather than editing that file**, and the
-   * override is why this bridge is attached after it in `world-ui.ts`. Its stubs said "no quest frame
-   * is decoded -- the SMSG_QUESTGIVER_* family has no subscriber, so there is nowhere to show the quest
-   * this would ask for" (`gossip-bridge.ts:231-233`). There is now, and registering the working version
-   * here keeps the gossip file owned by the merchant path while closing the gap the quest path opened.
+   * They live here because this bridge is attached AFTER `gossip-bridge.ts` in `world-ui.ts`, so
+   * whatever it registers wins. That ordering turned a duplicate into a silent defect: a correct
+   * implementation was added to the gossip file -- with the reference's opcode law and an explicit giver
+   * guid -- and it was dead code, overridden by the version here, which sent `CMSG_QUESTGIVER_QUERY_QUEST`
+   * for BOTH pools. The owner saw exactly that: a gold `?` on a completed quest, a click that opened
+   * nothing, and `0x186` on the wire where `0x18A` belongs. `gossip-bridge.ts` now carries a pointer
+   * here instead of a second copy.
    *
-   * `GossipTitleButton_OnClick` passes `self:GetID()`, which `GossipFrameAvailableQuestsUpdate` sets to
-   * the 1-based row of the AVAILABLE list -- the same indexing `GetGossipAvailableQuests` answers in.
+   * THE OPCODE LAW IS THE REFERENCE'S, byte-verified: `SelectActiveQuest` (`0x501320`) sends
+   * COMPLETE_QUEST **unconditionally**, and an AVAILABLE row sends COMPLETE_QUEST when its icon is 0 --
+   * the "one-click" flag at the pool record's `+0x48`, read at `0x5012db` to pick `0x18a` over `0x186` --
+   * else QUERY_QUEST (`benilla-app/src/ui_quest.rs:280,557`, `ui_gossip.rs:430-433`).
+   *
+   * `GossipTitleButton_OnClick` passes `self:GetID()`, which the two update functions set to the 1-based
+   * row of their OWN list, so each select indexes the list it belongs to.
+   *
+   * The giver guid is passed EXPLICITLY: `QuestHandler#source` is only set once a quest packet has
+   * arrived, so on a freshly opened menu it is null or still the previous NPC.
    */
+  const selectGossipRow = (rows: GossipQuest[], at: number, active: boolean): void => {
+    const gossip = world.game.objectHandler.gossipHandler;
+    const row = rows[Number(at) - 1];
+    const npc = gossip.source ?? undefined;
+    if (row === undefined) {
+      return;
+    }
+    if (active || row.icon === 0) {
+      quest.completeQuest(row.questId, npc);
+    } else {
+      quest.queryQuest(row.questId, npc);
+    }
+  };
+
   fn('SelectGossipAvailableQuest', (args) => {
     const gossip = world.game.objectHandler.gossipHandler;
-    const row = gossip.availableQuests[Number(args[0]) - 1];
-    if (row !== undefined) {
-      quest.queryQuest(row.questId, gossip.source ?? undefined);
-    }
+    selectGossipRow(gossip.availableQuests, Number(args[0]), false);
     return [];
   });
 
   fn('SelectGossipActiveQuest', (args) => {
     const gossip = world.game.objectHandler.gossipHandler;
-    const row = gossip.activeQuests[Number(args[0]) - 1];
-    if (row !== undefined) {
-      quest.queryQuest(row.questId, gossip.source ?? undefined);
-    }
+    selectGossipRow(gossip.activeQuests, Number(args[0]), true);
     return [];
   });
 

@@ -46,7 +46,7 @@ import { fireEvent } from './framexml/lua/events';
 import { GlueArt } from './art';
 import { setUnit } from './framexml/lua/api/units';
 import { snapshotOf } from './unit-bridge';
-import type { GossipHandler, GossipQuest } from '../../network/game/object/gossip';
+import type { GossipHandler } from '../../network/game/object/gossip';
 import { QUEST_STATE } from '../../network/game/object/update-object/quest-log';
 import { expandTextTokens } from './text-tokens';
 
@@ -106,10 +106,8 @@ const QUEST_FLAGS_WEEKLY = 0x8000;
 
 export function attachGossipBridge(vm: LuaVM, world: World, art: GlueArt): () => void {
   const gossip: GossipHandler = world.game.objectHandler.gossipHandler;
-  const quest = world.game.objectHandler.questHandler;
 
   let disposed = false;
-  let announcedSelect = false;
 
   // The ten icons, registered once. `art.register` is idempotent and the whole set is ten 16x16-ish
   // BLPs, so registering all of them on attach is cheaper than deciding per menu and cannot miss the
@@ -257,67 +255,19 @@ export function attachGossipBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   });
 
   /**
-   * The two quest selections -- **REAL now, and the paragraph that stood here was stale and costly.**
+   * THE TWO QUEST SELECTIONS ARE NOT HERE, and this pointer is the whole of the entry.
    *
-   * It said both "would send `CMSG_QUESTGIVER_QUERY_QUEST` / `CMSG_QUESTGIVER_CHOOSE_REWARD` and be
-   * answered by the `SMSG_QUESTGIVER_*` family, none of which this client decodes -- there is no quest
-   * frame to put the answer in". That has not been true since the quest bridge landed: `quest-bridge.ts`
-   * subscribes to the detail, progress and offer-reward packets and drives the client's own giver panel
-   * off them. So these two warned to the console and did nothing, and the owner's report was exactly
-   * that -- "сдать кстати тоже не получается".
+   * `quest-bridge.ts` owns `SelectGossipAvailableQuest`/`SelectGossipActiveQuest`, and it must: it is
+   * attached AFTER this bridge in `world-ui.ts`, so anything registered here for those two names is
+   * overwritten. A correct implementation DID live here for a few commits -- with the reference's opcode
+   * law and an explicit giver guid -- and it was dead code the whole time, while the version in the quest
+   * bridge sent `CMSG_QUESTGIVER_QUERY_QUEST` for both pools. The owner's symptoms were a click that
+   * opened nothing and `0x186` on the wire where `0x18A` belongs, and nothing in either file said the
+   * two were competing.
    *
-   * THE OPCODE LAW IS THE REFERENCE'S, byte-verified: `SelectActiveQuest` (`0x501320`) sends
-   * COMPLETE_QUEST **unconditionally**, and an AVAILABLE row sends COMPLETE_QUEST when its icon is 0 --
-   * the "one-click" flag stored at the pool record's `+0x48` and read at `0x5012db` to pick `0x18a` over
-   * `0x186` -- else QUERY_QUEST (`benilla-app/src/ui_quest.rs:280,557`,
-   * `ui_gossip.rs:430-433#row_is_one_click`).
-   *
-   * The GUID is the GOSSIP's giver, passed explicitly rather than left to `QuestHandler#source`: that
-   * field is only set once a quest packet has arrived, so on a freshly opened menu it is null or still
-   * the previous NPC.
+   * So: do not re-add them here. If they need changing, change them there.
    */
-  const selectQuestRow = (rows: GossipQuest[], at: number, active: boolean): void => {
-    const row = Number.isFinite(at) && at >= 1 ? rows[at - 1] : undefined;
-    const npc = gossip.source;
-    /**
-     * AT THE TOP, BEFORE THE GUARDS -- and the previous placement was my own diagnostic error.
-     *
-     * The line used to sit after the early return, so a missing row or a null giver guid produced no
-     * output at all. The owner then reported a click with no line and no packet, which is exactly what
-     * that hole looks like, and it cost a round: `GetMouseFocus()` names this button, its `type` is
-     * `Active`, its `GetID()` is 1 and its `OnClick` is registered, so the remaining question was
-     * whether this function is entered at all -- and the instrument could not answer it.
-     *
-     * Placed here, silence means the click is never dispatched to the handler (a registered handler is
-     * not a dispatched one), and a line with `row=undefined` or `npc=null` names the guard instead.
-     */
-    if (!announcedSelect) {
-      announcedSelect = true;
-      // eslint-disable-next-line no-console
-      console.log(`gossip: SELECT active=${active} at=${at} rows=${rows.length} `
-        + `row=${row === undefined ? 'undefined' : row.questId} npc=${String(npc)}`);
-    }
-    if (row === undefined || npc === null || npc === undefined) {
-      return;
-    }
-    // eslint-disable-next-line no-console
-    console.log(`gossip: row ${row.questId} icon=${row.icon} -> `
-      + `${active || row.icon === 0 ? 'COMPLETE_QUEST 0x18A' : 'QUERY_QUEST 0x186'}`);
-    if (active || row.icon === 0) {
-      quest.completeQuest(row.questId, npc);
-    } else {
-      quest.queryQuest(row.questId, npc);
-    }
-  };
 
-  vm.registerFunction('SelectGossipAvailableQuest', (args) => {
-    selectQuestRow(gossip.availableQuests, Number(args[0]), false);
-    return [];
-  });
-  vm.registerFunction('SelectGossipActiveQuest', (args) => {
-    selectQuestRow(gossip.activeQuests, Number(args[0]), true);
-    return [];
-  });
 
   /**
    * `CloseGossip()` -- `GossipFrame_OnEvent`'s bail-out and `GossipFrameCloseButton`'s click.
