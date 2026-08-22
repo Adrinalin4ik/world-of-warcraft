@@ -147,12 +147,34 @@ interface LogEntry {
  */
 let logSelection = 0;
 
+/**
+ * The bridge's own abandon latch, reached by the EARLY registration below.
+ *
+ * `QuestLogFrame_OnLoad` walks `QuestLog_SetSelection`, which calls `SelectQuestLogEntry` and then
+ * `SetAbandonQuest` (`questlogframe.lua:612,615`) -- both while the manifest is loading. Fixing only the
+ * first moved the owner's error from line 612 to line 615, which is the whole lesson: the OnLoad needs
+ * the SET, not one name at a time.
+ *
+ * A delegate rather than a second implementation: `SetAbandonQuest` has to latch the SELECTED row, and
+ * the entry list lives inside the bridge. Before the bridge attaches there are no quests, so latching
+ * nothing is the correct answer rather than a stub -- and once it attaches, these point at the real
+ * thing and there is still exactly one implementation.
+ */
+let latchAbandon: (() => void) | null = null;
+
+let abandonName: (() => string | null) | null = null;
+
 export function installQuestLogSelection(vm: LuaVM): void {
   vm.registerFunction('SelectQuestLogEntry', (args) => {
     logSelection = Number(args[0]) || 0;
     return [];
   });
   vm.registerFunction('GetQuestLogSelection', () => [logSelection]);
+  vm.registerFunction('SetAbandonQuest', () => {
+    latchAbandon?.();
+    return [];
+  });
+  vm.registerFunction('GetAbandonQuestName', () => [abandonName?.() ?? null]);
 }
 
 export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => void {
@@ -1329,17 +1351,26 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * `GetAbandonQuestName` answers **nil** with nothing latched, for the `0`-is-truthy reason in the
    * header: `QuestLogControlPanel_UpdateState` enables the Abandon button on its truth.
    */
-  fn('SetAbandonQuest', () => {
+  /**
+   * The SAME implementation the early registration delegates to, so there is one of it. See
+   * `latchAbandon`: `QuestLogFrame_OnLoad` reaches `SetAbandonQuest` while the manifest is loading, long
+   * before this bridge exists.
+   */
+  latchAbandon = (): void => {
     const row = selected();
     abandoning = row === null ? null : { slot: row.slot, questId: row.questId };
+  };
+  abandonName = (): string | null => (abandoning === null
+    ? null
+    : templateOf(abandoning.questId)?.title ?? null);
+
+  fn('SetAbandonQuest', () => {
+    latchAbandon?.();
     return [];
   });
 
   fn('GetAbandonQuestName', () => {
-    if (abandoning === null) {
-      return [null];
-    }
-    return [templateOf(abandoning.questId)?.title ?? null];
+    return [abandonName?.() ?? null];
   });
 
   /**

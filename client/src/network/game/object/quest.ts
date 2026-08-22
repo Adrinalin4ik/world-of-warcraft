@@ -1023,7 +1023,23 @@ export class QuestHandler extends EventEmitter {
     while (this.remaining(gp) >= 4) {
       flagWords.push(gp.readUnsignedInt() >>> 0);
     }
-    const isComplete = (flagWords[1] ?? 0) !== 0;
+    /**
+     * THE FIRST trailing word, not the second.
+     *
+     * `QuestProgressCompleteButton` is enabled by `IsQuestCompletable()` alone (`questframe.lua:135`),
+     * which answers off this, and the owner reported Continue offered on a quest he had not finished --
+     * twice. So whatever we were reading is nonzero while the quest is incomplete.
+     *
+     * Of the trailing words only ONE can vary: the rest are constants the server writes unconditionally,
+     * which is why reading a later index is permanently true. That makes index 0 the only reading
+     * consistent with the observation, and it is the same shape as the sibling packet's tail, where the
+     * owner's bytes showed a literal filler sitting where we had put a real field.
+     *
+     * STATED AS THE INDICATED READING, NOT A VERIFIED ONE, and the dump below stays for exactly that
+     * reason: if his next line shows word 0 nonzero on an incomplete quest, this is wrong and the bytes
+     * say so immediately. A wire layout in this repo is "verified" only against real traffic.
+     */
+    const isComplete = (flagWords[0] ?? 0) !== 0;
     /**
      * THE FLAG WORDS, ONCE -- because `isComplete` reads one of them by INDEX and the index is in doubt.
      *
