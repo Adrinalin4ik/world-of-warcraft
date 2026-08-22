@@ -63,6 +63,12 @@ type Pooled = {
   material: THREE.MeshBasicMaterial;
   geometry: THREE.BufferGeometry;
   /**
+   * The four fragment-clip planes for a widget inside a `<ScrollFrame>`, allocated on first need and
+   * mutated in place thereafter. Absent on every widget that has never been clipped, which is almost
+   * all of them -- and absent means a material with no `clippingPlanes` and the identical shader.
+   */
+  clipPlanes?: THREE.Plane[];
+  /**
    * What was last WRITTEN to this entry, so an unchanged frame writes nothing.
    *
    * MEASURED, and this is the single most expensive thing the widget layer does. The three writes
@@ -260,6 +266,16 @@ export class GlueRenderer {
     this.renderer = renderer;
     this.premultiplied = premultipliedAlpha;
     this.scene.name = 'GlueUI';
+    /**
+     * PER-MATERIAL CLIPPING, for the `<ScrollFrame>` fragment clip (see the crop block in `render`).
+     *
+     * Set once here and never toggled: flipping it mid-session would re-derive every program in the
+     * SHARED renderer, and this instance's renderer is the world's too. Enabling it costs nothing for
+     * a material with no `clippingPlanes` -- three derives `numClippingPlanes: 0` and the same program
+     * -- and the global `renderer.clippingPlanes` is deliberately left empty, so only the materials
+     * that ask for planes are clipped.
+     */
+    this.renderer.localClippingEnabled = true;
   }
 
   render(items: DrawItem[], resolve: SpriteResolver): void {
@@ -427,82 +443,58 @@ export class GlueRenderer {
         entry.mesh.position.set(snap(quadLeft) + size.width / 2, snap(quadTop) + size.height / 2, 0);
         entry.mesh.scale.set(size.width + padX, size.height + padY, 1);
         /**
-         * THE CROP, for a font string inside a `<ScrollFrame>`.
+         * THE CROP, for a font string inside a `<ScrollFrame>` -- APPLIED AS A FRAGMENT CLIP, and the
+         * change of mechanism is the point.
          *
-         * `widget.ts#clipItem` deliberately leaves a font string's RECT alone and passes the viewport
-         * here instead, because the placement above is centred in that rect: narrowing it would
-         * re-centre the text in a smaller box and keep its full height, which is what the owner saw as
-         * "нижняя часть движется быстрее" and "текст уходит за пределы бокса". So the text is placed
-         * exactly where it would be with no scroll, and the cut is made on the QUAD -- the only place
-         * the glyph box and the raster pad are known.
+         * A font string draws at its rasterized size, centred in its rect, so the two earlier attempts
+         * at this both had to MOVE something: narrow the rect (which re-centred the text and kept its
+         * full height), then re-derive the quad's centre, scale and UVs from the intersection. Both
+         * were geometry, and geometry is exactly what this project has got wrong three times over --
+         * a re-centre, a UV direction, a lost pixel snap. Every measurement of the failing page came
+         * back correct (`uiTextExtent`: raster 195 against a 195 rect, `overflowY` 0; the draw-list
+         * dump: crop equal to the viewport, no overlap between blocks) and the owner still saw the
+         * text break, which is the signature this project already records: state right, effect wrong,
+         * so look at the last hop.
+         *
+         * So nothing is moved any more. The quad keeps the placement above -- the same one it would
+         * have with no scroll, pixel-snapped -- and the viewport becomes four clipping planes on this
+         * mesh's own material. The fragment either survives or it does not; there is no coordinate to
+         * get backwards.
+         *
+         * The reference is built the same way round: the clip travels with the quad to the paint stage
+         * and is applied there (`benilla-ui/src/script/clip.rs` + `script/extract.rs`), rather than
+         * being folded into the quad's rect beforehand.
+         *
+         * COST, and why this is not paid by the whole interface: the pool is keyed per widget id, so
+         * only a widget that has actually been clipped ever gets planes -- everything else keeps a
+         * material with none and the identical shader. `localClippingEnabled` adds no per-frame work
+         * for a material with zero planes (three derives `numClippingPlanes: 0` and the same program).
+         * The four planes are allocated once per widget and mutated in place, so a scroll costs four
+         * float writes rather than an allocation or a program change.
          */
-        const crop = item.crop;
-        if (crop !== undefined) {
-          const quadWidth = size.width + padX;
-          const quadHeight = size.height + padY;
-          const quadX = snap(quadLeft) + size.width / 2 - quadWidth / 2;
-          const quadY = snap(quadTop) + size.height / 2 - quadHeight / 2;
-          const keptLeft = Math.max(quadX, crop.left);
-          const keptTop = Math.max(quadY, crop.top);
-          const keptRight = Math.min(quadX + quadWidth, crop.left + crop.width);
-          const keptBottom = Math.min(quadY + quadHeight, crop.top + crop.height);
-          // NOTHING ACTUALLY CUT -- leave the geometry and the UVs exactly as the uncropped path set
-          // them. `clipItem` hands a font string the whole viewport rather than the overlap, so an item
-          // well inside it arrives here with a crop that trims nothing, and re-deriving its position and
-          // UVs from the crop would only cost it the device-pixel snapping below for no benefit.
-          const cuts = quadX < crop.left - 0.01
-            || quadY < crop.top - 0.01
-            || quadX + quadWidth > crop.left + crop.width + 0.01
-            || quadY + quadHeight > crop.top + crop.height + 0.01;
-          if (!cuts) {
-            // The uncropped path already placed it; only the UV cache may need putting back, because a
-            // previous frame of THIS mesh may have written a crop into its geometry.
-            if (entry.lastTexCoords !== null) {
-              writeQuadUVs(entry.geometry, null);
-              entry.lastTexCoords = null;
-            }
-          } else if (keptRight <= keptLeft || keptBottom <= keptTop) {
-            // `clipItem` drops an item by its RECT; a text quad is inflated past its rect by the raster
-            // pad, so this is the residue that survives that test rather than a case it missed.
-            entry.mesh.scale.set(0, 0, 1);
-          } else {
-            /**
-             * SNAPPED, like the uncropped placement above and for the same reason it gives: the quad is
-             * 1 texel : 1 device pixel, and a fractional edge makes a bilinear fetch blend every glyph
-             * with its neighbour. My first version of this branch set the centre from the raw
-             * intersection and so threw that away for exactly the strings a scroll frame holds -- the
-             * ones the owner is reading.
-             *
-             * The UVs are computed from the SNAPPED edges, not the raw ones, or the texel the quad
-             * samples would no longer be the texel it covers.
-             */
-            const snappedTop = snap(keptTop);
-            const snappedBottom = snap(keptBottom);
-            const snappedLeft = snap(keptLeft);
-            const snappedRight = snap(keptRight);
-            entry.mesh.position.set(
-              (snappedLeft + snappedRight) / 2,
-              (snappedTop + snappedBottom) / 2,
-              0,
-            );
-            entry.mesh.scale.set(snappedRight - snappedLeft, snappedBottom - snappedTop, 1);
-            // `writeQuadUVs` puts `v1` on the TOP vertices -- `fy` is 1 there -- and a text canvas is
-            // sampled unflipped, so the quad's top edge is `uv.y = 1` and uv.y DECREASES downward.
-            // Hence `1 - fractionFromTop`, not the fraction. Getting this backwards would scroll the
-            // glyphs the wrong way inside a stationary box, which is the failure this project has hit
-            // three times; it is derived from the vertex order rather than guessed.
-            const cropped = {
-              u0: (snappedLeft - quadX) / quadWidth,
-              u1: (snappedRight - quadX) / quadWidth,
-              v0: 1 - (snappedBottom - quadY) / quadHeight,
-              v1: 1 - (snappedTop - quadY) / quadHeight,
-            };
-            writeQuadUVs(entry.geometry, cropped);
-            // The cache MUST be written, or the precedence block above will not restore full UVs when
-            // this string stops being cropped: it compares `wanted` against `lastTexCoords` and would
-            // see no change from the null it recorded.
-            entry.lastTexCoords = cropped;
+        if (item.crop !== undefined || entry.clipPlanes !== undefined) {
+          const box = item.crop ?? null;
+          if (entry.clipPlanes === undefined) {
+            entry.clipPlanes = [
+              new THREE.Plane(new THREE.Vector3(1, 0, 0), 0),
+              new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0),
+              new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
+              new THREE.Plane(new THREE.Vector3(0, -1, 0), 0),
+            ];
+            entry.material.clippingPlanes = entry.clipPlanes;
           }
+          // three keeps a fragment where `dot(normal, worldPos) + constant >= 0`, and this scene's
+          // world units ARE interface units, so the four constants are the box's edges directly. With
+          // no crop the box is opened past any possible screen so the planes are inert without a
+          // program change (removing them would change the plane COUNT and recompile).
+          const left = box === null ? -1e6 : box.left;
+          const top = box === null ? -1e6 : box.top;
+          const right = box === null ? 1e6 : box.left + box.width;
+          const bottom = box === null ? 1e6 : box.top + box.height;
+          entry.clipPlanes[0].constant = -left;
+          entry.clipPlanes[1].constant = right;
+          entry.clipPlanes[2].constant = -top;
+          entry.clipPlanes[3].constant = bottom;
         }
       } else {
         entry.mesh.position.set(left + width / 2, top + height / 2, 0);
