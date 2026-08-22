@@ -1228,7 +1228,28 @@ const FONTSTRING: MethodTable = {
     ensureFont(widgetOf(ctx, self)).align = value as 'LEFT' | 'CENTER' | 'RIGHT';
     return [];
   },
-  SetJustifyV: notImplemented('SetJustifyV', 'FontSpec has no vertical-justify field yet'),
+  /**
+   * `SetJustifyV(justify)` / `GetJustifyV()` -- REAL now, and the gap note it replaces was accurate:
+   * `FontSpec` had no vertical field, so every string was centred whatever its document asked for.
+   *
+   * The loader already routed the XML attribute here (`loader.ts:1100-1102`), so the whole feature was
+   * one field and one line in the renderer. `renderer.ts`' own comment named this as the outstanding
+   * half of the same gap.
+   *
+   * MIDDLE is FrameXML's default, so an absent value and an explicit MIDDLE are the same thing and the
+   * field stays undefined for the common case rather than being written on every string.
+   */
+  SetJustifyV: (ctx, self, args) => {
+    const value = String(args[0] ?? '').toUpperCase();
+    if (value !== 'TOP' && value !== 'MIDDLE' && value !== 'BOTTOM') {
+      warnOnce(`SetJustifyV: unknown justification '${value}'`);
+      return [];
+    }
+    ensureFont(widgetOf(ctx, self)).vertical = value as 'TOP' | 'MIDDLE' | 'BOTTOM';
+    touchGeometry();
+    return [];
+  },
+  GetJustifyV: (ctx, self) => [widgetOf(ctx, self).font?.vertical ?? 'MIDDLE'],
 };
 
 registerMethods('REGION', REGION);

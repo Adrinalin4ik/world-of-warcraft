@@ -123,6 +123,16 @@ export interface FontSpec {
   outline: boolean;
   align: 'LEFT' | 'CENTER' | 'RIGHT';
   /**
+   * `justifyV` -- where the glyph block sits VERTICALLY inside the region's rect.
+   *
+   * Absent means MIDDLE, which is FrameXML's own default (`benilla-ui/src/script/types.rs:186-198`) and
+   * what this renderer did unconditionally before. A font string whose height is DERIVED from its text
+   * has a rect the same height as its glyphs, so the three answers coincide for it and nothing moves;
+   * the setting only matters where the rect is taller than the text, which is exactly the case the
+   * client authors it for.
+   */
+  vertical?: 'TOP' | 'MIDDLE' | 'BOTTOM';
+  /**
    * Wrap at this width, in logical units -- a FontString's authored `Size` x when the client lets it
    * wrap (`GlueDialogText` is 450 wide, gluedialog.xml). OPT-IN: absent means the string is measured
    * and rasterized as one line exactly as it always was, so no existing caption's metrics move.

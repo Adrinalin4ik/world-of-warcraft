@@ -399,12 +399,12 @@ export class GlueRenderer {
         // stretch every letter. Position within the rect by the font's horizontal alignment and
         // always vertically centred.
         //
-        // "There is no vertical-align concept in GlueXML fontstrings" is what this comment used to
-        // say, and it is FALSE: `justifyV` exists and its FrameXML default is MIDDLE
-        // (`benilla-ui/src/script/types.rs:186-198`). Centring is therefore right for the default and
-        // right for every string in the loaded manifest that does not override it -- but an explicit
-        // `justifyV="TOP"` (e.g. `AchievementDescriptionFont`, fontstyles.xml:278) is still ignored,
-        // which is the same gap `SetJustifyV`'s `notImplemented` entry names.
+        // "There is no vertical-align concept in GlueXML fontstrings" is what this comment once said,
+        // and it was FALSE: `justifyV` exists and its FrameXML default is MIDDLE
+        // (`benilla-ui/src/script/types.rs:186-198`). It then said an explicit `justifyV="TOP"` was
+        // "still ignored" -- that is false NOW, and the branch below is why. Both corrections are kept
+        // rather than collapsed, because the second one is the kind of sentence that goes stale
+        // silently and this file has already carried it once.
         // CENTER, not LEFT: the FrameXML `JustifyH` default. See `region.ts#ensureFont` -- a
         // `FontSpec` always carries an align, so this fallback is only for a font string that never
         // went through `ensureFont` at all, and it must agree with that default or the two disagree
@@ -416,7 +416,24 @@ export class GlueRenderer {
             : align === 'RIGHT'
               ? left + width - size.width
               : left;
-        const quadTop = top + (height - size.height) / 2;
+        /**
+         * `justifyV` IS HONOURED NOW, and the paragraph above used to end by saying it was not.
+         *
+         * MIDDLE is FrameXML's default and what this line did unconditionally; TOP and BOTTOM were
+         * ignored, so an authored `justifyV="TOP"` drew centred. `Widget#FontSpec.vertical` carries it
+         * and `methods/region.ts#SetJustifyV` writes it -- the loader was already routing the XML
+         * attribute there, so the whole gap was one field and this branch.
+         *
+         * It only moves a string whose RECT is taller than its glyph block. A font string with a derived
+         * height has a rect the same height as its text, so all three answers coincide for it and no
+         * existing caption shifts by a pixel.
+         */
+        const vertical = item.widget.font?.vertical ?? 'MIDDLE';
+        const quadTop = vertical === 'TOP'
+          ? top
+          : vertical === 'BOTTOM'
+            ? top + height - size.height
+            : top + (height - size.height) / 2;
         // SNAP TO THE DEVICE-PIXEL GRID. `text.ts` rasterizes a string at `screenScale *
         // devicePixelRatio`, so its canvas is already an integer number of device pixels wide and the
         // quad below is exactly 1 texel : 1 device pixel in SCALE -- but its left/top edge is an
