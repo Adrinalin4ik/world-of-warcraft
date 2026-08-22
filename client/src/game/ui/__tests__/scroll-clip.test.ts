@@ -126,9 +126,13 @@ describe('ScrollFrame clipping', () => {
 
     // The rect is the UNCROPPED placement -- all 40 units of it.
     expect(Math.round(drawn!.rect.height)).toBe(40);
-    // And the crop is the part of the viewport it overlaps: 20 units, not 40.
+    // And the crop is the VIEWPORT -- all 100 units of it, not the 20 where the two overlap. The
+    // renderer intersects the text QUAD with this, and that quad is the rasterized glyph box rather
+    // than the rect: cropping to the overlap cut the text at the rect's edge instead of the viewport's,
+    // which is the hard dividing line the owner photographed.
     expect(drawn!.crop).toBeDefined();
-    expect(Math.round(drawn!.crop!.height)).toBe(20);
+    expect(Math.round(drawn!.crop!.height)).toBe(100);
+    expect(Math.round(drawn!.crop!.top)).toBe(0);
   });
 
   it('does not clip when the viewport is unplaceable or zero-sized', () => {

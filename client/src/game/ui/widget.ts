@@ -929,12 +929,19 @@ function clipItem(item: DrawItem, clip: Rect): DrawItem | null {
     return item;
   }
   if (item.widget.kind === 'fontstring') {
-    // See `DrawItem#crop`: the rect is left ALONE, because narrowing it moves the text instead of
-    // cutting it. `left`/`top`/`right`/`bottom` above are the intersection, which is exactly the crop.
-    return {
-      ...item,
-      crop: { left, top, width: right - left, height: bottom - top },
-    };
+    /**
+     * See `DrawItem#crop`: the rect is left ALONE, because narrowing it moves the text instead of
+     * cutting it.
+     *
+     * **THE VIEWPORT, NOT THE INTERSECTION ABOVE, and passing the intersection was a real defect the
+     * owner photographed**: "видна четкая линия разделения". A font string's QUAD is the rasterized
+     * glyph box, which is not the same as its rect -- `deriveSize`'s measurement and `text.ts`' raster
+     * can disagree, and the quad is centred in the rect, so it can overhang both edges. The renderer
+     * intersects the quad with whatever arrives here, so handing it `rect ∩ viewport` cut the text at
+     * the RECT's edge: the last lines of the description vanished and the block below butted straight
+     * against the cut. The engine clips to the viewport and nothing else, so that is what travels.
+     */
+    return { ...item, crop: clip };
   }
   const rect: Rect = { left, top, width: right - left, height: bottom - top };
   const base = item.texCoords ?? item.widget.texCoords ?? null;
