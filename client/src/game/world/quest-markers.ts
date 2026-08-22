@@ -330,6 +330,24 @@ export class QuestMarkers {
           M2Blueprint.unload(model as never);
           return;
         }
+        /**
+         * **`M2` CONSTRUCTS ITSELF HIDDEN, and this one line is the whole of "значка всё ещё нет".**
+         *
+         * Everything else about this marker was already right, and the owner's own console proved each
+         * step: 13 statuses matched to 13 entities, the correct model
+         * (`talktomequestionmark.m2`) loading, `attachTo` returning true against attachment 18,
+         * `attached=1 noSlot=0`, and finally `BAKED -- scale=1.0000, bone world pos=-8902.6,-162.7,84.2`
+         * -- a real Northshire position, so the bone had propagated and the counter-scale was correctly
+         * 1. State right at every stage, and not one pixel: this project's own recorded signature, and
+         * the answer was the LAST HOP again.
+         *
+         * `character/dress.ts:230-233` had the rule written down for exactly this case: "in the world the
+         * manager only knows about placements it registered, and a bone child is not one -- three's
+         * `projectObject` returns before walking children of a hidden node, so an unset flag here hides
+         * the weapon for ever." A marker is a bone child too, so it needs the same line for the same
+         * reason. Missing it is invisible to every check short of looking at the screen.
+         */
+        model.visible = true;
         // The marker's own bob, armed looping. Sequence 0; see the header on why 190 is a gap.
         const armable = model as unknown as Armable;
         const seq = armable.modelAnim?.resolve(0);

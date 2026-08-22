@@ -407,6 +407,8 @@ export class QuestHandler extends EventEmitter {
   }
 
   /** For the instrument only: what the arm that just ran was about. */
+  private announcedRequestFlags = false;
+
   private announcedStatusQuery = false;
 
   private announcedStatusReply = false;
@@ -1022,6 +1024,25 @@ export class QuestHandler extends EventEmitter {
       flagWords.push(gp.readUnsignedInt() >>> 0);
     }
     const isComplete = (flagWords[1] ?? 0) !== 0;
+    /**
+     * THE FLAG WORDS, ONCE -- because `isComplete` reads one of them by INDEX and the index is in doubt.
+     *
+     * The owner's progress panel offers "Continue" on a quest he has not finished, and
+     * `QuestProgressCompleteButton` is enabled by `IsQuestCompletable()` alone (`questframe.lua:135`),
+     * which answers off this word. So the word we picked is nonzero when the quest is incomplete -- and
+     * the same class of off-by-one in a trailing block was just found and fixed in
+     * `SMSG_QUESTGIVER_OFFER_REWARD`, where the literal filler the server writes had become
+     * `arenaPoints`.
+     *
+     * Not re-indexed on a reconstruction: guessing a server's write order from memory is what cost a
+     * round on the gossip icon, and the bytes settled the reward tail in one line. Same method here.
+     */
+    if (!this.announcedRequestFlags) {
+      this.announcedRequestFlags = true;
+      console.warn(`quest: REQUEST_ITEMS flag words = [${flagWords.join(' ')}] `
+        + `(we read isComplete from index 1 = ${String(isComplete)}; `
+        + `requiredItems=${requiredItems.length}, requiredMoney=${requiredMoney})`);
+    }
 
     // LOUD WHEN IMPLAUSIBLE, because this arm cannot use the quest-id oracle: the id is read before
     // the two WotLK words that are in doubt, so a wrong prefix still echoes the right id. The two
