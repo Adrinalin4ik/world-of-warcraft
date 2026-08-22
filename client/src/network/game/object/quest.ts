@@ -407,6 +407,8 @@ export class QuestHandler extends EventEmitter {
   }
 
   /** For the instrument only: what the arm that just ran was about. */
+  private announcedOfferTail = false;
+
   private lastQuestId = 0;
 
   private lastTitle = '';
@@ -838,6 +840,28 @@ export class QuestHandler extends EventEmitter {
     this.lastQuestId = chosen.questId;
     this.lastTitle = chosen.title;
     this.offerShape = shape;
+    /**
+     * THE TAIL, ONCE, AS RAW WORDS. See `tryOffer`'s note at `tailAt` for why this exists rather than a
+     * corrected order: the layout is unverified, the owner has shown it is wrong, and this repo settles
+     * a layout with bytes off real traffic.
+     */
+    if (!this.announcedOfferTail) {
+      this.announcedOfferTail = true;
+      const words: string[] = [];
+      const save = gp.index;
+      gp.index = chosen.tailAt;
+      try {
+        for (let i = 0; i < 16; ++i) {
+          words.push(String(gp.readUnsignedInt() >>> 0));
+        }
+      } catch {
+        // Ran off the frame; what was collected is still the evidence.
+      }
+      gp.index = save;
+      console.warn(`quest: OFFER_REWARD tail after xp = [${words.join(' ')}] (body ${gp.bodySize}; `
+        + `we read charTitleId=${chosen.charTitleId} bonusTalents=${chosen.bonusTalents} `
+        + `arenaPoints=${chosen.arenaPoints} honor=${chosen.honor})`);
+    }
     if (chosen.title === '' || chosen.emoteCount > QUEST_EMOTE_COUNT) {
       console.warn(
         'quest: SMSG_QUESTGIVER_OFFER_REWARD looks misaligned (chose "' + shape + '", title "'
@@ -870,7 +894,7 @@ export class QuestHandler extends EventEmitter {
    */
   private tryOffer(
     gp: GamePacket, base: number, autoBytes: 1 | 4,
-  ): (QuestGiverOfferReward & { cursor: number; emoteCount: number }) | null {
+  ): (QuestGiverOfferReward & { cursor: number; emoteCount: number; tailAt: number }) | null {
     gp.index = base;
     try {
       const npc = this.readFullGuid(gp);
@@ -887,6 +911,8 @@ export class QuestHandler extends EventEmitter {
         // Bail rather than loop: an implausible count is the whole signal, and looping on a
         // multi-million count would over-read the frame in a hot handler.
         return {
+          // 0: this candidate never reached the tail, and this shape is the one being REJECTED anyway.
+          tailAt: 0,
           npc,
           questId,
           title,
@@ -915,6 +941,13 @@ export class QuestHandler extends EventEmitter {
       const rewards = this.readTripleBlock(gp);
       const money = gp.readInt();
       const xp = gp.readUnsignedInt() >>> 0;
+      // WHERE THE UNVERIFIED TAIL STARTS. This method's header says the tail ORDER "cannot be checked
+      // without a live packet", and the owner has now supplied the evidence that it is wrong: his reward
+      // panel drew "Bonus arena points: 8" for a Northshire quest that grants none. The raw words are
+      // reported from here once (see `handleOfferReward`) -- a residual against real traffic is the only
+      // thing that settles a layout in this repo, and reconstructing a server's write order from memory
+      // is what cost a round on the gossip icon.
+      const tailAt = gp.index;
       const charTitleId = this.tailU32(gp);
       const bonusTalents = this.tailU32(gp);
       const arenaPoints = this.tailU32(gp);
@@ -939,6 +972,7 @@ export class QuestHandler extends EventEmitter {
         charTitleId,
         bonusTalents,
         arenaPoints,
+        tailAt,
         cursor: gp.index,
         emoteCount,
       };

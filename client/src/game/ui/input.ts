@@ -721,11 +721,10 @@ export class GlueInput {
       }
       return;
     }
-    if (!this.announcedClickDropFlag && pressed.onClick === null) {
-      this.announcedClickDropFlag = true;
-      // eslint-disable-next-line no-console
-      console.log(`click DROPPED: ${pressed.id} has no onClick bound (kind=${pressed.kind})`);
-    }
+    // NO LINE FOR "no onClick bound", and removing it is deliberate: a press on a plain mouse-enabled
+    // FRAME with no handler is ORDINARY -- a panel background, a modal backdrop -- and reporting it as a
+    // dropped click is a false alarm. It fired on exactly that during the gossip investigation and sent
+    // me looking at the wrong widget. The two cases above are real defects; this one is not.
 
     if (pressed.kind === 'checkbutton') {
       pressed.checked = !pressed.checked;
