@@ -232,7 +232,38 @@ function applyButtonFont(ctx: MethodContext, self: number): void {
  * STATE texture, so this does not repeat that branch.
  */
 function applyStateArg(region: Widget, arg: unknown): void {
-  region.sprite = arg === undefined || arg === null || arg === '' ? null : String(arg);
+  if (arg === undefined || arg === null || arg === '') {
+    region.sprite = null;
+    return;
+  }
+  /**
+   * **A NON-STRING IS NOT A PATH, and `String(arg)` on a table produced literal `"[object Object]"`.**
+   *
+   * The owner's console, on the world screen:
+   *
+   *     glue art missing: [object Object] ([object Object])
+   *     Failed to decode texture: [OBJECT OBJECT].BLP
+   *
+   * `SetNormalTexture` and its siblings accept a TEXTURE OBJECT as well as a path -- the engine then
+   * copies that texture's own sprite -- and `skillbuttons`/`GetSpellTabInfo` pass exactly that
+   * (`Widget#sprite`'s note on `skillLineTab:SetNormalTexture(texture)`). Stringifying it registered a
+   * nonsense path, which `registerTreeArt` then walked into a fetch and a BLP decode of a 404's HTML.
+   *
+   * DECLARED rather than guessed: copying the other region's live sprite is the engine's behaviour and
+   * would need the wrapper resolved back to a widget, which this helper has no context for. Answering
+   * null leaves the slot EMPTY -- visibly missing art, which is honest -- instead of a fabricated path
+   * that reports as a decode failure and blames the texture pipeline.
+   */
+  if (typeof arg !== 'string') {
+    warnOnce(
+      'SetNormalTexture/SetPushedTexture/SetDisabledTexture was given a TEXTURE OBJECT rather than a '
+      + 'path. The engine copies the other texture sprite; this client leaves the slot empty, so the '
+      + 'button draws without that state art.',
+    );
+    region.sprite = null;
+    return;
+  }
+  region.sprite = arg;
 }
 
 /**

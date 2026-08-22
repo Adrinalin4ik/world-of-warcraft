@@ -106,6 +106,26 @@ export class GlueArt {
    * explicitly, and future tables may as well).
    */
   private appendBLP(path: string): string {
+    /**
+     * A NON-BLP EXTENSION IS REPLACED, NOT KEPT, and the owner's console is the evidence:
+     *
+     *     glue art missing: Interface\Glues\Login\Glues-KoreanRating-Age.tga
+     *     Failed to decode texture: INTERFACE\GLUES\LOGIN\GLUES-KOREANRATING-AGE.TGA
+     *
+     * The client's own files name a few textures with a source extension -- `.tga` here, and `.png`
+     * elsewhere in the same family -- because that is what the ARTIST delivered; the shipped asset is
+     * the compiled BLP beside it. Verified against the host: `glues-koreanrating-age.blp` answers 200
+     * and the `.tga` answers 404, so keeping the authored extension is a guaranteed miss followed by a
+     * BLP decode of a 404's HTML page, which is the double-misattribution this repo already records.
+     *
+     * Only the known SOURCE extensions are rewritten. `.blp` is left alone, and anything else keeps its
+     * extension rather than being guessed at: a path with an unknown suffix is more likely to be a real
+     * name containing a dot than an image this client can find.
+     */
+    const source = /\.(tga|png|jpg|jpeg|dds)$/i;
+    if (source.test(path)) {
+      return path.replace(source, '.blp');
+    }
     if (!path.includes('.')) {
       return `${path}.blp`;
     }
