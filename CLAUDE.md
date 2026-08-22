@@ -360,6 +360,19 @@ recent round.
   refresh is revision-skipped by design, so it never takes them back), and the reason a hover highlight
   cannot reach an attachment at all. **`ownsBatches` is the test.** If you must borrow one, save and
   restore rather than skip — the pattern `model-booth.ts` already uses for the clear colour.
+- **A GETTER THAT RETURNS THE AUTHORED VALUE INSTEAD OF THE RESOLVED ONE ZEROES EVERY CLIENT
+  COMPUTATION BUILT ON IT -- and the client's own arithmetic hides it.** `GetHeight()` answered
+  `deriveSize`, i.e. the authored size, so a `<Slider>` whose height comes from two opposing anchors
+  reported **0**. The client computes every scroll step from it -- `parent:SetValue(parent:GetValue() +
+  parent:GetHeight() / 2)` -- so each input route became `SetValue(current + 0)`, and `SetValue`
+  dispatches only on a transition. Value never moved, `OnValueChanged` never fired, nothing scrolled.
+  **Ten commits landed on the scrollbar before this**, every one of them upstream or downstream of the
+  actual zero, because the symptom points at whatever you last touched: the range, the thumb, the
+  handler store, the wheel listener. The comment above the getter had **already named the excluded
+  case** ("a FRAME's 0 still means 'derive from the opposing anchors'") and it was read as a note, not
+  a defect. Two rules out of it: when several independent input paths die together, look for the ONE
+  value they all multiply, not for three dispatch bugs; and a documented exclusion in a getter is a
+  bug report someone declined to file.
 - An `ADD` widget in the world UI must not write destination alpha. The world pass is premultiplied, and
   three's `AdditiveBlending` there is an un-separated `blendFunc(ONE, ONE)` that saturates the offscreen
   target's alpha and masks the world out — an opaque black quad. `material.ts#applyBlend` is the one place.
