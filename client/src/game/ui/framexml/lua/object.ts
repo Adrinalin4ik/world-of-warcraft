@@ -57,6 +57,7 @@ export type WidgetClass =
   | 'GAMETOOLTIP'
   | 'WORLDFRAME'
   | 'MESSAGEFRAME'
+  | 'MINIMAP'
   | 'SCROLLINGMESSAGEFRAME'
   | 'BACKDROP';
 
@@ -90,6 +91,30 @@ const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
   // all, and `ActionButton_ShowGrid` -- the path that makes an EMPTY action slot droppable -- died on
   // `actionbutton.lua:265`'s `if ( GameTooltip:GetOwner() == self )`. See `methods/gametooltip.ts`.
   GAMETOOLTIP: 'FRAME',
+  /**
+   * A real client type, and the ROOT of `Interface\FrameXML\Minimap.xml` --
+   * `<Minimap name="Minimap" ...>` inside `MinimapCluster`. The same defect family as COOLDOWN,
+   * GAMETOOLTIP and WORLDFRAME above, found the same way: something asked for the global and got nil.
+   *
+   * **AND WHAT ASKED FOR IT KILLS THE WHOLE UI-PANEL LAYOUT, PERMANENTLY.** `GetMaxUIPanelsWidth`
+   * indexes it unguarded -- `if ( Minimap:IsShown() and not MinimapCluster:IsUserPlaced() )`,
+   * `uiparent.lua:2007` -- and `CanShowCenterUIPanel` is the gate the CENTER panel's placement sits
+   * behind (`:1689`). So the raise happens INSIDE
+   * `FramePositionDelegate:UpdateUIPanelPositions`, after it has set `self.updatingPanels = true`
+   * (`:1658`) and before the line that clears it: every later call returns immediately at `:1656`, so
+   * the layout is dead for the rest of the session. MEASURED live, the owner's console:
+   *
+   *     ERR [string "UIParent.lua"]:2007: attempt to index a nil value (global 'Minimap')
+   *
+   * The visible symptom was two panels drawn on top of each other. The SLOTS were right all along --
+   * `left=QuestFrame | center=CharacterFrame`, exactly what the real client does with a `pushable = 3`
+   * frame -- and the left panel was even placed correctly, because its block runs before the center's.
+   * Only the second placement was missing.
+   *
+   * `FRAME`, and the map itself is NOT drawn -- see `loader.ts#applyPerKind`, which declares that gap
+   * rather than leaving it silent.
+   */
+  MINIMAP: 'FRAME',
   // A real client type, and the ROOT ELEMENT of `Interface\FrameXML\WorldFrame.xml` --
   // `<WorldFrame name="WorldFrame" movable="true" resizable="true" setAllPoints="true">`, entry 12 of
   // `FrameXML.toc`. Missing, `parseClass` answered null, `CreateFrame` threw "unknown frame type", and
@@ -161,6 +186,8 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   // `frame` and not `backdrop`: the loader turns an element carrying a `<Backdrop>` into the nine-slice
   // kind itself (`loader.ts#applyBackdrop`), the same way it does for any `<Frame>` with one.
   GAMETOOLTIP: 'frame',
+  // `frame`: the frame exists so the client's own Lua can measure and index it; no map is rendered.
+  MINIMAP: 'frame',
   // `frame`: a WorldFrame draws no interface art of its own -- the world is rendered BEHIND it, which
   // is what its own XML comment says ("The world is rendered in the background of the frame"). Here
   // the world is a separate three.js scene entirely, so this frame is a rect and a parent and nothing
@@ -214,6 +241,12 @@ const CREATE_FRAME_CLASSES: WidgetClass[] = [
   // loader funnels every XML element through `CreateFrame`, so without this entry the manifest's own
   // `<WorldFrame>` still throws even though the class now parses.
   'WORLDFRAME',
+  // Listed for the same reason as the three above, and the reason the whole class exists: the loader
+  // funnels every XML element through `CreateFrame`, so `<Minimap name="Minimap">` (`minimap.xml`)
+  // throws "unknown frame type" without this entry even though the class now parses -- and a nil
+  // `Minimap` global takes the entire UI-panel layout down permanently (see the MINIMAP entry in
+  // `CLASS_PARENT`). `CreateFrame("Minimap", ...)` is legal in the real client too.
+  'MINIMAP',
   // Listed for the same reason as the two above -- the loader funnels every XML element through
   // `CreateFrame`, so `<MessageFrame name="UIErrorsFrame" ...>` (`uierrorsframe.xml:4`) throws without
   // it. That throw is why `UIErrorsFrame` did not exist and no refusal could be printed on screen.

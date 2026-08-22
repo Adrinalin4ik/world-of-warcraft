@@ -1439,26 +1439,39 @@ class DocumentLoader {
       // `applyButton` stops at Checked -- so it was read by nothing. Six exist in the manifest and two
       // are in `uipaneltemplates.xml`, the scrollbar template every scroll frame inherits.
       this.applySliderThumb(element, wrapper, selfName, dbg);
-      // The remaining gap is narrower than this line used to claim: a Slider's VALUE methods are real
-      // (`lua/methods/scroll.ts`, and `SetValue` now fires `OnValueChanged`, which is what makes the
-      // arrows scroll), and its thumb ART is applied above. What is still missing is thumb TRAVEL --
-      // nothing moves the thumb as the value changes, because `widget.ts` models no slider geometry.
+      // NO GAP LINE HERE ANY MORE, and removing it is a claim worth stating plainly. This used to
+      // report "thumb art is applied but does not TRACK the value ... this renderer models no thumb
+      // travel", and every clause of that is now false: `methods/scroll.ts#syncThumb` writes
+      // `Widget#sliderTravel` on every value and range change, `widget.ts` places the thumb from it
+      // against the track (`:1267-1276`), and `ui/input.ts` drags it through `Widget#onSliderDrag`.
+      // A stale gap line is worse than none: it tells the next reader to rebuild what is already here.
+    } else if (tag === 'minimap') {
+      /**
+       * The FRAME is real now (`lua/object.ts`' MINIMAP class) and the MAP is not, so the gap is
+       * declared here instead of being left silent.
+       *
+       * Creating the frame is not cosmetic: the class was missing, so `CreateFrame("Minimap")` threw
+       * and the element and its subtree were dropped, leaving the global nil -- and
+       * `GetMaxUIPanelsWidth` indexes it unguarded (`uiparent.lua:2007`), inside the gate the CENTER
+       * panel's placement sits behind. That raise happened after `UpdateUIPanelPositions` set
+       * `self.updatingPanels = true` and before the line clearing it, so the whole UI-panel layout was
+       * dead for the rest of the session and panels drew on top of each other. See the MINIMAP entry
+       * in `lua/object.ts` for the measurement.
+       */
       this.warnOnce(
-        'kind:slider',
-        `<Slider> thumb art is applied but does not TRACK the value: this renderer models no thumb travel, so the thumb sits where its XML anchors put it (first: ${dbg})`,
+        'kind:minimap',
+        `<Minimap> is a frame only: it measures and indexes like the real one, but no map, blips or `
+        + `zoom are rendered (first: ${dbg})`,
       );
     } else if (tag === 'model' || tag === 'modelffx' || tag === 'playermodel') {
       this.applyModel(element, wrapper, dbg);
     } else if (tag === 'scrollframe') {
-      // The counterpart line for the class that just gained methods: a `<ScrollFrame>`'s scroll VALUES
-      // are tracked for real (`lua/methods/scroll.ts`), and its pixels are not -- `widget.ts` cannot
-      // clip a frame's children, so an offset scroll child would draw outside its viewport instead of
-      // scrolling inside it, and the child is deliberately left where it is. Without this line the
-      // whole gap is invisible: every method the client calls now answers successfully.
-      this.warnOnce(
-        'kind:scrollframe',
-        `<ScrollFrame> scrolling is bookkeeping only: the scroll offsets and ranges are real, but nothing in this renderer clips a viewport or moves a scroll child, so the content does not scroll (first: ${dbg})`,
-      );
+      // AND NO GAP LINE HERE EITHER, for the same reason. This reported that "nothing in this
+      // renderer clips a viewport or moves a scroll child, so the content does not scroll"; both
+      // halves are done. `methods/scroll.ts#SetScrollChild` links the child's `clippedBy`,
+      // `widget.ts#clipItem` crops each item to the viewport (a font string by `DrawItem#crop`,
+      // because its quad is the rasterized glyph box and not its rect), and `SetVerticalScroll`
+      // writes `Widget#scrollOffset`, which the draw walk applies to the clipped subtree.
     }
   }
 
