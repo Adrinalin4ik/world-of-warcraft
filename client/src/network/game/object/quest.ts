@@ -407,8 +407,6 @@ export class QuestHandler extends EventEmitter {
   }
 
   /** For the instrument only: what the arm that just ran was about. */
-  private announcedRequestFlags = false;
-
   private announcedStatusQuery = false;
 
   private announcedStatusReply = false;
@@ -1035,30 +1033,16 @@ export class QuestHandler extends EventEmitter {
      * consistent with the observation, and it is the same shape as the sibling packet's tail, where the
      * owner's bytes showed a literal filler sitting where we had put a real field.
      *
-     * STATED AS THE INDICATED READING, NOT A VERIFIED ONE, and the dump below stays for exactly that
-     * reason: if his next line shows word 0 nonzero on an incomplete quest, this is wrong and the bytes
-     * say so immediately. A wire layout in this repo is "verified" only against real traffic.
+     * VERIFIED against the owner's own traffic, which is the only thing that settles a layout here. His
+     * console, on an incomplete quest with one required item:
+     *
+     *     quest: REQUEST_ITEMS flag words = [0 4 8 16]
+     *
+     * The first word is 0 and the other three are the constants the server writes unconditionally -- so
+     * reading any later index is permanently true, which is exactly the defect this replaced. The
+     * temporary dump that produced the line is removed now that it has done its job.
      */
     const isComplete = (flagWords[0] ?? 0) !== 0;
-    /**
-     * THE FLAG WORDS, ONCE -- because `isComplete` reads one of them by INDEX and the index is in doubt.
-     *
-     * The owner's progress panel offers "Continue" on a quest he has not finished, and
-     * `QuestProgressCompleteButton` is enabled by `IsQuestCompletable()` alone (`questframe.lua:135`),
-     * which answers off this word. So the word we picked is nonzero when the quest is incomplete -- and
-     * the same class of off-by-one in a trailing block was just found and fixed in
-     * `SMSG_QUESTGIVER_OFFER_REWARD`, where the literal filler the server writes had become
-     * `arenaPoints`.
-     *
-     * Not re-indexed on a reconstruction: guessing a server's write order from memory is what cost a
-     * round on the gossip icon, and the bytes settled the reward tail in one line. Same method here.
-     */
-    if (!this.announcedRequestFlags) {
-      this.announcedRequestFlags = true;
-      console.warn(`quest: REQUEST_ITEMS flag words = [${flagWords.join(' ')}] `
-        + `(we read isComplete from index 1 = ${String(isComplete)}; `
-        + `requiredItems=${requiredItems.length}, requiredMoney=${requiredMoney})`);
-    }
 
     // LOUD WHEN IMPLAUSIBLE, because this arm cannot use the quest-id oracle: the id is read before
     // the two WotLK words that are in doubt, so a wrong prefix still echoes the right id. The two

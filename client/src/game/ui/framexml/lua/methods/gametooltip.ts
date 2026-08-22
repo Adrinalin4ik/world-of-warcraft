@@ -1158,6 +1158,26 @@ const ITEM_SETTERS: MethodTable = {
   SetLootItem: (ctx, self, args) => fillFromSource(ctx, self, 'loot', Number(args[0])),
   SetHyperlink: (ctx, self, args) => fillFromSource(ctx, self, 'link', String(args[0] ?? '')),
   /**
+   * `SetQuestItem(type, index)` -- a reward, choice or requirement row on a giver panel.
+   *
+   * **Its absence was raising inside an `OnEnter`**, which is the worst place for a nil method. The
+   * owner's console:
+   *
+   *     QuestInfoItem3: OnEnter: [string "QuestInfo.xml:QuestInfoItem3:OnEnter"]:10:
+   *     attempt to call a nil value (method 'SetQuestItem')
+   *
+   * The handler dies part way, so the tooltip chain is left half built and the row shows nothing however
+   * good the data behind it is -- the same failure `SetInventoryItem`'s absence caused on the bag
+   * buttons, recorded a few lines below.
+   *
+   * `type` is one of the client's own strings on the buttons themselves -- `"required"`, `"reward"`,
+   * `"choice"` -- and `quest-bridge.ts` resolves it through exactly the triple `GetQuestItemInfo` reads,
+   * so the tooltip and the row can never name different items.
+   */
+  SetQuestItem: (ctx, self, args) => fillFromSource(
+    ctx, self, 'quest', String(args[0] ?? ''), Number(args[1]),
+  ),
+  /**
    * `SetInventoryItem(unit, invSlot)` -- a WORN item, identified by unit and equipment slot rather
    * than by bag and slot, so it takes the equipped read (`PLAYER_FIELD_INV_SLOT_HEAD + (id-1)*2`)
    * and not the container read.
@@ -1312,7 +1332,9 @@ const TOOLTIP_SETTER_GAPS: Array<[string, string]> = [
   ['SetPossession', 'no possession bar exists in this client'],
   ['SetTotem', 'no totem feed is decoded'],
   ['SetEquipmentSet', 'no equipment manager is decoded'],
-  ['SetQuestLogSpecialItem', 'no quest log is decoded'],
+  // The reason is NOT "no quest log is decoded" any more -- there is one. What is absent is the
+  // log's own special-item slot, which `GetQuestLogSpecialItemInfo` would have to answer for.
+  ['SetQuestLogSpecialItem', 'the quest log is decoded, but its special-item slot is not'],
   ['SetLFGDungeonReward', 'no LFG feed is decoded'],
   ['SetLFGCompletionReward', 'as SetLFGDungeonReward'],
   // `SetUnit` has LEFT this list -- it is real below. Its note used to read "needs a hover feed the

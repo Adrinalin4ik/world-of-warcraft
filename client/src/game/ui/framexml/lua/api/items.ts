@@ -159,7 +159,7 @@ export interface ItemTooltipInfo {
  * `Set<Thing>Item` family answers false exactly as it did when it did not exist.
  */
 export type ItemTooltipSource = (
-  kind: 'bag' | 'loot' | 'link' | 'inventory' | 'merchant' | 'buyback' | 'trainer',
+  kind: 'bag' | 'loot' | 'link' | 'inventory' | 'merchant' | 'buyback' | 'trainer' | 'quest',
   a: number | string,
   b?: number,
 ) => ItemTooltipInfo | null;

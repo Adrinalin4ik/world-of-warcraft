@@ -93,6 +93,11 @@ import type {
 } from '../../network/game/object/quest';
 import { QUEST_FLAGS } from '../../network/game/object/quest';
 import { NPC_FLAG } from '../world/cursor-mode';
+import { itemTooltipLines } from './item-tooltip';
+import { spellData } from '../pipeline/dbc/spell-data';
+import {
+  getItemTooltipSource, setItemTooltipSource, ItemTooltipInfo,
+} from './framexml/lua/api/items';
 import type { GossipQuest } from '../../network/game/object/gossip';
 import { QUEST_STATE, QuestLogSlot } from '../../network/game/object/update-object/quest-log';
 
@@ -686,17 +691,66 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * `allowableClass`/`allowableRace` and discards both, so the question has no answer here, and true is
    * the direction that never paints a usable reward red.
    */
-  fn('GetQuestItemInfo', (args) => {
-    const kind = String(args[0] ?? '');
-    const index = Number(args[1]) - 1;
-    let triple: QuestItemTriple | undefined;
-    if (kind === 'required') {
-      triple = quest.progress?.requiredItems[index];
-    } else if (kind === 'choice') {
-      triple = (quest.offer ?? quest.details)?.choices[index];
-    } else {
-      triple = (quest.offer ?? quest.details)?.rewards[index];
+  /**
+   * `GameTooltip:SetQuestItem(type, index)` -- the reward and requirement rows' own tooltip.
+   *
+   * MEASURED, the owner's console on hovering a reward:
+   *
+   *     QuestInfoItem3: OnEnter: [string "QuestInfo.xml:QuestInfoItem3:OnEnter"]:10:
+   *     attempt to call a nil value (method 'SetQuestItem')
+   *
+   * A nil method inside an `OnEnter` is the worst place for one -- it kills the handler part way, so the
+   * tooltip chain is left half built and the row shows nothing however good the data is. Same shape as
+   * `SetInventoryItem`'s absence on the bag buttons, which this file's sibling already records.
+   *
+   * CHAINED, not installed flat: every bridge that answers a tooltip kind captures the previous source
+   * and delegates what is not its own (`merchant-bridge.ts`, `loot-bridge.ts`, `trainer-bridge.ts` all
+   * do this), so the order bridges attach in cannot make one of them shadow the rest. Restored on
+   * teardown for the same reason.
+   *
+   * The three kinds are the client's own strings on the buttons themselves -- `"required"`, `"reward"`,
+   * `"choice"` -- and they resolve through exactly the triple `GetQuestItemInfo` reads, so the tooltip
+   * and the row can never name different items.
+   */
+  const previousTooltipSource = getItemTooltipSource(vm);
+  const questTooltip = (
+    kind: string, a: number | string, b?: number,
+  ): ItemTooltipInfo | null => {
+    if (kind !== 'quest') {
+      return previousTooltipSource === null
+        ? null
+        : previousTooltipSource(kind as never, a as never, b);
     }
+    const triple = questTripleAt(String(a), Number(b));
+    const template = triple === undefined ? null : items.template(triple.itemId);
+    if (template === null) {
+      return null;
+    }
+    return {
+      name: template.name,
+      quality: template.quality,
+      lines: itemTooltipLines(vm, template, {
+        playerLevel: world.player.level,
+        spellName: (id: number) => spellData.spell(id)?.name ?? null,
+      }),
+    };
+  };
+  setItemTooltipSource(vm, questTooltip as never);
+
+  /** The `{itemId, count, displayId}` a `type`/`index` pair names. One reader for the row and the tooltip. */
+  function questTripleAt(kind: string, oneBased: number): QuestItemTriple | undefined {
+    const index = oneBased - 1;
+    if (kind === 'required') {
+      return quest.progress?.requiredItems[index];
+    }
+    if (kind === 'choice') {
+      return (quest.offer ?? quest.details)?.choices[index];
+    }
+    return (quest.offer ?? quest.details)?.rewards[index];
+  }
+
+  fn('GetQuestItemInfo', (args) => {
+    const triple = questTripleAt(String(args[0] ?? ''), Number(args[1]));
     if (triple === undefined) {
       return [];
     }
@@ -1825,6 +1879,15 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     // or a disposed session's statuses would keep drawing over the next one's units.
     world.questMarkerStatuses = null;
     world.questMarkers.dispose();
+    // The chained tooltip source goes back, exactly as `merchant-bridge.ts` and `loot-bridge.ts` restore
+    // theirs: leaving ours installed would answer `SetQuestItem` for a session that no longer has a
+    // quest handler, and swallow every other kind on the way past.
+    setItemTooltipSource(vm, previousTooltipSource);
+    // The early-registration delegates are this bridge's own; a disposed session must not keep latching
+    // into it. `installQuestLogSelection`'s registrations survive and answer nil, which is correct with
+    // no bridge attached.
+    latchAbandon = null;
+    abandonName = null;
   };
 }
 
