@@ -383,6 +383,31 @@ export class QuestMarkers {
          * reason. Missing it is invisible to every check short of looking at the screen.
          */
         model.visible = true;
+        /**
+         * RAISE THE TEXTURE PRIORITY, or the marker stays white indefinitely.
+         *
+         * MEASURED by the owner: on the same NPC in the same frame, the helm and shoulders eventually
+         * arrived and the marker never did. Those go through `updateObjectTexture`, which sets
+         * `PRIORITY.CHARACTER`; a marker's textures are all `type = 0` -- the name is in the `.m2` and no
+         * runtime slot is filled -- so nothing ever raised them off `BACKGROUND`, and the background
+         * stream stays busy with the zone's terrain and doodads. His line said it exactly:
+         * `textures=[noimage]`, a claimed slot showing the shared placeholder, and it never resolved.
+         *
+         * `PRIORITY.CHARACTER`'s own doc is the argument for doing this rather than a special case: "a
+         * unit standing in the world with a placeholder texture is a visible defect on every frame it
+         * persists". An overhead indicator is that, more so than a weapon.
+         */
+        (model as unknown as THREE.Object3D).traverse((node) => {
+          const mat = (node as unknown as { material?: unknown }).material;
+          const list = Array.isArray(mat) ? mat : [mat];
+          list.forEach((one) => {
+            const raise = (one as { raiseToCharacterPriority?: () => unknown } | null)
+              ?.raiseToCharacterPriority;
+            if (typeof raise === 'function') {
+              void raise.call(one);
+            }
+          });
+        });
         // The marker's own bob, armed looping. Sequence 0; see the header on why 190 is a gap.
         const armable = model as unknown as Armable;
         const seq = armable.modelAnim?.resolve(0);

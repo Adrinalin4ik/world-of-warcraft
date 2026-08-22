@@ -876,6 +876,29 @@ class M2Material extends THREE.ShaderMaterial {
    * constraint that setter's doc is about -- an item model's material is touched exactly once, the same
    * as the body's.
    */
+  /**
+   * Re-fetch this material's OWN texture defs at character priority, supplying nothing.
+   *
+   * For a model whose textures are all `type = 0` -- the name lives in the `.m2` and no runtime slot is
+   * filled -- there is no setter to route through, so the priority stays `BACKGROUND` for ever. That is
+   * right for terrain and doodads and wrong for an overhead questgiver marker, which is the case
+   * `PRIORITY.CHARACTER`'s own doc describes: "a unit standing in the world with a placeholder texture
+   * is a visible defect on every frame it persists". MEASURED by the owner: his NPC's helm and shoulders
+   * arrived (they go through `updateObjectTexture`, so CHARACTER) and the marker's 64x64 ramp never did,
+   * leaving a white `!` indefinitely while the background stream stayed busy with the zone.
+   *
+   * ONE extra `loadTextures()` call, and it carries the over-reference this class already documents at
+   * `updateCharacterTextures`: the call takes a fresh loader reference per def and does not release the
+   * array it replaces. One texture per marker, once per attach, so this is a handful of pinned
+   * references for the session rather than a growing leak -- and the same cost `updateObjectTexture`
+   * already pays. The real fix is `loadTextures` tracking paths rather than textures, in the shared
+   * pipeline, which this is not the place for.
+   */
+  raiseToCharacterPriority(): TextureLoad {
+    this.texturePriority = PRIORITY.CHARACTER;
+    return this.loadTextures();
+  }
+
   updateObjectTexture(path): TextureLoad {
     this.skins.object = path;
 
