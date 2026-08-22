@@ -137,6 +137,17 @@ export interface UnitSnapshot {
 }
 
 /** A unit that exists but about which nothing has arrived yet. */
+/**
+ * The grey band, indexed by `playerLevel / 5` and clamped -- see `GetQuestGreenRange` below for the
+ * citation, the version caveat and what its absence cost.
+ */
+const GREY_BAND = [4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 12, 12, 12, 12, 12, 12, 12];
+
+function greyBand(playerLevel: number): number {
+  const index = Math.floor(Math.max(0, playerLevel) / 5);
+  return GREY_BAND[Math.min(index, GREY_BAND.length - 1)];
+}
+
 export function emptySnapshot(): UnitSnapshot {
   return {
     name: null,
@@ -334,6 +345,40 @@ export function installUnitsApi(vm: LuaVM): void {
     return [typeof plain === 'string' ? plain : null];
   });
   fn('UnitLevel', (args) => [withUnit(args[0], 0, (u) => u.level)]);
+
+  /**
+   * `GetQuestGreenRange()` -- the green->grey boundary, and its absence broke the WHOLE quest log.
+   *
+   * MEASURED, the owner's console on opening the log:
+   *
+   *     QuestLogFrame: OnShow: [string "UIParent.lua"]:3367:
+   *     attempt to call a nil value (global 'GetQuestGreenRange')
+   *
+   * `:3367` is inside the client's own `GetQuestDifficultyColor`, which `QuestLog_Update` calls to
+   * colour each row by level. So the row loop raised in the middle of the SELECTED row's iteration --
+   * and `QuestLog_OnShow` calls `QuestLogDetailFrame_AttachToQuestLog()` LAST, after `QuestLog_Update`
+   * (`questlogframe.lua:284-296`). One nil global therefore produced three separate symptoms: rows
+   * 3..22 kept `id` 0 and stayed shown (the phantom rows), `HybridScrollFrame_Update` never ran, and
+   * the detail panel was never attached -- so `QuestLogDetailFrame` sat at `UIParent`'s TOPLEFT and its
+   * content measured at `left=19` instead of the log's right page, which read as a blank page.
+   *
+   * **This file's own `GetQuestDifficultyColor` does not cover it**, and that is why the gap survived:
+   * `uiparent.lua` loads later and REDEFINES that global, so the client's version is the one that runs
+   * and it needs this one.
+   *
+   * THE TABLE IS THE REFERENCE'S, BYTE-VERIFIED, and it is not something to invent: `GREY_BAND` at
+   * `benilla-ui/src/script/unit/mod.rs:214-231`, transcribed from the 1.12 binary's `0x80ae98` with
+   * byte-identical twins at `0x81dda8` and `0x8076c0`, indexed `playerLevel / 5` (integer) and clamped
+   * to the last entry. The reference's own test pins it: at player 30 the band is 7, which is entry 6.
+   *
+   * VERSION CAVEAT, stated rather than hidden: that binary is 1.12, so the values are verified for
+   * 1.12. The mechanism is what this takes -- a 20-entry table, an index of `level / 5`, a clamp -- and
+   * the tail is already saturated at 12 from entry 12 (level 60) upward, so 3.3.5a's level-80 cap
+   * indexes entry 16 and lands on the same 12 whatever that build's high entries hold. The entries this
+   * client actually exercises today are the low ones. If a 3.3.5a source for the table appears, it
+   * replaces this and the citation should move with it.
+   */
+  fn('GetQuestGreenRange', () => [greyBand(withUnit('player', 0, (u) => u.level))]);
   fn('UnitHealth', (args) => [withUnit(args[0], 0, (u) => u.health)]);
   fn('UnitHealthMax', (args) => [withUnit(args[0], 0, (u) => u.maxHealth)]);
 
@@ -836,11 +881,11 @@ export function installUnitsApi(vm: LuaVM): void {
    * runs but resolved at CALL time, which is after `Constants.lua` has defined the table; the
    * fallback exists only for a VM where it somehow has not.
    *
-   * THE GREEN RANGE IS NOT PINNED. The engine's `GetQuestGreenRange()` is a level-dependent constant
-   * this client has no source for, so anything below the yellow band is green rather than fading to
-   * grey at low relative level. Said plainly rather than approximated with an invented table: the
-   * visible consequence is that a much lower-level unit's number is green where the real client would
-   * grey it.
+   * THE GREEN RANGE IS PINNED NOW, and this paragraph used to say it was not. `GetQuestGreenRange` is
+   * registered above off the reference's byte-verified grey-band table, so the grey leg is reachable
+   * rather than permanently green. Note that this function is REDEFINED by `uiparent.lua` when the
+   * manifest loads, so on the world screen it is the client's own version that runs -- which is
+   * precisely why the missing global mattered.
    */
   /**
    * THE CHARACTER SHEET'S OTHER THREE TABS, and each is declared with the value that makes the panel
