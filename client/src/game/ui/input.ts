@@ -713,7 +713,10 @@ export class GlueInput {
         this.announcedClickDropFlag = true;
         // eslint-disable-next-line no-console
         console.log(`click DROPPED: ${button} not registered on ${pressed.id} -- `
-          + `clickButtons=${pressed.clickButtons === undefined ? 'default(LEFT)'
+          // NULLISH, not `undefined`: `Widget#clickButtons` defaults to `null`, which is exactly what
+          // the `??` gate above treats as "unregistered". My first version tested `=== undefined` and
+          // spread a null -- caught by `click-button.test.ts`, which is what that test is for.
+          + `clickButtons=${pressed.clickButtons == null ? 'default(LEFT)'
             : `[${[...pressed.clickButtons].join(',')}]`}`);
       }
       return;
