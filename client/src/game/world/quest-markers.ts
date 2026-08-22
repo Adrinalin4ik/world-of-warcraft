@@ -165,6 +165,8 @@ export class QuestMarkers {
 
   private announcedOutcome = false;
 
+  private announcedStart = false;
+
   /** `window.worldQuestMarkers()` reads this. `noSlot` is the reference's render-nothing case. */
   public stats = {
     attached: 0, baked: 0, pending: 0, noSlot: 0, dropped: 0,
@@ -248,20 +250,41 @@ export class QuestMarkers {
 
   private attach(guid: string, unit: Unit, path: string): void {
     this.loading.add(guid);
+    /**
+     * ANNOUNCED BEFORE THE AWAIT, and the placement is the whole point of this line.
+     *
+     * The first version of this diagnostic logged inside `.then()`, and the owner's console then showed
+     * the feed line and nothing else -- which is consistent with two completely different things: the
+     * attach never being reached, or `M2Blueprint.load` never settling. This client already has one
+     * recorded instance of the second (the level-up burst's model load never settles while its page
+     * fetch answers 200), so the two had to be told apart rather than assumed.
+     *
+     * So: this line means the attach started. `resolved` below means the load came back. Their absence
+     * or presence is now a three-way answer instead of a one-way hint.
+     */
+    if (!this.announcedStart) {
+      this.announcedStart = true;
+      // eslint-disable-next-line no-console
+      console.log(`questmarkers: attach START ${guid} <- ${path}`);
+    }
     void M2Blueprint.load(path)
       .then((model: THREE.Object3D & { updateMatrix?: () => void }) => {
         this.loading.delete(guid);
         const host = unit.model as unknown as MarkerHost;
         // The unit may have gone, or been re-modelled, while the fetch was out.
         if (host === null || typeof host.attachTo !== 'function' || this.live.has(guid)) {
+          // Previously a silent exit. It is a real outcome -- the unit was re-modelled or gone while
+          // the fetch was out -- and indistinguishable from every other silence without a line.
+          // eslint-disable-next-line no-console
+          console.log(`questmarkers: dropped after load ${guid} -- host or liveness changed`);
           M2Blueprint.unload(model as never);
           return;
         }
         if (!this.announcedOutcome) {
           this.announcedOutcome = true;
           // eslint-disable-next-line no-console
-          console.log(`questmarkers: first attach ${guid} -> slot ${MARKER_ATTACHMENT} `
-            + `${host.attachTo === undefined ? 'NO attachTo' : 'trying'}`);
+          console.log(`questmarkers: load RESOLVED ${guid}; host=${host === null ? 'null' : 'ok'}, `
+            + `attachTo=${typeof host?.attachTo}, alreadyLive=${this.live.has(guid)}`);
         }
         if (!host.attachTo(MARKER_ATTACHMENT, model)) {
           // NO SLOT means NO MARKER -- the reference's own behaviour, not a fallback to another bone
