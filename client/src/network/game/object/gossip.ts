@@ -264,6 +264,27 @@ export class GossipHandler extends EventEmitter {
      */
     this.availableQuests = available;
     this.activeQuests = active;
+    /**
+     * THE ICONS, ANNOUNCED -- because two server generations put different things in this field and
+     * choosing between them by argument is exactly what this repo's rules forbid.
+     *
+     * 1.12 writes `__QuestGiverStatus` values here, which is what the reference verified its `3 || 4`
+     * against. 3.3.5-era cores write their own `QuestMenu` icon constants instead. The two overlap
+     * numerically and mean different things, so the predicate cannot be settled without seeing what
+     * THIS server sends -- the owner's screenshot shows a held, completed quest still drawn with the
+     * available `!`, so whatever it sends is not what `rowIsActive` currently tests.
+     *
+     * Once per menu open, and only while something is still misclassified: a menu carries a handful of
+     * rows, so this is a single short line and not a per-frame cost.
+     */
+    if (questCount > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `gossip: ${questCount} quest rows -- `
+        + `${[...active, ...available].map((q) => `${q.questId}:icon=${q.icon}`).join(' ')} `
+        + `(active=${active.length}, available=${available.length})`,
+      );
+    }
     // The greeting is a second round trip. Cleared first so a stale one from the previous NPC cannot
     // be drawn under this one's buttons.
     this.greeting = null;

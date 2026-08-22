@@ -1600,6 +1600,27 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
        * The player's own branch below keeps its `rebuild()` gate: that one is about the quest LOG, and
        * re-asking there is already covered by the same call at its end.
        */
+      /**
+       * **UNTIL THE FIRST ANSWER, ANY UNIT'S FIELDS ARE THE EDGE.** The questgiver gate below is right
+       * once statuses are flowing, and it was wrong as the ONLY gate -- which is why the markers worked
+       * on one visit and not the next.
+       *
+       * The bridge's own opening sweep fires when it attaches, which is before the world has any
+       * entities, so it is answered for nobody. After that, the only edges were quest events and this
+       * one. A giver who was ALREADY standing there when the player entered the world has had his
+       * fields applied before this handler existed and never applies them again, so he produced no
+       * edge at all: walk up to him and nothing is ever asked. The owner saw exactly that -- one visit
+       * with a quest event in it worked, the next was silent from the first line.
+       *
+       * So while `quest.status` is still empty, any unit's fields are taken as the signal that the
+       * world has populated and an answer is worth asking for. `reaskStatuses` throttles it to one
+       * small packet a second, and the first reply ends this arm for the rest of the session -- after
+       * which the questgiver flag is the gate, as it should be.
+       */
+      if (quest.status.size === 0) {
+        reaskStatuses();
+        return;
+      }
       const flags = (unit as { fields?: { npcFlags?: number } } | null)?.fields?.npcFlags ?? 0;
       if ((flags & NPC_FLAG.QUESTGIVER) !== 0) {
         reaskStatuses();
