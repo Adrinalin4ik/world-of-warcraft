@@ -124,6 +124,9 @@ export class GlueInput {
    */
   private rotating: { rig: ModelRig; startX: number; startRotation: number } | null = null;
 
+  /** See the click-drop diagnostics: one line for the whole session. */
+  private announcedClickDropFlag = false;
+
   /**
    * THE SLIDER BEING DRAGGED, which nothing in this client could do before -- the owner reported the
    * scrollbar's drag dead in every round.
@@ -533,6 +536,11 @@ export class GlueInput {
       }
     }
 
+    if (hit !== null && hit.state === 'disabled' && !this.announcedClickDropFlag) {
+      this.announcedClickDropFlag = true;
+      // eslint-disable-next-line no-console
+      console.log(`click DROPPED: ${hit.id} is DISABLED at press (kind=${hit.kind})`);
+    }
     if (hit && hit.state !== 'disabled') {
       this.pressed = hit;
       // The drag origin, for `maybeBeginDrag`. Recorded for every press, not only a registered one: the
@@ -658,7 +666,25 @@ export class GlueInput {
       return;
     }
 
+    /**
+     * EVERY SILENT DROP IN THIS PATH IS NAMED ONCE, and the reason is a measurement that came back
+     * entirely clean.
+     *
+     * The owner's gossip quest row reported `shown=true h=15 w=300 type=Active id=1 onclick=true` and
+     * -- from the client's own `GetMouseFocus()` -- itself as the widget under the cursor. Then clicking
+     * it produced no handler call at all. That is this project's recorded signature: a registered
+     * handler is not a dispatched one. There are exactly three places below where a press is discarded
+     * with no trace, and guessing between them has already cost two rounds.
+     *
+     * One line each, once per session, so this can never become per-click noise.
+     */
     if (released !== pressed) {
+      if (!this.announcedClickDropFlag) {
+        this.announcedClickDropFlag = true;
+        // eslint-disable-next-line no-console
+        console.log(`click DROPPED: released off the widget -- pressed=${pressed.id} `
+          + `released=${released === null ? 'null' : released.id}`);
+      }
       return; // Released off the widget: no click.
     }
 
@@ -683,7 +709,19 @@ export class GlueInput {
      */
     const button = this.pressButton;
     if (!(pressed.clickButtons ?? LEFT_ONLY).has(button)) {
+      if (!this.announcedClickDropFlag) {
+        this.announcedClickDropFlag = true;
+        // eslint-disable-next-line no-console
+        console.log(`click DROPPED: ${button} not registered on ${pressed.id} -- `
+          + `clickButtons=${pressed.clickButtons === undefined ? 'default(LEFT)'
+            : `[${[...pressed.clickButtons].join(',')}]`}`);
+      }
       return;
+    }
+    if (!this.announcedClickDropFlag && pressed.onClick === null) {
+      this.announcedClickDropFlag = true;
+      // eslint-disable-next-line no-console
+      console.log(`click DROPPED: ${pressed.id} has no onClick bound (kind=${pressed.kind})`);
     }
 
     if (pressed.kind === 'checkbutton') {
