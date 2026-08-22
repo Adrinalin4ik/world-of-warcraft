@@ -167,6 +167,10 @@ export class QuestMarkers {
 
   private announcedStart = false;
 
+  private textureSettled = false;
+
+  private textureFrames = 0;
+
   private announcedMaterials = false;
 
   private announcedBake = false;
@@ -527,6 +531,38 @@ export class QuestMarkers {
    * pass is a walk over at most a handful of live markers.
    */
   animate(camera: THREE.Camera, cameraMoved: boolean): void {
+    /**
+     * THE TEXTURE, WATCHED UNTIL IT LANDS OR PLAINLY DOES NOT -- one line either way.
+     *
+     * Everything about the fetch checks out: `loadTextures` claims the slot with the shared placeholder,
+     * assigns the decoded texture into the SAME array the uniform holds, and sets `uniformsNeedUpdate`,
+     * which is the renderer contract (`pipeline/m2/material/index.ts:692-697`). And the fetch reported
+     * `SETTLED with 0 failure(s)`. So either the slot fills a moment after the bake -- in which case the
+     * marker is briefly grey and then correct, and there is nothing to fix -- or it never fills, and the
+     * completion is writing into a material the live marker is not using.
+     *
+     * That second case has a named mechanism now: `M2Blueprint.load` returns a CLONE, and its own comment
+     * says an instanceable model's clone "shares the source's geometry and batches" while an animating one
+     * "rebuilds its own batches and materials". Which of those a marker is decides whether the texture
+     * that was fetched belongs to the material being drawn.
+     *
+     * Bounded: checked on the frames the camera moves, and reported at most twice -- once if it lands, once
+     * if it has not after 300 such frames. No allocation on the common path.
+     */
+    if (!this.textureSettled && this.live.size > 0) {
+      this.textureFrames += 1;
+      const landed = this.firstTextureSize();
+      if (landed !== null && landed !== 'noimage') {
+        this.textureSettled = true;
+        // eslint-disable-next-line no-console
+        console.log(`questmarkers: texture LANDED after ${this.textureFrames} moved frames -- ${landed}`);
+      } else if (this.textureFrames === 300) {
+        this.textureSettled = true;
+        // eslint-disable-next-line no-console
+        console.warn('questmarkers: texture NEVER landed in 300 moved frames -- the slot is still the '
+          + 'placeholder, so the decoded texture is going to a material this marker is not drawing');
+      }
+    }
     if (!cameraMoved) {
       return;
     }
@@ -539,6 +575,35 @@ export class QuestMarkers {
         model.applyBillboards(camera);
       }
     }
+  }
+
+  /** The first bound texture's `WxH`, `'noimage'` for the placeholder, or null when there is none. */
+  private firstTextureSize(): string | null {
+    for (const marker of this.live.values()) {
+      let found: string | null = null;
+      (marker.model as unknown as THREE.Object3D).traverse((node) => {
+        if (found !== null) {
+          return;
+        }
+        const mat = (node as unknown as { material?: unknown }).material;
+        const list = Array.isArray(mat) ? mat : [mat];
+        list.forEach((one) => {
+          const bound = (one as { uniforms?: { textures?: { value?: unknown } } } | null)
+            ?.uniforms?.textures?.value;
+          if (!Array.isArray(bound) || bound.length === 0) {
+            return;
+          }
+          const image = (bound[0] as { image?: { width?: number; height?: number } } | null)?.image;
+          found = image === undefined || image === null
+            ? 'noimage'
+            : `${String(image.width)}x${String(image.height)}`;
+        });
+      });
+      if (found !== null) {
+        return found;
+      }
+    }
+    return null;
   }
 
   private detach(guid: string, marker: Marker): void {
