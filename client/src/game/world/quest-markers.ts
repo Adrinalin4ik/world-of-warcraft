@@ -388,6 +388,43 @@ export class QuestMarkers {
          */
         model.visible = true;
         /**
+         * THE FOG CONTROL ARM -- `window.worldQuestMarkersFog = false` and reload.
+         *
+         * A MEASUREMENT, not a fix, and the reasoning it tests is this. The fragment shader mixes an
+         * opaque batch toward the FOG COLOUR after lighting (`fragment/common-header.glsl:234`), and the
+         * mix is zeroed only for geometry flagged unfogged (render flag 0x02). This model's flags are
+         * 0x41 -- unlit, and NOT unfogged -- so it is fogged by the game's own data, correctly.
+         *
+         * Which should be harmless at arm's length, because the factor falls to zero near the camera. But
+         * a marker is the only thing in this client whose vertices are skinned against its OWN skeleton
+         * while that skeleton hangs off another model's bone, so if the shader's camera distance comes
+         * from a position that does not carry the host's transform, the distance is the whole map and the
+         * fog is full -- which paints the glyph FLAT FOG COLOUR. Northshire's is pale, and pale flat is
+         * exactly what the owner sees, with the shape still legible because the shape is geometry.
+         *
+         * Everything else is already eliminated by his own console: the texture is bound and 64x64 in the
+         * material being drawn, `texCount` is 1, and `materialParams` reads `[1,0,1,1]` -- whose second
+         * component is this shader's lighting switch, so the batch is genuinely unlit. Texture present,
+         * light white, and still not yellow leaves the term applied after both.
+         *
+         * So: flip the arm. Yellow means the fog term is the cause and the fix belongs in how a
+         * bone-parented model reports its camera distance -- not here. Still pale means fog is exonerated
+         * and I am wrong again, which is worth knowing in one sighting rather than three.
+         */
+        if ((window as unknown as Record<string, unknown>).worldQuestMarkersFog === false) {
+          (model as unknown as THREE.Object3D).traverse((node) => {
+            const mat = (node as unknown as { material?: unknown }).material;
+            const list = Array.isArray(mat) ? mat : [mat];
+            list.forEach((one) => {
+              const u = (one as { uniforms?: Record<string, { value?: unknown }> } | null | undefined)
+                ?.uniforms;
+              if (u?.fogModifier !== undefined) {
+                u.fogModifier.value = 0;
+              }
+            });
+          });
+        }
+        /**
          * NO PRIORITY RAISE HERE, AND THE REVERT IS THE POINT.
          *
          * I added one -- `M2Material#raiseToCharacterPriority` -- on the reasoning that a marker's
