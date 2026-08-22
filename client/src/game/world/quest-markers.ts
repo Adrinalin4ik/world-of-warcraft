@@ -167,6 +167,12 @@ export class QuestMarkers {
 
   private announcedStart = false;
 
+  private announcedBake = false;
+
+  private announcedPending = false;
+
+  private pendingFrames = 0;
+
   /** `window.worldQuestMarkers()` reads this. `noSlot` is the reference's render-nothing case. */
   public stats = {
     attached: 0, baked: 0, pending: 0, noSlot: 0, dropped: 0,
@@ -241,8 +247,37 @@ export class QuestMarkers {
       }
       if (this.bake(marker)) {
         this.stats.baked += 1;
+        if (!this.announcedBake) {
+          this.announcedBake = true;
+          const bone = marker.model.parent;
+          const m = bone === null ? null : bone.matrixWorld.elements;
+          // eslint-disable-next-line no-console
+          console.log(`questmarkers: BAKED -- scale=${marker.model.scale.x.toFixed(4)}, `
+            + `bone world pos=${m === null ? 'none'
+              : `${m[12].toFixed(1)},${m[13].toFixed(1)},${m[14].toFixed(1)}`}`);
+        }
       } else {
         pending += 1;
+        /**
+         * THE BAKE THAT NEVER HAPPENS, and it is the one remaining silent state.
+         *
+         * `bake` refuses while the attach bone's world matrix has not propagated -- an all-zero
+         * translation -- and this world deliberately does NOT auto-update world matrices
+         * (`scene.matrixWorldAutoUpdate = false`, worth 6 ms a frame). If nothing ever walks the graph
+         * for a newly parented child, the refusal is permanent and the marker sits at scale 1 wherever
+         * an identity matrix puts it. Counted in frames rather than announced immediately, because the
+         * first few updates legitimately arrive before propagation.
+         */
+        this.pendingFrames += 1;
+        if (this.pendingFrames === 120 && !this.announcedPending) {
+          this.announcedPending = true;
+          const bone = marker.model.parent;
+          const m = bone === null ? null : bone.matrixWorld.elements;
+          // eslint-disable-next-line no-console
+          console.warn('questmarkers: bake STILL PENDING after 120 updates -- bone world matrix '
+            + `pos=${m === null ? 'no parent'
+              : `${m[12].toFixed(1)},${m[13].toFixed(1)},${m[14].toFixed(1)}`}`);
+        }
       }
     }
     this.stats.pending = pending;
@@ -303,6 +338,12 @@ export class QuestMarkers {
         }
         this.live.set(guid, { path, model, baked: false });
         this.stats.attached += 1;
+        // ATTACHED, said outright. `attachTo` returning true is the point past which every remaining
+        // failure is invisible from the outside -- the model is in the scene graph and simply does not
+        // appear -- so this and the bake lines below are the only way to tell them apart.
+        // eslint-disable-next-line no-console
+        console.log(`questmarkers: ATTACHED ${guid}; live=${this.live.size} `
+          + `attached=${this.stats.attached} noSlot=${this.stats.noSlot}`);
       })
       .catch((error: unknown) => {
         this.loading.delete(guid);
