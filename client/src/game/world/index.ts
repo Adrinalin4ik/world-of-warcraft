@@ -1162,7 +1162,26 @@ export default class World extends EventEmitter {
     // No named span: with no statuses (offline, or before the first
     // `SMSG_QUESTGIVER_STATUS_MULTIPLE`) this is one null check, and with statuses it is a walk over
     // a handful of markers.
-    if (this.questMarkerStatuses !== null) {
+    /**
+     * THE CONTROL ARM, in the shape `worldRingEnabled` and `worldCombatFacing` already use.
+     *
+     * The owner reported white helm and shoulder textures on an NPC in the same frame as a white
+     * marker, and attributed it to this feature. He may well be right and I cannot settle it by
+     * reading: the marker path loads a model by path and attaches it to a BONE, and this repo's own
+     * rules record that an attachment shares its batches with every other copy of that path in the
+     * zone -- "a SHARED material is not yours to write", three rounds spent on it already. His own log
+     * shows two markers of the SAME path attached to two different NPCs in one frame (`live=2`), which
+     * is exactly the shape of that hazard.
+     *
+     * So rather than argue: `window.worldQuestMarkersEnabled = false` and reload. If the armour comes
+     * back, the markers are the cause and the fix is a per-instance model rather than a shared one. If
+     * it does not, this feature is exonerated and the defect is elsewhere -- and either answer is worth
+     * more than my reasoning. One property read per frame.
+     */
+    if (
+      this.questMarkerStatuses !== null
+      && (window as unknown as Record<string, unknown>).worldQuestMarkersEnabled !== false
+    ) {
       this.questMarkers.update(this.entities, this.questMarkerStatuses);
     }
 
