@@ -167,8 +167,6 @@ export class QuestMarkers {
 
   private announcedStart = false;
 
-  private announcedTextureLoad = false;
-
   private announcedMaterials = false;
 
   private announcedBake = false;
@@ -386,58 +384,26 @@ export class QuestMarkers {
          */
         model.visible = true;
         /**
-         * RAISE THE TEXTURE PRIORITY, or the marker stays white indefinitely.
+         * NO PRIORITY RAISE HERE, AND THE REVERT IS THE POINT.
          *
-         * MEASURED by the owner: on the same NPC in the same frame, the helm and shoulders eventually
-         * arrived and the marker never did. Those go through `updateObjectTexture`, which sets
-         * `PRIORITY.CHARACTER`; a marker's textures are all `type = 0` -- the name is in the `.m2` and no
-         * runtime slot is filled -- so nothing ever raised them off `BACKGROUND`, and the background
-         * stream stays busy with the zone's terrain and doodads. His line said it exactly:
-         * `textures=[noimage]`, a claimed slot showing the shared placeholder, and it never resolved.
+         * I added one -- `M2Material#raiseToCharacterPriority` -- on the reasoning that a marker's
+         * `type = 0` textures never leave `BACKGROUND` because no runtime setter is ever called for
+         * them. The owner said the direction did not convince him, and he was right twice over.
          *
-         * `PRIORITY.CHARACTER`'s own doc is the argument for doing this rather than a special case: "a
-         * unit standing in the world with a placeholder texture is a visible defect on every frame it
-         * persists". An overhead indicator is that, more so than a weapon.
+         * First, the evidence says the fetch was never the problem: with the report in place his console
+         * gave `texture fetch SETTLED with 0 failure(s)`. The file arrives and decodes.
+         *
+         * Second, the raise could have CAUSED the symptom it was meant to cure. `loadTextures` REPLACES
+         * the texture array rather than filling the existing one, and its own doc says it "does NOT
+         * release the array it replaces" -- so a second call can leave the shader's uniform pointing at
+         * the first array, whose slot then holds the shared placeholder for ever. That is a plausible
+         * mechanism for a permanently white marker, which is exactly what was being chased.
+         *
+         * The lesson is the one this project already writes down: a fix that is reasonable in the
+         * abstract and unmeasured is a guess, and this one also generated bluebird "promise created in a
+         * handler but not returned" warnings in his console. Reverted rather than kept "because it
+         * cannot hurt".
          */
-        (model as unknown as THREE.Object3D).traverse((node) => {
-          const mat = (node as unknown as { material?: unknown }).material;
-          const list = Array.isArray(mat) ? mat : [mat];
-          list.forEach((one) => {
-            const raise = (one as {
-              raiseToCharacterPriority?: () => Promise<Array<{ path: string; error: unknown }>>;
-            } | null)?.raiseToCharacterPriority;
-            if (typeof raise !== 'function') {
-              return;
-            }
-            const settled = raise.call(one);
-            /**
-             * AND REPORT WHAT THE FETCH ACTUALLY DID, once -- because the priority raise is a REASONABLE
-             * change and a WEAK explanation, and the owner said so.
-             *
-             * The zone's own terrain and doodads do load, so the background stream plainly drains; a
-             * texture that never arrives is therefore not obviously starvation. The likelier story is
-             * the churn: markers attach and detach as statuses change, `M2Blueprint` caches by path, and
-             * a model unloaded while its texture was in flight releases the key -- after which a
-             * re-attach can hold a material whose slot is claimed and whose fetch is gone.
-             *
-             * `loadTextures` resolves with the failures rather than rejecting, so this says which of the
-             * three it is: resolving empty means the file arrived, a failure names the path and the
-             * error, and never settling at all means the fetch is lost -- and only the last of those is
-             * consistent with a permanently white marker.
-             */
-            if (!this.announcedTextureLoad) {
-              this.announcedTextureLoad = true;
-              void settled.then((failures) => {
-                // eslint-disable-next-line no-console
-                console.log(`questmarkers: texture fetch SETTLED with ${failures.length} failure(s)`
-                  + `${failures.length === 0 ? '' : `: ${failures.map((f) => f.path).join(' ')}`}`);
-              }).catch((error: unknown) => {
-                // eslint-disable-next-line no-console
-                console.log('questmarkers: texture fetch REJECTED', error);
-              });
-            }
-          });
-        });
         // The marker's own bob, armed looping. Sequence 0; see the header on why 190 is a gap.
         const armable = model as unknown as Armable;
         const seq = armable.modelAnim?.resolve(0);
