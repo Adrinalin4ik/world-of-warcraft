@@ -1507,6 +1507,10 @@ export default class World extends EventEmitter {
         model.applyBillboards(camera);
       }
 
+      // The MARKERS' billboards are not reachable from here: each is a separate `M2` parented to a bone
+      // of one of these models, so it is in no collection this loop walks. `QuestMarkers#animate` is
+      // called once per frame beside the update instead -- see its own doc.
+
       // NO `poseFrame` stamp and no gated walk for units, and this cost is KNOWINGLY retained.
       //
       // `entity.view` is a direct child of the scene root, so `updateDynamicMatrices` gives it an
@@ -1534,6 +1538,17 @@ export default class World extends EventEmitter {
       //   model.skeletonHelper.update();
       // }
     });
+
+    /**
+     * THE MARKERS, once per frame and here rather than beside their `update`.
+     *
+     * Their billboards are unreachable from the loop above: each marker is a separate `M2` parented to a
+     * BONE of one of the models it walks, so it is in no collection this method iterates -- which is
+     * exactly why the owner's `?` never turned to face him. `camera` and `cameraMoved` are in scope only
+     * here, and `animate` early-outs on a still camera and on a model with no billboarded bones, so a
+     * frame with nothing to do costs one call and one boolean.
+     */
+    this.questMarkers.animate(camera, cameraMoved);
 
     endAnimSection();
   }

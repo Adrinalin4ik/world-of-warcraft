@@ -509,6 +509,38 @@ export class QuestMarkers {
     return true;
   }
 
+  /**
+   * THE MARKERS' OWN PER-FRAME PASS -- and its absence is why the `?` does not turn to face you.
+   *
+   * The owner: "вопросительный знак не направляется лицом ко мне". He is right, and the reason is
+   * structural rather than a wrong angle: `world/index.ts`' animation loop walks the world's own MODELS
+   * and calls `applyBillboards` on each (`:1506-1508`). A marker is a separate `M2` parented to a BONE of
+   * one of those models, so it is in no such collection and nothing ever visits it. Its billboarded bones
+   * therefore keep their bind rotation for ever, and its own bob never advances either.
+   *
+   * The reference drives exactly this and names it: `face_billboards` writes absolute world transforms
+   * for the marker's billboarded submeshes, off the same clock its bob is armed against
+   * (`benilla-app/src/quest_markers/mod.rs:385-400`).
+   *
+   * GATED ON `cameraMoved`, like the world's own pass, and skipped entirely for a model with no
+   * billboarded bones -- so a marker costs nothing on a frame where the camera is still, and the whole
+   * pass is a walk over at most a handful of live markers.
+   */
+  animate(camera: THREE.Camera, cameraMoved: boolean): void {
+    if (!cameraMoved) {
+      return;
+    }
+    for (const marker of this.live.values()) {
+      const model = marker.model as unknown as {
+        billboards?: unknown[]; applyBillboards?: (camera: THREE.Camera) => void;
+      };
+      if (Array.isArray(model.billboards) && model.billboards.length > 0
+        && typeof model.applyBillboards === 'function') {
+        model.applyBillboards(camera);
+      }
+    }
+  }
+
   private detach(guid: string, marker: Marker): void {
     marker.model.parent?.remove(marker.model);
     // A refcount decrement, not a free: several NPCs share one marker path.
