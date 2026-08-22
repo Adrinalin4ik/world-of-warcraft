@@ -18,7 +18,8 @@
  * changed nothing about how `/` behaves.
  */
 import { keyToken } from './framexml/bindings';
-import { focusChain, hitTest, wheelTargetAt, nextFocus, paneAt } from './hit';
+import { focusChain, hitTest, wheelTargetAt, nextFocus, paneAt, sliderThumbAt } from './hit';
+import { layoutRectOf } from './rects';
 import { viewportUnits } from './layout';
 import { DrawItem, MouseButtonName, Widget } from './widget';
 import type { ModelRig } from './scene/scene-rig';
@@ -122,6 +123,23 @@ export class GlueInput {
    * on how many moves the browser chose to deliver.
    */
   private rotating: { rig: ModelRig; startX: number; startRotation: number } | null = null;
+
+  /**
+   * THE SLIDER BEING DRAGGED, which nothing in this client could do before -- the owner reported the
+   * scrollbar's drag dead in every round.
+   *
+   * `grab` is where inside the thumb the press landed, so the knob does not jump under the cursor on the
+   * first move; `travel` is the track length MINUS the thumb, which is the distance a fraction of 1 has
+   * to cover. Captured at press time: re-reading the rects mid-drag would follow a thumb that this very
+   * drag is moving, and the fraction would chase itself.
+   */
+  private sliding: {
+    slider: Widget;
+    grab: number;
+    trackStart: number;
+    travel: number;
+    vertical: boolean;
+  } | null = null;
 
   /**
    * The mouse-enabled widget the LIVE press landed on, or null when it landed on the world.
@@ -250,6 +268,7 @@ export class GlueInput {
     this.pressOrigin = null;
     this.dragging = null;
     this.rotating = null;
+    this.sliding = null;
     // The last pointer position goes too: it is what the cursor-attachment pass draws at, and a stale one
     // would put a dragged icon wherever the pointer was on the retired screen until the next move.
     this.pointerUnits = null;
@@ -389,6 +408,17 @@ export class GlueInput {
 
     // THE MODEL PANE'S SPIN, before the press bookkeeping and independent of it: a pane is not a
     // pressed widget (see `hit.ts#paneAt`), so nothing below would run for it.
+    // THE THUMB FOLLOWS THE POINTER, and the value follows the thumb -- through Lua, so the client's
+    // own `<OnValueChanged>` runs and the scroll frame is told. See `Widget#onSliderDrag`.
+    if (this.sliding !== null) {
+      const { slider, grab, trackStart, travel, vertical } = this.sliding;
+      if (travel > 0) {
+        const along = (vertical ? y : x) - grab - trackStart;
+        slider.onSliderDrag?.(Math.max(0, Math.min(1, along / travel)));
+      }
+      return;
+    }
+
     if (this.rotating !== null) {
       const rig = this.rotating.rig;
       const wanted = this.rotating.startRotation
@@ -467,6 +497,28 @@ export class GlueInput {
       this.capturePointer(event);
     }
 
+    // A PRESS ON A SCROLLBAR THUMB, and the same z-order reasoning as the pane above: the thumb is art
+    // inside a mouse-enabled panel, so `hitTest` answers the panel and this cannot be gated on it.
+    const thumb = sliderThumbAt(this.items, x, y);
+    const slider = thumb?.widget.thumbOf ?? null;
+    if (thumb !== null && slider !== null && slider.onSliderDrag !== null) {
+      const track = layoutRectOf(slider.id);
+      const vertical = slider.sliderTravel.vertical;
+      if (track !== null) {
+        const travel = vertical ? track.height - thumb.rect.height : track.width - thumb.rect.width;
+        this.sliding = {
+          slider,
+          grab: vertical ? y - thumb.rect.top : x - thumb.rect.left,
+          trackStart: vertical ? track.top : track.left,
+          // A track no longer than its thumb has nowhere to travel; guarded so the fraction below is
+          // never a division by zero, which would be NaN and would clamp to the top for ever.
+          travel: travel > 0 ? travel : 0,
+          vertical,
+        };
+        this.capturePointer(event);
+      }
+    }
+
     if (hit && hit.state !== 'disabled') {
       this.pressed = hit;
       // The drag origin, for `maybeBeginDrag`. Recorded for every press, not only a registered one: the
@@ -522,6 +574,7 @@ export class GlueInput {
 
   private onPointerUp = (event: PointerEvent): void => {
     this.rotating = null;
+    this.sliding = null;
     const pressed = this.pressed;
     const dragging = this.dragging;
     this.pressed = null;

@@ -16,23 +16,13 @@ import { LuaVM } from '../lua/vm';
 import { FrameRegistry, installObjectModel } from '../lua/object';
 import { createFrameXmlRuntime, loadDocument } from '../loader';
 import { parseXml } from '../xml';
-import { WidgetRoot } from '../../widget';
+import { Widget, WidgetRoot } from '../../widget';
 import { setRectResolver, clearRects } from '../../rects';
 
 const VIEWPORT = { width: 1024, height: 768 };
 
-describe('an arrow click on an inherited scrollbar', () => {
-  afterEach(() => clearRects());
-
-  it('reaches the scroll frame through the template OnValueChanged', () => {
-    const vm = new LuaVM();
-    const root = new WidgetRoot();
-    const registry = new FrameRegistry(root.root);
-    const ctx = installObjectModel(vm, registry, null);
-    const rt = createFrameXmlRuntime(vm, ctx);
-    setRectResolver(() => root.layoutRects(VIEWPORT));
-
-    const report = loadDocument(rt, parseXml(`
+/** The real shape: a virtual scrollbar template inherited by an instance inside a `<ScrollFrame>`. */
+const DOCUMENT = `
       <Ui>
         <Slider name="BarTemplate" virtual="true">
           <Size><AbsDimension x="16" y="0"/></Size>
@@ -82,7 +72,20 @@ describe('an arrow click on an inherited scrollbar', () => {
           </ScrollChild>
         </ScrollFrame>
       </Ui>
-    `), () => null, 'inline.xml');
+    `;
+
+describe('an arrow click on an inherited scrollbar', () => {
+  afterEach(() => clearRects());
+
+  it('reaches the scroll frame through the template OnValueChanged', () => {
+    const vm = new LuaVM();
+    const root = new WidgetRoot();
+    const registry = new FrameRegistry(root.root);
+    const ctx = installObjectModel(vm, registry, null);
+    const rt = createFrameXmlRuntime(vm, ctx);
+    setRectResolver(() => root.layoutRects(VIEWPORT));
+
+    const report = loadDocument(rt, parseXml(DOCUMENT), () => null, 'inline.xml');
     expect(report.errors).toEqual([]);
 
     // What `ScrollFrame_OnScrollRangeChanged` does once it survives to the end (`uipaneltemplates.lua:284`).
@@ -98,5 +101,42 @@ describe('an arrow click on an inherited scrollbar', () => {
     // And the transition carried through the inherited `<OnValueChanged>` to the frame.
     expect(vm.run('moved = Detail:GetVerticalScroll()', 't')).toBeNull();
     expect(vm.getGlobal('moved')).toBe(167);
+  });
+
+  /**
+   * THE DRAG, which no `<Slider>` script implements -- it is the engine's, so `ui/input.ts` owns the
+   * gesture and `Widget#onSliderDrag` is its only way back into Lua. Asserted through that hook rather
+   * than through a synthetic pointer sequence: the hook IS the contract between the two layers, and a
+   * fake `pointerdown` would test the harness's event plumbing instead.
+   */
+  it('drags the thumb through the same SetValue an arrow click uses', () => {
+    const vm = new LuaVM();
+    const root = new WidgetRoot();
+    const registry = new FrameRegistry(root.root);
+    const ctx = installObjectModel(vm, registry, null);
+    const rt = createFrameXmlRuntime(vm, ctx);
+    setRectResolver(() => root.layoutRects(VIEWPORT));
+
+    const report = loadDocument(rt, parseXml(DOCUMENT), () => null, 'inline.xml');
+    expect(report.errors).toEqual([]);
+    expect(vm.run('DetailScrollBar:SetMinMaxValues(0, 266)', 't')).toBeNull();
+
+    // The slider the loader built, found the way the input layer finds it: by the hook being installed.
+    const withDrag: Widget[] = [];
+    const walk = (node: Widget): void => {
+      if (node.onSliderDrag !== null) {
+        withDrag.push(node);
+      }
+      node.children.forEach(walk);
+    };
+    walk(root.root);
+    expect(withDrag).toHaveLength(1);
+
+    // Half way down the track.
+    withDrag[0].onSliderDrag!(0.5);
+
+    expect(vm.run('value = DetailScrollBar:GetValue(); moved = Detail:GetVerticalScroll()', 't')).toBeNull();
+    expect(vm.getGlobal('value')).toBe(133);
+    expect(vm.getGlobal('moved')).toBe(133);
   });
 });

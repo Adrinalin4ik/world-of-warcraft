@@ -65,6 +65,25 @@ export function hitTest(items: DrawItem[], x: number, y: number): Widget | null 
  * Cost is not on the critical path -- this runs once per physical wheel notch, never per frame, and the
  * common case exits on the first few items rather than walking the list.
  */
+/**
+ * The `<Slider>` thumb under this point, as a DRAW ITEM -- the item, because `drawList` overrides a
+ * thumb's rect from its track and the live value, so the item's rect is the only one that is where the
+ * knob actually is.
+ *
+ * `mouseEnabled` is not consulted, for the reason `paneAt` gives: this is an engine gesture, and a
+ * `<ThumbTexture>` is art -- it authors no `enableMouse` and never could, so gating on that flag would
+ * make the drag impossible rather than optional.
+ */
+export function sliderThumbAt(items: DrawItem[], x: number, y: number): DrawItem | null {
+  for (let index = items.length - 1; index >= 0; --index) {
+    const item = items[index];
+    if (item.widget.thumbOf !== null && contains(item, x, y)) {
+      return item;
+    }
+  }
+  return null;
+}
+
 export function wheelTargetAt(items: DrawItem[], x: number, y: number): Widget | null {
   for (let index = items.length - 1; index >= 0; --index) {
     const item = items[index];

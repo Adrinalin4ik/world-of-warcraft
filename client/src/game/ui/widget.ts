@@ -333,6 +333,21 @@ export class Widget {
    * scrollbar in the client is.
    */
   sliderTravel: { fraction: number; vertical: boolean } = { fraction: 0, vertical: true };
+
+  /**
+   * DRAG THE THUMB, and it is the engine's behaviour rather than a script's.
+   *
+   * No `<Slider>` in the client binds a press-and-move handler -- the same situation as a
+   * `<PlayerModel>`'s drag-to-rotate, answered the same way (see `hit.ts#paneAt`). So `ui/input.ts`
+   * owns the gesture and this is how it gets back into Lua: `methods/scroll.ts` installs a closure that
+   * runs the slider's own `SetValue`, so the clamp, the thumb sync and the `OnValueChanged` dispatch are
+   * the ones every other caller gets. Writing `sliderTravel` from the input layer instead would move the
+   * knob and tell the client nothing.
+   *
+   * `fraction` is 0..1 along the track, 0 at the top (or left) -- the same sense `sliderTravel` uses.
+   * Null on every widget that is not a live `<Slider>`.
+   */
+  onSliderDrag: ((fraction: number) => void) | null = null;
   focusable = false;
 
   /**

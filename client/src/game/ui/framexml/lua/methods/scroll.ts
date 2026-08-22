@@ -442,6 +442,22 @@ function ensureThumbTextureId(ctx: MethodContext, self: number): number {
     if (thumb !== undefined) {
       thumb.thumbOf = slider;
     }
+    /**
+     * THE DRAG'S WAY BACK INTO LUA. `ui/input.ts` owns the gesture -- no `<Slider>` in the client binds
+     * a press-and-move handler, so it is the engine's, like a model pane's spin -- and this is the only
+     * thing it calls. Routed through `SLIDER.SetValue` rather than writing `state.value`, so the drag
+     * gets the same clamp, the same `syncThumb` and the same `OnValueChanged` dispatch as an arrow
+     * click; writing the state directly would move the knob and tell the scroll frame nothing.
+     *
+     * `step` is honoured because `SetValue` is: the client sets one on faux lists
+     * (`FauxScrollFrame_Update`'s `valueStep`), and a drag that ignored it would land between rows.
+     */
+    slider.onSliderDrag = (fraction) => {
+      const state = sliderState(self);
+      const wanted = state.min + fraction * (state.max - state.min);
+      const snapped = state.step > 0 ? Math.round(wanted / state.step) * state.step : wanted;
+      SLIDER.SetValue?.(ctx, self, [snapped]);
+    };
   }
   return id;
 }
