@@ -407,6 +407,10 @@ export class QuestHandler extends EventEmitter {
   }
 
   /** For the instrument only: what the arm that just ran was about. */
+  private announcedStatusQuery = false;
+
+  private announcedStatusReply = false;
+
   private announcedOfferTail = false;
 
   private lastQuestId = 0;
@@ -1258,6 +1262,10 @@ export class QuestHandler extends EventEmitter {
     if (count === 0) {
       return;
     }
+    if (!this.announcedStatusReply) {
+      this.announcedStatusReply = true;
+      console.warn(`quest: status sweep ANSWERED with ${count} rows (body ${size})`);
+    }
     const stride = (size - 4) / count;
     const wide = stride >= GUID_BYTES + 4;
     for (let i = 0; i < count; ++i) {
@@ -1473,6 +1481,16 @@ export class QuestHandler extends EventEmitter {
    * (`quest/giver.rs:139-141`) and no bulk one. Sent on entering the world and when the log changes.
    */
   queryStatusMultiple(): void {
+    /**
+     * ANNOUNCED, ONCE. The overhead `!`/`?` markers have now cost several rounds in which the owner's
+     * console said nothing at all -- not even that a status map had arrived -- and silence cannot
+     * distinguish "no query was sent" from "the query was sent and never answered". These two lines
+     * (the twin is in `handleStatusMultiple`) make that a positive statement instead of an absence.
+     */
+    if (!this.announcedStatusQuery) {
+      this.announcedStatusQuery = true;
+      console.warn('quest: status sweep SENT (CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY)');
+    }
     const gp = new GamePacket(
       GameOpcode.CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY, GamePacket.HEADER_SIZE_OUTGOING,
     );
