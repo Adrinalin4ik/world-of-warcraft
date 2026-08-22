@@ -387,9 +387,20 @@ export class QuestMarkers {
             }
             const list = Array.isArray(mat) ? mat : [mat];
             list.forEach((one) => {
-              const m = one as { map?: { name?: string; image?: unknown } | null; type?: string };
-              rows.push(`${m.type ?? '?'}:map=${m.map === null || m.map === undefined ? 'NONE'
-                : `${m.map.name || 'unnamed'}${m.map.image === undefined ? '/noimage' : ''}`}`);
+              const m = one as {
+                map?: { name?: string } | null;
+                type?: string;
+                uniforms?: { textureCount?: { value?: unknown }; textures?: { value?: unknown } };
+              };
+              // `.map` IS THE WRONG FIELD FOR THE REAL BATCH MATERIAL, and reading only it made the
+              // first version of this line blind: an M2 batch is a `ShaderMaterial` and keeps its
+              // textures in `uniforms.textures`, with `uniforms.textureCount` saying how many bound.
+              // The owner's paste read `ShaderMaterial:map=NONE`, which is EXPECTED and says nothing.
+              const count = m.uniforms?.textureCount?.value;
+              const bound = m.uniforms?.textures?.value;
+              rows.push(`${m.type ?? '?'}:map=${m.map == null ? 'NONE' : m.map.name || 'unnamed'}`
+                + `${count === undefined ? '' : ` texCount=${String(count)}`}`
+                + `${Array.isArray(bound) ? ` textures=${bound.length}` : ''}`);
             });
           });
           // eslint-disable-next-line no-console

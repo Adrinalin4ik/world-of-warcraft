@@ -73,6 +73,7 @@ import { installStubApi } from './lua/api/stubs';
 import { installActionsApi } from './lua/api/actions';
 import { installAccountApi } from './lua/api/account';
 import { installUnitsApi } from './lua/api/units';
+import { installQuestLogSelection } from '../quest-bridge';
 import { installChatApi } from './lua/api/chat';
 import { installPortraitApi } from '../portrait-bridge';
 import { installBindingsApi, setBindingTable } from './lua/api/bindings';
@@ -219,6 +220,19 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   // The two that landed with the `TargetFrame` survey and had no caller until this host existed.
   installSecureApi(vm);
   installUnitsApi(vm);
+  /**
+   * THE QUEST LOG'S SELECTION, BEFORE THE MANIFEST -- and the ordering is the whole point.
+   *
+   * `QuestLogFrame_OnLoad` calls `SelectQuestLogEntry(0)` (`questlogframe.lua:612`) while this manifest
+   * is loading, and every bridge attaches after it. The owner reported the resulting error three times:
+   * "attempt to call a nil value (global 'SelectQuestLogEntry')". It was harmless -- the log re-selects
+   * when it opens -- but it is a genuine ordering defect and it kept surfacing in his load report.
+   *
+   * Registered here rather than stubbed: `quest-bridge.ts` re-registers the same two names over the SAME
+   * module variable, so this is the real implementation arriving early, not a placeholder that lies
+   * until the bridge lands.
+   */
+  installQuestLogSelection(vm);
   // THE CHAT ENGINE GLOBALS, and this one is load-ORDER-critical rather than merely present:
   // `ChatFrame.lua` calls `GetChatTypeIndex` at FILE SCOPE (line 2273), so without it that chunk raises
   // partway through and every function below the raise -- `ChatFrame_OnLoad`, `ChatFrame_OnEvent`, the

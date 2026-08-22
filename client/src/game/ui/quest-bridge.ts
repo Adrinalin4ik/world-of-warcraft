@@ -130,6 +130,31 @@ interface LogEntry {
   zoneOrSort: number;
 }
 
+/**
+ * The quest log's selected row -- ENGINE state, and at module scope for one reason only.
+ *
+ * `QuestLogFrame_OnLoad` calls `SelectQuestLogEntry(0)` (`questlogframe.lua:612`) while the MANIFEST is
+ * loading, which is before any bridge attaches. The owner reported the resulting error three times:
+ *
+ *     QuestLogFrame.xml:QuestLogFrame: OnLoad: [string "QuestLogFrame.lua"]:612:
+ *     attempt to call a nil value (global 'SelectQuestLogEntry')
+ *
+ * It was harmless -- the log re-selects when it opens -- but it is a real ordering defect and it will
+ * keep surfacing. `installQuestLogSelection` registers the pair before the manifest runs; the bridge
+ * re-registers the same names over the same variable, so there is one source of truth and no stub. The
+ * value is reset at attach, because module state outliving a mount is the defect class this project has
+ * already been bitten by four times.
+ */
+let logSelection = 0;
+
+export function installQuestLogSelection(vm: LuaVM): void {
+  vm.registerFunction('SelectQuestLogEntry', (args) => {
+    logSelection = Number(args[0]) || 0;
+    return [];
+  });
+  vm.registerFunction('GetQuestLogSelection', () => [logSelection]);
+}
+
 export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => void {
   const quest: QuestHandler = world.game.objectHandler.questHandler;
   const items = world.game.objectHandler.itemHandler;
@@ -196,7 +221,9 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * ENGINE state: `SelectQuestLogEntry` is the only writer and `GetQuestLogSelection` the only reader,
    * and nothing in the manifest stores it. Same shape as `skills-bridge.ts`' collapsed-header set.
    */
-  let selection = 0;
+  // Reset per attach: `logSelection` is module state so it can be installed BEFORE the manifest (see
+  // `installQuestLogSelection`), and a second mount must not inherit the first one's row.
+  logSelection = 0;
 
   /** Which headers are COLLAPSED, by `zoneOrSort`. Collapsed rather than expanded for the reason
    * `skills-bridge.ts` gives: every header is open on login, which is the real client's behaviour. */
@@ -306,7 +333,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     const known = rows.filter((row) => titleOf(row.questId) !== null);
     // Group by `zoneOrSort`, keeping each group's quests in descriptor order and the groups in the
     // order their first quest appears. The real client sorts alphabetically by header; this keeps the
-    // log stable across repaints, which is what matters for a selection held by index.
+    // log stable across repaints, which is what matters for a logSelection held by index.
     const groups = new Map<number, QuestLogSlot[]>();
     for (const row of known) {
       // NO TEMPLATE YET means no zone yet. `NO_ZONE` groups those together and its header is
@@ -363,19 +390,19 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   const entryAt = (index: number): LogEntry | null => entries[index - 1] ?? null;
 
   const selected = (): LogEntry | null => {
-    const row = entryAt(selection);
+    const row = entryAt(logSelection);
     return row !== null && !row.isHeader ? row : null;
   };
 
-  /** The template for an explicit entry index, or for the selection when none is given. */
+  /** The template for an explicit entry index, or for the logSelection when none is given. */
   const templateAt = (index?: number): QuestTemplate | null => {
-    const row = entryAt(index === undefined ? selection : index);
+    const row = entryAt(index === undefined ? logSelection : index);
     return row === null || row.isHeader ? null : templateOf(row.questId);
   };
 
-  /** The descriptor slot for an explicit entry index, or for the selection when none is given. */
+  /** The descriptor slot for an explicit entry index, or for the logSelection when none is given. */
   const slotAt = (index?: number): QuestLogSlot | null => {
-    const row = entryAt(index === undefined ? selection : index);
+    const row = entryAt(index === undefined ? logSelection : index);
     return row === null || row.isHeader ? null : world.player.questLog.get(row.slot) ?? null;
   };
 
@@ -669,7 +696,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * **`GetNumQuestChoices` is also the guard on turning in without picking.**
    * `QuestRewardCompleteButton_OnClick` refuses to send while `itemChoice == 0` and this is `> 0`
    * (`questframe.lua:91-93`) -- so an under-report here would let the player complete a choice quest
-   * with no selection and the SERVER would pick for him.
+   * with no logSelection and the SERVER would pick for him.
    */
   fn('GetNumQuestChoices', () => [(quest.offer ?? quest.details)?.choices.length ?? 0]);
 
@@ -946,14 +973,14 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     ];
   });
 
-  /** `SelectQuestLogEntry(index)` / `GetQuestLogSelection()` -- engine state, see `selection`. */
+  /** `SelectQuestLogEntry(index)` / `GetQuestLogSelection()` -- engine state, see `logSelection`. */
   fn('SelectQuestLogEntry', (args) => {
-    selection = Number(args[0]) || 0;
+    logSelection = Number(args[0]) || 0;
     revision += 1;
     return [];
   });
 
-  fn('GetQuestLogSelection', () => [selection]);
+  fn('GetQuestLogSelection', () => [logSelection]);
 
   /**
    * `GetQuestLogQuestText()` -> `description, objectivesText`.
@@ -991,7 +1018,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * into one rebuild and six.
    *
    * Invalidated by `revision`, which every writer bumps: the descriptor edge, a template landing, a
-   * selection change and a header collapse. A BAG change is covered by the descriptor edge because the
+   * logSelection change and a header collapse. A BAG change is covered by the descriptor edge because the
    * inventory slots are player fields, so `unit:fields` fires for them too -- which is what makes an
    * item objective un-tick when the item is destroyed.
    */
@@ -1001,9 +1028,9 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   const leaderBoards = (index?: number): LeaderBoardRow[] => {
     // `GetNumQuestLeaderBoards([questIndex])` and `GetQuestLogLeaderBoard(i[, questIndex])` BOTH take
     // an optional entry index, and the objective TRACKER always passes one
-    // (`watchframe.lua:805,839`). Answering the selection's objectives for a watched quest would show
+    // (`watchframe.lua:805,839`). Answering the logSelection's objectives for a watched quest would show
     // one quest's progress under every other quest's title -- found in the self-review, not live.
-    const at = index === undefined || index === 0 ? selection : index;
+    const at = index === undefined || index === 0 ? logSelection : index;
     if (boardCache !== null && boardCache.revision === revision && boardCache.index === at) {
       return boardCache.rows;
     }
@@ -1296,7 +1323,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * `SetAbandonQuest()`, then reads `GetAbandonQuestName()` to build the confirmation, and only the
    * popup's `OnAccept` calls `AbandonQuest()` (`questlogframe.lua:610-620`, `staticpopup.lua:1687-1697`).
    * So the quest is LATCHED at the second step and the send happens at the fourth -- which is what makes
-   * the confirmation meaningful: the selection can change under an open popup and the abandon still
+   * the confirmation meaningful: the logSelection can change under an open popup and the abandon still
    * removes what the popup names.
    *
    * `GetAbandonQuestName` answers **nil** with nothing latched, for the `0`-is-truthy reason in the
@@ -1399,7 +1426,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    */
   const mapGap = notImplemented(
     'GetMapInfo',
-    'no world map is set; the quest log calls this on its selection path and returns early on nil',
+    'no world map is set; the quest log calls this on its logSelection path and returns early on nil',
     [null],
   );
   fn('GetMapInfo', () => mapGap(null as never, 0, []));
