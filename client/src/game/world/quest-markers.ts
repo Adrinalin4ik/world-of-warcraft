@@ -573,6 +573,27 @@ export class QuestMarkers {
       if (Array.isArray(model.billboards) && model.billboards.length > 0
         && typeof model.applyBillboards === 'function') {
         model.applyBillboards(camera);
+        /**
+         * AND TURNED THE OTHER WAY, because this model's authored FRONT is the far side.
+         *
+         * MEASURED, and the measurement is what picks between two identical-looking causes. The billboard
+         * writes `bone.rotation`, which is LOCAL to the bone's parent -- and a marker hangs off a bone of
+         * the HOST's skeleton, which already carries the NPC's facing. That would have shown as an error
+         * that CHANGES as the NPC turns. The owner walked around one and reported it "всё время задом":
+         * constant, independent of the NPC and of where he stood. So the host's rotation is not being
+         * inherited, and what remains is the model's own front being on the opposite side from the axis
+         * `applySphericalBillboard` points at the camera (its matrix puts `forward` in column 0, i.e. local
+         * +X).
+         *
+         * TWO CONVENTIONS MEETING, which is what every orientation defect in this client has turned out to
+         * be -- three for three before this one -- and the fix is at the seam rather than a negated
+         * coordinate: the shared billboard code stays exactly as it is, because it is right for every
+         * doodad that uses it, and the marker's own bone is turned about the axis the billboard itself
+         * calls `up` (column 2 of the same matrix, so local Z).
+         */
+        for (const bone of model.billboards as Array<{ rotateZ?: (angle: number) => void }>) {
+          bone.rotateZ?.(Math.PI);
+        }
       }
     }
   }
