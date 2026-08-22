@@ -167,6 +167,8 @@ export class QuestMarkers {
 
   private announcedStart = false;
 
+  private announcedTextureLoad = false;
+
   private announcedMaterials = false;
 
   private announcedBake = false;
@@ -401,10 +403,38 @@ export class QuestMarkers {
           const mat = (node as unknown as { material?: unknown }).material;
           const list = Array.isArray(mat) ? mat : [mat];
           list.forEach((one) => {
-            const raise = (one as { raiseToCharacterPriority?: () => unknown } | null)
-              ?.raiseToCharacterPriority;
-            if (typeof raise === 'function') {
-              void raise.call(one);
+            const raise = (one as {
+              raiseToCharacterPriority?: () => Promise<Array<{ path: string; error: unknown }>>;
+            } | null)?.raiseToCharacterPriority;
+            if (typeof raise !== 'function') {
+              return;
+            }
+            const settled = raise.call(one);
+            /**
+             * AND REPORT WHAT THE FETCH ACTUALLY DID, once -- because the priority raise is a REASONABLE
+             * change and a WEAK explanation, and the owner said so.
+             *
+             * The zone's own terrain and doodads do load, so the background stream plainly drains; a
+             * texture that never arrives is therefore not obviously starvation. The likelier story is
+             * the churn: markers attach and detach as statuses change, `M2Blueprint` caches by path, and
+             * a model unloaded while its texture was in flight releases the key -- after which a
+             * re-attach can hold a material whose slot is claimed and whose fetch is gone.
+             *
+             * `loadTextures` resolves with the failures rather than rejecting, so this says which of the
+             * three it is: resolving empty means the file arrived, a failure names the path and the
+             * error, and never settling at all means the fetch is lost -- and only the last of those is
+             * consistent with a permanently white marker.
+             */
+            if (!this.announcedTextureLoad) {
+              this.announcedTextureLoad = true;
+              void settled.then((failures) => {
+                // eslint-disable-next-line no-console
+                console.log(`questmarkers: texture fetch SETTLED with ${failures.length} failure(s)`
+                  + `${failures.length === 0 ? '' : `: ${failures.map((f) => f.path).join(' ')}`}`);
+              }).catch((error: unknown) => {
+                // eslint-disable-next-line no-console
+                console.log('questmarkers: texture fetch REJECTED', error);
+              });
             }
           });
         });
