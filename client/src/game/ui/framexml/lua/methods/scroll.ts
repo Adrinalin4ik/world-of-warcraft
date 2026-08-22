@@ -384,6 +384,43 @@ const SLIDER: MethodTable = {
     return [];
   },
   GetOrientation: (_ctx, self) => [sliderState(self).orientation],
+
+  /**
+   * `Enable` / `Disable` / `IsEnabled` ON A SLIDER -- and their absence stopped the quest log dead.
+   *
+   * MEASURED, the owner's console after the previous fix let `QuestLog_Update` reach its end:
+   *
+   *     QuestLogFrame: OnShow: [string "HybridScrollFrame.lua"]:99:
+   *     attempt to call a nil value (method 'Disable')
+   *
+   * `:93` and `:99` are `self.scrollBar:Enable()` and `self.scrollBar:Disable()`, and `scrollBar` is a
+   * `<Slider>`. We had these three only on BUTTON (`kinds.ts:492-507`), so every hybrid scroll frame --
+   * the quest log's list among them -- raised inside `HybridScrollFrame_Update`. That call sits inside
+   * `QuestLog_Update`, which `QuestLog_OnShow` runs BEFORE
+   * `QuestLogDetailFrame_AttachToQuestLog()` (`questlogframe.lua:284-296`), so the right page stayed
+   * unattached and blank for the second time from a second missing method on the same path.
+   *
+   * The state WRITE only, without `kinds.ts`' `syncStateTextures`/`applyButtonFont`: those move a
+   * button's state art and its caption, and a slider has neither -- its art is the thumb, which
+   * `drawList` places from `sliderTravel`. `Enable` moves only OFF `disabled`, mirroring the button
+   * version, so it cannot clobber a live press.
+   *
+   * `ui/input.ts` reads the same flag before starting a thumb drag, so a disabled scrollbar is inert to
+   * the mouse as well as to Lua -- otherwise `IsEnabled` would report one thing and the pointer do
+   * another.
+   */
+  Enable: (ctx, self) => {
+    const widget = widgetOf(ctx, self);
+    if (widget.state === 'disabled') {
+      widget.state = 'up';
+    }
+    return [];
+  },
+  Disable: (ctx, self) => {
+    widgetOf(ctx, self).state = 'disabled';
+    return [];
+  },
+  IsEnabled: (ctx, self) => [widgetOf(ctx, self).state !== 'disabled'],
   /**
    * `SetThumbTexture` / `GetThumbTexture` -- the draggable part of a scrollbar, and NOTHING created it.
    *

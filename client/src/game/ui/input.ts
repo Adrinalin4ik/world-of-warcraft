@@ -511,7 +511,11 @@ export class GlueInput {
     // inside a mouse-enabled panel, so `hitTest` answers the panel and this cannot be gated on it.
     const thumb = sliderThumbAt(this.items, x, y);
     const slider = thumb?.widget.thumbOf ?? null;
-    if (thumb !== null && slider !== null && slider.onSliderDrag !== null) {
+    // `state` is checked because `Slider:Disable()` is real (`methods/scroll.ts`) and the client uses it
+    // on a scrollbar with nothing to scroll (`HybridScrollFrame.lua:99`). Without this, `IsEnabled`
+    // would report the bar dead while the pointer still dragged it.
+    if (thumb !== null && slider !== null && slider.onSliderDrag !== null
+      && slider.state !== 'disabled') {
       const track = layoutRectOf(slider.id);
       const vertical = slider.sliderTravel.vertical;
       if (track !== null) {

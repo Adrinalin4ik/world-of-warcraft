@@ -122,4 +122,34 @@ describe('Slider', () => {
     expect(vm.run('Bar:SetValue(100)', 't')).toBeNull();
     expect(Math.round(at()!.rect.top)).toBe(176);
   });
+
+  /**
+   * `Disable` / `Enable` / `IsEnabled` on a `<Slider>`, which had them only on BUTTON.
+   *
+   * `HybridScrollFrame_Update` calls `self.scrollBar:Enable()` (`:93`) and `:Disable()` (`:99`) on a
+   * Slider, so every hybrid scroll frame raised there -- and for the quest log that call sits inside
+   * `QuestLog_Update`, which runs BEFORE `QuestLogDetailFrame_AttachToQuestLog()`, leaving the right
+   * page unattached. Owner's console: `HybridScrollFrame.lua:99: attempt to call a nil value (method
+   * 'Disable')`.
+   */
+  it('takes Disable and Enable the way HybridScrollFrame calls them', () => {
+    const { vm, report } = load(`
+      <Ui>
+        <Slider name="Bar">
+          <Size><AbsDimension x="16" y="200"/></Size>
+          <Anchors><Anchor point="TOPLEFT"/></Anchors>
+          <ThumbTexture name="$parentThumb" file="knob">
+            <Size><AbsDimension x="16" y="24"/></Size>
+          </ThumbTexture>
+        </Slider>
+      </Ui>
+    `);
+    expect(report.errors).toEqual([]);
+
+    expect(vm.run('Bar:Disable(); off = Bar:IsEnabled()', 't')).toBeNull();
+    expect(vm.getGlobal('off')).toBe(false);
+
+    expect(vm.run('Bar:Enable(); on = Bar:IsEnabled()', 't')).toBeNull();
+    expect(vm.getGlobal('on')).toBe(true);
+  });
 });
