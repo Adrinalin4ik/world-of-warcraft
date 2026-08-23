@@ -575,6 +575,37 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   };
 
   /**
+   * The CONTINENT under a point on the World sheet, as a 1-based index, or 0.
+   *
+   * The other half of what the owner asked for: "на уровне континентов подписей нет". The World sheet
+   * is the one at continent 0, and hovering it should name a continent the way hovering a continent
+   * names a zone. `dbc/map-data.ts#worldRects` is the projection and carries the note about the one
+   * unsourced number in it -- the sheet margin.
+   *
+   * The COSMIC sheet (-1) is deliberately not answered: it carries two authored buttons of its own,
+   * `AzerothButton` and `OutlandButton`, which the client shows and handles itself
+   * (`worldmapframe.lua:237-239`). There is nothing for a hit test to add there.
+   */
+  const continentAtPoint = (fractionX: number, fractionY: number): number => {
+    if (continentIndex !== 0 || !mapData.loaded) {
+      return 0;
+    }
+    const order = mapData.continents();
+    for (const placed of mapData.worldRects()) {
+      const rect = placed.rect;
+      if (fractionX < rect.left || fractionX > rect.right
+        || fractionY < rect.top || fractionY > rect.bottom) {
+        continue;
+      }
+      const index = order.findIndex((row) => row.mapId === placed.mapId);
+      if (index >= 0) {
+        return index + 1;
+      }
+    }
+    return 0;
+  };
+
+  /**
    * `UpdateMapHighlight(x, y)` -> the zone under the cursor. REAL now, and it names the zone.
    *
    * It was eight nils, declared because "which zone is the cursor over" needed per-zone hit rectangles
@@ -594,11 +625,21 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
    * then try to load.
    */
   fn('UpdateMapHighlight', (args) => {
-    const row = zoneAtPoint(Number(args[0]), Number(args[1]));
-    if (row === null) {
-      return [null, null, null, null, null, null, null, null];
+    const x = Number(args[0]);
+    const y = Number(args[1]);
+    const row = zoneAtPoint(x, y);
+    if (row !== null) {
+      return [mapData.displayName(row), null, null, null, null, null, null, null];
     }
-    return [mapData.displayName(row), null, null, null, null, null, null, null];
+    // The World sheet names a CONTINENT instead, from `Map.dbc` -- "Eastern Kingdoms", not the art
+    // folder "Azeroth", the same distinction `GetMapContinents` makes.
+    const continent = continentAtPoint(x, y);
+    if (continent > 0) {
+      const sheet = mapData.continents()[continent - 1];
+      const name = mapData.mapName(sheet.mapId) ?? sheet.art;
+      return [name, null, null, null, null, null, null, null];
+    }
+    return [null, null, null, null, null, null, null, null];
   });
 
   /**
@@ -735,8 +776,17 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
    * A click on empty water finds no zone and does nothing, which is what the real client does.
    */
   fn('ProcessMapClick', (args) => {
-    const row = zoneAtPoint(Number(args[0]), Number(args[1]));
+    const x = Number(args[0]);
+    const y = Number(args[1]);
+    const row = zoneAtPoint(x, y);
     if (row === null) {
+      // On the World sheet a click picks a CONTINENT, which is the zoom step above a zone.
+      const continent = continentAtPoint(x, y);
+      if (continent > 0) {
+        continentIndex = continent;
+        zoneIndex = 0;
+        announce();
+      }
       return [];
     }
     const continent = mapData.continents()[continentIndex - 1];

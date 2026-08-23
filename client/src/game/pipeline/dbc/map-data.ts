@@ -187,6 +187,7 @@ class MapData {
       const row = record as {
         mapID?: number;
         bounds?: { left?: number; right?: number; top?: number; bottom?: number };
+        offsetX?: number; offsetY?: number; scale?: number;
       };
       if (typeof row.mapID !== 'number') {
         continue;
@@ -216,6 +217,9 @@ class MapData {
         && bounds.right !== bounds.left && bounds.bottom !== bounds.top) {
         sheets.set(row.mapID, {
           left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom,
+          offsetX: typeof row.offsetX === 'number' ? row.offsetX : 0,
+          offsetY: typeof row.offsetY === 'number' ? row.offsetY : 0,
+          scale: typeof row.scale === 'number' && row.scale > 0 ? row.scale : 1,
         });
       }
     }
@@ -272,6 +276,64 @@ class MapData {
       current = row.parentId;
     }
     return null;
+  }
+
+  /**
+   * Each continent's rect on the WORLD sheet, as 0..1 fractions -- what names a continent under the
+   * cursor when the map is zoomed all the way out.
+   *
+   * ## THE PROJECTION IS `WorldMapContinent`'s AND IT IS VALIDATED BY THE ART
+   *
+   * The World sheet is a composite, not a projection of the world grid: Kalimdor spans tiles 16-46
+   * on the Y axis and Eastern Kingdoms 26-44, so placing them by global tile coordinates would
+   * OVERLAP them. `offsetX`/`offsetY`/`scale` are what separate them, and running them out gives
+   * exactly the picture the art shows:
+   *
+   *     across:  Kalimdor -9.0 .. 12.0 | Northrend 13.0 .. 33.3 | Eastern Kingdoms 35.1 .. 47.7
+   *     down:    Northrend  2.0 .. 16.7 | Kalimdor 9.6 .. 39.7 | Eastern Kingdoms 4.1 .. 40.5
+   *
+   * Kalimdor left, Eastern Kingdoms right, Northrend centred at the top and the other two below it.
+   * That is the World map, and it is the corroboration that these three columns mean what this
+   * assumes -- the same kind of check that settled the tile units for the per-continent sheets.
+   *
+   * ## THE ONE UNSOURCED NUMBER, and it is a MARGIN
+   *
+   * No file states the World sheet's own extent, so it is taken as the bounding box of the four
+   * continents. That places them correctly RELATIVE to each other -- which is what names the right
+   * continent -- and puts the outermost coastlines exactly on the sheet's edges, where the art has
+   * open sea instead. So the hit rects run slightly wide at the edges of the sheet, and a margin is
+   * what would fix it. Stated rather than guessed at: a made-up margin would move every continent
+   * and could not be told from a wrong projection.
+   */
+  worldRects(): Array<{ mapId: number; rect: { left: number; right: number; top: number; bottom: number } }> {
+    const placed = this.continentMapIds
+      .map((mapId) => ({ mapId, sheet: this.sheets.get(mapId) }))
+      .filter((entry): entry is { mapId: number; sheet: SheetBounds } => entry.sheet !== undefined)
+      .map(({ mapId, sheet }) => ({
+        mapId,
+        left: sheet.left * sheet.scale + sheet.offsetX,
+        right: sheet.right * sheet.scale + sheet.offsetX,
+        top: sheet.top * sheet.scale + sheet.offsetY,
+        bottom: sheet.bottom * sheet.scale + sheet.offsetY,
+      }));
+    if (placed.length === 0) {
+      return [];
+    }
+    const minX = Math.min(...placed.map((entry) => entry.left));
+    const maxX = Math.max(...placed.map((entry) => entry.right));
+    const minY = Math.min(...placed.map((entry) => entry.top));
+    const maxY = Math.max(...placed.map((entry) => entry.bottom));
+    const across = maxX - minX;
+    const down = maxY - minY;
+    return placed.map((entry) => ({
+      mapId: entry.mapId,
+      rect: {
+        left: (entry.left - minX) / across,
+        right: (entry.right - minX) / across,
+        top: (entry.top - minY) / down,
+        bottom: (entry.bottom - minY) / down,
+      },
+    }));
   }
 
   /**
@@ -476,6 +538,10 @@ export interface SheetBounds {
   right: number;
   top: number;
   bottom: number;
+  /** `WorldMapContinent`'s placement of this continent on the WORLD sheet. See `worldRects`. */
+  offsetX: number;
+  offsetY: number;
+  scale: number;
 }
 
 export interface AreaRow {

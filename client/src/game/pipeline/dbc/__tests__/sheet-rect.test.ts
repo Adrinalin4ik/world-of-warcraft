@@ -24,7 +24,12 @@ const ELWYNN = {
 };
 
 /** Eastern Kingdoms: 18 tiles across by 52 down, which is the shape that corroborated the units. */
-const EASTERN_KINGDOMS = { left: 26, right: 44, top: 8, bottom: 60 };
+const EASTERN_KINGDOMS = {
+  left: 26, right: 44, top: 8, bottom: 60,
+  // The world-sheet placement, unused by `sheetRect` -- it projects onto the CONTINENT sheet, whose
+  // extent is the bounds alone. Carried so the fixture is the whole decoded row rather than half of it.
+  offsetX: 16.88, offsetY: -1.5, scale: 0.7,
+};
 
 test('a zone projects onto its continent sheet where the zone actually is', () => {
   const rect = sheetRect(ELWYNN, EASTERN_KINGDOMS)!;
