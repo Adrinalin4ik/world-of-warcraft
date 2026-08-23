@@ -63,23 +63,29 @@ import type Unit from '../classes/unit';
  */
 export class GameObjectSparkle {
 /**
-   * HOW BIG THE GLOW IS DRAWN, and **this is OURS, not the client's.**
+   * HOW BIG EACH PARTICLE IS DRAWN, and **this is OURS, not the client's.**
    *
-   * The owner, once the placement was right: "партиклы выглядят лучше, но я бы сделал их больше, они
-   * едва заметны." He is describing the authored size, and the reference is explicit that the art
-   * decides its own look -- "cadence/size/color/blend all authored in the asset, the client sets none of
-   * them" (`creature_anim/spell_visual.rs:1235-1236`). So scaling it is a DEVIATION from the reference
-   * and from the game's own data, taken on the owner's judgement of what reads on screen, and it is
-   * labelled as such rather than dressed up as fidelity.
+   * The owner, once the placement was right: "я бы сделал их больше, они едва заметны." The reference is
+   * explicit that the art decides its own look -- "cadence/size/color/blend all authored in the asset,
+   * the client sets none of them" (`creature_anim/spell_visual.rs:1235-1236`) -- so this is a DEVIATION
+   * from the reference and from the game's own data, taken on his judgement of what reads on screen, and
+   * labelled rather than dressed up as fidelity.
    *
-   * Why it is defensible anyway: the art is authored for a lootable CORPSE -- a body several times the
-   * size of a vineyard bucket -- so at 1:1 it is proportionally much smaller relative to what it is
-   * marking here than where it was designed to be seen. The scale restores the RATIO, not the pixels.
+   * Why it is defensible: the art is authored for a lootable CORPSE, several times the size of a
+   * vineyard bucket, so at 1:1 it is proportionally far smaller relative to what it marks here than
+   * where it was designed to be seen. This restores the RATIO.
    *
-   * `window.worldSparkleScale(n)` retunes it live so the value can be chosen by looking rather than by
-   * another round of guessing, and it takes effect on the next sparkle to spawn.
+   * **AND IT IS A PARTICLE SIZE, NOT A MODEL SCALE, because the first attempt got that wrong.** Scaling
+   * the model grew the emitter's VOLUME -- every spawn position rides the world matrix, so the cloud
+   * spread -- which the owner spotted immediately: "не увеличивает размер партикла, а только радиус
+   * вокруг куста. А я хотел просто увеличить размер каждой частицы". `ParticleBatch#pack`'s new
+   * per-instance `sizeScale` multiplies the size track alone, so the cloud keeps its authored shape and
+   * the sprites in it grow. The model's own transform is left at 1.
+   *
+   * `window.worldSparkleScale(n)` retunes it live and takes effect on the NEXT frame, not the next spawn
+   * -- the manager reads the property every pack.
    */
-  private static scale = 2.5;
+  private static particleSize = 2.5;
 
   /** The client's own hardcoded loot art. Lowercased for the case-sensitive host. See the header. */
   private static readonly MODEL = 'particles\\lootfx.m2';
@@ -103,10 +109,14 @@ export class GameObjectSparkle {
     (window as unknown as Record<string, unknown>).worldSparkleScale = (value: number) => {
       const wanted = Number(value);
       if (!Number.isFinite(wanted) || wanted <= 0) {
-        return `worldSparkleScale: ignoring ${String(value)}; it stays ${GameObjectSparkle.scale}`;
+        return `worldSparkleScale: ignoring ${String(value)}; it stays ${GameObjectSparkle.particleSize}`;
       }
-      GameObjectSparkle.scale = wanted;
-      return `sparkle scale ${wanted} -- walk away and back to respawn them`;
+      GameObjectSparkle.particleSize = wanted;
+      for (const entry of this.live.values()) {
+        // Live, not next-spawn: the manager reads this off the instance on every pack.
+        (entry.model as unknown as { particleSizeScale?: number }).particleSizeScale = wanted;
+      }
+      return `sparkle particle size ${wanted}`;
     };
   }
 
@@ -176,16 +186,21 @@ export class GameObjectSparkle {
         continue;
       }
       /**
-       * PLACE AND SCALE, THEN BAKE -- ONE bake, and after both writes.
+       * PLACE, THEN BAKE.
        *
        * `M2` sets `matrixAutoUpdate = false` on itself and the scene has `matrixWorldAutoUpdate = false`,
-       * so a write that is not followed by `updateMatrix()` is INERT and a model added without it draws
-       * at the world ORIGIN. Both halves of that trap are recorded in `unit.ts#applyRenderScale`,
-       * `quest-markers.ts` and `level-up-effect.ts`; the ordering here is the reason there is one bake
-       * rather than one per write.
+       * so a position written without a following `updateMatrix()` is INERT and a model added without
+       * `updateMatrixWorld(true)` draws at the world ORIGIN. Both halves of that trap are recorded in
+       * `unit.ts#applyRenderScale`, `quest-markers.ts` and `level-up-effect.ts`.
+       *
+       * The particle size below is deliberately NOT part of this: it is not a transform, so it needs no
+       * bake and must not become one -- see `particleSize`.
        */
       model.position.copy(at);
-      model.scale.setScalar(GameObjectSparkle.scale);
+      // The PARTICLE size, read by the manager every pack -- see `particleSize`. Not a model scale:
+      // that grows the emitter volume, which is the mistake the first attempt made.
+      (model as unknown as { particleSizeScale?: number }).particleSizeScale =
+        GameObjectSparkle.particleSize;
       if (typeof model.updateMatrix === 'function') {
         model.updateMatrix();
       }
