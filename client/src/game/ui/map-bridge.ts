@@ -558,19 +558,48 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   fn('ShowWorldMapArrowFrame', () => []);
 
   /**
-   * THE ZONE HIGHLIGHT under the cursor -- `UpdateMapHighlight(x, y)`, and eight nils is the right answer.
+   * The zone under a point on the CURRENT sheet, or null. Shared by the highlight and the click.
    *
-   * Called from `WorldMapButton_OnUpdate` whenever the cursor is over the map (`worldmapframe.lua:755`),
-   * and the client's very next lines are `if ( fileName ) then ... else WorldMapHighlight:Hide() end`. So
-   * nils take the else branch, which is precisely "nothing is highlighted" -- the state the map is in for
-   * most of every second the cursor moves across it.
-   *
-   * The real answer needs the per-zone highlight art (`Interface\WorldMap\<zone>\<zone>Highlight`) plus
-   * the hit rectangle each zone occupies on its continent sheet, and neither is anything this client
-   * reads today. A fabricated name here would make the client build a texture path from it and try to
-   * load art that does not exist.
+   * Only a CONTINENT sheet has zones to find: on a zone sheet the client is already zoomed in, and on
+   * the World or Cosmic sheet the buttons the client authors do the navigating.
    */
-  fn('UpdateMapHighlight', () => [null, null, null, null, null, null, null, null]);
+  const zoneAtPoint = (fractionX: number, fractionY: number): WorldMapAreaRow | null => {
+    if (continentIndex < 1 || zoneIndex !== 0 || !mapData.loaded) {
+      return null;
+    }
+    const continent = mapData.continents()[continentIndex - 1];
+    if (continent === undefined) {
+      return null;
+    }
+    return mapData.zoneAtSheetPoint(continent.mapId, fractionX, fractionY);
+  };
+
+  /**
+   * `UpdateMapHighlight(x, y)` -> the zone under the cursor. REAL now, and it names the zone.
+   *
+   * It was eight nils, declared because "which zone is the cursor over" needed per-zone hit rectangles
+   * this client did not compute. It computes them now -- `dbc/map-data.ts#zoneAtSheetPoint`, from
+   * `WorldMapContinent`'s sheet extent and each `WorldMapArea` rect -- so the answer is data rather than
+   * a stub.
+   *
+   * **The NAME is answered and the TEXTURE is not, and the client handles that split itself.** Its next
+   * lines are `WorldMapFrame.areaName = name; WorldMapFrameAreaLabel:SetText(name)` and then
+   * `if ( fileName ) then ... else WorldMapHighlight:Hide() end` (`worldmapframe.lua:758-777`), so a name
+   * without a file gives exactly the right behaviour: the zone name appears under the cursor and no
+   * highlight art is drawn.
+   *
+   * The art is the gap that remains: `Interface\WorldMap\<zone>\<zone>Highlight` plus the four
+   * percentages and offsets that place it, which are the engine's own crop of a highlight sheet and not
+   * something `WorldMapArea` states. Naming that rather than inventing a `fileName` the client would
+   * then try to load.
+   */
+  fn('UpdateMapHighlight', (args) => {
+    const row = zoneAtPoint(Number(args[0]), Number(args[1]));
+    if (row === null) {
+      return [null, null, null, null, null, null, null, null];
+    }
+    return [mapData.displayName(row), null, null, null, null, null, null, null];
+  });
 
   /**
    * THE DEBUG ZONE MAP -- `false`, and false is a fact rather than a stub.
@@ -693,17 +722,32 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   fn('ToggleMapFramerate', () => []);
 
   /**
-   * `ProcessMapClick(x, y)` -- the click that zooms INTO a zone from a continent sheet.
+   * `ProcessMapClick(x, y)` -- the click that zooms INTO a zone from a continent sheet. REAL now.
    *
-   * A gesture the owner will make, and a genuine gap: it needs the same per-zone hit rectangles
-   * `UpdateMapHighlight` needs, since "which zone did he click" and "which zone is he over" are one
-   * question. Returning nothing leaves the click inert, and the two dropdowns above the map are the
-   * working route to the same place -- so the feature is reachable, just not by clicking.
+   * The owner reported it as "клики не проходят и зоны не выделяются", and both were the same missing
+   * piece: the per-zone rectangles. `UpdateMapHighlight` above answers "which zone is the cursor over"
+   * and this answers "which zone did he click" from the same lookup.
    *
-   * Not routed through a red `UIErrorsFrame` line: `WorldMapButton_OnClick` calls this on EVERY click on
-   * the map, including the ones that are meant to do nothing, so a refusal notice would fire constantly.
+   * Selecting through the same path the dropdown uses, rather than writing the indices here: the zone
+   * index is 1-based over `zonesOn`, and duplicating that ordering would be a second place for it to
+   * drift out of step with `GetMapZones`.
+   *
+   * A click on empty water finds no zone and does nothing, which is what the real client does.
    */
-  fn('ProcessMapClick', () => []);
+  fn('ProcessMapClick', (args) => {
+    const row = zoneAtPoint(Number(args[0]), Number(args[1]));
+    if (row === null) {
+      return [];
+    }
+    const continent = mapData.continents()[continentIndex - 1];
+    const index = mapData.zonesOn(continent.mapId).findIndex((zone) => zone.areaId === row.areaId);
+    if (index < 0) {
+      return [];
+    }
+    zoneIndex = index + 1;
+    announce();
+    return [];
+  });
 
   fn('GetSubZoneText', () => [where().leaf]);
   fn('GetZoneText', () => [where().zone]);

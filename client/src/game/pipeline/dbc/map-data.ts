@@ -77,6 +77,9 @@ class MapData {
    */
   private order: WorldMapAreaRow[] = [];
 
+  /** Per continent mapID, the sheet's extent in ADT tile indices. See `load`. */
+  private sheets = new Map<number, SheetBounds>();
+
   /** `WorldMapContinent.dbc`'s mapIDs in file order -- what numbers the client's continents. */
   private continentMapIds: number[] = [];
 
@@ -179,13 +182,45 @@ class MapData {
      * continent sheet still reaches the dropdown instead of vanishing from it.
      */
     const continentMapIds: number[] = [];
+    const sheets = new Map<number, SheetBounds>();
     for (const record of recordsOf(continents)) {
-      const row = record as { mapID?: number };
-      if (typeof row.mapID === 'number' && !continentMapIds.includes(row.mapID)) {
+      const row = record as {
+        mapID?: number;
+        bounds?: { left?: number; right?: number; top?: number; bottom?: number };
+      };
+      if (typeof row.mapID !== 'number') {
+        continue;
+      }
+      if (!continentMapIds.includes(row.mapID)) {
         continentMapIds.push(row.mapID);
+      }
+      /**
+       * THE CONTINENT SHEET'S EXTENT, in ADT TILE indices -- which is what makes a zone's place on
+       * the zoomed-out sheet computable, and with it the click that zooms in and the highlight under
+       * the cursor.
+       *
+       * MEASURED on the served file, all four rows: mapID 0 is `left 26, right 44, top 8, bottom 60`
+       * (18 x 52 tiles), mapID 1 is `16, 46, 9, 52`, 530 is `23, 47, 15, 61`, 571 is `16, 45, 12, 33`.
+       * 18 wide by 52 tall is Eastern Kingdoms' shape, which is the corroboration that these are tile
+       * indices and not pixels.
+       *
+       * `left`/`right` run along the world's **Y** axis and `top`/`bottom` along its **X**, the same
+       * crossing `normalise` carries -- and both increase in the direction the tile index increases,
+       * i.e. as the world coordinate DECREASES. So `left` is the westmost tile and `top` the
+       * northmost, which is what puts Elwynn (tiles ~29-36 by ~47-51) at x 0.17-0.53, y 0.75-0.83 of
+       * the Eastern Kingdoms sheet: the south-central part, where it is.
+       */
+      const bounds = row.bounds;
+      if (typeof bounds?.left === 'number' && typeof bounds.right === 'number'
+        && typeof bounds.top === 'number' && typeof bounds.bottom === 'number'
+        && bounds.right !== bounds.left && bounds.bottom !== bounds.top) {
+        sheets.set(row.mapID, {
+          left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom,
+        });
       }
     }
     this.continentMapIds = continentMapIds;
+    this.sheets = sheets;
 
     const mapNames = new Map<number, string>();
     for (const record of recordsOf(maps)) {
@@ -237,6 +272,60 @@ class MapData {
       current = row.parentId;
     }
     return null;
+  }
+
+  /**
+   * The zone under a point on a CONTINENT sheet, as a 0..1 fraction from its top-left, or null.
+   *
+   * This is what makes `UpdateMapHighlight` and `ProcessMapClick` answerable: "which zone is the
+   * cursor over" and "which zone did he click" are one question, and both were declared gaps for want
+   * of exactly this. Every number in it comes from a served file -- the sheet extent from
+   * `WorldMapContinent` (see `load`) and each zone rect from `WorldMapArea`.
+   *
+   * **The SMALLEST matching zone wins.** Zone rects overlap: the rows for a city and for the zone
+   * around it both contain the city, and the client zooms to the city. Picking the first match would
+   * depend on file order instead, which is the kind of accident that reads as correct until it does
+   * not.
+   *
+   * Linear over the continent -- 25 rows for Eastern Kingdoms out of 108 in the whole table. It runs
+   * on a click and on a cursor move over the map, not per frame.
+   */
+  zoneAtSheetPoint(mapId: number, fractionX: number, fractionY: number): WorldMapAreaRow | null {
+    const sheet = this.sheets.get(mapId);
+    if (sheet === undefined) {
+      return null;
+    }
+    let best: WorldMapAreaRow | null = null;
+    let bestArea = Infinity;
+    for (const row of this.zonesOn(mapId)) {
+      const rect = this.sheetRectOf(row, sheet);
+      if (rect === null) {
+        continue;
+      }
+      if (fractionX < rect.left || fractionX > rect.right
+        || fractionY < rect.top || fractionY > rect.bottom) {
+        continue;
+      }
+      const area = (rect.right - rect.left) * (rect.bottom - rect.top);
+      if (area < bestArea) {
+        bestArea = area;
+        best = row;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * A zone's rect as 0..1 fractions of its continent sheet, or null when the row has no rect.
+   *
+   * The world rect is in yards, the sheet is in ADT tile indices, and `TILE_YARDS` converts.
+   * `positionFor`'s convention holds here too -- the tile index grows as the coordinate shrinks -- so
+   * the zone's `left` (its greatest world Y) is the SMALLEST tile index and therefore the leftmost
+   * edge.
+   */
+  private sheetRectOf(row: WorldMapAreaRow, sheet: SheetBounds):
+  { left: number; right: number; top: number; bottom: number } | null {
+    return sheetRect(row, sheet);
   }
 
   /** The `WorldMapArea` row for a zone, or null. `areaId` 0 is the continent-wide sheet. */
@@ -345,6 +434,50 @@ class MapData {
  * transcribed: the file is 2307 records, 36 fields, 144 B/record and closes exactly, and the two
  * columns read the values quoted in `load` for four known zones.
  */
+/**
+ * One ADT tile's side in yards -- `ADT.SIZE`, restated rather than imported.
+ *
+ * `pipeline/adt/index.js` is the authority and it is a plain JS module whose import chain reaches the
+ * worker pool; pulling it into a DBC reader for one constant would drag that chain into every consumer
+ * of this file, the tests included. The value is the game's, not ours, and a disagreement between the
+ * two would show up at once as every zone rect off by a factor.
+ */
+const TILE_YARDS = 533.33333;
+
+/**
+ * A zone's rect as 0..1 fractions of its continent sheet, or null when the row has no rect.
+ *
+ * EXPORTED AND PURE because this is the arithmetic here that fails SILENTLY: a wrong crossing or a
+ * wrong sign puts the zone somewhere else on the sheet, and a click then zooms confidently into the
+ * wrong place. The world rect is in yards, the sheet is in ADT tile indices, and `TILE_YARDS` converts.
+ *
+ * `positionFor`'s convention holds here too -- the tile index grows as the coordinate shrinks -- so the
+ * zone's `left` (its greatest world Y) is the SMALLEST tile index and therefore the leftmost edge.
+ */
+export function sheetRect(row: WorldMapAreaRow, sheet: SheetBounds):
+{ left: number; right: number; top: number; bottom: number } | null {
+  if (row.left === row.right || row.top === row.bottom) {
+    return null;
+  }
+  const tile = (coordinate: number) => 32 - coordinate / TILE_YARDS;
+  const across = sheet.right - sheet.left;
+  const down = sheet.bottom - sheet.top;
+  return {
+    left: (tile(row.left) - sheet.left) / across,
+    right: (tile(row.right) - sheet.left) / across,
+    top: (tile(row.top) - sheet.top) / down,
+    bottom: (tile(row.bottom) - sheet.top) / down,
+  };
+}
+
+/** A continent sheet's extent, in ADT tile indices. See `MapData#load`. */
+export interface SheetBounds {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
 export interface AreaRow {
   name: string;
   parentId: number;
