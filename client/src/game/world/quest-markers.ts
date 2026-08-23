@@ -167,6 +167,10 @@ export class QuestMarkers {
 
   private announcedStart = false;
 
+  private fogReported = false;
+
+  private lastCamera: THREE.Camera | null = null;
+
   private textureSettled = false;
 
   private textureFrames = 0;
@@ -595,6 +599,7 @@ export class QuestMarkers {
      * it was there to find. The guard is not there because the code below is expected to fail; it is there
      * because NOTHING that only reports may be allowed to stop a frame.
      */
+    this.lastCamera = camera;
     try {
       this.watchTexture();
     } catch (error) {
@@ -608,8 +613,44 @@ export class QuestMarkers {
     this.turnAndFace(camera);
   }
 
+  /**
+   * WHAT THE FOG TERM IS ACTUALLY FED, once.
+   *
+   * The owner confirmed the cause: with `worldQuestMarkersFog = false` the marker is yellow. So the fog
+   * mix is what paints it, and the question is why a marker two yards from the camera takes any fog at
+   * all -- the factor must fall to zero that close.
+   *
+   * This client has TWO vertex shaders and they compute the input differently: `shader.vert:65` takes a
+   * true `distance(cameraPosition, vertexWorldPosition)`, while `vertex/common-main.glsl:69` -- the one
+   * this batch compiles, matching its fragment header -- takes `-mvPosition.z`, the VIEW-SPACE DEPTH.
+   * Those agree for an ordinary placed model and need not for a mesh whose skeleton hangs off another
+   * model's bone, which is what a marker uniquely is.
+   *
+   * So both are computed here the way each shader would, off the same matrices three hands the draw, and
+   * reported side by side. Equal means the distance is fine and the fog parameters are the story; wildly
+   * different names the seam, and the fix goes where the mesh reports its depth rather than here.
+   */
+  private reportFogInput(camera: THREE.Camera): void {
+    for (const marker of this.live.values()) {
+      const object = marker.model as unknown as THREE.Object3D;
+      const world = object.getWorldPosition(new THREE.Vector3());
+      const trueDistance = world.distanceTo(camera.getWorldPosition(new THREE.Vector3()));
+      // The other shader's input: the same point in VIEW space, whose -z is what it feeds the fog.
+      const view = world.clone().applyMatrix4(camera.matrixWorldInverse);
+      // eslint-disable-next-line no-console
+      console.log(`questmarkers: fog input -- trueDistance=${trueDistance.toFixed(1)}, `
+        + `viewDepth=${(-view.z).toFixed(1)} (world ${world.x.toFixed(0)},${world.y.toFixed(0)},`
+        + `${world.z.toFixed(0)})`);
+      return;
+    }
+  }
+
   /** See `animate`'s fence. Split out so the fence wraps a named call rather than a block. */
   private watchTexture(): void {
+    if (!this.fogReported && this.live.size > 0 && this.textureSettled) {
+      this.fogReported = true;
+      this.reportFogInput(this.lastCamera as THREE.Camera);
+    }
     if (!this.textureSettled && this.live.size > 0) {
       this.textureFrames += 1;
       const landed = this.firstTextureSize();
