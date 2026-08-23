@@ -132,6 +132,14 @@ class Controls extends React.Component<IProp> {
   /** Pointer lock already asked for in this look session. See the request site for why. */
   private lockRequested = false;
 
+  /**
+   * Has the current button-held drag produced a real pointer delta?
+   *
+   * The pointer lock is gated on this, not on the button alone -- see the gate in the frame loop for the
+   * whole reason, which is the owner's vanishing cursor on every right click.
+   */
+  private lookMoved = false;
+
   constructor(props: IProp) {
     super(props);
     this.unit = props.player;
@@ -210,6 +218,10 @@ class Controls extends React.Component<IProp> {
   private onMouseUp(event: MouseEvent) {
     if (event.button === 0) this.buttons.left = false;
     if (event.button === 2) this.buttons.right = false;
+    if (!this.buttons.left && !this.buttons.right) {
+      // A new drag starts un-moved: see the lock gate.
+      this.lookMoved = false;
+    }
     /**
      * NO `pointerLockElement` GUARD, and its absence is the fix for the oldest open report on this
      * project: "when I do right click, cursor disappears for some reason and clicking left button makes
@@ -268,8 +280,15 @@ class Controls extends React.Component<IProp> {
       return;
     }
     // While pointer-locked, movementX/Y are the only meaningful deltas -- clientX/Y stop moving.
-    this.motion.dx += event.movementX ?? 0;
-    this.motion.dy += event.movementY ?? 0;
+    const dx = event.movementX ?? 0;
+    const dy = event.movementY ?? 0;
+    if (dx !== 0 || dy !== 0) {
+      // THE DRAG IS REAL. See the lock gate in the frame loop: a click that never moves never locks, and
+      // never costs the cursor a hide-and-restore.
+      this.lookMoved = true;
+    }
+    this.motion.dx += dx;
+    this.motion.dy += dy;
   }
 
   private onWheel(event: WheelEvent) {
@@ -316,14 +335,32 @@ class Controls extends React.Component<IProp> {
     // `NotAllowedError: Too many pointer lock requests in a short window`, which is how a mouselook
     // drag lost its lock instead of gaining it. Latched on the look session, cleared when the drag
     // ends, so a genuine denial is not retried at frame rate either.
-    if (this.rig.look) {
+    /**
+     * THE LOCK WAITS FOR ACTUAL MOVEMENT, and that is what finally fixes the vanishing cursor.
+     *
+     * Dropping `onMouseUp`'s stale guard was necessary and not sufficient: the owner still saw the cursor
+     * go, and gave the detail that settles it -- **"появляется по первому движению мыши"**. A pointer
+     * lock does not restore a cursor on movement, and a CSS `url(...)` cursor is repainted only when the
+     * pointer moves. So the lock WAS being exited correctly; the browser simply had not repainted the
+     * custom cursor yet, and would not until the mouse moved.
+     *
+     * Which means the flash was never worth having in the first place: **a click does not need a pointer
+     * lock at all.** The lock exists so `movementX/Y` keep arriving past the edge of the screen during
+     * mouse-look, and a press-and-release with no movement is not mouse-look. Requesting it on the frame
+     * the button goes down bought a lock, a hide and an exit for every single right click on an NPC.
+     *
+     * So it waits for a real delta. The first few pixels of a genuine drag come from the UNLOCKED
+     * `movementX/Y`, which browsers deliver either way, so nothing about mouse-look changes -- it locks a
+     * frame later and from then on behaves exactly as before.
+     */
+    if (this.rig.look && this.lookMoved) {
       if (!this.lockRequested && !document.pointerLockElement) {
         this.lockRequested = true;
         // Newer Chrome returns a promise here and older ones return undefined; an unhandled
         // rejection was reported as "a promise was rejected with a non-error" either way.
         Promise.resolve(this.element.requestPointerLock?.()).catch(() => undefined);
       }
-    } else {
+    } else if (!this.rig.look) {
       this.lockRequested = false;
     }
 
