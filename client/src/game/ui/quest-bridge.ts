@@ -544,7 +544,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * `or 0` inside the chunk rather than a guard out here: `GetItemCount` answering nil for an unknown
    * entry would make `table.concat` throw on the hole and take the whole reading with it.
    */
-  const collectCounts = (ids: number[]): number[] => {
+  const collectCounts = (ids: number[]): number[] | null => {
     if (ids.length === 0) {
       return [];
     }
@@ -552,10 +552,21 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     const result = vm.runExpr(
       `return table.concat({${calls}}, ",")`, 'quest-progress.lua',
     ) as { value?: unknown } | null;
-    return String(result?.value ?? '').split(',').map((raw) => {
-      const value = Number(raw);
-      return Number.isFinite(value) ? value : 0;
-    });
+    const parts = String(result?.value ?? '').split(',');
+    /**
+     * A SHORT READING IS VOID, NOT ZERO -- and the difference is a false toast.
+     *
+     * If the chunk fails (no `GetItemCount` registered yet, a VM teardown mid-read) the value comes
+     * back empty and a lenient parse would answer 0 for every objective. Those zeros would then be
+     * SEEDED as the baseline, and the next successful reading would look like a jump from 0 to 8 --
+     * announcing "8/8" for an item the player had all along. Refusing the reading leaves the previous
+     * baseline in place instead, which is the arm that says nothing rather than something false.
+     */
+    if (parts.length !== ids.length) {
+      return null;
+    }
+    const counts = parts.map((raw) => Number(raw));
+    return counts.every((value) => Number.isFinite(value)) ? counts : null;
   };
 
   /**
@@ -593,7 +604,9 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     const fresh = Array.from(collectNeeded.keys()).filter((id) => !collectSeen.has(id));
     if (fresh.length > 0) {
       const counts = collectCounts(fresh);
-      fresh.forEach((id, index) => collectSeen.set(id, counts[index] ?? 0));
+      if (counts !== null) {
+        fresh.forEach((id, index) => collectSeen.set(id, counts[index] ?? 0));
+      }
     }
   };
 
@@ -622,6 +635,10 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     }
     const ids = Array.from(collectNeeded.keys());
     const counts = collectCounts(ids);
+    if (counts === null) {
+      // Reading refused -- see `collectCounts`. The baseline is left as it was.
+      return;
+    }
     ids.forEach((id, index) => {
       const now = counts[index] ?? 0;
       const before = collectSeen.get(id);
