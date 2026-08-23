@@ -59,6 +59,9 @@ export class GameObjectHandler extends EventEmitter {
   /** entry -> its template prefix. Outlives a world session, like `CombatHandler#creatures`. */
   public templates = new Map<number, GameObjectTemplate>();
 
+  /** While `performance.now()` is below this, every inbound opcode is logged. See the constructor. */
+  private watchUntil = 0;
+
   /** Entries with a query in flight, so a grid of identical bushes asks once. */
   private asked = new Set<number>();
 
@@ -68,6 +71,38 @@ export class GameObjectHandler extends EventEmitter {
       `packet:receive:SMSG_GAMEOBJECT_QUERY_RESPONSE`,
       (gp: GamePacket) => this.handleQueryResponse(gp),
     );
+    /**
+     * EVERY INBOUND OPCODE FOR THREE SECONDS AFTER A USE -- and this exists because I misread a silence.
+     *
+     * The owner reported nothing coming back from `CMSG_GAMEOBJ_USE`, and I treated that as established.
+     * It was not: `socket.js`' console line logs OUTGOING packets only (`⇨`), so "nothing came back"
+     * rested entirely on the absence of my two loot lines -- which fire only for `SMSG_LOOT_RESPONSE`. A
+     * server that answered with the Opening spell's `SMSG_SPELL_START`, or with a custom animation, or
+     * with a refusal on some other opcode, would have produced exactly the same silence in his console
+     * while being a completely different defect.
+     *
+     * The probe data he sent makes this the right next question rather than a fishing trip: guid
+     * `0xf110...` (a real GAMEOBJECT high guid), entry 161557, **type 3** (a chest), name
+     * "Milly's Harvest", **2.63 yd**, state READY, `dynamic` carrying the activate bit. Every condition
+     * `GetGameObjectIfCanInteractWith` checks is satisfied -- and the name itself proves the server
+     * accepted a packet carrying THIS guid, since that is where the name came from. So the guid bytes,
+     * the distance and the object are all exonerated, and what remains is what the server actually said.
+     *
+     * Cost when not armed: one number comparison per inbound packet. Armed for three seconds after a
+     * use, which is long enough to cover an Opening cast (about one second) and the loot behind it.
+     */
+    this.game.on('packet:receive', (gp: GamePacket) => {
+      if (performance.now() > this.watchUntil) {
+        return;
+      }
+      try {
+        // eslint-disable-next-line no-console
+        console.log(`gameobject: after USE <- ${gp.opcodeName ?? `opcode 0x${gp.opcode.toString(16)}`}`
+          + ` (body ${gp.bodySize})`);
+      } catch {
+        // A diagnostic may never cost a packet.
+      }
+    });
   }
 
   /**
@@ -117,6 +152,8 @@ export class GameObjectHandler extends EventEmitter {
     );
     gp.write(Array.from(guidBytes(guid)));
     this.game.send(gp);
+    // Arm the inbound watch -- see the constructor on why a silence could not be trusted.
+    this.watchUntil = performance.now() + 3000;
   }
 
   private handleQueryResponse(gp: GamePacket): void {
