@@ -171,6 +171,30 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   fn('GetZonePVPInfo', () => [null, null, null]);
 
   /**
+   * ANNOUNCE A SELECTION CHANGE -- and without this the map opens blank.
+   *
+   * `WorldMapFrame_UpdateMap()`, which is what lays the twelve art tiles, runs from ONE place:
+   * `WorldMapFrame_OnEvent`'s `WORLD_MAP_UPDATE` arm (`worldmapframe.lua:172-175`). `OnShow` does not
+   * call it -- it calls `SetMapToCurrentZone()` and trusts the engine to announce the result. So a
+   * selection that changes silently is a map that never redraws.
+   *
+   * **This is the checklist the zone banner taught, applied before the fact rather than after it.** That
+   * round fired an event and did not ask what undoes the state it sets; this one asks the other half of
+   * the same question -- what does the client need told, for the state it just set to become visible?
+   *
+   * Only on a real change. `SetMapToCurrentZone` is called from `OnShow` AND `OnHide`, so firing
+   * unconditionally would rebuild the map every time it closes.
+   */
+  const announce = (before: { c: number; z: number }): void => {
+    if (before.c !== continentIndex || before.z !== zoneIndex) {
+      fireEvent(vm, 'WORLD_MAP_UPDATE');
+    }
+  };
+
+  /** The selection as it stands, for `announce` to compare against. */
+  const mark = () => ({ c: continentIndex, z: zoneIndex });
+
+  /**
    * `GetMapInfo()` -> the ART FOLDER name, and the texture height.
    *
    * `WorldMapFrame_Update` builds the map's twelve tiles from the first return
@@ -219,8 +243,10 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
       || mapData.continents()[continent - 1] === undefined) {
       return [];
     }
+    const before = mark();
     continentIndex = continent;
     zoneIndex = Number.isFinite(zone) && zone > 0 ? zone : 0;
+    announce(before);
     return [];
   });
 
@@ -228,8 +254,10 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   fn('SetMapToCurrentZone', () => {
     const zone = currentZoneRow();
     if (zone !== null) {
+      const before = mark();
       continentIndex = zone.continent;
       zoneIndex = zone.zone;
+      announce(before);
     }
     return [];
   });
@@ -247,8 +275,10 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
       const zones = mapData.zonesOn(continents[c].mapId);
       const index = zones.findIndex((row) => row.areaId === areaId);
       if (index >= 0) {
+        const before = mark();
         continentIndex = c + 1;
         zoneIndex = index + 1;
+        announce(before);
         return [];
       }
     }
