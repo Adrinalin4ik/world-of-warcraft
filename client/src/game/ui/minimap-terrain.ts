@@ -481,11 +481,11 @@ const ARROW_PX = 64;
 /**
  * How big the arrow is DRAWN, in the region's own pixels. Unsourced -- see the note at the `drawImage`.
  *
- * 20 rather than the client's 40 because the owner's comparison with the real client put ours at about
- * twice the size, and 40 is the box the engine reserves for a MODEL rather than the arrow inside it.
+ * 30 rather than the client's 40: the owner compared ours against the real client and named this value
+ * directly. 40 is the box the engine reserves for a MODEL, not the arrow drawn inside it.
  * `window.worldMinimapArrow(px)` overrides it.
  */
-const DEFAULT_ARROW_DRAW_PX = 20;
+const DEFAULT_ARROW_DRAW_PX = 30;
 
 /** The live override from `window.worldMinimapArrow(px)`, or null for the default above. */
 let arrowDrawPx: number | null = null;

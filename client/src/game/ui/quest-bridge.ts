@@ -1873,7 +1873,22 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * and are gone for the reason given above -- `ui/map-bridge.ts` owns them and this file was
    * overriding it.
    */
-  fn('QuestMapUpdateAllQuests', () => []);
+  /**
+   * `QuestMapUpdateAllQuests()` -> **0, a NUMBER**, because the client uses it as a for-loop bound.
+   *
+   *     framexml: WorldMapQuestShowObjectives: OnClick: WorldMapFrame.lua:1546:
+   *         'for' limit must be a number
+   *
+   * It was `() => []`, so `numEntries = QuestMapUpdateAllQuests()` was nil and
+   * `for i = 1, numEntries` raised -- taking the whole quest list on the world map with it. The same
+   * shape as the `0`-is-truthy trap read backwards: a getter meaning "nothing" normally answers nil,
+   * and a COUNT must answer 0 instead, because arithmetic and loop bounds cannot take nil.
+   *
+   * Swept rather than fixed alone: every global used as a `for` limit anywhere in the decoded
+   * FrameXML was matched against everything this project registers as returning nothing, and this was
+   * the only one.
+   */
+  fn('QuestMapUpdateAllQuests', () => [0]);
   fn('QuestPOIGetQuestIDByVisibleIndex', () => [0]);
   fn('GetQuestIDByVisibleIndex', () => [0]);
   fn('GetNumQuestPOIs', () => [0]);
