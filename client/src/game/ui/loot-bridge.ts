@@ -386,6 +386,33 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
     }
   };
 
+/**
+   * A REFUSED LOOT WAS COMPLETELY SILENT, and that is a defect by this project's own rule.
+   *
+   * `loot.ts#handleResponse` decodes the error shape -- `lootType == 0` followed by a lone error byte --
+   * and emits `lootError`. **Nothing listened.** So a server that declined to open a container answered,
+   * we decoded its answer correctly, and then dropped it: no window, no line, nothing. `CLAUDE.md`: "A
+   * silent gap is indistinguishable from a bug", and an ACTION the owner invoked must say so where he
+   * already sees refusals.
+   *
+   * Found while chasing his "окно лута не открылось" on a `CMSG_GAMEOBJ_USE` that provably went out
+   * (body 8, in his own console). Whether this is that answer is now visible instead of inferred: if the
+   * refusal prints, the send and the decode are both fine and the reason is the server's; if nothing
+   * prints, the server said nothing at all and the packet is the suspect.
+   *
+   * THE CODE IS PRINTED RAW rather than mapped to a string, deliberately. 3.3.5a's `LootError` enum is a
+   * server-side definition and nothing the client ships names its values, so a table here would be
+   * invented. The number is the honest thing to show and it is what makes the next step possible.
+   */
+  const onLootError = ({ guid, error }: { guid: string; error: number }): void => {
+    // No `disposed` flag in this bridge: it unhooks with `removeListener` in the teardown below, which
+    // is the same guarantee by a different route.
+    // eslint-disable-next-line no-console
+    console.warn(`loot: REFUSED by the server -- guid ${guid}, LootError code ${error}`);
+    fireEvent(vm, 'UI_ERROR_MESSAGE', [`Cannot loot that (server error ${error}).`]);
+  };
+
+  loot.on('lootError', onLootError);
   loot.on('lootOpened', onOpened);
   loot.on('lootRemoved', onRemoved);
   loot.on('lootMoneyCleared', onMoneyCleared);
@@ -465,6 +492,7 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
 
   return () => {
     setItemTooltipSource(vm, previous);
+    loot.removeListener('lootError', onLootError);
     loot.removeListener('lootOpened', onOpened);
     loot.removeListener('lootRemoved', onRemoved);
     loot.removeListener('lootMoneyCleared', onMoneyCleared);

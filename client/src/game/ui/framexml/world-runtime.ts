@@ -833,6 +833,58 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
 
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
+/**
+ * WHAT THE PER-FRAME TICK COSTS, BY PHASE -- `window.uiTickCensus()`.
+ *
+ * The owner's panel: 19 fps with `ui.framexml` at **35.6 ms**, everything else adding to less.
+ *
+ * The first hypothesis was EVENTS, because this file's neighbour records that as the historical cause
+ * (`action-bridge.ts:12`, "from ~10 ms to ~1 ms" by firing fewer). **The event census refuted it**, and
+ * cleanly: 423.5 ms total across the WHOLE session, dominated by one-time fires --
+ * `PLAYER_ENTERING_WORLD` 202.5 ms over 2 fires, `VARIABLES_LOADED` 44.9 ms over 1. Nothing is fired
+ * per frame. A per-frame 35.6 ms cannot come from a 423 ms session total, so the cost is inside this
+ * tick and not in event dispatch. That is a measurement doing its job in the direction that hurts the
+ * hypothesis, which `CLAUDE.md` asks for explicitly.
+ *
+ * Three phases, because they have very different shapes and only one of them is a Lua call at all:
+ *
+ *  - `editBoxMs` -- the caret and selection work. Expected to be nothing.
+ *  - `buttonMs` -- `collectButtons` **walks the frame tree every frame** and `syncInteractiveArt` runs
+ *    per visible button. This tree is 4211 frames; the walk prunes hidden subtrees but is still a walk,
+ *    and it grows with every panel this project makes work. It is OUR code, not the client's.
+ *  - `onUpdateMs` -- the eight hand-picked `<OnUpdate>` groups, which is what the header above spends
+ *    several hundred lines justifying one frame at a time.
+ *
+ * Reported as per-frame averages so the number is directly comparable to the 35.6 ms in the panel, with
+ * `buttons` per frame alongside `buttonMs` -- a walk that is expensive because it visits 2000 buttons is
+ * a different defect from one that visits 20 slowly.
+ */
+const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, buttons: 0 };
+
+(window as unknown as Record<string, unknown>).uiTickCensus = () => {
+  const n = Math.max(tickCensus.frames, 1);
+  const per = (total: number) => Math.round((total / n) * 100) / 100;
+  return {
+    frames: tickCensus.frames,
+    perFrame: {
+      editBoxMs: per(tickCensus.editBoxMs),
+      buttonMs: per(tickCensus.buttonMs),
+      onUpdateMs: per(tickCensus.onUpdateMs),
+      buttons: Math.round(tickCensus.buttons / n),
+    },
+    totalPerFrameMs: per(tickCensus.editBoxMs + tickCensus.buttonMs + tickCensus.onUpdateMs),
+  };
+};
+
+(window as unknown as Record<string, unknown>).uiTickCensusReset = () => {
+  tickCensus.frames = 0;
+  tickCensus.editBoxMs = 0;
+  tickCensus.buttonMs = 0;
+  tickCensus.onUpdateMs = 0;
+  tickCensus.buttons = 0;
+  return 'cleared';
+};
+
   let caretClock = 0;
 
   return {
@@ -845,6 +897,10 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
     longestBlockMs,
     addOnsMs,
     update: (dt: number) => {
+      // See `tickCensus` -- `window.uiTickCensus()`. Two `performance.now()` calls per phase, on a tick
+      // that is currently costing 35.6 ms.
+      tickCensus.frames += 1;
+      const tPhase0 = performance.now();
       // `UIErrorsFrame`'s messages expiring. FREE when nothing is on screen -- one `Map.size` test --
       // which is almost always; see `methods/messageframe.ts` on why there is no per-frame fade.
       tickMessageFrames(dt);
@@ -861,9 +917,16 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
       // this tree is 4211 frames and the great majority of them are hidden panels (the spellbook, the
       // talent frame, every `UIPanel`). A hidden frame's state art cannot be observed, and `drawList`
       // prunes the same subtrees -- so this is the same set of pixels for a fraction of the walk.
+      const tPhase1 = performance.now();
+      tickCensus.editBoxMs += tPhase1 - tPhase0;
+      let buttons = 0;
       for (const id of collectButtons(registry, options.root, false)) {
         syncInteractiveArt(ctx, id);
+        buttons += 1;
       }
+      tickCensus.buttons += buttons;
+      const tPhase2 = performance.now();
+      tickCensus.buttonMs += tPhase2 - tPhase1;
       // The bonus bar's slide -- see `bonusBarId`. Only while it is shown: hidden, its own body would
       // still run the `completed` check, and a frame nobody can see has no position worth integrating.
       if (bonusBarId !== null && registry.widget(bonusBarId)?.shown) {
@@ -916,6 +979,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
           invokeScriptHandler(ctx, id, 'OnUpdate', [dt]);
         }
       }
+      tickCensus.onUpdateMs += performance.now() - tPhase2;
     },
     dispose: () => {
       registry.reset();
