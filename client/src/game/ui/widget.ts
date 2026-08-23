@@ -262,19 +262,59 @@ export function touchGeometry(tag = 'unknown'): void {
 /** tag -> how many times it has bumped the revision. See `touchGeometry`. */
 const geometryCensus = new Map<string, number>();
 
+/**
+ * PER-FRAME DELTAS, and the totals alone were not enough.
+ *
+ * The first reading came back as session TOTALS -- `setAnchors` 54831, `add` 26508, `SetWidth` 14979 --
+ * and they name nothing, because a 4211-frame document load produces exactly that shape: every frame
+ * added once and anchored about twice. The question is what writes geometry in the STEADY STATE, since
+ * one bump per frame is all it takes to invalidate the whole-tree resolve. So the census now samples at a
+ * frame boundary and reports the average per frame; `steadyFrames` says how many boundaries it has seen,
+ * which is the denominator.
+ *
+ * Called from `world-ui.ts#render`, once per frame, and it is one `Map` walk over at most fourteen tags.
+ */
+const geometryPerFrame = new Map<string, number>();
+
+let geometryLastFrame = new Map<string, number>();
+
+let geometrySteadyFrames = 0;
+
+export function markGeometryFrame(): void {
+  geometrySteadyFrames += 1;
+  for (const [tag, count] of geometryCensus) {
+    const delta = count - (geometryLastFrame.get(tag) ?? 0);
+    if (delta !== 0) {
+      geometryPerFrame.set(tag, (geometryPerFrame.get(tag) ?? 0) + delta);
+    }
+  }
+  geometryLastFrame = new Map(geometryCensus);
+}
+
 (window as unknown as Record<string, unknown>).uiGeometryCensus = () => {
   const rows = Array.from(geometryCensus.entries())
     .map(([tag, count]) => ({ tag, count }))
     .sort((left, right) => right.count - left.count);
+  const frames = Math.max(geometrySteadyFrames, 1);
+  const perFrame = Array.from(geometryPerFrame.entries())
+    .map(([tag, count]) => ({ tag, perFrame: Math.round((count / frames) * 100) / 100 }))
+    .filter((row) => row.perFrame > 0)
+    .sort((left, right) => right.perFrame - left.perFrame);
   return {
     revision: geometryRevision,
-    total: rows.reduce((sum, row) => sum + row.count, 0),
+    steadyFrames: geometrySteadyFrames,
+    // THE ANSWER IS HERE, not in `top`: anything with a nonzero `perFrame` is invalidating the
+    // whole-tree layout resolve on that many frames out of every one.
+    perFrame,
     top: rows.slice(0, 14),
   };
 };
 
 (window as unknown as Record<string, unknown>).uiGeometryCensusReset = () => {
   geometryCensus.clear();
+  geometryPerFrame.clear();
+  geometryLastFrame = new Map();
+  geometrySteadyFrames = 0;
   return 'cleared';
 };
 
