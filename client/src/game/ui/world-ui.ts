@@ -48,6 +48,7 @@ import { attachPaperDollStats } from './paperdoll-stats';
 import { attachSkillsBridge } from './skills-bridge';
 import { attachReputationBridge } from './reputation-bridge';
 import { attachLootBridge } from './loot-bridge';
+import { attachMapBridge } from './map-bridge';
 import { attachGossipBridge } from './gossip-bridge';
 import { attachInteractionWatch } from './interaction-watch';
 import { attachMerchantBridge } from './merchant-bridge';
@@ -250,6 +251,9 @@ export class WorldUiHost {
 
   /** `attachReputationBridge`'s teardown, held so `dispose` can run it. */
   private detachReputation: (() => void) | null = null;
+
+  /** `attachMapBridge`'s teardown, held for the same reason as the loot bridge's below. */
+  private detachMap: (() => void) | null = null;
 
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
@@ -619,6 +623,9 @@ export class WorldUiHost {
         // read the same `ItemHandler` template cache -- `attachContainerBridge` is the one that first
         // asks `itemData` to load, and `ensureLoaded` is idempotent so this rides that promise.
         this.detachLoot = attachLootBridge(runtime.vm, this.world, this.art);
+        // WHERE THE PLAYER IS, in words -- the zone-text family the minimap's label reads. See
+        // `map-bridge.ts`; step 3 of the map arc and the first with anything visible in it.
+        this.detachMap = attachMapBridge(runtime.vm, this.world);
         // TALKING TO AN NPC, then BUYING AND SELLING. Gated on a real session for the reason the item
         // bridges are: a vendor's stock and a gossip menu are both packets, so an offline world has
         // neither and `world.game.objectHandler` must not be touched on that route.
@@ -1419,6 +1426,8 @@ export class WorldUiHost {
     // then let the loot bridge restore the container's closure over the top -- leaving a dead source
     // installed after dispose, reading a bridge whose listeners are gone. Unwinding in the reverse of
     // the attach order is what makes the chain's restore land on something live.
+    this.detachMap?.();
+    this.detachMap = null;
     this.detachLoot?.();
     this.detachLoot = null;
     // THE TRAINER'S FIRST, and the order is load-bearing rather than tidy. The tooltip-source chain has

@@ -196,6 +196,38 @@ class WorldMap extends THREE.Group {
     return chunkX * 64 * 16 + chunkY;
   }
 
+  /**
+   * WHICH AREA THE GROUND UNDER A WORLD POSITION BELONGS TO -- `AreaTable.id`, or 0 when unknown.
+   *
+   * The map's and the minimap's "where am I", and the last piece of that foundation that is not a DBC
+   * question. It is the reference's own source: "our MCNK `CurrentArea` is the leaf sub-area, so the
+   * parent walk lands on the same zone" (`benilla-app/src/ui_world_map.rs:17-20`). The zone above the
+   * leaf comes from `pipeline/dbc/map-data.ts#zoneOf`.
+   *
+   * **NOTHING NEW IS PARSED OR STREAMED FOR THIS.** `wow-data-parser/adt/index.js:133` has always read
+   * `areaID` out of the MCNK header, and `pipeline/adt/chunk` has always kept the whole record as
+   * `chunk.data` -- so the number was sitting in memory for every cell on screen and nothing had ever
+   * asked for it. That is the third time this arc has found the data already present (after
+   * `GameObjectDisplayInfo` and the four map tables), which is why "is it already there" is now the first
+   * question rather than the last.
+   *
+   * ZERO for "unknown", and the distinction matters to the caller: `AreaTable` has no id 0, so 0 can only
+   * mean the cell under the player is not loaded -- a teleport's first frames, or a position off the
+   * streamed set. A caller must not turn that into a zone name; `mapData.zoneOf(0)` answers null, which
+   * is the honest end of it.
+   *
+   * Cost: two divisions and one `Map#get`. Meant to be called once per frame at most, which is what the
+   * zone text and the map's own position need.
+   */
+  areaIdAt(x, y) {
+    // `chunkFor` takes a WORLD axis and answers the MCNK cell index on it. The x/y swap is the one this
+    // file already uses everywhere -- `render(x, y)` passes x through `chunkFor` for `chunkX` -- and it
+    // is the ADT convention, not a bug: a chunk's `position.x` is derived from `data.indexY`.
+    const chunk = this.chunks.get(this.indexFor(Chunk.chunkFor(x), Chunk.chunkFor(y)));
+    const areaId = chunk && chunk.data ? chunk.data.areaID : 0;
+    return typeof areaId === 'number' ? areaId : 0;
+  }
+
   animate(delta, camera, cameraMoved) {
     this.updateWorldTime(camera, this.mapID, null, delta);
     this.terrainManager.animate(delta, camera, cameraMoved);
