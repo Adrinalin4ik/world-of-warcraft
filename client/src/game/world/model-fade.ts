@@ -56,15 +56,17 @@ import type Unit from '../classes/unit';
  */
 
 /**
- * **500 ms, and that is the OWNER'S number over a byte-verified one.**
+ * `FadeTo(1.0, 2000 ms)` -- the reference's appear duration, byte-verified: "byte `0x7d0`, wall-clock via
+ * `OsGetAsyncTimeMs`, framerate-independent" (`model_fade.rs:148-150`). The despawn ramp reuses it, as
+ * the reference's does.
  *
- * The reference's is 2000: `FadeTo(1.0, 2000 ms)`, "byte `0x7d0`, wall-clock via `OsGetAsyncTimeMs`,
- * framerate-independent" (`model_fade.rs:148-150`). He asked for "быстрая 500мс исчезновение и
- * появление" after seeing two seconds in play, so this is a deliberate deviation from a verified
- * constant on his judgement of how it reads -- recorded as that rather than as fidelity, and one line to
- * put back.
+ * **This was 500 for one round, at the owner's request, and he then said "давай как у референса тогда".**
+ * So the verified number is back. Worth recording rather than quietly reverting: the 500 was his call on
+ * how it read in play, and he withdrew it once told the 2000 was byte-verified -- which is the same
+ * judgement this project applies everywhere else, that a measured value beats a preference unless the
+ * measurement is shown to be about something else.
  */
-const FADE_MS = 500;
+const FADE_MS = 2000;
 
 /**
  * The blend state a fade installs on a material it is allowed to touch, and the state it saves first.
