@@ -828,6 +828,25 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       return;
     }
     const handlers = this.game.objectHandler;
+    /**
+     * A WORLD OBJECT: `CMSG_GAMEOBJ_USE`, and nothing else needs building behind it.
+     *
+     * Answered before the kind switch because the kind is not what distinguishes it -- `Interact` is
+     * also an npc leg -- while `gameObject` being non-null is exactly "this is an object". The
+     * classifier has already applied the reference's flag gate and the range test, so reaching here
+     * means the object is usable and in reach.
+     *
+     * The guid, not the entry: the query is keyed on the template and names a KIND of bush, this names
+     * the one in front of the player. See `network/game/object/game-object.ts`.
+     *
+     * What comes back is already handled: `SMSG_LOOT_RESPONSE` for a bush, which `object/loot.ts` and
+     * `ui/loot-bridge.ts` already decode and draw, preceded by `SMSG_SPELL_START` when the object has an
+     * opening cast, which `ui/action-bridge.ts` already feeds to `CastingBarFrame`.
+     */
+    if (hit.gameObject !== null) {
+      handlers.gameObjectHandler.use(hit.guid);
+      return;
+    }
     switch (mode.kind) {
       case 'Pickup':
         // A VENDOR-ONLY NPC. `Pickup` is also the lootable-corpse mode, but a corpse never reaches

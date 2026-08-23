@@ -8,6 +8,7 @@ import { LootHandler } from './loot';
 import { GossipHandler } from './gossip';
 import { MerchantHandler } from './merchant';
 import { ReputationHandler } from './reputation';
+import GameObjectHandler from './game-object';
 import { QuestHandler } from './quest';
 import { LevelUpHandler } from './level-up';
 import { GroupHandler } from './group';
@@ -129,6 +130,9 @@ export class ObjectHandler extends EventEmitter {
    */
   public questHandler: QuestHandler;
 
+  /** World objects: the template name query, and `CMSG_GAMEOBJ_USE`. See `game-object.ts`. */
+  public gameObjectHandler: GameObjectHandler;
+
   /** LEVELLING UP -- `SMSG_LEVELUP_INFO`, which had no subscriber at all. See `level-up.ts`. */
   public levelUpHandler: LevelUpHandler;
 
@@ -168,6 +172,7 @@ export class ObjectHandler extends EventEmitter {
     // QUESTS. The whole `SMSG_QUESTGIVER_*` family had no subscriber until this line, which is what
     // `gossip-bridge.ts:231` recorded as the reason `SelectGossipAvailableQuest` was a declared gap.
     this.questHandler = new QuestHandler(this.game);
+    this.gameObjectHandler = new GameObjectHandler(this.game);
     // LEVELLING UP. `SMSG_LEVELUP_INFO` (0x1D4) likewise had no subscriber, so `PLAYER_LEVEL_UP` was
     // never fired and the client's own congratulation lines never printed.
     this.levelUpHandler = new LevelUpHandler(this.game);

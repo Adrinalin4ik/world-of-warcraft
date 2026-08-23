@@ -45,6 +45,7 @@
  *    spells.
  */
 import { DIALOG_STATUS } from '../../network/game/object/quest';
+import { goIsActivatable } from '../../network/game/object/update-object/game-object-fields';
 import type Unit from '../classes/unit';
 import { REACTION_HOSTILE, REACTION_NEUTRAL, reactionFor } from './faction';
 
@@ -142,6 +143,19 @@ const ANY_VENDOR =
 
 /** Every TRAINER sub-kind folded together, for the same reason. */
 const ANY_TRAINER = NPC_FLAG.TRAINER | NPC_FLAG.TRAINER_CLASS | NPC_FLAG.TRAINER_PROFESSION;
+
+/**
+ * `GameObjectFlags` bits that suppress interaction: `0x1` IN_USE and `0x10` NO_INTERACT, as their union.
+ * The reference's own constant and its own comment (`cursor_mode.rs:291`).
+ */
+const GO_FLAG_IN_USE_OR_NO_INTERACT = 0x11;
+
+/**
+ * `GO_FLAG_INTERACT_COND` (`0x4`) -- usable ONLY while the per-player activate bit is set. The
+ * reference: "this is the quest gate: a quest chest/goober carries it, an ordinary door does not"
+ * (`cursor_mode.rs:293-294`).
+ */
+const GO_FLAG_INTERACT_COND = 0x4;
 
 /**
  * `UNIT_FLAG_SKINNABLE` in `UNIT_FIELD_FLAGS`.
@@ -328,6 +342,45 @@ export function classifyUnitCursor(
   // `combatReach` for why both terms are currently 0 and what that does and does not affect, and
   // `interactReachSq` for why the arithmetic lives in a shared function now.
   const inMelee = distanceSq <= interactReachSq(self, unit);
+
+  /**
+   * A WORLD OBJECT -- and it is answered FIRST, before every unit leg below.
+   *
+   * First because none of them apply: a bush has no reaction, no npc flags, no `dead`, and reading
+   * `unit.fields` on it would answer the defaults of a bag that was never written. `gameObject` being
+   * non-null is exactly the "is this an object" test, which is why it is null on everything else
+   * (`classes/unit.ts#gameObject`).
+   *
+   * THE GATE IS THE REFERENCE'S, both terms verbatim (`cursor_mode.rs:420-425`, with its own flag
+   * constants at `:291-297`):
+   *
+   *   - `0x11` -- IN_USE (`0x1`) or NO_INTERACT (`0x10`) -- suppresses interaction outright.
+   *   - `INTERACT_COND` (`0x4`) means the object is usable ONLY while its per-player activate bit is
+   *     set. The reference names what carries it: "a quest chest/goober carries it, an ordinary door
+   *     does not". So this is the quest gate, and it is the same bit as the sparkle -- the server sets
+   *     both from `GameObject::ActivateToQuest`. A crate that is not our objective is not clickable and
+   *     does not glow, from one flag.
+   *
+   * `Interact` is the kind: the hand, not the sword and not the speech bubble. `unable` beyond service
+   * range for the same reason the unit legs use it -- there is no auto-approach in this client, so a
+   * send from out of range would be silently refused and read as a broken click.
+   *
+   * NOT PORTED, and named: the reference's per-TYPE table -- the strategy vtable overrides that make a
+   * fishing bobber or a chair never highlightable, and the per-type interact ranges (`:285-287`). Those
+   * need `type` from the template query, which arrives asynchronously, and the flags above already
+   * decide the owner's case. A chair will offer a hand it should not; that is a wrong cursor on
+   * furniture, not a wrong loot.
+   */
+  if (unit.gameObject !== null) {
+    const { flags, dynamic } = unit.gameObject;
+    if ((flags & GO_FLAG_IN_USE_OR_NO_INTERACT) !== 0) {
+      return null;
+    }
+    if ((flags & GO_FLAG_INTERACT_COND) !== 0 && !goIsActivatable(dynamic)) {
+      return null;
+    }
+    return { kind: 'Interact', unable: distanceSq > SERVICE_RANGE_SQ };
+  }
 
   if (unit.dead) {
     if (((unit.fields.dynamicFlags ?? 0) & DYNFLAG_LOOTABLE) !== 0) {

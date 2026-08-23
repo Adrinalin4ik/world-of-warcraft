@@ -25,6 +25,7 @@ import { reactionFor, REACTION_NEUTRAL } from "./faction";
 import { HoverHighlight } from "./hover-highlight";
 import { SelectionRing } from "./selection-ring";
 import { LevelUpEffect } from "./level-up-effect";
+import GameObjectSparkle from './game-object-sparkle';
 import { QuestMarkers } from "./quest-markers";
 import { NameplateConfig, Nameplates } from "./nameplates";
 import { FloaterSpawn, FloatingCombatText, MAX_FLOATERS, WordSource } from "./floating-text";
@@ -65,6 +66,9 @@ export default class World extends EventEmitter {
    * session, not in the render loop, and the effect has to be started from there.
    */
   public levelUpEffect: LevelUpEffect;
+
+  /** The glow on a quest objective object. See `game-object-sparkle.ts`. */
+  public gameObjectSparkle: GameObjectSparkle;
 
   /**
    * THE `!` AND `?` OVER A QUESTGIVER'S HEAD -- models on a bone, not sprites. See
@@ -224,6 +228,7 @@ export default class World extends EventEmitter {
     // THE LEVEL-UP BURST, on the scene ROOT for the selection ring's reason directly above: its
     // position is world-space and it belongs to no placed subtree. Draws nothing until a level lands.
     this.levelUpEffect = new LevelUpEffect(this.scene);
+    this.gameObjectSparkle = new GameObjectSparkle(this.scene);
     // `window.worldRing()` -- the ring instrument: what the last projection emitted, plus the raw
     // world-space vertices the gate measures against the terrain heightmap. See `SelectionRing#vertices`.
     window['worldRing'] = () => ({
@@ -1042,6 +1047,13 @@ export default class World extends EventEmitter {
     // `updateMatrixWorld` on one node; the particles themselves are already counted in `w.map`, which
     // is where `ParticleManager#animate` runs.
     this.levelUpEffect.update(delta * 1000);
+    // THE QUEST-OBJECT GLOW. Reconciled here rather than on a field event because the falling edge
+    // matters as much as the rising one -- an object that goes out of range emits nothing to listen to,
+    // it simply stops being in `entities`. See the file's cost note: one field test per entity.
+    this.gameObjectSparkle.update(
+      this.entities,
+      (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
+    );
 
     // THE NAMEPLATES, an EIGHTH named span. See the exhaustiveness note above: a statement outside all
     // of them breaks the sum rule, and that is the tell it exists for. After the entity pass for the

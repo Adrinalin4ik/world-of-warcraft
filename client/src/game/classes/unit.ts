@@ -2,6 +2,8 @@
 import * as THREE from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import DBC from "../pipeline/dbc";
+import { gameObjectDisplayData } from "../pipeline/dbc/game-object-display-data";
+import type { GameObjectState } from '../../network/game/object/update-object/game-object-fields';
 import M2 from "../pipeline/m2";
 import { InstanceAnim, windowElapsedOrInstant } from "../pipeline/m2/anim/instance-anim";
 import type { Sequence } from "../pipeline/m2/anim/model-anim";
@@ -801,6 +803,84 @@ class Unit extends Entity {
       return;
     }
     this.resolveDisplay(displayId).catch(console.error);
+  }
+
+  /**
+   * A GAMEOBJECT'S DESCRIPTOR STATE, or **null on anything that is not one**.
+   *
+   * Null rather than an empty state so "is this a world object" is one test and cannot be confused with
+   * "is this an object whose words have not arrived". Written by
+   * `update-object/game-object-fields.ts#mergeGameObjectFields`; read by the pick, the cursor, the
+   * tooltip and the sparkle.
+   */
+  gameObject: GameObjectState | null = null;
+
+  /** See `gameObjectDisplay`. The id whose model is already on this body, so a repeat costs nothing. */
+  private appliedGameObjectDisplayId = 0;
+
+  /**
+   * A GAMEOBJECT'S MODEL -- the bush, the crate, the chest.
+   *
+   * A SECOND display path on purpose, and a much shorter one, because a GameObject's lookup is not a
+   * creature's. `resolveDisplay` walks `CreatureDisplayInfo -> CreatureModelData -> file` and then has
+   * to decide about extra rows, npc looks, character looks, skins and a collision height; a
+   * GameObject's display row names its model **directly** and has none of those. Routing objects
+   * through the creature path would have meant a `CreatureDisplayInfo` lookup that cannot succeed.
+   *
+   * WHAT THIS DELIBERATELY DOES NOT DO, and each is a real difference rather than an omission:
+   *
+   *  - **No `setDisplayInfo`.** That applies a creature's skin VARIATION. A doodad has no variations
+   *    and its authored textures are already correct, so calling it would be asking for texture paths
+   *    built out of a creature naming convention.
+   *  - **No collision-height write.** That number is a swim depth for a body that swims.
+   *  - **No character-look guard.** A crate is never dressed, so the token dance those two flags exist
+   *    for cannot arise here. `appliedGameObjectDisplayId` is still needed, and for the same reason the
+   *    creature path needs its own: the server re-sends a create block every time we re-enter the grid,
+   *    so without a dedupe each re-entry would fetch and replace the model.
+   *
+   * `revealWhenWarm` rather than a plain `visible = true`, for the reason that helper documents: the
+   * first draw of a model kind compiles its programs, measured at 37.8 ms, and a grid of unfamiliar
+   * doodads coming into view is exactly the case it exists for.
+   */
+  set gameObjectDisplay(displayId: number) {
+    if (!displayId || displayId === this.appliedGameObjectDisplayId) {
+      return;
+    }
+    this.resolveGameObjectDisplay(displayId).catch(console.error);
+  }
+
+  private async resolveGameObjectDisplay(displayId: number): Promise<void> {
+    // CLAIMED SYNCHRONOUSLY, before any await. Two create blocks for the same object can be in flight
+    // at once -- the server re-sends one per grid re-entry -- and the second would otherwise get past
+    // the setter's compare and start a duplicate fetch.
+    this.appliedGameObjectDisplayId = displayId;
+    /**
+     * THE TABLE IS LOADED FROM HERE, not from the world's setup, and that is the arm that cannot miss.
+     *
+     * The alternative -- kick the load off at world entry -- loses every object that streams in before
+     * it lands, because `modelFor` would answer null and nothing retries. Awaiting the shared promise
+     * here means the FIRST object triggers the fetch and every other object waits on the same one, so
+     * there is no ordering to get wrong and no second request. `ensureLoaded` is idempotent.
+     */
+    await gameObjectDisplayData.ensureLoaded();
+    const path = gameObjectDisplayData.modelFor(displayId);
+    if (path === null) {
+      // UN-CLAIM, and the distinction matters. If the row is a `.wmo` or absent, retrying is pointless
+      // but harmless -- the answer will not change. If the DBC FAILED to load, `ensureLoaded` has
+      // already reset itself to be retryable, and holding the claim here would be the one thing that
+      // makes that retry unreachable: the object would stay modelless for the session.
+      this.appliedGameObjectDisplayId = 0;
+      return;
+    }
+    const m2: M2 = await M2Blueprint.load(path);
+    if (this.appliedGameObjectDisplayId !== displayId) {
+      // A later display id won while this fetch was out -- a chest that opened, say. Release rather
+      // than draw the stale body; `set model` would otherwise leak this clone.
+      M2Blueprint.unload(m2);
+      return;
+    }
+    this.model = m2;
+    revealWhenWarm(this.model);
   }
 
   /**

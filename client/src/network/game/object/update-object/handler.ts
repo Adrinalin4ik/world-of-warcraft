@@ -9,6 +9,7 @@ import { getUpdateFieldName, ObjectType, UpdateFlags, UpdateType } from '../enum
 import { readMovementInfo } from '../../movement-info';
 import { GUID_BYTES, guidHex } from '../../../guid-hex';
 import { objectTrace } from './trace';
+import { emptyGameObjectState, mergeGameObjectFields } from './game-object-fields';
 import { applyUnitFields, isDead } from './unit-fields';
 
 /**
@@ -248,8 +249,26 @@ export class UpdateObjectHandler extends EventEmitter {
     if (!unit || pack.objType === undefined) {
       return;
     }
+    if (pack.objType === ObjectType.GameObject && unit.gameObject !== null) {
+      /**
+       * A WORLD OBJECT'S STATE MOVING, and this is the door the SPARKLE comes through.
+       *
+       * `GAMEOBJECT_DYNAMIC` is set per-player when an object becomes an active objective for us, and
+       * `GAMEOBJECT_BYTES_1`'s state byte flips when it is used. Both arrive as values-only blocks
+       * after first sight, so an object decoded at creation and never again would sparkle at whatever
+       * it happened to be when it streamed in and keep offering itself after being looted.
+       *
+       * The RETURN is used. `CLAUDE.md` records a discarded merge return hiding a defect twice, and the
+       * shape here is identical: the map would be right and nothing would repaint.
+       */
+      if (mergeGameObjectFields(unit.gameObject, pack.newObject, pack.objType)) {
+        unit.gameObjectDisplay = unit.gameObject.displayId;
+        this.game.world.emit('gameobject:fields', unit);
+      }
+      return;
+    }
     if (pack.objType !== ObjectType.Unit && pack.objType !== ObjectType.Player) {
-      // Game objects and corpses have descriptor fields too; neither is a unit and neither has a
+      // A CORPSE, or an object whose create block never arrived. Neither is a unit and neither has a
       // `fields` bag to write. Decoding them costs nothing and reading them would be a lie.
       return;
     }
@@ -372,6 +391,21 @@ export class UpdateObjectHandler extends EventEmitter {
         // no symptom but a blank name, which is the report this code exists to answer.
         console.warn('applyUpdates: game.askNameOnce is missing -- other players will have no name');
       }
+    }
+    if (pack.obj_type === ObjectType.GameObject) {
+      // A WORLD OBJECT -- a bush, a crate, a chest. It was already in `World#entities` (see
+      // `game-object-fields.ts`' header on why "let them through" was never the missing half); what was
+      // missing is reading its block and giving it a model.
+      unit.gameObject = unit.gameObject ?? emptyGameObjectState();
+      mergeGameObjectFields(unit.gameObject, pack.newObject, pack.obj_type);
+      // THE SETTER dedupes on the id, so a re-entry into our own grid -- which re-sends this very
+      // create block -- costs one compare rather than a second fetch.
+      unit.gameObjectDisplay = unit.gameObject.displayId;
+      // THE NAME, for the tooltip. Keyed on the TEMPLATE entry and deduped there, so a vineyard of
+      // identical crates is one round trip -- the same economy `queryCreature` below documents for a
+      // camp of eleven wolves.
+      this.game.objectHandler?.gameObjectHandler?.query(unit.gameObject.entry, pack.guid);
+      this.game.world.emit('gameobject:fields', unit);
     }
     if (pack.obj_type === ObjectType.Unit || pack.obj_type === ObjectType.Player) {
       if (applyUnitFields(unit, pack.newObject, pack.obj_type, true)) {
