@@ -1823,7 +1823,28 @@ class Unit extends Entity {
     // NOT follow `nextAnimationID`, so an absent animation yields Stand rather than the authored
     // successor. It can also return null now: a model whose every sequence lives in a sibling
     // `.anim` file has nothing safe to play until Task 20 merges that data in.
-    const seq = this.model.modelAnim.resolve(id);
+    /**
+     * TWO RESOLVES, AND THE FIRST ONE IS THE LATCH TEST -- this is what makes a kneel last a cast.
+     *
+     * The owner's bucket, measured: `precast pose 141 for spell 6478 -> resolved=115 loops=true
+     * latched=false`. **141 is `SpellKneelLoop` and 115 is `KneelLoop`** (`AnimationData.dbc`, read off
+     * the served file) -- so the character does not own `SpellKneelLoop`, `resolve` followed the ALIAS
+     * chain to the plain kneel loop, and the body played the visually correct pose. It then lost it
+     * inside a frame, because the latch below required `seq.id === id` and 115 is not 141. Locomotion
+     * took the body straight back: "проигрывается анимация лута, долю секунды, потом он встает".
+     *
+     * The guard was right to exist and wrong in its test. Its own comment states the danger: `resolve`
+     * falls back to the FIRST INLINE sequence -- normally a looping Stand -- for an id the model lacks,
+     * and latching that would hold the body in a clip nobody asked for, for ever. But an ALIAS HOP is not
+     * that failure; it is the model saying which of its own clips this id means. `seq.id === id` cannot
+     * tell the two apart, and `resolve`'s own `fallback` flag can: with it off, an alias chain that lands
+     * on a real inline sequence still returns one, and only the accidental fallback returns null.
+     *
+     * So `intended` is the latch test and the fallback is still played when there is nothing better --
+     * just not owned. One extra call, and only on the path that was going to be wrong anyway.
+     */
+    const intended = this.model.modelAnim.resolve(id, false);
+    const seq = intended ?? this.model.modelAnim.resolve(id);
     if (!seq) {
       return;
     }
@@ -1835,10 +1856,11 @@ class Unit extends Entity {
     // STATE. `resolve` falls back to the first inline sequence -- normally Stand, a LOOP -- for any
     // id the model does not own, and most models own few state ids. Latching on the request would
     // therefore hand ownership of a looping Stand to a state that never arrived, and a looping
-    // owner never releases: the unit would stand still for the rest of the session. `seq.id === id`
-    // is exactly the "did we get what we asked for" test, and it needs no caller knowledge --
-    // locomotion's target is always a gait id, so it clears the latch rather than setting it.
-    this.externalSeq = (!isGaitId(id) && seq.id === id) ? seq : null;
+    // owner never releases: the unit would stand still for the rest of the session. `intended !== null`
+    // is the "did we get what we asked for" test -- see the two resolves above for why it is that and
+    // not `seq.id === id`, which threw away every alias the models actually use. It needs no caller
+    // knowledge: locomotion's target is always a gait id, so it clears the latch rather than setting it.
+    this.externalSeq = (!isGaitId(id) && intended !== null) ? seq : null;
     /**
      * A CLAMP ARMED AS A HOLD MUST FREEZE, and this flag is the whole of it.
      *

@@ -301,6 +301,28 @@ let geometryLastFrame = new Map<string, number>();
 let geometrySteadyFrames = 0;
 
 export function markGeometryFrame(): void {
+  /**
+   * THE FIRST CALL ONLY TAKES A BASELINE -- and leaving that out invalidated two rounds of my reasoning.
+   *
+   * `geometryLastFrame` starts empty, so the first frame's "delta" was the WHOLE DOCUMENT LOAD: 54801
+   * `setAnchors` and 26508 `add` attributed to one rendered frame. Dividing that by `steadyFrames` then
+   * produced a per-frame figure that looked enormous and moved with the sample length -- 39.23 over 1430
+   * frames, 75.23 over 736, 307.85 over 178 -- which is the signature of a constant divided by a
+   * denominator, not of per-frame work.
+   *
+   * **I read that as "all 26512 `add` calls happened during RENDERING" and built a whole hypothesis on
+   * it**, right up to sampling stacks to find the Lua that creates 36 frames a frame. The totals were
+   * telling me the opposite the entire time: they did not move between readings (54831, 54801, 54801),
+   * so almost nothing bumps geometry per frame at all. `CLAUDE.md` says to distrust the instrument and
+   * gives the tell -- "a number that confirms your hypothesis deserves more scepticism than one that
+   * refutes it" -- and this one confirmed mine three times while scaling with the window, which should
+   * have been the end of it much sooner.
+   */
+  if (!geometryBaselineTaken) {
+    geometryBaselineTaken = true;
+    geometryLastFrame = new Map(geometryCensus);
+    return;
+  }
   geometrySteadyFrames += 1;
   for (const [tag, count] of geometryCensus) {
     const delta = count - (geometryLastFrame.get(tag) ?? 0);
@@ -310,6 +332,8 @@ export function markGeometryFrame(): void {
   }
   geometryLastFrame = new Map(geometryCensus);
 }
+
+let geometryBaselineTaken = false;
 
 (window as unknown as Record<string, unknown>).uiGeometryCensus = () => {
   const rows = Array.from(geometryCensus.entries())
@@ -341,6 +365,7 @@ export function markGeometryFrame(): void {
   geometryPerFrame.clear();
   geometryLastFrame = new Map();
   geometrySteadyFrames = 0;
+  geometryBaselineTaken = false;
   geometryStacks.clear();
   return 'cleared';
 };
