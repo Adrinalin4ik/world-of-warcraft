@@ -72,6 +72,7 @@ export default class World extends EventEmitter {
    */
   public questMarkers: QuestMarkers = new QuestMarkers();
 
+
   /** See the instrument beside `questMarkers.update` -- published once, not per frame. */
   private questMarkerProbePublished = false;
 
@@ -1178,6 +1179,33 @@ export default class World extends EventEmitter {
      * it does not, this feature is exonerated and the defect is elsewhere -- and either answer is worth
      * more than my reasoning. One property read per frame.
      */
+    if (!this.questMarkerProbePublished) {
+      this.questMarkerProbePublished = true;
+      /**
+       * THE MARKERS' MATERIALS JOIN THE MAP'S LIGHT AND FOG REGISTRY, and without this they render WHITE.
+       *
+       * `adoptAttachedModel` documents the mechanism for helms, pauldrons and weapons, and a marker is the
+       * same kind of thing: nothing else hands an attached model's materials their fog uniforms, so
+       * `fogParams` stays `(0,0,0,0)` and `fogColor` keeps its constructor default -- white -- and
+       * `applyFog` then replaces the fragment with it outright at every distance.
+       *
+       * Wired here rather than inside `QuestMarkers` so that class keeps knowing nothing about the map,
+       * and wired in the same once-per-session block as the probe because it is the same kind of one-time
+       * hookup.
+       */
+      this.questMarkers.adoptMaterials = (model) => {
+        this.adoptAttachedModel(null as never, model);
+      };
+      this.questMarkers.releaseMaterials = (model) => {
+        this.releaseAttachedModel(null as never, model);
+      };
+      (window as unknown as Record<string, unknown>).worldQuestMarkers = () => ({
+        feed: this.questMarkerStatuses === null ? null : this.questMarkerStatuses.size,
+        live: this.questMarkers.liveCount,
+        ...this.questMarkers.stats,
+      });
+    }
+
     if (
       this.questMarkerStatuses !== null
       && (window as unknown as Record<string, unknown>).worldQuestMarkersEnabled !== false
@@ -1201,14 +1229,6 @@ export default class World extends EventEmitter {
      * Published ONCE, not per frame: the closure would otherwise be allocated on every tick, and this
      * is a console handle rather than a per-frame reading.
      */
-    if (!this.questMarkerProbePublished) {
-      this.questMarkerProbePublished = true;
-      (window as unknown as Record<string, unknown>).worldQuestMarkers = () => ({
-        feed: this.questMarkerStatuses === null ? null : this.questMarkerStatuses.size,
-        live: this.questMarkers.liveCount,
-        ...this.questMarkers.stats,
-      });
-    }
 
     // THE RENDERED TRANSFORM, sampled after the matrices are final and nowhere earlier.
     //

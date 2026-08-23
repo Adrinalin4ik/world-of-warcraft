@@ -150,6 +150,27 @@ export class QuestMarkers {
   private loading = new Set<string>();
 
   /**
+   * THE MAP'S LIGHT AND FOG REGISTRY, handed in by the world -- and without it a marker renders WHITE.
+   *
+   * Not a nicety: `world/index.ts#adoptAttachedModel` documents this exact failure for helms, pauldrons
+   * and weapons, and a marker is the same kind of thing. Nothing else hands an attached model's materials
+   * their fog uniforms, so `fogParams` stays `(0,0,0,0)` and `fogColor` keeps its constructor default --
+   * and `new THREE.Color()` is white. The shader's `f4 = min(max(d*0 + 0, 0), 1)` is then 0, so
+   * `fogFactor` is 1, and `applyFog` does `mix(color.rgb, fogRgb, 1.0)`: the fragment is replaced by that
+   * white outright, at every distance, whatever the texture says.
+   *
+   * CONFIRMED here the same way it was for the armour, by the owner: `worldQuestMarkersFog = false` made
+   * the marker yellow, and the measured inputs ruled the geometry out first -- `trueDistance=53.3`,
+   * `viewDepth=19.5`, world position exactly the NPC's head. Small, sane, and fogged solid, which only
+   * zeroed parameters can do.
+   *
+   * Injected rather than imported so this class keeps knowing nothing about the map.
+   */
+  adoptMaterials: ((model: unknown) => void) | null = null;
+
+  releaseMaterials: ((model: unknown) => void) | null = null;
+
+  /**
    * SELF-ANNOUNCING DIAGNOSIS, at most two lines for the whole session.
    *
    * Every static check on this subsystem passes -- the three models and their `.skin` files serve real
@@ -455,6 +476,9 @@ export class QuestMarkers {
         if (seq && armable.instanceAnim) {
           armable.instanceAnim.arm(seq as never, worldClock.ms);
         }
+        // BEFORE the live registration, so a marker is never in `live` with unregistered materials --
+        // one frame of that is one frame of solid fog colour.
+        this.adoptMaterials?.(model);
         this.live.set(guid, { path, model, baked: false });
         this.stats.attached += 1;
         // ATTACHED, said outright. `attachTo` returning true is the point past which every remaining
@@ -779,6 +803,9 @@ export class QuestMarkers {
   }
 
   private detach(guid: string, marker: Marker): void {
+    // Mirrors the adopt, exactly as `releaseAttachedModel` mirrors `adoptAttachedModel`: a registry
+    // holding a disposed marker's materials would keep writing light into them for the session.
+    this.releaseMaterials?.(marker.model);
     marker.model.parent?.remove(marker.model);
     // A refcount decrement, not a free: several NPCs share one marker path.
     M2Blueprint.unload(marker.model as never);
