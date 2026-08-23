@@ -647,7 +647,11 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
     return {
       dbcLoaded: mapData.loaded,
       continents: continents.length,
-      continentNames: continents.map((entry) => mapData.displayName(entry)),
+      // The SAME expression `GetMapContinents` answers with, not `displayName`. A probe that reports
+      // something the global does not is the trap this project has hit three times: the dropdown
+      // said "Eastern Kingdoms" while this printed the art folder "Azeroth", which reads as a bug
+      // in the global rather than in the probe.
+      continentNames: continents.map((entry) => mapData.mapName(entry.mapId) ?? entry.art),
       selection: { continentIndex, zoneIndex },
       zonesOnSelected: continentIndex === 0
         ? 0

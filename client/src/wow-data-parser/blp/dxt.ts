@@ -204,17 +204,30 @@ const dxtToAbgr8888 = (
   blockSize: number,
   decompressBlock: (block: Uint8Array, blockOfs: number) => void,
 ) => {
-  if (width % DXT_BLOCK_WIDTH !== 0) {
-    throw new Error(`Texture width is not a multiple of ${DXT_BLOCK_WIDTH}: ${width}`);
-  }
-
-  if (height % DXT_BLOCK_HEIGHT !== 0) {
-    throw new Error(`Texture height is not a multiple of ${DXT_BLOCK_HEIGHT}: ${height}`);
-  }
-
-  const bw = width / DXT_BLOCK_WIDTH;
-  const bh = height / DXT_BLOCK_HEIGHT;
+  /**
+   * A LEVEL SMALLER THAN A BLOCK IS LEGAL, and refusing it was this function disagreeing with its
+   * own file.
+   *
+   * DXT stores whole 4x4 blocks, so a 2x2 or 1x1 mip level is ONE full block of which only the
+   * top-left corner is meaningful. `getDxtSize` below has always known that -- it is written with
+   * `Math.ceil` -- while this function threw on the same input twenty lines above it. Every mip
+   * chain that reaches 2x2 ends in two levels this rejected.
+   *
+   * **It went unnoticed because almost nothing decodes DXT on the CPU.** `pipeline/blp/loader.js`
+   * hands DXT levels to the GPU still compressed, which is right and never calls this; the only
+   * `decompress` consumers are the character body bake (whose sources are all palettized -- measured
+   * in `scene/body-composite.ts`) and now the minimap. The minimap player arrow
+   * (`Interface\Minimap\MinimapArrow.blp`, measured: BLP2, colorEncoding 2 = DXT, alphaDepth 8,
+   * 32x32) has a full chain down to 1x1, so it threw on the 2x2 level and the arrow never appeared.
+   *
+   * The fast path is UNCHANGED for an aligned level, which matters: this is the terrain decode path
+   * for any CPU consumer, and the unrolled block writes below are why it is fast. Only a ragged edge
+   * takes the clamped write.
+   */
+  const bw = Math.ceil(width / DXT_BLOCK_WIDTH);
+  const bh = Math.ceil(height / DXT_BLOCK_HEIGHT);
   const bc = bw * bh;
+  const aligned = width % DXT_BLOCK_WIDTH === 0 && height % DXT_BLOCK_HEIGHT === 0;
 
   if (input.byteLength !== bc * blockSize) {
     throw new Error(
@@ -230,6 +243,27 @@ const dxtToAbgr8888 = (
   for (let by = 0, py = 0; by < bh; by++, py += DXT_BLOCK_HEIGHT) {
     for (let bx = 0, px = 0; bx < bw; bx++, px += DXT_BLOCK_WIDTH) {
       decompressBlock(input, blockOfs);
+
+      if (!aligned) {
+        // The clamped write, for a level whose last block hangs off the edge. Same decoded block,
+        // only the pixels inside `width`/`height` are stored -- the rest of the 4x4 is padding the
+        // encoder had to emit and the image does not contain.
+        for (let row = 0; row < DXT_BLOCK_HEIGHT; row += 1) {
+          const y = py + row;
+          if (y >= height) {
+            break;
+          }
+          for (let col = 0; col < DXT_BLOCK_WIDTH; col += 1) {
+            const x = px + col;
+            if (x >= width) {
+              break;
+            }
+            output32[y * width + x] = DECOMPRESSED_32[row * DXT_BLOCK_WIDTH + col];
+          }
+        }
+        blockOfs += blockSize;
+        continue;
+      }
 
       let pixelOfs = (py + 0) * width + px;
       output32[pixelOfs + 0] = DECOMPRESSED_32[0];
