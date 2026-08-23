@@ -62,6 +62,25 @@ import type Unit from '../classes/unit';
  * removed when it falls, both edges, never per frame.
  */
 export class GameObjectSparkle {
+/**
+   * HOW BIG THE GLOW IS DRAWN, and **this is OURS, not the client's.**
+   *
+   * The owner, once the placement was right: "партиклы выглядят лучше, но я бы сделал их больше, они
+   * едва заметны." He is describing the authored size, and the reference is explicit that the art
+   * decides its own look -- "cadence/size/color/blend all authored in the asset, the client sets none of
+   * them" (`creature_anim/spell_visual.rs:1235-1236`). So scaling it is a DEVIATION from the reference
+   * and from the game's own data, taken on the owner's judgement of what reads on screen, and it is
+   * labelled as such rather than dressed up as fidelity.
+   *
+   * Why it is defensible anyway: the art is authored for a lootable CORPSE -- a body several times the
+   * size of a vineyard bucket -- so at 1:1 it is proportionally much smaller relative to what it is
+   * marking here than where it was designed to be seen. The scale restores the RATIO, not the pixels.
+   *
+   * `window.worldSparkleScale(n)` retunes it live so the value can be chosen by looking rather than by
+   * another round of guessing, and it takes effect on the next sparkle to spawn.
+   */
+  private static scale = 2.5;
+
   /** The client's own hardcoded loot art. Lowercased for the case-sensitive host. See the header. */
   private static readonly MODEL = 'particles\\lootfx.m2';
 
@@ -78,7 +97,18 @@ export class GameObjectSparkle {
   /** `window.worldGameObjectSparkle()` reads this. */
   public stats = { live: 0, created: 0, removed: 0, noManager: 0, noModel: 0 };
 
-  constructor(private scene: THREE.Scene) {}
+  constructor(private scene: THREE.Scene) {
+    // Live retune -- see `scale`. Takes effect on the next sparkle, so walking away and back re-spawns
+    // them at the new size.
+    (window as unknown as Record<string, unknown>).worldSparkleScale = (value: number) => {
+      const wanted = Number(value);
+      if (!Number.isFinite(wanted) || wanted <= 0) {
+        return `worldSparkleScale: ignoring ${String(value)}; it stays ${GameObjectSparkle.scale}`;
+      }
+      GameObjectSparkle.scale = wanted;
+      return `sparkle scale ${wanted} -- walk away and back to respawn them`;
+    };
+  }
 
   /**
    * Reconcile the live sparkles against the world.
@@ -145,9 +175,17 @@ export class GameObjectSparkle {
         M2Blueprint.unload(model as never);
         continue;
       }
+      /**
+       * PLACE AND SCALE, THEN BAKE -- ONE bake, and after both writes.
+       *
+       * `M2` sets `matrixAutoUpdate = false` on itself and the scene has `matrixWorldAutoUpdate = false`,
+       * so a write that is not followed by `updateMatrix()` is INERT and a model added without it draws
+       * at the world ORIGIN. Both halves of that trap are recorded in `unit.ts#applyRenderScale`,
+       * `quest-markers.ts` and `level-up-effect.ts`; the ordering here is the reason there is one bake
+       * rather than one per write.
+       */
       model.position.copy(at);
-      // BOTH CALLS, and neither is optional -- see the header. Without them the sparkle draws at the
-      // world origin, which is the trap `level-up-effect.ts` and `unit.ts#applyRenderScale` record.
+      model.scale.setScalar(GameObjectSparkle.scale);
       if (typeof model.updateMatrix === 'function') {
         model.updateMatrix();
       }

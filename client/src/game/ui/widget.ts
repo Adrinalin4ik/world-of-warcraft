@@ -229,10 +229,54 @@ export function layoutRevision(): number {
   return geometryRevision;
 }
 
-/** Bumped from the few places that write a widget's geometry. See `geometryRevision`. */
-export function touchGeometry(): void {
-  geometryRevision += 1;
+/**
+ * Bumped from the few places that write a widget's geometry. See `geometryRevision`.
+ *
+ * **`tag` IS A DIAGNOSTIC AND IT EXISTS BECAUSE THIS COUNTER COSTS 36 ms A FRAME.** Not by itself -- the
+ * bump is one addition -- but by what it invalidates: `rects.ts#layoutRectOf` re-runs `resolveAll()`, a
+ * FULL layout resolution of the whole 4211-frame tree, whenever the revision has moved since its last
+ * answer. The scroll census proved the cache never holds: `skippedByRevision: 0` over 1535 passes, so
+ * every frame paid for a complete resolve. And the pass that triggered it was doing nothing --
+ * `onScreen: 1`, `nodes: 0`, `fired: 0` -- which is why four rounds of looking at the pass itself found
+ * nothing.
+ *
+ * So the question is which writer moves it every frame, and `window.uiGeometryCensus()` answers it by
+ * name. Cost: one `Map` increment per geometry write, on a path that already invalidates a
+ * whole-tree resolve.
+ */
+/** Same bump, for the writers inside this file. See `touchGeometry`.
+ *
+ * A separate name only because these are `Widget` methods rather than Lua entry points -- the census
+ * wants both, since a per-frame `Show`/`Hide` invalidates the whole-tree resolve exactly as a
+ * `SetWidth` does.
+ */
+function bumpGeometry(tag: string): void {
+  touchGeometry(tag);
 }
+
+export function touchGeometry(tag = 'unknown'): void {
+  geometryRevision += 1;
+  geometryCensus.set(tag, (geometryCensus.get(tag) ?? 0) + 1);
+}
+
+/** tag -> how many times it has bumped the revision. See `touchGeometry`. */
+const geometryCensus = new Map<string, number>();
+
+(window as unknown as Record<string, unknown>).uiGeometryCensus = () => {
+  const rows = Array.from(geometryCensus.entries())
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((left, right) => right.count - left.count);
+  return {
+    revision: geometryRevision,
+    total: rows.reduce((sum, row) => sum + row.count, 0),
+    top: rows.slice(0, 14),
+  };
+};
+
+(window as unknown as Record<string, unknown>).uiGeometryCensusReset = () => {
+  geometryCensus.clear();
+  return 'cleared';
+};
 
 /**
  * A mouse button, as FrameXML names it -- the string an `OnClick` handler's `button` argument receives.
@@ -614,7 +658,7 @@ export class Widget {
     child.frameLevel = isRegion ? this.frameLevel : this.frameLevel + 1;
     this.children.push(child);
     treeStructure += 1;
-    geometryRevision += 1;
+    bumpGeometry('add');
     return child;
   }
 
@@ -624,7 +668,7 @@ export class Widget {
       this.children.splice(index, 1);
       child.parent = null;
       treeStructure += 1;
-      geometryRevision += 1;
+      bumpGeometry('remove');
     }
   }
 
@@ -635,12 +679,12 @@ export class Widget {
     this.anchorsAreDefault = false;
     // Every `SetPoint`/`ClearAllPoints`/`SetAllPoints` funnels through here, so this one bump covers
     // all three. See `geometryRevision`.
-    geometryRevision += 1;
+    bumpGeometry('setAnchors');
     return this;
   }
 
   setSize(width: number, height: number): Widget {
-    geometryRevision += 1;
+    bumpGeometry('setSize');
     this.width = width;
     this.height = height;
     return this;
@@ -659,7 +703,7 @@ export class Widget {
     // A newly shown frame has a rect it did not have a moment ago, and `ToggleDropDownMenu` measures
     // one in this same tick. See `geometryRevision`. Inside the transition guard, so an idempotent
     // per-tick `show()` on an already-visible widget costs nothing.
-    geometryRevision += 1;
+    bumpGeometry('show');
     this.restamp();
   }
 
@@ -670,7 +714,7 @@ export class Widget {
 
   hide(): void {
     if (this.shown) {
-      geometryRevision += 1;
+      bumpGeometry('hide');
     }
     this.shown = false;
   }

@@ -227,7 +227,7 @@ function writeText(widget: Widget, next: string): void {
   }
   widget.text = next;
   if (widget.width === 0 || widget.height === 0) {
-    touchGeometry();
+    touchGeometry('region');
   }
 }
 
@@ -507,7 +507,7 @@ const REGION: MethodTable = {
       };
       walk(widget);
     }
-    touchGeometry();
+    touchGeometry('SetParent');
     return [];
   },
   SetAlpha: (ctx, self, args) => {
@@ -519,12 +519,12 @@ const REGION: MethodTable = {
     widgetOf(ctx, self).width = Number(args[0] ?? 0);
     // `width`/`height` are plain fields, so unlike `setAnchors`/`show` there is no method to bump the
     // geometry revision from. See `widget.ts#geometryRevision`.
-    touchGeometry();
+    touchGeometry('SetWidth');
     return [];
   },
   SetHeight: (ctx, self, args) => {
     widgetOf(ctx, self).height = Number(args[0] ?? 0);
-    touchGeometry();
+    touchGeometry('SetHeight');
     return [];
   },
   /**
@@ -543,7 +543,7 @@ const REGION: MethodTable = {
     const widget = widgetOf(ctx, self);
     widget.width = Number(args[0] ?? 0);
     widget.height = Number(args[1] ?? 0);
-    touchGeometry();
+    touchGeometry('SetSize');
     return [];
   },
   // A FONT STRING with a 0 dimension derives it from its text, exactly as the layout does
@@ -1165,7 +1165,7 @@ const FONTSTRING: MethodTable = {
     // The FONT changes measured text as surely as the text does. Same derived-dimension guard as
     // `writeText`: a fully sized FontString cannot move its own rect by changing face.
     if (widget.width === 0 || widget.height === 0) {
-      touchGeometry();
+      touchGeometry('SetFont');
     }
     return [true];
   },
@@ -1182,7 +1182,7 @@ const FONTSTRING: MethodTable = {
     const widget = widgetOf(ctx, self);
     applyFontObject(ctx, widget, name);
     if (widget.width === 0 || widget.height === 0) {
-      touchGeometry();
+      touchGeometry('SetFontObject');
     }
     return [];
   },
@@ -1246,7 +1246,7 @@ const FONTSTRING: MethodTable = {
       return [];
     }
     ensureFont(widgetOf(ctx, self)).vertical = value as 'TOP' | 'MIDDLE' | 'BOTTOM';
-    touchGeometry();
+    touchGeometry('SetJustifyV');
     return [];
   },
   GetJustifyV: (ctx, self) => [widgetOf(ctx, self).font?.vertical ?? 'MIDDLE'],
