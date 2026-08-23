@@ -833,14 +833,24 @@ export class SpellHandler extends EventEmitter {
     // For ANY caster, not just ourselves -- a peer casting beside us holds the same pose, exactly as
     // `handleSpellGo` already arms a peer's release. Same plain `entities` lookup the swing uses.
     //
-    // `interrupt` true and `repetitions` -1: the pose is a LOOP (`ReadySpellOmni`/`ReadySpellDirected`),
-    // and `Unit#externalSeq`'s latch never releases a loop, which is what HOLDS it. The release armed at
-    // GO replaces the latch; `releaseAnimationLatch` below is the way out when the cast never gets there.
+    // `interrupt` true, and the fourth argument -- `holdClamped` -- is what makes this hold for a pose
+    // that does NOT loop.
+    //
+    // A LOOPING pose (`ReadySpellOmni`/`ReadySpellDirected`) holds by itself: `Unit#externalSeq`'s latch
+    // never releases a loop. **A CLAMP does not**, and the owner found the case -- opening a bucket casts
+    // `Opening`, whose precast pose is `Loot` (50), an authored clamp: "проигрывается анимация лута, долю
+    // секунды, потом он встает". The clip ended, its window elapsed, and the latch handed the body back.
+    // The reference holds the same clip with `RepeatAnimation::Never` and "a deliberate freeze -- no
+    // window either" (`creature_anim/driver/mode.rs:523-527`); `holdClamped` is that, and it changes
+    // nothing for a looping pose or for any combat one-shot.
+    //
+    // The ways out are unchanged: the release armed at GO replaces the latch, and
+    // `releaseAnimationLatch` below is the exit when the cast never gets there.
     const caster = this.game.world.entities.get(decoded.caster);
     if (caster) {
       const pose = precastAnimationFor(caster, decoded.spellId);
       if (pose !== null) {
-        caster.setAnimation(pose, true, -1);
+        caster.setAnimation(pose, true, -1, true);
         // RECORDED so a later failure can tell this pose from any other latch -- see `castPose`.
         this.castPose.set(decoded.caster, { spellId: decoded.spellId, animId: pose });
       }

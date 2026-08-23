@@ -257,7 +257,27 @@ function bumpGeometry(tag: string): void {
 export function touchGeometry(tag = 'unknown'): void {
   geometryRevision += 1;
   geometryCensus.set(tag, (geometryCensus.get(tag) ?? 0) + 1);
+  /**
+   * ONE STACK PER TAG, taken after the load -- the last thing needed to name the caller.
+   *
+   * The per-frame census answered "what" and refuses to answer "who": `setAnchors` 39.23 a frame, `add`
+   * 18.54, `SetWidth` 10.47, `SetHeight` 9.98. And `perFrame * steadyFrames` equals the session totals
+   * exactly, which is the sharp part -- **all 26512 `add` calls happened during RENDERING**, not during
+   * the document load, so roughly eighteen widgets are being created every single frame. `SetParent` is
+   * 0.01 a frame, so it is not re-parenting; it is creation.
+   *
+   * Reading the code has not found it: `syncStateTextures` and `syncInteractiveArt` write `shown`
+   * directly and never bump, which is what their own comments say they do on purpose. So one stack per
+   * tag, captured once, after 60 steady frames so nothing from the load is sampled. `new Error().stack`
+   * is expensive -- which is why it happens at most fourteen times in a session, never per call.
+   */
+  if (geometrySteadyFrames > 60 && !geometryStacks.has(tag)) {
+    geometryStacks.set(tag, new Error().stack ?? '(no stack)');
+  }
 }
+
+/** tag -> one captured stack, for `window.uiGeometryCensus()`. See `touchGeometry`. */
+const geometryStacks = new Map<string, string>();
 
 /** tag -> how many times it has bumped the revision. See `touchGeometry`. */
 const geometryCensus = new Map<string, number>();
@@ -303,6 +323,12 @@ export function markGeometryFrame(): void {
   return {
     revision: geometryRevision,
     steadyFrames: geometrySteadyFrames,
+    // WHO. One stack per tag, taken after the load -- see `touchGeometry`. Trimmed to the frames that
+    // matter: the first line is `touchGeometry` itself and the next few name the caller.
+    who: Object.fromEntries(Array.from(geometryStacks.entries()).map(([tag, stack]) => [
+      tag,
+      stack.split(String.fromCharCode(10)).slice(1, 7).map((line) => line.trim()).join(' | '),
+    ])),
     // THE ANSWER IS HERE, not in `top`: anything with a nonzero `perFrame` is invalidating the
     // whole-tree layout resolve on that many frames out of every one.
     perFrame,
@@ -315,6 +341,7 @@ export function markGeometryFrame(): void {
   geometryPerFrame.clear();
   geometryLastFrame = new Map();
   geometrySteadyFrames = 0;
+  geometryStacks.clear();
   return 'cleared';
 };
 

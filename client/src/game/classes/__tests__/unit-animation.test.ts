@@ -656,6 +656,36 @@ describe('Unit#updateLocomotion external-animation ownership', () => {
    * Kills: holding every one-shot unconditionally (the unit never returns to Run), and dropping the
    * hold entirely (the swing is stomped at 0.4 s, mid-clip, and no one-shot is ever visible).
    */
+/**
+   * A CLAMP ARMED AS A HOLD FREEZES INSTEAD OF RELEASING -- the kneel that must last the whole cast.
+   *
+   * The owner, opening a quest container: "проигрывается анимация лута, долю секунды, потом он встает".
+   * `Opening`'s precast pose is `Loot` (50), an authored clamp rather than a loop, so the latch's window
+   * elapsed and handed the body back. The reference holds the same clip with `RepeatAnimation::Never`
+   * plus "a deliberate freeze -- no window either" (`creature_anim/driver/mode.rs:523-527`).
+   *
+   * The test beside this one is the reason `holdClamped` is an explicit argument: keying the freeze off
+   * `repetitions < 0` made EVERY one-shot hold, because that parameter defaults to -1. So this asserts
+   * the pair -- held with the flag, released without it -- since the whole risk here is a gate that is
+   * too broad.
+   */
+  it('freezes a clamped pose past its window when the caller asks, and only then', () => {
+    const held = locoUnit([...gaits(), animation({ id: 50, flags: ONE_SHOT, length: 500 })]);
+    held.setAnimation(50, true, -1, true);
+    held.move.horizVel.set(7, 0, 0);
+    // Well past the 500 ms clip: a plain one-shot would have gone back to the gait by now.
+    worldClock.advance(2.0);
+    held.updateLocomotion(0.4);
+    expect(held.model.instanceAnim.current.id).toBe(50);
+
+    const free = locoUnit([...gaits(), animation({ id: 50, flags: ONE_SHOT, length: 500 })]);
+    free.setAnimation(50, true, -1);
+    free.move.horizVel.set(7, 0, 0);
+    worldClock.advance(2.0);
+    free.updateLocomotion(0.4);
+    expect(free.model.instanceAnim.current.id).toBe(5);
+  });
+
   it('holds a non-Death one-shot for its window, then releases to the gait', () => {
     const u = locoUnit([...gaits(), animation({ id: 16, flags: ONE_SHOT, length: 1000 })]);
 

@@ -85,7 +85,7 @@ export class GameObjectSparkle {
    * `window.worldSparkleScale(n)` retunes it live and takes effect on the NEXT frame, not the next spawn
    * -- the manager reads the property every pack.
    */
-  private static particleSize = 2.5;
+  private static particleSize = 3;
 
   /** The client's own hardcoded loot art. Lowercased for the case-sensitive host. See the header. */
   private static readonly MODEL = 'particles\\lootfx.m2';

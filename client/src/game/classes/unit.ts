@@ -892,6 +892,14 @@ class Unit extends Entity {
    * id already on the body costs nothing at all, which matters because a zone of npcs now means an
    * `.m2` clone, a DBC chain and a texture fetch per repeat rather than just the first two.
    */
+  /**
+   * Is `externalSeq` a CLAMP being held deliberately? See `startAnimation`.
+   *
+   * Separate from `externalSeq.loops` because the two hold for different reasons: a loop holds because
+   * it never ends, a clamp holds because we decline to release it when it does.
+   */
+  private externalHeld = false;
+
   private displayToken = 0;
   private appliedDisplayId = 0;
 
@@ -1476,7 +1484,17 @@ class Unit extends Entity {
   setAnimation(
     id: number,
     interrupt: boolean = false,
-    repetitions: number = -1
+    repetitions: number = -1,
+    /**
+     * HOLD a non-looping clip after its window instead of giving the body back. See `startAnimation`.
+     *
+     * An EXPLICIT flag, and the first version of this used `repetitions < 0` instead -- which two tests
+     * killed immediately, correctly. `repetitions` DEFAULTS to -1 and the parameter's own comment two
+     * paragraphs up says it "is not honoured yet", so every plain `setAnimation(id)` in the client looked
+     * like a request to hold: a swing at 1.4 s stopped releasing to the gait. The discriminator has to be
+     * something only the caller who wants a freeze can say.
+     */
+    holdClamped: boolean = false,
   ) {
     // BEFORE the model check, so a request that beats the model home is not dropped. Spawn and
     // animation packets routinely arrive ahead of an async M2 load, and the model setter replays
@@ -1533,7 +1551,7 @@ class Unit extends Entity {
       }
     }
 
-    this.startAnimation(id, repetitions);
+    this.startAnimation(id, repetitions, holdClamped);
   }
 
   /**
@@ -1577,6 +1595,7 @@ class Unit extends Entity {
       return;
     }
     this.externalSeq = null;
+    this.externalHeld = false;
     // Nothing is armed in its place -- the next `updateLocomotion` frame picks a gait, which for a
     // unit standing still is Stand. Arming Stand here would be the same thing one frame earlier and
     // would take ownership of a loop, which is the permanent freeze `externalSeq` documents.
@@ -1704,6 +1723,7 @@ class Unit extends Entity {
       return false;
     }
     this.externalSeq = null;
+    this.externalHeld = false;
     this.locoCandidates = null;
     return true;
   }
@@ -1789,7 +1809,7 @@ class Unit extends Entity {
   }
 
   /** Arm unconditionally. `setAnimation` is the guarded entry point; this is the raw one. */
-  startAnimation(id: number, repetitions: number) {
+  startAnimation(id: number, repetitions: number, holdClamped: boolean = false) {
     if (!this.model) return;
 
     const inst = this.model.instanceAnim;
@@ -1819,6 +1839,32 @@ class Unit extends Entity {
     // is exactly the "did we get what we asked for" test, and it needs no caller knowledge --
     // locomotion's target is always a gait id, so it clears the latch rather than setting it.
     this.externalSeq = (!isGaitId(id) && seq.id === id) ? seq : null;
+    /**
+     * A CLAMP ARMED AS A HOLD MUST FREEZE, and this flag is the whole of it.
+     *
+     * The owner, on opening a bucket: "проигрывается анимация лута, долю секунды, потом он встает и
+     * проигрывается анимация успешного каста. Возможно нужно анимацию лута сделать так чтобы не долю
+     * секунду длилась а на весь период каста." Exactly right, and the cause is a property of the clip.
+     *
+     * `spell-anim.ts`' header explains how a precast pose is held: "`ReadySpellOmni` is a LOOPING
+     * sequence, and `Unit#externalSeq`'s latch never releases a loop -- so arming it hands the body to
+     * the pose". That is true and it is why Healing Wave holds. **But `Loot` (50) does not loop.** The
+     * reference is explicit: "Loot 50 is likewise authored clamp -- one 0.5 s kneel-down that must FREEZE
+     * in the rummage pose; as Forever it would wrap back to standing and re-kneel every half second"
+     * (`creature_anim/driver/mode.rs:523-525`), and it holds it with `RepeatAnimation::Never` plus "a
+     * deliberate freeze -- no window either".
+     *
+     * So a non-looping clip armed with `holdClamped` is latched as HELD, and `updateLocomotion`'s window
+     * release skips it exactly as it skips a loop. **Only a caller that asks for it**, which today is the
+     * precast pose alone -- an earlier version keyed this off `repetitions < 0` and two tests killed it
+     * within the minute, because that parameter defaults to -1 and is documented as not honoured, so
+     * every one-shot in the client became a freeze and a swing never released to the gait.
+     *
+     * The ways out are the ones that already existed and both still work: `SMSG_SPELL_GO` arms the
+     * release, which replaces the latch, and `releaseAnimationLatch` is the explicit exit for a cast
+     * that never completes.
+     */
+    this.externalHeld = this.externalSeq !== null && !seq.loops && holdClamped;
 
     this.emit("animation:play", id, repetitions);
   }
@@ -1860,6 +1906,7 @@ class Unit extends Entity {
       return false;
     }
     this.externalSeq = null;
+    this.externalHeld = false;
     this.locoCandidates = null;
     return true;
   }
@@ -2475,7 +2522,11 @@ class Unit extends Entity {
       if (inst.current !== owner) {
         // Something re-armed underneath the latch. Whatever is playing now is not ours to hold.
         this.externalSeq = null;
-      } else if (owner.loops || owner.id === DEATH) {
+        this.externalHeld = false;
+      } else if (owner.loops || owner.id === DEATH || this.externalHeld) {
+        // `externalHeld` is a CLAMP that was armed as a hold -- see `startAnimation`. It has a window
+        // and must not be released by it, which is the difference between a kneel that lasts the cast
+        // and one that lasts half a second.
         return;
       } else if (!windowElapsedOrInstant(inst, owner, worldClock.ms)) {
         // STILL PLAYING -- but a live cast or combat clip does not get to stop the LEGS. The client
@@ -2501,6 +2552,7 @@ class Unit extends Entity {
         }
       } else {
         this.externalSeq = null;
+        this.externalHeld = false;
       }
     }
 
