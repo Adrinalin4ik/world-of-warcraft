@@ -66,6 +66,9 @@ export interface LootRow {
   taken: boolean;
 }
 
+/** `AnimationData.dbc` row 50, `Loot` -- the kneel. See `LootHandler#kneel`. */
+const LOOT_ANIM = 50;
+
 /** `loot_type` (`loot.rs:58-63`). 3 is what `IsFishingLoot` answers to. */
 export const LOOT_TYPE_FISHING = 3;
 
@@ -273,6 +276,7 @@ export class LootHandler extends EventEmitter {
   /** `CMSG_LOOT` (**0x15D**): one FULL 8-byte guid. */
   loot(guid: string): void {
     this.send(GameOpcode.CMSG_LOOT, guid);
+    this.kneel(true);
   }
 
   /**
@@ -314,7 +318,46 @@ export class LootHandler extends EventEmitter {
     this.gold = 0;
     this.hadMoney = false;
     this.rows = [];
+    this.kneel(false);
     this.emit('lootClosed');
+  }
+
+/**
+   * THE LOOT KNEEL -- the owner's "анимация на лут мобов".
+   *
+   * `AnimationData.dbc` row **50 `Loot`**, and the trigger is the reference's, transcribed with its own
+   * split (`creature_anim/select.rs:60-80`):
+   *
+   *  - **Self** -- which is this method's whole case -- is a client-local latch "armed at the `CMSG_LOOT`
+   *    send for a corpse", which is why it hangs off the send above rather than off any packet coming
+   *    back. Nothing on the wire tells us we are looting before the window opens.
+   *  - **Remote** is `UNIT_FLAG_LOOTING` (0x400) set with `UNIT_FLAG_LOOT_SUPPRESS` (0x1000_0000) clear.
+   *    NOT built: another player kneeling at a corpse needs a per-unit field watcher, and this is the
+   *    half the owner asked for. Declared, not hidden.
+   *
+   * **The clip is an authored CLAMP** -- "kneel down, freeze in the rummage pose; the rise back is the
+   * ordinary cross-fade to Stand when the trigger drops" -- so it is armed with `holdClamped`, the flag
+   * `Unit#startAnimation` grew for the chest's `SpellKneelLoop`. Without it the latch would release at
+   * the end of the 0.5 s clip and the character would stand up over an open loot window, which is the
+   * exact symptom that fix was made for.
+   *
+   * The release is guarded by the animation id, which is `releaseAnimationLatch`'s whole safety: a
+   * player who died with a loot window open must not be stood back up, and a cast started over the
+   * window owns the body legitimately.
+   *
+   * Weapons stow for free -- row 50 carries the `WeaponFlags & 4` force-stow the per-animation sheath
+   * reconcile already applies (`select.rs:78-80`).
+   */
+  private kneel(on: boolean): void {
+    const player = this.game.world?.player ?? null;
+    if (player === null) {
+      return;
+    }
+    if (on) {
+      player.setAnimation(LOOT_ANIM, true, -1, true);
+    } else {
+      player.releaseAnimationLatch(LOOT_ANIM);
+    }
   }
 
   private send(opcode: number, guid: string): void {

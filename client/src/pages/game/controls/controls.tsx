@@ -155,6 +155,7 @@ class Controls extends React.Component<IProp> {
     this.element.addEventListener('mousemove', this.onMouseMove);
     this.element.addEventListener('wheel', this.onWheel, { passive: false });
     this.element.addEventListener('contextmenu', this.onContextMenu);
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
     document.addEventListener('keydown', this.onKeyDown);
     document.addEventListener('keyup', this.onKeyUp);
   }
@@ -165,6 +166,7 @@ class Controls extends React.Component<IProp> {
     this.element.removeEventListener('mousemove', this.onMouseMove);
     this.element.removeEventListener('wheel', this.onWheel);
     this.element.removeEventListener('contextmenu', this.onContextMenu);
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     document.removeEventListener('keydown', this.onKeyDown);
     document.removeEventListener('keyup', this.onKeyUp);
   }
@@ -208,10 +210,46 @@ class Controls extends React.Component<IProp> {
   private onMouseUp(event: MouseEvent) {
     if (event.button === 0) this.buttons.left = false;
     if (event.button === 2) this.buttons.right = false;
-    if (!this.buttons.left && !this.buttons.right && document.pointerLockElement) {
+    /**
+     * NO `pointerLockElement` GUARD, and its absence is the fix for the oldest open report on this
+     * project: "when I do right click, cursor disappears for some reason and clicking left button makes
+     * it appear again."
+     *
+     * The guard read as a cheap "are we even locked" test and was in fact the bug, because of the thing
+     * the frame loop below already documents at length: **the lock is granted ASYNCHRONOUSLY, so
+     * `pointerLockElement` stays null for the whole handshake.** The sequence for any quick right click:
+     *
+     *   1. press -> `buttons.right`
+     *   2. next frame -> `requestPointerLock()` goes out
+     *   3. release, still mid-handshake -> `pointerLockElement` is null, so the exit was SKIPPED
+     *   4. the lock lands, with no button held and nothing left to release it -- the browser hides the
+     *      cursor and keeps it hidden
+     *   5. a left click's release finally finds `pointerLockElement` set and exits -- "clicking left
+     *      button makes it appear again", exactly as reported
+     *
+     * Calling `exitPointerLock()` when nothing is locked is a documented no-op, so dropping the guard
+     * costs nothing and closes steps 3-5. `onPointerLockChange` closes the remaining ordering, where the
+     * grant arrives after this handler has already run.
+     */
+    if (!this.buttons.left && !this.buttons.right) {
       document.exitPointerLock();
     }
   }
+
+  /**
+   * A LOCK THAT ARRIVES AFTER THE DRAG ENDED MUST NOT STAY.
+   *
+   * The belt to `onMouseUp`'s braces, and it is what makes the fix ordering-proof rather than merely
+   * likely: whatever sequence the browser chooses, a pointer lock held while no mouse button is down is
+   * a hidden cursor with nothing holding it. This is the only place that can catch the grant itself, so
+   * it is checked here rather than trusted to the release.
+   */
+  private readonly onPointerLockChange = () => {
+    if (document.pointerLockElement === this.element
+      && !this.buttons.left && !this.buttons.right) {
+      document.exitPointerLock();
+    }
+  };
 
   private onMouseMove(event: MouseEvent) {
     // BEFORE the early return. The pick needs where the cursor IS, and a click is by definition a
