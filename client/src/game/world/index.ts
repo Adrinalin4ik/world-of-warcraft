@@ -26,6 +26,7 @@ import { HoverHighlight } from "./hover-highlight";
 import { SelectionRing } from "./selection-ring";
 import { LevelUpEffect } from "./level-up-effect";
 import GameObjectSparkle from './game-object-sparkle';
+import SessionGuard from './session-guard';
 import { QuestMarkers } from "./quest-markers";
 import { NameplateConfig, Nameplates } from "./nameplates";
 import { FloaterSpawn, FloatingCombatText, MAX_FLOATERS, WordSource } from "./floating-text";
@@ -69,6 +70,12 @@ export default class World extends EventEmitter {
 
   /** The glow on a quest objective object. See `game-object-sparkle.ts`. */
   public gameObjectSparkle: GameObjectSparkle;
+
+  /** NPC windows and the loot end when the player walks away. See `session-guard.ts`. */
+  public sessionGuard = new SessionGuard();
+
+  /** See the wiring block in `animate`. */
+  private sessionGuardWired = false;
 
   /**
    * THE `!` AND `?` OVER A QUESTGIVER'S HEAD -- models on a bone, not sprites. See
@@ -1082,6 +1089,47 @@ export default class World extends EventEmitter {
     // THE QUEST-OBJECT GLOW. Reconciled here rather than on a field event because the falling edge
     // matters as much as the rising one -- an object that goes out of range emits nothing to listen to,
     // it simply stops being in `entities`. See the file's cost note: one field test per entity.
+    /**
+     * WIRED ON THE FIRST TICK, not in the constructor -- `this.game` is not assigned yet there, which a
+     * red suite said immediately (`Cannot read properties of undefined (reading 'objectHandler')`). The
+     * same once-per-session shape `questMarkers`' material hooks use, and for the same reason.
+     */
+    if (!this.sessionGuardWired) {
+      this.sessionGuardWired = true;
+      const handlers = this.game.objectHandler;
+      this.sessionGuard.register({
+        label: 'gossip',
+        npc: () => handlers.gossipHandler.source,
+        close: () => handlers.gossipHandler.close(),
+      });
+      this.sessionGuard.register({
+        label: 'merchant',
+        npc: () => handlers.merchantHandler.source,
+        close: () => handlers.merchantHandler.close(),
+      });
+      this.sessionGuard.register({
+        label: 'trainer',
+        npc: () => handlers.trainerHandler.source,
+        close: () => handlers.trainerHandler.close(),
+      });
+      this.sessionGuard.register({
+        label: 'questgiver',
+        npc: () => handlers.questHandler.source,
+        close: () => handlers.questHandler.closePanels(),
+      });
+      this.sessionGuard.registerLoot({
+        isOpen: () => handlers.lootHandler.rows.length > 0 || handlers.lootHandler.gold > 0,
+        release: () => handlers.lootHandler.release(),
+      });
+      (window as unknown as Record<string, unknown>).worldSessionGuard =
+        () => this.sessionGuard.stats;
+    }
+    // The session guard: one squared-distance compare per OPEN window, nothing at all with none open.
+    this.sessionGuard.update(
+      this.entities,
+      this.player ?? null,
+      this.player ? this.player.move.horizVel.lengthSq() : 0,
+    );
     this.gameObjectSparkle.update(
       this.entities,
       (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
