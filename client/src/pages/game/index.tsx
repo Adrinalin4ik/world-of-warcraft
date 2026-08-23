@@ -750,7 +750,9 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
      * nothing.
      */
     if (hit?.gameObject) {
-      this.game.objectHandler.gameObjectHandler.use(hit.guid);
+      // `open`, not `use`: a LOCKED object is opened by casting at it and ignores `CMSG_GAMEOBJ_USE`
+      // entirely -- see `network/game/object/game-object.ts#open`.
+      this.game.objectHandler.gameObjectHandler.open(hit.guid, hit.gameObject.entry);
       return;
     }
     world.setTarget(hit);
@@ -794,8 +796,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
      * object is not a target and reads as a dead unit in the frame if it becomes one.
      */
     if (hit.gameObject) {
-      this.announceObjectUse(hit, world);
-      this.game.objectHandler.gameObjectHandler.use(hit.guid);
+      const how = this.game.objectHandler.gameObjectHandler.open(hit.guid, hit.gameObject.entry);
+      this.announceObjectUse(hit, world, how);
       return;
     }
     world.setTarget(hit);
@@ -897,7 +899,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    *  - `state` and `dynamic` are the descriptor's. State 0 is ACTIVE/used and 1 is READY, a sense worth
    *    printing because it is inverted from the intuition.
    */
-  private announceObjectUse(hit: Unit, world: World) {
+  private announceObjectUse(hit: Unit, world: World, how: 'cast' | 'use') {
     try {
       const go = hit.gameObject;
       const template = go === null
@@ -906,10 +908,11 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       const yd = Math.sqrt(hit.position.distanceToSquared(world.player.position));
       // eslint-disable-next-line no-console
       console.log(
-        `gameobject: USE ${hit.guid} | entry=${go?.entry ?? 'nil'}`
+        `gameobject: ${how.toUpperCase()} ${hit.guid} | entry=${go?.entry ?? 'nil'}`
         + ` | type=${template?.type ?? 'no-template'} | name=${template?.name ?? 'nil'}`
         + ` | yd=${yd.toFixed(2)} | state=${(go?.bytes1 ?? 0) & 0xff}`
-        + ` | dynamic=0x${((go?.dynamic ?? 0) & 0xffff).toString(16)}`,
+        + ` | dynamic=0x${((go?.dynamic ?? 0) & 0xffff).toString(16)}`
+        + ` | lockId=${template === null ? 'no-template' : template.lockId ?? 'residual'}`,
       );
     } catch (error) {
       // A diagnostic may never cost the click it is reporting on.

@@ -8,26 +8,25 @@
  *     SMSG_GAMEOBJECT_QUERY_RESPONSE  0x05F   the template -- name, and a long tail
  *     CMSG_GAMEOBJ_USE                0x0B1   u64 guid
  *
- * ## THE RESPONSE IS READ AS A PREFIX, ON PURPOSE
+ * ## THE RESPONSE'S TAIL IS READ, AND A RESIDUAL IS ITS ONLY ORACLE
  *
- * 3.3.5a's response carries the entry, a type, a display id, **four** name strings, an icon name, a
- * cast-bar caption, one more string, then a long block of template data words, a float size and a
- * quest-item array. This parse stops after the first name and reads none of the tail.
+ * This parse used to stop after the first name, on the ground that a tail taken from a recalled server
+ * implementation is worth nothing without a residual against real traffic. That ground still holds --
+ * so the residual is what `handleQueryResponse` does. The whole body is walked and `consumed` is
+ * compared against `bodySize`; `lockId` is trusted only when they agree, and a mismatch leaves it null
+ * and prints the remainder. Null falls back to the use path, which is exactly the behaviour before the
+ * tail was read, so a wrong layout costs nothing new.
  *
- * That is a decision, not laziness, and `CLAUDE.md` is the reason. Nothing the client ships states this
- * body, so any tail here would come from a server implementation recalled rather than read -- and the
- * only thing that settles such a layout is a residual against real traffic, which cannot be taken from
- * here. A prefix of fixed-width words followed by C-strings is safe to walk because each string
- * self-terminates; the words AFTER them are where a wrong count silently lands a field in the wrong
- * place. So this reads exactly what it needs, records how much of the body it consumed, and **states
- * that the remainder is deliberate** rather than reporting a clean residual it has not earned.
+ * Reading it became necessary rather than merely nice: the lock is what decides how an object opens.
  *
- * What that costs: nothing the owner asked for. The name is what a tooltip needs. `castBarCaption`
- * would be the one nice-to-have -- it is what the real client shows above the opening cast instead of
- * the spell name -- and it sits after three more strings, so it is reachable the day someone captures
- * a body and can prove the string order. Named, not silently skipped.
+ * ## AND `CMSG_GAMEOBJ_USE` IS ONLY HALF THE ROUTING -- the lock decides
  *
- * ## USING ONE IS EIGHT BYTES AND HAS NO REPLY OF ITS OWN
+ * This header used to say the use packet was "the last piece rather than the first of several". It was
+ * not, and the owner's bucket is the case that proves it: a correct 8-byte use went out and the server
+ * answered **nothing**, over three seconds of watched inbound traffic. The reference has the law --
+ * "a locked object (chest / mining vein / herb node / locked door) casts an `OPEN_LOCK` spell at it, an
+ * unlocked one sends `CMSG_GAMEOBJ_USE`" (`go_templates.rs:3-5`) -- so `open` below routes on the
+ * template's `lockId`, and the tail of the query response is read to get it.
  *
  * `CMSG_GAMEOBJ_USE` carries the guid and nothing else. The server answers with whatever the object
  * does -- for a bush, `SMSG_LOOT_RESPONSE`, which this client already decodes and already draws
@@ -53,6 +52,18 @@ export interface GameObjectTemplate {
   type: number;
   displayId: number;
   name: string;
+  /**
+   * `Lock.dbc` id, or 0 for no lock -- **the field that decides how the object is opened**.
+   *
+   * The reference states the law and this is the whole reason the tail is now read:
+   * "a locked object (chest / mining vein / herb node / locked door) casts an `OPEN_LOCK` spell at it,
+   * an unlocked one sends `CMSG_GAMEOBJ_USE`" (`benilla-app/src/go_templates.rs:3-5`).
+   *
+   * **Null when the body did not close**, which is not the same as 0. See `handleQueryResponse`: a
+   * residual means the tail was misread, and a misread 0 would route a locked chest down the use path
+   * that is already known not to work. Null keeps today's behaviour and says so.
+   */
+  lockId: number | null;
 }
 
 export class GameObjectHandler extends EventEmitter {
@@ -134,6 +145,28 @@ export class GameObjectHandler extends EventEmitter {
     this.game.send(gp);
   }
 
+/**
+   * `SPELL_OPENING` -- spell **6478**, "Opening", the `SPELL_EFFECT_OPEN_LOCK` every character knows.
+   *
+   * NOT chosen by me. The reference names it and says why it is the one that lands on a ground
+   * container: "every character knows both 6478 'Opening' and 22810 'Opening - No Text' -- both
+   * `SPELL_EFFECT_OPEN_LOCK` on `LockType 13` (Open Kneeling), both trivially sufficient against the
+   * `Skill == 0` slots **the ground containers carry**" (`target/lock.rs:145-149`). It also records
+   * which of the two wins and why: the client walks its known-spell array in ascending id and returns on
+   * the first sufficient match, so 6478 is the one whose name reaches the cast bar -- and iterating in
+   * any other order put Blizzard's placeholder name there instead, which it logs as a real bug (B247).
+   *
+   * **WHAT IS NOT BUILT, said plainly.** The reference's full resolver walks the eight `Lock.dbc` slots,
+   * dispatches SKILL/KEY/NONE, scans the player's known spells for a matching `OPEN_LOCK` effect and
+   * compares its value against the slot's requirement (`target/lock.rs:122-175`). That needs `Lock.dbc`,
+   * `LockType.dbc`, `SkillLine.dbc` and the spell catalogue's effect data, and it is what makes
+   * herbalism, mining, lockpicking and keyed doors work. None of it is here. This client sends 6478 for
+   * ANY locked object, which is correct for the quest containers the owner is opening and wrong for a
+   * herb node -- and a wrong opener is refused by the server, not silently mis-applied. Declared, and
+   * the file to grow is this one.
+   */
+  private static readonly SPELL_OPENING = 6478;
+
   /** The template's name, or **null** when it has not arrived. Never a placeholder. */
   nameOf(entry: number): string | null {
     return this.templates.get(entry)?.name ?? null;
@@ -146,6 +179,24 @@ export class GameObjectHandler extends EventEmitter {
    * no in-flight set to release -- using the same object twice is a thing the player may legitimately
    * do, so this is deliberately not deduped.
    */
+/**
+   * Open an object the way its LOCK says to -- the routing the reference calls `0x5f33e0`.
+   *
+   * `lockId` non-zero means cast; zero means use; **null means the tail did not decode**, and that falls
+   * back to `use` rather than casting -- the same behaviour this client had before the tail was read, so
+   * a residual costs no more than it did. Returns what it sent so the caller can say so.
+   */
+  open(guid: string, entry: number): 'cast' | 'use' {
+    const lockId = this.templates.get(entry)?.lockId ?? null;
+    if (lockId !== null && lockId !== 0) {
+      this.game.objectHandler?.spellHandler?.castAtObject(GameObjectHandler.SPELL_OPENING, guid);
+      this.watchUntil = performance.now() + 3000;
+      return 'cast';
+    }
+    this.use(guid);
+    return 'use';
+  }
+
   use(guid: string): void {
     const gp = new GamePacket(
       GameOpcode.CMSG_GAMEOBJ_USE, GamePacket.HEADER_SIZE_OUTGOING + GUID_BYTES,
@@ -156,6 +207,26 @@ export class GameObjectHandler extends EventEmitter {
     this.watchUntil = performance.now() + 3000;
   }
 
+  /**
+   * `SMSG_GAMEOBJECT_QUERY_RESPONSE` -- and the tail is read now, with a RESIDUAL as its oracle.
+   *
+   * This used to stop after the first name, on the stated ground that the tail was a server
+   * implementation recalled rather than read, and that only a residual against real traffic settles such
+   * a layout. That reasoning still holds -- so the residual is what this does. The whole body is walked
+   * and `consumed` is compared against `bodySize`: **`lockId` is only trusted when the two agree**, and
+   * a mismatch leaves it null and says so in the console. A misread lock would be worse than none,
+   * because 0 means "unlocked" and routes a locked chest down the path already known to be ignored.
+   *
+   * The layout walked here, and why each step is safe: three words, then **seven C-strings** (four name
+   * slots of which the server fills one, an icon name, a cast-bar caption, and one more), then
+   * `data[24]`, a float size, and six quest-item ids. Strings self-terminate so walking them cannot
+   * desync; the words after them can, which is exactly what the residual catches.
+   *
+   * `lockId` is `data[0]` for every type this client will meet. That is not a guess about one type: the
+   * server's own `GetLockId()` reads slot 0 for door, button, questgiver, chest, trap, goober, area
+   * damage, camera, flagstand and flagdrop -- every type but the fishing hole, which uses slot 4 and
+   * which this client has no fishing for. Named rather than silently assumed.
+   */
   private handleQueryResponse(gp: GamePacket): void {
     try {
       const entry = gp.readUnsignedInt() >>> 0;
@@ -168,11 +239,42 @@ export class GameObjectHandler extends EventEmitter {
       // FOUR name slots and the first is the one the client uses -- the same shape
       // `SMSG_CREATURE_QUERY_RESPONSE` has, where the server writes four and fills one.
       const name = gp.readCStr();
-      const template: GameObjectTemplate = { entry, type, displayId, name };
+      let lockId: number | null = null;
+      try {
+        for (let i = 1; i < 4; i += 1) {
+          gp.readCStr();
+        }
+        gp.readCStr(); // iconName
+        gp.readCStr(); // castBarCaption
+        gp.readCStr(); // unk1
+        const data: number[] = [];
+        for (let i = 0; i < 24; i += 1) {
+          data.push(gp.readUnsignedInt() >>> 0);
+        }
+        gp.readFloat(); // size
+        for (let i = 0; i < 6; i += 1) {
+          gp.readUnsignedInt(); // questItems
+        }
+        const consumed = gp.index - gp.headerSize;
+        if (consumed === gp.bodySize) {
+          lockId = data[0] ?? 0;
+        } else {
+          console.warn(
+            `gameObject: template ${entry} tail residual ${gp.bodySize - consumed} B`
+            + ` (consumed ${consumed} of ${gp.bodySize}). lockId is NOT trusted -- see game-object.ts.`,
+          );
+        }
+      } catch (tailError) {
+        // Over-read: the tail is longer than the body, so the layout is wrong. The NAME above is still
+        // good -- it was read before any of this -- so the tooltip keeps working and only the lock is
+        // unknown. That split is the reason the tail is walked in its own `try`.
+        console.warn(`gameObject: template ${entry} tail over-read; lockId unknown`, tailError);
+      }
+      const template: GameObjectTemplate = { entry, type, displayId, name, lockId };
       if (name === '') {
         console.warn(
           `gameObject: template ${entry} answered with an empty name (body ${gp.bodySize}).`
-          + ' The prefix parse may be misaligned -- see game-object.ts on why the tail is not read.',
+          + ' The prefix parse may be misaligned -- see game-object.ts.',
         );
       }
       this.templates.set(entry, template);
@@ -184,6 +286,7 @@ export class GameObjectHandler extends EventEmitter {
       console.warn('gameObject: SMSG_GAMEOBJECT_QUERY_RESPONSE did not decode', error);
     }
   }
+
 }
 
 export default GameObjectHandler;

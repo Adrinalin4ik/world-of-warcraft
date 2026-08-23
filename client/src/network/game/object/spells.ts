@@ -1057,6 +1057,55 @@ export class SpellHandler extends EventEmitter {
    * NOTE the 1.12 delta: the reference's `CMSG_CAST_SPELL` has no `castCount` and no `castFlags` at all.
    * Sending its form here shifts the target mask by two bytes and the server reads a nonsense mask.
    */
+/**
+   * `CMSG_CAST_SPELL` at a GAMEOBJECT -- the OPEN_LOCK route, which is how a locked chest is opened.
+   *
+   * **A locked object is not opened with `CMSG_GAMEOBJ_USE` at all**, and that is the reference's law
+   * rather than an inference: "a locked object (chest / mining vein / herb node / locked door) casts an
+   * `OPEN_LOCK` spell at it, an unlocked one sends `CMSG_GAMEOBJ_USE`"
+   * (`benilla-app/src/go_templates.rs:3-5`). The owner's bucket is a chest with a lock, which is why his
+   * `CMSG_GAMEOBJ_USE` went out correctly and the server answered nothing at all -- an inbound watch
+   * over the three seconds after the click caught only unrelated traffic.
+   *
+   * THE TARGET MASK IS `0x4800`, and it is the reference's own assertion for this exact spell:
+   * `assert_eq!(opening & (TF_GAMEOBJECT | TF_LOCKED), opening)` with `TF_GAMEOBJECT = 0x0800` and
+   * `TF_LOCKED = 0x4000` (`ui_action/cast_target.rs:86,90,577-578`). Both flags read ONE packed guid on
+   * the server side and they are read in the same branch, so the pair carries a single packed guid and
+   * not two -- which is what makes 0x4800 safe rather than a double write.
+   *
+   * Everything else is `castSpell`'s body above, unchanged and for its reasons: `castCount` 0,
+   * `castFlags` 0, and the 1.12 delta it records (the reference's own `CMSG_CAST_SPELL` has neither, and
+   * sending its form here shifts the mask by two bytes).
+   */
+  castAtObject(spellId: number, objectGuid: string): void {
+    const TARGET_FLAG_GAMEOBJECT = 0x0800;
+    const TARGET_FLAG_LOCKED = 0x4000;
+
+    const body = 1 + 4 + 1 + 4 + packedGuidLength(objectGuid);
+    const app = new GamePacket(GameOpcode.CMSG_CAST_SPELL, 6 + body);
+    app.writeUnsignedByte(0);
+    app.writeUnsignedInt(spellId);
+    app.writeUnsignedByte(0);
+    app.writeUnsignedInt(TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED);
+    app.writePackedGUID(objectGuid);
+    this.game.send(app);
+
+    spellWire.record({
+      at: Date.now(),
+      kind: 'CAST_SENT',
+      spellId,
+      caster: null,
+      detail: {
+        target: objectGuid,
+        name: spellData.spell(spellId)?.name ?? null,
+        bodyBytes: body,
+        objectTarget: 1,
+      },
+      bodySize: body,
+      consumed: body,
+    });
+  }
+
   castSpell(spellId: number, target: string | null): void {
     const TARGET_FLAG_SELF = 0x0000;
     const TARGET_FLAG_UNIT = 0x0002;
