@@ -438,7 +438,22 @@ function toCanvas(spec: BlpSpec): HTMLCanvasElement | null {
  */
 const ARROW_KEY = '__minimapPlayerArrow';
 
-/** The arrow canvas's side. Twice the art's 32 px so the rotated diagonal is not clipped. */
+/**
+ * The arrow canvas's side, and the REGION's -- which is deliberately larger than the arrow itself.
+ *
+ * The owner's first sighting was "он очень маленький", and the arithmetic says why: the art is 32 px,
+ * it was drawn at its native 32 into a 64 canvas, and that canvas was then squeezed into a 40 px
+ * region -- so the arrow came out at 32/64 x 40 = **20 px** on a 140 px minimap, half the size the
+ * client asked for.
+ *
+ * The client asks for the ARROW to be 40 px (`Minimap:SetPlayerTextureWidth(40)`), not the box around
+ * it. A rotating square needs its diagonal to fit, so the box has to be at least 40 * sqrt(2) = 56.6.
+ * 64 is that rounded up to a power of two, which a `CanvasTexture` uploads without a resize.
+ *
+ * So: region 64 px, art drawn at 40 px centred inside it, and the arrow is 40 px on screen at every
+ * heading -- the number the client itself named, with the rotation slack around it rather than
+ * inside it.
+ */
 const ARROW_PX = 64;
 
 class MinimapPlayerArrow {
@@ -503,7 +518,10 @@ class MinimapPlayerArrow {
      * here rather than discovered by negating a coordinate until it looked right.
      */
     ctx.rotate(-facing);
-    ctx.drawImage(this.art, -this.art.width / 2, -this.art.height / 2);
+    // Scaled to the size the CLIENT asked for, not the art's own -- see `ARROW_PX`. The art is 32 px
+    // and `playerArrow` is 40, so this is an upscale of 1.25 rather than a 1:1 blit.
+    const side = Math.min(playerArrow.width, playerArrow.height);
+    ctx.drawImage(this.art, -side / 2, -side / 2, side, side);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.texture.needsUpdate = true;
   }
@@ -610,8 +628,9 @@ export function attachMinimapTerrain(
     if (arrowRegion !== null) {
       arrowRegion.layer = 'OVERLAY';
       arrowRegion.sprite = ARROW_KEY;
-      // The size the client asks for itself (`minimap.lua:11-12`), held by `methods/minimap.ts`.
-      arrowRegion.setSize(playerArrow.width, playerArrow.height);
+      // `ARROW_PX`, not `playerArrow`: the region is the BOX and the client's 40 is the ARROW inside
+      // it. Sizing the region to 40 shrank the arrow to 20 -- see the note on `ARROW_PX`.
+      arrowRegion.setSize(ARROW_PX, ARROW_PX);
       arrowRegion.setAnchors({
         point: 'CENTER', relativePoint: 'CENTER', relativeTo: frame.id, x: 0, y: 0,
       });
