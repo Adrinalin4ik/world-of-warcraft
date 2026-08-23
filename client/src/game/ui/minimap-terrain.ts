@@ -238,9 +238,9 @@ export class MinimapTerrain {
    * Called once per UI tick from the map bridge. The early return is the whole performance story: see
    * this file's header on the pixel-quantised signature.
    */
-  update(mapName: string, worldX: number, worldY: number, zoom: number): void {
+  update(mapName: string, worldX: number, worldY: number, zoom: number): boolean {
     if (this.disposed || this.ctx === null || mapName === '') {
-      return;
+      return false;
     }
     const windowYards = this.windowFor(zoom);
     const perPixel = windowYards / TERRAIN_PX;
@@ -249,13 +249,14 @@ export class MinimapTerrain {
     const py = Math.round(worldY / perPixel);
     if (mapName === this.lastMap && windowYards === this.lastYards
       && px === this.lastPx && py === this.lastPy) {
-      return;
+      return false;
     }
     this.lastMap = mapName;
     this.lastYards = windowYards;
     this.lastPx = px;
     this.lastPy = py;
     this.composite(mapName, worldX, worldY, windowYards);
+    return true;
   }
 
   private composite(mapName: string, worldX: number, worldY: number, windowYards: number): void {
@@ -489,17 +490,17 @@ class MinimapPlayerArrow {
     this.glue.adopt(ARROW_KEY, this.texture);
   }
 
-  update(facing: number): void {
+  update(facing: number): boolean {
     if (this.ctx === null) {
-      return;
+      return false;
     }
     if (this.art === null) {
       this.load();
-      return;
+      return false;
     }
     const degrees = Math.round((facing * 180) / Math.PI);
     if (degrees === this.lastDegrees) {
-      return;
+      return false;
     }
     this.lastDegrees = degrees;
 
@@ -524,6 +525,7 @@ class MinimapPlayerArrow {
     ctx.drawImage(this.art, -side / 2, -side / 2, side, side);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.texture.needsUpdate = true;
+    return true;
   }
 
   private load(): void {
@@ -570,7 +572,18 @@ class MinimapPlayerArrow {
  * lifetimes, two attachments.
  */
 export interface MinimapTerrainHost {
-  tick: () => void;
+  /**
+   * Composite for this frame, and answer **whether any pixel changed**.
+   *
+   * The boolean is not a convenience. The interface renders to an offscreen target re-rendered only
+   * when a draw-list FINGERPRINT changes, and these two canvases change their CONTENTS without changing
+   * the list at all -- same widget, same rect, same sprite key. So the arrow turned only on the frames
+   * something else happened to dirty the interface, which is what the owner saw.
+   *
+   * `ui/scene/model-booth.ts` had this exact problem with the same answer: `boothBaked` forces the full
+   * draw "because a bake changes pixels the fingerprint cannot see". Same class of change, same signal.
+   */
+  tick: () => boolean;
   dispose: () => void;
 }
 
@@ -661,19 +674,24 @@ export function attachMinimapTerrain(
      */
     tick: () => {
       if (disposed || !ensure()) {
-        return;
+        return false;
       }
       const frame = minimapId === null ? null : ctx.registry.widget(minimapId);
       if (frame === null || !frame.visible) {
-        return;
+        return false;
       }
       const player = world.player;
       const map = world.map as unknown as { internalName?: string } | null;
       if (!player || !map || typeof map.internalName !== 'string') {
-        return;
+        return false;
       }
-      terrain?.update(map.internalName, player.position.x, player.position.y, zoomOf(frame));
-      arrow?.update(player.facing ?? 0);
+      // BOTH evaluated, not short-circuited: a `||` between the calls would skip the arrow on any
+      // frame the terrain happened to repaint.
+      const painted = terrain === null ? false : terrain.update(
+        map.internalName, player.position.x, player.position.y, zoomOf(frame),
+      );
+      const turned = arrow === null ? false : arrow.update(player.facing ?? 0);
+      return painted || turned;
     },
     dispose: () => {
       disposed = true;

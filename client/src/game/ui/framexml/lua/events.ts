@@ -126,6 +126,22 @@ registerMethods('FRAME', EVENT_METHODS);
  * Silently does nothing if the VM has no object model installed, or nothing is registered for
  * `eventName` -- both are normal, not error conditions worth throwing over.
  */
+/**
+ * WHICH FRAMES ARE LISTENING for an event -- for probes, not for the runtime.
+ *
+ * "The event fires and nothing happens" has two halves and no console line separates them: either no
+ * frame is registered, or one is and its handler declined. `fireEvent` returns early on an empty list
+ * and says nothing, which is right for the runtime and useless for a diagnosis.
+ *
+ * Built because the world map has been sitting on exactly that question: `WORLD_MAP_UPDATE` is fired,
+ * `WorldMapFrame_OnLoad` registers for it (`worldmapframe.lua:72`), and `WorldMapFrame_UpdateMap` does
+ * not run -- and calling that function by hand DOES lay the frame out, which proves the function is
+ * fine and the delivery is not. This answers the first half in one call.
+ */
+export function eventListeners(eventName: string): number[] {
+  return [...(framesByEvent.get(eventName) ?? [])];
+}
+
 export function fireEvent(vm: LuaVM, eventName: string, args: unknown[] = []): void {
   const ctx = contextFor(vm);
   if (ctx === null) {

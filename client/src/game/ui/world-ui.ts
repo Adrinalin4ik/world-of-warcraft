@@ -62,6 +62,7 @@ import { attachChatBridge } from './chat-bridge';
 import {
   publishRects, clearRects, setRectResolver, setVisibleRectResolver, rectStats, layoutRectOf,
 } from './rects';
+import { eventListeners } from './framexml/lua/events';
 import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
 import { createQuadMaterial } from './material';
 import { ModelBooth } from './scene/model-booth';
@@ -260,6 +261,9 @@ export class WorldUiHost {
 
   /** The minimap's terrain and player arrow -- attached after the manifest, unlike the bridge above. */
   private minimapTerrain: MinimapTerrainHost | null = null;
+
+  /** Set by the minimap tick; forces the offscreen re-render. See the tick call and `boothBaked`. */
+  private minimapRepainted = false;
 
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
@@ -797,6 +801,29 @@ export class WorldUiHost {
      * is hidden" from "its panel is". `spriteRegistered`/`spriteFetched` are `worldUiArt`'s two halves,
      * asked here so one call answers everything rather than three.
      */
+    /**
+     * `window.uiEventListeners('WORLD_MAP_UPDATE')` -- which frames are registered, by name.
+     *
+     * "The event fires and nothing happens" has two halves and no console line separates them: either
+     * no frame is listening, or one is and its handler declined. `fireEvent` returns early on an empty
+     * list and says nothing, which is right for the runtime and useless for a diagnosis.
+     *
+     * The world map has been sitting on exactly that question for two rounds. Calling
+     * `WorldMapFrame_UpdateMap()` by hand DOES lay the frame out, so the function is fine and the
+     * delivery is not -- and this is the half of the delivery a probe can answer without guessing.
+     */
+    (window as never as Record<string, unknown>).uiEventListeners = (eventName: string) => {
+      const runtime = this.runtime;
+      if (runtime === null) {
+        return 'the runtime is not up';
+      }
+      return eventListeners(eventName).map((id) => ({
+        id,
+        name: runtime.registry.nameOf(id),
+        hasHandler: runtime.registry.widget(id) !== null,
+      }));
+    };
+
     (window as never as Record<string, unknown>).uiRegion = (query: string, cap = 20) => {
       const runtime = this.runtime;
       if (runtime === null) {
@@ -861,7 +888,14 @@ export class WorldUiHost {
     this.mapBridge?.poll();
     // THE MINIMAP'S PICTURE, beside the zone edge. Both gates are quantised, so a standing player
     // pays four numeric compares and a `visible` walk -- see `minimap-terrain.ts` on the cost.
-    this.minimapTerrain?.tick();
+    //
+    // **THE RETURN IS LOAD-BEARING AND MUST NOT BE DISCARDED.** These two canvases change their
+    // CONTENTS without changing the draw list, so the fingerprint below cannot see them and the
+    // offscreen target is not re-rendered -- which is why the owner saw the arrow turn only when
+    // something else happened to dirty the interface. `boothBaked` is the same signal for the same
+    // reason, and this project has twice been bitten by a discarded return hiding exactly this kind
+    // of defect.
+    this.minimapRepainted = this.minimapTerrain?.tick() ?? false;
     this.sections.end('ui.tick');
 
     const viewport = { width: window.innerWidth, height: window.innerHeight };
@@ -976,7 +1010,8 @@ export class WorldUiHost {
     const target = this.target();
     const dirty =
       target !== null &&
-      (signature !== this.lastSignature || boothBaked || this.framesSinceFullDraw >= FULL_DRAW_EVERY);
+      (signature !== this.lastSignature || boothBaked || this.minimapRepainted
+        || this.framesSinceFullDraw >= FULL_DRAW_EVERY);
     // THE INSTRUMENT, built before the sweep was drawn and deliberately not blinded by it: it counts the
     // full re-renders SEPARATELY from the sweep pass, so "the sweep dirties the fingerprint" is a
     // question this can answer rather than one the code has to be trusted about. `STATE.md` recorded the
