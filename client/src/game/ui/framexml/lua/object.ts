@@ -524,6 +524,29 @@ export function onFrameTeardown(listener: (ctx: MethodContext, id: number) => vo
  * The registry owns the widget tree and the name -> id map; it knows nothing about Lua beyond
  * storing the opaque wrapper handle the object model puts there, and calling back to release it.
  */
+/** See `FrameRegistry#create`'s census. Counted only after the load, which `markCreateFrame` gates. */
+const createCensus = new Map<string, number>();
+
+const createSamples: string[] = [];
+
+let createCensusFrames = 0;
+
+/** Called once per rendered frame, from `world-ui.ts`, so the load itself is never sampled. */
+export function markCreateFrame(): void {
+  createCensusFrames += 1;
+}
+
+(window as unknown as Record<string, unknown>).uiCreateCensus = () => {
+  const frames = Math.max(createCensusFrames - 60, 1);
+  return {
+    frames,
+    byType: Array.from(createCensus.entries())
+      .map(([kind, count]) => ({ kind, count, perFrame: Math.round((count / frames) * 100) / 100 }))
+      .sort((left, right) => right.count - left.count),
+    firstTwelve: createSamples,
+  };
+};
+
 export class FrameRegistry {
   /** The tree's root. A frame created with no parent is parented here. */
   readonly root: Widget;
@@ -556,6 +579,27 @@ export class FrameRegistry {
       throw new Error(`CreateFrame: parent frame ${parent} does not exist`);
     }
 
+    /**
+     * WHAT IS BEING CREATED EVERY FRAME -- `window.uiCreateCensus()`.
+     *
+     * The geometry census's stacks put every per-frame write inside the fengari VM (`luaD_precall` in all
+     * seven), so the client's own Lua is doing it -- and `add` at 36 a frame arrives through THIS method,
+     * which means `CreateFrame` is being called about thirty-six times per frame. A JS stack cannot name
+     * the Lua function above it, so the frames themselves are sampled instead: type, name and parent for
+     * the first twelve created after the load, plus a count by type.
+     *
+     * Bounded and cheap: twelve strings kept, one `Map` increment per creation, and a creation is already
+     * a `new Widget` plus a registry insert.
+     */
+    if (createCensusFrames > 60) {
+      createCensus.set(kind, (createCensus.get(kind) ?? 0) + 1);
+      if (createSamples.length < 12) {
+        const parentName = parent === null
+          ? 'root'
+          : this.nameOf(parent) ?? `id ${parent}`;
+        createSamples.push(`${kind} "${name ?? '(anonymous)'}" under ${parentName}`);
+      }
+    }
     const id = this.nextId++;
     const widget = new Widget(widgetKind, `lua:${id}`);
     // INTERACTIVITY IS A PROPERTY OF THE CLASS, not of an attribute. `enableMouse="true"` appears on

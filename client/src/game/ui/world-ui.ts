@@ -41,6 +41,7 @@ import { GlueRenderer } from './renderer';
 import { resolveSprite } from './sprite';
 import { FontStringTextures, layoutScale, loadGlueFonts, measureText, wrapLines } from './text';
 import { DrawItem, WidgetRoot, effectiveFont, markGeometryFrame } from './widget';
+import { markCreateFrame } from './framexml/lua/object';
 import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachContainerBridge } from './container-bridge';
@@ -813,6 +814,7 @@ export class WorldUiHost {
     // The geometry census's frame boundary -- see `widget.ts#markGeometryFrame`. Here because this is
     // once per frame and immediately before the pass whose first `layoutRectOf` pays for the resolve.
     markGeometryFrame();
+    markCreateFrame();
     this.sections.begin('ui.scroll');
     if (this.runtime !== null) {
       reconcileScrollRanges(this.runtime.ctx);

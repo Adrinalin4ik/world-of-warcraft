@@ -851,6 +851,37 @@ export class SpellHandler extends EventEmitter {
       const pose = precastAnimationFor(caster, decoded.spellId);
       if (pose !== null) {
         caster.setAnimation(pose, true, -1, true);
+        /**
+         * WHY THE KNEEL STILL DOES NOT HOLD -- one line per cast, and it separates three candidates.
+         *
+         * The owner: "Персонаж не остался на коленях", after `holdClamped` was added. So either the pose
+         * is not what I think it is, or the latch that `holdClamped` gates was never taken in the first
+         * place -- and there is a specific reason it might not be. `Unit#startAnimation` latches
+         * `externalSeq` only when `seq.id === id`, because `ModelAnim#resolve` falls back to the first
+         * inline sequence for any id a model lacks and latching a fallback would freeze the body in a
+         * clip nobody asked for. If a character's `Loot` resolves through an alias, `resolved` below will
+         * differ from `pose`, the latch was never taken, `holdClamped` never applied, and locomotion took
+         * the body straight back -- which looks exactly like "a fraction of a second".
+         *
+         * `loops` is the third candidate: if it comes back true, this clip is not a clamp at all and my
+         * whole reading of the reference's Loot 50 does not apply to this rig.
+         */
+        try {
+          const model = (caster as unknown as {
+            model?: { modelAnim?: { resolve: (id: number) => { id: number; loops: boolean } | null } };
+          }).model ?? null;
+          const resolved = model?.modelAnim?.resolve(pose) ?? null;
+          // eslint-disable-next-line no-console
+          console.log(
+            `spellanim: precast pose ${pose} for spell ${decoded.spellId}`
+            + ` -> resolved=${resolved === null ? 'null' : resolved.id}`
+            + ` loops=${resolved === null ? 'n/a' : resolved.loops}`
+            + ` latched=${resolved !== null && resolved.id === pose}`,
+          );
+        } catch (error) {
+          // eslint-disable-next-line no-console
+          console.warn('spellanim: the precast probe threw and is being ignored', error);
+        }
         // RECORDED so a later failure can tell this pose from any other latch -- see `castPose`.
         this.castPose.set(decoded.caster, { spellId: decoded.spellId, animId: pose });
       }
