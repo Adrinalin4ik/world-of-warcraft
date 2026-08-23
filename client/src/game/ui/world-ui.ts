@@ -625,7 +625,7 @@ export class WorldUiHost {
         this.detachLoot = attachLootBridge(runtime.vm, this.world, this.art);
         // WHERE THE PLAYER IS, in words -- the zone-text family the minimap's label reads. See
         // `map-bridge.ts`; step 3 of the map arc and the first with anything visible in it.
-        this.mapBridge = attachMapBridge(runtime.vm, this.world);
+        this.mapBridge = attachMapBridge(runtime.vm, this.world, runtime.ctx, this.art);
         // TALKING TO AN NPC, then BUYING AND SELLING. Gated on a real session for the reason the item
         // bridges are: a vendor's stock and a gossip menu are both packets, so an offline world has
         // neither and `world.game.objectHandler` must not be touched on that route.

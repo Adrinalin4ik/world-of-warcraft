@@ -3,6 +3,10 @@ import type { WorldMapAreaRow } from '../pipeline/dbc/map-data';
 import { fireEvent } from './framexml/lua/events';
 import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
+import type { MethodContext } from './framexml/lua/object';
+import type { GlueArt } from './art';
+import { MinimapTerrain, MINIMAP_TERRAIN_KEY } from './minimap-terrain';
+import { zoomOf } from './framexml/lua/methods/minimap';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -60,7 +64,9 @@ import type World from '../world';
  * parent chain, and the chain is two or three deep in practice. These are called from `SetText` paths on
  * zone-change events, not per frame.
  */
-export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
+export function attachMapBridge(
+  vm: LuaVM, world: World, ctx: MethodContext, art: GlueArt,
+): MapBridge {
   let disposed = false;
 
   // Kicked off here rather than awaited: the first zone change after it lands fills the label, and a
@@ -630,11 +636,100 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
    * exists and the area comes from the terrain cell under the player, which changes as he walks. The cost
    * is `areaIdAt` -- two divisions and a `Map#get` -- plus a compare, once per UI tick.
    */
+  /**
+   * THE MINIMAP'S TERRAIN, drawn into the client's own `Minimap` frame.
+   *
+   * `minimap-terrain.ts` composites the game's minimap BLPs and publishes the result through
+   * `art.adopt`; this is the region that draws it. Created ENGINE-SIDE and not authored, which is
+   * correct rather than a shortcut: the real client's Minimap draws its terrain natively too -- there is
+   * no `<Texture>` for it anywhere in `minimap.xml`, because it is the engine's surface and not the
+   * client's art. `methods/statusbar.ts` creates its bar fill the same way and for the same reason.
+   *
+   * `BACKGROUND` layer, so every piece of the client's own art -- the border ring, the buttons, the
+   * blips it will one day draw -- lands on top of it. Anchored to fill the frame exactly, so the
+   * circular mask in the composite lines up with the round border the client draws over it.
+   *
+   * Created LAZILY on the first tick that finds a `Minimap` frame, rather than at attach: the bridge is
+   * attached before the manifest has necessarily produced the frame, and a null there would silently
+   * mean no terrain for the session.
+   */
+  let terrain: MinimapTerrain | null = null;
+  let terrainRegion: number | null = null;
+  let minimapId: number | null = null;
+
+  const ensureTerrain = (): boolean => {
+    if (terrainRegion !== null) {
+      return true;
+    }
+    minimapId = ctx.registry.byName('Minimap');
+    if (minimapId === null) {
+      return false;
+    }
+    terrain = new MinimapTerrain(art);
+    terrainRegion = ctx.registry.create('Texture', null, minimapId);
+    const region = ctx.registry.widget(terrainRegion);
+    if (region === null) {
+      return false;
+    }
+    region.layer = 'BACKGROUND';
+    region.sprite = MINIMAP_TERRAIN_KEY;
+    const fill = (point: 'TOPLEFT' | 'BOTTOMRIGHT') => ({
+      point, relativePoint: point, relativeTo: ctx.registry.widget(minimapId!)!.id, x: 0, y: 0,
+    });
+    region.setAnchors(fill('TOPLEFT'), fill('BOTTOMRIGHT'));
+    /**
+     * THE OWNER'S KNOB for the one number in this feature that no file states.
+     *
+     * `window.worldMinimapZoom(400)` sets how many yards the minimap shows; `null` restores the
+     * table. This is the shape that settled the quest sparkle's scale in a single message -- he
+     * looked, named the value that fitted, and the guessing stopped. Cheaper and more honest than a
+     * third round of arithmetic here.
+     */
+    (window as unknown as Record<string, unknown>).worldMinimapZoom = (yards?: number) => {
+      terrain?.setWindowYards(typeof yards === 'number' ? yards : null);
+      return yards ?? 'restored to the (unsourced) default table';
+    };
+    return true;
+  };
+
+  /**
+   * Composite the terrain for where the player is now. Called from `poll`, i.e. once per UI tick.
+   *
+   * The cost of a tick that changes nothing is the two `Math.round`s and a string compare inside
+   * `MinimapTerrain#update` -- see that file's header on why the gate is pixel-quantised rather than
+   * time-based. Gated on the frame being VISIBLE as well, so a session with the minimap hidden
+   * (`ToggleMinimap`) does not composite at all.
+   */
+  const drawMinimap = (): void => {
+    if (!ensureTerrain() || terrain === null) {
+      return;
+    }
+    const frame = minimapId === null ? null : ctx.registry.widget(minimapId);
+    if (frame === null || !frame.visible) {
+      return;
+    }
+    const player = world.player;
+    const map = world.map as unknown as { internalName?: string } | null;
+    if (!player || !map || typeof map.internalName !== 'string') {
+      return;
+    }
+    terrain.update(
+      map.internalName,
+      player.position.x,
+      player.position.y,
+      zoomOf(frame),
+    );
+  };
+
   let lastArea = 0;
   let lastZone = '';
 
   const poll = (): void => {
-    if (disposed || !mapData.loaded) {
+    if (disposed) {
+      return;
+    }
+    drawMinimap();
+    if (!mapData.loaded) {
       return;
     }
     const player = world.player;
@@ -657,6 +752,8 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
     poll,
     dispose: () => {
       disposed = true;
+      terrain?.dispose();
+      delete (window as unknown as Record<string, unknown>).worldMinimapZoom;
       delete (window as unknown as Record<string, unknown>).worldZone;
     },
   };
