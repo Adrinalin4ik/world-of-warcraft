@@ -2157,6 +2157,47 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * Always on, like `itemWire`: these are two strings and a handful of scalars, and the next person to
    * meet a blank quest panel should be able to read the answer instead of re-deriving it.
    */
+  /**
+   * `window.questRewardHighlight()` -- THE REWARD-CHOICE HIGHLIGHT'S RECT AGAINST THE BUTTONS'.
+   *
+   * The owner reports the selection frame is offset ("Рамка смещена"), and reading the whole chain did
+   * not find it. Every layer checks out on paper: `SetPoint` REPLACES the anchor at the same point
+   * rather than stacking (`methods/region.ts`, and `QuestInfoItem_OnClick` calls it with no
+   * `ClearAllPoints`, `questinfo.lua:28`); `layout.ts:163` resolves `y = target.y - anchor.y`, so the
+   * client's `+7` is seven units UP as it should be in a Y-down space; `SetBlendMode('ADD')` reaches the
+   * material; `SetFrameLevel` exists for the `RaiseFrameLevel` in the frame's `OnLoad`. Four mechanisms,
+   * all correct, and the symptom is still there -- which is the point at which this project stops
+   * guessing and prints numbers.
+   *
+   * The expected geometry, straight from the client's own files: the frame is 256x64
+   * (`questinfo.xml:372-375`) and its Lua puts it at the chosen button's TOPLEFT offset by (-8, +7). So
+   * a correct reading is `highlight.left === button.left - 8` and `highlight.top === button.top - 7`,
+   * with width 256 and height 64. Any other number names the broken layer by itself: a wrong `left`/`top`
+   * is the anchor, a wrong size is the `<Size>` not landing, and a right rect means the placement is
+   * fine and the ART is what disagrees -- a 256-wide texture necessarily reaches over the neighbouring
+   * button, so where its padding ends decides what that looks like.
+   *
+   * Costs nothing when not called, like `questShapes` beside it.
+   */
+  (window as unknown as Record<string, unknown>).questRewardHighlight = () => {
+    const rectOf = (name: string) => {
+      const result = vm.runExpr(
+        `local f = _G["${name}"] if not f then return "absent" end `
+        + 'if not f.GetLeft then return "no-getters" end '
+        + `return string.format("%s: left=%s top=%s w=%s h=%s shown=%s", "${name}",`
+        + ' tostring(f:GetLeft()), tostring(f:GetTop()), tostring(f:GetWidth()),'
+        + ' tostring(f:GetHeight()), tostring(f:IsShown()))',
+        'quest-highlight.lua',
+      ) as { value?: unknown } | null;
+      return String(result?.value ?? 'read failed');
+    };
+    return [
+      rectOf('QuestInfoItemHighlight'),
+      rectOf('QuestInfoItem1'),
+      rectOf('QuestInfoItem2'),
+    ];
+  };
+
   (window as unknown as Record<string, unknown>).questShapes = () => ({
     detailsShape: quest.detailsShape,
     offerShape: quest.offerShape,
