@@ -142,8 +142,16 @@ const MINIMAP: MethodTable = {
  * The player arrow's requested size, as the client asked for it.
  *
  * Module-level rather than per-widget because there is one Minimap and the real engine's setter is
- * likewise global to it. `ui/minimap-terrain.ts` is the reader: it sizes the arrow region with these,
- * which makes 40 the one SOURCED number in that whole feature.
+ * likewise global to it.
+ *
+ * **RECORDED AND NOT READ, and the round trip is worth writing down.** `ui/minimap-terrain.ts` did
+ * size its arrow from this, and the owner's side-by-side against the real client showed the result
+ * about twice too large. The reason is in `<Minimap>` itself: the arrow is named as a MODEL
+ * (`minimapPlayerModel="...MinimapArrow.mdx"`), so 40 is the box the engine reserves and the visible
+ * arrow inside it is smaller by a factor no file states. We draw the BLP, which fills its own box.
+ *
+ * So the drawn size is an unsourced constant with a live knob there, and this stays the client's
+ * request faithfully recorded -- which is the honest state, not a gap.
  */
 export const playerArrow = { width: 40, height: 40 };
 

@@ -179,17 +179,94 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   };
 
 /**
-   * `GetZonePVPInfo()` -- `Minimap_Update` reads it on the very next line after the label.
+   * The ZONE's `AreaTable` id under the player, or 0. The id half of `where()`, which answers names.
    *
-   * Answers nil, which is a real answer and not a stub: the else branch of the client's own ladder paints
-   * `NORMAL_FONT_COLOR`, which is what an ordinary contested zone looks like. Registering it matters even
-   * so -- an absent global would throw INSIDE the handler that has just set the text, and while the
-   * `SetText` above it would survive, the tooltip call below it would not.
-   *
-   * The real values need `AreaTable.flags`' sanctuary/arena bits and the faction ownership a zone can
-   * change hands over, neither of which this client reads. Declared, not faked.
+   * The ZONE and not the leaf, and that distinction is load-bearing for `GetZonePVPInfo`: Northshire
+   * Valley (9) carries faction mask 0 while its parent Elwynn Forest (12) carries 2, so reading the leaf
+   * would call the abbey contested.
    */
-  fn('GetZonePVPInfo', () => [null, null, null]);
+  const zoneAreaId = (): number => {
+    const player = world.player;
+    const map = world.map as unknown as { areaIdAt?: (x: number, y: number) => number } | null;
+    if (disposed || !mapData.loaded || !player || !map || typeof map.areaIdAt !== 'function') {
+      return 0;
+    }
+    const leaf = map.areaIdAt(player.position.x, player.position.y);
+    return leaf === 0 ? 0 : (mapData.zoneOf(leaf)?.areaId ?? 0);
+  };
+
+  /** 2 = Alliance, 4 = Horde. Transcribed from the client's race roster -- see `GetZonePVPInfo`. */
+  const RACE_FACTION_MASK = new Map<number, number>([
+    [1, 2], [3, 2], [4, 2], [7, 2], [11, 2],
+    [2, 4], [5, 4], [6, 4], [8, 4], [10, 4],
+  ]);
+
+  const playerFactionMask = (): number => {
+    const fields = (world.player as unknown as { fields?: { race?: number } } | null)?.fields;
+    const race = typeof fields?.race === 'number' ? fields.race : 0;
+    return RACE_FACTION_MASK.get(race) ?? 0;
+  };
+
+  /** The client's own localised faction word, or '' before GlobalStrings has run. */
+  const factionWord = (mask: number): string => {
+    const name = mask === 2 ? 'FACTION_ALLIANCE' : 'FACTION_HORDE';
+    const read = vm.runExpr(`return ${name}`, 'faction');
+    return 'value' in read && typeof read.value === 'string' ? read.value : '';
+  };
+
+  /**
+   * `GetZonePVPInfo()` -> `pvpType, isSubZonePvP, factionName`, and it is REAL now.
+   *
+   * The owner spotted it as a colour: the zone name over the minimap is GREEN in the real client and
+   * plain in ours, and so is the banner on entering a zone. Both read this one global --
+   * `Minimap_Update` runs a five-way ladder on `pvpType` (`minimap.lua:30-43`) where "friendly" is
+   * `SetTextColor(0.1, 1.0, 0.1)` -- so one nil here was two wrong colours.
+   *
+   * ## THE AREA SIDE IS MEASURED, not transcribed
+   *
+   * `AreaTable.factionGroupID` is a MASK rather than a `FactionGroup.dbc` id, which the served file
+   * settles: Elwynn Forest (12) is **2**, Durotar (14) is **4**, Stranglethorn Vale (33) is **0** and
+   * Dalaran (4395) is **6**. So 2 is Alliance, 4 is Horde, 6 is both and 0 is contested. The file is
+   * 2307 records, 36 fields, 144 B/record and closes exactly.
+   *
+   * ## THE PLAYER SIDE IS NOT SOURCED, and that is said rather than hidden
+   *
+   * The fully-sourced chain is `ChrRaces.factionID` -> `Faction.parentID` -> 469 (Alliance) / 67
+   * (Horde), and `ChrRaces.factionID` was measured for it: races 1/3/4 read 1/3/4, race 7 reads 115,
+   * race 11 reads 1629, races 2/5/6 read 2/5/6, race 8 reads 116, race 10 reads 1610. Walking it needs
+   * `Faction.dbc` loaded, and this bridge is seeded before the manifest for a session that may never
+   * open a map -- so `RACE_FACTION_MASK` above is transcribed instead, with the same standing as
+   * `framexml/bindings.ts`'s default keys: the client's own race roster, not a column this project read.
+   *
+   * `factionName` is the client's own `FACTION_ALLIANCE`/`FACTION_HORDE` global, read out of the VM
+   * rather than spelled here so a localised build gets its own word.
+   *
+   * NOT ANSWERED: "arena", and the sanctuary FLAG. `AreaTable.flags` is now read and deliberately not
+   * interpreted -- Dalaran's mask of 6 already reads as sanctuary, and guessing a bit position for a
+   * case this client cannot reach would be inventing a source.
+   */
+  fn('GetZonePVPInfo', () => {
+    const zone = zoneAreaId();
+    const area = zone === 0 ? null : mapData.area(zone);
+    if (area === null) {
+      return [null, false, null];
+    }
+    const zoneMask = area.factionGroupMask;
+    if (zoneMask === 6) {
+      return ['sanctuary', false, null];
+    }
+    if (zoneMask === 0) {
+      return ['contested', false, null];
+    }
+    const mine = playerFactionMask();
+    if (mine === 0) {
+      // The race is not known yet, so nothing can be said about whose land this is. nil takes the
+      // client's own else branch and paints NORMAL_FONT_COLOR, which is what it does at load.
+      return [null, false, null];
+    }
+    const type = zoneMask === mine ? 'friendly' : 'hostile';
+    return [type, false, factionWord(zoneMask)];
+  });
 
   /**
    * THE MINIMAP'S REMAINING GLOBALS, all six absent until now -- and absent means THROWING, not blank.
@@ -574,6 +651,26 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
    * `GetQuestLogLeaderBoard`, `GetNumQuestLeaderBoards` and the watch functions all answer from decoded
    * packets. It is only the map-placement half that is absent.
    */
+  /**
+   * THE QUEST-POI ENGINE PAIR, and their absence was breaking the map's quest panel outright:
+   *
+   *     framexml: WorldMapQuestShowObjectives: OnClick: WorldMapFrame.lua:1540:
+   *         attempt to call a nil value (global 'QuestPOIUpdateIcons')
+   *
+   * `WorldMapQuestShowObjectives_Toggle` calls it on the checkbox's click, so the raise took the
+   * whole toggle with it and the quest list never appeared. Both are ENGINE globals -- `questpoi.lua`
+   * defines only the `QuestPOI_*` helpers, checked on the served file, so nothing was going to supply
+   * these later.
+   *
+   * A no-op and a nil are the right answers rather than placeholders: the POI icons are the numbered
+   * blobs on the map, fed by `SMSG_QUEST_POI_QUERY_RESPONSE`, which has no subscriber. `GetNumQuestPOIs`
+   * already answers 0 in `ui/quest-bridge.ts`, so nothing can reach `QuestPOIGetIconInfo` -- it is
+   * registered for the reason the object model registers unreachable methods: an addon duck-types
+   * before it calls.
+   */
+  fn('QuestPOIUpdateIcons', () => []);
+  fn('QuestPOIGetIconInfo', () => [null]);
+
   fn('GetNumQuestItemDrops', () => [0]);
   fn('GetQuestLogItemDrop', () => [null]);
   fn('GetQuestPOILeaderBoard', () => [null]);

@@ -78,7 +78,7 @@ import minimapTiles from '../pipeline/minimap-tiles';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
 import type { GlueArt } from './art';
 import type { MethodContext } from './framexml/lua/object';
-import { playerArrow, zoomOf } from './framexml/lua/methods/minimap';
+import { zoomOf } from './framexml/lua/methods/minimap';
 import type World from '../world';
 
 /** The art key the Minimap's terrain region names. Not a path -- `art.adopt` publishes it directly. */
@@ -209,6 +209,27 @@ export class MinimapTerrain {
     this.texture.minFilter = THREE.LinearFilter;
     this.texture.wrapS = THREE.ClampToEdgeWrapping;
     this.texture.wrapT = THREE.ClampToEdgeWrapping;
+    /**
+     * **`flipY = false`, AND LEAVING IT AT THREE'S DEFAULT IS WHY THE MINIMAP CAME OUT INVERTED.**
+     *
+     * The owner put our minimap beside the real client's at the same spot and the picture was turned
+     * over. This is the third orientation defect on this project and the third time it was TWO
+     * CONVENTIONS MEETING rather than a wrong texture -- and the convention was already written
+     * down: `TextureLoader` creates every texture in this renderer with `flipY = false`,
+     * `renderer.ts#writeQuadUVs` builds its UVs on that basis (`renderer.ts:157`), and
+     * `material.ts:120` records the two cancelling flips. A `THREE.CanvasTexture` defaults to
+     * `flipY = true`, so these two were the only textures in the interface sampled upside down.
+     *
+     * `text.ts:578` is the precedent and it is exact: every glyph sheet is a canvas too, and it sets
+     * this line for this reason. Grepping the convention's existing home would have found it -- which
+     * is the rule `CLAUDE.md` states about adopting a camera's whole convention, including the parts
+     * that look like defaults.
+     *
+     * It fixes three things at once: the terrain's vertical axis, the arrow art, and the arrow's
+     * apparent rotation DIRECTION -- the `-facing` derivation was made for an unflipped canvas, so a
+     * mirrored one reverses it.
+     */
+    this.texture.flipY = false;
     this.art.adopt(MINIMAP_TERRAIN_KEY, this.texture);
   }
 
@@ -457,6 +478,24 @@ const ARROW_KEY = '__minimapPlayerArrow';
  */
 const ARROW_PX = 64;
 
+/**
+ * How big the arrow is DRAWN, in the region's own pixels. Unsourced -- see the note at the `drawImage`.
+ *
+ * 20 rather than the client's 40 because the owner's comparison with the real client put ours at about
+ * twice the size, and 40 is the box the engine reserves for a MODEL rather than the arrow inside it.
+ * `window.worldMinimapArrow(px)` overrides it.
+ */
+const DEFAULT_ARROW_DRAW_PX = 20;
+
+/** The live override from `window.worldMinimapArrow(px)`, or null for the default above. */
+let arrowDrawPx: number | null = null;
+
+/** Set the drawn arrow size live. Returns what it settled on, for the console. */
+export function setArrowDrawPx(px: number | null): number {
+  arrowDrawPx = px !== null && Number.isFinite(px) && px > 0 ? Math.min(px, ARROW_PX) : null;
+  return arrowDrawPx ?? DEFAULT_ARROW_DRAW_PX;
+}
+
 class MinimapPlayerArrow {
   private readonly canvas: HTMLCanvasElement;
 
@@ -487,6 +526,27 @@ class MinimapPlayerArrow {
     this.texture.minFilter = THREE.LinearFilter;
     this.texture.wrapS = THREE.ClampToEdgeWrapping;
     this.texture.wrapT = THREE.ClampToEdgeWrapping;
+    /**
+     * **`flipY = false`, AND LEAVING IT AT THREE'S DEFAULT IS WHY THE MINIMAP CAME OUT INVERTED.**
+     *
+     * The owner put our minimap beside the real client's at the same spot and the picture was turned
+     * over. This is the third orientation defect on this project and the third time it was TWO
+     * CONVENTIONS MEETING rather than a wrong texture -- and the convention was already written
+     * down: `TextureLoader` creates every texture in this renderer with `flipY = false`,
+     * `renderer.ts#writeQuadUVs` builds its UVs on that basis (`renderer.ts:157`), and
+     * `material.ts:120` records the two cancelling flips. A `THREE.CanvasTexture` defaults to
+     * `flipY = true`, so these two were the only textures in the interface sampled upside down.
+     *
+     * `text.ts:578` is the precedent and it is exact: every glyph sheet is a canvas too, and it sets
+     * this line for this reason. Grepping the convention's existing home would have found it -- which
+     * is the rule `CLAUDE.md` states about adopting a camera's whole convention, including the parts
+     * that look like defaults.
+     *
+     * It fixes three things at once: the terrain's vertical axis, the arrow art, and the arrow's
+     * apparent rotation DIRECTION -- the `-facing` derivation was made for an unflipped canvas, so a
+     * mirrored one reverses it.
+     */
+    this.texture.flipY = false;
     this.glue.adopt(ARROW_KEY, this.texture);
   }
 
@@ -519,13 +579,30 @@ class MinimapPlayerArrow {
      * here rather than discovered by negating a coordinate until it looked right.
      */
     ctx.rotate(-facing);
-    // Scaled to the size the CLIENT asked for, not the art's own -- see `ARROW_PX`. The art is 32 px
-    // and `playerArrow` is 40, so this is an upscale of 1.25 rather than a 1:1 blit.
-    const side = Math.min(playerArrow.width, playerArrow.height);
+    /**
+     * THE DRAWN SIZE, and `playerArrow`'s 40 turned out NOT to be it.
+     *
+     * The client asks for a 40 px player texture (`minimap.lua:11-12`) and that is what this drew,
+     * and the owner's side-by-side against the real client says it is about twice too big. The reason
+     * is that `<Minimap>` names a MODEL for the arrow -- `minimapPlayerModel="...MinimapArrow.mdx"`
+     * -- and a model does not fill its texture box; the BLP beside it does. So 40 is the box the
+     * engine reserves and the visible arrow inside it is smaller by a factor no file states.
+     *
+     * **UNSOURCED, and given a knob instead of a third guess**: `window.worldMinimapArrow(px)` sets
+     * it live. That is the shape that settled the quest sparkle in one message from the owner rather
+     * than three rounds of arithmetic here, and it is the same kind of number -- a proportion only a
+     * side-by-side can judge.
+     */
+    const side = arrowDrawPx ?? DEFAULT_ARROW_DRAW_PX;
     ctx.drawImage(this.art, -side / 2, -side / 2, side, side);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.texture.needsUpdate = true;
     return true;
+  }
+
+  /** Force the next `update` to draw, whatever the heading has done. */
+  invalidate(): void {
+    this.lastDegrees = Number.NaN;
   }
 
   private load(): void {
@@ -660,6 +737,17 @@ export function attachMinimapTerrain(
       terrain?.setWindowYards(typeof yards === 'number' ? yards : null);
       return yards ?? 'restored to the (unsourced) default table';
     };
+    /**
+     * `window.worldMinimapArrow(px)` -- the arrow's drawn size, the other unsourced number here.
+     *
+     * Invalidates the arrow's own gate as well as setting the value: that gate is the HEADING alone, so
+     * a size change while standing still would otherwise not be drawn until the player turned.
+     */
+    (window as unknown as Record<string, unknown>).worldMinimapArrow = (px?: number) => {
+      const settled = setArrowDrawPx(typeof px === 'number' ? px : null);
+      arrow?.invalidate();
+      return settled;
+    };
     built = true;
     return true;
   };
@@ -700,6 +788,7 @@ export function attachMinimapTerrain(
       terrain = null;
       arrow = null;
       delete (window as unknown as Record<string, unknown>).worldMinimapZoom;
+      delete (window as unknown as Record<string, unknown>).worldMinimapArrow;
     },
   };
 }

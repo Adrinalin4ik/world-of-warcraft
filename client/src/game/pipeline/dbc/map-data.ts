@@ -60,7 +60,7 @@ class MapData {
   private pending: Promise<void> | null = null;
 
   /** `areaId` -> its row. */
-  private areas = new Map<number, { name: string; parentId: number; mapId: number }>();
+  private areas = new Map<number, AreaRow>();
 
   /** `mapId` -> the world-map areas on it, in file order. */
   private byMap = new Map<number, WorldMapAreaRow[]>();
@@ -103,9 +103,12 @@ class MapData {
       DBC.load('WorldMapContinent'),
     ]);
 
-    const areas = new Map<number, { name: string; parentId: number; mapId: number }>();
+    const areas = new Map<number, AreaRow>();
     for (const record of recordsOf(areaTable)) {
-      const row = record as { id?: number; name?: unknown; parentID?: number; mapID?: number };
+      const row = record as {
+        id?: number; name?: unknown; parentID?: number; mapID?: number;
+        flags?: number; factionGroupID?: number;
+      };
       if (typeof row.id !== 'number') {
         continue;
       }
@@ -113,6 +116,11 @@ class MapData {
         name: localized(row.name),
         parentId: typeof row.parentID === 'number' ? row.parentID : 0,
         mapId: typeof row.mapID === 'number' ? row.mapID : 0,
+        flags: typeof row.flags === 'number' ? row.flags : 0,
+        // `factionGroupID` is a MASK here and not a `FactionGroup.dbc` id -- MEASURED on the served
+        // file: Elwynn Forest (12) is 2, Durotar (14) is 4, Stranglethorn Vale (33) is 0 and Dalaran
+        // (4395) is 6. So 2 is Alliance, 4 is Horde, 6 is both (a sanctuary) and 0 is contested.
+        factionGroupMask: typeof row.factionGroupID === 'number' ? row.factionGroupID : 0,
       });
     }
     this.areas = areas;
@@ -198,7 +206,7 @@ class MapData {
   }
 
   /** An `AreaTable` row, or null. */
-  area(areaId: number): { name: string; parentId: number; mapId: number } | null {
+  area(areaId: number): AreaRow | null {
     return this.areas.get(areaId) ?? null;
   }
 
@@ -330,6 +338,22 @@ class MapData {
 }
 
 /** One `WorldMapArea` row: which art draws it, and the world-space rect it covers. */
+/**
+ * An `AreaTable` row, as much of it as anything here reads.
+ *
+ * `flags` and `factionGroupMask` are new with `GetZonePVPInfo` and both were MEASURED rather than
+ * transcribed: the file is 2307 records, 36 fields, 144 B/record and closes exactly, and the two
+ * columns read the values quoted in `load` for four known zones.
+ */
+export interface AreaRow {
+  name: string;
+  parentId: number;
+  mapId: number;
+  flags: number;
+  /** 2 = Alliance, 4 = Horde, 6 = both (sanctuary), 0 = contested. See `load`. */
+  factionGroupMask: number;
+}
+
 export interface WorldMapAreaRow {
   id: number;
   mapId: number;
