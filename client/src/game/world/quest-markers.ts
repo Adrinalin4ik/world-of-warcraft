@@ -28,15 +28,28 @@ import type Unit from '../classes/unit';
  * nothing"), which is why there is no fallback bone here. Slot 29's mount branch is not implemented
  * because this client has no mounts.
  *
- * **The models are FOUR, and the names were PROBED on the case-sensitive host** rather than recalled.
- * `interface/buttons/` answers 200 for `talktome.m2` (15,680 B), `talktomequestionmark.m2`,
- * `talktomegrey.m2` and `talktomeblue.m2`, and 404 for fifteen other plausible spellings that were
- * tried (`talktomeq`, `talktomegray`, `talktomegold`, `talktomeexclaim`, `talktomered`,
- * `talktomeactive`, `talktomecomplete`, `talktomelowlevel`, `talktome_q`, `talktomeblu`,
- * `talktomedone`, and four grey-question-mark spellings). **The reference names five models and only
- * four are served here** -- there is no grey question mark under any spelling tried -- so the
- * low-level turn-in status takes the grey exclamation, and that substitution is named rather than
- * hidden.
+ * **The models are SIX, and the names came from the reference after fifteen guesses had failed.**
+ * `interface/buttons/` answers 200 for `talktome.m2` (15,680 B), `talktomequestionmark.m2` (17,952),
+ * `talktomegrey.m2` (15,664), `talktomeblue.m2`, `talktomequestion_grey.m2` (17,936) and
+ * `talktomequestion_ltblue.m2` (17,936).
+ *
+ * **The two `?` variants were nearly written off as unserved, and that is the lesson here.** Fifteen
+ * plausible spellings were probed and 404ed -- `talktomeq`, `talktomegray`, `talktomegold`,
+ * `talktomeexclaim`, `talktomered`, `talktomeactive`, `talktomecomplete`, `talktomelowlevel`,
+ * `talktome_q`, `talktomeblu`, `talktomedone` and four grey-question-mark spellings including
+ * `talktomequestionmarkgrey` and `talktomegreyquestionmark` -- and this header duly concluded that no
+ * grey question mark existed on this build, with the low-level turn-in taking the grey exclamation as a
+ * named substitution. **All of it was wrong, and only the underscore was.** The reference names both
+ * files outright (`mod.rs:126-127`), the host answers 200 for each and for its `.skin`, and reading the
+ * reference's map first would have replaced the whole guessing round with one line.
+ *
+ * The sizes corroborate the pairing without opening a skin: 15,664-15,680 B is the `!` glyph and 17,936
+ * -17,952 B the `?`, so the family is two glyphs under four texture ramps. The ramps were read out of
+ * each model's own texture block -- `INTERFACE\BUTTONS\YELLOWORANGE64.BLP` for both gold ones,
+ * `SPELLS\GRAD1A.BLP` for both grey ones, `GRADBLUE.BLP` for the light-blue `?` -- which is what makes
+ * "grey `?`" a read rather than an inference. `talktomeblue.m2` and `talktomegreen.m2` are the `!` glyph
+ * in blue and green and stay unused: the reference drives those off NPC flags, not off this status
+ * packet (`mod.rs:120-122`), and this client has no taxi handler to feed the green one.
  *
  * ## THE SCALE IS A SNAPSHOT, AND WAITING FOR PROPAGATION IS THE WHOLE OF IT
  *
@@ -83,6 +96,22 @@ const MODEL = {
   available: 'interface\\buttons\\talktome.m2',
   reward: 'interface\\buttons\\talktomequestionmark.m2',
   lowLevel: 'interface\\buttons\\talktomegrey.m2',
+  /**
+   * Grey `?` -- a quest held and NOT yet finished. The `?` glyph on the same grey ramp the grey `!`
+   * uses (`SPELLS\GRAD1A.BLP`, read off both models' texture blocks), and 17936 bytes against the gold
+   * `?`'s 17952 -- the same glyph, a different ramp.
+   *
+   * A comment here previously concluded no grey question mark is served on this build. That was wrong,
+   * and only the SPELLING was: the reference names the file outright as `TalkToMeQuestion_Grey.m2`
+   * (`samples/benilla/crates/benilla-app/src/quest_markers/mod.rs:126`) -- the underscore is the part
+   * every guess had missed. The host answers 200 for it and for its `.skin`.
+   */
+  greyReward: 'interface\\buttons\\talktomequestion_grey.m2',
+  /**
+   * Light-blue `?` -- a reputation turn-in. `INTERFACE\BUTTONS\GRADBLUE.BLP`, the `?` glyph, named by
+   * the same reference line (`:127`) and served the same way.
+   */
+  blueReward: 'interface\\buttons\\talktomequestion_ltblue.m2',
 } as const;
 
 /**
@@ -94,16 +123,21 @@ export const MARKER_ATTACHMENT = 18;
 /**
  * `DIALOG_STATUS` -> which model, or null for no marker.
  *
- * **Only the statuses whose meaning is unambiguous are mapped.** `AVAILABLE`/`AVAILABLE_REP` are an
- * offer; `REWARD`/`REWARD2`/`REWARD_REP` are a turn-in; the three `LOW_LEVEL_*` values are the same
- * two things below the player's level, which is what the grey art is for. `NONE` and `UNAVAILABLE`
- * are explicitly no marker.
+ * **The map is the reference's, translated status-by-status BY NAME** -- `quest_markers/mod.rs:118-131`
+ * lists it as `UNAVAILABLE -> grey !`, `INCOMPLETE -> grey ?`, `REWARD_REP -> light-blue ?`,
+ * `AVAILABLE -> gold !`, `REWARD_OLD/REWARD2 -> gold ?`. Its NUMBERS are 1.12's and are not reused:
+ * `INCOMPLETE` is 3 there and **5** here, `REWARD_REP` 4 there and **6** here, `AVAILABLE` 5 there and
+ * **8** here. Every case below names our own 3.3.5a enum member, so the translation is the compiler's
+ * problem rather than a literal anyone has to keep in step.
  *
- * **`INCOMPLETE` (5) answers null, deliberately.** It means "you have this quest and it is not done",
- * and whether 3.3.5a draws anything for it is not established by anything this client can read -- the
- * served light-blue model is left unused precisely because assigning it here would be a guess.
- * Drawing nothing is the conservative half: a missing marker is visibly absent, a wrong one reads as
- * fact.
+ * The three `LOW_LEVEL_*` values (2, 3, 4) have no counterpart in the reference -- 1.12 does not send
+ * them. They are read by name: the two `*_AVAILABLE*` ones are an offer below the player's level, which
+ * is what the grey `!` is for, and `LOW_LEVEL_REWARD_REP` is a turn-in below it, which is the grey `?`.
+ * `NONE` alone draws nothing.
+ *
+ * So the pair the owner asked for reads directly off this table: a held quest is a **grey `?`** while
+ * `INCOMPLETE` and a **gold `?`** once the server moves it to `REWARD`, and an offer is a **gold `!`**
+ * when it is takeable and a **grey `!`** when it is not yet.
  */
 export function modelFor(status: number): string | null {
   switch (status) {
@@ -112,13 +146,15 @@ export function modelFor(status: number): string | null {
       return MODEL.available;
     case DIALOG_STATUS.REWARD:
     case DIALOG_STATUS.REWARD2:
-    case DIALOG_STATUS.REWARD_REP:
       return MODEL.reward;
+    case DIALOG_STATUS.REWARD_REP:
+      return MODEL.blueReward;
+    case DIALOG_STATUS.INCOMPLETE:
+    case DIALOG_STATUS.LOW_LEVEL_REWARD_REP:
+      return MODEL.greyReward;
+    case DIALOG_STATUS.UNAVAILABLE:
     case DIALOG_STATUS.LOW_LEVEL_AVAILABLE:
     case DIALOG_STATUS.LOW_LEVEL_AVAILABLE_REP:
-    case DIALOG_STATUS.LOW_LEVEL_REWARD_REP:
-      // The grey EXCLAMATION for all three: no grey question mark is served on this build. See the
-      // header on the spellings that were tried.
       return MODEL.lowLevel;
     default:
       return null;
@@ -170,36 +206,6 @@ export class QuestMarkers {
 
   releaseMaterials: ((model: unknown) => void) | null = null;
 
-  /**
-   * SELF-ANNOUNCING DIAGNOSIS, at most two lines for the whole session.
-   *
-   * Every static check on this subsystem passes -- the three models and their `.skin` files serve real
-   * bytes, attachment id 18 is present in 3.3.5a's `humanmale.m2`, all four opcodes carry their 3.3.5a
-   * numbers, both guid maps go through `guid-hex.ts`, and the status width is derived from the body
-   * size rather than assumed. So what remains is runtime-only, and asking the owner to run a console
-   * probe has not worked. These two lines put the answer in the console he already reads.
-   *
-   * Bounded by construction: one line the first time a status map arrives non-empty, one line for the
-   * first attach outcome. Never per frame, so this cannot become spam or a cost.
-   */
-  private announcedFeed = false;
-
-  private announcedOutcome = false;
-
-  private announcedStart = false;
-
-  private fogReported = false;
-
-  private lastCamera: THREE.Camera | null = null;
-
-  private textureSettled = false;
-
-  private textureFrames = 0;
-
-  private announcedMaterials = false;
-
-  private announcedBake = false;
-
   private announcedPending = false;
 
   private pendingFrames = 0;
@@ -230,32 +236,6 @@ export class QuestMarkers {
       }
     }
 
-    if (!this.announcedFeed && statuses.size > 0) {
-      this.announcedFeed = true;
-      let matched = 0;
-      let withModel = 0;
-      let wanted = 0;
-      for (const [guid, status] of statuses) {
-        const unit = entities.get(guid);
-        if (unit !== undefined) {
-          matched += 1;
-          if (unit.model) {
-            withModel += 1;
-          }
-        }
-        if (modelFor(status) !== null) {
-          wanted += 1;
-        }
-      }
-      // eslint-disable-next-line no-console
-      console.log(
-        `questmarkers: ${statuses.size} statuses, ${wanted} want a model; `
-        + `entities=${entities.size}, matched=${matched}, withModel=${withModel}; `
-        + `statuses=[${Array.from(statuses.entries()).slice(0, 4)
-          .map(([g, st]) => `${g}:${st}`).join(' ')}]`,
-      );
-    }
-
     for (const [guid, status] of statuses) {
       const path = modelFor(status);
       if (path === null || this.live.has(guid) || this.loading.has(guid)) {
@@ -278,48 +258,6 @@ export class QuestMarkers {
       }
       if (this.bake(marker)) {
         this.stats.baked += 1;
-        if (!this.announcedBake) {
-          this.announcedBake = true;
-          const bone = marker.model.parent;
-          const m = bone === null ? null : bone.matrixWorld.elements;
-          /**
-           * THE TEXTURE, REPORTED HERE AND NOT AT ATTACH -- because at attach it cannot be anything but
-           * the placeholder.
-           *
-           * `M2Material#loadTextures` claims the slot with `TextureLoader.PLACEHOLDER` SYNCHRONOUSLY so
-           * the uniform array keeps its shape, and swaps the real texture in once the fetch decodes
-           * (`pipeline/m2/material/index.ts:679`). My first report ran in the `load` continuation, so
-           * `texCount=1 textures=1` was guaranteed and said nothing -- a claimed slot, not a bound
-           * image. The bake happens at least a frame later, so this one can tell them apart.
-           *
-           * Also worth naming: that fetch is queued at BACKGROUND priority for every material until a
-           * character/creature setter raises it, so a marker's texture sits behind terrain and every
-           * visible unit. A marker that is white for a while and then correct is that queue; one that
-           * stays white is not.
-           */
-          const sizes: string[] = [];
-          (marker.model as unknown as THREE.Object3D).traverse((node) => {
-            const mat = (node as unknown as { material?: unknown }).material;
-            const list = Array.isArray(mat) ? mat : [mat];
-            list.forEach((one) => {
-              const u = (one as { uniforms?: { textures?: { value?: unknown } } } | null)?.uniforms;
-              const bound = u?.textures?.value;
-              if (!Array.isArray(bound)) {
-                return;
-              }
-              bound.forEach((tex) => {
-                const image = (tex as { image?: { width?: number; height?: number } } | null)?.image;
-                sizes.push(image === undefined || image === null ? 'noimage'
-                  : `${String(image.width)}x${String(image.height)}`);
-              });
-            });
-          });
-          // eslint-disable-next-line no-console
-          console.log(`questmarkers: BAKED -- scale=${marker.model.scale.x.toFixed(4)}, `
-            + `bone world pos=${m === null ? 'none'
-              : `${m[12].toFixed(1)},${m[13].toFixed(1)},${m[14].toFixed(1)}`}`
-            + `, textures=[${sizes.join(' ')}] (the real one is 64x64)`);
-        }
       } else {
         pending += 1;
         /**
@@ -361,11 +299,6 @@ export class QuestMarkers {
      * So: this line means the attach started. `resolved` below means the load came back. Their absence
      * or presence is now a three-way answer instead of a one-way hint.
      */
-    if (!this.announcedStart) {
-      this.announcedStart = true;
-      // eslint-disable-next-line no-console
-      console.log(`questmarkers: attach START ${guid} <- ${path}`);
-    }
     void M2Blueprint.load(path)
       .then((model: THREE.Object3D & { updateMatrix?: () => void }) => {
         this.loading.delete(guid);
@@ -378,12 +311,6 @@ export class QuestMarkers {
           console.log(`questmarkers: dropped after load ${guid} -- host or liveness changed`);
           M2Blueprint.unload(model as never);
           return;
-        }
-        if (!this.announcedOutcome) {
-          this.announcedOutcome = true;
-          // eslint-disable-next-line no-console
-          console.log(`questmarkers: load RESOLVED ${guid}; host=${host === null ? 'null' : 'ok'}, `
-            + `attachTo=${typeof host?.attachTo}, alreadyLive=${this.live.has(guid)}`);
         }
         if (!host.attachTo(MARKER_ATTACHMENT, model)) {
           // NO SLOT means NO MARKER -- the reference's own behaviour, not a fallback to another bone
@@ -500,35 +427,6 @@ export class QuestMarkers {
          * So the question is whether a map is bound at all, and that is a property of the loaded model
          * rather than of anything this file does. Reported here rather than guessed at.
          */
-        if (!this.announcedMaterials) {
-          this.announcedMaterials = true;
-          const rows: string[] = [];
-          (model as unknown as THREE.Object3D).traverse((node) => {
-            const mat = (node as unknown as { material?: unknown }).material;
-            if (mat === undefined || mat === null) {
-              return;
-            }
-            const list = Array.isArray(mat) ? mat : [mat];
-            list.forEach((one) => {
-              const m = one as {
-                map?: { name?: string } | null;
-                type?: string;
-                uniforms?: { textureCount?: { value?: unknown }; textures?: { value?: unknown } };
-              };
-              // `.map` IS THE WRONG FIELD FOR THE REAL BATCH MATERIAL, and reading only it made the
-              // first version of this line blind: an M2 batch is a `ShaderMaterial` and keeps its
-              // textures in `uniforms.textures`, with `uniforms.textureCount` saying how many bound.
-              // The owner's paste read `ShaderMaterial:map=NONE`, which is EXPECTED and says nothing.
-              const count = m.uniforms?.textureCount?.value;
-              const bound = m.uniforms?.textures?.value;
-              rows.push(`${m.type ?? '?'}:map=${m.map == null ? 'NONE' : m.map.name || 'unnamed'}`
-                + `${count === undefined ? '' : ` texCount=${String(count)}`}`
-                + `${Array.isArray(bound) ? ` textures=${bound.length}` : ''}`);
-            });
-          });
-          // eslint-disable-next-line no-console
-          console.log(`questmarkers: materials [${rows.join(' | ')}]`);
-        }
         // eslint-disable-next-line no-console
         console.log(`questmarkers: ATTACHED ${guid}; live=${this.live.size} `
           + `attached=${this.stats.attached} noSlot=${this.stats.noSlot}`);
@@ -596,41 +494,6 @@ export class QuestMarkers {
    * pass is a walk over at most a handful of live markers.
    */
   animate(camera: THREE.Camera, cameraMoved: boolean): void {
-    /**
-     * THE TEXTURE, WATCHED UNTIL IT LANDS OR PLAINLY DOES NOT -- one line either way.
-     *
-     * Everything about the fetch checks out: `loadTextures` claims the slot with the shared placeholder,
-     * assigns the decoded texture into the SAME array the uniform holds, and sets `uniformsNeedUpdate`,
-     * which is the renderer contract (`pipeline/m2/material/index.ts:692-697`). And the fetch reported
-     * `SETTLED with 0 failure(s)`. So either the slot fills a moment after the bake -- in which case the
-     * marker is briefly grey and then correct, and there is nothing to fix -- or it never fills, and the
-     * completion is writing into a material the live marker is not using.
-     *
-     * That second case has a named mechanism now: `M2Blueprint.load` returns a CLONE, and its own comment
-     * says an instanceable model's clone "shares the source's geometry and batches" while an animating one
-     * "rebuilds its own batches and materials". Which of those a marker is decides whether the texture
-     * that was fetched belongs to the material being drawn.
-     *
-     * Bounded: checked on the frames the camera moves, and reported at most twice -- once if it lands, once
-     * if it has not after 300 such frames. No allocation on the common path.
-     */
-    /**
-     * FENCED, and the fence is the lesson rather than a precaution.
-     *
-     * This block is a DIAGNOSTIC and it runs inside the render loop. A nullish slip in it -- checking
-     * `=== null` where a missing material yields `undefined` -- threw and froze the owner's client at 0
-     * fps: an instrument taking down the thing it was measuring, which is strictly worse than the defect
-     * it was there to find. The guard is not there because the code below is expected to fail; it is there
-     * because NOTHING that only reports may be allowed to stop a frame.
-     */
-    this.lastCamera = camera;
-    try {
-      this.watchTexture();
-    } catch (error) {
-      this.textureSettled = true;
-      // eslint-disable-next-line no-console
-      console.warn('questmarkers: the texture watch threw and has been switched off', error);
-    }
     if (!cameraMoved) {
       return;
     }
@@ -638,61 +501,15 @@ export class QuestMarkers {
   }
 
   /**
-   * WHAT THE FOG TERM IS ACTUALLY FED, once.
+   * THE BILLBOARD TURN. `applyBillboards` writes each billboarded bone's rotation to face the camera,
+   * then every one of them is spun 180 degrees about its own Z.
    *
-   * The owner confirmed the cause: with `worldQuestMarkersFog = false` the marker is yellow. So the fog
-   * mix is what paints it, and the question is why a marker two yards from the camera takes any fog at
-   * all -- the factor must fall to zero that close.
-   *
-   * This client has TWO vertex shaders and they compute the input differently: `shader.vert:65` takes a
-   * true `distance(cameraPosition, vertexWorldPosition)`, while `vertex/common-main.glsl:69` -- the one
-   * this batch compiles, matching its fragment header -- takes `-mvPosition.z`, the VIEW-SPACE DEPTH.
-   * Those agree for an ordinary placed model and need not for a mesh whose skeleton hangs off another
-   * model's bone, which is what a marker uniquely is.
-   *
-   * So both are computed here the way each shader would, off the same matrices three hands the draw, and
-   * reported side by side. Equal means the distance is fine and the fog parameters are the story; wildly
-   * different names the seam, and the fix goes where the mesh reports its depth rather than here.
+   * **The half-turn is not a fudge: these models' authored front is the far side.** The owner saw the
+   * marker "все время задом" -- reliably reversed, never partly so -- which is the signature of a
+   * convention mismatch rather than a wrong angle, and it is the third orientation defect on this project
+   * to come out that way. Turning the bone is the fix that keeps the billboard pass itself untouched; a
+   * negated coordinate would have looked right here and disagreed with every other model in the world.
    */
-  private reportFogInput(camera: THREE.Camera): void {
-    for (const marker of this.live.values()) {
-      const object = marker.model as unknown as THREE.Object3D;
-      const world = object.getWorldPosition(new THREE.Vector3());
-      const trueDistance = world.distanceTo(camera.getWorldPosition(new THREE.Vector3()));
-      // The other shader's input: the same point in VIEW space, whose -z is what it feeds the fog.
-      const view = world.clone().applyMatrix4(camera.matrixWorldInverse);
-      // eslint-disable-next-line no-console
-      console.log(`questmarkers: fog input -- trueDistance=${trueDistance.toFixed(1)}, `
-        + `viewDepth=${(-view.z).toFixed(1)} (world ${world.x.toFixed(0)},${world.y.toFixed(0)},`
-        + `${world.z.toFixed(0)})`);
-      return;
-    }
-  }
-
-  /** See `animate`'s fence. Split out so the fence wraps a named call rather than a block. */
-  private watchTexture(): void {
-    if (!this.fogReported && this.live.size > 0 && this.textureSettled) {
-      this.fogReported = true;
-      this.reportFogInput(this.lastCamera as THREE.Camera);
-    }
-    if (!this.textureSettled && this.live.size > 0) {
-      this.textureFrames += 1;
-      const landed = this.firstTextureSize();
-      if (landed !== null && landed !== 'noimage') {
-        this.textureSettled = true;
-        // eslint-disable-next-line no-console
-        console.log(`questmarkers: texture LANDED after ${this.textureFrames} moved frames -- ${landed}`
-          + `; ${this.materialShape()}`);
-      } else if (this.textureFrames === 300) {
-        this.textureSettled = true;
-        // eslint-disable-next-line no-console
-        console.warn('questmarkers: texture NEVER landed in 300 moved frames -- the slot is still the '
-          + 'placeholder, so the decoded texture is going to a material this marker is not drawing');
-      }
-    }
-  }
-
-  /** See `animate`. The billboard turn, split out so the diagnostic fence cannot wrap it. */
   private turnAndFace(camera: THREE.Camera): void {
     for (const marker of this.live.values()) {
       const model = marker.model as unknown as {
@@ -724,82 +541,6 @@ export class QuestMarkers {
         }
       }
     }
-  }
-
-  /**
-   * The drawn batch's shading state, for the colour question.
-   *
-   * The texture is bound and 64x64 and the marker is still white, so what is left is HOW it is shaded.
-   * Three things decide that and all three are on the material: which `materialParams` it carries (its
-   * `y` is the lighting switch -- the shader does `light = mix(light, vec3(1.0), 1.0 - y)`, so `y = 0`
-   * is unlit and `y = 1` is lit, and the three material classes in this pipeline DEFAULT DIFFERENTLY),
-   * how many samplers it thinks it has, and which program it compiled -- a combiner this client does not
-   * implement can fall through to vertex colour, which is white.
-   */
-  private materialShape(): string {
-    const rows: string[] = [];
-    for (const marker of this.live.values()) {
-      (marker.model as unknown as THREE.Object3D).traverse((node) => {
-        const mat = (node as unknown as { material?: unknown }).material;
-        const list = Array.isArray(mat) ? mat : [mat];
-        list.forEach((one) => {
-          const m = one as {
-            type?: string;
-            name?: string;
-            uniforms?: { materialParams?: { value?: unknown }; textureCount?: { value?: unknown } };
-            defines?: Record<string, unknown>;
-          } | null;
-          // NULLISH, not `=== null`: a node with no material yields `[undefined]` from the wrap above,
-          // and `undefined !== null`. That threw inside the per-frame pass and froze the owner's client
-          // at 0 fps -- a diagnostic taking the whole render loop down with it, which is worse than the
-          // defect it was measuring. Both traversals in this file are guarded the same way now.
-          if (m == null || m.uniforms?.materialParams === undefined) {
-            return;
-          }
-          const params = m.uniforms.materialParams.value as
-            { x?: number; y?: number; z?: number; w?: number } | number[] | undefined;
-          const shown = Array.isArray(params)
-            ? params.join(',')
-            : `${String(params?.x)},${String(params?.y)},${String(params?.z)},${String(params?.w)}`;
-          rows.push(`${m.type ?? '?'}/${m.name || 'unnamed'} params=[${shown}] `
-            + `texCount=${String(m.uniforms.textureCount?.value)} `
-            + `defines=${Object.keys(m.defines ?? {}).join('+') || 'none'}`);
-        });
-      });
-      if (rows.length > 0) {
-        break;
-      }
-    }
-    return rows.join(' | ');
-  }
-
-  /** The first bound texture's `WxH`, `'noimage'` for the placeholder, or null when there is none. */
-  private firstTextureSize(): string | null {
-    for (const marker of this.live.values()) {
-      let found: string | null = null;
-      (marker.model as unknown as THREE.Object3D).traverse((node) => {
-        if (found !== null) {
-          return;
-        }
-        const mat = (node as unknown as { material?: unknown }).material;
-        const list = Array.isArray(mat) ? mat : [mat];
-        list.forEach((one) => {
-          const bound = (one as { uniforms?: { textures?: { value?: unknown } } } | null | undefined)
-            ?.uniforms?.textures?.value;
-          if (!Array.isArray(bound) || bound.length === 0) {
-            return;
-          }
-          const image = (bound[0] as { image?: { width?: number; height?: number } } | null)?.image;
-          found = image === undefined || image === null
-            ? 'noimage'
-            : `${String(image.width)}x${String(image.height)}`;
-        });
-      });
-      if (found !== null) {
-        return found;
-      }
-    }
-    return null;
   }
 
   private detach(guid: string, marker: Marker): void {

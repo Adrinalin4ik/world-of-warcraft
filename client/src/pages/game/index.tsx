@@ -17,7 +17,9 @@ import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-w
 import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
 import { LoadingScreen } from '../../game/ui/loading-screen';
 import { WorldCursorDriver } from '../../game/ui/world-cursor';
-import { CURSOR_POINT, classifyUnitCursor, cursorStem } from '../../game/world/cursor-mode';
+import {
+  CURSOR_POINT, classifyUnitCursor, cursorStem, questgiverHasQuest,
+} from '../../game/world/cursor-mode';
 import { pickUnit, pickUnitReport, drawnWorldBox } from '../../game/world/pick';
 import { collisionWorld } from '../../game/collision/collision-world';
 import { CollisionLayer } from '../../game/collision/types';
@@ -688,6 +690,10 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         // non-skinner gets NO knife, so false is the arm that shows nothing rather than the arm that
         // shows a knife a click cannot honour.
         knowsSkinning: false,
+        // THE QUESTGIVER LEG'S GATE, off the same status map the overhead markers read. See
+        // `cursor-mode.ts#questgiverHasQuest`: this used to be hard-coded false and a QUESTGIVER-only
+        // NPC was unclickable as a result.
+        questgiverHasQuest: this.questgiverHasQuest(hit),
       }) ?? CURSOR_POINT;
     }
     // THE MOUSEOVER MODEL BRIGHTEN, off the pick this method already made -- a second consumer of one
@@ -759,6 +765,25 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   };
 
   /**
+   * THE QUESTGIVER LEG'S GATE for one unit -- the input `classifyUnitCursor` cannot fetch itself.
+   *
+   * `QuestHandler#status` is the guid -> `DIALOG_STATUS` map the two `SMSG_QUESTGIVER_STATUS*` opcodes
+   * fill, and it is the same map `world/quest-markers.ts` draws the overhead `!`/`?` from -- so the
+   * cursor and the marker now read one source. The predicate itself lives in `cursor-mode.ts` beside the
+   * ladder it gates; this method only supplies the lookup.
+   *
+   * **One helper for both call sites on purpose.** The hover cursor and `interactWith` must pass the
+   * SAME value or the pointer promises a conversation the click declines, which is the failure this
+   * whole change fixes -- with the two disagreeing instead of both saying no.
+   *
+   * Cost: one `Map#get` on the hover cadence and one per interact click. The map holds the questgivers
+   * in range, a handful.
+   */
+  private questgiverHasQuest(unit: Unit): boolean {
+    return questgiverHasQuest(this.game.objectHandler.questHandler.status.get(unit.guid));
+  }
+
+  /**
    * A FRIENDLY SERVICE NPC'S RIGHT CLICK -- the interact, and the door the merchant window comes
    * through.
    *
@@ -794,6 +819,10 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       // DECLARED FALSE, as on the hover path: nothing decodes a learned profession. It only affects
       // the Skin leg, which is not a service and sends nothing here either way.
       knowsSkinning: false,
+      // The same gate the hover path applies, and it MUST be the same value: this method dispatches
+      // off the classification, so a mismatch here is a cursor that promises a gossip the click
+      // refuses. That is why both sites go through one helper.
+      questgiverHasQuest: this.questgiverHasQuest(hit),
     });
     if (mode === null || mode.unable) {
       return;

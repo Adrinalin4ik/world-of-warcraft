@@ -9,33 +9,36 @@ import { DIALOG_STATUS } from '../../../network/game/object/quest';
  * the pure decision, and it is the one where a wrong answer hangs a `!` over an NPC with nothing to
  * offer.
  *
- * `NONE` and `UNAVAILABLE` are the important half: the server answers them for every non-giver in
- * view, so a non-null result here would put a marker on the whole zone.
+ * `NONE` is the important half: the server answers it for every non-giver in view, so a non-null
+ * result there would put a marker on the whole zone.
  */
-
 /** The served paths use the game's own separator; built this way so no escape can be mis-typed. */
 const BS = String.fromCharCode(92);
 const art = (stem: string) => ['interface', 'buttons', `${stem}.m2`].join(BS);
 
-test('only an offer or a turn-in gets a marker, and low level gets the grey art', () => {
-  // Nothing at all -- the common case, and the one that must never draw.
+test('every status the reference maps gets its own art, and NONE draws nothing', () => {
+  // The one status that must never draw: the server answers it for every non-giver in view.
   expect(modelFor(DIALOG_STATUS.NONE)).toBeNull();
-  expect(modelFor(DIALOG_STATUS.UNAVAILABLE)).toBeNull();
-  // `INCOMPLETE` is a DECLARED gap rather than an oversight -- see `quest-markers.ts#modelFor`.
-  expect(modelFor(DIALOG_STATUS.INCOMPLETE)).toBeNull();
 
-  // An offer and a turn-in are different art.
+  // GOLD -- an offer you can take, and a turn-in that is ready.
   expect(modelFor(DIALOG_STATUS.AVAILABLE)).toBe(art('talktome'));
   expect(modelFor(DIALOG_STATUS.AVAILABLE_REP)).toBe(art('talktome'));
   expect(modelFor(DIALOG_STATUS.REWARD)).toBe(art('talktomequestionmark'));
   expect(modelFor(DIALOG_STATUS.REWARD2)).toBe(art('talktomequestionmark'));
-  expect(modelFor(DIALOG_STATUS.REWARD_REP)).toBe(art('talktomequestionmark'));
 
-  // Below the player's level: the grey art, and all three low-level statuses share it because no grey
-  // question mark is served on this build.
+  // GREY -- the same two things when they are not actionable yet. `UNAVAILABLE` and the low-level
+  // offers are the grey `!`; a held-but-unfinished quest is the grey `?`, which this test used to
+  // assert drew NOTHING because the model was believed unserved. It is served as
+  // `talktomequestion_grey`, so the pair the owner asked for -- grey while unfinished, gold once
+  // complete -- is the REWARD/INCOMPLETE line below and the one above it.
+  expect(modelFor(DIALOG_STATUS.UNAVAILABLE)).toBe(art('talktomegrey'));
   expect(modelFor(DIALOG_STATUS.LOW_LEVEL_AVAILABLE)).toBe(art('talktomegrey'));
   expect(modelFor(DIALOG_STATUS.LOW_LEVEL_AVAILABLE_REP)).toBe(art('talktomegrey'));
-  expect(modelFor(DIALOG_STATUS.LOW_LEVEL_REWARD_REP)).toBe(art('talktomegrey'));
+  expect(modelFor(DIALOG_STATUS.INCOMPLETE)).toBe(art('talktomequestion_grey'));
+  expect(modelFor(DIALOG_STATUS.LOW_LEVEL_REWARD_REP)).toBe(art('talktomequestion_grey'));
+
+  // LIGHT BLUE -- the reputation turn-in, its own served model.
+  expect(modelFor(DIALOG_STATUS.REWARD_REP)).toBe(art('talktomequestion_ltblue'));
 
   // The reference's slot, carried as a number so a silent edit shows up here.
   expect(MARKER_ATTACHMENT).toBe(18);

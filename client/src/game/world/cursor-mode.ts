@@ -20,14 +20,23 @@
  *    Mine, a plaque's Inspect), keyed off `Lock.dbc`/`LockType.dbc` and the GO's template. This
  *    client's pick (`world/pick.ts`) admits `OBJECT_TYPE_UNIT`/`_PLAYER` only and there is no
  *    GameObject template query at all, so there is no hovered GO to classify. Declared, not faked.
- *  - **The QUESTGIVER leg's quest-status gate.** `service_cursor` requires the unit's cached
- *    `SMSG_QUESTGIVER_STATUS` to be outside {NONE, UNAVAILABLE} before the bit means "talk to me"
- *    (`cursor_mode.rs:399-419`, and the reference records a real bug caused by skipping it). That
- *    opcode (0x183) is in `network/game/opcode.js` with no subscriber, so the status is genuinely
- *    unknown here -- and the reference's own rule for "never sent" is that it reads as NO quest. So
- *    the QUESTGIVER bit ALONE never produces Speak here: `questgiverHasQuest` is a declared gap that
- *    answers false, which is the conservative arm (a questgiver that also carries GOSSIP -- almost
- *    all of them -- still gets Speak off bit 0).
+ *  - ~~**The QUESTGIVER leg's quest-status gate.**~~ **MODELLED**, and it was a real defect rather
+ *    than a cosmetic gap. `serviceCursor` requires the unit's cached `SMSG_QUESTGIVER_STATUS` to be
+ *    outside {NONE, UNAVAILABLE} before bit 1 means "talk to me" (`cursor_mode.rs:642-645`, and the
+ *    reference records a real bug caused by skipping it). This file used to say that opcode "is in
+ *    `network/game/opcode.js` with no subscriber, so the status is genuinely unknown here" and hard-code
+ *    `false` as the conservative arm -- reasoning that a questgiver "almost all of them" also carries
+ *    GOSSIP and so still gets Speak off bit 0.
+ *
+ *    **The exception was not rare, and hard-coding false was not conservative.** `quest.ts#handleStatus`
+ *    has subscribed to both status opcodes since the overhead markers were built, so the status stopped
+ *    being unknown; and a QUESTGIVER-ONLY npc (`npcflag = 2`, no GOSSIP bit) then classified `null`.
+ *    Because `pages/game/index.tsx#interactWith` dispatches off THIS classification rather than
+ *    re-reading the flags, that one `false` cost the cursor AND the click together: Northshire's Eagan
+ *    Peltskinner highlighted on hover, wore a `Point`, sent no `CMSG_GOSSIP_HELLO`, and could not be
+ *    talked to at all -- while a gold `?` sat over his head off the very status map this gate was
+ *    declining to read. Every questgiver that carries GOSSIP kept working, which is exactly what made
+ *    it look like one broken NPC instead of one missing input.
  *  - **The loot leg's Pickup/LootAll split and the skin leg's learned-Skinning precondition.** Both
  *    are modelled: the auto-loot half needs a CVar this client's loot code does not have (there is
  *    no loot code), so `lootCursor` takes the effective flag as an argument and the caller passes
@@ -35,6 +44,7 @@
  *    (`cursor_mode.rs:461-468`). The Skinning precondition is real and reads the player's known
  *    spells.
  */
+import { DIALOG_STATUS } from '../../network/game/object/quest';
 import type Unit from '../classes/unit';
 import { REACTION_HOSTILE, REACTION_NEUTRAL, reactionFor } from './faction';
 
@@ -259,6 +269,28 @@ export function lootCursor(effectiveAutoLoot: boolean): CursorKind {
   return effectiveAutoLoot ? 'LootAll' : 'Pickup';
 }
 
+/**
+ * Does a QUESTGIVER-flagged unit actually have a quest for us?
+ *
+ * The reference's predicate verbatim (`cursor_mode.rs:642-645`):
+ * `!matches!(quest_status, None | Some(NONE) | Some(UNAVAILABLE))`. The two excluded values and
+ * `undefined` are all "nothing to talk about", so **`UNAVAILABLE` draws its grey `!` and still gets no
+ * Speak** -- the marker and the cursor answer different questions and are not meant to agree.
+ *
+ * The version-numbered part is the enum, not the rule: `NONE` and `UNAVAILABLE` are 0 and 1 in both
+ * builds, but they are named through our own 3.3.5a `DIALOG_STATUS` so nothing here carries a literal.
+ *
+ * **Never-sent reads as no quest**, which is the reference's own rule (`:640-641`): the server sends
+ * the status unprompted for every questgiver in range, so its absence is an answer. `:633` records what
+ * the gate is FOR -- an NPC carrying QUESTGIVER, no other service bit and no `creature_questrelation`
+ * row, where skipping the gate opens an empty gossip frame with a placeholder greeting.
+ */
+export function questgiverHasQuest(status: number | undefined): boolean {
+  return status !== undefined
+    && status !== DIALOG_STATUS.NONE
+    && status !== DIALOG_STATUS.UNAVAILABLE;
+}
+
 /** What the classifier needs from outside the two units. */
 export interface CursorInputs {
   /** Squared yards between the two units' centres. Passed in so the caller measures once. */
@@ -267,6 +299,13 @@ export interface CursorInputs {
   autoLoot: boolean;
   /** Has the local player learned a Skinning spell (`0xb700e4`'s role). */
   knowsSkinning: boolean;
+  /**
+   * Is this unit's cached `SMSG_QUESTGIVER_STATUS` one that means "I have something for you"?
+   *
+   * Gates the QUESTGIVER leg and nothing else -- see `questgiverHasQuest`, which the caller applies to
+   * the status map. Passed in rather than read here because this module holds no network state.
+   */
+  questgiverHasQuest: boolean;
 }
 
 /**
@@ -310,9 +349,7 @@ export function classifyUnitCursor(
   // attack-worthy, reaction >= neutral") because `CGUnit::CanInteract 0x606880` is not fully derived
   // there either; it is carried across unchanged rather than improved on guesswork.
   if (!isPlayer && reaction !== null && reaction >= REACTION_NEUTRAL) {
-    // The QUESTGIVER bit's own gate is a declared gap -- see this file's header. `false` is the
-    // conservative arm and the reference's own answer for a status that was never sent.
-    const kind = serviceCursor(unit.fields.npcFlags ?? 0, false);
+    const kind = serviceCursor(unit.fields.npcFlags ?? 0, inputs.questgiverHasQuest);
     if (kind !== null) {
       return { kind, unable: distanceSq > SERVICE_RANGE_SQ };
     }
