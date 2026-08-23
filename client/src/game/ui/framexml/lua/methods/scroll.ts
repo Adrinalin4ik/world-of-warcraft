@@ -133,56 +133,81 @@ function sliderState(self: number): SliderState {
  * `floor(yrange) == 0` branch hide a scrollbar for content that does not overflow.
  */
 /**
- * How far the scroll child's CONTENT extends past its own declared box, in logical units.
+ * The scroll child's content size on BOTH axes, in ONE walk.
  *
- * **THIS IS WHY NOTHING SCROLLED, and it is upstream of every input path.**
- * `QuestDetailScrollChildFrame` is authored 300x334 inside a 300x334 viewport
- * (`questframe.xml:344-348`) and **nothing ever resizes it** -- `QuestInfo_Display` positions its
- * elements with `SetPoint` chains and never touches the child's height (`questinfo.lua:68-80`). So a
- * range measured from the child's own `height` is structurally **0**, whatever the text does.
+ * **This was two walks and it was 40.4 ms of a 43.5 ms frame.** `reconcileScrollRanges` called a
+ * per-axis version twice per scroll frame, and each call recursed the child's whole subtree calling
+ * `layoutRectOf` on every node -- so a registered scroll frame cost two full subtree traversals every
+ * frame, whether it was on screen or not. In a 4211-frame tree with the quest log, the spellbook, the
+ * talent frame and the chat frames all holding scroll children, that is the whole frame budget.
  *
- * With a 0 range the slider's max is 0, `SetValue` clamps every value to 0, the transition guard then
- * returns early, and the arrows, the drag and the thumb's travel are all correctly dead. One cause, three
- * symptoms -- which is what the coordinator suspected from three inputs failing at once.
+ * Measured, not guessed: the owner's HUD read `ui.scroll` **40.4 ms** against `ui.rects` 0.0 and
+ * `ui.hit` 0.0, after three of my other hypotheses had each been refuted by their own instrument.
  *
- * The real engine measures the scroll child's actual EXTENT, descendants included, which is how 334 of
- * box holds 600 of text and yields a 266 range. Measured here from the resolved rects, which is the same
- * layout the draw pass uses -- and `rects.ts` answers before the first frame is drawn now, so a panel
- * opening mid-load is measurable too.
+ * The walk itself is unchanged -- same `layoutRectOf`, same far-edge maximum, same
+ * `Math.max(child[axis], far - start)` result on each axis. Only the number of traversals changed.
  */
-function contentExtent(ctx: MethodContext, child: Widget, axis: 'height' | 'width'): number {
+function contentExtents(ctx: MethodContext, child: Widget): { width: number; height: number } {
   const base = layoutRectOf(child.id);
   if (base === null) {
-    return child[axis];
+    return { width: child.width, height: child.height };
   }
-  const start = axis === 'height' ? base.top : base.left;
-  let far = axis === 'height' ? base.top + base.height : base.left + base.width;
+  let farY = base.top + base.height;
+  let farX = base.left + base.width;
   const walk = (node: Widget): void => {
     for (const kid of node.children) {
       const rect = layoutRectOf(kid.id);
       if (rect !== null) {
-        const edge = axis === 'height' ? rect.top + rect.height : rect.left + rect.width;
-        if (edge > far) {
-          far = edge;
+        const bottom = rect.top + rect.height;
+        if (bottom > farY) {
+          farY = bottom;
+        }
+        const right = rect.left + rect.width;
+        if (right > farX) {
+          farX = right;
         }
       }
       walk(kid);
     }
   };
   walk(child);
-  return Math.max(child[axis], far - start);
+  return {
+    width: Math.max(child.width, farX - base.left),
+    height: Math.max(child.height, farY - base.top),
+  };
 }
 
-function rangeOf(ctx: MethodContext, self: number, axis: 'height' | 'width'): number {
+/**
+ * Is this frame on screen at all -- itself shown, and every ancestor with it?
+ *
+ * `Widget#shown` is the frame's OWN flag, so a shown scroll frame inside a hidden panel still reads
+ * true. `collectButtons` gets effective visibility for free by pruning its walk
+ * (`framexml/tick.ts:234`); this pass iterates a registry rather than walking a tree, so it has to ask.
+ */
+function onScreen(widget: Widget): boolean {
+  for (let node: Widget | null = widget; node !== null; node = node.parent ?? null) {
+    if (!node.shown) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function rangesOf(ctx: MethodContext, self: number): { x: number; y: number } {
   const child = scrollState(self).child;
   if (child === null) {
-    return 0;
+    return { x: 0, y: 0 };
   }
   const childWidget = ctx.registry.widget(child);
   if (childWidget === null) {
-    return 0;
+    return { x: 0, y: 0 };
   }
-  return Math.max(0, contentExtent(ctx, childWidget, axis) - widgetOf(ctx, self)[axis]);
+  const content = contentExtents(ctx, childWidget);
+  const frame = widgetOf(ctx, self);
+  return {
+    x: Math.max(0, content.width - frame.width),
+    y: Math.max(0, content.height - frame.height),
+  };
 }
 
 /**
@@ -235,8 +260,23 @@ export function reconcileScrollRanges(ctx: MethodContext): void {
     if (widget === undefined) {
       continue;
     }
-    const y = rangeOf(ctx, frameId, 'height');
-    const x = rangeOf(ctx, frameId, 'width');
+    /**
+     * OFF-SCREEN FRAMES ARE SKIPPED, and that is the other half of the 40.4 ms.
+     *
+     * A hidden panel's scroll range cannot be observed by anybody, and it does not need to be computed
+     * early either: showing the panel moves geometry, which bumps `layoutRevision`, so the next tick
+     * reconciles it before the player can interact. Same rule `syncInteractiveArt` states for buttons --
+     * "a hidden frame's state art cannot be observed" -- and the same saving, which here is most of the
+     * registry.
+     *
+     * The last-announced pair is left UNTOUCHED for a skipped frame rather than zeroed: when it comes
+     * back on screen its real range is compared against what it was last told, so a panel that reopens
+     * unchanged re-announces nothing.
+     */
+    if (!onScreen(widget)) {
+      continue;
+    }
+    const { x, y } = rangesOf(ctx, frameId);
     if (x === last.x && y === last.y) {
       continue;
     }
@@ -289,7 +329,7 @@ const SCROLLFRAME: MethodTable = {
   // `SetVerticalScroll(GetVerticalScroll() - height/2)` straight past zero and expects the engine to
   // stop it there, then reads the value back to decide whether to disable the arrow.
   SetVerticalScroll: (ctx, self, args) => {
-    const range = rangeOf(ctx, self, 'height');
+    const range = rangesOf(ctx, self).y;
     const state = scrollState(self);
     const wanted = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
     if (wanted === state.vertical) {
@@ -305,9 +345,9 @@ const SCROLLFRAME: MethodTable = {
     return [];
   },
   GetVerticalScroll: (ctx, self) => [scrollState(self).vertical],
-  GetVerticalScrollRange: (ctx, self) => [rangeOf(ctx, self, 'height')],
+  GetVerticalScrollRange: (ctx, self) => [rangesOf(ctx, self).y],
   SetHorizontalScroll: (ctx, self, args) => {
-    const range = rangeOf(ctx, self, 'width');
+    const range = rangesOf(ctx, self).x;
     const state = scrollState(self);
     const wanted = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
     if (wanted === state.horizontal) {
@@ -319,7 +359,7 @@ const SCROLLFRAME: MethodTable = {
     return [];
   },
   GetHorizontalScroll: (ctx, self) => [scrollState(self).horizontal],
-  GetHorizontalScrollRange: (ctx, self) => [rangeOf(ctx, self, 'width')],
+  GetHorizontalScrollRange: (ctx, self) => [rangesOf(ctx, self).x],
 
   /**
    * A genuine no-op rather than a stub, and the distinction matters for the report.

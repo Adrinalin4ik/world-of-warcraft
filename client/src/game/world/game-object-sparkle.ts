@@ -71,6 +71,10 @@ export class GameObjectSparkle {
   /** Guids whose load is in flight, so a slow fetch cannot start a second one. */
   private loading = new Set<string>();
 
+  /** Loaded and awaiting adoption on the next tick -- see the note in `spawn`. */
+  private pending: { guid: string; model: THREE.Object3D & { updateMatrix?: () => void };
+    at: THREE.Vector3; manager: ParticleManager }[] = [];
+
   /** `window.worldGameObjectSparkle()` reads this. */
   public stats = { live: 0, created: 0, removed: 0, noManager: 0, noModel: 0 };
 
@@ -111,7 +115,50 @@ export class GameObjectSparkle {
       }
       this.spawn(guid, unit, manager);
     }
+    this.drainPending(entities);
     this.stats.live = this.live.size;
+  }
+
+  /**
+   * Adopt everything that finished loading -- on the tick, synchronously. See `spawn`.
+   *
+   * Free on the steady path: one array-length test. The work per entry is what the promise handler used
+   * to do, and the ordering is unchanged -- placed, matrices baked, added, then registered.
+   */
+  private drainPending(entities: Map<string, Unit>): void {
+    if (this.pending.length === 0) {
+      return;
+    }
+    for (const entry of this.pending) {
+      const { guid, model, at, manager } = entry;
+      /**
+       * RE-CHECKED HERE, not only before queueing.
+       *
+       * The drop pass above runs first and clears a `live` sparkle whose object was used -- but an entry
+       * queued while the fetch was out has no `live` row to clear, so without this test a bucket looted
+       * in the meantime would still get its glow adopted a frame later and then keep it until the NEXT
+       * drop pass. One `Map` lookup per queued entry, and only on the frames anything is queued.
+       */
+      const unit = entities.get(guid);
+      if (unit === undefined || unit.gameObject === null
+        || !goIsActivatable(unit.gameObject.dynamic) || this.live.has(guid)) {
+        M2Blueprint.unload(model as never);
+        continue;
+      }
+      model.position.copy(at);
+      // BOTH CALLS, and neither is optional -- see the header. Without them the sparkle draws at the
+      // world origin, which is the trap `level-up-effect.ts` and `unit.ts#applyRenderScale` record.
+      if (typeof model.updateMatrix === 'function') {
+        model.updateMatrix();
+      }
+      this.scene.add(model);
+      model.updateMatrixWorld(true);
+      // THE REGISTRATION IS WHAT MAKES IT EMIT. See the header.
+      manager.register(model);
+      this.live.set(guid, { model, manager });
+      this.stats.created += 1;
+    }
+    this.pending.length = 0;
   }
 
   private spawn(guid: string, unit: Unit, manager: ParticleManager): void {
@@ -128,18 +175,21 @@ export class GameObjectSparkle {
           M2Blueprint.unload(model as never);
           return;
         }
-        model.position.copy(at);
-        // BOTH CALLS, and neither is optional -- see the header. Without them the sparkle draws at the
-        // world origin, which is the trap `level-up-effect.ts` and `unit.ts#applyRenderScale` record.
-        if (typeof model.updateMatrix === 'function') {
-          model.updateMatrix();
-        }
-        this.scene.add(model);
-        model.updateMatrixWorld(true);
-        // THE REGISTRATION IS WHAT MAKES IT EMIT. See the header.
-        manager.register(model);
-        this.live.set(guid, { model, manager });
-        this.stats.created += 1;
+        /**
+         * QUEUED FOR THE TICK, NOT ADOPTED HERE -- and the owner's console is why.
+         *
+         * `ParticleManager.register` synchronously builds a `ParticleMaterial` per emitter, and each one
+         * starts a texture load. Called from inside a `.then`, that creates a promise the handler never
+         * returns, which Bluebird reports -- and `lootfx` has four emitters, so a vineyard of buckets
+         * produced **35 of those warnings in one session**, burying the very console lines the loot and
+         * perf diagnostics are being read from. A diagnostic drowned by noise is a diagnostic lost.
+         *
+         * Draining in `update` instead is better than a silenced warning, because the warning was
+         * pointing at something real: texture loads and material construction now happen on the world's
+         * own frame rather than in a microtask between frames, which is where every other model in this
+         * subsystem does its adoption. Same total work, on a boundary that can be measured.
+         */
+        this.pending.push({ guid, model, at, manager });
       })
       .catch(() => {
         this.loading.delete(guid);
@@ -156,6 +206,11 @@ export class GameObjectSparkle {
       this.scene.remove(entry.model);
       M2Blueprint.unload(entry.model as never);
     }
+    for (const entry of this.pending) {
+      // Never added to the scene, so only the blueprint reference has to go back.
+      M2Blueprint.unload(entry.model as never);
+    }
+    this.pending.length = 0;
     this.live.clear();
     this.loading.clear();
   }

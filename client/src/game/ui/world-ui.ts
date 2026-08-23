@@ -799,8 +799,16 @@ export class WorldUiHost {
      * `ScrollFrame_OnScrollRangeChanged` is the only thing that gives a scrollbar its min/max
      * (`uipaneltemplates.lua:275-285`), and nothing fired it -- so every real scroll frame had a 0..0
      * range and its arrows, drag and thumb were all dead. AFTER `publishRects`, because the range is
-     * measured from resolved rects. Gated internally on `layoutRevision()`: on a frame where nothing
-     * moved this is one integer comparison for the whole client.
+     * measured from resolved rects.
+     *
+     * **ITS COST NOTE USED TO SAY "on a frame where nothing moved this is one integer comparison for the
+     * whole client", AND THAT PREMISE WAS FALSE.** It is gated on `layoutRevision()`, and the revision
+     * evidently moves on nearly every frame in the world -- so the gate almost never held and the pass
+     * ran in full. It measured **40.4 ms of a 43.5 ms `ui.framexml`** on the owner's build: two full
+     * subtree traversals per registered scroll frame, hidden panels included. Fixed in
+     * `methods/scroll.ts` (one traversal, on-screen frames only); the note is corrected here because a
+     * comment asserting a cost that was never verified is what kept this invisible through four rounds of
+     * looking somewhere else.
      */
     this.sections.begin('ui.scroll');
     if (this.runtime !== null) {
