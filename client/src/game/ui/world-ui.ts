@@ -48,7 +48,7 @@ import { attachPaperDollStats } from './paperdoll-stats';
 import { attachSkillsBridge } from './skills-bridge';
 import { attachReputationBridge } from './reputation-bridge';
 import { attachLootBridge } from './loot-bridge';
-import { attachMapBridge } from './map-bridge';
+import { attachMapBridge, MapBridge } from './map-bridge';
 import { attachGossipBridge } from './gossip-bridge';
 import { attachInteractionWatch } from './interaction-watch';
 import { attachMerchantBridge } from './merchant-bridge';
@@ -253,7 +253,7 @@ export class WorldUiHost {
   private detachReputation: (() => void) | null = null;
 
   /** `attachMapBridge`'s teardown, held for the same reason as the loot bridge's below. */
-  private detachMap: (() => void) | null = null;
+  private mapBridge: MapBridge | null = null;
 
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
@@ -625,7 +625,7 @@ export class WorldUiHost {
         this.detachLoot = attachLootBridge(runtime.vm, this.world, this.art);
         // WHERE THE PLAYER IS, in words -- the zone-text family the minimap's label reads. See
         // `map-bridge.ts`; step 3 of the map arc and the first with anything visible in it.
-        this.detachMap = attachMapBridge(runtime.vm, this.world);
+        this.mapBridge = attachMapBridge(runtime.vm, this.world);
         // TALKING TO AN NPC, then BUYING AND SELLING. Gated on a real session for the reason the item
         // bridges are: a vendor's stock and a gossip menu are both packets, so an offline world has
         // neither and `world.game.objectHandler` must not be touched on that route.
@@ -763,6 +763,10 @@ export class WorldUiHost {
     // one comparison against a deadline. `performance.now()` rather than accumulating `dt`: a poll
     // measured in frames would fire eight times as often on a fast machine.
     this.interactionWatch?.poll(performance.now());
+    // THE ZONE EDGE, beside the interaction watch and for the same reason: there is nothing to push
+    // from. See `map-bridge.ts` -- the client refreshes its minimap label only on `ZONE_CHANGED*`, and
+    // this engine is what has to say one happened. Two divisions and a compare.
+    this.mapBridge?.poll();
     this.sections.end('ui.tick');
 
     const viewport = { width: window.innerWidth, height: window.innerHeight };
@@ -1426,8 +1430,8 @@ export class WorldUiHost {
     // then let the loot bridge restore the container's closure over the top -- leaving a dead source
     // installed after dispose, reading a bridge whose listeners are gone. Unwinding in the reverse of
     // the attach order is what makes the chain's restore land on something live.
-    this.detachMap?.();
-    this.detachMap = null;
+    this.mapBridge?.dispose();
+    this.mapBridge = null;
     this.detachLoot?.();
     this.detachLoot = null;
     // THE TRAINER'S FIRST, and the order is load-bearing rather than tidy. The tooltip-source chain has

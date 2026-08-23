@@ -123,6 +123,8 @@ export function attachAuraBridge(vm: LuaVM, world: World, art: GlueArt): () => v
     listBuilds: 0,
     listHits: 0,
     unnamed: 0,
+    /** Dropped because the spell is hidden from every aura display -- a passive. */
+    hidden: 0,
     forms: 0,
     trackedUnits: 0,
     unclassified: 0,
@@ -207,8 +209,29 @@ export function attachAuraBridge(vm: LuaVM, world: World, art: GlueArt): () => v
       if (playerOnly && entry.caster !== null && entry.caster !== playerGuid) {
         return false;
       }
-      if (spellData.spell(entry.spellId) === null) {
+      const spell = spellData.spell(entry.spellId);
+      if (spell === null) {
         stats.unnamed += 1;
+        return false;
+      }
+      /**
+       * A PASSIVE'S AURA IS NOT SHOWN ON ANY FRAME, and this is the owner's report on another player:
+       * "у него в бафах отображаются пасивные спасобности, что не верно."
+       *
+       * It also explains the "duplicated buffs" he reported before it, which cost a round: weapon-skill
+       * passives look alike and a character carries several -- `Unarmed`, `Defense`, `Thrown`,
+       * `Two-Handed Swords`, `Plate Mail` -- so a row of them reads as one buff repeated.
+       *
+       * `hiddenFromAuraBar` is the reference's own predicate (`spells/display.rs:617-619`), and the
+       * reference is explicit that it is not a player-bar rule: the aura is "hidden on *every* aura
+       * display, target rows included" (`ui_aura.rs:36`), the client's gate for another unit's row being
+       * `IsAuraDisplayable 0x519860`.
+       *
+       * FILTERED HERE rather than in the frame, because here is where every consumer meets: `UnitAura`,
+       * `UnitBuff`, `UnitDebuff` and the count all read this list, so one filter cannot be half-applied.
+       */
+      if (spell.hiddenFromAuraBar) {
+        stats.hidden += 1;
         return false;
       }
       return true;

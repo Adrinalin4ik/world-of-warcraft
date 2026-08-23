@@ -349,6 +349,34 @@ export interface SpellRow {
    * the served file proves the DISCRIMINATION, which is all the filter needs.
    */
   hiddenInSpellbook: boolean;
+
+  /**
+   * Keep this spell's aura OFF every aura display -- a unit frame's buff row included, not just the
+   * player's own bar.
+   *
+   * The owner found it on another player: "у него в бафах отображаются пасивные спасобности, что не
+   * верно." He is right, and it also explains the "duplicated buffs" report before it -- weapon-skill
+   * passives look alike and there are a lot of them.
+   *
+   * The reference's predicate verbatim: `attributes & ATTR_DO_NOT_DISPLAY != 0 || attributes_ex &
+   * ATTR_EX_NO_AURA_ICON != 0` (`benilla-formats/src/spells/display.rs:617-619`), with
+   * `ATTR_DO_NOT_DISPLAY = 0x80` and `ATTR_EX_NO_AURA_ICON = 0x1000_0000` (`spells/mod.rs:398,412`). It
+   * is explicit that this is not a player-bar rule -- the aura is "hidden on *every* aura display, target
+   * rows included" (`ui_aura.rs:36`), and the client's own gate for another unit's row is
+   * `IsAuraDisplayable 0x519860`.
+   *
+   * **`0x80` IS THE SAME BIT `hiddenInSpellbook` READS**, which is not a coincidence to paper over: the
+   * reference has one bit with two consumers, its spellbook predicate testing the identical
+   * `ATTR_DO_NOT_DISPLAY`. So the measurement already recorded on that field -- 10,243 spells, 20.6%,
+   * with `Unarmed`, `Defense`, `Thrown`, `Two-Handed Swords`, `Plate Mail` and `Rogue Passive (DND)` all
+   * carrying it -- is the measurement behind this too, and it names exactly what the owner is seeing.
+   *
+   * NOT MODELLED, and declared: the reference also excludes TRACKING auras from every display
+   * (`EffectApplyAuraName` in `{44, 45, 151}`), so `Find Minerals` never reaches a buff row and instead
+   * feeds `GetTrackingTexture`. That needs the three effect-aura columns this file does not read, and it
+   * is not the owner's symptom -- a tracking aura is on the PLAYER, not on another player's frame.
+   */
+  hiddenFromAuraBar: boolean;
   /** `SpellLevel`: which rank of a family this is. See `COL.spellLevel`. */
   spellLevel: number;
   iconID: number;
@@ -734,6 +762,12 @@ class SpellData {
         // Bit 0x80 of the SAME word. See `SpellRow#hiddenInSpellbook` for the measurement that
         // establishes it and rules out both the `(DND)` name and the weapon skill CATEGORY.
         hiddenInSpellbook: (col(COL.attributes) & 0x80) !== 0,
+        // The SAME `0x80`, plus `AttributesEx1`'s `0x1000_0000`. See `SpellRow#hiddenFromAuraBar` for the
+        // reference's predicate and for why one bit legitimately has two consumers. `COL.attributes + 1`
+        // is `AttributesEx1`: this file's own column note records that 4-11 are `Attributes` +
+        // `AttributesEx1..Ex7`.
+        hiddenFromAuraBar: (col(COL.attributes) & 0x80) !== 0
+          || (col(COL.attributes + 1) & 0x10000000) !== 0,
         spellLevel: col(COL.spellLevel),
         iconID: col(COL.iconID),
         visualID: col(COL.visual),

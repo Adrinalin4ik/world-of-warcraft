@@ -1,4 +1,5 @@
 import { mapData } from '../pipeline/dbc/map-data';
+import { fireEvent } from './framexml/lua/events';
 import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
 
@@ -48,7 +49,7 @@ import type World from '../world';
  * parent chain, and the chain is two or three deep in practice. These are called from `SetText` paths on
  * zone-change events, not per frame.
  */
-export function attachMapBridge(vm: LuaVM, world: World): () => void {
+export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   let disposed = false;
 
   // Kicked off here rather than awaited: the first zone change after it lands fills the label, and a
@@ -89,6 +90,19 @@ export function attachMapBridge(vm: LuaVM, world: World): () => void {
     vm.registerFunction(name, body);
   };
 
+/**
+   * `GetZonePVPInfo()` -- `Minimap_Update` reads it on the very next line after the label.
+   *
+   * Answers nil, which is a real answer and not a stub: the else branch of the client's own ladder paints
+   * `NORMAL_FONT_COLOR`, which is what an ordinary contested zone looks like. Registering it matters even
+   * so -- an absent global would throw INSIDE the handler that has just set the text, and while the
+   * `SetText` above it would survive, the tooltip call below it would not.
+   *
+   * The real values need `AreaTable.flags`' sanctuary/arena bits and the faction ownership a zone can
+   * change hands over, neither of which this client reads. Declared, not faked.
+   */
+  fn('GetZonePVPInfo', () => [null, null, null]);
+
   fn('GetSubZoneText', () => [where().leaf]);
   fn('GetZoneText', () => [where().zone]);
   // See the header: identical to `GetZoneText` outside an instance, and this client enters none.
@@ -122,10 +136,72 @@ export function attachMapBridge(vm: LuaVM, world: World): () => void {
     };
   };
 
-  return () => {
-    disposed = true;
-    delete (window as unknown as Record<string, unknown>).worldZone;
+/**
+   * THE ZONE-CHANGE EDGE, and without it the label is blank for ever.
+   *
+   * The owner's reading closed every other candidate: `loaded: true`, `areaId: 12`,
+   * `zone: 'Elwynn Forest'` -- so the globals answer correctly and nothing was asking them. The client's
+   * own file says why, and it is not a missing global:
+   *
+   *     <OnLoad>  Minimap.timer = 0; Minimap_Update();
+   *               self:RegisterEvent("ZONE_CHANGED");
+   *               self:RegisterEvent("ZONE_CHANGED_INDOORS");
+   *               self:RegisterEvent("ZONE_CHANGED_NEW_AREA");
+   *     <OnEvent function="Minimap_Update"/>          (`minimap.xml:741-751`)
+   *
+   * `Minimap_Update` runs ONCE at load -- before a world exists, when `GetMinimapZoneText` correctly
+   * answers "" -- and after that the label only ever refreshes on those three events. **This engine fires
+   * none of them**, so the blank was written at load and never rewritten. That is the same shape as the
+   * scroll ranges: the client announces nothing itself and waits for the engine to say something changed.
+   *
+   * WHICH of the three, by the reference's own distinction between the leaf and the zone:
+   *
+   *  - the ZONE changed -> `ZONE_CHANGED_NEW_AREA`, which is the "you have entered Westfall" edge.
+   *  - the zone is the same and the SUB-AREA changed -> `ZONE_CHANGED`.
+   *  - `ZONE_CHANGED_INDOORS` is NOT fired: it needs the indoor bit out of `AreaTable.flags`, which this
+   *    client does not read. Declared. Nothing is lost by its absence -- the client's handler is the same
+   *    function for all three.
+   *
+   * Polled rather than pushed because there is nothing to push from: no `SMSG_ZONE_UPDATE` subscriber
+   * exists and the area comes from the terrain cell under the player, which changes as he walks. The cost
+   * is `areaIdAt` -- two divisions and a `Map#get` -- plus a compare, once per UI tick.
+   */
+  let lastArea = 0;
+  let lastZone = '';
+
+  const poll = (): void => {
+    if (disposed || !mapData.loaded) {
+      return;
+    }
+    const player = world.player;
+    const map = world.map as unknown as { areaIdAt?: (x: number, y: number) => number } | null;
+    if (!player || !map || typeof map.areaIdAt !== 'function') {
+      return;
+    }
+    const areaId = map.areaIdAt(player.position.x, player.position.y);
+    if (areaId === 0 || areaId === lastArea) {
+      return;
+    }
+    lastArea = areaId;
+    const zone = mapData.zoneOf(areaId)?.name ?? '';
+    const zoneChanged = zone !== lastZone;
+    lastZone = zone;
+    fireEvent(vm, zoneChanged ? 'ZONE_CHANGED_NEW_AREA' : 'ZONE_CHANGED');
   };
+
+  return {
+    poll,
+    dispose: () => {
+      disposed = true;
+      delete (window as unknown as Record<string, unknown>).worldZone;
+    },
+  };
+}
+
+/** What the host holds: a per-tick poll for the zone edge, and the teardown. */
+export interface MapBridge {
+  poll: () => void;
+  dispose: () => void;
 }
 
 export default attachMapBridge;

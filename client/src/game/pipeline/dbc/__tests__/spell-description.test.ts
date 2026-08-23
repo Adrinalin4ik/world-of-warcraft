@@ -23,6 +23,7 @@ function emptyRow(id: number, description: string): SpellRow {
     description,
     passive: false,
     hiddenInSpellbook: false,
+  hiddenFromAuraBar: false,
     spellLevel: 1,
     iconID: 0,
     visualID: 0,
