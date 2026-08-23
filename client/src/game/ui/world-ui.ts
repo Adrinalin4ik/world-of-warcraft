@@ -803,17 +803,33 @@ export class WorldUiHost {
     // but it made every portrait a one-frame-in-twelve animation of the Stand loop. The booth now bakes
     // only on a real change; see `ModelBooth#render`. `boothBaked` still forces the full draw, because
     // a bake changes pixels the fingerprint cannot see.
+    /**
+     * SPANNED AS ITS OWN ROW, and this is why: `ui.framexml` measured **35.6 ms** on the owner's build
+     * while `ui.tick` + `ui.layout` + `ui.draw` came to 2.4 -- so about 33 ms of the pass had no row at
+     * all, and the booth is the only large piece of it that was never given one. `paneMs` was already
+     * being computed here and going nowhere the panel could show.
+     *
+     * Two hypotheses have already been killed by their own instruments this round: events (the census
+     * came back 423 ms for a whole SESSION against a per-frame 35.6) and the button walk (the tick
+     * census came back 0.12 ms per frame against 42 buttons). Neither was the cost. So this row is not
+     * an accusation -- it is the last large unmeasured span, and if it also comes back small then the
+     * cost is between the rows and the next step is the pass's own boundaries.
+     */
+    this.sections.begin('ui.booth');
     const paneStarted = performance.now();
     const boothBaked = this.booth.render(items, this.art, (unit) => this.subjectForUnit(unit), {
       scale,
       pixelRatio: this.renderer.getPixelRatio(),
     });
     const paneMs = performance.now() - paneStarted;
+    this.sections.end('ui.booth');
     // Re-render the OFFSCREEN target only when the interface actually changed; composite it every
     // frame with one quad. See `signature` and `target` for the measurement that forced this.
+    this.sections.begin('ui.sig');
     const signatureStarted = performance.now();
     const signature = drawListSignature(items);
     const signatureMs = performance.now() - signatureStarted;
+    this.sections.end('ui.sig');
     const target = this.target();
     const dirty =
       target !== null &&
