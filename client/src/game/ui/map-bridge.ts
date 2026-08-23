@@ -1,14 +1,25 @@
 import { mapData } from '../pipeline/dbc/map-data';
+import type { WorldMapAreaRow } from '../pipeline/dbc/map-data';
 import { fireEvent } from './framexml/lua/events';
 import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
 
 /**
- * WHERE THE PLAYER IS, in the words the interface shows -- the zone-text family.
+ * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
  *
- * Step 3 of the map arc, and the first one with anything visible in it. Step 1 was the DBC tables
- * (`pipeline/dbc/map-data.ts`), step 2 the area under the player (`world/map.js#areaIdAt`), and this is
- * what turns those two into the strings the minimap and the world map print.
+ * Steps 3 and 4 of the map arc. Step 1 was the DBC tables (`pipeline/dbc/map-data.ts`), step 2 the area
+ * under the player (`world/map.js#areaIdAt`), and this turns both into what the interface asks for.
+ *
+ * Every global here was taken from the client's own call sites rather than from a list of names:
+ * `worldmapframe.lua` calls `GetCurrentMapContinent` fifteen times, `SetMapZoom` seven, `GetMapInfo` and
+ * `GetCurrentMapAreaID` twice each, and so on. The dungeon and decoration surface is answered as EMPTY
+ * rather than left absent for a reason that is not politeness: `WorldMapFrame_Update` calls all of it on
+ * every open, and one absent global throws inside that function and takes the whole map down.
+ *
+ * ## THE SELECTION IS NOT THE POSITION
+ *
+ * The map shows what the player CHOSE; it follows him only when something calls `SetMapToCurrentZone`.
+ * The two are kept apart deliberately -- see `continentIndex`.
  *
  * ## FOUR GLOBALS AND THEY ARE NOT THE SAME QUESTION
  *
@@ -86,8 +97,64 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
     };
   };
 
-  const fn = (name: string, body: () => unknown[]): void => {
+  const fn = (name: string, body: (args: unknown[]) => unknown[]): void => {
     vm.registerFunction(name, body);
+  };
+
+  /**
+   * THE MAP'S OWN SELECTION, which is NOT the player's position.
+   *
+   * The world map shows whatever continent and zone the player chose from its dropdowns, and it follows
+   * him only when something calls `SetMapToCurrentZone`. Conflating the two would snap the map back every
+   * time he walked, so the selection is state and the position is a query.
+   *
+   * Both indices are 1-BASED and 0 means "not chosen", which is the client's own convention: the
+   * continent dropdown's first entry is index 1, and `GetCurrentMapContinent() == WORLDMAP_COSMIC_ID` is
+   * how `WorldMapFrame_Update` detects the zoomed-all-the-way-out sheet (`worldmapframe.lua:236`). A
+   * continent with zone 0 is the continent-wide sheet, which is exactly the `WorldMapArea` row whose
+   * `areaId` is 0 -- corroborated on the served file, where row 13 is `mapID 1, areaID 0, art "Kalimdor"`.
+   */
+  let continentIndex = 0;
+
+  let zoneIndex = 0;
+
+  /** The `WorldMapArea` row the selection names, or null when nothing is selected or loaded. */
+  const selected = (): WorldMapAreaRow | null => {
+    const continent = mapData.continents()[continentIndex - 1];
+    if (continent === undefined) {
+      return null;
+    }
+    if (zoneIndex === 0) {
+      return continent;
+    }
+    return mapData.zonesOn(continent.mapId)[zoneIndex - 1] ?? continent;
+  };
+
+  /**
+   * The player's zone as a (continent, zone) index pair -- what `SetMapToCurrentZone` needs.
+   *
+   * Both 1-based, and a zone the continent list does not contain answers null rather than 0: a zone we
+   * can name but cannot place is a data disagreement, and quietly selecting the continent sheet instead
+   * would hide it behind a map that looks plausible.
+   */
+  const currentZoneRow = (): { continent: number; zone: number } | null => {
+    const player = world.player;
+    const map = world.map as unknown as { areaIdAt?: (x: number, y: number) => number } | null;
+    if (!player || !map || typeof map.areaIdAt !== 'function' || !mapData.loaded) {
+      return null;
+    }
+    const areaId = map.areaIdAt(player.position.x, player.position.y);
+    const zone = areaId === 0 ? null : mapData.zoneOf(areaId);
+    if (zone === null) {
+      return null;
+    }
+    const continents = mapData.continents();
+    const continent = continents.findIndex((row) => row.mapId === zone.mapId);
+    if (continent < 0) {
+      return null;
+    }
+    const index = mapData.zonesOn(zone.mapId).findIndex((row) => row.areaId === zone.areaId);
+    return index < 0 ? null : { continent: continent + 1, zone: index + 1 };
   };
 
 /**
@@ -102,6 +169,136 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
    * change hands over, neither of which this client reads. Declared, not faked.
    */
   fn('GetZonePVPInfo', () => [null, null, null]);
+
+  /**
+   * `GetMapInfo()` -> the ART FOLDER name, and the texture height.
+   *
+   * `WorldMapFrame_Update` builds the map's twelve tiles from the first return
+   * (`worldmapframe.lua:234`) and handles nil itself by falling back to "Cosmic" or "World" -- so nil is
+   * a real answer for "nothing selected" rather than a gap.
+   *
+   * `textureHeight` is 0 because the client uses it only for DUNGEON maps, and this client enters none. A
+   * non-zero guess would change the art layout for no reason.
+   */
+  fn('GetMapInfo', () => {
+    const row = selected();
+    return row === null ? [null, 0] : [row.art, 0];
+  });
+
+  /**
+   * `GetMapContinents()` -- the `Map.dbc` names, NOT the art folders.
+   *
+   * "Eastern Kingdoms", not "Azeroth". The reference is explicit about it and our own data confirms the
+   * two disagree: `WorldMapArea` row 30's art is "Elwynn" while `AreaTable` 12 is "Elwynn Forest", and
+   * the continent sheet for map 0 is arted as "Azeroth". Showing the art folder puts the wrong word in
+   * front of the player.
+   */
+  fn('GetMapContinents', () => mapData.continents().map(
+    (row) => mapData.mapName(row.mapId) ?? row.art,
+  ));
+
+  fn('GetMapZones', (args) => {
+    const continent = mapData.continents()[Number(args[0]) - 1];
+    if (continent === undefined) {
+      return [];
+    }
+    return mapData.zonesOn(continent.mapId).map((row) => mapData.displayName(row));
+  });
+
+  /**
+   * `SetMapZoom(continent, zone)` -- the dropdowns' own setter and the one the client calls most.
+   *
+   * An out-of-range index is IGNORED rather than clamped. The client passes what its own dropdown gave
+   * it, so an index we cannot resolve means our list and its list disagree -- and clamping would hide
+   * that disagreement behind a map that looks plausible.
+   */
+  fn('SetMapZoom', (args) => {
+    const continent = Number(args[0]);
+    const zone = Number(args[1] ?? 0);
+    if (!Number.isFinite(continent) || continent < 1
+      || mapData.continents()[continent - 1] === undefined) {
+      return [];
+    }
+    continentIndex = continent;
+    zoneIndex = Number.isFinite(zone) && zone > 0 ? zone : 0;
+    return [];
+  });
+
+  /** `SetMapToCurrentZone()` -- the map follows the player once, on request. */
+  fn('SetMapToCurrentZone', () => {
+    const zone = currentZoneRow();
+    if (zone !== null) {
+      continentIndex = zone.continent;
+      zoneIndex = zone.zone;
+    }
+    return [];
+  });
+
+  /**
+   * `SetMapByID(areaId)` -- select by `WorldMapArea.areaID`, which is how a quest's map link arrives.
+   *
+   * Searched rather than indexed: the table is 108 rows, this runs on a click, and a second index would
+   * have to be kept in step with the sort for no measurable gain.
+   */
+  fn('SetMapByID', (args) => {
+    const areaId = Number(args[0]);
+    const continents = mapData.continents();
+    for (let c = 0; c < continents.length; c += 1) {
+      const zones = mapData.zonesOn(continents[c].mapId);
+      const index = zones.findIndex((row) => row.areaId === areaId);
+      if (index >= 0) {
+        continentIndex = c + 1;
+        zoneIndex = index + 1;
+        return [];
+      }
+    }
+    return [];
+  });
+
+  fn('GetCurrentMapContinent', () => [continentIndex]);
+  fn('GetCurrentMapZone', () => [zoneIndex]);
+  fn('GetCurrentMapAreaID', () => [selected()?.areaId ?? 0]);
+
+  /**
+   * `GetPlayerMapPosition(unit)` -> the pair, normalised into the DISPLAYED map.
+   *
+   * `(0, 0)` when the unit is not on it, which is the engine's own answer and what the client's callers
+   * test to hide the arrow. Only `player` is answered: any other token needs that unit's world position
+   * projected the same way, and the frames that ask about party members are not built here.
+   *
+   * The projection and its axis crossing live in `mapData.normalise`, verified there against the served
+   * rect rather than transcribed.
+   */
+  fn('GetPlayerMapPosition', (args) => {
+    const row = selected();
+    const player = world.player;
+    if (String(args[0] ?? '') !== 'player' || row === null || !player) {
+      return [0, 0];
+    }
+    const at = mapData.normalise(row, player.position.x, player.position.y);
+    return at === null ? [0, 0] : [at.x, at.y];
+  });
+
+  /**
+   * THE DUNGEON AND DECORATION SURFACE, answered as EMPTY rather than left absent.
+   *
+   * `WorldMapFrame_Update` calls all of these on every open, and an absent global throws inside it --
+   * which takes the whole map down rather than leaving one decoration off. Each answers the value that
+   * means "there are none", and here that is true:
+   *
+   *  - Dungeon levels: this client enters no instances, so no levels and level 0.
+   *  - Overlays: the explored-area patches. `WorldMapOverlay.dbc` PARSES already (the entity is
+   *    registered) and nothing reads it, so 0 draws the base art only. A real gap, named.
+   *  - Landmarks: `SMSG_WORLD_MAP_LANDMARKS`-fed points of interest, with no subscriber. Named.
+   *  - Debug objects: a development surface with no data behind it in any build.
+   */
+  fn('GetCurrentMapDungeonLevel', () => [0]);
+  fn('GetNumDungeonMapLevels', () => [0]);
+  fn('SetDungeonMapLevel', () => []);
+  fn('DungeonUsesTerrainMap', () => [false]);
+  fn('GetNumMapOverlays', () => [0]);
+  fn('GetNumMapLandmarks', () => [0]);
+  fn('GetNumMapDebugObjects', () => [0]);
 
   fn('GetSubZoneText', () => [where().leaf]);
   fn('GetZoneText', () => [where().zone]);

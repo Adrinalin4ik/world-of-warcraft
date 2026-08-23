@@ -68,6 +68,15 @@ class MapData {
   /** `(mapId << 20) | areaId` -> the world-map area row, for the direct lookup. */
   private byMapArea = new Map<number, WorldMapAreaRow>();
 
+/**
+   * Every `WorldMapArea` row in FILE ORDER, which is an ordering the client depends on.
+   *
+   * The reference: continents are listed "in `WorldMapArea` **file order** (Kalimdor, then EK -- the
+   * `0x4a5d00` builder's walk)" (`ui_world_map.rs:8-10`). Sorting them would put Eastern Kingdoms first
+   * and disagree with the real client's continent menu, so the array is kept as the file has it.
+   */
+  private order: WorldMapAreaRow[] = [];
+
   /** `mapId` -> the continent's own localized name. See the header on why this is not the art folder. */
   private mapNames = new Map<number, string>();
 
@@ -106,6 +115,7 @@ class MapData {
 
     const byMap = new Map<number, WorldMapAreaRow[]>();
     const byMapArea = new Map<number, WorldMapAreaRow>();
+    const order: WorldMapAreaRow[] = [];
     for (const record of recordsOf(worldMapArea)) {
       const row = record as {
         id?: number; mapID?: number; areaID?: number; name?: unknown;
@@ -132,9 +142,11 @@ class MapData {
         list.push(built);
       }
       byMapArea.set(mapAreaKey(built.mapId, built.areaId), built);
+      order.push(built);
     }
     this.byMap = byMap;
     this.byMapArea = byMapArea;
+    this.order = order;
 
     const mapNames = new Map<number, string>();
     for (const record of recordsOf(maps)) {
@@ -206,6 +218,77 @@ class MapData {
    */
   mapName(mapId: number): string | null {
     return this.mapNames.get(mapId) ?? null;
+  }
+
+  /**
+   * The CONTINENTS, in the order the client lists them: `WorldMapArea` rows whose `areaId` is 0, in file
+   * order. See `order` for why the order is not sorted.
+   *
+   * `areaId 0` being the continent-wide sheet is corroborated on the served file, not inferred from the
+   * name: row 13 is `mapID 1, areaID 0, art "Kalimdor"` and row 30 is `mapID 0, areaID 12, art "Elwynn"`.
+   */
+  continents(): WorldMapAreaRow[] {
+    return this.order.filter((row) => row.areaId === 0);
+  }
+
+  /**
+   * The ZONES on a continent, sorted the way the client sorts them.
+   *
+   * "Zones sorted case-insensitively by AreaTable localized name (the `0x4a6390` comparator's
+   * `SStrCmpI`)" (`ui_world_map.rs:11-13`) -- so this sorts by the AREA's name and not by the art folder,
+   * and case-insensitively, because both halves are the reference's and either alone would give a
+   * different list than the real client's dropdown.
+   */
+  zonesOn(mapId: number): WorldMapAreaRow[] {
+    return this.areasOnMap(mapId)
+      .filter((row) => row.areaId !== 0)
+      .sort((left, right) => {
+        const a = (this.areas.get(left.areaId)?.name ?? left.art).toUpperCase();
+        const b = (this.areas.get(right.areaId)?.name ?? right.art).toUpperCase();
+        return a < b ? -1 : a > b ? 1 : 0;
+      });
+  }
+
+  /**
+   * A zone's DISPLAY name -- `AreaTable`'s, not the art folder's.
+   *
+   * The two differ and the art folder is the wrong one to show: `WorldMapArea` 30's art is "Elwynn" while
+   * `AreaTable` 12 is "Elwynn Forest". Corroborated on the served files.
+   */
+  displayName(row: WorldMapAreaRow): string {
+    return this.areas.get(row.areaId)?.name ?? row.art;
+  }
+
+  /**
+   * Normalise a world position into a `WorldMapArea`'s rect -- `GetPlayerMapPosition`'s pair.
+   *
+   * **The axes cross, and that is the whole content of this function.** WoW's world X runs NORTH and its
+   * Y runs WEST, while a map's x runs east across the image and its y runs down it. So the horizontal
+   * fraction is measured from `left` using the world's Y, and the vertical from `top` using the world's X:
+   *
+   *     mapX = (left - worldY) / (left - right)
+   *     mapY = (top  - worldX) / (top  - bottom)
+   *
+   * VERIFIED against the served file rather than transcribed. Elwynn's rect is
+   * `left 1535.4, right -1935.4, top -7939.6, bottom -10254.2`, and Northshire's world position
+   * (x ~ -8900, y ~ -160) lands at (0.49, 0.42) -- inside the rect on both axes and in the northern middle
+   * of the zone, which is where Northshire is. A swapped or unflipped formula puts it outside [0, 1].
+   *
+   * Returns null when the position is outside the rect, which is the engine's own answer: `GetPlayerMapPosition`
+   * gives (0, 0) for a player not on the displayed map, and the client's callers hide the arrow on it.
+   */
+  normalise(row: WorldMapAreaRow, worldX: number, worldY: number): { x: number; y: number } | null {
+    const width = row.left - row.right;
+    const height = row.top - row.bottom;
+    if (width === 0 || height === 0) {
+      return null;
+    }
+    const x = (row.left - worldY) / width;
+    const y = (row.top - worldX) / height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) {
+      return null;
+    }
+    return { x, y };
   }
 }
 
