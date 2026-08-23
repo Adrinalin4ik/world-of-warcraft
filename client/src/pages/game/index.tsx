@@ -183,7 +183,32 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.debugCamera.position.set(15, 0, 7);
   }
   
+/**
+   * `window.perfHud(true|false)` -- the owner asked to toggle the debug panel from the console.
+   *
+   * WHY THIS IS THE ONE WORTH EXPOSING: the panel he screenshots is the perf HUD, and it is where every
+   * frame-budget row lives -- `ui.framexml`, and now `ui.booth` and `ui.sig`, which are the two rows
+   * this round added to find the missing 33 ms. Without a toggle that reading is only available in a
+   * session started with `?debug=true`, which is not the session he plays in.
+   *
+   * It changes NO measurement. `PerfMonitor`'s own doc states it at length and it is worth repeating
+   * where the handle lives: every span, frame and GPU query runs with the HUD off exactly as with it on,
+   * so a number read after toggling is comparable to one captured from boot. The node is built lazily,
+   * so a session that never asked for it has never paid for it.
+   *
+   * Installed and removed with the component, like every other handle here -- see
+   * `componentWillUnmount`'s note on why a `window` handle that outlives its renderer answers about a
+   * disposed one and reads as a live measurement.
+   */
+  private installPerfHudToggle(): void {
+    (window as unknown as Record<string, unknown>).perfHud = (visible = true) => {
+      this.perf.setHudVisible(visible !== false);
+      return visible !== false ? 'perf HUD shown' : 'perf HUD hidden';
+    };
+  }
+
   componentDidMount() {
+    this.installPerfHudToggle();
     const renderer = this.renderer = new THREE.WebGLRenderer({
       // OPAQUE drawing buffer. With `alpha: true` the canvas is composited over the page, and because
       // WebGL also defaults to `premultipliedAlpha: true` the compositor treats our non-premultiplied
@@ -436,7 +461,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   }
 
   /** The `window` keys `installPickInstrument` writes, so `componentWillUnmount` can take them back. */
-  private static readonly PICK_INSTRUMENT_KEYS = ['worldPick', 'worldUnits', 'worldCamera'];
+  private static readonly PICK_INSTRUMENT_KEYS = ['worldPick', 'worldUnits', 'worldCamera', 'perfHud'];
 
   private installPickInstrument(): void {
     const flags = window as unknown as Record<string, unknown>;

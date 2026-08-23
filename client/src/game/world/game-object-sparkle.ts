@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 import M2Blueprint from '../pipeline/m2/blueprint';
 import { goIsActivatable } from '../../network/game/object/update-object/game-object-fields';
+import { drawnWorldBox } from './pick';
 import type Unit from '../classes/unit';
 
 /**
@@ -35,11 +36,13 @@ import type Unit from '../classes/unit';
  * ## PARENTED TO THE SCENE, NOT TO A BONE
  *
  * `quest-markers.ts` hangs its `!` off attachment 18 of a creature's skeleton, and that is right for a
- * marker over a head. A doodad has no skeleton worth attaching to and the sparkle belongs at the
- * object's base rather than above it, so this places the effect in the scene at the object's own
- * position -- the shape `level-up-effect.ts` uses. Both of that file's traps apply and are honoured:
- * `M2` sets `matrixAutoUpdate = false` on itself and the scene has `matrixWorldAutoUpdate = false`, so
- * an effect added without `updateMatrix()` and `updateMatrixWorld(true)` draws at the world ORIGIN.
+ * marker over a head. A crate has no skeleton and no attachment table worth the name, so the effect
+ * goes into the scene at a computed world point -- see `sparkleAt`, which records the three attempts
+ * that took and why the attachment the reference cites is a CORPSE's slot rather than an object's.
+ *
+ * Both of `level-up-effect.ts`' traps apply and are honoured: `M2` sets `matrixAutoUpdate = false` on
+ * itself and the scene has `matrixWorldAutoUpdate = false`, so an effect added without `updateMatrix()`
+ * and `updateMatrixWorld(true)` draws at the world ORIGIN.
  *
  * **And the particle manager is not optional here.** `level-up-effect.ts` registers its model with
  * `map.particleManager` and that registration is what makes emitters emit. A sparkle added without it
@@ -113,32 +116,9 @@ export class GameObjectSparkle {
 
   private spawn(guid: string, unit: Unit, manager: ParticleManager): void {
     this.loading.add(guid);
-    /**
-     * RAISED OFF THE BASE, and the owner reported why: "партиклы слишком низко, позиция не верная."
-     *
-     * `view.position` is the object's ORIGIN, which for a doodad is the point it sits on the ground --
-     * so the sparkle was at the bucket's feet rather than in it. The horizontal placement was already
-     * right; only the height was wrong.
-     *
-     * The lift is the model's own authored bounding-sphere radius, scaled the way it is drawn. That is
-     * the same quantity `pick.ts:139` uses to size a pick sphere -- `M2#vertexRadius` is the M2 header's
-     * own bounding radius in MODEL units, so it must be multiplied by the scale actually applied to the
-     * view. It is a property of each model, so a bucket and a chest each get their own lift rather than
-     * one constant that suits neither.
-     *
-     * **THE FAITHFUL ANSWER IS AN ATTACHMENT AND THIS IS NOT IT.** The reference is explicit: the
-     * hardcoded loot art hangs from attach `0x13` (`creature_anim/spell_visual.rs:37`,
-     * `HARDCODED_FX_ATTACH`). Doing that here means adopting the attach basis and its counter-scale
-     * bake, which is the machinery `quest-markers.ts` needed a whole round to get right -- and its own
-     * header records that the bake is invisible when it silently fails, leaving the effect sized to the
-     * object instead of constant. So this is a stated approximation: right height, no attachment. If a
-     * bucket's sparkle still sits wrong, attachment `0x13` is the piece to add, not another constant.
-     */
-    const at = unit.view.position.clone();
-    const model = unit.model as unknown as { vertexRadius?: number; scale?: { x: number } } | null;
-    const scale = Math.abs(model?.scale?.x ?? 1) || 1;
-    const lift = (model?.vertexRadius ?? 0) * scale;
-    at.z += lift;
+    // WHERE it goes is `sparkleAt` -- three attempts are recorded there, including why the
+    // attachment the reference cites does not cover this case.
+    const at = sparkleAt(unit);
     void M2Blueprint.load(GameObjectSparkle.MODEL)
       .then((model: THREE.Object3D & { updateMatrix?: () => void }) => {
         this.loading.delete(guid);
@@ -185,6 +165,42 @@ export class GameObjectSparkle {
 interface ParticleManager {
   register: (instance: unknown) => number;
   unregister: (instance: unknown) => void;
+}
+
+/**
+ * WHERE THE SPARKLE GOES -- the centre of the geometry that is actually DRAWN.
+ *
+ * Third attempt at this, and the first two failed in instructive ways. `view.position` alone put it at
+ * the bucket's feet, because a doodad's origin is where it meets the ground. Lifting by
+ * `M2#vertexRadius * scale` -- the quantity `pick.ts` sizes its pick sphere with -- did not fix it
+ * either, and the owner said so plainly.
+ *
+ * **And the attachment I promised is the wrong answer for an object.** The reference hangs the loot art
+ * from attach `0x13` (`creature_anim/spell_visual.rs:37`), but that is a slot on a CREATURE's skeleton
+ * and the case it byte-verifies is a lootable CORPSE. A crate has no skeleton and no attachment table
+ * worth the name, so `attachTo` would answer false and render nothing -- which is how
+ * `quest-markers.ts` already documents that path behaving ("no slot => created but never parented --
+ * invisible"). Reporting that rather than shipping it: naming a citation is not the same as the
+ * citation covering your case.
+ *
+ * So this uses the DRAWN geometry instead of any authored number. `drawnWorldBox` is already exported
+ * from `pick.ts`, where it is the narrow phase's own world box -- the union of every visible submesh's
+ * bounds, after `updateWorldMatrix`. Its centre is the middle of the thing the player can see,
+ * whatever the model's origin convention, its scale, or whether its header radius is meaningful.
+ * A model with nothing drawn yet answers null, and then the object's own position stands in.
+ *
+ * Cost: one bounding-box union per sparkle CREATED, not per frame -- this runs once, on the rising edge.
+ */
+function sparkleAt(unit: Unit): THREE.Vector3 {
+  const box = drawnWorldBox(unit);
+  if (box === null) {
+    return unit.view.position.clone();
+  }
+  return new THREE.Vector3(
+    (box[0] + box[3]) / 2,
+    (box[1] + box[4]) / 2,
+    (box[2] + box[5]) / 2,
+  );
 }
 
 /** Does this object still want a sparkle? Split out so the async path reads as one condition. */

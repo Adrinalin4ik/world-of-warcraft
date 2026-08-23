@@ -52,8 +52,11 @@ export interface PerfPayload {
  * writes `textContent` on one preallocated node, at 4 Hz.
  */
 export class PerfHud {
-  /** Null when the HUD is not being shown -- see the `visible` constructor argument. */
-  private readonly root: HTMLDivElement | null;
+  /** Null until the HUD is first shown -- see the `visible` constructor argument and `setVisible`. */
+  private root: HTMLDivElement | null;
+
+  /** Held so `setVisible` can build the node later than the constructor did not. */
+  private readonly doc: Document;
   private lastPaint = Number.NEGATIVE_INFINITY;
   private painted = false;
 
@@ -71,19 +74,55 @@ export class PerfHud {
    * `?debug=true` is reading noise.
    */
   constructor(doc: Document, visible = true) {
+    this.doc = doc;
     if (!visible) {
       this.root = null;
       return;
     }
-    this.root = doc.createElement('div');
-    this.root.setAttribute('data-perf-hud', '');
-    this.root.style.cssText = [
+    this.root = this.build();
+  }
+
+  /**
+   * Show or hide the HUD at runtime -- the owner asked to toggle it from the console.
+   *
+   * **The node is built LAZILY, which is the whole reason this is not a one-line `display` flip.** The
+   * constructor's hidden path creates no DOM at all (see its doc), so a session started without
+   * `?debug=true` has nothing to unhide; turning it on has to construct the node then. That also keeps
+   * the hidden case exactly as cheap as it was -- nothing is created for a viewer who never asks.
+   *
+   * Toggling changes NOTHING about the measurement, for the reason the constructor states at length:
+   * every span, frame and GPU query runs either way, so a number read with the HUD off is the same
+   * number. Turning it on mid-session is therefore safe to compare against a capture taken with
+   * `?debug=true` from boot.
+   */
+  setVisible(visible: boolean): void {
+    if (!visible) {
+      if (this.root !== null) {
+        this.root.remove();
+        this.root = null;
+      }
+      return;
+    }
+    if (this.root === null) {
+      this.root = this.build();
+      // A fresh node has never been painted, so let the next `update` write immediately rather than
+      // wait out the repaint interval -- otherwise turning it on looks like it did nothing.
+      this.painted = false;
+    }
+  }
+
+  private build(): HTMLDivElement {
+    const doc = this.doc;
+    const root = doc.createElement('div');
+    root.setAttribute('data-perf-hud', '');
+    root.style.cssText = [
       'position:fixed', 'top:8px', 'right:8px', 'z-index:10000',
       'font:11px/1.45 monospace', 'white-space:pre', 'pointer-events:none',
       'padding:8px 10px', 'border-radius:4px',
       'background:rgba(0,0,0,0.72)', 'color:#d8d8d8',
     ].join(';');
-    doc.body.appendChild(this.root);
+    doc.body.appendChild(root);
+    return root;
   }
 
   update(nowMs: number, payload: PerfPayload): void {

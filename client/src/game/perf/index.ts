@@ -66,6 +66,14 @@ export class PerfMonitor {
     setAnimSectionSink(this.sections);
   }
 
+  /**
+   * Show or hide the overlay at runtime. See `PerfHud#setVisible`: the node is built lazily, so this
+   * works in a session that never passed `?debug=true`, and it changes no measurement either way.
+   */
+  setHudVisible(visible: boolean): void {
+    this.hud.setVisible(visible);
+  }
+
   /** Called once the WebGL context exists. Safe to skip: GPU timing then reads `n/a`. */
   attach(gl: WebGL2RenderingContext): void {
     this.gpu = GpuTimer.create(gl);
