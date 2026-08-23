@@ -27,6 +27,7 @@ import { SelectionRing } from "./selection-ring";
 import { LevelUpEffect } from "./level-up-effect";
 import GameObjectSparkle from './game-object-sparkle';
 import SessionGuard from './session-guard';
+import ModelFade from './model-fade';
 import { QuestMarkers } from "./quest-markers";
 import { NameplateConfig, Nameplates } from "./nameplates";
 import { FloaterSpawn, FloatingCombatText, MAX_FLOATERS, WordSource } from "./floating-text";
@@ -73,6 +74,14 @@ export default class World extends EventEmitter {
 
   /** NPC windows and the loot end when the player walks away. See `session-guard.ts`. */
   public sessionGuard = new SessionGuard();
+
+  /**
+   * Units fade in when they arrive and out when they stream away. See `world/model-fade.ts`.
+   *
+   * Constructed with `remove` bound, because the fade owns the moment a departing unit actually leaves
+   * the scene -- the ramp has to finish first.
+   */
+  public modelFade = new ModelFade((unit: Unit) => this.remove(unit));
 
   /** See the wiring block in `animate`. */
   private sessionGuardWired = false;
@@ -1125,6 +1134,8 @@ export default class World extends EventEmitter {
         () => this.sessionGuard.stats;
     }
     // The session guard: one squared-distance compare per OPEN window, nothing at all with none open.
+    // The appear/despawn ramps -- one Set lookup per entity, plus a cubic per live fade.
+    this.modelFade.update(this.entities, delta * 1000);
     this.sessionGuard.update(
       this.entities,
       this.player ?? null,

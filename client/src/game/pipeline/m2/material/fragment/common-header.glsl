@@ -286,10 +286,38 @@ vec4 finalizeColor(vec4 result) {
 
   result = applyFog(result);
 
-  // The distance fade rides the same output-alpha channel as everything else (the reference's single
-  // render-alpha slot, CM2Model+0x19c). Applied last so fog's own per-blend-mode alpha handling above
-  // is unaffected by it.
-  result.a *= fadeAlpha;
+  // THE FADE IS A DISSOLVE, NOT AN OUTPUT-ALPHA MULTIPLY -- and it used to be the multiply, which is
+  // the owner's white doodads: "оно работает как надо, но вместо прозрачности, дает белый цвет".
+  //
+  // `material/index.ts` states the rule this broke and even names the exclusion that broke it: "never
+  // let a draw touch the framebuffer's ALPHA channel, so it stays at the cleared 1.0" -- because the
+  // canvas is composited with `premultipliedAlpha: true`, so any sub-1 alpha left in the buffer has
+  // `(1 - a)` of the page added to it, and the page is white. Modes >= 1 are protected there by
+  // `blendSrcAlpha = Zero / blendDstAlpha = One`. **Mode 0 is deliberately NOT**, on a stated
+  // precondition: "it is left as-is because `Combiners_Opaque` is the only combiner that pairs with it
+  // and its alpha is already 1". The distance fade falsified that precondition the moment it shipped --
+  // a documented exclusion is a bug report someone declined to file, which `CLAUDE.md` says in as many
+  // words about a getter.
+  //
+  // A multiply could not have worked for mode 0 anyway: `NoBlending` ignores the blend factors and
+  // REPLACES the pixel, so there is no blend for an alpha to weight. The reference sidesteps this by
+  // never fading anything big -- its `> 7 yd` bucket is opaque trunks and buildings and is excluded from
+  // fading entirely -- and lets the alpha TEST erode the small alpha-keyed props ("per-pixel edge-first
+  // erosion"). That works for foliage and does nothing for a solid body, which is exactly what a unit
+  // fade needs.
+  //
+  // So: an ordered screen-space dissolve, which needs no blending and writes no alpha. **OURS, not the
+  // reference's** -- it has no dither anywhere -- chosen because it is the only mechanism that fades
+  // opaque geometry without touching blend state on a SHARED material. Interleaved gradient noise is
+  // the standard threshold for this: stable per pixel so a still camera shows a steady stipple rather
+  // than boiling noise, and cheap enough to sit behind the `fadeAlpha < 1.0` branch that skips it
+  // entirely on every ordinary fragment in the world.
+  if (fadeAlpha < 1.0) {
+    float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    if (ign >= fadeAlpha) {
+      discard;
+    }
+  }
 
   return result;
 }

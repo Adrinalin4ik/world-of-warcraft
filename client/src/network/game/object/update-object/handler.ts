@@ -181,7 +181,18 @@ export class UpdateObjectHandler extends EventEmitter {
               // list, and removing the local player would take the camera's subject out of the
               // scene -- a guard, not an observed case.
               if (unit && unit !== this.game.world.player) {
-                this.game.world.remove(unit);
+                /**
+                 * FADE, not pop -- and this is the ONLY removal path that fades.
+                 *
+                 * The distinction is the reference's and it is byte-verified on the other side:
+                 * "a *destroyed* object pops instantly, and the net bridge despawns it directly,
+                 * bypassing this", while the stream-out is its own stated look --
+                 * "on the reference, distant mobs fade out, never blink out"
+                 * (`benilla-app/src/net/apply/objects.rs:457-467`). This block IS the stream-out:
+                 * the unit still exists, we have merely left its range.
+                 * `handleDestroyObjectPacket` above keeps popping, deliberately.
+                 */
+                this.game.world.modelFade.fadeOutAndRemove(unit);
               }
             }
             break;
