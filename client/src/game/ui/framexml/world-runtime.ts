@@ -831,6 +831,28 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    */
   const questFadingId = registry.byName('QuestInfoFadingFrame');
 
+  /**
+   * A NINTH AND TENTH named `<OnUpdate>`: `ZoneTextFrame` and `SubZoneTextFrame`, and they exist because
+   * the zone name was stuck across the middle of the owner's screen.
+   *
+   * Firing `ZONE_CHANGED_NEW_AREA` (see `ui/map-bridge.ts`) is what put it there, correctly -- the client
+   * shows the big zone banner on that event. What takes it away is `FadingFrame_OnUpdate`, declared on
+   * both frames (`zonetext.xml:39,75`), which runs the fade-in, the hold and the fade-out and hides the
+   * frame at the end. `zonetext.lua:2-4` carries the timings: 0.5 s in, 1.0 s hold, 2.0 s out.
+   *
+   * **So the banner was permanent, and it is the trap `CLAUDE.md` names in as many words**: "any client
+   * code whose RECOVERY from a temporary state lives in an `<OnUpdate>` leaves that state PERMANENT". I
+   * introduced it by firing the event without checking what undoes the state the event sets, which is the
+   * checklist that trap exists to prompt.
+   *
+   * Gated on `shown`, like the six before them, and self-limiting for the same reason
+   * `TemporaryEnchantFrame` is: the driver's whole purpose is to hide the frame, so the steady cost is
+   * zero and the ticking cost is 3.5 s per zone change.
+   */
+  const zoneTextId = registry.byName('ZoneTextFrame');
+
+  const subZoneTextId = registry.byName('SubZoneTextFrame');
+
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
 /**
@@ -947,6 +969,13 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
       // The quest panels' fade, which is what ENABLES ACCEPT -- see `questFadingId`.
       if (questFadingId !== null && registry.widget(questFadingId)?.shown) {
         invokeScriptHandler(ctx, questFadingId, 'OnUpdate', [dt]);
+      }
+      // The zone banner's fade-in, hold and fade-out -- see `zoneTextId`. Without these the name the
+      // event puts on screen never leaves it.
+      for (const id of [zoneTextId, subZoneTextId]) {
+        if (id !== null && registry.widget(id)?.shown) {
+          invokeScriptHandler(ctx, id, 'OnUpdate', [dt]);
+        }
       }
       // The buff flash clock -- see `buffFrameId`. Zero fingerprint cost; it writes Lua fields only.
       if (buffFrameId !== null) {
