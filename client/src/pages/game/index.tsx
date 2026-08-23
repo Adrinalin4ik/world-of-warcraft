@@ -711,6 +711,23 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     }
     const world = this.game.world;
     const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
+    /**
+     * A WORLD OBJECT IS NOT A TARGET, and this is the owner's "их почему-то можно выделить".
+     *
+     * `setTarget` on a bucket put it in the target frame, and it read **Dead** -- which is the tell for
+     * what was actually wrong. A GameObject has no `fields`, so its health is 0 against a 0 max and
+     * `isDead` is true; the frame was faithfully reporting a unit that does not exist. Nothing about an
+     * object belongs in a unit frame, and the real client does not target one either.
+     *
+     * USING it on a left click is the other half: the hand cursor is a promise, and
+     * `classifyUnitCursor` has already applied the reference's flag gate and the range test to make it.
+     * A click that shows a hand and does nothing is the same defect as a Continue button that sends
+     * nothing.
+     */
+    if (hit?.gameObject) {
+      this.game.objectHandler.gameObjectHandler.use(hit.guid);
+      return;
+    }
     world.setTarget(hit);
   };
 
@@ -737,6 +754,22 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     const world = this.game.world;
     const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
     if (!hit) {
+      return;
+    }
+    /**
+     * THE OBJECT LEG COMES FIRST, and it has to -- this is the owner's "правой кнопкой мыши активация
+     * не происходит. То есть залутать я не могу."
+     *
+     * The `dead` branch below was swallowing it. A GameObject has no `fields`, so health 0 against a 0
+     * max makes `isDead` true; the right click therefore took the CORPSE-loot leg, found
+     * `dynamicFlags` 0 (there are no flags either), and **returned** -- so `interactWith` was never
+     * reached and the bucket did nothing. Every piece downstream was correct and unreachable.
+     *
+     * It also must precede `setTarget`, for the reason the left-click handler above now records: an
+     * object is not a target and reads as a dead unit in the frame if it becomes one.
+     */
+    if (hit.gameObject) {
+      this.game.objectHandler.gameObjectHandler.use(hit.guid);
       return;
     }
     world.setTarget(hit);

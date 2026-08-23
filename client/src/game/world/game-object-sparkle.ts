@@ -113,9 +113,32 @@ export class GameObjectSparkle {
 
   private spawn(guid: string, unit: Unit, manager: ParticleManager): void {
     this.loading.add(guid);
-    // The position is captured NOW, like `level-up-effect.ts` does: a doodad does not move, so this is
-    // simply the honest reading rather than a compromise.
+    /**
+     * RAISED OFF THE BASE, and the owner reported why: "партиклы слишком низко, позиция не верная."
+     *
+     * `view.position` is the object's ORIGIN, which for a doodad is the point it sits on the ground --
+     * so the sparkle was at the bucket's feet rather than in it. The horizontal placement was already
+     * right; only the height was wrong.
+     *
+     * The lift is the model's own authored bounding-sphere radius, scaled the way it is drawn. That is
+     * the same quantity `pick.ts:139` uses to size a pick sphere -- `M2#vertexRadius` is the M2 header's
+     * own bounding radius in MODEL units, so it must be multiplied by the scale actually applied to the
+     * view. It is a property of each model, so a bucket and a chest each get their own lift rather than
+     * one constant that suits neither.
+     *
+     * **THE FAITHFUL ANSWER IS AN ATTACHMENT AND THIS IS NOT IT.** The reference is explicit: the
+     * hardcoded loot art hangs from attach `0x13` (`creature_anim/spell_visual.rs:37`,
+     * `HARDCODED_FX_ATTACH`). Doing that here means adopting the attach basis and its counter-scale
+     * bake, which is the machinery `quest-markers.ts` needed a whole round to get right -- and its own
+     * header records that the bake is invisible when it silently fails, leaving the effect sized to the
+     * object instead of constant. So this is a stated approximation: right height, no attachment. If a
+     * bucket's sparkle still sits wrong, attachment `0x13` is the piece to add, not another constant.
+     */
     const at = unit.view.position.clone();
+    const model = unit.model as unknown as { vertexRadius?: number; scale?: { x: number } } | null;
+    const scale = Math.abs(model?.scale?.x ?? 1) || 1;
+    const lift = (model?.vertexRadius ?? 0) * scale;
+    at.z += lift;
     void M2Blueprint.load(GameObjectSparkle.MODEL)
       .then((model: THREE.Object3D & { updateMatrix?: () => void }) => {
         this.loading.delete(guid);
