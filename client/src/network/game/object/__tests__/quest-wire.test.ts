@@ -172,23 +172,24 @@ test('every outgoing quest body is the width 3.3.5a reads', () => {
   // THE ONE THAT BROKE. 8 + 4 + 4.
   expect(widthOf(GameOpcode.CMSG_QUESTGIVER_ACCEPT_QUEST)).toBe(16);
   /**
-   * COMPLETE_QUEST is **13**, and this line asserted 12 until the owner's own packet disproved it.
+   * COMPLETE_QUEST is **13**, and this is the second comment to sit here. The first said 12 "genuinely
+   * needed"; the second said the width was the defect behind a dead Continue button. Both were wrong,
+   * and the second was mine.
    *
-   * The old assertion, and the comment above it, said COMPLETE_QUEST and REQUEST_REWARD both "genuinely
-   * need 12". **That was never measured.** It asserted what our own send already did, which is the
-   * self-consistency trap `CLAUDE.md` names -- such a test "cannot catch a wrong width, which is the
-   * most repeated defect class in this project".
+   * The first was never measured -- it asserted what our own send already did, which is the
+   * self-consistency trap `CLAUDE.md` names, unable by construction to catch a wrong width.
    *
-   * What disproved it: the owner clicked Continue on a required-items turn-in, the panel had already
-   * declared the quest completable, `CMSG_QUESTGIVER_COMPLETE_QUEST` went out with body 12 and a valid
-   * giver guid, and **nothing came back at all**. Silence after a well-formed send is the documented
-   * signature of a server-side under-read, not of a refusal.
+   * The second read a silent Continue as a server-side under-read. An instrument then showed the server
+   * ANSWERING that send (`SMSG_QUESTGIVER_REQUEST_ITEMS`, 190 ms), so no body was ever being discarded:
+   * the button was calling the wrong method entirely. See `quest.ts#requestReward`.
    *
-   * And the family corroborates it: three of the four giver opcodes here already carry a WotLK trailing
-   * field -- QUERY_QUEST 13 (a `u8`), ACCEPT 16, CHOOSE_REWARD 16. COMPLETE_QUEST at 12 was the odd one
-   * out. See `quest.ts#completeQuest` for what the byte is and why taking it is free either way.
+   * So what does 13 rest on now? Not this bug. Only the asymmetry: a trailing byte the server never
+   * reads is ignored, a missing one is fatal, three of the four giver opcodes here already carry a
+   * WotLK trailing field, and 13 was demonstrably accepted by a real server. The number is asserted to
+   * keep it from drifting silently -- not as evidence that it fixed anything.
    *
-   * REQUEST_REWARD stays at 12, and that is still why the helper was not widened.
+   * REQUEST_REWARD stays at 12, and it is now the send that matters: it is what Continue actually
+   * takes. That is the reason the shared helper was never widened.
    */
   expect(widthOf(GameOpcode.CMSG_QUESTGIVER_COMPLETE_QUEST)).toBe(13);
   expect(widthOf(GameOpcode.CMSG_QUESTGIVER_REQUEST_REWARD)).toBe(12);

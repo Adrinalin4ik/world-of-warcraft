@@ -1437,45 +1437,30 @@ export class QuestHandler extends EventEmitter {
       return;
     }
     /**
-     * THIRTEEN BYTES, NOT TWELVE -- and the missing byte is why the click was inert.
+     * THIRTEEN BYTES. **The byte was NOT the bug, and this comment used to claim it was.**
      *
-     * The owner: "Не удается сдать квест, целью которого являлись сбор предметов. Кнопка continue не
-     * нажимается", with the packet attached -- `CMSG_QUESTGIVER_COMPLETE_QUEST (0x018A); Length: 18;
-     * Body: 12`. Body 12 is `guid + questId`, which is 1.12's whole layout and was this send's.
+     * The claim it made -- "and the missing byte is why the click was inert" -- is false and is
+     * corrected here rather than left standing. What it got right: the owner's packet was body 12, and
+     * 12 is 1.12's whole layout (`guid + questId`), which the reference confirms
+     * (`quest/giver.rs:438`). What it got wrong: the diagnosis. A 12-byte body was not being discarded
+     * at all. The probe showed the server ANSWERING a send -- 190 ms, `SMSG_QUESTGIVER_REQUEST_ITEMS`,
+     * body 146 -- so nothing was ever throwing on an under-read. The real defect was one method down:
+     * the progress panel's Continue was calling this at all instead of `requestReward`. See there.
      *
-     * **3.3.5a appends an `autoCompleteMode` bool.** TrinityCore reads
-     * `recvData >> guid >> questId >> autoCompleteMode` -- 0 for the ordinary "standing at the NPC"
-     * turn-in and 1 for a WotLK auto-complete quest finished from the log itself, which is a mode 1.12
-     * has no concept of. A 12-byte body therefore makes the server's `ByteBuffer` read past the end and
-     * throw, the packet is discarded, and **nothing at all comes back**: no reply, no failure opcode,
-     * no explanation. The gesture reads as inert rather than refused, which is exactly what he saw.
+     * The byte STAYS, on the narrow ground that is actually true rather than the story that was not.
+     * `CLAUDE.md`'s asymmetry holds regardless of this bug: a server `ByteBuffer` throws only on an
+     * under-read, so a trailing byte it never reads is ignored while a missing one is fatal. 3.3.5a
+     * plausibly reads an `autoCompleteMode` bool here -- three of the four giver opcodes in this file
+     * already carry a WotLK trailing field, `QUERY_QUEST` a `u8` and `ACCEPT`/`CHOOSE_REWARD` a word --
+     * and 13 was demonstrably accepted by a real server. So it is insurance that has been shown to cost
+     * nothing, not a fix.
      *
-     * This is the project's most repeated defect class -- a field widened between 1.12 and 3.3.5a
-     * failing silently, twelve found before this one -- and it presented the way `CLAUDE.md` says it
-     * always does: "When a send produces silence, suspect a width before suspecting the handler."
+     * **Written HERE and not in `send`, which is unchanged and still right.** `send`'s other caller is
+     * `CMSG_QUESTGIVER_REQUEST_REWARD` at 12 bytes -- now the load-bearing one -- and widening the
+     * shared helper would have altered the very send that turned out to be the whole answer.
      *
-     * Why it surfaced only now, on this quest: a turn-in that routes straight to OFFER_REWARD never
-     * sends this opcode at all, and the reward panel's own button sends `CHOOSE_REWARD` instead. A
-     * REQUIRED-ITEMS quest is the first one whose Continue goes through here, so every earlier turn-in
-     * worked while this opcode had never once been exercised.
-     *
-     * **The extra byte is written HERE and not in `send`, deliberately.** `send`'s other caller is
-     * `CMSG_QUESTGIVER_REQUEST_REWARD`, which really is 12 bytes; widening the shared helper would have
-     * fixed this send and silently broken that one. `CLAUDE.md` names this precise trap ("two quest
-     * sends must stay at 12, and widening the helper would have fixed one send while silently breaking
-     * two"), so the two layouts are kept apart instead.
-     *
-     * `0` is the honest value: this send only ever happens from a giver panel, which is the standing-at-
-     * the-NPC mode. Auto-complete would be a different route with its own caller.
-     *
-     * **What is measured here and what is not.** MEASURED: the owner's own packet, body 12, and total
-     * silence after it. NOT measured: that the third field is specifically an `autoCompleteMode` bool --
-     * that is the server implementation recalled, not a file read here, and the same class of source
-     * this file's header already flags a caveat for. **The byte is the right move either way**, which is
-     * why it is taken without waiting for a capture: `CLAUDE.md`'s rule is that a `ByteBuffer` throws
-     * only on an under-read, so a trailing byte the server never reads is ignored, while a missing one
-     * is fatal. 13 is required if the field exists and harmless if it does not; 12 is fatal in the first
-     * case. The asymmetry is free. If a capture later shows a wider field, the residual will name it.
+     * `0` is the honest value: this send only ever happens from a giver panel or a gossip row, both of
+     * which are the standing-at-the-NPC mode.
      */
     this.awaiting.add(id >>> 0);
     const gp = new GamePacket(
@@ -1494,15 +1479,48 @@ export class QuestHandler extends EventEmitter {
   /**
    * `CMSG_QUESTGIVER_REQUEST_REWARD` (**0x18C**): `u64 guid · u32 questId`, 12 bytes.
    *
-   * The progress panel's Continue button. Advances to `SMSG_QUESTGIVER_OFFER_REWARD`.
+   * **THE PROGRESS PANEL'S CONTINUE BUTTON -- and until this round nothing called it.** This method and
+   * that sentence existed already; the `CompleteQuest` global was wired to `completeQuest` instead, so
+   * the only caller of this was a test. A documented intent and an unwired implementation, which is the
+   * shape `CLAUDE.md` describes as "a bug report someone declined to file".
+   *
+   * The owner: "Не удается сдать квест, целью которого являлись сбор предметов. Кнопка continue не
+   * нажимается." Two guesses were spent on the wire before an instrument settled it in one click:
+   *
+   *     quest: TURN-IN attempt -- quest=33 giver=0xf1300000c4001de9 | isComplete=true | status=10
+   *                             | items=[50432:8/8]
+   *     quest: TURN-IN reply -- SMSG_QUESTGIVER_REQUEST_ITEMS after 190ms, body 146
+   *
+   * Read it in order. `status=10` is REWARD, so the server had the quest ready to hand in. `8/8` says
+   * the bag agreed. **The server ANSWERED**, so the guid was right, the quest id was right and the body
+   * was accepted -- every wire hypothesis dead at once. And what it answered with was
+   * `REQUEST_ITEMS` **again**: the same panel, redrawn. The button worked, the packet arrived, and the
+   * reply was a no-op, which is precisely "нажимается, но ничего не происходит".
+   *
+   * The reference states the flow and its probe was run against a live server
+   * (`benilla-protocol/src/bin/benilla-world/probes/quest.rs:200-201`): a quest **with** required items
+   * goes "Continue -> REQUEST_REWARD -> OFFER_REWARD", while one with none has `COMPLETE_QUEST`
+   * *already* answer with OFFER_REWARD. Its UI agrees without a condition -- `QuestAction::Continue`
+   * sends `QuestgiverRequestReward` and never `COMPLETE_QUEST` at all (`ui_quest.rs:592-596`).
+   *
+   * **That is also why every earlier turn-in worked.** A quest with no required items reaches the reward
+   * panel from `COMPLETE_QUEST` directly, so the wrong opcode was invisible until the first
+   * collect quest -- whose Continue is the only route that goes through here.
+   *
+   * `completeQuest` keeps its own callers: a gossip menu's active-quest row, which is how a held quest's
+   * turn-in is opened in the first place. The two are different steps, not two spellings of one.
    */
-  requestReward(questId?: number): void {
-    const guid = this.source;
+  requestReward(questId?: number, npc?: string): void {
+    // EXPLICIT giver accepted for the reason `completeQuest` records: `this.source` is whatever quest
+    // packet arrived last, and the panel's own npc is the one its Continue belongs to.
+    const guid = npc ?? this.progress?.npc ?? this.source;
     const id = questId ?? this.progress?.questId ?? 0;
-    if (guid === null || id === 0) {
+    if (guid === null || guid === undefined || id === 0) {
       return;
     }
     this.send(GameOpcode.CMSG_QUESTGIVER_REQUEST_REWARD, guid, id);
+    // The turn-in probe covers this route now that it is the one Continue takes. See `subscribe`.
+    this.turnInSentAt = performance.now();
   }
 
   /**

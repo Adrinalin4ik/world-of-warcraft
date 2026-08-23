@@ -1195,7 +1195,18 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
       // eslint-disable-next-line no-console
       console.warn('quest: the turn-in probe threw and is being ignored', error);
     }
-    quest.completeQuest();
+    /**
+     * `REQUEST_REWARD`, NOT `COMPLETE_QUEST`.
+     *
+     * `CompleteQuest()`'s name says complete and its opcode does not. The client's own file has exactly
+     * one call site for it -- `QuestProgressCompleteButton_OnClick` (`questframe.lua:107-108`), the
+     * progress panel's Continue -- and the reference sends `CMSG_QUESTGIVER_REQUEST_REWARD` from that
+     * button, never `COMPLETE_QUEST` (`ui_quest.rs:592-596`). The measurement agreed: COMPLETE_QUEST was
+     * answered with `REQUEST_ITEMS` again, i.e. the same panel redrawn.
+     *
+     * See `quest.ts#requestReward` for the probe output and the full derivation.
+     */
+    quest.requestReward();
     return [];
   });
 
