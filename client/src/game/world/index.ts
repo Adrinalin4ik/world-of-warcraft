@@ -1130,6 +1130,27 @@ export default class World extends EventEmitter {
         isOpen: () => handlers.lootHandler.rows.length > 0 || handlers.lootHandler.gold > 0,
         release: () => handlers.lootHandler.release(),
       });
+  /**
+       * `window.worldModelFade()` -- WHY A FADE IS NOT VISIBLE, in one call.
+       *
+       * The owner reports it not working and I am not guessing at which half. The counters separate
+       * every candidate on their own:
+       *
+       *  - `appeared` 0 means the arrival poll never armed anything -- no unit ever had a `model` when
+       *    it was looked at, which would be a wiring fault rather than a rendering one.
+       *  - `appeared` high with nothing seen means the ramp runs and the SHADER is not honouring it:
+       *    `fadeBlend` never reached the material, or the blend borrow was refused.
+       *  - `faded` 0 with `popped` 0 means the out-of-range path never fires at all -- this server may
+       *    simply never send the `OutOfRange` block, in which case a mob leaving is a DESTROY and pops
+       *    by design. That would make the despawn half unreachable rather than broken, which is a
+       *    completely different answer and the one I would not have guessed.
+       *  - `popped` high means units are streaming out with no body to fade.
+       *
+       * `blended` and `dissolved` say which mechanism arrivals actually got, which is the `ownsBatches`
+       * question -- a creature that shares its materials cannot be blended and gets the stipple.
+       */
+      (window as unknown as Record<string, unknown>).worldModelFade =
+        () => this.modelFade.stats;
       (window as unknown as Record<string, unknown>).worldSessionGuard =
         () => this.sessionGuard.stats;
     }

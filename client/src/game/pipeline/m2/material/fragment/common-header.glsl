@@ -310,6 +310,28 @@ vec4 finalizeColor(vec4 result) {
   // alpha test erode the small alpha-keyed props instead. The owner's report is why both exist: the
   // dissolve alone read as "слишком резко" on a mob, because a dither is granular per pixel and a distant
   // body covers few of them.
+  // AN OPAQUE PASS HAS NO BUSINESS WRITING ALPHA, and this is the owner's white dragon on the login
+  // screen: "на главной заставке тоже надо поправить белую альфу".
+  //
+  // Same root as the white doodads and a different producer. `material/index.ts` protects the alpha
+  // channel for every blending mode >= 1 and deliberately excludes mode 0, on the stated ground that
+  // "`Combiners_Opaque` is the only combiner that pairs with it and its alpha is already 1". That is true
+  // of the TEXTURE, and the combiners then multiply by more than the texture -- its own comment names it:
+  // "`Combiners_Mod` is `sampled0.a * vertexColor.a * animatedTransparency`". **An M2 with a transparency
+  // TRACK therefore writes sub-1 alpha through a NoBlending material**, which `NoBlending` stores
+  // verbatim, and the compositor adds `(1 - a)` of the white page to it. The login screen's dragon is
+  // animated; the doodads were the same defect reached through the distance fade.
+  //
+  // Forcing 1 is correct rather than a patch: with `NoBlending` the pixel REPLACES what was there, so the
+  // alpha it carries can only ever leak into the framebuffer -- nothing consumes it. The exception is a
+  // fade that has deliberately put this material into real blending, which owns the alpha channel for the
+  // duration and protects it itself (`world/model-fade.ts#borrowBlending`).
+#if defined(BLENDING_MODE) && BLENDING_MODE == 0
+  if (fadeBlend < 0.5) {
+    result.a = 1.0;
+  }
+#endif
+
   if (fadeBlend > 0.5) {
     result.a *= fadeAlpha;
   } else if (fadeAlpha < 1.0) {

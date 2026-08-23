@@ -213,7 +213,9 @@ export class ModelFade {
   private live: LiveFade[] = [];
 
   /** `window.worldModelFade()` reads this. */
-  public stats = { appearing: 0, leaving: 0, appeared: 0, faded: 0, popped: 0 };
+  public stats = {
+    appearing: 0, leaving: 0, appeared: 0, faded: 0, popped: 0, blended: 0, dissolved: 0,
+  };
 
   constructor(private remove: (unit: Unit) => void) {}
 
@@ -238,6 +240,11 @@ export class ModelFade {
       model.fadeAlpha = 0;
       const borrowed = borrowBlending(model);
       model.fadeBlend = borrowed.length > 0 ? 1 : 0;
+      if (borrowed.length > 0) {
+        this.stats.blended += 1;
+      } else {
+        this.stats.dissolved += 1;
+      }
       this.live.push({ unit, from: 0, to: 1, elapsed: 0, removeOnDone: false, borrowed });
       this.stats.appeared += 1;
     }
