@@ -1333,10 +1333,34 @@ export class WidgetRoot {
    * Not on the per-frame path. `ui/rects.ts` calls this only when a script asks for an edge of a widget
    * the last draw list did not contain, and caches it until the next publish.
    */
-  layoutRects(viewport: Viewport, measure?: MeasureText): Map<string, Rect> {
+  /**
+   * Every widget's resolved rect.
+   *
+   * `visibleOnly` PRUNES HIDDEN SUBTREES, and the evidence for it is the owner's own HUD rather than a
+   * benchmark of mine: `drawList` below does the SAME work over the SAME tree -- this walk, `deriveSize`
+   * on every node, the same `resolveAnchors` -- and costs **0.5 ms**, while this method costs 63 ms
+   * inside `ui.scroll`. The only difference is the node count: `drawList` prunes what it will not draw
+   * and this walked all 4211, every hidden panel included, once per frame.
+   *
+   * Pruning on `shown` and not on DRAWN is the distinction that matters for the caller that needs this
+   * per frame: a scroll child's rows that are scrolled out of the viewport are still `shown` -- they are
+   * clipped, not hidden -- and they are exactly the rows whose extent decides the scroll range.
+   *
+   * `rects.ts#layoutRectOf` asks for the pruned map first and falls back to the full one when the id it
+   * wants is absent, so a query about a hidden frame still gets a real answer. It just pays for it, once
+   * per revision, instead of every frame paying for every hidden panel.
+   */
+  layoutRects(
+    viewport: Viewport,
+    measure?: MeasureText,
+    visibleOnly: boolean = false,
+  ): Map<string, Rect> {
     const nodes: LayoutNode[] = [];
     const scale = screenScale(viewport.height);
     const walk = (widget: Widget): void => {
+      if (visibleOnly && widget !== this.root && !widget.shown) {
+        return;
+      }
       const size = deriveSize(widget, scale, measure);
       nodes.push({
         id: widget.id,

@@ -289,7 +289,54 @@ function lineHeight(spec: FontSpec): number {
  * The padding still exists in the RASTER: `FontStringTextures#get` reports it separately as `pad`,
  * and `renderer.ts` inflates the quad about the glyph box's centre so no stroke is clipped.
  */
+/**
+ * MEMOISED, and this is `ui.scroll`'s 63 ms.
+ *
+ * `WidgetRoot#layoutRects` calls `deriveSize(widget, scale, measure)` for **every widget in the tree** --
+ * all 4211, hidden panels included -- and for a font string that is a `wrapLines` (which measures per
+ * word) plus a `context.font` assignment and a canvas `measureText` per line. Setting `context.font` is
+ * one of the slowest operations on a 2D context, and this ran for the whole tree once per frame, because
+ * `rects.ts#layoutRectOf` re-resolves whenever `layoutRevision()` moves and the census measures geometry
+ * moving 1.22 times per frame.
+ *
+ * `drawList` calls the same function with the same argument and costs 0.5 ms, because it only ever sees
+ * the few hundred widgets it is about to draw. That 100x ratio was read as evidence of a quadratic
+ * SOLVER, and the solver was made linear -- correctly, but it moved `ui.scroll` from 36 ms to 63, which
+ * is the answer to whether that was the cost. **A component benchmarked in isolation is not the
+ * bottleneck it was chosen to explain**, which is `CLAUDE.md`'s rule about not generalising a measurement
+ * past the layer it covers, and I generalised it.
+ *
+ * The cache is semantically neutral: the answer is a pure function of (text, font, scale), so this is a
+ * memo and not a heuristic. The key carries every field the result depends on -- the CSS font string
+ * itself, the wrap width, the line spacing and the scale. Bounded: cleared wholesale past a cap, since a
+ * measurement recomputed after a clear is correct, merely not free.
+ */
+const measureCache = new Map<string, { width: number; height: number }>();
+
+/** Past this many distinct measurements the cache is dropped whole. See `measureText`. */
+const MEASURE_CACHE_CAP = 4096;
+
 export function measureText(
+  text: string,
+  spec: FontSpec,
+  scale: number,
+): { width: number; height: number } {
+  const pixelScale = density(scale);
+  const key = `${pixelScale}|${spec.size}|${spec.family}|${spec.outline ? 1 : 0}`
+    + `|${spec.wrapWidth ?? -1}|${spec.spacing ?? -1}|${text}`;
+  const hit = measureCache.get(key);
+  if (hit !== undefined) {
+    return hit;
+  }
+  const computed = measureUncached(text, spec, scale);
+  if (measureCache.size >= MEASURE_CACHE_CAP) {
+    measureCache.clear();
+  }
+  measureCache.set(key, computed);
+  return computed;
+}
+
+function measureUncached(
   text: string,
   spec: FontSpec,
   scale: number,

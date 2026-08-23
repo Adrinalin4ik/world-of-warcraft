@@ -58,7 +58,7 @@ import { attachAuraBridge } from './aura-bridge';
 import { attachTrainerBridge } from './trainer-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { attachChatBridge } from './chat-bridge';
-import { publishRects, clearRects, setRectResolver, rectStats } from './rects';
+import { publishRects, clearRects, setRectResolver, setVisibleRectResolver, rectStats } from './rects';
 import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
 import { createQuadMaterial } from './material';
 import { ModelBooth } from './scene/model-booth';
@@ -493,6 +493,13 @@ export class WorldUiHost {
     setRectResolver(() => this.root.layoutRects(
       { width: window.innerWidth, height: window.innerHeight },
       measureText,
+    ));
+    // THE PRUNED resolver, which is what every per-frame query answers from. See `rects.ts#layoutRectOf`
+    // for why there are two and what still reaches the full one.
+    setVisibleRectResolver(() => this.root.layoutRects(
+      { width: window.innerWidth, height: window.innerHeight },
+      measureText,
+      true,
     ));
     const runtime = await bootWorldRuntime({
       root: this.root.root,
@@ -1450,6 +1457,7 @@ export class WorldUiHost {
     // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
     // stale draw list would have a remounted world's scripts reading the previous world's layout.
     setRectResolver(null);
+    setVisibleRectResolver(null);
     clearRects();
     clearArtSink();
     this.input.detach();

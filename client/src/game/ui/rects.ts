@@ -186,6 +186,29 @@ export function layoutRectOf(id: string): Rect | null {
     return null;
   }
   const revision = layoutRevision();
+  /**
+   * THE VISIBLE MAP FIRST, THE WHOLE TREE ONLY IF THAT MISSES.
+   *
+   * This used to resolve the entire 4211-widget tree on every revision change, and the revision moves
+   * 1.22 times a frame (one `SetPoint` from an `OnUpdate` is enough), so it ran every frame. Measured in
+   * the owner's HUD as `ui.scroll` **63.4 ms**, against `ui.layout` **0.5 ms** for the same walk and the
+   * same solver over the widgets that were going to be drawn. The node count was the whole difference.
+   *
+   * So the per-frame path pays the visible price. A query about a HIDDEN frame still gets a real answer:
+   * it misses the pruned map and resolves the full tree, once per revision, which is what every query
+   * paid before. Nothing loses an answer; only the common case stops paying for the rare one.
+   */
+  if (allVisibleRects === null || allVisibleRevision !== revision) {
+    const started = performance.now();
+    allVisibleRects = resolveVisible === null ? new Map() : resolveVisible();
+    allVisibleRevision = revision;
+    rectStats.resolves += 1;
+    rectStats.ms += performance.now() - started;
+  }
+  const visible = allVisibleRects.get(id);
+  if (visible !== undefined) {
+    return visible;
+  }
   if (allRects === null || allRectsRevision !== revision) {
     const started = performance.now();
     allRects = resolveAll();
@@ -194,6 +217,21 @@ export function layoutRectOf(id: string): Rect | null {
     rectStats.ms += performance.now() - started;
   }
   return allRects.get(id) ?? null;
+}
+
+/** The pruned map and its revision -- see `layoutRectOf`. */
+let allVisibleRects: Map<string, Rect> | null = null;
+
+let allVisibleRevision = -1;
+
+/** Resolves the SHOWN subtree only. Installed beside `resolveAll`. */
+let resolveVisible: (() => Map<string, Rect>) | null = null;
+
+/** See `setRectResolver`. Split so the pruned and full resolvers are installed together. */
+export function setVisibleRectResolver(resolve: (() => Map<string, Rect>) | null): void {
+  resolveVisible = resolve;
+  allVisibleRects = null;
+  allVisibleRevision = -1;
 }
 
 /** The viewport height in logical units, for the Y flip. 0 before the first publish. */
