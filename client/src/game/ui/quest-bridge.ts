@@ -1753,26 +1753,32 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   fn('GetMaxDailyQuests', () => [25]);
 
   /**
-   * `GetMapInfo()` / `GetCurrentMapDungeonLevel()` -- **NOT quest globals, and registered anyway.**
+   * `GetMapInfo`, `GetCurrentMapDungeonLevel`, `GetCurrentMapZone` and `SetMapToCurrentZone` USED TO BE
+   * DECLARED HERE, and removing them is a bug fix rather than tidying.
    *
-   * These are the world map's, and they are here because the sweep found them on the quest log's paint
-   * path: `QuestLog_SetSelection` calls `QuestLog_UpdateMap()` immediately BEFORE
-   * `ShowUIPanel(QuestLogDetailFrame)` (`questlogframe.lua:667-670`), so a nil `GetMapInfo` raises and
-   * the detail frame never shows -- the exact failure mode `SecureUnitButton_OnClick`'s missing
-   * `SpellIsTargeting` produced, where the visible half looks absent rather than broken.
+   * They were placeholders: not quest globals at all, registered because the sweep found them on the
+   * quest log's paint path, each with a note saying the world-map work should find them. That work is
+   * done -- `ui/map-bridge.ts` answers all four for real, from `WorldMapArea`/`AreaTable`/`Map`/
+   * `WorldMapContinent` and the map's own selection state.
    *
-   * `GetMapInfo` answering nil is the client's own "no map is set" case and `QuestLog_UpdateMap`
-   * returns on it in its second line, so the whole map tile loop is skipped correctly rather than
-   * half-run. Declared through `notImplemented` so the load report names them and the world-map work
-   * finds them.
+   * **AND THEY WERE WINNING.** This bridge attaches after the map bridge, so a later
+   * `registerFunction` replaced the real implementations with the stubs -- the same load-order rule this
+   * file's own header cites for `SelectGossipAvailableQuest`, in the opposite direction. The world map
+   * therefore drew the "World" sheet for ever: `GetMapInfo` answered nil, `WorldMapFrame_Update` took
+   * its `not mapFileName` fallback, and `SetMapToCurrentZone` did nothing so the map could not even
+   * follow the player.
+   *
+   * It took four rounds to find because **the probe and the client were reading different things**:
+   * `window.worldMap()` reads the map bridge's own closure and correctly said "Elwynn", while the
+   * client's Lua called a stub that said nil. Every static link in the chain read correct because every
+   * one of them WAS correct.
+   *
+   * Left as a comment rather than deleted silently, because the reason they were here is still true:
+   * `QuestLog_SetSelection` calls `QuestLog_UpdateMap()` before `ShowUIPanel(QuestLogDetailFrame)`
+   * (`questlogframe.lua:667-670`) and `WatchFrame_Update` reads `GetCurrentMapZone()` unconditionally
+   * (`watchframe.lua:789`), so both paths still need these globals to exist -- they just need the real
+   * ones.
    */
-  const mapGap = notImplemented(
-    'GetMapInfo',
-    'no world map is set; the quest log calls this on its logSelection path and returns early on nil',
-    [null],
-  );
-  fn('GetMapInfo', () => mapGap(null as never, 0, []));
-  fn('GetCurrentMapDungeonLevel', () => [0]);
 
   // -- THE OBJECTIVE TRACKER ----------------------------------------------------------------------
 
@@ -1863,14 +1869,10 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   fn('QuestLogPushQuest', () => []);
 
   /**
-   * The quest POI (point-of-interest) family, and `GetCurrentMapZone`/`SetMapToCurrentZone`.
-   *
-   * All world-map globals, all on the tracker's unconditional path, none of them this file's subject
-   * -- registered for `GetMapInfo`'s reason exactly. `GetCurrentMapZone` answering 0 is the client's
-   * own "no zone selected" value and `WatchFrame_Update` uses it only as a table key.
+   * The quest POI (point-of-interest) family. `GetCurrentMapZone`/`SetMapToCurrentZone` were here too
+   * and are gone for the reason given above -- `ui/map-bridge.ts` owns them and this file was
+   * overriding it.
    */
-  fn('GetCurrentMapZone', () => [0]);
-  fn('SetMapToCurrentZone', () => []);
   fn('QuestMapUpdateAllQuests', () => []);
   fn('QuestPOIGetQuestIDByVisibleIndex', () => [0]);
   fn('GetQuestIDByVisibleIndex', () => [0]);

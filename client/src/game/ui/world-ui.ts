@@ -63,6 +63,7 @@ import {
   publishRects, clearRects, setRectResolver, setVisibleRectResolver, rectStats, layoutRectOf,
 } from './rects';
 import { eventListeners, fireEvent } from './framexml/lua/events';
+import { getScriptHandler } from './framexml/lua/scripts';
 import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
 import { createQuadMaterial } from './material';
 import { ModelBooth } from './scene/model-booth';
@@ -841,10 +842,18 @@ export class WorldUiHost {
       if (runtime === null) {
         return 'the runtime is not up';
       }
+      // `hasHandler` IS THE HANDLER, and it did not used to be: this field was
+      // `registry.widget(id) !== null`, i.e. "the widget exists" -- under a name that promised
+      // something else. It read `true` for `WorldMapFrame` and I took that as the OnEvent script
+      // being bound, which is exactly the "distrust the instrument" trap: a probe whose field name
+      // does not match its expression is worse than no probe, because it eliminates a cause that was
+      // never actually checked. `getScriptHandler` is what `invokeScriptHandler` itself looks up, so
+      // this now asks the same question the dispatch does.
       return eventListeners(eventName).map((id) => ({
         id,
         name: runtime.registry.nameOf(id),
-        hasHandler: runtime.registry.widget(id) !== null,
+        hasOnEvent: getScriptHandler(runtime.vm, id, 'OnEvent') !== null,
+        widgetAlive: runtime.registry.widget(id) !== null,
       }));
     };
 
