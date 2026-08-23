@@ -59,6 +59,10 @@ uniform float highlight;
 // would alter the silhouette of every alpha-tested prop in the game.)
 uniform float fadeAlpha;
 
+// 1 when the fade's owner has put this material into real alpha blending for the duration of the
+// ramp, so the output alpha can be weighted instead of dissolved. See `finalizeColor`.
+uniform float fadeBlend;
+
 // WMO point lights (MOLT) affecting this model. Positions are world space, matching
 // worldVertexPosition. Count is zero for anything not standing inside a WMO. Selected per object
 // (world/light/laws.ts::selectPointLights), which commits at most three -- see MAX_WMO_LIGHTS below.
@@ -286,33 +290,29 @@ vec4 finalizeColor(vec4 result) {
 
   result = applyFog(result);
 
-  // THE FADE IS A DISSOLVE, NOT AN OUTPUT-ALPHA MULTIPLY -- and it used to be the multiply, which is
-  // the owner's white doodads: "оно работает как надо, но вместо прозрачности, дает белый цвет".
+  // TWO FADE MECHANISMS, and the owner of the fade picks which by setting `fadeBlend`.
   //
-  // `material/index.ts` states the rule this broke and even names the exclusion that broke it: "never
-  // let a draw touch the framebuffer's ALPHA channel, so it stays at the cleared 1.0" -- because the
-  // canvas is composited with `premultipliedAlpha: true`, so any sub-1 alpha left in the buffer has
-  // `(1 - a)` of the page added to it, and the page is white. Modes >= 1 are protected there by
-  // `blendSrcAlpha = Zero / blendDstAlpha = One`. **Mode 0 is deliberately NOT**, on a stated
-  // precondition: "it is left as-is because `Combiners_Opaque` is the only combiner that pairs with it
-  // and its alpha is already 1". The distance fade falsified that precondition the moment it shipped --
-  // a documented exclusion is a bug report someone declined to file, which `CLAUDE.md` says in as many
-  // words about a getter.
+  // **The multiply is the smooth one and it needs real blending.** With `SrcAlpha/OneMinusSrcAlpha` on
+  // the colour channels and `Zero/One` on alpha -- which is what `ModelFade` installs, and only ever on
+  // materials an instance OWNS -- weighting the output alpha blends the body against the world and
+  // leaves the framebuffer's alpha at the cleared 1.0. That last part is the rule `material/index.ts`
+  // states and the reason this cannot be done unconditionally: with `NoBlending` the alpha is written
+  // straight through, the canvas goes sub-1, and the compositor adds the white page behind it. That was
+  // the owner's white doodads.
   //
-  // A multiply could not have worked for mode 0 anyway: `NoBlending` ignores the blend factors and
-  // REPLACES the pixel, so there is no blend for an alpha to weight. The reference sidesteps this by
-  // never fading anything big -- its `> 7 yd` bucket is opaque trunks and buildings and is excluded from
-  // fading entirely -- and lets the alpha TEST erode the small alpha-keyed props ("per-pixel edge-first
-  // erosion"). That works for foliage and does nothing for a solid body, which is exactly what a unit
-  // fade needs.
+  // **The dissolve is the fallback for geometry nobody may re-blend**: a doodad's materials are SHARED
+  // across every copy of that path in the zone, so putting them into blending would blend all of them --
+  // the trap `CLAUDE.md` records three rounds of. An ordered screen-space threshold needs no blend state
+  // and writes no alpha. Interleaved gradient noise is the standard choice: stable per pixel, so a still
+  // camera shows a steady stipple rather than boiling noise.
   //
-  // So: an ordered screen-space dissolve, which needs no blending and writes no alpha. **OURS, not the
-  // reference's** -- it has no dither anywhere -- chosen because it is the only mechanism that fades
-  // opaque geometry without touching blend state on a SHARED material. Interleaved gradient noise is
-  // the standard threshold for this: stable per pixel so a still camera shows a steady stipple rather
-  // than boiling noise, and cheap enough to sit behind the `fadeAlpha < 1.0` branch that skips it
-  // entirely on every ordinary fragment in the world.
-  if (fadeAlpha < 1.0) {
+  // The dissolve is OURS. The reference has no dither anywhere; it never fades anything big and lets the
+  // alpha test erode the small alpha-keyed props instead. The owner's report is why both exist: the
+  // dissolve alone read as "слишком резко" on a mob, because a dither is granular per pixel and a distant
+  // body covers few of them.
+  if (fadeBlend > 0.5) {
+    result.a *= fadeAlpha;
+  } else if (fadeAlpha < 1.0) {
     float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     if (ign >= fadeAlpha) {
       discard;

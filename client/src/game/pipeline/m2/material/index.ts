@@ -389,6 +389,8 @@ class M2Material extends THREE.ShaderMaterial {
 
       // Per-object distance-fade alpha (fade/laws.ts). 1.0 until a doodad enters its fade band.
       fadeAlpha: { value: 1.0 },
+      // See `fragment/common-header.glsl#finalizeColor`: 0 = dissolve, 1 = weight the output alpha.
+      fadeBlend: { value: 0.0 },
 
       // Animated texture coordinate transform matrices
       animatedUVs: {

@@ -31,11 +31,21 @@ export function applyFadeAlphaBeforeRender(_renderer, _scene, _camera, _geometry
   }
 
   const next = node ? node.fadeAlpha : 1.0;
-  if (material.uniforms.fadeAlpha.value === next) {
+  // `fadeBlend` rides the SAME walk and the same node, because they are one decision: whoever owns the
+  // fade also owns whether this material may be blended for it. See `finalizeColor` for the two
+  // mechanisms and `world/model-fade.ts` for who sets which.
+  const nextBlend = node && node.fadeBlend ? 1.0 : 0.0;
+  const blendSlot = material.uniforms.fadeBlend;
+  const alphaSame = material.uniforms.fadeAlpha.value === next;
+  const blendSame = !blendSlot || blendSlot.value === nextBlend;
+  if (alphaSame && blendSame) {
     return false;
   }
 
   material.uniforms.fadeAlpha.value = next;
+  if (blendSlot) {
+    blendSlot.value = nextBlend;
+  }
   return true;
 }
 

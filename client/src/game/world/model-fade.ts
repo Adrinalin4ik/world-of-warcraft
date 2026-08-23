@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+
 import type Unit from '../classes/unit';
 
 /**
@@ -22,45 +24,73 @@ import type Unit from '../classes/unit';
  * destroyed -- those are destroys, and they still go straight out. Only the OUT-OF-RANGE stream-out
  * fades, which is the case the owner is describing when a mob "disappears" as he walks away.
  *
- * ## THE ALPHA PATH ALREADY EXISTED, AND IT IS THE SAFE ONE
+ * ## TWO MECHANISMS, AND WHICH ONE A MODEL GETS IS AN OWNERSHIP QUESTION
  *
- * I expected to have to build this and to have to argue about the shared-material trap first: alpha
- * lives in material uniforms, an instanceable M2 shares its batches with every other copy in the zone,
- * and writing one would fade all of them -- the failure `CLAUDE.md` records three rounds of.
+ * The per-instance plumbing already existed and is already safe:
+ * `pipeline/m2/submesh.js#applyFadeAlphaBeforeRender` pushes `fadeAlpha` -- and now `fadeBlend` -- into
+ * the shared uniform **on every draw**, walking up "batch mesh -> Submesh -> M2" to whatever instance
+ * carries the property. So the VALUE never lives on a shared material; it is borrowed for one draw call.
  *
- * None of that applies, because the machinery is already here and already per-instance:
- * `pipeline/m2/submesh.js#applyFadeAlphaBeforeRender` pushes `fadeAlpha` into the shared uniform **on
- * every draw**, walking up "batch mesh -> Submesh -> M2" and stopping at whatever carries the property.
- * So the value lives on the INSTANCE and the shared uniform is only ever borrowed for the duration of
- * one draw call -- the save-and-restore shape `CLAUDE.md` names as the correct way to touch a shared
- * material. This file writes `model.fadeAlpha` and nothing else.
+ * The mechanism is not one thing, and the owner's report is why. A dissolve alone read as "слишком
+ * резко" on a mob, because a screen-space dither is granular per pixel and a distant body covers few of
+ * them. So:
  *
- * The fragment side is `result.a *= fadeAlpha` (`material/fragment/common-header.glsl:292`), and for a
- * CUTOUT material the alpha test `sampled0.a * fadeAlpha < 0.5` turns a dropping fade into per-pixel
- * edge-first erosion -- which is exactly the dissolve the reference describes for that pass. **A fully
- * opaque batch will not blend and will pop at the end of its ramp**; the reference has the same split
- * (its trees are hard-edged) and that is stated here rather than discovered later.
+ *  - **A model that OWNS its batches gets real alpha blending** -- `borrowBlending` puts its own
+ *    materials into `SrcAlpha/OneMinusSrcAlpha` with the alpha channel protected, and restores exactly
+ *    what it took when the ramp ends. That is a genuine soft fade, and `ownsBatches` is what makes it
+ *    safe: a character or a skinned creature rebuilt its own materials, so nothing else is drawing them.
+ *  - **Anything else dissolves.** An instanceable doodad SHARES its materials with every copy of that
+ *    path in the zone, so re-blending them would re-blend all of them -- the trap `CLAUDE.md` records
+ *    three rounds of, and `ownsBatches` is the test it names.
+ *
+ * The `depthWrite = false` in the blend path is not incidental: a fading body that still writes depth
+ * occludes its own far side and reads as a solid shell with holes in it.
  *
  * ## COST
  *
  * One `Set` lookup per entity per frame to notice an arrival -- the same walk `quest-markers.ts` and
  * `game-object-sparkle.ts` already make over the same collection -- plus one cubic per LIVE fade, of
- * which there are as many as things that appeared in the last two seconds. Nothing allocates on the
+ * which there are as many as things that appeared in the last half second. Nothing allocates on the
  * steady path. Zero UI draw-fingerprint by construction: these are world models, and
  * `drawListSignature` mixes interface draw items only.
  */
 
 /**
- * `FadeTo(1.0, 2000 ms)` -- the reference's byte-verified appear duration (`model_fade.rs:148-150`).
- * The despawn ramp reuses it, as the reference's does.
+ * **500 ms, and that is the OWNER'S number over a byte-verified one.**
+ *
+ * The reference's is 2000: `FadeTo(1.0, 2000 ms)`, "byte `0x7d0`, wall-clock via `OsGetAsyncTimeMs`,
+ * framerate-independent" (`model_fade.rs:148-150`). He asked for "быстрая 500мс исчезновение и
+ * появление" after seeing two seconds in play, so this is a deliberate deviation from a verified
+ * constant on his judgement of how it reads -- recorded as that rather than as fidelity, and one line to
+ * put back.
  */
-const FADE_MS = 2000;
+const FADE_MS = 500;
+
+/**
+ * The blend state a fade installs on a material it is allowed to touch, and the state it saves first.
+ *
+ * `SrcAlpha / OneMinusSrcAlpha` on the COLOUR channels, so weighting the output alpha blends the body
+ * against the world -- and `Zero / One` on the ALPHA channels, so the framebuffer's alpha stays at the
+ * cleared 1.0. That second pair is not optional: `material/index.ts` records that a sub-1 alpha left in
+ * the buffer gets `(1 - a)` of the white page added by the compositor, which was the owner's white
+ * doodads. The same protection modes >= 1 already carry.
+ */
+interface SavedBlend {
+  material: THREE.Material;
+  transparent: boolean;
+  blending: THREE.Blending;
+  blendSrc: THREE.BlendingSrcFactor;
+  blendDst: THREE.BlendingDstFactor;
+  blendSrcAlpha: THREE.Material['blendSrcAlpha'];
+  blendDstAlpha: THREE.Material['blendDstAlpha'];
+  depthWrite: boolean;
+}
 
 /**
  * The reference's cubic-ease render alpha, `lerp(from, to, clamp(t, 0, 1)^3)` (`model_fade.rs:164`,
  * byte-located at `0x614a90`).
  *
- * The cube is the whole character of it: an appear spends most of its two seconds nearly invisible and
+ * The cube is the whole character of it: an appear spends most of its ramp nearly invisible and
  * then arrives quickly, which is why a linear ramp reads as a ghost walking in and this does not.
  */
 export function fadeCurve(from: number, to: number, t: number): number {
@@ -69,8 +99,99 @@ export function fadeCurve(from: number, to: number, t: number): number {
   return from + (to - from) * eased;
 }
 
-/** A model with the per-instance fade property `submesh.js` walks up to find. */
-type Fadeable = { fadeAlpha?: number };
+/**
+ * A model with the per-instance fade properties `submesh.js` walks up to find, plus the ownership test
+ * that decides which mechanism it gets.
+ *
+ * `ownsBatches` is the whole safety of the blend path: false means this M2 SHARES its materials with
+ * every other copy of that path in the zone, so re-blending them would re-blend all of them. `CLAUDE.md`
+ * names `ownsBatches` as exactly this test.
+ */
+type Fadeable = {
+  fadeAlpha?: number;
+  fadeBlend?: number;
+  ownsBatches?: boolean;
+  batches?: Map<number, unknown>;
+};
+
+/** Every material under a model's batches, or an empty list when there is nothing to walk. */
+function materialsOf(model: Fadeable): THREE.Material[] {
+  const out: THREE.Material[] = [];
+  const batches = model.batches;
+  if (!batches || typeof batches.forEach !== 'function') {
+    return out;
+  }
+  batches.forEach((batch) => {
+    const material = (batch as { material?: THREE.Material } | null)?.material;
+    if (material) {
+      out.push(material);
+    }
+  });
+  return out;
+}
+
+/**
+ * Put a model's OWN materials into real alpha blending for the duration of a fade, and hand back what
+ * to restore.
+ *
+ * Returns an empty list -- meaning "use the dissolve instead" -- for a model that does not own its
+ * batches. That is the guard, not an optimisation.
+ */
+function borrowBlending(model: Fadeable): SavedBlend[] {
+  if (model.ownsBatches !== true) {
+    return [];
+  }
+  const saved: SavedBlend[] = [];
+  for (const material of materialsOf(model)) {
+    const m = material as THREE.Material & {
+      blendSrc: THREE.BlendingSrcFactor; blendDst: THREE.BlendingDstFactor;
+      blendSrcAlpha: THREE.Material['blendSrcAlpha'];
+      blendDstAlpha: THREE.Material['blendDstAlpha'];
+    };
+    saved.push({
+      material: m,
+      transparent: m.transparent,
+      blending: m.blending,
+      blendSrc: m.blendSrc,
+      blendDst: m.blendDst,
+      blendSrcAlpha: m.blendSrcAlpha,
+      blendDstAlpha: m.blendDstAlpha,
+      depthWrite: m.depthWrite,
+    });
+    m.transparent = true;
+    m.blending = THREE.CustomBlending;
+    m.blendSrc = THREE.SrcAlphaFactor;
+    m.blendDst = THREE.OneMinusSrcAlphaFactor;
+    // THE ALPHA CHANNEL IS PROTECTED. See `SavedBlend`: a sub-1 alpha left in the framebuffer gets the
+    // white page composited into it, which was the owner's white doodads.
+    m.blendSrcAlpha = THREE.ZeroFactor;
+    m.blendDstAlpha = THREE.OneFactor;
+    // A fading body must not occlude its own far side through the depth buffer, which is what makes a
+    // half-faded model read as a solid shell with holes.
+    m.depthWrite = false;
+    m.needsUpdate = true;
+  }
+  return saved;
+}
+
+/** Put back exactly what `borrowBlending` took. */
+function restoreBlending(saved: SavedBlend[]): void {
+  for (const entry of saved) {
+    const m = entry.material as THREE.Material & {
+      blendSrc: THREE.BlendingSrcFactor; blendDst: THREE.BlendingDstFactor;
+      blendSrcAlpha: THREE.Material['blendSrcAlpha'];
+      blendDstAlpha: THREE.Material['blendDstAlpha'];
+    };
+    m.transparent = entry.transparent;
+    m.blending = entry.blending;
+    m.blendSrc = entry.blendSrc;
+    m.blendDst = entry.blendDst;
+    m.blendSrcAlpha = entry.blendSrcAlpha;
+    m.blendDstAlpha = entry.blendDstAlpha;
+    m.depthWrite = entry.depthWrite;
+    m.needsUpdate = true;
+  }
+}
 
 interface LiveFade {
   unit: Unit;
@@ -79,6 +200,8 @@ interface LiveFade {
   elapsed: number;
   /** Remove the unit from the world when the ramp finishes -- the stream-out case. */
   removeOnDone: boolean;
+  /** The blend state to put back when the ramp ends. Empty when this fade dissolves instead. */
+  borrowed: SavedBlend[];
 }
 
 export class ModelFade {
@@ -111,7 +234,9 @@ export class ModelFade {
       }
       this.appeared.add(guid);
       model.fadeAlpha = 0;
-      this.live.push({ unit, from: 0, to: 1, elapsed: 0, removeOnDone: false });
+      const borrowed = borrowBlending(model);
+      model.fadeBlend = borrowed.length > 0 ? 1 : 0;
+      this.live.push({ unit, from: 0, to: 1, elapsed: 0, removeOnDone: false, borrowed });
       this.stats.appeared += 1;
     }
 
@@ -137,12 +262,15 @@ export class ModelFade {
       fade.elapsed += deltaMs;
       const model = fade.unit.model as unknown as Fadeable | null;
       if (!model) {
-        // The body went away mid-ramp -- a re-model, or a despawn. Nothing to drive.
+        // The body went away mid-ramp -- a re-model, or a despawn. Nothing to drive, and nothing of the
+        // model's own state left to put back.
         this.live.splice(i, 1);
         continue;
       }
       if (fade.elapsed >= FADE_MS) {
         model.fadeAlpha = fade.to;
+        model.fadeBlend = 0;
+        restoreBlending(fade.borrowed);
         this.live.splice(i, 1);
         if (fade.removeOnDone) {
           this.remove(fade.unit);
@@ -187,8 +315,17 @@ export class ModelFade {
     // FROM THE CURRENT ALPHA, not from 1: a unit that streams out while still fading IN must ramp down
     // from where it actually is, or it would brighten first. The reference's `{from: alpha, to: 0}`.
     const from = typeof model.fadeAlpha === 'number' ? model.fadeAlpha : 1;
+    // Restore anything an in-flight appear borrowed before taking it again, so the saved state is the
+    // model's own and never a fade's.
+    for (const fade of this.live) {
+      if (fade.unit === unit) {
+        restoreBlending(fade.borrowed);
+      }
+    }
     this.live = this.live.filter((fade) => fade.unit !== unit);
-    this.live.push({ unit, from, to: 0, elapsed: 0, removeOnDone: true });
+    const borrowed = borrowBlending(model);
+    model.fadeBlend = borrowed.length > 0 ? 1 : 0;
+    this.live.push({ unit, from, to: 0, elapsed: 0, removeOnDone: true, borrowed });
   }
 }
 
