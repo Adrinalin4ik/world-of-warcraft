@@ -378,6 +378,57 @@ const REGION: MethodTable = {
     const parent = ctx.registry.parentOf(self);
     return [parent === null ? null : ctx.wrapper(parent)];
   },
+
+  /**
+   * `GetPoint(index)` -- one of a region's anchors back, as `point, relativeTo, relativePoint, x, y`.
+   *
+   * **THIS WAS ABSENT ENTIRELY, and it is a read-modify-write the client uses to NUDGE things.** The
+   * owner's log caught it on the minimap:
+   *
+   *     framexml: MiniMapWorldMapButton: OnMouseDown: Minimap.lua:351:
+   *         attempt to call a nil value (method 'GetPoint')
+   *
+   * `MinimapButton_OnMouseDown` is `local point, relativeTo, relativePoint, x, y = icon:GetPoint()`
+   * followed by `icon:SetPoint(point, relativeTo, relativePoint, x+1, y-1)` -- the one-pixel shift that
+   * makes a minimap button look pressed. So the raise killed the press on every minimap button, and
+   * `MinimapButton_OnMouseUp` (which reverses it) would have been dead too.
+   *
+   * **`relativeTo` comes back as the real FRAME, not a name and not nil, and that mattered.** Every
+   * caller of this feeds the value straight back into `SetPoint`, and `SetPoint` treats nil as "the
+   * parent" (`resolveRelativeTo` above). So a nil here is not a missing value -- it MOVES a region that
+   * was anchored to a sibling onto its parent instead, silently and permanently. The lookup is free:
+   * `FrameRegistry#create` names every widget it makes `lua:<id>` (`object.ts:544`), so the anchor's
+   * stored target parses straight back to a frame id with no reverse index to maintain.
+   *
+   * A region with no anchors returns nothing, which is what the engine does; the client's callers all
+   * guard on the first value.
+   */
+  GetPoint: (ctx, self, args) => {
+    const widget = ctx.registry.widget(self);
+    if (widget === null || widget.anchors.length === 0) {
+      return [];
+    }
+    // 1-based, and an absent or out-of-range index means the first anchor -- the engine returns the
+    // only anchor for `GetPoint()` with no argument, which is how every call site in the manifest
+    // uses it.
+    const raw = Number(args[0]);
+    const index = Number.isFinite(raw) && raw >= 1 && raw <= widget.anchors.length
+      ? Math.floor(raw) - 1
+      : 0;
+    const at = widget.anchors[index];
+    const target = /^lua:(\d+)$/.exec(at.relativeTo ?? '');
+    return [
+      at.point,
+      target === null ? null : ctx.wrapper(Number(target[1])),
+      at.relativePoint ?? at.point,
+      at.x,
+      at.y,
+    ];
+  },
+
+  /** `GetNumPoints()` -- how many anchors this region has. Registered beside `GetPoint`; the client
+   * loops `for i = 1, self:GetNumPoints()` in a few places and a nil there is an arithmetic error. */
+  GetNumPoints: (ctx, self) => [ctx.registry.widget(self)?.anchors.length ?? 0],
   /**
    * `SetParent(frameOrNameOrNil)` -- RE-PARENT a live widget.
    *

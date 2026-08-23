@@ -688,6 +688,26 @@ const CHECKBUTTON: MethodTable = {
     return [];
   },
   GetChecked: (ctx, self) => [widgetOf(ctx, self).checked],
+  /**
+   * THE DISABLED-CHECKED ART -- a fourth state texture, declared rather than drawn.
+   *
+   * From the owner's world-map log:
+   *
+   *     warning: SetDisabledCheckedTexture is not in this runtime's object model
+   *              (first: WorldMapFrame.xml:WorldMapTrackQuest)
+   *
+   * A CheckButton has four state textures in the engine -- normal, pushed, checked and
+   * DISABLED-checked -- and this widget layer models three (`ensureStateTexture` above). The fourth is
+   * what a ticked box that is also greyed out draws, which `WorldMapTrackQuest` is whenever the
+   * selected quest cannot be tracked. Declared on CHECKBUTTON and not BUTTON, since a plain Button has
+   * no checked concept at all -- the same split the header of this file records.
+   */
+  SetDisabledCheckedTexture: notImplemented('SetDisabledCheckedTexture',
+    'this widget layer models three button state textures (normal, pushed, checked) and not the '
+    + 'fourth disabled-checked one'),
+  GetDisabledCheckedTexture: notImplemented('GetDisabledCheckedTexture',
+    'as SetDisabledCheckedTexture -- there is no fourth state region to hand back'),
+
   SetCheckedTexture: (ctx, self, args) => {
     const region = ctx.registry.widget(ensureCheckedTextureId(ctx, self))!;
     applyStateArg(region, args[0]);

@@ -1406,6 +1406,28 @@ function fillFromSource(
   return [true, info.repairCost ?? null];
 }
 
+/**
+ * THE MINIMAP AND WORLD MAP'S REMAINING TOOLTIP CALLS, declared rather than faked.
+ *
+ * `GameTooltip:SetTracking()` was raising on a gesture the owner makes -- hovering the minimap's
+ * tracking button (`minimap.xml:497`, inside its `<OnEnter>` two lines after `SetOwner`). It fills the
+ * tooltip with the tracking types the player has, and `GetNumTrackingTypes` answers 0 here because
+ * tracking types ARE known tracking spells and this client models none (see `ui/map-bridge.ts`). So
+ * there is nothing to list, and an invented line would be worse than an empty tooltip.
+ *
+ * The other three are the world map's multi-tooltip surface: the engine can stack several tooltips in
+ * one frame and `WorldMapPOI_OnEnter` asks which index it is looking at. This layer draws one tooltip.
+ */
+Object.assign(GAMETOOLTIP, {
+  SetTracking: notImplemented('SetTracking',
+    'GetNumTrackingTypes answers 0 -- tracking types are known tracking spells and none are modelled'),
+  GetNumTooltips: notImplemented('GetNumTooltips',
+    'this layer draws one tooltip per frame, not a stack', [1]),
+  GetTooltipIndex: notImplemented('GetTooltipIndex', 'as GetNumTooltips', [1]),
+  UpdateMouseOverTooltip: notImplemented('UpdateMouseOverTooltip',
+    'a tooltip here is rebuilt by its owner OnEnter; nothing refreshes one in place'),
+});
+
 Object.assign(GAMETOOLTIP, ITEM_SETTERS);
 
 registerMethods('GAMETOOLTIP', GAMETOOLTIP);

@@ -165,6 +165,62 @@ const FRAME: MethodTable = {
   SetClampRectInsets: notImplemented('SetClampRectInsets',
     'widget.ts has no clamp-inset field; SetClampedToScreen clamps to the bare screen rect'),
   GetEffectiveScale: notImplemented('GetEffectiveScale', 'reporting the only scale that exists today (1)', [1]),
+
+  /**
+   * MOVING A WINDOW, and the KEYBOARD -- four gaps that the owner's world-map log named directly:
+   *
+   *     warning: SetMovable is not in this runtime's object model; every XML use of it is ignored
+   *              (first: WorldMapFrame.xml:WorldMapScreenAnchor)
+   *     warning: EnableKeyboard is not in this runtime's object model (first: WorldMapFrame.xml)
+   *
+   * They are declared rather than implemented, and the reason is not the flags -- a boolean on the
+   * widget is nothing. `StartMoving` needs the input router to keep feeding pointer movement to a frame
+   * that has claimed the drag, and `ui/input.ts` has no such claim: it routes a press to the widget
+   * under the cursor and stops there. `EnableKeyboard` needs the same for keys, which today go to the
+   * binding table (`framexml/bindings.ts`) and to a focused EditBox and nowhere else.
+   *
+   * Named as one block so the load report says "movable windows" rather than four unrelated lines. The
+   * visible consequence is exactly what the owner has already reported -- a window cannot be dragged --
+   * and Escape reaching `TOGGLEGAMEMENU` instead of a keyboard-enabled frame's own `OnKeyDown`.
+   */
+  SetMovable: notImplemented('SetMovable',
+    'ui/input.ts has no drag claim, so a frame that may move has nothing to move it'),
+  IsMovable: notImplemented('IsMovable', 'as SetMovable', [false]),
+  StartMoving: notImplemented('StartMoving',
+    'ui/input.ts routes a press to the widget under the cursor and does not keep feeding movement to '
+    + 'a frame that has claimed a drag'),
+  StopMovingOrSizing: notImplemented('StopMovingOrSizing', 'as StartMoving'),
+  SetResizable: notImplemented('SetResizable', 'as SetMovable -- the same missing drag claim'),
+  IsResizable: notImplemented('IsResizable', 'as SetResizable', [false]),
+  EnableKeyboard: notImplemented('EnableKeyboard',
+    'key presses go to the binding table and to a focused EditBox; no frame receives OnKeyDown'),
+  IsKeyboardEnabled: notImplemented('IsKeyboardEnabled', 'as EnableKeyboard', [false]),
+
+  /**
+   * THE WORLD MAP'S QUEST BLOBS -- `WorldMapBlobFrame`'s own engine surface.
+   *
+   * `WorldMapBlobFrame_OnLoad` calls `SetFillTexture`/`SetBorderTexture`/`SetFillAlpha`/
+   * `SetBorderScalar`/`SetBorderAlpha` and `WorldMapBlobFrame_OnUpdate` calls `DrawQuestBlob`
+   * (`worldmapframe.lua`). A blob is the shaded AREA a quest objective covers, drawn from the polygon
+   * the server sends with `SMSG_QUEST_POI_QUERY_RESPONSE` -- which this client does not subscribe to,
+   * so there is no polygon to fill and no fill to alpha.
+   *
+   * Declared on FRAME rather than a new class because `WorldMapBlobFrame` is authored as a plain
+   * `<Frame>`; the engine gives it these methods natively. That is the same duck-typing hazard the
+   * `SetScale` note above warns about, accepted here for the same reason it was there: the alternative
+   * is a class that exists for one frame.
+   */
+  DrawQuestBlob: notImplemented('DrawQuestBlob',
+    'SMSG_QUEST_POI_QUERY_RESPONSE has no subscriber, so no objective polygon exists to fill'),
+  DrawBlob: notImplemented('DrawBlob', 'as DrawQuestBlob'),
+  SetFillTexture: notImplemented('SetFillTexture', 'as DrawQuestBlob'),
+  SetBorderTexture: notImplemented('SetBorderTexture', 'as DrawQuestBlob'),
+  SetFillAlpha: notImplemented('SetFillAlpha', 'as DrawQuestBlob'),
+  SetBorderAlpha: notImplemented('SetBorderAlpha', 'as DrawQuestBlob'),
+  SetBorderScalar: notImplemented('SetBorderScalar', 'as DrawQuestBlob'),
+  CreatePlayerArrowFrame: notImplemented('CreatePlayerArrowFrame',
+    'the widget layer draws axis-aligned quads only, so a rotating arrow overlay has nowhere to '
+    + 'draw; see map-bridge.ts on the world map arrow'),
   /**
    * `GetScale()` -- 1, and a TRUE ANSWER rather than a stub, which is why it is not beside the two
    * above: this widget layer has exactly one scale, so 1 is what a frame's scale IS here, not what we

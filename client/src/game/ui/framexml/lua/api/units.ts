@@ -965,6 +965,28 @@ export function installUnitsApi(vm: LuaVM): void {
       + 'so no watched token exists; nil is what makes BackpackTokenFrame_Update hide its buttons',
     []],
     ['GetCurrencyListSize', 'as GetBackpackCurrencyInfo', [0]],
+
+    // THE MINIMAP CLUSTER'S DROPDOWNS, and every one of these was killing an `OnLoad` in the owner's
+    // log rather than merely being absent. `MinimapCluster` hangs five dropdown frames off itself and
+    // each initialises in its own `<OnLoad>`, so a nil here is not a menu that opens empty -- it is a
+    // raise before `UIDropDownMenu_Initialize` is reached.
+    //
+    // THE VALUES ARE THE CLIENT'S OWN EMPTY STATES, taken from each call site:
+    //  - `GetBattlefieldStatus(i)` is compared `status ~= "none"` (`battlefieldframe.lua:600-602`), so
+    //    **the string "none" is the engine's own word for an unused queue slot** and nil would make
+    //    that comparison true -- adding a spacer and a title for a battleground nobody is queued for.
+    //  - `GetLFGProposal()` feeds `proposalExists` in the client's own `GetLFGMode`
+    //    (`uiparent.lua:3570-3576`); nil is "no dungeon has been offered".
+    //  - `GetNumVoiceSessions()` bounds `for id = 1, count` (`voicechat.lua:251-253`), so it must be a
+    //    number; 0 is true -- there is no voice transport in this client at all.
+    ['GetBattlefieldStatus', 'no battleground queue exists: SMSG_BATTLEFIELD_STATUS has no subscriber, '
+      + 'so every queue slot is empty', ['none']],
+    ['GetLFGProposal', 'no LFG queue exists: the dungeon finder is not decoded', []],
+    ['GetLFGInfoServer', 'as GetLFGProposal -- the queue state the client reads beside the proposal',
+    []],
+    ['GetLFGRoleUpdate', 'as GetLFGProposal -- the role-check state', []],
+    ['GetNumVoiceSessions', 'this client has no voice transport', [0]],
+    ['GetVoiceSessionInfo', 'as GetNumVoiceSessions -- unreachable behind a count of 0', []],
     ['GetCurrencyListInfo', 'as GetBackpackCurrencyInfo', []],
     ['GetNumWatchedTokens', 'as GetBackpackCurrencyInfo', [0]],
     ['ExpandCurrencyList', 'as GetBackpackCurrencyInfo', []],

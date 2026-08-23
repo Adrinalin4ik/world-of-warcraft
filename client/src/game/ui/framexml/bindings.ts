@@ -152,6 +152,20 @@ export const DEFAULT_BINDINGS: ReadonlyArray<readonly [string, string]> = [
   ['TOGGLESPELLBOOK', 'P'],
   ['TOGGLECHARACTER0', 'C'],
   ['TOGGLEBACKPACK', 'B'],
+  // THE MAP KEYS, added because the owner asked for them by name: "hotkey на карту не настроены.
+  // Режим shift + m тоже не включается." All three COMMANDS are the client's own
+  // (`bindings.xml:659-674`) -- `ToggleFrame(WorldMapFrame)`, `WorldMapFrame_ToggleWindowSize()` behind
+  // an `IsShown` guard, and `ToggleFrame(QuestLogFrame)` -- so the engine side is only the key.
+  //
+  // `SHIFT-M` is `TOGGLEWORLDMAPSIZE`, not a second way to open the map: it switches the open map
+  // between its windowed and full-screen layouts, which is the "режим" he means. Its binding body does
+  // nothing at all when the map is shut, by the client's own guard.
+  //
+  // The KEYS carry this table's standing note: transcribed from the shipped layout, not read from any
+  // data this project has.
+  ['TOGGLEWORLDMAP', 'M'],
+  ['TOGGLEWORLDMAPSIZE', 'SHIFT-M'],
+  ['TOGGLEQUESTLOG', 'L'],
   ['TOGGLEGAMEMENU', 'ESCAPE'],
   // TAB and SHIFT-TAB. `Bindings.xml:456-461` is the pair -- `TargetNearestEnemy()` and
   // `TargetNearestEnemy(1)`, whose own comment reads "1 (or "true") means reverse!". The KEYS carry the

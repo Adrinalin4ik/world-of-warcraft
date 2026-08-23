@@ -3,10 +3,6 @@ import type { WorldMapAreaRow } from '../pipeline/dbc/map-data';
 import { fireEvent } from './framexml/lua/events';
 import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
-import type { MethodContext } from './framexml/lua/object';
-import type { GlueArt } from './art';
-import { MinimapTerrain, MINIMAP_TERRAIN_KEY } from './minimap-terrain';
-import { zoomOf } from './framexml/lua/methods/minimap';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -64,9 +60,7 @@ import { zoomOf } from './framexml/lua/methods/minimap';
  * parent chain, and the chain is two or three deep in practice. These are called from `SetText` paths on
  * zone-change events, not per frame.
  */
-export function attachMapBridge(
-  vm: LuaVM, world: World, ctx: MethodContext, art: GlueArt,
-): MapBridge {
+export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   let disposed = false;
 
   // Kicked off here rather than awaited: the first zone change after it lands fills the label, and a
@@ -193,9 +187,15 @@ export function attachMapBridge(
    *    that select nothing.
    *  - `GetTrackingInfo` cannot be reached with the count at 0, and is registered anyway: an addon
    *    duck-types it, and this is the object-model rule the button classes already follow.
-   *  - `GetLFGMode`, `IsPartyLFG`, `IsInLFGDungeon` -> the LFG eye's four update functions
-   *    (`minimap.lua:215, 239-244, 284, 313`). nil throughout, and nil is the state "not queued" that
-   *    every one of those ladders falls through to.
+   *  - `IsPartyLFG`, `IsInLFGDungeon` -> the LFG eye's update functions (`minimap.lua:242-244`). nil,
+   *    which is the "not queued" state every one of those ladders falls through to.
+   *
+   *    **`GetLFGMode` is NOT here, and it was until the client's own file was read.** It is not an
+   *    engine global at all -- `uiparent.lua:3570` defines it in Lua, on top of `GetLFGProposal`,
+   *    `GetLFGInfoServer` and `GetLFGRoleUpdate`, which ARE the engine's. Registering it here shadowed
+   *    a function the client ships. Harmless once this bridge is seeded before the manifest (the real
+   *    definition simply lands later and wins), and wrong in any other order -- so it is gone, and the
+   *    three real globals under it are declared in `api/units.ts` with the rest of the cluster.
    *  - `GetLatestThreeSenders` -> the mail icon's tooltip (`minimap.lua:387`). Three nils make the
    *    client pick `HAVE_MAIL` over `HAVE_MAIL_FROM`, which is precisely its own wording for "you have
    *    mail and I cannot name the senders".
@@ -210,7 +210,6 @@ export function attachMapBridge(
   fn('GetTrackingTexture', () => [null]);
   fn('GetNumTrackingTypes', () => [0]);
   fn('GetTrackingInfo', () => [null, null, null, null]);
-  fn('GetLFGMode', () => [null, null]);
   fn('IsPartyLFG', () => [null]);
   fn('IsInLFGDungeon', () => [null]);
   fn('GetLatestThreeSenders', () => [null, null, null]);
@@ -591,6 +590,46 @@ export function attachMapBridge(
    * wiring one; and both names present with a blank label on screen says the globals are right and the
    * frame is not reading them.
    */
+  /**
+   * `window.worldMap()` -- what the WORLD MAP's engine side actually answers, in one call.
+   *
+   * The owner reports the map frame drawing with "карта не рендерится, селекторы ничего не дают
+   * выбрать" -- no art and dead dropdowns -- and those two symptoms have four quite different causes
+   * that look identical from a screenshot: the DBCs never loaded; they loaded but the selection is 0
+   * so there is no row to name art from; the selection is fine but `GetMapInfo` answers an art name
+   * the host does not serve; or all of that is right and the client never ran `UpdateMap`.
+   *
+   * **Build the instrument before the fix.** This prints all four at once, including the exact texture
+   * path the client would build for tile 1, so the next thing to check is a single URL rather than a
+   * guess. `tile1` is what `WorldMapFrame_UpdateMap` composes at `worldmapframe.lua:255-262`:
+   * `Interface\WorldMap\<art>\<art><i>`.
+   */
+  (window as unknown as Record<string, unknown>).worldMap = () => {
+    const row = selected();
+    const continents = mapData.continents();
+    const art = row?.art ?? '';
+    return {
+      dbcLoaded: mapData.loaded,
+      continents: continents.length,
+      continentNames: continents.map((entry) => mapData.displayName(entry)),
+      selection: { continentIndex, zoneIndex },
+      zonesOnSelected: continentIndex === 0
+        ? 0
+        : mapData.zonesOn(continents[continentIndex - 1]?.mapId ?? -1).length,
+      currentZoneRow: currentZoneRow(),
+      selectedRow: row === null ? null : {
+        areaId: row.areaId, mapId: row.mapId, art: row.art,
+      },
+      // The path the client builds for the first of its twelve detail tiles. If this is empty the
+      // selection is the problem; if it is populated, check whether the host serves it.
+      tile1: art === '' ? '' : `Interface\\WorldMap\\${art}\\${art}1`,
+      playerAt: (() => {
+        const at = world.player;
+        return at ? { x: at.position.x, y: at.position.y } : null;
+      })(),
+    };
+  };
+
   (window as unknown as Record<string, unknown>).worldZone = () => {
     const player = world.player;
     const map = world.map as unknown as { areaIdAt?: (x: number, y: number) => number } | null;
@@ -636,100 +675,11 @@ export function attachMapBridge(
    * exists and the area comes from the terrain cell under the player, which changes as he walks. The cost
    * is `areaIdAt` -- two divisions and a `Map#get` -- plus a compare, once per UI tick.
    */
-  /**
-   * THE MINIMAP'S TERRAIN, drawn into the client's own `Minimap` frame.
-   *
-   * `minimap-terrain.ts` composites the game's minimap BLPs and publishes the result through
-   * `art.adopt`; this is the region that draws it. Created ENGINE-SIDE and not authored, which is
-   * correct rather than a shortcut: the real client's Minimap draws its terrain natively too -- there is
-   * no `<Texture>` for it anywhere in `minimap.xml`, because it is the engine's surface and not the
-   * client's art. `methods/statusbar.ts` creates its bar fill the same way and for the same reason.
-   *
-   * `BACKGROUND` layer, so every piece of the client's own art -- the border ring, the buttons, the
-   * blips it will one day draw -- lands on top of it. Anchored to fill the frame exactly, so the
-   * circular mask in the composite lines up with the round border the client draws over it.
-   *
-   * Created LAZILY on the first tick that finds a `Minimap` frame, rather than at attach: the bridge is
-   * attached before the manifest has necessarily produced the frame, and a null there would silently
-   * mean no terrain for the session.
-   */
-  let terrain: MinimapTerrain | null = null;
-  let terrainRegion: number | null = null;
-  let minimapId: number | null = null;
-
-  const ensureTerrain = (): boolean => {
-    if (terrainRegion !== null) {
-      return true;
-    }
-    minimapId = ctx.registry.byName('Minimap');
-    if (minimapId === null) {
-      return false;
-    }
-    terrain = new MinimapTerrain(art);
-    terrainRegion = ctx.registry.create('Texture', null, minimapId);
-    const region = ctx.registry.widget(terrainRegion);
-    if (region === null) {
-      return false;
-    }
-    region.layer = 'BACKGROUND';
-    region.sprite = MINIMAP_TERRAIN_KEY;
-    const fill = (point: 'TOPLEFT' | 'BOTTOMRIGHT') => ({
-      point, relativePoint: point, relativeTo: ctx.registry.widget(minimapId!)!.id, x: 0, y: 0,
-    });
-    region.setAnchors(fill('TOPLEFT'), fill('BOTTOMRIGHT'));
-    /**
-     * THE OWNER'S KNOB for the one number in this feature that no file states.
-     *
-     * `window.worldMinimapZoom(400)` sets how many yards the minimap shows; `null` restores the
-     * table. This is the shape that settled the quest sparkle's scale in a single message -- he
-     * looked, named the value that fitted, and the guessing stopped. Cheaper and more honest than a
-     * third round of arithmetic here.
-     */
-    (window as unknown as Record<string, unknown>).worldMinimapZoom = (yards?: number) => {
-      terrain?.setWindowYards(typeof yards === 'number' ? yards : null);
-      return yards ?? 'restored to the (unsourced) default table';
-    };
-    return true;
-  };
-
-  /**
-   * Composite the terrain for where the player is now. Called from `poll`, i.e. once per UI tick.
-   *
-   * The cost of a tick that changes nothing is the two `Math.round`s and a string compare inside
-   * `MinimapTerrain#update` -- see that file's header on why the gate is pixel-quantised rather than
-   * time-based. Gated on the frame being VISIBLE as well, so a session with the minimap hidden
-   * (`ToggleMinimap`) does not composite at all.
-   */
-  const drawMinimap = (): void => {
-    if (!ensureTerrain() || terrain === null) {
-      return;
-    }
-    const frame = minimapId === null ? null : ctx.registry.widget(minimapId);
-    if (frame === null || !frame.visible) {
-      return;
-    }
-    const player = world.player;
-    const map = world.map as unknown as { internalName?: string } | null;
-    if (!player || !map || typeof map.internalName !== 'string') {
-      return;
-    }
-    terrain.update(
-      map.internalName,
-      player.position.x,
-      player.position.y,
-      zoomOf(frame),
-    );
-  };
-
   let lastArea = 0;
   let lastZone = '';
 
   const poll = (): void => {
-    if (disposed) {
-      return;
-    }
-    drawMinimap();
-    if (!mapData.loaded) {
+    if (disposed || !mapData.loaded) {
       return;
     }
     const player = world.player;
@@ -752,9 +702,8 @@ export function attachMapBridge(
     poll,
     dispose: () => {
       disposed = true;
-      terrain?.dispose();
-      delete (window as unknown as Record<string, unknown>).worldMinimapZoom;
       delete (window as unknown as Record<string, unknown>).worldZone;
+      delete (window as unknown as Record<string, unknown>).worldMap;
     },
   };
 }

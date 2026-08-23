@@ -77,6 +77,9 @@ import WorkerPool, { PRIORITY } from '../pipeline/worker/pool';
 import minimapTiles from '../pipeline/minimap-tiles';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
 import type { GlueArt } from './art';
+import type { MethodContext } from './framexml/lua/object';
+import { playerArrow, zoomOf } from './framexml/lua/methods/minimap';
+import type World from '../world';
 
 /** The art key the Minimap's terrain region names. Not a path -- `art.adopt` publishes it directly. */
 export const MINIMAP_TERRAIN_KEY = '__minimapTerrain';
@@ -274,7 +277,29 @@ export class MinimapTerrain {
         const rect = tileRect(a, b, worldX, worldY, windowYards);
         // `drawImage` clips to the canvas itself, so a tile hanging off an edge needs no arithmetic
         // here -- which is also why a fifth partially-visible tile costs nothing to include.
-        ctx.drawImage(tile, rect.x, rect.y, rect.size, rect.size);
+        /**
+         * SOURCE INSET BY HALF A TEXEL, DESTINATION EXPANDED BY HALF A PIXEL -- the seam fix.
+         *
+         * The owner saw "полосы на стыках": a visible line along every tile boundary. Two things
+         * produce it and this covers both, because from here they are indistinguishable.
+         *
+         *  1. `drawImage` at FRACTIONAL destination coordinates antialiases the tile's outer edge
+         *     against the transparent canvas, so each tile ends in a half-transparent row -- and two
+         *     of those meeting is a line darker than either tile.
+         *  2. A minimap tile's own outermost row is frequently not terrain at all but the edge the
+         *     artist left, which upscaling then smears across a whole destination pixel.
+         *
+         * Skipping the outer half-texel of the source removes (2); overlapping the destination by half
+         * a pixel on every side removes (1), since the neighbour now paints over the feathered edge.
+         * The cost is a 0.4% scale-up of each tile at this size, which no eye resolves, and it is
+         * cheaper and more certain than trying to round every rect onto integer boundaries -- the tile
+         * size is fractional at every zoom level, so rounding leaves gaps instead of overlaps.
+         */
+        ctx.drawImage(
+          tile,
+          0.5, 0.5, tile.width - 1, tile.height - 1,
+          rect.x - 0.5, rect.y - 0.5, rect.size + 1, rect.size + 1,
+        );
       }
     }
 
@@ -386,6 +411,260 @@ function toCanvas(spec: BlpSpec): HTMLCanvasElement | null {
   );
   ctx.putImageData(new ImageData(bytes, level.width, level.height), 0, 0);
   return canvas;
+}
+
+/**
+ * THE PLAYER ARROW, its own 64x64 canvas and its own region -- deliberately NOT part of the composite.
+ *
+ * It could have been drawn into the terrain canvas, and that would have been worse: the arrow turns
+ * whenever the player turns, and a facing change would then force a full terrain recomposite -- four
+ * `drawImage`s, the mask, and a 256 KB upload -- for a 40-pixel marker. On its own canvas a turn costs
+ * one clear, one rotated blit and a **4 KB** upload, and the terrain is untouched.
+ *
+ * `ctx.rotate` is why this works at all without a renderer change. The widget layer draws axis-aligned
+ * quads only, which is what made the world map's rotating arrow a declared gap -- but a canvas rotates
+ * for free, so the minimap gets the facing the world map cannot have yet.
+ *
+ * THE ART: `<Minimap>` names the arrow as an ATTRIBUTE rather than art --
+ * `minimapPlayerModel="Interface\Minimap\MinimapArrow.mdx"` (`minimap.xml`) -- so the authored form is
+ * an M2. `interface/minimap/minimaparrow.blp` is the same art beside it and answers 200 (measured: 32x32,
+ * BLP2, palettized with an 8-bit alpha), which is what this draws. A model would give the same picture
+ * through the model pipeline for a marker that is 40 pixels wide.
+ *
+ * THE SIZE IS SOURCED, and it is the one number in this whole feature that is: the client asks for it
+ * itself, `Minimap:SetPlayerTextureHeight(40)` / `SetPlayerTextureWidth(40)` in `MinimapPing_OnLoad`
+ * (`minimap.lua:11-12`). `methods/minimap.ts` records those calls and this is the reader its comment
+ * promised -- that note said "read by nothing yet", and it no longer applies.
+ */
+const ARROW_KEY = '__minimapPlayerArrow';
+
+/** The arrow canvas's side. Twice the art's 32 px so the rotated diagonal is not clipped. */
+const ARROW_PX = 64;
+
+class MinimapPlayerArrow {
+  private readonly canvas: HTMLCanvasElement;
+
+  private readonly ctx: CanvasRenderingContext2D | null;
+
+  private readonly texture: THREE.CanvasTexture;
+
+  private art: HTMLCanvasElement | null = null;
+
+  private loading = false;
+
+  /**
+   * The last facing drawn, quantised to whole degrees.
+   *
+   * Quantised so that standing still with a trembling heading costs nothing, and to DEGREES rather than
+   * anything coarser because the arrow is the one thing on the minimap whose angle a player reads
+   * directly -- a 5-degree step is visible as a stutter when turning slowly.
+   */
+  private lastDegrees = Number.NaN;
+
+  constructor(private readonly glue: GlueArt) {
+    this.canvas = document.createElement('canvas');
+    this.canvas.width = ARROW_PX;
+    this.canvas.height = ARROW_PX;
+    this.ctx = this.canvas.getContext('2d');
+    this.texture = new THREE.CanvasTexture(this.canvas);
+    this.texture.generateMipmaps = false;
+    this.texture.minFilter = THREE.LinearFilter;
+    this.texture.wrapS = THREE.ClampToEdgeWrapping;
+    this.texture.wrapT = THREE.ClampToEdgeWrapping;
+    this.glue.adopt(ARROW_KEY, this.texture);
+  }
+
+  update(facing: number): void {
+    if (this.ctx === null) {
+      return;
+    }
+    if (this.art === null) {
+      this.load();
+      return;
+    }
+    const degrees = Math.round((facing * 180) / Math.PI);
+    if (degrees === this.lastDegrees) {
+      return;
+    }
+    this.lastDegrees = degrees;
+
+    const ctx = this.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, ARROW_PX, ARROW_PX);
+    ctx.translate(ARROW_PX / 2, ARROW_PX / 2);
+    /**
+     * `-facing`, and the sign is the whole of the orientation question here.
+     *
+     * The game's orientation is 0 at NORTH and grows toward the world's +Y, which is WEST. On a
+     * north-up minimap west is LEFT, and a canvas `rotate` with y pointing down turns CLOCKWISE for a
+     * positive angle. So the arrow has to turn anticlockwise as the heading grows: negated.
+     *
+     * The same two conventions meeting that every orientation defect on this project has been -- named
+     * here rather than discovered by negating a coordinate until it looked right.
+     */
+    ctx.rotate(-facing);
+    ctx.drawImage(this.art, -this.art.width / 2, -this.art.height / 2);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.texture.needsUpdate = true;
+  }
+
+  private load(): void {
+    if (this.loading) {
+      return;
+    }
+    this.loading = true;
+    void (async () => {
+      try {
+        const spec = (await WorkerPool.enqueueAt(
+          PRIORITY.BACKGROUND, 'BLP', 'Interface\\Minimap\\MinimapArrow.blp', true,
+        )) as BlpSpec | null | undefined;
+        if (spec && spec.format === BLP_IMAGE_FORMAT.IMAGE_ABGR8888 && spec.mipmaps.length > 0) {
+          this.art = toCanvas(spec);
+          // The heading has not changed, but the art has -- so the next update must be allowed to draw.
+          this.lastDegrees = Number.NaN;
+        } else {
+          console.warn('minimap arrow: MinimapArrow.blp did not decode to RGBA');
+        }
+      } catch (error) {
+        console.warn('minimap arrow: MinimapArrow.blp failed to load', error);
+      } finally {
+        // Left latched on purpose after a failure: a missing arrow is a cosmetic gap, and retrying a
+        // 404 once per frame for the session is not a trade worth making.
+        this.loading = true;
+      }
+    })();
+  }
+
+  dispose(): void {
+    this.texture.dispose();
+    this.art = null;
+  }
+}
+
+/**
+ * What the host holds: a per-tick draw and the teardown.
+ *
+ * SEPARATE FROM `map-bridge.ts`, and the split is load-bearing rather than tidy. The map bridge's Lua
+ * globals must be registered **before the manifest runs**, because the client calls them from `OnLoad`:
+ * `MinimapCluster:OnLoad` is `Minimap_Update()`, whose first line is `GetMinimapZoneText()`. So the
+ * bridge is seeded (`world-runtime.ts#WorldRuntimeOptions.seed`). The drawing cannot be -- it needs the
+ * object model's registry to create regions on a `Minimap` frame the manifest has not built yet. Two
+ * lifetimes, two attachments.
+ */
+export interface MinimapTerrainHost {
+  tick: () => void;
+  dispose: () => void;
+}
+
+/**
+ * Give the client's `Minimap` frame its terrain and its player arrow, and keep both current.
+ *
+ * Both regions are created ENGINE-SIDE and neither is authored, which is correct rather than a
+ * shortcut: there is no `<Texture>` for either anywhere in `minimap.xml`, because both are the engine's
+ * own surface -- `<Minimap>` names the arrow as an attribute, not as art. `methods/statusbar.ts` creates
+ * its bar fill the same way and for the same reason.
+ *
+ * The terrain sits at `BACKGROUND` so every piece of the client's own art lands on top of it, and fills
+ * the frame exactly so the circular mask lines up with the round border drawn over it. The arrow sits at
+ * `OVERLAY`, centred, at the size the client itself asked for.
+ *
+ * Created LAZILY on the first tick that finds the frame: this attaches right after the manifest, but a
+ * frame that failed to load would otherwise mean a null captured for the whole session.
+ */
+export function attachMinimapTerrain(
+  ctx: MethodContext, art: GlueArt, world: World,
+): MinimapTerrainHost {
+  let terrain: MinimapTerrain | null = null;
+  let arrow: MinimapPlayerArrow | null = null;
+  let built = false;
+  let minimapId: number | null = null;
+  let disposed = false;
+
+  const ensure = (): boolean => {
+    if (built) {
+      return true;
+    }
+    minimapId = ctx.registry.byName('Minimap');
+    if (minimapId === null) {
+      return false;
+    }
+    const frame = ctx.registry.widget(minimapId);
+    if (frame === null) {
+      return false;
+    }
+
+    terrain = new MinimapTerrain(art);
+    const terrainRegion = ctx.registry.widget(ctx.registry.create('Texture', null, minimapId));
+    if (terrainRegion === null) {
+      return false;
+    }
+    terrainRegion.layer = 'BACKGROUND';
+    terrainRegion.sprite = MINIMAP_TERRAIN_KEY;
+    const fill = (point: 'TOPLEFT' | 'BOTTOMRIGHT') => ({
+      point, relativePoint: point, relativeTo: frame.id, x: 0, y: 0,
+    });
+    terrainRegion.setAnchors(fill('TOPLEFT'), fill('BOTTOMRIGHT'));
+
+    arrow = new MinimapPlayerArrow(art);
+    const arrowRegion = ctx.registry.widget(ctx.registry.create('Texture', null, minimapId));
+    if (arrowRegion !== null) {
+      arrowRegion.layer = 'OVERLAY';
+      arrowRegion.sprite = ARROW_KEY;
+      // The size the client asks for itself (`minimap.lua:11-12`), held by `methods/minimap.ts`.
+      arrowRegion.setSize(playerArrow.width, playerArrow.height);
+      arrowRegion.setAnchors({
+        point: 'CENTER', relativePoint: 'CENTER', relativeTo: frame.id, x: 0, y: 0,
+      });
+    }
+
+    /**
+     * THE OWNER'S KNOB for the one number in the terrain that no file states.
+     *
+     * `window.worldMinimapZoom(400)` sets how many yards the minimap shows; no argument restores the
+     * table. This is the shape that settled the quest sparkle's scale in a single message -- he looked,
+     * named the value that fitted, and the guessing stopped.
+     */
+    (window as unknown as Record<string, unknown>).worldMinimapZoom = (yards?: number) => {
+      terrain?.setWindowYards(typeof yards === 'number' ? yards : null);
+      return yards ?? 'restored to the (unsourced) default table';
+    };
+    built = true;
+    return true;
+  };
+
+  return {
+    /**
+     * Composite for where the player is now. Called once per UI tick.
+     *
+     * A tick that changes nothing costs the `visible` walk, four numeric compares in the terrain's gate
+     * and one in the arrow's -- see this file's header on why both gates are quantised rather than
+     * timed. Gated on the frame being VISIBLE too, so `ToggleMinimap` costs nothing at all.
+     */
+    tick: () => {
+      if (disposed || !ensure()) {
+        return;
+      }
+      const frame = minimapId === null ? null : ctx.registry.widget(minimapId);
+      if (frame === null || !frame.visible) {
+        return;
+      }
+      const player = world.player;
+      const map = world.map as unknown as { internalName?: string } | null;
+      if (!player || !map || typeof map.internalName !== 'string') {
+        return;
+      }
+      terrain?.update(map.internalName, player.position.x, player.position.y, zoomOf(frame));
+      arrow?.update(player.facing ?? 0);
+    },
+    dispose: () => {
+      disposed = true;
+      terrain?.dispose();
+      arrow?.dispose();
+      terrain = null;
+      arrow = null;
+      delete (window as unknown as Record<string, unknown>).worldMinimapZoom;
+    },
+  };
 }
 
 export default MinimapTerrain;

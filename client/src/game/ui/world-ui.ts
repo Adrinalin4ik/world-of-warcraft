@@ -49,6 +49,7 @@ import { attachSkillsBridge } from './skills-bridge';
 import { attachReputationBridge } from './reputation-bridge';
 import { attachLootBridge } from './loot-bridge';
 import { attachMapBridge, MapBridge } from './map-bridge';
+import { attachMinimapTerrain, MinimapTerrainHost } from './minimap-terrain';
 import { attachGossipBridge } from './gossip-bridge';
 import { attachInteractionWatch } from './interaction-watch';
 import { attachMerchantBridge } from './merchant-bridge';
@@ -254,6 +255,9 @@ export class WorldUiHost {
 
   /** `attachMapBridge`'s teardown, held for the same reason as the loot bridge's below. */
   private mapBridge: MapBridge | null = null;
+
+  /** The minimap's terrain and player arrow -- attached after the manifest, unlike the bridge above. */
+  private minimapTerrain: MinimapTerrainHost | null = null;
 
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
@@ -512,7 +516,32 @@ export class WorldUiHost {
       // their `OnLoad` and one of them (`MainMenuExpBar`) hides itself for good on a zero. See
       // `unit-bridge.ts#seedUnitSnapshots`. Snapshots only -- the events still come from the bridges
       // below, which need the tree to exist.
-      seed: this.world ? (vm) => seedUnitSnapshots(vm, this.world as World) : undefined,
+      /**
+       * THE PLAYER'S SNAPSHOT **and the map's globals**, both before the manifest runs.
+       *
+       * Several documents read unit state in their `OnLoad` and one of them (`MainMenuExpBar`) hides
+       * itself for good on a zero -- see `unit-bridge.ts#seedUnitSnapshots`.
+       *
+       * **THE MAP BRIDGE IS HERE FOR A SHARPER VERSION OF THE SAME REASON, and it was attached below
+       * with the others until the owner's log proved that wrong.** This was nil at load:
+       *
+       *     Minimap.xml:MinimapCluster: OnLoad: Minimap.lua:29:
+       *         attempt to call a nil value (global 'GetMinimapZoneText')
+       *
+       * `GetMinimapZoneText` had been registered and working for a round. It read nil because
+       * `MinimapCluster:OnLoad` is `Minimap_Update()` and that runs during the manifest, while every
+       * bridge below attaches AFTER it -- so the minimap label was never a missing global at all. It
+       * was a global that arrived after its only caller had already raised, and that one raise took the
+       * rest of `MinimapCluster:OnLoad` with it.
+       *
+       * So the rule this seam encodes: **a global the client calls from an `OnLoad` must be registered
+       * before the manifest, not after it.** The map bridge needs only the VM and the world, so it can
+       * be; the bridges below need the frame tree and cannot.
+       */
+      seed: this.world ? (vm) => {
+        seedUnitSnapshots(vm, this.world as World);
+        this.mapBridge = attachMapBridge(vm, this.world as World);
+      } : undefined,
       // THE LOADING SCREEN'S BAR. A real fraction of the manifest, not a timer: see
       // `ui/loading-screen.ts` and `world-runtime.ts`'s yield for why it is only called at a yield.
       onProgress: (done, total) => this.onLoadProgress?.(done / total),
@@ -623,9 +652,10 @@ export class WorldUiHost {
         // read the same `ItemHandler` template cache -- `attachContainerBridge` is the one that first
         // asks `itemData` to load, and `ensureLoaded` is idempotent so this rides that promise.
         this.detachLoot = attachLootBridge(runtime.vm, this.world, this.art);
-        // WHERE THE PLAYER IS, in words -- the zone-text family the minimap's label reads. See
-        // `map-bridge.ts`; step 3 of the map arc and the first with anything visible in it.
-        this.mapBridge = attachMapBridge(runtime.vm, this.world, runtime.ctx, this.art);
+        // THE MINIMAP'S TERRAIN AND PLAYER ARROW. The map bridge's globals are seeded above, before the
+        // manifest; the DRAWING has to be here instead, because it creates regions on a `Minimap` frame
+        // that does not exist until the manifest has built it. See `minimap-terrain.ts` on the split.
+        this.minimapTerrain = attachMinimapTerrain(runtime.ctx, this.art, this.world);
         // TALKING TO AN NPC, then BUYING AND SELLING. Gated on a real session for the reason the item
         // bridges are: a vendor's stock and a gossip menu are both packets, so an offline world has
         // neither and `world.game.objectHandler` must not be touched on that route.
@@ -767,6 +797,9 @@ export class WorldUiHost {
     // from. See `map-bridge.ts` -- the client refreshes its minimap label only on `ZONE_CHANGED*`, and
     // this engine is what has to say one happened. Two divisions and a compare.
     this.mapBridge?.poll();
+    // THE MINIMAP'S PICTURE, beside the zone edge. Both gates are quantised, so a standing player
+    // pays four numeric compares and a `visible` walk -- see `minimap-terrain.ts` on the cost.
+    this.minimapTerrain?.tick();
     this.sections.end('ui.tick');
 
     const viewport = { width: window.innerWidth, height: window.innerHeight };
@@ -1432,6 +1465,8 @@ export class WorldUiHost {
     // the attach order is what makes the chain's restore land on something live.
     this.mapBridge?.dispose();
     this.mapBridge = null;
+    this.minimapTerrain?.dispose();
+    this.minimapTerrain = null;
     this.detachLoot?.();
     this.detachLoot = null;
     // THE TRAINER'S FIRST, and the order is load-bearing rather than tidy. The tooltip-source chain has
