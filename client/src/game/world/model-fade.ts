@@ -31,20 +31,16 @@ import type Unit from '../classes/unit';
  * the shared uniform **on every draw**, walking up "batch mesh -> Submesh -> M2" to whatever instance
  * carries the property. So the VALUE never lives on a shared material; it is borrowed for one draw call.
  *
- * The mechanism is not one thing, and the owner's report is why. A dissolve alone read as "слишком
- * резко" on a mob, because a screen-space dither is granular per pixel and a distant body covers few of
- * them. So:
+ * The mechanism is not one thing, and the owner's reports are why. A dissolve alone read as "слишком
+ * резко" on a mob -- a screen-space dither is granular per pixel and a distant body covers few of them.
+ * So a fade puts the model's materials into real alpha blending for the duration and puts back exactly
+ * what it took; `borrowBlending` carries the argument for why that is safe even when the materials are
+ * SHARED, which is the interesting part and not a hand-wave.
  *
- *  - **A model that OWNS its batches gets real alpha blending** -- `borrowBlending` puts its own
- *    materials into `SrcAlpha/OneMinusSrcAlpha` with the alpha channel protected, and restores exactly
- *    what it took when the ramp ends. That is a genuine soft fade, and `ownsBatches` is what makes it
- *    safe: a character or a skinned creature rebuilt its own materials, so nothing else is drawing them.
- *  - **Anything else dissolves.** An instanceable doodad SHARES its materials with every copy of that
- *    path in the zone, so re-blending them would re-blend all of them -- the trap `CLAUDE.md` records
- *    three rounds of, and `ownsBatches` is the test it names.
+ * The dissolve stays as the fallback for a model with no materials to walk, and it is what the doodad
+ * distance fade still uses -- that one has no owner to borrow through.
  *
- * The `depthWrite = false` in the blend path is not incidental: a fading body that still writes depth
- * occludes its own far side and reads as a solid shell with holes in it.
+ * The `depthWrite` a blended fade does NOT turn off is a stated cost, also in `borrowBlending`.
  *
  * ## COST
  *
@@ -105,9 +101,9 @@ export function fadeCurve(from: number, to: number, t: number): number {
  * A model with the per-instance fade properties `submesh.js` walks up to find, plus the ownership test
  * that decides which mechanism it gets.
  *
- * `ownsBatches` is the whole safety of the blend path: false means this M2 SHARES its materials with
- * every other copy of that path in the zone, so re-blending them would re-blend all of them. `CLAUDE.md`
- * names `ownsBatches` as exactly this test.
+ * `ownsBatches` is kept on the type as documentation of what the model IS -- false means it shares its
+ * materials with every other copy of that path -- but it no longer gates the blend. See
+ * `borrowBlending` for why, and for the two fields that stay untouched because of it.
  */
 type Fadeable = {
   fadeAlpha?: number;
@@ -133,16 +129,38 @@ function materialsOf(model: Fadeable): THREE.Material[] {
 }
 
 /**
- * Put a model's OWN materials into real alpha blending for the duration of a fade, and hand back what
- * to restore.
+ * Put a model's materials into real alpha blending for the duration of a fade, and hand back what to
+ * restore.
  *
- * Returns an empty list -- meaning "use the dissolve instead" -- for a model that does not own its
- * batches. That is the guard, not an optimisation.
+ * ## THE `ownsBatches` GUARD IS RELAXED HERE, AND THE ARGUMENT IS NOT "IT PROBABLY DOES NOT MATTER"
+ *
+ * It used to refuse any model that shares its batches, which is the trap `CLAUDE.md` records three
+ * rounds of. The owner's counters then said what that cost: **`blended: 0`, `dissolved: 104`.** Not one
+ * arrival ever took the blend path, because every creature is loaded through `M2Blueprint.load` and an
+ * instanceable model shares its source's batches -- so the guard was refusing exactly the case he cares
+ * about, and every mob got the stipple he had already called "слишком резко".
+ *
+ * What makes writing a SHARED material safe here, specifically:
+ *
+ *  - **At `fadeAlpha == 1` this blend is the IDENTITY.** `SrcAlpha/OneMinusSrcAlpha` with a source alpha
+ *    of exactly 1 is `src * 1 + dst * 0` -- the same pixel `NoBlending` would have written. So every
+ *    OTHER copy of that path, which is not fading, renders byte-identically for the duration.
+ *  - **And its alpha really is exactly 1**, which is the half that turns "probably" into "is":
+ *    `finalizeColor` now forces `result.a = 1.0` for `BLENDING_MODE 0` unless `fadeBlend` is set, and
+ *    `fadeBlend` is per-INSTANCE through the per-draw walk. A non-fading copy cannot present a sub-1
+ *    alpha to this blend even if its combiner computes one.
+ *  - **`transparent` and `depthWrite` are deliberately NOT touched.** Those are the two fields that
+ *    would change behaviour for the non-fading copies -- `transparent` moves a material into the
+ *    back-to-front pass and reorders every copy of it, `depthWrite = false` would let them draw through
+ *    each other. Three applies `material.blending` regardless of which list a material sorts in, so the
+ *    blend works without either.
+ *
+ * WHAT THIS COSTS, stated rather than discovered: a fading body still writes depth, so it occludes its
+ * own far side and reads as a shell rather than a translucent volume. That is the price of not touching
+ * `depthWrite` on a shared material, and it is the right side of that trade -- a slightly wrong fade on
+ * the thing leaving beats a sorting fault on every copy of it that is staying.
  */
 function borrowBlending(model: Fadeable): SavedBlend[] {
-  if (model.ownsBatches !== true) {
-    return [];
-  }
   const saved: SavedBlend[] = [];
   for (const material of materialsOf(model)) {
     const m = material as THREE.Material & {
@@ -160,17 +178,13 @@ function borrowBlending(model: Fadeable): SavedBlend[] {
       blendDstAlpha: m.blendDstAlpha,
       depthWrite: m.depthWrite,
     });
-    m.transparent = true;
     m.blending = THREE.CustomBlending;
     m.blendSrc = THREE.SrcAlphaFactor;
     m.blendDst = THREE.OneMinusSrcAlphaFactor;
     // THE ALPHA CHANNEL IS PROTECTED. See `SavedBlend`: a sub-1 alpha left in the framebuffer gets the
-    // white page composited into it, which was the owner's white doodads.
+    // white page composited into it, which was the owner's white doodads and his white login dragon.
     m.blendSrcAlpha = THREE.ZeroFactor;
     m.blendDstAlpha = THREE.OneFactor;
-    // A fading body must not occlude its own far side through the depth buffer, which is what makes a
-    // half-faded model read as a solid shell with holes.
-    m.depthWrite = false;
     m.needsUpdate = true;
   }
   return saved;
