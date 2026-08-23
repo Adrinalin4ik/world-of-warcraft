@@ -229,6 +229,38 @@ export default class World extends EventEmitter {
     // position is world-space and it belongs to no placed subtree. Draws nothing until a level lands.
     this.levelUpEffect = new LevelUpEffect(this.scene);
     this.gameObjectSparkle = new GameObjectSparkle(this.scene);
+    /**
+     * `window.worldGameObjects()` -- WHY A BUSH IS NOT ON SCREEN, in one call.
+     *
+     * This area has now cost a round to a symptom that read as "the models do not load" and was a
+     * missing POSITION: every stage of the object arc worked and the node sat at NaN, which draws
+     * nowhere and is indistinguishable from a model that never arrived. These are the fields that
+     * separate the stages, so the next such report is one line instead of a round.
+     *
+     * `pos` NaN or (0,0,0) is the position path; `model: false` with a `displayId` is the DBC or the
+     * fetch; `visible: false` with a model is the program warm-up; `dynamic` 0 on a quest objective is
+     * the server not activating it for us, which is a quest-state answer rather than a render one.
+     */
+    (window as unknown as Record<string, unknown>).worldGameObjects = () => {
+      const rows: unknown[] = [];
+      for (const [guid, unit] of this.entities) {
+        if (unit.gameObject === null) {
+          continue;
+        }
+        const p = unit.view.position;
+        rows.push({
+          guid,
+          entry: unit.gameObject.entry,
+          displayId: unit.gameObject.displayId,
+          dynamic: unit.gameObject.dynamic,
+          flags: unit.gameObject.flags,
+          model: !!unit.model,
+          visible: unit.view.visible,
+          pos: `${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}`,
+        });
+      }
+      return { count: rows.length, sparkle: this.gameObjectSparkle.stats, rows: rows.slice(0, 12) };
+    };
     // `window.worldRing()` -- the ring instrument: what the last projection emitted, plus the raw
     // world-space vertices the gate measures against the terrain heightmap. See `SelectionRing#vertices`.
     window['worldRing'] = () => ({

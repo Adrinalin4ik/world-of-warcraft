@@ -504,10 +504,33 @@ export class UpdateObjectHandler extends EventEmitter {
     }
     // unit.displayId = 21976;
 
-    const {x, y, z, runSpeed, facing} = pack.movement;
+    /**
+     * THE CREATE BLOCK CARRIES ITS POSITION IN TWO DIFFERENT SHAPES, and reading only one is why the
+     * owner could not see a single bush.
+     *
+     * `parseMovement` writes them differently and always has:
+     *
+     *  - `UPDATEFLAG_LIVING` goes through `readMovementInfo`, whose `MovementInfo` has **flat** `x`,
+     *    `y`, `z` (`movement-info.ts:93-95`), and `Object.assign(movement, info)` lifts them to the top.
+     *  - `UPDATEFLAG_HAS_POSITION` -- the stationary block, which is what a GAMEOBJECT, a corpse and a
+     *    dynamic object carry -- writes `movement.position = packet.readVector3()`, a **nested** vector,
+     *    and sets no flat fields at all. The flag's own comment in `enums.ts` says who it is for:
+     *    "world objects (players, units, go, do, corpses)".
+     *
+     * This destructure read the flat shape only. For a stationary object `x`, `y` and `z` were all
+     * `undefined`, so `position.set(undefined, undefined, undefined)` wrote NaN -- and a node at NaN
+     * draws nowhere at all. Every piece of the object arc was working: the descriptor decoded, the DBC
+     * resolved, the `.m2` loaded, the model was added and revealed. It had no coordinates.
+     *
+     * **It read as "the models do not load", which is why this is worth spelling out.** The visible
+     * symptom of a missing position is identical to the symptom of a missing model, and nothing in the
+     * model path is at fault. Units were unaffected because they are the shape that was being read.
+     */
+    const at = pack.movement.position ?? pack.movement;
+    const {runSpeed, facing} = pack.movement;
 
-    if (!isOurself) {
-      unit.position.set(x, y, z);
+    if (!isOurself && typeof at?.x === 'number') {
+      unit.position.set(at.x, at.y, at.z);
       if (typeof facing === 'number') {
         unit.rotation.z = facing;
       }
