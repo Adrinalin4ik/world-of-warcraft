@@ -333,32 +333,91 @@ export function resolveAnchors(nodes: LayoutNode[], viewport: Viewport): Map<str
 
   const resolved = new Map<string, Rect>();
   const known = new Set(nodes.map((node) => node.id));
-  let pending = nodes.slice();
 
-  while (pending.length > 0) {
-    const ready = pending.filter((node) =>
-      node.anchors.every((anchor) => !anchor.relativeTo || resolved.has(anchor.relativeTo)),
-    );
+  /**
+   * A WORKLIST, NOT A ROUND-BASED FILTER -- and this was 36 ms of a 43 ms frame.
+   *
+   * The previous shape was `while (pending.length) { pending.filter(everyAnchorResolved) ... }`, which
+   * re-scans every unresolved node on every round. That is O(nodes x chain depth), and the chain depth in
+   * the client's own manifest is deep: a panel anchored to a panel anchored to a header, and so on.
+   *
+   * **The tell was that the SAME solver cost 0.4 ms in one caller and 36 ms in the other.**
+   * `WidgetRoot#drawList` feeds it only the widgets it is going to draw -- a few hundred -- while
+   * `layoutRects` feeds it all 4211, hidden panels included. In a quadratic solver a 10x input is a 100x
+   * cost, which is exactly the ratio the owner's HUD showed between `ui.layout` and `ui.scroll`.
+   *
+   * Why `layoutRects` runs at all on an ordinary frame: `rects.ts#layoutRectOf` re-resolves whenever
+   * `layoutRevision()` has moved, `reconcileScrollRanges` calls it once per frame for the one on-screen
+   * scroll frame, and the census measured geometry moving **1.22 times per frame** -- one `SetPoint` from
+   * an `OnUpdate` handler is enough, and one is all it takes.
+   *
+   * The transformation is a plain topological sort and the OUTPUT IS IDENTICAL: `place` reads only
+   * already-resolved nodes, so any order that respects the dependencies gives the same rects. What is
+   * preserved deliberately:
+   *
+   *  - An anchor to an id that is NOT in this node set can never be satisfied, exactly as before -- the
+   *    old `resolved.has` test could never pass for it. Such nodes fall through to the deadlock branch.
+   *  - A CYCLE leaves its members unresolved and reaches the same `reportUnresolvable` and the same
+   *    place-by-remaining-anchors recovery.
+   */
+  const waitingOn = new Map<string, number>();
+  const dependents = new Map<string, LayoutNode[]>();
+  const ready: LayoutNode[] = [];
 
-    if (ready.length === 0) {
-      reportUnresolvable(pending, known);
-      for (const node of pending) {
-        // The node's resolvable anchors only. Dropping the others is what breaks the deadlock; keeping
-        // the rest means a node held by one good anchor and one bad one still lands near where it
-        // belongs instead of in the corner.
-        const usable = node.anchors.filter(
-          (anchor) => !anchor.relativeTo || resolved.has(anchor.relativeTo),
-        );
-        resolved.set(node.id, place({ ...node, anchors: usable }, resolved, screen));
+  for (const node of nodes) {
+    let count = 0;
+    for (const anchor of node.anchors) {
+      const target = anchor.relativeTo;
+      if (target === undefined) {
+        continue;
       }
-      return resolved;
+      if (!known.has(target)) {
+        // Unsatisfiable for ever, as before: leave it counted so this node never becomes ready.
+        count += 1;
+        continue;
+      }
+      count += 1;
+      const list = dependents.get(target);
+      if (list === undefined) {
+        dependents.set(target, [node]);
+      } else {
+        list.push(node);
+      }
     }
-
-    for (const node of ready) {
-      resolved.set(node.id, place(node, resolved, screen));
+    waitingOn.set(node.id, count);
+    if (count === 0) {
+      ready.push(node);
     }
+  }
 
-    pending = pending.filter((node) => !resolved.has(node.id));
+  while (ready.length > 0) {
+    const node = ready.pop()!;
+    resolved.set(node.id, place(node, resolved, screen));
+    const waiters = dependents.get(node.id);
+    if (waiters === undefined) {
+      continue;
+    }
+    for (const waiter of waiters) {
+      const left = (waitingOn.get(waiter.id) ?? 0) - 1;
+      waitingOn.set(waiter.id, left);
+      if (left === 0) {
+        ready.push(waiter);
+      }
+    }
+  }
+
+  const stuck = nodes.filter((node) => !resolved.has(node.id));
+  if (stuck.length > 0) {
+    reportUnresolvable(stuck, known);
+    for (const node of stuck) {
+      // The node's resolvable anchors only. Dropping the others is what breaks the deadlock; keeping
+      // the rest means a node held by one good anchor and one bad one still lands near where it
+      // belongs instead of in the corner.
+      const usable = node.anchors.filter(
+        (anchor) => !anchor.relativeTo || resolved.has(anchor.relativeTo),
+      );
+      resolved.set(node.id, place({ ...node, anchors: usable }, resolved, screen));
+    }
   }
 
   return resolved;
