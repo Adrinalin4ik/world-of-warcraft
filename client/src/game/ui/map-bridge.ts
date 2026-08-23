@@ -108,11 +108,27 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
    * him only when something calls `SetMapToCurrentZone`. Conflating the two would snap the map back every
    * time he walked, so the selection is state and the position is a query.
    *
-   * Both indices are 1-BASED and 0 means "not chosen", which is the client's own convention: the
-   * continent dropdown's first entry is index 1, and `GetCurrentMapContinent() == WORLDMAP_COSMIC_ID` is
-   * how `WorldMapFrame_Update` detects the zoomed-all-the-way-out sheet (`worldmapframe.lua:236`). A
-   * continent with zone 0 is the continent-wide sheet, which is exactly the `WorldMapArea` row whose
-   * `areaId` is 0 -- corroborated on the served file, where row 13 is `mapID 1, areaID 0, art "Kalimdor"`.
+   * **THE CONTINENT NUMBERING IS THE CLIENT'S, and I had it wrong.** `worldmapframe.lua:8-10` states it
+   * outright and these are not values to infer:
+   *
+   *     WORLDMAP_COSMIC_ID  = -1;
+   *     WORLDMAP_WORLD_ID   = 0;
+   *     WORLDMAP_OUTLAND_ID = 3;
+   *
+   * So **0 is not "nothing chosen" -- it is the WORLD sheet**, the parchment with the three continents
+   * on it, and -1 is the cosmic sheet above that. `WorldMapFrame_Update`'s own fallback reads exactly
+   * that way: no art name and continent -1 gives "Cosmic", no art name and anything else gives "World"
+   * (`worldmapframe.lua:234-245`). The owner's first screenshot was that World sheet, drawn correctly
+   * for a selection of 0 -- which is why it looked like the map worked and then never changed.
+   *
+   * `WORLDMAP_OUTLAND_ID = 3` is also what settles the continent ORDER, in `dbc/map-data.ts`: index 3
+   * is Outland, which holds for `WorldMapContinent.dbc`'s mapIDs (0, 1, 530, 571) and not for
+   * `WorldMapArea`'s file order. A version-numbered constant taken from the game's own file rather
+   * than assumed, which is this project's rule about the reference in as many words.
+   *
+   * A continent with zone 0 is the continent-wide sheet, which is the `WorldMapArea` row whose `areaId`
+   * is 0 -- corroborated on the served file: rows 13/14/466/485 are the four, arted "Kalimdor",
+   * "Azeroth", "Expansion01" and "Northrend".
    */
   let continentIndex = 0;
 
@@ -120,6 +136,11 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
 
   /** The `WorldMapArea` row the selection names, or null when nothing is selected or loaded. */
   const selected = (): WorldMapAreaRow | null => {
+    // 0 (the World sheet) and -1 (Cosmic) have no `WorldMapArea` row at all, and null is the right
+    // answer for both: `GetMapInfo` then returns nil and the client picks its own art name.
+    if (continentIndex < 1) {
+      return null;
+    }
     const continent = mapData.continents()[continentIndex - 1];
     if (continent === undefined) {
       return null;
@@ -229,14 +250,30 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
    * Only on a real change. `SetMapToCurrentZone` is called from `OnShow` AND `OnHide`, so firing
    * unconditionally would rebuild the map every time it closes.
    */
-  const announce = (before: { c: number; z: number }): void => {
-    if (before.c !== continentIndex || before.z !== zoneIndex) {
-      fireEvent(vm, 'WORLD_MAP_UPDATE');
-    }
+  /**
+   * **UNCONDITIONALLY, and the dedupe that used to be here is what made the map go BLACK on its
+   * second opening.**
+   *
+   * `WorldMapFrame_OnHide` ends with `WorldMap_ClearTextures()` -- `SetTexture(nil)` on all twelve
+   * detail tiles, every overlay and the frame art (`worldmapframe.lua:1063-1072`) -- and then calls
+   * `SetMapToCurrentZone()`. `OnShow` calls `SetMapToCurrentZone()` again. So on the second opening
+   * the selection has NOT changed, and a dedupe here fired nothing, and `WorldMapFrame_UpdateMap`
+   * never ran, and the textures stayed cleared. The owner saw precisely that: parchment, then black,
+   * then a partial redraw.
+   *
+   * The lesson is the one this project keeps relearning from the other direction: **an event is not
+   * a change notification when the client uses it as a redraw request.** The real engine fires
+   * `WORLD_MAP_UPDATE` on both of those calls, because the frame it repaints has been torn down in
+   * between and only the client knows that.
+   *
+   * The cost is one `WorldMapFrame_UpdateMap` per open and per close, which is what the real client
+   * pays. It is not a per-frame cost: nothing calls these setters on a tick.
+   */
+  const announce = (): void => {
+    fireEvent(vm, 'WORLD_MAP_UPDATE');
   };
 
-  /** The selection as it stands, for `announce` to compare against. */
-  const mark = () => ({ c: continentIndex, z: zoneIndex });
+
 
   /**
    * `GetMapInfo()` -> the ART FOLDER name, and the texture height.
@@ -283,26 +320,36 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   fn('SetMapZoom', (args) => {
     const continent = Number(args[0]);
     const zone = Number(args[1] ?? 0);
-    if (!Number.isFinite(continent) || continent < 1
-      || mapData.continents()[continent - 1] === undefined) {
+    if (!Number.isFinite(continent)) {
       return [];
     }
-    const before = mark();
+    // -1 (Cosmic) and 0 (World) are REAL selections and not out of range -- `WorldMapZoomOutButton`
+    // sends both by name (`worldmapframe.lua:637-645`). Only a positive index has to resolve.
+    if (continent >= 1 && mapData.continents()[continent - 1] === undefined) {
+      return [];
+    }
     continentIndex = continent;
     zoneIndex = Number.isFinite(zone) && zone > 0 ? zone : 0;
-    announce(before);
+    announce();
     return [];
   });
 
-  /** `SetMapToCurrentZone()` -- the map follows the player once, on request. */
+  /**
+   * `SetMapToCurrentZone()` -- the map follows the player once, on request.
+   *
+   * **The event fires even when the zone cannot be resolved, and that is not sloppiness.** The client
+   * calls this from `WorldMapFrame_OnShow` AND from `OnHide` (which has just cleared every texture),
+   * and it is relying on the engine to announce that the map needs repainting -- not on the selection
+   * having moved. A zone we cannot place leaves the selection where it was, which then draws the World
+   * sheet; announcing nothing would leave the frame BLANK instead, which is what the owner saw.
+   */
   fn('SetMapToCurrentZone', () => {
     const zone = currentZoneRow();
     if (zone !== null) {
-      const before = mark();
       continentIndex = zone.continent;
       zoneIndex = zone.zone;
-      announce(before);
     }
+    announce();
     return [];
   });
 
@@ -319,10 +366,9 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
       const zones = mapData.zonesOn(continents[c].mapId);
       const index = zones.findIndex((row) => row.areaId === areaId);
       if (index >= 0) {
-        const before = mark();
         continentIndex = c + 1;
         zoneIndex = index + 1;
-        announce(before);
+        announce();
         return [];
       }
     }
@@ -375,38 +421,28 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   fn('GetNumMapDebugObjects', () => [0]);
 
   /**
-   * ZOOMING OUT, which is the map's own navigation and the one arm of it that was THROWING.
+   * ZOOMING OUT -- `IsZoomOutAvailable` was THROWING, and `ZoomOut` is not what it looks like.
    *
-   * `WorldMapFrame_UpdateMap` calls `IsZoomOutAvailable()` unguarded, right after it lays the twelve art
-   * tiles (`worldmapframe.lua:269`). So an absent global did not merely leave the button in the wrong
-   * state -- it raised out of `UpdateMap` and **took the whole rest of that function with it**: the
-   * landmark loop, the overlay loop and the debug pass all sit below it. The tiles would appear and
-   * nothing else would.
+   * `WorldMapFrame_Update` calls `IsZoomOutAvailable()` unguarded, right after it lays the twelve art
+   * tiles (`worldmapframe.lua:269`), so an absent global raised out of that function and took the
+   * landmark loop, the overlay loop and the debug pass below it. Available whenever there is somewhere
+   * further out to go, i.e. anywhere but the Cosmic sheet -- **`-1`, not 0**; 0 is the World sheet and
+   * still has a rung above it (`worldmapframe.lua:8-9`).
    *
-   * `ZoomOut()` is the button's own click, and it is real rather than a stub because the selection state
-   * to do it with is right here. The step order is the client's own zoom ladder read backwards -- a zone
-   * zooms out to its continent, a continent to the cosmic sheet -- and `WorldMapFrame_Update` detects
-   * that last state by `GetCurrentMapContinent() == WORLDMAP_COSMIC_ID`, which is what continent 0 means
-   * in this bridge's convention (see `continentIndex`).
+   * **`ZoomOut()` IS NOT THE ZOOM-OUT BUTTON, and reading the client is what showed that.** Its own
+   * `WorldMapZoomOutButton_OnClick` walks the whole ladder itself with `SetMapZoom` --
+   * zone -> continent -> World -> Cosmic (`worldmapframe.lua:632-647`) -- and reaches `ZoomOut()` in
+   * exactly two branches: a dungeon map with a level above 0, and the Cosmic sheet. This client enters
+   * no instances (`GetCurrentMapDungeonLevel` answers 0) and there is nothing outside Cosmic, so both
+   * branches are unreachable.
    *
-   * So "available" is exactly "there is somewhere to go", i.e. a continent is selected at all. On the
-   * cosmic sheet the client disables its own button, which is right: there is nothing further out.
+   * An earlier version of this file implemented the ladder here instead. That was wrong twice over: it
+   * duplicated logic the client already has, and it would have FOUGHT it -- the button calls
+   * `SetMapZoom` first and would then have had this stepping the selection a second time.
    */
-  fn('IsZoomOutAvailable', () => [continentIndex !== 0]);
+  fn('IsZoomOutAvailable', () => [continentIndex !== -1]);
 
-  fn('ZoomOut', () => {
-    if (continentIndex === 0) {
-      return [];
-    }
-    const before = mark();
-    if (zoneIndex !== 0) {
-      zoneIndex = 0;
-    } else {
-      continentIndex = 0;
-    }
-    announce(before);
-    return [];
-  });
+  fn('ZoomOut', () => []);
 
   /**
    * THE ROTATING PLAYER ARROW -- five globals, all declared gaps, and declaring them is what makes the

@@ -77,6 +77,9 @@ class MapData {
    */
   private order: WorldMapAreaRow[] = [];
 
+  /** `WorldMapContinent.dbc`'s mapIDs in file order -- what numbers the client's continents. */
+  private continentMapIds: number[] = [];
+
   /** `mapId` -> the continent's own localized name. See the header on why this is not the art folder. */
   private mapNames = new Map<number, string>();
 
@@ -93,10 +96,11 @@ class MapData {
   }
 
   private async load(): Promise<void> {
-    const [areaTable, worldMapArea, maps] = await Promise.all([
+    const [areaTable, worldMapArea, maps, continents] = await Promise.all([
       DBC.load('AreaTable'),
       DBC.load('WorldMapArea'),
       DBC.load('Map'),
+      DBC.load('WorldMapContinent'),
     ]);
 
     const areas = new Map<number, { name: string; parentId: number; mapId: number }>();
@@ -147,6 +151,33 @@ class MapData {
     this.byMap = byMap;
     this.byMapArea = byMapArea;
     this.order = order;
+
+    /**
+     * THE CONTINENT ORDER, and it is NOT `WorldMapArea`'s file order.
+     *
+     * `continents()` used to filter `WorldMapArea` for `areaId === 0` and keep the file order, which on
+     * the served file is **Kalimdor, Azeroth, Expansion01, Northrend** -- and that is wrong. The client
+     * numbers its continents from `WorldMapContinent.dbc`, whose four rows are mapIDs **0, 1, 530, 571**
+     * (measured: 4 records, 14 fields, 56 B/record, closes exactly).
+     *
+     * **`worldmapframe.lua:10` proves it rather than my inferring it**: `WORLDMAP_OUTLAND_ID = 3`, so
+     * continent 3 IS Outland -- which holds for `0, 1, 530, 571` and fails for the file order, where
+     * index 3 is Expansion01 only by coincidence and index 1 is Kalimdor rather than Eastern Kingdoms.
+     * With the old order `SetMapZoom(1)` selected the wrong continent and the zone list under it was a
+     * different continent's, which is a silent wrong answer of exactly the kind this project keeps
+     * finding: every index resolved, every name looked plausible, and the map showed the wrong place.
+     *
+     * Rows `WorldMapContinent` does not list are APPENDED rather than dropped, so a build with a fifth
+     * continent sheet still reaches the dropdown instead of vanishing from it.
+     */
+    const continentMapIds: number[] = [];
+    for (const record of recordsOf(continents)) {
+      const row = record as { mapID?: number };
+      if (typeof row.mapID === 'number' && !continentMapIds.includes(row.mapID)) {
+        continentMapIds.push(row.mapID);
+      }
+    }
+    this.continentMapIds = continentMapIds;
 
     const mapNames = new Map<number, string>();
     for (const record of recordsOf(maps)) {
@@ -228,7 +259,13 @@ class MapData {
    * name: row 13 is `mapID 1, areaID 0, art "Kalimdor"` and row 30 is `mapID 0, areaID 12, art "Elwynn"`.
    */
   continents(): WorldMapAreaRow[] {
-    return this.order.filter((row) => row.areaId === 0);
+    const sheets = this.order.filter((row) => row.areaId === 0);
+    const ranked = this.continentMapIds
+      .map((mapId) => sheets.find((row) => row.mapId === mapId))
+      .filter((row): row is WorldMapAreaRow => row !== undefined);
+    // Anything WorldMapContinent did not list keeps its file order at the end -- see the note in
+    // `load` on why these are appended rather than dropped.
+    return [...ranked, ...sheets.filter((row) => !ranked.includes(row))];
   }
 
   /**
