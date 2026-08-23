@@ -301,6 +301,55 @@ export function attachAuraBridge(vm: LuaVM, world: World, art: GlueArt): () => v
     ];
   };
 
+/**
+   * `window.targetAuras()` -- WHY THE TARGET'S BUFFS LOOK DUPLICATED, in one call.
+   *
+   * The owner reports duplicates and no tooltip. `window.auraWire.census()` already ruled the WIRE out:
+   * `SMSG_AURA_UPDATE_ALL` decoded 43 packets with `residuals: closed:0` and slots `[0..5]` -- six
+   * DISTINCT slots, no repeats, no residual. So the data is clean and the duplication is downstream, and
+   * the two obvious downstream causes are dead too: the helpful/harmful split reads `AFLAG_NEGATIVE`
+   * correctly, and `AURA_UPDATE_ALL` replaces the slot map rather than merging into it.
+   *
+   * What is left is the FRAMES. `TargetFrame_UpdateAuras` creates its buttons lazily -- `frame =
+   * _G[frameName]`, and only `CreateFrame` when that is nil (`targetframe.lua:351-360`) -- so if a
+   * created button is not findable by its own name on the next `UNIT_AURA`, every update builds another
+   * set at the same anchor. Forty-three aura packets would then stack forty-three rows of six, which
+   * looks exactly like duplication and would also explain the missing tooltip: the button under the
+   * pointer would be a dead one from an older set, with the live one on top of it.
+   *
+   * So this counts the buttons that actually exist, and prints each one's shown flag and rect. Two
+   * buttons sharing a rect names the cause; six buttons at six rects means the frames are fine and the
+   * duplication is in what they DISPLAY.
+   *
+   * `GetName()` is asked of each, so a button that exists without its global is visible as a row here
+   * even though `_G` cannot find it -- which is the specific failure being tested for.
+   */
+  (window as unknown as Record<string, unknown>).targetAuras = () => {
+    const rows: string[] = [];
+    for (let i = 1; i <= 12; i += 1) {
+      for (const kind of ['Buff', 'Debuff']) {
+        const name = `TargetFrame${kind}${i}`;
+        const result = vm.runExpr(
+          `local f = _G["${name}"] if not f then return "absent" end `
+          + 'return string.format("%s shown=%s left=%s top=%s",'
+          + ` (f.GetName and f:GetName()) or "?", tostring(f:IsShown()),`
+          + ' tostring(f:GetLeft()), tostring(f:GetTop()))',
+          'target-auras.lua',
+        ) as { value?: unknown } | null;
+        const line = String(result?.value ?? 'read failed');
+        if (line !== 'absent') {
+          rows.push(`${name}: ${line}`);
+        }
+      }
+    }
+    return {
+      buttons: rows.length,
+      helpful: auraList(world.target?.guid ?? '', false, false).length,
+      harmful: auraList(world.target?.guid ?? '', true, false).length,
+      rows,
+    };
+  };
+
   fn('UnitAura', (args) => auraReturns(args[0], args[1], args[2]));
   // `UnitBuff`/`UnitDebuff` are the same call with the filter FIXED -- and the third argument is still
   // read, because `UnitBuff(unit, i, "PLAYER")` is a real call shape. The helpful/harmful half of a
