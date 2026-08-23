@@ -26,7 +26,7 @@
  * upload. That is cheap ONCE and unaffordable every frame -- a 256x256 RGBA upload is 256 KB across
  * the bus, and the player moves every frame he walks.
  *
- * So it is redrawn only when the picture would actually CHANGE BY A PIXEL: `signature()` quantises the
+ * So it is redrawn only when the picture would actually CHANGE BY A PIXEL: `update` quantises the
  * window's origin to whole destination pixels and the composite is skipped when the quantised value has
  * not moved. Walking at ~7 yd/s with a 400-yard window over 256 px is 1.56 yd/px, so this redraws about
  * 4-5 times a second while running and **zero times while standing still**. The same test covers the
@@ -173,8 +173,20 @@ export class MinimapTerrain {
   /** In flight, so a walk across a seam asks once. Released in a `finally` -- see `CLAUDE.md`. */
   private readonly loading = new Set<string>();
 
-  /** The last composite's quantised inputs, so a stationary player costs nothing. */
-  private last = '';
+  /**
+   * The last composite's quantised inputs, so a stationary player costs nothing.
+   *
+   * Four fields rather than one joined string, and deliberately: this is compared once per UI tick, and
+   * a template literal there would allocate a string every frame for the life of the session to answer
+   * a question four numeric compares answer for free. `lastMap` empty is the never-composited state.
+   */
+  private lastMap = '';
+
+  private lastYards = 0;
+
+  private lastPx = 0;
+
+  private lastPy = 0;
 
   private disposed = false;
 
@@ -209,7 +221,12 @@ export class MinimapTerrain {
   /** The live override, for the owner's knob. Forces the next `update` to redraw. */
   setWindowYards(yards: number | null): void {
     this.override = yards !== null && Number.isFinite(yards) && yards > 0 ? yards : null;
-    this.last = '';
+    this.invalidate();
+  }
+
+  /** Force the next `update` to composite, whatever the player has done since. */
+  private invalidate(): void {
+    this.lastMap = '';
   }
 
   /**
@@ -225,12 +242,16 @@ export class MinimapTerrain {
     const windowYards = this.windowFor(zoom);
     const perPixel = windowYards / TERRAIN_PX;
     // Quantised to whole destination pixels: a move smaller than one pixel cannot change the image.
-    const signature = `${mapName}/${windowYards}/`
-      + `${Math.round(worldX / perPixel)}/${Math.round(worldY / perPixel)}`;
-    if (signature === this.last) {
+    const px = Math.round(worldX / perPixel);
+    const py = Math.round(worldY / perPixel);
+    if (mapName === this.lastMap && windowYards === this.lastYards
+      && px === this.lastPx && py === this.lastPy) {
       return;
     }
-    this.last = signature;
+    this.lastMap = mapName;
+    this.lastYards = windowYards;
+    this.lastPx = px;
+    this.lastPy = py;
     this.composite(mapName, worldX, worldY, windowYards);
   }
 
@@ -314,7 +335,7 @@ export class MinimapTerrain {
       this.remember(key, toCanvas(spec));
       // The composite that asked for this tile has already run without it, so the next `update` has
       // to be allowed to redraw even from a standstill.
-      this.last = '';
+      this.invalidate();
     } catch (error) {
       // Retryable rather than remembered: a network failure is not an absent tile, and the next
       // composite that needs it will ask again.
