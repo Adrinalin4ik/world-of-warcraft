@@ -171,6 +171,45 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   fn('GetZonePVPInfo', () => [null, null, null]);
 
   /**
+   * THE MINIMAP'S REMAINING GLOBALS, all six absent until now -- and absent means THROWING, not blank.
+   *
+   * Measured against the client's own file rather than guessed at: these are every `Get*`/`Is*` in
+   * `minimap.lua`/`minimap.xml` that this engine did not already answer. Each one is registered because
+   * of WHERE it is called from, and the call sites are what decide the answer:
+   *
+   *  - `GetTrackingTexture` -> `MiniMapTracking_Update`, which compares it with the icon's current
+   *    texture and calls `SetTexture(nil)` plus a shine when they differ (`minimap.lua:408-414`). nil is
+   *    the correct answer for "no tracking active", and it makes that comparison a no-op rather than a
+   *    flash: the icon starts with no texture, so nil == nil and the shine does not fire.
+   *  - `GetNumTrackingTypes` -> the dropdown's initialiser loops `1..count` (`minimap.lua:427-430`).
+   *    **0 leaves the menu empty, which is the truth**: tracking types are the tracking SPELLS the
+   *    player knows, and this client models no such thing. A fabricated count would put rows in the menu
+   *    that select nothing.
+   *  - `GetTrackingInfo` cannot be reached with the count at 0, and is registered anyway: an addon
+   *    duck-types it, and this is the object-model rule the button classes already follow.
+   *  - `GetLFGMode`, `IsPartyLFG`, `IsInLFGDungeon` -> the LFG eye's four update functions
+   *    (`minimap.lua:215, 239-244, 284, 313`). nil throughout, and nil is the state "not queued" that
+   *    every one of those ladders falls through to.
+   *  - `GetLatestThreeSenders` -> the mail icon's tooltip (`minimap.lua:387`). Three nils make the
+   *    client pick `HAVE_MAIL` over `HAVE_MAIL_FROM`, which is precisely its own wording for "you have
+   *    mail and I cannot name the senders".
+   *
+   * So every one of the six answers a value the client's own else-branch is written for. **None of them
+   * is a stub dressed as data, and none is a `notImplemented` either** -- a getter that goes through the
+   * report reddens `UIErrorsFrame` on a path the client walks unprompted, which is the rule that round
+   * of unit-popup gaps established. The two that are genuine missing FEATURES rather than missing
+   * values -- tracking spells and the LFG queue -- are named here instead, because a comment is where an
+   * absent subsystem belongs and a red line on screen is not.
+   */
+  fn('GetTrackingTexture', () => [null]);
+  fn('GetNumTrackingTypes', () => [0]);
+  fn('GetTrackingInfo', () => [null, null, null, null]);
+  fn('GetLFGMode', () => [null, null]);
+  fn('IsPartyLFG', () => [null]);
+  fn('IsInLFGDungeon', () => [null]);
+  fn('GetLatestThreeSenders', () => [null, null, null]);
+
+  /**
    * ANNOUNCE A SELECTION CHANGE -- and without this the map opens blank.
    *
    * `WorldMapFrame_UpdateMap()`, which is what lays the twelve art tiles, runs from ONE place:

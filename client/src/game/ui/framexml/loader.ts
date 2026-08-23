@@ -70,6 +70,7 @@ import './lua/methods/frame';
 import './lua/methods/gametooltip';
 import './lua/methods/kinds';
 import './lua/methods/messageframe';
+import './lua/methods/minimap';
 import {
   setMessageFrameDuration, setMessageFrameInsertMode, setMessageFrameMaxLines,
 } from './lua/methods/messageframe';
@@ -1460,8 +1461,8 @@ class DocumentLoader {
        */
       this.warnOnce(
         'kind:minimap',
-        `<Minimap> is a frame only: it measures and indexes like the real one, but no map, blips or `
-        + `zoom are rendered (first: ${dbg})`,
+        `<Minimap> is a frame only: it measures, indexes and holds a real zoom level `
+        + `(methods/minimap.ts), but no terrain, blips or player arrow are drawn (first: ${dbg})`,
       );
     } else if (tag === 'model' || tag === 'modelffx' || tag === 'playermodel') {
       this.applyModel(element, wrapper, dbg);
