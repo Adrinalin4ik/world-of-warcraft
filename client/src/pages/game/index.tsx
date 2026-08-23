@@ -285,6 +285,18 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // THE HOVER CURSOR. On `document.body` because `cursor` is an inherited property and the world
     // canvas, the UI canvas and the debug panel are all its descendants -- one write covers the route.
     this.cursorDriver = new WorldCursorDriver(document.body);
+    /**
+     * REPAINT THE CURSOR WHEN A POINTER LOCK ENDS.
+     *
+     * A custom `url(...)` cursor is repainted only when the pointer moves, so after a mouse-look drag
+     * releases the lock the arrow stays absent until the player happens to move the mouse -- the tail of
+     * the owner's "появляется только когда начинается движение". `controls.tsx` stops the lock being
+     * taken for a CLICK at all; this covers the drag that legitimately took one.
+     *
+     * Removed in `componentWillUnmount` with the rest, for the reason recorded there: a listener holding
+     * `this` after a remount answers about a disposed renderer.
+     */
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
     document.body.addEventListener('pointermove', this.onCursorPointerMove);
     (window as unknown as Record<string, unknown>).worldCursorArt = () =>
       this.cursorDriver?.cursorArtReport() ?? null;
@@ -362,7 +374,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       void this.ui.start().then(() => {
         // AFTER the boot resolves, not on a timer: `start()` resolves once the tree is built, the art
         // is registered and the bridges are attached, which is exactly when the interface can draw.
-        this.dismissLoadingScreen();
+        document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    this.dismissLoadingScreen();
       }).catch((error) => {
         // A boot that fails outright is the one thing `bootWorldRuntime` does not turn into a report
         // line, so it must not vanish into an unhandled rejection. The screen comes down either way --
@@ -562,6 +575,13 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   // -- The hover cursor -----------------------------------------------------------------------------
 
   private cursorDriver: WorldCursorDriver | null = null;
+
+  /** See the listener's own note where it is registered. */
+  private readonly onPointerLockChange = () => {
+    if (document.pointerLockElement === null) {
+      this.cursorDriver?.refresh();
+    }
+  };
 
   /**
    * The last pointer position in CLIENT pixels, or null before the pointer has moved.

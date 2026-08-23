@@ -132,13 +132,31 @@ class Controls extends React.Component<IProp> {
   /** Pointer lock already asked for in this look session. See the request site for why. */
   private lockRequested = false;
 
-  /**
-   * Has the current button-held drag produced a real pointer delta?
+/**
+   * How far the pointer has travelled during the current button-held drag, in device pixels.
    *
-   * The pointer lock is gated on this, not on the button alone -- see the gate in the frame loop for the
-   * whole reason, which is the owner's vanishing cursor on every right click.
+   * The pointer lock is gated on this crossing `LOCK_TRAVEL_PX`, not on the button and not on "did it
+   * move at all" -- see the gate in the frame loop.
    */
-  private lookMoved = false;
+  private lookTravel = 0;
+
+  /**
+   * How far the pointer must travel during a hold before the camera is considered to be MOVING and the
+   * pointer lock is worth taking. Device pixels, accumulated as |dx| + |dy|.
+   *
+   * OURS, and the owner set the rule rather than the number: "такой эффект должен быть только при
+   * движении камеры. У нас же она статична во время общения или лутания."
+   *
+   * The previous attempt gated on any nonzero delta and was still wrong, which he also diagnosed
+   * exactly -- a real mouse jitters a pixel during any click, so "did it move" was true almost
+   * immediately and the lock was taken for a click after all. That is why this is a threshold and not a
+   * boolean.
+   *
+   * 4 px is the conventional click-versus-drag slop and it is deliberately small: crossing it late costs
+   * nothing, because the first pixels of a genuine drag come from the UNLOCKED `movementX/Y`, which
+   * browsers deliver either way. Crossing it early costs the cursor, which is the whole complaint.
+   */
+  private static readonly LOCK_TRAVEL_PX = 4;
 
   constructor(props: IProp) {
     super(props);
@@ -219,8 +237,8 @@ class Controls extends React.Component<IProp> {
     if (event.button === 0) this.buttons.left = false;
     if (event.button === 2) this.buttons.right = false;
     if (!this.buttons.left && !this.buttons.right) {
-      // A new drag starts un-moved: see the lock gate.
-      this.lookMoved = false;
+      // A new drag starts with no travel: see the lock gate.
+      this.lookTravel = 0;
     }
     /**
      * NO `pointerLockElement` GUARD, and its absence is the fix for the oldest open report on this
@@ -282,11 +300,8 @@ class Controls extends React.Component<IProp> {
     // While pointer-locked, movementX/Y are the only meaningful deltas -- clientX/Y stop moving.
     const dx = event.movementX ?? 0;
     const dy = event.movementY ?? 0;
-    if (dx !== 0 || dy !== 0) {
-      // THE DRAG IS REAL. See the lock gate in the frame loop: a click that never moves never locks, and
-      // never costs the cursor a hide-and-restore.
-      this.lookMoved = true;
-    }
+    // ACCUMULATED TRAVEL, not "did it move at all" -- see `LOCK_TRAVEL_PX`.
+    this.lookTravel += Math.abs(dx) + Math.abs(dy);
     this.motion.dx += dx;
     this.motion.dy += dy;
   }
@@ -353,7 +368,7 @@ class Controls extends React.Component<IProp> {
      * `movementX/Y`, which browsers deliver either way, so nothing about mouse-look changes -- it locks a
      * frame later and from then on behaves exactly as before.
      */
-    if (this.rig.look && this.lookMoved) {
+    if (this.rig.look && this.lookTravel > Controls.LOCK_TRAVEL_PX) {
       if (!this.lockRequested && !document.pointerLockElement) {
         this.lockRequested = true;
         // Newer Chrome returns a promise here and older ones return undefined; an unhandled
