@@ -18,7 +18,7 @@
  * `IsShown`/`GetWidth`/`GetHeight` which `FRAME` and `REGION` already answer by inheritance. So this
  * table is exactly the six the client actually calls and nothing speculative.
  *
- * ## THE ZOOM IS REAL STATE, and it is state the terrain draw will read
+ * ## THE ZOOM IS REAL STATE, and the terrain draw reads it
  *
  * `Minimap_ZoomInClick` is `SetZoom(GetZoom() + 1)` followed by a bounds check against
  * `GetZoomLevels() - 1` (`minimap.lua:158-172`). So the two buttons only behave -- enable, disable,
@@ -28,8 +28,8 @@
  * returning the authored value**: the client computes its own state from the engine's number, so a
  * frozen number freezes every path built on it.
  *
- * `zoomOf` is exported because the terrain draw needs it: the zoom level is what decides how many ADT
- * tiles fit in the circle. Nothing reads it yet and that is stated rather than implied.
+ * `zoomOf` is exported because `ui/minimap-terrain.ts` reads it: the zoom level is what decides how many
+ * ADT tiles fit in the circle.
  *
  * ## WHAT IS NOT SOURCED, said plainly
  *
@@ -59,7 +59,7 @@ export const ZOOM_LEVELS = 5;
  */
 const zooms = new WeakMap<Widget, number>();
 
-/** The Minimap's zoom level, `0` when it has never been set. For the terrain draw, once there is one. */
+/** The Minimap's zoom level, `0` when it has never been set. Read by `ui/minimap-terrain.ts`. */
 export function zoomOf(widget: Widget): number {
   return zooms.get(widget) ?? 0;
 }
@@ -112,7 +112,7 @@ const MINIMAP: MethodTable = {
    * Accepted and RECORDED rather than routed through `notImplemented`, and the distinction is the point
    * of the two calls in `MinimapPing_OnLoad`: this is a setter whose effect is a texture that does not
    * exist yet, so there is nothing to refuse and nothing to warn about. The value is kept because the
-   * arrow is drawn by the same terrain pass that does not exist either, and 40 is what the client asks
+   * arrow is drawn by `ui/minimap-terrain.ts`, which reads the value below, and 40 is what the client asks
    * for. A `notImplemented` here would put a permanent gap in the load report for a call that is
    * perfectly well understood and merely early.
    */
@@ -142,7 +142,8 @@ const MINIMAP: MethodTable = {
  * The player arrow's requested size, as the client asked for it.
  *
  * Module-level rather than per-widget because there is one Minimap and the real engine's setter is
- * likewise global to it. Read by nothing yet -- the terrain draw is the reader, and it does not exist.
+ * likewise global to it. `ui/minimap-terrain.ts` is the reader: it sizes the arrow region with these,
+ * which makes 40 the one SOURCED number in that whole feature.
  */
 export const playerArrow = { width: 40, height: 40 };
 
