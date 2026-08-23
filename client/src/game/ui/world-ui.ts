@@ -62,7 +62,7 @@ import { attachChatBridge } from './chat-bridge';
 import {
   publishRects, clearRects, setRectResolver, setVisibleRectResolver, rectStats, layoutRectOf,
 } from './rects';
-import { eventListeners } from './framexml/lua/events';
+import { eventListeners, fireEvent } from './framexml/lua/events';
 import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
 import { createQuadMaterial } from './material';
 import { ModelBooth } from './scene/model-booth';
@@ -812,6 +812,30 @@ export class WorldUiHost {
      * `WorldMapFrame_UpdateMap()` by hand DOES lay the frame out, so the function is fine and the
      * delivery is not -- and this is the half of the delivery a probe can answer without guessing.
      */
+    /**
+     * `window.uiFireEvent('WORLD_MAP_UPDATE')` -- deliver an event by hand, from outside any handler.
+     *
+     * The LAST bit the world-map question needs, and it separates delivery from timing. Every static
+     * link in that chain has now been read and is correct: the frame is registered
+     * (`uiEventListeners` says so), the handler exists, the selection is right, and calling
+     * `WorldMapFrame_UpdateMap()` by hand works. What no reading can distinguish is whether the event
+     * fails to ARRIVE, or arrives at a moment when the handler's own guard turns it down -- and it is
+     * fired from inside `OnShow`, which is exactly where such a guard could differ.
+     *
+     * Firing it from the console is that comparison: same event, same frame, same handler, but from a
+     * quiet moment instead of mid-`OnShow`. If the tile changes here and not there, the guard is the
+     * answer; if it changes in neither, the delivery is.
+     */
+    (window as never as Record<string, unknown>).uiFireEvent = (eventName: string, ...args: unknown[]) => {
+      const runtime = this.runtime;
+      if (runtime === null) {
+        return 'the runtime is not up';
+      }
+      const listeners = eventListeners(eventName).length;
+      fireEvent(runtime.vm, eventName, args);
+      return { eventName, listeners };
+    };
+
     (window as never as Record<string, unknown>).uiEventListeners = (eventName: string) => {
       const runtime = this.runtime;
       if (runtime === null) {

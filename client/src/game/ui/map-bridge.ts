@@ -663,6 +663,24 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
       // The path the client builds for the first of its twelve detail tiles. If this is empty the
       // selection is the problem; if it is populated, check whether the host serves it.
       tile1: art === '' ? '' : `Interface\\WorldMap\\${art}\\${art}1`,
+      /**
+       * `WorldMapFrame.blockWorldMapUpdate`, read out of the VM -- the LAST unread half of the guard.
+       *
+       * `WorldMapFrame_OnEvent` only redraws when `not self.blockWorldMapUpdate and self:IsShown()`, and
+       * `WorldMapFrame_ToggleWindowSize` sets that flag true, does five things, and clears it
+       * (`worldmapframe.lua:1296-1306`). **If any of those five raises, the flag is true for the rest of
+       * the session and this event is ignored for ever** -- which is this project's own documented trap
+       * about recovery that lives after a raise, and SHIFT-M is the gesture that walks into it.
+       * Everything else in the guard has now been read and is correct, so this is what is left.
+       */
+      blockWorldMapUpdate: (() => {
+        const read = vm.runExpr('return WorldMapFrame and WorldMapFrame.blockWorldMapUpdate', 'probe');
+        return 'value' in read ? read.value : `error: ${String(read)}`;
+      })(),
+      isShown: (() => {
+        const read = vm.runExpr('return WorldMapFrame and WorldMapFrame:IsShown()', 'probe');
+        return 'value' in read ? read.value : `error: ${String(read)}`;
+      })(),
       playerAt: (() => {
         const at = world.player;
         return at ? { x: at.position.x, y: at.position.y } : null;
