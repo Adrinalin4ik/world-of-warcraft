@@ -832,7 +832,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   const questFadingId = registry.byName('QuestInfoFadingFrame');
 
   /**
-   * A NINTH AND TENTH named `<OnUpdate>`: `ZoneTextFrame` and `SubZoneTextFrame`, and they exist because
+   * TWO MORE named `<OnUpdate>`s: `ZoneTextFrame` and `SubZoneTextFrame`, and they exist because
    * the zone name was stuck across the middle of the owner's screen.
    *
    * Firing `ZONE_CHANGED_NEW_AREA` (see `ui/map-bridge.ts`) is what put it there, correctly -- the client
@@ -852,6 +852,32 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   const zoneTextId = registry.byName('ZoneTextFrame');
 
   const subZoneTextId = registry.byName('SubZoneTextFrame');
+
+  /**
+   * ANOTHER named `<OnUpdate>`: `WorldMapButton`, and it is the map's player marker.
+   *
+   * `WorldMapButton_OnUpdate` (`worldmapframe.lua:742-800`) is the ONLY thing that ever positions the
+   * player on the world map. Its last third reads `GetPlayerMapPosition("player")` and then either hides
+   * the marker or does
+   *
+   *     WorldMapPlayer:Show();
+   *     WorldMapPlayer:SetPoint("CENTER", "WorldMapDetailFrame", "TOPLEFT", playerX, playerY);
+   *
+   * so with no driver the dot is wherever its XML left it and never moves -- and `WorldMapPlayer` starts
+   * hidden, so it is not merely stale, it is absent. `WORLD_MAP_UPDATE` does not help: that event drives
+   * `WorldMapFrame_UpdateMap`, which lays the art tiles and knows nothing about the player.
+   *
+   * The same handler also drives the zone label under the cursor, whose engine side is a declared gap
+   * (`map-bridge.ts`' `UpdateMapHighlight`), so today this earns the marker only. That is stated rather
+   * than left to look like a bigger win than it is.
+   *
+   * **Gated on `visible`, not `shown`, and the difference is the whole cost.** `WorldMapButton` is an
+   * authored child of `WorldMapFrame` and its OWN `shown` is true from load -- it is the PARENT that
+   * opens and closes. So a `shown` gate would tick this every frame for the entire session with the map
+   * shut. `visible` walks the ancestor chain (`widget.ts:788`), which is a handful of pointer hops, and
+   * the handler then costs nothing at all while the map is closed -- which is nearly always.
+   */
+  const worldMapButtonId = registry.byName('WorldMapButton');
 
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
@@ -874,8 +900,8 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
  *  - `buttonMs` -- `collectButtons` **walks the frame tree every frame** and `syncInteractiveArt` runs
  *    per visible button. This tree is 4211 frames; the walk prunes hidden subtrees but is still a walk,
  *    and it grows with every panel this project makes work. It is OUR code, not the client's.
- *  - `onUpdateMs` -- the eight hand-picked `<OnUpdate>` groups, which is what the header above spends
- *    several hundred lines justifying one frame at a time.
+ *  - `onUpdateMs` -- every hand-picked `<OnUpdate>` group (this said "eight" while there were ten, so
+ *    it now counts none: the list only grows, and the header above justifies it one frame at a time).
  *
  * Reported as per-frame averages so the number is directly comparable to the 35.6 ms in the panel, with
  * `buttons` per frame alongside `buttonMs` -- a walk that is expensive because it visits 2000 buttons is
@@ -976,6 +1002,11 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
         if (id !== null && registry.widget(id)?.shown) {
           invokeScriptHandler(ctx, id, 'OnUpdate', [dt]);
         }
+      }
+      // The world map player marker -- see `worldMapButtonId`. `visible`, so this is free while
+      // the map is closed.
+      if (worldMapButtonId !== null && registry.widget(worldMapButtonId)?.visible) {
+        invokeScriptHandler(ctx, worldMapButtonId, 'OnUpdate', [dt]);
       }
       // The buff flash clock -- see `buffFrameId`. Zero fingerprint cost; it writes Lua fields only.
       if (buffFrameId !== null) {

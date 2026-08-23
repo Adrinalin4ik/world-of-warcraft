@@ -369,6 +369,204 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   fn('GetNumMapLandmarks', () => [0]);
   fn('GetNumMapDebugObjects', () => [0]);
 
+  /**
+   * ZOOMING OUT, which is the map's own navigation and the one arm of it that was THROWING.
+   *
+   * `WorldMapFrame_UpdateMap` calls `IsZoomOutAvailable()` unguarded, right after it lays the twelve art
+   * tiles (`worldmapframe.lua:269`). So an absent global did not merely leave the button in the wrong
+   * state -- it raised out of `UpdateMap` and **took the whole rest of that function with it**: the
+   * landmark loop, the overlay loop and the debug pass all sit below it. The tiles would appear and
+   * nothing else would.
+   *
+   * `ZoomOut()` is the button's own click, and it is real rather than a stub because the selection state
+   * to do it with is right here. The step order is the client's own zoom ladder read backwards -- a zone
+   * zooms out to its continent, a continent to the cosmic sheet -- and `WorldMapFrame_Update` detects
+   * that last state by `GetCurrentMapContinent() == WORLDMAP_COSMIC_ID`, which is what continent 0 means
+   * in this bridge's convention (see `continentIndex`).
+   *
+   * So "available" is exactly "there is somewhere to go", i.e. a continent is selected at all. On the
+   * cosmic sheet the client disables its own button, which is right: there is nothing further out.
+   */
+  fn('IsZoomOutAvailable', () => [continentIndex !== 0]);
+
+  fn('ZoomOut', () => {
+    if (continentIndex === 0) {
+      return [];
+    }
+    const before = mark();
+    if (zoneIndex !== 0) {
+      zoneIndex = 0;
+    } else {
+      continentIndex = 0;
+    }
+    announce(before);
+    return [];
+  });
+
+  /**
+   * THE ROTATING PLAYER ARROW -- five globals, all declared gaps, and declaring them is what makes the
+   * client's OWN player marker work.
+   *
+   * `CreateWorldMapArrowFrame(WorldMapFrame)` is the seventh line of `WorldMapFrame_OnLoad`
+   * (`worldmapframe.lua:84`), so an absent global raised THERE, at document load, and took the three
+   * lines below it with it -- the black divider's `SetVertexColor`, `InitWorldMapPing`, and
+   * `WorldMapFrame_Update()` itself. This is the same defect the minimap's `SetPlayerTextureHeight` had,
+   * found in the same round: one missing engine call, and a frame's entire load is gone.
+   *
+   * **The gap is genuinely the ROTATION, and no-oping these is therefore not a loss.** The engine's
+   * arrow frame is a rotating overlay, and this renderer draws axis-aligned quads only -- there is no
+   * per-item rotation in `widget.ts#DrawItem` and adding one is a renderer change, not a bridge one.
+   * The art was checked rather than assumed: `interface/worldmap/worldmaparrow.blp` **404s** on the asset
+   * host (and a 404 there returns an HTML page, the trap that names the wrong subsystem twice over),
+   * while `interface/minimap/minimaparrow.blp` and `rotating-minimaparrow.blp` both answer 200 and are
+   * both a single 32x32 arrow by their BLP headers -- so not a strip of pre-rotated frames a TexCoord
+   * could select from either.
+   *
+   * What matters is what the client does with the lines after them:
+   *
+   *     WorldMapPlayer:Show();
+   *     WorldMapPlayer:SetPoint("CENTER", "WorldMapDetailFrame", "TOPLEFT", playerX, playerY);
+   *                                                     (`worldmapframe.lua:792-793`)
+   *
+   * `WorldMapPlayer` is AUTHORED art the client positions itself, and it was unreachable only because
+   * `UpdateWorldMapArrowFrames()` raised eleven lines above it. So the player's position on the map is
+   * drawn by the client's own frame, and what is missing is the second, rotating marker on top of it --
+   * position without facing. Named, not implied.
+   */
+  fn('CreateWorldMapArrowFrame', () => []);
+  fn('InitWorldMapPing', () => []);
+  fn('UpdateWorldMapArrowFrames', () => []);
+  fn('PositionWorldMapArrowFrame', () => []);
+  fn('ShowWorldMapArrowFrame', () => []);
+
+  /**
+   * THE ZONE HIGHLIGHT under the cursor -- `UpdateMapHighlight(x, y)`, and eight nils is the right answer.
+   *
+   * Called from `WorldMapButton_OnUpdate` whenever the cursor is over the map (`worldmapframe.lua:755`),
+   * and the client's very next lines are `if ( fileName ) then ... else WorldMapHighlight:Hide() end`. So
+   * nils take the else branch, which is precisely "nothing is highlighted" -- the state the map is in for
+   * most of every second the cursor moves across it.
+   *
+   * The real answer needs the per-zone highlight art (`Interface\WorldMap\<zone>\<zone>Highlight`) plus
+   * the hit rectangle each zone occupies on its continent sheet, and neither is anything this client
+   * reads today. A fabricated name here would make the client build a texture path from it and try to
+   * load art that does not exist.
+   */
+  fn('UpdateMapHighlight', () => [null, null, null, null, null, null, null, null]);
+
+  /**
+   * THE DEBUG ZONE MAP -- `false`, and false is a fact rather than a stub.
+   *
+   * `HasDebugZoneMap()` is called unguarded inside `WorldMapFrame_UpdateMap` (`worldmapframe.lua:363`),
+   * below the landmark and overlay loops, so this was the SECOND raise in that one function. It gates a
+   * 32x32 double loop over `GetDebugZoneMap(x, y)`, i.e. 1,024 calls per map update, and the retail
+   * client answers false outside a development build too.
+   *
+   * `GetDebugZoneMap` and `GetMapDebugObjectInfo` cannot be reached with the count and the flag at zero
+   * and false, and are registered anyway for the reason the object model registers unreachable methods:
+   * an addon duck-types before it calls.
+   */
+  fn('HasDebugZoneMap', () => [false]);
+  fn('GetDebugZoneMap', () => [null]);
+  fn('GetMapDebugObjectInfo', () => [null]);
+
+  /**
+   * THE LANDMARK AND OVERLAY GETTERS, unreachable behind their own counts of 0 and registered anyway.
+   *
+   * Same rule as above, and the same reason the counts sit at 0 twenty lines up: `WorldMapOverlay.dbc`
+   * parses and nothing reads it, and `SMSG_WORLD_MAP_LANDMARKS` has no subscriber. Both already named as
+   * real gaps there; these are their getters, not new gaps.
+   *
+   * `ClickLandmark` is the one an owner could reach by gesture -- but only by clicking a landmark that
+   * cannot be drawn, so there is no route to it either.
+   */
+  fn('GetMapOverlayInfo', () => [null]);
+  fn('GetMapLandmarkInfo', () => [null]);
+  fn('ClickLandmark', () => []);
+
+  /**
+   * THE BATTLEFIELD OVERLAY -- three counts at 0, their getters, and the request that would fill them.
+   *
+   * `WorldMapFrame_UpdateUnits` walks all three every map update, and each count is `0` because this
+   * client joins no battleground: there is no `SMSG_BATTLEFIELD_STATUS` handler, so a flag carrier, an
+   * ally position or a siege vehicle would be inventing data rather than reporting none.
+   *
+   * `RequestBattlefieldPositions` is the client asking the SERVER to start streaming them, so a no-op is
+   * the honest shape rather than a refusal: nothing is refused, nothing is sent, and the counts stay 0.
+   * `GetWintergraspWaitTime` answers nil, which is the client's own "no queue information".
+   */
+  fn('GetNumBattlefieldFlagPositions', () => [0]);
+  fn('GetNumBattlefieldPositions', () => [0]);
+  fn('GetNumBattlefieldVehicles', () => [0]);
+  fn('GetBattlefieldFlagPosition', () => [null, null, null]);
+  fn('GetBattlefieldPosition', () => [null, null, null]);
+  fn('GetBattlefieldVehicleInfo', () => [null]);
+  fn('RequestBattlefieldPositions', () => []);
+  fn('GetWintergraspWaitTime', () => [null]);
+
+  /**
+   * WHERE THE PLAYER DIED -- `0, 0`, which is the engine's own "not applicable".
+   *
+   * `WorldMapFrame_UpdateUnits` reads both, and the client's guard is a comparison against 0 -- the same
+   * zero-means-nowhere convention `GetPlayerMapPosition` already uses for a unit that is not on the
+   * displayed map. So 0,0 hides the corpse marker and the spirit-healer marker, which is correct for a
+   * living character and is what this client always has: no death handling exists.
+   *
+   * **Zeros here, nil elsewhere, and the difference is the trap.** `0` is truthy in Lua, so a getter
+   * meaning "nothing" must normally answer nil -- but these two are read as NUMBERS and compared against
+   * 0 by the client's own guard, so nil would make that comparison throw instead of falling through.
+   * The convention to follow is the caller's, not the rule's.
+   */
+  fn('GetCorpseMapPosition', () => [0, 0]);
+  fn('GetDeathReleasePosition', () => [0, 0]);
+
+  /**
+   * THE QUEST PANEL'S REMAINING GETTERS, honest empties.
+   *
+   * `GetNumQuestItemDrops` at 0 makes the quest panel skip the item-drop rows, and `GetQuestLogItemDrop`
+   * is unreachable behind it. `GetQuestPOILeaderBoard` and `GetQuestWorldMapAreaID` are the POI half --
+   * the objective blobs drawn on the map itself -- which needs `SMSG_QUEST_POI_QUERY` and has no
+   * handler; `GetQuestWorldMapAreaID` answering 0 is what makes the client treat every quest as "not on
+   * this map" and draw no blob, rather than drawing one in the wrong place.
+   *
+   * The quest LOG side of this panel is real and already works -- `GetQuestLogTitle`,
+   * `GetQuestLogLeaderBoard`, `GetNumQuestLeaderBoards` and the watch functions all answer from decoded
+   * packets. It is only the map-placement half that is absent.
+   */
+  fn('GetNumQuestItemDrops', () => [0]);
+  fn('GetQuestLogItemDrop', () => [null]);
+  fn('GetQuestPOILeaderBoard', () => [null]);
+  fn('GetQuestWorldMapAreaID', () => [0]);
+
+  /**
+   * `SetupFullscreenScale(frame)` and `ToggleMapFramerate()` -- no-ops, and the first one is VISIBLE.
+   *
+   * `SetupFullscreenScale` is the engine sizing the map frame to fill the screen, called from
+   * `WorldMapFrame_OnShow` whenever the saved size is not the small windowed one
+   * (`worldmapframe.lua:132-134`). A no-op leaves the map at the scale its XML authored, so **the map
+   * may open smaller than it should** -- that is a real visual consequence and it belongs on the owner's
+   * check list rather than in a claim here. The reason it is not implemented is that the scale factor is
+   * the engine's own and no served file states it; guessing one would look right on this screen and
+   * wrong on another.
+   *
+   * `ToggleMapFramerate` is a development readout with nothing behind it in any build.
+   */
+  fn('SetupFullscreenScale', () => []);
+  fn('ToggleMapFramerate', () => []);
+
+  /**
+   * `ProcessMapClick(x, y)` -- the click that zooms INTO a zone from a continent sheet.
+   *
+   * A gesture the owner will make, and a genuine gap: it needs the same per-zone hit rectangles
+   * `UpdateMapHighlight` needs, since "which zone did he click" and "which zone is he over" are one
+   * question. Returning nothing leaves the click inert, and the two dropdowns above the map are the
+   * working route to the same place -- so the feature is reachable, just not by clicking.
+   *
+   * Not routed through a red `UIErrorsFrame` line: `WorldMapButton_OnClick` calls this on EVERY click on
+   * the map, including the ones that are meant to do nothing, so a refusal notice would fire constantly.
+   */
+  fn('ProcessMapClick', () => []);
+
   fn('GetSubZoneText', () => [where().leaf]);
   fn('GetZoneText', () => [where().zone]);
   // See the header: identical to `GetZoneText` outside an instance, and this client enters none.
