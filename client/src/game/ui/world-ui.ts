@@ -758,7 +758,9 @@ export class WorldUiHost {
     this.sections.begin('ui.layout');
     const items = this.root.drawList(viewport, measureText);
     this.sections.end('ui.layout');
+    this.sections.begin('ui.hit');
     this.input.setDrawList(items);
+    this.sections.end('ui.hit');
     // THE LAST DRAW LIST, as a console handle. The router hit-tests this exact array, so it is the only
     // authoritative answer to "is that widget on screen, and where" -- a screenshot cannot say whether a
     // quad is missing or merely transparent, and `registry.widget(id)` has no rect (the layout pass
@@ -775,7 +777,22 @@ export class WorldUiHost {
     // map: it runs only if `rectOf` misses, which for every existing caller is never.
     // The resolver is installed once at boot (see `setRectResolver` above), not per frame -- it has to
     // outlive the gap before the first draw, which is exactly where the chat frames were failing.
+    /**
+     * SPANNED, because the arithmetic now says the cost is HERE -- between the rows rather than in one.
+     *
+     * The measurements so far, each one killing a hypothesis of mine: events 423 ms for a whole SESSION
+     * against a per-frame 39.3; the button walk 0.12 ms per frame; the model booth **0.0 ms**. And the
+     * owner's panel adds up: `ui.tick` 2.4 + `ui.layout` 0.4 + `ui.draw` 0.4 (which nests `ui.booth` and
+     * `ui.sig`) is 3.2 ms of a 39.3 ms `ui.framexml`. So roughly 36 ms of the pass sits in code that no
+     * section covers, and this region -- `setDrawList`, `publishRects`, `reconcileScrollRanges` -- is all
+     * of it.
+     *
+     * NO FAVOURITE NAMED THIS TIME. Three guesses have been wrong; both of these get their own row and
+     * the numbers can say which, or say neither and push the search to the pass's own boundaries.
+     */
+    this.sections.begin('ui.rects');
     publishRects(items, viewportUnits(viewport).height);
+    this.sections.end('ui.rects');
     /**
      * THE SCROLL RANGES, announced from our layout pass because that is where the engine announces them.
      *
@@ -785,9 +802,11 @@ export class WorldUiHost {
      * measured from resolved rects. Gated internally on `layoutRevision()`: on a frame where nothing
      * moved this is one integer comparison for the whole client.
      */
+    this.sections.begin('ui.scroll');
     if (this.runtime !== null) {
       reconcileScrollRanges(this.runtime.ctx);
     }
+    this.sections.end('ui.scroll');
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');

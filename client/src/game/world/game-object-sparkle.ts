@@ -168,9 +168,9 @@ interface ParticleManager {
 }
 
 /**
- * WHERE THE SPARKLE GOES -- the centre of the geometry that is actually DRAWN.
+ * WHERE THE SPARKLE GOES -- the CROWN of the geometry that is actually DRAWN.
  *
- * Third attempt at this, and the first two failed in instructive ways. `view.position` alone put it at
+ * Fourth attempt at this, and the first three failed in instructive ways. `view.position` alone put it at
  * the bucket's feet, because a doodad's origin is where it meets the ground. Lifting by
  * `M2#vertexRadius * scale` -- the quantity `pick.ts` sizes its pick sphere with -- did not fix it
  * either, and the owner said so plainly.
@@ -185,8 +185,10 @@ interface ParticleManager {
  *
  * So this uses the DRAWN geometry instead of any authored number. `drawnWorldBox` is already exported
  * from `pick.ts`, where it is the narrow phase's own world box -- the union of every visible submesh's
- * bounds, after `updateWorldMatrix`. Its centre is the middle of the thing the player can see,
- * whatever the model's origin convention, its scale, or whether its header radius is meaningful.
+ * bounds, after `updateWorldMatrix`. It describes the thing the player can actually see, whatever the
+ * model's origin convention, its scale, or whether its header radius is meaningful -- which is why
+ * attempt three switched to it and why attempt four keeps it and only moves WHICH point on it is used.
+ * See the return below.
  * A model with nothing drawn yet answers null, and then the object's own position stands in.
  *
  * Cost: one bounding-box union per sparkle CREATED, not per frame -- this runs once, on the rising edge.
@@ -196,10 +198,23 @@ function sparkleAt(unit: Unit): THREE.Vector3 {
   if (box === null) {
     return unit.view.position.clone();
   }
+  /**
+   * THE TOP of the drawn box, not its centre -- attempt four, and the owner's own words chose it:
+   * "искру нужно поднимать выше, либо у основания но на большую дистанцию."
+   *
+   * Attempt three put it at the box CENTRE, which is inside the bucket. The box is the right instrument
+   * -- it is the geometry the player can see, so it cannot have attempt two's failure mode of a
+   * meaningless header radius -- but the centre was the wrong point on it. `box[5]` is the drawn maximum
+   * in Z, so this sits the effect at the object's crown, which is where a "you may loot this" glow reads
+   * from any camera angle rather than only from above.
+   *
+   * X and Y stay at the box CENTRE. Only the height was ever wrong, and the horizontal placement has
+   * been right since the position fix.
+   */
   return new THREE.Vector3(
     (box[0] + box[3]) / 2,
     (box[1] + box[4]) / 2,
-    (box[2] + box[5]) / 2,
+    box[5],
   );
 }
 
