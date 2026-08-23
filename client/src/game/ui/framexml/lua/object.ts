@@ -606,6 +606,27 @@ export class FrameRegistry {
     return this.names.get(name) ?? null;
   }
 
+  /**
+   * Every named frame whose name starts with `prefix`, up to `cap`. For PROBES, not for the runtime.
+   *
+   * `ui/world-ui.ts`' `uiRegion` handle needs it: the questions worth asking are about FAMILIES -- the
+   * twelve `WorldMapDetailTile`s, the fourteen `WorldMapFrameTexture`s -- and whether they all failed
+   * the same way or one of them differs is the answer. Capped so a one-letter prefix cannot print the
+   * whole tree.
+   */
+  namesStartingWith(prefix: string, cap: number): Array<{ name: string; id: number }> {
+    const out: Array<{ name: string; id: number }> = [];
+    for (const [name, id] of this.names) {
+      if (name.startsWith(prefix)) {
+        out.push({ name, id });
+        if (out.length >= cap) {
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
   classOf(id: number): WidgetClass | null {
     return this.entries.get(id)?.cls ?? null;
   }

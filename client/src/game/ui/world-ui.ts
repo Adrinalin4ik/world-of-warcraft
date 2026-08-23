@@ -59,7 +59,9 @@ import { attachAuraBridge } from './aura-bridge';
 import { attachTrainerBridge } from './trainer-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { attachChatBridge } from './chat-bridge';
-import { publishRects, clearRects, setRectResolver, setVisibleRectResolver, rectStats } from './rects';
+import {
+  publishRects, clearRects, setRectResolver, setVisibleRectResolver, rectStats, layoutRectOf,
+} from './rects';
 import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
 import { createQuadMaterial } from './material';
 import { ModelBooth } from './scene/model-booth';
@@ -774,6 +776,66 @@ export class WorldUiHost {
      */
     (window as never as Record<string, unknown>).uiTextExtent = (name: string) =>
       this.textExtent(name);
+
+    /**
+     * `window.uiRegion('WorldMapDetailTile')` -- every draw-relevant fact about a named widget, or
+     * about every widget whose name starts with a prefix.
+     *
+     * **BUILT BECAUSE "IT IS BLANK" HAS SIX CAUSES AND NO SCREENSHOT SEPARATES THEM.** The world map
+     * opened black after a close, with every asset verified present on the host and every global
+     * answering, and the remaining candidates were: the Lua never set a sprite; it set one that was
+     * never registered; it registered one that never fetched; the widget is hidden; an ancestor is
+     * hidden; the alpha is 0; or the rect is empty. Six guesses is what this project calls a diagnosis
+     * it has not made, and `worldUiArt` answers only two of them.
+     *
+     * A PREFIX is accepted because the interesting cases are families: twelve `WorldMapDetailTile`s and
+     * fourteen `WorldMapFrameTexture`s either all failed the same way or one of them differs, and that
+     * distinction is the answer. Capped so a prefix of one letter cannot print the whole 4,000-widget
+     * tree into a console.
+     *
+     * `visible` walks the ancestors and `shown` does not, which is the pair that separates "this widget
+     * is hidden" from "its panel is". `spriteRegistered`/`spriteFetched` are `worldUiArt`'s two halves,
+     * asked here so one call answers everything rather than three.
+     */
+    (window as never as Record<string, unknown>).uiRegion = (query: string, cap = 20) => {
+      const runtime = this.runtime;
+      if (runtime === null) {
+        return 'the runtime is not up';
+      }
+      const exact = runtime.registry.byName(query);
+      const ids = exact !== null
+        ? [exact]
+        : runtime.registry.namesStartingWith(query, cap).map((found) => found.id);
+      if (ids.length === 0) {
+        return `no frame named or prefixed '${query}'`;
+      }
+      return ids.map((id) => {
+        const widget = runtime.registry.widget(id);
+        if (widget === null) {
+          return { name: runtime.registry.nameOf(id), state: 'no widget' };
+        }
+        const sprite = widget.sprite;
+        const rect = layoutRectOf(widget.id);
+        const parentId = runtime.registry.parentOf(id);
+        return {
+          name: runtime.registry.nameOf(id),
+          kind: widget.kind,
+          parent: parentId === null ? null : runtime.registry.nameOf(parentId),
+          shown: widget.shown,
+          visible: widget.visible,
+          alpha: widget.alpha,
+          layer: widget.layer,
+          sprite,
+          spriteRegistered: sprite === null ? false : this.art.def(sprite) !== undefined,
+          spriteFetched: sprite === null ? false : this.art.texture(sprite) !== undefined,
+          anchors: widget.anchors.length,
+          rect: rect === null ? null : {
+            left: Math.round(rect.left), top: Math.round(rect.top),
+            width: Math.round(rect.width), height: Math.round(rect.height),
+          },
+        };
+      });
+    };
   }
 
   /**
