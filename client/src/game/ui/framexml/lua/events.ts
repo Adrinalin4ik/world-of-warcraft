@@ -126,79 +126,20 @@ registerMethods('FRAME', EVENT_METHODS);
  * Silently does nothing if the VM has no object model installed, or nothing is registered for
  * `eventName` -- both are normal, not error conditions worth throwing over.
  */
-/**
- * WHAT EACH EVENT COSTS -- `window.uiEventCensus()`.
- *
- * The owner's frame budget went to 19 fps with `ui.framexml` at **35.6 ms**, everything else in the
- * panel adding to less than that. This file's own neighbour already records why that is the number to
- * instrument: `action-bridge.ts:12` took `ui.framexml` "from ~10 ms to ~1 ms" by firing FEWER events,
- * because one event re-runs every handler registered for it -- `ActionButton_Update` across 24 buttons
- * in that case. So an event fired once per frame instead of once per change is the shape of this defect,
- * and the census names which one rather than leaving it to be guessed.
- *
- * `handlers` is the total number of `OnEvent` invocations, not the number of fires: an event with one
- * fire and forty registered frames costs forty script calls, and that ratio is the thing worth seeing.
- *
- * COST OF THE INSTRUMENT: two `performance.now()` calls per fire. That is real and it is the right
- * trade at 35 ms -- and it is stated rather than hidden, because `CLAUDE.md`'s rule is that an
- * instrument gets the same scepticism as the thing it measures. If events turn out NOT to explain the
- * cost, `total` will be well under `ui.framexml` and the answer is the `OnUpdate` frames instead.
- */
-const eventCensus = new Map<string, { fires: number; handlers: number; ms: number }>();
-
-let eventCensusInstalled = false;
-
-function installEventCensus(): void {
-  if (eventCensusInstalled) {
-    return;
-  }
-  eventCensusInstalled = true;
-  (window as unknown as Record<string, unknown>).uiEventCensus = () => {
-    const rows = Array.from(eventCensus.entries())
-      .map(([name, row]) => ({
-        name,
-        fires: row.fires,
-        handlers: row.handlers,
-        ms: Math.round(row.ms * 10) / 10,
-      }))
-      .sort((left, right) => right.ms - left.ms);
-    const total = rows.reduce((sum, row) => sum + row.ms, 0);
-    return { totalMs: Math.round(total * 10) / 10, top: rows.slice(0, 14) };
-  };
-  (window as unknown as Record<string, unknown>).uiEventCensusReset = () => {
-    eventCensus.clear();
-    return 'cleared';
-  };
-}
-
 export function fireEvent(vm: LuaVM, eventName: string, args: unknown[] = []): void {
   const ctx = contextFor(vm);
   if (ctx === null) {
     return;
   }
-  installEventCensus();
   const list = framesByEvent.get(eventName);
   if (list === undefined) {
-    // COUNTED EVEN SO. An event with no listener is nearly free, but "fired ten thousand times and
-    // listened to by nobody" is a real answer and the silent return would hide it.
-    const row = eventCensus.get(eventName) ?? { fires: 0, handlers: 0, ms: 0 };
-    row.fires += 1;
-    eventCensus.set(eventName, row);
     return;
   }
-  const startedAt = performance.now();
-  let invoked = 0;
   // Rule 2, spelled out: `list` is the SAME array `RegisterEvent`/`UnregisterEvent` mutate, held by
   // reference for the whole walk. `list.length` is re-read every iteration (not cached into a local
   // before the loop starts) so a push during this very dispatch extends how far the loop goes, and
   // `list[i]` is re-read every iteration so a splice during this dispatch is seen too.
   for (let i = 0; i < list.length; i++) {
     invokeScriptHandler(ctx, list[i], 'OnEvent', [eventName, ...args]);
-    invoked += 1;
   }
-  const row = eventCensus.get(eventName) ?? { fires: 0, handlers: 0, ms: 0 };
-  row.fires += 1;
-  row.handlers += invoked;
-  row.ms += performance.now() - startedAt;
-  eventCensus.set(eventName, row);
 }

@@ -1153,59 +1153,6 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
 
   /** `CompleteQuest()` -- the progress panel's Continue. `CMSG_QUESTGIVER_COMPLETE_QUEST`. */
   fn('CompleteQuest', () => {
-    /**
-     * THE TURN-IN PROBE -- because three guesses at this have now failed and the next step is a
-     * measurement, not a fourth guess.
-     *
-     * The owner's report: a required-items quest, Continue pressed, `CMSG_QUESTGIVER_COMPLETE_QUEST`
-     * sent, nothing happens. Widening the body to 13 did not move it. What his later reports DID settle
-     * is that the server considers the quest complete -- talking to the giver returned a gold `?` -- so
-     * the remaining candidates are narrow and this block separates them in one click:
-     *
-     *  - `flags` is the REQUEST_ITEMS tail we read `isComplete` from. If word 0 is 0 here while Continue
-     *    was clickable, the button is not gated by `IsQuestCompletable` at all and the panel is the bug.
-     *  - `status` is what the server last said about this giver. 10/9/6 is a turn-in, 5 is incomplete.
-     *  - `held`/`need` is the bag against the objective, so a disagreement between the bag and the
-     *    server's status is visible rather than inferred.
-     *  - `giver` and `quest` are what the packet will actually carry -- a null or stale giver guid makes
-     *    TrinityCore's `hasInvolvedQuest` check fail and return in silence, which looks identical to a
-     *    width fault from here.
-     *
-     * The handler prints the matching REPLY line, so the pair answers "did the server answer at all"
-     * -- the one thing no amount of reading this side can establish.
-     *
-     * FENCED, and for the reason the marker's watch had to be: a diagnostic that throws inside a Lua
-     * callback takes the button with it, which is worse than the defect it is here to find.
-     */
-    try {
-      const progress = quest.progress;
-      const required = (progress?.requiredItems ?? []).map((triple) => {
-        const held = itemCount(triple.itemId);
-        return `${triple.itemId}:${held}/${triple.count}`;
-      }).join(' ');
-      const giver = progress?.npc ?? null;
-      // eslint-disable-next-line no-console
-      console.log(
-        `quest: TURN-IN attempt -- quest=${progress?.questId ?? 'nil'} giver=${giver ?? 'nil'}`
-        + ` | isComplete=${progress?.isComplete ?? 'nil'} | status=${
-          giver === null ? 'no-giver' : quest.status.get(giver) ?? 'never-sent'}`
-        + ` | items=[${required}]`,
-      );
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.warn('quest: the turn-in probe threw and is being ignored', error);
-    }
-    /**
-     * `REQUEST_REWARD`, NOT `COMPLETE_QUEST`.
-     *
-     * `CompleteQuest()`'s name says complete and its opcode does not. The client's own file has exactly
-     * one call site for it -- `QuestProgressCompleteButton_OnClick` (`questframe.lua:107-108`), the
-     * progress panel's Continue -- and the reference sends `CMSG_QUESTGIVER_REQUEST_REWARD` from that
-     * button, never `COMPLETE_QUEST` (`ui_quest.rs:592-596`). The measurement agreed: COMPLETE_QUEST was
-     * answered with `REQUEST_ITEMS` again, i.e. the same panel redrawn.
-     *
-     * See `quest.ts#requestReward` for the probe output and the full derivation.
-     */
     quest.requestReward();
     return [];
   });

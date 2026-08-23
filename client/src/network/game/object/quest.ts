@@ -383,16 +383,6 @@ export class QuestHandler extends EventEmitter {
   private subscribe(name: string, arm: (gp: GamePacket) => void): void {
     this.game.on(`packet:receive:${name}`, (gp: GamePacket) => {
       const bodySize = gp.bodySize;
-      if (this.turnInSentAt !== null) {
-        const waited = Math.round(performance.now() - this.turnInSentAt);
-        this.turnInSentAt = null;
-        try {
-          // eslint-disable-next-line no-console
-          console.log(`quest: TURN-IN reply -- ${name} after ${waited}ms, body ${bodySize}`);
-        } catch {
-          // A diagnostic may never cost a packet. See the arm in `quest-bridge.ts`.
-        }
-      }
       try {
         arm.call(this, gp);
         itemWire.record({
@@ -1471,9 +1461,6 @@ export class QuestHandler extends EventEmitter {
     gp.writeUnsignedInt(id >>> 0);
     gp.writeUnsignedByte(0);
     this.game.send(gp);
-    // See `subscribe` -- the matching half of the turn-in probe. Bounded: one arm per attempt, cleared
-    // by the first quest packet that follows.
-    this.turnInSentAt = performance.now();
   }
 
   /**
@@ -1519,8 +1506,6 @@ export class QuestHandler extends EventEmitter {
       return;
     }
     this.send(GameOpcode.CMSG_QUESTGIVER_REQUEST_REWARD, guid, id);
-    // The turn-in probe covers this route now that it is the one Continue takes. See `subscribe`.
-    this.turnInSentAt = performance.now();
   }
 
   /**
@@ -1639,13 +1624,6 @@ export class QuestHandler extends EventEmitter {
    * `CMSG_QUESTGIVER_ACCEPT_QUEST` used to come through here and that was the bug: it reads a third
    * word in 3.3.5a. See `acceptQuest` for the width and for why it does not share this.
    */
-  /**
-   * When a turn-in was last sent, or null. Armed by `completeQuest` and cleared by the first quest
-   * packet after it, so the console says whether the server answered AT ALL -- the one question this
-   * side cannot answer by reading. See `game/ui/quest-bridge.ts`' `CompleteQuest` for the other half.
-   */
-  private turnInSentAt: number | null = null;
-
   private send(opcode: number, guid: string, questId: number): void {
     // Same oracle as `queryQuest`: both of these are answered with a panel that echoes the quest id
     // back.

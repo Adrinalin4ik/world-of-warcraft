@@ -147,57 +147,6 @@ function sliderState(self: number): SliderState {
  * The walk itself is unchanged -- same `layoutRectOf`, same far-edge maximum, same
  * `Math.max(child[axis], far - start)` result on each axis. Only the number of traversals changed.
  */
-/**
- * WHY THE PASS IS STILL EXPENSIVE -- `window.uiScrollCensus()`.
- *
- * The one-walk-and-skip-hidden fix took `ui.scroll` from 40.4 ms to 36.4, which is inside run-to-run
- * variation -- so it did essentially nothing, and the reason has to be measured rather than guessed
- * again. The counters separate every candidate:
- *
- *  - `registered` vs `onScreen` -- if they are equal, the visibility gate is not excluding anything and
- *    these frames really are all live (chat frames, the quest log, the objective tracker).
- *  - `nodes` -- how many widgets the extent walks actually visit. This is the walk's true size, and
- *    per-frame it is directly comparable to the 36 ms.
- *  - `fired` -- how many times `OnScrollRangeChanged` was DISPATCHED INTO LUA. This is the candidate the
- *    event census could not see, because a script handler is not an event: if a computed range
- *    oscillates, the `x === last.x` guard fails every frame and this pass runs the client's own
- *    scrollbar Lua for every frame in the client, every frame.
- *  - `skippedByRevision` -- whether the `layoutRevision` gate ever holds at all.
- *
- * Per-frame averages, so they read against the HUD row directly.
- */
-const scrollCensus = {
-  passes: 0, skippedByRevision: 0, registered: 0, onScreen: 0, nodes: 0, fired: 0,
-};
-
-let scrollCensusInstalled = false;
-
-function installScrollCensus(): void {
-  if (scrollCensusInstalled) {
-    return;
-  }
-  scrollCensusInstalled = true;
-  (window as unknown as Record<string, unknown>).uiScrollCensus = () => {
-    const n = Math.max(scrollCensus.passes, 1);
-    return {
-      passes: scrollCensus.passes,
-      skippedByRevision: scrollCensus.skippedByRevision,
-      perPass: {
-        registered: Math.round(scrollCensus.registered / n),
-        onScreen: Math.round(scrollCensus.onScreen / n),
-        nodes: Math.round(scrollCensus.nodes / n),
-        fired: Math.round((scrollCensus.fired / n) * 100) / 100,
-      },
-    };
-  };
-  (window as unknown as Record<string, unknown>).uiScrollCensusReset = () => {
-    Object.keys(scrollCensus).forEach((key) => {
-      (scrollCensus as unknown as Record<string, number>)[key] = 0;
-    });
-    return 'cleared';
-  };
-}
-
 function contentExtents(ctx: MethodContext, child: Widget): { width: number; height: number } {
   const base = layoutRectOf(child.id);
   if (base === null) {
@@ -207,7 +156,6 @@ function contentExtents(ctx: MethodContext, child: Widget): { width: number; hei
   let farX = base.left + base.width;
   const walk = (node: Widget): void => {
     for (const kid of node.children) {
-      scrollCensus.nodes += 1;
       const rect = layoutRectOf(kid.id);
       if (rect !== null) {
         const bottom = rect.top + rect.height;
@@ -302,14 +250,11 @@ let reconciledAt = -1;
  * unconditionally is exactly what the offscreen target cannot afford; this fires only on a real change.
  */
 export function reconcileScrollRanges(ctx: MethodContext): void {
-  installScrollCensus();
   const revision = layoutRevision();
   if (revision === reconciledAt) {
-    scrollCensus.skippedByRevision += 1;
     return;
   }
   reconciledAt = revision;
-  scrollCensus.passes += 1;
   for (const [frameId, last] of scrollRanges) {
     const widget = ctx.registry.widget(frameId);
     if (widget === undefined) {
@@ -328,18 +273,15 @@ export function reconcileScrollRanges(ctx: MethodContext): void {
      * back on screen its real range is compared against what it was last told, so a panel that reopens
      * unchanged re-announces nothing.
      */
-    scrollCensus.registered += 1;
     if (!onScreen(widget)) {
       continue;
     }
-    scrollCensus.onScreen += 1;
     const { x, y } = rangesOf(ctx, frameId);
     if (x === last.x && y === last.y) {
       continue;
     }
     last.x = x;
     last.y = y;
-    scrollCensus.fired += 1;
     const error = invokeScriptHandler(ctx, frameId, 'OnScrollRangeChanged', [x, y]);
     if (error !== null) {
       reportScriptError(

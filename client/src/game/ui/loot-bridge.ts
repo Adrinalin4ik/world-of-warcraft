@@ -412,28 +412,6 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
     fireEvent(vm, 'UI_ERROR_MESSAGE', [`Cannot loot that (server error ${error}).`]);
   };
 
-/**
-   * SAY THAT THE RESPONSE ARRIVED, once per open.
-   *
-   * The owner's report on a bucket was "окно лута не открылось" with no `lootError` printed either --
-   * two silences that mean opposite things. The load-report lines he DID see (`GetLootMethod`,
-   * `GetLootThreshold`, `GetMasterLootCandidate`) are called by `LootFrame_Update`, which suggests the
-   * frame ran; but those are `notImplemented` gap notices that can date from an earlier corpse loot, so
-   * they cannot settle it.
-   *
-   * This line can: it prints when `SMSG_LOOT_RESPONSE` decodes with real contents, with the counts. If
-   * it appears and no window does, the wire is fine and the defect is the FRAME -- and `LootFrame.xml`
-   * uses `SetToplevel` and `SetMovable`, both of which this runtime ignores, which is a concrete place
-   * to look. If it never appears and no refusal appears either, the server answered nothing and
-   * `CMSG_GAMEOBJ_USE` is the suspect.
-   */
-  const onOpenedAnnounce = (): void => {
-    // eslint-disable-next-line no-console
-    console.log(`loot: RESPONSE decoded -- ${loot.rows.length} row(s), ${loot.gold} copper,`
-      + ` lootType=${loot.lootType}`);
-  };
-
-  loot.on('lootOpened', onOpenedAnnounce);
   loot.on('lootError', onLootError);
   loot.on('lootOpened', onOpened);
   loot.on('lootRemoved', onRemoved);
@@ -514,7 +492,6 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
 
   return () => {
     setItemTooltipSource(vm, previous);
-    loot.removeListener('lootOpened', onOpenedAnnounce);
     loot.removeListener('lootError', onLootError);
     loot.removeListener('lootOpened', onOpened);
     loot.removeListener('lootRemoved', onRemoved);

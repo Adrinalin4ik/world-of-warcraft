@@ -796,8 +796,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
      * object is not a target and reads as a dead unit in the frame if it becomes one.
      */
     if (hit.gameObject) {
-      const how = this.game.objectHandler.gameObjectHandler.open(hit.guid, hit.gameObject.entry);
-      this.announceObjectUse(hit, world, how);
+      this.game.objectHandler.gameObjectHandler.open(hit.guid, hit.gameObject.entry);
       return;
     }
     world.setTarget(hit);
@@ -842,83 +841,6 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    */
   private questgiverHasQuest(unit: Unit): boolean {
     return questgiverHasQuest(this.game.objectHandler.questHandler.status.get(unit.guid));
-  }
-
-  /**
-   * A FRIENDLY SERVICE NPC'S RIGHT CLICK -- the interact, and the door the merchant window comes
-   * through.
-   *
-   * **The dispatch is the CURSOR's own classification, not a second reading of the flags.** The
-   * reference does exactly this: `interact_command(kind, guid, npc_flags)` switches on the already
-   * resolved `CursorKind` (`benilla/src/target/click.rs:628-647`), so the picture under the pointer and
-   * the packet the click sends can never disagree. `classifyUnitCursor` is the same call the hover path
-   * two methods up already makes, with the same options.
-   *
-   * Two branches, and the reference states the rule
-   * (`click.rs:124-139`): a **vendor-only** NPC -- which the ladder classifies `Pickup`, the pouch --
-   * opens the stock list directly with `CMSG_LIST_INVENTORY`; every other service kind opens the
-   * universal `CMSG_GOSSIP_HELLO` and the client's own `GossipFrame` shows whatever menu comes back.
-   *
-   * **AND THE DIRECT BRANCH IS LOAD-BEARING ON 3.3.5a, WHERE THE REFERENCE SAYS IT NEED NOT BE.**
-   * `click.rs:622-624` justifies routing anything through the hello with "`CMSG_GOSSIP_HELLO` works on
-   * any interactable creature (verified: the server passes `UNIT_NPC_FLAG_NONE`)". That is vmangos.
-   * TrinityCore 3.3.5's `HandleGossipHelloOpcode` passes **`UNIT_NPC_FLAG_GOSSIP`**
-   * (`Handlers/NPCHandler.cpp:150`) and returns silently for a creature without bit 0x1 -- so on this
-   * build a hello at a pure vendor is answered with nothing at all, and taking the reference's stated
-   * reason at face value would have left the plainest vendors unopenable with no error anywhere.
-   *
-   * THE RANGE GATE IS THE CURSOR'S. `classifyUnitCursor` marks a service beyond 5.5556 yd `unable`,
-   * and nothing is sent then -- there is no auto-approach in this client, so a send would be refused by
-   * the server and look like a broken click. The selection still lands, which is the reference's
-   * behaviour too (`click.rs:141-143`). A `Point` is not a service and sends nothing.
-   */
-/**
-   * EVERY INPUT `CMSG_GAMEOBJ_USE` DEPENDS ON, printed at the send.
-   *
-   * The owner clicked a bucket and his console showed the packet going out -- `Length: 14; Body: 8`,
-   * which is the correct 3.3.5a layout of one full guid -- and **nothing came back at all**: no
-   * `SMSG_LOOT_RESPONSE`, and no refusal either, now that a refusal has a listener. The server accepted
-   * the frame and answered silence, which is what `GetGameObjectIfCanInteractWith` does when it declines:
-   * it returns and writes nothing.
-   *
-   * So the question is which of its conditions failed, and every one of them is a value this client
-   * already holds. Rather than guess a fourth time -- three of my hypotheses have been killed by their
-   * own instruments this round -- they get printed:
-   *
-   *  - `guid` is what the packet carries. The server looks the object up by it, so a wrong guid is
-   *    indistinguishable from a wrong opcode from the client's side.
-   *  - `entry` and `type` are the template's. `type` is 3 for a chest, which is what a quest container
-   *    is; anything else means the pick found a different object than the one on screen. It is null
-   *    until `SMSG_GAMEOBJECT_QUERY_RESPONSE` lands, and a null here is itself a finding -- it would
-   *    mean the name query never answered.
-   *  - `yd` is the distance. TrinityCore range-checks against the object's own interaction distance and
-   *    returns SILENTLY when it fails, so this is the single most likely condition and the cheapest to
-   *    read. Our own gate is the reference's 5.5556 yd (`cursor-mode.ts#SERVICE_RANGE_SQ`), which is
-   *    LOOSER than the server's 5.0 for most objects -- so a click between the two is refused in exactly
-   *    this way, and the number says whether that is what happened.
-   *  - `state` and `dynamic` are the descriptor's. State 0 is ACTIVE/used and 1 is READY, a sense worth
-   *    printing because it is inverted from the intuition.
-   */
-  private announceObjectUse(hit: Unit, world: World, how: 'cast' | 'use') {
-    try {
-      const go = hit.gameObject;
-      const template = go === null
-        ? null
-        : this.game.objectHandler.gameObjectHandler.templates.get(go.entry) ?? null;
-      const yd = Math.sqrt(hit.position.distanceToSquared(world.player.position));
-      // eslint-disable-next-line no-console
-      console.log(
-        `gameobject: ${how.toUpperCase()} ${hit.guid} | entry=${go?.entry ?? 'nil'}`
-        + ` | type=${template?.type ?? 'no-template'} | name=${template?.name ?? 'nil'}`
-        + ` | yd=${yd.toFixed(2)} | state=${(go?.bytes1 ?? 0) & 0xff}`
-        + ` | dynamic=0x${((go?.dynamic ?? 0) & 0xffff).toString(16)}`
-        + ` | lockId=${template === null ? 'no-template' : template.lockId ?? 'residual'}`,
-      );
-    } catch (error) {
-      // A diagnostic may never cost the click it is reporting on.
-      // eslint-disable-next-line no-console
-      console.warn('gameobject: the use probe threw and is being ignored', error);
-    }
   }
 
   private interactWith(hit: Unit, world: World) {
