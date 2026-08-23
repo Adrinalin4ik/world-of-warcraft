@@ -235,31 +235,7 @@ const FRAME: MethodTable = {
     'key presses go to the binding table and to a focused EditBox; no frame receives OnKeyDown'),
   IsKeyboardEnabled: notImplemented('IsKeyboardEnabled', 'as EnableKeyboard', [false]),
 
-  /**
-   * THE WORLD MAP'S QUEST BLOBS -- `WorldMapBlobFrame`'s own engine surface.
-   *
-   * `WorldMapBlobFrame_OnLoad` calls `SetFillTexture`/`SetBorderTexture`/`SetFillAlpha`/
-   * `SetBorderScalar`/`SetBorderAlpha` and `WorldMapBlobFrame_OnUpdate` calls `DrawQuestBlob`
-   * (`worldmapframe.lua`). A blob is the shaded AREA a quest objective covers, drawn from the polygon
-   * the server sends with `SMSG_QUEST_POI_QUERY_RESPONSE` -- which this client does not subscribe to,
-   * so there is no polygon to fill and no fill to alpha.
-   *
-   * Declared on FRAME rather than a new class because `WorldMapBlobFrame` is authored as a plain
-   * `<Frame>`; the engine gives it these methods natively. That is the same duck-typing hazard the
-   * `SetScale` note above warns about, accepted here for the same reason it was there: the alternative
-   * is a class that exists for one frame.
-   */
-  DrawQuestBlob: notImplemented('DrawQuestBlob',
-    'SMSG_QUEST_POI_QUERY_RESPONSE has no subscriber, so no objective polygon exists to fill'),
-  DrawBlob: notImplemented('DrawBlob', 'as DrawQuestBlob'),
-  SetFillTexture: notImplemented('SetFillTexture', 'as DrawQuestBlob'),
-  SetBorderTexture: notImplemented('SetBorderTexture', 'as DrawQuestBlob'),
-  SetFillAlpha: notImplemented('SetFillAlpha', 'as DrawQuestBlob'),
-  SetBorderAlpha: notImplemented('SetBorderAlpha', 'as DrawQuestBlob'),
-  SetBorderScalar: notImplemented('SetBorderScalar', 'as DrawQuestBlob'),
-  CreatePlayerArrowFrame: notImplemented('CreatePlayerArrowFrame',
-    'the widget layer draws axis-aligned quads only, so a rotating arrow overlay has nowhere to '
-    + 'draw; see map-bridge.ts on the world map arrow'),
+
   /**
    * `GetScale()` -- the frame's own scale, unmultiplied by its ancestors' (that is
    * `GetEffectiveScale`). It answered a hardcoded 1 while `SetScale` was a no-op; both are real now,
@@ -719,4 +695,38 @@ function applyLayer(widget: { layer: Layer }, arg: unknown): void {
 // `methods/model.ts` where it is real. `AdvanceTime` is the one that is still a gap and it went with
 // them, so the class has one home.
 
+/**
+ * QUESTPOIFRAME -- `<QuestPOIFrame name="WorldMapBlobFrame">`'s own engine surface.
+ *
+ * These were on FRAME, which was a duck-typing leak I accepted in the comment at the time: it made
+ * `if frame.DrawQuestBlob then` true for every frame in the client. `QUESTPOIFRAME` is a real class now
+ * (`object.ts`), so they live where they belong -- and the class had to exist anyway, because without it
+ * the loader dropped the element and `WorldMapBlobFrame` was nil.
+ *
+ * A blob is the shaded AREA a quest objective covers, drawn from the polygon the server sends with
+ * `SMSG_QUEST_POI_QUERY_RESPONSE` -- which this client does not subscribe to, so there is no polygon to
+ * fill and no fill to alpha.
+ */
+const QUESTPOIFRAME: MethodTable = {
+  DrawQuestBlob: notImplemented('DrawQuestBlob',
+    'SMSG_QUEST_POI_QUERY_RESPONSE has no subscriber, so no objective polygon exists to fill'),
+  DrawBlob: notImplemented('DrawBlob', 'as DrawQuestBlob'),
+  SetFillTexture: notImplemented('SetFillTexture', 'as DrawQuestBlob'),
+  SetBorderTexture: notImplemented('SetBorderTexture', 'as DrawQuestBlob'),
+  SetFillAlpha: notImplemented('SetFillAlpha', 'as DrawQuestBlob'),
+  SetBorderAlpha: notImplemented('SetBorderAlpha', 'as DrawQuestBlob'),
+  SetBorderScalar: notImplemented('SetBorderScalar', 'as DrawQuestBlob'),
+};
+
+/**
+ * `CreatePlayerArrowFrame` stays on FRAME: `WorldMapFrame_OnLoad` calls it on the MAP frame, not on the
+ * blob frame, so moving it with the blob methods would have put it on a class its caller never touches.
+ */
+Object.assign(FRAME, {
+  CreatePlayerArrowFrame: notImplemented('CreatePlayerArrowFrame',
+    'the widget layer draws axis-aligned quads only, so a rotating arrow overlay has nowhere to '
+    + 'draw; see map-bridge.ts on the world map arrow'),
+});
+
 registerMethods('FRAME', FRAME);
+registerMethods('QUESTPOIFRAME', QUESTPOIFRAME);

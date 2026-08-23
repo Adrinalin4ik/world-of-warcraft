@@ -58,6 +58,7 @@ export type WidgetClass =
   | 'WORLDFRAME'
   | 'MESSAGEFRAME'
   | 'MINIMAP'
+  | 'QUESTPOIFRAME'
   | 'SCROLLINGMESSAGEFRAME'
   | 'BACKDROP';
 
@@ -115,6 +116,32 @@ const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
    * rather than leaving it silent.
    */
   MINIMAP: 'FRAME',
+  /**
+   * A real client type, and the ROOT of `<QuestPOIFrame name="WorldMapBlobFrame">`
+   * (`worldmapframe.xml:675`). Same defect family as COOLDOWN, GAMETOOLTIP, WORLDFRAME and MINIMAP
+   * above, and found the same way -- something asked for the global and got nil:
+   *
+   *     [string "WorldMapFrame.lua"]:1417:
+   *         attempt to index a nil value (global 'WorldMapBlobFrame')
+   *
+   * **That raise is why SHIFT-M did nothing**, and it is worse than one dead frame:
+   * `WorldMap_ToggleSizeUp`/`Down` index it, both are called from `WorldMapFrame_ToggleWindowSize`, and
+   * that function sets `WorldMapFrame.blockWorldMapUpdate = true` a few lines later and clears it at the
+   * end -- so a raise anywhere in between would have latched the flag on and stopped the world map
+   * updating for the rest of the session. It raised BEFORE the flag was set, which is the only reason
+   * that did not happen.
+   *
+   * FOUND BY SWEEP, not by chasing this one name: every `<Element>` tag in the decoded manifest was
+   * matched against this union, and the only two widget types with no class were `QuestPOIFrame` and
+   * `ModelFFX` -- and `ModelFFX` is an alias of MODEL already. Everything else was structural
+   * (`AbsInset`, `ScrollChild`, `TextInsets`, `Binding`) or a script handler.
+   *
+   * `FRAME`, and the blobs are NOT drawn -- the objective polygons come from
+   * `SMSG_QUEST_POI_QUERY_RESPONSE`, which has no subscriber. Its methods live on this class now rather
+   * than on FRAME, where they were a duck-typing leak that made `if frame.DrawQuestBlob then` true for
+   * every frame in the client.
+   */
+  QUESTPOIFRAME: 'FRAME',
   // A real client type, and the ROOT ELEMENT of `Interface\FrameXML\WorldFrame.xml` --
   // `<WorldFrame name="WorldFrame" movable="true" resizable="true" setAllPoints="true">`, entry 12 of
   // `FrameXML.toc`. Missing, `parseClass` answered null, `CreateFrame` threw "unknown frame type", and
@@ -188,6 +215,8 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   GAMETOOLTIP: 'frame',
   // `frame`: the frame exists so the client's own Lua can measure and index it; no map is rendered.
   MINIMAP: 'frame',
+  // `frame`: a blob frame is a rect the client sizes and scales; nothing draws an objective polygon.
+  QUESTPOIFRAME: 'frame',
   // `frame`: a WorldFrame draws no interface art of its own -- the world is rendered BEHIND it, which
   // is what its own XML comment says ("The world is rendered in the background of the frame"). Here
   // the world is a separate three.js scene entirely, so this frame is a rect and a parent and nothing
@@ -247,6 +276,9 @@ const CREATE_FRAME_CLASSES: WidgetClass[] = [
   // `Minimap` global takes the entire UI-panel layout down permanently (see the MINIMAP entry in
   // `CLASS_PARENT`). `CreateFrame("Minimap", ...)` is legal in the real client too.
   'MINIMAP',
+  // Listed for the same reason -- the loader funnels every XML element through `CreateFrame`, so
+  // `<QuestPOIFrame name="WorldMapBlobFrame">` throws without this entry and the global is nil.
+  'QUESTPOIFRAME',
   // Listed for the same reason as the two above -- the loader funnels every XML element through
   // `CreateFrame`, so `<MessageFrame name="UIErrorsFrame" ...>` (`uierrorsframe.xml:4`) throws without
   // it. That throw is why `UIErrorsFrame` did not exist and no refusal could be printed on screen.
