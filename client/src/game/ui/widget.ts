@@ -373,6 +373,20 @@ export class Widget {
    * the front of its bucket for no reason -- the bug `lua/methods/frame.ts` exists to avoid.
    */
   linkStamp = nextLinkStamp++;
+  /**
+ * `SetScale(s)` -- the frame's own scale, which CASCADES to everything under it.
+ *
+ * This was a `notImplemented` no-op and the gap was visible: the world map's player marker landed at
+ * 0.81/0.80 of the map where the arithmetic says 0.48/0.45, a ratio of about 1.7 -- which is
+ * `1 / WORLDMAP_WINDOWED_SIZE` (0.573). `WorldMapFrame_SetFullMapView` scales the detail frame,
+ * `WorldMap_ToggleSizeUp/Down` rescale it again, and with the scale dropped the frame kept its
+ * authored size while the offsets computed from it were meant for a scaled one.
+ *
+ * Held per widget and multiplied down the tree by whoever walks it -- see `LayoutNode#scale` for
+ * which three quantities it multiplies and why an anchor OFFSET is one of them.
+ */
+  scale = 1;
+
   anchors: Anchor[] = [];
 
   /**
@@ -735,6 +749,33 @@ export class Widget {
       treeStructure += 1;
       bumpGeometry('remove');
     }
+  }
+
+  /** `SetScale`. Geometry-touching, because every rect under this widget moves. */
+  setScale(scale: number): Widget {
+    const next = Number.isFinite(scale) && scale > 0 ? scale : 1;
+    if (next !== this.scale) {
+      this.scale = next;
+      bumpGeometry('scale');
+    }
+    return this;
+  }
+
+  /**
+   * This widget's scale multiplied by every ancestor's -- `GetEffectiveScale`.
+   *
+   * Walked rather than cached: a cache would have to be invalidated on every `SetScale`,
+   * `SetParent` and tree edit, and the chain here is a handful of pointer hops. The two tree walks
+   * that build layout nodes do NOT use this -- they carry the product down, which is free.
+   */
+  get effectiveScale(): number {
+    let out = this.scale;
+    let node: Widget | null = this.parent;
+    while (node) {
+      out *= node.scale;
+      node = node.parent;
+    }
+    return out;
   }
 
   setAnchors(...anchors: Anchor[]): Widget {
@@ -1280,6 +1321,8 @@ export class WidgetRoot {
       nodes.push({
         id, width: size.width, height: size.height, anchors: widget.anchors,
         clamped: widget.clampedToScreen,
+        // No chain to carry here -- these are found by id, off the walk -- so the walk-up is used.
+        scale: widget.effectiveScale,
       });
       for (const anchor of widget.anchors) {
         if (anchor.relativeTo !== undefined && !present.has(anchor.relativeTo)) {
@@ -1330,10 +1373,12 @@ export class WidgetRoot {
   ): Map<string, Rect> {
     const nodes: LayoutNode[] = [];
     const scale = screenScale(viewport.height);
-    const walk = (widget: Widget): void => {
+    const walk = (widget: Widget, inherited: number): void => {
       if (visibleOnly && widget !== this.root && !widget.shown) {
         return;
       }
+      // Carried down rather than read off `effectiveScale`, which would walk back up per node.
+      const effective = inherited * widget.scale;
       const size = deriveSize(widget, scale, measure);
       nodes.push({
         id: widget.id,
@@ -1341,12 +1386,13 @@ export class WidgetRoot {
         height: size.height,
         anchors: widget.anchors,
         clamped: widget.clampedToScreen,
+        scale: effective,
       });
       for (const child of widget.children) {
-        walk(child);
+        walk(child, effective);
       }
     };
-    walk(this.root);
+    walk(this.root, 1);
     return resolveAnchors(nodes, viewport);
   }
 
@@ -1358,7 +1404,7 @@ export class WidgetRoot {
     let sequence = 0;
     const scale = screenScale(viewport.height);
 
-    const walk = (widget: Widget, alpha: number, clip: Widget | null): void => {
+    const walk = (widget: Widget, alpha: number, clip: Widget | null, inherited: number): void => {
       if (!widget.shown) {
         return;
       }
@@ -1369,6 +1415,7 @@ export class WidgetRoot {
       // of the frame, and deliberately outside its viewport -- is never clipped.
       const clipping = widget.clippedBy ?? clip;
       flat.push({ widget, alpha: cumulative, sequence: sequence++, clip: clipping });
+      const effective = inherited * widget.scale;
       const size = deriveSize(widget, scale, measure);
       nodes.push({
         id: widget.id,
@@ -1376,14 +1423,15 @@ export class WidgetRoot {
         height: size.height,
         anchors: widget.anchors,
         clamped: widget.clampedToScreen,
+        scale: effective,
       });
 
       for (const child of widget.children) {
-        walk(child, cumulative, clipping);
+        walk(child, cumulative, clipping, effective);
       }
     };
 
-    walk(this.root, 1, null);
+    walk(this.root, 1, null, 1);
     this.addHiddenTargets(nodes, scale, measure);
 
     const rects = resolveAnchors(nodes, viewport);

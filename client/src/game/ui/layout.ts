@@ -51,6 +51,23 @@ export interface LayoutNode {
   anchors: Anchor[];
   /** `clampedToScreen="true"` -- see `clampToScreen` and `Widget#clampedToScreen`. */
   clamped?: boolean;
+  /**
+   * The node's EFFECTIVE scale: its own `SetScale` multiplied by every ancestor's. Absent means 1.
+   *
+   * Supplied by the caller rather than derived here, because the caller already walks the tree
+   * top-down and can carry the product for free -- see `WidgetRoot#drawList`.
+   *
+   * It multiplies THREE things and the choice of which is the whole content of scale support:
+   * the node's own width and height, and its anchor OFFSETS. The offsets scale because a
+   * `SetPoint(..., x, y)` is expressed in the anchored frame's own coordinate space, which is what
+   * `WorldMapButton_OnUpdate` relies on -- it computes `playerX * WorldMapDetailFrame:GetWidth()`
+   * and hands the result straight back as an offset, so a `GetWidth` in own-space units and an
+   * offset in own-space units are the same number twice and cancel correctly at any scale.
+   *
+   * It does NOT multiply a size that two opposing anchors already determined: that width is the
+   * distance between two resolved points and is scaled by whatever scaled them.
+   */
+  scale?: number;
 }
 
 /** The window in device pixels. */
@@ -142,6 +159,11 @@ function pointOf(rect: Rect, point: AnchorPoint): { x: number; y: number } {
  * instead of at its head, which is exactly what this screen did before.
  */
 function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect): Rect {
+  const scale = node.scale ?? 1;
+  // The AUTHORED size at this node's effective scale. Used only on an axis the anchors did not
+  // already size -- see `LayoutNode#scale`.
+  const scaledWidth = node.width * scale;
+  const scaledHeight = node.height * scale;
   // Edge constraints gathered from the anchors. An axis with two of them SIZES the node.
   let left: number | null = null;
   let right: number | null = null;
@@ -158,9 +180,10 @@ function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect)
     }
 
     const target = pointOf(relative, anchor.relativePoint ?? anchor.point);
-    // FrameXML's `+y` is up; our `top` grows downward, hence the subtraction.
-    const x = target.x + anchor.x;
-    const y = target.y - anchor.y;
+    // FrameXML's `+y` is up; our `top` grows downward, hence the subtraction. Scaled because an
+    // offset is in the anchored frame's OWN space -- see `LayoutNode#scale`.
+    const x = target.x + anchor.x * scale;
+    const y = target.y - anchor.y * scale;
 
     const h = HORIZONTAL[anchor.point];
     if (h === 0) {
@@ -182,14 +205,14 @@ function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect)
   }
 
   if (left === null && right === null && centerX !== null) {
-    left = centerX - node.width / 2;
+    left = centerX - scaledWidth / 2;
   }
   if (top === null && bottom === null && centerY !== null) {
-    top = centerY - node.height / 2;
+    top = centerY - scaledHeight / 2;
   }
 
-  const width = left !== null && right !== null ? right - left : node.width;
-  const height = top !== null && bottom !== null ? bottom - top : node.height;
+  const width = left !== null && right !== null ? right - left : scaledWidth;
+  const height = top !== null && bottom !== null ? bottom - top : scaledHeight;
 
   return {
     left: left !== null ? left : right !== null ? right - width : 0,

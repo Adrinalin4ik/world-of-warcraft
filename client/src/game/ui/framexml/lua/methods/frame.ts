@@ -16,6 +16,7 @@ import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { NO_TINT } from '../../../backdrop';
 import type { BackdropTint, Insets } from '../../../backdrop';
 import { Layer, Widget } from '../../../widget';
+import { screenScale } from '../../../layout';
 import { STRATA_ORDER, Strata } from '../../order';
 import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
 
@@ -153,10 +154,25 @@ const FRAME: MethodTable = {
   // Real `Region` has NO scale method at all in the 3.3.5 API -- scale is Frame-only, because it
   // cascades to a frame's CHILDREN, and a leaf Texture/FontString has none to cascade to. Registering
   // these on REGION (as an earlier pass here did) would make `if texture.SetScale then` true, which
-  // is exactly the duck-typing leak this task exists to close. Nothing in `widget.ts` models a
-  // per-widget scale that cascades the way `frameLevel` does at `Widget#add`, so this is still a
-  // warn-once no-op -- just on the right class now.
-  SetScale: notImplemented('SetScale', 'widget.ts has no per-widget scale field yet'),
+  // is exactly the duck-typing leak this task exists to close.
+  /**
+   * `SetScale(s)` -- REAL now, and the note above it used to say `widget.ts` had no field for it.
+   *
+   * The gap was visible on the world map: the player marker landed at 0.81/0.80 of the map where the
+   * arithmetic gives 0.48/0.45, a ratio of about 1.7 -- which is `1 / WORLDMAP_WINDOWED_SIZE`.
+   * `WorldMapFrame_SetFullMapView` scales the detail frame and `WorldMap_ToggleSizeUp/Down` rescale
+   * it, so with the call dropped the frame kept its authored size while every offset computed from
+   * that size was meant for a scaled one.
+   *
+   * `Widget#setScale` touches geometry, because every rect in the subtree moves.
+   */
+  SetScale: (ctx, self, args) => {
+    const widget = ctx.registry.widget(self);
+    if (widget !== null) {
+      widget.setScale(Number(args[0]));
+    }
+    return [];
+  },
   // `SetClampRectInsets(left, right, top, bottom)` -- how far a clamped frame may go PAST the screen
   // edge. `SetClampedToScreen` below is real; this is the inset it clamps to, and `widget.ts` has no
   // field for it. MEASURED as the only remaining load error in `ChatFrame1`'s own OnLoad
@@ -164,7 +180,30 @@ const FRAME: MethodTable = {
   // rest of that OnLoad.
   SetClampRectInsets: notImplemented('SetClampRectInsets',
     'widget.ts has no clamp-inset field; SetClampedToScreen clamps to the bare screen rect'),
-  GetEffectiveScale: notImplemented('GetEffectiveScale', 'reporting the only scale that exists today (1)', [1]),
+  /**
+   * `GetEffectiveScale()` -- the widget's own scale, times every ancestor's, times the VIRTUAL-SCREEN
+   * scale.
+   *
+   * That third factor is the one worth explaining. The client uses this global for exactly one kind
+   * of arithmetic -- converting a cursor position into a frame's own space:
+   *
+   *     local x, y = GetCursorPosition();
+   *     x = x / self:GetEffectiveScale();          (`worldmapframe.lua:743-745`)
+   *
+   * and `api/screen.ts` feeds `GetCursorPosition` in DEVICE pixels while every rect this layer
+   * resolves is in VIRTUAL units (`layout.ts#screenScale`). In the real client `UIParent`'s effective
+   * scale is precisely that conversion, so including it here is the client's own meaning rather than
+   * an extra factor -- and leaving it out would put the cursor in the wrong space on any window that
+   * is not exactly 768 units tall, which is every window.
+   *
+   * `window.innerHeight` rather than a threaded viewport: this is a Lua getter with no frame context,
+   * and it is the same value `WorldUiHost#render` passes to the layout each frame.
+   */
+  GetEffectiveScale: (ctx, self) => {
+    const own = ctx.registry.widget(self)?.effectiveScale ?? 1;
+    const virtual = typeof window === 'undefined' ? 1 : screenScale(window.innerHeight);
+    return [own * virtual];
+  },
 
   /**
    * MOVING A WINDOW, and the KEYBOARD -- four gaps that the owner's world-map log named directly:
@@ -222,9 +261,9 @@ const FRAME: MethodTable = {
     'the widget layer draws axis-aligned quads only, so a rotating arrow overlay has nowhere to '
     + 'draw; see map-bridge.ts on the world map arrow'),
   /**
-   * `GetScale()` -- 1, and a TRUE ANSWER rather than a stub, which is why it is not beside the two
-   * above: this widget layer has exactly one scale, so 1 is what a frame's scale IS here, not what we
-   * are guessing it to be. `SetScale` is the gap; reading back the value nothing can change is not.
+   * `GetScale()` -- the frame's own scale, unmultiplied by its ancestors' (that is
+   * `GetEffectiveScale`). It answered a hardcoded 1 while `SetScale` was a no-op; both are real now,
+   * so the note that used to say "reading back the value nothing can change" no longer applies.
    *
    * **ITS ABSENCE WAS THE WHOLE OF "I don't see options in selects".** `ToggleDropDownMenu`'s third
    * statement is `local uiParentScale = UIParent:GetScale()` (`uidropdownmenu.lua:621`), and it runs
@@ -232,7 +271,7 @@ const FRAME: MethodTable = {
    * frame carrying nothing but its own scroll arrows. Measured: `shownButtons=3`, the first of them
    * "Scroll Up", and the toggle raising on this method.
    */
-  GetScale: () => [1],
+  GetScale: (ctx, self) => [ctx.registry.widget(self)?.scale ?? 1],
 
   EnableMouse: (ctx, self, args) => {
     widgetOf(ctx, self).mouseEnabled = Boolean(args[0]);
