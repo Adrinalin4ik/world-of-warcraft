@@ -478,6 +478,169 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     return Number.isFinite(value) ? value : 0;
   };
 
+  /**
+   * OBJECTIVE PROGRESS -- the yellow "Diseased Wolf Pelt: 3/8" toast when a collect objective ticks.
+   *
+   * The owner took a quest to gather an item off mobs, looted one, and nothing said so. He named the
+   * surface he wanted and it is the right one: the client's own floating line, not an invention.
+   *
+   * ## WHICH DOOR, read out of the client's own file rather than assumed
+   *
+   * `UIErrorsFrame_OnLoad` registers three events and its handler colours them differently
+   * (`interface/framexml/uierrorsframe.lua`, fetched and read in full -- it is 17 lines):
+   *
+   *     UI_INFO_MESSAGE   -> AddMessage(arg1, 1.0, 1.0, 0.0, 1.0)   -- YELLOW
+   *     UI_ERROR_MESSAGE  -> AddMessage(arg1, 1.0, 0.1, 0.1, 1.0)   -- RED
+   *
+   * So progress is `UI_INFO_MESSAGE` and `arg1` is the finished text. The reference agrees in the same
+   * words ("the yellow `UI_INFO_MESSAGE` toast", `net/apply/quests.rs:88`). The red door is for
+   * refusals, which is what this bridge's other toasts use, and it would be the wrong colour here.
+   *
+   * The format string is the CLIENT'S: `ERR_QUEST_ADD_ITEM_SII = "%s: %d/%d"`
+   * (`globalstrings.lua:3407`). Read through the VM, so a locale shipping a different one wins with no
+   * edit here.
+   *
+   * ## AND 3.3.5a SENDS NO PACKET FOR THIS -- the version delta that decides the whole design
+   *
+   * The reference drives its item toast off `SMSG_QUESTUPDATE_ADD_ITEM` (`ui_quest_log.rs:650-651`).
+   * **That opcode is dead on this build.** Our own table names 0x19A
+   * `SMSG_QUESTUPDATE_ADD_ITEM_OBOSLETE` (`network/game/opcode.js:412`, TrinityCore's typo included)
+   * and nothing sends it, so waiting for one would wait for ever. The reference is authoritative on
+   * structure and silent on a version-numbered fact, exactly as the project rule says to expect.
+   *
+   * Nor is the descriptor counter the answer. `update-object/quest-log.ts` already records why, written
+   * before this feature existed: "for an ITEM objective the real client does not use it and counts the
+   * player's bags instead (`RequiredItemCount` against `GetItemCount`)". The bags are the source, so
+   * this is an engine-side derivation rather than a packet subscription.
+   *
+   * ## THE FIELD IS `requiredItems`, AND ITS NEIGHBOUR IS A TRAP
+   *
+   * `QuestObjective#sourceItemId` is NOT this. The query response writes four
+   * `{ RequiredNpcOrGo, count, ItemDrop, ItemDropQuantity }` quads and only THEN the
+   * `{ RequiredItemId, RequiredItemCount }` pairs, so `sourceItemId` is the item that DROPS to enable
+   * an objective and the collect objective is `QuestTemplate#requiredItems`. Reading the parse order
+   * settled it; the names alone would have picked the wrong field.
+   *
+   * ## COST
+   *
+   * **One `vm.runExpr` per inventory change, not one per objective.** The counts come back from a single
+   * chunk concatenating every `GetItemCount`, because the per-row version of this call is already a
+   * recorded cost in this file. The objective map is rebuilt only when the log or a template moves, and
+   * the walk covers the collect objectives actually in the log -- a handful.
+   *
+   * Counting goes through the client's own `GetItemCount` rather than a second bag walk, which is the
+   * rule `itemCount` above already states: one bag-counting implementation, not two.
+   */
+
+  /** `RequiredItemId` -> `RequiredItemCount`, for every collect objective in the log. */
+  const collectNeeded = new Map<number, number>();
+
+  /** The count last seen for each of those. Only an INCREASE announces. */
+  const collectSeen = new Map<number, number>();
+
+  /**
+   * Every collect objective's count in ONE VM call -- see the cost note above.
+   *
+   * `or 0` inside the chunk rather than a guard out here: `GetItemCount` answering nil for an unknown
+   * entry would make `table.concat` throw on the hole and take the whole reading with it.
+   */
+  const collectCounts = (ids: number[]): number[] => {
+    if (ids.length === 0) {
+      return [];
+    }
+    const calls = ids.map((id) => `GetItemCount(${id >>> 0}) or 0`).join(',');
+    const result = vm.runExpr(
+      `return table.concat({${calls}}, ",")`, 'quest-progress.lua',
+    ) as { value?: unknown } | null;
+    return String(result?.value ?? '').split(',').map((raw) => {
+      const value = Number(raw);
+      return Number.isFinite(value) ? value : 0;
+    });
+  };
+
+  /**
+   * Rebuild the objective map, and SEED any objective new to it.
+   *
+   * The seeding is load-bearing rather than tidy. Without it a quest accepted this session has no
+   * baseline, so the first item looted for it reads as a first sighting and announces nothing -- the
+   * one pickup the player is most likely watching for. Seeding here means the baseline exists before
+   * the first loot rather than because of it.
+   */
+  const rebuildCollect = (): void => {
+    collectNeeded.clear();
+    for (const slot of world.player.questLog.values()) {
+      if (slot.questId === 0) {
+        continue;
+      }
+      const template = templateOf(slot.questId);
+      if (template === null) {
+        continue;
+      }
+      for (const required of template.requiredItems) {
+        if (required.itemId === 0 || required.count === 0) {
+          continue;
+        }
+        collectNeeded.set(required.itemId, required.count);
+        // The toast needs a NAME, and this is the call that issues the query for one.
+        items.template(required.itemId);
+      }
+    }
+    for (const id of Array.from(collectSeen.keys())) {
+      if (!collectNeeded.has(id)) {
+        collectSeen.delete(id);
+      }
+    }
+    const fresh = Array.from(collectNeeded.keys()).filter((id) => !collectSeen.has(id));
+    if (fresh.length > 0) {
+      const counts = collectCounts(fresh);
+      fresh.forEach((id, index) => collectSeen.set(id, counts[index] ?? 0));
+    }
+  };
+
+  /** One line, through the client's own string and the client's own frame. */
+  const announceCollect = (itemId: number, have: number, need: number): void => {
+    const name = items.template(itemId)?.name ?? null;
+    if (name === null) {
+      // No name yet, so there is no honest line to print. `rebuildCollect` has already asked for the
+      // template, and a nameless ": 3/8" would be worse than one missed toast.
+      return;
+    }
+    const quoted = name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const text = vm.runExpr(
+      `return string.format(ERR_QUEST_ADD_ITEM_SII or "%s: %d/%d", "${quoted}", ${have}, ${need})`,
+      'quest-progress.lua',
+    ) as { value?: unknown } | null;
+    const message = String(text?.value ?? '');
+    if (message !== '') {
+      fireEvent(vm, 'UI_INFO_MESSAGE', [message]);
+    }
+  };
+
+  const onInventory = (): void => {
+    if (disposed || collectNeeded.size === 0) {
+      return;
+    }
+    const ids = Array.from(collectNeeded.keys());
+    const counts = collectCounts(ids);
+    ids.forEach((id, index) => {
+      const now = counts[index] ?? 0;
+      const before = collectSeen.get(id);
+      collectSeen.set(id, now);
+      if (before === undefined || now <= before) {
+        // A first sighting seeds silently; a DECREASE is a turn-in or a sale and the real client says
+        // nothing for either -- the reference records the same ("no removal opcode and no client-side
+        // removal toast", `ui_quest_log.rs:651`).
+        return;
+      }
+      const need = collectNeeded.get(id) ?? 0;
+      if (before >= need) {
+        // Already had enough: the objective did not tick, the bag did.
+        return;
+      }
+      announceCollect(id, Math.min(now, need), need);
+    });
+  };
+
   const fn = (name: string, body: (args: unknown[]) => unknown[]): void => {
     vm.registerFunction(name, body);
   };
@@ -1742,6 +1905,10 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     if (disposed) {
       return;
     }
+    // A template is where `requiredItems` first becomes readable, so the collect map cannot be built
+    // until one lands. Unconditional rather than inside the `rebuild()` arm below: a template arriving
+    // for a quest already listed by title changes no entry and would otherwise never be picked up.
+    rebuildCollect();
     if (rebuild()) {
       fireEvent(vm, 'QUEST_LOG_UPDATE');
     }
@@ -1816,6 +1983,8 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     if (!rebuild()) {
       return;
     }
+    // The quest SET moved -- one accepted or abandoned -- so the collect objectives did too.
+    rebuildCollect();
     fireEvent(vm, 'QUEST_LOG_UPDATE');
     fireEvent(vm, 'UNIT_QUEST_LOG_CHANGED', ['player']);
     // Our own state moved, so every nearby giver's answer could have -- the reference's sweep.
@@ -1870,6 +2039,9 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     fireEvent(vm, 'QUEST_LOG_UPDATE');
   };
   items.on('templatesChanged', onTemplates);
+  // THE COLLECT-OBJECTIVE TOAST's only trigger: 3.3.5a sends no add-item packet, so the bag IS the
+  // event. See `onInventory`.
+  items.on('inventoryChanged', onInventory);
 
   quest.on('questDetail', onDetail);
   quest.on('questProgress', onProgress);
@@ -1970,6 +2142,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     quest.off('questRewarded', reaskStatuses);
     world.off('unit:fields', onFields);
     items.off('templatesChanged', onTemplates);
+    items.off('inventoryChanged', onInventory);
     // The markers are the world's, but their FEED is this bridge's -- so it goes when the bridge does,
     // or a disposed session's statuses would keep drawing over the next one's units.
     world.questMarkerStatuses = null;

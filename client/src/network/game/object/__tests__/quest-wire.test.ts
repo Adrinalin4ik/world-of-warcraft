@@ -138,8 +138,9 @@ test('SMSG_QUEST_QUERY_RESPONSE consumes its body exactly and orders its strings
  * in this project, every one silent.
  *
  * This asserts the whole family at once rather than only the one that broke, because the sharp edge is
- * that `ACCEPT` needs 16 while `COMPLETE_QUEST` and `REQUEST_REWARD` -- the two that shared its helper
- * -- genuinely need 12. Widening the helper would have fixed one and broken two, equally silently.
+ * that widths differ ACROSS one shared helper: `ACCEPT` needs 16, `COMPLETE_QUEST` 13 and
+ * `REQUEST_REWARD` 12. Widening the helper would have fixed one and broken another, equally silently --
+ * which is why `completeQuest` writes its own body rather than teaching `send` a flag.
  *
  * Asserted at the SEND, which is this client's whole half: accept has no acknowledgement at all (the
  * descriptor slot is the only confirmation), so there is no reply to assert against and a test that
@@ -170,8 +171,26 @@ test('every outgoing quest body is the width 3.3.5a reads', () => {
   expect(widthOf(GameOpcode.CMSG_QUESTGIVER_QUERY_QUEST)).toBe(13);
   // THE ONE THAT BROKE. 8 + 4 + 4.
   expect(widthOf(GameOpcode.CMSG_QUESTGIVER_ACCEPT_QUEST)).toBe(16);
-  // And the two that must STAY at 12, which is why the helper was not widened.
-  expect(widthOf(GameOpcode.CMSG_QUESTGIVER_COMPLETE_QUEST)).toBe(12);
+  /**
+   * COMPLETE_QUEST is **13**, and this line asserted 12 until the owner's own packet disproved it.
+   *
+   * The old assertion, and the comment above it, said COMPLETE_QUEST and REQUEST_REWARD both "genuinely
+   * need 12". **That was never measured.** It asserted what our own send already did, which is the
+   * self-consistency trap `CLAUDE.md` names -- such a test "cannot catch a wrong width, which is the
+   * most repeated defect class in this project".
+   *
+   * What disproved it: the owner clicked Continue on a required-items turn-in, the panel had already
+   * declared the quest completable, `CMSG_QUESTGIVER_COMPLETE_QUEST` went out with body 12 and a valid
+   * giver guid, and **nothing came back at all**. Silence after a well-formed send is the documented
+   * signature of a server-side under-read, not of a refusal.
+   *
+   * And the family corroborates it: three of the four giver opcodes here already carry a WotLK trailing
+   * field -- QUERY_QUEST 13 (a `u8`), ACCEPT 16, CHOOSE_REWARD 16. COMPLETE_QUEST at 12 was the odd one
+   * out. See `quest.ts#completeQuest` for what the byte is and why taking it is free either way.
+   *
+   * REQUEST_REWARD stays at 12, and that is still why the helper was not widened.
+   */
+  expect(widthOf(GameOpcode.CMSG_QUESTGIVER_COMPLETE_QUEST)).toBe(13);
   expect(widthOf(GameOpcode.CMSG_QUESTGIVER_REQUEST_REWARD)).toBe(12);
   expect(widthOf(GameOpcode.CMSG_QUESTGIVER_CHOOSE_REWARD)).toBe(16);
   expect(widthOf(GameOpcode.CMSG_QUESTLOG_REMOVE_QUEST)).toBe(1);

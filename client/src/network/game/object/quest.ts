@@ -1426,7 +1426,56 @@ export class QuestHandler extends EventEmitter {
     if (guid === null || id === 0) {
       return;
     }
-    this.send(GameOpcode.CMSG_QUESTGIVER_COMPLETE_QUEST, guid, id);
+    /**
+     * THIRTEEN BYTES, NOT TWELVE -- and the missing byte is why the click was inert.
+     *
+     * The owner: "Не удается сдать квест, целью которого являлись сбор предметов. Кнопка continue не
+     * нажимается", with the packet attached -- `CMSG_QUESTGIVER_COMPLETE_QUEST (0x018A); Length: 18;
+     * Body: 12`. Body 12 is `guid + questId`, which is 1.12's whole layout and was this send's.
+     *
+     * **3.3.5a appends an `autoCompleteMode` bool.** TrinityCore reads
+     * `recvData >> guid >> questId >> autoCompleteMode` -- 0 for the ordinary "standing at the NPC"
+     * turn-in and 1 for a WotLK auto-complete quest finished from the log itself, which is a mode 1.12
+     * has no concept of. A 12-byte body therefore makes the server's `ByteBuffer` read past the end and
+     * throw, the packet is discarded, and **nothing at all comes back**: no reply, no failure opcode,
+     * no explanation. The gesture reads as inert rather than refused, which is exactly what he saw.
+     *
+     * This is the project's most repeated defect class -- a field widened between 1.12 and 3.3.5a
+     * failing silently, twelve found before this one -- and it presented the way `CLAUDE.md` says it
+     * always does: "When a send produces silence, suspect a width before suspecting the handler."
+     *
+     * Why it surfaced only now, on this quest: a turn-in that routes straight to OFFER_REWARD never
+     * sends this opcode at all, and the reward panel's own button sends `CHOOSE_REWARD` instead. A
+     * REQUIRED-ITEMS quest is the first one whose Continue goes through here, so every earlier turn-in
+     * worked while this opcode had never once been exercised.
+     *
+     * **The extra byte is written HERE and not in `send`, deliberately.** `send`'s other caller is
+     * `CMSG_QUESTGIVER_REQUEST_REWARD`, which really is 12 bytes; widening the shared helper would have
+     * fixed this send and silently broken that one. `CLAUDE.md` names this precise trap ("two quest
+     * sends must stay at 12, and widening the helper would have fixed one send while silently breaking
+     * two"), so the two layouts are kept apart instead.
+     *
+     * `0` is the honest value: this send only ever happens from a giver panel, which is the standing-at-
+     * the-NPC mode. Auto-complete would be a different route with its own caller.
+     *
+     * **What is measured here and what is not.** MEASURED: the owner's own packet, body 12, and total
+     * silence after it. NOT measured: that the third field is specifically an `autoCompleteMode` bool --
+     * that is the server implementation recalled, not a file read here, and the same class of source
+     * this file's header already flags a caveat for. **The byte is the right move either way**, which is
+     * why it is taken without waiting for a capture: `CLAUDE.md`'s rule is that a `ByteBuffer` throws
+     * only on an under-read, so a trailing byte the server never reads is ignored, while a missing one
+     * is fatal. 13 is required if the field exists and harmless if it does not; 12 is fatal in the first
+     * case. The asymmetry is free. If a capture later shows a wider field, the residual will name it.
+     */
+    this.awaiting.add(id >>> 0);
+    const gp = new GamePacket(
+      GameOpcode.CMSG_QUESTGIVER_COMPLETE_QUEST,
+      GamePacket.HEADER_SIZE_OUTGOING + GUID_BYTES + 4 + 1,
+    );
+    gp.write(Array.from(guidBytes(guid)));
+    gp.writeUnsignedInt(id >>> 0);
+    gp.writeUnsignedByte(0);
+    this.game.send(gp);
   }
 
   /**
