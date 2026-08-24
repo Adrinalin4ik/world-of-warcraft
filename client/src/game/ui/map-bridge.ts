@@ -1,5 +1,4 @@
-import { mapData, OverlayRow } from '../pipeline/dbc/map-data';
-import type { WorldMapAreaRow } from '../pipeline/dbc/map-data';
+import { mapData, OverlayRow, WorldMapAreaRow } from '../pipeline/dbc/map-data';
 import { fireEvent } from './framexml/lua/events';
 import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
@@ -8,6 +7,7 @@ import { publishMapSelection, clearMapSelection } from './map-selection';
 import { zoneHighlights, setHighlightScale } from '../pipeline/zone-highlight';
 import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
 import { BlobPolygon, setBlobSource } from './quest-blobs';
+import { resolveUnitToken } from '../world/unit-tokens';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -484,10 +484,54 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * The projection and its axis crossing live in `mapData.normalise`, verified there against the served
    * rect rather than transcribed.
    */
+  /**
+   * One unit's position on the displayed sheet, or `0,0` for "not on this map".
+   *
+   * **FAILS OPEN on an unknown map, and that is a correction to my own previous version.** The first
+   * one read `world.map?.mapID` and treated an absent handle as `-1`, i.e. as "matches nothing" --
+   * so if that handle is ever missing, the marker disappears from EVERY sheet including the right
+   * one. The owner saw exactly that: "На zone map не показывается наш персонаж."
+   *
+   * A check that suppresses a marker must only fire when it KNOWS the maps differ. Unknown means
+   * "do not suppress" -- the behaviour before the check existed -- and `window.worldMap()` reports
+   * the value so the handle can be looked at rather than guessed about.
+   */
+  const unitMapPosition = (
+    row: WorldMapAreaRow,
+    unit: { position: { x: number; y: number } },
+  ): number[] => {
+    const playerMapId = playerMapIdOf();
+    if (playerMapId !== null && playerMapId !== row.mapId) {
+      return [0, 0];
+    }
+    const at = mapData.normalise(row, unit.position.x, unit.position.y);
+    return at === null ? [0, 0] : [at.x, at.y];
+  };
+
+  /** The map the player is standing on, or null when this client cannot say. */
+  const playerMapIdOf = (): number | null => {
+    const id = world.map?.mapID;
+    return typeof id === 'number' ? id : null;
+  };
+
   fn('GetPlayerMapPosition', (args) => {
     const row = selected();
     const player = world.player;
-    if (String(args[0] ?? '') !== 'player' || row === null || !player) {
+    /**
+     * **EVERY unit token, not just "player" -- the party and raid arms call this same global.**
+     *
+     * `WorldMapFrame_UpdateUnits` walks `GetPlayerMapPosition(unit)` for each raid member and each
+     * `party<i>` (`worldmapframe.lua:828,844`) and hides the dot on `0,0`, exactly as it does for the
+     * player. Answering 0,0 for anything but "player" therefore hid every group member by
+     * construction, which is what the owner asked about.
+     *
+     * `resolveUnitToken` is the same resolver the unit frames use, so "party1" means here what it
+     * means everywhere else in this client -- and a member out of range, with no entity in the
+     * world, resolves to null and correctly gets no dot.
+     */
+    const token = String(args[0] ?? '');
+    const unit = token === 'player' ? player : resolveUnitToken(token, world);
+    if (row === null || !unit) {
       return [0, 0];
     }
     /**
@@ -506,12 +550,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
      * (`worldmapframe.lua:782-787`). The party and raid arms do the same with the same global
      * (`worldmapframe.lua:828-853`), so they inherit this check rather than needing their own.
      */
-    const playerMapId = typeof world.map?.mapID === 'number' ? world.map.mapID : -1;
-    if (playerMapId !== row.mapId) {
-      return [0, 0];
-    }
-    const at = mapData.normalise(row, player.position.x, player.position.y);
-    return at === null ? [0, 0] : [at.x, at.y];
+    return unitMapPosition(row, unit);
   });
 
   /**
@@ -1211,6 +1250,11 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     const art = row?.art ?? '';
     return {
       dbcLoaded: mapData.loaded,
+      // THE TWO MAP IDS THE MARKER COMPARES, because a suppressed marker is otherwise invisible
+      // to diagnose: null here means this client cannot say which map the player is on, and the
+      // check then deliberately does not suppress anything. See `unitMapPosition`.
+      playerMapId: playerMapIdOf(),
+      selectedRowMapId: row?.mapId ?? null,
       continents: continents.length,
       // The SAME expression `GetMapContinents` answers with, not `displayName`. A probe that reports
       // something the global does not is the trap this project has hit three times: the dropdown

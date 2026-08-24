@@ -738,6 +738,30 @@ const QUESTPOIFRAME: MethodTable = {
     questBlobs.setBorderAlpha(Number(args[0]));
     return [];
   },
+  /**
+   * `GetNumTooltips` -- how many objective tooltips the BLOB has, and **0 is the real answer.**
+   *
+   * It was absent, and the owner caught the raise it caused:
+   *
+   *     framexml: poiWorldMapPOIFrame1_3: OnEnter: WorldMapFrame.lua:1893:
+   *         attempt to call a nil value (method 'GetNumTooltips')
+   *
+   * -- so hovering a quest pin threw and the pin had no tooltip at all.
+   *
+   * **0 routes the client onto the path that WORKS**, and that is why it is right rather than a
+   * placeholder. `WorldMapQuestPOI_SetTooltip` uses the POI tooltips only when their count EQUALS
+   * the objective count, and falls back to `GetQuestLogLeaderBoard` otherwise
+   * (`worldmapframe.lua:1893-1901`) -- which is real here and reads the descriptor. A nonzero count
+   * would send it to `GetQuestPOILeaderBoard`, which is not.
+   *
+   * Safe against the Lua-truthiness trap: 0 IS truthy, but the guard is
+   * `numPOITooltips == numObjectives`, and a quest with 0 objectives never enters the loop.
+   */
+  GetNumTooltips: () => [0],
+  // Unreachable behind that 0 -- the client only calls it when the counts match -- and registered
+  // for the reason the object model registers unreachable methods: an addon duck-types first.
+  GetTooltipIndex: notImplemented('GetTooltipIndex',
+    'GetNumTooltips answers 0, so the client reads objectives from the quest log instead'),
   SetBorderScalar: notImplemented('SetBorderScalar',
     'the border is drawn at a fixed 2px; see ui/quest-blobs.ts'),
 };
