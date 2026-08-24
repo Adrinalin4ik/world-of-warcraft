@@ -644,26 +644,66 @@ const REGION: MethodTable = {
    * the tooltip's side (`containerframe.lua:759`), and with `GetRight` absent every bag tooltip threw
    * `attempt to call a nil value (method 'GetRight')`.
    */
-  GetLeft: (ctx, self) => [rectOf(widgetOf(ctx, self).id)?.left ?? null],
+  /**
+   * THE FIVE EDGE READERS ARE IN THE WIDGET'S OWN SPACE, and dividing by its scale is the whole of
+   * that -- it was missing and it broke the world map the moment `SetScale` started working.
+   *
+   * `WorldMapButton_OnUpdate` mixes three of these in one expression
+   * (`worldmapframe.lua:743-751`):
+   *
+   *     local x, y = GetCursorPosition();
+   *     x = x / self:GetEffectiveScale();
+   *     local centerX, centerY = self:GetCenter();
+   *     local width = self:GetWidth();
+   *     adjustedX = (x - (centerX - (width/2))) / width;
+   *
+   * `GetCursorPosition` is DEVICE pixels and `GetEffectiveScale` divides by the widget scale AND the
+   * virtual-screen scale, so `x` lands in the widget's own units. `GetWidth` is already own-space.
+   * These five returned VIRTUAL units -- and while every scale was 1 the two spaces were the same
+   * number, so the mixture worked and nothing said otherwise.
+   *
+   * `WorldMap_ToggleSizeUp` scales `WorldMapButton` to 1.0 and `ToggleSizeDown` to 0.573, which is
+   * exactly the owner's report: the hover was right in the full view and offset in the windowed one,
+   * "мышку наводишь непойми куда и появляется надпись". One space, two conventions.
+   *
+   * `Widget#effectiveScale` and not `GetEffectiveScale`: the rect is ALREADY in virtual units, so
+   * only the widget half of the product is left to divide out. Multiplying the screen half in again
+   * would answer device pixels.
+   */
+  GetLeft: (ctx, self) => {
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    return [rect === null ? null : rect.left / widget.effectiveScale];
+  },
   GetRight: (ctx, self) => {
-    const rect = rectOf(widgetOf(ctx, self).id);
-    return [rect === null ? null : rect.left + rect.width];
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    return [rect === null ? null : (rect.left + rect.width) / widget.effectiveScale];
   },
   GetTop: (ctx, self) => {
-    const rect = rectOf(widgetOf(ctx, self).id);
-    return [rect === null ? null : screenHeightUnits() - rect.top];
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    return [rect === null ? null : (screenHeightUnits() - rect.top) / widget.effectiveScale];
   },
   GetBottom: (ctx, self) => {
-    const rect = rectOf(widgetOf(ctx, self).id);
-    return [rect === null ? null : screenHeightUnits() - (rect.top + rect.height)];
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    return [rect === null
+      ? null
+      : (screenHeightUnits() - (rect.top + rect.height)) / widget.effectiveScale];
   },
-  /** Two returns, `x, y`, in the same bottom-left-origin space as the four edges. */
+  /** Two returns, `x, y`, in the same own-space bottom-left-origin coordinates as the four edges. */
   GetCenter: (ctx, self) => {
-    const rect = rectOf(widgetOf(ctx, self).id);
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
     if (rect === null) {
       return [];
     }
-    return [rect.left + rect.width / 2, screenHeightUnits() - (rect.top + rect.height / 2)];
+    const scale = widget.effectiveScale;
+    return [
+      (rect.left + rect.width / 2) / scale,
+      (screenHeightUnits() - (rect.top + rect.height / 2)) / scale,
+    ];
   },
   SetPoint: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
