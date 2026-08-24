@@ -78,6 +78,22 @@ interface Shape {
   height: number;
   /** One LUMINANCE byte per pixel, row-major from the top -- the decoder's own order. */
   mask: Uint8Array;
+  /**
+   * The outline's bounding box inside the image, 0..1 -- **and it is used ONLY to align the mask.**
+   *
+   * The outline does not fill the image (Elwynn's occupies x 0.219..0.844, y 0.125..0.562 of the
+   * 128x128), so sampling the zone rect straight across the image lands the zone's own edges in the
+   * black field around the shape. The owner saw that as a hover that answered "только определённая
+   * точка" -- most of the zone reading as outside itself.
+   *
+   * Stretching this box onto the zone rect makes the whole zone report inside, which is the useful
+   * behaviour. **It is an ALIGNMENT and not a placement**: the two are not proportional (measured,
+   * four zones, disagreeing by up to 58%), so this is the best available registration of the shape
+   * against the rect and not a derivation of where the engine draws it. That is why the art is still
+   * not handed to the client -- a mask that is approximately right is useful, a highlight that is
+   * approximately placed is just wrong on screen.
+   */
+  bounds: { left: number; right: number; top: number; bottom: number };
 }
 
 /**
@@ -119,10 +135,12 @@ class ZoneHighlights {
     if (u < 0 || u > 1 || v < 0 || v > 1) {
       return false;
     }
-    // `u`/`v` are 0..1 across the zone RECT and are sampled straight across the image. See the
-    // header on why that is an approximation and why it is still the right one to make.
-    const x = Math.min(shape.width - 1, Math.floor(u * shape.width));
-    const y = Math.min(shape.height - 1, Math.floor(v * shape.height));
+    // `u`/`v` are 0..1 across the zone RECT, stretched onto the outline's bounding box -- see
+    // `Shape#bounds` for why that alignment is needed and why it is not a placement.
+    const tx = shape.bounds.left + u * (shape.bounds.right - shape.bounds.left);
+    const ty = shape.bounds.top + v * (shape.bounds.bottom - shape.bounds.top);
+    const x = Math.min(shape.width - 1, Math.floor(tx * shape.width));
+    const y = Math.min(shape.height - 1, Math.floor(ty * shape.height));
     return shape.mask[y * shape.width + x] >= OPAQUE;
   }
 
@@ -151,21 +169,40 @@ class ZoneHighlights {
         // LUMINANCE, a quarter of the bytes, and the bounding box in the same pass. The decoder
         // gives RGBA in that order (`pipeline/blp/loader.js`).
         const mask = new Uint8Array(level.width * level.height);
-        let bright = 0;
-        for (let at = 0; at < mask.length; at += 1) {
-          const o = at * 4;
-          const value = (level.data[o] + level.data[o + 1] + level.data[o + 2]) / 3;
-          mask[at] = value;
-          if (value >= OPAQUE) {
-            bright += 1;
+        let minX = level.width;
+        let maxX = -1;
+        let minY = level.height;
+        let maxY = -1;
+        for (let y = 0; y < level.height; y += 1) {
+          for (let x = 0; x < level.width; x += 1) {
+            const at = y * level.width + x;
+            const o = at * 4;
+            const value = (level.data[o] + level.data[o + 1] + level.data[o + 2]) / 3;
+            mask[at] = value;
+            if (value >= OPAQUE) {
+              if (x < minX) { minX = x; }
+              if (x > maxX) { maxX = x; }
+              if (y < minY) { minY = y; }
+              if (y > maxY) { maxY = y; }
+            }
           }
         }
-        if (bright === 0) {
+        if (maxX < 0) {
           // Nothing bright anywhere: the file decoded and carries no outline. Absent, not empty.
           this.shapes.set(key, null);
           return;
         }
-        this.shapes.set(key, { width: level.width, height: level.height, mask });
+        this.shapes.set(key, {
+          width: level.width,
+          height: level.height,
+          mask,
+          bounds: {
+            left: minX / level.width,
+            right: (maxX + 1) / level.width,
+            top: minY / level.height,
+            bottom: (maxY + 1) / level.height,
+          },
+        });
       } catch (error) {
         // Not remembered as a miss: a network failure is not an absent file, and the next hover asks
         // again. The in-flight release below is what makes that possible.
