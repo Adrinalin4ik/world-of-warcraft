@@ -32,20 +32,20 @@ import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
  *
  * If the outline corresponded to the zone rect those last two columns would agree. They disagree by
  * up to 58%, in both directions, so **the `WorldMapArea` rect is the zone's playable bounds and not
- * its drawn outline** -- and no fixed relation between them exists to invert. I tried three models
- * (whole image over the rect, bbox inverted onto the rect, and the image at its authored 128x128)
- * and the owner saw each of them as a wrongly sized highlight.
+ * its landmass** -- there is no proportion between them and nothing here may be scaled by their ratio.
  *
- * SO THE ART IS NOT DRAWN. `UpdateMapHighlight` answers the zone NAME and a nil `fileName`, which is
- * the client's own "nothing is highlighted" branch, and the gap is named rather than filled with a
- * fourth guess. `WorldMapHighlight` is authored 128x128 inside `WorldMapDetailFrame`
- * (`worldmapframe.xml`), so the engine draws it at that natural size -- what is missing is where.
+ * ## HOW THE SHAPE IS PLACED, AND WHY IT IS ONE PLACEMENT AND NOT TWO
  *
- * THE MASK IS STILL WORTH READING, and this is the one part that is not a guess: sampling the image
- * across the zone rect excludes the CORNERS of the rect, which is exactly the case the owner
- * reported -- open sea far off a ragged coast. It is an approximation of the outline's placement and
- * a strict improvement on no test at all, and it is labelled as such rather than presented as the
- * engine's own answer.
+ * That measurement is the whole argument. **Nothing here is scaled by the rect.** The image draws at
+ * the size the client's own XML authors it -- see `HIGHLIGHT_PX` for the derivation from
+ * `worldmapframe.xml` -- and only its POSITION is chosen, by putting the outline's bounding-box centre
+ * on the zone rect's centre. `ZoneHighlights.place` is that one function, and BOTH the hover mask and
+ * the drawn art read it, so the two are the same shape by construction rather than by agreement.
+ *
+ * Four earlier models each stretched something onto the rect, and the owner saw each of them as a
+ * wrongly sized highlight -- the last one as a single highlight covering half of Kalimdor, which is
+ * what `rect / bbox` does when a small bbox meets a big rect. A stretch cannot be right here: the two
+ * are not proportional, and that is measured directly above.
  *
  * The art NAME is the `WorldMapArea` row's, and it is not always the zone's: Azshara's art is
  * **"Aszhara"** -- Blizzard's own typo -- so `aszharahighlight.blp` answers 200 where the spelling a
@@ -57,14 +57,17 @@ import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
  * `BACKGROUND` priority, and one LUMINANCE byte per pixel is kept -- a quarter of the RGBA the
  * decoder returns. 16 KB a zone at 128x128, so a session that sweeps a whole continent keeps ~400 KB.
  *
- * `opaqueAt` is a single array index. It runs from `WorldMapButton_OnUpdate`, i.e. per frame while the
- * cursor is over the map, which is exactly why it must not be anything more than that.
+ * `opaqueAtSheetPoint` is a handful of arithmetic and one array index. It runs from
+ * `WorldMapButton_OnUpdate`, i.e. per frame while the cursor is over the map, which is exactly why it
+ * must not be anything more than that. `place` allocates one small object per call on that path and
+ * nothing else -- no decode, no scan, no cache lookup beyond the `Map#get` the call already does.
  *
  * ## THE HONEST NULL
  *
- * `opaqueAt` answers **null** until the shape has landed, and the caller falls back to the rect. That
- * keeps the first hover after opening a map responsive instead of dead, and it is a different answer from
- * `false` on purpose: false means "that point is outside the zone", null means "ask again in a moment".
+ * `opaqueAtSheetPoint` answers **null** until the shape has landed, and the caller falls back to the
+ * rect. That keeps the first hover after opening a map responsive instead of dead, and it is a
+ * different answer from `false` on purpose: false means "that point is outside the zone", null means
+ * "ask again in a moment".
  */
 
 /** What a decoded BLP comes back as. Only the fields this file reads. */
@@ -79,19 +82,17 @@ interface Shape {
   /** One LUMINANCE byte per pixel, row-major from the top -- the decoder's own order. */
   mask: Uint8Array;
   /**
-   * The outline's bounding box inside the image, 0..1 -- **and it is used ONLY to align the mask.**
+   * The outline's bounding box inside the image, 0..1 -- **the one thing the placement needs.**
    *
    * The outline does not fill the image (Elwynn's occupies x 0.219..0.844, y 0.125..0.562 of the
-   * 128x128), so sampling the zone rect straight across the image lands the zone's own edges in the
-   * black field around the shape. The owner saw that as a hover that answered "только определённая
-   * точка" -- most of the zone reading as outside itself.
+   * 128x128), so the image cannot simply be pinned to the zone rect: its centre is not the shape's
+   * centre. `ZoneHighlights.place` puts THIS box's centre on the zone rect's centre and draws the
+   * image at its authored size around it, which is the only use this box has.
    *
-   * Stretching this box onto the zone rect makes the whole zone report inside, which is the useful
-   * behaviour. **It is an ALIGNMENT and not a placement**: the two are not proportional (measured,
-   * four zones, disagreeing by up to 58%), so this is the best available registration of the shape
-   * against the rect and not a derivation of where the engine draws it. That is why the art is still
-   * not handed to the client -- a mask that is approximately right is useful, a highlight that is
-   * approximately placed is just wrong on screen.
+   * It was previously STRETCHED onto the zone rect, and the measurement in the file header is why
+   * that had to go: box and rect disagree by up to 58% in both directions, so scaling one onto the
+   * other multiplies the shape by an arbitrary factor. On a big rect with a small box that factor is
+   * large, and the owner saw the result -- one highlight covering half a continent.
    */
   bounds: { left: number; right: number; top: number; bottom: number };
 }
@@ -111,18 +112,105 @@ interface Shape {
  */
 const OPAQUE = 20;
 
+/**
+ * The highlight image's authored size, and the sheet's -- both from the client's own XML.
+ *
+ * **THIS IS WHY THERE IS NOTHING TO FIT, and both numbers are read out of the game's own files.**
+ * `WorldMapHighlight` is `<AbsDimension x="128" y="128"/>` (`worldmapframe.xml:639-642`), and
+ * `WorldMapButton_OnUpdate` multiplies the fractions `UpdateMapHighlight` hands back by that
+ * button's own `GetWidth()`/`GetHeight()` (`worldmapframe.lua:747-748,765-766`), authored
+ * `<AbsDimension x="1002" y="668"/>` (`worldmapframe.xml:698`). So a 128 px image drawn at its
+ * NATURAL size is `128/1002` by `128/668` of the sheet -- derived, not fitted.
+ *
+ * It scales with the map rather than against it: in the minimised state the button is smaller and
+ * the same fraction draws a smaller shape, which is what the whole sheet does.
+ *
+ * MEASURED against four zones -- the outline's decoded bounding box placed at 1:1 with its centre
+ * on the zone rect's centre, against that rect:
+ *
+ *     Elwynn    shape x 0.411..0.491   rect 0.408..0.494  |  y 0.705..0.788   rect 0.704..0.789
+ *     Westfall        x 0.389..0.441        0.372..0.458  |    y 0.750..0.852        0.758..0.844
+ *     Duskwood        x 0.407..0.511        0.426..0.492  |    y 0.758..0.848        0.770..0.836
+ *     Aszhara         x 0.574..0.670        0.553..0.691  |    y 0.322..0.424        0.304..0.442
+ *
+ * Elwynn lands within a thousandth on both axes. The others sit a little inside or a little over,
+ * which is what a zone whose PLAYABLE rect includes coastal water should do -- the rect is not the
+ * landmass, and demanding they coincide is the mistake that produced every earlier model here.
+ */
+const HIGHLIGHT_PX = 128;
+
+const SHEET_WIDTH_UNITS = 1002;
+
+const SHEET_HEIGHT_UNITS = 668;
+
+/**
+ * A multiplier on the derived size, defaulting to **1** because the derivation needs none.
+ *
+ * Kept as a knob rather than hard-coded: if a zone still draws wrong the useful question is whether
+ * the derivation holds, and one live `window.worldMapHighlight(0.9)` answers that faster than
+ * another round of arithmetic here.
+ */
+let highlightScale: number | null = null;
+
+/** Set the drawn highlight scale live. Returns what it settled on, for the console. */
+export function setHighlightScale(factor: number | null): number {
+  highlightScale = factor !== null && Number.isFinite(factor) && factor > 0
+    ? Math.min(factor, 4)
+    : null;
+  return highlightScale ?? 1;
+}
+
 class ZoneHighlights {
   private readonly shapes = new Map<string, Shape | null>();
 
   private readonly loading = new Set<string>();
 
   /**
-   * Whether the zone's shape covers `(u, v)`, both 0..1 from the shape's top-left. Null until loaded.
+   * Where the whole image sits on the sheet, so its outline lands on the zone -- all four 0..1.
    *
-   * A MISS is remembered as `null` in `shapes` and reported as null for ever, which reads as "keep using
-   * the rect" -- the correct behaviour for a zone whose highlight the host does not serve.
+   * **ONE PLACEMENT, TWO USES: the hover reads it and the drawing reads it, so they cannot
+   * disagree.** The previous version had no placement at all -- it stretched the outline's bounding
+   * box onto the zone rect, which for a small box on a big rect is an enormous shape. That is why
+   * the owner saw a single highlight covering half of Kalimdor. Nothing is stretched now: the image
+   * draws at its authored size (see `HIGHLIGHT_PX`) and only its POSITION is chosen.
+   *
+   * The centre is the anchor, because it is the only choice that needs no offset from a table this
+   * client does not have, and the four-zone measurement at `HIGHLIGHT_PX` says it is right.
    */
-  opaqueAt(art: string, u: number, v: number): boolean | null {
+  private static place(
+    shape: Shape,
+    zone: { left: number; right: number; top: number; bottom: number },
+  ): { left: number; top: number; width: number; height: number } {
+    const factor = highlightScale ?? 1;
+    const width = (HIGHLIGHT_PX / SHEET_WIDTH_UNITS) * factor;
+    const height = (HIGHLIGHT_PX / SHEET_HEIGHT_UNITS) * factor;
+    const midU = (shape.bounds.left + shape.bounds.right) / 2;
+    const midV = (shape.bounds.top + shape.bounds.bottom) / 2;
+    return {
+      left: (zone.left + zone.right) / 2 - midU * width,
+      top: (zone.top + zone.bottom) / 2 - midV * height,
+      width,
+      height,
+    };
+  }
+
+  /**
+   * Whether the zone's shape covers a point on the SHEET, both 0..1. Null until the art is loaded.
+   *
+   * Takes the sheet point and the zone rect rather than a fraction inside the rect, because the
+   * shape is no longer stretched to that rect -- it is placed on the sheet, and the sheet is the one
+   * space where the hover and the drawing can be compared. Passing a pre-divided `u`/`v` is what let
+   * the two drift apart.
+   *
+   * A MISS is remembered as `null` in `shapes` and reported as null for ever, which reads as "keep
+   * using the rect" -- the correct behaviour for a zone whose highlight the host does not serve.
+   */
+  opaqueAtSheetPoint(
+    art: string,
+    zone: { left: number; right: number; top: number; bottom: number },
+    sheetX: number,
+    sheetY: number,
+  ): boolean | null {
     const key = art.toLowerCase();
     const shape = this.shapes.get(key);
     if (shape === undefined) {
@@ -132,52 +220,24 @@ class ZoneHighlights {
     if (shape === null) {
       return null;
     }
-    if (u < 0 || u > 1 || v < 0 || v > 1) {
+    const at = ZoneHighlights.place(shape, zone);
+    const tx = (sheetX - at.left) / at.width;
+    const ty = (sheetY - at.top) / at.height;
+    if (tx < 0 || tx > 1 || ty < 0 || ty > 1) {
       return false;
     }
-    // `u`/`v` are 0..1 across the zone RECT, stretched onto the outline's bounding box -- see
-    // `Shape#bounds` for why that alignment is needed and why it is not a placement.
-    const tx = shape.bounds.left + u * (shape.bounds.right - shape.bounds.left);
-    const ty = shape.bounds.top + v * (shape.bounds.bottom - shape.bounds.top);
     const x = Math.min(shape.width - 1, Math.floor(tx * shape.width));
     const y = Math.min(shape.height - 1, Math.floor(ty * shape.height));
     return shape.mask[y * shape.width + x] >= OPAQUE;
   }
 
   /**
-   * The rect to draw the WHOLE image at, so its outline lands on the zone -- both 0..1 on the sheet.
- *
-   * **THE SAME ALIGNMENT THE MASK USES, applied to the drawing, and that is the point.** The mask
-   * stretches the outline's bounding box onto the zone rect; this inverts exactly that, so what
-   * lights up is what the hover agreed with. One registration, two uses -- and the alternative was a
-   * fourth independent guess at a placement no table in this client states.
- *
-   * WHAT IT COSTS, stated because the owner will see it: the `WorldMapArea` rect is the zone's
-   * PLAYABLE bounds and includes coastal water, while the outline is its land. Stretching one onto
-   * the other draws the shape slightly LARGER than the landmass -- which is the "зона больше чем
-   * надо выделена" he reported when this was first tried. It is in the right place, it agrees with
-   * the hover, and it is generous at the coast. That is a different and smaller error than the three
-   * placements that were simply wrong, and it is the best available until a source turns up.
+   * The rect to draw the WHOLE image at -- the SAME placement the hover just read. See `place`.
    */
   drawRectFor(art: string, zone: { left: number; right: number; top: number; bottom: number }):
   { left: number; top: number; width: number; height: number } | null {
     const shape = this.shapes.get(art.toLowerCase()) ?? null;
-    if (shape === null) {
-      return null;
-    }
-    const across = shape.bounds.right - shape.bounds.left;
-    const down = shape.bounds.bottom - shape.bounds.top;
-    if (across <= 0 || down <= 0) {
-      return null;
-    }
-    const width = (zone.right - zone.left) / across;
-    const height = (zone.bottom - zone.top) / down;
-    return {
-      left: zone.left - shape.bounds.left * width,
-      top: zone.top - shape.bounds.top * height,
-      width,
-      height,
-    };
+    return shape === null ? null : ZoneHighlights.place(shape, zone);
   }
 
   /** True once the shape is known to exist -- which is when the client may be told to draw it. */
