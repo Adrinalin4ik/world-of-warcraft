@@ -44,7 +44,38 @@ export function resolveSprite(
     // string in that case has no derived width to compute anyway (both its edges are pinned, so
     // `layout.ts#resolveOne` ignores `node.width` outright).
     const spec = effectiveFont(widget, item.rect.width);
-    return spec ? sources.fonts.get(widget.displayText, spec, scale) : null;
+    if (spec === null) {
+      return null;
+    }
+    /**
+     * **A SCALED FRAME SCALES ITS TEXT, and this is the one place it can happen.**
+     *
+     * `SetScale` grows a font string's RECT (`layout.ts#LayoutNode.scale`) and that did nothing to
+     * the glyphs, because a font string is drawn at its RASTERIZED size and centred in its rect --
+     * never stretched to it (`renderer.ts:396-402`). The owner saw it as the world map's labels
+     * staying put while the map around them shrank: "в свернутом режиме подписи не масштабируются".
+     *
+     * Raising the raster DENSITY instead would have changed nothing, and the arithmetic says why:
+     * `text.ts` reports the glyph box as `widest / pixelScale`, so a denser raster of the same font
+     * measures wider and divides by more, and the on-screen quad comes out identical -- just
+     * sharper. That is the whole point of that division. **The font itself has to grow.**
+     *
+     * Which keeps the two halves in agreement rather than introducing a second notion of a label's
+     * size -- the bug `deriveSize` and this branch both warn about at length. `deriveSize` measures
+     * the UNSCALED spec and the layout multiplies the result by the same effective scale, so the
+     * rect and the raster are the same number arrived at two ways.
+     *
+     * `wrapWidth` is deliberately NOT scaled: it came from `item.rect.width`, which the layout has
+     * already scaled, so it is in the same units the scaled font measures in. Scaling it again would
+     * wrap a large font against a doubly-large budget.
+     */
+    const zoom = widget.effectiveScale;
+    const scaled = zoom === 1 ? spec : {
+      ...spec,
+      size: spec.size * zoom,
+      spacing: spec.spacing === undefined ? undefined : spec.spacing * zoom,
+    };
+    return sources.fonts.get(widget.displayText, scaled, scale);
   }
 
   // A flat colour quad -- the caret. `vertexColor` does the colouring; the texel is just a carrier.
