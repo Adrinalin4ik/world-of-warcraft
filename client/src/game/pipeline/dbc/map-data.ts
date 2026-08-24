@@ -80,6 +80,9 @@ class MapData {
   /** Per continent mapID, the sheet's extent in ADT tile indices. See `load`. */
   private sheets = new Map<number, SheetBounds>();
 
+  /** `WorldMapTransforms` rows -- see `MapTransform`. */
+  private placements: MapTransform[] = [];
+
   /** `WorldMapContinent.dbc`'s mapIDs in file order -- what numbers the client's continents. */
   private continentMapIds: number[] = [];
 
@@ -99,11 +102,12 @@ class MapData {
   }
 
   private async load(): Promise<void> {
-    const [areaTable, worldMapArea, maps, continents] = await Promise.all([
+    const [areaTable, worldMapArea, maps, continents, transforms] = await Promise.all([
       DBC.load('AreaTable'),
       DBC.load('WorldMapArea'),
       DBC.load('Map'),
       DBC.load('WorldMapContinent'),
+      DBC.load('WorldMapTransforms'),
     ]);
 
     const areas = new Map<number, AreaRow>();
@@ -228,6 +232,31 @@ class MapData {
       }
     }
     this.continentMapIds = continentMapIds;
+
+    // `WorldMapTransforms` -- see `MapTransform`. Identity rows are kept rather than filtered: they
+    // cost one comparison each and dropping them would be a rule this file has to justify.
+    const placements: MapTransform[] = [];
+    for (const record of recordsOf(transforms)) {
+      const row = record as {
+        mapID?: number; newMapID?: number;
+        regionMinX?: number; regionMaxX?: number; regionMinY?: number; regionMaxY?: number;
+        regionOffsetX?: number; regionOffsetY?: number;
+      };
+      if (typeof row.mapID !== 'number' || typeof row.newMapID !== 'number') {
+        continue;
+      }
+      placements.push({
+        mapId: row.mapID,
+        newMapId: row.newMapID,
+        minX: row.regionMinX ?? 0,
+        maxX: row.regionMaxX ?? 0,
+        minY: row.regionMinY ?? 0,
+        maxY: row.regionMaxY ?? 0,
+        offsetX: row.regionOffsetX ?? 0,
+        offsetY: row.regionOffsetY ?? 0,
+      });
+    }
+    this.placements = placements;
     this.sheets = sheets;
 
     const mapNames = new Map<number, string>();
@@ -363,10 +392,41 @@ class MapData {
    * shape test needs the local `(u, v)` inside that rect -- both are this rect. Exposed rather than
    * recomputed by the bridge, so there is one projection and not two.
    */
+  /**
+   * A zone's rect in the coordinate space of the SHEET it is displayed on.
+ *
+   * The identity for an ordinary zone, whose rect is already in its own map's space. For one placed
+   * on another map by `displayMapId`, the matching `WorldMapTransforms` offset is added -- see
+   * `MapTransform` for the measurement and the axis question it settles.
+ *
+   * The rect CENTRE is tested against the region rather than the whole rect: a zone straddling a
+   * region edge would otherwise be placed nowhere, and the regions in this file are far larger than
+   * any zone in them.
+   */
+  private placedRect(row: WorldMapAreaRow, sheetMapId: number): WorldMapAreaRow {
+    if (row.mapId === sheetMapId) {
+      return row;
+    }
+    const centreX = (row.top + row.bottom) / 2;
+    const centreY = (row.left + row.right) / 2;
+    const hit = this.placements.find((t) => t.mapId === row.mapId && t.newMapId === sheetMapId
+      && centreX >= t.minX && centreX <= t.maxX && centreY >= t.minY && centreY <= t.maxY);
+    if (hit === undefined) {
+      return row;
+    }
+    return {
+      ...row,
+      top: row.top + hit.offsetX,
+      bottom: row.bottom + hit.offsetX,
+      left: row.left + hit.offsetY,
+      right: row.right + hit.offsetY,
+    };
+  }
+
   sheetRectOfZone(mapId: number, row: WorldMapAreaRow):
   { left: number; right: number; top: number; bottom: number } | null {
     const continent = this.worldMapArea(mapId, 0);
-    return continent === null ? null : sheetRect(row, continent);
+    return continent === null ? null : sheetRect(this.placedRect(row, mapId), continent);
   }
 
   zoneAtSheetPoint(mapId: number, fractionX: number, fractionY: number): WorldMapAreaRow | null {
@@ -377,7 +437,7 @@ class MapData {
     let best: WorldMapAreaRow | null = null;
     let bestArea = Infinity;
     for (const row of this.zonesOn(mapId)) {
-      const rect = sheetRect(row, continent);
+      const rect = sheetRect(this.placedRect(row, mapId), continent);
       if (rect === null) {
         continue;
       }
@@ -492,7 +552,6 @@ class MapData {
   }
 }
 
-/** One `WorldMapArea` row: which art draws it, and the world-space rect it covers. */
 /**
  * An `AreaTable` row, as much of it as anything here reads.
  *
@@ -551,6 +610,44 @@ export function sheetRect(row: WorldMapAreaRow, continent: WorldMapAreaRow):
 }
 
 /**
+/**
+ * A `WorldMapTransforms` row -- how a zone that LIVES on one map is placed on ANOTHER map's sheet.
+ *
+ * **This is what puts the Draenei isles where the art draws them**, and it is the table that closes
+ * the hole `displayMapId` opened. The isles carry `mapID 530` and `displayMapID 1`, so they are
+ * listed under Kalimdor -- but their rect is in map 530's coordinates, and projecting it through
+ * Kalimdor's continent rect put them at x 0.75-0.86 of the sheet. The owner saw exactly that: the
+ * name appeared "около надписи The Great Sea".
+ *
+ * MEASURED, and the file is small enough to quote whole -- 9 records, 10 fields, 40 B/record,
+ * closes exactly. The two rows that matter:
+ *
+ *     map 530 -> 0   region x  4800.0..16000.0   y -10133.3.. -2666.7   offset  -2400.0,  2400.0
+ *     map 530 -> 1   region x -6933.3..  533.3   y -16000.0.. -8000.0   offset  10133.3, 17600.0
+ *
+ * The other seven are identity (`mapID == newMapID`, zero offset) and change nothing.
+ *
+ * WHICH AXIS IS WHICH was settled by containment, not by the field names: Azuremyst's worldX range
+ * (-5508..-2794) falls inside `region x` and its worldY range (-14571..-10500) inside `region y`, and
+ * the other pairing fits neither. So `regionX` is the world X axis -- the one `WorldMapArea` calls
+ * top/bottom -- and `regionY` is its left/right.
+ *
+ * CORROBORATED BY THE ART, which is the check that matters: with the offset applied, Azuremyst lands
+ * at x 0.271..0.381, y 0.223..0.333 of the Kalimdor sheet -- the upper left, where the islands are
+ * drawn. Without it, the lower right, where the sea label is.
+ */
+interface MapTransform {
+  mapId: number;
+  newMapId: number;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+/**
  * A `WorldMapContinent` row, read for the WORLD sheet only -- see `MapData#worldRects`.
  *
  * The bounds are in ADT tile indices and are used ONLY as the input to the offset/scale placement that
@@ -578,6 +675,7 @@ export interface AreaRow {
   factionGroupMask: number;
 }
 
+/** One `WorldMapArea` row: which art draws it, and the world-space rect it covers. */
 export interface WorldMapAreaRow {
   id: number;
   mapId: number;
