@@ -382,15 +382,23 @@ export function itemTooltipLines(
     push(`"${template.description}"`, GOLD, undefined, true);
   }
 
-  // Sell price last. `SELL_PRICE` is the bare label ("Sell Price"), so the colon is ours; the money
-  // words are the client's own three amount strings.
-  if (template.sellPrice > 0) {
-    const label = globalString(vm, 'SELL_PRICE');
-    const money = moneyText(vm, template.sellPrice);
-    if (label !== null && money !== null) {
-      push(`${label}: ${money}`);
-    }
-  }
+  /**
+   * **NO SELL-PRICE LINE HERE ANY MORE, and that is the fix rather than an omission.**
+   *
+   * This used to push `"Sell Price: 24 Copper"` as text, and the owner saw what that costs: "цена
+   * должна показываться иконкой вместо копперов и размер другой". A word where the real client
+   * draws a coin, in this file's own font instead of the money frame's.
+   *
+   * The client already owns all of it. `GameTooltip` binds `<OnTooltipAddMoney>` to
+   * `GameTooltip_OnTooltipAddMoney` (`gametooltiptemplate.xml:248-250`), which calls
+   * `SetTooltipMoney(self, cost, nil, format("%s:", SELL_PRICE))` (`gametooltip.lua:88`), which
+   * builds a `TooltipMoneyFrameTemplate` (`gametooltiptemplate.xml:365`) and fills it through
+   * `MoneyFrame_Update` -- coin textures, its own fonts, its own layout.
+   *
+   * So the engine's job is to FIRE that script and nothing else, which is what
+   * `methods/gametooltip.ts#fillFromSource` now does. Composing the line here was the hand-built
+   * frame this project forbids, in text form.
+   */
 
   return lines;
 }

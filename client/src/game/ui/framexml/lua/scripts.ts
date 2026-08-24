@@ -133,6 +133,10 @@ const SCRIPT_PARAMS: ReadonlyMap<string, readonly string[]> = new Map([
   ['OnDragStart', ['button']],
   ['OnMouseWheel', ['delta']],
   ['OnValueChanged', ['value']],
+  // `gametooltiptemplate.xml:248-250` reads BOTH by name:
+  // `GameTooltip_OnTooltipAddMoney(self, cost, maxcost)`. Without the names that body sees two nils
+  // and `SetTooltipMoney` is handed a nil money, so the coins never appear.
+  ['OnTooltipAddMoney', ['cost', 'maxcost']],
   ['OnChar', ['text']],
   ['OnKeyDown', ['key']],
   ['OnKeyUp', ['key']],

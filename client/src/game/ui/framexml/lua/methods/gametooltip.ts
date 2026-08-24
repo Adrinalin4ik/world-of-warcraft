@@ -1398,6 +1398,27 @@ function fillFromSource(
     return [false];
   }
   fillItemLines(ctx, self, info);
+  /**
+   * THE MONEY ROW IS THE CLIENT'S OWN FRAME, and the engine's whole job is to fire this script.
+   *
+   * `GameTooltip` binds `<OnTooltipAddMoney>` to `GameTooltip_OnTooltipAddMoney`
+   * (`gametooltiptemplate.xml:248-250`), which calls `SetTooltipMoney` with `SELL_PRICE` as the
+   * prefix (`gametooltip.lua:88`); that builds a `TooltipMoneyFrameTemplate` and fills it through
+   * `MoneyFrame_Update`. Coins, fonts and layout all come from the client.
+   *
+   * The owner had "Sell Price: 24 Copper" as plain text in the wrong font, because this bridge used
+   * to paste the words in `ui/item-tooltip.ts` instead of raising the event. A tooltip line is not a
+   * money frame, and the difference was visible.
+   *
+   * AFTER the lines, because `SetTooltipMoney` anchors its frame to `TextLeft<NumLines()>` -- the row
+   * it just added -- so a money frame raised before the body would attach to the wrong line.
+   *
+   * One argument, not two: `maxcost` is for the auction house's min/max pair, and a nil second
+   * argument is what takes the single-price branch.
+   */
+  if (info.sellPrice !== undefined && info.sellPrice > 0) {
+    invokeScriptHandler(ctx, self, 'OnTooltipAddMoney', [info.sellPrice]);
+  }
   // Remembered for `GetItem`, which `GameTooltip_ShowCompareItem` reads one line after every one of
   // these setters is called.
   const state = stateOf(widgetOf(ctx, self));

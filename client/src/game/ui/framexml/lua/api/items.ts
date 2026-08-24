@@ -137,6 +137,18 @@ export interface ItemTooltipInfo {
   repairCost?: number;
 
   /**
+   * The item's vendor price in copper, or **undefined** when it cannot be sold.
+   *
+   * Not a line of text: `methods/gametooltip.ts#fillFromSource` fires the frame's own
+   * `OnTooltipAddMoney` with it, and the client draws the coins. See `ui/item-tooltip.ts` where the
+   * text version used to be.
+   *
+   * UNDEFINED and not 0 for the same reason `repairCost` is: `SetTooltipMoney` would happily lay out
+   * a row of zero coins, and an unsellable item has no price row at all in the real client.
+   */
+  sellPrice?: number;
+
+  /**
    * The item's hyperlink -- `GameTooltip:GetItem`'s SECOND return.
    *
    * **A MEASURED NEED, not symmetry.** `MerchantItemButton_OnEnter` calls

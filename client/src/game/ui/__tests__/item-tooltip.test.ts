@@ -107,7 +107,10 @@ describe('itemTooltipLines', () => {
       'Requires Level 20',
       'Durability 60 / 60',
       '"Dented, but yours."',
-      'Sell Price: 3 Silver 5 Copper',
+      // NO SELL-PRICE LINE, and its absence is the assertion: the price is a money FRAME the client
+      // builds from `OnTooltipAddMoney` (`methods/gametooltip.ts#fillFromSource`), not text this
+      // builder pastes. It used to read "Sell Price: 3 Silver 5 Copper" in the wrong font, with the
+      // word "Copper" where the real client draws a coin.
     ]);
 
     // A primary stat is white and a rating sentence green -- the `%c` split. And the requirement is RED

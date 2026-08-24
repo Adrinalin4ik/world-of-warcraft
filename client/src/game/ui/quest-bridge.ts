@@ -949,6 +949,10 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     }
     return {
       name: template.name,
+      // THE VENDOR PRICE, as a NUMBER and not a line of text: `methods/gametooltip.ts` fires the
+      // frame's own `OnTooltipAddMoney` with it and the client draws the coin row. Undefined when the
+      // item cannot be sold, which is the case that has no price row at all.
+      sellPrice: template.sellPrice > 0 ? template.sellPrice : undefined,
       quality: template.quality,
       lines: itemTooltipLines(vm, template, {
         playerLevel: world.player.level,
