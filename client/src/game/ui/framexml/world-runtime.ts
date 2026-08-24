@@ -123,7 +123,16 @@ export interface WorldRuntimeOptions {
    *
    * Snapshots only. Events belong to the bridges, which attach after the tree exists.
    */
-  seed?: (vm: LuaVM) => void;
+  /**
+   * Runs BEFORE the first manifest file, and **again after it** (see the re-seed below) -- so a
+   * callback that does anything other than refresh a snapshot has to be idempotent itself.
+   *
+   * Given the object-model context as well as the VM, because some engine globals the client calls
+   * from an `OnLoad` have to CREATE frames: `CreateWorldMapArrowFrame` makes `PlayerArrowEffectFrame`,
+   * which `WorldMapFrame_OnLoad` then indexes eleven lines later. A seed with only the VM could
+   * register the name and not the behaviour.
+   */
+  seed?: (vm: LuaVM, ctx: MethodContext) => void;
   /**
    * Called during the manifest load with (files executed, total), so a host can drive a real progress
    * readout. Called only at a YIELD point -- calling it per file would report progress the browser has
@@ -315,7 +324,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
   vm.setGlobal('SHOW_NEWBIE_TIPS', '1');
 
   // BEFORE the first file runs -- see `WorldRuntimeOptions#seed` for why the order is load-bearing.
-  options.seed?.(vm);
+  options.seed?.(vm, ctx);
 
   const runtime = createFrameXmlRuntime(vm, ctx);
   const resolve = (path: string): string | null => texts.get(cacheKey(path)) ?? null;
@@ -533,7 +542,7 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    * Re-seeding is idempotent -- `seedUnitSnapshots` only calls `setUnit` with a fresh snapshot.
    */
   await raceClassData.ensureLoaded();
-  options.seed?.(vm);
+  options.seed?.(vm, ctx);
 
   /**
    * THE REST OF THE ORDERING HAZARD, NAMED AND NOT FIXED HERE.

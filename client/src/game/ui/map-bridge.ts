@@ -3,6 +3,7 @@ import type { WorldMapAreaRow } from '../pipeline/dbc/map-data';
 import { fireEvent } from './framexml/lua/events';
 import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
+import type { MethodContext } from './framexml/lua/object';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -60,7 +61,7 @@ import type World from '../world';
  * parent chain, and the chain is two or three deep in practice. These are called from `SetText` paths on
  * zone-change events, not per frame.
  */
-export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
+export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): MapBridge {
   let disposed = false;
 
   // Kicked off here rather than awaited: the first zone change after it lands fills the label, and a
@@ -522,40 +523,102 @@ export function attachMapBridge(vm: LuaVM, world: World): MapBridge {
   fn('ZoomOut', () => []);
 
   /**
-   * THE ROTATING PLAYER ARROW -- five globals, all declared gaps, and declaring them is what makes the
-   * client's OWN player marker work.
+   * THE WORLD MAP'S PLAYER ARROW -- and `CreateWorldMapArrowFrame` had to CREATE A FRAME, not no-op.
    *
-   * `CreateWorldMapArrowFrame(WorldMapFrame)` is the seventh line of `WorldMapFrame_OnLoad`
-   * (`worldmapframe.lua:84`), so an absent global raised THERE, at document load, and took the three
-   * lines below it with it -- the black divider's `SetVertexColor`, `InitWorldMapPing`, and
-   * `WorldMapFrame_Update()` itself. This is the same defect the minimap's `SetPlayerTextureHeight` had,
-   * found in the same round: one missing engine call, and a frame's entire load is gone.
+   * These five were declared gaps on the grounds that the arrow ROTATES and this widget layer draws
+   * axis-aligned quads. That reasoning held for the art and was wrong about the frame, and the client
+   * says so in its own comment:
    *
-   * **The gap is genuinely the ROTATION, and no-oping these is therefore not a loss.** The engine's
-   * arrow frame is a rotating overlay, and this renderer draws axis-aligned quads only -- there is no
-   * per-item rotation in `widget.ts#DrawItem` and adding one is a renderer change, not a bridge one.
-   * The art was checked rather than assumed: `interface/worldmap/worldmaparrow.blp` **404s** on the asset
-   * host (and a 404 there returns an HTML page, the trap that names the wrong subsystem twice over),
-   * while `interface/minimap/minimaparrow.blp` and `rotating-minimaparrow.blp` both answer 200 and are
-   * both a single 32x32 arrow by their BLP headers -- so not a strip of pre-rotated frames a TexCoord
-   * could select from either.
+   *     -- PlayerArrowEffectFrame is created in code: CWorldMap::CreatePlayerArrowFrame()
+   *     PlayerArrowEffectFrame:SetAlpha(0.65);           (`worldmapframe.lua:108-109`)
    *
-   * What matters is what the client does with the lines after them:
+   * **Line 109 is inside `WorldMapFrame_OnLoad`, so everything after it was dead** -- and the tail of
+   * that function is not decoration:
    *
-   *     WorldMapPlayer:Show();
-   *     WorldMapPlayer:SetPoint("CENTER", "WorldMapDetailFrame", "TOPLEFT", playerX, playerY);
-   *                                                     (`worldmapframe.lua:792-793`)
+   *     WorldMapFrame_ResetFrameLevels();
+   *     WorldMapDetailFrame:SetScale(WORLDMAP_QUESTLIST_SIZE);
+   *     WorldMapButton:SetScale(WORLDMAP_QUESTLIST_SIZE);
+   *     WorldMapFrame_SetPOIMaxBounds();
+   *     WatchFrame.showObjectives = WorldMapQuestShowObjectives:GetChecked();
+   *     ... the quest frames' font metrics and the two scroll frames' flags
    *
-   * `WorldMapPlayer` is AUTHORED art the client positions itself, and it was unreachable only because
-   * `UpdateWorldMapArrowFrames()` raised eleven lines above it. So the player's position on the map is
-   * drawn by the client's own frame, and what is missing is the second, rotating marker on top of it --
-   * position without facing. Named, not implied.
+   * So the map has been laid out at scale 1 instead of the 0.691 the client asks for, every frame level
+   * was left at its authored value, and the objective text had no line height. The owner saw the scale
+   * half of that as "текст очень большой" -- the label IS 62 pt by `fonts.xml:165`, and 0.691 of 62 is
+   * what he was comparing against.
+   *
+   * The frame is REAL and its art is still a gap, which is the same shape `<Minimap>` has: the client
+   * only ever calls `SetAlpha` and `SetFrameLevel` on it (all five uses, grepped), so a frame is exactly
+   * what it needs. `ShowWorldMapArrowFrame` and `PositionWorldMapArrowFrame` act on it for real, so the
+   * day an arrow is drawn it is already in the right place at the right time.
+   *
+   * WHY THE ART IS STILL A GAP: the arrow turns with the player and the widget layer has no rotation.
+   * The minimap solves it with a canvas (`ui/minimap-terrain.ts`), and the same trick would work here --
+   * it needs the drawing host, which this bridge is seeded too early to have. Named, not implied.
    */
-  fn('CreateWorldMapArrowFrame', () => []);
+  const ARROW_FRAME = 'PlayerArrowEffectFrame';
+  let arrowFrameId: number | null = null;
+
+  fn('CreateWorldMapArrowFrame', (args) => {
+    if (arrowFrameId !== null) {
+      return [];
+    }
+    const parent = ctx.frameIdOf(args[0]);
+    if (parent === null) {
+      return [];
+    }
+    try {
+      arrowFrameId = ctx.registry.create('Frame', ARROW_FRAME, parent);
+      // The engine publishes it as a global, which is how the client reaches it by name.
+      ctx.registry.publishName(arrowFrameId, ARROW_FRAME);
+    } catch (error) {
+      console.warn(`CreateWorldMapArrowFrame: ${String(error)}`);
+    }
+    return [];
+  });
+
+  /** `InitWorldMapPing(frame)` -- the ping is authored art (`WorldMapPing`); nothing to create. */
   fn('InitWorldMapPing', () => []);
+
+  /**
+   * `UpdateWorldMapArrowFrames()` -- refreshes the arrow's rotation, of which there is none to refresh.
+   * A no-op for the reason named above and not for want of a frame.
+   */
   fn('UpdateWorldMapArrowFrames', () => []);
-  fn('PositionWorldMapArrowFrame', () => []);
-  fn('ShowWorldMapArrowFrame', () => []);
+
+  /** `PositionWorldMapArrowFrame(point, relativeTo, relativePoint, x, y)` -- placed for real. */
+  fn('PositionWorldMapArrowFrame', (args) => {
+    const widget = arrowFrameId === null ? null : ctx.registry.widget(arrowFrameId);
+    if (widget === null) {
+      return [];
+    }
+    const point = String(args[0] ?? 'CENTER').toUpperCase();
+    const relativePoint = String(args[2] ?? point).toUpperCase();
+    const target = typeof args[1] === 'string' ? ctx.registry.byName(args[1]) : null;
+    const relativeTo = target === null ? undefined : ctx.registry.widget(target)?.id;
+    widget.setAnchors({
+      point: point as never,
+      relativePoint: relativePoint as never,
+      relativeTo,
+      x: Number(args[3]) || 0,
+      y: Number(args[4]) || 0,
+    });
+    return [];
+  });
+
+  /** `ShowWorldMapArrowFrame(show)` -- nil hides, anything else shows. The client passes 1 or nil. */
+  fn('ShowWorldMapArrowFrame', (args) => {
+    const widget = arrowFrameId === null ? null : ctx.registry.widget(arrowFrameId);
+    if (widget === null) {
+      return [];
+    }
+    if (args[0] === undefined || args[0] === null || args[0] === false) {
+      widget.hide();
+    } else {
+      widget.show();
+    }
+    return [];
+  });
 
   /**
    * The zone under a point on the CURRENT sheet, or null. Shared by the highlight and the click.

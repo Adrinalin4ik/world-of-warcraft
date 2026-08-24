@@ -545,9 +545,15 @@ export class WorldUiHost {
        * before the manifest, not after it.** The map bridge needs only the VM and the world, so it can
        * be; the bridges below need the frame tree and cannot.
        */
-      seed: this.world ? (vm) => {
+      seed: this.world ? (vm, ctx) => {
         seedUnitSnapshots(vm, this.world as World);
-        this.mapBridge = attachMapBridge(vm, this.world as World);
+        // ONCE, and the guard is not defensive: `bootWorldRuntime` calls `seed` a SECOND time after
+        // the manifest, to refresh the unit snapshot against DBC tables that landed meanwhile. A
+        // second `attachMapBridge` would leave the first one polling with nothing to dispose it, and
+        // would ask for a second `PlayerArrowEffectFrame` whose name the first already owns.
+        if (this.mapBridge === null) {
+          this.mapBridge = attachMapBridge(vm, this.world as World, ctx);
+        }
       } : undefined,
       // THE LOADING SCREEN'S BAR. A real fraction of the manifest, not a timer: see
       // `ui/loading-screen.ts` and `world-runtime.ts`'s yield for why it is only called at a yield.
