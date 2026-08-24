@@ -28,6 +28,7 @@
 import { LuaRef, LuaVM } from './vm';
 import { FontObjectLookup } from '../fonts';
 import { Widget, WidgetKind, WidgetRoot } from '../../widget';
+import { setWidgetNameResolver } from '../../layout';
 
 /**
  * The client's widget classes, as a real hierarchy rather than a flat list of kinds.
@@ -889,6 +890,24 @@ export function installObjectModel(
     // of them unreachable and never invalidated. Nothing needs it, so refuse rather than cope.
     throw new Error('installObjectModel: this VM already has an object model installed');
   }
+
+  /**
+   * NAME THE WIDGETS IN THE LAYOUT SOLVER'S COMPLAINT.
+   *
+   * `layout.ts` reported an unplaceable widget by its widget id, which is this file's own counter and
+   * means nothing outside it -- the owner pasted "lua:17608 -> lua:17596" and neither of us could say
+   * what had moved. A warning nobody can act on gets scrolled past, which is the same failure as no
+   * warning at all.
+   *
+   * The solver is the widget layer and knows nothing about the registry, so the registry publishes the
+   * lookup instead -- the way `ui/rects.ts` is published, and for the same reason.
+   *
+   * `lua:<id>` is the shape `create` mints, so the parse is the whole resolution.
+   */
+  setWidgetNameResolver((widgetId) => {
+    const match = /^lua:(\d+)$/.exec(widgetId);
+    return match === null ? null : registry.nameOf(Number(match[1]));
+  });
 
   // Assigned once the dispatch chunk below has run. `wrapper` is a closure, so it only has to be
   // non-null by the time the first frame is created, which is necessarily after that.

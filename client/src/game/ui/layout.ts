@@ -328,6 +328,31 @@ function place(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect): Rec
   return node.clamped ? clampToScreen(rect, screen) : rect;
 }
 
+/**
+ * Widget id -> the frame NAME the client knows it by, for the complaint below.
+ *
+ * **The warning used to print raw ids and that made it useless to act on.** The owner pasted
+ * "lua:17608 -> lua:17596, lua:4241 -> lua:4242" and neither of us could say what had moved: the id
+ * is `FrameRegistry`'s counter and means nothing outside it. A warning nobody can act on is a
+ * warning that gets scrolled past, which is the same failure as no warning at all.
+ *
+ * A published resolver rather than an import, for the reason `ui/rects.ts` publishes its own: this
+ * module is the widget layer and knows nothing about Lua or the registry, and it must keep working
+ * with no resolver at all -- every unit test of the solver runs without one.
+ */
+let nameOfWidget: ((id: string) => string | null) | null = null;
+
+/** The object model publishes its registry lookup. Called once per runtime; cleared on teardown. */
+export function setWidgetNameResolver(resolve: ((id: string) => string | null) | null): void {
+  nameOfWidget = resolve;
+}
+
+/** `Name (lua:17608)`, or the bare id when nothing can name it. */
+function describe(id: string): string {
+  const name = nameOfWidget === null ? null : nameOfWidget(id);
+  return name === null ? id : `${name} (${id})`;
+}
+
 /** Layout complaints already reported, so a per-frame one is a single console line. */
 const warned = new Set<string>();
 
@@ -455,7 +480,7 @@ function reportUnresolvable(pending: LayoutNode[], known: Set<string>): void {
   );
   const missing = details.filter((detail) => !known.has(detail.target));
   const parts = (missing.length > 0 ? missing : details).map(
-    (detail) => `${detail.node} -> ${detail.target}`,
+    (detail) => `${describe(detail.node)} -> ${describe(detail.target)}`,
   );
   const kind =
     missing.length > 0
