@@ -483,6 +483,26 @@ function installCVars(vm: LuaVM): void {
     ['advancedWorldMap', '0'],
     ['miniWorldMap', '0'],
     ['questPOI', '1'],
+    /**
+     * `showBattlefieldMinimap`, and its ABSENCE left the world map's "Zone Map" dropdown blank.
+     *
+     * The owner: "Вот этот селектор не выбран." `WorldMapZoneMinimapDropDown_Update` sets the label
+     * to `WorldMapZoneMinimapDropDown_GetText(GetCVar("showBattlefieldMinimap"))`
+     * (`worldmapframe.lua:717-720`), and that function compares the value to the STRINGS `"0"`,
+     * `"1"` and `"2"` and **returns nil for anything else** (`:703-714`). An unset CVar is nil, nil
+     * matches none of the three, so the label was set to nil -- an empty dropdown with a working
+     * arrow and a working tooltip, which is exactly what he photographed.
+     *
+     * `"0"` is BATTLEFIELD_MINIMAP_SHOW_NEVER, and it is the right default for the same reason the
+     * three above it are: the initialiser ticks whichever entry equals the CVar (`:656-658`), so the
+     * default has to be one of the three or nothing is selected. Never is retail's own out-of-the-box
+     * state for the battlefield minimap, and this client shows no battlefield minimap at all.
+     *
+     * A STRING and not a number, and that is the whole trap: `value == info.value` compares against
+     * `"0"`, and Lua does not coerce across types -- `0 == "0"` is false. A numeric default here
+     * would look set and behave unset.
+     */
+    ['showBattlefieldMinimap', '0'],
     ['nameplateShowEnemies', '0'],
     ['nameplateShowFriends', '0'],
     /**
