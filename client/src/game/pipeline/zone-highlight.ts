@@ -109,6 +109,40 @@ interface Shape {
 const OPAQUE = 20;
 
 /**
+ * **HOW MUCH OF THE 128x128 IMAGE IS ACTUALLY USED, and it is not all of it vertically.**
+ *
+ * This is `UpdateMapHighlight`'s `texPercentageX`/`texPercentageY`, which the client feeds straight
+ * into `WorldMapHighlight:SetTexCoord(0, texPercentageX, 0, texPercentageY)`
+ * (`worldmapframe.lua:763`). Returning 1 for both -- which is what this did -- squeezes a square
+ * image into a rect of aspect 1.5, and the owner named the symptom exactly: "ты сузил скейл по оси
+ * y".
+ *
+ * MEASURED by decoding twelve zones' highlight art and taking the bounding box of every pixel above
+ * `OPAQUE`, in texels of 128:
+ *
+ *     zone           bbox x        bbox y
+ *     Elwynn          26..109        16..72
+ *     Aszhara         14..112         9..77
+ *     Duskwood        14..118        13..72
+ *     Winterspring    36.. 89         4..78
+ *     Barrens         47.. 81         4..78
+ *     Felwood         43.. 82         3..80
+ *     Durotar         51.. 70        16..60
+ *     Silithus        10.. 96        15..82
+ *
+ * **x reaches 118 and y never passes 82.** So the content is not centred in a square -- it fills the
+ * width and stops two thirds of the way down. `128 * 2/3 = 85.33`, and every measured maximum is
+ * under it.
+ *
+ * And 2/3 is not fitted: the sheet is 1002x668 and `668 / 1002 = 2/3` exactly. The art is a
+ * power-of-two 128x128 holding a 128x85.33 image of the zone's own rect, which has the sheet's
+ * aspect -- so the crop is the aspect ratio, and cropping to it makes the drawn shape undistorted.
+ */
+const USED_X = 1;
+
+const USED_Y = 668 / 1002;
+
+/**
  * A multiplier on the zone rect the highlight is drawn at, defaulting to **1**.
  *
  * 1 is the derivation itself -- see `ZoneHighlights.place`. The knob stays because the last five
@@ -207,14 +241,29 @@ class ZoneHighlights {
       return null;
     }
     const at = ZoneHighlights.place(zone);
-    const tx = (sheetX - at.left) / at.width;
-    const ty = (sheetY - at.top) / at.height;
-    if (tx < 0 || tx > 1 || ty < 0 || ty > 1) {
+    // THE SAME CROP THE DRAWING USES. The zone rect maps onto the USED part of the image, not the
+    // whole of it, so a v of 1 is texel 85 and not texel 128 -- see `USED_Y`. Without this the mask
+    // reads the blank bottom third of the art as "outside the zone" for the southern third of every
+    // zone, which is a hover that dies below the middle of the map.
+    const tx = ((sheetX - at.left) / at.width) * USED_X;
+    const ty = ((sheetY - at.top) / at.height) * USED_Y;
+    if (tx < 0 || tx > USED_X || ty < 0 || ty > USED_Y) {
       return false;
     }
     const x = Math.min(shape.width - 1, Math.floor(tx * shape.width));
     const y = Math.min(shape.height - 1, Math.floor(ty * shape.height));
     return shape.mask[y * shape.width + x] >= OPAQUE;
+  }
+
+  /**
+   * `texPercentageX` / `texPercentageY` -- how much of the image the client should sample.
+   *
+   * See `USED_X` / `USED_Y`. Constant for every zone, because it is the aspect ratio of the sheet
+   * and not a property of any one zone.
+   */
+  // eslint-disable-next-line class-methods-use-this
+  usedTexCoords(): { x: number; y: number } {
+    return { x: USED_X, y: USED_Y };
   }
 
   /**

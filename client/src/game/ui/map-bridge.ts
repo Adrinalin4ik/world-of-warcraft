@@ -844,10 +844,11 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
        * a zone whose art the host does not serve gets.
        */
       const draw = zoneHighlights.drawRectFor(row.art, rect);
+      const crop = zoneHighlights.usedTexCoords();
       return draw === null
         ? [mapData.displayName(row), null, null, null, null, null, null, null]
         : [
-          mapData.displayName(row), row.art, 1, 1,
+          mapData.displayName(row), row.art, crop.x, crop.y,
           draw.width, draw.height, draw.left, draw.top,
         ];
     }
