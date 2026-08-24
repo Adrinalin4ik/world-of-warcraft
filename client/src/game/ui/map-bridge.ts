@@ -750,23 +750,25 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     if (hit !== null) {
       const { row, rect } = hit;
       /**
-       * THE ART IS ANSWERED ONLY ONCE ITS SHAPE IS KNOWN TO EXIST, and the two conditions are the
-       * same one: the file this names is the file the hit test just sampled. So the client is never
-       * told to load art that is not there, and the highlight it draws is the outline the hover
-       * agreed with.
+       * THE ART IS ANSWERED ONLY ONCE ITS SHAPE IS KNOWN, and the two conditions are the same one:
+       * the file this names is the file the hit test just sampled. So the client is never told to
+       * load art that is not there, and the highlight it draws is the outline the hover agreed with.
        *
-       * The five numbers are fractions of the MAP, which is what the client multiplies them by:
-       * `textureX = textureX * width` for the size and `scrollChildX = scrollChildX * width` for the
-       * placement (`worldmapframe.lua:765-771`). `texPercentageX/Y` are the used fraction of the
-       * texture and are 1 here -- the highlight BLP is the zone rect exactly, which is why sampling
-       * it with the same rect works.
+       * **THE RECT IS THE TEXTURE'S, NOT THE ZONE'S, and that was the scaling bug.** The client
+       * draws the WHOLE image at what it is given (`worldmapframe.lua:765-771`), and the outline
+       * fills only part of the image -- so handing it the zone rect squeezed a 128x128 into the
+       * zone. `drawRectFor` inverts the measured bounding box to get the rect at which the outline
+       * lands on the zone; see `pipeline/zone-highlight.ts`.
+       *
+       * `texPercentageX/Y` stay 1: the image is a power of two with nothing to crop, and the part
+       * that is not outline is black, which the client draws additively.
        */
-      const art = zoneHighlights.has(row.art) ? row.art : null;
-      return art === null
+      const draw = zoneHighlights.drawRectFor(row.art, rect);
+      return draw === null
         ? [mapData.displayName(row), null, null, null, null, null, null, null]
         : [
-          mapData.displayName(row), art, 1, 1,
-          rect.right - rect.left, rect.bottom - rect.top, rect.left, rect.top,
+          mapData.displayName(row), row.art, 1, 1,
+          draw.width, draw.height, draw.left, draw.top,
         ];
     }
     // The World sheet names a CONTINENT instead, from `Map.dbc` -- "Eastern Kingdoms", not the art
