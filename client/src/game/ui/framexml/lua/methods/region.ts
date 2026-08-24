@@ -453,15 +453,33 @@ const REGION: MethodTable = {
    * `add`'s own rule applied recursively -- a REGION keeps its owner's level, a child FRAME sits one
    * above; see `widget.ts#add` for why that asymmetry exists.
    *
-   * `SetParent(nil)` DETACHES rather than re-homing to `UIParent`. The engine's own behaviour, and
-   * nothing in the loaded manifest calls it that way; a detached widget simply stops being reached by
-   * the draw walk.
+   * **`SetParent(nil)` RE-HOMES TO THE SCREEN ROOT, and the comment that used to sit here said the
+   * opposite -- wrongly, and with a claim that turned out to be false.** It read: "`SetParent(nil)`
+   * DETACHES rather than re-homing to `UIParent`. The engine's own behaviour, and nothing in the
+   * loaded manifest calls it that way."
+   *
+   * Both halves were wrong. The manifest calls it exactly that way, once, and it is the world map's
+   * full-screen mode: `WorldMap_ToggleSizeUp`'s second statement is `WorldMapFrame:SetParent(nil)`
+   * (`worldmapframe.lua:1313`). Measured -- one call site in the whole decoded manifest, and it is a
+   * feature the owner was testing. **A documented exclusion is a bug report someone declined to
+   * file**, which is a rule this project already wrote down about a getter and had to relearn here.
+   *
+   * And detaching is not what the engine does. A parentless frame in the real client is a TOP-LEVEL
+   * frame: still drawn, no longer inheriting `UIParent`'s scale or taking part in the UI-panel
+   * layout, which is precisely why the client reaches for it to make the map full-screen. Detaching
+   * dropped the frame out of the draw walk instead, so the map vanished and could not be reopened --
+   * the owner's "карта просто пропадает и её не удаётся больше открыть", with no error, because
+   * nothing had failed.
+   *
+   * `GetParent()` still answers nil afterwards, which is the engine's behaviour too: the root is not
+   * a frame, so `Registry#parentOf` finds no id for it and returns null.
    */
   SetParent: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
     const value = args[0];
 
-    let target: Widget | null = null;
+    // The SCREEN ROOT for nil -- see the note above on why this is not a detach.
+    let target: Widget | null = ctx.registry.root;
     if (value !== undefined && value !== null) {
       let id: number | null;
       if (typeof value === 'string') {
