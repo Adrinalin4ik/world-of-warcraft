@@ -450,6 +450,39 @@ function installCVars(vm: LuaVM): void {
      * start off. (The value in a real install lives in `Config.wtf`, which the asset host does not
      * serve -- `wtf/config.wtf` 404s -- so this is an inference from the client's Lua, not a read.)
      */
+    /**
+     * THE WORLD MAP'S FOUR, and the first one was an ARITHMETIC ERROR on the owner's SHIFT-M:
+     *
+     *     binding TOGGLEWORLDMAPSIZE (SHIFT-M, down): WorldMapFrame.lua:2139:
+     *         attempt to perform arithmetic on a nil value (local 'opacity')
+     *
+     * The chain is two lines in the client's own file. `WorldMapFrame_OnEvent`'s `VARIABLES_LOADED`
+     * arm does `WORLDMAP_SETTINGS.opacity = tonumber(GetCVar("worldMapOpacity"))` (`:182`), and an
+     * unset CVar makes that **nil** -- overwriting the literal's own 0. `WorldMap_ToggleSizeDown`
+     * then hands it to `WorldMapFrame_SetOpacity` (`:1409`), which computes
+     * `0.5 + (1.0 - opacity) * 0.5` and raises.
+     *
+     * **And the raise sat between the two `ToggleFrame` calls of `WorldMapFrame_ToggleWindowSize`** --
+     * the first had closed the map and the second never ran, which is exactly what the owner
+     * reported: "карта становится компактнее, но приходится заново открывать её". One nil, two
+     * symptoms.
+     *
+     * THREE OF THE FOUR ARE SOURCED, from the client's own initialiser
+     * (`worldmapframe.lua:61-68`): `WORLDMAP_SETTINGS = { opacity = 0, advanced = nil,
+     * size = WORLDMAP_QUESTLIST_SIZE }`. The `VARIABLES_LOADED` arm overwrites each of those three
+     * fields from a CVar, so the CVar that reproduces the literal IS the default -- `0` for the
+     * opacity, false for `advancedWorldMap`, and false for `miniWorldMap` (whose true branch would
+     * call `WorldMap_ToggleSizeDown` and change the size the literal just set).
+     *
+     * `questPOI` is the one that is TRANSCRIBED rather than derived: nothing in the client's Lua
+     * pins it, the checkbox carries no `checked` attribute, and `Config.wtf` is not served
+     * (`wtf/config.wtf` 404s). `1` is retail's out-of-the-box state and it is what the owner is
+     * trying to see, so it carries the same standing note as `framexml/bindings.ts`'s default keys.
+     */
+    ['worldMapOpacity', '0'],
+    ['advancedWorldMap', '0'],
+    ['miniWorldMap', '0'],
+    ['questPOI', '1'],
     ['nameplateShowEnemies', '0'],
     ['nameplateShowFriends', '0'],
     /**
