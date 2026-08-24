@@ -51,6 +51,7 @@ import type { ModelRig } from '../scene/scene-rig';
 import type { GlueRuntime } from '../framexml/runtime';
 import { sceneFromPath } from '../scene/tokens';
 import { wantsTrialScene } from './login-state';
+import { AutoLoginDriver, readAutoLogin } from './auto-login';
 
 /**
  * The client's screen names (`GlueScreenInfo`, glueparent.lua:11-19) to this app's `ClientState`.
@@ -121,6 +122,14 @@ export class FrameXmlGlueScreen implements GlueScreen {
   private activeModelFrame: string | null = 'AccountLogin';
 
   /**
+   * The URL-driven entry walk, or null when the URL did not ask for one (and once it is done).
+   *
+   * Built at MOUNT and not in the constructor, so a remount starts a fresh walk from the login form --
+   * which is what a page that has gone back to the glue screens needs.
+   */
+  private autoLogin: AutoLoginDriver | null = null;
+
+  /**
    * `SetCharSelectModelFrame(name)` -- the frame the ENGINE draws the ROSTER character into. Null until
    * the client's Lua names one.
    *
@@ -173,6 +182,10 @@ export class FrameXmlGlueScreen implements GlueScreen {
     const token = ++this.mountToken;
     this.ctx = ctx;
     this.activeModelFrame = 'AccountLogin';
+    const requested = readAutoLogin(window.location.search);
+    this.autoLogin = requested === null
+      ? null
+      : new AutoLoginDriver(requested, performance.now());
     this.charSelectFrame = null;
     this.charCustomizeFrame = null;
     this.pendingCharacter = null;
@@ -336,6 +349,16 @@ export class FrameXmlGlueScreen implements GlueScreen {
 
   update(dt: number): void {
     this.runtime?.update(dt);
+    // AUTOLOGIN, before the model push and only while it has something left to do. It drives the
+    // client's own `AccountLogin_Login`/`RealmList_OnOk`/`CharacterSelect_EnterWorld`, so it belongs
+    // on the tick that owns this VM rather than anywhere that could reach the protocol directly.
+    // See `screens/auto-login.ts`.
+    if (this.autoLogin !== null && this.runtime !== null) {
+      this.autoLogin.tick(this.runtime.vm, performance.now());
+      if (this.autoLogin.finished) {
+        this.autoLogin = null;
+      }
+    }
     this.pushModelState();
   }
 
