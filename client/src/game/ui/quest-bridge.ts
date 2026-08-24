@@ -81,6 +81,7 @@
 import type World from '../world';
 import { LuaVM } from './framexml/lua/vm';
 import { notImplemented, warnOnce } from './framexml/lua/methods/region';
+import { selectedZoneName } from './map-selection';
 import { fireEvent } from './framexml/lua/events';
 import { GlueArt } from './art';
 import { setUnit } from './framexml/lua/api/units';
@@ -1888,8 +1889,52 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * FrameXML was matched against everything this project registers as returning nothing, and this was
    * the only one.
    */
-  fn('QuestMapUpdateAllQuests', () => [0]);
-  fn('QuestPOIGetQuestIDByVisibleIndex', () => [0]);
+  /**
+   * THE WORLD MAP'S QUEST LIST -- real now, and built from the quest LOG rather than from POI data.
+   *
+   * `WorldMapFrame_UpdateQuests` is two calls: `numEntries = QuestMapUpdateAllQuests()` and then
+   * `questId, questLogIndex = QuestPOIGetQuestIDByVisibleIndex(i)` for each (`worldmapframe.lua:1538,
+   * 1547`). Both answered 0, so the list was empty on every map -- the owner's "квесты не
+   * показываются на карте".
+   *
+   * **The engine answers these from `SMSG_QUEST_POI_QUERY_RESPONSE`, which this client does not
+   * subscribe to. The QUEST LOG answers the same question for the list**, and the filter comes from
+   * the log's own zone headers: a quest is grouped under its `zoneOrSort`'s `AreaTable` name, and the
+   * map publishes the displayed zone under the same name (`ui/map-selection.ts`). So "the quests on
+   * this map" is a comparison between two things already decoded, not an approximation.
+   *
+   * WHAT IS STILL MISSING, and it is the POI half rather than the list half: the numbered blobs on
+   * the map itself need the objective COORDINATES, which only that packet carries.
+   * `GetQuestWorldMapAreaID` still answers 0 and `QuestPOIGetIconInfo` still answers nil, so the
+   * client draws no blob -- and its list, which is what this feeds, does not need one.
+   *
+   * `questLogIndex` is the 1-BASED position in `entries`, because that is what the client hands
+   * straight to `GetQuestLogTitle` on the next line -- the same index `entryAt` takes. A position
+   * within the filtered subset would name a different quest.
+   */
+  const questsOnMap = (): Array<{ questId: number; logIndex: number }> => {
+    const zone = selectedZoneName();
+    if (zone === '') {
+      return [];
+    }
+    const out: Array<{ questId: number; logIndex: number }> = [];
+    entries.forEach((row, at) => {
+      if (!row.isHeader && headerFor(row.zoneOrSort) === zone) {
+        out.push({ questId: row.questId, logIndex: at + 1 });
+      }
+    });
+    return out;
+  };
+
+  fn('QuestMapUpdateAllQuests', () => [questsOnMap().length]);
+
+  fn('QuestPOIGetQuestIDByVisibleIndex', (args) => {
+    const at = questsOnMap()[Number(args[0]) - 1];
+    // 0 and nil, not a pair of zeroes: the client guards with `if ( questLogIndex and
+    // questLogIndex > 0 )` and **0 is truthy in Lua**, so a zero index would pass the guard and
+    // then read `GetQuestLogTitle(0)`.
+    return at === undefined ? [0, null] : [at.questId, at.logIndex];
+  });
   fn('GetQuestIDByVisibleIndex', () => [0]);
   fn('GetNumQuestPOIs', () => [0]);
 

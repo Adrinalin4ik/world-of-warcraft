@@ -4,6 +4,7 @@ import { fireEvent } from './framexml/lua/events';
 import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
 import type { MethodContext } from './framexml/lua/object';
+import { publishMapSelection, clearMapSelection } from './map-selection';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -363,6 +364,20 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * `textureHeight` is 0 because the client uses it only for DUNGEON maps, and this client enters none. A
    * non-zero guess would change the art layout for no reason.
    */
+  /**
+   * PUBLISH THE SELECTED ZONE for the quest bridge -- see `ui/map-selection.ts` on why a sink.
+   *
+   * The DISPLAY name and only for a ZONE sheet: a continent or the World view has no zone, and the
+   * client's own quest list is empty there. `zoneIndex === 0` is that case.
+   */
+  publishMapSelection(() => {
+    if (disposed || zoneIndex === 0) {
+      return '';
+    }
+    const row = selected();
+    return row === null ? '' : mapData.displayName(row);
+  });
+
   fn('GetMapInfo', () => {
     const row = selected();
     return row === null ? [null, 0] : [row.art, 0];
@@ -1024,6 +1039,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
   return {
     poll,
     dispose: () => {
+      clearMapSelection();
       disposed = true;
       delete (window as unknown as Record<string, unknown>).worldZone;
       delete (window as unknown as Record<string, unknown>).worldMap;
