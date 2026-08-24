@@ -5,7 +5,7 @@ import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
 import type { MethodContext } from './framexml/lua/object';
 import { publishMapSelection, clearMapSelection } from './map-selection';
-import { zoneHighlights } from '../pipeline/zone-highlight';
+import { zoneHighlights, setHighlightScale } from '../pipeline/zone-highlight';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -488,6 +488,26 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     if (String(args[0] ?? '') !== 'player' || row === null || !player) {
       return [0, 0];
     }
+    /**
+     * **THE MAP HAS TO MATCH, and without this the player drew on whatever sheet was open.**
+     *
+     * The owner: "Сейчас я нахожусь в эльвинском лесу, но меня также показывает в калимдоре по
+     * тем же координатам." A world position means nothing off its own map, and Kalimdor's rect
+     * happens to CONTAIN Elwynn's coordinates -- so `normalise` answered a perfectly good
+     * fraction for a place the player is nowhere near.
+     *
+     * Compared against the selected row's OWN `mapId` and not the sheet's: a zone shown on
+     * another continent through `displayMapID` is still entered from the map it lives on, so the
+     * player standing in it is on `row.mapId`. Answering 0,0 is the engine's own "not on the
+     * displayed map", and it is checked by name: `WorldMapButton_OnUpdate` reads `playerX == 0 and
+     * playerY == 0` and hides the arrow, the ping and `WorldMapPlayer`
+     * (`worldmapframe.lua:782-787`). The party and raid arms do the same with the same global
+     * (`worldmapframe.lua:828-853`), so they inherit this check rather than needing their own.
+     */
+    const playerMapId = typeof world.map?.mapID === 'number' ? world.map.mapID : -1;
+    if (playerMapId !== row.mapId) {
+      return [0, 0];
+    }
     const at = mapData.normalise(row, player.position.x, player.position.y);
     return at === null ? [0, 0] : [at.x, at.y];
   });
@@ -712,10 +732,11 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     if (rect === null) {
       return null;
     }
-    // The point as a fraction INSIDE the zone, which is what the shape is indexed by.
-    const u = (fractionX - rect.left) / (rect.right - rect.left);
-    const v = (fractionY - rect.top) / (rect.bottom - rect.top);
-    return zoneHighlights.opaqueAt(row.art, u, v) === false ? null : { row, rect };
+    // The SHEET point and the zone rect, not a fraction inside it: the shape is placed on the
+    // sheet at its authored size now, and the drawing reads the same placement.
+    return zoneHighlights.opaqueAtSheetPoint(row.art, rect, fractionX, fractionY) === false
+      ? null
+      : { row, rect };
   };
 
   /**
@@ -1000,6 +1021,14 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * guess. `tile1` is what `WorldMapFrame_UpdateMap` composes at `worldmapframe.lua:255-262`:
    * `Interface\WorldMap\<art>\<art><i>`.
    */
+  /**
+   * `window.worldMapHighlight(0.9)` -- a multiplier on the derived highlight size. No argument
+   * restores 1, which is the derivation itself. See `HIGHLIGHT_PX` in `pipeline/zone-highlight.ts`.
+   */
+  (window as unknown as Record<string, unknown>).worldMapHighlight = (factor?: number) => (
+    setHighlightScale(typeof factor === 'number' ? factor : null)
+  );
+
   (window as unknown as Record<string, unknown>).worldMap = () => {
     const row = selected();
     const continents = mapData.continents();
@@ -1123,6 +1152,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       disposed = true;
       delete (window as unknown as Record<string, unknown>).worldZone;
       delete (window as unknown as Record<string, unknown>).worldMap;
+      delete (window as unknown as Record<string, unknown>).worldMapHighlight;
     },
   };
 }
