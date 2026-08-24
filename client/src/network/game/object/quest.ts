@@ -78,6 +78,7 @@ import EventEmitter from 'events';
 
 import { GameHandler } from '../handler';
 import GamePacket from '../packet';
+import { QuestPoi, decodeQuestPoi } from './quest-poi';
 import GameOpcode from '../opcode';
 import { guidBytes, guidHex, GUID_BYTES } from '../../guid-hex';
 import { itemWire } from '../../../game/classes/item-wire';
@@ -325,6 +326,25 @@ export class QuestHandler extends EventEmitter {
   /** Which candidate `activateAccept` width the last reward panel decoded under. See `handleOfferReward`. */
   public offerShape = '';
 
+  /**
+   * `questId` -> its points of interest. The map's quest markers and objective blobs.
+   *
+   * Not in a DBC and not in the descriptor -- see `object/quest-poi.ts`. Empty until
+   * `queryPois` has been answered, and an empty ARRAY for a quest that genuinely has none, which is
+   * a different answer from absent: absent means "not asked yet" and the bridge must not report a
+   * quest as having no marker on the strength of it.
+   */
+  public pois = new Map<number, QuestPoi[]>();
+
+  /**
+   * Quest ids already asked for, so a repainting map does not re-send.
+   *
+   * **Released on the reply, INCLUDING a reply that carried nothing for the quest.** A dedupe set
+   * that only releases on success is the documented trap here: one bad packet and that quest could
+   * never be asked for again. This one is cleared for every id in the request the reply answers.
+   */
+  private poiQueried = new Set<number>();
+
   /** NPC guid -> `DIALOG_STATUS`. What the `!` over a giver's head is drawn from. */
   public status = new Map<string, number>();
 
@@ -334,6 +354,7 @@ export class QuestHandler extends EventEmitter {
     this.game = gameHandler;
 
     this.subscribe('SMSG_QUEST_QUERY_RESPONSE', this.handleQueryResponse);
+    this.subscribe('SMSG_QUEST_POI_QUERY_RESPONSE', this.handlePoiResponse);
     this.subscribe('SMSG_QUESTGIVER_QUEST_DETAILS', this.handleDetails);
     this.subscribe('SMSG_QUESTGIVER_OFFER_REWARD', this.handleOfferReward);
     this.subscribe('SMSG_QUESTGIVER_REQUEST_ITEMS', this.handleRequestItems);
@@ -1305,6 +1326,31 @@ export class QuestHandler extends EventEmitter {
     this.emit('questgiverStatusMultiple');
   }
 
+  /**
+   * `SMSG_QUEST_POI_QUERY_RESPONSE` (**0x1E4**) -- the map's quest markers.
+   *
+   * The decode and its residual diagnostic live in `object/quest-poi.ts`; this only files the
+   * result and announces it. **A quest the reply does not mention is recorded as an EMPTY array**,
+   * not left absent: the server answers with what it has, so silence for a quest is the answer
+   * "no POI" and the bridge needs to be able to tell that from "not asked yet".
+   */
+  private handlePoiResponse = (gp: GamePacket): void => {
+    const reply = decodeQuestPoi(gp);
+    for (const set of reply.quests) {
+      this.pois.set(set.questId, set.pois);
+      this.poiQueried.delete(set.questId);
+    }
+    // Everything still in flight after a reply is a quest the server had nothing for. Recording the
+    // empty array is what stops the map asking again on every repaint.
+    for (const questId of Array.from(this.poiQueried)) {
+      if (!this.pois.has(questId)) {
+        this.pois.set(questId, []);
+      }
+      this.poiQueried.delete(questId);
+    }
+    this.emit('questPois');
+  };
+
   // -- Outgoing -----------------------------------------------------------------------------------
 
   /**
@@ -1314,6 +1360,33 @@ export class QuestHandler extends EventEmitter {
    * not send 25 packets per health tick -- which is the whole per-frame cost of the quest log's data
    * path and the reason it is zero after the first paint.
    */
+  /**
+   * `CMSG_QUEST_POI_QUERY` (**0x1E3**): a `u32` count then that many quest ids.
+   *
+   * **ONE packet for the whole log**, which is why this takes a list where `queryTemplate` takes an
+   * id: the client asks for its POIs from `QuestPOIUpdateIcons`, once per map update, and 25
+   * separate queries there would be 25 packets per open.
+   *
+   * Ids already cached or already in flight are dropped, and nothing is sent when that leaves the
+   * list empty -- a map repainting on a health tick must cost zero packets.
+   */
+  queryPois(questIds: number[]): void {
+    const wanted = questIds.filter((id) => (
+      id > 0 && !this.pois.has(id) && !this.poiQueried.has(id)
+    ));
+    if (wanted.length === 0) {
+      return;
+    }
+    wanted.forEach((id) => this.poiQueried.add(id));
+    const gp = new GamePacket(
+      GameOpcode.CMSG_QUEST_POI_QUERY,
+      GamePacket.HEADER_SIZE_OUTGOING + 4 + wanted.length * 4,
+    );
+    gp.writeUnsignedInt(wanted.length >>> 0);
+    wanted.forEach((id) => gp.writeUnsignedInt(id >>> 0));
+    this.game.send(gp);
+  }
+
   queryTemplate(questId: number): void {
     if (questId <= 0 || this.templates.has(questId) || this.queried.has(questId)) {
       return;

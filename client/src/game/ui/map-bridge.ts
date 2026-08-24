@@ -964,34 +964,107 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * THE QUEST PANEL'S REMAINING GETTERS, honest empties.
    *
    * `GetNumQuestItemDrops` at 0 makes the quest panel skip the item-drop rows, and `GetQuestLogItemDrop`
-   * is unreachable behind it. `GetQuestPOILeaderBoard` and `GetQuestWorldMapAreaID` are the POI half --
-   * the objective blobs drawn on the map itself -- which needs `SMSG_QUEST_POI_QUERY` and has no
-   * handler; `GetQuestWorldMapAreaID` answering 0 is what makes the client treat every quest as "not on
-   * this map" and draw no blob, rather than drawing one in the wrong place.
+   * is unreachable behind it. `GetQuestPOILeaderBoard` and `GetQuestWorldMapAreaID` are the BLOB half
+   * -- the shaded objective areas, which `WorldMapBlobFrame` draws from the same POI reply the pins
+   * now use. The pins are done (`QuestPOIGetIconInfo` below); the blobs still are not, because they
+   * need the polygon rendered rather than a point, and `GetQuestWorldMapAreaID` answering 0 is what
+   * keeps the client from drawing one in the wrong place while that is true.
    *
    * The quest LOG side of this panel is real and already works -- `GetQuestLogTitle`,
    * `GetQuestLogLeaderBoard`, `GetNumQuestLeaderBoards` and the watch functions all answer from decoded
    * packets. It is only the map-placement half that is absent.
    */
   /**
-   * THE QUEST-POI ENGINE PAIR, and their absence was breaking the map's quest panel outright:
+   * THE QUEST-POI ENGINE PAIR -- the numbered pins on the map, and they are REAL now.
+   *
+   * Their absence used to break the panel outright:
    *
    *     framexml: WorldMapQuestShowObjectives: OnClick: WorldMapFrame.lua:1540:
    *         attempt to call a nil value (global 'QuestPOIUpdateIcons')
    *
-   * `WorldMapQuestShowObjectives_Toggle` calls it on the checkbox's click, so the raise took the
-   * whole toggle with it and the quest list never appeared. Both are ENGINE globals -- `questpoi.lua`
-   * defines only the `QuestPOI_*` helpers, checked on the served file, so nothing was going to supply
-   * these later.
+   * `WorldMapQuestShowObjectives_Toggle` calls it on the checkbox click, so the raise took the whole
+   * toggle with it and the quest list never appeared. Both are ENGINE globals -- `questpoi.lua`
+   * defines only the `QuestPOI_*` helpers, checked on the served file.
    *
-   * A no-op and a nil are the right answers rather than placeholders: the POI icons are the numbered
-   * blobs on the map, fed by `SMSG_QUEST_POI_QUERY_RESPONSE`, which has no subscriber. `GetNumQuestPOIs`
-   * already answers 0 in `ui/quest-bridge.ts`, so nothing can reach `QuestPOIGetIconInfo` -- it is
-   * registered for the reason the object model registers unreachable methods: an addon duck-types
-   * before it calls.
+   * `QuestPOIUpdateIcons` is where the QUERY belongs, because it is what the client calls once per
+   * map update (`worldmapframe.lua:1540`). The ids come from the DESCRIPTOR -- `world.player`'s own
+   * quest log -- and not from `ui/quest-bridge.ts`, because the descriptor is where log membership
+   * actually lives and this bridge would otherwise depend on the order the two attach in.
+   *
+   * `queryPois` drops ids it already has or has in flight, so a map repainting on a health tick
+   * sends nothing. See `network/game/object/quest.ts#queryPois`.
    */
-  fn('QuestPOIUpdateIcons', () => []);
-  fn('QuestPOIGetIconInfo', () => [null]);
+  fn('QuestPOIUpdateIcons', () => {
+    const player = world.player;
+    if (!player) {
+      return [];
+    }
+    const ids: number[] = [];
+    player.questLog.forEach((slot) => {
+      if (slot.questId > 0) {
+        ids.push(slot.questId);
+      }
+    });
+    world.game.objectHandler.questHandler.queryPois(ids);
+    return [];
+  });
+
+  /**
+   * `QuestPOIGetIconInfo(questId)` -> `completed, posX, posY, objective`.
+   *
+   * **Only the middle two are used by anything this client ships.** `WorldMapFrame_DisplayQuestPOI`
+   * discards the first and the fourth (`worldmapframe.lua:1711`) and no other FrameXML file calls
+   * this global at all -- checked against the served `questpoi.lua`, `watchframe.lua` and
+   * `questlogframe.lua`. So the first return is the one value here with no oracle in the game's own
+   * files: it is the POI's completion flag per the documented signature, and it is labelled rather
+   * than presented as measured.
+   *
+   * `posX`/`posY` are fractions of `WorldMapDetailFrame`, which the client multiplies by the frame's
+   * size and the windowed scale itself (`worldmapframe.lua:1719-1720`). **nil, not 0,0, when there is
+   * no marker** -- the client guards on `if ( posX and posY )`, so a 0,0 would pin every quest to the
+   * top-left corner of the sheet.
+   *
+   * ## THE MAP HAS TO MATCH, the same rule as the player arrow
+   *
+   * A POI's points are WORLD coordinates inside its own `worldMapAreaId`, so they mean nothing on
+   * another sheet -- the mistake that drew the player in Kalimdor while he stood in Elwynn. This
+   * answers nil unless the displayed row IS that area. A quest whose POI sits on a different zone
+   * therefore has no pin, which is also what the real client does: its quest list is per zone.
+   *
+   * Continent-level sheets are NOT projected, and that is a stated gap rather than an oversight: it
+   * would need the POI composed through `sheetRect` the way the zone rects are, and the quest list
+   * the pins belong to is itself filtered to one zone (`ui/quest-bridge.ts#questsOnMap`).
+   *
+   * A POI with several points is an objective AREA. The position is the mean of its points, because
+   * a pin needs one place and the centre is the only choice that does not favour a corner.
+   */
+  fn('QuestPOIGetIconInfo', (args) => {
+    const questId = Math.trunc(Number(args[0]));
+    const row = selected();
+    if (!Number.isFinite(questId) || questId <= 0 || row === null) {
+      return [null];
+    }
+    const pois = world.game.objectHandler.questHandler.pois.get(questId);
+    if (pois === undefined) {
+      // Not asked yet -- a different answer from "no POI", and nil is right for both.
+      return [null];
+    }
+    const poi = pois.find((candidate) => (
+      candidate.worldMapAreaId === row.id && candidate.points.length > 0
+    ));
+    if (poi === undefined) {
+      return [null];
+    }
+    const mid = poi.points.reduce(
+      (into, point) => ({ x: into.x + point.x, y: into.y + point.y }),
+      { x: 0, y: 0 },
+    );
+    const at = mapData.normalise(row, mid.x / poi.points.length, mid.y / poi.points.length);
+    if (at === null) {
+      return [null];
+    }
+    return [poi.objectiveIndex < 0, at.x, at.y, poi.objectiveIndex];
+  });
 
   fn('GetNumQuestItemDrops', () => [0]);
   fn('GetQuestLogItemDrop', () => [null]);
