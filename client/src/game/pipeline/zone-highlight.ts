@@ -34,18 +34,16 @@ import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
  * up to 58%, in both directions, so **the `WorldMapArea` rect is the zone's playable bounds and not
  * its landmass** -- there is no proportion between them and nothing here may be scaled by their ratio.
  *
- * ## HOW THE SHAPE IS PLACED, AND WHY IT IS ONE PLACEMENT AND NOT TWO
+ * ## HOW THE SHAPE IS PLACED: IT ISN'T. THE ART IS ALREADY IN THE RIGHT PLACE.
  *
- * That measurement is the whole argument. **Nothing here is scaled by the rect.** The image draws at
- * the size the client's own XML authors it -- see `HIGHLIGHT_PX` for the derivation from
- * `worldmapframe.xml` -- and only its POSITION is chosen, by putting the outline's bounding-box centre
- * on the zone rect's centre. `ZoneHighlights.place` is that one function, and BOTH the hover mask and
- * the drawn art read it, so the two are the same shape by construction rather than by agreement.
+ * The measurement above says the outline and the zone rect are not proportional, and FOUR models
+ * read that as "so something must be scaled to compensate". It means the opposite. The art is
+ * authored against the zone's own `WorldMapArea` rect: the image spans the rect and the outline
+ * sits inside it exactly where the land is, coastal water included in the rect and excluded from
+ * the shape. Nothing is scaled, nothing is offset, and the bounding box is not read at all.
  *
- * Four earlier models each stretched something onto the rect, and the owner saw each of them as a
- * wrongly sized highlight -- the last one as a single highlight covering half of Kalimdor, which is
- * what `rect / bbox` does when a small bbox meets a big rect. A stretch cannot be right here: the two
- * are not proportional, and that is measured directly above.
+ * `ZoneHighlights.place` is that one function and carries the numbers that settled it. Both the
+ * hover mask and the drawn art read it, so the two are the same shape by construction.
  *
  * The art NAME is the `WorldMapArea` row's, and it is not always the zone's: Azshara's art is
  * **"Aszhara"** -- Blizzard's own typo -- so `aszharahighlight.blp` answers 200 where the spelling a
@@ -76,25 +74,23 @@ interface BlpSpec {
   mipmaps: { width: number; height: number; data: Uint8Array }[];
 }
 
+/**
+ * **NO BOUNDING BOX, and its absence is the fix.**
+ *
+ * Three models measured the outline's extent inside the image and scaled or offset the drawing by it.
+ * All three were correcting a placement that needed no correction: the art is authored against the
+ * zone's own `WorldMapArea` rect, so the image spans the rect and the outline is already where the
+ * land is. See `ZoneHighlights.place`.
+ *
+ * The scan that computed it is gone with it -- four compares per bright pixel that fed nothing. What
+ * the decode still needs from that pass is one bit: whether ANY pixel is bright, because a file that
+ * decodes and carries no outline is absent rather than empty.
+ */
 interface Shape {
   width: number;
   height: number;
   /** One LUMINANCE byte per pixel, row-major from the top -- the decoder's own order. */
   mask: Uint8Array;
-  /**
-   * The outline's bounding box inside the image, 0..1 -- **the one thing the placement needs.**
-   *
-   * The outline does not fill the image (Elwynn's occupies x 0.219..0.844, y 0.125..0.562 of the
-   * 128x128), so the image cannot simply be pinned to the zone rect: its centre is not the shape's
-   * centre. `ZoneHighlights.place` puts THIS box's centre on the zone rect's centre and draws the
-   * image at its authored size around it, which is the only use this box has.
-   *
-   * It was previously STRETCHED onto the zone rect, and the measurement in the file header is why
-   * that had to go: box and rect disagree by up to 58% in both directions, so scaling one onto the
-   * other multiplies the shape by an arbitrary factor. On a big rect with a small box that factor is
-   * large, and the owner saw the result -- one highlight covering half a continent.
-   */
-  bounds: { left: number; right: number; top: number; bottom: number };
 }
 
 /**
@@ -113,42 +109,11 @@ interface Shape {
 const OPAQUE = 20;
 
 /**
- * The highlight image's authored size, and the sheet's -- both from the client's own XML.
+ * A multiplier on the zone rect the highlight is drawn at, defaulting to **1**.
  *
- * **THIS IS WHY THERE IS NOTHING TO FIT, and both numbers are read out of the game's own files.**
- * `WorldMapHighlight` is `<AbsDimension x="128" y="128"/>` (`worldmapframe.xml:639-642`), and
- * `WorldMapButton_OnUpdate` multiplies the fractions `UpdateMapHighlight` hands back by that
- * button's own `GetWidth()`/`GetHeight()` (`worldmapframe.lua:747-748,765-766`), authored
- * `<AbsDimension x="1002" y="668"/>` (`worldmapframe.xml:698`). So a 128 px image drawn at its
- * NATURAL size is `128/1002` by `128/668` of the sheet -- derived, not fitted.
- *
- * It scales with the map rather than against it: in the minimised state the button is smaller and
- * the same fraction draws a smaller shape, which is what the whole sheet does.
- *
- * MEASURED against four zones -- the outline's decoded bounding box placed at 1:1 with its centre
- * on the zone rect's centre, against that rect:
- *
- *     Elwynn    shape x 0.411..0.491   rect 0.408..0.494  |  y 0.705..0.788   rect 0.704..0.789
- *     Westfall        x 0.389..0.441        0.372..0.458  |    y 0.750..0.852        0.758..0.844
- *     Duskwood        x 0.407..0.511        0.426..0.492  |    y 0.758..0.848        0.770..0.836
- *     Aszhara         x 0.574..0.670        0.553..0.691  |    y 0.322..0.424        0.304..0.442
- *
- * Elwynn lands within a thousandth on both axes. The others sit a little inside or a little over,
- * which is what a zone whose PLAYABLE rect includes coastal water should do -- the rect is not the
- * landmass, and demanding they coincide is the mistake that produced every earlier model here.
- */
-const HIGHLIGHT_PX = 128;
-
-const SHEET_WIDTH_UNITS = 1002;
-
-const SHEET_HEIGHT_UNITS = 668;
-
-/**
- * A multiplier on the derived size, defaulting to **1** because the derivation needs none.
- *
- * Kept as a knob rather than hard-coded: if a zone still draws wrong the useful question is whether
- * the derivation holds, and one live `window.worldMapHighlight(0.9)` answers that faster than
- * another round of arithmetic here.
+ * 1 is the derivation itself -- see `ZoneHighlights.place`. The knob stays because the last five
+ * models here were each wrong in a way one live `window.worldMapHighlight(1.1)` would have shown in
+ * a second, and the owner is the one who can see it.
  */
 let highlightScale: number | null = null;
 
@@ -166,29 +131,50 @@ class ZoneHighlights {
   private readonly loading = new Set<string>();
 
   /**
-   * Where the whole image sits on the sheet, so its outline lands on the zone -- all four 0..1.
+   * Where the whole image sits on the sheet: **the zone's own rect, exactly.** All four 0..1.
    *
-   * **ONE PLACEMENT, TWO USES: the hover reads it and the drawing reads it, so they cannot
-   * disagree.** The previous version had no placement at all -- it stretched the outline's bounding
-   * box onto the zone rect, which for a small box on a big rect is an enormous shape. That is why
-   * the owner saw a single highlight covering half of Kalimdor. Nothing is stretched now: the image
-   * draws at its authored size (see `HIGHLIGHT_PX`) and only its POSITION is chosen.
+   * ## THE SIXTH MODEL, AND THE FIRST ONE THAT IS A DERIVATION RATHER THAN A FIT
    *
-   * The centre is the anchor, because it is the only choice that needs no offset from a table this
-   * client does not have, and the four-zone measurement at `HIGHLIGHT_PX` says it is right.
+   * The art is authored against the zone's `WorldMapArea` rect. So there is no scale to choose and
+   * no offset to guess -- the image spans the rect, and the outline sits inside it wherever the land
+   * is. `UpdateMapHighlight` returns `textureX`/`textureY` as the rect's SIZE and
+   * `scrollChildX`/`scrollChildY` as its top-left, which is exactly the four numbers the client
+   * multiplies by the button's width and height (`worldmapframe.lua:765-772`).
+   *
+   * **The owner's two zones are what settled it, and they rule out a fixed size.** Every zone rect
+   * is square as a fraction of its sheet; measured on the served `worldmaparea.dbc` against the
+   * continent rows:
+   *
+   *     zone           rect on sheet    at a fixed 128/1002    verdict
+   *     Aszhara        0.138            0.128                  "выглядит как надо"
+   *     Winterspring   0.193            0.128                  "маленький", shape right
+   *     Teldrassil     0.138            0.128
+   *     Elwynn         0.085            0.128
+   *     Barrens        0.275            0.128
+   *
+   * A fixed size is 8% off for Azshara -- invisible -- and 34% short for Winterspring, which is
+   * exactly what he saw. The rect predicts both, and it predicts Barrens and Elwynn differing by a
+   * factor of three, which no constant can.
+   *
+   * ## What the four earlier models got wrong
+   *
+   * Three stretched the outline's BOUNDING BOX onto the rect, which multiplies the image by
+   * `rect / bbox` -- 33% too big for Azshara, and far worse for a zone whose land is a small part of
+   * its playable water. One drew the image at its authored 128x128, which is right only for a zone
+   * whose rect happens to be 0.128 of the sheet. **The bbox was never part of the answer**: the art
+   * already carries where the land is, and every model that measured the outline was correcting for
+   * a placement that did not need correcting.
    */
   private static place(
-    shape: Shape,
     zone: { left: number; right: number; top: number; bottom: number },
   ): { left: number; top: number; width: number; height: number } {
     const factor = highlightScale ?? 1;
-    const width = (HIGHLIGHT_PX / SHEET_WIDTH_UNITS) * factor;
-    const height = (HIGHLIGHT_PX / SHEET_HEIGHT_UNITS) * factor;
-    const midU = (shape.bounds.left + shape.bounds.right) / 2;
-    const midV = (shape.bounds.top + shape.bounds.bottom) / 2;
+    const width = (zone.right - zone.left) * factor;
+    const height = (zone.bottom - zone.top) * factor;
+    // Grown or shrunk about the CENTRE, so the knob cannot move the shape off the zone.
     return {
-      left: (zone.left + zone.right) / 2 - midU * width,
-      top: (zone.top + zone.bottom) / 2 - midV * height,
+      left: (zone.left + zone.right) / 2 - width / 2,
+      top: (zone.top + zone.bottom) / 2 - height / 2,
       width,
       height,
     };
@@ -220,7 +206,7 @@ class ZoneHighlights {
     if (shape === null) {
       return null;
     }
-    const at = ZoneHighlights.place(shape, zone);
+    const at = ZoneHighlights.place(zone);
     const tx = (sheetX - at.left) / at.width;
     const ty = (sheetY - at.top) / at.height;
     if (tx < 0 || tx > 1 || ty < 0 || ty > 1) {
@@ -237,7 +223,7 @@ class ZoneHighlights {
   drawRectFor(art: string, zone: { left: number; right: number; top: number; bottom: number }):
   { left: number; top: number; width: number; height: number } | null {
     const shape = this.shapes.get(art.toLowerCase()) ?? null;
-    return shape === null ? null : ZoneHighlights.place(shape, zone);
+    return shape === null ? null : ZoneHighlights.place(zone);
   }
 
   /** True once the shape is known to exist -- which is when the client may be told to draw it. */
@@ -265,10 +251,7 @@ class ZoneHighlights {
         // LUMINANCE, a quarter of the bytes, and the bounding box in the same pass. The decoder
         // gives RGBA in that order (`pipeline/blp/loader.js`).
         const mask = new Uint8Array(level.width * level.height);
-        let minX = level.width;
-        let maxX = -1;
-        let minY = level.height;
-        let maxY = -1;
+        let bright = false;
         for (let y = 0; y < level.height; y += 1) {
           for (let x = 0; x < level.width; x += 1) {
             const at = y * level.width + x;
@@ -276,29 +259,16 @@ class ZoneHighlights {
             const value = (level.data[o] + level.data[o + 1] + level.data[o + 2]) / 3;
             mask[at] = value;
             if (value >= OPAQUE) {
-              if (x < minX) { minX = x; }
-              if (x > maxX) { maxX = x; }
-              if (y < minY) { minY = y; }
-              if (y > maxY) { maxY = y; }
+              bright = true;
             }
           }
         }
-        if (maxX < 0) {
+        if (!bright) {
           // Nothing bright anywhere: the file decoded and carries no outline. Absent, not empty.
           this.shapes.set(key, null);
           return;
         }
-        this.shapes.set(key, {
-          width: level.width,
-          height: level.height,
-          mask,
-          bounds: {
-            left: minX / level.width,
-            right: (maxX + 1) / level.width,
-            top: minY / level.height,
-            bottom: (maxY + 1) / level.height,
-          },
-        });
+        this.shapes.set(key, { width: level.width, height: level.height, mask });
       } catch (error) {
         // Not remembered as a miss: a network failure is not an absent file, and the next hover asks
         // again. The in-flight release below is what makes that possible.
