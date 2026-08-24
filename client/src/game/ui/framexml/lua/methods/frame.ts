@@ -12,6 +12,7 @@
  * worth the confusion of two tasks touching the same name for different reasons.
  */
 import { MethodTable, onFrameTeardown, registerMethods } from '../object';
+import { questBlobs } from '../../../quest-blobs';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { NO_TINT } from '../../../backdrop';
 import type { BackdropTint, Insets } from '../../../backdrop';
@@ -704,18 +705,41 @@ function applyLayer(widget: { layer: Layer }, arg: unknown): void {
  * the loader dropped the element and `WorldMapBlobFrame` was nil.
  *
  * A blob is the shaded AREA a quest objective covers, drawn from the polygon the server sends with
- * `SMSG_QUEST_POI_QUERY_RESPONSE` -- which this client does not subscribe to, so there is no polygon to
- * fill and no fill to alpha.
+ * `SMSG_QUEST_POI_QUERY_RESPONSE`. **That reply has a subscriber now**
+ * (`network/game/object/quest-poi.ts`), so the polygon exists and `DrawQuestBlob` is real -- see
+ * `ui/quest-blobs.ts` for why it rasterises into a canvas rather than building regions.
+ *
+ * The two TEXTURE setters stay gaps, and honestly: `ui/quest-blobs.ts` fills with a flat colour
+ * rather than the client's tiling art, so accepting a texture name here would claim it was used.
+ * `SetBorderScalar` is the border's width multiplier and is in the same position.
  */
 const QUESTPOIFRAME: MethodTable = {
-  DrawQuestBlob: notImplemented('DrawQuestBlob',
-    'SMSG_QUEST_POI_QUERY_RESPONSE has no subscriber, so no objective polygon exists to fill'),
-  DrawBlob: notImplemented('DrawBlob', 'as DrawQuestBlob'),
-  SetFillTexture: notImplemented('SetFillTexture', 'as DrawQuestBlob'),
-  SetBorderTexture: notImplemented('SetBorderTexture', 'as DrawQuestBlob'),
-  SetFillAlpha: notImplemented('SetFillAlpha', 'as DrawQuestBlob'),
-  SetBorderAlpha: notImplemented('SetBorderAlpha', 'as DrawQuestBlob'),
-  SetBorderScalar: notImplemented('SetBorderScalar', 'as DrawQuestBlob'),
+  DrawQuestBlob: (ctx, self, args) => {
+    questBlobs.draw(
+      ctx,
+      Math.trunc(Number(args[0])) || 0,
+      !(args[1] === undefined || args[1] === null || args[1] === false),
+    );
+    return [];
+  },
+  // `DrawBlob(blobIndex, show)` is the same drawing keyed by POI id rather than quest id. Nothing
+  // in this client calls it -- checked against the served worldmapframe.lua -- so it stays a
+  // declared gap rather than a guess at which key it means.
+  DrawBlob: notImplemented('DrawBlob',
+    'no FrameXML caller; DrawQuestBlob is the one the map uses'),
+  SetFillTexture: notImplemented('SetFillTexture',
+    'ui/quest-blobs.ts fills with a flat colour, so a texture name would be ignored'),
+  SetBorderTexture: notImplemented('SetBorderTexture', 'as SetFillTexture'),
+  SetFillAlpha: (ctx, self, args) => {
+    questBlobs.setFillAlpha(Number(args[0]));
+    return [];
+  },
+  SetBorderAlpha: (ctx, self, args) => {
+    questBlobs.setBorderAlpha(Number(args[0]));
+    return [];
+  },
+  SetBorderScalar: notImplemented('SetBorderScalar',
+    'the border is drawn at a fixed 2px; see ui/quest-blobs.ts'),
 };
 
 /**

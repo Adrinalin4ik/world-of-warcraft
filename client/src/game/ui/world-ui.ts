@@ -50,6 +50,7 @@ import { attachReputationBridge } from './reputation-bridge';
 import { attachLootBridge } from './loot-bridge';
 import { attachMapBridge, MapBridge } from './map-bridge';
 import { attachMinimapTerrain, MinimapTerrainHost } from './minimap-terrain';
+import { questBlobs } from './quest-blobs';
 import { attachGossipBridge } from './gossip-bridge';
 import { attachInteractionWatch } from './interaction-watch';
 import { attachMerchantBridge } from './merchant-bridge';
@@ -669,6 +670,9 @@ export class WorldUiHost {
         // manifest; the DRAWING has to be here instead, because it creates regions on a `Minimap` frame
         // that does not exist until the manifest has built it. See `minimap-terrain.ts` on the split.
         this.minimapTerrain = attachMinimapTerrain(runtime.ctx, this.art, this.world);
+        // The blob raster needs a `GlueArt` and nothing else; the polygons reach it from
+        // `ui/map-bridge.ts`' sink and the draw call from the client's own widget method.
+        questBlobs.attach(this.art);
         // TALKING TO AN NPC, then BUYING AND SELLING. Gated on a real session for the reason the item
         // bridges are: a vendor's stock and a gossip menu are both packets, so an offline world has
         // neither and `world.game.objectHandler` must not be touched on that route.
@@ -934,7 +938,11 @@ export class WorldUiHost {
     // something else happened to dirty the interface. `boothBaked` is the same signal for the same
     // reason, and this project has twice been bitten by a discarded return hiding exactly this kind
     // of defect.
-    this.minimapRepainted = this.minimapTerrain?.tick() ?? false;
+    // OR, not a second flag: both are "a canvas this interface draws changed its contents", which the
+    // draw-list fingerprint cannot see. See `quest-blobs.ts#takeRepainted`. `takeRepainted` CLEARS,
+    // so it must be called every frame and before the short-circuit -- hence the explicit local.
+    const blobRepainted = questBlobs.takeRepainted();
+    this.minimapRepainted = (this.minimapTerrain?.tick() ?? false) || blobRepainted;
     this.sections.end('ui.tick');
 
     const viewport = { width: window.innerWidth, height: window.innerHeight };
@@ -1601,6 +1609,7 @@ export class WorldUiHost {
     // the attach order is what makes the chain's restore land on something live.
     this.mapBridge?.dispose();
     this.mapBridge = null;
+    questBlobs.dispose();
     this.minimapTerrain?.dispose();
     this.minimapTerrain = null;
     this.detachLoot?.();

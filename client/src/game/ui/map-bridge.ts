@@ -7,6 +7,7 @@ import type { MethodContext } from './framexml/lua/object';
 import { publishMapSelection, clearMapSelection } from './map-selection';
 import { zoneHighlights, setHighlightScale } from '../pipeline/zone-highlight';
 import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
+import { BlobPolygon, setBlobSource } from './quest-blobs';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -994,6 +995,44 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * `queryPois` drops ids it already has or has in flight, so a map repainting on a health tick
    * sends nothing. See `network/game/object/quest.ts#queryPois`.
    */
+  /**
+   * THE BLOB POLYGONS -- the same POI reply the pins read, projected onto the displayed sheet.
+   *
+   * Installed as a sink rather than passed, because `WorldMapBlobFrame:DrawQuestBlob` is a widget
+   * METHOD and a `MethodContext` carries no `World` (`ui/quest-blobs.ts` states the same reason).
+   * This is the half that knows the world, the quest handler and which sheet is open; the raster is
+   * the half that knows the canvas.
+   *
+   * Same map discipline as the pins and the player arrow: a POI's points are world coordinates
+   * inside its own `worldMapAreaId`, so a POI on another sheet contributes nothing rather than a
+   * polygon in the wrong place. A one- or two-point POI is a PIN and not an area -- it is the
+   * marker `QuestPOIGetIconInfo` already draws -- so only genuine polygons come through here.
+   */
+  setBlobSource((questId) => {
+    const row = selected();
+    if (row === null) {
+      return [];
+    }
+    const pois = world.game.objectHandler.questHandler.pois.get(questId) ?? [];
+    const out: BlobPolygon[] = [];
+    for (const poi of pois) {
+      if (poi.worldMapAreaId !== row.id || poi.points.length < 3) {
+        continue;
+      }
+      const points: { x: number; y: number }[] = [];
+      for (const point of poi.points) {
+        const at = mapData.normalise(row, point.x, point.y);
+        if (at !== null) {
+          points.push(at);
+        }
+      }
+      if (points.length >= 3) {
+        out.push({ points });
+      }
+    }
+    return out;
+  });
+
   fn('QuestPOIUpdateIcons', () => {
     const player = world.player;
     if (!player) {
@@ -1289,6 +1328,8 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       delete (window as unknown as Record<string, unknown>).worldZone;
       delete (window as unknown as Record<string, unknown>).worldMap;
       delete (window as unknown as Record<string, unknown>).worldMapHighlight;
+      // The blob source outlives this bridge otherwise, and it closes over a disposed world.
+      setBlobSource(null);
     },
   };
 }
