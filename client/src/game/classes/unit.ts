@@ -69,6 +69,7 @@ import {
 } from "../../network/game/object/update-object/character-stats";
 import type { SkillSlot } from "../../network/game/object/update-object/player-skills";
 import type { QuestLogSlot } from "../../network/game/object/update-object/quest-log";
+import { emptyExploredZones } from "../../network/game/object/update-object/explored-zones";
 
 enum SlopeType {
   sliding,
@@ -486,6 +487,19 @@ class Unit extends Entity {
    * any packet -- is where the quest log's membership actually lives.
    */
   public questLog: Map<number, QuestLogSlot> = new Map<number, QuestLogSlot>();
+
+  /**
+   * THE EXPLORED-ZONES BITFIELD -- `PLAYER_EXPLORED_ZONES_1`, 128 words of it.
+   *
+   * Beside `questLog` and for the same reason: exploration is a descriptor and not a packet, so
+   * this is where the world map learns which overlay patches it may draw. See
+   * `update-object/explored-zones.ts`, which derives the 128 from the field table.
+   *
+   * A `Uint32Array` and not a `Set` of area ids: the wire gives words, the DBC gives a bit index,
+   * and 512 bytes answers any of 4096 areas in one mask -- a Set would allocate on every merge
+   * of a block that mentioned nothing new.
+   */
+  public exploredZones: Uint32Array = emptyExploredZones();
 
   /** Whether the death one-shot is armed. Written only by `setDead`, which is edge-triggered. */
   public dead: boolean = false;

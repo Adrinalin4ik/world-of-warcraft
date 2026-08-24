@@ -77,6 +77,9 @@ class MapData {
    */
   private order: WorldMapAreaRow[] = [];
 
+  /** `WorldMapArea.id` -> its explored-area overlays, in file order. */
+  private byOverlayArea = new Map<number, OverlayRow[]>();
+
   /** Per continent mapID, the sheet's extent in ADT tile indices. See `load`. */
   private sheets = new Map<number, SheetBounds>();
 
@@ -102,19 +105,20 @@ class MapData {
   }
 
   private async load(): Promise<void> {
-    const [areaTable, worldMapArea, maps, continents, transforms] = await Promise.all([
+    const [areaTable, worldMapArea, maps, continents, transforms, overlays] = await Promise.all([
       DBC.load('AreaTable'),
       DBC.load('WorldMapArea'),
       DBC.load('Map'),
       DBC.load('WorldMapContinent'),
       DBC.load('WorldMapTransforms'),
+      DBC.load('WorldMapOverlay'),
     ]);
 
     const areas = new Map<number, AreaRow>();
     for (const record of recordsOf(areaTable)) {
       const row = record as {
         id?: number; name?: unknown; parentID?: number; mapID?: number;
-        flags?: number; factionGroupID?: number;
+        flags?: number; factionGroupID?: number; areaBit?: number;
       };
       if (typeof row.id !== 'number') {
         continue;
@@ -128,6 +132,7 @@ class MapData {
         // file: Elwynn Forest (12) is 2, Durotar (14) is 4, Stranglethorn Vale (33) is 0 and Dalaran
         // (4395) is 6. So 2 is Alliance, 4 is Horde, 6 is both (a sanctuary) and 0 is contested.
         factionGroupMask: typeof row.factionGroupID === 'number' ? row.factionGroupID : 0,
+        areaBit: typeof row.areaBit === 'number' ? row.areaBit : -1,
       });
     }
     this.areas = areas;
@@ -170,6 +175,46 @@ class MapData {
     this.byMap = byMap;
     this.byMapArea = byMapArea;
     this.order = order;
+
+    /**
+     * THE EXPLORED-AREA PATCHES, grouped by the `WorldMapArea` row they belong to.
+     *
+     * `worldmapoverlay.dbc` is 988 records of 17 fields at 68 bytes, and the entity at
+     * `wow-data-parser/dbc/entities/world-map-overlay.js` already names every one of them -- so this
+     * is a read, not a decode. Elwynn has twelve, measured on the served file: `STORMWIND` 485x405 at
+     * offset 0,0 through `STONECAIRNLAKE` 310x256 at 587,190.
+     *
+     * `mapAreaID` is the `WorldMapArea` ROW id and not a map id, so the grouping key is `row.id` --
+     * which is why that field is on `WorldMapAreaRow` at all.
+     *
+     * `areaIDs` is up to four `AreaTable` ids and the trailing slots are 0. An overlay is drawn when
+     * the player has explored ANY of them, which is what `areaBit` is for -- see `mapData.overlaysOf`.
+     */
+    const byOverlayArea = new Map<number, OverlayRow[]>();
+    for (const record of recordsOf(overlays)) {
+      const row = record as {
+        mapAreaID?: number; areaIDs?: number[]; textureName?: unknown;
+        textureWidth?: number; textureHeight?: number; offsetX?: number; offsetY?: number;
+      };
+      if (typeof row.mapAreaID !== 'number' || typeof row.textureName !== 'string') {
+        continue;
+      }
+      const built: OverlayRow = {
+        textureName: row.textureName,
+        width: typeof row.textureWidth === 'number' ? row.textureWidth : 0,
+        height: typeof row.textureHeight === 'number' ? row.textureHeight : 0,
+        offsetX: typeof row.offsetX === 'number' ? row.offsetX : 0,
+        offsetY: typeof row.offsetY === 'number' ? row.offsetY : 0,
+        areaIds: (row.areaIDs ?? []).filter((id) => id > 0),
+      };
+      const list = byOverlayArea.get(row.mapAreaID);
+      if (list === undefined) {
+        byOverlayArea.set(row.mapAreaID, [built]);
+      } else {
+        list.push(built);
+      }
+    }
+    this.byOverlayArea = byOverlayArea;
 
     /**
      * THE CONTINENT ORDER, and it is NOT `WorldMapArea`'s file order.
@@ -515,6 +560,28 @@ class MapData {
    * The two differ and the art folder is the wrong one to show: `WorldMapArea` 30's art is "Elwynn" while
    * `AreaTable` 12 is "Elwynn Forest". Corroborated on the served files.
    */
+  /**
+   * The explored-area patches for a zone that the player has actually explored, in file order.
+   *
+   * **THE ENGINE FILTERS BY EXPLORATION, and the client's own loop shows it does so by returning an
+   * EMPTY NAME rather than a shorter list.** `WorldMapFrame_Update` iterates `1..GetNumMapOverlays()`
+   * and skips a row whose `textureName` is nil or `""` (`worldmapframe.lua:303-306`), so the count is
+   * stable and the gaps are in the values. This returns the FILTERED list and the bridge answers its
+   * length, which is the same thing the client sees -- one fewer index to keep straight.
+   *
+   * `explored` is asked per `AreaTable` id and any one of the row's up-to-four ids is enough. An
+   * `areaBit` of -1 can never be explored and is dropped by the caller, not here.
+   */
+  overlaysOf(row: WorldMapAreaRow, explored: (areaId: number) => boolean): OverlayRow[] {
+    const all = this.byOverlayArea.get(row.id) ?? [];
+    return all.filter((overlay) => overlay.areaIds.some((areaId) => explored(areaId)));
+  }
+
+  /** This area's bit index into the explored-zones field, or -1 when the DBC gives it none. */
+  areaBitOf(areaId: number): number {
+    return this.areas.get(areaId)?.areaBit ?? -1;
+  }
+
   displayName(row: WorldMapAreaRow): string {
     return this.areas.get(row.areaId)?.name ?? row.art;
   }
@@ -673,6 +740,37 @@ export interface AreaRow {
   flags: number;
   /** 2 = Alliance, 4 = Horde, 6 = both (sanctuary), 0 = contested. See `load`. */
   factionGroupMask: number;
+  /**
+   * `areaBit` -- this area's index into the player's explored-zones bitfield, or **-1** for none.
+   *
+   * The server sends 128 dwords at `player_explored_zones_1`
+   * (`network/game/object/enums.ts:462`), so bit `areaBit` of word `areaBit >> 5` is "this area has
+   * been visited". -1 is the DBC's own "no bit", carried through rather than clamped to 0: word 0
+   * bit 0 is a real area, and defaulting to it would mark every bitless row explored the moment the
+   * player entered that one.
+   */
+  areaBit: number;
+}
+
+/** One `WorldMapOverlay` row -- an explored-area patch drawn over a zone's base art. */
+export interface OverlayRow {
+  /**
+   * The BARE texture name, e.g. `STORMWIND`. Not a path and not a file.
+   *
+   * The client appends a 1-based tile index to whatever it is handed and the engine prefixes the
+   * zone's art folder, so the file is `Interface\\WorldMap\\<art>\\<textureName><n>`. Verified on the
+   * host: `interface/worldmap/elwynn/stormwind1.blp` answers 200 with a `BLP2` header, and a name
+   * that does not exist answers 404 with 27 KB of HTML -- the trap this project has hit before.
+   */
+  textureName: string;
+  /** Both in the sheet's own pixels, which the client cuts into 256-px tiles itself. */
+  width: number;
+  height: number;
+  /** From the sheet's TOP-LEFT, in the same pixels. The client negates `offsetY` itself. */
+  offsetX: number;
+  offsetY: number;
+  /** Up to four `AreaTable` ids; any one of them explored shows the patch. Zeros dropped. */
+  areaIds: number[];
 }
 
 /** One `WorldMapArea` row: which art draws it, and the world-space rect it covers. */

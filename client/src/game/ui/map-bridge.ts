@@ -1,4 +1,4 @@
-import { mapData } from '../pipeline/dbc/map-data';
+import { mapData, OverlayRow } from '../pipeline/dbc/map-data';
 import type { WorldMapAreaRow } from '../pipeline/dbc/map-data';
 import { fireEvent } from './framexml/lua/events';
 import type { LuaVM } from './framexml/lua/vm';
@@ -6,6 +6,7 @@ import type World from '../world';
 import type { MethodContext } from './framexml/lua/object';
 import { publishMapSelection, clearMapSelection } from './map-selection';
 import { zoneHighlights, setHighlightScale } from '../pipeline/zone-highlight';
+import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -520,8 +521,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * means "there are none", and here that is true:
    *
    *  - Dungeon levels: this client enters no instances, so no levels and level 0.
-   *  - Overlays: the explored-area patches. `WorldMapOverlay.dbc` PARSES already (the entity is
-   *    registered) and nothing reads it, so 0 draws the base art only. A real gap, named.
+   *  - Overlays: CLOSED, and no longer on this list -- see `GetNumMapOverlays` below.
    *  - Landmarks: `SMSG_WORLD_MAP_LANDMARKS`-fed points of interest, with no subscriber. Named.
    *  - Debug objects: a development surface with no data behind it in any build.
    */
@@ -529,7 +529,37 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
   fn('GetNumDungeonMapLevels', () => [0]);
   fn('SetDungeonMapLevel', () => []);
   fn('DungeonUsesTerrainMap', () => [false]);
-  fn('GetNumMapOverlays', () => [0]);
+  /**
+   * THE EXPLORED-AREA PATCHES -- "разведанные территории", and the count is the EXPLORED count.
+   *
+   * `WorldMapFrame_Update` walks `1..GetNumMapOverlays()` and skips any row whose `textureName` is
+   * nil or empty (`worldmapframe.lua:303-306`), so the engine is free to answer either a stable
+   * count with holes in the values or a filtered count with none. This answers the FILTERED count,
+   * because the two are indistinguishable to that loop and one index is easier to keep straight
+   * than two.
+   *
+   * Exploration comes from the player's own descriptor -- `PLAYER_EXPLORED_ZONES_1`, 128 words,
+   * indexed by `AreaTable.areaBit` (`update-object/explored-zones.ts`). Nothing on the wire
+   * announces a discovery; the word changes and the map must notice. That is why the merge returns
+   * a flag and why `applyUnitFields` folds it into the one it emits on.
+   *
+   * NOT the selected sheet but the selected ROW: overlays hang off a `WorldMapArea` row id, and on
+   * the World or Cosmic sheet there is no row, so the list is empty and the client draws base art.
+   */
+  const overlaysNow = (): OverlayRow[] => {
+    const row = selected();
+    const player = world.player;
+    if (row === null || !player) {
+      return [];
+    }
+    const zones = player.exploredZones;
+    return mapData.overlaysOf(
+      row,
+      (areaId) => isAreaExplored(zones, mapData.areaBitOf(areaId)),
+    );
+  };
+
+  fn('GetNumMapOverlays', () => [overlaysNow().length]);
   fn('GetNumMapLandmarks', () => [0]);
   fn('GetNumMapDebugObjects', () => [0]);
 
@@ -848,16 +878,49 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
   fn('GetMapDebugObjectInfo', () => [null]);
 
   /**
-   * THE LANDMARK AND OVERLAY GETTERS, unreachable behind their own counts of 0 and registered anyway.
+   * THE LANDMARK GETTERS, unreachable behind a count of 0 and registered anyway.
    *
-   * Same rule as above, and the same reason the counts sit at 0 twenty lines up: `WorldMapOverlay.dbc`
-   * parses and nothing reads it, and `SMSG_WORLD_MAP_LANDMARKS` has no subscriber. Both already named as
-   * real gaps there; these are their getters, not new gaps.
-   *
-   * `ClickLandmark` is the one an owner could reach by gesture -- but only by clicking a landmark that
-   * cannot be drawn, so there is no route to it either.
+   * Same rule as above: `SMSG_WORLD_MAP_LANDMARKS` has no subscriber, so the count sits at 0 and this
+   * is its getter rather than a new gap. `ClickLandmark` is the one an owner could reach by gesture --
+   * but only by clicking a landmark that cannot be drawn, so there is no route to it either.
    */
-  fn('GetMapOverlayInfo', () => [null]);
+  /**
+   * ONE EXPLORED-AREA PATCH -- the seven values the client's overlay loop destructures.
+   *
+   * Order is the client's own, read off the call and not from memory: `textureName, textureWidth,
+   * textureHeight, offsetX, offsetY, mapPointX, mapPointY` (`worldmapframe.lua:305`).
+   *
+   * **`textureName` is a PATH here and a bare name in the DBC.** The client appends a 1-based tile
+   * index to whatever it gets -- `SetTexture(textureName..n)` at `worldmapframe.lua:351` -- so the
+   * engine must hand back everything up to that index. `Interface\WorldMap\<art>\<name>` is the
+   * shape, verified on the host: `interface/worldmap/elwynn/stormwind1.blp` answers 200 with a
+   * `BLP2` header.
+   *
+   * `mapPointX`/`mapPointY` are 0 in every one of the 988 rows on the served file, so they are
+   * passed through as the zeros they are rather than invented. The client destructures them and
+   * never reads them.
+   *
+   * The index is 1-based and out of range answers nil, which the loop's own `if ( textureName ...`
+   * guard already handles -- the same shape as an unexplored row in the real engine.
+   */
+  fn('GetMapOverlayInfo', (args) => {
+    const index = Math.trunc(Number(args[0]));
+    const row = selected();
+    const list = overlaysNow();
+    const overlay = index >= 1 && index <= list.length ? list[index - 1] : null;
+    if (overlay === null || row === null) {
+      return [null];
+    }
+    return [
+      `Interface\\WorldMap\\${row.art}\\${overlay.textureName}`,
+      overlay.width,
+      overlay.height,
+      overlay.offsetX,
+      overlay.offsetY,
+      0,
+      0,
+    ];
+  });
   fn('GetMapLandmarkInfo', () => [null]);
   fn('ClickLandmark', () => []);
 

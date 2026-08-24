@@ -41,6 +41,7 @@ import { ObjectType, PlayerField, UnitField } from '../enums';
 import { mergeCharacterStats } from './character-stats';
 import { mergePlayerSkills } from './player-skills';
 import { mergeQuestLog } from './quest-log';
+import { mergeExploredZones } from './explored-zones';
 
 /** What one values block said about a unit. Every field optional -- see the header. */
 export interface UnitFieldUpdate {
@@ -508,6 +509,11 @@ export function applyUnitFields(
   // each returns is a real comparison against the stored value rather than "a word arrived": a create
   // block resends every stat a character has, so gating on arrival would fire on every create.
   changed = mergeQuestLog(unit.questLog, values, type) || changed;
+
+  // EXPLORATION, on the same contract and for the same reason: walking into a new subzone writes
+  // one word of `PLAYER_EXPLORED_ZONES_1` and nothing else, so a discarded return would leave the
+  // world map with a patch it never learns to draw. `explored-zones.ts` derives the 128 words.
+  changed = mergeExploredZones(unit.exploredZones, values, type) || changed;
 
   // SPELL POWER is seven numbers and lives beside `fields`, not in it -- see `SPELL_SCHOOL_COUNT`.
   const spellDamage = readSpellDamage(values);
