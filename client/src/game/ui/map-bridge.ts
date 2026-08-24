@@ -784,6 +784,8 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * after a map opens responsive rather than dead. That is a different answer from "outside": null
    * means ask again, false means this point is not in this zone.
    */
+  type SheetRect = { left: number; right: number; top: number; bottom: number };
+
   const zoneAtPoint = (fractionX: number, fractionY: number): {
     row: WorldMapAreaRow; rect: { left: number; right: number; top: number; bottom: number };
   } | null => {
@@ -794,19 +796,38 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     if (continent === undefined) {
       return null;
     }
-    const row = mapData.zoneAtSheetPoint(continent.mapId, fractionX, fractionY);
-    if (row === null) {
-      return null;
+    /**
+     * **ASK EVERY CANDIDATE, because the rects overlap -- this is the zone-name bug, measured.**
+     *
+     * The owner hovered the Barrens and `window.worldMapHover()` reported `art: "Mulgore"`,
+     * `inside: false`, `luminance: 0`. Mulgore's rect contains that point and is the smaller of the
+     * two, so it was the only candidate tested; its outline correctly rejected the point, and the
+     * old code returned null rather than trying the Barrens. Hence a name in one small patch and
+     * nowhere else -- and hence a highlight that looked right whenever the patch was reached.
+     *
+     * The outline is what distinguishes overlapping rects, so each candidate is asked in
+     * smallest-rect-first order and the first whose SHAPE accepts wins.
+     *
+     * A candidate whose art has not loaded answers null, not false. That is kept as a FALLBACK
+     * rather than accepted outright: a definite yes from a larger zone should beat a "do not know"
+     * from a smaller one, and answering the unknown immediately would reinstate exactly the
+     * first-match behaviour this fixes for the first second after a map opens.
+     */
+    let fallback: { row: WorldMapAreaRow; rect: SheetRect } | null = null;
+    for (const row of mapData.zonesAtSheetPoint(continent.mapId, fractionX, fractionY)) {
+      const rect = mapData.sheetRectOfZone(continent.mapId, row);
+      if (rect === null) {
+        continue;
+      }
+      const opaque = zoneHighlights.opaqueAtSheetPoint(row.art, rect, fractionX, fractionY);
+      if (opaque === true) {
+        return { row, rect };
+      }
+      if (opaque === null && fallback === null) {
+        fallback = { row, rect };
+      }
     }
-    const rect = mapData.sheetRectOfZone(continent.mapId, row);
-    if (rect === null) {
-      return null;
-    }
-    // The SHEET point and the zone rect, not a fraction inside it: the shape is placed on the
-    // sheet at its authored size now, and the drawing reads the same placement.
-    return zoneHighlights.opaqueAtSheetPoint(row.art, rect, fractionX, fractionY) === false
-      ? null
-      : { row, rect };
+    return fallback;
   };
 
   /**

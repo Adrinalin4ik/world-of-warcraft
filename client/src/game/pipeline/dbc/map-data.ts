@@ -479,8 +479,29 @@ class MapData {
     if (continent === null) {
       return null;
     }
-    let best: WorldMapAreaRow | null = null;
-    let bestArea = Infinity;
+    return this.zonesAtSheetPoint(mapId, fractionX, fractionY)[0] ?? null;
+  }
+
+  /**
+   * EVERY zone whose rect contains the point, SMALLEST rect first.
+   *
+   * **The rects OVERLAP, and answering only the smallest is what lost the zone name.** Measured
+   * live from the owner's own hover: the point `(0.524, 0.607)` on the Kalimdor sheet lies inside
+   * Mulgore's rect (0.408..0.548 x, 0.533..0.672 y) AND inside the Barrens' much larger one, and he
+   * was over the Barrens. The old code returned Mulgore because its rect is smaller, the outline
+   * mask then correctly answered "not my land", and the caller gave up -- so hovering most of the
+   * Barrens named nothing while the small patch where the Barrens' own rect wins named it.
+   *
+   * The SHAPE is the discriminator between overlapping rects, so the caller needs all of the
+   * candidates to ask it about. Smallest first because that is the right preference among zones
+   * whose shape accepts equally, and the right fallback when no art is loaded yet.
+   */
+  zonesAtSheetPoint(mapId: number, fractionX: number, fractionY: number): WorldMapAreaRow[] {
+    const continent = this.worldMapArea(mapId, 0);
+    if (continent === null) {
+      return [];
+    }
+    const hits: { row: WorldMapAreaRow; area: number }[] = [];
     for (const row of this.zonesOn(mapId)) {
       const rect = sheetRect(this.placedRect(row, mapId), continent);
       if (rect === null) {
@@ -490,13 +511,10 @@ class MapData {
         || fractionY < rect.top || fractionY > rect.bottom) {
         continue;
       }
-      const area = (rect.right - rect.left) * (rect.bottom - rect.top);
-      if (area < bestArea) {
-        bestArea = area;
-        best = row;
-      }
+      hits.push({ row, area: (rect.right - rect.left) * (rect.bottom - rect.top) });
     }
-    return best;
+    hits.sort((a, b) => a.area - b.area);
+    return hits.map((hit) => hit.row);
   }
 
   /** The `WorldMapArea` row for a zone, or null. `areaId` 0 is the continent-wide sheet. */
