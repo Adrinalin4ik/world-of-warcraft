@@ -144,6 +144,42 @@ class ZoneHighlights {
     return shape.mask[y * shape.width + x] >= OPAQUE;
   }
 
+  /**
+   * The rect to draw the WHOLE image at, so its outline lands on the zone -- both 0..1 on the sheet.
+ *
+   * **THE SAME ALIGNMENT THE MASK USES, applied to the drawing, and that is the point.** The mask
+   * stretches the outline's bounding box onto the zone rect; this inverts exactly that, so what
+   * lights up is what the hover agreed with. One registration, two uses -- and the alternative was a
+   * fourth independent guess at a placement no table in this client states.
+ *
+   * WHAT IT COSTS, stated because the owner will see it: the `WorldMapArea` rect is the zone's
+   * PLAYABLE bounds and includes coastal water, while the outline is its land. Stretching one onto
+   * the other draws the shape slightly LARGER than the landmass -- which is the "зона больше чем
+   * надо выделена" he reported when this was first tried. It is in the right place, it agrees with
+   * the hover, and it is generous at the coast. That is a different and smaller error than the three
+   * placements that were simply wrong, and it is the best available until a source turns up.
+   */
+  drawRectFor(art: string, zone: { left: number; right: number; top: number; bottom: number }):
+  { left: number; top: number; width: number; height: number } | null {
+    const shape = this.shapes.get(art.toLowerCase()) ?? null;
+    if (shape === null) {
+      return null;
+    }
+    const across = shape.bounds.right - shape.bounds.left;
+    const down = shape.bounds.bottom - shape.bounds.top;
+    if (across <= 0 || down <= 0) {
+      return null;
+    }
+    const width = (zone.right - zone.left) / across;
+    const height = (zone.bottom - zone.top) / down;
+    return {
+      left: zone.left - shape.bounds.left * width,
+      top: zone.top - shape.bounds.top * height,
+      width,
+      height,
+    };
+  }
+
   /** True once the shape is known to exist -- which is when the client may be told to draw it. */
   has(art: string): boolean {
     return (this.shapes.get(art.toLowerCase()) ?? null) !== null;
