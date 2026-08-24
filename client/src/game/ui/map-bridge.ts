@@ -5,6 +5,7 @@ import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
 import type { MethodContext } from './framexml/lua/object';
 import { publishMapSelection, clearMapSelection } from './map-selection';
+import { zoneHighlights } from '../pipeline/zone-highlight';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -652,7 +653,25 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * Only a CONTINENT sheet has zones to find: on a zone sheet the client is already zoomed in, and on
    * the World or Cosmic sheet the buttons the client authors do the navigating.
    */
-  const zoneAtPoint = (fractionX: number, fractionY: number): WorldMapAreaRow | null => {
+  /**
+   * The zone under a point on the current CONTINENT sheet, tested against its SHAPE and not its rect.
+   *
+   * The rect is only the first pass. `WorldMapArea` gives a bounding rectangle, and the owner found
+   * what that costs: hovering open water "очень далеко от локации" named Winterspring, because a
+   * ragged coastline's bounding box is mostly sea. The real engine tests the zone's highlight
+   * TEXTURE, whose alpha IS the outline -- so `pipeline/zone-highlight.ts` reads that alpha and this
+   * asks it.
+   *
+   * Ordered rect-first because the rect is the cheap reject: it removes every zone but one or two
+   * before any shape is sampled, and the sample is an array index.
+   *
+   * **A shape that has not landed yet answers null and the rect stands**, which keeps the first hover
+   * after a map opens responsive rather than dead. That is a different answer from "outside": null
+   * means ask again, false means this point is not in this zone.
+   */
+  const zoneAtPoint = (fractionX: number, fractionY: number): {
+    row: WorldMapAreaRow; rect: { left: number; right: number; top: number; bottom: number };
+  } | null => {
     if (continentIndex < 1 || zoneIndex !== 0 || !mapData.loaded) {
       return null;
     }
@@ -660,7 +679,18 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     if (continent === undefined) {
       return null;
     }
-    return mapData.zoneAtSheetPoint(continent.mapId, fractionX, fractionY);
+    const row = mapData.zoneAtSheetPoint(continent.mapId, fractionX, fractionY);
+    if (row === null) {
+      return null;
+    }
+    const rect = mapData.sheetRectOfZone(continent.mapId, row);
+    if (rect === null) {
+      return null;
+    }
+    // The point as a fraction INSIDE the zone, which is what the shape is indexed by.
+    const u = (fractionX - rect.left) / (rect.right - rect.left);
+    const v = (fractionY - rect.top) / (rect.bottom - rect.top);
+    return zoneHighlights.opaqueAt(row.art, u, v) === false ? null : { row, rect };
   };
 
   /**
@@ -716,9 +746,28 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
   fn('UpdateMapHighlight', (args) => {
     const x = Number(args[0]);
     const y = Number(args[1]);
-    const row = zoneAtPoint(x, y);
-    if (row !== null) {
-      return [mapData.displayName(row), null, null, null, null, null, null, null];
+    const hit = zoneAtPoint(x, y);
+    if (hit !== null) {
+      const { row, rect } = hit;
+      /**
+       * THE ART IS ANSWERED ONLY ONCE ITS SHAPE IS KNOWN TO EXIST, and the two conditions are the
+       * same one: the file this names is the file the hit test just sampled. So the client is never
+       * told to load art that is not there, and the highlight it draws is the outline the hover
+       * agreed with.
+       *
+       * The five numbers are fractions of the MAP, which is what the client multiplies them by:
+       * `textureX = textureX * width` for the size and `scrollChildX = scrollChildX * width` for the
+       * placement (`worldmapframe.lua:765-771`). `texPercentageX/Y` are the used fraction of the
+       * texture and are 1 here -- the highlight BLP is the zone rect exactly, which is why sampling
+       * it with the same rect works.
+       */
+      const art = zoneHighlights.has(row.art) ? row.art : null;
+      return art === null
+        ? [mapData.displayName(row), null, null, null, null, null, null, null]
+        : [
+          mapData.displayName(row), art, 1, 1,
+          rect.right - rect.left, rect.bottom - rect.top, rect.left, rect.top,
+        ];
     }
     // The World sheet names a CONTINENT instead, from `Map.dbc` -- "Eastern Kingdoms", not the art
     // folder "Azeroth", the same distinction `GetMapContinents` makes.
@@ -867,8 +916,8 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
   fn('ProcessMapClick', (args) => {
     const x = Number(args[0]);
     const y = Number(args[1]);
-    const row = zoneAtPoint(x, y);
-    if (row === null) {
+    const hit = zoneAtPoint(x, y);
+    if (hit === null) {
       // On the World sheet a click picks a CONTINENT, which is the zoom step above a zone.
       const continent = continentAtPoint(x, y);
       if (continent > 0) {
@@ -879,7 +928,8 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       return [];
     }
     const continent = mapData.continents()[continentIndex - 1];
-    const index = mapData.zonesOn(continent.mapId).findIndex((zone) => zone.areaId === row.areaId);
+    const index = mapData.zonesOn(continent.mapId)
+      .findIndex((zone) => zone.areaId === hit.row.areaId);
     if (index < 0) {
       return [];
     }

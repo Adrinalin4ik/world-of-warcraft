@@ -352,6 +352,19 @@ class MapData {
    * Linear over the continent -- 25 rows for Eastern Kingdoms out of 108 in the whole table. It runs
    * on a click and on a cursor move over the map, not per frame.
    */
+  /**
+   * A zone's rect on its continent sheet, for a caller that needs the rect and not just the hit.
+   *
+   * `UpdateMapHighlight` has to answer WHERE the highlight goes as well as which zone it is, and the
+   * shape test needs the local `(u, v)` inside that rect -- both are this rect. Exposed rather than
+   * recomputed by the bridge, so there is one projection and not two.
+   */
+  sheetRectOfZone(mapId: number, row: WorldMapAreaRow):
+  { left: number; right: number; top: number; bottom: number } | null {
+    const sheet = this.sheets.get(mapId);
+    return sheet === undefined ? null : sheetRect(row, sheet);
+  }
+
   zoneAtSheetPoint(mapId: number, fractionX: number, fractionY: number): WorldMapAreaRow | null {
     const sheet = this.sheets.get(mapId);
     if (sheet === undefined) {
