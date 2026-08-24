@@ -748,28 +748,25 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     const y = Number(args[1]);
     const hit = zoneAtPoint(x, y);
     if (hit !== null) {
-      const { row, rect } = hit;
+      const { row } = hit;
       /**
-       * THE ART IS ANSWERED ONLY ONCE ITS SHAPE IS KNOWN, and the two conditions are the same one:
-       * the file this names is the file the hit test just sampled. So the client is never told to
-       * load art that is not there, and the highlight it draws is the outline the hover agreed with.
+       * THE NAME IS ANSWERED AND THE ART IS NOT, and that is a decision rather than an omission.
        *
-       * **THE RECT IS THE TEXTURE'S, NOT THE ZONE'S, and that was the scaling bug.** The client
-       * draws the WHOLE image at what it is given (`worldmapframe.lua:765-771`), and the outline
-       * fills only part of the image -- so handing it the zone rect squeezed a 128x128 into the
-       * zone. `drawRectFor` inverts the measured bounding box to get the rect at which the outline
-       * lands on the zone; see `pipeline/zone-highlight.ts`.
+       * The client's next lines are `WorldMapFrameAreaLabel:SetText(name)` and then
+       * `if ( fileName ) then ... else WorldMapHighlight:Hide() end` (`worldmapframe.lua:758-777`),
+       * so a nil `fileName` is its own "nothing is highlighted" branch -- the zone is named under
+       * the cursor and no art is drawn.
        *
-       * `texPercentageX/Y` stay 1: the image is a power of two with nothing to crop, and the part
-       * that is not outline is black, which the client draws additively.
+       * **Three models for where the art goes were tried and each was wrong on screen.** The
+       * measurements are in `pipeline/zone-highlight.ts`: across four zones, the outline's bounding
+       * box in the image and the zone's `WorldMapArea` rect disagree by up to 58% in both
+       * directions, so that rect is the zone's PLAYABLE bounds and not its drawn outline, and there
+       * is no fixed relation to invert. A fourth guess would be a fourth wrong highlight, so the
+       * gap is named instead.
+       *
+       * The mask is still read for the HOVER, and that part is not a guess -- see the same file.
        */
-      const draw = zoneHighlights.drawRectFor(row.art, rect);
-      return draw === null
-        ? [mapData.displayName(row), null, null, null, null, null, null, null]
-        : [
-          mapData.displayName(row), row.art, 1, 1,
-          draw.width, draw.height, draw.left, draw.top,
-        ];
+      return [mapData.displayName(row), null, null, null, null, null, null, null];
     }
     // The World sheet names a CONTINENT instead, from `Map.dbc` -- "Eastern Kingdoms", not the art
     // folder "Azeroth", the same distinction `GetMapContinents` makes.

@@ -21,10 +21,31 @@ import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
  * everywhere and the rect behaviour survived the fix meant to replace it. The outline is drawn bright
  * on black, so LUMINANCE is the mask -- see `OPAQUE`.
  *
- * **And the outline does not fill the image.** A block map of the decoded art puts Elwynn at roughly
- * x 0.25..0.78, y 0.19..0.50 of the 128x128. So the texture covers a region LARGER than the zone, and
- * drawing the whole image over the zone rect squeezes it -- the owner's "выделения не правильно
- * скалированы". `Shape#bounds` is measured in the same pass as the mask and `drawRectFor` inverts it.
+ * **And the outline does not fill the image, but HOW it sits in it is not derivable from any table I
+ * have found.** Measured, four zones, block-mapping the decoded art against each zone rect:
+ *
+ *     zone       zone rect (x)     outline bbox (x)   bbox*128 px   zone*1002 px
+ *     Elwynn     0.408..0.494      0.219..0.844            80             86
+ *     Westfall   0.372..0.458      0.281..0.688            52             86
+ *     Duskwood   0.426..0.492      0.094..0.906           104             66
+ *     Aszhara     0.553..0.691     0.125..0.875            96            138
+ *
+ * If the outline corresponded to the zone rect those last two columns would agree. They disagree by
+ * up to 58%, in both directions, so **the `WorldMapArea` rect is the zone's playable bounds and not
+ * its drawn outline** -- and no fixed relation between them exists to invert. I tried three models
+ * (whole image over the rect, bbox inverted onto the rect, and the image at its authored 128x128)
+ * and the owner saw each of them as a wrongly sized highlight.
+ *
+ * SO THE ART IS NOT DRAWN. `UpdateMapHighlight` answers the zone NAME and a nil `fileName`, which is
+ * the client's own "nothing is highlighted" branch, and the gap is named rather than filled with a
+ * fourth guess. `WorldMapHighlight` is authored 128x128 inside `WorldMapDetailFrame`
+ * (`worldmapframe.xml`), so the engine draws it at that natural size -- what is missing is where.
+ *
+ * THE MASK IS STILL WORTH READING, and this is the one part that is not a guess: sampling the image
+ * across the zone rect excludes the CORNERS of the rect, which is exactly the case the owner
+ * reported -- open sea far off a ragged coast. It is an approximation of the outline's placement and
+ * a strict improvement on no test at all, and it is labelled as such rather than presented as the
+ * engine's own answer.
  *
  * The art NAME is the `WorldMapArea` row's, and it is not always the zone's: Azshara's art is
  * **"Aszhara"** -- Blizzard's own typo -- so `aszharahighlight.blp` answers 200 where the spelling a
@@ -57,17 +78,6 @@ interface Shape {
   height: number;
   /** One LUMINANCE byte per pixel, row-major from the top -- the decoder's own order. */
   mask: Uint8Array;
-  /**
-   * The shape's bounding box inside the texture, 0..1.
-   *
-   * **This is what makes the highlight the right SIZE, and it had to be measured rather than
-   * assumed.** The art is a fixed 128x128 whatever the zone, and the outline occupies only part of
-   * it -- Elwynn's sits at roughly x 0.25..0.78, y 0.19..0.50, decoded and printed as a block map
-   * before this was written. So the texture covers a region LARGER than the zone, and the zone rect
-   * corresponds to this box rather than to the whole image. Drawing the whole image over the zone
-   * rect is what the owner saw as "выделения не правильно скалированы".
-   */
-  bounds: { left: number; right: number; top: number; bottom: number };
 }
 
 /**
@@ -109,44 +119,11 @@ class ZoneHighlights {
     if (u < 0 || u > 1 || v < 0 || v > 1) {
       return false;
     }
-    // `u`/`v` are 0..1 across the ZONE, and the zone corresponds to the mask's bounding box -- not
-    // to the whole texture. See `Shape#bounds`.
-    const tx = shape.bounds.left + u * (shape.bounds.right - shape.bounds.left);
-    const ty = shape.bounds.top + v * (shape.bounds.bottom - shape.bounds.top);
-    const x = Math.min(shape.width - 1, Math.floor(tx * shape.width));
-    const y = Math.min(shape.height - 1, Math.floor(ty * shape.height));
+    // `u`/`v` are 0..1 across the zone RECT and are sampled straight across the image. See the
+    // header on why that is an approximation and why it is still the right one to make.
+    const x = Math.min(shape.width - 1, Math.floor(u * shape.width));
+    const y = Math.min(shape.height - 1, Math.floor(v * shape.height));
     return shape.mask[y * shape.width + x] >= OPAQUE;
-  }
-
-  /**
-   * The rect to DRAW the whole texture at, given the zone rect -- both 0..1 on the sheet.
-   *
-   * The zone rect corresponds to the outline's bounding box INSIDE the texture, so the full texture
-   * covers a proportionally larger area: its width is `zoneWidth / boundsWidth`, and its left edge
-   * sits `boundsLeft` of that width before the zone's. That is what puts the outline exactly on the
-   * zone instead of squeezing a whole 128x128 into the zone rect.
-   *
-   * Null until the shape has landed, which is the same condition as the hover having a real answer.
-   */
-  drawRectFor(art: string, zone: { left: number; right: number; top: number; bottom: number }):
-  { left: number; top: number; width: number; height: number } | null {
-    const shape = this.shapes.get(art.toLowerCase()) ?? null;
-    if (shape === null) {
-      return null;
-    }
-    const across = shape.bounds.right - shape.bounds.left;
-    const down = shape.bounds.bottom - shape.bounds.top;
-    if (across <= 0 || down <= 0) {
-      return null;
-    }
-    const width = (zone.right - zone.left) / across;
-    const height = (zone.bottom - zone.top) / down;
-    return {
-      left: zone.left - shape.bounds.left * width,
-      top: zone.top - shape.bounds.top * height,
-      width,
-      height,
-    };
   }
 
   /** True once the shape is known to exist -- which is when the client may be told to draw it. */
@@ -174,40 +151,21 @@ class ZoneHighlights {
         // LUMINANCE, a quarter of the bytes, and the bounding box in the same pass. The decoder
         // gives RGBA in that order (`pipeline/blp/loader.js`).
         const mask = new Uint8Array(level.width * level.height);
-        let minX = level.width;
-        let maxX = -1;
-        let minY = level.height;
-        let maxY = -1;
-        for (let y = 0; y < level.height; y += 1) {
-          for (let x = 0; x < level.width; x += 1) {
-            const at = y * level.width + x;
-            const o = at * 4;
-            const value = (level.data[o] + level.data[o + 1] + level.data[o + 2]) / 3;
-            mask[at] = value;
-            if (value >= OPAQUE) {
-              if (x < minX) { minX = x; }
-              if (x > maxX) { maxX = x; }
-              if (y < minY) { minY = y; }
-              if (y > maxY) { maxY = y; }
-            }
+        let bright = 0;
+        for (let at = 0; at < mask.length; at += 1) {
+          const o = at * 4;
+          const value = (level.data[o] + level.data[o + 1] + level.data[o + 2]) / 3;
+          mask[at] = value;
+          if (value >= OPAQUE) {
+            bright += 1;
           }
         }
-        if (maxX < 0) {
+        if (bright === 0) {
           // Nothing bright anywhere: the file decoded and carries no outline. Absent, not empty.
           this.shapes.set(key, null);
           return;
         }
-        this.shapes.set(key, {
-          width: level.width,
-          height: level.height,
-          mask,
-          bounds: {
-            left: minX / level.width,
-            right: (maxX + 1) / level.width,
-            top: minY / level.height,
-            bottom: (maxY + 1) / level.height,
-          },
-        });
+        this.shapes.set(key, { width: level.width, height: level.height, mask });
       } catch (error) {
         // Not remembered as a miss: a network failure is not an absent file, and the next hover asks
         // again. The in-flight release below is what makes that possible.
