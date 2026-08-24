@@ -1383,12 +1383,32 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
       if (objective.requiredCount === 0) {
         return;
       }
-      // The objective's own text wins; failing that, the creature's name if it has ever been in view.
-      // See the header on why an unseen creature is answered as counts only.
+      /**
+       * The objective's own text wins; failing that, the creature's NAME -- and it is now ASKED FOR
+       * rather than only used if it happened to be in view.
+       *
+       * The owner: "квест на убийство мобов ... на цели нет названия, пишет 4/8 и нет названия
+       * чего." An ITEM objective names itself because the item cache is queried on sight of the
+       * quest; a KILL objective named nothing unless that creature had already been targeted,
+       * because nothing asked. A creature's name lives only in
+       * `SMSG_CREATURE_QUERY_RESPONSE` -- there is no `UNIT_FIELD_NAME`
+       * (`network/game/object/combat.ts:228-236`) -- so a mob the player has not met yet is
+       * genuinely unnamed until the query round-trips.
+       *
+       * A ZERO guid, and that is deliberate rather than a placeholder: the packet is
+       * `u32 entry` then a full 8-byte guid, and the server answers on the ENTRY. The guid is
+       * along for the ride, so there is nothing to invent -- and sending eight zero bytes keeps
+       * the body the width the server reads, which is the trap this project has hit twelve times.
+       *
+       * `queryCreature` dedupes on its own `asked` set, so this costs one packet per creature per
+       * session even though it is reached from a getter the quest log calls on every repaint.
+       * The high bit marks a GAME OBJECT rather than a creature, and those have their own query
+       * this client does not send -- so they are left as counts, as before.
+       */
       const entry = objective.creatureOrGo;
       const named = objective.text !== ''
         ? objective.text
-        : (entry & 0x80000000) === 0 ? combat.creatureInfo(entry)?.name ?? null : null;
+        : (entry & 0x80000000) === 0 ? creatureName(entry) : null;
       rows.push({
         kind: 'monster',
         name: named,
@@ -1917,6 +1937,22 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * straight to `GetQuestLogTitle` on the next line -- the same index `entryAt` takes. A position
    * within the filtered subset would name a different quest.
    */
+  /**
+   * A creature template's name, ASKING for it the first time it is wanted.
+   *
+   * Null while the query is outstanding, which the caller renders as counts alone -- the same
+   * behaviour as before, but now temporary rather than permanent. See the block comment at the call
+   * site for why the guid is zero and why this is cheap.
+   */
+  const creatureName = (entry: number): string | null => {
+    const known = combat.creatureInfo(entry)?.name ?? null;
+    if (known !== null) {
+      return known;
+    }
+    combat.queryCreature(entry, '0000000000000000');
+    return null;
+  };
+
   const questsOnMap = (): Array<{ questId: number; logIndex: number }> => {
     const zone = selectedZoneAreaId();
     if (zone === 0) {
@@ -2159,6 +2195,25 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   // event. See `onInventory`.
   items.on('inventoryChanged', onInventory);
 
+  /**
+   * A creature TEMPLATE landing repaints the log, because a kill objective may have been waiting
+   * for its name.
+   *
+   * `creature:info` and not `unit:fields`: the mob a quest counts is usually not in view, so
+   * `applyCreatureInfo`'s per-unit event never fires for it. See
+   * `network/game/object/combat.ts#handleCreatureQuery`.
+   *
+   * Unconditional, and cheap for the same reason the other `QUEST_LOG_UPDATE` fires are: the client
+   * repaints the list from getters that diff, and one packet per creature per session is the whole
+   * traffic.
+   */
+  const onCreatureInfo = (): void => {
+    if (!disposed) {
+      fireEvent(vm, 'QUEST_LOG_UPDATE');
+    }
+  };
+  world.on('creature:info', onCreatureInfo);
+
   quest.on('questDetail', onDetail);
   quest.on('questProgress', onProgress);
   quest.on('questOfferReward', onOffer);
@@ -2288,6 +2343,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
 
   return () => {
     disposed = true;
+    world.off('creature:info', onCreatureInfo);
     quest.off('questDetail', onDetail);
     quest.off('questProgress', onProgress);
     quest.off('questOfferReward', onOffer);

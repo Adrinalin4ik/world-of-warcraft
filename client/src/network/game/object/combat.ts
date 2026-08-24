@@ -301,6 +301,20 @@ export class CombatHandler extends EventEmitter {
     const info = { name, rank, type };
     this.creatures.set(entry, info);
     this.applyCreatureInfo(entry, info);
+    /**
+     * ANNOUNCED SEPARATELY FROM `unit:fields`, because a template can arrive with NO unit to write
+     * it onto.
+     *
+     * `applyCreatureInfo` walks the entities and emits per unit, which is right for a target frame
+     * -- but the quest log asks for a creature's name for a mob that may be nowhere near the player
+     * (`ui/quest-bridge.ts`, the kill-objective text). For that reader the answer arrives with no
+     * entity in the world, so the per-unit event never fires and the objective would keep reading
+     * "4/8" with no name until something unrelated repainted the list.
+     *
+     * The entry, not the info: a listener that wants the name asks `creatureInfo`, which is the
+     * cache this just filled.
+     */
+    this.game.world.emit('creature:info', entry);
   }
 
   /**
