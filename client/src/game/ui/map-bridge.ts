@@ -4,7 +4,7 @@ import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
 import type { MethodContext } from './framexml/lua/object';
 import { publishMapSelection, clearMapSelection } from './map-selection';
-import { zoneHighlights, setHighlightScale } from '../pipeline/zone-highlight';
+import { zoneHighlights, setHighlightScale, lastHoverTest } from '../pipeline/zone-highlight';
 import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
 import { BlobPolygon, setBlobSource } from './quest-blobs';
 import { resolveUnitToken } from '../world/unit-tokens';
@@ -1237,6 +1237,16 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * `Interface\WorldMap\<art>\<art><i>`.
    */
   /**
+   * `window.worldMapHover()` -- what the hover test computed for the LAST point under the cursor.
+   *
+   * Hover a spot, move the pointer off the map, then call it. See `lastHover` in
+   * `pipeline/zone-highlight.ts` for why this exists: the drawn highlight and the name are supposed
+   * to read one placement, and they visibly disagree, so this reports the arithmetic rather than
+   * leaving it to be inferred from a screenshot.
+   */
+  (window as unknown as Record<string, unknown>).worldMapHover = () => lastHoverTest();
+
+  /**
    * `window.worldMapHighlight(0.9)` -- a multiplier on the derived highlight size. No argument
    * restores 1, which is the derivation itself. See `HIGHLIGHT_PX` in `pipeline/zone-highlight.ts`.
    */
@@ -1373,6 +1383,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       delete (window as unknown as Record<string, unknown>).worldZone;
       delete (window as unknown as Record<string, unknown>).worldMap;
       delete (window as unknown as Record<string, unknown>).worldMapHighlight;
+      delete (window as unknown as Record<string, unknown>).worldMapHover;
       // The blob source outlives this bridge otherwise, and it closes over a disposed world.
       setBlobSource(null);
     },

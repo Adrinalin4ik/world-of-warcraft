@@ -151,6 +151,40 @@ const USED_Y = 668 / 1002;
  */
 let highlightScale: number | null = null;
 
+/**
+ * THE LAST HOVER TEST, kept so the disagreement can be MEASURED instead of inferred from a JPEG.
+ *
+ * The owner reports a highlight that covers the whole Barrens correctly while the NAME appears only
+ * in a small patch of it. Those two read the same placement in this file, so one of my two models of
+ * it is wrong -- and every attempt to decide which from a screenshot has been a guess. This records
+ * what the mask actually computed for the last point tested; `window.worldMapHover()` prints it.
+ *
+ * Cost: seven number writes per frame while the cursor is over the map, and nothing at all
+ * otherwise. No allocation -- the same object is overwritten.
+ */
+const lastHover = {
+  art: '',
+  sheetX: 0,
+  sheetY: 0,
+  rectLeft: 0,
+  rectTop: 0,
+  rectWidth: 0,
+  rectHeight: 0,
+  u: 0,
+  v: 0,
+  texelX: 0,
+  texelY: 0,
+  luminance: 0,
+  inside: false,
+  usedX: 0,
+  usedY: 0,
+};
+
+/** A copy of the last hover test, for `window.worldMapHover()`. */
+export function lastHoverTest(): Record<string, unknown> {
+  return { ...lastHover };
+}
+
 /** Set the drawn highlight scale live. Returns what it settled on, for the console. */
 export function setHighlightScale(factor: number | null): number {
   highlightScale = factor !== null && Number.isFinite(factor) && factor > 0
@@ -252,7 +286,25 @@ class ZoneHighlights {
     }
     const x = Math.min(shape.width - 1, Math.floor(tx * shape.width));
     const y = Math.min(shape.height - 1, Math.floor(ty * shape.height));
-    return shape.mask[y * shape.width + x] >= OPAQUE;
+    const luminance = shape.mask[y * shape.width + x];
+    const inside = luminance >= OPAQUE;
+    // The record -- see `lastHover`. Assignments only; this is the per-frame hover path.
+    lastHover.art = art;
+    lastHover.sheetX = sheetX;
+    lastHover.sheetY = sheetY;
+    lastHover.rectLeft = zone.left;
+    lastHover.rectTop = zone.top;
+    lastHover.rectWidth = zone.right - zone.left;
+    lastHover.rectHeight = zone.bottom - zone.top;
+    lastHover.u = (sheetX - at.left) / at.width;
+    lastHover.v = (sheetY - at.top) / at.height;
+    lastHover.texelX = x;
+    lastHover.texelY = y;
+    lastHover.luminance = luminance;
+    lastHover.inside = inside;
+    lastHover.usedX = USED_X;
+    lastHover.usedY = USED_Y;
+    return inside;
   }
 
   /**
