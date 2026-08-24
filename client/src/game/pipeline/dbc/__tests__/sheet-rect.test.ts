@@ -17,16 +17,22 @@ import { sheetRect } from '../map-data';
  */
 const AZEROTH = {
   id: 14, mapId: 0, areaId: 0, art: 'Azeroth',
+  // -1: displayed on its own map, which is every row but the three Draenei isles.
+  displayMapId: -1,
   left: 18172.0, right: -22569.2, top: 11176.3, bottom: -15973.3,
 };
 
 const KALIMDOR = {
   id: 13, mapId: 1, areaId: 0, art: 'Kalimdor',
+  // -1: displayed on its own map, which is every row but the three Draenei isles.
+  displayMapId: -1,
   left: 17066.6, right: -19733.2, top: 12799.9, bottom: -11733.3,
 };
 
 const ELWYNN = {
   id: 30, mapId: 0, areaId: 12, art: 'Elwynn',
+  // -1: displayed on its own map, which is every row but the three Draenei isles.
+  displayMapId: -1,
   left: 1535.4, right: -1935.4, top: -7939.6, bottom: -10254.2,
 };
 

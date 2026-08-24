@@ -133,7 +133,7 @@ class MapData {
     const order: WorldMapAreaRow[] = [];
     for (const record of recordsOf(worldMapArea)) {
       const row = record as {
-        id?: number; mapID?: number; areaID?: number; name?: unknown;
+        id?: number; mapID?: number; areaID?: number; name?: unknown; displayMapID?: number;
         position?: { left?: number; right?: number; top?: number; bottom?: number };
       };
       if (typeof row.id !== 'number' || typeof row.mapID !== 'number') {
@@ -143,6 +143,7 @@ class MapData {
         id: row.id,
         mapId: row.mapID,
         areaId: typeof row.areaID === 'number' ? row.areaID : 0,
+        displayMapId: typeof row.displayMapID === 'number' ? row.displayMapID : -1,
         // The ART FOLDER name, which is `GetMapInfo`'s first return -- not a name to show a player.
         art: typeof row.name === 'string' ? row.name : '',
         left: row.position?.left ?? 0,
@@ -150,9 +151,12 @@ class MapData {
         top: row.position?.top ?? 0,
         bottom: row.position?.bottom ?? 0,
       };
-      const list = byMap.get(built.mapId);
+      // BY THE DISPLAY MAP, not by `mapId` -- see `WorldMapAreaRow#displayMapId`. This is what puts
+      // the Draenei isles on the Kalimdor sheet, where the real client has them.
+      const sheetMapId = built.displayMapId >= 0 ? built.displayMapId : built.mapId;
+      const list = byMap.get(sheetMapId);
       if (list === undefined) {
-        byMap.set(built.mapId, [built]);
+        byMap.set(sheetMapId, [built]);
       } else {
         list.push(built);
       }
@@ -584,6 +588,20 @@ export interface WorldMapAreaRow {
   right: number;
   top: number;
   bottom: number;
+  /**
+   * `displayMapID` -- the map whose SHEET this zone is drawn on, or -1 for "its own `mapId`".
+   *
+   * **A column I did not read, and the owner found it.** `worldmaparea.dbc` has ELEVEN fields and
+   * this code used eight. Measured on the served file: `AzuremystIsle`, `BloodmystIsle` and
+   * `TheExodar` carry `mapID 530` (Outland, where their terrain actually is) and
+   * **`displayMapID 1`** -- Kalimdor, where the real client draws and names them. Every other row
+   * carries -1.
+   *
+   * So "which continent sheet is this zone on" is `displayMapId >= 0 ? displayMapId : mapId`, and
+   * reading `mapId` alone put the Draenei isles under Outland: hovering them on the Kalimdor sheet
+   * named nothing, which is exactly what he reported.
+   */
+  displayMapId: number;
 }
 
 /**

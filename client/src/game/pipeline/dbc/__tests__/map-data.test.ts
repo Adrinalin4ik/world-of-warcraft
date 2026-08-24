@@ -16,7 +16,8 @@ const ELWYNN = {
   id: 30,
   mapId: 0,
   areaId: 12,
-  art: 'Elwynn',
+  art: 'Elwynn',  // -1 is what every row but the three Draenei isles carries: displayed on its own map.
+  displayMapId: -1,
   left: 1535.4,
   right: -1935.4,
   top: -7939.6,
