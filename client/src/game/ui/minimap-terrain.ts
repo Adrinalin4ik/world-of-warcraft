@@ -811,7 +811,10 @@ export function attachMinimapTerrain(
     if (worldArrowFrame !== null) {
       return true;
     }
-    const frame = ctx.registry.byName('PlayerArrowEffectFrame');
+    // The ARROW's frame and not the EFFECT's: the client sets the effect frame to alpha 0.65 and a
+    // child cannot undo that. `ui/map-bridge.ts` creates this sibling at full alpha for exactly this,
+    // and moves both with the same `PositionWorldMapArrowFrame`.
+    const frame = ctx.registry.byName('__worldMapPlayerArrow');
     if (frame === null) {
       return false;
     }

@@ -572,7 +572,26 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * it needs the drawing host, which this bridge is seeded too early to have. Named, not implied.
    */
   const ARROW_FRAME = 'PlayerArrowEffectFrame';
+  /**
+   * THE ARROW'S OWN FRAME, a sibling of the effect frame -- and it exists because of one client line.
+   *
+   * `WorldMapFrame_OnLoad` does `PlayerArrowEffectFrame:SetAlpha(0.65)` (`worldmapframe.lua:109`),
+   * and the name is the tell: that frame is the arrow's EFFECT -- the glow the engine pulses around
+   * it -- not the arrow. Drawing our arrow inside it inherited an alpha meant for something else, and
+   * the owner saw it at once: "она полупрозрачная почему-то".
+   *
+   * Alpha cascades multiplicatively in this widget layer, so a child cannot undo its parent's 0.65.
+   * The arrow therefore gets a sibling frame at full alpha, and both are moved by the same
+   * `PositionWorldMapArrowFrame` and shown by the same `ShowWorldMapArrowFrame` -- so the engine's
+   * own two-part shape is honoured rather than collapsed, and the client keeps its 0.65 on the frame
+   * it asked for.
+   *
+   * Named in the REGISTRY only and never minted as a Lua table, so no `_G` entry appears for a frame
+   * the client does not know about. `ui/minimap-terrain.ts` finds it with `byName`.
+   */
+  const ARROW_ART_FRAME = '__worldMapPlayerArrow';
   let arrowFrameId: number | null = null;
+  let arrowArtId: number | null = null;
 
   fn('CreateWorldMapArrowFrame', (args) => {
     if (arrowFrameId !== null) {
@@ -597,6 +616,8 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
        * rather than left as one call among four.
        */
       ctx.wrapper(arrowFrameId);
+      // The sibling: same parent, full alpha, no Lua global. See `ARROW_ART_FRAME`.
+      arrowArtId = ctx.registry.create('Frame', ARROW_ART_FRAME, parent);
     } catch (error) {
       console.warn(`CreateWorldMapArrowFrame: ${String(error)}`);
     }
@@ -614,35 +635,40 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
 
   /** `PositionWorldMapArrowFrame(point, relativeTo, relativePoint, x, y)` -- placed for real. */
   fn('PositionWorldMapArrowFrame', (args) => {
-    const widget = arrowFrameId === null ? null : ctx.registry.widget(arrowFrameId);
-    if (widget === null) {
+    const frames = [arrowFrameId, arrowArtId]
+      .map((id) => (id === null ? null : ctx.registry.widget(id)))
+      .filter((w): w is NonNullable<typeof w> => w !== null);
+    if (frames.length === 0) {
       return [];
     }
     const point = String(args[0] ?? 'CENTER').toUpperCase();
     const relativePoint = String(args[2] ?? point).toUpperCase();
     const target = typeof args[1] === 'string' ? ctx.registry.byName(args[1]) : null;
     const relativeTo = target === null ? undefined : ctx.registry.widget(target)?.id;
-    widget.setAnchors({
+    frames.forEach((widget) => widget.setAnchors({
       point: point as never,
       relativePoint: relativePoint as never,
       relativeTo,
       x: Number(args[3]) || 0,
       y: Number(args[4]) || 0,
-    });
+    }));
     return [];
   });
 
   /** `ShowWorldMapArrowFrame(show)` -- nil hides, anything else shows. The client passes 1 or nil. */
   fn('ShowWorldMapArrowFrame', (args) => {
-    const widget = arrowFrameId === null ? null : ctx.registry.widget(arrowFrameId);
-    if (widget === null) {
-      return [];
-    }
-    if (args[0] === undefined || args[0] === null || args[0] === false) {
-      widget.hide();
-    } else {
-      widget.show();
-    }
+    const wanted = !(args[0] === undefined || args[0] === null || args[0] === false);
+    [arrowFrameId, arrowArtId].forEach((id) => {
+      const widget = id === null ? null : ctx.registry.widget(id);
+      if (widget === null) {
+        return;
+      }
+      if (wanted) {
+        widget.show();
+      } else {
+        widget.hide();
+      }
+    });
     return [];
   });
 
