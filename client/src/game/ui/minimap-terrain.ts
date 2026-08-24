@@ -461,6 +461,34 @@ function toCanvas(spec: BlpSpec): HTMLCanvasElement | null {
 const ARROW_KEY = '__minimapPlayerArrow';
 
 /**
+ * The WORLD MAP's own arrow, drawn by the same canvas as the minimap's.
+ *
+ * A second key and a second instance rather than a shared texture: the two rotate together (both
+ * follow the player's heading) but they are different SIZES, and `art.adopt` keys a texture by name.
+ * Sharing one would make the world map draw at the minimap's 30 px.
+ */
+const WORLD_ARROW_KEY = '__worldMapPlayerArrow';
+
+/**
+ * How big the world map's arrow is drawn, in its own region's pixels.
+ *
+ * UNSOURCED, like the minimap's: `<Minimap>` names the minimap arrow as a model and the world map
+ * names nothing at all -- `PlayerArrowEffectFrame` is created in code by the engine
+ * (`worldmapframe.lua:108`) and its size comes from the arrow model it holds. 24 is a little smaller
+ * than the minimap's 30 because the world map is a wider view of the same world, and
+ * `window.worldMapArrow(px)` settles it the way `worldMinimapArrow` settled the other one.
+ */
+const DEFAULT_WORLD_ARROW_PX = 24;
+
+let worldArrowDrawPx: number | null = null;
+
+/** Set the world map arrow's drawn size live. Returns what it settled on, for the console. */
+export function setWorldArrowDrawPx(px: number | null): number {
+  worldArrowDrawPx = px !== null && Number.isFinite(px) && px > 0 ? Math.min(px, ARROW_PX) : null;
+  return worldArrowDrawPx ?? DEFAULT_WORLD_ARROW_PX;
+}
+
+/**
  * The arrow canvas's side, and the REGION's -- which is deliberately larger than the arrow itself.
  *
  * The owner's first sighting was "он очень маленький", and the arithmetic says why: the art is 32 px,
@@ -496,7 +524,7 @@ export function setArrowDrawPx(px: number | null): number {
   return arrowDrawPx ?? DEFAULT_ARROW_DRAW_PX;
 }
 
-class MinimapPlayerArrow {
+class PlayerArrowSprite {
   private readonly canvas: HTMLCanvasElement;
 
   private readonly ctx: CanvasRenderingContext2D | null;
@@ -516,7 +544,11 @@ class MinimapPlayerArrow {
    */
   private lastDegrees = Number.NaN;
 
-  constructor(private readonly glue: GlueArt) {
+  constructor(
+    private readonly glue: GlueArt,
+    private readonly key: string,
+    private readonly drawPx: () => number,
+  ) {
     this.canvas = document.createElement('canvas');
     this.canvas.width = ARROW_PX;
     this.canvas.height = ARROW_PX;
@@ -547,7 +579,7 @@ class MinimapPlayerArrow {
      * mirrored one reverses it.
      */
     this.texture.flipY = false;
-    this.glue.adopt(ARROW_KEY, this.texture);
+    this.glue.adopt(this.key, this.texture);
   }
 
   update(facing: number): boolean {
@@ -593,7 +625,7 @@ class MinimapPlayerArrow {
      * than three rounds of arithmetic here, and it is the same kind of number -- a proportion only a
      * side-by-side can judge.
      */
-    const side = arrowDrawPx ?? DEFAULT_ARROW_DRAW_PX;
+    const side = this.drawPx();
     ctx.drawImage(this.art, -side / 2, -side / 2, side, side);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.texture.needsUpdate = true;
@@ -683,7 +715,9 @@ export function attachMinimapTerrain(
   ctx: MethodContext, art: GlueArt, world: World,
 ): MinimapTerrainHost {
   let terrain: MinimapTerrain | null = null;
-  let arrow: MinimapPlayerArrow | null = null;
+  let arrow: PlayerArrowSprite | null = null;
+  let worldArrow: PlayerArrowSprite | null = null;
+  let worldArrowFrame: number | null = null;
   let built = false;
   let minimapId: number | null = null;
   let disposed = false;
@@ -713,7 +747,7 @@ export function attachMinimapTerrain(
     });
     terrainRegion.setAnchors(fill('TOPLEFT'), fill('BOTTOMRIGHT'));
 
-    arrow = new MinimapPlayerArrow(art);
+    arrow = new PlayerArrowSprite(art, ARROW_KEY, () => arrowDrawPx ?? DEFAULT_ARROW_DRAW_PX);
     const arrowRegion = ctx.registry.widget(ctx.registry.create('Texture', null, minimapId));
     if (arrowRegion !== null) {
       arrowRegion.layer = 'OVERLAY';
@@ -748,7 +782,57 @@ export function attachMinimapTerrain(
       arrow?.invalidate();
       return settled;
     };
+    (window as unknown as Record<string, unknown>).worldMapArrow = (px?: number) => {
+      const settled = setWorldArrowDrawPx(typeof px === 'number' ? px : null);
+      worldArrow?.invalidate();
+      return settled;
+    };
     built = true;
+    return true;
+  };
+
+  /**
+   * THE WORLD MAP'S ARROW, in the frame the engine creates for it.
+   *
+   * `WorldMapPlayer` -- the frame the client positions from `GetPlayerMapPosition` -- carries no
+   * texture at all: the owner's own reading showed it shown, visible, alpha 1 and `sprite: null`. It
+   * is the mouseover target, and the visible marker is the ENGINE's arrow, which the client asks for
+   * with `CreateWorldMapArrowFrame` and then only ever calls `SetAlpha`/`SetFrameLevel` on
+   * (`worldmapframe.lua:108,1421`). So the marker was never missing data -- it had nothing to draw.
+   *
+   * `ui/map-bridge.ts` creates `PlayerArrowEffectFrame` and `PositionWorldMapArrowFrame` already
+   * moves it to where the client says, so this only has to put art inside it -- the same rotated
+   * canvas the minimap uses, which is why that class is shared rather than copied.
+   *
+   * Lazily, because the frame is created during the manifest and this host attaches after it but the
+   * world map may never be opened.
+   */
+  const ensureWorldArrow = (): boolean => {
+    if (worldArrowFrame !== null) {
+      return true;
+    }
+    const frame = ctx.registry.byName('PlayerArrowEffectFrame');
+    if (frame === null) {
+      return false;
+    }
+    const parent = ctx.registry.widget(frame);
+    if (parent === null) {
+      return false;
+    }
+    worldArrow = new PlayerArrowSprite(
+      art, WORLD_ARROW_KEY, () => worldArrowDrawPx ?? DEFAULT_WORLD_ARROW_PX,
+    );
+    const region = ctx.registry.widget(ctx.registry.create('Texture', null, frame));
+    if (region === null) {
+      return false;
+    }
+    region.layer = 'OVERLAY';
+    region.sprite = WORLD_ARROW_KEY;
+    region.setSize(ARROW_PX, ARROW_PX);
+    region.setAnchors({
+      point: 'CENTER', relativePoint: 'CENTER', relativeTo: parent.id, x: 0, y: 0,
+    });
+    worldArrowFrame = frame;
     return true;
   };
 
@@ -779,16 +863,23 @@ export function attachMinimapTerrain(
         map.internalName, player.position.x, player.position.y, zoomOf(frame),
       );
       const turned = arrow === null ? false : arrow.update(player.facing ?? 0);
-      return painted || turned;
+      // `onMap`, not `world`: this closure already has a `world` -- the World itself.
+      const onMap = ensureWorldArrow()
+        ? (worldArrow?.update(player.facing ?? 0) ?? false)
+        : false;
+      return painted || turned || onMap;
     },
     dispose: () => {
       disposed = true;
       terrain?.dispose();
       arrow?.dispose();
+      worldArrow?.dispose();
       terrain = null;
       arrow = null;
+      worldArrow = null;
       delete (window as unknown as Record<string, unknown>).worldMinimapZoom;
       delete (window as unknown as Record<string, unknown>).worldMinimapArrow;
+      delete (window as unknown as Record<string, unknown>).worldMapArrow;
     },
   };
 }
