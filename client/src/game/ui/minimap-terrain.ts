@@ -77,6 +77,8 @@ import WorkerPool, { PRIORITY } from '../pipeline/worker/pool';
 import minimapTiles from '../pipeline/minimap-tiles';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
 import type { GlueArt } from './art';
+import { Blip, MinimapBlips, blipForStatus } from './minimap-blips';
+import { resolveUnitToken } from '../world/unit-tokens';
 import type { MethodContext } from './framexml/lua/object';
 import { zoomOf } from './framexml/lua/methods/minimap';
 import type World from '../world';
@@ -170,6 +172,12 @@ export class MinimapTerrain {
 
   private readonly texture: THREE.CanvasTexture;
 
+  /** The blip layer, drawn into this same canvas before the mask. See `ui/minimap-blips.ts`. */
+  private readonly blips = new MinimapBlips();
+
+  /** The last composite's blip fingerprint, so a party that has not moved costs nothing. */
+  private lastBlips = '';
+
   /** `<mapName>/<A>_<B>` -> the decoded tile, or a remembered miss. LRU by insertion order. */
   private readonly tiles = new Map<string, TileEntry>();
 
@@ -259,7 +267,13 @@ export class MinimapTerrain {
    * Called once per UI tick from the map bridge. The early return is the whole performance story: see
    * this file's header on the pixel-quantised signature.
    */
-  update(mapName: string, worldX: number, worldY: number, zoom: number): boolean {
+  update(
+    mapName: string,
+    worldX: number,
+    worldY: number,
+    zoom: number,
+    blips: Blip[] = [],
+  ): boolean {
     if (this.disposed || this.ctx === null || mapName === '') {
       return false;
     }
@@ -268,19 +282,31 @@ export class MinimapTerrain {
     // Quantised to whole destination pixels: a move smaller than one pixel cannot change the image.
     const px = Math.round(worldX / perPixel);
     const py = Math.round(worldY / perPixel);
+    // THE BLIPS ARE PART OF THE GATE, not drawn outside it. A quest giver appearing or a party
+    // member walking has to force a composite, and nothing else here would notice: the four
+    // numbers above are the player's own state. Quantised to whole yards inside `fingerprint`, so
+    // a member standing still is free.
+    const blipPrint = this.blips.fingerprint(blips);
     if (mapName === this.lastMap && windowYards === this.lastYards
-      && px === this.lastPx && py === this.lastPy) {
+      && px === this.lastPx && py === this.lastPy && blipPrint === this.lastBlips) {
       return false;
     }
+    this.lastBlips = blipPrint;
     this.lastMap = mapName;
     this.lastYards = windowYards;
     this.lastPx = px;
     this.lastPy = py;
-    this.composite(mapName, worldX, worldY, windowYards);
+    this.composite(mapName, worldX, worldY, windowYards, blips);
     return true;
   }
 
-  private composite(mapName: string, worldX: number, worldY: number, windowYards: number): void {
+  private composite(
+    mapName: string,
+    worldX: number,
+    worldY: number,
+    windowYards: number,
+    blips: Blip[],
+  ): void {
     const ctx = this.ctx!;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
@@ -324,6 +350,27 @@ export class MinimapTerrain {
         );
       }
     }
+
+    /**
+     * THE BLIPS, on top of the terrain and BEFORE the mask.
+     *
+     * Before the mask so the same arc that rounds the terrain clips a blip near the rim -- an icon
+     * hanging outside the circle would draw over the client's own border art, which is a frame this
+     * canvas sits under rather than inside.
+     *
+     * The world-to-canvas mapping is passed in rather than duplicated in `minimap-blips.ts`: the
+     * window and its rounding belong to this file, and a second copy of that arithmetic would be a
+     * second chance to disagree with the tiles underneath.
+     *
+     * The minimap's vertical axis is the world's X and its horizontal is the world's Y, which is the
+     * same convention `tileSpan` above uses -- `spanA` from the world Y and `spanB` from the world X.
+     * Both increase toward the top-left in world space, so both are subtracted.
+     */
+    const perPixel = windowYards / TERRAIN_PX;
+    this.blips.draw(ctx, blips, (blipX, blipY) => ({
+      x: TERRAIN_PX / 2 - (blipY - worldY) / perPixel,
+      y: TERRAIN_PX / 2 - (blipX - worldX) / perPixel,
+    }));
 
     /**
      * THE MASK, and this is why the whole file is a canvas.
@@ -409,6 +456,7 @@ export class MinimapTerrain {
     this.disposed = true;
     this.tiles.clear();
     this.loading.clear();
+    this.blips.dispose();
     this.texture.dispose();
   }
 }
@@ -458,6 +506,18 @@ function toCanvas(spec: BlpSpec): HTMLCanvasElement | null {
  * (`minimap.lua:11-12`). `methods/minimap.ts` records those calls and this is the reader its comment
  * promised -- that note said "read by nothing yet", and it no longer applies.
  */
+/**
+ * Every group token the minimap can draw a dot for, built ONCE.
+ *
+ * `MAX_PARTY_MEMBERS` is 4 and `MAX_RAID_MEMBERS` 40 in 3.3.5a. Built at module scope because
+ * `blipsNow` runs every frame and building 44 strings there would allocate for nothing -- the list
+ * never changes.
+ */
+const GROUP_TOKENS: string[] = [
+  ...Array.from({ length: 4 }, (unused, i) => `party${i + 1}`),
+  ...Array.from({ length: 40 }, (unused, i) => `raid${i + 1}`),
+];
+
 const ARROW_KEY = '__minimapPlayerArrow';
 
 /**
@@ -807,6 +867,59 @@ export function attachMinimapTerrain(
    * Lazily, because the frame is created during the manifest and this host attaches after it but the
    * world map may never be opened.
    */
+  /**
+   * The blips to draw this frame: quest givers, then the group.
+   *
+   * ## Quest givers come from the DESCRIPTOR-adjacent status map, not from a scan
+   *
+   * `QuestHandler.status` is guid -> `DIALOG_STATUS`, filled by `SMSG_QUESTGIVER_STATUS` and
+   * `SMSG_QUESTGIVER_STATUS_MULTIPLE` -- the server's own answer to "what does this NPC have for
+   * you", which is exactly what the icon shows. `blipForStatus` maps it to the `!` or the `?` and
+   * answers null for everything else, so an NPC mid-quest gets no marker -- which is what the real
+   * client does.
+   *
+   * An entry whose entity is not in the world is skipped rather than dropped: the status map
+   * outlives an NPC leaving range, and it is the right cache to keep -- re-entering range should not
+   * need a new query.
+   *
+   * ## The group is resolved through the same tokens everything else uses
+   *
+   * `party1..4` and `raid1..40`, through `resolveUnitToken`, so membership means here what it means
+   * in the unit frames and on the world map. A member out of range resolves to null and gets no dot,
+   * which is correct: the minimap only shows what is nearby.
+   *
+   * ## Cost
+   *
+   * Called once per frame, and it is a walk of the status map plus 44 token lookups -- but the LIST
+   * is only ever fed to a composite that the fingerprint gate rejects unless something moved a whole
+   * yard. So the per-frame cost is the walk, and the drawing is as rare as the terrain repaint.
+   * `RAID_TOKENS` is built once for that reason; building it here would allocate 40 strings a frame.
+   */
+  const blipsNow = (): Blip[] => {
+    const out: Blip[] = [];
+    const quests = world.game?.objectHandler?.questHandler ?? null;
+    if (quests !== null) {
+      quests.status.forEach((status: number, guid: string) => {
+        const kind = blipForStatus(status);
+        const unit = kind === null ? null : world.entities.get(guid) ?? null;
+        if (kind !== null && unit) {
+          out.push({ worldX: unit.position.x, worldY: unit.position.y, kind });
+        }
+      });
+    }
+    for (const token of GROUP_TOKENS) {
+      const unit = resolveUnitToken(token, world);
+      if (unit) {
+        out.push({
+          worldX: unit.position.x,
+          worldY: unit.position.y,
+          kind: token.startsWith('raid') ? 'raid' : 'party',
+        });
+      }
+    }
+    return out;
+  };
+
   const ensureWorldArrow = (): boolean => {
     if (worldArrowFrame !== null) {
       return true;
@@ -863,7 +976,7 @@ export function attachMinimapTerrain(
       // BOTH evaluated, not short-circuited: a `||` between the calls would skip the arrow on any
       // frame the terrain happened to repaint.
       const painted = terrain === null ? false : terrain.update(
-        map.internalName, player.position.x, player.position.y, zoomOf(frame),
+        map.internalName, player.position.x, player.position.y, zoomOf(frame), blipsNow(),
       );
       const turned = arrow === null ? false : arrow.update(player.facing ?? 0);
       // `onMap`, not `world`: this closure already has a `world` -- the World itself.
