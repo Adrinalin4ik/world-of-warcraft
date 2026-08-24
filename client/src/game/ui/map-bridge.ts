@@ -569,8 +569,19 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     }
     try {
       arrowFrameId = ctx.registry.create('Frame', ARROW_FRAME, parent);
-      // The engine publishes it as a global, which is how the client reaches it by name.
-      ctx.registry.publishName(arrowFrameId, ARROW_FRAME);
+      /**
+       * **`wrapper` IS WHAT PUBLISHES `_G[name]`, and creating the frame alone did not.**
+       *
+       * The registry's name map and Lua's global table are two different things: `registry.create`
+       * records the name so `byName` can find it, and only minting the Lua table exports the global.
+       * `object.ts`' own `CreateFrame` says so at the line it does it -- "minting it is also what
+       * publishes `_G[name]`" -- and that was the line this was missing. The frame existed, the
+       * registry knew its name, and `PlayerArrowEffectFrame` was still nil in Lua.
+       *
+       * The same trap waits for any future engine-created frame, which is why this is written here
+       * rather than left as one call among four.
+       */
+      ctx.wrapper(arrowFrameId);
     } catch (error) {
       console.warn(`CreateWorldMapArrowFrame: ${String(error)}`);
     }
