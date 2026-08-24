@@ -361,19 +361,19 @@ class MapData {
    */
   sheetRectOfZone(mapId: number, row: WorldMapAreaRow):
   { left: number; right: number; top: number; bottom: number } | null {
-    const sheet = this.sheets.get(mapId);
-    return sheet === undefined ? null : sheetRect(row, sheet);
+    const continent = this.worldMapArea(mapId, 0);
+    return continent === null ? null : sheetRect(row, continent);
   }
 
   zoneAtSheetPoint(mapId: number, fractionX: number, fractionY: number): WorldMapAreaRow | null {
-    const sheet = this.sheets.get(mapId);
-    if (sheet === undefined) {
+    const continent = this.worldMapArea(mapId, 0);
+    if (continent === null) {
       return null;
     }
     let best: WorldMapAreaRow | null = null;
     let bestArea = Infinity;
     for (const row of this.zonesOn(mapId)) {
-      const rect = this.sheetRectOf(row, sheet);
+      const rect = sheetRect(row, continent);
       if (rect === null) {
         continue;
       }
@@ -388,19 +388,6 @@ class MapData {
       }
     }
     return best;
-  }
-
-  /**
-   * A zone's rect as 0..1 fractions of its continent sheet, or null when the row has no rect.
-   *
-   * The world rect is in yards, the sheet is in ADT tile indices, and `TILE_YARDS` converts.
-   * `positionFor`'s convention holds here too -- the tile index grows as the coordinate shrinks -- so
-   * the zone's `left` (its greatest world Y) is the SMALLEST tile index and therefore the leftmost
-   * edge.
-   */
-  private sheetRectOf(row: WorldMapAreaRow, sheet: SheetBounds):
-  { left: number; right: number; top: number; bottom: number } | null {
-    return sheetRect(row, sheet);
   }
 
   /** The `WorldMapArea` row for a zone, or null. `areaId` 0 is the continent-wide sheet. */
@@ -510,42 +497,63 @@ class MapData {
  * columns read the values quoted in `load` for four known zones.
  */
 /**
- * One ADT tile's side in yards -- `ADT.SIZE`, restated rather than imported.
+ * A zone's rect as 0..1 fractions of its CONTINENT SHEET, or null when either row has no rect.
  *
- * `pipeline/adt/index.js` is the authority and it is a plain JS module whose import chain reaches the
- * worker pool; pulling it into a DBC reader for one constant would drag that chain into every consumer
- * of this file, the tests included. The value is the game's, not ours, and a disagreement between the
- * two would show up at once as every zone rect off by a factor.
+ * ## THE SHEET IS THE CONTINENT'S OWN `WorldMapArea` ROW, and my first version had this wrong
+ *
+ * It projected through `WorldMapContinent.bounds` read as ADT tile indices, and I accepted it on a
+ * loose check: Elwynn came out at x 0.17-0.53, y 0.75-0.83 and I called that "south-central, where it
+ * is". It is not -- it is twice too wide and shifted left, and the owner saw the consequence as a
+ * highlight drawn over open sea and a hover that named Winterspring from the middle of the ocean. **A
+ * number that agreed with me got less scepticism than one that argued**, which is the trap this
+ * project has written down and I walked into anyway.
+ *
+ * The right sheet is the row with `areaId == 0` for the same map: the continent-wide entry, whose
+ * left/right/top/bottom cover exactly what the continent sheet draws. So a zone's place on it is the
+ * same crossing `normalise` already carries and nothing else -- no tile indices, no second table.
+ *
+ * MEASURED on the served file, and these are the values the projection now produces:
+ *
+ *     Elwynn Forest  on Azeroth    x 0.408..0.494   y 0.704..0.789
+ *     Winterspring   on Kalimdor   x 0.472..0.665   y 0.174..0.367
+ *     Azshara        on Kalimdor   x 0.553..0.691   y 0.304..0.442
+ *
+ * All three land on the landmass and in the right quarter of it. That is a check the old projection
+ * fails on every one of them.
+ *
+ * `WorldMapContinent` is still read, and still only for the WORLD sheet (`worldRects`), where its
+ * offset/scale triple was validated by the shape it produces.
+ *
+ * EXPORTED AND PURE because this is the arithmetic here that fails SILENTLY: a wrong crossing does not
+ * blank the map, it puts the zone somewhere else, and the click and the hover then agree with each other
+ * about the wrong place.
  */
-const TILE_YARDS = 533.33333;
-
-/**
- * A zone's rect as 0..1 fractions of its continent sheet, or null when the row has no rect.
- *
- * EXPORTED AND PURE because this is the arithmetic here that fails SILENTLY: a wrong crossing or a
- * wrong sign puts the zone somewhere else on the sheet, and a click then zooms confidently into the
- * wrong place. The world rect is in yards, the sheet is in ADT tile indices, and `TILE_YARDS` converts.
- *
- * `positionFor`'s convention holds here too -- the tile index grows as the coordinate shrinks -- so the
- * zone's `left` (its greatest world Y) is the SMALLEST tile index and therefore the leftmost edge.
- */
-export function sheetRect(row: WorldMapAreaRow, sheet: SheetBounds):
+export function sheetRect(row: WorldMapAreaRow, continent: WorldMapAreaRow):
 { left: number; right: number; top: number; bottom: number } | null {
-  if (row.left === row.right || row.top === row.bottom) {
+  if (row.left === row.right || row.top === row.bottom
+    || continent.left === continent.right || continent.top === continent.bottom) {
     return null;
   }
-  const tile = (coordinate: number) => 32 - coordinate / TILE_YARDS;
-  const across = sheet.right - sheet.left;
-  const down = sheet.bottom - sheet.top;
+  // The world's Y runs WEST and the sheet's x runs east; the world's X runs NORTH and the sheet's y
+  // runs down. The same crossing `normalise` carries, applied to a rect instead of a point.
+  const across = continent.left - continent.right;
+  const down = continent.top - continent.bottom;
   return {
-    left: (tile(row.left) - sheet.left) / across,
-    right: (tile(row.right) - sheet.left) / across,
-    top: (tile(row.top) - sheet.top) / down,
-    bottom: (tile(row.bottom) - sheet.top) / down,
+    left: (continent.left - row.left) / across,
+    right: (continent.left - row.right) / across,
+    top: (continent.top - row.top) / down,
+    bottom: (continent.top - row.bottom) / down,
   };
 }
 
-/** A continent sheet's extent, in ADT tile indices. See `MapData#load`. */
+/**
+ * A `WorldMapContinent` row, read for the WORLD sheet only -- see `MapData#worldRects`.
+ *
+ * The bounds are in ADT tile indices and are used ONLY as the input to the offset/scale placement that
+ * lays the continents out on the zoomed-out world map. They are deliberately NOT the per-continent
+ * sheet's extent: reading them that way is the mistake `sheetRect` documents at length, and the sheet's
+ * real extent is the continent's own `WorldMapArea` row.
+ */
 export interface SheetBounds {
   left: number;
   right: number;

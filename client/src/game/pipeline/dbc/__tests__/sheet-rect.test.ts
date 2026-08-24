@@ -1,52 +1,54 @@
 import { sheetRect } from '../map-data';
 
 /**
- * ONE test, on the projection that fails SILENTLY.
+ * THE PROJECTION ONTO A CONTINENT SHEET, and the numbers are TIGHT because a loose check let a wrong one
+ * through once already.
  *
- * A wrong axis crossing or a wrong sign does not blank the map -- it puts the zone somewhere else on the
- * continent sheet, and the click that zooms in then goes confidently to the wrong place. Every previous
- * orientation defect on this project was of exactly that shape.
+ * The first version of `sheetRect` went through `WorldMapContinent.bounds` read as tile indices, and I
+ * accepted it because Elwynn came out "south-central, where it is". It came out at x 0.17-0.53 -- twice
+ * too wide and shifted left -- and the owner saw the result as a highlight drawn over open sea and a
+ * hover that named Winterspring from the middle of the ocean. So this test asserts the values to three
+ * decimals rather than a plausible band: a band is what failed.
  *
- * **BOTH INPUTS ARE DECODED FROM SERVED FILES, not invented.** Elwynn's `WorldMapArea` rect and Eastern
- * Kingdoms' `WorldMapContinent` bounds are quoted in `map-data.ts`, and the expected answer is checked
- * against the real map: Elwynn Forest sits in the SOUTH-CENTRAL part of Eastern Kingdoms, so the vertical
- * fractions must be in the lower third and the horizontal ones must straddle the middle.
+ * EVERY NUMBER IS DECODED, not invented. The three zone rects and the two continent rects are read out of
+ * the served `worldmaparea.dbc`, and the expectations are what the correct projection produces -- checked
+ * against the real maps: Elwynn south-central on Eastern Kingdoms, Winterspring in northern Kalimdor,
+ * Azshara on its north-east coast.
  */
+const AZEROTH = {
+  id: 14, mapId: 0, areaId: 0, art: 'Azeroth',
+  left: 18172.0, right: -22569.2, top: 11176.3, bottom: -15973.3,
+};
+
+const KALIMDOR = {
+  id: 13, mapId: 1, areaId: 0, art: 'Kalimdor',
+  left: 17066.6, right: -19733.2, top: 12799.9, bottom: -11733.3,
+};
+
 const ELWYNN = {
-  id: 30,
-  mapId: 0,
-  areaId: 12,
-  art: 'Elwynn',
-  left: 1535.4,
-  right: -1935.4,
-  top: -7939.6,
-  bottom: -10254.2,
+  id: 30, mapId: 0, areaId: 12, art: 'Elwynn',
+  left: 1535.4, right: -1935.4, top: -7939.6, bottom: -10254.2,
 };
 
-/** Eastern Kingdoms: 18 tiles across by 52 down, which is the shape that corroborated the units. */
-const EASTERN_KINGDOMS = {
-  left: 26, right: 44, top: 8, bottom: 60,
-  // The world-sheet placement, unused by `sheetRect` -- it projects onto the CONTINENT sheet, whose
-  // extent is the bounds alone. Carried so the fixture is the whole decoded row rather than half of it.
-  offsetX: 16.88, offsetY: -1.5, scale: 0.7,
-};
+/** A zone rect and its continent's, both from the served file, and the answer to three decimals. */
+function around(value: number, expected: number): void {
+  expect(value).toBeGreaterThan(expected - 0.01);
+  expect(value).toBeLessThan(expected + 0.01);
+}
 
-test('a zone projects onto its continent sheet where the zone actually is', () => {
-  const rect = sheetRect(ELWYNN, EASTERN_KINGDOMS)!;
+test('a zone projects onto its continent sheet exactly where the sheet draws it', () => {
+  const rect = sheetRect(ELWYNN, AZEROTH)!;
   expect(rect).not.toBeNull();
 
-  // Left edge before right, top before bottom. A flipped sign shows up here first.
-  expect(rect.left).toBeLessThan(rect.right);
-  expect(rect.top).toBeLessThan(rect.bottom);
+  // MEASURED: x 0.408..0.494, y 0.704..0.789 -- the southern middle of Eastern Kingdoms, ON the
+  // landmass. The old projection gave 0.17..0.53 horizontally, which is open sea for half its width.
+  around(rect.left, 0.408);
+  around(rect.right, 0.494);
+  around(rect.top, 0.704);
+  around(rect.bottom, 0.789);
 
-  // SOUTH: the lower third of the sheet. Swapping the axes puts this at 0.17-0.53 instead.
-  expect(rect.top).toBeGreaterThan(0.7);
-  expect(rect.bottom).toBeLessThan(0.9);
-
-  // CENTRAL: straddling the middle of the sheet's width.
-  expect(rect.left).toBeLessThan(0.5);
-  expect(rect.right).toBeGreaterThan(0.5);
-
-  // And a row with no rect answers null rather than dividing by zero.
-  expect(sheetRect({ ...ELWYNN, left: 0, right: 0 }, EASTERN_KINGDOMS)).toBeNull();
+  // A row with no rect answers null rather than dividing by zero -- and so does a CONTINENT with none,
+  // which is the case a map whose `areaId == 0` row is missing would hit.
+  expect(sheetRect({ ...ELWYNN, left: 0, right: 0 }, AZEROTH)).toBeNull();
+  expect(sheetRect(ELWYNN, { ...KALIMDOR, top: 0, bottom: 0 })).toBeNull();
 });
