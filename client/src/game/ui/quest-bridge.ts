@@ -81,7 +81,8 @@
 import type World from '../world';
 import { LuaVM } from './framexml/lua/vm';
 import { notImplemented, warnOnce } from './framexml/lua/methods/region';
-import { selectedZoneName } from './map-selection';
+import { selectedZoneAreaId } from './map-selection';
+import { mapData } from '../pipeline/dbc/map-data';
 import { fireEvent } from './framexml/lua/events';
 import { GlueArt } from './art';
 import { setUnit } from './framexml/lua/api/units';
@@ -1913,13 +1914,22 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
    * within the filtered subset would name a different quest.
    */
   const questsOnMap = (): Array<{ questId: number; logIndex: number }> => {
-    const zone = selectedZoneName();
-    if (zone === '') {
+    const zone = selectedZoneAreaId();
+    if (zone === 0) {
       return [];
     }
     const out: Array<{ questId: number; logIndex: number }> = [];
     entries.forEach((row, at) => {
-      if (!row.isHeader && headerFor(row.zoneOrSort) === zone) {
+      if (row.isHeader || row.zoneOrSort <= 0) {
+        // A negative `zoneOrSort` is a `QuestSort` -- a profession or a class quest, which belongs
+        // to no map at all and must not be listed on one.
+        return;
+      }
+      // THROUGH THE PARENT WALK, not by name. A quest may be filed under a SUB-area (a Northshire
+      // quest under "Northshire Valley") while the map shows the zone above it, and comparing the
+      // two strings then rejects a quest that is plainly on screen -- which is why this answered 0
+      // with three quests in the log. `zoneOf` is the same walk the minimap label uses.
+      if ((mapData.zoneOf(row.zoneOrSort)?.areaId ?? 0) === zone) {
         out.push({ questId: row.questId, logIndex: at + 1 });
       }
     });

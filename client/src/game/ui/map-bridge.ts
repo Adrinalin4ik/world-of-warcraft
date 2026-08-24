@@ -368,15 +368,14 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
   /**
    * PUBLISH THE SELECTED ZONE for the quest bridge -- see `ui/map-selection.ts` on why a sink.
    *
-   * The DISPLAY name and only for a ZONE sheet: a continent or the World view has no zone, and the
-   * client's own quest list is empty there. `zoneIndex === 0` is that case.
+   * The `AreaTable` id, and only for a ZONE sheet: a continent or the World view has no zone, and
+   * the client's own quest list is empty there. `zoneIndex === 0` is that case.
    */
   publishMapSelection(() => {
     if (disposed || zoneIndex === 0) {
-      return '';
+      return 0;
     }
-    const row = selected();
-    return row === null ? '' : mapData.displayName(row);
+    return selected()?.areaId ?? 0;
   });
 
   fn('GetMapInfo', () => {
