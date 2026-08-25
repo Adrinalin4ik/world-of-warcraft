@@ -1421,10 +1421,19 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
      * from the frames it was actually drawn on. `at` says how many frames ago, so a stale sample
      * cannot be mistaken for a live one.
      */
+    /**
+     * NAMES RESOLVED TO IDS, and the first version did not -- `lastDrawn` came back null for
+     * everything because the sampler compares `widget.id` while it was handed frame NAMES. The
+     * `drawn` arm answered the question anyway, but a diagnostic that silently reports nothing is
+     * worse than none: it reads as "nothing was drawn".
+     */
     watchDrawn([
       'WorldMapTooltip', 'WorldMapTooltipTextLeft1', 'WorldMapTooltipTextLeft2',
       'WorldMapTooltipBackdrop', 'WorldMapFrame', 'WorldMapDetailFrame',
-    ]);
+    ].map((name) => {
+      const found = ctx.registry.byName(name);
+      return found === null ? null : ctx.registry.widget(found)?.id ?? null;
+    }).filter((wid): wid is string => wid !== null));
     const id = ctx.registry.byName('WorldMapTooltip');
     const tip = id === null ? null : ctx.registry.widget(id);
     if (tip === null) {

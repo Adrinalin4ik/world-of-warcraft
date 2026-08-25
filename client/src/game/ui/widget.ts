@@ -814,8 +814,38 @@ export class Widget {
   }
 
   /** Moves this widget to the tail of its draw bucket. See `linkStamp`'s doc comment for the rule. */
+  /**
+   * Move this widget to the tail of its draw bucket -- **and its whole SUBTREE with it.**
+   *
+   * ## The subtree is the fix, and it was measured
+   *
+   * It used to stamp `this` alone, which INVERTS a frame against its own regions: the frame jumps to
+   * a fresh stamp while its backdrop and font strings keep older ones, so the frame sorts AFTER the
+   * children it contains. A frame with a semi-transparent backdrop then draws that backdrop over its
+   * own text, and white text under dark glass reads as grey.
+   *
+   * That is exactly what the owner reported on the world-map tooltip, and the numbers named it:
+   * `WorldMapTooltipTextLeft1` at draw index **196**, `TextLeft2` at **197**, and `WorldMapTooltip`
+   * itself at **253** -- the container fifty-six items after its contents, with cascaded alpha 1 on
+   * all three. Four earlier rounds looked at colour, alpha, raster density and fractional placement,
+   * all of which were correct; the defect was the ORDER, which none of those could show.
+   *
+   * `SetFrameStrata` is what triggered it: `WorldMapFrame_SetOpacity`'s callers set the tooltip's
+   * strata on every size change (`worldmapframe.lua:1355,1405`), which is why it began after the map
+   * had been windowed once and stayed afterwards.
+   *
+   * ## Cost
+   *
+   * A pre-order walk of the subtree, and the ORDER of the walk is the point: parent first, so a
+   * parent always ends with a lower stamp than its children. Called from `show()` and from
+   * `SetFrameStrata`/`SetFrameLevel` on a real change -- never per frame, and both of those already
+   * guard against no-op sets for the same reason this walk must not run for nothing.
+   */
   restamp(): void {
     this.linkStamp = nextLinkStamp++;
+    for (const child of this.children) {
+      child.restamp();
+    }
   }
 
   hide(): void {
