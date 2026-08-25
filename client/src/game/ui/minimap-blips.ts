@@ -59,6 +59,7 @@ export type BlipKind =
   | 'questAvailable'
   | 'questComplete'
   | 'questIncomplete'
+  | 'tracked'
   | 'party'
   | 'raid';
 
@@ -72,6 +73,13 @@ export interface Blip {
    * queried yet is a real state and silence is the honest answer for it.
    */
   name?: string;
+  /**
+   * For a `tracked` blip: the icon path, which is the ACTIVE tracking row's own art.
+   *
+   * On the blip rather than in `ICON_PATHS`, because there are fifteen possible ones and only ever
+   * one active -- keying them all into the loader would decode fifteen files to draw with one.
+   */
+  icon?: string;
   /**
    * The member's `classId`, for a group dot. Undefined for a quest glyph and for an unknown class.
    *
@@ -188,6 +196,9 @@ export class MinimapBlips {
   private readonly icons = new Map<string, HTMLCanvasElement | null>();
 
   private loading = false;
+
+  /** Paths with a decode in flight, so a per-frame builder cannot queue the same file twice. */
+  private readonly decoding = new Set<string>();
 
   /**
    * Set when an icon lands, cleared by `takeArtArrived`. **Without it the first blips never draw.**
@@ -344,7 +355,18 @@ export class MinimapBlips {
         ctx.stroke();
         continue;
       }
-      const icon = this.icons.get(ICON_PATHS[blip.kind]);
+      /**
+       * A TRACKED blip carries its own icon path; the quest glyphs are keyed by kind.
+       *
+       * Loaded on demand through the same map, so switching tracking category decodes one file and
+       * then costs nothing. `ensureIcon` returns undefined until it lands, and an undefined icon
+       * simply skips -- the blip appears a moment later, which is what every other art here does.
+       */
+      const path = blip.kind === 'tracked' ? blip.icon : ICON_PATHS[blip.kind];
+      if (path === undefined) {
+        continue;
+      }
+      const icon = this.ensureIcon(path);
       if (!icon) {
         continue;
       }
@@ -378,48 +400,76 @@ export class MinimapBlips {
    * One attempt is enough for a file that either exists or does not, and a retry per composite would be
    * a request per step the player takes.
    */
+  /**
+   * The decoded icon for a path, kicking off its decode on a miss.
+   *
+   * Separate from `load` because a TRACKED blip's art is chosen at runtime -- the player picks one of
+   * fifteen -- and the three quest glyphs are fixed. One map, two ways in.
+   */
+  private ensureIcon(path: string): HTMLCanvasElement | null | undefined {
+    if (!this.icons.has(path)) {
+      this.decode(path);
+      return undefined;
+    }
+    return this.icons.get(path);
+  }
+
   private load(): void {
     if (this.loading) {
       return;
     }
     this.loading = true;
     for (const path of Object.values(ICON_PATHS)) {
-      void (async () => {
-        try {
-          const spec = (await WorkerPool.enqueueAt(
-            PRIORITY.BACKGROUND, 'BLP', path, true,
-          )) as BlpSpec | null | undefined;
-          const level = spec?.mipmaps[0];
-          if (!spec || level === undefined || spec.format !== BLP_IMAGE_FORMAT.IMAGE_ABGR8888) {
-            this.icons.set(path, null);
-            return;
-          }
-          const canvas = document.createElement('canvas');
-          canvas.width = level.width;
-          canvas.height = level.height;
-          const into = canvas.getContext('2d');
-          if (into === null) {
-            this.icons.set(path, null);
-            return;
-          }
-          // The decoder gives RGBA in that order (`pipeline/blp/loader.js`), which is what `ImageData`
-          // wants, so this is a copy and not a conversion.
-          into.putImageData(
-            new ImageData(new Uint8ClampedArray(level.data), level.width, level.height), 0, 0,
-          );
-          this.icons.set(path, canvas);
-          // See `artArrived`: the gate cannot see that this changed what a composite would paint.
-          this.artArrived = true;
-        } catch (error) {
-          this.icons.set(path, null);
-          console.warn(`minimap blips: ${path} failed to load`, error);
-        }
-      })();
+      this.decode(path);
     }
   }
 
+  /**
+   * Decode one icon into a canvas, once. A failure is remembered as null and never retried.
+   *
+   * One attempt is enough for a file that either exists or does not, and a retry per composite would
+   * be a request per step the player takes.
+   */
+  private decode(path: string): void {
+    if (this.icons.has(path) || this.decoding.has(path)) {
+      return;
+    }
+    this.decoding.add(path);
+    void (async () => {
+      try {
+        const spec = (await WorkerPool.enqueueAt(
+          PRIORITY.BACKGROUND, 'BLP', path, true,
+        )) as BlpSpec | null | undefined;
+        const level = spec?.mipmaps[0];
+        if (!spec || level === undefined || spec.format !== BLP_IMAGE_FORMAT.IMAGE_ABGR8888) {
+          this.icons.set(path, null);
+          return;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = level.width;
+        canvas.height = level.height;
+        const into = canvas.getContext('2d');
+        if (into === null) {
+          this.icons.set(path, null);
+          return;
+        }
+        // The decoder gives RGBA in that order (`pipeline/blp/loader.js`), which is what `ImageData`
+        // wants, so this is a copy and not a conversion.
+        into.putImageData(
+          new ImageData(new Uint8ClampedArray(level.data), level.width, level.height), 0, 0,
+        );
+        this.icons.set(path, canvas);
+        // See `artArrived`: the gate cannot see that this changed what a composite would paint.
+        this.artArrived = true;
+      } catch (error) {
+        this.icons.set(path, null);
+        console.warn(`minimap blips: ${path} failed to load`, error);
+      }
+    })();
+  }
   dispose(): void {
     this.icons.clear();
+    this.decoding.clear();
     this.loading = false;
   }
 }

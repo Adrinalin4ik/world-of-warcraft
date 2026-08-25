@@ -80,6 +80,7 @@ import type { GlueArt } from './art';
 import {
   Blip, MinimapBlips, blipForStatus, setBlipSizes,
 } from './minimap-blips';
+import { activeTracking, trackingTexturePath } from './minimap-tracking';
 import { resolveUnitToken } from '../world/unit-tokens';
 import { rectOf } from './rects';
 import type { MethodContext } from './framexml/lua/object';
@@ -1198,6 +1199,32 @@ export function attachMinimapTerrain(
         name: member.name,
       });
     }
+    /**
+     * THE TRACKED CATEGORY, if the player has chosen one.
+     *
+     * `UNIT_NPC_FLAGS` is on every unit, so a category is a MASK and a blip is any entity carrying
+     * it -- see `ui/minimap-tracking.ts` on why this is client-side and sends nothing.
+     *
+     * A row with `flag: 0` selects nothing and is skipped here rather than looped over 72 entities
+     * for no possible hit: Mailbox has no unit flag (it is a GameObject) and Low Level Quests is a
+     * filter on the quest blips, not a kind of NPC. Both are named at that file.
+     */
+    const tracked = activeTracking();
+    if (tracked !== null && tracked.flag !== 0) {
+      const icon = trackingTexturePath(tracked);
+      world.entities.forEach((unit) => {
+        if (((unit.fields.npcFlags ?? 0) & tracked.flag) !== 0) {
+          out.push({
+            worldX: unit.position.x,
+            worldY: unit.position.y,
+            kind: 'tracked',
+            icon,
+            name: unit.name,
+          });
+        }
+      });
+    }
+
     return out;
   };
 

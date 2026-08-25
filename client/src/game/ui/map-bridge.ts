@@ -8,6 +8,9 @@ import { zoneHighlights, setHighlightScale, lastHoverTest } from '../pipeline/zo
 import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
 import { BlobPolygon, setBlobSource } from './quest-blobs';
 import { resolveUnitToken } from '../world/unit-tokens';
+import {
+  activeTracking, setTracking, trackingTexturePath, visibleTracking,
+} from './minimap-tracking';
 
 /**
  * THE MAP'S ENGINE SIDE -- the zone text, the world map's selection, and the player's position on it.
@@ -65,6 +68,28 @@ import { resolveUnitToken } from '../world/unit-tokens';
  * parent chain, and the chain is two or three deep in practice. These are called from `SetText` paths on
  * zone-change events, not per frame.
  */
+/**
+ * A `GlobalStrings.lua` entry, or null.
+ *
+ * The KEY is checked against a whitelist pattern before it reaches the chunk. Every key here is a
+ * literal in this repo, so nothing hostile can arrive -- but the rule on this project is that only
+ * numbers and global NAMES are ever spliced into a source string, and a regex is what makes that
+ * true by construction rather than by inspection. Same shape as `ui/item-tooltip.ts#globalString`.
+ */
+const SAFE_GLOBAL = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function globalString(vm: LuaVM, key: string): string | null {
+  if (!SAFE_GLOBAL.test(key)) {
+    return null;
+  }
+  const answer = vm.runExpr(
+    `if type(${key}) ~= "string" then return nil end return ${key}`,
+    'map-bridge-global.lua',
+  ) as { value?: unknown } | null;
+  const value = answer === null ? null : answer.value;
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
 export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): MapBridge {
   let disposed = false;
 
@@ -284,12 +309,12 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    *    texture and calls `SetTexture(nil)` plus a shine when they differ (`minimap.lua:408-414`). nil is
    *    the correct answer for "no tracking active", and it makes that comparison a no-op rather than a
    *    flash: the icon starts with no texture, so nil == nil and the shine does not fire.
-   *  - `GetNumTrackingTypes` -> the dropdown's initialiser loops `1..count` (`minimap.lua:427-430`).
-   *    **0 leaves the menu empty, which is the truth**: tracking types are the tracking SPELLS the
-   *    player knows, and this client models no such thing. A fabricated count would put rows in the menu
-   *    that select nothing.
-   *  - `GetTrackingInfo` cannot be reached with the count at 0, and is registered anyway: an addon
-   *    duck-types it, and this is the object-model rule the button classes already follow.
+   *  - The three TRACKING globals have LEFT this list -- they are real below. The sentence that used
+   *    to be here said "tracking types are the tracking SPELLS the player knows, and this client
+   *    models no such thing", and **that was wrong**: the owner photographed the menu in the real
+   *    client and it is twelve fixed townsfolk categories -- Repair, Food & Drink, Reagents,
+   *    Innkeeper and so on -- none of which is a spell. Tracking spells are a different, additional
+   *    category (`GetTrackingInfo`'s fourth return distinguishes them), and those are still absent.
    *  - `IsPartyLFG`, `IsInLFGDungeon` -> the LFG eye's update functions (`minimap.lua:242-244`). nil,
    *    which is the "not queued" state every one of those ladders falls through to.
    *
@@ -310,9 +335,83 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * values -- tracking spells and the LFG queue -- are named here instead, because a comment is where an
    * absent subsystem belongs and a red line on screen is not.
    */
-  fn('GetTrackingTexture', () => [null]);
-  fn('GetNumTrackingTypes', () => [0]);
-  fn('GetTrackingInfo', () => [null, null, null, null]);
+  /**
+   * THE TRACKING MENU -- four globals, and the menu is derived entirely from them.
+   *
+   * `MiniMapTrackingDropDown_Initialize` walks `1..GetNumTrackingTypes()`, reads
+   * `name, texture, active, category = GetTrackingInfo(id)` for each and adds a final None row whose
+   * `checked` is set only when nothing is active (`minimap.lua:424-467`). So there is no list in Lua
+   * to match -- what these answer IS the menu. `ui/minimap-tracking.ts` holds the list and the
+   * evidence for its order.
+   *
+   * The NAME is resolved through the VM from its `GlobalStrings.lua` key, so a Russian client
+   * localises itself and no English literal appears here. A key that resolves to nothing yields a
+   * row the client skips, which is the honest outcome for a build whose strings differ.
+   *
+   * `category` is the client's own discriminator: it sets a tighter tex-coord crop for `"spell"` than
+   * for anything else (`minimap.lua:438-448`), because a spell icon is a full square and a tracking
+   * icon has its own margin. These are all townsfolk, so `"townsfolk"` it is -- and that is also the
+   * word that keeps the spell branch reachable for the tracking SPELLS still absent here.
+   */
+  /**
+   * The player's class, or 0 -- which matches no row's `onlyClass` and so shows only the common ones.
+   *
+   * 0 rather than a guess: before the descriptor lands the class is genuinely unknown, and a menu
+   * missing a hunter row for one second is better than one that shows a rogue his ammunition.
+   */
+  const playerClassId = (): number => world.player?.fields.classId ?? 0;
+
+  fn('GetNumTrackingTypes', () => [visibleTracking(playerClassId()).length]);
+
+  fn('GetTrackingInfo', (args) => {
+    const id = Math.trunc(Number(args[0]));
+    const rows = visibleTracking(playerClassId());
+    const row = id >= 1 && id <= rows.length ? rows[id - 1] : null;
+    if (row === null) {
+      return [null, null, null, null];
+    }
+    const name = globalString(vm, row.stringKey);
+    return [
+      name,
+      trackingTexturePath(row),
+      // `active` gates the tick, and the client also folds it into `anyActive` to decide whether
+      // None is ticked -- so `false` and not nil: nil would be indistinguishable from an error to a
+      // reader, and the client tests it for truth either way.
+      activeTracking() === row,
+      'townsfolk',
+    ];
+  });
+
+  /**
+   * `SetTracking(id)` -- 1-based into the class-filtered list, and **nil for the None row.**
+   *
+   * `MiniMapTracking_SetTracking` passes `self.value`, which the initialiser sets to `nil` on that
+   * last row (`minimap.lua:462-465`). So an absent argument is not a caller mistake, it is the
+   * documented way to turn tracking off, and `Number(undefined)` being NaN is what would have made
+   * that silently select row 0.
+   *
+   * NOTHING IS SENT. A tracking SPELL writes `PLAYER_TRACK_CREATURES` server-side; the townsfolk
+   * categories are a display filter over units this client already has, since `UNIT_NPC_FLAGS` is
+   * decoded onto every one of them.
+   */
+  fn('SetTracking', (args) => {
+    const raw = args[0];
+    const id = raw === undefined || raw === null ? null : Math.trunc(Number(raw));
+    setTracking(playerClassId(), id !== null && Number.isFinite(id) ? id : null);
+    return [];
+  });
+
+  /**
+   * `GetTrackingTexture()` -- the button's own icon, or nil.
+   *
+   * `MiniMapTracking_Update` compares it with the icon's current texture and only then calls
+   * `SetTexture` plus a shine (`minimap.lua:408-414`), so nil while nothing is tracked keeps that a
+   * no-op rather than a flash -- which is what the old stub got right and is kept.
+   */
+  fn('GetTrackingTexture', () => {
+    const row = activeTracking();
+    return [row === null ? null : trackingTexturePath(row)];
+  });
   fn('IsPartyLFG', () => [null]);
   fn('IsInLFGDungeon', () => [null]);
   fn('GetLatestThreeSenders', () => [null, null, null]);
