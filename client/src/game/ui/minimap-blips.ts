@@ -89,14 +89,10 @@ export interface Blip {
    * and not an offset against some other convention.
    */
   bearing?: number;
-  /**
-   * Recolour this blip to `[r, g, b]`, each 0..1. Only the edge arrow uses it.
-   *
-   * The arrow art is a dark gold -- measured, mean endpoint `(33, 27, 10)` -- so the engine tints it
-   * rather than shipping one file per colour, and the owner confirms there are several: "они бывают
-   * нескольких цветов".
-   */
-  tint?: readonly [number, number, number];
+  /** For a tracked quest: whether it can be handed in. Picks the atlas cell -- see `POI_CELL`. */
+  complete?: boolean;
+  /** Its position in the watch list, 0-based. The digit drawn inside the circle. */
+  index?: number;
   /**
    * The member's `classId`, for a group dot. Undefined for a quest glyph and for an unknown class.
    *
@@ -146,13 +142,22 @@ const ICON_PATHS: Record<
   questComplete: 'Interface\\GossipFrame\\ActiveQuestIcon.blp',
   questIncomplete: 'Interface\\GossipFrame\\IncompleteQuestIcon.blp',
   /**
-   * The EDGE ARROW for a tracked quest whose objective is off the minimap.
+   * THE TRACKED-QUEST MARKER, and it is the client's own POI ICON -- not a guide arrow.
    *
-   * `Interface\\Minimap\\Rotating-MinimapGuideArrow` -- named for exactly this job, and DECODED to
-   * check rather than assumed: BLP2 32x32, DXT with alphaDepth 8, and its alpha is a triangle
-   * pointing UP. Up matters, because the rotation below is measured from up.
+   * **The owner compared ours with the real client and the shape was wrong.** I had used
+   * `Rotating-MinimapGuideArrow`, a triangle, on the strength of its NAME. His screenshot of the
+   * original shows round POI icons distributed around the rim, which is a different thing: the
+   * triangle guide arrow belongs to the corpse/destination pointer, not to quest tracking.
+   *
+   * `UI-QuestPoi-NumberIcons` is what the client itself uses for a tracked quest, and every
+   * coordinate below is read out of `questpoi.lua` rather than guessed. The atlas is an 8x8 grid --
+   * `QUEST_POI_ICON_SIZE = 0.125` (`:5`).
+   *
+   * DIRECTION IS POSITION, not rotation: a round icon at the rim in the objective's direction is how
+   * the real client conveys it, which is why the rotation and the colour tint this file briefly grew
+   * are both gone. The art is already coloured and already round.
    */
-  questArrow: 'Interface\\Minimap\\Rotating-MinimapGuideArrow.blp',
+  questArrow: 'Interface\\WorldMap\\UI-QuestPoi-NumberIcons.blp',
 };
 
 /**
@@ -197,13 +202,13 @@ let questIconPx = 22;
 let dotPx = 13;
 
 /**
- * The edge arrow, and it is its OWN size rather than a fraction of the glyph.
+ * The RIM MARKER's size -- its own, not a fraction of the giver glyph's.
  *
- * It was `questIconPx * 0.7` -- 15 px -- and the owner could not find it: "она очень маленькая, в
- * этом проблема". Deriving it from the glyph was the mistake: an arrow at the rim is read at a
- * glance and from further away than an icon under the cursor, so it wants to be LARGER than a POI
- * glyph, not smaller. 32 against the glyph's 22 -- 26 was still too small when he looked at it,
- * which is why this is a knob and not a derivation.
+ * It was `questIconPx * 0.7` -- 15 px -- and the owner could not find it on screen: "она очень
+ * маленькая, в этом проблема". Deriving it from the glyph was the mistake: a marker at the rim is
+ * read at a glance and from further away than an icon under the cursor, so it wants to be LARGER,
+ * not smaller. 32 against the glyph's 22 -- 26 was still too small when he looked at it, which is
+ * why this is a knob and not a derivation.
  *
  * UNSOURCED like the other two, and settled the same way -- `window.worldMinimapBlipSize` takes it
  * as a third argument.
@@ -245,29 +250,32 @@ const OUTLINE_PX = 2;
 const EDGE_REACH = 0.82;
 
 /**
- * THE ARROW COLOURS, and the DISTINCTION is sourced while the hues are not.
+ * The atlas cell for a tracked quest, READ OUT OF `questpoi.lua`.
  *
- * What the client itself separates is a quest that can be handed in from one still in progress: its
- * POI buttons come in `QUEST_POI_NUMERIC` and `QUEST_POI_COMPLETE_*` types and it picks between them
- * by `isComplete` (`questpoi.lua:9-12`, `worldmapframe.lua:1553-1558`). That is the same split this
- * file already draws for a giver -- a yellow `?` for a turn-in against a grey one for in-progress --
- * so an arrow follows it.
+ * In progress: `normalTexture:SetTexCoord(0.500, 0.625, 0.875, 1.0)` (`:67`) -- the numbered circle.
+ * Ready to hand in: `(0.500, 0.625, 0.375, 0.5)` (`:134`) -- the same circle in its complete state.
  *
- * **The hues are OURS.** No file states a minimap arrow colour, and the art is one tintable texture.
- * Gold for in-progress matches the untinted art and the numbered POI buttons; green for complete
- * matches what a finished objective reads as everywhere else in this client. If the owner names the
- * real pair, these are two constants.
+ * So the STATE and the CELL are both the client's, and nothing here is a hue I chose.
  */
-const ARROW_TINT_ACTIVE: readonly [number, number, number] = [1.0, 0.82, 0.2];
+const POI_CELL = { x: 0.5, size: 0.125, active: 0.875, complete: 0.375 } as const;
 
-const ARROW_TINT_COMPLETE: readonly [number, number, number] = [0.4, 1.0, 0.4];
-
-/** The arrow tint for a quest that can be handed in, and for one still in progress. */
-export function arrowTint(complete: boolean): readonly [number, number, number] {
-  return complete ? ARROW_TINT_COMPLETE : ARROW_TINT_ACTIVE;
-}
-
-export class MinimapBlips {
+/**
+ * Where the DIGIT for the n-th tracked quest lives in the same atlas.
+ *
+ * `yOffset = 0.5 + floor(i / QUEST_POI_ICONS_PER_ROW) * 0.125` and
+ * `xOffset = mod(i, QUEST_POI_ICONS_PER_ROW) * 0.125` (`questpoi.lua:72-73`), with the index being
+ * the button number the client passes -- 1-based in its own list, so 0-based here.
+ *
+ * `QUEST_POI_ICONS_PER_ROW` is not in `questpoi.lua`; it is 8, which the 0.125 cell size states
+ * arithmetically -- a row of an 8x8 grid.
+ */
+function digitCell(index: number): { x: number; y: number } {
+  const perRow = 8;
+  return {
+    x: (index % perRow) * POI_CELL.size,
+    y: 0.5 + Math.floor(index / perRow) * POI_CELL.size,
+  };
+}export class MinimapBlips {
   private readonly icons = new Map<string, HTMLCanvasElement | null>();
 
   private loading = false;
@@ -275,8 +283,6 @@ export class MinimapBlips {
   /** Paths with a decode in flight, so a per-frame builder cannot queue the same file twice. */
   private readonly decoding = new Set<string>();
 
-  /** `<size>:<r,g,b>` -> a pre-tinted copy. See `tinted`. */
-  private readonly tints = new Map<string, HTMLCanvasElement>();
 
   /**
    * Set when an icon lands, cleared by `takeArtArrived`. **Without it the first blips never draw.**
@@ -455,55 +461,24 @@ export class MinimapBlips {
       }
       if (blip.kind === 'questArrow') {
         /**
-         * PUSHED TO THE RIM along the bearing, inset by its own half-size so the whole arrow stays
-         * inside the circle.
+         * ON THE RIM in the objective's direction, and NOT rotated -- the icon is round.
          *
-         * The mask that follows would otherwise clip it: `destination-in` keeps only what the circle
-         * covers, so an arrow centred ON the rim loses its outer half. The inset is `side / 2` plus a
-         * pixel for the antialiased edge the mask itself leaves.
-         *
-         * Screen up is `-y` and bearing 0 is up, so the offset is `(sin, -cos)` -- not `(cos, sin)`,
-         * which would put bearing 0 to the right and rotate every arrow a quarter turn out of step
-         * with the art.
-         */
-        /**
-         * INSIDE the border ring, not against the extreme edge of the canvas.
-         *
-         * `half - side / 2 - 1` put the arrow at 93% of the radius, and the client draws its own
-         * round border art OVER the minimap texture -- `MiniMap-TrackingBorder` and the frame's ring
-         * (`minimap.xml`) -- so an arrow that close to the edge sits underneath it and is invisible.
-         * The blips are pixels in a texture the border is layered above; they cannot be "on" the rim
-         * the way a widget anchored to the frame could be.
-         *
-         * `EDGE_REACH` is UNSOURCED like the blip sizes, and settled the same way:
-         * `window.worldMinimapBlipSize` moves the sizes, and this one is a single factor the owner can
-         * see. 0.82 clears the ring on his screenshots while still reading as "at the edge".
+         * Inset by its own half-size: the client draws its border art OVER this texture, so an icon
+         * at the very edge sits under the ring and is invisible. That was the "стрелки не видно"
+         * round.
          */
         const half = canvasPx / 2;
         const reach = half * EDGE_REACH - side / 2;
         const bearing = blip.bearing ?? 0;
-        // ALWAYS on the rim: `questArrow` has no other placement, so there is no flag to consult.
-        // The builder gives it the PLAYER's coordinates because the list is in world space and the
-        // rim is a canvas fact -- converting back and forth would arrive where we started.
         const rim = {
           x: half + Math.sin(bearing) * reach,
           y: half - Math.cos(bearing) * reach,
         };
-        /**
-         * ROTATED ABOUT ITS OWN CENTRE, saved and restored around the draw.
-         *
-         * `rotate` is CUMULATIVE on a 2D context, so leaving one in place would turn every blip after
-         * this one and then the circular mask -- clipping the terrain at an angle. That is why this is
-         * a save/restore and not an inverse rotate afterwards.
-         *
-         * The art points UP at bearing 0, measured by decoding it -- see `ICON_PATHS.questArrow`.
-         */
-        ctx.save();
-        ctx.translate(rim.x, rim.y);
-        ctx.rotate(blip.bearing ?? 0);
-        const art = blip.tint === undefined ? icon : this.tinted(icon, blip.tint);
-        ctx.drawImage(art, -side / 2, -side / 2, side, side);
-        ctx.restore();
+        // The CIRCLE, then the DIGIT inside it. Both cells come from `questpoi.lua`; see `POI_CELL`.
+        const cellY = blip.complete === true ? POI_CELL.complete : POI_CELL.active;
+        MinimapBlips.blit(ctx, icon, POI_CELL.x, cellY, rim, side);
+        const digit = digitCell(blip.index ?? 0);
+        MinimapBlips.blit(ctx, icon, digit.x, digit.y, rim, side);
         this.record(blip, rim, side);
         continue;
       }
@@ -577,37 +552,25 @@ export class MinimapBlips {
   }
 
   /**
-   * A tinted copy of an icon, made once per (icon, colour) pair.
+   * Draw one cell of an atlas centred on a point.
    *
-   * **PRE-TINTED into its own canvas rather than composited at draw time, and that is not a
-   * preference.** The obvious route -- draw the icon, then `source-atop` a colour over it -- reads the
-   * DESTINATION alpha, and the destination here is the terrain that has already been composited. It
-   * would recolour the map under the arrow, not the arrow. `source-in` on a scratch canvas has only
-   * the icon in it, so the alpha it reads is the icon's own.
-   *
-   * Cached because a tint is a canvas allocation and this runs from the composite: two colours and
-   * one arrow texture means two canvases for the session.
+   * The cell is given in the same 0..1 fractions the client uses in `SetTexCoord`, so the numbers at
+   * the call site are literally the ones in `questpoi.lua` and can be compared with it by eye.
    */
-  private tinted(icon: HTMLCanvasElement, tint: readonly [number, number, number])
-    : HTMLCanvasElement {
-    const key = `${icon.width}x${icon.height}:${tint.join(',')}`;
-    const known = this.tints.get(key);
-    if (known !== undefined) {
-      return known;
-    }
-    const canvas = document.createElement('canvas');
-    canvas.width = icon.width;
-    canvas.height = icon.height;
-    const into = canvas.getContext('2d');
-    if (into === null) {
-      return icon;
-    }
-    into.drawImage(icon, 0, 0);
-    into.globalCompositeOperation = 'source-in';
-    into.fillStyle = `rgb(${Math.round(tint[0] * 255)}, ${Math.round(tint[1] * 255)}, ${Math.round(tint[2] * 255)})`;
-    into.fillRect(0, 0, canvas.width, canvas.height);
-    this.tints.set(key, canvas);
-    return canvas;
+  private static blit(
+    ctx: CanvasRenderingContext2D,
+    atlas: HTMLCanvasElement,
+    cellX: number,
+    cellY: number,
+    at: { x: number; y: number },
+    side: number,
+  ): void {
+    ctx.drawImage(
+      atlas,
+      cellX * atlas.width, cellY * atlas.height,
+      POI_CELL.size * atlas.width, POI_CELL.size * atlas.height,
+      at.x - side / 2, at.y - side / 2, side, side,
+    );
   }
 
   private ensureIcon(path: string): HTMLCanvasElement | null | undefined {
@@ -673,7 +636,6 @@ export class MinimapBlips {
   }
   dispose(): void {
     this.icons.clear();
-    this.tints.clear();
     this.decoding.clear();
     this.loading = false;
   }

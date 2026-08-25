@@ -78,7 +78,7 @@ import minimapTiles from '../pipeline/minimap-tiles';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
 import type { GlueArt } from './art';
 import {
-  Blip, MinimapBlips, blipForStatus, setBlipSizes, arrowTint,
+  Blip, MinimapBlips, blipForStatus, setBlipSizes,
 } from './minimap-blips';
 import { activeTracking, trackingTextureFile } from './minimap-tracking';
 import { watchedQuestIds } from './quest-watch';
@@ -1346,10 +1346,11 @@ export function attachMinimapTerrain(
        * this is one query per watched quest per session even from a per-frame builder.
        */
       quests?.queryPois(watched);
-      for (const questId of watched) {
+      const done = completeQuests();
+      watched.forEach((questId, at) => {
         const first = quests?.pois.get(questId)?.find((poi) => poi.points.length > 0) ?? null;
         if (first === null) {
-          continue;
+          return;
         }
         // The mean of the polygon, the same point `QuestPOIGetIconInfo` answers with.
         const mid = first.points.reduce(
@@ -1363,8 +1364,8 @@ export function attachMinimapTerrain(
         const away = Math.sqrt(dx * dx + dy * dy);
         arrowTrace.push({ questId, away: Math.round(away), radiusYards: Math.round(radiusYards) });
         if (away <= radiusYards) {
-          // Inside the window: the POI is on the map already, so an arrow would be noise.
-          continue;
+          // Inside the window: the POI is on the map already, so a rim icon would be noise.
+          return;
         }
         out.push({
           // The PLAYER's position; the rim placement is the draw's -- see `minimap-blips.ts`.
@@ -1375,11 +1376,13 @@ export function attachMinimapTerrain(
           /**
            * COMPLETE comes from the DESCRIPTOR, not from a packet: the quest log slot's word 1
            * carries `QUEST_STATE.COMPLETE` (`update-object/quest-log.ts`). So a quest that became
-           * turn-in-able changes the arrow on the next field update with nothing else to ask.
+           * turn-in-able changes the icon on the next field update with nothing else to ask.
            */
-          tint: arrowTint(completeQuests().has(questId)),
+          complete: done.has(questId),
+          // Its place in the watch list, which is the digit the client draws inside the circle.
+          index: at,
         });
-      }
+      });
     }
 
     return out;
