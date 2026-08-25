@@ -398,6 +398,20 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     const raw = args[0];
     const id = raw === undefined || raw === null ? null : Math.trunc(Number(raw));
     setTracking(playerClassId(), id !== null && Number.isFinite(id) ? id : null);
+    /**
+     * **`MINIMAP_UPDATE_TRACKING`, and without it the button icon never changes.**
+     *
+     * The owner: "После выбора выбор не появляется в кружочке." The tick moved, so the choice was
+     * taken -- what was missing is the announcement. `MiniMapTracking_SetTracking` calls this global
+     * and nothing else (`minimap.lua:420-422`); the icon is repainted by `MiniMapTracking_Update`,
+     * which the frame binds to `<OnEvent>` after registering `MINIMAP_UPDATE_TRACKING`
+     * (`minimap.xml:479-482`). So the event is the engine telling the client the tracking moved, and
+     * this is the engine.
+     *
+     * The same shape as the `unit:fields` and `QUEST_LOG_UPDATE` edges: the value was written
+     * correctly and nothing told the reader.
+     */
+    fireEvent(vm, 'MINIMAP_UPDATE_TRACKING');
     return [];
   });
 

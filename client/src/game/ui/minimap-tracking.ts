@@ -151,8 +151,55 @@ export const TRACKING_TYPES: readonly TrackingType[] = [
   },
 ];
 
+/**
+ * WHERE THE CHOICE SURVIVES A RELOAD -- the owner: "он должен сохраняться как и масштаб между
+ * перезапусками."
+ *
+ * The same store and the same reasoning as the minimap zoom
+ * (`framexml/lua/methods/minimap.ts#ZOOM_STORAGE_KEY`): the real client keeps it in saved variables,
+ * this project has none, and the value is ENGINE state -- the client never asks for a tracking CVar,
+ * it reads the choice back through `GetTrackingInfo`'s `active`.
+ *
+ * The `stringKey` is stored, not the index. An index would silently point at a different category if
+ * this list ever gains a row, and the list is transcribed from a screenshot rather than read from a
+ * file -- so it is exactly the kind of thing that will gain a row.
+ */
+const TRACKING_STORAGE_KEY = 'wow.minimap.tracking';
+
 /** The active row's index into `TRACKING_TYPES`, or null for "None". */
 let active: number | null = null;
+
+/** Whether storage has been consulted. See `readStored`. */
+let restored = false;
+
+function readStored(): void {
+  if (restored) {
+    return;
+  }
+  restored = true;
+  try {
+    const key = window.localStorage.getItem(TRACKING_STORAGE_KEY);
+    if (key !== null) {
+      const at = TRACKING_TYPES.findIndex((type) => type.stringKey === key);
+      active = at < 0 ? null : at;
+    }
+  } catch {
+    // A private window, or site data blocked. Tracking simply starts at None.
+  }
+}
+
+function writeStored(): void {
+  try {
+    const row = active === null ? null : TRACKING_TYPES[active] ?? null;
+    if (row === null) {
+      window.localStorage.removeItem(TRACKING_STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(TRACKING_STORAGE_KEY, row.stringKey);
+    }
+  } catch {
+    // Nothing to do and nothing to report: the choice still holds for this session.
+  }
+}
 
 /** Which rows this class sees, in order. `GetTrackingInfo(id)` is `visible()[id - 1]`. */
 export function visibleTracking(classId: number): TrackingType[] {
@@ -160,6 +207,7 @@ export function visibleTracking(classId: number): TrackingType[] {
 }
 
 export function activeTracking(): TrackingType | null {
+  readStored();
   return active === null ? null : TRACKING_TYPES[active] ?? null;
 }
 
@@ -172,10 +220,15 @@ export function activeTracking(): TrackingType | null {
 export function setTracking(classId: number, id: number | null): void {
   if (id === null) {
     active = null;
+    restored = true;
+    writeStored();
     return;
   }
   const chosen = visibleTracking(classId)[id - 1];
   active = chosen === undefined ? null : TRACKING_TYPES.indexOf(chosen);
+  // Consulted BEFORE writing, so a first-ever `SetTracking` cannot be overwritten by a later read.
+  restored = true;
+  writeStored();
 }
 
 /** The full path of a row's icon, or of the active row's for `GetTrackingTexture`. */

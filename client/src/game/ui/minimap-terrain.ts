@@ -912,6 +912,24 @@ export function attachMinimapTerrain(
         }
       });
       return {
+        // THE TRACKING ARM, so "it does not show my category" becomes a number. `matchedFlag` is how
+        // many entities in range carry the mask -- 0 with a category selected means there is simply
+        // no such NPC nearby, which is a correct empty rather than a defect.
+        tracking: activeTracking()?.stringKey ?? null,
+        trackingFlag: activeTracking()?.flag ?? null,
+        matchedFlag: (() => {
+          const row = activeTracking();
+          if (row === null || row.flag === 0) {
+            return null;
+          }
+          let hits = 0;
+          world.entities.forEach((unit) => {
+            if (((unit.fields.npcFlags ?? 0) & row.flag) !== 0) {
+              hits += 1;
+            }
+          });
+          return hits;
+        })(),
         statuses: quests?.status.size ?? null,
         iconworthy,
         matched,
