@@ -251,8 +251,15 @@ const OUTLINE_RGBA = 'rgba(0, 0, 0, 0.85)';
 
 const OUTLINE_PX = 2;
 
-/** How far out an edge arrow sits, as a fraction of the radius. UNSOURCED -- see the rim comment. */
-const EDGE_REACH = 0.82;
+/**
+ * Where a rim marker's CENTRE sits, as a fraction of the radius. UNSOURCED.
+ *
+ * Not "how far out before an inset": the inset used to be applied twice, here and again as
+ * `side / 2` at the call. 0.86 puts a 38-px marker at 110 of 128 with its outer edge at 129 -- a
+ * couple of pixels past the mask, which is what "at the edge" looks like and is why the mask exists
+ * rather than a hard clamp.
+ */
+const EDGE_REACH = 0.86;
 
 /**
  * The atlas cell for a tracked quest, READ OUT OF `questpoi.lua`.
@@ -473,7 +480,10 @@ function digitCell(index: number): { x: number; y: number } {
          * round.
          */
         const half = canvasPx / 2;
-        const reach = half * EDGE_REACH - side / 2;
+        // `EDGE_REACH` alone: it IS where the centre goes. Subtracting `side / 2` on top of it was a
+        // double inset, and at 38 px that was 19 more pixels inward -- the markers sat at 67% of the
+        // radius while the constant said 82%, which is why they read as central.
+        const reach = half * EDGE_REACH;
         const bearing = blip.bearing ?? 0;
         const rim = {
           x: half + Math.sin(bearing) * reach,
