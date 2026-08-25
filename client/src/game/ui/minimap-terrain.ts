@@ -1258,12 +1258,26 @@ export function attachMinimapTerrain(
       if (unit === null || unit === world.player) {
         continue;
       }
+      /**
+       * IN RANGE a dot, OUT OF RANGE an arrow at the rim pointing at them.
+       *
+       * The same distance test the quest markers use, against the same radius -- a member inside the
+       * window is drawn where they are and needs no direction, and one outside has no position on
+       * this map at all, so the shape has to carry it.
+       */
+      const self = world.player;
+      const dx = self ? unit.position.x - self.position.x : 0;
+      const dy = self ? unit.position.y - self.position.y : 0;
+      const beyond = self !== null && radiusYards > 0
+        && Math.sqrt(dx * dx + dy * dy) > radiusYards;
       out.push({
         worldX: unit.position.x,
         worldY: unit.position.y,
-        kind: isRaid ? 'raid' : 'party',
+        kind: beyond ? 'partyEdge' : (isRaid ? 'raid' : 'party'),
         classId: unit.fields.classId,
         name: member.name,
+        // Only read for `partyEdge`; the same bearing convention as the quest markers.
+        bearing: Math.atan2(-dy, dx),
       });
     }
     /**

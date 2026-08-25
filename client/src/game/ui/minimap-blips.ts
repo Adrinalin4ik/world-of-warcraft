@@ -62,7 +62,8 @@ export type BlipKind =
   | 'tracked'
   | 'questArrow'
   | 'party'
-  | 'raid';
+  | 'raid'
+  | 'partyEdge';
 
 export interface Blip {
   /** World coordinates -- the same space the player's position and the terrain window are in. */
@@ -259,7 +260,17 @@ const OUTLINE_PX = 2;
  * couple of pixels past the mask, which is what "at the edge" looks like and is why the mask exists
  * rather than a hard clamp.
  */
-const EDGE_REACH = 0.86;
+const EDGE_REACH = 0.78;
+
+/**
+ * How big a rim arrow for an out-of-range group member is. UNSOURCED, like every blip size here.
+ *
+ * Smaller than a quest marker on purpose: that one carries a digit and has to be read, this one only
+ * has to be seen and pointed. `window.worldMinimapBlipSize` does not take it -- if it needs settling
+ * the owner has one line to say so, and a fourth argument for a shape nobody has looked at yet would
+ * be a knob built on speculation.
+ */
+const PARTY_ARROW_PX = 16;
 
 /**
  * The atlas cell for a tracked quest, READ OUT OF `questpoi.lua`.
@@ -438,6 +449,44 @@ function digitCell(index: number): { x: number; y: number } {
       // NO `record` HERE. Each branch records with the position it actually DREW at -- an edge
       // arrow draws on the rim, not at `at` -- and a call here as well double-counted `drawn` and
       // put two hover boxes on every blip.
+      if (blip.kind === 'partyEdge') {
+        /**
+         * A GROUP MEMBER OUT OF RANGE -- a triangle at the rim, pointing at them.
+         *
+         * The owner: "должна быть еще стрелочка, указывающая на члена пати." A round icon cannot
+         * carry a direction, which is why the quest markers get away without one -- their POSITION is
+         * the direction and they sit where the objective is. A member outside the window has no such
+         * position: every one of them is off the same edge, so the shape has to point.
+         *
+         * DRAWN, not a texture, for the same reason the in-range dot is: it needs the CLASS colour,
+         * and the one arrow texture this client has is a fixed dark gold. Drawing it keeps the colour
+         * source identical to the dot's -- `CLASS_COLOURS`, out of the client's own
+         * `constants.lua` -- and needs no tinted-canvas cache, which is the machinery this file
+         * carried briefly and shed.
+         */
+        const half = canvasPx / 2;
+        const bearing = blip.bearing ?? 0;
+        const reach = half * EDGE_REACH;
+        const [r, g, b] = CLASS_COLOURS[blip.classId ?? -1] ?? UNKNOWN_CLASS;
+        ctx.save();
+        ctx.translate(half + Math.sin(bearing) * reach, half - Math.cos(bearing) * reach);
+        ctx.rotate(bearing);
+        ctx.beginPath();
+        // Apex forward, base behind: a triangle whose point is at `-side / 2` in the unrotated
+        // frame, which after `rotate(bearing)` is the direction of the member.
+        ctx.moveTo(0, -side / 2);
+        ctx.lineTo(side / 2, side / 2);
+        ctx.lineTo(-side / 2, side / 2);
+        ctx.closePath();
+        ctx.fillStyle = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+        ctx.fill();
+        ctx.lineWidth = OUTLINE_PX;
+        ctx.strokeStyle = OUTLINE_RGBA;
+        ctx.stroke();
+        ctx.restore();
+        this.record(blip, { x: half + Math.sin(bearing) * reach, y: half - Math.cos(bearing) * reach }, side);
+        continue;
+      }
       if (blip.kind === 'party' || blip.kind === 'raid') {
         /**
          * A FILLED DOT IN THE CLASS COLOUR, drawn rather than sampled.
@@ -517,6 +566,9 @@ function digitCell(index: number): { x: number; y: number } {
    * they are settled by `window.worldMinimapBlipSize(quest, dot)` rather than by argument.
    */
   private static drawSize(kind: BlipKind): number {
+    if (kind === 'partyEdge') {
+      return PARTY_ARROW_PX;
+    }
     if (kind === 'party' || kind === 'raid') {
       return dotPx;
     }
