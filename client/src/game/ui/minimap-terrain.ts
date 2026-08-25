@@ -867,15 +867,21 @@ export function attachMinimapTerrain(
       let iconworthy = 0;
       const sample: unknown[] = [];
       quests?.status.forEach((status: number, guid: string) => {
-        const kind = blipForStatus(status);
-        if (kind !== null) {
+        const marker = blipForStatus(status);
+        if (marker !== null) {
           iconworthy += 1;
         }
         if (world.entities.get(guid)) {
           matched += 1;
         }
         if (sample.length < 5) {
-          sample.push({ guid, status, kind, inWorld: !!world.entities.get(guid) });
+          sample.push({
+            guid,
+            status,
+            kind: marker?.kind ?? null,
+            dim: marker?.dim ?? null,
+            inWorld: !!world.entities.get(guid),
+          });
         }
       });
       return {
@@ -955,10 +961,15 @@ export function attachMinimapTerrain(
     const quests = world.game?.objectHandler?.questHandler ?? null;
     if (quests !== null) {
       quests.status.forEach((status: number, guid: string) => {
-        const kind = blipForStatus(status);
-        const unit = kind === null ? null : world.entities.get(guid) ?? null;
-        if (kind !== null && unit) {
-          out.push({ worldX: unit.position.x, worldY: unit.position.y, kind });
+        const marker = blipForStatus(status);
+        const unit = marker === null ? null : world.entities.get(guid) ?? null;
+        if (marker !== null && unit) {
+          out.push({
+            worldX: unit.position.x,
+            worldY: unit.position.y,
+            kind: marker.kind,
+            dim: marker.dim,
+          });
         }
       });
     }

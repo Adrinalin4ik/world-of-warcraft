@@ -62,33 +62,51 @@ export interface Blip {
   worldX: number;
   worldY: number;
   kind: BlipKind;
+  /**
+   * Drawn at reduced alpha -- the GREY variant of the same glyph.
+   *
+   * A separate flag rather than four more kinds, because the ART is identical: WotLK draws the same
+   * `!` and `?` desaturated for the low-level and in-progress cases. One texture, two alphas.
+   */
+  dim?: boolean;
 }
 
 /**
- * The `!` a giver with an offer wears and the `?` one with a turn-in wears, from `DIALOG_STATUS`.
+ * Every `DIALOG_STATUS` that draws a glyph, and whether it draws it GREY.
+ *
+ * **`INCOMPLETE` was the bug, and the owner's own probe found it.** The first version returned null
+ * for it on the reasoning that a quest already in the log needs no marker. His session then had
+ * eight givers in range, seven at `NONE` and one at `INCOMPLETE`, so the report read
+ * `statuses: 8, matched: 8, iconworthy: 0` -- the packet was fine, the guids matched, and my own
+ * filter threw away the only thing there was to draw.
+ *
+ * WotLK draws the same two glyphs desaturated for the cases that are not a fresh offer or a
+ * finished turn-in: a grey `?` for a quest in the log and not done, and a grey `!` or `?` for the
+ * LOW_LEVEL variants -- a quest so far below the player that the client dims it. So the mapping is
+ * a glyph plus a `dim` flag, not four more textures.
  *
  * The statuses are 3.3.5a's own (`network/game/object/quest.ts:112-124`), so nothing here is a
- * literal. `INCOMPLETE` deliberately produces NOTHING: the real client shows no minimap icon for a
- * quest already in the log and not yet finished, and drawing one would put a marker on every NPC the
- * player is mid-quest for.
+ * literal. `NONE` and `UNAVAILABLE` are the two that genuinely draw nothing.
  */
-export function blipForStatus(status: number): BlipKind | null {
+export function blipForStatus(status: number): { kind: BlipKind; dim: boolean } | null {
   switch (status) {
     case DIALOG_STATUS.AVAILABLE:
     case DIALOG_STATUS.AVAILABLE_REP:
+      return { kind: 'questAvailable', dim: false };
     case DIALOG_STATUS.LOW_LEVEL_AVAILABLE:
     case DIALOG_STATUS.LOW_LEVEL_AVAILABLE_REP:
-      return 'questAvailable';
+      return { kind: 'questAvailable', dim: true };
     case DIALOG_STATUS.REWARD:
     case DIALOG_STATUS.REWARD2:
     case DIALOG_STATUS.REWARD_REP:
+      return { kind: 'questComplete', dim: false };
     case DIALOG_STATUS.LOW_LEVEL_REWARD_REP:
-      return 'questComplete';
+    case DIALOG_STATUS.INCOMPLETE:
+      return { kind: 'questComplete', dim: true };
     default:
       return null;
   }
 }
-
 const ICON_PATHS: Record<'questAvailable' | 'questComplete' | 'dots', string> = {
   questAvailable: 'Interface\\GossipFrame\\AvailableQuestIcon.blp',
   questComplete: 'Interface\\GossipFrame\\ActiveQuestIcon.blp',
@@ -113,6 +131,15 @@ const DOT_ATLAS_COLUMNS = 8;
 const QUEST_ICON_PX = 16;
 
 const DOT_PX = 8;
+
+/**
+ * How faint a dimmed glyph is. UNSOURCED, like the two sizes above.
+ *
+ * WotLK's grey `?` is a different TEXTURE in the real client, not the yellow one at reduced alpha --
+ * so this is an approximation of it and is labelled as one. 0.45 reads as clearly present and
+ * clearly secondary; the owner is the one who can say whether it matches.
+ */
+const DIM_ALPHA = 0.45;
 
 export class MinimapBlips {
   private readonly icons = new Map<string, HTMLCanvasElement | null>();
@@ -232,7 +259,14 @@ export class MinimapBlips {
       if (!icon) {
         continue;
       }
+      // The GREY variant, by alpha on the same texture -- see `Blip#dim`. Restored immediately, so
+      // one dim blip cannot fade the blips after it or the mask that follows them.
+      const alpha = ctx.globalAlpha;
+      if (blip.dim === true) {
+        ctx.globalAlpha = alpha * DIM_ALPHA;
+      }
       ctx.drawImage(icon, at.x - side / 2, at.y - side / 2, side, side);
+      ctx.globalAlpha = alpha;
     }
   }
 
