@@ -59,9 +59,65 @@ export const ZOOM_LEVELS = 5;
  */
 const zooms = new WeakMap<Widget, number>();
 
-/** The Minimap's zoom level, `0` when it has never been set. Read by `ui/minimap-terrain.ts`. */
+/**
+ * WHERE THE ZOOM SURVIVES A RELOAD -- the owner: "Не сохраняется масштаб мини карты между
+ * обновлениями страницы."
+ *
+ * The real client keeps it in its saved variables, which this project has no equivalent of: there
+ * is no `Config.wtf` (the host 404s it) and no per-character store. So the engine remembers it the
+ * way a browser engine can, and `localStorage` is that -- one small number, written on a change
+ * and read once per session.
+ *
+ * **Engine state and not client state, which is why it lives here rather than in a CVar.** The
+ * client never asks for a zoom CVar; `minimap.lua` reads the level back through `GetZoom` and
+ * nothing else, so the value belongs to the widget the same way its size does.
+ *
+ * Every access is wrapped: `localStorage` THROWS rather than returning null in a private window
+ * or with site data blocked, and a minimap that cannot remember its zoom must still draw.
+ */
+const ZOOM_STORAGE_KEY = 'wow.minimap.zoom';
+
+/**
+ * The stored level, or null. Read at most ONCE per session.
+ *
+ * `undefined` means "not looked yet", `null` means "looked, nothing there" -- a distinction that
+ * matters because the stored value can legitimately be `0`, which is a real level and not an
+ * absence. That is the same `0`-is-a-real-value case `GetZoom` documents below.
+ */
+let storedZoom: number | null | undefined;
+
+function readStoredZoom(): number | null {
+  if (storedZoom !== undefined) {
+    return storedZoom;
+  }
+  storedZoom = null;
+  try {
+    const raw = window.localStorage.getItem(ZOOM_STORAGE_KEY);
+    const value = raw === null ? NaN : Number(raw);
+    if (Number.isFinite(value)) {
+      storedZoom = Math.max(0, Math.min(ZOOM_LEVELS - 1, Math.floor(value)));
+    }
+  } catch {
+    // A private window, or site data blocked. The zoom simply starts at 0.
+  }
+  return storedZoom;
+}
+
+/**
+ * The Minimap's zoom level, `0` when it has never been set. Read by `ui/minimap-terrain.ts`.
+ *
+ * SEEDS FROM STORAGE on the first read of a fresh widget, so a reload comes back where the player
+ * left off. Seeded here rather than at attach for the reason the terrain host is lazy: the frame
+ * exists only after the manifest, and this is the first thing that touches it either way.
+ */
 export function zoomOf(widget: Widget): number {
-  return zooms.get(widget) ?? 0;
+  const known = zooms.get(widget);
+  if (known !== undefined) {
+    return known;
+  }
+  const restored = readStoredZoom() ?? 0;
+  zooms.set(widget, restored);
+  return restored;
 }
 
 const MINIMAP: MethodTable = {
@@ -99,7 +155,16 @@ const MINIMAP: MethodTable = {
     if (!Number.isFinite(wanted)) {
       return [];
     }
-    zooms.set(widget, Math.max(0, Math.min(ZOOM_LEVELS - 1, Math.floor(wanted))));
+    const level = Math.max(0, Math.min(ZOOM_LEVELS - 1, Math.floor(wanted)));
+    zooms.set(widget, level);
+    // Remembered across a reload -- see `ZOOM_STORAGE_KEY`. Written on the CLAMPED value, so what
+    // comes back is a level this build can actually use even if `ZOOM_LEVELS` changes under it.
+    try {
+      window.localStorage.setItem(ZOOM_STORAGE_KEY, String(level));
+      storedZoom = level;
+    } catch {
+      // Nothing to do and nothing to report: the zoom still works for this session.
+    }
     return [];
   },
 
