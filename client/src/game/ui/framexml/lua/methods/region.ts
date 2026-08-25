@@ -875,6 +875,28 @@ export function isDrawLayer(value: string): value is Layer {
 }
 
 const TEXTURE: MethodTable = {
+  /**
+   * `GetTexture()` -- the path this region is drawing, or nil.
+   *
+   * **IT WAS ABSENT, and that is why the minimap tracking button never changed its icon.** The
+   * owner's probe left exactly one hop: the listener was registered, its `OnEvent` bound,
+   * `MiniMapTracking_Update` a real global, the region resolved, shown, visible and 20x20 -- and its
+   * sprite unchanged after a dispatch. `MiniMapTracking_Update`'s first line touching the icon is
+   * `if ( MiniMapTrackingIcon:GetTexture() ~= texture )` (`minimap.lua:410`), so the handler raised
+   * on a nil method before ever reaching `SetTexture` on the next line.
+   *
+   * A raise inside an `OnEvent` goes to the script-error path, not the browser console, which is why
+   * five rounds of probing found everything EXCEPT the missing method: every piece of state was
+   * right and the failure was a call that never returned.
+   *
+   * `paperdollframe.lua` is the other caller in the files decoded here, so this was two defects.
+   *
+   * THE SPRITE, not the authored `file=`: the two are the same until something calls `SetTexture`,
+   * and after that the sprite is what draws. A solid-colour region (`SetTexture(r, g, b)`) has no
+   * path and answers nil, which is what the real client does with one -- and nil rather than an empty
+   * string, because the comparison the client makes is `~=` against a path and `""` would pass it.
+   */
+  GetTexture: (ctx, self) => [widgetOf(ctx, self).sprite ?? null],
   // `SetTexture("")` clears the slot -- the live API's blank form, which real FrameXML uses (an
   // authored `<Texture file="">` template override, most commonly). `nil` clears the same way.
   // The (r, g, b[, a]) overload is real too, and maps onto the flat-color quad `Widget.solid` exists
