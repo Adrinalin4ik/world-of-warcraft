@@ -55,20 +55,18 @@ interface BlpSpec {
  * Deliberately not "any texture": a caller that could ask for arbitrary art would make the icon
  * loading unbounded, and the whole cost argument above depends on the set being small and fixed.
  */
-export type BlipKind = 'questAvailable' | 'questComplete' | 'party' | 'raid';
+export type BlipKind =
+  | 'questAvailable'
+  | 'questComplete'
+  | 'questIncomplete'
+  | 'party'
+  | 'raid';
 
 export interface Blip {
   /** World coordinates -- the same space the player's position and the terrain window are in. */
   worldX: number;
   worldY: number;
   kind: BlipKind;
-  /**
-   * Drawn at reduced alpha -- the GREY variant of the same glyph.
-   *
-   * A separate flag rather than four more kinds, because the ART is identical: WotLK draws the same
-   * `!` and `?` desaturated for the low-level and in-progress cases. One texture, two alphas.
-   */
-  dim?: boolean;
   /**
    * The member's `classId`, for a group dot. Undefined for a quest glyph and for an unknown class.
    *
@@ -79,47 +77,41 @@ export interface Blip {
 }
 
 /**
- * Every `DIALOG_STATUS` that draws a glyph, and whether it draws it GREY.
- *
- * **`INCOMPLETE` was the bug, and the owner's own probe found it.** The first version returned null
- * for it on the reasoning that a quest already in the log needs no marker. His session then had
- * eight givers in range, seven at `NONE` and one at `INCOMPLETE`, so the report read
- * `statuses: 8, matched: 8, iconworthy: 0` -- the packet was fine, the guids matched, and my own
- * filter threw away the only thing there was to draw.
- *
- * WotLK draws the same two glyphs desaturated for the cases that are not a fresh offer or a
- * finished turn-in: a grey `?` for a quest in the log and not done, and a grey `!` or `?` for the
- * LOW_LEVEL variants -- a quest so far below the player that the client dims it. So the mapping is
- * a glyph plus a `dim` flag, not four more textures.
+ * Every `DIALOG_STATUS` that draws a glyph, and WHICH of the three it draws.
  *
  * The statuses are 3.3.5a's own (`network/game/object/quest.ts:112-124`), so nothing here is a
- * literal. `NONE` and `UNAVAILABLE` are the two that genuinely draw nothing.
+ * literal. Three real states rather than two plus a fudge:
+ *
+ *  - AVAILABLE / AVAILABLE_REP and their LOW_LEVEL twins -> the yellow `!`. An offer is an offer
+ *    whether or not the client would grey it in its own gossip list; the minimap shows it.
+ *  - REWARD / REWARD2 / REWARD_REP -> the yellow `?`. Finished, come and collect.
+ *  - INCOMPLETE and LOW_LEVEL_REWARD_REP -> the GREY `?`. In the log, not done. This is the one the
+ *    owner caught twice: absent in the first version, yellow-with-alpha in the second.
+ *
+ * NONE and UNAVAILABLE draw nothing, which is the whole of what draws nothing.
  */
-export function blipForStatus(status: number): { kind: BlipKind; dim: boolean } | null {
+export function blipForStatus(status: number): BlipKind | null {
   switch (status) {
     case DIALOG_STATUS.AVAILABLE:
     case DIALOG_STATUS.AVAILABLE_REP:
-      return { kind: 'questAvailable', dim: false };
     case DIALOG_STATUS.LOW_LEVEL_AVAILABLE:
     case DIALOG_STATUS.LOW_LEVEL_AVAILABLE_REP:
-      return { kind: 'questAvailable', dim: true };
+      return 'questAvailable';
     case DIALOG_STATUS.REWARD:
     case DIALOG_STATUS.REWARD2:
     case DIALOG_STATUS.REWARD_REP:
-      return { kind: 'questComplete', dim: false };
-    case DIALOG_STATUS.LOW_LEVEL_REWARD_REP:
+      return 'questComplete';
     case DIALOG_STATUS.INCOMPLETE:
-      return { kind: 'questComplete', dim: true };
+    case DIALOG_STATUS.LOW_LEVEL_REWARD_REP:
+      return 'questIncomplete';
     default:
       return null;
   }
 }
-const ICON_PATHS: Record<'questAvailable' | 'questComplete', string> = {
+const ICON_PATHS: Record<'questAvailable' | 'questComplete' | 'questIncomplete', string> = {
   questAvailable: 'Interface\\GossipFrame\\AvailableQuestIcon.blp',
   questComplete: 'Interface\\GossipFrame\\ActiveQuestIcon.blp',
-  // `dots` IS GONE: the group dot is drawn as a filled arc in the class colour, so there is one
-  // fewer BLP to decode and no dependence on an atlas layout whose colours I measured but whose
-  // meaning I did not. See `CLASS_COLOURS`.
+  questIncomplete: 'Interface\\GossipFrame\\IncompleteQuestIcon.blp',
 };
 
 /**
@@ -173,20 +165,6 @@ export function setBlipSizes(quest?: number, dot?: number): { quest: number; dot
   }
   return { quest: questIconPx, dot: dotPx };
 }
-
-/**
- * **NO DIMMING. The owner asked for it gone: "полупрозрачность нужно убрать".**
- *
- * The grey `?` was my approximation of what WotLK draws for an in-progress quest, done by alpha on
- * the yellow texture. He looked at it beside the real client and said no, so the `dim` flag is kept
- * on the data -- it is a true fact about the status, and a later change may want it -- and it no
- * longer changes what is painted.
- *
- * Kept rather than deleted deliberately: throwing away the distinction would mean re-deriving
- * `blipForStatus` from scratch if the grey variant turns out to want a different TEXTURE, which is
- * what the real client actually uses.
- */
-const DIM_ALPHA = 1;
 
 /**
  * The dark ring around a GROUP DOT, and only around a dot.
@@ -321,19 +299,15 @@ export class MinimapBlips {
       if (!icon) {
         continue;
       }
-      // The GREY variant, by alpha on the same texture -- see `Blip#dim`. Restored immediately, so
-      // one dim blip cannot fade the blips after it or the mask that follows them.
-      const alpha = ctx.globalAlpha;
-      if (blip.dim === true) {
-        ctx.globalAlpha = alpha * DIM_ALPHA;
-      }
+      // NO ALPHA AND NO RING on a glyph: the grey variant is its own texture now (see `ICON_PATHS`),
+      // and a circle stroked round an icon reads as a second object (see `OUTLINE_RGBA`).
+
       // **NO RING ON A GLYPH.** The owner asked for a border and then saw what it does to a `?`:
       // "теперь вокруг квеста появился круг, убери его". A circle around a shape that is already an
       // icon reads as a second object, not as an edge -- which is why the real client puts the border
       // INSIDE the texture instead of stroking around it. The ring stays on the group dot, where a
       // flat colour on light terrain genuinely needs an edge.
       ctx.drawImage(icon, at.x - side / 2, at.y - side / 2, side, side);
-      ctx.globalAlpha = alpha;
     }
   }
 
