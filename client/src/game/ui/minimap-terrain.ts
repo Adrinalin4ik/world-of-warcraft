@@ -1107,14 +1107,27 @@ export function attachMinimapTerrain(
     }
     tipShowing = next;
     if (!helperInstalled) {
-      ctx.vm.run(HELPER, 'minimap-blip-tooltip.lua');
+      // **THE RETURN IS ASSERTED, not discarded.** Both of these answer `LuaError | null`, and
+      // throwing them away is how this arm came to land and do nothing twice: the hit test was
+      // right, the name was right, and the last hop failed in silence. A discarded return is a
+      // documented defect class on this project.
+      const failed = ctx.vm.run(HELPER, 'minimap-blip-tooltip.lua');
+      if (failed !== null) {
+        console.warn('minimap blip tooltip: the helper failed to install', failed);
+      }
       helperInstalled = true;
     }
     // `isRef` and not a null check -- `getGlobal` answers `unknown`, and the loader uses the same
     // guard before calling `CreateFrame` (`framexml/loader.ts:728-731`).
     const fn = ctx.vm.getGlobal('__minimapBlipTooltip');
-    if (ctx.vm.isRef(fn)) {
-      ctx.vm.call(fn, [wanted]);
+    if (!ctx.vm.isRef(fn)) {
+      tipProbe = { ...tipProbe, lastError: '__minimapBlipTooltip is not a function in this VM' };
+      return;
+    }
+    const error = ctx.vm.call(fn, [wanted]);
+    if (error !== null) {
+      tipProbe = { ...tipProbe, lastError: error.message };
+      console.warn('minimap blip tooltip: the call raised', error);
     }
   };
 

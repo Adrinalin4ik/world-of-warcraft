@@ -57,6 +57,7 @@
  * three frames writing into one.
  */
 import { MethodContext, MethodTable, registerMethods } from '../object';
+import { pointerAt } from '../../../pointer';
 import { Widget } from '../../../widget';
 import { ensureFont, notImplemented, warnOnce, widgetOf } from './region';
 import { getAction } from '../api/actions';
@@ -569,11 +570,53 @@ const GAMETOOLTIP: MethodTable = {
       // Positioned by the caller on its next line; see above.
       return [];
     }
+    /**
+     * THE CURSOR ANCHORS, and this closes a gap the comment below used to name.
+     *
+     * `ANCHOR_CURSOR`, `ANCHOR_CURSOR_LEFT` and `ANCHOR_CURSOR_RIGHT` position against the POINTER
+     * rather than the owner, so they need something the object model has no field for. It has a route
+     * now -- `ui/pointer.ts`, a sink the host installs, the same shape as `ui/map-selection.ts`.
+     *
+     * The client asks for these: `WorldMapQuestPOI_SetTooltip` uses `ANCHOR_CURSOR_RIGHT`
+     * (`worldmapframe.lua:1867`), so the world map's own quest-pin tooltip was unanchored too, not
+     * only the minimap's blip tooltip this was written for.
+     *
+     * Anchored to `UIParent`'s TOPLEFT with the pointer as the offset, and the Y is NEGATED because
+     * anchor offsets grow upward while the pointer grows downward -- the same sign the client uses
+     * everywhere it places from a cursor. Divided by the tooltip's own `effectiveScale`, because an
+     * offset is in the widget's space while the pointer is in the screen's -- the same division
+     * `GetLeft` does one file over.
+     *
+     * The LEFT/RIGHT variants shift by the tooltip's own width so the box sits beside the cursor
+     * rather than under it. A tooltip whose width is not resolved yet gets 0, i.e. behaves as plain
+     * `ANCHOR_CURSOR` for one frame -- which is what a freshly created tooltip does anyway.
+     */
+    if (anchorType.startsWith('ANCHOR_CURSOR')) {
+      const at = pointerAt();
+      if (at === null) {
+        warnOnce(
+          'GameTooltip:SetOwner: a cursor anchor was asked for before anything installed a pointer '
+          + 'source (ui/pointer.ts), so the tooltip is left unanchored',
+        );
+        return [];
+      }
+      const scale = widget.effectiveScale || 1;
+      const shift = anchorType === 'ANCHOR_CURSOR_LEFT' ? -widget.width
+        : anchorType === 'ANCHOR_CURSOR_RIGHT' ? 0 : 0;
+      widget.setAnchors({
+        point: 'TOPLEFT' as never,
+        relativePoint: 'TOPLEFT' as never,
+        relativeTo: ctx.registry.root.id,
+        x: at.x / scale + shift + Number(args[2] ?? 0),
+        y: -(at.y / scale) + Number(args[3] ?? 0),
+      });
+      return [];
+    }
     const pair = ANCHORS[anchorType];
     if (pair === undefined) {
-      // `ANCHOR_CURSOR` is the notable one: it needs the live pointer, which this object model has no
-      // route to (the router is `ui/input.ts` and nothing in `MethodContext` reaches it). Named rather
-      // than silently defaulted, because a tooltip in the wrong place is a visible defect.
+      // The cursor anchors are handled above and are no longer the notable case. What reaches here is
+      // a name neither this table nor that branch knows, which is a real defect rather than a gap --
+      // named rather than silently defaulted, because a tooltip in the wrong place is visible.
       warnOnce(
         `GameTooltip:SetOwner: anchor type '${anchorType}' is not implemented -- the tooltip is left `
         + 'unanchored, which puts it at the window\'s top-left corner if anything shows it',

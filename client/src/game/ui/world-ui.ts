@@ -51,6 +51,7 @@ import { attachLootBridge } from './loot-bridge';
 import { attachMapBridge, MapBridge } from './map-bridge';
 import { attachMinimapTerrain, MinimapTerrainHost } from './minimap-terrain';
 import { questBlobs } from './quest-blobs';
+import { setPointerSource } from './pointer';
 import { attachGossipBridge } from './gossip-bridge';
 import { attachInteractionWatch } from './interaction-watch';
 import { attachMerchantBridge } from './merchant-bridge';
@@ -681,6 +682,10 @@ export class WorldUiHost {
         // The blob raster needs a `GlueArt` and nothing else; the polygons reach it from
         // `ui/map-bridge.ts`' sink and the draw call from the client's own widget method.
         questBlobs.attach(this.art);
+        // The pointer, for the object model's cursor anchors -- `GameTooltip:SetOwner(owner,
+        // "ANCHOR_CURSOR")` and the two side variants. Installed here because this is where the
+        // router lives; released in `dispose` so a disposed host cannot be read through.
+        setPointerSource(() => this.input.pointerPosition);
         // TALKING TO AN NPC, then BUYING AND SELLING. Gated on a real session for the reason the item
         // bridges are: a vendor's stock and a gossip menu are both packets, so an offline world has
         // neither and `world.game.objectHandler` must not be touched on that route.
@@ -1617,6 +1622,7 @@ export class WorldUiHost {
     // the attach order is what makes the chain's restore land on something live.
     this.mapBridge?.dispose();
     this.mapBridge = null;
+    setPointerSource(null);
     questBlobs.dispose();
     this.minimapTerrain?.dispose();
     this.minimapTerrain = null;
