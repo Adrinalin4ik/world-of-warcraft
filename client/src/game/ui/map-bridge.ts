@@ -567,17 +567,31 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
   });
 
   /**
-   * `SetMapByID(areaId)` -- select by `WorldMapArea.areaID`, which is how a quest's map link arrives.
+   * `SetMapByID(id)` -- select by **`WorldMapArea.id`**, the DBC ROW id. Not `areaID`.
    *
-   * Searched rather than indexed: the table is 108 rows, this runs on a click, and a second index would
-   * have to be kept in step with the sort for no measurable gain.
+   * ## The id space is derived from the client, and it is measurable
+   *
+   * `WORLDMAP_WINTERGRASP_ID = 502` (`worldmapframe.lua:11`) is compared against
+   * `GetCurrentMapAreaID()` (`:209`), and on the served `worldmaparea.dbc` Lake Wintergrasp is row
+   * **id 501** with `areaID` 4197. So `GetCurrentMapAreaID` answers `WorldMapArea.id + 1`, and the
+   * pairing `SetMapByID(GetCurrentMapAreaID() - 1)` (`:1279,1301`) makes this function take
+   * `WorldMapArea.id`. Neither is `AreaTable.areaID`, which is what both ends of this bridge used.
+   *
+   * **That mismatch is why minimising the map changed the zone.**
+   * `WorldMapFrame_ToggleWindowSize` saves the view, closes and reopens the frame -- and
+   * `WorldMapFrame_OnShow` calls `SetMapToCurrentZone()` (`:142`), which is correct engine behaviour
+   * -- then restores what it saved. With the wrong id space the restore found no row and returned
+   * silently, leaving the player's own zone showing. The owner saw the zone change; the defect was a
+   * restore that quietly did nothing.
+   *
+   * Searched rather than indexed: the table is 108 rows and this runs on a click.
    */
   fn('SetMapByID', (args) => {
-    const areaId = Number(args[0]);
+    const wanted = Number(args[0]);
     const continents = mapData.continents();
     for (let c = 0; c < continents.length; c += 1) {
       const zones = mapData.zonesOn(continents[c].mapId);
-      const index = zones.findIndex((row) => row.areaId === areaId);
+      const index = zones.findIndex((row) => row.id === wanted);
       if (index >= 0) {
         continentIndex = c + 1;
         zoneIndex = index + 1;
@@ -590,7 +604,18 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
 
   fn('GetCurrentMapContinent', () => [continentIndex]);
   fn('GetCurrentMapZone', () => [zoneIndex]);
-  fn('GetCurrentMapAreaID', () => [selected()?.areaId ?? 0]);
+  /**
+   * `GetCurrentMapAreaID()` -- **`WorldMapArea.id + 1`**, and 0 on a continent or world sheet.
+   *
+   * The `+ 1` is the engine's, not a fudge: `WORLDMAP_WINTERGRASP_ID = 502` is compared against this
+   * (`worldmapframe.lua:11,209`) and Lake Wintergrasp is row id 501 on the served DBC. The client
+   * then does `GetCurrentMapAreaID() - 1` and branches on `< 0` to mean "a continent is showing"
+   * (`:1279-1284`), so a sheet with no zone row must answer 0 rather than the row id of anything.
+   */
+  fn('GetCurrentMapAreaID', () => {
+    const row = selected();
+    return [row === null || row.areaId === 0 ? 0 : row.id + 1];
+  });
 
   /**
    * `GetPlayerMapPosition(unit)` -> the pair, normalised into the DISPLAYED map.
