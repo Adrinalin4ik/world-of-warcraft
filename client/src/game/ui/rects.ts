@@ -115,6 +115,29 @@ export function publishRects(list: DrawItem[], screenHeightUnits: number): void 
 }
 
 /** The last resolved rect for a widget id, or null when it was not drawn. */
+/**
+ * The draw item for a widget id -- its CASCADED alpha and its position in the list.
+ *
+ * **`Widget#alpha` is the widget's OWN, and `DrawItem#alpha` is that multiplied down the ancestor
+ * chain** (`widget.ts:1014`). A probe that reads the own value cannot see a dimming parent, and
+ * that blind spot cost a round on the world-map tooltip: every line reported `alpha: 1` while the
+ * pixels were grey.
+ *
+ * The INDEX matters for the same class of question: a region drawn before its own backdrop is
+ * covered by it, and nothing about the region itself would say so.
+ */
+export function drawItemOf(id: string): { alpha: number; index: number } | null {
+  if (items === null) {
+    return null;
+  }
+  for (let i = 0; i < items.length; i += 1) {
+    if (items[i].widget.id === id) {
+      return { alpha: items[i].alpha, index: i };
+    }
+  }
+  return null;
+}
+
 export function rectOf(id: string): Rect | null {
   // NO EARLY RETURN ON A MISSING DRAW LIST. That return is what made every geometry query during the
   // manifest load answer nil; see `setRectResolver`. With no draw list there is simply nothing drawn to

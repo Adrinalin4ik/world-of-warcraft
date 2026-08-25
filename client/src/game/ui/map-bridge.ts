@@ -9,7 +9,7 @@ import { zoneHighlights, setHighlightScale, lastHoverTest } from '../pipeline/zo
 import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
 import { BlobPolygon, setBlobSource } from './quest-blobs';
 import { resolveUnitToken } from '../world/unit-tokens';
-import { rectOf } from './rects';
+import { drawItemOf, rectOf } from './rects';
 import {
   activeTracking, setTracking, trackingTexturePath, visibleTracking,
 } from './minimap-tracking';
@@ -1434,6 +1434,10 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
         size: line.font?.size ?? null,
         family: line.font?.family ?? null,
         effectiveScale: line.effectiveScale,
+        // THE CASCADED alpha and the draw position -- see `rects.ts#drawItemOf`. The own alpha above
+        // read 1 on every line while the pixels were grey, which is exactly what a dimming ANCESTOR
+        // looks like from here.
+        drawn: drawItemOf(line.id),
       });
     }
     return {
@@ -1443,6 +1447,13 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
         visible: tip.visible,
         effectiveScale: tip.effectiveScale,
         scale: tip.scale,
+        drawn: drawItemOf(tip.id),
+        // The backdrop, whose draw index decides whether it covers the text.
+        backdrop: (() => {
+          const b = ctx.registry.byName('WorldMapTooltipBackdrop');
+          const w = b === null ? null : ctx.registry.widget(b);
+          return w === null ? null : { alpha: w.alpha, drawn: drawItemOf(w.id) };
+        })(),
       },
       // The frames the windowed transition DOES touch, for comparison.
       detailFrameAlpha: (() => {
