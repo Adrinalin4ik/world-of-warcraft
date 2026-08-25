@@ -80,7 +80,7 @@ import type { GlueArt } from './art';
 import {
   Blip, MinimapBlips, blipForStatus, setBlipSizes,
 } from './minimap-blips';
-import { activeTracking, trackingTexturePath } from './minimap-tracking';
+import { activeTracking, trackingTextureFile } from './minimap-tracking';
 import { resolveUnitToken } from '../world/unit-tokens';
 import { rectOf } from './rects';
 import type { MethodContext } from './framexml/lua/object';
@@ -1229,7 +1229,9 @@ export function attachMinimapTerrain(
      */
     const tracked = activeTracking();
     if (tracked !== null && tracked.flag !== 0) {
-      const icon = trackingTexturePath(tracked);
+      // The FILE, not the texture name: this string reaches the BLP decoder. See
+      // `trackingTextureFile` -- handing it the client-facing path was a 404 per frame.
+      const icon = trackingTextureFile(tracked);
       world.entities.forEach((unit) => {
         if (((unit.fields.npcFlags ?? 0) & tracked.flag) !== 0) {
           out.push({

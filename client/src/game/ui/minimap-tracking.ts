@@ -231,7 +231,26 @@ export function setTracking(classId: number, id: number | null): void {
   writeStored();
 }
 
-/** The full path of a row's icon, or of the active row's for `GetTrackingTexture`. */
+/**
+ * A row's icon as the CLIENT wants it: a texture name with **no extension**.
+ *
+ * This is what `GetTrackingTexture` and `GetTrackingInfo` answer, and the client hands it straight
+ * to `SetTexture` -- where the widget layer resolves the file. Every texture path in FrameXML is
+ * written this way, so returning one with `.blp` on it would be the odd one out.
+ */
 export function trackingTexturePath(type: TrackingType): string {
   return `Interface\\Minimap\\Tracking\\${type.texture}`;
+}
+
+/**
+ * The same icon as the BLP DECODER wants it: the file, with its extension.
+ *
+ * **Two functions because the two consumers are not the same, and one path served both.** The
+ * owner caught it as a 404 on `interface/minimap/tracking/repair` -- no extension, because the
+ * blip layer was handed the string meant for `SetTexture` and passed it to `WorkerPool` as a
+ * filename. A texture NAME and a FILE differ by exactly this, and the quest glyphs never showed it
+ * because their paths are literals in `ui/minimap-blips.ts` and were written with `.blp` already.
+ */
+export function trackingTextureFile(type: TrackingType): string {
+  return `${trackingTexturePath(type)}.blp`;
 }
