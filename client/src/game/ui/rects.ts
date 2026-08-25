@@ -210,6 +210,48 @@ export function lastCovering(): unknown {
   return coverLast;
 }
 
+/**
+ * EVERY draw item whose rect contains a screen point, in draw order.
+ *
+ * The complement of `coveringItems`: that one starts from a widget and asks what is over it, this
+ * one starts from a PIXEL and asks what is there. Needed when the thing on screen cannot be named --
+ * a white rectangle where the chat should be is not a widget anyone can look up, and asking about
+ * the frames one expects to be there answered "nothing is covering it", which was true and useless.
+ *
+ * Ordered as drawn, so the LAST entry is what the eye sees. `solid` and `sprite` say whether an
+ * entry paints at all: a container with neither is invisible and can be skipped by the reader.
+ */
+export function itemsAt(x: number, y: number): unknown {
+  if (items === null) {
+    return { note: 'no draw list yet' };
+  }
+  const hits: unknown[] = [];
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    const inside = x >= item.rect.left && x < item.rect.left + item.rect.width
+      && y >= item.rect.top && y < item.rect.top + item.rect.height;
+    if (!inside) {
+      continue;
+    }
+    hits.push({
+      index: i,
+      id: item.widget.id,
+      alpha: item.alpha,
+      solid: item.widget.solid,
+      sprite: item.widget.sprite,
+      vertexColor: item.widget.vertexColor,
+      layer: item.widget.layer,
+      strata: item.widget.strata,
+      text: item.widget.displayText,
+      rect: [
+        Math.round(item.rect.left), Math.round(item.rect.top),
+        Math.round(item.rect.width), Math.round(item.rect.height),
+      ],
+    });
+  }
+  return { point: [x, y], total: items.length, painting: hits };
+}
+
 export function coveringItems(id: string): unknown {
   if (items === null) {
     return { note: 'no draw list yet' };

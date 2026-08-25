@@ -10,8 +10,7 @@ import { isAreaExplored } from '../../network/game/object/update-object/explored
 import { BlobPolygon, setBlobSource } from './quest-blobs';
 import { resolveUnitToken } from '../world/unit-tokens';
 import {
-  coveringItems, drawItemOf, lastCovering, lastDrawnOf, rectOf, watchCovering,
-  watchDrawn,
+  coveringItems, drawItemOf, itemsAt, lastCovering, lastDrawnOf, rectOf, watchCovering, watchDrawn,
 } from './rects';
 import {
   activeTracking, setTracking, trackingTexturePath, visibleTracking,
@@ -1441,6 +1440,70 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * downstream.
    */
   /**
+   * `window.frameInfo("ChatFrame1")` -- everything about one widget and its whole ancestry.
+   *
+   * The general form of "why is this not on screen". A widget can be missing from the draw list for
+   * several unrelated reasons -- it does not exist, its own `shown` is false, an ANCESTOR is hidden,
+   * it has no rect, it has nothing to draw -- and every one of those looks identical from outside.
+   * Asking about the widget alone cannot tell them apart, which is why the chain is reported: the
+   * first ancestor with `shown: false` is the answer, and it is usually not the widget asked about.
+   *
+   * Built after `whatCovers` answered "not in the draw list" for `ChatFrame1`, which ruled out
+   * everything that probe could see and named nothing.
+   */
+  /**
+   * `window.whatIsAt(x, y)` -- everything painting at a screen point, in draw order.
+   *
+   * For the case where the thing on screen has no name to ask about. The LAST entry with a `sprite`
+   * or `solid: true` is what the eye sees.
+   *
+   * Coordinates are the same logical units `frameInfo` and `whatCovers` report rects in, so a rect
+   * from one of those can be pointed at directly.
+   */
+  (window as unknown as Record<string, unknown>).whatIsAt = (x: number, y: number) => (
+    itemsAt(Number(x), Number(y))
+  );
+
+  (window as unknown as Record<string, unknown>).frameInfo = (name: string) => {
+    const found = ctx.registry.byName(String(name));
+    if (found === null) {
+      return { note: `no widget named ${name}` };
+    }
+    const widget = ctx.registry.widget(found);
+    if (widget === null) {
+      return { note: `${name} is named but has no widget` };
+    }
+    const chain: unknown[] = [];
+    let node: typeof widget | null = widget;
+    while (node !== null) {
+      chain.push({
+        name: ctx.registry.nameOf(ctx.registry.idOfWidget(node) ?? -1) ?? node.id,
+        shown: node.shown,
+        visible: node.visible,
+        alpha: node.alpha,
+        strata: node.strata,
+        level: node.frameLevel,
+        scale: node.scale,
+        rect: rectOf(node.id),
+        drawn: drawItemOf(node.id),
+      });
+      node = node.parent;
+    }
+    return {
+      self: {
+        kind: widget.kind,
+        sprite: widget.sprite,
+        solid: widget.solid,
+        vertexColor: widget.vertexColor,
+        text: widget.displayText,
+        children: widget.children.length,
+      },
+      // Self first, then each ancestor. The first `shown: false` is the reason.
+      chain,
+    };
+  };
+
+  /**
    * `window.whatCovers("WorldMapTooltipTextLeft1")` -- everything drawn over a named widget.
    *
    * The general form of the question the tooltip investigation needed and never asked: not "is this
@@ -1735,6 +1798,8 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       delete (window as unknown as Record<string, unknown>).worldTracking;
       delete (window as unknown as Record<string, unknown>).worldMapTooltip;
       delete (window as unknown as Record<string, unknown>).whatCovers;
+      delete (window as unknown as Record<string, unknown>).frameInfo;
+      delete (window as unknown as Record<string, unknown>).whatIsAt;
       // The blob source outlives this bridge otherwise, and it closes over a disposed world.
       setBlobSource(null);
     },
