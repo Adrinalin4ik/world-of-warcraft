@@ -623,6 +623,14 @@ export class Widget {
    */
   mouseWheelEnabled = false;
 
+  /**
+   * `GameTooltip:SetPadding(extra)` -- extra width the tooltip reserves for its own furniture.
+   *
+   * `ItemRefTooltip` asks for 16 (`itemref.xml:43`) because it carries a 32-pixel close button at its
+   * TOPRIGHT that would otherwise sit on the item name. Read where the tooltip resolves its width.
+   */
+  tooltipPadding = 0;
+
   history: string[] = [];
   /**
    * How many lines the ring holds -- `historyLines="32"` on `ChatFrameEditBoxTemplate`

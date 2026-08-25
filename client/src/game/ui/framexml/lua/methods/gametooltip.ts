@@ -64,6 +64,7 @@ import { getAction } from '../api/actions';
 import { getAuraTooltipSource, getShapeshiftTooltipSource } from '../api/auras';
 import { getSpellbook } from '../api/spells';
 import { layoutScale, measureText } from '../../../text';
+import type { LuaVM } from '../vm';
 import { getItemTooltipSource, ItemTooltipInfo, ItemTooltipSource } from '../api/items';
 import { getUnit } from '../api/units';
 import { invokeScriptHandler } from '../scripts';
@@ -242,7 +243,10 @@ function resize(ctx: MethodContext, self: number): void {
     width = Math.max(width, lineWidth);
     height += Math.max(left.height, right.height) + (line > 1 ? LINE_GAP : 0);
   }
-  widget.width = Math.max(state.minWidth, width + INSET * 2);
+  // `tooltipPadding` is `SetPadding`'s -- extra room the frame asked for beyond its text.
+  // `ItemRefTooltip` asks for 16 because it carries a close button over its top-right corner
+  // (`itemref.xml:20-43`); without it the button sits on the item name.
+  widget.width = Math.max(state.minWidth, width + INSET * 2 + widget.tooltipPadding);
   widget.height = height + INSET * 2;
   placeRightColumns(ctx, self, state.lines, widget);
 }
@@ -1212,6 +1216,29 @@ function fillItemLines(ctx: MethodContext, self: number, info: ItemTooltipInfo):
 const ITEM_SETTERS: MethodTable = {
   SetBagItem: (ctx, self, args) => fillFromSource(ctx, self, 'bag', Number(args[0]), Number(args[1])),
   SetLootItem: (ctx, self, args) => fillFromSource(ctx, self, 'loot', Number(args[0])),
+  /**
+   * `SetPadding(extra)` -- extra WIDTH the tooltip reserves, and its absence cost two assignments.
+   *
+   * `ItemRefTooltip`'s `<OnLoad>` is `GameTooltip_OnLoad(self)`, `self:SetPadding(16)`,
+   * `self:RegisterForDrag("LeftButton")`, and THEN the two that matter
+   * (`itemref.xml:41-47`): `self.shoppingTooltips = { ... }` and `self.UpdateTooltip = function ...`.
+   * A nil method throws, so neither ever ran -- and the owner got
+   * `ItemRefTooltip: OnLeave: bad argument #1 to 'for iterator' (table expected, got nil)` on every
+   * pointer that left the tooltip, because `<OnLeave>` iterates `self.shoppingTooltips`
+   * (`itemref.xml:79`). The error was three frames away from its cause.
+   *
+   * WHAT IT IS FOR: the room the close button needs. `ItemRefTooltip` puts a 32-pixel
+   * `ItemRefCloseButton` at its TOPRIGHT (`itemref.xml:20-37`), which would otherwise sit on top of
+   * the item name. 16 is the client's own number and the only call site in the loaded manifest.
+   *
+   * RECORDED AND APPLIED to the width the tooltip resolves, which is where the engine spends it.
+   */
+  SetPadding: (ctx, self, args) => {
+    widgetOf(ctx, self).tooltipPadding = Math.max(0, Number(args[0] ?? 0));
+    return [];
+  },
+  GetPadding: (ctx, self) => [widgetOf(ctx, self).tooltipPadding],
+
   SetHyperlink: (ctx, self, args) => fillFromSource(ctx, self, 'link', String(args[0] ?? '')),
   /**
    * `SetQuestItem(type, index)` -- a reward, choice or requirement row on a giver panel.
@@ -1436,6 +1463,34 @@ for (const [name, reason] of TOOLTIP_SETTER_GAPS) {
  * which is what the real engine answers for a row that has no repair cost. See
  * `ItemTooltipInfo.repairCost` on why nil rather than 0 even though `0 > 0` would also be false.
  */
+/**
+ * Fills that found no data yet, per VM and per frame. See the miss path in `fillFromSource`.
+ *
+ * A closure rather than the arguments, so the retry cannot disagree with the call that made it.
+ */
+const pendingFills = new WeakMap<LuaVM, Map<number, () => boolean>>();
+
+/**
+ * Re-run the fills that missed, and drop the ones that now succeed.
+ *
+ * Called by `container-bridge.ts` on `templatesChanged` -- the same edge the bags, the loot window and
+ * the merchant already re-enter on. Only fills for THIS vm are touched.
+ *
+ * Free when there is nothing pending, which is the normal state: a tooltip whose data was already
+ * cached leaves no entry at all.
+ */
+export function retryTooltipFills(vm: LuaVM): void {
+  const byFrame = pendingFills.get(vm);
+  if (byFrame === undefined || byFrame.size === 0) {
+    return;
+  }
+  for (const [frameId, retry] of [...byFrame]) {
+    if (retry()) {
+      byFrame.delete(frameId);
+    }
+  }
+}
+
 function fillFromSource(
   ctx: MethodContext,
   self: number,
@@ -1451,8 +1506,34 @@ function fillFromSource(
   }
   const info = source(kind, a, b);
   if (info === null) {
+    /**
+     * A MISS IS NOT ALWAYS A NO -- it is usually "not yet", and the tooltip has to be told when it
+     * arrives.
+     *
+     * The owner clicked an item link in chat and got an EMPTY tooltip. Correct at that instant:
+     * `items.template(entry)` issues `CMSG_ITEM_QUERY_SINGLE` on the first sight of an entry and
+     * returns null until the answer lands (`network/game/object/items.ts:222-243`, "the first resolve
+     * of a cold entry therefore ALWAYS returns null, and that is normal"). An item another player
+     * linked has never been queried, so the first click is always cold.
+     *
+     * Every other consumer of that data is re-run by an event -- the bags by `BAG_UPDATE`, the loot
+     * window and the merchant by their own bridges re-entering on `templatesChanged`. A tooltip has no
+     * such edge, so it kept the empty frame it opened with. The retry below is that edge: the fill is
+     * remembered and `retryTooltipFills` re-runs it when templates change.
+     *
+     * ONE PER FRAME, replaced by the next fill on the same frame, so a tooltip that moves on to
+     * another item does not resurrect the old one. Keyed by VM in a WeakMap so nothing outlives a
+     * disposed runtime -- the double-mount hazard this project has been bitten by four times.
+     */
+    let byFrame = pendingFills.get(ctx.vm);
+    if (byFrame === undefined) {
+      byFrame = new Map();
+      pendingFills.set(ctx.vm, byFrame);
+    }
+    byFrame.set(self, () => fillFromSource(ctx, self, kind, a, b)[0] === true);
     return [false];
   }
+  pendingFills.get(ctx.vm)?.delete(self);
   fillItemLines(ctx, self, info);
   /**
    * THE MONEY ROW IS THE CLIENT'S OWN FRAME, and the engine's whole job is to fire this script.

@@ -64,6 +64,7 @@ import { durabilityOf as readDurability, repairCostOf as readRepairCost } from '
 import type { ItemHandler, ItemTemplate } from '../../network/game/object/items';
 import GameOpcode from '../../network/game/opcode';
 import GamePacket from '../../network/game/packet';
+import { retryTooltipFills } from './framexml/lua/methods/gametooltip';
 
 /** `BACKPACK_CONTAINER` (`containerframe.lua` addresses bag 0 as the backpack throughout). */
 const BACKPACK_CONTAINER = 0;
@@ -1762,8 +1763,20 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
   };
   items.on('equipError', onEquipError);
 
+  /**
+   * Templates arriving refreshes the bags AND re-runs any tooltip fill that found nothing yet.
+   *
+   * A tooltip has no event of its own: an item link in chat names an entry this client has never
+   * queried, so the first click is always cold and the frame opened empty. See
+   * `methods/gametooltip.ts#retryTooltipFills`.
+   */
+  const onTemplates = (): void => {
+    pushAll();
+    retryTooltipFills(vm);
+  };
+
   items.on('inventoryChanged', pushAll);
-  items.on('templatesChanged', pushAll);
+  items.on('templatesChanged', onTemplates);
   // `ItemDisplayInfo.dbc` is 6.7 MB and the icons are null until it lands; this is the repaint that
   // puts them on screen. Idempotent, and on a dressed character it rides `character-look.ts`' fetch.
   void itemData.ensureLoaded().then(pushAll);
@@ -1829,7 +1842,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
     disposed = true;
     setItemTooltipSource(vm, null);
     items.removeListener('inventoryChanged', pushAll);
-    items.removeListener('templatesChanged', pushAll);
+    items.removeListener('templatesChanged', onTemplates);
     items.removeListener('equipError', onEquipError);
     delete (window as unknown as Record<string, unknown>).bagBridge;
   };
