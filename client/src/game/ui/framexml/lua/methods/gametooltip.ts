@@ -607,8 +607,21 @@ const GAMETOOLTIP: MethodTable = {
         point: 'TOPLEFT' as never,
         relativePoint: 'TOPLEFT' as never,
         relativeTo: ctx.registry.root.id,
-        x: at.x / scale + shift + Number(args[2] ?? 0),
-        y: -(at.y / scale) + Number(args[3] ?? 0),
+        /**
+         * ROUNDED TO WHOLE UNITS, and that is not tidiness -- it is why the text was grey.
+         *
+         * `at.x / scale` is fractional in general, and a font string placed on a half unit lands its
+         * quad between texels: the glyph atlas is then sampled off-grid and white text on a dark
+         * backdrop reads as grey. The probe showed why nothing else could explain it -- every line
+         * came back `colour: "#ffffff"`, `alpha: 1`, `effectiveScale: 1`, and the raster density is
+         * already part of the font cache key (`ui/text.ts`). State correct, pixels wrong, which on
+         * this project means look at the last hop.
+         *
+         * It also matches WHEN it started: cursor anchors did nothing until this branch existed, so
+         * before it the tooltip was unanchored and drew at the origin -- on integers.
+         */
+        x: Math.round(at.x / scale + shift + Number(args[2] ?? 0)),
+        y: Math.round(-(at.y / scale) + Number(args[3] ?? 0)),
       });
       return [];
     }
