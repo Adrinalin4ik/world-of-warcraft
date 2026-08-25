@@ -281,6 +281,26 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   /** The flat entry list, rebuilt whenever the log or the template cache changes. */
   let entries: LogEntry[] = [];
 
+  /**
+   * The quest ids the last rebuild saw, so a NEW one can be announced.
+   *
+   * `QUEST_ACCEPTED` is what auto-tracking hangs off, and nothing was firing it -- see
+   * `announceAccepted`. Kept as a set of IDS rather than a count: a rebuild can add one and drop
+   * another in the same pass (accept while abandoning), and a count would see no change at all.
+   */
+  let knownQuestIds = new Set<number>();
+
+  /**
+   * Whether the log has been seen at all yet. The FIRST population is not a set of acceptances.
+   *
+   * At login the descriptor arrives carrying every quest the character already has. Announcing
+   * `QUEST_ACCEPTED` for each would auto-track the first five on every reconnect, which is not what
+   * the real client does -- there the log arrives silently and the watch list comes back from saved
+   * variables. This project has no saved variables, so the honest equivalent is to track NOTHING at
+   * login and auto-track only what is accepted afterwards.
+   */
+  let logSeen = false;
+
   // -- Reading the log ----------------------------------------------------------------------------
 
   const slots = (): QuestLogSlot[] => Array.from(world.player.questLog.values())
@@ -2148,8 +2168,46 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     rebuildCollect();
     fireEvent(vm, 'QUEST_LOG_UPDATE');
     fireEvent(vm, 'UNIT_QUEST_LOG_CHANGED', ['player']);
+    announceAccepted();
     // Our own state moved, so every nearby giver's answer could have -- the reference's sweep.
     reaskStatuses();
+  };
+
+  /**
+   * Fire `QUEST_ACCEPTED` for every quest that has just appeared in the log.
+   *
+   * **NOTHING WAS FIRING IT, and that is why no quest was ever tracked automatically.**
+   * `QuestLog_OnEvent`'s `QUEST_ACCEPTED` arm is the whole of auto-tracking:
+   * `if ( AUTO_QUEST_WATCH == "1" and GetNumQuestWatches() < MAX_WATCHABLE_QUESTS ) then
+   * AddQuestWatch(arg1) end` (`questlogframe.lua:260-264`). The owner's probe read `watched: []`
+   * with three quests in the log, and the minimap arrows had nothing to point at as a direct
+   * consequence -- the arrows were the symptom, this is the cause.
+   *
+   * `AUTO_QUEST_WATCH` needs no seeding from us: it is a uvar whose own default is `"1"`
+   * (`interfaceoptionsframe.lua:321`), set by `InterfaceOptionsFrame_InitializeUVars` from that
+   * frame's `OnLoad` (`:348-353,373-376`), and `InterfaceOptionsFrame.xml` is entry 44 of
+   * `FrameXML.toc`. So the client turns it on itself, and seeding a CVar for it would have been a
+   * second source of truth for a value the client already owns.
+   *
+   * THE ARGUMENT IS THE LOG INDEX, not the quest id: `AddQuestWatch` resolves it through `entryAt`,
+   * the same 1-based entry numbering `GetQuestIndexForWatch` answers in. Fired AFTER the rebuild, so
+   * that index is valid when the client uses it -- before it, every index would be the old list's.
+   */
+  const announceAccepted = (): void => {
+    const present = new Set<number>();
+    // See `logSeen`: the first pass only RECORDS, so a reconnect does not read as five acceptances.
+    const announce = logSeen;
+    logSeen = true;
+    entries.forEach((row, at) => {
+      if (row.isHeader) {
+        return;
+      }
+      present.add(row.questId);
+      if (announce && !knownQuestIds.has(row.questId)) {
+        fireEvent(vm, 'QUEST_ACCEPTED', [at + 1]);
+      }
+    });
+    knownQuestIds = present;
   };
 
   const onUpdate = (): void => {
