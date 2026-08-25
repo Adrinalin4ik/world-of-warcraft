@@ -21,8 +21,9 @@
  * work; this file exists so the client's own chat code LOADS, which is what the frames, the docking,
  * the tabs, the edit box and four waiting producers all sit behind.
  */
+import { ChatMsg } from '../../../../../network/game/object/chat';
 import { LuaVM } from '../vm';
-import { notImplemented } from '../methods/region';
+import { notImplemented, warnOnce } from '../methods/region';
 
 /**
  * The chat type ids, and **these are OURS rather than the engine's, which is stated because it matters
@@ -42,6 +43,31 @@ import { notImplemented } from '../methods/region';
 const chatTypeIds = new Map<string, number>();
 
 /** Reset between sessions so a reconnect does not keep growing the table. */
+/**
+ * Where a typed line goes. Installed by `ui/chat-bridge.ts`, which owns the chat handler.
+ *
+ * A sink for the reason `ui/pointer.ts` and `ui/map-selection.ts` are: this file installs globals
+ * BEFORE the manifest -- `ChatFrame.lua` references `SendChatMessage` while it loads -- and the
+ * handler belongs to a world session that comes and goes. The global exists from the start and
+ * answers into nothing until a session installs itself.
+ *
+ * `language` is null when the client did not pass one, which lets the sender keep its own default
+ * rather than have this file invent a number -- see `object/chat.ts#send` on why a wrong language is
+ * discarded by the server with no reply.
+ */
+export type ChatSender = (
+  type: number,
+  text: string,
+  target: string | null,
+  language: number | null,
+) => void;
+
+let sender: ChatSender | null = null;
+
+export function setChatSender(next: ChatSender | null): void {
+  sender = next;
+}
+
 export function resetChatTypeIds(): void {
   chatTypeIds.clear();
 }
@@ -186,9 +212,9 @@ export function installChatApi(vm: LuaVM): void {
     // (`GetChatTypeIndex`-tagged lines) is already satisfied by the defaults set at file scope.
     ['ChangeChatColor', 'no chat colour is persisted, so a change would not survive the frame', []],
     ['GetChatTypeColor', 'no chat colour is persisted', [1, 1, 1]],
-    // Sending. This is the piece a later round replaces with `CMSG_MESSAGECHAT`; it is declared rather
-    // than silently dropped so a Whisper that goes nowhere says so in the load report.
-    ['SendChatMessage', 'CMSG_MESSAGECHAT is not built yet, so nothing this client types is sent', []],
+    // `SendChatMessage` has LEFT this list -- it is real below. Its note said "CMSG_MESSAGECHAT is
+    // not built yet", and that stopped being true when `network/game/object/chat.ts#send` landed;
+    // the packet was there and nothing called it.
     ['GetDefaultLanguage', 'no language state is read from the wire', ['Common', 7]],
     ['GetLanguageByIndex', 'no language state is read from the wire', ['Common', 7]],
     ['GetNumLanguages', 'no language state is read from the wire', [1]],
@@ -196,6 +222,45 @@ export function installChatApi(vm: LuaVM): void {
     ['LoggingChat', 'this client writes no chat log file', [false]],
     ['LoggingCombat', 'this client writes no combat log file', [false]],
   ];
+  /**
+   * `SendChatMessage(text, type, language, target)` -- the client's own signature, from its callers.
+   *
+   * Read off `chatframe.lua` rather than assumed: `SendChatMessage(msg, "WHISPER", editBox.language,
+   * lastTell)` (`:1484`), `SendChatMessage(msg, "AFK")` (`:1937`), `SendChatMessage(msg, "CHANNEL",
+   * editBox.language, editBox:GetAttribute("channelTarget"))` (`:1954`), and the three in
+   * `ChatEdit_SendText` (`:3669,3684,3686`). So the type is a STRING -- `"SAY"`, `"WHISPER"`,
+   * `"CHANNEL"` -- and the fourth argument is a player name for a whisper and a channel name for a
+   * channel, which is exactly the split `chatHandler.send` already makes.
+   *
+   * **The type name maps straight onto `ChatMsg`**, whose keys are the same words the client uses.
+   * An unknown one is refused rather than guessed at: sending a say when the player asked for an
+   * officer chat is worse than not sending, and the report names it.
+   *
+   * The LANGUAGE the client passes is honoured when it gives one. `editBox.language` comes from
+   * `GetDefaultLanguage`, so the value round-trips through the client rather than being decided
+   * here -- and `chat.ts#send` documents why the number matters: a language the character cannot
+   * speak makes the server discard the packet with no reply at all.
+   */
+  vm.registerFunction('SendChatMessage', (args) => {
+    const text = String(args[0] ?? '');
+    const typeName = String(args[1] ?? 'SAY').toUpperCase();
+    const language = Number(args[2]);
+    const target = args[3] === undefined || args[3] === null ? null : String(args[3]);
+    if (text === '') {
+      return [];
+    }
+    const type = (ChatMsg as unknown as Record<string, number>)[typeName];
+    if (typeof type !== 'number') {
+      warnOnce(
+        `SendChatMessage: chat type '${typeName}' is not in this client's ChatMsg table, so the `
+        + 'message was not sent -- guessing a type would put a private line in the wrong channel',
+      );
+      return [];
+    }
+    sender?.(type, text, target, Number.isFinite(language) ? language : null);
+    return [];
+  });
+
   for (const [name, reason, results] of gaps) {
     const stub = notImplemented(name, reason, results);
     // `notImplemented` builds a FRAME METHOD (ctx, self, args); a global takes only args. The same

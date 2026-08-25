@@ -287,7 +287,21 @@ export class ChatMessageHandler extends EventEmitter {
    * `HandleMessagechatOpcode` reads `uint32 type; uint32 lang;` while `BuildChatPacket` writes
    * `uint8(chatType)`. The dead handler had this one thing right and it is worth keeping from it.
    */
-  send(type: number, text: string, target?: string | null, channel?: string | null): void {
+  send(
+    type: number,
+    text: string,
+    target?: string | null,
+    channel?: string | null,
+    /**
+     * The language, or null to keep this file's own default.
+     *
+     * Passed through from `SendChatMessage`, which gets it from the client's `editBox.language` and
+     * ultimately from `GetDefaultLanguage`. So the value round-trips through the client rather than
+     * being decided in two places -- and the comment below on why a wrong one is fatal applies to
+     * whatever arrives here, not just to the default.
+     */
+    language?: number | null,
+  ): void {
     const prefix = type === ChatMsg.WHISPER ? (target ?? '')
       : (type === ChatMsg.CHANNEL ? (channel ?? '') : null);
     const body = 4 + 4 + cstrBytes(prefix) + cstrBytes(text);
@@ -306,7 +320,9 @@ export class ChatMessageHandler extends EventEmitter {
     // read -- the same gap `api/chat.ts#GetDefaultLanguage` declares while answering `Common, 7`. A
     // Horde character will have their say refused until that join exists, which is honest and visible
     // rather than silent, because the refusal is total.
-    gp.writeUnsignedInt(LANG_COMMON);
+    gp.writeUnsignedInt(
+      typeof language === 'number' && Number.isFinite(language) ? language : LANG_COMMON,
+    );
     if (prefix !== null) {
       gp.writeCString(prefix);
     }

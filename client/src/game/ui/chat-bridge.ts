@@ -33,6 +33,7 @@ import type World from '../world';
 import type { ChatLine, ChatMessageHandler } from '../../network/game/object/chat';
 import { LuaVM } from './framexml/lua/vm';
 import { fireEvent } from './framexml/lua/events';
+import { setChatSender } from './framexml/lua/api/chat';
 
 /** `chatTag` -> the string `arg6` carries. 0 is none; the rest are the client's own globals. */
 const TAG_TEXT: Record<number, string> = {
@@ -54,6 +55,22 @@ function needsPlayerName(line: ChatLine): boolean {
 
 export function attachChatBridge(vm: LuaVM, world: World): () => void {
   const chat: ChatMessageHandler = world.game.objectHandler.chatHandler;
+
+  /**
+   * OUTBOUND: give `SendChatMessage` somewhere to go.
+   *
+   * The global itself is registered in `api/chat.ts` before the manifest, because `ChatFrame.lua`
+   * references it while loading; what it lacked was a handler. `object/chat.ts#send` has built
+   * `CMSG_MESSAGECHAT` for some time and nothing called it -- the gap note there still said the
+   * packet did not exist.
+   *
+   * The fourth argument is a player name for a whisper and a channel name for a channel, and `send`
+   * picks by type, so both are handed the same string rather than this bridge deciding which is
+   * which -- the client already made that call by the type it passed.
+   */
+  setChatSender((type, text, target, language) => {
+    chat.send(type, text, target, target, language);
+  });
 
   /** Lines waiting on a name query, oldest first. Bounded: a name that never arrives must not leak. */
   const pending: { line: ChatLine; at: number }[] = [];
@@ -179,6 +196,8 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
   world.on('unit:fields', onFields);
 
   return () => {
+    // The sender closes over this session; a stale one outliving it is the double-mount hazard.
+    setChatSender(null);
     chat.removeListener('line', onLine);
     world.removeListener('unit:fields', onFields);
     pending.length = 0;
