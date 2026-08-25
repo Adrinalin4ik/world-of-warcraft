@@ -1393,6 +1393,67 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * registered, shown and sized -- and it FIRES the event itself, so the same call also says whether
    * dispatching it changes anything.
    */
+  /**
+   * `window.worldMapTooltip()` -- why the world-map tooltip text goes grey.
+   *
+   * The owner: fine on the big map at first, grey once the map has been WINDOWED, and grey on the
+   * big map thereafter. That shape is state left behind by the windowed transition, not a property
+   * of the mode -- otherwise returning would restore it.
+   *
+   * Ruled out statically first: `WorldMapTooltip` is `parent="WorldMapFrame"`
+   * (`worldmapframe.xml:1139`), nothing calls `WorldMapFrame:SetAlpha` (grepped: the only
+   * `SetAlpha` calls are the ping, the arrow effect frame, and `SetOpacity`'s borders plus
+   * `WorldMapDetailFrame`/`WorldMapPOIFrame`), and `SetScale` is never applied to `WorldMapFrame` or
+   * to the tooltip. So neither the alpha cascade nor the scale chain explains it on paper, which is
+   * exactly when to measure instead of reasoning.
+   *
+   * Reports what the RENDERER sees for each line: the widget alpha, the cascaded alpha, the
+   * effective scale, and the font colour and size actually resolved -- not the values handed in.
+   * `fillItemLines` passes `1,1,1`, so a grey line means something downstream of that, and this is
+   * downstream.
+   */
+  (window as unknown as Record<string, unknown>).worldMapTooltip = () => {
+    const id = ctx.registry.byName('WorldMapTooltip');
+    const tip = id === null ? null : ctx.registry.widget(id);
+    if (tip === null) {
+      return { note: 'WorldMapTooltip is not in the registry' };
+    }
+    const lines: unknown[] = [];
+    for (let i = 1; i <= 6; i += 1) {
+      const lineId = ctx.registry.byName(`WorldMapTooltipTextLeft${i}`);
+      const line = lineId === null ? null : ctx.registry.widget(lineId);
+      if (line === null) {
+        continue;
+      }
+      lines.push({
+        n: i,
+        text: line.displayText,
+        shown: line.shown,
+        alpha: line.alpha,
+        colour: line.font?.color ?? null,
+        size: line.font?.size ?? null,
+        family: line.font?.family ?? null,
+        effectiveScale: line.effectiveScale,
+      });
+    }
+    return {
+      tooltip: {
+        alpha: tip.alpha,
+        shown: tip.shown,
+        visible: tip.visible,
+        effectiveScale: tip.effectiveScale,
+        scale: tip.scale,
+      },
+      // The frames the windowed transition DOES touch, for comparison.
+      detailFrameAlpha: (() => {
+        const d = ctx.registry.byName('WorldMapDetailFrame');
+        const w = d === null ? null : ctx.registry.widget(d);
+        return w === null ? null : { alpha: w.alpha, scale: w.scale };
+      })(),
+      lines,
+    };
+  };
+
   (window as unknown as Record<string, unknown>).worldTracking = () => {
     const iconId = ctx.registry.byName('MiniMapTrackingIcon');
     const icon = iconId === null ? null : ctx.registry.widget(iconId);
@@ -1573,6 +1634,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       delete (window as unknown as Record<string, unknown>).worldMapHighlight;
       delete (window as unknown as Record<string, unknown>).worldMapHover;
       delete (window as unknown as Record<string, unknown>).worldTracking;
+      delete (window as unknown as Record<string, unknown>).worldMapTooltip;
       // The blob source outlives this bridge otherwise, and it closes over a disposed world.
       setBlobSource(null);
     },
