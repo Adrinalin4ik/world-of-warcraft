@@ -385,6 +385,38 @@ export function installActionsApi(vm: LuaVM): void {
 
   const gaps: Array<[string, string, unknown[]]> = [
     [
+      // **THE FIRST STATEMENT OF EVERY RIGHT-CLICK ON A UNIT PORTRAIT, AND ITS ABSENCE WAS THE WHOLE
+      // OF "правый клик не работает, совсем. Не появляется меню".**
+      //
+      // `SecureUnitButton_OnLoad` sets `*type2 = "menu"` (`SecureTemplates.lua:557`), so a right-click
+      // on PlayerFrame/TargetFrame/PartyMemberFrame enters `SecureUnitButton_OnClick`, whose body opens:
+      //
+      //     local type = SecureButton_GetModifiedAttribute(self, "type", button);
+      //     if ( type == "menu" ) then
+      //         if ( SpellIsTargeting() ) then          -- SecureTemplates.lua:565
+      //
+      // MEASURED, not reasoned about -- the console line, from a separated right-click on PlayerFrame:
+      //   `framexml: PlayerFrame: OnClick: [string "SecureTemplates.lua"]:565: attempt to call a nil
+      //    value (global 'SpellIsTargeting')`
+      // The handler died there, BEFORE `SecureActionButton_OnClick` ran, so `rawget(self, "menu")` was
+      // never reached and no menu could ever appear.
+      //
+      // THIS IS ALSO THE ASYMMETRY WITH THE STAT DROPDOWNS, which DO open: their arrow is a plain
+      // Button whose `OnClick` calls `ToggleDropDownMenu` directly (`paperdollframe.lua`), so it never
+      // touches the secure-button path. The unit popup is the only menu in the client that does. It was
+      // therefore neither the dropdown rect, nor `SetFrameLevel`, nor hit-testing -- all three of which
+      // were fixed in neighbouring rounds and none of which was reached.
+      //
+      // `SpellCanTargetItem` below was declared for the TAIL of the same file's
+      // `SecureActionButton_OnClick` (line 537) and by the same reasoning; this is its head. Both are
+      // FALSE for the same true reason: nothing in this client puts the cursor into spell-targeting
+      // mode, so a click is never awaiting a spell target.
+      'SpellIsTargeting',
+      'no spell-targeting cursor state exists in this client, so a click is never awaiting a spell '
+        + 'target (SecureTemplates.lua:565, and SECURE_ACTIONS.target at :403)',
+      [false],
+    ],
+    [
       // The TAIL of every action-button click: `SecureActionButton_OnClick:537` reads
       // `if ( SpellCanTargetItem() )` after it has dispatched the action, to route a spell that needs an
       // item target (an enchant, a poison) at a bag slot. Its absence raised on EVERY click -- measured,
@@ -397,20 +429,12 @@ export function installActionsApi(vm: LuaVM): void {
         + 'target (SecureTemplates.lua:537)',
       [false],
     ],
-    [
-      // Called 10 times across `BonusActionBarFrame.lua`, `PetActionBarFrame.lua`, `MainMenuBar.lua`,
-      // `UIParent.lua` and `FloatingChatFrame.lua`, and its absence was aborting
-      // `ShapeshiftBar_OnLoad` outright (`BonusActionBarFrame.lua:126`). 0 means "this character has no
-      // stance bar", which hides `ShapeshiftBarFrame` (`ShapeshiftBar_Update:145`) -- and that is the
-      // honest answer: the player's CURRENT form is read (see `GetBonusBarOffset`), but the LIST of
-      // forms a class has needs the known-spell set cross-referenced against `SpellShapeshiftForm.dbc`,
-      // which is not done, and `GetShapeshiftFormInfo`/`GetShapeshiftFormCooldown` with it. So the
-      // stance BUTTONS are absent rather than wrong.
-      'GetNumShapeshiftForms',
-      'no stance-bar feed: the current form is known but the list of a class\'s forms is not, so '
-        + 'ShapeshiftBarFrame stays hidden and the three stance buttons are not drawn',
-      [0],
-    ],
+    // `GetNumShapeshiftForms` HAS LEFT THIS LIST. Its note read "the list of a class's forms is not
+    // known", and that is what kept `ShapeshiftBarFrame` hidden -- `ShapeshiftBar_Update` hides the bar
+    // on 0 (`bonusactionbarframe.lua:145-146`), which is where 3.3.5a's stance bar actually lives; there
+    // is no `ShapeshiftBar.xml` in `FrameXML.toc`. The list is real now: a known spell with an
+    // `SPELL_AURA_MOD_SHAPESHIFT` effect IS a form, and `ui/aura-bridge.ts#shapeshiftForms` builds it
+    // with `GetShapeshiftFormInfo`, `GetShapeshiftFormCooldown` and `CastShapeshiftForm` beside it.
     [
       'GetBindingKey',
       'no keybinding table in this client, so no hotkey text is drawn on a button',

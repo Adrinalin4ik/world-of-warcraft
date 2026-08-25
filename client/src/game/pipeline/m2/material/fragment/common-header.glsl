@@ -29,6 +29,25 @@ uniform int interiorFog;
 
 uniform float animatedTransparency;
 
+// The MOUSEOVER / TARGET model brighten -- the real client's per-model HIGHLIGHT EMISSIVE, as a flat
+// additive lift on the lighting sum. 0 for everything that is not lit up.
+//
+// A CM2 instance carries it beside its fade alpha: an additive highlight emissive at
+// `model+0x190/194/198` (setter `0x710d40`, default 0,0,0), pushed by `SetHighlight 0x614550` /
+// `ClearHighlight 0x6144f0` and added by the animate kernel to the material emissive through
+// `glMaterialfv(GL_EMISSION)` (`samples/benilla/.../instance_tint.rs:5-10` and
+// `.../target/highlight.rs:1-10`, wow-re `selection-circle.md` PART 2 §5). The shipped config default
+// is `0xff404040`, i.e. **+64/255 per channel** -- see `world/hover-highlight.ts#HIGHLIGHT_LIFT`, which
+// is where that number lives.
+//
+// WHERE it is added is the whole of getting this right, and `applyDiffuseLighting` does it: GL_EMISSION
+// lands INSIDE the lighting sum, which is clamped to [0,1] BEFORE the texture modulates it. So darks
+// lift toward fully-lit and already-bright spots saturate -- the reference's own shader says exactly
+// that ("darks lift toward fully-lit, already-bright spots saturate",
+// `benilla/.../wow_model.wgsl:785-790`). Adding it after the clamp, or to the final colour, would be a
+// wash rather than a brighten.
+uniform float highlight;
+
 // The per-object distance-fade alpha (pipeline/m2/fade/laws.ts -- the size-bucketed law from
 // FUN_00683f80). 1.0 is opaque; the cull drops the object entirely at 0.0, so only the feathering
 // band 0 < a < 1 ever reaches here.
@@ -39,6 +58,10 @@ uniform float animatedTransparency;
 // 224/255; that difference predates this and is deliberately left alone here, since changing it
 // would alter the silhouette of every alpha-tested prop in the game.)
 uniform float fadeAlpha;
+
+// 1 when the fade's owner has put this material into real alpha blending for the duration of the
+// ramp, so the output alpha can be weighted instead of dissolved. See `finalizeColor`.
+uniform float fadeBlend;
 
 // WMO point lights (MOLT) affecting this model. Positions are world space, matching
 // worldVertexPosition. Count is zero for anything not standing inside a WMO. Selected per object
@@ -167,9 +190,17 @@ vec4 applyDiffuseLighting(vec4 result) {
     // point lights are added in above; the interior probe's own docstring says the same). Clamping
     // BOTH ends matters -- a bare min() would leave the sun lobe's negative dip in place, and that
     // negative factor would darken the albedo below black once multiplied through.
+    // The mouseover/target brighten, INSIDE the sum and BEFORE the clamp -- see `highlight`'s own
+    // declaration for why that placement is the whole fidelity of it.
+    light += highlight;
+
     light = clamp(light, 0.0, 1.0);
     light = mix(light, vec3(1.0, 1.0, 1.0), 1.0 - materialParams.y);
   #else
+    // NO HIGHLIGHT ON AN UNLIT BATCH, and that is faithful rather than an omission: with GL_LIGHTING
+    // off the client's own GL_EMISSION is dead, so a glow card or an eye flare does not brighten with
+    // the body ("the fullbright/UNLIT path below faithfully never receives it",
+    // `benilla/.../wow_model.wgsl:788-789`).
     vec3 light = vec3(1.0, 1.0, 1.0);
   #endif
 
@@ -259,10 +290,56 @@ vec4 finalizeColor(vec4 result) {
 
   result = applyFog(result);
 
-  // The distance fade rides the same output-alpha channel as everything else (the reference's single
-  // render-alpha slot, CM2Model+0x19c). Applied last so fog's own per-blend-mode alpha handling above
-  // is unaffected by it.
-  result.a *= fadeAlpha;
+  // TWO FADE MECHANISMS, and the owner of the fade picks which by setting `fadeBlend`.
+  //
+  // **The multiply is the smooth one and it needs real blending.** With `SrcAlpha/OneMinusSrcAlpha` on
+  // the colour channels and `Zero/One` on alpha -- which is what `ModelFade` installs, and only ever on
+  // materials an instance OWNS -- weighting the output alpha blends the body against the world and
+  // leaves the framebuffer's alpha at the cleared 1.0. That last part is the rule `material/index.ts`
+  // states and the reason this cannot be done unconditionally: with `NoBlending` the alpha is written
+  // straight through, the canvas goes sub-1, and the compositor adds the white page behind it. That was
+  // the owner's white doodads.
+  //
+  // **The dissolve is the fallback for geometry nobody may re-blend**: a doodad's materials are SHARED
+  // across every copy of that path in the zone, so putting them into blending would blend all of them --
+  // the trap `CLAUDE.md` records three rounds of. An ordered screen-space threshold needs no blend state
+  // and writes no alpha. Interleaved gradient noise is the standard choice: stable per pixel, so a still
+  // camera shows a steady stipple rather than boiling noise.
+  //
+  // The dissolve is OURS. The reference has no dither anywhere; it never fades anything big and lets the
+  // alpha test erode the small alpha-keyed props instead. The owner's report is why both exist: the
+  // dissolve alone read as "слишком резко" on a mob, because a dither is granular per pixel and a distant
+  // body covers few of them.
+  // AN OPAQUE PASS HAS NO BUSINESS WRITING ALPHA, and this is the owner's white dragon on the login
+  // screen: "на главной заставке тоже надо поправить белую альфу".
+  //
+  // Same root as the white doodads and a different producer. `material/index.ts` protects the alpha
+  // channel for every blending mode >= 1 and deliberately excludes mode 0, on the stated ground that
+  // "`Combiners_Opaque` is the only combiner that pairs with it and its alpha is already 1". That is true
+  // of the TEXTURE, and the combiners then multiply by more than the texture -- its own comment names it:
+  // "`Combiners_Mod` is `sampled0.a * vertexColor.a * animatedTransparency`". **An M2 with a transparency
+  // TRACK therefore writes sub-1 alpha through a NoBlending material**, which `NoBlending` stores
+  // verbatim, and the compositor adds `(1 - a)` of the white page to it. The login screen's dragon is
+  // animated; the doodads were the same defect reached through the distance fade.
+  //
+  // Forcing 1 is correct rather than a patch: with `NoBlending` the pixel REPLACES what was there, so the
+  // alpha it carries can only ever leak into the framebuffer -- nothing consumes it. The exception is a
+  // fade that has deliberately put this material into real blending, which owns the alpha channel for the
+  // duration and protects it itself (`world/model-fade.ts#borrowBlending`).
+#if defined(BLENDING_MODE) && BLENDING_MODE == 0
+  if (fadeBlend < 0.5) {
+    result.a = 1.0;
+  }
+#endif
+
+  if (fadeBlend > 0.5) {
+    result.a *= fadeAlpha;
+  } else if (fadeAlpha < 1.0) {
+    float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    if (ign >= fadeAlpha) {
+      discard;
+    }
+  }
 
   return result;
 }

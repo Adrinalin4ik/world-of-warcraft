@@ -69,6 +69,11 @@ import './lua/methods/worldframe';
 import './lua/methods/frame';
 import './lua/methods/gametooltip';
 import './lua/methods/kinds';
+import './lua/methods/messageframe';
+import './lua/methods/minimap';
+import {
+  setMessageFrameDuration, setMessageFrameInsertMode, setMessageFrameMaxLines,
+} from './lua/methods/messageframe';
 import './lua/methods/model';
 import './lua/methods/scroll';
 import './lua/methods/statusbar';
@@ -124,6 +129,21 @@ export interface FrameXmlRuntime {
  * thing to Lua as it does to the loader. A `MethodContext` built without a runtime keeps null and those
  * methods report the gap instead of guessing.
  */
+/**
+ * The handlers whose mere DECLARATION makes a frame mouse-interactive.
+ *
+ * See the mouse-enable step at the end of `applyScripts` for the evidence and the citations. Compared
+ * lower-cased because FrameXML is not consistent about handler-name casing between documents.
+ *
+ * `OnMouseWheel` is deliberately NOT here: the wheel is `EnableMouseWheel`, a separate flag in the
+ * engine (`chatframe.lua:2550` calls it on its own), and nothing in this widget layer routes a wheel
+ * event yet -- adding it would arm a frame for a mouse it does not otherwise take.
+ */
+const MOUSE_SCRIPTS = new Set([
+  'onenter', 'onleave', 'onmousedown', 'onmouseup', 'onclick', 'ondoubleclick',
+  'ondragstart', 'ondragstop', 'onreceivedrag',
+]);
+
 export function createFrameXmlRuntime(vm: LuaVM, ctx: MethodContext): FrameXmlRuntime {
   const fonts = new TemplateRegistry();
   ctx.fontObject = (name) => readFontObject(fonts, name, warnOnce);
@@ -510,6 +530,9 @@ class DocumentLoader {
     let effectiveParent = parent;
     let effectiveParentName = parentName;
     let borrowedParent: LuaRef | null = null;
+    // Set when `parent="Name"` did NOT resolve: the frame is built at the root and then HIDDEN. See
+    // `orphanHidden` below for why hiding it is the honest fallback and not a workaround.
+    let orphaned = false;
     const declaredParent = parent === null ? attr(element, 'parent') : undefined;
     if (declaredParent !== undefined && declaredParent !== '') {
       const global = this.rt.vm.getGlobal(declaredParent);
@@ -518,9 +541,10 @@ class DocumentLoader {
         effectiveParent = global;
         effectiveParentName = declaredParent;
       } else {
+        orphaned = true;
         this.report.warnings.push(
           `${sourceName}:${attr(element, 'name') ?? `<${element.tag}>`}: ` +
-            `parent="${declaredParent}" names no frame yet; built at the root instead`,
+            `parent="${declaredParent}" names no frame; built at the root and HIDDEN`,
         );
       }
     }
@@ -556,8 +580,37 @@ class DocumentLoader {
     // still resolves `$parent` to something addressable.
     const selfName = resolvedName ?? effectiveParentName;
 
+    // AN ORPHAN IS HIDDEN, and this is the honest fallback rather than a workaround.
+    //
+    // `parent="X"` is not decoration: it is where the frame IS and what it is visible WITH. A document
+    // that names a parent this client never built has authored neither a rect nor a shown state we can
+    // honour, and leaving it at the root gives it BOTH -- invented ones. It resolves its `CENTER` anchor
+    // against the screen instead of against its owner and it inherits nothing's hidden state, so it
+    // draws in the middle of the world.
+    //
+    // MEASURED, and it is the owner's "часть какого-то интерфейса" dead centre of the screen:
+    // `CombatLogQuickButtonFrame_Custom` is `parent="ChatFrame2"` with
+    // `<Anchor point="CENTER" relativeTo="ChatFrame2" relativePoint="CENTER">` and `hidden="false"`
+    // (`interface/addons/blizzard_combatlog/blizzard_combatlog.xml:28-36`) -- a 65x24 black 70%-alpha
+    // panel with a 28x28 `UI-MainMenu-ScrollDownButton-Up` filter button, which is exactly the "dark
+    // panel with a gold icon" reported. It appeared now because `Blizzard_CombatLog` genuinely loads at
+    // `PLAYER_LOGIN` (`uiparent.lua:480-483`) and `LoadAddOn` only became real last round.
+    //
+    // **The root cause is one class down, not here**: `ChatFrame2` is a `<ScrollingMessageFrame>`
+    // (`floatingchatframe.xml:991`) and `object.ts` has no such `WidgetClass`, so all seven chat frames
+    // fail to be created -- a gap `STATE.md` already records ("`ScrollingMessageFrame` 10, so no chat").
+    // Adding the class is a task of its own (`AddMessage`, `SetMaxLines`, `ScrollUp` &c. are what
+    // `FloatingChatFrame_OnLoad` then needs) and is NOT done here. What is done here is to stop
+    // inventing a position and a visibility for any frame whose declared owner is absent.
     try {
       this.decorate(element, wrapper, effectiveParentName, selfName, sourceName, dbg);
+      // AFTER `decorate`, not before, and deliberately: the frame's own `<OnLoad>` runs in there and may
+      // `Show()` itself (`Blizzard_CombatLog_QuickButtonFrame_OnLoad` is one). In the real client that
+      // Show is still invisible because the PARENT is hidden, so hiding last is what reproduces the
+      // engine -- hiding first would let a script undo it and put the frame back on screen.
+      if (orphaned) {
+        this.callMethod(wrapper, 'Hide', [], dbg);
+      }
     } finally {
       // The wrapper handle lives exactly as long as this frame's own subtree build. The frame itself
       // and its permanent Lua table are owned by `FrameRegistry`; this was a call-result handle.
@@ -597,6 +650,10 @@ class DocumentLoader {
     this.applySpecialFontStrings(element, wrapper, selfName, dbg);
     this.applyBackdrop(element, wrapper, dbg);
     this.applyPerKind(element, wrapper, selfName, dbg);
+    // 5b - <Attributes>. BEFORE <Scripts>, so an `OnLoad` that reads one sees it -- and before
+    // `OnAttributeChanged` can be installed, so seeding them fires no spurious dispatch. That is also
+    // the engine's order: attributes are part of the frame's declaration, not a later write.
+    this.applyAttributes(element, wrapper, dbg);
     // 6 - <Scripts>. OnLoad is noted, not fired.
     const hasOnLoad = this.applyScripts(element, wrapper, dbg);
     // 7 - nested <Frames>, whose own OnLoads therefore run first, then <ScrollChild> (which is the
@@ -703,6 +760,26 @@ class DocumentLoader {
   private applyAttrs(element: XmlElement, wrapper: LuaRef, dbg: string): void {
     if (attrBool(element, 'hidden')) {
       this.callMethod(wrapper, 'Hide', [], dbg);
+    }
+    // `<MessageFrame displayDuration="5" insertMode="TOP">` -- `uierrorsframe.xml:4`, the only
+    // MessageFrame in the manifest. Applied HERE because these are LoadXML attributes like every other
+    // one in this method, and NOT through a Lua method because the class has none: nothing in the
+    // manifest calls `SetTimeVisible` or `SetInsertMode`, so inventing them to carry an attribute would
+    // add API surface that no file has ever pinned. See `methods/messageframe.ts`' header.
+    const displayDuration = num(attr(element, 'displayDuration'));
+    if (displayDuration !== undefined) {
+      setMessageFrameDuration(this.rt.ctx.frameIdOf(wrapper), displayDuration);
+    }
+    // `<ScrollingMessageFrame maxLines="128">` (`chatframe.xml:4`). It is the scrollback DEPTH, not the
+    // number of lines on screen, and it is also the signal that separates a chat frame from an error
+    // frame at load time -- see `setMessageFrameMaxLines`, which turns fading off with it.
+    const maxLines = num(attr(element, 'maxLines'));
+    if (maxLines !== undefined) {
+      setMessageFrameMaxLines(this.rt.ctx.frameIdOf(wrapper), maxLines);
+    }
+    const insertMode = attr(element, 'insertMode');
+    if (insertMode !== undefined) {
+      setMessageFrameInsertMode(this.rt.ctx.frameIdOf(wrapper), insertMode);
     }
     const strata = attr(element, 'frameStrata');
     if (strata !== undefined) {
@@ -963,10 +1040,29 @@ class DocumentLoader {
    * the two opposing anchors. That is the same precedence benilla pins for an explicit
    * `setAllPoints` ("size present, but setAllPoints wins", `script/tests/regions.rs:131`). Most of
    * them are positioned from Lua later -- `TutorialFrame`'s arrows, `GameTooltipTemplate`'s ten
-   * `$parentTexture<n>` slots -- and a later `SetPoint` at a NEW point stacks on top of the fill
-   * rather than replacing it, so those keep the owner's rect until something calls `ClearAllPoints`.
-   * Both frames are hidden by default and `GameTooltip` is not a frame type this runtime has yet, so
-   * nothing observable rests on it today; it is written down rather than guessed at.
+   * `$parentTexture<n>` slots.
+   *
+   * **THE STACKING THIS PARAGRAPH PREDICTED HAS NOW COST SOMETHING, so the prediction is replaced by
+   * what happened.** It used to end "a later `SetPoint` at a NEW point stacks on top of the fill rather
+   * than replacing it ... nothing observable rests on it today". `QuestInfo_Display` positions every
+   * element of the quest page with a single `SetPoint` and no `ClearAllPoints` (`questinfo.lua:73,75`),
+   * so `QuestInfoTitleHeader` -- authored with a `<Size>` and no `<Anchors>` (`questinfo.xml:251-255`)
+   * -- got four fill anchors plus one more, resolved to the whole 295x324 viewport instead of its text
+   * height, and pushed everything chained below its `BOTTOMLEFT` under the fold where the scroll clip
+   * dropped it. Blank body, dead scroll, one cause.
+   *
+   * The fill is now marked `Widget#anchorsAreDefault` and the first explicit `SetPoint` REPLACES it,
+   * which is what the engine does with a default position. A region nothing positions still fills.
+   *
+   * **AND THE DEFAULT ITSELF IS OURS, not the reference's.** `regions.rs:131` is cited above for the
+   * size-versus-`setAllPoints` PRECEDENCE and covers only the explicit `setAllPoints="true"` attribute;
+   * benilla has no default for an ABSENT `<Anchors>` block at all. Two facts from the manifest bound the
+   * question and they point opposite ways: **44** anchorless textures write `setAllPoints="true"`
+   * explicitly, which would be redundant if anchorless already filled -- yet
+   * `actionbuttontemplate.xml`'s `$parentIcon` is anchorless with no size and no attribute and
+   * demonstrably fills its button. So the engine's real rule is probably narrower than this one, the
+   * evidence does not settle where, and the default is kept as OURS rather than removed on a guess --
+   * **58** bare anchorless textures currently draw because of it.
    */
   private applyRegionLayout(
     region: XmlElement,
@@ -980,6 +1076,23 @@ class DocumentLoader {
     );
     if (!declaresAnchors && !attrBool(region, 'setAllPoints')) {
       this.callMethod(wrapper, 'SetAllPoints', [], dbg);
+      /**
+       * MARKED AS A DEFAULT, which is what the paragraph above predicted would matter one day.
+       *
+       * It said "a later `SetPoint` at a NEW point stacks on top of the fill rather than replacing it
+       * ... nothing observable rests on it today". Something did: `QuestInfo_Display` positions every
+       * element with a single `SetPoint` and no `ClearAllPoints` (`questinfo.lua:73,75`), so
+       * `QuestInfoTitleHeader` ended up with five anchors and the whole viewport's rect. See
+       * `Widget#anchorsAreDefault` -- the flag is set AFTER the call, because `setAnchors` clears it.
+       *
+       * An explicit `setAllPoints="true"` is NOT marked: that is the document's own statement, and 44
+       * textures in the manifest make it deliberately.
+       */
+      const frameId = this.rt.ctx.frameIdOf(wrapper);
+      const widget = frameId === null ? undefined : this.rt.ctx.registry.widget(frameId);
+      if (widget !== undefined) {
+        widget.anchorsAreDefault = true;
+      }
     }
     const justifyH = attr(region, 'justifyH');
     if (justifyH !== undefined) {
@@ -1322,26 +1435,44 @@ class DocumentLoader {
     } else if (tag === 'statusbar') {
       this.applyStatusBar(element, wrapper, dbg);
     } else if (tag === 'slider') {
-      // Unchanged, and still a gap: `lua/methods/scroll.ts` gives SLIDER its VALUE methods -- which is
-      // what the client's own scroll code reads and what eleven of the manifest's load errors turned
-      // on -- but nothing in `widget.ts` draws a slider's track or thumb. `<StatusBar>` has moved out
-      // of this branch because its fill IS drawn now (`widget.ts#barFillRect`); a Slider's is not.
+      // `<ThumbTexture>` IS APPLIED NOW, and its absence is why no scrollbar in the client had a
+      // visible thumb. It is a first-class element on a `<Slider>` and the state-texture list in
+      // `applyButton` stops at Checked -- so it was read by nothing. Six exist in the manifest and two
+      // are in `uipaneltemplates.xml`, the scrollbar template every scroll frame inherits.
+      this.applySliderThumb(element, wrapper, selfName, dbg);
+      // NO GAP LINE HERE ANY MORE, and removing it is a claim worth stating plainly. This used to
+      // report "thumb art is applied but does not TRACK the value ... this renderer models no thumb
+      // travel", and every clause of that is now false: `methods/scroll.ts#syncThumb` writes
+      // `Widget#sliderTravel` on every value and range change, `widget.ts` places the thumb from it
+      // against the track (`:1267-1276`), and `ui/input.ts` drags it through `Widget#onSliderDrag`.
+      // A stale gap line is worse than none: it tells the next reader to rebuild what is already here.
+    } else if (tag === 'minimap') {
+      /**
+       * The FRAME is real now (`lua/object.ts`' MINIMAP class) and the MAP is not, so the gap is
+       * declared here instead of being left silent.
+       *
+       * Creating the frame is not cosmetic: the class was missing, so `CreateFrame("Minimap")` threw
+       * and the element and its subtree were dropped, leaving the global nil -- and
+       * `GetMaxUIPanelsWidth` indexes it unguarded (`uiparent.lua:2007`), inside the gate the CENTER
+       * panel's placement sits behind. That raise happened after `UpdateUIPanelPositions` set
+       * `self.updatingPanels = true` and before the line clearing it, so the whole UI-panel layout was
+       * dead for the rest of the session and panels drew on top of each other. See the MINIMAP entry
+       * in `lua/object.ts` for the measurement.
+       */
       this.warnOnce(
-        'kind:slider',
-        `<Slider> bar/thumb attributes are ignored: nothing in this renderer draws a Slider's track or fill (its value methods are real; only the art is missing) (first: ${dbg})`,
+        'kind:minimap',
+        `<Minimap> is a frame only: it measures, indexes and holds a real zoom level `
+        + `(methods/minimap.ts), but no terrain, blips or player arrow are drawn (first: ${dbg})`,
       );
     } else if (tag === 'model' || tag === 'modelffx' || tag === 'playermodel') {
       this.applyModel(element, wrapper, dbg);
     } else if (tag === 'scrollframe') {
-      // The counterpart line for the class that just gained methods: a `<ScrollFrame>`'s scroll VALUES
-      // are tracked for real (`lua/methods/scroll.ts`), and its pixels are not -- `widget.ts` cannot
-      // clip a frame's children, so an offset scroll child would draw outside its viewport instead of
-      // scrolling inside it, and the child is deliberately left where it is. Without this line the
-      // whole gap is invisible: every method the client calls now answers successfully.
-      this.warnOnce(
-        'kind:scrollframe',
-        `<ScrollFrame> scrolling is bookkeeping only: the scroll offsets and ranges are real, but nothing in this renderer clips a viewport or moves a scroll child, so the content does not scroll (first: ${dbg})`,
-      );
+      // AND NO GAP LINE HERE EITHER, for the same reason. This reported that "nothing in this
+      // renderer clips a viewport or moves a scroll child, so the content does not scroll"; both
+      // halves are done. `methods/scroll.ts#SetScrollChild` links the child's `clippedBy`,
+      // `widget.ts#clipItem` crops each item to the viewport (a font string by `DrawItem#crop`,
+      // because its quad is the rasterized glyph box and not its rect), and `SetVerticalScroll`
+      // writes `Widget#scrollOffset`, which the draw walk applies to the clipped subtree.
     }
   }
 
@@ -1497,6 +1628,18 @@ class DocumentLoader {
       try {
         this.applyRegionLayout(buttonText, label, selfName, dbg);
         this.publishRegion(buttonText, label, selfName, dbg);
+        // `parentKey` ON A `<ButtonText>` -- the ONE region path that was missing it, and measured
+        // live rather than reasoned about: the quest log printed
+        // `QuestLogFrame.lua:190: attempt to index a nil value (local 'questNormalText')`, which is
+        // `QuestLogTitleButton_Resize` reading `questLogTitle.normalText` off
+        // `<ButtonText name="$parentNormalText" parentKey="normalText">` (questlogframe.xml:86).
+        //
+        // `applyParentKey` was already called for a `<Layers>` region (:924) and for a button's state
+        // textures (:1545), so the gap was this loop alone -- and `publishRegion` publishes only the
+        // GLOBAL name, which is why the `$parentNormalText` global existed while the key did not. A
+        // caller that uses the key rather than the global therefore saw nil, and
+        // `QuestLogTitleButton_Resize` runs for every row of the log.
+        this.applyParentKey(buttonText, label, wrapper, dbg);
       } finally {
         this.rt.vm.unref(label);
       }
@@ -1757,8 +1900,135 @@ class DocumentLoader {
    * matches what the client does: the observable difference is a child whose `OnLoad` rewires its
    * parent's `OnLoad` before the parent fires, and in that case the client runs the new handler too.
    */
+  /**
+   * `<ThumbTexture>` on a `<Slider>`.
+   *
+   * EXPANDED first, exactly like `applyButton`'s slots and for the same reason: a thumb routinely
+   * carries no `file=` of its own and inherits a virtual `<Texture>` that does. `UIPanelScrollFrame`'s
+   * is `<ThumbTexture name="$parentThumbTexture" file="Interface\Buttons\UI-ScrollBar-Knob">`, which
+   * does carry one, but `colorpickerframe.xml` and `optionspaneltemplates.xml` are not guaranteed to.
+   *
+   * The region is reached through `SetThumbTexture`/`GetThumbTexture` (`methods/scroll.ts`) so the
+   * object model owns the slot, then decorated by the SAME `applyRegion` path a `<Layers>` texture
+   * takes -- so its `<Size>`, `<Anchors>`, `<TexCoords>` and `<Color>` all work without a second
+   * implementation.
+   */
+  private applySliderThumb(
+    element: XmlElement,
+    wrapper: LuaRef,
+    selfName: string,
+    dbg: string,
+  ): void {
+    for (const raw of childrenNamed(element, 'ThumbTexture')) {
+      const thumb = this.expandRegion(raw);
+      const file = attr(thumb, 'file');
+      // The setter runs even with an empty file: it is what CREATES the slot. Same contract the button
+      // state textures use.
+      this.callMethod(wrapper, 'SetThumbTexture', [file ?? ''], dbg);
+      const region = this.callForWidget(wrapper, 'GetThumbTexture', [], dbg);
+      if (region === null) {
+        continue;
+      }
+      try {
+        /**
+         * **THE NAME, AND DROPPING IT KILLED THE WHOLE SCROLLBAR -- arrows, drag and wheel at once.**
+         *
+         * The comment above this method already quoted `name="$parentThumbTexture"`
+         * (`uipaneltemplates.xml:207`) and then read only `file=`, so the thumb existed in our object
+         * model and had no global. The client indexes it by that global in the one function that gives a
+         * scrollbar its limits: `ScrollFrame_OnScrollRangeChanged` does
+         * `_G[scrollbar:GetName().."ThumbTexture"]:Hide()` at `uipaneltemplates.lua:300` and `:Show()` at
+         * `:305`, on the zero-range and non-zero-range branches respectively -- so EVERY announcement
+         * raised, whatever the range.
+         *
+         * The owner's console named it exactly: `WorldMapQuestScrollFrame: OnScrollRangeChanged:
+         * [string "UIPanelTemplates.lua"]:300: attempt to index a nil value (field '?')`.
+         *
+         * What that truncation costs is the whole symptom, and it is why all three input routes died
+         * together while the range itself was computed correctly. `:284` sets the bar's min/max and runs
+         * BEFORE the throw, so the limits were right and every static check of the range chain passed.
+         * Everything after the throw never ran: `:311`'s `ScrollDownButton:Enable()`, so both arrows
+         * stayed disabled from `ScrollFrame_OnLoad`'s `:255-256`, and `:305`'s `ThumbTexture:Show()`, so
+         * there was no thumb to drag.
+         *
+         * FROM THE RAW element, not the expanded one -- `publishRegion`'s own contract: a `name`
+         * inherited from a template would publish every inheritor's thumb under ONE global and clash.
+         * `parentKey` takes the expanded one, for the opposite reason. Same split, and the same two
+         * calls, as the button state textures at `:1587-1590`.
+         */
+        this.publishRegion(raw, region, selfName, dbg);
+        this.applyParentKey(thumb, region, wrapper, dbg);
+        const texCoords = texCoordsOf(thumb);
+        if (texCoords !== null) {
+          this.callMethod(region, 'SetTexCoord', texCoords, dbg);
+        }
+        // The SAME layout path a `<Layers>` texture takes, so `<Size>` and `<Anchors>` need no second
+        // implementation here.
+        this.applyRegionLayout(thumb, region, selfName, dbg);
+      } finally {
+        this.rt.vm.unref(region);
+      }
+    }
+  }
+
+  /**
+   * `<Attributes><Attribute name= type= value=/></Attributes>` -- and NOTHING read these before.
+   *
+   * **This killed the whole UI-panel layout pass**, and the owner's own console log is the evidence:
+   *
+   *     framexml: OnAttributeChanged(panel-update): [string "UIParent.lua"]:1717:
+   *       attempt to perform arithmetic on a nil value
+   *
+   * `uiparent.lua:1717` is `rightOffset = leftOffset + UIParent:GetAttribute("DEFAULT_FRAME_WIDTH") * 2`,
+   * and `uiparent.xml:5-12` declares that attribute -- along with `TOP_OFFSET`, `LEFT_OFFSET`,
+   * `CENTER_OFFSET`, `RIGHT_OFFSET` and `RIGHT_OFFSET_BUFFER` -- in an `<Attributes>` block. With the
+   * block ignored, all six read nil, `UpdateUIPanelPositions` raised on its first arithmetic, and
+   * everything after that line never ran: `SetAttribute("RIGHT_OFFSET", ...)`, the right-panel
+   * placement, and the slot bookkeeping that decides which panel currently occupies "left".
+   *
+   * There are only **14** of these in the whole loaded manifest, and every one matters:
+   *  - `uiparent.xml` x6 -- the panel geometry above.
+   *  - `multiactionbars.xml` x4 -- `actionpage` on the four bonus bars (`SecureButton_GetModifiedAttribute`
+   *    reads it to decide which page a button acts on).
+   *  - `securetemplates.xml` x4 -- `showParty`/`showRaid` on the secure group headers.
+   *
+   * `type` defaults to `"string"` per `UI.xsd:181`, and the manifest uses `number` (10) and `boolean`
+   * (4). A `number` that does not parse is DROPPED with a report rather than coerced to `NaN`, because
+   * `NaN` propagates silently through exactly the arithmetic this exists to fix.
+   */
+  private applyAttributes(element: XmlElement, wrapper: LuaRef, dbg: string): void {
+    for (const block of childrenNamed(element, 'Attributes')) {
+      for (const item of childrenNamed(block, 'Attribute')) {
+        const name = attr(item, 'name');
+        if (name === undefined || name === '') {
+          this.report.errors.push(`${dbg}: <Attribute> with no name; ignored`);
+          continue;
+        }
+        const raw = attr(item, 'value') ?? '';
+        const kind = (attr(item, 'type') ?? 'string').toLowerCase();
+        let value: unknown = raw;
+        if (kind === 'number') {
+          const parsed = Number(raw);
+          if (!Number.isFinite(parsed)) {
+            this.report.errors.push(
+              `${dbg}: <Attribute name="${name}" type="number" value="${raw}"> is not a number; ignored`,
+            );
+            continue;
+          }
+          value = parsed;
+        } else if (kind === 'boolean') {
+          // The engine's spelling is `value="true"`. Anything else false, rather than truthy-by-string
+          // -- `"false"` is a non-empty string and would otherwise come out TRUE.
+          value = raw.toLowerCase() === 'true' || raw === '1';
+        }
+        this.callMethod(wrapper, 'SetAttribute', [name, value], dbg);
+      }
+    }
+  }
+
   private applyScripts(element: XmlElement, wrapper: LuaRef, dbg: string): boolean {
     let hasOnLoad = false;
+    let declaresMouseScript = false;
     for (const scripts of childrenNamed(element, 'Scripts')) {
       for (const handler of scripts.children) {
         const name = handler.tag;
@@ -1787,7 +2057,43 @@ class DocumentLoader {
         if (name.toLowerCase() === 'onload') {
           hasOnLoad = true;
         }
+        if (MOUSE_SCRIPTS.has(name.toLowerCase())) {
+          declaresMouseScript = true;
+        }
       }
+    }
+    /**
+     * A FRAME THAT DECLARES A MOUSE SCRIPT IS MOUSE-INTERACTIVE, and not doing this made every such
+     * handler dead code.
+     *
+     * MEASURED, and it is one cause behind three of the owner's reports at once -- no tooltip on a
+     * character-panel stat, none on a resistance icon, none on the experience bar -- while ITEM tooltips
+     * worked. The difference is the widget CLASS, not the frame:
+     *
+     *     StatLike  (Frame,     <OnEnter>) mouseEnabled false  onEnter bound   <- handler never runs
+     *     BarLike   (StatusBar, <OnEnter>) mouseEnabled false  onEnter bound   <- handler never runs
+     *     ButtonLike(Button,    <OnClick>) mouseEnabled TRUE   onClick bound   <- works
+     *
+     * `object.ts:504-508` enables the mouse for `button`/`checkbutton`/`editbox` by class, which is right
+     * as far as it goes, and `loader.ts` applies `enableMouse="true"` when a document declares it.
+     * Neither covers the case the client's own files are full of: `StatFrameTemplate`
+     * (`paperdollframe.xml:170,202-209`), `MagicResistanceFrameTemplate` (`:211,215-224`) and
+     * `MainMenuExpBar` (`mainmenubar.xml:12`) are a Frame, a Frame and a StatusBar, every one of them
+     * declares `<OnEnter>`, and NOT ONE declares `enableMouse` -- `UI.xsd:470` gives that attribute
+     * `default="false"`. All three show tooltips in the real client, and grepping `EnableMouse` over the
+     * served FrameXML finds no call for any of them. So the engine's rule is not the class alone and not
+     * the attribute alone: declaring a mouse handler is what arms the frame.
+     *
+     * `hitTest` only ever answers a `mouseEnabled` widget (`ui/hit.ts:41`), so without this the `OnEnter`
+     * the loader had just bound could never be reached by the router.
+     *
+     * The STARTING VALUE, exactly like the class rule beside it: a later `EnableMouse(false)` still turns
+     * it off, which `watchframe.lua:465` and `friendsframe.lua:896` rely on. An explicit
+     * `enableMouse="false"` on the element is honoured rather than overridden -- the attribute is the
+     * document's own statement and outranks an inference from its scripts.
+     */
+    if (declaresMouseScript && attr(element, 'enableMouse') !== 'false') {
+      this.callMethod(wrapper, 'EnableMouse', [true], dbg);
     }
     return hasOnLoad;
   }

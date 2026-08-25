@@ -207,6 +207,20 @@ export class LuaVM {
         }
         throw error;
       }
+      // GROW THE STACK BEFORE PUSHING. A Lua C function is guaranteed only `LUA_MINSTACK` (20) free
+      // slots, and pushing past that without asking is undefined -- in fengari it surfaces as an error
+      // whose MESSAGE IS THE VALUE THAT DID NOT FIT, which is about as misleading as a diagnostic gets.
+      //
+      // MEASURED: `GetChatWindowMessages` returns a list of 30 message-group names, and the call raised
+      // `AFK` -- the 21st entry. Nothing in the message said "stack", the function looked correct, and
+      // the failure was two subsystems away from its cause. Any global returning more than 20 values
+      // had this waiting for it.
+      if (results.length > 0 && !lua.lua_checkstack(L, results.length)) {
+        return lauxlib.luaL_error(
+          L, fengari.to_luastring('%s'),
+          `${name}: cannot return ${results.length} values -- the Lua stack could not grow`,
+        );
+      }
       for (const result of results) {
         this.pushValue(result);
       }

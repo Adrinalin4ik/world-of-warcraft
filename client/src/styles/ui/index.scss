@@ -30,9 +30,26 @@ html, body {
   font-family: Galdeano;
   font-size: 13px;
   color: #FFFFFF;
-  -webkit-font-smoothing: antialiased;&:active {
-    cursor: none;
-  }.branding {
+  -webkit-font-smoothing: antialiased;
+
+  // NO `&:active { cursor: none }` HERE, and its removal is the fix for the oldest open report
+  // on this project -- the cursor vanishing on a right click.
+  //
+  // `:active` is true while ANY mouse button is held over the element, so this hid the cursor for
+  // every press: hold left and it goes, release and it returns, right-click and it returns only on
+  // the next repaint -- which for a custom `url(...)` cursor is the next pointer MOVE. That is the
+  // owner's report word for word, including "появляется только когда начинается движение", and
+  // it had nothing to do with the pointer lock I spent three attempts on.
+  //
+  // It hid here for the same reason it was hard to find: it was glued onto the end of the
+  // `-webkit-font-smoothing` line by some earlier edit, so it read as part of that declaration.
+  //
+  // Hiding the cursor during mouse-look is right and is already done, by the POINTER LOCK, which
+  // is now taken only once the camera is actually moving (`controls.tsx#LOCK_TRAVEL_PX`). A
+  // blanket rule on the app root cannot tell a drag from a click, which is exactly the
+  // distinction the owner asked for: "такой эффект должен быть только при движении камеры".
+
+  .branding {
     position: absolute;
     top: 10px;
     right: 10px;

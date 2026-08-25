@@ -231,7 +231,26 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
    * `lootframe.xml:52`, `itemref.lua:175`) meaning "was any modifier held". OURS: answered as
    * shift-or-ctrl-or-alt, which is the only reading those call sites' use as a plain boolean supports.
    */
-  const modifiedClicks = new Map<string, string>([['PICKUPACTION', 'SHIFT']]);
+  const modifiedClicks = new Map<string, string>([
+    ['PICKUPACTION', 'SHIFT'],
+    /**
+     * `SPLITSTACK` -> SHIFT. **The owner's second requirement of this table, and the reason
+     * shift-clicking a vendor's stackable did nothing.**
+     *
+     * `MerchantItemButton_OnModifiedClick` opens the quantity dialogue only behind
+     * `IsModifiedClick("SPLITSTACK")` (`merchantframe.lua:415`), and `ContainerFrameItemButton_OnModifiedClick`
+     * gates `SplitContainerItem` the same way (`containerframe.lua:754`). With the action unbound this
+     * read `NONE`, `IsModifiedClick` answered false, and the click fell through to nothing -- which is
+     * exactly what the owner reported.
+     *
+     * SOURCED THE SAME WAY `PICKUPACTION` IS, AND NO BETTER: the engine ships this default in its own
+     * config, and the client's own options panel exposes only `AUTOLOOTTOGGLE`, `SELFCAST` and
+     * `FOCUSCAST` through `SetModifiedClick` (grepped `interfaceoptionspanels.lua`) -- so no served file
+     * states a default for `SPLITSTACK` either. SHIFT is the owner's requirement, recorded as a
+     * requirement and not as a reading of the game's data.
+     */
+    ['SPLITSTACK', 'SHIFT'],
+  ]);
   const modifierHeld = (modifier: string): boolean => {
     if (modifier === 'SHIFT') {
       return shiftDown;
@@ -267,6 +286,21 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
 
   // CharacterSelectFrame's drag-to-rotate (characterselect.lua:479,492,494).
   vm.registerFunction('GetCursorPosition', () => [cursorX, cursorY]);
+
+  /**
+   * `InCinematic()` -- false, and it gates EVERY static popup in the client.
+   *
+   * `StaticPopup_Show`'s third guard is `if ( InCinematic() and not info.interruptCinematic )`
+   * (`staticpopup.lua:2956`), so with this nil **no dialogue could open at all** -- not the delete
+   * confirmation, not the logout prompt, not a quest confirmation. It was found while wiring the
+   * item-destroy dialogue and is the only engine global on that function's path that was missing
+   * (`UnitIsDeadOrGhost` beside it already answers).
+   *
+   * FALSE is a true answer rather than a stub: this client plays no cinematics -- there is no
+   * `CinematicFrame` feed and `SMSG_TRIGGER_CINEMATIC` has no subscriber -- so the player is never in
+   * one, and that is precisely the value that lets every popup through.
+   */
+  vm.registerFunction('InCinematic', () => [false]);
 
   vm.registerFunction('IsWindowsClient', () => {
     const ua =
@@ -416,8 +450,141 @@ function installCVars(vm: LuaVM): void {
      * start off. (The value in a real install lives in `Config.wtf`, which the asset host does not
      * serve -- `wtf/config.wtf` 404s -- so this is an inference from the client's Lua, not a read.)
      */
+    /**
+     * THE WORLD MAP'S FOUR, and the first one was an ARITHMETIC ERROR on the owner's SHIFT-M:
+     *
+     *     binding TOGGLEWORLDMAPSIZE (SHIFT-M, down): WorldMapFrame.lua:2139:
+     *         attempt to perform arithmetic on a nil value (local 'opacity')
+     *
+     * The chain is two lines in the client's own file. `WorldMapFrame_OnEvent`'s `VARIABLES_LOADED`
+     * arm does `WORLDMAP_SETTINGS.opacity = tonumber(GetCVar("worldMapOpacity"))` (`:182`), and an
+     * unset CVar makes that **nil** -- overwriting the literal's own 0. `WorldMap_ToggleSizeDown`
+     * then hands it to `WorldMapFrame_SetOpacity` (`:1409`), which computes
+     * `0.5 + (1.0 - opacity) * 0.5` and raises.
+     *
+     * **And the raise sat between the two `ToggleFrame` calls of `WorldMapFrame_ToggleWindowSize`** --
+     * the first had closed the map and the second never ran, which is exactly what the owner
+     * reported: "карта становится компактнее, но приходится заново открывать её". One nil, two
+     * symptoms.
+     *
+     * THREE OF THE FOUR ARE SOURCED, from the client's own initialiser
+     * (`worldmapframe.lua:61-68`): `WORLDMAP_SETTINGS = { opacity = 0, advanced = nil,
+     * size = WORLDMAP_QUESTLIST_SIZE }`. The `VARIABLES_LOADED` arm overwrites each of those three
+     * fields from a CVar, so the CVar that reproduces the literal IS the default -- `0` for the
+     * opacity, false for `advancedWorldMap`, and false for `miniWorldMap` (whose true branch would
+     * call `WorldMap_ToggleSizeDown` and change the size the literal just set).
+     *
+     * `questPOI` is the one that is TRANSCRIBED rather than derived: nothing in the client's Lua
+     * pins it, the checkbox carries no `checked` attribute, and `Config.wtf` is not served
+     * (`wtf/config.wtf` 404s). `1` is retail's out-of-the-box state and it is what the owner is
+     * trying to see, so it carries the same standing note as `framexml/bindings.ts`'s default keys.
+     */
+    ['worldMapOpacity', '0'],
+    ['advancedWorldMap', '0'],
+    ['miniWorldMap', '0'],
+    ['questPOI', '1'],
+    /**
+     * `showBattlefieldMinimap`, and its ABSENCE left the world map's "Zone Map" dropdown blank.
+     *
+     * The owner: "Вот этот селектор не выбран." `WorldMapZoneMinimapDropDown_Update` sets the label
+     * to `WorldMapZoneMinimapDropDown_GetText(GetCVar("showBattlefieldMinimap"))`
+     * (`worldmapframe.lua:717-720`), and that function compares the value to the STRINGS `"0"`,
+     * `"1"` and `"2"` and **returns nil for anything else** (`:703-714`). An unset CVar is nil, nil
+     * matches none of the three, so the label was set to nil -- an empty dropdown with a working
+     * arrow and a working tooltip, which is exactly what he photographed.
+     *
+     * `"0"` is BATTLEFIELD_MINIMAP_SHOW_NEVER, and it is the right default for the same reason the
+     * three above it are: the initialiser ticks whichever entry equals the CVar (`:656-658`), so the
+     * default has to be one of the three or nothing is selected. Never is retail's own out-of-the-box
+     * state for the battlefield minimap, and this client shows no battlefield minimap at all.
+     *
+     * A STRING and not a number, and that is the whole trap: `value == info.value` compares against
+     * `"0"`, and Lua does not coerce across types -- `0 == "0"` is false. A numeric default here
+     * would look set and behave unset.
+     */
+    ['showBattlefieldMinimap', '0'],
     ['nameplateShowEnemies', '0'],
     ['nameplateShowFriends', '0'],
+    /**
+     * `lastTalkedToGM`, EMPTY -- and its absence put a modal error dialog on the owner's screen.
+     *
+     * `UIParent_OnEvent`'s `VARIABLES_LOADED` arm reads it and branches on
+     * `if ( lastTalkedToGM ~= "" )` (`uiparent.lua:471`), taking the branch that calls
+     * `GMChatFrame_LoadUI()` -> `UIParentLoadAddOn("Blizzard_GMChatUI")`. **In Lua `nil ~= ""` is
+     * TRUE**, so an ABSENT CVar takes the same branch a real conversation with a GM would, on every
+     * login -- and the popup reading "Couldn't load Blizzard_GMChatUI: Unknown load problem" was
+     * photographed on a live login before this line existed.
+     *
+     * The empty string is the game's own default and the comparison is the evidence for it: the client
+     * would not test a CVar against `""` unless `""` were its unset value. Seeding it is what makes the
+     * branch behave as it does in a real client -- not taken.
+     *
+     * This is why an unknown-CVar nil is dangerous rather than harmless, and it qualifies the paragraph
+     * above about `nil` being the faithful answer for an unknown name: it is faithful for a name the
+     * client does not know, and WRONG for one it does.
+     */
+    ['lastTalkedToGM', ''],
+    /**
+     * THE TWO STAT-PANE CATEGORIES, EMPTY -- and their absence is the whole of "I don't see character
+     * stats under the preview and don't see options in selects there".
+     *
+     * Exactly the `lastTalkedToGM` case above, with the comparison the other way round.
+     * `PaperDollFrame_OnEvent`'s `VARIABLES_LOADED` arm is
+     * `if ( GetCVar("playerStatLeftDropdown") == "" or GetCVar("playerStatRightDropdown") == "" ) then`
+     * and its body picks the defaults per CLASS -- `PLAYERSTAT_BASE_STATS` on the left, and on the
+     * right `PLAYERSTAT_SPELL_COMBAT` for a mage/priest/warlock/druid, `PLAYERSTAT_RANGED_COMBAT` for a
+     * hunter, `PLAYERSTAT_MELEE_COMBAT` for everyone else (`paperdollframe.lua:161-174`).
+     *
+     * **In Lua `nil == ""` is FALSE**, so an absent CVar skipped that whole block: neither category was
+     * ever chosen, and `UpdatePaperdollStats(prefix, index)` is a five-way `if index == "PLAYERSTAT_*"`
+     * chain with **no else** (`:1680`), so every branch was skipped and both panes kept their authored
+     * placeholders. The same nil then went to `UIDropDownMenu_SetSelectedValue`, which is why the two
+     * category selects read blank as well -- one cause, three symptoms.
+     *
+     * The empty string is the game's own default and the client's own `== ""` test is the evidence, the
+     * same argument `lastTalkedToGM` above is seeded on. Seeding is all that is needed: **the client
+     * picks the actual categories itself**, per class, which is why nothing here names a category.
+     */
+    ['playerStatLeftDropdown', ''],
+    ['playerStatRightDropdown', ''],
+    /**
+     * `showNewbieTips`, "1" -- THE GAME'S OWN DEFAULT, and its absence was why the experience bar had
+     * no tooltip.
+     *
+     * `interfaceoptionsframe.lua:310` is the source and it gives both halves:
+     *
+     *     ["SHOW_NEWBIE_TIPS"] = { default = "1", cvar = "showNewbieTips", event = "SHOW_NEWBIE_TIPS_TEXT" }
+     *
+     * `world-runtime.ts` already sets the uvar `SHOW_NEWBIE_TIPS` to "1" before the load -- but
+     * `BlizzardOptionsPanel_SetupControl` then does `_G[control.uvar] = GetCVar(control.cvar)`
+     * (`optionspaneltemplates.lua:373-380`) on `PLAYER_ENTERING_WORLD`, and with this CVar unknown that
+     * **overwrote the "1" with nil.** MEASURED live: `SHOW_NEWBIE_TIPS` read nil in the world.
+     *
+     * What that cost: `MainMenuExpBar`'s `<OnEnter>` ends in
+     * `GameTooltip_AddNewbieTip(self, XPBAR_LABEL, 1, 1, 1, NEWBIE_TOOLTIP_XPBAR, 1)`
+     * (`mainmenubar.xml:46-52`), and the trailing `1` is `noNormalText` -- so in the `~= "1"` branch
+     * `GameTooltip_AddNewbieTip` shows NOTHING AT ALL (`gametooltip.lua:199-215`). The owner's "missing
+     * tooltip on exp bar" is exactly that branch. The same nil silenced every micro button, which is
+     * the case `world-runtime.ts` reasoned its way to before this CVar existed -- correctly, and now
+     * with a real source instead of an inference.
+     */
+    ['showNewbieTips', '1'],
+    /**
+     * `buffDurations` -- whether the buff icons carry a "2m" line under them.
+     *
+     * `interfaceoptionsframe.lua:312` is the source and gives both halves:
+     *
+     *     ["SHOW_BUFF_DURATIONS"] = { default = "0", cvar = "buffDurations", event = "SHOW_BUFF_DURATION_TEXT" }
+     *
+     * It is here for the reason `showNewbieTips` is: `BlizzardOptionsPanel_SetupControl` runs
+     * `_G[control.uvar] = GetCVar(control.cvar)` on `PLAYER_ENTERING_WORLD`
+     * (`optionspaneltemplates.lua:373-380`), so an unknown CVar OVERWRITES the uvar with nil.
+     * `SHOW_BUFF_DURATIONS` nil and `SHOW_BUFF_DURATIONS == "0"` happen to take the same branch
+     * everywhere in `buffframe.lua`, so this changes no pixel today -- it exists so the value is the
+     * client's own shipped default rather than an accident, and so `BuffFrame_UpdatePositions`'
+     * `BUFF_ROW_SPACING` arm has a defined value to compare.
+     */
+    ['buffDurations', '0'],
   ]);
   CVAR_STORES.set(vm, cvars);
 
@@ -450,7 +617,15 @@ function installCVars(vm: LuaVM): void {
    * answer for a name the config does not know -- rather than echoing the current value, which would make
    * `InterfaceOptionsFrame_LoadUVars`' `cvarValue == setting.default` test always true.
    */
-  const cvarDefaults = new Map<string, string>([['lockactionbars', '0']]);
+  const cvarDefaults = new Map<string, string>([
+    ['lockactionbars', '0'],
+    // `interfaceoptionsframe.lua:310`'s `default = "1"`, the same line the CVar above is seeded from.
+    // `InterfaceOptionsFrame_LoadUVars` compares `cvarValue == setting.default`, so a nil here would
+    // make that test false for a CVar whose value IS the default.
+    ['shownewbietips', '1'],
+    // `interfaceoptionsframe.lua:312`'s `default = "0"`, the same line the CVar above is seeded from.
+    ['buffdurations', '0'],
+  ]);
   vm.registerFunction('GetCVarDefault', (args) => [
     cvarDefaults.get(key(args[0])) ?? null,
   ]);

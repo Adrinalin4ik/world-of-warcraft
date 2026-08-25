@@ -17,12 +17,16 @@ import { pumpProgramWarm, setProgramWarmer } from '../../game/pipeline/program-w
 import { WorldUiHost, wantsLuaUi } from '../../game/ui/world-ui';
 import { LoadingScreen } from '../../game/ui/loading-screen';
 import { WorldCursorDriver } from '../../game/ui/world-cursor';
-import { CURSOR_POINT, classifyUnitCursor, cursorStem } from '../../game/world/cursor-mode';
+import {
+  CURSOR_POINT, classifyUnitCursor, cursorStem, questgiverHasQuest,
+} from '../../game/world/cursor-mode';
 import { pickUnit, pickUnitReport, drawnWorldBox } from '../../game/world/pick';
 import { collisionWorld } from '../../game/collision/collision-world';
 import { CollisionLayer } from '../../game/collision/types';
 import { wantsDebugPanels } from '../debug-flags';
 import { REACTION_NEUTRAL, primeFactionTemplates, reactionFor } from '../../game/world/faction';
+import type World from '../../game/world';
+import type Unit from '../../game/classes/unit';
 
 import './index.scss';
 
@@ -55,7 +59,6 @@ interface IGameScreenState {
 class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private camera: THREE.PerspectiveCamera;
   public debugCamera: THREE.PerspectiveCamera;
-  public cameraHelper: THREE.CameraHelper;
   private prevCameraRotation: THREE.Quaternion = new THREE.Quaternion();
   private prevCameraPosition: THREE.Vector3 = new THREE.Vector3();
   private hasPrevCamera = false;
@@ -159,15 +162,53 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     this.camera.position.set(15, 0, 7);
     this.game.camera = this.camera;
 
-    this.cameraHelper = new THREE.CameraHelper( this.camera );
-    this.game.world.scene.add(this.cameraHelper);
+    // NO `THREE.CameraHelper` HERE. It used to be built for `this.camera` and added to the world
+    // scene unconditionally, and it was the faint one-pixel full-height line down the exact horizontal
+    // centre of the screen that the owner has been looking at. Rendered THROUGH the very camera it
+    // describes, a frustum wireframe degenerates: the eye-to-target and up-vector segments project
+    // onto the centre column and the near/far rectangles land on the clip boundary, so all that
+    // survives is a vertical hairline at width/2, in the world pass (hence under the interface) and in
+    // no UI draw list.
+    //
+    // MEASURED rather than argued: it was the only visible line primitive in the world scene
+    // (`CollisionDebugView` is hidden), and setting `visible = false` on it live removed the line from
+    // a centre-column screenshot crop (`MB9-before.png` / `MB9-after.png`, round 31).
+    //
+    // It was also dead: the field was assigned, added and removed and read nowhere, and `update()` was
+    // never called after construction, so it did not even describe the camera's current frustum. The
+    // debug-camera pair below is still used by the visibility work; only the helper is gone.
     this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
     this.debugCamera.name = 'DebugCamera';
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
   }
   
+/**
+   * `window.perfHud(true|false)` -- the owner asked to toggle the debug panel from the console.
+   *
+   * WHY THIS IS THE ONE WORTH EXPOSING: the panel he screenshots is the perf HUD, and it is where every
+   * frame-budget row lives -- `ui.framexml`, and now `ui.booth` and `ui.sig`, which are the two rows
+   * this round added to find the missing 33 ms. Without a toggle that reading is only available in a
+   * session started with `?debug=true`, which is not the session he plays in.
+   *
+   * It changes NO measurement. `PerfMonitor`'s own doc states it at length and it is worth repeating
+   * where the handle lives: every span, frame and GPU query runs with the HUD off exactly as with it on,
+   * so a number read after toggling is comparable to one captured from boot. The node is built lazily,
+   * so a session that never asked for it has never paid for it.
+   *
+   * Installed and removed with the component, like every other handle here -- see
+   * `componentWillUnmount`'s note on why a `window` handle that outlives its renderer answers about a
+   * disposed one and reads as a live measurement.
+   */
+  private installPerfHudToggle(): void {
+    (window as unknown as Record<string, unknown>).perfHud = (visible = true) => {
+      this.perf.setHudVisible(visible !== false);
+      return visible !== false ? 'perf HUD shown' : 'perf HUD hidden';
+    };
+  }
+
   componentDidMount() {
+    this.installPerfHudToggle();
     const renderer = this.renderer = new THREE.WebGLRenderer({
       // OPAQUE drawing buffer. With `alpha: true` the canvas is composited over the page, and because
       // WebGL also defaults to `premultipliedAlpha: true` the compositor treats our non-premultiplied
@@ -244,6 +285,18 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // THE HOVER CURSOR. On `document.body` because `cursor` is an inherited property and the world
     // canvas, the UI canvas and the debug panel are all its descendants -- one write covers the route.
     this.cursorDriver = new WorldCursorDriver(document.body);
+    /**
+     * REPAINT THE CURSOR WHEN A POINTER LOCK ENDS.
+     *
+     * A custom `url(...)` cursor is repainted only when the pointer moves, so after a mouse-look drag
+     * releases the lock the arrow stays absent until the player happens to move the mouse -- the tail of
+     * the owner's "появляется только когда начинается движение". `controls.tsx` stops the lock being
+     * taken for a CLICK at all; this covers the drag that legitimately took one.
+     *
+     * Removed in `componentWillUnmount` with the rest, for the reason recorded there: a listener holding
+     * `this` after a remount answers about a disposed renderer.
+     */
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
     document.body.addEventListener('pointermove', this.onCursorPointerMove);
     (window as unknown as Record<string, unknown>).worldCursorArt = () =>
       this.cursorDriver?.cursorArtReport() ?? null;
@@ -321,7 +374,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       void this.ui.start().then(() => {
         // AFTER the boot resolves, not on a timer: `start()` resolves once the tree is built, the art
         // is registered and the bridges are attached, which is exactly when the interface can draw.
-        this.dismissLoadingScreen();
+        document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    this.dismissLoadingScreen();
       }).catch((error) => {
         // A boot that fails outright is the one thing `bootWorldRuntime` does not turn into a report
         // line, so it must not vanish into an unhandled rejection. The screen comes down either way --
@@ -420,7 +474,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   }
 
   /** The `window` keys `installPickInstrument` writes, so `componentWillUnmount` can take them back. */
-  private static readonly PICK_INSTRUMENT_KEYS = ['worldPick', 'worldUnits', 'worldCamera'];
+  private static readonly PICK_INSTRUMENT_KEYS = ['worldPick', 'worldUnits', 'worldCamera', 'perfHud'];
 
   private installPickInstrument(): void {
     const flags = window as unknown as Record<string, unknown>;
@@ -521,6 +575,13 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   // -- The hover cursor -----------------------------------------------------------------------------
 
   private cursorDriver: WorldCursorDriver | null = null;
+
+  /** See the listener's own note where it is registered. */
+  private readonly onPointerLockChange = () => {
+    if (document.pointerLockElement === null) {
+      this.cursorDriver?.refresh();
+    }
+  };
 
   /**
    * The last pointer position in CLIENT pixels, or null before the pointer has moved.
@@ -633,12 +694,18 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       stats.reason = 'held';
       stats.stem = 'Point';
       driver.reset();
+      // Nothing is hovered while an ability or an item is on the cursor, so nothing stays lit. Beside
+      // `driver.reset()` because it answers the same question the cursor just answered.
+      this.game.world.setHovered(null);
       return;
     }
     if (pointer === null || this.ui?.pointerWidget) {
       stats.reason = pointer === null ? 'nopointer' : 'widget';
       stats.stem = 'Point';
       driver.reset();
+      // The pointer left the world (onto a frame, or off the window): the unit under it stops being
+      // hovered, so the brighten drops. Without this a unit would stay lit behind an open panel.
+      this.game.world.setHovered(null);
       return;
     }
 
@@ -668,8 +735,16 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
         // non-skinner gets NO knife, so false is the arm that shows nothing rather than the arm that
         // shows a knife a click cannot honour.
         knowsSkinning: false,
+        // THE QUESTGIVER LEG'S GATE, off the same status map the overhead markers read. See
+        // `cursor-mode.ts#questgiverHasQuest`: this used to be hard-coded false and a QUESTGIVER-only
+        // NPC was unclickable as a result.
+        questgiverHasQuest: this.questgiverHasQuest(hit),
       }) ?? CURSOR_POINT;
     }
+    // THE MOUSEOVER MODEL BRIGHTEN, off the pick this method already made -- a second consumer of one
+    // pick rather than a second pick. `World#setHovered` is idempotent, so a cadence tick that lands
+    // on the same unit costs one reference compare. See `world/hover-highlight.ts`.
+    this.game.world.setHovered(hit);
     stats.reason = hit === null ? 'nopick' : '';
     stats.stem = cursorStem(mode);
     driver.apply(mode);
@@ -681,6 +756,25 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     }
     const world = this.game.world;
     const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
+    /**
+     * A WORLD OBJECT IS NOT A TARGET, and this is the owner's "их почему-то можно выделить".
+     *
+     * `setTarget` on a bucket put it in the target frame, and it read **Dead** -- which is the tell for
+     * what was actually wrong. A GameObject has no `fields`, so its health is 0 against a 0 max and
+     * `isDead` is true; the frame was faithfully reporting a unit that does not exist. Nothing about an
+     * object belongs in a unit frame, and the real client does not target one either.
+     *
+     * USING it on a left click is the other half: the hand cursor is a promise, and
+     * `classifyUnitCursor` has already applied the reference's flag gate and the range test to make it.
+     * A click that shows a hand and does nothing is the same defect as a Continue button that sends
+     * nothing.
+     */
+    if (hit?.gameObject) {
+      // `open`, not `use`: a LOCKED object is opened by casting at it and ignores `CMSG_GAMEOBJ_USE`
+      // entirely -- see `network/game/object/game-object.ts#open`.
+      this.game.objectHandler.gameObjectHandler.open(hit.guid, hit.gameObject.entry);
+      return;
+    }
     world.setTarget(hit);
   };
 
@@ -694,9 +788,11 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    *
    * The reaction gate is `UnitCanAttack`'s and it INCLUDES NEUTRAL -- `benilla/src/target/click.rs:98`
    * gives the Attack cursor as "alive + reaction <= neutral". A critter or an unaggressive beast is
-   * attackable and simply does not fight back; only a FRIENDLY unit is not. A friendly NPC's right
-   * click is an INTERACT in the real client (gossip, vendor, flight master), which this client has no
-   * wire path for at all -- so it does nothing here rather than swinging at a guard.
+   * attackable and simply does not fight back; only a FRIENDLY unit is not.
+   *
+   * A FRIENDLY NPC'S RIGHT CLICK IS AN INTERACT, and this method used to end by saying that "this
+   * client has no wire path for at all". It has one now -- see `interactCommand` -- so the sentence is
+   * replaced rather than left standing over working code.
    */
   private onWorldRightClick = (ndc: { x: number; y: number }) => {
     if (this.ui?.pointerWidget) {
@@ -705,6 +801,22 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     const world = this.game.world;
     const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
     if (!hit) {
+      return;
+    }
+    /**
+     * THE OBJECT LEG COMES FIRST, and it has to -- this is the owner's "правой кнопкой мыши активация
+     * не происходит. То есть залутать я не могу."
+     *
+     * The `dead` branch below was swallowing it. A GameObject has no `fields`, so health 0 against a 0
+     * max makes `isDead` true; the right click therefore took the CORPSE-loot leg, found
+     * `dynamicFlags` 0 (there are no flags either), and **returned** -- so `interactWith` was never
+     * reached and the bucket did nothing. Every piece downstream was correct and unreachable.
+     *
+     * It also must precede `setTarget`, for the reason the left-click handler above now records: an
+     * object is not a target and reads as a dead unit in the frame if it becomes one.
+     */
+    if (hit.gameObject) {
+      this.game.objectHandler.gameObjectHandler.open(hit.guid, hit.gameObject.entry);
       return;
     }
     world.setTarget(hit);
@@ -727,8 +839,92 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     const reaction = reactionFor(hit, world.player);
     if (reaction !== null && reaction <= REACTION_NEUTRAL) {
       this.game.objectHandler.combatHandler.startAttack(hit.guid);
+      return;
     }
+    this.interactWith(hit, world);
   };
+
+  /**
+   * THE QUESTGIVER LEG'S GATE for one unit -- the input `classifyUnitCursor` cannot fetch itself.
+   *
+   * `QuestHandler#status` is the guid -> `DIALOG_STATUS` map the two `SMSG_QUESTGIVER_STATUS*` opcodes
+   * fill, and it is the same map `world/quest-markers.ts` draws the overhead `!`/`?` from -- so the
+   * cursor and the marker now read one source. The predicate itself lives in `cursor-mode.ts` beside the
+   * ladder it gates; this method only supplies the lookup.
+   *
+   * **One helper for both call sites on purpose.** The hover cursor and `interactWith` must pass the
+   * SAME value or the pointer promises a conversation the click declines, which is the failure this
+   * whole change fixes -- with the two disagreeing instead of both saying no.
+   *
+   * Cost: one `Map#get` on the hover cadence and one per interact click. The map holds the questgivers
+   * in range, a handful.
+   */
+  private questgiverHasQuest(unit: Unit): boolean {
+    return questgiverHasQuest(this.game.objectHandler.questHandler.status.get(unit.guid));
+  }
+
+  private interactWith(hit: Unit, world: World) {
+    const distanceSq = hit.position.distanceToSquared(world.player.position);
+    const mode = classifyUnitCursor(hit, world.player, {
+      distanceSq,
+      autoLoot: this.cursorShift,
+      // DECLARED FALSE, as on the hover path: nothing decodes a learned profession. It only affects
+      // the Skin leg, which is not a service and sends nothing here either way.
+      knowsSkinning: false,
+      // The same gate the hover path applies, and it MUST be the same value: this method dispatches
+      // off the classification, so a mismatch here is a cursor that promises a gossip the click
+      // refuses. That is why both sites go through one helper.
+      questgiverHasQuest: this.questgiverHasQuest(hit),
+    });
+    if (mode === null || mode.unable) {
+      return;
+    }
+    const handlers = this.game.objectHandler;
+    /**
+     * A WORLD OBJECT: `CMSG_GAMEOBJ_USE`, and nothing else needs building behind it.
+     *
+     * Answered before the kind switch because the kind is not what distinguishes it -- `Interact` is
+     * also an npc leg -- while `gameObject` being non-null is exactly "this is an object". The
+     * classifier has already applied the reference's flag gate and the range test, so reaching here
+     * means the object is usable and in reach.
+     *
+     * The guid, not the entry: the query is keyed on the template and names a KIND of bush, this names
+     * the one in front of the player. See `network/game/object/game-object.ts`.
+     *
+     * What comes back is already handled: `SMSG_LOOT_RESPONSE` for a bush, which `object/loot.ts` and
+     * `ui/loot-bridge.ts` already decode and draw, preceded by `SMSG_SPELL_START` when the object has an
+     * opening cast, which `ui/action-bridge.ts` already feeds to `CastingBarFrame`.
+     */
+    if (hit.gameObject !== null) {
+      handlers.gameObjectHandler.use(hit.guid);
+      return;
+    }
+    switch (mode.kind) {
+      case 'Pickup':
+        // A VENDOR-ONLY NPC. `Pickup` is also the lootable-corpse mode, but a corpse never reaches
+        // here -- the dead branch above returns first, which is the same ordering the reference notes.
+        handlers.merchantHandler.listInventory(hit.guid);
+        break;
+      case 'Speak':
+      case 'Interact':
+      case 'Buy':
+      case 'Trainer':
+        // Gossip, questgiver, innkeeper, banker, auctioneer, trainer. The banker's and trainer's own
+        // windows are separate arcs; the generic hello is faithful and shows whatever menu the server
+        // has, which for most vendors in the game includes "Let me browse your goods".
+        handlers.gossipHandler.hello(hit.guid);
+        break;
+      case 'Taxi':
+        // The flight master. `CMSG_TAXIQUERYAVAILABLENODES` and the taxi map are their own arc, and the
+        // gossip taxi option reaches the same place server-side -- so the hello is the honest send
+        // here rather than nothing.
+        handlers.gossipHandler.hello(hit.guid);
+        break;
+      default:
+        // `Point`, `Attack`, `Skin`, `LootAll` -- not services. Attack was handled above.
+        break;
+    }
+  }
 
   /**
    * Everything this component put somewhere that outlives it.
@@ -773,7 +969,6 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // it, and its own `dispose` deliberately does NOT free the renderer it was merely lent.
     this.ui?.dispose();
     this.ui = null;
-    this.game.world.scene.remove(this.cameraHelper);
     this.stats?.dom.parentNode?.removeChild(this.stats.dom);
     this.renderer?.dispose();
     this.debugRenderer?.dispose();

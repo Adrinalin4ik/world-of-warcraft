@@ -11,28 +11,71 @@
  *
  * WHAT IS AND IS NOT REAL HERE. The VALUES are real: a scroll offset, a range, a slider's
  * value/min/max/step are all stored per frame and read back exactly, which is all the client's Lua
- * does with them (disable an arrow at the end of the range, clamp a value, size a child). The
- * PIXELS are not: nothing in `widget.ts` clips a frame's children, so an offset scroll child would
- * draw outside its viewport rather than being scrolled inside it, and nothing draws a slider track
- * or moves a thumb. So the child is deliberately NOT moved, and `loader.ts#applyPerKind` carries one
- * report line per class saying exactly that -- an honest gap in the report beats a screen with
- * content spilling out of every scroll box.
+ * does with them (disable an arrow at the end of the range, clamp a value, size a child).
+ *
+ * **THE CLIPPING HALF OF THIS PARAGRAPH IS NO LONGER TRUE, and it predicted its own defect.** It used
+ * to read "nothing in `widget.ts` clips a frame's children, so an offset scroll child would draw
+ * outside its viewport rather than being scrolled inside it ... an honest gap in the report beats a
+ * screen with content spilling out of every scroll box." The trainer round then measured exactly that
+ * spill -- a rank string beginning at x=295 inside a 296-wide viewport, drawn in full where the real
+ * client clips it. `widget.ts#clipItem` clips now, keyed off `Widget#clippedBy` which `SetScrollChild`
+ * below sets, and the draw list gets SHORTER for it (63 items to 18 on a 60-row list in a 220-unit
+ * viewport).
+ *
+ * What is still absent is the SLIDER's pixels: nothing moves a thumb along its track, so a scrollbar's
+ * thumb sits where its XML anchors put it. `loader.ts#applyPerKind` carries that one report line, and
+ * only that one -- the clipping line is gone from it in spirit and the wording there says so.
  *
  * `GetVerticalScrollRange` is DERIVED, not stored: the scroll child's height minus the viewport's,
  * floored at zero. That is the engine's own definition, it is truthful for a runtime with no scroll
  * child (0 -- there is nothing to scroll), and it is the value the `floor(yrange) == 0` branch in
  * `GlueScrollFrame_OnScrollRangeChanged` needs in order to hide a scrollbar that is not needed.
  *
- * NO EVENT DISPATCH from these setters, though the engine has some. Real `SetValue` fires
- * `OnValueChanged` and real `SetVerticalScroll` fires `OnVerticalScroll`, and both of those handlers
- * read their argument as a NAMED PARAMETER in the client's own XML (`GlueScrollBarTemplate`'s
- * `<OnValueChanged>` is `self:GetParent():SetVerticalScroll(value)`). `lua/scripts.ts` compiles a
- * handler body as `function(self, ...)`, so `value` would resolve to a nil global and the dispatch
- * would push nil straight back through this file. That is the same convention gap `runtime.ts`
- * declines to fire `OnUpdate` over; firing here would be the same mistake in a smaller place.
+ * **THIS HEADER USED TO SAY THESE SETTERS FIRE NOTHING, and that rationale is now STALE** -- the same
+ * class of defect as `api/secure.ts`'s header, which claimed a live subsystem was missing. It argued
+ * that a handler reading `value` as a NAMED PARAMETER would see a nil global because `lua/scripts.ts`
+ * compiles bodies as `function(self, ...)`. That is no longer true: `scripts.ts:135` binds
+ * `['value']` for `OnValueChanged` and `:141` binds `['offset']` for `OnVerticalScroll`, and
+ * `methods/statusbar.ts:148-151` has been dispatching `OnValueChanged` this way all along -- which is
+ * how every unit frame's health bar updates.
+ *
+ * So `SetValue` DOES fire `OnValueChanged` now, and not firing it was the whole of "скролла у нас нет"
+ * being more than cosmetic: `FauxScrollFrameTemplate`'s scrollbar carries
+ * `<OnValueChanged>FauxScrollFrame_OnVerticalScroll(...)</OnValueChanged>`, and its arrow buttons do
+ * nothing but `scrollBar:SetValue(scrollBar:GetValue() -/+ scrollBar:GetValueStep())`. Without the
+ * dispatch, an arrow click moved a number and **nothing re-rendered the list** -- so no scroll frame in
+ * the client could be scrolled at all, not just the Skills tab.
+ *
+ * **`SetVerticalScroll` FIRES `OnVerticalScroll` NOW, and declining to was wrong for the case that
+ * matters.** The previous note here reasoned that dispatching would "announce a scroll that did not
+ * happen" because this file does not move the scroll child. That is true of a real scroll frame and
+ * FALSE of a FAUX one -- and every scrolling list in this client is faux. The whole point of
+ * `FauxScrollFrameTemplate` is that no child moves: the handler recomputes a ROW OFFSET and re-renders.
+ *
+ * The chain, end to end, from the client's own files:
+ *
+ *   1. arrow `<OnClick>`  -> `scrollBar:SetValue(GetValue() -/+ GetValueStep())`
+ *   2. slider `<OnValueChanged>` -> `self:GetParent():SetVerticalScroll(value)`   uipaneltemplates.xml:203-205
+ *   3. scroll frame `<OnVerticalScroll>` -> `FauxScrollFrame_OnVerticalScroll(self, offset, ...)`
+ *                                                                              skillframe.xml:508-510
+ *   4. that sets `self.offset = floor(value / itemHeight + 0.5)` and calls the update function
+ *                                                                        uipaneltemplates.lua:236-243
+ *   5. `SkillFrame_UpdateSkills` re-reads `FauxScrollFrame_GetOffset` and repaints the rows
+ *
+ * Step 3 was the break. Steps 1 and 2 already worked once `SetValue` dispatched, so the value moved and
+ * **no row ever repainted** -- which is exactly "скрол не работает", reported twice, on Skills AND
+ * Reputation, because both are faux frames going through this same step.
+ *
+ * NO INFINITE LOOP, and it is worth stating because the chain is genuinely circular: step 4 ends in
+ * `scrollbar:SetValue(value)`, which re-enters step 1. Both setters here dispatch ONLY on a real change,
+ * so the second pass finds the value already stored and stops. That guard is load-bearing, not tidiness.
  */
 import { MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
+import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { widgetOf } from './region';
+import { layoutRectOf } from '../../../rects';
+import { layoutRevision } from '../../../widget';
+import type { Widget } from '../../../widget';
 
 interface ScrollState {
   vertical: number;
@@ -57,6 +100,10 @@ const sliderStates = new Map<number, SliderState>();
 onFrameTeardown((_ctx, id) => {
   scrollStates.delete(id);
   sliderStates.delete(id);
+  scrollRanges.delete(id);
+  // A rebuilt screen must re-announce: the revision is a global counter, so without this a new runtime
+  // whose tree happens to settle at the same revision would never fire its first range.
+  reconciledAt = -1;
 });
 
 function scrollState(self: number): ScrollState {
@@ -85,16 +132,163 @@ function sliderState(self: number): SliderState {
  * Zero with no scroll child, which is both the honest answer and the one that makes the client's
  * `floor(yrange) == 0` branch hide a scrollbar for content that does not overflow.
  */
-function rangeOf(ctx: MethodContext, self: number, axis: 'height' | 'width'): number {
+/**
+ * The scroll child's content size on BOTH axes, in ONE walk.
+ *
+ * **This was two walks and it was 40.4 ms of a 43.5 ms frame.** `reconcileScrollRanges` called a
+ * per-axis version twice per scroll frame, and each call recursed the child's whole subtree calling
+ * `layoutRectOf` on every node -- so a registered scroll frame cost two full subtree traversals every
+ * frame, whether it was on screen or not. In a 4211-frame tree with the quest log, the spellbook, the
+ * talent frame and the chat frames all holding scroll children, that is the whole frame budget.
+ *
+ * Measured, not guessed: the owner's HUD read `ui.scroll` **40.4 ms** against `ui.rects` 0.0 and
+ * `ui.hit` 0.0, after three of my other hypotheses had each been refuted by their own instrument.
+ *
+ * The walk itself is unchanged -- same `layoutRectOf`, same far-edge maximum, same
+ * `Math.max(child[axis], far - start)` result on each axis. Only the number of traversals changed.
+ */
+function contentExtents(ctx: MethodContext, child: Widget): { width: number; height: number } {
+  const base = layoutRectOf(child.id);
+  if (base === null) {
+    return { width: child.width, height: child.height };
+  }
+  let farY = base.top + base.height;
+  let farX = base.left + base.width;
+  const walk = (node: Widget): void => {
+    for (const kid of node.children) {
+      const rect = layoutRectOf(kid.id);
+      if (rect !== null) {
+        const bottom = rect.top + rect.height;
+        if (bottom > farY) {
+          farY = bottom;
+        }
+        const right = rect.left + rect.width;
+        if (right > farX) {
+          farX = right;
+        }
+      }
+      walk(kid);
+    }
+  };
+  walk(child);
+  return {
+    width: Math.max(child.width, farX - base.left),
+    height: Math.max(child.height, farY - base.top),
+  };
+}
+
+/**
+ * Is this frame on screen at all -- itself shown, and every ancestor with it?
+ *
+ * `Widget#shown` is the frame's OWN flag, so a shown scroll frame inside a hidden panel still reads
+ * true. `collectButtons` gets effective visibility for free by pruning its walk
+ * (`framexml/tick.ts:234`); this pass iterates a registry rather than walking a tree, so it has to ask.
+ */
+function onScreen(widget: Widget): boolean {
+  for (let node: Widget | null = widget; node !== null; node = node.parent ?? null) {
+    if (!node.shown) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function rangesOf(ctx: MethodContext, self: number): { x: number; y: number } {
   const child = scrollState(self).child;
   if (child === null) {
-    return 0;
+    return { x: 0, y: 0 };
   }
   const childWidget = ctx.registry.widget(child);
   if (childWidget === null) {
-    return 0;
+    return { x: 0, y: 0 };
   }
-  return Math.max(0, childWidget[axis] - widgetOf(ctx, self)[axis]);
+  const content = contentExtents(ctx, childWidget);
+  const frame = widgetOf(ctx, self);
+  return {
+    x: Math.max(0, content.width - frame.width),
+    y: Math.max(0, content.height - frame.height),
+  };
+}
+
+/**
+ * Dispatch `OnVerticalScroll`/`OnHorizontalScroll`, reporting a failure instead of raising.
+ *
+ * `scripts.ts:141-142` binds `['offset']` for both, so the client's own
+ * `FauxScrollFrame_OnVerticalScroll(self, offset, ...)` reads its argument by name. Same treatment
+ * `statusbar.ts#fireValueChanged` gives `OnValueChanged`: a broken handler must not take out the caller,
+ * which here is an arrow-button click.
+ */
+function fireScroll(ctx: MethodContext, self: number, script: string, offset: number): void {
+  const error = invokeScriptHandler(ctx, self, script, [offset]);
+  if (error !== null) {
+    reportScriptError(`${ctx.registry.nameOf(self) ?? `frame ${self}`}: ${script}`, error.message);
+  }
+}
+
+/**
+ * Every frame that has been given a scroll child, and the range each was last told about.
+ *
+ * Keyed by frame ID and cleared by `onFrameTeardown` below -- NOT a bare module `Map` left to leak, which
+ * is the mistake `thumbTextures` made when ids restarted from 1 between registries.
+ */
+const scrollRanges = new Map<number, { x: number; y: number }>();
+
+/** The `layoutRevision()` the ranges were last reconciled at. See `reconcileScrollRanges`. */
+let reconciledAt = -1;
+
+/**
+ * Fire `OnScrollRangeChanged` on any scroll frame whose range has moved.
+ *
+ * **THE ENGINE FIRES THIS FROM ITS LAYOUT PASS and nothing in this client fired it at all**, so
+ * `ScrollFrame_OnScrollRangeChanged` -- the only thing that calls `scrollbar:SetMinMaxValues(0, yrange)`
+ * (`uipaneltemplates.lua:275-285`) -- never ran. A scrollbar with a 0..0 range clamps every `SetValue` to
+ * 0, so the arrows, the drag and the thumb's travel were all dead at once.
+ *
+ * Called once per frame by the UI host, which is our layout pass. **Gated on `layoutRevision()`, so in
+ * steady state it is a single integer comparison for the whole client** -- the walk over a scroll child's
+ * subtree happens only on a frame where something actually moved or resized. Firing Lua per frame
+ * unconditionally is exactly what the offscreen target cannot afford; this fires only on a real change.
+ */
+export function reconcileScrollRanges(ctx: MethodContext): void {
+  const revision = layoutRevision();
+  if (revision === reconciledAt) {
+    return;
+  }
+  reconciledAt = revision;
+  for (const [frameId, last] of scrollRanges) {
+    const widget = ctx.registry.widget(frameId);
+    if (widget === undefined) {
+      continue;
+    }
+    /**
+     * OFF-SCREEN FRAMES ARE SKIPPED, and that is the other half of the 40.4 ms.
+     *
+     * A hidden panel's scroll range cannot be observed by anybody, and it does not need to be computed
+     * early either: showing the panel moves geometry, which bumps `layoutRevision`, so the next tick
+     * reconciles it before the player can interact. Same rule `syncInteractiveArt` states for buttons --
+     * "a hidden frame's state art cannot be observed" -- and the same saving, which here is most of the
+     * registry.
+     *
+     * The last-announced pair is left UNTOUCHED for a skipped frame rather than zeroed: when it comes
+     * back on screen its real range is compared against what it was last told, so a panel that reopens
+     * unchanged re-announces nothing.
+     */
+    if (!onScreen(widget)) {
+      continue;
+    }
+    const { x, y } = rangesOf(ctx, frameId);
+    if (x === last.x && y === last.y) {
+      continue;
+    }
+    last.x = x;
+    last.y = y;
+    const error = invokeScriptHandler(ctx, frameId, 'OnScrollRangeChanged', [x, y]);
+    if (error !== null) {
+      reportScriptError(
+        `${ctx.registry.nameOf(frameId) ?? `frame ${frameId}`}: OnScrollRangeChanged`, error.message,
+      );
+    }
+  }
 }
 
 const SCROLLFRAME: MethodTable = {
@@ -104,6 +298,26 @@ const SCROLLFRAME: MethodTable = {
       throw new Error('SetScrollChild: the scroll child must be a frame');
     }
     scrollState(self).child = id;
+    // Registered for the range pass. Seeded with -1 so the FIRST reconcile always announces, which is
+    // what gives the scrollbar its initial min/max.
+    scrollRanges.set(self, { x: -1, y: -1 });
+    /**
+     * THE CLIP LINK, and it is what makes a real `<ScrollFrame>` behave like one.
+     *
+     * This file's header used to predict the consequence of not having it: "nothing in `widget.ts` clips
+     * a frame's children, so an offset scroll child would draw outside its viewport rather than being
+     * scrolled inside it". The trainer round then measured it -- a rank string beginning at x=295 inside
+     * a 296-wide viewport, which the real client hides by clipping and we drew in full.
+     *
+     * Set on the CHILD, not on the frame: the scrollbar is also a child of the ScrollFrame
+     * (`uipaneltemplates.xml:287`) and lives outside the viewport, so clipping every child would delete
+     * it. Only the one frame `SetScrollChild` names is clipped, which is exactly the engine's rule.
+     */
+    const frame = widgetOf(ctx, self);
+    const child = ctx.registry.widget(id);
+    if (child !== undefined) {
+      child.clippedBy = frame;
+    }
     return [];
   },
   GetScrollChild: (ctx, self) => {
@@ -115,19 +329,37 @@ const SCROLLFRAME: MethodTable = {
   // `SetVerticalScroll(GetVerticalScroll() - height/2)` straight past zero and expects the engine to
   // stop it there, then reads the value back to decide whether to disable the arrow.
   SetVerticalScroll: (ctx, self, args) => {
-    const range = rangeOf(ctx, self, 'height');
-    scrollState(self).vertical = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
+    const range = rangesOf(ctx, self).y;
+    const state = scrollState(self);
+    const wanted = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
+    if (wanted === state.vertical) {
+      // The transition only -- see the header on why this guard stops the circular chain.
+      return [];
+    }
+    state.vertical = wanted;
+    // THE CHILD ACTUALLY MOVES NOW. `drawList` offsets the clipped subtree by this, which is the half of
+    // a real `<ScrollFrame>` this file's header called "a real remaining gap". Inert for a faux frame:
+    // its scroll child has no drawable descendants (see `Widget#scrollOffset`).
+    widgetOf(ctx, self).scrollOffset.y = wanted;
+    fireScroll(ctx, self, 'OnVerticalScroll', wanted);
     return [];
   },
   GetVerticalScroll: (ctx, self) => [scrollState(self).vertical],
-  GetVerticalScrollRange: (ctx, self) => [rangeOf(ctx, self, 'height')],
+  GetVerticalScrollRange: (ctx, self) => [rangesOf(ctx, self).y],
   SetHorizontalScroll: (ctx, self, args) => {
-    const range = rangeOf(ctx, self, 'width');
-    scrollState(self).horizontal = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
+    const range = rangesOf(ctx, self).x;
+    const state = scrollState(self);
+    const wanted = Math.max(0, Math.min(range, Number(args[0] ?? 0)));
+    if (wanted === state.horizontal) {
+      return [];
+    }
+    state.horizontal = wanted;
+    widgetOf(ctx, self).scrollOffset.x = wanted;
+    fireScroll(ctx, self, 'OnHorizontalScroll', wanted);
     return [];
   },
   GetHorizontalScroll: (ctx, self) => [scrollState(self).horizontal],
-  GetHorizontalScrollRange: (ctx, self) => [rangeOf(ctx, self, 'width')],
+  GetHorizontalScrollRange: (ctx, self) => [rangesOf(ctx, self).x],
 
   /**
    * A genuine no-op rather than a stub, and the distinction matters for the report.
@@ -144,13 +376,26 @@ const SCROLLFRAME: MethodTable = {
 const SLIDER: MethodTable = {
   // Clamped, like the scroll offsets above and for the same reason: `GlueScrollFrame_Update` and both
   // arrow-button handlers push the value past an end and read it back.
-  SetValue: (_ctx, self, args) => {
+  SetValue: (ctx, self, args) => {
     const state = sliderState(self);
-    state.value = Math.max(state.min, Math.min(state.max, Number(args[0] ?? 0)));
+    const wanted = Math.max(state.min, Math.min(state.max, Number(args[0] ?? 0)));
+    if (wanted === state.value) {
+      // ON THE TRANSITION ONLY, like `statusbar.ts`: the arrow handlers push a value past an end and
+      // read it back, so an unchanged write is the ordinary case and must not re-run the handler.
+      return [];
+    }
+    state.value = wanted;
+    syncThumb(ctx, self);
+    const error = invokeScriptHandler(ctx, self, 'OnValueChanged', [state.value]);
+    if (error !== null) {
+      reportScriptError(
+        `${ctx.registry.nameOf(self) ?? `frame ${self}`}: OnValueChanged`, error.message,
+      );
+    }
     return [];
   },
   GetValue: (_ctx, self) => [sliderState(self).value],
-  SetMinMaxValues: (_ctx, self, args) => {
+  SetMinMaxValues: (ctx, self, args) => {
     const state = sliderState(self);
     state.min = Number(args[0] ?? 0);
     state.max = Number(args[1] ?? 0);
@@ -158,6 +403,9 @@ const SLIDER: MethodTable = {
     // position outside the range it just declared -- which is exactly what
     // `GlueScrollFrame_OnScrollRangeChanged` is written to avoid doing by hand.
     state.value = Math.max(state.min, Math.min(state.max, state.value));
+    // The RANGE moves the thumb as surely as the value does: `FauxScrollFrame_Update` sets the range
+    // every refresh, and a thumb sized against a stale range would sit at the wrong place.
+    syncThumb(ctx, self);
     return [];
   },
   GetMinMaxValues: (_ctx, self) => {
@@ -169,13 +417,138 @@ const SLIDER: MethodTable = {
     return [];
   },
   GetValueStep: (_ctx, self) => [sliderState(self).step],
-  SetOrientation: (_ctx, self, args) => {
+  SetOrientation: (ctx, self, args) => {
     sliderState(self).orientation =
       String(args[0] ?? '').toUpperCase() === 'HORIZONTAL' ? 'HORIZONTAL' : 'VERTICAL';
+    syncThumb(ctx, self);
     return [];
   },
   GetOrientation: (_ctx, self) => [sliderState(self).orientation],
+
+  /**
+   * `Enable` / `Disable` / `IsEnabled` ON A SLIDER -- and their absence stopped the quest log dead.
+   *
+   * MEASURED, the owner's console after the previous fix let `QuestLog_Update` reach its end:
+   *
+   *     QuestLogFrame: OnShow: [string "HybridScrollFrame.lua"]:99:
+   *     attempt to call a nil value (method 'Disable')
+   *
+   * `:93` and `:99` are `self.scrollBar:Enable()` and `self.scrollBar:Disable()`, and `scrollBar` is a
+   * `<Slider>`. We had these three only on BUTTON (`kinds.ts:492-507`), so every hybrid scroll frame --
+   * the quest log's list among them -- raised inside `HybridScrollFrame_Update`. That call sits inside
+   * `QuestLog_Update`, which `QuestLog_OnShow` runs BEFORE
+   * `QuestLogDetailFrame_AttachToQuestLog()` (`questlogframe.lua:284-296`), so the right page stayed
+   * unattached and blank for the second time from a second missing method on the same path.
+   *
+   * The state WRITE only, without `kinds.ts`' `syncStateTextures`/`applyButtonFont`: those move a
+   * button's state art and its caption, and a slider has neither -- its art is the thumb, which
+   * `drawList` places from `sliderTravel`. `Enable` moves only OFF `disabled`, mirroring the button
+   * version, so it cannot clobber a live press.
+   *
+   * `ui/input.ts` reads the same flag before starting a thumb drag, so a disabled scrollbar is inert to
+   * the mouse as well as to Lua -- otherwise `IsEnabled` would report one thing and the pointer do
+   * another.
+   */
+  Enable: (ctx, self) => {
+    const widget = widgetOf(ctx, self);
+    if (widget.state === 'disabled') {
+      widget.state = 'up';
+    }
+    return [];
+  },
+  Disable: (ctx, self) => {
+    widgetOf(ctx, self).state = 'disabled';
+    return [];
+  },
+  IsEnabled: (ctx, self) => [widgetOf(ctx, self).state !== 'disabled'],
+  /**
+   * `SetThumbTexture` / `GetThumbTexture` -- the draggable part of a scrollbar, and NOTHING created it.
+   *
+   * `<ThumbTexture>` is a first-class XML element on a `<Slider>` and `loader.ts` had no handling for
+   * it at all (its state-texture list covers Normal/Pushed/Disabled/Highlight/Checked and stops). Six
+   * exist in the loaded manifest, and **two of them are in `uipaneltemplates.xml`** -- the scrollbar
+   * template every scroll frame in the client inherits -- so no scrollbar anywhere had a visible thumb.
+   *
+   * The region is created as a child Texture and left for the loader to size and anchor from the
+   * element, exactly as `applyButton` does for its slots. **It is NOT positioned by the slider's
+   * value**: this widget layer models no thumb travel, so the thumb sits where the XML anchors it. That
+   * is a real and stated limit -- the arrows and the mouse wheel scroll correctly through
+   * `OnValueChanged` (see the header), and it is the thumb's POSITION that lags, not the list.
+   */
+  SetThumbTexture: (ctx, self, args) => {
+    const id = ensureThumbTextureId(ctx, self);
+    const region = ctx.registry.widget(id);
+    if (region === undefined) {
+      return [];
+    }
+    const arg = args[0];
+    if (typeof arg === 'string') {
+      region.sprite = arg;
+      region.solid = false;
+    }
+    return [];
+  },
+  GetThumbTexture: (ctx, self) => [ctx.wrapper(ensureThumbTextureId(ctx, self))],
 };
+
+/**
+ * The slider's thumb region, created on first use.
+ *
+ * **A `WeakMap` ON THE WIDGET, not a `Map` on the frame id, and the first version got this wrong.**
+ * Frame ids are minted per REGISTRY and restart from 1, so a module-level id map leaks one runtime's
+ * thumbs into the next one's by number collision -- and a torn-down and rebuilt screen is the ordinary
+ * case here (glue -> world). The stale id then resolves to nothing in the new registry, so the thumb is
+ * never created and the scrollbar has no knob.
+ *
+ * `methods/gametooltip.ts#stateByWidget` records this hazard verbatim for the same reason. Mine
+ * reproduced it: two sliders in one jest file, the second one silently thumbless because the first had
+ * already claimed frame id 1.
+ */
+const thumbTextures = new WeakMap<Widget, number>();
+
+function ensureThumbTextureId(ctx: MethodContext, self: number): number {
+  const slider = widgetOf(ctx, self);
+  let id = thumbTextures.get(slider);
+  if (id === undefined) {
+    id = ctx.registry.create('Texture', null, self);
+    thumbTextures.set(slider, id);
+    // The back-link `drawList` needs to place it. A thumb's position is the engine's to choose --
+    // `<ThumbTexture>` carries no `<Anchors>` at all -- so it must not be left to the loader's
+    // anchorless fill, which gave it the whole track's rect.
+    const thumb = ctx.registry.widget(id);
+    if (thumb !== undefined) {
+      thumb.thumbOf = slider;
+    }
+    /**
+     * THE DRAG'S WAY BACK INTO LUA. `ui/input.ts` owns the gesture -- no `<Slider>` in the client binds
+     * a press-and-move handler, so it is the engine's, like a model pane's spin -- and this is the only
+     * thing it calls. Routed through `SLIDER.SetValue` rather than writing `state.value`, so the drag
+     * gets the same clamp, the same `syncThumb` and the same `OnValueChanged` dispatch as an arrow
+     * click; writing the state directly would move the knob and tell the scroll frame nothing.
+     *
+     * `step` is honoured because `SetValue` is: the client sets one on faux lists
+     * (`FauxScrollFrame_Update`'s `valueStep`), and a drag that ignored it would land between rows.
+     */
+    slider.onSliderDrag = (fraction) => {
+      const state = sliderState(self);
+      const wanted = state.min + fraction * (state.max - state.min);
+      const snapped = state.step > 0 ? Math.round(wanted / state.step) * state.step : wanted;
+      SLIDER.SetValue?.(ctx, self, [snapped]);
+    };
+  }
+  return id;
+}
+
+/** Recompute where the thumb sits, from the live value and range. See `Widget#sliderTravel`. */
+function syncThumb(ctx: MethodContext, self: number): void {
+  const state = sliderState(self);
+  const span = state.max - state.min;
+  const widget = widgetOf(ctx, self);
+  widget.sliderTravel.fraction = span > 0
+    ? Math.max(0, Math.min(1, (state.value - state.min) / span))
+    : 0;
+  widget.sliderTravel.vertical = state.orientation === 'VERTICAL';
+}
 
 registerMethods('SCROLLFRAME', SCROLLFRAME);
 registerMethods('SLIDER', SLIDER);

@@ -314,7 +314,10 @@ async function loadLayerSource(layer: BodyLayer): Promise<BlpSpec | null> {
       // cannot be composited until the LAST of them arrives -- so one layer stuck behind a
       // terrain burst holds the whole bake, and the character stands in his base skin until it
       // clears. See `worker/pool.js#PRIORITY`.
-      const spec = (await WorkerPool.enqueueAt(
+      // QUIET: the gendered name missing is the normal path to the `_U` file, said two lines down,
+      // and the pool logged a stack trace for it twice per miss. `enqueueQuietAt` silences the log
+      // and nothing else -- the loop below still falls through exactly as before.
+      const spec = (await WorkerPool.enqueueQuietAt(
         PRIORITY.CHARACTER, 'BLP', candidate.toUpperCase(), true,
       )) as
         | BlpSpec

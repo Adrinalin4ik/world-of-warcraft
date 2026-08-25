@@ -83,6 +83,24 @@ export interface SkillLineRow {
   /** 7 is the CLASS-skill category -- the spellbook's tabs. See the header for the whole partition. */
   categoryID: number;
   name: string;
+  /**
+   * `SkillLine.dbc`'s own description column, field **20** -- what the Skills tab's DETAIL pane prints
+   * under the selected row.
+   *
+   * The owner sent a screenshot of the real client to compare against: selecting a skill reproduces its
+   * row in the lower pane WITH a paragraph beneath it, and ours printed nothing. That pane is not an
+   * artifact to remove -- it is `SkillDetailFrame_SetStatusBar` working with an empty body, because
+   * `GetSkillLineInfo`'s THIRTEENTH return was missing.
+   *
+   * MEASURED on the served file: `skillline.dbc` is `recordCount 150`, `fieldCount 56`,
+   * `recordSize 224`, `stringBlockSize 5151`, and `20 + 150*224 + 5151 = 38771` -- the exact file size.
+   * Field 3 is the name, field 20 the description, field 37 the icon, which is what the entity already
+   * declares. Read back: `95 Defense -> "Higher defense improves your chance to dodge, parry, and
+   * block."`, `356 Fishing -> "Higher fishing skill increases your chance of catching fish"`,
+   * `777 Mounts -> "Your mounts."`. Not every line has one -- a spell-tab line often does not -- so an
+   * empty string is a real answer and not a miss.
+   */
+  description: string;
   /** `SpellIcon.dbc` id, which is why `spellData.icon()` resolves a tab's texture. */
   spellIconID: number;
 }
@@ -94,6 +112,39 @@ export interface SkillLineRow {
  * his three book tabs and his category-6/8 lines (Axes, Maces, Mail, Shield) are correctly not tabs.
  */
 export const SKILL_CATEGORY_CLASS = 7;
+
+/**
+ * One `SkillLineCategory.dbc` row -- the SKILLS TAB's header rows.
+ *
+ * MEASURED on the served file (`dbfilesclient/skilllinecategory.dbc`, 200, 740 bytes):
+ * `recordCount 8`, `fieldCount 19`, `recordSize 76`. Layout `id`, `name` (16 locales + a flags word
+ * = 17), `sortIndex` -- `1 + 17 + 1 = 19`, so it closes with nothing left over, which is the
+ * strongest check a DBC layout gets. The entity definition already existed and already matched
+ * (`wow-data-parser/dbc/entities/skill-line-category.js`).
+ *
+ * The eight rows, verbatim, with their sort index:
+ *
+ *     5  Attributes           1        9  Secondary Skills     4
+ *     7  Class Skills         2        6  Weapon Skills        5
+ *     11 Professions          3        8  Armor Proficiencies  6
+ *                                      10 Languages            7
+ *                                      12 Not Displayed        8
+ *
+ * **`sortIndex` is what orders the Skills tab's headers**, and it is the game's own answer to a
+ * question this file's header records as unsourced for the SPELLBOOK's tabs -- those are the order of
+ * LINES inside one category, which this column does not give. Different question, still open there.
+ *
+ * **Category 12 is excluded by its own name**: "Not Displayed". Not a rule invented here.
+ */
+export interface SkillCategoryRow {
+  id: number;
+  name: string;
+  /** 1-based display order. See the table above. */
+  sortIndex: number;
+}
+
+/** The category whose own name is "Not Displayed" -- excluded from the Skills tab. */
+export const SKILL_CATEGORY_HIDDEN = 12;
 
 class SkillData {
   /** `SkillLine.dbc` id -> the row. */
@@ -113,6 +164,9 @@ class SkillData {
    * spell being grouped is one this character actually knows.
    */
   private lineOfSpell: Map<number, number> | null = null;
+
+  /** `SkillLineCategory.dbc` id -> the row. The Skills tab's header rows. */
+  private categories: Map<number, SkillCategoryRow> | null = null;
 
   private pending: Promise<void> | null = null;
 
@@ -141,10 +195,26 @@ class SkillData {
   }
 
   private async load(): Promise<void> {
-    const [lines, abilities] = await Promise.all([
+    const [lines, abilities, categories] = await Promise.all([
       DBC.load('SkillLine'),
       DBC.load('SkillLineAbility'),
+      // 740 bytes. Added for the SKILLS TAB, whose header rows are these eight names in this column's
+      // own order -- see `SkillCategoryRow`. The spellbook does not read it.
+      DBC.load('SkillLineCategory'),
     ]);
+
+    this.categories = new Map<number, SkillCategoryRow>();
+    for (const record of (categories as any).records ?? []) {
+      if (!record || typeof record.id !== 'number') {
+        continue;
+      }
+      this.categories.set(record.id, {
+        id: record.id,
+        name: typeof record.name === 'string' ? record.name : '',
+        // `order` is the entity's name for the column; `sortIndex` is what it means.
+        sortIndex: record.order ?? 0,
+      });
+    }
 
     this.lines = new Map<number, SkillLineRow>();
     for (const record of (lines as any).records ?? []) {
@@ -156,6 +226,8 @@ class SkillData {
         categoryID: record.categoryID ?? 0,
         // `LocalizedStringRef` returns locale 0, which is enUS on the served files.
         name: typeof record.name === 'string' ? record.name : '',
+        // Decoded by the entity all along and dropped here until the detail pane needed it.
+        description: typeof record.description === 'string' ? record.description : '',
         spellIconID: record.spellIconID ?? 0,
       });
     }
@@ -187,6 +259,25 @@ class SkillData {
 
   line(id: number): SkillLineRow | null {
     return this.lines?.get(id) ?? null;
+  }
+
+  /** One category row, or null before the tables land. */
+  category(id: number): SkillCategoryRow | null {
+    return this.categories?.get(id) ?? null;
+  }
+
+  /**
+   * Every DISPLAYABLE category, in the game's own `sortIndex` order.
+   *
+   * Category 12 is dropped by its own name ("Not Displayed") -- see `SKILL_CATEGORY_HIDDEN`.
+   */
+  displayCategories(): SkillCategoryRow[] {
+    if (this.categories === null) {
+      return [];
+    }
+    return [...this.categories.values()]
+      .filter((row) => row.id !== SKILL_CATEGORY_HIDDEN)
+      .sort((a, b) => a.sortIndex - b.sortIndex);
   }
 }
 

@@ -18,15 +18,59 @@
  * changed nothing about how `/` behaves.
  */
 import { keyToken } from './framexml/bindings';
-import { focusChain, hitTest, nextFocus } from './hit';
+import { focusChain, hitTest, wheelTargetAt, nextFocus, paneAt, sliderThumbAt } from './hit';
+import { layoutRectOf } from './rects';
 import { viewportUnits } from './layout';
-import { DrawItem, Widget } from './widget';
+import { DrawItem, MouseButtonName, Widget } from './widget';
+import type { ModelRig } from './scene/scene-rig';
+
+/**
+ * The default click registration: a Button that never called `RegisterForClicks` takes the LEFT button
+ * only, which is the engine's own default. See `Widget#clickButtons`.
+ */
+const LEFT_ONLY: ReadonlySet<MouseButtonName> = new Set<MouseButtonName>(['LeftButton']);
+
+/**
+ * A DOM `PointerEvent#button` as FrameXML names it.
+ *
+ * The DOM order is 0 left, 1 MIDDLE, 2 RIGHT -- middle and right are not adjacent to left in the order
+ * a reader expects, and getting that backwards would send every right-click to the middle button. 3 and
+ * 4 are the back/forward buttons, which FrameXML calls `Button4`/`Button5`. Anything else is reported as
+ * the left button, since the alternative is a click that silently does nothing.
+ */
+function buttonName(event: PointerEvent): MouseButtonName {
+  switch (event.button) {
+    case 2: return 'RightButton';
+    case 1: return 'MiddleButton';
+    case 3: return 'Button4';
+    case 4: return 'Button5';
+    default: return 'LeftButton';
+  }
+}
 
 /**
  * How close two clicks have to be to count as a double click. OURS: the real client reads the host's
  * double-click interval, and a browser exposes no such setting -- `dblclick` has its own hidden one.
  */
 const DOUBLE_CLICK_MS = 500;
+
+/**
+ * How far the mouse turns a model pane, in RADIANS PER LOGICAL UNIT of horizontal travel.
+ *
+ * DERIVED from the client's own drag rate and not chosen: `CHARACTER_ROTATION_CONSTANT = 0.6`
+ * (characterselect.lua:4) is what `CharacterSelectFrame_OnUpdate` multiplies the cursor's horizontal
+ * travel by, and the value it feeds is `SetCharacterSelectFacing`, which is in DEGREES
+ * (`api/characters.ts:142-148`: "as radians the same drag would be 57 revolutions"). A model frame's
+ * `SetRotation` is in radians, so the same rate is `0.6 * PI / 180`.
+ *
+ * WHAT IS OURS about it: the client's own paper-doll drag is engine behaviour with no script and no
+ * constant we can read (see `hit.ts#paneAt`), so the CHOICE to reuse the glue screen's rate for it is
+ * this project's, not the client's. The unit is also not identical -- the glue Lua reads
+ * `GetCursorPosition()` in CSS pixels while this reads logical units -- so on a window taller than 768
+ * the same physical drag turns the figure slightly less than the glue screen would. Named rather than
+ * hidden; if the owner reports the drag as too slow or too fast, this is the number.
+ */
+const MODEL_DRAG_RADIANS_PER_UNIT = (0.6 * Math.PI) / 180;
 
 /**
  * How far the pointer must travel, in LOGICAL UNITS, before a press becomes a drag.
@@ -43,6 +87,15 @@ export class GlueInput {
   private readonly canvas: HTMLCanvasElement;
   private items: DrawItem[] = [];
   private pressed: Widget | null = null;
+
+  /**
+   * Which button the live press used, so the release can report it.
+   *
+   * Held on the press rather than read off the release event because a `pointerup` for a chorded release
+   * reports the button that CHANGED, and the press is the one the click belongs to. Defaults to
+   * `LeftButton` so a synthetic release with no press before it behaves as it always did.
+   */
+  private pressButton: MouseButtonName = 'LeftButton';
   private hovered: Widget | null = null;
   private focus: Widget | null = null;
   /** The last completed click, for `onDoubleClick`. */
@@ -58,6 +111,38 @@ export class GlueInput {
 
   /** The widget a drag is currently in progress FROM, or null. Set once the threshold is crossed. */
   private dragging: Widget | null = null;
+
+  /**
+   * A model pane being spun by the mouse: its rig, where the press started and what the yaw was then.
+   *
+   * ABSOLUTE from the press rather than accumulated per move, which is not how the client's own glue
+   * drag is written (`CharacterSelectFrame_OnUpdate` re-bases its start on every tick,
+   * characterselect.lua:490-496) and is deliberate: that shape only works because it runs in an
+   * `OnUpdate` at a fixed cadence, while this runs on `pointermove`, whose events coalesce. Summing
+   * per-event deltas would make the same physical drag turn the figure by a different amount depending
+   * on how many moves the browser chose to deliver.
+   */
+  private rotating: { rig: ModelRig; startX: number; startRotation: number } | null = null;
+
+  /** See the click-drop diagnostics: one line for the whole session. */
+  private announcedClickDropFlag = false;
+
+  /**
+   * THE SLIDER BEING DRAGGED, which nothing in this client could do before -- the owner reported the
+   * scrollbar's drag dead in every round.
+   *
+   * `grab` is where inside the thumb the press landed, so the knob does not jump under the cursor on the
+   * first move; `travel` is the track length MINUS the thumb, which is the distance a fraction of 1 has
+   * to cover. Captured at press time: re-reading the rects mid-drag would follow a thumb that this very
+   * drag is moving, and the fraction would chase itself.
+   */
+  private sliding: {
+    slider: Widget;
+    grab: number;
+    trackStart: number;
+    travel: number;
+    vertical: boolean;
+  } | null = null;
 
   /**
    * The mouse-enabled widget the LIVE press landed on, or null when it landed on the world.
@@ -140,6 +225,7 @@ export class GlueInput {
     return this.pointerUnits;
   }
 
+
   setFocus(widget: Widget | null): void {
     if (this.focus === widget) {
       return;
@@ -185,6 +271,8 @@ export class GlueInput {
     // origin that would make the next press look like it had already moved.
     this.pressOrigin = null;
     this.dragging = null;
+    this.rotating = null;
+    this.sliding = null;
     // The last pointer position goes too: it is what the cursor-attachment pass draws at, and a stale one
     // would put a dragged icon wherever the pointer was on the retired screen until the next move.
     this.pointerUnits = null;
@@ -225,6 +313,8 @@ export class GlueInput {
   attach(): void {
     this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
+    // NOT passive: a frame that handles the wheel must be able to stop the page scrolling with it.
+    this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
     window.addEventListener('pointerup', this.onPointerUp);
     window.addEventListener('pointercancel', this.onPointerCancel);
     window.addEventListener('keydown', this.onKeyDown);
@@ -235,6 +325,7 @@ export class GlueInput {
   detach(): void {
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
+    this.canvas.removeEventListener('wheel', this.onWheel);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('pointercancel', this.onPointerCancel);
     window.removeEventListener('keydown', this.onKeyDown);
@@ -268,6 +359,44 @@ export class GlueInput {
     return { x: (event.clientX - bounds.left) / scale, y: (event.clientY - bounds.top) / scale };
   }
 
+  /**
+   * FrameXML's `OnMouseWheel`, which reached NOTHING before -- this listener did not exist, so no frame
+   * in the client could be scrolled by the wheel.
+   *
+   * The handler is looked up on the frame under the pointer and then **up its ancestors**, because that
+   * is where the client puts it: `UIPanelScrollFrameTemplate` binds `<OnMouseWheel>` on the SCROLL FRAME
+   * (`uipaneltemplates.xml:327-329`) while the pointer is over the scroll child's content. Stopping at
+   * the hit widget would find nothing on almost every real wheel event.
+   *
+   * `preventDefault` only when a handler actually took it, so a wheel over the world still reaches
+   * whatever else wants it.
+   *
+   * SIGN: the engine's `delta` is +1 up / -1 down -- `ScrollFrameTemplate_OnMouseWheel`'s
+   * `if ( value > 0 )` branch SUBTRACTS from the scroll value (`uipaneltemplates.lua:158-165`), i.e.
+   * wheel-up scrolls toward the top. A DOM `deltaY` is positive scrolling down, so it is negated.
+   */
+  private onWheel = (event: WheelEvent): void => {
+    const { x, y } = this.toUnits(event as unknown as PointerEvent);
+    this.pointerUnits = { x, y };
+    // `wheelTargetAt`, NOT `hitTest` and a climb: over the quest text `hitTest` answers `QuestFrame`,
+    // whose ancestors do not include the scroll frame that binds the handler. See `hit.ts`.
+    const target = wheelTargetAt(this.items, x, y);
+    if (target !== null) {
+      event.preventDefault();
+      /**
+       * STOP THE BUBBLE, or the camera zooms while the panel scrolls -- the owner saw both happen at
+       * once. `preventDefault` only suppresses the browser's default action; it does not stop the event
+       * reaching another listener. `pages/game/controls/controls.tsx:156` registers its own `wheel`
+       * handler on `document.body` (`:106`), which is an ANCESTOR of this canvas, so the event arrives
+       * here in the target phase and at the camera afterwards by bubbling. Stopping propagation is
+       * therefore enough, and it puts the wheel under the same rule as a press: the UI is in front, and
+       * one gesture has one owner (`GlueInput#capturedPress`).
+       */
+      event.stopPropagation();
+      target.onMouseWheel?.(event.deltaY > 0 ? -1 : 1);
+    }
+  };
+
   private onPointerMove = (event: PointerEvent): void => {
     const { x, y } = this.toUnits(event);
     this.pointerUnits = { x, y };
@@ -275,6 +404,10 @@ export class GlueInput {
 
     // Hover skips disabled widgets.
     const hoverTarget = hit && hit.state !== 'disabled' ? hit : null;
+    // NO LOCAL-OFFSET BOOKKEEPING HERE. A previous version recorded the pointer inside the hovered
+    // widget for the minimap tooltip, which turned out to be both the wrong question and a draw-list
+    // scan per hover transition: `ui/rects.ts#rectOf` already resolves any widget's absolute rect in
+    // these same units, so the reader subtracts it itself. See `minimap-terrain.ts#updateTooltip`.
     if (this.hovered !== hoverTarget) {
       if (this.hovered) {
         this.hovered.hovered = false;
@@ -289,6 +422,31 @@ export class GlueInput {
       // block, which has no field to be read out of.
       left?.onLeave?.();
       hoverTarget?.onEnter?.();
+    }
+
+    // THE MODEL PANE'S SPIN, before the press bookkeeping and independent of it: a pane is not a
+    // pressed widget (see `hit.ts#paneAt`), so nothing below would run for it.
+    // THE THUMB FOLLOWS THE POINTER, and the value follows the thumb -- through Lua, so the client's
+    // own `<OnValueChanged>` runs and the scroll frame is told. See `Widget#onSliderDrag`.
+    if (this.sliding !== null) {
+      const { slider, grab, trackStart, travel, vertical } = this.sliding;
+      if (travel > 0) {
+        const along = (vertical ? y : x) - grab - trackStart;
+        slider.onSliderDrag?.(Math.max(0, Math.min(1, along / travel)));
+      }
+      return;
+    }
+
+    if (this.rotating !== null) {
+      const rig = this.rotating.rig;
+      const wanted = this.rotating.startRotation
+        + (x - this.rotating.startX) * MODEL_DRAG_RADIANS_PER_UNIT;
+      // Only on a real change: a `pointermove` with no horizontal travel (a vertical drag) would
+      // otherwise bump the revision and cost a bake plus a full interface re-render for nothing.
+      if (wanted !== rig.rotation) {
+        rig.rotation = wanted;
+        rig.revision += 1;
+      }
     }
 
     if (this.pressed) {
@@ -333,6 +491,7 @@ export class GlueInput {
   }
 
   private onPointerDown = (event: PointerEvent): void => {
+    this.pressButton = buttonName(event);
     const { x, y } = this.toUnits(event);
     const hit = hitTest(this.items, x, y);
 
@@ -345,6 +504,48 @@ export class GlueInput {
 
     this.setFocus(hit && hit.focusable ? hit : null);
 
+    // A PRESS ON A MODEL PANE. `paneAt` owns the z-order decision -- it answers null when anything
+    // scriptable is on top, which is what keeps the two rotate buttons inside the pane's own rect
+    // working as buttons. NOT gated on `hit === null` here: `CharacterFrame` is mouse-enabled and sits
+    // under the pane, so `hitTest` always answers the panel and this branch never ran.
+    const pane = paneAt(this.items, x, y);
+    const paneRig = pane?.modelRig ?? null;
+    if (paneRig !== null) {
+      this.rotating = { rig: paneRig, startX: x, startRotation: paneRig.rotation };
+      this.capturePointer(event);
+    }
+
+    // A PRESS ON A SCROLLBAR THUMB, and the same z-order reasoning as the pane above: the thumb is art
+    // inside a mouse-enabled panel, so `hitTest` answers the panel and this cannot be gated on it.
+    const thumb = sliderThumbAt(this.items, x, y);
+    const slider = thumb?.widget.thumbOf ?? null;
+    // `state` is checked because `Slider:Disable()` is real (`methods/scroll.ts`) and the client uses it
+    // on a scrollbar with nothing to scroll (`HybridScrollFrame.lua:99`). Without this, `IsEnabled`
+    // would report the bar dead while the pointer still dragged it.
+    if (thumb !== null && slider !== null && slider.onSliderDrag !== null
+      && slider.state !== 'disabled') {
+      const track = layoutRectOf(slider.id);
+      const vertical = slider.sliderTravel.vertical;
+      if (track !== null) {
+        const travel = vertical ? track.height - thumb.rect.height : track.width - thumb.rect.width;
+        this.sliding = {
+          slider,
+          grab: vertical ? y - thumb.rect.top : x - thumb.rect.left,
+          trackStart: vertical ? track.top : track.left,
+          // A track no longer than its thumb has nowhere to travel; guarded so the fraction below is
+          // never a division by zero, which would be NaN and would clamp to the top for ever.
+          travel: travel > 0 ? travel : 0,
+          vertical,
+        };
+        this.capturePointer(event);
+      }
+    }
+
+    if (hit !== null && hit.state === 'disabled' && !this.announcedClickDropFlag) {
+      this.announcedClickDropFlag = true;
+      // eslint-disable-next-line no-console
+      console.log(`click DROPPED: ${hit.id} is DISABLED at press (kind=${hit.kind})`);
+    }
     if (hit && hit.state !== 'disabled') {
       this.pressed = hit;
       // The drag origin, for `maybeBeginDrag`. Recorded for every press, not only a registered one: the
@@ -367,21 +568,40 @@ export class GlueInput {
        *
        * Guarded because the API is absent in jsdom, where the unit tests run.
        */
-      if (typeof this.canvas.setPointerCapture === 'function' && event.pointerId !== undefined) {
-        try {
-          this.canvas.setPointerCapture(event.pointerId);
-        } catch {
-          // A pointer that is already gone throws `NotFoundError`. Nothing to capture, nothing to do.
-        }
-      }
+      this.capturePointer(event);
       hit.state = 'down';
       // FrameXML's `OnMouseDown`, which is NOT the click: it fires on the press itself, and a press
       // that drags off and releases elsewhere still had one.
-      hit.onMouseDown?.();
+      hit.onMouseDown?.(this.pressButton);
     }
   };
 
+  /**
+   * Retarget every later event for this pointer to the canvas until it is released.
+   *
+   * Extracted so the model-pane spin gets it too, and it is not a nicety: `pointermove` is bound to the
+   * CANVAS, so any element that ends up over it mid-gesture takes the moves and the router simply stops
+   * being told where the pointer is. MEASURED on the ability drag it was written for: during a drag from
+   * `ActionButton1` towards `ActionButton4`, `window` received ten `pointermove` events and the canvas
+   * received **one**, so the release resolved back to the source button. It also covers a drag that
+   * leaves the canvas and comes back, and the dev server's intermittent full-page overlay iframe, which
+   * has eaten clicks here before.
+   *
+   * Guarded because the API is absent in jsdom, where the unit tests run.
+   */
+  private capturePointer(event: PointerEvent): void {
+    if (typeof this.canvas.setPointerCapture === 'function' && event.pointerId !== undefined) {
+      try {
+        this.canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // A pointer that is already gone throws `NotFoundError`. Nothing to capture, nothing to do.
+      }
+    }
+  }
+
   private onPointerUp = (event: PointerEvent): void => {
+    this.rotating = null;
+    this.sliding = null;
     const pressed = this.pressed;
     const dragging = this.dragging;
     this.pressed = null;
@@ -411,7 +631,7 @@ export class GlueInput {
     pressed.state = 'up';
     // The counterpart of `OnMouseDown`: the engine fires `OnMouseUp` on the frame that took the press
     // wherever the release lands, so this is BEFORE the released-off-the-widget test below.
-    pressed.onMouseUp?.();
+    pressed.onMouseUp?.(this.pressButton);
 
     const { x, y } = this.toUnits(event as PointerEvent);
     this.pointerUnits = { x, y };
@@ -451,14 +671,70 @@ export class GlueInput {
       return;
     }
 
+    /**
+     * EVERY SILENT DROP IN THIS PATH IS NAMED ONCE, and the reason is a measurement that came back
+     * entirely clean.
+     *
+     * The owner's gossip quest row reported `shown=true h=15 w=300 type=Active id=1 onclick=true` and
+     * -- from the client's own `GetMouseFocus()` -- itself as the widget under the cursor. Then clicking
+     * it produced no handler call at all. That is this project's recorded signature: a registered
+     * handler is not a dispatched one. There are exactly three places below where a press is discarded
+     * with no trace, and guessing between them has already cost two rounds.
+     *
+     * One line each, once per session, so this can never become per-click noise.
+     */
     if (released !== pressed) {
+      if (!this.announcedClickDropFlag) {
+        this.announcedClickDropFlag = true;
+        // eslint-disable-next-line no-console
+        console.log(`click DROPPED: released off the widget -- pressed=${pressed.id} `
+          + `released=${released === null ? 'null' : released.id}`);
+      }
       return; // Released off the widget: no click.
     }
+
+    /**
+     * THE BUTTON IS NOW REAL, AND ITS ABSENCE WAS WHY NOTHING COULD BE EQUIPPED.
+     *
+     * Every click used to reach Lua as `"LeftButton"` regardless of the button pressed, so a RIGHT-click
+     * on a bag slot ran `ContainerFrameItemButton_OnClick`'s LEFT branch -- `PickupContainerItem`, which
+     * is the declared item-cursor gap -- rather than its right branch, `UseContainerItem`, which sends
+     * `CMSG_AUTOEQUIP_ITEM` and was correct all along. See `Widget#clickButtons`.
+     *
+     * The registration gate is the engine's: a frame that never called `RegisterForClicks` takes LEFT
+     * only. Applied HERE rather than in `scripts.ts` because it is a routing decision -- the handler is
+     * bound once and the button varies per press.
+     *
+     * **THE RETURN COVERS THE CHECKBOX TOGGLE AND THE DOUBLE-CLICK BOOKKEEPING TOO, and self-review
+     * caught that it did not.** With the gate wrapped around `onClick` alone, a right-click on a
+     * left-only CheckButton still flipped `checked` -- a checkbox that toggles visibly and tells its
+     * handler nothing, which is worse than either doing nothing or doing everything. And `lastClick`
+     * was still recorded, so a suppressed right-click could pair with a later left click into a
+     * spurious `OnDoubleClick`. An unregistered button is not a click at all.
+     */
+    const button = this.pressButton;
+    if (!(pressed.clickButtons ?? LEFT_ONLY).has(button)) {
+      if (!this.announcedClickDropFlag) {
+        this.announcedClickDropFlag = true;
+        // eslint-disable-next-line no-console
+        console.log(`click DROPPED: ${button} not registered on ${pressed.id} -- `
+          // NULLISH, not `undefined`: `Widget#clickButtons` defaults to `null`, which is exactly what
+          // the `??` gate above treats as "unregistered". My first version tested `=== undefined` and
+          // spread a null -- caught by `click-button.test.ts`, which is what that test is for.
+          + `clickButtons=${pressed.clickButtons == null ? 'default(LEFT)'
+            : `[${[...pressed.clickButtons].join(',')}]`}`);
+      }
+      return;
+    }
+    // NO LINE FOR "no onClick bound", and removing it is deliberate: a press on a plain mouse-enabled
+    // FRAME with no handler is ORDINARY -- a panel background, a modal backdrop -- and reporting it as a
+    // dropped click is a false alarm. It fired on exactly that during the gossip investigation and sent
+    // me looking at the wrong widget. The two cases above are real defects; this one is not.
 
     if (pressed.kind === 'checkbutton') {
       pressed.checked = !pressed.checked;
     }
-    pressed.onClick?.();
+    pressed.onClick?.(button);
 
     // FrameXML's `OnDoubleClick`: two clicks on the SAME widget inside the interval. It fires after
     // the second `onClick`, not instead of it, because that is the order the engine's own is
@@ -471,7 +747,7 @@ export class GlueInput {
     ) {
       // Cleared, so a third click starts a new pair rather than firing again on every click.
       this.lastClick = null;
-      pressed.onDoubleClick?.();
+      pressed.onDoubleClick?.(this.pressButton);
     } else {
       this.lastClick = { widget: pressed, time: now };
     }
@@ -562,7 +838,10 @@ export class GlueInput {
         // list row -- keeps activating on Enter through `onClick`, where keyboard and pointer
         // activation genuinely mean the same thing.
         const activate = target.onSubmit ?? target.onClick;
-        activate?.();
+        // `'LeftButton'` explicitly: Enter on a button is a LEFT click in the engine, and `onSubmit`
+        // ignores the argument. Passing the last POINTER button here would make a keyboard activation
+        // inherit whichever button was last pressed somewhere else on screen.
+        activate?.('LeftButton');
       }
       event.preventDefault();
       return;

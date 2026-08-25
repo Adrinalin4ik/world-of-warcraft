@@ -109,7 +109,41 @@ class WorkerPool {
    * call site also means a new caller gets background by default, which is the safe direction.
    */
   enqueueAt(priority, ...args) {
+    return this.submit(priority, false, args);
+  }
+
+  /**
+   * As `enqueueAt`, but a FAILURE IS EXPECTED and is not logged.
+   *
+   * Some loads are speculative by design. A character's armour layer is named per gender and the
+   * gendered file frequently does not exist, so `ui/scene/body-composite.ts` asks for it and falls
+   * through to the `_U` variant -- its own comment calls the 404 "the NORMAL path to the `_U`
+   * file". The pool logged it anyway, twice per miss (once here, once in `next`), and the owner saw a
+   * console full of stack traces for a path that was working exactly as written.
+   *
+   * A separate METHOD for the reason the comment on `enqueueAt` gives for itself: the arguments are
+   * the worker's own payload and a trailing option would be indistinguishable from a loader
+   * argument. Quiet is a property of the REQUEST, not of the payload.
+   *
+   * It silences only the log. The rejection still settles the task the same way, so a caller that
+   * wants to know still learns -- and a caller that has no fallback should keep using `enqueueAt`,
+   * because a silent miss with nothing to fall back on is the invisible failure this project keeps
+   * paying for.
+   */
+  enqueueQuietAt(priority, ...args) {
+    return this.submit(priority, true, args);
+  }
+
+  /**
+   * The one enqueue path. `quiet` decides only whether a failure reaches the console.
+   *
+   * Both catch sites read `task.quiet`: this one, and the one in `next` -- which is why a miss used
+   * to log TWICE. Two logs for one failure read as two failures, and that is how the owner reported
+   * it.
+   */
+  submit(priority, quiet, args) {
     const task = new Task(...args);
+    task.quiet = quiet;
     task.priority = priority;
     task.queuedAt = now();
 
@@ -121,7 +155,11 @@ class WorkerPool {
     }
 
     this.next();
-    return task.promise.catch(ex => console.error(ex));
+    return task.promise.catch((ex) => {
+      if (!task.quiet) {
+        console.error(ex);
+      }
+    });
   }
 
   /**
@@ -174,7 +212,10 @@ class WorkerPool {
             return this.next()
           }).catch( (ex) => {
             this.record(task, startedAt);
-            console.error(ex)
+            // See `submit`: a speculative load logs nothing. The task still settles as a failure.
+            if (!task.quiet) {
+              console.error(ex)
+            }
             return this.next()
           });
         }

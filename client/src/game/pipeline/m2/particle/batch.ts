@@ -81,7 +81,27 @@ export class ParticleBatch extends THREE.Mesh {
    * @param worldMatrix transform from the emitter's local space into world space
    * @returns the number of instances written
    */
-  pack(pool: ParticlePool, definition: any, worldMatrix: THREE.Matrix4): number {
+  pack(
+    pool: ParticlePool,
+    definition: any,
+    worldMatrix: THREE.Matrix4,
+    /**
+     * A PER-INSTANCE multiplier on each particle's own billboard size. 1 leaves the asset alone.
+     *
+     * Separate from the world scale below, and the distinction is the owner's own correction:
+     * "window.worldSparkleScale(4) не увеличивает размер партикла, а только радиус вокруг куста. А я
+     * хотел просто увеличить размер каждой частицы". Scaling the INSTANCE grows the emitter's volume --
+     * every spawn position is transformed by `worldMatrix`, so the cloud spreads -- which is right for a
+     * doodad placed at scale 3 and wrong as a way to make particles bigger. This multiplies the size
+     * track and nothing else, so the cloud keeps its authored shape and the sprites in it grow.
+     *
+     * Read off the INSTANCE by the manager rather than stamped onto the definition, deliberately:
+     * `M2Blueprint.load` returns a clone that can share its source's definitions, and writing one would
+     * resize every copy of that model in the zone -- the "a SHARED thing is not yours to write" trap
+     * `CLAUDE.md` records three rounds of.
+     */
+    sizeScale = 1,
+  ): number {
     const cellCount = this.rows * this.columns;
     const cellWidth = 1 / this.columns;
     const cellHeight = 1 / this.rows;
@@ -125,8 +145,8 @@ export class ParticleBatch extends THREE.Mesh {
       this.offsets[index * 3 + 2] = scratchPosition.z;
 
       evaluateFBlockVec2(definition.scaleTrack, t, scratchScale);
-      this.scales[index * 2] = scratchScale.x * worldScaleFactor;
-      this.scales[index * 2 + 1] = scratchScale.y * worldScaleFactor;
+      this.scales[index * 2] = scratchScale.x * worldScaleFactor * sizeScale;
+      this.scales[index * 2 + 1] = scratchScale.y * worldScaleFactor * sizeScale;
 
       this.rotations[index] = pool.spin[slot];
 

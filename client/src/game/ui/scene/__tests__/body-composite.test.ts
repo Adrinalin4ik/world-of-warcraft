@@ -22,10 +22,12 @@
 import { bodyLayersFor, CharSectionsRow } from '../character-look';
 import { compositeBody } from '../body-composite';
 
-// `enqueueAt` delegates to `enqueue` with the priority dropped, so every expectation below keeps
-// reading `(kind, path)` at the positions it always did. The bake asks at CHARACTER priority (see
-// `worker/pool.js#PRIORITY`); WHICH priority is a scheduling decision the pool owns and tests, and
-// is not what this suite is about.
+// `enqueueAt` and `enqueueQuietAt` both delegate to `enqueue` with the priority dropped, so every
+// expectation below keeps reading `(kind, path)` at the positions it always did. The bake asks at
+// CHARACTER priority and QUIETLY (`worker/pool.js#enqueueQuietAt`), because a gendered armour layer
+// is expected to 404 on its way to the `_U` variant. WHICH priority and whether a miss is logged are
+// scheduling decisions the pool owns; neither is what this suite is about, so both map to the same
+// spy -- and mapping only one of them is what made this test fail when the caller switched.
 jest.mock('../../../pipeline/worker/pool', () => {
   const enqueue = jest.fn();
   return {
@@ -34,6 +36,7 @@ jest.mock('../../../pipeline/worker/pool', () => {
     default: {
       enqueue,
       enqueueAt: (_priority: number, ...args: unknown[]) => enqueue(...args),
+      enqueueQuietAt: (_priority: number, ...args: unknown[]) => enqueue(...args),
     },
   };
 });

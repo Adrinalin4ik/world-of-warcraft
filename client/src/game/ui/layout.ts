@@ -51,6 +51,23 @@ export interface LayoutNode {
   anchors: Anchor[];
   /** `clampedToScreen="true"` -- see `clampToScreen` and `Widget#clampedToScreen`. */
   clamped?: boolean;
+  /**
+   * The node's EFFECTIVE scale: its own `SetScale` multiplied by every ancestor's. Absent means 1.
+   *
+   * Supplied by the caller rather than derived here, because the caller already walks the tree
+   * top-down and can carry the product for free -- see `WidgetRoot#drawList`.
+   *
+   * It multiplies THREE things and the choice of which is the whole content of scale support:
+   * the node's own width and height, and its anchor OFFSETS. The offsets scale because a
+   * `SetPoint(..., x, y)` is expressed in the anchored frame's own coordinate space, which is what
+   * `WorldMapButton_OnUpdate` relies on -- it computes `playerX * WorldMapDetailFrame:GetWidth()`
+   * and hands the result straight back as an offset, so a `GetWidth` in own-space units and an
+   * offset in own-space units are the same number twice and cancel correctly at any scale.
+   *
+   * It does NOT multiply a size that two opposing anchors already determined: that width is the
+   * distance between two resolved points and is scaled by whatever scaled them.
+   */
+  scale?: number;
 }
 
 /** The window in device pixels. */
@@ -142,6 +159,11 @@ function pointOf(rect: Rect, point: AnchorPoint): { x: number; y: number } {
  * instead of at its head, which is exactly what this screen did before.
  */
 function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect): Rect {
+  const scale = node.scale ?? 1;
+  // The AUTHORED size at this node's effective scale. Used only on an axis the anchors did not
+  // already size -- see `LayoutNode#scale`.
+  const scaledWidth = node.width * scale;
+  const scaledHeight = node.height * scale;
   // Edge constraints gathered from the anchors. An axis with two of them SIZES the node.
   let left: number | null = null;
   let right: number | null = null;
@@ -158,9 +180,10 @@ function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect)
     }
 
     const target = pointOf(relative, anchor.relativePoint ?? anchor.point);
-    // FrameXML's `+y` is up; our `top` grows downward, hence the subtraction.
-    const x = target.x + anchor.x;
-    const y = target.y - anchor.y;
+    // FrameXML's `+y` is up; our `top` grows downward, hence the subtraction. Scaled because an
+    // offset is in the anchored frame's OWN space -- see `LayoutNode#scale`.
+    const x = target.x + anchor.x * scale;
+    const y = target.y - anchor.y * scale;
 
     const h = HORIZONTAL[anchor.point];
     if (h === 0) {
@@ -182,14 +205,14 @@ function resolveOne(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect)
   }
 
   if (left === null && right === null && centerX !== null) {
-    left = centerX - node.width / 2;
+    left = centerX - scaledWidth / 2;
   }
   if (top === null && bottom === null && centerY !== null) {
-    top = centerY - node.height / 2;
+    top = centerY - scaledHeight / 2;
   }
 
-  const width = left !== null && right !== null ? right - left : node.width;
-  const height = top !== null && bottom !== null ? bottom - top : node.height;
+  const width = left !== null && right !== null ? right - left : scaledWidth;
+  const height = top !== null && bottom !== null ? bottom - top : scaledHeight;
 
   return {
     left: left !== null ? left : right !== null ? right - width : 0,
@@ -305,6 +328,31 @@ function place(node: LayoutNode, resolved: Map<string, Rect>, screen: Rect): Rec
   return node.clamped ? clampToScreen(rect, screen) : rect;
 }
 
+/**
+ * Widget id -> the frame NAME the client knows it by, for the complaint below.
+ *
+ * **The warning used to print raw ids and that made it useless to act on.** The owner pasted
+ * "lua:17608 -> lua:17596, lua:4241 -> lua:4242" and neither of us could say what had moved: the id
+ * is `FrameRegistry`'s counter and means nothing outside it. A warning nobody can act on is a
+ * warning that gets scrolled past, which is the same failure as no warning at all.
+ *
+ * A published resolver rather than an import, for the reason `ui/rects.ts` publishes its own: this
+ * module is the widget layer and knows nothing about Lua or the registry, and it must keep working
+ * with no resolver at all -- every unit test of the solver runs without one.
+ */
+let nameOfWidget: ((id: string) => string | null) | null = null;
+
+/** The object model publishes its registry lookup. Called once per runtime; cleared on teardown. */
+export function setWidgetNameResolver(resolve: ((id: string) => string | null) | null): void {
+  nameOfWidget = resolve;
+}
+
+/** `Name (lua:17608)`, or the bare id when nothing can name it. */
+function describe(id: string): string {
+  const name = nameOfWidget === null ? null : nameOfWidget(id);
+  return name === null ? id : `${name} (${id})`;
+}
+
 /** Layout complaints already reported, so a per-frame one is a single console line. */
 const warned = new Set<string>();
 
@@ -333,32 +381,91 @@ export function resolveAnchors(nodes: LayoutNode[], viewport: Viewport): Map<str
 
   const resolved = new Map<string, Rect>();
   const known = new Set(nodes.map((node) => node.id));
-  let pending = nodes.slice();
 
-  while (pending.length > 0) {
-    const ready = pending.filter((node) =>
-      node.anchors.every((anchor) => !anchor.relativeTo || resolved.has(anchor.relativeTo)),
-    );
+  /**
+   * A WORKLIST, NOT A ROUND-BASED FILTER -- and this was 36 ms of a 43 ms frame.
+   *
+   * The previous shape was `while (pending.length) { pending.filter(everyAnchorResolved) ... }`, which
+   * re-scans every unresolved node on every round. That is O(nodes x chain depth), and the chain depth in
+   * the client's own manifest is deep: a panel anchored to a panel anchored to a header, and so on.
+   *
+   * **The tell was that the SAME solver cost 0.4 ms in one caller and 36 ms in the other.**
+   * `WidgetRoot#drawList` feeds it only the widgets it is going to draw -- a few hundred -- while
+   * `layoutRects` feeds it all 4211, hidden panels included. In a quadratic solver a 10x input is a 100x
+   * cost, which is exactly the ratio the owner's HUD showed between `ui.layout` and `ui.scroll`.
+   *
+   * Why `layoutRects` runs at all on an ordinary frame: `rects.ts#layoutRectOf` re-resolves whenever
+   * `layoutRevision()` has moved, `reconcileScrollRanges` calls it once per frame for the one on-screen
+   * scroll frame, and the census measured geometry moving **1.22 times per frame** -- one `SetPoint` from
+   * an `OnUpdate` handler is enough, and one is all it takes.
+   *
+   * The transformation is a plain topological sort and the OUTPUT IS IDENTICAL: `place` reads only
+   * already-resolved nodes, so any order that respects the dependencies gives the same rects. What is
+   * preserved deliberately:
+   *
+   *  - An anchor to an id that is NOT in this node set can never be satisfied, exactly as before -- the
+   *    old `resolved.has` test could never pass for it. Such nodes fall through to the deadlock branch.
+   *  - A CYCLE leaves its members unresolved and reaches the same `reportUnresolvable` and the same
+   *    place-by-remaining-anchors recovery.
+   */
+  const waitingOn = new Map<string, number>();
+  const dependents = new Map<string, LayoutNode[]>();
+  const ready: LayoutNode[] = [];
 
-    if (ready.length === 0) {
-      reportUnresolvable(pending, known);
-      for (const node of pending) {
-        // The node's resolvable anchors only. Dropping the others is what breaks the deadlock; keeping
-        // the rest means a node held by one good anchor and one bad one still lands near where it
-        // belongs instead of in the corner.
-        const usable = node.anchors.filter(
-          (anchor) => !anchor.relativeTo || resolved.has(anchor.relativeTo),
-        );
-        resolved.set(node.id, place({ ...node, anchors: usable }, resolved, screen));
+  for (const node of nodes) {
+    let count = 0;
+    for (const anchor of node.anchors) {
+      const target = anchor.relativeTo;
+      if (target === undefined) {
+        continue;
       }
-      return resolved;
+      if (!known.has(target)) {
+        // Unsatisfiable for ever, as before: leave it counted so this node never becomes ready.
+        count += 1;
+        continue;
+      }
+      count += 1;
+      const list = dependents.get(target);
+      if (list === undefined) {
+        dependents.set(target, [node]);
+      } else {
+        list.push(node);
+      }
     }
-
-    for (const node of ready) {
-      resolved.set(node.id, place(node, resolved, screen));
+    waitingOn.set(node.id, count);
+    if (count === 0) {
+      ready.push(node);
     }
+  }
 
-    pending = pending.filter((node) => !resolved.has(node.id));
+  while (ready.length > 0) {
+    const node = ready.pop()!;
+    resolved.set(node.id, place(node, resolved, screen));
+    const waiters = dependents.get(node.id);
+    if (waiters === undefined) {
+      continue;
+    }
+    for (const waiter of waiters) {
+      const left = (waitingOn.get(waiter.id) ?? 0) - 1;
+      waitingOn.set(waiter.id, left);
+      if (left === 0) {
+        ready.push(waiter);
+      }
+    }
+  }
+
+  const stuck = nodes.filter((node) => !resolved.has(node.id));
+  if (stuck.length > 0) {
+    reportUnresolvable(stuck, known);
+    for (const node of stuck) {
+      // The node's resolvable anchors only. Dropping the others is what breaks the deadlock; keeping
+      // the rest means a node held by one good anchor and one bad one still lands near where it
+      // belongs instead of in the corner.
+      const usable = node.anchors.filter(
+        (anchor) => !anchor.relativeTo || resolved.has(anchor.relativeTo),
+      );
+      resolved.set(node.id, place({ ...node, anchors: usable }, resolved, screen));
+    }
   }
 
   return resolved;
@@ -373,7 +480,7 @@ function reportUnresolvable(pending: LayoutNode[], known: Set<string>): void {
   );
   const missing = details.filter((detail) => !known.has(detail.target));
   const parts = (missing.length > 0 ? missing : details).map(
-    (detail) => `${detail.node} -> ${detail.target}`,
+    (detail) => `${describe(detail.node)} -> ${describe(detail.target)}`,
   );
   const kind =
     missing.length > 0

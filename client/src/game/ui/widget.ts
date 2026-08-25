@@ -123,6 +123,16 @@ export interface FontSpec {
   outline: boolean;
   align: 'LEFT' | 'CENTER' | 'RIGHT';
   /**
+   * `justifyV` -- where the glyph block sits VERTICALLY inside the region's rect.
+   *
+   * Absent means MIDDLE, which is FrameXML's own default (`benilla-ui/src/script/types.rs:186-198`) and
+   * what this renderer did unconditionally before. A font string whose height is DERIVED from its text
+   * has a rect the same height as its glyphs, so the three answers coincide for it and nothing moves;
+   * the setting only matters where the rect is taller than the text, which is exactly the case the
+   * client authors it for.
+   */
+  vertical?: 'TOP' | 'MIDDLE' | 'BOTTOM';
+  /**
    * Wrap at this width, in logical units -- a FontString's authored `Size` x when the client lets it
    * wrap (`GlueDialogText` is 450 wide, gluedialog.xml). OPT-IN: absent means the string is measured
    * and rasterized as one line exactly as it always was, so no existing caption's metrics move.
@@ -196,6 +206,151 @@ let nextLinkStamp = 0;
  */
 let treeStructure = 0;
 
+/**
+ * Bumped whenever anything that can MOVE OR RESIZE a widget changes: its anchors, its shown flag, its
+ * size, or the tree's shape.
+ *
+ * `ui/rects.ts` keys its on-demand rect map on this. That map exists because the client's own Lua
+ * measures a frame in the tick it shows it (`ToggleDropDownMenu`'s `Show()` then `GetCenter()`), and
+ * caching it only until the next `publishRects` was a stale-map hazard the moment a SECOND
+ * Show-then-measure happened in the same frame -- which the unit-popup submenus now do.
+ *
+ * Deliberately COARSE: one counter for the whole tree, not per widget. A geometry change anywhere can
+ * move anything anchored to it transitively, so a per-widget revision would have to walk the anchor
+ * graph to be correct, and that is more expensive than the resolve it would save.
+ *
+ * NOT bumped by `restamp()`, `SetFrameLevel` or alpha: those change draw ORDER or opacity, never a
+ * rect, and bumping on them would throw the map away for nothing on a cooldown sweep.
+ */
+let geometryRevision = 0;
+
+/** See `geometryRevision`. Read by `ui/rects.ts` to decide whether its cached map is still valid. */
+export function layoutRevision(): number {
+  return geometryRevision;
+}
+
+/**
+ * Bumped from the few places that write a widget's geometry. See `geometryRevision`.
+ *
+ * **`tag` IS A DIAGNOSTIC AND IT EXISTS BECAUSE THIS COUNTER COSTS 36 ms A FRAME.** Not by itself -- the
+ * bump is one addition -- but by what it invalidates: `rects.ts#layoutRectOf` re-runs `resolveAll()`, a
+ * FULL layout resolution of the whole 4211-frame tree, whenever the revision has moved since its last
+ * answer. The scroll census proved the cache never holds: `skippedByRevision: 0` over 1535 passes, so
+ * every frame paid for a complete resolve. And the pass that triggered it was doing nothing --
+ * `onScreen: 1`, `nodes: 0`, `fired: 0` -- which is why four rounds of looking at the pass itself found
+ * nothing.
+ *
+ * So the question is which writer moves it every frame, and `window.uiGeometryCensus()` answers it by
+ * name. Cost: one `Map` increment per geometry write, on a path that already invalidates a
+ * whole-tree resolve.
+ */
+/** Same bump, for the writers inside this file. See `touchGeometry`.
+ *
+ * A separate name only because these are `Widget` methods rather than Lua entry points -- the census
+ * wants both, since a per-frame `Show`/`Hide` invalidates the whole-tree resolve exactly as a
+ * `SetWidth` does.
+ */
+function bumpGeometry(tag: string): void {
+  touchGeometry(tag);
+}
+
+export function touchGeometry(tag = 'unknown'): void {
+  geometryRevision += 1;
+  geometryCensus.set(tag, (geometryCensus.get(tag) ?? 0) + 1);
+}
+
+/** tag -> how many times it has bumped the revision. See `touchGeometry`. */
+const geometryCensus = new Map<string, number>();
+
+/**
+ * PER-FRAME DELTAS, and the totals alone were not enough.
+ *
+ * The first reading came back as session TOTALS -- `setAnchors` 54831, `add` 26508, `SetWidth` 14979 --
+ * and they name nothing, because a 4211-frame document load produces exactly that shape: every frame
+ * added once and anchored about twice. The question is what writes geometry in the STEADY STATE, since
+ * one bump per frame is all it takes to invalidate the whole-tree resolve. So the census now samples at a
+ * frame boundary and reports the average per frame; `steadyFrames` says how many boundaries it has seen,
+ * which is the denominator.
+ *
+ * Called from `world-ui.ts#render`, once per frame, and it is one `Map` walk over at most fourteen tags.
+ */
+const geometryPerFrame = new Map<string, number>();
+
+let geometryLastFrame = new Map<string, number>();
+
+let geometrySteadyFrames = 0;
+
+export function markGeometryFrame(): void {
+  /**
+   * THE FIRST CALL ONLY TAKES A BASELINE -- and leaving that out invalidated two rounds of my reasoning.
+   *
+   * `geometryLastFrame` starts empty, so the first frame's "delta" was the WHOLE DOCUMENT LOAD: 54801
+   * `setAnchors` and 26508 `add` attributed to one rendered frame. Dividing that by `steadyFrames` then
+   * produced a per-frame figure that looked enormous and moved with the sample length -- 39.23 over 1430
+   * frames, 75.23 over 736, 307.85 over 178 -- which is the signature of a constant divided by a
+   * denominator, not of per-frame work.
+   *
+   * **I read that as "all 26512 `add` calls happened during RENDERING" and built a whole hypothesis on
+   * it**, right up to sampling stacks to find the Lua that creates 36 frames a frame. The totals were
+   * telling me the opposite the entire time: they did not move between readings (54831, 54801, 54801),
+   * so almost nothing bumps geometry per frame at all. `CLAUDE.md` says to distrust the instrument and
+   * gives the tell -- "a number that confirms your hypothesis deserves more scepticism than one that
+   * refutes it" -- and this one confirmed mine three times while scaling with the window, which should
+   * have been the end of it much sooner.
+   */
+  if (!geometryBaselineTaken) {
+    geometryBaselineTaken = true;
+    geometryLastFrame = new Map(geometryCensus);
+    return;
+  }
+  geometrySteadyFrames += 1;
+  for (const [tag, count] of geometryCensus) {
+    const delta = count - (geometryLastFrame.get(tag) ?? 0);
+    if (delta !== 0) {
+      geometryPerFrame.set(tag, (geometryPerFrame.get(tag) ?? 0) + delta);
+    }
+  }
+  geometryLastFrame = new Map(geometryCensus);
+}
+
+let geometryBaselineTaken = false;
+
+(window as unknown as Record<string, unknown>).uiGeometryCensus = () => {
+  const rows = Array.from(geometryCensus.entries())
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((left, right) => right.count - left.count);
+  const frames = Math.max(geometrySteadyFrames, 1);
+  const perFrame = Array.from(geometryPerFrame.entries())
+    .map(([tag, count]) => ({ tag, perFrame: Math.round((count / frames) * 100) / 100 }))
+    .filter((row) => row.perFrame > 0)
+    .sort((left, right) => right.perFrame - left.perFrame);
+  return {
+    revision: geometryRevision,
+    steadyFrames: geometrySteadyFrames,
+    // THE ANSWER IS HERE, not in `top`: anything with a nonzero `perFrame` is invalidating the
+    // whole-tree layout resolve on that many frames out of every one.
+    perFrame,
+    top: rows.slice(0, 14),
+  };
+};
+
+(window as unknown as Record<string, unknown>).uiGeometryCensusReset = () => {
+  geometryCensus.clear();
+  geometryPerFrame.clear();
+  geometryLastFrame = new Map();
+  geometrySteadyFrames = 0;
+  geometryBaselineTaken = false;
+  return 'cleared';
+};
+
+/**
+ * A mouse button, as FrameXML names it -- the string an `OnClick` handler's `button` argument receives.
+ *
+ * The five the engine knows. `input.ts` maps a DOM `PointerEvent#button` onto these; anything past
+ * `Button5` has no FrameXML name and is not delivered.
+ */
+export type MouseButtonName = 'LeftButton' | 'RightButton' | 'MiddleButton' | 'Button4' | 'Button5';
+
 export class Widget {
   readonly id: string;
   readonly kind: WidgetKind;
@@ -218,13 +373,114 @@ export class Widget {
    * the front of its bucket for no reason -- the bug `lua/methods/frame.ts` exists to avoid.
    */
   linkStamp = nextLinkStamp++;
+  /**
+ * `SetScale(s)` -- the frame's own scale, which CASCADES to everything under it.
+ *
+ * This was a `notImplemented` no-op and the gap was visible: the world map's player marker landed at
+ * 0.81/0.80 of the map where the arithmetic says 0.48/0.45, a ratio of about 1.7 -- which is
+ * `1 / WORLDMAP_WINDOWED_SIZE` (0.573). `WorldMapFrame_SetFullMapView` scales the detail frame,
+ * `WorldMap_ToggleSizeUp/Down` rescale it again, and with the scale dropped the frame kept its
+ * authored size while the offsets computed from it were meant for a scaled one.
+ *
+ * Held per widget and multiplied down the tree by whoever walks it -- see `LayoutNode#scale` for
+ * which three quantities it multiplies and why an anchor OFFSET is one of them.
+ */
+  scale = 1;
+
   anchors: Anchor[] = [];
+
+  /**
+   * Whether `anchors` is the loader's DEFAULT placement rather than something the document declared.
+   *
+   * **THE ENGINE'S DEFAULT PLACEMENT IS NOT AN ANCHOR SET, and conflating the two is a real defect.**
+   * `loader.ts#applyRegionLayout` gives an anchorless `<Layer>` region the parent's rect, which is
+   * right -- an anchorless `$parentIcon` does fill its button in the real client. But it did so by
+   * writing four ANCHORS, and the client's own Lua then adds a fifth with `SetPoint` and no
+   * `ClearAllPoints`:
+   *
+   *     shownFrame:SetPoint("TOPLEFT", lastFrame, "BOTTOMLEFT", ...)   questinfo.lua:73
+   *     shownFrame:SetPoint("TOPLEFT", parentFrame, "TOPLEFT", ...)    :75
+   *
+   * Four fill anchors plus that one give OPPOSING edges, so `QuestInfoTitleHeader` resolved to the
+   * whole 295x324 viewport instead of its text height -- and every element the client chains below its
+   * `BOTTOMLEFT` then started below the fold, where the scroll-frame clip correctly dropped it. One
+   * cause, both of "the quest text is missing" and "the scroll does nothing".
+   *
+   * In the real engine a region with no `SetPoint` has a default POSITION, and the first real
+   * `SetPoint` replaces it rather than combining with it -- which is why the client never needs
+   * `ClearAllPoints` there. This flag is that distinction: the fill stays for anything never
+   * positioned from Lua (a parchment, a background, an icon), and vanishes the moment something
+   * places the region itself.
+   */
+  anchorsAreDefault = false;
   width = 0;
   height = 0;
 
   shown = true;
   alpha = 1;
   mouseEnabled = false;
+
+  /**
+   * The `<ScrollFrame>` that CLIPS this widget's subtree, or null.
+   *
+   * Set by `SetScrollChild` on the scroll CHILD -- never on the scroll frame and never on its other
+   * children, which is the whole precision of it: `UIPanelScrollFrameTemplate` makes
+   * `$parentScrollBar` a `<Frames>` child of the ScrollFrame too, and the scrollbar sits OUTSIDE the
+   * viewport to the right. Clipping every child would delete it.
+   *
+   * `drawList` carries this down the subtree and intersects each item's rect with the frame's. See
+   * `clipRect`.
+   */
+  clippedBy: Widget | null = null;
+
+  /**
+   * How far this `<ScrollFrame>` has scrolled its child, in logical units. Written by
+   * `SetVerticalScroll`/`SetHorizontalScroll`; read by `drawList` when it offsets the clipped subtree.
+   *
+   * On the FRAME, not the child, so one lookup serves the clip and the offset -- they are two halves of
+   * one behaviour. The clip decides what is inside the viewport; this decides which part of the child the
+   * viewport is over.
+   *
+   * **INERT FOR A FAUX SCROLL FRAME, and that is a fact about the client's own files rather than a
+   * special case here.** A faux frame recomputes a ROW OFFSET and repaints; its rows are not children of
+   * its scroll child at all -- `SkillRankFrame1` is outside `skillframe.xml`'s `<ScrollChild>` block, as
+   * are reputation's and the spellbook's. So the scroll child a faux frame declares has nothing drawable
+   * under it and offsetting it moves nothing. Nothing needs to distinguish the two kinds.
+   */
+  scrollOffset: { x: number; y: number } = { x: 0, y: 0 };
+
+  /**
+   * The `<Slider>` this texture is the THUMB of, or null. Set by `SetThumbTexture`.
+   *
+   * A thumb's position is the engine's to choose, not the document's: `<ThumbTexture>` carries a `<Size>`
+   * and no `<Anchors>` at all (`uipaneltemplates.xml:207-211`), so it has nothing to be placed by. Under
+   * the loader's anchorless default it inherited the whole TRACK's rect -- a knob stretched over the full
+   * bar rather than a knob. `drawList` overrides its rect from the track and the slider's value.
+   */
+  thumbOf: Widget | null = null;
+
+  /**
+   * Where this `<Slider>`'s thumb sits along its track: `fraction` in 0..1, and the axis it travels on.
+   *
+   * Written by `SetValue`/`SetMinMaxValues`/`SetOrientation`. Vertical by default, which is what every
+   * scrollbar in the client is.
+   */
+  sliderTravel: { fraction: number; vertical: boolean } = { fraction: 0, vertical: true };
+
+  /**
+   * DRAG THE THUMB, and it is the engine's behaviour rather than a script's.
+   *
+   * No `<Slider>` in the client binds a press-and-move handler -- the same situation as a
+   * `<PlayerModel>`'s drag-to-rotate, answered the same way (see `hit.ts#paneAt`). So `ui/input.ts`
+   * owns the gesture and this is how it gets back into Lua: `methods/scroll.ts` installs a closure that
+   * runs the slider's own `SetValue`, so the clamp, the thumb sync and the `OnValueChanged` dispatch are
+   * the ones every other caller gets. Writing `sliderTravel` from the input layer instead would move the
+   * knob and tell the client nothing.
+   *
+   * `fraction` is 0..1 along the track, 0 at the top (or left) -- the same sense `sliderTravel` uses.
+   * Null on every widget that is not a live `<Slider>`.
+   */
+  onSliderDrag: ((fraction: number) => void) | null = null;
   focusable = false;
 
   /**
@@ -361,7 +617,30 @@ export class Widget {
    * carrying both meanings that made clicking back into the account box to fix a typo submit the typo.
    * A widget where Enter means something a click does not uses `onSubmit`.
    */
-  onClick: (() => void) | null = null;
+  onClick: ((button: MouseButtonName) => void) | null = null;
+
+  /**
+   * WHICH MOUSE BUTTONS FIRE `onClick`, from `RegisterForClicks`. `null` means the frame never called it.
+   *
+   * **This existed as a declared gap and the gap was the reason nothing could be equipped.** Every click
+   * used to be reported as `"LeftButton"` whatever button was pressed (`scripts.ts:374`, now fixed), so a
+   * RIGHT-click on a bag slot ran `ContainerFrameItemButton_OnClick`'s LEFT branch --
+   * `PickupContainerItem`, the item-cursor gap -- instead of its right branch, `UseContainerItem`. The
+   * equip path was written and correct and simply never reached. `ContainerFrameItemButton_OnLoad`
+   * (`containerframe.lua:614`) registers `"LeftButtonUp", "RightButtonUp"`, which is what this stores.
+   *
+   * `null` means LEFT ONLY, which is the engine's default for a Button and not a convenience: 37 of the
+   * manifest's registrations exist precisely to ADD the right button, and a frame that never asked for
+   * it does not get it.
+   *
+   * **THE Up/Down PHASE IS NOT HONOURED, and that is a stated limitation.** The registration strings
+   * are `LeftButtonUp` / `RightButtonDown` / `AnyUp` and the engine fires on the phase named; this
+   * router fires `onClick` on the RELEASE only, so only the BUTTON half of each entry is kept. A frame
+   * that registers only `...Down` therefore still clicks on release rather than not at all -- which is
+   * where this differs from the engine, and it is the safe direction: the alternative would silence two
+   * of the manifest's registrations entirely.
+   */
+  clickButtons: Set<MouseButtonName> | null = null;
   /**
    * Invoked by Enter, in preference to `onClick`. FrameXML's `OnEnterPressed` -- the login screen's
    * edit boxes submit the form on Enter, and a pointer click on them must not.
@@ -374,7 +653,7 @@ export class Widget {
    * engine does, and what `RealmListRealmButtonTemplate` relies on: its `OnClick` selects a realm
    * and its `OnDoubleClick` joins the one just selected (realmlist.xml:234-239).
    */
-  onDoubleClick: (() => void) | null = null;
+  onDoubleClick: ((button: MouseButtonName) => void) | null = null;
 
   /**
    * The rest of the FrameXML script surface the input router can actually observe.
@@ -393,8 +672,20 @@ export class Widget {
    */
   onEnter: (() => void) | null = null;
   onLeave: (() => void) | null = null;
-  onMouseDown: (() => void) | null = null;
-  onMouseUp: (() => void) | null = null;
+  onMouseDown: ((button: MouseButtonName) => void) | null = null;
+
+  onMouseUp: ((button: MouseButtonName) => void) | null = null;
+
+  /**
+   * FrameXML's `OnMouseWheel`, which was delivered NOWHERE -- `ui/input.ts` had no wheel listener at
+   * all, so no frame in the client could be scrolled by the wheel.
+   *
+   * `delta` is the engine's sign convention: **+1 is up / away from the user, -1 is down**, which is what
+   * `ScrollFrameTemplate_OnMouseWheel`'s `if ( value > 0 )` branch subtracts from the scroll value with
+   * (`uipaneltemplates.lua:158-165`). A DOM `wheel` event's `deltaY` is the opposite sign, so the router
+   * negates it.
+   */
+  onMouseWheel: ((delta: number) => void) | null = null;
   /**
    * FrameXML's `OnTabPressed`, and it REPLACES the router's own Tab ring for the widget that has one:
    * `accountlogin.xml`'s account box moves focus to the password box itself, and a document that
@@ -446,6 +737,7 @@ export class Widget {
     child.frameLevel = isRegion ? this.frameLevel : this.frameLevel + 1;
     this.children.push(child);
     treeStructure += 1;
+    bumpGeometry('add');
     return child;
   }
 
@@ -455,15 +747,50 @@ export class Widget {
       this.children.splice(index, 1);
       child.parent = null;
       treeStructure += 1;
+      bumpGeometry('remove');
     }
+  }
+
+  /** `SetScale`. Geometry-touching, because every rect under this widget moves. */
+  setScale(scale: number): Widget {
+    const next = Number.isFinite(scale) && scale > 0 ? scale : 1;
+    if (next !== this.scale) {
+      this.scale = next;
+      bumpGeometry('scale');
+    }
+    return this;
+  }
+
+  /**
+   * This widget's scale multiplied by every ancestor's -- `GetEffectiveScale`.
+   *
+   * Walked rather than cached: a cache would have to be invalidated on every `SetScale`,
+   * `SetParent` and tree edit, and the chain here is a handful of pointer hops. The two tree walks
+   * that build layout nodes do NOT use this -- they carry the product down, which is free.
+   */
+  get effectiveScale(): number {
+    let out = this.scale;
+    let node: Widget | null = this.parent;
+    while (node) {
+      out *= node.scale;
+      node = node.parent;
+    }
+    return out;
   }
 
   setAnchors(...anchors: Anchor[]): Widget {
     this.anchors = anchors;
+    // Any explicit call is an authored placement, so it stops being the loader's default. `loader.ts`
+    // re-sets the flag straight after its own fill.
+    this.anchorsAreDefault = false;
+    // Every `SetPoint`/`ClearAllPoints`/`SetAllPoints` funnels through here, so this one bump covers
+    // all three. See `geometryRevision`.
+    bumpGeometry('setAnchors');
     return this;
   }
 
   setSize(width: number, height: number): Widget {
+    bumpGeometry('setSize');
     this.width = width;
     this.height = height;
     return this;
@@ -479,15 +806,83 @@ export class Widget {
       return;
     }
     this.shown = true;
+    // A newly shown frame has a rect it did not have a moment ago, and `ToggleDropDownMenu` measures
+    // one in this same tick. See `geometryRevision`. Inside the transition guard, so an idempotent
+    // per-tick `show()` on an already-visible widget costs nothing.
+    bumpGeometry('show');
     this.restamp();
   }
 
   /** Moves this widget to the tail of its draw bucket. See `linkStamp`'s doc comment for the rule. */
+  /**
+   * Move this widget to the tail of its draw bucket -- **and its whole SUBTREE with it.**
+   *
+   * ## The subtree is the fix, and it was measured
+   *
+   * It used to stamp `this` alone, which INVERTS a frame against its own regions: the frame jumps to
+   * a fresh stamp while its backdrop and font strings keep older ones, so the frame sorts AFTER the
+   * children it contains. A frame with a semi-transparent backdrop then draws that backdrop over its
+   * own text, and white text under dark glass reads as grey.
+   *
+   * That is exactly what the owner reported on the world-map tooltip, and the numbers named it:
+   * `WorldMapTooltipTextLeft1` at draw index **196**, `TextLeft2` at **197**, and `WorldMapTooltip`
+   * itself at **253** -- the container fifty-six items after its contents, with cascaded alpha 1 on
+   * all three. Four earlier rounds looked at colour, alpha, raster density and fractional placement,
+   * all of which were correct; the defect was the ORDER, which none of those could show.
+   *
+   * `SetFrameStrata` is what triggered it: `WorldMapFrame_SetOpacity`'s callers set the tooltip's
+   * strata on every size change (`worldmapframe.lua:1355,1405`), which is why it began after the map
+   * had been windowed once and stayed afterwards.
+   *
+   * ## Cost
+   *
+   * A pre-order walk of the subtree, and the ORDER of the walk is the point: parent first, so a
+   * parent always ends with a lower stamp than its children. Called from `show()` and from
+   * `SetFrameStrata`/`SetFrameLevel` on a real change -- never per frame, and both of those already
+   * guard against no-op sets for the same reason this walk must not run for nothing.
+   */
   restamp(): void {
     this.linkStamp = nextLinkStamp++;
+    for (const child of this.children) {
+      child.restamp();
+    }
+  }
+
+  /**
+   * Push this widget's strata down the subtree. **Strata is INHERITED, and it was only inherited
+   * once.**
+   *
+   * `add` copies the parent's strata onto a child at the moment it is added (`:729`), and
+   * `SetFrameStrata` used to write the frame alone. So a frame whose strata CHANGES leaves every
+   * region it already owns behind in the old one -- and `compareOrder` ranks strata above everything
+   * else (`framexml/order.ts:88-96`), so the layer never gets to referee.
+   *
+   * That is the grey tooltip text, measured. `window.whatCovers("WorldMapTooltipTextLeft1")`:
+   * the text at draw index **196**, and covering it at **253** the tooltip's own backdrop --
+   * `layer: "BACKGROUND"`, same rect, alpha 1. BACKGROUND sorts before ARTWORK, so the only way it
+   * lands after the text is a higher-ranked axis, and strata is the only one above frame level.
+   * The backdrop is created lazily on `SetBackdrop`, i.e. AFTER `SetFrameStrata("TOOLTIP")` had run,
+   * so it inherited TOOLTIP while the text regions still carried the strata from load.
+   *
+   * Which is exactly why it began after the map had been windowed once: the client sets the
+   * tooltip's strata on every size change (`worldmapframe.lua:1355,1405`), and nothing before that
+   * had ever changed a strata on a frame that already had children.
+   *
+   * Every descendant, not just regions: a child FRAME inherits its parent's strata in this model too
+   * (`add`), and the client sets a child's explicitly afterwards when it wants something else --
+   * which is the same order of operations the engine has.
+   */
+  restrata(): void {
+    for (const child of this.children) {
+      child.strata = this.strata;
+      child.restrata();
+    }
   }
 
   hide(): void {
+    if (this.shown) {
+      bumpGeometry('hide');
+    }
     this.shown = false;
   }
 
@@ -687,6 +1082,22 @@ export interface DrawItem {
    * `barFillTexCoords`.
    */
   texCoords?: TexCoords;
+  /**
+   * The viewport this item must not draw outside of, when NARROWING ITS RECT CANNOT EXPRESS THE CROP.
+   *
+   * Set for a FONT STRING only, and the reason is `renderer.ts`' text branch: a string draws at its
+   * RASTERIZED size, centred inside its rect (`renderer.ts:396-402`), not stretched to it. So shrinking
+   * a font string's rect does not crop the text -- it RE-CENTRES it in a smaller box and keeps its full
+   * height. The owner saw both halves of that: "нижняя часть движется быстрее и заходит поверх другого
+   * текста" (a block drifts further the more of it is cropped, so blocks at different crops appear to
+   * move at different speeds and collide) and "текст уходит за пределы бокса" (the quad keeps its full
+   * size while its rect shrinks).
+   *
+   * So a clipped font string keeps its UNCROPPED rect -- placement stays exactly what it would be with
+   * no scroll -- and the crop rides along here for the renderer to apply to the text quad, where the
+   * glyph box and the raster pad are known and this file's rect arithmetic cannot reach.
+   */
+  crop?: Rect;
 }
 
 /**
@@ -695,6 +1106,151 @@ export interface DrawItem {
  * (this walk's DFS index) rides along as `declarationSeq` -- a defensive tie-break only, since
  * `linkStamp` is a global monotonic counter and two widgets sharing one is not expected to happen.
  */
+/**
+ * Crop `item` to `clip`, or null when it falls entirely outside.
+ *
+ * **THE ENGINE'S SCROLLFRAME CLIPS, AND OURS DID NOT.** `methods/scroll.ts`' header predicted exactly
+ * this consequence -- "nothing in `widget.ts` clips a frame's children, so an offset scroll child would
+ * draw outside its viewport rather than being scrolled inside it" -- and the trainer round then measured
+ * it: a rank string beginning at **x = 295 inside a 296-wide viewport**, which the real client hides by
+ * clipping and we drew in full.
+ *
+ * **THE ANCHOR IS NOT TOUCHED, and that was a deliberate rejection.** Nudging the child's offset would
+ * invent a number the game's own file does not contain, and would still spill for any other overflowing
+ * row. Clipping is what the engine does, and it is also what makes a real scroll frame actually SCROLL
+ * rather than spill.
+ *
+ * ## The UVs move with the rect, or the crop would squash instead of cut
+ *
+ * A sprite's quad samples `u0..u1` across its width. Shrinking the rect alone would draw the WHOLE
+ * texture into a narrower box -- a squash, not a clip, and a subtler wrong than the overflow it
+ * replaced. So each edge's fractional travel is applied to the matching UV edge. Reversed coordinates
+ * survive this untouched: the interpolation is a plain lerp between `u0` and `u1`, which is how
+ * `renderer.ts:208-213` already treats a mirrored crop.
+ *
+ * ## Cost: the item count can only FALL
+ *
+ * This is the constraint that matters, because `items.length` is the offscreen target's whole basis.
+ * Nothing is added here: an item is passed through, narrowed, or DROPPED. A clipped scroll box therefore
+ * makes the draw list shorter than it was, never longer, and the fingerprint cheaper rather than dearer.
+ */
+function clipItem(item: DrawItem, clip: Rect): DrawItem | null {
+  const left = Math.max(item.rect.left, clip.left);
+  const top = Math.max(item.rect.top, clip.top);
+  const right = Math.min(item.rect.left + item.rect.width, clip.left + clip.width);
+  const bottom = Math.min(item.rect.top + item.rect.height, clip.top + clip.height);
+  if (right <= left || bottom <= top) {
+    // Entirely outside the viewport. The trainer's x=295 rank string in a 296-wide box is all but this.
+    return null;
+  }
+  if (left === item.rect.left && top === item.rect.top
+    && right === item.rect.left + item.rect.width
+    && bottom === item.rect.top + item.rect.height) {
+    // Wholly inside: the common case, and it must allocate nothing.
+    return item;
+  }
+  if (item.widget.kind === 'fontstring') {
+    /**
+     * See `DrawItem#crop`: the rect is left ALONE, because narrowing it moves the text instead of
+     * cutting it.
+     *
+     * **THE VIEWPORT, NOT THE INTERSECTION ABOVE, and passing the intersection was a real defect the
+     * owner photographed**: "видна четкая линия разделения". A font string's QUAD is the rasterized
+     * glyph box, which is not the same as its rect -- `deriveSize`'s measurement and `text.ts`' raster
+     * can disagree, and the quad is centred in the rect, so it can overhang both edges. The renderer
+     * intersects the quad with whatever arrives here, so handing it `rect ∩ viewport` cut the text at
+     * the RECT's edge: the last lines of the description vanished and the block below butted straight
+     * against the cut. The engine clips to the viewport and nothing else, so that is what travels.
+     */
+    return { ...item, crop: clip };
+  }
+  const rect: Rect = { left, top, width: right - left, height: bottom - top };
+  const base = item.texCoords ?? item.widget.texCoords ?? null;
+  let texCoords = item.texCoords;
+  if (base !== null && item.rect.width > 0 && item.rect.height > 0) {
+    const fx0 = (left - item.rect.left) / item.rect.width;
+    const fx1 = (right - item.rect.left) / item.rect.width;
+    const fy0 = (top - item.rect.top) / item.rect.height;
+    const fy1 = (bottom - item.rect.top) / item.rect.height;
+    texCoords = {
+      u0: base.u0 + fx0 * (base.u1 - base.u0),
+      u1: base.u0 + fx1 * (base.u1 - base.u0),
+      v0: base.v0 + fy0 * (base.v1 - base.v0),
+      v1: base.v0 + fy1 * (base.v1 - base.v0),
+    };
+  }
+  return texCoords === undefined
+    ? { widget: item.widget, rect, alpha: item.alpha }
+    : { widget: item.widget, rect, alpha: item.alpha, texCoords };
+}
+
+/**
+ * The intersected clip rect for a widget's chain of clipping ancestors, or null when it has none.
+ *
+ * Walks up rather than taking only the innermost: a scroll frame nested inside another is clipped by
+ * both, and the engine applies each independently. The walk is over CLIPPING ancestors only, so it runs
+ * once per clipped item and is a no-op for everything else.
+ */
+function clipRect(
+  clip: Widget | null,
+  rects: Map<string, Rect>,
+  unplaceable: Set<string>,
+  offset: { x: number; y: number },
+): Rect | null {
+  let out: Rect | null = null;
+  let node: Widget | null = clip;
+  let guard = 0;
+  while (node !== null) {
+    /**
+     * IT FAILS OPEN, NOT CLOSED, and that is the whole point of these two guards.
+     *
+     * A clip that cannot establish where its viewport IS must not conclude that the content is
+     * off-screen. Clipping is the only stage in `drawList` that can DROP an item, so a viewport whose
+     * rect we got wrong turns a misplaced panel into a BLANK one -- and blank is much harder to
+     * diagnose than misplaced, because there is nothing left on screen to reason about.
+     *
+     *  - **UNPLACEABLE**: the frame has no resolvable anchor chain, so `resolveAnchors` placed it by
+     *    fallback rather than by its document. `unplaceableNodes` already knows; `drawList` computes it
+     *    two lines above for its own filter.
+     *  - **DEGENERATE**: zero or negative width or height. A frame sized by a script that has not run
+     *    yet reads 0, and `drawList` runs every frame from the first one -- so this is reachable during
+     *    the load for any frame whose size the client sets in Lua.
+     *
+     * In both cases the item is passed through unclipped: overflowing content is a visible, reportable
+     * defect, and an empty panel is not.
+     */
+    if (unplaceable.has(node.id)) {
+      return null;
+    }
+    const rect = rects.get(node.id);
+    if (rect === undefined || rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    // ACCUMULATED with the clip, because they are two halves of one behaviour: this frame decides both
+    // what part of the child is over its viewport and which of that survives. Summed up the chain so a
+    // scroll frame nested in another scrolls by both.
+    offset.x += node.scrollOffset.x;
+    offset.y += node.scrollOffset.y;
+    if (out === null) {
+      out = rect;
+    } else {
+      const left = Math.max(out.left, rect.left);
+      const top = Math.max(out.top, rect.top);
+      const right = Math.min(out.left + out.width, rect.left + rect.width);
+      const bottom = Math.min(out.top + out.height, rect.top + rect.height);
+      out = { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+    }
+    // Bounded: `clippedBy` is a graph this file does not own, and a cycle in it would hang the draw
+    // pass rather than merely mis-clip. Four is past any real nesting.
+    guard += 1;
+    if (guard > 4) {
+      return out;
+    }
+    node = node.clippedBy ?? (node.parent === null ? null : node.parent.clippedBy);
+  }
+  return out;
+}
+
 const orderKey = (entry: { widget: Widget; sequence: number }): OrderKey => ({
   strata: entry.widget.strata,
   frameLevel: entry.widget.frameLevel,
@@ -826,6 +1382,8 @@ export class WidgetRoot {
       nodes.push({
         id, width: size.width, height: size.height, anchors: widget.anchors,
         clamped: widget.clampedToScreen,
+        // No chain to carry here -- these are found by id, off the walk -- so the walk-up is used.
+        scale: widget.effectiveScale,
       });
       for (const anchor of widget.anchors) {
         if (anchor.relativeTo !== undefined && !present.has(anchor.relativeTo)) {
@@ -835,19 +1393,53 @@ export class WidgetRoot {
     }
   }
 
-  drawList(viewport: Viewport, measure?: MeasureText): DrawItem[] {
-    const flat: Array<{ widget: Widget; alpha: number; sequence: number }> = [];
+  /**
+   * Every widget's rect, resolved NOW over the whole tree -- shown or not.
+   *
+   * **WHY THIS EXISTS, and it is the whole of "the stat selects will not open."** The client's own
+   * `ToggleDropDownMenu` does `listFrame:Show()` and then, on the very next line,
+   * `local x, y = listFrame:GetCenter()` -- and `if ( not x or not y ) then listFrame:Hide(); return; end`
+   * (`uidropdownmenu.lua:742-751`). `Region:GetCenter` answers out of the PUBLISHED draw list
+   * (`ui/rects.ts`), which is the PREVIOUS frame's, and a frame shown during an `OnClick` is not in it.
+   * So the client's own guard hid the menu one line after showing it, every time. MEASURED live: after a
+   * real click, `numButtons` 5 and `UIDROPDOWNMENU_OPEN_MENU` set, but `IsShown()` false through 2.6 s.
+   *
+   * `drawList` cannot answer this: it skips a hidden subtree whole, and `addHiddenTargets` only adds a
+   * hidden frame that something else is ANCHORED to -- nothing anchors to `DropDownList1`.
+   *
+   * Not on the per-frame path. `ui/rects.ts` calls this only when a script asks for an edge of a widget
+   * the last draw list did not contain, and caches it until the next publish.
+   */
+  /**
+   * Every widget's resolved rect.
+   *
+   * `visibleOnly` PRUNES HIDDEN SUBTREES, and the evidence for it is the owner's own HUD rather than a
+   * benchmark of mine: `drawList` below does the SAME work over the SAME tree -- this walk, `deriveSize`
+   * on every node, the same `resolveAnchors` -- and costs **0.5 ms**, while this method costs 63 ms
+   * inside `ui.scroll`. The only difference is the node count: `drawList` prunes what it will not draw
+   * and this walked all 4211, every hidden panel included, once per frame.
+   *
+   * Pruning on `shown` and not on DRAWN is the distinction that matters for the caller that needs this
+   * per frame: a scroll child's rows that are scrolled out of the viewport are still `shown` -- they are
+   * clipped, not hidden -- and they are exactly the rows whose extent decides the scroll range.
+   *
+   * `rects.ts#layoutRectOf` asks for the pruned map first and falls back to the full one when the id it
+   * wants is absent, so a query about a hidden frame still gets a real answer. It just pays for it, once
+   * per revision, instead of every frame paying for every hidden panel.
+   */
+  layoutRects(
+    viewport: Viewport,
+    measure?: MeasureText,
+    visibleOnly: boolean = false,
+  ): Map<string, Rect> {
     const nodes: LayoutNode[] = [];
-    let sequence = 0;
     const scale = screenScale(viewport.height);
-
-    const walk = (widget: Widget, alpha: number): void => {
-      if (!widget.shown) {
+    const walk = (widget: Widget, inherited: number): void => {
+      if (visibleOnly && widget !== this.root && !widget.shown) {
         return;
       }
-
-      const cumulative = alpha * widget.alpha;
-      flat.push({ widget, alpha: cumulative, sequence: sequence++ });
+      // Carried down rather than read off `effectiveScale`, which would walk back up per node.
+      const effective = inherited * widget.scale;
       const size = deriveSize(widget, scale, measure);
       nodes.push({
         id: widget.id,
@@ -855,14 +1447,52 @@ export class WidgetRoot {
         height: size.height,
         anchors: widget.anchors,
         clamped: widget.clampedToScreen,
+        scale: effective,
+      });
+      for (const child of widget.children) {
+        walk(child, effective);
+      }
+    };
+    walk(this.root, 1);
+    return resolveAnchors(nodes, viewport);
+  }
+
+  drawList(viewport: Viewport, measure?: MeasureText): DrawItem[] {
+    const flat: Array<{
+      widget: Widget; alpha: number; sequence: number; clip: Widget | null;
+    }> = [];
+    const nodes: LayoutNode[] = [];
+    let sequence = 0;
+    const scale = screenScale(viewport.height);
+
+    const walk = (widget: Widget, alpha: number, clip: Widget | null, inherited: number): void => {
+      if (!widget.shown) {
+        return;
+      }
+
+      const cumulative = alpha * widget.alpha;
+      // The innermost `<ScrollFrame>` clipping this widget, inherited down the subtree. `clippedBy` is
+      // set only on a scroll CHILD (`methods/scroll.ts#SetScrollChild`), so a scrollbar -- also a child
+      // of the frame, and deliberately outside its viewport -- is never clipped.
+      const clipping = widget.clippedBy ?? clip;
+      flat.push({ widget, alpha: cumulative, sequence: sequence++, clip: clipping });
+      const effective = inherited * widget.scale;
+      const size = deriveSize(widget, scale, measure);
+      nodes.push({
+        id: widget.id,
+        width: size.width,
+        height: size.height,
+        anchors: widget.anchors,
+        clamped: widget.clampedToScreen,
+        scale: effective,
       });
 
       for (const child of widget.children) {
-        walk(child, cumulative);
+        walk(child, cumulative, clipping, effective);
       }
     };
 
-    walk(this.root, 1);
+    walk(this.root, 1, null, 1);
     this.addHiddenTargets(nodes, scale, measure);
 
     const rects = resolveAnchors(nodes, viewport);
@@ -872,6 +1502,15 @@ export class WidgetRoot {
     // doomed nodes stay in it), so a dependent is judged by its target's real state rather than by
     // the target having been withheld.
     const unplaceable = unplaceableNodes(nodes);
+    // Which clipping frame each widget inherited, carried out of the walk so the crop stage can find it
+    // after `resolveAnchors` has given every clip frame a rect. Empty for a tree with no scroll child,
+    // which is the ordinary case.
+    const itemClip = new Map<Widget, Widget | null>();
+    for (const entry of flat) {
+      if (entry.clip !== null) {
+        itemClip.set(entry.widget, entry.clip);
+      }
+    }
 
     return flat
       .filter((entry) => {
@@ -910,6 +1549,86 @@ export class WidgetRoot {
           rect: rects.get(entry.widget.id)!,
           alpha: entry.alpha,
         };
-      });
+      })
+      // THE SCROLLFRAME CROP. Last, so it sees the final rect -- including a StatusBar fill's
+      // overridden one. `clipItem` passes through, narrows, or DROPS: the item count can only fall.
+      .map((item) => {
+        /**
+         * A SLIDER'S THUMB IS PLACED BY THE ENGINE, not by its document.
+         *
+         * `<ThumbTexture>` carries a `<Size>` and no `<Anchors>` at all
+         * (`uipaneltemplates.xml:207-211`), so under the loader's anchorless default it inherited the
+         * whole TRACK's rect -- a knob stretched over the full bar instead of a knob. The owner's
+         * side-by-side shows the real client's scrollbar with a visible thumb and ours with none.
+         *
+         * Overridden here rather than by writing anchors, for the reason the scroll offset is: the rect
+         * map stays untouched, so a slider that moves costs one arithmetic per frame and never a
+         * re-layout. The travel is `trackLength - thumbLength`, which is the engine's rule -- a thumb at
+         * `fraction` 1 sits flush with the far end rather than half off it.
+         */
+        const slider = item.widget.thumbOf;
+        if (slider !== null) {
+          const track = rects.get(slider.id);
+          if (track !== undefined) {
+            const size = deriveSize(item.widget, scale, measure);
+            const travel = slider.sliderTravel;
+            if (travel.vertical) {
+              const span = Math.max(0, track.height - size.height);
+              return {
+                ...item,
+                rect: {
+                  left: track.left + (track.width - size.width) / 2,
+                  top: track.top + travel.fraction * span,
+                  width: size.width,
+                  height: size.height,
+                },
+              };
+            }
+            const span = Math.max(0, track.width - size.width);
+            return {
+              ...item,
+              rect: {
+                left: track.left + travel.fraction * span,
+                top: track.top + (track.height - size.height) / 2,
+                width: size.width,
+                height: size.height,
+              },
+            };
+          }
+        }
+        const owner = itemClip.get(item.widget) ?? null;
+        if (owner === null) {
+          return item;
+        }
+        const offset = { x: 0, y: 0 };
+        const clip = clipRect(owner, rects, unplaceable, offset);
+        if (clip === null) {
+          return item;
+        }
+        /**
+         * SCROLLED, THEN CLIPPED -- in that order, and the order is the whole behaviour.
+         *
+         * Offsetting first is what brings the next lines INTO the viewport; clipping second is what
+         * keeps the ones that scrolled past the top edge out of it. Done here at DRAW time rather than by
+         * moving the child's anchors, so the rect map and `resolveAnchors` are untouched: a scroll costs
+         * one subtraction per already-clipped item and never a re-layout.
+         *
+         * `top - y` because `Rect.top` grows downward while a scroll offset grows as the view descends,
+         * so a positive offset lifts the content.
+         */
+        const shifted = offset.x === 0 && offset.y === 0
+          ? item
+          : {
+            ...item,
+            rect: {
+              left: item.rect.left - offset.x,
+              top: item.rect.top - offset.y,
+              width: item.rect.width,
+              height: item.rect.height,
+            },
+          };
+        return clipItem(shifted, clip);
+      })
+      .filter((item): item is DrawItem => item !== null);
   }
 }

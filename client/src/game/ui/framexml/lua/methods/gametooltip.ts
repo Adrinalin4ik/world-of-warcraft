@@ -57,22 +57,40 @@
  * three frames writing into one.
  */
 import { MethodContext, MethodTable, registerMethods } from '../object';
+import { pointerAt } from '../../../pointer';
 import { Widget } from '../../../widget';
 import { ensureFont, notImplemented, warnOnce, widgetOf } from './region';
 import { getAction } from '../api/actions';
+import { getAuraTooltipSource, getShapeshiftTooltipSource } from '../api/auras';
 import { getSpellbook } from '../api/spells';
 import { layoutScale, measureText } from '../../../text';
-import { getItemTooltipSource, ItemTooltipInfo } from '../api/items';
+import { getItemTooltipSource, ItemTooltipInfo, ItemTooltipSource } from '../api/items';
+import { getUnit } from '../api/units';
+import { invokeScriptHandler } from '../scripts';
 
 /**
- * How many lines a tooltip can hold: the eight `$parentTextLeft<n>` slots `GameTooltipTemplate` authors.
+ * The eight `$parentTextLeft<n>` slots `GameTooltipTemplate` authors -- and no longer the ceiling.
  *
- * The real engine CREATES more `FontString`s past the authored eight when a tooltip needs them. This one
- * does not, and a ninth line is dropped with a one-time warning rather than silently: none of the three
- * consumers built here comes near eight (a spell tooltip is name + rank + cost + range + description), so
- * growing the stack would be machinery for a case nothing reaches, and a warning names it if one ever does.
+ * **THIS FILE USED TO STOP AT EIGHT AND ARGUE THAT NOTHING WOULD REACH IT.** The argument was "a spell
+ * tooltip is name + rank + cost + range + description", and it held until the item body landed: a plain
+ * helm is item level, binding, slot, armour, two stats, a blank, the requirement, durability, the
+ * flavour text and the sell price -- ELEVEN lines under the name. Capped at eight, the fix for "items
+ * have no description" would have shown two thirds of one and printed a warning.
+ *
+ * So the stack GROWS, which is what the real engine does: it creates further `FontString`s past the
+ * authored eight on demand. `ensureLine` below does exactly that, copying the authored slots' font and
+ * continuing their anchor chain.
  */
-const MAX_LINES = 8;
+const AUTHORED_LINES = 8;
+
+/**
+ * The ceiling on a grown stack. OURS -- the engine has no documented limit.
+ *
+ * It exists only so a runaway caller cannot mint FontStrings without bound; 30 is comfortably past the
+ * longest real item tooltip (a socketed epic with three effects is high teens) and a line past it is
+ * dropped with the same one-time warning the hard cap used to give.
+ */
+const MAX_LINES = 30;
 
 /**
  * The tooltip's inner padding and line gap, in LOGICAL UNITS -- both read straight off the template.
@@ -109,6 +127,28 @@ interface TooltipState {
   lines: number;
   /** `SetMinimumWidth`'s value, in logical units. 0 for none. */
   minWidth: number;
+
+  /**
+   * The token `SetUnit` was last given, lower-cased, or null.
+   *
+   * What `GameTooltip:IsUnit(token)` answers -- and `GameTooltip`'s own `<OnTooltipSetUnit>` is
+   * `if ( self:IsUnit("mouseover") ) then ... GameTooltip_UnitColor("mouseover") end`
+   * (`gametooltip.xml:14-18`), so without this the client cannot colour its own first line.
+   */
+  unitToken: string | null;
+
+  /**
+   * The NAME and LINK of whatever `Set<Thing>Item` last filled this tooltip -- what
+   * `GameTooltip:GetItem()` answers. About the tooltip's CURRENT CONTENTS, not about a widget, which
+   * is why they live here and are cleared by `SetOwner`.
+   */
+  itemName?: string | null;
+  itemLink?: string | null;
+  /**
+   * The anchor `SetOwner` was given, kept so `GetAnchorType` can answer it. Not new state -- the value
+   * was already received and already mapped through `ANCHORS`; it was simply thrown away.
+   */
+  anchorType?: string;
 }
 
 /**
@@ -120,10 +160,18 @@ interface TooltipState {
  */
 const stateByWidget = new WeakMap<Widget, TooltipState>();
 
+/**
+ * Each line slot's colour as its document authored it, so an uncoloured line can be restored to it.
+ *
+ * A `WeakMap` on the WIDGET for the reason `stateByWidget` gives: frame ids are minted per registry, so
+ * a module-level id map would leak one runtime's slots into the next one's by number collision.
+ */
+const AUTHORED_COLOURS = new WeakMap<Widget, string>();
+
 function stateOf(widget: Widget): TooltipState {
   let state = stateByWidget.get(widget);
   if (state === undefined) {
-    state = { owner: null, lines: 0, minWidth: 0 };
+    state = { owner: null, lines: 0, minWidth: 0, unitToken: null };
     stateByWidget.set(widget, state);
   }
   return state;
@@ -276,8 +324,26 @@ function writeSide(
   region.text = text;
   region.shown = true;
   const font = ensureFont(region);
+  /**
+   * A COLOURLESS LINE GOES BACK TO THE SLOT'S AUTHORED COLOUR, and it used not to -- it kept whatever
+   * the LAST tooltip left in that slot.
+   *
+   * Caught in a screenshot, not on paper: after an item tooltip had painted its `Use:` line green in
+   * slot 4, a following tooltip's uncoloured line 4 drew green too. The comment below is still right
+   * about the DEFAULT (`GameTooltipHeaderText`/`GameTooltipText` are both white, `fontstyles.xml:247-255`);
+   * what was wrong is that "leave the font alone" is only equivalent to "use the authored colour" on a
+   * slot nobody has coloured yet, and every slot gets coloured eventually.
+   *
+   * The authored value is captured the first time the slot is seen, which is before anything here can
+   * have overwritten it.
+   */
+  if (!AUTHORED_COLOURS.has(region)) {
+    AUTHORED_COLOURS.set(region, font.color);
+  }
   if (colour !== undefined) {
     font.color = toHex(colour.r, colour.g, colour.b);
+  } else {
+    font.color = AUTHORED_COLOURS.get(region)!;
   }
   // Only ever SET, never cleared back to undefined: a slot reused for an unwrapped line would otherwise
   // keep the previous tooltip's wrap. `wrapWidth` of undefined is "measure on one line".
@@ -309,6 +375,73 @@ function colourArg(args: unknown[], at: number): { r: number; g: number; b: numb
 }
 
 /** Append a line, returning the 1-based index written, or 0 when the tooltip is full. */
+/**
+ * Make sure line slot `line` exists, creating it if the template did not author it.
+ *
+ * The real engine does this; see `AUTHORED_LINES`. What is created is a pair of `FontString`s named
+ * exactly as the authored ones are (`<tooltip>TextLeft9`, `TextRight9`), so `regionOf` finds them by the
+ * same name lookup and nothing else in this file needs to know which slots were authored.
+ *
+ * THREE THINGS ARE COPIED FROM THE AUTHORED SLOTS RATHER THAN CHOSEN:
+ *
+ *  - **The font.** Taken from `TextLeft1`, which inherits `GameTooltipHeaderText`/`GameTooltipText`
+ *    (`gametooltiptemplate.xml:18-24`). A fresh `FontString` would otherwise get `ensureFont`'s
+ *    fallback -- 12pt FRIZQT centred -- and a centred body line under left-aligned ones is visible
+ *    immediately. Copied as a NEW object, not shared: `writeSide` writes `color` and `wrapWidth` per
+ *    line, so a shared spec would give every grown line the last one's colour.
+ *  - **The anchor.** `TOPLEFT` to the previous line's `BOTTOMLEFT` at `0,-LINE_GAP`, which is verbatim
+ *    what the template does for lines 2..8 (`:36-42`).
+ *  - **The layer.** `ARTWORK`, as the authored slots declare.
+ *
+ * Returns false when the tooltip has no authored slots at all -- an addon's bare `CreateFrame`
+ * `GameTooltip` -- because there is then no font and no anchor to continue from, and inventing both is
+ * how a tooltip renders plausibly and wrongly.
+ */
+function ensureLine(ctx: MethodContext, self: number, line: number): boolean {
+  if (regionOf(ctx, self, `TextLeft${line}`) !== null) {
+    return true;
+  }
+  const name = ctx.registry.nameOf(self);
+  const first = regionOf(ctx, self, 'TextLeft1');
+  const previousLeft = regionOf(ctx, self, `TextLeft${line - 1}`);
+  if (name === null || first === null || previousLeft === null) {
+    return false;
+  }
+  const leftId = ctx.registry.create('FontString', `${name}TextLeft${line}`, self);
+  const left = ctx.registry.widget(leftId)!;
+  left.layer = first.layer;
+  left.font = { ...ensureFont(first) };
+  left.shown = false;
+  left.setAnchors({
+    point: 'TOPLEFT', relativeTo: previousLeft.id, relativePoint: 'BOTTOMLEFT', x: 0, y: -LINE_GAP,
+  });
+
+  // The right slot is created alongside even though most lines never use one: `placeRightColumns`
+  // re-anchors it every resize and `clearFrom` blanks it, and both of those look it up by name -- so a
+  // grown line that later gains a right column must not be the one case where the slot is absent.
+  const rightId = ctx.registry.create('FontString', `${name}TextRight${line}`, self);
+  const right = ctx.registry.widget(rightId)!;
+  right.layer = first.layer;
+  right.font = { ...ensureFont(first) };
+  right.shown = false;
+
+  /**
+   * PUBLISH BOTH TO `_G`, and this was a real defect found by driving the path rather than reading it.
+   *
+   * `ctx.wrapper(id)` is what mints a frame's Lua table and sets `_G[name]` (`object.ts:790-797`), and
+   * it is LAZY -- nothing publishes a name until someone asks for the wrapper. Nothing here ever did, so
+   * the grown slots existed in the registry and drew correctly while `_G["GameTooltipTextLeft9"]` was
+   * nil. Measured live: `GameTooltip:NumLines()` answered 14 and the ninth global did not exist.
+   *
+   * That matters because FrameXML reaches these slots by name and not by method -- `SetTooltipMoney`
+   * and `GameTooltip_AddNewbieTip` both index `_G["GameTooltipTextLeft"..i]` -- so an unpublished slot
+   * is invisible to the client's own Lua and to every addon.
+   */
+  ctx.wrapper(leftId);
+  ctx.wrapper(rightId);
+  return true;
+}
+
 function appendLine(
   ctx: MethodContext,
   self: number,
@@ -321,12 +454,17 @@ function appendLine(
   const state = stateOf(widgetOf(ctx, self));
   if (state.lines >= MAX_LINES) {
     warnOnce(
-      `GameTooltip: more than ${MAX_LINES} lines -- GameTooltipTemplate authors exactly that many `
-      + '$parentTextLeft<n> slots and this runtime does not create more, so the extra lines are dropped',
+      `GameTooltip: more than ${MAX_LINES} lines -- that is this runtime's own ceiling on a grown line `
+      + 'stack rather than the eight the template authors, so the extra lines are dropped',
     );
     return 0;
   }
   const line = state.lines + 1;
+  // Past the authored eight, the slot has to be minted first. `ensureLine` returning false means this
+  // tooltip has no authored slots to copy from at all, and `writeSide` below then answers false too.
+  if (line > AUTHORED_LINES) {
+    ensureLine(ctx, self, line);
+  }
   if (!writeSide(ctx, self, `TextLeft${line}`, left, leftColour, wrap)) {
     return 0;
   }
@@ -377,6 +515,39 @@ const GAMETOOLTIP: MethodTable = {
     state.owner = ctx.frameIdOf(args[0]);
     state.lines = 0;
     state.minWidth = 0;
+    /**
+     * THE UNIT STATE IS PART OF THE RESET, and leaving it out put a health bar on every tooltip.
+     *
+     * Owner: "сейчас все тултипы имеют полоску здоровья, а она нужна только при наведении на цель." His
+     * screenshot is the XP Bar tooltip -- plain text, no unit -- carrying the green strip.
+     *
+     * **NO RULE OF OURS IS ADDED HERE.** `GameTooltipStatusBar` is named NOWHERE in the served manifest
+     * (grepped: zero hits in any `.lua` or `.xml`), so the engine owns showing AND hiding it -- there is
+     * no client call to honour. What the client does have is a universal reset point, and every tooltip
+     * path goes through it: `GameTooltip_SetDefaultAnchor`'s first line is
+     * `tooltip:SetOwner(parent, "ANCHOR_NONE")` (`gametooltip.lua:72-76`), which is how the XP-bar
+     * tooltip arrives via `GameTooltip_AddNewbieTip`. `SetOwner` already resets the lines, the owner, the
+     * minimum width and the anchors here. The bar and the unit token were simply missing from that list,
+     * so this COMPLETES an existing reset rather than layering a new lifecycle over the client's.
+     *
+     * `unitToken` is cleared for the same reason and it is the same bug one step further on: left set, a
+     * plain tooltip would answer `IsUnit("mouseover")` true and the client's own `<OnTooltipSetUnit>`
+     * would recolour a line that has nothing to do with a unit.
+     */
+    state.unitToken = null;
+    const name = ctx.registry.nameOf(self);
+    if (name !== null) {
+      ctx.vm.run(
+        `if _G["${name}StatusBar"] then _G["${name}StatusBar"]:Hide() end`,
+        'tooltip-status-bar-reset',
+      );
+    }
+    // A NEW TOOLTIP HAS NO ITEM YET. `GameTooltip:GetItem` is about the current contents, so the
+    // previous owner's item must not survive into this one -- otherwise hovering a vendor row and then
+    // a micro button would still answer the sword.
+    state.itemName = null;
+    state.itemLink = null;
+    state.anchorType = String(args[1] ?? 'ANCHOR_NONE').toUpperCase();
     clearFrom(ctx, self, 1);
     resize(ctx, self);
 
@@ -399,11 +570,66 @@ const GAMETOOLTIP: MethodTable = {
       // Positioned by the caller on its next line; see above.
       return [];
     }
+    /**
+     * THE CURSOR ANCHORS, and this closes a gap the comment below used to name.
+     *
+     * `ANCHOR_CURSOR`, `ANCHOR_CURSOR_LEFT` and `ANCHOR_CURSOR_RIGHT` position against the POINTER
+     * rather than the owner, so they need something the object model has no field for. It has a route
+     * now -- `ui/pointer.ts`, a sink the host installs, the same shape as `ui/map-selection.ts`.
+     *
+     * The client asks for these: `WorldMapQuestPOI_SetTooltip` uses `ANCHOR_CURSOR_RIGHT`
+     * (`worldmapframe.lua:1867`), so the world map's own quest-pin tooltip was unanchored too, not
+     * only the minimap's blip tooltip this was written for.
+     *
+     * Anchored to `UIParent`'s TOPLEFT with the pointer as the offset, and the Y is NEGATED because
+     * anchor offsets grow upward while the pointer grows downward -- the same sign the client uses
+     * everywhere it places from a cursor. Divided by the tooltip's own `effectiveScale`, because an
+     * offset is in the widget's space while the pointer is in the screen's -- the same division
+     * `GetLeft` does one file over.
+     *
+     * The LEFT/RIGHT variants shift by the tooltip's own width so the box sits beside the cursor
+     * rather than under it. A tooltip whose width is not resolved yet gets 0, i.e. behaves as plain
+     * `ANCHOR_CURSOR` for one frame -- which is what a freshly created tooltip does anyway.
+     */
+    if (anchorType.startsWith('ANCHOR_CURSOR')) {
+      const at = pointerAt();
+      if (at === null) {
+        warnOnce(
+          'GameTooltip:SetOwner: a cursor anchor was asked for before anything installed a pointer '
+          + 'source (ui/pointer.ts), so the tooltip is left unanchored',
+        );
+        return [];
+      }
+      const scale = widget.effectiveScale || 1;
+      const shift = anchorType === 'ANCHOR_CURSOR_LEFT' ? -widget.width
+        : anchorType === 'ANCHOR_CURSOR_RIGHT' ? 0 : 0;
+      widget.setAnchors({
+        point: 'TOPLEFT' as never,
+        relativePoint: 'TOPLEFT' as never,
+        relativeTo: ctx.registry.root.id,
+        /**
+         * ROUNDED TO WHOLE UNITS, and that is not tidiness -- it is why the text was grey.
+         *
+         * `at.x / scale` is fractional in general, and a font string placed on a half unit lands its
+         * quad between texels: the glyph atlas is then sampled off-grid and white text on a dark
+         * backdrop reads as grey. The probe showed why nothing else could explain it -- every line
+         * came back `colour: "#ffffff"`, `alpha: 1`, `effectiveScale: 1`, and the raster density is
+         * already part of the font cache key (`ui/text.ts`). State correct, pixels wrong, which on
+         * this project means look at the last hop.
+         *
+         * It also matches WHEN it started: cursor anchors did nothing until this branch existed, so
+         * before it the tooltip was unanchored and drew at the origin -- on integers.
+         */
+        x: Math.round(at.x / scale + shift + Number(args[2] ?? 0)),
+        y: Math.round(-(at.y / scale) + Number(args[3] ?? 0)),
+      });
+      return [];
+    }
     const pair = ANCHORS[anchorType];
     if (pair === undefined) {
-      // `ANCHOR_CURSOR` is the notable one: it needs the live pointer, which this object model has no
-      // route to (the router is `ui/input.ts` and nothing in `MethodContext` reaches it). Named rather
-      // than silently defaulted, because a tooltip in the wrong place is a visible defect.
+      // The cursor anchors are handled above and are no longer the notable case. What reaches here is
+      // a name neither this table nor that branch knows, which is a real defect rather than a gap --
+      // named rather than silently defaulted, because a tooltip in the wrong place is visible.
       warnOnce(
         `GameTooltip:SetOwner: anchor type '${anchorType}' is not implemented -- the tooltip is left `
         + 'unanchored, which puts it at the window\'s top-left corner if anything shows it',
@@ -457,6 +683,208 @@ const GAMETOOLTIP: MethodTable = {
    * The `alpha` argument (slot 4) is dropped: `FontSpec.color` is an `#rrggbb` string with nowhere to put
    * a channel, the same reason `region.ts`'s `FONTSTRING.SetTextColor` drops it.
    */
+  /**
+   * `GameTooltip:SetUnit(unit, hideStatus)` -> whether it filled anything.
+   *
+   * Owner: "При наведении на юнита должен появляться тултип." This is the engine method behind BOTH the
+   * world hover and a unit FRAME's hover -- `UnitFrame_UpdateTooltip` is
+   * `GameTooltip_SetDefaultAnchor(GameTooltip, self); if ( GameTooltip:SetUnit(self.unit, ...) )`
+   * (`unitframe.lua:144-154`), and it colours line 1 itself afterwards with `GameTooltip_UnitColor`.
+   *
+   * **THE WORLD HOVER HAS NO FrameXML DRIVER AT ALL**, and that is worth writing down because it is the
+   * opposite of what this project usually finds. Grepped the whole served manifest: there is no
+   * `UPDATE_MOUSEOVER_UNIT` handler anywhere and no caller of `GameTooltip:SetUnit` outside
+   * `unitframe.lua`. In the real client the ENGINE fills and shows this tooltip when the cursor rests on
+   * a unit. So the host must drive it -- and it drives it by calling the client's own globals rather
+   * than drawing anything, because there is no script to defer to.
+   *
+   * ## The line content, and which parts are authored
+   *
+   * The FORMAT STRINGS are the client's own, read out of the VM at call time so a localised
+   * `GlobalStrings.lua` is honoured and nothing here hardcodes English:
+   *
+   *     PLAYER_LEVEL               = "Level %s %s %s"   globalstrings.lua:5678
+   *     UNIT_TYPE_LEVEL_TEMPLATE   = "Level %d %s"      :7892
+   *     UNIT_LEVEL_TEMPLATE        = "Level %d"         :7858
+   *     UNIT_LETHAL_LEVEL_TEMPLATE = "Level ??"         :7856
+   *
+   * `PLAYER_LEVEL` is the same string `PaperDollFrame_SetLevel` uses for the character sheet, with the
+   * same three substitutions in the same order, so the player line is not a choice at all.
+   *
+   * **WHAT IS OURS, stated as earlier rounds stated the item tooltip's line order:** that line 1 is the
+   * name and line 2 the level line, and that a creature's second substitution is its CLASSIFICATION
+   * word rather than its creature TYPE. The ordering is in no served file -- the engine owns it -- so it
+   * is taken from what the real client displays. The classification substitution is a FORCED choice, not
+   * a preference: `UNIT_TYPE_LEVEL_TEMPLATE`'s `%s` is the creature type in the real client, and **this
+   * client has no creature type.** `SMSG_CREATURE_QUERY_RESPONSE` gives us `name` and `rank` only
+   * (`object/combat.ts:70-74`), so `UnitCreatureType` has no source and is deliberately NOT registered
+   * -- inventing "Humanoid" would be the plausible-and-wrong failure the rules forbid. An elite reads
+   * "Level 12 Elite"; a normal creature falls back to `UNIT_LEVEL_TEMPLATE`, "Level 12".
+   *
+   * The `??` case is reachable and not decoration: `UNIT_LETHAL_LEVEL_TEMPLATE` is what the engine shows
+   * when the level is unknowable, signalled as a NEGATIVE `UnitLevel`. Ours cannot produce one today
+   * (`UnitLevel` floors at 0 from `fields.level`), so the branch is there for the day it can rather than
+   * being faked.
+   *
+   * Returns `[false]` for a token nothing occupies, which is what makes `UnitFrame_UpdateTooltip` clear
+   * `self.UpdateTooltip` instead of polling a tooltip that will never fill.
+   */
+  SetUnit: (ctx, self, args) => {
+    const token = String(args[0] ?? '');
+    const unit = getUnit(ctx.vm, token);
+    if (unit === null || unit.name === null || unit.name === '') {
+      return [false];
+    }
+    const state = stateOf(widgetOf(ctx, self));
+    state.lines = 0;
+    // What `IsUnit` answers, and therefore what lets the client colour its own first line.
+    state.unitToken = token.toLowerCase();
+    clearFrom(ctx, self, 1);
+    appendLine(ctx, self, unit.name, null, undefined, undefined, false);
+
+    // The client's own strings, read live. A missing one means `GlobalStrings.lua` did not load, and the
+    // line is SKIPPED rather than guessed -- a tooltip with a name and no level beats one reading
+    // "Level %d".
+    const str = (name: string): string | null => {
+      const value = ctx.vm.getGlobal(name);
+      return typeof value === 'string' && value !== '' ? value : null;
+    };
+    // `%d` and `%s` only, positionally -- the four templates above use nothing else.
+    const fmt = (template: string, ...values: Array<string | number>): string => {
+      let index = 0;
+      return template.replace(/%[ds]/g, () => {
+        const value = values[index] ?? '';
+        index += 1;
+        return String(value);
+      });
+    };
+
+    const level = unit.level;
+    const type = unit.creatureType;
+    let line: string | null = null;
+    if (level < 0) {
+      // `UNIT_TYPE_LETHAL_LEVEL_TEMPLATE = "Level ?? %s"` when a type is known, else the bare "Level ??".
+      const template = type === null
+        ? str('UNIT_LETHAL_LEVEL_TEMPLATE')
+        : str('UNIT_TYPE_LETHAL_LEVEL_TEMPLATE');
+      line = template === null ? null : fmt(template, type ?? '');
+    } else if (unit.isPlayer) {
+      const template = str('PLAYER_LEVEL');
+      // Race and class are the same pair the character sheet substitutes, and both answer nil until
+      // `ChrRaces`/`ChrClasses` land -- in which case an empty substitution is the honest one.
+      line = template === null ? null
+        : fmt(template, level, unit.race?.name ?? '', unit.classInfo?.name ?? '').trim();
+    } else if (type !== null) {
+      /**
+       * BOTH of these are the client's own strings, so the elite wording is authored and not ours:
+       *
+       *     UNIT_TYPE_LEVEL_TEMPLATE      = "Level %d %s"        globalstrings.lua:7892
+       *     UNIT_TYPE_PLUS_LEVEL_TEMPLATE = "Level %d Elite %s"  :7893
+       *
+       * The `+` in the name is historical; 3.3.5a's string spells the word out. An earlier version of
+       * this method substituted the CLASSIFICATION word into `UNIT_TYPE_LEVEL_TEMPLATE` because the
+       * creature type was believed unobtainable -- it is not, and that guess is gone.
+       */
+      const elite = unit.classification !== 'normal' && unit.classification !== 'rare';
+      const template = str(elite ? 'UNIT_TYPE_PLUS_LEVEL_TEMPLATE' : 'UNIT_TYPE_LEVEL_TEMPLATE');
+      line = template === null ? null : fmt(template, level, type);
+    } else {
+      // No type word yet -- the creature query has not answered. "Level 12" alone rather than a guess.
+      const template = str('UNIT_LEVEL_TEMPLATE');
+      line = template === null ? null : fmt(template, level);
+    }
+    if (line !== null && line !== '') {
+      appendLine(ctx, self, line, null, undefined, undefined, false);
+    }
+    resize(ctx, self);
+
+    const name = ctx.registry.nameOf(self);
+
+    /**
+     * THE FIRST LINE'S COLOUR IS THE CLIENT'S OWN, and firing this is what lets it do the colouring.
+     *
+     * `GameTooltip`'s instance carries
+     *
+     *     <OnTooltipSetUnit>
+     *       if ( self:IsUnit("mouseover") ) then
+     *         _G[self:GetName().."TextLeft1"]:SetTextColor(GameTooltip_UnitColor("mouseover"));
+     *       end
+     *     </OnTooltipSetUnit>                                              gametooltip.xml:14-18
+     *
+     * so the reaction ladder (`GameTooltip_UnitColor`, `gametooltip.lua:7`) is applied by the client
+     * off `UnitPlayerControlled`/`UnitCanAttack`/`UnitReaction`, all of which are real. Nothing here
+     * chooses a colour -- the engine's job is to fire the script, which is what the real engine does.
+     * `IsUnit` below is the other half; without it that `if` is false and the line stays white.
+     */
+    invokeScriptHandler(ctx, self, 'OnTooltipSetUnit', []);
+
+    /**
+     * THE LEVEL LINE'S COLOUR, and this half IS ours -- stated rather than implied.
+     *
+     * No script colours it: `<OnTooltipSetUnit>` touches `TextLeft1` only. In the real client the engine
+     * applies the difficulty ramp, so the choice to apply it is ours -- but the RAMP is not: it is the
+     * client's own `GetQuestDifficultyColor` (`uiparent.lua:3358-3371`), called rather than copied, which
+     * is exactly how `nameplates.ts` reaches the same question (`NameplateConfig.levelColor`) and how
+     * `targetframe.lua:246-251` colours the target frame's level text.
+     *
+     * Skipped for a player (his line is race and class, not a difficulty) and when the level is unknown.
+     */
+    if (name !== null && line !== null && line !== '' && !unit.isPlayer && level > 0) {
+      ctx.vm.run(
+        `local c = GetQuestDifficultyColor and GetQuestDifficultyColor(${level});`
+        + ` local t = _G["${name}TextLeft2"];`
+        + ' if c and t then t:SetTextColor(c.r, c.g, c.b) end',
+        'tooltip-level-colour',
+      );
+    }
+
+    /**
+     * THE HEALTH BAR, which is a frame the template already authors -- not something to draw.
+     *
+     * `GameTooltipTemplate` carries `<StatusBar name="$parentStatusBar" hidden="true">` anchored across
+     * the tooltip's bottom edge, with its own `<BarTexture>` and an `<OnValueChanged>` calling
+     * `HealthBar_OnValueChanged` (`gametooltiptemplate.xml:214-236`). So this shows it and feeds it, and
+     * the client owns its art and its green.
+     *
+     * `hideStatus` is `SetUnit`'s second argument -- `self.hideStatusOnTooltip` at the call site
+     * (`unitframe.lua:146`) -- and honouring it is why a unit frame's own tooltip can suppress the bar.
+     *
+     * **SET ONCE PER HOVER, NOT PER FRAME, and that is a deliberate divergence with a stated reason.**
+     * The real client re-reads this bar from `GameTooltip_OnUpdate`. Doing that here would change a
+     * StatusBar's fill every frame, and a fill width is part of the interface draw-list fingerprint --
+     * it would dirty the offscreen target continuously and hand back the 4-7.5 ms it buys on ~92% of
+     * frames, for a bar on a unit whose health is not even streaming while it is merely hovered. The
+     * bar therefore shows the health as it was when the pointer arrived. If live tracking is wanted it
+     * belongs on the `unit:fields` edge, not on a per-frame poll.
+     */
+    if (name !== null) {
+      const bar = `_G["${name}StatusBar"]`;
+      const maxHealth = unit.maxHealth;
+      ctx.vm.run(
+        flag(args[1]) || maxHealth <= 0
+          ? `if ${bar} then ${bar}:Hide() end`
+          : `if ${bar} then ${bar}:SetMinMaxValues(0, ${maxHealth});`
+            + ` ${bar}:SetValue(${unit.health}); ${bar}:Show() end`,
+        'tooltip-status-bar',
+      );
+    }
+    return [true];
+  },
+
+  /**
+   * `GameTooltip:IsUnit(token)` -- whether this tooltip currently describes that unit.
+   *
+   * The other half of the client colouring its own first line: `<OnTooltipSetUnit>` opens with
+   * `if ( self:IsUnit("mouseover") )` (`gametooltip.xml:15`), so without this the reaction colour is
+   * never applied. Compared case-insensitively because the client's own files spell tokens both ways --
+   * `UnitName("NPC")` in `merchantframe.lua:75` against `UnitName("npc")` in `gossipframe.lua:42`.
+   */
+  IsUnit: (ctx, self, args) => {
+    const token = String(args[0] ?? '').toLowerCase();
+    return [stateOf(widgetOf(ctx, self)).unitToken === token];
+  },
+
+
   SetText: (ctx, self, args) => {
     const state = stateOf(widgetOf(ctx, self));
     state.lines = 0;
@@ -507,6 +935,23 @@ const GAMETOOLTIP: MethodTable = {
     return [];
   },
 
+  /**
+   * `GetMinimumWidth()` -- the twin of the setter below, and **`SetTooltipMoney` dies without it.**
+   *
+   * FOUND LIVE hovering `MerchantRepairAllButton`: the money frame had already been filled and was
+   * showing the right 14 copper, and then
+   * `GameTooltip.lua:135: attempt to call a nil value (method 'GetMinimumWidth')` killed the handler.
+   * That line is `if ( frame:GetMinimumWidth() < moneyFrameWidth ) then frame:SetMinimumWidth(...)` --
+   * the widening that stops a money row from overflowing a narrow tooltip
+   * (`gametooltip.lua:133-136`). So the visible half worked and the layout correction did not, which is
+   * the same shape as the `GetItem` defect two methods up: a nil inside an `OnEnter`, past the point
+   * where the thing being built already looked right.
+   *
+   * The value is already stored -- `SetMinimumWidth` has been writing `state.minWidth` all along; only
+   * the reader was missing. 0 for a tooltip that has never been given one, which is what the real
+   * engine answers and what makes the comparison above take the widening branch.
+   */
+  GetMinimumWidth: (ctx, self) => [stateOf(widgetOf(ctx, self)).minWidth],
   SetMinimumWidth: (ctx, self, args) => {
     stateOf(widgetOf(ctx, self)).minWidth = Number(args[0] ?? 0);
     resize(ctx, self);
@@ -545,6 +990,70 @@ const GAMETOOLTIP: MethodTable = {
       return [false];
     }
     fillSpellLines(ctx, self, entry.name, entry.subName, entry.description);
+    return [true];
+  },
+
+  /**
+   * `SetUnitAura(unit, index, filter)` -> true when the tooltip was filled.
+   *
+   * TWO call sites and both are HOVER-REFRESH paths rather than the initial hover:
+   * `AuraButton_Update` re-fills it when the aura changes under the cursor (`buffframe.lua:216-218`)
+   * and `AuraButton_OnUpdate` re-fills it on the tooltip timer (`:247-249`), both guarded by
+   * `GameTooltip:IsOwned(buff)`. The FIRST hover comes through `BuffButtonTemplate`'s own
+   * `<OnEnter>`, which calls this method too (`buffframe.xml`), so all three go through here.
+   *
+   * It SHOWS ITSELF for `SetSpell`'s measured reason: none of those call sites calls `Show()`.
+   *
+   * The body is `fillSpellLines`, unchanged -- an aura's tooltip in 3.3.5a is the spell's name, its rank
+   * and its description. What the real client also puts there and this does NOT, stated rather than
+   * approximated: the "N seconds remaining" line and the caster's name. The remaining time is already on
+   * screen on the icon itself when durations are on, and the caster needs a name lookup for a guid that
+   * may belong to a unit outside our own object map.
+   */
+  SetUnitAura: (ctx, self, args) => {
+    const source = getAuraTooltipSource(ctx.vm);
+    if (source === null) {
+      return [false];
+    }
+    const unit = String(args[0] ?? '');
+    const index = Number(args[1]);
+    // `nil` is a real filter and it means HELPFUL -- `UnitAura`'s own default. `TargetFrame` passes
+    // nothing for a buff and "HARMFUL" for a debuff.
+    const filter = args[2] === undefined || args[2] === null ? 'HELPFUL' : String(args[2]);
+    if (!Number.isFinite(index) || index < 1) {
+      return [false];
+    }
+    const aura = source(unit, index, filter);
+    if (aura === null) {
+      return [false];
+    }
+    fillSpellLines(ctx, self, aura.name, aura.rank, aura.description);
+    return [true];
+  },
+
+  /**
+   * `SetShapeshift(index)` -> true when the tooltip was filled. The STANCE button's hover.
+   *
+   * ONE call site and it is UNGUARDED: `ShapeshiftButtonTemplate`'s own `<OnEnter>`
+   * (`bonusactionbarframe.xml:34`) calls `GameTooltip:SetShapeshift(self:GetID())` with nothing around
+   * it, so a nil method here raises inside the handler and the hover shows nothing at all. That is why
+   * it is real rather than a declared gap: the gap list's members are all reached through a caller that
+   * branches on the false, and this one is not.
+   *
+   * The ARGUMENT is a stance-bar POSITION (1..`GetNumShapeshiftForms()`), the same index
+   * `GetShapeshiftFormInfo` takes -- not a form id and not a spell id.
+   */
+  SetShapeshift: (ctx, self, args) => {
+    const source = getShapeshiftTooltipSource(ctx.vm);
+    const index = Number(args[0]);
+    if (source === null || !Number.isFinite(index) || index < 1) {
+      return [false];
+    }
+    const form = source(index);
+    if (form === null) {
+      return [false];
+    }
+    fillSpellLines(ctx, self, form.name, form.rank, form.description);
     return [true];
   },
 
@@ -590,16 +1099,13 @@ const GAMETOOLTIP: MethodTable = {
       + 'call sites are item or aura tooltips whose own Set* method is absent too',
   ),
   /**
-   * `IsUnit`/`IsEquippedItem` are read by `GameTooltip.xml`'s own `<OnTooltipSetUnit>` and
-   * `<OnTooltipSetItem>` handlers (`gametooltip.xml:16,23`). Those fire only from `SetUnit`/`SetItem`
-   * paths, which are absent -- so neither is reachable today, and both are declared rather than assumed
-   * unreachable.
+   * `IsEquippedItem` is read by `GameTooltip.xml`'s `<OnTooltipSetItem>` (`gametooltip.xml:23`), which
+   * fires only from a `SetItem` path this file does not have.
+   *
+   * **`IsUnit` HAS LEFT THIS BLOCK** -- it is real above, and its old note ("no Set* method here fills a
+   * UNIT tooltip") stopped being true the moment `SetUnit` landed. It is the half that lets
+   * `<OnTooltipSetUnit>` colour the tooltip's first line with the client's own `GameTooltip_UnitColor`.
    */
-  IsUnit: notImplemented(
-    'IsUnit',
-    'no Set* method here fills a UNIT tooltip, so the tooltip never has a unit to compare against',
-    [false],
-  ),
   IsEquippedItem: notImplemented(
     'IsEquippedItem',
     'there is no item feed in this client, so no tooltip ever holds an item',
@@ -673,8 +1179,16 @@ function fillItemLines(ctx: MethodContext, self: number, info: ItemTooltipInfo):
     }
   }
   appendLine(ctx, self, info.name, null, colour, undefined, false);
+  // Each line carries its own colour and, for damage/speed, a right column -- see
+  // `api/items.ts#ItemTooltipInfo`. `wrap` is per line rather than always on: the flavour text and an
+  // effect sentence want wrapping, and a short stat line wrapped for no reason widens the tooltip.
   for (const line of info.lines) {
-    appendLine(ctx, self, line, null, { r: 1, g: 1, b: 1 }, undefined, true);
+    const rgb = line.colour ?? [1, 1, 1];
+    appendLine(
+      ctx, self, line.left, line.right ?? null,
+      { r: rgb[0], g: rgb[1], b: rgb[2] }, { r: rgb[0], g: rgb[1], b: rgb[2] },
+      line.wrap === true,
+    );
   }
   resize(ctx, self);
   widgetOf(ctx, self).shown = true;
@@ -700,6 +1214,46 @@ const ITEM_SETTERS: MethodTable = {
   SetLootItem: (ctx, self, args) => fillFromSource(ctx, self, 'loot', Number(args[0])),
   SetHyperlink: (ctx, self, args) => fillFromSource(ctx, self, 'link', String(args[0] ?? '')),
   /**
+   * `SetQuestItem(type, index)` -- a reward, choice or requirement row on a giver panel.
+   *
+   * **Its absence was raising inside an `OnEnter`**, which is the worst place for a nil method. The
+   * owner's console:
+   *
+   *     QuestInfoItem3: OnEnter: [string "QuestInfo.xml:QuestInfoItem3:OnEnter"]:10:
+   *     attempt to call a nil value (method 'SetQuestItem')
+   *
+   * The handler dies part way, so the tooltip chain is left half built and the row shows nothing however
+   * good the data behind it is -- the same failure `SetInventoryItem`'s absence caused on the bag
+   * buttons, recorded a few lines below.
+   *
+   * `type` is one of the client's own strings on the buttons themselves -- `"required"`, `"reward"`,
+   * `"choice"` -- and `quest-bridge.ts` resolves it through exactly the triple `GetQuestItemInfo` reads,
+   * so the tooltip and the row can never name different items.
+   */
+  SetQuestItem: (ctx, self, args) => fillFromSource(
+    ctx, self, 'quest', String(args[0] ?? ''), Number(args[1]),
+  ),
+  /**
+   * `SetQuestLogItem(type, index)` -- the LOG's own reward and choice rows, and a SECOND setter rather
+   * than an argument to the one above.
+   *
+   * `QuestInfoRewardItemTemplate`'s `OnEnter` branches on `QuestInfoFrame.questLog` and calls one or the
+   * other (`questinfo.xml:12-16`), because the two read different sources: a giver panel's items are
+   * self-contained on the wire and the log's come from the template cache joined to the player's
+   * descriptor slots. One resolver for both would name the wrong item whenever the log is open over a
+   * different quest than the last giver panel showed.
+   *
+   * The owner's console named it: `QuestInfoItem2: OnEnter: attempt to call a nil value (method
+   * 'SetQuestLogItem')`.
+   *
+   * Worth recording alongside: the ACCEPT panel legitimately shows no tooltip at all. Its template is
+   * `QUEST_TEMPLATE_DETAIL1`, whose `tooltip` field is nil (`questinfo.lua:508`), and the handler starts
+   * `local tooltip = _G[QuestInfoFrame.tooltip]` and does nothing when that is absent. Not a gap here.
+   */
+  SetQuestLogItem: (ctx, self, args) => fillFromSource(
+    ctx, self, 'questlog', String(args[0] ?? ''), Number(args[1]),
+  ),
+  /**
    * `SetInventoryItem(unit, invSlot)` -- a WORN item, identified by unit and equipment slot rather
    * than by bag and slot, so it takes the equipped read (`PLAYER_FIELD_INV_SLOT_HEAD + (id-1)*2`)
    * and not the container read.
@@ -712,6 +1266,115 @@ const ITEM_SETTERS: MethodTable = {
   SetInventoryItem: (ctx, self, args) => fillFromSource(
     ctx, self, 'inventory', String(args[0] ?? 'player'), Number(args[1]),
   ),
+  /**
+   * `SetMerchantItem(index)` / `SetBuybackItem(index)` -- a VENDOR row and a sold-back row.
+   *
+   * **Both were in `TOOLTIP_SETTER_GAPS` below with the reason "no merchant window is decoded
+   * (SMSG_LIST_INVENTORY has no subscriber)". It has one now** (`network/game/object/merchant.ts`),
+   * so they are real and the declaration is removed rather than left describing a closed gap.
+   *
+   * `MerchantItemButton_OnEnter` calls `SetOwner` then one of these and never `Show()`
+   * (`merchantframe.lua:434-448`), which is the same contract `SetBagItem` and `SetLootItem` answer --
+   * so they show themselves through `fillFromSource`.
+   */
+  SetMerchantItem: (ctx, self, args) => fillFromSource(ctx, self, 'merchant', Number(args[0])),
+  SetBuybackItem: (ctx, self, args) => fillFromSource(ctx, self, 'buyback', Number(args[0])),
+
+  /**
+   * `SetTrainerService(index)` -- a CLASS TRAINER's row.
+   *
+   * **It is not in the census below and could not have been**: that count was taken over the served
+   * `FrameXML`, and this call site is in an ADDON -- `ClassTrainerSkillIcon`'s `<OnEnter>` in
+   * `Interface\AddOns\Blizzard_TrainerUI\Blizzard_TrainerUI.xml:440-444`. So the census is sound for
+   * what it measured and this is a reminder that the manifest is not the whole interface; the same
+   * lesson `ui/framexml/addons.ts` records for `TokenFrame`.
+   *
+   * Unlike the bag and vendor setters this call site DOES call `Show()` itself, so filling is the whole
+   * job -- `fillFromSource` showing it as well is harmless and keeps the family uniform.
+   * `ui/trainer-bridge.ts` answers the `'trainer'` kind.
+   */
+  SetTrainerService: (ctx, self, args) => fillFromSource(ctx, self, 'trainer', Number(args[0])),
+
+  /**
+   * `GetItem()` -> `itemName, itemLink`. **A LIVE DEFECT, found on a Northshire weapon vendor.**
+   *
+   * `MerchantItemButton_OnEnter` calls `GameTooltip_ShowCompareItem(GameTooltip)` right after the
+   * setter (`merchantframe.lua:436`), and that function opens with
+   * `local item, link = self:GetItem(); if ( not link ) then return; end` (`gametooltip.lua:217-222`).
+   * With this absent, every hover over a vendor row printed
+   * `GameTooltip.lua:221: attempt to call a nil value (method 'GetItem')` and died INSIDE the OnEnter --
+   * one line past the point where the tooltip had already been built, so the tooltip looked perfect
+   * and `MerchantFrame.itemHover = button:GetID()` on the next line never ran.
+   *
+   * Answers whatever the last `Set<Thing>Item` filled, which is the engine's own contract: the getter
+   * is about the tooltip's CURRENT CONTENTS, not about a widget.
+   *
+   * Both returns are honest. The link is the real hyperlink the bridges already build for
+   * `GetMerchantItemLink`/`GetContainerItemLink`, so the guard above is PASSED and the comparison path
+   * is entered -- see `SetHyperlinkCompareItem` and `GetAnchorType` below on why that is now safe.
+   * Withholding the link to make the client take its own early return was the other option and was
+   * rejected: it would have been a lie about a value this client knows.
+   */
+  GetItem: (ctx, self) => {
+    const state = stateOf(widgetOf(ctx, self));
+    return [state.itemName ?? null, state.itemLink ?? null];
+  },
+
+  /**
+   * `SetHyperlinkCompareItem(link, slot, shift, owner)` -- a DECLARED GAP returning false.
+   *
+   * The three `shoppingTooltip`s this fills are the side-by-side comparison against what the player
+   * has EQUIPPED in the same slot. That needs the equipped item for a given inventory type as well as
+   * a link-to-item resolve, and nothing in this client compares two items. False is the answer
+   * `GameTooltip_ShowCompareItem` already branches on (`gametooltip.lua:232-240`), and with all three
+   * false every subsequent block in that function is skipped -- so the vendor tooltip draws, no
+   * comparison appears, and nothing raises.
+   */
+  SetHyperlinkCompareItem: notImplemented(
+    'GameTooltip:SetHyperlinkCompareItem',
+    'the side-by-side comparison needs the equipped item for a given inventory type and a '
+      + 'link-to-item resolve; nothing in this client compares two items',
+    [false],
+  ),
+
+  /**
+   * `GetAnchorType()` and `SetAnchorType(anchor, x, y)` -- the anchor `SetOwner` was already given.
+   *
+   * REAL, not stubs, and they HAD to be: `GameTooltip_ShowCompareItem` reads
+   * `if ( self:GetAnchorType() and self:GetAnchorType() ~= "ANCHOR_PRESERVE" )`
+   * (`gametooltip.lua:261`) unconditionally, PAST the `link` guard. So closing `GetItem` on its own
+   * would have moved the identical raise forty lines down the identical function -- which is why this
+   * landed as a set of three rather than as one. `SetAnchorType` is reachable in the same breath: the
+   * right-hand overflow test is `rightPos + totalWidth > GetScreenWidth()`, and that is true for a
+   * tooltip near the right edge even with `totalWidth` zero.
+   *
+   * Neither is new state. `SetOwner` already receives the anchor and already maps it through
+   * `ANCHORS`; it was simply thrown away. `SetAnchorType` re-applies it with the caller's offset
+   * through the SAME `ANCHORS` table and the same `setAnchors` call, so there is one anchoring rule
+   * here and not two.
+   */
+  GetAnchorType: (ctx, self) => [stateOf(widgetOf(ctx, self)).anchorType ?? 'ANCHOR_NONE'],
+  SetAnchorType: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const state = stateOf(widget);
+    const anchorType = String(args[0] ?? 'ANCHOR_NONE').toUpperCase();
+    state.anchorType = anchorType;
+    const pair = ANCHORS[anchorType];
+    const ownerWidget = state.owner === null ? null : ctx.registry.widget(state.owner);
+    if (pair === undefined || ownerWidget === null) {
+      // `ANCHOR_NONE`, `ANCHOR_CURSOR` and an unresolved owner all mean "the caller positions it",
+      // which is what `SetOwner` does with the same three cases.
+      return [];
+    }
+    widget.setAnchors({
+      point: pair[0] as never,
+      relativePoint: pair[1] as never,
+      relativeTo: ownerWidget.id,
+      x: Number(args[1] ?? 0),
+      y: Number(args[2] ?? 0),
+    });
+    return [];
+  },
 };
 
 /**
@@ -730,33 +1393,55 @@ const ITEM_SETTERS: MethodTable = {
  * declared here. Each returns FALSE, which is the "nothing was filled" answer its callers already
  * branch on, and the load report names it.
  *
- * Each needs a feed this client does not decode: auras, the mail box, the merchant and buyback lists,
- * pet actions, possession bars, totems, equipment sets and the LFG reward tables.
+ * Each needs a feed this client does not decode: the mail box, pet actions, possession bars, totems,
+ * equipment sets and the LFG reward tables. **`SetUnitAura` HAS LEFT THIS LIST** -- its note read "no
+ * aura feed is decoded (SMSG_AURA_UPDATE has no subscriber)" and that stopped being true when
+ * `network/game/object/auras.ts` picked the pair up; it is real below. **The merchant and buyback lists were on that
+ * sentence and are not any more** -- they moved up into `ITEM_SETTERS` when
+ * `network/game/object/merchant.ts` landed; the census above still stands as a census.
  */
 const TOOLTIP_SETTER_GAPS: Array<[string, string]> = [
-  ['SetUnitAura', 'no aura feed is decoded (SMSG_AURA_UPDATE has no subscriber)'],
   ['SetSpellByID', 'the spellbook is indexed by SLOT, not by spell id -- see api/spells.ts'],
   ['SetInboxItem', 'no mail box is decoded'],
   ['SetSendMailItem', 'as SetInboxItem'],
-  ['SetMerchantItem', 'no merchant window is decoded (SMSG_LIST_INVENTORY has no subscriber)'],
-  ['SetBuybackItem', 'as SetMerchantItem'],
   ['SetPetAction', 'no pet action bar is decoded (SMSG_PET_SPELLS has no subscriber)'],
   ['SetPossession', 'no possession bar exists in this client'],
   ['SetTotem', 'no totem feed is decoded'],
   ['SetEquipmentSet', 'no equipment manager is decoded'],
-  ['SetQuestLogSpecialItem', 'no quest log is decoded'],
+  // The reason is NOT "no quest log is decoded" any more -- there is one. What is absent is the
+  // log's own special-item slot, which `GetQuestLogSpecialItemInfo` would have to answer for.
+  ['SetQuestLogSpecialItem', 'the quest log is decoded, but its special-item slot is not'],
   ['SetLFGDungeonReward', 'no LFG feed is decoded'],
   ['SetLFGCompletionReward', 'as SetLFGDungeonReward'],
-  ['SetUnit', 'the unit tooltip needs a hover feed the world pass does not raise'],
+  // `SetUnit` has LEFT this list -- it is real below. Its note used to read "needs a hover feed the
+  // world pass does not raise"; the pick has raised one since the cursor work.
 ];
 for (const [name, reason] of TOOLTIP_SETTER_GAPS) {
   ITEM_SETTERS[name] = notImplemented(`GameTooltip:${name}`, reason, [false]);
 }
 
+/**
+ * Fill from whichever bridge owns this kind, and answer the TWO returns the client reads.
+ *
+ * `local hasCooldown, repairCost = GameTooltip:SetBagItem(bag, slot)`
+ * (`containerframe.lua:774`) -- so the second return is the per-item repair cost, and
+ * `ContainerFrameItemButton_OnEnter` uses it on the very next line to append `REPAIR_COST` and a
+ * `SetTooltipMoney` when the player is in repair mode.
+ *
+ * The FIRST return keeps its existing meaning: false means nothing was filled and nothing is shown,
+ * which is what every caller of this family branches on. That happens to coincide with `hasCooldown`,
+ * which no call site in the manifest reads -- grepped -- so the two contracts do not collide.
+ *
+ * `info.repairCost` is `undefined` for every kind but a bag, and `undefined` crosses into Lua as nil,
+ * which is what the real engine answers for a row that has no repair cost. See
+ * `ItemTooltipInfo.repairCost` on why nil rather than 0 even though `0 > 0` would also be false.
+ */
 function fillFromSource(
   ctx: MethodContext,
   self: number,
-  kind: 'bag' | 'loot' | 'link' | 'inventory',
+  // The kind union lives in ONE place -- `api/items.ts`, where the source type is declared -- so adding
+  // a kind cannot leave these two spellings of it disagreeing.
+  kind: Parameters<ItemTooltipSource>[0],
   a: number | string,
   b?: number,
 ): unknown[] {
@@ -769,8 +1454,56 @@ function fillFromSource(
     return [false];
   }
   fillItemLines(ctx, self, info);
-  return [true];
+  /**
+   * THE MONEY ROW IS THE CLIENT'S OWN FRAME, and the engine's whole job is to fire this script.
+   *
+   * `GameTooltip` binds `<OnTooltipAddMoney>` to `GameTooltip_OnTooltipAddMoney`
+   * (`gametooltiptemplate.xml:248-250`), which calls `SetTooltipMoney` with `SELL_PRICE` as the
+   * prefix (`gametooltip.lua:88`); that builds a `TooltipMoneyFrameTemplate` and fills it through
+   * `MoneyFrame_Update`. Coins, fonts and layout all come from the client.
+   *
+   * The owner had "Sell Price: 24 Copper" as plain text in the wrong font, because this bridge used
+   * to paste the words in `ui/item-tooltip.ts` instead of raising the event. A tooltip line is not a
+   * money frame, and the difference was visible.
+   *
+   * AFTER the lines, because `SetTooltipMoney` anchors its frame to `TextLeft<NumLines()>` -- the row
+   * it just added -- so a money frame raised before the body would attach to the wrong line.
+   *
+   * One argument, not two: `maxcost` is for the auction house's min/max pair, and a nil second
+   * argument is what takes the single-price branch.
+   */
+  if (info.sellPrice !== undefined && info.sellPrice > 0) {
+    invokeScriptHandler(ctx, self, 'OnTooltipAddMoney', [info.sellPrice]);
+  }
+  // Remembered for `GetItem`, which `GameTooltip_ShowCompareItem` reads one line after every one of
+  // these setters is called.
+  const state = stateOf(widgetOf(ctx, self));
+  state.itemName = info.name;
+  state.itemLink = info.link ?? null;
+  return [true, info.repairCost ?? null];
 }
+
+/**
+ * THE MINIMAP AND WORLD MAP'S REMAINING TOOLTIP CALLS, declared rather than faked.
+ *
+ * `GameTooltip:SetTracking()` was raising on a gesture the owner makes -- hovering the minimap's
+ * tracking button (`minimap.xml:497`, inside its `<OnEnter>` two lines after `SetOwner`). It fills the
+ * tooltip with the tracking types the player has, and `GetNumTrackingTypes` answers 0 here because
+ * tracking types ARE known tracking spells and this client models none (see `ui/map-bridge.ts`). So
+ * there is nothing to list, and an invented line would be worse than an empty tooltip.
+ *
+ * The other three are the world map's multi-tooltip surface: the engine can stack several tooltips in
+ * one frame and `WorldMapPOI_OnEnter` asks which index it is looking at. This layer draws one tooltip.
+ */
+Object.assign(GAMETOOLTIP, {
+  SetTracking: notImplemented('SetTracking',
+    'GetNumTrackingTypes answers 0 -- tracking types are known tracking spells and none are modelled'),
+  GetNumTooltips: notImplemented('GetNumTooltips',
+    'this layer draws one tooltip per frame, not a stack', [1]),
+  GetTooltipIndex: notImplemented('GetTooltipIndex', 'as GetNumTooltips', [1]),
+  UpdateMouseOverTooltip: notImplemented('UpdateMouseOverTooltip',
+    'a tooltip here is rebuilt by its owner OnEnter; nothing refreshes one in place'),
+});
 
 Object.assign(GAMETOOLTIP, ITEM_SETTERS);
 

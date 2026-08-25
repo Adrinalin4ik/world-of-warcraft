@@ -12,10 +12,12 @@
  * worth the confusion of two tasks touching the same name for different reasons.
  */
 import { MethodTable, onFrameTeardown, registerMethods } from '../object';
+import { questBlobs } from '../../../quest-blobs';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { NO_TINT } from '../../../backdrop';
 import type { BackdropTint, Insets } from '../../../backdrop';
-import { Layer } from '../../../widget';
+import { Layer, Widget } from '../../../widget';
+import { screenScale } from '../../../layout';
 import { STRATA_ORDER, Strata } from '../../order';
 import { isDrawLayer, notImplemented, warnOnce, widgetOf } from './region';
 
@@ -135,6 +137,10 @@ const FRAME: MethodTable = {
       return [];
     }
     widget.strata = value as Strata;
+    // DOWN THE SUBTREE: strata is inherited, and `add` only ever copied it once. A frame that
+    // changes strata after it has children left them behind -- see `Widget#restrata`, which carries
+    // the measurement that found this (the tooltip backdrop drawing over its own text).
+    widget.restrata();
     widget.restamp();
     return [];
   },
@@ -145,13 +151,7 @@ const FRAME: MethodTable = {
   // draw bucket for no reason -- nothing about "set my level to what it already is" should move
   // anything.
   SetFrameLevel: (ctx, self, args) => {
-    const widget = widgetOf(ctx, self);
-    const level = Number(args[0] ?? 0);
-    if (widget.frameLevel === level) {
-      return [];
-    }
-    widget.frameLevel = level;
-    widget.restamp();
+    shiftLevel(widgetOf(ctx, self), Number(args[0] ?? 0));
     return [];
   },
   GetFrameLevel: (ctx, self) => [widgetOf(ctx, self).frameLevel],
@@ -159,11 +159,100 @@ const FRAME: MethodTable = {
   // Real `Region` has NO scale method at all in the 3.3.5 API -- scale is Frame-only, because it
   // cascades to a frame's CHILDREN, and a leaf Texture/FontString has none to cascade to. Registering
   // these on REGION (as an earlier pass here did) would make `if texture.SetScale then` true, which
-  // is exactly the duck-typing leak this task exists to close. Nothing in `widget.ts` models a
-  // per-widget scale that cascades the way `frameLevel` does at `Widget#add`, so this is still a
-  // warn-once no-op -- just on the right class now.
-  SetScale: notImplemented('SetScale', 'widget.ts has no per-widget scale field yet'),
-  GetEffectiveScale: notImplemented('GetEffectiveScale', 'reporting the only scale that exists today (1)', [1]),
+  // is exactly the duck-typing leak this task exists to close.
+  /**
+   * `SetScale(s)` -- REAL now, and the note above it used to say `widget.ts` had no field for it.
+   *
+   * The gap was visible on the world map: the player marker landed at 0.81/0.80 of the map where the
+   * arithmetic gives 0.48/0.45, a ratio of about 1.7 -- which is `1 / WORLDMAP_WINDOWED_SIZE`.
+   * `WorldMapFrame_SetFullMapView` scales the detail frame and `WorldMap_ToggleSizeUp/Down` rescale
+   * it, so with the call dropped the frame kept its authored size while every offset computed from
+   * that size was meant for a scaled one.
+   *
+   * `Widget#setScale` touches geometry, because every rect in the subtree moves.
+   */
+  SetScale: (ctx, self, args) => {
+    const widget = ctx.registry.widget(self);
+    if (widget !== null) {
+      widget.setScale(Number(args[0]));
+    }
+    return [];
+  },
+  // `SetClampRectInsets(left, right, top, bottom)` -- how far a clamped frame may go PAST the screen
+  // edge. `SetClampedToScreen` below is real; this is the inset it clamps to, and `widget.ts` has no
+  // field for it. MEASURED as the only remaining load error in `ChatFrame1`'s own OnLoad
+  // (`floatingchatframe.xml:883`, relative line 13), which mattered because a raise there skips the
+  // rest of that OnLoad.
+  SetClampRectInsets: notImplemented('SetClampRectInsets',
+    'widget.ts has no clamp-inset field; SetClampedToScreen clamps to the bare screen rect'),
+  /**
+   * `GetEffectiveScale()` -- the widget's own scale, times every ancestor's, times the VIRTUAL-SCREEN
+   * scale.
+   *
+   * That third factor is the one worth explaining. The client uses this global for exactly one kind
+   * of arithmetic -- converting a cursor position into a frame's own space:
+   *
+   *     local x, y = GetCursorPosition();
+   *     x = x / self:GetEffectiveScale();          (`worldmapframe.lua:743-745`)
+   *
+   * and `api/screen.ts` feeds `GetCursorPosition` in DEVICE pixels while every rect this layer
+   * resolves is in VIRTUAL units (`layout.ts#screenScale`). In the real client `UIParent`'s effective
+   * scale is precisely that conversion, so including it here is the client's own meaning rather than
+   * an extra factor -- and leaving it out would put the cursor in the wrong space on any window that
+   * is not exactly 768 units tall, which is every window.
+   *
+   * `window.innerHeight` rather than a threaded viewport: this is a Lua getter with no frame context,
+   * and it is the same value `WorldUiHost#render` passes to the layout each frame.
+   */
+  GetEffectiveScale: (ctx, self) => {
+    const own = ctx.registry.widget(self)?.effectiveScale ?? 1;
+    const virtual = typeof window === 'undefined' ? 1 : screenScale(window.innerHeight);
+    return [own * virtual];
+  },
+
+  /**
+   * MOVING A WINDOW, and the KEYBOARD -- four gaps that the owner's world-map log named directly:
+   *
+   *     warning: SetMovable is not in this runtime's object model; every XML use of it is ignored
+   *              (first: WorldMapFrame.xml:WorldMapScreenAnchor)
+   *     warning: EnableKeyboard is not in this runtime's object model (first: WorldMapFrame.xml)
+   *
+   * They are declared rather than implemented, and the reason is not the flags -- a boolean on the
+   * widget is nothing. `StartMoving` needs the input router to keep feeding pointer movement to a frame
+   * that has claimed the drag, and `ui/input.ts` has no such claim: it routes a press to the widget
+   * under the cursor and stops there. `EnableKeyboard` needs the same for keys, which today go to the
+   * binding table (`framexml/bindings.ts`) and to a focused EditBox and nowhere else.
+   *
+   * Named as one block so the load report says "movable windows" rather than four unrelated lines. The
+   * visible consequence is exactly what the owner has already reported -- a window cannot be dragged --
+   * and Escape reaching `TOGGLEGAMEMENU` instead of a keyboard-enabled frame's own `OnKeyDown`.
+   */
+  SetMovable: notImplemented('SetMovable',
+    'ui/input.ts has no drag claim, so a frame that may move has nothing to move it'),
+  IsMovable: notImplemented('IsMovable', 'as SetMovable', [false]),
+  StartMoving: notImplemented('StartMoving',
+    'ui/input.ts routes a press to the widget under the cursor and does not keep feeding movement to '
+    + 'a frame that has claimed a drag'),
+  StopMovingOrSizing: notImplemented('StopMovingOrSizing', 'as StartMoving'),
+  SetResizable: notImplemented('SetResizable', 'as SetMovable -- the same missing drag claim'),
+  IsResizable: notImplemented('IsResizable', 'as SetResizable', [false]),
+  EnableKeyboard: notImplemented('EnableKeyboard',
+    'key presses go to the binding table and to a focused EditBox; no frame receives OnKeyDown'),
+  IsKeyboardEnabled: notImplemented('IsKeyboardEnabled', 'as EnableKeyboard', [false]),
+
+
+  /**
+   * `GetScale()` -- the frame's own scale, unmultiplied by its ancestors' (that is
+   * `GetEffectiveScale`). It answered a hardcoded 1 while `SetScale` was a no-op; both are real now,
+   * so the note that used to say "reading back the value nothing can change" no longer applies.
+   *
+   * **ITS ABSENCE WAS THE WHOLE OF "I don't see options in selects".** `ToggleDropDownMenu`'s third
+   * statement is `local uiParentScale = UIParent:GetScale()` (`uidropdownmenu.lua:621`), and it runs
+   * BEFORE the loop that adds the menu's buttons -- so every dropdown in the client opened to a list
+   * frame carrying nothing but its own scroll arrows. Measured: `shownButtons=3`, the first of them
+   * "Scroll Up", and the toggle raising on this method.
+   */
+  GetScale: (ctx, self) => [ctx.registry.widget(self)?.scale ?? 1],
 
   EnableMouse: (ctx, self, args) => {
     widgetOf(ctx, self).mouseEnabled = Boolean(args[0]);
@@ -539,13 +628,57 @@ const FRAME: MethodTable = {
 /** The shared body of `RaiseFrameLevel`/`RaiseFrameLevelByTwo`/`LowerFrameLevel`. */
 function nudgeLevel(ctx: Parameters<MethodTable[string]>[0], self: number, delta: number): unknown[] {
   const widget = widgetOf(ctx, self);
-  const level = widget.frameLevel + delta;
-  if (widget.frameLevel === level) {
-    return [];
-  }
-  widget.frameLevel = level;
-  widget.restamp();
+  shiftLevel(widget, widget.frameLevel + delta);
   return [];
+}
+
+/**
+ * Move a frame to `level` AND CARRY ITS WHOLE SUBTREE WITH IT, keeping every relative offset.
+ *
+ * **THIS IS WHY THE STAT DROPDOWNS WOULD NOT OPEN**, and it was measured live rather than reasoned
+ * about. `PlayerStatFrameLeftDropDown_OnLoad`'s first statement is `RaiseFrameLevel(self)`
+ * (`paperdollframe.lua:1518`), and the frame it raises is the CONTAINER whose child `$parentButton`
+ * carries the only `<OnClick>` that opens the menu -- `ToggleDropDownMenu(nil, nil, self:GetParent())`
+ * (`uidropdownmenutemplates.xml:312-326`). The container also declares `enableMouse="true"` in the
+ * client's own XML (`paperdollframe.xml:726`), so it is hit-testable by the document's own choice.
+ *
+ * Raising ONLY the frame put the container at its arrow button's level with a fresher `linkStamp` (the
+ * `restamp()` below), so the container sorted AFTER its own child and `hitTest`'s backwards walk
+ * answered the container. MEASURED with the panel open and the pointer on the arrow:
+ *
+ *     pointerWidget = PlayerStatFrameLeftDropDown        <- the container, not its button
+ *     after a real click: IsShown()=false, UIDROPDOWNMENU_OPEN_MENU=nil, numButtons=5
+ *
+ * -- the list was already POPULATED by `UIDropDownMenu_Initialize` on show, and `ToggleDropDownMenu`
+ * had simply never run, through 2.6 s of sampling. That is the whole of "options appear but choosing
+ * one does nothing": the menu never opened at all.
+ *
+ * The engine's levels are RELATIVE -- `Widget#add:478` already builds them that way, a child frame at
+ * the parent's level + 1 and a region at the owner's level -- so moving a parent must move the
+ * subtree, or the invariant that built the tree is broken by the first `SetFrameLevel`.
+ *
+ * Regions shift too: `add` gives them their owner's level exactly so that `frameLevel` outranking
+ * `layer` in `compareOrder` keeps a frame's art with the frame. Leaving them behind would separate a
+ * raised frame from its own textures.
+ */
+function shiftLevel(widget: Widget, level: number): void {
+  const delta = level - widget.frameLevel;
+  if (delta === 0) {
+    // The same-value guard `SetFrameLevel` has always had: a no-op write must not `restamp`, or a
+    // redundant call would reorder the frame within its bucket.
+    return;
+  }
+  const walk = (node: Widget): void => {
+    node.frameLevel += delta;
+    for (const child of node.children) {
+      walk(child);
+    }
+  };
+  walk(widget);
+  // Only the frame ITSELF is restamped. `linkStamp` is the live-list order within a bucket and the
+  // client re-tails the frame that moved, not its descendants -- and restamping children would
+  // reverse their relative order against each other.
+  widget.restamp();
 }
 
 function applyLayer(widget: { layer: Layer }, arg: unknown): void {
@@ -567,4 +700,105 @@ function applyLayer(widget: { layer: Layer }, arg: unknown): void {
 // `methods/model.ts` where it is real. `AdvanceTime` is the one that is still a gap and it went with
 // them, so the class has one home.
 
+/**
+ * QUESTPOIFRAME -- `<QuestPOIFrame name="WorldMapBlobFrame">`'s own engine surface.
+ *
+ * These were on FRAME, which was a duck-typing leak I accepted in the comment at the time: it made
+ * `if frame.DrawQuestBlob then` true for every frame in the client. `QUESTPOIFRAME` is a real class now
+ * (`object.ts`), so they live where they belong -- and the class had to exist anyway, because without it
+ * the loader dropped the element and `WorldMapBlobFrame` was nil.
+ *
+ * A blob is the shaded AREA a quest objective covers, drawn from the polygon the server sends with
+ * `SMSG_QUEST_POI_QUERY_RESPONSE`. **That reply has a subscriber now**
+ * (`network/game/object/quest-poi.ts`), so the polygon exists and `DrawQuestBlob` is real -- see
+ * `ui/quest-blobs.ts` for why it rasterises into a canvas rather than building regions.
+ *
+ * The two TEXTURE setters stay gaps, and honestly: `ui/quest-blobs.ts` fills with a flat colour
+ * rather than the client's tiling art, so accepting a texture name here would claim it was used.
+ * `SetBorderScalar` is the border's width multiplier and is in the same position.
+ */
+const QUESTPOIFRAME: MethodTable = {
+  DrawQuestBlob: (ctx, self, args) => {
+    questBlobs.draw(
+      ctx,
+      Math.trunc(Number(args[0])) || 0,
+      !(args[1] === undefined || args[1] === null || args[1] === false),
+    );
+    return [];
+  },
+  // `DrawBlob(blobIndex, show)` is the same drawing keyed by POI id rather than quest id. Nothing
+  // in this client calls it -- checked against the served worldmapframe.lua -- so it stays a
+  // declared gap rather than a guess at which key it means.
+  DrawBlob: notImplemented('DrawBlob',
+    'no FrameXML caller; DrawQuestBlob is the one the map uses'),
+  SetFillTexture: notImplemented('SetFillTexture',
+    'ui/quest-blobs.ts fills with a flat colour, so a texture name would be ignored'),
+  SetBorderTexture: notImplemented('SetBorderTexture', 'as SetFillTexture'),
+  SetFillAlpha: (ctx, self, args) => {
+    questBlobs.setFillAlpha(Number(args[0]));
+    return [];
+  },
+  SetBorderAlpha: (ctx, self, args) => {
+    questBlobs.setBorderAlpha(Number(args[0]));
+    return [];
+  },
+  /**
+   * `GetNumTooltips` -- how many objective tooltips the BLOB has, and **0 is the real answer.**
+   *
+   * It was absent, and the owner caught the raise it caused:
+   *
+   *     framexml: poiWorldMapPOIFrame1_3: OnEnter: WorldMapFrame.lua:1893:
+   *         attempt to call a nil value (method 'GetNumTooltips')
+   *
+   * -- so hovering a quest pin threw and the pin had no tooltip at all.
+   *
+   * **0 routes the client onto the path that WORKS**, and that is why it is right rather than a
+   * placeholder. `WorldMapQuestPOI_SetTooltip` uses the POI tooltips only when their count EQUALS
+   * the objective count, and falls back to `GetQuestLogLeaderBoard` otherwise
+   * (`worldmapframe.lua:1893-1901`) -- which is real here and reads the descriptor. A nonzero count
+   * would send it to `GetQuestPOILeaderBoard`, which is not.
+   *
+   * Safe against the Lua-truthiness trap: 0 IS truthy, but the guard is
+   * `numPOITooltips == numObjectives`, and a quest with 0 objectives never enters the loop.
+   */
+  GetNumTooltips: () => [0],
+
+  /**
+   * `UpdateMouseOverTooltip(x, y)` -> `questLogIndex, numObjectives`, or NOTHING.
+   *
+   * **Nothing is the answer that fixes the owner's bug, and it is a real answer rather than a stub.**
+   * He reported a POI tooltip that never disappears, and the reason is in the client: the button's
+   * `OnLeave` does not hide it (`worldmapframe.lua:1862-1864`). What hides it is the ELSE branch of
+   * `WorldMapBlobFrame_OnUpdate` -- `if (numObjectives) then ... else WorldMapTooltip:Hide() end`
+   * (`:1930-1935`). So the recovery lives behind this method returning nothing, which is exactly the
+   * documented shape on this project: recovery in an `OnUpdate`, and the state permanent without it.
+   *
+   * Nothing is also TRUE today. The blob this client draws is the selected quest's shaded area
+   * (`ui/quest-blobs.ts`), and hovering it to read that quest's objectives is a feature nobody has
+   * asked for; the point-in-polygon test it would need is real work on data that is already here.
+   * When it lands, this returns the pair.
+   *
+   * NOT `notImplemented`: this runs from an `OnUpdate`, so a gap notice would redden `UIErrorsFrame`
+   * every frame the map is open -- the rule that round of unit-popup gaps established.
+   */
+  UpdateMouseOverTooltip: () => [],
+  // Unreachable behind that 0 -- the client only calls it when the counts match -- and registered
+  // for the reason the object model registers unreachable methods: an addon duck-types first.
+  GetTooltipIndex: notImplemented('GetTooltipIndex',
+    'GetNumTooltips answers 0, so the client reads objectives from the quest log instead'),
+  SetBorderScalar: notImplemented('SetBorderScalar',
+    'the border is drawn at a fixed 2px; see ui/quest-blobs.ts'),
+};
+
+/**
+ * `CreatePlayerArrowFrame` stays on FRAME: `WorldMapFrame_OnLoad` calls it on the MAP frame, not on the
+ * blob frame, so moving it with the blob methods would have put it on a class its caller never touches.
+ */
+Object.assign(FRAME, {
+  CreatePlayerArrowFrame: notImplemented('CreatePlayerArrowFrame',
+    'the widget layer draws axis-aligned quads only, so a rotating arrow overlay has nowhere to '
+    + 'draw; see map-bridge.ts on the world map arrow'),
+});
+
 registerMethods('FRAME', FRAME);
+registerMethods('QUESTPOIFRAME', QUESTPOIFRAME);

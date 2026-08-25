@@ -9,6 +9,7 @@ import { getUpdateFieldName, ObjectType, UpdateFlags, UpdateType } from '../enum
 import { readMovementInfo } from '../../movement-info';
 import { GUID_BYTES, guidHex } from '../../../guid-hex';
 import { objectTrace } from './trace';
+import { emptyGameObjectState, mergeGameObjectFields } from './game-object-fields';
 import { applyUnitFields, isDead } from './unit-fields';
 
 /**
@@ -72,6 +73,11 @@ export class UpdateObjectHandler extends EventEmitter {
     // in `World#entities`, so the branch above never sees it; without this the bag would keep drawing
     // a row for an item that no longer exists.
     this.game.objectHandler?.itemHandler?.forgetObject(guid);
+    // And its AURAS, for the same reason and through the same lazy door: `AuraHandler` keeps a sparse
+    // slot map per guid, so without this a mob that despawned mid-debuff would keep its entry for the
+    // rest of the session. Nothing would DISPLAY it -- `UnitAura` only ever asks about a resolved token
+    // -- so this is a leak rather than a wrong screen, which is why it is one line and not a subscription.
+    this.game.objectHandler?.auraHandler?.forget(guid);
   }
 
   
@@ -175,7 +181,18 @@ export class UpdateObjectHandler extends EventEmitter {
               // list, and removing the local player would take the camera's subject out of the
               // scene -- a guard, not an observed case.
               if (unit && unit !== this.game.world.player) {
-                this.game.world.remove(unit);
+                /**
+                 * FADE, not pop -- and this is the ONLY removal path that fades.
+                 *
+                 * The distinction is the reference's and it is byte-verified on the other side:
+                 * "a *destroyed* object pops instantly, and the net bridge despawns it directly,
+                 * bypassing this", while the stream-out is its own stated look --
+                 * "on the reference, distant mobs fade out, never blink out"
+                 * (`benilla-app/src/net/apply/objects.rs:457-467`). This block IS the stream-out:
+                 * the unit still exists, we have merely left its range.
+                 * `handleDestroyObjectPacket` above keeps popping, deliberately.
+                 */
+                this.game.world.modelFade.fadeOutAndRemove(unit);
               }
             }
             break;
@@ -243,8 +260,26 @@ export class UpdateObjectHandler extends EventEmitter {
     if (!unit || pack.objType === undefined) {
       return;
     }
+    if (pack.objType === ObjectType.GameObject && unit.gameObject !== null) {
+      /**
+       * A WORLD OBJECT'S STATE MOVING, and this is the door the SPARKLE comes through.
+       *
+       * `GAMEOBJECT_DYNAMIC` is set per-player when an object becomes an active objective for us, and
+       * `GAMEOBJECT_BYTES_1`'s state byte flips when it is used. Both arrive as values-only blocks
+       * after first sight, so an object decoded at creation and never again would sparkle at whatever
+       * it happened to be when it streamed in and keep offering itself after being looted.
+       *
+       * The RETURN is used. `CLAUDE.md` records a discarded merge return hiding a defect twice, and the
+       * shape here is identical: the map would be right and nothing would repaint.
+       */
+      if (mergeGameObjectFields(unit.gameObject, pack.newObject, pack.objType)) {
+        unit.gameObjectDisplay = unit.gameObject.displayId;
+        this.game.world.emit('gameobject:fields', unit);
+      }
+      return;
+    }
     if (pack.objType !== ObjectType.Unit && pack.objType !== ObjectType.Player) {
-      // Game objects and corpses have descriptor fields too; neither is a unit and neither has a
+      // A CORPSE, or an object whose create block never arrived. Neither is a unit and neither has a
       // `fields` bag to write. Decoding them costs nothing and reading them would be a lie.
       return;
     }
@@ -327,6 +362,62 @@ export class UpdateObjectHandler extends EventEmitter {
     // The TYPE is remembered on the unit here and nowhere else; every later values-only update is
     // decoded against it (`applyValues`).
     unit.objectType = pack.obj_type;
+    // ASK FOR ANOTHER PLAYER'S NAME. A creature is named by `SMSG_CREATURE_QUERY_RESPONSE`, which
+    // `combat.ts#applyCreatureInfo` writes onto every unit sharing the template; a PLAYER is named
+    // only by `SMSG_NAME_QUERY_RESPONSE`, and **nothing was asking for anybody.**
+    //
+    // 255083b put the ask in `world/index.ts#add` behind `if (entity.isPlayer && entity !== this.player
+    // && ...)`, and that condition is false for ALL inputs. `Unit#isPlayer` (`classes/unit.ts:323`)
+    // defaults to false and is assigned in exactly one place in the tree -- `classes/player.ts:14`, the
+    // constructor of our OWN character -- so it is false for every player the server streams, and the
+    // `entity !== this.player` half excludes the single unit where it is true. All four defects that
+    // commit fixed were real; this fifth one made the fix unreachable, which is why the owner still
+    // saw an empty name. `add` also runs BEFORE the create block's type byte is decoded (twenty lines
+    // above: a bare `new Unit` is added immediately), so nothing there can know a unit is a player.
+    //
+    // Here, on `pack.obj_type` -- the create block's own `ObjectType` byte, the wire's answer rather
+    // than a guess off the guid's high word. `cursor-mode.ts:290` and `nameplates.ts:561` already test
+    // players this way, and that is not a coincidence:
+    //
+    // **`isPlayer` IN THIS CODEBASE MEANS "IS THE LOCALLY-CONTROLLED PLAYER", NOT "IS A PLAYER
+    // CHARACTER"**, and setting it here would have been a real regression. SELF-REVIEW caught it: the
+    // first version of this block did `unit.isPlayer = true`, and eight motion sites read the flag as
+    // the local/remote switch -- `world/index.ts:1051` picks `entity.move.horizVel.length()` over
+    // `entity.remoteMotion.speed` for it, and `unit.ts:3012,3023` gate the peer dead-reckon trace on
+    // `!this.isPlayer`. A peer has no Controls writing `move.horizVel`, so flipping the flag would have
+    // read every other player's speed as 0 and stopped their run cycle -- breaking locomotion, which is
+    // owner-confirmed working, in another agent's area. The flag is left alone.
+    //
+    // `UnitIsPlayer`/`UnitPlayerControlled` DO want "is a player character", and they are wrong for the
+    // same reason; that is fixed where it belongs, in `ui/unit-bridge.ts`, off `objectType`.
+    if (pack.obj_type === ObjectType.Player
+      && unit !== this.game.world.player
+      && (unit.name === '' || unit.name === '<unknown>')) {
+      // `askNameOnce` dedupes on the name cache and the in-flight set, so re-entering our own grid --
+      // which re-sends the create block -- does not re-ask.
+      if (typeof this.game.askNameOnce === 'function') {
+        this.game.askNameOnce(pack.guid);
+      } else {
+        // LOUD, not a silent optional call: a rename on the handler would otherwise turn this off with
+        // no symptom but a blank name, which is the report this code exists to answer.
+        console.warn('applyUpdates: game.askNameOnce is missing -- other players will have no name');
+      }
+    }
+    if (pack.obj_type === ObjectType.GameObject) {
+      // A WORLD OBJECT -- a bush, a crate, a chest. It was already in `World#entities` (see
+      // `game-object-fields.ts`' header on why "let them through" was never the missing half); what was
+      // missing is reading its block and giving it a model.
+      unit.gameObject = unit.gameObject ?? emptyGameObjectState();
+      mergeGameObjectFields(unit.gameObject, pack.newObject, pack.obj_type);
+      // THE SETTER dedupes on the id, so a re-entry into our own grid -- which re-sends this very
+      // create block -- costs one compare rather than a second fetch.
+      unit.gameObjectDisplay = unit.gameObject.displayId;
+      // THE NAME, for the tooltip. Keyed on the TEMPLATE entry and deduped there, so a vineyard of
+      // identical crates is one round trip -- the same economy `queryCreature` below documents for a
+      // camp of eleven wolves.
+      this.game.objectHandler?.gameObjectHandler?.query(unit.gameObject.entry, pack.guid);
+      this.game.world.emit('gameobject:fields', unit);
+    }
     if (pack.obj_type === ObjectType.Unit || pack.obj_type === ObjectType.Player) {
       if (applyUnitFields(unit, pack.newObject, pack.obj_type, true)) {
         // A unit can stream into view ALREADY DEAD -- a corpse that has not decayed yet. Same edge
@@ -334,6 +425,35 @@ export class UpdateObjectHandler extends EventEmitter {
         unit.setDead(isDead(unit));
         this.game.world.emit('unit:fields', unit);
       }
+    }
+    /**
+     * A CREATURE'S NAME, asked for HERE and not only on selection.
+     *
+     * Reported by the merchant agent as "every NPC's name reads `<unknown>`", with the diagnosis that
+     * the creature-name QUERY was at fault. The decode is fine; **the query was never sent for most
+     * units.** `CombatHandler#queryCreature` had exactly two callers:
+     *
+     *   - `world/index.ts#setTarget` -- so a unit you TARGET gets named, which is why the owner has
+     *     screenshots of "Kobold Worker" and "Diseased Timber Wolf" in the target frame;
+     *   - the nameplate sweep (`nameplates.ts:425`) -- which is gated on `showEnemies`/`showFriends`,
+     *     and BOTH are seeded `'0'` (`api/screen.ts`, and `nameplates.ts:400-401` defaults them false).
+     *     So that caller does nothing until the owner presses `V`.
+     *
+     * A vendor opened by right-clicking is never targeted and never gets a plate, so nothing ever asked
+     * for its name -- which reconciles the two halves of the evidence that looked contradictory.
+     *
+     * THE COST IS ALREADY ESTABLISHED and is why this can be unconditional: the query is keyed on the
+     * TEMPLATE `entry`, `CombatHandler#asked` dedupes on it, and `applyCreatureInfo` writes the answer
+     * onto EVERY unit sharing that entry. `nameplates.ts:428-433` records the measurement -- "a camp of
+     * eleven identical wolves is ONE round trip and a Northshire grid is a handful". So this is a
+     * handful of packets per grid, paid once per session per template, on a path that already does a DBC
+     * lookup and an M2 fetch.
+     *
+     * AFTER `applyUnitFields`, because `fields.entry` is decoded there and is nil before it.
+     * `ObjectType.Unit` only: a PLAYER has no creature template and is named by the query above.
+     */
+    if (pack.obj_type === ObjectType.Unit && unit.fields.entry) {
+      this.game.objectHandler?.combatHandler?.queryCreature(unit.fields.entry, pack.guid);
     }
     // The inventory words out of our own create block -- see the same call in `applyValues` for why
     // they are kept outside `unit.fields`. This is the one that MATTERS at login: the create block is
@@ -395,10 +515,33 @@ export class UpdateObjectHandler extends EventEmitter {
     }
     // unit.displayId = 21976;
 
-    const {x, y, z, runSpeed, facing} = pack.movement;
+    /**
+     * THE CREATE BLOCK CARRIES ITS POSITION IN TWO DIFFERENT SHAPES, and reading only one is why the
+     * owner could not see a single bush.
+     *
+     * `parseMovement` writes them differently and always has:
+     *
+     *  - `UPDATEFLAG_LIVING` goes through `readMovementInfo`, whose `MovementInfo` has **flat** `x`,
+     *    `y`, `z` (`movement-info.ts:93-95`), and `Object.assign(movement, info)` lifts them to the top.
+     *  - `UPDATEFLAG_HAS_POSITION` -- the stationary block, which is what a GAMEOBJECT, a corpse and a
+     *    dynamic object carry -- writes `movement.position = packet.readVector3()`, a **nested** vector,
+     *    and sets no flat fields at all. The flag's own comment in `enums.ts` says who it is for:
+     *    "world objects (players, units, go, do, corpses)".
+     *
+     * This destructure read the flat shape only. For a stationary object `x`, `y` and `z` were all
+     * `undefined`, so `position.set(undefined, undefined, undefined)` wrote NaN -- and a node at NaN
+     * draws nowhere at all. Every piece of the object arc was working: the descriptor decoded, the DBC
+     * resolved, the `.m2` loaded, the model was added and revealed. It had no coordinates.
+     *
+     * **It read as "the models do not load", which is why this is worth spelling out.** The visible
+     * symptom of a missing position is identical to the symptom of a missing model, and nothing in the
+     * model path is at fault. Units were unaffected because they are the shape that was being read.
+     */
+    const at = pack.movement.position ?? pack.movement;
+    const {runSpeed, facing} = pack.movement;
 
-    if (!isOurself) {
-      unit.position.set(x, y, z);
+    if (!isOurself && typeof at?.x === 'number') {
+      unit.position.set(at.x, at.y, at.z);
       if (typeof facing === 'number') {
         unit.rotation.z = facing;
       }

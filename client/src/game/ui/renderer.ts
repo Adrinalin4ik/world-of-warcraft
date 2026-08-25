@@ -63,6 +63,12 @@ type Pooled = {
   material: THREE.MeshBasicMaterial;
   geometry: THREE.BufferGeometry;
   /**
+   * The four fragment-clip planes for a widget inside a `<ScrollFrame>`, allocated on first need and
+   * mutated in place thereafter. Absent on every widget that has never been clipped, which is almost
+   * all of them -- and absent means a material with no `clippingPlanes` and the identical shader.
+   */
+  clipPlanes?: THREE.Plane[];
+  /**
    * What was last WRITTEN to this entry, so an unchanged frame writes nothing.
    *
    * MEASURED, and this is the single most expensive thing the widget layer does. The three writes
@@ -260,6 +266,16 @@ export class GlueRenderer {
     this.renderer = renderer;
     this.premultiplied = premultipliedAlpha;
     this.scene.name = 'GlueUI';
+    /**
+     * PER-MATERIAL CLIPPING, for the `<ScrollFrame>` fragment clip (see the crop block in `render`).
+     *
+     * Set once here and never toggled: flipping it mid-session would re-derive every program in the
+     * SHARED renderer, and this instance's renderer is the world's too. Enabling it costs nothing for
+     * a material with no `clippingPlanes` -- three derives `numClippingPlanes: 0` and the same program
+     * -- and the global `renderer.clippingPlanes` is deliberately left empty, so only the materials
+     * that ask for planes are clipped.
+     */
+    this.renderer.localClippingEnabled = true;
   }
 
   render(items: DrawItem[], resolve: SpriteResolver): void {
@@ -383,12 +399,12 @@ export class GlueRenderer {
         // stretch every letter. Position within the rect by the font's horizontal alignment and
         // always vertically centred.
         //
-        // "There is no vertical-align concept in GlueXML fontstrings" is what this comment used to
-        // say, and it is FALSE: `justifyV` exists and its FrameXML default is MIDDLE
-        // (`benilla-ui/src/script/types.rs:186-198`). Centring is therefore right for the default and
-        // right for every string in the loaded manifest that does not override it -- but an explicit
-        // `justifyV="TOP"` (e.g. `AchievementDescriptionFont`, fontstyles.xml:278) is still ignored,
-        // which is the same gap `SetJustifyV`'s `notImplemented` entry names.
+        // "There is no vertical-align concept in GlueXML fontstrings" is what this comment once said,
+        // and it was FALSE: `justifyV` exists and its FrameXML default is MIDDLE
+        // (`benilla-ui/src/script/types.rs:186-198`). It then said an explicit `justifyV="TOP"` was
+        // "still ignored" -- that is false NOW, and the branch below is why. Both corrections are kept
+        // rather than collapsed, because the second one is the kind of sentence that goes stale
+        // silently and this file has already carried it once.
         // CENTER, not LEFT: the FrameXML `JustifyH` default. See `region.ts#ensureFont` -- a
         // `FontSpec` always carries an align, so this fallback is only for a font string that never
         // went through `ensureFont` at all, and it must agree with that default or the two disagree
@@ -400,7 +416,24 @@ export class GlueRenderer {
             : align === 'RIGHT'
               ? left + width - size.width
               : left;
-        const quadTop = top + (height - size.height) / 2;
+        /**
+         * `justifyV` IS HONOURED NOW, and the paragraph above used to end by saying it was not.
+         *
+         * MIDDLE is FrameXML's default and what this line did unconditionally; TOP and BOTTOM were
+         * ignored, so an authored `justifyV="TOP"` drew centred. `Widget#FontSpec.vertical` carries it
+         * and `methods/region.ts#SetJustifyV` writes it -- the loader was already routing the XML
+         * attribute there, so the whole gap was one field and this branch.
+         *
+         * It only moves a string whose RECT is taller than its glyph block. A font string with a derived
+         * height has a rect the same height as its text, so all three answers coincide for it and no
+         * existing caption shifts by a pixel.
+         */
+        const vertical = item.widget.font?.vertical ?? 'MIDDLE';
+        const quadTop = vertical === 'TOP'
+          ? top
+          : vertical === 'BOTTOM'
+            ? top + height - size.height
+            : top + (height - size.height) / 2;
         // SNAP TO THE DEVICE-PIXEL GRID. `text.ts` rasterizes a string at `screenScale *
         // devicePixelRatio`, so its canvas is already an integer number of device pixels wide and the
         // quad below is exactly 1 texel : 1 device pixel in SCALE -- but its left/top edge is an
@@ -426,6 +459,60 @@ export class GlueRenderer {
         const padY = pad?.y ?? 0;
         entry.mesh.position.set(snap(quadLeft) + size.width / 2, snap(quadTop) + size.height / 2, 0);
         entry.mesh.scale.set(size.width + padX, size.height + padY, 1);
+        /**
+         * THE CROP, for a font string inside a `<ScrollFrame>` -- APPLIED AS A FRAGMENT CLIP, and the
+         * change of mechanism is the point.
+         *
+         * A font string draws at its rasterized size, centred in its rect, so the two earlier attempts
+         * at this both had to MOVE something: narrow the rect (which re-centred the text and kept its
+         * full height), then re-derive the quad's centre, scale and UVs from the intersection. Both
+         * were geometry, and geometry is exactly what this project has got wrong three times over --
+         * a re-centre, a UV direction, a lost pixel snap. Every measurement of the failing page came
+         * back correct (`uiTextExtent`: raster 195 against a 195 rect, `overflowY` 0; the draw-list
+         * dump: crop equal to the viewport, no overlap between blocks) and the owner still saw the
+         * text break, which is the signature this project already records: state right, effect wrong,
+         * so look at the last hop.
+         *
+         * So nothing is moved any more. The quad keeps the placement above -- the same one it would
+         * have with no scroll, pixel-snapped -- and the viewport becomes four clipping planes on this
+         * mesh's own material. The fragment either survives or it does not; there is no coordinate to
+         * get backwards.
+         *
+         * The reference is built the same way round: the clip travels with the quad to the paint stage
+         * and is applied there (`benilla-ui/src/script/clip.rs` + `script/extract.rs`), rather than
+         * being folded into the quad's rect beforehand.
+         *
+         * COST, and why this is not paid by the whole interface: the pool is keyed per widget id, so
+         * only a widget that has actually been clipped ever gets planes -- everything else keeps a
+         * material with none and the identical shader. `localClippingEnabled` adds no per-frame work
+         * for a material with zero planes (three derives `numClippingPlanes: 0` and the same program).
+         * The four planes are allocated once per widget and mutated in place, so a scroll costs four
+         * float writes rather than an allocation or a program change.
+         */
+        if (item.crop !== undefined || entry.clipPlanes !== undefined) {
+          const box = item.crop ?? null;
+          if (entry.clipPlanes === undefined) {
+            entry.clipPlanes = [
+              new THREE.Plane(new THREE.Vector3(1, 0, 0), 0),
+              new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0),
+              new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
+              new THREE.Plane(new THREE.Vector3(0, -1, 0), 0),
+            ];
+            entry.material.clippingPlanes = entry.clipPlanes;
+          }
+          // three keeps a fragment where `dot(normal, worldPos) + constant >= 0`, and this scene's
+          // world units ARE interface units, so the four constants are the box's edges directly. With
+          // no crop the box is opened past any possible screen so the planes are inert without a
+          // program change (removing them would change the plane COUNT and recompile).
+          const left = box === null ? -1e6 : box.left;
+          const top = box === null ? -1e6 : box.top;
+          const right = box === null ? 1e6 : box.left + box.width;
+          const bottom = box === null ? 1e6 : box.top + box.height;
+          entry.clipPlanes[0].constant = -left;
+          entry.clipPlanes[1].constant = right;
+          entry.clipPlanes[2].constant = -top;
+          entry.clipPlanes[3].constant = bottom;
+        }
       } else {
         entry.mesh.position.set(left + width / 2, top + height / 2, 0);
         entry.mesh.scale.set(width, height, 1);

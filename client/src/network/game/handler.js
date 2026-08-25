@@ -13,6 +13,7 @@ import { ObjectHandler } from './object/handler';
 import { clientTicks, encodeTimeSyncResponse } from './time-sync';
 import { readAuthResponseExpansion } from './account-info';
 import World from '../../game/world';
+import { guidBytes } from '../guid-hex';
 import { Camera } from 'three';
 
 /**
@@ -54,6 +55,14 @@ export class GameHandler extends Socket {
     this.authenticated = false;
     // [guid] = name
     this.playerNames = [];
+    /**
+     * Guids with a `CMSG_NAME_QUERY` outstanding, so a player in view is asked for ONCE.
+     *
+     * Never cleared on a response: `playerNames` gaining the entry is what makes `hasNameFor` true
+     * thereafter, and a guid whose answer never comes must not be re-asked on every update either.
+     * Cleared with the connection, in `resetConnection`.
+     */
+    this.nameQueriesInFlight = new Set();
 
     this.playerNames[0] = { name: 'SYSTEM' };
 
@@ -207,36 +216,188 @@ export class GameHandler extends Socket {
     }
   }
 
+  /**
+   * `SMSG_NAME_QUERY_RESPONSE` (0x051) -- ANOTHER PLAYER'S NAME.
+   *
+   * The owner: "I don't see players name in target window and in toolbar on top of the player. But I
+   * see mobs names." A creature's name arrives with `SMSG_CREATURE_QUERY_RESPONSE` and is written onto
+   * every unit sharing the template (`object/combat.ts#applyCreatureInfo`). A player's name comes only
+   * from here, and this handler had FOUR defects, every one of which had to be fixed for a name to
+   * appear:
+   *
+   *  1. **It clobbered our own character's name.** `this.session.player.name = name` wrote whatever
+   *     player was last queried over the local player. The roster is the only correct source for that
+   *     (`game/world/index.ts:383` sets it from `entered.name`), so the line is gone.
+   *  2. **It stored under a key nothing reads.** `readPackedGUID` answers a HEX STRING, while the chat
+   *     handler indexes `playerNames` by the numeric `guid.low` throughout
+   *     (`chat/handler.js:123,129-130,160-161`). So the answer to every name query has been
+   *     unreachable, which is why a chat line falls back to printing the raw guid number. Both keys
+   *     are written now: hex for the unit path, `low` for the chat path that already expects it.
+   *  3. **Nothing applied it to a UNIT**, so `UnitName` and the nameplate had nothing to read.
+   *  4. **Nothing ever ASKED.** The only callers of `askName` were three chat paths, so a player who
+   *     walked into view was never queried at all. `game/world/index.ts#add` asks now.
+   *
+   * THE LAYOUT, from the server that sends it (TrinityCore 3.3.5 `WorldSession::SendNameQueryOpcode`):
+   * packed guid, `u8 nameUnknown`, then -- only when that byte is 0 -- the name, the realm name, race,
+   * gender, class and a declined-names flag. **The unknown case ENDS THE PACKET after the byte**, and
+   * reading on past it was a real over-read; it is guarded now. The realm name is written as a lone
+   * `uint8(0)` for a same-realm player, i.e. an empty C-string, which is why `readCString` is right
+   * for it.
+   */
   handleName(gp) {
     const guid = gp.readPackedGUID();
-    const name_known = gp.readUnsignedByte();
-    const name = gp.readCString();
-    const realm = gp.readCString(); // only for crossrealm
-
+    const nameUnknown = gp.readUnsignedByte();
+    if (nameUnknown !== 0) {
+      // The server does not know this guid. Nothing follows the byte -- see the note above.
+      return;
+    }
+    const name = gp.readCStr();
+    // `readCStr`, NOT `readCString` -- and this was a live off-by-one, not a tidy-up. The realm name
+    // is a lone `uint8(0)` for a same-realm player, and `byte-buffer`'s own `readCString` returns
+    // `null` for an empty run WITHOUT advancing the index (`net/packet.js:47-77` carries the
+    // measurement). So the terminator stayed in the buffer and `race`/`gender`/`playerClass` each
+    // read the byte before their own: race got the realm terminator (0 = an invalid race), gender got
+    // the race, class got the gender. The NAME decoded perfectly either way, which is exactly why
+    // nothing noticed -- the same shape as the `SMSG_ITEM_QUERY_SINGLE_RESPONSE` bug.
+    gp.readCStr(); // realm name, empty for a same-realm player
     const race = gp.readUnsignedByte();
-    const gender = gp.readUnsignedByte(); // guid2
+    const gender = gp.readUnsignedByte();
     const playerClass = gp.readUnsignedByte();
-    const declined = gp.readUnsignedByte();
 
-    this.session.player.name = name;
+    const entry = { name, race, gender, playerClass };
+    this.playerNames[guid] = entry;
+    // AND under the numeric low word, which is the key `chat/handler.js` has always looked under. The
+    // low 32 bits are the last eight hex digits of the guid -- `guidHex` zero-extends, so this is exact
+    // rather than a truncation.
+    const low = Number.parseInt(guid.slice(-8), 16);
+    if (Number.isFinite(low)) {
+      this.playerNames[low] = entry;
+    }
 
-    this.playerNames[guid] = {
-      name
-        // race : race,
-        // gender : gender,
-        // playerClass : playerClass
-    };
-
-    this.session.chat.emit('message', null); // to refresh
+    // Onto the UNIT, and announced -- the same two lines `applyCreatureInfo` ends with, so the target
+    // frame and the nameplate both refresh through the path they already refresh on. This is the answer
+    // to "does anything repaint when the name lands asynchronously": yes, and it is the event the
+    // bridges and the plate walker already listen to, not a new one.
+    // Through the SHARED applier, so the packet path and the cache-hit path in `askNameOnce` cannot
+    // drift apart -- they are the same two lines and one of them used to be missing entirely.
+    this.applyPlayerName(guid);
+    // WHAT WAS HERE, and why it is gone: `this.session.chat.emit('message', null); // to refresh`.
+    //
+    // **`session.chat` IS ASSIGNED NOWHERE** -- one reference in the whole repo, and no writer -- so
+    // every name query that RESOLVED threw `Cannot read properties of undefined (reading 'emit')`. That
+    // was the two page errors on every login: the two boot-time name queries.
+    //
+    // The refresh it wanted is already done, by the line above it. `applyPlayerName` ends with the same
+    // two lines `applyCreatureInfo` does, which is the event the unit bridges and the nameplate walker
+    // already listen to -- the comment directly above says exactly that. So this was a "to refresh"
+    // whose feed had been replaced, and `CLAUDE.md` treats a comment whose rationale has expired as a
+    // defect in its own right.
+    //
+    // ONE CORRECTION to how this was reported to me: it is the handler's LAST statement, so nothing in
+    // `handleName` was skipped by the throw. The real harm is upstream -- an uncaught throw escapes
+    // `GameHandler#dataReceived`'s receive loop and takes every packet still buffered in that SAME data
+    // event with it, which is the hazard `object/loot.ts#subscribe` exists to contain. A name response
+    // sharing a TCP read with anything else could therefore drop it, silently and unreproducibly.
   }
 
+  /**
+   * Whether this guid's name is already known or already asked for.
+   *
+   * The dedupe is the whole reason this exists: a player standing in view is re-examined every time
+   * `World#add` sees an update for him, and `CMSG_NAME_QUERY` is not free.
+   */
+  hasNameFor(guid) {
+    return this.playerNames[guid] !== undefined || this.nameQueriesInFlight.has(guid);
+  }
+
+  /**
+   * `CMSG_NAME_QUERY` (0x050) -- a full 8-byte little-endian guid, not a packed one.
+   *
+   * TWO CALLER SHAPES, and the second one **threw**. The three chat callers
+   * (`chat/handler.js:131,162,170`) pass a `GUID` OBJECT, which is what `writeGUID` wants -- it does
+   * `this.write(guid.raw)` (`net/packet.js:86-89`). The unit path passes the normalised hex STRING
+   * every guid in the rest of this client is (`network/guid-hex.ts`), and a string has no `.raw`, so
+   * `writeGUID` reached `byte-buffer`'s `write(undefined)` -- which throws
+   * `TypeError: Cannot write undefined, not a sequence`
+   * (`byte-buffer/dist/byte-buffer.js:167-172`). `items.ts:267` records the same trap for
+   * `CMSG_ITEM_QUERY_SINGLE` and uses `guidBytes`; so does this now.
+   *
+   * The size argument is deliberately left at 64 rather than tightened to `HEADER + 8`. `send`
+   * declares `packet.bodySize`, which is the whole BUFFER length minus the header, so the body has
+   * always gone out as 58 bytes -- 8 of guid and 50 of zeros. TrinityCore's
+   * `HandleNameQueryOpcode` reads the guid and lets `WorldSession::Update` log the unread tail, so
+   * this is tolerated and has been for every chat query this client ever sent; narrowing it is a
+   * separate change and not one to make blind in the same commit as a fix.
+   */
   askName(guid) {
     const app = new GamePacket(GameOpcode.CMSG_NAME_QUERY, 64);
 
-    app.writeGUID(guid);
+    if (typeof guid === 'string') {
+      app.write(Array.from(guidBytes(guid)));
+    } else {
+      app.writeGUID(guid);
+    }
 
     this.session.game.send(app);
     return true;
+  }
+
+  /**
+   * Ask once for a player's name, if it is not known and not already in flight.
+   *
+   * Separate from `askName` because that one is the raw send and its three chat callers pass a guid
+   * OBJECT, while the unit path has a hex string. Keeping both means neither caller changes shape.
+   */
+  askNameOnce(guid) {
+    /**
+     * ALREADY ANSWERED: APPLY IT rather than just returning, and this is not an optimisation.
+     *
+     * Owner: "имена персонажей выбранных в цель не всегда прогружаются. Если персонаж стоял рядом в
+     * момент прогрузки, то работает, а если пришел позже и его взяли в цель, то имя не видно."
+     *
+     * `playerNames` outlives a unit. It is filled by three chat paths as well as by this one, and it is
+     * deliberately NOT cleared between sessions (a name does not change with a socket). So a guid can be
+     * in the cache BEFORE its unit exists -- someone speaks in `/say`, or he streams out and back in --
+     * and the old body returned `false` here and wrote nothing. The name was known and the unit stayed
+     * `<unknown>` for as long as it lived, with no further packet coming to fix it, because
+     * `hasNameFor` is exactly what stops one being asked for.
+     *
+     * `CombatHandler#queryCreature` has carried this same branch, with this same reasoning, since the
+     * creature path was written: "ALREADY ANSWERED: apply it rather than returning, and this is not an
+     * optimisation." The player path simply never got its half.
+     *
+     * MEASURED before writing this: a late-arriving player IS asked about and IS cached and named
+     * (probe on a live realm -- `Plantin` arrived after load, `cached=true`, `name="Plantin"`), so the
+     * ask and the answer are sound and the remaining hole is this one -- the case where no ask is due.
+     */
+    if (this.hasNameFor(guid)) {
+      this.applyPlayerName(guid);
+      return false;
+    }
+    this.nameQueriesInFlight.add(guid);
+    return this.askName(guid);
+  }
+
+  /**
+   * Write a cached name onto the unit that owns `guid`, and announce it.
+   *
+   * The same two lines `handleName` ends with, factored out so the cache-hit path above cannot drift
+   * from the packet path. `unit:fields` is the edge the unit bridge repaints on, and the nameplate picks
+   * `unit.name` up on its next frame regardless.
+   */
+  applyPlayerName(guid) {
+    const entry = this.playerNames[guid];
+    const name = entry && typeof entry.name === 'string' ? entry.name : null;
+    if (name === null || name === '') {
+      // A chat path seeds `playerNames[low] = { name: <the raw guid number> }` as a placeholder before
+      // its query answers. That is not a name; writing it would replace "<unknown>" with a number.
+      return;
+    }
+    const unit = this.world && this.world.entities.get(guid);
+    if (unit && unit.name !== name) {
+      unit.name = name;
+      this.world.emit('unit:fields', unit);
+    }
   }
 
   /**
@@ -450,6 +611,11 @@ export class GameHandler extends Socket {
     this._crypt = null;
     this.authenticated = false;
     this.remaining = false;
+    // A name query is per SESSION: the guids of the ended one mean nothing to the next, and an
+    // outstanding entry here would suppress the re-ask for a player who is genuinely in view again.
+    // `playerNames` is deliberately NOT cleared -- it is a name cache and a name does not change with
+    // our socket, which is the same reasoning `ItemHandler` keeps its template cache on.
+    this.nameQueriesInFlight.clear();
     // The units the ended session streamed in. Guid-keyed and never otherwise emptied -- see
     // `World#clearRemoteEntities`. Guarded because `World` is constructed at the end of this
     // constructor, after the `disconnect` subscription above is registered.

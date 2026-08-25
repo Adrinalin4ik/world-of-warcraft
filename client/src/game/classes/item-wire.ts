@@ -31,6 +31,37 @@ export interface ItemWireRow {
   bodySize: number;
   /** Bytes of body consumed by the decode. Compare with `bodySize`; equal is the pass. */
   consumed: number;
+
+  /**
+   * For a `header + count * stride + tail` body: the COUNT the header declared, stashed BEFORE the row
+   * loop ran.
+   *
+   * Optional because most packets in this family are a fixed shape and have no count to divide by;
+   * `items.ts` and `loot.ts` leave both of these alone. `SMSG_LIST_INVENTORY` sets them.
+   *
+   * "Before the loop" is the load-bearing part: if the stride is wrong the loop either over-reads and
+   * THROWS or under-reads and leaves a remainder, and in the throwing case this is the one number still
+   * needed to tell those apart. Reading it off the decoded array afterwards would give the wrong answer
+   * in exactly the case that matters.
+   */
+  wireCount?: number;
+
+  /**
+   * `residual / wireCount` when it divides exactly, else `null` -- **the discriminator, not a statistic.**
+   *
+   * Ported from `network/game/object/trainer.ts#record`, where it was introduced (`2690666`), because a
+   * widened field and a moved header need different fixes and this separates them in one reading:
+   *
+   *  - **a whole number** -> the error is INSIDE THE ROW, by that many bytes per row. A field widened
+   *    (`u8` -> `u32` is +3) or one was inserted (+4 for a word). Fix the row.
+   *  - **`null` with a nonzero residual** -> the stride is right and something in the HEADER or the
+   *    TRAILER moved. Fix those instead.
+   *  - **an opcode ending `!THREW`** -> we over-read, so the stride is too LARGE, which neither case
+   *    above can express.
+   *
+   * `null` is therefore a real answer and not "unknown".
+   */
+  residualPerRow?: number | null;
 }
 
 const HISTORY = 400;
@@ -72,12 +103,31 @@ class ItemWire {
       list.push(row.bodySize - row.consumed);
       byOpcode.set(row.opcode, list);
     }
-    return [...byOpcode.entries()].map(([opcode, residuals]) => ({
-      opcode,
-      count: residuals.length,
-      residuals: [...new Set(residuals)].sort((a, b) => a - b),
-      worst: residuals.reduce((acc, r) => (Math.abs(r) > Math.abs(acc) ? r : acc), 0),
-    }));
+    // The per-row discriminator, where a decode supplied one. Kept beside the raw residuals rather
+    // than replacing them: the residual says THAT the layout is wrong and this says WHERE.
+    const perRowByOpcode = new Map<string, Array<number | null>>();
+    for (const row of this.rows) {
+      if (row.residualPerRow === undefined) {
+        continue;
+      }
+      const list = perRowByOpcode.get(row.opcode) ?? [];
+      list.push(row.residualPerRow);
+      perRowByOpcode.set(row.opcode, list);
+    }
+    return [...byOpcode.entries()].map(([opcode, residuals]) => {
+      const perRow = perRowByOpcode.get(opcode);
+      return {
+        opcode,
+        count: residuals.length,
+        residuals: [...new Set(residuals)].sort((a, b) => a - b),
+        worst: residuals.reduce((acc, r) => (Math.abs(r) > Math.abs(acc) ? r : acc), 0),
+        // Only the NONZERO cases are worth surfacing -- a clean packet reports `residualPerRow` 0/null
+        // on every row and listing that would bury the one reading that matters.
+        ...(perRow && perRow.some((v) => v !== null && v !== 0)
+          ? { perRow: [...new Set(perRow.filter((v) => v !== null && v !== 0))] }
+          : {}),
+      };
+    });
   }
 }
 

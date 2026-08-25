@@ -77,6 +77,41 @@ export interface RigLight {
 export interface ModelRig {
   /** `SetModel(path)`. Null until the frame's Lua names a model. */
   modelPath: string | null;
+  /**
+   * `SetUnit(token)` -- the unit whose DRESSED model this frame draws, or null.
+   *
+   * A different supply from `modelPath` and not a derived one: `SetModel` names a file, while
+   * `SetUnit` names a live unit whose race, gender, appearance and worn gear decide the file, the
+   * geosets, the body composite and the attachments. The paper doll uses only this one
+   * (`paperdollframe.lua:159`, `CharacterModelFrame:SetUnit("player")`); the glue screens use only
+   * `SetModel`. Nothing in 3.3.5's FrameXML sets both on one frame.
+   */
+  unit: string | null;
+  /**
+   * Which framing the booth fits for this rig's unit -- and it is a property of the CALLER, not of the
+   * model.
+   *
+   * `'body'` is a `<PlayerModel>` pane: the whole standing figure, fitted from the model's bounds.
+   * `'portrait'` is `SetPortraitTexture(texture, unit)`: the model's own authored bust camera, taken
+   * verbatim. The reference keeps them apart for exactly this reason -- its paper-doll slot "frames the
+   * whole standing figure from the model's bounds (`framing::body_frame`, **not** the authored bust
+   * camera)" while the portrait slots are the authored camera and nothing else
+   * (`benilla/.../portrait/mod.rs:12-19` and :29-41).
+   *
+   * On a `Widget` that is a plain `<Texture>` rather than a model frame, this and `unit` are the whole
+   * of the rig; see `ui/portrait-bridge.ts` for why a texture carries one at all.
+   */
+  framing: 'body' | 'portrait';
+  /**
+   * `SetRotation(radians)` -- the figure's yaw in the pane.
+   *
+   * 0.61 for every model pane in the client, from `Model_OnLoad` (`uiparent.lua:2824-2827`), and
+   * moved in 0.03 steps by the two rotate buttons (`Model_RotateLeft`/`Right`, :2829-2845) or
+   * continuously while one is held (`Model_OnUpdate`, :2847). It is the ONE thing about a pane that
+   * changes at interactive rates, which is what decides the booth's redraw policy -- see
+   * `model-booth.ts`.
+   */
+  rotation: number;
   /** `SetSequence(slot)` -- a FILE SLOT, not an `AnimationData` id. */
   sequence: number;
   /** `SetCamera(index)` -- an index into the model's camera TABLE. */
@@ -102,9 +137,24 @@ export interface ModelRig {
  * `glow` starts at 0 rather than at `SetLighting`'s 0.3 fallback: 0.3 is what the client picks for a
  * race with no `CharModelGlowInfo` row, which is a decision `SetLighting` makes and not a default
  * of the widget.
+ *
+ * `rotation` starts at 0 for the same reason: 0.61 is what `Model_OnLoad` picks
+ * (`uiparent.lua:2825`), which is a decision the client's own Lua makes on every model pane, not a
+ * property of an untouched widget. `unit` starts null -- an untouched pane draws nobody.
  */
 export function emptyRig(): ModelRig {
-  return { modelPath: null, sequence: 0, camera: 0, fog: null, glow: 0, lights: [], revision: 0 };
+  return {
+    modelPath: null,
+    unit: null,
+    framing: 'body',
+    rotation: 0,
+    sequence: 0,
+    camera: 0,
+    fog: null,
+    glow: 0,
+    lights: [],
+    revision: 0,
+  };
 }
 
 /** The fog triple a rig resolves to: the packed `fogParams` vec4 plus its colour. */

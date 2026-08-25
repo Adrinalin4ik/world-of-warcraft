@@ -48,7 +48,6 @@ import {
   HIT_INFO, HIT_INFO_ANY_ABSORB, HIT_INFO_ANY_RESIST,
 } from '../../../game/classes/combat-text';
 import { worldClock } from '../../../game/pipeline/m2/anim/world-clock';
-import { windowElapsedOrInstant } from '../../../game/pipeline/m2/anim/instance-anim';
 
 /**
  * The `HitInfo` bits this decode reads. **THE TABLE MOVED**, and it moved for a reason:
@@ -72,6 +71,16 @@ export interface CreatureInfo {
   name: string;
   /** `rank` -- 0 normal, 1 elite, 2 rare-elite, 3 world boss, 4 rare. See `classificationWord`. */
   rank: number;
+  /**
+   * `CreatureType.dbc` id -- 1 Beast, 7 Humanoid, and so on. 0 when unknown.
+   *
+   * READ ALL ALONG AND THROWN AWAY. `handleCreatureQuery` has always consumed this word (its comment
+   * even named the table) and never stored it, and I then claimed the packet "gives us name and rank
+   * only" -- a statement about this interface mistaken for one about the wire. The owner's screenshot
+   * of the real client's "Животное 1-го уровня" is what disproved it. `pipeline/dbc/creature-type-data.ts`
+   * turns it into the word.
+   */
+  type: number;
 }
 
 export class CombatHandler extends EventEmitter {
@@ -283,13 +292,29 @@ export class CombatHandler extends EventEmitter {
     gp.readCStr(); // SubName
     gp.readCStr(); // IconName -- 3.3.5a only; see above
     gp.readUnsignedInt(); // type_flags
-    gp.readUnsignedInt(); // type (CreatureType.dbc)
+    // KEPT NOW, not skipped: this is the word behind a tooltip's "Level 1 Beast", joined through
+    // `CreatureType.dbc`. See `CreatureInfo.type` for why it sat here unread for so long.
+    const type = gp.readUnsignedInt() >>> 0;
     gp.readUnsignedInt(); // family
     const rank = gp.readUnsignedInt() >>> 0;
 
-    const info = { name, rank };
+    const info = { name, rank, type };
     this.creatures.set(entry, info);
     this.applyCreatureInfo(entry, info);
+    /**
+     * ANNOUNCED SEPARATELY FROM `unit:fields`, because a template can arrive with NO unit to write
+     * it onto.
+     *
+     * `applyCreatureInfo` walks the entities and emits per unit, which is right for a target frame
+     * -- but the quest log asks for a creature's name for a mob that may be nowhere near the player
+     * (`ui/quest-bridge.ts`, the kill-objective text). For that reader the answer arrives with no
+     * entity in the world, so the per-unit event never fires and the objective would keep reading
+     * "4/8" with no name until something unrelated repainted the list.
+     *
+     * The entry, not the info: a listener that wants the name asks `creatureInfo`, which is the
+     * cache this just filled.
+     */
+    this.game.world.emit('creature:info', entry);
   }
 
   /**
@@ -302,9 +327,11 @@ export class CombatHandler extends EventEmitter {
   private applyCreatureInfo(entry: number, info: CreatureInfo): void {
     const classification = classificationWord(info.rank);
     for (const unit of this.game.world.entities.values()) {
-      if (unit.fields.entry === entry && (unit.name !== info.name || unit.classification !== classification)) {
+      if (unit.fields.entry === entry && (unit.name !== info.name
+        || unit.classification !== classification || unit.creatureType !== info.type)) {
         unit.name = info.name;
         unit.classification = classification;
+        unit.creatureType = info.type;
         this.game.world.emit('unit:fields', unit);
       }
     }
@@ -560,16 +587,20 @@ export class CombatHandler extends EventEmitter {
       //
       // This also replaces `interrupt: true`, which was a HARD CUT of the in-flight swing -- the exact
       // thing the reference says the fast-path exists to prevent.
-      const live = unit.model?.instanceAnim ?? null;
-      const inFlight = live && live.current && live.current.id === swingId
-        && !windowElapsedOrInstant(live, live.current, worldClock.ms);
-      if (inFlight && live) {
-        live.setRate(2, worldClock.ms);
-      } else {
-        // Repetitions 0 -- a swing is a ONE-SHOT, and `startAnimation`'s ownership latch gives the body
-        // back to locomotion when its window ends.
-        unit.setAnimation(swingId, true, 0);
-      }
+      // THE FAST PATH MOVED, and this is the whole of that change here: it now lives in
+      // `Unit#combatFastPath`, which `setAnimation` consults first. It had to move, because the version
+      // that lived here compared `live.current.id === swingId` -- the SAME id on the BASE slot -- and
+      // that is two-thirds wrong of the client's rule. The client's predicate is
+      // `is_combat_anim(cur) && is_combat_anim(id)` (`driver.rs:871`), ANY combat clip over ANY other,
+      // on whichever slot it is playing: since the masked route landed, a swing thrown while running is
+      // on the OVERLAY and `current` holds the gait, so this test answered "nothing is playing" through
+      // every swing the owner throws while moving -- and it never protected an ABILITY's clip from the
+      // next auto-attack at all, which is the report "Анимация способностей должна быть выше чем
+      // анимация автоатаки". `Unit` is the only place that can see both slots and the parked request.
+      //
+      // Repetitions 0 -- a swing is a ONE-SHOT, and the ownership latch (full body) or the overlay's own
+      // release fade (masked) gives the body back when its window ends.
+      unit.setAnimation(swingId, true, 0);
 
       // ONLY WHEN THE ARM ACTUALLY LANDED ON THE SWING, and this guard was the defect a self-review of
       // the previous commit found. `setAnimation` goes through `resolve`, which falls back to the first
@@ -580,7 +611,15 @@ export class CombatHandler extends EventEmitter {
       // loop" guard means that rate would then persist for the rest of that unit's life. Exactly the
       // class of bug the `setScalar`-under-`matrixAutoUpdate` and hover-magnitude traps are.
       const inst = unit.model?.instanceAnim ?? null;
-      const armed = inst?.current?.id === swingId ? inst.current : null;
+      // WHICH SLOT THE SWING LANDED IN. A swing taken while the legs are committed is routed onto the
+      // MASKED upper-body overlay instead of the base track (`Unit#tryMaskedRoute`,
+      // `game/classes/oneshot-route.ts`), so `inst.current` is then the GAIT and reading only it would
+      // have silently dropped the whiff slow-down for every swing thrown while running -- the same
+      // class of miss as the `armed.id === swingId` guard below it.
+      const onOverlay = inst?.overlay?.id === swingId;
+      const armed = onOverlay
+        ? inst!.overlay
+        : (inst?.current?.id === swingId ? inst.current : null);
 
       // THE WHIFF SLOW-DOWN (`impact.rs:73-76`, the client's `0x712910`, decision 0279): a swing that
       // contacted nothing -- miss, dodge, evade -- runs the rest of its arc at half speed. That IS what
@@ -594,7 +633,11 @@ export class CombatHandler extends EventEmitter {
       // this round and would slow a gait loop to half speed for ever on any unit whose model has no
       // swing clip. A miss on a clipless attacker now slows nothing, which is the honest answer.
       if (victimState !== null && isWhiff(victimState) && inst && armed) {
-        inst.setRate(inst.playbackRate * 0.5, worldClock.ms);
+        if (onOverlay) {
+          inst.setOverlayRate(inst.overlayPlaybackRate * 0.5, worldClock.ms);
+        } else {
+          inst.setRate(inst.playbackRate * 0.5, worldClock.ms);
+        }
       }
     }
 
@@ -607,13 +650,18 @@ export class CombatHandler extends EventEmitter {
     // ownership latch gives the body back when its window ends -- which for an engaged victim is back to
     // the Ready stance.
     //
-    // KNOWN DEVIATION, stated: the reference plays this on a MASKED overlay at 0.75 weight with a decay
-    // envelope (`WOUND_AMPLITUDE`, `wound_full_body`), so the victim's legs keep walking. This client has
-    // one track, so it plays FULL BODY. The reference's own rule is that the full-body case is precisely
-    // a victim whose base pose is a combat-ready stance {25..29} -- which, now that an engaged unit
-    // holds a Ready idle, is the common combat case -- so the approximation is right where it matters and
-    // wrong for a victim who is walking. The masked version needs the second weighted track that
-    // `blendTime` and the weapon grip are also waiting on.
+    // A MOVING VICTIM'S LEGS NOW KEEP WALKING. This went through `setAnimation` before and reached the
+    // full-body route always, because there was no masked slot to reach; the note here said so and said
+    // it needed "the second weighted track that `blendTime` and the weapon grip are also waiting on".
+    // That track exists (`InstanceAnim#armOverlay`), and a dodge/parry/block is a CLASS_A one-shot, so a
+    // victim who is running when he is hit now flinches on the torso over his run -- routed by the same
+    // `route_oneshot` the swing is. A STANDING victim is still full body, which is the reference's own
+    // rule and not a shortcut: `route_oneshot` masks only a committed lower body.
+    //
+    // STILL NOT PORTED, stated: the reference's wound overlay carries a 0.75 weight and a decay envelope
+    // (`WOUND_AMPLITUDE`, `wound_full_body`); ours plays the clip at full weight on the subtree and
+    // retires it over the client's fixed 150 ms release fade. The envelope is the shape of the recoil,
+    // not whether there is one.
     if (victimState !== null) {
       const victimUnit = this.game.world.entities.get(victim);
       if (victimUnit && !victimUnit.dead) {

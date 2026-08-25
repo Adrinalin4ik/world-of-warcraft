@@ -82,6 +82,20 @@ const COL = {
   /** `Category` -- the shared-cooldown group `CategoryRecoveryTime` applies across. */
   category: 1,
   /**
+   * `DispelType` -> `SpellDispelType.dbc`, which is what a DEBUFF's border colour is keyed by.
+   *
+   * VERIFIED AGAINST THE GAME'S OWN DATA rather than taken from an enum header: the served
+   * `DBFilesClient/SpellDispelType.dbc` is 12 rows and its name column reads, in id order, `None`,
+   * `Magic`, `Curse`, `Disease`, `Poison`, `Stealth`, `Invisibility`, `All(M+C+D+P)`,
+   * `Special - npc only`, `Enrage`, `ZG Trinkets`, `ZZOLD UNUSED`. The client's own
+   * `DebuffTypeColor` table is keyed by exactly four of those strings -- Magic, Curse, Disease, Poison
+   * (`buffframe.lua:16-21`) -- so 1..4 are the only ids `UnitAura`'s fifth return may name, and
+   * anything else must come back nil (see `ui/aura-bridge.ts#dispelName`).
+   *
+   * Column 2, between `Category` and `Mechanic`, per `wow-data-parser/dbc/entities/spell.js:9`.
+   */
+  dispelType: 2,
+  /**
    * `Attributes` -- the first attribute word. Bit `0x40` is `SPELL_ATTR0_PASSIVE`, which is what
    * `IsPassiveSpell` answers and what makes a spellbook entry draw a black button border and a grey
    * name instead of a clickable icon (`spellbookframe.lua:496-506`).
@@ -194,6 +208,19 @@ const COL = {
   // at 71..121 sits inside that run.
   //
   // Each is the FIRST of three per-effect words; effect n (1-based) is `COL.x + n - 1`.
+  /**
+   * `Effect[0..2]` -- the SPELL_EFFECT_* id of each effect slot, the first word of the block this
+   * comment describes. `effectDieSides: 74` three lines below is what pins it: the block is three
+   * words per column, so `Effect` is `74 - 3 = 71`.
+   *
+   * MEASURED against the served file rather than reasoned about, because one caller depends on the
+   * exact value: spell **7266 "Duel"** (name column 136) reads `Effect[0..2] = 83, 0, 0` in
+   * `12340/dbfilesclient/spell.dbc`. 83 is `SPELL_EFFECT_DUEL`, and `StartDuel` finds the duel spell
+   * by that effect rather than by a hardcoded id -- which is what the reference client does
+   * (`samples/benilla/crates/benilla/src/ui_duel.rs:56-63`, byte-read from WoW.exe `0x4b2605`:
+   * any learned spell whose `SpellRec+0xf4` is `0x53` is stored into the duel-spell global).
+   */
+  effect: 71,
   /** `EffectDieSides[0..2]`. With `effectBasePoints`, this is the min/max pair -- see `effectMin`. */
   effectDieSides: 74,
   /** `EffectRealPointsPerLevel[0..2]`, a FLOAT. The per-level growth term; 0 for most player spells. */
@@ -206,6 +233,32 @@ const COL = {
   effectAmplitude: 98,
   /** `EffectChainTarget[0..2]`. `$x<n>`. */
   effectChainTargets: 104,
+  /**
+   * `EffectApplyAuraName[0..2]` -- the `AuraType` an `SPELL_EFFECT_APPLY_AURA` effect applies.
+   *
+   * Read for exactly one thing here: `SPELL_AURA_MOD_SHAPESHIFT` (36) is what makes a known spell a
+   * STANCE, which is how `GetNumShapeshiftForms` is built (`ui/aura-bridge.ts`). The 36 is the same
+   * `AuraType` vocabulary `network/game/object/combat-log.ts` already carries and labels.
+   *
+   * The INDEX is derived, not guessed, and it is checkable from the two neighbours already in this
+   * table: `wow-data-parser/dbc/entities/spell.js:84` puts `effectAurasIDs` (3 columns) immediately
+   * after `effectRadiusIDs` (3 columns, index 92 here) and immediately before `effectAmplitudes`
+   * (index 98 here). 92 + 3 = 95 and 95 + 3 = 98, so 95 is the only value consistent with both.
+   */
+  effectApplyAuraName: 95,
+  /**
+   * `EffectMiscValue[0..2]` -- for a shapeshift effect, the `SpellShapeshiftForm.dbc` FORM id.
+   *
+   * SIGNED (`spell.js:89` reads `int32le`), and it must be: plenty of effects store a negative here.
+   *
+   * The index is derived the same way as `effectApplyAuraName`: `spell.js` runs
+   * `effectItemTypes` (3) then `effectMiscValues` (**6** -- `EffectMiscValue[3]` and
+   * `EffectMiscValueB[3]` in one array) then `effectTriggerSpells` (3) then
+   * `effectPointsPerComboPoint`, which this table already fixes at 119. Walking back from 119:
+   * 119 - 3 = 116 (`effectTriggerSpells`), 116 - 6 = **110**. `EffectMiscValueB` therefore starts at
+   * 113, which is why only the first three columns are read.
+   */
+  effectMiscValue: 110,
   /** `EffectPointsPerComboPoint[0..2]`, a FLOAT. `$b<n>` -- Eviscerate's 5.0 per combo point. */
   effectPointsPerComboPoint: 119,
   /** `DurationIndex` -> `SpellDuration.dbc`. `$d`. */
@@ -296,6 +349,34 @@ export interface SpellRow {
    * the served file proves the DISCRIMINATION, which is all the filter needs.
    */
   hiddenInSpellbook: boolean;
+
+  /**
+   * Keep this spell's aura OFF every aura display -- a unit frame's buff row included, not just the
+   * player's own bar.
+   *
+   * The owner found it on another player: "у него в бафах отображаются пасивные спасобности, что не
+   * верно." He is right, and it also explains the "duplicated buffs" report before it -- weapon-skill
+   * passives look alike and there are a lot of them.
+   *
+   * The reference's predicate verbatim: `attributes & ATTR_DO_NOT_DISPLAY != 0 || attributes_ex &
+   * ATTR_EX_NO_AURA_ICON != 0` (`benilla-formats/src/spells/display.rs:617-619`), with
+   * `ATTR_DO_NOT_DISPLAY = 0x80` and `ATTR_EX_NO_AURA_ICON = 0x1000_0000` (`spells/mod.rs:398,412`). It
+   * is explicit that this is not a player-bar rule -- the aura is "hidden on *every* aura display, target
+   * rows included" (`ui_aura.rs:36`), and the client's own gate for another unit's row is
+   * `IsAuraDisplayable 0x519860`.
+   *
+   * **`0x80` IS THE SAME BIT `hiddenInSpellbook` READS**, which is not a coincidence to paper over: the
+   * reference has one bit with two consumers, its spellbook predicate testing the identical
+   * `ATTR_DO_NOT_DISPLAY`. So the measurement already recorded on that field -- 10,243 spells, 20.6%,
+   * with `Unarmed`, `Defense`, `Thrown`, `Two-Handed Swords`, `Plate Mail` and `Rogue Passive (DND)` all
+   * carrying it -- is the measurement behind this too, and it names exactly what the owner is seeing.
+   *
+   * NOT MODELLED, and declared: the reference also excludes TRACKING auras from every display
+   * (`EffectApplyAuraName` in `{44, 45, 151}`), so `Find Minerals` never reaches a buff row and instead
+   * feeds `GetTrackingTexture`. That needs the three effect-aura columns this file does not read, and it
+   * is not the owner's symptom -- a tracking aura is on the PLAYER, not on another player's frame.
+   */
+  hiddenFromAuraBar: boolean;
   /** `SpellLevel`: which rank of a family this is. See `COL.spellLevel`. */
   spellLevel: number;
   iconID: number;
@@ -324,6 +405,11 @@ export interface SpellRow {
    * The three effects' columns, index 0 = effect 1. See `COL.effectDieSides` for where they come from
    * and `effectRange` for the min/max identity they define.
    */
+  /**
+   * `Effect[0..2]` -- each slot's `SPELL_EFFECT_*` id. See `COL.effect`; 83 is `SPELL_EFFECT_DUEL`,
+   * which is how `StartDuel` finds the duel spell in the player's own book.
+   */
+  effect: number[];
   effectBasePoints: number[];
   effectDieSides: number[];
   effectRealPointsPerLevel: number[];
@@ -331,6 +417,10 @@ export interface SpellRow {
   effectRadiusIndex: number[];
   effectAmplitudeMs: number[];
   effectChainTargets: number[];
+  /** `EffectApplyAuraName[0..2]`. 36 is `SPELL_AURA_MOD_SHAPESHIFT` -- see `COL.effectApplyAuraName`. */
+  effectApplyAuraName: number[];
+  /** `EffectMiscValue[0..2]`, SIGNED. The FORM id for a shapeshift effect. */
+  effectMiscValue: number[];
 
   /** `DurationIndex` (`$d`), `ProcChance` (`$h`), `StackAmount` (`$n`), `MaxAffectedTargets` (`$u`). */
   durationIndex: number;
@@ -347,6 +437,11 @@ export interface SpellRow {
 
   /** `SpellDescriptionVariableID`: 0, or a row of `SpellDescriptionVariables.dbc`. */
   descriptionVariablesID: number;
+  /**
+   * `DispelType` -- 1 Magic, 2 Curse, 3 Disease, 4 Poison, 0 none. See `COL.dispelType` for the DBC
+   * that was read to establish those four, and `ui/aura-bridge.ts` for why anything else answers nil.
+   */
+  dispelType: number;
 }
 
 /**
@@ -667,6 +762,12 @@ class SpellData {
         // Bit 0x80 of the SAME word. See `SpellRow#hiddenInSpellbook` for the measurement that
         // establishes it and rules out both the `(DND)` name and the weapon skill CATEGORY.
         hiddenInSpellbook: (col(COL.attributes) & 0x80) !== 0,
+        // The SAME `0x80`, plus `AttributesEx1`'s `0x1000_0000`. See `SpellRow#hiddenFromAuraBar` for the
+        // reference's predicate and for why one bit legitimately has two consumers. `COL.attributes + 1`
+        // is `AttributesEx1`: this file's own column note records that 4-11 are `Attributes` +
+        // `AttributesEx1..Ex7`.
+        hiddenFromAuraBar: (col(COL.attributes) & 0x80) !== 0
+          || (col(COL.attributes + 1) & 0x10000000) !== 0,
         spellLevel: col(COL.spellLevel),
         iconID: col(COL.iconID),
         visualID: col(COL.visual),
@@ -683,6 +784,7 @@ class SpellData {
 
         // THE EFFECT BLOCK -- what every `$` token in a description resolves through. See
         // `COL.effectDieSides` for the indices and `effectRange` for what the first two mean.
+        effect: three(COL.effect, col),
         effectBasePoints: three(COL.effectBasePoints, int),
         effectDieSides: three(COL.effectDieSides, int),
         effectRealPointsPerLevel: three(COL.effectRealPointsPerLevel, flt),
@@ -690,6 +792,9 @@ class SpellData {
         effectRadiusIndex: three(COL.effectRadiusIndex, col),
         effectAmplitudeMs: three(COL.effectAmplitude, col),
         effectChainTargets: three(COL.effectChainTargets, col),
+        effectApplyAuraName: three(COL.effectApplyAuraName, col),
+        // SIGNED -- see `COL.effectMiscValue`.
+        effectMiscValue: three(COL.effectMiscValue, int),
         durationIndex: col(COL.durationIndex),
         procChance: col(COL.procChance),
         stackAmount: col(COL.stackAmount),
@@ -698,6 +803,7 @@ class SpellData {
         maxLevel: col(COL.maxLevel),
         schoolMask: col(COL.schoolMask),
         descriptionVariablesID: col(COL.descriptionVariablesID),
+        dispelType: col(COL.dispelType),
       });
     }
     return rows;

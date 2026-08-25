@@ -17,10 +17,11 @@
 import { FrameMethod, MethodContext, MethodTable, isObjectType, registerMethods } from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
-import { Layer, Widget, deriveSize, effectiveFont } from '../../../widget';
-import { familyForFontFile, measureText } from '../../../text';
+import { Layer, Widget, deriveSize, effectiveFont, touchGeometry } from '../../../widget';
+import { familyForFontFile, fontFileForFamily, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
-import { rectOf, screenHeightUnits } from '../../../rects';
+import { layoutRectOf, rectOf, screenHeightUnits } from '../../../rects';
+import { pointerAt } from '../../../pointer';
 import { ensureArt } from '../../../runtime-art';
 
 const warned = new Set<string>();
@@ -196,6 +197,83 @@ function cascadeVisibility(ctx: MethodContext, widget: Widget, handler: 'OnShow'
   }
 }
 
+/**
+ * Write a FontString's text, and TELL THE GEOMETRY if that can have moved it.
+ *
+ * **TEXT IS GEOMETRY FOR A DERIVED FONT STRING, and not saying so made four landed fixes inert.**
+ * `deriveSize` measures a FontString's text whenever a dimension is 0, and the client authors exactly
+ * that: `QuestInfoDescriptionText` and its siblings are `<Size x="285" y="0">`
+ * (`questinfo.xml:251-262`). So filling a quest description changes real heights -- and nothing bumped
+ * `widget.ts#geometryRevision`, which is what invalidates `rects.ts`' resolved-rect cache AND what
+ * `reconcileScrollRanges` gates on.
+ *
+ * The live consequence, which no harness reproduced: the manifest loads and the ranges reconcile once at
+ * revision N with no text; the player opens a quest; `SetText` fills it; the revision stays N; so
+ * `OnScrollRangeChanged` never fires again, the scrollbar keeps its 0..0 range, and the arrows, the drag
+ * and the wheel are all correctly dead. My own tests passed because they called `reconcileScrollRanges`
+ * manually AFTER building, inside the epoch where the geometry was already final.
+ *
+ * It is wider than the scrollbar: `rectOf`'s on-demand map is keyed on the same revision, so ANY
+ * `GetRight`/`GetCenter`/`GetHeight` asked after a `SetText` could read a pre-text rect.
+ *
+ * TWO GUARDS, so this does not become per-frame churn -- `SetText` is called constantly by unit frames
+ * and cooldowns:
+ *  - only on a REAL change, because repainting the same string is the common case;
+ *  - only when a dimension is DERIVED (0). A FontString with both dimensions authored cannot change its
+ *    own rect by changing its text, so its text is not geometry.
+ */
+function writeText(widget: Widget, next: string): void {
+  if (widget.text === next) {
+    return;
+  }
+  widget.text = next;
+  if (widget.width === 0 || widget.height === 0) {
+    touchGeometry('region');
+  }
+}
+
+/**
+ * `GetWidth`/`GetHeight` on an axis the anchors constrain, which is where all three scrollbar inputs died.
+ *
+ * **THE COMMENT ABOVE `GetWidth` ALREADY NAMED THIS GAP** -- "a FRAME's 0 still means 'derive from the
+ * opposing anchors', which only `resolveAnchors` can do" -- and it turned out to be the whole of
+ * "скрол не работает: ни кнопки, ни драг, ни колесо". `UIPanelScrollBarTemplate` is authored
+ * `<Size x="16" y="0"/>` (`uipaneltemplates.xml:173-175`) and takes its real height from two opposing
+ * anchors on the instance (`:288-299`). So `GetHeight()` answered 0, and the client computes every scroll
+ * step FROM it:
+ *
+ *   - arrow `<OnClick>`: `parent:SetValue(parent:GetValue() + (parent:GetHeight() / 2))`  `:184`, `:196`
+ *   - wheel: `scrollBar:SetValue(scrollBar:GetValue() +/- (scrollBar:GetHeight() / 2))`  `:161-163`
+ *
+ * Both are `SetValue(currentValue + 0)`, and `SetValue` dispatches only on a TRANSITION -- so the value
+ * never moved, `OnValueChanged` never fired, and `SetVerticalScroll` was never called. MEASURED in
+ * `__tests__/scroll-arrow-click.test.ts` before the fix: handlers bound, scroll child present, both
+ * scripts found, and `GetHeight()` = 0.
+ *
+ * ONLY when the derived size is 0 on that axis, which is exactly the case the old comment excluded. Any
+ * widget with an authored or text-derived extent keeps the answer it already gave, so this cannot move a
+ * value that was already right.
+ *
+ * `layoutRectOf` rather than `rectOf`: the on-demand resolve answers for a HIDDEN frame too, and the
+ * engine's `GetHeight()` does not depend on being drawn. It also answers before the first draw, which is
+ * when a panel's `OnLoad` measures itself.
+ *
+ * KNOWN LIMITATION, stated rather than papered over: the resolved rect is in the layout's own units, so
+ * on a SCALED frame this reports the scaled extent where the engine reports the local one. Every scroll
+ * customer in this client is scale 1, so nothing here is wrong today; the reference names the symptom for
+ * when one is not (`benilla-ui/src/script/scrollframe.rs:71-79` -- a scaled scroll frame under-scrolls by
+ * its scale). There is no effective-scale helper in this codebase yet to divide by.
+ */
+function resolvedExtent(ctx: MethodContext, self: number, axis: 'width' | 'height'): number {
+  const widget = widgetOf(ctx, self);
+  const derived = deriveSize(widget, 1, measureText)[axis];
+  if (derived !== 0) {
+    return derived;
+  }
+  const rect = layoutRectOf(widget.id);
+  return rect === null ? derived : rect[axis];
+}
+
 const REGION: MethodTable = {
   // The TRANSITION is what dispatches, not the call. `Widget#show` already guards on an unchanged
   // flag (per-frame code calls it idempotently), and the same guard has to be visible here: an
@@ -236,21 +314,43 @@ const REGION: MethodTable = {
   IsShown: (ctx, self) => [widgetOf(ctx, self).shown],
   IsVisible: (ctx, self) => [widgetOf(ctx, self).visible],
   /**
-   * `IsMouseOver()` -- answered from the INPUT ROUTER's hit, not from a rect test.
+   * `IsMouseOver()` -- the pointer against this frame's RECT, which is what the engine tests.
    *
-   * `Widget#hovered` is what `GlueInput` sets on the single topmost widget the pointer is over
-   * (`ui/input.ts#onPointerMove`), which is what the callers in this manifest mean: every one of them
-   * is inside an `OnMouseUp`/`OnEnter` on the frame itself, deciding whether the release landed on
-   * the button -- `MainMenuBarMicroButtons.xml:CharacterMicroButton`'s `OnMouseUp` is the one that
-   * found this method missing, and its whole body is guarded on it.
+   * **This used to answer `Widget#hovered`, and the comment here already named the gap**: "the
+   * engine tests the cursor against this frame's rect whether or not another frame is on top ...
+   * Closing that gap needs a rect the frame keeps outside the draw list, which it does not have."
+   * It has one now -- `rects.ts#rectOf` resolves any widget's and `pointer.ts#pointerAt` gives the
+   * pointer in the same units. Both landed for other reasons this session, so a stated exclusion
+   * became closable, and a documented exclusion is a bug report someone declined to file.
    *
-   * It is NOT identical to the engine's, and the difference is worth stating: the engine tests the
-   * cursor against this frame's rect whether or not another frame is on top and whether or not this
-   * frame takes the mouse, so a frame UNDER the pointer but beneath another one answers true there
-   * and false here. Closing that gap needs a rect the frame keeps outside the draw list, which it
-   * does not have.
+   * **It was a live defect.** `WorldMapBlobFrame_OnUpdate` opens with `if ( not
+   * WorldMapPOIFrame.allowBlobTooltip or not WorldMapDetailFrame:IsMouseOver() ) then return end`
+   * (`worldmapframe.lua:1920-1922`), and the detail frame is never the TOPMOST hit -- WorldMapButton
+   * and the POI buttons sit above it. So `hovered` was false whenever the pointer was over the map,
+   * that handler returned on its first line, and the quest tooltip it is responsible for hiding
+   * stayed up for ever. The owner reported exactly that, twice.
+   *
+   * `hitRectInsets` is honoured the same way `ui/hit.ts#contains` does it for the router: a frame
+   * that shrinks its own hit area means it for this question too.
+   *
+   * Falls back to `hovered` with no rect or no pointer yet -- before the first pointer move there is
+   * nothing to compare against, and the flag is the only thing that could be true.
    */
-  IsMouseOver: (ctx, self) => [widgetOf(ctx, self).hovered],
+  IsMouseOver: (ctx, self) => {
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    const at = pointerAt();
+    if (rect === null || at === null) {
+      return [widget.hovered];
+    }
+    const insets = widget.hitRectInsets;
+    return [
+      at.x >= rect.left + insets.left
+      && at.x < rect.left + rect.width - insets.right
+      && at.y >= rect.top + insets.top
+      && at.y < rect.top + rect.height - insets.bottom,
+    ];
+  },
   GetName: (ctx, self) => [ctx.registry.nameOf(self)],
   /**
    * `IsObjectType(name)` -- is this widget of that class, or descended from it?
@@ -301,6 +401,207 @@ const REGION: MethodTable = {
     const parent = ctx.registry.parentOf(self);
     return [parent === null ? null : ctx.wrapper(parent)];
   },
+
+  /**
+   * `GetPoint(index)` -- one of a region's anchors back, as `point, relativeTo, relativePoint, x, y`.
+   *
+   * **THIS WAS ABSENT ENTIRELY, and it is a read-modify-write the client uses to NUDGE things.** The
+   * owner's log caught it on the minimap:
+   *
+   *     framexml: MiniMapWorldMapButton: OnMouseDown: Minimap.lua:351:
+   *         attempt to call a nil value (method 'GetPoint')
+   *
+   * `MinimapButton_OnMouseDown` is `local point, relativeTo, relativePoint, x, y = icon:GetPoint()`
+   * followed by `icon:SetPoint(point, relativeTo, relativePoint, x+1, y-1)` -- the one-pixel shift that
+   * makes a minimap button look pressed. So the raise killed the press on every minimap button, and
+   * `MinimapButton_OnMouseUp` (which reverses it) would have been dead too.
+   *
+   * **`relativeTo` comes back as the real FRAME, not a name and not nil, and that mattered.** Every
+   * caller of this feeds the value straight back into `SetPoint`, and `SetPoint` treats nil as "the
+   * parent" (`resolveRelativeTo` above). So a nil here is not a missing value -- it MOVES a region that
+   * was anchored to a sibling onto its parent instead, silently and permanently. The lookup is free:
+   * `FrameRegistry#create` names every widget it makes `lua:<id>` (`object.ts:544`), so the anchor's
+   * stored target parses straight back to a frame id with no reverse index to maintain.
+   *
+   * A region with no anchors returns nothing, which is what the engine does; the client's callers all
+   * guard on the first value.
+   */
+  GetPoint: (ctx, self, args) => {
+    const widget = ctx.registry.widget(self);
+    if (widget === null || widget.anchors.length === 0) {
+      return [];
+    }
+    // 1-based, and an absent or out-of-range index means the first anchor -- the engine returns the
+    // only anchor for `GetPoint()` with no argument, which is how every call site in the manifest
+    // uses it.
+    const raw = Number(args[0]);
+    const index = Number.isFinite(raw) && raw >= 1 && raw <= widget.anchors.length
+      ? Math.floor(raw) - 1
+      : 0;
+    const at = widget.anchors[index];
+    const target = /^lua:(\d+)$/.exec(at.relativeTo ?? '');
+    return [
+      at.point,
+      target === null ? null : ctx.wrapper(Number(target[1])),
+      at.relativePoint ?? at.point,
+      at.x,
+      at.y,
+    ];
+  },
+
+  /** `GetNumPoints()` -- how many anchors this region has. Registered beside `GetPoint`; the client
+   * loops `for i = 1, self:GetNumPoints()` in a few places and a nil there is an arithmetic error. */
+  GetNumPoints: (ctx, self) => [ctx.registry.widget(self)?.anchors.length ?? 0],
+  /**
+   * `SetParent(frameOrNameOrNil)` -- RE-PARENT a live widget.
+   *
+   * **This was absent from the runtime entirely and it is not a small gap.** Measured live: the quest
+   * log printed `QuestLogFrame.lua:848: attempt to call a nil value (method 'SetParent')` on its
+   * `OnShow` and `:819` on its `OnHide`, and the far worse consumer is `QuestInfo_Display` --
+   * `shownFrame:SetParent(parentFrame)` is the FIRST statement of its element loop
+   * (`questinfo.lua:71`), and that loop is the shared body of ALL FOUR questgiver panels and the
+   * quest log's detail pane. A nil there kills every one of them before the title is placed.
+   *
+   * It is REGION-level, not frame-level, because the client calls it on `ScrollFrame`s
+   * (`QuestLogDetailFrame_DetachFromQuestLog`) as well as `Frame`s, and `GetParent` already lives
+   * here.
+   *
+   * The registry does not keep its own parent map -- `Registry#parentOf` reads
+   * `entry.widget.parent` -- so moving the Widget is the whole operation and `GetParent` follows for
+   * free.
+   *
+   * `Widget#add` re-derives `strata` and `frameLevel` from the new parent, which is what the real
+   * `SetParent` does. It does NOT walk the subtree, so that is done here: a re-parented panel's own
+   * children have to move with it or a reward button would draw at the old strata. The walk is
+   * `add`'s own rule applied recursively -- a REGION keeps its owner's level, a child FRAME sits one
+   * above; see `widget.ts#add` for why that asymmetry exists.
+   *
+   * **`SetParent(nil)` RE-HOMES TO THE SCREEN ROOT, and the comment that used to sit here said the
+   * opposite -- wrongly, and with a claim that turned out to be false.** It read: "`SetParent(nil)`
+   * DETACHES rather than re-homing to `UIParent`. The engine's own behaviour, and nothing in the
+   * loaded manifest calls it that way."
+   *
+   * Both halves were wrong. The manifest calls it exactly that way, once, and it is the world map's
+   * full-screen mode: `WorldMap_ToggleSizeUp`'s second statement is `WorldMapFrame:SetParent(nil)`
+   * (`worldmapframe.lua:1313`). Measured -- one call site in the whole decoded manifest, and it is a
+   * feature the owner was testing. **A documented exclusion is a bug report someone declined to
+   * file**, which is a rule this project already wrote down about a getter and had to relearn here.
+   *
+   * And detaching is not what the engine does. A parentless frame in the real client is a TOP-LEVEL
+   * frame: still drawn, no longer inheriting `UIParent`'s scale or taking part in the UI-panel
+   * layout, which is precisely why the client reaches for it to make the map full-screen. Detaching
+   * dropped the frame out of the draw walk instead, so the map vanished and could not be reopened --
+   * the owner's "карта просто пропадает и её не удаётся больше открыть", with no error, because
+   * nothing had failed.
+   *
+   * `GetParent()` still answers nil afterwards, which is the engine's behaviour too: the root is not
+   * a frame, so `Registry#parentOf` finds no id for it and returns null.
+   */
+  SetParent: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const value = args[0];
+
+    // The SCREEN ROOT for nil -- see the note above on why this is not a detach.
+    let target: Widget | null = ctx.registry.root;
+    if (value !== undefined && value !== null) {
+      let id: number | null;
+      if (typeof value === 'string') {
+        id = ctx.registry.byName(value);
+        if (id === null) {
+          warnOnce(`SetParent: no frame named '${value}' -- the parent is left unchanged`);
+          return [];
+        }
+      } else {
+        id = ctx.frameIdOf(value);
+        if (id === null) {
+          warnOnce('SetParent: the argument is not a frame -- the parent is left unchanged');
+          return [];
+        }
+      }
+      target = ctx.registry.widget(id) ?? null;
+      if (target === null) {
+        return [];
+      }
+    }
+
+    if (target === widget) {
+      // A frame cannot parent itself. The engine ignores it; so does this.
+      return [];
+    }
+    // A CYCLE would make the draw walk non-terminating, which a browser cannot afford -- the same
+    // reasoning `SHOW_REENTRY_LIMIT` in this file gives for its own guard. Refusing is the engine's
+    // behaviour too.
+    for (let node: Widget | null = target; node !== null; node = node.parent) {
+      if (node === widget) {
+        warnOnce('SetParent: refused -- the new parent is a descendant, which would cycle');
+        return [];
+      }
+    }
+    if (widget.parent === target) {
+      return [];
+    }
+
+    // RE-POINT THE ANCHORS THAT NAMED THE OLD PARENT, and this is the whole reason the owner's quest
+    // page was blank while its Accept button was fine.
+    //
+    // MEASURED, in the headless harness: `QuestInfoTitleHeader` carried
+    // `BOTTOMRIGHT -> QuestInfoFrame` (its AUTHORING parent) alongside the `TOPLEFT ->
+    // QuestDetailScrollChildFrame` that `QuestInfo_Display` had just set -- so the top resolved
+    // BELOW the bottom and the rect came out `272 x -95`. A negative-height rect intersects no
+    // viewport, so the ScrollFrame crop dropped it, and the description, the objectives and the whole
+    // reward block with it. The parchment and the Accept button, which are not reparented, drew fine.
+    // That is the screenshot exactly, including the scroll doing nothing because nothing was left
+    // inside to move.
+    //
+    // The real engine cannot hit this because an anchor with no explicit `relativeTo` means "relative
+    // to MY PARENT" and follows the frame around. Our loader materialises that implicit reference as
+    // the parent's concrete id (`layout.ts` resolves against ids), so re-parenting has to carry it --
+    // otherwise a `<Layer>` region that inherits default anchors from its authoring frame keeps
+    // pointing at a frame it no longer belongs to. `QuestInfo_Display` reparents ten such regions on
+    // every panel show, which is why quests met it first and hardest.
+    //
+    // Only anchors naming the OLD parent are touched. One naming a third frame is a deliberate
+    // cross-reference (`QuestInfoReputationsFrame` anchors to its anchor argument, and half of
+    // `questframe.lua` anchors one region to another by name) and must survive untouched.
+    const previous = widget.parent;
+    // **NOT A DEFAULT FILL, and skipping it is what keeps `Widget#anchorsAreDefault` alive.**
+    //
+    // Found by re-running my own harness after the loader's fill became a DEFAULT (`684b68b`): the
+    // quest title was STILL resolving to the whole 295x324 viewport, and the reason was this method.
+    // `setAnchors` clears `anchorsAreDefault` by design -- "any explicit call is an authored
+    // placement" (`widget.ts:563-565`) -- so re-pointing a default fill turned it into an EXPLICIT
+    // anchor set, and the `SetPoint("TOPLEFT")` that `QuestInfo_Display` issues two statements later
+    // then MERGED with it instead of replacing it. My fix was defeating theirs.
+    //
+    // A default fill needs no re-pointing anyway: it exists only until something places the region,
+    // and the first explicit `SetPoint` discards the whole set. So the correct action here is none.
+    if (previous !== null && target !== null && previous !== target && !widget.anchorsAreDefault) {
+      const repointed = widget.anchors.map((anchor) => (
+        anchor.relativeTo === previous.id ? { ...anchor, relativeTo: target.id } : anchor
+      ));
+      if (repointed.some((a, i) => a !== widget.anchors[i])) {
+        widget.setAnchors(...repointed);
+      }
+    }
+
+    widget.parent?.remove(widget);
+    if (target !== null) {
+      target.add(widget);
+      // The subtree, by `add`'s own rule. Only reached on a real re-parent, which happens on a panel
+      // show and not per frame.
+      const walk = (node: Widget): void => {
+        for (const child of node.children) {
+          child.strata = node.strata;
+          const isRegion = child.kind === 'texture' || child.kind === 'fontstring';
+          child.frameLevel = isRegion ? node.frameLevel : node.frameLevel + 1;
+          walk(child);
+        }
+      };
+      walk(widget);
+    }
+    touchGeometry('SetParent');
+    return [];
+  },
   SetAlpha: (ctx, self, args) => {
     widgetOf(ctx, self).alpha = Number(args[0] ?? 1);
     return [];
@@ -308,10 +609,33 @@ const REGION: MethodTable = {
   GetAlpha: (ctx, self) => [widgetOf(ctx, self).alpha],
   SetWidth: (ctx, self, args) => {
     widgetOf(ctx, self).width = Number(args[0] ?? 0);
+    // `width`/`height` are plain fields, so unlike `setAnchors`/`show` there is no method to bump the
+    // geometry revision from. See `widget.ts#geometryRevision`.
+    touchGeometry('SetWidth');
     return [];
   },
   SetHeight: (ctx, self, args) => {
     widgetOf(ctx, self).height = Number(args[0] ?? 0);
+    touchGeometry('SetHeight');
+    return [];
+  },
+  /**
+   * `SetSize(width, height)` -- exactly `SetWidth` then `SetHeight`, and it was absent.
+   *
+   * MEASURED from the owner's own console log, not guessed: `TutorialFrame` calls it as a method and
+   * the log carries the raise. It is one of 46 "attempt to call a nil value" entries in that boot and
+   * one of only two that are WIDGET-LAYER gaps rather than missing content globals -- the rest need a
+   * feed this client has no wire path for.
+   *
+   * The same two field writes as `SetWidth`/`SetHeight` rather than a composite of the two Lua calls:
+   * each of those is one assignment, so routing through `callMethod` would add two boundary crossings
+   * for nothing.
+   */
+  SetSize: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    widget.width = Number(args[0] ?? 0);
+    widget.height = Number(args[1] ?? 0);
+    touchGeometry('SetSize');
     return [];
   },
   // A FONT STRING with a 0 dimension derives it from its text, exactly as the layout does
@@ -319,10 +643,11 @@ const REGION: MethodTable = {
   // y="0">` and `gluedialog.lua:610,677` sizes the whole dialog panel from its `GetHeight()`, which
   // reported 0 and left the panel one text-height short. `GetStringWidth` already measured this way.
   // Measured at scale 1: a widget's size is in logical units, so the live layout scale divides out.
-  // Everything else reports its stored size unchanged -- a FRAME's 0 still means "derive from the
-  // opposing anchors", which only `resolveAnchors` can do.
-  GetWidth: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).width],
-  GetHeight: (ctx, self) => [deriveSize(widgetOf(ctx, self), 1, measureText).height],
+  // Everything else reports its stored size -- and a FRAME's 0, which means "derive from the opposing
+  // anchors", is now answered from the resolved rect rather than left at 0. See `resolvedExtent`: that
+  // 0 was the whole of the dead scrollbar.
+  GetWidth: (ctx, self) => [resolvedExtent(ctx, self, 'width')],
+  GetHeight: (ctx, self) => [resolvedExtent(ctx, self, 'height')],
 
   /**
    * `GetLeft` / `GetRight` / `GetTop` / `GetBottom` / `GetCenter` -- where the widget actually ENDED UP.
@@ -342,26 +667,66 @@ const REGION: MethodTable = {
    * the tooltip's side (`containerframe.lua:759`), and with `GetRight` absent every bag tooltip threw
    * `attempt to call a nil value (method 'GetRight')`.
    */
-  GetLeft: (ctx, self) => [rectOf(widgetOf(ctx, self).id)?.left ?? null],
+  /**
+   * THE FIVE EDGE READERS ARE IN THE WIDGET'S OWN SPACE, and dividing by its scale is the whole of
+   * that -- it was missing and it broke the world map the moment `SetScale` started working.
+   *
+   * `WorldMapButton_OnUpdate` mixes three of these in one expression
+   * (`worldmapframe.lua:743-751`):
+   *
+   *     local x, y = GetCursorPosition();
+   *     x = x / self:GetEffectiveScale();
+   *     local centerX, centerY = self:GetCenter();
+   *     local width = self:GetWidth();
+   *     adjustedX = (x - (centerX - (width/2))) / width;
+   *
+   * `GetCursorPosition` is DEVICE pixels and `GetEffectiveScale` divides by the widget scale AND the
+   * virtual-screen scale, so `x` lands in the widget's own units. `GetWidth` is already own-space.
+   * These five returned VIRTUAL units -- and while every scale was 1 the two spaces were the same
+   * number, so the mixture worked and nothing said otherwise.
+   *
+   * `WorldMap_ToggleSizeUp` scales `WorldMapButton` to 1.0 and `ToggleSizeDown` to 0.573, which is
+   * exactly the owner's report: the hover was right in the full view and offset in the windowed one,
+   * "мышку наводишь непойми куда и появляется надпись". One space, two conventions.
+   *
+   * `Widget#effectiveScale` and not `GetEffectiveScale`: the rect is ALREADY in virtual units, so
+   * only the widget half of the product is left to divide out. Multiplying the screen half in again
+   * would answer device pixels.
+   */
+  GetLeft: (ctx, self) => {
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    return [rect === null ? null : rect.left / widget.effectiveScale];
+  },
   GetRight: (ctx, self) => {
-    const rect = rectOf(widgetOf(ctx, self).id);
-    return [rect === null ? null : rect.left + rect.width];
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    return [rect === null ? null : (rect.left + rect.width) / widget.effectiveScale];
   },
   GetTop: (ctx, self) => {
-    const rect = rectOf(widgetOf(ctx, self).id);
-    return [rect === null ? null : screenHeightUnits() - rect.top];
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    return [rect === null ? null : (screenHeightUnits() - rect.top) / widget.effectiveScale];
   },
   GetBottom: (ctx, self) => {
-    const rect = rectOf(widgetOf(ctx, self).id);
-    return [rect === null ? null : screenHeightUnits() - (rect.top + rect.height)];
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    return [rect === null
+      ? null
+      : (screenHeightUnits() - (rect.top + rect.height)) / widget.effectiveScale];
   },
-  /** Two returns, `x, y`, in the same bottom-left-origin space as the four edges. */
+  /** Two returns, `x, y`, in the same own-space bottom-left-origin coordinates as the four edges. */
   GetCenter: (ctx, self) => {
-    const rect = rectOf(widgetOf(ctx, self).id);
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
     if (rect === null) {
       return [];
     }
-    return [rect.left + rect.width / 2, screenHeightUnits() - (rect.top + rect.height / 2)];
+    const scale = widget.effectiveScale;
+    return [
+      (rect.left + rect.width / 2) / scale,
+      (screenHeightUnits() - (rect.top + rect.height / 2)) / scale,
+    ];
   },
   SetPoint: (ctx, self, args) => {
     const widget = widgetOf(ctx, self);
@@ -411,9 +776,22 @@ const REGION: MethodTable = {
     if (relativeToId !== undefined) {
       anchor.relativeTo = relativeToId;
     }
+    /**
+     * A DEFAULT PLACEMENT IS REPLACED, NOT STACKED ON, and that distinction is the quest page's blank
+     * body. See `Widget#anchorsAreDefault`: the loader gives an anchorless `<Layer>` region the
+     * parent's rect, and `QuestInfo_Display` then adds ONE `SetPoint` with no `ClearAllPoints`
+     * (`questinfo.lua:73,75`). Stacked, the four fill anchors plus that one gave opposing edges and
+     * `QuestInfoTitleHeader` resolved to the whole 295x324 viewport instead of its text height.
+     *
+     * The real engine's default position is not an anchor set, so the first explicit `SetPoint`
+     * supersedes it. Anything never positioned from Lua keeps the fill.
+     */
+    const existing = widget.anchorsAreDefault
+      ? []
+      : widget.anchors.filter((candidate) => candidate.point !== point);
     // Replace only the anchor at this POINT -- FrameXML stacks a TOPLEFT and a BOTTOMRIGHT call to
     // stretch a frame, and a second SetPoint("TOPLEFT", ...) is meant to move that corner, not add one.
-    widget.setAnchors(...widget.anchors.filter((existing) => existing.point !== point), anchor);
+    widget.setAnchors(...existing, anchor);
     return [];
   },
   ClearAllPoints: (ctx, self) => {
@@ -436,12 +814,38 @@ const REGION: MethodTable = {
 };
 
 const LAYEREDREGION: MethodTable = {
+  /**
+   * `SetVertexColor(r, g, b)` -- and on a FONTSTRING it must SET the glyph colour, not tint it.
+   *
+   * **This was the owner's "we need right colors for the items titles" in the loot window, and it is a
+   * WIDGET-LAYER gap rather than a loot one.** `LootFrame_UpdateButton` colours the row with
+   * `text:SetVertexColor(color.r, color.g, color.b)` off `ITEM_QUALITY_COLORS[quality]`
+   * (`lootframe.lua:98,111`). A font string is rasterized here at `FontSpec.color` and drawn as a quad
+   * whose material colour is `widget.vertexColor` (`ui/renderer.ts:356-358`), so a vertex colour
+   * MULTIPLIES the glyphs that are already painted. `LootButtonNText` inherits `GameFontNormal`, which
+   * is the client's GOLD -- so quality 1 (Common, pure white) multiplied gold by 1 and left it gold,
+   * and quality 0 (Poor, 0.62 grey) darkened the gold into something muddy. Two wrong colours, one
+   * cause, and exactly what his screenshot shows.
+   *
+   * A TEXTURE keeps the multiply, which is what a vertex colour means for art -- that is how one
+   * greyscale sheet is tinted per state, and `SetItemButtonNameFrameVertexColor` depends on it. For
+   * TEXT the engine's own behaviour is a replacement: `SetVertexColor` and `SetTextColor` are the same
+   * operation on a font string, which is why the client's own Lua uses them interchangeably
+   * (`lootframe.lua:111` uses one, `paperdollframe.lua:249` the other, on the same kind of label).
+   *
+   * The alpha argument is dropped for the same reason `SetTextColor` above drops it.
+   */
   SetVertexColor: (ctx, self, args) => {
-    widgetOf(ctx, self).vertexColor = toHex(
-      Number(args[0] ?? 1),
-      Number(args[1] ?? 1),
-      Number(args[2] ?? 1),
-    );
+    const widget = widgetOf(ctx, self);
+    const color = toHex(Number(args[0] ?? 1), Number(args[1] ?? 1), Number(args[2] ?? 1));
+    if (widget.kind === 'fontstring') {
+      ensureFont(widget).color = color;
+      // The quad's tint stays neutral, or the replacement above would be multiplied by a stale one --
+      // a second `SetVertexColor` would then darken the text twice.
+      widget.vertexColor = '#ffffff';
+      return [];
+    }
+    widget.vertexColor = color;
     return [];
   },
   /**
@@ -494,6 +898,28 @@ export function isDrawLayer(value: string): value is Layer {
 }
 
 const TEXTURE: MethodTable = {
+  /**
+   * `GetTexture()` -- the path this region is drawing, or nil.
+   *
+   * **IT WAS ABSENT, and that is why the minimap tracking button never changed its icon.** The
+   * owner's probe left exactly one hop: the listener was registered, its `OnEvent` bound,
+   * `MiniMapTracking_Update` a real global, the region resolved, shown, visible and 20x20 -- and its
+   * sprite unchanged after a dispatch. `MiniMapTracking_Update`'s first line touching the icon is
+   * `if ( MiniMapTrackingIcon:GetTexture() ~= texture )` (`minimap.lua:410`), so the handler raised
+   * on a nil method before ever reaching `SetTexture` on the next line.
+   *
+   * A raise inside an `OnEvent` goes to the script-error path, not the browser console, which is why
+   * five rounds of probing found everything EXCEPT the missing method: every piece of state was
+   * right and the failure was a call that never returned.
+   *
+   * `paperdollframe.lua` is the other caller in the files decoded here, so this was two defects.
+   *
+   * THE SPRITE, not the authored `file=`: the two are the same until something calls `SetTexture`,
+   * and after that the sprite is what draws. A solid-colour region (`SetTexture(r, g, b)`) has no
+   * path and answers nil, which is what the real client does with one -- and nil rather than an empty
+   * string, because the comparison the client makes is `~=` against a path and `""` would pass it.
+   */
+  GetTexture: (ctx, self) => [widgetOf(ctx, self).sprite ?? null],
   // `SetTexture("")` clears the slot -- the live API's blank form, which real FrameXML uses (an
   // authored `<Texture file="">` template override, most commonly). `nil` clears the same way.
   // The (r, g, b[, a]) overload is real too, and maps onto the flat-color quad `Widget.solid` exists
@@ -676,18 +1102,54 @@ export function applyFontResolution(widget: Widget, resolved: FontResolution, db
   }
 }
 
+/**
+ * `SetFormattedText`'s substitution, shared with `BUTTON`'s own copy of the method.
+ *
+ * `%s`, `%d` and the `%%` escape, positionally. Exported because `Button:SetFormattedText` is REAL API
+ * on a Button too and the gossip menu depends on it -- see `kinds.ts`. Two private copies of a format
+ * routine is exactly the drift `container-bridge.ts` records about the tooltip body.
+ */
+export function formatText(args: unknown[]): string {
+  const format = String(args[0] ?? '');
+  let index = 1;
+  return format.replace(/%[sd%]/g, (token) =>
+    (token === '%%' ? '%' : String(args[index++] ?? '')));
+}
+
 const FONTSTRING: MethodTable = {
+  /**
+   * `SetAlphaGradient(start, length)` -> whether the gradient is still PARTIAL.
+   *
+   * A FontString method that fades a run of text in character by character -- the "quest text writes
+   * itself onto the parchment" effect. This renderer rasterizes whole glyph runs onto a 2D context
+   * (`ui/text.ts`) and has no per-character alpha, so there is no gradient to model.
+   *
+   * **FALSE, and the return value is the entire point of this entry.** It was measured live: without
+   * it, `QuestInfo_ShowDescriptionText` raised on its LAST statement (`questinfo.lua:107`), and
+   * because `QuestInfo_Display`'s element loop calls each element function directly
+   * (`questinfo.lua:69-77`) that raise aborted the whole loop -- so in `QUEST_TEMPLATE_LOG` the
+   * description is 8th of 10 and the REWARD BLOCK never placed. The probe read
+   * `reward buttons shown: 0` against `GetNumQuestLogChoices() == 5`, which looked like a reward bug
+   * and was this.
+   *
+   * And FALSE specifically, never true: `QuestInfoFadingFrame_OnUpdate` does
+   * `if ( not QuestInfoDescriptionText:SetAlphaGradient(...) ) then ... acceptButton:Enable() end`
+   * (`questinfo.lua:3-16`). A truthy answer means "still fading", so it would leave the fade running
+   * forever and **the Accept button DISABLED on every quest in the game**. False means "finished",
+   * which ends the fade on its first update and enables the button -- the same end state
+   * `QUEST_FADING_DISABLE == "1"` produces in the real client.
+   *
+   * The visible consequence, stated: quest text appears at once instead of writing itself on. The
+   * text itself is complete and correct.
+   */
+  SetAlphaGradient: () => [false],
   SetText: (ctx, self, args) => {
-    widgetOf(ctx, self).text = args[0] === undefined || args[0] === null ? '' : String(args[0]);
+    writeText(widgetOf(ctx, self), args[0] === undefined || args[0] === null ? '' : String(args[0]));
     return [];
   },
   GetText: (ctx, self) => [widgetOf(ctx, self).text],
   SetFormattedText: (ctx, self, args) => {
-    const format = String(args[0] ?? '');
-    let index = 1;
-    widgetOf(ctx, self).text = format.replace(/%[sd%]/g, (token) =>
-      token === '%%' ? '%' : String(args[index++] ?? ''),
-    );
+    writeText(widgetOf(ctx, self), formatText(args));
     return [];
   },
   // Real `SetTextColor` also takes an alpha channel; `FontSpec.color` is a plain `#rrggbb` with
@@ -770,6 +1232,25 @@ const FONTSTRING: MethodTable = {
     ensureFont(widgetOf(ctx, self)).nonSpaceWrap = luaFlag(args[0]);
     return [];
   },
+  /**
+   * `SetSpacing(pixels)` -- the extra leading between a wrapped string's lines.
+   *
+   * MEASURED absent from the owner's console log: `BNToastFrame` calls it and the call raised. The
+   * field already existed -- `FontSpec.spacing`, which `<Font spacing="2">` authors and the wrap pass
+   * reads -- so this is the setter for a value the layer already honours, not new machinery.
+   *
+   * **HONEST LIMIT, and it is the field's own:** `spacing` is only reachable through `wrapWidth`,
+   * because a single-line string has no gap to space (see `FontSpec.spacing`). So this call is a no-op
+   * in appearance for an unwrapped string -- which is what `BNToastFrame` is. It is registered because
+   * the raise took out the rest of that handler, and the value is stored truthfully rather than being
+   * dropped on the floor.
+   */
+  SetSpacing: (ctx, self, args) => {
+    const value = Number(args[0] ?? 0);
+    ensureFont(widgetOf(ctx, self)).spacing = Number.isFinite(value) ? value : 0;
+    return [];
+  },
+  GetSpacing: (ctx, self) => [ensureFont(widgetOf(ctx, self)).spacing ?? 0],
   SetMaxLines: (ctx, self, args) => {
     const n = Number(args[0]);
     ensureFont(widgetOf(ctx, self)).maxLines =
@@ -792,17 +1273,54 @@ const FONTSTRING: MethodTable = {
     spec.shadowAlpha = args[3] === undefined ? 1 : Number(args[3]);
     return [];
   },
+  /**
+   * `GetFont()` -> `fontFile, height, flags` -- the same triple `SetFont` takes.
+   *
+   * MEASURED ABSENT, not guessed at. Loading the client's own `UIDropDownMenu.xml` through the real
+   * loader in a headless harness reports exactly one error:
+   *
+   *     uidropdownmenu.xml:DropDownList1: OnLoad: attempt to call a nil value (method 'GetFont')
+   *
+   * That `<OnLoad>` is `local fontName, fontHeight, fontFlags =
+   * _G["DropDownList1Button1NormalText"]:GetFont(); UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT = fontHeight;`
+   * (`uidropdownmenu.xml:11-14`), so the raise left `UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT` nil and killed
+   * the rest of that handler.
+   *
+   * Through `effectiveFont`, like `GetStringHeight` and unlike `GetStringWidth`: a font string with no
+   * spec of its own inherits its font object's, and the engine's `GetFont` answers what the string will
+   * actually draw with, not whether it happens to carry a local override.
+   *
+   * The flags string is rebuilt from the spec rather than remembered: `FontSpec` keeps `outline` as a
+   * boolean and nothing else from the flags word, so `"OUTLINE"` or `""` is the whole truthful answer.
+   * `MONOCHROME` and `THICKOUTLINE` are not modelled anywhere in this widget layer, so reporting them
+   * would be inventing a value -- see the project rule about comments that invent a source.
+   */
+  GetFont: (ctx, self) => {
+    const spec = effectiveFont(widgetOf(ctx, self));
+    if (spec === null) {
+      // The real call answers nil for a string that has no font at all, and `UIDropDownMenu.xml`'s
+      // handler tests nothing -- but a nil triple is the honest answer and is what the engine gives.
+      return [];
+    }
+    return [fontFileForFamily(spec.family), spec.size, spec.outline ? 'OUTLINE' : ''];
+  },
   SetFont: (ctx, self, args) => {
     const family = familyForFontFile(String(args[0] ?? ''));
     if (family === null) {
       warnOnce(`SetFont: unknown font file '${args[0]}'`);
       return [false];
     }
-    const spec = ensureFont(widgetOf(ctx, self));
+    const widget = widgetOf(ctx, self);
+    const spec = ensureFont(widget);
     spec.family = family;
     spec.size = Number(args[1] ?? spec.size);
     const flags = String(args[2] ?? '').toUpperCase();
     spec.outline = flags.includes('OUTLINE');
+    // The FONT changes measured text as surely as the text does. Same derived-dimension guard as
+    // `writeText`: a fully sized FontString cannot move its own rect by changing face.
+    if (widget.width === 0 || widget.height === 0) {
+      touchGeometry('SetFont');
+    }
     return [true];
   },
   // REAL now: `ctx.fontObject` is the live name -> font-values lookup the loader installs over its
@@ -815,7 +1333,11 @@ const FONTSTRING: MethodTable = {
       warnOnce('SetFontObject: the argument is neither a font object nor a <Font> name; ignored');
       return [];
     }
-    applyFontObject(ctx, widgetOf(ctx, self), name);
+    const widget = widgetOf(ctx, self);
+    applyFontObject(ctx, widget, name);
+    if (widget.width === 0 || widget.height === 0) {
+      touchGeometry('SetFontObject');
+    }
     return [];
   },
   /**
@@ -860,7 +1382,28 @@ const FONTSTRING: MethodTable = {
     ensureFont(widgetOf(ctx, self)).align = value as 'LEFT' | 'CENTER' | 'RIGHT';
     return [];
   },
-  SetJustifyV: notImplemented('SetJustifyV', 'FontSpec has no vertical-justify field yet'),
+  /**
+   * `SetJustifyV(justify)` / `GetJustifyV()` -- REAL now, and the gap note it replaces was accurate:
+   * `FontSpec` had no vertical field, so every string was centred whatever its document asked for.
+   *
+   * The loader already routed the XML attribute here (`loader.ts:1100-1102`), so the whole feature was
+   * one field and one line in the renderer. `renderer.ts`' own comment named this as the outstanding
+   * half of the same gap.
+   *
+   * MIDDLE is FrameXML's default, so an absent value and an explicit MIDDLE are the same thing and the
+   * field stays undefined for the common case rather than being written on every string.
+   */
+  SetJustifyV: (ctx, self, args) => {
+    const value = String(args[0] ?? '').toUpperCase();
+    if (value !== 'TOP' && value !== 'MIDDLE' && value !== 'BOTTOM') {
+      warnOnce(`SetJustifyV: unknown justification '${value}'`);
+      return [];
+    }
+    ensureFont(widgetOf(ctx, self)).vertical = value as 'TOP' | 'MIDDLE' | 'BOTTOM';
+    touchGeometry('SetJustifyV');
+    return [];
+  },
+  GetJustifyV: (ctx, self) => [widgetOf(ctx, self).font?.vertical ?? 'MIDDLE'],
 };
 
 registerMethods('REGION', REGION);

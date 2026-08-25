@@ -20,6 +20,18 @@ export interface FrameDeps {
 export interface FrameInput extends MoveInput {
   /** True only on the frame the jump key went down. */
   jumpPressed: boolean;
+  /**
+   * The unit's live SWIM speeds off the wire (`MSG_MOVE_SET_SWIM_SPEED` /
+   * `SMSG_FORCE_SWIM_SPEED_CHANGE`, held on `Unit#speeds`), or omitted to keep the vanilla defaults.
+   *
+   * On `input` rather than on `PlayerMoveState` because that is what the two already are: `speed`
+   * lives here for exactly the same reason -- it is "how fast the player may go this frame", an
+   * input to the step, where the state holds what the step DECIDED (`swimStrokeSpeed` is an output
+   * on the state and must not be confused with these). Optional so every existing caller and every
+   * movement test keeps compiling and keeps the defaults it was written against.
+   */
+  swimSpeed?: number;
+  swimBackSpeed?: number;
 }
 
 export interface FrameResult {
@@ -69,12 +81,23 @@ export function movementFrame(
 
   // A net-backward swim takes min(swimBack, swim), like the run arm's min(runBack, run); a
   // strafe-only swim uses the forward speed.
+  // THE WIRE'S SWIM SPEEDS, falling back to vanilla's defaults -- the same defect as the run speed
+  // (`controls.tsx`'s `speed`), in the same class: `SMSG_FORCE_SWIM_SPEED_CHANGE` is decoded, acked
+  // and stored on `Unit#speeds.swim`, and this branch read a compile-time constant instead, so a
+  // swim-speed effect could not move the body. `> 0` guards a speed set that has not arrived and a
+  // zero the validator let through.
+  const swimFwd = input.swimSpeed !== undefined && input.swimSpeed > 0 ? input.swimSpeed : SWIM_SPEED;
+  const swimBack = input.swimBackSpeed !== undefined && input.swimBackSpeed > 0
+    ? input.swimBackSpeed
+    : SWIM_BACK_SPEED;
   let speed = 0;
   if (input.moving && input.dir.lengthSq() > 1e-12) {
     _forward.set(Math.cos(state.faceYaw), Math.sin(state.faceYaw), 0);
+    // `min(back, forward)` is the reference's own rule and is kept: a net-backward swim takes the
+    // slower of the two, so a buff that raises only the forward speed cannot make backstroking fast.
     speed = input.dir.dot(_forward) < 0
-      ? Math.min(SWIM_BACK_SPEED, SWIM_SPEED)
-      : SWIM_SPEED;
+      ? Math.min(swimBack, swimFwd)
+      : swimFwd;
   }
   state.swimStrokeSpeed = speed;
 

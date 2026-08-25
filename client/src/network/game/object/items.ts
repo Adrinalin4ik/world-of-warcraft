@@ -96,6 +96,26 @@ export interface ItemTemplate {
   description: string;
   maxDurability: number;
   startQuest: number;
+
+  /**
+   * THE TOOLTIP BODY'S FIELDS. Every one of these was already READ and thrown away; keeping them is
+   * the whole of what "items have no description" needed (`ui/item-tooltip.ts` turns them into lines).
+   */
+
+  /** The two 3.3.5a damage blocks, EMPTY ones dropped. `school` is a `SPELL_SCHOOL_*` index. */
+  damage: Array<{ min: number; max: number; school: number }>;
+  /** The first word of the armor+resistances run of seven. */
+  armor: number;
+  /** The remaining six of that run, in wire order: holy, fire, nature, frost, shadow, arcane. */
+  resistances: number[];
+  /** Weapon swing time in MILLISECONDS -- the tooltip's `Speed` is this over 1000. */
+  delay: number;
+  /** Shield block value. Its own word, not a stat entry. */
+  block: number;
+  /** The variable-length stat array. `type` is an `ITEM_MOD_*` index; see `ui/item-tooltip.ts`. */
+  stats: Array<{ type: number; value: number }>;
+  /** The five spell blocks, the sentinel (`id <= 0`) ones dropped. */
+  spells: Array<{ id: number; trigger: number; charges: number; cooldown: number }>;
 }
 
 /** A decoded descriptor bag for one item or container object, merged across updates. */
@@ -155,6 +175,43 @@ export class ItemHandler extends EventEmitter {
     // whose guids are still perfectly valid keys. Found in self-review as dead code, which is what it
     // was; the bug it implies is not theoretical.
     this.game.on('packet:receive:SMSG_LOGIN_VERIFY_WORLD', () => this.clearSession());
+    this.game.on(
+      `packet:receive:${'SMSG_INVENTORY_CHANGE_FAILURE'}`,
+      (gp: GamePacket) => this.handleEquipError(gp),
+    );
+  }
+
+  /**
+   * `SMSG_INVENTORY_CHANGE_FAILURE` (**0x112**) -- WHY the server refused an item action.
+   *
+   * The owner: "there're not alerts when I'm trying to do something restrictive, like wearing a mail
+   * while mage etc." This is the packet that says so, and it had no subscriber at all: every refusal
+   * arrived and was dropped, so a rule of the game and a bug in this client looked identical. That has
+   * already cost one false report.
+   *
+   * **Only the FIRST BYTE is consumed, and that is deliberate.** The body is `u8 reason` and then, for
+   * every reason but 0, two item guids, a bag-subclass byte and a per-reason tail (TrinityCore 3.3.5
+   * `Player::SendEquipError`). The reason byte's position is the one part of that layout no version
+   * disagrees about, and it is the whole of what the message needs; reading the tail would mean pinning
+   * a conditional layout for the sake of one string's `%d`. So `ERR_CANT_EQUIP_LEVEL_I` and
+   * `ERR_PURCHASE_LEVEL_TOO_LOW` keep their raw `%d` -- see `ui/container-bridge.ts`, which is where
+   * that is handled and said out loud.
+   *
+   * Reason **0** (`EQUIP_ERR_OK`) is not a refusal and is dropped here rather than downstream: the
+   * server sends it as a bare two-byte "nothing went wrong" and there is no message for it.
+   */
+  private handleEquipError(gp: GamePacket): void {
+    try {
+      const reason = gp.readUnsignedByte();
+      if (reason === 0) {
+        return;
+      }
+      this.emit('equipError', reason);
+    } catch (e) {
+      // Same contract as `loot.ts#subscribe`: `byte-buffer` THROWS past the frame and an uncaught throw
+      // escapes `GameHandler#dataReceived`'s receive loop, taking every packet still buffered with it.
+      console.warn(`items: SMSG_INVENTORY_CHANGE_FAILURE did not decode -- ${(e as Error).message}`);
+    }
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -309,35 +366,55 @@ export class ItemHandler extends EventEmitter {
     if (statsCount > 32) {
       throw new Error(`statsCount ${statsCount} is not credible -- the layout has desynced`);
     }
+    const stats: Array<{ type: number; value: number }> = [];
     for (let i = 0; i < statsCount; ++i) {
-      gp.readUnsignedInt(); // statType
-      gp.readInt(); // statValue
+      const type = gp.readUnsignedInt() >>> 0;
+      const value = gp.readInt();
+      // A ZERO-VALUE ENTRY IS PADDING, not a stat. The server writes `statsCount` entries and an
+      // unused one is `{0, 0}`, which as a tooltip line would read "+0 Mana" -- so it is dropped here
+      // rather than filtered at the far end, where two callers would each have to remember.
+      if (value !== 0) {
+        stats.push({ type, value });
+      }
     }
     gp.readUnsignedInt(); // scalingStatDistribution -- 3.x
     gp.readUnsignedInt(); // scalingStatValue -- 3.x
 
     // TWO damage blocks in 3.3.5a, five in 1.12 (`MAX_ITEM_PROTO_DAMAGES`).
+    const damage: Array<{ min: number; max: number; school: number }> = [];
     for (let i = 0; i < 2; ++i) {
-      gp.readFloat(); // min
-      gp.readFloat(); // max
-      gp.readUnsignedInt(); // school
+      const min = gp.readFloat();
+      const max = gp.readFloat();
+      const school = gp.readUnsignedInt() >>> 0;
+      // An unused block is all zeroes. Dropped for the same reason a zero stat is.
+      if (max > 0) {
+        damage.push({ min, max, school });
+      }
     }
     // armor + the six resistances, one run of seven words, as in 1.12.
-    for (let i = 0; i < 7; ++i) {
-      gp.readInt();
+    const armor = gp.readInt();
+    const resistances: number[] = [];
+    for (let i = 0; i < 6; ++i) {
+      resistances.push(gp.readInt());
     }
-    gp.readUnsignedInt(); // delay
+    const delay = gp.readUnsignedInt() >>> 0;
     gp.readUnsignedInt(); // ammoType
     gp.readFloat(); // rangedModRange
     // Five spell blocks of six words. Fixed size on both wires; the server writes sentinels for an
     // empty slot rather than omitting it.
+    const spells: Array<{ id: number; trigger: number; charges: number; cooldown: number }> = [];
     for (let i = 0; i < 5; ++i) {
-      gp.readUnsignedInt(); // spellId
-      gp.readUnsignedInt(); // spellTrigger
-      gp.readInt(); // spellCharges
-      gp.readInt(); // spellCooldown
+      const id = gp.readInt();
+      const trigger = gp.readUnsignedInt() >>> 0;
+      const charges = gp.readInt();
+      const cooldown = gp.readInt();
       gp.readUnsignedInt(); // spellCategory
       gp.readInt(); // spellCategoryCooldown
+      // The sentinel for an empty slot is 0 -- and `-1` has been seen in this field too, which is why
+      // the guard is `> 0` and not `!== 0`.
+      if (id > 0) {
+        spells.push({ id, trigger, charges, cooldown });
+      }
     }
     const bonding = gp.readUnsignedInt() >>> 0;
     const description = gp.readCStr();
@@ -350,7 +427,7 @@ export class ItemHandler extends EventEmitter {
     gp.readUnsignedInt(); // sheath
     gp.readInt(); // randomProperty
     gp.readInt(); // randomSuffix -- 2.x insertion
-    gp.readUnsignedInt(); // block
+    const block = gp.readUnsignedInt() >>> 0;
     gp.readUnsignedInt(); // itemSet
     const maxDurability = gp.readUnsignedInt() >>> 0;
     gp.readUnsignedInt(); // area
@@ -388,6 +465,13 @@ export class ItemHandler extends EventEmitter {
       description,
       maxDurability,
       startQuest,
+      damage,
+      armor,
+      resistances,
+      delay,
+      block,
+      stats,
+      spells,
     };
   }
 

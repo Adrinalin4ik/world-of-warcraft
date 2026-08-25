@@ -132,6 +132,32 @@ class Controls extends React.Component<IProp> {
   /** Pointer lock already asked for in this look session. See the request site for why. */
   private lockRequested = false;
 
+/**
+   * How far the pointer has travelled during the current button-held drag, in device pixels.
+   *
+   * The pointer lock is gated on this crossing `LOCK_TRAVEL_PX`, not on the button and not on "did it
+   * move at all" -- see the gate in the frame loop.
+   */
+  private lookTravel = 0;
+
+  /**
+   * How far the pointer must travel during a hold before the camera is considered to be MOVING and the
+   * pointer lock is worth taking. Device pixels, accumulated as |dx| + |dy|.
+   *
+   * OURS, and the owner set the rule rather than the number: "такой эффект должен быть только при
+   * движении камеры. У нас же она статична во время общения или лутания."
+   *
+   * The previous attempt gated on any nonzero delta and was still wrong, which he also diagnosed
+   * exactly -- a real mouse jitters a pixel during any click, so "did it move" was true almost
+   * immediately and the lock was taken for a click after all. That is why this is a threshold and not a
+   * boolean.
+   *
+   * 4 px is the conventional click-versus-drag slop and it is deliberately small: crossing it late costs
+   * nothing, because the first pixels of a genuine drag come from the UNLOCKED `movementX/Y`, which
+   * browsers deliver either way. Crossing it early costs the cursor, which is the whole complaint.
+   */
+  private static readonly LOCK_TRAVEL_PX = 4;
+
   constructor(props: IProp) {
     super(props);
     this.unit = props.player;
@@ -155,6 +181,7 @@ class Controls extends React.Component<IProp> {
     this.element.addEventListener('mousemove', this.onMouseMove);
     this.element.addEventListener('wheel', this.onWheel, { passive: false });
     this.element.addEventListener('contextmenu', this.onContextMenu);
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
     document.addEventListener('keydown', this.onKeyDown);
     document.addEventListener('keyup', this.onKeyUp);
   }
@@ -165,6 +192,7 @@ class Controls extends React.Component<IProp> {
     this.element.removeEventListener('mousemove', this.onMouseMove);
     this.element.removeEventListener('wheel', this.onWheel);
     this.element.removeEventListener('contextmenu', this.onContextMenu);
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     document.removeEventListener('keydown', this.onKeyDown);
     document.removeEventListener('keyup', this.onKeyUp);
   }
@@ -208,10 +236,50 @@ class Controls extends React.Component<IProp> {
   private onMouseUp(event: MouseEvent) {
     if (event.button === 0) this.buttons.left = false;
     if (event.button === 2) this.buttons.right = false;
-    if (!this.buttons.left && !this.buttons.right && document.pointerLockElement) {
+    if (!this.buttons.left && !this.buttons.right) {
+      // A new drag starts with no travel: see the lock gate.
+      this.lookTravel = 0;
+    }
+    /**
+     * NO `pointerLockElement` GUARD, and its absence is the fix for the oldest open report on this
+     * project: "when I do right click, cursor disappears for some reason and clicking left button makes
+     * it appear again."
+     *
+     * The guard read as a cheap "are we even locked" test and was in fact the bug, because of the thing
+     * the frame loop below already documents at length: **the lock is granted ASYNCHRONOUSLY, so
+     * `pointerLockElement` stays null for the whole handshake.** The sequence for any quick right click:
+     *
+     *   1. press -> `buttons.right`
+     *   2. next frame -> `requestPointerLock()` goes out
+     *   3. release, still mid-handshake -> `pointerLockElement` is null, so the exit was SKIPPED
+     *   4. the lock lands, with no button held and nothing left to release it -- the browser hides the
+     *      cursor and keeps it hidden
+     *   5. a left click's release finally finds `pointerLockElement` set and exits -- "clicking left
+     *      button makes it appear again", exactly as reported
+     *
+     * Calling `exitPointerLock()` when nothing is locked is a documented no-op, so dropping the guard
+     * costs nothing and closes steps 3-5. `onPointerLockChange` closes the remaining ordering, where the
+     * grant arrives after this handler has already run.
+     */
+    if (!this.buttons.left && !this.buttons.right) {
       document.exitPointerLock();
     }
   }
+
+  /**
+   * A LOCK THAT ARRIVES AFTER THE DRAG ENDED MUST NOT STAY.
+   *
+   * The belt to `onMouseUp`'s braces, and it is what makes the fix ordering-proof rather than merely
+   * likely: whatever sequence the browser chooses, a pointer lock held while no mouse button is down is
+   * a hidden cursor with nothing holding it. This is the only place that can catch the grant itself, so
+   * it is checked here rather than trusted to the release.
+   */
+  private readonly onPointerLockChange = () => {
+    if (document.pointerLockElement === this.element
+      && !this.buttons.left && !this.buttons.right) {
+      document.exitPointerLock();
+    }
+  };
 
   private onMouseMove(event: MouseEvent) {
     // BEFORE the early return. The pick needs where the cursor IS, and a click is by definition a
@@ -230,8 +298,12 @@ class Controls extends React.Component<IProp> {
       return;
     }
     // While pointer-locked, movementX/Y are the only meaningful deltas -- clientX/Y stop moving.
-    this.motion.dx += event.movementX ?? 0;
-    this.motion.dy += event.movementY ?? 0;
+    const dx = event.movementX ?? 0;
+    const dy = event.movementY ?? 0;
+    // ACCUMULATED TRAVEL, not "did it move at all" -- see `LOCK_TRAVEL_PX`.
+    this.lookTravel += Math.abs(dx) + Math.abs(dy);
+    this.motion.dx += dx;
+    this.motion.dy += dy;
   }
 
   private onWheel(event: WheelEvent) {
@@ -278,14 +350,32 @@ class Controls extends React.Component<IProp> {
     // `NotAllowedError: Too many pointer lock requests in a short window`, which is how a mouselook
     // drag lost its lock instead of gaining it. Latched on the look session, cleared when the drag
     // ends, so a genuine denial is not retried at frame rate either.
-    if (this.rig.look) {
+    /**
+     * THE LOCK WAITS FOR ACTUAL MOVEMENT, and that is what finally fixes the vanishing cursor.
+     *
+     * Dropping `onMouseUp`'s stale guard was necessary and not sufficient: the owner still saw the cursor
+     * go, and gave the detail that settles it -- **"появляется по первому движению мыши"**. A pointer
+     * lock does not restore a cursor on movement, and a CSS `url(...)` cursor is repainted only when the
+     * pointer moves. So the lock WAS being exited correctly; the browser simply had not repainted the
+     * custom cursor yet, and would not until the mouse moved.
+     *
+     * Which means the flash was never worth having in the first place: **a click does not need a pointer
+     * lock at all.** The lock exists so `movementX/Y` keep arriving past the edge of the screen during
+     * mouse-look, and a press-and-release with no movement is not mouse-look. Requesting it on the frame
+     * the button goes down bought a lock, a hide and an exit for every single right click on an NPC.
+     *
+     * So it waits for a real delta. The first few pixels of a genuine drag come from the UNLOCKED
+     * `movementX/Y`, which browsers deliver either way, so nothing about mouse-look changes -- it locks a
+     * frame later and from then on behaves exactly as before.
+     */
+    if (this.rig.look && this.lookTravel > Controls.LOCK_TRAVEL_PX) {
       if (!this.lockRequested && !document.pointerLockElement) {
         this.lockRequested = true;
         // Newer Chrome returns a promise here and older ones return undefined; an unhandled
         // rejection was reported as "a promise was rejected with a non-error" either way.
         Promise.resolve(this.element.requestPointerLock?.()).catch(() => undefined);
       }
-    } else {
+    } else if (!this.rig.look) {
       this.lockRequested = false;
     }
 
@@ -395,7 +485,33 @@ class Controls extends React.Component<IProp> {
       0,
     );
     const moving = forward !== 0 || strafe !== 0;
-    const speed = forward < 0 ? RUN_SPEED * RUN_BACK_RATIO : RUN_SPEED;
+    // THE SERVER'S SPEED, NOT THE CONSTANT -- and this is the owner's "не работают способности,
+    // которые связаны с передвижением ... дух стаи".
+    //
+    // `RUN_SPEED`'s own docstring says it is "the fallback until server speeds stream in"
+    // (`movement/constants.ts:22-25`), and NOTHING EVER STREAMED IT IN: the avatar moved at the
+    // compile-time 7.0 whatever the wire said. So every movement-speed effect in the game was
+    // inert on the player -- an Aspect-of-the-Pack style aura, a Sprint, a mount, a daze, a
+    // snare. Not refused, not mis-drawn: applied to a number nobody read.
+    //
+    // The wire half was already complete and correct, which is why this is one expression and not
+    // a feature: `MSG_MOVE_SET_RUN_SPEED` and `SMSG_FORCE_RUN_SPEED_CHANGE` are both decoded, the
+    // force form is ACKED with the server's own change counter (the server resends and eventually
+    // drops an unresponsive client otherwise), and `Unit#moveSpeed`'s setter validates the float
+    // against `TELEPORT_SPEED` before forwarding it into `speeds.run`
+    // (`network/game/object/player/movement.ts:339-341, 371-374`; `classes/unit.ts:592-617`).
+    // `speeds` starts as a spread of `DEFAULT_MOVE_SPEEDS`, so before any packet arrives this reads
+    // the same 7.0 it always did.
+    //
+    // BACKPEDAL TAKES THE WIRE'S OWN `runBack`, not `run * RUN_BACK_RATIO`. The ratio is vanilla's
+    // 4.5/7.0 and is only correct while both are at their defaults -- a buff that scales `run`
+    // leaves `runBack` alone on the wire, so deriving it would invent a backpedal speed the server
+    // is not simulating and desync the position it checks. The ratio stays as the fallback for a
+    // `runBack` that has not arrived.
+    const speeds = player.speeds;
+    const speed = forward < 0
+      ? (speeds.runBack > 0 ? speeds.runBack : RUN_SPEED * RUN_BACK_RATIO)
+      : (speeds.run > 0 ? speeds.run : RUN_SPEED);
 
     // 5. One movement frame. The claim is outdoor-only for now; see the note in Task 22.
     const claim = { wmoGroup: null };
@@ -442,6 +558,8 @@ class Controls extends React.Component<IProp> {
     beginSection('ctl.move');
     movementFrame(player.move, deps, {
       moving, dir, speed, wantJump: this.jumpPressed, jumpPressed: this.jumpPressed,
+      // The swim pair travels the same way the run speed does, and for the same reason.
+      swimSpeed: speeds.swim, swimBackSpeed: speeds.swimBack,
     }, delta, now);
     endSection('ctl.move');
     this.jumpPressed = false;

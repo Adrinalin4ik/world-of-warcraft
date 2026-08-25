@@ -38,6 +38,10 @@
  */
 import type Unit from '../../../../game/classes/unit';
 import { ObjectType, PlayerField, UnitField } from '../enums';
+import { mergeCharacterStats } from './character-stats';
+import { mergePlayerSkills } from './player-skills';
+import { mergeQuestLog } from './quest-log';
+import { mergeExploredZones } from './explored-zones';
 
 /** What one values block said about a unit. Every field optional -- see the header. */
 export interface UnitFieldUpdate {
@@ -177,6 +181,8 @@ export interface UnitFieldUpdate {
    * block beside it. Named by `Spell.dbc` 48165's own legend as `$bh` -- "healing: ${$bh}".
    */
   healingDone?: number;
+  /** `player_character_points1` -- talent points. See the read in `readUnitFields`. */
+  talentPoints?: number;
 }
 
 /**
@@ -327,6 +333,10 @@ export function readUnitFields(values: Record<string, number>): UnitFieldUpdate 
   out.rangedAttackPowerMultiplier = f32('unit_field_ranged_attack_power_multiplier');
   out.baseAttackTimeMs = u32('unit_field_baseattacktime');
   out.healingDone = i32('player_field_mod_healing_done_pos');
+  // TALENT POINTS -- `player_character_points1` (`enums.ts:441`), which is what
+  // `UnitCharacterPoints("player")` answers and `SkillFrame_UpdateSkills` destructures
+  // (`skillframe.lua:436`). A scalar, so it belongs in `fields` rather than beside them.
+  out.talentPoints = u32('player_character_points1');
 
   return out;
 }
@@ -462,6 +472,48 @@ export function applyUnitFields(
   set('rangedAttackPowerMultiplier', fields.rangedAttackPowerMultiplier);
   set('baseAttackTimeMs', fields.baseAttackTimeMs);
   set('healingDone', fields.healingDone);
+  set('talentPoints', fields.talentPoints);
+
+  // THE CHARACTER SHEET'S STAT BLOCK -- stats, resistances, the damage range, the percentages, the 25
+  // combat ratings. Merged rather than replaced, because an update mask is sparse and one point of
+  // agility moves one word; see `character-stats.ts` on why that differs from `readSpellDamage` below.
+  // `values` is the same map this function was handed and otherwise discards.
+  changed = mergeCharacterStats(unit.characterStats, values, type) || changed;
+  // THE SKILLS BLOCK -- 128 triples, merged per slot for the same sparse-mask reason. Player-scope, so
+  // `mergePlayerSkills` returns immediately for a creature. See `player-skills.ts`.
+  changed = mergePlayerSkills(unit.skills, values, type) || changed;
+  // THE QUEST LOG'S SLOTS -- 25 five-word slots, merged per slot for the same sparse-mask reason.
+  // Player-scope, so `mergeQuestLog` returns immediately for a creature. `quest-log.ts`' header is
+  // where the "packets versus descriptor" question is answered: this block is the log's membership and
+  // its objective counters, and the abandon confirmation is a slot going to zero here.
+  //
+  // **ITS RETURN IS OR-ED INTO `changed`, AND DISCARDING IT WAS THE WHOLE OF "Quests: 1/25 with no
+  // rows".**
+  //
+  // `changed` is what `update-object/handler.ts:267,381` gates `world.emit('unit:fields', unit)` on,
+  // and only the `set(...)` calls above -- the NAMED SCALARS -- were feeding it. Accepting a quest
+  // writes ONLY `PLAYER_QUEST_LOG_*` words, so the map below was filled, `changed` stayed false, the
+  // event never fired, and every consumer that rebuilds on that edge kept its previous answer. The
+  // quest log's header reads `world.player.questLog.size` LIVE and said 1; its list reads an array
+  // rebuilt only on the event and stayed empty; the objectives tracker reads the same array. Three
+  // symptoms, one dropped boolean.
+  //
+  // **This is also why a headless harness could not have caught it.** The harness is a VM plus a widget
+  // tree: no World, no descriptor, no bridges. It validates the client's Lua and our layout, which is
+  // exactly where the fixes that DID land live -- and it cannot see a data path at all.
+  //
+  // ALL THREE block merges now report a change, and the other two were the same defect waiting. They
+  // returned their containers -- truthy, so read as a flag they would say "always changed", and
+  // discarded they said "never" -- and a lone skill-point tick or a lone stat change writes only its own
+  // words, so neither fired an event. Fixed in `character-stats.ts` and `player-skills.ts`, and the flag
+  // each returns is a real comparison against the stored value rather than "a word arrived": a create
+  // block resends every stat a character has, so gating on arrival would fire on every create.
+  changed = mergeQuestLog(unit.questLog, values, type) || changed;
+
+  // EXPLORATION, on the same contract and for the same reason: walking into a new subzone writes
+  // one word of `PLAYER_EXPLORED_ZONES_1` and nothing else, so a discarded return would leave the
+  // world map with a patch it never learns to draw. `explored-zones.ts` derives the 128 words.
+  changed = mergeExploredZones(unit.exploredZones, values, type) || changed;
 
   // SPELL POWER is seven numbers and lives beside `fields`, not in it -- see `SPELL_SCHOOL_COUNT`.
   const spellDamage = readSpellDamage(values);

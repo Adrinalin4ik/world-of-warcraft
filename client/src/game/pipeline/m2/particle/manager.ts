@@ -247,7 +247,12 @@ export class ParticleManager {
       // timestamp among the emitter's own animated inputs. Driving this from the mixer's real time,
       // wrapped to the clip duration, is Phase 2c.
       entry.emitter.step(dt, entry.emitter.advance(dt));
-      entry.batch.pack(entry.emitter.pool, entry.definition, entry.instance.matrixWorld);
+      // `particleSizeScale` is an optional per-instance knob -- see `ParticleBatch#pack`. Absent on
+      // every model but the ones that ask for it, so this is one property read.
+      entry.batch.pack(
+        entry.emitter.pool, entry.definition, entry.instance.matrixWorld,
+        entry.instance.particleSizeScale ?? 1,
+      );
     }
   }
 

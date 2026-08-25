@@ -40,12 +40,36 @@ import { screenScale, viewportUnits } from './layout';
 import { GlueRenderer } from './renderer';
 import { resolveSprite } from './sprite';
 import { FontStringTextures, layoutScale, loadGlueFonts, measureText, wrapLines } from './text';
-import { DrawItem, WidgetRoot, effectiveFont } from './widget';
+import { DrawItem, WidgetRoot, effectiveFont, markGeometryFrame } from './widget';
 import { attachActionBridge } from './action-bridge';
 import { attachSpellbookBridge } from './spellbook-bridge';
 import { attachContainerBridge } from './container-bridge';
+import { attachPaperDollStats } from './paperdoll-stats';
+import { attachSkillsBridge } from './skills-bridge';
+import { attachReputationBridge } from './reputation-bridge';
 import { attachLootBridge } from './loot-bridge';
-import { publishRects, clearRects } from './rects';
+import { attachMapBridge, MapBridge } from './map-bridge';
+import { attachMinimapTerrain, MinimapTerrainHost } from './minimap-terrain';
+import { questBlobs } from './quest-blobs';
+import { setPointerSource } from './pointer';
+import { attachGossipBridge } from './gossip-bridge';
+import { attachInteractionWatch } from './interaction-watch';
+import { attachMerchantBridge } from './merchant-bridge';
+import { attachQuestBridge } from './quest-bridge';
+import { attachLevelUpBridge } from './level-up-bridge';
+import { attachAuraBridge } from './aura-bridge';
+import { attachTrainerBridge } from './trainer-bridge';
+import { attachGroupBridge } from './group-bridge';
+import { attachChatBridge } from './chat-bridge';
+import {
+  publishRects, clearRects, setRectResolver, setVisibleRectResolver, rectStats, layoutRectOf,
+} from './rects';
+import { eventListeners, fireEvent } from './framexml/lua/events';
+import { getScriptHandler } from './framexml/lua/scripts';
+import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
+import { createQuadMaterial } from './material';
+import { ModelBooth } from './scene/model-booth';
+import { resolveUnitToken } from '../world/unit-tokens';
 import { publishArtSink, clearArtSink } from './runtime-art';
 import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
 import { attachTargetBridge } from './target-bridge';
@@ -55,6 +79,7 @@ import { cvarBool } from './framexml/lua/api/screen';
 import { gameTime } from './framexml/lua/compat';
 import type World from '../world';
 import type { WorldRuntime } from './framexml/world-runtime';
+import type { BoothSubject } from './scene/model-booth';
 
 /** The offscreen target's clear colour. Fully transparent, so only what the UI draws is composited. */
 const TRANSPARENT = new THREE.Color(0, 0, 0);
@@ -165,6 +190,13 @@ export class WorldUiHost {
   private readonly ui: GlueRenderer;
   private readonly input: GlueInput;
   private readonly art = new GlueArt();
+
+  /**
+   * THE MODEL BOOTH -- what draws a `<PlayerModel>` pane's figure. See `scene/model-booth.ts` for how
+   * a model reaches a texture and for the redraw policy; the host's whole part is the call in `render`
+   * and the boolean it answers.
+   */
+  private readonly booth: ModelBooth;
   private readonly fonts = new FontStringTextures();
   private readonly root = new WidgetRoot();
   /**
@@ -211,14 +243,66 @@ export class WorldUiHost {
   /** `attachTargetBridge`'s teardown, held so `dispose` can run it. */
   private detachTargets: (() => void) | null = null;
 
+
   /** `attachSpellbookBridge`'s teardown, held so `dispose` can run it. */
   private detachSpellbook: (() => void) | null = null;
 
   /** `attachContainerBridge`'s teardown, held so `dispose` can run it. */
   private detachContainers: (() => void) | null = null;
 
+  /** `attachPaperDollStats`' teardown, held so `dispose` can run it. */
+  private detachStats: (() => void) | null = null;
+
+  /** `attachSkillsBridge`'s teardown, held so `dispose` can run it. */
+  private detachSkills: (() => void) | null = null;
+
+  /** `attachReputationBridge`'s teardown, held so `dispose` can run it. */
+  private detachReputation: (() => void) | null = null;
+
+  /** `attachMapBridge`'s teardown, held for the same reason as the loot bridge's below. */
+  private mapBridge: MapBridge | null = null;
+
+  /** The minimap's terrain and player arrow -- attached after the manifest, unlike the bridge above. */
+  private minimapTerrain: MinimapTerrainHost | null = null;
+
+  /** Set by the minimap tick; forces the offscreen re-render. See the tick call and `boothBaked`. */
+  private minimapRepainted = false;
+
   /** `attachLootBridge`'s teardown, held so `dispose` can run it. */
   private detachLoot: (() => void) | null = null;
+
+  /** `attachGossipBridge`'s teardown, held so `dispose` can run it. */
+  private detachGossip: (() => void) | null = null;
+
+  /** `attachMerchantBridge`'s teardown, held so `dispose` can run it. */
+  private detachMerchant: (() => void) | null = null;
+
+  /** `attachQuestBridge`'s teardown, held so `dispose` can run it. */
+  private detachQuest: (() => void) | null = null;
+
+  /** `attachAuraBridge`'s teardown, held so `dispose` can run it. */
+  private detachAuras: (() => void) | null = null;
+
+  /** `attachLevelUpBridge`'s teardown, held so `dispose` can run it. */
+  private detachLevelUp: (() => void) | null = null;
+
+  /** `attachTrainerBridge`'s teardown, held so `dispose` can run it. */
+  private detachTrainer: (() => void) | null = null;
+
+  /**
+   * THE OPEN-INTERACTION WATCH -- what closes the vendor and the corpse when the player walks off.
+   *
+   * Held as a pair rather than a teardown alone because it is the only bridge with a POLL: nothing
+   * else in the interface has to notice the world moving. See `ui/interaction-watch.ts` on why the
+   * engine owns this (neither the server nor the documents do) and why 250 ms.
+   */
+  private interactionWatch: { poll: (nowMs: number) => void; dispose: () => void } | null = null;
+
+  /** `attachGroupBridge`'s teardown, held so `dispose` can run it. */
+  private detachGroup: (() => void) | null = null;
+
+  /** `attachChatBridge`'s teardown, held so `dispose` can run it. */
+  private detachChat: (() => void) | null = null;
 
   /**
    * THE DRAW INSTRUMENT, on `window.uiDrawStats`.
@@ -246,10 +330,16 @@ export class WorldUiHost {
     fullDrawMs: 0,
     sweeps: 0,
     sweepMs: 0,
+    /** `paneBakes` vs `dirtyFrames`: what the model panes cost, and whether they cost a dirty frame. */
+    paneBakes: 0,
+    paneMs: 0,
+    paneMsTotal: 0,
     reset(): void {
       this.frames = 0;
       this.dirtyFrames = 0;
       this.signatureMsTotal = 0;
+      this.paneBakes = 0;
+      this.paneMsTotal = 0;
     },
   };
 
@@ -265,6 +355,7 @@ export class WorldUiHost {
     // `renderer.ts#GlueRenderer.premultiplied` and `composite` below.
     this.ui = new GlueRenderer(renderer, true);
     this.input = new GlueInput(canvas);
+    this.booth = new ModelBooth(renderer);
     this.sections = sections ?? { begin: () => undefined, end: () => undefined };
   }
 
@@ -403,6 +494,29 @@ export class WorldUiHost {
     if (this.stopped) {
       return;
     }
+    /**
+     * THE RECT RESOLVER, INSTALLED BEFORE THE MANIFEST RUNS -- not on the first drawn frame.
+     *
+     * The client lays frames out during their own `OnLoad`, long before anything is rendered:
+     * `FCF_UpdateButtonSide` does `GetScreenWidth() - chatFrame:GetRight()`
+     * (`floatingchatframe.lua:1281`) from a chat frame's load path (`:167`). `rectOf` used to return null
+     * whenever no draw list had been published, so every such query answered nil and that line was
+     * arithmetic on nil -- which killed six of the seven chat windows.
+     *
+     * The viewport is read at CALL time, not captured here, so a resize before the first render still
+     * resolves against the real screen.
+     */
+    setRectResolver(() => this.root.layoutRects(
+      { width: window.innerWidth, height: window.innerHeight },
+      measureText,
+    ));
+    // THE PRUNED resolver, which is what every per-frame query answers from. See `rects.ts#layoutRectOf`
+    // for why there are two and what still reaches the full one.
+    setVisibleRectResolver(() => this.root.layoutRects(
+      { width: window.innerWidth, height: window.innerHeight },
+      measureText,
+      true,
+    ));
     const runtime = await bootWorldRuntime({
       root: this.root.root,
       art: this.art,
@@ -411,7 +525,38 @@ export class WorldUiHost {
       // their `OnLoad` and one of them (`MainMenuExpBar`) hides itself for good on a zero. See
       // `unit-bridge.ts#seedUnitSnapshots`. Snapshots only -- the events still come from the bridges
       // below, which need the tree to exist.
-      seed: this.world ? (vm) => seedUnitSnapshots(vm, this.world as World) : undefined,
+      /**
+       * THE PLAYER'S SNAPSHOT **and the map's globals**, both before the manifest runs.
+       *
+       * Several documents read unit state in their `OnLoad` and one of them (`MainMenuExpBar`) hides
+       * itself for good on a zero -- see `unit-bridge.ts#seedUnitSnapshots`.
+       *
+       * **THE MAP BRIDGE IS HERE FOR A SHARPER VERSION OF THE SAME REASON, and it was attached below
+       * with the others until the owner's log proved that wrong.** This was nil at load:
+       *
+       *     Minimap.xml:MinimapCluster: OnLoad: Minimap.lua:29:
+       *         attempt to call a nil value (global 'GetMinimapZoneText')
+       *
+       * `GetMinimapZoneText` had been registered and working for a round. It read nil because
+       * `MinimapCluster:OnLoad` is `Minimap_Update()` and that runs during the manifest, while every
+       * bridge below attaches AFTER it -- so the minimap label was never a missing global at all. It
+       * was a global that arrived after its only caller had already raised, and that one raise took the
+       * rest of `MinimapCluster:OnLoad` with it.
+       *
+       * So the rule this seam encodes: **a global the client calls from an `OnLoad` must be registered
+       * before the manifest, not after it.** The map bridge needs only the VM and the world, so it can
+       * be; the bridges below need the frame tree and cannot.
+       */
+      seed: this.world ? (vm, ctx) => {
+        seedUnitSnapshots(vm, this.world as World);
+        // ONCE, and the guard is not defensive: `bootWorldRuntime` calls `seed` a SECOND time after
+        // the manifest, to refresh the unit snapshot against DBC tables that landed meanwhile. A
+        // second `attachMapBridge` would leave the first one polling with nothing to dispose it, and
+        // would ask for a second `PlayerArrowEffectFrame` whose name the first already owns.
+        if (this.mapBridge === null) {
+          this.mapBridge = attachMapBridge(vm, this.world as World, ctx);
+        }
+      } : undefined,
       // THE LOADING SCREEN'S BAR. A real fraction of the manifest, not a timer: see
       // `ui/loading-screen.ts` and `world-runtime.ts`'s yield for why it is only called at a yield.
       onProgress: (done, total) => this.onLoadProgress?.(done / total),
@@ -522,6 +667,97 @@ export class WorldUiHost {
         // read the same `ItemHandler` template cache -- `attachContainerBridge` is the one that first
         // asks `itemData` to load, and `ensureLoaded` is idempotent so this rides that promise.
         this.detachLoot = attachLootBridge(runtime.vm, this.world, this.art);
+        // THE MINIMAP'S TERRAIN AND PLAYER ARROW. The map bridge's globals are seeded above, before the
+        // manifest; the DRAWING has to be here instead, because it creates regions on a `Minimap` frame
+        // that does not exist until the manifest has built it. See `minimap-terrain.ts` on the split.
+        // The pointer, so the minimap can put a tooltip on a blip. The ROUTER owns both halves --
+        // which widget is hovered and where inside it -- and this host is where they meet the
+        // minimap. See `minimap-terrain.ts#updateTooltip`.
+        this.minimapTerrain = attachMinimapTerrain(
+          runtime.ctx,
+          this.art,
+          this.world,
+          () => ({ position: this.input.pointerPosition }),
+        );
+        // The blob raster needs a `GlueArt` and nothing else; the polygons reach it from
+        // `ui/map-bridge.ts`' sink and the draw call from the client's own widget method.
+        questBlobs.attach(this.art);
+        // The pointer, for the object model's cursor anchors -- `GameTooltip:SetOwner(owner,
+        // "ANCHOR_CURSOR")` and the two side variants. Installed here because this is where the
+        // router lives; released in `dispose` so a disposed host cannot be read through.
+        setPointerSource(() => this.input.pointerPosition);
+        // TALKING TO AN NPC, then BUYING AND SELLING. Gated on a real session for the reason the item
+        // bridges are: a vendor's stock and a gossip menu are both packets, so an offline world has
+        // neither and `world.game.objectHandler` must not be touched on that route.
+        //
+        // **THE MERCHANT BRIDGE MUST BE LAST OF THE THREE ITEM BRIDGES, and the order is load-bearing
+        // rather than tidy.** All three install `setItemTooltipSource`, and each CHAINS onto what it
+        // replaces: the container bridge owns `bag`/`inventory`/`link`, the loot bridge adds `loot`,
+        // and this one adds `merchant`/`buyback`. Attaching it earlier would put it under the loot
+        // bridge's install and every merchant tooltip would fall through to a source that does not
+        // know the kind.
+        this.detachGossip = attachGossipBridge(runtime.vm, this.world, this.art);
+        this.detachMerchant = attachMerchantBridge(runtime.vm, this.world, this.art);
+        // QUESTS. **AFTER the gossip bridge, and the order is load-bearing rather than tidy.**
+        // `gossip-bridge.ts` registers `SelectGossipAvailableQuest`/`SelectGossipActiveQuest` as
+        // declared gaps -- "no quest frame is decoded" -- and `quest-bridge.ts` registers the working
+        // versions under the same names. A later `registerFunction` wins, so attaching this first would
+        // put the stubs back on top and a quest row in a gossip menu would warn and do nothing. That
+        // also keeps `gossip-bridge.ts` owned by the merchant path: nothing in it had to change.
+        //
+        // Gated on a real session for the reason the item bridges are: every quest panel, the template
+        // cache and the log's descriptor slots are all packets, so an offline world has no quest to
+        // show and `world.game.objectHandler` must not be touched on that route.
+        this.detachQuest = attachQuestBridge(runtime.vm, this.world, this.art);
+        // THE LEVEL-UP. `SMSG_LEVELUP_INFO` and the burst on the character; see `level-up-bridge.ts`
+        // for why there is no frame to draw on 3.3.5a.
+        this.detachLevelUp = attachLevelUpBridge(runtime.vm, this.world);
+        // THE CLASS TRAINER. **LAST of the tooltip-source chain, and for the reason stated just above
+        // for the merchant**: it adds the `trainer` kind on top of `bag`/`inventory`/`link`/`loot`/
+        // `merchant`/`buyback`, so attaching it earlier would put it under the merchant bridge's
+        // install and every trainer tooltip would fall through to a source that does not know the kind.
+        //
+        // Gated on a real session like its neighbours: a trainer's service list is a packet
+        // (`SMSG_TRAINER_LIST`), so an offline world has none and `world.game.objectHandler` must not
+        // be touched on that route.
+        this.detachTrainer = attachTrainerBridge(runtime.vm, this.world, this.art);
+        // WALK AWAY AND THE WINDOW SHUTS -- the vendor's and the corpse's, one mechanism. Attached
+        // after both bridges because it drives their handlers, and gated on a real session like they
+        // are: an offline world has neither a vendor nor a corpse to walk away from.
+        this.interactionWatch = attachInteractionWatch(this.world);
+        // THE CHARACTER SHEET'S STAT PANES. Gated on a real session like the three above: every number
+        // it answers is a descriptor word off our own character, and an offline world has no descriptor.
+        // AFTER them for no reason but readability -- it subscribes to `world.on('unit:fields')` and
+        // shares nothing with the item bridges.
+        this.detachStats = attachPaperDollStats(runtime.vm, this.world);
+        // THE SKILLS TAB. Gated on a real session for the same reason: every row comes off our own
+        // character's descriptor, and an offline world has none. Its DBC join is `skillData`, which the
+        // spellbook already asks for, so this adds no fetch.
+        this.detachSkills = attachSkillsBridge(runtime.vm, this.world);
+        // THE REPUTATION TAB. Gated on a real session for the same reason as the skills tab: every
+        // standing comes from `SMSG_INITIALIZE_FACTIONS`, and an offline world receives none -- with no
+        // packet the pane shows an empty list, which is what it showed before this existed. Its DBC
+        // join (`faction-data.ts`) is kicked by the bridge itself and is a table nothing else fetches.
+        this.detachReputation = attachReputationBridge(runtime.vm, this.world);
+        // THE UNIT RIGHT-CLICK MENUS -- groups, duels, dungeon difficulty, instance reset. Gated on a
+        // real session like the rest: every answer is a packet, and an offline world has no roster, no
+        // duel and no instance to reset. AFTER the spellbook bridge, because `StartDuel` finds the duel
+        // spell in the player's own book by its `Effect[0]` and that bridge is the one that OWNS the
+        // `Spell.dbc` fetch -- `ensureLoaded` is idempotent, so this rides the same promise rather than
+        // starting a second one.
+        this.detachGroup = attachGroupBridge(runtime.vm, this.world);
+        // CHAT. Gated on a real session like the rest: every line is a packet, and an offline world has
+        // no server to have said anything. AFTER the group bridge for no reason but readability -- they
+        // share nothing, though the duel and party lines this unblocks are the group bridge's.
+        this.detachChat = attachChatBridge(runtime.vm, this.world);
+        // BUFFS, DEBUFFS AND THE STANCE BAR. Gated on a real session like the rest: every aura arrives
+        // as `SMSG_AURA_UPDATE`, and an offline world sends none -- with no packet the buff row is empty,
+        // which is what it was before this existed. AFTER the action bridge, and that ordering is not
+        // cosmetic: the action bridge OWNS the 49 MB `Spell.dbc` fetch and starting a second one would
+        // starve the manifest (see its own header). `ensureLoaded` is idempotent, so this rides the same
+        // promise. It takes `this.art` because a buff icon is a BLP that has to be registered before
+        // `icon:SetTexture(path)` names it.
+        this.detachAuras = attachAuraBridge(runtime.vm, this.world, this.art);
       }
     }
     // THE RUNTIME ART SINK, before the load report and before anything can script a texture. See
@@ -538,6 +774,10 @@ export class WorldUiHost {
     // registered and the BLP failed to fetch. `worldUiArt.def(path)` and `worldUiArt.texture(path)`
     // answer the second and third directly. This is how the empty action bar was found.
     (window as never as Record<string, unknown>).worldUiArt = this.art;
+    // THE MODEL BOOTH, as a handle, for exactly the reason `worldUiArt` is one: "the figure in the pane
+    // is wrong" has several indistinguishable causes and the pane's scene is not the world scene, so
+    // nothing else a probe can traverse reaches the model it is drawing. `worldUiBooth.debug()`.
+    (window as never as Record<string, unknown>).worldUiBooth = this.booth;
     // The draw instrument -- see `drawStats` for what each number answers.
     (window as never as Record<string, unknown>).uiDrawStats = this.drawStats;
     /**
@@ -552,12 +792,133 @@ export class WorldUiHost {
      */
     (window as never as Record<string, unknown>).worldUiInput = this.input;
     /**
+     * `window.uiRectStats` -- how many whole-tree rect resolves the on-demand fallback has done and how
+     * long they took. The fallback is not free and the tree grows under it during the load, so this is
+     * the number that says whether it costs anything worth caring about.
+     */
+    (window as never as Record<string, unknown>).uiRectStats = rectStats;
+    /**
      * THE OVERFLOW INSTRUMENT -- `uiTextExtent('VideoOptionsResolutionPanelSubText')`. See `textExtent`
      * for why a crop cannot answer this and why it borrows the draw pass's own calls rather than
      * re-deriving them.
      */
     (window as never as Record<string, unknown>).uiTextExtent = (name: string) =>
       this.textExtent(name);
+
+    /**
+     * `window.uiRegion('WorldMapDetailTile')` -- every draw-relevant fact about a named widget, or
+     * about every widget whose name starts with a prefix.
+     *
+     * **BUILT BECAUSE "IT IS BLANK" HAS SIX CAUSES AND NO SCREENSHOT SEPARATES THEM.** The world map
+     * opened black after a close, with every asset verified present on the host and every global
+     * answering, and the remaining candidates were: the Lua never set a sprite; it set one that was
+     * never registered; it registered one that never fetched; the widget is hidden; an ancestor is
+     * hidden; the alpha is 0; or the rect is empty. Six guesses is what this project calls a diagnosis
+     * it has not made, and `worldUiArt` answers only two of them.
+     *
+     * A PREFIX is accepted because the interesting cases are families: twelve `WorldMapDetailTile`s and
+     * fourteen `WorldMapFrameTexture`s either all failed the same way or one of them differs, and that
+     * distinction is the answer. Capped so a prefix of one letter cannot print the whole 4,000-widget
+     * tree into a console.
+     *
+     * `visible` walks the ancestors and `shown` does not, which is the pair that separates "this widget
+     * is hidden" from "its panel is". `spriteRegistered`/`spriteFetched` are `worldUiArt`'s two halves,
+     * asked here so one call answers everything rather than three.
+     */
+    /**
+     * `window.uiEventListeners('WORLD_MAP_UPDATE')` -- which frames are registered, by name.
+     *
+     * "The event fires and nothing happens" has two halves and no console line separates them: either
+     * no frame is listening, or one is and its handler declined. `fireEvent` returns early on an empty
+     * list and says nothing, which is right for the runtime and useless for a diagnosis.
+     *
+     * The world map has been sitting on exactly that question for two rounds. Calling
+     * `WorldMapFrame_UpdateMap()` by hand DOES lay the frame out, so the function is fine and the
+     * delivery is not -- and this is the half of the delivery a probe can answer without guessing.
+     */
+    /**
+     * `window.uiFireEvent('WORLD_MAP_UPDATE')` -- deliver an event by hand, from outside any handler.
+     *
+     * The LAST bit the world-map question needs, and it separates delivery from timing. Every static
+     * link in that chain has now been read and is correct: the frame is registered
+     * (`uiEventListeners` says so), the handler exists, the selection is right, and calling
+     * `WorldMapFrame_UpdateMap()` by hand works. What no reading can distinguish is whether the event
+     * fails to ARRIVE, or arrives at a moment when the handler's own guard turns it down -- and it is
+     * fired from inside `OnShow`, which is exactly where such a guard could differ.
+     *
+     * Firing it from the console is that comparison: same event, same frame, same handler, but from a
+     * quiet moment instead of mid-`OnShow`. If the tile changes here and not there, the guard is the
+     * answer; if it changes in neither, the delivery is.
+     */
+    (window as never as Record<string, unknown>).uiFireEvent = (eventName: string, ...args: unknown[]) => {
+      const runtime = this.runtime;
+      if (runtime === null) {
+        return 'the runtime is not up';
+      }
+      const listeners = eventListeners(eventName).length;
+      fireEvent(runtime.vm, eventName, args);
+      return { eventName, listeners };
+    };
+
+    (window as never as Record<string, unknown>).uiEventListeners = (eventName: string) => {
+      const runtime = this.runtime;
+      if (runtime === null) {
+        return 'the runtime is not up';
+      }
+      // `hasHandler` IS THE HANDLER, and it did not used to be: this field was
+      // `registry.widget(id) !== null`, i.e. "the widget exists" -- under a name that promised
+      // something else. It read `true` for `WorldMapFrame` and I took that as the OnEvent script
+      // being bound, which is exactly the "distrust the instrument" trap: a probe whose field name
+      // does not match its expression is worse than no probe, because it eliminates a cause that was
+      // never actually checked. `getScriptHandler` is what `invokeScriptHandler` itself looks up, so
+      // this now asks the same question the dispatch does.
+      return eventListeners(eventName).map((id) => ({
+        id,
+        name: runtime.registry.nameOf(id),
+        hasOnEvent: getScriptHandler(runtime.vm, id, 'OnEvent') !== null,
+        widgetAlive: runtime.registry.widget(id) !== null,
+      }));
+    };
+
+    (window as never as Record<string, unknown>).uiRegion = (query: string, cap = 20) => {
+      const runtime = this.runtime;
+      if (runtime === null) {
+        return 'the runtime is not up';
+      }
+      const exact = runtime.registry.byName(query);
+      const ids = exact !== null
+        ? [exact]
+        : runtime.registry.namesStartingWith(query, cap).map((found) => found.id);
+      if (ids.length === 0) {
+        return `no frame named or prefixed '${query}'`;
+      }
+      return ids.map((id) => {
+        const widget = runtime.registry.widget(id);
+        if (widget === null) {
+          return { name: runtime.registry.nameOf(id), state: 'no widget' };
+        }
+        const sprite = widget.sprite;
+        const rect = layoutRectOf(widget.id);
+        const parentId = runtime.registry.parentOf(id);
+        return {
+          name: runtime.registry.nameOf(id),
+          kind: widget.kind,
+          parent: parentId === null ? null : runtime.registry.nameOf(parentId),
+          shown: widget.shown,
+          visible: widget.visible,
+          alpha: widget.alpha,
+          layer: widget.layer,
+          sprite,
+          spriteRegistered: sprite === null ? false : this.art.def(sprite) !== undefined,
+          spriteFetched: sprite === null ? false : this.art.texture(sprite) !== undefined,
+          anchors: widget.anchors.length,
+          rect: rect === null ? null : {
+            left: Math.round(rect.left), top: Math.round(rect.top),
+            width: Math.round(rect.width), height: Math.round(rect.height),
+          },
+        };
+      });
+    };
   }
 
   /**
@@ -572,6 +933,29 @@ export class WorldUiHost {
     }
     this.sections.begin('ui.tick');
     this.runtime.update(dt);
+    // THE OPEN-INTERACTION POLL, inside the tick section it belongs to. Self-throttled to 250 ms and
+    // a pair of null checks when nothing is open, so on the overwhelming majority of frames this is
+    // one comparison against a deadline. `performance.now()` rather than accumulating `dt`: a poll
+    // measured in frames would fire eight times as often on a fast machine.
+    this.interactionWatch?.poll(performance.now());
+    // THE ZONE EDGE, beside the interaction watch and for the same reason: there is nothing to push
+    // from. See `map-bridge.ts` -- the client refreshes its minimap label only on `ZONE_CHANGED*`, and
+    // this engine is what has to say one happened. Two divisions and a compare.
+    this.mapBridge?.poll();
+    // THE MINIMAP'S PICTURE, beside the zone edge. Both gates are quantised, so a standing player
+    // pays four numeric compares and a `visible` walk -- see `minimap-terrain.ts` on the cost.
+    //
+    // **THE RETURN IS LOAD-BEARING AND MUST NOT BE DISCARDED.** These two canvases change their
+    // CONTENTS without changing the draw list, so the fingerprint below cannot see them and the
+    // offscreen target is not re-rendered -- which is why the owner saw the arrow turn only when
+    // something else happened to dirty the interface. `boothBaked` is the same signal for the same
+    // reason, and this project has twice been bitten by a discarded return hiding exactly this kind
+    // of defect.
+    // OR, not a second flag: both are "a canvas this interface draws changed its contents", which the
+    // draw-list fingerprint cannot see. See `quest-blobs.ts#takeRepainted`. `takeRepainted` CLEARS,
+    // so it must be called every frame and before the short-circuit -- hence the explicit local.
+    const blobRepainted = questBlobs.takeRepainted();
+    this.minimapRepainted = (this.minimapTerrain?.tick() ?? false) || blobRepainted;
     this.sections.end('ui.tick');
 
     const viewport = { width: window.innerWidth, height: window.innerHeight };
@@ -581,7 +965,9 @@ export class WorldUiHost {
     this.sections.begin('ui.layout');
     const items = this.root.drawList(viewport, measureText);
     this.sections.end('ui.layout');
+    this.sections.begin('ui.hit');
     this.input.setDrawList(items);
+    this.sections.end('ui.hit');
     // THE LAST DRAW LIST, as a console handle. The router hit-tests this exact array, so it is the only
     // authoritative answer to "is that widget on screen, and where" -- a screenshot cannot say whether a
     // quad is missing or merely transparent, and `registry.widget(id)` has no rect (the layout pass
@@ -593,19 +979,99 @@ export class WorldUiHost {
     // array the router hit-tests, so a rect a script reads and a rect a click lands in cannot
     // disagree. One reference assignment; the id map is built lazily on first lookup. See
     // `ui/rects.ts` for why nothing else in this client could answer where a widget ended up.
+    // The third argument is the ON-DEMAND resolver, for a script that measures a frame in the same tick
+    // it shows it -- `ToggleDropDownMenu`'s `Show()` then `GetCenter()`. A closure, not a precomputed
+    // map: it runs only if `rectOf` misses, which for every existing caller is never.
+    // The resolver is installed once at boot (see `setRectResolver` above), not per frame -- it has to
+    // outlive the gap before the first draw, which is exactly where the chat frames were failing.
+    /**
+     * SPANNED, because the arithmetic now says the cost is HERE -- between the rows rather than in one.
+     *
+     * The measurements so far, each one killing a hypothesis of mine: events 423 ms for a whole SESSION
+     * against a per-frame 39.3; the button walk 0.12 ms per frame; the model booth **0.0 ms**. And the
+     * owner's panel adds up: `ui.tick` 2.4 + `ui.layout` 0.4 + `ui.draw` 0.4 (which nests `ui.booth` and
+     * `ui.sig`) is 3.2 ms of a 39.3 ms `ui.framexml`. So roughly 36 ms of the pass sits in code that no
+     * section covers, and this region -- `setDrawList`, `publishRects`, `reconcileScrollRanges` -- is all
+     * of it.
+     *
+     * NO FAVOURITE NAMED THIS TIME. Three guesses have been wrong; both of these get their own row and
+     * the numbers can say which, or say neither and push the search to the pass's own boundaries.
+     */
+    this.sections.begin('ui.rects');
     publishRects(items, viewportUnits(viewport).height);
+    this.sections.end('ui.rects');
+    /**
+     * THE SCROLL RANGES, announced from our layout pass because that is where the engine announces them.
+     *
+     * `ScrollFrame_OnScrollRangeChanged` is the only thing that gives a scrollbar its min/max
+     * (`uipaneltemplates.lua:275-285`), and nothing fired it -- so every real scroll frame had a 0..0
+     * range and its arrows, drag and thumb were all dead. AFTER `publishRects`, because the range is
+     * measured from resolved rects.
+     *
+     * **ITS COST NOTE USED TO SAY "on a frame where nothing moved this is one integer comparison for the
+     * whole client", AND THAT PREMISE WAS FALSE.** It is gated on `layoutRevision()`, and the revision
+     * evidently moves on nearly every frame in the world -- so the gate almost never held and the pass
+     * ran in full. It measured **40.4 ms of a 43.5 ms `ui.framexml`** on the owner's build: two full
+     * subtree traversals per registered scroll frame, hidden panels included. Fixed in
+     * `methods/scroll.ts` (one traversal, on-screen frames only); the note is corrected here because a
+     * comment asserting a cost that was never verified is what kept this invisible through four rounds of
+     * looking somewhere else.
+     */
+    // The geometry census's frame boundary -- see `widget.ts#markGeometryFrame`. Here because this is
+    // once per frame and immediately before the pass whose first `layoutRectOf` pays for the resolve.
+    markGeometryFrame();
+    this.sections.begin('ui.scroll');
+    if (this.runtime !== null) {
+      reconcileScrollRanges(this.runtime.ctx);
+    }
+    this.sections.end('ui.scroll');
     const scale = screenScale(viewport.height);
 
     this.sections.begin('ui.draw');
+    // THE MODEL PANES, BEFORE the fingerprint and before the full draw.
+    //
+    // Before the fingerprint because this is where a pane's `sprite` is set, and the fingerprint has to
+    // see it -- a pane appearing changes the interface exactly once, which is a change the signature
+    // SHOULD catch. Before the full draw because the pane's texture is drawn INTO the interface target,
+    // so a bake that happened after it would not be composited until the next dirty frame.
+    //
+    // NO VALVE IS HANDED DOWN. This used to pass `framesSinceFullDraw >= FULL_DRAW_EVERY` so a pane
+    // re-baked on the frames the interface was being fully re-rendered anyway -- free in dirty frames,
+    // but it made every portrait a one-frame-in-twelve animation of the Stand loop. The booth now bakes
+    // only on a real change; see `ModelBooth#render`. `boothBaked` still forces the full draw, because
+    // a bake changes pixels the fingerprint cannot see.
+    /**
+     * SPANNED AS ITS OWN ROW, and this is why: `ui.framexml` measured **35.6 ms** on the owner's build
+     * while `ui.tick` + `ui.layout` + `ui.draw` came to 2.4 -- so about 33 ms of the pass had no row at
+     * all, and the booth is the only large piece of it that was never given one. `paneMs` was already
+     * being computed here and going nowhere the panel could show.
+     *
+     * Two hypotheses have already been killed by their own instruments this round: events (the census
+     * came back 423 ms for a whole SESSION against a per-frame 35.6) and the button walk (the tick
+     * census came back 0.12 ms per frame against 42 buttons). Neither was the cost. So this row is not
+     * an accusation -- it is the last large unmeasured span, and if it also comes back small then the
+     * cost is between the rows and the next step is the pass's own boundaries.
+     */
+    this.sections.begin('ui.booth');
+    const paneStarted = performance.now();
+    const boothBaked = this.booth.render(items, this.art, (unit) => this.subjectForUnit(unit), {
+      scale,
+      pixelRatio: this.renderer.getPixelRatio(),
+    });
+    const paneMs = performance.now() - paneStarted;
+    this.sections.end('ui.booth');
     // Re-render the OFFSCREEN target only when the interface actually changed; composite it every
     // frame with one quad. See `signature` and `target` for the measurement that forced this.
+    this.sections.begin('ui.sig');
     const signatureStarted = performance.now();
     const signature = drawListSignature(items);
     const signatureMs = performance.now() - signatureStarted;
+    this.sections.end('ui.sig');
     const target = this.target();
     const dirty =
       target !== null &&
-      (signature !== this.lastSignature || this.framesSinceFullDraw >= FULL_DRAW_EVERY);
+      (signature !== this.lastSignature || boothBaked || this.minimapRepainted
+        || this.framesSinceFullDraw >= FULL_DRAW_EVERY);
     // THE INSTRUMENT, built before the sweep was drawn and deliberately not blinded by it: it counts the
     // full re-renders SEPARATELY from the sweep pass, so "the sweep dirties the fingerprint" is a
     // question this can answer rather than one the code has to be trusted about. `STATE.md` recorded the
@@ -617,6 +1083,11 @@ export class WorldUiHost {
     stats.items = items.length;
     stats.signatureMs = signatureMs;
     stats.signatureMsTotal += signatureMs;
+    stats.paneMs = paneMs;
+    stats.paneMsTotal += paneMs;
+    if (boothBaked) {
+      stats.paneBakes += 1;
+    }
     if (dirty) {
       stats.dirtyFrames += 1;
     }
@@ -650,6 +1121,51 @@ export class WorldUiHost {
     // THE DRAGGED ABILITY'S ICON, in the same after-the-composite pass and for exactly the same reason.
     this.drawCursorIcon(viewport);
     this.sections.end('ui.draw');
+  }
+
+  /**
+   * A `SetUnit`/`SetPortraitTexture` token to the BODY the booth should build, or null.
+   *
+   * The whole of the host's part in the model booth, and deliberately the narrowest thing that could
+   * work: the booth knows nothing about units and this knows nothing about rendering.
+   *
+   * WHICH TOKENS RESOLVE is `world/unit-tokens.ts`' business, not this method's, and that file states
+   * what it answers and what it declines. Today: `player`, `target`, `mouseover`, and `npc` -- the last
+   * from the guid the opening packet carried, which the gossip, merchant and trainer handlers each
+   * already keep as `source`. A token it cannot answer resolves to null and the pane draws nothing,
+   * which is why the booth's opaque portrait backdrop is gated on there being a figure rather than on
+   * the framing.
+   *
+   * A unit answers exactly one of the two supplies -- see `BoothSubject` -- and the KEY is what the
+   * booth compares. For a character it is the look object itself, because `resolveCharacterLook` builds
+   * a fresh one per redress and identity therefore means "this unit's gear changed". For a creature it
+   * is the display id, because `creatureDisplay` builds its descriptor on every read and comparing
+   * THAT by identity would re-bake the portrait on every frame.
+   */
+  private subjectForUnit(unit: string): BoothSubject | null {
+    const world = this.world;
+    if (world === null) {
+      return null;
+    }
+    // ONE PLACE resolves a token to an entity -- `world/unit-tokens.ts`. This used to be a ternary over
+    // `player` and `target`, which is why every NPC window's portrait was blank: the client asks for
+    // `"NPC"` (`merchantframe.lua:74`, `blizzard_trainerui.lua:75`, `gossipframe.lua`) and nothing
+    // answered. It is a module and not a third arm because the two sides need different things: the
+    // bridges push a `UnitSnapshot`, which carries NO GUID by design, while a portrait has to be baked
+    // from an entity's `characterLook` or `creatureDisplay`.
+    const target = resolveUnitToken(unit, world);
+    if (!target) {
+      return null;
+    }
+    const look = target.characterLook;
+    if (look !== null) {
+      return { key: look, look, creature: null };
+    }
+    const creature = target.creatureDisplay;
+    if (creature !== null) {
+      return { key: target.displayId, look: null, creature };
+    }
+    return null;
   }
 
   /**
@@ -699,9 +1215,12 @@ export class WorldUiHost {
       material.map = map;
       material.needsUpdate = true;
     }
-    // Centred on the pointer, which is where the real client holds a picked-up icon. NDC on the composite
-    // camera, the same two lines `drawSweeps` uses.
-    quad.position.set(pointer.x / units.width - 0.5, 0.5 - pointer.y / units.height, 0);
+    // Centred on the pointer, which is where the real client holds a picked-up icon. In `cursorCamera`'s
+    // space, which is unit-sized and Y DOWN -- the same space `pointerPosition` already reports in, so
+    // the mapping is a plain divide with no inversion. It used to be `0.5 - y` into the Y-UP composite
+    // camera, and that inversion was the icon's flip: see `cursorCamera` for why the two cameras exist
+    // and which one an uploaded BLP belongs to.
+    quad.position.set(pointer.x / units.width, pointer.y / units.height, 0);
     quad.scale.set(CURSOR_ICON_UNITS / units.width, CURSOR_ICON_UNITS / units.height, 1);
     // BY HAND -- `matrixAutoUpdate` is false, so the two writes above are otherwise inert.
     quad.updateMatrix();
@@ -709,7 +1228,7 @@ export class WorldUiHost {
 
     const previousAutoClear = this.renderer.autoClear;
     this.renderer.autoClear = false;
-    this.renderer.render(this.cursorSceneOf(), this.compositeCamera);
+    this.renderer.render(this.cursorSceneOf(), this.cursorCamera);
     this.renderer.autoClear = previousAutoClear;
   }
 
@@ -720,14 +1239,24 @@ export class WorldUiHost {
   /** One quad, built on first use. Same recipe as `sweepQuad`. */
   private cursorQuadOf(): THREE.Mesh {
     if (this.cursorQuad === null) {
-      const material = new THREE.MeshBasicMaterial({
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-        // The composite is premultiplied and this quad is drawn into the same canvas after it, so the
-        // icon's own alpha must be premultiplied too or a soft edge reads as a bright halo.
-        premultipliedAlpha: true,
-      });
+      // THROUGH THE SHARED FACTORY, and that is the fix for the icon VANISHING rather than a tidy-up.
+      //
+      // This used to hand-build a `MeshBasicMaterial`. That was survivable while the icon drew through
+      // the Y-UP composite camera and merely came out flipped; the moment it moved to `cursorCamera`
+      // -- Y-DOWN, which is what makes an uploaded BLP upright -- it disappeared completely, because a
+      // Y-down projection has a NEGATIVE Y scale, a mirror reverses triangle winding, three compensates
+      // only for winding flips from an OBJECT's world-matrix determinant and never from the camera's,
+      // and a hand-built material defaults to `FrontSide`. So the quad presented its back face and was
+      // culled: "draw calls are issued, triangles are counted, and not one pixel lands" --
+      // `material.ts:98-104`, which documents this exact failure for every other UI quad and is why
+      // `createQuadMaterial` has set `DoubleSide` all along.
+      //
+      // Taking the factory rather than adding `side` here is the point: the Y-down camera's
+      // requirements now live in ONE place for this quad too, so the next hand-built material cannot
+      // reintroduce it. `'ALPHA'` is the icon's blend and `premultipliedAlpha` is true for the reason
+      // that comment already gives -- this draws into the same canvas the premultiplied composite just
+      // wrote, so straight alpha would read as a bright halo on a soft edge.
+      const material = createQuadMaterial('ALPHA', true);
       const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
       quad.frustumCulled = false;
       quad.matrixAutoUpdate = false;
@@ -788,6 +1317,37 @@ export class WorldUiHost {
   private renderTarget: THREE.WebGLRenderTarget | null = null;
   private compositeScene: THREE.Scene | null = null;
   private compositeCamera = new THREE.OrthographicCamera(-0.5, 0.5, 0.5, -0.5, -1, 1);
+
+  /**
+   * The cursor icon's camera: unit space with **Y DOWN**, and that is the whole of the upside-down-icon
+   * fix.
+   *
+   * "Если выбрать предмет левой кнопкой мыши он схватится и иконка будет перевёрнутой." A picked-up item
+   * icon was drawn mirrored vertically, and so was every ability icon before it -- nobody noticed on a
+   * spell glyph, and a sword is unmistakable.
+   *
+   * WHY, and it is the loading screen's defect a second time. This renderer has TWO conventions and they
+   * are both correct in their own place:
+   *
+   *  - `GlueRenderer`'s camera is `OrthographicCamera(0, 1, 0, 1)` -- top 0, bottom 1, so **Y DOWN**.
+   *    `PlaneGeometry`'s own UVs put `v = 1` at local +y, which that camera puts at the BOTTOM of the
+   *    screen, and `v = 0` is the sheet's top row because textures load `flipY = false`. So an uploaded
+   *    BLP comes out upright with three's default UVs and nothing has to be negated
+   *    (`renderer.ts:148-151`).
+   *  - `compositeCamera` is `(-0.5, 0.5, 0.5, -0.5)` -- top +0.5, so **Y UP**. That is right for what it
+   *    exists to draw: the interface's own RENDER TARGET, whose texture is a framebuffer with `v = 0` at
+   *    the bottom.
+   *
+   * `drawCursorIcon` was drawing an uploaded BLP through the framebuffer camera, so the two conventions
+   * did not cancel and the icon came out flipped. The fix is to draw it through a camera whose convention
+   * its geometry already matches -- the same fix the upside-down loading screen took, where the answer
+   * was to adopt the existing camera rather than negate a UV. Nothing here mirrors a coordinate, and no
+   * texture is mutated.
+   *
+   * The sweeps keep the composite camera and are untouched: `sweepMaterial` is a `ShaderMaterial` with
+   * no `map` at all -- a fragment wedge test -- so there is no image convention for it to disagree with.
+   */
+  private cursorCamera = new THREE.OrthographicCamera(0, 1, 0, 1, -1, 1);
   private compositeMesh: THREE.Mesh | null = null;
   private savedClearColor = new THREE.Color();
   private savedClearAlpha = 1;
@@ -1060,19 +1620,56 @@ export class WorldUiHost {
     // then let the loot bridge restore the container's closure over the top -- leaving a dead source
     // installed after dispose, reading a bridge whose listeners are gone. Unwinding in the reverse of
     // the attach order is what makes the chain's restore land on something live.
+    this.mapBridge?.dispose();
+    this.mapBridge = null;
+    setPointerSource(null);
+    questBlobs.dispose();
+    this.minimapTerrain?.dispose();
+    this.minimapTerrain = null;
     this.detachLoot?.();
     this.detachLoot = null;
+    // THE TRAINER'S FIRST, and the order is load-bearing rather than tidy. The tooltip-source chain has
+    // to unwind in the REVERSE of the order it was built: this teardown restores the merchant's source,
+    // and the merchant's restores the loot bridge's. Disposing the merchant first would leave the
+    // trainer's teardown reinstalling a source belonging to a bridge already gone.
+    this.detachTrainer?.();
+    this.detachTrainer = null;
+    this.detachMerchant?.();
+    this.detachMerchant = null;
+    this.detachQuest?.();
+    this.detachQuest = null;
+    this.detachLevelUp?.();
+    this.detachLevelUp = null;
+    this.interactionWatch?.dispose();
+    this.interactionWatch = null;
+    this.detachGossip?.();
+    this.detachGossip = null;
+    this.detachGroup?.();
+    this.detachGroup = null;
+    this.detachChat?.();
+    this.detachChat = null;
+    this.detachAuras?.();
+    this.detachAuras = null;
     this.detachContainers?.();
     this.detachContainers = null;
+    this.detachStats?.();
+    this.detachStats = null;
+    this.detachSkills?.();
+    this.detachSkills = null;
+    this.detachReputation?.();
+    this.detachReputation = null;
     // The rect publication is module-level, so it OUTLIVES this host unless it is cleared -- exactly
     // the hazard `pages/game/index.tsx#componentWillUnmount` records for its own window handles. A
     // stale draw list would have a remounted world's scripts reading the previous world's layout.
+    setRectResolver(null);
+    setVisibleRectResolver(null);
     clearRects();
     clearArtSink();
     this.input.detach();
     this.runtime?.dispose();
     this.runtime = null;
     this.ui.dispose();
+    this.booth.dispose();
     this.renderTarget?.dispose();
     this.renderTarget = null;
     if (this.compositeMesh) {
@@ -1100,6 +1697,7 @@ export class WorldUiHost {
     delete (window as never as Record<string, unknown>).worldUiArt;
     delete (window as never as Record<string, unknown>).worldUiDrawList;
     delete (window as never as Record<string, unknown>).uiDrawStats;
+    delete (window as never as Record<string, unknown>).worldUiBooth;
     delete (window as never as Record<string, unknown>).uiTextExtent;
     this.lastItems = [];
   }

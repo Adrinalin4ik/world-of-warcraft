@@ -70,6 +70,23 @@ const EVENT_METHODS: MethodTable = {
     return [];
   },
 
+  /**
+   * `IsEventRegistered(eventName)` -> whether THIS frame is in that event's list.
+   *
+   * Added as an INSTRUMENT as much as an API: the character sheet's stat panes are blank because
+   * `PaperDollFrame` does not receive `VARIABLES_LOADED` at login even though its `OnEvent` is bound and
+   * a manual replay of the handler fills both panes correctly (measured -- see
+   * `ui/paperdoll-stats.ts`). Without this method there was no way to ask, from Lua, whether the frame
+   * was registered at all, so the question could not be separated from "the event was not fired".
+   *
+   * It is real API too: `IsEventRegistered` exists in 3.3.5a, and reading back a list this file already
+   * owns asserts nothing new.
+   */
+  IsEventRegistered: (_ctx, self, args) => {
+    const list = framesByEvent.get(String(args[0] ?? ''));
+    return [list !== undefined && list.includes(self)];
+  },
+
   // UnregisterEvent(eventName). Removing in place (not replacing the array) matters for the same
   // reason `fireEvent` re-reads by index below: if this ever fires from inside a dispatch of the same
   // event, the in-progress walk has to see the shorter list, not a stale reference to the old one.
@@ -109,6 +126,22 @@ registerMethods('FRAME', EVENT_METHODS);
  * Silently does nothing if the VM has no object model installed, or nothing is registered for
  * `eventName` -- both are normal, not error conditions worth throwing over.
  */
+/**
+ * WHICH FRAMES ARE LISTENING for an event -- for probes, not for the runtime.
+ *
+ * "The event fires and nothing happens" has two halves and no console line separates them: either no
+ * frame is registered, or one is and its handler declined. `fireEvent` returns early on an empty list
+ * and says nothing, which is right for the runtime and useless for a diagnosis.
+ *
+ * Built because the world map has been sitting on exactly that question: `WORLD_MAP_UPDATE` is fired,
+ * `WorldMapFrame_OnLoad` registers for it (`worldmapframe.lua:72`), and `WorldMapFrame_UpdateMap` does
+ * not run -- and calling that function by hand DOES lay the frame out, which proves the function is
+ * fine and the delivery is not. This answers the first half in one call.
+ */
+export function eventListeners(eventName: string): number[] {
+  return [...(framesByEvent.get(eventName) ?? [])];
+}
+
 export function fireEvent(vm: LuaVM, eventName: string, args: unknown[] = []): void {
   const ctx = contextFor(vm);
   if (ctx === null) {

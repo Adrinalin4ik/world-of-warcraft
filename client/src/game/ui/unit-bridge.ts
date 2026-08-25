@@ -44,6 +44,7 @@ import { combatFeedbackArgs, spellFeedbackArgs, spellMissText } from '../classes
 import type { SpellDamageEvent } from '../../network/game/object/combat-log';
 import { LuaVM } from './framexml/lua/vm';
 import { raceClassData } from '../pipeline/dbc/race-class-data';
+import { creatureTypeData } from '../pipeline/dbc/creature-type-data';
 
 /**
  * `UnitPowerType`'s numeric order -> the event a bar of that power listens for
@@ -51,8 +52,24 @@ import { raceClassData } from '../pipeline/dbc/race-class-data';
  * own in 3.3.5a's list; a death knight's rune bar is `RuneFrame`, not the mana bar, so it maps to
  * nothing and its changes ride the max/displaypower events.
  */
+/**
+ * `ObjectType.Player`. Declared locally the way `cursor-mode.ts:42`, `nameplates.ts:98` and
+ * `pick.ts:101` each declare it, rather than reaching into the network layer's enum from the UI.
+ */
+const OBJECT_TYPE_PLAYER = 4;
+
 const POWER_EVENT = ['UNIT_MANA', 'UNIT_RAGE', 'UNIT_FOCUS', 'UNIT_ENERGY', 'UNIT_HAPPINESS', null, 'UNIT_RUNIC_POWER'];
 const MAX_POWER_EVENT = ['UNIT_MAXMANA', 'UNIT_MAXRAGE', 'UNIT_MAXFOCUS', 'UNIT_MAXENERGY', 'UNIT_MAXHAPPINESS', null, 'UNIT_MAXRUNIC_POWER'];
+
+/** The hover tooltip's failure, said once. A mouse-move must not spam the console. */
+let hoverTooltipWarned = false;
+function warnHoverTooltipOnce(message: string): void {
+  if (hoverTooltipWarned) {
+    return;
+  }
+  hoverTooltipWarned = true;
+  console.warn(`the world hover tooltip raised: ${message}`);
+}
 
 /** A unit's live state as one snapshot. Pure -- it reads, it does not write. */
 export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
@@ -65,7 +82,23 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   snapshot.power = unit.fields.power ?? 0;
   snapshot.maxPower = unit.fields.maxPower ?? 0;
   snapshot.classification = unit.classification;
-  snapshot.isPlayer = unit.isPlayer;
+  // The WORD, resolved here rather than on the unit: `Unit` holds the `CreatureType.dbc` id that the
+  // packet carried, and turning an id into a localised string is a DBC join, which is this layer's job
+  // (the same division `race`/`classInfo` already use). Null until the table lands.
+  snapshot.creatureType = unit.creatureType > 0 ? creatureTypeData.name(unit.creatureType) : null;
+  // `UnitIsPlayer`/`UnitPlayerControlled` ask "is this a player CHARACTER", and `Unit#isPlayer` does
+  // not answer that question. It defaults to false and is assigned in exactly one place in the tree,
+  // `classes/player.ts:14` -- the constructor of our OWN character -- because eight motion sites read
+  // it as the LOCAL-versus-REMOTE switch (`world/index.ts:1051` picks `move.horizVel` over
+  // `remoteMotion.speed` on it; `unit.ts:3012,3023` gate the peer dead-reckon trace on `!isPlayer`).
+  // So it was false for every player the server streams, and `UnitIsPlayer("target")` answered false
+  // for a targeted player -- which also fed `UnitSelectionColor` (`api/units.ts:475`) the creature
+  // ramp for a player.
+  //
+  // `objectType` is the create block's own `ObjectType` byte and the right question to ask.
+  // `cursor-mode.ts:290` and `nameplates.ts:561` already test players this way; the flag is left to
+  // mean what the motion code needs it to mean.
+  snapshot.isPlayer = unit.objectType === OBJECT_TYPE_PLAYER;
   snapshot.dead = unit.dead;
 
   // The experience pair and the rested pool. PLAYER-scope update fields, so they are only ever present
@@ -94,6 +127,12 @@ export function snapshotOf(unit: Unit, self: Unit | null): UnitSnapshot {
   // rather than a wrong race. `ensureLoaded` is kicked off by `attachUnitBridge`.
   snapshot.race = unit.fields.race ? raceClassData.race(unit.fields.race) : null;
   snapshot.classInfo = unit.fields.classId ? raceClassData.class(unit.fields.classId) : null;
+  // THE SEX, converted here and not in `api/units.ts`, because the two numberings differ: the wire's
+  // byte 2 of `UNIT_FIELD_BYTES_0` is 0 male / 1 female
+  // (`network/game/object/update-object/unit-fields.ts:281-285`) and `UnitSex` answers 1 unknown / 2
+  // male / 3 female. `undefined` (no `bytes_0` yet) stays 1, which is the API's "unknown" and not a
+  // guess at male. See `UnitSnapshot#sex`.
+  snapshot.sex = unit.fields.gender === undefined ? 1 : unit.fields.gender + 2;
   return snapshot;
 }
 
@@ -215,6 +254,50 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
       stats.pushes += 1;
     }
     return fired;
+  };
+
+  /**
+   * THE WORLD HOVER TOOLTIP -- "При наведении на юнита должен появляться тултип."
+   *
+   * `"mouseover"` is pushed here, and the tooltip is driven through the CLIENT'S OWN globals.
+   *
+   * **There is no FrameXML driver for this and that is not an omission on our part.** Grepped the whole
+   * served manifest: no `UPDATE_MOUSEOVER_UNIT` handler exists and nothing outside `unitframe.lua` calls
+   * `GameTooltip:SetUnit`. In the real client the ENGINE fills and shows this tooltip when the cursor
+   * rests on a unit, so being the engine is exactly our job here -- and it is done by calling
+   * `GameTooltip_SetDefaultAnchor` and `GameTooltip:SetUnit`, both of which the client defines
+   * (`gametooltip.lua:72`, `methods/gametooltip.ts`), rather than by drawing anything.
+   *
+   * `UPDATE_MOUSEOVER_UNIT` is fired too. Nothing in the manifest handles it, so it changes nothing
+   * today -- it is fired because an ADDON is entitled to it and running addons is the point of this
+   * runtime.
+   *
+   * ## Cost
+   *
+   * `World#setHovered` guards on the transition, so this runs on a real hover CHANGE and not on the
+   * pick's 100 ms cadence. The tooltip lands at `GameTooltip_SetDefaultAnchor`'s fixed position -- the
+   * bottom-right of `UIParent`, which is where the real client puts a world unit's tooltip -- so it does
+   * NOT follow the pointer and therefore does not dirty the draw-list fingerprint per frame. Two dirty
+   * frames per hover: one to show, one to hide.
+   */
+  const onHoverChange = (unit: Unit | null): void => {
+    push('mouseover', unit);
+    fireEvent(vm, 'UPDATE_MOUSEOVER_UNIT');
+    // `GameTooltip` may not exist yet -- the bridges attach before the manifest finishes on some
+    // paths -- so this is guarded rather than assumed, the same way the token pushes are.
+    const error = vm.run(
+      unit === null
+        ? 'if GameTooltip then GameTooltip:Hide() end'
+        : 'if GameTooltip and GameTooltip_SetDefaultAnchor then'
+          + ' GameTooltip_SetDefaultAnchor(GameTooltip, UIParent);'
+          + ' if GameTooltip:SetUnit("mouseover") then GameTooltip:Show() end'
+          + ' end',
+      'hover-tooltip',
+    );
+    if (error !== null) {
+      // Reported once rather than every hover: a broken tooltip must not spam the console on mouse move.
+      warnHoverTooltipOnce(error.message);
+    }
   };
 
   const onFields = (unit: Unit): void => {
@@ -380,8 +463,15 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
     push('player', world.player);
     push('target', world.target);
   });
+  // `CreatureType.dbc`, 1127 bytes, for the tooltip's "Level 1 Beast". Kicked, not awaited, and it
+  // re-pushes the TARGET only: a hovered unit is re-pushed on the next hover change anyway, and the
+  // player has no creature type.
+  void creatureTypeData.ensureLoaded().then(() => {
+    push('target', world.target);
+  });
 
   world.on('unit:fields', onFields);
+  world.on('hover:change', onHoverChange);
   world.on('target:change', onTargetChange);
   spells.on('comboPoints', pushCombo);
   combat.on('attack:swing', onSwing);
@@ -400,6 +490,7 @@ export function attachUnitBridge(vm: LuaVM, world: World): () => void {
 
   return () => {
     world.removeListener('unit:fields', onFields);
+    world.removeListener('hover:change', onHoverChange);
     world.removeListener('target:change', onTargetChange);
     spells.removeListener('comboPoints', pushCombo);
     combat.removeListener('attack:swing', onSwing);

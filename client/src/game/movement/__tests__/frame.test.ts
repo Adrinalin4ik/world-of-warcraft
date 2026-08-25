@@ -185,3 +185,25 @@ describe('movementFrame: the swim stroke', () => {
     expect(state.swimStrokeSpeed).toBe(0);
   });
 });
+
+/**
+ * Kills: reading the compile-time `SWIM_SPEED` instead of the speed the server sent -- the owner's
+ * "не работают способности, которые связаны с передвижением". The wire half was always complete
+ * (`SMSG_FORCE_SWIM_SPEED_CHANGE` is decoded, acked and validated onto `Unit#speeds.swim`); the mover
+ * simply never read it, so every movement-speed effect was applied to a number nobody consulted.
+ *
+ * Asserts BOTH directions, because the fallback is what keeps every existing caller correct: with no
+ * wire speed the stroke is vanilla's default, and with one it is the server's.
+ */
+it('strokes at the speed the server sent, and at the default when it sent none', () => {
+  const buffed = 2 * SWIM_SPEED;
+
+  const withWire = player(SURFACE - swimEnterDepth(H) - 0.1);
+  movementFrame(withWire, deep, { ...swimmingForward, swimSpeed: buffed }, 1 / 60, 0);
+  expect(withWire.swimming).toBe(true);
+  expect(withWire.swimStrokeSpeed).toBeCloseTo(buffed, 4);
+
+  const withoutWire = player(SURFACE - swimEnterDepth(H) - 0.1);
+  movementFrame(withoutWire, deep, swimmingForward, 1 / 60, 0);
+  expect(withoutWire.swimStrokeSpeed).toBeCloseTo(SWIM_SPEED, 4);
+});

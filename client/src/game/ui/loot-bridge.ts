@@ -37,18 +37,65 @@ import { fireEvent } from './framexml/lua/events';
 import { GlueArt } from './art';
 import { getItemTooltipSource, setItemTooltipSource, ItemTooltipInfo } from './framexml/lua/api/items';
 import { itemData } from '../pipeline/dbc/item-data';
+import { spellData } from '../pipeline/dbc/spell-data';
+import { copperAsWords, itemTooltipLines } from './item-tooltip';
 import type { LootHandler, LootRow } from '../../network/game/object/loot';
 import { LOOT_TYPE_FISHING } from '../../network/game/object/loot';
 import type { ItemHandler } from '../../network/game/object/items';
 
 /**
- * The coin row's texture.
+ * THE COIN ROW'S ICON, chosen by denomination.
  *
- * `Interface\Icons\INV_Misc_Coin_01` -- the stem is the client's own and its BLP is confirmed present
- * on the asset host. The real client picks between several coin icons by denomination; this one is the
- * gold coin and is used for every pile, which is a stated simplification rather than a claim.
+ * The owner, once the amount was right: "icon for copper is different." It was a CONSTANT here -- the
+ * gold `Interface\Icons\INV_Misc_Coin_01` for every pile -- which the old comment called a stated
+ * simplification. With the words now reading "4 Copper" beside a gold coin the simplification was
+ * visibly wrong, so it is gone.
+ *
+ * **THE THREE PATHS ARE THE GAME'S OWN DATA, not remembered names.** They are exactly the icons the
+ * client's own money strings embed: `COPPER_AMOUNT_TEXTURE` is
+ * `"%d|TInterface\MoneyFrame\UI-CopperIcon:%d:%d:2:0|t"` (`globalstrings.lua:1862`), and
+ * `SILVER_AMOUNT_TEXTURE` / `GOLD_AMOUNT_TEXTURE` name theirs the same way (`:6323`, `:3845`). Probed
+ * on the asset host rather than assumed: all three answer **200, 1540 bytes, 16x16 DXT5**.
+ * That naming is what makes them safe to choose between -- `INV_Misc_Coin_01..17` are NUMBERED with no
+ * denomination in the name, so picking among those would have been a guess, which is the trap that cost
+ * a previous round six 404ing cursor stems.
+ *
+ * A second, equally sourced option was `Interface\MoneyFrame\UI-MoneyIcons` (200, 64x16), one sheet
+ * holding all three at `TexCoords` `0..0.25` gold, `0.25..0.5` silver, `0.5..0.75` copper
+ * (`coinpickupframe.xml:29,41,53`). The standalone files win because `GetLootSlotInfo` answers a PATH
+ * and the client does `LootButtonNIconTexture:SetTexture(texture)` -- there is nowhere in that call to
+ * carry a sub-rect.
+ *
+ * **The RULE is ours; the icons are not.** `coinpickupframe.lua:47-64` chooses per denomination for a
+ * SINGLE-denomination pickup (`multiplier == 1` copper, `== COPPER_PER_SILVER` silver,
+ * `== COPPER_PER_GOLD` gold), which does not say what a MIXED pile shows. "Largest non-zero
+ * denomination" is this client's choice and is labelled as such. The icons are 16x16 against a 37x37
+ * loot icon slot, so they draw magnified -- also stated, since the real client's loot row may use a
+ * different art family entirely and that is not settled by any served file.
  */
-const COIN_TEXTURE = 'Interface\\Icons\\INV_Misc_Coin_01';
+const BS = String.fromCharCode(92);
+
+const COIN_TEXTURES = {
+  gold: ['Interface', 'MoneyFrame', 'UI-GoldIcon'].join(BS),
+  silver: ['Interface', 'MoneyFrame', 'UI-SilverIcon'].join(BS),
+  copper: ['Interface', 'MoneyFrame', 'UI-CopperIcon'].join(BS),
+};
+
+/**
+ * The icon for a pile, by its largest non-zero denomination. See `COIN_TEXTURES`.
+ *
+ * 10000 copper to the gold and 100 to the silver -- `moneyframe.lua`'s own arithmetic, the same
+ * constants `item-tooltip.ts#moneyText` divides by.
+ */
+function coinTexture(copper: number): string {
+  if (copper >= 10000) {
+    return COIN_TEXTURES.gold;
+  }
+  if (copper >= 100) {
+    return COIN_TEXTURES.silver;
+  }
+  return COIN_TEXTURES.copper;
+}
 
 /** What one display row resolves to: the coin, or an item row. */
 type Row = { kind: 'money' } | { kind: 'item'; row: LootRow };
@@ -155,11 +202,23 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
       return [];
     }
     if (row.kind === 'money') {
-      const answer = vm.runExpr(
-        `return GetCoinTextureString(${Math.floor(loot.gold)})`, 'loot-coin.lua',
-      ) as { value?: unknown } | null;
-      const text = String(answer?.value ?? '');
-      return [COIN_TEXTURE, text === '' || text === 'nil' ? String(loot.gold) : text, 0, 1, false];
+      // THE OWNER'S "when looting it shows gold when it should show copper", and it was this line.
+      //
+      // It used to ask the VM for `GetCoinTextureString(copper)`. That global exists in the real engine
+      // -- and is called by NOTHING in the 268 loaded manifest files (grepped), so nothing had ever
+      // registered it here. The fallback beside it printed `String(copper)`, so a five-copper pile read
+      // as a bare "5" next to the gold coin icon: no denomination anywhere, and the only visible unit
+      // was the icon, which is gold.
+      //
+      // `copperAsWords` is the SAME formatter the tooltip's sell price uses (`ui/item-tooltip.ts`), so
+      // the two cannot drift, and every string in it is the client's own `GOLD_AMOUNT`/`SILVER_AMOUNT`/
+      // `COPPER_AMOUNT`. Not the `*_AMOUNT_TEXTURE` forms: those embed `|TInterface\MoneyFrame\...|t`
+      // inline textures and `|T` is a named gap in `ui/markup.ts` that is deliberately left VISIBLE, so
+      // the texture form would print its own markup into the row. That is the one deviation from the
+      // real client here and it is the words instead of the coin icons, not a wrong amount.
+      const amount = Math.floor(loot.gold);
+      const text = copperAsWords(vm, amount);
+      return [coinTexture(amount), text ?? String(amount), 0, 1, false];
     }
     const template = items.template(row.row.itemId);
     return [
@@ -247,7 +306,10 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
    */
   const onOpened = (): void => {
     const paths = loot.rows.map((row) => iconFor(row)).filter((p): p is string => p !== null);
-    paths.push(COIN_TEXTURE);
+    // ALL THREE coin icons, not only the one this pile needs: the amount changes while the window is
+    // open (taking the coins zeroes it) and `art.register` is idempotent, so registering the set once is
+    // cheaper than deciding per repaint and cannot miss a denomination.
+    paths.push(COIN_TEXTURES.gold, COIN_TEXTURES.silver, COIN_TEXTURES.copper);
     for (const path of paths) {
       art.register(path, { path });
     }
@@ -324,6 +386,33 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
     }
   };
 
+/**
+   * A REFUSED LOOT WAS COMPLETELY SILENT, and that is a defect by this project's own rule.
+   *
+   * `loot.ts#handleResponse` decodes the error shape -- `lootType == 0` followed by a lone error byte --
+   * and emits `lootError`. **Nothing listened.** So a server that declined to open a container answered,
+   * we decoded its answer correctly, and then dropped it: no window, no line, nothing. `CLAUDE.md`: "A
+   * silent gap is indistinguishable from a bug", and an ACTION the owner invoked must say so where he
+   * already sees refusals.
+   *
+   * Found while chasing his "окно лута не открылось" on a `CMSG_GAMEOBJ_USE` that provably went out
+   * (body 8, in his own console). Whether this is that answer is now visible instead of inferred: if the
+   * refusal prints, the send and the decode are both fine and the reason is the server's; if nothing
+   * prints, the server said nothing at all and the packet is the suspect.
+   *
+   * THE CODE IS PRINTED RAW rather than mapped to a string, deliberately. 3.3.5a's `LootError` enum is a
+   * server-side definition and nothing the client ships names its values, so a table here would be
+   * invented. The number is the honest thing to show and it is what makes the next step possible.
+   */
+  const onLootError = ({ guid, error }: { guid: string; error: number }): void => {
+    // No `disposed` flag in this bridge: it unhooks with `removeListener` in the teardown below, which
+    // is the same guarantee by a different route.
+    // eslint-disable-next-line no-console
+    console.warn(`loot: REFUSED by the server -- guid ${guid}, LootError code ${error}`);
+    fireEvent(vm, 'UI_ERROR_MESSAGE', [`Cannot loot that (server error ${error}).`]);
+  };
+
+  loot.on('lootError', onLootError);
   loot.on('lootOpened', onOpened);
   loot.on('lootRemoved', onRemoved);
   loot.on('lootMoneyCleared', onMoneyCleared);
@@ -351,14 +440,32 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
     if (template === null) {
       return null;
     }
-    const lines: string[] = [];
-    if (template.itemLevel > 0) {
-      lines.push(`Item Level ${template.itemLevel}`);
-    }
-    if (row.row.count > 1) {
-      lines.push(`Stack: ${row.row.count}`);
-    }
-    return { name: template.name, quality: template.quality, lines };
+    // THE BODY, from `ui/item-tooltip.ts` -- shared with the other bridge on purpose. The owner saw the
+    // name and nothing under it in BOTH the bag and the loot window, because each bridge had its own
+    // two-line body; one builder is why that cannot drift again.
+    const lines = itemTooltipLines(vm, template, {
+      // The player's own level, so an unmet `Requires Level` goes red. `Unit#level` (`classes/unit.ts:313`)
+      // initialises to 0 and `itemTooltipLines` treats 0 as "do not judge" rather than as level zero --
+      // so a tooltip opened before the descriptor lands paints nothing red instead of everything.
+      playerLevel: world.player.level,
+      // The effect labels' spell names. `spellData` is the same table the action bar reads, so a name
+      // appears once `Spell.dbc` has landed and the label stands alone until then.
+      spellName: (id: number) => spellData.spell(id)?.name ?? null,
+    });
+    return {
+      name: template.name,
+      // THE VENDOR PRICE, as a NUMBER and not a line of text: `methods/gametooltip.ts` fires the
+      // frame's own `OnTooltipAddMoney` with it and the client draws the coin row. Undefined when the
+      // item cannot be sold, which is the case that has no price row at all.
+      sellPrice: template.sellPrice > 0 ? template.sellPrice : undefined,
+      quality: template.quality,
+      lines,
+      // `GameTooltip:GetItem`'s second return. `LootItem_OnEnter` does not call
+      // `GameTooltip_ShowCompareItem`, so nothing reads this on a loot row today -- it is supplied so
+      // the three tooltip sources answer the same shape and an addon calling `GetItem()` over the loot
+      // window is not told the row has no item.
+      link: `|Hitem:${row.row.itemId}:0:0:0:0:0:0:0:0:0:0|h[${template.name}]|h|r`,
+    };
   };
   setItemTooltipSource(vm, lootTooltip as never);
 
@@ -389,6 +496,7 @@ export function attachLootBridge(vm: LuaVM, world: World, art: GlueArt): () => v
 
   return () => {
     setItemTooltipSource(vm, previous);
+    loot.removeListener('lootError', onLootError);
     loot.removeListener('lootOpened', onOpened);
     loot.removeListener('lootRemoved', onRemoved);
     loot.removeListener('lootMoneyCleared', onMoneyCleared);

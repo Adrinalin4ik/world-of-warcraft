@@ -4,28 +4,41 @@ import './app.scss';
 import { sessionForSearch } from './network/offline-session';
 import GameRoute from './pages/game';
 import GlueHost from './pages/glue';
+import RootRoute from './pages/root';
 
 
 const App: React.FC = () => {
   // `?offline=1` builds a session that never connects -- the debug path into the world.
   const gameSession = sessionForSearch(window.location.search);
 
-  // // if (window.location.pathname != '/') {
-  // //   window.location.replace('/' + window.location.search);
-  // // }
+  // A commented-out `location.replace` used to sit here, forcing every path back to `/`. It is gone
+  // rather than left dormant: the root route now holds both halves of the client, so nothing needs
+  // to rewrite the location -- see `pages/root.tsx`.
 
   const router = createBrowserRouter([
     {
-      // The glue app -- the in-canvas pre-world screens, starting with the transcribed AccountLogin.
+      /**
+       * THE GLUE SCREENS **AND** THE WORLD, on one route and swapped in place.
+       *
+       * Entering the world used to navigate to `/game` and leaving it used to navigate back here,
+       * which changed the URL for no reason a player can see -- and this URL is the session's
+       * configuration (`?ui=lua`, `?realmlist=`, `?gateway=`, the autologin four). A refresh after
+       * entering therefore reloaded `/game`, which without `?ui=lua` is a different client: the
+       * owner's "обновление страницы после входа ведёт меня в нашу песочницу".
+       *
+       * See `pages/root.tsx` for what the swap does and does not change.
+       */
       path: "/",
-      element: <GlueHost session={gameSession} />
+      element: <RootRoute session={gameSession} />
     },
     {
       path: "/game",
       element: <GameRoute session={gameSession} />
     },
     {
-      // Kept as an alias of "/" so existing links and bookmarks still work.
+      // Kept as DIRECT ENTRY POINTS, not as the default flow any more. `/game?offline=1` is this
+      // project's documented way into a world with no server, and `/glue` is the glue screens on
+      // their own; both still navigate between each other the way they always did.
       path: "/glue",
       element: <GlueHost session={gameSession} />
     },

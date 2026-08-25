@@ -84,16 +84,25 @@ export function installStubApi(vm: LuaVM): void {
 
   // --- The addon system (AddonList.xml, and `UpdateAddonButton` from CharacterSelect_OnShow) -------
   //
-  // This client has no addon loader at all: nothing reads an `.toc`, nothing sandboxes a third-party
-  // Lua file, and there is no disk to enumerate. So "no addons" is the complete and TRUE answer, not a
-  // placeholder -- `GetNumAddOns() > 0` is the first line of `UpdateAddonButton` (addonlist.lua:5) and
-  // it correctly hides the Addons button on the character screen.
+  // This client has no THIRD-PARTY addon loader: nothing sandboxes a user's Lua file, and there is no
+  // disk to enumerate. So "no addons" is the complete and TRUE answer for `AddonList.xml`, whose
+  // subject is exactly that set -- `GetNumAddOns() > 0` is the first line of `UpdateAddonButton`
+  // (addonlist.lua:5) and it correctly hides the Addons button on the character screen.
+  //
+  // **CORRECTED, because this comment used to say "nothing reads an `.toc`" and that is now false.**
+  // The world runtime loads the client's own `Interface\AddOns\Blizzard_*` startup set
+  // (`framexml/addons.ts`), so `IsAddOnLoaded` has a real answer there and is REDEFINED by
+  // `lua/api/addons.ts`, which is installed after this. `GetNumAddOns` is deliberately left at 0: see
+  // that file's header for why the Blizzard set is not counted here.
   //
   // Latent until this task: `UpdateAddonButton` is only reachable from `CharacterSelect_OnShow`, so
   // while `CharacterSelect.xml` was past `stopAfter` the nil `GetNumAddOns` could not be hit. It aborted
   // that whole `OnShow` -- which is why `CharSelectRealmName` drew blank before this line existed.
   vm.registerFunction('GetNumAddOns', () => [0]); // fed into `> 0` and `for i=1, ...`; must be a number.
   vm.registerFunction('GetAddOnInfo', () => []);
+  // Overridden in the WORLD runtime by `lua/api/addons.ts`, which knows what actually loaded. This
+  // answer is the glue screens', where no addon has loaded yet and nothing is.
+  vm.registerFunction('IsAddOnLoaded', () => []);
   vm.registerFunction('GetAddOnDependencies', () => []);
   vm.registerFunction('GetAddOnEnableState', () => [0]); // 0 = disabled, the state of an absent addon.
   vm.registerFunction('EnableAddOn', () => []);

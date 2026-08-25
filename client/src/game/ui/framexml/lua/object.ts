@@ -28,6 +28,7 @@
 import { LuaRef, LuaVM } from './vm';
 import { FontObjectLookup } from '../fonts';
 import { Widget, WidgetKind, WidgetRoot } from '../../widget';
+import { setWidgetNameResolver } from '../../layout';
 
 /**
  * The client's widget classes, as a real hierarchy rather than a flat list of kinds.
@@ -56,6 +57,10 @@ export type WidgetClass =
   | 'COOLDOWN'
   | 'GAMETOOLTIP'
   | 'WORLDFRAME'
+  | 'MESSAGEFRAME'
+  | 'MINIMAP'
+  | 'QUESTPOIFRAME'
+  | 'SCROLLINGMESSAGEFRAME'
   | 'BACKDROP';
 
 const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
@@ -88,6 +93,56 @@ const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
   // all, and `ActionButton_ShowGrid` -- the path that makes an EMPTY action slot droppable -- died on
   // `actionbutton.lua:265`'s `if ( GameTooltip:GetOwner() == self )`. See `methods/gametooltip.ts`.
   GAMETOOLTIP: 'FRAME',
+  /**
+   * A real client type, and the ROOT of `Interface\FrameXML\Minimap.xml` --
+   * `<Minimap name="Minimap" ...>` inside `MinimapCluster`. The same defect family as COOLDOWN,
+   * GAMETOOLTIP and WORLDFRAME above, found the same way: something asked for the global and got nil.
+   *
+   * **AND WHAT ASKED FOR IT KILLS THE WHOLE UI-PANEL LAYOUT, PERMANENTLY.** `GetMaxUIPanelsWidth`
+   * indexes it unguarded -- `if ( Minimap:IsShown() and not MinimapCluster:IsUserPlaced() )`,
+   * `uiparent.lua:2007` -- and `CanShowCenterUIPanel` is the gate the CENTER panel's placement sits
+   * behind (`:1689`). So the raise happens INSIDE
+   * `FramePositionDelegate:UpdateUIPanelPositions`, after it has set `self.updatingPanels = true`
+   * (`:1658`) and before the line that clears it: every later call returns immediately at `:1656`, so
+   * the layout is dead for the rest of the session. MEASURED live, the owner's console:
+   *
+   *     ERR [string "UIParent.lua"]:2007: attempt to index a nil value (global 'Minimap')
+   *
+   * The visible symptom was two panels drawn on top of each other. The SLOTS were right all along --
+   * `left=QuestFrame | center=CharacterFrame`, exactly what the real client does with a `pushable = 3`
+   * frame -- and the left panel was even placed correctly, because its block runs before the center's.
+   * Only the second placement was missing.
+   *
+   * `FRAME`, and the map itself is NOT drawn -- see `loader.ts#applyPerKind`, which declares that gap
+   * rather than leaving it silent.
+   */
+  MINIMAP: 'FRAME',
+  /**
+   * A real client type, and the ROOT of `<QuestPOIFrame name="WorldMapBlobFrame">`
+   * (`worldmapframe.xml:675`). Same defect family as COOLDOWN, GAMETOOLTIP, WORLDFRAME and MINIMAP
+   * above, and found the same way -- something asked for the global and got nil:
+   *
+   *     [string "WorldMapFrame.lua"]:1417:
+   *         attempt to index a nil value (global 'WorldMapBlobFrame')
+   *
+   * **That raise is why SHIFT-M did nothing**, and it is worse than one dead frame:
+   * `WorldMap_ToggleSizeUp`/`Down` index it, both are called from `WorldMapFrame_ToggleWindowSize`, and
+   * that function sets `WorldMapFrame.blockWorldMapUpdate = true` a few lines later and clears it at the
+   * end -- so a raise anywhere in between would have latched the flag on and stopped the world map
+   * updating for the rest of the session. It raised BEFORE the flag was set, which is the only reason
+   * that did not happen.
+   *
+   * FOUND BY SWEEP, not by chasing this one name: every `<Element>` tag in the decoded manifest was
+   * matched against this union, and the only two widget types with no class were `QuestPOIFrame` and
+   * `ModelFFX` -- and `ModelFFX` is an alias of MODEL already. Everything else was structural
+   * (`AbsInset`, `ScrollChild`, `TextInsets`, `Binding`) or a script handler.
+   *
+   * `FRAME`, and the blobs are NOT drawn -- the objective polygons come from
+   * `SMSG_QUEST_POI_QUERY_RESPONSE`, which has no subscriber. Its methods live on this class now rather
+   * than on FRAME, where they were a duck-typing leak that made `if frame.DrawQuestBlob then` true for
+   * every frame in the client.
+   */
+  QUESTPOIFRAME: 'FRAME',
   // A real client type, and the ROOT ELEMENT of `Interface\FrameXML\WorldFrame.xml` --
   // `<WorldFrame name="WorldFrame" movable="true" resizable="true" setAllPoints="true">`, entry 12 of
   // `FrameXML.toc`. Missing, `parseClass` answered null, `CreateFrame` threw "unknown frame type", and
@@ -106,6 +161,23 @@ const CLASS_PARENT: Record<WidgetClass, WidgetClass | null> = {
   // child `<Frame>` (`ActionStatus`), all authored hidden. The claim it was supporting -- that a
   // nameplate is engine-created and appears in no manifest file -- is unaffected and still holds.
   WORLDFRAME: 'FRAME',
+  // A MessageFrame IS a Frame that prints lines -- `UIErrorsFrame` inherits `RegisterEvent`,
+  // `UnregisterEvent` and `GetFrameLevel` from here and adds exactly `AddMessage`. See
+  // `methods/messageframe.ts` for why that one method is the whole surface.
+  MESSAGEFRAME: 'FRAME',
+  // A real client type, and the ROOT of every chat window: `ChatFrame1..7` are
+  // `<ScrollingMessageFrame>` (`chatframe.xml:4` for `ChatFrameTemplate`, `floatingchatframe.xml:871`
+  // and on for the instances). Missing, `parseClass` answered null, `CreateFrame` threw and rule 5
+  // dropped each element AND ITS SUBTREE -- so `ChatFrame1` was nil, `DEFAULT_CHAT_FRAME` was never
+  // assigned (`floatingchatframe.xml:886`), and FOUR features had nowhere to print: the Whisper menu
+  // row, the level-up congratulation lines, the duel countdown/winner lines, and
+  // `SMSG_PARTY_COMMAND_RESULT`'s reason codes. Fourth of exactly this defect family after COOLDOWN,
+  // GAMETOOLTIP and WORLDFRAME above.
+  //
+  // PARENT IS 'FRAME', NOT 'MESSAGEFRAME', and that is not an oversight: in the real API both derive
+  // from Frame, so `IsObjectType("MessageFrame")` on a chat frame must answer FALSE. The shared
+  // `AddMessage` is composed in `methods/messageframe.ts` instead.
+  SCROLLINGMESSAGEFRAME: 'FRAME',
   // OURS, not the client's: `backdrop` is a Widget kind this project invented for a nine-slice
   // frame. It behaves as a Frame and has no methods of its own today.
   BACKDROP: 'FRAME',
@@ -142,11 +214,21 @@ const CLASS_KIND: Partial<Record<WidgetClass, WidgetKind>> = {
   // `frame` and not `backdrop`: the loader turns an element carrying a `<Backdrop>` into the nine-slice
   // kind itself (`loader.ts#applyBackdrop`), the same way it does for any `<Frame>` with one.
   GAMETOOLTIP: 'frame',
+  // `frame`: the frame exists so the client's own Lua can measure and index it; no map is rendered.
+  MINIMAP: 'frame',
+  // `frame`: a blob frame is a rect the client sizes and scales; nothing draws an objective polygon.
+  QUESTPOIFRAME: 'frame',
   // `frame`: a WorldFrame draws no interface art of its own -- the world is rendered BEHIND it, which
   // is what its own XML comment says ("The world is rendered in the background of the frame"). Here
   // the world is a separate three.js scene entirely, so this frame is a rect and a parent and nothing
   // more, which is exactly what an addon walking `GetChildren()` needs it to be.
   WORLDFRAME: 'frame',
+  // `frame`: the lines are real FontString children under it, so the frame itself draws nothing of its
+  // own -- exactly like GAMETOOLTIP above.
+  MESSAGEFRAME: 'frame',
+  // `frame`, same as MESSAGEFRAME and for the same reason: the lines are real FontString children under
+  // it, so the frame itself draws nothing of its own.
+  SCROLLINGMESSAGEFRAME: 'frame',
 };
 
 /**
@@ -189,6 +271,23 @@ const CREATE_FRAME_CLASSES: WidgetClass[] = [
   // loader funnels every XML element through `CreateFrame`, so without this entry the manifest's own
   // `<WorldFrame>` still throws even though the class now parses.
   'WORLDFRAME',
+  // Listed for the same reason as the three above, and the reason the whole class exists: the loader
+  // funnels every XML element through `CreateFrame`, so `<Minimap name="Minimap">` (`minimap.xml`)
+  // throws "unknown frame type" without this entry even though the class now parses -- and a nil
+  // `Minimap` global takes the entire UI-panel layout down permanently (see the MINIMAP entry in
+  // `CLASS_PARENT`). `CreateFrame("Minimap", ...)` is legal in the real client too.
+  'MINIMAP',
+  // Listed for the same reason -- the loader funnels every XML element through `CreateFrame`, so
+  // `<QuestPOIFrame name="WorldMapBlobFrame">` throws without this entry and the global is nil.
+  'QUESTPOIFRAME',
+  // Listed for the same reason as the two above -- the loader funnels every XML element through
+  // `CreateFrame`, so `<MessageFrame name="UIErrorsFrame" ...>` (`uierrorsframe.xml:4`) throws without
+  // it. That throw is why `UIErrorsFrame` did not exist and no refusal could be printed on screen.
+  'MESSAGEFRAME',
+  // Required for the same reason as MESSAGEFRAME above -- the loader funnels every XML element through
+  // `CreateFrame`. `FCF_OpenTemporaryWindow` also calls `CreateFrame("ScrollingMessageFrame", ...)`
+  // directly for a whisper pop-out (`floatingchatframe.lua`), so addons and the client both need it.
+  'SCROLLINGMESSAGEFRAME',
   'BACKDROP',
 ];
 
@@ -266,6 +365,15 @@ export type MethodTable = Record<string, FrameMethod>;
 export interface FocusSink {
   readonly focused: Widget | null;
   setFocus(widget: Widget | null): void;
+  /**
+   * The widget the pointer is currently over, for `GetMouseFocus()`.
+   *
+   * Already implemented by both routers -- `GlueInput#pointerWidget` (`ui/input.ts:172`) serves the
+   * glue screens and the world alike, and `world-ui.ts` publishes the same object as
+   * `window.worldUiInput`. Widening this interface is what makes it reachable from Lua; nothing new
+   * tracks the pointer.
+   */
+  readonly pointerWidget: Widget | null;
 }
 
 export interface MethodContext {
@@ -531,6 +639,27 @@ export class FrameRegistry {
     return this.names.get(name) ?? null;
   }
 
+  /**
+   * Every named frame whose name starts with `prefix`, up to `cap`. For PROBES, not for the runtime.
+   *
+   * `ui/world-ui.ts`' `uiRegion` handle needs it: the questions worth asking are about FAMILIES -- the
+   * twelve `WorldMapDetailTile`s, the fourteen `WorldMapFrameTexture`s -- and whether they all failed
+   * the same way or one of them differs is the answer. Capped so a one-letter prefix cannot print the
+   * whole tree.
+   */
+  namesStartingWith(prefix: string, cap: number): Array<{ name: string; id: number }> {
+    const out: Array<{ name: string; id: number }> = [];
+    for (const [name, id] of this.names) {
+      if (name.startsWith(prefix)) {
+        out.push({ name, id });
+        if (out.length >= cap) {
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
   classOf(id: number): WidgetClass | null {
     return this.entries.get(id)?.cls ?? null;
   }
@@ -762,6 +891,24 @@ export function installObjectModel(
     throw new Error('installObjectModel: this VM already has an object model installed');
   }
 
+  /**
+   * NAME THE WIDGETS IN THE LAYOUT SOLVER'S COMPLAINT.
+   *
+   * `layout.ts` reported an unplaceable widget by its widget id, which is this file's own counter and
+   * means nothing outside it -- the owner pasted "lua:17608 -> lua:17596" and neither of us could say
+   * what had moved. A warning nobody can act on gets scrolled past, which is the same failure as no
+   * warning at all.
+   *
+   * The solver is the widget layer and knows nothing about the registry, so the registry publishes the
+   * lookup instead -- the way `ui/rects.ts` is published, and for the same reason.
+   *
+   * `lua:<id>` is the shape `create` mints, so the parse is the whole resolution.
+   */
+  setWidgetNameResolver((widgetId) => {
+    const match = /^lua:(\d+)$/.exec(widgetId);
+    return match === null ? null : registry.nameOf(Number(match[1]));
+  });
+
   // Assigned once the dispatch chunk below has run. `wrapper` is a closure, so it only has to be
   // non-null by the time the first frame is created, which is necessarily after that.
   let metatable: LuaRef | null = null;
@@ -906,6 +1053,31 @@ export function installObjectModel(
     if (callError !== null) {
       throw new Error(`flushing the dispatch cache failed: ${callError.message}`);
     }
+  });
+
+  /**
+   * `GetMouseFocus()` -> the frame the mouse is over, or nil.
+   *
+   * MEASURED absent from the owner's console log: `VehicleMenuBar.lua:846` raised on it inside
+   * `VehicleMenuBarPowerBar: OnValueChanged`, taking that handler down. An ENGINE global -- no FrameXML
+   * file defines it -- and the router has answered this question all along
+   * (`GlueInput#pointerWidget`), so this is a wiring gap and not a feature.
+   *
+   * Registered HERE rather than in an `api/` module because it needs the `MethodContext`: the answer is
+   * a frame WRAPPER, which only `ctx.wrapper` can mint, and only this scope holds both the router and
+   * the registry. `installPortraitApi(vm, ctx, registry)` is the precedent for a ctx-aware global.
+   *
+   * Nil in three cases, all honest: no router threaded in, the pointer over nothing, or the pointer
+   * over a widget the registry does not own (art created outside the object model). The real call
+   * answers nil for a pointer over the world too.
+   */
+  vm.registerFunction('GetMouseFocus', () => {
+    const widget = ctx.input?.pointerWidget ?? null;
+    if (widget === null) {
+      return [null];
+    }
+    const id = registry.idOfWidget(widget);
+    return [id === null ? null : ctx.wrapper(id)];
   });
 
   // CreateFrame(type, name, parent, template).

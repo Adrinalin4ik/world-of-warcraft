@@ -23,7 +23,7 @@
  * WHICH GLOBALS ARE HERE was decided by reading what the client's own files call, not from a list:
  * `TargetFrame.lua`, `UnitFrame.lua` and `TextStatusBar.lua` between them call 37 distinct `Unit*`
  * functions. The ones with a real field behind them are real below; the ones whose feed does not
- * exist yet (threat, auras, casting, tap state) go through `notImplemented` so the load report names
+ * exist yet (threat, casting, tap state) go through `notImplemented` so the load report names
  * them, per the rule that a gap is declared and never silently answered.
  */
 import { LuaVM } from '../vm';
@@ -68,6 +68,12 @@ export interface UnitSnapshot {
   reaction: number;
   /** `"normal" | "elite" | "rare" | "rareelite" | "worldboss"` -- see `classificationWord`. */
   classification: string;
+  /**
+   * The localised `CreatureType.dbc` word -- "Beast", "Humanoid" -- or null for a player, an unknown
+   * type, or before the table lands. What `UnitCreatureType` answers and what the tooltip's level line
+   * substitutes.
+   */
+  creatureType: string | null;
   isPlayer: boolean;
   dead: boolean;
 
@@ -117,9 +123,31 @@ export interface UnitSnapshot {
    */
   race: { name: string; token: string } | null;
   classInfo: { name: string; token: string } | null;
+
+  /**
+   * `UnitSex`'s answer: **1 unknown, 2 male, 3 female**.
+   *
+   * The wire has 0 male / 1 female in byte 2 of `UNIT_FIELD_BYTES_0`
+   * (`network/game/object/update-object/unit-fields.ts:281-285`); the Lua API's numbering is the
+   * different one above, which is why the conversion happens in `unit-bridge.ts` and this field carries
+   * the API's value rather than the wire's. 1 (unknown) is the honest value before `bytes_0` lands and
+   * is what the real client answers for a unit whose gender it does not know.
+   */
+  sex: number;
 }
 
 /** A unit that exists but about which nothing has arrived yet. */
+/**
+ * The grey band, indexed by `playerLevel / 5` and clamped -- see `GetQuestGreenRange` below for the
+ * citation, the version caveat and what its absence cost.
+ */
+const GREY_BAND = [4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 12, 12, 12, 12, 12, 12, 12];
+
+function greyBand(playerLevel: number): number {
+  const index = Math.floor(Math.max(0, playerLevel) / 5);
+  return GREY_BAND[Math.min(index, GREY_BAND.length - 1)];
+}
+
 export function emptySnapshot(): UnitSnapshot {
   return {
     name: null,
@@ -131,6 +159,7 @@ export function emptySnapshot(): UnitSnapshot {
     maxPower: 0,
     reaction: 4,
     classification: 'normal',
+    creatureType: null,
     isPlayer: false,
     dead: false,
     xp: 0,
@@ -139,6 +168,7 @@ export function emptySnapshot(): UnitSnapshot {
     baseMana: 0,
     race: null,
     classInfo: null,
+    sex: 1,
   };
 }
 
@@ -252,7 +282,103 @@ export function installUnitsApi(vm: LuaVM): void {
   // nil, not "", for a unit with no name yet: `GetUnitName` and every caller in the manifest tests the
   // result for truthiness, and an empty string is truthy in Lua.
   fn('UnitName', (args) => [withUnit(args[0], null, (u) => u.name)]);
+
+  /**
+   * `UnitPVPName(unit)` -- THE CHARACTER PANEL'S TITLE, and its absence is the whole of the owner's
+   * "Name" placeholder.
+   *
+   * `CharacterFrame_OnShow`'s third statement is `CharacterNameText:SetText(UnitPVPName("player"))`
+   * (`characterframe.lua:88`) and `characterframe.xml:48` authors that font string as `text="NAME"`. With
+   * the global nil the handler raised on that line, the placeholder stayed on screen, and **everything
+   * after it in `CharacterFrame_OnShow` never ran either** -- `UpdateMicroButtons`, the five
+   * `showNumeric` assignments and the six `ShowTextStatusBarText` calls (`:89-101`). Measured live:
+   * `CharacterNameText` read `"Name"` and `PaperDollItemSlotButton_Update` was reached only because
+   * `PaperDollFrame_OnShow` is a separate handler.
+   *
+   * **It answers the plain name, and the difference from the real client is stated rather than hidden.**
+   * `UnitPVPName` decorates the name with the player's chosen TITLE, which lives in
+   * `PLAYER_CHOSEN_TITLE` and is formatted through `CharTitles.dbc`; this client decodes neither, and
+   * `PlayerTitleFrame` is not fed. A character with no title -- which is every character here -- gets
+   * exactly the plain name from the real client too, so this is the correct answer today and an
+   * incomplete one only once titles are decoded.
+   */
+  fn('UnitPVPName', (args) => [withUnit(args[0], null, (u) => u.name)]);
+
+  /**
+   * `UnitSex(unit)` -> 1 unknown / 2 male / 3 female. See `UnitSnapshot#sex` for the numbering and where
+   * the conversion from the wire's 0/1 happens.
+   *
+   * `ReputationFrame_Update`'s fifteenth line is `local gender = UnitSex("player")`
+   * (`reputationframe.lua:140`), so with this nil the whole panel raised before its row loop -- one of
+   * the two reasons the Reputation tab showed blank names under the XML's own `text="Revered"`
+   * placeholder (`reputationframe.xml:120`). The other is `GetNumFactions`; see `ui/container-bridge.ts`.
+   */
+  fn('UnitSex', (args) => [withUnit(args[0], 1, (u) => u.sex)]);
+
+  /**
+   * `GetText(key, gender, ordinal)` -> the `GlobalStrings` entry, gender-selected.
+   *
+   * The engine's gendered-string lookup, and it is a real engine global rather than Lua: nothing in the
+   * 264 loaded manifest files defines it, and `ReputationFrame_Update:157` calls it as
+   * `GetText("FACTION_STANDING_LABEL"..standingID, gender)`.
+   *
+   * **The gender argument is IGNORED and that is what enUS does.** The gendered form is
+   * `<key>_MALE`/`<key>_FEMALE`, which the real client prefers when present; `GlobalStrings.lua` on this
+   * build carries `FACTION_STANDING_LABEL1..8` with no gendered twins, so the ungendered key is the
+   * only one there is. The lookup tries the gendered key FIRST anyway, so a locale that does ship them
+   * is served without this needing to change: 2 is male and 3 is female, matching `UnitSex` above.
+   */
+  fn('GetText', (args) => {
+    const key = String(args[0] ?? '');
+    if (key === '') {
+      return [null];
+    }
+    const gender = Number(args[1]);
+    const suffix = gender === 2 ? '_MALE' : (gender === 3 ? '_FEMALE' : null);
+    if (suffix !== null) {
+      const gendered = vm.getGlobal(`${key}${suffix}`);
+      if (typeof gendered === 'string') {
+        return [gendered];
+      }
+    }
+    const plain = vm.getGlobal(key);
+    return [typeof plain === 'string' ? plain : null];
+  });
   fn('UnitLevel', (args) => [withUnit(args[0], 0, (u) => u.level)]);
+
+  /**
+   * `GetQuestGreenRange()` -- the green->grey boundary, and its absence broke the WHOLE quest log.
+   *
+   * MEASURED, the owner's console on opening the log:
+   *
+   *     QuestLogFrame: OnShow: [string "UIParent.lua"]:3367:
+   *     attempt to call a nil value (global 'GetQuestGreenRange')
+   *
+   * `:3367` is inside the client's own `GetQuestDifficultyColor`, which `QuestLog_Update` calls to
+   * colour each row by level. So the row loop raised in the middle of the SELECTED row's iteration --
+   * and `QuestLog_OnShow` calls `QuestLogDetailFrame_AttachToQuestLog()` LAST, after `QuestLog_Update`
+   * (`questlogframe.lua:284-296`). One nil global therefore produced three separate symptoms: rows
+   * 3..22 kept `id` 0 and stayed shown (the phantom rows), `HybridScrollFrame_Update` never ran, and
+   * the detail panel was never attached -- so `QuestLogDetailFrame` sat at `UIParent`'s TOPLEFT and its
+   * content measured at `left=19` instead of the log's right page, which read as a blank page.
+   *
+   * **This file's own `GetQuestDifficultyColor` does not cover it**, and that is why the gap survived:
+   * `uiparent.lua` loads later and REDEFINES that global, so the client's version is the one that runs
+   * and it needs this one.
+   *
+   * THE TABLE IS THE REFERENCE'S, BYTE-VERIFIED, and it is not something to invent: `GREY_BAND` at
+   * `benilla-ui/src/script/unit/mod.rs:214-231`, transcribed from the 1.12 binary's `0x80ae98` with
+   * byte-identical twins at `0x81dda8` and `0x8076c0`, indexed `playerLevel / 5` (integer) and clamped
+   * to the last entry. The reference's own test pins it: at player 30 the band is 7, which is entry 6.
+   *
+   * VERSION CAVEAT, stated rather than hidden: that binary is 1.12, so the values are verified for
+   * 1.12. The mechanism is what this takes -- a 20-entry table, an index of `level / 5`, a clamp -- and
+   * the tail is already saturated at 12 from entry 12 (level 60) upward, so 3.3.5a's level-80 cap
+   * indexes entry 16 and lands on the same 12 whatever that build's high entries hold. The entries this
+   * client actually exercises today are the low ones. If a 3.3.5a source for the table appears, it
+   * replaces this and the citation should move with it.
+   */
+  fn('GetQuestGreenRange', () => [greyBand(withUnit('player', 0, (u) => u.level))]);
   fn('UnitHealth', (args) => [withUnit(args[0], 0, (u) => u.health)]);
   fn('UnitHealthMax', (args) => [withUnit(args[0], 0, (u) => u.maxHealth)]);
 
@@ -415,6 +541,17 @@ export function installUnitsApi(vm: LuaVM): void {
   fn('GetComboPoints', () => [getComboPoints(vm)]);
 
   fn('UnitClassification', (args) => [withUnit(args[0], 'normal', (u) => u.classification)]);
+  /**
+   * `UnitCreatureType(unit)` -- the localised word from `CreatureType.dbc`.
+   *
+   * REAL now, and it was previously not registered at all on a stated belief that the wire did not carry
+   * the type. It does: `object/combat.ts` had been reading the word and discarding it. See
+   * `pipeline/dbc/creature-type-data.ts` for the measurement and for why the earlier claim was wrong.
+   *
+   * nil rather than a placeholder for a player or an unresolved type, because `0` IS TRUTHY IN LUA and a
+   * caller testing `if ( UnitCreatureType(unit) )` must get a false answer when there is none.
+   */
+  fn('UnitCreatureType', (args) => [withUnit(args[0], null, (u) => u.creatureType)]);
   fn('UnitIsPlayer', (args) => [withUnit(args[0], false, (u) => u.isPlayer)]);
   fn('UnitIsDead', (args) => [withUnit(args[0], false, (u) => u.dead)]);
   fn('UnitIsDeadOrGhost', (args) => [withUnit(args[0], false, (u) => u.dead)]);
@@ -449,6 +586,24 @@ export function installUnitsApi(vm: LuaVM): void {
   // With the strict form, right-clicking a chicken did nothing and `TargetFrame_CheckLevel` coloured a
   // neutral target's level as if it were unattackable.
   fn('UnitCanAttack', (args) => [withUnit(pickToken(args), false, (u) => u.reaction <= 4)]);
+
+  /**
+   * `UnitCanAssist(a, b)` -- the OTHER half of `SecureActionButton_OnClick`'s disposition test, and the
+   * SECOND missing global on the right-click-a-portrait path.
+   *
+   *     if ( UnitCanAttack("player", unit) ) then ...
+   *     elseif ( UnitCanAssist("player", unit) ) then ...     -- SecureTemplates.lua:493
+   *
+   * Right-clicking our OWN portrait takes the `elseif`: our reaction to ourselves is FRIENDLY, so
+   * `UnitCanAttack` is false and this is evaluated on every such click. It raised second, behind
+   * `SpellIsTargeting` (`api/actions.ts`), which is why only the first showed in the console.
+   *
+   * `reaction > 4` -- strictly friendly -- and the boundary is deliberately the MIRROR of
+   * `UnitCanAttack`'s `<= 4` above, so the two are exhaustive and a neutral unit is attackable and not
+   * assistable. That is the same neutral-point ruling the comment above cites from
+   * `benilla/src/target/click.rs:98`, applied to the complement rather than restated.
+   */
+  fn('UnitCanAssist', (args) => [withUnit(pickToken(args), false, (u) => u.reaction > 4)]);
 
   // `UnitIsUnit(a, b)` is called seven times by TargetFrame.lua and is pure token algebra -- it needs
   // no field at all, only whether two tokens name the same unit. Compared by NAME because that is the
@@ -538,8 +693,6 @@ export function installUnitsApi(vm: LuaVM): void {
   const gaps: Array<[string, string, unknown[]]> = [
     ['UnitThreatSituation', 'no threat table is read from the wire', [null]],
     ['UnitDetailedThreatSituation', 'no threat table is read from the wire', [null]],
-    ['UnitBuff', 'auras are not read out of the update fields yet', []],
-    ['UnitDebuff', 'auras are not read out of the update fields yet', []],
     ['UnitCastingInfo', 'no cast bar feed exists', []],
     ['UnitChannelInfo', 'no cast bar feed exists', []],
     ['UnitIsTapped', 'UNIT_DYNAMIC_FLAGS is not read yet', [false]],
@@ -559,13 +712,18 @@ export function installUnitsApi(vm: LuaVM): void {
   // defines them), so an absent one is not a load-order problem that will fix itself later.
   //
   //  - `SetPortraitTexture(texture, unit)` (UnitFrame.lua:97) renders a unit's 3D portrait into a
-  //    texture. This client has no portrait render target at all, so there is nothing to point it at.
+  //    texture. NO LONGER A GAP and deliberately not listed below: `ui/portrait-bridge.ts` registers it
+  //    for real against the model booth (`ui/scene/model-booth.ts`). It is registered from a bridge
+  //    rather than here because it needs `ctx.frameIdOf` to turn its texture argument back into a
+  //    widget, and this installer is handed a bare VM. The GLUE runtime therefore does not get it,
+  //    which is right: no GlueXML file calls it.
+  //  - `SetPortraitToTexture(texture, path)` stays a gap, and it is a different call -- it takes a FILE
+  //    and applies the engine's circular crop to it. The booth renders models, not crops.
   //  - `IsThreatWarningEnabled()` (UnitFrame.lua:437) gates the threat glow. There is no threat table
   //    on the wire here (see `UnitThreatSituation` above), so answering true would light a glow with
   //    no data behind it.
   gaps.push(
-    ['SetPortraitTexture', 'no portrait render target exists in this client', []],
-    ['SetPortraitToTexture', 'no portrait render target exists in this client', []],
+    ['SetPortraitToTexture', 'the engine applies a circular crop to a FILE; the booth renders models', []],
     ['IsThreatWarningEnabled', 'no threat table is read from the wire', [false]],
     ['GetThreatStatusColor', 'no threat table is read from the wire', [1, 1, 1]],
     // The world-state globals the same chain reaches next, each found by re-measuring rather than
@@ -645,10 +803,12 @@ export function installUnitsApi(vm: LuaVM): void {
     ['UnitIsInMyGuild', 'no guild roster is fed', [false]],
     ['IsGuildLeader', 'no guild roster is fed', [false]],
     ['CheckInteractDistance', 'no interact-distance test exists in this client', [false]],
-    // `UnitAura(unit, index, filter)` is the ARRAY form `BuffFrame_Update` walks (bufffframe.lua:125);
-    // `UnitBuff`/`UnitDebuff` above are the same gap by their other two names. Answering nothing
-    // terminates the walk at index 1, which is what a unit with no auras looks like.
-    ['UnitAura', 'auras are not read out of the update fields yet', []],
+    // `UnitAura`, `UnitBuff` and `UnitDebuff` HAVE LEFT THIS LIST. Their note read "auras are not read
+    // out of the update fields yet" and **the note's own premise was wrong for this build**: 3.3.5a has
+    // no aura update fields at all -- they were removed after 1.12 and replaced by `SMSG_AURA_UPDATE`
+    // (0x496) / `SMSG_AURA_UPDATE_ALL` (0x495), which had no subscriber. They are real now, in
+    // `ui/aura-bridge.ts`, over `network/game/object/auras.ts`. See that file's header for the two checks
+    // that establish the version difference.
     /**
      * `GetWeaponEnchantInfo()` -> `hasMainHand, mainExpiration, mainCharges, hasOffHand, ...`.
      *
@@ -721,12 +881,140 @@ export function installUnitsApi(vm: LuaVM): void {
    * runs but resolved at CALL time, which is after `Constants.lua` has defined the table; the
    * fallback exists only for a VM where it somehow has not.
    *
-   * THE GREEN RANGE IS NOT PINNED. The engine's `GetQuestGreenRange()` is a level-dependent constant
-   * this client has no source for, so anything below the yellow band is green rather than fading to
-   * grey at low relative level. Said plainly rather than approximated with an invented table: the
-   * visible consequence is that a much lower-level unit's number is green where the real client would
-   * grey it.
+   * THE GREEN RANGE IS PINNED NOW, and this paragraph used to say it was not. `GetQuestGreenRange` is
+   * registered above off the reference's byte-verified grey-band table, so the grey leg is reachable
+   * rather than permanently green. Note that this function is REDEFINED by `uiparent.lua` when the
+   * manifest loads, so on the world screen it is the client's own version that runs -- which is
+   * precisely why the missing global mattered.
    */
+  /**
+   * THE CHARACTER SHEET'S OTHER THREE TABS, and each is declared with the value that makes the panel
+   * render EMPTY rather than render placeholders.
+   *
+   * The owner reported blank rows with "Revered" on every one of them in Reputation, and blank rows in
+   * Skills. Neither was a default being returned: `reputationframe.xml:120` authors the standing font
+   * string as `text="Revered"` and `reputationframe.xml:32` authors the row's collapse button with
+   * `Interface\Buttons\UI-MinusButton-UP` as its NormalTexture, both SHOWN. So what the owner saw was
+   * the client's own XML, untouched, because the routine that fills the rows never ran:
+   * `ReputationFrame_Update` raised on its FIRST line, `local numFactions = GetNumFactions()`
+   * (`reputationframe.lua:124`) -- measured live, that exact error string. `SkillFrame_UpdateSkills`
+   * raises the same way on `GetNumSkillLines()` (`skillframe.lua:403`).
+   *
+   * **0 is the answer that makes the client hide those rows itself.** With `numFactions` 0,
+   * `FauxScrollFrame_Update` reports no rows and the loop's `factionIndex <= numFactions` is false for
+   * every row, which takes the `else` arm that HIDES the row -- placeholder text, minus button and all.
+   * A nil would raise again inside `FauxScrollFrame_Update`; that is why these carry a result and the
+   * `Get*Info` pair does not.
+   *
+   * WHERE THE REAL DATA WOULD COME FROM, so this is a named gap and not a shrug:
+   *  - factions: `SMSG_INITIALIZE_FACTIONS` (0x122) -- 128 (flags, standing) pairs -- joined to
+   *    `Faction.dbc` for the name, parent and reputation index. Neither the opcode nor the DBC is read
+   *    here; `network/game/opcode.js` has no subscriber for it.
+   *  - skills: `PLAYER_SKILL_INFO_1_1`, 128 three-word records on the player descriptor, joined to
+   *    `SkillLine.dbc` for the name and `SkillLineCategory` for the header rows. The descriptor block
+   *    is decoded as raw words today and nothing reads it.
+   *  - the pet tab: `HasPetUI`/`GetNumCompanions`/`UnitCreatureFamily` need a pet unit and
+   *    `SMSG_PET_SPELLS`, and `CreatureFamily.dbc`. With `HasPetUI` false, `PetPaperDollFrame_Update`
+   *    returns on its second line (`petpaperdollframe.lua:467-469`), which is why `PetLevelText` still
+   *    reads its own XML placeholder `text="Level level race class"` (`petpaperdollframe.xml:131`) --
+   *    that placeholder is the client's, not ours, and the honest fix is a pet feed, not a SetText.
+   *
+   * ONE THING THAT IS NOT A DEFECT: the magenta bars at the bottom of the Pets tab are CORRECT. The pet
+   * XP bar is authored `<BarColor r="0.58" g="0.0" b="0.55"/>` (`petpaperdollframe.xml:206`) -- the same
+   * purple `GetRestState` above documents for the player's own unrested XP bar.
+   */
+  gaps.push(
+    // THE REPUTATION TAB'S GLOBALS ARE GONE FROM THIS LIST -- `GetNumFactions`, `GetFactionInfo`,
+    // `GetWatchedFactionInfo`, `SetWatchedFactionIndex`, `CollapseFactionHeader`,
+    // `ExpandFactionHeader` and `IsFactionInactive` are real in `ui/reputation-bridge.ts` now, fed by
+    // `network/game/object/reputation.ts` (the 0x122/0x123/0x124 subscriber this list used to say did
+    // not exist) joined to `pipeline/dbc/faction-data.ts`. Deliberately NOT left declared here as
+    // well, for the reason the skills block below gives: a stub the bridge overrides would still put
+    // its name in the load report, and a report naming a gap that has closed is treated as a defect.
+    // THE SKILLS TAB'S OWN GLOBALS ARE GONE FROM THIS LIST -- `GetNumSkillLines`, `GetSkillLineInfo`,
+    // `GetSelectedSkill`, `SetSelectedSkill`, `CollapseSkillHeader`, `ExpandSkillHeader`,
+    // `UnitCharacterPoints` and `GetAdjustedSkillPoints` are real (or, for the last, declared) in
+    // `ui/skills-bridge.ts` now. They are deliberately NOT left declared here as well: a stub the
+    // bridge overrides would still put its name in the load report, and a report that names a gap that
+    // has closed is treated as a defect on this project.
+    ['AbandonSkill', 'unlearning a profession needs CMSG_UNLEARN_SKILL, which is not sent -- and '
+      + 'GetSkillLineInfo answers isAbandonable 0 for every row, so nothing offers it', []],
+    ['HasPetUI', 'no pet unit is tracked and SMSG_PET_SPELLS has no subscriber', [false, false]],
+    ['GetNumCompanions', 'SMSG_PET_SPELLS / the companion list are not decoded', [0]],
+    ['GetCompanionInfo', 'as GetNumCompanions', []],
+    ['CallCompanion', 'as GetNumCompanions', []],
+    ['DismissCompanion', 'as GetNumCompanions', []],
+    ['UnitCreatureFamily', 'CreatureFamily.dbc is not joined and no pet unit is tracked', [null]],
+    ['UnitHasRelicSlot', 'no class relic rule is decoded, so the ranged slot cannot be known to be a '
+      + 'relic slot; the only effect is which empty-slot art the ranged button shows', [false]],
+    // The rest of what those panels reach, each found the same way -- by pcall-ing the client's own
+    // update routine and reading the next call it died on.
+    // `IsFactionInactive` has LEFT this list -- `ui/reputation-bridge.ts` answers it from the wire's
+    // own `FACTION_FLAG_INACTIVE` bit. The selection pair stays, and the reason is no longer "as
+    // GetNumFactions" (which is real now): the reputation pane tracks its selected row in ENGINE state
+    // that nothing in the manifest reads back, so neither has an observable effect here. 0 is the
+    // "nothing selected" answer `ReputationFrame_Update` treats as no highlight.
+    ['GetSelectedFaction', 'the selected reputation row is engine state nothing reads back', [0]],
+    ['SetSelectedFaction', 'as GetSelectedFaction -- the write half of a value nothing reads', []],
+    // THE CURRENCY FAMILY, and it is a NEW gap rather than an old one: `Blizzard_CombatLog` is not the
+    // only addon `PLAYER_LOGIN` loads -- `Blizzard_TokenUI` is in the startup set, and its
+    // `BackpackTokenFrame_Update` (`blizzard_tokenui.lua:176-180`) is hooked to the bag frames. With
+    // `GetBackpackCurrencyInfo` nil that raised on **`OpenBackpack()`**, i.e. on opening a bag at all,
+    // which is measured and is why it is declared here beside the panels rather than left for later.
+    ['GetBackpackCurrencyInfo', 'SMSG_INIT_CURRENCY / the currency descriptor block are not decoded, '
+      + 'so no watched token exists; nil is what makes BackpackTokenFrame_Update hide its buttons',
+    []],
+    ['GetCurrencyListSize', 'as GetBackpackCurrencyInfo', [0]],
+
+    // THE MINIMAP CLUSTER'S DROPDOWNS, and every one of these was killing an `OnLoad` in the owner's
+    // log rather than merely being absent. `MinimapCluster` hangs five dropdown frames off itself and
+    // each initialises in its own `<OnLoad>`, so a nil here is not a menu that opens empty -- it is a
+    // raise before `UIDropDownMenu_Initialize` is reached.
+    //
+    // THE VALUES ARE THE CLIENT'S OWN EMPTY STATES, taken from each call site:
+    //  - `GetBattlefieldStatus(i)` is compared `status ~= "none"` (`battlefieldframe.lua:600-602`), so
+    //    **the string "none" is the engine's own word for an unused queue slot** and nil would make
+    //    that comparison true -- adding a spacer and a title for a battleground nobody is queued for.
+    //  - `GetLFGProposal()` feeds `proposalExists` in the client's own `GetLFGMode`
+    //    (`uiparent.lua:3570-3576`); nil is "no dungeon has been offered".
+    //  - `GetNumVoiceSessions()` bounds `for id = 1, count` (`voicechat.lua:251-253`), so it must be a
+    //    number; 0 is true -- there is no voice transport in this client at all.
+    ['GetBattlefieldStatus', 'no battleground queue exists: SMSG_BATTLEFIELD_STATUS has no subscriber, '
+      + 'so every queue slot is empty', ['none']],
+    ['GetLFGProposal', 'no LFG queue exists: the dungeon finder is not decoded', []],
+    ['GetLFGInfoServer', 'as GetLFGProposal -- the queue state the client reads beside the proposal',
+    []],
+    ['GetLFGRoleUpdate', 'as GetLFGProposal -- the role-check state', []],
+    ['GetNumVoiceSessions', 'this client has no voice transport', [0]],
+    ['GetVoiceSessionInfo', 'as GetNumVoiceSessions -- unreachable behind a count of 0', []],
+    ['GetCurrencyListInfo', 'as GetBackpackCurrencyInfo', []],
+    ['GetNumWatchedTokens', 'as GetBackpackCurrencyInfo', [0]],
+    ['ExpandCurrencyList', 'as GetBackpackCurrencyInfo', []],
+    ['SetCurrencyBackpack', 'as GetBackpackCurrencyInfo', []],
+    ['SetCurrencyUnused', 'as GetBackpackCurrencyInfo', []],
+    // THE TITLE PICKER -- the empty select at the top of the Character tab.
+    //
+    // **0 titles is what makes the client HIDE the control itself**, which is why these carry values.
+    // `PlayerTitleFrame_UpdateTitles` counts the known titles and ends
+    // `if ( titleCount < 2 ) then PlayerTitleFrame:Hide(); PlayerTitlePickerFrame:Hide();`
+    // (`paperdollframe.lua:2619-2621`) -- so with `GetNumTitles` answering 0 the whole picker goes away
+    // rather than sitting there empty. It was sitting there empty because the routine raised on its own
+    // FIRST line, `GetCurrentTitle()` (`:2593`), and never reached the hide.
+    //
+    // `IsTitleKnown` is compared `~= 0` (`:2605`), not tested for truth, so 0 is the value and false
+    // would read as "known" in Lua. `GetCurrentTitle` answers 0, which the same routine maps to the
+    // `PAPERDOLL_SELECT_TITLE` caption -- unreachable here, since the hide comes first.
+    //
+    // The feed: `PLAYER_CHOSEN_TITLE` on the descriptor plus the known-title bitmask in
+    // `PLAYER__FIELD_KNOWN_TITLES`, joined to `CharTitles.dbc`. None of the three is read.
+    ['GetNumTitles', 'the known-title bitmask (PLAYER__FIELD_KNOWN_TITLES) and CharTitles.dbc are not '
+      + 'read, so no title is known; 0 is what makes the client hide its own picker', [0]],
+    ['GetCurrentTitle', 'PLAYER_CHOSEN_TITLE is not read', [0]],
+    ['IsTitleKnown', 'as GetNumTitles -- compared against 0, so 0 and not false', [0]],
+    ['GetTitleName', 'as GetNumTitles -- CharTitles.dbc is not joined', []],
+    ['SetCurrentTitle', 'CMSG_SET_TITLE is not sent; with no title known there is none to choose', []],
+  );
+
   vm.run(
     `function GetQuestDifficultyColor(level)
       local colors = QuestDifficultyColors

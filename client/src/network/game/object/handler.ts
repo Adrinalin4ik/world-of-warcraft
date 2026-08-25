@@ -1,12 +1,22 @@
 import EventEmitter from 'events';
 import { CombatHandler } from './combat';
+import { AuraHandler } from './auras';
 import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
 import { ItemHandler } from './items';
 import { LootHandler } from './loot';
+import { GossipHandler } from './gossip';
+import { MerchantHandler } from './merchant';
+import { ReputationHandler } from './reputation';
+import GameObjectHandler from './game-object';
+import { QuestHandler } from './quest';
+import { LevelUpHandler } from './level-up';
+import { GroupHandler } from './group';
+import { ChatMessageHandler } from './chat';
 import { MonsterMovementtHandler } from './monster-movement/handler';
 import { PlayerMovementHandler } from './player/movement';
 import { SpellHandler } from './spells';
+import { TrainerHandler } from './trainer';
 import { UpdateObjectHandler } from './update-object/handler';
 
 export class ObjectHandler extends EventEmitter {
@@ -63,6 +73,80 @@ export class ObjectHandler extends EventEmitter {
    */
   public lootHandler: LootHandler;
 
+  /**
+   * GROUPS, DUELS, DUNGEON DIFFICULTY AND INSTANCE RESET. PUBLIC for the same reason the others are:
+   * `ui/group-bridge.ts` reads the roster to answer `GetNumPartyMembers`/`UnitInParty` and owns the
+   * only sends of `CMSG_GROUP_INVITE`, `CMSG_DUEL_ACCEPTED`, `MSG_SET_DUNGEON_DIFFICULTY` and the rest
+   * of the unit-popup family.
+   */
+  public groupHandler: GroupHandler;
+
+  /**
+   * CHAT. PUBLIC for the reason the others are: `ui/chat-bridge.ts` reads its lines to raise the
+   * client's own `CHAT_MSG_*` events, and this handler owns the only send of `CMSG_MESSAGECHAT`.
+   *
+   * NOT `network/game/chat/handler.js`, which is never constructed and has four independent faults
+   * that stop it running at all -- see `object/chat.ts`' header.
+   */
+  public chatHandler: ChatMessageHandler;
+
+  /**
+   * TALKING TO AN NPC. PUBLIC for the same reason the others are: `ui/gossip-bridge.ts` reads the menu
+   * to answer `GetGossipOptions`, and this handler owns the only sends of `CMSG_GOSSIP_HELLO`,
+   * `CMSG_GOSSIP_SELECT_OPTION` and `CMSG_NPC_TEXT_QUERY`.
+   *
+   * The hello is also the door every OTHER npc service comes through, so the world's right click
+   * drives this one and not the merchant handler -- see `object/gossip.ts`' header.
+   */
+  public gossipHandler: GossipHandler;
+
+  /**
+   * BUYING AND SELLING. PUBLIC for the same reason: `ui/merchant-bridge.ts` reads the vendor's stock to
+   * answer `GetMerchantItemInfo`, and this handler owns the only sends of `CMSG_LIST_INVENTORY`,
+   * `CMSG_BUY_ITEM`, `CMSG_SELL_ITEM`, `CMSG_BUYBACK_ITEM` and `CMSG_REPAIR_ITEM`.
+   */
+  public merchantHandler: MerchantHandler;
+
+  /**
+   * THE CLASS TRAINER. PUBLIC for the same reason the others are: `ui/trainer-bridge.ts` reads the
+   * service list to answer `GetTrainerServiceInfo`, and this handler owns the only sends of
+   * `CMSG_TRAINER_LIST` and `CMSG_TRAINER_BUY_SPELL`.
+   *
+   * Like the merchant, the door in is the GOSSIP hello -- the server answers a trainer's hello with
+   * `SMSG_TRAINER_LIST` directly, or with a menu whose training option leads to it -- so nothing here
+   * has to be driven by the world's right click.
+   */
+  public trainerHandler: TrainerHandler;
+
+  public reputationHandler: ReputationHandler;
+
+  /**
+   * QUESTS. PUBLIC for the same reason the others are: `ui/quest-bridge.ts` reads the open panel and
+   * the template cache to answer `GetTitleText`/`GetQuestLogTitle`, and this handler owns every send
+   * in the `CMSG_QUESTGIVER_*` family plus `CMSG_QUEST_QUERY` and `CMSG_QUESTLOG_REMOVE_QUEST`.
+   *
+   * The door in is the gossip menu's quest rows and `SMSG_QUESTGIVER_QUEST_LIST`; see `quest.ts`'
+   * header for where the log's own state lives, which is NOT here.
+   */
+  public questHandler: QuestHandler;
+
+  /** World objects: the template name query, and `CMSG_GAMEOBJ_USE`. See `game-object.ts`. */
+  public gameObjectHandler: GameObjectHandler;
+
+  /** LEVELLING UP -- `SMSG_LEVELUP_INFO`, which had no subscriber at all. See `level-up.ts`. */
+  public levelUpHandler: LevelUpHandler;
+
+  /**
+   * BUFFS AND DEBUFFS. PUBLIC for the same reason every handler above is: `ui/aura-bridge.ts` reads the
+   * per-unit slot map to answer `UnitAura`, and this handler owns the only send of `CMSG_CANCEL_AURA`.
+   *
+   * `SMSG_AURA_UPDATE` (0x496) and `SMSG_AURA_UPDATE_ALL` (0x495) had no subscriber at all until this
+   * line, which is what `api/units.ts` recorded as the reason `UnitAura`/`UnitBuff`/`UnitDebuff` were
+   * declared gaps -- with a comment blaming the update fields, which in 3.3.5a do not carry auras at
+   * all. See `auras.ts`' header for the version difference.
+   */
+  public auraHandler: AuraHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -77,6 +161,24 @@ export class ObjectHandler extends EventEmitter {
     this.combatLogHandler = new CombatLogHandler(this.game);
     this.itemHandler = new ItemHandler(this.game);
     this.lootHandler = new LootHandler(this.game);
+    this.groupHandler = new GroupHandler(this.game);
+    this.chatHandler = new ChatMessageHandler(this.game);
+    this.gossipHandler = new GossipHandler(this.game);
+    this.merchantHandler = new MerchantHandler(this.game);
+    this.trainerHandler = new TrainerHandler(this.game);
+    // REPUTATION. `SMSG_INITIALIZE_FACTIONS` (0x122) had no subscriber at all until this line, which
+    // is what `api/units.ts` recorded as the reason the whole reputation tab was a declared gap.
+    this.reputationHandler = new ReputationHandler(this.game);
+    // QUESTS. The whole `SMSG_QUESTGIVER_*` family had no subscriber until this line, which is what
+    // `gossip-bridge.ts:231` recorded as the reason `SelectGossipAvailableQuest` was a declared gap.
+    this.questHandler = new QuestHandler(this.game);
+    this.gameObjectHandler = new GameObjectHandler(this.game);
+    // LEVELLING UP. `SMSG_LEVELUP_INFO` (0x1D4) likewise had no subscriber, so `PLAYER_LEVEL_UP` was
+    // never fired and the client's own congratulation lines never printed.
+    this.levelUpHandler = new LevelUpHandler(this.game);
+    // AURAS. The pair had no subscriber, so every buff and debuff the server sent was framed, emitted
+    // and dropped -- the owner's "ауры и бафы с дебафами не отображаются".
+    this.auraHandler = new AuraHandler(this.game);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

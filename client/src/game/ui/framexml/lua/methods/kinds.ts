@@ -16,9 +16,19 @@
  */
 import { FocusSink, MethodContext, MethodTable, onFrameTeardown, registerMethods } from '../object';
 import { Anchor } from '../../../layout';
-import { Widget } from '../../../widget';
-import { applyFontObject, ensureFont, fontObjectName, notImplemented, warnOnce, widgetOf } from './region';
+import { MouseButtonName, Widget } from '../../../widget';
+
+import {
+  applyFontObject, ensureFont, fontObjectName, formatText, notImplemented, warnOnce, widgetOf,
+} from './region';
 import { measureText } from '../../../text';
+import { effectiveFont } from '../../../widget';
+
+/** Every button `RegisterForClicks` and `AnyUp`/`AnyDown` can name. */
+const ALL_MOUSE_BUTTONS = [
+  'LeftButton', 'RightButton', 'MiddleButton', 'Button4', 'Button5',
+] as const satisfies readonly MouseButtonName[];
+
 
 /** `0..1` floats to the `#rrggbb` string `Widget` stores colors as -- duplicated from `region.ts`'s
  * private helper of the same shape rather than exported, since it is three lines and not worth a
@@ -222,7 +232,38 @@ function applyButtonFont(ctx: MethodContext, self: number): void {
  * STATE texture, so this does not repeat that branch.
  */
 function applyStateArg(region: Widget, arg: unknown): void {
-  region.sprite = arg === undefined || arg === null || arg === '' ? null : String(arg);
+  if (arg === undefined || arg === null || arg === '') {
+    region.sprite = null;
+    return;
+  }
+  /**
+   * **A NON-STRING IS NOT A PATH, and `String(arg)` on a table produced literal `"[object Object]"`.**
+   *
+   * The owner's console, on the world screen:
+   *
+   *     glue art missing: [object Object] ([object Object])
+   *     Failed to decode texture: [OBJECT OBJECT].BLP
+   *
+   * `SetNormalTexture` and its siblings accept a TEXTURE OBJECT as well as a path -- the engine then
+   * copies that texture's own sprite -- and `skillbuttons`/`GetSpellTabInfo` pass exactly that
+   * (`Widget#sprite`'s note on `skillLineTab:SetNormalTexture(texture)`). Stringifying it registered a
+   * nonsense path, which `registerTreeArt` then walked into a fetch and a BLP decode of a 404's HTML.
+   *
+   * DECLARED rather than guessed: copying the other region's live sprite is the engine's behaviour and
+   * would need the wrapper resolved back to a widget, which this helper has no context for. Answering
+   * null leaves the slot EMPTY -- visibly missing art, which is honest -- instead of a fabricated path
+   * that reports as a decode failure and blames the texture pipeline.
+   */
+  if (typeof arg !== 'string') {
+    warnOnce(
+      'SetNormalTexture/SetPushedTexture/SetDisabledTexture was given a TEXTURE OBJECT rather than a '
+      + 'path. The engine copies the other texture sprite; this client leaves the slot empty, so the '
+      + 'button draws without that state art.',
+    );
+    region.sprite = null;
+    return;
+  }
+  region.sprite = arg;
 }
 
 /**
@@ -340,6 +381,32 @@ const BUTTON: MethodTable = {
     applyButtonFont(ctx, self);
     return [];
   },
+  /**
+   * `SetFormattedText(format, ...)` -- REAL API on a Button, and **the gossip menu does not draw a
+   * single row without it.**
+   *
+   * FOUND LIVE at a Northshire questgiver. `GossipFrameAvailableQuestsUpdate` and
+   * `GossipFrameActiveQuestsUpdate` both title their row with
+   * `titleButton:SetFormattedText(NORMAL_QUEST_DISPLAY, select(i, ...))`
+   * (`gossipframe.lua:93,96,124,127`) -- on the BUTTON, not on its font string. With the method absent
+   * the raise landed inside the loop that builds the rows, so a questgiver's menu came up with five
+   * buttons shown, all of them blank, and the greeting empty: measured
+   * `options: []`, one available quest decoded off the wire as
+   * `{ questId 18, title "Brotherhood of Thieves" }`, and `GossipTitleButton1:GetText()` empty.
+   *
+   * `GossipFrameOptionsUpdate` uses plain `SetText`, which is why a pure vendor's "Let me browse your
+   * goods" row would have drawn and a questgiver's would not -- the same document, two methods, one
+   * present.
+   *
+   * Delegates through `ensureLabelId` + `applyButtonFont` exactly as `SetText` above does, and shares
+   * `region.ts#formatText` with the FontString version so the two cannot drift on `%s` handling.
+   */
+  SetFormattedText: (ctx, self, args) => {
+    const label = ctx.registry.widget(ensureLabelId(ctx, self))!;
+    label.text = formatText(args);
+    applyButtonFont(ctx, self);
+    return [];
+  },
   GetText: (ctx, self) => {
     const id = buttonLabels.get(self);
     return [id === undefined ? '' : ctx.registry.widget(id)!.text];
@@ -369,18 +436,86 @@ const BUTTON: MethodTable = {
     return [measureText(label.text, ensureFont(label), 1).width];
   },
   /**
-   * Which mouse buttons fire `OnClick` -- `RegisterForClicks("LeftButtonDown", ...)`.
+   * `GetTextHeight()` -- the twin of `GetTextWidth`, and **a blocker for the gossip menu rather than a
+   * symmetry exercise.**
    *
-   * A declared gap rather than a stored set, because storing it would be a lie in the other direction:
-   * `ui/input.ts` routes only a LEFT button press and hardcodes `"LeftButton"` (task-9 report, fix
-   * round 2), so nothing downstream could honour a registration for anything else. The two callers in
-   * this manifest are `CharacterSelectRotateLeft`/`Right` (characterselect.xml), whose held-down
-   * rotation is an `<OnUpdate>` this runtime does not dispatch anyway.
+   * `GossipResize(titleButton)` is one line -- `titleButton:SetHeight(titleButton:GetTextHeight() + 2)`
+   * (`gossipframe.lua:171-173`) -- and it runs for EVERY row of a gossip menu, from all three of
+   * `GossipFrameAvailableQuestsUpdate`, `GossipFrameActiveQuestsUpdate` and
+   * `GossipFrameOptionsUpdate`. A nil method there raises inside the loop that is building the buttons,
+   * so the menu would have come up with NO ROWS AT ALL -- including "Let me browse your goods", which
+   * is how most vendors in the game are opened. `questframe.lua:239,279` calls it the same way.
+   *
+   * Found by a static sweep of every name `MerchantFrame`/`GossipFrame` calls against what this client
+   * registers, not by a click. It is the one genuine gap that sweep turned up: `SetDesaturation` looked
+   * like a second, and is not -- it is FrameXML's own (`uiparent.lua:2799`), and it reads the RESULT of
+   * `texture:SetDesaturated`, which is a declared gap here answering nothing, so the client's own
+   * `if ( not shaderSupported )` fallback takes over and greys the icon with `SetVertexColor` instead.
+   * That is exactly what the real client does on hardware without the shader, so the gap composes
+   * correctly and needed no change.
+   *
+   * Through `effectiveFont` and NOT through `ensureFont`, which is the one place this differs from its
+   * sibling above -- the same asymmetry `region.ts#GetStringHeight` documents, and here it is
+   * load-bearing rather than incidental: a gossip option long enough to wrap is precisely the case
+   * `GossipResize` exists for, and `ensureFont` would report one line's height and collapse a two-line
+   * option onto one row. Measured at scale 1, for the reason `GetTextWidth` gives.
    */
-  RegisterForClicks: notImplemented(
-    'RegisterForClicks',
-    'ui/input.ts routes only a left-button press, so no other registration could be honoured',
-  ),
+  GetTextHeight: (ctx, self) => {
+    const id = buttonLabels.get(self);
+    if (id === undefined) {
+      return [0];
+    }
+    const label = ctx.registry.widget(id)!;
+    return [measureText(label.text, effectiveFont(label) ?? ensureFont(label), 1).height];
+  },
+  /**
+   * `RegisterForClicks("LeftButtonUp", "RightButtonUp", ...)` -- which buttons fire `OnClick`.
+   *
+   * **THIS WAS A DECLARED GAP AND THE GAP WAS WHY NOTHING COULD BE EQUIPPED.** Its reason was true when
+   * written -- "`ui/input.ts` routes only a left-button press and hardcodes `LeftButton`, so nothing
+   * downstream could honour a registration" -- and both halves of that are now false: the router reads
+   * `PointerEvent#button` and reports the real one (`ui/input.ts#buttonName`). Its census was also wrong:
+   * it named two callers, and there are **73 registrations across the manifest**, 37 of them exactly
+   * `"LeftButtonUp", "RightButtonUp"`, including `ContainerFrameItemButton_OnLoad`
+   * (`containerframe.lua:614`) -- the bag slot whose right-click is the equip gesture.
+   *
+   * The whole set of forms in the manifest is `<Button>Up`, `<Button>Down`, `AnyUp` and `AnyDown`. Only
+   * the BUTTON half is kept; see `Widget#clickButtons` for why the phase is not honoured and why that is
+   * the safe direction.
+   *
+   * An UNPARSEABLE entry is warned about rather than dropped silently, and it does not poison the rest of
+   * the call: a registration this runtime cannot read must not turn into "no buttons at all", which would
+   * make the frame dead to the mouse.
+   *
+   * **The XML ATTRIBUTE form is NOT wired, and it is one frame.** `registerForClicks=` appears exactly
+   * once in the manifest -- `LFRBrowseButtonTemplate` (`lfrframe.xml:41`) -- and `loader.ts` does not
+   * issue it. Left as a named gap rather than plumbed: the raid browser has no feed in this client, so
+   * the attribute has no reachable effect, and every button that matters registers in Lua.
+   */
+  RegisterForClicks: (ctx, self, args) => {
+    const buttons = new Set<MouseButtonName>();
+    for (const arg of args) {
+      if (typeof arg !== 'string') {
+        continue;
+      }
+      const entry = arg.trim();
+      const phase = /(Up|Down)$/.exec(entry);
+      const name = phase === null ? entry : entry.slice(0, -phase[1].length);
+      if (name === 'Any') {
+        for (const any of ALL_MOUSE_BUTTONS) {
+          buttons.add(any);
+        }
+      } else if ((ALL_MOUSE_BUTTONS as readonly string[]).includes(name)) {
+        buttons.add(name as MouseButtonName);
+      } else {
+        warnOnce(`RegisterForClicks: unrecognised registration '${entry}'`);
+      }
+    }
+    // An empty call is `RegisterForClicks()` with no arguments, which the engine treats as clearing the
+    // registration -- so the frame goes back to the LEFT-only default rather than to "no buttons".
+    widgetOf(ctx, self).clickButtons = buttons.size === 0 ? null : buttons;
+    return [];
+  },
 
   // Each of the five state-moving methods below repaints the CAPTION as well as the art: a caller that
   // disables a button and reads its label back must not have to wait for the next frame's poll, and the
@@ -442,8 +577,11 @@ const BUTTON: MethodTable = {
   },
   // Real `Click()` fires even on a disabled button -- it is a forced simulated click, not a pointer
   // event the input router would refuse.
-  Click: (ctx, self) => {
-    widgetOf(ctx, self).onClick?.();
+  Click: (ctx, self, args) => {
+    // `Click([button])` -- the argument is real FrameXML (`Click("RightButton")` appears in the
+    // manifest) and it defaults to the left button, which is what a bare `Click()` means.
+    const button = typeof args[0] === 'string' ? (args[0] as MouseButtonName) : 'LeftButton';
+    widgetOf(ctx, self).onClick?.(button);
     return [];
   },
 
@@ -550,6 +688,26 @@ const CHECKBUTTON: MethodTable = {
     return [];
   },
   GetChecked: (ctx, self) => [widgetOf(ctx, self).checked],
+  /**
+   * THE DISABLED-CHECKED ART -- a fourth state texture, declared rather than drawn.
+   *
+   * From the owner's world-map log:
+   *
+   *     warning: SetDisabledCheckedTexture is not in this runtime's object model
+   *              (first: WorldMapFrame.xml:WorldMapTrackQuest)
+   *
+   * A CheckButton has four state textures in the engine -- normal, pushed, checked and
+   * DISABLED-checked -- and this widget layer models three (`ensureStateTexture` above). The fourth is
+   * what a ticked box that is also greyed out draws, which `WorldMapTrackQuest` is whenever the
+   * selected quest cannot be tracked. Declared on CHECKBUTTON and not BUTTON, since a plain Button has
+   * no checked concept at all -- the same split the header of this file records.
+   */
+  SetDisabledCheckedTexture: notImplemented('SetDisabledCheckedTexture',
+    'this widget layer models three button state textures (normal, pushed, checked) and not the '
+    + 'fourth disabled-checked one'),
+  GetDisabledCheckedTexture: notImplemented('GetDisabledCheckedTexture',
+    'as SetDisabledCheckedTexture -- there is no fourth state region to hand back'),
+
   SetCheckedTexture: (ctx, self, args) => {
     const region = ctx.registry.widget(ensureCheckedTextureId(ctx, self))!;
     applyStateArg(region, args[0]);

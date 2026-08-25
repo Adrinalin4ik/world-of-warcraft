@@ -46,6 +46,16 @@ export interface AnimCountersSnapshot {
    * frame actually spends, which is why the doc was corrected to the code rather than the reverse.
    */
   materialsEvaluated: number;
+  /**
+   * Instances that solved a MASKED UPPER-BODY OVERLAY this frame -- a second sampled track on the
+   * bones inside the split subtree (`anim/upper-body.ts`).
+   *
+   * The population that pays for the split, counted separately from `posed` because that is the whole
+   * cost question: the overlay is armed for the length of one swing clip and retires itself, so a
+   * fight among forty units still only ever has a handful of these. A number here that tracks `posed`
+   * would mean something is failing to retire.
+   */
+  overlays: number;
 }
 
 class AnimCounters implements AnimCountersSnapshot {
@@ -55,6 +65,7 @@ class AnimCounters implements AnimCountersSnapshot {
   bonesSolved = 0;
   posesApplied = 0;
   materialsEvaluated = 0;
+  overlays = 0;
 
   reset(): void {
     this.resident = 0;
@@ -63,6 +74,7 @@ class AnimCounters implements AnimCountersSnapshot {
     this.bonesSolved = 0;
     this.posesApplied = 0;
     this.materialsEvaluated = 0;
+    this.overlays = 0;
   }
 
   snapshot(): AnimCountersSnapshot {
@@ -73,8 +85,19 @@ class AnimCounters implements AnimCountersSnapshot {
       bonesSolved: this.bonesSolved,
       posesApplied: this.posesApplied,
       materialsEvaluated: this.materialsEvaluated,
+      overlays: this.overlays,
     };
   }
 }
 
 export const animCounters = new AnimCounters();
+
+/**
+ * Readable as `window.animCounters` -- the same publish `blendControl`/`overlayControl` get, and for
+ * the same reason: the per-frame animation population is only measurable from a probe, and the perf
+ * HUD's payload copy (`pages/game/index.tsx`) is behind `showDebug`. Read only in practice; nothing
+ * in the client reads it back off `window`.
+ */
+if (typeof window !== 'undefined') {
+  (window as unknown as Record<string, unknown>).animCounters = animCounters;
+}

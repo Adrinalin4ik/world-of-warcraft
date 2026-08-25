@@ -1,0 +1,201 @@
+/**
+ * The model PANE: the two things a `<PlayerModel>` needs that the glue `<ModelFFX>` never did.
+ *
+ * TWO happy-path tests, by the project owner's standing budget, on the two halves that were absent:
+ *
+ *  1. **The paper doll's own chain, run in a real VM against the client's own Lua** -- `Model_OnLoad`
+ *     and `PaperDollFrame_OnEvent`'s `SetUnit`, both transcribed verbatim from the shipped files. They
+ *     RAISED before this round (measured live: `CharacterModelFrame.SetRotation` read `nil`), so the
+ *     pane had no rig at all and drew nothing. The assertion is that the unit and the yaw arrive.
+ *  2. **The framing arithmetic**, which decides whether the figure is in the frame at all -- and which
+ *     no screenshot can attribute, because a cropped figure and a mis-scaled one look alike.
+ *
+ * Everything else about the booth is verified in a real browser on an ordinary online login, which is
+ * where a wrong camera or a wrong V flip is a visibly wrong picture rather than a failing expectation.
+ */
+import * as THREE from 'three';
+
+import { applyBlendingModeToMaterial } from '../../../pipeline/m2/material';
+import { allowDestinationAlpha, flipCropV, portraitTargetSide } from '../model-booth';
+import { LuaVM } from '../../framexml/lua/vm';
+import { FrameRegistry, installObjectModel } from '../../framexml/lua/object';
+import { installCompat } from '../../framexml/lua/compat';
+import { createFrameXmlRuntime, loadDocument } from '../../framexml/loader';
+import { parseXml } from '../../framexml/xml';
+import { WidgetRoot } from '../../widget';
+import { bodyFrame, BODY_FOV } from '../booth-framing';
+import { verticalFov } from '../scene-rig';
+
+/**
+ * `interface/framexml/uiparent.lua:2824-2845`, build 12340, VERBATIM -- the generic model rotation
+ * functions -- and `paperdollframe.lua:157-160`'s branch of `PaperDollFrame_OnEvent`.
+ *
+ * Copied rather than paraphrased for the reason the sibling glue test gives: the point is that these
+ * numbers reach the widget without this repository holding a copy of them, so the copy has to live
+ * where a reader can see whose it is.
+ */
+const CLIENT_LUA = `
+function Model_OnLoad (self)
+	self.rotation = 0.61;
+	self:SetRotation(self.rotation);
+end
+
+function Model_RotateLeft(model, rotationIncrement)
+	if ( not rotationIncrement ) then
+		rotationIncrement = 0.03;
+	end
+	model.rotation = model.rotation - rotationIncrement;
+	model:SetRotation(model.rotation);
+end
+
+function PaperDollFrame_OnEvent(self, event, unit)
+	if ( event == "PLAYER_ENTERING_WORLD" or
+		event == "UNIT_MODEL_CHANGED" and unit == "player" ) then
+		CharacterModelFrame:SetUnit("player");
+		return;
+	end
+end
+`;
+
+function runtime() {
+  const vm = new LuaVM();
+  installCompat(vm);
+  const root = new WidgetRoot();
+  const registry = new FrameRegistry(root.root);
+  const ctx = installObjectModel(vm, registry);
+  return { vm, registry, rt: createFrameXmlRuntime(vm, ctx) };
+}
+
+describe("a PlayerModel pane driven by the client's own Lua", () => {
+  it('takes its unit from PaperDollFrame_OnEvent and its yaw from Model_OnLoad', () => {
+    const { vm, registry, rt } = runtime();
+
+    // The frame as `paperdollframe.xml:460-462` declares it: a `<PlayerModel>` that names no model
+    // file at all, because `SetUnit` is what gives this pane its content.
+    const report = loadDocument(
+      rt,
+      parseXml('<Ui><PlayerModel name="CharacterModelFrame"><Size><AbsDimension x="233" y="215"/></Size></PlayerModel></Ui>'),
+      () => null,
+      'paperdollframe.xml',
+    );
+    expect(report.errors).toEqual([]);
+
+    expect(vm.run(CLIENT_LUA, 'uiparent.lua')).toBeNull();
+    expect(vm.run('Model_OnLoad(CharacterModelFrame)', 'onload')).toBeNull();
+    expect(
+      vm.run('PaperDollFrame_OnEvent(PaperDollFrame, "PLAYER_ENTERING_WORLD")', 'onevent'),
+    ).toBeNull();
+    // Two clicks of the rotate button, which is the only thing that moves in a pane.
+    expect(vm.run('Model_RotateLeft(CharacterModelFrame)', 'rotate')).toBeNull();
+
+    const rig = registry.widget(registry.byName('CharacterModelFrame')!)!.modelRig!;
+    expect(rig.unit).toBe('player');
+    // 0.61 minus one 0.03 step, unwrapped and unclamped -- `Model_RotateLeft` does no normalising and
+    // neither may `SetRotation`.
+    expect(rig.rotation).toBeCloseTo(0.58);
+    // No file was ever named: a pane's content is its unit, and `modelPath` staying null is what tells
+    // the booth this is not a glue stage.
+    expect(rig.modelPath).toBeNull();
+  });
+});
+
+describe('the pane camera', () => {
+  it('keeps feet and crown inside the frame across the player size range', () => {
+    // benilla's own test values (`portrait/framing.rs:296-332`): a gnome, a human and a tauren head
+    // signal, with a human's footprint.
+    const aspect = 233 / 215; // `paperdollframe.xml:461-462`, the pane's authored size
+    const halfAngle = 0.5 * verticalFov(BODY_FOV, aspect);
+
+    for (const signal of [0.88, 1.9, 2.6]) {
+      const frame = bodyFrame(
+        { pivotHeight: signal, headHeight: 0, cameraTargetHeight: 0, groundRadius: 0.35, front: [1, 0], bust: null },
+        1,
+        aspect,
+      );
+      // The camera looks along -x at the origin's column, so a point's height above the look target
+      // over its distance from the eye is the tangent of its angle off centre -- and |tan| < tan(half)
+      // is exactly "inside the frame".
+      const ndc = (z: number) => (z - frame.target[2]) / (frame.eye[0] * Math.tan(halfAngle));
+      const feet = ndc(0);
+      // A conservatively high crown: the throat signal is about 0.9 of standing height, so the top of
+      // the head sits a little above it. benilla's own estimate.
+      const crown = ndc(1.12 * signal);
+
+      expect(feet).toBeLessThan(0);
+      expect(crown).toBeGreaterThan(0);
+      expect(Math.abs(feet)).toBeLessThan(0.95);
+      expect(crown).toBeLessThan(0.95);
+    }
+  });
+});
+
+/**
+ * THE MISSING HAIRSTYLE, pinned where a screenshot could not attribute it.
+ *
+ * The pane's figure resolved the same geosets, bound the same texture OBJECTS, posed to the same
+ * skinned bounds and issued the same per-batch draws as the character standing in the world -- and its
+ * hair was still absent, because `applyBlendingModeToMaterial` forbids every blending mode >= 1 from
+ * writing destination alpha (to keep the reference's opaque backbuffer) and a pane is composited BY
+ * its alpha. The world's rule is asserted here as the real function computes it, not as a literal, so
+ * this cannot pass against a rule that has since changed.
+ */
+describe('a pane figure and destination alpha', () => {
+  it('lets an alpha-keyed batch write pane alpha, and refuses a model that shares its materials',
+    () => {
+      const material = new THREE.MeshBasicMaterial();
+      // Blending mode 1 -- alpha key. A character's hair geoset is this.
+      applyBlendingModeToMaterial(material, 1);
+      expect(material.blendSrcAlpha).toBe(THREE.ZeroFactor);
+      expect(material.blendDstAlpha).toBe(THREE.OneFactor);
+
+      const model = {
+        ownsBatches: true,
+        submeshes: [{ children: [{ material }] }],
+      };
+      expect(allowDestinationAlpha(model)).toBe(true);
+      expect(material.blendSrcAlpha).toBe(THREE.OneFactor);
+      expect(material.blendDstAlpha).toBe(THREE.OneMinusSrcAlphaFactor);
+
+      // A shared-batch model's materials belong to every placement of its path, world included.
+      const shared = new THREE.MeshBasicMaterial();
+      applyBlendingModeToMaterial(shared, 1);
+      expect(allowDestinationAlpha({ ownsBatches: false, submeshes: [{ children: [{ material: shared }] }] }))
+        .toBe(false);
+      expect(shared.blendSrcAlpha).toBe(THREE.ZeroFactor);
+    });
+});
+
+/**
+ * THE BOTTOM-BAR PREVIEW, which the owner raised twice ("толи скейл не тот, толи что-то другое") and
+ * which was two defects in one widget.
+ *
+ * `MicroButtonPortrait` is the character face on the micro-menu button, and the game's own
+ * `mainmenubarmicrobuttons.xml:43-55` gives it a size of 18x25 AND
+ * `<TexCoords left="0.2" right="0.8" top="0.0666" bottom="0.9"/>`. So the client bakes a SQUARE
+ * portrait and that widget samples a slice of it. Sizing the target off the 18x25 rect squashed the
+ * bust; and because `renderer.ts:369` lets a widget's own `<TexCoords>` outrank the `FLIP_V` the booth
+ * gives `art.adopt`, the pane was also sampled upside down.
+ *
+ * Both are pure arithmetic, which is the only part a screenshot of an 18x25 slot could never attribute.
+ */
+describe('a portrait pane behind an authored crop', () => {
+  it("bakes a square big enough for the crop, and keeps the framebuffer flip", () => {
+    // The real widget, at the device scale the live probe measured (21x30 device pixels).
+    const micro = { u0: 0.2, v0: 0.0666, u1: 0.8, v1: 0.9 };
+
+    // 21 / 0.6 = 35, 30 / 0.8334 = 36 -- the square is the larger, so neither axis is stretched and
+    // the visible face gets MORE pixels than the 21x30 it used to get.
+    expect(Math.round(portraitTargetSide(21, 30, micro))).toBe(36);
+    // No crop: the square is just the longer edge, which leaves a 76x76 portrait untouched.
+    expect(portraitTargetSide(76, 76, null)).toBe(76);
+
+    // The flip is composed WITH the crop, not replaced by it: u is untouched, v is mirrored.
+    const flipped = flipCropV(micro);
+    expect(flipped.u0).toBe(0.2);
+    expect(flipped.u1).toBe(0.8);
+    expect(flipped.v0).toBeCloseTo(1 - 0.0666, 6);
+    expect(flipped.v1).toBeCloseTo(0.1, 6);
+    // ...and the whole-texture case still degenerates to the plain V flip the booth used before.
+    expect(flipCropV(null)).toEqual({ u0: 0, v0: 1, u1: 1, v1: 0 });
+  });
+});

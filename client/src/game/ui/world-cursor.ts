@@ -125,6 +125,29 @@ export class WorldCursorDriver {
     this.element.style.cursor = `url(${art.css}) ${HOTSPOT_X} ${HOTSPOT_Y}, default`;
   }
 
+/**
+   * Write the current cursor to the element AGAIN, even though nothing about it changed.
+   *
+   * `apply` early-outs on an unchanged stem, which is right for the per-frame hover path and wrong for
+   * one case: **the browser has just stopped showing our cursor for a reason of its own.** Exiting a
+   * pointer lock is that case -- the style is still on the element, but a custom `url(...)` cursor is
+   * repainted only when the pointer moves, so the arrow stays absent until the player happens to move
+   * the mouse. That is the tail of the owner's report: "появляется только когда начинается движение."
+   *
+   * Rewriting the property forces the re-evaluation. One style write per pointer-lock exit, which is
+   * once per genuine mouse-look drag, so this is not on any per-frame path.
+   */
+  refresh(): void {
+    if (this.applied === null) {
+      return;
+    }
+    const art = this.ensure(this.applied);
+    if (art === null) {
+      return;
+    }
+    this.element.style.cursor = `url(${art.css}) ${HOTSPOT_X} ${HOTSPOT_Y}, default`;
+  }
+
   /** Back to the resting arrow -- the game's own `Point`, not the browser's. */
   reset(): void {
     this.apply(CURSOR_POINT);

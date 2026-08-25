@@ -43,7 +43,9 @@
  *
  * Into `Widget#modelRig`, and nowhere else. The host does not get told; it POLLS -- the FrameXML
  * screen reads the active model frame's rig once per tick and re-pushes only when `revision` has
- * moved (`screens/framexml-screen.ts`). Three reasons that is the right shape here and a sink is not:
+ * moved (`screens/framexml-screen.ts`), and in the world `world-ui.ts` polls every model frame in the
+ * draw list the same way for the model booth (`scene/model-booth.ts`). Three reasons that is the
+ * right shape here and a sink is not:
  *
  *  - `SetLighting` issues up to 41 calls in a row for one stage change (2 + 3 fog + 1 glow + 1 reset +
  *    3 sets x up to 3 rows x 13 floats). A per-call callback would rebuild the fold 41 times for one
@@ -53,9 +55,21 @@
  *  - It is the reference's own gate: `glue_booth.rs:816-819` compares a monotonic revision for exactly
  *    this, so a yaw-only change skips the rebuild (`apply_yaw`, `:970-974`).
  *
+ * ## The world half: `SetUnit`, `RefreshUnit`, `SetRotation`
+ *
+ * Added this round, and they are the whole of what a `<PlayerModel>` pane needs. `CharacterModelFrame`
+ * (`paperdollframe.xml:460`) authors no model file at all -- its content is
+ * `CharacterModelFrame:SetUnit("player")` from `PaperDollFrame_OnEvent` (`paperdollframe.lua:159`)
+ * and its pose is `Model_OnLoad`'s `self:SetRotation(0.61)` (`uiparent.lua:2824-2827`). Both were
+ * absent, so both RAISED: measured live on an ordinary online login before this round,
+ * `CharacterModelFrame.SetUnit` and `.SetRotation` both read `nil` and `Model_OnLoad` failed with
+ * "attempt to call a nil value (method 'SetRotation')". That is why the pane was a black rectangle --
+ * not a renderer gap first, a missing engine method.
+ *
  * ## What is still a declared gap, and why
  *
- * `AdvanceTime` alone. It is `CharacterSelect_UpdateModel`'s animation step
+ * `SetCreature`, `TryOn` and `AdvanceTime`; the first two are documented at their own entries.
+ * `AdvanceTime` is `CharacterSelect_UpdateModel`'s animation step
  * (characterselect.lua:295), reached only from an `<OnUpdate>` this runtime does not dispatch -- and
  * if it were dispatched, the glue scene's models are already advanced once per frame from
  * `worldClock` (`screens.ts#tick` -> `GlueSceneView#update`), so honouring a second Lua-driven step
@@ -120,6 +134,65 @@ const MODEL: MethodTable = {
     const rig = rigOf(ctx, self);
     const path = typeof args[0] === 'string' && args[0].trim() !== '' ? args[0] : null;
     rig.modelPath = path;
+    rig.revision += 1;
+    return [];
+  },
+
+  /**
+   * `SetUnit(token)` -- draw this UNIT's dressed model, not a file.
+   *
+   * The paper doll's only supply. `CharacterModelFrame` never calls `SetModel`: it is a
+   * `<PlayerModel>` whose content arrives entirely from `PaperDollFrame_OnEvent` ->
+   * `CharacterModelFrame:SetUnit("player")` on `PLAYER_ENTERING_WORLD` and `UNIT_MODEL_CHANGED`
+   * (`paperdollframe.lua:157-160`), and from `CharacterModelFrame_OnMouseUp`'s equip path re-firing
+   * the same event. Its absence was not a silent gap: `Model_OnLoad` died on `SetRotation` at
+   * `uiparent.lua:2826` and this died at `paperdollframe.lua:159`, so the frame had NO rig at all --
+   * measured live before this round, `CharacterModelFrame.SetUnit` read `nil`.
+   *
+   * The token is recorded VERBATIM and not resolved here. Resolution is the host's: `world-ui.ts`
+   * hands the booth whichever unit the token names, and the only token any 3.3.5 model pane passes is
+   * `"player"` (`paperdollframe.lua:159`, `dressupframe.lua:8`, `tabardframe.lua:27`) or `"pet"`
+   * (`petpaperdollframe.lua:471`). A method table has no world to ask -- the same reason
+   * `methods/gametooltip.ts` reaches its item feed through a hook.
+   */
+  SetUnit: (ctx, self, args) => {
+    const rig = rigOf(ctx, self);
+    const unit = typeof args[0] === 'string' && args[0].trim() !== '' ? args[0] : null;
+    rig.unit = unit;
+    rig.revision += 1;
+    return [];
+  },
+
+  /**
+   * `RefreshUnit()` -- re-read the unit this frame is already showing.
+   *
+   * `CharacterModelFrame`'s `<OnEvent>` is literally `self:RefreshUnit();`, on
+   * `DISPLAY_SIZE_CHANGED` (`paperdollframe.xml:474-478`). It carries no arguments and names no
+   * unit, so all it can mean is "whatever `SetUnit` last said, build it again" -- which here is a
+   * revision bump, because the booth rebuilds from the rig whenever the revision moves. Not a
+   * `notImplemented`: the call has a real effect, and the effect is the one the client asks for.
+   */
+  RefreshUnit: (ctx, self) => {
+    const rig = rigOf(ctx, self);
+    rig.revision += 1;
+    return [];
+  },
+
+  /**
+   * `SetRotation(radians)` -- the figure's yaw in the pane.
+   *
+   * The most-called method on this surface in the world manifest (12 call sites against 6 for
+   * `SetUnit`), and the only one that moves at interactive rates: `Model_OnLoad` sets 0.61,
+   * `Model_RotateLeft`/`Right` step it by 0.03 per click, and `Model_OnUpdate` sweeps it
+   * continuously while a rotate button is held (`uiparent.lua:2824-2865`).
+   *
+   * NOT normalised. `Model_OnUpdate` does its own wrapping into [0, 2*PI) and `Model_RotateLeft`
+   * deliberately does not, so `Model_OnLoad`'s 0.61 minus twenty clicks is a legitimate 0.01 and
+   * clamping or wrapping here would fight the client's own arithmetic.
+   */
+  SetRotation: (ctx, self, args) => {
+    const rig = rigOf(ctx, self);
+    rig.rotation = numberAt(args, 0);
     rig.revision += 1;
     return [];
   },
@@ -235,6 +308,36 @@ const MODEL: MethodTable = {
   AddLight: addLight('background'),
   AddCharacterLight: addLight('character'),
   AddPetLight: addLight('pet'),
+
+  /**
+   * `SetCreature(displayId)` -- the pet-stable panes.
+   *
+   * ONE caller in the whole world manifest (`petstable.lua`, the stable's slot preview), and it is a
+   * `CreatureDisplayInfo` id rather than a unit. Declared rather than written because the booth's one
+   * supply today is a `CharacterLook` off a live unit, and a display id takes the OTHER dressing path
+   * (`classes/unit.ts#resolveDisplay`) which no model pane is wired to. The stable is not reachable in
+   * this client anyway -- there is no stable master.
+   */
+  SetCreature: notImplemented(
+    'SetCreature',
+    'the model booth builds a CharacterLook from a live unit; a CreatureDisplayInfo id takes the ' +
+      "display-id dressing path instead, and its only caller is the pet stable's slot preview",
+  ),
+
+  /**
+   * `TryOn(item)` -- the dress-up frame previewing an item the player does not wear.
+   *
+   * ONE caller (`dressupframe.lua`). Declared rather than written because it needs a look built from
+   * the player's gear WITH one slot overridden, and `character-equipment.ts#wornEquipmentFor` reads
+   * the unit's real equipment array -- an override parameter is a change to the look resolver, not to
+   * this surface. `DressUpModel` also still counts as a missing frame type in the load report, so the
+   * frame it belongs to does not exist yet either.
+   */
+  TryOn: notImplemented(
+    'TryOn',
+    'previewing an unworn item needs a CharacterLook with one equipment slot overridden, which is a ' +
+      'change to character-equipment.ts rather than to the model surface',
+  ),
 
   // The one method on this surface that is still a gap; see the file header for the double-advance
   // reason, which is a better one than "no per-widget model state" was.

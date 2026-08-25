@@ -99,6 +99,8 @@ export const PICK_RANGE = 41;
 /** `ObjectType.Unit` / `ObjectType.Player`, by value so this module does not depend on `network/`. */
 const OBJECT_TYPE_UNIT = 3;
 const OBJECT_TYPE_PLAYER = 4;
+/** `ObjectType.GameObject`. A bush, a crate, a chest -- see the gate in the candidate loop. */
+const OBJECT_TYPE_GAMEOBJECT = 5;
 
 /**
  * Float slack on the occlusion compare (yards). OURS, and much smaller than round 20's 0.25.
@@ -414,7 +416,26 @@ export function pickUnit(
       continue;
     }
     if (unit.objectType !== OBJECT_TYPE_UNIT && unit.objectType !== OBJECT_TYPE_PLAYER) {
-      continue;
+      /**
+       * A WORLD OBJECT IS PICKABLE NOW -- but only once it has a body, and that condition is the whole
+       * of what the comment above was protecting against.
+       *
+       * Read that defect again: "a game object with no fields at all and a DEFAULT COLLISION HEIGHT,
+       * whose pick sphere sat in front of the wolf". The object was not the problem; the object with
+       * **nothing drawn** was. `pickSphere` falls back to `max(collisionHeight/2, 0.5)` when there is no
+       * model, so a fieldless object got a half-yard sphere at its feet and won on distance against a
+       * creature it did not overlap. A GameObject now carries a real `.m2`
+       * (`classes/unit.ts#gameObjectDisplay`), so `model.vertexRadius` gives it an authored radius and
+       * the narrow phase tests its actual triangles -- exactly what makes a bush clickable where it is
+       * drawn instead of within a sphere.
+       *
+       * So the gate is a MODEL, not a type. That also keeps the old protection for corpses and for an
+       * object whose display row is a `.wmo` this client cannot load: no body, not pickable, which is
+       * the same answer they got before and the honest one for something the player cannot see.
+       */
+      if (unit.objectType !== OBJECT_TYPE_GAMEOBJECT || unit.gameObject === null || !unit.model) {
+        continue;
+      }
     }
     const radius = pickSphere(unit, centre);
     toCentre.copy(centre).sub(rayOrigin);

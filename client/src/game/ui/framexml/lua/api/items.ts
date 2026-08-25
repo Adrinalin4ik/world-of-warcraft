@@ -59,6 +59,7 @@
  */
 import { LuaVM } from '../vm';
 import { notImplemented } from '../methods/region';
+import type { ItemTooltipLine } from '../../../item-tooltip';
 
 /**
  * THE PURSE, in copper, per VM.
@@ -80,13 +81,85 @@ export function setCoinage(vm: LuaVM, copper: number): void {
   coinageByVm.set(vm, copper);
 }
 
+/**
+ * REPAIR MODE -- whether the player has clicked `MerchantRepairItemButton` and is now pointing a
+ * (notional) hammer at his bags.
+ *
+ * Per VM, for the reason `coinageByVm` states: the state belongs to one VM and must not survive into
+ * the next one a relog builds.
+ *
+ * IT LIVES HERE because `InRepairMode` does, and `InRepairMode` lives here because
+ * `ContainerFrameItemButton_OnEnter` calls it (`containerframe.lua:775`) -- so the READERS are the
+ * container bridge and that document, while the only WRITER is `ui/merchant-bridge.ts`'s
+ * `ShowRepairCursor`/`HideRepairCursor`. One slot rather than one per bridge is what keeps the bag
+ * tooltip's repair line and the merchant button's own state from disagreeing.
+ */
+const repairModeByVm = new WeakMap<LuaVM, boolean>();
+
+/** The merchant bridge's door: `ShowRepairCursor` sets it, `HideRepairCursor` clears it. */
+export function setRepairMode(vm: LuaVM, active: boolean): void {
+  repairModeByVm.set(vm, active);
+}
+
+/** What `InRepairMode()` answers, and what `container-bridge.ts` reads to price a bag slot. */
+export function getRepairMode(vm: LuaVM): boolean {
+  return repairModeByVm.get(vm) === true;
+}
+
 /** What a bag slot or a loot row resolves to for a tooltip. */
 export interface ItemTooltipInfo {
   name: string;
   /** 0..7; the name line is drawn in `ITEM_QUALITY_COLORS[quality]`. */
   quality: number;
-  /** Body lines under the name, already ordered. Empty is legal. */
-  lines: string[];
+  /**
+   * Body lines under the name, already ordered and already coloured. Empty is legal.
+   *
+   * **Was `string[]`, and every line drew white in one column.** `ui/item-tooltip.ts` builds these now:
+   * a requirement the player cannot meet has to be RED and an effect GREEN, and damage/speed is one
+   * line with two columns, so the shape the two bridges hand over had to carry colour and a right
+   * column. `appendLine` already took both -- nothing new was needed at the drawing end.
+   */
+  lines: ItemTooltipLine[];
+
+  /**
+   * What repairing THIS item would cost, in copper -- `GameTooltip:SetBagItem`'s SECOND return.
+   *
+   * `ContainerFrameItemButton_OnEnter` reads it as
+   * `local hasCooldown, repairCost = GameTooltip:SetBagItem(bag, slot)` and then
+   * `if ( InRepairMode() and (repairCost and repairCost > 0) )` (`containerframe.lua:774-779`), so it
+   * is only ever consulted in repair mode.
+   *
+   * **UNDEFINED, not 0, when there is nothing to charge.** The client tests the value for TRUTH before
+   * comparing it, and 0 is truthy in Lua -- so while `0 > 0` happens to be false and would survive,
+   * `undefined` is the answer that matches the real engine's nil and cannot mislead a reader of the
+   * next global that copies this shape.
+   */
+  repairCost?: number;
+
+  /**
+   * The item's vendor price in copper, or **undefined** when it cannot be sold.
+   *
+   * Not a line of text: `methods/gametooltip.ts#fillFromSource` fires the frame's own
+   * `OnTooltipAddMoney` with it, and the client draws the coins. See `ui/item-tooltip.ts` where the
+   * text version used to be.
+   *
+   * UNDEFINED and not 0 for the same reason `repairCost` is: `SetTooltipMoney` would happily lay out
+   * a row of zero coins, and an unsellable item has no price row at all in the real client.
+   */
+  sellPrice?: number;
+
+  /**
+   * The item's hyperlink -- `GameTooltip:GetItem`'s SECOND return.
+   *
+   * **A MEASURED NEED, not symmetry.** `MerchantItemButton_OnEnter` calls
+   * `GameTooltip_ShowCompareItem(GameTooltip)` immediately after the setter
+   * (`merchantframe.lua:436`), and that function's first act is
+   * `local item, link = self:GetItem()` (`gametooltip.lua:221`). With `GetItem` absent, every hover
+   * over a vendor row raised INSIDE the OnEnter, one line after the tooltip had been filled -- so the
+   * tooltip looked right and `MerchantFrame.itemHover` was never set. Seen live on a Northshire weapon
+   * vendor, not reasoned about.
+   */
+  link?: string | null;
 }
 
 /**
@@ -98,7 +171,7 @@ export interface ItemTooltipInfo {
  * `Set<Thing>Item` family answers false exactly as it did when it did not exist.
  */
 export type ItemTooltipSource = (
-  kind: 'bag' | 'loot' | 'link' | 'inventory',
+  kind: 'bag' | 'loot' | 'link' | 'inventory' | 'merchant' | 'buyback' | 'trainer' | 'quest' | 'questlog',
   a: number | string,
   b?: number,
 ) => ItemTooltipInfo | null;
@@ -183,15 +256,20 @@ export function installItemsApi(vm: LuaVM): void {
   vm.registerFunction('GetPlayerTradeMoney', () => [0]);
 
   /**
-   * `InRepairMode()` -- false, a TRUE answer rather than a stub: repair mode is a MERCHANT state
-   * (the hammer cursor at an armourer), and no merchant window exists in this client to enter it from.
+   * `InRepairMode()` -- REAL STATE NOW, and the paragraph that used to stand here has expired.
    *
+   * It read "false, a TRUE answer rather than a stub: ... no merchant window exists in this client to
+   * enter it from". A merchant window does exist: `MerchantRepairItemButton`'s `<OnClick>` toggles
+   * `ShowRepairCursor`/`HideRepairCursor` (`merchantframe.xml:453-461`), which
+   * `ui/merchant-bridge.ts` implements against `setRepairMode` above.
+   *
+   * What has NOT changed is why the global lives here rather than on that bridge:
    * `ContainerFrameItemButton_OnEnter` (`containerframe.lua:775`) tests it immediately after
    * `GameTooltip:SetBagItem` to decide whether to append a repair-cost line, so with it nil every bag
    * tooltip threw one call AFTER the tooltip had already been filled -- the tooltip was built and then
    * the handler died before anything else it does could run.
    */
-  vm.registerFunction('InRepairMode', () => [false]);
+  vm.registerFunction('InRepairMode', () => [getRepairMode(vm)]);
 
   /**
    * THE GROUP-LOOT GAPS, declared HERE rather than on `ui/loot-bridge.ts` -- and the placement is the

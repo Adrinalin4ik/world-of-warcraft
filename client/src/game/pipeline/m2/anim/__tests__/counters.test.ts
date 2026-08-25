@@ -7,7 +7,7 @@ describe('animCounters', () => {
   it('starts at zero', () => {
     expect(animCounters.snapshot()).toEqual({
       resident: 0, posed: 0, skipped: 0, bonesSolved: 0, posesApplied: 0,
-      materialsEvaluated: 0,
+      materialsEvaluated: 0, overlays: 0,
     });
   });
 
@@ -19,7 +19,7 @@ describe('animCounters', () => {
     animCounters.materialsEvaluated += 7;
     expect(animCounters.snapshot()).toEqual({
       resident: 12, posed: 5, skipped: 0, bonesSolved: 40, posesApplied: 0,
-      materialsEvaluated: 7,
+      materialsEvaluated: 7, overlays: 0,
     });
   });
 
@@ -30,10 +30,11 @@ describe('animCounters', () => {
     animCounters.bonesSolved = 9;
     animCounters.posesApplied = 9;
     animCounters.materialsEvaluated = 9;
+    animCounters.overlays = 9;
     animCounters.reset();
     expect(animCounters.snapshot()).toEqual({
       resident: 0, posed: 0, skipped: 0, bonesSolved: 0, posesApplied: 0,
-      materialsEvaluated: 0,
+      materialsEvaluated: 0, overlays: 0,
     });
   });
 });

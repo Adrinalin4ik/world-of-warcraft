@@ -2,8 +2,10 @@
 import * as THREE from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import DBC from "../pipeline/dbc";
+import { gameObjectDisplayData } from "../pipeline/dbc/game-object-display-data";
+import type { GameObjectState } from '../../network/game/object/update-object/game-object-fields';
 import M2 from "../pipeline/m2";
-import { windowElapsedOrInstant } from "../pipeline/m2/anim/instance-anim";
+import { InstanceAnim, windowElapsedOrInstant } from "../pipeline/m2/anim/instance-anim";
 import type { Sequence } from "../pipeline/m2/anim/model-anim";
 import { worldClock } from "../pipeline/m2/anim/world-clock";
 import M2Blueprint from "../pipeline/m2/blueprint";
@@ -24,6 +26,7 @@ import { shouldPose } from "../pipeline/m2/anim/gating";
 import { createPlayerMoveState } from "../movement/player-state";
 import { peerTrace } from "../movement/peer-trace";
 import { readyAnimation } from "./combat-anim";
+import { isCastAnim, isCombatAnim, OneShotRoute, routeOneShot } from "./oneshot-route";
 import {
   ANY_MOVE,
   DEFAULT_MOVE_SPEEDS,
@@ -61,6 +64,12 @@ import Entity from "./entity";
 // TYPE-ONLY, and deliberately: `unit-fields.ts` imports `Unit` back for its own signatures, so a
 // value import either way round would be a runtime cycle. `import type` is erased entirely.
 import type { UnitFieldUpdate } from "../../network/game/object/update-object/unit-fields";
+import {
+  CharacterStats, emptyCharacterStats,
+} from "../../network/game/object/update-object/character-stats";
+import type { SkillSlot } from "../../network/game/object/update-object/player-skills";
+import type { QuestLogSlot } from "../../network/game/object/update-object/quest-log";
+import { emptyExploredZones } from "../../network/game/object/update-object/explored-zones";
 
 enum SlopeType {
   sliding,
@@ -349,6 +358,14 @@ class Unit extends Entity {
   public classification: string = 'normal';
 
   /**
+   * `CreatureType.dbc` id from `SMSG_CREATURE_QUERY_RESPONSE`, or 0 for unknown / for a player.
+   *
+   * Written only by `object/combat.ts#applyCreatureInfo`, beside `classification`, and turned into a
+   * word by `pipeline/dbc/creature-type-data.ts` -- the tooltip's "Level 1 Beast".
+   */
+  public creatureType: number = 0;
+
+  /**
    * The client's 1..8 reaction scale toward the local player, or null while unknown.
    *
    * Derived from `unit_field_factiontemplate` through `FactionTemplate.dbc`
@@ -439,6 +456,50 @@ class Unit extends Entity {
    * beside the weapons rather than inside `fields`.
    */
   public spellDamage: number[] = [];
+
+  /**
+   * THE CHARACTER SHEET'S STAT BLOCK -- stats, resistances, the damage range, the percentages and the
+   * 25 combat ratings. Beside `spellDamage` and for the same reason: arrays, not scalars, so they do not
+   * belong in `fields`.
+   *
+   * Always present rather than empty-until-filled, unlike `spellDamage`: every member is MERGED from a
+   * sparse update mask (`update-object/character-stats.ts`), so there has to be something to merge onto
+   * from the first packet. Zeroes read as "the server has not told us", which is also what a level-1
+   * character's resistances genuinely are.
+   */
+  public characterStats: CharacterStats = emptyCharacterStats();
+
+  /**
+   * THE SKILLS TAB'S ROWS -- `PLAYER_SKILL_INFO_1_1`, keyed by descriptor SLOT (0..127).
+   *
+   * Beside `characterStats` and for the same reason. Keyed by slot rather than by skill id because a
+   * slot is REASSIGNED when a profession is unlearned; see
+   * `update-object/player-skills.ts#mergePlayerSkills`.
+   */
+  public skills: Map<number, SkillSlot> = new Map<number, SkillSlot>();
+
+  /**
+   * THE QUEST LOG'S SLOTS -- `PLAYER_QUEST_LOG_1_1`, keyed by descriptor SLOT (0..24).
+   *
+   * Beside `skills` and for the same reason. Keyed by slot rather than by quest id because the slot is
+   * what `CMSG_QUESTLOG_REMOVE_QUEST` carries, and because a slot is REUSED the moment a quest is
+   * abandoned; see `update-object/quest-log.ts#mergeQuestLog`, which also records why this -- and not
+   * any packet -- is where the quest log's membership actually lives.
+   */
+  public questLog: Map<number, QuestLogSlot> = new Map<number, QuestLogSlot>();
+
+  /**
+   * THE EXPLORED-ZONES BITFIELD -- `PLAYER_EXPLORED_ZONES_1`, 128 words of it.
+   *
+   * Beside `questLog` and for the same reason: exploration is a descriptor and not a packet, so
+   * this is where the world map learns which overlay patches it may draw. See
+   * `update-object/explored-zones.ts`, which derives the 128 from the field table.
+   *
+   * A `Uint32Array` and not a `Set` of area ids: the wire gives words, the DBC gives a bit index,
+   * and 512 bytes answers any of 4096 areas in one mask -- a Set would allocate on every merge
+   * of a block that mentioned nothing new.
+   */
+  public exploredZones: Uint32Array = emptyExploredZones();
 
   /** Whether the death one-shot is armed. Written only by `setDead`, which is edge-triggered. */
   public dead: boolean = false;
@@ -573,6 +634,44 @@ class Unit extends Entity {
 
   /** The last speed value rejected above, so the warning fires once per distinct bad value. */
   private rejectedSpeed: number | null = null;
+
+  /**
+   * Store one wire speed on `speeds`, validated exactly as the run speed is.
+   *
+   * WHY THIS EXISTS: **only `run` was ever stored.** `MSG_MOVE_SET_*_SPEED` and
+   * `SMSG_FORCE_*_SPEED_CHANGE` are decoded for all nine rates and the force forms are all acked, and
+   * then eight of the nine were dropped on the floor -- `player/movement.ts` had a single
+   * `if (key === 'run')` / `if (ackOpcode === ...RUN...)` arm. Nothing noticed, because until this
+   * round the mover read compile-time constants and `speeds` was consulted only by the peer
+   * dead-reckon, which needs `run` alone.
+   *
+   * That made the swim and backpedal halves of the speed fix INERT: they read `speeds.swim` and
+   * `speeds.runBack`, which no code path ever wrote, so they always fell back to their defaults. Found
+   * by checking the write side after fixing the read side rather than by a probe.
+   *
+   * The validation is the run setter's and the reasoning is identical -- see `moveSpeed`. `turnRate` is
+   * radians/s rather than yd/s, so the `TELEPORT_SPEED` ceiling is not a meaningful bound for it; it is
+   * applied anyway because pi is nowhere near 100 and a separate limit would be an invented number.
+   */
+  setWireSpeed(field: keyof MoveSpeeds, value: number): void {
+    if (field === 'run') {
+      // Through the accessor, which also keeps the legacy `_moveSpeed` in step for `updatePlayer`.
+      this.moveSpeed = value;
+      return;
+    }
+    if (Number.isFinite(value) && value > 0 && value <= TELEPORT_SPEED) {
+      this.speeds[field] = value;
+      return;
+    }
+    if (this.rejectedSpeed !== value) {
+      this.rejectedSpeed = value;
+      console.warn(
+        `movement: ignoring an impossible ${field} speed ${value} for ${this.guid} --`
+        + ` keeping ${this.speeds[field]}. A value outside 0..${TELEPORT_SPEED} is a misread float`
+        + ' on the wire, not a buff.',
+      );
+    }
+  }
 
   public flySpeed: number = 100; //10
   public gravity: number = -30; //10;
@@ -721,6 +820,84 @@ class Unit extends Entity {
   }
 
   /**
+   * A GAMEOBJECT'S DESCRIPTOR STATE, or **null on anything that is not one**.
+   *
+   * Null rather than an empty state so "is this a world object" is one test and cannot be confused with
+   * "is this an object whose words have not arrived". Written by
+   * `update-object/game-object-fields.ts#mergeGameObjectFields`; read by the pick, the cursor, the
+   * tooltip and the sparkle.
+   */
+  gameObject: GameObjectState | null = null;
+
+  /** See `gameObjectDisplay`. The id whose model is already on this body, so a repeat costs nothing. */
+  private appliedGameObjectDisplayId = 0;
+
+  /**
+   * A GAMEOBJECT'S MODEL -- the bush, the crate, the chest.
+   *
+   * A SECOND display path on purpose, and a much shorter one, because a GameObject's lookup is not a
+   * creature's. `resolveDisplay` walks `CreatureDisplayInfo -> CreatureModelData -> file` and then has
+   * to decide about extra rows, npc looks, character looks, skins and a collision height; a
+   * GameObject's display row names its model **directly** and has none of those. Routing objects
+   * through the creature path would have meant a `CreatureDisplayInfo` lookup that cannot succeed.
+   *
+   * WHAT THIS DELIBERATELY DOES NOT DO, and each is a real difference rather than an omission:
+   *
+   *  - **No `setDisplayInfo`.** That applies a creature's skin VARIATION. A doodad has no variations
+   *    and its authored textures are already correct, so calling it would be asking for texture paths
+   *    built out of a creature naming convention.
+   *  - **No collision-height write.** That number is a swim depth for a body that swims.
+   *  - **No character-look guard.** A crate is never dressed, so the token dance those two flags exist
+   *    for cannot arise here. `appliedGameObjectDisplayId` is still needed, and for the same reason the
+   *    creature path needs its own: the server re-sends a create block every time we re-enter the grid,
+   *    so without a dedupe each re-entry would fetch and replace the model.
+   *
+   * `revealWhenWarm` rather than a plain `visible = true`, for the reason that helper documents: the
+   * first draw of a model kind compiles its programs, measured at 37.8 ms, and a grid of unfamiliar
+   * doodads coming into view is exactly the case it exists for.
+   */
+  set gameObjectDisplay(displayId: number) {
+    if (!displayId || displayId === this.appliedGameObjectDisplayId) {
+      return;
+    }
+    this.resolveGameObjectDisplay(displayId).catch(console.error);
+  }
+
+  private async resolveGameObjectDisplay(displayId: number): Promise<void> {
+    // CLAIMED SYNCHRONOUSLY, before any await. Two create blocks for the same object can be in flight
+    // at once -- the server re-sends one per grid re-entry -- and the second would otherwise get past
+    // the setter's compare and start a duplicate fetch.
+    this.appliedGameObjectDisplayId = displayId;
+    /**
+     * THE TABLE IS LOADED FROM HERE, not from the world's setup, and that is the arm that cannot miss.
+     *
+     * The alternative -- kick the load off at world entry -- loses every object that streams in before
+     * it lands, because `modelFor` would answer null and nothing retries. Awaiting the shared promise
+     * here means the FIRST object triggers the fetch and every other object waits on the same one, so
+     * there is no ordering to get wrong and no second request. `ensureLoaded` is idempotent.
+     */
+    await gameObjectDisplayData.ensureLoaded();
+    const path = gameObjectDisplayData.modelFor(displayId);
+    if (path === null) {
+      // UN-CLAIM, and the distinction matters. If the row is a `.wmo` or absent, retrying is pointless
+      // but harmless -- the answer will not change. If the DBC FAILED to load, `ensureLoaded` has
+      // already reset itself to be retryable, and holding the claim here would be the one thing that
+      // makes that retry unreachable: the object would stay modelless for the session.
+      this.appliedGameObjectDisplayId = 0;
+      return;
+    }
+    const m2: M2 = await M2Blueprint.load(path);
+    if (this.appliedGameObjectDisplayId !== displayId) {
+      // A later display id won while this fetch was out -- a chest that opened, say. Release rather
+      // than draw the stale body; `set model` would otherwise leak this clone.
+      M2Blueprint.unload(m2);
+      return;
+    }
+    this.model = m2;
+    revealWhenWarm(this.model);
+  }
+
+  /**
    * Which `resolveDisplay` call owns the body, and which display id it finished drawing.
    *
    * The token is the same law `characterLookToken` is: the resolve is four awaits deep and the server
@@ -729,6 +906,14 @@ class Unit extends Entity {
    * id already on the body costs nothing at all, which matters because a zone of npcs now means an
    * `.m2` clone, a DBC chain and a texture fetch per repeat rather than just the first two.
    */
+  /**
+   * Is `externalSeq` a CLAMP being held deliberately? See `startAnimation`.
+   *
+   * Separate from `externalSeq.loops` because the two hold for different reasons: a loop holds because
+   * it never ends, a clamp holds because we decline to release it when it does.
+   */
+  private externalHeld = false;
+
   private displayToken = 0;
   private appliedDisplayId = 0;
 
@@ -969,6 +1154,58 @@ class Unit extends Entity {
   private characterLookKey: string | null = null;
 
   /**
+   * The resolved look this unit is currently DRESSED from, or null.
+   *
+   * Written by `wearLook` (the one place a look reaches a body) and read by the model booth
+   * (`ui/scene/model-booth.ts`), which builds a second, frozen instance of the same look for a
+   * `<PlayerModel>` pane. It is exposed as the look OBJECT rather than as a key or a copy for two
+   * reasons:
+   *
+   *  - **Identity is the change signal.** `resolveCharacterLook` builds a fresh object per resolve, so
+   *    `look !== lastLook` is exactly "this unit has been redressed" -- a gear change, a race change,
+   *    a re-create. The booth needs no event and no second dedupe key, and it cannot drift from what
+   *    is standing in the world, which is the reference's own reason for mirroring the live look
+   *    rather than a display cache (`benilla/crates/benilla/src/portrait/mod.rs:20-23`).
+   *  - **It carries `compositeKey`,** so the booth's own `loadCharacter` hits the SAME 512x512 body
+   *    composite this unit baked (`ui/scene/body-composite.ts#cachedComposite` is keyed on it) instead
+   *    of baking a second one. That bake is measured at 4.7 ms naked / 6.3 ms dressed on the main
+   *    thread (`character/dress.ts` header), and paying it twice for one character was the specific
+   *    thing not to do.
+   *
+   * Read-only to the outside: nothing but `wearLook` may write it, or the pane and the body would
+   * disagree about who is wearing what.
+   */
+  get characterLook(): CharacterLook | null {
+    return this._characterLook;
+  }
+
+  private _characterLook: CharacterLook | null = null;
+
+  /**
+   * What a model booth needs to build a second instance of a CREATURE's body -- a unit drawn from a
+   * `CreatureDisplayInfo` row rather than from a character look.
+   *
+   * The two are exclusive by construction: `resolveDisplay` takes the character path for a row with an
+   * `extraInfoID` (15 451 of 24 262 rows -- the humanoid NPCs) and this one for the other 8 811 (the
+   * wolves and the rabbits), and `characterLook` above is what the first path writes. So a caller asks
+   * for a look first and falls back here, and a unit answers exactly one of them.
+   *
+   * `displayInfo` is handed out as the ROW, because `M2#setDisplayInfo` is what turns it into texture
+   * variations and there is no smaller thing that call accepts. `unknown` rather than the `DBC` type so
+   * the booth needs no DBC import for a value it only passes through.
+   */
+  get creatureDisplay(): { modelPath: string; displayInfo: unknown; scale: number } | null {
+    if (this._characterLook !== null || this.displayInfo === null || this.modelData === null) {
+      return null;
+    }
+    const path = (this.modelData as any).file;
+    if (typeof path !== 'string' || path === '') {
+      return null;
+    }
+    return { modelPath: path, displayInfo: this.displayInfo, scale: this.renderScale(this.displayInfo) };
+  }
+
+  /**
    * Draw this unit as an actual CHARACTER: its race and gender model, its geosets, its composited body
    * texture and its equipment, instead of a bare `CreatureDisplayInfo` display id.
    *
@@ -1078,6 +1315,10 @@ class Unit extends Entity {
     const previous = this._model;
 
     this.model = loaded.model;
+    // The look this body is now wearing, for the model booth -- see `characterLook`. Written HERE and
+    // not before the token re-check above, so a look that lost the race never becomes the answer to
+    // "what is this unit wearing".
+    this._characterLook = look;
     // DELIBERATELY NOT AWAITED, and this is the one place in the pattern where that is the right
     // answer. `wearLook`'s result is awaited by `update-object/handler.ts`, which places a PEER's
     // body from the same packet immediately afterwards -- waiting here for a composite and a cloak
@@ -1257,7 +1498,17 @@ class Unit extends Entity {
   setAnimation(
     id: number,
     interrupt: boolean = false,
-    repetitions: number = -1
+    repetitions: number = -1,
+    /**
+     * HOLD a non-looping clip after its window instead of giving the body back. See `startAnimation`.
+     *
+     * An EXPLICIT flag, and the first version of this used `repetitions < 0` instead -- which two tests
+     * killed immediately, correctly. `repetitions` DEFAULTS to -1 and the parameter's own comment two
+     * paragraphs up says it "is not honoured yet", so every plain `setAnimation(id)` in the client looked
+     * like a request to hold: a swing at 1.4 s stopped releasing to the gait. The discriminator has to be
+     * something only the caller who wants a freeze can say.
+     */
+    holdClamped: boolean = false,
   ) {
     // BEFORE the model check, so a request that beats the model home is not dropped. Spawn and
     // animation packets routinely arrive ahead of an async M2 load, and the model setter replays
@@ -1278,6 +1529,27 @@ class Unit extends Entity {
       return;
     }
 
+    // THE COMBAT FAST-PATH, ahead of every other decision, because it decides whether this request is
+    // armed AT ALL. See `combatFastPath`. This is the owner's "Анимация способностей должна
+    // быть выше чем анимация автоатаки": a live combat clip is never cut by another one.
+    if (this.combatFastPath(id, seq, inst)) {
+      return;
+    }
+
+    // THE MASKED UPPER-BODY ROUTE: a swing taken while the legs are committed plays on the torso over
+    // the gait instead of replacing the whole body. See `tryMaskedRoute` for the routing rule and for
+    // every case it deliberately declines.
+    if (this.tryMaskedRoute(id, seq, inst, repetitions)) {
+      return;
+    }
+
+    // THE TRANSPLANT: this request is a LOCOMOTION clip and something is holding the base. Move that
+    // clip up onto the torso at its live frame rather than letting the request overwrite it, and let
+    // the arm below proceed. This is what makes a jump land under a swing -- see `tryTransplantUp`.
+    if (RATE_SCALED.has(id)) {
+      this.tryTransplantUp(inst);
+    }
+
     if (inst.current === seq) {
       // A LOOP that is already running is never re-armed, `interrupt` or not -- see above. A
       // one-shot still inside its play window is left alone unless the caller says to interrupt it;
@@ -1293,7 +1565,7 @@ class Unit extends Entity {
       }
     }
 
-    this.startAnimation(id, repetitions);
+    this.startAnimation(id, repetitions, holdClamped);
   }
 
   /**
@@ -1327,19 +1599,231 @@ class Unit extends Entity {
     this.inCombat = false;
     this.combatTarget = null;
     this.attackedBy.clear();
+    // And a corpse throws no parked swing. `DEATH` is not in the fast path's set so nothing can defer
+    // over it, but a swing parked a moment BEFORE the death would otherwise drain onto the corpse the
+    // first frame locomotion ran -- and locomotion never releases a Death owner, so it would sit there
+    // for the session instead.
+    this.deferredOneShot = null;
     if (dead) {
       this.setAnimation(DEATH, true, 0);
       return;
     }
     this.externalSeq = null;
+    this.externalHeld = false;
     // Nothing is armed in its place -- the next `updateLocomotion` frame picks a gait, which for a
     // unit standing still is Stand. Arming Stand here would be the same thing one frame earlier and
     // would take ownership of a loop, which is the permanent freeze `externalSeq` documents.
     this.locoCandidates = null;
   }
 
+  /**
+   * THE DEFERRED ONE-SHOT -- the client's `+0xd60` cache. An `AnimationData` id, or null.
+   *
+   * Round 32 named this as deliberately NOT ported ("the deferred cache needs a drain point in the
+   * locomotion release and a swing dropped this way is a swing not drawn, so it is named rather than
+   * faked"). It is the drain point that was missing, and `updateLocomotion` is exactly it.
+   */
+  private deferredOneShot: number | null = null;
+
+  /**
+   * Is a COMBAT one-shot on screen right now, and on which slot? `null` when none is.
+   *
+   * Both slots have to be asked, and that is the whole reason this is a helper: since the masked route
+   * landed, a swing thrown while running lives on the OVERLAY while `inst.current` holds the gait. A
+   * combat-liveness test that read `current` alone would answer "nothing is playing" through every
+   * swing the owner actually throws while moving.
+   */
+  private liveCombatSlot(inst: InstanceAnim): 'base' | 'overlay' | null {
+    const overlay = inst.overlay;
+    if (overlay !== null && isCombatAnim(overlay.id) && !inst.overlayWindowElapsed(worldClock.ms)) {
+      return 'overlay';
+    }
+    // `?? null`, not a bare read: every animation test drives these methods with `.call()` on a
+    // hand-built double where an unset field is `undefined`, and `undefined !== null` walks straight
+    // into a `TypeError` on `.loops`. Same degradation `InstanceAnim#armable` documents.
+    const owner = this.externalSeq ?? null;
+    if (owner !== null && !owner.loops && isCombatAnim(owner.id)
+      && inst.current === owner && !windowElapsedOrInstant(inst, owner, worldClock.ms)) {
+      return 'base';
+    }
+    return null;
+  }
+
+  /**
+   * THE COMBAT FAST-PATH (`0x5fe43c`-`0x5fe48b`, wow-re `combat-anim-fastpath.md`, decision 0406):
+   * **a combat clip requested while another combat clip is playing is NOT armed.** The CURRENT clip's
+   * rate doubles (op6 `2.0f` re-times its remainder, pose-continuous) and the request parks in the
+   * `+0xd60` cache to play afterwards. Returns whether the request was swallowed this way.
+   *
+   * THE OWNER'S REPORT IS THE MISSING GENERALITY, not the missing rule. Round 32 ported the doubling
+   * but keyed it on the SAME id on one slot -- `combat.ts` compared `live.current.id === swingId` and
+   * `tryMaskedRoute` compared `inst.overlay.id === id` -- so two consecutive auto-attacks were handled
+   * and **an ability's clip cut by the next auto-attack was not**. The reference's predicate is
+   * `is_combat_anim(cur) && is_combat_anim(id)` (`driver.rs:871`), any combat clip over any other, and
+   * its own comment names the exact symptom: "this is why the **Eviscerate spin survives the
+   * auto-swings its cast triggers** -- sped up, never cut -- and why consecutive swings don't hard-cut
+   * each other."
+   *
+   * So the precedence the owner asked for is not a rank table: it is that **the clip already on screen
+   * finishes**, faster, and the loser plays immediately after instead of being dropped. An ability whose
+   * clip is NOT a combat id (a cast release, `isCastAnim`) is not in this set at all and takes the
+   * normal arm, replacing a swing outright -- also the reference's behaviour, and also "the ability
+   * wins".
+   *
+   * A flat 2x, never `clip / timer`. `seq` is taken rather than re-resolved so this asks about the clip
+   * that would actually have been armed.
+   */
+  private combatFastPath(id: number, seq: Sequence, inst: InstanceAnim): boolean {
+    if (seq.loops || !isCombatAnim(id)) {
+      return false;
+    }
+    const slot = this.liveCombatSlot(inst);
+    if (slot === null) {
+      return false;
+    }
+    // THE SAME-ID DEDUP is deliberately NOT a separate case here (`0x5fdba0`, decision 0280): the
+    // reference notes "combat same-id re-plays never reach it -- the fast-path above catches them
+    // first, the client's head-of-function order". A second identical swing therefore doubles and
+    // parks exactly like a different one, which is what round 32 already did for that case.
+    if (slot === 'overlay') {
+      inst.setOverlayRate(inst.overlayPlaybackRate * 2, worldClock.ms);
+    } else {
+      inst.setRate(inst.playbackRate * 2, worldClock.ms);
+    }
+    this.deferredOneShot = id;
+    return true;
+  }
+
+  /**
+   * Move a live CAST or COMBAT clip off the base and onto the torso, so a locomotion request can have
+   * the legs. Returns whether it moved. See `InstanceAnim#transplantToOverlay` for the mechanism.
+   *
+   * THIS IS "прыжек все еще не работает с атакой". A swing standing still is full body and holds
+   * the ownership latch, and until now that latch simply won: `updateLocomotion` returned early for the
+   * whole clip, so JumpStart was armed over the swing (replacing it) and the gait behind it could not
+   * run at all. The client does neither -- it transplants. `JUMP_START` **37 is a locomotion id** (it is
+   * in `RATE_SCALED`, and the reference states outright that "the same table is the LOCOMOTION
+   * membership the transplant predicates key on", `select.rs:963-971`), so a jump requested over a live
+   * swing moves the swing to the torso and takes the legs.
+   *
+   * THE LATCH IS RELEASED HERE, and it must be: the clip is no longer on the base, so an owner that
+   * still claimed it would block locomotion for the rest of the clip's window -- the very bug this
+   * removes. The overlay retires itself.
+   *
+   * WHAT IT REFUSES, and each refusal is a behaviour already confirmed:
+   *  - **a LOOP** -- the held cast pose (`ReadySpellOmni` 51/52) and a looping emote. The reference
+   *    excludes 51/52 from `isCastAnim` on purpose: "a jump over a standing hold really does take the
+   *    whole body" (`select.rs:628-629`). So jumping mid-cast still replaces the pose, as today.
+   *  - **DEATH** -- not a cast and not a combat id, so it is not in the movable set at all and the
+   *    corpse keeps the body. Nothing here can stand a corpse up.
+   *  - **an id that is neither cast nor combat** -- an emote, a landing clip. Overwritten on the base as
+   *    before.
+   *  - **no split key-bone** on this rig, or an overlay already busy (the reference's own no-op).
+   */
+  private tryTransplantUp(inst: InstanceAnim): boolean {
+    const owner = this.externalSeq ?? null;
+    if (owner === null || owner.loops) {
+      return false;
+    }
+    if (!isCastAnim(owner.id) && !isCombatAnim(owner.id)) {
+      return false;
+    }
+    const modelAnim = this.model?.modelAnim ?? null;
+    const mask = modelAnim && modelAnim.upperBodyMask ? modelAnim.upperBodyMask() : null;
+    if (mask === null) {
+      return false;
+    }
+    if (!inst.transplantToOverlay(mask, worldClock.ms)) {
+      return false;
+    }
+    this.externalSeq = null;
+    this.externalHeld = false;
+    this.locoCandidates = null;
+    return true;
+  }
+
+  /**
+   * "THE LEGS RUN, THE UPPER BODY FIGHTS." Try to play `seq` on the masked upper-body slot; return
+   * whether it was taken, in which case `setAnimation` must do nothing else.
+   *
+   * THE ROUTE IS `oneshot-route.ts#routeOneShot` -- the client's own per-play decision, keyed on the
+   * live movement flags, NOT on the animation id. The same Attack1H is full body standing and masked
+   * running (`creature_anim/select.rs:941-961`). That single fact is what fixes the report: nothing
+   * about which clip is chosen changes, only where it is played.
+   *
+   * FIVE THINGS THIS DECLINES, each for a reason and each of them a behaviour the owner has already
+   * confirmed:
+   *
+   *  - **the split key-bone is absent** -- `upperBodyMask()` null is the client's `-1` sentinel and its
+   *    documented fallback is full body (`benilla-assets/src/model/anims.rs:72-73`). Every creature in
+   *    Northshire is in this class or not, per rig; a wolf that has no SpineLow swings full body as it
+   *    always did.
+   *  - **`seq.id !== id`** -- the arm did not land on what was asked for. `resolve` falls back to the
+   *    first inline sequence (normally a looping Stand) for an id a model lacks, and masking THAT onto
+   *    a torso is a wrong pose held over a correct gait. Same test, same reason, as the ownership
+   *    latch in `startAnimation`.
+   *  - **a LOOP** -- the overlay retires on "window elapsed, then 150 ms", which a loop never reaches.
+   *    The held cast pose (`ReadySpellOmni`, a loop) and any looping emote therefore keep the base
+   *    track and the `externalSeq` latch, which is what `SpellHandler#releaseCastPose` releases. The
+   *    reference DOES mask a moving cast hold (`driver.rs:1136`) and that remains a gap, stated: it
+   *    needs an explicit stow on the overlay, which is a round of its own.
+   *  - **an external state already owns the base** -- a cast pose, a death, a jump entry. This client
+   *    has ONE latch, and a request arriving over it is normally the thing meant to replace it (a cast
+   *    release ending its own held pose). Masking it would leave the latch holding the body for ever.
+   *    This is a DEVIATION from the reference, which would mask a swing taken mid-jump; it costs a
+   *    mid-air swing its split and it protects two fixes that were each reported and fixed once.
+   *  - **the overlay already holds this same clip, still in flight** -- the ARM-LEVEL SAME-ID DEDUP
+   *    (`0x5fdba0`, decision 0280): "a requested id that already occupies its slot and is still playing
+   *    is NOT re-armed" (`driver.rs:888-892`), which is what lets a repeated kit request free-run. It is
+   *    a flat 2x here because it doubles the live clip like the fast path does, and SELF-REVIEW of this
+   *    round corrected what that branch is: no COMBAT id can reach it any more, because
+   *    `combatFastPath` catches every combat-over-combat request before `setAnimation` gets here. What
+   *    is left for this branch is a non-combat same-id re-request -- a repeated cast release, a repeated
+   *    emote.
+   *
+   * `currentAnimationId` is NOT written here and `externalSeq` is NOT latched: the base track is
+   * untouched, so locomotion still owns it and must keep driving the gait. That is the whole point.
+   */
+  private tryMaskedRoute(
+    id: number,
+    seq: Sequence,
+    inst: InstanceAnim,
+    repetitions: number,
+  ): boolean {
+    if (seq.loops || seq.id !== id || (this.externalSeq ?? null) !== null) {
+      return false;
+    }
+    // THE MASK FIRST, and the order is deliberate twice over. It is the cached, per-model half of the
+    // decision (`ModelAnim#upperBodyMask`, built once), where `locomotionFlags()` reads live state; and
+    // it means a rig with no split key-bone declines without ever reaching the flags -- which is what
+    // keeps this safe on the hand-built `.call()` doubles every animation test uses, where a method
+    // that is not on the double is a `TypeError` rather than a falsy read.
+    const modelAnim = this.model?.modelAnim ?? null;
+    const mask = modelAnim && modelAnim.upperBodyMask ? modelAnim.upperBodyMask() : null;
+    if (mask === null) {
+      return false;
+    }
+    if (routeOneShot(id, this.locomotionFlags()) !== OneShotRoute.Masked) {
+      return false;
+    }
+
+    if (inst.overlay !== null && inst.overlay.id === id
+      && !inst.overlayWindowElapsed(worldClock.ms)) {
+      inst.setOverlayRate(inst.overlayPlaybackRate * 2, worldClock.ms);
+    } else {
+      inst.armOverlay(seq, mask, worldClock.ms);
+    }
+
+    // Emitted so every listener sees the same thing it would have seen on the full-body route.
+    // `currentAnimationId` is NOT written here: `setAnimation`'s own first statement already recorded
+    // it before the model check, and writing it again would only restate that -- SELF-REVIEW caught a
+    // redundant assignment here that read as if the masked path had its own bookkeeping.
+    this.emit('animation:play', id, repetitions);
+    return true;
+  }
+
   /** Arm unconditionally. `setAnimation` is the guarded entry point; this is the raw one. */
-  startAnimation(id: number, repetitions: number) {
+  startAnimation(id: number, repetitions: number, holdClamped: boolean = false) {
     if (!this.model) return;
 
     const inst = this.model.instanceAnim;
@@ -1353,7 +1837,28 @@ class Unit extends Entity {
     // NOT follow `nextAnimationID`, so an absent animation yields Stand rather than the authored
     // successor. It can also return null now: a model whose every sequence lives in a sibling
     // `.anim` file has nothing safe to play until Task 20 merges that data in.
-    const seq = this.model.modelAnim.resolve(id);
+    /**
+     * TWO RESOLVES, AND THE FIRST ONE IS THE LATCH TEST -- this is what makes a kneel last a cast.
+     *
+     * The owner's bucket, measured: `precast pose 141 for spell 6478 -> resolved=115 loops=true
+     * latched=false`. **141 is `SpellKneelLoop` and 115 is `KneelLoop`** (`AnimationData.dbc`, read off
+     * the served file) -- so the character does not own `SpellKneelLoop`, `resolve` followed the ALIAS
+     * chain to the plain kneel loop, and the body played the visually correct pose. It then lost it
+     * inside a frame, because the latch below required `seq.id === id` and 115 is not 141. Locomotion
+     * took the body straight back: "проигрывается анимация лута, долю секунды, потом он встает".
+     *
+     * The guard was right to exist and wrong in its test. Its own comment states the danger: `resolve`
+     * falls back to the FIRST INLINE sequence -- normally a looping Stand -- for an id the model lacks,
+     * and latching that would hold the body in a clip nobody asked for, for ever. But an ALIAS HOP is not
+     * that failure; it is the model saying which of its own clips this id means. `seq.id === id` cannot
+     * tell the two apart, and `resolve`'s own `fallback` flag can: with it off, an alias chain that lands
+     * on a real inline sequence still returns one, and only the accidental fallback returns null.
+     *
+     * So `intended` is the latch test and the fallback is still played when there is nothing better --
+     * just not owned. One extra call, and only on the path that was going to be wrong anyway.
+     */
+    const intended = this.model.modelAnim.resolve(id, false);
+    const seq = intended ?? this.model.modelAnim.resolve(id);
     if (!seq) {
       return;
     }
@@ -1365,10 +1870,37 @@ class Unit extends Entity {
     // STATE. `resolve` falls back to the first inline sequence -- normally Stand, a LOOP -- for any
     // id the model does not own, and most models own few state ids. Latching on the request would
     // therefore hand ownership of a looping Stand to a state that never arrived, and a looping
-    // owner never releases: the unit would stand still for the rest of the session. `seq.id === id`
-    // is exactly the "did we get what we asked for" test, and it needs no caller knowledge --
-    // locomotion's target is always a gait id, so it clears the latch rather than setting it.
-    this.externalSeq = (!isGaitId(id) && seq.id === id) ? seq : null;
+    // owner never releases: the unit would stand still for the rest of the session. `intended !== null`
+    // is the "did we get what we asked for" test -- see the two resolves above for why it is that and
+    // not `seq.id === id`, which threw away every alias the models actually use. It needs no caller
+    // knowledge: locomotion's target is always a gait id, so it clears the latch rather than setting it.
+    this.externalSeq = (!isGaitId(id) && intended !== null) ? seq : null;
+    /**
+     * A CLAMP ARMED AS A HOLD MUST FREEZE, and this flag is the whole of it.
+     *
+     * The owner, on opening a bucket: "проигрывается анимация лута, долю секунды, потом он встает и
+     * проигрывается анимация успешного каста. Возможно нужно анимацию лута сделать так чтобы не долю
+     * секунду длилась а на весь период каста." Exactly right, and the cause is a property of the clip.
+     *
+     * `spell-anim.ts`' header explains how a precast pose is held: "`ReadySpellOmni` is a LOOPING
+     * sequence, and `Unit#externalSeq`'s latch never releases a loop -- so arming it hands the body to
+     * the pose". That is true and it is why Healing Wave holds. **But `Loot` (50) does not loop.** The
+     * reference is explicit: "Loot 50 is likewise authored clamp -- one 0.5 s kneel-down that must FREEZE
+     * in the rummage pose; as Forever it would wrap back to standing and re-kneel every half second"
+     * (`creature_anim/driver/mode.rs:523-525`), and it holds it with `RepeatAnimation::Never` plus "a
+     * deliberate freeze -- no window either".
+     *
+     * So a non-looping clip armed with `holdClamped` is latched as HELD, and `updateLocomotion`'s window
+     * release skips it exactly as it skips a loop. **Only a caller that asks for it**, which today is the
+     * precast pose alone -- an earlier version keyed this off `repetitions < 0` and two tests killed it
+     * within the minute, because that parameter defaults to -1 and is documented as not honoured, so
+     * every one-shot in the client became a freeze and a swing never released to the gait.
+     *
+     * The ways out are the ones that already existed and both still work: `SMSG_SPELL_GO` arms the
+     * release, which replaces the latch, and `releaseAnimationLatch` is the explicit exit for a cast
+     * that never completes.
+     */
+    this.externalHeld = this.externalSeq !== null && !seq.loops && holdClamped;
 
     this.emit("animation:play", id, repetitions);
   }
@@ -1410,6 +1942,7 @@ class Unit extends Entity {
       return false;
     }
     this.externalSeq = null;
+    this.externalHeld = false;
     this.locoCandidates = null;
     return true;
   }
@@ -1998,6 +2531,9 @@ class Unit extends Entity {
       // touchdown is stationary, JumpLandRun when it is still running forward, and NOTHING for a
       // backpedal or a walk -- those drop straight into their gait, because 187 is a forward-run
       // footplant and playing it backward is the "forward run flash after jump-then-hold-S" bug.
+      // A PARK MADE MID-ARC DIES HERE: "it waits -- and dies at the landing play's clear" (§5-verified,
+      // decision 0868). A swing deferred during a jump is not replayed on touchdown.
+      this.deferredOneShot = null;
       if ((flags & ANY_MOVE) === 0) {
         this.locoLand = { id: JUMP_END, flags };
       } else if ((flags & (MoveFlag.BACKWARD | MoveFlag.WALK_MODE)) === 0) {
@@ -2022,12 +2558,55 @@ class Unit extends Entity {
       if (inst.current !== owner) {
         // Something re-armed underneath the latch. Whatever is playing now is not ours to hold.
         this.externalSeq = null;
-      } else if (owner.loops || owner.id === DEATH) {
+        this.externalHeld = false;
+      } else if (owner.loops || owner.id === DEATH || this.externalHeld) {
+        // `externalHeld` is a CLAMP that was armed as a hold -- see `startAnimation`. It has a window
+        // and must not be released by it, which is the difference between a kneel that lasts the cast
+        // and one that lasts half a second.
         return;
       } else if (!windowElapsedOrInstant(inst, owner, worldClock.ms)) {
-        return;
+        // STILL PLAYING -- but a live cast or combat clip does not get to stop the LEGS. The client
+        // transplants it up onto the torso and hands the base to the gait, and the test for whether it
+        // may is the reference's `gait_is_locomotion` (`select.rs:989-993`): the FIRST candidate of
+        // this frame's gait pick, asked with NO engagement, has to be a locomotion id.
+        //
+        // THAT TEST IS THE COMBAT BRACKET'S PROTECTION, and it is the reference's own hard-won gate,
+        // not a precaution of mine. Standing still the head candidate is `STAND`, which is not a
+        // locomotion id, so a standing swing is never transplanted and keeps the whole body exactly as
+        // the owner confirmed it. The reference paid for this gate: "a stun's root wipes the direction
+        // bits, so the flag change re-arms to **Stand(0)** -- not locomotion -- and the reference
+        // *overwrites* the cast on bone 0 ... Transplanting unconditionally moved it to the torso
+        // instead and froze an arm out" (`driver/mode.rs:318-327`, decision 0894, Ice Block).
+        //
+        // `ready` is 0 on purpose: the reference passes `None` there. An engaged unit standing still
+        // picks a Ready idle, which is not a locomotion id either, so the answer is the same both ways
+        // -- but passing the real `ready` would make this test disagree with the reference for no
+        // reason anyone could later reconstruct.
+        const head = this.gaitCandidates(flags, speed, 0)[0];
+        if (!RATE_SCALED.has(head) || !this.tryTransplantUp(inst)) {
+          return;
+        }
       } else {
         this.externalSeq = null;
+        this.externalHeld = false;
+      }
+    }
+
+    // DRAIN THE PARKED ONE-SHOT (the client's `+0xd60` read at the base recompute, `0x5fd392`): the
+    // moment no one-shot is live, the clip the fast path deferred plays. Here, and not at the top of
+    // this method, because "the read sits downstream of the airborne-freeze, so a park made mid-arc
+    // waits" (`driver.rs:846-856`) -- and by this point the ownership latch has already released, which
+    // is exactly the "no one-shot is live" the client tests.
+    //
+    // NEVER MID-AIR, and never with an overlay still running: both would drop the clip into a slot that
+    // is not free. A park that never drains is cleared by the landing pick and by death, so nothing can
+    // hold a stale id for the rest of a session.
+    if (this.deferredOneShot !== null) {
+      const parked = this.deferredOneShot;
+      if (!airborne && this.externalSeq === null && inst.overlay === null) {
+        this.deferredOneShot = null;
+        this.setAnimation(parked, true, 0);
+        return;
       }
     }
 

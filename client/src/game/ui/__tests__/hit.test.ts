@@ -1,4 +1,4 @@
-import { focusChain, hitTest, nextFocus } from '../hit';
+import { focusChain, hitTest, nextFocus, wheelTargetAt } from '../hit';
 import { Widget, WidgetRoot } from '../widget';
 
 const viewport = { width: 1024, height: 768 };
@@ -87,5 +87,39 @@ describe('focus', () => {
     const chain = focusChain(tree().drawList(viewport));
 
     expect(nextFocus(chain, chain[0], true)!.id).toBe('box');
+  });
+});
+
+/**
+ * THE WHEEL'S TARGET, and it is not `hitTest`'s.
+ *
+ * The quest page's shape: a mouse-enabled panel with the scroll frame INSIDE it. `hitTest` answers the
+ * panel, and the frame binding `<OnMouseWheel>` is the panel's DESCENDANT -- so the old climb-from-the-hit
+ * went panel -> root and found no handler, which is why the wheel was dead there.
+ */
+describe('wheelTargetAt', () => {
+  it('finds a scroll frame nested inside the mouse-enabled panel hitTest answers', () => {
+    const root = new WidgetRoot();
+
+    const panel = root.root.add(new Widget('frame', 'panel'));
+    panel.mouseEnabled = true;
+    panel.setSize(400, 400).setAnchors({ point: 'TOPLEFT', x: 0, y: 0 });
+
+    const scroll = panel.add(new Widget('frame', 'scroll'));
+    scroll.setSize(300, 334).setAnchors({ point: 'TOPLEFT', x: 20, y: -20 });
+    let seen: number | null = null;
+    scroll.onMouseWheel = (delta) => { seen = delta; };
+
+    // The content the pointer is actually over -- art, so not mouse-enabled, exactly like quest text.
+    const content = scroll.add(new Widget('texture', 'content'));
+    content.setSize(285, 300).setAnchors({ point: 'TOPLEFT', x: 0, y: 0 });
+
+    const items = root.drawList(viewport);
+
+    expect(hitTest(items, 100, 100)!.id).toBe('panel');
+    expect(wheelTargetAt(items, 100, 100)!.id).toBe('scroll');
+
+    wheelTargetAt(items, 100, 100)!.onMouseWheel!(1);
+    expect(seen).toBe(1);
   });
 });

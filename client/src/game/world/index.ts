@@ -22,7 +22,13 @@ import SkyManager from "../pipeline/sky/manager";
 import { fogDebug } from "./fog-debug";
 import { lightDebug } from "./light-debug";
 import { reactionFor, REACTION_NEUTRAL } from "./faction";
+import { HoverHighlight } from "./hover-highlight";
 import { SelectionRing } from "./selection-ring";
+import { LevelUpEffect } from "./level-up-effect";
+import GameObjectSparkle from './game-object-sparkle';
+import SessionGuard from './session-guard';
+import ModelFade from './model-fade';
+import { QuestMarkers } from "./quest-markers";
 import { NameplateConfig, Nameplates } from "./nameplates";
 import { FloaterSpawn, FloatingCombatText, MAX_FLOATERS, WordSource } from "./floating-text";
 import {
@@ -52,6 +58,54 @@ export default class World extends EventEmitter {
   public collisionDebug = collisionDebugView;
   /** The ground selection ring under the current target. Built in the constructor, ticked in `animate`. */
   public selectionRing: SelectionRing;
+
+  /**
+   * THE LEVEL-UP BURST. `Spells\LevelUp\LevelUp.m2`, which `SpellVisualEffectName.dbc` row 21 names
+   * `HARDCODED Unit Level Up` -- see `level-up-effect.ts` for the whole source trail and for why the
+   * idle cost is one array-length compare.
+   *
+   * Public so `ui/level-up-bridge.ts` can play it: the packet arrives on the network thread of the
+   * session, not in the render loop, and the effect has to be started from there.
+   */
+  public levelUpEffect: LevelUpEffect;
+
+  /** The glow on a quest objective object. See `game-object-sparkle.ts`. */
+  public gameObjectSparkle: GameObjectSparkle;
+
+  /** NPC windows and the loot end when the player walks away. See `session-guard.ts`. */
+  public sessionGuard = new SessionGuard();
+
+  /**
+   * Units fade in when they arrive and out when they stream away. See `world/model-fade.ts`.
+   *
+   * Constructed with `remove` bound, because the fade owns the moment a departing unit actually leaves
+   * the scene -- the ramp has to finish first.
+   */
+  public modelFade = new ModelFade((unit: Unit) => this.remove(unit));
+
+  /** See the wiring block in `animate`. */
+  private sessionGuardWired = false;
+
+  /**
+   * THE `!` AND `?` OVER A QUESTGIVER'S HEAD -- models on a bone, not sprites. See
+   * `world/quest-markers.ts` for the whole render law and for why the nameplate band is not involved.
+   */
+  public questMarkers: QuestMarkers = new QuestMarkers();
+
+
+  /** See the instrument beside `questMarkers.update` -- published once, not per frame. */
+  private questMarkerProbePublished = false;
+
+  /**
+   * The guid -> `DIALOG_STATUS` map the markers are drawn from, or null.
+   *
+   * INSTALLED BY THE BRIDGE rather than read from here, deliberately: `game/ui/quest-bridge.ts` owns
+   * the handler and is only attached on a real session, so an offline world leaves this null and the
+   * marker pass early-outs. Reaching into `game.objectHandler` from the world would touch transports
+   * the offline route contracts never to construct -- the same rule `world-ui.ts` states for its own
+   * gated bridges.
+   */
+  public questMarkerStatuses: Map<string, number> | null = null;
   /**
    * The overhead name plates. Built in the constructor and ticked in `animate`, like the ring.
    *
@@ -158,8 +212,6 @@ export default class World extends EventEmitter {
   // private skybox: THREE.Mesh;
   constructor(game: GameHandler) {
     super();
-    console.log(game)
-    console.log('WORLD GAME', game)
     window['world'] = this;
     this.scene = new THREE.Scene();
     this.scene.matrixAutoUpdate = false;
@@ -189,6 +241,42 @@ export default class World extends EventEmitter {
     // are world-space (it is a projected decal, `world/decal.ts`), so it belongs to the scene ROOT and
     // not to any placed subtree, and it draws nothing at all until something is targeted.
     this.selectionRing = new SelectionRing(this.scene);
+    // THE LEVEL-UP BURST, on the scene ROOT for the selection ring's reason directly above: its
+    // position is world-space and it belongs to no placed subtree. Draws nothing until a level lands.
+    this.levelUpEffect = new LevelUpEffect(this.scene);
+    this.gameObjectSparkle = new GameObjectSparkle(this.scene);
+    /**
+     * `window.worldGameObjects()` -- WHY A BUSH IS NOT ON SCREEN, in one call.
+     *
+     * This area has now cost a round to a symptom that read as "the models do not load" and was a
+     * missing POSITION: every stage of the object arc worked and the node sat at NaN, which draws
+     * nowhere and is indistinguishable from a model that never arrived. These are the fields that
+     * separate the stages, so the next such report is one line instead of a round.
+     *
+     * `pos` NaN or (0,0,0) is the position path; `model: false` with a `displayId` is the DBC or the
+     * fetch; `visible: false` with a model is the program warm-up; `dynamic` 0 on a quest objective is
+     * the server not activating it for us, which is a quest-state answer rather than a render one.
+     */
+    (window as unknown as Record<string, unknown>).worldGameObjects = () => {
+      const rows: unknown[] = [];
+      for (const [guid, unit] of this.entities) {
+        if (unit.gameObject === null) {
+          continue;
+        }
+        const p = unit.view.position;
+        rows.push({
+          guid,
+          entry: unit.gameObject.entry,
+          displayId: unit.gameObject.displayId,
+          dynamic: unit.gameObject.dynamic,
+          flags: unit.gameObject.flags,
+          model: !!unit.model,
+          visible: unit.view.visible,
+          pos: `${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}`,
+        });
+      }
+      return { count: rows.length, sparkle: this.gameObjectSparkle.stats, rows: rows.slice(0, 12) };
+    };
     // `window.worldRing()` -- the ring instrument: what the last projection emitted, plus the raw
     // world-space vertices the gate measures against the terrain heightmap. See `SelectionRing#vertices`.
     window['worldRing'] = () => ({
@@ -549,6 +637,41 @@ export default class World extends EventEmitter {
       this.emit('unit:fields', entity);
     }
     this.entities.set(entity.guid, entity);
+    // ANOTHER PLAYER'S NAME. A creature is named by `SMSG_CREATURE_QUERY_RESPONSE`, which
+    // `object/combat.ts` already asks for per template; a PLAYER is named only by
+    // `SMSG_NAME_QUERY_RESPONSE`, and nothing ever asked -- the only `askName` callers were three chat
+    // paths. That is the whole of "I don't see players name in target window and in toolbar on top of
+    // the player. But I see mobs names."
+    //
+    // **THIS GUARD NEVER FIRED, AND THE PRIMARY ASK IS NOT HERE.** Corrected after the owner
+    // reported the name still missing: `Unit#isPlayer` was assigned in exactly one place, the local
+    // `Player` constructor (`classes/player.ts:14`), so it was `false` for every player the server
+    // streams -- and the `entity !== this.player` half excludes the single unit where it was true.
+    // The condition was therefore false for all inputs. Worse, `add` runs BEFORE the create block's
+    // type and fields are decoded (`update-object/handler.ts:309-310` constructs a bare `Unit` and
+    // adds it immediately), so nothing here can know a unit is a player in the first place.
+    //
+    // The ask now lives where the wire has just said so, at `update-object/handler.ts`'s
+    // `unit.objectType = pack.obj_type`, which is also where `isPlayer` is now set from the create
+    // block. This block is kept as a second door for a re-`add` of an already-typed unit; it is no
+    // longer load-bearing. `askNameOnce` dedupes on both the cache and the in-flight set, so a player
+    // standing in view is asked for exactly once across both doors.
+    //
+    // **`!entity.name` WOULD NEVER HAVE FIRED**, and self-review caught it before it shipped:
+    // `Unit#name` defaults to the STRING `"<unknown>"` (`classes/unit.ts:317`), which is truthy, so a
+    // falsiness test is false for every unit that has never been named -- exactly the units this is
+    // for. The literal is compared instead, which is what `ui/unit-bridge.ts:60` already does when it
+    // decides whether a snapshot has a real name.
+    if (entity.isPlayer && entity !== this.player
+        && (entity.name === '' || entity.name === '<unknown>')) {
+      if (typeof this.game?.askNameOnce === 'function') {
+        this.game.askNameOnce(entity.guid);
+      } else {
+        // LOUD, not silent: a rename on the handler would otherwise turn this feature off with no
+        // symptom but a blank name, which is the report this code exists to answer.
+        console.warn('World#add: game.askNameOnce is missing -- other players will have no name');
+      }
+    }
     if (entity.view) {
       this.scene.add(entity.view);
       // this.scene.add(entity.collider); // if you want to see the player collider
@@ -594,6 +717,29 @@ export default class World extends EventEmitter {
    * it, so what this holds and what the server believes cannot drift apart.
    */
   public target: Unit | null = null;
+
+  /**
+   * The mouseover/target model brighten. See `world/hover-highlight.ts` for what it is in the real
+   * client and why it costs nothing per frame.
+   */
+  private readonly hoverHighlight = new HoverHighlight();
+
+  /**
+   * The FOCUSED entity, or null -- the body behind the `focus` unit token.
+   *
+   * Written only by `ui/group-bridge.ts#FocusUnit`/`ClearFocus`, because `focus` is a pure client
+   * concept set from another token's SNAPSHOT and a snapshot carries no guid by design
+   * (`framexml/lua/api/units.ts:11`). `world/unit-tokens.ts` reads it so a portrait can be baked for
+   * `FocusFrame`; without it that portrait resolved to nothing and drew nothing.
+   *
+   * Plain and public rather than the getter/setter pair `hovered` has: nothing inside `World` derives
+   * from a focus change -- the lighting and ring legs that make `hovered` interesting have no focus
+   * counterpart -- so a setter would be ceremony.
+   */
+  public focus: Unit | null = null;
+
+  /** Backing field for `hovered`. */
+  private _hovered: Unit | null = null;
 
   /**
    * Pick a unit (or null to clear), tell the server, and announce it.
@@ -650,6 +796,12 @@ export default class World extends EventEmitter {
       return;
     }
     this.target = unit;
+    // The TARGET half of the model brighten. Hover and target STACK in the reference, so this is a
+    // second reason and not a second highlight -- `hover-highlight.ts` folds them. The selection ring
+    // is untouched and unrelated: it is a projected decal that marks the target, this lifts the
+    // lighting sum of whatever is hovered OR targeted, and both are true at once on a unit that is
+    // both.
+    this.hoverHighlight.setTargeted(unit);
     this.game.objectHandler.combatHandler.select(unit ? unit.guid : null);
     if (unit && unit.fields.entry) {
       this.game.objectHandler.combatHandler.queryCreature(unit.fields.entry, unit.guid);
@@ -657,11 +809,67 @@ export default class World extends EventEmitter {
     this.emit('target:change', unit);
   }
 
+  /**
+   * The unit under the pointer, or null -- the MOUSEOVER half of the model brighten.
+   *
+   * Driven from the world screen's existing 100 ms hover pick (`pages/game/index.tsx`), which already
+   * resolves this unit for the cursor: the highlight is a second consumer of one pick, not a second
+   * pick. Idempotent, so calling it on every cadence tick with the same answer costs a reference
+   * compare.
+   */
+  setHovered(unit: Unit | null) {
+    /**
+     * ON THE TRANSITION ONLY, and that guard is a performance requirement rather than tidiness.
+     *
+     * The pick runs on a 100 ms cadence and calls this every time, so without the guard everything
+     * downstream churns ten times a second whether or not the pointer moved between units -- including
+     * the `mouseover` token push and the tooltip below, which would dirty the interface draw-list
+     * fingerprint and hand back the 4-7.5 ms the offscreen target buys on ~92% of frames.
+     */
+    if (this._hovered === unit) {
+      return;
+    }
+    this._hovered = unit;
+    this.hoverHighlight.setHovered(unit);
+    /**
+     * The client's own `"mouseover"` token changed. `ui/unit-bridge.ts` listens and is what pushes the
+     * snapshot and drives `GameTooltip:SetUnit` -- the same division `target:change` already uses, so
+     * this class keeps no VM and no tooltip knowledge.
+     */
+    this.emit('hover:change', unit);
+  }
+
+  /**
+   * The unit under the pointer, or null -- the client's own `"mouseover"` token.
+   *
+   * Held here rather than asked of `HoverHighlight` because it is a fact about the WORLD that two
+   * consumers want: the brighten, and `world/unit-tokens.ts` resolving `"mouseover"` for a portrait.
+   * The highlight owns what to DO with it, not what it is.
+   */
+  get hovered(): Unit | null {
+    return this._hovered;
+  }
+
   remove(entity: Unit) {
+    // Before anything is released: neither the hover nor the target reason may keep a departing
+    // unit's model alive, and the lift itself is not worth clearing on materials about to be
+    // disposed. `setTarget(null)` below covers the UI side of losing a target; this covers the glow.
+    this.hoverHighlight.forget(entity);
+    if (this._hovered === entity) {
+      this._hovered = null;
+    }
     // A target that streams out or dies-and-decays stops being a target. Without this the UI would
     // keep painting a unit that is no longer in the scene, and `TargetFrame` would never hide.
     if (this.target === entity) {
       this.setTarget(null);
+    }
+    // AND THE SAME FOR THE FOCUS. `focus` is the only token whose ENTITY this class holds across
+    // streaming, so a despawned focus would leave `unit-tokens.ts` resolving a body no longer in the
+    // scene and the booth baking a portrait of it. The Lua-side snapshot is deliberately left alone:
+    // `FocusFrame` hides itself off `UnitExists("focus")`, which is the bridge's business, and clearing
+    // that from here would need a VM this class does not hold.
+    if (this.focus === entity) {
+      this.focus = null;
     }
     this.entities.delete(entity.guid);
     if (entity.view) {
@@ -788,6 +996,13 @@ export default class World extends EventEmitter {
    * white silhouette rather than a textured model.)
    */
   changeModel(_unit: Unit, oldModel: any, newModel: any) {
+    // A REPLACED BODY ARRIVES UNLIT. The hovered unit is the same object across a redress or a
+    // display-id change, so the highlight's own idempotence would short-circuit and the new clone --
+    // with fresh materials at zero -- would stand dark under the pointer until the pointer moved.
+    // Before the early return below, because that return is about the material registry and this is
+    // not.
+    this.hoverHighlight.refresh();
+
     const registry = this.map?.materialRegistry;
     if (!registry) {
       // No map yet -- the player's model resolves before the first zone finishes loading. The
@@ -873,6 +1088,84 @@ export default class World extends EventEmitter {
     beginSection('w.ring');
     this.selectionRing.update(this.ringTarget(), camera);
     endSection('w.ring');
+
+    // THE LEVEL-UP BURST. Inside `w.ring`'s neighbourhood rather than its own span on purpose: with
+    // nothing live this is a single `length === 0` compare, and a named span for a statement that
+    // costs a compare would be more expensive than the statement. The moment it has work it is one
+    // `updateMatrixWorld` on one node; the particles themselves are already counted in `w.map`, which
+    // is where `ParticleManager#animate` runs.
+    this.levelUpEffect.update(delta * 1000);
+    // THE QUEST-OBJECT GLOW. Reconciled here rather than on a field event because the falling edge
+    // matters as much as the rising one -- an object that goes out of range emits nothing to listen to,
+    // it simply stops being in `entities`. See the file's cost note: one field test per entity.
+    /**
+     * WIRED ON THE FIRST TICK, not in the constructor -- `this.game` is not assigned yet there, which a
+     * red suite said immediately (`Cannot read properties of undefined (reading 'objectHandler')`). The
+     * same once-per-session shape `questMarkers`' material hooks use, and for the same reason.
+     */
+    if (!this.sessionGuardWired) {
+      this.sessionGuardWired = true;
+      const handlers = this.game.objectHandler;
+      this.sessionGuard.register({
+        label: 'gossip',
+        npc: () => handlers.gossipHandler.source,
+        close: () => handlers.gossipHandler.close(),
+      });
+      this.sessionGuard.register({
+        label: 'merchant',
+        npc: () => handlers.merchantHandler.source,
+        close: () => handlers.merchantHandler.close(),
+      });
+      this.sessionGuard.register({
+        label: 'trainer',
+        npc: () => handlers.trainerHandler.source,
+        close: () => handlers.trainerHandler.close(),
+      });
+      this.sessionGuard.register({
+        label: 'questgiver',
+        npc: () => handlers.questHandler.source,
+        close: () => handlers.questHandler.closePanels(),
+      });
+      this.sessionGuard.registerLoot({
+        isOpen: () => handlers.lootHandler.rows.length > 0 || handlers.lootHandler.gold > 0,
+        release: () => handlers.lootHandler.release(),
+      });
+  /**
+       * `window.worldModelFade()` -- WHY A FADE IS NOT VISIBLE, in one call.
+       *
+       * The owner reports it not working and I am not guessing at which half. The counters separate
+       * every candidate on their own:
+       *
+       *  - `appeared` 0 means the arrival poll never armed anything -- no unit ever had a `model` when
+       *    it was looked at, which would be a wiring fault rather than a rendering one.
+       *  - `appeared` high with nothing seen means the ramp runs and the SHADER is not honouring it:
+       *    `fadeBlend` never reached the material, or the blend borrow was refused.
+       *  - `faded` 0 with `popped` 0 means the out-of-range path never fires at all -- this server may
+       *    simply never send the `OutOfRange` block, in which case a mob leaving is a DESTROY and pops
+       *    by design. That would make the despawn half unreachable rather than broken, which is a
+       *    completely different answer and the one I would not have guessed.
+       *  - `popped` high means units are streaming out with no body to fade.
+       *
+       * `blended` and `dissolved` say which mechanism arrivals actually got, which is the `ownsBatches`
+       * question -- a creature that shares its materials cannot be blended and gets the stipple.
+       */
+      (window as unknown as Record<string, unknown>).worldModelFade =
+        () => this.modelFade.stats;
+      (window as unknown as Record<string, unknown>).worldSessionGuard =
+        () => this.sessionGuard.stats;
+    }
+    // The session guard: one squared-distance compare per OPEN window, nothing at all with none open.
+    // The appear/despawn ramps -- one Set lookup per entity, plus a cubic per live fade.
+    this.modelFade.update(this.entities, delta * 1000);
+    this.sessionGuard.update(
+      this.entities,
+      this.player ?? null,
+      this.player ? this.player.move.horizVel.lengthSq() : 0,
+    );
+    this.gameObjectSparkle.update(
+      this.entities,
+      (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
+    );
 
     // THE NAMEPLATES, an EIGHTH named span. See the exhaustiveness note above: a statement outside all
     // of them breaks the sum rule, and that is the tell it exists for. After the entity pass for the
@@ -982,6 +1275,84 @@ export default class World extends EventEmitter {
     beginSection('w.matrices');
     this.updateDynamicMatrices();
     endSection('w.matrices');
+
+    // THE QUESTGIVER MARKERS, and the placement is load-bearing: AFTER `w.matrices`.
+    //
+    // The one-time `1/L` counter-scale reads the attach bone's WORLD matrix, and this scene has
+    // `matrixWorldAutoUpdate = false` -- so before `updateDynamicMatrices` has run, that matrix is
+    // still the identity it was constructed with and `L` reads ~1. Baking there is the reference's
+    // documented case A: no counter-scale at all, permanently, and invisible on an unscaled unit.
+    // Running here means a marker attached this frame is baked on the next one, with a real basis.
+    //
+    // No named span: with no statuses (offline, or before the first
+    // `SMSG_QUESTGIVER_STATUS_MULTIPLE`) this is one null check, and with statuses it is a walk over
+    // a handful of markers.
+    /**
+     * THE CONTROL ARM, in the shape `worldRingEnabled` and `worldCombatFacing` already use.
+     *
+     * The owner reported white helm and shoulder textures on an NPC in the same frame as a white
+     * marker, and attributed it to this feature. He may well be right and I cannot settle it by
+     * reading: the marker path loads a model by path and attaches it to a BONE, and this repo's own
+     * rules record that an attachment shares its batches with every other copy of that path in the
+     * zone -- "a SHARED material is not yours to write", three rounds spent on it already. His own log
+     * shows two markers of the SAME path attached to two different NPCs in one frame (`live=2`), which
+     * is exactly the shape of that hazard.
+     *
+     * So rather than argue: `window.worldQuestMarkersEnabled = false` and reload. If the armour comes
+     * back, the markers are the cause and the fix is a per-instance model rather than a shared one. If
+     * it does not, this feature is exonerated and the defect is elsewhere -- and either answer is worth
+     * more than my reasoning. One property read per frame.
+     */
+    if (!this.questMarkerProbePublished) {
+      this.questMarkerProbePublished = true;
+      /**
+       * THE MARKERS' MATERIALS JOIN THE MAP'S LIGHT AND FOG REGISTRY, and without this they render WHITE.
+       *
+       * `adoptAttachedModel` documents the mechanism for helms, pauldrons and weapons, and a marker is the
+       * same kind of thing: nothing else hands an attached model's materials their fog uniforms, so
+       * `fogParams` stays `(0,0,0,0)` and `fogColor` keeps its constructor default -- white -- and
+       * `applyFog` then replaces the fragment with it outright at every distance.
+       *
+       * Wired here rather than inside `QuestMarkers` so that class keeps knowing nothing about the map,
+       * and wired in the same once-per-session block as the probe because it is the same kind of one-time
+       * hookup.
+       */
+      this.questMarkers.adoptMaterials = (model) => {
+        this.adoptAttachedModel(null as never, model);
+      };
+      this.questMarkers.releaseMaterials = (model) => {
+        this.releaseAttachedModel(null as never, model);
+      };
+      (window as unknown as Record<string, unknown>).worldQuestMarkers = () => ({
+        feed: this.questMarkerStatuses === null ? null : this.questMarkerStatuses.size,
+        live: this.questMarkers.liveCount,
+        ...this.questMarkers.stats,
+      });
+    }
+
+    if (
+      this.questMarkerStatuses !== null
+      && (window as unknown as Record<string, unknown>).worldQuestMarkersEnabled !== false
+    ) {
+      this.questMarkers.update(this.entities, this.questMarkerStatuses);
+    }
+
+    /**
+     * THE MARKER INSTRUMENT, and its absence is why "no `!` appears" could not be diagnosed at all.
+     *
+     * `quest-markers.ts:152` already claimed `window.worldQuestMarkers()` read its counters and
+     * **nothing registered that handle** -- so the subsystem shipped with an instrument that did not
+     * exist, and a comment asserting it did. Both halves are defects by this project's own rules.
+     *
+     * `feed` is the first field to read and it separates two completely different failures: `null`
+     * means the bridge never installed the status map, so the `update` above has never run once and
+     * every counter below is zero for a reason that has nothing to do with markers, models or
+     * attachment slots. A number means statuses are arriving and the counters are then meaningful --
+     * `noSlot` in particular is the reference's render-nothing case, which is silent by design.
+     *
+     * Published ONCE, not per frame: the closure would otherwise be allocated on every tick, and this
+     * is a console handle rather than a per-frame reading.
+     */
 
     // THE RENDERED TRANSFORM, sampled after the matrices are final and nowhere earlier.
     //
@@ -1280,6 +1651,10 @@ export default class World extends EventEmitter {
         model.applyBillboards(camera);
       }
 
+      // The MARKERS' billboards are not reachable from here: each is a separate `M2` parented to a bone
+      // of one of these models, so it is in no collection this loop walks. `QuestMarkers#animate` is
+      // called once per frame beside the update instead -- see its own doc.
+
       // NO `poseFrame` stamp and no gated walk for units, and this cost is KNOWINGLY retained.
       //
       // `entity.view` is a direct child of the scene root, so `updateDynamicMatrices` gives it an
@@ -1307,6 +1682,17 @@ export default class World extends EventEmitter {
       //   model.skeletonHelper.update();
       // }
     });
+
+    /**
+     * THE MARKERS, once per frame and here rather than beside their `update`.
+     *
+     * Their billboards are unreachable from the loop above: each marker is a separate `M2` parented to a
+     * BONE of one of the models it walks, so it is in no collection this method iterates -- which is
+     * exactly why the owner's `?` never turned to face him. `camera` and `cameraMoved` are in scope only
+     * here, and `animate` early-outs on a still camera and on a model with no billboarded bones, so a
+     * frame with nothing to do costs one call and one boolean.
+     */
+    this.questMarkers.animate(camera, cameraMoved);
 
     endAnimSection();
   }

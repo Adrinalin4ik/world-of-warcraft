@@ -133,6 +133,10 @@ const SCRIPT_PARAMS: ReadonlyMap<string, readonly string[]> = new Map([
   ['OnDragStart', ['button']],
   ['OnMouseWheel', ['delta']],
   ['OnValueChanged', ['value']],
+  // `gametooltiptemplate.xml:248-250` reads BOTH by name:
+  // `GameTooltip_OnTooltipAddMoney(self, cost, maxcost)`. Without the names that body sees two nils
+  // and `SetTooltipMoney` is handed a nil money, so the coins never appear.
+  ['OnTooltipAddMoney', ['cost', 'maxcost']],
   ['OnChar', ['text']],
   ['OnKeyDown', ['key']],
   ['OnKeyUp', ['key']],
@@ -158,8 +162,40 @@ function checkHandlerName(name: string, where: string): void {
   console.warn(`${where}: unknown script handler '${name}'`);
 }
 
-/** Every frame's stored handlers, by frame id then handler name. Holds OWNED handles only. */
-const handlersByFrame = new Map<number, Map<string, LuaRef>>();
+/**
+ * Every frame's stored handlers, by frame id then handler name. Holds OWNED handles only.
+ *
+ * **PER VM, and that is the whole of a "the handler is registered and never dispatches" class of bug.**
+ * A `LuaRef` is an index into ONE `LuaVM`'s handle table (`vm.ts`, and see `CLAUDE.md` on why those
+ * handles index our own table rather than fengari's registry). Frame ids restart at 1 for every new
+ * `FrameRegistry`, so a module-level map keyed by frame id let a SECOND runtime's frame 1 find the FIRST
+ * runtime's handle -- and then, worse, `setScriptHandler` below released it: `vm.unref(existing)` with
+ * the new VM against the old VM's index frees whatever the NEW VM happens to hold at that slot. Both
+ * runtimes load the same documents in the same order, so the slot it frees is very often the handler
+ * that same call is about to store, and a freed slot holds the free-list sentinel -- a TABLE. So the
+ * handler was stored, `GetScript` answered non-nil, the dispatch happened, and Lua said "attempt to call
+ * a table value" into `reportScriptError`.
+ *
+ * This is not hypothetical and it is not test-only: the world UI host is documented to mount twice with
+ * one copy disposed, and a disposed VM's frames are dropped rather than torn down, so its entries stay.
+ * MEASURED in `__tests__/scroll-range.test.ts` before this change: `reconcileScrollRanges` computed the
+ * right range (776), the entry differed from the last announced, `invokeScriptHandler` was called, and it
+ * returned `attempt to call a table value` -- the same "live and inert" shape as three other fixes in
+ * flight. Same defect family as `methods/scroll.ts#thumbTextures`, which was keyed by frame id too.
+ *
+ * A `WeakMap` on the VM, so a disposed runtime's whole store goes with it and nothing here pins a VM.
+ */
+const handlerStores = new WeakMap<LuaVM, Map<number, Map<string, LuaRef>>>();
+
+/** `vm`'s own frame-id -> handler-name -> handle store, created on first use. */
+function handlersOf(vm: LuaVM): Map<number, Map<string, LuaRef>> {
+  let store = handlerStores.get(vm);
+  if (store === undefined) {
+    store = new Map();
+    handlerStores.set(vm, store);
+  }
+  return store;
+}
 
 /**
  * The teardown half of the map above: a released frame's handlers are the LARGEST thing this runtime
@@ -168,14 +204,14 @@ const handlersByFrame = new Map<number, Map<string, LuaRef>>();
  * pinned a fresh set each time.
  */
 onFrameTeardown((ctx, id) => {
-  const byName = handlersByFrame.get(id);
+  const byName = handlersOf(ctx.vm).get(id);
   if (byName === undefined) {
     return;
   }
   for (const handler of byName.values()) {
     ctx.vm.unref(handler);
   }
-  handlersByFrame.delete(id);
+  handlersOf(ctx.vm).delete(id);
 });
 
 /**
@@ -185,7 +221,8 @@ onFrameTeardown((ctx, id) => {
  * borrowed from a call boundary), so the loader (Task 7) can pass it straight through.
  */
 export function setScriptHandler(vm: LuaVM, self: number, name: string, handler: LuaRef | null): void {
-  let byName = handlersByFrame.get(self);
+  const store = handlersOf(vm);
+  let byName = store.get(self);
   const existing = byName?.get(name);
   if (existing !== undefined) {
     vm.unref(existing);
@@ -196,14 +233,14 @@ export function setScriptHandler(vm: LuaVM, self: number, name: string, handler:
   }
   if (byName === undefined) {
     byName = new Map();
-    handlersByFrame.set(self, byName);
+    store.set(self, byName);
   }
   byName.set(name, handler);
 }
 
 /** The handle `self` has stored for `name`, or null if nothing is set. Never releases or retains it. */
-export function getScriptHandler(self: number, name: string): LuaRef | null {
-  return handlersByFrame.get(self)?.get(name) ?? null;
+export function getScriptHandler(vm: LuaVM, self: number, name: string): LuaRef | null {
+  return handlerStores.get(vm)?.get(self)?.get(name) ?? null;
 }
 
 /**
@@ -317,7 +354,7 @@ export function invokeScriptHandler(
   name: string,
   args: unknown[] = [],
 ): LuaError | null {
-  const handler = getScriptHandler(self, name);
+  const handler = getScriptHandler(ctx.vm, self, name);
   if (handler === null) {
     return null;
   }
@@ -357,6 +394,18 @@ export function invokeScriptHandler(
 type CallbackBinder = (widget: Widget, fire: ((args?: unknown[]) => void) | null) => void;
 
 /** The mouse button the engine reports for a left click, which is the only one this router routes. */
+/**
+ * The button an `OnClick`/`OnMouseDown`/`OnMouseUp`/`OnDoubleClick` handler receives is now the REAL one
+ * -- `Widget#onClick` takes it from `ui/input.ts` and these binders pass it straight on.
+ *
+ * It used to be this constant, unconditionally, and that is what stopped anything being equipped: a
+ * right-click on a bag slot ran `ContainerFrameItemButton_OnClick`'s LEFT branch. See
+ * `Widget#clickButtons`.
+ *
+ * `OnDragStart` keeps a constant, and deliberately: `ui/input.ts#maybeBeginDrag` has no button of its
+ * own to report and `RegisterForDrag` is stored as a boolean for the reason `Widget#dragRegistered`
+ * gives.
+ */
 const LEFT_BUTTON = 'LeftButton';
 
 /**
@@ -371,12 +420,15 @@ const LEFT_BUTTON = 'LeftButton';
 const CLICK_SEQUENCE = ['PreClick', 'OnClick', 'PostClick'] as const;
 
 const CALLBACK_BINDERS = new Map<string, CallbackBinder>([
-  ['OnClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['PreClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['PostClick', (w, f) => { w.onClick = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['OnDoubleClick', (w, f) => { w.onDoubleClick = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['OnMouseDown', (w, f) => { w.onMouseDown = f === null ? null : () => f([LEFT_BUTTON]); }],
-  ['OnMouseUp', (w, f) => { w.onMouseUp = f === null ? null : () => f([LEFT_BUTTON]); }],
+  ['OnClick', (w, f) => { w.onClick = f === null ? null : (button) => f([button]); }],
+  ['PreClick', (w, f) => { w.onClick = f === null ? null : (button) => f([button]); }],
+  ['PostClick', (w, f) => { w.onClick = f === null ? null : (button) => f([button]); }],
+  ['OnDoubleClick', (w, f) => { w.onDoubleClick = f === null ? null : (button) => f([button]); }],
+  ['OnMouseDown', (w, f) => { w.onMouseDown = f === null ? null : (button) => f([button]); }],
+  ['OnMouseUp', (w, f) => { w.onMouseUp = f === null ? null : (button) => f([button]); }],
+  // `delta` is a NAMED parameter (`:134` binds it) -- `chatframe.xml` and `uipaneltemplates.xml` both
+  // read it by name, so it must be passed positionally here.
+  ['OnMouseWheel', (w, f) => { w.onMouseWheel = f === null ? null : (delta) => f([delta]); }],
   ['OnEnter', (w, f) => { w.onEnter = f === null ? null : () => f(); }],
   ['OnLeave', (w, f) => { w.onLeave = f === null ? null : () => f(); }],
   ['OnEnterPressed', (w, f) => { w.onSubmit = f === null ? null : () => f(); }],
@@ -428,7 +480,7 @@ function bindInputCallback(ctx: MethodContext, self: number, name: string): void
     ? CLICK_SEQUENCE
     : null;
   if (clickNames !== null) {
-    const present = clickNames.filter((handler) => getScriptHandler(self, handler) !== null);
+    const present = clickNames.filter((handler) => getScriptHandler(ctx.vm, self, handler) !== null);
     if (present.length === 0) {
       binder(widget, null);
       return;
@@ -437,14 +489,14 @@ function bindInputCallback(ctx: MethodContext, self: number, name: string): void
       // Re-read the handler set at CLICK time, not at bind time, so a `SetScript` between the two takes
       // effect -- the same rule the single-handler path relies on by firing through `invokeScriptHandler`.
       for (const handler of clickNames) {
-        if (getScriptHandler(self, handler) !== null) {
+        if (getScriptHandler(ctx.vm, self, handler) !== null) {
           fireFromInput(ctx, self, handler, args);
         }
       }
     });
     return;
   }
-  if (getScriptHandler(self, name) === null) {
+  if (getScriptHandler(ctx.vm, self, name) === null) {
     binder(widget, null);
     return;
   }
@@ -481,7 +533,7 @@ const SCRIPT_METHODS: MethodTable = {
 
   GetScript: (ctx, self, args) => {
     const name = String(args[0] ?? '');
-    const handler = getScriptHandler(self, name);
+    const handler = getScriptHandler(ctx.vm, self, name);
     if (handler === null) {
       return [null];
     }

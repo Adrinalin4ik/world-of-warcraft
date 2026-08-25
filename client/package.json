@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "cross-env BROWSER=none NODE_ENV=development PORT=3000 DANGEROUSLY_DISABLE_HOST_CHECK=true node scripts/start.js",
+    "start": "cross-env BROWSER=none NODE_ENV=development PORT=3000 DANGEROUSLY_DISABLE_HOST_CHECK=true FAST_REFRESH=false node scripts/start.js",
     "start:windows": "npm run start",
     "build": "node scripts/build.js",
     "test": "node scripts/test.js",

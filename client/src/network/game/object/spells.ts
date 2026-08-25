@@ -184,6 +184,121 @@ export class SpellHandler extends EventEmitter {
     this.game.on('packet:receive:SMSG_SPELL_FAILURE', this.handleSpellFailure.bind(this));
     this.game.on('packet:receive:SMSG_SPELL_DELAYED', this.handleSpellDelayed.bind(this));
     this.game.on('packet:receive:SMSG_UPDATE_COMBO_POINTS', this.handleComboPoints.bind(this));
+    // THE THREE INCREMENTAL SPELL EDGES, and all three had NO SUBSCRIBER AT ALL until the trainer
+    // round. `SMSG_INITIAL_SPELLS` is a login-burst snapshot, so without these a spell learned DURING
+    // a session -- from a trainer, from a quest reward, from a level-up -- was known to the server and
+    // absent from `this.known` until the next relog. See `handleLearnedSpell`.
+    this.game.on('packet:receive:SMSG_LEARNED_SPELL', this.handleLearnedSpell.bind(this));
+    this.game.on('packet:receive:SMSG_SUPERCEDED_SPELL', this.handleSupercededSpell.bind(this));
+    this.game.on('packet:receive:SMSG_REMOVED_SPELL', this.handleRemovedSpell.bind(this));
+  }
+
+  /**
+   * `SMSG_LEARNED_SPELL` (**0x12B**): `u32 spellId · u16 unk`, 6 bytes.
+   *
+   * The layout is TrinityCore 3.3.5's `Player::SendLearnPacket` shape and is labelled as a server-side
+   * source, exactly as `handleComboPoints` labels its own. The trailing `u16` is written as a literal 0
+   * and its meaning is unstated there, so it is read for the residual and discarded.
+   *
+   * **The residual is the whole check on all three of these arms**: 6 bytes for this one, 8 for
+   * superceded, 4 for removed. A wrong layout would show as a nonzero remainder in
+   * `window.spellWire.history()` rather than as a spell quietly missing from the book.
+   *
+   * `spellsChanged` is emitted only when the set actually CHANGED. The server can and does re-send a
+   * spell the client already has (a rank refresh, a talent reset replay), and `spellbook-bridge.ts#push`
+   * rebuilds and re-sorts the whole book off this event -- so an unconditional emit would pay that walk
+   * for nothing and dirty the interface fingerprint with it.
+   */
+  private handleLearnedSpell(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    const spellId = gp.readUnsignedInt() >>> 0;
+    if (gp.available >= 2) {
+      gp.readUnsignedShort(); // unk -- a literal 0 server-side; read so `consumed` is meaningful
+    }
+    const isNew = spellId !== 0 && !this.known.has(spellId);
+    if (isNew) {
+      this.known.add(spellId);
+    }
+    spellWire.record({
+      at: Date.now(),
+      kind: 'LEARNED_SPELL',
+      spellId,
+      caster: null,
+      detail: { known: this.known.size, isNew: isNew ? 1 : 0 },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    if (isNew) {
+      this.emit('spellsChanged');
+    }
+  }
+
+  /**
+   * `SMSG_SUPERCEDED_SPELL` (**0x12C**): `u32 newSpellId · u32 oldSpellId`, 8 bytes.
+   *
+   * A RANK UP -- what a trainer teaching Rank 2 of an ability sends instead of a plain learn. The old
+   * rank leaves the book as the new one enters, which is why this is one packet and not two: handling
+   * only the learn half would leave both ranks in the spellbook and two buttons that cast the same
+   * ability.
+   *
+   * Order is `new` then `old`, TrinityCore 3.3.5's `Player::SendSupercededSpell`. It is the one field
+   * order here that a residual CANNOT check -- both words are `u32` and either order consumes the body
+   * whole -- so it is called out rather than presented as measured. The consequence of having it
+   * backwards is visible immediately and harmlessly: the spellbook would show the OLD rank and lose the
+   * new one, which the owner would see on the first rank-up.
+   */
+  private handleSupercededSpell(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    const newSpellId = gp.readUnsignedInt() >>> 0;
+    const oldSpellId = gp.readUnsignedInt() >>> 0;
+    let changed = false;
+    if (oldSpellId !== 0 && this.known.delete(oldSpellId)) {
+      changed = true;
+    }
+    if (newSpellId !== 0 && !this.known.has(newSpellId)) {
+      this.known.add(newSpellId);
+      changed = true;
+    }
+    spellWire.record({
+      at: Date.now(),
+      kind: 'SUPERCEDED_SPELL',
+      spellId: newSpellId,
+      caster: null,
+      detail: { oldSpellId, known: this.known.size },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    if (changed) {
+      this.emit('spellsChanged');
+    }
+  }
+
+  /**
+   * `SMSG_REMOVED_SPELL` (**0x203**): `u32 spellId`, 4 bytes.
+   *
+   * The unlearn edge -- a talent reset, or a profession abandoned. Wired with its two siblings because
+   * leaving it out would let the book keep a spell the server has taken away, which is the same class
+   * of staleness the other two fix.
+   */
+  private handleRemovedSpell(gp: GamePacket): void {
+    gp.index = gp.headerSize;
+    const bodySize = gp.length - gp.headerSize;
+    const spellId = gp.readUnsignedInt() >>> 0;
+    const changed = spellId !== 0 && this.known.delete(spellId);
+    spellWire.record({
+      at: Date.now(),
+      kind: 'REMOVED_SPELL',
+      spellId,
+      caster: null,
+      detail: { known: this.known.size },
+      bodySize,
+      consumed: gp.index - gp.headerSize,
+    });
+    if (changed) {
+      this.emit('spellsChanged');
+    }
   }
 
   /**
@@ -718,14 +833,24 @@ export class SpellHandler extends EventEmitter {
     // For ANY caster, not just ourselves -- a peer casting beside us holds the same pose, exactly as
     // `handleSpellGo` already arms a peer's release. Same plain `entities` lookup the swing uses.
     //
-    // `interrupt` true and `repetitions` -1: the pose is a LOOP (`ReadySpellOmni`/`ReadySpellDirected`),
-    // and `Unit#externalSeq`'s latch never releases a loop, which is what HOLDS it. The release armed at
-    // GO replaces the latch; `releaseAnimationLatch` below is the way out when the cast never gets there.
+    // `interrupt` true, and the fourth argument -- `holdClamped` -- is what makes this hold for a pose
+    // that does NOT loop.
+    //
+    // A LOOPING pose (`ReadySpellOmni`/`ReadySpellDirected`) holds by itself: `Unit#externalSeq`'s latch
+    // never releases a loop. **A CLAMP does not**, and the owner found the case -- opening a bucket casts
+    // `Opening`, whose precast pose is `Loot` (50), an authored clamp: "проигрывается анимация лута, долю
+    // секунды, потом он встает". The clip ended, its window elapsed, and the latch handed the body back.
+    // The reference holds the same clip with `RepeatAnimation::Never` and "a deliberate freeze -- no
+    // window either" (`creature_anim/driver/mode.rs:523-527`); `holdClamped` is that, and it changes
+    // nothing for a looping pose or for any combat one-shot.
+    //
+    // The ways out are unchanged: the release armed at GO replaces the latch, and
+    // `releaseAnimationLatch` below is the exit when the cast never gets there.
     const caster = this.game.world.entities.get(decoded.caster);
     if (caster) {
       const pose = precastAnimationFor(caster, decoded.spellId);
       if (pose !== null) {
-        caster.setAnimation(pose, true, -1);
+        caster.setAnimation(pose, true, -1, true);
         // RECORDED so a later failure can tell this pose from any other latch -- see `castPose`.
         this.castPose.set(decoded.caster, { spellId: decoded.spellId, animId: pose });
       }
@@ -942,6 +1067,55 @@ export class SpellHandler extends EventEmitter {
    * NOTE the 1.12 delta: the reference's `CMSG_CAST_SPELL` has no `castCount` and no `castFlags` at all.
    * Sending its form here shifts the target mask by two bytes and the server reads a nonsense mask.
    */
+/**
+   * `CMSG_CAST_SPELL` at a GAMEOBJECT -- the OPEN_LOCK route, which is how a locked chest is opened.
+   *
+   * **A locked object is not opened with `CMSG_GAMEOBJ_USE` at all**, and that is the reference's law
+   * rather than an inference: "a locked object (chest / mining vein / herb node / locked door) casts an
+   * `OPEN_LOCK` spell at it, an unlocked one sends `CMSG_GAMEOBJ_USE`"
+   * (`benilla-app/src/go_templates.rs:3-5`). The owner's bucket is a chest with a lock, which is why his
+   * `CMSG_GAMEOBJ_USE` went out correctly and the server answered nothing at all -- an inbound watch
+   * over the three seconds after the click caught only unrelated traffic.
+   *
+   * THE TARGET MASK IS `0x4800`, and it is the reference's own assertion for this exact spell:
+   * `assert_eq!(opening & (TF_GAMEOBJECT | TF_LOCKED), opening)` with `TF_GAMEOBJECT = 0x0800` and
+   * `TF_LOCKED = 0x4000` (`ui_action/cast_target.rs:86,90,577-578`). Both flags read ONE packed guid on
+   * the server side and they are read in the same branch, so the pair carries a single packed guid and
+   * not two -- which is what makes 0x4800 safe rather than a double write.
+   *
+   * Everything else is `castSpell`'s body above, unchanged and for its reasons: `castCount` 0,
+   * `castFlags` 0, and the 1.12 delta it records (the reference's own `CMSG_CAST_SPELL` has neither, and
+   * sending its form here shifts the mask by two bytes).
+   */
+  castAtObject(spellId: number, objectGuid: string): void {
+    const TARGET_FLAG_GAMEOBJECT = 0x0800;
+    const TARGET_FLAG_LOCKED = 0x4000;
+
+    const body = 1 + 4 + 1 + 4 + packedGuidLength(objectGuid);
+    const app = new GamePacket(GameOpcode.CMSG_CAST_SPELL, 6 + body);
+    app.writeUnsignedByte(0);
+    app.writeUnsignedInt(spellId);
+    app.writeUnsignedByte(0);
+    app.writeUnsignedInt(TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED);
+    app.writePackedGUID(objectGuid);
+    this.game.send(app);
+
+    spellWire.record({
+      at: Date.now(),
+      kind: 'CAST_SENT',
+      spellId,
+      caster: null,
+      detail: {
+        target: objectGuid,
+        name: spellData.spell(spellId)?.name ?? null,
+        bodyBytes: body,
+        objectTarget: 1,
+      },
+      bodySize: body,
+      consumed: body,
+    });
+  }
+
   castSpell(spellId: number, target: string | null): void {
     const TARGET_FLAG_SELF = 0x0000;
     const TARGET_FLAG_UNIT = 0x0002;
