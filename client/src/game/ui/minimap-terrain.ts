@@ -78,10 +78,11 @@ import minimapTiles from '../pipeline/minimap-tiles';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
 import type { GlueArt } from './art';
 import {
-  Blip, MinimapBlips, blipForStatus, setBlipSizes,
+  Blip, MinimapBlips, blipForStatus, setBlipSizes, arrowTint,
 } from './minimap-blips';
 import { activeTracking, trackingTextureFile } from './minimap-tracking';
 import { watchedQuestIds } from './quest-watch';
+import { QUEST_STATE } from '../../network/game/object/update-object/quest-log';
 import { resolveUnitToken } from '../world/unit-tokens';
 import { rectOf } from './rects';
 import type { MethodContext } from './framexml/lua/object';
@@ -975,8 +976,9 @@ export function attachMinimapTerrain(
     (window as unknown as Record<string, unknown>).worldMinimapBlipSize = (
       quest?: number,
       dot?: number,
+      arrow?: number,
     ) => {
-      const settled = setBlipSizes(quest, dot);
+      const settled = setBlipSizes(quest, dot, arrow);
       terrain?.invalidate();
       return settled;
     };
@@ -1181,6 +1183,22 @@ export function attachMinimapTerrain(
   /** The last frame's arrow decisions: distance against the window radius, per watched quest. */
   let arrowTrace: unknown[] = [];
 
+  /**
+   * The quest ids whose log slot says COMPLETE. Rebuilt per call, which is a walk of at most 25.
+   *
+   * Read straight from the player's own quest log rather than through the quest bridge: the bridge
+   * owns the LIST the client sees and this wants the state bit, which is descriptor data either way.
+   */
+  const completeQuests = (): Set<number> => {
+    const out = new Set<number>();
+    world.player?.questLog.forEach((slot) => {
+      if ((slot.state & QUEST_STATE.COMPLETE) !== 0) {
+        out.add(slot.questId);
+      }
+    });
+    return out;
+  };
+
   const blipsNow = (radiusYards: number): Blip[] => {
     const out: Blip[] = [];
     const quests = world.game?.objectHandler?.questHandler ?? null;
@@ -1349,14 +1367,17 @@ export function attachMinimapTerrain(
           continue;
         }
         out.push({
-          // ON THE PLAYER, and the arrow is nudged to the rim by the builder below rather than here:
-          // `toCanvas` is the terrain's and this list is in WORLD coordinates, so a rim position
-          // would have to be converted back and forth. `edge` says "clamp me".
+          // The PLAYER's position; the rim placement is the draw's -- see `minimap-blips.ts`.
           worldX: self.position.x,
           worldY: self.position.y,
           kind: 'questArrow',
           bearing: Math.atan2(-dy, dx),
-          edge: true,
+          /**
+           * COMPLETE comes from the DESCRIPTOR, not from a packet: the quest log slot's word 1
+           * carries `QUEST_STATE.COMPLETE` (`update-object/quest-log.ts`). So a quest that became
+           * turn-in-able changes the arrow on the next field update with nothing else to ask.
+           */
+          tint: arrowTint(completeQuests().has(questId)),
         });
       }
     }

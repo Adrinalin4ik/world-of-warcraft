@@ -261,7 +261,42 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   const collapsed = new Set<number>();
 
   /** Watched quest ids. See the header on why this has no server side. */
+  /**
+   * WHERE THE WATCH LIST SURVIVES A RELOAD -- the owner: "когда я нажимаю track quest состояние не
+   * сохраняется между перезагрузками."
+   *
+   * Third value on this pattern after the minimap zoom and the tracking category, and the same
+   * reasoning: the real client keeps it in saved variables, this project has none, and the value is
+   * the player's own choice rather than anything the server tells us.
+   *
+   * ONE KEY, not one per character, and that is a deliberate simplification with a reason: quest IDS
+   * differ per character, so a restored id that this character does not have simply never matches a
+   * log entry and is dropped by the next write. The list is self-cleaning, so per-character keying
+   * would buy nothing but a character id this bridge does not have at attach.
+   */
+  const WATCH_STORAGE_KEY = 'wow.quest.watched';
+
   const watched = new Set<number>();
+  try {
+    const raw = window.localStorage.getItem(WATCH_STORAGE_KEY);
+    for (const part of (raw ?? '').split(',')) {
+      const id = Number(part);
+      if (Number.isFinite(id) && id > 0) {
+        watched.add(id);
+      }
+    }
+  } catch {
+    // A private window, or site data blocked. Nothing is tracked until the player ticks a box.
+  }
+
+  /** Persist the watch list. Called on every add and remove -- see `WATCH_STORAGE_KEY`. */
+  const saveWatched = (): void => {
+    try {
+      window.localStorage.setItem(WATCH_STORAGE_KEY, Array.from(watched).join(','));
+    } catch {
+      // Nothing to do and nothing to report: the list still holds for this session.
+    }
+  };
   /**
    * PUBLISHED, so the minimap can draw an edge arrow for a tracked quest.
    *
@@ -1684,6 +1719,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     const row = entryAt(Number(args[0]));
     if (row !== null && !row.isHeader) {
       watched.add(row.questId);
+      saveWatched();
     }
     return [];
   });
@@ -1692,6 +1728,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     const row = entryAt(Number(args[0]));
     if (row !== null && !row.isHeader) {
       watched.delete(row.questId);
+      saveWatched();
     }
     return [];
   });
@@ -2205,6 +2242,8 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
       present.add(row.questId);
       if (announce && !knownQuestIds.has(row.questId)) {
         fireEvent(vm, 'QUEST_ACCEPTED', [at + 1]);
+        // The client answers that event by calling `AddQuestWatch`, which saves -- but only if
+        // `AUTO_QUEST_WATCH` is on. Nothing to do here; the save lives with the mutation.
       }
     });
     knownQuestIds = present;

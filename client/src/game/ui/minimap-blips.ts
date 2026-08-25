@@ -90,14 +90,13 @@ export interface Blip {
    */
   bearing?: number;
   /**
-   * Draw me on the RIM, in the direction of `bearing`, ignoring my world position.
+   * Recolour this blip to `[r, g, b]`, each 0..1. Only the edge arrow uses it.
    *
-   * The builder gives an edge arrow the PLAYER's coordinates, because the list is in world space and
-   * the rim is a canvas fact -- converting a rim point back to world coordinates just so `toCanvas`
-   * could convert it forward again would be two conversions to arrive where we started. So the
-   * position says "the centre" and this says "push me out".
+   * The arrow art is a dark gold -- measured, mean endpoint `(33, 27, 10)` -- so the engine tints it
+   * rather than shipping one file per colour, and the owner confirms there are several: "они бывают
+   * нескольких цветов".
    */
-  edge?: boolean;
+  tint?: readonly [number, number, number];
   /**
    * The member's `classId`, for a group dot. Undefined for a quest glyph and for an unknown class.
    *
@@ -197,15 +196,36 @@ let questIconPx = 22;
 
 let dotPx = 13;
 
+/**
+ * The edge arrow, and it is its OWN size rather than a fraction of the glyph.
+ *
+ * It was `questIconPx * 0.7` -- 15 px -- and the owner could not find it: "она очень маленькая, в
+ * этом проблема". Deriving it from the glyph was the mistake: an arrow at the rim is read at a
+ * glance and from further away than an icon under the cursor, so it wants to be LARGER than a POI
+ * glyph, not smaller. 32 against the glyph's 22 -- 26 was still too small when he looked at it,
+ * which is why this is a knob and not a derivation.
+ *
+ * UNSOURCED like the other two, and settled the same way -- `window.worldMinimapBlipSize` takes it
+ * as a third argument.
+ */
+let arrowPx = 32;
+
 /** Set both blip sizes live. Returns what they settled on, for the console. */
-export function setBlipSizes(quest?: number, dot?: number): { quest: number; dot: number } {
+export function setBlipSizes(
+  quest?: number,
+  dot?: number,
+  arrow?: number,
+): { quest: number; dot: number; arrow: number } {
   if (typeof quest === 'number' && Number.isFinite(quest) && quest > 0) {
     questIconPx = Math.min(quest, 64);
   }
   if (typeof dot === 'number' && Number.isFinite(dot) && dot > 0) {
     dotPx = Math.min(dot, 64);
   }
-  return { quest: questIconPx, dot: dotPx };
+  if (typeof arrow === 'number' && Number.isFinite(arrow) && arrow > 0) {
+    arrowPx = Math.min(arrow, 64);
+  }
+  return { quest: questIconPx, dot: dotPx, arrow: arrowPx };
 }
 
 /**
@@ -224,6 +244,29 @@ const OUTLINE_PX = 2;
 /** How far out an edge arrow sits, as a fraction of the radius. UNSOURCED -- see the rim comment. */
 const EDGE_REACH = 0.82;
 
+/**
+ * THE ARROW COLOURS, and the DISTINCTION is sourced while the hues are not.
+ *
+ * What the client itself separates is a quest that can be handed in from one still in progress: its
+ * POI buttons come in `QUEST_POI_NUMERIC` and `QUEST_POI_COMPLETE_*` types and it picks between them
+ * by `isComplete` (`questpoi.lua:9-12`, `worldmapframe.lua:1553-1558`). That is the same split this
+ * file already draws for a giver -- a yellow `?` for a turn-in against a grey one for in-progress --
+ * so an arrow follows it.
+ *
+ * **The hues are OURS.** No file states a minimap arrow colour, and the art is one tintable texture.
+ * Gold for in-progress matches the untinted art and the numbered POI buttons; green for complete
+ * matches what a finished objective reads as everywhere else in this client. If the owner names the
+ * real pair, these are two constants.
+ */
+const ARROW_TINT_ACTIVE: readonly [number, number, number] = [1.0, 0.82, 0.2];
+
+const ARROW_TINT_COMPLETE: readonly [number, number, number] = [0.4, 1.0, 0.4];
+
+/** The arrow tint for a quest that can be handed in, and for one still in progress. */
+export function arrowTint(complete: boolean): readonly [number, number, number] {
+  return complete ? ARROW_TINT_COMPLETE : ARROW_TINT_ACTIVE;
+}
+
 export class MinimapBlips {
   private readonly icons = new Map<string, HTMLCanvasElement | null>();
 
@@ -231,6 +274,9 @@ export class MinimapBlips {
 
   /** Paths with a decode in flight, so a per-frame builder cannot queue the same file twice. */
   private readonly decoding = new Set<string>();
+
+  /** `<size>:<r,g,b>` -> a pre-tinted copy. See `tinted`. */
+  private readonly tints = new Map<string, HTMLCanvasElement>();
 
   /**
    * Set when an icon lands, cleared by `takeArtArrived`. **Without it the first blips never draw.**
@@ -436,12 +482,13 @@ export class MinimapBlips {
         const half = canvasPx / 2;
         const reach = half * EDGE_REACH - side / 2;
         const bearing = blip.bearing ?? 0;
-        const rim = blip.edge === true
-          ? {
-            x: half + Math.sin(bearing) * reach,
-            y: half - Math.cos(bearing) * reach,
-          }
-          : at;
+        // ALWAYS on the rim: `questArrow` has no other placement, so there is no flag to consult.
+        // The builder gives it the PLAYER's coordinates because the list is in world space and the
+        // rim is a canvas fact -- converting back and forth would arrive where we started.
+        const rim = {
+          x: half + Math.sin(bearing) * reach,
+          y: half - Math.cos(bearing) * reach,
+        };
         /**
          * ROTATED ABOUT ITS OWN CENTRE, saved and restored around the draw.
          *
@@ -454,7 +501,8 @@ export class MinimapBlips {
         ctx.save();
         ctx.translate(rim.x, rim.y);
         ctx.rotate(blip.bearing ?? 0);
-        ctx.drawImage(icon, -side / 2, -side / 2, side, side);
+        const art = blip.tint === undefined ? icon : this.tinted(icon, blip.tint);
+        ctx.drawImage(art, -side / 2, -side / 2, side, side);
         ctx.restore();
         this.record(blip, rim, side);
         continue;
@@ -482,9 +530,7 @@ export class MinimapBlips {
     if (kind === 'party' || kind === 'raid') {
       return dotPx;
     }
-    // The edge arrow is smaller than a glyph: it is a direction, not a thing, and the real client
-    // draws it noticeably slighter than a POI icon. UNSOURCED like the other two.
-    return kind === 'questArrow' ? Math.round(questIconPx * 0.7) : questIconPx;
+    return kind === 'questArrow' ? arrowPx : questIconPx;
   }
 
   /**
@@ -528,6 +574,40 @@ export class MinimapBlips {
     if (blip.name !== undefined && blip.name !== '') {
       this.placed.push({ x: at.x, y: at.y, radius: side / 2, name: blip.name });
     }
+  }
+
+  /**
+   * A tinted copy of an icon, made once per (icon, colour) pair.
+   *
+   * **PRE-TINTED into its own canvas rather than composited at draw time, and that is not a
+   * preference.** The obvious route -- draw the icon, then `source-atop` a colour over it -- reads the
+   * DESTINATION alpha, and the destination here is the terrain that has already been composited. It
+   * would recolour the map under the arrow, not the arrow. `source-in` on a scratch canvas has only
+   * the icon in it, so the alpha it reads is the icon's own.
+   *
+   * Cached because a tint is a canvas allocation and this runs from the composite: two colours and
+   * one arrow texture means two canvases for the session.
+   */
+  private tinted(icon: HTMLCanvasElement, tint: readonly [number, number, number])
+    : HTMLCanvasElement {
+    const key = `${icon.width}x${icon.height}:${tint.join(',')}`;
+    const known = this.tints.get(key);
+    if (known !== undefined) {
+      return known;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = icon.width;
+    canvas.height = icon.height;
+    const into = canvas.getContext('2d');
+    if (into === null) {
+      return icon;
+    }
+    into.drawImage(icon, 0, 0);
+    into.globalCompositeOperation = 'source-in';
+    into.fillStyle = `rgb(${Math.round(tint[0] * 255)}, ${Math.round(tint[1] * 255)}, ${Math.round(tint[2] * 255)})`;
+    into.fillRect(0, 0, canvas.width, canvas.height);
+    this.tints.set(key, canvas);
+    return canvas;
   }
 
   private ensureIcon(path: string): HTMLCanvasElement | null | undefined {
@@ -593,6 +673,7 @@ export class MinimapBlips {
   }
   dispose(): void {
     this.icons.clear();
+    this.tints.clear();
     this.decoding.clear();
     this.loading = false;
   }
