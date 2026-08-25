@@ -56,6 +56,13 @@ interface IProp {
    * carry whatever the last React render saw, and nothing re-renders this component on a pointer event.
    */
   uiCapturedPress?: () => string | null;
+  /**
+   * The name of the EditBox that owns the keyboard, or null. See `WorldUiHost#keyboardFocus`.
+   *
+   * Absent (plain `/game`, which has no FrameXML host) means nothing can own it, so the world keeps
+   * every key -- the same fallback `uiCapturedPress` takes.
+   */
+  uiKeyboardFocus?: () => string | null;
 }
 
 /** One press, as `captureLog` records it. */
@@ -311,7 +318,27 @@ class Controls extends React.Component<IProp> {
     this.scrollNotches += event.deltaY > 0 ? -1 : 1;
   }
 
+  /**
+   * A PRESS THE CHAT FIELD OWNS IS NOT A PRESS FOR THE WORLD.
+   *
+   * Typing into chat walked the character: this listener is on `document` and reads `event.code`
+   * directly, so it never saw the focus rule `ui/input.ts` already applies to bound keys. Asking the
+   * host rather than tracking focus here is the rule `onMouseDown` follows for the press -- a second,
+   * independent test is a second answer that can differ, invisibly.
+   *
+   * `keys.clear()` on the way in, because a key held when the field TOOK focus would otherwise stay
+   * in the set for ever: its release is a `keyup` this component still processes, but a `W` held while
+   * Enter opened the box gets no release at all if the browser delivers it elsewhere. Clearing is the
+   * same latch-release `onPointerCancel` does for a lost press.
+   *
+   * `onKeyUp` is deliberately NOT gated: a release must always be able to lift a key this set is
+   * holding, whoever owns the keyboard by then.
+   */
   private onKeyDown(event: KeyboardEvent) {
+    if ((this.props.uiKeyboardFocus?.() ?? null) !== null) {
+      this.keys.clear();
+      return;
+    }
     const key = event.code;
     if (key === 'Space' && !this.keys.has(key)) {
       this.jumpPressed = true;

@@ -423,6 +423,9 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
    */
   private uiCapturedPress = (): string | null => this.ui?.capturedPress ?? null;
 
+  /** The EditBox that owns the keyboard, or null. See `controls.tsx#onKeyDown`. */
+  private uiKeyboardFocus = (): string | null => this.ui?.keyboardFocus ?? null;
+
   /**
    * The pick's options, built per click.
    *
@@ -1173,6 +1176,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
             onWorldClick={this.onWorldClick}
             onWorldRightClick={this.onWorldRightClick}
             uiCapturedPress={this.uiCapturedPress}
+            uiKeyboardFocus={this.uiKeyboardFocus}
           />
           { this.showDebug && !this.isMobile && <DebugPanel ref={this.debugPanel} renderer={renderer} game={this.game}></DebugPanel>}
           { this.showDebug &&

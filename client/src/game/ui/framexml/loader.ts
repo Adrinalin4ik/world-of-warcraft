@@ -1798,6 +1798,13 @@ class DocumentLoader {
     if (letters !== undefined) {
       this.callMethod(wrapper, 'SetMaxLetters', [letters], dbg);
     }
+    // `historyLines="32"` on the chat boxes (`chatframe.xml:21`) -- the size of the ring Up and Down
+    // walk. Parsed here beside `letters` because it is the same kind of attribute: a count the engine
+    // keeps, with no Lua caller in the client.
+    const historyLines = num(attr(element, 'historyLines'));
+    if (historyLines !== undefined) {
+      this.callMethod(wrapper, 'SetHistoryLines', [historyLines], dbg);
+    }
     const insetsElement = childrenNamed(element, 'TextInsets')[0];
     if (insetsElement !== undefined) {
       const source = childrenNamed(insetsElement, 'AbsInset')[0] ?? insetsElement;

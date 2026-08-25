@@ -54,6 +54,13 @@ import GamePacket from '../packet';
 import { GUID_BYTES, guidHex } from '../../guid-hex';
 
 /**
+ * The wire encoding of a chat body. UTF-8, and `fatal: false` so one bad byte yields U+FFFD rather
+ * than throwing away a whole message -- a decode error here would lose a line the player can see
+ * arrive in every other client.
+ */
+const CHAT_TEXT = new TextDecoder('utf-8', { fatal: false });
+
+/**
  * `ChatMsg`, 3.3.5a. See the header for why these are NOT the reference's values.
  *
  * Only the types this client can receive are named. The combat/skill/loot/money block (`0x1a`-`0x23`)
@@ -249,6 +256,21 @@ export class ChatMessageHandler extends EventEmitter {
   /**
    * `u32 len` then `len` bytes, **the last of which is the NUL**.
    *
+   * ## The bytes are UTF-8, and reading them one at a time made them LATIN-1
+   *
+   * A linked item came into the owner's chat as `Ð Ð°Ð·Ð...` -- the signature of UTF-8 read as one
+   * byte per character. This loop used to build the string with `String.fromCharCode(byte)`, which is
+   * exactly that: every byte above 0x7F became its own codepoint, so a two-byte Cyrillic letter came
+   * out as two Latin-1 ones.
+   *
+   * **Nothing else in this client had the defect, which is why only chat showed it.** Every other
+   * decoder reads strings through `packet.js#readCStr` -> byte-buffer's `readString`, and that reader
+   * decodes UTF-8 properly (`byte-buffer/dist/byte-buffer.js:201-320`: it walks continuation bytes and
+   * builds surrogate pairs). This family hand-rolled its own reader because of the length prefix below
+   * and inherited none of that. The message body is the one field a PLAYER composes, so it is also the
+   * one field most likely to be non-ASCII -- an item link, a Russian sentence, an emoji.
+   *
+   *
    * THE LENGTH INCLUDES THE TERMINATOR, which the reference states explicitly and which is the trap
    * here: taking `len` characters yields the text plus a stray NUL, and reading a bare cstring without
    * consuming the prefix is four bytes out. Both are silent. A zero length is a real value on the wire
@@ -259,14 +281,16 @@ export class ChatMessageHandler extends EventEmitter {
     if (length === 0) {
       return '';
     }
-    let out = '';
+    const bytes = new Uint8Array(length);
+    let kept = 0;
     for (let i = 0; i < length; ++i) {
       const byte = gp.readUnsignedByte();
       if (byte !== 0) {
-        out += String.fromCharCode(byte);
+        bytes[kept] = byte;
+        ++kept;
       }
     }
-    return out;
+    return CHAT_TEXT.decode(bytes.subarray(0, kept));
   }
 
   /** Eight little-endian bytes -> the normalised guid string. FULL, never packed, in this family. */

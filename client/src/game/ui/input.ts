@@ -861,6 +861,41 @@ export class GlueInput {
     }
 
     /**
+     * UP AND DOWN WALK THE SENT-LINE HISTORY, which is the engine's job and not the client's.
+     *
+     * The owner: "Стрелочка вверх - вниз на клавиатуре не показывает предыдущие отправленные
+     * сообщения." Nothing in FrameXML implements this -- there is no `<OnArrowPressed>` and no Lua
+     * that reads a history. The client only FEEDS the ring: `ChatEdit_AddHistory` calls
+     * `editBox:AddHistoryLine(text)` (`chatframe.lua:3655`) and declares how deep it goes with
+     * `historyLines="32"` (`chatframe.xml:21`). Walking it is the engine's, so it is here.
+     *
+     * GATED ON `ignoreArrows`, the box's own attribute (`chatframe.xml:21`), because that flag is
+     * exactly the client saying "the arrows are not for the caret in this box". A search box without
+     * it keeps arrows for caret movement, which is what the login screen needs.
+     *
+     * `historyAt === history.length` is "not browsing": Up from there offers the newest line, and Down
+     * back off the end restores an EMPTY field rather than the newest line again -- the real client
+     * ends a downward walk on a blank box, not on what you last sent.
+     *
+     * `SetText` is not used: this is an engine edit, and the client's `OnTextChanged` fires with
+     * `userInput` unset for one -- `AutoCompleteEditBox_OnTextChanged` only runs the completer when a
+     * human typed (`autocomplete.lua:225-229`). Writing the field directly and firing the handler is
+     * what the typing path below does too.
+     */
+    if ((event.key === 'ArrowUp' || event.key === 'ArrowDown')
+      && target.ignoreArrows && target.history.length > 0) {
+      event.preventDefault();
+      const step = event.key === 'ArrowUp' ? -1 : 1;
+      const at = Math.max(0, Math.min(target.history.length, target.historyAt + step));
+      target.historyAt = at;
+      target.text = at === target.history.length ? '' : target.history[at];
+      target.caret = target.text.length;
+      target.selectionAnchor = target.caret;
+      target.onTextChanged?.();
+      return;
+    }
+
+    /**
      * THE CLIPBOARD AND SELECT-ALL CHORDS, which were the whole of what a keyboard could not do here.
      *
      * Measured on :3000 before this block (`scratchpad/t13-edit.js`, `?ui=lua`, the real

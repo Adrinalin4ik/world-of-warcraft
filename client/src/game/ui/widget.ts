@@ -605,6 +605,35 @@ export class Widget {
    * box gets visible text at all.
    */
   textRegion: Widget | null = null;
+  /**
+   * `AddHistoryLine` -- the lines this box remembers, oldest first, capped at `historyLines`.
+   *
+   * The client keeps its own: `ChatEdit_AddHistory` builds the line it wants remembered (the slash
+   * command plus the text, so "/p hello" comes back whole rather than "hello") and calls
+   * `editBox:AddHistoryLine(text)` (`chatframe.lua:3655`). Six other call sites do the same for the
+   * macro and script boxes. The ENGINE owns the ring and the up/down walk over it, which is why both
+   * live here and in `input.ts` rather than in Lua.
+   */
+  history: string[] = [];
+  /**
+   * How many lines the ring holds -- `historyLines="32"` on `ChatFrameEditBoxTemplate`
+   * (`chatframe.xml:21`). Zero means the box remembers nothing, which is every box that does not
+   * declare the attribute.
+   */
+  historyLines = 0;
+  /**
+   * Where the up/down walk currently sits. `history.length` means "not browsing" -- the box is
+   * showing what the player typed, not a recalled line.
+   */
+  historyAt = 0;
+  /**
+   * `ignoreArrows="true"` -- the arrows do NOT move the caret in this box.
+   *
+   * `ChatFrameEditBoxTemplate` declares it (`chatframe.xml:21`) and that is what frees Up and Down to
+   * walk the history instead. Read by `input.ts`; the loader passed the attribute all along and had
+   * no setter to give it to.
+   */
+  ignoreArrows = false;
   caret = 0;
   /** Selection anchor. Equal to `caret` when there is no selection (the common case). */
   selectionAnchor = 0;
