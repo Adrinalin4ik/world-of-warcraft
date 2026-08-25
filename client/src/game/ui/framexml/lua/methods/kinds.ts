@@ -1007,6 +1007,38 @@ const EDITBOX: MethodTable = {
    */
   GetInputLanguage: () => ['ROMAN'],
 
+  /**
+   * `Insert(text)` -- put text in at the caret, replacing any selection.
+   *
+   * The owner: "я не могу линкануть предмет или способность в чат." `ChatEdit_InsertLink` is one
+   * statement -- `activeWindow:Insert(" "..text)` (`chatframe.lua:3493`) -- and this method did not
+   * exist, so every shift-click that reached a chat field threw instead of inserting. It is also what
+   * the macro box and the auction browser use for the same gesture (`:3506-3520`).
+   *
+   * REPLACES THE SELECTION, which is what an insert into a text field means everywhere and what the
+   * engine does: a box opened by a link click has its text selected, and appending instead of
+   * replacing would leave both. The caret lands AFTER the inserted run so a second link appends.
+   *
+   * `maxLetters` is honoured, because the box declares one (`letters="255"`, `chatframe.xml:21`) and a
+   * pasted item link is 60-odd characters -- three links overflow a real limit, and the engine
+   * truncates rather than refusing.
+   */
+  Insert: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const insert = args[0] === undefined || args[0] === null ? '' : String(args[0]);
+    if (insert === '') {
+      return [];
+    }
+    const from = Math.min(widget.caret, widget.selectionAnchor);
+    const to = Math.max(widget.caret, widget.selectionAnchor);
+    const next = widget.text.slice(0, from) + insert + widget.text.slice(to);
+    widget.text = widget.maxLetters > 0 ? next.slice(0, widget.maxLetters) : next;
+    widget.caret = Math.min(from + insert.length, widget.text.length);
+    widget.selectionAnchor = widget.caret;
+    widget.onTextChanged?.();
+    return [];
+  },
+
   GetNumLetters: (ctx, self) => [widgetOf(ctx, self).text.length],
 
   /**
