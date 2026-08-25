@@ -9,7 +9,10 @@ import { zoneHighlights, setHighlightScale, lastHoverTest } from '../pipeline/zo
 import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
 import { BlobPolygon, setBlobSource } from './quest-blobs';
 import { resolveUnitToken } from '../world/unit-tokens';
-import { drawItemOf, lastDrawnOf, rectOf, watchDrawn } from './rects';
+import {
+  coveringItems, drawItemOf, lastCovering, lastDrawnOf, rectOf, watchCovering,
+  watchDrawn,
+} from './rects';
 import {
   activeTracking, setTracking, trackingTexturePath, visibleTracking,
 } from './minimap-tracking';
@@ -1412,6 +1415,33 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * `fillItemLines` passes `1,1,1`, so a grey line means something downstream of that, and this is
    * downstream.
    */
+  /**
+   * `window.whatCovers("WorldMapTooltipTextLeft1")` -- everything drawn over a named widget.
+   *
+   * The general form of the question the tooltip investigation needed and never asked: not "is this
+   * text right" -- it was, in every field measured -- but "what is on top of it". Takes a frame or
+   * region NAME so it can be typed from the console without knowing internal ids.
+   */
+  (window as unknown as Record<string, unknown>).whatCovers = (name: string) => {
+    const found = ctx.registry.byName(String(name));
+    const widget = found === null ? null : ctx.registry.widget(found);
+    if (widget === null) {
+      return { note: `no widget named ${name}` };
+    }
+    /**
+     * ARMS the per-frame capture as well as answering now.
+     *
+     * Answering now works for anything permanently on screen; the capture is what makes a HOVER
+     * measurable. So: call it once naming the widget, do the gesture, call it again -- the second
+     * answer carries `lastFrameDrawn`, taken while the thing was actually up.
+     */
+    watchCovering(widget.id);
+    return {
+      now: coveringItems(widget.id),
+      lastFrameDrawn: lastCovering(),
+    };
+  };
+
   (window as unknown as Record<string, unknown>).worldMapTooltip = () => {
     /**
      * ARM THE SAMPLER on the first call, then read what it caught.
@@ -1679,6 +1709,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       delete (window as unknown as Record<string, unknown>).worldMapHover;
       delete (window as unknown as Record<string, unknown>).worldTracking;
       delete (window as unknown as Record<string, unknown>).worldMapTooltip;
+      delete (window as unknown as Record<string, unknown>).whatCovers;
       // The blob source outlives this bridge otherwise, and it closes over a disposed world.
       setBlobSource(null);
     },

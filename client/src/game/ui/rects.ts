@@ -129,6 +129,10 @@ export function lastDrawnOf(id: string): { alpha: number; index: number; at: num
 export function publishRects(list: DrawItem[], screenHeightUnits: number): void {
   items = list;
   byId = null;
+  // See `coverWatch`: captured here for the same reason -- a hover cannot be observed from a call.
+  if (coverWatch !== null && list.some((item) => item.widget.id === coverWatch)) {
+    coverLast = { frame: frameCounter, report: coveringItems(coverWatch) };
+  }
   // See `watched`: sampling here is the only place a hover-only frame can be caught in the act.
   if (watched.size > 0) {
     for (let i = 0; i < list.length; i += 1) {
@@ -165,6 +169,99 @@ export function publishRects(list: DrawItem[], screenHeightUnits: number): void 
  * The INDEX matters for the same class of question: a region drawn before its own backdrop is
  * covered by it, and nothing about the region itself would say so.
  */
+/**
+ * EVERYTHING DRAWN ON TOP OF A WIDGET, with the properties that could dim or cover it.
+ *
+ * **This is the question four rounds of probes were circling without asking.** "White text looks
+ * grey" means something translucent is over it, and every instrument so far described the TEXT --
+ * its colour, its own alpha, its cascaded alpha, its raster density, its position, its draw index.
+ * All of those came back correct. None of them could name the thing on top, because none of them
+ * looked at anything but the text.
+ *
+ * So: find the target in the draw list, then report every LATER item whose rect intersects it. That
+ * is what covering means, and it is one pass over a list that is already built.
+ *
+ * `solid` matters as much as `sprite`: a solid quad is a flat colour, and a translucent one over
+ * text is exactly the reported symptom. `vertexColor` is reported for both, since a white sprite
+ * tinted dark covers just as well as a dark one.
+ */
+/**
+ * The id whose covering report is captured every frame it is DRAWN, and the last capture.
+ *
+ * **A console call cannot observe a hover** -- reaching the keyboard ends it, which is how two
+ * reports came back `drawn: null` and read as "nothing was drawn". So the capture happens where the
+ * per-frame list arrives and the console reads the last one.
+ *
+ * One id at a time on purpose: the report is a pass over the whole draw list, which is a diagnostic
+ * cost worth paying once and not per watched widget.
+ */
+let coverWatch: string | null = null;
+
+let coverLast: unknown = null;
+
+/** Arm the per-frame capture for one widget id. Null disarms. */
+export function watchCovering(id: string | null): void {
+  coverWatch = id;
+  coverLast = null;
+}
+
+/** The last frame the armed widget was drawn on, with everything that was over it. */
+export function lastCovering(): unknown {
+  return coverLast;
+}
+
+export function coveringItems(id: string): unknown {
+  if (items === null) {
+    return { note: 'no draw list yet' };
+  }
+  const at = items.findIndex((item) => item.widget.id === id);
+  if (at < 0) {
+    return { note: 'not in the draw list -- it is hidden, or the id is wrong' };
+  }
+  const target = items[at];
+  const overlaps = (rect: Rect): boolean => (
+    rect.left < target.rect.left + target.rect.width
+    && rect.left + rect.width > target.rect.left
+    && rect.top < target.rect.top + target.rect.height
+    && rect.top + rect.height > target.rect.top
+  );
+  const over: unknown[] = [];
+  for (let i = at + 1; i < items.length; i += 1) {
+    const item = items[i];
+    if (!overlaps(item.rect)) {
+      continue;
+    }
+    over.push({
+      index: i,
+      id: item.widget.id,
+      alpha: item.alpha,
+      ownAlpha: item.widget.alpha,
+      solid: item.widget.solid,
+      sprite: item.widget.sprite,
+      vertexColor: item.widget.vertexColor,
+      blend: item.widget.blend,
+      layer: item.widget.layer,
+      text: item.widget.displayText,
+      rect: [
+        Math.round(item.rect.left), Math.round(item.rect.top),
+        Math.round(item.rect.width), Math.round(item.rect.height),
+      ],
+    });
+  }
+  return {
+    target: {
+      index: at,
+      alpha: target.alpha,
+      rect: [
+        Math.round(target.rect.left), Math.round(target.rect.top),
+        Math.round(target.rect.width), Math.round(target.rect.height),
+      ],
+    },
+    total: items.length,
+    coveredBy: over,
+  };
+}
+
 export function drawItemOf(id: string): { alpha: number; index: number } | null {
   if (items === null) {
     return null;
