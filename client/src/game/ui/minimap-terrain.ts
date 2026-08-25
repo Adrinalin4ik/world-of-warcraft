@@ -1003,6 +1003,8 @@ export function attachMinimapTerrain(
           worldX: unit.position.x,
           worldY: unit.position.y,
           kind: token.startsWith('raid') ? 'raid' : 'party',
+          // The class the dot is coloured by -- see `CLASS_COLOURS` in `ui/minimap-blips.ts`.
+          classId: unit.fields.classId,
         });
       }
     }

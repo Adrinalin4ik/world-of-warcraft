@@ -69,6 +69,13 @@ export interface Blip {
    * `!` and `?` desaturated for the low-level and in-progress cases. One texture, two alphas.
    */
   dim?: boolean;
+  /**
+   * The member's `classId`, for a group dot. Undefined for a quest glyph and for an unknown class.
+   *
+   * The dot is drawn in the CLASS colour -- the owner: "это должна быть точка, цвет которой должен
+   * отражать цвет класса." So the colour is data on the blip rather than a fixed atlas cell.
+   */
+  classId?: number;
 }
 
 /**
@@ -107,25 +114,42 @@ export function blipForStatus(status: number): { kind: BlipKind; dim: boolean } 
       return null;
   }
 }
-const ICON_PATHS: Record<'questAvailable' | 'questComplete' | 'dots', string> = {
+const ICON_PATHS: Record<'questAvailable' | 'questComplete', string> = {
   questAvailable: 'Interface\\GossipFrame\\AvailableQuestIcon.blp',
   questComplete: 'Interface\\GossipFrame\\ActiveQuestIcon.blp',
-  dots: 'Interface\\Minimap\\ObjectIcons.blp',
+  // `dots` IS GONE: the group dot is drawn as a filled arc in the class colour, so there is one
+  // fewer BLP to decode and no dependence on an atlas layout whose colours I measured but whose
+  // meaning I did not. See `CLASS_COLOURS`.
 };
 
 /**
- * Which 32x32 cell of `ObjectIcons` a dot blip uses.
+ * `RAID_CLASS_COLORS`, READ OUT OF THE CLIENT'S OWN FILE -- `constants.lua:54-65`.
  *
- * From the measured colours in the header: cell 11 is `(0, 121, 255)` and cell 12 `(0, 137, 255)`, the
- * two blues -- which is what the real client draws party and raid members in. **The ASSIGNMENT of blue
- * to party is the client's convention and not something the atlas states**; what is measured is which
- * cells are blue.
+ * Keyed by `classId` here rather than by the uppercase token FrameXML uses, because a blip has a
+ * `Unit` and a unit carries the id. The ids are 3.3.5a's `ChrClasses` order, which
+ * `pipeline/dbc/race-class-data.ts` already resolves to those same tokens.
+ *
+ * **The dot is drawn, not sampled from an atlas, and that is a change of approach.** The first
+ * version took a blue circle out of `ObjectIcons`, which was wrong twice over: the owner reported it
+ * as "не точка, а скорее вопросительный знак" -- so whatever that atlas cell drew was not the dot I
+ * expected -- and a fixed cell cannot carry a class colour at all. A filled arc needs no atlas, no
+ * decode and no assumption about a layout I only measured the alpha of.
  */
-const DOT_CELL: Record<'party' | 'raid', number> = { party: 11, raid: 12 };
+const CLASS_COLOURS: Record<number, readonly [number, number, number]> = {
+  1: [0.78, 0.61, 0.43], // Warrior
+  2: [0.96, 0.55, 0.73], // Paladin
+  3: [0.67, 0.83, 0.45], // Hunter
+  4: [1.0, 0.96, 0.41], // Rogue
+  5: [1.0, 1.0, 1.0], // Priest
+  6: [0.77, 0.12, 0.23], // Death Knight
+  7: [0.0, 0.44, 0.87], // Shaman
+  8: [0.41, 0.8, 0.94], // Mage
+  9: [0.58, 0.51, 0.79], // Warlock
+  11: [1.0, 0.49, 0.04], // Druid
+};
 
-const DOT_CELL_PX = 32;
-
-const DOT_ATLAS_COLUMNS = 8;
+/** What a dot with no known class draws. The client's own unknown-unit grey. */
+const UNKNOWN_CLASS: readonly [number, number, number] = [0.63, 0.63, 0.63];
 
 /**
  * How big a blip draws, in canvas pixels of the 256-pixel minimap. UNSOURCED -- see `drawSize`.
@@ -135,9 +159,9 @@ const DOT_ATLAS_COLUMNS = 8;
  * `window.worldMinimapBlipSize(quest, dot)` exists: this is the fourth number on this project that
  * one live call settles faster than any amount of arithmetic here.
  */
-let questIconPx = 24;
+let questIconPx = 22;
 
-let dotPx = 12;
+let dotPx = 10;
 
 /** Set both blip sizes live. Returns what they settled on, for the console. */
 export function setBlipSizes(quest?: number, dot?: number): { quest: number; dot: number } {
@@ -151,13 +175,29 @@ export function setBlipSizes(quest?: number, dot?: number): { quest: number; dot
 }
 
 /**
- * How faint a dimmed glyph is. UNSOURCED, like the two sizes above.
+ * **NO DIMMING. The owner asked for it gone: "полупрозрачность нужно убрать".**
  *
- * WotLK's grey `?` is a different TEXTURE in the real client, not the yellow one at reduced alpha --
- * so this is an approximation of it and is labelled as one. 0.45 reads as clearly present and
- * clearly secondary; the owner is the one who can say whether it matches.
+ * The grey `?` was my approximation of what WotLK draws for an in-progress quest, done by alpha on
+ * the yellow texture. He looked at it beside the real client and said no, so the `dim` flag is kept
+ * on the data -- it is a true fact about the status, and a later change may want it -- and it no
+ * longer changes what is painted.
+ *
+ * Kept rather than deleted deliberately: throwing away the distinction would mean re-deriving
+ * `blipForStatus` from scratch if the grey variant turns out to want a different TEXTURE, which is
+ * what the real client actually uses.
  */
-const DIM_ALPHA = 0.45;
+const DIM_ALPHA = 1;
+
+/**
+ * The dark ring drawn behind a blip -- "нужно чтобы была обводка вокруг как в оригинале".
+ *
+ * UNSOURCED as art: the real client's minimap icons carry their own border in the texture, and these
+ * two glyphs (`AvailableQuestIcon`, `ActiveQuestIcon`) are the gossip-frame versions, which do not.
+ * So the ring is drawn, and it is an approximation of a border rather than the border.
+ */
+const OUTLINE_RGBA = 'rgba(0, 0, 0, 0.85)';
+
+const OUTLINE_PX = 2;
 
 export class MinimapBlips {
   private readonly icons = new Map<string, HTMLCanvasElement | null>();
@@ -259,18 +299,20 @@ export class MinimapBlips {
       }
       this.lastDraw.drawn = (this.lastDraw.drawn as number) + 1;
       if (blip.kind === 'party' || blip.kind === 'raid') {
-        const atlas = this.icons.get(ICON_PATHS.dots);
-        if (!atlas) {
-          continue;
-        }
-        const cell = DOT_CELL[blip.kind];
-        ctx.drawImage(
-          atlas,
-          (cell % DOT_ATLAS_COLUMNS) * DOT_CELL_PX,
-          Math.floor(cell / DOT_ATLAS_COLUMNS) * DOT_CELL_PX,
-          DOT_CELL_PX, DOT_CELL_PX,
-          at.x - side / 2, at.y - side / 2, side, side,
-        );
+        /**
+         * A FILLED DOT IN THE CLASS COLOUR, drawn rather than sampled.
+         *
+         * See `CLASS_COLOURS` for why the atlas is gone. The ring is the same one the glyphs get,
+         * so a dot on light terrain stays visible -- which is the whole job of a border here.
+         */
+        const [r, g, b] = CLASS_COLOURS[blip.classId ?? -1] ?? UNKNOWN_CLASS;
+        ctx.beginPath();
+        ctx.arc(at.x, at.y, side / 2, 0, Math.PI * 2);
+        ctx.fillStyle = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+        ctx.fill();
+        ctx.lineWidth = OUTLINE_PX;
+        ctx.strokeStyle = OUTLINE_RGBA;
+        ctx.stroke();
         continue;
       }
       const icon = this.icons.get(ICON_PATHS[blip.kind]);
@@ -283,6 +325,12 @@ export class MinimapBlips {
       if (blip.dim === true) {
         ctx.globalAlpha = alpha * DIM_ALPHA;
       }
+      // The RING FIRST, so the glyph sits on top of its own border rather than under it.
+      ctx.beginPath();
+      ctx.arc(at.x, at.y, side / 2, 0, Math.PI * 2);
+      ctx.lineWidth = OUTLINE_PX;
+      ctx.strokeStyle = OUTLINE_RGBA;
+      ctx.stroke();
       ctx.drawImage(icon, at.x - side / 2, at.y - side / 2, side, side);
       ctx.globalAlpha = alpha;
     }
