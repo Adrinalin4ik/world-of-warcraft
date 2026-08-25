@@ -97,6 +97,7 @@ import { QUEST_FLAGS } from '../../network/game/object/quest';
 import { NPC_FLAG } from '../world/cursor-mode';
 import { itemLink, itemTooltipLines } from './item-tooltip';
 import { setWatchedQuestSource } from './quest-watch';
+import { cvarBool } from './framexml/lua/api/screen';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { questXpData } from '../pipeline/dbc/quest-xp-data';
 import {
@@ -2020,6 +2021,28 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   };
 
   const questsOnMap = (): Array<{ questId: number; logIndex: number }> => {
+    /**
+     * **GATED ON THE `questPOI` CVAR, and that gate is the whole of the checkbox.**
+     *
+     * The owner: unticking "Show Quest Objectives" left the pins on the map, and they then survived
+     * a change of zone -- "как будто не хватает обновления". His instinct was right and the update
+     * is the client's own: the checkbox's `OnClick` does `SetCVar("questPOI", self:GetChecked())`
+     * and then calls `WorldMapFrame_DisplayQuests()` unconditionally (`worldmapframe.xml:1109-1116`).
+     *
+     * That call reaches `WorldMapFrame_UpdateQuests`, which begins
+     * `numEntries = QuestMapUpdateAllQuests(); WorldMapFrame_ClearQuestPOIs()` (`:1538-1539`) and
+     * whose RETURN decides everything: `DisplayQuests` shows the POI frame, the blob and the track
+     * checkbox when it is above zero and HIDES all three when it is not (`:1535-1563`). So the engine
+     * is expected to answer zero once the CVar is off -- which is exactly why the client writes it
+     * one line before asking.
+     *
+     * Without this the count stayed positive, `DisplayQuests` took the show branch, and the pins came
+     * straight back. And with the flag off nothing called `DisplayQuests` again, so `ClearQuestPOIs`
+     * never ran and the stale pins outlived a zone change too -- one missing gate, both symptoms.
+     */
+    if (!cvarBool(vm, 'questPOI')) {
+      return [];
+    }
     const zone = selectedZoneAreaId();
     if (zone === 0) {
       return [];
