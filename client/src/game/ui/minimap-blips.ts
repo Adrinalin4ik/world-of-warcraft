@@ -68,6 +68,11 @@ export interface Blip {
   worldY: number;
   kind: BlipKind;
   /**
+   * What a tooltip on this blip says. Empty or absent means no tooltip -- a name this client has not
+   * queried yet is a real state and silence is the honest answer for it.
+   */
+  name?: string;
+  /**
    * The member's `classId`, for a group dot. Undefined for a quest glyph and for an unknown class.
    *
    * The dot is drawn in the CLASS colour -- the owner: "это должна быть точка, цвет которой должен
@@ -213,6 +218,37 @@ export class MinimapBlips {
    */
   private lastDraw: Record<string, unknown> = { drawn: 0, asked: 0 };
 
+  /**
+   * Where each blip actually landed, for the hover test. Rebuilt on every composite.
+   *
+   * The DRAWN positions and not the world ones: the hover arrives in canvas pixels and comparing in
+   * that space needs no second copy of the window arithmetic -- which is the same reason `draw` takes
+   * a `toCanvas` rather than computing one.
+   */
+  private placed: { x: number; y: number; radius: number; name: string }[] = [];
+
+  /**
+   * The name of the blip under a point in canvas pixels, or null.
+   *
+   * NEAREST rather than first, because blips overlap: two party members standing together are two
+   * circles a few pixels apart, and the topmost by draw order is not the one the pointer is closest
+   * to. Radius is the drawn half-size, so the hit area is exactly what is on screen.
+   */
+  nameAt(x: number, y: number): string | null {
+    let best: string | null = null;
+    let bestDistance = Infinity;
+    for (const blip of this.placed) {
+      const dx = x - blip.x;
+      const dy = y - blip.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance <= blip.radius && distance < bestDistance) {
+        bestDistance = distance;
+        best = blip.name;
+      }
+    }
+    return best;
+  }
+
   report(): Record<string, unknown> {
     return {
       ...this.lastDraw,
@@ -262,6 +298,7 @@ export class MinimapBlips {
     toCanvas: (worldX: number, worldY: number) => { x: number; y: number },
   ): void {
     this.lastDraw = { asked: blips.length, drawn: 0, samples: [] as unknown[] };
+    this.placed = [];
     if (blips.length === 0) {
       return;
     }
@@ -278,6 +315,9 @@ export class MinimapBlips {
         });
       }
       this.lastDraw.drawn = (this.lastDraw.drawn as number) + 1;
+      if (blip.name !== undefined && blip.name !== '') {
+        this.placed.push({ x: at.x, y: at.y, radius: side / 2, name: blip.name });
+      }
       if (blip.kind === 'party' || blip.kind === 'raid') {
         /**
          * A FILLED DOT IN THE CLASS COLOUR, drawn rather than sampled.

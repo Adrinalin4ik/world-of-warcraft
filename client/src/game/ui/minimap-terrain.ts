@@ -76,6 +76,7 @@ import ADT from '../pipeline/adt';
 import WorkerPool, { PRIORITY } from '../pipeline/worker/pool';
 import minimapTiles from '../pipeline/minimap-tiles';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
+import type { Widget } from './widget';
 import type { GlueArt } from './art';
 import {
   Blip, MinimapBlips, blipForStatus, setBlipSizes,
@@ -261,6 +262,11 @@ export class MinimapTerrain {
   /** What the last blip pass was asked to draw. For `window.worldMinimapBlips()`. */
   blipReport(): Record<string, unknown> {
     return this.blips.report();
+  }
+
+  /** The name of the blip under a point in this canvas's pixels, or null. */
+  blipNameAt(x: number, y: number): string | null {
+    return this.blips.nameAt(x, y);
   }
 
   /**
@@ -787,8 +793,17 @@ export interface MinimapTerrainHost {
  * Created LAZILY on the first tick that finds the frame: this attaches right after the manifest, but a
  * frame that failed to load would otherwise mean a null captured for the whole session.
  */
+/** What the host needs to know about the pointer to put a tooltip on a blip. */
+export interface PointerReader {
+  widget: Widget | null;
+  local: { x: number; y: number; width: number; height: number } | null;
+}
+
 export function attachMinimapTerrain(
-  ctx: MethodContext, art: GlueArt, world: World,
+  ctx: MethodContext,
+  art: GlueArt,
+  world: World,
+  pointer?: () => PointerReader,
 ): MinimapTerrainHost {
   let terrain: MinimapTerrain | null = null;
   let arrow: PlayerArrowSprite | null = null;
@@ -973,6 +988,74 @@ export function attachMinimapTerrain(
    * yard. So the per-frame cost is the walk, and the drawing is as rare as the terrain repaint.
    * `RAID_TOKENS` is built once for that reason; building it here would allocate 40 strings a frame.
    */
+  /** What the last frame put in the tooltip, so an unchanged hover costs one string compare. */
+  let tipShowing = '';
+
+  /**
+   * THE BLIP TOOLTIP -- the client's own `GameTooltip`, driven by the engine.
+   *
+   * The owner: "Наведение на точку, квест должно показывать тултип." FrameXML cannot do this -- the
+   * blips are ours, and no `Minimap:` call in the served `minimap.lua`/`minimap.xml` concerns them --
+   * so the hit test and the trigger are engine work, and the TOOLTIP is the client's.
+   *
+   * **The name is passed as an ARGUMENT, never spliced into a chunk.** An NPC called "Marshal
+   * Dughan's Aide" would terminate a `runExpr` source string, which is the trap `vm.ts:133` names.
+   * So a tiny Lua helper is defined once, with no interpolation in it, and called through
+   * `vm.call` with the string as a value -- the same discipline `item-tooltip.ts` follows for an
+   * item name.
+   *
+   * `ANCHOR_CURSOR` because that is what the real minimap tooltips use, and it saves this file from
+   * knowing anything about where the pointer is in screen space.
+   *
+   * Cost: one string compare per frame while the pointer is over the minimap, and a Lua call only on
+   * a CHANGE of what the tooltip should say. Nothing at all when the pointer is elsewhere.
+   */
+  const HELPER = [
+    'function __minimapBlipTooltip(name)',
+    '  if not GameTooltip then return end',
+    '  if name then',
+    '    GameTooltip:SetOwner(Minimap, "ANCHOR_CURSOR")',
+    '    GameTooltip:SetText(name)',
+    '    GameTooltip:Show()',
+    '  else',
+    '    GameTooltip:Hide()',
+    '  end',
+    'end',
+  ].join('\n');
+
+  let helperInstalled = false;
+
+  const updateTooltip = (): void => {
+    if (pointer === undefined || minimapId === null) {
+      return;
+    }
+    const frame = ctx.registry.widget(minimapId);
+    const seen = pointer();
+    let wanted: string | null = null;
+    if (frame !== null && seen.widget === frame && seen.local !== null && terrain !== null
+      && seen.local.width > 0 && seen.local.height > 0) {
+      wanted = terrain.blipNameAt(
+        (seen.local.x / seen.local.width) * TERRAIN_PX,
+        (seen.local.y / seen.local.height) * TERRAIN_PX,
+      );
+    }
+    const next = wanted ?? '';
+    if (next === tipShowing) {
+      return;
+    }
+    tipShowing = next;
+    if (!helperInstalled) {
+      ctx.vm.run(HELPER, 'minimap-blip-tooltip.lua');
+      helperInstalled = true;
+    }
+    // `isRef` and not a null check -- `getGlobal` answers `unknown`, and the loader uses the same
+    // guard before calling `CreateFrame` (`framexml/loader.ts:728-731`).
+    const fn = ctx.vm.getGlobal('__minimapBlipTooltip');
+    if (ctx.vm.isRef(fn)) {
+      ctx.vm.call(fn, [wanted]);
+    }
+  };
+
   const blipsNow = (): Blip[] => {
     const out: Blip[] = [];
     const quests = world.game?.objectHandler?.questHandler ?? null;
@@ -981,7 +1064,15 @@ export function attachMinimapTerrain(
         const kind = blipForStatus(status);
         const unit = kind === null ? null : world.entities.get(guid) ?? null;
         if (kind !== null && unit) {
-          out.push({ worldX: unit.position.x, worldY: unit.position.y, kind });
+          out.push({
+            worldX: unit.position.x,
+            worldY: unit.position.y,
+            kind,
+            // `Unit#name` is written by `applyCreatureInfo` from `SMSG_CREATURE_QUERY_RESPONSE`, so
+            // it is empty until that lands and the blip then simply has no tooltip. The quest log
+            // asks for the same names, so in practice one query serves both.
+            name: unit.name,
+          });
         }
       });
     }
@@ -992,6 +1083,7 @@ export function attachMinimapTerrain(
           worldX: unit.position.x,
           worldY: unit.position.y,
           kind: token.startsWith('raid') ? 'raid' : 'party',
+          name: unit.name,
           // The class the dot is coloured by -- see `CLASS_COLOURS` in `ui/minimap-blips.ts`.
           classId: unit.fields.classId,
         });
@@ -1063,6 +1155,8 @@ export function attachMinimapTerrain(
       const onMap = ensureWorldArrow()
         ? (worldArrow?.update(player.facing ?? 0) ?? false)
         : false;
+      // AFTER the composite, so a blip that has just moved is tested where it was drawn.
+      updateTooltip();
       return painted || turned || onMap;
     },
     dispose: () => {

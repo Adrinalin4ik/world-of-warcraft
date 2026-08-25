@@ -165,6 +165,20 @@ export class GlueInput {
    */
   private pointerUnits: { x: number; y: number } | null = null;
 
+  /**
+   * The pointer's position INSIDE the hovered widget, plus that widget's size. Null when nothing is
+   * hovered.
+   *
+   * **Recorded here because this is the only place the rect is already in hand.** The hover branch
+   * has just found the `DrawItem` and its resolved rect; anything downstream that wants a local
+   * offset would otherwise scan the draw list for the widget again, per frame, to recompute what was
+   * momentarily free.
+   *
+   * The first reader is the minimap: a blip tooltip needs to know WHERE in the 256-pixel circle the
+   * pointer is, and the widget layer has no notion of anything inside a frame.
+   */
+  private pointerLocalRect: { x: number; y: number; width: number; height: number } | null = null;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
   }
@@ -223,6 +237,11 @@ export class GlueInput {
    */
   get pointerPosition(): { x: number; y: number } | null {
     return this.pointerUnits;
+  }
+
+  /** The pointer inside the hovered widget, and that widget's size. See `pointerLocalRect`. */
+  get pointerLocal(): { x: number; y: number; width: number; height: number } | null {
+    return this.pointerLocalRect;
   }
 
   setFocus(widget: Widget | null): void {
@@ -403,6 +422,22 @@ export class GlueInput {
 
     // Hover skips disabled widgets.
     const hoverTarget = hit && hit.state !== 'disabled' ? hit : null;
+    // The local offset, from the item we just hit. See `pointerLocalRect`.
+    this.pointerLocalRect = null;
+    if (hoverTarget !== null) {
+      for (let i = this.items.length - 1; i >= 0; i -= 1) {
+        const item = this.items[i];
+        if (item.widget === hoverTarget) {
+          this.pointerLocalRect = {
+            x: x - item.rect.left,
+            y: y - item.rect.top,
+            width: item.rect.width,
+            height: item.rect.height,
+          };
+          break;
+        }
+      }
+    }
     if (this.hovered !== hoverTarget) {
       if (this.hovered) {
         this.hovered.hovered = false;

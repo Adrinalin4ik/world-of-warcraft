@@ -669,7 +669,15 @@ export class WorldUiHost {
         // THE MINIMAP'S TERRAIN AND PLAYER ARROW. The map bridge's globals are seeded above, before the
         // manifest; the DRAWING has to be here instead, because it creates regions on a `Minimap` frame
         // that does not exist until the manifest has built it. See `minimap-terrain.ts` on the split.
-        this.minimapTerrain = attachMinimapTerrain(runtime.ctx, this.art, this.world);
+        // The pointer, so the minimap can put a tooltip on a blip. The ROUTER owns both halves --
+        // which widget is hovered and where inside it -- and this host is where they meet the
+        // minimap. See `minimap-terrain.ts#updateTooltip`.
+        this.minimapTerrain = attachMinimapTerrain(
+          runtime.ctx,
+          this.art,
+          this.world,
+          () => ({ widget: this.input.pointerWidget, local: this.input.pointerLocal }),
+        );
         // The blob raster needs a `GlueArt` and nothing else; the polygons reach it from
         // `ui/map-bridge.ts`' sink and the draw call from the client's own widget method.
         questBlobs.attach(this.art);
