@@ -245,6 +245,36 @@ export function installChatApi(vm: LuaVM): void {
      * one would take the `return false` branch on every keystroke and reproduce the exact bug it was
      * meant to fix -- the trap this project has now hit four times with `0`.
      */
+    /**
+     * `GetAutoCompletePresenceID(name)` -- and it is why a whisper printed WHITE under a "Say:" header
+     * while sending correctly as a whisper.
+     *
+     * The owner: "в момент написания сообщения он еще не был переключен, и я писал белый текст", and
+     * his `runLua` answered `WHISPER` for the attribute at the same time. Both are true, and the split
+     * is one line. `ChatEdit_UpdateHeader` has a WHISPER-ONLY branch before it writes anything
+     * (`chatframe.lua:3594-3600`):
+     *
+     *     if ( type == "WHISPER" ) then
+     *         if ( BNet_GetPresenceID(editBox:GetAttribute("tellTarget")) ) then
+     *
+     * and `BNet_GetPresenceID` is one statement -- `return GetAutoCompletePresenceID(name)`
+     * (`bnet.lua:37-39`). A nil global throws there, so `header:SetFormattedText(CHAT_WHISPER_SEND,
+     * ...)` at `:3603` never ran and neither did the `SetTextColor` block at `:3625-3633`. The
+     * ATTRIBUTES were already set by `ChatEdit_ExtractTellTarget`, which is why the message still went
+     * out pink and as a whisper -- only the field itself never caught up.
+     *
+     * WHISPER-ONLY is the whole reason `/p` was fine: no other chat type reaches that branch. The
+     * owner reported exactly that asymmetry, twice.
+     *
+     * NOTHING is the truthful answer: there is no Battle.net connection here, so no name has a
+     * presence id, and nil takes the else path -- a normal whisper, which is what it is.
+     *
+     * **AND NOT 0.** `0` is truthy in Lua, so it would set `chatType` to `BN_WHISPER` for every
+     * whisper the player ever types and send them all down a Battle.net path this client has none of.
+     * Silent, and the fifth costume of the same trap.
+     */
+    ['GetAutoCompletePresenceID', 'there is no Battle.net connection, so no name has a presence id -- '
+      + 'and nil is what makes ChatEdit_UpdateHeader treat a whisper as a whisper', []],
     ['GetAutoCompleteResults', 'no name index is kept (friends, guild, recent whispers), so there are '
       + 'no completion candidates -- and NOTHING is what ChatEdit_ExtractTellTarget needs to hear', []],
     // The channel system: `CMSG_JOIN_CHANNEL` and its family are not sent, and no channel list is read.
