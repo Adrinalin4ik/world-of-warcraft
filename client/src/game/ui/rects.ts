@@ -97,9 +97,48 @@ let allRectsRevision = -1;
  * to the other needs the viewport's height in the same logical units, and reading it from anywhere
  * else risks the two disagreeing on the frame the window was resized.
  */
+/**
+ * Widget ids whose DRAWN state is sampled every frame, and the last sample of each.
+ *
+ * **A probe that has to be called by hand cannot see a hover.** The world-map tooltip is only in the
+ * draw list while the pointer is on a POI, and reaching the console ends that -- the owner's report
+ * came back `shown: false, drawn: null` for exactly that reason, which is the instrument failing to
+ * answer rather than an answer.
+ *
+ * So the sampling happens where the per-frame list already arrives, and the probe reads the LAST
+ * time each id was actually drawn. Empty by default: this costs one `Map#size` check per frame until
+ * something asks.
+ */
+/** Frames since sampling began, so a stale sample is recognisable as stale. */
+let frameCounter = 0;
+
+const watched = new Set<string>();
+
+const lastDrawn = new Map<string, { alpha: number; index: number; at: number }>();
+
+/** Start sampling these ids. Idempotent; ids accumulate, which is what a diagnostic wants. */
+export function watchDrawn(ids: string[]): void {
+  ids.forEach((id) => watched.add(id));
+}
+
+/** The last frame each watched id was drawn on, with its CASCADED alpha and list position. */
+export function lastDrawnOf(id: string): { alpha: number; index: number; at: number } | null {
+  return lastDrawn.get(id) ?? null;
+}
+
 export function publishRects(list: DrawItem[], screenHeightUnits: number): void {
   items = list;
   byId = null;
+  // See `watched`: sampling here is the only place a hover-only frame can be caught in the act.
+  if (watched.size > 0) {
+    for (let i = 0; i < list.length; i += 1) {
+      const item = list[i];
+      if (watched.has(item.widget.id)) {
+        lastDrawn.set(item.widget.id, { alpha: item.alpha, index: i, at: frameCounter });
+      }
+    }
+    frameCounter += 1;
+  }
   screenHeight = screenHeightUnits;
   /**
    * **THIS MUST NOT TOUCH THE RESOLVER, AND A TEST CAUGHT IT DOING SO.** The resolver used to arrive as

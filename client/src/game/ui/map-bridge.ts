@@ -9,7 +9,7 @@ import { zoneHighlights, setHighlightScale, lastHoverTest } from '../pipeline/zo
 import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
 import { BlobPolygon, setBlobSource } from './quest-blobs';
 import { resolveUnitToken } from '../world/unit-tokens';
-import { drawItemOf, rectOf } from './rects';
+import { drawItemOf, lastDrawnOf, rectOf, watchDrawn } from './rects';
 import {
   activeTracking, setTracking, trackingTexturePath, visibleTracking,
 } from './minimap-tracking';
@@ -1413,6 +1413,18 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * downstream.
    */
   (window as unknown as Record<string, unknown>).worldMapTooltip = () => {
+    /**
+     * ARM THE SAMPLER on the first call, then read what it caught.
+     *
+     * The tooltip is in the draw list only while the pointer is on a POI, so calling this while it is
+     * on screen is impossible by hand. First call arms; hover, then call again and the numbers are
+     * from the frames it was actually drawn on. `at` says how many frames ago, so a stale sample
+     * cannot be mistaken for a live one.
+     */
+    watchDrawn([
+      'WorldMapTooltip', 'WorldMapTooltipTextLeft1', 'WorldMapTooltipTextLeft2',
+      'WorldMapTooltipBackdrop', 'WorldMapFrame', 'WorldMapDetailFrame',
+    ]);
     const id = ctx.registry.byName('WorldMapTooltip');
     const tip = id === null ? null : ctx.registry.widget(id);
     if (tip === null) {
@@ -1438,6 +1450,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
         // read 1 on every line while the pixels were grey, which is exactly what a dimming ANCESTOR
         // looks like from here.
         drawn: drawItemOf(line.id),
+        lastDrawn: lastDrawnOf(line.id),
       });
     }
     return {
@@ -1448,6 +1461,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
         effectiveScale: tip.effectiveScale,
         scale: tip.scale,
         drawn: drawItemOf(tip.id),
+        lastDrawn: lastDrawnOf(tip.id),
         // The backdrop, whose draw index decides whether it covers the text.
         backdrop: (() => {
           const b = ctx.registry.byName('WorldMapTooltipBackdrop');
@@ -1461,6 +1475,16 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
         const w = d === null ? null : ctx.registry.widget(d);
         return w === null ? null : { alpha: w.alpha, scale: w.scale };
       })(),
+      // The ancestors, so a dimming parent is visible rather than inferred.
+      ancestors: ['WorldMapFrame', 'WorldMapDetailFrame'].map((name) => {
+        const wid = ctx.registry.byName(name);
+        const w = wid === null ? null : ctx.registry.widget(wid);
+        return {
+          name,
+          alpha: w?.alpha ?? null,
+          lastDrawn: w === null ? null : lastDrawnOf(w.id),
+        };
+      }),
       lines,
     };
   };
