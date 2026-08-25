@@ -137,6 +137,10 @@ const FRAME: MethodTable = {
       return [];
     }
     widget.strata = value as Strata;
+    // DOWN THE SUBTREE: strata is inherited, and `add` only ever copied it once. A frame that
+    // changes strata after it has children left them behind -- see `Widget#restrata`, which carries
+    // the measurement that found this (the tooltip backdrop drawing over its own text).
+    widget.restrata();
     widget.restamp();
     return [];
   },

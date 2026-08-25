@@ -848,6 +848,37 @@ export class Widget {
     }
   }
 
+  /**
+   * Push this widget's strata down the subtree. **Strata is INHERITED, and it was only inherited
+   * once.**
+   *
+   * `add` copies the parent's strata onto a child at the moment it is added (`:729`), and
+   * `SetFrameStrata` used to write the frame alone. So a frame whose strata CHANGES leaves every
+   * region it already owns behind in the old one -- and `compareOrder` ranks strata above everything
+   * else (`framexml/order.ts:88-96`), so the layer never gets to referee.
+   *
+   * That is the grey tooltip text, measured. `window.whatCovers("WorldMapTooltipTextLeft1")`:
+   * the text at draw index **196**, and covering it at **253** the tooltip's own backdrop --
+   * `layer: "BACKGROUND"`, same rect, alpha 1. BACKGROUND sorts before ARTWORK, so the only way it
+   * lands after the text is a higher-ranked axis, and strata is the only one above frame level.
+   * The backdrop is created lazily on `SetBackdrop`, i.e. AFTER `SetFrameStrata("TOOLTIP")` had run,
+   * so it inherited TOOLTIP while the text regions still carried the strata from load.
+   *
+   * Which is exactly why it began after the map had been windowed once: the client sets the
+   * tooltip's strata on every size change (`worldmapframe.lua:1355,1405`), and nothing before that
+   * had ever changed a strata on a frame that already had children.
+   *
+   * Every descendant, not just regions: a child FRAME inherits its parent's strata in this model too
+   * (`add`), and the client sets a child's explicitly afterwards when it wants something else --
+   * which is the same order of operations the engine has.
+   */
+  restrata(): void {
+    for (const child of this.children) {
+      child.strata = this.strata;
+      child.restrata();
+    }
+  }
+
   hide(): void {
     if (this.shown) {
       bumpGeometry('hide');
