@@ -117,7 +117,24 @@ export function installChatApi(vm: LuaVM): void {
     const index = typeof args[0] === 'number' ? args[0] : 0;
     // The name is left EMPTY rather than invented: `FCF_SetWindowName` derives "General" and
     // "Combat Log" from the localized globals itself, and a name here would fight it.
-    return ['', 14, 0.24, 0.24, 0.24, 1, index === 1, false, null];
+    /**
+     * **THE COLOUR AND ALPHA ARE THE CLIENT'S OWN CONSTANTS, and they used to be a guess.**
+     *
+     * This returned `0.24, 0.24, 0.24` and alpha `1`, and the owner saw the result: an opaque grey
+     * slab where the chat should be. The client feeds these straight through --
+     * `FCF_LoadChatWindow` destructures the nine values and calls `FCF_SetWindowColor(frame, r, g, b,
+     * 1)` and `FCF_SetWindowAlpha(frame, alpha, 1)` -- so whatever is answered here IS the chat
+     * background, with no default of its own to fall back on.
+     *
+     * `floatingchatframe.lua:21-22` states both:
+     *
+     *     DEFAULT_CHATFRAME_ALPHA = 0.25;
+     *     DEFAULT_CHATFRAME_COLOR = {r = 0, g = 0, b = 0};
+     *
+     * Black at a quarter alpha, which is the dark tint the real client shows. The grey was invented
+     * for a value the client publishes two lines apart from the function that consumes it.
+     */
+    return ['', 14, 0, 0, 0, 0.25, index === 1, false, null];
   });
 
   /**
