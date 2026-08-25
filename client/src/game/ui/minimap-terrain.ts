@@ -77,7 +77,9 @@ import WorkerPool, { PRIORITY } from '../pipeline/worker/pool';
 import minimapTiles from '../pipeline/minimap-tiles';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
 import type { GlueArt } from './art';
-import { Blip, MinimapBlips, blipForStatus } from './minimap-blips';
+import {
+  Blip, MinimapBlips, blipForStatus, setBlipSizes,
+} from './minimap-blips';
 import { resolveUnitToken } from '../world/unit-tokens';
 import type { MethodContext } from './framexml/lua/object';
 import { zoomOf } from './framexml/lua/methods/minimap';
@@ -261,8 +263,14 @@ export class MinimapTerrain {
     return this.blips.report();
   }
 
-  /** Force the next `update` to composite, whatever the player has done since. */
-  private invalidate(): void {
+  /**
+   * Force the next `update` to composite, whatever the player has done since.
+   *
+   * Public because the blip-size knob has to reach it: changing a size changes what a repaint would
+   * paint, and the gate compares positions -- it cannot see a size. Same reason `takeArtArrived`
+   * exists one field up.
+   */
+  invalidate(): void {
     this.lastMap = '';
   }
 
@@ -894,6 +902,21 @@ export function attachMinimapTerrain(
       };
     };
 
+    /**
+     * `window.worldMinimapBlipSize(24, 12)` -- the two blip sizes, live. Either may be omitted.
+     *
+     * Forces the next composite, because the sizes change what a repaint would paint and the gate
+     * cannot see that -- the same reason `takeArtArrived` exists.
+     */
+    (window as unknown as Record<string, unknown>).worldMinimapBlipSize = (
+      quest?: number,
+      dot?: number,
+    ) => {
+      const settled = setBlipSizes(quest, dot);
+      terrain?.invalidate();
+      return settled;
+    };
+
     (window as unknown as Record<string, unknown>).worldMinimapBlips = () => (
       terrain?.blipReport() ?? { note: 'no terrain host yet' }
     );
@@ -1063,6 +1086,7 @@ export function attachMinimapTerrain(
       delete (window as unknown as Record<string, unknown>).worldMinimapArrow;
       delete (window as unknown as Record<string, unknown>).worldMinimapBlips;
       delete (window as unknown as Record<string, unknown>).worldMinimapBlipSource;
+      delete (window as unknown as Record<string, unknown>).worldMinimapBlipSize;
       delete (window as unknown as Record<string, unknown>).worldMapArrow;
     },
   };

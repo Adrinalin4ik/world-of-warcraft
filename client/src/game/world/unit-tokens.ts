@@ -75,6 +75,15 @@ export interface TokenWorld {
       merchantHandler?: { source: string | null };
       trainerHandler?: { source: string | null };
       questHandler?: { source: string | null };
+      /**
+       * THE GROUP ROSTER, and it is the only place a party member's guid exists.
+       *
+       * `ui/group-bridge.ts` publishes party tokens as UI SNAPSHOTS -- name, health, class -- which
+       * is what the party frames need and carries no position and no guid by design. So a caller who
+       * wants the member as a `Unit` (the minimap blips, the world map dots) cannot go through the
+       * snapshot store and has to come here.
+       */
+      groupHandler?: { members: { guid: string }[] };
     };
   };
 }
@@ -162,6 +171,39 @@ export function resolveUnitToken(token: string, world: TokenWorld | null): Unit 
     case 'questnpc':
       return entityFor(world, world.game?.objectHandler?.questHandler?.source ?? null);
     default:
-      return null;
+      return groupMember(token.toLowerCase(), world);
   }
+}
+
+/**
+ * `party1..4` and `raid1..40` -> the member's `Unit`, or null.
+ *
+ * **THESE WERE MISSING ENTIRELY, and two features were silently inert because of it.** The world
+ * map's party dots and the minimap's group blips both call this resolver, and both got null for every
+ * token -- the owner saw no group anywhere and the probe read `group: 0` in a real party. Nothing
+ * errored: an absent case in a `switch` returns null, which is indistinguishable from "that member
+ * is out of range".
+ *
+ * The ORDER is `SMSG_GROUP_LIST`'s, which is the order `ui/group-bridge.ts` already publishes the
+ * snapshots in and the order `PartyMemberFrame<N>` expects (`partymemberframe.lua:83`). Both indexes
+ * read the same roster, so a member cannot be `party2` to one caller and `party3` to another.
+ *
+ * A member with no ENTITY answers null, and that is correct rather than a gap: the roster carries a
+ * member who is out of visual range, but this function's contract is a `Unit` -- something with a
+ * position and a model. A caller that only needs the name uses the snapshot store, which is exactly
+ * why the two live apart.
+ *
+ * `raid` is the SAME roster and not a separate one. 3.3.5a keeps one member list either way and the
+ * group type is a flag on it (`network/game/object/group.ts:86`), so `raid1` and `party1` name the
+ * same person in a five-man -- which is what the real client does.
+ */
+function groupMember(token: string, world: TokenWorld): Unit | null {
+  const match = /^(party|raid)([0-9]{1,2})$/.exec(token);
+  if (match === null) {
+    return null;
+  }
+  const index = Number(match[2]);
+  const members = world.game?.objectHandler?.groupHandler?.members ?? [];
+  const member = index >= 1 ? members[index - 1] : undefined;
+  return member === undefined ? null : entityFor(world, member.guid);
 }

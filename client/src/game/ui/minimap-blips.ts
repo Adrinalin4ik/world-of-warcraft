@@ -127,10 +127,28 @@ const DOT_CELL_PX = 32;
 
 const DOT_ATLAS_COLUMNS = 8;
 
-/** How big a blip draws in canvas pixels. UNSOURCED -- see `drawSize`. */
-const QUEST_ICON_PX = 16;
+/**
+ * How big a blip draws, in canvas pixels of the 256-pixel minimap. UNSOURCED -- see `drawSize`.
+ *
+ * 16 was too small on the owner's screen ("маленький слишком"), so the quest glyph is 24 and the dot
+ * 12. Both are still read off his screenshot of the real client rather than derived, which is why
+ * `window.worldMinimapBlipSize(quest, dot)` exists: this is the fourth number on this project that
+ * one live call settles faster than any amount of arithmetic here.
+ */
+let questIconPx = 24;
 
-const DOT_PX = 8;
+let dotPx = 12;
+
+/** Set both blip sizes live. Returns what they settled on, for the console. */
+export function setBlipSizes(quest?: number, dot?: number): { quest: number; dot: number } {
+  if (typeof quest === 'number' && Number.isFinite(quest) && quest > 0) {
+    questIconPx = Math.min(quest, 64);
+  }
+  if (typeof dot === 'number' && Number.isFinite(dot) && dot > 0) {
+    dotPx = Math.min(dot, 64);
+  }
+  return { quest: questIconPx, dot: dotPx };
+}
 
 /**
  * How faint a dimmed glyph is. UNSOURCED, like the two sizes above.
@@ -274,13 +292,12 @@ export class MinimapBlips {
    * How big a blip draws, in canvas pixels of the 256-pixel minimap.
    *
    * **UNSOURCED, and it has to be**: the engine's blip size is not in any file this project has, and
-   * the minimap's own texture is 256 across where the client's is whatever its frame is. 16 for a quest
-   * glyph and 8 for a dot are read off the owner's screenshot of the real client, where the `?` is
-   * roughly a twelfth of the circle. If they are wrong the fix is one number each, and the owner is the
-   * one who can see it.
+   * the minimap's own texture is 256 across where the client's is whatever its frame is. The values
+   * are read off the owner's screenshot of the real client, and 16 was his "маленький слишком" -- so
+   * they are settled by `window.worldMinimapBlipSize(quest, dot)` rather than by argument.
    */
   private static drawSize(kind: BlipKind): number {
-    return kind === 'party' || kind === 'raid' ? DOT_PX : QUEST_ICON_PX;
+    return kind === 'party' || kind === 'raid' ? dotPx : questIconPx;
   }
 
   /**
