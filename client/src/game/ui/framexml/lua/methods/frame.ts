@@ -758,6 +758,26 @@ const QUESTPOIFRAME: MethodTable = {
    * `numPOITooltips == numObjectives`, and a quest with 0 objectives never enters the loop.
    */
   GetNumTooltips: () => [0],
+
+  /**
+   * `UpdateMouseOverTooltip(x, y)` -> `questLogIndex, numObjectives`, or NOTHING.
+   *
+   * **Nothing is the answer that fixes the owner's bug, and it is a real answer rather than a stub.**
+   * He reported a POI tooltip that never disappears, and the reason is in the client: the button's
+   * `OnLeave` does not hide it (`worldmapframe.lua:1862-1864`). What hides it is the ELSE branch of
+   * `WorldMapBlobFrame_OnUpdate` -- `if (numObjectives) then ... else WorldMapTooltip:Hide() end`
+   * (`:1930-1935`). So the recovery lives behind this method returning nothing, which is exactly the
+   * documented shape on this project: recovery in an `OnUpdate`, and the state permanent without it.
+   *
+   * Nothing is also TRUE today. The blob this client draws is the selected quest's shaded area
+   * (`ui/quest-blobs.ts`), and hovering it to read that quest's objectives is a feature nobody has
+   * asked for; the point-in-polygon test it would need is real work on data that is already here.
+   * When it lands, this returns the pair.
+   *
+   * NOT `notImplemented`: this runs from an `OnUpdate`, so a gap notice would redden `UIErrorsFrame`
+   * every frame the map is open -- the rule that round of unit-popup gaps established.
+   */
+  UpdateMouseOverTooltip: () => [],
   // Unreachable behind that 0 -- the client only calls it when the counts match -- and registered
   // for the reason the object model registers unreachable methods: an addon duck-types first.
   GetTooltipIndex: notImplemented('GetTooltipIndex',

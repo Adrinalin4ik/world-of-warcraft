@@ -888,6 +888,24 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    */
   const worldMapButtonId = registry.byName('WorldMapButton');
 
+  /**
+   * `WorldMapBlobFrame` -- and it is the frame that HIDES the quest POI tooltip.
+   *
+   * The owner: the tooltip on a quest indicator "не пропадает если убрать мышь с индикатора". The
+   * button's own `OnLeave` only clears a flag (`worldmapframe.lua:1862-1864`); the hide is in the
+   * else branch of `WorldMapBlobFrame_OnUpdate` (`:1930-1935`), which runs per frame and is reached
+   * only once `allowBlobTooltip` is back to true -- i.e. after the pointer has left.
+   *
+   * So this is the documented trap verbatim: **recovery from a temporary state lives in an
+   * `<OnUpdate>`, and this runtime hand-picks which of those it fires.** Not firing this one left the
+   * tooltip up for ever, and no amount of looking at the tooltip code would have shown why.
+   *
+   * Gated on `visible` for the same reason as `WorldMapButton` above: the blob frame is an authored
+   * child whose own `shown` is true from load, so a `shown` gate would tick it all session with the
+   * map shut. `visible` walks the ancestor chain and costs nothing while it is closed.
+   */
+  const worldMapBlobId = registry.byName('WorldMapBlobFrame');
+
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
 /**
@@ -1016,6 +1034,10 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
       // the map is closed.
       if (worldMapButtonId !== null && registry.widget(worldMapButtonId)?.visible) {
         invokeScriptHandler(ctx, worldMapButtonId, 'OnUpdate', [dt]);
+      }
+      // The blob frame, which is what hides the POI tooltip -- see `worldMapBlobId`.
+      if (worldMapBlobId !== null && registry.widget(worldMapBlobId)?.visible) {
+        invokeScriptHandler(ctx, worldMapBlobId, 'OnUpdate', [dt]);
       }
       // The buff flash clock -- see `buffFrameId`. Zero fingerprint cost; it writes Lua fields only.
       if (buffFrameId !== null) {
