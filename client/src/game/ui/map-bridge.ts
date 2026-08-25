@@ -1460,6 +1460,42 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * Coordinates are the same logical units `frameInfo` and `whatCovers` report rects in, so a rect
    * from one of those can be pointed at directly.
    */
+  /**
+   * `window.runLua("<chunk>")` -- run one chunk of the client's own Lua and report what happened.
+   *
+   * **The instrument this file was missing, and the round that proved it.** The chat window's left
+   * button column is off screen: `frameInfo` measured `ChatFrame1ButtonFrame` at
+   * `{left: 0, top: 0, width: 29, height: 0}` -- its authored size at the origin, with `alpha: 1`,
+   * so nothing about visibility or fading was ever involved and the anchors simply are not there.
+   *
+   * That frame has NO `<Anchors>` in its document (`floatingchatframe.xml:572`): its whole position
+   * comes from `FCF_SetButtonSide` (`fcf.lua:1301-1313`), reached through
+   * `FloatingChatFrame_Update` -> `FCF_UpdateButtonSide` (`:167`). Reading gets no further than
+   * that: the function makes eight calls before the one that matters, any of which can throw and
+   * abandon the rest, and a throw inside an event this bridge fires is not something the owner can
+   * see after the fact. Calling it again by hand, under `pcall`, names the failing line in one go.
+   *
+   * The chunk is STATEMENTS, so a value comes back through an explicit `return` --
+   * `runLua("return ChatFrame1.buttonSide")`. Errors come back as
+   * data instead of reaching the console -- an error in a probe should be the probe's ANSWER.
+   *
+   * A DOOR INTO THE CLIENT'S OWN NAMESPACE is also the closest thing this project has to the
+   * `/script` slash command, so it answers "does this global exist", "what does this function
+   * return here", and "does calling it fix the frame" without a new probe per question.
+   */
+  (window as unknown as Record<string, unknown>).runLua = (chunk: string) => {
+    // `runExpr` compiles the whole string as a chunk and pcalls it for ONE return, so a top-level
+    // `return` is the way a value comes back. The inner `pcall` is what turns a runtime error into
+    // that value instead of a thrown script error.
+    const source = `local ok, err = pcall(function() ${String(chunk)} end) `
+      + 'if not ok then return tostring(err) end return "ok"';
+    const result = vm.runExpr(source, 'runLua');
+    if ('value' in result) {
+      return { ran: true, result: result.value };
+    }
+    return { ran: false, compileError: result.message };
+  };
+
   (window as unknown as Record<string, unknown>).whatIsAt = (x: number, y: number) => (
     itemsAt(Number(x), Number(y))
   );
