@@ -233,6 +233,18 @@ const FRAME: MethodTable = {
   StartMoving: notImplemented('StartMoving',
     'ui/input.ts routes a press to the widget under the cursor and does not keep feeding movement to '
     + 'a frame that has claimed a drag'),
+  /**
+   * `StartSizing` was MISSING rather than declared, and a missing method THROWS.
+   *
+   * The owner's console, on every press of the chat window's resize grabber:
+   *
+   *     ChatFrame1ResizeButton: OnMouseDown: attempt to call a nil value (method 'StartSizing')
+   *
+   * -- and that error aborts the rest of the handler. Declared here beside `StartMoving` for the same
+   * reason and with the same consequence: the gesture does nothing, but it does nothing SILENTLY and
+   * the load report names it, instead of raising a red script error the owner has to read past.
+   */
+  StartSizing: notImplemented('StartSizing', 'as StartMoving -- the same missing drag claim'),
   StopMovingOrSizing: notImplemented('StopMovingOrSizing', 'as StartMoving'),
   SetResizable: notImplemented('SetResizable', 'as SetMovable -- the same missing drag claim'),
   IsResizable: notImplemented('IsResizable', 'as SetResizable', [false]),

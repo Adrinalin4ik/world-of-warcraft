@@ -10,7 +10,7 @@
  * for Digit1 with shift held is `"!"`, so a token built from it would look up a command bound to `"!"`
  * and find nothing. `keyToken` reads `event.code` for exactly that reason.
  */
-import { keyToken, parseBindings } from '../bindings';
+import { DEFAULT_BINDINGS, keyToken, parseBindings } from '../bindings';
 import { LuaVM } from '../lua/vm';
 import { dispatchBinding, installBindingsApi, setBindingTable } from '../lua/api/bindings';
 
@@ -71,4 +71,15 @@ test('a bound key runs its Bindings.xml command with keystate, and GetBindingKey
   expect(dispatchBinding(vm, '9', true)).toBe(false);
 
   vm.dispose();
+});
+
+/**
+ * ENTER HOLDS `OPENCHAT`, which is the only route to the chat edit box.
+ *
+ * The box is `hidden="true"` and only `ChatEdit_ActivateChat` shows it
+ * (`chatframe.lua:3382-3409`); `bindings.xml:93` is what reaches that. With no key bound the owner
+ * could read chat and not type into it.
+ */
+test('ENTER is bound to OPENCHAT', () => {
+  expect(new Map(DEFAULT_BINDINGS.map(([c, k]) => [c, k])).get('OPENCHAT')).toBe('ENTER');
 });

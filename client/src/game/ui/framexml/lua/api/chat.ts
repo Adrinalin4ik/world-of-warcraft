@@ -202,6 +202,16 @@ export function installChatApi(vm: LuaVM): void {
       + 'authored size', []],
     ['GetChatWindowSavedPosition', 'no chat window layout is persisted, so each frame keeps its '
       + 'authored anchor', []],
+    // The SETTERS of the same pair, and they were absent where the getters were declared -- so a
+    // press of the resize grabber raised `attempt to call a nil value (global
+    // 'SetChatWindowSavedPosition')` in the owner's console. `FCF_SavePositionAndDimensions`
+    // (`floatingchatframe.lua:1117-1124`) calls both from the grabber's `OnMouseUp` and from every
+    // window drag. Declaring them keeps the layout unpersisted, which is what the getters already
+    // say, without the script error.
+    ['SetChatWindowSavedPosition', 'no chat window layout is persisted, so a moved window returns to '
+      + 'its authored anchor on reload', []],
+    ['SetChatWindowSavedDimensions', 'no chat window layout is persisted, so a resized window returns '
+      + 'to its authored size on reload', []],
     ['GetChatWindowChannels', 'no chat settings are persisted', []],
     ['AddChatWindowMessages', 'no chat settings are persisted', []],
     ['RemoveChatWindowMessages', 'no chat settings are persisted', []],

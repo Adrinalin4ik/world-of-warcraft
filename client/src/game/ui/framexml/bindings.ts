@@ -182,6 +182,34 @@ export const DEFAULT_BINDINGS: ReadonlyArray<readonly [string, string]> = [
   // The other two rungs of the same three-way, so shift and ctrl do what the real client does rather
   // than nothing. `Bindings.xml:554-563` and `:564-573`; FRIENDNAMEPLATES shows friendly plates only and
   // ALLNAMEPLATES shows both.
+  /**
+   * ENTER AND SLASH -- and their absence was the whole of "я не могу писать".
+   *
+   * The chat edit box is `hidden="true"` in its own document and NOTHING in the client shows it on a
+   * pointer click: `ChatEdit_ActivateChat` is what does the `editBox:Show()` and `SetFocus()`
+   * (`chatframe.lua:3382-3409`), and its route in from a keyboard is one binding --
+   *
+   *     <Binding name="OPENCHAT" header="CHAT">ChatFrame_OpenChat("");</Binding>
+   *     <Binding name="OPENCHATSLASH">ChatFrame_OpenChat("/");</Binding>
+   *
+   * (`bindings.xml:93-98`). With no key holding `OPENCHAT`, the box could not be reached at all: the
+   * frame loaded, the messages arrived and rendered, and the owner had no way to open the field. He
+   * saw exactly that -- other people's lines visible, no input.
+   *
+   * `ChatFrame_OpenChat` needs nothing this runtime lacks; checked against its body
+   * (`chatframe.lua:3045-3057`) and `ChatEdit_ActivateChat`'s: `Show`, `SetFocus`, `SetFrameStrata`,
+   * `Raise`, `SetAlpha`, `GetAttribute`/`SetAttribute` are all real methods here.
+   *
+   * A press with the box already focused does NOT re-open it -- `input.ts#onKeyDown` consults the
+   * binding table only while `this.focus === null`, which is the reference's own rule
+   * (`target/scan.rs:501` refuses a bound key while an EditBox owns the keyboard). So Enter opens the
+   * field and the next Enter reaches the field's `OnEnterPressed`, which is what sends the message.
+   *
+   * The KEYS carry this table's standing note: transcribed from the shipped layout, not read from any
+   * data this project has.
+   */
+  ['OPENCHAT', 'ENTER'],
+  ['OPENCHATSLASH', '/'],
   ['FRIENDNAMEPLATES', 'SHIFT-V'],
   ['ALLNAMEPLATES', 'CTRL-V'],
 ];
