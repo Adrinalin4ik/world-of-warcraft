@@ -985,6 +985,28 @@ const EDITBOX: MethodTable = {
     return [];
   },
 
+  /**
+   * `GetInputLanguage()` -> the IME state's name, and `'ROMAN'` is the sourced answer here.
+   *
+   * Another nil method that threw: `ChatEdit_OnInputLanguageChanged` does
+   * `_G["INPUT_"..self:GetInputLanguage()]` (`chatframe.lua:3883`), reached from
+   * `ChatEdit_ResetChatType` (`:3356`) and therefore from the edit box's `OnShow`, its `OnHide` and
+   * every deactivation. The owner saw all three in one session.
+   *
+   * THE RETURN IS NOT A GUESS: `globalstrings.lua:4236-4239` declares exactly four `INPUT_*` strings
+   * -- `INPUT_CHINESE = "CH"`, `INPUT_JAPANESE = "JP"`, `INPUT_KOREAN = "KO"`, `INPUT_ROMAN = "A"` --
+   * so the method's range is those four names and nothing else. `ROMAN` is the one that means "no IME
+   * is composing", which is every keystroke a browser delivers here: there is no IME state to read,
+   * and a `KeyboardEvent` carries no composition language. Its indicator is the "A" a Western install
+   * shows.
+   *
+   * The button that displays it stays hidden anyway unless `CHAT_SHOW_IME` is set, which only
+   * `ChatEdit_LanguageShow` does (`chatframe.lua:3877`) and nothing in this client calls -- so the
+   * value is consumed and not drawn. That is why this is a plain answer rather than a gap notice: a
+   * `notImplemented` here would redden `UIErrorsFrame` on every open of the chat field.
+   */
+  GetInputLanguage: () => ['ROMAN'],
+
   GetNumLetters: (ctx, self) => [widgetOf(ctx, self).text.length],
 
   /**
