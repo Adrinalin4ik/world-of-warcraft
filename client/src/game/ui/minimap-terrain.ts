@@ -975,18 +975,22 @@ export function attachMinimapTerrain(
    * outlives an NPC leaving range, and it is the right cache to keep -- re-entering range should not
    * need a new query.
    *
-   * ## The group is resolved through the same tokens everything else uses
+   * ## The group comes off the ROSTER, not through the tokens
    *
-   * `party1..4` and `raid1..40`, through `resolveUnitToken`, so membership means here what it means
-   * in the unit frames and on the world map. A member out of range resolves to null and gets no dot,
-   * which is correct: the minimap only shows what is nearby.
+   * It used 44 `resolveUnitToken` lookups. The roster is both shorter and the only place a member's
+   * NAME exists, which the tooltip needs -- see the block at the loop itself. A member with no
+   * entity is skipped, which is correct: the minimap only shows what is nearby.
+   *
+   * `GROUP_TOKENS` survives for `window.worldMinimapBlipSource()`, and deliberately: it reports what
+   * the TOKEN route resolves, independently of what this function draws, so the two can be compared
+   * when one of them is wrong. That comparison is exactly what would have caught the missing
+   * `party<N>` cases in a single call instead of two rounds.
    *
    * ## Cost
    *
-   * Called once per frame, and it is a walk of the status map plus 44 token lookups -- but the LIST
-   * is only ever fed to a composite that the fingerprint gate rejects unless something moved a whole
-   * yard. So the per-frame cost is the walk, and the drawing is as rare as the terrain repaint.
-   * `RAID_TOKENS` is built once for that reason; building it here would allocate 40 strings a frame.
+   * Called once per frame: a walk of the status map plus a walk of the roster, both small. The LIST
+   * is only ever fed to a composite the fingerprint gate rejects unless something moved a whole yard,
+   * so the drawing is as rare as the terrain repaint.
    */
   /** What the last frame put in the tooltip, so an unchanged hover costs one string compare. */
   let tipShowing = '';
@@ -1064,30 +1068,64 @@ export function attachMinimapTerrain(
         const kind = blipForStatus(status);
         const unit = kind === null ? null : world.entities.get(guid) ?? null;
         if (kind !== null && unit) {
+          /**
+           * **ASK FOR THE NAME. Nothing else ever does for a quest giver.**
+           *
+           * The owner hovered a blip repeatedly and got no tooltip, and reported no
+           * `SMSG_CREATURE_QUERY_RESPONSE` in the log at all -- which was the tell: not a lost
+           * reply, an unsent REQUEST. `Unit#name` is filled by `applyCreatureInfo` from that
+           * response, and the only senders were the target-selection path and (since this round)
+           * a kill objective. An NPC merely standing there with a `?` over its head is asked by
+           * nobody, so its name stays empty for ever and a nameless blip gets no tooltip.
+           *
+           * Same shape as the kill-objective fix, and with a better argument: here the real guid
+           * is in hand, so the packet carries it rather than eight zero bytes.
+           * `queryCreature` dedupes on its own `asked` set, so this is one packet per creature
+           * per session even though it runs from a per-frame builder.
+           */
+          if (unit.name === '' && unit.fields.entry) {
+            world.game?.objectHandler?.combatHandler?.queryCreature(unit.fields.entry, guid);
+          }
           out.push({
             worldX: unit.position.x,
             worldY: unit.position.y,
             kind,
-            // `Unit#name` is written by `applyCreatureInfo` from `SMSG_CREATURE_QUERY_RESPONSE`, so
-            // it is empty until that lands and the blip then simply has no tooltip. The quest log
-            // asks for the same names, so in practice one query serves both.
             name: unit.name,
           });
         }
       });
     }
-    for (const token of GROUP_TOKENS) {
-      const unit = resolveUnitToken(token, world);
-      if (unit) {
-        out.push({
-          worldX: unit.position.x,
-          worldY: unit.position.y,
-          kind: token.startsWith('raid') ? 'raid' : 'party',
-          name: unit.name,
-          // The class the dot is coloured by -- see `CLASS_COLOURS` in `ui/minimap-blips.ts`.
-          classId: unit.fields.classId,
-        });
+    /**
+     * THE GROUP, straight off the roster rather than through the tokens.
+     *
+     * `GroupMember` carries the NAME (`network/game/object/group.ts:56-58`), and a player's name
+     * comes from `SMSG_NAME_QUERY_RESPONSE` -- a different query this client does not send. So
+     * reading `Unit#name` for a party member would have left every dot nameless even after the
+     * creature fix above, which only serves NPCs.
+     *
+     * The roster is also the shorter path: it gives the guid and the name together, where the token
+     * route resolved a guid to a `Unit` and then had nowhere to get the name from. `resolveUnitToken`
+     * stays as it is -- the world map and any addon still need it -- but this caller does not.
+     *
+     * Our OWN guid is skipped: the player already has an arrow, and drawing a dot under it would
+     * read as a second person standing on top of him.
+     */
+    const roster = world.game?.objectHandler?.groupHandler?.members ?? [];
+    // `GROUP_TYPE_*`: bit 0 is raid (`network/game/object/group.ts:86-87`). Read as a mask rather
+    // than as an equality, which is what that comment says it is.
+    const isRaid = ((world.game?.objectHandler?.groupHandler?.groupType ?? 0) & 0x01) !== 0;
+    for (const member of roster) {
+      const unit = world.entities.get(member.guid) ?? null;
+      if (unit === null || unit === world.player) {
+        continue;
       }
+      out.push({
+        worldX: unit.position.x,
+        worldY: unit.position.y,
+        kind: isRaid ? 'raid' : 'party',
+        classId: unit.fields.classId,
+        name: member.name,
+      });
     }
     return out;
   };
