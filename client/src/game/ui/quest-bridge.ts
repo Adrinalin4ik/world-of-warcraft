@@ -2343,6 +2343,51 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     ];
   };
 
+  /**
+   * `window.worldWatchFrame()` -- why "Show Quest Objectives" turns on but not off.
+   *
+   * The asymmetry is the whole clue: the ON branch of
+   * `WorldMapQuestShowObjectives_Toggle` sets a flag and shows a button, while the OFF branch also
+   * calls `WatchFrame_Update()` (`worldmapframe.lua:1424-1433`). If that raises, the flag is already
+   * cleared but everything after it is skipped -- and a raise inside a click handler goes to the
+   * script-error path, not the browser console.
+   *
+   * So this CALLS it and returns the error, the way `window.worldTracking()` did for the tracking
+   * icon -- where the answer turned out to be a nil method four calls upstream of everything I was
+   * measuring.
+   *
+   * Ruled out statically first, so the report says something new: every method
+   * `WatchFrame_Update` calls exists in the object model (13 of them, checked), `max` is in the 5.1
+   * shim (`lua/compat.ts:117`), `WatchFrame.xml` is entry 91 of `FrameXML.toc`, and all four frames
+   * it indexes are authored there. What is left is a runtime failure, which is what this returns.
+   */
+  (window as unknown as Record<string, unknown>).worldWatchFrame = () => {
+    // Asked in LUA, not of the registry: the client indexes these as globals, and a frame that
+    // exists in the registry but was never published as a global is exactly the failure this is
+    // looking for -- that distinction has cost this project a round before.
+    const frames = vm.runExpr(
+      'local out = {} for _, n in ipairs({"WatchFrame", "WatchFrameLines", "WatchFrameHeader",'
+      + ' "WatchFrameTitle", "WatchFrameCollapseExpandButton"}) do'
+      + ' out[#out + 1] = n .. "=" .. type(_G[n]) end return table.concat(out, " ")',
+      'watchframe-frames.lua',
+    );
+    const fn = vm.getGlobal('WatchFrame_Update');
+    if (!vm.isRef(fn)) {
+      return { frames, error: 'WatchFrame_Update is not a global in this VM' };
+    }
+    const error = vm.call(fn, []);
+    return {
+      frames,
+      // The handler list the loop walks. 0 is not a failure -- the loop simply does nothing.
+      handlers: vm.runExpr(
+        'if type(WATCHFRAME_OBJECTIVEHANDLERS) ~= "table" then return -1 end'
+        + ' return #WATCHFRAME_OBJECTIVEHANDLERS',
+        'watchframe-handlers.lua',
+      ),
+      error: error === null ? null : error.message,
+    };
+  };
+
   (window as unknown as Record<string, unknown>).questShapes = () => ({
     detailsShape: quest.detailsShape,
     offerShape: quest.offerShape,
