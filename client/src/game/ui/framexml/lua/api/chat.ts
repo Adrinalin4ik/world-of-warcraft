@@ -225,6 +225,28 @@ export function installChatApi(vm: LuaVM): void {
     ['SetChatWindowLocked', 'no chat settings are persisted', []],
     ['SetChatWindowDocked', 'no chat settings are persisted', []],
     ['SetChatWindowUninteractable', 'no chat settings are persisted', []],
+    /**
+     * `GetAutoCompleteResults` -- and it did not EXIST, which is why a whisper never became one.
+     *
+     * The owner: clicking a name filled the field with `/w Gdsh ` and the mode stayed SAY. The
+     * conversion is `ChatEdit_ExtractTellTarget`'s job (`chatframe.lua:4116-4145`) -- it is what calls
+     * `SetAttribute("chatType", "WHISPER")` and `SetAttribute("tellTarget", target)` -- and its third
+     * statement is `if ( GetAutoCompleteResults(...) ) then return false end` (`:4125`). A nil global
+     * THROWS there, so the whisper arm of `processChatType` died and `/p` -- which needs no target and
+     * never reaches this -- worked. That is exactly the split he measured.
+     *
+     * NOTHING is also the honest answer, not merely a convenient one: autocompletion needs a NAME INDEX
+     * (friends, guild, recent whispers, players in range) that this client does not keep, so there are
+     * genuinely no candidates. And nothing is what the caller needs -- `ChatEdit_ExtractTellTarget`
+     * treats a hit as "the player is still typing a name" and refuses to extract, so any non-empty
+     * answer would keep the whisper unconverted.
+     *
+     * **AND IT MUST BE NOTHING RATHER THAN AN EMPTY TABLE.** `{}` is TRUTHY in Lua, so a stub returning
+     * one would take the `return false` branch on every keystroke and reproduce the exact bug it was
+     * meant to fix -- the trap this project has now hit four times with `0`.
+     */
+    ['GetAutoCompleteResults', 'no name index is kept (friends, guild, recent whispers), so there are '
+      + 'no completion candidates -- and NOTHING is what ChatEdit_ExtractTellTarget needs to hear', []],
     // The channel system: `CMSG_JOIN_CHANNEL` and its family are not sent, and no channel list is read.
     ['GetChannelList', 'no chat channel is joined: CMSG_JOIN_CHANNEL is not sent', []],
     ['GetNumDisplayChannels', 'no chat channel is joined', [0]],

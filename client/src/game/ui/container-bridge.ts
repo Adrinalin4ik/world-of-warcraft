@@ -380,6 +380,40 @@ interface SlotItem {
   template: ItemTemplate | null;
 }
 
+/**
+ * An item ENTRY out of whatever the client handed us: a number, an item string, or a full link.
+ *
+ * **MEASURED, and it is why every item tooltip on a chat link was empty.** The owner ran
+ *
+ *     ItemRefTooltip:SetHyperlink('item:6948:0:0:0:0:0:0:0:0:0:0') -> NumLines() = 0
+ *     GetItemInfo(6948) -> "Hearthstone"
+ *
+ * so the template store was warm and the FILL was what failed. Three places here parsed a link with
+ * `/\|Hitem:(\d+)/` -- requiring the `|H` prefix -- and `SetItemRef` passes the PAYLOAD ONLY:
+ * `strsub` gives it `item:6948:0:...` with no `|H` and no brackets (`itemref.lua:176-183`). The regex
+ * missed, the fallback did `Number("item:6948:...")` = NaN, and the source answered null. A cold entry
+ * looks identical to this, which is why the retry added for cold entries could not have helped.
+ *
+ * THE THREE FORMS ARE THE REAL API'S. `GetItemInfo` accepts an item id, an itemString and an
+ * itemLink, and the client uses all three: a number from `GetContainerItemID`, a payload from
+ * `SetItemRef`, and a full link from `GetContainerItemLink`. One parser, so the three call sites
+ * cannot drift again -- they already had three copies of the same wrong regex.
+ *
+ * The item NAME, which the real `GetItemInfo` also accepts, is deliberately not handled: it would
+ * need a name index this client does not keep, and answering 0 is what it already did.
+ */
+function itemEntryOf(value: unknown): number {
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber) && asNumber > 0) {
+    return asNumber;
+  }
+  // `item:` ANYWHERE in the string covers all three: `|Hitem:6948|h[..]|h`, `item:6948:0:...`, and a
+  // colour-wrapped link. The digits are the entry and everything after the next colon is suffix data
+  // this client does not read.
+  const match = /item:(\d+)/.exec(String(value ?? ''));
+  return match === null ? 0 : Number(match[1]);
+}
+
 export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): () => void {
   const items: ItemHandler = world.game.objectHandler.itemHandler;
 
@@ -621,12 +655,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    * a missing one.
    */
   vm.registerFunction('GetItemInfo', (args) => {
-    const raw = args[0];
-    let entry = Number(raw);
-    if (!Number.isFinite(entry) || entry <= 0) {
-      const match = /\|Hitem:(\d+)/.exec(String(raw ?? ''));
-      entry = match === null ? 0 : Number(match[1]);
-    }
+    const entry = itemEntryOf(args[0]);
     if (entry <= 0) {
       return [];
     }
@@ -659,11 +688,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
    * accepted and cannot change the answer -- named here rather than silently ignored.
    */
   vm.registerFunction('GetItemCount', (args) => {
-    let entry = Number(args[0]);
-    if (!Number.isFinite(entry) || entry <= 0) {
-      const match = /\|Hitem:(\d+)/.exec(String(args[0] ?? ''));
-      entry = match === null ? 0 : Number(match[1]);
-    }
+    const entry = itemEntryOf(args[0]);
     if (entry <= 0) {
       return [0];
     }
@@ -1633,9 +1658,10 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       template = item.template;
       guid = item.guid;
     } else if (kind === 'link') {
-      const match = /\|Hitem:(\d+)/.exec(String(a));
-      const entry = match === null ? Number(a) : Number(match[1]);
-      template = Number.isFinite(entry) && entry > 0 ? items.template(entry) : null;
+      // Any of the three forms -- see `itemEntryOf`. This site is the one the empty tooltip came
+      // through: `SetItemRef` hands over the payload with no `|H` prefix.
+      const entry = itemEntryOf(a);
+      template = entry > 0 ? items.template(entry) : null;
     } else {
       return null;
     }
