@@ -234,6 +234,15 @@ export class MinimapBlips {
    * circles a few pixels apart, and the topmost by draw order is not the one the pointer is closest
    * to. Radius is the drawn half-size, so the hit area is exactly what is on screen.
    */
+  /** The hoverable blips as plain data, for the probe. Empty means no blip carries a name yet. */
+  placedList(): unknown[] {
+    return this.placed.map((blip) => ({
+      at: [Math.round(blip.x), Math.round(blip.y)],
+      radius: blip.radius,
+      name: blip.name,
+    }));
+  }
+
   nameAt(x: number, y: number): string | null {
     let best: string | null = null;
     let bestDistance = Infinity;

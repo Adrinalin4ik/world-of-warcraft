@@ -676,7 +676,7 @@ export class WorldUiHost {
           runtime.ctx,
           this.art,
           this.world,
-          () => ({ widget: this.input.pointerWidget, local: this.input.pointerLocal }),
+          () => ({ position: this.input.pointerPosition }),
         );
         // The blob raster needs a `GlueArt` and nothing else; the polygons reach it from
         // `ui/map-bridge.ts`' sink and the draw call from the client's own widget method.

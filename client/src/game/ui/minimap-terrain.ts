@@ -76,12 +76,12 @@ import ADT from '../pipeline/adt';
 import WorkerPool, { PRIORITY } from '../pipeline/worker/pool';
 import minimapTiles from '../pipeline/minimap-tiles';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
-import type { Widget } from './widget';
 import type { GlueArt } from './art';
 import {
   Blip, MinimapBlips, blipForStatus, setBlipSizes,
 } from './minimap-blips';
 import { resolveUnitToken } from '../world/unit-tokens';
+import { rectOf } from './rects';
 import type { MethodContext } from './framexml/lua/object';
 import { zoomOf } from './framexml/lua/methods/minimap';
 import type World from '../world';
@@ -267,6 +267,11 @@ export class MinimapTerrain {
   /** The name of the blip under a point in this canvas's pixels, or null. */
   blipNameAt(x: number, y: number): string | null {
     return this.blips.nameAt(x, y);
+  }
+
+  /** The hoverable blips -- position, radius and name. For the probe. */
+  blipPlaced(): unknown[] {
+    return this.blips.placedList();
   }
 
   /**
@@ -793,10 +798,14 @@ export interface MinimapTerrainHost {
  * Created LAZILY on the first tick that finds the frame: this attaches right after the manifest, but a
  * frame that failed to load would otherwise mean a null captured for the whole session.
  */
-/** What the host needs to know about the pointer to put a tooltip on a blip. */
+/**
+ * What the host needs to know about the pointer to put a tooltip on a blip.
+ *
+ * The ABSOLUTE position only. An earlier version also took the pointer's offset inside the hovered
+ * widget, which was both more coupling and the wrong question -- see `updateTooltip`.
+ */
 export interface PointerReader {
-  widget: Widget | null;
-  local: { x: number; y: number; width: number; height: number } | null;
+  position: { x: number; y: number } | null;
 }
 
 export function attachMinimapTerrain(
@@ -926,9 +935,10 @@ export function attachMinimapTerrain(
       return settled;
     };
 
-    (window as unknown as Record<string, unknown>).worldMinimapBlips = () => (
-      terrain?.blipReport() ?? { note: 'no terrain host yet' }
-    );
+    (window as unknown as Record<string, unknown>).worldMinimapBlips = () => ({
+      ...(terrain?.blipReport() ?? { note: 'no terrain host yet' }),
+      hover: tipProbe,
+    });
 
     (window as unknown as Record<string, unknown>).worldMinimapArrow = (px?: number) => {
       const settled = setArrowDrawPx(typeof px === 'number' ? px : null);
@@ -1029,19 +1039,67 @@ export function attachMinimapTerrain(
 
   let helperInstalled = false;
 
+  /** What the last hover test computed, for `window.worldMinimapBlips()`. */
+  let tipProbe: Record<string, unknown> = { note: 'no hover yet' };
+
   const updateTooltip = (): void => {
     if (pointer === undefined || minimapId === null) {
+      tipProbe = { note: 'no pointer reader or no minimap frame' };
       return;
     }
     const frame = ctx.registry.widget(minimapId);
-    const seen = pointer();
+    /**
+     * **THE POINTER AGAINST THE MINIMAP'S OWN RECT, not "is the minimap the hovered widget".**
+     *
+     * The first version compared the hover target to this frame by identity, and the owner got no
+     * tooltip while the probe showed three blips drawn inside the canvas -- so the drawing was right
+     * and the acceptance test was wrong. `hitTest` answers the TOPMOST mouse-enabled item, which over
+     * the minimap circle is whatever the client has layered above it, not necessarily `Minimap`
+     * itself. Requiring identity there is the same mistake as requiring a click to land on a frame
+     * rather than in its area.
+     *
+     * `rectOf` gives the resolved absolute rect in the SAME units the router hit-tests in
+     * (`ui/rects.ts:118`), so the pointer needs no per-widget bookkeeping and no `effectiveScale`
+     * division -- that division belongs to `GetLeft`, which answers in the script's own space.
+     */
+    const rect = frame === null ? null : rectOf(frame.id);
+    const at = pointer().position;
     let wanted: string | null = null;
-    if (frame !== null && seen.widget === frame && seen.local !== null && terrain !== null
-      && seen.local.width > 0 && seen.local.height > 0) {
-      wanted = terrain.blipNameAt(
-        (seen.local.x / seen.local.width) * TERRAIN_PX,
-        (seen.local.y / seen.local.height) * TERRAIN_PX,
-      );
+    let inside = false;
+    if (frame !== null && frame.visible && rect !== null && at !== null
+      && rect.width > 0 && rect.height > 0) {
+      const localX = at.x - rect.left;
+      const localY = at.y - rect.top;
+      inside = localX >= 0 && localY >= 0 && localX < rect.width && localY < rect.height;
+      if (inside && terrain !== null) {
+        wanted = terrain.blipNameAt(
+          (localX / rect.width) * TERRAIN_PX,
+          (localY / rect.height) * TERRAIN_PX,
+        );
+      }
+      tipProbe = {
+        pointer: at === null ? null : [Math.round(at.x), Math.round(at.y)],
+        minimapRect: [
+          Math.round(rect.left), Math.round(rect.top),
+          Math.round(rect.width), Math.round(rect.height),
+        ],
+        inside,
+        canvas: inside
+          ? [
+            Math.round((localX / rect.width) * TERRAIN_PX),
+            Math.round((localY / rect.height) * TERRAIN_PX),
+          ]
+          : null,
+        name: wanted,
+        placed: terrain?.blipPlaced() ?? null,
+      };
+    } else {
+      tipProbe = {
+        note: 'minimap not visible or no rect yet',
+        visible: frame?.visible ?? null,
+        rect: rect === null ? null : true,
+        pointer: at === null ? null : [Math.round(at.x), Math.round(at.y)],
+      };
     }
     const next = wanted ?? '';
     if (next === tipShowing) {
