@@ -1487,8 +1487,13 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     // `runExpr` compiles the whole string as a chunk and pcalls it for ONE return, so a top-level
     // `return` is the way a value comes back. The inner `pcall` is what turns a runtime error into
     // that value instead of a thrown script error.
-    const source = `local ok, err = pcall(function() ${String(chunk)} end) `
-      + 'if not ok then return tostring(err) end return "ok"';
+    // THE INNER RETURN HAS TO COME BACK OUT, and the first version dropped it: it kept only
+    // `pcall`'s ok flag and answered a literal "ok", so `runLua("return ChatFrame1.buttonSide")`
+    // reported success and threw the answer away. Caught on the first real use -- two of the four
+    // questions in that round came back as "ok" and told the owner nothing.
+    const source = `local ok, res = pcall(function() ${String(chunk)} end) `
+      + 'if not ok then return tostring(res) end '
+      + 'if res == nil then return "ok" end return res';
     const result = vm.runExpr(source, 'runLua');
     if ('value' in result) {
       return { ran: true, result: result.value };

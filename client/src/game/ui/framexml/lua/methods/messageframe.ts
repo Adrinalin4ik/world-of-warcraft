@@ -99,6 +99,9 @@ interface MessageFrameState {
    */
   bottomUp: boolean;
 
+  /** `SetHyperlinksEnabled` -- see that method. True until something says otherwise. */
+  hyperlinksEnabled: boolean;
+
   /** Lines never expire on a scrolling frame -- see `SetFading`. */
   fading: boolean;
   /**
@@ -157,6 +160,7 @@ function stateOf(frameId: number): MessageFrameState {
   if (state === undefined) {
     state = {
       frameId, lines: [], regions: [], holdSeconds: 5, insertTop: true, bottomUp: false,
+      hyperlinksEnabled: true,
       maxLines: MAX_LINES, scrollOffset: 0, fading: true, buffer: [], fontFlags: '',
     };
     stateByFrame.set(frameId, state);
@@ -442,6 +446,20 @@ function scrollTo(ctx: MethodContext, self: number, offset: number): boolean {
  * accepted and recorded but change no drawing: hyperlink hit-testing inside a line and
  * per-message-id recolouring both need the text layer to expose per-run rects, which it does not. Named
  * here rather than left to be discovered.
+ *
+ * **AND THAT SENTENCE WAS FALSE ABOUT `SetHyperlinksEnabled` UNTIL NOW, WHICH COST THE CHAT WINDOW'S
+ * WHOLE BUTTON COLUMN.** The method was never registered, so it was not "accepted and recorded" -- it
+ * was nil, and a nil method throws. `FCF_SetUninteractable` calls it (`fcf.lua:984`) and is itself
+ * called from `FloatingChatFrame_Update` (`:135`), which reaches `FCF_UpdateButtonSide` at `:167` --
+ * thirty-two lines it never got to. `ChatFrame1ButtonFrame` has no `<Anchors>` of its own
+ * (`floatingchatframe.xml:572`), so with `FCF_SetButtonSide` unreached it sat at the origin with
+ * height 0 and put the whole column, plus `ChatFrameMenuButton` and `FriendsMicroButton` anchored to
+ * it, above the top of the screen. MEASURED by `window.runLua("FloatingChatFrame_Update(1, 1)")`,
+ * which named the line in one call after five rounds of reading had not.
+ *
+ * The lesson is the one the project already records and this is another instance of: a comment that
+ * describes a gap as closed when it is not is a defect, and this one read as a survey of known
+ * limitations while being the bug report.
  */
 const SCROLLINGMESSAGEFRAME: MethodTable = {
   ...MESSAGEFRAME,
@@ -516,6 +534,25 @@ const SCROLLINGMESSAGEFRAME: MethodTable = {
     reflow(state, regionsOf(ctx, state));
     return [];
   },
+
+  /**
+   * `SetHyperlinksEnabled(enabled)` / `GetHyperlinksEnabled()` -- whether links in this frame respond.
+   *
+   * RECORDED, and recording it is the whole of what the engine does with the flag: the CLICK side
+   * reads it, and there is no click side here yet (hyperlink hit-testing needs per-run rects from the
+   * text layer). So the value is honest and the behaviour it gates is the gap -- which is why this is
+   * a real method rather than a `notImplemented`: a frame asking "are my links live" gets the answer
+   * it set, and nothing pretends a link was clicked.
+   *
+   * DEFAULT TRUE, because that is the engine's: `FCF_SetUninteractable` passes
+   * `not isUninteractable` and every chat window starts interactable, so a frame nobody has called
+   * this on behaves like one that was told true.
+   */
+  SetHyperlinksEnabled: (ctx, self, args) => {
+    stateOf(self).hyperlinksEnabled = args[0] !== false && args[0] !== null && args[0] !== undefined;
+    return [];
+  },
+  GetHyperlinksEnabled: (ctx, self) => [stateOf(self).hyperlinksEnabled],
 
   /** `GetNumMessages()` -- lines in the BUFFER, not lines on screen. */
   GetNumMessages: (ctx, self) => [stateOf(self).buffer.length],
