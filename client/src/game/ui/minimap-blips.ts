@@ -60,6 +60,7 @@ export type BlipKind =
   | 'questComplete'
   | 'questIncomplete'
   | 'tracked'
+  | 'questArrow'
   | 'party'
   | 'raid';
 
@@ -80,6 +81,23 @@ export interface Blip {
    * one active -- keying them all into the loader would decode fifteen files to draw with one.
    */
   icon?: string;
+  /**
+   * For a `questArrow`: the direction to point, in RADIANS clockwise from up.
+   *
+   * Computed by the builder, which owns the window and therefore knows what "off the edge" means.
+   * The art points up at 0 -- measured, see `ICON_PATHS.questArrow` -- so this is a plain rotation
+   * and not an offset against some other convention.
+   */
+  bearing?: number;
+  /**
+   * Draw me on the RIM, in the direction of `bearing`, ignoring my world position.
+   *
+   * The builder gives an edge arrow the PLAYER's coordinates, because the list is in world space and
+   * the rim is a canvas fact -- converting a rim point back to world coordinates just so `toCanvas`
+   * could convert it forward again would be two conversions to arrive where we started. So the
+   * position says "the centre" and this says "push me out".
+   */
+  edge?: boolean;
   /**
    * The member's `classId`, for a group dot. Undefined for a quest glyph and for an unknown class.
    *
@@ -121,10 +139,21 @@ export function blipForStatus(status: number): BlipKind | null {
       return null;
   }
 }
-const ICON_PATHS: Record<'questAvailable' | 'questComplete' | 'questIncomplete', string> = {
+const ICON_PATHS: Record<
+  'questAvailable' | 'questComplete' | 'questIncomplete' | 'questArrow',
+  string
+> = {
   questAvailable: 'Interface\\GossipFrame\\AvailableQuestIcon.blp',
   questComplete: 'Interface\\GossipFrame\\ActiveQuestIcon.blp',
   questIncomplete: 'Interface\\GossipFrame\\IncompleteQuestIcon.blp',
+  /**
+   * The EDGE ARROW for a tracked quest whose objective is off the minimap.
+   *
+   * `Interface\\Minimap\\Rotating-MinimapGuideArrow` -- named for exactly this job, and DECODED to
+   * check rather than assumed: BLP2 32x32, DXT with alphaDepth 8, and its alpha is a triangle
+   * pointing UP. Up matters, because the rotation below is measured from up.
+   */
+  questArrow: 'Interface\\Minimap\\Rotating-MinimapGuideArrow.blp',
 };
 
 /**
@@ -191,6 +220,9 @@ export function setBlipSizes(quest?: number, dot?: number): { quest: number; dot
 const OUTLINE_RGBA = 'rgba(0, 0, 0, 0.85)';
 
 const OUTLINE_PX = 2;
+
+/** Half the canvas, i.e. the circle's centre and its radius. See `draw` on the rim inset. */
+const TERRAIN_HALF = 128;
 
 export class MinimapBlips {
   private readonly icons = new Map<string, HTMLCanvasElement | null>();
@@ -334,10 +366,7 @@ export class MinimapBlips {
           canvas: [Math.round(at.x), Math.round(at.y)],
         });
       }
-      this.lastDraw.drawn = (this.lastDraw.drawn as number) + 1;
-      if (blip.name !== undefined && blip.name !== '') {
-        this.placed.push({ x: at.x, y: at.y, radius: side / 2, name: blip.name });
-      }
+      this.record(blip, at, side);
       if (blip.kind === 'party' || blip.kind === 'raid') {
         /**
          * A FILLED DOT IN THE CLASS COLOUR, drawn rather than sampled.
@@ -353,6 +382,7 @@ export class MinimapBlips {
         ctx.lineWidth = OUTLINE_PX;
         ctx.strokeStyle = OUTLINE_RGBA;
         ctx.stroke();
+        this.record(blip, at, side);
         continue;
       }
       /**
@@ -370,15 +400,52 @@ export class MinimapBlips {
       if (!icon) {
         continue;
       }
-      // NO ALPHA AND NO RING on a glyph: the grey variant is its own texture now (see `ICON_PATHS`),
-      // and a circle stroked round an icon reads as a second object (see `OUTLINE_RGBA`).
-
+      if (blip.kind === 'questArrow') {
+        /**
+         * PUSHED TO THE RIM along the bearing, inset by its own half-size so the whole arrow stays
+         * inside the circle.
+         *
+         * The mask that follows would otherwise clip it: `destination-in` keeps only what the circle
+         * covers, so an arrow centred ON the rim loses its outer half. The inset is `side / 2` plus a
+         * pixel for the antialiased edge the mask itself leaves.
+         *
+         * Screen up is `-y` and bearing 0 is up, so the offset is `(sin, -cos)` -- not `(cos, sin)`,
+         * which would put bearing 0 to the right and rotate every arrow a quarter turn out of step
+         * with the art.
+         */
+        const reach = TERRAIN_HALF - side / 2 - 1;
+        const bearing = blip.bearing ?? 0;
+        const rim = blip.edge === true
+          ? {
+            x: TERRAIN_HALF + Math.sin(bearing) * reach,
+            y: TERRAIN_HALF - Math.cos(bearing) * reach,
+          }
+          : at;
+        /**
+         * ROTATED ABOUT ITS OWN CENTRE, saved and restored around the draw.
+         *
+         * `rotate` is CUMULATIVE on a 2D context, so leaving one in place would turn every blip after
+         * this one and then the circular mask -- clipping the terrain at an angle. That is why this is
+         * a save/restore and not an inverse rotate afterwards.
+         *
+         * The art points UP at bearing 0, measured by decoding it -- see `ICON_PATHS.questArrow`.
+         */
+        ctx.save();
+        ctx.translate(rim.x, rim.y);
+        ctx.rotate(blip.bearing ?? 0);
+        ctx.drawImage(icon, -side / 2, -side / 2, side, side);
+        ctx.restore();
+        this.record(blip, rim, side);
+        continue;
+      }
       // **NO RING ON A GLYPH.** The owner asked for a border and then saw what it does to a `?`:
       // "теперь вокруг квеста появился круг, убери его". A circle around a shape that is already an
       // icon reads as a second object, not as an edge -- which is why the real client puts the border
       // INSIDE the texture instead of stroking around it. The ring stays on the group dot, where a
-      // flat colour on light terrain genuinely needs an edge.
+      // flat colour on light terrain genuinely needs an edge. No alpha either: the grey variant is
+      // its own texture now (see `ICON_PATHS`).
       ctx.drawImage(icon, at.x - side / 2, at.y - side / 2, side, side);
+      this.record(blip, at, side);
     }
   }
 
@@ -391,7 +458,12 @@ export class MinimapBlips {
    * they are settled by `window.worldMinimapBlipSize(quest, dot)` rather than by argument.
    */
   private static drawSize(kind: BlipKind): number {
-    return kind === 'party' || kind === 'raid' ? dotPx : questIconPx;
+    if (kind === 'party' || kind === 'raid') {
+      return dotPx;
+    }
+    // The edge arrow is smaller than a glyph: it is a direction, not a thing, and the real client
+    // draws it noticeably slighter than a POI icon. UNSOURCED like the other two.
+    return kind === 'questArrow' ? Math.round(questIconPx * 0.7) : questIconPx;
   }
 
   /**
@@ -406,6 +478,19 @@ export class MinimapBlips {
    * Separate from `load` because a TRACKED blip's art is chosen at runtime -- the player picks one of
    * fifteen -- and the three quest glyphs are fixed. One map, two ways in.
    */
+  /**
+   * Register a drawn blip for the hover test. Nameless blips are not hoverable.
+   *
+   * One method rather than the same three lines in each draw branch: the arrow branch was added
+   * after the others and an inline copy is how one of them ends up not recording.
+   */
+  private record(blip: Blip, at: { x: number; y: number }, side: number): void {
+    this.lastDraw.drawn = (this.lastDraw.drawn as number) + 1;
+    if (blip.name !== undefined && blip.name !== '') {
+      this.placed.push({ x: at.x, y: at.y, radius: side / 2, name: blip.name });
+    }
+  }
+
   private ensureIcon(path: string): HTMLCanvasElement | null | undefined {
     if (!this.icons.has(path)) {
       this.decode(path);

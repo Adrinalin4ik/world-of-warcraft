@@ -96,6 +96,7 @@ import type {
 import { QUEST_FLAGS } from '../../network/game/object/quest';
 import { NPC_FLAG } from '../world/cursor-mode';
 import { itemLink, itemTooltipLines } from './item-tooltip';
+import { setWatchedQuestSource } from './quest-watch';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { questXpData } from '../pipeline/dbc/quest-xp-data';
 import {
@@ -261,6 +262,14 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
 
   /** Watched quest ids. See the header on why this has no server side. */
   const watched = new Set<number>();
+  /**
+   * PUBLISHED, so the minimap can draw an edge arrow for a tracked quest.
+   *
+   * A sink rather than a shared object: the set is this bridge's and stays so -- what leaves is a
+   * reader, and it answers ids because an index renumbers whenever the log changes. See
+   * `ui/quest-watch.ts` on why the minimap cannot reach in here directly.
+   */
+  setWatchedQuestSource(() => Array.from(watched));
 
   /** The quest the abandon popup is about, latched by `SetAbandonQuest`. */
   let abandoning: { slot: number; questId: number } | null = null;
@@ -2343,6 +2352,8 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
 
   return () => {
     disposed = true;
+    // The reader closes over this bridge; a stale one outliving it is the double-mount hazard.
+    setWatchedQuestSource(null);
     world.off('creature:info', onCreatureInfo);
     quest.off('questDetail', onDetail);
     quest.off('questProgress', onProgress);

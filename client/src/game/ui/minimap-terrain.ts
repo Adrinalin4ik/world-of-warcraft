@@ -81,6 +81,7 @@ import {
   Blip, MinimapBlips, blipForStatus, setBlipSizes,
 } from './minimap-blips';
 import { activeTracking, trackingTextureFile } from './minimap-tracking';
+import { watchedQuestIds } from './quest-watch';
 import { resolveUnitToken } from '../world/unit-tokens';
 import { rectOf } from './rects';
 import type { MethodContext } from './framexml/lua/object';
@@ -246,6 +247,17 @@ export class MinimapTerrain {
   }
 
   /** Yards across, for a zoom level. */
+  /**
+   * The window in yards for a zoom level, for a caller outside this class.
+   *
+   * The blip builder needs it to decide whether a tracked objective is off the map, and the window
+   * (including the live override) belongs here -- a second copy of that choice is a second thing to
+   * keep in step with the composite.
+   */
+  windowYardsAt(zoom: number): number {
+    return this.windowFor(zoom);
+  }
+
   private windowFor(zoom: number): number {
     if (this.override !== null) {
       return this.override;
@@ -1150,7 +1162,8 @@ export function attachMinimapTerrain(
     }
   };
 
-  const blipsNow = (): Blip[] => {
+  /** `radiusYards` is HALF the window: the terrain owns the window, this list only reads it. */
+  const blipsNow = (radiusYards: number): Blip[] => {
     const out: Blip[] = [];
     const quests = world.game?.objectHandler?.questHandler ?? null;
     if (quests !== null) {
@@ -1245,6 +1258,73 @@ export function attachMinimapTerrain(
       });
     }
 
+    /**
+     * THE TRACKED-QUEST EDGE ARROWS -- a direction to a watched objective that is off the minimap.
+     *
+     * The owner asked for "стрелочки указываемые на отслеживаемые квесты". FrameXML has nothing for
+     * it, like the rest of the blips, so it is engine work; what it needs is the watch set (from
+     * `ui/quest-watch.ts`, published by the quest bridge) and the POI coordinates, which
+     * `SMSG_QUEST_POI_QUERY_RESPONSE` already gives us.
+     *
+     * ## Only when it is OFF the minimap
+     *
+     * An objective inside the window needs no arrow -- the real client draws the POI itself there,
+     * and an arrow on top of a visible target is noise. So the test is the distance in yards against
+     * the window's own radius, which this file owns.
+     *
+     * ## The bearing
+     *
+     * The minimap's vertical axis is the world's X and its horizontal is the world's Y, both
+     * increasing toward the top-left -- the same convention `tileSpan` and the blip mapping use. So
+     * screen-right is `-dy` and screen-up is `-dx`, and the bearing measured clockwise from UP (which
+     * is what the art points at, decoded) is `atan2(-dy, dx)`.
+     *
+     * **It does NOT follow the player's facing.** The minimap here is north-up: the terrain is
+     * composited axis-aligned and only the player ARROW rotates. An arrow rotated by facing as well
+     * would be right for a rotating minimap and wrong for this one -- the same two-conventions trap
+     * that has produced every orientation defect on this project.
+     *
+     * ## Cost
+     *
+     * One walk of the watch set, which is at most 25 and usually under 5, and a `Math.atan2` for each
+     * arrow actually drawn. It feeds the same gate as everything else, so a stationary player with a
+     * tracked quest costs the walk and nothing more.
+     */
+    const watched = watchedQuestIds();
+    const self = world.player;
+    if (watched.length > 0 && self && radiusYards > 0) {
+      const pois = world.game?.objectHandler?.questHandler?.pois ?? null;
+      for (const questId of watched) {
+        const first = pois?.get(questId)?.find((poi) => poi.points.length > 0) ?? null;
+        if (first === null) {
+          continue;
+        }
+        // The mean of the polygon, the same point `QuestPOIGetIconInfo` answers with.
+        const mid = first.points.reduce(
+          (into, point) => ({ x: into.x + point.x, y: into.y + point.y }),
+          { x: 0, y: 0 },
+        );
+        const targetX = mid.x / first.points.length;
+        const targetY = mid.y / first.points.length;
+        const dx = targetX - self.position.x;
+        const dy = targetY - self.position.y;
+        if (Math.sqrt(dx * dx + dy * dy) <= radiusYards) {
+          // Inside the window: the POI is on the map already, so an arrow would be noise.
+          continue;
+        }
+        out.push({
+          // ON THE PLAYER, and the arrow is nudged to the rim by the builder below rather than here:
+          // `toCanvas` is the terrain's and this list is in WORLD coordinates, so a rim position
+          // would have to be converted back and forth. `edge` says "clamp me".
+          worldX: self.position.x,
+          worldY: self.position.y,
+          kind: 'questArrow',
+          bearing: Math.atan2(-dy, dx),
+          edge: true,
+        });
+      }
+    }
+
     return out;
   };
 
@@ -1304,7 +1384,8 @@ export function attachMinimapTerrain(
       // BOTH evaluated, not short-circuited: a `||` between the calls would skip the arrow on any
       // frame the terrain happened to repaint.
       const painted = terrain === null ? false : terrain.update(
-        map.internalName, player.position.x, player.position.y, zoomOf(frame), blipsNow(),
+        map.internalName, player.position.x, player.position.y, zoomOf(frame),
+        blipsNow((terrain?.windowYardsAt(zoomOf(frame)) ?? 0) / 2),
       );
       const turned = arrow === null ? false : arrow.update(player.facing ?? 0);
       // `onMap`, not `world`: this closure already has a `world` -- the World itself.
