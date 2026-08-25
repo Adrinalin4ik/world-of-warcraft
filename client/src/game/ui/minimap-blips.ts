@@ -120,6 +120,46 @@ export class MinimapBlips {
   private loading = false;
 
   /**
+   * Set when an icon lands, cleared by `takeArtArrived`. **Without it the first blips never draw.**
+   *
+   * `draw` is what kicks the load off, so the composite that first wanted a blip has no icon yet and
+   * draws nothing. The composite GATE then rejects every later frame, because the fingerprint has
+   * not changed -- the blip is in the same place. So the icons arrive and nothing ever paints them.
+   *
+   * Third instance of this exact shape on this project (`boothBaked`, the quest blob's art), and
+   * the same rule catches it: a canvas whose CONTENTS change must announce it, because the
+   * draw-list fingerprint cannot see inside a texture.
+   */
+  private artArrived = false;
+
+  /** Whether an icon landed since the last call, and CLEARS the flag. Polled by the terrain gate. */
+  takeArtArrived(): boolean {
+    const was = this.artArrived;
+    this.artArrived = false;
+    return was;
+  }
+
+  /**
+   * What the last `draw` was asked to paint, for `window.worldMinimapBlips()`.
+   *
+   * The owner reports no dots. Every piece of state here could be right with the LAST HOP missing --
+   * an empty list, an icon that never decoded, or a mapping that puts every blip off-canvas -- and
+   * those three look identical on screen. This separates them in one console call.
+   */
+  private lastDraw: Record<string, unknown> = { drawn: 0, asked: 0 };
+
+  report(): Record<string, unknown> {
+    return {
+      ...this.lastDraw,
+      icons: Object.fromEntries(
+        Object.entries(ICON_PATHS).map(([name, path]) => [
+          name, this.icons.has(path) ? (this.icons.get(path) ? 'loaded' : 'MISSING') : 'pending',
+        ]),
+      ),
+    };
+  }
+
+  /**
    * A cheap fingerprint of a blip set, for the composite gate in `minimap-terrain.ts`.
    *
    * Quantised to whole yards, so a party member walking on the spot cannot force a repaint, and summed
@@ -156,6 +196,7 @@ export class MinimapBlips {
     blips: Blip[],
     toCanvas: (worldX: number, worldY: number) => { x: number; y: number },
   ): void {
+    this.lastDraw = { asked: blips.length, drawn: 0, samples: [] as unknown[] };
     if (blips.length === 0) {
       return;
     }
@@ -163,6 +204,15 @@ export class MinimapBlips {
     for (const blip of blips) {
       const at = toCanvas(blip.worldX, blip.worldY);
       const side = MinimapBlips.drawSize(blip.kind);
+      const samples = this.lastDraw.samples as unknown[];
+      if (samples.length < 6) {
+        samples.push({
+          kind: blip.kind,
+          world: [Math.round(blip.worldX), Math.round(blip.worldY)],
+          canvas: [Math.round(at.x), Math.round(at.y)],
+        });
+      }
+      this.lastDraw.drawn = (this.lastDraw.drawn as number) + 1;
       if (blip.kind === 'party' || blip.kind === 'raid') {
         const atlas = this.icons.get(ICON_PATHS.dots);
         if (!atlas) {
@@ -235,6 +285,8 @@ export class MinimapBlips {
             new ImageData(new Uint8ClampedArray(level.data), level.width, level.height), 0, 0,
           );
           this.icons.set(path, canvas);
+          // See `artArrived`: the gate cannot see that this changed what a composite would paint.
+          this.artArrived = true;
         } catch (error) {
           this.icons.set(path, null);
           console.warn(`minimap blips: ${path} failed to load`, error);

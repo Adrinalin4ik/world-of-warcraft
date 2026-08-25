@@ -256,6 +256,11 @@ export class MinimapTerrain {
     this.invalidate();
   }
 
+  /** What the last blip pass was asked to draw. For `window.worldMinimapBlips()`. */
+  blipReport(): Record<string, unknown> {
+    return this.blips.report();
+  }
+
   /** Force the next `update` to composite, whatever the player has done since. */
   private invalidate(): void {
     this.lastMap = '';
@@ -287,7 +292,10 @@ export class MinimapTerrain {
     // numbers above are the player's own state. Quantised to whole yards inside `fingerprint`, so
     // a member standing still is free.
     const blipPrint = this.blips.fingerprint(blips);
-    if (mapName === this.lastMap && windowYards === this.lastYards
+    // `takeArtArrived` CLEARS, so it must be read every frame and BEFORE the short-circuit -- an
+    // icon landing has to force one composite even though nothing moved. See its own doc.
+    const artArrived = this.blips.takeArtArrived();
+    if (!artArrived && mapName === this.lastMap && windowYards === this.lastYards
       && px === this.lastPx && py === this.lastPy && blipPrint === this.lastBlips) {
       return false;
     }
@@ -837,6 +845,53 @@ export function attachMinimapTerrain(
      * Invalidates the arrow's own gate as well as setting the value: that gate is the HEADING alone, so
      * a size change while standing still would otherwise not be drawn until the player turned.
      */
+    /**
+     * `window.worldMinimapBlips()` -- what the blip pass was asked to draw and whether its art is in.
+     *
+     * Three different failures look identical on screen: an empty list, an icon that never decoded,
+     * and a mapping that puts every blip outside the 256-pixel canvas. This tells them apart.
+     */
+    /**
+     * `window.worldMinimapBlipSource()` -- why the list is the length it is.
+     *
+     * The other probe says how many blips were ASKED for; this says where they did not come from.
+     * `statuses` is what the server has told us about givers, `matched` how many of those have an
+     * entity in the world to take a position from, and `group` how many party or raid tokens
+     * resolve. A `statuses` of 0 is a packet problem; `statuses` high with `matched` 0 is a guid
+     * format mismatch between the status map and `World#entities`, which is a real hazard here --
+     * a 64-bit guid does not survive a JS number and `network/guid-hex.ts` is the one formatter.
+     */
+    (window as unknown as Record<string, unknown>).worldMinimapBlipSource = () => {
+      const quests = world.game?.objectHandler?.questHandler ?? null;
+      let matched = 0;
+      let iconworthy = 0;
+      const sample: unknown[] = [];
+      quests?.status.forEach((status: number, guid: string) => {
+        const kind = blipForStatus(status);
+        if (kind !== null) {
+          iconworthy += 1;
+        }
+        if (world.entities.get(guid)) {
+          matched += 1;
+        }
+        if (sample.length < 5) {
+          sample.push({ guid, status, kind, inWorld: !!world.entities.get(guid) });
+        }
+      });
+      return {
+        statuses: quests?.status.size ?? null,
+        iconworthy,
+        matched,
+        entities: world.entities.size,
+        group: GROUP_TOKENS.filter((t) => resolveUnitToken(t, world) !== null).length,
+        sample,
+      };
+    };
+
+    (window as unknown as Record<string, unknown>).worldMinimapBlips = () => (
+      terrain?.blipReport() ?? { note: 'no terrain host yet' }
+    );
+
     (window as unknown as Record<string, unknown>).worldMinimapArrow = (px?: number) => {
       const settled = setArrowDrawPx(typeof px === 'number' ? px : null);
       arrow?.invalidate();
@@ -995,6 +1050,8 @@ export function attachMinimapTerrain(
       worldArrow = null;
       delete (window as unknown as Record<string, unknown>).worldMinimapZoom;
       delete (window as unknown as Record<string, unknown>).worldMinimapArrow;
+      delete (window as unknown as Record<string, unknown>).worldMinimapBlips;
+      delete (window as unknown as Record<string, unknown>).worldMinimapBlipSource;
       delete (window as unknown as Record<string, unknown>).worldMapArrow;
     },
   };
