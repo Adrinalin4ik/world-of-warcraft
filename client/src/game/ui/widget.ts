@@ -614,6 +614,15 @@ export class Widget {
    * macro and script boxes. The ENGINE owns the ring and the up/down walk over it, which is why both
    * live here and in `input.ts` rather than in Lua.
    */
+  /**
+   * `EnableMouseWheel` -- recorded, and NOT what routes the wheel. See that method.
+   *
+   * `hit.ts#wheelTargetAt` picks its target by finding the first ancestor with an `onMouseWheel`
+   * handler and ignores this flag, which is deliberate and documented there. The field exists because
+   * the client sets it and `IsMouseWheelEnabled` reads it back.
+   */
+  mouseWheelEnabled = false;
+
   history: string[] = [];
   /**
    * How many lines the ring holds -- `historyLines="32"` on `ChatFrameEditBoxTemplate`

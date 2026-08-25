@@ -503,6 +503,28 @@ function installCVars(vm: LuaVM): void {
      * would look set and behave unset.
      */
     ['showBattlefieldMinimap', '0'],
+    /**
+     * `chatMouseScroll`, and it is the GATE on the chat window's wheel -- not a preference.
+     *
+     * The owner: "скролить мышью нельзя." The chat frame has no `<OnMouseWheel>` in any of its
+     * documents; grepped `chatframe.xml` and `floatingchatframe.xml` and there is none. The handler is
+     * installed at RUNTIME and only if this CVar is true:
+     *
+     *     if ( GetCVarBool("chatMouseScroll") ) then
+     *         self:SetScript("OnMouseWheel", FloatingChatFrame_OnMouseScroll);
+     *         self:EnableMouseWheel(true);
+     *     end
+     *
+     * (`chatframe.lua:2547-2551`, in the `VARIABLES_LOADED` arm -- an event this runtime does fire,
+     * `world-runtime.ts:564`). With the CVar unset `GetCVarBool` answers false and the wheel is never
+     * wired to anything, which is exactly the symptom.
+     *
+     * TRANSCRIBED, not derived, and it carries the same standing note as `questPOI` above: nothing in
+     * the client's Lua pins the default, the shape of the gate does not imply it the way the nameplate
+     * bindings imply theirs, and `Config.wtf` is not served. `1` is what a real install does -- the
+     * wheel scrolls chat out of the box -- and it is what the owner is asking for.
+     */
+    ['chatMouseScroll', '1'],
     ['nameplateShowEnemies', '0'],
     ['nameplateShowFriends', '0'],
     /**
