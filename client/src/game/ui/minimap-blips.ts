@@ -161,7 +161,7 @@ const UNKNOWN_CLASS: readonly [number, number, number] = [0.63, 0.63, 0.63];
  */
 let questIconPx = 22;
 
-let dotPx = 10;
+let dotPx = 13;
 
 /** Set both blip sizes live. Returns what they settled on, for the console. */
 export function setBlipSizes(quest?: number, dot?: number): { quest: number; dot: number } {
@@ -189,11 +189,13 @@ export function setBlipSizes(quest?: number, dot?: number): { quest: number; dot
 const DIM_ALPHA = 1;
 
 /**
- * The dark ring drawn behind a blip -- "нужно чтобы была обводка вокруг как в оригинале".
+ * The dark ring around a GROUP DOT, and only around a dot.
  *
- * UNSOURCED as art: the real client's minimap icons carry their own border in the texture, and these
- * two glyphs (`AvailableQuestIcon`, `ActiveQuestIcon`) are the gossip-frame versions, which do not.
- * So the ring is drawn, and it is an approximation of a border rather than the border.
+ * Asked for as "обводка вокруг как в оригинале", then withdrawn for the quest glyphs once he saw it:
+ * a circle around an icon reads as a second object rather than as its edge. The real client carries
+ * the border inside the icon texture, which is why stroking around one cannot look like it.
+ *
+ * On a dot it is doing real work: a flat class colour on light terrain has no edge of its own.
  */
 const OUTLINE_RGBA = 'rgba(0, 0, 0, 0.85)';
 
@@ -325,12 +327,11 @@ export class MinimapBlips {
       if (blip.dim === true) {
         ctx.globalAlpha = alpha * DIM_ALPHA;
       }
-      // The RING FIRST, so the glyph sits on top of its own border rather than under it.
-      ctx.beginPath();
-      ctx.arc(at.x, at.y, side / 2, 0, Math.PI * 2);
-      ctx.lineWidth = OUTLINE_PX;
-      ctx.strokeStyle = OUTLINE_RGBA;
-      ctx.stroke();
+      // **NO RING ON A GLYPH.** The owner asked for a border and then saw what it does to a `?`:
+      // "теперь вокруг квеста появился круг, убери его". A circle around a shape that is already an
+      // icon reads as a second object, not as an edge -- which is why the real client puts the border
+      // INSIDE the texture instead of stroking around it. The ring stays on the group dot, where a
+      // flat colour on light terrain genuinely needs an edge.
       ctx.drawImage(icon, at.x - side / 2, at.y - side / 2, side, side);
       ctx.globalAlpha = alpha;
     }
