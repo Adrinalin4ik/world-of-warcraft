@@ -2424,6 +2424,45 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
         'watchframe-handlers.lua',
       ),
       error: error === null ? null : error.message,
+      /**
+       * THE TOGGLE ITSELF, which is what the owner actually clicks.
+       *
+       * `WatchFrame_Update` came back clean, so the OFF branch does not die there -- but this probe
+       * was calling that function directly and the branch does two more things: it clears
+       * `WatchFrame.showObjectives` and hides `QuestLogFrameShowMapButton`
+       * (`worldmapframe.lua:1428-1431`). Calling the toggle covers all three, and reports the flag on
+       * both sides so a silent no-op is distinguishable from a raise.
+       *
+       * It also flips the real checkbox, so calling this twice returns the state to where it was.
+       */
+      toggle: (() => {
+        const before = vm.runExpr(
+          'return tostring(WatchFrame and WatchFrame.showObjectives)',
+          'watchframe-flag.lua',
+        );
+        const toggleFn = vm.getGlobal('WorldMapQuestShowObjectives_Toggle');
+        if (!vm.isRef(toggleFn)) {
+          return { before, error: 'WorldMapQuestShowObjectives_Toggle is not a global' };
+        }
+        const raised = vm.call(toggleFn, []);
+        return {
+          before,
+          after: vm.runExpr(
+            'return tostring(WatchFrame and WatchFrame.showObjectives)',
+            'watchframe-flag.lua',
+          ),
+          checked: vm.runExpr(
+            'return tostring(WorldMapQuestShowObjectives and'
+            + ' WorldMapQuestShowObjectives:GetChecked())',
+            'watchframe-checked.lua',
+          ),
+          showMapButton: vm.runExpr(
+            'return type(QuestLogFrameShowMapButton)',
+            'watchframe-showmap.lua',
+          ),
+          error: raised === null ? null : raised.message,
+        };
+      })(),
     };
   };
 
