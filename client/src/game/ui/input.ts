@@ -18,7 +18,9 @@
  * changed nothing about how `/` behaves.
  */
 import { keyToken } from './framexml/bindings';
-import { focusChain, hitTest, wheelTargetAt, nextFocus, paneAt, sliderThumbAt } from './hit';
+import {
+  focusChain, hitTest, hyperlinkAt, nextFocus, paneAt, sliderThumbAt, wheelTargetAt,
+} from './hit';
 import { layoutRectOf } from './rects';
 import { viewportUnits } from './layout';
 import { DrawItem, MouseButtonName, Widget } from './widget';
@@ -500,6 +502,26 @@ export class GlueInput {
     // before the compatibility `mousedown` is dispatched (UI Events / Pointer Events: the mouse event
     // follows the pointer event for the same press), so `controls`' body-level `mousedown` handler always
     // reads a value this line has already written.
+    /**
+     * A CLICK ON A HYPERLINK, tested here and CLAIMED here.
+     *
+     * Dispatched on the press rather than the release because the click it stands for has no other
+     * owner: the chat frame authors `enableMouse="false"`, so `hitTest` above answers null over it and
+     * the press would otherwise reach the camera and orbit the world. Claiming it through `pressHit`
+     * is what `controls`' `mousedown` reads to stay out -- the same one-press-one-owner rule the pane
+     * and the wheel already follow.
+     *
+     * `pressHit` is set to the HANDLING FRAME, so `capturedPress` names the chat frame in an
+     * instrument rather than an anonymous line region.
+     */
+    const linked = hit === null ? hyperlinkAt(this.items, x, y) : null;
+    if (linked !== null) {
+      this.pressHit = linked.frame;
+      this.setFocus(null);
+      linked.frame.onHyperlinkClick?.(linked.link, linked.text, this.pressButton);
+      return;
+    }
+
     this.pressHit = hit;
 
     this.setFocus(hit && hit.focusable ? hit : null);

@@ -724,6 +724,17 @@ export class Widget {
    * negates it.
    */
   onMouseWheel: ((delta: number) => void) | null = null;
+
+  /**
+   * `<OnHyperlinkClick>` -- a click on a `|H...|h[body]|h` run inside a line of text.
+   *
+   * `hit.ts#hyperlinkAt` finds the run and climbs to the nearest ancestor carrying this, which is
+   * how a click on a FONT STRING reaches the CHAT FRAME that binds the handler
+   * (`chatframe.xml:15-17`, `ChatFrame_OnHyperlinkShow(self, link, text, button)` -> `SetItemRef`).
+   *
+   * The three arguments are the ones the document names, in the order `scripts.ts:149` binds them.
+   */
+  onHyperlinkClick: ((link: string, text: string, button: string) => void) | null = null;
   /**
    * FrameXML's `OnTabPressed`, and it REPLACES the router's own Tab ring for the widget that has one:
    * `accountlogin.xml`'s account box moves focus to the password box itself, and a document that

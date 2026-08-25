@@ -429,6 +429,13 @@ const CALLBACK_BINDERS = new Map<string, CallbackBinder>([
   // `delta` is a NAMED parameter (`:134` binds it) -- `chatframe.xml` and `uipaneltemplates.xml` both
   // read it by name, so it must be passed positionally here.
   ['OnMouseWheel', (w, f) => { w.onMouseWheel = f === null ? null : (delta) => f([delta]); }],
+  // `link`, `text` and `button` are NAMED parameters (`:149` binds them) and `chatframe.xml:15-17`
+  // reads all three by name, so they must be passed positionally in that order.
+  ['OnHyperlinkClick', (w, f) => {
+    w.onHyperlinkClick = f === null
+      ? null
+      : (link, text, button) => f([link, text, button]);
+  }],
   ['OnEnter', (w, f) => { w.onEnter = f === null ? null : () => f(); }],
   ['OnLeave', (w, f) => { w.onLeave = f === null ? null : () => f(); }],
   ['OnEnterPressed', (w, f) => { w.onSubmit = f === null ? null : () => f(); }],

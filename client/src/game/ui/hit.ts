@@ -6,6 +6,8 @@
  * answers "what is under this point" and "what gets focus next".
  */
 import { DrawItem, Widget } from './widget';
+import { parseMarkup } from './markup';
+import { caretOffset } from './text';
 
 /**
  * The rect this item is CLICKABLE in: the drawn rect shrunk by `SetHitRectInsets`.
@@ -79,6 +81,70 @@ export function sliderThumbAt(items: DrawItem[], x: number, y: number): DrawItem
     const item = items[index];
     if (item.widget.thumbOf !== null && contains(item, x, y)) {
       return item;
+    }
+  }
+  return null;
+}
+
+/**
+ * THE HYPERLINK under this point: the frame that handles it, plus the link and the body text.
+ *
+ * A `|H<type>:<args>|h[body]|h` run was already DRAWN before this -- `markup.ts` renders the
+ * bracketed body under whatever colour encloses it, which is what made an item link visible in chat
+ * at all. What was thrown away was WHERE it landed, so no click could be attributed to it. `markup.ts`
+ * now returns the runs indexed into the plain text and this maps a click back through them.
+ *
+ * `mouseEnabled` IS NOT CONSULTED, for the reason `wheelTargetAt` gives and more sharply: the chat
+ * frame authors `enableMouse="false"` (`floatingchatframe.xml:505`), and a link in it is clickable in
+ * the real client anyway -- which is exactly why `SetHyperlinksEnabled` exists as its own flag rather
+ * than riding on the mouse one. Gating on `mouseEnabled` would make this impossible, not optional.
+ *
+ * THE X MAPPING GOES THROUGH `caretOffset`, not through a width of its own, and that is the whole
+ * reason this is not a private measurement: `caretOffset` measures a prefix through the same context
+ * and font the raster draws with, and its own contract states that a font string's rect left edge IS
+ * the first glyph's cell (`text.ts:363-372`, and the `NO INSET` note at `:385`). A second measurement
+ * here would be a second answer that can differ, invisibly -- the failure mode this project has paid
+ * for more than once.
+ *
+ * The run must be hit HORIZONTALLY as well as vertically: `contains` only says the click is somewhere
+ * in the line, and a line usually holds one link among plain words. Clicking the words does nothing,
+ * which is the engine's behaviour.
+ *
+ * Cost: one `parseMarkup` and two `measureText` calls per LINK on the clicked line, once per physical
+ * click and never per frame. The `indexOf` guard exits before any of that for a line with no link,
+ * which is nearly every line.
+ */
+export function hyperlinkAt(items: DrawItem[], x: number, y: number): {
+  frame: Widget;
+  link: string;
+  text: string;
+} | null {
+  for (let index = items.length - 1; index >= 0; --index) {
+    const item = items[index];
+    const widget = item.widget;
+    if (widget.kind !== 'fontstring' || widget.font === null) {
+      continue;
+    }
+    if (widget.text.indexOf('|H') === -1 || !contains(item, x, y)) {
+      continue;
+    }
+    const { plain, links } = parseMarkup(widget.text);
+    const offset = x - item.rect.left;
+    for (const span of links) {
+      const from = caretOffset(plain, widget.font, 1, span.start);
+      const to = caretOffset(plain, widget.font, 1, span.end);
+      if (offset < from || offset >= to) {
+        continue;
+      }
+      // The handler lives on an ANCESTOR -- the chat frame, not the line. Climbing from the run is
+      // the same rule `wheelTargetAt` follows and for the same reason.
+      for (let node: Widget | null = widget; node !== null; node = node.parent) {
+        if (node.onHyperlinkClick !== null) {
+          return { frame: node, link: span.link, text: span.text };
+        }
+      }
+      // A run nobody handles is not a reason to keep looking under it.
+      return null;
     }
   }
   return null;
