@@ -8,6 +8,7 @@ import { zoneHighlights, setHighlightScale, lastHoverTest } from '../pipeline/zo
 import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
 import { BlobPolygon, setBlobSource } from './quest-blobs';
 import { resolveUnitToken } from '../world/unit-tokens';
+import { rectOf } from './rects';
 import {
   activeTracking, setTracking, trackingTexturePath, visibleTracking,
 } from './minimap-tracking';
@@ -1378,6 +1379,40 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * to read one placement, and they visibly disagree, so this reports the arithmetic rather than
    * leaving it to be inferred from a screenshot.
    */
+  /**
+   * `window.worldTracking()` -- why the tracking button shows no icon.
+   *
+   * The blips draw, so the choice is stored and the art exists. What is left is the button, and
+   * three things could each be it alone: the event never reaching the frame, `MiniMapTracking_Update`
+   * skipping because `GetTexture()` already equals the new value, or the region having a sprite that
+   * does not draw. They look identical on screen.
+   *
+   * So this reports both sides of the comparison the client makes
+   * (`MiniMapTrackingIcon:GetTexture() ~= texture`, `minimap.lua:410`) plus whether the region is
+   * registered, shown and sized -- and it FIRES the event itself, so the same call also says whether
+   * dispatching it changes anything.
+   */
+  (window as unknown as Record<string, unknown>).worldTracking = () => {
+    const iconId = ctx.registry.byName('MiniMapTrackingIcon');
+    const icon = iconId === null ? null : ctx.registry.widget(iconId);
+    const before = icon?.sprite ?? null;
+    fireEvent(vm, 'MINIMAP_UPDATE_TRACKING');
+    const row = activeTracking();
+    return {
+      // What `GetTrackingTexture` answers -- the string the client is handed.
+      wanted: row === null ? null : trackingTexturePath(row),
+      activeRow: row?.stringKey ?? null,
+      // The region itself. `null` for `regionFound` means the name resolves to nothing, which would
+      // make the client's own `MiniMapTrackingIcon:GetTexture()` raise rather than skip.
+      regionFound: iconId !== null,
+      spriteBefore: before,
+      spriteAfterEvent: icon?.sprite ?? null,
+      shown: icon?.shown ?? null,
+      visible: icon?.visible ?? null,
+      rect: icon === null ? null : rectOf(icon.id),
+    };
+  };
+
   (window as unknown as Record<string, unknown>).worldMapHover = () => lastHoverTest();
 
   /**
@@ -1518,6 +1553,7 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       delete (window as unknown as Record<string, unknown>).worldMap;
       delete (window as unknown as Record<string, unknown>).worldMapHighlight;
       delete (window as unknown as Record<string, unknown>).worldMapHover;
+      delete (window as unknown as Record<string, unknown>).worldTracking;
       // The blob source outlives this bridge otherwise, and it closes over a disposed world.
       setBlobSource(null);
     },
