@@ -323,6 +323,43 @@ function hasOwn(object: object, key: string): boolean {
  * An unknown name is `false`, not an error -- which is what the engine answers for a type that does not
  * exist, and is the safe direction for a caller using this to feature-detect.
  */
+/**
+ * A class's name in the ENGINE'S capitalisation, for `GetObjectType`.
+ *
+ * Spelled out rather than derived from the enum by title-casing, because the engine's names are not
+ * a mechanical transform of these keys: `SCROLLINGMESSAGEFRAME` is `"ScrollingMessageFrame"`,
+ * `EDITBOX` is `"EditBox"`, `SIMPLEHTML` is `"SimpleHTML"`. A transform would get the first right and
+ * the other two wrong, and the case is load-bearing -- `FCF_SetWindowColor` compares against
+ * `"Button"` and `"Texture"` as written (`floatingchatframe.lua:836,840`).
+ *
+ * `LAYEREDREGION` and `REGION` are the two abstract bases; the engine never reports them for a real
+ * object, but a widget of that class would be a bug elsewhere and answering its own name is more
+ * useful than answering nothing.
+ */
+export const OBJECT_TYPE_NAME: Record<WidgetClass, string> = {
+  REGION: 'Region',
+  LAYEREDREGION: 'LayeredRegion',
+  TEXTURE: 'Texture',
+  FONTSTRING: 'FontString',
+  FRAME: 'Frame',
+  BUTTON: 'Button',
+  CHECKBUTTON: 'CheckButton',
+  EDITBOX: 'EditBox',
+  MODEL: 'Model',
+  SCROLLFRAME: 'ScrollFrame',
+  SLIDER: 'Slider',
+  STATUSBAR: 'StatusBar',
+  SIMPLEHTML: 'SimpleHTML',
+  COOLDOWN: 'Cooldown',
+  GAMETOOLTIP: 'GameTooltip',
+  WORLDFRAME: 'WorldFrame',
+  MESSAGEFRAME: 'MessageFrame',
+  MINIMAP: 'Minimap',
+  QUESTPOIFRAME: 'QuestPOIFrame',
+  SCROLLINGMESSAGEFRAME: 'ScrollingMessageFrame',
+  BACKDROP: 'Backdrop',
+};
+
 export function isObjectType(cls: WidgetClass, name: string): boolean {
   const wanted = parseClass(name);
   return wanted !== null && chainOf(cls).includes(wanted);
