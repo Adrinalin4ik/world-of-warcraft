@@ -263,6 +263,14 @@ const OUTLINE_PX = 2;
 const EDGE_REACH = 0.78;
 
 /**
+ * The rim arrow for an out-of-range group member. UNSOURCED, like every blip size here.
+ *
+ * Smaller than a quest marker on purpose: that one carries a digit and has to be READ, this one only
+ * has to be seen and pointed.
+ */
+const PARTY_ARROW_PX = 16;
+
+/**
  * The atlas cell for a tracked quest, READ OUT OF `questpoi.lua`.
  *
  * In progress: `normalTexture:SetTexCoord(0.500, 0.625, 0.875, 1.0)` (`:67`) -- the numbered circle.
@@ -439,7 +447,42 @@ function digitCell(index: number): { x: number; y: number } {
       // NO `record` HERE. Each branch records with the position it actually DREW at -- an edge
       // arrow draws on the rim, not at `at` -- and a call here as well double-counted `drawn` and
       // put two hover boxes on every blip.
-      if (blip.kind === 'party' || blip.kind === 'raid' || blip.kind === 'partyEdge') {
+      if (blip.kind === 'partyEdge') {
+        /**
+         * AN ARROW, and this is the OWNER'S CHOICE rather than a claim about the real client.
+         *
+         * The history is worth keeping straight. I drew a triangle first from reasoning; he compared
+         * it with the original and said it did not match, and his screenshot showed only round rim
+         * markers -- so it became a clamped dot. Looking at that, he asked for the arrow back:
+         * "давай оставим стрелку как было". He has seen both, so this is preference, and the comment
+         * says so instead of pretending the round version was wrong.
+         *
+         * DRAWN rather than a texture because it needs the CLASS colour, and the one arrow texture
+         * here is a fixed dark gold. Same `CLASS_COLOURS` and same `onRim` as the dot, so colour and
+         * position cannot drift between the two.
+         */
+        const [ar, ag, ab] = CLASS_COLOURS[blip.classId ?? -1] ?? UNKNOWN_CLASS;
+        const tip = MinimapBlips.onRim(canvasPx, blip.bearing ?? 0);
+        ctx.save();
+        ctx.translate(tip.x, tip.y);
+        ctx.rotate(blip.bearing ?? 0);
+        ctx.beginPath();
+        // Apex forward: at `-side / 2` before the rotation, which after it is the member's
+        // direction. `rotate` is cumulative, hence the save/restore rather than an inverse turn.
+        ctx.moveTo(0, -side / 2);
+        ctx.lineTo(side / 2, side / 2);
+        ctx.lineTo(-side / 2, side / 2);
+        ctx.closePath();
+        ctx.fillStyle = `rgb(${Math.round(ar * 255)}, ${Math.round(ag * 255)}, ${Math.round(ab * 255)})`;
+        ctx.fill();
+        ctx.lineWidth = OUTLINE_PX;
+        ctx.strokeStyle = OUTLINE_RGBA;
+        ctx.stroke();
+        ctx.restore();
+        this.record(blip, tip, side);
+        continue;
+      }
+      if (blip.kind === 'party' || blip.kind === 'raid') {
         /**
          * A FILLED DOT IN THE CLASS COLOUR, drawn rather than sampled.
          *
@@ -447,30 +490,20 @@ function digitCell(index: number): { x: number; y: number } {
          * so a dot on light terrain stays visible -- which is the whole job of a border here.
          */
         /**
-         * OUT OF RANGE is the SAME DOT, clamped to the rim -- not a different shape.
+         * A FILLED DOT IN THE CLASS COLOUR, drawn rather than sampled -- see `CLASS_COLOURS` for why
+         * the atlas is gone. The ring keeps it visible on light terrain, which is its whole job.
          *
-         * I drew a triangle first, reasoning that a round icon cannot carry a direction. The owner
-         * compared it with the real client: "она не похожа на оригинальную", and his screenshot of
-         * the original has no triangles on the minimap at all -- every rim marker there is round.
-         * So the engine clamps the blip and lets its POSITION carry the direction, exactly as it does
-         * for a tracked quest.
-         *
-         * That is the second time this round that reasoning about what a shape MUST convey produced
-         * the wrong shape, against a screenshot that showed the answer. The position is the
-         * direction; nothing needs to point.
+         * IN RANGE only: a member beyond the window is `partyEdge` and is handled above.
          */
         const [r, g, b] = CLASS_COLOURS[blip.classId ?? -1] ?? UNKNOWN_CLASS;
-        const spot = blip.kind === 'partyEdge'
-          ? MinimapBlips.onRim(canvasPx, blip.bearing ?? 0)
-          : at;
         ctx.beginPath();
-        ctx.arc(spot.x, spot.y, side / 2, 0, Math.PI * 2);
+        ctx.arc(at.x, at.y, side / 2, 0, Math.PI * 2);
         ctx.fillStyle = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
         ctx.fill();
         ctx.lineWidth = OUTLINE_PX;
         ctx.strokeStyle = OUTLINE_RGBA;
         ctx.stroke();
-        this.record(blip, spot, side);
+        this.record(blip, at, side);
         continue;
       }
       /**
@@ -535,7 +568,10 @@ function digitCell(index: number): { x: number; y: number } {
    */
   private static drawSize(kind: BlipKind): number {
 
-    if (kind === 'party' || kind === 'raid' || kind === 'partyEdge') {
+    if (kind === 'partyEdge') {
+      return PARTY_ARROW_PX;
+    }
+    if (kind === 'party' || kind === 'raid') {
       return dotPx;
     }
     return kind === 'questArrow' ? arrowPx : questIconPx;
