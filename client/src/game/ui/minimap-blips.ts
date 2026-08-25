@@ -208,12 +208,17 @@ let dotPx = 13;
  * маленькая, в этом проблема". Deriving it from the glyph was the mistake: a marker at the rim is
  * read at a glance and from further away than an icon under the cursor, so it wants to be LARGER,
  * not smaller. 32 against the glyph's 22 -- 26 was still too small when he looked at it, which is
- * why this is a knob and not a derivation.
+ * why this is a knob and not a derivation: 15 was invisible, 26 too small, 32 close, 38 his.
+ *
+ * The DIGIT inside it is the quest's place in the watch list, which is what the client draws too --
+ * `QuestPOI_DisplayButton` is passed the tracker row index and `questpoi.lua:72-73` turns it into an
+ * atlas cell. A quest whose objective is inside the window gets no rim marker, so the digits on
+ * screen can start at 2: the numbering follows the LIST, not the markers, and that is correct.
  *
  * UNSOURCED like the other two, and settled the same way -- `window.worldMinimapBlipSize` takes it
  * as a third argument.
  */
-let arrowPx = 32;
+let arrowPx = 38;
 
 /** Set both blip sizes live. Returns what they settled on, for the console. */
 export function setBlipSizes(
