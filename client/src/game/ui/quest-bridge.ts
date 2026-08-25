@@ -2433,7 +2433,11 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
        * (`worldmapframe.lua:1428-1431`). Calling the toggle covers all three, and reports the flag on
        * both sides so a silent no-op is distinguishable from a raise.
        *
-       * It also flips the real checkbox, so calling this twice returns the state to where it was.
+       * **It does NOT flip the checkbox, and the first version of this comment said it did.** The
+       * toggle READS `WorldMapQuestShowObjectives:GetChecked()` and branches on it; the box is turned
+       * over by the input router on a real click. So calling this re-applies the CURRENT state, and
+       * `before == after` is the expected reading rather than a stuck flag -- which is exactly how
+       * the owner's `before: "true", after: "true"` should be read.
        */
       toggle: (() => {
         const before = vm.runExpr(
