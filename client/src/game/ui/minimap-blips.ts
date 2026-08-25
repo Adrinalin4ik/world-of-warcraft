@@ -42,6 +42,7 @@
 import WorkerPool, { PRIORITY } from '../pipeline/worker/pool';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
 import { DIALOG_STATUS } from '../../network/game/object/quest';
+import { TERRAIN_PX } from './minimap-terrain';
 
 /** What a decoded BLP comes back as. Only the fields this file reads. */
 interface BlpSpec {
@@ -221,8 +222,15 @@ const OUTLINE_RGBA = 'rgba(0, 0, 0, 0.85)';
 
 const OUTLINE_PX = 2;
 
-/** Half the canvas, i.e. the circle's centre and its radius. See `draw` on the rim inset. */
-const TERRAIN_HALF = 128;
+/**
+ * Half the canvas: the circle's centre and its radius. See `draw` on the rim inset.
+ *
+ * DERIVED from the size the terrain composites at rather than written again. 128 was right, and a
+ * second copy of a number two modules apart is the shape of every "two things to keep in step"
+ * defect on this project -- including one in this very file, where a texture NAME and a FILE shared
+ * one helper.
+ */
+const TERRAIN_HALF = TERRAIN_PX / 2;
 
 export class MinimapBlips {
   private readonly icons = new Map<string, HTMLCanvasElement | null>();
@@ -366,7 +374,9 @@ export class MinimapBlips {
           canvas: [Math.round(at.x), Math.round(at.y)],
         });
       }
-      this.record(blip, at, side);
+      // NO `record` HERE. Each branch records with the position it actually DREW at -- an edge
+      // arrow draws on the rim, not at `at` -- and a call here as well double-counted `drawn` and
+      // put two hover boxes on every blip.
       if (blip.kind === 'party' || blip.kind === 'raid') {
         /**
          * A FILLED DOT IN THE CLASS COLOUR, drawn rather than sampled.

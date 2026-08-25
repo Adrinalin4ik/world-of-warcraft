@@ -97,7 +97,7 @@ export const MINIMAP_TERRAIN_KEY = '__minimapTerrain';
  * 256 rather than the frame's authored 140 so the terrain is not upscaled on a UI that is itself
  * scaled, and a power of two because a `CanvasTexture` of one avoids a resize on upload.
  */
-const TERRAIN_PX = 256;
+export const TERRAIN_PX = 256;
 
 /**
  * Yards across the minimap at each zoom level, index 0 being fully zoomed OUT.
