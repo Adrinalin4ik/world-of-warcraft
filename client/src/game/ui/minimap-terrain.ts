@@ -97,7 +97,7 @@ export const MINIMAP_TERRAIN_KEY = '__minimapTerrain';
  * 256 rather than the frame's authored 140 so the terrain is not upscaled on a UI that is itself
  * scaled, and a power of two because a `CanvasTexture` of one avoids a resize on upload.
  */
-export const TERRAIN_PX = 256;
+const TERRAIN_PX = 256;
 
 /**
  * Yards across the minimap at each zoom level, index 0 being fully zoomed OUT.
@@ -410,7 +410,7 @@ export class MinimapTerrain {
     this.blips.draw(ctx, blips, (blipX, blipY) => ({
       x: TERRAIN_PX / 2 - (blipY - worldY) / perPixel,
       y: TERRAIN_PX / 2 - (blipX - worldX) / perPixel,
-    }));
+    }), TERRAIN_PX);
 
     /**
      * THE MASK, and this is why the whole file is a canvas.

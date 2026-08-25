@@ -42,7 +42,6 @@
 import WorkerPool, { PRIORITY } from '../pipeline/worker/pool';
 import { BLP_IMAGE_FORMAT } from '../../wow-data-parser/blp/const';
 import { DIALOG_STATUS } from '../../network/game/object/quest';
-import { TERRAIN_PX } from './minimap-terrain';
 
 /** What a decoded BLP comes back as. Only the fields this file reads. */
 interface BlpSpec {
@@ -222,16 +221,6 @@ const OUTLINE_RGBA = 'rgba(0, 0, 0, 0.85)';
 
 const OUTLINE_PX = 2;
 
-/**
- * Half the canvas: the circle's centre and its radius. See `draw` on the rim inset.
- *
- * DERIVED from the size the terrain composites at rather than written again. 128 was right, and a
- * second copy of a number two modules apart is the shape of every "two things to keep in step"
- * defect on this project -- including one in this very file, where a texture NAME and a FILE shared
- * one helper.
- */
-const TERRAIN_HALF = TERRAIN_PX / 2;
-
 export class MinimapBlips {
   private readonly icons = new Map<string, HTMLCanvasElement | null>();
 
@@ -356,6 +345,18 @@ export class MinimapBlips {
     ctx: CanvasRenderingContext2D,
     blips: Blip[],
     toCanvas: (worldX: number, worldY: number) => { x: number; y: number },
+    /**
+     * The canvas side in pixels, PASSED IN rather than known here.
+     *
+     * Importing it from `minimap-terrain.ts` was a circular import -- that module already depends on
+     * this one, so the constant was in its temporal dead zone at load and the whole bundle threw
+     * `Cannot access TERRAIN_PX before initialization`. Deriving a value is right; reaching across a
+     * dependency edge to do it is not.
+     *
+     * And it is the better shape anyway: the blip layer rasterises into a canvas someone else owns,
+     * so its size is an input like `toCanvas` is, not a fact about this file.
+     */
+    canvasPx: number,
   ): void {
     this.lastDraw = { asked: blips.length, drawn: 0, samples: [] as unknown[] };
     this.placed = [];
@@ -423,12 +424,13 @@ export class MinimapBlips {
          * which would put bearing 0 to the right and rotate every arrow a quarter turn out of step
          * with the art.
          */
-        const reach = TERRAIN_HALF - side / 2 - 1;
+        const half = canvasPx / 2;
+        const reach = half - side / 2 - 1;
         const bearing = blip.bearing ?? 0;
         const rim = blip.edge === true
           ? {
-            x: TERRAIN_HALF + Math.sin(bearing) * reach,
-            y: TERRAIN_HALF - Math.cos(bearing) * reach,
+            x: half + Math.sin(bearing) * reach,
+            y: half - Math.cos(bearing) * reach,
           }
           : at;
         /**
