@@ -221,6 +221,9 @@ const OUTLINE_RGBA = 'rgba(0, 0, 0, 0.85)';
 
 const OUTLINE_PX = 2;
 
+/** How far out an edge arrow sits, as a fraction of the radius. UNSOURCED -- see the rim comment. */
+const EDGE_REACH = 0.82;
+
 export class MinimapBlips {
   private readonly icons = new Map<string, HTMLCanvasElement | null>();
 
@@ -367,14 +370,7 @@ export class MinimapBlips {
     for (const blip of blips) {
       const at = toCanvas(blip.worldX, blip.worldY);
       const side = MinimapBlips.drawSize(blip.kind);
-      const samples = this.lastDraw.samples as unknown[];
-      if (samples.length < 6) {
-        samples.push({
-          kind: blip.kind,
-          world: [Math.round(blip.worldX), Math.round(blip.worldY)],
-          canvas: [Math.round(at.x), Math.round(at.y)],
-        });
-      }
+
       // NO `record` HERE. Each branch records with the position it actually DREW at -- an edge
       // arrow draws on the rim, not at `at` -- and a call here as well double-counted `drawn` and
       // put two hover boxes on every blip.
@@ -424,8 +420,21 @@ export class MinimapBlips {
          * which would put bearing 0 to the right and rotate every arrow a quarter turn out of step
          * with the art.
          */
+        /**
+         * INSIDE the border ring, not against the extreme edge of the canvas.
+         *
+         * `half - side / 2 - 1` put the arrow at 93% of the radius, and the client draws its own
+         * round border art OVER the minimap texture -- `MiniMap-TrackingBorder` and the frame's ring
+         * (`minimap.xml`) -- so an arrow that close to the edge sits underneath it and is invisible.
+         * The blips are pixels in a texture the border is layered above; they cannot be "on" the rim
+         * the way a widget anchored to the frame could be.
+         *
+         * `EDGE_REACH` is UNSOURCED like the blip sizes, and settled the same way:
+         * `window.worldMinimapBlipSize` moves the sizes, and this one is a single factor the owner can
+         * see. 0.82 clears the ring on his screenshots while still reading as "at the edge".
+         */
         const half = canvasPx / 2;
-        const reach = half - side / 2 - 1;
+        const reach = half * EDGE_REACH - side / 2;
         const bearing = blip.bearing ?? 0;
         const rim = blip.edge === true
           ? {
@@ -498,6 +507,24 @@ export class MinimapBlips {
    */
   private record(blip: Blip, at: { x: number; y: number }, side: number): void {
     this.lastDraw.drawn = (this.lastDraw.drawn as number) + 1;
+    /**
+     * THE SAMPLE IS TAKEN HERE, where the DRAWN position is known.
+     *
+     * It used to be pushed at the top of the loop from `at`, which for an edge arrow is the player,
+     * not the rim it draws at -- so the probe reported `[128, 128]` for two arrows that were drawn
+     * elsewhere, and cost a round chasing a position the code never used. A probe that reports
+     * something other than what the code does is the documented hazard on this project, and that was
+     * one.
+     */
+    const samples = this.lastDraw.samples as unknown[];
+    if (samples.length < 8) {
+      samples.push({
+        kind: blip.kind,
+        world: [Math.round(blip.worldX), Math.round(blip.worldY)],
+        drawnAt: [Math.round(at.x), Math.round(at.y)],
+        side,
+      });
+    }
     if (blip.name !== undefined && blip.name !== '') {
       this.placed.push({ x: at.x, y: at.y, radius: side / 2, name: blip.name });
     }
