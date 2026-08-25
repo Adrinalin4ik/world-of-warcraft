@@ -33,6 +33,7 @@ import type World from '../world';
 import type { ChatLine, ChatMessageHandler } from '../../network/game/object/chat';
 import { LuaVM } from './framexml/lua/vm';
 import { fireEvent } from './framexml/lua/events';
+import { chatColourEvents } from './chat-colours';
 import { setChatSender } from './framexml/lua/api/chat';
 
 /** `chatTag` -> the string `arg6` carries. 0 is none; the rest are the client's own globals. */
@@ -187,7 +188,17 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
    * before the UI asks, and a bridge that attaches later has to say so explicitly rather than wait for
    * an edge that will never come.
    */
-  fireEvent(vm, 'UPDATE_CHAT_COLOR');
+  /**
+   * ONE `UPDATE_CHAT_COLOR` PER TYPE, because the arm reads `arg1` and this fired with none.
+   *
+   * `ChatTypeInfo` carries no colours in FrameXML at all -- see `chat-colours.ts`, which holds the
+   * table and the citation. The argument-less fire below used to reach
+   * `ChatTypeInfo[strupper(nil)]` and do nothing, so every line rendered with `info.r` nil and came
+   * out white.
+   */
+  for (const [type, r, g, b] of chatColourEvents()) {
+    fireEvent(vm, 'UPDATE_CHAT_COLOR', [type, r / 255, g / 255, b / 255]);
+  }
   fireEvent(vm, 'UPDATE_CHAT_WINDOWS');
 
   chat.on('line', onLine);

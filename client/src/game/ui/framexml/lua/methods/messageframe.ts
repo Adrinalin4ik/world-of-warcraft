@@ -80,6 +80,25 @@ interface MessageFrameState {
    * shared `reflow` below correct for both without a branch.
    */
   scrollOffset: number;
+  /**
+   * THE LINE BLOCK SITS AT THE FRAME'S BOTTOM EDGE and grows upward. `ScrollingMessageFrame` only.
+   *
+   * The owner: "Текст должен идти снизу вверх, а не сверху вниз." With three messages in a
+   * 120-pixel chat frame this was the whole visible difference -- `windowInto` already builds the
+   * window oldest-first and `reflow` already laid it top-down, so the ORDER was right and the BLOCK
+   * was in the wrong half of the frame: three lines pinned under the top border with empty space
+   * below, where the client puts them on the floor with empty space above.
+   *
+   * It only shows while the buffer is shorter than the window; once chat fills the frame the two
+   * layouts agree, which is why this survived the scrollback probe that measured 14 messages.
+   *
+   * A plain `MessageFrame` is NOT bottom-anchored: `UIErrorsFrame` stacks its three lines down from
+   * the top of the screen. So the default is false and `windowInto` sets it -- that function windows
+   * a SCROLLBACK onto the regions, and only a `ScrollingMessageFrame` has one, so reaching it is
+   * itself the proof of which class this is.
+   */
+  bottomUp: boolean;
+
   /** Lines never expire on a scrolling frame -- see `SetFading`. */
   fading: boolean;
   /**
@@ -137,7 +156,7 @@ function stateOf(frameId: number): MessageFrameState {
   let state = stateByFrame.get(frameId);
   if (state === undefined) {
     state = {
-      frameId, lines: [], regions: [], holdSeconds: 5, insertTop: true,
+      frameId, lines: [], regions: [], holdSeconds: 5, insertTop: true, bottomUp: false,
       maxLines: MAX_LINES, scrollOffset: 0, fading: true, buffer: [], fontFlags: '',
     };
     stateByFrame.set(frameId, state);
@@ -209,14 +228,25 @@ function reflow(state: MessageFrameState, regions: Widget[]): void {
   }
   order.forEach((line, index) => {
     line.region.shown = true;
-    line.region.setAnchors({
-      point: 'TOP',
-      relativeTo: frame?.id,
-      relativePoint: 'TOP',
-      x: 0,
-      // `+y` is UP in a FrameXML anchor offset (`ui/layout.ts:33`), so stacking DOWNWARD is negative.
-      y: -index * lineHeight,
-    });
+    // `+y` is UP in a FrameXML anchor offset (`ui/layout.ts:33`). A MessageFrame hangs its lines
+    // DOWN from the top edge, so the offset is negative and grows with the index; a scrolling frame
+    // stands them UP from the bottom edge, so the offset is positive and counts back from the LAST
+    // line -- which `windowInto` puts newest-last. See `bottomUp`.
+    line.region.setAnchors(state.bottomUp
+      ? {
+        point: 'BOTTOM',
+        relativeTo: frame?.id,
+        relativePoint: 'BOTTOM',
+        x: 0,
+        y: (order.length - 1 - index) * lineHeight,
+      }
+      : {
+        point: 'TOP',
+        relativeTo: frame?.id,
+        relativePoint: 'TOP',
+        x: 0,
+        y: -index * lineHeight,
+      });
     line.region.width = frame?.width ?? 512;
     line.region.height = lineHeight;
   });
@@ -348,6 +378,10 @@ registerMethods('MESSAGEFRAME', MESSAGEFRAME);
  * is needed here.
  */
 function windowInto(state: MessageFrameState, regions: Widget[]): void {
+  // A frame with a scrollback is a `ScrollingMessageFrame`, and those lay out from the bottom edge
+  // up. This is the one function only that class reaches, which is why the flag is set here rather
+  // than guessed from the widget. See `MessageFrameState.bottomUp`.
+  state.bottomUp = true;
   if (state.buffer.length === 0) {
     return;
   }
