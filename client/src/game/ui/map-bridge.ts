@@ -1,5 +1,6 @@
 import { mapData, OverlayRow, WorldMapAreaRow } from '../pipeline/dbc/map-data';
-import { fireEvent } from './framexml/lua/events';
+import { eventListeners, fireEvent } from './framexml/lua/events';
+import { getScriptHandler } from './framexml/lua/scripts';
 import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
 import type { MethodContext } from './framexml/lua/object';
@@ -1410,6 +1411,24 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       shown: icon?.shown ?? null,
       visible: icon?.visible ?? null,
       rect: icon === null ? null : rectOf(icon.id),
+      /**
+       * WHO IS LISTENING, because the sprite not moving after a dispatch leaves only two causes.
+       *
+       * The region resolves, is shown and has a rect, and its sprite is null -- so
+       * `MiniMapTrackingIcon:GetTexture()` answers nil, `nil ~= path` is TRUE, and
+       * `MiniMapTracking_Update` was obliged to call `SetTexture`. It did not. So either nothing is
+       * registered for the event, or the frame that is has no `OnEvent` bound.
+       *
+       * `MiniMapTrackingButton` is the one that registers, in an inline `<OnLoad>` body
+       * (`minimap.xml:478-482`) -- and an inline body that failed to compile would leave the frame
+       * loaded, named and silent, which is exactly this shape.
+       */
+      listeners: eventListeners('MINIMAP_UPDATE_TRACKING').map((id) => ({
+        name: ctx.registry.nameOf(id),
+        hasOnEvent: getScriptHandler(vm, id, 'OnEvent') !== null,
+      })),
+      buttonFound: ctx.registry.byName('MiniMapTrackingButton') !== null,
+      updateGlobal: vm.isRef(vm.getGlobal('MiniMapTracking_Update')),
     };
   };
 
