@@ -927,6 +927,21 @@ export function attachMinimapTerrain(
         // THE TRACKING ARM, so "it does not show my category" becomes a number. `matchedFlag` is how
         // many entities in range carry the mask -- 0 with a category selected means there is simply
         // no such NPC nearby, which is a correct empty rather than a defect.
+        /**
+         * THE ARROW ARM. "No arrows" has four causes and they are indistinguishable on screen:
+         * nothing watched, no POI for a watched quest, the objective inside the window, or the draw.
+         */
+        watched: watchedQuestIds(),
+        arrowTrace,
+        watchedPois: watchedQuestIds().map((id) => {
+          const list = world.game?.objectHandler?.questHandler?.pois.get(id);
+          return {
+            id,
+            // `undefined` means never asked; `[]` means the server answered with none.
+            pois: list === undefined ? null : list.length,
+            points: list?.[0]?.points.length ?? null,
+          };
+        }),
         tracking: activeTracking()?.stringKey ?? null,
         trackingFlag: activeTracking()?.flag ?? null,
         matchedFlag: (() => {
@@ -1163,6 +1178,9 @@ export function attachMinimapTerrain(
   };
 
   /** `radiusYards` is HALF the window: the terrain owns the window, this list only reads it. */
+  /** The last frame's arrow decisions: distance against the window radius, per watched quest. */
+  let arrowTrace: unknown[] = [];
+
   const blipsNow = (radiusYards: number): Blip[] => {
     const out: Blip[] = [];
     const quests = world.game?.objectHandler?.questHandler ?? null;
@@ -1290,12 +1308,28 @@ export function attachMinimapTerrain(
      * arrow actually drawn. It feeds the same gate as everything else, so a stationary player with a
      * tracked quest costs the walk and nothing more.
      */
+    // What the arrow arm decided this frame, for `window.worldMinimapBlipSource()`. Cleared here
+    // rather than at the end, so a frame that returns early still leaves the previous answer rather
+    // than an empty one -- an empty trace and "never ran" are different facts.
+    arrowTrace = [];
     const watched = watchedQuestIds();
     const self = world.player;
     if (watched.length > 0 && self && radiusYards > 0) {
-      const pois = world.game?.objectHandler?.questHandler?.pois ?? null;
+      const quests = world.game?.objectHandler?.questHandler ?? null;
+      /**
+       * **ASK FOR THE POIs. Nothing else does unless the world map is opened.**
+       *
+       * `QuestPOIUpdateIcons` is the only other caller of `queryPois`, and the client calls it from
+       * `WorldMapFrame_DisplayQuests` -- so before the map has been opened once, `pois` is empty and
+       * every arrow silently had nothing to point at. Same shape as the creature-name fix above: the
+       * consumer that wants the data is the one that has to ask for it.
+       *
+       * `queryPois` drops ids it already has or has in flight and sends ONE packet for the list, so
+       * this is one query per watched quest per session even from a per-frame builder.
+       */
+      quests?.queryPois(watched);
       for (const questId of watched) {
-        const first = pois?.get(questId)?.find((poi) => poi.points.length > 0) ?? null;
+        const first = quests?.pois.get(questId)?.find((poi) => poi.points.length > 0) ?? null;
         if (first === null) {
           continue;
         }
@@ -1308,7 +1342,9 @@ export function attachMinimapTerrain(
         const targetY = mid.y / first.points.length;
         const dx = targetX - self.position.x;
         const dy = targetY - self.position.y;
-        if (Math.sqrt(dx * dx + dy * dy) <= radiusYards) {
+        const away = Math.sqrt(dx * dx + dy * dy);
+        arrowTrace.push({ questId, away: Math.round(away), radiusYards: Math.round(radiusYards) });
+        if (away <= radiusYards) {
           // Inside the window: the POI is on the map already, so an arrow would be noise.
           continue;
         }
