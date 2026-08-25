@@ -21,6 +21,7 @@ import { Layer, Widget, deriveSize, effectiveFont, touchGeometry } from '../../.
 import { familyForFontFile, fontFileForFamily, measureText } from '../../../text';
 import { FontResolution, isOutlined } from '../../fonts';
 import { layoutRectOf, rectOf, screenHeightUnits } from '../../../rects';
+import { pointerAt } from '../../../pointer';
 import { ensureArt } from '../../../runtime-art';
 
 const warned = new Set<string>();
@@ -313,21 +314,43 @@ const REGION: MethodTable = {
   IsShown: (ctx, self) => [widgetOf(ctx, self).shown],
   IsVisible: (ctx, self) => [widgetOf(ctx, self).visible],
   /**
-   * `IsMouseOver()` -- answered from the INPUT ROUTER's hit, not from a rect test.
+   * `IsMouseOver()` -- the pointer against this frame's RECT, which is what the engine tests.
    *
-   * `Widget#hovered` is what `GlueInput` sets on the single topmost widget the pointer is over
-   * (`ui/input.ts#onPointerMove`), which is what the callers in this manifest mean: every one of them
-   * is inside an `OnMouseUp`/`OnEnter` on the frame itself, deciding whether the release landed on
-   * the button -- `MainMenuBarMicroButtons.xml:CharacterMicroButton`'s `OnMouseUp` is the one that
-   * found this method missing, and its whole body is guarded on it.
+   * **This used to answer `Widget#hovered`, and the comment here already named the gap**: "the
+   * engine tests the cursor against this frame's rect whether or not another frame is on top ...
+   * Closing that gap needs a rect the frame keeps outside the draw list, which it does not have."
+   * It has one now -- `rects.ts#rectOf` resolves any widget's and `pointer.ts#pointerAt` gives the
+   * pointer in the same units. Both landed for other reasons this session, so a stated exclusion
+   * became closable, and a documented exclusion is a bug report someone declined to file.
    *
-   * It is NOT identical to the engine's, and the difference is worth stating: the engine tests the
-   * cursor against this frame's rect whether or not another frame is on top and whether or not this
-   * frame takes the mouse, so a frame UNDER the pointer but beneath another one answers true there
-   * and false here. Closing that gap needs a rect the frame keeps outside the draw list, which it
-   * does not have.
+   * **It was a live defect.** `WorldMapBlobFrame_OnUpdate` opens with `if ( not
+   * WorldMapPOIFrame.allowBlobTooltip or not WorldMapDetailFrame:IsMouseOver() ) then return end`
+   * (`worldmapframe.lua:1920-1922`), and the detail frame is never the TOPMOST hit -- WorldMapButton
+   * and the POI buttons sit above it. So `hovered` was false whenever the pointer was over the map,
+   * that handler returned on its first line, and the quest tooltip it is responsible for hiding
+   * stayed up for ever. The owner reported exactly that, twice.
+   *
+   * `hitRectInsets` is honoured the same way `ui/hit.ts#contains` does it for the router: a frame
+   * that shrinks its own hit area means it for this question too.
+   *
+   * Falls back to `hovered` with no rect or no pointer yet -- before the first pointer move there is
+   * nothing to compare against, and the flag is the only thing that could be true.
    */
-  IsMouseOver: (ctx, self) => [widgetOf(ctx, self).hovered],
+  IsMouseOver: (ctx, self) => {
+    const widget = widgetOf(ctx, self);
+    const rect = rectOf(widget.id);
+    const at = pointerAt();
+    if (rect === null || at === null) {
+      return [widget.hovered];
+    }
+    const insets = widget.hitRectInsets;
+    return [
+      at.x >= rect.left + insets.left
+      && at.x < rect.left + rect.width - insets.right
+      && at.y >= rect.top + insets.top
+      && at.y < rect.top + rect.height - insets.bottom,
+    ];
+  },
   GetName: (ctx, self) => [ctx.registry.nameOf(self)],
   /**
    * `IsObjectType(name)` -- is this widget of that class, or descended from it?
