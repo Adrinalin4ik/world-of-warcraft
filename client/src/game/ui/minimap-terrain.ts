@@ -1362,6 +1362,26 @@ export function attachMinimapTerrain(
       quests?.queryPois(watched);
       const done = completeQuests();
       watched.forEach((questId, at) => {
+        /**
+         * A COMPLETED QUEST GETS NO OBJECTIVE MARKER AT ALL.
+         *
+         * The owner: "Если квест выполнен, не нужно отображать его на миникарте." Right, and the
+         * reason it is right is what the marker MEANS: a POI points at where the objective is done,
+         * and once the quest is complete there is nothing left to do there -- the only place worth
+         * pointing at is the turn-in, which is a different marker entirely and comes from the giver
+         * glyphs above (a yellow `?` over the NPC), not from this arm.
+         *
+         * So it is skipped rather than drawn in a "complete" colour, which is what it used to do.
+         * SKIPPED FIRST, before the POI lookup, so a finished quest costs one set membership and
+         * nothing else -- no polygon walk, no distance, no trace entry.
+         *
+         * COMPLETE comes from the DESCRIPTOR: the quest log slot's word 1 carries
+         * `QUEST_STATE.COMPLETE` (`update-object/quest-log.ts`), so the marker disappears on the next
+         * field update after the last kill with nothing else to ask.
+         */
+        if (done.has(questId)) {
+          return;
+        }
         const first = quests?.pois.get(questId)?.find((poi) => poi.points.length > 0) ?? null;
         if (first === null) {
           return;
@@ -1387,12 +1407,8 @@ export function attachMinimapTerrain(
           worldY: self.position.y,
           kind: 'questArrow',
           bearing: Math.atan2(-dy, dx),
-          /**
-           * COMPLETE comes from the DESCRIPTOR, not from a packet: the quest log slot's word 1
-           * carries `QUEST_STATE.COMPLETE` (`update-object/quest-log.ts`). So a quest that became
-           * turn-in-able changes the icon on the next field update with nothing else to ask.
-           */
-          complete: done.has(questId),
+          // No `complete` here any more: a finished quest returned above, so every marker this arm
+          // pushes is an unfinished one. See the skip.
           // Its place in the watch list, which is the digit the client draws inside the circle.
           index: at,
         });

@@ -90,8 +90,6 @@ export interface Blip {
    * and not an offset against some other convention.
    */
   bearing?: number;
-  /** For a tracked quest: whether it can be handed in. Picks the atlas cell -- see `POI_CELL`. */
-  complete?: boolean;
   /** Its position in the watch list, 0-based. The digit drawn inside the circle. */
   index?: number;
   /**
@@ -275,6 +273,12 @@ const PARTY_ARROW_PX = 16;
  *
  * In progress: `normalTexture:SetTexCoord(0.500, 0.625, 0.875, 1.0)` (`:67`) -- the numbered circle.
  * Ready to hand in: `(0.500, 0.625, 0.375, 0.5)` (`:134`) -- the same circle in its complete state.
+ *
+ * **`complete` IS KEPT AND NOTHING DRAWS IT, deliberately.** A finished quest gets no objective
+ * marker on the minimap at all (the owner's call, and the right one: the marker points at where the
+ * objective is done, and there is nothing left to do there). The cell stays because it is a READ of
+ * the client's own file, and deleting it would lose the citation and make the pair look unresearched
+ * the next time someone wants the world map to draw both states.
  *
  * So the STATE and the CELL are both the client's, and nothing here is a hue I chose.
  */
@@ -540,7 +544,9 @@ function digitCell(index: number): { x: number; y: number } {
           y: half - Math.cos(bearing) * reach,
         };
         // The CIRCLE, then the DIGIT inside it. Both cells come from `questpoi.lua`; see `POI_CELL`.
-        const cellY = blip.complete === true ? POI_CELL.complete : POI_CELL.active;
+        // ALWAYS THE IN-PROGRESS CELL. A completed quest is not pushed here at all -- see the skip
+        // in `minimap-terrain.ts` -- so there is nothing left to choose between.
+        const cellY = POI_CELL.active;
         MinimapBlips.blit(ctx, icon, POI_CELL.x, cellY, rim, side);
         const digit = digitCell(blip.index ?? 0);
         MinimapBlips.blit(ctx, icon, digit.x, digit.y, rim, side);
