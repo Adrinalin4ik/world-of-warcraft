@@ -399,6 +399,29 @@ export class WorldUiHost {
    * and "SpellButton3" says that where an object identity does not. An unnamed frame falls back to its
    * registry id (`lua:3256`), so a non-null answer always means "claimed" and never "unnamed".
    */
+  /**
+   * The NAME of the EditBox that owns the keyboard, or null when nothing does.
+   *
+   * The owner: "при печатании кнопки передвижения реагируют" -- he typed into chat and the character
+   * walked. `input.ts` has always refused a BOUND key while a field has focus (`onKeyDown`'s
+   * `focus === null` gate), but `pages/game/controls` registers its own `keydown` on `document` and
+   * reads WASD straight out of it, so the two never met. Same shape as the wheel and the press before
+   * it: a second listener on an ancestor, and one gesture with one owner.
+   *
+   * A NAME rather than the widget, for the reasons `capturedPress` states: the caller is a React
+   * component with no business holding a `Widget`, and a name makes the decision readable in an
+   * instrument.
+   */
+  get keyboardFocus(): string | null {
+    const widget = this.input.focused;
+    if (widget === null || widget.kind !== 'editbox') {
+      return null;
+    }
+    const registry = this.runtime?.registry ?? null;
+    const id = registry === null ? null : registry.idOfWidget(widget);
+    return (id === null ? null : registry?.nameOf(id) ?? null) ?? widget.id;
+  }
+
   get capturedPress(): string | null {
     const widget = this.input.capturedPress;
     if (widget === null) {

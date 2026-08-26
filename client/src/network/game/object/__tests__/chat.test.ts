@@ -39,6 +39,34 @@ const ascii = (s: string): number[] => Array.from(s, (c) => c.charCodeAt(0));
 const prefixed = (s: string): number[] => [...u32(s.length + 1), ...ascii(s), 0];
 
 describe('SMSG_MESSAGECHAT', () => {
+  /**
+   * A CYRILLIC BODY, which came out as `Ð Ð°Ð·...` in the owner's chat.
+   *
+   * The body is UTF-8 on the wire; the old reader built the string one byte at a time, which is
+   * Latin-1. `utf8` below encodes the way the server does, so a byte-per-character read cannot pass
+   * this -- it would answer twice as many characters.
+   */
+  it('decodes a UTF-8 body rather than one byte per character', () => {
+    const game = fakeGame();
+    const handler = new ChatMessageHandler(game as never);
+    const lines: unknown[] = [];
+    handler.on('line', (line) => lines.push(line));
+    const text = 'Разящий';
+    const utf8 = Array.from(new TextEncoder().encode(text));
+
+    game.emit('packet:receive:SMSG_MESSAGECHAT', incoming([
+      ChatMsg.SAY,
+      ...u32(0),
+      ...u64(0x22),
+      ...u32(0),
+      ...u64(0),
+      ...u32(utf8.length + 1), ...utf8, 0,
+      0x00,
+    ]));
+
+    expect((lines[0] as { text: string }).text).toBe(text);
+  });
+
   it('decodes a say, consuming the length-prefixed text exactly', () => {
     const game = fakeGame();
     const handler = new ChatMessageHandler(game as never);

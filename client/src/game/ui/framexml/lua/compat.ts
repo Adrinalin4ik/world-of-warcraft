@@ -94,10 +94,83 @@ export function installCompat(vm: LuaVM): void {
     gmatch = string.gmatch
     date = os.date
     time = os.time
-    -- NOT aliased, deliberately, because they are engine functions with no standard-library twin and
-    -- their exact semantics are not sourced here: strsplit (18 calls -- its first argument is a SET of
-    -- delimiter characters and it returns a tuple), strjoin (2), strtrim (12). Each still aborts its
-    -- chunk where it is called at file scope, and the load report names it.
+    -- strsplit / strjoin / strtrim: WoWs own string extensions, with no standard-library twin.
+    --
+    -- WRITTEN NOW, and the note this replaces said their semantics were not sourced. Two of the three
+    -- ARE, by the same standard the bit library below is judged by -- a fully specified domain -- and
+    -- the third is pinned by the call sites. What forced it: clicking a players name in chat reached
+    -- ItemRef.lua:12,
+    --
+    --     local name, lineid, chatType, chatTarget = strsplit(":", namelink);
+    --
+    -- and a nil global there is the whole of "тыкнуть на имя игрока не получается".
+    --
+    -- strsplit(delimiters, s): the FIRST argument is a SET of delimiter characters, not a substring --
+    -- which is why it is written with a character class below rather than with a plain find. Every
+    -- call site in the manifest passes a single character, so the set behaviour is unobservable there
+    -- and choosing the documented meaning costs nothing.
+    --
+    -- EMPTY FIELDS ARE KEPT, and that is load-bearing rather than a detail. The call above unpacks a
+    -- players link, player:Name:lineID:chatType:chatTarget, whose middle fields are frequently empty;
+    -- dropping them would slide chatType into lineid and hand FriendsFrame_ShowDropdown the wrong
+    -- arguments. So a:: b yields three values and a trailing delimiter yields a final empty one.
+    --
+    -- It returns a TUPLE, not a table: the call site destructures four names off one call.
+    function strsplit(delimiters, s)
+      local out = {}
+      local n = 0
+      s = tostring(s or "")
+      -- The pattern is built from the delimiter SET, with every character escaped so a set like "%."
+      -- or "-" cannot be read as pattern syntax.
+      local class = string.gsub(tostring(delimiters or ""), "(.)", "%%%1")
+      if class == "" then
+        return s
+      end
+      local from = 1
+      while true do
+        local a, b = string.find(s, "[" .. class .. "]", from)
+        if not a then
+          n = n + 1
+          out[n] = string.sub(s, from)
+          break
+        end
+        n = n + 1
+        out[n] = string.sub(s, from, a - 1)
+        from = b + 1
+      end
+      return unpack(out, 1, n)
+    end
+
+    -- strjoin(delimiter, ...): the inverse, and fully specified. table.concat cannot be used
+    -- directly because the arguments are a vararg and may contain nils in the middle in principle;
+    -- select("#", ...) is what preserves the count.
+    function strjoin(delimiter, ...)
+      local parts = {}
+      local count = select("#", ...)
+      for i = 1, count do
+        parts[i] = tostring((select(i, ...)) or "")
+      end
+      return table.concat(parts, tostring(delimiter or ""))
+    end
+
+    -- strtrim(s, chars): strip the given characters from BOTH ends, defaulting to whitespace.
+    -- The default set is the documented one and every manifest call site passes no second argument.
+    function strtrim(s, chars)
+      -- NO BACKSLASH ESCAPES IN THE DEFAULT, and that is not cosmetic: this shim is a JS TEMPLATE
+      -- NO BACKSLASH ESCAPES AND NO BACKTICKS IN THIS BLOCK. Both are traps this file already
+      -- documents and I walked into both: a backslash-t written here reaches Lua as a REAL TAB and
+      -- ends the string literal, and a backtick ends the JS TEMPLATE LITERAL this whole shim is. The
+      -- test below caught the first as a Lua parse error and the second as a TypeScript one. "%s" is
+      -- the pattern class for whitespace, needs no escape, and IS the documented default set.
+      local class
+      if chars == nil then
+        class = "%s"
+      else
+        class = string.gsub(tostring(chars), "(.)", "%%%1")
+      end
+      local trimmed = string.gsub(tostring(s or ""), "^[" .. class .. "]*(.-)[" .. class .. "]*$", "%1")
+      return trimmed
+    end
     -- PI: an engine CONSTANT, not a function, and the only one on this list.
     --
     -- Defined in no FrameXML file at all -- GameTime.lua:16 is literally "local PI = PI", which caches

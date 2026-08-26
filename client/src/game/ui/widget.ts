@@ -605,6 +605,52 @@ export class Widget {
    * box gets visible text at all.
    */
   textRegion: Widget | null = null;
+  /**
+   * `AddHistoryLine` -- the lines this box remembers, oldest first, capped at `historyLines`.
+   *
+   * The client keeps its own: `ChatEdit_AddHistory` builds the line it wants remembered (the slash
+   * command plus the text, so "/p hello" comes back whole rather than "hello") and calls
+   * `editBox:AddHistoryLine(text)` (`chatframe.lua:3655`). Six other call sites do the same for the
+   * macro and script boxes. The ENGINE owns the ring and the up/down walk over it, which is why both
+   * live here and in `input.ts` rather than in Lua.
+   */
+  /**
+   * `EnableMouseWheel` -- recorded, and NOT what routes the wheel. See that method.
+   *
+   * `hit.ts#wheelTargetAt` picks its target by finding the first ancestor with an `onMouseWheel`
+   * handler and ignores this flag, which is deliberate and documented there. The field exists because
+   * the client sets it and `IsMouseWheelEnabled` reads it back.
+   */
+  mouseWheelEnabled = false;
+
+  /**
+   * `GameTooltip:SetPadding(extra)` -- extra width the tooltip reserves for its own furniture.
+   *
+   * `ItemRefTooltip` asks for 16 (`itemref.xml:43`) because it carries a 32-pixel close button at its
+   * TOPRIGHT that would otherwise sit on the item name. Read where the tooltip resolves its width.
+   */
+  tooltipPadding = 0;
+
+  history: string[] = [];
+  /**
+   * How many lines the ring holds -- `historyLines="32"` on `ChatFrameEditBoxTemplate`
+   * (`chatframe.xml:21`). Zero means the box remembers nothing, which is every box that does not
+   * declare the attribute.
+   */
+  historyLines = 0;
+  /**
+   * Where the up/down walk currently sits. `history.length` means "not browsing" -- the box is
+   * showing what the player typed, not a recalled line.
+   */
+  historyAt = 0;
+  /**
+   * `ignoreArrows="true"` -- the arrows do NOT move the caret in this box.
+   *
+   * `ChatFrameEditBoxTemplate` declares it (`chatframe.xml:21`) and that is what frees Up and Down to
+   * walk the history instead. Read by `input.ts`; the loader passed the attribute all along and had
+   * no setter to give it to.
+   */
+  ignoreArrows = false;
   caret = 0;
   /** Selection anchor. Equal to `caret` when there is no selection (the common case). */
   selectionAnchor = 0;
@@ -686,6 +732,17 @@ export class Widget {
    * negates it.
    */
   onMouseWheel: ((delta: number) => void) | null = null;
+
+  /**
+   * `<OnHyperlinkClick>` -- a click on a `|H...|h[body]|h` run inside a line of text.
+   *
+   * `hit.ts#hyperlinkAt` finds the run and climbs to the nearest ancestor carrying this, which is
+   * how a click on a FONT STRING reaches the CHAT FRAME that binds the handler
+   * (`chatframe.xml:15-17`, `ChatFrame_OnHyperlinkShow(self, link, text, button)` -> `SetItemRef`).
+   *
+   * The three arguments are the ones the document names, in the order `scripts.ts:149` binds them.
+   */
+  onHyperlinkClick: ((link: string, text: string, button: string) => void) | null = null;
   /**
    * FrameXML's `OnTabPressed`, and it REPLACES the router's own Tab ring for the widget that has one:
    * `accountlogin.xml`'s account box moves focus to the password box itself, and a document that

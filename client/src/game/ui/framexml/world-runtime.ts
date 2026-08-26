@@ -906,6 +906,39 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
    */
   const worldMapBlobId = registry.byName('WorldMapBlobFrame');
 
+  /**
+   * THE CHAT EDIT BOXES, and this one is the documented trap in its purest form.
+   *
+   * The owner: clicking a name in chat opens the field "просто как /say, а не то, какое нужно."
+   * `SetItemRef` -> `ChatFrame_SendTell` -> `ChatFrame_OpenChat(SLASH_WHISPER1.." "..name.." ")`,
+   * and `ChatFrame_OpenChat` does NOT set the text (`chatframe.lua:3045-3050`):
+   *
+   *     editBox.setText = 1;
+   *     editBox.text = text;
+   *
+   * -- two Lua FIELDS. The only thing that applies them is `ChatEdit_OnUpdate` (`:3328-3334`):
+   *
+   *     if ( self.setText == 1 ) then
+   *         self:SetText(self.text);
+   *         self.setText = 0;
+   *         ChatEdit_ParseText(self, 0, true);
+   *     end
+   *
+   * So without it the box opens EMPTY and its `chatType` is never converted -- the whisper, the
+   * channel message and every slash-prefilled open are all this one unfired handler. And it explains
+   * why typing worked all along: the Enter binding is `ChatFrame_OpenChat("")`, whose text is empty,
+   * so nothing was lost on the path anyone had tested.
+   *
+   * ALL SEVEN, gated on `visible`, which is what makes the cost nothing: at most one chat edit box is
+   * ever shown, so this is seven `visible` reads and one Lua call per tick while the field is open --
+   * and its body is a single field comparison that exits immediately once the text has been applied.
+   * Registering only `ChatFrame1EditBox` would work today and break the moment a second window is
+   * used, which is the kind of narrowing this project asks not to do.
+   */
+  const chatEditBoxIds = Array.from({ length: 7 }, (unused, index) => (
+    registry.byName(`ChatFrame${index + 1}EditBox`)
+  )).filter((id): id is number => id !== null);
+
   const input = options.input ?? null;
   /** Seconds since the boot, for the caret blink. */
 /**
@@ -1038,6 +1071,12 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
       // The blob frame, which is what hides the POI tooltip -- see `worldMapBlobId`.
       if (worldMapBlobId !== null && registry.widget(worldMapBlobId)?.visible) {
         invokeScriptHandler(ctx, worldMapBlobId, 'OnUpdate', [dt]);
+      }
+      // The chat field, which is what applies a prefilled `/w Name ` -- see `chatEditBoxIds`.
+      for (const editBoxId of chatEditBoxIds) {
+        if (registry.widget(editBoxId)?.visible) {
+          invokeScriptHandler(ctx, editBoxId, 'OnUpdate', [dt]);
+        }
       }
       // The buff flash clock -- see `buffFrameId`. Zero fingerprint cost; it writes Lua fields only.
       if (buffFrameId !== null) {

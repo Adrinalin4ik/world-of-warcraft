@@ -37,3 +37,19 @@ describe('FrameXML text escapes', () => {
     expect(marked.plain).toBe('cost |TInterface\\Icons\\Foo:16|t here');
   });
 });
+
+/**
+ * A LINK RUN IS LOCATED, not merely rendered.
+ *
+ * The body was always drawn -- that is what made an item link visible in chat. What was missing was
+ * WHERE it landed, so no click could be attributed to it (`hit.ts#hyperlinkAt`). The offsets are into
+ * the PLAIN text, because the escapes are zero-width and must never reach `measureText`.
+ */
+test('a hyperlink run is indexed into the plain text', () => {
+  const { plain, links } = parseMarkup('says: |cff9d9d9d|Hitem:3299:0:0|h[Belt]|h|r ok');
+  expect(plain).toBe('says: [Belt] ok');
+  expect(links).toHaveLength(1);
+  expect(links[0].link).toBe('item:3299:0:0');
+  expect(links[0].text).toBe('[Belt]');
+  expect(plain.slice(links[0].start, links[0].end)).toBe(links[0].text);
+});

@@ -59,11 +59,40 @@ export interface ColorSpan {
   color: string;
 }
 
+/**
+ * A HYPERLINK over `plain`, half-open `[start, end)`.
+ *
+ * `link` is the payload between `|H` and the first `|h` -- `item:3299:0:0:...` or `player:Gdsh` --
+ * which is exactly what the client's `<OnHyperlinkClick>` calls `link`, and what `SetItemRef`
+ * (`itemref.lua`) parses to decide between a tooltip and a whisper. `text` is the bracketed body it
+ * is passed alongside, `[Ragged Leather Belt]` included brackets.
+ *
+ * INDEXED INTO `plain`, for the reason the header gives for colour spans: the escapes are
+ * zero-width, so nothing about them may reach `measureText`. A click is mapped back by measuring
+ * prefixes of `plain` -- see `hit.ts#hyperlinkAt`.
+ */
+export interface LinkSpan {
+  start: number;
+  end: number;
+  /** The `|H` payload, without the `|H` or the `|h`. */
+  link: string;
+  /** The bracketed body as drawn, which is the handler's second argument. */
+  text: string;
+}
+
 export interface Markup {
   /** The text as it is measured, wrapped and drawn. */
   plain: string;
   /** Colour runs over `plain`, in order, non-overlapping (see `parseMarkup`). */
   spans: ColorSpan[];
+  /**
+   * Hyperlink runs over `plain`, in document order.
+   *
+   * Collected because a link that cannot be located cannot be CLICKED: the bracketed body was
+   * already drawn (that is what made an item link visible at all), but where it sits in the line was
+   * thrown away, so no click could ever be attributed to it.
+   */
+  links: LinkSpan[];
 }
 
 /**
@@ -146,11 +175,12 @@ export function parseMarkup(text: string): Markup {
   // identical string back and every downstream measurement is bit-for-bit what it was before this
   // file existed.
   if (text.indexOf('|') === -1) {
-    return { plain: text, spans: [] };
+    return { plain: text, spans: [], links: [] };
   }
 
   let plain = '';
   const spans: ColorSpan[] = [];
+  const links: LinkSpan[] = [];
   /** Open `|c` runs, innermost last. Each entry is the colour and where it started in `plain`. */
   const stack: Array<{ color: string; start: number }> = [];
 
@@ -238,7 +268,16 @@ export function parseMarkup(text: string): Markup {
       if (bodyStart !== -1) {
         const bodyEnd = text.indexOf('|h', bodyStart + 2);
         if (bodyEnd !== -1) {
-          plain += text.slice(bodyStart + 2, bodyEnd);
+          const body = text.slice(bodyStart + 2, bodyEnd);
+          // WHERE the body landed, so a click can be attributed to it. The payload is everything
+          // between `|H` and the first `|h`, which is what the handler receives as `link`.
+          links.push({
+            start: plain.length,
+            end: plain.length + body.length,
+            link: text.slice(i + 2, bodyStart),
+            text: body,
+          });
+          plain += body;
           i = bodyEnd + 2;
           continue;
         }
@@ -280,7 +319,7 @@ export function parseMarkup(text: string): Markup {
   }
 
   spans.sort((a, b) => a.start - b.start);
-  return { plain, spans };
+  return { plain, spans, links };
 }
 
 /**

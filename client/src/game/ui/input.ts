@@ -18,7 +18,9 @@
  * changed nothing about how `/` behaves.
  */
 import { keyToken } from './framexml/bindings';
-import { focusChain, hitTest, wheelTargetAt, nextFocus, paneAt, sliderThumbAt } from './hit';
+import {
+  focusChain, hitTest, hyperlinkAt, nextFocus, paneAt, sliderThumbAt, wheelTargetAt,
+} from './hit';
 import { layoutRectOf } from './rects';
 import { viewportUnits } from './layout';
 import { DrawItem, MouseButtonName, Widget } from './widget';
@@ -500,6 +502,26 @@ export class GlueInput {
     // before the compatibility `mousedown` is dispatched (UI Events / Pointer Events: the mouse event
     // follows the pointer event for the same press), so `controls`' body-level `mousedown` handler always
     // reads a value this line has already written.
+    /**
+     * A CLICK ON A HYPERLINK, tested here and CLAIMED here.
+     *
+     * Dispatched on the press rather than the release because the click it stands for has no other
+     * owner: the chat frame authors `enableMouse="false"`, so `hitTest` above answers null over it and
+     * the press would otherwise reach the camera and orbit the world. Claiming it through `pressHit`
+     * is what `controls`' `mousedown` reads to stay out -- the same one-press-one-owner rule the pane
+     * and the wheel already follow.
+     *
+     * `pressHit` is set to the HANDLING FRAME, so `capturedPress` names the chat frame in an
+     * instrument rather than an anonymous line region.
+     */
+    const linked = hit === null ? hyperlinkAt(this.items, x, y) : null;
+    if (linked !== null) {
+      this.pressHit = linked.frame;
+      this.setFocus(null);
+      linked.frame.onHyperlinkClick?.(linked.link, linked.text, this.pressButton);
+      return;
+    }
+
     this.pressHit = hit;
 
     this.setFocus(hit && hit.focusable ? hit : null);
@@ -857,6 +879,41 @@ export class GlueInput {
     }
 
     if (target.kind !== 'editbox') {
+      return;
+    }
+
+    /**
+     * UP AND DOWN WALK THE SENT-LINE HISTORY, which is the engine's job and not the client's.
+     *
+     * The owner: "Стрелочка вверх - вниз на клавиатуре не показывает предыдущие отправленные
+     * сообщения." Nothing in FrameXML implements this -- there is no `<OnArrowPressed>` and no Lua
+     * that reads a history. The client only FEEDS the ring: `ChatEdit_AddHistory` calls
+     * `editBox:AddHistoryLine(text)` (`chatframe.lua:3655`) and declares how deep it goes with
+     * `historyLines="32"` (`chatframe.xml:21`). Walking it is the engine's, so it is here.
+     *
+     * GATED ON `ignoreArrows`, the box's own attribute (`chatframe.xml:21`), because that flag is
+     * exactly the client saying "the arrows are not for the caret in this box". A search box without
+     * it keeps arrows for caret movement, which is what the login screen needs.
+     *
+     * `historyAt === history.length` is "not browsing": Up from there offers the newest line, and Down
+     * back off the end restores an EMPTY field rather than the newest line again -- the real client
+     * ends a downward walk on a blank box, not on what you last sent.
+     *
+     * `SetText` is not used: this is an engine edit, and the client's `OnTextChanged` fires with
+     * `userInput` unset for one -- `AutoCompleteEditBox_OnTextChanged` only runs the completer when a
+     * human typed (`autocomplete.lua:225-229`). Writing the field directly and firing the handler is
+     * what the typing path below does too.
+     */
+    if ((event.key === 'ArrowUp' || event.key === 'ArrowDown')
+      && target.ignoreArrows && target.history.length > 0) {
+      event.preventDefault();
+      const step = event.key === 'ArrowUp' ? -1 : 1;
+      const at = Math.max(0, Math.min(target.history.length, target.historyAt + step));
+      target.historyAt = at;
+      target.text = at === target.history.length ? '' : target.history[at];
+      target.caret = target.text.length;
+      target.selectionAnchor = target.caret;
+      target.onTextChanged?.();
       return;
     }
 

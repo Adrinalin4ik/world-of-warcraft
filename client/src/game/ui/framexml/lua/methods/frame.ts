@@ -233,6 +233,18 @@ const FRAME: MethodTable = {
   StartMoving: notImplemented('StartMoving',
     'ui/input.ts routes a press to the widget under the cursor and does not keep feeding movement to '
     + 'a frame that has claimed a drag'),
+  /**
+   * `StartSizing` was MISSING rather than declared, and a missing method THROWS.
+   *
+   * The owner's console, on every press of the chat window's resize grabber:
+   *
+   *     ChatFrame1ResizeButton: OnMouseDown: attempt to call a nil value (method 'StartSizing')
+   *
+   * -- and that error aborts the rest of the handler. Declared here beside `StartMoving` for the same
+   * reason and with the same consequence: the gesture does nothing, but it does nothing SILENTLY and
+   * the load report names it, instead of raising a red script error the owner has to read past.
+   */
+  StartSizing: notImplemented('StartSizing', 'as StartMoving -- the same missing drag claim'),
   StopMovingOrSizing: notImplemented('StopMovingOrSizing', 'as StartMoving'),
   SetResizable: notImplemented('SetResizable', 'as SetMovable -- the same missing drag claim'),
   IsResizable: notImplemented('IsResizable', 'as SetResizable', [false]),
@@ -258,6 +270,34 @@ const FRAME: MethodTable = {
     widgetOf(ctx, self).mouseEnabled = Boolean(args[0]);
     return [];
   },
+
+  /**
+   * `EnableMouseWheel(enabled)` / `IsMouseWheelEnabled()` -- RECORDED, and the recording is the point.
+   *
+   * The owner: "скролить мышью нельзя." The client wires its own wheel at runtime, in the
+   * `VARIABLES_LOADED` arm of `ChatFrame_OnEvent`:
+   *
+   *     if ( GetCVarBool("chatMouseScroll") ) then
+   *         self:SetScript("OnMouseWheel", FloatingChatFrame_OnMouseScroll);
+   *         self:EnableMouseWheel(true);
+   *     end
+   *
+   * (`chatframe.lua:2547-2551`, and `fcf.lua:715-719` repeats it for every temporary window). This
+   * method did not exist, so the SECOND line threw -- after the first had already run. The wheel
+   * handler was therefore installed and the throw only cost the two statements after it, which is why
+   * this reads as "the wheel does nothing" rather than as an error the owner would connect to it.
+   *
+   * WHAT MAKES THE WHEEL WORK IS THE CVAR ABOVE IT, not this flag: `hit.ts#wheelTargetAt` finds a
+   * target by walking up from the hit widget for the first `onMouseWheel` handler and does not consult
+   * an enable flag at all (`hit.ts:87-100`). That is deliberate there and documented, so this stores
+   * the flag for `IsMouseWheelEnabled` and for anything that later wants to honour it -- it is not the
+   * gate, and saying so here is what stops someone "fixing" the wheel by setting it.
+   */
+  EnableMouseWheel: (ctx, self, args) => {
+    widgetOf(ctx, self).mouseWheelEnabled = Boolean(args[0]);
+    return [];
+  },
+  IsMouseWheelEnabled: (ctx, self) => [widgetOf(ctx, self).mouseWheelEnabled],
 
   /**
    * `SetClampedToScreen(clamped)` / `IsClampedToScreen()` -- keep the frame inside the window.

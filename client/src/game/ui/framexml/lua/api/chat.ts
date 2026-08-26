@@ -21,8 +21,9 @@
  * work; this file exists so the client's own chat code LOADS, which is what the frames, the docking,
  * the tabs, the edit box and four waiting producers all sit behind.
  */
+import { ChatMsg } from '../../../../../network/game/object/chat';
 import { LuaVM } from '../vm';
-import { notImplemented } from '../methods/region';
+import { notImplemented, warnOnce } from '../methods/region';
 
 /**
  * The chat type ids, and **these are OURS rather than the engine's, which is stated because it matters
@@ -42,6 +43,31 @@ import { notImplemented } from '../methods/region';
 const chatTypeIds = new Map<string, number>();
 
 /** Reset between sessions so a reconnect does not keep growing the table. */
+/**
+ * Where a typed line goes. Installed by `ui/chat-bridge.ts`, which owns the chat handler.
+ *
+ * A sink for the reason `ui/pointer.ts` and `ui/map-selection.ts` are: this file installs globals
+ * BEFORE the manifest -- `ChatFrame.lua` references `SendChatMessage` while it loads -- and the
+ * handler belongs to a world session that comes and goes. The global exists from the start and
+ * answers into nothing until a session installs itself.
+ *
+ * `language` is null when the client did not pass one, which lets the sender keep its own default
+ * rather than have this file invent a number -- see `object/chat.ts#send` on why a wrong language is
+ * discarded by the server with no reply.
+ */
+export type ChatSender = (
+  type: number,
+  text: string,
+  target: string | null,
+  language: number | null,
+) => void;
+
+let sender: ChatSender | null = null;
+
+export function setChatSender(next: ChatSender | null): void {
+  sender = next;
+}
+
 export function resetChatTypeIds(): void {
   chatTypeIds.clear();
 }
@@ -91,7 +117,24 @@ export function installChatApi(vm: LuaVM): void {
     const index = typeof args[0] === 'number' ? args[0] : 0;
     // The name is left EMPTY rather than invented: `FCF_SetWindowName` derives "General" and
     // "Combat Log" from the localized globals itself, and a name here would fight it.
-    return ['', 14, 0.24, 0.24, 0.24, 1, index === 1, false, null];
+    /**
+     * **THE COLOUR AND ALPHA ARE THE CLIENT'S OWN CONSTANTS, and they used to be a guess.**
+     *
+     * This returned `0.24, 0.24, 0.24` and alpha `1`, and the owner saw the result: an opaque grey
+     * slab where the chat should be. The client feeds these straight through --
+     * `FCF_LoadChatWindow` destructures the nine values and calls `FCF_SetWindowColor(frame, r, g, b,
+     * 1)` and `FCF_SetWindowAlpha(frame, alpha, 1)` -- so whatever is answered here IS the chat
+     * background, with no default of its own to fall back on.
+     *
+     * `floatingchatframe.lua:21-22` states both:
+     *
+     *     DEFAULT_CHATFRAME_ALPHA = 0.25;
+     *     DEFAULT_CHATFRAME_COLOR = {r = 0, g = 0, b = 0};
+     *
+     * Black at a quarter alpha, which is the dark tint the real client shows. The grey was invented
+     * for a value the client publishes two lines apart from the function that consumes it.
+     */
+    return ['', 14, 0, 0, 0, 0.25, index === 1, false, null];
   });
 
   /**
@@ -159,6 +202,16 @@ export function installChatApi(vm: LuaVM): void {
       + 'authored size', []],
     ['GetChatWindowSavedPosition', 'no chat window layout is persisted, so each frame keeps its '
       + 'authored anchor', []],
+    // The SETTERS of the same pair, and they were absent where the getters were declared -- so a
+    // press of the resize grabber raised `attempt to call a nil value (global
+    // 'SetChatWindowSavedPosition')` in the owner's console. `FCF_SavePositionAndDimensions`
+    // (`floatingchatframe.lua:1117-1124`) calls both from the grabber's `OnMouseUp` and from every
+    // window drag. Declaring them keeps the layout unpersisted, which is what the getters already
+    // say, without the script error.
+    ['SetChatWindowSavedPosition', 'no chat window layout is persisted, so a moved window returns to '
+      + 'its authored anchor on reload', []],
+    ['SetChatWindowSavedDimensions', 'no chat window layout is persisted, so a resized window returns '
+      + 'to its authored size on reload', []],
     ['GetChatWindowChannels', 'no chat settings are persisted', []],
     ['AddChatWindowMessages', 'no chat settings are persisted', []],
     ['RemoveChatWindowMessages', 'no chat settings are persisted', []],
@@ -172,6 +225,58 @@ export function installChatApi(vm: LuaVM): void {
     ['SetChatWindowLocked', 'no chat settings are persisted', []],
     ['SetChatWindowDocked', 'no chat settings are persisted', []],
     ['SetChatWindowUninteractable', 'no chat settings are persisted', []],
+    /**
+     * `GetAutoCompleteResults` -- and it did not EXIST, which is why a whisper never became one.
+     *
+     * The owner: clicking a name filled the field with `/w Gdsh ` and the mode stayed SAY. The
+     * conversion is `ChatEdit_ExtractTellTarget`'s job (`chatframe.lua:4116-4145`) -- it is what calls
+     * `SetAttribute("chatType", "WHISPER")` and `SetAttribute("tellTarget", target)` -- and its third
+     * statement is `if ( GetAutoCompleteResults(...) ) then return false end` (`:4125`). A nil global
+     * THROWS there, so the whisper arm of `processChatType` died and `/p` -- which needs no target and
+     * never reaches this -- worked. That is exactly the split he measured.
+     *
+     * NOTHING is also the honest answer, not merely a convenient one: autocompletion needs a NAME INDEX
+     * (friends, guild, recent whispers, players in range) that this client does not keep, so there are
+     * genuinely no candidates. And nothing is what the caller needs -- `ChatEdit_ExtractTellTarget`
+     * treats a hit as "the player is still typing a name" and refuses to extract, so any non-empty
+     * answer would keep the whisper unconverted.
+     *
+     * **AND IT MUST BE NOTHING RATHER THAN AN EMPTY TABLE.** `{}` is TRUTHY in Lua, so a stub returning
+     * one would take the `return false` branch on every keystroke and reproduce the exact bug it was
+     * meant to fix -- the trap this project has now hit four times with `0`.
+     */
+    /**
+     * `GetAutoCompletePresenceID(name)` -- and it is why a whisper printed WHITE under a "Say:" header
+     * while sending correctly as a whisper.
+     *
+     * The owner: "в момент написания сообщения он еще не был переключен, и я писал белый текст", and
+     * his `runLua` answered `WHISPER` for the attribute at the same time. Both are true, and the split
+     * is one line. `ChatEdit_UpdateHeader` has a WHISPER-ONLY branch before it writes anything
+     * (`chatframe.lua:3594-3600`):
+     *
+     *     if ( type == "WHISPER" ) then
+     *         if ( BNet_GetPresenceID(editBox:GetAttribute("tellTarget")) ) then
+     *
+     * and `BNet_GetPresenceID` is one statement -- `return GetAutoCompletePresenceID(name)`
+     * (`bnet.lua:37-39`). A nil global throws there, so `header:SetFormattedText(CHAT_WHISPER_SEND,
+     * ...)` at `:3603` never ran and neither did the `SetTextColor` block at `:3625-3633`. The
+     * ATTRIBUTES were already set by `ChatEdit_ExtractTellTarget`, which is why the message still went
+     * out pink and as a whisper -- only the field itself never caught up.
+     *
+     * WHISPER-ONLY is the whole reason `/p` was fine: no other chat type reaches that branch. The
+     * owner reported exactly that asymmetry, twice.
+     *
+     * NOTHING is the truthful answer: there is no Battle.net connection here, so no name has a
+     * presence id, and nil takes the else path -- a normal whisper, which is what it is.
+     *
+     * **AND NOT 0.** `0` is truthy in Lua, so it would set `chatType` to `BN_WHISPER` for every
+     * whisper the player ever types and send them all down a Battle.net path this client has none of.
+     * Silent, and the fifth costume of the same trap.
+     */
+    ['GetAutoCompletePresenceID', 'there is no Battle.net connection, so no name has a presence id -- '
+      + 'and nil is what makes ChatEdit_UpdateHeader treat a whisper as a whisper', []],
+    ['GetAutoCompleteResults', 'no name index is kept (friends, guild, recent whispers), so there are '
+      + 'no completion candidates -- and NOTHING is what ChatEdit_ExtractTellTarget needs to hear', []],
     // The channel system: `CMSG_JOIN_CHANNEL` and its family are not sent, and no channel list is read.
     ['GetChannelList', 'no chat channel is joined: CMSG_JOIN_CHANNEL is not sent', []],
     ['GetNumDisplayChannels', 'no chat channel is joined', [0]],
@@ -186,9 +291,9 @@ export function installChatApi(vm: LuaVM): void {
     // (`GetChatTypeIndex`-tagged lines) is already satisfied by the defaults set at file scope.
     ['ChangeChatColor', 'no chat colour is persisted, so a change would not survive the frame', []],
     ['GetChatTypeColor', 'no chat colour is persisted', [1, 1, 1]],
-    // Sending. This is the piece a later round replaces with `CMSG_MESSAGECHAT`; it is declared rather
-    // than silently dropped so a Whisper that goes nowhere says so in the load report.
-    ['SendChatMessage', 'CMSG_MESSAGECHAT is not built yet, so nothing this client types is sent', []],
+    // `SendChatMessage` has LEFT this list -- it is real below. Its note said "CMSG_MESSAGECHAT is
+    // not built yet", and that stopped being true when `network/game/object/chat.ts#send` landed;
+    // the packet was there and nothing called it.
     ['GetDefaultLanguage', 'no language state is read from the wire', ['Common', 7]],
     ['GetLanguageByIndex', 'no language state is read from the wire', ['Common', 7]],
     ['GetNumLanguages', 'no language state is read from the wire', [1]],
@@ -196,6 +301,45 @@ export function installChatApi(vm: LuaVM): void {
     ['LoggingChat', 'this client writes no chat log file', [false]],
     ['LoggingCombat', 'this client writes no combat log file', [false]],
   ];
+  /**
+   * `SendChatMessage(text, type, language, target)` -- the client's own signature, from its callers.
+   *
+   * Read off `chatframe.lua` rather than assumed: `SendChatMessage(msg, "WHISPER", editBox.language,
+   * lastTell)` (`:1484`), `SendChatMessage(msg, "AFK")` (`:1937`), `SendChatMessage(msg, "CHANNEL",
+   * editBox.language, editBox:GetAttribute("channelTarget"))` (`:1954`), and the three in
+   * `ChatEdit_SendText` (`:3669,3684,3686`). So the type is a STRING -- `"SAY"`, `"WHISPER"`,
+   * `"CHANNEL"` -- and the fourth argument is a player name for a whisper and a channel name for a
+   * channel, which is exactly the split `chatHandler.send` already makes.
+   *
+   * **The type name maps straight onto `ChatMsg`**, whose keys are the same words the client uses.
+   * An unknown one is refused rather than guessed at: sending a say when the player asked for an
+   * officer chat is worse than not sending, and the report names it.
+   *
+   * The LANGUAGE the client passes is honoured when it gives one. `editBox.language` comes from
+   * `GetDefaultLanguage`, so the value round-trips through the client rather than being decided
+   * here -- and `chat.ts#send` documents why the number matters: a language the character cannot
+   * speak makes the server discard the packet with no reply at all.
+   */
+  vm.registerFunction('SendChatMessage', (args) => {
+    const text = String(args[0] ?? '');
+    const typeName = String(args[1] ?? 'SAY').toUpperCase();
+    const language = Number(args[2]);
+    const target = args[3] === undefined || args[3] === null ? null : String(args[3]);
+    if (text === '') {
+      return [];
+    }
+    const type = (ChatMsg as unknown as Record<string, number>)[typeName];
+    if (typeof type !== 'number') {
+      warnOnce(
+        `SendChatMessage: chat type '${typeName}' is not in this client's ChatMsg table, so the `
+        + 'message was not sent -- guessing a type would put a private line in the wrong channel',
+      );
+      return [];
+    }
+    sender?.(type, text, target, Number.isFinite(language) ? language : null);
+    return [];
+  });
+
   for (const [name, reason, results] of gaps) {
     const stub = notImplemented(name, reason, results);
     // `notImplemented` builds a FRAME METHOD (ctx, self, args); a global takes only args. The same

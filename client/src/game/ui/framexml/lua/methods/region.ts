@@ -14,7 +14,9 @@
  *     SetTexCoord, SetDrawLayer -- the client's own LayeredRegion base class).
  *   - TEXTURE / FONTSTRING: everything else, on the leaf it actually belongs to.
  */
-import { FrameMethod, MethodContext, MethodTable, isObjectType, registerMethods } from '../object';
+import {
+  FrameMethod, MethodContext, MethodTable, OBJECT_TYPE_NAME, isObjectType, registerMethods,
+} from '../object';
 import { invokeScriptHandler, reportScriptError } from '../scripts';
 import { Anchor, AnchorPoint } from '../../../layout';
 import { Layer, Widget, deriveSize, effectiveFont, touchGeometry } from '../../../widget';
@@ -374,6 +376,28 @@ const REGION: MethodTable = {
   IsObjectType: (ctx, self, args) => {
     const cls = ctx.registry.classOf(self);
     return [cls !== null && isObjectType(cls, String(args[0] ?? ''))];
+  },
+  /**
+   * `GetObjectType()` -- the widget's own class name, in the engine's CAPITALISATION.
+   *
+   * **It was absent, and the whole chat window was WHITE because of it.**
+   * `FCF_SetWindowColor` walks `CHAT_FRAME_TEXTURES` and its second statement per entry is
+   * `local objectType = object:GetObjectType()` (`floatingchatframe.lua:830-845`); it then tints each
+   * texture with `SetVertexColor(r, g, b)`. `DEFAULT_CHATFRAME_COLOR` is `{0, 0, 0}` (`:22`), so the
+   * chat background is untinted art MADE black by that call -- and a raise on the first iteration
+   * left every texture at its own white, which is exactly the white rectangle the owner saw.
+   *
+   * The comment two methods up already knew the contract -- "the engine's own `GetObjectType`
+   * returns `\"Frame\"`" -- while the method itself did not exist. Knowing what a function returns
+   * is not the same as providing it, and that is twice in this session (`GetTexture` was the other).
+   *
+   * Capitalised per class rather than lowercased: `IsObjectType` is case-INSENSITIVE because a
+   * caller passes `"frame"`, but a caller of THIS compares the result against `"Button"` and
+   * `"Texture"` as written (`:836,840`), so the case is load-bearing here in a way it is not there.
+   */
+  GetObjectType: (ctx, self) => {
+    const cls = ctx.registry.classOf(self);
+    return [cls === null ? null : OBJECT_TYPE_NAME[cls] ?? null];
   },
   /**
    * `IsUserPlaced()` -- has the player dragged this frame to a position of his own?

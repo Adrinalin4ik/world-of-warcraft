@@ -863,6 +863,25 @@ const EDITBOX: MethodTable = {
       throw new Error('SetTextRegion: the text region must be a FontString');
     }
     widget.textRegion = region;
+    /**
+     * LEFT, whatever the FONT says -- and this was "печатает по центру".
+     *
+     * `ChatFrameEditBoxTemplate` gives its text region `inherits="ChatFontNormal"`, and neither that
+     * font nor `NumberFont_Shadow_Med` above it declares a `justifyH` (`fontstyles.xml:166`,
+     * `fonts.xml:187`) -- so the region took the FontString default, CENTER, and the typed text sat
+     * in the middle of the field.
+     *
+     * Two conventions meeting again: a FontString centres by default, and a TEXT FIELD has no
+     * justification at all -- the engine draws typed text from the left text inset outward, which is
+     * why the client makes room for the "Say:" label with `SetTextInsets(15 + header:GetWidth(), ...)`
+     * (`chatframe.lua:3627`) rather than by nudging an alignment. This renderer already assumes it:
+     * `tick.ts#placeCaret` puts the caret at an offset measured from the region's left edge, so a
+     * centred region had the caret disagreeing with its own glyphs as well.
+     *
+     * Set at the ADOPTION rather than in the loader: this is the moment a FontString stops being one
+     * and becomes a field's text, and it is the one door every route goes through.
+     */
+    ensureFont(region).align = 'LEFT';
     anchorTextRegion(widget);
     return [];
   },
@@ -886,6 +905,140 @@ const EDITBOX: MethodTable = {
     widget.caret = Math.max(0, Math.min(length, end));
     return [];
   },
+  /**
+   * `SetTextColor(r, g, b)` -- and its ABSENCE was a thrown error that took a whole handler with it.
+   *
+   * The owner's console, every time the chat field gained or lost focus:
+   *
+   *     ChatFrame1EditBox: OnEditFocusGained: ChatFrame.lua:3628:
+   *         attempt to call a nil value (method 'SetTextColor')
+   *
+   * `ChatEdit_UpdateHeader` colours the header, sets the text insets and then colours the box's own
+   * text (`chatframe.lua:3625-3633`); the throw at 3628 meant the three `focusLeft`/`focusRight`/
+   * `focusMid` vertex colours below it never ran either, so the focus border stayed uncoloured.
+   *
+   * An EditBox is not a FontString, so `region.ts`'s method did not reach it -- but the colour lands
+   * in the same place: the adopted text region's font spec, which is what actually rasterizes the
+   * typed glyphs. Alpha is dropped for the reason `FONTSTRING.SetTextColor` drops it: `FontSpec.color`
+   * is a plain `#rrggbb`.
+   */
+  SetTextColor: (ctx, self, args) => {
+    const region = widgetOf(ctx, self).textRegion;
+    if (region !== null) {
+      ensureFont(region).color = toHex(
+        Number(args[0] ?? 1),
+        Number(args[1] ?? 1),
+        Number(args[2] ?? 1),
+      );
+    }
+    return [];
+  },
+
+  /**
+   * `AddHistoryLine(text)` -- and its absence is why the field never cleared after a send.
+   *
+   * The owner: "После отправки поле не очищается." The clear is real, and it is at the END of a chain
+   * this call sits in the middle of: `ChatEdit_OnEnterPressed` -> `ChatEdit_SendText` ->
+   * `ChatEdit_AddHistory` -> `editBox:AddHistoryLine(text)` (`chatframe.lua:3655`), and only after
+   * `SendText` returns does `OnEnterPressed` reach `ChatEdit_OnEscapePressed`, whose body is the
+   * `editBox:SetText(""); editBox:Hide()` pair (`:3715-3724`). A missing method THROWS, so the send
+   * went out and everything after it did not -- exactly the shape he reported: the message arrives,
+   * the field keeps the text and stays open.
+   *
+   * OLDEST FIRST and capped at `historyLines`, and a repeat of the newest line is not stored twice.
+   * Adding resets the walk, so Up after a send offers the line just sent.
+   */
+  AddHistoryLine: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const line = args[0] === undefined || args[0] === null ? '' : String(args[0]);
+    if (line === '') {
+      return [];
+    }
+    if (widget.history[widget.history.length - 1] !== line) {
+      widget.history.push(line);
+      while (widget.historyLines > 0 && widget.history.length > widget.historyLines) {
+        widget.history.shift();
+      }
+    }
+    widget.historyAt = widget.history.length;
+    return [];
+  },
+
+  /**
+   * `historyLines="32"` (`chatframe.xml:21`), the ring's size. The loader has always walked the
+   * attribute list; this is the setter it had nowhere to send this one.
+   */
+  SetHistoryLines: (ctx, self, args) => {
+    widgetOf(ctx, self).historyLines = Math.max(0, Number(args[0] ?? 0));
+    return [];
+  },
+  GetHistoryLines: (ctx, self) => [widgetOf(ctx, self).historyLines],
+
+  /**
+   * `ignoreArrows="true"` -- the arrows do not move the caret here, which is what frees Up and Down
+   * to walk the history (`input.ts`). Previously a missing method, so the flag the document sets on
+   * every chat box was dropped and the load report named it.
+   */
+  SetIgnoreArrows: (ctx, self, args) => {
+    widgetOf(ctx, self).ignoreArrows = args[0] !== false && args[0] !== undefined
+      && args[0] !== null;
+    return [];
+  },
+
+  /**
+   * `GetInputLanguage()` -> the IME state's name, and `'ROMAN'` is the sourced answer here.
+   *
+   * Another nil method that threw: `ChatEdit_OnInputLanguageChanged` does
+   * `_G["INPUT_"..self:GetInputLanguage()]` (`chatframe.lua:3883`), reached from
+   * `ChatEdit_ResetChatType` (`:3356`) and therefore from the edit box's `OnShow`, its `OnHide` and
+   * every deactivation. The owner saw all three in one session.
+   *
+   * THE RETURN IS NOT A GUESS: `globalstrings.lua:4236-4239` declares exactly four `INPUT_*` strings
+   * -- `INPUT_CHINESE = "CH"`, `INPUT_JAPANESE = "JP"`, `INPUT_KOREAN = "KO"`, `INPUT_ROMAN = "A"` --
+   * so the method's range is those four names and nothing else. `ROMAN` is the one that means "no IME
+   * is composing", which is every keystroke a browser delivers here: there is no IME state to read,
+   * and a `KeyboardEvent` carries no composition language. Its indicator is the "A" a Western install
+   * shows.
+   *
+   * The button that displays it stays hidden anyway unless `CHAT_SHOW_IME` is set, which only
+   * `ChatEdit_LanguageShow` does (`chatframe.lua:3877`) and nothing in this client calls -- so the
+   * value is consumed and not drawn. That is why this is a plain answer rather than a gap notice: a
+   * `notImplemented` here would redden `UIErrorsFrame` on every open of the chat field.
+   */
+  GetInputLanguage: () => ['ROMAN'],
+
+  /**
+   * `Insert(text)` -- put text in at the caret, replacing any selection.
+   *
+   * The owner: "я не могу линкануть предмет или способность в чат." `ChatEdit_InsertLink` is one
+   * statement -- `activeWindow:Insert(" "..text)` (`chatframe.lua:3493`) -- and this method did not
+   * exist, so every shift-click that reached a chat field threw instead of inserting. It is also what
+   * the macro box and the auction browser use for the same gesture (`:3506-3520`).
+   *
+   * REPLACES THE SELECTION, which is what an insert into a text field means everywhere and what the
+   * engine does: a box opened by a link click has its text selected, and appending instead of
+   * replacing would leave both. The caret lands AFTER the inserted run so a second link appends.
+   *
+   * `maxLetters` is honoured, because the box declares one (`letters="255"`, `chatframe.xml:21`) and a
+   * pasted item link is 60-odd characters -- three links overflow a real limit, and the engine
+   * truncates rather than refusing.
+   */
+  Insert: (ctx, self, args) => {
+    const widget = widgetOf(ctx, self);
+    const insert = args[0] === undefined || args[0] === null ? '' : String(args[0]);
+    if (insert === '') {
+      return [];
+    }
+    const from = Math.min(widget.caret, widget.selectionAnchor);
+    const to = Math.max(widget.caret, widget.selectionAnchor);
+    const next = widget.text.slice(0, from) + insert + widget.text.slice(to);
+    widget.text = widget.maxLetters > 0 ? next.slice(0, widget.maxLetters) : next;
+    widget.caret = Math.min(from + insert.length, widget.text.length);
+    widget.selectionAnchor = widget.caret;
+    widget.onTextChanged?.();
+    return [];
+  },
+
   GetNumLetters: (ctx, self) => [widgetOf(ctx, self).text.length],
 
   /**

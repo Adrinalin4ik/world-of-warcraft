@@ -10,8 +10,7 @@ import { isAreaExplored } from '../../network/game/object/update-object/explored
 import { BlobPolygon, setBlobSource } from './quest-blobs';
 import { resolveUnitToken } from '../world/unit-tokens';
 import {
-  coveringItems, drawItemOf, lastCovering, lastDrawnOf, rectOf, watchCovering,
-  watchDrawn,
+  coveringItems, drawItemOf, itemsAt, lastCovering, lastDrawnOf, rectOf, watchCovering, watchDrawn,
 } from './rects';
 import {
   activeTracking, setTracking, trackingTexturePath, visibleTracking,
@@ -1441,6 +1440,111 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
    * downstream.
    */
   /**
+   * `window.frameInfo("ChatFrame1")` -- everything about one widget and its whole ancestry.
+   *
+   * The general form of "why is this not on screen". A widget can be missing from the draw list for
+   * several unrelated reasons -- it does not exist, its own `shown` is false, an ANCESTOR is hidden,
+   * it has no rect, it has nothing to draw -- and every one of those looks identical from outside.
+   * Asking about the widget alone cannot tell them apart, which is why the chain is reported: the
+   * first ancestor with `shown: false` is the answer, and it is usually not the widget asked about.
+   *
+   * Built after `whatCovers` answered "not in the draw list" for `ChatFrame1`, which ruled out
+   * everything that probe could see and named nothing.
+   */
+  /**
+   * `window.whatIsAt(x, y)` -- everything painting at a screen point, in draw order.
+   *
+   * For the case where the thing on screen has no name to ask about. The LAST entry with a `sprite`
+   * or `solid: true` is what the eye sees.
+   *
+   * Coordinates are the same logical units `frameInfo` and `whatCovers` report rects in, so a rect
+   * from one of those can be pointed at directly.
+   */
+  /**
+   * `window.runLua("<chunk>")` -- run one chunk of the client's own Lua and report what happened.
+   *
+   * **The instrument this file was missing, and the round that proved it.** The chat window's left
+   * button column is off screen: `frameInfo` measured `ChatFrame1ButtonFrame` at
+   * `{left: 0, top: 0, width: 29, height: 0}` -- its authored size at the origin, with `alpha: 1`,
+   * so nothing about visibility or fading was ever involved and the anchors simply are not there.
+   *
+   * That frame has NO `<Anchors>` in its document (`floatingchatframe.xml:572`): its whole position
+   * comes from `FCF_SetButtonSide` (`fcf.lua:1301-1313`), reached through
+   * `FloatingChatFrame_Update` -> `FCF_UpdateButtonSide` (`:167`). Reading gets no further than
+   * that: the function makes eight calls before the one that matters, any of which can throw and
+   * abandon the rest, and a throw inside an event this bridge fires is not something the owner can
+   * see after the fact. Calling it again by hand, under `pcall`, names the failing line in one go.
+   *
+   * The chunk is STATEMENTS, so a value comes back through an explicit `return` --
+   * `runLua("return ChatFrame1.buttonSide")`. Errors come back as
+   * data instead of reaching the console -- an error in a probe should be the probe's ANSWER.
+   *
+   * A DOOR INTO THE CLIENT'S OWN NAMESPACE is also the closest thing this project has to the
+   * `/script` slash command, so it answers "does this global exist", "what does this function
+   * return here", and "does calling it fix the frame" without a new probe per question.
+   */
+  (window as unknown as Record<string, unknown>).runLua = (chunk: string) => {
+    // `runExpr` compiles the whole string as a chunk and pcalls it for ONE return, so a top-level
+    // `return` is the way a value comes back. The inner `pcall` is what turns a runtime error into
+    // that value instead of a thrown script error.
+    // THE INNER RETURN HAS TO COME BACK OUT, and the first version dropped it: it kept only
+    // `pcall`'s ok flag and answered a literal "ok", so `runLua("return ChatFrame1.buttonSide")`
+    // reported success and threw the answer away. Caught on the first real use -- two of the four
+    // questions in that round came back as "ok" and told the owner nothing.
+    const source = `local ok, res = pcall(function() ${String(chunk)} end) `
+      + 'if not ok then return tostring(res) end '
+      + 'if res == nil then return "ok" end return res';
+    const result = vm.runExpr(source, 'runLua');
+    if ('value' in result) {
+      return { ran: true, result: result.value };
+    }
+    return { ran: false, compileError: result.message };
+  };
+
+  (window as unknown as Record<string, unknown>).whatIsAt = (x: number, y: number) => (
+    itemsAt(Number(x), Number(y))
+  );
+
+  (window as unknown as Record<string, unknown>).frameInfo = (name: string) => {
+    const found = ctx.registry.byName(String(name));
+    if (found === null) {
+      return { note: `no widget named ${name}` };
+    }
+    const widget = ctx.registry.widget(found);
+    if (widget === null) {
+      return { note: `${name} is named but has no widget` };
+    }
+    const chain: unknown[] = [];
+    let node: typeof widget | null = widget;
+    while (node !== null) {
+      chain.push({
+        name: ctx.registry.nameOf(ctx.registry.idOfWidget(node) ?? -1) ?? node.id,
+        shown: node.shown,
+        visible: node.visible,
+        alpha: node.alpha,
+        strata: node.strata,
+        level: node.frameLevel,
+        scale: node.scale,
+        rect: rectOf(node.id),
+        drawn: drawItemOf(node.id),
+      });
+      node = node.parent;
+    }
+    return {
+      self: {
+        kind: widget.kind,
+        sprite: widget.sprite,
+        solid: widget.solid,
+        vertexColor: widget.vertexColor,
+        text: widget.displayText,
+        children: widget.children.length,
+      },
+      // Self first, then each ancestor. The first `shown: false` is the reason.
+      chain,
+    };
+  };
+
+  /**
    * `window.whatCovers("WorldMapTooltipTextLeft1")` -- everything drawn over a named widget.
    *
    * The general form of the question the tooltip investigation needed and never asked: not "is this
@@ -1735,6 +1839,8 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
       delete (window as unknown as Record<string, unknown>).worldTracking;
       delete (window as unknown as Record<string, unknown>).worldMapTooltip;
       delete (window as unknown as Record<string, unknown>).whatCovers;
+      delete (window as unknown as Record<string, unknown>).frameInfo;
+      delete (window as unknown as Record<string, unknown>).whatIsAt;
       // The blob source outlives this bridge otherwise, and it closes over a disposed world.
       setBlobSource(null);
     },
