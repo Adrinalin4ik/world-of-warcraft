@@ -323,6 +323,28 @@ function writeSide(
 ): boolean {
   const region = regionOf(ctx, self, suffix);
   if (region === null) {
+    /**
+     * **A MISSING LINE SLOT WAS THE PROJECT'S OWN FORBIDDEN FAILURE: SILENT.**
+     *
+     * `appendLine` returns 0 on this, so `state.lines` never advances, `NumLines()` answers 0 and the
+     * frame draws at its authored size with nothing in it. That is indistinguishable from "the item
+     * data has not arrived" -- which is a completely different defect with a completely different fix
+     * -- and the owner has now reported an empty tooltip three rounds running while I chased the
+     * other one.
+     *
+     * So it names the slot. `ItemRefTooltipTextLeft1` missing and `GameTooltipTextLeft1` present is a
+     * template-expansion answer; both present is a DATA answer. One line of output separates them,
+     * where five rounds of reading did not.
+     *
+     * `warnOnce` and not a `notImplemented`: this is not a gap, it is a lookup that failed, and it
+     * belongs in the report next to the other load-time facts rather than reddening `UIErrorsFrame` --
+     * every tooltip open would repeat it.
+     */
+    warnOnce(
+      `GameTooltip: ${ctx.registry.nameOf(self) ?? self}${suffix} does not exist, so this line cannot `
+      + 'be written -- the frame will draw empty. A tooltip inheriting GameTooltipTemplate should have '
+      + 'had it minted from `$parentTextLeft<n>`',
+    );
     return false;
   }
   region.text = text;
@@ -1531,6 +1553,12 @@ function fillFromSource(
       pendingFills.set(ctx.vm, byFrame);
     }
     byFrame.set(self, () => fillFromSource(ctx, self, kind, a, b)[0] === true);
+    // NAMED, for the same reason the missing line slot above is: an empty tooltip has two causes and
+    // they look identical. This one says the DATA was not there; that one says the SLOT was not.
+    warnOnce(
+      `GameTooltip: no ${kind} data for '${String(a)}' yet -- the tooltip will fill when it arrives `
+      + '(see retryTooltipFills). An entry seen for the first time is always cold once.',
+    );
     return [false];
   }
   pendingFills.get(ctx.vm)?.delete(self);
