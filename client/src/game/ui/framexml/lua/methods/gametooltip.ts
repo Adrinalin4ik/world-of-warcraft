@@ -1306,7 +1306,21 @@ const ITEM_SETTERS: MethodTable = {
       fillSpellLines(ctx, self, row.name, row.subName, row.description);
       return [true];
     }
-    if (type !== null && type !== 'item') {
+    /**
+     * `quest:<id>:<level>` -- the title and the objectives, through the same source hook.
+     *
+     * The CONTENT is ours and has to be: the real engine composes a quest tooltip itself, so no
+     * FrameXML file states what goes in one. The title and the one-line objectives summary are what
+     * `SMSG_QUEST_QUERY_RESPONSE` gives us (`quest.ts#QuestTemplate.title`/`objectivesText`), and they
+     * are what a reader clicking the link wants to know: what the quest is and what it asks for.
+     */
+    if (type === 'quest') {
+      const id = Number(/^quest:(\d+)/.exec(payload)?.[1] ?? 0);
+      if (id > 0) {
+        return fillFromSource(ctx, self, 'questlink', id);
+      }
+    }
+    if (type !== null && type !== 'item' && type !== 'quest') {
       warnOnce(
         `GameTooltip:SetHyperlink: the '${type}' link type is not built, so its tooltip stays empty `
         + '(item and spell are)',

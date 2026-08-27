@@ -330,6 +330,39 @@ export function installSpellsApi(vm: LuaVM): void {
   });
 
   /**
+   * `GetSpellLink(slot, bookType)` -> `spellLink, tradeSkillLink`.
+   *
+   * REAL, and the gap note it replaces had gone stale on BOTH of its reasons. It said the escape
+   * format was unsourced and that there was no chat box to insert into. The second is simply no longer
+   * true -- `ScrollingMessageFrame` is real, the chat field takes input, and `EditBox:Insert` landed
+   * with the whisper work. The first was already answered elsewhere in this client:
+   * `container-bridge.ts#itemLink` builds the same shape for an item and has since the bags worked.
+   *
+   * SHAPE: `|cAARRGGBB|Hspell:<id>|h[Name]|h|r`, which is what `markup.ts` parses back
+   * (`|H<type>:<args>|h[text]|h`, and its own census counted 111 `|H` uses across the manifest) and
+   * what `SetItemRef` splits on `:` to get the id. Verified by the round trip that matters: the tooltip
+   * side reads exactly this and `GameTooltip:SetHyperlink`'s `spell:` arm resolves it.
+   *
+   * THE COLOUR IS TRANSCRIBED, NOT READ. `71d5ff` is the light blue every 3.3.5a spell link carries,
+   * and no file in the 264-file manifest states it -- grepped the served Lua and XML for the literal
+   * and found nothing, because the engine composes the link. So it carries the same standing note as
+   * `framexml/bindings.ts`' default keys: transcribed from the shipped client, not derived from data
+   * this project can read. A wrong colour here is a cosmetic defect in one direction only -- the link
+   * still parses, still resolves and still opens the right tooltip.
+   *
+   * The SECOND return is the trade-skill link and is nil: this client has no trade skills, and
+   * `SpellButton_OnModifiedClick` tests the two separately (`spellbookframe.lua:372-378`), so a nil is
+   * the answer that takes the spell branch rather than a fabricated one.
+   */
+  fn('GetSpellLink', (args) => {
+    const entry = entryOf(args[0], args[1]);
+    if (entry === null) {
+      return [];
+    }
+    return [`|cff71d5ff|Hspell:${entry.spellId}|h[${entry.name}]|h|r`, null];
+  });
+
+  /**
    * `GetSpellCooldown(slot, bookType)` -> `start, duration, enable`.
    *
    * `enable` is NUMERIC and it is **1** for an ordinary known spell, not 0.
@@ -463,17 +496,7 @@ export function installSpellsApi(vm: LuaVM): void {
         + 'hunter or warlock with one',
       [null],
     ],
-    [
-      // `SpellButton_OnModifiedClick:372` -- shift-clicking a spell to put a link in the chat box. A
-      // hyperlink is an escape-coded string (`|cff71d5ff|Hspell:331|h[Healing Wave]|h|r`) whose exact
-      // colour and payload for 3.3.5a are not sourced here, and the chat frame cannot receive one in any
-      // case: `ScrollingMessageFrame` is still a missing frame TYPE, so there is no chat edit box for
-      // `ChatEdit_InsertLink` to insert into. Two nils, which is what the branch tests.
-      'GetSpellLink',
-      'hyperlink escape format is not sourced, and ScrollingMessageFrame is a missing frame type so '
-        + 'there is no chat box for ChatEdit_InsertLink to reach',
-      [null, null],
-    ],
+
     [
       // `SpellButton_OnClick:348`, pet book only. Needs `CMSG_PET_SPELL_AUTOCAST` and the pet feed above.
       'ToggleSpellAutocast',

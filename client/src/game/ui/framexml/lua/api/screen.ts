@@ -250,6 +250,25 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
      * requirement and not as a reading of the game's data.
      */
     ['SPLITSTACK', 'SHIFT'],
+    /**
+     * `CHATLINK` -> SHIFT. **The owner's third requirement of this table: "дать возможность линковать
+     * мне по shift + клик".**
+     *
+     * It is the one gate on every shift-to-link path in the client, and all of them are one call:
+     *
+     *  - `HandleModifiedItemClick(link)` is `if ( IsModifiedClick("CHATLINK") ) then
+     *    ChatEdit_InsertLink(link) end` (`itembuttontemplate.lua:108-113`), reached from a BAG slot
+     *    (`containerframe.lua:739`) and from an EQUIPPED slot (`paperdollframe.lua:1250`);
+     *  - `SpellButton_OnModifiedClick` gates the spellbook the same way (`spellbookframe.lua:360`).
+     *
+     * So one entry turns on bags, equipment and the spellbook at once, and with the action unbound
+     * every one of them read `NONE`, answered false, and fell through to nothing.
+     *
+     * SOURCED THE SAME WAY THE TWO ABOVE ARE, AND NO BETTER: the engine ships this default in its own
+     * config and the client's options panel exposes only `AUTOLOOTTOGGLE`, `SELFCAST` and `FOCUSCAST`
+     * through `SetModifiedClick`. SHIFT is the owner's requirement, recorded as a requirement.
+     */
+    ['CHATLINK', 'SHIFT'],
   ]);
   const modifierHeld = (modifier: string): boolean => {
     if (modifier === 'SHIFT') {
