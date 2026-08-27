@@ -62,7 +62,7 @@ import { Widget } from '../../../widget';
 import { ensureFont, notImplemented, warnOnce, widgetOf } from './region';
 import { getAction } from '../api/actions';
 import { getAuraTooltipSource, getShapeshiftTooltipSource } from '../api/auras';
-import { getSpellbook } from '../api/spells';
+import { getSpellLinkSource, getSpellbook } from '../api/spells';
 import { layoutScale, measureText } from '../../../text';
 import type { LuaVM } from '../vm';
 import { getItemTooltipSource, ItemTooltipInfo, ItemTooltipSource } from '../api/items';
@@ -1261,7 +1261,60 @@ const ITEM_SETTERS: MethodTable = {
   },
   GetPadding: (ctx, self) => [widgetOf(ctx, self).tooltipPadding],
 
-  SetHyperlink: (ctx, self, args) => fillFromSource(ctx, self, 'link', String(args[0] ?? '')),
+  /**
+   * `SetHyperlink(link)` -- and the LINK TYPE decides which tooltip this is.
+   *
+   * The owner: item links fill, "тултипы скилов не работают". `SetItemRef` has no separate arm for a
+   * spell -- every type that is not a player, a channel or a GM link falls through to the same
+   * `ItemRefTooltip:SetHyperlink(link)` (`itemref.lua:175-183`) -- so dispatching on the type is the
+   * ENGINE's job, and this method was doing the item half of it and calling that the whole thing.
+   *
+   * `spell:<id>` goes to the DBC by id, not to the spellbook by slot: see
+   * `api/spells.ts#SpellLinkSource` for why that distinction is the feature and not a detail.
+   *
+   * AN UNKNOWN TYPE SAYS SO instead of drawing an empty frame. `quest:`, `achievement:`, `talent:`,
+   * `enchant:` and `trade:` all reach here in the real client and none is built; a frame that opens
+   * blank is the failure this project forbids, and one line in the report is the difference between
+   * "not built" and "broken".
+   */
+  SetHyperlink: (ctx, self, args) => {
+    const link = String(args[0] ?? '');
+    /**
+     * THE TYPE IS WHAT FOLLOWS `|H`, and the first version of this got it wrong on two real types.
+     *
+     * It tried to skip an optional `|cAARRGGBB` with a hex character class, and a hex class EATS THE
+     * LEADING LETTERS of a type that starts with one: measured, `enchant:1234` parsed as `nchant` and
+     * `achievement:456` as `hievement`. Both would still have taken the "not built" branch, so the
+     * behaviour was right and only the message lied -- which is exactly the kind of quiet wrongness a
+     * regex hides. Cutting at `|H` cannot do that.
+     *
+     * A link may arrive with the wrapper (`|cff...|Hspell:75|h[Shoot]|h|r`, from a Lua caller) or as
+     * the bare payload (`spell:75`, which is what `SetItemRef` passes), so both are handled.
+     */
+    const at = link.indexOf('|H');
+    const payload = at === -1 ? link : link.slice(at + 2);
+    const type = /^([a-zA-Z]+):/.exec(payload)?.[1]?.toLowerCase() ?? null;
+    if (type === 'spell') {
+      const id = Number(/^spell:(\d+)/.exec(payload)?.[1] ?? 0);
+      const row = id > 0 ? getSpellLinkSource(ctx.vm)?.(id) ?? null : null;
+      if (row === null) {
+        warnOnce(
+          `GameTooltip: no spell data for '${link}' -- Spell.dbc may not have landed yet`,
+        );
+        return [false];
+      }
+      fillSpellLines(ctx, self, row.name, row.subName, row.description);
+      return [true];
+    }
+    if (type !== null && type !== 'item') {
+      warnOnce(
+        `GameTooltip:SetHyperlink: the '${type}' link type is not built, so its tooltip stays empty `
+        + '(item and spell are)',
+      );
+      return [false];
+    }
+    return fillFromSource(ctx, self, 'link', link);
+  },
   /**
    * `SetQuestItem(type, index)` -- a reward, choice or requirement row on a giver panel.
    *

@@ -42,7 +42,7 @@ import World from '../world';
 import { GlueArt } from './art';
 import {
   MAX_SKILLLINE_TABS, SpellbookEntry, SpellbookSnapshot, SpellbookTab, emptySpellbook, getSpellbook,
-  setSpellCastHandler, setSpellbook,
+  setSpellCastHandler, setSpellbook, setSpellLinkSource,
 } from './framexml/lua/api/spells';
 import { CursorPayload, setCursorHandlers } from './framexml/lua/api/cursor';
 import { SPELL_AUTO_ATTACK, SpellHandler } from '../../network/game/object/spells';
@@ -543,9 +543,30 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
 
   (window as unknown as Record<string, unknown>).spellbookStats = stats;
 
+  /**
+   * THE SPELL-LINK TOOLTIP FEED -- `GameTooltip:SetHyperlink` on a `|Hspell:<id>|h`.
+   *
+   * Installed here because this is the bridge that already owns `Spell.dbc` for the spellbook, and
+   * because the method table it feeds has no session of its own. Straight off the DBC row rather than
+   * out of the pushed snapshot: a linked spell is often one the player does not know, and the snapshot
+   * holds only the book.
+   *
+   * `null` until the 49 MB `Spell.dbc` fetch lands, which is the same "not yet" every other spell
+   * label here answers -- and the tooltip's own retry is what fills it when it does.
+   */
+  setSpellLinkSource(vm, (spellId: number) => {
+    const row = spellData.spell(spellId);
+    if (row === null) {
+      return null;
+    }
+    return { name: row.name, subName: row.subName, description: row.description };
+  });
+
   return () => {
     spells.removeListener('spellsChanged', push);
     spells.removeListener('cooldownsChanged', pushCooldowns);
+    // The source closes over this session; a stale one outliving it is the double-mount hazard.
+    setSpellLinkSource(vm, null);
     delete (window as unknown as Record<string, unknown>).spellbookStats;
   };
 }

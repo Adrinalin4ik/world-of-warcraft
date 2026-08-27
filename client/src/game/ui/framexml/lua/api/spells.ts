@@ -153,6 +153,39 @@ function stateOf(vm: LuaVM): SpellbookState {
  * Push THEN fire, the rule this runtime's other three bridges state: `SpellBookFrame_OnEvent` calls
  * `SpellBookFrame_Update`, which re-reads `GetNumSpellTabs` and `GetSpellTabInfo` on its first lines.
  */
+/**
+ * A SPELL BY ID, for a `|Hspell:<id>|h` link clicked in chat.
+ *
+ * A VM-KEYED HOOK, the same shape and for the same reason as
+ * `api/items.ts#setItemTooltipSource`: `methods/gametooltip.ts` is a method table with no session and
+ * must not grow one, and `Spell.dbc` is loaded per session by `spellbook-bridge.ts`.
+ *
+ * **BY ID AND NOT BY SPELLBOOK SLOT, which is the whole point.** `GameTooltip:SetSpell` takes a slot
+ * and reads the player's own book -- right for the spellbook frame, and useless here: a spell linked
+ * into chat is frequently one the player does not know. `Spell.dbc` has every spell, so the link
+ * resolves either way. Narrowing this to the known book would have worked on the owner's own
+ * `[Выстрел]` and failed silently on everyone else's.
+ */
+export type SpellLinkSource = (spellId: number) => {
+  name: string;
+  subName: string;
+  description: string;
+} | null;
+
+const spellLinkByVm = new WeakMap<LuaVM, SpellLinkSource>();
+
+export function setSpellLinkSource(vm: LuaVM, source: SpellLinkSource | null): void {
+  if (source === null) {
+    spellLinkByVm.delete(vm);
+  } else {
+    spellLinkByVm.set(vm, source);
+  }
+}
+
+export function getSpellLinkSource(vm: LuaVM): SpellLinkSource | null {
+  return spellLinkByVm.get(vm) ?? null;
+}
+
 export function setSpellbook(vm: LuaVM, book: SpellbookSnapshot): void {
   stateOf(vm).book = book;
 }
