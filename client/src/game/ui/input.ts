@@ -524,7 +524,33 @@ export class GlueInput {
 
     this.pressHit = hit;
 
-    this.setFocus(hit && hit.focusable ? hit : null);
+    /**
+     * A CLICK ELSEWHERE DOES NOT TAKE THE KEYBOARD AWAY FROM AN EDIT BOX.
+     *
+     * The owner: shift-clicking a bag item to link it "снимается фокус с поля ввода и оно пропадает =
+     * ничего не линкуется". Both halves were this one line, which used to clear the focus on ANY press
+     * that did not land on something focusable:
+     *
+     *  - the field VANISHED because losing focus fires `OnEditFocusLost` ->
+     *    `ChatEdit_DeactivateChat` -> `ChatEdit_SetDeactivated`, whose whole body hides or dims the box
+     *    (`chatframe.lua:3411-3428`);
+     *  - and nothing LINKED because `ChatEdit_InsertLink` inserts only into
+     *    `ChatEdit_GetActiveWindow()` (`:3490-3495`), which by then was nil -- so it fell through to
+     *    the auction and macro branches and returned false.
+     *
+     * THE ENGINE MOVES KEYBOARD FOCUS ONLY ON PURPOSE: a click INTO an edit box, an explicit
+     * `SetFocus`/`ClearFocus`, Escape, or Tab. A press on a Button is not one of those, and the whole
+     * shift-to-link gesture is built on that -- you keep typing, click an item, and the link arrives in
+     * the sentence you were writing. Clearing here made every such gesture impossible rather than
+     * merely awkward.
+     *
+     * So focus MOVES to a focusable hit and is otherwise LEFT ALONE. Escape still clears it
+     * (`onKeyDown`'s focused branch) and so does the client's own `ClearFocus`, which are the routes
+     * that are supposed to.
+     */
+    if (hit && hit.focusable) {
+      this.setFocus(hit);
+    }
 
     // A PRESS ON A MODEL PANE. `paneAt` owns the z-order decision -- it answers null when anything
     // scriptable is on top, which is what keeps the two rotate buttons inside the pane's own rect
