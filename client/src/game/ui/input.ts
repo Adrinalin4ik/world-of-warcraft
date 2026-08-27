@@ -21,6 +21,7 @@ import { keyToken } from './framexml/bindings';
 import {
   focusChain, hitTest, hyperlinkAt, nextFocus, paneAt, sliderThumbAt, wheelTargetAt,
 } from './hit';
+import { linkRunEndingAt } from './markup';
 import { layoutRectOf } from './rects';
 import { viewportUnits } from './layout';
 import { DrawItem, MouseButtonName, Widget } from './widget';
@@ -1011,8 +1012,20 @@ export class GlueInput {
       if (this.hasSelection(target)) {
         this.deleteSelection(target);
       } else if (target.caret > 0) {
-        target.text = target.text.slice(0, target.caret - 1) + target.text.slice(target.caret);
-        target.caret -= 1;
+        /**
+         * A WHOLE HYPERLINK GOES IN ONE PRESS. See `markup.ts#linkRunEndingAt`.
+         *
+         * Per-character deletion ate the closing `|h` first, which left a malformed escape the parser
+         * could no longer hide -- so the item id surfaced in the field, which is exactly what the
+         * owner reported. A link is one character to an editor, and the engine treats it as one.
+         *
+         * The range test runs only when the caret is preceded by `|h` or `|r`, so an ordinary
+         * Backspace pays two `slice` comparisons and nothing else.
+         */
+        const run = linkRunEndingAt(target.text, target.caret);
+        const from = run === null ? target.caret - 1 : run.start;
+        target.text = target.text.slice(0, from) + target.text.slice(target.caret);
+        target.caret = from;
         target.selectionAnchor = target.caret;
       }
     } else if (event.key === 'Delete') {

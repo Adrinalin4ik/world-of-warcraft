@@ -524,11 +524,29 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
   /**
    * The `|Hitem:...|h[Name]|h` hyperlink `GetContainerItemLink` and `GetItemInfo` answer.
    *
-   * The twelve numeric fields after the entry are enchant, three gems, a suffix, a unique id, the
-   * player's level and three reforge/upgrade words. This client decodes none of them and writes zeros,
-   * which is what an unenchanted, ungemmed item's link genuinely is -- so the link is correct for the
-   * common case and understates a socketed one. `HandleModifiedItemClick` and the tooltip parse the
-   * entry out of position 2, which is the part that has to be right.
+   * NINE numeric fields after the entry: enchant, four gems, a random-property suffix, a unique id and
+   * the link level. This client decodes none of them and writes zeros, which is what an unenchanted,
+   * ungemmed item's link genuinely is -- correct for the common case and understating a socketed one.
+   *
+   * **IT USED TO WRITE ELEVEN, AND THE COMMENT HERE PROVED THEM WRONG RATHER THAN RIGHT:** it
+   * justified the last three as "reforge/upgrade words", and reforging is Cataclysm and upgrades are
+   * Mists -- neither exists in 3.3.5a. So the shape was retail's, written into a 3.3.5a client, which
+   * is precisely the version-numbered-value trap this project records.
+   *
+   * THE COUNT IS TRANSCRIBED, NOT READ, and nothing available here can settle it: no file in the
+   * 264-file manifest builds an item string (the engine composes them), and the reference is 1.12 and
+   * writes `item:id:0:0:0` (`benilla-app/src/capture/fixtures.rs:1358`) -- which is itself proof that
+   * the number moves between versions and that benilla is not the authority on it. So this carries the
+   * same standing note as `framexml/bindings.ts`' default keys.
+   *
+   * WHY IT MIGHT MATTER BEYOND TIDINESS, stated as a hypothesis and not as a finding: the owner
+   * reports that a message containing ONLY a link does not send, and a 3.3.5a server with strict link
+   * checking validates the field count before broadcasting and drops the packet with no reply -- the
+   * same silent signature this project has been bitten by over widths. Whether that is the cause is
+   * for his next test to say; what is certain is that the old count could not be right.
+   *
+   * `HandleModifiedItemClick` and the tooltip parse the entry out of position 2 either way, which is
+   * the part that has to be right for anything local to work.
    */
   const itemLink = (item: SlotItem): string | null => {
     if (item.template === null) {
@@ -539,7 +557,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       `local _,_,_,hex = GetItemQualityColor(${quality}) return hex`, 'item-link.lua',
     ) as { value?: unknown } | null;
     const hex = String(answer?.value ?? '|cffffffff');
-    return `${hex}|Hitem:${item.entry}:0:0:0:0:0:0:0:0:0:0|h[${item.template.name}]|h|r`;
+    return `${hex}|Hitem:${item.entry}:0:0:0:0:0:0:0:0:0|h[${item.template.name}]|h|r`;
   };
 
   // -- The globals --------------------------------------------------------------------------------

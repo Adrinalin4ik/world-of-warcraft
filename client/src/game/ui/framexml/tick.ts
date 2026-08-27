@@ -11,6 +11,7 @@
 import { Widget } from '../widget';
 import { caretOffset } from '../text';
 import { FocusSink, FrameRegistry } from './lua/object';
+import { parseMarkup, plainIndexOf } from '../markup';
 
 /**
  * The caret, OURS.
@@ -202,7 +203,18 @@ export function placeCaret(
     caret.shown = false;
     return;
   }
-  caret.anchors[0].x = caretOffset(box.displayText, spec, 1, box.caret);
+  /**
+   * OVER THE PLAIN TEXT, because that is what the glyphs are.
+   *
+   * The box stores the raw escaped string -- an item link is ~60 characters of which ~8 are drawn --
+   * and the raster parses it. Measuring the raw prefix put the caret far right of the text it belongs
+   * to, which is the owner's "курсор улетает после вставки". `plainIndexOf` maps the caret through the
+   * SAME parse that produced the glyphs; see its header for why it reuses `parseMarkup` rather than
+   * walking the escapes again.
+   */
+  const raw = box.displayText;
+  const shown = parseMarkup(raw).plain;
+  caret.anchors[0].x = caretOffset(shown, spec, 1, plainIndexOf(raw, box.caret));
   caret.shown = true;
 }
 
