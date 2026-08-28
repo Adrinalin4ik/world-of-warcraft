@@ -524,14 +524,23 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
   /**
    * The `|Hitem:...|h[Name]|h` hyperlink `GetContainerItemLink` and `GetItemInfo` answer.
    *
-   * NINE numeric fields after the entry: enchant, four gems, a random-property suffix, a unique id and
-   * the link level. This client decodes none of them and writes zeros, which is what an unenchanted,
-   * ungemmed item's link genuinely is -- correct for the common case and understating a socketed one.
+   * **NINE NUMBERS IN TOTAL, OF WHICH THE ENTRY IS THE FIRST -- so EIGHT zeros follow it.** The count
+   * is spelled both ways here on purpose: confusing "numbers in the string" with "zeros after the
+   * entry" is exactly how this line was wrong twice in two commits, once in each direction.
    *
-   * **IT USED TO WRITE ELEVEN, AND THE COMMENT HERE PROVED THEM WRONG RATHER THAN RIGHT:** it
-   * justified the last three as "reforge/upgrade words", and reforging is Cataclysm and upgrades are
-   * Mists -- neither exists in 3.3.5a. So the shape was retail's, written into a 3.3.5a client, which
-   * is precisely the version-numbered-value trap this project records.
+   * The nine are `itemId, enchantId, jewelId1..4, suffixId, uniqueId, linkLevel` -- the order every
+   * 3.3.5a-era consumer destructures with `strsplit(":", itemString)`. This client decodes none but the
+   * first and writes zeros, which is what an unenchanted, ungemmed item's link genuinely is: correct
+   * for the common case and understating a socketed one.
+   *
+   * **IT WROTE ELEVEN ZEROS, THEN NINE, AND NEITHER SENT.** The eleven came with a comment justifying
+   * three of them as "reforge/upgrade words" -- reforging is Cataclysm, upgrades are Mists, neither
+   * exists here -- so that shape was retail's. The nine was mine, off by one from misreading my own
+   * measurement. The owner saw the same symptom for both: a message containing only an item link is
+   * accepted by the field, sent on the wire, and produces NO REPLY -- while a spell link from the same
+   * field sends perfectly. A 3.3.5a server with strict link checking validates the field count before
+   * broadcasting and returns without a word, which is the silent signature this project knows from
+   * widths.
    *
    * THE COUNT IS TRANSCRIBED, NOT READ, and nothing available here can settle it: no file in the
    * 264-file manifest builds an item string (the engine composes them), and the reference is 1.12 and
@@ -557,7 +566,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       `local _,_,_,hex = GetItemQualityColor(${quality}) return hex`, 'item-link.lua',
     ) as { value?: unknown } | null;
     const hex = String(answer?.value ?? '|cffffffff');
-    return `${hex}|Hitem:${item.entry}:0:0:0:0:0:0:0:0:0|h[${item.template.name}]|h|r`;
+    return `${hex}|Hitem:${item.entry}:0:0:0:0:0:0:0:0|h[${item.template.name}]|h|r`;
   };
 
   // -- The globals --------------------------------------------------------------------------------
