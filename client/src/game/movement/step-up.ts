@@ -69,9 +69,26 @@ export interface StepUpResult {
     travel: number;
     /** The body-scaled forward reach actually used. */
     advance: number;
-    /** The settle: how far it descended, and the floor normal it found. */
+    /** The settle: how far it descended, and the floor normal it found. FAR probe, for continuity. */
     downDist: number | null;
     downNz: number | null;
+    /**
+     * **EVERY settle probe, one row each -- because "why did the near probe not help" cannot be
+     * answered from the far one.**
+     *
+     * The owner is still stuck after the two-offset change, and the previous record could not say
+     * whether the near probe found nothing, found a steep floor, found a zero-distance contact (the
+     * no-descent guard, which SKIPS the offset), or found a floor that was simply not higher. Those
+     * are four different files. `climb` is `rise - dist`, so each row carries its own verdict.
+     */
+    settles: Array<{
+      offset: number;
+      reach: number;
+      dist: number | null;
+      nz: number | null;
+      /** What this row contributed: a candidate landing, or the reason it did not. */
+      as: 'candidate' | 'no-floor' | 'steep' | 'no-descent';
+    }>;
   };
 }
 
@@ -145,7 +162,8 @@ export function stepUp(
   // Undefined when the trace is off, and every write below is guarded by that.
   const detail: StepUpResult['detail'] = moveTrace.enabled
     ? {
-      aheadDist: -1, aheadN: [0, 0, 0], rise: 0, forward: 0, travel, advance, downDist: null, downNz: null,
+      aheadDist: -1, aheadN: [0, 0, 0], rise: 0, forward: 0, travel, advance,
+      downDist: null, downNz: null, settles: [],
     }
     : undefined;
 
@@ -232,6 +250,9 @@ export function stepUp(
     // Same skin as the election snap: a committed step must not land flush against its floor.
     const hit = cast(at, _down, reach, SKIN_WIDTH);
     if (!hit) {
+      if (detail) {
+        detail.settles.push({ offset, reach, dist: null, nz: null, as: 'no-floor' });
+      }
       continue;
     }
     sawFloor = true;
@@ -241,12 +262,27 @@ export function stepUp(
       detail.downNz = hit.normal.z;
     }
     if (hit.normal.z < GROUND_COS) {
+      if (detail) {
+        detail.settles.push({
+          offset, reach, dist: hit.distance, nz: hit.normal.z, as: 'steep',
+        });
+      }
       continue;
     }
     sawWalkable = true;
     // A settle that did not descend is not a landing -- see the block below for what zero means.
     if (hit.distance <= 0) {
+      if (detail) {
+        detail.settles.push({
+          offset, reach, dist: hit.distance, nz: hit.normal.z, as: 'no-descent',
+        });
+      }
       continue;
+    }
+    if (detail) {
+      detail.settles.push({
+        offset, reach, dist: hit.distance, nz: hit.normal.z, as: 'candidate',
+      });
     }
     const landed = at.clone().addScaledVector(_down, hit.distance);
     const climb = landed.z - center.z;
