@@ -118,7 +118,45 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
     ]);
   };
 
+  /**
+   * `window.lastChatLinks` -- the hyperlink payloads the SERVER has sent us, newest last.
+   *
+   * **THE ONE AUTHORITY AVAILABLE ON A LINK'S SHAPE, and I have guessed at it twice.** The owner: a
+   * message containing only an item link "отправляет, но... нет ответа и он не отображает в чате" --
+   * the silent-refusal signature this project knows from widths, and a SPELL link in the same field
+   * sends perfectly. So the send path, the encoding and `SendChatMessage` are all ruled out by that
+   * asymmetry, and what differs is the item link's own field count, which a 3.3.5a server with strict
+   * link checking validates before broadcasting.
+   *
+   * No file settles the count: the engine composes item strings, nothing in the 264-file manifest
+   * builds one, and the reference is 1.12 and writes a different number. But the SERVER writes them
+   * too -- every loot message carries `|cff...|Hitem:...|h[Name]|h|r` -- so its own form arrives here
+   * in the ordinary course of play, and matching it needs no guess at all.
+   *
+   * `fields` is the count after the type, which is the number in question. Five entries, so a burst of
+   * loot does not push the interesting one out; no allocation while nothing has links, which is most
+   * lines.
+   */
+  const seenLinks: Array<{ payload: string; fields: number; type: string }> = [];
+  const captureLinks = (text: string): void => {
+    if (text.indexOf('|H') === -1) {
+      return;
+    }
+    const pattern = /\|H([^|]*)\|h/g;
+    let match = pattern.exec(text);
+    while (match !== null) {
+      const parts = match[1].split(':');
+      seenLinks.push({ payload: match[1], fields: parts.length - 1, type: parts[0] });
+      while (seenLinks.length > 5) {
+        seenLinks.shift();
+      }
+      match = pattern.exec(text);
+    }
+    (window as unknown as Record<string, unknown>).lastChatLinks = seenLinks;
+  };
+
   const onLine = (line: ChatLine): void => {
+    captureLinks(line.text);
     if (!needsPlayerName(line)) {
       raise(line, line.senderName ?? '');
       return;
