@@ -143,10 +143,35 @@ function ms(value: number): string {
   return value.toFixed(1);
 }
 
+/**
+ * Frames per second, DERIVED FROM THE SAME SAMPLE the milliseconds beside it print.
+ *
+ * Not a second counter, deliberately: a rate measured on its own cadence and a frame time measured
+ * per frame disagree the moment the load is uneven, and then the panel argues with itself. `1000 / ms`
+ * cannot -- it is the same number in the units a player thinks in.
+ *
+ * ROUNDED TO A WHOLE FRAME. The fraction is noise at this cadence and reads as precision the
+ * measurement does not have.
+ *
+ * `--` for no samples yet, rather than a division by zero dressed up as Infinity.
+ */
+function fps(frameMs: number): string {
+  return frameMs > 0 ? String(Math.round(1000 / frameMs)) : '--';
+}
+
 function format(p: PerfPayload): string {
   const f = p.frame;
   const lines = [
     `worst ${ms(f.worst)}ms   budget ${ms(FRAME_BUDGET_MS)}ms`,
+    /**
+     * FPS as its own line, and BOTH ends of it.
+     *
+     * The median is the rate the player sees most of the time; the worst frame's rate is the hitch
+     * they actually notice, which is this panel's stated philosophy one line up ("averages hide the
+     * hitch a player feels"). One without the other is the half that misleads: 60 median with a 24 ms
+     * worst frame is not a 60 fps experience.
+     */
+    `fps ${fps(f.p50)}   worst ${fps(f.worst)}`,
     `p50 ${ms(f.p50)}  p99 ${ms(f.p99)}  last ${ms(f.last)}`,
     `over-budget ${f.overBudget}/${f.sampleCount}`,
     `gpu ${p.gpuMs === null ? 'n/a' : `${ms(p.gpuMs)}ms`}`,
