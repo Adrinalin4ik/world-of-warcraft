@@ -14,6 +14,20 @@ import { stepUp, StepUpResult, StepUpVerdict } from './step-up';
 
 const _down = new THREE.Vector3(0, 0, -1);
 
+/**
+ * **WHAT "WENT NOWHERE" MEANS (yd of horizontal travel in one frame), in ONE place.**
+ *
+ * It was `1e-6`, and the owner's stall measured **0.0006** -- six hundred times that, and six tenths
+ * of a millimetre a frame. So the push-out declined all 18 frames of a dead stop as "moved", which is
+ * both a missed recovery and a lying diagnosis: the trace named the state correctly only because the
+ * stall trap uses a different number for the same idea, `1e-3`. Two thresholds for one concept is how
+ * an instrument and the code it measures come to disagree, so they now share this.
+ *
+ * A walking frame travels about 0.12 yd, so this is a two-hundredth of a step: too small to catch a
+ * body that is genuinely creeping along a wall, large enough to catch one that is not moving.
+ */
+const STUCK_TRAVEL = 1e-3;
+
 /** The election snap's probe reach and what it found -- trace fodder. */
 export interface SnapTrace {
   reach: number;
@@ -358,6 +372,7 @@ export function step(
     ? input.dir.clone().normalize().multiplyScalar(input.speed)
     : new THREE.Vector3();
 
+  
   const halfH = CAPSULE_HEIGHT * 0.5;
   let center = state.pos.clone();
   center.z += halfH;
@@ -503,7 +518,7 @@ export function step(
         pushOutReason = 'no-contact';
       } else if (state.horizVel.lengthSq() <= 1e-12) {
         pushOutReason = 'no-input';
-      } else if (Math.hypot(center.x - before.x, center.y - before.y) >= 1e-6) {
+      } else if (Math.hypot(center.x - before.x, center.y - before.y) >= STUCK_TRAVEL) {
         pushOutReason = 'moved';
       } else {
         pushOutReason = 'ran';
@@ -524,7 +539,7 @@ export function step(
     if (depenetrate !== undefined
       && resolved.contacts > 0
       && state.horizVel.lengthSq() > 1e-12
-      && movedH < 1e-6) {
+      && movedH < STUCK_TRAVEL) {
       const freed = depenetrate(center, SKIN_WIDTH);
       if (freed !== null) {
         pushOutReason = 'freed';
