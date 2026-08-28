@@ -13,6 +13,18 @@ import { StepUpResult, StepUpVerdict } from './step-up';
 export interface MoveTraceFrame {
   zIn: number;
   zOut: number;
+  /**
+   * Where this frame ended, horizontally.
+   *
+   * Recorded because the owner's report is "это происходит всегда в одном месте" -- a defect that
+   * repeats at ONE spot is a geometry defect, and the spot is the most valuable thing about it. A
+   * trace that says what happened but not where cannot be walked back to.
+   *
+   * Optional to match the rest of this interface -- the readout's own fixtures build frames
+   * without them -- but the mover always supplies both.
+   */
+  x?: number;
+  y?: number;
   grounded: boolean;
   onWalkable: boolean;
   velZ: number;
@@ -63,6 +75,34 @@ class MoveTrace {
 
   private frames: MoveTraceFrame[] = [];
 
+  /**
+   * **THE SELF-STOPPING TRIP, in yards of drop. `null` to record continuously.**
+   *
+   * `armDrop(n)` turns the trace on and stops it again the instant a single grounded frame loses
+   * `n` yards of height -- which freezes the ring buffer with the event as its LAST entry and the
+   * run-up to it intact.
+   *
+   * This exists because the alternative does not work, twice proven on this project: an instrument
+   * a human switches off by hand records the frames AFTER the gesture, and both `castTrace` and
+   * this trace have already produced a reading that was entirely standing-still frames. Falling
+   * through a stair is worse than a feel report -- by the time the owner reaches the keyboard the
+   * body has landed, slid and settled somewhere else entirely, and the frames that explain it are
+   * long out of a window of any length. So the EVENT has to be what stops the recording.
+   */
+  stopOnDrop: number | null = null;
+
+  /** The frame that tripped `stopOnDrop`, kept after the trace disarms itself. */
+  tripped: MoveTraceFrame | null = null;
+
+  /** Arm the trip and start recording. One call, so the console cannot half-arm it. */
+  armDrop(yards = 0.5): string {
+    this.clear();
+    this.tripped = null;
+    this.stopOnDrop = yards;
+    this.enabled = true;
+    return `armed: recording, will stop on a grounded frame losing ${yards} yd`;
+  }
+
   frame(record: MoveTraceFrame): void {
     if (!this.enabled) {
       return;
@@ -71,6 +111,12 @@ class MoveTrace {
     this.frames.push(record);
     if (this.frames.length > HISTORY) {
       this.frames.shift();
+    }
+
+    // AFTER the push, so the tripping frame is in the history rather than only in `tripped`.
+    if (this.stopOnDrop !== null && record.zIn - record.zOut >= this.stopOnDrop) {
+      this.tripped = record;
+      this.enabled = false;
     }
   }
 

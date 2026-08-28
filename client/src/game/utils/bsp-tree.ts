@@ -161,11 +161,21 @@ class BSPTree {
    * The locals are named after the half they test, so a future reader cannot pair them wrongly
    * without the line reading obviously false.
    *
-   * ONE SUSPECTED DEFECT LEFT UNTOUCHED, deliberately, because there is no measurement for it: the
-   * axis is compared with `flags == 0/1/2` rather than `flags & 0x3`. A well-formed MOBN carries only
-   * those values on an internal node (0x4 marks a leaf), but any extra bit would make every arm miss
-   * and silently prune the whole subtree -- which is the same symptom as this bug. Fixing both at
-   * once would leave neither attributable.
+   * THE SECOND SUSPECT IS NOW MEASURED AND ACQUITTED, and the note that stood here said it could not
+   * be. The axis is compared with `flags == 0/1/2` rather than `flags & 0x3`, so an internal node
+   * carrying any extra bit would fall through to the `return` below and silently prune its whole
+   * subtree -- a HOLE in the collision at one fixed place, which is exactly the shape of the owner's
+   * "я проваливаюсь под текстуры... всегда в одном месте".
+   *
+   * So it was worth an hour, and it took one: the abbey group the earlier trace named as the hit
+   * source, `world/wmo/azeroth/buildings/nsabbey/nsabbey_005.wmo`, decoded straight off the asset host
+   * and its MOBN histogrammed. **452 nodes, flags exactly `{0: 79, 1: 66, 2: 94, 4: 213}`, and not one
+   * internal node this comparison drops.** The equality is equivalent to the mask on this data.
+   *
+   * It is left as an equality rather than 'fixed' to a mask, because there is now nothing to fix here
+   * and a change would only move the suspicion somewhere unmeasured. `Flag_NoChild` is `0xFFFF` in the
+   * format, so a mask would ALSO have to answer for that value; if a group is ever found with axis bits
+   * beside other flags, that is the day for it, and this paragraph is the measurement to re-run.
    */
   queryBox(bbox, nodeIndex, bspLeafIdList) {
     if (nodeIndex === -1) {

@@ -549,6 +549,8 @@ export function step(
   moveTrace.frame({
     zIn: preMove.z - halfH,
     zOut: state.pos.z,
+    x: state.pos.x,
+    y: state.pos.y,
     grounded,
     onWalkable,
     velZ: state.velZ,
