@@ -147,6 +147,42 @@ export const STEP_SNAP_SLACK = 1 / 36;
 export const STEP_UP_HEIGHT = 0.7;
 
 /**
+ * **THE STEP-UP'S FORWARD REACH (yd), and it is a property of the BODY, not of the frame rate.**
+ *
+ * How far the maneuver must reach to SEE the tread it would stand on is a question about the
+ * body's width, so it cannot be this frame's travel -- and passing travel for it is the defect the
+ * owner walked into. Measured on his own trace at a step he could not climb: `fwd` equal to `travel`
+ * at 0.17-0.22 yd, the elevated sweep completely free, and the settle nevertheless descending 0.6991
+ * of a 0.7 rise -- back onto its own floor, `climb` 0.0009, refused by the net-zero bar.
+ *
+ * The arithmetic says why, and it is about the capsule's WIDTH. Pressed against a riser the centre
+ * stands `CAPSULE_RADIUS + skin` from its plane; advancing one frame leaves the centre still BEHIND
+ * that plane, so the descending capsule's lower sphere still overhangs the floor it came from --
+ * 0.70 away, where the tread edge is 1.16 away. The nearer surface wins and the maneuver lands where
+ * it started. To clear the lip the advance must exceed a radius, and a radius is not a time.
+ *
+ * **THE VALUE IS THE GAME'S, not a body-scaled guess of ours.** The reference reads it out of the
+ * client at `0x636193`, where `ebx` is `max(H * tan50deg, radius + 1/720)` and has exactly two uses,
+ * both the LENGTH argument to the sweep at `0x632ba0` -- never added to a position. With the
+ * verified `H` of 1.0 (decision 1125: `0x617430` is `[unit+0xb8]`, the dimensionless scale ratio,
+ * so a player's `H` is 1.0) that is **1.1917536**
+ * (`samples/benilla/crates/benilla-app/src/player/state.rs:184`).
+ *
+ * That 1.0 is the CLIENT's step budget and our own `STEP_UP_HEIGHT` above is not -- 0.7 is ours and
+ * deliberately modest. The two are independent and both stay: this constant is a SWEEP LENGTH, and
+ * lengthening a sweep does not widen what may be climbed. The reference makes that argument
+ * explicitly and it is what makes the longer reach safe: the rise ceiling still bounds the lift, the
+ * settle must still find a WALKABLE floor higher than the feet, and -- the load-bearing part -- the
+ * elevated forward sweep is CLIPPED by anything in the way, so the advance only ever reaches as far
+ * as there is clear air at the raised height. A fence, a trunk and a two-trunk pinch still block at
+ * the same body height, with a clipped advance and a net-zero settle.
+ *
+ * The frame's own travel still wins when it is longer, so this is a FLOOR and not a fixed reach: a
+ * very low frame rate never steps you less far than you asked to walk.
+ */
+export const STEP_UP_ADVANCE = 1.1917536;
+
+/**
  * The landing probe (yd): while airborne, walk mode resumes only this close to the floor, so the
  * arc ends where the slide actually contacts.
  *

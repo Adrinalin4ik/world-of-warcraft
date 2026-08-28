@@ -100,7 +100,19 @@ describe('groundedStep', () => {
     expect(out.snap!.hit).toBeNull();
   });
 
-  it('lets a committed step-up BE the frame, skipping the slide and the snap', () => {
+  /**
+   * **THIS TEST ASSERTED THE TELEPORT, and its old name was the design it was guarding: "lets a
+   * committed step-up BE the frame, skipping the slide and the snap".**
+   *
+   * That is precisely what the reference reversed. The probe's landing sits a full body length
+   * downrange, so making it the frame put a horizontal lurch in every step-up; and skipping the
+   * snap is what let a wrong certification strand the body in the air with nothing to undo it.
+   *
+   * The commit is now a vertical rise, after which the ORDINARY slide and the ORDINARY settle own
+   * the frame -- so `snap` being present is the corrected behaviour, and it is asserted as such:
+   * this is the mechanism that makes a mistaken certification self-correcting.
+   */
+  it('rises on a committed step-up and lets the ordinary slide and snap own the frame', () => {
     const r = (70 * Math.PI) / 180;
     const steepFace = v3(-Math.sin(r), 0, Math.cos(r));
     let horizontalProbes = 0;
@@ -119,7 +131,9 @@ describe('groundedStep', () => {
     expect(out.climb).not.toBeNull();
     expect(out.climb!).toBeGreaterThan(0);
     expect(out.stepUpVerdict).toBe('commit');
-    expect(out.snap).toBeNull();
+    // The settle ran, which is the correction: it reads back past the height just gained, so it
+    // finds the obstacle's top or the ground we left rather than leaving the body popped.
+    expect(out.snap).not.toBeNull();
   });
 
   it('carries the step-up verdict through even when it did not commit', () => {

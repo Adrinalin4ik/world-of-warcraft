@@ -23,10 +23,21 @@ export type StepUpVerdict =
   | 'no-descent';
 
 export interface StepUpResult {
-  /** The resolved capsule centre, non-null only on `'commit'`. */
-  landed: THREE.Vector3 | null;
   verdict: StepUpVerdict;
-  /** Height gained (yd), 0 unless committed. */
+  /**
+   * **THE RISE TO COMMIT -- VERTICAL, IN PLACE. This, and not `landed`, is what the frame does.**
+   *
+   * 0 unless certified. See the header for why committing `landed` was wrong in kind.
+   */
+  rise: number;
+  /**
+   * DIAGNOSTIC ONLY: where the certification's settle found floor, one full advance downrange.
+   *
+   * Committing this as the frame's position is the teleport the reference removed. It is kept
+   * because the trace reads it, and named here so it cannot be re-adopted by accident.
+   */
+  landed: THREE.Vector3 | null;
+  /** DIAGNOSTIC ONLY: the height the settle certified, i.e. the reference's `dy`. */
   climb: number;
   /**
    * The maneuver's INTERMEDIATE numbers, recorded only while `moveTrace.enabled`.
@@ -56,6 +67,8 @@ export interface StepUpResult {
     /** How far the raised capsule actually advanced, against `travel` asked for. */
     forward: number;
     travel: number;
+    /** The body-scaled forward reach actually used. */
+    advance: number;
     /** The settle: how far it descended, and the floor normal it found. */
     downDist: number | null;
     downNz: number | null;
@@ -66,14 +79,45 @@ const _up = new THREE.Vector3(0, 0, 1);
 const _down = new THREE.Vector3(0, 0, -1);
 
 /**
- * The atomic step-up -- the standard kinematic-controller maneuver: a steep opposing face within
+ * **THE STEP-UP IS A CERTIFICATION, NOT A MOVE -- two corrections, both measured, both the
+ * reference's own.**
+ *
+ * 1. **`look` and `advance` are different questions.** "Is there a steep face in my way NOW" is
+ *    about this frame, so the look-ahead is this frame's travel. "How far must I reach to see the
+ *    tread I would stand on" is about the BODY, so the advance is at least `STEP_UP_ADVANCE`
+ *    whatever the frame rate or the gait. Passing travel for both is what made a small step
+ *    unclimbable: the settle never got past the lip and landed back on its own floor
+ *    (`constants.ts#STEP_UP_ADVANCE` carries the owner's trace and the arithmetic).
+ *
+ * 2. **What the frame commits is a RISE, never this probe's landing.** Committing `landed` puts a
+ *    full advance of horizontal teleport into every step-up -- ten frames of travel in one frame,
+ *    at ten times walking speed -- and the reference's own reading says it is wrong in KIND and not
+ *    merely in magnitude: `0x636193`'s length is never added to a position, every position write in
+ *    the walk resolver is RELATIVE, and what the certified arm commits is a free vertical segment
+ *    after which the caller's own heading resumes with the budget that is left
+ *    (`samples/benilla/crates/benilla-app/src/player/mover.rs:511-536`, decision 1130).
+ *
+ *    So the caller rises in place and lets the ordinary slide and the ordinary settle own the
+ *    frame, exactly as they do on flat ground. The settle cannot strand the body up there: its
+ *    reach always reads back past the height just gained, so it finds the obstacle's top or the
+ *    ground we left -- which makes a WRONG certification self-correcting rather than a stall.
+ *
+ * NOT PORTED, and named so the gap is not silent: the foot-cone RIDE (`mover.rs:487-509`, decision
+ * 1123). The real client's movement solid is a cone below `FOOT_CONE_HEIGHT`, so a low edge meets a
+ * slanted skirt and is ridden up over several frames instead of popped. Without it a low step takes
+ * the atomic pop, which is a coarser look and not a stall. The cone-capped descent (decision 1132)
+ * is absent for the same reason.
+ *
+ * ---
+ *
+ * The maneuver itself: a steep opposing face within
  * this frame's travel triggers RISE, ADVANCE, SETTLE, committed whole inside one frame, or nothing
  * happens and the plain slide runs.
  *
  * - RISE by the free headroom, at most STEP_UP_HEIGHT -- the deliberately low ceiling that scopes
  *   this to stairs, doorsteps and low rocks, and keeps fences and walls slide-only.
- * - ADVANCE this frame's own travel along the INPUT direction at the raised height. Never a
- *   probe-length lunge.
+ * - ADVANCE `advance` along the INPUT direction at the raised height, clipped by whatever is in
+ *   the way -- so the reach only ever spends the clear air that is actually there.
  * - SETTLE back down by the walk election's own reach; commit ONLY onto a walkable floor that is
  *   actually higher.
  *
@@ -92,18 +136,21 @@ export function stepUp(
   cast: CastFn,
   center: THREE.Vector3,
   dirH: THREE.Vector3,
+  /** The look-ahead: this frame's travel. */
   travel: number,
+  /** The forward reach of the rise/settle probe -- a body length, not a frame. */
+  advance: number,
 ): StepUpResult {
   // The trace record, filled in as the maneuver proceeds so a MISS carries whatever it had reached.
   // Undefined when the trace is off, and every write below is guarded by that.
   const detail: StepUpResult['detail'] = moveTrace.enabled
     ? {
-      aheadDist: -1, aheadN: [0, 0, 0], rise: 0, forward: 0, travel, downDist: null, downNz: null,
+      aheadDist: -1, aheadN: [0, 0, 0], rise: 0, forward: 0, travel, advance, downDist: null, downNz: null,
     }
     : undefined;
 
   const miss = (verdict: StepUpVerdict): StepUpResult => ({
-    landed: null, verdict, climb: 0, detail,
+    landed: null, verdict, climb: 0, rise: 0, detail,
   });
 
   // A steep, non-overhanging face opposing the motion, within this frame's travel. No incidence
@@ -135,8 +182,8 @@ export function stepUp(
 
   // ADVANCE: this frame's travel along the input direction, swept at the raised height.
   const raised = center.clone().addScaledVector(_up, rise);
-  const forwardHit = cast(raised, dirH, travel);
-  const forward = forwardHit ? forwardHit.distance : travel;
+  const forwardHit = cast(raised, dirH, advance);
+  const forward = forwardHit ? forwardHit.distance : advance;
   if (detail) {
     detail.forward = forward;
   }
@@ -144,7 +191,7 @@ export function stepUp(
 
   // SETTLE: the walk election's reach below the advanced point -- the rise undone, plus the
   // travel-scaled step-down allowance -- onto a WALKABLE floor only.
-  const reach = rise + travel * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+  const reach = rise + advance * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
   // Same skin as the election snap: a committed step must not land flush against its floor.
   const downHit = cast(over, _down, reach, SKIN_WIDTH);
   if (!downHit) {
@@ -202,5 +249,5 @@ export function stepUp(
     return miss('net-zero');
   }
 
-  return { landed, verdict: 'commit', climb, detail };
+  return { landed, verdict: 'commit', climb, rise, detail };
 }

@@ -5,7 +5,9 @@ import * as THREE from 'three';
 
 import { CastFn } from '../../collision/collision-world';
 import { CastHit } from '../../collision/types';
-import { CAPSULE_HEIGHT, GROUND_COS, STEP_UP_HEIGHT } from '../constants';
+import {
+  CAPSULE_HEIGHT, CAPSULE_RADIUS, GROUND_COS, STEP_UP_ADVANCE, STEP_UP_HEIGHT,
+} from '../constants';
 import { stepUp } from '../step-up';
 
 const v3 = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
@@ -48,7 +50,7 @@ function steepFace() {
 
 describe('stepUp', () => {
   it('does nothing when there is no obstacle ahead', () => {
-    const out = stepUp(scriptedCast({ ahead: null }), v3(0, 0, 0), FWD, 0.12);
+    const out = stepUp(scriptedCast({ ahead: null }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.landed).toBeNull();
     expect(out.verdict).toBe('no-obstacle');
@@ -58,14 +60,14 @@ describe('stepUp', () => {
     const walkable = v3(-0.3, 0, 0.954).normalize(); // ~17 degrees
     expect(walkable.z).toBeGreaterThan(GROUND_COS);
 
-    const out = stepUp(scriptedCast({ ahead: hit(0.05, walkable) }), v3(0, 0, 0), FWD, 0.12);
+    const out = stepUp(scriptedCast({ ahead: hit(0.05, walkable) }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.verdict).toBe('no-obstacle');
   });
 
   it('leaves an overhang alone', () => {
     const overhang = v3(-0.5, 0, -0.7).normalize();
-    const out = stepUp(scriptedCast({ ahead: hit(0.05, overhang) }), v3(0, 0, 0), FWD, 0.12);
+    const out = stepUp(scriptedCast({ ahead: hit(0.05, overhang) }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.verdict).toBe('no-obstacle');
   });
@@ -73,7 +75,7 @@ describe('stepUp', () => {
   it('leaves a receding face alone', () => {
     // A face whose normal points the same way we are travelling opposes nothing.
     const receding = v3(Math.sin(1.2), 0, Math.cos(1.2)).normalize();
-    const out = stepUp(scriptedCast({ ahead: hit(0.05, receding) }), v3(0, 0, 0), FWD, 0.12);
+    const out = stepUp(scriptedCast({ ahead: hit(0.05, receding) }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.verdict).toBe('no-obstacle');
   });
@@ -84,13 +86,14 @@ describe('stepUp', () => {
       up: null,                              // full STEP_UP_HEIGHT of headroom
       forward: null,                         // the full travel is clear at the raised height
       down: hit(STEP_UP_HEIGHT - 0.3, UP),   // floor 0.3 above where we started
-    }), v3(0, 0, 0), FWD, 0.12);
+    }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.verdict).toBe('commit');
-    expect(out.landed).not.toBeNull();
     expect(out.climb).toBeCloseTo(0.3, 5);
-    expect(out.landed!.z).toBeCloseTo(0.3, 5);
-    expect(out.landed!.x).toBeCloseTo(0.12, 5);
+    // WHAT THE FRAME COMMITS IS THE RISE. `landed` is the probe's own settle point, a full advance
+    // downrange, and committing it as a position was the teleport -- so the assertion is on `rise`.
+    expect(out.rise).toBeCloseTo(STEP_UP_HEIGHT, 5);
+    expect(out.landed!.x).toBeCloseTo(STEP_UP_ADVANCE, 5);
   });
 
   // THE COLLISION STALL. A zero-distance settle is not a landing -- it is the swept cast saying the
@@ -105,7 +108,7 @@ describe('stepUp', () => {
       up: null,                 // full STEP_UP_HEIGHT of headroom
       forward: null,            // the full travel is clear at the raised height
       down: hit(0, UP),         // "floor" at distance zero: already touching at the raised height
-    }), v3(0, 0, 0), FWD, 0.12);
+    }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.verdict).toBe('no-descent');
     expect(out.landed).toBeNull();
@@ -116,7 +119,7 @@ describe('stepUp', () => {
     const out = stepUp(scriptedCast({
       ahead: hit(0.05, steepFace()),
       up: hit(0.0005, v3(0, 0, -1)), // a ceiling immediately overhead
-    }), v3(0, 0, 0), FWD, 0.12);
+    }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.landed).toBeNull();
     expect(out.verdict).toBe('no-headroom');
@@ -125,7 +128,7 @@ describe('stepUp', () => {
   it('slides instead when there is no floor under the advanced point', () => {
     const out = stepUp(scriptedCast({
       ahead: hit(0.05, steepFace()), up: null, forward: null, down: null,
-    }), v3(0, 0, 0), FWD, 0.12);
+    }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.landed).toBeNull();
     expect(out.verdict).toBe('no-floor');
@@ -135,7 +138,7 @@ describe('stepUp', () => {
     const out = stepUp(scriptedCast({
       ahead: hit(0.05, steepFace()), up: null, forward: null,
       down: hit(0.2, steepFace()),
-    }), v3(0, 0, 0), FWD, 0.12);
+    }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.landed).toBeNull();
     expect(out.verdict).toBe('steep-floor');
@@ -147,7 +150,7 @@ describe('stepUp', () => {
     const out = stepUp(scriptedCast({
       ahead: hit(0.05, steepFace()), up: null, forward: null,
       down: hit(STEP_UP_HEIGHT, UP),
-    }), v3(0, 0, 0), FWD, 0.12);
+    }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.landed).toBeNull();
     expect(out.verdict).toBe('net-zero');
@@ -158,7 +161,7 @@ describe('stepUp', () => {
       ahead: hit(0.05, steepFace()), up: null,
       forward: hit(0, steepFace()),   // still blocked at the raised height
       down: hit(STEP_UP_HEIGHT, UP),  // settles back on the origin floor
-    }), v3(0, 0, 0), FWD, 0.12);
+    }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.landed).toBeNull();
     expect(out.verdict).toBe('net-zero');
@@ -177,23 +180,71 @@ describe('stepUp', () => {
     const out = stepUp(scriptedCast({
       ahead: hit(0.05, steepFace()), up: null, forward: null,
       down: hit(0.01, UP), // floor a hair below the raised height, so the settle really descends
-    }), v3(0, 0, 0), FWD, 0.12);
+    }), v3(0, 0, 0), FWD, 0.12, STEP_UP_ADVANCE);
 
     expect(out.verdict).toBe('commit');
     expect(out.climb).toBeCloseTo(STEP_UP_HEIGHT - 0.01, 5);
   });
 
-  it('advances this frame travel, not a probe-length lunge', () => {
-    // A committed step must move us by the distance we were actually going to travel. Using the
-    // probe length instead would teleport a slow walker onto a step.
+  /**
+   * **THIS TEST ASSERTED A LAW THAT HAS SINCE BEEN REVERSED, and its old name said so out loud:
+   * "advances this frame travel, not a probe-length lunge".** It scripted travel 0.03 and required
+   * the landing to be 0.03 downrange.
+   *
+   * The intent was right and the mechanism was in the wrong place. A slow walker must not be
+   * teleported onto a step -- but the fix for that is that the frame commits a RISE and never the
+   * probe's landing at all, which is what makes the probe free to reach as far as the body needs to
+   * SEE. Binding the reach to the travel instead bought the same safety by blinding the maneuver,
+   * and the price was the owner unable to climb a small step at any frame rate.
+   *
+   * So both halves are asserted here, together, because either alone is a defect: the probe looks a
+   * BODY LENGTH ahead, and the commit is a vertical rise with no horizontal component to lunge with.
+   */
+  it('reaches a body length to decide, and commits a rise rather than that reach', () => {
     const travel = 0.03;
     const out = stepUp(scriptedCast({
       ahead: hit(0.01, steepFace()), up: null, forward: null,
       down: hit(STEP_UP_HEIGHT - 0.2, UP),
-    }), v3(0, 0, 0), FWD, travel);
+    }), v3(0, 0, 0), FWD, travel, Math.max(travel, STEP_UP_ADVANCE));
 
     expect(out.verdict).toBe('commit');
-    expect(out.landed!.x).toBeCloseTo(travel, 6);
+    expect(out.rise).toBeCloseTo(STEP_UP_HEIGHT, 5);
+    // The reach must exceed the capsule's own half-width, or the settle can never clear a lip --
+    // the case below measures the consequence. (`detail` is not asserted: it is populated only
+    // while the movement trace is on, and a test that switched the instrument on to read its own
+    // input would be measuring the instrument.)
+    expect(STEP_UP_ADVANCE).toBeGreaterThan(CAPSULE_RADIUS);
+  });
+
+  /**
+   * **THE OWNER'S STEP, as his trace measured it -- and the only test here whose cast answers by
+   * POSITION rather than by direction, because that is the whole mechanism.**
+   *
+   * A riser at x = 0.34 with a tread 0.25 above. The settle descends from wherever the advance put
+   * it: still behind the lip, the capsule overhangs the floor it came from and finds it at the full
+   * rise; past the lip, it finds the tread. One frame of travel leaves the probe behind the lip --
+   * that is the defect, and it is asserted here so a future shortening of the advance fails loudly
+   * instead of quietly making steps unclimbable again.
+   */
+  it('clears a lip a frame of travel cannot reach', () => {
+    const LIP = 0.34;
+    const TREAD = 0.25;
+    const byPosition: CastFn = (from, dir) => {
+      if (dir.z > 0.5) return null;
+      if (dir.z < -0.5) {
+        return from.x > LIP
+          ? hit(STEP_UP_HEIGHT - TREAD, UP)   // over the tread
+          : hit(STEP_UP_HEIGHT, UP);          // still over the floor we left
+      }
+      return from.z > 0.5 ? null : hit(0, steepFace());
+    };
+
+    const short = stepUp(byPosition, v3(0, 0, 0), FWD, 0.18, 0.18);
+    expect(short.verdict).toBe('net-zero');
+
+    const full = stepUp(byPosition, v3(0, 0, 0), FWD, 0.18, STEP_UP_ADVANCE);
+    expect(full.verdict).toBe('commit');
+    expect(full.climb).toBeCloseTo(TREAD, 5);
   });
 
   it('is bounded well below the capsule height, so fences slide', () => {

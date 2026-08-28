@@ -5,6 +5,7 @@ import {
   AIR_NUDGE_SPEED, CAPSULE_HEIGHT, SKIN_WIDTH, FALL_FAR_DROP, FALL_FAR_TIME, GRAVITY, GROUND_COS, GROUND_PROBE,
   JUMP_SPEED, LAND_PROBE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, TERMINAL_VELOCITY, WEDGE_MIN_FALL,
   WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+  STEP_UP_ADVANCE,
 } from './constants';
 import { MoveTraceFrame, moveTrace } from './move-trace';
 import { PlayerMoveState } from './player-state';
@@ -127,37 +128,52 @@ export function groundedStep(
 ): GroundedStep {
   const speed = horizVel.length();
 
-  // The step-up is ATOMIC: a steep face in the way triggers rise -> advance -> settle, all
-  // committed inside this one frame, or nothing happens and the plain slide runs below.
+  // The height the certification promised, for the trace only -- what the frame actually gains is
+  // the pop above minus whatever the settle below takes back.
+  let climbCertified: number | null = null;
+
+  /**
+   * **THE STEP-UP CERTIFIES; THIS FRAME RISES IN PLACE AND THEN WALKS.**
+   *
+   * It used to return the probe's own landing as the whole of the frame's motion, skipping the
+   * slide and the snap. Two things were wrong with that and the reference corrected both
+   * (`step-up.ts`'s header carries the citations):
+   *
+   *  - the landing sits one full ADVANCE downrange, so committing it teleports the body a body
+   *    length forward in one frame -- ten frames of travel at ten times walking speed;
+   *  - the advance was this frame's travel, which is shorter than the capsule is wide, so the
+   *    settle could not see over a lip and a small step never certified at all. That is the defect
+   *    the owner reported, measured: `fwd` = `travel` = 0.18, elevated sweep entirely free, settle
+   *    descending 0.6991 of a 0.7 rise back onto its own floor, `climb` 0.0009, refused.
+   *
+   * So the maneuver now reaches a body length to DECIDE, and the frame commits only the vertical
+   * rise. Everything after this is the ordinary flat-ground path, which is the point: there is no
+   * second movement code path to disagree with the first, and a certification that turns out wrong
+   * is undone by the snap below rather than stranding the body in the air.
+   */
   let stepUpVerdict: StepUpVerdict | null = null;
   let stepUpDetail: StepUpResult['detail'];
+  let start = center;
   if (speed > 1e-6) {
     const dirH = horizVel.clone().divideScalar(speed);
-    const stepped = stepUp(cast, center, dirH, speed * dt);
+    const travel = speed * dt;
+    // The look-ahead is the frame; the advance is the body. `travel` still wins when it is longer,
+    // so a very low frame rate never steps you less far than you asked to walk.
+    const stepped = stepUp(cast, center, dirH, travel, Math.max(travel, STEP_UP_ADVANCE));
     stepUpVerdict = stepped.verdict;
     stepUpDetail = stepped.detail;
 
-    if (stepped.landed) {
-      // The committed maneuver IS this frame's motion -- already settled on a walkable floor, so
-      // the slide and the snap below are skipped entirely.
-      return {
-        center: stepped.landed,
-        ground: null,
-        climb: stepped.climb,
-        stepUpVerdict,
-        stepUpDetail,
-        snap: null,
-        contacts: 0,
-        blockedBy: null,
-        slide: null,
-      };
+    if (stepped.rise > 0) {
+      start = center.clone();
+      start.z += stepped.rise;
+      climbCertified = stepped.climb;
     }
   }
 
   let firstContact: { normalZ: number; distance: number } | null = null;
   // Allocated only while the trace is on, so a normal frame still allocates nothing here.
   const iterations: SlideIteration[] | null = moveTrace.enabled ? [] : null;
-  const slide = moveAndSlide(cast, center, horizVel, dt, (hit) => {
+  const slide = moveAndSlide(cast, start, horizVel, dt, (hit) => {
     if (firstContact === null) {
       firstContact = { normalZ: hit.normal.z, distance: 0 };
     }
@@ -175,8 +191,10 @@ export function groundedStep(
   //
   // Standing still the reach is slack + collision height, which is what re-grounds an IDLE body
   // every frame and takes out the small float a raw position leaves.
-  const dx = slid.x - center.x;
-  const dy = slid.y - center.y;
+  // Measured from `start`, not from `center`: after a pop those differ by the rise, and a reach
+  // computed from the pre-pop centre would be a reach for a horizontal distance never travelled.
+  const dx = slid.x - start.x;
+  const dy = slid.y - start.y;
   const reach = snapReach(Math.hypot(dx, dy));
   // SKIN_WIDTH, so the body settles a hair ABOVE the floor rather than exactly on it.
   //
@@ -213,7 +231,7 @@ export function groundedStep(
   }
 
   return {
-    center: slid, ground, climb: null, stepUpVerdict, stepUpDetail, snap,
+    center: slid, ground, climb: climbCertified, stepUpVerdict, stepUpDetail, snap,
     contacts: slide.contacts, blockedBy: firstContact, slide: iterations,
   };
 }
