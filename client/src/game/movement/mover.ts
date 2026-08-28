@@ -14,19 +14,6 @@ import { stepUp, StepUpResult, StepUpVerdict } from './step-up';
 
 const _down = new THREE.Vector3(0, 0, -1);
 
-/**
- * **WHAT "WENT NOWHERE" MEANS (yd of horizontal travel in one frame), in ONE place.**
- *
- * It was `1e-6`, and the owner's stall measured **0.0006** -- six hundred times that, and six tenths
- * of a millimetre a frame. So the push-out declined all 18 frames of a dead stop as "moved", which is
- * both a missed recovery and a lying diagnosis: the trace named the state correctly only because the
- * stall trap uses a different number for the same idea, `1e-3`. Two thresholds for one concept is how
- * an instrument and the code it measures come to disagree, so they now share this.
- *
- * A walking frame travels about 0.12 yd, so this is a two-hundredth of a step: too small to catch a
- * body that is genuinely creeping along a wall, large enough to catch one that is not moving.
- */
-const STUCK_TRAVEL = 1e-3;
 
 /** The election snap's probe reach and what it found -- trace fodder. */
 export interface SnapTrace {
@@ -366,7 +353,7 @@ export function step(
    * unit-tested with no world loaded, which is the property that made this whole module diagnosable
    * from a console trace.
    */
-  depenetrate?: (center: THREE.Vector3, skin?: number) => THREE.Vector3 | null,
+  depenetrate?: (center: THREE.Vector3, skin?: number, count?: boolean) => THREE.Vector3 | null,
 ): Outcome {
   const inputHoriz = input.moving && input.speed > 0
     ? input.dir.clone().normalize().multiplyScalar(input.speed)
@@ -461,7 +448,6 @@ export function step(
   let pushOutReason: MoveTraceFrame['pushOutReason'];
 
   if (!held && grounded && !jumped) {
-    const before = center.clone();
     const resolved = groundedStep(cast, center, state.horizVel, dt);
     center = resolved.center;
     climb = resolved.climb;
@@ -516,30 +502,43 @@ export function step(
         pushOutReason = 'absent';
       } else if (resolved.contacts === 0) {
         pushOutReason = 'no-contact';
-      } else if (state.horizVel.lengthSq() <= 1e-12) {
-        pushOutReason = 'no-input';
-      } else if (Math.hypot(center.x - before.x, center.y - before.y) >= STUCK_TRAVEL) {
-        pushOutReason = 'moved';
       } else {
         pushOutReason = 'ran';
       }
     }
 
     /**
-     * **HORIZONTAL, not 3D.** The vertical term is the snap doing its job and has nothing to say about
-     * whether the body is stuck; including it made this branch dead code (measured: 532 of 532
-     * declined as `moved`).
+     * **MEASURE THE PENETRATION; DO NOT INFER IT FROM "DID NOT MOVE". I gated this on movement three
+     * times and it failed to reach the state three times.**
      *
-     * The owner's stall is the state this now reaches, and his own words are the diagnosis: "скорее
-     * всего это связано с тем что я на половину в текстуре". Sunk to the shin, every horizontal sweep
-     * reports a contact at distance zero, and the election snap can only ever DESCEND -- so nothing in
-     * the ordinary path can lift him out and the block reads as a wall from nowhere.
+     * The record, because the pattern is the lesson:
+     *
+     *  1. 3D displacement under `1e-12` -- declined 532 of 532, because the election snap re-seats Z by
+     *     a hair every frame while the body is horizontally pinned;
+     *  2. HORIZONTAL displacement under `1e-6` -- declined 18 of 18 at the abbey, where the measured
+     *     creep was 0.0006 yd a frame, six hundred times the threshold;
+     *  3. horizontal under `1e-3` -- and then the fence: "он упирается в забор и камера дергается то
+     *     туда то обратно... микро сдвиг". A thin rail has two OPPOSED faces, so a body inside it is
+     *     pushed alternately by each and travels a millimetre every frame, forever. Five seconds of it
+     *     produced `stallFrames: 0`.
+     *
+     * Each gate was a better guess than the last and all three were the same mistake: "did not move" is
+     * not what "inside geometry" means. An oscillating body moves constantly and is exactly as stuck as
+     * a still one.
+     *
+     * So the condition is now the measurement itself. `depenetrateCapsule` returns null when the body is
+     * free -- its first pass IS the overlap scan -- so asking it is the same work as testing whether to
+     * ask, and there is no threshold left to be wrong about.
+     *
+     * COST, stated: a candidate gather plus one capsule-triangle distance per candidate, on every
+     * grounded frame that resolved a contact. At the abbey that is 255 WMO triangles; the four slide
+     * iterations the same frame already sweep the same set, so it is roughly a quarter more collision
+     * work while brushing geometry, and nothing at all on open ground. The frame budget here is already
+     * marginal (p50 16.6 against 16.7), so if this shows up it is the first thing to bound -- by
+     * running it every other frame, or only while a contact persists. I have not measured it live and
+     * am not claiming otherwise.
      */
-    const movedH = Math.hypot(center.x - before.x, center.y - before.y);
-    if (depenetrate !== undefined
-      && resolved.contacts > 0
-      && state.horizVel.lengthSq() > 1e-12
-      && movedH < STUCK_TRAVEL) {
+    if (depenetrate !== undefined && resolved.contacts > 0) {
       const freed = depenetrate(center, SKIN_WIDTH);
       if (freed !== null) {
         pushOutReason = 'freed';
@@ -657,7 +656,22 @@ export function step(
     state.fallFar = false;
   }
 
+  /**
+   * The penetration MEASUREMENT -- see `MoveTraceFrame#penetration`. Trace-only, and deliberately
+   * outside the stuck gate: the state it exists to expose is one the gate cannot reach.
+   *
+   * `skin` 0, so this reports the overlap itself rather than the overlap plus a clearance.
+   */
+  let penetration: number | undefined;
+  if (moveTrace.enabled && depenetrate !== undefined) {
+    const centre = state.pos.clone();
+    centre.z += halfH;
+    const freed = depenetrate(centre, 0, false);
+    penetration = freed === null ? 0 : freed.distanceTo(centre);
+  }
+
   moveTrace.frame({
+    penetration,
     zIn: preMove.z - halfH,
     zOut: state.pos.z,
     speed: state.horizVel.length(),

@@ -24,6 +24,26 @@ export interface MoveTraceFrame {
    * Optional to match the rest of this interface -- the readout's own fixtures build frames
    * without them -- but the mover always supplies both.
    */
+  /**
+   * **HOW DEEP THE BODY IS INSIDE GEOMETRY (yd), measured every traced frame.**
+   *
+   * The stall trap cannot see the fence, and five seconds of running into one proved it: not ONE
+   * frame satisfied "a contact and no progress" -- `stallFrames: 0`. That reading is correct and it
+   * reframes the report. At the fence the owner is not stalled; he WALKS, and what fails is the
+   * jump. Two symptoms, two places, and I had been measuring the abbey's at the fence.
+   *
+   * Depth is the quantity the fence report is actually about, and the push-out already computes it:
+   * the distance it would move the body IS the overlap. So it runs measure-only on every traced
+   * frame, outside the stuck gate that kept it from ever reaching this state.
+   *
+   * Zero means genuinely free. A nonzero value while standing still is a body inside a collider,
+   * which no gesture in the ordinary movement path will notice.
+   *
+   * Costs a candidate gather per traced frame, which is why it is behind the trace and not on by
+   * default.
+   */
+  penetration?: number;
+
   /** The horizontal speed the frame was ASKED for (yd/s) -- input, not achievement. */
   speed?: number;
   x?: number;

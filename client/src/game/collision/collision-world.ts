@@ -278,13 +278,21 @@ export class CollisionWorld {
    * when stuck and wants the answer to be about where the body IS.
    */
   depenetrateFor(layer: CollisionLayer, radius: number, halfSegment: number) {
-    return (center: THREE.Vector3, skin = 0): THREE.Vector3 | null => {
+    /**
+     * `count` false for a MEASURE-ONLY call. The movement trace asks for the overlap depth every
+     * frame it records, and a measurement that moved `fired`/`freed` would be one instrument
+     * corrupting another -- those two counters are how the recovery itself is diagnosed, and I have
+     * been reading them all round.
+     */
+    return (center: THREE.Vector3, skin = 0, count = true): THREE.Vector3 | null => {
       // Before the gather, so a disabled push-out costs one boolean and the caller sees exactly what
       // it saw before this feature existed.
       if (!this.pushOut.enabled) {
         return null;
       }
-      this.pushOut.fired += 1;
+      if (count) {
+        this.pushOut.fired += 1;
+      }
 
       const candidates = this.candidates;
       candidates.length = 0;
@@ -305,7 +313,7 @@ export class CollisionWorld {
       }
 
       const freed = depenetrateCapsule(center, radius, halfSegment, candidates, skin);
-      if (freed !== null) {
+      if (freed !== null && count) {
         this.pushOut.freed += 1;
       }
       return freed;
