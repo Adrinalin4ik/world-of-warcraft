@@ -13,23 +13,24 @@
  * chat window never gets its colour or alpha. The owner saw a white box, the same symptom
  * `GetObjectType` and `SetHyperlinksEnabled` each produced before it. See `api/chat.ts#ChannelSink`.
  *
- * ## Why `/join` and not an auto-join
+ * ## The auto-join, and why the paragraph that used to stand here was wrong
  *
- * General is not called "General" on the wire -- it is `General - <ZoneName>`, built from
- * `ChatChannels.dbc`'s name, that row's flags and the current zone. The flag bit marking a channel
- * zone-dependent is stated by no file served here, so auto-joining would mean guessing a name and then
- * guessing why the server said nothing.
+ * It said auto-joining would mean guessing: that `General - <ZoneName>` is built from a flag no served
+ * file states, so the name and the set were both unsourced. Then I dumped `ChatChannels.dbc` and both
+ * were stated by the data -- zone-dependence by a `%s` IN THE NAME, and the auto-join set by flag bit
+ * `0x1`, clear on exactly the two rows nobody is auto-joined to. See `dbc/chat-channel-data.ts` for
+ * the six-row dump.
  *
- * `SlashCmdList["JOIN"]` is already in the client (`chatframe.lua:1526-1545`), so a real
- * `JoinPermanentChannel` gives a working `/join General` AND makes the server report the channel's real
- * name back through `SMSG_CHANNEL_NOTIFY`. That is the measurement auto-join needs, taken through the
- * client's own door rather than a probe.
+ * So the guess was never necessary; I had declined to read the file. `/join` remains real and is what
+ * a player uses for a custom channel, but the zone channels are joined the way the client joins them.
  */
 import type World from '../world';
 import { LuaVM } from './framexml/lua/vm';
 import { fireEvent } from './framexml/lua/events';
 import { setChannelSink, setChannelSource } from './framexml/lua/api/chat';
 import { CHANNEL_NOTIFY } from '../../network/game/object/channel';
+import { currentZone, onZoneChanged } from './zone-watch';
+import chatChannelData, { nameFor } from '../pipeline/dbc/chat-channel-data';
 
 /**
  * `SMSG_CHANNEL_NOTIFY`'s type -> the client's own notice NAME, which is `arg1`.
@@ -132,6 +133,49 @@ export function attachChannelBridge(vm: LuaVM, world: World): () => void {
   channels.on('channelsChanged', onChannels);
 
   /**
+   * THE ZONE CHANNELS, joined when the zone is known and re-joined when it changes.
+   *
+   * `General - %s` takes the zone name (`dbc/chat-channel-data.ts`), so the join cannot be sent until
+   * the terrain under the player has resolved -- which is after this bridge attaches. Hence a poll on
+   * the zone sink rather than a one-shot: `ui/zone-watch.ts` carries what the map bridge already
+   * computes every tick, and this reads it on the UI tick it is called from.
+   *
+   * IDEMPOTENT AT EVERY LEVEL, which is what makes calling it repeatedly free: `nameFor` answers null
+   * while the zone is unknown, `ChannelHandler#join` drops a name already joined or already in flight,
+   * and the DBC load dedupes internally. So the steady state is a string compare per channel per call.
+   *
+   * **LEAVING THE OLD ZONE CHANNEL IS NOT DONE HERE, and that is a stated gap rather than an
+   * oversight.** The real client leaves `General - Elwynn Forest` on entering Westfall. Doing that
+   * needs the previous zone's name and a `CMSG_LEAVE_CHANNEL` per row, and it interacts with the
+   * POSITIONAL numbering (`channel.ts#joined`): a leave renumbers, so `/1` would silently address a
+   * different channel mid-session. Worth doing, worth doing deliberately, and the server keeping us in
+   * a channel we have walked out of is visible rather than silent -- it shows up as an extra row in
+   * `GetChannelList`.
+   */
+  let joinedForZone = '';
+  const joinZoneChannels = (): void => {
+    const zone = currentZone();
+    if (zone === '' || zone === joinedForZone) {
+      return;
+    }
+    const rows = chatChannelData.autoJoin;
+    if (rows.length === 0) {
+      // The DBC has not landed. `ensureLoaded` below re-enters this once it has.
+      return;
+    }
+    joinedForZone = zone;
+    for (const row of rows) {
+      const name = nameFor(row, zone);
+      if (name !== null) {
+        // THE DBC ID, not 0: a built-in channel is identified by it, and the server resolves the row
+        // itself rather than treating the name as a custom channel. See `channel.ts#join`.
+        channels.join(row.id, name);
+      }
+    }
+  };
+  void chatChannelData.ensureLoaded().then(joinZoneChannels);
+
+  /**
    * **AND FIRE IT ONCE NOW, BECAUSE THE EDGE THIS BRIDGE WAITS FOR HAS ALREADY PASSED.**
    *
    * MEASURED: with a channel joined and `GetChannelList()` answering it, `ChatFrame1.channelList[1]`
@@ -156,8 +200,18 @@ export function attachChannelBridge(vm: LuaVM, world: World): () => void {
    */
   onChannels();
 
+  /**
+   * THE ZONE EDGE, which the map bridge announces from the poll it already runs.
+   *
+   * My first version retried on `notice` and `channelsChanged` instead, and it DEADLOCKED: there are
+   * no channel events until something is joined, and nothing can be joined until the zone is known.
+   * `ui/zone-watch.ts` carries the edge for exactly that reason.
+   */
+  const offZone = onZoneChanged(joinZoneChannels);
+
   return () => {
     channels.removeListener('channelsChanged', onChannels);
+    offZone();
     channels.removeListener('notice', onNotice);
     // Both close over this session; a stale one outliving it is the double-mount hazard.
     setChannelSink(vm, null);
