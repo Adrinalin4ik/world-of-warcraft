@@ -150,6 +150,40 @@ class MoveTrace {
     return `armed: both traces recording, will stop after ${frames} frames asking to move and not moving`;
   }
 
+  /**
+   * **WHAT THE TRAP THINKS IT IS DOING -- the instrument for the instrument.**
+   *
+   * The armed trap printed nothing at a spot the owner was demonstrably stuck at, and from outside
+   * there was no way to tell which of four things was true: the arm never took (a stale bundle -- the
+   * page must be reloaded for a new one), it is armed but the condition is not being met, it is armed
+   * and counting but never reaching the threshold, or it already tripped and the line was missed.
+   *
+   * Every field the trip decision reads is private, so none of that was observable. This project has
+   * lost measurement arms to exactly that shape before -- a probe whose own state cannot be checked.
+   *
+   * `stalled` is the interesting one: nonzero-but-resetting means the body is momentarily moving, so
+   * the stall is not what it looks like; stuck at 0 with `contacts` present means the slide is not
+   * resolving contacts at all, which is a different file entirely.
+   */
+  status(): {
+    enabled: boolean; stopOnDrop: number | null; stopOnStall: number | null;
+    stalled: number; frames: number; tripped: boolean;
+    lastContacts: number | null; lastTravel: number | null; lastSpeed: number | null;
+  } {
+    const last = this.last();
+    return {
+      enabled: this.enabled,
+      stopOnDrop: this.stopOnDrop,
+      stopOnStall: this.stopOnStall,
+      stalled: this.stalled,
+      frames: this.frames.length,
+      tripped: this.tripped !== null,
+      lastContacts: last ? last.contacts ?? null : null,
+      lastTravel: last ? last.travelXY ?? null : null,
+      lastSpeed: last ? last.speed ?? null : null,
+    };
+  }
+
   frame(record: MoveTraceFrame): void {
     if (!this.enabled) {
       return;
