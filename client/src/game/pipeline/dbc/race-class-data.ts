@@ -38,6 +38,18 @@ interface NamePair {
   token: string;
 }
 
+/**
+ * A race's own tongue -- `ChrRaces.dbc`'s `baseLanguage` column, which the schema already names
+ * (`wow-data-parser/dbc/entities/chr-races.js:21`).
+ *
+ * READ OFF THE ROW THIS FILE ALREADY LOADS, which is the whole reason it lives here rather than in
+ * `language-data.ts`: `ChrRaces.dbc` is fetched once and a second module asking for it would fetch it
+ * twice. The NAME for the id it returns is `language-data.ts`'s job, from `Languages.dbc`.
+ *
+ * Kept separate from `NamePair` so `race()` still answers exactly the two strings `UnitRace` returns.
+ */
+const baseLanguages = new Map<number, number>();
+
 class RaceClassData {
   private races: Map<number, NamePair> | null = null;
 
@@ -74,6 +86,10 @@ class RaceClassData {
           name: String(record.name ?? ''),
           token: String(record.clientFileString ?? ''),
         });
+        // The race's tongue, for `GetDefaultLanguage`. See `baseLanguages`.
+        if (typeof record.baseLanguage === 'number') {
+          baseLanguages.set(record.id, record.baseLanguage);
+        }
       }
     }
     this.races = raceMap;
@@ -95,6 +111,20 @@ class RaceClassData {
   race(id: number): NamePair | null {
     const row = this.races?.get(id) ?? null;
     return row === null || row.name === '' ? null : row;
+  }
+
+  /**
+   * The `Languages.dbc` id this race speaks by default, or null before the fetch lands.
+   *
+   * 1 is Orcish and 7 is Common in 3.3.5a (`network/game/object/chat.ts` documents both), but this
+   * answers whatever the column holds rather than deciding by faction -- the data states it per race,
+   * so nothing here needs to know which side a race is on.
+   */
+  baseLanguage(raceId: number): number | null {
+    if (this.races === null) {
+      return null;
+    }
+    return baseLanguages.get(raceId) ?? null;
   }
 
   /** `[localizedName, TOKEN]` for a `ChrClasses` id, or null. */

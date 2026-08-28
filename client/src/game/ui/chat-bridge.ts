@@ -34,7 +34,9 @@ import type { ChatLine, ChatMessageHandler } from '../../network/game/object/cha
 import { LuaVM } from './framexml/lua/vm';
 import { fireEvent } from './framexml/lua/events';
 import { chatColourEvents } from './chat-colours';
-import { setChatSender } from './framexml/lua/api/chat';
+import { setChatSender, setDefaultLanguage } from './framexml/lua/api/chat';
+import raceClassData from '../pipeline/dbc/race-class-data';
+import languageData from '../pipeline/dbc/language-data';
 
 /** `chatTag` -> the string `arg6` carries. 0 is none; the rest are the client's own globals. */
 const TAG_TEXT: Record<number, string> = {
@@ -191,7 +193,43 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
    * be reordered by whose name query answered first. So the queue is walked once and only the entries
    * whose name is now known are taken, leaving the rest in place.
    */
+  /**
+   * THE PLAYER'S OWN TONGUE, joined from the descriptor and two DBCs. See
+   * `api/chat.ts#GetDefaultLanguage` for what the literal answer it replaces was costing.
+   *
+   * `UNIT_FIELD_BYTES_0` byte 0 is the `ChrRaces.dbc` id (`update-object/unit-fields.ts:298`), that
+   * row's `baseLanguage` is the language id, and `Languages.dbc` holds its localized name -- which is
+   * what the client compares against, not the id.
+   *
+   * PUSHED ON EVERY `unit:fields`, which this bridge already listens to for sender names, so the join
+   * costs two map reads on an edge that fires anyway. Idempotent: the same pair re-pushed is the same
+   * pair, and `setDefaultLanguage` is a `WeakMap.set`.
+   *
+   * BOTH FETCHES ARE ASKED FOR, because nothing else asks for `Languages.dbc` at all and
+   * `raceClassData` may not have been touched yet on a session where nothing read a race. The
+   * `ensureLoaded` pair is idempotent and dedupes internally, so this is one fetch each per session.
+   */
+  const pushLanguage = (): void => {
+    const raceId = world.player?.fields.race ?? null;
+    if (raceId === null) {
+      return;
+    }
+    const languageId = raceClassData.baseLanguage(raceId);
+    if (languageId === null) {
+      return;
+    }
+    const name = languageData.name(languageId);
+    if (name === null) {
+      return;
+    }
+    setDefaultLanguage(vm, { name, id: languageId });
+  };
+  void raceClassData.ensureLoaded().then(pushLanguage);
+  void languageData.ensureLoaded().then(pushLanguage);
+  pushLanguage();
+
   const onFields = (): void => {
+    pushLanguage();
     if (pending.length === 0) {
       return;
     }
@@ -247,6 +285,9 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
   return () => {
     // The sender closes over this session; a stale one outliving it is the double-mount hazard.
     setChatSender(null);
+    // The snapshot closes over nothing, but a stale language outliving its session would be read by
+    // the next mount as if it were that character's. Cleared for the same reason the sender is.
+    setDefaultLanguage(vm, null);
     chat.removeListener('line', onLine);
     world.removeListener('unit:fields', onFields);
     pending.length = 0;

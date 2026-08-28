@@ -72,6 +72,25 @@ export function resetChatTypeIds(): void {
   chatTypeIds.clear();
 }
 
+/**
+ * The player's default language, pushed by `chat-bridge.ts`. See `GetDefaultLanguage`.
+ *
+ * A snapshot rather than a callback, for the reason `api/spells.ts` pushes the spellbook as one: this
+ * module holds no world, and the join that produces it needs the descriptor and two DBCs.
+ */
+const defaultLanguageByVm = new WeakMap<LuaVM, { name: string; id: number }>();
+
+export function setDefaultLanguage(
+  vm: LuaVM,
+  pair: { name: string; id: number } | null,
+): void {
+  if (pair === null) {
+    defaultLanguageByVm.delete(vm);
+  } else {
+    defaultLanguageByVm.set(vm, pair);
+  }
+}
+
 export function installChatApi(vm: LuaVM): void {
   /**
    * `GetChatTypeIndex(typeName)` -> a stable number for that chat type.
@@ -294,9 +313,7 @@ export function installChatApi(vm: LuaVM): void {
     // `SendChatMessage` has LEFT this list -- it is real below. Its note said "CMSG_MESSAGECHAT is
     // not built yet", and that stopped being true when `network/game/object/chat.ts#send` landed;
     // the packet was there and nothing called it.
-    ['GetDefaultLanguage', 'no language state is read from the wire', ['Common', 7]],
-    ['GetLanguageByIndex', 'no language state is read from the wire', ['Common', 7]],
-    ['GetNumLanguages', 'no language state is read from the wire', [1]],
+
     // The logging commands two slash handlers reach.
     ['LoggingChat', 'this client writes no chat log file', [false]],
     ['LoggingCombat', 'this client writes no combat log file', [false]],
@@ -338,6 +355,49 @@ export function installChatApi(vm: LuaVM): void {
     }
     sender?.(type, text, target, Number.isFinite(language) ? language : null);
     return [];
+  });
+
+  /**
+   * THE PLAYER'S OWN TONGUE -- `GetDefaultLanguage`, and its literal answer was a DECLARED refusal.
+   *
+   * It used to return `'Common', 7` for everyone. `network/game/object/chat.ts#send`'s own comment
+   * states the cost: TrinityCore checks the sender can speak the language before it broadcasts and a
+   * failed check returns WITHOUT A REPLY, so a Horde character's `/say` was refused in total silence
+   * -- the same signature the item link spent three rounds on, declared in a comment rather than
+   * discovered.
+   *
+   * Now a snapshot the chat bridge pushes: the player's race joined to `ChrRaces.dbc`'s
+   * `baseLanguage` and then to `Languages.dbc` for the name. Both columns are in the schemas already;
+   * see `dbc/language-data.ts`.
+   *
+   * NOTHING, not a fallback pair, while the race or the DBC is missing. A wrong language is a message
+   * the server discards; nil makes `editBox.language` nil, which `chat.ts#send` reads as "use my
+   * default" -- so the first second of a session behaves exactly as it did before this existed, and a
+   * Horde player gets the right answer the moment the join resolves rather than a plausible wrong one.
+   */
+  vm.registerFunction('GetDefaultLanguage', () => {
+    const pair = defaultLanguageByVm.get(vm) ?? null;
+    return pair === null ? [] : [pair.name, pair.id];
+  });
+
+  /**
+   * `GetNumLanguages()` / `GetLanguageByIndex(i)` -- the languages this character can speak.
+   *
+   * ONE, the base tongue, and that is a stated limit rather than a guess: a character also knows any
+   * language a racial or a learned skill grants, and those come from the SKILL list
+   * (`SMSG_INITIAL_SPELLS`' skill lines joined to `SkillLineAbility`), which this client does not read
+   * for languages. So the list holds what is known to be true and no more.
+   *
+   * A COUNT, so 0 is the honest answer for "not resolved yet" and not a falsy accident: the client
+   * loops `for i = 1, GetNumLanguages()` and an empty loop is exactly right there.
+   */
+  vm.registerFunction('GetNumLanguages', () => [defaultLanguageByVm.get(vm) === undefined ? 0 : 1]);
+  vm.registerFunction('GetLanguageByIndex', (args) => {
+    const pair = defaultLanguageByVm.get(vm) ?? null;
+    if (pair === null || Number(args[0]) !== 1) {
+      return [];
+    }
+    return [pair.name, pair.id];
   });
 
   for (const [name, reason, results] of gaps) {
