@@ -270,3 +270,70 @@ describe('depenetrateCapsule', () => {
     expect(fixed!.z).toBeCloseTo(10, 6);
   });
 });
+
+/**
+ * A SLAB UNDERFOOT DOES NOT BLOCK HORIZONTAL MOTION, AND A WALL STILL STOPS IT DEAD.
+ *
+ * **WRITTEN TO REPRODUCE A DEFECT AND IT REFUSED, WHICH IS THE USEFUL PART.** The hypothesis was that
+ * a WMO tread is a thin shell -- walking surface plus an underside facing DOWN -- and that a capsule
+ * standing on it overlaps the underside, takes the sweep's "already touching" branch, and is blocked
+ * there because that branch accepts any closing speed above `1e-9`. The abbey trace fitted: four slide
+ * iterations, all `travelled: 0`, all against `(-0.0024, 0.0042, -0.99998)`, a closing speed of 0.005.
+ *
+ * The arithmetic says otherwise. The capsule's support along a near-vertical normal is
+ * `radius + halfSegment` -- its whole half-height, about 1.01 yd -- so an underside 0.1 or 0.2 yd
+ * below the tread is still 1.1 to 1.2 yd from the centre and the gap is POSITIVE. The time of impact
+ * then comes out around 20 yd, far outside a 0.15 yd step, and nothing blocks. Both cases below pass
+ * without any change to the threshold.
+ *
+ * So the abbey contacts at `gap <= EPS` were not a thin-shell graze: the capsule was genuinely INSIDE
+ * the step, which is what the owner said ("провалился под ступеньку") and what `depenetrateCapsule`
+ * addresses. The threshold is left alone.
+ *
+ * The tests stay because the two properties are worth guarding whatever the cause was, and the pair
+ * is the point: a future threshold change that frees the graze must not also free the wall.
+ */
+describe('an already-touching face along the motion', () => {
+  /**
+   * THE MEASURED NORMAL, not an idealised one, and that distinction is the test.
+   *
+   * A perfectly horizontal underside gives `dir . n == 0` exactly for horizontal motion, so it never
+   * blocked and a slab built with `(0, 0, -1)` proves nothing -- the first version of this test passed
+   * before the fix for that reason. The abbey's face is very slightly TILTED:
+   * `(-0.0024, 0.0042, -0.99998)`, straight out of the owner's trace. That tilt is what makes the
+   * closing speed small and POSITIVE, which is what the old threshold of `1e-9` accepted.
+   */
+  const TILTED_UNDERSIDE: [number, number, number] = [-0.0024, 0.0042, -0.99998];
+
+  /** A slab: walkable top at `top`, and a barely-tilted underside a little below it. */
+  const slab = (top: number, thickness: number): Triangle[] => {
+    const s = 50;
+    return [
+      ...floor(top),
+      tri([-s, -s, top - thickness], [s, s, top - thickness], [s, -s, top - thickness],
+        TILTED_UNDERSIDE),
+      tri([-s, -s, top - thickness], [-s, s, top - thickness], [s, s, top - thickness],
+        TILTED_UNDERSIDE),
+    ];
+  };
+
+  it('does not block horizontal motion', () => {
+    // Resting on the slab: centre one capsule half-height above the top face.
+    const resting = new THREE.Vector3(0, 0, HALF_SEGMENT + RADIUS);
+    // ALONG THE TILT, which is the worst case: any other heading closes on the face even more
+    // slowly, so a direction picked for convenience would under-test it.
+    const into = new THREE.Vector3(TILTED_UNDERSIDE[0], TILTED_UNDERSIDE[1], 0).normalize();
+    const hit = cast(resting, into, 0.147, slab(0, 0.1));
+
+    expect(hit).toBeNull();
+  });
+
+  it('still stops dead at a wall it is already touching', () => {
+    // Against the wall at x = 0, driving into it: the contact is real and must remain distance 0.
+    const against = new THREE.Vector3(RADIUS * 0.5, 0, 10);
+    const hit = cast(against, new THREE.Vector3(1, 0, 0), 0.147, wall(RADIUS));
+
+    expect(hit).not.toBeNull();
+    expect(hit!.distance).toBe(0);
+  });
+});
