@@ -191,11 +191,31 @@ class MoveTrace {
     }
   }
 
-  /** Freeze both records on one event. */
+  /**
+   * Freeze both records on one event -- **and SAY SO, because an armed trap that reports nothing is
+   * indistinguishable from a trap that did not catch anything.**
+   *
+   * That cost a whole round. The owner armed the stall trip, walked, and read back 519 frames
+   * containing no stall at all: 208 `no-obstacle` and not one `net-zero`, so the maneuver never even
+   * saw a face. The reading was honest and empty, and neither of us could tell whether the defect was
+   * gone, not reached, or the trap broken -- three very different answers -- because there was no
+   * moment to point at.
+   *
+   * One line on the console at the instant of the freeze fixes that: he knows the state was captured
+   * without having to read anything back, and silence now means "not reproduced" rather than
+   * "unknown". It only ever fires for a trap someone deliberately armed.
+   */
   private trip(record: MoveTraceFrame): void {
     this.tripped = record;
     this.enabled = false;
     castTrace.enabled = false;
+    const at = `${(record.x ?? 0).toFixed(2)}, ${(record.y ?? 0).toFixed(2)}, ${record.zOut.toFixed(2)}`;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[moveTrace] TRIPPED and frozen at ${at} -- verdict ${record.stepUpVerdict}, `
+      + `drop ${(record.zIn - record.zOut).toFixed(3)}, travel ${(record.travelXY ?? 0).toFixed(4)}, `
+      + `${this.frames.length} frames held. Read them now: the trace is no longer recording.`,
+    );
   }
 
   last(): MoveTraceFrame | null {
