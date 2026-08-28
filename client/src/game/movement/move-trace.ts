@@ -28,7 +28,21 @@ export interface MoveTraceFrame {
   travelXY?: number;
 }
 
-const HISTORY = 120;
+/**
+ * **1200 FRAMES, ABOUT TWENTY SECONDS, AND 120 WAS TOO FEW TO READ.**
+ *
+ * 120 frames is two seconds, and the player cannot type in the console while holding W -- so every
+ * reading of this trace so far has contained only the STANDING frames that followed the gesture,
+ * with `travelXY: 0` and an empty slide. That is not a measurement of walking; it is a measurement
+ * of stopping, and it read like a conclusion twice.
+ *
+ * The same window-shorter-than-the-gesture mistake `castTrace` made, in a second instrument, which
+ * is what makes it a pattern worth fixing rather than an accident: an instrument someone else has to
+ * trigger by hand needs a window longer than the hand.
+ *
+ * A frame is a dozen numbers and two small arrays, so 1200 is cheap and still bounded.
+ */
+const HISTORY = 1200;
 
 /**
  * The movement trace recorder.
