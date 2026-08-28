@@ -547,6 +547,14 @@ class Controls extends React.Component<IProp> {
       surfaceAt: (feet: THREE.Vector3) => (
         collisionWorld.surfaceAt(feet.x, feet.y, claim)?.surfaceZ ?? null
       ),
+      /**
+       * The push-out for a body INSIDE geometry. The mover calls it only when a step contacted
+       * something, wanted to move and travelled nothing -- see `mover.ts#step`. Same audience and
+       * same capsule as the cast above, because it is the same body.
+       */
+      depenetrate: collisionWorld.depenetrateFor(
+        CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment(),
+      ),
     };
 
     // Release the post-teleport settle hold once the destination's collision has actually arrived.

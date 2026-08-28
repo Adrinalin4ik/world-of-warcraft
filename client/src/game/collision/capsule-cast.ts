@@ -56,6 +56,83 @@ export function closestDistanceCapsuleTriangle(
   return distance - radius;
 }
 
+/** Scratch for the depenetration pass. */
+const _separation = new THREE.Vector3();
+const _push = new THREE.Vector3();
+
+/**
+ * PUSH A CAPSULE OUT OF WHAT IT IS INSIDE. Returns a corrected centre, or null when it is already free.
+ *
+ * **The owner asked for this and the trace agrees with him.** `moveTrace` on the abbey stairs showed
+ * four slide iterations, every one `travelled: 0`, blocked at distance 0 by faces whose normal is
+ * `(~0, ~0, -1)` -- DOWNWARD-facing, i.e. the underside of a tread. A capsule in contact with the
+ * underside of a step is INSIDE the step, and no amount of sweeping gets it out: a sweep answers
+ * "what would I hit going that way", and every way is already blocked. "Я просто провалился под
+ * ступеньку... нужно выталкивания сделать" is exactly right.
+ *
+ * DEEPEST FIRST, iterated. Pushing out of one face can push into another (a stair is a wedge of
+ * them), so this resolves the worst overlap, re-measures, and repeats. Taking them in arbitrary order
+ * lets two faces fight and the position oscillate; taking the deepest converges, because each pass
+ * strictly reduces the maximum penetration.
+ *
+ * THE DIRECTION COMES FROM GEOMETRY, not from the face normal, and that is the same rule the sweep
+ * follows: `closestDistanceCapsuleTriangle`'s separation vector points from the face toward the
+ * capsule axis, so it is correct whichever side the body ended up on. A WMO face carries no reliable
+ * outward normal, so using `triangle.normal` here would push some bodies deeper.
+ *
+ * `skin` is added to the push so the body ends a hair OUTSIDE rather than exactly on the surface --
+ * resting at a zero gap is what the sweep reports as a contact, which is the state this exists to
+ * leave.
+ *
+ * Returns null when nothing overlaps, so the caller pays one distance evaluation per candidate and no
+ * allocation in the ordinary case.
+ */
+export function depenetrateCapsule(
+  center: THREE.Vector3,
+  radius: number,
+  halfSegment: number,
+  triangles: Triangle[],
+  skin = 0,
+  maxPasses = 4,
+): THREE.Vector3 | null {
+  if (triangles.length === 0) {
+    return null;
+  }
+  const at = center.clone();
+  let moved = false;
+
+  for (let pass = 0; pass < maxPasses; ++pass) {
+    let worstGap = 0;
+    let worstTriangle: Triangle | null = null;
+
+    for (let i = 0; i < triangles.length; ++i) {
+      const gap = closestDistanceCapsuleTriangle(at, halfSegment, radius, triangles[i]);
+      if (gap < worstGap) {
+        worstGap = gap;
+        worstTriangle = triangles[i];
+      }
+    }
+
+    if (worstTriangle === null || worstGap >= -CAPSULE_CAST_EPS) {
+      break;
+    }
+
+    // Re-measured for the separation vector: the loop above discards it to keep the scan cheap.
+    closestDistanceCapsuleTriangle(at, halfSegment, radius, worstTriangle, _separation);
+    const length = _separation.length();
+    if (length < 1e-9) {
+      // The axis passes exactly through the face and there is no direction to push along. Refusing
+      // is right: an invented direction here is as likely to push deeper as out.
+      break;
+    }
+    _push.copy(_separation).divideScalar(length).multiplyScalar(-worstGap + skin);
+    at.add(_push);
+    moved = true;
+  }
+
+  return moved ? at : null;
+}
+
 /**
  * Time of impact of the swept capsule against ONE triangle's plane, or null.
  *

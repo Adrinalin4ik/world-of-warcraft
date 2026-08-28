@@ -14,6 +14,13 @@ import {
 export interface FrameDeps {
   cast: CastFn;
   surfaceAt(feet: THREE.Vector3): number | null;
+  /**
+   * The push-out for a body that is INSIDE geometry -- see `mover.ts#step`.
+   *
+   * OPTIONAL, so a caller with no world (every movement test) and the swim paths are unchanged. It is
+   * a closure like the other two, which is what keeps this module testable with nothing loaded.
+   */
+  depenetrate?: (center: THREE.Vector3, skin?: number) => THREE.Vector3 | null;
 }
 
 /** `MoveInput` plus the jump key's PRESS edge, which the swim breach is triggered on. */
@@ -63,7 +70,7 @@ export function movementFrame(
 
   if (!state.swimming) {
     state.swimStrokeSpeed = 0;
-    return { outcome: step(state, deps.cast, input, dt, now), swim: null };
+    return { outcome: step(state, deps.cast, input, dt, now, deps.depenetrate), swim: null };
   }
 
   if (input.jumpPressed) {

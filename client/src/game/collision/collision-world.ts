@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import { castCapsuleAgainstTriangles } from './capsule-cast';
+import { castCapsuleAgainstTriangles, depenetrateCapsule } from './capsule-cast';
 import { DoodadProvider } from './doodad-provider';
 import { LiquidRegistry } from './liquid-query';
 import { TerrainProvider } from './terrain-provider';
@@ -240,6 +240,42 @@ export class CollisionWorld {
         });
       }
       return hit;
+    };
+  }
+
+  /**
+   * A PUSH-OUT closure for one audience and one capsule shape: the recovery a sweep cannot perform.
+   *
+   * A sweep answers "what would I hit going that way". A body already INSIDE geometry is blocked every
+   * way at distance zero, which is the state the owner reached under the abbey stairs -- four slide
+   * iterations, all `travelled: 0`, all against downward-facing faces. Only a positional correction
+   * gets out, and that needs the candidate SET rather than a cast.
+   *
+   * THE BOX IS THE CAPSULE ITSELF, padded by the skin and no more. Unlike a cast there is no sweep to
+   * cover, so this is the smallest honest query -- and it matters, because the caller runs this only
+   * when stuck and wants the answer to be about where the body IS.
+   */
+  depenetrateFor(layer: CollisionLayer, radius: number, halfSegment: number) {
+    return (center: THREE.Vector3, skin = 0): THREE.Vector3 | null => {
+      const candidates = this.candidates;
+      candidates.length = 0;
+
+      _box.makeEmpty().expandByPoint(center);
+      const pad = radius + halfSegment + skin;
+      _box.min.subScalar(pad);
+      _box.max.addScalar(pad);
+
+      if (!this.ignore.terrain) {
+        this.terrain.gather(_box, candidates);
+      }
+      if (!this.ignore.wmo) {
+        this.wmo.gather(_box, layer, candidates);
+      }
+      if (!this.ignore.doodads) {
+        this.doodads.gather(_box, candidates);
+      }
+
+      return depenetrateCapsule(center, radius, halfSegment, candidates, skin);
     };
   }
 

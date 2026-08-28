@@ -3,7 +3,9 @@
  */
 import * as THREE from 'three';
 
-import { castCapsuleAgainstTriangles, closestDistanceCapsuleTriangle } from '../capsule-cast';
+import {
+  castCapsuleAgainstTriangles, closestDistanceCapsuleTriangle, depenetrateCapsule,
+} from '../capsule-cast';
 import { Triangle } from '../types';
 
 const RADIUS = 1 / 3;
@@ -218,5 +220,53 @@ describe('castCapsuleAgainstTriangles', () => {
 
     expect(from.toArray()).toEqual([0, 0, 5]);
     expect(dir.toArray()).toEqual([0, 0, -1]);
+  });
+});
+
+/**
+ * PUSHING A CAPSULE OUT OF WHAT IT IS INSIDE.
+ *
+ * The state this exists for, measured on the abbey stairs: four slide iterations, every one
+ * `travelled: 0`, all blocked at distance 0 by faces whose normal is `(~0, ~0, -1)` -- the underside
+ * of a tread. A capsule touching the underside of a step is inside the step, and a sweep cannot
+ * recover: it answers "what would I hit going that way", and every way is blocked.
+ *
+ * The assertions are the two that matter: a body genuinely inside comes out on the near side and ends
+ * clear, and a body already free is left EXACTLY alone -- null, not a copy. The second is what keeps
+ * this out of the ordinary frame: a caller that got a new position every frame would have to compare
+ * it, and a moving body would jitter.
+ */
+describe('depenetrateCapsule', () => {
+  const SKIN = 0.02;
+
+  it('leaves a free capsule alone', () => {
+    const free = new THREE.Vector3(0, 0, 10);
+    expect(depenetrateCapsule(free, RADIUS, HALF_SEGMENT, floor(0), SKIN)).toBeNull();
+  });
+
+  it('pushes a capsule sunk into the floor back above it', () => {
+    // Centre below where it can rest: the capsule bottom is HALF_SEGMENT + RADIUS under the axis, so
+    // resting means centre.z = HALF_SEGMENT + RADIUS. Start a third of a yard lower than that.
+    const rest = HALF_SEGMENT + RADIUS;
+    const sunk = new THREE.Vector3(0, 0, rest - 0.33);
+    const fixed = depenetrateCapsule(sunk, RADIUS, HALF_SEGMENT, floor(0), SKIN);
+
+    expect(fixed).not.toBeNull();
+    // Out along +Z, and clear of the surface by about the skin.
+    expect(fixed!.z).toBeGreaterThan(rest);
+    expect(fixed!.z).toBeLessThan(rest + 3 * SKIN);
+    // And it really is free afterwards -- the property, not the arithmetic.
+    expect(closestDistanceCapsuleTriangle(fixed!, HALF_SEGMENT, RADIUS, floor(0)[0]))
+      .toBeGreaterThan(0);
+  });
+
+  it('pushes a capsule buried in a wall out sideways', () => {
+    const buried = new THREE.Vector3(0.2, 0, 10);
+    const fixed = depenetrateCapsule(buried, RADIUS, HALF_SEGMENT, wall(0), SKIN);
+
+    expect(fixed).not.toBeNull();
+    // The wall is at x = 0 and the body was on the +X side, so it comes out further +X.
+    expect(fixed!.x).toBeGreaterThan(RADIUS);
+    expect(fixed!.z).toBeCloseTo(10, 6);
   });
 });

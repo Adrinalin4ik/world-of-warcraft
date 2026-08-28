@@ -285,6 +285,14 @@ export function step(
   input: MoveInput,
   dt: number,
   now: number,
+  /**
+   * The push-out, or undefined to go without one.
+   *
+   * OPTIONAL so every existing caller and every movement test is unchanged -- the rule set is
+   * unit-tested with no world loaded, which is the property that made this whole module diagnosable
+   * from a console trace.
+   */
+  depenetrate?: (center: THREE.Vector3, skin?: number) => THREE.Vector3 | null,
 ): Outcome {
   const inputHoriz = input.moving && input.speed > 0
     ? input.dir.clone().normalize().multiplyScalar(input.speed)
@@ -373,6 +381,7 @@ export function step(
   let slideIterations: SlideIteration[] | null = null;
 
   if (!held && grounded && !jumped) {
+    const before = center.clone();
     const resolved = groundedStep(cast, center, state.horizVel, dt);
     center = resolved.center;
     climb = resolved.climb;
@@ -383,6 +392,38 @@ export function step(
     slideIterations = resolved.slide;
     if (resolved.ground) {
       groundEntity = resolved.ground;
+    }
+
+    /**
+     * **STUCK: PUSH OUT.** Only here, and only on this condition.
+     *
+     * The owner, under the abbey stairs: "я просто провалился под ступеньку... нужно выталкивания
+     * сделать". The trace agrees -- four slide iterations, every one `travelled: 0`, every contact
+     * against a face whose normal is `(~0, ~0, -1)`. A capsule touching the UNDERSIDE of a tread is
+     * inside the tread, and a sweep cannot recover from that: it answers what lies along a
+     * direction, and while inside, every direction is blocked at distance zero.
+     *
+     * THE CONDITION IS THE WHOLE COST CONTROL. A push-out needs the candidate SET and a
+     * capsule-triangle distance per candidate -- 60 to 240 of them at the abbey, times up to four
+     * passes. Run every frame that is a real per-frame bill for a state that is rare; run only when
+     * the body ASKED to move, CONTACTED something and travelled nothing, and the ordinary frame pays
+     * one subtraction.
+     *
+     * Wanting to move is part of the test on purpose: a body standing still against a wall also
+     * travels nothing, and it is not stuck -- it is standing.
+     *
+     * The correction lands on the position and takes effect next frame; nothing is re-run here. That
+     * keeps this a recovery rather than a second movement path, and it is why one frame of visible
+     * stall is the worst case.
+     */
+    if (depenetrate !== undefined
+      && resolved.contacts > 0
+      && state.horizVel.lengthSq() > 1e-12
+      && center.distanceToSquared(before) < 1e-12) {
+      const freed = depenetrate(center, SKIN_WIDTH);
+      if (freed !== null) {
+        center = freed;
+      }
     }
   } else {
     // Held zeroed both terms already, but say it outright. Jumping and airborne frames let gravity
