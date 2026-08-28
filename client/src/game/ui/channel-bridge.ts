@@ -131,6 +131,31 @@ export function attachChannelBridge(vm: LuaVM, world: World): () => void {
   };
   channels.on('channelsChanged', onChannels);
 
+  /**
+   * **AND FIRE IT ONCE NOW, BECAUSE THE EDGE THIS BRIDGE WAITS FOR HAS ALREADY PASSED.**
+   *
+   * MEASURED: with a channel joined and `GetChannelList()` answering it, `ChatFrame1.channelList[1]`
+   * was still nil -- so `ChatFrame_MessageEventHandler` matched no channel for an incoming line and
+   * dropped every one of them (`chatframe.lua:2705-2723`). The list is filled only by
+   * `ChatFrame_RegisterForChannels(self, GetChatWindowChannels(self:GetID()))`, in the
+   * `UPDATE_CHAT_WINDOWS` arm (`:2511`).
+   *
+   * Two ways that edge is missed, and both are ordering:
+   *
+   *  - `attachChatBridge` fires `UPDATE_CHAT_WINDOWS` when IT attaches, and this bridge installs the
+   *    channel sink AFTER it. So at the moment of that one dispatch `GetChatWindowChannels` truthfully
+   *    answered "no channels", and nothing fired it again;
+   *  - a server that remembers channel membership sends `YOU_JOINED` during LOGIN, before this bridge
+   *    has subscribed to `channelsChanged` -- so the handler adds the channel and emits to nobody.
+   *
+   * This is the lesson `unit-bridge.ts#seedUnitSnapshots` already records: the real client has this
+   * state before the UI asks, and a bridge that attaches later has to SAY so rather than wait for an
+   * edge that will never come. One dispatch at attach, which is also what re-runs
+   * `ChatFrame_RegisterForMessages` -- idempotent, and the same call the arm makes on every real
+   * update.
+   */
+  onChannels();
+
   return () => {
     channels.removeListener('channelsChanged', onChannels);
     channels.removeListener('notice', onNotice);
