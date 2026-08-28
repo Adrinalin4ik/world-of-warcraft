@@ -56,7 +56,9 @@ import { Widget } from '../widget';
 import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
 import { PrefetchedAddOn, prefetchStartupAddOns } from './addons';
 import { cacheKey, prefetchManifest, registerTreeArt } from './manifest';
-import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret, placeSelection } from './tick';
+import {
+  CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, mirrorEditBoxText, placeCaret, placeSelection,
+} from './tick';
 import { parseXml } from './xml';
 import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
@@ -1015,9 +1017,9 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
       caretClock += dt;
       const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
       for (const { box, caret, selection } of editBoxes) {
-        if (box.textRegion !== null) {
-          box.textRegion.text = box.displayText;
-        }
+        // THROUGH `mirrorEditBoxText`, not a direct assignment: the horizontal window lives there
+        // and the caret and selection read the same one. See `tick.ts#editBoxWindow`.
+        mirrorEditBoxText(box);
         placeCaret(box, caret, input, litCaret);
         placeSelection(box, selection, input);
       }

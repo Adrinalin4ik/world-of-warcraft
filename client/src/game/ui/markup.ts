@@ -239,6 +239,42 @@ export function plainIndexOf(text: string, rawIndex: number): number {
   return parseMarkup(text.slice(0, Math.max(0, Math.min(rawIndex, text.length)))).plain.length;
 }
 
+/**
+ * The RAW index whose prefix contains exactly `plainIndex` drawn characters -- the inverse of
+ * `plainIndexOf`.
+ *
+ * Needed by the edit box's horizontal window: the window is chosen in PLAIN space (that is where the
+ * glyphs and the measurements are) and the region is fed RAW text, so that a link inside the window
+ * keeps its colour escapes instead of arriving as bare `[Name]`.
+ *
+ * BY BISECTION OVER `plainIndexOf`, not by a second walk of the escape rules. Two copies of those
+ * rules would drift, and this project has already paid for that class of duplication more than once.
+ * Eight probes for a 255-character box, and only while the text overflows -- the caller skips this
+ * entirely when everything fits, which is the ordinary case.
+ *
+ * The answer is the SMALLEST raw index with that many plain characters, so a window boundary lands
+ * before an escape run rather than inside it.
+ */
+export function rawIndexOf(text: string, plainIndex: number): number {
+  if (plainIndex <= 0) {
+    return 0;
+  }
+  if (text.indexOf('|') === -1) {
+    return Math.min(plainIndex, text.length);
+  }
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (plainIndexOf(text, mid) < plainIndex) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+
 export function parseMarkup(text: string): Markup {
   // Fast path, and it is the overwhelmingly common one: no escapes at all means the caller gets the
   // identical string back and every downstream measurement is bit-for-bit what it was before this

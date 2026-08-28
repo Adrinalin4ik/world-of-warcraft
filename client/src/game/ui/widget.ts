@@ -651,6 +651,19 @@ export class Widget {
    * no setter to give it to.
    */
   ignoreArrows = false;
+  /**
+   * THE HORIZONTAL WINDOW: the PLAIN index of the first character the box shows.
+   *
+   * A single-line field does not wrap, so text longer than the box has to go somewhere. The engine
+   * slides it and clips at the edge, keeping the caret visible; before this it ran off the right side
+   * of the chat box and over the world, which is what the owner photographed.
+   *
+   * PLAIN space, not raw: the window is chosen where the glyphs are measured. `tick.ts#editBoxWindow`
+   * owns it, and the caret and the selection read the same value -- one number, so the three cannot
+   * disagree about what is on screen.
+   */
+  textScroll = 0;
+
   caret = 0;
   /** Selection anchor. Equal to `caret` when there is no selection (the common case). */
   selectionAnchor = 0;

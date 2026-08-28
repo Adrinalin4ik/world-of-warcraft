@@ -11,7 +11,8 @@
 import { Widget } from '../widget';
 import { caretOffset } from '../text';
 import { FocusSink, FrameRegistry } from './lua/object';
-import { parseMarkup, plainIndexOf } from '../markup';
+import { parseMarkup, plainIndexOf, rawIndexOf } from '../markup';
+import { rectOf } from '../rects';
 
 /**
  * The caret, OURS.
@@ -156,6 +157,129 @@ function buildSelection(registry: FrameRegistry, box: Widget): Widget | null {
  * it adds no dirty frames: a selection's rect is static while it stands, and the CARET beside it already
  * dirties the fingerprint twice a second by blinking. The highlight itself deliberately does not blink.
  */
+/** What is on screen in a single-line box, and where it starts. See `editBoxWindow`. */
+interface EditBoxWindow {
+  /** The RAW text the region is given -- the window, with its escapes intact. */
+  shown: string;
+  /** The PLAIN index the window starts at. */
+  from: number;
+  /** The caret, in plain characters from the window start. */
+  caretIn: number;
+}
+
+/** Per-box memo for `editBoxWindow`, keyed on everything the answer depends on. */
+const windowCache = new WeakMap<Widget, { key: string; value: EditBoxWindow }>();
+
+/**
+ * THE HORIZONTAL WINDOW of a single-line edit box: what is on screen, and where it starts.
+ *
+ * A single-line field does not wrap (`methods/kinds.ts#SetTextRegion`), so text longer than the box
+ * has to go somewhere. The engine slides it and clips at the edge with the caret kept visible; before
+ * this it ran off the right side of the chat box and across the world, which is what the owner
+ * photographed.
+ *
+ * ONE FUNCTION, read by three callers -- the text mirror, the caret and the selection. That is the
+ * point of it: the three used to measure `displayText` independently, and any disagreement between
+ * them puts the caret under the wrong letter. Now there is one window and one offset.
+ *
+ * THE AVAILABLE WIDTH IS THE BOX'S RESOLVED RECT minus its text insets, and NOT `box.width`: the chat
+ * field authors `Size x="5"` and takes its real width from two opposing anchors
+ * (`floatingchatframe.xml:682`), so the authored value is 5 and useless. `rectOf` answers what is
+ * actually on screen -- the same source `GetLeft`/`GetRight` use, and the same lesson the slider
+ * getter's zero taught.
+ *
+ * THE WINDOW IS FED TO THE REGION AS **RAW** TEXT, mapped back through `rawIndexOf`, so a link inside
+ * it keeps its colour escapes rather than arriving as a bare `[Name]`.
+ *
+ * COST: the fast path is a single `measureText` of the whole string, and it returns before any
+ * bisection whenever the text fits -- which is every box on every screen except a chat line being
+ * typed past the edge. Nothing here allocates while the window is unchanged.
+ */
+export function editBoxWindow(box: Widget): EditBoxWindow {
+  const raw = box.displayText;
+  const spec = box.textRegion?.font ?? null;
+  const rect = rectOf(box.id);
+  const available = rect === null
+    ? 0
+    : rect.width - box.textInsets.left - box.textInsets.right;
+
+  /**
+   * MEMOISED, and that is not an optimisation but the difference between a feature and a frame-budget
+   * hole.
+   *
+   * `caretOffset` measures through a 2D context and is NOT cached (`text.ts:376-390` -- unlike
+   * `measureText`, which is). This function is called three times per tick for the focused box -- the
+   * mirror, the caret, the selection -- and once per tick for every other edit box in the tree, of
+   * which the world UI has ten. Unmemoised that is a canvas measurement per box per frame for a value
+   * that changes only on a keystroke.
+   *
+   * The key is everything the answer depends on: the string, the caret and the width. A resize
+   * therefore recomputes, which is right -- the window depends on the box, not only on the text.
+   */
+  const key = `${raw}|${box.caret}|${available}`;
+  const cached = windowCache.get(box);
+  if (cached !== undefined && cached.key === key) {
+    return cached.value;
+  }
+
+  const plain = parseMarkup(raw).plain;
+  const caretPlain = plainIndexOf(raw, box.caret);
+  const answer = (value: EditBoxWindow): EditBoxWindow => {
+    windowCache.set(box, { key, value });
+    box.textScroll = value.from;
+    return value;
+  };
+  if (spec === null || available <= 0
+    || caretOffset(plain, spec, 1, plain.length) <= available) {
+    // Everything fits, or there is nothing to measure with: no window and no bisection.
+    return answer({ shown: raw, from: 0, caretIn: caretPlain });
+  }
+
+  /**
+   * The smallest window start that keeps the caret inside, BY BISECTION.
+   *
+   * `caretOffset(plain, ..., from)` is non-decreasing in `from`, so the condition
+   * `caretPx - offset(from) <= available` is monotonic and bisects. The first draft of this walked
+   * `from` up one character at a time and re-measured BOTH ends each step: 255 iterations x 2
+   * uncached canvas measurements, per frame, for one box. Eight probes instead.
+   *
+   * `caretPx` is hoisted for the same reason -- it does not depend on `from` and was being remeasured
+   * inside the loop.
+   */
+  const caretPx = caretOffset(plain, spec, 1, caretPlain);
+  let low = Math.min(box.textScroll, caretPlain);
+  let high = caretPlain;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (caretPx - caretOffset(plain, spec, 1, mid) > available) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  const from = low;
+  return answer({
+    // RAW from the same boundary, so escapes inside the window survive. `rawIndexOf` bisects too,
+    // which is why it is reached only on this path.
+    shown: from === 0 ? raw : raw.slice(rawIndexOf(raw, from)),
+    from,
+    caretIn: caretPlain - from,
+  });
+}
+/**
+ * Mirror the box's value into its text region, through the window above.
+ *
+ * The two runtimes used to assign `textRegion.text = box.displayText` themselves. Routing both
+ * through here is what makes the window, the caret and the selection agree -- and it is the only
+ * place that assignment now happens.
+ */
+export function mirrorEditBoxText(box: Widget): void {
+  if (box.textRegion === null) {
+    return;
+  }
+  box.textRegion.text = editBoxWindow(box).shown;
+}
+
 export function placeSelection(box: Widget, selection: Widget | null, input: FocusSink | null): void {
   if (selection === null) {
     return;
@@ -165,10 +289,30 @@ export function placeSelection(box: Widget, selection: Widget | null, input: Foc
     selection.shown = false;
     return;
   }
-  const start = Math.min(box.selectionAnchor, box.caret);
-  const end = Math.max(box.selectionAnchor, box.caret);
-  const left = caretOffset(box.displayText, spec, 1, start);
-  const right = caretOffset(box.displayText, spec, 1, end);
+  /**
+   * MEASURED INSIDE THE WINDOW AND OVER THE PLAIN TEXT, and it used to be neither.
+   *
+   * Against the raw string a selection covering an item link was ~60 characters wide instead of the 8
+   * that are drawn, and against the unwindowed string it was offset by whatever had scrolled off the
+   * left. Ctrl+A is where that shows: the model was already right (`input.ts` sets anchor 0 and caret
+   * to the end) and the highlight was the half that lied.
+   *
+   * CLAMPED to the window, so a selection running off either edge paints to the edge and no further.
+   */
+  const raw = box.displayText;
+  const plain = parseMarkup(raw).plain;
+  const window = editBoxWindow(box);
+  const startPlain = plainIndexOf(raw, Math.min(box.selectionAnchor, box.caret));
+  const endPlain = plainIndexOf(raw, Math.max(box.selectionAnchor, box.caret));
+  const shownPlain = plain.slice(window.from);
+  const start = Math.max(0, Math.min(startPlain - window.from, shownPlain.length));
+  const end = Math.max(0, Math.min(endPlain - window.from, shownPlain.length));
+  if (end <= start) {
+    selection.shown = false;
+    return;
+  }
+  const left = caretOffset(shownPlain, spec, 1, start);
+  const right = caretOffset(shownPlain, spec, 1, end);
   selection.anchors[0].x = left;
   selection.setSize(Math.max(0, right - left), spec.size ?? 12);
   selection.shown = true;
@@ -212,9 +356,9 @@ export function placeCaret(
    * SAME parse that produced the glyphs; see its header for why it reuses `parseMarkup` rather than
    * walking the escapes again.
    */
-  const raw = box.displayText;
-  const shown = parseMarkup(raw).plain;
-  caret.anchors[0].x = caretOffset(shown, spec, 1, plainIndexOf(raw, box.caret));
+  const window = editBoxWindow(box);
+  const shown = parseMarkup(window.shown).plain;
+  caret.anchors[0].x = caretOffset(shown, spec, 1, window.caretIn);
   caret.shown = true;
 }
 
