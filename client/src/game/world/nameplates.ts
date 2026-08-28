@@ -1,6 +1,10 @@
 /**
- * NAMEPLATES: the unit's name over its head, and -- on the client's own `V` binding -- a health bar and
- * a level.
+ * NAMEPLATES: the unit's name over its head, and -- on an ATTACKABLE unit -- a health bar and a level.
+ *
+ * The friendly/hostile split is the owner's rule and not the client's: "имена союзников и союзных ncp
+ * + панель здоровья и имя на противниками". The real client gives both a bar. Both are ON by default
+ * here (`api/screen.ts`' `nameplateShowFriends`/`nameplateShowEnemies`), and the client's own three
+ * bindings still own visibility -- see the `bar: attackable` comment for how the two interact.
  *
  * The owner: "нету имени цели и на букву v должен включаться индикатор здоровья с отображение уровня…
  * и нужно оптимально сделать."
@@ -573,12 +577,33 @@ export class Nameplates {
     // plate, which is what the real client does too (the set is "units you can attack").
     const reaction = reactionFor(unit, self) ?? REACTION_NEUTRAL;
     const attackable = reaction <= REACTION_NEUTRAL;
+    /**
+     * **A FRIENDLY UNIT GETS A NAME; AN ATTACKABLE ONE GETS THE BAR TOO.** The owner's rule, stated
+     * as: "показывались имена союзников и союзных ncp + панель здоровья и имя на противниками".
+     *
+     * `bar: attackable` is the whole of it, and the two branches were already here -- the plate/bar
+     * form and the bare-name form -- so this is a routing change and not new drawing. What it buys is
+     * the reading the owner asked for: an ally is identified, an enemy is assessed.
+     *
+     * ATTACKABLE INCLUDES NEUTRAL, unchanged: that is `canAttackUnit`'s gate and the same set the
+     * right-click attack and the Attack cursor use, so Northshire's neutral wolves carry a bar.
+     *
+     * The CVARS still decide VISIBILITY and the bindings still own the CVars -- see `installCVars`.
+     * So `V` leaves enemy bars and drops friendly names, `SHIFT-V` the reverse, `CTRL-V` toggles both,
+     * exactly as the client's own three bindings define (`bindings.xml:544-573`). Nothing here reads a
+     * key.
+     */
     if (attackable ? config.showEnemies : config.showFriends) {
-      return { bar: true };
+      return { bar: attackable };
     }
-    // THE RESCUE. A name, no bar -- the target is named whatever the CVars say.
+    /**
+     * THE RESCUE: the TARGET is named whatever the CVars say -- and a friendly target still gets no
+     * bar, by the same rule one branch up. Without the `attackable` term a selected ally would grow a
+     * health bar the moment enemy plates were on, which is the rule contradicting itself on the one
+     * unit the player is looking at.
+     */
     if (unit === target) {
-      return { bar: config.showEnemies || config.showFriends };
+      return { bar: attackable && (config.showEnemies || config.showFriends) };
     }
     return null;
   }
@@ -766,8 +791,26 @@ export class Nameplates {
       resolved.texture.flipY = true;
       resolved.texture.needsUpdate = true;
     }
-    material.map = resolved.texture;
-    material.needsUpdate = true;
+    /**
+     * **ONLY WHEN THE MAP ACTUALLY CHANGES**, and this guard is new because the plate count is.
+     *
+     * `Material.needsUpdate = true` dirties the material and makes three re-evaluate its program on
+     * the next render. Set unconditionally that is once per plate per frame -- invisible while the
+     * only plate was the target's, and multiplied by every friendly unit in range the moment both
+     * CVars default to on.
+     *
+     * The rasterisation above was already cached (`FontStringTextures#get` is keyed by content and
+     * scale), so a name that has not changed resolves to the SAME texture object -- which makes the
+     * identity compare exact rather than approximate. Nothing is skipped that a redraw needs: a
+     * different string is a different entry and a different object.
+     *
+     * The same lesson as the edit box two commits ago, applied before the owner had to measure it:
+     * work that was free at one call site is not free at thirty.
+     */
+    if (material.map !== resolved.texture) {
+      material.map = resolved.texture;
+      material.needsUpdate = true;
+    }
     // THE PAD IS PART OF THE QUAD, not of the layout -- the same split `renderer.ts` makes. `size` is
     // the glyph box and `pad` is the outline's clearance around it; drawing the quad at `size` alone
     // would squeeze the raster and clip the ring.

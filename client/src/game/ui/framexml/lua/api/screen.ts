@@ -464,10 +464,20 @@ function installCVars(vm: LuaVM): void {
      * what documents that the names are the CVars the client's own Lua uses -- `GetCVarBool` already
      * answers false for an unset name, so behaviour is identical either way.
      *
-     * **OFF is 3.3.5a's own default**, and the evidence is the binding's own shape: the first `V` press
-     * takes the `else` arm and turns enemy plates ON, which is only the right first behaviour if they
-     * start off. (The value in a real install lives in `Config.wtf`, which the asset host does not
-     * serve -- `wtf/config.wtf` 404s -- so this is an inference from the client's Lua, not a read.)
+     * **ON, BY THE OWNER'S REQUIREMENT, and that overrules the inference this comment used to carry.**
+     * It argued OFF from the binding's shape -- the first `V` press takes the `else` arm and turns enemy
+     * plates on, which is only the right FIRST behaviour if they start off. That reasoning is still
+     * sound about 3.3.5a's shipped default and is no longer what this client wants: he asked for ally
+     * names and enemy health bars to be there without pressing anything.
+     *
+     * THE BINDINGS STILL WORK AND STILL DO WHAT THE CLIENT SAYS, which is the other half of his ask.
+     * From both-on, `V` (NAMEPLATES) takes the `else` arm and leaves enemies on with friends off;
+     * `SHIFT-V` mirrors it; `CTRL-V` (ALLNAMEPLATES) sees both set and turns both off, then on again.
+     * So all three keys toggle exactly as `bindings.xml:544-573` defines -- reading their bodies is how
+     * that was checked, not by pressing them.
+     *
+     * (A real install keeps the value in `Config.wtf`, which the asset host does not serve --
+     * `wtf/config.wtf` 404s -- so neither the old value nor this one is a read of the game's data.)
      */
     /**
      * THE WORLD MAP'S FOUR, and the first one was an ARITHMETIC ERROR on the owner's SHIFT-M:
@@ -544,8 +554,8 @@ function installCVars(vm: LuaVM): void {
      * wheel scrolls chat out of the box -- and it is what the owner is asking for.
      */
     ['chatMouseScroll', '1'],
-    ['nameplateShowEnemies', '0'],
-    ['nameplateShowFriends', '0'],
+    ['nameplateShowEnemies', '1'],
+    ['nameplateShowFriends', '1'],
     /**
      * `lastTalkedToGM`, EMPTY -- and its absence put a modal error dialog on the owner's screen.
      *
