@@ -10,6 +10,7 @@ import { MerchantHandler } from './merchant';
 import { ReputationHandler } from './reputation';
 import GameObjectHandler from './game-object';
 import { QuestHandler } from './quest';
+import { ChannelHandler } from './channel';
 import { LevelUpHandler } from './level-up';
 import { GroupHandler } from './group';
 import { ChatMessageHandler } from './chat';
@@ -130,6 +131,14 @@ export class ObjectHandler extends EventEmitter {
    */
   public questHandler: QuestHandler;
 
+  /**
+   * CHAT CHANNELS -- the join/leave pair and `SMSG_CHANNEL_NOTIFY`, which had no subscriber at all.
+   *
+   * Membership is confirmed by the server rather than assumed from the send; see `channel.ts` for why
+   * that is the design and not caution.
+   */
+  public channelHandler: ChannelHandler;
+
   /** World objects: the template name query, and `CMSG_GAMEOBJ_USE`. See `game-object.ts`. */
   public gameObjectHandler: GameObjectHandler;
 
@@ -172,6 +181,10 @@ export class ObjectHandler extends EventEmitter {
     // QUESTS. The whole `SMSG_QUESTGIVER_*` family had no subscriber until this line, which is what
     // `gossip-bridge.ts:231` recorded as the reason `SelectGossipAvailableQuest` was a declared gap.
     this.questHandler = new QuestHandler(this.game);
+    // CHANNELS. `SMSG_CHANNEL_NOTIFY` had no subscriber, so `GetChannelList` could only ever be empty
+    // and no chat frame was registered for a channel -- which drops incoming channel messages as well
+    // as making outgoing ones unaddressable.
+    this.channelHandler = new ChannelHandler(this.game);
     this.gameObjectHandler = new GameObjectHandler(this.game);
     // LEVELLING UP. `SMSG_LEVELUP_INFO` (0x1D4) likewise had no subscriber, so `PLAYER_LEVEL_UP` was
     // never fired and the client's own congratulation lines never printed.

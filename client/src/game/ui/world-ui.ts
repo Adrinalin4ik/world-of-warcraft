@@ -61,6 +61,7 @@ import { attachAuraBridge } from './aura-bridge';
 import { attachTrainerBridge } from './trainer-bridge';
 import { attachGroupBridge } from './group-bridge';
 import { attachChatBridge } from './chat-bridge';
+import { attachChannelBridge } from './channel-bridge';
 import {
   publishRects, clearRects, setRectResolver, setVisibleRectResolver, rectStats, layoutRectOf,
 } from './rects';
@@ -303,6 +304,9 @@ export class WorldUiHost {
 
   /** `attachChatBridge`'s teardown, held so `dispose` can run it. */
   private detachChat: (() => void) | null = null;
+
+  /** `attachChannelBridge`'s teardown, held so `dispose` can run it. */
+  private detachChannel: (() => void) | null = null;
 
   /**
    * THE DRAW INSTRUMENT, on `window.uiDrawStats`.
@@ -773,6 +777,11 @@ export class WorldUiHost {
         // no server to have said anything. AFTER the group bridge for no reason but readability -- they
         // share nothing, though the duel and party lines this unblocks are the group bridge's.
         this.detachChat = attachChatBridge(runtime.vm, this.world);
+        // CHANNELS. AFTER the chat bridge, and that ordering is load-bearing: this one installs the
+        // channel-name source `SendChatMessage` reads, and that global is registered by the chat api
+        // the chat bridge feeds. Gated on a real session for the same reason -- a channel is a round
+        // trip and an offline world answers nothing.
+        this.detachChannel = attachChannelBridge(runtime.vm, this.world);
         // BUFFS, DEBUFFS AND THE STANCE BAR. Gated on a real session like the rest: every aura arrives
         // as `SMSG_AURA_UPDATE`, and an offline world sends none -- with no packet the buff row is empty,
         // which is what it was before this existed. AFTER the action bridge, and that ordering is not
@@ -1671,6 +1680,8 @@ export class WorldUiHost {
     this.detachGroup = null;
     this.detachChat?.();
     this.detachChat = null;
+    this.detachChannel?.();
+    this.detachChannel = null;
     this.detachAuras?.();
     this.detachAuras = null;
     this.detachContainers?.();

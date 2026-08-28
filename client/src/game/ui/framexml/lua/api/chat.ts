@@ -80,6 +80,29 @@ export function resetChatTypeIds(): void {
  */
 const defaultLanguageByVm = new WeakMap<LuaVM, { name: string; id: number }>();
 
+/**
+ * A channel NUMBER (or name) -> the name the wire wants, installed by `channel-bridge.ts`.
+ *
+ * `ChatEdit_SendText` passes the edit box's `channelTarget` attribute as `SendChatMessage`'s fourth
+ * argument (`chatframe.lua:3683`) and that attribute is a NUMBER, while the wire addresses a channel
+ * by NAME. Nothing between them knew the mapping, so `/1 hello` would have put "1" on the wire as the
+ * channel name and been discarded without a word.
+ *
+ * Null when the number names no channel this character is in, which stops the send rather than
+ * addressing a wrong one.
+ */
+export type ChannelSource = (target: string) => string | null;
+
+const channelSourceByVm = new WeakMap<LuaVM, ChannelSource>();
+
+export function setChannelSource(vm: LuaVM, source: ChannelSource | null): void {
+  if (source === null) {
+    channelSourceByVm.delete(vm);
+  } else {
+    channelSourceByVm.set(vm, source);
+  }
+}
+
 export function setDefaultLanguage(
   vm: LuaVM,
   pair: { name: string; id: number } | null,
@@ -231,7 +254,10 @@ export function installChatApi(vm: LuaVM): void {
       + 'its authored anchor on reload', []],
     ['SetChatWindowSavedDimensions', 'no chat window layout is persisted, so a resized window returns '
       + 'to its authored size on reload', []],
-    ['GetChatWindowChannels', 'no chat settings are persisted', []],
+    // `GetChatWindowChannels` has LEFT this list -- `channel-bridge.ts` answers it from live
+    // membership. Its note said "no chat settings are persisted", which is still true and was never
+    // the reason a channel message did not show: the client needs the list to REGISTER a frame for a
+    // channel at all (`chatframe.lua:2511`), persisted or not.
     ['AddChatWindowMessages', 'no chat settings are persisted', []],
     ['RemoveChatWindowMessages', 'no chat settings are persisted', []],
     ['AddChatWindowChannel', 'no chat settings are persisted', []],
@@ -296,16 +322,14 @@ export function installChatApi(vm: LuaVM): void {
       + 'and nil is what makes ChatEdit_UpdateHeader treat a whisper as a whisper', []],
     ['GetAutoCompleteResults', 'no name index is kept (friends, guild, recent whispers), so there are '
       + 'no completion candidates -- and NOTHING is what ChatEdit_ExtractTellTarget needs to hear', []],
-    // The channel system: `CMSG_JOIN_CHANNEL` and its family are not sent, and no channel list is read.
-    ['GetChannelList', 'no chat channel is joined: CMSG_JOIN_CHANNEL is not sent', []],
-    ['GetNumDisplayChannels', 'no chat channel is joined', [0]],
-    ['GetChannelDisplayInfo', 'no chat channel is joined', []],
-    ['JoinPermanentChannel', 'no chat channel is joined', []],
-    ['JoinTemporaryChannel', 'no chat channel is joined', []],
-    ['LeaveChannelByName', 'no chat channel is joined', []],
-    ['ListChannels', 'no chat channel is joined', []],
-    ['ListChannelByName', 'no chat channel is joined', []],
-    ['GetChannelName', 'no chat channel is joined', [0, '', 0]],
+    // The channel system: `channel-bridge.ts` registers `JoinPermanentChannel`,
+    // `JoinTemporaryChannel`, `LeaveChannelByName`, `GetChannelName`, `GetChannelList`,
+    // `GetNumDisplayChannels` and `GetChatWindowChannels` over live membership, so those have LEFT
+    // this list. What stays is the part that needs `SMSG_CHANNEL_LIST` -- the roster of a channel --
+    // which nothing in this client asks for yet.
+    ['GetChannelDisplayInfo', 'the channel roster needs SMSG_CHANNEL_LIST, which is not requested', []],
+    ['ListChannels', 'the channel roster needs SMSG_CHANNEL_LIST, which is not requested', []],
+    ['ListChannelByName', 'the channel roster needs SMSG_CHANNEL_LIST, which is not requested', []],
     // Colours. `ChangeChatColor` would persist a CVar this client does not keep, and the reader
     // (`GetChatTypeIndex`-tagged lines) is already satisfied by the defaults set at file scope.
     ['ChangeChatColor', 'no chat colour is persisted, so a change would not survive the frame', []],
@@ -353,7 +377,25 @@ export function installChatApi(vm: LuaVM): void {
       );
       return [];
     }
-    sender?.(type, text, target, Number.isFinite(language) ? language : null);
+    /**
+     * A CHANNEL TARGET IS A NUMBER AND THE WIRE WANTS A NAME. See `setChannelSource`.
+     *
+     * Resolved here rather than in `chat.ts#send` because the mapping is the ENGINE's channel list,
+     * which lives in the bridge -- and because a refusal has to stop the send: an unresolvable
+     * channel number would otherwise go out as its own digits and be discarded in silence, which is
+     * the failure mode this project keeps paying for.
+     */
+    let resolved = target;
+    if (typeName === 'CHANNEL') {
+      resolved = channelSourceByVm.get(vm)?.(String(target ?? '')) ?? null;
+      if (resolved === null) {
+        warnOnce(
+          `SendChatMessage: no channel is joined as '${String(target)}', so the message was not sent`,
+        );
+        return [];
+      }
+    }
+    sender?.(type, text, resolved, Number.isFinite(language) ? language : null);
     return [];
   });
 
