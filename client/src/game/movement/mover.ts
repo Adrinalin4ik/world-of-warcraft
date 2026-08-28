@@ -559,7 +559,43 @@ export function step(
     const velocity = held
       ? new THREE.Vector3()
       : new THREE.Vector3(state.horizVel.x, state.horizVel.y, state.velZ);
+    const beforeAir = center.z;
     center = airborneStep(cast, center, velocity, dt);
+
+    /**
+     * **A JUMP THAT WENT NOWHERE IS PROOF OF PENETRATION, and it is the only proof available while
+     * the body is standing still.**
+     *
+     * The owner, at a fence: "не могу прыгать, он упирается в забор и не прыгает вверх. Даже без
+     * зажатой w... при этом анимация проигрывается." That last clause is the measurement. The jump was
+     * ELECTED -- `velZ` set, the event dispatched, the animation running -- and the world refused the
+     * motion. An upward sweep is refused at distance zero only by a face the capsule is already inside.
+     *
+     * The grounded push-out cannot reach this state and never will: it needs a CONTACT, and a slide
+     * with no velocity resolves none, so a body standing still inside geometry reports `no-contact`
+     * every frame (measured: 30 of 30 on his own dump). Without input there is nothing to notice the
+     * penetration WITH -- except a motion the player asked for and did not get.
+     *
+     * So the jump doubles as the recovery gesture, which is also how it reads to a player: press space,
+     * come unstuck. HALF the expected rise is the bar rather than zero, because a legitimate jump into
+     * a low ceiling is clipped part-way and is not penetration.
+     *
+     * Cost is confined to rising frames -- a fraction of a second per jump -- and to those where the
+     * rise was actually refused.
+     */
+    if (depenetrate !== undefined
+      && velocity.z > 0
+      && center.z - beforeAir < velocity.z * dt * 0.5) {
+      const freed = depenetrate(center, SKIN_WIDTH);
+      if (freed !== null) {
+        center = freed;
+        if (moveTrace.enabled) {
+          pushOutReason = 'freed';
+        }
+      } else if (moveTrace.enabled) {
+        pushOutReason = 'ran';
+      }
+    }
   }
 
   // Wedge-rest detection: airborne, already falling fast, yet the descent achieved is a sliver of
