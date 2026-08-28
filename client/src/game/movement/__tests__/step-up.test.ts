@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { CastFn } from '../../collision/collision-world';
 import { CastHit } from '../../collision/types';
 import {
-  CAPSULE_HEIGHT, CAPSULE_RADIUS, GROUND_COS, STEP_UP_ADVANCE, STEP_UP_HEIGHT,
+  CAPSULE_HEIGHT, CAPSULE_RADIUS, GROUND_COS, SKIN_WIDTH, STEP_UP_ADVANCE, STEP_UP_HEIGHT,
 } from '../constants';
 import { stepUp } from '../step-up';
 
@@ -93,7 +93,10 @@ describe('stepUp', () => {
     // WHAT THE FRAME COMMITS IS THE RISE. `landed` is the probe's own settle point, a full advance
     // downrange, and committing it as a position was the teleport -- so the assertion is on `rise`.
     expect(out.rise).toBeCloseTo(STEP_UP_HEIGHT, 5);
-    expect(out.landed!.x).toBeCloseTo(STEP_UP_ADVANCE, 5);
+    // The settle is probed at TWO offsets and the highest landing wins. This fixture answers every
+    // downward probe identically, so the two tie -- and a tie keeps the NEAR one, deliberately:
+    // standing closer is the safer of two equal landings. `landed` is diagnostic either way.
+    expect(out.landed!.x).toBeCloseTo(CAPSULE_RADIUS + SKIN_WIDTH, 5);
   });
 
   // THE COLLISION STALL. A zero-distance settle is not a landing -- it is the swept cast saying the
@@ -226,6 +229,46 @@ describe('stepUp', () => {
    * that is the defect, and it is asserted here so a future shortening of the advance fails loudly
    * instead of quietly making steps unclimbable again.
    */
+  /**
+   * **THE OWNER'S DOORWAY SILL, and it is the FAR probe's blind spot -- the mirror image of the case
+   * below.**
+   *
+   * Measured at the abbey door, 18 identical stalled frames: the elevated sweep free for the whole
+   * 1.1918 and the settle descending 0.8208 of a 0.7 rise, i.e. `climb` **-0.12**. The long probe flew
+   * over the sill and sampled the interior floor, which is lower than where he stood; the sill top he
+   * needed was between him and the probe. His collision overlay showed the geometry is exactly what it
+   * looks like, so the refusal was a sampling gap and not bad data.
+   *
+   * The fixture is that shape: a sill from one radius out to 0.60 whose top is 0.25 up, and beyond it a
+   * floor 0.12 DOWN. The far probe alone nets zero; the near probe finds the sill.
+   */
+  it('finds a sill the far probe flies over, when the floor beyond is lower', () => {
+    const SILL_FROM = 0.34;
+    const SILL_TO = 0.60;
+    const SILL_UP = 0.25;
+    const BEYOND_DOWN = 0.12;
+    const byPosition: CastFn = (from, dir) => {
+      if (dir.z > 0.5) return null;
+      if (dir.z < -0.5) {
+        if (from.x >= SILL_FROM && from.x <= SILL_TO) {
+          return hit(STEP_UP_HEIGHT - SILL_UP, UP);
+        }
+        if (from.x > SILL_TO) {
+          return hit(STEP_UP_HEIGHT + BEYOND_DOWN, UP);
+        }
+        return hit(STEP_UP_HEIGHT, UP);
+      }
+      return from.z > 0.5 ? null : hit(0, steepFace());
+    };
+
+    const out = stepUp(byPosition, v3(0, 0, 0), FWD, 0.18, STEP_UP_ADVANCE);
+
+    expect(out.verdict).toBe('commit');
+    expect(out.climb).toBeCloseTo(SILL_UP, 5);
+    // And the near offset is what found it, which is the whole point of the second sample.
+    expect(out.landed!.x).toBeCloseTo(CAPSULE_RADIUS + SKIN_WIDTH, 5);
+  });
+
   it('clears a lip a frame of travel cannot reach', () => {
     const LIP = 0.34;
     const TREAD = 0.25;

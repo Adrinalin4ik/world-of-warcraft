@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { CastFn } from '../collision/collision-world';
 import { moveTrace } from './move-trace';
 import {
-  GROUND_COS, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT,
+  CAPSULE_RADIUS, GROUND_COS, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT,
 } from './constants';
 
 /**
@@ -187,22 +187,82 @@ export function stepUp(
   if (detail) {
     detail.forward = forward;
   }
-  const over = raised.clone().addScaledVector(dirH, forward);
 
-  // SETTLE: the walk election's reach below the advanced point -- the rise undone, plus the
-  // travel-scaled step-down allowance -- onto a WALKABLE floor only.
-  const reach = rise + advance * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
-  // Same skin as the election snap: a committed step must not land flush against its floor.
-  const downHit = cast(over, _down, reach, SKIN_WIDTH);
-  if (!downHit) {
+  /**
+   * **SETTLE, AT TWO OFFSETS, BECAUSE THE TREAD YOU MUST STAND ON IS NOT ALWAYS AT THE FAR END.**
+   *
+   * One probe at one offset cannot serve both obstacles, and the owner walked into the second:
+   *
+   *  - a KERB whose unwalkable face runs on for most of a yard needs the long reach, or the probe is
+   *    still over the face and reads it as a steep floor. That is why `STEP_UP_ADVANCE` exists;
+   *  - a doorway SILL needs a short one. Measured on his stall at the abbey door, 18 identical
+   *    frames: the elevated sweep entirely free for the full 1.1918, and the settle descending 0.8208
+   *    of a 0.7 rise -- `climb` **-0.12**. The long probe flew OVER the sill and found the interior
+   *    floor, which is 12 cm BELOW him. Refused, correctly, for a floor he never needed; the sill top
+   *    he did need lay between him and the probe and was never sampled. His overlay confirmed the
+   *    geometry is exactly what it looks like -- "я ничего лишнего не вижу" -- so nothing was lying to
+   *    the engine.
+   *
+   * **THIS IS AN EXTENSION, NOT A PORT, and the reference is the reason to trust it rather than the
+   * source of it.** Its `step_up` probes once. But its DIAGNOSTIC sweeps a ladder of advances "to find
+   * the offset at which the settle probe would have cleared the obstacle's lip, which is the number a
+   * 'it won't step up this curb' report is actually about" (`mover.rs:986-992`). The reference
+   * therefore already holds that a single offset is insufficient and that the interesting quantity is
+   * the offset that clears the lip -- it just kept that knowledge in the instrument. Two samples put
+   * the cheapest version of it in the maneuver.
+   *
+   * The NEAR offset is one capsule radius plus the skin: the shortest advance that puts the body past
+   * a face it is touching. The FAR one is the clipped `forward` as before. The HIGHEST walkable
+   * landing wins, which is what "the tread I would stand on" means when there are two of them.
+   *
+   * Cost: ONE extra cast, and only on a frame that already found a steep opposing face -- skipped
+   * entirely when the two offsets coincide, which is every frame the forward sweep was clipped short.
+   */
+  const nearOffset = Math.min(forward, CAPSULE_RADIUS + SKIN_WIDTH);
+  const offsets = nearOffset < forward - 1e-6 ? [nearOffset, forward] : [forward];
+
+  let best: { landed: THREE.Vector3; climb: number } | null = null;
+  let sawFloor = false;
+  let sawWalkable = false;
+  for (let i = 0; i < offsets.length; ++i) {
+    const offset = offsets[i];
+    const at = raised.clone().addScaledVector(dirH, offset);
+    // The reach follows the offset it belongs to: a short advance may not borrow a long probe.
+    const reach = rise + offset * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+    // Same skin as the election snap: a committed step must not land flush against its floor.
+    const hit = cast(at, _down, reach, SKIN_WIDTH);
+    if (!hit) {
+      continue;
+    }
+    sawFloor = true;
+    // The FAR probe owns the trace fields, so a reading stays comparable with every earlier one.
+    if (detail && offset === forward) {
+      detail.downDist = hit.distance;
+      detail.downNz = hit.normal.z;
+    }
+    if (hit.normal.z < GROUND_COS) {
+      continue;
+    }
+    sawWalkable = true;
+    // A settle that did not descend is not a landing -- see the block below for what zero means.
+    if (hit.distance <= 0) {
+      continue;
+    }
+    const landed = at.clone().addScaledVector(_down, hit.distance);
+    const climb = landed.z - center.z;
+    if (best === null || climb > best.climb) {
+      best = { landed, climb };
+    }
+  }
+
+  if (!sawFloor) {
     return miss('no-floor');
   }
-  if (detail) {
-    detail.downDist = downHit.distance;
-    detail.downNz = downHit.normal.z;
-  }
-  if (downHit.normal.z < GROUND_COS) {
+  if (!sawWalkable) {
     return miss('steep-floor');
+  }
+  if (best === null) {
+    return miss('no-descent');
   }
 
   // A SETTLE THAT DID NOT DESCEND IS NOT A LANDING.
@@ -235,12 +295,7 @@ export function stepUp(
   // lands at distance zero, now slides instead of climbing. That is the conservative failure, it is
   // bounded by a ceiling that is OURS and TUNABLE rather than a game value (`constants.ts`), and
   // sliding along a 0.7 yd step is a great deal better than being deposited inside a fence.
-  if (downHit.distance <= 0) {
-    return miss('no-descent');
-  }
-
-  const landed = over.clone().addScaledVector(_down, downHit.distance);
-  const climb = landed.z - center.z;
+  const { landed, climb } = best;
 
   // Commit only a landing that actually gained a floor. A net-zero maneuver -- grazing a face,
   // pushing a too-tall wall, the tree pinch's gap grass -- belongs to the plain slide: its
