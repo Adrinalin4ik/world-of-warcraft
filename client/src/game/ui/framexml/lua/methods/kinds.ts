@@ -882,6 +882,30 @@ const EDITBOX: MethodTable = {
      * and becomes a field's text, and it is the one door every route goes through.
      */
     ensureFont(region).align = 'LEFT';
+    /**
+     * AND IT DOES NOT WRAP. A single-line text field has one line by definition.
+     *
+     * The owner pasted a long string into chat and it came out on THREE lines, pushing the box open;
+     * the original keeps one line. `effectiveFont` hands a wrap budget to any font string whose
+     * anchors bound both horizontal edges (`widget.ts:1066-1096`), and this region is anchored
+     * TOPLEFT/BOTTOMRIGHT to the box by `anchorTextRegion` -- so it qualified, and a 32-pixel-tall box
+     * fits two or three lines of chat font, which is exactly what he photographed.
+     *
+     * `wordWrap = false` and NOT "clear the budget": the flag is the mechanism `text.ts:207` already
+     * reads, and it survives `effectiveFont` recomputing the budget from a resized box. Clearing
+     * `wrapWidth` here would be undone the next time that function ran.
+     *
+     * A `multiLine` box would want the opposite, and `SetMultiLine` is a method this runtime does not
+     * have -- the loader already reports it missing for every document that asks. So no box here is
+     * multi-line today, and the one that would be (`MacroFrameText`) is unreachable in this client.
+     * When that method lands, it flips this flag.
+     *
+     * WHAT THIS DOES NOT DO: scroll. The real client keeps the caret visible by sliding the text
+     * horizontally and clipping at the box edge; with one line and no window, text longer than the box
+     * now runs PAST its right edge instead of wrapping inside it. That is closer to the original than
+     * wrapping was and it is not the original -- named here rather than left to be discovered.
+     */
+    ensureFont(region).wordWrap = false;
     anchorTextRegion(widget);
     return [];
   },
