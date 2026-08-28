@@ -24,6 +24,8 @@ export interface MoveTraceFrame {
    * Optional to match the rest of this interface -- the readout's own fixtures build frames
    * without them -- but the mover always supplies both.
    */
+  /** The horizontal speed the frame was ASKED for (yd/s) -- input, not achievement. */
+  speed?: number;
   x?: number;
   y?: number;
   grounded: boolean;
@@ -92,6 +94,22 @@ class MoveTrace {
    */
   stopOnDrop: number | null = null;
 
+  /**
+   * **THE SECOND TRIP: consecutive frames that ASKED to move and went nowhere.** `null` to ignore.
+   *
+   * The owner's "уткнулся в какую-то невидимую преграду" is this and nothing else, and it needs its
+   * own trip for the same reason the drop did: by the time a hand reaches the console the state may
+   * have resolved, and a stall that resolves is the one whose cause is hardest to name.
+   *
+   * Asking to move is the load-bearing half of the test. A body standing against a wall also travels
+   * nothing and is not stuck -- it is standing -- which is why `speed` is recorded as the input
+   * rather than the achievement.
+   */
+  stopOnStall: number | null = null;
+
+  /** Consecutive stalled frames so far. */
+  private stalled = 0;
+
   /** The frame that tripped `stopOnDrop`, kept after the trace disarms itself. */
   tripped: MoveTraceFrame | null = null;
 
@@ -110,11 +128,26 @@ class MoveTrace {
   armDrop(yards = 0.5): string {
     this.clear();
     this.tripped = null;
+    this.stalled = 0;
+    this.stopOnStall = null;
     this.stopOnDrop = yards;
     castTrace.clear();
     castTrace.enabled = true;
     this.enabled = true;
     return `armed: move + cast traces recording, both stop on a grounded frame losing ${yards} yd`;
+  }
+
+  /** Arm the stall trip and start recording. Same pairing as `armDrop`: both traces, one event. */
+  armStall(frames = 20): string {
+    this.clear();
+    this.tripped = null;
+    this.stalled = 0;
+    this.stopOnDrop = null;
+    this.stopOnStall = frames;
+    castTrace.clear();
+    castTrace.enabled = true;
+    this.enabled = true;
+    return `armed: both traces recording, will stop after ${frames} frames asking to move and not moving`;
   }
 
   frame(record: MoveTraceFrame): void {
@@ -129,10 +162,25 @@ class MoveTrace {
 
     // AFTER the push, so the tripping frame is in the history rather than only in `tripped`.
     if (this.stopOnDrop !== null && record.zIn - record.zOut >= this.stopOnDrop) {
-      this.tripped = record;
-      this.enabled = false;
-      castTrace.enabled = false;
+      this.trip(record);
+      return;
     }
+
+    if (this.stopOnStall !== null) {
+      const asked = (record.speed ?? 0) > 1e-6;
+      const went = (record.travelXY ?? 0) >= 1e-3;
+      this.stalled = asked && !went ? this.stalled + 1 : 0;
+      if (this.stalled >= this.stopOnStall) {
+        this.trip(record);
+      }
+    }
+  }
+
+  /** Freeze both records on one event. */
+  private trip(record: MoveTraceFrame): void {
+    this.tripped = record;
+    this.enabled = false;
+    castTrace.enabled = false;
   }
 
   last(): MoveTraceFrame | null {

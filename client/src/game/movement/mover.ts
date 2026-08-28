@@ -490,10 +490,11 @@ export function step(
      * reached the mover, there was no contact, there was no input, or the centre DID move -- and
      * only one of them is a defect in this gate. A bare zero cannot say which.
      *
-     * `moved` is the one I expect and the one I refuse to fix on expectation: `before` is the full
-     * 3D centre, so a snap re-seating Z by a hair each frame clears the threshold while the body is
-     * horizontally pinned. If the next reading says `moved`, the gate should be measuring
-     * HORIZONTAL displacement -- but that is a code change and this is the measurement for it.
+     * **THE READING CAME BACK `moved` ON ALL 532 OF THEM, so the gate is fixed and this note records
+     * that it was earned rather than guessed.** `before` was the full 3D centre, and the snap re-seats
+     * Z by a hair every frame, so a body horizontally PINNED still cleared a 3D threshold -- the
+     * push-out was unreachable code in the only state it exists for. It now measures horizontal
+     * displacement, which is what "stuck" means for a walker.
      */
     if (moveTrace.enabled) {
       if (depenetrate === undefined) {
@@ -502,17 +503,28 @@ export function step(
         pushOutReason = 'no-contact';
       } else if (state.horizVel.lengthSq() <= 1e-12) {
         pushOutReason = 'no-input';
-      } else if (center.distanceToSquared(before) >= 1e-12) {
+      } else if (Math.hypot(center.x - before.x, center.y - before.y) >= 1e-6) {
         pushOutReason = 'moved';
       } else {
         pushOutReason = 'ran';
       }
     }
 
+    /**
+     * **HORIZONTAL, not 3D.** The vertical term is the snap doing its job and has nothing to say about
+     * whether the body is stuck; including it made this branch dead code (measured: 532 of 532
+     * declined as `moved`).
+     *
+     * The owner's stall is the state this now reaches, and his own words are the diagnosis: "скорее
+     * всего это связано с тем что я на половину в текстуре". Sunk to the shin, every horizontal sweep
+     * reports a contact at distance zero, and the election snap can only ever DESCEND -- so nothing in
+     * the ordinary path can lift him out and the block reads as a wall from nowhere.
+     */
+    const movedH = Math.hypot(center.x - before.x, center.y - before.y);
     if (depenetrate !== undefined
       && resolved.contacts > 0
       && state.horizVel.lengthSq() > 1e-12
-      && center.distanceToSquared(before) < 1e-12) {
+      && movedH < 1e-6) {
       const freed = depenetrate(center, SKIN_WIDTH);
       if (freed !== null) {
         pushOutReason = 'freed';
@@ -597,6 +609,7 @@ export function step(
   moveTrace.frame({
     zIn: preMove.z - halfH,
     zOut: state.pos.z,
+    speed: state.horizVel.length(),
     x: state.pos.x,
     y: state.pos.y,
     grounded,
