@@ -498,13 +498,7 @@ export function step(
      * displacement, which is what "stuck" means for a walker.
      */
     if (moveTrace.enabled) {
-      if (depenetrate === undefined) {
-        pushOutReason = 'absent';
-      } else if (resolved.contacts === 0) {
-        pushOutReason = 'no-contact';
-      } else {
-        pushOutReason = 'ran';
-      }
+      pushOutReason = depenetrate === undefined ? 'absent' : 'ran';
     }
 
     /**
@@ -538,7 +532,33 @@ export function step(
      * running it every other frame, or only while a contact persists. I have not measured it live and
      * am not claiming otherwise.
      */
-    if (depenetrate !== undefined && resolved.contacts > 0) {
+    /**
+     * **AND NOT GATED ON A CONTACT EITHER -- the state has none, by construction. Fourth attempt,
+     * and this time the measurement said so before the code did.**
+     *
+     * The first direct penetration reading, 321 frames of it: depth **0.28 to 0.32 yd**, `travel`
+     * the full 0.33 -- walking freely -- and `resolved.contacts` **zero**. Two of our own subsystems
+     * appeared to contradict each other, and both were right:
+     *
+     *  - the depth is real. `halfSegment` is `CAPSULE_HEIGHT/2 - radius`, so a correctly seated
+     *    capsule has its segment exactly `radius` above the floor and a gap of 0. A gap of -0.31
+     *    puts the segment 0.02 from the floor, i.e. the FEET 0.31 below the surface -- "я на
+     *    половину в текстуре", finally with a number;
+     *  - and the absent contact is correct too. A horizontal sweep is blocked by a face only when it
+     *    is driving INTO it, and a horizontal direction against a floor normal has zero closing
+     *    speed. The floor a body is sunk into does not obstruct walking along it.
+     *
+     * So the body walks freely, shin-deep, and the election snap can only ever DESCEND -- nothing in
+     * the ordinary path even notices. Every gate I have written asked the movement whether it was
+     * stuck; the movement genuinely was not. Only the geometry knew.
+     *
+     * COST, and it is smaller than the estimate I gave with the last gate, which was too pessimistic:
+     * one `closestPointToSegment` per candidate, about 255 of them at the abbey -- roughly 0.02 ms.
+     * The four slide SWEEPS the same frame already run over the same set and each sweep is dearer per
+     * triangle than a distance. Still unmeasured live, and still the first thing to bound if the panel
+     * disagrees with that arithmetic.
+     */
+    if (depenetrate !== undefined) {
       const freed = depenetrate(center, SKIN_WIDTH);
       if (freed !== null) {
         pushOutReason = 'freed';
