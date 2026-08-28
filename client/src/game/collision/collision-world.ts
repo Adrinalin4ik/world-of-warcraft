@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import { castCapsuleAgainstTriangles, depenetrateCapsule } from './capsule-cast';
+import { CAPSULE_CAST_EPS, castCapsuleAgainstTriangles, depenetrateCapsule } from './capsule-cast';
 import { DoodadProvider } from './doodad-provider';
 import { LiquidRegistry } from './liquid-query';
 import { TerrainProvider } from './terrain-provider';
@@ -348,8 +348,15 @@ export class CollisionWorld {
       _penInfo.source = null;
       _penInfo.normalZ = 0;
       _penInfo.gap = 0;
+      /**
+       * The DEADBAND is the skin, for the recovery, and stays at the epsilon for a measure-only
+       * call -- so the trace keeps reporting the true overlap while the recovery ignores tangency.
+       * The two answering differently is deliberate: an instrument that adopted the deadband could
+       * not show what the deadband is doing.
+       */
+      const deadband = count ? Math.max(skin, CAPSULE_CAST_EPS) : CAPSULE_CAST_EPS;
       const freed = depenetrateCapsule(
-        center, radius, halfSegment, candidates, skin, 4, _penInfo,
+        center, radius, halfSegment, candidates, skin, 4, _penInfo, deadband,
       );
       const described = _penInfo.source === null ? null : describeSource(_penInfo.source);
       this.pushOut.lastSource = described;

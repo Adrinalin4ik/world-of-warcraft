@@ -105,6 +105,21 @@ export function depenetrateCapsule(
    * to open -- terrain, a named WMO group, or a doodad hull.
    */
   infoOut?: { source: object | null; normalZ: number; gap: number },
+  /**
+   * **THE DEADBAND: an overlap shallower than this is RESTING, not stuck.**
+   *
+   * A body on a slope lies TANGENT to it. The election snap descends until the sweep reports zero
+   * and cannot lift, so the resting clearance it aims for is only ever restored by this push-out --
+   * which, asked every frame, then lifts by the skin while the snap puts it straight back. Measured
+   * on the abbey stairs, whose collision is a 26-degree RAMP (`normalZ` 0.898, group 5): `fired`
+   * 6816 with `freed` **231**. One frame in thirty getting a real positional correction is not a
+   * body being rescued, it is two subsystems taking turns -- and the owner sees it as jitter and a
+   * LANDING animation replaying on a step.
+   *
+   * `CAPSULE_CAST_EPS` by default, which preserves every existing caller. The mover passes its skin,
+   * so a genuine 0.17 yd sinking still resolves while tangency does not.
+   */
+  deadband = CAPSULE_CAST_EPS,
 ): THREE.Vector3 | null {
   if (triangles.length === 0) {
     return null;
@@ -130,7 +145,7 @@ export function depenetrateCapsule(
       infoOut.normalZ = worstTriangle === null ? 0 : worstTriangle.normal.z;
       infoOut.gap = worstGap;
     }
-    if (worstTriangle === null || worstGap >= -CAPSULE_CAST_EPS) {
+    if (worstTriangle === null || worstGap >= -deadband) {
       break;
     }
 
