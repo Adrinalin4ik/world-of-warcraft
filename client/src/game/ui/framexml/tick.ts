@@ -197,6 +197,29 @@ const windowCache = new WeakMap<Widget, { key: string; value: EditBoxWindow }>()
  */
 export function editBoxWindow(box: Widget): EditBoxWindow {
   const raw = box.displayText;
+  /**
+   * **AN INVISIBLE BOX GETS NO RECT LOOKUP, AND SKIPPING IT IS WORTH 20 MS A FRAME.**
+   *
+   * MEASURED by the owner after this function landed: `uiTickCensus` reported `editBoxMs: 20.92` per
+   * frame, against a census whose own comment says the edit-box work is "expected to be nothing".
+   *
+   * The cause is in `rects.ts#rectOf` and its own header states it: a widget NOT in the last draw
+   * list falls through to "resolve the whole tree once and answer from that", and that path ends
+   * "Nothing here runs per frame". This function broke that assumption -- it asked for a rect once
+   * per edit box per tick, and six of the seven chat edit boxes are hidden, so every tick missed the
+   * draw list and paid a full layout resolve.
+   *
+   * A hidden box needs no window: nothing of it is on screen, its caret is not drawn (`placeCaret`
+   * returns unless the box holds focus) and its region's text is only read when it becomes visible,
+   * at which point this runs again. So the guard is not a shortcut -- there is no answer to compute.
+   *
+   * The visible one is IN the draw list by definition, so its `rectOf` is a map lookup and the
+   * expensive path is never reached at all.
+   */
+  if (!box.visible) {
+    box.textScroll = 0;
+    return { shown: raw, from: 0, caretIn: plainIndexOf(raw, box.caret) };
+  }
   const spec = box.textRegion?.font ?? null;
   const rect = rectOf(box.id);
   const available = rect === null
