@@ -144,6 +144,20 @@ class MoveTrace {
    */
   private maxStalled = 0;
 
+  /**
+   * **THE THIRD TRIP: the frame the body FIRST goes under (yd of overlap). `null` to ignore.**
+   *
+   * The push-out now gets him back out -- "стало лучше" -- so the remaining question is the ENTRY, and
+   * it is the one no trap could ask before now. A stall trap fires while the body is already stuck and
+   * a drop trap fires on losing height; sinking into a floor does neither. It walks in, and by the time
+   * anything notices, the frames that put it there are gone.
+   *
+   * Depth is recorded every frame now, so the edge is free: freeze on the FIRST frame the overlap
+   * exceeds the bar, and the ring buffer then holds twenty seconds of the approach with the entry as
+   * its last entry. That run-up is what a "how did I get in" question is actually about.
+   */
+  stopOnSink: number | null = null;
+
   /** Frames since arming that satisfied the stall test at all, however briefly. */
   private stallFrames = 0;
 
@@ -169,6 +183,7 @@ class MoveTrace {
     this.maxStalled = 0;
     this.stallFrames = 0;
     this.stopOnStall = null;
+    this.stopOnSink = null;
     this.stopOnDrop = yards;
     castTrace.clear();
     castTrace.enabled = true;
@@ -177,6 +192,25 @@ class MoveTrace {
   }
 
   /** Arm the stall trip and start recording. Same pairing as `armDrop`: both traces, one event. */
+  /**
+   * Arm the SINK trip and start recording. Default a tenth of a yard: deeper than the snap's own skin
+   * gap can ever read, so a correctly seated body never trips it.
+   */
+  armSink(yards = 0.1): string {
+    this.clear();
+    this.tripped = null;
+    this.stalled = 0;
+    this.maxStalled = 0;
+    this.stallFrames = 0;
+    this.stopOnDrop = null;
+    this.stopOnStall = null;
+    this.stopOnSink = yards;
+    castTrace.clear();
+    castTrace.enabled = true;
+    this.enabled = true;
+    return `armed: both traces recording, will stop the first frame the body is ${yards} yd inside geometry`;
+  }
+
   armStall(frames = 20): string {
     this.clear();
     this.tripped = null;
@@ -184,6 +218,7 @@ class MoveTrace {
     this.maxStalled = 0;
     this.stallFrames = 0;
     this.stopOnDrop = null;
+    this.stopOnSink = null;
     this.stopOnStall = frames;
     castTrace.clear();
     castTrace.enabled = true;
@@ -208,6 +243,7 @@ class MoveTrace {
    */
   status(): {
     enabled: boolean; stopOnDrop: number | null; stopOnStall: number | null;
+    stopOnSink: number | null;
     stalled: number; maxStalled: number; stallFrames: number;
     frames: number; tripped: boolean;
     lastContacts: number | null; lastTravel: number | null; lastSpeed: number | null;
@@ -217,6 +253,7 @@ class MoveTrace {
       enabled: this.enabled,
       stopOnDrop: this.stopOnDrop,
       stopOnStall: this.stopOnStall,
+      stopOnSink: this.stopOnSink,
       stalled: this.stalled,
       maxStalled: this.maxStalled,
       stallFrames: this.stallFrames,
@@ -240,6 +277,11 @@ class MoveTrace {
 
     // AFTER the push, so the tripping frame is in the history rather than only in `tripped`.
     if (this.stopOnDrop !== null && record.zIn - record.zOut >= this.stopOnDrop) {
+      this.trip(record);
+      return;
+    }
+
+    if (this.stopOnSink !== null && (record.penetration ?? 0) >= this.stopOnSink) {
       this.trip(record);
       return;
     }
@@ -307,7 +349,8 @@ class MoveTrace {
     console.warn(
       `[moveTrace] TRIPPED and frozen at ${at} -- verdict ${record.stepUpVerdict}, `
       + `drop ${(record.zIn - record.zOut).toFixed(3)}, travel ${(record.travelXY ?? 0).toFixed(4)}, `
-      + `${this.frames.length} frames held. Read them now: the trace is no longer recording.`,
+      + `depth ${(record.penetration ?? 0).toFixed(4)}, ${this.frames.length} frames held. `
+      + 'Read them now: the trace is no longer recording.',
     );
   }
 
