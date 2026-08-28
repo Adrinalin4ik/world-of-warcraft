@@ -94,6 +94,43 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
     return name;
   };
 
+  /**
+   * **A CHANNEL LINE WAS DROPPED BY THE CLIENT, AND THESE TWO ARGUMENTS ARE WHY.**
+   *
+   * The owner: posting to a channel "не работает". The SEND was fine -- his probe answered
+   * `CHANNEL / 1` for the parsed attributes -- and the ECHO was thrown away on arrival, which looks
+   * identical from outside.
+   *
+   * `ChatFrame_MessageEventHandler` matches an incoming channel line against the frame's own
+   * `channelList` (`chatframe.lua:2694-2720`), and the loop is gated on
+   *
+   *     local channelLength = strlen(arg4);
+   *     ...
+   *     if ( channelLength > strlen(value) ) then
+   *
+   * where `value` is the BARE name from that list. This bridge passed the bare name as `arg4` too, so
+   * the test was `5 > 5` for `world` -- false, every time, for every channel. `found` stayed 0 and the
+   * handler returned without printing.
+   *
+   * `arg8` was 0 and that is fatal a second time over: the matched arm sets
+   * `infoType = "CHANNEL"..arg8`, so 0 asks `ChatTypeInfo` for `CHANNEL0`, which does not exist
+   * (`chatframe.lua:82-91` declares `CHANNEL1`..`CHANNEL10`) -- and a nil `info` is the other way that
+   * handler returns early.
+   *
+   * So the number is what both arguments were missing, and it comes from the ENGINE: the server speaks
+   * channel names only, and the numbering is a client convention `channel.ts` owns.
+   */
+  const channelNumber = (channel: string | null): number => (
+    channel === null || channel === '' ? 0 : (channels?.numberOf(channel) ?? 0)
+  );
+  const channelLabel = (channel: string | null): string => {
+    if (channel === null || channel === '') {
+      return '';
+    }
+    const number = channelNumber(channel);
+    return number > 0 ? `${number}. ${channel}` : channel;
+  };
+
   const raise = (line: ChatLine, senderName: string): void => {
     if (line.eventSuffix === null) {
       // An unknown type byte. Named on the console rather than dropped silently: it means the enum
@@ -108,11 +145,16 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
       // The language NAME, not the id: `chatframe.lua` compares it against `GetDefaultLanguage()` to
       // decide whether to show the "[Language]" prefix. Empty means universal, which suppresses it.
       '',
-      line.channel ?? '',
+      // `arg4` -- THE CHANNEL NAME WITH ITS NUMBER IN FRONT, and a bare one made the client DROP the
+      // line. See `channelLabel`.
+      channelLabel(line.channel),
       line.targetName ?? '',
       TAG_TEXT[line.chatTag] ?? '',
+      // `arg7`, the zone-channel id. 0 for a custom channel, which makes the matching loop fall
+      // through to comparing `arg9` -- the branch that matches here.
       0,
-      0,
+      // `arg8` -- THE CHANNEL NUMBER, and 0 was fatal twice over. See `channelLabel`.
+      channelNumber(line.channel),
       line.channel ?? '',
       0,
       lineId,
@@ -156,6 +198,12 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
     }
     (window as unknown as Record<string, unknown>).lastChatLinks = seenLinks;
   };
+
+  /**
+   * The channel list, for the two arguments above. Null in an offline world, where no channel exists
+   * and `channelNumber` correctly answers 0 for everything.
+   */
+  const channels = world.game?.objectHandler?.channelHandler ?? null;
 
   const onLine = (line: ChatLine): void => {
     captureLinks(line.text);
