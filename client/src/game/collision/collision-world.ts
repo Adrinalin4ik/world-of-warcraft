@@ -20,6 +20,11 @@ export type CastFn = (
 
 const _box = new THREE.Box3();
 
+/** Scratch for the push-out report -- see `pushOut.lastSource`. */
+const _penInfo: { source: object | null; normalZ: number; gap: number } = {
+  source: null, normalZ: 0, gap: 0,
+};
+
 /** One recorded cast. See the trace block in `castFor`. */
 interface CastRow {
   layer: CollisionLayer;
@@ -164,7 +169,22 @@ export class CollisionWorld {
    *
    * Console-only, like `ignore`. Two integer increments on a path that already gathers triangles.
    */
-  readonly pushOut = { enabled: true, fired: 0, freed: 0 };
+  readonly pushOut = {
+    enabled: true,
+    fired: 0,
+    freed: 0,
+    /**
+     * **THE LAST OVERLAP, NAMED.** Written by every push-out call including the measure-only ones,
+     * so after the trace freezes on a trip this holds the tripping frame's own answer -- the trace's
+     * depth measurement is the last thing to run before the frame is recorded.
+     *
+     * Read from the console beside `depth`: it turns "0.165 yd inside something" into "0.165 yd
+     * inside THIS", which is the difference between four candidate files and one.
+     */
+    lastSource: null as string | null,
+    lastNormalZ: 0,
+    lastGap: 0,
+  };
 
   /** Scratch candidate list, reused every cast so a frame allocates nothing here. */
   private candidates: Triangle[] = [];
@@ -312,7 +332,15 @@ export class CollisionWorld {
         this.doodads.gather(_box, candidates);
       }
 
-      const freed = depenetrateCapsule(center, radius, halfSegment, candidates, skin);
+      _penInfo.source = null;
+      _penInfo.normalZ = 0;
+      _penInfo.gap = 0;
+      const freed = depenetrateCapsule(
+        center, radius, halfSegment, candidates, skin, 4, _penInfo,
+      );
+      this.pushOut.lastSource = _penInfo.source === null ? null : describeSource(_penInfo.source);
+      this.pushOut.lastNormalZ = _penInfo.normalZ;
+      this.pushOut.lastGap = _penInfo.gap;
       if (freed !== null && count) {
         this.pushOut.freed += 1;
       }

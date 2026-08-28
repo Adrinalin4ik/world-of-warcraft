@@ -94,6 +94,17 @@ export function depenetrateCapsule(
   triangles: Triangle[],
   skin = 0,
   maxPasses = 4,
+  /**
+   * **WHAT the body is inside, filled in from the FIRST pass -- the deepest overlap, which is the
+   * one worth naming.**
+   *
+   * The scan already picks that triangle out and then discards everything about it but a direction.
+   * Yet "which subsystem put a face here" is the question left after four rounds: the sweep gathered
+   * this triangle, measured it, and did not treat it as an obstacle, while this scan calls it a
+   * 0.165 yd overlap. One of them is wrong about the same triangle, and its SOURCE says which file
+   * to open -- terrain, a named WMO group, or a doodad hull.
+   */
+  infoOut?: { source: object | null; normalZ: number; gap: number },
 ): THREE.Vector3 | null {
   if (triangles.length === 0) {
     return null;
@@ -113,6 +124,12 @@ export function depenetrateCapsule(
       }
     }
 
+    // The FIRST pass owns the report: it holds the deepest overlap, before any push has changed it.
+    if (infoOut && pass === 0) {
+      infoOut.source = worstTriangle === null ? null : worstTriangle.source;
+      infoOut.normalZ = worstTriangle === null ? 0 : worstTriangle.normal.z;
+      infoOut.gap = worstGap;
+    }
     if (worstTriangle === null || worstGap >= -CAPSULE_CAST_EPS) {
       break;
     }
