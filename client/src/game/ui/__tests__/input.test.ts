@@ -29,6 +29,17 @@ function focusedEditBox(input: GlueInput, text: string): Widget {
 }
 
 /** Drive the router's key handling directly, bypassing DOM KeyboardEvent construction entirely. */
+/**
+ * A `KeyboardEvent`-shaped object.
+ *
+ * **`code` AS WELL AS `key`, and its absence made this fixture assert a defect.** A real event always
+ * carries both; this one carried only `key`, so the Ctrl chords -- which read `code` because
+ * `event.key` on a Cyrillic layout gives "ф" for the A key -- saw `undefined` and did nothing. The
+ * test passed for as long as the code under it read the layout-dependent field.
+ *
+ * Derived rather than passed: a single-letter key is `Key<X>` and everything else is its own name,
+ * which is what a browser reports for every key this suite presses.
+ */
 function pressKey(
   input: GlueInput,
   key: string,
@@ -36,6 +47,7 @@ function pressKey(
 ): void {
   const event = {
     key,
+    code: /^[a-zA-Z]$/.test(key) ? `Key${key.toUpperCase()}` : key,
     shiftKey: !!modifiers.shiftKey,
     ctrlKey: !!modifiers.ctrlKey,
     metaKey: !!modifiers.metaKey,

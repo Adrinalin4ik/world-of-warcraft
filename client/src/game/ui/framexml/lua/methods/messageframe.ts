@@ -48,6 +48,8 @@
  */
 import { MethodTable, MethodContext, onFrameTeardown, registerMethods } from '../object';
 import { Widget } from '../../../widget';
+import { layoutScale, measureText } from '../../../text';
+import { ensureFont } from './region';
 
 /** One line on screen. `until` is in the same seconds-since-boot clock `tickMessageFrames` advances. */
 interface MessageLine {
@@ -225,37 +227,85 @@ function regionsOf(ctx: MethodContext, state: MessageFrameState): Widget[] {
  */
 function reflow(state: MessageFrameState, regions: Widget[]): void {
   const frame = regions[0]?.parent ?? null;
-  const lineHeight = regions[0]?.font?.size ?? 16;
+  const width = frame?.width ?? 512;
+  const fallback = regions[0]?.font?.size ?? 16;
   const order = state.insertTop ? state.lines : [...state.lines].reverse();
   for (const region of regions) {
     region.shown = false;
   }
+
+  /**
+   * **A LONG LINE WRAPS, and each one therefore has its OWN height.**
+   *
+   * The owner's sent message ran off the right edge of the chat frame and across the world. A chat
+   * line wraps in the real client; ours could not, because every line got a region exactly one
+   * font-size tall and `effectiveFont` refuses to wrap a region that fits fewer than two lines
+   * (`widget.ts:1086-1090`). So the budget was never handed out and the glyphs ran on.
+   *
+   * `wrapWidth` is set on the region's OWN font spec, which `effectiveFont` then leaves alone -- an
+   * explicit budget from a caller wins over the derived one, and that is the door `GameTooltip`
+   * already uses (`methods/gametooltip.ts#writeSide`). No `maxLines`: the whole wrapped block draws.
+   *
+   * MEASURED PER LINE, and `measureText` IS cached by content, font and wrap width -- unlike
+   * `caretOffset` -- so a reflow that changes nothing costs a map lookup per visible line. Reflow
+   * runs on `AddMessage` and on a scroll, never per frame.
+   *
+   * THE LIVE LAYOUT SCALE, not 1, for the reason `gametooltip.ts#lineSize` records: `wrapLines`
+   * measures against a device-pixel budget, so the same logical width breaks a string differently at
+   * a different density, and measuring at 1 would report a height the raster does not produce.
+   */
+  const scale = layoutScale();
+  const heights = order.map((line) => {
+    const spec = ensureFont(line.region);
+    spec.wrapWidth = width;
+    return Math.max(fallback, measureText(line.region.text, spec, scale).height);
+  });
+
+  /**
+   * Stacked by MEASURED height, and CLIPPED at the frame -- a wrapped line is taller than a slot, so
+   * a window chosen by line COUNT can now overflow the frame. Without the cap the oldest lines would
+   * draw above the chat window and over the world, which is the same defect in a different direction.
+   *
+   * The cap drops the FURTHEST lines (the oldest, for a chat frame), which is what the engine does
+   * when a wrapped message pushes the top of the window out.
+   */
+  const limit = frame?.height ?? Number.POSITIVE_INFINITY;
+  let used = 0;
   order.forEach((line, index) => {
+    const height = heights[index];
+    // For a bottom-anchored frame the offset is the height of everything BELOW this line; for a
+    // top-anchored one it is the height of everything above.
+    const offset = state.bottomUp
+      ? heights.slice(index + 1).reduce((into, each) => into + each, 0)
+      : heights.slice(0, index).reduce((into, each) => into + each, 0);
+    used += height;
+    if (used > limit) {
+      line.region.shown = false;
+      return;
+    }
     line.region.shown = true;
     // `+y` is UP in a FrameXML anchor offset (`ui/layout.ts:33`). A MessageFrame hangs its lines
-    // DOWN from the top edge, so the offset is negative and grows with the index; a scrolling frame
-    // stands them UP from the bottom edge, so the offset is positive and counts back from the LAST
-    // line -- which `windowInto` puts newest-last. See `bottomUp`.
+    // DOWN from the top edge, so the offset is negative; a scrolling frame stands them UP from the
+    // bottom edge, so it is positive. See `bottomUp`.
     line.region.setAnchors(state.bottomUp
       ? {
         point: 'BOTTOM',
         relativeTo: frame?.id,
         relativePoint: 'BOTTOM',
         x: 0,
-        y: (order.length - 1 - index) * lineHeight,
+        y: offset,
       }
       : {
         point: 'TOP',
         relativeTo: frame?.id,
         relativePoint: 'TOP',
         x: 0,
-        y: -index * lineHeight,
+        y: -offset,
       });
-    line.region.width = frame?.width ?? 512;
-    line.region.height = lineHeight;
+    line.region.width = width;
+    line.region.height = height;
   });
 }
-
 /**
  * Expire what has been up long enough. Called once per host tick from `world-runtime.ts#update`.
  *

@@ -965,7 +965,19 @@ export class GlueInput {
      * `OSX`, so a Mac user reaches this code.
      */
     if ((event.ctrlKey || event.metaKey) && !event.altKey) {
-      const chord = event.key.toLowerCase();
+      /**
+       * **`event.code`, NOT `event.key`, AND THAT IS WHY CTRL+A DID NOTHING.**
+       *
+       * The owner types Russian, and `event.key` is the CHARACTER the layout produces: on a Cyrillic
+       * layout Ctrl+A arrives as `"ф"`, so a comparison against `"a"` never matched and the chord fell
+       * through to the browser. `event.code` is the physical key and is layout-independent --
+       * `KeyA` whatever is printed on it.
+       *
+       * `framexml/bindings.ts#baseToken` already made this choice for the binding table and records
+       * the same reasoning ("`code` is layout-position and stable under modifiers, which is the same
+       * property the client's own scan codes have"). This block predated it and kept the older read.
+       */
+      const chord = /^Key([A-Z])$/.exec(event.code)?.[1]?.toLowerCase() ?? null;
       if (chord === 'a') {
         // The client's own `HighlightText()` with no arguments: anchor at 0, caret at the end
         // (`lua/methods/kinds.ts#HighlightText`). Written directly rather than by calling into the Lua
