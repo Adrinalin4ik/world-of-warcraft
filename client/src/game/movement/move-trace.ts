@@ -167,9 +167,24 @@ class MoveTrace {
     }
 
     if (this.stopOnStall !== null) {
-      const asked = (record.speed ?? 0) > 1e-6;
+      /**
+       * **A CONTACT WITH NO PROGRESS. It used to test the INPUT, and it never fired.**
+       *
+       * The owner was stuck, held the key, and the trip stayed armed -- so the reading he could take
+       * was thirty frames of standing at the console, which says nothing. `speed` is
+       * `state.horizVel.length()`, and a stall is exactly the state where the mover may have clipped
+       * that velocity to nothing: the test then reset its own counter on the frames it existed for.
+       * Asking about the intent through a value the collision response is allowed to zero was the
+       * mistake.
+       *
+       * A CONTACT is the honest signal and it needs no intent: standing on flat ground the slide
+       * resolves no contacts at all -- measured, `no-contact` on 30 of 30 idle frames -- so an idle
+       * body cannot trip this, while a body pressed into geometry trips it whatever became of its
+       * velocity.
+       */
       const went = (record.travelXY ?? 0) >= 1e-3;
-      this.stalled = asked && !went ? this.stalled + 1 : 0;
+      const pressing = (record.contacts ?? 0) > 0;
+      this.stalled = pressing && !went ? this.stalled + 1 : 0;
       if (this.stalled >= this.stopOnStall) {
         this.trip(record);
       }
