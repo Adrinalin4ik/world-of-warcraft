@@ -29,6 +29,23 @@ import type World from '../world';
 import { LuaVM } from './framexml/lua/vm';
 import { fireEvent } from './framexml/lua/events';
 import { setChannelSink, setChannelSource } from './framexml/lua/api/chat';
+import { CHANNEL_NOTIFY } from '../../network/game/object/channel';
+
+/**
+ * `SMSG_CHANNEL_NOTIFY`'s type -> the client's own notice NAME, which is `arg1`.
+ *
+ * Each has a `CHAT_<NAME>_NOTICE` string in `globalstrings.lua` -- checked, because a name without
+ * one makes the client `format` a nil. A type not in this table is skipped rather than announced.
+ */
+const NOTICE_LABELS: Record<number, string> = {
+  [CHANNEL_NOTIFY.YOU_JOINED]: 'YOU_JOINED',
+  [CHANNEL_NOTIFY.YOU_LEFT]: 'YOU_LEFT',
+  [CHANNEL_NOTIFY.WRONG_PASSWORD]: 'WRONG_PASSWORD',
+  [CHANNEL_NOTIFY.NOT_MEMBER]: 'NOT_MEMBER',
+  [CHANNEL_NOTIFY.BANNED]: 'BANNED',
+  [CHANNEL_NOTIFY.INVALID_NAME]: 'INVALID_NAME',
+  [CHANNEL_NOTIFY.NOT_MODERATED]: 'NOT_MODERATED',
+};
 
 export function attachChannelBridge(vm: LuaVM, world: World): () => void {
   const channels = world.game?.objectHandler?.channelHandler ?? null;
@@ -64,6 +81,44 @@ export function attachChannelBridge(vm: LuaVM, world: World): () => void {
   });
 
   /**
+   * A NOTIFY BECOMES THE CLIENT'S OWN `CHAT_MSG_CHANNEL_NOTICE`, which is what prints "Joined
+   * Channel: [1. world]".
+ *
+   * The owner joined a channel and saw no confirmation. Correct: that line is not sent by the server,
+   * it is composed by the CLIENT from an event the ENGINE fires. `ChatFrame_MessageEventHandler`'s
+   * `CHANNEL_NOTICE` arm builds it as `format(_G["CHAT_"..arg1.."_NOTICE"], arg8, arg4)`
+   * (`chatframe.lua:2791-2801`), and `CHAT_YOU_JOINED_NOTICE` is `"Joined Channel:
+   * |Hchannel:%d|h[%s]|h"` (`globalstrings.lua:1613`). Nothing fired it, so nothing printed.
+   *
+   * THE ARGUMENT POSITIONS ARE READ OFF THE HANDLER, not guessed, and three of them are traps:
+   *
+   *  - `arg4` is the name WITH the number in front (`1. world`). The matching loop requires
+   *    `strlen(arg4) > strlen(value)` where `value` is the bare name from `channelList`
+   *    (`:2694,2707`), so a bare `arg4` would never match and the notice would be dropped;
+   *  - `arg9` is the name WITHOUT it -- the file says so in a comment on that very line;
+   *  - `arg7` and `arg10` are COMPARED (`arg7 > 0`, `arg10 > 0`), so they must be NUMBERS. A nil
+   *    there raises inside the handler and takes the whole line with it, which is this project's
+   *    most repeated failure and would have looked like "the notice still does not print".
+   *
+   * `arg7` is the zone-channel id and 0 is right for a custom channel: it makes the loop fall through
+   * to the name comparison, which is the branch that matches here. The id is in the notify's
+   * type-dependent tail, which `channel.ts` deliberately does not read.
+   */
+  const onNotice = (notice: { type: number; name: string; number: number }): void => {
+    const label = NOTICE_LABELS[notice.type] ?? null;
+    if (label === null) {
+      // A notify with no `CHAT_<NAME>_NOTICE` string would make the client format a nil. Recorded by
+      // `window.channelWire` either way, so nothing is lost silently.
+      return;
+    }
+    const numbered = notice.number > 0 ? `${notice.number}. ${notice.name}` : notice.name;
+    fireEvent(vm, 'CHAT_MSG_CHANNEL_NOTICE', [
+      label, '', '', numbered, '', '', 0, notice.number, notice.name, 0,
+    ]);
+  };
+  channels.on('notice', onNotice);
+
+  /**
    * Membership changed -> tell the client, through the two events it already listens to.
    *
    * `CHANNEL_UI_UPDATE` is what the channel list frames redraw on, and `UPDATE_CHAT_WINDOWS` is what
@@ -78,6 +133,7 @@ export function attachChannelBridge(vm: LuaVM, world: World): () => void {
 
   return () => {
     channels.removeListener('channelsChanged', onChannels);
+    channels.removeListener('notice', onNotice);
     // Both close over this session; a stale one outliving it is the double-mount hazard.
     setChannelSink(vm, null);
     setChannelSource(vm, null);

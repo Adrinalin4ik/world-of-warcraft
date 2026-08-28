@@ -168,6 +168,17 @@ export class ChannelHandler extends EventEmitter {
     this.game.send(gp);
   }
 
+  /**
+   * Announce a notify to the UI half, with the channel NUMBER as it stands at this instant.
+   *
+   * The number matters and its timing matters: `CHAT_YOU_LEFT_NOTICE` names the channel the player
+   * just left, so it has to be reported BEFORE the renumber -- afterwards that index belongs to a
+   * different channel or to none. The join reports after the add, for the mirror reason.
+   */
+  private report(type: number, name: string): void {
+    this.emit('notice', { type, name, number: this.numberOf(name) });
+  }
+
   private notify(gp: GamePacket): void {
     const type = gp.readUnsignedByte();
     const name = gp.readCStr();
@@ -180,17 +191,23 @@ export class ChannelHandler extends EventEmitter {
         this.joined.push({ number: this.joined.length + 1, name });
         this.emit('channelsChanged', this.channels);
       }
+      this.report(type, name);
       return;
     }
     if (type === CHANNEL_NOTIFY.YOU_LEFT) {
       const lower = name.toLowerCase();
       const kept = this.joined.filter((entry) => entry.name.toLowerCase() !== lower);
       if (kept.length !== this.joined.length) {
+        // REPORTED BEFORE THE RENUMBER, so the notice names the number the channel HAD. After the
+        // renumber that number belongs to a different channel or to none.
+        this.report(type, name);
         // RENUMBERED, because the index is positional -- see `joined`.
         this.joined = kept.map((entry, index) => ({ ...entry, number: index + 1 }));
         this.emit('channelsChanged', this.channels);
       }
+      return;
     }
+    this.report(type, name);
     // Every other notify is a NOTICE the client renders from its own `CHAT_MSG_CHANNEL_NOTICE` feed and
     // needs no engine state, so it is recorded by the wire instrument and otherwise left alone. The
     // type-dependent tail is deliberately not read: a wrong arm would read past the frame, and the
