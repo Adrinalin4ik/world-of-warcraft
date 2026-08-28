@@ -6,10 +6,10 @@ import {
   JUMP_SPEED, LAND_PROBE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, TERMINAL_VELOCITY, WEDGE_MIN_FALL,
   WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 } from './constants';
-import { moveTrace } from './move-trace';
+import { MoveTraceFrame, moveTrace } from './move-trace';
 import { PlayerMoveState } from './player-state';
 import { airborneHitResponse, groundedHitResponse, moveAndSlide, SlideIteration } from './slide';
-import { stepUp, StepUpVerdict } from './step-up';
+import { stepUp, StepUpResult, StepUpVerdict } from './step-up';
 
 const _down = new THREE.Vector3(0, 0, -1);
 
@@ -44,6 +44,8 @@ export interface GroundedStep {
   climb: number | null;
   /** Why the step-up did or did not commit. */
   stepUpVerdict: StepUpVerdict | null;
+  /** The step-up's intermediate numbers, present only while the trace is on. */
+  stepUpDetail?: StepUpResult['detail'];
   /** The election snap's probe, or null when the step-up took the frame instead. */
   snap: SnapTrace | null;
   /** How many contacts the slide resolved, and what the first one was. Trace fodder. */
@@ -128,10 +130,12 @@ export function groundedStep(
   // The step-up is ATOMIC: a steep face in the way triggers rise -> advance -> settle, all
   // committed inside this one frame, or nothing happens and the plain slide runs below.
   let stepUpVerdict: StepUpVerdict | null = null;
+  let stepUpDetail: StepUpResult['detail'];
   if (speed > 1e-6) {
     const dirH = horizVel.clone().divideScalar(speed);
     const stepped = stepUp(cast, center, dirH, speed * dt);
     stepUpVerdict = stepped.verdict;
+    stepUpDetail = stepped.detail;
 
     if (stepped.landed) {
       // The committed maneuver IS this frame's motion -- already settled on a walkable floor, so
@@ -141,6 +145,7 @@ export function groundedStep(
         ground: null,
         climb: stepped.climb,
         stepUpVerdict,
+        stepUpDetail,
         snap: null,
         contacts: 0,
         blockedBy: null,
@@ -208,7 +213,7 @@ export function groundedStep(
   }
 
   return {
-    center: slid, ground, climb: null, stepUpVerdict, snap,
+    center: slid, ground, climb: null, stepUpVerdict, stepUpDetail, snap,
     contacts: slide.contacts, blockedBy: firstContact, slide: iterations,
   };
 }
@@ -376,9 +381,11 @@ export function step(
   let climb: number | null = null;
   let snap: SnapTrace | null = null;
   let stepUpVerdict: StepUpVerdict | null = null;
+  let stepUpDetail: StepUpResult['detail'];
   let contacts = 0;
   let blockedBy: { normalZ: number; distance: number } | null = null;
   let slideIterations: SlideIteration[] | null = null;
+  let pushOutReason: MoveTraceFrame['pushOutReason'];
 
   if (!held && grounded && !jumped) {
     const before = center.clone();
@@ -387,6 +394,7 @@ export function step(
     climb = resolved.climb;
     snap = resolved.snap;
     stepUpVerdict = resolved.stepUpVerdict;
+    stepUpDetail = resolved.stepUpDetail;
     contacts = resolved.contacts;
     blockedBy = resolved.blockedBy;
     slideIterations = resolved.slide;
@@ -416,12 +424,39 @@ export function step(
      * keeps this a recovery rather than a second movement path, and it is why one frame of visible
      * stall is the worst case.
      */
+    /**
+     * WHY IT DID NOT RUN IS AS DIAGNOSTIC AS WHETHER IT RAN, and the first reading proved it: the
+     * owner walked a step he could not climb and came back with `fired: 0` beside 234 frames that
+     * had a contact and travelled nothing. Four different things produce that -- the closure never
+     * reached the mover, there was no contact, there was no input, or the centre DID move -- and
+     * only one of them is a defect in this gate. A bare zero cannot say which.
+     *
+     * `moved` is the one I expect and the one I refuse to fix on expectation: `before` is the full
+     * 3D centre, so a snap re-seating Z by a hair each frame clears the threshold while the body is
+     * horizontally pinned. If the next reading says `moved`, the gate should be measuring
+     * HORIZONTAL displacement -- but that is a code change and this is the measurement for it.
+     */
+    if (moveTrace.enabled) {
+      if (depenetrate === undefined) {
+        pushOutReason = 'absent';
+      } else if (resolved.contacts === 0) {
+        pushOutReason = 'no-contact';
+      } else if (state.horizVel.lengthSq() <= 1e-12) {
+        pushOutReason = 'no-input';
+      } else if (center.distanceToSquared(before) >= 1e-12) {
+        pushOutReason = 'moved';
+      } else {
+        pushOutReason = 'ran';
+      }
+    }
+
     if (depenetrate !== undefined
       && resolved.contacts > 0
       && state.horizVel.lengthSq() > 1e-12
       && center.distanceToSquared(before) < 1e-12) {
       const freed = depenetrate(center, SKIN_WIDTH);
       if (freed !== null) {
+        pushOutReason = 'freed';
         center = freed;
       }
     }
@@ -502,6 +537,8 @@ export function step(
     snap,
     climb,
     stepUpVerdict,
+    stepUpDetail,
+    pushOutReason,
     contacts,
     blockedBy,
     slide: slideIterations ?? undefined,

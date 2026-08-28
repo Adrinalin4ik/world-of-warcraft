@@ -1,6 +1,6 @@
 import { SnapTrace } from './mover';
 import { SlideIteration } from './slide';
-import { StepUpVerdict } from './step-up';
+import { StepUpResult, StepUpVerdict } from './step-up';
 
 /**
  * One frame of the movement trace.
@@ -19,6 +19,13 @@ export interface MoveTraceFrame {
   snap: SnapTrace | null;
   climb: number | null;
   stepUpVerdict: StepUpVerdict | null;
+  /** The step-up's intermediate numbers -- see `StepUpResult['detail']` for why they exist. */
+  stepUpDetail?: StepUpResult['detail'];
+  /**
+   * Why the stuck push-out ran or did not, this frame. See the block in `mover.ts` -- a bare
+   * `fired: 0` cannot distinguish an absent closure from a gate that is measuring the wrong thing.
+   */
+  pushOutReason?: 'absent' | 'no-contact' | 'no-input' | 'moved' | 'ran' | 'freed';
   /** Contacts the slide resolved this frame, and the first blocking face. */
   contacts?: number;
   blockedBy?: { normalZ: number; distance: number } | null;

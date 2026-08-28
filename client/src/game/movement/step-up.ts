@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
 import { CastFn } from '../collision/collision-world';
+import { moveTrace } from './move-trace';
 import {
   GROUND_COS, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT,
 } from './constants';
@@ -27,6 +28,38 @@ export interface StepUpResult {
   verdict: StepUpVerdict;
   /** Height gained (yd), 0 unless committed. */
   climb: number;
+  /**
+   * The maneuver's INTERMEDIATE numbers, recorded only while `moveTrace.enabled`.
+   *
+   * **THE VERDICT ALONE CANNOT BE ACTED ON, WHICH IS WHY THIS EXISTS.** The owner walked a small
+   * step he could not climb and the trace came back `net-zero` on 244 of 597 frames -- and
+   * `net-zero` is the CORRECT answer for a wall, a graze and a too-tall face, so the count says
+   * nothing about which of them he was standing at. The three want opposite fixes: a wall wants no
+   * change at all, a blocked advance wants a longer ADVANCE, a mis-measured landing wants the
+   * SETTLE looked at.
+   *
+   * `climb` is `rise - downDist` by construction, so the pair localises the failure exactly: on a
+   * step of height h a healthy maneuver reads `rise` 0.7, `forward` the full travel and `downDist`
+   * about `0.7 - h`. `forward` at 0 says the raised capsule could not advance -- the face is a wall
+   * or the advance is too short to clear the tread. `downDist` at the full `rise` says it advanced
+   * and then landed back on its own floor.
+   *
+   * Gated, because this allocates an object and copies a normal per call, and the step-up runs every
+   * frame a walker has input. Off, it costs one boolean read.
+   */
+  detail?: {
+    /** The opposing face: distance to it and its normal, as the RISE test saw them. */
+    aheadDist: number;
+    aheadN: [number, number, number];
+    /** Free headroom taken, at most STEP_UP_HEIGHT. */
+    rise: number;
+    /** How far the raised capsule actually advanced, against `travel` asked for. */
+    forward: number;
+    travel: number;
+    /** The settle: how far it descended, and the floor normal it found. */
+    downDist: number | null;
+    downNz: number | null;
+  };
 }
 
 const _up = new THREE.Vector3(0, 0, 1);
@@ -61,7 +94,17 @@ export function stepUp(
   dirH: THREE.Vector3,
   travel: number,
 ): StepUpResult {
-  const miss = (verdict: StepUpVerdict): StepUpResult => ({ landed: null, verdict, climb: 0 });
+  // The trace record, filled in as the maneuver proceeds so a MISS carries whatever it had reached.
+  // Undefined when the trace is off, and every write below is guarded by that.
+  const detail: StepUpResult['detail'] = moveTrace.enabled
+    ? {
+      aheadDist: -1, aheadN: [0, 0, 0], rise: 0, forward: 0, travel, downDist: null, downNz: null,
+    }
+    : undefined;
+
+  const miss = (verdict: StepUpVerdict): StepUpResult => ({
+    landed: null, verdict, climb: 0, detail,
+  });
 
   // A steep, non-overhanging face opposing the motion, within this frame's travel. No incidence
   // gate -- the verified reference has none, and a grazing contact nets zero through the settle
@@ -72,6 +115,10 @@ export function stepUp(
   }
 
   const n = ahead.normal;
+  if (detail) {
+    detail.aheadDist = ahead.distance;
+    detail.aheadN = [n.x, n.y, n.z];
+  }
   if (n.z >= GROUND_COS || n.z < 0 || n.dot(dirH) >= 0) {
     return miss('no-obstacle');
   }
@@ -79,6 +126,9 @@ export function stepUp(
   // RISE: the free headroom, at most STEP_UP_HEIGHT.
   const upHit = cast(center, _up, STEP_UP_HEIGHT);
   const rise = upHit ? upHit.distance : STEP_UP_HEIGHT;
+  if (detail) {
+    detail.rise = rise;
+  }
   if (rise < 1e-3) {
     return miss('no-headroom');
   }
@@ -87,6 +137,9 @@ export function stepUp(
   const raised = center.clone().addScaledVector(_up, rise);
   const forwardHit = cast(raised, dirH, travel);
   const forward = forwardHit ? forwardHit.distance : travel;
+  if (detail) {
+    detail.forward = forward;
+  }
   const over = raised.clone().addScaledVector(dirH, forward);
 
   // SETTLE: the walk election's reach below the advanced point -- the rise undone, plus the
@@ -96,6 +149,10 @@ export function stepUp(
   const downHit = cast(over, _down, reach, SKIN_WIDTH);
   if (!downHit) {
     return miss('no-floor');
+  }
+  if (detail) {
+    detail.downDist = downHit.distance;
+    detail.downNz = downHit.normal.z;
   }
   if (downHit.normal.z < GROUND_COS) {
     return miss('steep-floor');
@@ -145,5 +202,5 @@ export function stepUp(
     return miss('net-zero');
   }
 
-  return { landed, verdict: 'commit', climb };
+  return { landed, verdict: 'commit', climb, detail };
 }
