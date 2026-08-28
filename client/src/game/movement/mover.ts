@@ -14,6 +14,11 @@ import { stepUp, StepUpResult, StepUpVerdict } from './step-up';
 
 const _down = new THREE.Vector3(0, 0, -1);
 
+/** Scratch for the trace's penetration report, so a recorded frame allocates nothing extra. */
+const _penReport: { source: string | null; normalZ: number; gap: number } = {
+  source: null, normalZ: 0, gap: 0,
+};
+
 
 /** The election snap's probe reach and what it found -- trace fodder. */
 export interface SnapTrace {
@@ -353,7 +358,12 @@ export function step(
    * unit-tested with no world loaded, which is the property that made this whole module diagnosable
    * from a console trace.
    */
-  depenetrate?: (center: THREE.Vector3, skin?: number, count?: boolean) => THREE.Vector3 | null,
+  depenetrate?: (
+    center: THREE.Vector3,
+    skin?: number,
+    count?: boolean,
+    infoOut?: { source: string | null; normalZ: number; gap: number },
+  ) => THREE.Vector3 | null,
 ): Outcome {
   const inputHoriz = input.moving && input.speed > 0
     ? input.dir.clone().normalize().multiplyScalar(input.speed)
@@ -683,15 +693,21 @@ export function step(
    * `skin` 0, so this reports the overlap itself rather than the overlap plus a clearance.
    */
   let penetration: number | undefined;
+  let penetrationSource: string | null | undefined;
+  let penetrationNormalZ: number | undefined;
   if (moveTrace.enabled && depenetrate !== undefined) {
     const centre = state.pos.clone();
     centre.z += halfH;
-    const freed = depenetrate(centre, 0, false);
+    const freed = depenetrate(centre, 0, false, _penReport);
     penetration = freed === null ? 0 : freed.distanceTo(centre);
+    penetrationSource = _penReport.source;
+    penetrationNormalZ = _penReport.normalZ;
   }
 
   moveTrace.frame({
     penetration,
+    penetrationSource,
+    penetrationNormalZ,
     zIn: preMove.z - halfH,
     zOut: state.pos.z,
     speed: state.horizVel.length(),

@@ -174,12 +174,13 @@ export class CollisionWorld {
     fired: 0,
     freed: 0,
     /**
-     * **THE LAST OVERLAP, NAMED.** Written by every push-out call including the measure-only ones,
-     * so after the trace freezes on a trip this holds the tripping frame's own answer -- the trace's
-     * depth measurement is the last thing to run before the frame is recorded.
+     * **THE MOST RECENT OVERLAP, NAMED -- and it is NOT the one a frozen trace caught.** A previous
+     * commit of mine claimed it was, and that was wrong: the real push-out runs on every grounded
+     * frame regardless of the trace, so these fields keep being overwritten after a trap freezes.
+     * The owner read `lastSource: null` for exactly that reason -- by then he was free.
      *
-     * Read from the console beside `depth`: it turns "0.165 yd inside something" into "0.165 yd
-     * inside THIS", which is the difference between four candidate files and one.
+     * Good for a live glance; for anything a trap caught, read the frame's own
+     * `penetrationSource` instead.
      */
     lastSource: null as string | null,
     lastNormalZ: 0,
@@ -304,7 +305,19 @@ export class CollisionWorld {
      * corrupting another -- those two counters are how the recovery itself is diagnosed, and I have
      * been reading them all round.
      */
-    return (center: THREE.Vector3, skin = 0, count = true): THREE.Vector3 | null => {
+    return (
+      center: THREE.Vector3,
+      skin = 0,
+      count = true,
+      /**
+       * The caller's own report slot. **`pushOut.lastSource` below is NOT usable for a frozen
+       * trace and my previous commit message said it was -- that claim was false.** The real
+       * push-out runs every grounded frame whether or not the trace is recording, so it overwrites
+       * those fields long after a trap has frozen; what the console reads is the latest frame, by
+       * which time the body is free. Only a value copied into the trace FRAME survives the freeze.
+       */
+      infoOut?: { source: string | null; normalZ: number; gap: number },
+    ): THREE.Vector3 | null => {
       // Before the gather, so a disabled push-out costs one boolean and the caller sees exactly what
       // it saw before this feature existed.
       if (!this.pushOut.enabled) {
@@ -338,9 +351,15 @@ export class CollisionWorld {
       const freed = depenetrateCapsule(
         center, radius, halfSegment, candidates, skin, 4, _penInfo,
       );
-      this.pushOut.lastSource = _penInfo.source === null ? null : describeSource(_penInfo.source);
+      const described = _penInfo.source === null ? null : describeSource(_penInfo.source);
+      this.pushOut.lastSource = described;
       this.pushOut.lastNormalZ = _penInfo.normalZ;
       this.pushOut.lastGap = _penInfo.gap;
+      if (infoOut) {
+        infoOut.source = described;
+        infoOut.normalZ = _penInfo.normalZ;
+        infoOut.gap = _penInfo.gap;
+      }
       if (freed !== null && count) {
         this.pushOut.freed += 1;
       }

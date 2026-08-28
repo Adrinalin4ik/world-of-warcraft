@@ -44,6 +44,20 @@ export interface MoveTraceFrame {
    */
   penetration?: number;
 
+  /**
+   * **WHAT the penetration was against, frozen WITH the frame.**
+   *
+   * The collision world also exposes the latest overlap live, and that is useless for a trap: the
+   * push-out runs every grounded frame, so by the time the console is reached the field describes a
+   * body that is already free. The owner read `null` from it on the frame that mattered.
+   *
+   * A WMO answers with its group path, so this says which of four subsystems to open.
+   */
+  penetrationSource?: string | null;
+
+  /** The overlapping face's normal Z: ~0 is a wall entered sideways, ~1 a floor pushed through. */
+  penetrationNormalZ?: number;
+
   /** The horizontal speed the frame was ASKED for (yd/s) -- input, not achievement. */
   speed?: number;
   x?: number;
