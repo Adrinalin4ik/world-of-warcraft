@@ -21,6 +21,7 @@ import {
   CURSOR_POINT, classifyUnitCursor, cursorStem, questgiverHasQuest,
 } from '../../game/world/cursor-mode';
 import { pickUnit, pickUnitReport, drawnWorldBox } from '../../game/world/pick';
+import { CAM_NEAR } from '../../game/camera/rig';
 import { collisionWorld } from '../../game/collision/collision-world';
 import { CollisionLayer } from '../../game/collision/types';
 import { wantsDebugPanels } from '../debug-flags';
@@ -156,7 +157,11 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       this.stats.showPanel(0);
     }
 
-    this.camera = new THREE.PerspectiveCamera(45, this.aspectRatio, 2, 500);
+    // NEAR IS THE RIG'S CONSTANT, not a literal. It was 2.0 here while `CAM_NEAR` said 1.0 and its
+    // comment claimed the projection shared it -- so the camera clipped two yards of the world in
+    // front of itself while stopping 0.3 yd short of a wall, and showed the room through it. See
+    // `camera/rig.ts#CAM_NEAR` for the client's own value and the depth-precision trade.
+    this.camera = new THREE.PerspectiveCamera(45, this.aspectRatio, CAM_NEAR, 500);
     this.camera.name = 'MainCamera';
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(15, 0, 7);
@@ -177,7 +182,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // It was also dead: the field was assigned, added and removed and read nowhere, and `update()` was
     // never called after construction, so it did not even describe the camera's current frustum. The
     // debug-camera pair below is still used by the visibility work; only the helper is gone.
-    this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
+    this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, CAM_NEAR, 500);
     this.debugCamera.name = 'DebugCamera';
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
