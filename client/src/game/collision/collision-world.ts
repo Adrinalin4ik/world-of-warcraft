@@ -51,8 +51,14 @@ function describeSource(source: object): string {
 /**
  * The cast trace, on `window.castTrace`. Off by default; `enabled = true` to record.
  *
- * Bounded at 400 rows, which is a few seconds of walking: a frame issues six to eight casts and a
- * log that grew without limit would be a memory leak in an instrument.
+ * **BOUNDED AT 4000 ROWS, AND 400 WAS TOO FEW TO ANSWER THE QUESTION.** A frame issues six to eight
+ * casts, so 400 rows is about fifty frames -- and the owner cannot type in the console while holding
+ * W. By the time he read the trace, the horizontal slide casts had been evicted by the standing
+ * ground probes that followed, and the summary said `withWmo 400 / hitWmo 0` with no horizontal cast
+ * in the buffer at all. The window was shorter than the gesture, which is the same mistake the
+ * `moveTrace` slice made one round earlier.
+ *
+ * 4000 is about eight seconds of walking, still bounded, and a row is five numbers and a short string.
  */
 class CastTrace {
   enabled = false;
@@ -61,14 +67,44 @@ class CastTrace {
 
   record(row: CastRow): void {
     this.rows.push(row);
-    if (this.rows.length > 400) {
-      this.rows.splice(0, this.rows.length - 400);
+    if (this.rows.length > 4000) {
+      this.rows.splice(0, this.rows.length - 4000);
     }
   }
 
   /** Every cast that gathered WMO faces -- the question this trace was built to answer. */
   get withWmo(): CastRow[] {
     return this.rows.filter((row) => row.wmo > 0);
+  }
+
+  /**
+   * The HORIZONTAL casts -- the slide, and the only ones that can stop a body at a wall.
+   *
+   * A ground probe points straight down and a camera boom points wherever the camera is; neither can
+   * tell you anything about walking into a building. Separating them is the first thing to ask for,
+   * so it is a getter rather than a filter the reader has to remember.
+   */
+  get horizontal(): CastRow[] {
+    return this.rows.filter((row) => Math.abs(row.dirZ) < 1e-6);
+  }
+
+  /**
+   * One line that says what the buffer actually holds, by cast SHAPE.
+   *
+   * Built because the first reading of this trace was ambiguous in a way the reader could not see: a
+   * summary of 400 rows that were all ground probes looks exactly like a summary of 400 rows that
+   * include the slide. Counting them apart makes an empty horizontal set visible immediately instead
+   * of after a second round trip.
+   */
+  get shape(): { rows: number; horizontal: number; down: number; other: number } {
+    const horizontal = this.horizontal.length;
+    const down = this.rows.filter((row) => row.dirZ < -1e-6).length;
+    return {
+      rows: this.rows.length,
+      horizontal,
+      down,
+      other: this.rows.length - horizontal - down,
+    };
   }
 
   /** Every cast whose HIT came from a WMO. */
