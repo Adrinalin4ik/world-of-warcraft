@@ -136,6 +136,14 @@ export class CollisionWorld {
 
   readonly liquid = new LiquidRegistry();
 
+  /**
+   * Providers a cast should pretend do not exist. See the block in `castFor`.
+   *
+   * Mutated from the console (`window.collisionWorld.ignore.wmo = true`) and nowhere in the code, so
+   * a shipped build behaves exactly as it did -- all three false.
+   */
+  readonly ignore = { terrain: false, wmo: false, doodads: false };
+
   /** Scratch candidate list, reused every cast so a frame allocates nothing here. */
   private candidates: Triangle[] = [];
 
@@ -164,11 +172,32 @@ export class CollisionWorld {
       _box.min.subScalar(pad);
       _box.max.addScalar(pad);
 
-      this.terrain.gather(_box, candidates);
+      /**
+       * PER-PROVIDER NOCLIP. `collisionWorld.ignore.wmo = true` and a building stops existing.
+       *
+       * The owner asked for it while stuck inside geometry -- "а то я не выберусь из текстуры" -- and
+       * PER PROVIDER is the point rather than one global switch: ignoring everything makes the ground
+       * vanish too, and a body with no floor falls until `rescueFromVoid` catches it, which is a
+       * second problem on top of the first. Ignoring the WMO alone leaves the terrain holding him up
+       * while he walks out through the wall.
+       *
+       * IT IS ALSO A BISECTION, and that is why it is worth having beyond the rescue: "does the
+       * sticking stop when the WMO is ignored" separates a building defect from a terrain or doodad
+       * one in one gesture, with no rebuild and no new probe.
+       *
+       * Three boolean reads per cast when unused, which is nothing beside the gathers they guard.
+       */
+      if (!this.ignore.terrain) {
+        this.terrain.gather(_box, candidates);
+      }
       const afterTerrain = candidates.length;
-      this.wmo.gather(_box, layer, candidates);
+      if (!this.ignore.wmo) {
+        this.wmo.gather(_box, layer, candidates);
+      }
       const afterWmo = candidates.length;
-      this.doodads.gather(_box, candidates);
+      if (!this.ignore.doodads) {
+        this.doodads.gather(_box, candidates);
+      }
 
       const hit = castCapsuleAgainstTriangles(
         from, dir, maxDist, radius, halfSegment, candidates, skin, minNormalZ,
