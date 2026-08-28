@@ -135,49 +135,74 @@ class BSPTree {
     return leafNodeIds;
   }
   
+  /**
+   * **THE TWO HALVES WERE SWAPPED, AND THAT IS WHY A BUILDING COULD BE WALKED THROUGH.**
+   *
+   * MOBN defines a node as `flags, negChild, posChild, nFaces, faceStart, planeDist`
+   * (`wow-data-parser/wmo/group.js:88-96`), where `negChild` is the subtree on the NEGATIVE side of
+   * the split plane. This function tested the negative side and then descended `posChild`, on every
+   * axis and therefore on every internal node -- so a query returned leaves from the mirror-image
+   * region of the tree.
+   *
+   * MEASURED, and the shape of the wrong answer is what identified it. `window.castTrace` on the
+   * owner walking into Northshire Abbey: every horizontal cast gathered exactly **27** WMO faces --
+   * a small, CONSTANT count while he moved -- and not one produced a hit. Constant means the query
+   * was not tracking the box; 27 non-zero means it was not empty either. Floor faces answered a
+   * horizontal sweep with `closing ~ 0` (a vertical normal cannot block horizontal motion), which is
+   * correct, and the wall faces were never in the set to be tested.
+   *
+   * The plane conventions, both verified rather than assumed:
+   *
+   *  - `checkFrustum` returns false only when all eight corners satisfy `ax+by+cz+d < 0`, so it
+   *    answers "does the box touch the half-space `ax+by+cz+d >= 0`";
+   *  - therefore `[-1, 0, 0, planeDist]` is `x <= planeDist`, the NEGATIVE half, and
+   *    `[1, 0, 0, -planeDist]` is `x >= planeDist`, the positive one.
+   *
+   * The locals are named after the half they test, so a future reader cannot pair them wrongly
+   * without the line reading obviously false.
+   *
+   * ONE SUSPECTED DEFECT LEFT UNTOUCHED, deliberately, because there is no measurement for it: the
+   * axis is compared with `flags == 0/1/2` rather than `flags & 0x3`. A well-formed MOBN carries only
+   * those values on an internal node (0x4 marks a leaf), but any extra bit would make every arm miss
+   * and silently prune the whole subtree -- which is the same symptom as this bug. Fixing both at
+   * once would leave neither attributable.
+   */
   queryBox(bbox, nodeIndex, bspLeafIdList) {
     if (nodeIndex === -1) {
-      // console.debug("Node is empty", nodeIndex)
       return;
     }
-    
-    const node = this.nodes[nodeIndex]
+
+    const node = this.nodes[nodeIndex];
 
     if ((node.flags & 0x4)) {
       bspLeafIdList.push(nodeIndex);
-    } else if ((node.flags == 0)) {
-      var leftSide = checkFrustum([[-1, 0, 0, this.nodes[nodeIndex].planeDist]], bbox, 1, null);
-      var rightSide = checkFrustum([[1, 0, 0, -this.nodes[nodeIndex].planeDist]], bbox, 1, null);
+      return;
+    }
 
-      if (leftSide) {
-          this.queryBox(bbox, this.nodes[nodeIndex].posChild, bspLeafIdList)
-      }
-      if (rightSide) {
-          this.queryBox(bbox, this.nodes[nodeIndex].negChild, bspLeafIdList)
-      }
-    } else if ((node.flags == 1)) {
-      var leftSide = checkFrustum([[0, -1, 0, this.nodes[nodeIndex].planeDist]], bbox, 1, null);
-      var rightSide = checkFrustum([[0, 1, 0, -this.nodes[nodeIndex].planeDist]], bbox, 1, null);
+    // The split axis, and the plane pair that brackets it. `planeDist` is the coordinate of the
+    // plane on that axis.
+    let negativePlane;
+    let positivePlane;
+    if (node.flags === 0) {
+      negativePlane = [-1, 0, 0, node.planeDist];
+      positivePlane = [1, 0, 0, -node.planeDist];
+    } else if (node.flags === 1) {
+      negativePlane = [0, -1, 0, node.planeDist];
+      positivePlane = [0, 1, 0, -node.planeDist];
+    } else if (node.flags === 2) {
+      negativePlane = [0, 0, -1, node.planeDist];
+      positivePlane = [0, 0, 1, -node.planeDist];
+    } else {
+      return;
+    }
 
-      if (leftSide) {
-        this.queryBox(bbox, node.posChild, bspLeafIdList)
-      }
-      if (rightSide) {
-        this.queryBox(bbox, node.negChild, bspLeafIdList)
-      }
-    } else if ((node.flags == 2)) {
-      var leftSide = checkFrustum([[0, 0, -1, node.planeDist]], bbox, 1, null);
-      var rightSide = checkFrustum([[0, 0, 1, -node.planeDist]], bbox, 1, null);
-
-      if (leftSide) {
-        this.queryBox(bbox, node.posChild, bspLeafIdList)
-      }
-      if (rightSide) {
-        this.queryBox(bbox, node.negChild, bspLeafIdList)
-      }
+    if (checkFrustum([negativePlane], bbox, 1, null)) {
+      this.queryBox(bbox, node.negChild, bspLeafIdList);
+    }
+    if (checkFrustum([positivePlane], bbox, 1, null)) {
+      this.queryBox(bbox, node.posChild, bspLeafIdList);
     }
   }
-
   checkIfInsidePortals(point, groupFile, parentWmoFile) {
     var moprIndex = groupFile.mogp.moprIndex;
     var numItems = groupFile.mogp.numItems;
