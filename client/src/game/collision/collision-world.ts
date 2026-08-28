@@ -144,6 +144,28 @@ export class CollisionWorld {
    */
   readonly ignore = { terrain: false, wmo: false, doodads: false };
 
+  /**
+   * **THE PUSH-OUT, AND THE COUNTER THAT SAYS WHETHER IT RAN.**
+   *
+   * Two things at once, because the owner reported "не получается переступить даже маленькую
+   * ступеньку" right after the push-out landed and neither of us knows whether it is the cause. A
+   * flag alone would only let him A/B a feel, which is the weakest evidence this project accepts;
+   * the counters make the question answerable without a second run:
+   *
+   *  - `fired` zero at a step he could not climb ACQUITS the push-out entirely -- the recovery never
+   *    ran, so whatever stopped him is the step-up or the slide, and this commit is not in the story;
+   *  - `fired` climbing with `freed` climbing means it is running AND moving him every frame, which
+   *    is exactly the shape of "pushed back off the tread as fast as he climbs it";
+   *  - `fired` climbing with `freed` zero means it runs, finds no overlap, and costs a gather per
+   *    stuck frame for nothing -- a performance answer rather than a correctness one.
+   *
+   * `enabled = false` is the bisection: it restores the pre-push-out mover exactly, since the caller
+   * treats a null return and an absent closure the same way.
+   *
+   * Console-only, like `ignore`. Two integer increments on a path that already gathers triangles.
+   */
+  readonly pushOut = { enabled: true, fired: 0, freed: 0 };
+
   /** Scratch candidate list, reused every cast so a frame allocates nothing here. */
   private candidates: Triangle[] = [];
 
@@ -257,6 +279,13 @@ export class CollisionWorld {
    */
   depenetrateFor(layer: CollisionLayer, radius: number, halfSegment: number) {
     return (center: THREE.Vector3, skin = 0): THREE.Vector3 | null => {
+      // Before the gather, so a disabled push-out costs one boolean and the caller sees exactly what
+      // it saw before this feature existed.
+      if (!this.pushOut.enabled) {
+        return null;
+      }
+      this.pushOut.fired += 1;
+
       const candidates = this.candidates;
       candidates.length = 0;
 
@@ -275,7 +304,11 @@ export class CollisionWorld {
         this.doodads.gather(_box, candidates);
       }
 
-      return depenetrateCapsule(center, radius, halfSegment, candidates, skin);
+      const freed = depenetrateCapsule(center, radius, halfSegment, candidates, skin);
+      if (freed !== null) {
+        this.pushOut.freed += 1;
+      }
+      return freed;
     };
   }
 
