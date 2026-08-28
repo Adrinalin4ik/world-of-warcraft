@@ -107,8 +107,25 @@ class MoveTrace {
    */
   stopOnStall: number | null = null;
 
-  /** Consecutive stalled frames so far. */
+  /** Stall pressure: up on a stalled frame, down on a moving one. See the trip test. */
   private stalled = 0;
+
+  /**
+   * **THE HIGH WATER MARK, and without it the counter is unreadable by the person using it.**
+   *
+   * `stalled` can only be read from the console, and reaching the console means releasing the key --
+   * by which time the body is moving again and the counter has drained. So "did it ever count at all"
+   * was unanswerable exactly when it mattered: the owner read `stalled: 0` after 657 frames at a spot
+   * he could not walk out of, and that zero was equally consistent with never counting and with
+   * having counted to 14 and drained.
+   *
+   * The same shape as every instrument failure in this project: a probe whose state is only
+   * observable at a moment when the thing it measures is over. This survives the release.
+   */
+  private maxStalled = 0;
+
+  /** Frames since arming that satisfied the stall test at all, however briefly. */
+  private stallFrames = 0;
 
   /** The frame that tripped `stopOnDrop`, kept after the trace disarms itself. */
   tripped: MoveTraceFrame | null = null;
@@ -129,6 +146,8 @@ class MoveTrace {
     this.clear();
     this.tripped = null;
     this.stalled = 0;
+    this.maxStalled = 0;
+    this.stallFrames = 0;
     this.stopOnStall = null;
     this.stopOnDrop = yards;
     castTrace.clear();
@@ -142,6 +161,8 @@ class MoveTrace {
     this.clear();
     this.tripped = null;
     this.stalled = 0;
+    this.maxStalled = 0;
+    this.stallFrames = 0;
     this.stopOnDrop = null;
     this.stopOnStall = frames;
     castTrace.clear();
@@ -167,7 +188,8 @@ class MoveTrace {
    */
   status(): {
     enabled: boolean; stopOnDrop: number | null; stopOnStall: number | null;
-    stalled: number; frames: number; tripped: boolean;
+    stalled: number; maxStalled: number; stallFrames: number;
+    frames: number; tripped: boolean;
     lastContacts: number | null; lastTravel: number | null; lastSpeed: number | null;
   } {
     const last = this.last();
@@ -176,6 +198,8 @@ class MoveTrace {
       stopOnDrop: this.stopOnDrop,
       stopOnStall: this.stopOnStall,
       stalled: this.stalled,
+      maxStalled: this.maxStalled,
+      stallFrames: this.stallFrames,
       frames: this.frames.length,
       tripped: this.tripped !== null,
       lastContacts: last ? last.contacts ?? null : null,
@@ -218,7 +242,22 @@ class MoveTrace {
        */
       const went = (record.travelXY ?? 0) >= 1e-3;
       const pressing = (record.contacts ?? 0) > 0;
-      this.stalled = pressing && !went ? this.stalled + 1 : 0;
+      /**
+       * **PRESSURE, NOT A RUN OF CONSECUTIVE FRAMES.** A hard reset to zero demands a perfectly
+       * uninterrupted stall, and a body grinding against geometry does creep -- one frame over the
+       * threshold in fifteen was enough to keep the trap silent through a stall the owner could not
+       * walk out of. Up one on a stalled frame, down one on a moving frame: an intermittent stall
+       * still accumulates, and genuine walking drains it as fast as it filled.
+       */
+      if (pressing && !went) {
+        this.stalled += 1;
+        this.stallFrames += 1;
+        if (this.stalled > this.maxStalled) {
+          this.maxStalled = this.stalled;
+        }
+      } else if (this.stalled > 0) {
+        this.stalled -= 1;
+      }
       if (this.stalled >= this.stopOnStall) {
         this.trip(record);
       }
