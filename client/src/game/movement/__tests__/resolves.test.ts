@@ -136,6 +136,25 @@ describe('groundedStep', () => {
     expect(out.snap).not.toBeNull();
   });
 
+  /**
+   * **THE OWNER'S FALL, as the drop trap measured it: a floor 1.5 yd below, taken whole in one
+   * frame.** 1.426 yd of height gone between two frames, which is what "проваливаюсь под текстуры"
+   * is from the inside.
+   *
+   * The reach may see that far -- that is what keeps the body grounded on a face steeper than one
+   * frame can follow. The DESCENT may not spend it. Both halves are asserted because either alone is
+   * the bug: an uncapped descent is the teleport, and a cap without `stepDown` is the same fall
+   * arriving through the ground probe instead.
+   */
+  it('descends one cone per frame when the floor is deeper than a frame may fall', () => {
+    const travel = 7 / 60;
+    const cone = travel * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+    const out = groundedStep(floorBelow(1.5), v3(0, 0, 10), v3(7, 0, 0), 1 / 60);
+
+    expect(10 - out.center.z).toBeCloseTo(cone, 5);
+    expect(out.stepDown).toBe(true);
+  });
+
   it('carries the step-up verdict through even when it did not commit', () => {
     // The verdict is the whole diagnosis of a stuck report, so it must survive the fall-through.
     const out = groundedStep(floorBelow(0.1), v3(0, 0, 10), v3(7, 0, 0), 0.1);

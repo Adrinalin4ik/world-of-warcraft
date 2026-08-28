@@ -62,6 +62,19 @@ export interface PlayerMoveState {
    */
   wedged: boolean;
 
+  /**
+   * **A STEP-DOWN STILL IN PROGRESS: the floor is in SIGHT but further than one frame may
+   * descend.** Treated as standing -- gravity off, walking control live -- exactly as `wedged`
+   * above is, and self-clearing the same way: it is re-decided from the snap every frame, so
+   * walking off into open air drops it and a normal fall elects.
+   *
+   * It exists because the descent is now capped (see the snap in `mover.ts`) and the ordinary
+   * ground probe is only 0.2 yd. Without this flag a capped descent would leave the body above the
+   * probe's reach, be classified airborne, and fall -- which is the dive the cap was added to
+   * prevent, arriving by the other route.
+   */
+  stepDown: boolean;
+
   /** Consecutive stalled airborne frames (see WEDGE_STALL_RATIO). */
   wedgeStill: number;
 
@@ -129,6 +142,7 @@ export function createPlayerMoveState(): PlayerMoveState {
     fallStartZ: 0,
     fallFar: false,
     wedged: false,
+    stepDown: false,
     wedgeStill: 0,
     settling: false,
     settleDeadline: 0,

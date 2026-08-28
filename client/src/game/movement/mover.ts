@@ -35,6 +35,8 @@ export interface SnapTrace {
 export interface GroundedStep {
   /** The resolved capsule centre. */
   center: THREE.Vector3;
+  /** The snap saw a walkable floor further below than this frame was allowed to descend. */
+  stepDown: boolean;
   /**
    * The collider of the walkable floor the election snap settled onto, when it ran and hit one.
    * `null` means "keep whatever the caller already believed" -- a step-up commit and a missed snap
@@ -225,13 +227,48 @@ export function groundedStep(
 
   // Kept alongside the filter for the same reason the grounded test keeps its own -- see `step`.
   let ground: object | null = null;
+  /**
+   * **THE REACH IS HOW FAR WE CAN SEE; THE DESCENT IS HOW FAR WE MAY GO. They were the same
+   * number, and that is a teleport.**
+   *
+   * Measured on the owner's own fall, the frame that tripped the drop trap: nine frames climbing a
+   * `normalZ` 0.90 surface at 0.09 yd a frame with the snap probe reporting distance 0.000 -- resting
+   * exactly on it -- and then ONE frame where the nearest walkable floor was **1.518 yd below**, taken
+   * whole. 1.426 yd of height gone in a single frame, which is what "я проваливаюсь под текстуры"
+   * looks like from the inside.
+   *
+   * The reference names this exactly and it is about OUR body, not its own: its mover is a cone at the
+   * foot, so stepping off an edge its skirt stays in contact the whole way down and the descent comes
+   * out at the cone's own slope without any cap being needed -- the geometry IS the cap. A capsule
+   * touches the edge side-on and then hangs clear, so the identical instruction sees the entire
+   * remaining drop and spends it at once. Same law, different body, opposite look. So we port the
+   * cone's EFFECT: one cone's worth of descent per frame
+   * (`samples/benilla/crates/benilla-app/src/player/mover.rs:665-690`, decision 1132).
+   *
+   * The REACH is deliberately left alone at `snapReach`, deep. Seeing further and falling further are
+   * different questions, and the deep reach is what keeps the body grounded on a face steeper than
+   * one frame can follow -- which is what stops the cap from becoming a dive.
+   *
+   * A KNOWN DIVERGENCE, stated rather than discovered later: the reference collapses its REACH to the
+   * slack alone when standing still, so an idle body far above a floor is never re-grounded and simply
+   * falls. Ours still sees it and now descends at the slack per frame instead of snapping. The case
+   * needs a body dislocated vertically with no input, which `settling` already freezes; after an
+   * ordinary landing the drop is a skin width and costs about three frames. Taking the conditional
+   * reach (decision 1129) as well belongs in its own change: it alters what is SEEN, and a pending
+   * measurement in this very area asks exactly that question.
+   */
+  const coneReach = Math.hypot(dx, dy) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+  let stepDown = false;
   if (hit && hit.normal.z >= GROUND_COS) {
-    slid.z -= hit.distance;
+    slid.z -= Math.min(hit.distance, coneReach);
     ground = hit.source;
+    // Further than the cone could rest, but in sight: the next frames finish it, and the caller
+    // keeps the body grounded meanwhile rather than letting the fall elect.
+    stepDown = hit.distance > coneReach;
   }
 
   return {
-    center: slid, ground, climb: climbCertified, stepUpVerdict, stepUpDetail, snap,
+    center: slid, ground, stepDown, climb: climbCertified, stepUpVerdict, stepUpDetail, snap,
     contacts: slide.contacts, blockedBy: firstContact, slide: iterations,
   };
 }
@@ -365,7 +402,10 @@ export function step(
   if (state.wedged && (onFloor || held || cast(center, _down, LAND_PROBE) === null)) {
     state.wedged = false;
   }
-  let grounded = onFloor || state.wedged;
+  // `stepDown` joins `wedged` for the same reason and on the same terms: a descent still in
+  // progress is standing, not falling. It is re-decided from every grounded frame's snap below, so
+  // it cannot latch -- walking off into open air leaves the snap with no hit and clears it.
+  let grounded = onFloor || state.wedged || state.stepDown;
 
   let jumped = false;
   if (held) {
@@ -416,6 +456,7 @@ export function step(
     contacts = resolved.contacts;
     blockedBy = resolved.blockedBy;
     slideIterations = resolved.slide;
+    state.stepDown = resolved.stepDown;
     if (resolved.ground) {
       groundEntity = resolved.ground;
     }
@@ -479,6 +520,13 @@ export function step(
       }
     }
   } else {
+    // **THE DESCENT FLAG IS CLEARED HERE, and leaving it out was a latch I wrote and caught.** It is
+    // only ever SET from a grounded frame's snap, so an airborne, jumping or held frame that never
+    // reaches that assignment would carry the last grounded frame's `true` for the whole arc -- and
+    // `grounded` reads it, so a jump would report standing in mid-air. `wedged` beside it has its own
+    // explicit clear for the same reason.
+    state.stepDown = false;
+
     // Held zeroed both terms already, but say it outright. Jumping and airborne frames let gravity
     // carry the arc.
     const velocity = held

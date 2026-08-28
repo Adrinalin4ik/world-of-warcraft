@@ -1,3 +1,4 @@
+import { castTrace } from '../collision/collision-world';
 import { SnapTrace } from './mover';
 import { SlideIteration } from './slide';
 import { StepUpResult, StepUpVerdict } from './step-up';
@@ -94,13 +95,26 @@ class MoveTrace {
   /** The frame that tripped `stopOnDrop`, kept after the trace disarms itself. */
   tripped: MoveTraceFrame | null = null;
 
-  /** Arm the trip and start recording. One call, so the console cannot half-arm it. */
+  /**
+   * Arm the trip and start recording. One call, so the console cannot half-arm it.
+   *
+   * **IT ARMS THE CAST TRACE TOO, and that pairing is the point.** The movement trace says the floor
+   * was suddenly 1.5 yd below; only the cast trace can say whether that probe was even OFFERED the
+   * surface that had been there the frame before. Provider counts separate the two diagnoses that
+   * this symptom cannot distinguish on its own: `wmo` zero at that spot is a broadphase or BSP hole,
+   * `wmo` non-zero with no walkable hit is a face the filter refused. Those live in different files.
+   *
+   * Both freeze on the same event, so the two records are of the same instant rather than of two
+   * runs.
+   */
   armDrop(yards = 0.5): string {
     this.clear();
     this.tripped = null;
     this.stopOnDrop = yards;
+    castTrace.clear();
+    castTrace.enabled = true;
     this.enabled = true;
-    return `armed: recording, will stop on a grounded frame losing ${yards} yd`;
+    return `armed: move + cast traces recording, both stop on a grounded frame losing ${yards} yd`;
   }
 
   frame(record: MoveTraceFrame): void {
@@ -117,6 +131,7 @@ class MoveTrace {
     if (this.stopOnDrop !== null && record.zIn - record.zOut >= this.stopOnDrop) {
       this.tripped = record;
       this.enabled = false;
+      castTrace.enabled = false;
     }
   }
 
