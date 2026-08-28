@@ -489,18 +489,33 @@ export function installChatApi(vm: LuaVM): void {
   /**
    * `JoinPermanentChannel(name, password, frameId, zoneUpdate)` -> `zoneChannelNumber, channelName`.
    *
-   * ANSWERS NOTHING, and that is honest rather than pessimistic: the join is a round trip, membership
-   * is confirmed by `SMSG_CHANNEL_NOTIFY` (`network/game/object/channel.ts`), and at the moment this
-   * returns the answer is genuinely unknown. The first return gates `CHAT_INVALID_NAME_NOTICE`
-   * (`chatframe.lua:1538-1542`), so a number invented here would tell the player they had joined a
-   * channel the server may refuse. The list is rebuilt from the notify a moment later.
+   * **ANSWERS THE NUMBER THE CHANNEL WILL HAVE, and answering NOTHING was a defect I shipped.** The
+   * first return gates `CHAT_INVALID_NAME_NOTICE` (`chatframe.lua:1538-1542`), so a falsy one makes
+   * the client print "invalid channel name" -- which it did on EVERY `/join`, including the one that
+   * demonstrably worked: the owner joined `world`, `GetChannelName(1)` answered it, and he was told
+   * the name was invalid. Refusing to guess produced a lie on screen, which is worse than the guess.
+   *
+   * THE PREDICTION IS EXACT WHEN THE JOIN SUCCEEDS, because the number is positional and assigned in
+   * join order (`channel.ts#joined`): the next channel gets `count + 1`, which is what this returns,
+   * and a name already joined returns its existing number. When the join FAILS the client has added a
+   * row to its own `channelList` that the engine does not have -- and that self-corrects, because the
+   * notify's `UPDATE_CHAT_WINDOWS` rebuilds that list from `GetChatWindowChannels`, which is
+   * authoritative. So the failure mode is a stale row for one round trip, against a false refusal on
+   * every success.
+   *
+   * The SECOND return is left nil: it lets the client replace the name it typed with the canonical
+   * one, and this client does not know the canonical form until the notify arrives. Nil makes
+   * `if ( channelName ) then name = channelName end` keep what the player typed, which is right.
    */
   vm.registerFunction('JoinPermanentChannel', (args) => {
     const name = String(args[0] ?? '').trim();
-    if (name !== '') {
-      channelSinkByVm.get(vm)?.join(name, String(args[1] ?? ''));
+    if (name === '') {
+      return [];
     }
-    return [];
+    const list = channelsNow();
+    const already = list.find((entry) => entry.name.toLowerCase() === name.toLowerCase()) ?? null;
+    channelSinkByVm.get(vm)?.join(name, String(args[1] ?? ''));
+    return [already === null ? list.length + 1 : already.number];
   });
   vm.registerFunction('JoinTemporaryChannel', (args) => {
     const name = String(args[0] ?? '').trim();
