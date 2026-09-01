@@ -403,9 +403,49 @@ export function step(
     : new THREE.Vector3();
 
   
+  let pushOutReason: MoveTraceFrame['pushOutReason'];
   const halfH = CAPSULE_HEIGHT * 0.5;
   let center = state.pos.clone();
   center.z += halfH;
+
+  /**
+   * **THE INVARIANT: A FRAME NEVER BEGINS INSIDE GEOMETRY. This is the whole of the recovery, and its
+   * POSITION in the frame is the fix -- the owner named the symptom that comes of getting it wrong.**
+   *
+   * It used to run at the END of the grounded branch, after the slide and the snap. So a correction was
+   * applied to a position the frame had already finished with, the NEXT frame began from inside again,
+   * and its own motion drove straight back in. Push and motion worked against each other every frame:
+   * "когда иду в забор сильное дрожжание". The tell was his other observation -- "с одной стороны
+   * работает хорошо, а с другой дрожжит" -- because from one side the shortest exit already agrees with
+   * the side rule and there is nothing to fight, while from the other the rule flips the push and the
+   * same frame pushes back.
+   *
+   * At the START, before any sweep, the fight disappears rather than being damped: the sweep begins
+   * from a position provably outside, and a sweep cannot enter what it stops at. The correction is
+   * CONSUMED by this frame instead of being undone by the next one.
+   *
+   * This is also the answer to "нам не нужна реальная физика": nothing here simulates anything. One
+   * invariant, checked once a frame, plus a swept test that cannot tunnel at any `dt` -- which is what
+   * "не проваливаться даже с низким фпс" actually requires. A discrete step that moves first and asks
+   * afterwards is the thing that falls through on a frame drop.
+   *
+   * It replaces two special cases as well: the end-of-slide recovery and the jump-that-went-nowhere
+   * recovery both existed only because the body could begin a frame embedded. It cannot now.
+   */
+  if (depenetrate !== undefined) {
+    const freed = depenetrate(center, SKIN_WIDTH, true, undefined, state.lastCentre);
+    if (freed !== null) {
+      center = freed;
+      state.pos.set(center.x, center.y, center.z - halfH);
+      if (moveTrace.enabled) {
+        pushOutReason = 'freed';
+      }
+    } else if (moveTrace.enabled) {
+      pushOutReason = 'ran';
+    }
+  }
+  // Recorded for the NEXT frame, before this one moves: the last centre reached legitimately.
+  state.lastCentre.copy(center);
 
   // While airborne, "on the ground" means where the slide actually contacts (LAND_PROBE). The wider
   // walking probe would end the arc up to 0.2 yd early and close the gap with a same-frame snap --
@@ -488,7 +528,7 @@ export function step(
   let contacts = 0;
   let blockedBy: { normalZ: number; distance: number } | null = null;
   let slideIterations: SlideIteration[] | null = null;
-  let pushOutReason: MoveTraceFrame['pushOutReason'];
+
 
   if (!held && grounded && !jumped) {
     const resolved = groundedStep(cast, center, state.horizVel, dt);
@@ -527,87 +567,7 @@ export function step(
      * keeps this a recovery rather than a second movement path, and it is why one frame of visible
      * stall is the worst case.
      */
-    /**
-     * WHY IT DID NOT RUN IS AS DIAGNOSTIC AS WHETHER IT RAN, and the first reading proved it: the
-     * owner walked a step he could not climb and came back with `fired: 0` beside 234 frames that
-     * had a contact and travelled nothing. Four different things produce that -- the closure never
-     * reached the mover, there was no contact, there was no input, or the centre DID move -- and
-     * only one of them is a defect in this gate. A bare zero cannot say which.
-     *
-     * **THE READING CAME BACK `moved` ON ALL 532 OF THEM, so the gate is fixed and this note records
-     * that it was earned rather than guessed.** `before` was the full 3D centre, and the snap re-seats
-     * Z by a hair every frame, so a body horizontally PINNED still cleared a 3D threshold -- the
-     * push-out was unreachable code in the only state it exists for. It now measures horizontal
-     * displacement, which is what "stuck" means for a walker.
-     */
-    if (moveTrace.enabled) {
-      pushOutReason = depenetrate === undefined ? 'absent' : 'ran';
-    }
 
-    /**
-     * **MEASURE THE PENETRATION; DO NOT INFER IT FROM "DID NOT MOVE". I gated this on movement three
-     * times and it failed to reach the state three times.**
-     *
-     * The record, because the pattern is the lesson:
-     *
-     *  1. 3D displacement under `1e-12` -- declined 532 of 532, because the election snap re-seats Z by
-     *     a hair every frame while the body is horizontally pinned;
-     *  2. HORIZONTAL displacement under `1e-6` -- declined 18 of 18 at the abbey, where the measured
-     *     creep was 0.0006 yd a frame, six hundred times the threshold;
-     *  3. horizontal under `1e-3` -- and then the fence: "он упирается в забор и камера дергается то
-     *     туда то обратно... микро сдвиг". A thin rail has two OPPOSED faces, so a body inside it is
-     *     pushed alternately by each and travels a millimetre every frame, forever. Five seconds of it
-     *     produced `stallFrames: 0`.
-     *
-     * Each gate was a better guess than the last and all three were the same mistake: "did not move" is
-     * not what "inside geometry" means. An oscillating body moves constantly and is exactly as stuck as
-     * a still one.
-     *
-     * So the condition is now the measurement itself. `depenetrateCapsule` returns null when the body is
-     * free -- its first pass IS the overlap scan -- so asking it is the same work as testing whether to
-     * ask, and there is no threshold left to be wrong about.
-     *
-     * COST, stated: a candidate gather plus one capsule-triangle distance per candidate, on every
-     * grounded frame that resolved a contact. At the abbey that is 255 WMO triangles; the four slide
-     * iterations the same frame already sweep the same set, so it is roughly a quarter more collision
-     * work while brushing geometry, and nothing at all on open ground. The frame budget here is already
-     * marginal (p50 16.6 against 16.7), so if this shows up it is the first thing to bound -- by
-     * running it every other frame, or only while a contact persists. I have not measured it live and
-     * am not claiming otherwise.
-     */
-    /**
-     * **AND NOT GATED ON A CONTACT EITHER -- the state has none, by construction. Fourth attempt,
-     * and this time the measurement said so before the code did.**
-     *
-     * The first direct penetration reading, 321 frames of it: depth **0.28 to 0.32 yd**, `travel`
-     * the full 0.33 -- walking freely -- and `resolved.contacts` **zero**. Two of our own subsystems
-     * appeared to contradict each other, and both were right:
-     *
-     *  - the depth is real. `halfSegment` is `CAPSULE_HEIGHT/2 - radius`, so a correctly seated
-     *    capsule has its segment exactly `radius` above the floor and a gap of 0. A gap of -0.31
-     *    puts the segment 0.02 from the floor, i.e. the FEET 0.31 below the surface -- "я на
-     *    половину в текстуре", finally with a number;
-     *  - and the absent contact is correct too. A horizontal sweep is blocked by a face only when it
-     *    is driving INTO it, and a horizontal direction against a floor normal has zero closing
-     *    speed. The floor a body is sunk into does not obstruct walking along it.
-     *
-     * So the body walks freely, shin-deep, and the election snap can only ever DESCEND -- nothing in
-     * the ordinary path even notices. Every gate I have written asked the movement whether it was
-     * stuck; the movement genuinely was not. Only the geometry knew.
-     *
-     * COST, and it is smaller than the estimate I gave with the last gate, which was too pessimistic:
-     * one `closestPointToSegment` per candidate, about 255 of them at the abbey -- roughly 0.02 ms.
-     * The four slide SWEEPS the same frame already run over the same set and each sweep is dearer per
-     * triangle than a distance. Still unmeasured live, and still the first thing to bound if the panel
-     * disagrees with that arithmetic.
-     */
-    if (depenetrate !== undefined) {
-      const freed = depenetrate(center, SKIN_WIDTH, true, undefined, preMove);
-      if (freed !== null) {
-        pushOutReason = 'freed';
-        center = freed;
-      }
-    }
   } else {
     // **THE DESCENT FLAG IS CLEARED HERE, and leaving it out was a latch I wrote and caught.** It is
     // only ever SET from a grounded frame's snap, so an airborne, jumping or held frame that never
@@ -626,40 +586,6 @@ export function step(
     slideIterations = moveTrace.enabled ? [] : null;
     center = airborneStep(cast, center, velocity, dt, slideIterations ?? undefined);
 
-    /**
-     * **A JUMP THAT WENT NOWHERE IS PROOF OF PENETRATION, and it is the only proof available while
-     * the body is standing still.**
-     *
-     * The owner, at a fence: "не могу прыгать, он упирается в забор и не прыгает вверх. Даже без
-     * зажатой w... при этом анимация проигрывается." That last clause is the measurement. The jump was
-     * ELECTED -- `velZ` set, the event dispatched, the animation running -- and the world refused the
-     * motion. An upward sweep is refused at distance zero only by a face the capsule is already inside.
-     *
-     * The grounded push-out cannot reach this state and never will: it needs a CONTACT, and a slide
-     * with no velocity resolves none, so a body standing still inside geometry reports `no-contact`
-     * every frame (measured: 30 of 30 on his own dump). Without input there is nothing to notice the
-     * penetration WITH -- except a motion the player asked for and did not get.
-     *
-     * So the jump doubles as the recovery gesture, which is also how it reads to a player: press space,
-     * come unstuck. HALF the expected rise is the bar rather than zero, because a legitimate jump into
-     * a low ceiling is clipped part-way and is not penetration.
-     *
-     * Cost is confined to rising frames -- a fraction of a second per jump -- and to those where the
-     * rise was actually refused.
-     */
-    if (depenetrate !== undefined
-      && velocity.z > 0
-      && center.z - beforeAir < velocity.z * dt * 0.5) {
-      const freed = depenetrate(center, SKIN_WIDTH, true, undefined, preMove);
-      if (freed !== null) {
-        center = freed;
-        if (moveTrace.enabled) {
-          pushOutReason = 'freed';
-        }
-      } else if (moveTrace.enabled) {
-        pushOutReason = 'ran';
-      }
-    }
   }
 
   // Wedge-rest detection: airborne, already falling fast, yet the descent achieved is a sliver of

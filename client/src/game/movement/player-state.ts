@@ -63,6 +63,15 @@ export interface PlayerMoveState {
   wedged: boolean;
 
   /**
+   * The capsule CENTRE at the start of the previous frame -- the last position the body reached by
+   * legitimate motion, used as the "which side did I come from" hint for the frame-start push-out.
+   *
+   * The current position cannot serve: at the moment the penetration is discovered the body is
+   * already inside, so asking it which side it came from answers "this one".
+   */
+  lastCentre: THREE.Vector3;
+
+  /**
    * **A STEP-DOWN STILL IN PROGRESS: the floor is in SIGHT but further than one frame may
    * descend.** Treated as standing -- gravity off, walking control live -- exactly as `wedged`
    * above is, and self-clearing the same way: it is re-decided from the snap every frame, so
@@ -142,6 +151,7 @@ export function createPlayerMoveState(): PlayerMoveState {
     fallStartZ: 0,
     fallFar: false,
     wedged: false,
+    lastCentre: new THREE.Vector3(),
     stepDown: false,
     wedgeStill: 0,
     settling: false,
