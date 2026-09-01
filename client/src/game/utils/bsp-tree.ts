@@ -678,8 +678,26 @@ class BSPTree {
      * building, the room over dirt -- one swapped pair.
      */
     const zRange = this.getTopAndBottomTriangleFromBsp(point, leafIndices);
-    const minZ = zRange[1];
-    const maxZ = zRange[0];
+
+    /**
+     * **AND THE SENTINELS BECOME `null`, which is the other half of the same fix.**
+     *
+     * `getTopAndBottomTriangleFromBsp` reports "nothing found" as `topZ = -999999` and
+     * `bottomZ = 999999`. Unswapping the pair without translating those handed the caller a FLOOR at
+     * 999999, so its containment test rejected every group where no floor was found beneath the point
+     * -- which is most of them. The owner's next frame showed exactly that: the interior gone entirely
+     * and the valley drawn through it, because no interior group could be selected at all.
+     *
+     * `null` is the value the caller is already written for: `location-manager` falls back to a portal
+     * raycast for an unbounded end, and then to the group box. A sentinel masquerading as a coordinate
+     * bypassed both.
+     */
+    const NONE_BELOW = 999999;
+    const NONE_ABOVE = -999999;
+    const floor = zRange[1];
+    const ceiling = zRange[0];
+    const minZ = floor === NONE_BELOW ? null : floor;
+    const maxZ = ceiling === NONE_ABOVE ? null : ceiling;
 
     return {
       z: {
