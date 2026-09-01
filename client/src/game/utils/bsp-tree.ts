@@ -657,13 +657,29 @@ class BSPTree {
       // console.log("here 1", bounding, leafIndices, point)
       return null;
     }
-    const zRange = this.getTopAndBottomTriangleFromBsp(point, leafIndices)
-    // Determine upper and lower Z bounds of leaves
-    // const zRange = this.calculateZRange(point, leafIndices);
-    // debugger;
-    // console.log(zRange)
-    const minZ = zRange[0];
-    const maxZ = zRange[1];
+    /**
+     * **THE FLOOR AND THE CEILING WERE SWAPPED HERE, and that is the root of a week of reports.**
+     *
+     * `getTopAndBottomTriangleFromBsp` returns `[topZ, bottomZ]` -- the ceiling first. This read
+     * `min = zRange[0]` and `max = zRange[1]`, so `z.min` carried the CEILING and `z.max` the floor.
+     *
+     * The owner's probe proves it three ways in one reading, standing with his feet at local z 1.9:
+     *
+     *  - group 0 answered `zMin: -999999, zMax: 999999` -- exactly the INITIAL values of `topZ` and
+     *    `bottomZ`, in that order, which pins which slot is which;
+     *  - group 5 answered `zMin: 21.09` and group 3 `zMin: 14.84`, both far ABOVE his feet. A leaf
+     *    containing a point at 1.9 cannot have a floor at 21;
+     *  - and those are the two groups his room actually is, both rejected by the containment test for
+     *    being "below their floor", while group 0 -- which found nothing at all and kept its sentinels
+     *    -- passed by accident and became the seed.
+     *
+     * Everything downstream followed from that seed: the flood started in the wrong room, reached 3 of
+     * 14 groups, and the floor he was standing on was never among them. The void, the vanishing
+     * building, the room over dirt -- one swapped pair.
+     */
+    const zRange = this.getTopAndBottomTriangleFromBsp(point, leafIndices);
+    const minZ = zRange[1];
+    const maxZ = zRange[0];
 
     return {
       z: {
@@ -755,15 +771,23 @@ class BSPTree {
         var normal_avg = bary[0]*normal1[2]+bary[1]*normal2[2]+bary[2]*normal3[2];
         if (normal_avg > 0) {
           //Bottom
+          // NEAREST floor below, not the last one found: `minPositiveDistanceToCamera` was compared
+          // against and never updated, so every qualifying triangle overwrote the previous one and the
+          // LAST in iteration order won. With a stack of floors -- a stair, a gallery -- that is
+          // whichever the BSP happened to list last.
           var distanceToCamera = cameraLocal[2] - z;
-          if ((distanceToCamera > 0) && (distanceToCamera < minPositiveDistanceToCamera))
-              bottomZ = z;
+          if ((distanceToCamera > 0) && (distanceToCamera < minPositiveDistanceToCamera)) {
+            minPositiveDistanceToCamera = distanceToCamera;
+            bottomZ = z;
+          }
         } else {
           //Top
           topZ = Math.max(z, topZ);
         }
       }
     }
+    // `[ceiling, floor]`. The caller unpacks it in that order -- see `queryBoundedPoint`, where
+    // reading it the other way round was the defect.
     return [topZ, bottomZ];
   }
 
