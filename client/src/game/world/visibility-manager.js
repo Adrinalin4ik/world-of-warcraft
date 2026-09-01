@@ -122,7 +122,7 @@ class VisibilityManager {
     this.updateStats();
   }
 
-  enablePortalsFromExterior(depth, camera, frustum = null, visitedPortals = new Set()) {
+  enablePortalsFromExterior(depth, camera, frustum = null) {
     this.map.exterior.visible = true;
 
     for (const doodad of this.map.doodadManager.doodads.values()) {
@@ -179,12 +179,12 @@ class VisibilityManager {
 
         // Traverse inward from the exterior groups of all WMOs, marking any relevant WMO groups
         // as visible.
-        this.traversePortalsAndEnable(depth, camera, wmo, group, FULL_SCREEN_RECT, visitedPortals);
+        this.traversePortalsAndEnable(depth, camera, wmo, group, FULL_SCREEN_RECT);
       }
     }
   }
 
-  enablePortalsFromInterior(depth, camera, rect = FULL_SCREEN_RECT, visitedPortals = new Set()) {
+  enablePortalsFromInterior(depth, camera, rect = FULL_SCREEN_RECT) {
     const wmo = camera.location.wmo.handler;
     const group = camera.location.wmo.group;
     const groupView = camera.location.wmo.views.group;
@@ -196,7 +196,7 @@ class VisibilityManager {
       this.enableStaticObjectInRect(doodad, rect);
     }
 
-    this.traversePortalsAndEnable(depth, camera, wmo, group, rect, visitedPortals);
+    this.traversePortalsAndEnable(depth, camera, wmo, group, rect);
   }
 
   enableStaticObjectInFrustum(object, frustum) {
@@ -271,8 +271,38 @@ class VisibilityManager {
    * doorway test keyed on MOGP 0x8 while city streets carry 0x40. That predicate is fixed now
    * (see world/wmo-flags.ts), but the gate needs its own verification pass first.
    */
-  traversePortalsAndEnable(depth, camera, wmo, group, rect = FULL_SCREEN_RECT, visitedPortals = new Set()) {
+  /**
+   * **THE GLOBAL VISITED SET IS NOT THE REFERENCE'S GUARD, AND IT IS WHY A VISIBLE PORTAL BLINKS.**
+   *
+   * The owner: "кручу камерой и бывает пропадает явно видимый портал." A portal was marked visited by
+   * the FIRST branch that reached it, so a later branch arriving with a WIDER screen rect was
+   * discarded -- and which branch arrives first depends on the traversal order, which depends on the
+   * camera. Rotate, and a narrow route wins a race it lost a moment ago, taking a room with it.
+   *
+   * The reference has no such set (`benilla-world/src/wmo_portal/mod.rs:659-723`). Its guards are
+   * three, and all three are local or global-but-cheap:
+   *
+   *  - `neighbour == came` -- never re-cross the portal you entered THROUGH. Per branch, so it stops
+   *    the immediate bounce without forbidding a second, better route to the same room;
+   *  - a recursion DEPTH cap, which we already had at 10;
+   *  - a global ITERATION budget, which is the real cycle backstop: a portal graph can loop, and
+   *    without a bound on total work a cycle would spin. It bounds cost, not reachability -- exactly
+   *    the distinction the visited set got wrong.
+   *
+   * So `cameFrom` replaces the set, and `budget` is carried by reference so every branch spends from
+   * one pot. `MAX_ITERS` matches the reference's own backstop role: high enough that no honest room
+   * ever reaches it, low enough that a cyclic graph cannot spin a frame away.
+   *
+   * STILL MISSING, and named so it is not silently absent: the ON-PLANE special case. The reference
+   * gives the full-screen rect to an eye standing IN a portal's polygon (the client's `0x6b46f0`), and
+   * says of its absence: "a camera crossing a doorway clips the room ahead to nothing for a frame."
+   * That is a second, independent cause of the same report and it needs a point-in-polygon test we do
+   * not have yet.
+   */
+  traversePortalsAndEnable(depth, camera, wmo, group, rect = FULL_SCREEN_RECT, cameFrom = -1, budget = { left: 4096 }) {
     if (depth > 10) return;
+    if (budget.left <= 0) return;
+    budget.left -= 1;
 
     const view = wmo.views.groups.get(group.index);
     if (!view) return;
@@ -297,7 +327,9 @@ class VisibilityManager {
       const exteriorDestination = (destination.header.flags & WmoFlags.visibilityMask) !== 0;
 
       if (!portalView || !destinationView) continue;
-      if (visitedPortals.has(portalView)) continue;
+      // Never re-cross the portal we came THROUGH -- the reference's only per-branch guard. A second
+      // route to the same room is allowed, and is the whole point: it may carry a wider window.
+      if (ref.groupIndex === cameFrom) continue;
 
       // Exterior-to-exterior links are already covered by enablePortalsFromExterior.
       if ((group.header.flags & WmoFlags.visibilityMask) !== 0 && exteriorDestination) continue;
@@ -313,14 +345,13 @@ class VisibilityManager {
       const nextRect = portalView.projectToRect(this.scratchViewProjection, rect, cameraLocal);
       if (!nextRect) continue;
 
-      visitedPortals.add(portalView);
       destinationView.visibleFrame = this.frame;
 
       if (exteriorDestination && camera.location.type !== 'exterior') {
-        this.enablePortalsFromExterior(depth + 1, camera, this.frustumFromRect(nextRect), visitedPortals);
+        this.enablePortalsFromExterior(depth + 1, camera, this.frustumFromRect(nextRect));
       }
 
-      this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, nextRect, visitedPortals);
+      this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, nextRect, group.index, budget);
     }
   }
 
