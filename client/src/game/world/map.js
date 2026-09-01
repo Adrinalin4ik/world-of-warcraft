@@ -428,12 +428,16 @@ class WorldMap extends THREE.Group {
     }
   }
 
-  locateCamera(camera) {
-    this.locationManager.update([camera]);
+  locateCamera(camera, bodyPoint = null) {
+    this.locationManager.update([camera], bodyPoint);
   }
 
-  updateVisibility(camera) {
-    this.visibilityManager.update([camera]);
+  /**
+   * `bodyPoint` is the PLAYER's own position, used as a fallback seed when the eye resolves to no
+   * interior group -- see `location-manager.js#locateCamera` for the measurement behind it.
+   */
+  updateVisibility(camera, bodyPoint = null) {
+    this.visibilityManager.update([camera], bodyPoint);
   }
 
   static load(id) {

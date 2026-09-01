@@ -104,7 +104,7 @@ class VisibilityManager {
     this.frame = 0;
   }
 
-  update(cameras) {
+  update(cameras, bodyPoint = null) {
     if (!this.map) {
       return;
     }

@@ -1209,8 +1209,15 @@ export default class World extends EventEmitter {
     if (this.map !== null) {
       if (cameraMoved) {
         beginSection('w.vis');
-        this.map.locateCamera(camera);
-        this.map.updateVisibility(camera);
+        /**
+         * The PLAYER's own position rides along as a fallback seed. A third-person eye is routinely
+         * outside the room -- measured at ten yards horizontally and seven up from the feet, which
+         * put it outside the abbey hall entirely and made the whole world resolve as OUTDOORS. See
+         * `location-manager.js#locateCamera`; the eye is still tried first.
+         */
+        const bodySeed = this.player ? this.player.position : null;
+        this.map.locateCamera(camera, bodySeed);
+        this.map.updateVisibility(camera, bodySeed);
         endSection('w.vis');
       }
       // `map.animate` itself calls `updateWorldTime` first thing, with the real per-frame `delta` --

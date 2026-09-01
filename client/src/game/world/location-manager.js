@@ -24,21 +24,35 @@ class LocationManager {
    * - exterior: camera is either not in a WMO, or is in a WMO group marked as exterior
    * - interior: camera is in a specific WMO and WMO group, and WMO group is marked as interior
    */
-  update(cameras) {
+  update(cameras, bodyPoint = null) {
     for (const camera of cameras) {
-      this.locateCamera(camera);
+      this.locateCamera(camera, bodyPoint);
     }
   }
 
-  locateCamera(camera) {
-    const candidates = [];
+  /**
+   * **THE BODY IS THE FALLBACK SEED, because a third-person eye is routinely outside the room.**
+   *
+   * Measured: the owner's eye resolved to local `(-12.42, 18.30, 8.67)` while his feet were at
+   * `(-22.42, 21.54, 1.90)` -- ten yards away horizontally and seven up. The boom had carried it clean
+   * out of the hall, so no group contained it, the location came back EXTERIOR, and the interior flood
+   * never ran. `portalTrace` said it outright: no `seed` record at all, and the only traversals were
+   * exterior ones through buildings 630 yd away.
+   *
+   * The reference seeds from the eye too, and can afford to: its boom stops at every collidable face,
+   * so its camera cannot leave the room. Ours passes `NOCAMCOLLIDE` geometry by design
+   * (`collision/layers.ts`), so our eye leaves rooms the body cannot. Given that, the BODY is the
+   * better authority on which room to draw -- it is the thing standing in it.
+   *
+   * The eye is still tried FIRST, so nothing changes wherever it resolves. This fills only the case
+   * that used to fall through to "outdoors" and draw the world from the wrong room.
+   */
+  locateCamera(camera, bodyPoint = null) {
+    let location = this.locateAt(camera.position);
 
-    for (const wmo of this.map.wmoManager.entries.values()) {
-      this.addCandidates(camera, wmo, candidates);
+    if (!location && bodyPoint) {
+      location = this.locateAt(bodyPoint);
     }
-
-    const location = this.selectCandidate(candidates);
-    // const location = candidates[0];
     if (location) {
       camera.location = location;
       // console.log("Interior")
@@ -47,6 +61,17 @@ class LocationManager {
         type: 'exterior'
       };
     }
+  }
+
+  /** Resolve a location for one world POINT, or null. Both seeds go through this. */
+  locateAt(point) {
+    const candidates = [];
+
+    for (const wmo of this.map.wmoManager.entries.values()) {
+      this.addCandidates({ position: point }, wmo, candidates);
+    }
+
+    return this.selectCandidate(candidates);
   }
 
   addCandidates(camera, wmo, candidates) {
