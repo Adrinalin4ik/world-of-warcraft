@@ -195,9 +195,35 @@ export function depenetrateCapsule(
 
     for (let i = 0; i < triangles.length; ++i) {
       const triangle = triangles[i];
-      const gap = closestDistanceCapsuleTriangle(at, halfSegment, radius, triangle);
+      const n = triangle.normal;
       // A floor may be rested on within the deadband; a wall may not be overlapped at all.
-      const limit = Math.abs(triangle.normal.z) >= restingCos ? deadband : CAPSULE_CAST_EPS;
+      const limit = Math.abs(n.z) >= restingCos ? deadband : CAPSULE_CAST_EPS;
+
+      /**
+       * **PLANE REJECTION FIRST -- one dot product instead of a closest-point solve.**
+       *
+       * MEASURED, on the owner's own panel: `ctl.move` 3.8 ms walking the abbey stairs against 3.0 ms
+       * away from geometry. That 0.8 ms is this scan, which the frame-start invariant runs over every
+       * candidate every grounded frame -- 255 triangles at that spot. I had estimated 0.02 ms and said
+       * so without measuring; the estimate was wrong by more than an order of magnitude.
+       *
+       * `support` is how far the capsule reaches along the face normal, so a triangle whose PLANE is
+       * further than that cannot possibly overlap the capsule -- and the plane distance is a
+       * subtraction and a dot product, where `closestPointToSegment` recomputes a triangle plane and
+       * solves a segment-triangle closest pair. Almost every candidate in a 2-yard box is rejected
+       * here, and the exact test then runs only on the few that could actually touch.
+       *
+       * NO BEHAVIOUR CHANGE: the plane distance is a LOWER bound on the true distance (the closest
+       * point of the triangle is at least as far as its plane), so anything rejected here could not
+       * have cleared the limit anyway.
+       */
+      const support = radius + halfSegment * Math.abs(n.z);
+      _toTri.subVectors(at, triangle.a);
+      if (Math.abs(_toTri.dot(n)) - support >= -limit) {
+        continue;
+      }
+
+      const gap = closestDistanceCapsuleTriangle(at, halfSegment, radius, triangle);
       if (gap < -limit && gap < worstGap) {
         worstGap = gap;
         worstTriangle = triangle;
