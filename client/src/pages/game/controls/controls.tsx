@@ -10,7 +10,7 @@ import { headHeight } from '../../../game/camera/pivot';
 import { collisionWorld } from '../../../game/collision/collision-world';
 import { CollisionLayer } from '../../../game/collision/types';
 import {
-  CAPSULE_HEIGHT, CAPSULE_RADIUS, MOUSELOOK_BODY_TURN_RATE, MOUSELOOK_PITCH_CLAMP,
+  CAPSULE_HEIGHT, CAPSULE_RADIUS, GROUND_COS, MOUSELOOK_BODY_TURN_RATE, MOUSELOOK_PITCH_CLAMP,
   RUN_BACK_RATIO, RUN_SPEED,
   SETTLE_STREAM_TIMEOUT, SETTLE_TIMEOUT, STATIONARY_CHASE_RATE, TURN_RATE, TURN_RATE_MOVING,
   capsuleHalfSegment,
@@ -208,7 +208,7 @@ class Controls extends React.Component<IProp> {
     (window as never as Record<string, unknown>).stuckReport = () => {
       const cast = collisionWorld.castFor(CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment());
       const push = collisionWorld.depenetrateFor(
-        CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment(),
+        CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment(), GROUND_COS,
       );
       const move = this.unit.move;
       const centre = move.pos.clone();
@@ -686,7 +686,7 @@ class Controls extends React.Component<IProp> {
        * same capsule as the cast above, because it is the same body.
        */
       depenetrate: collisionWorld.depenetrateFor(
-        CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment(),
+        CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment(), GROUND_COS,
       ),
     };
 

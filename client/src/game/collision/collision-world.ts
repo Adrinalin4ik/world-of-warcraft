@@ -298,7 +298,13 @@ export class CollisionWorld {
    * cover, so this is the smallest honest query -- and it matters, because the caller runs this only
    * when stuck and wants the answer to be about where the body IS.
    */
-  depenetrateFor(layer: CollisionLayer, radius: number, halfSegment: number) {
+  depenetrateFor(
+    layer: CollisionLayer,
+    radius: number,
+    halfSegment: number,
+    /** The walk election's own cosine -- see `depenetrateCapsule`'s `restingCos`. */
+    restingCos = 1.1,
+  ) {
     /**
      * `count` false for a MEASURE-ONLY call. The movement trace asks for the overlap depth every
      * frame it records, and a measurement that moved `fired`/`freed` would be one instrument
@@ -359,6 +365,7 @@ export class CollisionWorld {
       const deadband = count ? Math.max(skin, CAPSULE_CAST_EPS) : CAPSULE_CAST_EPS;
       const freed = depenetrateCapsule(
         center, radius, halfSegment, candidates, skin, 4, _penInfo, deadband, cameFrom,
+        restingCos,
       );
       const described = _penInfo.source === null ? null : describeSource(_penInfo.source);
       this.pushOut.lastSource = described;

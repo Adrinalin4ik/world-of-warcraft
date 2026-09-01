@@ -164,6 +164,24 @@ export function depenetrateCapsule(
    * where it legitimately was.
    */
   cameFrom?: THREE.Vector3,
+  /**
+   * **THE DEADBAND IS FOR FLOORS, NOT FOR WALLS -- above this |n.z| a shallow overlap is RESTING.**
+   *
+   * A global deadband was my defect and it locked the owner in a fence. His report, one mesh, three
+   * faces, every one of the 36 bearings blocked at distance ZERO, and an overlap of 1.9 cm against a
+   * face whose `normalZ` is **-0.009** -- a wall. `pushWould` said 0.0189: the recovery knew the
+   * answer and declined it, because 1.9 cm is under the skin.
+   *
+   * Tangency is a property of the surface you STAND on. Gravity presses the body into a floor, so an
+   * overlap within the resting clearance there is rest, and correcting it every frame is the jitter
+   * the deadband was added for. You cannot rest against a wall: nothing presses you into it, so any
+   * overlap past the epsilon is penetration and must be resolved.
+   *
+   * `1.1` by default -- unreachable, so every existing caller keeps a single global deadband. The
+   * movement layer supplies `GROUND_COS`, which is the same cosine the walk election uses to decide
+   * what may be stood on, so the two cannot drift apart.
+   */
+  restingCos = 1.1,
 ): THREE.Vector3 | null {
   if (triangles.length === 0) {
     return null;
@@ -176,10 +194,13 @@ export function depenetrateCapsule(
     let worstTriangle: Triangle | null = null;
 
     for (let i = 0; i < triangles.length; ++i) {
-      const gap = closestDistanceCapsuleTriangle(at, halfSegment, radius, triangles[i]);
-      if (gap < worstGap) {
+      const triangle = triangles[i];
+      const gap = closestDistanceCapsuleTriangle(at, halfSegment, radius, triangle);
+      // A floor may be rested on within the deadband; a wall may not be overlapped at all.
+      const limit = Math.abs(triangle.normal.z) >= restingCos ? deadband : CAPSULE_CAST_EPS;
+      if (gap < -limit && gap < worstGap) {
         worstGap = gap;
-        worstTriangle = triangles[i];
+        worstTriangle = triangle;
       }
     }
 
@@ -189,7 +210,9 @@ export function depenetrateCapsule(
       infoOut.normalZ = worstTriangle === null ? 0 : worstTriangle.normal.z;
       infoOut.gap = worstGap;
     }
-    if (worstTriangle === null || worstGap >= -deadband) {
+    // The per-triangle limit above already rejected everything shallower than its own threshold,
+    // so reaching here with no triangle means the body is free by both rules.
+    if (worstTriangle === null) {
       break;
     }
 
