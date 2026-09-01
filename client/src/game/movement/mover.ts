@@ -266,11 +266,32 @@ export function groundedStep(
   const coneReach = Math.hypot(dx, dy) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
   let stepDown = false;
   if (hit && hit.normal.z >= GROUND_COS) {
-    slid.z -= Math.min(hit.distance, coneReach);
+    const descended = Math.min(hit.distance, coneReach);
+    slid.z -= descended;
     ground = hit.source;
-    // Further than the cone could rest, but in sight: the next frames finish it, and the caller
-    // keeps the body grounded meanwhile rather than letting the fall elect.
-    stepDown = hit.distance > coneReach;
+    /**
+     * **SUPPORT IS EARNED BY DESCENDING, NOT BY TOUCHING -- and leaving that clause out of the port
+     * left the owner hanging in the air beside a fence post, unable to move at all.**
+     *
+     * His words and the screenshot together: "хотя я даже не в нем, но я не могу идти, я застрял",
+     * with his feet clearly off the ground. The mechanism is mine, and it is arithmetic:
+     * `coneReach` is `travelXY * STEP_SLOPE_RATIO + STEP_SNAP_SLACK`, so a body blocked horizontally
+     * has `travelXY` 0 and a cap of the SLACK ALONE -- 1/36 of a yard a frame. Meanwhile `stepDown`
+     * told the caller it was standing, which switches gravity off. A descent of 2.8 cm a frame with
+     * no fall to elect is a hover, and against a post it is a hover that cannot walk out either.
+     *
+     * The reference states the condition I dropped, twice over: `Support::steep` is set from
+     * `drop > STEP_SNAP_SLACK` -- "resting ON a steep face gives a clearance of ~0, and standing
+     * still the bound is the slack alone, so a within-reach test alone would perch a motionless body
+     * on a 60-degree bank forever" -- and, of the deep case, "a drop deeper than the cone is NOT
+     * absorbed... the gap becomes a fall"
+     * (`samples/benilla/crates/benilla-app/src/player/mover.rs:670-690`, decision 1121).
+     *
+     * So a step-down holds only while the frame ACHIEVED real downward progress. Blocked and
+     * motionless, the flag drops, the ground probe misses, and the body falls -- which is the honest
+     * outcome and the one that gets him back on the ground.
+     */
+    stepDown = hit.distance > coneReach && descended > STEP_SNAP_SLACK;
   }
 
   return {
