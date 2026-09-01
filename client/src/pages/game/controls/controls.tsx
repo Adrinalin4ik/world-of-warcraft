@@ -183,6 +183,95 @@ class Controls extends React.Component<IProp> {
     // `window.uiCaptureLog` -- see `captureLog`. Published from the mount rather than at module scope so
     // it exists only while something is actually reading the mouse.
     (window as never as Record<string, unknown>).uiCaptureLog = captureLog;
+
+    /**
+     * **`window.stuckReport()` -- ONE CALL, NO ARMING, ANSWERED WHILE STUCK.**
+     *
+     * Every instrument in this area so far has had to be armed before the event and read after it,
+     * and that has cost this round four readings: a trap read thirty frames of standing at the
+     * console, a counter that drained on release, a live field overwritten before it could be read,
+     * and a trace switched off in the same line that switched it on. A body that is stuck is stuck
+     * NOW -- so the honest instrument for it is a snapshot, and the owner can call it while it is
+     * happening.
+     *
+     * THE 36 BEARINGS are the measurement this codebase has referred to twice without ever having:
+     * "0 of 36 bearings free" appears in `step-up.ts` as evidence from a past round. `free` at 36
+     * means nothing is holding the body horizontally and the freeze is in the MOVER; a small number
+     * means it is genuinely walled in and the geometry is the story; anything between says which way
+     * out exists, which is the question "I cannot leave" actually asks.
+     *
+     * THE MOVE STATE is the other half and may be the whole answer. `settling` freezes the body and
+     * switches gravity off until streamed collision arrives, `wedged` and `stepDown` both report
+     * "standing" to the caller, and any of the three latched is a freeze with no geometry involved
+     * at all -- which is exactly what "хотя я даже не в нем, но я не могу идти" describes.
+     */
+    (window as never as Record<string, unknown>).stuckReport = () => {
+      const cast = collisionWorld.castFor(CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment());
+      const push = collisionWorld.depenetrateFor(
+        CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment(),
+      );
+      const move = this.unit.move;
+      const centre = move.pos.clone();
+      centre.z += CAPSULE_HEIGHT * 0.5;
+
+      const name = (source: object): string => {
+        const named = source as { group?: { path?: string; index?: number } };
+        if (typeof named.group?.path === 'string') {
+          return `wmo ${named.group.path}#${named.group.index ?? 0}`;
+        }
+        return source.constructor?.name ?? 'unknown';
+      };
+
+      // Half a yard: further than a frame of walking and shorter than the gaps a body threads, so a
+      // blocked bearing here is a wall rather than something noticed early.
+      const PROBE = 0.5;
+      const blocked: { deg: number; d: number; nz: number; src: string }[] = [];
+      let free = 0;
+      for (let i = 0; i < 36; i += 1) {
+        const angle = (i * 10 * Math.PI) / 180;
+        const dir = new THREE.Vector3(Math.cos(angle), Math.sin(angle), 0);
+        const hit = cast(centre, dir, PROBE);
+        if (hit === null) {
+          free += 1;
+        } else {
+          blocked.push({
+            deg: i * 10,
+            d: Number(hit.distance.toFixed(3)),
+            nz: Number(hit.normal.z.toFixed(2)),
+            src: name(hit.source),
+          });
+        }
+      }
+
+      const up = cast(centre, new THREE.Vector3(0, 0, 1), 1.0);
+      const down = cast(centre, new THREE.Vector3(0, 0, -1), 3.0);
+      const overlap = { source: null as string | null, normalZ: 0, gap: 0 };
+      const freed = push(centre, 0, false, overlap);
+
+      return {
+        feet: [move.pos.x, move.pos.y, move.pos.z].map((v) => Number(v.toFixed(3))),
+        freeBearings: free,
+        blockedBearings: blocked.length,
+        blocked: blocked.slice(0, 6),
+        up: up === null ? null : { d: Number(up.distance.toFixed(3)), src: name(up.source) },
+        down: down === null ? null : {
+          d: Number(down.distance.toFixed(3)),
+          nz: Number(down.normal.z.toFixed(2)),
+          src: name(down.source),
+        },
+        overlap,
+        pushWould: freed === null ? null : Number(freed.distanceTo(centre).toFixed(4)),
+        move: {
+          velZ: Number(move.velZ.toFixed(3)),
+          horizVel: Number(move.horizVel.length().toFixed(3)),
+          airborneSince: move.airborneSince,
+          settling: move.settling,
+          wedged: move.wedged,
+          stepDown: move.stepDown,
+          swimming: move.swimming,
+        },
+      };
+    };
     this.element.addEventListener('mousedown', this.onMouseDown);
     window.addEventListener('mouseup', this.onMouseUp);
     this.element.addEventListener('mousemove', this.onMouseMove);
