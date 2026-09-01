@@ -3,6 +3,15 @@ import * as THREE from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import { doodadFadeAlpha } from '../pipeline/m2/fade/laws';
 import { FULL_SCREEN_RECT } from '../pipeline/wmo/portal/rect';
+
+/**
+ * How many consecutive EXTERIOR frames still re-seed the last interior. See the latch in `cull`.
+ *
+ * Long enough to cover a boom that dips through a floor and comes back -- a fraction of a second of
+ * camera swing -- and short enough that walking out of a building stops drawing its inside almost at
+ * once.
+ */
+const INTERIOR_LATCH_FRAMES = 12;
 import { WmoFlags } from './wmo-flags';
 import THREEUtil from '../utils/three-util';
 import { PlaneHelper } from '../utils/plane-helper';
@@ -127,8 +136,58 @@ class VisibilityManager {
 
     if (camera.location.type === 'exterior') {
       this.enablePortalsFromExterior(0, camera, frustum);
+
+      /**
+       * **THE INTERIOR IS RE-SEEDED FROM THE LAST GROUP THE EYE WAS IN, so a camera that leaves a room
+       * does not delete the building.**
+       *
+       * The owner sent a frame with the whole abbey gone -- no walls, no floor, only units on a void --
+       * and, a shot later, the same spot correct, and a third with the camera UNDER the floor and the
+       * room above it. One defect with two faces.
+       *
+       * The camera gets there legitimately: its audience drops `NOCAMCOLLIDE` faces -- "faces the
+       * player stands on but the camera passes through" (`layers.ts`) -- so parts of a WMO floor are, by
+       * the game's own data, transparent to the boom. Once the eye is below one, `camera.location` no
+       * longer resolves to an interior group, the interior flood never seeds, and every group is
+       * invisible for that frame.
+       *
+       * **A visibility pass must never answer "draw nothing".** The reference carries the same principle
+       * as the client's render-record persistence, an ever-visited latch (`mod.rs:205-216`).
+       *
+       * ADDITIVE and BOUNDED: the exterior flood above has already run, so this can only add groups,
+       * never hide one, and it expires after `INTERIOR_LATCH_FRAMES` -- long enough for a boom that dips
+       * through a floor and returns, short enough that walking out stops drawing the inside at once.
+       */
+      if (this.lastInterior !== null && this.exteriorRun < INTERIOR_LATCH_FRAMES) {
+        this.exteriorRun += 1;
+        this.seedInterior(this.lastInterior, FULL_SCREEN_RECT, camera);
+      }
     } else {
+      this.exteriorRun = 0;
+      this.lastInterior = camera.location.wmo;
       this.enablePortalsFromInterior(0, camera, FULL_SCREEN_RECT);
+
+      /**
+       * **THE GROUND IS ALWAYS DRAWN. A body cannot be standing on terrain that is not rendered.**
+       *
+       * The probe named the void exactly: an invisible mesh at distance ZERO from his feet, 33.3 x 33.3
+       * yd -- one ADT chunk, 533.33/16 -- under `ExteriorView / WorldMap`, box centred at z 81.78 with
+       * his feet at 81.96. He was standing ON THE TERRAIN, inside the abbey: the building has no floor
+       * of its own there and the ground shows through. Its own floor was drawn around the NPC the whole
+       * time, which is why this read as a portal defect for four rounds and was never one.
+       *
+       * The terrain is not a WMO group, so the deferred-exterior gate cannot reach it: that fires only
+       * when the flood finds a doorway onto a group flagged EXTERIOR, and from the middle of the hall it
+       * never does. No arm enabled the chunks at all.
+       *
+       * **A GUARD, and named as one.** The reference does not need it -- its interiors have floors where
+       * ours shows ground -- and the honest rule is not "port a gate" but "the ground is not optional".
+       * It cannot hide anything: this loop only ENABLES, the walls draw over the terrain they enclose,
+       * and a chunk outside the camera frustum is still culled by the same test the exterior pass uses.
+       */
+      for (const chunk of this.map.chunks.values()) {
+        this.enableStaticObjectInFrustum(chunk, frustum);
+      }
     }
 
     this.resolveVisibility();
@@ -198,9 +257,18 @@ class VisibilityManager {
   }
 
   enablePortalsFromInterior(depth, camera, rect = FULL_SCREEN_RECT) {
-    const wmo = camera.location.wmo.handler;
-    const group = camera.location.wmo.group;
-    const groupView = camera.location.wmo.views.group;
+    this.seedInterior(camera.location.wmo, rect, camera, depth);
+  }
+
+  /**
+   * Flood from one interior location. Split out so the exterior arm can re-seed from a REMEMBERED
+   * location -- see the latch at the call site for why it must.
+   */
+  seedInterior(location, rect, camera, depth = 0) {
+    const wmo = location.handler;
+    const group = location.group;
+    const groupView = location.views.group;
+    if (!wmo || !group || !groupView) return;
 
     // The group the camera is currently in should always be visible
     groupView.visibleFrame = this.frame;
