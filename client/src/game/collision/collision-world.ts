@@ -211,7 +211,25 @@ export class CollisionWorld {
       // every wall a running step reaches.
       _end.copy(dir).multiplyScalar(maxDist).add(from);
       _box.makeEmpty().expandByPoint(from).expandByPoint(_end);
-      const pad = radius + halfSegment + 0.5;
+      /**
+     * **THE PAD IS THE CAPSULE, AND NOTHING MORE. The `+ 0.5` was undocumented slack and it cost
+     * three times the candidates.**
+     *
+     * A capsule anywhere along the sweep occupies `radius` in X and Y and `radius + halfSegment` in Z,
+     * so padding the swept segment by `radius + halfSegment` on every axis already CONTAINS it -- and
+     * over-contains it horizontally by `halfSegment`. The extra half yard was pure margin.
+     *
+     * It is worth removing because the candidate count is the whole cost of a cast. On the owner's
+     * abbey stairs a cast gathered 249 to 336 WMO triangles, a movement frame issues about ten casts
+     * (the ground classify, up to five in the step-up, up to four in the slide, the snap), and that is
+     * some three thousand capsule-triangle solves a frame -- which is `ctl.move` at 3.8 ms almost
+     * exactly. Box volume falls as the cube of the pad: `(1.01 / 1.51)^3` is 0.30.
+     *
+     * STRICTLY CONSERVATIVE, which is the only reason it is safe: the box still contains every point
+     * the capsule can occupy on this sweep, so no triangle that could be hit is dropped. Nothing about
+     * which triangles BLOCK changes -- only how many are examined.
+     */
+      const pad = radius + halfSegment;
       _box.min.subScalar(pad);
       _box.max.addScalar(pad);
 
