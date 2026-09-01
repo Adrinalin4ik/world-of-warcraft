@@ -45,6 +45,42 @@ class WorldMap extends THREE.Group {
     this.doodadManager = new DoodadManager(this, this.constructor.ZEROPOINT);
     this.wmoManager = new WMOManager(this, this.constructor.ZEROPOINT);
     this.visibilityManager = new VisibilityManager(this);
+
+    /**
+     * **`window.wmoReport()` -- every loaded WMO group, its flags, and whether it was drawn.**
+     *
+     * The owner's floor is present in COLLISION and absent from the render: his own probe found
+     * `NSABBEY_005.WMO#5` with an upward normal directly under the eye, and the area was a VOID until a
+     * terrain guard filled it. So the question is no longer "which subsystem" -- it is "why is one
+     * GROUP not drawn", and that needs the groups named by index rather than counted.
+     *
+     * `visibleFrame` against the manager's current `frame` is the whole answer: equal means the flood
+     * reached it this frame, behind means it did not. `EXTERIOR`/`EXTERIOR_LIT` are printed raw because
+     * the mask over them is what this thread already turned on once.
+     */
+    if (typeof window !== 'undefined') {
+      window.wmoReport = () => {
+        const out = [];
+        for (const wmo of this.wmoManager.entries.values()) {
+          for (const group of wmo.groups.values()) {
+            const view = wmo.views.groups.get(group.index);
+            const flags = group.header.flags;
+            out.push({
+              path: (wmo.path || '').split(/[\/]/).pop(),
+              index: group.index,
+              flags: `0x${flags.toString(16)}`,
+              exterior: (flags & 0x8) !== 0,
+              exteriorLit: (flags & 0x40) !== 0,
+              hasView: !!view,
+              visibleFrame: view ? view.visibleFrame : null,
+              drawn: view ? view.visible : null,
+              meshes: view ? view.children.filter((c) => c.isMesh).length : null,
+            });
+          }
+        }
+        return { frame: this.visibilityManager.frame, groups: out };
+      };
+    }
     this.locationManager = new LocationManager(this);
 
     // Materials that want per-frame light uniforms. Populated at content-load time by the managers
