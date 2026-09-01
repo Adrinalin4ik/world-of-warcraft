@@ -120,12 +120,29 @@ class LocationManager {
 
     // Check if camera is in any of this WMO's groups
     for (const group of wmo.groups.values()) {
-      // Only hunting for interior groups. See world/wmo-flags.ts for which bits decide this and
-      // why the visibility class is not the same law as the lighting class.
+      /**
+       * **AN EXTERIOR GROUP IS A CANDIDATE TOO, and refusing to consider one is why stepping into a
+       * doorway killed the world.**
+       *
+       * Measured at the owner's feet, local `(-27.72, 30.38, 2.16)`: group **5**, flagged EXTERIOR,
+       * resolves a real floor at 2.13 with a ceiling at 16.42. Group 0, interior, resolves NOTHING. And
+       * group 3 is not even a candidate -- its box is `y[14.0, 29.5]` and he is at 30.38, so he has
+       * stepped out of it. By the data he is standing in group 5, one pace beyond portal 10
+       * (`x[-26.6,-23.4] y[25.2,28.5]`), which is the abbey's front door.
+       *
+       * Skipping exterior groups outright made the verdict "you are outdoors" UNREACHABLE. So group 0
+       * won through the no-floor fallback, the flood seeded in the far hall, and the outdoors was never
+       * enabled -- which is his own observation exactly: the world appears by his CHARACTER's position,
+       * never by where the camera looks, and one step forward fixes it. A step carries him past group
+       * 0's box as well, leaving no interior candidate at all, and only then does the type fall through
+       * to exterior.
+       *
+       * INTERIOR STILL WINS WHEREVER IT RESOLVES -- see `selectCandidate`. This adds an exterior
+       * candidate as the answer of last resort, which matters because one of these boxes
+       * (group 5's: `x[-35.9, 16.2] y[-14.6, 37.9] z[0, 89.1]`) spans the entire model. Its BSP only
+       * answers where its own geometry is, and that is what keeps it from claiming the whole building.
+       */
       const isExterior = (group.header.flags & WmoFlags.visibilityMask) !== 0;
-      if (isExterior) {
-        continue;
-      }
       // console.log(isExterior)
       
       // Check if camera could be inside this group
@@ -254,7 +271,8 @@ class LocationManager {
         continue;
       }
 
-      valid.push({ candidate, closestPortal: group.closestPortal(camera.local, 1.0) });
+      const isExterior = (group.header.flags & WmoFlags.visibilityMask) !== 0;
+      valid.push({ candidate, isExterior, closestPortal: group.closestPortal(camera.local, 1.0) });
     }
 
     /**
@@ -307,7 +325,22 @@ class LocationManager {
       return ad - bd;
     });
 
-    return valid[0].candidate;
+    /**
+     * **INTERIOR FIRST. An exterior candidate is the answer of last resort, never a competitor.**
+     *
+     * Standing inside a hall, the shell group's box contains you as surely as the room's does -- group
+     * 5's is `x[-35.9, 16.2] y[-14.6, 37.9] z[0, 89.1]`, the whole model. It may only ever win when no
+     * interior group can place you at all, which is what standing in a doorway looks like from here.
+     */
+    const interior = valid.filter((entry) => !entry.isExterior);
+    const chosen = interior.length > 0 ? interior[0] : valid[0];
+
+    if (chosen.isExterior) {
+      // Resolved INTO the shell: the viewer is outdoors, and the exterior pass owns the frame.
+      return null;
+    }
+
+    return chosen.candidate;
   }
 }
 
