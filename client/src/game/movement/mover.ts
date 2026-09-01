@@ -316,8 +316,19 @@ export function airborneStep(
   center: THREE.Vector3,
   velocity: THREE.Vector3,
   dt: number,
+  /**
+   * Per-iteration record, for the trace. **The airborne slide was the only movement path with no
+   * instrument at all, and the owner's report lives there:** "перепрыгнуть его не могу... стоя
+   * вплотную". A jump flush against a fence is a diagonal sweep against a face already touching,
+   * and what happens next is entirely a question about the slide's iterations -- which of them
+   * clipped, against what normal, and whether the budget ran out before the motion was purely up.
+   * The grounded path has recorded exactly that for rounds; this one reported `slide: []`.
+   */
+  iterationsOut?: SlideIteration[],
 ): THREE.Vector3 {
-  return moveAndSlide(cast, center, velocity, dt, airborneHitResponse).position;
+  return moveAndSlide(
+    cast, center, velocity, dt, airborneHitResponse, iterationsOut,
+  ).position;
 }
 
 /** This frame's movement intent, already resolved from keys and camera heading. */
@@ -610,7 +621,9 @@ export function step(
       ? new THREE.Vector3()
       : new THREE.Vector3(state.horizVel.x, state.horizVel.y, state.velZ);
     const beforeAir = center.z;
-    center = airborneStep(cast, center, velocity, dt);
+    // Recorded only while the trace is on, so an ordinary airborne frame still allocates nothing.
+    slideIterations = moveTrace.enabled ? [] : null;
+    center = airborneStep(cast, center, velocity, dt, slideIterations ?? undefined);
 
     /**
      * **A JUMP THAT WENT NOWHERE IS PROOF OF PENETRATION, and it is the only proof available while
