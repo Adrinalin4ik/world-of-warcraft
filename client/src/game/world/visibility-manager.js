@@ -12,6 +12,36 @@ import { FULL_SCREEN_RECT } from '../pipeline/wmo/portal/rect';
  * once.
  */
 const INTERIOR_LATCH_FRAMES = 12;
+
+/**
+ * **THE PORTAL TRACE -- the reference's own instrument, and the one thing this thread never had.**
+ *
+ * Its flood records every attempt and why it ended: `side_fail`, `rect_none`, `rect_collapse`,
+ * `entered` (`benilla-world/src/wmo_portal/mod.rs:690-716`). Ours recorded nothing, so ten commits
+ * argued about the graph from the OUTSIDE -- counting how many groups were drawn, never which, and
+ * never why one was not.
+ *
+ * The measurement that made this necessary: five groups of the abbey drawn (0, 2, 8, 9, 13) and six
+ * not (1, 3, 4, 5, 6, 7), with the floor the owner stands on named by collision as group **5**. The
+ * flood simply does not enter it, and only a per-portal record can say which of the three gates
+ * turned it away.
+ *
+ * Off by default: `window.portalTrace.enabled = true`, then read `window.portalTrace.rows`. One frame
+ * is enough, so it self-disarms after a full cull.
+ */
+export const portalTrace = {
+  enabled: false,
+  rows: [],
+  record(row) {
+    if (this.enabled) {
+      this.rows.push(row);
+    }
+  },
+};
+
+if (typeof window !== 'undefined') {
+  window.portalTrace = portalTrace;
+}
 import { WmoFlags } from './wmo-flags';
 import THREEUtil from '../utils/three-util';
 import { PlaneHelper } from '../utils/plane-helper';
@@ -210,6 +240,12 @@ class VisibilityManager {
 
     this.resolveVisibility();
     this.updateStats();
+
+    // One frame is the whole reading, so it disarms itself -- an armed trace nobody released is how
+    // a profile comes back inflated, which this round has already done once.
+    if (portalTrace.enabled) {
+      portalTrace.enabled = false;
+    }
   }
 
   enablePortalsFromExterior(depth, camera, frustum = null) {
@@ -290,6 +326,7 @@ class VisibilityManager {
 
     // The group the camera is currently in should always be visible
     groupView.visibleFrame = this.frame;
+    portalTrace.record({ seed: group.index, flags: `0x${group.header.flags.toString(16)}` });
 
     for (const doodad of wmo.doodadsForGroup(group)) {
       this.enableStaticObjectInRect(doodad, rect);
@@ -429,20 +466,36 @@ class VisibilityManager {
       // Never re-cross the portal we came THROUGH -- the reference's only per-branch guard. A second
       // route to the same room is allowed, and is the whole point: it may carry a wider window.
       if (ref.groupIndex === cameFrom) continue;
+      const traceRow = { from: group.index, to: ref.groupIndex, portal: ref.portalIndex };
 
       // Exterior-to-exterior links are already covered by enablePortalsFromExterior.
-      if ((group.header.flags & WmoFlags.visibilityMask) !== 0 && exteriorDestination) continue;
+      if ((group.header.flags & WmoFlags.visibilityMask) !== 0 && exteriorDestination) {
+        portalTrace.record({ ...traceRow, why: 'exterior-to-exterior' });
+        continue;
+      }
 
-      if (portalView.legacyGeometry.vertices.length < 4) continue;
+      if (portalView.legacyGeometry.vertices.length < 4) {
+        portalTrace.record({ ...traceRow, why: 'degenerate' });
+        continue;
+      }
 
       // The side test: portals are traversed outward only.
       const distance = portal.plane.distanceToPoint(cameraLocal) + 0.001;
       const insidePortal = ref.side < 0 ? distance <= 0 : distance >= 0;
-      if (!insidePortal) continue;
+      if (!insidePortal) {
+        portalTrace.record({
+          ...traceRow, why: 'side', d: Number(distance.toFixed(3)), side: ref.side,
+        });
+        continue;
+      }
 
       // Narrow the window through this portal. Null means the branch dies here.
       const nextRect = portalView.projectToRect(this.scratchViewProjection, rect, cameraLocal);
-      if (!nextRect) continue;
+      if (!nextRect) {
+        portalTrace.record({ ...traceRow, why: 'rect-collapse' });
+        continue;
+      }
+      portalTrace.record({ ...traceRow, why: 'entered' });
 
       destinationView.visibleFrame = this.frame;
 
