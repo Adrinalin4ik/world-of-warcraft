@@ -226,7 +226,7 @@ class Controls extends React.Component<IProp> {
      */
     if (new URLSearchParams(window.location.search).get('sinktrap') === '1') {
       // eslint-disable-next-line no-console
-      console.warn(`[sinktrap] ${moveTrace.armSink(0.1)}`);
+      console.log(`[sinktrap] ${moveTrace.armSink(0.1)}`);
     }
 
     (window as never as Record<string, unknown>).stuckReport = () => {
@@ -766,8 +766,10 @@ class Controls extends React.Component<IProp> {
          *
          * Once per teleport or world entry, so it adds nothing to a running session.
          */
+        // `log` rather than `warn`: React DevTools overrides `warn` to append a component
+        // stack, which buried this one line under forty of `requestAnimationFrame`.
         // eslint-disable-next-line no-console
-        console.warn(
+        console.log(
           `[settle] released by ${resident ? 'floor' : (byTerrain ? 'terrain-timeout' : 'cap')}`
           + ` after ${elapsed.toFixed(2)}s -- floorWithin${SETTLE_FLOOR_REACH}yd=${resident},`
           + ` terrainRegistered=${groundStreamed},`

@@ -359,8 +359,9 @@ class MoveTrace {
     this.enabled = false;
     castTrace.enabled = false;
     const at = `${(record.x ?? 0).toFixed(2)}, ${(record.y ?? 0).toFixed(2)}, ${record.zOut.toFixed(2)}`;
+    // `log` rather than `warn` -- DevTools appends a component stack to `warn`.
     // eslint-disable-next-line no-console
-    console.warn(
+    console.log(
       `[moveTrace] TRIPPED and frozen at ${at} -- verdict ${record.stepUpVerdict}, `
       + `drop ${(record.zIn - record.zOut).toFixed(3)}, travel ${(record.travelXY ?? 0).toFixed(4)}, `
       + `depth ${(record.penetration ?? 0).toFixed(4)}, ${this.frames.length} frames held. `
