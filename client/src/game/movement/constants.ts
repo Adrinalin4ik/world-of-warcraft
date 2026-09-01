@@ -288,8 +288,31 @@ export const MAX_SLIDE_ITERATIONS = 4;
 export const MAX_SUBSTEP_TRAVEL = 0.12;
 
 /**
- * **AND THE HARD CEILING ON SUBSTEPS, because they cost proportionally and the frame is over
- * budget.**
+ * **ONE. SUBSTEPPING IS OFF, AND THE MEASUREMENT THAT TURNED IT OFF IS WHY THE CONSTANT STAYS.**
+ *
+ * I shipped this at 3 with the cost stated as "up to three times the movement step on slow frames
+ * only" and asked for the number. The number came back **`ctl.move` 17.3 ms against 3.8** -- not
+ * three times but four and a half, and 13.5 ms added to a frame whose whole budget is 16.7. It is the
+ * largest single item in his profile, larger than `world.animate`.
+ *
+ * Worse than the multiplier: it is SELF-AMPLIFYING in exactly the way I wrote the ceiling to prevent
+ * and the ceiling did not prevent. A step that costs 13 ms more makes the frame longer, a longer frame
+ * travels further, and further travel buys the full three substeps every frame instead of on the rare
+ * slow one. The cap bounds the count; it cannot bound the feedback, because the feedback runs through
+ * the frame time and not through the count.
+ *
+ * The GOAL is still right and the owner asked for it: the body should meet the world at the same
+ * resolution whatever the clock does. But it cannot be bought at 4.5x, and the prerequisite is now
+ * clear -- ONE step has to be cheap first. At 3.8 ms it is already a fifth of the budget, and the
+ * reason for that is the next thing to measure, not to guess.
+ *
+ * Left as a constant rather than deleted so the mechanism, the measurement and the prerequisite stay
+ * where the next person will look. Set it above 1 only with `ctl.move` in front of you.
+ *
+ * ---
+ *
+ * The original reasoning, kept because it is still the argument FOR doing this once a step is cheap:
+ * they cost proportionally and the frame was already over budget.
  *
  * Measured on the owner's panel: `ctl.move` 3.8 ms on the abbey stairs, in a frame whose p50 is 19.3
  * against a 16.7 budget. Substepping an over-budget frame without a ceiling is a feedback loop --
@@ -300,7 +323,7 @@ export const MAX_SUBSTEP_TRAVEL = 0.12;
  * Past the ceiling the substeps simply get longer, and the sweep still cannot tunnel -- the
  * degradation is in resolution, not in soundness.
  */
-export const MAX_SUBSTEPS = 3;
+export const MAX_SUBSTEPS = 1;
 
 /**
  * Half the capsule's AXIS SEGMENT -- the distance from the centre to either cap centre. This, not
