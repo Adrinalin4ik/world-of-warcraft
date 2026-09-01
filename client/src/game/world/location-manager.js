@@ -71,7 +71,13 @@ class LocationManager {
       this.addCandidates({ position: point }, wmo, candidates);
     }
 
-    return this.selectCandidate(candidates);
+    const location = this.selectCandidate(candidates);
+    if (location) {
+      // The point this location was resolved AT. The portal flood tests from it, so seeding at one
+      // point and testing from another would ask every side test its question in the wrong room.
+      location.at = point.clone ? point.clone() : point;
+    }
+    return location;
   }
 
   addCandidates(camera, wmo, candidates) {

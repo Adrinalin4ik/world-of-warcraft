@@ -190,7 +190,9 @@ class VisibilityManager {
     } else {
       this.exteriorRun = 0;
       this.lastInterior = camera.location.wmo;
-      this.enablePortalsFromInterior(0, camera, FULL_SCREEN_RECT);
+      // The point the location resolved AT -- the eye when it resolved there, the body otherwise.
+      // Mixing the two makes every side test ask its question in the wrong room.
+      this.enablePortalsFromInterior(0, camera, FULL_SCREEN_RECT, camera.location.at || null);
 
       /**
        * **THE "GROUND IS ALWAYS DRAWN" GUARD IS GONE, with the cause it was masking.**
@@ -279,15 +281,15 @@ class VisibilityManager {
     }
   }
 
-  enablePortalsFromInterior(depth, camera, rect = FULL_SCREEN_RECT) {
-    this.seedInterior(camera.location.wmo, rect, camera, depth);
+  enablePortalsFromInterior(depth, camera, rect = FULL_SCREEN_RECT, viewpoint = null) {
+    this.seedInterior(camera.location.wmo, rect, camera, depth, viewpoint);
   }
 
   /**
    * Flood from one interior location. Split out so the exterior arm can re-seed from a REMEMBERED
    * location -- see the latch at the call site for why it must.
    */
-  seedInterior(location, rect, camera, depth = 0) {
+  seedInterior(location, rect, camera, depth = 0, viewpoint = null) {
     const wmo = location.handler;
     const group = location.group;
     const groupView = location.views.group;
@@ -301,7 +303,7 @@ class VisibilityManager {
       this.enableStaticObjectInRect(doodad, rect);
     }
 
-    this.traversePortalsAndEnable(depth, camera, wmo, group, rect);
+    this.traversePortalsAndEnable(depth, camera, wmo, group, rect, -1, { left: 4096 }, viewpoint);
   }
 
   enableStaticObjectInFrustum(object, frustum) {
@@ -404,7 +406,10 @@ class VisibilityManager {
    * That is a second, independent cause of the same report and it needs a point-in-polygon test we do
    * not have yet.
    */
-  traversePortalsAndEnable(depth, camera, wmo, group, rect = FULL_SCREEN_RECT, cameFrom = -1, budget = { left: 4096 }) {
+  traversePortalsAndEnable(
+    depth, camera, wmo, group, rect = FULL_SCREEN_RECT, cameFrom = -1, budget = { left: 4096 },
+    viewpoint = null,
+  ) {
     if (depth > 10) return;
     if (budget.left <= 0) return;
     budget.left -= 1;
@@ -412,7 +417,22 @@ class VisibilityManager {
     const view = wmo.views.groups.get(group.index);
     if (!view) return;
 
-    SCRATCH_CAMERA_LOCAL.copy(camera.position);
+    /**
+     * **THE FLOOD TESTS FROM THE POINT IT WAS SEEDED AT, and mixing the two is what I did last.**
+     *
+     * Every portal side test asks "which half-space is the viewer in". Seeding from the BODY while
+     * testing from the EYE asks that question at a point in a DIFFERENT ROOM, and the answers come back
+     * exactly as wrong as that sounds: measured, two nearby doorways rejected with `d` of **-1.742** and
+     * **-2.799** -- one and three yards, i.e. the plane of a door the body is beside and the eye is past.
+     *
+     * The reference carries one `eye_local` through the whole flood and never mixes points
+     * (`benilla-world/src/wmo_portal/mod.rs:659-723`). So the seed point rides through here: the eye
+     * where the eye resolved, the body where it did not.
+     *
+     * The PROJECTION still uses the real camera, and must: a screen rect is about what the camera can
+     * see. Only the side test is about where the viewer stands.
+     */
+    SCRATCH_CAMERA_LOCAL.copy(viewpoint || camera.position);
     const cameraLocal = view.worldToLocal(SCRATCH_CAMERA_LOCAL);
 
     for (const doodad of wmo.doodadsForGroup(group)) {
@@ -490,7 +510,9 @@ class VisibilityManager {
         this.enablePortalsFromExterior(depth + 1, camera, this.frustumFromRect(nextRect));
       }
 
-      this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, nextRect, group.index, budget);
+      this.traversePortalsAndEnable(
+        depth + 1, camera, wmo, destination, nextRect, group.index, budget, viewpoint,
+      );
     }
   }
 
