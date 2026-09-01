@@ -185,6 +185,24 @@ class VisibilityManager {
        * It cannot hide anything: this loop only ENABLES, the walls draw over the terrain they enclose,
        * and a chunk outside the camera frustum is still culled by the same test the exterior pass uses.
        */
+      /**
+       * **AND THE PARENT NODE, without which every flag below it is inert.**
+       *
+       * `cull` hides `map.exterior` -- the `ExteriorView` node that OWNS the terrain chunks -- at the
+       * top of every frame, and only the exterior arm turns it back on. So the chunk loop below set
+       * `visibleFrame` on objects whose parent was invisible, and nothing changed on screen. My first
+       * attempt at this guard did exactly that and I reported it as a fix.
+       *
+       * This is the failure `CLAUDE.md` names outright -- "A DRAW CALL IS NOT A PIXEL": every piece of
+       * STATE was right and only the effect was missing, because I set the state and did not follow it
+       * to the last hop. The probe had even printed the answer, `Mesh / ExteriorView / WorldMap`, and I
+       * read the leaf and not the chain.
+       *
+       * Making the node visible does NOT drag the outdoor doodads back in: they carry their own
+       * per-object flags, which only the exterior arm sets, so they stay hidden while the ground draws.
+       */
+      this.map.exterior.visible = true;
+
       for (const chunk of this.map.chunks.values()) {
         this.enableStaticObjectInFrustum(chunk, frustum);
       }
