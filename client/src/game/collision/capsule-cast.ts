@@ -148,6 +148,22 @@ export function depenetrateCapsule(
    * so a genuine 0.17 yd sinking still resolves while tangency does not.
    */
   deadband = CAPSULE_CAST_EPS,
+  /**
+   * **WHERE THE BODY CAME FROM -- the side it must be returned to.**
+   *
+   * Without it the push is the SHORTEST way out, and for a THIN body the shortest way out is often
+   * straight through: the owner, at a fence, "его в итоге проталкивает насквозь забора". A fence
+   * rail is a few inches thick, so once the capsule is past its midplane the near side is the far
+   * side, and the correction politely completes the trip.
+   *
+   * The side test is GEOMETRIC -- which half-space the hint is in -- so it does not depend on face
+   * winding, which a WMO does not reliably carry. That is the same reason the separation vector is
+   * used at all, and the hint only overrides it when the two disagree about which side to end on.
+   *
+   * The natural hint is the centre at the START of the frame: wherever the body has got to, that is
+   * where it legitimately was.
+   */
+  cameFrom?: THREE.Vector3,
 ): THREE.Vector3 | null {
   if (triangles.length === 0) {
     return null;
@@ -186,6 +202,29 @@ export function depenetrateCapsule(
       break;
     }
     _push.copy(_separation).divideScalar(length).multiplyScalar(-worstGap + skin);
+
+    /**
+     * THE SIDE OVERRIDE. Only when a hint is given AND the shortest push would cross the face.
+     *
+     * `support` is how far the capsule reaches along the face normal -- the radius plus the axis
+     * projected onto it -- so clearing the plane on a chosen side is one subtraction, exactly as
+     * `planeTimeOfImpact` computes its gap. Pushing along the normal rather than along the
+     * separation is right here for the same reason it is wrong in general: the separation knows
+     * about edges and vertices, but only the normal knows about SIDES.
+     */
+    if (cameFrom !== undefined) {
+      const n = worstTriangle.normal;
+      _toTri.subVectors(cameFrom, worstTriangle.a);
+      const hintSide = _toTri.dot(n) >= 0 ? 1 : -1;
+      // Would the shortest push leave the body on the other side from where it came?
+      if (_push.dot(n) * hintSide < 0) {
+        const support = radius + halfSegment * Math.abs(n.z);
+        _toTri.subVectors(at, worstTriangle.a);
+        const clearance = support - hintSide * _toTri.dot(n) + skin;
+        _push.copy(n).multiplyScalar(hintSide * clearance);
+      }
+    }
+
     at.add(_push);
     moved = true;
   }

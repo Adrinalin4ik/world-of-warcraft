@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 
 import {
-  castCapsuleAgainstTriangles, closestDistanceCapsuleTriangle, depenetrateCapsule,
+  CAPSULE_CAST_EPS, castCapsuleAgainstTriangles, closestDistanceCapsuleTriangle, depenetrateCapsule,
 } from '../capsule-cast';
 import { Triangle } from '../types';
 
@@ -364,5 +364,42 @@ describe('a wall already touching', () => {
 
     expect(hit).not.toBeNull();
     expect(hit!.distance).toBeCloseTo(0, 3);
+  });
+});
+
+/**
+ * **THE SHORTEST WAY OUT OF A THIN BODY IS OFTEN STRAIGHT THROUGH IT.**
+ *
+ * The owner at a fence: "его в итоге проталкивает насквозь забора." A rail is a few inches thick, so
+ * once the capsule is past its midplane the nearest exit is the FAR side, and a push-out that only
+ * knows about distance completes the trip for him.
+ *
+ * A capsule whose axis sits just past a vertical face: the separation vector points away from the
+ * face on the wrong side, so the unhinted push drives it further through. Given where the body came
+ * from, it must come back instead -- and land clear, a skin outside the face it was inside.
+ *
+ * Both directions are asserted because the hint must not be free to override a push that was already
+ * correct; the pair is what pins that.
+ */
+describe('the push-out and the side the body came from', () => {
+  const PAST = -0.05;
+
+  it('drives further through when it does not know where the body came from', () => {
+    const at = new THREE.Vector3(PAST, 0, 0);
+    const out = depenetrateCapsule(at, RADIUS, HALF_SEGMENT, wall(0), 0, 4);
+
+    expect(out).not.toBeNull();
+    expect(out!.x).toBeLessThan(PAST);
+  });
+
+  it('returns the body to the side it came from', () => {
+    const at = new THREE.Vector3(PAST, 0, 0);
+    const out = depenetrateCapsule(
+      at, RADIUS, HALF_SEGMENT, wall(0), 0, 4, undefined, CAPSULE_CAST_EPS,
+      new THREE.Vector3(1, 0, 0),
+    );
+
+    expect(out).not.toBeNull();
+    expect(out!.x).toBeGreaterThanOrEqual(RADIUS);
   });
 });

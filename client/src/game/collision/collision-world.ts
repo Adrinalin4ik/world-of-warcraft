@@ -317,6 +317,8 @@ export class CollisionWorld {
        * which time the body is free. Only a value copied into the trace FRAME survives the freeze.
        */
       infoOut?: { source: string | null; normalZ: number; gap: number },
+      /** The centre at the start of the frame -- see `depenetrateCapsule`'s `cameFrom`. */
+      cameFrom?: THREE.Vector3,
     ): THREE.Vector3 | null => {
       // Before the gather, so a disabled push-out costs one boolean and the caller sees exactly what
       // it saw before this feature existed.
@@ -356,7 +358,7 @@ export class CollisionWorld {
        */
       const deadband = count ? Math.max(skin, CAPSULE_CAST_EPS) : CAPSULE_CAST_EPS;
       const freed = depenetrateCapsule(
-        center, radius, halfSegment, candidates, skin, 4, _penInfo, deadband,
+        center, radius, halfSegment, candidates, skin, 4, _penInfo, deadband, cameFrom,
       );
       const described = _penInfo.source === null ? null : describeSource(_penInfo.source);
       this.pushOut.lastSource = described;

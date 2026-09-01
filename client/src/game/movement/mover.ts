@@ -395,6 +395,7 @@ export function step(
     skin?: number,
     count?: boolean,
     infoOut?: { source: string | null; normalZ: number; gap: number },
+    cameFrom?: THREE.Vector3,
   ) => THREE.Vector3 | null,
 ): Outcome {
   const inputHoriz = input.moving && input.speed > 0
@@ -601,7 +602,7 @@ export function step(
      * disagrees with that arithmetic.
      */
     if (depenetrate !== undefined) {
-      const freed = depenetrate(center, SKIN_WIDTH);
+      const freed = depenetrate(center, SKIN_WIDTH, true, undefined, preMove);
       if (freed !== null) {
         pushOutReason = 'freed';
         center = freed;
@@ -649,7 +650,7 @@ export function step(
     if (depenetrate !== undefined
       && velocity.z > 0
       && center.z - beforeAir < velocity.z * dt * 0.5) {
-      const freed = depenetrate(center, SKIN_WIDTH);
+      const freed = depenetrate(center, SKIN_WIDTH, true, undefined, preMove);
       if (freed !== null) {
         center = freed;
         if (moveTrace.enabled) {
