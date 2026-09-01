@@ -27,6 +27,12 @@ class VisibilityManager {
   constructor(map) {
     this.map = map;
 
+    /** The last interior location the EYE resolved to -- the latch in `cull` re-seeds from it. */
+    this.lastInterior = null;
+
+    /** Consecutive frames the eye has resolved exterior, for that latch. */
+    this.exteriorRun = 0;
+
     this.stats = {
       map: {
         visibleChunks: 0,
