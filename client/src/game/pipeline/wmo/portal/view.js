@@ -5,6 +5,7 @@ import {
   FULL_SCREEN_RECT,
   intersectRect,
   ON_PLANE_EPS,
+  clipPolygonToSidePlanes,
   rectFromClipPolygon,
 } from './rect';
 
@@ -243,7 +244,14 @@ class WMOPortalView extends THREE.Mesh {
      * anyway, and adding a clipping pass while removing another is how one fix becomes two changes
      * with one measurement. If a portal is ever seen opening too WIDE, that is where to look.
      */
-    const projected = rectFromClipPolygon(SCRATCH_CLIP.slice(0, count));
+    // The four SIDE planes, and not the near plane -- see `clipPolygonToSidePlanes` for the
+    // reference's pairing and for what removing the near clip alone cost.
+    const sided = clipPolygonToSidePlanes(SCRATCH_CLIP.slice(0, count));
+    if (sided.length < 3) {
+      return null;
+    }
+
+    const projected = rectFromClipPolygon(sided);
     if (!projected) {
       return null;
     }

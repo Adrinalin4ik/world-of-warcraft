@@ -105,6 +105,69 @@ export function clipPolygonToNearPlane(
   return out.length >= 3 ? out : [];
 }
 
+/**
+ * **SUTHERLAND-HODGMAN AGAINST THE FOUR SIDE PLANES -- and NOT against the near plane.**
+ *
+ * The reference's pairing, and both halves matter: "clip against the four **side** planes of the
+ * view pyramid (there is NO near-plane clip)"
+ * (`samples/benilla/crates/benilla-world/src/wmo_portal/mod.rs:789-798`).
+ *
+ * I removed the near clip on its own and shipped it, and the owner's next frame showed the cost: a
+ * STRAIGHT HORIZONTAL screen-space edge with the world missing below it, the player's own legs drawn
+ * past it. Geometry does not cut like that; a rect does. A vertex left behind the eye carries a large
+ * negative `w`, its mirrored NDC lands far from the polygon, and because the rect is a min/max over
+ * the vertices, that stray point can RAISE `minY` and slice a band off the bottom of the view. I even
+ * wrote in that commit that the failure to watch for was a portal opening too WIDE. It was the
+ * opposite.
+ *
+ * The side planes in clip space are `w + x >= 0`, `w - x >= 0`, `w + y >= 0`, `w - y >= 0`. Clipping
+ * against them brings every surviving vertex inside the view pyramid laterally, so no mirrored point
+ * can escape into the min/max -- while vertices behind the eye still survive, which is what the `w`
+ * clamp in `ndcFromClip` is for and what keeps a straddled doorway wide open.
+ */
+export function clipPolygonToSidePlanes(
+  vertices: ReadonlyArray<ArrayLike<number>>,
+): number[][] {
+  // `[axis, sign]`: the distance is `w + sign * v[axis]`.
+  const planes: Array<[number, number]> = [[0, 1], [0, -1], [1, 1], [1, -1]];
+
+  let poly: number[][] = vertices.map((v) => [v[0], v[1], v[2], v[3]]);
+
+  for (let p = 0; p < planes.length; ++p) {
+    const [axis, sign] = planes[p];
+    const count = poly.length;
+    if (count < 3) {
+      return [];
+    }
+
+    const out: number[][] = [];
+    for (let i = 0; i < count; ++i) {
+      const current = poly[i];
+      const next = poly[(i + 1) % count];
+      const dCurrent = current[3] + sign * current[axis];
+      const dNext = next[3] + sign * next[axis];
+      const currentInside = dCurrent >= 0;
+      const nextInside = dNext >= 0;
+
+      if (currentInside) {
+        out.push(current);
+      }
+      if (currentInside !== nextInside) {
+        const t = dCurrent / (dCurrent - dNext);
+        out.push([
+          current[0] + (next[0] - current[0]) * t,
+          current[1] + (next[1] - current[1]) * t,
+          current[2] + (next[2] - current[2]) * t,
+          current[3] + (next[3] - current[3]) * t,
+        ]);
+      }
+    }
+    poly = out;
+  }
+
+  return poly.length >= 3 ? poly : [];
+}
+
 /** Perspective divide with the client's `w` clamp. `clip` is `[x, y, z, w]`. */
 export function ndcFromClip(clip: ArrayLike<number>): [number, number] {
   let w = clip[3];
