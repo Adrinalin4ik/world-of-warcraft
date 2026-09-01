@@ -225,7 +225,25 @@ class Controls extends React.Component<IProp> {
       // Half a yard: further than a frame of walking and shorter than the gaps a body threads, so a
       // blocked bearing here is a wall rather than something noticed early.
       const PROBE = 0.5;
-      const blocked: { deg: number; d: number; nz: number; src: string }[] = [];
+      /**
+       * **THE FULL NORMAL, not just its Z -- because Z alone cannot tell the two diagnoses apart.**
+       *
+       * The first reading came back 36 of 36 blocked, every bearing at distance 0 with `nz: 0.01`.
+       * That looks like one face blocking every direction, which would be a defect in the sweep --
+       * but every VERTICAL face has the same `nz` by construction, so the reading cannot distinguish
+       * one face from twelve. The normal's direction can: identical vectors across opposed bearings
+       * is the sweep refusing a direction it should allow, while vectors that point outward from the
+       * body in every bearing is a capsule genuinely enclosed by a hull.
+       *
+       * The sweep itself is not the suspect it looked like -- its already-touching branch does gate
+       * on the closing speed (`capsule-cast.ts`, `closing > 1e-9`), so a receding direction is
+       * refused. That was read rather than assumed.
+       */
+      const blocked: {
+        deg: number; d: number; n: number[]; src: string; same: boolean;
+      }[] = [];
+      let firstSource: object | null = null;
+      const sources = new Set<object>();
       let free = 0;
       for (let i = 0; i < 36; i += 1) {
         const angle = (i * 10 * Math.PI) / 180;
@@ -234,11 +252,16 @@ class Controls extends React.Component<IProp> {
         if (hit === null) {
           free += 1;
         } else {
+          if (firstSource === null) {
+            firstSource = hit.source;
+          }
+          sources.add(hit.source);
           blocked.push({
             deg: i * 10,
             d: Number(hit.distance.toFixed(3)),
-            nz: Number(hit.normal.z.toFixed(2)),
+            n: [hit.normal.x, hit.normal.y, hit.normal.z].map((v) => Number(v.toFixed(3))),
             src: name(hit.source),
+            same: hit.source === firstSource,
           });
         }
       }
@@ -252,7 +275,10 @@ class Controls extends React.Component<IProp> {
         feet: [move.pos.x, move.pos.y, move.pos.z].map((v) => Number(v.toFixed(3))),
         freeBearings: free,
         blockedBearings: blocked.length,
-        blocked: blocked.slice(0, 6),
+        // Every SECOND bearing, so twenty degrees of the circle fit in one readable object and
+        // opposed directions (0 and 180) are both present -- which is the pair that matters.
+        blocked: blocked.filter((_, i) => i % 3 === 0),
+        distinctSources: sources.size,
         up: up === null ? null : { d: Number(up.distance.toFixed(3)), src: name(up.source) },
         down: down === null ? null : {
           d: Number(down.distance.toFixed(3)),
