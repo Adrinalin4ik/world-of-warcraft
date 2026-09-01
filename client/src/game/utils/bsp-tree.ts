@@ -826,7 +826,25 @@ class BSPTree {
     var det = (p2[1] - p3[1]) * (p1[0] - p3[0]) + (p3[0] - p2[0]) * (p1[1] - p3[1]);
 
     if (det > -0.001 && det < 0.001) {
-        return Math.min(p1[0], p2[0], p3[0]);
+      /**
+       * **INDEX 2, NOT 0. This returned the minimum X where a Z was required.**
+       *
+       * A near-zero determinant means the triangle projects to a LINE on the XY plane -- a wall, a
+       * riser, the reveal of a doorway. There is no interpolated height for a point over it, so the
+       * fallback is a coordinate of the triangle itself, and it has to be a height.
+       *
+       * Returning `p[0]` handed the caller an X. Everything downstream then treated it as a Z: the
+       * caller builds `(x, y, z)` from it and asks for barycentric coordinates against the real
+       * triangle, which land far off its plane and come back negative, so the face is discarded. A
+       * vertical face therefore never contributes -- and near a doorway, vertical faces are most of
+       * what there is.
+       *
+       * Found by reproducing this whole query offline on the abbey's own group files: with the
+       * barycentric filter omitted, group 3 reports a floor at 1.881 at three separate points in the
+       * doorway while group 0 reports none at all -- the correct answer. The client, which applies the
+       * filter, seeded group 0. That gap between the two runs is this line.
+       */
+      return Math.min(p1[2], p2[2], p3[2]);
     }
 
     var l1 = ((p2[1] - p3[1]) * (x - p3[0]) + (p3[0] - p2[0]) * (y - p3[1])) / det;
