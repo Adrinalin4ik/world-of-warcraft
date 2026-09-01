@@ -272,6 +272,37 @@ export const SETTLE_STREAM_TIMEOUT = 30.0;
 export const MAX_SLIDE_ITERATIONS = 4;
 
 /**
+ * **THE LONGEST HORIZONTAL STEP ONE SUBSTEP MAY RESOLVE (yd).**
+ *
+ * The owner's requirement, in his words: "нам нужно чтобы мы не проваливались под текстуры даже с
+ * низким фпс". A swept capsule cannot tunnel at any `dt`, so the failure at low frame rates is not
+ * leakage -- it is that everything else in a step is scaled by the travel. The slide gets four
+ * iterations however far it is going, the step-up looks ahead by one frame's travel, and the
+ * descent cap is `travel * 1.849`. At 27 fps his travel measured 0.35 yd, three times what a 60 fps
+ * frame resolves, so the same geometry is met with a third of the resolution.
+ *
+ * A substep bounded in DISTANCE makes all of that frame-rate independent: the body meets the world
+ * in steps of the same size whatever the clock does. 0.12 yd is one 60 fps walking frame at 7 yd/s,
+ * which is the resolution this mover has actually been tuned and measured at.
+ */
+export const MAX_SUBSTEP_TRAVEL = 0.12;
+
+/**
+ * **AND THE HARD CEILING ON SUBSTEPS, because they cost proportionally and the frame is over
+ * budget.**
+ *
+ * Measured on the owner's panel: `ctl.move` 3.8 ms on the abbey stairs, in a frame whose p50 is 19.3
+ * against a 16.7 budget. Substepping an over-budget frame without a ceiling is a feedback loop --
+ * a slow frame travels further, which buys more substeps, which makes the frame slower. Three is
+ * enough to cover 0.36 yd of travel, i.e. down to about 19 fps at walking speed, and bounds the
+ * added cost at twice one step rather than at whatever the frame rate collapses to.
+ *
+ * Past the ceiling the substeps simply get longer, and the sweep still cannot tunnel -- the
+ * degradation is in resolution, not in soundness.
+ */
+export const MAX_SUBSTEPS = 3;
+
+/**
  * Half the capsule's AXIS SEGMENT -- the distance from the centre to either cap centre. This, not
  * half the total height, is what the swept cast wants.
  */

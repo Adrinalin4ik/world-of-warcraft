@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
 import { CastFn } from '../collision/collision-world';
+import { MAX_SUBSTEP_TRAVEL, MAX_SUBSTEPS } from './constants';
 import { MoveInput, Outcome, step } from './mover';
 import { PlayerMoveState } from './player-state';
 import {
@@ -70,7 +71,53 @@ export function movementFrame(
 
   if (!state.swimming) {
     state.swimStrokeSpeed = 0;
-    return { outcome: step(state, deps.cast, input, dt, now, deps.depenetrate), swim: null };
+
+    /**
+     * **SUBSTEPPING: the body meets the world in steps of the same SIZE whatever the frame rate is.**
+     *
+     * This is the owner's actual requirement -- "не проваливаться под текстуры даже с низким фпс" --
+     * and the reason a swept mover still needs it. The sweep itself cannot tunnel at any `dt`; what
+     * breaks at low frame rates is that every OTHER quantity in a step is scaled by the travel. The
+     * slide gets four iterations however far it goes, the step-up looks one frame ahead, the descent
+     * cap is `travel * 1.849`. At 27 fps his travel measured 0.35 yd against 0.12 at 60, so the same
+     * stair was met with a third of the resolution -- and his uneven descent was exactly that.
+     *
+     * The count comes from the DISTANCE the frame intends, not from its duration, so a stationary
+     * body never pays for a long frame and a sprint on a good one still takes a single step.
+     *
+     * JUMP FIRES ONCE. `wantJump` is an edge, and handing it to three substeps would apply the
+     * take-off impulse three times. The first substep keeps it; the rest are handed a copy with it
+     * cleared, which is also how the arc then belongs to gravity rather than to the key.
+     *
+     * The LAST outcome is the frame's: each substep resolves against the world in turn, so the final
+     * one holds the position, the grounded verdict and the support the caller needs. `held` and
+     * `jumped` are OR-ed, because a settle hold or a take-off anywhere in the frame is true of the
+     * frame.
+     */
+    const speed = input.moving ? input.speed : 0;
+    const intended = speed * dt;
+    const substeps = Math.min(
+      MAX_SUBSTEPS,
+      Math.max(1, Math.ceil(intended / MAX_SUBSTEP_TRAVEL)),
+    );
+
+    if (substeps === 1) {
+      return { outcome: step(state, deps.cast, input, dt, now, deps.depenetrate), swim: null };
+    }
+
+    const slice = dt / substeps;
+    // Allocated only when the frame actually splits, which is a low-frame-rate frame by definition.
+    const later: FrameInput = { ...input, wantJump: false, jumpPressed: false };
+    let outcome = step(state, deps.cast, input, slice, now, deps.depenetrate);
+    for (let i = 1; i < substeps; ++i) {
+      const next = step(state, deps.cast, later, slice, now, deps.depenetrate);
+      outcome = {
+        ...next,
+        held: outcome.held || next.held,
+        jumped: outcome.jumped || next.jumped,
+      };
+    }
+    return { outcome, swim: null };
   }
 
   if (input.jumpPressed) {
