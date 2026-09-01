@@ -475,6 +475,34 @@ class VisibilityManager {
         portalTrace.record({
           ...traceRow, why: 'side', d: Number(distance.toFixed(3)), side: ref.side,
         });
+
+        /**
+         * **STANDING IN THE DOORWAY: on the far side of a portal onto the OUTSIDE means looking out of
+         * it.**
+         *
+         * The owner's last frame -- interior drawn correctly, and the doorway a flat void where the
+         * valley should be. The trace named it in one line: `from 3 to 5, portal 10, why side,
+         * d 2.224, side -1`.
+         *
+         * Portal 10 is the abbey's ONLY interior route to daylight -- decoded from `nsabbey.wmo`, groups
+         * 4 and 6 carry no portals at all and portal 13 is a hole in the roof at z 57 -- so refusing it
+         * refuses the outdoors entirely. And the refusal is arithmetically correct: he is 2.2 yd on the
+         * EXTERIOR side of its plane, which the side convention reads as "already through". Checked
+         * against the file rather than assumed: a portal-10 vertex gives `n.p + dist = +0.15`, so the
+         * plane is `n.p + dist = 0` and our `THREE.Plane` is built right, while group 3's box centre
+         * gives -7.0 -- from inside the room the test passes.
+         *
+         * What is wrong is the conclusion, not the sign. A viewer past the plane of the front door is
+         * standing IN the door, and the group box reaches past it, so the location stays interior. The
+         * one thing he certainly can see from there is the outside.
+         *
+         * NARROW ON PURPOSE: only for a destination flagged EXTERIOR, and it enables the outdoors under
+         * the rect this branch already carries, so a doorway off screen still shows nothing. An interior
+         * neighbour refused by the side test stays refused -- that case is the reference's and is right.
+         */
+        if (exteriorDestination && camera.location.type !== 'exterior') {
+          this.enablePortalsFromExterior(depth + 1, camera, this.frustumFromRect(rect));
+        }
         continue;
       }
 
