@@ -72,8 +72,6 @@ class VisibilityManager {
     /** Consecutive frames the eye has resolved exterior, for that latch. */
     this.exteriorRun = 0;
 
-    /** This frame's camera frustum, for the deferred-exterior arm. Set at the top of `cull`. */
-    this.cameraFrustum = null;
 
     this.stats = {
       map: {
@@ -160,9 +158,6 @@ class VisibilityManager {
     // var dist = vec4.dot(nearPlane, cameraVec4);
     // nearPlane.constant -= dist;
 
-    // Held for the deferred-exterior arm inside the interior flood: the outside is bounded by the
-    // CAMERA's frustum, never by the doorway it was reached through. See the block there.
-    this.cameraFrustum = frustum;
 
     if (camera.location.type === 'exterior') {
       this.enablePortalsFromExterior(0, camera, frustum);
@@ -198,44 +193,18 @@ class VisibilityManager {
       this.enablePortalsFromInterior(0, camera, FULL_SCREEN_RECT);
 
       /**
-       * **THE GROUND IS ALWAYS DRAWN. A body cannot be standing on terrain that is not rendered.**
+       * **THE "GROUND IS ALWAYS DRAWN" GUARD IS GONE, with the cause it was masking.**
        *
-       * The probe named the void exactly: an invisible mesh at distance ZERO from his feet, 33.3 x 33.3
-       * yd -- one ADT chunk, 533.33/16 -- under `ExteriorView / WorldMap`, box centred at z 81.78 with
-       * his feet at 81.96. He was standing ON THE TERRAIN, inside the abbey: the building has no floor
-       * of its own there and the ground shows through. Its own floor was drawn around the NPC the whole
-       * time, which is why this read as a portal defect for four rounds and was never one.
+       * It forced `map.exterior.visible` and every chunk in the camera frustum, because the owner was
+       * standing on terrain that nothing rendered. He was -- but because the flood had seeded in the
+       * wrong room, which it did because the BSP never received its normals and could not find a floor
+       * anywhere (`pipeline/wmo/group/index.js#createBSPTree`). With the seed right, the ground he can
+       * see arrives through the doorway like everything else outside.
        *
-       * The terrain is not a WMO group, so the deferred-exterior gate cannot reach it: that fires only
-       * when the flood finds a doorway onto a group flagged EXTERIOR, and from the middle of the hall it
-       * never does. No arm enabled the chunks at all.
-       *
-       * **A GUARD, and named as one.** The reference does not need it -- its interiors have floors where
-       * ours shows ground -- and the honest rule is not "port a gate" but "the ground is not optional".
-       * It cannot hide anything: this loop only ENABLES, the walls draw over the terrain they enclose,
-       * and a chunk outside the camera frustum is still culled by the same test the exterior pass uses.
+       * Removed rather than left as insurance. A guard that hides a broken PVS is exactly what let this
+       * defect survive four rounds of looking at it -- the void became dirt and the report stayed "то же
+       * самое", which is the one outcome that teaches nothing.
        */
-      /**
-       * **AND THE PARENT NODE, without which every flag below it is inert.**
-       *
-       * `cull` hides `map.exterior` -- the `ExteriorView` node that OWNS the terrain chunks -- at the
-       * top of every frame, and only the exterior arm turns it back on. So the chunk loop below set
-       * `visibleFrame` on objects whose parent was invisible, and nothing changed on screen. My first
-       * attempt at this guard did exactly that and I reported it as a fix.
-       *
-       * This is the failure `CLAUDE.md` names outright -- "A DRAW CALL IS NOT A PIXEL": every piece of
-       * STATE was right and only the effect was missing, because I set the state and did not follow it
-       * to the last hop. The probe had even printed the answer, `Mesh / ExteriorView / WorldMap`, and I
-       * read the leaf and not the chain.
-       *
-       * Making the node visible does NOT drag the outdoor doodads back in: they carry their own
-       * per-object flags, which only the exterior arm sets, so they stay hidden while the ground draws.
-       */
-      this.map.exterior.visible = true;
-
-      for (const chunk of this.map.chunks.values()) {
-        this.enableStaticObjectInFrustum(chunk, frustum);
-      }
     }
 
     this.resolveVisibility();
@@ -504,28 +473,21 @@ class VisibilityManager {
 
       if (exteriorDestination && camera.location.type !== 'exterior') {
         /**
-         * **THE DEFERRED EXTERIOR IS NOT NARROWED BY THE DOORWAY IT WAS REACHED THROUGH.**
+         * **NARROWED BY THE DOORWAY AGAIN. I widened this to the whole camera frustum and it was a
+         * symptom fix for a cause that turned out to be somewhere else entirely.**
          *
-         * This passed `frustumFromRect(nextRect)` -- the doorway's own narrow window -- and culled the
-         * terrain with it. So the ADT chunk the player is STANDING ON was culled, because it is behind
-         * him relative to the door he can see out of.
+         * The reasoning was that the ADT chunk under the player's feet was being culled by the doorway's
+         * window. It was -- but only because the portal flood had seeded in the wrong room, which it did
+         * because the BSP never received its vertex normals and therefore could not find a floor
+         * anywhere (`pipeline/wmo/group/index.js#createBSPTree`). With the seed correct the ground comes
+         * through the doorway on its own.
          *
-         * That is the void in his screenshots, and the probe named it: an invisible mesh at distance
-         * ZERO from his feet, 33.3 x 33.3 yd -- exactly one ADT chunk, 533.33/16 -- under
-         * `ExteriorView / WorldMap`. Not the WMO floor at all, which is why the abbey's own floor was
-         * still drawn around the NPC while the ground in front of him was not. Four portal-graph fixes
-         * did not move it because the graph was never wrong about it.
-         *
-         * The reference enables the exterior WHOLESALE once any doorway onto it is reached -- its
-         * deferred-window gate is a boolean, and the loop that spends it carries no rect at all:
-         * `if deferred_exterior { for g in nav { if g.flags & EXTERIOR != 0 { visible[g] = true } } }`
-         * (`benilla-world/src/wmo_portal/mod.rs:734-740`). The doorway decides WHETHER the outside is
-         * drawn, never HOW MUCH of it.
-         *
-         * So the camera's own frustum is what bounds it, which is the ordinary exterior pass -- the
-         * same one a player standing outside gets.
+         * And the widened version is visibly wrong now that the rest works: the owner's frame looking
+         * toward the street draws the whole outdoors, through the walls that should occlude it. A
+         * doorway decides WHETHER the outside is drawn and the window decides HOW MUCH -- for terrain
+         * and doodads both, which is what this arm enables.
          */
-        this.enablePortalsFromExterior(depth + 1, camera, this.cameraFrustum);
+        this.enablePortalsFromExterior(depth + 1, camera, this.frustumFromRect(nextRect));
       }
 
       this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, nextRect, group.index, budget);
