@@ -261,36 +261,20 @@ export function seatCamera(
   const position = head.clone().addScaledVector(boom, frac);
 
   /**
-   * **THE EYE MAY NOT SIT UNDER A FLOOR THE BODY CAN STAND ON.**
+   * **THE POST-SWEEP FLOOR CLAMP IS GONE. It could not have worked and the owner's next frame proved
+   * it in one look.**
    *
-   * The owner, with the picture that finally settled it: "я стою на полу, но вижу что под ним" --
-   * the stone slab's edge across the middle of the screen, terrain below it, the room above, and
-   * himself standing in the doorway. Everything was being drawn correctly. The EYE was underneath.
+   * It probed upward from the seated eye and, on finding an underside, lifted the eye by
+   * `distance + CAM_COLLISION_RADIUS`. A slab has THICKNESS, so that lands the eye inside the slab and
+   * not above its walking surface -- the picture was unchanged, which is exactly what he reported.
    *
-   * It gets there legitimately, and that is why the boom sweep cannot stop it: the camera audience
-   * drops `NOCAMCOLLIDE` faces -- "faces the player stands on but the camera passes through"
-   * (`collision/layers.ts`) -- and parts of a WMO floor carry that bit in the game's own data. The
-   * sweep is doing exactly what it is told; the faces are simply not in its set.
+   * Fixing a state the sweep should never have reached is the wrong layer. The camera's own gather now
+   * keeps any face the BODY could stand on, `NOCAMCOLLIDE` or not, so the boom stops at a floor
+   * instead of passing through it and needing rescue (`collision/wmo-provider.ts`).
    *
-   * So the clamp asks the WALK audience instead, which by definition contains the floor the body is
-   * standing on. One upward probe from the seated eye: a face within `FLOOR_CLAMP_REACH` whose
-   * normal points DOWN is an underside, so the eye is beneath a floor, and it is lifted to sit
-   * `CAM_COLLISION_RADIUS` above that face -- the same margin the boom keeps from everything else.
-   *
-   * WHY UPWARD AND NOT A Z FLOOR AT THE FEET: a bridge, a balcony, a stair overhang. Clamping the
-   * eye to the player's height would forbid every legitimate low camera; asking what is directly
-   * overhead forbids only the one arrangement that is wrong.
-   *
-   * Optional by design. Without a `floorCast` the behaviour is exactly what it was, so the movement
-   * and camera unit tests -- which have no world -- are untouched.
+   * `floorCast` stays on the options for now: it costs nothing unused, and the clamp is the fallback if
+   * a floor is ever found that the gather still lets through.
    */
-  if (floorCast !== undefined) {
-    const above = floorCast(position, _up, FLOOR_CLAMP_REACH);
-    if (above !== null && above.normal.z < 0) {
-      position.z += above.distance + CAM_COLLISION_RADIUS;
-    }
-  }
-
   rig.selfFadeAlpha = selfFadeAlpha(position.distanceTo(pivot));
 
   // In first person -- zoom 0, or the boom pulled all the way in -- the camera sits ON the pivot,

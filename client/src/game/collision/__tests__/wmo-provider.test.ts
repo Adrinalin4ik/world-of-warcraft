@@ -48,6 +48,47 @@ function collider(flags: number[], position = new THREE.Vector3(0, 0, 0)) {
   return { view, bspTree: fakeBsp(flags.length), triangleFlags: Uint8Array.from(flags) };
 }
 
+/**
+ * The same shape as `fakeBsp` but VERTICAL: a triangle in the `x = t/10` plane, so its normal is
+ * horizontal. `fakeBsp`'s faces are all flat floors, which is why the NOCAMCOLLIDE test below could not
+ * tell a floor from a wall -- and that is exactly the distinction the camera rule now turns on.
+ */
+function fakeBspVertical(triangleCount: number) {
+  const vertices: number[] = [];
+  const face: number[] = [];
+  const plane: number[] = [];
+
+  for (let t = 0; t < triangleCount; ++t) {
+    const base = t * 3;
+    const x = t / 10;
+    vertices.push(x, 0, 0, x, 1, 0, x, 0, 1);
+    face.push(base, base + 1, base + 2);
+    plane.push(t);
+  }
+
+  return {
+    nodes: [{
+      flags: 0x4, negChild: -1, posChild: -1, nFaces: triangleCount, faceStart: 0, planeDist: 0,
+    }],
+    indices: { plane, face },
+    vertices,
+    queriedWith: null as THREE.Box3 | null,
+    query(box: THREE.Box3) {
+      this.queriedWith = box.clone();
+      return [0];
+    },
+  };
+}
+
+/** A collider whose faces are vertical walls rather than floors. */
+function wallCollider(flags: number[]) {
+  const view = new THREE.Object3D();
+  view.updateMatrix();
+  view.updateMatrixWorld(true);
+
+  return { view, bspTree: fakeBspVertical(flags.length), triangleFlags: Uint8Array.from(flags) };
+}
+
 const bigBox = () => new THREE.Box3(
   new THREE.Vector3(-10, -10, -10),
   new THREE.Vector3(10, 10, 10),
@@ -80,9 +121,35 @@ describe('WmoProvider', () => {
     expect(camera).toHaveLength(3);
   });
 
-  it('drops NOCAMCOLLIDE faces from the camera set only', () => {
+  /**
+   * **THIS TEST ASSERTED THE RULE WE NOW DEVIATE FROM, and its fixture could not have caught the
+   * deviation either way: `fakeBsp` builds only FLAT triangles, so every face in it is a floor.**
+   *
+   * The rule is now: a NOCAMCOLLIDE face still leaves the camera set UNLESS the body could stand on
+   * it. See `wmo-provider.ts` for why -- the abbey floor carries the bit, and a camera under a floor
+   * is a broken picture in this renderer specifically, because we draw the terrain beneath a building
+   * and do not draw the underside of its floor.
+   *
+   * So the pair, and it has to be a pair or it asserts nothing: a NOCAMCOLLIDE FLOOR is kept for the
+   * camera, a NOCAMCOLLIDE WALL is still dropped. Either assertion alone passes under both the old
+   * rule and the new one.
+   */
+  it('keeps a NOCAMCOLLIDE FLOOR for the camera -- the body can stand on it', () => {
     const provider = new WmoProvider();
     provider.add(collider([MOPY_NOCAMCOLLIDE, 0, 0]));
+
+    const walk: Triangle[] = [];
+    const camera: Triangle[] = [];
+    provider.gather(bigBox(), CollisionLayer.Walk, walk);
+    provider.gather(bigBox(), CollisionLayer.Camera, camera);
+
+    expect(walk).toHaveLength(3);
+    expect(camera).toHaveLength(3);
+  });
+
+  it('still drops a NOCAMCOLLIDE WALL from the camera set', () => {
+    const provider = new WmoProvider();
+    provider.add(wallCollider([MOPY_NOCAMCOLLIDE, 0, 0]));
 
     const walk: Triangle[] = [];
     const camera: Triangle[] = [];

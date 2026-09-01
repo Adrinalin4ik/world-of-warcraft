@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
 import { wmoFaceIsCollidable } from './layers';
+import { GROUND_COS } from '../movement/constants';
 import { CollisionLayer, Triangle } from './types';
 
 /** One placed WMO group's collision data. */
@@ -178,7 +179,12 @@ export class WmoProvider {
 
         // No flags array means the group predates the MOPY plumbing or came from a stale cache.
         // Collide with everything rather than turning the building into a walk-through.
-        if (triangleFlags && !wmoFaceIsCollidable(triangleFlags[triangle], layer)) {
+        //
+        // The CAMERA's reject is deferred until its normal is known -- see the block below the
+        // cross product, and `wmoFaceIsCollidable` for the rule it is an exception to.
+        const rejected = triangleFlags !== undefined && triangleFlags !== null
+          && !wmoFaceIsCollidable(triangleFlags[triangle], layer);
+        if (rejected && layer !== CollisionLayer.Camera) {
           continue;
         }
 
@@ -201,6 +207,37 @@ export class WmoProvider {
           continue;
         }
         normal.divideScalar(length);
+
+        /**
+         * **A FACE THE BODY CAN STAND ON STOPS THE CAMERA, `NOCAMCOLLIDE` OR NOT.**
+         *
+         * A DELIBERATE DIVERGENCE, and the reason is ours rather than the reference's. That bit is
+         * authored for thin walkways and railings the camera SHOULD see through, and the reference
+         * honours it exactly (`benilla-formats/src/models/collision.rs:89-99`). But the abbey floor
+         * carries it, and a camera under a floor is a broken picture in THIS renderer for two reasons
+         * that are both ours: we do not draw the underside of a WMO floor, and we do draw the terrain
+         * beneath the building. So the eye ends up looking at dirt with the room floating above it.
+         *
+         * The owner showed that frame four times, and each earlier reading of it sent me somewhere
+         * else: the portal graph, the near-plane clip, the deferred exterior, the chunk flags. Every
+         * one of those was a real defect and none was this. His own words are the whole diagnosis --
+         * "я стою на полу, но вижу что под ним".
+         *
+         * WALKABLE ONLY, which is what keeps the divergence narrow: `GROUND_COS` is the walk
+         * election's own cosine, so this keeps FLOORS and nothing else. A railing, a plank, an
+         * overhang, a wall -- anything the body cannot stand on -- still honours `NOCAMCOLLIDE` and
+         * the camera still threads it, which is what the bit is for.
+         *
+         * My previous attempt clamped the eye AFTER the sweep, lifting it above the underside it
+         * found. It could not work and the owner's next frame said so: a slab has thickness, so
+         * `underside + radius` is still inside the slab. Not passing through in the first place is
+         * the only version of this that has a defined answer.
+         */
+        // `abs`, because a WMO face carries no reliable outward winding -- the same reason every
+        // other rule in this subsystem orients by geometry. A floor is a floor from either side.
+        if (rejected && Math.abs(normal.z) < GROUND_COS) {
+          continue;
+        }
 
         // Unlike terrain, a WMO normal is NOT forced up: a building genuinely has ceilings and
         // overhangs, and the steep-wall rule reads `normal.z < 0` to leave them alone.
