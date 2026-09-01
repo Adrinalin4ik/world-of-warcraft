@@ -9,12 +9,30 @@ export const CAPSULE_CAST_EPS = 1e-4;
 /**
  * The least closing cosine that lets an ALREADY-TOUCHING face block a sweep.
  *
- * See the branch in `planeTimeOfImpact` for the measurement that set it: a face 4 degrees off
- * parallel was stopping a third of the compass at distance zero. Six degrees' worth of margin, and
- * no more, because the same branch is what makes a body resting ON a floor still able to cast away
- * from it -- the case that gate was written for in the first place.
+ * **BACK AT `1e-9`, AND THE 0.1 I PUT HERE WAS A DEFECT OF MY OWN REASONING. Kept as a named
+ * constant so the mistake is documented rather than reintroduced.**
+ *
+ * The evidence for 0.1 was `stuckReport` finding 36 of 36 bearings "blocked" at a fence, three of
+ * them by a face whose normal pointed DOWN -- four degrees off parallel to a horizontal walk. I read
+ * that as a cage and raised the bar so a graze could not block.
+ *
+ * **A CONTACT AT DISTANCE ZERO DOES NOT STOP A BODY.** The slide clips the velocity against the
+ * contact plane and continues with the remaining time -- that is what sliding along a wall IS. A
+ * grazing face removes only its own tiny component: 0.069 of the motion, and the other 0.997
+ * survives. So the raw sweep saying "blocked" was never evidence that the mover could not move, and
+ * my whole inference rested on treating a probe result as an outcome.
+ *
+ * And raising it caused a worse defect than the one it chased, by arithmetic that took two minutes
+ * to check afterwards and would have taken two minutes before. Walking ACROSS a 26-degree ramp at
+ * 80 degrees to its gradient closes at `0.44 * cos80 = 0.076` -- under 0.1, so the ramp was SKIPPED
+ * entirely. The body then advanced horizontally into the slope by 1.4 cm a frame with nothing to
+ * stop it and an election snap that can only ever descend. Fifty frames is 0.7 yd, which is how a
+ * body ends up UNDER the abbey stairs -- exactly the report that was open when I made the change.
+ *
+ * The fence lockup is therefore still undiagnosed, and it belongs in the slide iterations rather
+ * than here. Those are now recorded for the airborne path too.
  */
-export const CONTACT_MIN_CLOSING = 0.1;
+export const CONTACT_MIN_CLOSING = 1e-9;
 
 /**
  * How far off a face the verification pass still counts as a contact.
@@ -231,11 +249,13 @@ function planeTimeOfImpact(
      * branch returns `t = 0` unconditionally and has no such limit, so it was the one place a graze
      * could stop a body.
      *
-     * The threshold has to exceed the 0.069 that was measured, and it is deliberately not much
-     * larger: at `CONTACT_MIN_CLOSING` a face within about six degrees of parallel to the motion is
-     * a GRAZE and cannot block a body already resting against it, which is what sliding along a
-     * wall is. Anything steeper still blocks at distance zero exactly as before -- a wall met
-     * head-on closes at 1.0, and even a 15-degree scrape closes at 0.26.
+     * **AND THE THRESHOLD IS BACK AT `1e-9`, because raising it was my own defect.** A contact at
+     * distance zero does NOT stop a body: the slide clips the velocity against the plane and
+     * continues, which is what sliding along a wall is, so the grazing face removed 0.069 of the
+     * motion and left 0.997 of it. "Blocked" in a raw sweep was never evidence the mover was stuck.
+     * Meanwhile the raised bar let a body walk ACROSS a 26-degree ramp with the ramp skipped
+     * altogether -- 0.076 of closing, under the bar -- sinking 1.4 cm a frame into a surface the snap
+     * cannot lift it off. See `CONTACT_MIN_CLOSING` for the full arithmetic.
      */
     return closing > CONTACT_MIN_CLOSING ? { t: 0, side } : null;
   }

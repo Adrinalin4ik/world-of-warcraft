@@ -339,46 +339,27 @@ describe('an already-touching face along the motion', () => {
 });
 
 /**
- * **THE CAGE OF THREE FACES, and the pair is the test.**
+ * **A WALL MET HEAD-ON STILL BLOCKS AT DISTANCE ZERO -- and the grazing case that stood beside this
+ * one was VACUOUS, which is worth more than the test was.**
  *
- * The owner, stuck at a fence, measured with `window.stuckReport()`: 36 of 36 bearings blocked, every
- * one at distance 0, by three faces -- one of them a normal pointing DOWN, `(-0.016, 0.069, -0.998)`,
- * which was stopping the bearings from 210 to 270 degrees. For a horizontal cast that face is four
- * degrees off parallel: its closing component is at most 0.069, and the already-touching branch
- * accepted anything over `1e-9`. Nine millimetres of overlap, every direction refused, and no mover
- * flag set.
+ * I wrote a pair: a grazing face already touching must not block, a wall must. The first passed, so I
+ * shipped a threshold change on the strength of it. It passes at EVERY value of the gate, including
+ * the one it was written to justify -- the fixture never reaches the branch at all, because the plane
+ * solution is rejected by the triangle verification before the gate is consulted. Proved by flipping
+ * the assertion: `not.toBeNull()` fails, so the sweep returns null for reasons that have nothing to do
+ * with closing speed.
  *
- * Both halves are asserted together because either alone is a defect. A grazing face already in
- * contact must NOT block -- that is what sliding along a surface is -- and a face genuinely met must
- * still block at distance zero, which is the case the gate was written for.
+ * That is a self-consistent fixture standing in for a measurement, which this project names as its
+ * most repeated defect class. Deleted rather than left as false coverage, and the gate is back at
+ * `1e-9` -- see `CONTACT_MIN_CLOSING` for why raising it was wrong on its own terms.
+ *
+ * The wall case survives because it asserts something real and independent of that argument.
  */
-describe('an already-touching face and the closing gate', () => {
-  /** The owner's own face: a near-horizontal underside, tilted four degrees, touching the capsule. */
-  const grazing = (): Triangle[] => {
-    const s = 20;
-    const n: [number, number, number] = [-0.016, 0.069, -0.998];
-    // Placed so the capsule centred at the origin is already inside `CAPSULE_CAST_EPS` of its plane.
-    const z = HALF_SEGMENT + RADIUS;
-    return [
-      tri([-s, -s, z], [s, -s, z], [s, s, z], n),
-      tri([-s, -s, z], [s, s, z], [-s, s, z], n),
-    ];
-  };
-
-  it('does not block a horizontal sweep along it', () => {
-    const hit = castCapsuleAgainstTriangles(
-      new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, -1, 0), 1,
-      RADIUS, HALF_SEGMENT, grazing(),
-    );
-
-    expect(hit).toBeNull();
-  });
-
-  it('still blocks a wall it is driving into', () => {
-    const at = RADIUS;
+describe('a wall already touching', () => {
+  it('still blocks at distance zero when driven into', () => {
     const hit = castCapsuleAgainstTriangles(
       new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 0, 0), 1,
-      RADIUS, HALF_SEGMENT, wall(at),
+      RADIUS, HALF_SEGMENT, wall(RADIUS),
     );
 
     expect(hit).not.toBeNull();
