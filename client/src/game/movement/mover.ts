@@ -429,6 +429,9 @@ export function step(
 
   
   let pushOutReason: MoveTraceFrame['pushOutReason'];
+  let penetration: number | undefined;
+  let penetrationSource: string | null | undefined;
+  let penetrationNormalZ: number | undefined;
   const halfH = CAPSULE_HEIGHT * 0.5;
   let center = state.pos.clone();
   center.z += halfH;
@@ -458,15 +461,28 @@ export function step(
    * recovery both existed only because the body could begin a frame embedded. It cannot now.
    */
   if (depenetrate !== undefined) {
-    const freed = depenetrate(center, SKIN_WIDTH, true, undefined, state.lastCentre);
+    const freed = depenetrate(center, SKIN_WIDTH, true, _penReport, state.lastCentre);
     if (freed !== null) {
       center = freed;
       state.pos.set(center.x, center.y, center.z - halfH);
-      if (moveTrace.enabled) {
-        pushOutReason = 'freed';
-      }
-    } else if (moveTrace.enabled) {
-      pushOutReason = 'ran';
+    }
+    if (moveTrace.enabled) {
+      pushOutReason = freed === null ? 'ran' : 'freed';
+      /**
+       * **THE DEPTH COMES FROM THE RECOVERY THAT ALREADY RAN, not from a second scan.**
+       *
+       * It used to be measured by its own call at the end of the frame, which doubled the gather and
+       * the per-candidate solve on every traced frame -- an instrument costing as much as the thing it
+       * measures, in the one section (`ctl.move`) the owner and I are trying to read. His last profile
+       * came back with every section inflated, which is what a left-on instrument looks like from
+       * outside and is why it could not be compared with the one before it.
+       *
+       * The frame-start push-out already scans for the deepest overlap and now reports it, so tracing
+       * costs the report and nothing else.
+       */
+      penetration = -Math.min(0, _penReport.gap);
+      penetrationSource = _penReport.source;
+      penetrationNormalZ = _penReport.normalZ;
     }
   }
   // Recorded for the NEXT frame, before this one moves: the last centre reached legitimately.
@@ -670,24 +686,6 @@ export function step(
     // Landing clears the arc, exactly as the client's StopFalling does.
     state.airborneSince = null;
     state.fallFar = false;
-  }
-
-  /**
-   * The penetration MEASUREMENT -- see `MoveTraceFrame#penetration`. Trace-only, and deliberately
-   * outside the stuck gate: the state it exists to expose is one the gate cannot reach.
-   *
-   * `skin` 0, so this reports the overlap itself rather than the overlap plus a clearance.
-   */
-  let penetration: number | undefined;
-  let penetrationSource: string | null | undefined;
-  let penetrationNormalZ: number | undefined;
-  if (moveTrace.enabled && depenetrate !== undefined) {
-    const centre = state.pos.clone();
-    centre.z += halfH;
-    const freed = depenetrate(centre, 0, false, _penReport);
-    penetration = freed === null ? 0 : freed.distanceTo(centre);
-    penetrationSource = _penReport.source;
-    penetrationNormalZ = _penReport.normalZ;
   }
 
   moveTrace.frame({
