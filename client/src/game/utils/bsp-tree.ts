@@ -118,14 +118,27 @@ class BSPTree {
     face: []
   };
   vertices = [];
-  normals = [];
-  constructor(nodes: BSPTreeNode[], planeIndices: number[], faceIndices: number[], vertices: number[]) {
+  normals: ArrayLike<number> = [];
+  /**
+   * `normals` is per-VERTEX and parallel to `vertices`, indexed by the same face indices -- WMO
+   * `MONR` beside `MOVT`. Without it `getTopAndBottomTriangleFromBsp` cannot tell a floor from a
+   * ceiling, and it defaults every face to ceiling: see the block in
+   * `pipeline/wmo/group/index.js#createBSPTree` for what that cost.
+   */
+  constructor(
+    nodes: BSPTreeNode[],
+    planeIndices: number[],
+    faceIndices: number[],
+    vertices: number[],
+    normals: ArrayLike<number> = [],
+  ) {
     this.nodes = nodes;
     this.indices = {
       plane: planeIndices,
       face: faceIndices
     };
     this.vertices = vertices;
+    this.normals = normals;
   }
 
   query(subject, startingNodeIndex) {
