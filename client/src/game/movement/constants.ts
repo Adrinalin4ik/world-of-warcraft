@@ -268,6 +268,26 @@ export const SETTLE_TIMEOUT = 6.0;
  */
 export const SETTLE_STREAM_TIMEOUT = 30.0;
 
+/**
+ * **HOW FAR BELOW THE FEET A FLOOR MUST BE FOUND to end the post-load settle hold (yd).**
+ *
+ * The hold released on a downward probe of **200 yd**, which does not mean "there is a floor under
+ * me" -- it means "there is something, anywhere, in the world below me". Spawn INSIDE a building
+ * and the terrain beneath it streams in before the building's own floor does: the probe finds
+ * ground eighty yards down, the hold lifts, gravity starts, and the body is under the WMO floor by
+ * the time that floor arrives. Which is the owner's "проваливаюсь под текстуры после загрузки",
+ * exactly.
+ *
+ * Five yards is local enough to mean the floor the body will actually stand on, and loose enough
+ * for the gap between the server's Z and our own collision surface, which is a fraction of a yard
+ * in practice.
+ *
+ * Nothing hangs on being conservative here, and that asymmetry is why the number can be tight: a
+ * probe that finds nothing does not freeze the body for ever -- it falls through to the two
+ * timeouts below it, which release on the terrain being registered, and then unconditionally.
+ */
+export const SETTLE_FLOOR_REACH = 5.0;
+
 /** Max contact iterations one collide-and-slide resolves before giving up on the remainder. */
 export const MAX_SLIDE_ITERATIONS = 4;
 

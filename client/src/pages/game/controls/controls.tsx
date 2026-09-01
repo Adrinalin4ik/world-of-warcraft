@@ -14,6 +14,7 @@ import {
   RUN_BACK_RATIO, RUN_SPEED,
   SETTLE_STREAM_TIMEOUT, SETTLE_TIMEOUT, STATIONARY_CHASE_RATE, TURN_RATE, TURN_RATE_MOVING,
   capsuleHalfSegment,
+  SETTLE_FLOOR_REACH,
 } from '../../../game/movement/constants';
 import { movementFrame } from '../../../game/movement/frame';
 import { easeDisplayYaw, strafeBodyOffset } from '../../../game/movement/net-motion';
@@ -706,7 +707,12 @@ class Controls extends React.Component<IProp> {
     if (player.move.settling) {
       const feetCentre = player.move.pos.clone();
       feetCentre.z += CAPSULE_HEIGHT * 0.5;
-      const resident = deps.cast(feetCentre, new THREE.Vector3(0, 0, -1), 200) !== null;
+      // NEAR the feet, not anywhere below -- see `SETTLE_FLOOR_REACH`. At 200 yd this asked whether
+      // the world had loaded at all, and answered yes from the terrain under a building whose own
+      // floor had not arrived, which is what dropped the body through it.
+      const resident = deps.cast(
+        feetCentre, new THREE.Vector3(0, 0, -1), SETTLE_FLOOR_REACH,
+      ) !== null;
       const groundStreamed = collisionWorld.terrain
         .heightAt(player.move.pos.x, player.move.pos.y) !== null;
       // How long we have been holding, reconstructed from the deadline. `PlayerMoveState` carries a
