@@ -392,6 +392,30 @@ class SkyManager {
    * active, same as `MapLight` itself.
    */
   private updateClouds(camera: THREE.Camera, dt: number): void {
+    /**
+     * **A FIELD NOBODY CAN SEE IS NOT SIMULATED. Measured: `sky.clouds` 2.4 ms with the owner stood
+     * INSIDE the abbey and `visibleChunks` at zero.**
+     *
+     * The dome lives in `celestialGroup`, and `updateSkyboxSuppression` is the only thing that touches
+     * that group's `.visible` -- so with a WMO skybox active the dome is not drawn at all, while the
+     * coverage field went on ticking and uploading its texture every frame. That was the whole of
+     * `w.sky` indoors (2.4 of 2.4), and the five spans added a commit earlier are what made it
+     * attributable rather than a mystery inside one number.
+     *
+     * `cloudPrimed` is cleared on the way out, so the first visible frame takes the REBUILD path
+     * rather than a scroll: after an arbitrary gap the field has no continuity to preserve, and the
+     * init-vs-scroll distinction already exists for exactly that reason (a zone change). Nothing can
+     * jump, because nothing was on screen to jump from.
+     *
+     * ONE FRAME OF LAG, stated: `updateSkyboxSuppression` runs at the END of `update`, so the flag
+     * read here is the previous frame's. That is right rather than merely tolerable -- the frame the
+     * dome becomes visible is the frame the rebuild runs, and a rebuild is what that frame needs.
+     */
+    if (!this.celestialGroup.visible) {
+      this.cloudPrimed = false;
+      return;
+    }
+
     // Camera-follow runs every frame independent of whether the field itself changed.
     this.cloudDome.update(camera);
 
