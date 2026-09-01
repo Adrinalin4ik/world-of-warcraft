@@ -35,6 +35,7 @@ import {
 import { SPELL_AUTO_ATTACK, SpellHandler } from '../../network/game/object/spells';
 import { fireEvent } from './framexml/lua/events';
 import { getCast, setCast } from './framexml/lua/api/casting';
+import castWithRefusal from './cast-refusal';
 import { gameTime } from './framexml/lua/compat';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { renderSpellDescription } from '../pipeline/dbc/spell-description';
@@ -320,7 +321,9 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       }
       return;
     }
-    spells.castSpell(spellId, target);
+    // Through the shared door, so the in-flight refusal and its red line behave the same here as on
+    // the spellbook, the shapeshift bar and the duel accept. See `cast-refusal.ts`.
+    castWithRefusal(vm, spells, spellId, target);
   };
 
   setActionUseHandler(vm, use);

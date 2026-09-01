@@ -52,6 +52,7 @@ import { renderSpellDescription } from '../pipeline/dbc/spell-description';
 import { casterStatsFor } from './caster-stats';
 import { skillData } from '../pipeline/dbc/skill-data';
 import { LuaVM } from './framexml/lua/vm';
+import castWithRefusal from './cast-refusal';
 
 /**
  * `GENERAL_SPELLS` -- the first tab's name, and it is the client's own global string, not a literal
@@ -486,7 +487,7 @@ export function attachSpellbookBridge(vm: LuaVM, world: World, art: GlueArt): ()
       }
       return;
     }
-    spells.castSpell(entry.spellId, target);
+    castWithRefusal(vm, spells, entry.spellId, target);
   });
 
   /**

@@ -49,6 +49,7 @@ import { GUID_BYTES, guidBytes } from '../../guid-hex';
 import { castAnimationFor, precastAnimationFor } from '../../../game/classes/spell-anim';
 import { spellData } from '../../../game/pipeline/dbc/spell-data';
 import { spellWire } from '../../../game/classes/spell-wire';
+import PendingCast from '../../../game/classes/pending-cast';
 // `GetTime()`'s clock. A cooldown's `start` is what the client's own Lua compares against, so the wire
 // side has to stamp it on the SAME clock -- see `lua/compat.ts#gameTime`.
 import { gameTime } from '../../../game/ui/framexml/lua/compat';
@@ -160,6 +161,17 @@ export class SpellHandler extends EventEmitter {
    * GO, at a failure, and at an interrupt, so it holds at most one entry per actively-casting unit.
    */
   private castPose = new Map<string, { spellId: number; animId: number }>();
+
+  /**
+   * OUR OWN OUTSTANDING CAST -- the optimistic in-flight guard that makes a second press of a spell
+   * mid-cast a no-op instead of a cast-bar kill. See `game/classes/pending-cast.ts` for the whole
+   * mechanism, the reference citations and the bug it closes.
+   *
+   * Lives here because this is the one class that both SENDS the cast and receives every packet that
+   * resolves it, which is what keeps the arm and the clear from drifting apart -- the reference's
+   * "ONE cast-send path" rule (`ui_action/cast_send.rs:216-218`).
+   */
+  private pendingCast = new PendingCast();
 
   /**
    * The last `SMSG_UPDATE_COMBO_POINTS`: how many points, and WHICH unit they are banked against.
@@ -433,6 +445,11 @@ export class SpellHandler extends EventEmitter {
       );
       return;
     }
+    // The cast is now longer than START said, so the guard's deadline has to follow it or the guard
+    // would lapse mid-cast and let a press through.
+    if (caster === this.game.world.player?.guid) {
+      this.pendingCast.delay(delayMs, Date.now());
+    }
     this.emit('spellDelayed', { caster, delayMs });
   }
 
@@ -476,6 +493,10 @@ export class SpellHandler extends EventEmitter {
     // the latch back, and a broken cast never gets there. Gated on this spell having armed a pose so a
     // failure cannot drop a latch belonging to something else.
     this.releaseCastPose(caster, spellId);
+    // Our own cast broke: open the guard. A peer's failure is not our guard's business.
+    if (caster === this.game.world.player?.guid) {
+      this.pendingCast.clearIf(spellId);
+    }
     this.emit('spellFailure', { caster, spellId });
   }
 
@@ -822,6 +843,10 @@ export class SpellHandler extends EventEmitter {
       if (this.applyGlobalCooldown(decoded.spellId)) {
         this.announceCooldowns();
       }
+      // The in-flight guard was armed at SEND with a generous provisional window; START is the first
+      // moment the real cast length is known, so tighten to it. `castTimeMs` is the server's own value
+      // with haste and auras already folded in. Only for our own cast: a peer's START is not our guard.
+      this.pendingCast.refine(decoded.castTimeMs, Date.now());
     }
 
     // THE HELD CAST POSE. This is the half that was missing, and it is why the owner saw "no animation
@@ -911,6 +936,9 @@ export class SpellHandler extends EventEmitter {
       } else if (this.applyGlobalCooldown(decoded.spellId)) {
         this.announceCooldowns();
       }
+      // The cast RESOLVED -- open the in-flight guard so the next press goes out. Spell-id-keyed, which
+      // is what stops a triggered proc's GO (a different spell, arriving mid-cast) opening it early.
+      this.pendingCast.clearIf(decoded.spellId);
     }
 
     this.emit('spellGo', decoded);
@@ -1047,6 +1075,11 @@ export class SpellHandler extends EventEmitter {
     if (self !== undefined) {
       this.releaseCastPose(self, spellId);
     }
+    // Open the guard. `clearIf` is spell-id-keyed, so a refusal naming a spell that is NOT the one in
+    // flight leaves the guard alone -- which is the correct answer now that the send path refuses a
+    // duplicate locally: any `SMSG_CAST_FAILED` that still names a different spell came from a route
+    // that does not go through the guard (an item use, a server-initiated refusal), and must not open it.
+    this.pendingCast.clearIf(spellId);
     this.emit('castFailed', { spellId, result });
   }
 
@@ -1116,9 +1149,28 @@ export class SpellHandler extends EventEmitter {
     });
   }
 
-  castSpell(spellId: number, target: string | null): void {
+  /**
+   * THE IN-FLIGHT REFUSAL, and the reason `castSpell` now has a return value.
+   *
+   * `'sent'` the packet went out. `'busy-same'` the same spell is already casting -- the real client
+   * bails SILENTLY here (`6e4d43`), so the caller must show nothing. `'busy-other'` a different spell is
+   * casting -- the real client shows its own red line, reason 0x61 "Another action is in progress"
+   * (`6e4d97`), and still sends nothing.
+   *
+   * Both arms are `samples/benilla/crates/benilla-app/src/ui_action/cast_send.rs:283-297`. Neither sends
+   * a packet, which is the entire fix: see `game/classes/pending-cast.ts`.
+   */
+  castSpell(spellId: number, target: string | null): 'sent' | 'busy-same' | 'busy-other' {
     const TARGET_FLAG_SELF = 0x0000;
     const TARGET_FLAG_UNIT = 0x0002;
+
+    // THE GUARD, ahead of everything. A duplicate press must not reach the wire: the server would refuse
+    // it with `SPELL_FAILED_SPELL_IN_PROGRESS` and that refusal used to close the RUNNING cast's bar.
+    const now = Date.now();
+    const inFlight = this.pendingCast.current(now);
+    if (inFlight !== null) {
+      return inFlight === spellId ? 'busy-same' : 'busy-other';
+    }
 
     // The body is sized exactly, because `GameHandler#send` derives the packet's declared LENGTH from
     // the buffer size -- an over-allocated buffer sends a wrong length field, which `handler.js` records
@@ -1136,6 +1188,9 @@ export class SpellHandler extends EventEmitter {
       app.writePackedGUID(target as string);
     }
     this.game.send(app);
+    // OPTIMISTIC: armed on the send, not on `SMSG_SPELL_START`, because the mashing lands during that
+    // round trip. Tightened to the server's real cast time when START names it.
+    this.pendingCast.arm(spellId, now);
 
     spellWire.record({
       at: Date.now(),
@@ -1150,6 +1205,7 @@ export class SpellHandler extends EventEmitter {
       bodySize: body,
       consumed: body,
     });
+    return 'sent';
   }
 
   /**
@@ -1172,6 +1228,11 @@ export class SpellHandler extends EventEmitter {
     app.writeUnsignedInt(spellId);
     this.game.send(app);
 
+    // The cast is over as far as we are concerned, so the guard must open NOW rather than waiting for
+    // the server's echo -- otherwise Escape (or a movement cancel) would leave the guard holding and the
+    // next press would be refused as a duplicate of a cast that is already cancelled.
+    this.pendingCast.clearIf(spellId);
+
     spellWire.record({
       at: Date.now(),
       kind: 'CANCEL_SENT',
@@ -1181,6 +1242,52 @@ export class SpellHandler extends EventEmitter {
       bodySize: body,
       consumed: body,
     });
+  }
+
+  /**
+   * `CMSG_CANCEL_CHANNELLING` (0x13B): stop a CHANNEL. A different opcode from `CMSG_CANCEL_CAST` and
+   * not interchangeable with it.
+   *
+   * 3.3.5a body: `u32 spellId`. TrinityCore's `HandleCancelChanneling` reads one `uint32`; the same
+   * server-implementation standing `cancelCast` above declares. **The longer-body rule does not help
+   * here and is not applied**: there is no second word this could be, and a cancel the server rejects is
+   * silent either way.
+   *
+   * **MOVEMENT ONLY -- Escape can never reach a channel**, and that asymmetry is the reference's,
+   * verified rather than assumed: `Script::SpellStopCasting 0x6e6e80`'s callee closure never calls the
+   * channel canceller `0x6e9b70`, and its in-flight word is already 0 mid-channel because the launch
+   * result cleared it (`ui_cast.rs:366-374`). That is the vanilla "/stopcasting cannot stop a channel"
+   * quirk, and it is kept.
+   *
+   * Nothing local is torn down, which is also the reference's: `0x6e9b70` fires no event and clears no
+   * state -- the channel bar closes on the server's `SMSG_CHANNEL_UPDATE(0)`.
+   */
+  cancelChannelling(spellId: number): void {
+    const body = 4;
+    const app = new GamePacket(GameOpcode.CMSG_CANCEL_CHANNELLING, GamePacket.HEADER_SIZE_OUTGOING + body);
+    app.writeUnsignedInt(spellId);
+    this.game.send(app);
+
+    spellWire.record({
+      at: Date.now(),
+      kind: 'CANCEL_SENT',
+      spellId,
+      caster: null,
+      detail: { channelling: 1 },
+      bodySize: body,
+      consumed: body,
+    });
+  }
+
+  /**
+   * The spell id of our outstanding cast, or null -- the guard's read side.
+   *
+   * This is what the movement cancel asks (`game/ui/world-ui.ts`): it needs to know WHICH spell is in
+   * flight so it can consult that spell's own `InterruptFlags`, and it needs the answer during the
+   * send -> `SMSG_SPELL_START` window as well as after it, which the cast-bar snapshot cannot give.
+   */
+  currentCast(): number | null {
+    return this.pendingCast.current(Date.now());
   }
 
   // -- What the Lua side reads --------------------------------------------------------------------

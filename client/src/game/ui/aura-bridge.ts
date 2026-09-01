@@ -76,6 +76,7 @@ import type { AuraEntry, AuraHandler } from '../../network/game/object/auras';
 import { AFLAG_NEGATIVE } from '../../network/game/object/auras';
 import type { SpellHandler } from '../../network/game/object/spells';
 import type Unit from '../classes/unit';
+import castWithRefusal from './cast-refusal';
 
 /**
  * `SPELL_AURA_MOD_SHAPESHIFT`, the `AuraType` that makes a known spell a STANCE.
@@ -576,7 +577,7 @@ export function attachAuraBridge(vm: LuaVM, world: World, art: GlueArt): () => v
   fn('CastShapeshiftForm', (args) => {
     const entry = formAt(args[0]);
     if (entry !== null) {
-      spells.castSpell(entry.spellId, null);
+      castWithRefusal(vm, spells, entry.spellId, null);
     }
     return [];
   });
