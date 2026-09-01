@@ -329,6 +329,45 @@ class Controls extends React.Component<IProp> {
         },
         overlap,
         pushWould: freed === null ? null : Number(freed.distanceTo(centre).toFixed(4)),
+        /**
+         * **THE EYE, IN NUMBERS -- because ten commits into this thread the screenshots stopped
+         * deciding anything.**
+         *
+         * Four different frames were reported as "то же самое", and they were not the same picture: a
+         * building gone, a room over a void, a room over dirt, a camera pressed into a pillar. I was
+         * reading intent out of pixels and getting it wrong about half the time. Whether the EYE is
+         * below the floor is one subtraction, and it settles in one reading what four rounds of looking
+         * could not.
+         *
+         * `eyeToFeet` negative means the eye is beneath the feet. `downFromEye` is what the WALK
+         * audience finds below the eye -- the audience that now holds the floor -- so a hit at a short
+         * distance with an upward normal means there IS floor under the eye and it is above it.
+         * `upFromEye` finding a DOWNWARD normal is the opposite and is the broken state outright.
+         */
+        eye: (() => {
+          const cam = this.props.camera;
+          if (!cam) return null;
+          const eye = cam.position.clone();
+          const down = cast(eye, new THREE.Vector3(0, 0, -1), 6);
+          const up = cast(eye, new THREE.Vector3(0, 0, 1), 6);
+          return {
+            at: [eye.x, eye.y, eye.z].map((v) => Number(v.toFixed(3))),
+            eyeToFeet: Number((eye.z - move.pos.z).toFixed(3)),
+            boom: Number(this.rig.collisionDistance.toFixed(3)),
+            zoom: Number(this.rig.distance.toFixed(2)),
+            downFromEye: down === null ? null : {
+              d: Number(down.distance.toFixed(3)),
+              nz: Number(down.normal.z.toFixed(3)),
+              src: name(down.source),
+            },
+            upFromEye: up === null ? null : {
+              d: Number(up.distance.toFixed(3)),
+              nz: Number(up.normal.z.toFixed(3)),
+              src: name(up.source),
+            },
+          };
+        })(),
+
         move: {
           velZ: Number(move.velZ.toFixed(3)),
           horizVel: Number(move.horizVel.length().toFixed(3)),
