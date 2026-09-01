@@ -183,15 +183,6 @@ export function selfFadeAlpha(cameraToPivot: number): number {
   return Math.min(1, Math.max(0, t));
 }
 
-/**
- * How far above the eye to look for a floor it has ended up under (yd).
- *
- * Only ever a rescue from a wrong state, so it needs to cover the depth the boom can sink through a
- * floor in one frame and no more. Two yards is a body height: deeper than any single-frame slip and
- * shallow enough that a legitimately low camera under a high ceiling is never touched.
- */
-const FLOOR_CLAMP_REACH = 2.0;
-
 const _up = new THREE.Vector3(0, 0, 1);
 
 /**
@@ -218,16 +209,11 @@ export function seatCamera(
     head: THREE.Vector3;
     pivotHeight: number;
     cast: CastFn;
-    /**
-     * A WALK-audience cast, for the floor clamp below. Optional, so every caller without a world --
-     * and every camera test -- is unchanged.
-     */
-    floorCast?: CastFn;
     dt: number;
   },
 ): { position: THREE.Vector3; quaternion: THREE.Quaternion } {
   const {
-    feet, head, pivotHeight, cast, floorCast, dt,
+    feet, head, pivotHeight, cast, dt,
   } = opts;
 
   // Z-up forward from yaw (about Z) and pitch.
@@ -272,8 +258,8 @@ export function seatCamera(
    * keeps any face the BODY could stand on, `NOCAMCOLLIDE` or not, so the boom stops at a floor
    * instead of passing through it and needing rescue (`collision/wmo-provider.ts`).
    *
-   * `floorCast` stays on the options for now: it costs nothing unused, and the clamp is the fallback if
-   * a floor is ever found that the gather still lets through.
+   * `floorCast` went with it rather than being kept "in case": an option no code reads is a
+   * claim that something uses it, and it was building a WALK cast every frame for nothing.
    */
   rig.selfFadeAlpha = selfFadeAlpha(position.distanceTo(pivot));
 
