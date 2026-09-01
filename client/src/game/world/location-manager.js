@@ -239,8 +239,43 @@ class LocationManager {
       valid.push({ candidate, closestPortal: group.closestPortal(camera.local, 1.0) });
     }
 
+    /**
+     * **NO RESOLVED FLOOR ANYWHERE: TAKE THE TIGHTEST BOX. Decoded from the abbey, not guessed.**
+     *
+     * `nsabbey.wmo`'s MOGI, parsed from the file: at the owner's feet, local `(-22.42, 21.54, 1.90)`,
+     * exactly three group boxes contain the point --
+     *
+     *   group 0: x[-28.8, 11.9] y[-11.1, 31.0] z[1.5, 23.9]   -- the whole building footprint
+     *   group 3: x[-27.8,-12.2] y[14.0, 29.5] z[1.8, 14.9]   -- the corridor he is actually in
+     *   group 5: x[-35.9, 16.2] y[-14.6, 37.9] z[0.0, 89.1]  -- EXTERIOR, never an interior candidate
+     *
+     * The right answer is group 3, and the portal geometry agrees: his position sits between portal 11
+     * (x[-15.9,-12.2] y[14.4,18.1]) and portal 10 (x[-26.6,-23.4] y[25.2,28.5]), which are exactly the
+     * two doorways of group 3. He seeded in group 0 instead -- a whole room wrong -- because group 3's
+     * BSP could not resolve a floor while group 0's could, and an unresolved floor disqualifies a
+     * candidate outright.
+     *
+     * Returning null there is the worst of the options: it declares the viewer OUTDOORS and floods from
+     * outside a building he is standing inside. A box is a crude containment test, but the tightest box
+     * containing a point is a far better guess at "which room" than "no room at all" -- and it can only
+     * ever be consulted when the BSP has already failed for every candidate.
+     *
+     * The BSP-resolved answer still wins whenever it exists, so this changes nothing where containment
+     * works. It replaces a verdict of "outdoors" with the smallest room that contains you.
+     */
     if (valid.length === 0) {
-      return null;
+      let tightest = null;
+      let smallest = Infinity;
+      for (const candidate of candidates) {
+        const box = candidate.wmo.group.boundingBox;
+        const size = box.max.clone().sub(box.min);
+        const volume = size.x * size.y * size.z;
+        if (volume < smallest) {
+          smallest = volume;
+          tightest = candidate;
+        }
+      }
+      return tightest;
     }
 
     valid.sort((a, b) => {
