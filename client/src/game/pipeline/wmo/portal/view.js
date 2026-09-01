@@ -2,7 +2,6 @@ import { vec4, mat4 } from 'gl-matrix';
 import * as THREE from 'three';
 import THREEUtil from '../../../utils/three-util';
 import {
-  clipPolygonToNearPlane,
   FULL_SCREEN_RECT,
   intersectRect,
   ON_PLANE_EPS,
@@ -167,18 +166,34 @@ class WMOPortalView extends THREE.Mesh {
    * client's zero-area epsilon. That collapse is the mechanism: it is why a room behind a doorway
    * you cannot see through stops being drawn.
    *
-   * The polygon is clipped against the NEAR PLANE before projecting. See
-   * `rect.ts::clipPolygonToNearPlane` for why skipping that step silently drops visible rooms.
+   * **THE POLYGON IS NOT CLIPPED AGAINST THE NEAR PLANE, and this paragraph used to say the
+   * opposite.** It claimed that skipping that step "silently drops visible rooms"; doing it is what
+   * dropped them. The reference clips against the four SIDE planes only and handles the degenerate
+   * `w` instead -- see the block inside for the citation and for what the clip was costing.
    *
    * The reference's special case (client `0x6b46f0`): an eye within ON_PLANE_EPS of the portal's
-   * plane gets the full screen rect for that portal, because the projection is degenerate there.
+   * plane AND inside its polygon gets the full screen rect, because the projection is degenerate
+   * there. Both halves -- the plane test alone opens rooms a doorway does not show.
    *
    * @param viewProjection  projection * matrixWorldInverse for the main camera
    * @param incoming        the rect this branch arrived with
    * @param cameraLocal     camera position in THIS portal view's local space
    */
   projectToRect(viewProjection, incoming, cameraLocal) {
-    if (Math.abs(this.portal.plane.distanceToPoint(cameraLocal)) <= ON_PLANE_EPS) {
+    /**
+     * **THE EYE MUST BE IN THE POLYGON, NOT MERELY IN ITS PLANE.**
+     *
+     * A portal's plane is infinite. Standing twenty yards to the side of a doorway but coplanar with
+     * it granted the FULL-SCREEN rect, which opens rooms the doorway does not show. The reference
+     * tests both halves -- within `ON_PLANE_EPS` of the plane (the client's `|d| <= 0.01`) AND inside
+     * the polygon, by a dominant-axis 2-D projection (the client's `0x7c23e0`)
+     * (`benilla-world/src/wmo_portal/mod.rs:755-770`).
+     *
+     * This errs OPEN rather than closed, so it was never the blink -- but it is a rule we were half
+     * applying, and the half we had is the one that costs correctness.
+     */
+    if (Math.abs(this.portal.plane.distanceToPoint(cameraLocal)) <= ON_PLANE_EPS
+      && this.eyeInPolygon(cameraLocal)) {
       return intersectRect(incoming, FULL_SCREEN_RECT);
     }
 
@@ -203,12 +218,32 @@ class WMOPortalView extends THREE.Mesh {
       clip[3] = e[3] * x + e[7] * y + e[11] * z + e[15];
     }
 
-    const clipped = clipPolygonToNearPlane(SCRATCH_CLIP.slice(0, count));
-    if (clipped.length < 3) {
-      return null;
-    }
-
-    const projected = rectFromClipPolygon(clipped);
+    /**
+     * **NO NEAR-PLANE CLIP. The reference says so in as many words, and its absence here is the blink.**
+     *
+     * This clipped the polygon against the near plane and returned `null` when fewer than three
+     * vertices survived. A doorway the eye is close to has vertices BEHIND the near plane, so the
+     * polygon degenerated, the branch died, and the room behind it vanished for that frame -- which is
+     * "кручу камерой и бывает пропадает явно видимый портал" under certain angles, because the angle
+     * is what decides how many vertices fall behind.
+     *
+     * The reference clips against "the four **side** planes of the view pyramid (there is NO
+     * near-plane clip)" and handles the degenerate `w` instead: `|w| < 0.001` substitutes `+1e-5`
+     * regardless of sign, and a vertex still carrying `w <= -0.001` divides by its real negative `w`
+     * so its MIRRORED NDC enters the rect. Its own words for why: "That is what keeps a doorway the
+     * eye is straddling wide open (the boundary points at the eye clamp to `+1e-5` and blow the rect
+     * out) instead of collapsing it for a frame" (`mod.rs:789-798`).
+     *
+     * `ndcFromClip` already implements that clamp exactly -- so the fix is to stop throwing away the
+     * vertices it was written to handle. The rect comes out raw and un-clamped, as the reference
+     * returns it; the `intersectRect` below is what bounds it, which is the reference's own
+     * arrangement too ("the caller's intersect with the carried rect bounds it").
+     *
+     * The side-plane clip is NOT ported with it. It narrows a rect the carried-rect intersect narrows
+     * anyway, and adding a clipping pass while removing another is how one fix becomes two changes
+     * with one measurement. If a portal is ever seen opening too WIDE, that is where to look.
+     */
+    const projected = rectFromClipPolygon(SCRATCH_CLIP.slice(0, count));
     if (!projected) {
       return null;
     }
@@ -225,6 +260,49 @@ class WMOPortalView extends THREE.Mesh {
    * this portal view
    *
    */
+  /**
+   * Is the eye inside this portal's POLYGON? Projects out the plane's dominant axis and runs an
+   * even-odd test -- the reference's `eye_on_portal` (`mod.rs:759-787`, the client's `0x7c23e0`).
+   * Only meaningful for an eye already known to be in the plane: its projection is then itself.
+   */
+  eyeInPolygon(eyeLocal) {
+    const vertices = this.legacyGeometry.vertices;
+    const count = vertices.length;
+    if (count < 3) {
+      return false;
+    }
+
+    // The normal's dominant axis is the one to project OUT; the other two index the 2-D test.
+    const n = this.portal.plane.normal;
+    const ax = Math.abs(n.x);
+    const ay = Math.abs(n.y);
+    const az = Math.abs(n.z);
+    let u;
+    let v;
+    if (ax >= ay && ax >= az) {
+      u = 'y'; v = 'z';
+    } else if (ay >= az) {
+      u = 'x'; v = 'z';
+    } else {
+      u = 'x'; v = 'y';
+    }
+
+    const pu = eyeLocal[u];
+    const pv = eyeLocal[v];
+    let inside = false;
+    for (let i = 0, j = count - 1; i < count; j = i, ++i) {
+      const cu = vertices[i][u];
+      const cv = vertices[i][v];
+      const ju = vertices[j][u];
+      const jv = vertices[j][v];
+      if ((cv > pv) !== (jv > pv)
+        && pu < ((ju - cu) * (pv - cv)) / (jv - cv) + cu) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
   intersectFrustum(frustum) {
     const planes = frustum.planes;
     const vertices = this.legacyGeometry.vertices;
