@@ -66,6 +66,32 @@ class LocationManager {
      * The eye is still tried when the body resolves nothing, which covers a body mid-air or in geometry
      * the BSP cannot place. Ordering is the whole change.
      */
+    /**
+     * **A VERDICT OF "OUTDOORS" FROM THE BODY IS AN ANSWER, AND ASKING THE EYE TO OVERRULE IT IS WHAT
+     * MADE THE WORLD DEPEND ON WHICH WAY YOU FACED.**
+     *
+     * `locateAt` used to answer `null` for two unrelated reasons -- "nothing could place this point" and
+     * "this point resolved into the exterior shell, so you are outdoors" -- and this line read both as
+     * the first. So the body's correct "I am on the road" was discarded and the boom was asked instead;
+     * a boom eight yards long swings into a building's bounding box, resolves a group there, and the
+     * frame is declared INTERIOR with the whole outdoors switched off.
+     *
+     * Measured offline on the real `nsabbey` files, with the body held still and the boom swept every
+     * 30 degrees (`harness/fallback-probe.test.js`):
+     *
+     *   body on the road, local (-27.72, 45, 2.0) -- outside the root box entirely, so unambiguously
+     *   outdoors: the eye resolved `null` at eleven yaws and **group 5 at 90 degrees**, and that one
+     *   bearing turned the terrain off.
+     *
+     *   body on the porch, local (-27.72, 33.5, 2.16): the eye decided EIGHT of twelve frames, handing
+     *   back group 5, group 3 or nothing purely as a function of bearing.
+     *
+     * The same sweep from inside a room shows the ordering is otherwise sound: at local (-10, 12, 3)
+     * the body resolved group 1 at all twelve yaws while the eye would have said g0, g1 or g3.
+     *
+     * So the eye stays as the fallback for the case it was added for -- the body inside a building that
+     * cannot place it -- and no longer overrules a body that knows it is outside.
+     */
     let location = bodyPoint ? this.locateAt(bodyPoint) : null;
 
     if (!location) {
@@ -82,11 +108,32 @@ class LocationManager {
   }
 
   /** Resolve a location for one world POINT, or null. Both seeds go through this. */
+  /**
+   * Resolve a location for one world POINT. Three outcomes, and they are deliberately distinct:
+   *
+   * - an interior location -- some group places the point;
+   * - `{ type: 'exterior' }` -- the point is OUTDOORS, said with confidence, either because no
+   *   building's bounding volume contains it or because the only group that resolved it is the
+   *   exterior shell;
+   * - `null` -- UNKNOWN: the point is inside a building whose groups cannot place it.
+   *
+   * Only the third invites a second opinion. Collapsing the second into the third is the defect
+   * `locateCamera` describes: a body that knew it was outside had its answer thrown away.
+   */
   locateAt(point) {
     const candidates = [];
+    let insideSomeBuilding = false;
 
     for (const wmo of this.map.wmoManager.entries.values()) {
-      this.addCandidates({ position: point }, wmo, candidates);
+      if (this.addCandidates({ position: point }, wmo, candidates)) {
+        insideSomeBuilding = true;
+      }
+    }
+
+    if (!insideSomeBuilding) {
+      // Not inside any building's bounding volume. Nothing about a portal graph can make this point
+      // indoors, so it is not an open question and must not be re-asked of another seed.
+      return { type: 'exterior', at: point.clone ? point.clone() : point };
     }
 
     const location = this.selectCandidate(candidates);
@@ -115,7 +162,7 @@ class LocationManager {
     const maybeInsideWMO = wmo.root.boundingBox.containsPoint(cameraLocal);
     // Camera cannot be inside this WMO
     if (!maybeInsideWMO) {
-      return;
+      return false;
     }
 
     // Check if camera is in any of this WMO's groups
@@ -220,6 +267,11 @@ class LocationManager {
       // console.log("Interior", location)
       candidates.push(location);
     }
+
+    // The point is inside this building's own bounding volume. Reported so `locateAt` can tell a point
+    // that no group could PLACE from a point that is simply not in a building at all -- see the
+    // verdicts it builds out of this.
+    return true;
   }
 
   /**
@@ -336,8 +388,15 @@ class LocationManager {
     const chosen = interior.length > 0 ? interior[0] : valid[0];
 
     if (chosen.isExterior) {
-      // Resolved INTO the shell: the viewer is outdoors, and the exterior pass owns the frame.
-      return null;
+      /**
+       * Resolved INTO the shell: the viewer is outdoors, and the exterior pass owns the frame.
+       *
+       * This says so with a location rather than with `null`. `null` here used to mean both this and
+       * "no idea", and `locateCamera` could only read it as the second -- so a body standing on the
+       * porch, which resolves group 5 and nothing else, was ruled unplaceable and the boom decided the
+       * frame instead. Measured: the eye decided eight of twelve bearings there.
+       */
+      return { type: 'exterior' };
     }
 
     return chosen.candidate;
