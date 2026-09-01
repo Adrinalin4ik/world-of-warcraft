@@ -97,6 +97,30 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private frameHandle = 0;
   private stopped = false;
   /** Held bound, because `removeEventListener` needs the SAME function object `add` was given. */
+  /**
+   * **THE POINTER'S VIEWPORT RECT, CACHED -- because reading it per tick is a forced layout.**
+   *
+   * `updateHoverCursor` called `document.body.getBoundingClientRect()` on every cadence tick to turn
+   * the pointer into NDC. That call is a synchronous LAYOUT FLUSH: the browser must resolve the
+   * document before it can answer, and this page carries the whole interface DOM. Measured on the
+   * owner's panel, `ui.cursor` came in at **4.6 ms** where every earlier reading of that section was
+   * 0.0 or 0.1 -- and it is gated to about one frame in six, so the tick itself costs several times
+   * that.
+   *
+   * The rect can only change when the window does, and the renderer is already sized from
+   * `window.innerWidth/innerHeight` (`resize`), so `resize` is exactly where it is refreshed. Keeping
+   * the BODY rect rather than assuming `(0, 0, innerWidth, innerHeight)` preserves the current answer
+   * exactly, including any body offset, and preserves the property the pick instruments' own comment
+   * insists on: they measure against the same element `controls.tsx` does, so a probe and a real
+   * click cannot disagree about where the pointer is. This removes a cost; it does not move a
+   * coordinate.
+   *
+   * The two debug pick instruments keep their own live read -- they run once per invocation, not per
+   * frame, and a stale rect in an instrument is exactly the class of defect they were written to
+   * avoid.
+   */
+  private cursorBounds: { left: number; top: number; width: number; height: number } | null = null;
+
   private readonly onResize = () => this.resize();
   private readonly onWorldDisconnect = () => {
     // Once, and only forward. The socket emits `disconnect` and `Socket#dropSocket` can silence a
@@ -721,7 +745,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     }
 
     const world = this.game.world;
-    const bounds = document.body.getBoundingClientRect();
+    // Cached; refreshed by `resize`. See `cursorBounds` for the forced layout this removes.
+    const bounds = this.cursorBounds ?? this.refreshCursorBounds();
     const ndc = {
       x: ((pointer.x - bounds.left) / bounds.width) * 2 - 1,
       y: -(((pointer.y - bounds.top) / bounds.height) * 2 - 1),
@@ -1004,7 +1029,18 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     return window.innerWidth / window.innerHeight;
   }
 
+  /** Re-read the viewport rect once, and hand it back for the first-use path. */
+  private refreshCursorBounds(): { left: number; top: number; width: number; height: number } {
+    const rect = document.body.getBoundingClientRect();
+    this.cursorBounds = {
+      left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+    };
+    return this.cursorBounds;
+  }
+
   resize() {
+    // The pointer rect follows the window and nothing else, so this is its one invalidation point.
+    this.refreshCursorBounds();
     if (this.renderer) {
       const scale = this.debug ? 2 : 1;
       this.renderer.setSize(window.innerWidth/scale, window.innerHeight/scale);
