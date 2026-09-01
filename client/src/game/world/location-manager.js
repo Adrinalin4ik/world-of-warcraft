@@ -296,44 +296,14 @@ class LocationManager {
       return tightest;
     }
 
-    /**
-     * **THE TIGHTEST BOX WINS, not the highest floor -- and the abbey's own MOGI is why.**
-     *
-     * The floor heights do not discriminate: group 0's floor is 1.5 and group 3's is 1.87, a third of a
-     * yard apart, so a "highest floor" rule decides essentially at random between them. Their BOXES are
-     * not close at all:
-     *
-     *   group 0: x[-28.8, 11.9] y[-11.1, 31.0] z[1.5, 23.9]  -- the entire building
-     *   group 3: x[-27.8,-12.2] y[14.0, 29.5] z[1.8, 14.9]  -- one corridor
-     *
-     * Measured consequence, standing in the abbey's front door: seed 0, seven groups flooded, and
-     * neither 1 nor 3 among them -- so portal 10, the ONLY interior route to daylight in the whole
-     * model, was never even considered. `exteriorVisible: false`, `chunks: 0`, and a void where the
-     * valley should be.
-     *
-     * A group whose box spans the whole model is never a better answer to "which room am I in" than one
-     * whose box is a room. The floor height stays as the tie-break, for two boxes of genuinely similar
-     * size stacked vertically -- a gallery over a hall -- which is the case it was written for.
-     */
-    const volumeOf = (candidate) => {
-      const box = candidate.wmo.group.boundingBox;
-      const size = box.max.clone().sub(box.min);
-
-      return size.x * size.y * size.z;
-    };
-
     valid.sort((a, b) => {
-      const dv = volumeOf(a.candidate) - volumeOf(b.candidate);
-      if (Math.abs(dv) > 1e-3) {
-        return dv;
-      }
       const dz = b.candidate.query.z.min - a.candidate.query.z.min;
       if (dz !== 0) {
         return dz;
       }
+      // Tie: the nearer portal, which is what the previous sort was attempting on its own.
       const ad = a.closestPortal ? a.closestPortal.distance : Infinity;
       const bd = b.closestPortal ? b.closestPortal.distance : Infinity;
-
       return ad - bd;
     });
 
