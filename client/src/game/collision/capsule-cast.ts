@@ -7,6 +7,16 @@ import { CastHit, Triangle } from './types';
 export const CAPSULE_CAST_EPS = 1e-4;
 
 /**
+ * The least closing cosine that lets an ALREADY-TOUCHING face block a sweep.
+ *
+ * See the branch in `planeTimeOfImpact` for the measurement that set it: a face 4 degrees off
+ * parallel was stopping a third of the compass at distance zero. Six degrees' worth of margin, and
+ * no more, because the same branch is what makes a body resting ON a floor still able to cast away
+ * from it -- the case that gate was written for in the first place.
+ */
+export const CONTACT_MIN_CLOSING = 0.1;
+
+/**
  * How far off a face the verification pass still counts as a contact.
  *
  * The plane solution is exact; this only absorbs the float error of re-evaluating the distance at
@@ -199,9 +209,35 @@ function planeTimeOfImpact(
   const closing = -side * dir.dot(n);
 
   if (gap <= CAPSULE_CAST_EPS) {
-    // Already touching or overlapping. A contact only counts if we are still driving into the face;
-    // otherwise a body resting on the floor could never cast away from it.
-    return closing > 1e-9 ? { t: 0, side } : null;
+    /**
+     * **ALREADY TOUCHING, AND ONLY A REAL APPROACH MAY BLOCK. `1e-9` LOCKED A BODY IN A CAGE OF
+     * THREE FACES.**
+     *
+     * `closing` is the cosine between the motion and the inward face normal, so `1e-9` accepted
+     * anything but exact parallelism -- and a face 4 degrees off parallel is, for a horizontal
+     * walk, the FLOOR or a rail underside. It then reports a contact at distance ZERO, which stops
+     * the walk dead.
+     *
+     * Measured, on the owner stuck at a fence with `window.stuckReport()`: **36 of 36 bearings
+     * blocked**, all at distance 0, by exactly three faces -- `(-0.995, -0.096, 0.009)` on six
+     * bearings, `(0.095, -0.993, -0.070)` on three, and `(-0.016, 0.069, -0.998)` -- a normal
+     * pointing DOWN -- on the three bearings from 210 to 270 degrees. For a horizontal cast that
+     * third face has a closing component of at most 0.069, i.e. it is four degrees from being
+     * parallel to the motion, and it was blocking a third of the circle. Total lockup with a
+     * measured overlap of nine millimetres, `wedged` false, `stepDown` false, `settling` false.
+     *
+     * **THE ASYMMETRY IS THE BUG, and it is why only this branch had it.** Below, a tiny `closing`
+     * yields an enormous `t` which `t <= maxDist` discards, so grazes filter themselves out. This
+     * branch returns `t = 0` unconditionally and has no such limit, so it was the one place a graze
+     * could stop a body.
+     *
+     * The threshold has to exceed the 0.069 that was measured, and it is deliberately not much
+     * larger: at `CONTACT_MIN_CLOSING` a face within about six degrees of parallel to the motion is
+     * a GRAZE and cannot block a body already resting against it, which is what sliding along a
+     * wall is. Anything steeper still blocks at distance zero exactly as before -- a wall met
+     * head-on closes at 1.0, and even a 15-degree scrape closes at 0.26.
+     */
+    return closing > CONTACT_MIN_CLOSING ? { t: 0, side } : null;
   }
 
   if (closing <= 1e-9) {
