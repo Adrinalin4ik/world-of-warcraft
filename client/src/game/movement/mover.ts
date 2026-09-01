@@ -263,7 +263,32 @@ export function groundedStep(
    * reach (decision 1129) as well belongs in its own change: it alters what is SEEN, and a pending
    * measurement in this very area asks exactly that question.
    */
-  const coneReach = Math.hypot(dx, dy) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+  /**
+   * **THE CAP IS SCALED BY THE TRAVEL THE FRAME ASKED FOR, NOT THE TRAVEL IT ACHIEVED -- because the
+   * achieved travel is reduced by the very penetration the cap creates.**
+   *
+   * Measured on the owner walking straight down a slope, 484 frames: the descent came out in a
+   * period-THREE stutter -- two frames of 0.055 then one of 0.27, over and over -- with 110 frames
+   * penetrating to 0.18 and 120 push-outs. He sees it as shaking. The direction never reversed (7
+   * flips in 484), so this was never an oscillation; it was a RATE limit below what the surface
+   * required.
+   *
+   * The loop: the cap allows `achieved * 1.849`, the body falls behind the slope and sinks, sinking
+   * costs it horizontal travel against the slope face, less travel means a smaller cap, and the next
+   * frame descends even less. Every third frame the accumulated deficit is released at once.
+   *
+   * The frame's INTENDED travel is `speed * dt` and cannot be affected by the outcome, so the loop
+   * cannot form. The cap keeps the job it was ported for -- a 1.5 yd ledge is still not absorbed in
+   * one frame, because that drop is far larger than any walkable slope needs.
+   *
+   * A DIVERGENCE FROM THE REFERENCE, stated: it scales by the achieved `d_h`
+   * (`mover.rs:665-690`). It can afford to -- its mover is a CONE, whose skirt stays in contact and
+   * limits the descent geometrically, so the cap is a description of what its geometry already does
+   * rather than a control loop. Ours is a capsule and the cap is the only limiter, which makes the
+   * feedback path real for us and absent for them. Same law, different body: the same reason 1132
+   * gave for porting the effect instead of the instruction.
+   */
+  const coneReach = speed * dt * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
   let stepDown = false;
   if (hit && hit.normal.z >= GROUND_COS) {
     const descended = Math.min(hit.distance, coneReach);
