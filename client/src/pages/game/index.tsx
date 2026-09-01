@@ -150,6 +150,9 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // The perf monitor exists either way -- it owns the frame ring and the CPU spans, which every
     // capture in this repo's performance record is taken from. Only its HUD is gated.
     this.perf = new PerfMonitor(document, this.showDebug);
+    // `window.perfReport()` -- the HUD's numbers as JSON. See `PerfMonitor#report` for why: a panel
+    // can only be read by eye, and comparing two routes needs numbers that subtract.
+    (window as never as Record<string, unknown>).perfReport = () => this.perf.report();
 
     if (this.showDebug) {
       this.stats = new Stats();
