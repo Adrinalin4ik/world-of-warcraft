@@ -17,6 +17,7 @@ import {
   SETTLE_FLOOR_REACH,
 } from '../../../game/movement/constants';
 import { movementFrame } from '../../../game/movement/frame';
+import { moveTrace } from '../../../game/movement/move-trace';
 import { easeDisplayYaw, strafeBodyOffset } from '../../../game/movement/net-motion';
 import { movementFlagsFor, streamMovement } from '../../../game/movement/outbound';
 import { rescueFromVoid } from '../../../game/movement/void-rescue';
@@ -206,6 +207,28 @@ class Controls extends React.Component<IProp> {
      * "standing" to the caller, and any of the three latched is a freeze with no geometry involved
      * at all -- which is exactly what "хотя я даже не в нем, но я не могу идти" describes.
      */
+    /**
+     * **`?sinktrap=1` -- THE ONLY TRAP THAT CAN CATCH A FALL AT WORLD ENTRY.**
+     *
+     * The owner: "я прогружаюсь под лестницей." His settle log releases the hold at z **82**, the
+     * stairs level, and under the staircase is **80.6** -- so the fall happens in the first second,
+     * after a release that was healthy in every respect the log records (a floor within five yards,
+     * the terrain registered). Every trap in this area is armed from the console, and a page reload
+     * clears the console, so there has never been a way to be watching when it happens.
+     *
+     * Armed HERE, at the controls mount, which runs before the world finishes streaming -- so the trap
+     * is already live when the body first touches geometry. It freezes both traces on the first frame
+     * the capsule is a tenth of a yard inside anything, which is the entry and not the aftermath.
+     *
+     * A query flag rather than a default, for the reason everything else here is: the trace costs a
+     * per-frame record, and an instrument that is on when nobody asked is how a profile comes back
+     * inflated -- which has already happened once this round.
+     */
+    if (new URLSearchParams(window.location.search).get('sinktrap') === '1') {
+      // eslint-disable-next-line no-console
+      console.warn(`[sinktrap] ${moveTrace.armSink(0.1)}`);
+    }
+
     (window as never as Record<string, unknown>).stuckReport = () => {
       const cast = collisionWorld.castFor(CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment());
       const push = collisionWorld.depenetrateFor(
