@@ -179,7 +179,7 @@ class WMOPortalView extends THREE.Mesh {
    * @param incoming        the rect this branch arrived with
    * @param cameraLocal     camera position in THIS portal view's local space
    */
-  projectToRect(viewProjection, incoming, cameraLocal) {
+  projectToRect(viewProjection, incoming, cameraLocal, debugOut = null) {
     /**
      * **THE EYE MUST BE IN THE POLYGON, NOT MERELY IN ITS PLANE.**
      *
@@ -262,6 +262,27 @@ class WMOPortalView extends THREE.Mesh {
      * it is wrong here is worth more than the function was.
      */
     const projected = rectFromClipPolygon(SCRATCH_CLIP.slice(0, count));
+
+    /**
+     * The projection, for the portal trace. Four `rect-collapse` outcomes in six attempts, with the
+     * eye inside the room those doorways belong to, is not a portal that is off screen -- it is a
+     * projection landing somewhere it should not. Recording the first WORLD vertex beside the rect is
+     * what separates "the matrix is wrong" from "the rect really is outside the carried window":
+     * this scene runs with `matrixWorldAutoUpdate = false`, so a view whose matrix was never updated
+     * projects from the origin and lands consistently off screen.
+     */
+    if (debugOut) {
+      SCRATCH_VERTEX.copy(vertices[0]);
+      this.localToWorld(SCRATCH_VERTEX);
+      debugOut.v0 = [SCRATCH_VERTEX.x, SCRATCH_VERTEX.y, SCRATCH_VERTEX.z]
+        .map((v) => Number(v.toFixed(2)));
+      debugOut.clip0 = SCRATCH_CLIP[0].map((v) => Number(v.toFixed(3)));
+      debugOut.rect = projected === null ? null : {
+        minX: Number(projected.minX.toFixed(3)), maxX: Number(projected.maxX.toFixed(3)),
+        minY: Number(projected.minY.toFixed(3)), maxY: Number(projected.maxY.toFixed(3)),
+      };
+      debugOut.verts = count;
+    }
     if (!projected) {
       return null;
     }

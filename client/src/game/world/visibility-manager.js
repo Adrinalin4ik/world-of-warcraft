@@ -490,12 +490,15 @@ class VisibilityManager {
       }
 
       // Narrow the window through this portal. Null means the branch dies here.
-      const nextRect = portalView.projectToRect(this.scratchViewProjection, rect, cameraLocal);
+      const shot = portalTrace.enabled ? {} : null;
+      const nextRect = portalView.projectToRect(
+        this.scratchViewProjection, rect, cameraLocal, shot,
+      );
       if (!nextRect) {
-        portalTrace.record({ ...traceRow, why: 'rect-collapse' });
+        portalTrace.record({ ...traceRow, why: 'rect-collapse', ...(shot || {}) });
         continue;
       }
-      portalTrace.record({ ...traceRow, why: 'entered' });
+      portalTrace.record({ ...traceRow, why: 'entered', ...(shot || {}) });
 
       destinationView.visibleFrame = this.frame;
 
