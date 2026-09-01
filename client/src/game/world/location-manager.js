@@ -156,103 +156,75 @@ class LocationManager {
     }
   }
 
+  /**
+   * **WHICH GROUP THE CAMERA IS IN. Every rule in here was commented out, and that is the root of a
+   * week's worth of the owner's reports.**
+   *
+   * What was live: candidates whose `z.min` was unresolved became `null` but were NOT removed; the
+   * sort compared `undefined - undefined`, i.e. `NaN`, so it did not reorder; and `[0]` was taken --
+   * the first interior group in `Map` order whose BOUNDING BOX contains the point. WMO group boxes
+   * overlap almost completely inside a building, so that is group 0, always.
+   *
+   * The consequence, measured: `portalTrace` reported `seed: 0` while the collision under his feet
+   * named group **5**. The flood therefore started in the wrong room and reached 5 groups of 14 --
+   * 0, 2, 8, 9, 13 -- and the floor he was standing on was never among them. That is the void, the
+   * disappearing building, the room over dirt: one wrong seed, four disguises.
+   *
+   * THE RULE IS THE ONE THIS FILE ALREADY STATED, in a comment above the code that implemented it:
+   * "The correct candidate has the highest min Z bound of all remaining candidates". Among the groups
+   * that genuinely contain the eye, the one whose floor is highest is the room you are standing in --
+   * a gallery over a hall, an upper storey over a lower.
+   *
+   * So, in order: reject a candidate with no resolved floor; reject one whose Z range does not contain
+   * the eye; take the highest floor of what is left; break a tie on the nearest portal, which is what
+   * the live sort was reaching for.
+   *
+   * The portal-side rejection stays out. It was commented too, and it is a second rule with its own
+   * failure mode -- restoring two at once would leave neither attributable, which is the mistake this
+   * thread has already made repeatedly.
+   */
   selectCandidate(candidates) {
-    // Adjust bounds and mark invalid candidates
-    if (candidates.length > 1) {
-      // debugger;
-    }
-    const adjustedCandidates = candidates.map((candidate) => {
+    const valid = [];
+
+    for (const candidate of candidates) {
       const { camera, query } = candidate;
       const { group } = candidate.wmo;
 
-      // If a query didn't get a min Z bound from the BSP tree or from raycasting for portals, the
-      // candidate is invalid.
-      // console.log('here', query.z.min)
-      // debugger;
+      // No floor was resolved, by the BSP or by a portal raycast: we cannot say we are inside.
       if (query.z.min === null) {
-        return null;
+        continue;
       }
-
-      if (query.z.min === null) {
-        query.z.min = group.boundingBox.min.z;
-      }
-      // Assume the bounding box max in cases where max Z is unbounded
+      // Assume the bounding box max when the ceiling is unbounded -- the original intent, kept.
       if (query.z.max === null) {
         query.z.max = group.boundingBox.max.z;
       }
 
-      // const cameraInBoundsZ =
-      //   camera.local.z >= query.z.min &&
-      //   camera.local.z <= query.z.max;
-        
-      // if (!cameraInBoundsZ) {
-      //   return null;
-      // }
-      
-      // Get the closest portal within a small range and ensure we're inside it
-      const closestPortal = group.closestPortal(camera.local, 1.0);
-      
-      if (closestPortal !== null) {
-        // const outsidePortal = closestPortal.portalRef.side * closestPortal.distance < 0.0;
-        
-        // if (outsidePortal) {
-        //   return null;
-        // }
+      // The test that was commented out. Without it a group whose floor is twenty yards below still
+      // counted as containing the eye.
+      if (camera.local.z < query.z.min || camera.local.z > query.z.max) {
+        continue;
       }
 
-      return {
-        candidate,
-        closestPortal
-      };
+      valid.push({ candidate, closestPortal: group.closestPortal(camera.local, 1.0) });
+    }
+
+    if (valid.length === 0) {
+      return null;
+    }
+
+    valid.sort((a, b) => {
+      const dz = b.candidate.query.z.min - a.candidate.query.z.min;
+      if (dz !== 0) {
+        return dz;
+      }
+      // Tie: the nearer portal, which is what the previous sort was attempting on its own.
+      const ad = a.closestPortal ? a.closestPortal.distance : Infinity;
+      const bd = b.closestPortal ? b.closestPortal.distance : Infinity;
+      return ad - bd;
     });
 
-    // Remove invalid candidates
-    // const validCandidates = adjustedCandidates.filter((candidate) => candidate !== null);
-
-    // No valid candidates
-    // if (validCandidates.length === 0) {
-    //   return null;
-    // }
-
-    // The correct candidate has the highest min Z bound of all remaining candidates
-    // validCandidates.sort((a,b) => a.query.z.min + b.query.z.min)
-    // validCandidates.sort((a, b) => {
-    //   if (a.query.z.min > b.query.z.min) {
-    //     return -1;
-    //   } else if (a.query.z.min < b.query.z.min) {
-    //     return 1;
-    //   } else {
-    //     return 0;
-    //   }
-    // });
-    // return validCandidates[0];
-
-    adjustedCandidates.sort((a,b) => {
-      const aPortal = a?.closestPortal;
-      const bPortal = b?.closestPortal;
-
-      // if (aPortal.distance)
-
-      return aPortal?.distance - bPortal?.distance;
-
-      // return aPortal?.distance - bPortal?.distance;
-    });
-
-    const candidate = adjustedCandidates[0];
-
-
-    // if (candidate?.candidate) {
-    //   candidate.candidate.wmo.group.portals.forEach(p => p.material.color = new THREE.Color(0x0000ff));
-    // }
-
-    // if (candidate?.closestPortal) {
-    //   candidate.closestPortal.portal.material.color = new THREE.Color(0x00ff00);
-    //   // console.log(candidate.closestPortal.distance, candidate.closestPortal.sign, candidate.closestPortal.portalRef.side)
-    //   DebugPanel.test2 = candidate.closestPortal.portal.index
-    // }
-    return candidate?.candidate;
+    return valid[0].candidate;
   }
-
 }
 
 export default LocationManager;
