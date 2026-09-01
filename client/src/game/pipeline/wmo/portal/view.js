@@ -5,7 +5,6 @@ import {
   FULL_SCREEN_RECT,
   intersectRect,
   ON_PLANE_EPS,
-  clipPolygonToSidePlanes,
   rectFromClipPolygon,
 } from './rect';
 
@@ -244,14 +243,25 @@ class WMOPortalView extends THREE.Mesh {
      * anyway, and adding a clipping pass while removing another is how one fix becomes two changes
      * with one measurement. If a portal is ever seen opening too WIDE, that is where to look.
      */
-    // The four SIDE planes, and not the near plane -- see `clipPolygonToSidePlanes` for the
-    // reference's pairing and for what removing the near clip alone cost.
-    const sided = clipPolygonToSidePlanes(SCRATCH_CLIP.slice(0, count));
-    if (sided.length < 3) {
-      return null;
-    }
-
-    const projected = rectFromClipPolygon(sided);
+    /**
+     * **NO CLIPPING AT ALL. The side-plane clip was mine and it killed the portals it was meant to
+     * widen -- measured, seven `rect-collapse` in thirteen attempts, including the doorway into the
+     * group whose floor the owner was standing on.**
+     *
+     * `w + x >= 0` is false for almost any vertex BEHIND the eye, because `w` is negative there. So
+     * the clip discarded exactly the vertices the `w` rule exists to handle: the reference says a
+     * vertex carrying `w <= -0.001` "divides by its real negative `w`, so its MIRRORED NDC enters the
+     * rect", and that is what keeps a doorway the eye is straddling wide open. They have to SURVIVE.
+     * I clipped them away and then relied on the handling that never saw them.
+     *
+     * So the rect is the min/max over every projected vertex, with `ndcFromClip`'s clamp doing the
+     * whole of the work -- which is the reference's own arrangement, raw and un-clamped, bounded by
+     * the caller's intersect with the carried rect.
+     *
+     * `clipPolygonToSidePlanes` stays in `rect.ts`, unused and documented, because the record of why
+     * it is wrong here is worth more than the function was.
+     */
+    const projected = rectFromClipPolygon(SCRATCH_CLIP.slice(0, count));
     if (!projected) {
       return null;
     }

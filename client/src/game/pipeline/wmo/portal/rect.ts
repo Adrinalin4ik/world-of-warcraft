@@ -106,6 +106,16 @@ export function clipPolygonToNearPlane(
 }
 
 /**
+ * **UNUSED, AND KEPT ONLY AS A RECORD OF WHY IT IS WRONG FOR PORTALS.**
+ *
+ * I added this to `projectToRect` and it collapsed the portals it was meant to widen: seven
+ * `rect-collapse` outcomes in thirteen attempts, including the doorway into the very group whose
+ * floor the owner was standing on. `w + x >= 0` is false for almost any vertex BEHIND the eye, since
+ * `w` is negative there -- so it discards exactly the vertices `ndcFromClip`'s clamp exists to
+ * handle, and those must survive for a straddled doorway to stay open.
+ *
+ * ---
+ *
  * **SUTHERLAND-HODGMAN AGAINST THE FOUR SIDE PLANES -- and NOT against the near plane.**
  *
  * The reference's pairing, and both halves matter: "clip against the four **side** planes of the
