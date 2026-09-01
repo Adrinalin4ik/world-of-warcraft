@@ -59,6 +59,58 @@ class WorldMap extends THREE.Group {
      * the mask over them is what this thread already turned on once.
      */
     if (typeof window !== 'undefined') {
+      /**
+       * **`window.groupProbe(x, y, z)` -- which groups claim a world point, and what the containment
+       * test says about each.**
+       *
+       * The portal trace cleared the projection: world vertices are sane, and the collapsed rects are
+       * genuinely off screen, so the flood is behaving correctly for the seed it was given. What it also
+       * showed is that every portal in the seed group's list is 30 to 45 yd away from where the owner
+       * stands. The seed is not his room, and no amount of sorting candidates fixes that -- a group only
+       * BECOMES a candidate if `queryBoundedPoint` yields a floor for it.
+       *
+       * So this asks the question one layer earlier: for every group whose bounding box contains the
+       * point, does the BSP place the point inside, and what Z range comes back. A group whose box
+       * contains the feet but whose query returns null can never be selected, however the selection is
+       * written -- and that is the gap this is built to expose or to rule out.
+       *
+       * Takes WORLD coordinates and converts per WMO, because that conversion is itself a candidate:
+       * `local` is printed so it can be checked against the group box that is being tested.
+       */
+      window.groupProbe = (x, y, z) => {
+        const world = new THREE.Vector3(x, y, z);
+        const rows = [];
+        for (const wmo of this.wmoManager.entries.values()) {
+          if (!wmo.views.root) continue;
+          const local = wmo.views.root.worldToLocal(world.clone());
+          if (!wmo.root.boundingBox.containsPoint(local)) continue;
+          for (const group of wmo.groups.values()) {
+            if (!group.boundingBox.containsPoint(local)) continue;
+            let query = null;
+            let threw = null;
+            try {
+              query = group.bspTree.queryBoundedPoint(local, group.boundingBox);
+            } catch (e) {
+              threw = String(e && e.message);
+            }
+            const flags = group.header.flags;
+            rows.push({
+              index: group.index,
+              flags: `0x${flags.toString(16)}`,
+              exterior: (flags & 0x8) !== 0,
+              local: [local.x, local.y, local.z].map((v) => Number(v.toFixed(2))),
+              boxZ: [group.boundingBox.min.z, group.boundingBox.max.z].map((v) => Number(v.toFixed(2))),
+              queryNull: query === null,
+              zMin: query && query.z.min === null ? null : (query ? Number(query.z.min.toFixed(2)) : null),
+              zMax: query && query.z.max === null ? null : (query ? Number(query.z.max.toFixed(2)) : null),
+              portalRefs: group.portalRefs ? group.portalRefs.length : null,
+              threw,
+            });
+          }
+        }
+        return rows;
+      };
+
       window.wmoReport = () => {
         const out = [];
         for (const wmo of this.wmoManager.entries.values()) {
