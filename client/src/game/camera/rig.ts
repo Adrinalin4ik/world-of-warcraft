@@ -183,6 +183,15 @@ export function selfFadeAlpha(cameraToPivot: number): number {
   return Math.min(1, Math.max(0, t));
 }
 
+/**
+ * How far above the eye to look for a floor it has ended up under (yd).
+ *
+ * Only ever a rescue from a wrong state, so it needs to cover the depth the boom can sink through a
+ * floor in one frame and no more. Two yards is a body height: deeper than any single-frame slip and
+ * shallow enough that a legitimately low camera under a high ceiling is never touched.
+ */
+const FLOOR_CLAMP_REACH = 2.0;
+
 const _up = new THREE.Vector3(0, 0, 1);
 
 /**
@@ -209,11 +218,16 @@ export function seatCamera(
     head: THREE.Vector3;
     pivotHeight: number;
     cast: CastFn;
+    /**
+     * A WALK-audience cast, for the floor clamp below. Optional, so every caller without a world --
+     * and every camera test -- is unchanged.
+     */
+    floorCast?: CastFn;
     dt: number;
   },
 ): { position: THREE.Vector3; quaternion: THREE.Quaternion } {
   const {
-    feet, head, pivotHeight, cast, dt,
+    feet, head, pivotHeight, cast, floorCast, dt,
   } = opts;
 
   // Z-up forward from yaw (about Z) and pitch.
@@ -245,6 +259,37 @@ export function seatCamera(
 
   const frac = Math.min(1, Math.max(0, rig.collisionDistance / boomLength));
   const position = head.clone().addScaledVector(boom, frac);
+
+  /**
+   * **THE EYE MAY NOT SIT UNDER A FLOOR THE BODY CAN STAND ON.**
+   *
+   * The owner, with the picture that finally settled it: "я стою на полу, но вижу что под ним" --
+   * the stone slab's edge across the middle of the screen, terrain below it, the room above, and
+   * himself standing in the doorway. Everything was being drawn correctly. The EYE was underneath.
+   *
+   * It gets there legitimately, and that is why the boom sweep cannot stop it: the camera audience
+   * drops `NOCAMCOLLIDE` faces -- "faces the player stands on but the camera passes through"
+   * (`collision/layers.ts`) -- and parts of a WMO floor carry that bit in the game's own data. The
+   * sweep is doing exactly what it is told; the faces are simply not in its set.
+   *
+   * So the clamp asks the WALK audience instead, which by definition contains the floor the body is
+   * standing on. One upward probe from the seated eye: a face within `FLOOR_CLAMP_REACH` whose
+   * normal points DOWN is an underside, so the eye is beneath a floor, and it is lifted to sit
+   * `CAM_COLLISION_RADIUS` above that face -- the same margin the boom keeps from everything else.
+   *
+   * WHY UPWARD AND NOT A Z FLOOR AT THE FEET: a bridge, a balcony, a stair overhang. Clamping the
+   * eye to the player's height would forbid every legitimate low camera; asking what is directly
+   * overhead forbids only the one arrangement that is wrong.
+   *
+   * Optional by design. Without a `floorCast` the behaviour is exactly what it was, so the movement
+   * and camera unit tests -- which have no world -- are untouched.
+   */
+  if (floorCast !== undefined) {
+    const above = floorCast(position, _up, FLOOR_CLAMP_REACH);
+    if (above !== null && above.normal.z < 0) {
+      position.z += above.distance + CAM_COLLISION_RADIUS;
+    }
+  }
 
   rig.selfFadeAlpha = selfFadeAlpha(position.distanceTo(pivot));
 

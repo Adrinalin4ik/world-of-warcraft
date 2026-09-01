@@ -867,6 +867,9 @@ class Controls extends React.Component<IProp> {
       head,
       pivotHeight: headHeight(null, 1),
       cast: collisionWorld.castFor(CollisionLayer.Camera, CAM_COLLISION_RADIUS, 0),
+      // The WALK audience, for the floor clamp -- it holds the faces the camera set drops
+      // (`NOCAMCOLLIDE`), which is exactly the floor the eye must not end up beneath.
+      floorCast: collisionWorld.castFor(CollisionLayer.Walk, CAM_COLLISION_RADIUS, 0),
       dt: delta,
     });
 
