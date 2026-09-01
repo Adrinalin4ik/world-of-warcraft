@@ -23,6 +23,7 @@ import {
 import { pickUnit, pickUnitReport, drawnWorldBox } from '../../game/world/pick';
 import { CAM_NEAR } from '../../game/camera/rig';
 import { collisionWorld } from '../../game/collision/collision-world';
+import cancelCastOnMove from '../../game/classes/cast-cancel';
 import { CollisionLayer } from '../../game/collision/types';
 import { wantsDebugPanels } from '../debug-flags';
 import { REACTION_NEUTRAL, primeFactionTemplates, reactionFor } from '../../game/world/faction';
@@ -457,6 +458,17 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
 
   /** The EditBox that owns the keyboard, or null. See `controls.tsx#onKeyDown`. */
   private uiKeyboardFocus = (): string | null => this.ui?.keyboardFocus ?? null;
+
+  /**
+   * A cancel-worthy movement edge -- the cast self-cancel's trigger. `controls.tsx` decides WHICH edges
+   * qualify (turn and pitch do not); `cast-cancel.ts` decides whether the cast in flight is one that
+   * movement breaks. This is only the wire between them.
+   */
+  private onMoveStart = (): void => {
+    if (this.game?.world) {
+      cancelCastOnMove(this.game.world);
+    }
+  };
 
   /**
    * The pick's options, built per click.
@@ -1221,6 +1233,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
             onWorldRightClick={this.onWorldRightClick}
             uiCapturedPress={this.uiCapturedPress}
             uiKeyboardFocus={this.uiKeyboardFocus}
+            onMoveStart={this.onMoveStart}
           />
           { this.showDebug && !this.isMobile && <DebugPanel ref={this.debugPanel} renderer={renderer} game={this.game}></DebugPanel>}
           { this.showDebug &&

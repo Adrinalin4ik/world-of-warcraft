@@ -126,6 +126,34 @@ const COL = {
   attributes: 4,
   castingTimeIndex: 28,
   /**
+   * `InterruptFlags` -- what BREAKS a cast in progress. Bit 0x1 is
+   * `SPELL_INTERRUPT_FLAG_MOVEMENT`, the movement self-cancel's gate (`game/classes/cast-cancel.ts`).
+   *
+   * **Column 31 is MEASURED, not ported.** The reference is 1.12 and states the field as `SpellRec+0x54`
+   * (`samples/benilla/crates/benilla-app/src/ui_cast.rs:336`), which is a 1.12 byte offset and says
+   * nothing about a 3.3.5a column index. What pins it is that the reference also records four
+   * byte-verified VALUES -- "Heroic Strike 78, Cleave 845, Raptor Strike 2973 all ship `InterruptFlags =
+   * 0x0` ... vs Fireball's `0xf`" (`ui_cast.rs:447-450`) -- and column 31 is the **only** column in the
+   * served 3.3.5a `Spell.dbc` that satisfies all four at once: a scan of columns 1-59 for
+   * `spell[133] == 0xf && spell[78] == spell[845] == spell[2973] == 0` returns exactly `[31]`.
+   *
+   * It corroborates the declaration independently: `dbc/entities/spell.js` reaches `interruptFlags` at
+   * declared index 31 by its own field arithmetic, and so does `speed` at 47 (Fireball reads 24.0 there),
+   * which was checked in the same pass.
+   */
+  interruptFlags: 31,
+  /**
+   * `ChannelInterruptFlags` -- what breaks a CHANNEL. Bit 0x8 is `AURA_INTERRUPT_FLAG_MOVE`, the
+   * channel half of the movement cancel (`ui_cast.rs:337`).
+   *
+   * Two columns after `interruptFlags`, with `AuraInterruptFlags` between them, which is the order
+   * `dbc/entities/spell.js:37-39` declares. Read back off the served file, every channelled spell
+   * checked carries **0x7c0c** here -- Mind Flay 15407, Drain Life 689, Health Funnel 755, Hellfire
+   * 1949 -- and `0x7c0c & 0x8` is set, so movement cancels all four. Fireball (not a channel) and
+   * Heroic Strike both read 0.
+   */
+  channelInterruptFlags: 33,
+  /**
    * `SpellLevel` -- the character level this rank of the spell is learned at.
    *
    * Read for ONE purpose: deciding which member of a rank family is the HIGHEST rank, which the
@@ -384,6 +412,10 @@ export interface SpellRow {
   visualID: number;
   /** `SpellCastTimes.dbc` id. Read for a later round; cast TIME is deferred. */
   castingTimeIndex: number;
+  /** `InterruptFlags`. Bit 0x1 = movement breaks the cast. See `COL.interruptFlags`. */
+  interruptFlags: number;
+  /** `ChannelInterruptFlags`. Bit 0x8 = movement breaks the channel. See `COL.channelInterruptFlags`. */
+  channelInterruptFlags: number;
   powerType: number;
   manaCost: number;
   /** `Category`. 0 for a spell in no shared-cooldown group. */
@@ -772,6 +804,8 @@ class SpellData {
         iconID: col(COL.iconID),
         visualID: col(COL.visual),
         castingTimeIndex: col(COL.castingTimeIndex),
+        interruptFlags: col(COL.interruptFlags),
+        channelInterruptFlags: col(COL.channelInterruptFlags),
         powerType: col(COL.powerType),
         manaCost: col(COL.manaCost),
         category: col(COL.category),

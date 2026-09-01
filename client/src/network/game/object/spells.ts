@@ -519,7 +519,10 @@ export class SpellHandler extends EventEmitter {
    *
    * A no-op is the common and correct outcome: most refusals concern a spell that never started.
    */
-  private releaseCastPose(casterGuid: string, spellId: number): void {
+  releaseCastPose(casterGuid: string | null, spellId: number): void {
+    if (casterGuid === null) {
+      return;
+    }
     const pose = this.castPose.get(casterGuid);
     if (pose === undefined || pose.spellId !== spellId) {
       return;
@@ -1288,6 +1291,18 @@ export class SpellHandler extends EventEmitter {
    */
   currentCast(): number | null {
     return this.pendingCast.current(Date.now());
+  }
+
+  /**
+   * Open the in-flight guard without sending anything -- the OFFLINE world's cancel leg.
+   *
+   * `/game?offline=1` has no wire, so `cancelCast` (which opens the guard as a side effect of sending)
+   * is not called there. Without this the guard would stay armed until its 5 s provisional deadline and
+   * casting would appear to lock up after the first cancelled cast. Spell-id-keyed like every other
+   * clear, so it cannot open a guard belonging to a later cast.
+   */
+  releaseCastGuard(spellId: number): void {
+    this.pendingCast.clearIf(spellId);
   }
 
   // -- What the Lua side reads --------------------------------------------------------------------

@@ -65,6 +65,17 @@ interface IProp {
    * every key -- the same fallback `uiCapturedPress` takes.
    */
   uiKeyboardFocus?: () => string | null;
+  /**
+   * A cancel-worthy MOVEMENT EDGE just happened: a directional start (forward / backward / strafe) or a
+   * jump-key press. Fired once per edge, never while a key is merely held.
+   *
+   * The one consumer is the cast self-cancel (`game/classes/cast-cancel.ts`), which is why the
+   * membership of "cancel-worthy" is not this file's to choose: the real client's interrupt mask is
+   * `0x10f0` = {forward, backward, strafe L, strafe R, autorun}, and **TURN and PITCH are outside it**.
+   * That is exactly the split this file already computes below -- `strafe` versus `turning` -- so the
+   * edge is taken from those two and a keyboard turn deliberately raises nothing.
+   */
+  onMoveStart?: () => void;
 }
 
 /** One press, as `captureLog` records it. */
@@ -137,6 +148,15 @@ class Controls extends React.Component<IProp> {
 
   /** Edge-triggered: the swim breach fires once per PRESS, never on a held key. */
   private jumpPressed = false;
+
+  /**
+   * Whether a DIRECTIONAL key was down last frame -- forward, backward or strafe, never turn.
+   *
+   * The cast self-cancel wants the START of movement, so it needs the 0 -> nonzero transition and not
+   * "is moving": a cast begun while already running must not be cancelled by the same key still being
+   * held. See `onMoveStart` in `IProp` for why turn is excluded.
+   */
+  private wasDirectional = false;
 
   /** Pointer lock already asked for in this look session. See the request site for why. */
   private lockRequested = false;
@@ -680,6 +700,17 @@ class Controls extends React.Component<IProp> {
       - (this.held('KeyD', 'ArrowRight') ? 1 : 0);
     const strafe = mouselook ? strafeKeys + turnKeys : strafeKeys;
     const turning = mouselook ? 0 : turnKeys;
+
+    // THE CAST SELF-CANCEL'S EDGE. Computed here, at the one place that knows which keys turned and
+    // which translated -- the distinction the real client's `0x10f0` interrupt mask draws and that a
+    // downstream "is the player moving" test could not recover. The jump key is in the mask too
+    // (`Script::Jump 0x513bd0` inlines the same gate) and fires on the PRESS, which is what
+    // `jumpPressed` already is -- it is read here before the frame loop clears it below.
+    const directional = forward !== 0 || strafe !== 0;
+    if ((directional && !this.wasDirectional) || this.jumpPressed) {
+      this.props.onMoveStart?.();
+    }
+    this.wasDirectional = directional;
 
     if (turning !== 0) {
       const rate = TURN_RATE * (this.isTranslating(forward, strafe) ? TURN_RATE_MOVING : 1);
