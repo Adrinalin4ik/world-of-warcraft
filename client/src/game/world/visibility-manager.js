@@ -33,6 +33,9 @@ class VisibilityManager {
     /** Consecutive frames the eye has resolved exterior, for that latch. */
     this.exteriorRun = 0;
 
+    /** This frame's camera frustum, for the deferred-exterior arm. Set at the top of `cull`. */
+    this.cameraFrustum = null;
+
     this.stats = {
       map: {
         visibleChunks: 0,
@@ -117,6 +120,10 @@ class VisibilityManager {
     // var cameraVec4 = vec4.fromValues(camera.position.x, camera.position.y, camera.position.z,1);
     // var dist = vec4.dot(nearPlane, cameraVec4);
     // nearPlane.constant -= dist;
+
+    // Held for the deferred-exterior arm inside the interior flood: the outside is bounded by the
+    // CAMERA's frustum, never by the doorway it was reached through. See the block there.
+    this.cameraFrustum = frustum;
 
     if (camera.location.type === 'exterior') {
       this.enablePortalsFromExterior(0, camera, frustum);
@@ -354,7 +361,29 @@ class VisibilityManager {
       destinationView.visibleFrame = this.frame;
 
       if (exteriorDestination && camera.location.type !== 'exterior') {
-        this.enablePortalsFromExterior(depth + 1, camera, this.frustumFromRect(nextRect));
+        /**
+         * **THE DEFERRED EXTERIOR IS NOT NARROWED BY THE DOORWAY IT WAS REACHED THROUGH.**
+         *
+         * This passed `frustumFromRect(nextRect)` -- the doorway's own narrow window -- and culled the
+         * terrain with it. So the ADT chunk the player is STANDING ON was culled, because it is behind
+         * him relative to the door he can see out of.
+         *
+         * That is the void in his screenshots, and the probe named it: an invisible mesh at distance
+         * ZERO from his feet, 33.3 x 33.3 yd -- exactly one ADT chunk, 533.33/16 -- under
+         * `ExteriorView / WorldMap`. Not the WMO floor at all, which is why the abbey's own floor was
+         * still drawn around the NPC while the ground in front of him was not. Four portal-graph fixes
+         * did not move it because the graph was never wrong about it.
+         *
+         * The reference enables the exterior WHOLESALE once any doorway onto it is reached -- its
+         * deferred-window gate is a boolean, and the loop that spends it carries no rect at all:
+         * `if deferred_exterior { for g in nav { if g.flags & EXTERIOR != 0 { visible[g] = true } } }`
+         * (`benilla-world/src/wmo_portal/mod.rs:734-740`). The doorway decides WHETHER the outside is
+         * drawn, never HOW MUCH of it.
+         *
+         * So the camera's own frustum is what bounds it, which is the ordinary exterior pass -- the
+         * same one a player standing outside gets.
+         */
+        this.enablePortalsFromExterior(depth + 1, camera, this.cameraFrustum);
       }
 
       this.traversePortalsAndEnable(depth + 1, camera, wmo, destination, nextRect, group.index, budget);
