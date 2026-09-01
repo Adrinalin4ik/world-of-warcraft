@@ -1,3 +1,4 @@
+import { beginSection, endSection } from '../../../perf/anim-section';
 import * as THREE from 'three';
 import MapLight from '../../../world/light/MapLight';
 import { CloudFrame, CloudKernel, Vec3Like, occ1Sun, occ1Moon } from '../../../world/sky/clouds/kernel';
@@ -248,6 +249,20 @@ class SkyManager {
   public update(camera: THREE.Camera, mapID: number, dt: number = 0): void {
     if (!this.isEnabled) return;
 
+    /**
+     * **FIVE SPANS, EXHAUSTIVE OF `w.sky`, for the reason this codebase already learned once.**
+     *
+     * `w.sky` measured **2.3 ms** on the owner's panel while he walked the abbey stairs and **0.1 ms**
+     * standing still elsewhere. The sky cannot depend on a staircase, so one of the six things below
+     * depends on the CAMERA MOVING -- and from outside there is no way to say which, exactly as
+     * `world.animate` was unreadable until Task 9 split it into seven ("five samples of one unchanged
+     * build spanned 7.3-15.5 ms").
+     *
+     * Deliberately exhaustive, like those seven: every statement of this update sits inside exactly
+     * one span, so their sum reconstructs `w.sky` to within the timestamp overhead. If a statement is
+     * ever added outside all five, the sum stops matching and that is the intended tell.
+     */
+    beginSection('sky.dome');
     if (this.currentMethod === 'cone' && this.skyCone) {
       this.skyCone.update(camera, mapID);
     } else if (this.currentMethod === 'procedural' && this.proceduralSky) {
@@ -255,14 +270,25 @@ class SkyManager {
     } else if (this.currentMethod === 'skybox' && this.skybox) {
       this.skybox.update(camera, mapID);
     }
+    endSection('sky.dome');
 
+    beginSection('sky.clouds');
     this.updateClouds(camera, dt);
+    endSection('sky.clouds');
+
+    beginSection('sky.celestial');
     this.updateCelestialBodies(camera, dt);
+    endSection('sky.celestial');
 
     // Task 6 Steps 1-2: resolve/build whichever skybox this frame wants. Both are no-ops (stay
     // invisible) when neither the zone nor any WMO names one active right now.
+    beginSection('sky.zonebox');
     this.zoneSkybox.update(camera, mapID);
+    endSection('sky.zonebox');
+
+    beginSection('sky.wmobox');
     this.wmoSkybox.update(camera, this.wmoManagerRef);
+    endSection('sky.wmobox');
 
     // The two backdrops are MUTUALLY EXCLUSIVE, and the WMO one wins. A zone can name a
     // `LightSkybox` while the camera also stands somewhere whose portal flood reaches a group asking
