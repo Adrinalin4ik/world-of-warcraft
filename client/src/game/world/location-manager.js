@@ -48,10 +48,28 @@ class LocationManager {
    * that used to fall through to "outdoors" and draw the world from the wrong room.
    */
   locateCamera(camera, bodyPoint = null) {
-    let location = this.locateAt(camera.position);
+    /**
+     * **THE BODY GOES FIRST. Trying the eye first put the seed in the wrong room every time, and the
+     * abbey's own file says why.**
+     *
+     * MOGI, decoded from `nsabbey.wmo`: group 0's bounding box is `x[-28.8, 11.9] y[-11.1, 31.0]
+     * z[1.5, 23.9]` -- the ENTIRE BUILDING. A third-person eye eight yards behind the player lands
+     * inside it from almost anywhere, resolves a floor there, and wins. Measured: seed 0 while the
+     * body's own probe resolved group 1 with a real floor at 1.87, and group 1's box is `x[-18.4,-2.0]
+     * y[4.1, 20.6]` -- an actual room.
+     *
+     * The reference seeds from the eye and is right to: its boom stops at every collidable face, so its
+     * eye is in the room the body is in. Ours passes `NOCAMCOLLIDE` geometry by design
+     * (`collision/layers.ts`) and sits eight yards back, so the eye is routinely in a different group --
+     * and with one group's box spanning the whole model, "a different group" means "the wrong one".
+     *
+     * The eye is still tried when the body resolves nothing, which covers a body mid-air or in geometry
+     * the BSP cannot place. Ordering is the whole change.
+     */
+    let location = bodyPoint ? this.locateAt(bodyPoint) : null;
 
-    if (!location && bodyPoint) {
-      location = this.locateAt(bodyPoint);
+    if (!location) {
+      location = this.locateAt(camera.position);
     }
     if (location) {
       camera.location = location;
