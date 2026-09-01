@@ -249,9 +249,24 @@ class Controls extends React.Component<IProp> {
         const angle = (i * 10 * Math.PI) / 180;
         const dir = new THREE.Vector3(Math.cos(angle), Math.sin(angle), 0);
         const hit = cast(centre, dir, PROBE);
-        if (hit === null) {
+        /**
+         * **A HIT AT 0.22 YD IS ROOM TO WALK, NOT A WALL -- and counting it as blocked made me
+         * read a POCKET as a cage.**
+         *
+         * Under the abbey stairs the report said 0 of 36 free, and seven of those bearings were hits
+         * at 0.049 to 0.225 yd: a fifth of a yard of clearance, against the terrain, with walkable
+         * normals. Only five bearings were at zero -- the underside of the stone ramp. The body was
+         * in a narrow pocket it could shuffle inside, which is a different defect from the fence,
+         * where all thirty-six really were zero.
+         *
+         * So a bearing is FREE if it has room, blocked only if the contact is immediate. The
+         * threshold is one frame of walking: at 7 yd/s and 60 Hz that is about 0.117, so anything
+         * under a tenth of a yard cannot even be stepped into.
+         */
+        if (hit === null || hit.distance > 0.1) {
           free += 1;
-        } else {
+        }
+        if (hit !== null) {
           if (firstSource === null) {
             firstSource = hit.source;
           }
@@ -274,7 +289,10 @@ class Controls extends React.Component<IProp> {
       return {
         feet: [move.pos.x, move.pos.y, move.pos.z].map((v) => Number(v.toFixed(3))),
         freeBearings: free,
-        blockedBearings: blocked.length,
+        // Every bearing with any contact inside the probe, free or not -- the `d` on each row says
+        // which. `freeBearings` is the one to read for "can I leave".
+        contactBearings: blocked.length,
+        blockedAtZero: blocked.filter((b) => b.d <= 0.1).length,
         // Every SECOND bearing, so twenty degrees of the circle fit in one readable object and
         // opposed directions (0 and 180) are both present -- which is the pair that matters.
         blocked: blocked.filter((_, i) => i % 3 === 0),
