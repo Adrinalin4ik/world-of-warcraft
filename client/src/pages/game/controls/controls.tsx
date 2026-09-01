@@ -722,10 +722,34 @@ class Controls extends React.Component<IProp> {
       // here.
       const elapsed = now - (player.move.settleDeadline - SETTLE_TIMEOUT);
 
-      if (resident
-        || (groundStreamed && elapsed >= SETTLE_TIMEOUT)
-        || elapsed >= SETTLE_STREAM_TIMEOUT) {
+      const byTerrain = groundStreamed && elapsed >= SETTLE_TIMEOUT;
+      const byCap = elapsed >= SETTLE_STREAM_TIMEOUT;
+      if (resident || byTerrain || byCap) {
         player.move.settling = false;
+
+        /**
+         * **THE RELEASE ANNOUNCES ITSELF, because a post-load fall cannot be trapped by hand.**
+         *
+         * Every other instrument in this area is armed from the console, and a page reload clears
+         * the console while the fall happens in the first second of the world. So the one event that
+         * decides it has to speak for itself: which of the three conditions fired, how long the hold
+         * lasted, whether the terrain was registered, and how far the floor probe reached.
+         *
+         * `resident` releasing at once with `ground: false` is the shape of the defect -- a floor
+         * within five yards but no registered terrain means a WMO floor and nothing under it yet.
+         * `byTerrain` after six seconds means the probe never found a floor and we let go on the
+         * timer, which is a legitimate cliff OR a floor that never arrived. `byCap` at thirty is the
+         * backstop and always worth knowing about.
+         *
+         * Once per teleport or world entry, so it adds nothing to a running session.
+         */
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[settle] released by ${resident ? 'floor' : (byTerrain ? 'terrain-timeout' : 'cap')}`
+          + ` after ${elapsed.toFixed(2)}s -- floorWithin${SETTLE_FLOOR_REACH}yd=${resident},`
+          + ` terrainRegistered=${groundStreamed},`
+          + ` at ${player.move.pos.x.toFixed(1)}, ${player.move.pos.y.toFixed(1)}, ${player.move.pos.z.toFixed(1)}`,
+        );
       }
     }
 
