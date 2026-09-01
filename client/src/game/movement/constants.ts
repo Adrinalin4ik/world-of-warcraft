@@ -278,15 +278,29 @@ export const SETTLE_STREAM_TIMEOUT = 30.0;
  * the time that floor arrives. Which is the owner's "проваливаюсь под текстуры после загрузки",
  * exactly.
  *
- * Five yards is local enough to mean the floor the body will actually stand on, and loose enough
- * for the gap between the server's Z and our own collision surface, which is a fraction of a yard
- * in practice.
+ * **AND FIVE YARDS WAS STILL FOUR AND A HALF TOO MANY, because the probe is a CAPSULE CAST.** Its
+ * distance is not "how far below me is a surface" -- it is HOW FAR THE BODY MUST FALL TO LAND. A
+ * correctly seated body measures **zero**. So the reach is not a search radius; it is the drop we are
+ * willing to call "already standing on it".
+ *
+ * Measured, with the sink trap armed from world entry: the trap never fired and `penetration` was 0
+ * on every frame -- the body was never INSIDE anything. It simply fell from 82.0, where the hold
+ * released, to 80.57, and stood there on terrain with `nearest.normalZ` 0.9995. It fell 1.43 yd
+ * through the place the staircase was going to be. Five yards happily called that terrain "the floor
+ * I am standing on".
+ *
+ * Which is exactly the owner's own generalisation -- "проблема присутствует со всеми объектами, кроме
+ * земли wdt". The terrain streams first, so a spawn on ANY building or doodad releases on the ground
+ * beneath it and drops onto that instead. Nothing about it is specific to a staircase.
+ *
+ * Half a yard covers the gap between the server's Z and our own collision surface -- centimetres in
+ * practice -- and rejects a fall of 1.43.
  *
  * Nothing hangs on being conservative here, and that asymmetry is why the number can be tight: a
  * probe that finds nothing does not freeze the body for ever -- it falls through to the two
  * timeouts below it, which release on the terrain being registered, and then unconditionally.
  */
-export const SETTLE_FLOOR_REACH = 5.0;
+export const SETTLE_FLOOR_REACH = 0.5;
 
 /** Max contact iterations one collide-and-slide resolves before giving up on the remainder. */
 export const MAX_SLIDE_ITERATIONS = 4;
