@@ -506,10 +506,33 @@ class M2Material extends THREE.ShaderMaterial {
       this.uniforms.fogModifier.value = 0.0;
     }
 
-    // Flag 0x04 (no backface culling)
+    // Flag 0x04 (no backface culling) -- CULLING ONLY. It used to also set `transparent = true`,
+    // and that is the defect the owner's "hides behind the particle from some angles" turned out to
+    // be. Two-sidedness says nothing about blending: `applyBlendingModeToMaterial` below is what
+    // owns `transparent`, and it sets it for exactly `blendingMode >= 1`.
+    //
+    // WHAT IT COST. `DemonArmor_Impact_Head`'s shield is TWO submeshes: material 0 is
+    // `blendingMode 0` (OPAQUE) with `renderFlags 0x07`, and material 1 is `blendingMode 4`
+    // (ADD_ALPHA) with `0x13`. The 0x07 includes 0x04, so the OPAQUE half was forced transparent and
+    // dropped into the transparent pass -- where three depth-sorts it against the particle batches by
+    // comparing one mesh origin with one batch origin, and the comparison flips as the camera circles
+    // a model whose mesh and emitters share an origin. Identical geometry, opposite outcome.
+    //
+    // IN THE OPAQUE PASS BOTH CASES COME OUT RIGHT WITH NO SORTING AT ALL. The mesh draws first and
+    // writes depth (it has no 0x10 bit, so `depthWrite` stays true); a particle behind it is then
+    // depth-rejected -- `depthTest` is three's default on (`particle/material.ts:174`) -- and a
+    // particle in front is drawn after and covers it. That is also how the reference is structured:
+    // it derives `no_depth_write` from flag 0x10 and `no_depth_test` from 0x08
+    // (`benilla-assets/src/model.rs:104-108`) and chooses the PASS from the blend mode
+    // (`AlphaMode::Add` for additive batches, `model.rs:94`; `AlphaMode::Opaque` = "depth-LEQUAL +
+    // depth-write, no blend", `materials.rs:455`). Nothing in it takes a pass from two-sidedness.
+    //
+    // BLAST RADIUS, measured: of 2377 materials across the served corpus, **132 (5.6%)** are
+    // `blendingMode 0` AND two-sided, so exactly those move from the transparent pass to the opaque
+    // one. 766 (32.2%) are two-sided in total, but the 634 with a real blend mode keep `transparent`
+    // from the blend and are untouched.
     if (renderFlags & 0x04) {
       this.side = THREE.DoubleSide;
-      this.transparent = true;
     }
 
     // Flag 0x10 (no z-buffer write)

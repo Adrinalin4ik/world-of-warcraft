@@ -772,6 +772,13 @@ export class SpellKitEffects {
       // sort -- which compares one batch origin against one mesh origin and flips as the camera
       // circles a model whose mesh and emitters share an origin.
       //
+      // AND THE ANSWER WAS THE PASS, NOT A SORT. The shield's opaque submesh was being forced into
+      // the TRANSPARENT pass by `applyRenderFlags`' flag-0x04 branch, which set `transparent = true`
+      // off the TWO-SIDED bit. In the opaque pass it writes depth first and both particle cases come
+      // out right with no ordering at all -- see `m2/material/index.ts`' 0x04 branch for the
+      // measurement and the reference citations. So neither of the two options below is needed for
+      // this report, and `priorityPlane` stays unread.
+      //
       // THE HOOK IS AVAILABLE AND CLEAN, which the coordinator was right to ask about: `renderOrder`
       // is set NOWHERE in the model or particle path, and neither `map.particleGroup` nor the M2's
       // ancestors set it, so both subtrees have `groupOrder` 0 and a per-object `renderOrder` would
