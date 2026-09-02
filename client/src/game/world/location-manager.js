@@ -363,6 +363,35 @@ class LocationManager {
           tightest = candidate;
         }
       }
+
+      /**
+       * **THE SHELL RULE APPLIES HERE TOO, and leaving it off this path is what switched the whole
+       * outdoors off while the owner stood on the abbey steps.**
+       *
+       * His own `voidReport()`, taken in that frame:
+       *
+       *   {"loc":"interior","group":5,"exteriorVisible":false,"chunksLoaded":441,"chunksDrawn":0}
+       *
+       * Group 5 is the abbey's EXTERIOR shell, so "interior, group 5" is a contradiction in terms --
+       * and `addCandidates` stamps every candidate `type: 'interior'`, so returning one raw from this
+       * branch asserts it. `VisibilityManager#update` then takes the interior branch,
+       * `enablePortalsFromExterior` never runs, and **441 loaded terrain chunks draw none**. That pair
+       * of numbers is what made this diagnosable: loaded-but-not-drawn rules out streaming, which the
+       * screenshot could not.
+       *
+       * The rule below is the same one the `valid` path already applies twenty lines down. The last
+       * round put it there and not here, and the two paths are reached by different inputs: `valid` is
+       * empty exactly when no group resolved a floor, which is what standing on outdoor steps looks
+       * like from the BSP's point of view.
+       *
+       * Reproduced offline before fixing (`harness/shell-as-interior.test.js`, real `nsabbey` bytes):
+       * **465 of 1755 sampled positions in front of the abbey returned an interior verdict naming an
+       * exterior group, and the outdoors was dark in all 465.**
+       */
+      if (tightest && (tightest.wmo.group.header.flags & WmoFlags.visibilityMask) !== 0) {
+        return { type: 'exterior' };
+      }
+
       return tightest;
     }
 
