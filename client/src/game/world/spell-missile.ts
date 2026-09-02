@@ -100,14 +100,13 @@ import type Unit from '../classes/unit';
  * NOT MEASURED and named as owed: the millisecond cost of the projectile models' own emitters inside
  * `ParticleManager#animate`. That needs the models parsed in a browser.
  *
- * ## The floating-promise warning
+ * ## The floating-promise warning, closed
  *
- * `particleManager?.register(model)` below is called from inside a `.then` handler and starts a
- * texture load it cannot return, which is what bluebird warns about. It is NOT an unhandled rejection
- * -- `ParticleMaterial` terminates its own chain with a logging `.catch`
- * (`particle/material.ts:119-133`) -- and no caller can await it because `register` is synchronous.
- * The full finding, and why it is reported rather than worked around, is in
- * `world/spell-kit-effects.ts`.
+ * `register` below starts a texture load per emitter from inside a `.then` handler, which is what
+ * Bluebird reported. The handler now RETURNS `ParticleManager#ready`, joining the chain instead of
+ * silencing the report; the handle never rejects and does not gate the flight, so a projectile's
+ * first frames still draw with the placeholder texture exactly as before. The whole finding is in
+ * `world/spell-kit-effects.ts` and the contract is on `particle/manager.ts#ready`.
  *
  * ## No material is written
  *
@@ -139,6 +138,8 @@ const BODY_HEIGHT = 1.2;
 interface ParticleManager {
   register: (instance: unknown) => number;
   unregister: (instance: unknown) => void;
+  /** The readiness handle -- see `pipeline/m2/particle/manager.ts#ready`. Never rejects. */
+  ready: (instance: unknown) => Promise<void>;
 }
 
 /** One projectile in flight. */
@@ -384,6 +385,9 @@ export class SpellMissiles {
         // Without this a PARTICLE model draws nothing at all -- and a projectile is one.
         particleManager?.register(model);
         missile.model = model;
+        // RETURNED, not orphaned -- the same reason as `spell-kit-effects.ts`, and the handle never
+        // rejects and does not gate the flight. See `ParticleManager#ready`.
+        return particleManager?.ready(model);
       })
       .catch((e) => {
         this.stats.failed += 1;

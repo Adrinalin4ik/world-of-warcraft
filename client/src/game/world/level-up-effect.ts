@@ -105,7 +105,9 @@ export class LevelUpEffect {
   play(
     position: THREE.Vector3,
     particleManager: { register: (instance: unknown) => number;
-      unregister: (instance: unknown) => void; } | null,
+      unregister: (instance: unknown) => void;
+      /** See `pipeline/m2/particle/manager.ts#ready`. Never rejects. */
+      ready: (instance: unknown) => Promise<void>; } | null,
   ): void {
     const at = position.clone();
     void M2Blueprint.load(LevelUpEffect.MODEL)
@@ -124,6 +126,12 @@ export class LevelUpEffect {
           particleManager.register(model);
         }
         this.live.push({ model, manager: particleManager, remaining: LevelUpEffect.DURATION_MS });
+        // RETURNED, not orphaned: `register` starts a texture load per emitter and this runs inside a
+        // `.then`, so returning the readiness handle is what stops Bluebird reporting a promise
+        // created in a handler and never returned. It never rejects and does not gate the burst --
+        // see `ParticleManager#ready`. `LevelUp.mdl` has five emitters, so this lane produced five of
+        // those warnings per level.
+        return particleManager?.ready(model);
       })
       .catch((e) => {
         // `M2Blueprint.load` logs its own failure. A missing effect model is a missing burst, not a

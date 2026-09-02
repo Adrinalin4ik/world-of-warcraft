@@ -174,6 +174,21 @@ class DoodadManager {
       if (doodad.animated || doodad.billboards.length > 0) {
         this.enableDoodadAnimations(entry.id, doodad);
       }
+
+      // RETURNED, not orphaned. `particleManager.register` above builds a `ParticleMaterial` per
+      // emitter and each one starts a texture load, so registering from inside this `.then` created a
+      // promise nothing returned -- which Bluebird reports as "a promise was created in a handler ...
+      // but was not returned from it". Returning the readiness handle joins the chain instead.
+      //
+      // THIS IS THE ZONE-LOAD LANE, so the cost matters and was measured rather than assumed: it is
+      // one `WeakMap` read per doodad, and `ready` hands back the material's OWN already-existing
+      // promise when a doodad has a single emitter, allocating nothing. See
+      // `pipeline/m2/particle/manager.ts#ready`.
+      //
+      // The handle never rejects, and here that is not a nicety: this chain has no `.catch` of its
+      // own, so a rejecting handle would turn a missing particle texture into an unhandled rejection
+      // at zone-load scale. `ParticleMaterial#ready` carries that requirement.
+      return this.map.particleManager ? this.map.particleManager.ready(doodad) : undefined;
     });
   }
 

@@ -125,28 +125,31 @@ import type Unit from '../classes/unit';
  * per-instance millisecond cost. That needs the models parsed in a browser. The number is owed and is
  * named as owed rather than estimated -- the same standing `level-up-effect.ts` takes for its own.
  *
- * ## THE FLOATING-PROMISE WARNING IS REAL, AND IT IS NOT AN UNHANDLED REJECTION
+ * ## THE FLOATING-PROMISE WARNING, NOW CLOSED AT ITS SOURCE
  *
- * The owner's console carries, from this spawn path:
+ * The owner's console used to carry, from this spawn path:
  *
  *     Warning: a promise was created in a handler at bundle.js:100618:89 but was not returned from it
  *       at new ParticleMaterial -> ParticleManager.register -> SpellKitEffects.spawn
  *
- * Read rather than assumed, and the brief's framing of it ("a failure there is unhandled") does not
- * survive the read. `ParticleMaterial`'s constructor starts `TextureLoader.load(...)` and **already
- * terminates that chain with a `.catch` that logs** (`particle/material.ts:119-133`), so a texture
- * 404 is handled, not swallowed. What the warning reports is the other thing bluebird warns about: a
- * new promise chain was begun inside a `.then` handler and not returned, so nothing can await it.
+ * It was never an unhandled rejection: `ParticleMaterial` terminates its own texture chain with a
+ * logging `.catch` (`particle/material.ts`). It was Bluebird's other report -- a promise begun inside
+ * a `.then` handler and never returned, because `register` is synchronous and answered a `number`, so
+ * no caller had a handle to return.
  *
- * **And nothing CAN, from any caller.** `ParticleManager.register` is synchronous and returns a
- * `number` (`particle/manager.ts:85`), so it exposes no handle on the texture load at all. That is a
- * shape shared by every caller -- `level-up-effect.ts`, `game-object-sparkle.ts`, the doodad lane and
- * both of this round's modules -- and it is reported here rather than worked around, because a local
- * wrapper would hide a manager-level property from the next caller. Its one visible consequence is
- * that an effect's first frames draw with `TextureLoader.PLACEHOLDER` until the texture lands.
+ * `ParticleManager` now exposes one (`particle/manager.ts#ready`) and the spawn handler below RETURNS
+ * it, which joins the chain rather than silencing the report. Nothing is suppressed: no Bluebird
+ * config was touched and no `.catch` was added to quiet it.
  *
- * Fixing it properly means giving `register` a way to report texture readiness, which changes a
- * signature four lanes depend on -- a scoped round, not a line in this one.
+ * The same fix landed in every lane that registers from a handler -- `world/level-up-effect.ts`,
+ * `world/doodad-manager.js`, `pipeline/wmo/index.js` and `world/spell-missile.ts`.
+ * `world/game-object-sparkle.ts` needed none: it already defers registration to the frame tick, which
+ * is the other valid answer to the same warning and is documented there.
+ *
+ * **The first frames are unchanged, deliberately.** The handle does not gate emission, so an effect
+ * still opens with `TextureLoader.PLACEHOLDER` until its texture lands, exactly as before. Gating was
+ * the alternative and it is the wrong trade here: a kit effect is a transient burst, so a cast's flash
+ * would arrive after the cast that caused it. `manager.ts#ready` carries the reasoning.
  *
  * ## Materials are not written here, at all
  *
@@ -189,6 +192,8 @@ const SPANLESS_MS = 1000;
 interface ParticleManager {
   register: (instance: unknown) => number;
   unregister: (instance: unknown) => void;
+  /** The readiness handle -- see `pipeline/m2/particle/manager.ts#ready`. Never rejects. */
+  ready: (instance: unknown) => Promise<void>;
 }
 
 /** One live effect model. */
@@ -395,6 +400,14 @@ export class SpellKitEffects {
           planted,
           decaying: false,
         });
+
+        // RETURNED, NOT ORPHANED, and this line is the whole point of the round. `register` above
+        // starts a texture load per emitter and this runs inside a `.then` handler, so without
+        // returning something Bluebird reports "a promise was created in a handler ... but was not
+        // returned from it" -- the warning the owner has now pasted three times. Returning the
+        // readiness handle JOINS the chain rather than silencing the report. It never rejects and it
+        // does not gate emission; `ParticleManager#ready` carries both reasons.
+        return particleManager?.ready(model);
       })
       .catch((e) => {
         // `M2Blueprint.load` logs its own failure; the reason is kept rather than swallowed.

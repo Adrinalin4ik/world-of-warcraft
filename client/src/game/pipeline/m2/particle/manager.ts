@@ -82,6 +82,64 @@ export class ParticleManager {
    *
    * @returns how many emitters were registered
    */
+  /**
+   * Per-instance texture readiness, for [`ready`]. A `WeakMap` so an instance that is dropped without
+   * `unregister` (a disposed effect, a worldported doodad) cannot keep its entry alive.
+   */
+  private readiness = new WeakMap<object, Promise<void>>();
+
+  /** Returned by `ready` when there is nothing to wait for, so the common case allocates nothing. */
+  private static readonly SETTLED: Promise<void> = Promise.resolve();
+
+  /**
+   * THE READINESS HANDLE for one registered instance -- resolves when every emitter's texture load has
+   * SETTLED. Never rejects; see `ParticleMaterial#ready` for why that is required and not a shortcut.
+   *
+   * ## Why this exists
+   *
+   * `register` is synchronous and answers a `number`, but `ParticleMaterial`'s constructor starts a
+   * texture load. A caller that registers from inside a `.then` handler therefore creates a promise it
+   * has no way to return, and Bluebird reports exactly that -- the warning the owner has now pasted
+   * three times. Every such caller can now `return manager.ready(model)` and the chain is JOINED
+   * rather than orphaned. Nothing is silenced: the promise is returned, which is what the warning asks
+   * for.
+   *
+   * ## It does NOT gate emission, deliberately
+   *
+   * The emitter is live from the moment `register` returns and its first frames draw with
+   * `TextureLoader.PLACEHOLDER`, exactly as before this handle existed. Holding the emitter back until
+   * the texture landed was the alternative and it is the wrong trade for both kinds of caller: a spell
+   * effect is a transient burst, so a cast's flash would arrive after the cast that caused it, and a
+   * doodad is scenery that would pop in late at zone load. So this answers "has the texture settled"
+   * for a caller that wants to chain on it, and changes nothing about what is drawn or when.
+   *
+   * An instance that was never registered gets the shared resolved promise, so the miss allocates
+   * nothing.
+   *
+   * ## The zone-load cost, measured
+   *
+   * The two doodad lanes register at zone-load scale, so the added cost was measured rather than
+   * argued (`__tests__/manager.test.ts`, median of 7 after 2 warm-ups, 1000 instances per arm):
+   *
+   *     register x1000, 1 emitter each,  NO ready      53.941 ms  (spread  11.600)
+   *     register x1000, 1 emitter each,  with ready    45.934 ms  (spread  15.557)
+   *     register x1000, 4 emitters each, NO ready     171.589 ms  (spread  41.621)
+   *     register x1000, 4 emitters each, with ready   166.236 ms  (spread 122.734)
+   *
+   * **Both arms measured the `ready` version as FASTER than the control**, which is impossible as a
+   * real effect -- so the honest reading is that the cost is below this instrument's resolution, in
+   * both the allocating shape (4 emitters, where a `Promise.all` is built) and the non-allocating one
+   * (1 emitter, where the material's own promise is handed straight back). The spreads dwarf the
+   * differences. What dominates is `register` itself -- material, batch and pool construction at
+   * roughly 46-54 microseconds per single-emitter instance -- and that is untouched.
+   */
+  ready(instance: any): Promise<void> {
+    if (!instance) {
+      return ParticleManager.SETTLED;
+    }
+    return this.readiness.get(instance) ?? ParticleManager.SETTLED;
+  }
+
   register(instance: any): number {
     if (!instance || this.registered.has(instance)) {
       return 0;
@@ -151,6 +209,16 @@ export class ParticleManager {
       this.emitters.push(entry);
     }
 
+    // The readiness handle, recorded only when there is something to wait for. `Promise.all` over the
+    // materials' own chains -- see `ready` for what it is for and why it does not gate emission.
+    if (built.length > 0) {
+      const settled = built.map((entry) => (entry.batch.material as ParticleMaterial).ready);
+      this.readiness.set(
+        instance,
+        settled.length === 1 ? settled[0] : Promise.all(settled).then(() => undefined),
+      );
+    }
+
     return built.length;
   }
 
@@ -160,6 +228,7 @@ export class ParticleManager {
     }
 
     this.registered.delete(instance);
+    this.readiness.delete(instance);
 
     this.emitters = this.emitters.filter((entry) => {
       if (entry.instance !== instance) {

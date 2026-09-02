@@ -58,12 +58,18 @@ function stubUnit(guid: string) {
   } as never;
 }
 
-const manager = { register: jest.fn(() => 0), unregister: jest.fn() };
+const manager = {
+  register: jest.fn(() => 0),
+  unregister: jest.fn(),
+  // The readiness handle the spawn path returns. Resolved, so the handler's chain settles at once.
+  ready: jest.fn(() => Promise.resolve()),
+};
 const nobodyGone = () => false;
 
 beforeEach(() => {
   mockUnloaded = [];
   manager.register.mockClear();
+  manager.ready.mockClear();
   manager.unregister.mockClear();
 });
 

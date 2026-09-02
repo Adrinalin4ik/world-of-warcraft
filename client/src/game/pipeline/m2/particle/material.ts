@@ -77,6 +77,23 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
   private resolvedTexture: THREE.Texture | null = null;
   private disposed = false;
 
+  /**
+   * THE READINESS HANDLE: resolves when this material's texture load has SETTLED, successfully or not.
+   *
+   * It exists because the constructor starts I/O, and a caller that constructs one inside a `.then`
+   * handler otherwise creates a promise nothing can return -- which is what Bluebird reports as
+   * "a promise was created in a handler ... but was not returned from it". `ParticleManager#ready`
+   * aggregates these so its callers can return the chain instead of orphaning it.
+   *
+   * **It NEVER REJECTS, and that is load-bearing rather than lazy.** The two doodad lanes register
+   * from a `.then` with no `.catch` of their own (`world/doodad-manager.js#loadDoodad`,
+   * `pipeline/wmo/index.js#processLoadDoodad`), so a rejecting handle returned into those chains would
+   * turn a missing particle texture into an unhandled rejection -- the exact class of problem this
+   * change is meant to remove. The failure is already reported by the `.catch` below; this handle
+   * answers "has it finished trying", not "did it work".
+   */
+  readonly ready: Promise<void>;
+
   constructor(texturePath: string, blendingType: number) {
     super();
 
@@ -116,7 +133,7 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
 
     applyParticleBlending(this, blendingType);
 
-    TextureLoader.load(texturePath)
+    this.ready = TextureLoader.load(texturePath)
       .then((texture) => {
         if (this.disposed) {
           // The material was disposed before the texture arrived: release it immediately rather than
@@ -131,6 +148,7 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
       .catch((error) => {
         console.error(`Failed to load particle texture ${texturePath}:`, error);
       });
+    // `.catch` above returns a resolved promise, so `ready` settles either way -- see its docstring.
   }
 
   dispose() {

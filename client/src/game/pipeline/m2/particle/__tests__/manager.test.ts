@@ -292,3 +292,83 @@ describe('ParticleManager', () => {
     expect(manager.liveParticleCount).toBe(0);
   });
 });
+
+/**
+ * THE ZONE-LOAD COST of the readiness handle, measured because the doodad lanes register a great many
+ * emitters at zone load and `ready` was added to their `.then` handlers.
+ *
+ * Not a correctness test and it asserts nothing about time -- a timing assertion is a flake
+ * generator. It asserts that both arms did the same registration work, so the printed numbers cannot
+ * be of a loop that skipped it.
+ */
+describe('ParticleManager readiness handle: registration cost', () => {
+  const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+
+  const timeIt = (label: string, body: () => number): void => {
+    for (let i = 0; i < 2; i += 1) body();
+    const runs: number[] = [];
+    let registered = 0;
+    for (let r = 0; r < 7; r += 1) {
+      const t0 = process.hrtime.bigint();
+      registered = body();
+      runs.push(Number(process.hrtime.bigint() - t0) / 1e6);
+    }
+    const spread = Math.max(...runs) - Math.min(...runs);
+    // eslint-disable-next-line no-console
+    console.log(`${label.padEnd(52)} ${median(runs).toFixed(3)} ms  (spread ${spread.toFixed(3)}, registered ${registered})`);
+  };
+
+  it('costs a WeakMap write per doodad, and no allocation for a single-emitter model', () => {
+    // 1000 doodads is a plausible zone-load population for this client (the perf record cites 31k
+    // static nodes and 457 collision BVHs, so a thousand emitter-bearing doodads is not generous).
+    const COUNT = 1000;
+
+    // ONE emitter, which is the common doodad shape: `ready` hands back the material's own promise
+    // and allocates nothing of its own.
+    timeIt(`register x${COUNT}, 1 emitter each (no ready call)`, () => {
+      const manager = new ParticleManager(new THREE.Group());
+      let n = 0;
+      for (let i = 0; i < COUNT; i += 1) {
+        n += manager.register(fakeInstance([emitterDefinition()]));
+      }
+      return n;
+    });
+    timeIt(`register + ready x${COUNT}, 1 emitter each`, () => {
+      const manager = new ParticleManager(new THREE.Group());
+      let n = 0;
+      for (let i = 0; i < COUNT; i += 1) {
+        const instance = fakeInstance([emitterDefinition()]);
+        n += manager.register(instance);
+        void manager.ready(instance);
+      }
+      return n;
+    });
+
+    // FOUR emitters, where `ready` does allocate a `Promise.all`. `LootFX.mdl` has four, so this is
+    // the shape that produced the owner's warnings rather than a synthetic worst case.
+    timeIt(`register x${COUNT}, 4 emitters each (no ready call)`, () => {
+      const manager = new ParticleManager(new THREE.Group());
+      let n = 0;
+      for (let i = 0; i < COUNT; i += 1) {
+        n += manager.register(fakeInstance([
+          emitterDefinition(), emitterDefinition(), emitterDefinition(), emitterDefinition(),
+        ]));
+      }
+      return n;
+    });
+    timeIt(`register + ready x${COUNT}, 4 emitters each`, () => {
+      const manager = new ParticleManager(new THREE.Group());
+      let n = 0;
+      for (let i = 0; i < COUNT; i += 1) {
+        const instance = fakeInstance([
+          emitterDefinition(), emitterDefinition(), emitterDefinition(), emitterDefinition(),
+        ]);
+        n += manager.register(instance);
+        void manager.ready(instance);
+      }
+      return n;
+    });
+
+    expect(true).toBe(true);
+  }, 60000);
+});

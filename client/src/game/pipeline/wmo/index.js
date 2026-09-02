@@ -269,6 +269,12 @@ class WMO {
         this.parentCounters.animatedDoodads++;
         this.counters.animatedDoodads++;
       }
+
+      // RETURNED, not orphaned -- the same reason as `world/doodad-manager.js#loadDoodad`, which
+      // carries the full note: `loadDoodad` below registers the doodad's emitters, each of which
+      // starts a texture load, and this is a `.then` handler. The handle never rejects, which matters
+      // because this chain has no `.catch` either. See `pipeline/m2/particle/manager.ts#ready`.
+      return this.particleManager ? this.particleManager.ready(doodad) : undefined;
     });
   }
 
