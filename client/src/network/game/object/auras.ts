@@ -294,6 +294,18 @@ export class AuraHandler extends EventEmitter {
   }
 
   /**
+   * Every guid this handler holds auras for.
+   *
+   * For the re-sweep in `aura-visuals.ts`: the aura feed is not gated on the object feed, so a unit's
+   * auras can arrive before its create block and before `spellData` has loaded, and neither of those
+   * produces a second `'auras'` emit to re-drive the visual off. Iterating the keys is how that sweep
+   * finds the units it already knows about.
+   */
+  trackedGuids(): string[] {
+    return [...this.byUnit.keys()];
+  }
+
+  /**
    * `CMSG_CANCEL_AURA` (**0x136**): dismiss one of OUR OWN buffs -- what a right click on a buff icon
    * does (`BuffButton_OnClick` -> `CancelUnitBuff`, `buffframe.lua:271-273`).
    *

@@ -1,6 +1,7 @@
 import EventEmitter from 'events';
 import { CombatHandler } from './combat';
 import { AuraHandler } from './auras';
+import { AuraVisualHandler } from './aura-visuals';
 import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
 import { ItemHandler } from './items';
@@ -156,6 +157,22 @@ export class ObjectHandler extends EventEmitter {
    */
   public auraHandler: AuraHandler;
 
+  /**
+   * THE BUFF's own visual -- the owner's "попробовал забафать себя, щитом мага и не увидел
+   * визуального эффекта".
+   *
+   * A buff's visual is not a cast flash and is not driven by `SMSG_SPELL_GO`: it is the spell's STATE
+   * kit, armed while the spell id sits in the unit's aura slots. Every part of that chain already
+   * existed -- the aura feed, the kit resolver, the persistent-instance spawner -- and nothing
+   * subscribed the one to the other. This is that subscription; `game/classes/aura-visual.ts` carries
+   * the mechanism, the measurements and the named gaps.
+   *
+   * PUBLIC for the same reason the movement handlers are: `auraVisualHandler.kits.stats` and
+   * `.applied` are how a probe tells "the buff has no visual in the data" from "the visual was
+   * refused" from "the model was spawned".
+   */
+  public auraVisualHandler: AuraVisualHandler;
+
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
     super();
@@ -192,6 +209,8 @@ export class ObjectHandler extends EventEmitter {
     // AURAS. The pair had no subscriber, so every buff and debuff the server sent was framed, emitted
     // and dropped -- the owner's "ауры и бафы с дебафами не отображаются".
     this.auraHandler = new AuraHandler(this.game);
+    // AFTER `auraHandler`, because it subscribes to it. The buff's own visual: see the field's docs.
+    this.auraVisualHandler = new AuraVisualHandler(this.game, this.auraHandler);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and
