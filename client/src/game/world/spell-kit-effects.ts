@@ -27,10 +27,11 @@ import type Unit from '../classes/unit';
  *    particle model draws nothing at all.** Effect models are overwhelmingly particle models, so that
  *    registration is what makes this visible rather than a no-op.
  *  - `character/dress.ts#attachCharacterItems` -- a model on a bone. Its `stillWanted` re-check and its
- *    load-failure discipline are copied. **Its `model.visible = true` is NOT**, and that distinction
- *    cost two rounds: see the note at the spawn site. An ITEM on a bone must be un-hidden because its
- *    geometry is the thing being drawn; a particle EFFECT must stay hidden, because its particles draw
- *    from `ParticleManager`'s own group and un-hiding it only reveals a mesh nothing poses.
+ *    load-failure discipline are copied. **Its unconditional `model.visible = true` is not**: whether an
+ *    effect model's mesh should draw depends on whether it HAS particle emitters, and that distinction
+ *    cost three rounds in both directions -- see the visibility rule at the spawn site. An ITEM on a
+ *    bone is always un-hidden because its geometry is the thing being drawn; an effect model's mesh is
+ *    the thing being drawn only when it has no emitters to draw instead.
  *
  * ## The attach cascade is the reference's, not a fallback of ours
  *
@@ -403,28 +404,6 @@ export class SpellKitEffects {
           this.stats.attached += 1;
         }
 
-        // NOT `model.visible = true`, and that was a defect here for two rounds.
-        //
-        // `M2` hides itself at construction (`pipeline/m2/index.ts:242`, `this.visible = false`), and a
-        // particle effect must STAY hidden: `ParticleManager` adds each emitter's batch to its own
-        // group (`particle/manager.ts:150`, constructed from `map.js:200`'s `particleGroup`), NOT to
-        // the model's subtree, so the particles draw whatever the model's own flag says. Un-hiding the
-        // model therefore adds nothing to the effect and reveals its MESH -- which for an effect model
-        // nothing poses is a static shape at bind pose.
-        //
-        // `level-up-effect.ts` and `game-object-sparkle.ts` are the working precedent and neither sets
-        // it; this copied the flag from `character/dress.ts`, where it IS required, because a
-        // bone-attached ITEM's geometry is the thing being drawn and no visibility manager will ever
-        // enable it. Two lanes, two conventions, and the wrong one was borrowed.
-        //
-        // Measured before removing it, because a plausible fix is not a verified one
-        // (`__bench__/effect-emitter-probe.test.ts`): of six real effect models, `ChargeTrail.mdx`,
-        // `DustCloud_Land.mdx`, `Fire_Precast_Hand.mdx` and `Shadow_Precast_Uber_Hand.mdx` carry
-        // **0 vertices** -- pure emitters, for which this flag could never have drawn anything either
-        // way -- while `Fireball_Missile_Low.mdx` has 43, `ThunderClap_Cast_Base.mdx` 178 (authored box
-        // 12.7 x 13.0 x 8.7) and `Frost_Nova_state.mdx` 614 (9.7 x 9.7 x 2.7). Those three are the ones
-        // this flag was wrongly drawing, and the last two are large enough to read as sheets.
-
         // The birth clip, through the same resolver+arm pair `character/dress.ts#armStand` uses. It is
         // armed even though nothing advances it yet (see the header): the clock is then correct the
         // moment a poser exists, and an unarmed instance would have to be found again later.
@@ -435,7 +414,35 @@ export class SpellKitEffects {
         // says 1 is what the game's own data asks for, and why no other number is picked here.
         (model as unknown as { particleSizeScale?: number }).particleSizeScale = spellFxParticleSize();
         // Without this a PARTICLE model draws nothing at all -- `level-up-effect.ts`'s own note.
-        particleManager?.register(model);
+        const emitterCount = particleManager?.register(model) ?? 0;
+        // THE VISIBILITY RULE, AND IT IS DATA-DRIVEN RATHER THAN A CONVENTION GUESS.
+        //
+        // `register` returns how many particle emitters it took. That number decides whether this
+        // model's MESH is the effect or merely the skeleton its particles hang off:
+        //
+        //  - **emitters > 0 -> stay hidden.** `ParticleManager` puts each batch in its OWN group
+        //    (`particle/manager.ts` over `map.js`'s `particleGroup`), so the particles draw whatever
+        //    this flag says. Un-hiding would add nothing and reveal a mesh nothing poses -- which is
+        //    what drew the big pale sheets (`ThunderClap_Cast_Base` is 178 vertices in a
+        //    12.7 x 13.0 x 8.7 box, `Frost_Nova_state` 614 in 9.7 x 9.7 x 2.7).
+        //  - **emitters == 0 -> MUST be visible.** Then the mesh is the only thing the model can
+        //    draw, and hiding it draws nothing at all.
+        //
+        // The second arm is measured, not assumed, and it is why the owner lost the projectile:
+        // `Spells\LightningBolt_Missile.mdx` and `Spells\Lightning_PreCast_Low_Hand.mdx` register
+        // **0 emitters** and carry **116 vertices, 23 animated bones and 3 RIBBON emitters**
+        // (`__bench__/effect-emitter-probe.test.ts`). This client renders no ribbon emitters at all --
+        // nothing in `pipeline/m2` references them -- so those two models have only their mesh, and
+        // blanket-hiding it in 9f4101b is exactly "И снаряд тоже было видно раньше".
+        //
+        // NAMED LIMIT: a mesh shown this way still draws in BIND POSE, because nothing poses a
+        // free-standing effect model (the `DoodadManager#poseDoodad` gap this file's header records).
+        // So Lightning Bolt's projectile is a static shape again rather than an animated one -- which
+        // is what the owner saw before and reported as "снаряд не анимирован". Visible-and-static is
+        // the honest state; invisible was a regression.
+        if (emitterCount === 0) {
+          model.visible = true;
+        }
 
         this.live.push({
           model,

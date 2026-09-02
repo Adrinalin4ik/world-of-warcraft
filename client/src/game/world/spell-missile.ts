@@ -192,8 +192,18 @@ export class SpellMissiles {
     modelless: 0,
     /** Arrivals that handed off to an impact kit. */
     impacts: 0,
-    /** Casts refused because the spell has no Speed. Expected for most spells. */
+    /**
+     * Casts refused because the spell has no Speed. Expected for most spells, and NOT a defect.
+     *
+     * The counters are per-SESSION totals across every spell, which read as a contradiction once:
+     * `speedless: 1` beside `launched: 1` looked like one cast doing both. It was two different GO
+     * packets -- Lightning Bolt 403 has `Spell.dbc` column 47 = **20.0** and launched, while some
+     * other spell's GO in the same session had no Speed and was refused. `speedlessSpells` records
+     * which, so the pair can never be misread that way again.
+     */
     speedless: 0,
+    /** The spell ids refused for having no Speed, newest last, capped. See `speedless`. */
+    speedlessSpells: [] as number[],
     /** Model loads that threw. */
     failed: 0,
     /**
@@ -263,6 +273,9 @@ export class SpellMissiles {
     if (!(speed > 0)) {
       // NOT a gap: the great majority of spells have no projectile, and Speed is the whole gate.
       this.stats.speedless += 1;
+      if (!this.stats.speedlessSpells.includes(spellId) && this.stats.speedlessSpells.length < 16) {
+        this.stats.speedlessSpells.push(spellId);
+      }
       return;
     }
 
@@ -402,33 +415,35 @@ export class SpellMissiles {
         }
         this.scene.add(model);
         model.updateMatrixWorld(true);
-        // NOT `model.visible = true`, and that was a defect here for two rounds.
+        const emitterCount = particleManager?.register(model) ?? 0;
+        // THE VISIBILITY RULE, AND IT IS DATA-DRIVEN RATHER THAN A CONVENTION GUESS.
         //
-        // `M2` hides itself at construction (`pipeline/m2/index.ts:242`, `this.visible = false`), and a
-        // particle effect must STAY hidden: `ParticleManager` adds each emitter's batch to its own
-        // group (`particle/manager.ts:150`, constructed from `map.js:200`'s `particleGroup`), NOT to
-        // the model's subtree, so the particles draw whatever the model's own flag says. Un-hiding the
-        // model therefore adds nothing to the effect and reveals its MESH -- which for an effect model
-        // nothing poses is a static shape at bind pose.
+        // `register` returns how many particle emitters it took. That number decides whether this
+        // model's MESH is the effect or merely the skeleton its particles hang off:
         //
-        // `level-up-effect.ts` and `game-object-sparkle.ts` are the working precedent and neither sets
-        // it; this copied the flag from `character/dress.ts`, where it IS required, because a
-        // bone-attached ITEM's geometry is the thing being drawn and no visibility manager will ever
-        // enable it. Two lanes, two conventions, and the wrong one was borrowed.
+        //  - **emitters > 0 -> stay hidden.** `ParticleManager` puts each batch in its OWN group
+        //    (`particle/manager.ts` over `map.js`'s `particleGroup`), so the particles draw whatever
+        //    this flag says. Un-hiding would add nothing and reveal a mesh nothing poses -- which is
+        //    what drew the big pale sheets (`ThunderClap_Cast_Base` is 178 vertices in a
+        //    12.7 x 13.0 x 8.7 box, `Frost_Nova_state` 614 in 9.7 x 9.7 x 2.7).
+        //  - **emitters == 0 -> MUST be visible.** Then the mesh is the only thing the model can
+        //    draw, and hiding it draws nothing at all.
         //
-        // Measured before removing it, because a plausible fix is not a verified one
-        // (`__bench__/effect-emitter-probe.test.ts`): of six real effect models, `ChargeTrail.mdx`,
-        // `DustCloud_Land.mdx`, `Fire_Precast_Hand.mdx` and `Shadow_Precast_Uber_Hand.mdx` carry
-        // **0 vertices** -- pure emitters, for which this flag could never have drawn anything either
-        // way -- while `Fireball_Missile_Low.mdx` has 43, `ThunderClap_Cast_Base.mdx` 178 (authored box
-        // 12.7 x 13.0 x 8.7) and `Frost_Nova_state.mdx` 614 (9.7 x 9.7 x 2.7). Those three are the ones
-        // this flag was wrongly drawing, and the last two are large enough to read as sheets.
-        // Without this a PARTICLE model draws nothing at all -- and a projectile is one.
-        // THE PARTICLE SIZE MULTIPLIER, read by `ParticleBatch#pack` every frame. Defaults to 1,
-        // i.e. the size the asset authors -- `world/spell-fx-scale.ts` carries the measurement that
-        // says 1 is what the game's own data asks for, and why no other number is picked here.
-        (model as unknown as { particleSizeScale?: number }).particleSizeScale = spellFxParticleSize();
-        particleManager?.register(model);
+        // The second arm is measured, not assumed, and it is why the owner lost the projectile:
+        // `Spells\LightningBolt_Missile.mdx` and `Spells\Lightning_PreCast_Low_Hand.mdx` register
+        // **0 emitters** and carry **116 vertices, 23 animated bones and 3 RIBBON emitters**
+        // (`__bench__/effect-emitter-probe.test.ts`). This client renders no ribbon emitters at all --
+        // nothing in `pipeline/m2` references them -- so those two models have only their mesh, and
+        // blanket-hiding it in 9f4101b is exactly "И снаряд тоже было видно раньше".
+        //
+        // NAMED LIMIT: a mesh shown this way still draws in BIND POSE, because nothing poses a
+        // free-standing effect model (the `DoodadManager#poseDoodad` gap this file's header records).
+        // So Lightning Bolt's projectile is a static shape again rather than an animated one -- which
+        // is what the owner saw before and reported as "снаряд не анимирован". Visible-and-static is
+        // the honest state; invisible was a regression.
+        if (emitterCount === 0) {
+          model.visible = true;
+        }
         missile.model = model;
         // RETURNED, not orphaned -- the same reason as `spell-kit-effects.ts`, and the handle never
         // rejects and does not gate the flight. See `ParticleManager#ready`.

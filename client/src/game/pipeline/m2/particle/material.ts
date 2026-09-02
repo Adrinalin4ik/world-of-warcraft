@@ -141,12 +141,23 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
     // (`m2/material/index.ts:505-519`), so it writes correct depth in the opaque pass and a NEARER
     // particle passes `depthTest` and draws over it.
     //
-    // So for a far rock to occlude these, the particle centres must genuinely BE farther than the rock
-    // -- a world-POSITION defect, not a depth one. Disabling `depthTest` or biasing depth would hide
-    // that by drawing particles over everything, and `CLAUDE.md`'s record is that every orientation
-    // defect here was two conventions meeting and none was fixed by negating a coordinate.
-    // `window.worldSpellFx()` reports each live effect's `distFromPlayer` for exactly this reason: a
-    // hand effect should be a couple of units away, not tens.
+    // That reasoning pointed at a world-POSITION defect, and **the measurement REFUTED it** -- this
+    // comment previously asserted position as the cause and that assertion was wrong. The owner's
+    // `window.worldSpellFx()` reading gives 1.89, 2.62 and 3.10 units from the player for the live
+    // effects, against a `CULL_DISTANCE` of 120. The particles are exactly where they should be.
+    //
+    // So the occlusion is STILL UNEXPLAINED and is recorded as such rather than papered over: with
+    // correct positions and `depthTest` on, a rock tens of units behind the character cannot occlude a
+    // sprite two units in front of it. One candidate is retired by reading -- there is a single scene
+    // and a single world camera, and the batches sit under `map.particleGroup`, so no second pass with
+    // a foreign projection is involved. A live candidate remains: the owner's screenshot was taken
+    // while Lightning Bolt's MESH models were still being drawn (they carry 116 vertices and no
+    // emitters), and an M2 mesh at `blendingMode >= 1` is transparent with `depthWrite` off and sorts
+    // by its object origin -- which is a known way to get exactly this. If the occlusion recurs now
+    // that those meshes draw again, it is a mesh-material sort question and not a particle one.
+    //
+    // No bias was added either way. `CLAUDE.md`'s record is that every orientation defect here was two
+    // conventions meeting and none was fixed by negating a coordinate.
 
     applyParticleBlending(this, blendingType);
 

@@ -70,6 +70,9 @@ jest.mock('../../pipeline/texture-loader', () => ({
 
 /** `Fireball_Missile_Low` is the projectile the owner is watching -- `SpellVisual` 67 field 8 = 365. */
 const MODELS = [
+  'Spells\\LightningBolt_Missile.mdx',
+  'Spells\\Lightning_PreCast_Low_Hand.mdx',
+  'Spells\\Lightning_Cast_Hand.mdx',
   'Spells\\Fireball_Missile_Low.mdx',
   'Spells\\LevelUp\\LevelUp.mdl',
   'Particles\\LootFX.mdl',
@@ -149,6 +152,7 @@ describe('spell effect emitters: pool capacity at register time', () => {
       lines.push(
         `${path}  v${m2.version}  emitters=${emitters.length}  textures=${(m2.textures ?? []).length}`
         + `  VERTICES=${verts}  sequences=${seqs}  animatedBones=${animatedBones}`
+        + `  RIBBONS=${(m2.ribbonEmitters ?? []).length}`
         + `  authoredBox=${box}  radius=${(m2.vertexRadius ?? 0).toFixed(2)}`,
       );
 
@@ -223,6 +227,22 @@ describe('spell effect emitters: pool capacity at register time', () => {
  * `DustCloud_Land`'s 20 live particles are the capacity fix working: before it, that emitter had one
  * slot.
  *
+ * ## LIGHTNING BOLT 403, which is what the owner is actually casting
+ *
+ *     stage    model                                emitters  verts  ribbons  live  size range
+ *     precast  Lightning_PreCast_Low_Hand.mdx              0    116        3     0  -- nothing
+ *     missile  LightningBolt_Missile.mdx                   0    116        3     0  -- nothing
+ *     release  Lightning_Cast_Hand.mdx                     1     20        0    13  0.012 .. 0.219
+ *     impact   LightningBolt_Impact_Chest.mdx              2     20?       0    12  0.069 .. 0.417
+ *
+ * **Two of the four stages have NO particle emitters at all.** They are ribbon-and-mesh assets, and
+ * this client renders no ribbon emitters -- so with the mesh hidden they drew literally nothing, which
+ * is "снаряда совсем не видно" and "что-то видно в конце анимации каста не более" exactly: only the
+ * release and impact stages have emitters, and the release's 13 sprites top out at 0.219 units.
+ *
+ * That is what the visibility rule in `world/spell-kit-effects.ts` now keys on: a model with zero
+ * emitters must show its mesh, because the mesh is all it has.
+ *
  * ## THE SIZE DISTRIBUTION PER STAGE, and why one global multiplier cannot serve two
  *
  * The owner: "во время каста виден листочек если скейл сделать больше. Но вот конец каста тогда имеет
@@ -269,6 +289,10 @@ describe('spell effect emitters: the last hop to the renderer', () => {
   // hands (effects 287 and 288), which is what makes a single global size multiplier the wrong
   // shape if their authored sizes differ by much.
   const LAST_HOP_MODELS = [
+    'Spells\\LightningBolt_Missile.mdx',
+    'Spells\\Lightning_PreCast_Low_Hand.mdx',
+    'Spells\\Lightning_Cast_Hand.mdx',
+    'Spells\\LightningBolt_Impact_Chest.mdx',
     'Spells\\Fire_Precast_Hand.mdx',
     'Spells\\Fire_Cast_Hand.mdx',
     'Spells\\MoltenBlast_Impact_Chest.mdx',
