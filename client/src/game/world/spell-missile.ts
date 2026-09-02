@@ -129,6 +129,23 @@ const WORLD_UP = new THREE.Vector3(0, 0, 1);
 const scratchBasis = new THREE.Matrix4();
 
 /**
+ * THE PROJECTILE-ORIENTATION A/B, AND IT DEFAULTS **OFF** -- see `SpellMissiles#orient`.
+ *
+ * `window.missileOrientControl.enabled = true` restores what `2286a20` shipped: the model rotated so
+ * its authored +X faces the flight. Off (the default) is identity rotation, which is what every build
+ * before `2286a20` did and what the owner had no complaint about.
+ *
+ * A knob rather than a deletion because the underlying question -- does a projectile point along its
+ * travel, and about which axis -- is real and unresolved, and one console word is cheaper than a
+ * rebuild when the measurement that settles it arrives.
+ */
+export const missileOrientControl = { enabled: false };
+
+if (typeof window !== 'undefined') {
+  (window as unknown as Record<string, unknown>).missileOrientControl = missileOrientControl;
+}
+
+/**
  * How high above a unit's origin a projectile is launched from and aimed at, in world units.
  *
  * **UNEXPLAINED, and said so rather than sourced.** The reference launches from the release
@@ -635,43 +652,57 @@ export class SpellMissiles {
   }
 
   /**
-   * POINT THE PROJECTILE ALONG ITS FLIGHT. Until this existed the missile model was never rotated at
-   * all -- only `position` was ever written -- so every projectile in the game flew with IDENTITY
-   * rotation, its authored nose pinned to world +X whatever direction it was actually travelling.
+   * POINT THE PROJECTILE ALONG ITS FLIGHT -- **REVERTED, AND OFF BY DEFAULT.** See
+   * `missileOrientControl`.
    *
-   * ## The authored forward axis is +X, and that is MEASURED rather than assumed
+   * ## Why it is off: the owner reported a 90-degree error on the model this was derived from
    *
-   * This project's record is that every orientation defect here was two conventions meeting and none
-   * was fixed by negating a coordinate, so the model's own axis was read out of the served files
-   * before anything was rotated. The `MD20` bounding box is near-symmetric in Y and Z and clearly
-   * ASYMMETRIC IN X on three of the four missiles measured, with the long side behind the origin:
+   * "Она ротирована не верно. Должен быть билбординг. Т.е. сейчас она параллельно снаряду, а должна
+   * быть поперёк и смотреть в него" -- about the red-orange blob on the fireball, on a build that
+   * already had `2286a20` (this) and `60bede3` (the global-sequence bone port) in it. Both of those
+   * change this model's frame, and both landed before the report, so the defect is **new and mine**,
+   * not newly-visible. `43c444c`'s billboard last-hop fix is NOT the cause: measured below, Fireball
+   * has no billboarded bone for it to have revealed.
    *
-   *   Fireball_Missile_Low   x [-2.44, +0.43]   y [-1.95, +1.95]   z [-1.63, +1.63]
-   *   Arcane_Missile         x [-0.92, +0.60]   y [-1.64, +1.91]   z [-0.34, +1.13]
-   *   Shadowbolt_Missile     x [-0.76, +0.42]   y [-0.87, +0.81]   z [-0.83, +0.86]
+   * ## The evidence this was built on was MISATTRIBUTED, which is the real reason it is reverted
    *
-   * So the body sits at the origin and the tail streams back along -X: forward is +X. The
-   * corroborating datum is Fireball's fourth particle emitter, which is authored at local
-   * `(-1.300, 0, 0)` on a bone whose pivot is the same point -- the tail emitter, 1.3 units BEHIND
-   * the nose. Unrotated, that emitter sat 1.3 units away along a fixed compass direction instead of
-   * behind the projectile, which is the closest thing measured to the owner's displaced light blob.
-   * `LightningBolt_Missile` is the one near-symmetric case (x [-0.36, +0.44]) and is unaffected
-   * either way.
+   * `2286a20` claimed "the body sits at the origin and the tail streams back along -X" from the MD20
+   * bounding box's X asymmetry (Fireball `x [-2.44, +0.43]` against symmetric y and z). Measured
+   * properly, **that box is the PARTICLE volume, not the body**: the mesh is 43 vertices, every one
+   * of them weighted to bone 1, spanning `+/-0.18` in ALL THREE axes -- a tiny symmetric blob 0.36
+   * units across. So the box described where the emitters throw, and I wrote it up as the shape of
+   * the model. The conclusion may still be right -- bone 5, the tail emitter's bone, has its pivot at
+   * `(-1.300, 0, 0)`, which is real evidence for -X being aft -- but one of the two cited facts was
+   * about a different thing than the sentence said, and that is exactly the defect class this project
+   * treats as worst.
    *
-   * ## Why the basis rather than a `lookAt`
+   * And the part I had already flagged as unevidenced is the part that a 90-degree report implicates:
+   * `makeBasis(forward, right, up)` assigns model +Y and +Z to `right` and `up` on the stated grounds
+   * that "a spin about the nose is invisible on a radially symmetric fireball". **Fireball is not
+   * radially symmetric** -- its particle box is y `+/-1.95` against z `+/-1.63` -- so that excuse does
+   * not hold for the very model it was written about. A documented exclusion is a bug report someone
+   * declined to file, and this is the second time that has been true in this file.
    *
-   * `missile.forward/right/up` is already built at launch, already orthonormal, and already the frame
-   * the motion-script offsets are expressed in (see `applyMotion`), so reusing it is the only choice
-   * that cannot disagree with them. `Object3D#lookAt` would impose three's own -Z convention and a
-   * world-up of its choosing, which is exactly the second convention this comment exists to avoid.
+   * ## What actually orients the emission, and what would settle the axis
    *
-   * `makeBasis(forward, right, up)` maps model +X to `forward`, +Y to `right` and +Z to `up`. Y and Z
-   * are the axes the bounding boxes say are symmetric, so their assignment is not evidenced and does
-   * not need to be: a spin about the nose is invisible on a radially symmetric fireball. Said plainly
-   * rather than dressed up -- if a future projectile is NOT radially symmetric, this is the line that
-   * will be wrong, and no measurement here covers it.
+   * All four emitters are type 1 (PLANE), which emits from a rectangle in the emitter's local XY with
+   * velocity along local +Z (`particle/spawn.ts`). The emitter's frame comes from its BONE, and
+   * Fireball's bones 0, 1, 2 and 5 each carry a rotation track -- every one of them on a GLOBAL
+   * SEQUENCE (`gs = 2, 0, 1, 2`). So the emission direction is animated data, on the clock
+   * `60bede3` only just started driving correctly, composed with whatever this method does on top.
+   * Two conventions, and I have measured only one of them.
+   *
+   * The measurement that settles it, and it is not a static one: sample bone 5's global-sequence
+   * rotation at a few cursors and read where its local +Z points in MODEL space. If +Z sweeps around
+   * -X, then -X is aft and a nose-along-forward basis is right (and only the roll is open). If it
+   * sweeps around +Z, the emitters throw "up" in model space and a projectile must NOT be pitched
+   * into its flight at all -- only yawed, the way `plantTransform` yaws a plant. Until that is read,
+   * identity is the state the owner did not complain about.
    */
   private orient(missile: Missile, model: THREE.Object3D): void {
+    if (!missileOrientControl.enabled) {
+      return;
+    }
     scratchBasis.makeBasis(missile.forward, missile.right, missile.up);
     model.quaternion.setFromRotationMatrix(scratchBasis);
   }
