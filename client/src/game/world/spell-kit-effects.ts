@@ -238,6 +238,12 @@ interface Instance {
    * See `world/effect-pose.ts`.
    */
   lifecycle: EffectLifecycle;
+  /**
+   * `worldClock.ms` at the push. Purely instrumental, and it is what finds a STUCK instance: a
+   * non-persistent instance whose age exceeds its own `remaining` deadline by any margin is by
+   * definition one the removal path never reached, and no other field can say that.
+   */
+  bornAt: number;
 }
 
 /**
@@ -317,7 +323,7 @@ export class SpellKitEffects {
      * actually matched; `removed` counts instances that left `live` by any route. So:
      *
      *   `armed - removed` must equal `liveCount`, always. If it does not, `remove` is being skipped.
-     *   `persistentLive` growing across casts of the SAME spell is the leak, in one number.
+     *   `liveDetail()` names WHICH instance is stuck and by how long -- see its own doc.
      *   `armed` growing per cast while `reaped` stays flat means the reap KEY never matches --
      *   which is the neighbour-interaction hypothesis, and it is now falsifiable rather than argued.
      *
@@ -333,33 +339,51 @@ export class SpellKitEffects {
   };
 
   /**
-   * Live PERSISTENT instances, broken out by `(guid, spellId)` -- the leak's shape, not just its size.
+   * EVERY live instance, described -- persistent and self-terminating alike.
    *
-   * A count alone cannot distinguish "one spell leaked ten instances" (a reap-key miss) from "ten
-   * spells each hold one" (correct, a buffed unit). The keys say which, and a duplicated key is by
-   * itself proof of a defect: `play` reaps this unit's live persistent instances of the same spell
-   * before beginning, so two live entries on one key cannot happen if that reap is working.
+   * ## The blind spot this replaces, because it was the exact shape this project keeps losing arms to
+   *
+   * The first version of this was `persistentLive()`, and it filtered `!instance.persistent` OUT. A
+   * CAST kit is armed `persistent: false`. So if the leak were ever a cast-kit instance -- which was
+   * the live suspect when this was written -- the instrument would have reported **an empty object
+   * while the leak was plainly on screen**, and reported it confidently. An instrument with a blind
+   * spot over the suspect is worse than no instrument: it produces a clean number that ends the
+   * investigation. It is replaced rather than extended so the filtered version cannot be called.
+   *
+   * ## What each field is for
+   *
+   * `remaining` is the deadline in ms (`null` = persistent, owned by its spell's reap). `ageMs` is
+   * how long it has actually been alive. **`stuck` is the diagnosis**: a non-persistent instance
+   * whose age has passed its deadline should have been removed, so `stuck: true` on any row is proof
+   * the removal path did not run for it, independently of what the deadline says. That is the one
+   * question neither a count nor a key can answer.
+   *
+   * `key` is `(guid:spellId)`, and a duplicate key among PERSISTENT rows is itself proof of a
+   * defect: `play` reaps this unit's live persistent instances of the same spell before beginning.
    */
-  public persistentLive(): Record<string, number> {
-    const out: Record<string, number> = {};
-    for (const instance of this.live) {
-      if (!instance.persistent || instance.decaying) {
-        continue;
-      }
-      const key = `${instance.guid}:${instance.spellId}`;
-      out[key] = (out[key] ?? 0) + 1;
-    }
-    return out;
+  public liveDetail(): Array<{
+    key: string; persistent: boolean; decaying: boolean; planted: boolean;
+    remaining: number | null; ageMs: number; stuck: boolean; lifecycle: string;
+  }> {
+    const now = worldClock.ms;
+    return this.live.map((instance) => {
+      const ageMs = Math.round(now - instance.bornAt);
+      return {
+        key: `${instance.guid}:${instance.spellId}`,
+        persistent: instance.persistent,
+        decaying: instance.decaying,
+        planted: instance.planted,
+        remaining: instance.remaining === null ? null : Math.round(instance.remaining),
+        ageMs,
+        stuck: instance.remaining !== null && ageMs > instance.remaining + 1000,
+        lifecycle: instance.lifecycle,
+      };
+    });
   }
 
   public lastError: string | null = null;
 
   /** How many instances are live. For the instrument; `live` is private. */
-  /**
-   * The models currently in flight, for `window.worldSpellFxScale` to retune live. Yields the
-   * MODEL rather than the entry, because `particleSizeScale` is a property the manager reads off
-   * the instance -- see `world/spell-fx-scale.ts`.
-   */
   public liveModels(): Array<{ particleSizeScale?: number }> {
     return this.live
       .map((entry) => entry.model as unknown as { particleSizeScale?: number })
@@ -527,6 +551,7 @@ export class SpellKitEffects {
           decaying: false,
           ribbons: ribbonManager,
           lifecycle: 'birth',
+          bornAt: worldClock.ms,
         });
 
         // RETURNED, NOT ORPHANED, and this line is the whole point of the round. `register` above

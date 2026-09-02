@@ -163,3 +163,32 @@ describe('SpellKitEffects lifetimes', () => {
     expect(plant.rotation.z).toBeCloseTo(Math.PI / 2 + Math.PI, 6);
   });
 });
+
+/**
+ * THE INSTRUMENT MUST SEE A SELF-TERMINATING INSTANCE. Its first version filtered
+ * `!instance.persistent` out, so a cast-kit leak would have reported an empty object while being
+ * plainly on screen -- a clean number that ends an investigation, which is worse than no number.
+ * One assertion, on the case that was blind.
+ */
+describe('liveDetail', () => {
+  it('describes a non-persistent instance and its deadline', async () => {
+    const fx = new SpellKitEffects(new THREE.Scene());
+    mockNextModel = () => stubModel('glow', { 0: 400 });
+    mockEmitters = [{
+      slot: 3, tag: 0x15, effectId: 1, modelPath: 'Spells\Glow.mdx',
+    }];
+
+    // `persistent: false` -- the cast stage, the one the old `persistentLive()` could not see.
+    fx.play(stubUnit('0x1'), 133, 38, false, manager);
+    await Promise.resolve();
+
+    const rows = fx.liveDetail();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].persistent).toBe(false);
+    expect(rows[0].key).toBe('0x1:133');
+    // A real deadline, not null: `selfTerminateMs` folds a missing or zero span to `SPANLESS_MS`,
+    // so a self-terminating instance can never be left without one.
+    expect(rows[0].remaining).toBe(400);
+    expect(rows[0].stuck).toBe(false);
+  });
+});

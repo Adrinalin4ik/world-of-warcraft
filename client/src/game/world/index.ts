@@ -295,12 +295,15 @@ export default class World extends EventEmitter {
             Math.round(player.z * 100) / 100],
         missiles: { ...this.spellMissiles.stats, live: this.spellMissiles.liveCount },
         kits: { ...this.spellKitEffects.stats, live: this.spellKitEffects.liveCount },
-        // THE LEAK CHECK, two derived numbers so nobody has to subtract by eye. `armedMinusRemoved`
-        // must equal `kits.live` at all times; `persistentLive` maps `(guid:spellId)` -> count and a
-        // key with a count above 1, or a key that survives a cast it should not, IS the leak.
+        // THE LEAK CHECK. `armedMinusRemoved` must ALWAYS equal `kits.live` -- if it does not,
+        // `remove` is being skipped. `stuck` is the diagnosis in one number: any row whose deadline
+        // has passed without it being removed. `live` describes EVERY instance including
+        // self-terminating ones, which the first version of this wrongly filtered out.
         kitLeak: {
           armedMinusRemoved: this.spellKitEffects.stats.armed - this.spellKitEffects.stats.removed,
-          persistentLive: this.spellKitEffects.persistentLive(),
+          liveCount: this.spellKitEffects.liveCount,
+          stuck: this.spellKitEffects.liveDetail().filter((row) => row.stuck).length,
+          live: this.spellKitEffects.liveDetail(),
         },
         // THE DECIDING NUMBERS. `distFromPlayer` should be a couple of units for a hand effect and
         // under `ParticleManager.CULL_DISTANCE` (120) for anything meant to be seen at all. A large
