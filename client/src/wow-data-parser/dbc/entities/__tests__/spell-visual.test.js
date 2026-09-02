@@ -72,8 +72,11 @@ describe('SpellVisual / SpellVisualKit column layout', () => {
     ]);
     expect(visual.id).toBe(968);
     expect(visual.stateKitID).toBe(990);
-    // The inserted 3.3.5a column and the shifted channel column both read 0 on this row, so the
-    // state kit cannot have come out of either of them.
+    // The inserted 3.3.5a column (index 5) and the shifted channel column (index 6) both read 0 in
+    // the record above, so the state kit cannot have come out of either of them. Only the channel
+    // column is ASSERTABLE -- index 5 is declared `r.Reserved` precisely because seven rows support
+    // no name for it, so it is absent from the decoded object by design and its zero is visible in
+    // the literal rather than in an expectation.
     expect(visual.channelKitID).toBe(0);
 
     const kit = decode(SpellVisualKit, [
