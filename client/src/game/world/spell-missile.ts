@@ -125,6 +125,8 @@ const launchPoint = new THREE.Vector3();
 const straightAt = new THREE.Vector3();
 const offset = new THREE.Vector3();
 const WORLD_UP = new THREE.Vector3(0, 0, 1);
+// Module-level, like every scratch above it: `orient` runs once per live missile per frame.
+const scratchBasis = new THREE.Matrix4();
 
 /**
  * How high above a unit's origin a projectile is launched from and aimed at, in world units.
@@ -425,6 +427,7 @@ export class SpellMissiles {
           return;
         }
         model.position.copy(missile.at);
+        this.orient(missile, model);
         // BOTH calls: the scene is `matrixWorldAutoUpdate = false` and `M2` sets
         // `matrixAutoUpdate = false` on itself, so without them a model added here draws at the world
         // ORIGIN. `level-up-effect.ts` records the same trap.
@@ -549,6 +552,11 @@ export class SpellMissiles {
       const model = missile.model;
       if (model !== null) {
         model.position.copy(shaped);
+        // Re-applied per frame rather than once at spawn: the flight basis is FIXED at launch, but
+        // `M2` runs `matrixAutoUpdate = false`, and a model whose quaternion was written before it
+        // was added to the scene has had exactly one `updateMatrix` since. Cheap and unconditional
+        // beats a dirty flag that has to stay correct across the late-model path above.
+        this.orient(missile, model);
         if (typeof model.updateMatrix === 'function') {
           model.updateMatrix();
         }
@@ -624,6 +632,48 @@ export class SpellMissiles {
       offset.addScaledVector(missile.up, shape.transUp);
     }
     return at.add(offset);
+  }
+
+  /**
+   * POINT THE PROJECTILE ALONG ITS FLIGHT. Until this existed the missile model was never rotated at
+   * all -- only `position` was ever written -- so every projectile in the game flew with IDENTITY
+   * rotation, its authored nose pinned to world +X whatever direction it was actually travelling.
+   *
+   * ## The authored forward axis is +X, and that is MEASURED rather than assumed
+   *
+   * This project's record is that every orientation defect here was two conventions meeting and none
+   * was fixed by negating a coordinate, so the model's own axis was read out of the served files
+   * before anything was rotated. The `MD20` bounding box is near-symmetric in Y and Z and clearly
+   * ASYMMETRIC IN X on three of the four missiles measured, with the long side behind the origin:
+   *
+   *   Fireball_Missile_Low   x [-2.44, +0.43]   y [-1.95, +1.95]   z [-1.63, +1.63]
+   *   Arcane_Missile         x [-0.92, +0.60]   y [-1.64, +1.91]   z [-0.34, +1.13]
+   *   Shadowbolt_Missile     x [-0.76, +0.42]   y [-0.87, +0.81]   z [-0.83, +0.86]
+   *
+   * So the body sits at the origin and the tail streams back along -X: forward is +X. The
+   * corroborating datum is Fireball's fourth particle emitter, which is authored at local
+   * `(-1.300, 0, 0)` on a bone whose pivot is the same point -- the tail emitter, 1.3 units BEHIND
+   * the nose. Unrotated, that emitter sat 1.3 units away along a fixed compass direction instead of
+   * behind the projectile, which is the closest thing measured to the owner's displaced light blob.
+   * `LightningBolt_Missile` is the one near-symmetric case (x [-0.36, +0.44]) and is unaffected
+   * either way.
+   *
+   * ## Why the basis rather than a `lookAt`
+   *
+   * `missile.forward/right/up` is already built at launch, already orthonormal, and already the frame
+   * the motion-script offsets are expressed in (see `applyMotion`), so reusing it is the only choice
+   * that cannot disagree with them. `Object3D#lookAt` would impose three's own -Z convention and a
+   * world-up of its choosing, which is exactly the second convention this comment exists to avoid.
+   *
+   * `makeBasis(forward, right, up)` maps model +X to `forward`, +Y to `right` and +Z to `up`. Y and Z
+   * are the axes the bounding boxes say are symmetric, so their assignment is not evidenced and does
+   * not need to be: a spin about the nose is invisible on a radially symmetric fireball. Said plainly
+   * rather than dressed up -- if a future projectile is NOT radially symmetric, this is the line that
+   * will be wrong, and no measurement here covers it.
+   */
+  private orient(missile: Missile, model: THREE.Object3D): void {
+    scratchBasis.makeBasis(missile.forward, missile.right, missile.up);
+    model.quaternion.setFromRotationMatrix(scratchBasis);
   }
 
   private remove(index: number): void {
