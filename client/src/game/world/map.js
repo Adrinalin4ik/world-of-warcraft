@@ -13,6 +13,7 @@ import TerrainManager from './terrain-manager';
 import VisibilityManager from './visibility-manager';
 import WMOManager from './wmo-manager';
 import { ParticleManager } from '../pipeline/m2/particle/manager';
+import { RibbonManager } from '../pipeline/m2/ribbon/manager';
 
 class WorldMap extends THREE.Group {
 
@@ -198,6 +199,11 @@ class WorldMap extends THREE.Group {
     this.add(this.particleGroup);
 
     this.particleManager = new ParticleManager(this.particleGroup);
+    // RIBBON TRAILS share the particle group, for the reason that group exists: it lives apart so
+    // doodad visibility culling cannot take it, and a trail is exactly as un-cullable-by-doodad as a
+    // particle. Verified rather than assumed -- `visibility-manager.js` writes `.visible` on chunks,
+    // doodads and WMO views and never on this group.
+    this.ribbonManager = new RibbonManager(this.particleGroup);
 
     this.data = data;
     this.wdt = wdt;
@@ -375,6 +381,7 @@ class WorldMap extends THREE.Group {
     this.doodadManager.animate(delta, camera, cameraMoved);
     this.wmoManager.animate(delta, camera, cameraMoved);
     this.particleManager.animate(delta, camera);
+    this.ribbonManager.animate(delta, camera);
   }
 
   // `delta` is the real per-frame seconds elapsed (THREE.Clock.getDelta(), from

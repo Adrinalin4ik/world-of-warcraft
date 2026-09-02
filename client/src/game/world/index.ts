@@ -1165,6 +1165,7 @@ export default class World extends EventEmitter {
       groundAt,
       (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
       (guid: string) => this.entities.get(guid)?.position ?? null,
+      (this.map as unknown as { ribbonManager?: never } | null)?.ribbonManager ?? null,
     );
   }
 
@@ -1175,6 +1176,7 @@ export default class World extends EventEmitter {
       kitId,
       persistent,
       (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
+      (this.map as unknown as { ribbonManager?: never } | null)?.ribbonManager ?? null,
     );
   }
 

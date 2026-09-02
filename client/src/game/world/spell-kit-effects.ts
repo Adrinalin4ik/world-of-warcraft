@@ -191,6 +191,17 @@ const ATTACH_CASCADE = [0xf, 0x13];
 const SPANLESS_MS = 1000;
 
 /** What this module needs of `map.particleManager`. Same shape `level-up-effect.ts` declares. */
+/**
+ * What these lanes need of `map.ribbonManager`. Separate from the particle manager on purpose: they
+ * share the group and the cull rule, but a ribbon's geometry, shader and simulation are all different,
+ * so one object pretending to be both would hide that.
+ */
+interface RibbonManagerLike {
+  register: (instance: unknown) => number;
+  unregister: (instance: unknown) => void;
+  ready: (instance: unknown) => Promise<void>;
+}
+
 interface ParticleManager {
   register: (instance: unknown) => number;
   unregister: (instance: unknown) => void;
@@ -214,6 +225,8 @@ interface Instance {
   planted: boolean;
   /** Already reaped and playing its decay out: a second reap must not re-arm or double-remove. */
   decaying: boolean;
+  /** The ribbon lane this model registered with, so removal releases it too. */
+  ribbons: RibbonManagerLike | null;
 }
 
 /**
@@ -354,6 +367,7 @@ export class SpellKitEffects {
     kitId: number,
     persistent: boolean,
     particleManager: ParticleManager | null,
+    ribbonManager: RibbonManagerLike | null = null,
   ): void {
     // REAP FIRST, and before the empty check rather than after it. The reference's order is
     // reap-then-begin unconditionally (`mod.rs:698-705`), so a re-cast whose kit happens to resolve to
@@ -368,7 +382,7 @@ export class SpellKitEffects {
     }
     for (const emitter of emitters) {
       this.stats.requested += 1;
-      this.spawn(unit, spellId, persistent, emitter, particleManager);
+      this.spawn(unit, spellId, persistent, emitter, particleManager, ribbonManager);
     }
   }
 
@@ -378,6 +392,7 @@ export class SpellKitEffects {
     persistent: boolean,
     emitter: KitEmitter,
     particleManager: ParticleManager | null,
+    ribbonManager: RibbonManagerLike | null = null,
   ): void {
     const guid = unit.guid;
     void M2Blueprint.load(emitter.modelPath)
@@ -415,6 +430,11 @@ export class SpellKitEffects {
         (model as unknown as { particleSizeScale?: number }).particleSizeScale = spellFxParticleSize();
         // Without this a PARTICLE model draws nothing at all -- `level-up-effect.ts`'s own note.
         const emitterCount = particleManager?.register(model) ?? 0;
+        // RIBBON TRAILS. Additive to the particle registration, not an alternative: a lightning
+        // bolt's model carries 3 ribbons AND 116 mesh vertices, and the real client draws both. So
+        // this does NOT change the visibility rule above -- the rule keys on PARTICLE emitters
+        // because that is what decides whether the mesh is the only thing the model can draw.
+        ribbonManager?.register(model);
         // THE VISIBILITY RULE, AND IT IS DATA-DRIVEN RATHER THAN A CONVENTION GUESS.
         //
         // `register` returns how many particle emitters it took. That number decides whether this
@@ -453,6 +473,7 @@ export class SpellKitEffects {
           remaining: persistent ? null : this.selfTerminateMs(model),
           planted,
           decaying: false,
+          ribbons: ribbonManager,
         });
 
         // RETURNED, NOT ORPHANED, and this line is the whole point of the round. `register` above
@@ -622,6 +643,7 @@ export class SpellKitEffects {
   private remove(index: number): void {
     const instance = this.live[index];
     instance.manager?.unregister(instance.model);
+    instance.ribbons?.unregister(instance.model);
     if (instance.planted) {
       this.scene.remove(instance.model);
     } else {

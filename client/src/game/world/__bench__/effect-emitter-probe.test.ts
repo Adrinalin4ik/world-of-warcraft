@@ -395,3 +395,80 @@ describe('spell effect emitters: the last hop to the renderer', () => {
     expect(lines.length).toBeGreaterThan(0);
   }, 60000);
 });
+
+/**
+ * THE RIBBON CHUNK, validated against real 3.3.5a bytes rather than trusted.
+ *
+ * `wow-data-parser/m2/particle/ribbon.js` declares a 176-byte v264 record and its comment lists the
+ * field sizes -- but a comment is not a measurement, and this project's most repeated silent defect is
+ * a field that widened between versions. The reference's own spec is build 5875 / MD20 v256 with a
+ * record stride of **0xdc = 220 bytes** (`benilla-formats/src/ribbons.rs:9-19`), so the two disagree by
+ * 44 bytes and the difference has to be accounted for before a single line is written on top of it.
+ *
+ * The 44 bytes are the SIX `M2Track`s: v256 carries `interpolationRanges` in every track (3 arrays +
+ * 2 u16 = 28 B) and v264 dropped it (2 arrays + 4 u16 = 20 B). 6 x 8 = 48, less the 4 bytes v264 ADDS
+ * back as `priorityPlane`/`ribbonColorIndex`/`textureTransformLookupIndex`, = 44. So the stride delta
+ * is fully explained, and this arm checks the consequence: that every field lands on a sane value.
+ */
+describe('M2 ribbon emitters: the v264 record', () => {
+  it('decodes LightningBolt_Missile ribbons with every field in range', async () => {
+    const buffer = await fetchFixture(asM2('Spells\\LightningBolt_Missile.mdx'));
+    if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+      // eslint-disable-next-line no-console
+      console.log('SKIPPED: asset host unreachable');
+      return;
+    }
+    const m2: any = M2Parser.decode(new DecodeStream(buffer));
+    const ribbons: any[] = m2.ribbonEmitters ?? [];
+    const bones: any[] = m2.bones ?? [];
+    const textures: any[] = m2.textures ?? [];
+    const materials: any[] = m2.materials ?? [];
+
+    const lines: string[] = [`ribbons=${ribbons.length}  bones=${bones.length}`
+      + `  textures=${textures.length}  materials=${materials.length}`];
+
+    for (let i = 0; i < ribbons.length; i += 1) {
+      const rb = ribbons[i];
+      const keys = (block: any) => (block?.tracks ?? []).reduce(
+        (n: number, t: any) => n + ((t.values ?? []).length), 0,
+      );
+      lines.push(
+        `   ribbon ${i}  id=${rb.ribbonId}  bone=${rb.boneIndex}`
+        + `  pos=[${rb.position.x.toFixed(3)}, ${rb.position.y.toFixed(3)}, ${rb.position.z.toFixed(3)}]`
+        + `  tex=[${(rb.textureIndices ?? []).join(',')}]`
+        + `  mat=[${(rb.materialIndices ?? []).join(',')}]`
+        + `  edgesPerSec=${rb.edgesPerSecond.toFixed(3)}`
+        + `  edgeLife=${rb.edgeLifetime.toFixed(3)}`
+        + `  gravity=${rb.gravity.toFixed(3)}`
+        + `  rows=${rb.textureRows} cols=${rb.textureCols}`
+        + `  keys(color/alpha/above/below/slot/vis)=`
+        + `${keys(rb.colorTrack)}/${keys(rb.alphaTrack)}/${keys(rb.heightAboveTrack)}`
+        + `/${keys(rb.heightBelowTrack)}/${keys(rb.texSlotTrack)}/${keys(rb.visibilityTrack)}`
+        + `  priorityPlane=${rb.priorityPlane}`,
+      );
+    }
+    // eslint-disable-next-line no-console
+    console.log(lines.join(String.fromCharCode(10)));
+
+    // THE RESIDUAL. Every field must land somewhere legal, which a 44-byte stride error could not do:
+    // a wrong stride walks each successive record into the middle of the previous one.
+    for (const rb of ribbons) {
+      expect(rb.boneIndex).toBeGreaterThanOrEqual(0);
+      expect(rb.boneIndex).toBeLessThan(bones.length);
+      for (const t of rb.textureIndices ?? []) {
+        expect(t).toBeLessThan(textures.length);
+      }
+      // `edgeLifetime` is clamped >= 0.25 by the reference; a stride error gives garbage floats.
+      expect(rb.edgeLifetime).toBeGreaterThan(0);
+      expect(rb.edgeLifetime).toBeLessThan(60);
+      expect(rb.edgesPerSecond).toBeGreaterThan(0);
+      expect(rb.edgesPerSecond).toBeLessThan(1000);
+      // An atlas is a handful of cells, never thousands.
+      expect(rb.textureRows).toBeGreaterThanOrEqual(1);
+      expect(rb.textureRows).toBeLessThan(64);
+      expect(rb.textureCols).toBeGreaterThanOrEqual(1);
+      expect(rb.textureCols).toBeLessThan(64);
+    }
+    expect(ribbons.length).toBeGreaterThan(0);
+  }, 60000);
+});

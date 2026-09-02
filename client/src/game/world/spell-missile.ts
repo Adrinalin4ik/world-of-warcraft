@@ -136,6 +136,17 @@ const WORLD_UP = new THREE.Vector3(0, 0, 1);
 const BODY_HEIGHT = 1.2;
 
 /** What this module needs of `map.particleManager`. Same shape the sibling effect modules declare. */
+/**
+ * What these lanes need of `map.ribbonManager`. Separate from the particle manager on purpose: they
+ * share the group and the cull rule, but a ribbon's geometry, shader and simulation are all different,
+ * so one object pretending to be both would hide that.
+ */
+interface RibbonManagerLike {
+  register: (instance: unknown) => number;
+  unregister: (instance: unknown) => void;
+  ready: (instance: unknown) => Promise<void>;
+}
+
 interface ParticleManager {
   register: (instance: unknown) => number;
   unregister: (instance: unknown) => void;
@@ -158,6 +169,8 @@ interface Missile {
   remaining: number;
   /** True when the target was in the GO's MISS list -- arrival plays no impact kit. */
   missed: boolean;
+  /** The ribbon lane this model registered with, so removal releases it too. */
+  ribbons: RibbonManagerLike | null;
 
   // ---- the motion script's state, all fixed at launch. See `world/spell-motion.ts`.
   /** The whole flight time, so `progress` and `time` can be derived from `remaining`. */
@@ -268,6 +281,7 @@ export class SpellMissiles {
     groundAt: { x: number; y: number; z: number } | null,
     particleManager: ParticleManager | null,
     unitAt: (guid: string) => THREE.Vector3 | null,
+    ribbonManager: RibbonManagerLike | null = null,
   ): void {
     const speed = spellData.spellSpeed(spellId);
     if (!(speed > 0)) {
@@ -300,15 +314,15 @@ export class SpellMissiles {
       }
       this.spawn(
         spellId, null, new THREE.Vector3(groundAt.x, groundAt.y, groundAt.z),
-        false, speed, modelPath, particleManager, unitAt, 0, 1,
+        false, speed, modelPath, particleManager, unitAt, 0, 1, ribbonManager,
       );
       return;
     }
 
     for (let i = 0; i < targets.length; i += 1) {
       this.spawn(
-        spellId, targets[i].guid, null, targets[i].missed, speed, modelPath, particleManager, unitAt,
-        i, targets.length,
+        spellId, targets[i].guid, null, targets[i].missed, speed, modelPath, particleManager,
+        unitAt, i, targets.length, ribbonManager,
       );
     }
   }
@@ -324,6 +338,7 @@ export class SpellMissiles {
     unitAt: (guid: string) => THREE.Vector3 | null,
     index: number,
     count: number,
+    ribbonManager: RibbonManagerLike | null = null,
   ): void {
     // THE DEADLINE, fixed here and never recomputed: distance / Speed (`missile.rs:17-19`). Measured
     // from the aim point at LAUNCH, so a target who then runs is chased inside the original window.
@@ -370,6 +385,7 @@ export class SpellMissiles {
       at: launchPoint.clone(),
       remaining,
       missed,
+      ribbons: ribbonManager,
       totalTime: remaining,
       startDistance,
       index,
@@ -416,6 +432,11 @@ export class SpellMissiles {
         this.scene.add(model);
         model.updateMatrixWorld(true);
         const emitterCount = particleManager?.register(model) ?? 0;
+        // RIBBON TRAILS. Additive to the particle registration, not an alternative: a lightning
+        // bolt's model carries 3 ribbons AND 116 mesh vertices, and the real client draws both. So
+        // this does NOT change the visibility rule above -- the rule keys on PARTICLE emitters
+        // because that is what decides whether the mesh is the only thing the model can draw.
+        ribbonManager?.register(model);
         // THE VISIBILITY RULE, AND IT IS DATA-DRIVEN RATHER THAN A CONVENTION GUESS.
         //
         // `register` returns how many particle emitters it took. That number decides whether this
@@ -596,6 +617,7 @@ export class SpellMissiles {
     const missile = this.live[index];
     if (missile.model !== null) {
       missile.manager?.unregister(missile.model);
+      missile.ribbons?.unregister(missile.model);
       this.scene.remove(missile.model);
       // A refcount decrement, not a free -- another projectile of the same path may still be flying.
       M2Blueprint.unload(missile.model as never);
