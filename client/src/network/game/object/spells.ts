@@ -120,7 +120,29 @@ interface CooldownEntry {
   start: number;
   duration: number;
   fromGcd: boolean;
+  /**
+   * **WHICH OF THE WRITERS PUT THIS HERE** -- the instrument for "something is supplying a cooldown
+   * the data does not".
+   *
+   * There are seven call sites and they fall into two kinds that a duration alone cannot separate:
+   * three DERIVE the number from `Spell.dbc` (`gcd`, `own`, `category`) and four take it from the
+   * SERVER (`wire-list`, `wire-event-own`, `wire-event-category`, `login`). When the owner reports a
+   * cooldown that the DBC says should not exist, the only question that matters is which kind made
+   * it -- and until now nothing recorded that, which is why a measurement of what the DATA says
+   * could not answer what the CODE did.
+   */
+  source: CooldownSource;
 }
+
+/** See `CooldownEntry#source`. Derived from the DBC, or taken from the server. */
+type CooldownSource =
+  | 'gcd'
+  | 'own'
+  | 'category'
+  | 'wire-list'
+  | 'wire-event-own'
+  | 'wire-event-category'
+  | 'login';
 
 export class SpellHandler extends EventEmitter {
   private game: GameHandler;
@@ -628,6 +650,53 @@ export class SpellHandler extends EventEmitter {
     this.game.world.entities.get(casterGuid)?.releaseAnimationLatch(pose.animId);
   }
 
+  /**
+   * **EVERY LIVE COOLDOWN WITH ITS PROVENANCE** -- `window.session.protocol.game.objectHandler
+   * .spellHandler.cooldownReport()`.
+   *
+   * The instrument this area was missing, and the reason a whole round's conclusion could be wrong
+   * while every measurement in it was right: last round measured what `Spell.dbc` SAYS (Heroic
+   * Strike 78 is off-GCD -- `startRecoveryCategory` 0, `startRecoveryTime` 0) and concluded no code
+   * was needed. That is only sound if the code reads that zero as a zero, and nothing here reported
+   * what the code actually DID. This reports it.
+   *
+   * One row per live cooldown: the spell, its remaining time, and WHICH of the seven writers made
+   * it. `derived` separates the two kinds at a glance -- true means this client computed the number
+   * from the DBC, false means the server sent it. For a spell the DBC says has no cooldown, a row at
+   * all is the finding, and `source` says whose it is.
+   *
+   * Sorted longest-remaining first, so a 1.5 s GCD sweep and a 2-minute racial do not have to be
+   * hunted for. Called from a console, never per frame.
+   */
+  cooldownReport(): Array<{
+    spellId: number;
+    name: string | null;
+    remainingMs: number;
+    durationMs: number;
+    source: CooldownSource;
+    derived: boolean;
+    fromGcd: boolean;
+  }> {
+    const now = gameTime();
+    const out = [];
+    for (const [spellId, entry] of this.cooldowns) {
+      const remainingMs = Math.round((entry.start + entry.duration - now) * 1000);
+      if (remainingMs <= 0) {
+        continue;
+      }
+      out.push({
+        spellId,
+        name: spellData.spell(spellId)?.name ?? null,
+        remainingMs,
+        durationMs: Math.round(entry.duration * 1000),
+        source: entry.source,
+        derived: entry.source === 'gcd' || entry.source === 'own' || entry.source === 'category',
+        fromGcd: entry.fromGcd,
+      });
+    }
+    return out.sort((a, b) => b.remainingMs - a.remainingMs);
+  }
+
   /** `GetActionCooldown`'s two numbers for one spell, or null when nothing is running. */
   cooldownOf(spellId: number): { start: number; duration: number } | null {
     const entry = this.cooldowns.get(spellId);
@@ -653,6 +722,7 @@ export class SpellHandler extends EventEmitter {
     durationMs: number,
     startAt = gameTime(),
     fromGcd = false,
+    source: CooldownSource = 'wire-list',
   ): boolean {
     if (spellId <= 0) {
       return false;
@@ -665,7 +735,7 @@ export class SpellHandler extends EventEmitter {
     if (existing !== undefined && existing.start + existing.duration > startAt + duration) {
       return false;
     }
-    this.cooldowns.set(spellId, { start: startAt, duration, fromGcd });
+    this.cooldowns.set(spellId, { start: startAt, duration, fromGcd, source });
     return true;
   }
 
@@ -776,7 +846,7 @@ export class SpellHandler extends EventEmitter {
           continue;
         }
         // `fromGcd` -- this is the entry a cancelled cast gives back. See `clearGlobalCooldown`.
-        if (this.setCooldown(known, cast.startRecoveryTimeMs, at, true)) {
+        if (this.setCooldown(known, cast.startRecoveryTimeMs, at, true, 'gcd')) {
           changed = true;
         }
       }
@@ -784,7 +854,7 @@ export class SpellHandler extends EventEmitter {
 
     // ── (2) THE SPELL'S OWN COOLDOWN, from the DBC: the server does not send a packet for a cooldown
     // the client can derive from its own tables. NOT `fromGcd`: a real cooldown survives a cancel.
-    if (cast.recoveryTimeMs > 0 && this.setCooldown(spellId, cast.recoveryTimeMs, at, false)) {
+    if (cast.recoveryTimeMs > 0 && this.setCooldown(spellId, cast.recoveryTimeMs, at, false, 'own')) {
       changed = true;
     }
 
@@ -805,7 +875,7 @@ export class SpellHandler extends EventEmitter {
         if (row === null || row.category !== cast.category) {
           continue;
         }
-        if (this.setCooldown(known, cast.categoryRecoveryTimeMs, at, false)) {
+        if (this.setCooldown(known, cast.categoryRecoveryTimeMs, at, false, 'category')) {
           changed = true;
         }
       }
@@ -823,14 +893,22 @@ export class SpellHandler extends EventEmitter {
     gp.index = gp.headerSize;
     const bodySize = gp.length - gp.headerSize;
     const guid = gp.readGUID();
-    gp.readUnsignedByte();
+    /**
+     * **THE FLAGS BYTE WAS READ AND THROWN AWAY, and it is the one unexplained field on this
+     * packet.** Nothing here claims to know what it means -- no source in this repo names it and
+     * the reference has no 3.3.5a twin of this opcode -- but it is now RECORDED, because it is the
+     * only field that could distinguish one kind of cooldown list from another and a capture that
+     * discards it cannot answer that question at all. Read, kept, and named as unexplained rather
+     * than either guessed at or silently dropped.
+     */
+    const flags = gp.readUnsignedByte();
     let changed = false;
     const pairs: Array<[number, number]> = [];
     while (gp.available >= 8) {
       const spellId = gp.readUnsignedInt();
       const ms = gp.readUnsignedInt();
       pairs.push([spellId, ms]);
-      if (this.setCooldown(spellId, ms)) {
+      if (this.setCooldown(spellId, ms, gameTime(), false, 'wire-list')) {
         changed = true;
       }
     }
@@ -841,8 +919,13 @@ export class SpellHandler extends EventEmitter {
       caster: String(guid),
       detail: {
         count: pairs.length,
-        firstSpell: pairs[0]?.[0] ?? null,
-        firstMs: pairs[0]?.[1] ?? null,
+        flags,
+        // **ALL THE PAIRS, not just the first.** The row used to keep `firstSpell`/`firstMs` only,
+        // so a list that included the spell the owner pressed was indistinguishable from one that
+        // did not -- which is exactly the question a "why is there a cooldown here" report asks.
+        // Capped so one enormous list cannot swamp the ring; the count above is always exact.
+        pairs: pairs.slice(0, 24).map(([id, ms]) => `${id}:${ms}`).join(" "),
+        truncated: pairs.length > 24 ? 1 : 0,
       },
       bodySize,
       consumed: gp.index - gp.headerSize,
@@ -890,7 +973,7 @@ export class SpellHandler extends EventEmitter {
       return;
     }
     const at = gameTime();
-    let changed = this.setCooldown(spellId, ms, at, false);
+    let changed = this.setCooldown(spellId, ms, at, false, 'wire-event-own');
     // The category family, when this spell has one -- the same separate mechanism leg (3) applies.
     if (category > 0 && row !== null && row.category !== 0) {
       for (const known of this.known) {
@@ -898,7 +981,7 @@ export class SpellHandler extends EventEmitter {
         if (other === null || other.category !== row.category) {
           continue;
         }
-        if (this.setCooldown(known, category, at, false)) {
+        if (this.setCooldown(known, category, at, false, 'wire-event-category')) {
           changed = true;
         }
       }
@@ -1009,7 +1092,7 @@ export class SpellHandler extends EventEmitter {
         if (spellId !== 0 && ms > 0) {
           // NOT `fromGcd`: a cooldown that survived a relog is a real one, and a later cancelled cast
           // must not refund it.
-          this.setCooldown(spellId, ms, at, false);
+          this.setCooldown(spellId, ms, at, false, 'login');
         }
         // NAMED LIMIT, and it is a limit of WHERE this runs rather than of the decode: the category
         // cooldown is applied to the spell the packet NAMES and is not expanded across its family.
