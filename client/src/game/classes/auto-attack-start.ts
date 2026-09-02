@@ -100,3 +100,38 @@ export function initiatesAutoAttack(row: SpellRow | null): boolean {
   return (row.attributes & ATTR_ON_NEXT_SWING) !== 0
     || (row.attributesEx1 & ATTR_EX1_INITIATES_COMBAT) !== 0;
 }
+
+/**
+ * **IS THIS AN ON-NEXT-SWING ABILITY?** -- the queueing class on its own, without the
+ * initiates-combat leg.
+ *
+ * The owner: "еще некоторые скилы, например у хантера или вара работают под следующий свинг."
+ *
+ * Separate from `initiatesAutoAttack` because the two questions genuinely differ: Sinister Strike
+ * starts the swing but does NOT queue, and this class both queues and starts. The queueing decision
+ * needs only `Attributes & 0x404`, which is the reference's own fork
+ * (`benilla-app/src/ui_action/cast_send.rs:275-283`: "An on-next-swing spell (`Attributes & 0x404` --
+ * Heroic Strike, Cleave) queues on the server's melee slot").
+ *
+ * **BOTH BIT POSITIONS MEASURED on the served file, and they are NOT interchangeable:**
+ *
+ *     0x004  PRIMARY    321 spells -- Heroic Strike 78, Cleave 845, Kick 1770
+ *     0x400  SECONDARY  150 spells -- overwhelmingly CREATURE melee (Savage Assault 91,
+ *                                    Dismember 96, Ice Claw 3130, Rend Flesh 3147)
+ *     both    37 spells -- Raptor Strike 2973, Maul 6807 / 8972 / 9880 / 9881
+ *     union  434 spells
+ *
+ * All three requested anchors land, on different legs: **Heroic Strike 78 and Cleave 845 carry the
+ * PRIMARY bit only** (`Attributes 0x00050014`); **Raptor Strike 2973 carries BOTH** (`0x00050404`).
+ * So a SECONDARY-only test would have dropped both warrior anchors, and a PRIMARY-only test would
+ * have dropped the creature half -- reading one bit is how one half or the other goes missing.
+ * `Slam 1464` carries NEITHER (`0x00250110`), which is correct: Slam is a cast-time melee ability,
+ * not a queued one.
+ *
+ * The `AttributesEx2` post-cast-defer exclusion is deliberately NOT applied here. That bit governs
+ * WHEN the auto-attack starts, which is `initiatesAutoAttack`'s question; it says nothing about
+ * whether the spell queues on the melee slot.
+ */
+export function isOnNextSwing(row: SpellRow | null): boolean {
+  return row !== null && (row.attributes & ATTR_ON_NEXT_SWING) !== 0;
+}

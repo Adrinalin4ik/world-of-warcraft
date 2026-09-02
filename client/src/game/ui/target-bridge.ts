@@ -112,7 +112,14 @@ export function attachTargetBridge(vm: LuaVM, world: World): () => void {
     // in-flight guard covers exactly that window because it is armed on the SEND
     // (`game/classes/pending-cast.ts`), and the reference reads its own equivalent first for the same
     // reason (`ui_cast.rs:270`, `inflight(&pending, ...)`).
-    const guarded = spells.currentCast();
+    // BOTH SLOTS, because Escape cancels a queued on-next-swing strike as well as an ordinary cast.
+    // The reference keeps that reader separate from the guard and says why (`ui_cast.rs:196-199`,
+    // decision 1049): "In the reference a queued strike simply *is* the inflight spell, so
+    // `Script::SpellStopCasting 0x6e6e80`'s plain `IsCasting` branch cancels it like any cast ...
+    // `Inflight` is where our two slots are re-joined for that reader." The MOVEMENT self-cancel
+    // deliberately does NOT use this -- it reads `currentCast()`, the guard alone, because the
+    // reference's un-queue list ends "never movement".
+    const guarded = spells.inflightOrQueued();
     if (cast === null && guarded === null) {
       return [null];
     }

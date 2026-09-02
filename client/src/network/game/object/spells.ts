@@ -51,7 +51,7 @@ import { spellData } from '../../../game/pipeline/dbc/spell-data';
 import { spellWire } from '../../../game/classes/spell-wire';
 import PendingCast from '../../../game/classes/pending-cast';
 import { ERR_NO_TARGET, resolveCastTarget } from '../../../game/classes/cast-target';
-import { initiatesAutoAttack } from '../../../game/classes/auto-attack-start';
+import { initiatesAutoAttack, isOnNextSwing } from '../../../game/classes/auto-attack-start';
 // `GetTime()`'s clock. A cooldown's `start` is what the client's own Lua compares against, so the wire
 // side has to stamp it on the SAME clock -- see `lua/compat.ts#gameTime`.
 import { gameTime } from '../../../game/ui/framexml/lua/compat';
@@ -174,6 +174,45 @@ export class SpellHandler extends EventEmitter {
    * cast that never completes cannot leave an id in here and suppress the next instant's GCD.
    */
   private castStarted = new Set<number>();
+
+  /**
+   * **OUR QUEUED ON-NEXT-SWING SPELL** -- Heroic Strike, Cleave, Maul, Raptor Strike.
+   *
+   * The owner: "еще некоторые скилы, например у хантера или вара работают под следующий свинг.
+   * Смысл как с автоатакой, активируешь, дальше после свинга произойдет удар и начнется кд."
+   *
+   * **THE QUEUE IS THE SERVER'S, NOT OURS.** The press sends an ordinary `CMSG_CAST_SPELL`; the
+   * server drops it into its single `CURRENT_MELEE_SPELL` slot and fires it on its own swing timer.
+   * So there is nothing to send at swing time and no swing clock to keep -- this slot is BOOKKEEPING
+   * ONLY, for the two things the client owes: the button's checked ring, and keeping a queued strike
+   * out of the in-flight cast guard. The reference states the same division
+   * (`benilla-app/src/ui_cast.rs:164-199`: "queues on the server's melee slot ... Re-arming replaces
+   * silently: the server holds a single `CURRENT_MELEE_SPELL` slot").
+   *
+   * **WHY IT IS A SECOND SLOT AND NOT THE IN-FLIGHT GUARD.** In the reference the queued spell
+   * occupies the client's own inflight id, and the already-casting refusal at `6e4d97` then EXEMPTS
+   * it because the inflight record carries the `0x404` bits -- "so a queued Heroic Strike never
+   * blocks Rend". The reference models that observable with two slots rather than the client's
+   * push/pop pair (`ui_cast.rs:78-79`: "the on-next-swing class never occupies this guard at all --
+   * it arms `QueuedMeleeSpell` instead, so this guard only ever holds ordinary casts and the gate
+   * needs no attribute test"). This is that second slot, for that reason.
+   *
+   * **DEADLINE-LESS AND WIRE-CLEARED**, like the reference's: no timer touches it. It clears on
+   * `SMSG_SPELL_GO` -- which for this class IS the landing, because the server sends GO when its
+   * swing fires the strike -- and on `SMSG_CAST_FAILED` / `SMSG_SPELL_FAILURE` when the queue dies
+   * (target death, replacement, cancel). Id-keyed, like every reap here.
+   */
+  private queuedMelee: number | null = null;
+
+  /**
+   * The queued on-next-swing spell, or null -- what the button's checked ring reads.
+   *
+   * The reference's checked state reads BOTH slots (`ui_cast.rs:170-173`, the `IsCurrentAction` C2
+   * leg), which is why this is exposed rather than private to the fork.
+   */
+  get queuedMeleeSpell(): number | null {
+    return this.queuedMelee;
+  }
 
   /**
    * THE POSE CURRENTLY HELD, per caster guid: which spell armed it and which clip it is.
@@ -519,6 +558,9 @@ export class SpellHandler extends EventEmitter {
     // A cast that broke never reaches GO, so its id must be dropped here or it would suppress the
     // global cooldown of the next INSTANT cast of the same spell (see `castStarted`).
     this.castStarted.delete(spellId);
+    // The queue dies with it: a failing `SMSG_SPELL_FAILURE` on the PREPARING melee slot is one of
+    // the reference's three clear edges (`ui_cast.rs:176-183`). Id-keyed.
+    this.clearQueuedMelee(spellId);
     // AND the held pose must be given up, or the caster stands in it for the rest of the session: the pose
     // is a LOOP and `externalSeq`'s release "never releases a loop" by design. GO is what normally takes
     // the latch back, and a broken cast never gets there. Gated on this spell having armed a pose so a
@@ -1283,6 +1325,27 @@ export class SpellHandler extends EventEmitter {
       // The cast RESOLVED -- open the in-flight guard so the next press goes out. Spell-id-keyed, which
       // is what stops a triggered proc's GO (a different spell, arriving mid-cast) opening it early.
       this.pendingCast.clearIf(decoded.spellId);
+      /**
+       * **AND THE MELEE QUEUE, because for an on-next-swing strike THIS GO *IS* THE LANDING.**
+       *
+       * The owner: "дальше после свинга произойдет удар и начнется кд." The server holds the strike
+       * in its `CURRENT_MELEE_SPELL` slot and sends `SMSG_SPELL_GO` when its own swing timer fires
+       * it -- so GO arrives at the moment the blow lands, not at the press.
+       *
+       * **WHICH MEANS THE COOLDOWN ALREADY STARTS AT THE LANDING AND NEEDED NO NEW GATE.** The
+       * `applyCastCooldowns` call a few lines above is the instant-cast arm, and an on-next-swing
+       * spell reaches it here for exactly the reason an instant does: it sends no
+       * `SMSG_SPELL_START`, so `castStarted` is empty for it. The cooldown is therefore stamped at
+       * GO, which is the swing. The ordering the owner described is the ordering that falls out --
+       * verified by reading rather than assumed, and stated because a gate added "to be safe" here
+       * would have moved the cooldown to the press and broken it.
+       *
+       * The reference's own clear set is the same three edges, and it explains why GO is in it on
+       * this wire where the 1.12 client used `CAST_RESULT`: "vmangos never sends an OK `CAST_RESULT`
+       * at all, so on our wire the resolution is `SMSG_SPELL_GO` when the swing fires the strike"
+       * (`ui_cast.rs:176-183`).
+       */
+      this.clearQueuedMelee(decoded.spellId);
     }
 
     this.emit('spellGo', { ...decoded, targets });
@@ -1554,6 +1617,9 @@ export class SpellHandler extends EventEmitter {
     // Same reason as in `handleSpellFailure`: a refused cast never reaches GO, so its id must not be left
     // in `castStarted` to suppress a later instant's global cooldown.
     this.castStarted.delete(spellId);
+    // The queue's other failure edge -- the reference clears on a failing `CAST_RESULT` too
+    // (`ui_cast.rs:176-183`); on this wire `SMSG_CAST_FAILED` is that packet.
+    this.clearQueuedMelee(spellId);
     // AND THE GCD GOES BACK. This is the reference's own trigger, named exactly: the GCD is armed at
     // send and "a later `SMSG_CAST_RESULT` failure clears it again (`0x6e1630`)"
     // (`ui_action/cast_send.rs:643-647`) -- `SMSG_CAST_FAILED` is 3.3.5a's name for that packet.
@@ -1684,6 +1750,27 @@ export class SpellHandler extends EventEmitter {
     // THE GUARD, ahead of everything. A duplicate press must not reach the wire: the server would refuse
     // it with `SPELL_FAILED_SPELL_IN_PROGRESS` and that refusal used to close the RUNNING cast's bar.
     const now = Date.now();
+    /**
+     * **THE ON-NEXT-SWING CLASS FORKS HERE, and it is the whole of the second defect.**
+     *
+     * `Attributes & 0x404` -- both bits measured on this build, in
+     * `classes/auto-attack-start.ts#isOnNextSwing`. Such a spell does not cast: it queues on the
+     * server's melee slot and lands on the next swing.
+     *
+     * **RE-PRESSING A QUEUED STRIKE IS A SILENT BAIL, NOT A CANCEL -- checked against the reference
+     * rather than assumed, because the brief said the opposite.** The reference is explicit and
+     * §5-CONFIRMED: "Re-pressing the queued spell itself is the ref's silent same-spell bail
+     * (`6e4d43`: debug-log, `xor al,al`, no CMSG, no error): **1.12 has no re-press-to-unqueue**"
+     * (`ui_cast.rs:184-187`, same fork at `ui_action/cast_send.rs:281-283`). So `'busy-same'` is
+     * returned, which `ui/cast-refusal.ts` already renders as nothing at all -- no packet, no red
+     * line. The real un-queue is the StopAttack chain, never a re-press.
+     */
+    const onNextSwing = isOnNextSwing(spellData.spell(spellId));
+    if (onNextSwing && this.queuedMelee === spellId) {
+      return 'busy-same';
+    }
+    // The guard now only ever holds ORDINARY casts, which is what lets a queued strike stop blocking
+    // them; `pendingCast` is armed below on the non-on-next-swing branch only.
     const inFlight = this.pendingCast.current(now);
     if (inFlight !== null) {
       return inFlight === spellId ? 'busy-same' : 'busy-other';
@@ -1742,7 +1829,24 @@ export class SpellHandler extends EventEmitter {
     this.game.send(app);
     // OPTIMISTIC: armed on the send, not on `SMSG_SPELL_START`, because the mashing lands during that
     // round trip. Tightened to the server's real cast time when START names it.
-    this.pendingCast.arm(spellId, now);
+    //
+    // **EXCEPT FOR THE ON-NEXT-SWING CLASS, which arms the melee queue INSTEAD** -- the reference's
+    // own fork (`ui_action/cast_send.rs:596-600`). This CHANGES a rule
+    // `game/classes/pending-cast.ts` established -- that the guard is armed on every send -- and the
+    // change is what the reference requires: with a queued strike in the guard, pressing Rend during
+    // it was refused `'busy-other'` with a red line for up to the guard's 5 s provisional deadline,
+    // where the reference says plainly "a queued Heroic Strike never blocks Rend". `pending-cast.ts`
+    // itself is untouched; only who arms it changed.
+    //
+    // A consequence that is the reference's rule falling out rather than a coincidence: the movement
+    // self-cancel reads `currentCast()`, i.e. the guard, so a queued strike is now invisible to it --
+    // and the reference's un-queue list ends "never movement" (`ui_cast.rs:188-191`).
+    if (onNextSwing) {
+      // Replaces any prior queue, silently: the server holds ONE melee slot.
+      this.queuedMelee = spellId;
+    } else {
+      this.pendingCast.arm(spellId, now);
+    }
 
     spellWire.record({
       at: Date.now(),
@@ -1893,6 +1997,38 @@ export class SpellHandler extends EventEmitter {
    */
   currentCast(): number | null {
     return this.pendingCast.current(Date.now());
+  }
+
+  /**
+   * Drop the melee queue when THIS spell resolved or died. Id-keyed, like every reap here.
+   *
+   * Returns whether it cleared, so a caller can announce rather than guess -- the discarded-return
+   * defect class this project records twice.
+   */
+  clearQueuedMelee(spellId: number): boolean {
+    if (this.queuedMelee !== spellId) {
+      return false;
+    }
+    this.queuedMelee = null;
+    this.emit('cooldownsChanged');
+    return true;
+  }
+
+  /**
+   * The in-flight cast OR the queued strike -- the two slots re-joined for the readers that must see
+   * both.
+   *
+   * The reference keeps exactly this reader and names why it is separate from the guard
+   * (`ui_cast.rs:196-199`): "**Escape is the other route, and it is not that chain at all** (1049).
+   * In the reference a queued strike simply *is* the inflight spell, so
+   * `Script::SpellStopCasting 0x6e6e80`'s plain `IsCasting` branch cancels it like any cast ...
+   * `Inflight` is where our two slots are re-joined for that reader."
+   *
+   * So Escape cancels a queued strike and the MOVEMENT self-cancel does not -- which is the whole
+   * reason these are two readers and not one. `currentCast` above stays the guard alone.
+   */
+  inflightOrQueued(): number | null {
+    return this.pendingCast.current(Date.now()) ?? this.queuedMelee;
   }
 
   /**
