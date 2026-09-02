@@ -85,6 +85,8 @@ const MODELS = [
 ];
 
 /** `M2Blueprint.load`'s rewrite, which the asset host requires -- only `.m2` is served. */
+const LIGHTNING_MISSILE = 'Spells\\LightningBolt_Missile.mdx';
+
 const asM2 = (path: string) => path.replace(/\.md(x|l)$/i, '.m2');
 
 /** `ParticleManager.capacityFor`, replicated so the probe reports the number the manager would pick. */
@@ -412,7 +414,7 @@ describe('spell effect emitters: the last hop to the renderer', () => {
  */
 describe('M2 ribbon emitters: the v264 record', () => {
   it('decodes LightningBolt_Missile ribbons with every field in range', async () => {
-    const buffer = await fetchFixture(asM2('Spells\\LightningBolt_Missile.mdx'));
+    const buffer = await fetchFixture(asM2(LIGHTNING_MISSILE));
     if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
       // eslint-disable-next-line no-console
       console.log('SKIPPED: asset host unreachable');
@@ -469,6 +471,121 @@ describe('M2 ribbon emitters: the v264 record', () => {
       expect(rb.textureCols).toBeGreaterThanOrEqual(1);
       expect(rb.textureCols).toBeLessThan(64);
     }
+    expect(ribbons.length).toBeGreaterThan(0);
+  }, 60000);
+});
+
+/**
+ * IS THE ORBIT AUTHORED, AND ON WHICH CLOCK?
+ *
+ * The owner: "в оригинале вокруг снаряда еще крутятся молнии, тут нет." The arcs draw but do not
+ * orbit. Three places that can die look identical on screen, and this arm answers the one that can be
+ * answered from served bytes -- which rules the other two out if the orbit turns out unauthored or on
+ * a feed nothing drives.
+ *
+ * For every bone of `LightningBolt_Missile`: its parent, its billboard flag, how many rotation keys
+ * each sequence slot carries, and the `globalSequenceID` of each of its three tracks. -1 there is the
+ * model own clock; >= 0 is a GLOBAL sequence, a separate feed indexed by the model global-sequence
+ * duration table rather than by an armed animation.
+ *
+ * The three ribbon hosts are bones 23, 24 and 25 (measured in the ribbon arm above), so those rows and
+ * their ancestors are the ones that decide it.
+ */
+describe('M2 bone rotation: is the lightning orbit authored', () => {
+  it('reports rotation key counts and the global-sequence flag per bone', async () => {
+    const buffer = await fetchFixture(asM2(LIGHTNING_MISSILE));
+    if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+      // eslint-disable-next-line no-console
+      console.log('SKIPPED: asset host unreachable');
+      return;
+    }
+    const m2: any = M2Parser.decode(new DecodeStream(buffer));
+    const bones: any[] = m2.bones ?? [];
+    const sequences: any[] = m2.animations ?? [];
+    const globals: any[] = m2.sequences ?? [];
+
+    const lines: string[] = [
+      `bones=${bones.length}  sequences=${sequences.length}  globalSequences=${globals.length}`
+      + `  globalDurations=[${globals.join(String.fromCharCode(44))}]`,
+    ];
+    sequences.forEach((seq: any, i: number) => {
+      lines.push(`   sequence ${i}: animId=${seq.id} length=${seq.length}ms flags=0x${(seq.flags >>> 0).toString(16)}`);
+    });
+
+    const keyCounts = (block: any) => (block?.tracks ?? [])
+      .map((t: any) => (t.values ?? []).length)
+      .join(String.fromCharCode(47));
+
+    for (let i = 0; i < bones.length; i += 1) {
+      const bone = bones[i];
+      const rotKeys = keyCounts(bone.rotation);
+      const transKeys = keyCounts(bone.translation);
+      const scaleKeys = keyCounts(bone.scaling);
+      const totalKeys = [bone.rotation, bone.translation, bone.scaling]
+        .reduce((sum: number, block: any) => sum + (block?.tracks ?? [])
+          .reduce((n: number, t: any) => n + (t.values ?? []).length, 0), 0);
+      const isHost = i >= 23 && i <= 25;
+      if (!isHost && totalKeys === 0) {
+        continue;
+      }
+      lines.push(
+        `   bone ${String(i).padStart(2)}${isHost ? String.fromCharCode(42) : String.fromCharCode(32)}`
+        + ` parent=${String(bone.parentID).padStart(3)}`
+        + ` billboard=${bone.billboardType}`
+        + ` rotKeys=[${rotKeys}] gsRot=${bone.rotation?.globalSequenceID}`
+        + ` transKeys=[${transKeys}] gsTrans=${bone.translation?.globalSequenceID}`
+        + ` scaleKeys=[${scaleKeys}] gsScale=${bone.scaling?.globalSequenceID}`,
+      );
+    }
+    // eslint-disable-next-line no-console
+    console.log(lines.join(String.fromCharCode(10)));
+    expect(bones.length).toBeGreaterThan(0);
+  }, 60000);
+});
+
+/**
+ * THE STRIP GEOMETRY ITSELF: do the height tracks stay non-zero for the whole flight?
+ *
+ * A ribbon whose `heightAbove`/`heightBelow` both reach 0 collapses to a degenerate line and draws
+ * nothing, and `RibbonRuntime#step` samples both at its own monotonically-accumulating `timeMs` --
+ * so a track whose last key sits at 200 ms decides what a 900 ms flight looks like. That is the other
+ * way "there is no trail" can be true with every position correct, so it is measured rather than
+ * assumed.
+ */
+describe('M2 ribbon geometry: the height and visibility tracks', () => {
+  it('reports height/visibility keys and their spans for the lightning ribbons', async () => {
+    const buffer = await fetchFixture(asM2(LIGHTNING_MISSILE));
+    if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+      // eslint-disable-next-line no-console
+      console.log('SKIPPED: asset host unreachable');
+      return;
+    }
+    const m2: any = M2Parser.decode(new DecodeStream(buffer));
+    const ribbons: any[] = m2.ribbonEmitters ?? m2.ribbons ?? [];
+    const lines: string[] = [`ribbons=${ribbons.length}`];
+    const describeTrack = (name: string, block: any) => {
+      if (!block) {
+        return `${name}=absent`;
+      }
+      const t0 = (block.tracks ?? [])[0];
+      const stamps: number[] = t0?.timestamps ?? [];
+      const values: any[] = t0?.values ?? [];
+      const nums = values.map((v: any) => (typeof v === 'number' ? v : v?.x ?? v?.[0]));
+      return `${name}{gs=${block.globalSequenceID} keys=${stamps.length}`
+        + ` span=${stamps.length ? `${stamps[0]}..${stamps[stamps.length - 1]}ms` : 'none'}`
+        + ` values=[${nums.slice(0, 6).map((n: any) => (typeof n === 'number' ? n.toFixed(3) : String(n))).join(String.fromCharCode(44))}]}`;
+    };
+    ribbons.forEach((r: any, i: number) => {
+      lines.push(`   ribbon ${i}: bone=${r.boneIndex} edgesPerSec=${r.edgesPerSecond}`
+        + ` edgeLifetime=${r.edgeLifetime} gravity=${r.gravity}`
+        + ` textureRows=${r.textureRows} textureCols=${r.textureCols}`);
+      lines.push(`      ${describeTrack('above', r.heightAboveTrack)}`);
+      lines.push(`      ${describeTrack('below', r.heightBelowTrack)}`);
+      lines.push(`      ${describeTrack('visibility', r.visibilityTrack)}`);
+      lines.push(`      ${describeTrack('color', r.colorTrack)}  ${describeTrack('alpha', r.alphaTrack)}`);
+    });
+    // eslint-disable-next-line no-console
+    console.log(lines.join(String.fromCharCode(10)));
     expect(ribbons.length).toBeGreaterThan(0);
   }, 60000);
 });
