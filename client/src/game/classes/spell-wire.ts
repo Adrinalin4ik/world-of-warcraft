@@ -39,6 +39,16 @@ export interface SpellWireRow {
     | 'CAST_FAILED'
     | 'CAST_SENT'
     /**
+     * A press REFUSED LOCALLY at target resolution -- no packet, a red line instead.
+     *
+     * OUTBOUND-side like `CAST_SENT`, and its own kind because it is the one press outcome with no
+     * wire trace at all: the real client refuses an unbindable cast without sending
+     * (`game/classes/cast-target.ts`). `detail.word` is the targeting flag word that could not be
+     * satisfied and `detail.error` the `GlobalStrings.lua` name shown, so "the button did nothing"
+     * can be told apart from "the button was refused, and by which bit".
+     */
+    | 'CAST_REFUSED'
+    /**
      * `CMSG_SET_ACTION_BUTTON` (0x128) as SENT -- one action slot written to the server, which is what
      * makes a dragged ability survive a relog.
      *

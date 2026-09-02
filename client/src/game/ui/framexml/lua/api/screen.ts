@@ -457,6 +457,26 @@ function installCVars(vm: LuaVM): void {
      */
     ['lockActionBars', '1'],
     /**
+     * AUTO SELF-CAST: a helpful spell cast with a hostile target falls back to the caster.
+     *
+     * The owner's requirement, verbatim: "не могу кастовать дружественные заклинания, типа хил, пока
+     * в таргете противник, а должен мочь и такие эффекты должны автоматически применяться на меня."
+     * Read by `ui/cast-refusal.ts` -- the one cast door -- and consumed by
+     * `classes/cast-target.ts`'s second candidate, which is the real client's own
+     * `0x6e53d7` fallback to the active player.
+     *
+     * **`"1"` IS OURS AND THE SHIPPED DEFAULT IS `"0"`**, exactly like `lockActionBars` above. The
+     * reference records the engine's registered default as `"0"` (CVar name `0x870dc0`, gate
+     * `[0xceac34]+0x28`) and then defaults it ON itself, as a named deviation, because with it off an
+     * unbindable friendly cast falls into the targeting-cursor mode neither it nor this client models
+     * (`benilla-app/src/ui_action/cast_target.rs:211-222`). Same position, same choice, and the owner
+     * asked for it.
+     *
+     * It is a real CVar, so `SetCVar("autoSelfCast", "0")` restores the shipped behaviour with no
+     * code change.
+     */
+    ['autoSelfCast', '1'],
+    /**
      * THE TWO NAMEPLATE SWITCHES, seeded OFF.
      *
      * Not decoration: `Bindings.xml:544-573`'s three nameplate bindings do nothing but read and write

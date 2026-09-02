@@ -50,6 +50,7 @@ import { castAnimationFor, precastAnimationFor } from '../../../game/classes/spe
 import { spellData } from '../../../game/pipeline/dbc/spell-data';
 import { spellWire } from '../../../game/classes/spell-wire';
 import PendingCast from '../../../game/classes/pending-cast';
+import { ERR_NO_TARGET, resolveCastTarget } from '../../../game/classes/cast-target';
 // `GetTime()`'s clock. A cooldown's `start` is what the client's own Lua compares against, so the wire
 // side has to stamp it on the SAME clock -- see `lua/compat.ts#gameTime`.
 import { gameTime } from '../../../game/ui/framexml/lua/compat';
@@ -1405,7 +1406,31 @@ export class SpellHandler extends EventEmitter {
    * Both arms are `samples/benilla/crates/benilla-app/src/ui_action/cast_send.rs:283-297`. Neither sends
    * a packet, which is the entire fix: see `game/classes/pending-cast.ts`.
    */
-  castSpell(spellId: number, target: string | null): 'sent' | 'busy-same' | 'busy-other' {
+  /**
+   * **THE TARGET IS NOW RESOLVED, NOT COPIED** -- see `game/classes/cast-target.ts`.
+   *
+   * This used to ship the current selection whenever there was one, for every spell. That is the
+   * owner's "не могу кастовать дружественные заклинания, типа хил, пока в таргете противник": with a
+   * wolf selected, a heal went out aimed at the wolf and a self-buff went out aimed at the wolf, and
+   * the server refused both. The real client resolves the target locally first, and the two arms that
+   * matter are a `Targets` word of ZERO (ship `TARGET_FLAG_SELF` and no guid) and the autoSelfCast
+   * fallback to the player. `cast-target.ts` carries the mechanism, its citations and the DBC
+   * measurement that establishes which column decides.
+   *
+   * **NO WIRE SHAPE CHANGES HERE, and that is what keeps the width trap out of this fix.** Both
+   * bodies this can now send are bodies this method already sent: `TARGET_FLAG_UNIT` + a packed guid
+   * (what a targeted press sent), and `TARGET_FLAG_SELF` with nothing following (what a press with no
+   * selection sent). The resolution only chooses BETWEEN them, so there is no new length, no new
+   * field and nothing to widen -- and the exact sizing below is unchanged.
+   *
+   * `autoSelfCast` is passed in rather than read here because the CVar store lives on the Lua side;
+   * `ui/cast-refusal.ts` reads it and it is the ONE door, so there is one reader.
+   */
+  castSpell(
+    spellId: number,
+    target: string | null,
+    autoSelfCast: boolean,
+  ): 'sent' | 'busy-same' | 'busy-other' | 'no-target' | 'invalid-target' {
     const TARGET_FLAG_SELF = 0x0000;
     const TARGET_FLAG_UNIT = 0x0002;
 
@@ -1417,11 +1442,46 @@ export class SpellHandler extends EventEmitter {
       return inFlight === spellId ? 'busy-same' : 'busy-other';
     }
 
+    const world = this.game.world;
+    const selfGuid = world?.player?.guid ?? null;
+    const selection = target !== null && target !== '0x0' ? target : null;
+    const wire = resolveCastTarget(
+      spellData.spell(spellId),
+      selection,
+      selfGuid,
+      autoSelfCast,
+      {
+        target: selection === null ? null : world?.entities?.get(selection) ?? null,
+        self: selfGuid === null ? null : world?.entities?.get(selfGuid) ?? world?.player ?? null,
+      },
+    );
+    if (wire.kind === 'refused') {
+      // REFUSED LOCALLY AND NOT SENT, which is the reference's own behaviour for a word it cannot
+      // bind. Recorded so a probe can see which word was refused rather than only that a press did
+      // nothing -- the targeting-cursor families (Flamestrike, Blizzard, Mining, Opening) all land
+      // here and `cast-target.ts` names that gap.
+      spellWire.record({
+        at: Date.now(),
+        kind: 'CAST_REFUSED',
+        spellId,
+        caster: null,
+        detail: {
+          word: wire.word,
+          error: wire.error,
+          selection,
+          name: spellData.spell(spellId)?.name ?? null,
+        },
+        bodySize: 0,
+        consumed: 0,
+      });
+      return wire.error === ERR_NO_TARGET ? 'no-target' : 'invalid-target';
+    }
+
     // The body is sized exactly, because `GameHandler#send` derives the packet's declared LENGTH from
     // the buffer size -- an over-allocated buffer sends a wrong length field, which `handler.js` records
     // as a real defect it has already been bitten by.
-    const targeted = target !== null && target !== '0x0';
-    const guidBytesLength = targeted ? packedGuidLength(target as string) : 0;
+    const targeted = wire.kind === 'unit';
+    const guidBytesLength = targeted ? packedGuidLength(wire.guid) : 0;
     const body = 1 + 4 + 1 + 4 + guidBytesLength;
 
     const app = new GamePacket(GameOpcode.CMSG_CAST_SPELL, 6 + body);
@@ -1430,7 +1490,7 @@ export class SpellHandler extends EventEmitter {
     app.writeUnsignedByte(0);
     app.writeUnsignedInt(targeted ? TARGET_FLAG_UNIT : TARGET_FLAG_SELF);
     if (targeted) {
-      app.writePackedGUID(target as string);
+      app.writePackedGUID(wire.guid);
     }
     this.game.send(app);
     // OPTIMISTIC: armed on the send, not on `SMSG_SPELL_START`, because the mashing lands during that
@@ -1443,7 +1503,11 @@ export class SpellHandler extends EventEmitter {
       spellId,
       caster: null,
       detail: {
-        target: targeted ? (target as string) : null,
+        // The RESOLVED target, and the selection it came from -- so a probe can see the fallback
+        // happen (`selection` a wolf, `target` ourselves) rather than only its result.
+        target: targeted ? wire.guid : null,
+        selection,
+        selfCast: targeted && wire.guid === selfGuid ? 1 : 0,
         name: spellData.spell(spellId)?.name ?? null,
         bodyBytes: body,
       },
