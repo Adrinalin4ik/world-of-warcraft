@@ -939,19 +939,19 @@ export class SpellHandler extends EventEmitter {
      *     A `u16` id read where a `u32` sits is exactly `+2`, which is the mistake this fixes, so a
      *     future reading of 14 would report `perEntry 2` and name itself.
      *   - `perEntry` null with a nonzero remainder: the stride is right and the HEADER moved.
-     *   - a THROW (caught by the caller): we over-read, so the stride is too LARGE -- the one case
-     *     the other two cannot express.
-     *
-     * The header is stashed BEFORE the loop so a throwing entry still produces a row, which is the
-     * placement `CLAUDE.md` requires.
+     *   - a stride too LARGE would normally show as a throw, and `CLAUDE.md` asks for that third
+     *     arm -- but it is UNREACHABLE here and that is by construction rather than by luck: the
+     *     loop is bounded by `gp.available >= COOLDOWN_ENTRY` as well as by the wire count, so it
+     *     stops short rather than over-reading. An over-large stride therefore reports as
+     *     `cooldownsRead` BELOW `cooldownCount` with a nonzero residual, which is the same
+     *     information without the exception. Said plainly rather than leaving a reader to wonder
+     *     where the throw arm went.
      */
     let cooldownCount = 0;
     const COOLDOWN_ENTRY = 16;
     let cooldownsRead = 0;
-    let cooldownStart = gp.index;
     if (gp.available >= 2) {
       cooldownCount = gp.readUnsignedShort();
-      cooldownStart = gp.index;
       const at = gameTime();
       for (let i = 0; i < cooldownCount && gp.available >= COOLDOWN_ENTRY; i += 1) {
         const spellId = gp.readUnsignedInt() >>> 0;
@@ -985,7 +985,6 @@ export class SpellHandler extends EventEmitter {
       && cooldownResidual % cooldownsRead === 0
       ? cooldownResidual / cooldownsRead
       : null;
-    void cooldownStart;
 
     this.known = new Set(found);
     spellWire.record({
