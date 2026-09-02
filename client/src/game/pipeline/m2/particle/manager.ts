@@ -256,9 +256,67 @@ export class ParticleManager {
     }
   }
 
+  /**
+   * The largest value anywhere in an animated track, over every animation it carries.
+   *
+   * `capacityFor` needs the PEAK rather than a sample, and the difference is not academic -- see its
+   * own comment. Falls back to `fallback` for a track with no data, exactly as
+   * `evaluateAnimationTrack` does, so a definition with no track behaves as before.
+   */
+  private static trackPeak(block: any, fallback: number): number {
+    const tracks = block && block.tracks;
+    if (!tracks || tracks.length === 0) {
+      return fallback;
+    }
+    let peak = -Infinity;
+    for (const track of tracks) {
+      const values = track && track.values;
+      if (!values) {
+        continue;
+      }
+      for (let i = 0; i < values.length; ++i) {
+        if (typeof values[i] === 'number' && values[i] > peak) {
+          peak = values[i];
+        }
+      }
+    }
+    return peak === -Infinity ? fallback : peak;
+  }
+
+  /**
+   * How many particle slots to allocate for one emitter, decided ONCE at register time.
+   *
+   * ## THE PEAK, NOT THE VALUE AT t=0, AND THAT IS A MEASURED FIX
+   *
+   * This used to sample `emissionRate` and `lifespan` at `timeMs = 0`. For a DOODAD that is correct --
+   * a fountain or a brazier emits at a constant rate, so its t=0 sample IS its rate. For a SPELL
+   * EFFECT it is wrong in a way that shows as "the effect has no particles at all": a spell emitter
+   * RAMPS, so its authored rate at t=0 is frequently 0, the pool was then built with the floor of one
+   * slot, and the emitter could never hold more than a single particle however hard it emitted later.
+   *
+   * Measured on the real served models (`game/world/__bench__/effect-emitter-probe.test.ts`), where
+   * `rate(t=0)` is what this function used to read and `rateMax` is what it reads now:
+   *
+   *     Spells\DustCloud_Land.mdx      1 emitter   rate(t=0) 0.0  rateMax  50.0  ->  1 slot, now  51
+   *     Spells\ChargeTrail.mdx         1 emitter   rate(t=0) 0.0  rateMax  10.0  ->  1 slot, now  11
+   *     Spells\Frost_Nova_state.mdx    9 emitters  5 of them at rate(t=0) 0.0, rateMax 50-450
+   *     Spells\Fireball_Missile_Low.mdx 4 emitters  rate(t=0) == rateMax on all four -- unaffected
+   *
+   * **6 of the 25 emitters measured across six real effect models were starved to a single slot**, and
+   * both of Warrior Charge's two emitters were among them -- which is the owner's "партиклов нет" on
+   * that spell, exactly. The models whose rate is already flat, including every doodad emitter this
+   * function has ever sized, get the identical number they got before.
+   *
+   * The cost of the change is memory, and it is bounded by the same `MAX_PARTICLES_PER_EMITTER` clamp
+   * as before (512): the worst row measured, Frost Nova's 450/sec over a 0.5 s lifespan, asks for 226
+   * slots against the 1 it used to get. A slot is a handful of floats in the pool's typed arrays, so
+   * this is kilobytes per emitter and only for emitters that actually exist.
+   */
   private static capacityFor(definition: any): number {
-    const rate = evaluateAnimationTrack(definition.emissionRate, 0, 0, 0);
-    const lifespan = evaluateAnimationTrack(definition.lifespan, 0, 0, RuntimeEmitter.DEFAULT_LIFESPAN_SECONDS);
+    const rate = ParticleManager.trackPeak(definition.emissionRate, 0);
+    const lifespan = ParticleManager.trackPeak(
+      definition.lifespan, RuntimeEmitter.DEFAULT_LIFESPAN_SECONDS,
+    );
 
     // +1 covers the fractional accumulator's overshoot; the floor of 1 keeps a zero-rate emitter from
     // constructing zero-length typed arrays.

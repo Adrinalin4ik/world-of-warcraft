@@ -116,6 +116,35 @@ describe('ParticleManager', () => {
     expect(manager.liveParticleCount).toBeLessThanOrEqual(25);
   });
 
+  it('sizes the pool from the emission-rate PEAK, not its value at t=0', () => {
+    // THE SPELL-EFFECT SHAPE, and the defect this closes. A doodad emits at a constant rate, so
+    // sampling `emissionRate` at t=0 gave its real rate; a spell effect RAMPS, and four of the six
+    // real effect models measured start at zero -- both of Warrior Charge's emitters among them. The
+    // pool was then built with the floor of one slot and the effect could never show more than a
+    // single particle however hard it emitted later, which on screen is "no particles at all".
+    //
+    // 0 at t=0 rising to 50 over 500 ms, at a 1 s lifespan: the peak asks for ~51 slots, the old t=0
+    // read asked for 1.
+    const ramped = {
+      tracks: [{ animationIndex: 0, timestamps: [0, 500], values: [0, 50] }],
+    };
+    const manager = new ParticleManager(new THREE.Group());
+    manager.register(fakeInstance([emitterDefinition({
+      emissionRate: ramped,
+      lifespan: constantTrack(1),
+    })]));
+
+    const camera = testCamera();
+    for (let i = 0; i < 120; i++) {
+      manager.animate(1 / 60, camera);
+    }
+
+    // The assertion is on the number of particles the emitter could HOLD, which is what the capacity
+    // decides -- one slot would pin this at 1 forever.
+    expect(manager.liveParticleCount).toBeGreaterThan(1);
+    expect(manager.liveParticleCount).toBeLessThanOrEqual(ParticleManager.MAX_PARTICLES_PER_EMITTER);
+  });
+
   it('clamps a pathological definition to the per-emitter ceiling', () => {
     const manager = new ParticleManager(new THREE.Group());
     manager.register(fakeInstance([emitterDefinition({
