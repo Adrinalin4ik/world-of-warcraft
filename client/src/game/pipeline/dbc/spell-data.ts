@@ -610,6 +610,25 @@ class SpellData {
   private impactKits: Map<number, number> | null = null;
 
   /**
+   * `SpellVisual.dbc` id -> its STATE-stage kit id (column 4) -- the kit that belongs to an AURA's
+   * life rather than to a cast edge.
+   *
+   * The fourth of the stage quartet, and the one whose lifetime is the aura's: the reference's aura
+   * watcher reads `SpellVisual` field 4 and plays it at stage 2 for exactly as long as the spell id
+   * sits in the unit's aura slots (`benilla-app/src/creature_anim/spell_visual.rs:1132`
+   * `arm_aura_state_fx`, byte-verified there as `0x604d00 -> 0x6123f0 -> 0x5ff350` with
+   * `0x5ff4c2: push 2`). Field 4 is one of the four indices 3.3.5a did NOT move --
+   * `dbc/entities/spell-visual.js` measures the inserted column at index 5 -- so this is the one
+   * stage column where the reference's index transfers unchanged, and it is stated rather than
+   * assumed.
+   *
+   * MEASURED on the served `spellvisual.dbc` (9406 records, 32 fields, 128 B): **3837 rows carry a
+   * non-zero state kit and 2201 distinct kits are named, every one of them a live
+   * `SpellVisualKit` row.** Same zero-sentinel rule as the three stage columns above.
+   */
+  private stateKits: Map<number, number> | null = null;
+
+  /**
    * `SpellVisual.dbc` id -> its `missileMotionID` (column 21), a `SpellMissileMotion.dbc` key.
    *
    * Measured 99.9% valid against that table's 204 ids; resolved, the top values read "Parabola" (255
@@ -816,6 +835,7 @@ class SpellData {
     this.castKits = new Map<number, number>();
     this.precastKits = new Map<number, number>();
     this.impactKits = new Map<number, number>();
+    this.stateKits = new Map<number, number>();
     this.missileMotions = new Map<number, number>();
     for (const record of (visuals as any).records ?? []) {
       if (record && record.castKitID) {
@@ -834,6 +854,10 @@ class SpellData {
       // The impact stage. Same zero-sentinel rule as the two above.
       if (record && record.impactKitID && record.impactKitID !== 0xffffffff) {
         this.impactKits.set(record.id, record.impactKitID);
+      }
+      // The STATE stage -- the aura's own kit. Same zero-sentinel rule again.
+      if (record && record.stateKitID && record.stateKitID !== 0xffffffff) {
+        this.stateKits.set(record.id, record.stateKitID);
       }
       if (record && record.missileMotionID && record.missileMotionID !== 0xffffffff) {
         this.missileMotions.set(record.id, record.missileMotionID);
@@ -936,6 +960,7 @@ class SpellData {
         kitSlots: this.kitSlots.size,
         kitWorldEffects: this.kitWorldEffects.size,
         impactKits: this.impactKits.size,
+        stateKits: this.stateKits.size,
         missileMotions: this.missileMotions.size,
         missileMotionRows: this.missileMotionRows.size,
         ms: Date.now() - startedAt,
@@ -1243,6 +1268,27 @@ class SpellData {
       return null;
     }
     return this.impactKits?.get(row.visualID) ?? null;
+  }
+
+  /**
+   * The `SpellVisualKit` id of the STATE stage -- the kit an AURA owns, or null.
+   *
+   * The fourth of the quartet beside `castKit`/`precastKit`/`impactKit` and read off the same
+   * `SpellVisual` row, so all four agree about which column is which stage. Its consumer is the
+   * aura slot diff (`network/game/object/aura-visuals.ts`), not a cast edge: this kit is armed when
+   * a spell id APPEARS in a unit's aura slots and reaped when it leaves, which is why it is the only
+   * one of the four with a lifetime measured in minutes.
+   *
+   * Anchors from the served files, resolved end to end: Mana Shield 1463 -> visual 968 -> kit 990;
+   * Ice Barrier 11426 -> visual 4302 -> kit 3672; Ice Block 45438 -> visual 4325 -> kit 3709;
+   * Power Word: Shield 17 -> visual 784 -> kit 847.
+   */
+  stateKit(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    return this.stateKits?.get(row.visualID) ?? null;
   }
 
   /**

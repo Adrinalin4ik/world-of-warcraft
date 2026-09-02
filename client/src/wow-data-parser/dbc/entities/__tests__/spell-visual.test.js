@@ -52,6 +52,48 @@ describe('SpellVisual / SpellVisualKit column layout', () => {
     expect(record.missileFollowGround).toEqual([100, 300, 750, 6]);
   });
 
+  /**
+   * THE STATE STAGE, on a row that actually uses it -- Mana Shield.
+   *
+   * Fireball's record above pins `stateKitID` only by reading 0 there, which a wrongly indexed column
+   * would also do on a record whose neighbours are all zero. This is the positive case, and it is the
+   * spell the owner reported: `Spell.dbc` 1463 Mana Shield -> visual **968** -> state kit **990** ->
+   * base slot effect **718** -> `Spells\ManaShield_State_Base.mdx`. Both records are the served
+   * bytes, all 32 and all 38 words.
+   *
+   * Field 4 is one of the four indices 3.3.5a did NOT move, so it is also the one stage column where
+   * the reference's own index transfers -- and asserting it here is what makes that a check rather
+   * than an assumption.
+   */
+  it('reads the STATE kit at field 4 on the real Mana Shield visual and kit records', () => {
+    const visual = decode(SpellVisual, [
+      968, 266, 267, 0, 990, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+      -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ]);
+    expect(visual.id).toBe(968);
+    expect(visual.stateKitID).toBe(990);
+    // The inserted 3.3.5a column and the shifted channel column both read 0 on this row, so the
+    // state kit cannot have come out of either of them.
+    expect(visual.channelKitID).toBe(0);
+
+    const kit = decode(SpellVisualKit, [
+      990, -1, -1, 0, 0, 718, 0, 0, 0, 0, 0, 0, 0, 0, 0, 39,
+      0, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ]);
+    expect(kit.id).toBe(990);
+    // The BASE slot -- kit field 5, the unit's feet, which is where the state stage overwhelmingly
+    // lives (902 of the 2237 effect slots on state kits).
+    expect(kit.baseEffectID).toBe(718);
+    expect(kit.headEffectID).toBe(0);
+    expect(kit.chestEffectID).toBe(0);
+    // The kit sound at field 15, and the four CharProc keys all empty -- Mana Shield's whole visual
+    // is the one base model.
+    expect(kit.soundID).toBe(39);
+    expect(kit.charProcTypes).toEqual([-1, -1, -1, -1]);
+    // The dual none-sentinel on the anim column: this kit carries the `-1` form.
+    expect(kit.animID).toBe(0xffffffff);
+  });
+
   it('reads missileModelID as SIGNED, so a -1 row means no missile and not ErrorCube', () => {
     // The same Fireball record with column 8 replaced by the raw 0xFFFFFFFF that 51 of the served
     // rows carry (90 rows are negative in total). Read as `uint32` this is 4294967295, which passes
