@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 import { ParticleBatch } from './batch';
 import { ParticleMaterial } from './material';
-import { driftPool, followFraction } from './integrate';
+import { driftPool, FOLLOW_EMITTER, followFraction } from './integrate';
 import { ParticlePool } from './pool';
 import { RuntimeEmitter } from './runtime-emitter';
 import { evaluateAnimationTrack } from './tracks';
@@ -356,7 +356,12 @@ export class ParticleManager {
       const wx = we[12];
       const wy = we[13];
       const wz = we[14];
-      if (trailEnabled && entry.hasPrev) {
+      // THE FLAG GATE, and it is the whole correctness of this feature. Only an emitter the DATA
+      // marks with `FOLLOW_EMITTER` lags behind its anchor; every other emitter rides, which is the
+      // baseline and what a hand glow, a carried torch and a campfire all need. Shipping this
+      // ungated inverted it: 94.6% of emitters carry no such flag, so 94.6% of them trailed.
+      const lags = trailEnabled && (entry.definition.flags & FOLLOW_EMITTER) !== 0;
+      if (lags && entry.hasPrev) {
         const ddx = wx - entry.prevX;
         const ddy = wy - entry.prevY;
         const ddz = wz - entry.prevZ;

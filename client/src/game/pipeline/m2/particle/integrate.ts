@@ -60,21 +60,38 @@ export const integratePool = (pool: ParticlePool, dt: number, forces: Forces): n
  * follow_line's fraction (<= 1) of the emitter's per-frame world motion -- at saturation the trail
  * rides the emitter rigidly, below it lags toward a world-frozen trail; it never leads."
  *
- * ## THE POLARITY IS SETTLED BY THE OWNER'S SCREENSHOT, NOT BY THE REFERENCE
+ * ## THE POLARITY, AND I GOT IT BACKWARDS ONCE -- THE BASELINE IS *RIDE*
  *
- * The reference contradicts ITSELF on this, and the disagreement is worth recording rather than
- * quietly resolving. `follow_emitter`'s own doc says "the reference's baseline for this content class
- * is **world-frozen** ... and its `+fraction*delta` add recovers the ride". Forty lines above it,
+ * The reference contradicts itself here and the disagreement is recorded rather than resolved
+ * silently. `follow_emitter`'s own doc says "the reference's baseline for this content class is
+ * **world-frozen** ... and its `+fraction*delta` add recovers the ride". Forty lines above it,
  * `model_space()`'s doc says the opposite: "Either way the cloud is re-anchored to the emitter's
  * current position every frame ... a moving model carries its flame; there is **NO world-frozen
  * trail mode**."
  *
- * Both are rationale, so neither wins on the "prefer the bytes" rule. What settles it is a measured
- * fact plus the original client: `Spells/Fireball_Missile_Low.m2`'s four emitters are
- * `0x40009 / 0x30009 / 0x30009 / 0x20055` -- **bit 0x4000 is CLEAR on all four** -- and the owner's
- * screenshot of the original client shows Fireball with a long streaming tail. No flag and a tail
- * therefore means baseline = world-frozen, and `model_space()`'s "no world-frozen trail mode" is the
- * sentence that is wrong. That is the only ordering consistent with the observable.
+ * **SELF-REVIEW: THIS FILE ARGUED FOR THE FIRST READING AND THAT WAS WRONG.** It reasoned that
+ * Fireball authors no `0x4000` yet trails in the original, so the baseline must be world-frozen.
+ * The step that reasoning skipped is that 94.6% of ALL emitters author no `0x4000` either --
+ * measured: `0x4000` is 5.4% of 607 missile emitters and 1.5% of 337 doodad emitters -- so a
+ * flagless world-freeze is not a port, it is every emitter in the game trailing. It shipped that
+ * way for one commit and the owner's next screenshot showed a running mage laying a line of rings
+ * across the grass from his SHIELD's hand glow.
+ *
+ * The measurement that closes it: all four mage shield chains -- Ice Barrier 11426, Mana Shield
+ * 1463, Frost Ward 6143, Fire Ward 543 -- resolve to hand-slot models
+ * (`ice_precast_uber_hand`, `magic_precast_hand`, `ice_precast_med_hand`, `fire_precast_hand`
+ * and siblings) whose **33 emitters carry `0x4000` CLEAR without exception**. A hand glow must ride
+ * the hand. So the baseline is RIDE, the flag is what ENABLES the lag, and `model_space()` is the
+ * paragraph that was right. `follow_emitter`'s "at saturation the trail rides the emitter rigidly,
+ * below it lags toward a world-frozen trail" describes the range WITHIN the flag, not without it.
+ *
+ * WHICH RE-OPENS FIREBALL'S TAIL as an honest unknown rather than a solved problem. It is NOT this
+ * mechanism. The evidenced candidate is file flag **`0x40` `inherits_emitter_motion`**
+ * (`particles.rs:485-492`, "VERIFIED"): births inherit the emitter's recent ~30 Hz motion vector
+ * scaled by `inherit_scale`, and Fireball's fourth emitter authors it (`0x20055` includes `0x40`).
+ * This client does not implement it. That is the next thing to port, and it is a birth-velocity
+ * change rather than a per-frame displacement, so it cannot leave a field of rings behind a walking
+ * character the way this did.
  *
  * ## The flag word did NOT shift between 1.12 and 3.3.5a, and that was checked rather than assumed
  *
