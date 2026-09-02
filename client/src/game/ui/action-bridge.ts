@@ -164,8 +164,23 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       // A token the evaluator cannot resolve is left VISIBLE -- see `spell-description.ts`.
       description: row === null ? '' : renderSpellDescription(row, casterStatsFor(world, spells)),
       isAttack: spellId === SPELL_AUTO_ATTACK,
-      // Only auto-attack drives "current" today; see `api/actions.ts`'s `IsCurrentAction`.
-      isCurrent: spellId === SPELL_AUTO_ATTACK && spells.autoAttackOn,
+      /**
+       * "CURRENT" -- what `IsCurrentAction` answers and what `ActionButton_UpdateState` turns into
+       * the button's CHECKED ring (`actionbutton.lua`). Two things drive it, and the second is new.
+       *
+       * Auto-attack while engaged, as before. AND a QUEUED ON-NEXT-SWING STRIKE: the owner presses
+       * Heroic Strike, it waits on the server's melee slot, and the real client keeps the button lit
+       * for exactly that wait. The reference's checked state reads BOTH of its slots for this --
+       * "the checked ring reads both (the ref's `IsCurrentAction` C2 leg -- spell == inflight)"
+       * (`benilla-app/src/ui_cast.rs:170-173`).
+       *
+       * **THE RING IS THE CLIENT'S OWN LUA, drawn from its own XML** -- nothing here draws a
+       * highlight. This pushes one boolean into the snapshot `IsCurrentAction` reads, and
+       * `ActionButton_UpdateState` does the rest, which is the same division every other field in
+       * this snapshot follows.
+       */
+      isCurrent: (spellId === SPELL_AUTO_ATTACK && spells.autoAttackOn)
+        || (spellId !== 0 && spellId === spells.queuedMeleeSpell),
       cooldownStart: cooldown?.start ?? 0,
       cooldownDuration: cooldown?.duration ?? 0,
       usable,
@@ -275,7 +290,17 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     stats.events += 1;
   };
 
-  /** Only the auto-attack button's checked state moved, so only the state event is needed. */
+  /**
+   * The last auto-attack state this fired the combat pair for -- so the two events go out on the
+   * TRANSITION and not on every call. `null` until the first push.
+   */
+  let flashedAttacking: boolean | null = null;
+
+  /**
+   * Auto-attack turned on or off: the checked ring AND **the flash**.
+   *
+   * The owner: "auto attack slot should blip if activated."
+   */
   const pushAutoAttack = (): void => {
     let changed = false;
     for (let action = 1; action <= ACTION_SLOTS; action += 1) {
@@ -292,9 +317,51 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       stats.pushes += 1;
     }
     if (changed) {
-      // `ACTIONBAR_UPDATE_STATE` is precisely the checked/flash event
-      // (`ActionButton_OnEvent:390` -> `ActionButton_UpdateState`), and it does NOT re-read the texture.
+      // `ACTIONBAR_UPDATE_STATE` is the CHECKED event and only that
+      // (`ActionButton_OnEvent:390` -> `ActionButton_UpdateState`, whose whole body is `SetChecked`);
+      // it does NOT re-read the texture. **An earlier version of this comment called it "the
+      // checked/flash event" and that was wrong** -- nothing on this event's arm reaches
+      // `ActionButton_UpdateFlash`, which is why the button never blinked. The flash is the pair
+      // below.
       fireEvent(vm, 'ACTIONBAR_UPDATE_STATE');
+      stats.events += 1;
+    }
+
+    /**
+     * **THE FLASH: `PLAYER_ENTER_COMBAT` / `PLAYER_LEAVE_COMBAT`, and NOT the regen pair.**
+     *
+     * Read out of the served `interface/framexml/actionbutton.lua` rather than from memory. Two
+     * things there decide it:
+     *
+     *  - `ActionButton_OnEvent:400-407` -- `PLAYER_ENTER_COMBAT` calls `ActionButton_StartFlash(self)`
+     *    when `IsAttackAction(self.action)`, and `PLAYER_LEAVE_COMBAT` calls `StopFlash`. Those two
+     *    are the MELEE SWING events, not the in-combat flag (that is
+     *    `PLAYER_REGEN_DISABLED`/`_ENABLED`, which this bar never registers -- `:173-183`).
+     *  - `ActionButton_StartFlash:505-509` sets `self.flashing = 1` and `self.flashtime = 0`, and
+     *    `ActionButton_OnUpdate:437-458` then toggles the `Flash` texture every
+     *    `ATTACK_BUTTON_FLASH_TIME` while `ActionButton_IsFlashing(self)` -- so the blink itself is
+     *    the client's own per-frame handler and its own texture. **Nothing is drawn here.**
+     *
+     * THE TICK WAS ALREADY THERE, which is what made this a globals-and-events task rather than a
+     * runtime one: `framexml/world-runtime.ts:673-705` drives the 24 named action-button
+     * `<OnUpdate>`s as its third deliberate exception to "no general dispatch", and names the attack
+     * flash as one of the two reasons it exists. Both globals the predicate reads already exist too
+     * (`IsAttackAction`, `IsCurrentAction` in `api/actions.ts`) and both return real Lua booleans, so
+     * the `0`-is-truthy trap does not apply to either. The ONLY missing piece was this pair.
+     *
+     * ON THE TRANSITION, tracked locally rather than off `changed` above: `changed` is a snapshot
+     * diff over the auto-attack slots, so it is false when no button holds auto-attack and false on a
+     * re-push of the same value -- neither of which is the question "did attacking start or stop".
+     * Firing `PLAYER_ENTER_COMBAT` twice would restart the flash mid-blink.
+     *
+     * AFTER the push, which is this file's rule everywhere: `StartFlash` calls
+     * `ActionButton_UpdateState`, which re-reads `IsCurrentAction`, so the snapshot has to be current
+     * before the event goes out.
+     */
+    const attacking = spells.autoAttackOn;
+    if (flashedAttacking !== attacking) {
+      flashedAttacking = attacking;
+      fireEvent(vm, attacking ? 'PLAYER_ENTER_COMBAT' : 'PLAYER_LEAVE_COMBAT');
       stats.events += 1;
     }
   };
