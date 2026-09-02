@@ -107,6 +107,18 @@ export default function cancelCastOnMove(world: World): number | null {
     return null;
   }
 
+  // **THE GLOBAL COOLDOWN GOES BACK, and it is cleared on BOTH routes rather than inside the wire
+  // send.** The owner: "если мы кастуем и каст прервался из-за движения или мы сами его отменили
+  // как-то, то гкд сбрасывается." A cast cancelled locally never produces a server failure packet at
+  // all -- `CMSG_CANCEL_CAST` is answered with silence, as `SpellHandler#cancelCast` records -- so the
+  // wire-side clears in `handleSpellFailure` / `handleCastFailed` cannot reach this edge. It has to be
+  // done here, and above the offline fork so the offline world behaves the same.
+  //
+  // Only `fromGcd` entries are dropped, so a spell's REAL cooldown survives being interrupted: a
+  // 2-minute racial the server already started is not refunded because a later cast was cancelled.
+  // See `SpellHandler#clearGlobalCooldown` for the reference's arm-at-send / clear-on-failure model.
+  spells.clearGlobalCooldown();
+
   // `castCount` 0, which is what `castSpell` sent for this cast. `cancelCast` opens the in-flight guard
   // itself, so the next press is not refused as a duplicate of a cast that is already gone.
   if (!world.session?.offline) {

@@ -123,6 +123,12 @@ export function attachTargetBridge(vm: LuaVM, world: World): () => void {
     // The snapshot's spell id when there is one -- it is the cast the player can see -- and the guard's
     // otherwise. `castID` is 0 for every cast this client sends, which is what `castSpell` writes.
     const spellId = cast !== null ? cast.spellId : (guarded as number);
+    // **AND THE GLOBAL COOLDOWN GOES BACK** -- the owner's "мы сами его отменили как-то", of which
+    // Escape is the "как-то". A locally cancelled cast gets no failure packet from the server, so the
+    // wire-side clears cannot reach this edge either; the movement cancel
+    // (`classes/cast-cancel.ts`) is the sibling route and clears for the same reason. Only `fromGcd`
+    // entries are dropped, so a real cooldown survives -- see `SpellHandler#clearGlobalCooldown`.
+    spells.clearGlobalCooldown();
     if (!world.session.offline) {
       spells.cancelCast(spellId, cast !== null ? cast.castID : 0);
     } else {

@@ -20,11 +20,16 @@ jest.mock('../../pipeline/dbc/spell-data', () => ({
 }));
 
 function stubWorld(inFlight: number | null) {
-  const calls = { cancelCast: [] as number[], releasedPose: [] as number[] };
+  const calls = {
+    cancelCast: [] as number[], releasedPose: [] as number[], gcdCleared: 0,
+  };
   const spellHandler = {
     currentCast: () => inFlight,
     cancelCast: (spellId: number) => { calls.cancelCast.push(spellId); },
     releaseCastGuard: () => {},
+    // The GCD hand-back: a cast cancelled locally gets no failure packet, so the clear has to happen
+    // on this edge. Counted so the assertion below is about the DECISION and not about the map.
+    clearGlobalCooldown: () => { calls.gcdCleared += 1; return true; },
     releaseCastPose: (_guid: string | null, spellId: number) => { calls.releasedPose.push(spellId); },
   };
   const world = {
@@ -48,6 +53,10 @@ describe('cancelCastOnMove', () => {
     expect(fireball.calls.cancelCast).toEqual([133]);
     expect(fireball.calls.releasedPose).toEqual([133]);
     expect(bar).toEqual([133]);
+    // The global cooldown goes back on this edge -- the owner's "прервался из-за движения ... гкд
+    // сбрасывается". There is no server failure packet for a locally cancelled cast, so nothing else
+    // can do it.
+    expect(fireball.calls.gcdCleared).toBe(1);
 
     // Heroic Strike: InterruptFlags 0, so charging in must not drop it. Nothing on the wire at all.
     const strike = stubWorld(78);
