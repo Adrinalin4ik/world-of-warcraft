@@ -1186,17 +1186,23 @@ export default class World extends EventEmitter {
    * Self-terminating, like the cast release: an impact flash is not a held state.
    */
   playImpactKit(targetGuid: string, spellId: number): void {
+    const stats = this.spellKitEffects.stats;
+    stats.impactAsked += 1;
     const victim = this.entities.get(targetGuid);
     if (!victim) {
-      return; // it left the world during the flight
-    }
-    const kit = spellData.impactKit(spellId);
-    if (kit !== null) {
-      this.spellKitEffects.stats.impactPlayed += 1;
-    }
-    if (kit === null) {
+      // The guid is not in our object set -- it left the world during a missile's flight, or the GO
+      // named something we never streamed. Counted, because it is indistinguishable from "the effect
+      // did not play" without a number.
+      stats.impactNoVictim += 1;
       return;
     }
+    const kit = spellData.impactKit(spellId);
+    if (kit === null) {
+      // The spell authors no impact stage. Common and correct -- most spells do not.
+      stats.impactNoKit += 1;
+      return;
+    }
+    stats.impactPlayed += 1;
     this.playSpellKit(victim, spellId, kit, false);
   }
 

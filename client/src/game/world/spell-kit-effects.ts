@@ -331,19 +331,31 @@ export class SpellKitEffects {
     /** Instances reaped that played a `Decay` out rather than going at once. */
     decayed: 0,
     /**
-     * IMPACT-STAGE plays, split by which route reached them -- the instrument for the one thing the
-     * speedless-impact fix could not settle statically.
+     * THE IMPACT STAGE, counted at every exit -- and this replaces a counter that COULD NOT MOVE.
      *
-     * `impactPlayed` counts every impact kit armed, by any route. `impactSelfFallback` counts the
-     * times a projectile-less spell's GO carried an EMPTY hit list and the caster was used instead.
-     * A self-buff's `SMSG_SPELL_GO` should name the caster as its own target, but that is a claim
-     * about the wire this client cannot verify without a capture, so it is COUNTED rather than
-     * assumed: after one Demon Skin cast, `impactSelfFallback` 0 means the hit list carried him and
-     * the fallback is dead code; 1 means it did not and the fallback is what made the shield appear.
-     * Either way the visual works and the wire shape stops being a guess.
+     * `2242bd7`'s message claimed `impactSelfFallback` would settle whether a self-buff's
+     * `SMSG_SPELL_GO` names its caster: "after one Demon Skin cast, `impactSelfFallback` 0 means the
+     * hit list carried him". **That was false.** No fallback was ever wired -- the field was declared
+     * and never incremented anywhere -- so it could only ever read 0, and a 0 that cannot become
+     * anything else is not evidence. A commit message asserting a measurement the code does not take
+     * is this project's worst recorded defect class, and this is one of mine.
+     *
+     * What is here instead is the full exit split, so one melee swing is decisive:
+     *
+     *   impactAsked     calls into `playImpactKit`, by any route.
+     *   impactNoVictim  the guid was not in `entities` -- a wire or streaming problem, not effects.
+     *   impactNoKit     the spell authors no impact stage. Correct for most spells.
+     *   impactPlayed    a kit was found and handed to `play`; `requested`/`attached`/`unattachable`/
+     *                   `failed` then say what became of its models.
+     *
+     * `impactAsked` at 0 after a melee hit means the GO-site call never fired -- the hit list was
+     * empty, or the tail was refused as implausible. That is the one reading no static analysis can
+     * substitute for.
      */
+    impactAsked: 0,
+    impactNoVictim: 0,
+    impactNoKit: 0,
     impactPlayed: 0,
-    impactSelfFallback: 0,
     /**
      * THE LEAK INSTRUMENT, and it did not exist until the owner reported one.
      *
