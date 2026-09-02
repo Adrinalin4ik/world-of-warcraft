@@ -797,3 +797,31 @@ describe('M2 particle emitters: spin, scale aspect and twinkle', () => {
     expect(lines.length).toBeGreaterThan(0);
   }, 120000);
 });
+
+/**
+ * THE PARTICLE TYPE SELECTOR -- head, tail, or both -- read through `M2Parser` so it is authoritative.
+ *
+ * Two candidate fields sit adjacent in the record (`particleType` at 44, `headOrTail` at 45) and the
+ * wiki is not crisp about which selects the geometry, so BOTH are reported rather than one being
+ * assumed. Their offsets are in the region BEFORE `colorTrack` at 260, i.e. before the 16-vs-20-byte
+ * FBlock stride that corrupted the earlier hand-rolled survey -- but they are printed from the JS
+ * parser anyway, because "the offset is probably fine" is what the last round cost.
+ */
+describe('M2 particle emitters: the head/tail type selector', () => {
+  it('reports both type fields and the tail length for Fireball', async () => {
+    const buffer = await fetchFixture(asM2('Spells/Fireball_Missile_Low.m2'));
+    if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+      // eslint-disable-next-line no-console
+      console.log('SKIPPED: asset host unreachable');
+      return;
+    }
+    const m2: any = M2Parser.decode(new DecodeStream(buffer));
+    const lines = (m2.particleEmitters ?? []).map((e: any, i: number) => `   emitter ${i}`
+      + ` particleType=${e.particleType} headOrTail=${e.headOrTail}`
+      + ` tailLength=${e.tailLength} emitterType=${e.emitterType}`
+      + ` scale0=(${(e.scaleTrack?.values ?? [])[0]})`);
+    // eslint-disable-next-line no-console
+    console.log(['Spells/Fireball_Missile_Low.m2', ...lines].join('\n'));
+    expect(lines.length).toBe(4);
+  }, 120000);
+});

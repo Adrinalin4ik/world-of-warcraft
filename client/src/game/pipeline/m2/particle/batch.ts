@@ -82,6 +82,36 @@ const scratchWorldScale = new THREE.Vector3();
  * the only modulation is the twinkle multiplier above. So there is no per-blend, per-sheet or
  * per-flag exemption to discover -- if the 2x is wrong it is wrong everywhere, not here.
  */
+/**
+ * EVERY PARTICLE HERE IS A CAMERA-FACING HEAD QUAD, AND THE DATA SAYS THAT IS CORRECT.
+ *
+ * M2 authors a geometry selector -- `particleType` (+44) and `headOrTail` (+45) -- and the reference
+ * specifies the alternative precisely: "a tail-mode particle (`head_tail` 1/2) renders a
+ * velocity-projected streak of world length `|velocity| * tail_time`, trailing behind the motion"
+ * (`benilla-formats/src/particles.rs:393-397`, wow-re `part-quad-tail-twinkle.md`). A stretched,
+ * zero-spin, screen-aligned sprite is exactly what such a particle looks like drawn as a head, so
+ * this was the standing explanation for the fireball's elongated glow.
+ *
+ * **IT IS NOT THE EXPLANATION. Measured across 1614 emitters in the served build, `particleType` and
+ * `headOrTail` are CONSTANT 0 -- every emitter, no exceptions.** Not one asks for tail mode.
+ *
+ * THE OFFSETS ARE NOT IN DOUBT, which matters because the last survey in this subsystem was ruined
+ * by a 4-byte-per-FBlock stride error. Both bytes were read through `M2Parser` for Fireball first,
+ * and a byte histogram of the whole region +36..+56 confirms the alignment independently -- every
+ * neighbouring field takes exactly the values its semantic predicts: `blendingType` (+40) 4/2/1,
+ * `emitterType` (+41) 1/2/3 = plane/sphere/spline, `rows` and `columns` (+48/+50) 1/2/4/8, the high
+ * bytes of both constant 0, `priorityPlane` (+46/+47) signed with 255 high bytes. The record-size
+ * canary agrees: the field list sums to `PARTICLE_EMITTER_SIZE` 476 only with these two bytes here.
+ *
+ * `tailLength` (+348) IS authored variously -- 50 distinct values, median 0.100, up to 10.0 -- on
+ * emitters whose selector is 0, so it is vestigial authoring rather than evidence of tail mode.
+ * That was the one thing that could have resurrected the hypothesis and it does not.
+ *
+ * So the head/tail selector is a decode-and-ignore, and it is INERT: implementing tail geometry
+ * would change nothing in this corpus. Named here so nobody ports a whole velocity-oriented quad
+ * lane for zero emitters -- and so that if a later build's data does select it, the mechanism is
+ * already written down with its citation.
+ */
 const HALF_SIZE_TO_EXTENT = 2;
 
 export class ParticleBatch extends THREE.Mesh {
