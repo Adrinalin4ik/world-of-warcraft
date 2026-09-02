@@ -330,6 +330,20 @@ export class SpellKitEffects {
     /** Instances reaped that played a `Decay` out rather than going at once. */
     decayed: 0,
     /**
+     * IMPACT-STAGE plays, split by which route reached them -- the instrument for the one thing the
+     * speedless-impact fix could not settle statically.
+     *
+     * `impactPlayed` counts every impact kit armed, by any route. `impactSelfFallback` counts the
+     * times a projectile-less spell's GO carried an EMPTY hit list and the caster was used instead.
+     * A self-buff's `SMSG_SPELL_GO` should name the caster as its own target, but that is a claim
+     * about the wire this client cannot verify without a capture, so it is COUNTED rather than
+     * assumed: after one Demon Skin cast, `impactSelfFallback` 0 means the hit list carried him and
+     * the fallback is dead code; 1 means it did not and the fallback is what made the shield appear.
+     * Either way the visual works and the wire shape stops being a guess.
+     */
+    impactPlayed: 0,
+    impactSelfFallback: 0,
+    /**
      * THE LEAK INSTRUMENT, and it did not exist until the owner reported one.
      *
      * `armed` counts instances PUSHED into `live`; `reaped` counts instances the spell-id-keyed reap

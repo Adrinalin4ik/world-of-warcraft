@@ -1020,6 +1020,28 @@ export class SpellHandler extends EventEmitter {
           targets.misses.map((m) => m.guid),
           targets.dest,
         );
+        // A SPELL WITH NO PROJECTILE STILL HAS AN IMPACT STAGE, and it had no way to reach it.
+        //
+        // `playImpactKit` is wired into exactly one caller: the missile lane's arrival callback
+        // (`world/index.ts:1320`). `SpellMissiles#launch` refuses a spell whose `Spell.dbc` Speed is
+        // 0 -- correctly, there is no projectile to fly -- and returns at its `speedless` guard. So
+        // for every instant self-buff the impact kit was unreachable, silently.
+        //
+        // MEASURED on the owner's report ("должен быть такой щит над головой, и потом пропасть, но
+        // такого нет"): Demon Skin 687 -> `SpellVisual` 130 -> **impact kit 227, head slot, tag 0x14
+        // = `DemonArmor_Impact_Head.mdx`** -- the shield over the head, and the ONLY slot in the whole
+        // chain that carries it. Its precast kit 217 and cast kit 218 carry hand art only, its state
+        // kit is 0, and Speed is 0.00. Every rank shares visual 130, and `Demon Armor` and `Fel Armor`
+        // do too. So the entire visual he is missing lives in the one stage nothing could play.
+        //
+        // Inside the `plausible` gate deliberately: these are guids off the same decoded tail the
+        // missile lane refuses to trust when its stride check fails, and playing a kit on a
+        // mis-strided guid would put a shield on a random unit.
+        if (!(spellData.spellSpeed(decoded.spellId) > 0)) {
+          for (const guid of targets.hits) {
+            this.game.world.playImpactKit(guid, decoded.spellId);
+          }
+        }
       } else {
         // NAMED, not silent. This gate is the missile lane's alone -- the kit lane never reads the
         // tail -- and it is the first candidate for "снаряда не видно" while the hand kit IS visible.

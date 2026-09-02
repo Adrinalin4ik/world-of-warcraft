@@ -1150,6 +1150,9 @@ export default class World extends EventEmitter {
       return; // it left the world during the flight
     }
     const kit = spellData.impactKit(spellId);
+    if (kit !== null) {
+      this.spellKitEffects.stats.impactPlayed += 1;
+    }
     if (kit === null) {
       return;
     }
