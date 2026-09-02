@@ -622,6 +622,27 @@ class SpellData {
    */
   private missileModels: Map<number, number> | null = null;
 
+  /**
+   * `SpellVisualKit.dbc` id -> its ELEVEN emitter slots, in kit-field order, `null` for an empty slot.
+   *
+   * Eleven and not the reference's nine: 3.3.5a inserts two between the breath slot and the specials
+   * (`dbc/entities/spell-visual-kit.js` carries the measurement). The array is always length 11 so a
+   * slot INDEX is meaningful -- `game/classes/spell-kit-fx.ts` maps index to attachment tag, and a
+   * ragged array would make that mapping positional-by-accident.
+   *
+   * Both none-sentinels fold to `null`, the same dual sentinel this table uses on its anim column.
+   */
+  private kitSlots: Map<number, Array<number | null>> | null = null;
+
+  /**
+   * `SpellVisualKit.dbc` id -> its world-plant effect id (kit column 14), or absent.
+   *
+   * Kept apart from `kitSlots` because it is not an attach-point slot at all: it plants in world space
+   * at the owner's position/facing/scale with no bone (`spell_visual/mod.rs:110-120`). Folding it into
+   * the slot array would give it an index that implies a tag it does not have.
+   */
+  private kitWorldEffects: Map<number, number> | null = null;
+
   /** `SpellRange.dbc` id -> `maxRangeHostile`, in YARDS. What `IsActionInRange` is judged against. */
   private ranges: Map<number, number> | null = null;
 
@@ -784,6 +805,38 @@ class SpellData {
       }
     }
 
+    this.kitSlots = new Map<number, Array<number | null>>();
+    this.kitWorldEffects = new Map<number, number>();
+    for (const record of (kits as any).records ?? []) {
+      if (!record) {
+        continue;
+      }
+      // The eleven, in kit-field order (columns 3-13). `spell-visual-kit.js` names them
+      // head / chest / base / hand pair / breath / weapon pair / special triple.
+      const raw = [
+        record.headEffectID,
+        record.chestEffectID,
+        record.baseEffectID,
+        record.handEffectIDs?.[0],
+        record.handEffectIDs?.[1],
+        record.breathEffectID,
+        record.weaponEffectIDs?.[0],
+        record.weaponEffectIDs?.[1],
+        record.specialEffectIDs?.[0],
+        record.specialEffectIDs?.[1],
+        record.specialEffectIDs?.[2],
+      ];
+      const slots = raw.map((v) =>
+        (typeof v === 'number' && v !== 0 && v !== 0xffffffff ? v : null));
+      if (slots.some((v) => v !== null)) {
+        this.kitSlots.set(record.id, slots);
+      }
+      const world = record.worldEffectID;
+      if (typeof world === 'number' && world !== 0 && world !== 0xffffffff) {
+        this.kitWorldEffects.set(record.id, world);
+      }
+    }
+
     this.effectPaths = new Map<number, string>();
     this.hardcodedEffects = new Map<string, string>();
     for (const record of (effectNames as any).records ?? []) {
@@ -824,6 +877,8 @@ class SpellData {
         effectPaths: this.effectPaths.size,
         hardcodedEffects: this.hardcodedEffects.size,
         missileModels: this.missileModels.size,
+        kitSlots: this.kitSlots.size,
+        kitWorldEffects: this.kitWorldEffects.size,
         ms: Date.now() - startedAt,
       },
       bodySize: 0,
@@ -1085,6 +1140,23 @@ class SpellData {
       this.missileModels?.get(visualId),
       (id) => this.effectModelPath(id),
     );
+  }
+
+  /**
+   * A kit's ELEVEN emitter slots, in kit-field order, `null` for an empty one -- or null when the kit
+   * has no populated slot at all.
+   *
+   * The array is the raw slot layout and carries no attachment tags: `game/classes/spell-kit-fx.ts`
+   * owns the index -> tag mapping, because that mapping is where the reference's evidence and this
+   * build's two unknown slots live.
+   */
+  kitEffectSlots(kitId: number): Array<number | null> | null {
+    return this.kitSlots?.get(kitId) ?? null;
+  }
+
+  /** A kit's world-plant effect id (kit column 14), or null. Not an attach-point slot -- see the field. */
+  kitWorldEffect(kitId: number): number | null {
+    return this.kitWorldEffects?.get(kitId) ?? null;
   }
 
   /**
