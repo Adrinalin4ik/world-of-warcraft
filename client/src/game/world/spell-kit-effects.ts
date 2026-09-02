@@ -750,6 +750,34 @@ export class SpellKitEffects {
       // THE BILLBOARD PASS -- see the header. One existing call, gated on the model actually having
       // billboarded bones, so a pure particle model (no bones) costs one array-length read. `camera`
       // is optional only so the two unit tests need not build one; the world always passes it.
+      // WHY THE CORONA HIDES THE SHIELD FROM SOME ANGLES, and why `priorityPlane` is NOT the fix.
+      //
+      // MEASURED FIRST: `DemonArmor_Impact_Head` authors `priorityPlane` **0** on all five emitters
+      // AND on both of its `.skin` batches, so there is no authored order between the mesh and the
+      // corona to honour. The field is live data broadly -- 437 of 1631 emitters (26.8%) author a
+      // non-zero plane, from -100 to +100 -- just not here. And the REFERENCE never implements it:
+      // zero mentions of `priority_plane` anywhere in `samples/benilla`, so there is no comparator to
+      // port and honouring it would be an original design, not a port.
+      //
+      // THE BRIEF'S PREMISE IS WRONG FOR TWO OF THE FIVE. "The particles are additive so they cannot
+      // occlude" holds for e1/e2/e3, which are blend **4** (ADD_ALPHA -- `SrcAlpha`/`One`, brightens
+      // only). **e0 and e4 are blend 2** (ALPHA -- `SrcAlpha`/`OneMinusSrcAlpha`), which genuinely
+      // obscures whatever is behind it in draw order. Those two are what cover the shield.
+      //
+      // SO THE FLIP IS AN ORDER-DEPENDENT RESULT FOR IDENTICAL GEOMETRY, which is the defect worth
+      // naming. `depthTest` is on (three's default -- `particle/material.ts:174`), so an alpha
+      // particle physically BEHIND the mesh is depth-rejected and cannot cover it. A particle in
+      // FRONT covers it only if it is drawn AFTER; drawn before, the mesh overwrites it because
+      // particles do not write depth. Same geometry, opposite outcome, decided by three's transparent
+      // sort -- which compares one batch origin against one mesh origin and flips as the camera
+      // circles a model whose mesh and emitters share an origin.
+      //
+      // THE HOOK IS AVAILABLE AND CLEAN, which the coordinator was right to ask about: `renderOrder`
+      // is set NOWHERE in the model or particle path, and neither `map.particleGroup` nor the M2's
+      // ancestors set it, so both subtrees have `groupOrder` 0 and a per-object `renderOrder` would
+      // be the dominant key. It is deliberately NOT set: with every authored plane at 0 there is
+      // nothing to derive a winner from, and picking one would be a sort that happens to look right
+      // at two camera angles -- exactly what this round was told not to ship.
       // THE BILLBOARD CHAIN READS CORRECT END TO END, and five candidates for "billboarding is
       // simply absent" on `DemonArmor_Impact_Head` are refuted rather than untested. Recorded so the
       // next round does not re-walk them:
