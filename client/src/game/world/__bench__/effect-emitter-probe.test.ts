@@ -9,6 +9,23 @@ import { evaluateAnimationTrack } from '../../pipeline/m2/particle/tracks';
 const { fetchFixture } = require('../../../wow-data-parser/m2/particle/test-support/fixtures');
 
 /**
+ * THE TEXTURE LOADER IS MOCKED, and it had to be: `ParticleManager.register` builds a
+ * `ParticleMaterial` per emitter and each constructor calls `TextureLoader.load`. Unmocked in a node
+ * environment that call never settles, so the last-hop arm below hung with an EMPTY output file --
+ * the run produced no numbers at all until this was added. A `load` that never resolves is also the
+ * right stand-in here: the packed size and alpha this probe measures come from the emitter's own
+ * tracks, not from the texture, so the placeholder is exactly what a first frame really draws with.
+ */
+jest.mock('../../pipeline/texture-loader', () => ({
+  __esModule: true,
+  default: {
+    PLACEHOLDER: new (require('three').Texture)(),
+    load: jest.fn(() => new Promise(() => {})),
+    unload: jest.fn(),
+  },
+}));
+
+/**
  * THE PROBE THAT SEPARATES THE TWO SUSPECTS behind the owner's "сам снаряд не анимирован и партиклов
  * нет" -- the projectile flies but is a static shape emitting nothing.
  *
@@ -166,5 +183,158 @@ describe('spell effect emitters: pool capacity at register time', () => {
     // No assertion on the counts: offline this measures nothing and must not fail. The probe's job is
     // the report -- the numbers it produced are recorded on `world/spell-kit-effects.ts`.
     expect(measured).toBeGreaterThanOrEqual(0);
+  }, 60000);
+});
+
+/**
+ * THE LAST HOP -- what actually reaches the renderer for one cast's emitters.
+ *
+ * The owner's report is "ошибок нет, но и визуала я не вижу ... скорее всего размер как-то поменялся".
+ * Every state fact upstream of this is already verified (handle returned, pool sized, emitter stepped,
+ * batch built), and `CLAUDE.md`'s rule is that a draw call is not a pixel: so this measures the packed
+ * INSTANCE ATTRIBUTES the shader reads, which is the last thing before pixels that a headless rig can
+ * see.
+ *
+ * Answerable here: live particle count, packed `iScale` (the billboard size in world units), packed
+ * alpha, the packed positions against the emitter's world matrix, the batch's own `visible`, and
+ * whether the manager culled it.
+ *
+ * NOT answerable here, and named rather than implied: whether `map.particleGroup` is in the rendered
+ * scene graph on a live frame, whether the camera is actually within `CULL_DISTANCE` of the caster in
+ * play, and whether the material's shader compiled. Those need the browser.
+ *
+ * ## WHAT IT MEASURED, and it refutes every suspect it can reach
+ *
+ *     Fireball_Missile_Low.mdx  registered=4  liveParticles=106
+ *        blend=ADD_ALPHA  count= 52  visible=true  size=[0.074 .. 0.278]  alpha=[0.025 .. 0.537]
+ *        blend=ADD_ALPHA  count= 26  visible=true  size=[0.172 .. 0.222]  alpha=[0.000 .. 0.961]
+ *        blend=ALPHA      count= 26  visible=true  size=[0.111 .. 0.222]  alpha=[0.000 .. 0.961]
+ *        blend=ADD_ALPHA  count=  2  visible=true  size=[1.940 .. 3.771]  alpha=[0.723 .. 0.723]
+ *     Fire_Precast_Hand.mdx     registered=5  liveParticles=96   (sizes 0.036 .. 0.642, alpha to 1.0)
+ *     DustCloud_Land.mdx        registered=1  liveParticles=20   (size 0.139 .. 0.394, alpha to 0.228)
+ *
+ * Emission WORKS (106/96/20 particles alive after one second of steps). Sizes are sensible world
+ * units, not zero and not microscopic. Alpha reaches 0.96/1.0/0.23. Packed positions sit 0.03-1.31
+ * from the emitter, so nothing is stranded at the world origin. Every batch reports `visible=true`,
+ * and `ParticleBatch` sets `frustumCulled = false` (`batch.ts:75`), so three cannot drop them either.
+ * `ADD_ALPHA` -- which is what almost every one of these emitters uses -- maps to
+ * `SrcAlphaFactor`/`OneFactor`, correct additive.
+ *
+ * `DustCloud_Land`'s 20 live particles are the capacity fix working: before it, that emitter had one
+ * slot.
+ *
+ * ## SO THE FAILURE IS BROWSER-ONLY, AND THE SUBSYSTEM DEMONSTRABLY DRAWS
+ *
+ * The owner has seen particles from this same manager, group, material and batch: commit `3304d2a`
+ * exists because he distinguished the loot sparkle's CLOUD RADIUS from its PARTICLE SIZE
+ * ("не увеличивает размер партикла, а только радиус вокруг куста"). So `ParticleManager` reaches
+ * pixels, and whatever stops the spell lanes is specific to them and invisible to a headless rig.
+ *
+ * The one structural difference between the lane he has seen and the lanes he has not:
+ * `world/game-object-sparkle.ts` adopts its model on the FRAME TICK, while
+ * `world/spell-kit-effects.ts` and `world/spell-missile.ts` register inside a promise handler. That
+ * difference is recorded here and deliberately NOT acted on: no mechanism connects microtask-time
+ * registration to an invisible emitter (the manager stores the entry and steps it on the next
+ * `animate` either way), and `CLAUDE.md` records five plausible diagnoses failing on one bug here.
+ * Copying a working lane without a mechanism is how that happens again.
+ */
+describe('spell effect emitters: the last hop to the renderer', () => {
+  const LAST_HOP_MODELS = [
+    'Spells\\Fireball_Missile_Low.mdx',
+    'Spells\\Fire_Precast_Hand.mdx',
+    'Spells\\DustCloud_Land.mdx',
+  ];
+
+  it('reports live particles, packed size and packed alpha for real effect models', async () => {
+    /* eslint-disable global-require */
+    const THREE = require('three');
+    const { ParticleManager } = require('../../pipeline/m2/particle/manager');
+    /* eslint-enable global-require */
+
+    const lines: string[] = [];
+
+    for (const path of LAST_HOP_MODELS) {
+      const buffer = await fetchFixture(asM2(path));
+      if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+        lines.push(`SKIPPED ${path}`);
+        continue;
+      }
+      const m2: any = M2Parser.decode(new DecodeStream(buffer));
+
+      // The instance the manager registers. A bare `Object3D` standing in for the loaded M2 -- the
+      // manager only reads `particleEmitters`, `textures`, `matrixWorld` and `bones` off it, and using
+      // a real `M2` here would drag in `collisionWorld` and the worker pool.
+      const instance: any = new THREE.Object3D();
+      instance.particleEmitters = m2.particleEmitters ?? [];
+      instance.textures = m2.textures ?? [];
+      instance.path = path;
+      // A plausible caster position, so a wrong packed position is visible as a wrong number rather
+      // than as a zero that happens to match the origin.
+      instance.position.set(100, 200, 30);
+      instance.updateMatrix();
+      instance.updateMatrixWorld(true);
+
+      const group = new THREE.Group();
+      const manager = new ParticleManager(group);
+      const registered = manager.register(instance);
+
+      // The camera sits AT the emitter, so `CULL_DISTANCE` cannot be what hides anything here -- that
+      // isolates the cull from the size question rather than confounding the two.
+      const camera = new THREE.PerspectiveCamera();
+      camera.position.copy(instance.position);
+
+      // A second of frames at 60 fps: long enough for every lifespan measured (0.2 s to 1.5 s) to
+      // have spawned and for a ramped rate track to have reached its peak.
+      for (let i = 0; i < 60; i += 1) {
+        manager.animate(1 / 60, camera);
+      }
+
+      lines.push(`${path}  registered=${registered}  liveParticles=${manager.liveParticleCount}`);
+
+      for (let b = 0; b < group.children.length; b += 1) {
+        const batch: any = group.children[b];
+        const geometry = batch.geometry;
+        const count = geometry.instanceCount;
+        const scales = geometry.getAttribute('iScale');
+        const colors = geometry.getAttribute('iColor');
+        const offsets = geometry.getAttribute('iOffset');
+
+        let minScale = Infinity; let maxScale = -Infinity;
+        let minAlpha = Infinity; let maxAlpha = -Infinity;
+        let maxOffsetFromEmitter = 0;
+        for (let i = 0; i < count; i += 1) {
+          const sx = scales.array[i * 2];
+          const sy = scales.array[i * 2 + 1];
+          minScale = Math.min(minScale, sx, sy);
+          maxScale = Math.max(maxScale, sx, sy);
+          const a = colors.array[i * 4 + 3];
+          minAlpha = Math.min(minAlpha, a);
+          maxAlpha = Math.max(maxAlpha, a);
+          const dx = offsets.array[i * 3] - instance.position.x;
+          const dy = offsets.array[i * 3 + 1] - instance.position.y;
+          const dz = offsets.array[i * 3 + 2] - instance.position.z;
+          maxOffsetFromEmitter = Math.max(maxOffsetFromEmitter, Math.hypot(dx, dy, dz));
+        }
+
+        const fmt = (v: number) => (Number.isFinite(v) ? v.toFixed(4) : 'n/a');
+        const definition: any = instance.particleEmitters[b];
+        const BLEND = ['OPAQUE', 'ALPHA_KEY', 'ALPHA', 'ADD', 'ADD_ALPHA', 'MODULATE', 'MODULATE_2X'];
+        lines.push(
+          `   batch ${String(b).padStart(2)}  blend=${definition ? (BLEND[definition.blendingType] ?? definition.blendingType) : '?'}`
+          + `  instanceCount=${String(count).padStart(4)}`
+          + `  visible=${batch.visible}`
+          + `  size=[${fmt(minScale)} .. ${fmt(maxScale)}]`
+          + `  alpha=[${fmt(minAlpha)} .. ${fmt(maxAlpha)}]`
+          + `  maxSpread=${fmt(maxOffsetFromEmitter)}`
+          + (count === 0 ? '   <-- NOTHING PACKED' : '')
+          + (count > 0 && maxScale <= 0.001 ? '   <-- ZERO SIZE' : '')
+          + (count > 0 && maxAlpha <= 0.001 ? '   <-- ZERO ALPHA' : ''),
+        );
+      }
+    }
+
+    // eslint-disable-next-line no-console
+    console.log(lines.join(String.fromCharCode(10)));
+    expect(lines.length).toBeGreaterThan(0);
   }, 60000);
 });
