@@ -976,3 +976,44 @@ describe('M2 particle emitters: sprite size over life and blend', () => {
     expect(lines.length).toBeGreaterThan(0);
   }, 120000);
 });
+
+/**
+ * DOES `applyBillboards`' SWITCH EVER MATCH? The dispatcher is
+ * `switch (bone.userData.billboardType) { case 0: ... case 3: ... default: break }`
+ * (`m2/index.ts:1011-1026`), filled from `boneDef.billboardType` by `bind-pose.ts:72`. That member
+ * is declared as a FUNCTION in `wow-data-parser/m2/index.js`. If restructure does not evaluate it as
+ * a computed property, every case misses and no billboard is ever written -- while every field the
+ * five earlier refutations checked still inspects as correct.
+ */
+describe('M2 bones: is billboardType a number or a function', () => {
+  it('reports the type restructure actually produces', async () => {
+    const buffer = await fetchFixture(asM2('Spells/DemonArmor_Impact_Head.m2'));
+    if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+      // eslint-disable-next-line no-console
+      console.log('SKIPPED: asset host unreachable');
+      return;
+    }
+    const m2: any = M2Parser.decode(new DecodeStream(buffer));
+    const bones: any[] = m2.bones ?? [];
+    const lines = bones.map((b: any, i: number) => {
+      const bt = b.billboardType;
+      const bb = b.billboarded;
+      return '   bone ' + String(i)
+        + ' flags=0x' + Number(b.flags).toString(16)
+        + ' typeof(billboardType)=' + typeof bt
+        + ' value=' + (typeof bt === 'function' ? 'FUNCTION' : String(bt))
+        + ' typeof(billboarded)=' + typeof bb
+        + ' value=' + (typeof bb === 'function' ? 'FUNCTION' : String(bb));
+    });
+    const numeric = bones.filter((b: any) => typeof b.billboardType === 'number').length;
+    const truthyBb = bones.filter((b: any) => (typeof b.billboarded === 'function'
+      ? 'fn' : b.billboarded) === true).length;
+    // eslint-disable-next-line no-console
+    console.log(['Spells/DemonArmor_Impact_Head.m2  bones=' + String(bones.length),
+      ...lines,
+      'billboardType numeric on ' + String(numeric) + ' of ' + String(bones.length) + ' bones',
+      'billboarded === true on ' + String(truthyBb) + ' of ' + String(bones.length),
+    ].join(String.fromCharCode(10)));
+    expect(bones.length).toBeGreaterThan(0);
+  }, 120000);
+});

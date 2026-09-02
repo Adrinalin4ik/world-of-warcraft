@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 import M2Blueprint from '../pipeline/m2/blueprint';
 import { worldClock } from '../pipeline/m2/anim/world-clock';
+import { forgetBillboards, sampleBillboards } from './billboard-probe';
 import { kitEmitters, WORLD_EFFECT_TAG, KitEmitter } from '../classes/spell-kit-fx';
 import { warnOnce } from '../ui/framexml/lua/methods/region';
 import { spellFxParticleSize } from './spell-fx-scale';
@@ -790,6 +791,9 @@ export class SpellKitEffects {
           && typeof billboarded.applyBillboards === 'function') {
           billboarded.applyBillboards(camera);
           billboardsMoved = true;
+          // STAGE 1 of the last-hop probe: the bone's own quaternion, immediately after the writer
+          // wrote it and BEFORE any world walk. See `billboard-probe.ts`.
+          sampleBillboards(instance.model, instance.guid + ':' + String(instance.spellId), 'writer');
         }
       }
 
@@ -817,6 +821,12 @@ export class SpellKitEffects {
       if (poseEffectModel(instance.model, camera, frameIndex) || billboardsMoved) {
         instance.model.updateMatrixWorld(true);
       }
+      if (billboardsMoved) {
+        // STAGE 2: what the SKINNING PALETTE sees, after the world walk. The pair is the whole
+        // measurement -- `paletteRotChangeDeg` staying ~0 while `writerRotChangeDeg` moves is proof
+        // the billboard never reached the vertex, whatever the bone's own fields say.
+        sampleBillboards(instance.model, instance.guid + ':' + String(instance.spellId), 'palette');
+      }
       // AND THE HANDOVER: `Stand` -> `Hold` once the birth span elapses. Without it a state kit holds
       // its birth pose for the whole life of the buff, which for a shield is minutes.
       instance.lifecycle = advanceEffectLifecycle(instance.model, instance.lifecycle);
@@ -834,6 +844,7 @@ export class SpellKitEffects {
   private remove(index: number): void {
     const instance = this.live[index];
     this.stats.removed += 1;
+    forgetBillboards(instance.guid + ':' + String(instance.spellId));
     instance.manager?.unregister(instance.model);
     instance.ribbons?.unregister(instance.model);
     if (instance.planted) {

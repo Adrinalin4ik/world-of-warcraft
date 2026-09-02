@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import Player from "../classes/player";
 import Unit from "../classes/unit";
 import spots from "./spots";
+import { billboardRows } from './billboard-probe';
 
 import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
@@ -294,6 +295,13 @@ export default class World extends EventEmitter {
           : [Math.round(player.x * 100) / 100, Math.round(player.y * 100) / 100,
             Math.round(player.z * 100) / 100],
         missiles: { ...this.spellMissiles.stats, live: this.spellMissiles.liveCount },
+        // THE BILLBOARD LAST-HOP PROBE, one row per billboarded bone of each live kit instance.
+        // `frames` first in every row because it decides whether the rest of the row means anything:
+        // two console reads whose `frames` has not advanced are one stale sample. Then turn the
+        // camera and read again -- `writerRotChangeDeg` moving while `paletteRotChangeDeg` stays ~0
+        // is proof the billboard never reached the skinning palette. `billboard-probe.ts` carries the
+        // full decision table.
+        billboards: billboardRows(),
         // THE CORONA COUNTER. Per-emitter LIVE particle counts beside each emitter's authored
         // `rate * lifespan`, so the comparison needs no arithmetic at the console. A row whose
         // `live` is far below `expected` is a starved pool or a refused emitter; a row matching it
