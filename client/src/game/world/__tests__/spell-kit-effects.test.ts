@@ -192,3 +192,51 @@ describe('liveDetail', () => {
     expect(rows[0].stuck).toBe(false);
   });
 });
+
+/**
+ * THE MESH VISIBILITY RULE'S SECOND ARM. One test, two halves, because the whole point is the
+ * DISTINCTION -- a rule that showed every mesh would pass the first half and reintroduce the pale
+ * sheets the first arm exists to prevent.
+ *
+ * `register` returns 6 here, as `SummonPet_Impact_Base` really does, so both halves exercise the
+ * `emitterCount > 0` branch that used to hide the mesh unconditionally.
+ */
+describe('kit mesh visibility', () => {
+  const withEmitters = { ...manager, register: jest.fn(() => 6) };
+
+  it('shows a posable mesh alongside its particles, and still hides an unposable one', async () => {
+    mockEmitters = [{
+      slot: 3, tag: 0x15, effectId: 1, modelPath: 'Spells\Glow.mdx',
+    }];
+
+    // POSABLE: `useSkinning` plus an armable `instanceAnim` -- what both summon models carry.
+    const posable = new SpellKitEffects(new THREE.Scene());
+    mockNextModel = () => {
+      const m = stubModel('summon', { 0: 1100 });
+      // `M2` constructs with `visible = false` (`pipeline/m2/index.ts:242`), so a stub that starts
+      // visible would pass the second half for the wrong reason. Both halves start hidden.
+      m.visible = false;
+      m.useSkinning = true;
+      m.instanceAnim = { arm: jest.fn(), armable: true };
+      return m;
+    };
+    posable.play(stubUnit('0x1'), 688, 137, true, withEmitters);
+    await Promise.resolve();
+    expect(posable.liveModels()[0]).toBeDefined();
+    expect((posable.liveModels()[0] as any).visible).toBe(true);
+
+    // NOT POSABLE: no skinning, so an un-hidden mesh would draw in bind pose -- the pale sheet the
+    // original rule was written for. It must stay hidden even though it has a mesh.
+    const unposable = new SpellKitEffects(new THREE.Scene());
+    mockNextModel = () => {
+      const m = stubModel('thunderclap', { 0: 1100 });
+      m.visible = false;
+      m.useSkinning = false;
+      m.instanceAnim = { arm: jest.fn(), armable: false };
+      return m;
+    };
+    unposable.play(stubUnit('0x2'), 6343, 1, true, withEmitters);
+    await Promise.resolve();
+    expect((unposable.liveModels()[0] as any).visible).toBe(false);
+  });
+});

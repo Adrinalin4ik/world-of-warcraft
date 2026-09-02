@@ -191,6 +191,19 @@ const ATTACH_CASCADE = [0xf, 0x13];
  * many. It is used only for that residual case and the count of instances that take it is reported by
  * `stats.spanless`, so how often it matters is a number rather than a guess.
  */
+/**
+ * THE KIT-MESH A/B: `window.kitMeshControl.enabled = false` restores the pre-fix rule, where a model
+ * with any particle emitter kept its MESH hidden.
+ *
+ * A knob because this changes every kit effect model that carries both a mesh and emitters, and one
+ * console word is a cheaper comparison than a rebuild. Read at spawn, not per frame.
+ */
+export const kitMeshControl = { enabled: true };
+
+if (typeof window !== 'undefined') {
+  (window as unknown as Record<string, unknown>).kitMeshControl = kitMeshControl;
+}
+
 const SPANLESS_MS = 1000;
 
 /** What this module needs of `map.particleManager`. Same shape `level-up-effect.ts` declares. */
@@ -510,32 +523,45 @@ export class SpellKitEffects {
         // this does NOT change the visibility rule above -- the rule keys on PARTICLE emitters
         // because that is what decides whether the mesh is the only thing the model can draw.
         ribbonManager?.register(model);
-        // THE VISIBILITY RULE, AND IT IS DATA-DRIVEN RATHER THAN A CONVENTION GUESS.
+        // THE VISIBILITY RULE. Data-driven, and BOTH of its original justifications have since
+        // expired -- which is why it now has a second arm.
         //
-        // `register` returns how many particle emitters it took. That number decides whether this
-        // model's MESH is the effect or merely the skeleton its particles hang off:
+        // `register` returns how many particle emitters it took. The rule used to be "emitters > 0
+        // -> stay hidden", on two grounds:
         //
-        //  - **emitters > 0 -> stay hidden.** `ParticleManager` puts each batch in its OWN group
-        //    (`particle/manager.ts` over `map.js`'s `particleGroup`), so the particles draw whatever
-        //    this flag says. Un-hiding would add nothing and reveal a mesh nothing poses -- which is
-        //    what drew the big pale sheets (`ThunderClap_Cast_Base` is 178 vertices in a
-        //    12.7 x 13.0 x 8.7 box, `Frost_Nova_state` 614 in 9.7 x 9.7 x 2.7).
-        //  - **emitters == 0 -> MUST be visible.** Then the mesh is the only thing the model can
-        //    draw, and hiding it draws nothing at all.
+        //  1. "Un-hiding would reveal a mesh NOTHING POSES" -- true when written, and **closed**:
+        //     `0f06488` added `poseEffectModel` to this file's per-frame `update`, and `60bede3`
+        //     fixed the bone path to honour `globalSequenceID`. A posable effect mesh is now posed.
+        //  2. "This client renders no ribbon emitters at all -- nothing in `pipeline/m2` references
+        //     them" -- **also closed**, by the ribbon port (`pipeline/m2/ribbon/`). That sentence is
+        //     corrected here rather than left standing.
         //
-        // The second arm is measured, not assumed, and it is why the owner lost the projectile:
-        // `Spells\LightningBolt_Missile.mdx` and `Spells\Lightning_PreCast_Low_Hand.mdx` register
-        // **0 emitters** and carry **116 vertices, 23 animated bones and 3 RIBBON emitters**
-        // (`__bench__/effect-emitter-probe.test.ts`). This client renders no ribbon emitters at all --
-        // nothing in `pipeline/m2` references them -- so those two models have only their mesh, and
-        // blanket-hiding it in 9f4101b is exactly "И снаряд тоже было видно раньше".
+        // WHAT THE OLD RULE COST, measured on the owner's report "Сумон визуализация слишком низко":
+        // `Spells\SummonPet_Impact_Base.mdx` is **200 vertices spanning Z 0.063 to 3.650** with 18
+        // bones (10 animated) AND 6 particle emitters; `SummonPet_Cast_Impact_Base` is 200 vertices,
+        // 17 bones (13 animated) and 4 emitters. `emitterCount > 0` on both, so their mesh was never
+        // shown -- **the entire 3.6-unit column of the summon effect was not being drawn**, leaving
+        // only the particle cloud, whose authored volume reaches 1.358 units BELOW the origin. That
+        // reads exactly as "too low": the high part was missing, not mis-placed.
         //
-        // NAMED LIMIT: a mesh shown this way still draws in BIND POSE, because nothing poses a
-        // free-standing effect model (the `DoodadManager#poseDoodad` gap this file's header records).
-        // So Lightning Bolt's projectile is a static shape again rather than an animated one -- which
-        // is what the owner saw before and reported as "снаряд не анимирован". Visible-and-static is
-        // the honest state; invisible was a regression.
-        if (emitterCount === 0) {
+        // So the mesh is shown when it can be POSED, which is the precondition the old first ground
+        // was really about. The predicate is `poseEffectModel`'s own gate (`world/effect-pose.ts`):
+        // `useSkinning` plus an armable `instanceAnim`. Both summon models satisfy it (one inline
+        // animation, animId 0, 1100 / 1667 ms), so showing them cannot produce a bind-pose sheet.
+        //
+        // AND THE OLD GUARD IS KEPT for exactly the case it was written for: a mesh with emitters
+        // that CANNOT be posed stays hidden, because that is still an unposed pale sheet
+        // (`ThunderClap_Cast_Base` 178 vertices in a 12.7 x 13.0 x 8.7 box, `Frost_Nova_state` 614 in
+        // 9.7 x 9.7 x 2.7 -- neither is lifted by this change unless it poses).
+        //
+        // `emitters == 0` still MUST be visible: then the mesh is the only thing the model can draw,
+        // and hiding it draws nothing at all -- the arm that cost the owner his projectile
+        // (`LightningBolt_Missile` registers 0 emitters and carries 116 vertices and 3 ribbons).
+        const posable = (model as unknown as {
+          useSkinning?: boolean; instanceAnim?: { armable?: boolean } | null;
+        });
+        const canPose = posable.useSkinning === true && posable.instanceAnim?.armable === true;
+        if (emitterCount === 0 || (kitMeshControl.enabled && canPose)) {
           model.visible = true;
         }
 
