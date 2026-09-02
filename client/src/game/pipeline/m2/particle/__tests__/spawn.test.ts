@@ -623,3 +623,50 @@ describe('spawnParticle — inherited emitter motion', () => {
     expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(10, 5);
   });
 });
+
+/**
+ * BAKED ORIENTATION (`MODEL_SPACE` clear) -- see `integrate.ts#MODEL_SPACE`.
+ *
+ * Two assertions, because the change has two halves that must both hold: baking must compose to the
+ * SAME world position as the old full-matrix pack for a static emitter (or every campfire moves), and
+ * a baked particle must be untouched by the emitter's LATER rotation (which is the owner's report).
+ */
+describe('spawnParticle — baked emitter orientation', () => {
+  // A 90-degree yaw about Z, column-major as `Matrix4#elements` is.
+  const yaw90 = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const spawnAt = (worldLinear: number[] | null) => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+    spawnParticle(pool, slot, {
+      ...baseParams, areaWidth: 0, areaLength: 0, speed: 10, worldLinear,
+    }, scriptedRandom([0.5]));
+    return { pool, slot };
+  };
+
+  it('composes to the same world position a full-matrix pack would produce', () => {
+    // Emission is straight up local +Z at speed 10, so the VELOCITY is what the yaw acts on and it
+    // must be invariant under a yaw about Z -- the check that the linear part is applied correctly
+    // rather than transposed. A transposed 3x3 would be the inverse rotation here and show up on x/y.
+    const baked = spawnAt(yaw90);
+    const plain = spawnAt(null);
+    expect(baked.pool.velocity[baked.slot * 3 + 2]).toBeCloseTo(10, 5);
+    expect(baked.pool.velocity[baked.slot * 3]).toBeCloseTo(0, 5);
+    expect(baked.pool.velocity[baked.slot * 3 + 1]).toBeCloseTo(0, 5);
+    // And with no bake the same emission is identical, so a static emitter's cloud cannot move.
+    expect(plain.pool.velocity[plain.slot * 3 + 2]).toBeCloseTo(10, 5);
+  });
+
+  it('bakes the rotation into the velocity so a later rotation cannot turn the particle', () => {
+    // Velocity along local +X this time, which a yaw about Z DOES turn -- so the bake is observable.
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+    spawnParticle(pool, slot, {
+      ...baseParams,
+      areaWidth: 0, areaLength: 0, speed: 0, verticalRange: 0, horizontalRange: 0,
+      inheritX: 5, inheritY: 0, inheritZ: 0, worldLinear: yaw90,
+    }, scriptedRandom([0.5]));
+    // The yaw maps +X onto +Y, once, at birth. Nothing re-applies it afterwards.
+    expect(pool.velocity[slot * 3]).toBeCloseTo(0, 5);
+    expect(pool.velocity[slot * 3 + 1]).toBeCloseTo(5, 5);
+  });
+});

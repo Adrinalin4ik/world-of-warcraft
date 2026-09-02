@@ -52,6 +52,12 @@ export interface SpawnParams {
    * function has already rotated the emission velocity into by the time it is added -- and the frame
    * `integratePool` applies gravity in. The caller does the rotation; see `ParticleManager#animate`.
    */
+  /**
+   * The emitter's world matrix ELEMENTS when the cloud is baked-at-birth (`MODEL_SPACE` clear), or
+   * undefined when it is re-oriented per frame. Only the linear 3x3 is read -- indices 0,1,2,4,5,6,
+   * 8,9,10 -- so rotation AND scale are baked while the translation stays `pack`'s job.
+   */
+  worldLinear?: ArrayLike<number> | null;
   inheritX?: number;
   inheritY?: number;
   inheritZ?: number;
@@ -354,6 +360,29 @@ export const spawnParticle = (
     pool.velocity[base] += ix * variation;
     pool.velocity[base + 1] += iy * variation;
     pool.velocity[base + 2] += iz * variation;
+  }
+
+  // BAKE THE EMITTER'S ORIENTATION, when the emitter is not `MODEL_SPACE`. See
+  // `integrate.ts#MODEL_SPACE`: the reference bakes bone/model rotation at birth for exactly this
+  // case, and `pack` then contributes only the translation. Applied LAST, after the basis rotation
+  // and after the speed scaling and the inherit, so it captures the finished model-space state --
+  // and to BOTH position and velocity, because a velocity left in model axes would re-introduce the
+  // rotation one integration step later.
+  const wl = params.worldLinear;
+  if (wl) {
+    const px = pool.position[base];
+    const py = pool.position[base + 1];
+    const pz = pool.position[base + 2];
+    pool.position[base] = wl[0] * px + wl[4] * py + wl[8] * pz;
+    pool.position[base + 1] = wl[1] * px + wl[5] * py + wl[9] * pz;
+    pool.position[base + 2] = wl[2] * px + wl[6] * py + wl[10] * pz;
+
+    const vx = pool.velocity[base];
+    const vy = pool.velocity[base + 1];
+    const vz = pool.velocity[base + 2];
+    pool.velocity[base] = wl[0] * vx + wl[4] * vy + wl[8] * vz;
+    pool.velocity[base + 1] = wl[1] * vx + wl[5] * vy + wl[9] * vz;
+    pool.velocity[base + 2] = wl[2] * vx + wl[6] * vy + wl[10] * vz;
   }
 
   pool.age[slot] = 0;

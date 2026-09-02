@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { ParticleBatch } from './batch';
 import { ParticleMaterial } from './material';
 import {
-  driftPool, followFraction, INHERIT_EMITTER_MOTION,
+  driftPool, followFraction, INHERIT_EMITTER_MOTION, MODEL_SPACE,
 } from './integrate';
 import { ParticlePool } from './pool';
 import { RuntimeEmitter } from './runtime-emitter';
@@ -369,6 +369,9 @@ export class ParticleManager {
       const wy = we[13];
       const wz = we[14];
       const emitterFlags = entry.definition.flags | 0;
+      // ORIENTATION: baked at birth unless the emitter is `MODEL_SPACE`. Fed every frame so a birth
+      // bakes the CURRENT bone rotation; `pack` below then contributes only the translation.
+      const baked = (emitterFlags & MODEL_SPACE) === 0;
       // TWO INDEPENDENT AXES, and `integrate.ts#INHERIT_EMITTER_MOTION` says why they are not in
       // conflict: the world-frozen drift lags the whole live cloud every frame, `0x40` gives each
       // BIRTH a forward impulse.
@@ -395,8 +398,18 @@ export class ParticleManager {
           // `spawnParticle` has already rotated the emission velocity into by the time the inherit
           // is added. A Matrix3 and `applyMatrix3` rather than `transformDirection`, which
           // NORMALISES -- it would make both effects independent of the emitter's actual speed.
-          scratchDriftBasis.setFromMatrix4(scratchInverse.copy(entry.instance.matrixWorld).invert());
-          scratchDrift.set(ddx, ddy, ddz).applyMatrix3(scratchDriftBasis);
+          // THE DELTA'S FRAME MUST MATCH THE POOL'S. A baked pool is WORLD-AXED, so the world
+          // delta goes in unrotated; a `MODEL_SPACE` pool is model-axed and needs the inverse.
+          // Getting this pair crossed is the two-conventions shape, so the branch is explicit
+          // rather than a single path that happens to be right for one of them.
+          if (baked) {
+            scratchDrift.set(ddx, ddy, ddz);
+          } else {
+            scratchDriftBasis.setFromMatrix4(
+              scratchInverse.copy(entry.instance.matrixWorld).invert(),
+            );
+            scratchDrift.set(ddx, ddy, ddz).applyMatrix3(scratchDriftBasis);
+          }
 
           if (lags) {
             const keep = followFraction(
@@ -440,6 +453,8 @@ export class ParticleManager {
       // world matrix to every particle, so composing the two puts a spawn exactly where its bone is
       // while keeping the pool in model space. Recomputed each frame so an animated bone drags its
       // emitter along; for a static doodad like a portal it simply resolves to the same matrix.
+      entry.emitter.setWorldLinear(baked ? entry.instance.matrixWorld.elements : null);
+
       if (entry.bone && entry.basis) {
         scratchInverse.copy(entry.instance.matrixWorld).invert();
         entry.basis.multiplyMatrices(scratchInverse, entry.bone.matrixWorld);
@@ -455,6 +470,7 @@ export class ParticleManager {
       entry.batch.pack(
         entry.emitter.pool, entry.definition, entry.instance.matrixWorld,
         entry.instance.particleSizeScale ?? 1,
+        baked,
       );
     }
   }

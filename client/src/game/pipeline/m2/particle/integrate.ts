@@ -146,6 +146,55 @@ export const integratePool = (pool: ParticlePool, dt: number, forces: Forces): n
  * into a per-second integrator instead would make the inherit 30x too small, i.e. invisible, which
  * would contradict the reference's own account of the mechanism being load-bearing for hand effects.
  */
+/**
+ * M2Particle file flag `0x10`: the cloud is ORIENTED by the emitter's live bone matrix every frame.
+ * Its ABSENCE means the emitter's rotation is baked into each particle AT BIRTH and never re-applied.
+ *
+ * `ParticleEmitterDef::model_space` (`benilla-formats/src/particles.rs:452-461`, wow-re
+ * `part-simspace-fields.md` corrections `1f40db0b`, byte block `0x70faf8-0x70fc44`): "the whole cloud
+ * renders through the emitter's **live bone matrix** each frame (rotation and all -- the chandelier's
+ * candle flames rigidly ride the swing). **Clear => bone/model rotation is baked at birth instead.**"
+ *
+ * THE OWNER DESCRIBED EXACTLY THIS DISTINCTION, unprompted, which is what identified it: "они
+ * следуют за руками по всем осям. Они не должны ротироваться совсем, но ротируются вместе с руками."
+ * Position following is right; rotating with the wrist is not. That is `0x10` clear.
+ *
+ * ## It is a DIFFERENT AXIS from the two motion flags, and that is why it looked like a dead end
+ *
+ * An earlier round measured `0x10` as clear on both hand emitters AND on all three Fireball tail
+ * emitters and concluded it "does not separate them". True -- and irrelevant, because it was being
+ * tested against the wrong question. `0x10` does not govern whether a cloud RIDES or TRAILS (that is
+ * `FOLLOW_EMITTER`); it governs whether the cloud is RE-ORIENTED. Three flags, three axes:
+ *
+ *   `0x10`    ORIENTATION: live bone rotation each frame, or baked once at birth.
+ *   `0x4000`  POSITION:    how much of the emitter's motion the live cloud keeps.
+ *   `0x40`    BIRTH IMPULSE: the emitter's recent velocity added to a birth.
+ *
+ * Measured on the served build: `0x10` is clear on every emitter of `Magic_PreCast_Hand`,
+ * `Fire_PreCast_Hand`, `Fireball_Missile_Low` and `Fireball_Missile_High` -- so all of them should be
+ * baked-at-birth, and this client re-oriented all of them every frame.
+ *
+ * ## What baking changes, and what it deliberately does not
+ *
+ * The pool stores model-space offsets and `ParticleBatch#pack` applied the emitter's whole world
+ * matrix -- rotation, scale AND translation -- to every particle every frame. Baking splits that: the
+ * matrix's LINEAR part (rotation and scale together, so a scaled instance is unaffected) is applied
+ * at BIRTH inside `spawnParticle`, and `pack` then adds only the translation column.
+ *
+ * **A STATIC emitter is byte-identical either way** -- its world matrix never changes, so baking the
+ * linear part at birth and adding the translation at pack composes to exactly the same world position
+ * as applying the whole matrix at pack. Every campfire, torch and brazier is therefore unaffected by
+ * construction rather than by measurement.
+ *
+ * AND IT FIXES GRAVITY'S FRAME AS A SIDE EFFECT, which is worth stating because it was filed as an
+ * open two-conventions problem. `integratePool` applies gravity along the POOL's local -Z. With the
+ * old full-matrix pack the pool was model-space, so gravity pointed along the model's rotated -Z --
+ * wrong for any rotated emitter. Baked, the pool is WORLD-AXED, so its -Z IS world down and gravity
+ * is correct. The defect was measured LATENT (gravity is authored 0 on every emitter measured), so
+ * nothing visible changes, but the convention is now right rather than accidentally unused.
+ */
+export const MODEL_SPACE = 0x10;
+
 export const INHERIT_EMITTER_MOTION = 0x40;
 
 /**

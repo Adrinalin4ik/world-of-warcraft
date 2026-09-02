@@ -195,8 +195,17 @@ export class ParticleBatch extends THREE.Mesh {
      * `CLAUDE.md` records three rounds of.
      */
     sizeScale = 1,
+    /**
+     * BAKED-AT-BIRTH: the emitter's orientation was applied to each particle when it was born, so
+     * `worldMatrix` must contribute only its TRANSLATION here. True for every emitter whose file
+     * flags leave `MODEL_SPACE` (0x10) clear, which is all of them measured so far. See
+     * `integrate.ts#MODEL_SPACE`.
+     */
+    baked = false,
   ): number {
     const cellCount = this.rows * this.columns;
+    // Hoisted: `pack` runs per particle and this is one array read per CALL rather than per particle.
+    const we = worldMatrix.elements;
     const cellWidth = 1 / this.columns;
     const cellHeight = 1 / this.rows;
 
@@ -228,11 +237,22 @@ export class ParticleBatch extends THREE.Mesh {
       const lifespan = pool.lifespan[slot];
       const t = lifespan > 0 ? Math.min(1, pool.age[slot] / lifespan) : 1;
 
+      // BAKED-AT-BIRTH clouds add only the TRANSLATION; re-oriented ones take the whole matrix.
+      // `integrate.ts#MODEL_SPACE` carries the citation and the byte-identical-for-a-static-emitter
+      // argument. The branch is hoisted out of the loop as `we`/`baked` above, so this costs one
+      // already-loaded boolean per particle.
       scratchPosition.set(
         pool.position[slot * 3],
         pool.position[slot * 3 + 1],
         pool.position[slot * 3 + 2],
-      ).applyMatrix4(worldMatrix);
+      );
+      if (baked) {
+        scratchPosition.x += we[12];
+        scratchPosition.y += we[13];
+        scratchPosition.z += we[14];
+      } else {
+        scratchPosition.applyMatrix4(worldMatrix);
+      }
 
       this.offsets[index * 3] = scratchPosition.x;
       this.offsets[index * 3 + 1] = scratchPosition.y;

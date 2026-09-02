@@ -120,6 +120,16 @@ export class RuntimeEmitter {
    * and a stationary emitter -- `spawnParticle` skips the add entirely on all-zero, so an emitter
    * that never moves pays one three-way compare per birth.
    */
+  /**
+   * The emitter's world matrix for BAKING orientation into each birth, or null to keep the cloud
+   * re-oriented per frame. See `integrate.ts#MODEL_SPACE`. Refreshed every frame by the manager so a
+   * birth bakes the rotation the bone has NOW, which is the whole point -- a later rotation must not
+   * reach it, but the one at its birth must.
+   */
+  setWorldLinear(elements: ArrayLike<number> | null) {
+    this.spawnParams.worldLinear = elements;
+  }
+
   setInheritVelocity(x: number, y: number, z: number) {
     this.spawnParams.inheritX = x;
     this.spawnParams.inheritY = y;
