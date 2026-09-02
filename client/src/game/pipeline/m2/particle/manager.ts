@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { ParticleBatch } from './batch';
 import { ParticleMaterial } from './material';
 import {
-  driftPool, FOLLOW_EMITTER, followFraction, INHERIT_EMITTER_MOTION,
+  driftPool, followFraction, INHERIT_EMITTER_MOTION,
 } from './integrate';
 import { ParticlePool } from './pool';
 import { RuntimeEmitter } from './runtime-emitter';
@@ -370,10 +370,15 @@ export class ParticleManager {
       const wz = we[14];
       const emitterFlags = entry.definition.flags | 0;
       // TWO INDEPENDENT AXES, and `integrate.ts#INHERIT_EMITTER_MOTION` says why they are not in
-      // conflict: `0x4000` lags the whole live cloud every frame, `0x40` gives each BIRTH a forward
-      // impulse. An emitter with both gets both; one with neither rides its anchor exactly as it did
-      // before either flag existed, and reaches none of the work below.
-      const lags = trailEnabled && (emitterFlags & FOLLOW_EMITTER) !== 0;
+      // conflict: the world-frozen drift lags the whole live cloud every frame, `0x40` gives each
+      // BIRTH a forward impulse.
+      //
+      // NO FLAG GATE ON THE DRIFT, and `integrate.ts#FOLLOW_EMITTER` carries the whole reasoning and
+      // the polarity's history. The short version: world-frozen is the BASELINE and `0x4000` is what
+      // buys a ride back, via `followFraction`'s line -- so every moving emitter drifts unless its
+      // own data says otherwise, and `followFraction` returning 0 for an unflagged emitter is what
+      // makes `leave` 1. A static emitter still reaches nothing: its delta is exactly zero.
+      const lags = trailEnabled;
       const inherits = (emitterFlags & INHERIT_EMITTER_MOTION) !== 0;
       if (inherits) {
         entry.inheritAccum += dt;

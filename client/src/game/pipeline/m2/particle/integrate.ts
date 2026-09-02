@@ -120,13 +120,19 @@ export const integratePool = (pool: ParticlePool, dt: number, forces: Forces): n
  * ## THIS IS A DIFFERENT AXIS FROM `FOLLOW_EMITTER`, and conflating them is how a polarity inverts
  *
  *   `0x40`   acts ONCE, at birth, on ONE particle's VELOCITY -- it carries motion FORWARD.
- *   `0x4000` acts EVERY FRAME, on EVERY live particle's POSITION -- it leaves motion BEHIND.
+ *   `0x4000` acts EVERY FRAME, on EVERY live particle's POSITION -- it buys back a RIDE, because
+ *            world-frozen is the baseline. See `FOLLOW_EMITTER` for the polarity's whole history.
  *
  * They are independent in the reference (separate runtime bits `0x400` and `0x40000`) and
- * independent here. An emitter authoring BOTH gets both: its births lead, and all its live particles
- * then lag the anchor -- which is coherent rather than contradictory, because one is a birth impulse
- * and the other a per-frame displacement of the whole cloud. An emitter authoring NEITHER rides its
- * anchor exactly as before either flag existed.
+ * independent here. An emitter authoring BOTH gets both: its births lead, and its live cloud rides
+ * by `followFraction`'s line -- coherent rather than contradictory, because one is a birth impulse
+ * and the other a per-frame displacement of the whole cloud.
+ *
+ * An emitter authoring NEITHER is left behind in world space, which is the baseline. (This sentence
+ * used to read "rides its anchor exactly as before either flag existed" -- correct while the drift
+ * was gated on `0x4000` and false the moment that gate came off, so it is corrected here rather
+ * than left to mislead.) A STATIC emitter is unaffected either way: its per-frame delta is exactly
+ * zero, so it reaches neither mechanism.
  *
  * ## The (1/30) is a STORAGE convention, not a 30x reduction
  *
@@ -143,36 +149,71 @@ export const integratePool = (pool: ParticlePool, dt: number, forces: Forces): n
 export const INHERIT_EMITTER_MOTION = 0x40;
 
 /**
- * THE UNRESOLVED DISCRIMINATOR, recorded because the arithmetic now pins exactly what it must do.
+ * ## THE POLARITY, ITS WHOLE HISTORY IN ONE PLACE
  *
- * Fireball's tail is arithmetically ONLY possible if its particles are left behind in world space,
- * and the shield's ring artefact is arithmetically a real consequence of the same rule. Both
- * measured on the served build, using each emitter's own authored rate, lifespan and scale, with the
- * sprite extent already including the half-size doubling:
+ * This has inverted once and a reader should not have to reconstruct it from three commits.
+ *
+ *   `57efa68`  world-frozen UNGATED. Restored Fireball's tail. Also world-froze the mage shield's
+ *              hand glow, which the owner photographed as a line of faint rings across the grass.
+ *   `93ee44f`  gated on `FOLLOW_EMITTER`. Removed the rings AND the tail. Justified by "94.6% of
+ *              emitters author no flag, so a flagless freeze is not a port" -- true as far as it
+ *              goes, and it was still the wrong call, because it made the flag's ABSENCE mean
+ *              "ride" when the reference's own `follow_emitter` doc says the absence is the
+ *              world-frozen baseline and the flag is what buys the ride back.
+ *   THIS ONE    ungated again, deliberately, on arithmetic rather than on a third guess.
+ *
+ * ## Why ungated, and it is measured rather than argued
+ *
+ * Fireball's tail is arithmetically ONLY possible if its particles are left behind in world space.
+ * Per emitter, with its own authored rate, lifespan and (already half-size-doubled) sprite extent:
  *
  *   Fireball_Missile_Low at the missile's 24 u/s (`Spell.dbc` Speed), world-frozen:
- *     e0  rate 130   life 0.40  ->  52 particles over 9.6 units, spacing 0.185 vs extent 0.556  MERGES
- *     e1  rate 63.1  life 0.40  ->  25 particles over 9.6 units, spacing 0.380 vs extent 0.444  MERGES
- *     e2  rate 63.1  life 0.40  ->  25 particles over 9.6 units, spacing 0.380 vs extent 0.444  MERGES
- *   -- a CONTINUOUS 9.6-unit tail, which is the owner's original-client screenshot.
+ *     e0  rate 130   life 0.40  ->  52 particles over 9.6 units, spacing 0.185 vs extent 0.556
+ *     e1  rate 63.1  life 0.40  ->  25 particles over 9.6 units, spacing 0.380 vs extent 0.444
+ *     e2  rate 63.1  life 0.40  ->  25 particles over 9.6 units, spacing 0.380 vs extent 0.444
+ *   Every one MERGES -- a continuous 9.6-unit tail, which is the owner's original-client screenshot.
+ *
+ * And the emission speeds forbid the alternative outright: every Fireball emitter emits at 0 to
+ * 1.111 u/s against a 24 u/s carrier, so an anchor-riding emitter holds its cloud within
+ * `speed * lifespan` = 0.28-0.44 units of the ball whatever direction it throws. No mapping, and no
+ * sign flip, can make a tail out of that.
+ *
+ * ## THE DISCRIMINATOR DOES NOT EXIST IN THE DATA, and four candidates are now excluded
+ *
+ * A rule that world-freezes a missile emitter and anchor-rides a hand emitter would be ideal. There
+ * isn't one to find:
+ *
+ *   * NOT `FOLLOW_EMITTER` `0x4000` -- clear on all nine Fireball emitters (`_Low` 0x40009/0x30009/
+ *     0x30009/0x20055, `_High` 0x20028/0x40009/0x20055/0x30009/0x30009) and on both
+ *     `Magic_PreCast_Hand` emitters (0x20109/0x20469).
+ *   * NOT `0x10 model_space` -- clear on all three Fireball tail emitters and clear on both hand
+ *     emitters too, while SET on other hand models. It does not separate them.
+ *   * NOT the emitter's PARENT BONE, which was the last structural candidate and the reason this
+ *     round was spent: Fireball is 4/4 and 5/5 emitters on ROOT bones (parent -1), and the hand
+ *     models are mixed -- `Ice_Precast_Uber_Hand` 5/5 descendants, `Ice_Precast_High_Hand` 4/4
+ *     descendants, `Magic_Cast_Hand` 2 descendants + 1 root, `Magic_PreCast_Hand` 1 + 1, and
+ *     **`Fire_PreCast_Hand` 5/5 ROOT BONES** -- structurally identical to the missile, and it must
+ *     ride. A root-bone rule would bead the Fire Ward glow.
+ *   * NOT anything the reference supplies: its particle path DEFERS bone-follow entirely --
+ *     "Bone-follow @ +0x14 is deferred -- static props sit on the root" (`particles.rs:344`) -- so
+ *     it never distinguishes a bone-attached emitter from a root one and cannot arbitrate this.
+ *
+ * ## THE COST OF UNGATING, NAMED AS A SEPARATE DEFECT RATHER THAN HIDDEN
+ *
+ * The mage shield's hand glow will bead again while its owner RUNS. That is not a polarity error and
+ * it is not the half-extent bug either -- it is a rate problem, and the arithmetic says so:
  *
  *   Magic_PreCast_Hand on a player running at ~7 u/s, world-frozen:
- *     e0  rate 11    life 0.80  -> 8.8 particles over 5.6 units, spacing 0.636 vs extent 0.056  BEADS
- *     e1  rate 10    life 0.40  -> 4.0 particles over 2.8 units, spacing 0.700 vs extent 0.278  BEADS
- *   -- a line of discrete dots, which is the owner's ring screenshot. And it is NOT the half-extent
- *   bug: the gap is ELEVEN TIMES the sprite on e0, so doubling the sprite again cannot close it.
+ *     e0  rate 11  life 0.80  -> 8.8 particles over 5.6 units, spacing 0.636 vs extent 0.056
+ *     e1  rate 10  life 0.40  -> 4.0 particles over 2.8 units, spacing 0.700 vs extent 0.278
  *
- * So `57efa68` (world-frozen) was right about Fireball and `93ee44f` (gated) is right about the
- * shield, and neither is right about both. The discriminator must world-freeze a missile emitter and
- * anchor-ride a hand emitter, and **it is not `FOLLOW_EMITTER`**: not one emitter of either model
- * authors `0x4000` (Fireball 0x40009 / 0x30009 / 0x30009 / 0x20055; the hand 0x20109 / 0x20469).
- * Nor is it `0x10` `model_space`, which is clear on all three Fireball tail emitters AND clear on
- * both hand emitters, and set on other hand models -- so it does not separate them either.
+ * **Eleven particles per second cannot look continuous over 5.6 units at ANY sprite size**: on e0
+ * the gap is eleven times the sprite, so doubling the sprite again -- or a third time -- cannot
+ * close it. So its fix lives in the rate, the lifespan, the alpha or the blend, and NOT here. Filed
+ * as its own defect with its own numbers, which is the honest way to ship a known regression rather
+ * than pretending the trade does not exist.
  *
- * NOT FLIPPED A THIRD TIME on my own judgement. This polarity has already inverted once, the
- * project's record on sign flips to make an effect appear is three for three against, and the
- * numbers above are the input to a decision rather than the decision. The gate stays as `93ee44f`
- * left it until the discriminator is identified.
+ * `window.particleTrailControl.enabled = false` restores the gated behaviour for a one-line A/B.
  */
 export const FOLLOW_EMITTER = 0x4000;
 
