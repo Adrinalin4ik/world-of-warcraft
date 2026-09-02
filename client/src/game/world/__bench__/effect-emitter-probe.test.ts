@@ -871,3 +871,108 @@ describe('M2 particle emitters: Fireball _Low versus _High', () => {
     expect(lines.length).toBeGreaterThan(0);
   }, 120000);
 });
+
+
+/**
+ * THE SHIELD'S BEADING: is 11 particles/sec AUTHORED, or is it a rate read low?
+ *
+ * `capacityFor` in this same record already read `emissionRate` at t=0 instead of the track's peak
+ * and starved six emitters to a single slot -- a rate read, wrong in exactly the direction that
+ * makes an effect look sparse. So this dumps EVERY key of the rate and lifespan tracks rather than
+ * sampling them, plus the two variation scalars, and says which of them this client reads.
+ */
+describe('M2 particle emitters: the full rate and lifespan tracks', () => {
+  it('dumps every key for the shield hand and Fireball emitters', async () => {
+    const dumpBlock = (name: string, block: any): string[] => {
+      const out: string[] = [];
+      const tracks: any[] = block?.tracks ?? [];
+      if (tracks.length === 0) return [`      ${name}: NO TRACKS`];
+      out.push(`      ${name}: gs=${block.globalSequenceID} interp=${block.interpolationType}`
+        + ` tracks=${tracks.length}`);
+      tracks.forEach((t: any, si: number) => {
+        const ts: number[] = t?.timestamps ?? [];
+        const vs: any[] = t?.values ?? [];
+        if (ts.length === 0 && vs.length === 0) return;
+        const keys = ts.map((time: number, k: number) => {
+          const v = vs[k];
+          return `${time}ms=${typeof v === 'number' ? Number(v.toFixed(3)) : JSON.stringify(v)}`;
+        });
+        out.push(`         seq ${si}: ${keys.length} keys  ${keys.join('  ')}`);
+      });
+      return out;
+    };
+    const lines: string[] = [];
+    for (const path of ['Spells/Magic_PreCast_Hand.m2', 'Spells/Fire_PreCast_Hand.m2',
+      'Spells/Fireball_Missile_Low.m2']) {
+      // eslint-disable-next-line no-await-in-loop
+      const buffer = await fetchFixture(asM2(path));
+      if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+        lines.push(`${path}: UNREACHABLE`);
+        continue;
+      }
+      const m2: any = M2Parser.decode(new DecodeStream(buffer));
+      lines.push(`${path}  animations=${(m2.animations ?? []).length}`
+        + ` durations=[${(m2.animations ?? []).map((a: any) => a.length).join(',')}]`);
+      (m2.particleEmitters ?? []).forEach((e: any, i: number) => {
+        lines.push(`   emitter ${i}  blend=${e.blendingType} rows=${e.rows} cols=${e.columns}`
+          + `  emissionRateVariation=${e.emissionRateVariation}`
+          + ` lifespanVariation=${e.lifespanVariation}`);
+        lines.push(...dumpBlock('emissionRate', e.emissionRate));
+        lines.push(...dumpBlock('lifespan', e.lifespan));
+        lines.push(...dumpBlock('enabledIn', e.enabledIn));
+      });
+    }
+    // eslint-disable-next-line no-console
+    console.log(lines.join(String.fromCharCode(10)));
+    expect(lines.length).toBeGreaterThan(0);
+  }, 120000);
+});
+
+
+/**
+ * THE SPRITE'S SIZE OVER ITS LIFE, and the blend it draws with -- the appearance half.
+ *
+ * The beading arithmetic first quoted used `scaleTrack` key **0** for the sprite extent, which is the
+ * exact `capacityFor` mistake (a t=0 read where the track has a ramp) committed a second time in the
+ * same subsystem. `scaleTrack` is an FBlock keyed on the particle's own LIFETIME FRACTION, so key 0
+ * is the birth size and says nothing about the peak. Every key is dumped here.
+ */
+describe('M2 particle emitters: sprite size over life and blend', () => {
+  it('dumps the whole scale track and the blend for the shield hands', async () => {
+    const lines: string[] = [];
+    for (const path of ['Spells/Magic_PreCast_Hand.m2', 'Spells/Fire_PreCast_Hand.m2',
+      'Spells/Ice_Precast_Uber_Hand.m2', 'Spells/Fireball_Missile_Low.m2']) {
+      // eslint-disable-next-line no-await-in-loop
+      const buffer = await fetchFixture(asM2(path));
+      if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+        lines.push(`${path}: UNREACHABLE`);
+        continue;
+      }
+      const m2: any = M2Parser.decode(new DecodeStream(buffer));
+      lines.push(path);
+      (m2.particleEmitters ?? []).forEach((e: any, i: number) => {
+        const times: number[] = e.scaleTrack?.times ?? [];
+        const vals: any[] = e.scaleTrack?.values ?? [];
+        const keys = vals.map((v: any, k: number) => {
+          const x = Array.isArray(v) ? v[0] : v?.x;
+          const y = Array.isArray(v) ? v[1] : v?.y;
+          const t = times[k];
+          return `t=${t === undefined ? '?' : (t / 32767).toFixed(2)}:(${Number(x).toFixed(3)},${Number(y).toFixed(3)})`;
+        });
+        const peak = vals.reduce((m: number, v: any) => {
+          const x = Array.isArray(v) ? v[0] : v?.x;
+          const y = Array.isArray(v) ? v[1] : v?.y;
+          return Math.max(m, Math.abs(Number(x)), Math.abs(Number(y)));
+        }, 0);
+        const alphas: any[] = e.alphaTrack?.values ?? [];
+        lines.push(`   e${i} blend=${e.blendingType} tex=${e.textureId} rows=${e.rows}x${e.columns}`
+          + ` PEAK half-size=${peak.toFixed(3)} -> full extent=${(peak * 2).toFixed(3)}`);
+        lines.push(`      scale keys: ${keys.join('  ')}`);
+        lines.push(`      alpha keys (fixed16 /32767): ${alphas.slice(0, 6).map((a: any) => (Number(a) / 32767).toFixed(2)).join(' ')}`);
+      });
+    }
+    // eslint-disable-next-line no-console
+    console.log(lines.join(String.fromCharCode(10)));
+    expect(lines.length).toBeGreaterThan(0);
+  }, 120000);
+});

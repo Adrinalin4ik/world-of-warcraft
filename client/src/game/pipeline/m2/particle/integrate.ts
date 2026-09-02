@@ -198,20 +198,49 @@ export const INHERIT_EMITTER_MOTION = 0x40;
  *     "Bone-follow @ +0x14 is deferred -- static props sit on the root" (`particles.rs:344`) -- so
  *     it never distinguishes a bone-attached emitter from a root one and cannot arbitrate this.
  *
- * ## THE COST OF UNGATING, NAMED AS A SEPARATE DEFECT RATHER THAN HIDDEN
+ * ## THE COST OF UNGATING: SMALLER THAN FIRST FILED, BECAUSE THE FIRST ARITHMETIC WAS MINE AND WRONG
  *
- * The mage shield's hand glow will bead again while its owner RUNS. That is not a polarity error and
- * it is not the half-extent bug either -- it is a rate problem, and the arithmetic says so:
+ * This block first read: "the mage shield's hand glow WILL bead again while its owner runs ... eleven
+ * particles per second cannot look continuous over 5.6 units at ANY sprite size -- the gap is eleven
+ * times the sprite". **The rate and the lifespan were right; the SPRITE SIZE was not.**
  *
- *   Magic_PreCast_Hand on a player running at ~7 u/s, world-frozen:
- *     e0  rate 11  life 0.80  -> 8.8 particles over 5.6 units, spacing 0.636 vs extent 0.056
- *     e1  rate 10  life 0.40  -> 4.0 particles over 2.8 units, spacing 0.700 vs extent 0.278
+ * It used `scaleTrack` key **0** for the extent. `scaleTrack` is an FBlock keyed on the particle's
+ * own LIFETIME FRACTION, so key 0 is the BIRTH size and the sprite ramps from it. That is the exact
+ * `capacityFor` mistake -- a t=0 read where the track has a ramp -- committed a second time in the
+ * same record by the same author. `ParticleBatch#pack` never had the bug: it samples
+ * `evaluateFBlockVec2(scaleTrack, age/lifespan)` per particle, which is correct. Only the analysis
+ * was wrong.
  *
- * **Eleven particles per second cannot look continuous over 5.6 units at ANY sprite size**: on e0
- * the gap is eleven times the sprite, so doubling the sprite again -- or a third time -- cannot
- * close it. So its fix lives in the rate, the lifespan, the alpha or the blend, and NOT here. Filed
- * as its own defect with its own numbers, which is the honest way to ship a known regression rather
- * than pretending the trade does not exist.
+ * Re-done on each track's PEAK, at a player running ~7 u/s, world-frozen:
+ *
+ *   Magic_PreCast_Hand
+ *     e0  rate 11  life 0.80  8.8 over 5.6u  spacing 0.636  scale 0.028->0.078->0.028  extent 0.156
+ *         -> BEADS (gap 4.1x the sprite)
+ *     e1  rate 10  life 0.40  4.0 over 2.8u  spacing 0.700  scale 0.139->0.278->0.556  extent 1.111
+ *         -> **MERGES** (the sprite is 1.6x the gap)
+ *   Fire_PreCast_Hand -- all five merge:
+ *     e0 spacing 0.175 vs extent 0.444 · e1 0.108 vs 0.167 · e2 0.700 vs 1.333 ·
+ *     e3 0.700 vs 1.333 · e4 0.108 vs 0.167
+ *
+ * So the beading is ONE emitter of seven across the two models, its sprite is 0.156 units, and it
+ * sits inside `Magic_PreCast_Hand` e1's continuous 1.111-unit wash. The "line of rings" the owner
+ * photographed cannot have been e0 at 0.156 units; whatever he saw, the arithmetic that predicted it
+ * was the discredited t=0 one.
+ *
+ * WHICH OF THE THREE IT WAS, answered plainly: not a misread rate (`emissionRate` is a SINGLE key,
+ * `0ms = 11`, with `emissionRateVariation = 0`), not a misread lifespan (a single key, `0ms = 0.8`,
+ * `lifespanVariation = 0`), but a misread APPEARANCE property -- and misread by the analysis, not by
+ * the renderer. **Nothing is tuned here, and no number is raised.** The authored values are correct
+ * and this client already applies them correctly.
+ *
+ * The residual -- e0 beading at 4.1x -- is left alone deliberately rather than filed as a defect: it
+ * is one small emitter inside a merged wash, and the honest position after two bad arithmetics on
+ * this exact question is that it needs the owner's eye before anyone acts on it again.
+ *
+ * A SIDE EFFECT WORTH RECORDING: the sub-frame birth-distribution question is now dead for BOTH
+ * cases. It would only matter where consecutive births are far enough apart to read as separate, and
+ * the merging emitters above (0.108 to 0.700 spacing against 0.167 to 1.333 extents) leave nothing
+ * for it to smooth.
  *
  * `window.particleTrailControl.enabled = false` restores the gated behaviour for a one-line A/B.
  */
