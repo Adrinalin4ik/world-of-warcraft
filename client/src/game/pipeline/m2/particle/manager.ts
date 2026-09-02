@@ -2,7 +2,9 @@ import * as THREE from 'three';
 
 import { ParticleBatch } from './batch';
 import { ParticleMaterial } from './material';
-import { driftPool, FOLLOW_EMITTER, followFraction } from './integrate';
+import {
+  driftPool, FOLLOW_EMITTER, followFraction, INHERIT_EMITTER_MOTION,
+} from './integrate';
 import { ParticlePool } from './pool';
 import { RuntimeEmitter } from './runtime-emitter';
 import { evaluateAnimationTrack } from './tracks';
@@ -35,6 +37,12 @@ interface LiveEmitter {
   prevY: number;
   prevZ: number;
   hasPrev: boolean;
+  /**
+   * The `INHERIT_EMITTER_MOTION` accumulator: seconds since the last ~30 Hz trigger. The reference
+   * samples the inherit vector at that rate rather than per frame, so a 144 Hz client and a 30 Hz
+   * one feed their births the same impulse instead of one seeing 5x finer deltas.
+   */
+  inheritAccum: number;
 }
 
 // Reused across animate() calls to avoid an allocation per emitter per frame.
@@ -54,6 +62,9 @@ const scratchDrift = new THREE.Vector3();
  * per `animate`, never per emitter.
  */
 export const particleTrailControl = { enabled: true };
+
+/** The reference's ~30 Hz inherit sampling window, in seconds (`particles.rs:485-492`). */
+const INHERIT_INTERVAL = 1 / 30;
 
 if (typeof window !== 'undefined') {
   (window as unknown as Record<string, unknown>).particleTrailControl = particleTrailControl;
@@ -222,7 +233,7 @@ export class ParticleManager {
           culled: false,
           // `hasPrev` false so the FIRST frame establishes the anchor and drifts nothing -- see the
           // field's own doc for why (0,0,0) is not a usable sentinel.
-          prevX: 0, prevY: 0, prevZ: 0, hasPrev: false,
+          prevX: 0, prevY: 0, prevZ: 0, hasPrev: false, inheritAccum: 0,
         });
       }
     } catch (error) {
@@ -312,6 +323,7 @@ export class ParticleManager {
           // See `hasPrev`: an emitter that travelled while culled must not hand its whole
           // displacement to the first uncelled frame as one step of drift.
           entry.hasPrev = false;
+          entry.inheritAccum = 0;
         }
 
         (entry.batch.geometry as THREE.InstancedBufferGeometry).instanceCount = 0;
@@ -356,36 +368,63 @@ export class ParticleManager {
       const wx = we[12];
       const wy = we[13];
       const wz = we[14];
-      // THE FLAG GATE, and it is the whole correctness of this feature. Only an emitter the DATA
-      // marks with `FOLLOW_EMITTER` lags behind its anchor; every other emitter rides, which is the
-      // baseline and what a hand glow, a carried torch and a campfire all need. Shipping this
-      // ungated inverted it: 94.6% of emitters carry no such flag, so 94.6% of them trailed.
-      const lags = trailEnabled && (entry.definition.flags & FOLLOW_EMITTER) !== 0;
-      if (lags && entry.hasPrev) {
+      const emitterFlags = entry.definition.flags | 0;
+      // TWO INDEPENDENT AXES, and `integrate.ts#INHERIT_EMITTER_MOTION` says why they are not in
+      // conflict: `0x4000` lags the whole live cloud every frame, `0x40` gives each BIRTH a forward
+      // impulse. An emitter with both gets both; one with neither rides its anchor exactly as it did
+      // before either flag existed, and reaches none of the work below.
+      const lags = trailEnabled && (emitterFlags & FOLLOW_EMITTER) !== 0;
+      const inherits = (emitterFlags & INHERIT_EMITTER_MOTION) !== 0;
+      if (inherits) {
+        entry.inheritAccum += dt;
+      }
+      if ((lags || inherits) && entry.hasPrev) {
         const ddx = wx - entry.prevX;
         const ddy = wy - entry.prevY;
         const ddz = wz - entry.prevZ;
         // THE EARLY-OUT THAT KEEPS EVERY CAMPFIRE FREE. A static emitter's delta is exactly zero, so
         // it pays this three-way compare and nothing else -- no inverse, no Matrix3, no pool walk.
         if (ddx !== 0 || ddy !== 0 || ddz !== 0) {
-          // Rotated into the POOL's local frame, because that is the space the pool stores and the
-          // space `integratePool` applies gravity in. A Matrix3 and `applyMatrix3` rather than
-          // `transformDirection`, which NORMALISES -- it would turn every delta into a unit step and
-          // make the trail's length independent of the projectile's speed.
+          // ONE rotation into the POOL's local frame, shared by both flags -- that is the space the
+          // pool stores, the space `integratePool` applies gravity in, and the space
+          // `spawnParticle` has already rotated the emission velocity into by the time the inherit
+          // is added. A Matrix3 and `applyMatrix3` rather than `transformDirection`, which
+          // NORMALISES -- it would make both effects independent of the emitter's actual speed.
           scratchDriftBasis.setFromMatrix4(scratchInverse.copy(entry.instance.matrixWorld).invert());
           scratchDrift.set(ddx, ddy, ddz).applyMatrix3(scratchDriftBasis);
-          const keep = followFraction(
-            entry.definition,
-            dt > 0 ? Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz) / dt : 0,
-          );
-          const leave = 1 - keep;
-          if (leave > 0) {
-            driftPool(
-              entry.emitter.pool,
-              scratchDrift.x * leave, scratchDrift.y * leave, scratchDrift.z * leave,
+
+          if (lags) {
+            const keep = followFraction(
+              entry.definition,
+              dt > 0 ? Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz) / dt : 0,
             );
+            const leave = 1 - keep;
+            if (leave > 0) {
+              driftPool(
+                entry.emitter.pool,
+                scratchDrift.x * leave, scratchDrift.y * leave, scratchDrift.z * leave,
+              );
+            }
+          }
+
+          // THE ~30 Hz TRIGGER. `delta / accum` is the emitter's velocity over the window that just
+          // closed; `inheritVelocityScale` is the file's own multiplier on it (`inherit_scale`,
+          // reference `particles.rs:405-409`). The 1/30 in the reference's expression is a storage
+          // convention and cancels here -- see `INHERIT_EMITTER_MOTION`.
+          if (inherits && entry.inheritAccum >= INHERIT_INTERVAL) {
+            const scale = (Number(entry.definition.inheritVelocityScale) || 0)
+              / entry.inheritAccum;
+            entry.emitter.setInheritVelocity(
+              scratchDrift.x * scale, scratchDrift.y * scale, scratchDrift.z * scale,
+            );
+            entry.inheritAccum = 0;
           }
         }
+      }
+      // "ZEROED WHILE NO PARTICLES ARE LIVE" is the reference's own clause, and it is what stops a
+      // long-dormant emitter handing a stale impulse to its first birth after it wakes.
+      if (inherits && entry.emitter.pool.liveCount === 0) {
+        entry.emitter.setInheritVelocity(0, 0, 0);
       }
       entry.prevX = wx;
       entry.prevY = wy;

@@ -588,3 +588,38 @@ describe('spawnParticle — common state', () => {
     }
   });
 });
+
+/**
+ * THE INHERITED EMITTER MOTION (file flag 0x40) -- one arm, on the arithmetic that matters.
+ *
+ * `speedVariation: 0` so the `(1 + S11*speedVariation)` factor is exactly 1 and the assertion is on
+ * the inherit itself rather than on a random draw. `verticalRange`/`horizontalRange` 0 sends the
+ * emission velocity straight up local +Z at `speed`, so the inherit's X and Y land on axes the
+ * emission does not touch and cannot be confused with it.
+ */
+describe('spawnParticle — inherited emitter motion', () => {
+  it('adds the inherit vector to the birth velocity, on top of the emission speed', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+    spawnParticle(pool, slot, {
+      ...baseParams, inheritX: 3, inheritY: -4, inheritZ: 5,
+    }, scriptedRandom([0.5]));
+
+    expect(pool.velocity[slot * 3]).toBeCloseTo(3, 5);
+    expect(pool.velocity[slot * 3 + 1]).toBeCloseTo(-4, 5);
+    // The emission's own 10 along +Z, plus the inherited 5.
+    expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(15, 5);
+  });
+
+  it('leaves the birth velocity untouched when the emitter is not moving', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+    spawnParticle(pool, slot, {
+      ...baseParams, inheritX: 0, inheritY: 0, inheritZ: 0,
+    }, scriptedRandom([0.5]));
+
+    expect(pool.velocity[slot * 3]).toBeCloseTo(0, 5);
+    expect(pool.velocity[slot * 3 + 1]).toBeCloseTo(0, 5);
+    expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(10, 5);
+  });
+});

@@ -46,6 +46,15 @@ export interface SpawnParams {
   lifespan: number;
   baseSpin: number;
   spinSpeed: number;
+  /**
+   * The emitter's inherited motion, in MODEL space and units per second, or 0 when the emitter does
+   * not author `INHERIT_EMITTER_MOTION`. Model space and not world, because that is the frame this
+   * function has already rotated the emission velocity into by the time it is added -- and the frame
+   * `integratePool` applies gravity in. The caller does the rotation; see `ParticleManager#animate`.
+   */
+  inheritX?: number;
+  inheritY?: number;
+  inheritZ?: number;
   zSource: number;
   // The emitter's own offset, in model space, relative to its bone (bone binding itself is a later
   // phase -- see the module docs on RuntimeEmitter). Applied to the generator's local spawn position
@@ -328,6 +337,24 @@ export const spawnParticle = (
   pool.velocity[base] *= speed;
   pool.velocity[base + 1] *= speed;
   pool.velocity[base + 2] *= speed;
+
+  // THE INHERITED EMITTER MOTION (file flag 0x40) -- `integrate.ts#INHERIT_EMITTER_MOTION` carries
+  // the citation and the unit derivation. Added AFTER the speed scaling because it is a velocity in
+  // its own right, not a direction to be scaled: the reference adds it to the finished velocity.
+  //
+  // `variation` is REUSED rather than redrawn, and that is a stated choice: the reference writes the
+  // factor as `(1 + S11*speed_variation)`, the same form the emission speed just used, and places it
+  // in "the shape kernels' closing block" -- the same block. Whether the original draws one random
+  // or two is NOT pinned by anything I can read, and one draw is the reading that makes the inherit
+  // co-vary with the particle's own speed instead of jittering independently of it.
+  const ix = params.inheritX ?? 0;
+  const iy = params.inheritY ?? 0;
+  const iz = params.inheritZ ?? 0;
+  if (ix !== 0 || iy !== 0 || iz !== 0) {
+    pool.velocity[base] += ix * variation;
+    pool.velocity[base + 1] += iy * variation;
+    pool.velocity[base + 2] += iz * variation;
+  }
 
   pool.age[slot] = 0;
   pool.lifespan[slot] = params.lifespan;

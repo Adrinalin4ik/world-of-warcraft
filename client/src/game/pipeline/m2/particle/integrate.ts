@@ -106,6 +106,42 @@ export const integratePool = (pool: ParticlePool, dt: number, forces: Forces): n
  * (`scale_size_by_instance`, "torches/campfires author it"): 78.9% of doodad emitters against 50.2%
  * of missile ones, and 9/9 vs 0/10 on a hand-split fire-versus-missile control.
  */
+/**
+ * M2Particle file flag `0x40`: each BIRTH inherits the emitter's recent world motion, added to its
+ * own emission velocity.
+ *
+ * `ParticleEmitterDef::inherits_emitter_motion` (`benilla-formats/src/particles.rs:485-492`, wow-re
+ * `part-emitter-motion.md` §1, marked **VERIFIED**): "the emitter keeps a ~30 Hz inherit-velocity
+ * vector -- at each trigger (accumulated dt > 1/30 s), `oneFrameDelta * ((1/30)/accum) *
+ * inherit_scale`, zeroed while no particles are live -- and each birth adds
+ * `(1 + S11*speed_variation) * inherit` to its velocity". The named corpus is "the enchant hands /
+ * Bloodlust / Death Wish family (70 emitters / 33 spell models)".
+ *
+ * ## THIS IS A DIFFERENT AXIS FROM `FOLLOW_EMITTER`, and conflating them is how a polarity inverts
+ *
+ *   `0x40`   acts ONCE, at birth, on ONE particle's VELOCITY -- it carries motion FORWARD.
+ *   `0x4000` acts EVERY FRAME, on EVERY live particle's POSITION -- it leaves motion BEHIND.
+ *
+ * They are independent in the reference (separate runtime bits `0x400` and `0x40000`) and
+ * independent here. An emitter authoring BOTH gets both: its births lead, and all its live particles
+ * then lag the anchor -- which is coherent rather than contradictory, because one is a birth impulse
+ * and the other a per-frame displacement of the whole cloud. An emitter authoring NEITHER rides its
+ * anchor exactly as before either flag existed.
+ *
+ * ## The (1/30) is a STORAGE convention, not a 30x reduction
+ *
+ * Read literally, `oneFrameDelta * ((1/30)/accum)` is a DISPLACEMENT over a 1/30 s window, and the
+ * reference adds it to a velocity. Those do not have the same units, so one of the two readings has
+ * to be named rather than guessed. The trigger fires when `accum > 1/30`, so `accum ~= 1/30` and the
+ * factor is `~= 1`: the expression is "the emitter's displacement over a 1/30 s window", i.e. a
+ * velocity divided by 30. Our `pool.velocity` is units per SECOND (`integratePool` does
+ * `position += velocity * dt`), so the port multiplies back by 30, which cancels the 1/30 and leaves
+ * `delta / accum * inherit_scale` -- a plain velocity. Taking the reference's literal expression
+ * into a per-second integrator instead would make the inherit 30x too small, i.e. invisible, which
+ * would contradict the reference's own account of the mechanism being load-bearing for hand effects.
+ */
+export const INHERIT_EMITTER_MOTION = 0x40;
+
 export const FOLLOW_EMITTER = 0x4000;
 
 export interface FollowDef {
