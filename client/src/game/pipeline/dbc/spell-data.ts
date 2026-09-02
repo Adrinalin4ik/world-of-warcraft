@@ -1143,6 +1143,34 @@ class SpellData {
   }
 
   /**
+   * The `SpellVisualKit` id armed at `SMSG_SPELL_GO` -- the RELEASE stage, or null.
+   *
+   * The same `castKits` map `castAnimation` walks, one step short of the animation: which kit belongs
+   * to which cast edge is `classes/spell-anim.ts`'s knowledge and is deliberately not re-derived here,
+   * so this and `castAnimation` cannot disagree about it.
+   */
+  castKit(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    return this.castKits?.get(row.visualID) ?? null;
+  }
+
+  /**
+   * The `SpellVisualKit` id armed at `SMSG_SPELL_START` -- the HELD precast stage, or null. The
+   * `precastKits` half of the pair above; see `precastAnimation` for the measurement that establishes
+   * field 1 as the held pose.
+   */
+  precastKit(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    return this.precastKits?.get(row.visualID) ?? null;
+  }
+
+  /**
    * A kit's ELEVEN emitter slots, in kit-field order, `null` for an empty one -- or null when the kit
    * has no populated slot at all.
    *

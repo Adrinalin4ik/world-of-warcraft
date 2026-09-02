@@ -518,11 +518,27 @@ export class SpellHandler extends EventEmitter {
    *     his `DEATH` latch dropped and the corpse stands up.
    *
    * A no-op is the common and correct outcome: most refusals concern a spell that never started.
+   *
+   * ## IT ALSO REAPS THE CAST'S KIT EFFECTS, and that is why it is the single exit
+   *
+   * The precast stage arms two things on the same edge -- a held POSE and a set of persistent emitter
+   * MODELS (`world/spell-kit-effects.ts`) -- so both have to end on the same edge too. Every existing
+   * way out of a cast already funnels here: `SMSG_SPELL_FAILURE`, `SMSG_CAST_FAILED`, a GO with no
+   * release clip, Escape (`ui/target-bridge.ts`) and the movement cancel
+   * (`classes/cast-cancel.ts`). Reaping here rather than at those five call sites is what stops a
+   * cancelled cast leaving a glow burning on the caster for the rest of the session -- the exact
+   * failure mode the pose half already had.
+   *
+   * The reap is BEFORE the pose guards and not behind them, deliberately: those guards ask whether
+   * this spell armed the latch, and a spell can carry kit slots without carrying a pose at all (the
+   * kit's anim column is one of twelve). Behind the guard, such a cast would keep its glow for ever.
+   * The reap is itself spell-id keyed, so it cannot touch another spell's instances.
    */
   releaseCastPose(casterGuid: string | null, spellId: number): void {
     if (casterGuid === null) {
       return;
     }
+    this.game.world.spellKitEffects.reap(casterGuid, spellId);
     const pose = this.castPose.get(casterGuid);
     if (pose === undefined || pose.spellId !== spellId) {
       return;
@@ -882,6 +898,14 @@ export class SpellHandler extends EventEmitter {
         // RECORDED so a later failure can tell this pose from any other latch -- see `castPose`.
         this.castPose.set(decoded.caster, { spellId: decoded.spellId, animId: pose });
       }
+      // THE PRECAST KIT'S EMITTER MODELS, beside the pose because they are the same stage of the same
+      // edge: `precastKitID`'s pose is one column of the kit and its effect slots are eleven more.
+      // PERSISTENT -- a held pose and a held glow have the same lifetime, and the kit lives until its
+      // spell-id-keyed reap at GO (`spell_fx/mod.rs:15-19`). `world/spell-kit-effects.ts` owns the rest.
+      const precastKit = spellData.precastKit(decoded.spellId);
+      if (precastKit !== null) {
+        this.game.world.playSpellKit(caster, decoded.spellId, precastKit, true);
+      }
     }
 
     this.emit('spellStart', decoded);
@@ -926,6 +950,22 @@ export class SpellHandler extends EventEmitter {
       }
       // The release clip re-latched `externalSeq` onto itself, so the pose record is spent either way.
       this.castPose.delete(decoded.caster);
+
+      // THE KIT HAND-OVER, the same shape as the pose's above: the precast kit is reaped and the cast
+      // kit armed. Reap FIRST so a persistent precast glow dies before the release flash appears --
+      // the reference's own emission order (`spell_fx/mod.rs:657-660`, "a GO's reap-then-begin lands
+      // in emission order, so the precast dies before the release flash").
+      //
+      // The cast kit is NOT persistent: it self-terminates after one pass of its model's sequence 0.
+      //
+      // The IMPACT kit is absent on purpose and is not a silent gap -- it plays on the TARGETS, and
+      // this packet's hit list is exactly the tail this method says it does not decode. Named in
+      // `world/spell-kit-effects.ts`, which cannot reach it either.
+      this.game.world.spellKitEffects.reap(decoded.caster, decoded.spellId);
+      const castKit = spellData.castKit(decoded.spellId);
+      if (castKit !== null) {
+        this.game.world.playSpellKit(unit, decoded.spellId, castKit, false);
+      }
     }
 
     // THE GLOBAL COOLDOWN for an INSTANT spell, which is the only kind that reaches here without having

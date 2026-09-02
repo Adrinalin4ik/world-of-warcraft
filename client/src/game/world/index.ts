@@ -25,6 +25,7 @@ import { reactionFor, REACTION_NEUTRAL } from "./faction";
 import { HoverHighlight } from "./hover-highlight";
 import { SelectionRing } from "./selection-ring";
 import { LevelUpEffect } from "./level-up-effect";
+import { SpellKitEffects } from "./spell-kit-effects";
 import GameObjectSparkle from './game-object-sparkle';
 import SessionGuard from './session-guard';
 import ModelFade from './model-fade';
@@ -68,6 +69,14 @@ export default class World extends EventEmitter {
    * session, not in the render loop, and the effect has to be started from there.
    */
   public levelUpEffect: LevelUpEffect;
+
+  /**
+   * THE SPELL VISUAL KIT EFFECTS -- the attach-point models and ground plants a cast hangs on a
+   * unit. Public because the cast edges arrive in the network layer
+   * (`network/game/object/spells.ts`), which is where the pose is already armed from, and routing
+   * them through `playSpellKit` below is what supplies the particle manager they need.
+   */
+  public spellKitEffects: SpellKitEffects;
 
   /** The glow on a quest objective object. See `game-object-sparkle.ts`. */
   public gameObjectSparkle: GameObjectSparkle;
@@ -244,6 +253,7 @@ export default class World extends EventEmitter {
     // THE LEVEL-UP BURST, on the scene ROOT for the selection ring's reason directly above: its
     // position is world-space and it belongs to no placed subtree. Draws nothing until a level lands.
     this.levelUpEffect = new LevelUpEffect(this.scene);
+    this.spellKitEffects = new SpellKitEffects(this.scene);
     this.gameObjectSparkle = new GameObjectSparkle(this.scene);
     /**
      * `window.worldGameObjects()` -- WHY A BUSH IS NOT ON SCREEN, in one call.
@@ -1053,6 +1063,27 @@ export default class World extends EventEmitter {
     // this.skybox.position.set(position.x, position.y, 100)
   }
 
+  /**
+   * Arm a spell visual kit on a unit -- the ONE door the cast edges use.
+   *
+   * Here rather than on `SpellKitEffects` itself because the particle manager belongs to the MAP, and
+   * the map is replaced on a worldport: a cached manager would be the previous world's. Exactly the
+   * reason `LevelUpEffect#play` takes one as an argument, and the same lookup `gameObjectSparkle`
+   * does per frame.
+   *
+   * `persistent` is the stage: true for the precast kit armed at `SMSG_SPELL_START`, false for the
+   * cast release armed at `SMSG_SPELL_GO`.
+   */
+  playSpellKit(unit: Unit, spellId: number, kitId: number, persistent: boolean): void {
+    this.spellKitEffects.play(
+      unit,
+      spellId,
+      kitId,
+      persistent,
+      (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
+    );
+  }
+
   animate(
     delta: number,
     camera: THREE.PerspectiveCamera,
@@ -1165,6 +1196,14 @@ export default class World extends EventEmitter {
     this.gameObjectSparkle.update(
       this.entities,
       (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
+    );
+    // The kit effects: one array-length compare with nothing live, one subtract-and-compare per live
+    // instance otherwise. `ownerGone` is what releases a model handle when a unit leaves the world --
+    // a bone child dies with its body but `M2Blueprint.unload` is a refcount and would never be
+    // called. Same `entities` identity test `combatText.update` takes.
+    this.spellKitEffects.update(
+      delta * 1000,
+      (guid: string) => this.entities.get(guid) === undefined,
     );
 
     // THE NAMEPLATES, an EIGHTH named span. See the exhaustiveness note above: a statement outside all
