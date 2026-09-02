@@ -772,6 +772,44 @@ export class SpellKitEffects {
       // sort -- which compares one batch origin against one mesh origin and flips as the camera
       // circles a model whose mesh and emitters share an origin.
       //
+      // WHY THE CARD ALTERNATES IN FRONT OF AND BEHIND THE CORONA, and why nothing is mis-placed.
+      // MEASURED, because the offset this was attributed to is not there:
+      //
+      //   bone 0 pivot (the billboard rotation centre)  (-0.0000,  0.0000, 0.9722)
+      //   bone 1 pivot (the bone carrying all 64 verts) (-0.0000,  0.0000, 0.9722)  <- IDENTICAL
+      //   mesh centroid                                 ( 0.0220, -0.0027, 0.9648)
+      //   mesh centroid offset from the pivot            |xy| = 0.0222, |xyz| = 0.0234
+      //   corona centre (mean emitter position)         ( 0.0715,  0.0016, 0.9048)
+      //   card centre vs corona centre                   distance = 0.0779
+      //
+      // THE "~1.0 OFFSET" IS AN EXTENT, NOT AN OFFSET. The card's vertices span Z 0.503..1.502, so it
+      // is a ~1-unit-tall card whose CENTRE sits 0.023 from the pivot it rotates about -- 2 cm. A
+      // cylindrical-Z billboard therefore sweeps its centre on a 0.022-radius circle and cannot move
+      // it in front of or behind anything. Reading the span as displacement is what made it look like
+      // `87f9180` one level up; it is not that defect.
+      //
+      // AND THE PIVOT IS ALREADY THE RIGHT ONE. The reference builds a billboard batch with its bone
+      // pivot SUBTRACTED from every vertex and rotates about the origin, re-placing the entity at the
+      // pivot (`benilla-assets/src/model.rs:29-31` and `:160-169` --
+      // `positions.map(|p| wow_to_bevy(p) - center)` with `center = billboard.pivot`). That is
+      // algebraically identical to this client's `T(pivot) . R . T(-pivot)` in `solveBone`. It also
+      // answers the chain question: the reference billboards the submesh whose OWN bone is the
+      // billboard bone, and here bone 1's pivot equals bone 0's exactly, so the distinction is moot
+      // for this model. Rotation centre: correct, and citable.
+      //
+      // SO THIS IS NOT A PLACEMENT DEFECT -- IT IS A FLAT CARD INSIDE A CLOUD. A ~1 x 0.9 unit card
+      // sits inside a corona whose sprites reach 1.333 across, centred 0.078 away. Any flat quad
+      // embedded in a volumetric cloud has some particles nearer and some farther, and now that the
+      // card is OPAQUE and writes depth (`775a98f`), the per-particle depth test resolves each one
+      // correctly -- which is exactly why the answer alternates as the camera orbits. That is right,
+      // not wrong.
+      //
+      // Forcing the card always in front would need the arbitrary `renderOrder` pick declined below,
+      // and it would be wrong for every model that authors a card genuinely behind its own cloud.
+      // Left alone deliberately: a card correctly intersecting its corona is a smaller defect than a
+      // global ordering rule with no data behind it. NOT centred by subtracting the offset either --
+      // there is no offset to subtract, and doing it anyway is the shape this project has reverted
+      // three times.
       // AND THE ANSWER WAS THE PASS, NOT A SORT. The shield's opaque submesh was being forced into
       // the TRANSPARENT pass by `applyRenderFlags`' flag-0x04 branch, which set `transparent = true`
       // off the TWO-SIDED bit. In the opaque pass it writes depth first and both particle cases come
