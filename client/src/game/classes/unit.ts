@@ -2110,6 +2110,17 @@ class Unit extends Entity {
    * teleport simply is not there for the first few frames.
    */
   teleportTo(x: number, y: number, z: number) {
+    // A RELOCATION VOIDS ANY IN-PROGRESS SERVER RIDE, and it is the ONE place that can say so.
+    //
+    // The server teleports at ITS end of a ride -- a taxi's landing beats our own spline end by
+    // about the latency -- and its spline-done handler ignores acknowledgements while a teleport is
+    // pending, so the relocation IS the hand-back and no `CMSG_MOVE_SPLINE_DONE` is owed. Mirroring
+    // the still-running spline on the next frame would clobber the snap this method just made.
+    // `serverRideFrame` consumes the flag; see `PlayerMoveState#rideAbort` for the reference's own
+    // account (`player/state.rs:612-618`, decision 0501).
+    this.move.rideAbort = true;
+    this.splineRide = null;
+
     this.move.pos.set(x, y, z);
     this.move.velZ = 0;
     this.move.horizVel.set(0, 0, 0);

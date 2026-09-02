@@ -19,7 +19,8 @@ import {
 import { movementFrame } from '../../../game/movement/frame';
 import { moveTrace } from '../../../game/movement/move-trace';
 import { easeDisplayYaw, strafeBodyOffset } from '../../../game/movement/net-motion';
-import { movementFlagsFor, streamMovement } from '../../../game/movement/outbound';
+import { movementFlagsFor, streamMovement, streamSplineDone } from '../../../game/movement/outbound';
+import { serverRideFrame, serverRideStats } from '../../../game/movement/server-ride';
 import { rescueFromVoid } from '../../../game/movement/void-rescue';
 import Player from '../../../game/classes/player';
 
@@ -396,6 +397,13 @@ class Controls extends React.Component<IProp> {
           wedged: move.wedged,
           stepDown: move.stepDown,
           swimming: move.swimming,
+          // The server-ride hand-off, so a charge can be read without a console. `serverRiding`
+          // true means the spline owns the pose and the mover is parked this frame; a
+          // `rideStopSplineId` still set with nothing riding is an ack owed and not yet paid.
+          serverRiding: move.serverRiding,
+          rideSplineId: move.rideSplineId,
+          rideStopSplineId: move.rideStopSplineId,
+          ride: { ...serverRideStats },
         },
       };
     };
@@ -686,6 +694,55 @@ class Controls extends React.Component<IProp> {
     }
     advanceZoom(this.rig, delta);
 
+    // 2b. **THE SERVER-RIDE GUARD: a server-authored spline owns the avatar this frame.**
+    //
+    // Charge, a knockback path, a taxi flight, a fear flee -- all of them arrive as an
+    // `SMSG_MONSTER_MOVE` naming our own guid, and while one is running the spline is the sole
+    // authority over `move.pos` and the facing. Input, the capsule mover and the outbound movement
+    // stream all yield; only the camera keeps seating, on the body the spline is moving. That is
+    // the reference's own division of labour and its own guard placement
+    // (`benilla-app/src/player/server_ride.rs` for the mirror, `player.rs:800-886` for the guard).
+    //
+    // WHY HERE, after the look session and the zoom and before the keyboard. Mouse-look and zoom
+    // are camera input and must keep working through a charge -- you can spin the view while being
+    // dragged -- and step 1's right-drag weld writes `faceYaw` from the camera, which
+    // `serverRideFrame` then overwrites from the path tangent, so the spline wins the facing for as
+    // long as it runs. Everything from step 3 down is body input, and body input is what yields.
+    //
+    // The keyboard is not read at all here, which is deliberate twice over: no `onMoveStart` fires,
+    // so being charged does not cancel your own cast the way pressing W does (the interrupt is a
+    // KEYPRESS test -- see step 3's `directional` edge); and the jump latch is DROPPED rather than
+    // queued, because a Space pressed mid-ride is a jump the real client never took and a queued
+    // one would fire on the arrival frame.
+    const ride = serverRideFrame(player.move, player.splineRide, performance.now());
+    if (ride.clearRide) {
+      player.clearSplinePath();
+    }
+    if (ride.verdict === 'engaged') {
+      // Once per ride, and it is the instrument the owner reads: the counter part lives on
+      // `monsterMovementHandler.stats.selfMoves`.
+      // eslint-disable-next-line no-console
+      console.log(
+        `[ride] server spline ${player.move.rideSplineId} drives the avatar`
+        + ` (${player.splineRide ? player.splineRide.points.length : 0} pts,`
+        + ` ${player.splineRide ? player.splineRide.durationMs : 0} ms)`,
+      );
+    }
+    if (ride.ackSplineId !== null) {
+      // The server holds our mover spline-controlled -- and DROPS every movement packet we send --
+      // until this arrives. Sent before the resumed frame streams anything of its own, so the
+      // release is the first thing the server sees.
+      streamSplineDone(player.move, ride.ackSplineId);
+    }
+    if (ride.riding) {
+      // The spline's pose, onto the scene graph. `move.modelYaw` was written by the ride, so this
+      // is the same one-line hand-off the ordinary frame ends with.
+      player.syncViewFromMove();
+      this.jumpPressed = false;
+      this.seatFollowCamera(player, delta);
+      return;
+    }
+
     // 3. Keyboard. A/D TURN in vanilla rather than strafing; Q/E strafe.
     //
     // EXCEPT UNDER MOUSE-LOOK, where A/D become STRAFE and turn nothing -- the mouse owns the heading
@@ -926,8 +983,24 @@ class Controls extends React.Component<IProp> {
     // (`/game?offline=1`, and every movement test), because no sink is attached then.
     streamMovement(player.move, { forward, strafe, turning }, now);
 
-    // 7. Seat the camera. Its cast uses the CAMERA face set, not the walking one, so it stops at
-    // overhangs the player walks under and threads railings the player stands on.
+    // 7 + 8. Seat the camera and settle the first-person fade.
+    this.seatFollowCamera(player, delta);
+  }
+
+  /**
+   * Seat the follow camera on the avatar and settle the first-person body fade.
+   *
+   * Its cast uses the CAMERA face set, not the walking one, so it stops at overhangs the player
+   * walks under and threads railings the player stands on.
+   *
+   * Factored out because the SERVER-RIDE guard needs exactly this and nothing else: the reference
+   * parks input, physics and the outbound stream behind the guard but still carries the follow
+   * camera onto the moving avatar, and says what skipping it costs -- "the body ran off on its
+   * spline while the orbit stayed at the pose the controller last wrote, which reads as the view
+   * detaching into free flight" (`samples/benilla/crates/benilla-app/src/player.rs:827-886`). Two
+   * copies of this block would be two things to keep in step.
+   */
+  private seatFollowCamera(player: Player, delta: number) {
     const head = player.move.pos.clone();
     head.z += CAPSULE_HEIGHT - CAPSULE_RADIUS;
 
@@ -946,7 +1019,7 @@ class Controls extends React.Component<IProp> {
     this.camera.position.copy(seat.position);
     this.camera.quaternion.copy(seat.quaternion);
 
-    // 8. First person: hide the body once the fade reaches zero.
+    // First person: hide the body once the fade reaches zero.
     if (player.model) {
       player.model.visible = this.rig.selfFadeAlpha > 0.01;
     }
