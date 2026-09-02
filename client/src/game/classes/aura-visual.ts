@@ -258,11 +258,13 @@ export class AuraStateKits {
     }
 
     if (begin.length === 0 && reap.length === 0) {
-      // Keep the armed set in step even on a no-edge diff: a refresh re-states the same ids and the
-      // set must not drift, but there is nothing for the caller to do.
-      if (prev === undefined && live.size > 0) {
-        this.armed.set(guid, new Set());
-      }
+      // NOTHING IS RECORDED FOR A UNIT WE ARMED NOTHING FOR. An earlier version stored an empty
+      // `Set` here to "keep the set in step", which recorded nothing and cost a Map entry per unit
+      // whose auras this client cannot draw -- for ever, since only a reap edge removes one. It also
+      // made `trackedUnits` count units with no instances at all, i.e. lie about the population it
+      // exists to measure. An absent record and an empty one are indistinguishable to every reader
+      // below (`prev.has` is false either way and the loop over `prev` runs zero times), so the
+      // entry bought nothing.
       return NOTHING;
     }
 
@@ -280,11 +282,50 @@ export class AuraStateKits {
     for (const { spellId } of begin) {
       next.add(spellId);
     }
-    this.armed.set(guid, next);
+    // AN EMPTY SURVIVOR SET DELETES THE KEY rather than storing an empty `Set`, and a test caught
+    // this: a guid whose last aura was reaped kept a record for the rest of the session, so
+    // `trackedUnits` grew monotonically and never came back down. Harmless to behaviour -- an empty
+    // record reads the same as none -- and a real leak of the number that reports the population.
+    if (next.size === 0) {
+      this.armed.delete(guid);
+    } else {
+      this.armed.set(guid, next);
+    }
 
     this.stats.armed += begin.length;
     this.stats.reaped += reap.length;
     return { begin, reap };
+  }
+
+  /**
+   * **Give back ownership of spells we did NOT manage to arm, and keep everything we did.**
+   *
+   * The distinction this exists to preserve, and its absence was a defect: a diff can return a
+   * `begin` list the caller then fails to act on -- the body is not in the world this instant, so
+   * there is nothing to hang a model on. Those spells must be disowned, because no instance exists
+   * for them and a later reap would find nothing; but the spells armed by EARLIER diffs must be
+   * KEPT, because their instances are live and this record is the only thing that can ever reap
+   * them.
+   *
+   * `forget` was being used for this and it cannot distinguish the two -- it drops the whole unit.
+   * A shield armed a minute ago and still up is exactly the case that gets lost, and a shield is the
+   * commonest instance of the shape. See `aura-visuals.ts`'s absent-body branch for the two edges
+   * and which one this is.
+   *
+   * A no-op for a guid we hold nothing for, and it never CREATES a record: disowning is subtraction
+   * only.
+   */
+  unarm(guid: string, spellIds: readonly number[]): void {
+    const held = this.armed.get(guid);
+    if (held === undefined) {
+      return;
+    }
+    for (const spellId of spellIds) {
+      held.delete(spellId);
+    }
+    if (held.size === 0) {
+      this.armed.delete(guid);
+    }
   }
 
   /**

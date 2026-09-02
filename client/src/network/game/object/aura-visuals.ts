@@ -98,13 +98,31 @@ export class AuraVisualHandler {
       // COUNTED, not warned: this is a normal race on world entry rather than a defect, and
       // `resweep` is what closes it once the unit exists. A warning here would fire on every login.
       //
-      // The armed set is dropped rather than partially kept, and that is SAFE rather than lossy: any
-      // spell it was holding gets re-decided on the next diff, and `SpellKitEffects#play` reaps this
-      // unit's live persistent instances of the same spell before beginning, so a re-arm replaces
-      // instead of stacking. Keeping a partial set would be the lossy choice -- it would leave this
-      // watcher claiming ownership of instances while the reap edge for them had already passed.
+      // **A BLINK IS NOT A DEATH, AND THIS BRANCH USED TO TREAT THEM AS ONE.** It called
+      // `kits.forget(guid)`, dropping ownership of EVERY spell for this guid -- including live
+      // instances armed by earlier diffs, which nothing could then ever reap, because the record they
+      // would be found by was gone. Its own comment defended that as safe because "a re-arm replaces
+      // instead of stacking", and that is true only for a spell that later gets re-armed. A shield
+      // cast once and kept is exactly the case it is not true for.
+      //
+      // So only the spells this diff FAILED TO ARM are disowned; everything armed earlier is kept.
+      // `unarm` is subtraction only and `AuraStateKits#unarm` carries the reasoning.
+      //
+      // THE TWO EDGES, which is the distinction the old code could not express:
+      //
+      //  - **the owner BLINKED** (or has not arrived yet) -- this branch. Ownership of live
+      //    instances is retained, so a later reap can still find them, and the next diff or
+      //    `resweep` re-arms what this one could not. If the absence outlasts a single frame the
+      //    MODELS are torn down anyway by `SpellKitEffects#update`'s per-frame `ownerGone` sweep,
+      //    which asks the very same question this branch did (`world/index.ts:1309` --
+      //    `entities.get(guid) === undefined`); retaining the record cannot leak a model, it only
+      //    keeps the reap key valid for the case where the body comes straight back.
+      //  - **the owner is GONE FOR GOOD** -- `SMSG_DESTROY_OBJECT`, which reaches this handler
+      //    through `AuraHandler#forget` now that it announces itself. That arrives as an ordinary
+      //    diff with an EMPTY slot list, so every armed spell is reaped by the loop above and the
+      //    record drops itself. No second notion of "gone", and no subscription of our own.
       this.applied.unitMissing += diff.begin.length;
-      this.kits.forget(guid);
+      this.kits.unarm(guid, diff.begin.map((b) => b.spellId));
       return;
     }
 
@@ -133,16 +151,20 @@ export class AuraVisualHandler {
   }
 
   /**
-   * A unit left the world: drop its bookkeeping. See `AuraStateKits#forget`.
+   * A unit left the world: drop its bookkeeping outright.
    *
-   * **Nothing calls this yet, and that is stated rather than hidden.** `AuraHandler#forget` has no
-   * caller either -- this client does not currently drop a despawned unit's auras -- so there is no
-   * destroy edge to hang it on without widening into the object-update handler, which is another
-   * agent's area this round. The consequence is bounded and not a leak of anything drawn: the MODELS
-   * are torn down by `SpellKitEffects#update`'s own `ownerGone` sweep, so what survives is one `Set`
-   * of spell ids per guid that left the world. A guid that streams back in is re-driven by the
-   * `SMSG_AURA_UPDATE_ALL` the server sends for it, and `play`'s replace-on-begin keeps that single
-   * -instanced. Named here so the round that adds a destroy edge knows to call it.
+   * **THE DESPAWN EDGE NO LONGER NEEDS THIS, and the previous version of this comment described a
+   * gap that is now closed.** It said no destroy edge existed without widening into the
+   * object-update handler. One did, one step further back: that handler already calls
+   * `AuraHandler#forget` for every `SMSG_DESTROY_OBJECT`, and that method now announces itself
+   * (`auras.ts#forget`). So a despawn arrives here as an ordinary diff with an empty slot list,
+   * which REAPS every armed spell before dropping the record -- strictly better than this method,
+   * which drops the record without reaping and would orphan exactly what the blink branch above was
+   * orphaning.
+   *
+   * Kept as the explicit teardown for a caller that has already reaped by another route (a
+   * worldport, a session teardown). It has no caller today, and that is now a spare door rather
+   * than a missing edge.
    */
   forget(guid: string): void {
     this.kits.forget(guid);
