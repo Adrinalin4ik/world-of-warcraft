@@ -677,8 +677,53 @@ export class CombatHandler extends EventEmitter {
         // did not land on the requested id), so the cascade would re-arm the next frame: a flicker, not
         // a reaction. Creatures dodge with no clip at all, which is the honest answer for a model that
         // has none.
+        //
+        // **AND ONLY IF THE FLINCH WOULD NOT DESTROY A HELD POSE. THIS IS THE OWNER'S "каждый удар по
+        // мне сбивает каст" -- every hit on me knocks the cast off -- AND IT WAS NOT THE CAST BAR.**
+        //
+        // The bar and the wire were both innocent, which is why the pushback hypothesis did not
+        // explain it: `SMSG_SPELL_DELAYED` is decoded, extends the guard and shifts the snapshot
+        // (`spells.ts#handleSpellDelayed`, `ui/action-bridge.ts#onSpellDelayed`), and NOTHING on the
+        // damage side reaches `endCast`, the in-flight guard or `CMSG_CANCEL_CAST` -- swept
+        // exhaustively over every damage opcode, every event they emit and every subscriber. The cast
+        // kept running and completed. What broke was the POSE: the caster visibly dropped out of
+        // casting on the first hit and stood there, which from the player's chair IS the cast being
+        // knocked off.
+        //
+        // The mechanism, in one line: the precast pose is a LOOP latched on `externalSeq`, this
+        // `setAnimation` is a one-shot over it, `Unit#tryMaskedRoute` DECLINES to mask anything while
+        // `externalSeq` is held (its own documented rule, protecting two earlier fixes), so the
+        // request fell through to the FULL-BODY route and replaced the pose -- permanently, because a
+        // looping owner never self-releases.
+        //
+        // **THE REFERENCE SETTLES WHAT SHOULD HAPPEN, and it is the opposite of replacing.**
+        // `creature_anim/select.rs:862-882` byte-decodes the client's own wound router
+        // (`0x60eae8` / `0x60eb9a`, decision 0111 §5.2): a flinch covers the full body ONLY when the
+        // victim's resolved base pose is a combat-ready stance (ids 25-29), or for `StandWound(8)` on
+        // a genuinely stationary unmounted victim -- and "everything else is masked: the legs keep the
+        // base animation untouched". A cast pose is neither: `ReadySpellDirected` is 51 and
+        // `ReadySpellOmni` its sibling, nowhere near 25-29. The client also never lets a wound fully
+        // replace what is underneath at all -- `WOUND_AMPLITUDE` is 0.75 (`select.rs:887`).
+        //
+        // So the faithful answer is "mask it, leave the base alone", and this client cannot mask over
+        // a held `externalSeq` yet -- that is `tryMaskedRoute`'s fourth decline, already stated there
+        // as an open gap needing "an explicit stow on the overlay, which is a round of its own".
+        // Between the two behaviours actually available -- destroy the pose, or leave the base
+        // untouched -- the second is the one the reference's rule produces for this case. So the
+        // flinch is DECLINED here rather than routed, and the cosmetic shortfall (no visible recoil
+        // while casting, where the real client shows a 0.75-weight masked one) is named rather than
+        // traded for a permanently broken cast pose.
+        //
+        // `baseHeldByLoop` and not `animationLatchId !== null`, deliberately: a NON-looping external
+        // owner releases itself when its window elapses, so a flinch over that costs a moment of one
+        // clip and is the ordinary one-shot-over-one-shot case this block was written for. Only a LOOP
+        // is unrecoverable. That also makes the rule general rather than cast-specific -- a looping
+        // emote survives a hit too, which is what the reference's "everything else is masked" says.
         const modelAnim = victimUnit.model?.modelAnim ?? null;
-        if (reaction !== null && modelAnim && modelAnim.resolve(reaction, false) !== null) {
+        if (reaction !== null
+          && modelAnim
+          && modelAnim.resolve(reaction, false) !== null
+          && !victimUnit.baseHeldByLoop) {
           victimUnit.setAnimation(reaction, true, 0);
         }
       }

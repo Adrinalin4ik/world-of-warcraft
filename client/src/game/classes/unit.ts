@@ -1952,6 +1952,26 @@ class Unit extends Entity {
     return this.externalSeq?.id ?? null;
   }
 
+  /**
+   * **The base track is held by an externally-armed LOOP** -- a cast pose, a looping emote -- so a
+   * one-shot arriving over it would REPLACE it and nothing would ever put it back.
+   *
+   * The `loops` half is the whole of it, and it is what separates "held for ever" from "held for a
+   * window": a non-looping external owner releases itself when its window elapses
+   * (`externalSeq`'s own release, checked at the top of `updateLocomotion`), so a one-shot over THAT
+   * costs a moment of the clip. A LOOP never reaches that release -- `externalSeq` documents "a
+   * looping owner never releases" -- so the only way back is an explicit
+   * `releaseAnimationLatch`, and a caller that stomps a loop it does not own has destroyed a pose
+   * permanently.
+   *
+   * Exposed for `network/game/object/combat.ts`'s victim flinch, which is the caller that was doing
+   * exactly that to a held cast pose. Read-only, and deliberately NOT a way to clear the latch: the
+   * one legitimate release is `releaseAnimationLatch`, which checks identity.
+   */
+  get baseHeldByLoop(): boolean {
+    return this.externalSeq !== null && this.externalSeq.loops;
+  }
+
   stopAnimation(id?: number) {
     const animationId = id === undefined ? this.currentAnimationId : id;
     this.emit("animation:stop", animationId);
