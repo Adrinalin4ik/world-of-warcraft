@@ -294,6 +294,25 @@ export default class World extends EventEmitter {
           : [Math.round(player.x * 100) / 100, Math.round(player.y * 100) / 100,
             Math.round(player.z * 100) / 100],
         missiles: { ...this.spellMissiles.stats, live: this.spellMissiles.liveCount },
+        // THE CORONA COUNTER. Per-emitter LIVE particle counts beside each emitter's authored
+        // `rate * lifespan`, so the comparison needs no arithmetic at the console. A row whose
+        // `live` is far below `expected` is a starved pool or a refused emitter; a row matching it
+        // says the deficit is appearance rather than count. `live` pinned at `cap` is the
+        // `capacityFor` starvation recurring. Reads the map's manager, which is null before a world
+        // exists and is replaced on a worldport -- hence the lookup rather than a cached reference.
+        particles: (() => {
+          const pm = (this.map as unknown as { particleManager?: {
+            liveByEmitter?: () => unknown[]; liveParticleCount?: number; emitterCount?: number;
+          } } | null)?.particleManager ?? null;
+          if (!pm || typeof pm.liveByEmitter !== 'function') {
+            return null;
+          }
+          return {
+            emitters: pm.emitterCount,
+            liveTotal: pm.liveParticleCount,
+            byEmitter: pm.liveByEmitter(),
+          };
+        })(),
         kits: { ...this.spellKitEffects.stats, live: this.spellKitEffects.liveCount },
         // THE LEAK CHECK. `armedMinusRemoved` must ALWAYS equal `kits.live` -- if it does not,
         // `remove` is being skipped. `stuck` is the diagnosis in one number: any row whose deadline

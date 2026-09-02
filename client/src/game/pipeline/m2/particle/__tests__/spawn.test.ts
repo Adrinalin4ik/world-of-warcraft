@@ -240,19 +240,29 @@ describe('spawnParticle — bone basis', () => {
     originZ: 1,
   };
 
-  it('rotates the spawn position without applying the bone translation', () => {
+  /**
+   * THIS TEST USED TO ENCODE THE DEFECT. It expected `(0, -1, 0)` -- the model-space offset
+   * `originZ: 1` added FIRST and then swung through the basis rotation, which is what displaced
+   * `DemonArmor_Impact_Head`'s emitters by up to a full unit while its mesh stayed put. A model-space
+   * point must not be rotated by the bone's own rotation, and this file's own `+90 degree` comment
+   * already stated that rule for the kernel turn.
+   *
+   * The double-count guard it also pinned is UNCHANGED and still asserted: `x` must never become 5.
+   */
+  it('adds the model-space offset AFTER the rotation, and never the basis translation', () => {
     const pool = new ParticlePool(4);
     const slot = pool.allocate();
 
     spawnParticle(pool, slot, { ...pointParams, basis: rotateXTranslate }, scriptedRandom([0.5]));
 
-    // (0, 0, 1) rotated about X is (0, -1, 0). If the basis translation were applied on top, x would
-    // be 5 -- and on a real model that is a double-count, because the emitter's own `position` already
-    // places it in model space. INSTANCEPORTAL.M2 has position and pivot both [0, 0, 2.74]; applying
-    // both put its ring's centre at 5.48 rather than 2.74.
+    // The point generator spawns at the origin, so the rotation acts on (0, 0, 0) and the authored
+    // offset lands verbatim: the emitter sits exactly where its `position` says, whatever the bone
+    // is doing. If the basis TRANSLATION were applied on top, x would be 5 -- a double-count, because
+    // `position` is already the bone's pivot in model space (measured identical on every emitter of
+    // every model checked, and on INSTANCEPORTAL.M2 both are [0, 0, 2.74]).
     expect(pool.position[slot * 3]).toBeCloseTo(0, 5);
-    expect(pool.position[slot * 3 + 1]).toBeCloseTo(-1, 5);
-    expect(pool.position[slot * 3 + 2]).toBeCloseTo(0, 5);
+    expect(pool.position[slot * 3 + 1]).toBeCloseTo(0, 5);
+    expect(pool.position[slot * 3 + 2]).toBeCloseTo(1, 5);
   });
 
   it('rotates velocity without translating it', () => {

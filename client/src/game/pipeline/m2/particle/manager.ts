@@ -122,6 +122,50 @@ export class ParticleManager {
   }
 
   /**
+   * PER-EMITTER LIVE COUNTS, keyed by model path -- the corona measurement, and the one thing about
+   * it that cannot be read out of the files.
+   *
+   * The data authors `fire_precast_hand` at 40 births/sec over a 0.70 s lifespan on its widest
+   * emitter, so ~28 particles should be alive on it and ~2.5 each on the two 1.333-unit ones. What is
+   * ACTUALLY alive is a runtime fact. This reports it next to the authored `rate` and `lifespan` so
+   * the comparison needs no arithmetic at the console: a row whose `live` is far below
+   * `rate * lifespan` is a starved pool or a refused emitter, and one that matches means the deficit
+   * is appearance rather than count.
+   *
+   * `cap` is the pool's ceiling, because `capacityFor` has starved emitters in this subsystem before
+   * -- it sized pools from the rate at t=0 rather than the track peak and cut six of 25 to a single
+   * slot. A `live` pinned exactly at `cap` is that failure recurring and is worth seeing directly.
+   *
+   * Built on demand from a console handle, never per frame.
+   */
+  liveByEmitter(): Array<{
+    path: string; emitter: number; live: number; cap: number;
+    rate: number | null; lifespan: number | null; expected: number | null;
+  }> {
+    const first = (block: any): number | null => {
+      const v = (block?.tracks?.[0]?.values ?? [])[0];
+      return typeof v === 'number' ? Math.round(v * 1000) / 1000 : null;
+    };
+    const seen = new Map<any, number>();
+    return this.emitters.map((entry) => {
+      const index = seen.get(entry.instance) ?? 0;
+      seen.set(entry.instance, index + 1);
+      const rate = first(entry.definition?.emissionRate);
+      const lifespan = first(entry.definition?.lifespan);
+      return {
+        path: String(entry.instance?.path ?? '?'),
+        emitter: index,
+        live: entry.emitter.liveCount,
+        cap: entry.emitter.pool.capacity ?? -1,
+        rate,
+        lifespan,
+        expected: rate !== null && lifespan !== null
+          ? Math.round(rate * lifespan * 10) / 10 : null,
+      };
+    });
+  }
+
+  /**
    * Register every particle emitter on a loaded M2 instance.
    *
    * @returns how many emitters were registered
