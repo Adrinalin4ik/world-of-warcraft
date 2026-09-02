@@ -449,6 +449,13 @@ class Unit extends Entity {
    */
   public equippedMainhand: number = 0;
   public equippedOffhand: number = 0;
+  /**
+   * The RANGED slot's entry, feeding `combat-anim.ts#rangedLoadAnimation` -- a bow, gun, crossbow,
+   * thrown weapon or wand. A third field rather than a widening of the two above because the wire
+   * puts it in a third place again: `UNIT_VIRTUAL_ITEM_SLOT_ID + 2` for a creature and
+   * `PLAYER_VISIBLE_ITEM_18_ENTRYID` for a player (slot 18 one-based is `EQUIPMENT_SLOT_RANGED`).
+   */
+  public equippedRanged: number = 0;
 
   /**
    * `GetSpellBonusDamage(school)` for the seven spell schools -- `$SP`'s source. Empty until a values
