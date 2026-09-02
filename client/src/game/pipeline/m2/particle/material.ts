@@ -68,6 +68,36 @@ export const applyParticleBlending = (material: any, blendingType: number): void
       material.blendDst = THREE.OneMinusSrcAlphaFactor;
       break;
   }
+
+  // NEVER TOUCH THE FRAMEBUFFER'S ALPHA -- the other half of this function's own promise that
+  // "particles and batches must blend identically", which it did not keep.
+  //
+  // Every RGB pair above already matches `applyBlendingModeToMaterial`
+  // (`m2/material/index.ts:73-131`) mode for mode. What did NOT match is the ALPHA pair: that helper
+  // ends by pinning `blendSrcAlpha = Zero` / `blendDstAlpha = One` for every mode >= 1 (the `d348889`
+  // fix), and this function set neither -- so three.js mirrored each mode's RGB factors into alpha.
+  //
+  // WHY THAT IS VISIBLE, quoting the fix that already exists in the other lane: three requests a
+  // canvas context with `alpha: true` and `premultipliedAlpha: true`, so "the compositor reads our
+  // NON-premultiplied output as premultiplied and adds `(1 - a)` of whatever is behind the canvas --
+  // nothing here, so white. Any fragment that leaves sub-1 alpha in the buffer gets a bright halo."
+  //
+  // WHICH MODES IT ACTUALLY CHANGED, per mode rather than in general -- the framebuffer starts at the
+  // cleared 1.0:
+  //   mode 2 ALPHA       a_dst = a_src^2 + (1 - a_src) * a_dst  -> sub-1. A soft sprite's edge left
+  //                      ~0.84 at a_src 0.2, so every blended particle carried a white fringe.
+  //   mode 5 MODULATE    a_dst = a_dst * a_src + 0              -> driven DOWN hard, the worst case.
+  //   mode 6 MODULATE_2X a_dst = a_dst * a_src + a_src * a_dst  -> sub-1 as well.
+  //   mode 3 ADD         a_dst = a_src^2 + a_src * a_dst        -> rises, clamps at 1. SAFE.
+  //   mode 4 ADD_ALPHA   a_dst = a_src^2 + a_dst                -> rises, clamps at 1. SAFE.
+  //   mode 0 OPAQUE      `NoBlending` ignores these factors entirely, and returns above.
+  //
+  // SO THIS DOES NOT EXPLAIN THE HAND CORONA, and that is stated here rather than discovered later:
+  // all five of `Fire_PreCast_Hand`'s emitters and all four of `Fireball_Missile_Low`'s bar one are
+  // blend **4**, which is in the safe set. This fixes modes 2, 5 and 6 -- a real, game-wide fringe on
+  // every blended and modulating particle -- and leaves the corona question open.
+  material.blendSrcAlpha = THREE.ZeroFactor;
+  material.blendDstAlpha = THREE.OneFactor;
 };
 
 export class ParticleMaterial extends THREE.ShaderMaterial {
