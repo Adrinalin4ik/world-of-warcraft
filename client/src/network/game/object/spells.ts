@@ -134,6 +134,24 @@ interface CooldownEntry {
   source: CooldownSource;
 }
 
+/**
+ * **WHICH LEGS OF A CONFIRMED CAST'S COOLDOWNS TO APPLY, and the split is the reference's.**
+ *
+ * `'gcd'` -- the global cooldown alone, which is what a cast's START may stamp.
+ * `'recovery'` -- the spell's own and its category's, which land at GO and NOWHERE EARLIER.
+ * `'all'` -- both, for an instant, whose GO is its only edge.
+ *
+ * The reference byte-verifies the boundary twice, from both sides. From the GO handler: "Our own
+ * launch starts the cast's cooldown locally, **at the GO** -- byte-VERIFIED ... `HandleSpellGo
+ * 0x6e7a70`'s self-insert tail ... the NO-ITEM spell leg (`0x6e8498`: SpellRec
+ * RecoveryTime/Category/CategoryRecoveryTime, onHold from Attributes bit 25, **start = the GO
+ * receive-time**)" (`benilla-app/src/net/apply/spells.rs:407-415`). And from the failure handler,
+ * stated as the reason a failed cast needs no revert: "the spell's own recovery **was never started
+ * pre-launch** (it lands at SPELL_GO / SMSG_SPELL_COOLDOWN, which a failed cast never reaches)"
+ * (`:99-103`). Only the GCD is armed early.
+ */
+type CooldownLegs = 'gcd' | 'recovery' | 'all';
+
 /** See `CooldownEntry#source`. Derived from the DBC, or taken from the server. */
 type CooldownSource =
   | 'gcd'
@@ -651,6 +669,57 @@ export class SpellHandler extends EventEmitter {
   }
 
   /**
+   * **THE WHOLE VERDICT IN ONE LINE** -- `window.session.protocol.game.objectHandler.spellHandler
+   * .castVerdict()`.
+   *
+   * Written because the owner has twice been asked for a console read plus timestamps and has
+   * answered with observations instead -- which is the right response to a six-step ask. One
+   * command, one string, nothing to interpret at his end.
+   *
+   * It answers, for the LAST cast this client sent: which spell, how many milliseconds elapsed
+   * between `CAST_SENT` and its `SPELL_GO` (the send-to-landing gap), and whether that spell now has
+   * a cooldown row -- with its duration, WHICH of the seven writers made it, and whether that writer
+   * derived the number from the DBC or took it from the server.
+   *
+   * **THE GAP IS THE NUMBER THAT DECIDES THE MID-SWING QUESTION**, and it decides it without a swing
+   * clock, which this client does not have. If the server queues a strike to the next swing, the gap
+   * is the remaining swing time -- hundreds of milliseconds to a couple of seconds, and DIFFERENT
+   * for a press early in the swing versus late in it. If the server fires it at once, the gap is one
+   * round trip (tens of ms) and does not vary with when in the swing it was pressed. So two presses,
+   * one early and one late, settle it: two similar small gaps mean no queueing, two different larger
+   * gaps mean queueing is real and the landing is genuinely later than the press.
+   */
+  castVerdict(): string {
+    const rows = spellWire.history();
+    let sent: { at: number; spellId: number } | null = null;
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      if (rows[i].kind === 'CAST_SENT') {
+        sent = { at: rows[i].at, spellId: rows[i].spellId };
+        break;
+      }
+    }
+    if (sent === null) {
+      return 'castVerdict: no cast has been sent this session.';
+    }
+    const go = rows.find((r) => r.kind === 'SPELL_GO' && r.spellId === sent.spellId
+      && r.at >= (sent as { at: number }).at);
+    const name = spellData.spell(sent.spellId)?.name ?? '?';
+    const gap = go === undefined ? null : Math.round(go.at - sent.at);
+    const entry = this.cooldowns.get(sent.spellId);
+    const now = gameTime();
+    const live = entry !== undefined && entry.start + entry.duration > now;
+    const cd = !live || entry === undefined
+      ? 'no cooldown row'
+      : `cooldown ${Math.round(entry.duration * 1000)} ms`
+        + ` (${Math.round((entry.start + entry.duration - now) * 1000)} ms left),`
+        + ` source=${entry.source},`
+        + ` ${entry.source === 'gcd' || entry.source === 'own' || entry.source === 'category'
+          ? 'DERIVED by this client' : 'SENT by the server'}`;
+    return `castVerdict: spell ${sent.spellId} ${name} -- `
+      + `send->GO ${gap === null ? 'GO NOT SEEN YET' : `${gap} ms`}; ${cd}`;
+  }
+
+  /**
    * **EVERY LIVE COOLDOWN WITH ITS PROVENANCE** -- `window.session.protocol.game.objectHandler
    * .spellHandler.cooldownReport()`.
    *
@@ -810,7 +879,7 @@ export class SpellHandler extends EventEmitter {
    * The GCD goes on every KNOWN spell sharing the category, which is the client's rule and is why the
    * whole bar dims at once. Spells not known are skipped -- they cannot be on a button.
    */
-  private applyCastCooldowns(spellId: number): boolean {
+  private applyCastCooldowns(spellId: number, legs: CooldownLegs = 'all'): boolean {
     const cast = spellData.spell(spellId);
     if (cast === null) {
       // No table, so nothing to derive. Honest rather than silent: with `Spell.dbc` absent the bar
@@ -839,7 +908,7 @@ export class SpellHandler extends EventEmitter {
     // (120000 own), Berserking 26297 (180000 own), Vanish 1856 (category 39, 180000 category),
     // Stoneform 20594 and Will of the Forsaken 7744 (120000 own; both carry GCD category 133 but
     // `startRecoveryTime` 0, so they tripped the second half of the same gate).
-    if (cast.startRecoveryCategory !== 0 && cast.startRecoveryTimeMs > 0) {
+    if (legs !== 'recovery' && cast.startRecoveryCategory !== 0 && cast.startRecoveryTimeMs > 0) {
       for (const known of this.known) {
         const row = spellData.spell(known);
         if (row === null || row.startRecoveryCategory !== cast.startRecoveryCategory) {
@@ -854,7 +923,9 @@ export class SpellHandler extends EventEmitter {
 
     // ── (2) THE SPELL'S OWN COOLDOWN, from the DBC: the server does not send a packet for a cooldown
     // the client can derive from its own tables. NOT `fromGcd`: a real cooldown survives a cancel.
-    if (cast.recoveryTimeMs > 0 && this.setCooldown(spellId, cast.recoveryTimeMs, at, false, 'own')) {
+    if (legs !== 'gcd'
+      && cast.recoveryTimeMs > 0
+      && this.setCooldown(spellId, cast.recoveryTimeMs, at, false, 'own')) {
       changed = true;
     }
 
@@ -869,7 +940,7 @@ export class SpellHandler extends EventEmitter {
     // cooldown that also covers ITEMS (a potion category shared with a trinket) is not applied to the
     // item, because this client has no item-cooldown surface at all -- `GetItemCooldown` is absent.
     // So the racial's own button dims and a category-mate item's would not.
-    if (cast.categoryRecoveryTimeMs > 0 && cast.category !== 0) {
+    if (legs !== 'gcd' && cast.categoryRecoveryTimeMs > 0 && cast.category !== 0) {
       for (const known of this.known) {
         const row = spellData.spell(known);
         if (row === null || row.category !== cast.category) {
@@ -1219,7 +1290,38 @@ export class SpellHandler extends EventEmitter {
     // twice and the second stamp -- being later -- would win and double the GCD.
     if (decoded.caster === this.game.world.player?.guid) {
       this.castStarted.add(decoded.spellId);
-      if (this.applyCastCooldowns(decoded.spellId)) {
+      /**
+       * **`'gcd'` ONLY, and this is the owner's Raptor Strike defect.**
+       *
+       * "Все еще гкд начинается сразу, даже если нажал способность в середине свинга. Тестирую на
+       * raptor strike."
+       *
+       * This call used to apply ALL THREE legs at START. Raptor Strike 2973 is on-next-swing with
+       * `category` 40 and `categoryRecoveryTime` **6000** and no GCD at all
+       * (`startRecoveryCategory` 0), so the server's START -- which arrives at the PRESS, because
+       * the server accepts the cast immediately and only its LANDING waits for the swing -- ran
+       * leg (3) and started the 6 s there. That is why it began at once, and why pressing mid-swing
+       * changed nothing: the stamp was keyed to the press, never to the swing.
+       *
+       * **THE PREVIOUS ROUND'S ASSUMPTION WAS THE DEFECT, not its data.** Its commit asserted "an
+       * on-next-swing spell sends no `SMSG_SPELL_START`, so it reaches the instant-cast arm at GO
+       * exactly as an instant does". The measurement behind it -- that the class is off-GCD by data
+       * -- was correct and is still correct; what was never checked is which handler actually runs,
+       * and START does.
+       *
+       * The split is the reference's and it is byte-verified on both sides -- see `CooldownLegs`.
+       * Only the GCD is armed before the launch; `RecoveryTime` and the category land at GO
+       * receive-time. So this is not a delay invented to make the sweep start later: it is the
+       * cooldown being applied on the edge the real client applies it on, and the edge is the
+       * server's own GO.
+       *
+       * **THIS IS NOT SPECIFIC TO ONE SPELL.** Every timed cast with a cooldown of its own was
+       * starting it at the press instead of at completion, so it read as ready that much early --
+       * a 2 s cast with a 6 s cooldown was short by the whole 2 s. Raptor Strike is simply the case
+       * where the whole cooldown is the category leg and the press-to-landing gap is a swing rather
+       * than a cast bar, which is what made it visible.
+       */
+      if (this.applyCastCooldowns(decoded.spellId, 'gcd')) {
         this.announceCooldowns();
       }
       // The in-flight guard was armed at SEND with a generous provisional window; START is the first
@@ -1400,9 +1502,13 @@ export class SpellHandler extends EventEmitter {
     // later stamp would win and double the GCD. `world.player` is the authority on which guid is ours; a
     // peer's confirmed cast must not put a cooldown on our bar.
     if (decoded.caster === this.game.world.player?.guid) {
-      if (this.castStarted.delete(decoded.spellId)) {
-        // Timed cast: already stamped at START. Nothing to do.
-      } else if (this.applyCastCooldowns(decoded.spellId)) {
+      // **THE RECOVERY LEGS LAND HERE AND ONLY HERE** -- `HandleSpellGo`'s self-insert, "start = the
+      // GO receive-time" (see `CooldownLegs`). `castStarted` says whether START already stamped the
+      // GCD: it did for a timed cast, so GO adds the recovery legs alone; an instant sends no START
+      // at all, so its GO is the one edge and applies both. Either way the GCD is stamped exactly
+      // once, which is what `castStarted` has always been for.
+      const stampedAtStart = this.castStarted.delete(decoded.spellId);
+      if (this.applyCastCooldowns(decoded.spellId, stampedAtStart ? 'recovery' : 'all')) {
         this.announceCooldowns();
       }
       // The cast RESOLVED -- open the in-flight guard so the next press goes out. Spell-id-keyed, which

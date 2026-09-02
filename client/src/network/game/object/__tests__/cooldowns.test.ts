@@ -42,6 +42,12 @@ jest.mock('../../../../game/pipeline/dbc/spell-data', () => {
       category: 0, recoveryTimeMs: 0, categoryRecoveryTimeMs: 0,
       startRecoveryCategory: 133, startRecoveryTimeMs: 1500,
     },
+    // Raptor Strike 2973: ON-NEXT-SWING, off-GCD, and its whole 6 s lives in the CATEGORY column.
+    // The owner's test spell.
+    2973: {
+      category: 40, recoveryTimeMs: 0, categoryRecoveryTimeMs: 6000,
+      startRecoveryCategory: 0, startRecoveryTimeMs: 0,
+    },
     // Blood Fury: off-GCD with a 120 s cooldown of its OWN -- the other half of the same gate.
     20572: {
       category: 0, recoveryTimeMs: 120000, categoryRecoveryTimeMs: 0,
@@ -62,9 +68,9 @@ function handler(known: number[]): SpellHandler {
   return h;
 }
 
-const apply = (h: SpellHandler, spellId: number): boolean => (
-  h as unknown as { applyCastCooldowns: (id: number) => boolean }
-).applyCastCooldowns(spellId);
+const apply = (h: SpellHandler, spellId: number, legs: 'gcd' | 'recovery' | 'all' = 'all'): boolean => (
+  h as unknown as { applyCastCooldowns: (id: number, legs?: string) => boolean }
+).applyCastCooldowns(spellId, legs);
 
 it('an OFF-GCD spell gets its category cooldown -- Every Man for Himself is 120 s', () => {
   const h = handler([59752, 72757, 133]);
@@ -103,4 +109,30 @@ it('a cancelled cast gives back the GCD and never refunds a real cooldown', () =
   // Nothing left to give back, so a second cancel reports no change -- the return is the caller's
   // gate on announcing, which is the discarded-return defect class this project records.
   expect(h.clearGlobalCooldown()).toBe(false);
+});
+
+it('own and category cooldowns land at GO, never at START', () => {
+  // THE OWNER'S DEFECT: "Все еще гкд начинается сразу, даже если нажал способность в середине
+  // свинга. Тестирую на raptor strike." Raptor Strike's 6 s was stamped by the START handler, which
+  // arrives at the PRESS -- so it began at once and pressing mid-swing changed nothing.
+  //
+  // The reference byte-verifies the boundary from both sides: the recovery legs land at
+  // `HandleSpellGo`'s self-insert with "start = the GO receive-time"
+  // (`net/apply/spells.rs:407-415`), and a failed cast needs no revert because "the spell's own
+  // recovery was never started pre-launch" (`:99-103`). Only the GCD is armed early.
+  const h = handler([2973]);
+
+  // START's arm: the GCD leg alone. Raptor Strike is off-GCD, so this must write NOTHING.
+  expect(apply(h, 2973, 'gcd')).toBe(false);
+  expect(h.cooldownOf(2973)).toBeNull();
+
+  // GO's arm: the recovery legs. NOW the 6 s starts, and it came from the category column.
+  expect(apply(h, 2973, 'recovery')).toBe(true);
+  expect(h.cooldownOf(2973)?.duration).toBe(6);
+
+  // And a TIMED cast's GCD is still stamped at START -- the leg split must not cost that, which is
+  // the behaviour a live measurement established (the sweep belongs during the cast, not after it).
+  const fireball = handler([133]);
+  expect(apply(fireball, 133, 'gcd')).toBe(true);
+  expect(fireball.cooldownOf(133)?.duration).toBe(1.5);
 });
