@@ -120,6 +120,12 @@ class VisibilityManager {
       return;
     }
 
+    // Held for `window.voidReport()`, which needs the exact camera and body point this frame was
+    // culled with. Reading them off the world afterwards is how a probe ends up describing a
+    // different frame than the one on screen.
+    this.lastCamera = camera;
+    this.lastBodyPoint = bodyPoint ? bodyPoint.clone() : null;
+
     this.cameraX = camera.position.x;
     this.cameraY = camera.position.y;
 

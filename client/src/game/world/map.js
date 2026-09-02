@@ -132,6 +132,59 @@ class WorldMap extends THREE.Group {
         }
         return { frame: this.visibilityManager.frame, groups: out };
       };
+
+      /**
+       * **`window.voidReport()` -- the exact inputs the offline rig needs to reproduce one frame.**
+       *
+       * The owner's standing report is a frame taken OUTSIDE on the abbey steps in which the facade and
+       * the room through the door are both drawn and the terrain, the trees and the distant buildings
+       * are all gone. `VisibilityManager#update` clears `map.exterior.visible` every frame and only
+       * `enablePortalsFromExterior` puts it back, so that picture says the flood never reached the
+       * outdoors -- the verdict was INTERIOR while he stood outside.
+       *
+       * `client/harness/` reproduces a frame from real WMO bytes in 210 ms with no browser, but it
+       * could not reproduce THAT frame: sweeping 90 positions standing on the abbey's exterior shell
+       * left the outdoors lit at every one. So the cause is not in the abbey's own geometry; it is in
+       * an input the rig does not have -- the real placement, the neighbouring buildings, or the body
+       * point actually passed in.
+       *
+       * Rather than guess a third time (twice already reverted: widening the deferred exterior arm drew
+       * the street through walls), this prints what the rig consumes:
+       *
+       *  - `bodyLocal` and `wmo` place the point in the rig directly;
+       *  - `loc`/`group` say whether the verdict really is interior;
+       *  - `chunks` separates "terrain not ENABLED" from "terrain not LOADED", which the picture
+       *    cannot distinguish and which are unrelated defects.
+       *
+       * Ordinary console line, no arguments -- a report the owner can paste back.
+       */
+      window.voidReport = () => {
+        const camera = this.visibilityManager.lastCamera || null;
+        const nearby = [];
+        for (const wmo of this.wmoManager.entries.values()) {
+          if (!wmo.views.root || !camera) continue;
+          const local = wmo.views.root.worldToLocal(camera.position.clone());
+          if (Math.abs(local.x) > 150 || Math.abs(local.y) > 150) continue;
+          nearby.push({
+            path: (wmo.path || '').split(/[\/]/).pop(),
+            eyeLocal: [local.x, local.y, local.z].map((v) => Number(v.toFixed(2))),
+          });
+        }
+        const body = this.visibilityManager.lastBodyPoint || null;
+        return {
+          loc: camera && camera.location ? camera.location.type : null,
+          group: camera && camera.location && camera.location.wmo
+            ? camera.location.wmo.group.index : null,
+          eyeWorld: camera
+            ? [camera.position.x, camera.position.y, camera.position.z]
+              .map((v) => Number(v.toFixed(2))) : null,
+          bodyWorld: body ? [body.x, body.y, body.z].map((v) => Number(v.toFixed(2))) : null,
+          exteriorVisible: this.exterior ? this.exterior.visible : null,
+          chunksLoaded: this.chunks.size,
+          chunksDrawn: [...this.chunks.values()].filter((c) => c.visible).length,
+          nearby,
+        };
+      };
     }
     this.locationManager = new LocationManager(this);
 
