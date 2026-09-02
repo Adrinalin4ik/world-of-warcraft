@@ -746,3 +746,54 @@ describe('M2 particle emitters: gravity convention and trail length', () => {
     expect(lines.length).toBeGreaterThan(0);
   }, 120000);
 });
+
+/**
+ * THE ELONGATED BLOB: is it a SPIN, a non-square SCALE, or one enormous particle?
+ *
+ * Through `M2Parser` rather than a hand-offset reader on purpose. The hand reader used for the
+ * corpus surveys assumed `FBlock` was 20 bytes; it is **16** (`part-track.js`: two `Nofs`, 8 + 8),
+ * so every offset past `colorTrack` at 260 was wrong by an accumulating amount -- which is how a
+ * "twinkle min != max on 57.2% of emitters" claim was really reading `baseSpinVariation` against
+ * `spinSpeed`. The record size is the canary that caught it: 5 FBlocks x 4 bytes = the 20 bytes
+ * between the wrong total (496) and the declared `PARTICLE_EMITTER_SIZE` (476).
+ */
+describe('M2 particle emitters: spin, scale aspect and twinkle', () => {
+  it('reports the fields that could elongate or enlarge a sprite', async () => {
+    const pairs = (block: any): string => {
+      const values: any[] = block?.values ?? [];
+      if (values.length === 0) return 'none';
+      return values.slice(0, 4).map((v: any) => {
+        const x = Array.isArray(v) ? v[0] : v?.x;
+        const y = Array.isArray(v) ? v[1] : v?.y;
+        const ratio = (typeof x === 'number' && typeof y === 'number' && y !== 0)
+          ? (x / y).toFixed(2) : '?';
+        return `(${Number(x).toFixed(3)},${Number(y).toFixed(3)} r=${ratio})`;
+      }).join(' ');
+    };
+    const lines: string[] = [];
+    for (const path of ['Spells/Fireball_Missile_Low.m2', 'Spells/Fireball_Impact_Chest.m2']) {
+      // eslint-disable-next-line no-await-in-loop
+      const buffer = await fetchFixture(asM2(path));
+      if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+        lines.push(`${path}: UNREACHABLE`);
+        continue;
+      }
+      const m2: any = M2Parser.decode(new DecodeStream(buffer));
+      lines.push(path);
+      (m2.particleEmitters ?? []).forEach((e: any, i: number) => {
+        lines.push(`   emitter ${i} type=${e.emitterType} blend=${e.blendingType}`
+          + ` rows=${e.rows} cols=${e.columns} headOrTail=${e.headOrTail}`);
+        lines.push(`      scaleTrack ${pairs(e.scaleTrack)}`);
+        lines.push(`      scaleVary=(${e.scaleVary})`
+          + ` baseSpin=${e.baseSpin} baseSpinVary=${e.baseSpinVariation}`
+          + ` spinSpeed=${e.spinSpeed} spinSpeedVary=${e.spinSpeedVariation}`);
+        lines.push(`      twinkle speed=${e.twinkleSpeed} pct=${e.twinklePercent}`
+          + ` min=${e.twinkleScaleMin} max=${e.twinkleScaleMax}`
+          + `  tailLength=${e.tailLength} inheritVelScale=${e.inheritVelocityScale} drag=${e.drag}`);
+      });
+    }
+    // eslint-disable-next-line no-console
+    console.log(lines.join('\n'));
+    expect(lines.length).toBeGreaterThan(0);
+  }, 120000);
+});

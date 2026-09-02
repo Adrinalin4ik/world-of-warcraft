@@ -45,14 +45,42 @@ const scratchWorldScale = new THREE.Vector3();
  * this project has already broken once by "simplifying" it. The conversion belongs at the boundary
  * where the file's semantic is read, which is here.
  *
- * NOT APPLIED, and named rather than folded in silently: the **gated twinkle multiplier** from the
- * same sentence -- `min != max => noise(speed * age) * (max - min) + min`, skipped entirely when
- * `min == max`. This client decodes `twinkleSpeed / twinklePercent / twinkleScaleMin /
- * twinkleScaleMax` and reads none of them. Surveyed on the served build across 1580 emitters in 315
- * models, **903 (57.2%) author `min != max`** and 677 (42.8%) are the degenerate case the reference
- * skips -- so this is a live multiplier on the majority of emitters, not a corner. It is a separate
- * port with a real risk attached (a `{0, 0.5}` range at speed 0 is a SHRINK, so applying it in the
- * same commit as a 2x growth would confound both), and it needs the noise function pinned first.
+ * ## SELF-REVIEW: THE TWINKLE POPULATION QUOTED HERE WAS WRONG BY 6x, AND SO WAS ITS CONCLUSION
+ *
+ * This paragraph used to say "903 (57.2%) author `min != max` ... a live multiplier on the majority
+ * of emitters, not a corner". **Both numbers came from a broken reader.** The hand-offset survey
+ * script assumed `FBlock` was 20 bytes; it is **16** (`part-track.js`: two `Nofs`, 8 + 8), so every
+ * offset past `colorTrack` at 260 was wrong by an accumulating 4 bytes per FBlock -- the "twinkle
+ * min/max" it read were really `baseSpinVariation` and `spinSpeed`. The record size is the canary
+ * that catches it and it was there all along: five FBlocks x 4 bytes is exactly the 20-byte gap
+ * between the wrong total (496) and the declared `PARTICLE_EMITTER_SIZE` (476).
+ *
+ * Re-measured with a reader validated field-for-field against `M2Parser` on Fireball first, across
+ * 1614 emitters: **147 (9.1%) author `min != max`**, 1467 (90.9%) are the degenerate case the
+ * reference skips. So the gated twinkle multiplier is a genuine but MINORITY gap -- a corner, which
+ * is the opposite of what this file claimed. Still worth porting, still a separate commit (a
+ * `{0.7, 1}` range is a shrink and would confound a growth), and now correctly sized.
+ *
+ * Two more numbers from the same corrected survey, because they bear on this constant directly:
+ * **spin is authored non-zero on 822 of 1614 emitters (50.9%)** -- `baseSpin` and `spinSpeed` are
+ * both read, so that channel is faithful -- and **only 59 of 1614 (3.7%) author a NON-SQUARE
+ * `scaleTrack`**, which makes an elongated sprite a rare authored shape rather than a normal one.
+ *
+ * ## AND THE PROVENANCE OF THE 2x IS WEAKER THAN THIS FILE FIRST CLAIMED
+ *
+ * The reference's statement is about a SCALAR. `OverLife.scale` is `[f32; 3]` -- three keys of ONE
+ * float -- and `OverLife::sample` computes a single `size` from it (`particles.rs:167, 223`). v264
+ * authors a PAIR (`scaleTrack: FBlock(float32array2)`), which is a 3.3.5a widening benilla cannot
+ * speak to, so "byte-verified in the client's own quad writer" is true of the reference's build and
+ * OVERSTATED for this one. The half-size semantic almost certainly carried over into both
+ * components, and the corpus is consistent with it -- authored magnitudes run p50 0.417, p90 4.167,
+ * p99 12.5, max 13.889, so large sprites are normal and doubling them is not obviously absurd -- but
+ * this is a reading, not a verification.
+ *
+ * What IS settled, and it was the open question: the reference applies the half-size rule
+ * **UNCONDITIONALLY**. `size` is computed for every emitter in `OverLife::sample` with no flag gate;
+ * the only modulation is the twinkle multiplier above. So there is no per-blend, per-sheet or
+ * per-flag exemption to discover -- if the 2x is wrong it is wrong everywhere, not here.
  */
 const HALF_SIZE_TO_EXTENT = 2;
 
