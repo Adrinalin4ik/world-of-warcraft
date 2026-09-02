@@ -108,6 +108,19 @@ export interface SpellGoTargets {
   plausible: boolean;
 }
 
+/**
+ * One live cooldown. `start` and `duration` are `GetTime()` SECONDS -- the shape
+ * `GetActionCooldown` and `GetSpellCooldown` return and `CooldownFrame_SetTimer` consumes.
+ *
+ * `fromGcd` is PROVENANCE, and it exists so a cancelled cast can give back the global cooldown
+ * without touching a real one. See `clearGlobalCooldown`.
+ */
+interface CooldownEntry {
+  start: number;
+  duration: number;
+  fromGcd: boolean;
+}
+
 export class SpellHandler extends EventEmitter {
   private game: GameHandler;
 
@@ -150,7 +163,7 @@ export class SpellHandler extends EventEmitter {
    * and the sweep pass both read the numbers rather than a boolean. `pruneCooldowns` drops them on the
    * next update so the map cannot grow without bound over a long session.
    */
-  private cooldowns = new Map<number, { start: number; duration: number }>();
+  private cooldowns = new Map<number, CooldownEntry>();
 
   /**
    * Spells of ours for which a `SMSG_SPELL_START` has been seen and the matching GO has not.
@@ -510,9 +523,17 @@ export class SpellHandler extends EventEmitter {
     // the latch back, and a broken cast never gets there. Gated on this spell having armed a pose so a
     // failure cannot drop a latch belonging to something else.
     this.releaseCastPose(caster, spellId);
-    // Our own cast broke: open the guard. A peer's failure is not our guard's business.
+    // Our own cast broke: open the guard AND GIVE BACK THE GLOBAL COOLDOWN. A peer's failure is
+    // neither our guard's business nor our bar's -- the GCD is ours alone.
+    //
+    // This is the owner's second report ("если мы кастуем и каст прервался ... то гкд сбрасывается")
+    // on the wire-driven edge: a timed cast stamps the GCD at `SMSG_SPELL_START` and, until now,
+    // nothing took it back when the cast did not finish. The reference's model is arm-at-send +
+    // clear-on-failure (`ui_action/cast_send.rs:643-647`); `clearGlobalCooldown` is that clear, and it
+    // drops ONLY `fromGcd` entries so a real cooldown the server started survives the interrupt.
     if (caster === this.game.world.player?.guid) {
       this.pendingCast.clearIf(spellId);
+      this.clearGlobalCooldown();
     }
     this.emit('spellFailure', { caster, spellId });
   }
@@ -584,7 +605,12 @@ export class SpellHandler extends EventEmitter {
    * spell that is on a 30-second cooldown of its own must not cut it to 1.5 s. The real client keeps the
    * later expiry for exactly this reason -- every cast puts the GCD on every spell on the bar.
    */
-  private setCooldown(spellId: number, durationMs: number, startAt = gameTime()): boolean {
+  private setCooldown(
+    spellId: number,
+    durationMs: number,
+    startAt = gameTime(),
+    fromGcd = false,
+  ): boolean {
     if (spellId <= 0) {
       return false;
     }
@@ -596,8 +622,42 @@ export class SpellHandler extends EventEmitter {
     if (existing !== undefined && existing.start + existing.duration > startAt + duration) {
       return false;
     }
-    this.cooldowns.set(spellId, { start: startAt, duration });
+    this.cooldowns.set(spellId, { start: startAt, duration, fromGcd });
     return true;
+  }
+
+  /**
+   * **CLEAR THE GLOBAL COOLDOWN, and only it** -- the owner's "если мы кастуем и каст прервался
+   * из-за движения или мы сами его отменили как-то, то гкд сбрасывается".
+   *
+   * The reference states both halves of the real client's model and byte-verifies them: the GCD is
+   * armed at SEND (`StartGlobalCooldown 0x6e2de0` from the cast-send arm `0x6e58fb`) and "a later
+   * `SMSG_CAST_RESULT` failure clears it again (`0x6e1630`)"
+   * (`benilla-app/src/ui_action/cast_send.rs:643-647`). So a cast that does not complete gives the
+   * global cooldown back; this is that clear.
+   *
+   * **`fromGcd` IS THE WHOLE POINT, and without it this would be the wrong fix.** A real cooldown
+   * must survive an interrupted cast -- a 2-minute racial whose cooldown the server started is not
+   * refunded because a later cast was cancelled -- so the entries have provenance and only the ones
+   * the GCD pass wrote are dropped. The two cannot be told apart by DURATION: a 1.5 s spell cooldown
+   * exists, and `setCooldown`'s longer-wins rule means a real cooldown that landed on a spell already
+   * carrying a GCD has already replaced the entry and cleared the flag with it.
+   *
+   * Returns whether anything was dropped, so the caller decides whether to announce -- the discarded
+   * -return defect class this project records twice.
+   */
+  clearGlobalCooldown(): boolean {
+    let changed = false;
+    for (const [spellId, entry] of this.cooldowns) {
+      if (entry.fromGcd) {
+        this.cooldowns.delete(spellId);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.announceCooldowns();
+    }
+    return changed;
   }
 
   /** Drop entries whose expiry has passed, so a long session's map stays the size of the live set. */
@@ -611,47 +671,98 @@ export class SpellHandler extends EventEmitter {
   }
 
   /**
-   * THE GLOBAL COOLDOWN, applied on our own confirmed cast.
+   * **ALL THREE COOLDOWNS a confirmed cast of ours starts** -- the global one, the spell's own, and
+   * its category's. Renamed from `applyGlobalCooldown`, which named only the first of the three and
+   * is why a gate meant for that one was allowed to skip the other two; see leg (1).
    *
-   * Applied at `SMSG_SPELL_GO` and not at the click, deliberately: a cast the server refuses
-   * (`SMSG_CAST_FAILED`) triggers no GCD in the real client, and `Gesf` -- who is refused every cast --
-   * would otherwise show a full bar of sweeps for a cast that never happened. GO is the server's
-   * confirmation, and it is also where this file already arms the caster's animation.
+   * ## WHEN it is applied, and a STATED DEVIATION from the reference
+   *
+   * This runs on the server's CONFIRMATION -- `SMSG_SPELL_START` for a timed cast, `SMSG_SPELL_GO`
+   * for an instant, with `castStarted` keeping one cast from stamping twice.
+   *
+   * **The real client does it differently and the previous version of this comment misdescribed
+   * it.** It said the GCD is applied at GO rather than at the click because "a cast the server
+   * refuses triggers no GCD in the real client". The OUTCOME is right; the mechanism is not. The
+   * reference byte-verifies both halves: the client arms the GCD **at send**
+   * (`StartGlobalCooldown 0x6e2de0` from the cast-send arm `0x6e58fb`) and "a later
+   * `SMSG_CAST_RESULT` failure clears it again (`0x6e1630`)"
+   * (`benilla-app/src/ui_action/cast_send.rs:643-647`). So it arms optimistically and gives it back,
+   * where we simply never arm.
+   *
+   * The visible difference is one round trip: the real client's sweep starts on the keypress, ours
+   * about 150 ms later when the confirmation lands. Arming at send is left for a scoped round --
+   * `clearGlobalCooldown` is the half the owner asked for and is now built, so moving the arm point
+   * is a one-line change with the clear already in place. Named rather than quietly kept.
    *
    * The GCD goes on every KNOWN spell sharing the category, which is the client's rule and is why the
    * whole bar dims at once. Spells not known are skipped -- they cannot be on a button.
    */
-  private applyGlobalCooldown(spellId: number): boolean {
+  private applyCastCooldowns(spellId: number): boolean {
     const cast = spellData.spell(spellId);
-    if (cast === null || cast.startRecoveryCategory === 0 || cast.startRecoveryTimeMs <= 0) {
-      // Off-GCD, and correctly so for Heroic Strike (78) and Auto Attack (6603) -- both read category 0
-      // and time 0 on the served file. `spellData` being absent also lands here, which is honest: with
-      // no table there is no GCD to compute and the bar simply shows none.
+    if (cast === null) {
+      // No table, so nothing to derive. Honest rather than silent: with `Spell.dbc` absent the bar
+      // shows no cooldown at all, and the server's own `SMSG_SPELL_COOLDOWN` still lands if it comes.
       return false;
     }
     const at = gameTime();
     let changed = false;
-    for (const known of this.known) {
-      const row = spellData.spell(known);
-      if (row === null || row.startRecoveryCategory !== cast.startRecoveryCategory) {
-        continue;
-      }
-      if (this.setCooldown(known, cast.startRecoveryTimeMs, at)) {
-        changed = true;
+
+    // ── (1) THE GLOBAL COOLDOWN, across the GCD category. GATED, and the gate now covers ONLY this
+    // loop, which is the whole of the owner's first defect.
+    //
+    // "у нас не имплементировано общий кулдаун способностей, например если я жму Каждый сам за себя,
+    // у меня не появляется кд, хотя должно быть 2 минуты. При этом гкд проходит как надо."
+    //
+    // This method used to open with that gate as an EARLY RETURN over the entire body, so an OFF-GCD
+    // spell never reached legs (2) or (3) below and got no cooldown of any kind. Every Man for Himself
+    // is exactly that spell -- measured on the served `spell.dbc`, it reads
+    // `startRecoveryCategory = 0`, `startRecoveryTime = 0`, so the gate fired and its real 120000 ms
+    // was never applied. The owner's own two observations fall straight out of the same line: the GCD
+    // "proceeds as it should" because an ON-GCD spell passes the gate and then reaches everything, and
+    // the per-spell cooldown is missing precisely for the spells that do not.
+    //
+    // Measured, so the scale of it is a number rather than a guess -- every one of these was silently
+    // cooldown-less: Every Man for Himself 59752 (category 1182, 120000 category), Blood Fury 20572
+    // (120000 own), Berserking 26297 (180000 own), Vanish 1856 (category 39, 180000 category),
+    // Stoneform 20594 and Will of the Forsaken 7744 (120000 own; both carry GCD category 133 but
+    // `startRecoveryTime` 0, so they tripped the second half of the same gate).
+    if (cast.startRecoveryCategory !== 0 && cast.startRecoveryTimeMs > 0) {
+      for (const known of this.known) {
+        const row = spellData.spell(known);
+        if (row === null || row.startRecoveryCategory !== cast.startRecoveryCategory) {
+          continue;
+        }
+        // `fromGcd` -- this is the entry a cancelled cast gives back. See `clearGlobalCooldown`.
+        if (this.setCooldown(known, cast.startRecoveryTimeMs, at, true)) {
+          changed = true;
+        }
       }
     }
-    // The cast spell's OWN cooldown, from the DBC, for the same reason: the server does not send a packet
-    // for a cooldown the client can derive from its own tables.
-    if (cast.recoveryTimeMs > 0 && this.setCooldown(spellId, cast.recoveryTimeMs, at)) {
+
+    // ── (2) THE SPELL'S OWN COOLDOWN, from the DBC: the server does not send a packet for a cooldown
+    // the client can derive from its own tables. NOT `fromGcd`: a real cooldown survives a cancel.
+    if (cast.recoveryTimeMs > 0 && this.setCooldown(spellId, cast.recoveryTimeMs, at, false)) {
       changed = true;
     }
+
+    // ── (3) THE CATEGORY COOLDOWN -- a genuinely SEPARATE mechanism, and implemented rather than
+    // folded into (2). A `Category` groups a family that shares one cooldown: the racial trinket
+    // family, potions, the Vanish/Preparation group. It is the leg that matters most for the owner's
+    // report, because Every Man for Himself carries its whole 2 minutes HERE and nothing in
+    // `recoveryTime` at all -- so a fix that only reached (2) would have looked right on Blood Fury
+    // and still shown nothing on the spell he actually pressed.
+    //
+    // NAMED LIMIT: the family is resolved over `this.known`, i.e. spells the character knows. A shared
+    // cooldown that also covers ITEMS (a potion category shared with a trinket) is not applied to the
+    // item, because this client has no item-cooldown surface at all -- `GetItemCooldown` is absent.
+    // So the racial's own button dims and a category-mate item's would not.
     if (cast.categoryRecoveryTimeMs > 0 && cast.category !== 0) {
       for (const known of this.known) {
         const row = spellData.spell(known);
         if (row === null || row.category !== cast.category) {
           continue;
         }
-        if (this.setCooldown(known, cast.categoryRecoveryTimeMs, at)) {
+        if (this.setCooldown(known, cast.categoryRecoveryTimeMs, at, false)) {
           changed = true;
         }
       }
@@ -702,7 +813,15 @@ export class SpellHandler extends EventEmitter {
    * `SMSG_COOLDOWN_EVENT` (0x135): one spell's cooldown STARTED, with no duration in the packet.
    *
    * 3.3.5a body: `u32 spellId`, `u64 guid`. The duration is the client's own to look up, which is why
-   * `Spell.dbc`'s `RecoveryTime` is read here rather than waited for on the wire.
+   * `Spell.dbc` is read here rather than waited for on the wire.
+   *
+   * **AND IT READS BOTH COOLDOWN COLUMNS, not just `RecoveryTime`.** It used to take
+   * `recoveryTimeMs` alone, which is 0 for every spell whose cooldown lives in its CATEGORY -- so an
+   * explicit server-sent cooldown event for Every Man for Himself (0 own, 120000 category) applied
+   * nothing at all. The same blind spot as the early return in `applyCastCooldowns`, in a second
+   * place, and it would have kept the owner's symptom alive on the packet path after the DBC path was
+   * fixed. The LONGER of the two is taken, and the category leg is applied across the family exactly
+   * as `applyCastCooldowns` leg (3) does.
    */
   private handleCooldownEvent(gp: GamePacket): void {
     gp.index = gp.headerSize;
@@ -710,17 +829,38 @@ export class SpellHandler extends EventEmitter {
     const spellId = gp.readUnsignedInt();
     const guid = gp.readGUID();
     const row = spellData.spell(spellId);
-    const ms = row?.recoveryTimeMs ?? 0;
+    const own = row?.recoveryTimeMs ?? 0;
+    const category = row?.categoryRecoveryTimeMs ?? 0;
+    const ms = Math.max(own, category);
     spellWire.record({
       at: Date.now(),
       kind: 'COOLDOWN_EVENT',
       spellId,
       caster: String(guid),
-      detail: { recoveryTimeMs: ms, name: row?.name ?? null },
+      detail: {
+        recoveryTimeMs: own, categoryRecoveryTimeMs: category, appliedMs: ms, name: row?.name ?? null,
+      },
       bodySize,
       consumed: gp.index - gp.headerSize,
     });
-    if (ms > 0 && this.setCooldown(spellId, ms)) {
+    if (ms <= 0) {
+      return;
+    }
+    const at = gameTime();
+    let changed = this.setCooldown(spellId, ms, at, false);
+    // The category family, when this spell has one -- the same separate mechanism leg (3) applies.
+    if (category > 0 && row !== null && row.category !== 0) {
+      for (const known of this.known) {
+        const other = spellData.spell(known);
+        if (other === null || other.category !== row.category) {
+          continue;
+        }
+        if (this.setCooldown(known, category, at, false)) {
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
       this.announceCooldowns();
     }
   }
@@ -769,15 +909,83 @@ export class SpellHandler extends EventEmitter {
       }
     }
 
+    /**
+     * **THE LOGIN COOLDOWN BLOCK -- now decoded and APPLIED, and its stride widened from 14 to 16.**
+     *
+     * It used to be skipped (`gp.read(14)` per entry, "nothing consumes them yet"), so a character
+     * who relogged with a cooldown running showed none: the server states it exactly once, here, and
+     * nothing read it. That is the other half of the owner's cooldown report -- the live packets cover
+     * a cooldown that STARTS while you are online, and only this covers one already running.
+     *
+     * **THE 14 WAS THE 1.12 WIDTH AND IT IS THE WIDTH TRAP, caught by reading rather than by a
+     * failure.** 1.12's entry is `u16 spellId, u16 itemId, u16 category, u32 cooldown,
+     * u32 categoryCooldown` = 14; 3.3.5a widens the id to `u32`, giving **16**. That is the SAME
+     * widening this file's own header already records for the spell entries in this very packet
+     * ("3.3.5a widens the id to `u32`, giving 6-byte entries") -- applied to one block of the packet
+     * and not the other. A `u16` id in one block and a `u32` id in the next, in one server write, is
+     * not a shape any implementation has.
+     *
+     * **AND THE ARITHMETIC THAT PINNED THIS PACKET CANNOT DISCRIMINATE IT**, which is exactly why it
+     * survived: the header's proof is `1 + 2 + 6n + 2 + 14m = 329` solved with **m = 0**, so the
+     * stride was multiplied by zero and never tested. A fresh character has no cooldowns, so every
+     * capture this client has seen exercises this block not at all.
+     *
+     * So: **self-consistent, NOT residual-verified.** No body with `m > 0` has been through it. The
+     * diagnostic below is written to NAME the error rather than only report one, per `CLAUDE.md`:
+     * this block is the packet's TAIL, so a wrong stride leaves a remainder, and dividing that
+     * remainder by the wire's own count localises it --
+     *
+     *   - `perEntry` a whole number: the error is INSIDE the entry and that is its size in bytes.
+     *     A `u16` id read where a `u32` sits is exactly `+2`, which is the mistake this fixes, so a
+     *     future reading of 14 would report `perEntry 2` and name itself.
+     *   - `perEntry` null with a nonzero remainder: the stride is right and the HEADER moved.
+     *   - a THROW (caught by the caller): we over-read, so the stride is too LARGE -- the one case
+     *     the other two cannot express.
+     *
+     * The header is stashed BEFORE the loop so a throwing entry still produces a row, which is the
+     * placement `CLAUDE.md` requires.
+     */
     let cooldownCount = 0;
+    const COOLDOWN_ENTRY = 16;
+    let cooldownsRead = 0;
+    let cooldownStart = gp.index;
     if (gp.available >= 2) {
       cooldownCount = gp.readUnsignedShort();
-      // Read past the cooldown blocks to make `consumed` meaningful. Nothing consumes them yet: a live
-      // cooldown sweep is deferred, and `methods/cooldown.ts` explains why nothing is drawn.
-      for (let i = 0; i < cooldownCount && gp.available >= 14; i += 1) {
-        gp.read(14);
+      cooldownStart = gp.index;
+      const at = gameTime();
+      for (let i = 0; i < cooldownCount && gp.available >= COOLDOWN_ENTRY; i += 1) {
+        const spellId = gp.readUnsignedInt() >>> 0;
+        gp.readUnsignedShort(); // itemId -- the item that granted it; no item-cooldown surface here
+        const category = gp.readUnsignedShort();
+        const ownMs = gp.readUnsignedInt() >>> 0;
+        const categoryMs = gp.readUnsignedInt() >>> 0;
+        cooldownsRead += 1;
+        // REMAINING milliseconds, not total: the server is describing a cooldown already under way,
+        // so this is exactly what `setCooldown` wants and no elapsed time is subtracted.
+        const ms = Math.max(ownMs, categoryMs);
+        if (spellId !== 0 && ms > 0) {
+          // NOT `fromGcd`: a cooldown that survived a relog is a real one, and a later cancelled cast
+          // must not refund it.
+          this.setCooldown(spellId, ms, at, false);
+        }
+        // NAMED LIMIT, and it is a limit of WHERE this runs rather than of the decode: the category
+        // cooldown is applied to the spell the packet NAMES and is not expanded across its family.
+        // It cannot be expanded here -- `Spell.dbc` is deliberately not loaded at login (the note
+        // below measures why: fetching 49 MB in the login burst starved the FrameXML manifest for
+        // over 240 s), so there is no table to resolve a category against. In practice the server
+        // sends one entry per spell that has a cooldown running, so a family whose members are all on
+        // cooldown is all named; a member the server omits keeps an undimmed button until the next
+        // live packet. `category` is read rather than skipped so the entry closes and so the value is
+        // in the wire record.
+        void category;
       }
     }
+    const cooldownResidual = bodySize - (gp.index - gp.headerSize);
+    const cooldownPerEntry = cooldownsRead > 0 && cooldownResidual !== 0
+      && cooldownResidual % cooldownsRead === 0
+      ? cooldownResidual / cooldownsRead
+      : null;
+    void cooldownStart;
 
     this.known = new Set(found);
     spellWire.record({
@@ -785,7 +993,17 @@ export class SpellHandler extends EventEmitter {
       kind: 'INITIAL_SPELLS',
       spellId: 0,
       caster: null,
-      detail: { spellCount, decoded: found.length, cooldownCount, first: found[0] ?? null },
+      detail: {
+        spellCount,
+        decoded: found.length,
+        cooldownCount,
+        cooldownsRead,
+        cooldownEntryBytes: COOLDOWN_ENTRY,
+        // See the cooldown block above: these two are the diagnostic that NAMES a wrong stride.
+        cooldownResidual,
+        cooldownPerEntry,
+        first: found[0] ?? null,
+      },
       bodySize,
       consumed: gp.index - gp.headerSize,
     });
@@ -876,7 +1094,7 @@ export class SpellHandler extends EventEmitter {
     // twice and the second stamp -- being later -- would win and double the GCD.
     if (decoded.caster === this.game.world.player?.guid) {
       this.castStarted.add(decoded.spellId);
-      if (this.applyGlobalCooldown(decoded.spellId)) {
+      if (this.applyCastCooldowns(decoded.spellId)) {
         this.announceCooldowns();
       }
       // The in-flight guard was armed at SEND with a generous provisional window; START is the first
@@ -1059,7 +1277,7 @@ export class SpellHandler extends EventEmitter {
     if (decoded.caster === this.game.world.player?.guid) {
       if (this.castStarted.delete(decoded.spellId)) {
         // Timed cast: already stamped at START. Nothing to do.
-      } else if (this.applyGlobalCooldown(decoded.spellId)) {
+      } else if (this.applyCastCooldowns(decoded.spellId)) {
         this.announceCooldowns();
       }
       // The cast RESOLVED -- open the in-flight guard so the next press goes out. Spell-id-keyed, which
@@ -1336,6 +1554,13 @@ export class SpellHandler extends EventEmitter {
     // Same reason as in `handleSpellFailure`: a refused cast never reaches GO, so its id must not be left
     // in `castStarted` to suppress a later instant's global cooldown.
     this.castStarted.delete(spellId);
+    // AND THE GCD GOES BACK. This is the reference's own trigger, named exactly: the GCD is armed at
+    // send and "a later `SMSG_CAST_RESULT` failure clears it again (`0x6e1630`)"
+    // (`ui_action/cast_send.rs:643-647`) -- `SMSG_CAST_FAILED` is 3.3.5a's name for that packet.
+    // Ordinarily a no-op, because a refused cast usually got no START and so stamped no GCD; the case
+    // it covers is a cast that STARTED and was then refused, which is also the only case the pose
+    // release below covers.
+    this.clearGlobalCooldown();
     // `SMSG_CAST_FAILED`'s body names no caster -- the server only refuses OUR casts -- so the pose to
     // release is the player's. Ordinarily there is none to release: a refused cast gets no START either,
     // so no pose was ever armed. The case this covers is a cast that STARTED and was then refused.
