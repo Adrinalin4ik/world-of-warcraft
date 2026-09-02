@@ -55,15 +55,18 @@ export function intersectRect(a: ScreenRect, b: ScreenRect): ScreenRect | null {
 /**
  * Clip a clip-space polygon against the near plane, returning the part in front of the eye.
  *
- * THIS IS NOT OPTIONAL, and leaving it out is what broke the first attempt at the rect flood.
- * A portal you are standing in the plane of has vertices on both sides of the eye. Projecting a
- * vertex with negative `w` divides by that negative value and flips it through the origin, so the
- * screen-space AABB of a mixed-sign polygon comes out SMALL and bounded where the true projection
- * is unbounded. The flood then collapses the branch and drops rooms that really are visible through
- * the doorway. The `w` clamp does not help: it only covers `w` near zero, not a polygon spanning it.
+ * **NOT THE CLIENT'S BEHAVIOUR, and not used by the portal flood. Kept for the record and its tests.**
  *
- * Clipping first also makes the projection well-conditioned. In a WebGL perspective matrix
- * `w_clip = -z_view`, so every surviving vertex has `w >= near`, and no sign flip is possible.
+ * This carried a paragraph beginning "THIS IS NOT OPTIONAL". That was wrong and the reference says so
+ * in as many words: the projection clips against "the four **side** planes of the view pyramid (there
+ * is NO near-plane clip)" (`benilla-world/src/wmo_portal/mod.rs:789-798`). A near clip is what makes a
+ * doorway the eye is close to degenerate and its room blink out, because the angle decides how many
+ * vertices fall behind the plane.
+ *
+ * What the flood uses is `clipPolygonToSidePlanes` below. The two are not interchangeable: the side
+ * clip discards a behind-the-eye vertex too, but replaces the edge through it with an interpolated
+ * boundary point at/near `w = 0`, which `ndcFromClip`'s clamp then blows out -- that is the straddled
+ * doorway staying open. A near clip removes the edge instead of moving it.
  *
  * Sutherland-Hodgman against the OpenGL near plane `z = -w`, i.e. inside where `z + w > 0`.
  */

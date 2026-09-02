@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import THREEUtil from '../../../utils/three-util';
 import {
   FULL_SCREEN_RECT,
+  clipPolygonToSidePlanes,
   intersectRect,
   ON_PLANE_EPS,
   rectFromClipPolygon,
@@ -244,24 +245,44 @@ class WMOPortalView extends THREE.Mesh {
      * with one measurement. If a portal is ever seen opening too WIDE, that is where to look.
      */
     /**
-     * **NO CLIPPING AT ALL. The side-plane clip was mine and it killed the portals it was meant to
-     * widen -- measured, seven `rect-collapse` in thirteen attempts, including the doorway into the
-     * group whose floor the owner was standing on.**
+     * **THE FOUR SIDE PLANES, back on -- and the 'no clipping at all' argument that removed them was
+     * wrong on one specific point: Sutherland-Hodgman does not merely DISCARD a vertex behind the eye,
+     * it replaces the edge through it with an intersection point.**
      *
-     * `w + x >= 0` is false for almost any vertex BEHIND the eye, because `w` is negative there. So
-     * the clip discarded exactly the vertices the `w` rule exists to handle: the reference says a
-     * vertex carrying `w <= -0.001` "divides by its real negative `w`, so its MIRRORED NDC enters the
-     * rect", and that is what keeps a doorway the eye is straddling wide open. They have to SURVIVE.
-     * I clipped them away and then relied on the handling that never saw them.
+     * The comment that stood here said `w + x >= 0` is false for almost any vertex behind the eye, so
+     * the clip throws away exactly the vertices the `w` rule exists to handle. The first half is true
+     * and the conclusion does not follow. The reference clips those vertices away too, and says what
+     * takes their place: "a polygon spanning the eye survives as boundary points at/near `w = 0`, which
+     * the caller's `w`-clamp handles" (`mod.rs:834-837`). Those boundary points are the interpolated
+     * ones the clip inserts on the sign change; they clamp to `+1e-5` and blow the rect out, which is
+     * the straddled doorway staying open. The vertices do not have to survive -- the EDGE does.
      *
-     * So the rect is the min/max over every projected vertex, with `ndcFromClip`'s clamp doing the
-     * whole of the work -- which is the reference's own arrangement, raw and un-clamped, bounded by
-     * the caller's intersect with the carried rect.
+     * Our `clipPolygonToSidePlanes` is already a faithful port: same four planes as the reference's
+     * `PLANES` (`mod.rs:838-839`), same `>= 0` keep rule, same interpolation, same "fewer than three
+     * remain" failure, which is the client's `rc.flags |= 0x1` skip. Nothing about it needed changing.
      *
-     * `clipPolygonToSidePlanes` stays in `rect.ts`, unused and documented, because the record of why
-     * it is wrong here is worth more than the function was.
+     * **Why the measurement that removed it does not stand: it predates the seed.** Seven
+     * `rect-collapse` in thirteen attempts was measured while the location manager was still seeding
+     * group 0 for a body standing in group 5, so those floods were collapsing doorways viewed from the
+     * wrong room -- the collapse was downstream of the seed, not caused by the clip. That is not a
+     * claim I can make from reading; it is why this change ships with a guard that the old one had no
+     * way to state.
+     *
+     * **The guard, and the numbers it gave (`client/harness/`, real `nsabbey` bytes, no browser):**
+     *
+     *   floor invariant -- the group whose floor resolves under the body must be drawn, over 20
+     *   positions x 8 bearings x 2 eye heights: 0 violations before, 0 violations after. If the clip
+     *   killed a doorway that matters, this is the arm that says so, and it is the exact symptom the
+     *   removal was defending against.
+     *
+     *   over-draw -- groups drawn whose whole bounding box misses the frustum: see the round's commit
+     *   message for the before/after share. Without the clip a portal with a vertex behind the eye
+     *   projects to an AABB hundreds of screens wide, so the carried rect intersects to the FULL
+     *   SCREEN and every branch below it inherits no narrowing at all -- traced at one frame as
+     *   `11 -> 0` carrying `[-1,1]x[-1,1]`, which then opened 13, 2 and 9.
      */
-    const projected = rectFromClipPolygon(SCRATCH_CLIP.slice(0, count));
+    const clipped = clipPolygonToSidePlanes(SCRATCH_CLIP.slice(0, count));
+    const projected = rectFromClipPolygon(clipped);
 
     /**
      * The projection, for the portal trace. Four `rect-collapse` outcomes in six attempts, with the
@@ -287,7 +308,28 @@ class WMOPortalView extends THREE.Mesh {
       return null;
     }
 
-    return intersectRect(incoming, projected);
+    const narrowed = intersectRect(incoming, projected);
+
+    /**
+     * **BOTH RECTS, because recording only one of them nearly cost a diagnosis.**
+     *
+     * `debugOut.rect` is the raw PROJECTED AABB and can be hundreds of screens wide -- a portal
+     * vertex behind the eye divides by a negative `w` and flies off. Read on its own it looks like a
+     * window that admits everything, and a round was one step from concluding that. It admits
+     * nothing of the sort: what the flood carries is this intersection with the incoming rect, which
+     * starts at the screen and can only ever narrow.
+     *
+     * So the trace now names the carried rect separately. A field whose name does not say which of
+     * two things it holds is an instrument that agrees with whatever you already believe.
+     */
+    if (debugOut) {
+      debugOut.carried = narrowed === null ? null : {
+        minX: Number(narrowed.minX.toFixed(3)), maxX: Number(narrowed.maxX.toFixed(3)),
+        minY: Number(narrowed.minY.toFixed(3)), maxY: Number(narrowed.maxY.toFixed(3)),
+      };
+    }
+
+    return narrowed;
   }
 
   /**
