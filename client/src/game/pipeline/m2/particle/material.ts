@@ -96,6 +96,16 @@ export const applyParticleBlending = (material: any, blendingType: number): void
   // all five of `Fire_PreCast_Hand`'s emitters and all four of `Fireball_Missile_Low`'s bar one are
   // blend **4**, which is in the safe set. This fixes modes 2, 5 and 6 -- a real, game-wide fringe on
   // every blended and modulating particle -- and leaves the corona question open.
+  //
+  // AND THE CORONA'S SIZE IS AUTHORED, MEASURED: Fireball's precast kit 30 puts
+  // `fire_precast_hand` on BOTH hand slots (0x15 / 0x16) with five emitters at peak full extents
+  // 0.444 / 0.167 / **1.333** / **1.333** / 0.167, and its cast kit 38 puts `fire_cast_hand` on both
+  // with three at **1.344 / 1.961 / 1.961**. A human head is ~0.25-0.30 units on a 2.03-unit body, so
+  // the cast kit alone authors additive sprites SIX TO SEVEN head-widths across, on each hand, at
+  // full alpha mid-life. **The file can produce the owner's reference corona and more**, so no size
+  // multiplier is justified and the deficit is something suppressing those emitters rather than a
+  // number that needs raising. What remains unmeasured is how many of them are LIVE at once, which
+  // needs a running client and not another byte read.
   material.blendSrcAlpha = THREE.ZeroFactor;
   material.blendDstAlpha = THREE.OneFactor;
 };
