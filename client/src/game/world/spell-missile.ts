@@ -676,6 +676,30 @@ export class SpellMissiles {
     model.quaternion.setFromRotationMatrix(scratchBasis);
   }
 
+  /**
+   * NOT IMPLEMENTED: THE PROJECTILE'S GROUND LIGHT DECAL -- named here with its real size, because
+   * commit `2286a20` overstated it and a commit message is the permanent record.
+   *
+   * The owner: "Декаль света летящего снаряда фаербола должна быть на земле, а сейчас она над
+   * снарядом." That commit reported the gap as "a decal/projector lane -- a new pass, not a fix".
+   * **THAT IS WRONG, AND BY A LOT.** The projector already exists in this client:
+   * `world/decal.ts` is a full port of the reference's ground-decal mechanism (`decal.rs:1-23`, the
+   * `0x6d7330 -> 0x6d6fa0 -> 0x6d7480` emit chain) -- it gathers terrain and WMO faces, never
+   * doodads, clips them Sutherland-Hodgman to a projection box and emits coplanar triangles with
+   * planar top-down UVs, so a decal follows a slope by construction instead of floating over it.
+   * `selection-ring.ts:384` already drives it, and `hover-highlight.ts` uses the same module.
+   *
+   * So the actual work is: one `DecalFrame` per live missile centred under the projectile, a
+   * `decalMesh` sized like the ring's, and an ADDITIVE material instead of the ring's -- reusing a
+   * lane that is already ported and already has its own test (`__tests__/ring-decal.test.ts`). That
+   * is a small, well-scoped addition, not a new pass.
+   *
+   * It is still not taken in this round because the reference's own blob-shadow port
+   * (`benilla-app/src/blob_shadow.rs:1-28`) records that the shared collector's receiver set here
+   * does NOT yet include liquid -- "the shadow lands on terrain + WMO faces only" -- so a fireball
+   * skimming water would drop its light decal. That is a receiver-set question in `decal.ts`, and
+   * worth settling before adding a second consumer that inherits the same hole.
+   */
   private remove(index: number): void {
     const missile = this.live[index];
     if (missile.model !== null) {
