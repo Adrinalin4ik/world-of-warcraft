@@ -51,6 +51,7 @@ import { spellData } from '../../../game/pipeline/dbc/spell-data';
 import { spellWire } from '../../../game/classes/spell-wire';
 import PendingCast from '../../../game/classes/pending-cast';
 import { ERR_NO_TARGET, resolveCastTarget } from '../../../game/classes/cast-target';
+import { initiatesAutoAttack } from '../../../game/classes/auto-attack-start';
 // `GetTime()`'s clock. A cooldown's `start` is what the client's own Lua compares against, so the wire
 // side has to stamp it on the SAME clock -- see `lua/compat.ts#gameTime`.
 import { gameTime } from '../../../game/ui/framexml/lua/compat';
@@ -1760,6 +1761,55 @@ export class SpellHandler extends EventEmitter {
       bodySize: body,
       consumed: body,
     });
+
+    /**
+     * **`TryCast`'s POST-SEND TAIL: a strike starts the melee auto-attack.**
+     *
+     * The owner: "Нужно сделать так, чтобы автоатака начиналась автоматически после первого удара."
+     *
+     * Ported from `benilla-app/src/ui_action/cast_send.rs:601-630`, which byte-verifies the whole
+     * tail against `6e51b5` (wow-re `combat-feel-law.md` §5 @ c445713b): a COMMITTED send whose spell
+     * passes `initiates_auto_attack` starts the melee auto-attack **at the cast's bound unit target,
+     * unless one is already running**. The predicate and its three bits are
+     * `classes/auto-attack-start.ts`, measured on this build rather than ported.
+     *
+     * FOUR CONDITIONS, and every one of them is the reference's rather than mine:
+     *
+     *  1. **The send was COMMITTED.** This sits after `this.game.send`, so a press refused by the
+     *     in-flight guard or by target resolution never reaches it -- both of those return earlier.
+     *     That matters: the reference's tail is reached only from a committed send.
+     *  2. **The spell's attributes say so** (`initiatesAutoAttack`). NOT "any damage", which is the
+     *     one thing this must not be: Fireball, Divine Storm, Charge and Intercept all deal damage
+     *     and none of them starts a swing in the real client.
+     *  3. **A BOUND UNIT TARGET.** The reference's `if let (Some(d), Some(guid))` -- a self-implicit
+     *     cast has no guid to swing at, so `wire.kind === 'unit'` is the same test. And it must not be
+     *     OURSELVES: a helpful spell that fell back to the caster (`cast-target.ts`' autoSelfCast
+     *     candidate) would otherwise start us swinging at our own guid.
+     *  4. **NOT ALREADY ENGAGED.** `!engaged` is the TAIL's own gate, not `StartAttack`'s, and the
+     *     reference records that the distinction cost it a wrong half (decision 1028):
+     *     `Attack 0x5ecb70`'s already-attacking test skips only the send, but TryCast's tail gates
+     *     the whole CALL (`6e51cb call 0x60ecb0; 6e51d2 jne`). So a strike pressed while already
+     *     swinging does nothing at all -- notably it does not disturb a running auto-repeat.
+     *
+     * `autoAttackOn` is the right mirror for `engaged` and not an approximation: it is driven from
+     * the SERVER's `SMSG_ATTACKSTART`/`SMSG_ATTACKSTOP` naming us (`combat.ts#handleAttackStart`),
+     * which is exactly what the reference calls "our mirror is the wire-echoed `Engaged`".
+     *
+     * **NO WIRE SHAPE IS ADDED AND NOTHING IS WIDENED.** `startAttack` already exists and already
+     * sends `CMSG_ATTACKSWING` with one FULL 8-byte guid; this only calls it. The stop half is
+     * likewise already built and server-authoritative -- see the round report for the edge list.
+     *
+     * The reference also snaps the melee sheath alongside the send (`0x6131a0` -> `0x5ecb70`). This
+     * client has no sheath state to snap: the stance comes from `inCombat`, which `combat.ts` sets
+     * from the same `SMSG_ATTACKSTART` this send provokes, so the pose follows without a second
+     * writer. Named rather than silently dropped.
+     */
+    if (targeted && wire.guid !== selfGuid && initiatesAutoAttack(spellData.spell(spellId))) {
+      const combat = this.game.objectHandler?.combatHandler;
+      if (combat !== undefined && !this.autoAttackOn) {
+        combat.startAttack(wire.guid);
+      }
+    }
     return 'sent';
   }
 
