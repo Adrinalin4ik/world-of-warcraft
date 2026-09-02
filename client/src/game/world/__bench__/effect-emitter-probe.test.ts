@@ -589,3 +589,160 @@ describe('M2 ribbon geometry: the height and visibility tracks', () => {
     expect(ribbons.length).toBeGreaterThan(0);
   }, 60000);
 });
+
+/**
+ * WHICH FLAG BIT MEANS "PARTICLES STAY WHERE THEY WERE BORN".
+ *
+ * Measured as a DISCRIMINANT rather than taken from a bit list: the models are split into two groups
+ * by what they physically are -- emitters that TRAVEL (a spell missile, which must leave a trail) and
+ * emitters that never move (a campfire, a torch, a brazier, whose particles correctly ride the
+ * emitter because the emitter is nailed down). A bit that means world-space-after-birth must be set
+ * across the first group and clear across the second. Any bit that fails to separate them is not it,
+ * whatever a wiki calls it.
+ *
+ * This is the shape that catches a version-numbered value: `spawn.ts` already records that file flag
+ * 0x4000 is NOT the reference's runtime 0x4000, so reading a remapped runtime bit off the file would
+ * both miss real emitters and fire on unrelated ones.
+ */
+const TRAVELLING = [
+  'Spells/Fireball_Missile_Low.m2',
+  'Spells/Frostbolt_Missile.m2',
+  'Spells/Arcane_Missile.m2',
+  'Spells/Shadowbolt_Missile.m2',
+];
+const STATIC = [
+  // Real paths out of `gameobjectdisplayinfo.dbc` col 1, not guessed -- the first attempt at this arm
+  // guessed four and ALL FOUR 404'd, which left the control group empty and made the discriminant
+  // report a confident "0x1" off a 0/0 comparison. An empty control group is not a control group.
+  'World/Azeroth/Elwynn/PassiveDoodads/Campfire/ElwynnCampfire.m2',
+  'World/Generic/Human/Passive Doodads/Braziers/StormwindBrazier01.m2',
+  'World/Generic/Dwarf/Passive Doodads/Braziers/DwarvenBrazier02.m2',
+  'World/Expansion01/Doodads/Generic/ShadowCouncil/Torch/ShadowCouncil_Torch.m2',
+  'World/Generic/Ogre/Passive Doodads/Torches/OgreWallTorchpurple.m2',
+];
+
+describe('M2 particle emitters: the world-space-after-birth flag', () => {
+  it('finds the bit that separates travelling emitters from nailed-down ones', async () => {
+    const read = async (paths: string[]) => {
+      const rows: Array<{ path: string; flags: number[]; types: number[] }> = [];
+      for (const path of paths) {
+        // eslint-disable-next-line no-await-in-loop
+        const buffer = await fetchFixture(asM2(path));
+        if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+          rows.push({ path: `${path} (UNREACHABLE)`, flags: [], types: [] });
+          continue;
+        }
+        const m2: any = M2Parser.decode(new DecodeStream(buffer));
+        const emitters: any[] = m2.particleEmitters ?? [];
+        rows.push({
+          path,
+          flags: emitters.map((e: any) => e.flags >>> 0),
+          types: emitters.map((e: any) => e.emitterType),
+        });
+      }
+      return rows;
+    };
+    const travelling = await read(TRAVELLING);
+    const still = await read(STATIC);
+
+    const lines: string[] = [];
+    const dump = (label: string, rows: any[]) => {
+      lines.push(label);
+      for (const r of rows) {
+        lines.push(`   ${r.path}`);
+        r.flags.forEach((f: number, i: number) => {
+          lines.push(`      emitter ${i} type=${r.types[i]} flags=0x${f.toString(16)}`
+            + ` bits=[${[...Array(24).keys()].filter((b) => (f >>> b) & 1)
+              .map((b) => `0x${(1 << b).toString(16)}`).join(' ')}]`);
+        });
+      }
+    };
+    dump('TRAVELLING (must leave a trail):', travelling);
+    dump('STATIC (correctly rides the emitter):', still);
+
+    // The discriminant: set on EVERY travelling emitter, clear on EVERY static one.
+    const all = (rows: any[]) => rows.flatMap((r: any) => r.flags);
+    const tf = all(travelling);
+    const sf = all(still);
+    const candidates: string[] = [];
+    for (let b = 0; b < 24; b += 1) {
+      const bit = 1 << b;
+      const onT = tf.filter((f) => (f & bit) !== 0).length;
+      const onS = sf.filter((f) => (f & bit) !== 0).length;
+      lines.push(`bit 0x${bit.toString(16).padStart(5, '0')}`
+        + `  travelling ${onT}/${tf.length}   static ${onS}/${sf.length}`);
+      if (onT === tf.length && onS === 0 && tf.length > 0) {
+        candidates.push(`0x${bit.toString(16)}`);
+      }
+    }
+    // GUARD, and it exists because this arm already lied once: with every static path 404-ing, every
+    // bit trivially satisfied "clear on all 0 static emitters" and the arm named 0x1 -- a bit set on
+    // literally every emitter in the file -- as a perfect discriminant.
+    lines.push(sf.length === 0
+      ? 'VOID: the control group decoded 0 emitters, so no discriminant can be claimed'
+      : `PERFECT DISCRIMINANTS: ${candidates.length ? candidates.join(', ') : 'NONE'}`);
+    expect(sf.length).toBeGreaterThan(0);
+    // eslint-disable-next-line no-console
+    console.log(lines.join('\n'));
+    expect(tf.length).toBeGreaterThan(0);
+  }, 180000);
+});
+
+/**
+ * DOES THE TRAIL PORT COLLIDE WITH GRAVITY'S CONVENTION, and how long is a legitimate tail?
+ *
+ * `integratePool` applies gravity as `velocity[base + 2] -= gravityStep` -- along the POOL's local
+ * -Z. The pool is in the emitter's local space, so gravity is MODEL-relative, and a missile model
+ * rotated to face its flight direction therefore has its particle gravity pointing somewhere other
+ * than world down. That is a pre-existing disagreement between two conventions and this arm prices
+ * it rather than assuming it is harmless: if the travelling emitters author gravity 0, the trail
+ * port cannot make it worse, and the defect is real but latent.
+ *
+ * It also bounds the tail, which decides whether anything culls it: a trail cannot be longer than
+ * `lifespan * missileSpeed`, and both numbers are in the data.
+ */
+describe('M2 particle emitters: gravity convention and trail length', () => {
+  it('reports authored gravity and lifespan for travelling emitters', async () => {
+    const first = (block: any): number | null => {
+      const values = block?.tracks?.[0]?.values;
+      if (!values || values.length === 0) return null;
+      const v = values[0];
+      return typeof v === 'number' ? v : (v?.x ?? null);
+    };
+    const maxOf = (block: any): number | null => {
+      let best: number | null = null;
+      for (const track of block?.tracks ?? []) {
+        for (const v of track?.values ?? []) {
+          const n = typeof v === 'number' ? v : (v?.x ?? null);
+          if (n !== null && (best === null || Math.abs(n) > Math.abs(best))) best = n;
+        }
+      }
+      return best;
+    };
+    const lines: string[] = [];
+    for (const path of ['Spells/Fireball_Missile_Low.m2', 'Spells/Arcane_Missile.m2',
+      'Spells/Shadowbolt_Missile.m2',
+      'World/Azeroth/Elwynn/PassiveDoodads/Campfire/ElwynnCampfire.m2']) {
+      // eslint-disable-next-line no-await-in-loop
+      const buffer = await fetchFixture(asM2(path));
+      if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+        lines.push(`${path}: UNREACHABLE`);
+        continue;
+      }
+      const m2: any = M2Parser.decode(new DecodeStream(buffer));
+      lines.push(path);
+      (m2.particleEmitters ?? []).forEach((e: any, i: number) => {
+        lines.push(`   emitter ${i} flags=0x${(e.flags >>> 0).toString(16)}`
+          + ` follow=${((e.flags >>> 0) & 0x4000) !== 0}`
+          + ` gravity[0]=${first(e.gravity)} gravityMax=${maxOf(e.gravity)}`
+          + ` lifespan[0]=${first(e.lifespan)} lifespanMax=${maxOf(e.lifespan)}`
+          + ` speed[0]=${first(e.emissionSpeed)}`
+          + ` followSpeeds=(${e.followSpeed1},${e.followSpeed2})`
+          + ` followScales=(${e.followScale1},${e.followScale2})`);
+      });
+    }
+    // eslint-disable-next-line no-console
+    console.log(lines.join('\n'));
+    expect(lines.length).toBeGreaterThan(0);
+  }, 120000);
+});

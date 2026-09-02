@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 import { ParticleBatch } from './batch';
 import { ParticleMaterial } from './material';
+import { driftPool, followFraction } from './integrate';
 import { ParticlePool } from './pool';
 import { RuntimeEmitter } from './runtime-emitter';
 import { evaluateAnimationTrack } from './tracks';
@@ -20,11 +21,43 @@ interface LiveEmitter {
   // Tracks whether this entry was culled as of the previous animate() call, so the pool is only reset
   // on the transition into culled (see I5) rather than every frame it stays culled.
   culled: boolean;
+  /**
+   * THE EMITTER'S WORLD POSITION LAST FRAME, and whether there was a last frame -- the input to the
+   * world-frozen trail (`integrate.ts#driftPool`). Three scalars rather than a `Vector3` because
+   * this is read and written on every surviving emitter every frame and never needs vector maths.
+   *
+   * `hasPrev` is NOT replaceable by "prev is (0,0,0)": the origin is a legal emitter position, and
+   * seeding from it would make the first frame of an emitter near 0,0,0 subtract its entire world
+   * position from every live particle. It is also reset on the culled transition below, because an
+   * emitter that walked 400 units while culled must not apply that whole jump as one frame's drift.
+   */
+  prevX: number;
+  prevY: number;
+  prevZ: number;
+  hasPrev: boolean;
 }
 
 // Reused across animate() calls to avoid an allocation per emitter per frame.
 const scratchWorldPosition = new THREE.Vector3();
 const scratchInverse = new THREE.Matrix4();
+const scratchDriftBasis = new THREE.Matrix3();
+const scratchDrift = new THREE.Vector3();
+
+/**
+ * THE WORLD-FROZEN TRAIL'S A/B SWITCH: `window.particleTrailControl.enabled = false` restores the
+ * previous behaviour, where every live particle is re-placed relative to the emitter's current
+ * position each frame and a travelling emitter's cloud rides it with no history.
+ *
+ * A switch rather than a constant because this changes EVERY moving emitter in the world, not only a
+ * spell missile -- a carried torch, a creature with a particle effect, anything that walks -- and the
+ * owner needs to be able to compare the two in one session rather than across a rebuild. Read once
+ * per `animate`, never per emitter.
+ */
+export const particleTrailControl = { enabled: true };
+
+if (typeof window !== 'undefined') {
+  (window as unknown as Record<string, unknown>).particleTrailControl = particleTrailControl;
+}
 
 /**
  * Owns every live particle emitter and its batch.
@@ -187,6 +220,9 @@ export class ParticleManager {
           bone,
           basis: bone ? new THREE.Matrix4() : null,
           culled: false,
+          // `hasPrev` false so the FIRST frame establishes the anchor and drifts nothing -- see the
+          // field's own doc for why (0,0,0) is not a usable sentinel.
+          prevX: 0, prevY: 0, prevZ: 0, hasPrev: false,
         });
       }
     } catch (error) {
@@ -252,6 +288,8 @@ export class ParticleManager {
     // 60fps) is generous for a normal frame and still short enough that a resumed tab doesn't visibly
     // jump.
     const dt = Math.min(delta, 0.1);
+    // ONCE per animate, never per emitter -- the same rule `blendControl` follows in `instance-anim`.
+    const trailEnabled = particleTrailControl.enabled;
 
     for (const entry of this.emitters) {
       // Read matrixWorld directly instead of calling updateMatrixWorld() up front: the renderer's own
@@ -271,6 +309,9 @@ export class ParticleManager {
           // stale, frozen puff before the emitter resumes -- and the pool's slots are never reclaimed.
           entry.emitter.pool.reset();
           entry.culled = true;
+          // See `hasPrev`: an emitter that travelled while culled must not hand its whole
+          // displacement to the first uncelled frame as one step of drift.
+          entry.hasPrev = false;
         }
 
         (entry.batch.geometry as THREE.InstancedBufferGeometry).instanceCount = 0;
@@ -301,6 +342,50 @@ export class ParticleManager {
       // The instance's own matrix places its particles in the world; the emitter's bone orients them
       // within the model. This also refreshes the bone subtree, which the basis below reads.
       entry.instance.updateMatrixWorld(false);
+
+      // THE WORLD-FROZEN TRAIL. `pack()` re-places every live particle through the emitter's CURRENT
+      // world matrix, so the store is anchor-riding and a travelling emitter's cloud rides it with no
+      // history -- correct for a campfire, and what destroys a spell missile's tail. Leaving the
+      // emitter's own per-frame motion behind is the reference's `(fraction - 1) * delta` move for an
+      // anchor-riding store; see `integrate.ts#driftPool` for the citation and for why the polarity
+      // is settled by the original client rather than by the reference, which contradicts itself.
+      //
+      // ORDER: after `updateMatrixWorld` so the position is this frame's, and BEFORE `step()` so the
+      // particles born this frame are not drifted by a motion that happened before they existed.
+      const we = entry.instance.matrixWorld.elements;
+      const wx = we[12];
+      const wy = we[13];
+      const wz = we[14];
+      if (trailEnabled && entry.hasPrev) {
+        const ddx = wx - entry.prevX;
+        const ddy = wy - entry.prevY;
+        const ddz = wz - entry.prevZ;
+        // THE EARLY-OUT THAT KEEPS EVERY CAMPFIRE FREE. A static emitter's delta is exactly zero, so
+        // it pays this three-way compare and nothing else -- no inverse, no Matrix3, no pool walk.
+        if (ddx !== 0 || ddy !== 0 || ddz !== 0) {
+          // Rotated into the POOL's local frame, because that is the space the pool stores and the
+          // space `integratePool` applies gravity in. A Matrix3 and `applyMatrix3` rather than
+          // `transformDirection`, which NORMALISES -- it would turn every delta into a unit step and
+          // make the trail's length independent of the projectile's speed.
+          scratchDriftBasis.setFromMatrix4(scratchInverse.copy(entry.instance.matrixWorld).invert());
+          scratchDrift.set(ddx, ddy, ddz).applyMatrix3(scratchDriftBasis);
+          const keep = followFraction(
+            entry.definition,
+            dt > 0 ? Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz) / dt : 0,
+          );
+          const leave = 1 - keep;
+          if (leave > 0) {
+            driftPool(
+              entry.emitter.pool,
+              scratchDrift.x * leave, scratchDrift.y * leave, scratchDrift.z * leave,
+            );
+          }
+        }
+      }
+      entry.prevX = wx;
+      entry.prevY = wy;
+      entry.prevZ = wz;
+      entry.hasPrev = true;
 
       // Bone-in-model-space = inverse(model world) * bone world. `pack()` then applies the model's
       // world matrix to every particle, so composing the two puts a spawn exactly where its bone is

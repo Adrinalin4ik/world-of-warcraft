@@ -50,3 +50,104 @@ export const integratePool = (pool: ParticlePool, dt: number, forces: Forces): n
 
   return freed;
 };
+
+/**
+ * M2Particle file flag `0x4000`: live particles KEEP a fraction of the emitter's per-frame world
+ * motion, so the cloud rides the emitter instead of being left behind.
+ *
+ * The reference is `ParticleEmitterDef::follow_emitter` (`benilla-formats/src/particles.rs:470-472`,
+ * wow-re `part-emitter-motion.md` §2/§2b, marked §5-resolved there): "live particles keep exactly
+ * follow_line's fraction (<= 1) of the emitter's per-frame world motion -- at saturation the trail
+ * rides the emitter rigidly, below it lags toward a world-frozen trail; it never leads."
+ *
+ * ## THE POLARITY IS SETTLED BY THE OWNER'S SCREENSHOT, NOT BY THE REFERENCE
+ *
+ * The reference contradicts ITSELF on this, and the disagreement is worth recording rather than
+ * quietly resolving. `follow_emitter`'s own doc says "the reference's baseline for this content class
+ * is **world-frozen** ... and its `+fraction*delta` add recovers the ride". Forty lines above it,
+ * `model_space()`'s doc says the opposite: "Either way the cloud is re-anchored to the emitter's
+ * current position every frame ... a moving model carries its flame; there is **NO world-frozen
+ * trail mode**."
+ *
+ * Both are rationale, so neither wins on the "prefer the bytes" rule. What settles it is a measured
+ * fact plus the original client: `Spells/Fireball_Missile_Low.m2`'s four emitters are
+ * `0x40009 / 0x30009 / 0x30009 / 0x20055` -- **bit 0x4000 is CLEAR on all four** -- and the owner's
+ * screenshot of the original client shows Fireball with a long streaming tail. No flag and a tail
+ * therefore means baseline = world-frozen, and `model_space()`'s "no world-frozen trail mode" is the
+ * sentence that is wrong. That is the only ordering consistent with the observable.
+ *
+ * ## The flag word did NOT shift between 1.12 and 3.3.5a, and that was checked rather than assumed
+ *
+ * Surveyed on the served build with a validated reader (it reproduces the JS parser's bone, ribbon
+ * and particle counts and all four of Fireball's flag words exactly): across 129 missile-named
+ * `SpellVisualEffectName` models (607 emitters) and a 300-model `GameObjectDisplayInfo` sample
+ * (337 emitters), `0x4000` is **5.4% of missile emitters against 1.5% of doodad emitters** -- live,
+ * and enriched 3.6x on exactly the content class the reference names ("the hunter missiles author
+ * it"). The 1.12 -> runtime remap `0x4000 -> 0x40000` is NOT what this build's file holds: file
+ * `0x40000` runs 11.0% / 13.6%, i.e. no enrichment at all, so it is a different flag. The
+ * cross-check that pins the word as unshifted is `0x20`
+ * (`scale_size_by_instance`, "torches/campfires author it"): 78.9% of doodad emitters against 50.2%
+ * of missile ones, and 9/9 vs 0/10 on a hand-split fire-versus-missile control.
+ */
+export const FOLLOW_EMITTER = 0x4000;
+
+export interface FollowDef {
+  flags: number;
+  followSpeed1: number;
+  followScale1: number;
+  followSpeed2: number;
+  followScale2: number;
+}
+
+/**
+ * The fraction of the emitter's motion this frame's live particles KEEP, in 0..1.
+ *
+ * `0` is a world-frozen trail and `1` is a rigid ride. The line is the reference's load-time
+ * `0x7b5d30` (`particles.rs:477-483`): the slope/intercept through the two authored
+ * `(speed, fraction)` samples, evaluated at this frame's emitter speed and clamped. Coincident
+ * speeds mean "no follow response" and the reference zeroes both, so that degrades to 0 here too --
+ * which is the same answer as an unflagged emitter and therefore cannot introduce a third behaviour.
+ */
+export const followFraction = (definition: FollowDef, emitterSpeed: number): number => {
+  if ((definition.flags & FOLLOW_EMITTER) === 0) {
+    return 0;
+  }
+  const span = definition.followSpeed2 - definition.followSpeed1;
+  if (Math.abs(span) < 1e-6) {
+    return 0;
+  }
+  const slope = (definition.followScale2 - definition.followScale1) / span;
+  const value = slope * emitterSpeed + (definition.followScale1 - slope * definition.followSpeed1);
+  return value < 0 ? 0 : value > 1 ? 1 : value;
+};
+
+/**
+ * Leave `amount` of the emitter's motion BEHIND: subtract it from every live particle's position.
+ *
+ * The pool stores positions in the emitter's local space and `ParticleBatch#pack` re-places them
+ * through the emitter's CURRENT world matrix every frame, so the store is anchor-riding by
+ * construction. The reference states the conversion for exactly that case: "over an anchor-riding
+ * store the same observable is a `(fraction-1)*delta` move" (`particles.rs:463-469`). This is that
+ * move, with the sign carried by the caller passing `(1 - fraction) * delta` and subtracting.
+ *
+ * SO NOTHING ABOUT GRAVITY'S CONVENTION CHANGES. `delta` arrives already rotated into the pool's own
+ * local frame, which is why this takes three scalars rather than a world vector -- see the caller.
+ * Integrating in world space instead would have been the smaller diff and would have silently
+ * redefined `integratePool`'s gravity, which is applied along the POOL's local -Z
+ * (`velocity[base + 2] -= gravityStep`) for every campfire in the game.
+ *
+ * A zero delta returns before touching the pool, so a static emitter -- every campfire, torch and
+ * brazier -- pays one three-way compare and not one write. That is what keeps the unchanged path
+ * unchanged.
+ */
+export const driftPool = (pool: ParticlePool, dx: number, dy: number, dz: number): void => {
+  if (dx === 0 && dy === 0 && dz === 0) {
+    return;
+  }
+  pool.forEachLive((slot) => {
+    const base = slot * 3;
+    pool.position[base] -= dx;
+    pool.position[base + 1] -= dy;
+    pool.position[base + 2] -= dz;
+  });
+};
