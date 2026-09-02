@@ -1308,6 +1308,7 @@ export default class World extends EventEmitter {
       delta * 1000,
       (guid: string) => this.entities.get(guid)?.position ?? null,
       (targetGuid: string, spellId: number) => this.playImpactKit(targetGuid, spellId),
+      camera,
     );
 
     // THE NAMEPLATES, an EIGHTH named span. See the exhaustiveness note above: a statement outside all

@@ -5,6 +5,8 @@ import { spellData } from '../pipeline/dbc/spell-data';
 import { warnOnce } from '../ui/framexml/lua/methods/region';
 import spellMotion, { MotionOffset } from './spell-motion';
 import { spellFxParticleSize } from './spell-fx-scale';
+import { poseEffectModel } from './effect-pose';
+import { worldClock } from '../pipeline/m2/anim/world-clock';
 import type Unit from '../classes/unit';
 
 /**
@@ -492,6 +494,7 @@ export class SpellMissiles {
     deltaMs: number,
     unitAt: (guid: string) => THREE.Vector3 | null,
     onImpact: (targetGuid: string, spellId: number) => void,
+    camera?: THREE.Camera,
   ): void {
     if (this.live.length === 0) {
       return;
@@ -549,6 +552,16 @@ export class SpellMissiles {
         if (typeof model.updateMatrix === 'function') {
           model.updateMatrix();
         }
+        // THE POSE PASS, before the world-matrix walk rather than after: `poseEffectModel` writes bone
+        // TRS, and `updateMatrixWorld(true)` below is what accumulates it -- the ordering the doodad
+        // lane keeps through its `poseFrame` stamp. `world/effect-pose.ts` carries the reasoning, and
+        // the projectile is why it matters here: `LightningBolt_Missile` has 23 animated bones and was
+        // drawing every one of them in bind pose.
+        //
+        // The return is deliberately DISCARDED, unlike the kit lane's: this lane calls
+        // `updateMatrixWorld(true)` unconditionally on the next line because the missile MOVED, so
+        // there is nothing a pose-only walk would add.
+        poseEffectModel(model, camera, worldClock.frameIndex);
         model.updateMatrixWorld(true);
       }
     }

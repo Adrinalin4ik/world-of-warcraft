@@ -5,6 +5,9 @@ import { worldClock } from '../pipeline/m2/anim/world-clock';
 import { kitEmitters, WORLD_EFFECT_TAG, KitEmitter } from '../classes/spell-kit-fx';
 import { warnOnce } from '../ui/framexml/lua/methods/region';
 import { spellFxParticleSize } from './spell-fx-scale';
+import {
+  poseEffectModel, advanceEffectLifecycle, armEffectDecay, EffectLifecycle,
+} from './effect-pose';
 import type Unit from '../classes/unit';
 
 /**
@@ -227,6 +230,14 @@ interface Instance {
   decaying: boolean;
   /** The ribbon lane this model registered with, so removal releases it too. */
   ribbons: RibbonManagerLike | null;
+  /**
+   * Where this instance sits in the reference's `Stand` -> `Hold` -> `Decay` lifecycle.
+   *
+   * `birth` until its armed span elapses, then `settled` (on `Hold` if the model authors one, else
+   * parked on the birth clip -- the reference's explicit do-nothing). `decaying` once reaped.
+   * See `world/effect-pose.ts`.
+   */
+  lifecycle: EffectLifecycle;
 }
 
 /**
@@ -474,6 +485,7 @@ export class SpellKitEffects {
           planted,
           decaying: false,
           ribbons: ribbonManager,
+          lifecycle: 'birth',
         });
 
         // RETURNED, NOT ORPHANED, and this line is the whole point of the round. `register` above
@@ -570,7 +582,12 @@ export class SpellKitEffects {
         continue;
       }
       instance.decaying = true;
-      const decay = spanOf(instance.model, ANIM_DECAY);
+      instance.lifecycle = 'decaying';
+      // ARMS the clip as well as reading its span, which is the half that was missing: the reap knew
+      // how long a decay lasts and never played it, so a reaped shield held its pose while it waited
+      // out a fade it was not performing. `armEffectDecay` does both (`world/effect-pose.ts`), and
+      // never repeats the clip whatever the sequence flags say -- the instance dies at its end.
+      const decay = armEffectDecay(instance.model);
       if (decay === null) {
         // The reference's immediate-destroy gate: no `Decay` authored, so it goes now.
         instance.remaining = 0;
@@ -608,6 +625,9 @@ export class SpellKitEffects {
     if (this.live.length === 0) {
       return;
     }
+    // The gate phases on it, so it must be the world's own counter rather than a local tick count --
+    // `shouldPose` staggers instances against this exact number for every other animated population.
+    const frameIndex = worldClock.frameIndex;
     for (let i = this.live.length - 1; i >= 0; i -= 1) {
       const instance = this.live[i];
 
@@ -629,6 +649,17 @@ export class SpellKitEffects {
           billboarded.applyBillboards(camera);
         }
       }
+
+      // THE POSE PASS. `world/effect-pose.ts` carries the whole reasoning; the two things that matter
+      // at this call site are that it samples the MATERIAL CHANNELS unconditionally -- which is what
+      // stops a transparency-only shield drawing at full additive alpha -- and that a true return
+      // means the bones moved, so the subtree needs re-accumulating.
+      if (poseEffectModel(instance.model, camera, frameIndex)) {
+        instance.model.updateMatrixWorld(true);
+      }
+      // AND THE HANDOVER: `Stand` -> `Hold` once the birth span elapses. Without it a state kit holds
+      // its birth pose for the whole life of the buff, which for a shield is minutes.
+      instance.lifecycle = advanceEffectLifecycle(instance.model, instance.lifecycle);
       if (instance.remaining === null) {
         continue; // persistent and unreaped: its spell owns it
       }
