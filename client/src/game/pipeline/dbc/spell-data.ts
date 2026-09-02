@@ -124,6 +124,58 @@ const COL = {
    * file agrees, column 12's maximum being `0xf807e0ff`, a shapeshift-form mask and not an attribute word.
    */
   attributes: 4,
+  /**
+   * `Targets` -- the TARGETING FLAG-WORD SEED, and the whole of "who may this spell be cast on".
+   *
+   * The real client seeds its targeting word from this column and then overlays one arm keyed on
+   * `EffectImplicitTargetA[0]`; a word of ZERO means the cast needs no target at all and ships
+   * `TARGET_FLAG_SELF` with no guid (`benilla-app/src/ui_action/cast_target.rs:4-16`, transcribing
+   * `Spell_C::ArmCast 0x6e5250` + `BindTarget 0x6e5b40`, both byte-verified there).
+   *
+   * **COLUMN 16 IS MEASURED, and the reference's own byte offset is useless here**: it states the
+   * field as `SpellRec+0x34`, a 1.12 offset. Three independent checks on the served
+   * `dbfilesclient/spell.dbc` (49839 records, 234 fields, 936 B, so a field index IS offset/4):
+   *
+   *  1. `wow-data-parser/dbc/entities/spell.js` reaches `targets` at declared index 16 by its own
+   *     field arithmetic, and the SAME arithmetic reaches `interruptFlags` at 31, `speed` at 47,
+   *     `effectIDs` at 71-73, `visualIDs` at 131 and `name` at 136 -- five indices this file and
+   *     `spell-visual.js` already measured independently. A declaration that lands all five cannot
+   *     be off by a column at 16.
+   *  2. The column is a BITMASK and nothing else: **15 distinct values across all 49839 rows**, every
+   *     one a power of two or a sum of them (`0` x46744, `0x40` x1145, `0x10` x768, `0x100` x476,
+   *     `0x20000` x355, `0x4000` x203, `0x20` x64, `0x8000` x50, `0x2` x11, `0x402` x9, ...).
+   *  3. **The reference's two byte-verified VALUES reproduce exactly.** It cites "Blizzard's bare
+   *     `Targets = 0x40`" and the LOCKED family's `0x4000`: here Blizzard 10 and Flamestrike 2120
+   *     both read **0x40**, and Opening 3365/6247, Mining 2575 and Herb Gathering 2366 all read
+   *     **0x4000**. Meanwhile every self-buff and every heal reads **0** -- which is the finding that
+   *     matters, because it means the friendly/hostile question is NOT in this column at all and is
+   *     decided by the implicit-target overlay below.
+   */
+  targets: 16,
+  /**
+   * `EffectImplicitTargetA[0]` -- the overlay arm that turns a zero `Targets` word into a real
+   * targeting requirement. Without it, a heal and a self-buff are indistinguishable.
+   *
+   * **COLUMN 86 IS MEASURED, and the ENUM VALUES ARE UNCHANGED FROM 1.12** -- which is a finding, not
+   * an assumption. The reference's arm map is byte-verified (`cast_target.rs:224-240`): `1` clears the
+   * explicit gate, `6|53` set UNIT_ENEMY, `16` is the ground arm, `21|45` set UNIT_ASSIST, `23` sets
+   * GAMEOBJECT, `25|63` set UNIT. Read off the served file at index 86, **every one of those arms
+   * lands on exactly the family it should**:
+   *
+   *      1   Frost Armor 168, Ice Armor 7302, Mage Armor 6117, Molten Armor 30482,
+   *          Mana Shield 1463, Ice Barrier 11426        -- the self-only buffs
+   *      6   Fireball 133, Frostbolt 116, Smite 585, Lightning Bolt 403, Immolate 348,
+   *          Corruption 172                             -- the enemy nukes
+   *     21   Lesser Heal 2050, Heal 2054, Greater Heal 2060, Holy Light 635, Rejuvenation 774,
+   *          Regrowth 8936, Power Word: Shield 17, Arcane Intellect 1459, Mark of the Wild 1126
+   *     45   Healing Wave 331/332                       -- the other half of the 21|45 arm
+   *     16   Flamestrike 2120                           -- the ground arm
+   *     23   Opening 3365, Mining 2575, Herb Gathering 2366  -- the LOCKED family
+   *
+   * Six arms, six families, no misses. That is much stronger evidence than a column scan could give,
+   * because the arms partition a set the reference named for a DIFFERENT build.
+   */
+  implicitTargetA0: 86,
   castingTimeIndex: 28,
   /**
    * `InterruptFlags` -- what BREAKS a cast in progress. Bit 0x1 is
@@ -421,6 +473,10 @@ export interface SpellRow {
   iconID: number;
   /** `SpellVisual.dbc` id, or 0 for a spell with no visual (spell 6603 Auto Attack is one). */
   visualID: number;
+  /** `Targets` -- the targeting flag-word seed. See `COL.targets`; consumed by `classes/cast-target.ts`. */
+  targets: number;
+  /** `EffectImplicitTargetA[0]` -- the flag-word overlay arm. See `COL.implicitTargetA0`. */
+  implicitTargetA0: number;
   /** `SpellCastTimes.dbc` id. Read for a later round; cast TIME is deferred. */
   castingTimeIndex: number;
   /** `InterruptFlags`. Bit 0x1 = movement breaks the cast. See `COL.interruptFlags`. */
@@ -1040,6 +1096,8 @@ class SpellData {
         spellLevel: col(COL.spellLevel),
         iconID: col(COL.iconID),
         visualID: col(COL.visual),
+        targets: col(COL.targets),
+        implicitTargetA0: col(COL.implicitTargetA0),
         castingTimeIndex: col(COL.castingTimeIndex),
         speed: flt(COL.speed),
         interruptFlags: col(COL.interruptFlags),

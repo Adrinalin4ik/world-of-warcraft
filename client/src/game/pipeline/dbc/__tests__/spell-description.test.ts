@@ -24,6 +24,8 @@ function emptyRow(id: number, description: string): SpellRow {
     passive: false,
     hiddenInSpellbook: false,
     speed: 0,
+    targets: 0,
+    implicitTargetA0: 0,
     interruptFlags: 0,
     channelInterruptFlags: 0,
   hiddenFromAuraBar: false,
