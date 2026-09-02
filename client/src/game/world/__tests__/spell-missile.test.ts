@@ -26,6 +26,9 @@ jest.mock('../../pipeline/dbc/spell-data', () => ({
     // Null so nothing tries to load a model: the flight law is what is under test, and the reference
     // is explicit that a modelless missile "flies invisible and still impacts on schedule".
     missileModelPath: () => null,
+    // No motion row: this test is about the straight arrive-on-time law, and `spell-motion.ts` has
+    // its own instrument. Null is also the ordinary answer -- only 1051 of 9406 visuals name one.
+    missileMotionScript: () => null,
   },
 }));
 

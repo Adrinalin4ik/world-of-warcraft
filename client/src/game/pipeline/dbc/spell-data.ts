@@ -1252,7 +1252,7 @@ class SpellData {
    * it yet and `world/spell-missile.ts` says why; this is the door for the round that does, so that
    * round reads the real script instead of re-deriving an arc.
    */
-  missileMotionScript(spellId: number): { name: string; script: string } | null {
+  missileMotionScript(spellId: number): { id: number; name: string; script: string } | null {
     const row = this.spell(spellId);
     if (row === null || row.visualID === 0) {
       return null;
@@ -1261,7 +1261,11 @@ class SpellData {
     if (motionId === undefined) {
       return null;
     }
-    return this.missileMotionRows?.get(motionId) ?? null;
+    const motion = this.missileMotionRows?.get(motionId);
+    // The id travels with the row because `world/spell-motion.ts` caches its compiled chunk by it --
+    // a compile cache keyed on the spell would recompile the same script once per spell sharing it,
+    // and Parabola alone is reached by 255 visuals.
+    return motion === undefined ? null : { id: motionId, ...motion };
   }
 
   /**

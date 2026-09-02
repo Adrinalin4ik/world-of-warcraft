@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import M2Blueprint from '../pipeline/m2/blueprint';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { warnOnce } from '../ui/framexml/lua/methods/region';
+import spellMotion, { MotionOffset } from './spell-motion';
 import type Unit from '../classes/unit';
 
 /**
@@ -38,36 +39,29 @@ import type Unit from '../classes/unit';
  * -- at melee range there is no visible flight or trail at all" (`missile.rs:20-22`), which is why the
  * zero-time case below is an impact and not a discard.
  *
- * ## THE PARABOLA IS REAL, IS AUTHORED IN LUA, AND IS NOT IMPLEMENTED HERE
+ * ## THE ARC ON TOP OF IT IS THE GAME'S OWN LUA, AND IT IS NOW RUNNING
  *
- * The brief for this round asked to port the motion "from the reference rather than lerping". **The
- * reference has no motion to port**: `SpellMissile.dbc` and `SpellMissileMotion.dbc` appear NOWHERE in
- * it -- zero matches across every crate -- and its own header names the consequence, "a lobbed shot
- * reads as a straight glide here" (`missile.rs:59-61`). So the straight arrive-on-time line below IS
- * the reference's behaviour, faithfully ported, and not a shortcut taken instead of one.
+ * The straight line above is the reference's whole flight law; the reference has no motion table at
+ * all and admits "a lobbed shot reads as a straight glide here" (`missile.rs:59-61`).
+ * `SpellMissileMotion.dbc` supplies the missing arc as **Lua source**, and `world/spell-motion.ts`
+ * compiles and evaluates it -- with the frame cost measured BEFORE it was written, which is the whole
+ * reason it exists at all (0.014 ms for one projectile, 0.096 ms for eight, against a 16.67 ms frame).
+ * That file carries the numbers, the rejected alternatives and the unresolved trig-unit question.
  *
- * What the measurement found instead is better news than a port would have been.
- * `SpellMissileMotion.dbc` on this build is 204 rows x 5 fields with a **57,509-byte string block**,
- * and its column 2 is **Lua SOURCE** -- the flight law is authored as script, not as coefficients.
- * Row 13 `Parabola`, verbatim off the served file:
+ * **How the offset is APPLIED is derived here, not ported, because nothing to port exists.** The
+ * script yields `transMag` (a magnitude), `transAngle` (an angle around the flight axis) and the three
+ * explicit axis terms `transFront`/`transRight`/`transUp`. This composes them in a basis built at
+ * launch -- forward along the flight, right horizontal, up completing it -- as
  *
- *     local angle = 0
- *     local maxMagnitude = startDistance * .15
- *     transAngle = angle
- *     transMag = (progress * 2) - 1
- *     transMag = (1 - (transMag * transMag)) * maxMagnitude
+ *     offset = (up * cos(transAngle) + right * sin(transAngle)) * transMag
+ *              + forward * transFront + right * transRight + up * transUp
  *
- * So the contract is: inputs `progress`, `time`, `startDistance`, `missileIndex`, `missileCount`,
- * `rand1`, `rand2`; outputs `transAngle`, `transMag`, `transFront`, `transRight`, `transUp`,
- * `speedScalar`. Row 19 `Spiral Vortex` and row 20 `Drunken Missiles` use the full input set including
- * `sin`/`cos` and both random seeds, so the simple rows are not the whole shape.
- *
- * **This client already has the VM to run that** (fengari, executing FrameXML), so it is portable
- * rather than blocked -- but it is a per-missile per-frame Lua evaluation, and `CLAUDE.md` records a
- * 10.1 s interface freeze caused by fengari handle churn, so it needs its own round with its own
- * measurement. Named as the scoped next step, with the column measured and the script quoted, rather
- * than approximated with a hand-rolled arc here -- a hand-rolled arc would look plausible and would
- * agree with nothing in the data.
+ * with `transAngle = 0` therefore meaning STRAIGHT UP. That pairing is the derivation: row 13
+ * `Parabola` sets `transAngle = 0` and a positive `transMag`, and a parabola is a vertical bulge, so
+ * angle zero must be the up axis. **The falsifier is direct and the owner can see it** -- if Fireball
+ * bulges SIDEWAYS instead of upward, the cos/sin pair is swapped and nothing else in this file is
+ * wrong. It is stated this plainly because `CLAUDE.md` records that every orientation defect here has
+ * been two conventions meeting, and this is a place where a convention had to be chosen.
  *
  * ## Named deviations from the reference, each with its reason
  *
@@ -126,6 +120,9 @@ import type Unit from '../classes/unit';
 /** Module-level scratch, so the per-frame path allocates nothing. */
 const toTarget = new THREE.Vector3();
 const launchPoint = new THREE.Vector3();
+const straightAt = new THREE.Vector3();
+const offset = new THREE.Vector3();
+const WORLD_UP = new THREE.Vector3(0, 0, 1);
 
 /**
  * How high above a unit's origin a projectile is launched from and aimed at, in world units.
@@ -159,6 +156,25 @@ interface Missile {
   remaining: number;
   /** True when the target was in the GO's MISS list -- arrival plays no impact kit. */
   missed: boolean;
+
+  // ---- the motion script's state, all fixed at launch. See `world/spell-motion.ts`.
+  /** The whole flight time, so `progress` and `time` can be derived from `remaining`. */
+  totalTime: number;
+  /** `startDistance` -- launch-to-aim distance at launch, the input 93 of 204 rows read. */
+  startDistance: number;
+  /** Which of this cast's projectiles this is, and how many there are: 32 rows read the pair. */
+  index: number;
+  count: number;
+  /** `rand1`/`rand2`/`rand3` -- per-missile seeds, so a seeded row is pure PER MISSILE. */
+  rand1: number;
+  rand2: number;
+  rand3: number;
+  /** The flight basis, built once at launch. `forward` is launch -> aim; `up` completes the pair. */
+  forward: THREE.Vector3;
+  right: THREE.Vector3;
+  up: THREE.Vector3;
+  /** Where the straight line starts, kept so the offset is applied to the unoffset path. */
+  from: THREE.Vector3;
 }
 
 export class SpellMissiles {
@@ -231,13 +247,16 @@ export class SpellMissiles {
       }
       this.spawn(
         spellId, null, new THREE.Vector3(groundAt.x, groundAt.y, groundAt.z),
-        false, speed, modelPath, particleManager, unitAt,
+        false, speed, modelPath, particleManager, unitAt, 0, 1,
       );
       return;
     }
 
-    for (const target of targets) {
-      this.spawn(spellId, target.guid, null, target.missed, speed, modelPath, particleManager, unitAt);
+    for (let i = 0; i < targets.length; i += 1) {
+      this.spawn(
+        spellId, targets[i].guid, null, targets[i].missed, speed, modelPath, particleManager, unitAt,
+        i, targets.length,
+      );
     }
   }
 
@@ -250,6 +269,8 @@ export class SpellMissiles {
     modelPath: string | null,
     particleManager: ParticleManager | null,
     unitAt: (guid: string) => THREE.Vector3 | null,
+    index: number,
+    count: number,
   ): void {
     // THE DEADLINE, fixed here and never recomputed: distance / Speed (`missile.rs:17-19`). Measured
     // from the aim point at LAUNCH, so a target who then runs is chased inside the original window.
@@ -262,9 +283,29 @@ export class SpellMissiles {
     if (targetGuid !== null) {
       toTarget.z += BODY_HEIGHT;
     }
-    const remaining = toTarget.distanceTo(launchPoint) / speed;
+    const startDistance = toTarget.distanceTo(launchPoint);
+    const remaining = startDistance / speed;
 
     this.stats.launched += 1;
+
+    // THE FLIGHT BASIS, built once. `right` is horizontal by construction (forward crossed with world
+    // up), so a level shot gets a level `right` and `up` lands vertical -- which is what makes
+    // `transAngle = 0` read as straight up. A perfectly vertical shot degenerates (forward parallel to
+    // world up), and then `right` falls back to world X rather than becoming zero: an arbitrary but
+    // stable pair beats a NaN basis, and a straight-up projectile has no visually meaningful "right".
+    const forward = new THREE.Vector3().subVectors(toTarget, launchPoint);
+    if (forward.lengthSq() < 1e-8) {
+      forward.set(1, 0, 0);
+    } else {
+      forward.normalize();
+    }
+    const right = new THREE.Vector3().crossVectors(forward, WORLD_UP);
+    if (right.lengthSq() < 1e-8) {
+      right.set(1, 0, 0);
+    } else {
+      right.normalize();
+    }
+    const up = new THREE.Vector3().crossVectors(right, forward).normalize();
 
     const missile: Missile = {
       model: null,
@@ -275,6 +316,19 @@ export class SpellMissiles {
       at: launchPoint.clone(),
       remaining,
       missed,
+      totalTime: remaining,
+      startDistance,
+      index,
+      count,
+      // The three seeds a script may read. `Math.random` per missile is what makes a seeded row differ
+      // between projectiles of the same volley while staying pure for any one of them.
+      rand1: Math.random(),
+      rand2: Math.random(),
+      rand3: Math.random(),
+      forward,
+      right,
+      up,
+      from: launchPoint.clone(),
     };
     this.live.push(missile);
 
@@ -378,15 +432,81 @@ export class SpellMissiles {
         missile.at.add(toTarget);
       }
 
+      // THE MOTION SCRIPT'S OFFSET, on top of the straight arrive-on-time position. `missile.at` stays
+      // the UNOFFSET path so the arc is a pure function of progress rather than an accumulating drift
+      // -- integrating the offset into `at` would compound it every frame and the projectile would
+      // spiral away instead of arcing.
+      straightAt.copy(missile.at);
+      const shaped = this.applyMotion(missile, straightAt);
+
       const model = missile.model;
       if (model !== null) {
-        model.position.copy(missile.at);
+        model.position.copy(shaped);
         if (typeof model.updateMatrix === 'function') {
           model.updateMatrix();
         }
         model.updateMatrixWorld(true);
       }
     }
+  }
+
+  /**
+   * Offset a missile's straight-line position by its motion script, in place, and return it.
+   *
+   * The composition and the `transAngle = 0` means up derivation are in this file's header, with the
+   * falsifier. `progress` and `time` are derived from the fixed deadline rather than accumulated, so
+   * they are exact at every frame regardless of frame pacing.
+   *
+   * A spell with no motion row returns the straight position untouched, which is the common case and
+   * the reference's own behaviour.
+   */
+  private applyMotion(missile: Missile, at: THREE.Vector3): THREE.Vector3 {
+    if (missile.totalTime <= 0) {
+      return at;
+    }
+    const elapsed = missile.totalTime - missile.remaining;
+    const progress = Math.min(1, Math.max(0, elapsed / missile.totalTime));
+    const travelled = missile.from.distanceTo(at);
+
+    const shape: MotionOffset | null = spellMotion.evaluate(missile.spellId, {
+      progress,
+      time: elapsed,
+      startDistance: missile.startDistance,
+      missileIndex: missile.index,
+      missileCount: missile.count,
+      rand1: missile.rand1,
+      rand2: missile.rand2,
+      rand3: missile.rand3,
+      // The three distance inputs, derived rather than guessed: `distanceToFirePos` is how far the
+      // projectile has come, `distanceToImpactPos`/`distanceFromImpactPos` how far is left (the two
+      // names are read by 9 and 1 rows and no measurement here distinguishes them, so both get the
+      // same value and that is stated rather than hidden), `totalDistance` the whole span.
+      distanceToFirePos: travelled,
+      distanceToImpactPos: Math.max(0, missile.startDistance - travelled),
+      distanceFromImpactPos: Math.max(0, missile.startDistance - travelled),
+      totalDistance: missile.startDistance,
+    });
+    if (shape === null) {
+      return at;
+    }
+
+    // DEGREES -- see `spell-motion.ts` on why, and on why the choice is contained.
+    const radians = shape.transAngle * (Math.PI / 180);
+    offset.set(0, 0, 0);
+    if (shape.transMag !== 0) {
+      offset.addScaledVector(missile.up, Math.cos(radians) * shape.transMag);
+      offset.addScaledVector(missile.right, Math.sin(radians) * shape.transMag);
+    }
+    if (shape.transFront !== 0) {
+      offset.addScaledVector(missile.forward, shape.transFront);
+    }
+    if (shape.transRight !== 0) {
+      offset.addScaledVector(missile.right, shape.transRight);
+    }
+    if (shape.transUp !== 0) {
+      offset.addScaledVector(missile.up, shape.transUp);
+    }
+    return at.add(offset);
   }
 
   private remove(index: number): void {
