@@ -179,8 +179,7 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
        * `ActionButton_UpdateState` does the rest, which is the same division every other field in
        * this snapshot follows.
        */
-      isCurrent: (spellId === SPELL_AUTO_ATTACK && spells.autoAttackOn)
-        || (spellId !== 0 && spellId === spells.queuedMeleeSpell),
+      isCurrent: currentFor(spellId),
       cooldownStart: cooldown?.start ?? 0,
       cooldownDuration: cooldown?.duration ?? 0,
       usable,
@@ -291,6 +290,73 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   };
 
   /**
+   * **"CURRENT" -- the one predicate `IsCurrentAction` answers, in ONE place.**
+   *
+   * Two things make a slot current, and they are different states with different textures:
+   *
+   *  - **auto-attack while engaged.** This one also FLASHES, via `PLAYER_ENTER_COMBAT` and the
+   *    `$parentFlash` texture (`ActionButtonTemplate.xml:12`, `Interface\Buttons\UI-QuickslotRed`).
+   *  - **a QUEUED on-next-swing strike.** This one only CHECKS -- the `<CheckedTexture
+   *    alphaMode="ADD" file="Interface\Buttons\CheckButtonHilight"/>` at
+   *    `ActionButtonTemplate.xml:88`, which is the bright additive border the owner screenshotted.
+   *
+   * Factored out because the snapshot builder and `pushQueuedMelee` both need it and a second copy
+   * would be a second answer that could differ. The reference reads both of its slots for the same
+   * predicate (`benilla-app/src/ui_cast.rs:170-173`, the `IsCurrentAction` C2 leg).
+   *
+   * **NOTHING HERE DRAWS AND NOTHING NEEDED TO.** The texture is the client's own, declared in its
+   * own XML, and `SetChecked` already shows and hides it -- proven by the spellbook, whose IDENTICAL
+   * `<CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>`
+   * (`spellbookframe.xml:191`) was observed drawing over all twelve buttons when a truthiness bug
+   * checked them all (`lua/methods/kinds.ts:652-670`). So the last hop was never in doubt; the
+   * defect was that this value did not reach Lua.
+   */
+  const currentFor = (spellId: number): boolean => (
+    (spellId === SPELL_AUTO_ATTACK && spells.autoAttackOn)
+    || (spellId !== 0 && spellId === spells.queuedMeleeSpell)
+  );
+
+  /**
+   * A queued on-next-swing strike was armed or landed: re-push the CHECKED state and fire the
+   * client's own state event.
+   *
+   * **THE WHOLE DEFECT WAS THIS FUNCTION'S ABSENCE.** `isCurrent` already consulted the queue in the
+   * snapshot builder, so the state was right -- but the builder only runs on a full push, and neither
+   * incremental push could carry it: `pushCooldowns` spreads `...previous` (keeping the OLD
+   * `isCurrent`) and fires `ACTIONBAR_UPDATE_COOLDOWN`, which `ActionButton_OnEvent:396` routes to
+   * `ActionButton_UpdateCooldown` alone. Arming the queue emitted nothing at all. So the button could
+   * never check: a last-hop failure, not anything about drawing.
+   *
+   * `ACTIONBAR_UPDATE_STATE` is the right event and the only one that reaches the checked state:
+   * `ActionButton_OnEvent:390` routes it to `ActionButton_UpdateState`, whose entire body is
+   * `SetChecked` (`actionbutton.lua:302-311`). It touches no texture, no count and no cooldown, so a
+   * queued strike costs one `SetChecked` per filled button and nothing else.
+   *
+   * Push THEN fire, this file's rule everywhere: `ActionButton_UpdateState` re-reads
+   * `IsCurrentAction`, so the snapshot has to be current before the event goes out.
+   */
+  const pushQueuedMelee = (): void => {
+    let changed = false;
+    for (let action = 1; action <= ACTION_SLOTS; action += 1) {
+      const previous = getAction(vm, action);
+      if (previous === null || previous.spellId === 0) {
+        continue;
+      }
+      const next = { ...previous, isCurrent: currentFor(previous.spellId) };
+      if (same(previous, next)) {
+        continue;
+      }
+      setAction(vm, action, next);
+      changed = true;
+      stats.pushes += 1;
+    }
+    if (changed) {
+      fireEvent(vm, 'ACTIONBAR_UPDATE_STATE');
+      stats.events += 1;
+    }
+  };
+
+  /**
    * The last auto-attack state this fired the combat pair for -- so the two events go out on the
    * TRANSITION and not on every call. `null` until the first push.
    */
@@ -308,7 +374,10 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       if (previous === null || previous.spellId !== SPELL_AUTO_ATTACK) {
         continue;
       }
-      const next = { ...previous, isCurrent: spells.autoAttackOn };
+      // THE SHARED PREDICATE, not `spells.autoAttackOn` alone: this walk only visits auto-attack
+      // slots, so the two agree today -- but the narrower expression here is how the queue term
+      // would get silently dropped if this loop were ever widened.
+      const next = { ...previous, isCurrent: currentFor(previous.spellId) };
       if (same(previous, next)) {
         continue;
       }
@@ -640,6 +709,7 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   spells.on('spellsChanged', pushAll);
   spells.on('autoAttackChanged', pushAutoAttack);
   spells.on('cooldownsChanged', pushCooldowns);
+  spells.on('queuedMeleeChanged', pushQueuedMelee);
   world.on('unit:fields', onFields);
 
   // Both entry packets arrive while the manifest is still loading -- `SMSG_ACTION_BUTTONS` is in the
@@ -679,6 +749,7 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     spells.removeListener('spellsChanged', pushAll);
     spells.removeListener('autoAttackChanged', pushAutoAttack);
     spells.removeListener('cooldownsChanged', pushCooldowns);
+    spells.removeListener('queuedMeleeChanged', pushQueuedMelee);
     spells.removeListener('spellStart', onSpellStart);
     spells.removeListener('spellDelayed', onSpellDelayed);
     spells.removeListener('spellGo', onSpellGo);

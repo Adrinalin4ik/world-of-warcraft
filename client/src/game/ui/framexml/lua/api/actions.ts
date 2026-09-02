@@ -240,8 +240,24 @@ export function installActionsApi(vm: LuaVM): void {
   fn('IsStackableAction', () => [false]);
   fn('IsEquippedAction', () => [false]);
 
-  // The auto-attack button's CHECKED state and its flash. `IsCurrentAction` is also what a "current"
-  // spell (an aimed shot being wound up) would use; only auto-attack drives it today.
+  /**
+   * `IsCurrentAction(slot)` -- the CHECKED state, and TWO things drive it.
+   *
+   * The comment here used to end "only auto-attack drives it today", and that stopped being true
+   * when the on-next-swing queue landed. Both now feed the one `isCurrent` boolean, computed in
+   * `ui/action-bridge.ts#currentFor`:
+   *
+   *  - auto-attack while engaged -- which ALSO flashes (`$parentFlash`, a separate texture);
+   *  - a QUEUED on-next-swing strike -- which only checks, drawing the template's
+   *    `<CheckedTexture alphaMode="ADD" file="Interface\Buttons\CheckButtonHilight"/>`
+   *    (`ActionButtonTemplate.xml:88`).
+   *
+   * **`?? false` AND NOT `?? 0`, deliberately.** `ActionButton_UpdateState` branches on this value
+   * directly (`if ( IsCurrentAction(action) or IsAutoRepeatAction(action) )`), and `0` IS TRUTHY IN
+   * LUA -- returning it would check every button on the bar, which is this project's most repeated
+   * recorded defect and exactly the shape that once drew the checked border over all twelve
+   * spellbook buttons. A real Lua `false` is what the client's `or` needs.
+   */
   fn('IsCurrentAction', (args) => [slotOf(args[0])?.isCurrent ?? false]);
   fn('IsAttackAction', (args) => [slotOf(args[0])?.isAttack ?? false]);
   // Auto-SHOOT (a wand or a ranged auto-repeat), which is not auto-ATTACK and is not wired: there is no

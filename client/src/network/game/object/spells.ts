@@ -2033,6 +2033,11 @@ export class SpellHandler extends EventEmitter {
     if (onNextSwing) {
       // Replaces any prior queue, silently: the server holds ONE melee slot.
       this.queuedMelee = spellId;
+      // **AND IT ANNOUNCES ITSELF. This is the owner's "Скил когда активирован должен вот так
+      // загораться".** Arming used to be a silent field write, so the checked state the action bar
+      // computes from `queuedMeleeSpell` was correct and never reached Lua -- the button could not
+      // light up because nothing told it to look. See `ui/action-bridge.ts#pushQueuedMelee`.
+      this.emit('queuedMeleeChanged');
     } else {
       this.pendingCast.arm(spellId, now);
     }
@@ -2199,7 +2204,11 @@ export class SpellHandler extends EventEmitter {
       return false;
     }
     this.queuedMelee = null;
-    this.emit('cooldownsChanged');
+    // The STATE event, not the cooldown one: the queue is a checked state and
+    // `ACTIONBAR_UPDATE_COOLDOWN` never reaches `ActionButton_UpdateState`. The cooldown push is not
+    // lost by the swap -- every caller of this (`SPELL_GO`, `SMSG_CAST_FAILED`,
+    // `SMSG_SPELL_FAILURE`) announces cooldowns on its own path.
+    this.emit('queuedMeleeChanged');
     return true;
   }
 
