@@ -196,6 +196,22 @@ export class SpellMissiles {
     speedless: 0,
     /** Model loads that threw. */
     failed: 0,
+    /**
+     * THE THREE SILENT GATES, counted because the projectile is invisible and the kit effects are not.
+     *
+     * Two lanes sharing one manager, one material and one batch, with one visible and one not, is the
+     * cleanest lead in this thread -- and every difference is upstream of the renderer, in gates that
+     * until now returned without saying anything. The kit lane has none of these: it never touches the
+     * `SMSG_SPELL_GO` tail, never needs a target position, and never asks `Spell.dbc` for a Speed.
+     */
+    /** `SMSG_SPELL_GO`'s target tail failed its stride check, so no missile was allowed to launch. */
+    implausibleTail: 0,
+    /** The tail decoded, but named no unit target and carried no ground point. Nothing to fly at. */
+    noTargets: 0,
+    /** A named target was not in our object set, so `unitAt` gave no position to aim at. */
+    targetNotInWorld: 0,
+    /** The model landed after the flight had already ended. */
+    lateModel: 0,
   };
 
   public lastError: string | null = null;
@@ -209,6 +225,16 @@ export class SpellMissiles {
     return this.live
       .map((entry) => entry.model as unknown as { particleSizeScale?: number })
       .filter((model) => model !== null && model !== undefined);
+  }
+
+  /** Where each projectile is, and where it is aiming. See `SpellKitEffects#liveTransforms`. */
+  public liveTransforms(): Array<{ spellId: number; at: number[]; remaining: number; hasModel: boolean }> {
+    return this.live.map((m) => ({
+      spellId: m.spellId,
+      at: [Math.round(m.at.x * 100) / 100, Math.round(m.at.y * 100) / 100, Math.round(m.at.z * 100) / 100],
+      remaining: Math.round(m.remaining * 1000) / 1000,
+      hasModel: m.model !== null,
+    }));
   }
 
   public get liveCount(): number {
@@ -256,6 +282,7 @@ export class SpellMissiles {
     if (targets.length === 0) {
       if (groundAt === null) {
         // No targets and no point. The cast still animates through the kit path; nothing flies.
+        this.stats.noTargets += 1;
         return;
       }
       this.spawn(
@@ -290,6 +317,7 @@ export class SpellMissiles {
     const aim = targetGuid === null ? groundAt : unitAt(targetGuid);
     if (aim === null) {
       // The target is not in our object set -- nothing to fly at, and no invisible flight either.
+      this.stats.targetNotInWorld += 1;
       return;
     }
     toTarget.copy(aim);
@@ -361,6 +389,7 @@ export class SpellMissiles {
         // The flight may already be over: arrival does not wait on a fetch, exactly as the deadline
         // does not. Release the handle rather than adding a model to a missile that has landed.
         if (!this.live.includes(missile)) {
+          this.stats.lateModel += 1;
           M2Blueprint.unload(model as never);
           return;
         }
@@ -557,6 +586,14 @@ export class SpellMissiles {
       M2Blueprint.unload(missile.model as never);
     }
     this.live.splice(index, 1);
+  }
+
+  /**
+   * The tail was unusable, so nothing launched. Called by the GO handler rather than counted here,
+   * because the gate lives there -- see `stats.implausibleTail`.
+   */
+  noteImplausibleTail(): void {
+    this.stats.implausibleTail += 1;
   }
 
   /** Drop everything, for a worldport or a teardown. */

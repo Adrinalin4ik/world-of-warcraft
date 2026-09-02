@@ -951,6 +951,24 @@ export class SpellHandler extends EventEmitter {
     // swing and the defense reaction use in `combat.ts`.
     // THE TAIL, decoded before anything reads it. `readCastHead` has already validated the cursor.
     const targets = this.readSpellGoTargets(gp);
+    // RECORDED for every GO, because the missile lane depends entirely on this and the decode has
+    // never been checked against captured traffic. One live cast now says what the wire carried:
+    // a plausible mask with a hit count is a working decode, an implausible one names the defect.
+    spellWire.record({
+      at: Date.now(),
+      kind: 'SPELL_GO',
+      spellId: decoded.spellId,
+      caster: decoded.caster,
+      detail: {
+        tailPlausible: targets.plausible ? 1 : 0,
+        targetMask: targets.targetMask,
+        hits: targets.hits.length,
+        misses: targets.misses.length,
+        hasDest: targets.dest === null ? 0 : 1,
+      },
+      bodySize: gp.length - gp.headerSize,
+      consumed: gp.index - gp.headerSize,
+    });
 
     const unit = this.game.world.entities.get(decoded.caster);
     if (unit) {
@@ -1001,6 +1019,12 @@ export class SpellHandler extends EventEmitter {
           targets.misses.map((m) => m.guid),
           targets.dest,
         );
+      } else {
+        // NAMED, not silent. This gate is the missile lane's alone -- the kit lane never reads the
+        // tail -- and it is the first candidate for "снаряда не видно" while the hand kit IS visible.
+        // The decode is labelled self-consistent rather than residual-verified, so it failing its own
+        // stride check is a real possibility and must show up as a number rather than as an absence.
+        this.game.world.spellMissiles.noteImplausibleTail();
       }
     }
 

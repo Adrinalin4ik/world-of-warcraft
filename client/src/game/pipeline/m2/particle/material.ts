@@ -131,6 +131,23 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
     // particles vanish from half the angles a player can stand at.
     this.side = THREE.DoubleSide;
 
+    // `depthTest` IS DELIBERATELY LEFT AT THREE'S DEFAULT (true), and a depth bias is NOT the answer
+    // to a particle that reads as being behind something it should be in front of.
+    //
+    // The owner reported an effect partly occluded by a rock far behind the character. Worked through
+    // rather than patched: `shader.vert` builds the quad in VIEW space (`viewCenter.xy += spun`), so a
+    // billboard has exactly ONE depth -- its centre's -- and the corner offset cannot perturb it. An
+    // opaque rock is `blendingMode` 0, which leaves `transparent` false and `depthWrite` true
+    // (`m2/material/index.ts:505-519`), so it writes correct depth in the opaque pass and a NEARER
+    // particle passes `depthTest` and draws over it.
+    //
+    // So for a far rock to occlude these, the particle centres must genuinely BE farther than the rock
+    // -- a world-POSITION defect, not a depth one. Disabling `depthTest` or biasing depth would hide
+    // that by drawing particles over everything, and `CLAUDE.md`'s record is that every orientation
+    // defect here was two conventions meeting and none was fixed by negating a coordinate.
+    // `window.worldSpellFx()` reports each live effect's `distFromPlayer` for exactly this reason: a
+    // hand effect should be a couple of units away, not tens.
+
     applyParticleBlending(this, blendingType);
 
     this.ready = TextureLoader.load(texturePath)

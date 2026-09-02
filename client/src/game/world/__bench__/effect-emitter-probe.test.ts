@@ -223,6 +223,32 @@ describe('spell effect emitters: pool capacity at register time', () => {
  * `DustCloud_Land`'s 20 live particles are the capacity fix working: before it, that emitter had one
  * slot.
  *
+ * ## THE SIZE DISTRIBUTION PER STAGE, and why one global multiplier cannot serve two
+ *
+ * The owner: "во время каста виден листочек если скейл сделать больше. Но вот конец каста тогда имеет
+ * слишком большой скейл." Fireball's precast and release are DIFFERENT assets on the same hands
+ * (`SpellVisualKit` 30 slot handA/B -> effect 287, kit 38 -> effect 288), so their authored sizes were
+ * measured side by side:
+ *
+ *     stage    model                          emitters  live  size range      ratePeak x life
+ *     precast  Fire_Precast_Hand.mdx                 5    96  0.036 .. 0.642  40x0.7, 65x0.5, 10x0.25
+ *     release  Fire_Cast_Hand.mdx                    3    17  0.250 .. 0.863  21x0.3, 15x0.3
+ *     impact   MoltenBlast_Impact_Chest.mdx          6   131  0.030 .. 1.886  100x0.3 .. 20x0.8
+ *
+ * **The maxima differ by only 1.34x -- but the MINIMA by 7x, and that is the whole problem.** Two
+ * thirds of the precast's 96 particles live in batches whose sprites are 0.037 to 0.083 (3-8 cm), and
+ * it has exactly TWO large ones. Every one of the release's 17 particles is 0.25 to 0.86. So the
+ * multiplier the precast's smallest sprites need to become visible is ~8x, and at 8x the release's
+ * 0.86 sprites become ~6.9 units -- a seven-metre sprite on a two-metre body, which is the green cloud
+ * swallowing the screen. **A single global knob is confirmed the wrong shape, with the number.**
+ *
+ * The density reading is supported too: the release is genuinely SPARSE -- 17 particles, rate 15-21
+ * over a 0.3 s life -- so it is a few big sprites rather than a dense blob, which is what the second
+ * screenshot shows.
+ *
+ * One oddity worth a later look: `MoltenBlast_Impact_Chest` batch 0 has `ratePeak` 100 and packed
+ * ZERO particles, while its five siblings packed 11-71. Not chased here.
+ *
  * ## SO THE FAILURE IS BROWSER-ONLY, AND THE SUBSYSTEM DEMONSTRABLY DRAWS
  *
  * The owner has seen particles from this same manager, group, material and batch: commit `3304d2a`
@@ -239,9 +265,14 @@ describe('spell effect emitters: pool capacity at register time', () => {
  * Copying a working lane without a mechanism is how that happens again.
  */
 describe('spell effect emitters: the last hop to the renderer', () => {
+  // FIREBALL'S THREE STAGES, side by side. Precast and release are different assets on the same
+  // hands (effects 287 and 288), which is what makes a single global size multiplier the wrong
+  // shape if their authored sizes differ by much.
   const LAST_HOP_MODELS = [
-    'Spells\\Fireball_Missile_Low.mdx',
     'Spells\\Fire_Precast_Hand.mdx',
+    'Spells\\Fire_Cast_Hand.mdx',
+    'Spells\\MoltenBlast_Impact_Chest.mdx',
+    'Spells\\Fireball_Missile_Low.mdx',
     'Spells\\DustCloud_Land.mdx',
   ];
 
@@ -299,6 +330,7 @@ describe('spell effect emitters: the last hop to the renderer', () => {
         const colors = geometry.getAttribute('iColor');
         const offsets = geometry.getAttribute('iOffset');
 
+        const fmt = (v: number) => (Number.isFinite(v) ? v.toFixed(4) : 'n/a');
         let minScale = Infinity; let maxScale = -Infinity;
         let minAlpha = Infinity; let maxAlpha = -Infinity;
         let maxOffsetFromEmitter = 0;
@@ -316,11 +348,12 @@ describe('spell effect emitters: the last hop to the renderer', () => {
           maxOffsetFromEmitter = Math.max(maxOffsetFromEmitter, Math.hypot(dx, dy, dz));
         }
 
-        const fmt = (v: number) => (Number.isFinite(v) ? v.toFixed(4) : 'n/a');
         const definition: any = instance.particleEmitters[b];
         const BLEND = ['OPAQUE', 'ALPHA_KEY', 'ALPHA', 'ADD', 'ADD_ALPHA', 'MODULATE', 'MODULATE_2X'];
         lines.push(
           `   batch ${String(b).padStart(2)}  blend=${definition ? (BLEND[definition.blendingType] ?? definition.blendingType) : '?'}`
+          + `  ratePeak=${fmt(trackMax(definition?.emissionRate))}`
+          + `  life=${fmt(evaluateAnimationTrack(definition?.lifespan, 0, 0, 1))}`
           + `  instanceCount=${String(count).padStart(4)}`
           + `  visible=${batch.visible}`
           + `  size=[${fmt(minScale)} .. ${fmt(maxScale)}]`

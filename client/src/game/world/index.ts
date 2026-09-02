@@ -270,6 +270,43 @@ export default class World extends EventEmitter {
       ...this.spellKitEffects.liveModels(),
       ...this.spellMissiles.liveModels(),
     ]);
+
+    /**
+     * `window.worldSpellFx()` -- WHICH GATE CLOSED, for the projectile nobody can see.
+     *
+     * The kit effects are visible when enlarged and the missile is not, on the same manager, material
+     * and batch. Every difference between the two lanes is upstream of the renderer and used to be a
+     * silent `return`; they are all counted now, and this is where they can be read. One cast answers
+     * it: a non-zero `implausibleTail` means the `SMSG_SPELL_GO` decode failed its own stride check,
+     * `noTargets` means the tail named nobody, `targetNotInWorld` means the aim had no position,
+     * `modelless` means the visual chain named no model, `speedless` means the spell has no Speed at
+     * all. `launched` non-zero with `liveMissiles` zero means they flew and expired unseen, which is a
+     * different bug from never launching.
+     */
+    (window as unknown as Record<string, unknown>).worldSpellFx = () => {
+      const player = this.player ? this.player.position : null;
+      const dist = (at: number[]) => (player === null ? null : Math.round(
+        Math.hypot(at[0] - player.x, at[1] - player.y, at[2] - player.z) * 100,
+      ) / 100);
+      return {
+        // WHERE the player is, so every distance below is readable without a second call.
+        player: player === null ? null
+          : [Math.round(player.x * 100) / 100, Math.round(player.y * 100) / 100,
+            Math.round(player.z * 100) / 100],
+        missiles: { ...this.spellMissiles.stats, live: this.spellMissiles.liveCount },
+        kits: { ...this.spellKitEffects.stats, live: this.spellKitEffects.liveCount },
+        // THE DECIDING NUMBERS. `distFromPlayer` should be a couple of units for a hand effect and
+        // under `ParticleManager.CULL_DISTANCE` (120) for anything meant to be seen at all. A large
+        // number here explains the tiny dots, the rock occluding them, and an invisible projectile,
+        // all three at once -- see `SpellKitEffects#liveTransforms`.
+        liveKits: this.spellKitEffects.liveTransforms()
+          .map((k) => ({ ...k, distFromPlayer: dist(k.at) })),
+        liveMissiles: this.spellMissiles.liveTransforms()
+          .map((m) => ({ ...m, distFromPlayer: dist(m.at) })),
+        missileLastError: this.spellMissiles.lastError,
+        kitLastError: this.spellKitEffects.lastError,
+      };
+    };
     this.gameObjectSparkle = new GameObjectSparkle(this.scene);
     /**
      * `window.worldGameObjects()` -- WHY A BUSH IS NOT ON SCREEN, in one call.

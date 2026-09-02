@@ -301,6 +301,37 @@ export class SpellKitEffects {
       .filter((model) => model !== null && model !== undefined);
   }
 
+  /**
+   * WHERE EACH LIVE EFFECT ACTUALLY IS, in world space, for `window.worldSpellFx()`.
+   *
+   * This is the measurement that three separate symptoms turn on, and it is the one thing a headless
+   * probe could never answer. A billboard quad has ONE depth -- its centre's, because
+   * `particle/shader.vert` adds the corner offset in VIEW space and leaves z alone -- so for a rock
+   * 40 units away to occlude a hand effect, the effect's particles have to be FARTHER than the rock.
+   * Not depth-biased: farther. And a correctly-sized 0.6-unit sprite seen from far away is a few
+   * pixels, which is "крошечные точки" exactly.
+   *
+   * So position is the common cause candidate for the tiny dots, the bad occlusion and possibly the
+   * invisible projectile too (`ParticleManager.CULL_DISTANCE` is 120, and anything left near a map
+   * origin is thousands of units out and silently culled). `matrixWorld` is what `ParticleManager`
+   * packs every particle through, so this reports exactly the number that decides it.
+   */
+  public liveTransforms(): Array<{ slot: number; spellId: number; planted: boolean; at: number[] }> {
+    return this.live.map((entry) => {
+      const m = (entry.model as unknown as { matrixWorld?: THREE.Matrix4 }).matrixWorld;
+      const at = new THREE.Vector3();
+      if (m) {
+        at.setFromMatrixPosition(m);
+      }
+      return {
+        slot: entry.planted ? -1 : 0,
+        spellId: entry.spellId,
+        planted: entry.planted,
+        at: [Math.round(at.x * 100) / 100, Math.round(at.y * 100) / 100, Math.round(at.z * 100) / 100],
+      };
+    });
+  }
+
   public get liveCount(): number {
     return this.live.length;
   }
