@@ -475,6 +475,18 @@ export interface SpellRow {
   visualID: number;
   /** `Targets` -- the targeting flag-word seed. See `COL.targets`; consumed by `classes/cast-target.ts`. */
   targets: number;
+  /**
+   * The first THREE attribute words, raw: `Attributes`, `AttributesEx1`, `AttributesEx2` -- columns
+   * 4, 5 and 6. See `COL.attributes` for how the 8-word block was pinned.
+   *
+   * Exposed because `classes/auto-attack-start.ts`' predicate spans all three, and a derived boolean
+   * on this row cannot express a test whose two positive legs live in different words. The existing
+   * `passive` / `hiddenInSpellbook` / `hiddenFromAuraBar` booleans stay exactly as they are -- they
+   * are single-bit reads with named meanings and are not re-derived from these.
+   */
+  attributes: number;
+  attributesEx1: number;
+  attributesEx2: number;
   /** `EffectImplicitTargetA[0]` -- the flag-word overlay arm. See `COL.implicitTargetA0`. */
   implicitTargetA0: number;
   /** `SpellCastTimes.dbc` id. Read for a later round; cast TIME is deferred. */
@@ -1097,6 +1109,11 @@ class SpellData {
         iconID: col(COL.iconID),
         visualID: col(COL.visual),
         targets: col(COL.targets),
+        attributes: col(COL.attributes),
+        // `COL.attributes + 1` / `+ 2`: this file's own column note establishes that 4-11 are
+        // `Attributes` + `AttributesEx1..Ex7`, and `hiddenFromAuraBar` already reads `+ 1` this way.
+        attributesEx1: col(COL.attributes + 1),
+        attributesEx2: col(COL.attributes + 2),
         implicitTargetA0: col(COL.implicitTargetA0),
         castingTimeIndex: col(COL.castingTimeIndex),
         speed: flt(COL.speed),
