@@ -538,6 +538,41 @@ export function effectRange(
   return { min: basePoints + growth + 1, max: basePoints + growth + sides };
 }
 
+/**
+ * The client's literal missile-model fallback when a visual names a `SpellVisualEffectName` id that
+ * does not resolve -- a checkerboard cube shipped in the real MPQs, and the reference's own note on it
+ * is "faithful, not a joke" (`benilla-app/src/creature_anim/spell_visual.rs:27-29`, its `ERROR_CUBE`).
+ *
+ * Spelled with the DBC's own `.mdx`, exactly as the reference spells it, because it travels the same
+ * route as every other path out of this module: `M2Blueprint.load` rewrites the extension and
+ * `Loader#normalizePath` lowercases it. On this host `spells/errorcube.m2` answers 200 and its first
+ * four bytes are `MD20`, so the fallback is a real model here and not a second dead end.
+ */
+const ERROR_CUBE_MODEL = 'Spells\\ErrorCube.mdx';
+
+/**
+ * THE THREE-WAY MISSILE FORK, as a pure function of the column value and a path lookup.
+ *
+ * Separated from `SpellData#missileModelPath` only so the decision can be asserted without loading
+ * 49 MB of DBC -- the reference keeps a synthetic-table seam on its own catalog for the same reason
+ * (`spell_visual/mod.rs:439-457`). There is one implementation and the method calls this.
+ *
+ * `effectId` is `SpellVisual` column 8 as stored, SIGNED, or `undefined` for a visual whose column is
+ * zero. `pathOf` is `SpellData#effectModelPath`. See `missileModelPath` for every measured number.
+ */
+export function missileModelFrom(
+  effectId: number | undefined,
+  pathOf: (id: number) => string | null,
+): string | null {
+  // Below the gate -- including the 90 NEGATIVE rows -- means "this visual names no missile", which is
+  // not the error case. Returning `ERROR_CUBE_MODEL` here would be the defect the column's own
+  // docstring quantifies.
+  if (effectId === undefined || !Number.isFinite(effectId) || effectId < 1) {
+    return null;
+  }
+  return pathOf(effectId) ?? ERROR_CUBE_MODEL;
+}
+
 class SpellData {
   private spells: Map<number, SpellRow> | null = null;
 
@@ -557,6 +592,35 @@ class SpellData {
 
   /** `SpellVisualKit.dbc` id -> its `animID`, sentinels already folded away. */
   private kitAnims: Map<number, number> | null = null;
+
+  /**
+   * `SpellVisualEffectName.dbc` id -> the effect model's path, EXACTLY AS THE DBC SPELLS IT.
+   *
+   * Not normalised and not extension-rewritten here, deliberately -- see `effectModelPath` for the
+   * two places that already own those two jobs. 3964 of the table's 3965 rows carry a path; the one
+   * that does not is id 3250 "Detect Invisibility and Stealth State", whose path column is the empty
+   * string, and an empty path is dropped so it reads as absent rather than as a path to nowhere.
+   */
+  private effectPaths: Map<number, string> | null = null;
+
+  /**
+   * The `"HARDCODED *"` rows, LOWERCASED NAME -> path -- the engine-spawned effect set, which the
+   * client resolves BY NAME once at boot rather than by id (a baked string table matched against the
+   * name column, `spell_visual/mod.rs:53-58`). Lowercased because the client's matchers are
+   * `stricmp`-family, which the reference notes at `mod.rs:691-693`.
+   *
+   * **16 rows on this build**, enumerated in `hardcodedEffectPath`. Nothing consumes them yet: they
+   * are the corpse sparkle, the level-up ding, the mount poof and friends, none of which is wired.
+   */
+  private hardcodedEffects: Map<string, string> | null = null;
+
+  /**
+   * `SpellVisual.dbc` id -> its `missileModelID` (column 8), signed and non-zero only.
+   *
+   * Kept as the raw id rather than a resolved path so the `>= 1` gate and the ErrorCube fallback stay
+   * in one expression in `missileModelPath`, where the reference puts them.
+   */
+  private missileModels: Map<number, number> | null = null;
 
   /** `SpellRange.dbc` id -> `maxRangeHostile`, in YARDS. What `IsActionInRange` is judged against. */
   private ranges: Map<number, number> | null = null;
@@ -624,11 +688,16 @@ class SpellData {
     // `SpellDuration` (2.1 KB), `SpellRadius` (0.9 KB) and `SpellDescriptionVariables` (2.8 KB) ride
     // along for the same reason `SpellRange` does: together they are under 6 KB behind a 49 MB fetch
     // that is already in flight, and none of them is useful without `Spell.dbc`'s own index columns.
-    const [spells, icons, visuals, kits, ranges, durations, radii, descVars] = await Promise.all([
+    // `SpellVisualEffectName` (260 KB) rides along on the same argument the four small tables above
+    // take: it is the only table that turns a visual's missile column into a model path, it is useless
+    // without `SpellVisual` which is already being fetched, and 260 KB behind a 49 MB fetch that is
+    // already in flight costs nothing measurable.
+    const [spells, icons, visuals, kits, effectNames, ranges, durations, radii, descVars] = await Promise.all([
       this.loadSpells(),
       DBC.load('SpellIcon'),
       DBC.load('SpellVisual'),
       DBC.load('SpellVisualKit'),
+      DBC.load('SpellVisualEffectName'),
       DBC.load('SpellRange'),
       DBC.load('SpellDuration'),
       DBC.load('SpellRadius'),
@@ -715,6 +784,32 @@ class SpellData {
       }
     }
 
+    this.effectPaths = new Map<number, string>();
+    this.hardcodedEffects = new Map<string, string>();
+    for (const record of (effectNames as any).records ?? []) {
+      const file = record?.file;
+      if (typeof file !== 'string' || file === '') {
+        continue;
+      }
+      this.effectPaths.set(record.id, file);
+      // The engine-spawned set, keyed by name and not by id -- see `hardcodedEffects`. Only rows the
+      // client's own boot name-resolve could hit, i.e. the `HARDCODED ` prefix.
+      const name = record?.name;
+      if (typeof name === 'string' && /^HARDCODED /i.test(name)) {
+        this.hardcodedEffects.set(name.toLowerCase(), file);
+      }
+    }
+
+    this.missileModels = new Map<number, number>();
+    for (const record of (visuals as any).records ?? []) {
+      // Stored when non-zero and left SIGNED. Zero is by far the common case -- 7554 of 9406 visuals
+      // name no missile at all -- so skipping it keeps the map at the 1852 rows that say anything.
+      const missile = record?.missileModelID;
+      if (typeof missile === 'number' && missile !== 0) {
+        this.missileModels.set(record.id, missile);
+      }
+    }
+
     spellWire.record({
       at: Date.now(),
       kind: 'TABLES_LOADED',
@@ -726,6 +821,9 @@ class SpellData {
         castKits: this.castKits.size,
         precastKits: this.precastKits.size,
         kitAnims: this.kitAnims.size,
+        effectPaths: this.effectPaths.size,
+        hardcodedEffects: this.hardcodedEffects.size,
+        missileModels: this.missileModels.size,
         ms: Date.now() - startedAt,
       },
       bodySize: 0,
@@ -921,6 +1019,126 @@ class SpellData {
    * kit and no anim, which is correct -- its animation comes from `SMSG_ATTACKERSTATEUPDATE`, one clip
    * per swing, which `network/game/object/combat.ts` already drives.
    */
+  /**
+   * `SpellVisualEffectName.dbc` id -> the effect model's path, **as the DBC spells it**, or null.
+   *
+   * ## Two things this deliberately does NOT do, because this client already has one place for each
+   *
+   * **It does not rewrite the extension.** The DBC names Warcraft III extensions and the asset host
+   * serves none of them. Measured across the table's 2042 distinct non-empty paths: **1928 end `.mdx`,
+   * 108 end `.mdl`, 6 already end `.m2`** -- and probing every one of them against the host with the
+   * extension swapped to `.m2` answers **200 for 1936 of 2042 (94.8%)**. Probed as spelled, `.mdx` and
+   * `.mdl` both 404: `spells/fireball_missile_low.mdx` 404s while `spells/fireball_missile_low.m2`
+   * answers 200 and its first four bytes are `4d 44 32 30`, "MD20". So the rewrite is required -- and
+   * `M2Blueprint.load` at `pipeline/m2/blueprint.js:29-30` already does exactly it, for both
+   * extensions, for every model this client loads. A second rewrite here would be the duplicate-path
+   * defect, so callers hand this string to `M2Blueprint.load` unchanged.
+   *
+   * **It does not lowercase or convert separators.** The host is case-sensitive and the DBC writes
+   * mixed case with backslashes, so an un-normalised lookup 404s -- and a 404 returns an HTML page
+   * which then fails to DECODE, naming the wrong subsystem twice. `Loader#normalizePath`
+   * (`game/net/loader.js:15`) is the single place that does it, applied inside `Loader#url` so every
+   * fetch gets it. `url` also runs `encodeURI`, which matters for the paths containing a SPACE: the
+   * two in the sample (`World\Generic\Dwarf\Passive Doodads\...`) 404 unencoded and answer 200 encoded.
+   *
+   * ## The 106 that do not resolve
+   *
+   * The misses split almost entirely by original extension: **`.mdl` misses 90 of 108 (83.3%)** and
+   * **`.mdx` misses 16 of 1928 (0.8%)**. The `.mdl` rows are a `Particles\` set this build no longer
+   * ships -- dead alpha-era art still named in the table -- which is worth knowing before anyone reads
+   * a missing model as a resolver bug. A 404 is NOT this function's business: it answers from the DBC
+   * and the fetch is the caller's.
+   */
+  effectModelPath(effectId: number): string | null {
+    if (!Number.isFinite(effectId) || effectId < 1) {
+      return null;
+    }
+    return this.effectPaths?.get(effectId) ?? null;
+  }
+
+  /**
+   * THE MISSILE MODEL for a `SpellVisual.dbc` id: `SpellVisual` column 8 -> `SpellVisualEffectName`
+   * column 2 -> a model path. Null when the visual names no missile.
+   *
+   * ## Three outcomes, not two, and the boundary between them is the trap
+   *
+   * The reference's expression is `(missile_model >= 1).then(|| effect_path(id).unwrap_or(ERROR_CUBE))`
+   * (`benilla-app/src/creature_anim/spell_visual.rs:952-957`), which forks three ways:
+   *
+   *  - **below 1 -> `null`.** The visual chain names no missile. This is NOT the error case and must
+   *    not become one: the reference's own comment there says the spawner then falls back to the wire's
+   *    ammo model, and every basic shot spell lands here. Measured on the served file: **7644 of 9406
+   *    visuals** (7554 zero, **90 negative**).
+   *  - **1 or above and the lookup succeeds -> that path.** Measured: **1760 visuals**. Fireball's
+   *    visual 67 carries 365 -> `Spells\Fireball_Missile_Low.mdx`.
+   *  - **1 or above and the lookup FAILS -> the literal `Spells\ErrorCube.mdx`.** The client's own
+   *    fallback (`spell_visual.rs:27-29`). Measured: **2 visuals** -- visual 20 names effect 52 and
+   *    visual 9240 names effect 3343, and neither row exists in the table.
+   *
+   * The trap is the boundary, and `missileModelID`'s own docstring carries the number: the column is
+   * read as `int32` for this reason. Read as `uint32`, the 90 negative rows pass `>= 1`, fail the
+   * lookup, and come out as ErrorCube -- turning a 2-visual error path into a 92-visual one, so one
+   * visual in fifty would launch a checkerboard cube where the answer is "no missile".
+   */
+  missileModelPath(visualId: number): string | null {
+    return missileModelFrom(
+      this.missileModels?.get(visualId),
+      (id) => this.effectModelPath(id),
+    );
+  }
+
+  /**
+   * One of the engine-spawned `"HARDCODED *"` effects, by name, case-insensitively. Null when the name
+   * is not in the table.
+   *
+   * The client resolves this set by NAME at boot rather than by id (`spell_visual/mod.rs:53-58`), so
+   * the name is the key here too. Nothing consumes it yet -- it is the half of the table the kit slots
+   * never reach, and it is built now because it comes free with the load.
+   *
+   * **This build ships 16 such rows**, and all 16 are:
+   *
+   *     14    HARDCODED Loot Art                    Particles\LootFX.mdl
+   *     21    HARDCODED Unit Level Up               Spells\LevelUp\LevelUp.mdl
+   *     107   HARDCODED Breath Cold                 Particles\ColdBreath.mdl
+   *     108   HARDCODED Breath Underwater           Particles\Bubbles.mdl
+   *     200   HARDCODED Footstep Water Run Spray    Particles\FootstepSprayWater.mdl
+   *     201   HARDCODED Footstep Water Walk Spray   Particles\FootstepSprayWaterWalk.mdl
+   *     1185  HARDCODED Mount Poof                  spells\mountmorph_impact.mdx
+   *     1223  HARDCODED Inebriated Bubbles          Spells\Bubble_Drunk.mdx
+   *     1645  HARDCODED PetLoyalty Down Base        spells\loyaltydown_impact_base.mdx
+   *     1646  HARDCODED PetLoyalty Down Head        spells\loyaltydown_impact_head.mdx
+   *     1647  HARDCODED PetLoyalty Up Base          spells\loyaltyup_impact_base.mdx
+   *     1648  HARDCODED PetLoyalty Up Head          spells\loyaltyup_impact_head.mdx
+   *     2702  HARDCODED Meeting Stone Join          Spells\Bind_Impact_Base.mdx
+   *     2922  HARDCODED Reputation                  Spells\ReputationLevelUp.mdx
+   *     3207  HARDCODED Resist Spell                spells\resist_immune_effect.mdx
+   *     4392  HARDCODED Achievement Base            spells\Achievement_OnRoot.mdx
+   *
+   * (`\` stands for a backslash throughout this block -- the DBC's own separator, which would end this
+   * comment's escape rules if written literally.)
+   *
+   * **On "benilla has 14 and this build has 16": the two counts are not the same measurement, so the
+   * difference cannot be reported as a list of two rows.** The reference's 14 is the size of the 1.12
+   * CLIENT's baked string table at `0x61f5b0` -- the matcher's own name list -- while 16 is a row count
+   * in this build's DBC. No 1.12 dump of this table is in this repo, so the 1.12 ROW count is not
+   * measurable from here and no subtraction is claimed.
+   *
+   * What can be said from the data instead: id **4392 "HARDCODED Achievement Base"** cannot exist in
+   * 1.12, because achievements shipped in 3.0.2. And the four **PetLoyalty** rows (1645-1648) are the
+   * reverse case -- pet loyalty is a 1.12 mechanic that 3.0 removed, and its rows survive here with
+   * their models still served. Both facts are about the FEATURES, not about the reference's table.
+   *
+   * `Particles\LootFX.mdl` and `Spells\LevelUp\LevelUp.mdl` both answer 200 as `.m2`; nine other
+   * `Particles\*.mdl` rows in the sample do not, which is the `.mdl` attrition `effectModelPath`
+   * records.
+   */
+  hardcodedEffectPath(name: string): string | null {
+    if (typeof name !== 'string' || name === '') {
+      return null;
+    }
+    return this.hardcodedEffects?.get(name.toLowerCase()) ?? null;
+  }
+
   castAnimation(spellId: number): number | null {
     const row = this.spell(spellId);
     if (row === null || row.visualID === 0) {

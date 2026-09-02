@@ -92,12 +92,21 @@ export default Entity({
    */
   hasMissile: r.uint32le,
   /**
-   * The projectile's `SpellVisualEffectName` id -- benilla's field 7, measured here at **8**. 1801
-   * rows populated plus 51 at `0xFFFFFFFF`; **97.7%** of the populated values are live
-   * `SpellVisualEffectName` ids against only 32.1% valid as kit ids, which separates it from every
-   * kit column in the record. Fireball's 365 -> `Spells\Fireball_Missile_Low.mdx`.
+   * The projectile's `SpellVisualEffectName` id -- benilla's field 7, measured here at **8**. 1852 of
+   * 9406 rows are non-zero, of which **1762 are positive and 1760 of those (99.9%) name a live
+   * `SpellVisualEffectName` row with a path**. Against the kit table only 32.1% would be valid, which
+   * is what separates this column from every kit column in the record.
+   * Fireball's 365 -> `Spells\Fireball_Missile_Low.mdx`.
+   *
+   * **SIGNED, and reading it unsigned inflates the error path 46-fold.** The reference gates the
+   * missile on `field 7 >= 1` and treats anything below that as "this visual names no missile"
+   * (`benilla-app/src/creature_anim/spell_visual.rs:952-957`). 90 of the non-zero rows here are
+   * NEGATIVE. Read as `int32` they fall below the gate and correctly yield no missile; read as
+   * `uint32` they become 4294967295-ish ids that pass `>= 1`, fail the effect-name lookup, and come
+   * out the other side as the literal `Spells\ErrorCube.mdx`. Measured on the served file: the
+   * genuine ErrorCube case is **2** visuals, and reading this column unsigned would make it **92**.
    */
-  missileModelID: r.uint32le,
+  missileModelID: r.int32le,
   /**
    * 106 rows, and the only values are 1 and 2 -- a small enum, not an id. benilla records its 1.12
    * equivalent (its field 8) as "dead-by-absence" and no consumer here reads it either; it is named

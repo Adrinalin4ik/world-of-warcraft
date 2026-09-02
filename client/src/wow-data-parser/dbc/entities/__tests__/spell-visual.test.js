@@ -52,6 +52,20 @@ describe('SpellVisual / SpellVisualKit column layout', () => {
     expect(record.missileFollowGround).toEqual([100, 300, 750, 6]);
   });
 
+  it('reads missileModelID as SIGNED, so a -1 row means no missile and not ErrorCube', () => {
+    // The same Fireball record with column 8 replaced by the raw 0xFFFFFFFF that 51 of the served
+    // rows carry (90 rows are negative in total). Read as `uint32` this is 4294967295, which passes
+    // the reference's `>= 1` missile gate, fails the SpellVisualEffectName lookup and comes out as the
+    // literal `Spells\\ErrorCube.mdx` -- measured to turn a 2-visual error path into a 92-visual one.
+    const record = decode(SpellVisual, [
+      67, 30, 38, 286, 0, 0, 0, 1, -1, 0, 1, 3011, 0, 1, 0, 0,
+      -1, 100, 300, 750, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ]);
+
+    expect(record.missileModelID).toBe(-1);
+    expect(record.missileModelID).toBeLessThan(1);
+  });
+
   it('reads kits 38 and 285 out of the real SpellVisualKit records', () => {
     // Fireball's cast kit: anim 53 SpellCastDirected, sound 1484 "Fire Cast", the same effect id 288
     // in both hand slots.
