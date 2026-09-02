@@ -43,6 +43,16 @@ interface LiveEmitter {
    * one feed their births the same impulse instead of one seeing 5x finer deltas.
    */
   inheritAccum: number;
+  /**
+   * INSTRUMENT-ONLY, and both exist because `live: 0` was not self-describing.
+   *
+   * `distSq` is the squared camera distance this frame -- the same value the cull test already
+   * computed, kept rather than recomputed so the reported distance is the one the decision was
+   * actually taken on. `framesSinceLive` counts frames since this emitter last held a particle, which
+   * is what separates "culled, correctly empty" from "in range and dead".
+   */
+  distSq: number;
+  framesSinceLive: number;
 }
 
 // Reused across animate() calls to avoid an allocation per emitter per frame.
@@ -138,29 +148,88 @@ export class ParticleManager {
    *
    * Built on demand from a console handle, never per frame.
    */
+  /**
+   * PER-EMITTER LIVE COUNTS -- v2. Two defects in v1, both of them the instrument's fault.
+   *
+   * ## `expected` was read at t = 0, which is the same mistake for the third time
+   *
+   * v1 reported `rate` and `expected` from `emissionRate.tracks[0].values[0]` -- the BIRTH sample.
+   * The owner's dump proved it in one row: `DEMONARMOR_IMPACT_HEAD` emitter 4 came back
+   * `rate: 0, expected: 0, live: 10`. Ten particles alive against an expectation of zero, because the
+   * track starts at zero and rises. That is the `capacityFor` t=0 read a third time (after
+   * `capacityFor` itself and the sprite-extent arithmetic), and `capacityFor` had ALREADY been fixed
+   * to use `trackPeak` -- the correct helper was ten lines away and this did not call it.
+   *
+   * SO NO SINGLE `expected` FIELD ANY MORE. A number whose name does not say which sample it came
+   * from is the projected-versus-carried ambiguity again, so both are reported and named:
+   * `rateT0`/`ratePeak`, `lifespanT0`/`lifespanPeak`, `expectedFromT0`/`expectedFromPeak`. A reader
+   * can see the spread rather than trusting one end of it.
+   *
+   * The Demon Skin shortfall this was built to investigate (`live` 21/19/16/5 against a t=0
+   * `expected` 36/35/29.7/5.3, a suspiciously even ~55%) must be re-read against `expectedFromPeak`
+   * before it is treated as a shortfall at all -- the denominator was wrong.
+   *
+   * ## `live: 0` could not distinguish a DEAD emitter from a CULLED one
+   *
+   * `CULL_DISTANCE` is 120 and `animate` resets a pool on the transition into culled, so a distant
+   * waterfall legitimately reads zero. The owner's dump has `MOUNTAINCAVERIVER` at 0 on all eleven
+   * emitters, `NEWWATERFALL` 0/101, `HOOKAHBONG01` 0/201, and `ORCBRAZIER_LIGHTPOSTBARRENS` appearing
+   * BOTH ways -- three instances at 0 and one at 67/68. Consistent with distance, and equally
+   * consistent with his oldest unconfirmed report ("доодадных частиц не видно"). The instrument could
+   * not tell them apart, which is why that report has sat unresolved.
+   *
+   * `culled` is the manager's OWN flag, not a distance re-derived here -- the same field the cull
+   * decision writes, so the row cannot disagree with the behaviour. `distance` is the square root of
+   * the very `distanceSquared` that decision used. `framesSinceLive` counts frames since the emitter
+   * last held a particle.
+   *
+   * **A zero is now self-describing.** `culled: true` with `distance > 120` explains itself. But
+   * `culled: false`, `distance < 120`, `framesSinceLive` large and `live: 0` is a REAL DEFECT, and a
+   * much bigger one than any spell effect: it would mean a large share of the world's ambient
+   * particles have never worked.
+   *
+   * Built on demand from the console handle, never per frame.
+   */
   liveByEmitter(): Array<{
     path: string; emitter: number; live: number; cap: number;
-    rate: number | null; lifespan: number | null; expected: number | null;
+    culled: boolean; distance: number | null; framesSinceLive: number;
+    rateT0: number | null; ratePeak: number | null;
+    lifespanT0: number | null; lifespanPeak: number | null;
+    expectedFromT0: number | null; expectedFromPeak: number | null;
   }> {
-    const first = (block: any): number | null => {
+    const t0 = (block: any): number | null => {
       const v = (block?.tracks?.[0]?.values ?? [])[0];
       return typeof v === 'number' ? Math.round(v * 1000) / 1000 : null;
     };
+    const peak = (block: any): number | null => {
+      const p = ParticleManager.trackPeak(block, Number.NaN);
+      return Number.isFinite(p) ? Math.round(p * 1000) / 1000 : null;
+    };
+    const product = (a: number | null, b: number | null): number | null => (
+      a === null || b === null ? null : Math.round(a * b * 10) / 10
+    );
     const seen = new Map<any, number>();
     return this.emitters.map((entry) => {
       const index = seen.get(entry.instance) ?? 0;
       seen.set(entry.instance, index + 1);
-      const rate = first(entry.definition?.emissionRate);
-      const lifespan = first(entry.definition?.lifespan);
+      const rT0 = t0(entry.definition?.emissionRate);
+      const rPk = peak(entry.definition?.emissionRate);
+      const lT0 = t0(entry.definition?.lifespan);
+      const lPk = peak(entry.definition?.lifespan);
       return {
         path: String(entry.instance?.path ?? '?'),
         emitter: index,
         live: entry.emitter.liveCount,
         cap: entry.emitter.pool.capacity ?? -1,
-        rate,
-        lifespan,
-        expected: rate !== null && lifespan !== null
-          ? Math.round(rate * lifespan * 10) / 10 : null,
+        culled: entry.culled,
+        distance: entry.distSq < 0 ? null : Math.round(Math.sqrt(entry.distSq) * 100) / 100,
+        framesSinceLive: entry.framesSinceLive,
+        rateT0: rT0,
+        ratePeak: rPk,
+        lifespanT0: lT0,
+        lifespanPeak: lPk,
+        expectedFromT0: product(rT0, lT0),
+        expectedFromPeak: product(rPk, lPk),
       };
     });
   }
@@ -278,6 +347,7 @@ export class ParticleManager {
           // `hasPrev` false so the FIRST frame establishes the anchor and drifts nothing -- see the
           // field's own doc for why (0,0,0) is not a usable sentinel.
           prevX: 0, prevY: 0, prevZ: 0, hasPrev: false, inheritAccum: 0,
+          distSq: -1, framesSinceLive: 0,
         });
       }
     } catch (error) {
@@ -353,6 +423,14 @@ export class ParticleManager {
       // check. Recursing that subtree is only worth paying for emitters that survive the cull below.
       scratchWorldPosition.setFromMatrixPosition(entry.instance.matrixWorld);
       const distanceSquared = camera.position.distanceToSquared(scratchWorldPosition);
+      // Recorded for EVERY entry, before the cull returns: a culled emitter's distance is exactly the
+      // number that explains its zero, so skipping it would leave the ambiguity the field exists for.
+      entry.distSq = distanceSquared;
+      if (entry.emitter.liveCount > 0) {
+        entry.framesSinceLive = 0;
+      } else {
+        entry.framesSinceLive += 1;
+      }
 
       if (distanceSquared > cullDistanceSquared) {
         // Beyond the cull distance: don't step or pack, and draw nothing. Comparing squared

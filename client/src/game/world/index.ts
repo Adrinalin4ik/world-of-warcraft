@@ -304,12 +304,14 @@ export default class World extends EventEmitter {
         billboards: billboardRows(),
         // `worldBillboardReset()` zeroes the maxima, so a fresh attempt is not read against an old
         // session's numbers -- the maxima accumulate across casts by design.
-        // THE CORONA COUNTER. Per-emitter LIVE particle counts beside each emitter's authored
-        // `rate * lifespan`, so the comparison needs no arithmetic at the console. A row whose
-        // `live` is far below `expected` is a starved pool or a refused emitter; a row matching it
-        // says the deficit is appearance rather than count. `live` pinned at `cap` is the
-        // `capacityFor` starvation recurring. Reads the map's manager, which is null before a world
-        // exists and is replaced on a worldport -- hence the lookup rather than a cached reference.
+        // THE PARTICLE COUNTER. Per-emitter live counts with the authored rate and lifespan at BOTH
+        // t=0 and track-peak, named separately -- `particle/manager.ts#liveByEmitter` carries why a
+        // single `expected` was a defect. `suspectDead` is the field to read FIRST: it counts
+        // emitters that are IN RANGE, NOT culled, and have held no particle for a while. Zero means
+        // every empty emitter is explained by distance; anything above zero is the owner's oldest
+        // unconfirmed report ("доодадных частиц не видно") finally reproducing, and it matters more
+        // than any spell effect. Reads the map's manager, which is null before a world exists and is
+        // replaced on a worldport -- hence the lookup rather than a cached reference.
         particles: (() => {
           const pm = (this.map as unknown as { particleManager?: {
             liveByEmitter?: () => unknown[]; liveParticleCount?: number; emitterCount?: number;
@@ -317,10 +319,20 @@ export default class World extends EventEmitter {
           if (!pm || typeof pm.liveByEmitter !== 'function') {
             return null;
           }
+          const rows = pm.liveByEmitter() as Array<{
+            path: string; live: number; culled: boolean;
+            distance: number | null; framesSinceLive: number;
+          }>;
+          // IN RANGE, NOT CULLED, AND EMPTY FOR OVER A SECOND at 60fps. The 60-frame floor is there
+          // so an emitter that simply has not reached its first birth yet -- a slow rate, or the
+          // frame it registered on -- is not reported as dead.
+          const dead = rows.filter((r) => !r.culled && r.live === 0 && r.framesSinceLive > 60);
           return {
             emitters: pm.emitterCount,
             liveTotal: pm.liveParticleCount,
-            byEmitter: pm.liveByEmitter(),
+            suspectDead: dead.length,
+            suspectDeadPaths: Array.from(new Set(dead.map((r) => r.path))).slice(0, 12),
+            byEmitter: rows,
           };
         })(),
         kits: { ...this.spellKitEffects.stats, live: this.spellKitEffects.liveCount },
