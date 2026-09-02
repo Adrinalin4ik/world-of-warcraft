@@ -26,6 +26,8 @@ import { HoverHighlight } from "./hover-highlight";
 import { SelectionRing } from "./selection-ring";
 import { LevelUpEffect } from "./level-up-effect";
 import { SpellKitEffects } from "./spell-kit-effects";
+import { spellData } from "../pipeline/dbc/spell-data";
+import { SpellMissiles } from "./spell-missile";
 import GameObjectSparkle from './game-object-sparkle';
 import SessionGuard from './session-guard';
 import ModelFade from './model-fade';
@@ -77,6 +79,12 @@ export default class World extends EventEmitter {
    * them through `playSpellKit` below is what supplies the particle manager they need.
    */
   public spellKitEffects: SpellKitEffects;
+
+  /**
+   * THE PROJECTILES -- the owner's "основная вещь". Public for the same reason
+   * `spellKitEffects` is: the launch edge is `SMSG_SPELL_GO` in the network layer.
+   */
+  public spellMissiles: SpellMissiles;
 
   /** The glow on a quest objective object. See `game-object-sparkle.ts`. */
   public gameObjectSparkle: GameObjectSparkle;
@@ -254,6 +262,7 @@ export default class World extends EventEmitter {
     // position is world-space and it belongs to no placed subtree. Draws nothing until a level lands.
     this.levelUpEffect = new LevelUpEffect(this.scene);
     this.spellKitEffects = new SpellKitEffects(this.scene);
+    this.spellMissiles = new SpellMissiles(this.scene);
     this.gameObjectSparkle = new GameObjectSparkle(this.scene);
     /**
      * `window.worldGameObjects()` -- WHY A BUSH IS NOT ON SCREEN, in one call.
@@ -1074,6 +1083,47 @@ export default class World extends EventEmitter {
    * `persistent` is the stage: true for the precast kit armed at `SMSG_SPELL_START`, false for the
    * cast release armed at `SMSG_SPELL_GO`.
    */
+  /**
+   * A missile arrived: play the spell's IMPACT kit on the VICTIM.
+   *
+   * The impact stage plays on the target rather than the caster, which is why it was unreachable until
+   * `SMSG_SPELL_GO`'s hit list was decoded -- one decode bought the missile's destination and this.
+   * Self-terminating, like the cast release: an impact flash is not a held state.
+   */
+  playImpactKit(targetGuid: string, spellId: number): void {
+    const victim = this.entities.get(targetGuid);
+    if (!victim) {
+      return; // it left the world during the flight
+    }
+    const kit = spellData.impactKit(spellId);
+    if (kit === null) {
+      return;
+    }
+    this.playSpellKit(victim, spellId, kit, false);
+  }
+
+  /**
+   * Launch a cast's projectiles -- the ONE door the GO edge uses, for the particle-manager reason
+   * `playSpellKit` gives.
+   */
+  launchSpellMissiles(
+    caster: Unit,
+    spellId: number,
+    hits: string[],
+    misses: string[],
+    groundAt: { x: number; y: number; z: number } | null,
+  ): void {
+    this.spellMissiles.launch(
+      caster,
+      spellId,
+      hits,
+      misses,
+      groundAt,
+      (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
+      (guid: string) => this.entities.get(guid)?.position ?? null,
+    );
+  }
+
   playSpellKit(unit: Unit, spellId: number, kitId: number, persistent: boolean): void {
     this.spellKitEffects.play(
       unit,
@@ -1204,6 +1254,14 @@ export default class World extends EventEmitter {
     this.spellKitEffects.update(
       delta * 1000,
       (guid: string) => this.entities.get(guid) === undefined,
+      camera,
+    );
+    // The projectiles: one array-length compare with nothing in flight. `unitAt` is what makes the
+    // flight HOMING -- the aim is re-resolved every frame off the live entity set.
+    this.spellMissiles.update(
+      delta * 1000,
+      (guid: string) => this.entities.get(guid)?.position ?? null,
+      (targetGuid: string, spellId: number) => this.playImpactKit(targetGuid, spellId),
     );
 
     // THE NAMEPLATES, an EIGHTH named span. See the exhaustiveness note above: a statement outside all

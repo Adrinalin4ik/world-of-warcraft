@@ -177,6 +177,17 @@ const COL = {
   manaCost: 42,
   /** `rangeIndex` -> `SpellRange.dbc`, which is what `IsActionInRange` needs. */
   rangeIndex: 46,
+  /**
+   * `Speed` -- the PROJECTILE speed in world units per second, and the missile's whole gate: the
+   * reference's spawn test is "Speed alone" (`benilla-app/src/entities/missile.rs` /
+   * `creature_anim/spell_visual.rs:951-953`, "the spawn gate is Speed **alone** ... every basic shot
+   * spell has no `SpellVisual` row at all and still flies").
+   *
+   * Column 47 is measured, not ported: scanning Fireball 133's row for a float in [5,100] returns
+   * exactly one column, 47, reading **24.0**. It also sits immediately after `rangeIndex` at 46, which
+   * this file had already established independently, so the pair corroborates.
+   */
+  speed: 47,
   /** `ManaCostPercentage` -- a PERCENT OF BASE MANA, used instead of `manaCost` by most caster spells. */
   manaCostPercentage: 204,
   /** `StartRecoveryCategory`: 133 is the shared global-cooldown group; 0 means the spell is off-GCD. */
@@ -413,6 +424,8 @@ export interface SpellRow {
   /** `SpellCastTimes.dbc` id. Read for a later round; cast TIME is deferred. */
   castingTimeIndex: number;
   /** `InterruptFlags`. Bit 0x1 = movement breaks the cast. See `COL.interruptFlags`. */
+  /** `Speed`, world units/sec. `0` for a spell with no projectile -- see `COL.speed`. */
+  speed: number;
   interruptFlags: number;
   /** `ChannelInterruptFlags`. Bit 0x8 = movement breaks the channel. See `COL.channelInterruptFlags`. */
   channelInterruptFlags: number;
@@ -590,6 +603,30 @@ class SpellData {
    */
   private precastKits: Map<number, number> | null = null;
 
+  /**
+   * `SpellVisual.dbc` id -> its IMPACT-stage kit id (column 3), which plays on the TARGET rather than
+   * on the caster. Reachable at last: it needs `SMSG_SPELL_GO`'s hit list, which this round decodes.
+   */
+  private impactKits: Map<number, number> | null = null;
+
+  /**
+   * `SpellVisual.dbc` id -> its `missileMotionID` (column 21), a `SpellMissileMotion.dbc` key.
+   *
+   * Measured 99.9% valid against that table's 204 ids; resolved, the top values read "Parabola" (255
+   * visuals), "Parabola (High)" (64), "Forward Spin + Parabola" (61).
+   */
+  private missileMotions: Map<number, number> | null = null;
+
+  /**
+   * `SpellMissileMotion.dbc` id -> `{ name, script }`, where **script is LUA SOURCE**.
+   *
+   * The flight law is authored as script rather than as coefficients, which is why this table has a
+   * 57,509-byte string block for 204 rows. Nothing evaluates it yet -- see
+   * `world/spell-missile.ts` for the whole finding, the Parabola script quoted, and why running it
+   * needs its own round. It is loaded and exposed so that round starts from the data.
+   */
+  private missileMotionRows: Map<number, { name: string; script: string }> | null = null;
+
   /** `SpellVisualKit.dbc` id -> its `animID`, sentinels already folded away. */
   private kitAnims: Map<number, number> | null = null;
 
@@ -713,12 +750,14 @@ class SpellData {
     // take: it is the only table that turns a visual's missile column into a model path, it is useless
     // without `SpellVisual` which is already being fetched, and 260 KB behind a 49 MB fetch that is
     // already in flight costs nothing measurable.
-    const [spells, icons, visuals, kits, effectNames, ranges, durations, radii, descVars] = await Promise.all([
+    const [spells, icons, visuals, kits, effectNames, missileMotions, ranges, durations,
+      radii, descVars] = await Promise.all([
       this.loadSpells(),
       DBC.load('SpellIcon'),
       DBC.load('SpellVisual'),
       DBC.load('SpellVisualKit'),
       DBC.load('SpellVisualEffectName'),
+      DBC.load('SpellMissileMotion'),
       DBC.load('SpellRange'),
       DBC.load('SpellDuration'),
       DBC.load('SpellRadius'),
@@ -776,6 +815,8 @@ class SpellData {
 
     this.castKits = new Map<number, number>();
     this.precastKits = new Map<number, number>();
+    this.impactKits = new Map<number, number>();
+    this.missileMotions = new Map<number, number>();
     for (const record of (visuals as any).records ?? []) {
       if (record && record.castKitID) {
         this.castKits.set(record.id, record.castKitID);
@@ -789,6 +830,13 @@ class SpellData {
       // does not.
       if (record && record.precastKitID && record.precastKitID !== 0xffffffff) {
         this.precastKits.set(record.id, record.precastKitID);
+      }
+      // The impact stage. Same zero-sentinel rule as the two above.
+      if (record && record.impactKitID && record.impactKitID !== 0xffffffff) {
+        this.impactKits.set(record.id, record.impactKitID);
+      }
+      if (record && record.missileMotionID && record.missileMotionID !== 0xffffffff) {
+        this.missileMotions.set(record.id, record.missileMotionID);
       }
     }
 
@@ -837,6 +885,14 @@ class SpellData {
       }
     }
 
+    this.missileMotionRows = new Map<number, { name: string; script: string }>();
+    for (const record of (missileMotions as any).records ?? []) {
+      const script = record?.script;
+      if (typeof script === 'string' && script !== '') {
+        this.missileMotionRows.set(record.id, { name: record.name ?? '', script });
+      }
+    }
+
     this.effectPaths = new Map<number, string>();
     this.hardcodedEffects = new Map<string, string>();
     for (const record of (effectNames as any).records ?? []) {
@@ -879,6 +935,9 @@ class SpellData {
         missileModels: this.missileModels.size,
         kitSlots: this.kitSlots.size,
         kitWorldEffects: this.kitWorldEffects.size,
+        impactKits: this.impactKits.size,
+        missileMotions: this.missileMotions.size,
+        missileMotionRows: this.missileMotionRows.size,
         ms: Date.now() - startedAt,
       },
       bodySize: 0,
@@ -957,6 +1016,7 @@ class SpellData {
         iconID: col(COL.iconID),
         visualID: col(COL.visual),
         castingTimeIndex: col(COL.castingTimeIndex),
+        speed: flt(COL.speed),
         interruptFlags: col(COL.interruptFlags),
         channelInterruptFlags: col(COL.channelInterruptFlags),
         powerType: col(COL.powerType),
@@ -1168,6 +1228,48 @@ class SpellData {
       return null;
     }
     return this.precastKits?.get(row.visualID) ?? null;
+  }
+
+  /**
+   * The `SpellVisualKit` id of the IMPACT stage -- the kit that plays on the TARGET, not the caster.
+   *
+   * The third of the trio beside `castKit`/`precastKit` and read off the same `SpellVisual` row, so
+   * all three agree about which column is which stage. Its consumer needs `SMSG_SPELL_GO`'s hit list
+   * to know WHO to play it on.
+   */
+  impactKit(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    return this.impactKits?.get(row.visualID) ?? null;
+  }
+
+  /**
+   * A spell's missile MOTION script -- `{ name, script }` where `script` is Lua source, or null.
+   *
+   * `Spell.dbc` visual -> `SpellVisual` column 21 -> `SpellMissileMotion` column 2. Nothing evaluates
+   * it yet and `world/spell-missile.ts` says why; this is the door for the round that does, so that
+   * round reads the real script instead of re-deriving an arc.
+   */
+  missileMotionScript(spellId: number): { name: string; script: string } | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    const motionId = this.missileMotions?.get(row.visualID);
+    if (motionId === undefined) {
+      return null;
+    }
+    return this.missileMotionRows?.get(motionId) ?? null;
+  }
+
+  /**
+   * `Spell.dbc` `Speed` -- world units/sec, or 0. THE MISSILE GATE: the reference's spawn test is
+   * Speed alone (`creature_anim/spell_visual.rs:951-953`), not `hasMissile` and not the model column.
+   */
+  spellSpeed(spellId: number): number {
+    return this.spell(spellId)?.speed ?? 0;
   }
 
   /**

@@ -45,7 +45,7 @@ import EventEmitter from 'events';
 import { GameHandler } from '../handler';
 import GameOpcode from '../opcode';
 import GamePacket from '../packet';
-import { GUID_BYTES, guidBytes } from '../../guid-hex';
+import { GUID_BYTES, guidBytes, guidHex } from '../../guid-hex';
 import { castAnimationFor, precastAnimationFor } from '../../../game/classes/spell-anim';
 import { spellData } from '../../../game/pipeline/dbc/spell-data';
 import { spellWire } from '../../../game/classes/spell-wire';
@@ -90,6 +90,22 @@ export interface ActionSlot {
 
 /** `spell 6603 "Auto Attack"` -- the melee auto-attack, which in the real client is a SPELL ON A BUTTON. */
 export const SPELL_AUTO_ATTACK = 6603;
+
+/**
+ * `SMSG_SPELL_GO`'s decoded target tail. See `SpellHandler#readSpellGoTargets` for the layout, the
+ * two width deltas and why `plausible` exists.
+ */
+export interface SpellGoTargets {
+  /** Units the cast LANDED on -- one missile each, and the impact kit plays on each. */
+  hits: string[];
+  /** Units it missed, with the wire's `SpellMissInfo`. A missile still flies at a missed target. */
+  misses: Array<{ guid: string; condition: number }>;
+  targetMask: number;
+  /** The ground point, when the mask carries one -- the location fallback's single projectile. */
+  dest: { x: number; y: number; z: number } | null;
+  /** False when the stride check failed or the body was short: treat the lists as unusable. */
+  plausible: boolean;
+}
 
 export class SpellHandler extends EventEmitter {
   private game: GameHandler;
@@ -933,6 +949,9 @@ export class SpellHandler extends EventEmitter {
     //
     // The caster may be a peer as easily as ourselves, so this is the same plain `entities` lookup the
     // swing and the defense reaction use in `combat.ts`.
+    // THE TAIL, decoded before anything reads it. `readCastHead` has already validated the cursor.
+    const targets = this.readSpellGoTargets(gp);
+
     const unit = this.game.world.entities.get(decoded.caster);
     if (unit) {
       const anim = castAnimationFor(unit, decoded.spellId);
@@ -966,6 +985,23 @@ export class SpellHandler extends EventEmitter {
       if (castKit !== null) {
         this.game.world.playSpellKit(unit, decoded.spellId, castKit, false);
       }
+
+      // THE PROJECTILE -- the owner's "основная вещь", and the one thing this subsystem was missing.
+      // Gated on `Spell.dbc` Speed inside `SpellMissiles#launch`, which is the reference's whole spawn
+      // test. The IMPACT kit now rides its arrival rather than being unreachable: both halves came from
+      // decoding the target tail above, which is why one decode closed two gaps.
+      //
+      // Guarded on the tail being trustworthy. A `plausible` false means the stride check failed, and
+      // flying projectiles at guids read out of a mis-strided body would put fireballs at random units.
+      if (targets.plausible) {
+        this.game.world.launchSpellMissiles(
+          unit,
+          decoded.spellId,
+          targets.hits,
+          targets.misses.map((m) => m.guid),
+          targets.dest,
+        );
+      }
     }
 
     // THE GLOBAL COOLDOWN for an INSTANT spell, which is the only kind that reaches here without having
@@ -984,7 +1020,149 @@ export class SpellHandler extends EventEmitter {
       this.pendingCast.clearIf(decoded.spellId);
     }
 
-    this.emit('spellGo', decoded);
+    this.emit('spellGo', { ...decoded, targets });
+  }
+
+
+  /**
+   * `SMSG_SPELL_GO`'s TARGET TAIL -- the hit list, the miss list and the ground point.
+   *
+   * This is the tail this method said for four rounds it deliberately did not decode. It is decoded
+   * now because ONE decode closes TWO gaps: the missile needs a destination and the impact kit needs
+   * to know whose body to play on, and both are in this block.
+   *
+   * ## The layout, and the two width deltas that are already handled upstream
+   *
+   * **The layout is the SERVER IMPLEMENTATIONS' shape, not measured off a capture** -- the same
+   * standing this file's `CMSG_CANCEL_CAST` and `CMSG_SET_ACTION_BUTTON` notes take. It is
+   * TrinityCore's `Spell::WriteSpellGoTargets` followed by `SpellCastTargets::Write`, and it is
+   * labelled rather than asserted because nothing available from here can observe the difference.
+   * What IS measured is the cursor it starts from: `readCastHead`'s own live-wire measurement (the
+   * `1500`/`2` reading recorded on it) pins where this block begins.
+   *
+   * Read from immediately after `readCastHead`, which has consumed the two guids, `castCount`,
+   * `spellId`, `castFlags` and the one `u32` timestamp:
+   *
+   *     u8  hitCount
+   *     hitCount  x  u64 guid            -- FULL eight bytes, NOT packed
+   *     u8  missCount
+   *     missCount x (u64 guid, u8 missCondition [, u8 reflectResult when condition == 11 REFLECT])
+   *     u32 targetMask                   -- `SpellCastTargets`
+   *     ... mask-dependent blocks, then castFlags-dependent blocks
+   *
+   * The two 1.12 -> 3.3.5a width deltas in this packet are `castFlags` (u16 -> u32) and the `castCount`
+   * byte that did not exist in 1.12, and BOTH are consumed by `readCastHead`, which self-checks its
+   * `spellId` precisely so a 1.12-shaped read cannot reach here. So this block inherits an already
+   * validated cursor rather than re-deriving the offset -- which is the shape that made the quest-area
+   * defect land its strings 8 bytes early.
+   *
+   * The guids here are NOT packed, and that is the trap worth naming: every other guid in this file is
+   * packed, so reusing `readPackedGUID` would read one byte where eight sit and walk the rest of the
+   * body off by seven per target.
+   *
+   * ## SELF-CONSISTENT, NOT RESIDUAL-VERIFIED, and the difference is stated on purpose
+   *
+   * `CLAUDE.md` is explicit that only a residual against captured traffic settles a layout, and no
+   * capture is available from here -- so this says "self-consistent" as instructed. What it DOES have
+   * is an oracle that costs nothing and is not self-built: after the two lists, the next word must be
+   * a `SpellCastTargets` mask, i.e. a small bitmask drawn from known flags. A wrong stride in either
+   * list lands a guid word or a garbage count there instead, and `MASK_PLAUSIBLE` catches it. That is
+   * the same trick `readCastHead` uses on `spellId`, and it is reported through `spellWire` rather
+   * than thrown, so a bad read shows up as a named record instead of a missing missile.
+   *
+   * The remainder is NOT asserted to be zero, deliberately: the mask-dependent and castFlags-dependent
+   * blocks that follow are not consumed here (each is its own width risk and nothing needs them), so a
+   * non-zero remainder is expected and is recorded as `left` rather than treated as an error.
+   */
+  private readSpellGoTargets(gp: GamePacket): SpellGoTargets {
+    // `TARGET_FLAG_*`, the bits this build's `SpellCastTargets::Read` knows. Used only as the
+    // plausibility oracle above and to decide whether a ground point follows.
+    const TARGET_FLAG_UNIT = 0x0002;
+    const TARGET_FLAG_ITEM = 0x0010;
+    const TARGET_FLAG_SOURCE_LOCATION = 0x0020;
+    const TARGET_FLAG_DEST_LOCATION = 0x0040;
+    const TARGET_FLAG_STRING = 0x2000;
+    const TARGET_FLAG_GAMEOBJECT = 0x0800;
+    const TARGET_FLAG_CORPSE_ALLY = 0x8000;
+    const MASK_KNOWN = 0xffff;
+    /** `SPELL_MISS_REFLECT`, the one miss condition that carries a second byte. */
+    const MISS_REFLECT = 11;
+
+    const hits: string[] = [];
+    const misses: Array<{ guid: string; condition: number }> = [];
+    let targetMask = 0;
+    let dest: { x: number; y: number; z: number } | null = null;
+    let plausible = false;
+
+    try {
+      const hitCount = gp.readUnsignedByte();
+      for (let i = 0; i < hitCount; i += 1) {
+        hits.push(this.readFullGuid(gp));
+      }
+      const missCount = gp.readUnsignedByte();
+      for (let i = 0; i < missCount; i += 1) {
+        const guid = this.readFullGuid(gp);
+        const condition = gp.readUnsignedByte();
+        if (condition === MISS_REFLECT) {
+          gp.readUnsignedByte();
+        }
+        misses.push({ guid, condition });
+      }
+      targetMask = gp.readUnsignedInt();
+      // THE ORACLE. A real mask uses only the low bits this build defines; a stride error puts a guid
+      // word or a count here, which overwhelmingly fails this.
+      plausible = (targetMask & ~MASK_KNOWN) === 0;
+
+      if (plausible) {
+        // Only the blocks needed to find a GROUND point are walked, in `SpellCastTargets::Read` order.
+        if ((targetMask & (TARGET_FLAG_UNIT | TARGET_FLAG_CORPSE_ALLY | TARGET_FLAG_GAMEOBJECT)) !== 0) {
+          gp.readPackedGUID();
+        }
+        if ((targetMask & TARGET_FLAG_ITEM) !== 0) {
+          gp.readPackedGUID();
+        }
+        if ((targetMask & TARGET_FLAG_SOURCE_LOCATION) !== 0) {
+          gp.readPackedGUID();
+          gp.readFloat();
+          gp.readFloat();
+          gp.readFloat();
+        }
+        if ((targetMask & TARGET_FLAG_DEST_LOCATION) !== 0) {
+          gp.readPackedGUID();
+          const x = gp.readFloat();
+          const y = gp.readFloat();
+          const z = gp.readFloat();
+          dest = { x, y, z };
+        }
+        // `TARGET_FLAG_STRING`'s cstring is deliberately NOT consumed: nothing needs it and a
+        // cstring read is its own width risk. It is the last block in `SpellCastTargets`, so skipping
+        // it costs nothing here -- everything this method returns has already been read.
+      }
+    } catch (error) {
+      // A short body is a real outcome (a truncated packet, or a stride wrong enough to over-read).
+      // Recorded, never thrown: the caller degrades to "no targets" and the cast still animates.
+      spellWire.record({
+        at: Date.now(),
+        kind: 'SPELL_GO',
+        spellId: 0,
+        caster: null,
+        detail: { targetsError: String(error), hits: hits.length, misses: misses.length },
+        bodySize: gp.length - gp.headerSize,
+        consumed: gp.index - gp.headerSize,
+      });
+      return { hits, misses, targetMask, dest, plausible: false };
+    }
+
+    return { hits, misses, targetMask, dest, plausible };
+  }
+
+  /** Eight little-endian bytes -> the normalised guid string. See `guid-hex.ts` for why not a Number. */
+  private readFullGuid(gp: GamePacket): string {
+    const bytes = new Uint8Array(GUID_BYTES);
+    for (let i = 0; i < GUID_BYTES; ++i) {
+      bytes[i] = gp.readUnsignedByte();
+    }
+    return guidHex(bytes);
   }
 
   /**

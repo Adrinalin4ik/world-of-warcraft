@@ -67,6 +67,29 @@ import type Unit from '../classes/unit';
  *    nothing hands a state kit over to `Hold` (158) mid-life. That needs a per-instance completion
  *    callback, and more basically it needs someone to ADVANCE the instance every frame -- see the next
  *    item.
+ * ## BILLBOARDING: found, diagnosed, and it was NOT the particle system
+ *
+ * The owner's first screenshot showed the hand glow as flat sheets EDGE-ON rather than facing him.
+ * `CLAUDE.md` records that every orientation defect on this project has been two conventions meeting,
+ * three for three, and none was fixed by negating a coordinate -- so the first job was to find which
+ * two, and no sign was touched.
+ *
+ * It is not the particle shader. `particle/shader.vert` builds every quad in VIEW space
+ * (`viewCenter.xy += spun`), so a particle physically cannot be edge-on -- and `particle/material.ts`
+ * sets `DoubleSide` for the same reason. Particles were never the suspect once read.
+ *
+ * The two conventions are the MODEL's billboarded BONES and the host lane that is supposed to orient
+ * them. An M2 carries a `billboards` list -- bones whose `userData.billboardType` is spherical (0) or
+ * cylindrical-Z (3) -- and `M2#applyBillboards(camera)` is what turns them to face the viewer
+ * (`pipeline/m2/index.ts:1011-1024`). Nothing calls it for a model unless its lane does: the doodad
+ * lane does, per frame, at `doodad-manager.js:401-404`. **This lane did not**, so an effect model with
+ * billboarded bones drew its quads in whatever direction the bind pose left them -- exactly flat
+ * sheets at a fixed angle. The fix is one existing call, added to `update` below.
+ *
+ * NOT gated on `cameraMoved`, unlike the doodad lane, and that difference is deliberate: a doodad is
+ * static so only camera motion changes its billboard, while these ride units that move. Gating on the
+ * camera would freeze the billboard of an effect on a walking mob.
+ *
  *  - **Nothing poses a free-standing effect model per frame.** A unit's body is advanced by
  *    `unit.update`, a doodad by `DoodadManager#poseDoodad` (bone budget, distance decimation, material
  *    channels -- a subsystem, not a line). A model this module spawns is in neither lane, so its
@@ -99,6 +122,29 @@ import type Unit from '../classes/unit';
  * **What is NOT measured**: the emitter and particle counts of these models, and therefore the real
  * per-instance millisecond cost. That needs the models parsed in a browser. The number is owed and is
  * named as owed rather than estimated -- the same standing `level-up-effect.ts` takes for its own.
+ *
+ * ## THE FLOATING-PROMISE WARNING IS REAL, AND IT IS NOT AN UNHANDLED REJECTION
+ *
+ * The owner's console carries, from this spawn path:
+ *
+ *     Warning: a promise was created in a handler at bundle.js:100618:89 but was not returned from it
+ *       at new ParticleMaterial -> ParticleManager.register -> SpellKitEffects.spawn
+ *
+ * Read rather than assumed, and the brief's framing of it ("a failure there is unhandled") does not
+ * survive the read. `ParticleMaterial`'s constructor starts `TextureLoader.load(...)` and **already
+ * terminates that chain with a `.catch` that logs** (`particle/material.ts:119-133`), so a texture
+ * 404 is handled, not swallowed. What the warning reports is the other thing bluebird warns about: a
+ * new promise chain was begun inside a `.then` handler and not returned, so nothing can await it.
+ *
+ * **And nothing CAN, from any caller.** `ParticleManager.register` is synchronous and returns a
+ * `number` (`particle/manager.ts:85`), so it exposes no handle on the texture load at all. That is a
+ * shape shared by every caller -- `level-up-effect.ts`, `game-object-sparkle.ts`, the doodad lane and
+ * both of this round's modules -- and it is reported here rather than worked around, because a local
+ * wrapper would hide a manager-level property from the next caller. Its one visible consequence is
+ * that an effect's first frames draw with `TextureLoader.PLACEHOLDER` until the texture lands.
+ *
+ * Fixing it properly means giving `register` a way to report texture readiness, which changes a
+ * signature four lanes depend on -- a scoped round, not a line in this one.
  *
  * ## Materials are not written here, at all
  *
@@ -447,7 +493,11 @@ export class SpellKitEffects {
    * the reference tends explicitly (`tend_world_plants`, `mod.rs:636-647`) because a plant is a scene
    * child and would otherwise outlive its owner visibly.
    */
-  update(deltaMs: number, ownerGone: (guid: string) => boolean): void {
+  update(
+    deltaMs: number,
+    ownerGone: (guid: string) => boolean,
+    camera?: THREE.Camera,
+  ): void {
     if (this.live.length === 0) {
       return;
     }
@@ -457,6 +507,20 @@ export class SpellKitEffects {
       if (ownerGone(instance.guid)) {
         this.remove(i);
         continue;
+      }
+
+      // THE BILLBOARD PASS -- see the header. One existing call, gated on the model actually having
+      // billboarded bones, so a pure particle model (no bones) costs one array-length read. `camera`
+      // is optional only so the two unit tests need not build one; the world always passes it.
+      if (camera !== undefined) {
+        const billboarded = instance.model as unknown as {
+          billboards?: unknown[]; applyBillboards?: (c: THREE.Camera) => void;
+        };
+        if (billboarded.billboards !== undefined
+          && billboarded.billboards.length > 0
+          && typeof billboarded.applyBillboards === 'function') {
+          billboarded.applyBillboards(camera);
+        }
       }
       if (instance.remaining === null) {
         continue; // persistent and unreaped: its spell owns it
