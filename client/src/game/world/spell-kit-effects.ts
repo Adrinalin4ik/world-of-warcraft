@@ -746,6 +746,40 @@ export class SpellKitEffects {
       // THE BILLBOARD PASS -- see the header. One existing call, gated on the model actually having
       // billboarded bones, so a pure particle model (no bones) costs one array-length read. `camera`
       // is optional only so the two unit tests need not build one; the world always passes it.
+      // THE BILLBOARD CHAIN READS CORRECT END TO END, and five candidates for "billboarding is
+      // simply absent" on `DemonArmor_Impact_Head` are refuted rather than untested. Recorded so the
+      // next round does not re-walk them:
+      //
+      //  1. WRONG LIST / SPAWNED ELSEWHERE. No: `playImpactKit` -> `playSpellKit` -> `play` pushes
+      //     into `this.live`, the single collection this loop iterates, and there is exactly one
+      //     `live.push` in the file. `camera` IS passed (`world/index.ts`'s `spellKitEffects.update`
+      //     call), so the pass below is not skipped.
+      //  2. AN UNIMPLEMENTED BILLBOARD TYPE. No: the model's two billboarded bones are bone 0
+      //     flags 0x0040 = cylindrical-Z and bone 2 flags 0x0008 = spherical. BOTH are implemented;
+      //     the unimplemented one is type 2 cylindrical-Y and nothing here authors it.
+      //  3. THE WRITER'S `bone.skin` GUARD. `applySphericalBillboard` returns early on `!bone.skin`,
+      //     and `skin` is published only to ROOT bones (`m2/index.ts:613-615`). Both billboarded
+      //     bones here have `parentID = -1`, so both are roots and both get it.
+      //  4. THE POSE CLOBBERING IT. No: `anim/pose.ts:61` deliberately withholds rotation for a
+      //     billboarded bone -- "rotation here would fight `applyBillboards` -- and win on every
+      //     frame the camera did not move" -- and its own test pins that. Order is not the issue.
+      //  5. `bone.rotation` BEING INERT under `matrixAutoUpdate = false`, this project's own recorded
+      //     trap. No: that flag is set on the M2, its submeshes and the skeleton
+      //     (`m2/index.ts:244/405/472/625`), and `m2/index.ts:835` passes it to the SUBMESH, not to
+      //     bones. Bones keep three's default `true`, so the Euler reaches `bone.matrix` on the
+      //     `updateMatrixWorld(true)` walk below.
+      //
+      // AND THE MESH IS ON THE PALETTE THAT CARRIES THE BILLBOARD: all 64 of its vertices weight to
+      // bone 1 alone, whose parent bone 0 is billboarded, so `chainBillboarded` forces
+      // `SCOPE_SKINNED` for that submesh (`anim/skinning-scope.ts:213-218`) precisely so it rides
+      // three's palette -- built from `bone.matrixWorld`, which has the facing -- instead of
+      // `InstanceAnim.palette`, which does not.
+      //
+      // SO THE OBSERVATION NEEDS RE-TAKING BEFORE ANYTHING ELSE IS HUNTED. It was made on a build
+      // where this same model's EMITTERS were swinging by up to a full unit as the camera moved
+      // (`87f9180`: a model-space offset was being rotated by a spherical billboard). A corona
+      // sliding relative to a static shield reads as "the shield does not billboard" just as
+      // readily as the reverse, and that motion is now gone.
       let billboardsMoved = false;
       if (camera !== undefined) {
         const billboarded = instance.model as unknown as {
