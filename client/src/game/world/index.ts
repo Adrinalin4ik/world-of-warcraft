@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import Player from "../classes/player";
 import Unit from "../classes/unit";
 import spots from "./spots";
-import { billboardRows } from './billboard-probe';
+import { billboardRows, resetBillboardProbe } from './billboard-probe';
 
 import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
@@ -302,6 +302,8 @@ export default class World extends EventEmitter {
         // is proof the billboard never reached the skinning palette. `billboard-probe.ts` carries the
         // full decision table.
         billboards: billboardRows(),
+        // `worldBillboardReset()` zeroes the maxima, so a fresh attempt is not read against an old
+        // session's numbers -- the maxima accumulate across casts by design.
         // THE CORONA COUNTER. Per-emitter LIVE particle counts beside each emitter's authored
         // `rate * lifespan`, so the comparison needs no arithmetic at the console. A row whose
         // `live` is far below `expected` is a starved pool or a refused emitter; a row matching it

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 import M2Blueprint from '../pipeline/m2/blueprint';
 import { worldClock } from '../pipeline/m2/anim/world-clock';
-import { forgetBillboards, sampleBillboards } from './billboard-probe';
+import { sampleBillboards, sampleCamera } from './billboard-probe';
 import { kitEmitters, WORLD_EFFECT_TAG, KitEmitter } from '../classes/spell-kit-fx';
 import { warnOnce } from '../ui/framexml/lua/methods/region';
 import { spellFxParticleSize } from './spell-fx-scale';
@@ -736,6 +736,9 @@ export class SpellKitEffects {
     // The gate phases on it, so it must be the world's own counter rather than a local tick count --
     // `shouldPose` staggers instances against this exact number for every other animated population.
     const frameIndex = worldClock.frameIndex;
+    // ONCE per frame, before any instance: the camera window is what makes a zero writer delta
+    // readable as a finding rather than a still-camera null test.
+    sampleCamera(camera, frameIndex);
     for (let i = this.live.length - 1; i >= 0; i -= 1) {
       const instance = this.live[i];
 
@@ -793,7 +796,7 @@ export class SpellKitEffects {
           billboardsMoved = true;
           // STAGE 1 of the last-hop probe: the bone's own quaternion, immediately after the writer
           // wrote it and BEFORE any world walk. See `billboard-probe.ts`.
-          sampleBillboards(instance.model, instance.guid + ':' + String(instance.spellId), 'writer');
+          sampleBillboards(instance.model, 'writer');
         }
       }
 
@@ -825,7 +828,7 @@ export class SpellKitEffects {
         // STAGE 2: what the SKINNING PALETTE sees, after the world walk. The pair is the whole
         // measurement -- `paletteRotChangeDeg` staying ~0 while `writerRotChangeDeg` moves is proof
         // the billboard never reached the vertex, whatever the bone's own fields say.
-        sampleBillboards(instance.model, instance.guid + ':' + String(instance.spellId), 'palette');
+        sampleBillboards(instance.model, 'palette');
       }
       // AND THE HANDOVER: `Stand` -> `Hold` once the birth span elapses. Without it a state kit holds
       // its birth pose for the whole life of the buff, which for a shield is minutes.
@@ -844,7 +847,6 @@ export class SpellKitEffects {
   private remove(index: number): void {
     const instance = this.live[index];
     this.stats.removed += 1;
-    forgetBillboards(instance.guid + ':' + String(instance.spellId));
     instance.manager?.unregister(instance.model);
     instance.ribbons?.unregister(instance.model);
     if (instance.planted) {

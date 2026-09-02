@@ -66,10 +66,11 @@ interface Row {
   billboardsLen: number;
   frames: number;
   writerRotDeg: number;
-  writerRotChangeDeg: number;
-  paletteRotDeg: number;
-  paletteRotChangeDeg: number;
-  paletteTranslation: number[];
+  writerRotMaxChangeDeg: number;
+  paletteRotDegModelSpace: number;
+  paletteRotMaxChangeDeg: number;
+  seededWriter: boolean;
+  seededPalette: boolean;
   prevWriter: THREE.Quaternion;
   prevPalette: THREE.Quaternion;
 }
@@ -80,6 +81,13 @@ const IDENTITY = new THREE.Quaternion();
 const scratchQuat = new THREE.Quaternion();
 const scratchPos = new THREE.Vector3();
 const scratchScale = new THREE.Vector3();
+const scratchModelSpace = new THREE.Matrix4();
+const prevCameraQuat = new THREE.Quaternion();
+
+let cameraSeeded = false;
+let cameraFrame = -1;
+let cameraRotMaxChangeDeg = 0;
+let cameraRotTotalDeg = 0;
 
 /** Signed angle between two unit quaternions, in degrees. */
 const angleBetween = (a: THREE.Quaternion, b: THREE.Quaternion): number => {
@@ -98,6 +106,42 @@ const typeOf = (flags: number): number => {
   return -1;
 };
 
+
+/**
+ * Advance the CAMERA's own rotation window. Once per frame, before any instance is sampled --
+ * `frameIndex` is what makes it once rather than once per live kit.
+ *
+ * WITHOUT THIS THE TEST CANNOT BE READ. A zero writer delta means "the writer is broken" only if the
+ * camera actually moved; with a still camera zero is correct and expected, which is exactly what made
+ * the owner's first read useless. The first sample only SEEDS the reference and contributes no delta,
+ * or frame one would report the camera's whole orientation as a change.
+ */
+export function sampleCamera(camera: THREE.Camera | undefined, frameIndex: number): void {
+  if (!billboardProbe.enabled || camera === undefined || frameIndex === cameraFrame) {
+    return;
+  }
+  cameraFrame = frameIndex;
+  if (!cameraSeeded) {
+    prevCameraQuat.copy(camera.quaternion);
+    cameraSeeded = true;
+    return;
+  }
+  const delta = angleBetween(camera.quaternion, prevCameraQuat);
+  prevCameraQuat.copy(camera.quaternion);
+  cameraRotTotalDeg += delta;
+  if (delta > cameraRotMaxChangeDeg) {
+    cameraRotMaxChangeDeg = delta;
+  }
+}
+
+/** Zero every accumulator, so a fresh attempt is not read against an old session's maxima. */
+export function resetBillboardProbe(): void {
+  rows.clear();
+  cameraSeeded = false;
+  cameraRotMaxChangeDeg = 0;
+  cameraRotTotalDeg = 0;
+}
+
 /**
  * Sample one instance's billboarded bones. Call TWICE per frame: once right after
  * `applyBillboards` with `stage` "writer", and once after `updateMatrixWorld(true)` with "palette".
@@ -106,16 +150,13 @@ const typeOf = (flags: number): number => {
  * two different moments in the frame. Reading them together would sample the palette AFTER the walk
  * either way and could not tell a stale palette from a fresh one.
  */
-export function sampleBillboards(
-  model: unknown,
-  key: string,
-  stage: 'writer' | 'palette',
-): void {
+export function sampleBillboards(model: unknown, stage: 'writer' | 'palette'): void {
   if (!billboardProbe.enabled) {
     return;
   }
   const host = model as {
     path?: string;
+    matrixWorld?: THREE.Matrix4;
     bones?: THREE.Object3D[];
     billboards?: Array<THREE.Object3D & { skin?: unknown }>;
     data?: { bones?: Array<{ flags?: number; parentID?: number }> };
@@ -124,6 +165,7 @@ export function sampleBillboards(
   if (!bones || bones.length === 0) {
     return;
   }
+  const path = String(host.path ?? '?');
 
   for (let i = 0; i < bones.length; i += 1) {
     const bone = bones[i];
@@ -133,14 +175,16 @@ export function sampleBillboards(
     // using the loop counter would read bone 1's flags into the second row and libel a bone that is
     // not billboarded at all. `-1` when unresolvable, which the row shows rather than hides.
     const index = (host.bones ?? []).indexOf(bone);
-    const rowKey = key + ':' + String(index);
+    // KEYED BY MODEL PATH, never by guid: the maxima must outlive the instance and accumulate
+    // across casts, which is what makes the sequence "turn, cast, keep turning, read" work.
+    const rowKey = path + ':' + String(index);
     let row = rows.get(rowKey);
     if (row === undefined) {
       const def = index >= 0 ? host.data?.bones?.[index] : undefined;
       const flags = Number(def?.flags ?? 0);
       row = {
         key: rowKey,
-        path: String(host.path ?? '?'),
+        path,
         bone: index,
         parentID: Number(def?.parentID ?? -99),
         flags,
@@ -151,10 +195,11 @@ export function sampleBillboards(
         billboardsLen: bones.length,
         frames: 0,
         writerRotDeg: 0,
-        writerRotChangeDeg: 0,
-        paletteRotDeg: 0,
-        paletteRotChangeDeg: 0,
-        paletteTranslation: [0, 0, 0],
+        writerRotMaxChangeDeg: 0,
+        paletteRotDegModelSpace: 0,
+        paletteRotMaxChangeDeg: 0,
+        seededWriter: false,
+        seededPalette: false,
         prevWriter: new THREE.Quaternion(),
         prevPalette: new THREE.Quaternion(),
       };
@@ -164,9 +209,15 @@ export function sampleBillboards(
     if (stage === 'writer') {
       // The bone's OWN quaternion, straight after `applyBillboards` wrote its Euler. three links
       // `rotation` to `quaternion` through an onChange callback, so this is the writer's output.
-      row.writerRotChangeDeg = round(angleBetween(bone.quaternion, row.prevWriter));
-      row.prevWriter.copy(bone.quaternion);
       row.writerRotDeg = round(angleBetween(bone.quaternion, IDENTITY));
+      if (row.seededWriter) {
+        const delta = angleBetween(bone.quaternion, row.prevWriter);
+        if (delta > row.writerRotMaxChangeDeg) {
+          row.writerRotMaxChangeDeg = round(delta);
+        }
+      }
+      row.prevWriter.copy(bone.quaternion);
+      row.seededWriter = true;
       // `hasSkin` is re-read every frame, not just on creation: `applyBatches` publishes it later
       // than the first tick, and a row that cached `false` at spawn would libel the writer for ever.
       row.hasSkin = Boolean(bone.skin);
@@ -181,43 +232,57 @@ export function sampleBillboards(
     // What SKINNING reads. `Skeleton#update` builds every palette entry from `bone.matrixWorld`, so
     // this is the value that reaches the vertex shader -- decomposed rather than dumped, because
     // sixteen floats per bone per frame is not something anyone reads at a console.
-    bone.matrixWorld.decompose(scratchPos, scratchQuat, scratchScale);
-    row.paletteRotChangeDeg = round(angleBetween(scratchQuat, row.prevPalette));
-    row.prevPalette.copy(scratchQuat);
-    row.paletteRotDeg = round(angleBetween(scratchQuat, IDENTITY));
-    row.paletteTranslation = [round(scratchPos.x), round(scratchPos.y), round(scratchPos.z)];
-  }
-}
-
-/** Drop a dead instance's rows, so a session's map does not grow without bound. */
-export function forgetBillboards(key: string): void {
-  for (const rowKey of Array.from(rows.keys())) {
-    if (rowKey.startsWith(key + ':')) {
-      rows.delete(rowKey);
+    // MODEL SPACE, not world -- v1 decomposed `bone.matrixWorld` and reported 125.742 deg against
+    // the writer's 45.265. That difference was neither a defect nor a surprise: `matrixWorld`
+    // composes the ENTIRE chain to the world, including the host character's facing, so it is a
+    // world total while the writer's is a local rotation. Two different quantities under names that
+    // did not say so -- the exact ambiguity this module's v1 doc warned about, committed inside the
+    // warning. It also made the test non-specific: turning the CHARACTER moved it with the billboard
+    // entirely dead.
+    //
+    // What the vertex receives is `P_i`, the bone's MODEL-space posed matrix
+    // (`anim/skinning-scope.ts`: `Skeleton#update` writes `boneMatrix_i = W . P_i . B_i^-1` and
+    // three's `AttachedBindMode` divides `W` back out), so the host's facing cancels here and only
+    // the billboard can move this number.
+    if (host.matrixWorld === undefined) {
+      continue;
     }
+    scratchModelSpace.copy(host.matrixWorld).invert().multiply(bone.matrixWorld);
+    scratchModelSpace.decompose(scratchPos, scratchQuat, scratchScale);
+    row.paletteRotDegModelSpace = round(angleBetween(scratchQuat, IDENTITY));
+    if (row.seededPalette) {
+      const delta = angleBetween(scratchQuat, row.prevPalette);
+      if (delta > row.paletteRotMaxChangeDeg) {
+        row.paletteRotMaxChangeDeg = round(delta);
+      }
+    }
+    row.prevPalette.copy(scratchQuat);
+    row.seededPalette = true;
   }
 }
 
-/**
- * The console view. `frames` FIRST in each row, because it is the field that decides whether the
- * rest of the row means anything.
- */
-export function billboardRows(): Array<Record<string, unknown>> {
-  return Array.from(rows.values()).map((row) => ({
-    frames: row.frames,
-    path: row.path,
-    bone: row.bone,
-    parentID: row.parentID,
-    flags: '0x' + row.flags.toString(16),
-    type: row.type,
-    hasSkin: row.hasSkin,
-    dispatchType: row.dispatchType,
-    dispatchValue: row.dispatchValue,
-    billboardsLen: row.billboardsLen,
-    writerRotDeg: row.writerRotDeg,
-    writerRotChangeDeg: row.writerRotChangeDeg,
-    paletteRotDeg: row.paletteRotDeg,
-    paletteRotChangeDeg: row.paletteRotChangeDeg,
-    paletteTranslation: row.paletteTranslation,
-  }));
+export function billboardRows(): Record<string, unknown> {
+  return {
+    cameraRotMaxChangeDeg: round(cameraRotMaxChangeDeg),
+    cameraRotTotalDeg: round(cameraRotTotalDeg),
+    verdict: cameraRotMaxChangeDeg < 0.5
+      ? 'NULL TEST -- the camera barely moved; every row below proves nothing'
+      : 'camera moved; compare writerRotMaxChangeDeg against paletteRotMaxChangeDeg per row',
+    rows: Array.from(rows.values()).map((row) => ({
+      frames: row.frames,
+      path: row.path,
+      bone: row.bone,
+      parentID: row.parentID,
+      flags: '0x' + row.flags.toString(16),
+      type: row.type,
+      hasSkin: row.hasSkin,
+      dispatchType: row.dispatchType,
+      dispatchValue: row.dispatchValue,
+      billboardsLen: row.billboardsLen,
+      writerRotDeg: row.writerRotDeg,
+      writerRotMaxChangeDeg: row.writerRotMaxChangeDeg,
+      paletteRotDegModelSpace: row.paletteRotDegModelSpace,
+      paletteRotMaxChangeDeg: row.paletteRotMaxChangeDeg,
+    })),
+  };
 }
