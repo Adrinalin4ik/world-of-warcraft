@@ -639,6 +639,7 @@ export class SpellKitEffects {
       // THE BILLBOARD PASS -- see the header. One existing call, gated on the model actually having
       // billboarded bones, so a pure particle model (no bones) costs one array-length read. `camera`
       // is optional only so the two unit tests need not build one; the world always passes it.
+      let billboardsMoved = false;
       if (camera !== undefined) {
         const billboarded = instance.model as unknown as {
           billboards?: unknown[]; applyBillboards?: (c: THREE.Camera) => void;
@@ -647,6 +648,7 @@ export class SpellKitEffects {
           && billboarded.billboards.length > 0
           && typeof billboarded.applyBillboards === 'function') {
           billboarded.applyBillboards(camera);
+          billboardsMoved = true;
         }
       }
 
@@ -654,7 +656,24 @@ export class SpellKitEffects {
       // at this call site are that it samples the MATERIAL CHANNELS unconditionally -- which is what
       // stops a transparency-only shield drawing at full additive alpha -- and that a true return
       // means the bones moved, so the subtree needs re-accumulating.
-      if (poseEffectModel(instance.model, camera, frameIndex)) {
+      // `|| billboardsMoved` IS THE LAST HOP, and without it the billboard pass above was computed
+      // and thrown away for a whole class of model. `applyBillboards` writes bone ROTATIONS and
+      // nothing else (`pipeline/m2/index.ts:1011-1026` -- no `updateMatrix`, no `updateMatrixWorld`);
+      // this `updateMatrixWorld(true)` is the only thing that accumulates them. But it used to be
+      // reached only when `poseEffectModel` returned TRUE, and that returns false for any model
+      // without `useSkinning`, without an `instanceAnim`, or not `armable` -- so exactly the models
+      // whose billboards are their only animation got every billboard discarded, and read as flat
+      // sheets held in bind orientation. The owner's "возможно билбординга не хватает" on the warlock
+      // summon is that symptom.
+      //
+      // TWO ROTATIONS AT TWO LEVELS, and they are not in conflict -- the distinction matters because
+      // conflating them is how this project's orientation defects happen. A PLANT's own transform
+      // (translate + yaw + scale) is baked once at spawn and deliberately never re-applied, so a
+      // plant does not turn with its owner; that is `plantTransform` and it is untouched here. Its
+      // BILLBOARDED BONES are a level below that, inside the model, and must face the camera every
+      // frame like any other model's. This line only re-accumulates the subtree; it never rewrites
+      // the plant's own baked matrix.
+      if (poseEffectModel(instance.model, camera, frameIndex) || billboardsMoved) {
         instance.model.updateMatrixWorld(true);
       }
       // AND THE HANDOVER: `Stand` -> `Hold` once the birth span elapses. Without it a state kit holds

@@ -20,6 +20,42 @@ const scratchWorldScale = new THREE.Vector3();
  * varies: world position, scale, rotation, colour and the sub-rect of the flipbook to sample. The
  * vertex shader billboards the quad in view space, so nothing here has to face the camera.
  */
+/**
+ * TWO CONVENTIONS, AND EVERY SPRITE IN THE GAME WAS HALF ITS SIZE BECAUSE THEY WERE NEVER RECONCILED.
+ *
+ * The M2 scale track is a **HALF-size** -- a radius. The reference states it and byte-verifies it in
+ * the client's own quad writer `0x7b2a50`: "The rendered **half-size** is the over-life scale ramp x
+ * a gated twinkle multiplier" (`benilla-formats/src/particles.rs:418-419`, wow-re
+ * `part-simspace-fields.md`).
+ *
+ * `shader.vert` builds the quad as `position.xy * iScale` where "`position` is the unit quad,
+ * spanning -0.5..0.5" -- so `iScale` is the quad's **FULL extent**. Packing the ramp value straight
+ * into it therefore rendered a half-size of `ramp / 2`: a constant factor of exactly 2, on every
+ * particle of every emitter in the game.
+ *
+ * That single factor is the shape of what the owner reported four separate times on four unrelated
+ * chains -- the healing precast leaves ("очень маленькие"), the hand glow, a Shadow Bolt projectile,
+ * and a warlock summon -- plus, by arithmetic, the BEADED trail: Fireball authors 50 births/sec at
+ * 24 u/s, so births land 0.48 units apart, and a sprite whose measured ramp is ~0.2 drew 0.2 wide
+ * against a 0.48 gap (a dotted line by construction) where it should draw 0.4 and very nearly touch.
+ * Four size complaints and the beading were one defect.
+ *
+ * CORRECTED HERE AND NOT IN THE SHADER, deliberately. The shader's contract ("`iScale` is the full
+ * extent of a -0.5..0.5 quad") is self-consistent and is shared with its own UV derivation, which
+ * this project has already broken once by "simplifying" it. The conversion belongs at the boundary
+ * where the file's semantic is read, which is here.
+ *
+ * NOT APPLIED, and named rather than folded in silently: the **gated twinkle multiplier** from the
+ * same sentence -- `min != max => noise(speed * age) * (max - min) + min`, skipped entirely when
+ * `min == max`. This client decodes `twinkleSpeed / twinklePercent / twinkleScaleMin /
+ * twinkleScaleMax` and reads none of them. Surveyed on the served build across 1580 emitters in 315
+ * models, **903 (57.2%) author `min != max`** and 677 (42.8%) are the degenerate case the reference
+ * skips -- so this is a live multiplier on the majority of emitters, not a corner. It is a separate
+ * port with a real risk attached (a `{0, 0.5}` range at speed 0 is a SHRINK, so applying it in the
+ * same commit as a 2x growth would confound both), and it needs the noise function pinned first.
+ */
+const HALF_SIZE_TO_EXTENT = 2;
+
 export class ParticleBatch extends THREE.Mesh {
 
   readonly capacity: number;
@@ -145,8 +181,10 @@ export class ParticleBatch extends THREE.Mesh {
       this.offsets[index * 3 + 2] = scratchPosition.z;
 
       evaluateFBlockVec2(definition.scaleTrack, t, scratchScale);
-      this.scales[index * 2] = scratchScale.x * worldScaleFactor * sizeScale;
-      this.scales[index * 2 + 1] = scratchScale.y * worldScaleFactor * sizeScale;
+      // THE HALF-SIZE -> FULL-EXTENT CONVERSION. See `HALF_SIZE_TO_EXTENT`: this is the one place the
+      // M2's "radius" convention meets this renderer's "full width" one, and it was missing.
+      this.scales[index * 2] = scratchScale.x * HALF_SIZE_TO_EXTENT * worldScaleFactor * sizeScale;
+      this.scales[index * 2 + 1] = scratchScale.y * HALF_SIZE_TO_EXTENT * worldScaleFactor * sizeScale;
 
       this.rotations[index] = pool.spin[slot];
 
