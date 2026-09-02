@@ -127,19 +127,20 @@ const offset = new THREE.Vector3();
 const WORLD_UP = new THREE.Vector3(0, 0, 1);
 // Module-level, like every scratch above it: `orient` runs once per live missile per frame.
 const scratchBasis = new THREE.Matrix4();
+const scratchAxisX = new THREE.Vector3();
 
 /**
- * THE PROJECTILE-ORIENTATION A/B, AND IT DEFAULTS **OFF** -- see `SpellMissiles#orient`.
+ * THE PROJECTILE-ORIENTATION A/B, AND IT NOW DEFAULTS **ON** -- see `SpellMissiles#orient`.
  *
- * `window.missileOrientControl.enabled = true` restores what `2286a20` shipped: the model rotated so
- * its authored +X faces the flight. Off (the default) is identity rotation, which is what every build
- * before `2286a20` did and what the owner had no complaint about.
+ * `window.missileOrientControl.enabled = false` restores identity rotation, which is what every
+ * build before `2286a20` did and what `a038fc0` reverted to. On is the fix: the model's authored
+ * EMISSION axis is pointed along the flight.
  *
- * A knob rather than a deletion because the underlying question -- does a projectile point along its
- * travel, and about which axis -- is real and unresolved, and one console word is cheaper than a
- * rebuild when the measurement that settles it arrives.
+ * Kept as a knob rather than removed because it is the single line that isolates this change from
+ * everything else landing in this subsystem -- one console word gives a before/after on the same
+ * cast, which is worth more here than a tidy file.
  */
-export const missileOrientControl = { enabled: false };
+export const missileOrientControl = { enabled: true };
 
 if (typeof window !== 'undefined') {
   (window as unknown as Record<string, unknown>).missileOrientControl = missileOrientControl;
@@ -652,58 +653,76 @@ export class SpellMissiles {
   }
 
   /**
-   * POINT THE PROJECTILE ALONG ITS FLIGHT -- **REVERTED, AND OFF BY DEFAULT.** See
-   * `missileOrientControl`.
+   * POINT THE MODEL'S **EMISSION AXIS** ALONG THE FLIGHT.
    *
-   * ## Why it is off: the owner reported a 90-degree error on the model this was derived from
+   * ## The axis comes from the EMITTER, which is what `2286a20` got wrong
    *
-   * "Она ротирована не верно. Должен быть билбординг. Т.е. сейчас она параллельно снаряду, а должна
-   * быть поперёк и смотреть в него" -- about the red-orange blob on the fireball, on a build that
-   * already had `2286a20` (this) and `60bede3` (the global-sequence bone port) in it. Both of those
-   * change this model's frame, and both landed before the report, so the defect is **new and mine**,
-   * not newly-visible. `43c444c`'s billboard last-hop fix is NOT the cause: measured below, Fireball
-   * has no billboarded bone for it to have revealed.
+   * That commit derived "forward is +X" from the MD20 bounding box and was reverted (`a038fc0`)
+   * because the box is the particle VOLUME, not the body -- Fireball's mesh is 43 vertices spanning
+   * `+/-0.18` in all three axes. The box said where the emitters throw and it was written up as the
+   * shape of the model.
    *
-   * ## The evidence this was built on was MISATTRIBUTED, which is the real reason it is reverted
+   * The authored emission axis is measured, not inferred from a silhouette. All four of Fireball's
+   * emitters are `emitterType 1` (PLANE), and a plane emitter emits from a rectangle in the
+   * emitter's local XY with **velocity along local +Z** (`particle/spawn.ts`: "Zero polar angle
+   * sends velocity straight up (+Z)"). With identity rotation -- the state this replaces -- model
+   * local +Z IS world +Z, so every one of those emitters threw its spray STRAIGHT UP in world space
+   * and the glow hung above the projectile and drifted upward. That is exactly the picture the owner
+   * circled, and it is the prediction I parked last round as needing a live run.
    *
-   * `2286a20` claimed "the body sits at the origin and the tail streams back along -X" from the MD20
-   * bounding box's X asymmetry (Fireball `x [-2.44, +0.43]` against symmetric y and z). Measured
-   * properly, **that box is the PARTICLE volume, not the body**: the mesh is 43 vertices, every one
-   * of them weighted to bone 1, spanning `+/-0.18` in ALL THREE axes -- a tiny symmetric blob 0.36
-   * units across. So the box described where the emitters throw, and I wrote it up as the shape of
-   * the model. The conclusion may still be right -- bone 5, the tail emitter's bone, has its pivot at
-   * `(-1.300, 0, 0)`, which is real evidence for -X being aft -- but one of the two cited facts was
-   * about a different thing than the sentence said, and that is exactly the defect class this project
-   * treats as worst.
+   * So the mapping is `model local +Z -> flight forward`, and it is the whole of the fix.
    *
-   * And the part I had already flagged as unevidenced is the part that a 90-degree report implicates:
-   * `makeBasis(forward, right, up)` assigns model +Y and +Z to `right` and `up` on the stated grounds
-   * that "a spin about the nose is invisible on a radially symmetric fireball". **Fireball is not
-   * radially symmetric** -- its particle box is y `+/-1.95` against z `+/-1.63` -- so that excuse does
-   * not hold for the very model it was written about. A documented exclusion is a bug report someone
-   * declined to file, and this is the second time that has been true in this file.
+   * ## What that does to the other two axes, and which part is a CONVENTION
    *
-   * ## What actually orients the emission, and what would settle the axis
+   * `makeBasis(a, b, c)` maps +X to `a`, +Y to `b`, +Z to `c`. With +Z pinned to `forward`, the
+   * emission RECTANGLE (authored in local XY, sized by `areaWidth`/`areaLength`) becomes the spray's
+   * cross-section perpendicular to travel -- which is the correct shape for a jet along the flight,
+   * and is a consequence of the mapping rather than a second choice.
    *
-   * All four emitters are type 1 (PLANE), which emits from a rectangle in the emitter's local XY with
-   * velocity along local +Z (`particle/spawn.ts`). The emitter's frame comes from its BONE, and
-   * Fireball's bones 0, 1, 2 and 5 each carry a rotation track -- every one of them on a GLOBAL
-   * SEQUENCE (`gs = 2, 0, 1, 2`). So the emission direction is animated data, on the clock
-   * `60bede3` only just started driving correctly, composed with whatever this method does on top.
-   * Two conventions, and I have measured only one of them.
+   * **THE ROLL ABOUT THE FLIGHT AXIS IS UNDETERMINED BY ANY DATA I CAN READ, and it is fixed here by
+   * convention: model +Y points "up" in the flight frame.** Concretely `makeBasis(-right, up,
+   * forward)`, using the flight basis already built at launch. `-right` and not `right` because the
+   * triple must stay right-handed -- `(-right) x up = forward`, where `right x up = -forward` -- and
+   * a mirrored basis would flip every authored asymmetry in the model.
    *
-   * The measurement that settles it, and it is not a static one: sample bone 5's global-sequence
-   * rotation at a few cursors and read where its local +Z points in MODEL space. If +Z sweeps around
-   * -X, then -X is aft and a nose-along-forward basis is right (and only the roll is open). If it
-   * sweeps around +Z, the emitters throw "up" in model space and a projectile must NOT be pitched
-   * into its flight at all -- only yawed, the way `plantTransform` yaws a plant. Until that is read,
-   * identity is the state the owner did not complain about.
+   * This is stated as a convention and NOT excused. `2286a20` justified choosing the roll freely on
+   * the grounds that "a spin about the nose is invisible on a radially symmetric fireball", and that
+   * excuse is known false: Fireball's particle box is y `+/-1.95` against z `+/-1.63`. The honest
+   * position is that the roll is a convention, that world up is the only stable reference available
+   * for it, and that a model authored to have a distinguishable top would need the real determinant
+   * found before this line could be called correct.
+   *
+   * ## PITCH, not yaw -- and what a steep shot tests
+   *
+   * This is necessarily a full 3D pitch: `forward` is a 3D direction, and mapping +Z onto it tilts
+   * the model out of the horizontal. A yaw-only rotation (the way `plantTransform` yaws a plant
+   * about world Z) would leave local +Z along world up and the spray would still rise -- it would
+   * not fix anything, which is why the choice is not free.
+   *
+   * The owner's shot is nearly flat, so it cannot discriminate the two. **A steep shot is the case
+   * that tests this**: firing sharply upward or downward should send the spray along the steep
+   * travel direction, not vertically. Under a yaw-only implementation the spray would stay vertical
+   * on both; under this one it follows the barrel. A near-vertical shot is also where the roll goes
+   * ill-conditioned (`forward` parallel to world up), and the flight basis already handles that by
+   * falling back to a stable arbitrary `right` rather than producing a NaN.
+   *
+   * ## What this should look like
+   *
+   * The spray should sit BEHIND and along the projectile rather than above it, and the bright core
+   * should stop having a glow stacked over it. Whether the big emitter-3 sprite still reads as
+   * ELONGATED is a separate and unresolved question -- its 1.94 aspect and zero spin are authored
+   * and this changes neither -- but it should now be elongated ALONG the travel rather than at a
+   * fixed screen angle unrelated to it, because the cloud it sits in is finally pointing the right
+   * way. If it still reads as crosswise after this, the rotation question is genuinely separate and
+   * the parked screen-angle observation is what to take next.
    */
   private orient(missile: Missile, model: THREE.Object3D): void {
     if (!missileOrientControl.enabled) {
       return;
     }
-    scratchBasis.makeBasis(missile.forward, missile.right, missile.up);
+    // `-right` keeps the triple right-handed with +Z on `forward`; see the header.
+    scratchAxisX.copy(missile.right).negate();
+    scratchBasis.makeBasis(scratchAxisX, missile.up, missile.forward);
     model.quaternion.setFromRotationMatrix(scratchBasis);
   }
 
