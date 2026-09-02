@@ -4,6 +4,7 @@ import M2Blueprint from '../pipeline/m2/blueprint';
 import { worldClock } from '../pipeline/m2/anim/world-clock';
 import { kitEmitters, WORLD_EFFECT_TAG, KitEmitter } from '../classes/spell-kit-fx';
 import { warnOnce } from '../ui/framexml/lua/methods/region';
+import { spellFxParticleSize } from './spell-fx-scale';
 import type Unit from '../classes/unit';
 
 /**
@@ -289,6 +290,17 @@ export class SpellKitEffects {
   public lastError: string | null = null;
 
   /** How many instances are live. For the instrument; `live` is private. */
+  /**
+   * The models currently in flight, for `window.worldSpellFxScale` to retune live. Yields the
+   * MODEL rather than the entry, because `particleSizeScale` is a property the manager reads off
+   * the instance -- see `world/spell-fx-scale.ts`.
+   */
+  public liveModels(): Array<{ particleSizeScale?: number }> {
+    return this.live
+      .map((entry) => entry.model as unknown as { particleSizeScale?: number })
+      .filter((model) => model !== null && model !== undefined);
+  }
+
   public get liveCount(): number {
     return this.live.length;
   }
@@ -387,6 +399,10 @@ export class SpellKitEffects {
         // moment a poser exists, and an unarmed instance would have to be found again later.
         this.armBirth(model, emitter.modelPath);
 
+        // THE PARTICLE SIZE MULTIPLIER, read by `ParticleBatch#pack` every frame. Defaults to 1,
+        // i.e. the size the asset authors -- `world/spell-fx-scale.ts` carries the measurement that
+        // says 1 is what the game's own data asks for, and why no other number is picked here.
+        (model as unknown as { particleSizeScale?: number }).particleSizeScale = spellFxParticleSize();
         // Without this a PARTICLE model draws nothing at all -- `level-up-effect.ts`'s own note.
         particleManager?.register(model);
 

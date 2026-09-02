@@ -28,6 +28,7 @@ import { LevelUpEffect } from "./level-up-effect";
 import { SpellKitEffects } from "./spell-kit-effects";
 import { spellData } from "../pipeline/dbc/spell-data";
 import { SpellMissiles } from "./spell-missile";
+import { installSpellFxScaleKnob } from "./spell-fx-scale";
 import GameObjectSparkle from './game-object-sparkle';
 import SessionGuard from './session-guard';
 import ModelFade from './model-fade';
@@ -263,6 +264,12 @@ export default class World extends EventEmitter {
     this.levelUpEffect = new LevelUpEffect(this.scene);
     this.spellKitEffects = new SpellKitEffects(this.scene);
     this.spellMissiles = new SpellMissiles(this.scene);
+    // `window.worldSpellFxScale(n)` -- the owner's instrument for the one question the data cannot
+    // answer. Defaults to 1, so installing it changes nothing. See `spell-fx-scale.ts`.
+    installSpellFxScaleKnob(() => [
+      ...this.spellKitEffects.liveModels(),
+      ...this.spellMissiles.liveModels(),
+    ]);
     this.gameObjectSparkle = new GameObjectSparkle(this.scene);
     /**
      * `window.worldGameObjects()` -- WHY A BUSH IS NOT ON SCREEN, in one call.

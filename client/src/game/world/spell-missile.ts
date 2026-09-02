@@ -4,6 +4,7 @@ import M2Blueprint from '../pipeline/m2/blueprint';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { warnOnce } from '../ui/framexml/lua/methods/region';
 import spellMotion, { MotionOffset } from './spell-motion';
+import { spellFxParticleSize } from './spell-fx-scale';
 import type Unit from '../classes/unit';
 
 /**
@@ -199,6 +200,17 @@ export class SpellMissiles {
 
   public lastError: string | null = null;
 
+  /**
+   * The models currently in flight, for `window.worldSpellFxScale` to retune live. Yields the
+   * MODEL rather than the entry, because `particleSizeScale` is a property the manager reads off
+   * the instance -- see `world/spell-fx-scale.ts`.
+   */
+  public liveModels(): Array<{ particleSizeScale?: number }> {
+    return this.live
+      .map((entry) => entry.model as unknown as { particleSizeScale?: number })
+      .filter((model) => model !== null && model !== undefined);
+  }
+
   public get liveCount(): number {
     return this.live.length;
   }
@@ -383,6 +395,10 @@ export class SpellMissiles {
         // 12.7 x 13.0 x 8.7) and `Frost_Nova_state.mdx` 614 (9.7 x 9.7 x 2.7). Those three are the ones
         // this flag was wrongly drawing, and the last two are large enough to read as sheets.
         // Without this a PARTICLE model draws nothing at all -- and a projectile is one.
+        // THE PARTICLE SIZE MULTIPLIER, read by `ParticleBatch#pack` every frame. Defaults to 1,
+        // i.e. the size the asset authors -- `world/spell-fx-scale.ts` carries the measurement that
+        // says 1 is what the game's own data asks for, and why no other number is picked here.
+        (model as unknown as { particleSizeScale?: number }).particleSizeScale = spellFxParticleSize();
         particleManager?.register(model);
         missile.model = model;
         // RETURNED, not orphaned -- the same reason as `spell-kit-effects.ts`, and the handle never
