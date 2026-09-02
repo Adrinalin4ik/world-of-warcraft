@@ -142,6 +142,38 @@ export const integratePool = (pool: ParticlePool, dt: number, forces: Forces): n
  */
 export const INHERIT_EMITTER_MOTION = 0x40;
 
+/**
+ * THE UNRESOLVED DISCRIMINATOR, recorded because the arithmetic now pins exactly what it must do.
+ *
+ * Fireball's tail is arithmetically ONLY possible if its particles are left behind in world space,
+ * and the shield's ring artefact is arithmetically a real consequence of the same rule. Both
+ * measured on the served build, using each emitter's own authored rate, lifespan and scale, with the
+ * sprite extent already including the half-size doubling:
+ *
+ *   Fireball_Missile_Low at the missile's 24 u/s (`Spell.dbc` Speed), world-frozen:
+ *     e0  rate 130   life 0.40  ->  52 particles over 9.6 units, spacing 0.185 vs extent 0.556  MERGES
+ *     e1  rate 63.1  life 0.40  ->  25 particles over 9.6 units, spacing 0.380 vs extent 0.444  MERGES
+ *     e2  rate 63.1  life 0.40  ->  25 particles over 9.6 units, spacing 0.380 vs extent 0.444  MERGES
+ *   -- a CONTINUOUS 9.6-unit tail, which is the owner's original-client screenshot.
+ *
+ *   Magic_PreCast_Hand on a player running at ~7 u/s, world-frozen:
+ *     e0  rate 11    life 0.80  -> 8.8 particles over 5.6 units, spacing 0.636 vs extent 0.056  BEADS
+ *     e1  rate 10    life 0.40  -> 4.0 particles over 2.8 units, spacing 0.700 vs extent 0.278  BEADS
+ *   -- a line of discrete dots, which is the owner's ring screenshot. And it is NOT the half-extent
+ *   bug: the gap is ELEVEN TIMES the sprite on e0, so doubling the sprite again cannot close it.
+ *
+ * So `57efa68` (world-frozen) was right about Fireball and `93ee44f` (gated) is right about the
+ * shield, and neither is right about both. The discriminator must world-freeze a missile emitter and
+ * anchor-ride a hand emitter, and **it is not `FOLLOW_EMITTER`**: not one emitter of either model
+ * authors `0x4000` (Fireball 0x40009 / 0x30009 / 0x30009 / 0x20055; the hand 0x20109 / 0x20469).
+ * Nor is it `0x10` `model_space`, which is clear on all three Fireball tail emitters AND clear on
+ * both hand emitters, and set on other hand models -- so it does not separate them either.
+ *
+ * NOT FLIPPED A THIRD TIME on my own judgement. This polarity has already inverted once, the
+ * project's record on sign flips to make an effect appear is three for three against, and the
+ * numbers above are the input to a decision rather than the decision. The gate stays as `93ee44f`
+ * left it until the discriminator is identified.
+ */
 export const FOLLOW_EMITTER = 0x4000;
 
 export interface FollowDef {

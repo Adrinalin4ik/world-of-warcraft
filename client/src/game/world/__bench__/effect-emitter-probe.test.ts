@@ -825,3 +825,49 @@ describe('M2 particle emitters: the head/tail type selector', () => {
     expect(lines.length).toBe(4);
   }, 120000);
 });
+
+
+/**
+ * `_Low` VERSUS `_High`: the DBC names one, and the owner's reference client may draw the other.
+ *
+ * `Spell.dbc` 133 -> `SpellVisual` 67 -> `missileModelID` 365 -> `SpellVisualEffectName` 365 ->
+ * `Spells/Fireball_Missile_Low.mdx`. But `Spells/Fireball_Missile_High.mdx` is also served and is
+ * also referenced by the same table under other ids (503, 3896, 4016, 4242, 5257), with FIVE
+ * emitters and 8 bones against `_Low`'s four and 6. Everything measured in this subsystem so far has
+ * been `_Low`, because that is what the row says. Both are dumped here so the difference is data
+ * rather than an assumption about which the original draws.
+ */
+describe('M2 particle emitters: Fireball _Low versus _High', () => {
+  it('dumps every emitter of both missile models', async () => {
+    const lines: string[] = [];
+    for (const path of ['Spells/Fireball_Missile_Low.m2', 'Spells/Fireball_Missile_High.m2']) {
+      // eslint-disable-next-line no-await-in-loop
+      const buffer = await fetchFixture(asM2(path));
+      if (buffer === null || buffer.slice(0, 4).toString('latin1') !== 'MD20') {
+        lines.push(`${path}: UNREACHABLE`);
+        continue;
+      }
+      const m2: any = M2Parser.decode(new DecodeStream(buffer));
+      const first = (b: any) => {
+        const v = (b?.tracks?.[0]?.values ?? [])[0];
+        return v === undefined ? null : (typeof v === 'number' ? Number(v.toFixed(3)) : v);
+      };
+      lines.push(`${path}  ribbons=${(m2.ribbonEmitters ?? []).length}`
+        + ` bones=${(m2.bones ?? []).length}`);
+      (m2.particleEmitters ?? []).forEach((e: any, i: number) => {
+        const f = e.flags >>> 0;
+        const sc = (e.scaleTrack?.values ?? [])[0];
+        lines.push(`   emitter ${i} flags=0x${f.toString(16)}`
+          + ` [follow0x4000=${(f & 0x4000) !== 0} inherit0x40=${(f & 0x40) !== 0}]`
+          + ` type=${e.emitterType} bone=${e.boneId}`);
+        lines.push(`      speed=${first(e.emissionSpeed)} speedVar=${first(e.speedVariation)}`
+          + ` lifespan=${first(e.lifespan)} rate=${first(e.emissionRate)}`
+          + ` gravity=${first(e.gravity)} drag=${e.drag}`
+          + ` scale0=(${sc}) pos=(${e.position?.x},${e.position?.y},${e.position?.z})`);
+      });
+    }
+    // eslint-disable-next-line no-console
+    console.log(lines.join(String.fromCharCode(10)));
+    expect(lines.length).toBeGreaterThan(0);
+  }, 120000);
+});
