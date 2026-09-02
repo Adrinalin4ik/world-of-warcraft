@@ -295,6 +295,13 @@ export default class World extends EventEmitter {
             Math.round(player.z * 100) / 100],
         missiles: { ...this.spellMissiles.stats, live: this.spellMissiles.liveCount },
         kits: { ...this.spellKitEffects.stats, live: this.spellKitEffects.liveCount },
+        // THE LEAK CHECK, two derived numbers so nobody has to subtract by eye. `armedMinusRemoved`
+        // must equal `kits.live` at all times; `persistentLive` maps `(guid:spellId)` -> count and a
+        // key with a count above 1, or a key that survives a cast it should not, IS the leak.
+        kitLeak: {
+          armedMinusRemoved: this.spellKitEffects.stats.armed - this.spellKitEffects.stats.removed,
+          persistentLive: this.spellKitEffects.persistentLive(),
+        },
         // THE DECIDING NUMBERS. `distFromPlayer` should be a couple of units for a hand effect and
         // under `ParticleManager.CULL_DISTANCE` (120) for anything meant to be seen at all. A large
         // number here explains the tiny dots, the rock occluding them, and an invisible projectile,

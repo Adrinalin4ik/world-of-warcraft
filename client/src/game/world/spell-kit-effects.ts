@@ -310,7 +310,47 @@ export class SpellKitEffects {
     spanless: 0,
     /** Instances reaped that played a `Decay` out rather than going at once. */
     decayed: 0,
+    /**
+     * THE LEAK INSTRUMENT, and it did not exist until the owner reported one.
+     *
+     * `armed` counts instances PUSHED into `live`; `reaped` counts instances the spell-id-keyed reap
+     * actually matched; `removed` counts instances that left `live` by any route. So:
+     *
+     *   `armed - removed` must equal `liveCount`, always. If it does not, `remove` is being skipped.
+     *   `persistentLive` growing across casts of the SAME spell is the leak, in one number.
+     *   `armed` growing per cast while `reaped` stays flat means the reap KEY never matches --
+     *   which is the neighbour-interaction hypothesis, and it is now falsifiable rather than argued.
+     *
+     * Worth stating because it was assumed to exist already: `stats` had no `armed` and no `reaped`.
+     * The `reaped` counter that does exist is `aura-visuals.ts`'s `applied.reaped`, a DIFFERENT
+     * object counting aura-diff decisions rather than kit instances -- so it can report a healthy
+     * reap decision for a spell whose instance was never touched, which is precisely the failure
+     * being hunted. Three integers, incremented on paths that already run; no per-frame cost.
+     */
+    armed: 0,
+    reaped: 0,
+    removed: 0,
   };
+
+  /**
+   * Live PERSISTENT instances, broken out by `(guid, spellId)` -- the leak's shape, not just its size.
+   *
+   * A count alone cannot distinguish "one spell leaked ten instances" (a reap-key miss) from "ten
+   * spells each hold one" (correct, a buffed unit). The keys say which, and a duplicated key is by
+   * itself proof of a defect: `play` reaps this unit's live persistent instances of the same spell
+   * before beginning, so two live entries on one key cannot happen if that reap is working.
+   */
+  public persistentLive(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const instance of this.live) {
+      if (!instance.persistent || instance.decaying) {
+        continue;
+      }
+      const key = `${instance.guid}:${instance.spellId}`;
+      out[key] = (out[key] ?? 0) + 1;
+    }
+    return out;
+  }
 
   public lastError: string | null = null;
 
@@ -475,6 +515,7 @@ export class SpellKitEffects {
           model.visible = true;
         }
 
+        this.stats.armed += 1;
         this.live.push({
           model,
           manager: particleManager,
@@ -583,6 +624,7 @@ export class SpellKitEffects {
       }
       instance.decaying = true;
       instance.lifecycle = 'decaying';
+      this.stats.reaped += 1;
       // ARMS the clip as well as reading its span, which is the half that was missing: the reap knew
       // how long a decay lasts and never played it, so a reaped shield held its pose while it waited
       // out a fade it was not performing. `armEffectDecay` does both (`world/effect-pose.ts`), and
@@ -692,6 +734,7 @@ export class SpellKitEffects {
 
   private remove(index: number): void {
     const instance = this.live[index];
+    this.stats.removed += 1;
     instance.manager?.unregister(instance.model);
     instance.ribbons?.unregister(instance.model);
     if (instance.planted) {
