@@ -263,3 +263,66 @@ it('refreshes a hull once per collision frame, and always when none has begun', 
   provider.gather(boxAt(0, 0, 0, 2), []);
   expect(refreshes).toBe(2);
 });
+
+/**
+ * **THE PLACEMENT GATE: a hull registered BEFORE it is placed must still be found afterwards.**
+ *
+ * This is the recorded failure the world-matrix refresh exists to prevent -- a hull is registered
+ * when its M2 is constructed, before `doodad-manager` places it, and the map subtree is static so
+ * nothing else ever walks it. A stale identity matrix puts the bounds at the world origin and the
+ * doodad silently never collides: "Measured: 2528 map doodads loaded, zero triangles gathered."
+ *
+ * The refresh is now LATCHED once the placement has settled, which is the whole saving -- and the
+ * trap in latching is settling too early. Stability alone would do it: an unplaced hull's matrix is
+ * unchanged between frames too, so a stability-only rule would latch the identity and reproduce
+ * exactly the bug above. `hasSettled` therefore also requires a non-zero translation, and this test
+ * is what holds that rule down.
+ *
+ * Two gates that have already caught this fix's own defects -- the Z-axis one on the terrain
+ * broadphase and the epoch-0 one above -- are the reason this is written before trusting the change.
+ */
+it('finds a hull placed after registration, then stops refreshing once it has settled', () => {
+  const provider = new DoodadProvider();
+  // Registered UNPLACED, exactly as an M2 registers its bounding mesh at construction.
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1).toNonIndexed());
+  mesh.name = 'BoundingMesh';
+  provider.add(mesh);
+
+  let refreshes = 0;
+  const real = mesh.updateWorldMatrix.bind(mesh);
+  mesh.updateWorldMatrix = ((parents: boolean, children: boolean) => {
+    refreshes += 1;
+    return real(parents, children);
+  }) as typeof mesh.updateWorldMatrix;
+
+  // Two frames unplaced. The matrix is stable at identity across both -- and it must NOT settle on
+  // that, or the placement below is never seen.
+  beginCollisionFrame();
+  provider.gather(boxAt(0, 0, 0, 2), []);
+  beginCollisionFrame();
+  provider.gather(boxAt(0, 0, 0, 2), []);
+
+  // NOW it is placed, the way `doodad-manager.js:300-330` places one.
+  mesh.position.set(400, -250, 30);
+  mesh.updateMatrix();
+
+  beginCollisionFrame();
+  const found: Triangle[] = [];
+  provider.gather(boxAt(400, -250, 30, 2), found);
+  // THE GATE: the placement is picked up. Under a stability-only settle rule this came back empty.
+  expect(found.length).toBeGreaterThan(0);
+
+  // And the old position is now empty, so the bounds moved with it rather than being cached stale.
+  const atOrigin: Triangle[] = [];
+  beginCollisionFrame();
+  provider.gather(boxAt(0, 0, 0, 2), atOrigin);
+  expect(atOrigin).toHaveLength(0);
+
+  // THE SAVING: placed and stable, so the refresh latches off. Several more frames cost none at all.
+  refreshes = 0;
+  for (let frame = 0; frame < 5; ++frame) {
+    beginCollisionFrame();
+    provider.gather(boxAt(400, -250, 30, 2), []);
+  }
+  expect(refreshes).toBe(0);
+});

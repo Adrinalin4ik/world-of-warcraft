@@ -25,6 +25,13 @@ interface HullBounds {
    * refreshes.
    */
   refreshedIn: number;
+  /**
+   * **PLACED AND STABLE: stop refreshing this hull's world matrix entirely.** See `hasSettled`.
+   *
+   * Once true the per-frame refresh is skipped for good, which is what takes the last of this
+   * provider's fixed per-cast cost to zero for the static majority.
+   */
+  settled: boolean;
   /** Identity-compared, not value-compared: a geometry swap replaces the object. */
   geometry: THREE.BufferGeometry;
   boundingBox: THREE.Box3;
@@ -68,6 +75,51 @@ interface HullBounds {
  * which keeps the risk on the side that has an owner to check it.
  */
 let epoch = 0;
+
+/**
+ * **HAS THIS HULL'S PLACEMENT SETTLED?** Two conditions, and both are needed.
+ *
+ * The refresh exists for a one-time ORDERING problem, not a recurring one: a hull is registered when
+ * its M2 is CONSTRUCTED (`pipeline/m2/index.ts`), which happens BEFORE the doodad is placed
+ * (`world/doodad-manager.js:300-330`), and the map subtree is declared static
+ * (`world/map.js:39`, `isStaticSubtree = true`) so `World#updateDynamicMatrices` deliberately never
+ * walks it. Hence a refresh is needed exactly ONCE, after placement -- never per frame, and never
+ * per cast.
+ *
+ * **NOTHING IN THIS CLIENT MOVES A PLACED DOODAD, and that was checked rather than assumed.**
+ * `doodad-manager.js:300-330` is the only writer of a doodad's position, quaternion or scale; the
+ * animated-doodad path (`enableDoodadAnimations`, and the billboard pass) writes BONE transforms and
+ * never the root; there are no transports, elevators or `MOVEMENT`-flagged placements implemented at
+ * all. Streaming a doodad out and back in removes and re-adds the hull, which makes a fresh entry.
+ *
+ * **NAMED GAP for whenever transports land**: a doodad that moves after settling would keep the
+ * bounds it settled with. The fix then is to clear `settled` from whatever moves it -- the marker is
+ * per-hull and public to this module, so that is a one-line hook rather than a redesign. And a
+ * doodad in a NON-static subtree needs no refresh from here in the first place, because
+ * `updateDynamicMatrices` already updates its matrix every frame and `worldBoundsOf`'s matrix
+ * comparison then re-derives the box on its own.
+ *
+ * ## Why the test is "non-identity AND unchanged" and not either alone
+ *
+ * "Unchanged since the last refresh" ALONE is unsafe, and this is the trap: an UNPLACED hull's
+ * matrix is also unchanged between frames, so settling on stability would latch the identity matrix
+ * before placement ever happened -- which is precisely the recorded failure this refresh exists to
+ * prevent ("Measured: 2528 map doodads loaded, zero triangles gathered"). It has to be shown that
+ * placement HAS occurred, and a non-zero translation is that evidence: every map doodad sits
+ * thousands of yards from the world origin.
+ *
+ * The assumption is stated rather than hidden: a doodad placed at exactly the world origin with no
+ * rotation and unit scale would never settle and would keep paying one refresh per frame. That costs
+ * correctness nothing -- it is the old behaviour -- and no such placement exists in a real map.
+ */
+function hasSettled(elements: ArrayLike<number>, cached: HullBounds): boolean {
+  // Placed: a non-zero translation. `matrixWorld` is identity until `doodad-manager` places it.
+  if (elements[12] === 0 && elements[13] === 0 && elements[14] === 0) {
+    return false;
+  }
+  // And stable: this refresh produced the same matrix the last one did.
+  return matrixEquals(cached.matrix, elements);
+}
 
 /**
  * Open a new collision frame: every doodad hull will refresh its world matrix once more.
@@ -202,6 +254,7 @@ export class DoodadProvider {
       // gather of the same frame -- correct, but it would give back a quarter of the saving on every
       // newly streamed doodad.
       refreshedIn: epoch,
+      settled: false,
       geometry,
       boundingBox,
       box: new THREE.Box3(),
@@ -247,10 +300,16 @@ export class DoodadProvider {
     // bounds were already cached" caught immediately, gathering 12 triangles at a position the
     // doodad had left. Every collision unit test runs at epoch 0 and therefore keeps the exact
     // pre-change behaviour; only the app, which calls `beginCollisionFrame`, takes the saving.
-    if (cached === null || epoch === 0 || cached.refreshedIn !== epoch) {
+    if (cached === null || epoch === 0 || (!cached.settled && cached.refreshedIn !== epoch)) {
       mesh.updateWorldMatrix(true, false);
       if (cached !== null) {
         cached.refreshedIn = epoch;
+        // LATCH once the placement is provably done -- see `hasSettled`. Checked AFTER the refresh
+        // and BEFORE `worldBoundsOf`, because the comparison it needs is "did this refresh change
+        // anything", and `worldBoundsOf` overwrites the cached matrix.
+        if (epoch !== 0 && hasSettled(mesh.matrixWorld.elements, cached)) {
+          cached.settled = true;
+        }
       }
     }
 
