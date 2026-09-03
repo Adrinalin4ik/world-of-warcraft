@@ -89,6 +89,29 @@ export class LuaVM {
   /** Next never-used slot. 1-based only so a slot number is never the falsy 0. */
   private nextSlot = 1;
 
+  /**
+   * **LIVE HANDLE COUNT -- the instrument that separates a LEAK from a state-dependent cost.**
+   *
+   * Every table or function crossing from Lua to JS mints a slot (`toJs`'s default branch calls
+   * `ref()`), and only an explicit `unref` gives it back. A caller that reads a table-valued global
+   * and forgets to release it therefore leaks one slot per call, and a per-frame caller leaks at
+   * frame rate -- which reads on a profile as a cost that GROWS with session length rather than one
+   * that depends on what is on screen. Those two look identical in a single sample and completely
+   * different in two, so the count is exported and censused rather than argued about.
+   *
+   * It is also the number that decides how much a leak COSTS. Slot allocation itself is O(1) here by
+   * design -- that is the whole point of not using `luaL_ref` (see `ref` below) -- so a leak is not
+   * automatically slow. But the handle table it grows is a fengari `Table` backed by a JS `Map`, and
+   * the measured `luaL_ref` table above is what a growing one did to this interface: a 10.1 s freeze.
+   * So a rising `liveHandles` is a defect to fix on its own terms whether or not it is today's
+   * hot line.
+   *
+   * Two subtractions and no allocation, so it is free to read every frame.
+   */
+  get liveHandles(): number {
+    return this.nextSlot - 1 - this.freeSlots.length;
+  }
+
   constructor() {
     this.L = lauxlib.luaL_newstate();
     lualib.luaL_openlibs(this.L);

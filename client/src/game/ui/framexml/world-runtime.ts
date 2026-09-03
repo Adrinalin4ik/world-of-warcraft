@@ -996,6 +996,17 @@ const tickCensus = {
       onUpdateMs: per(tickCensus.onUpdateMs),
       buttons: Math.round(tickCensus.buttons / n),
     },
+    // **LIVE LUA HANDLES -- read this before believing any explanation of `ui.tick`'s 6x spread.**
+    // Across the owner's samples that line has read 1.6, 3.4, 4.8, 5.6, 6.6 and 9.7 ms, which is
+    // MONOTONIC and therefore looks far more like a leak than like state. Every table crossing from
+    // Lua to JS mints a registry handle (`lua/vm.ts#toJs`) and only an explicit `unref` returns it;
+    // `lua/scripts.ts#callWithBothConventions` saves `this`/`event`/`argN` with `getGlobal` and
+    // unrefs none of them -- MEASURED at exactly **1.00 leaked handle per invocation** whenever
+    // `this` holds a table (`__bench__/script-call.test.ts`).
+    //
+    // A rising number here across two readings settles leak-versus-state without another hypothesis.
+    // Two subtractions to read, so it is free.
+    luaHandles: vm.liveHandles,
     totalPerFrameMs: per(
       tickCensus.editBoxMs + tickCensus.buttonMs + tickCensus.onUpdateMs + tickCensus.actionButtonMs,
     ),

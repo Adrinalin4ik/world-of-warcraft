@@ -68,6 +68,63 @@ import {
 import { eventListeners, fireEvent } from './framexml/lua/events';
 import { getScriptHandler } from './framexml/lua/scripts';
 import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
+
+/**
+ * **WHAT ELSE IS INSIDE `ui.tick`** -- `window.uiPollCensus()`, and it exists because the section
+ * arithmetic did not close.
+ *
+ * `uiTickCensus` splits the FrameXML runtime's own tick and reported `totalPerFrameMs 3.69` while the
+ * `ui.tick` section read **5.5 ms**. `ui.tick` wraps `runtime.update` PLUS four polls that live here
+ * and had never been timed, so ~1.8 ms of the largest UI line had no row in any instrument. A
+ * residual that size is not a rounding difference and it is not something to reason about -- it is
+ * something to stamp.
+ *
+ * `runtimeUpdateMs` is included deliberately even though `uiTickCensus` already covers its inside:
+ * with it, `runtimeUpdateMs + interactionMs + mapBridgeMs + questBlobsMs + minimapMs` must account
+ * for the whole section, so the residual is CLOSED rather than moved. If the five still fall short
+ * of `ui.tick`, the gap is the section machinery itself and that is a different finding again.
+ *
+ * Ten `performance.now()` reads a frame, on a section already costing milliseconds -- the same trade
+ * `uiTickCensus`'s four phases already make. The clock is quantised to 100 us on the owner's
+ * browser, so every figure is a MEAN over the window and never a median.
+ */
+const pollCensus = {
+  frames: 0,
+  runtimeUpdateMs: 0,
+  interactionMs: 0,
+  mapBridgeMs: 0,
+  questBlobsMs: 0,
+  minimapMs: 0,
+};
+
+if (typeof window !== 'undefined') {
+  (window as unknown as Record<string, unknown>).uiPollCensus = () => {
+    const n = Math.max(pollCensus.frames, 1);
+    const per = (total: number) => Math.round((total / n) * 100) / 100;
+    return {
+      frames: pollCensus.frames,
+      runtimeUpdateMs: per(pollCensus.runtimeUpdateMs),
+      interactionMs: per(pollCensus.interactionMs),
+      mapBridgeMs: per(pollCensus.mapBridgeMs),
+      questBlobsMs: per(pollCensus.questBlobsMs),
+      minimapMs: per(pollCensus.minimapMs),
+      // Compare against the `ui.tick` row in `perfReport()`. Anything left over is the section
+      // machinery, not one of these five.
+      totalPerFrameMs: per(
+        pollCensus.runtimeUpdateMs + pollCensus.interactionMs + pollCensus.mapBridgeMs
+        + pollCensus.questBlobsMs + pollCensus.minimapMs,
+      ),
+    };
+  };
+  (window as unknown as Record<string, unknown>).uiPollCensusReset = () => {
+    pollCensus.frames = 0;
+    pollCensus.runtimeUpdateMs = 0;
+    pollCensus.interactionMs = 0;
+    pollCensus.mapBridgeMs = 0;
+    pollCensus.questBlobsMs = 0;
+    pollCensus.minimapMs = 0;
+  };
+}
 import { createQuadMaterial } from './material';
 import { ModelBooth } from './scene/model-booth';
 import { resolveUnitToken } from '../world/unit-tokens';
@@ -964,16 +1021,25 @@ export class WorldUiHost {
       return;
     }
     this.sections.begin('ui.tick');
+    // SEE `uiPollCensus` -- `window.uiPollCensus()`. `uiTickCensus` splits what is inside
+    // `runtime.update`, and its `totalPerFrameMs` came back 3.69 against an `ui.tick` of 5.5, so
+    // ~1.8 ms of this section had no row anywhere. That is what these five stamps close: the four
+    // polls below, plus `runtime.update` itself so the section arithmetic is complete rather than
+    // leaving a residual to be argued about.
+    const tPoll0 = performance.now();
     this.runtime.update(dt);
+    const tPoll1 = performance.now();
     // THE OPEN-INTERACTION POLL, inside the tick section it belongs to. Self-throttled to 250 ms and
     // a pair of null checks when nothing is open, so on the overwhelming majority of frames this is
     // one comparison against a deadline. `performance.now()` rather than accumulating `dt`: a poll
     // measured in frames would fire eight times as often on a fast machine.
-    this.interactionWatch?.poll(performance.now());
+    this.interactionWatch?.poll(tPoll1);
     // THE ZONE EDGE, beside the interaction watch and for the same reason: there is nothing to push
     // from. See `map-bridge.ts` -- the client refreshes its minimap label only on `ZONE_CHANGED*`, and
     // this engine is what has to say one happened. Two divisions and a compare.
+    const tPoll2 = performance.now();
     this.mapBridge?.poll();
+    const tPoll3 = performance.now();
     // THE MINIMAP'S PICTURE, beside the zone edge. Both gates are quantised, so a standing player
     // pays four numeric compares and a `visible` walk -- see `minimap-terrain.ts` on the cost.
     //
@@ -987,7 +1053,15 @@ export class WorldUiHost {
     // draw-list fingerprint cannot see. See `quest-blobs.ts#takeRepainted`. `takeRepainted` CLEARS,
     // so it must be called every frame and before the short-circuit -- hence the explicit local.
     const blobRepainted = questBlobs.takeRepainted();
+    const tPoll4 = performance.now();
     this.minimapRepainted = (this.minimapTerrain?.tick() ?? false) || blobRepainted;
+    const tPoll5 = performance.now();
+    pollCensus.frames += 1;
+    pollCensus.runtimeUpdateMs += tPoll1 - tPoll0;
+    pollCensus.interactionMs += tPoll2 - tPoll1;
+    pollCensus.mapBridgeMs += tPoll3 - tPoll2;
+    pollCensus.questBlobsMs += tPoll4 - tPoll3;
+    pollCensus.minimapMs += tPoll5 - tPoll4;
     this.sections.end('ui.tick');
 
     const viewport = { width: window.innerWidth, height: window.innerHeight };

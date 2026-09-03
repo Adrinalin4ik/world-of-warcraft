@@ -339,6 +339,37 @@ function callWithBothConventions(vm: LuaVM, handler: LuaRef, selfValue: unknown,
     vm.setGlobal('this', previousThis);
     vm.setGlobal('event', previousEvent);
     previousArgs.forEach((value, index) => vm.setGlobal(`arg${index + 1}`, value));
+
+    // **RELEASE THE SAVED HANDLES.** `getGlobal` goes through `toJs`, whose default branch mints a
+    // registry slot for anything with no JS shape -- a table or a function (`vm.ts#toJs`) -- and only
+    // an explicit `unref` gives it back. Nothing here released them, so every invocation that found a
+    // TABLE in `this` leaked one slot, for ever.
+    //
+    // MEASURED at exactly **1.00 handle per call** (`__bench__/script-call.test.ts`), and `this` holds
+    // a table on any NESTED invocation, which is the ordinary case: an outer handler sets `this` to
+    // its own wrapper before calling a client function that fires another frame's handler. At the
+    // per-frame tick's rate that is a leak at frame rate.
+    //
+    // AFTER the `setGlobal`s, never before: `setGlobal` pushes the value and stores it in the Lua
+    // globals table, so Lua holds its own reference by then and freeing our slot cannot collect a
+    // value the global still names.
+    //
+    // Why this matters beyond memory: slot allocation is O(1) here by design (`vm.ts#ref` exists
+    // precisely because `luaL_ref` is O(live handles)), so a leak is not automatically slow -- but it
+    // grows the fengari-side handle table without bound, and a growing handle table is what once
+    // froze this interface for 10.1 s. `LuaVM#liveHandles` is censused so a regression is visible
+    // rather than inferred.
+    releaseSaved(vm, previousThis);
+    releaseSaved(vm, previousEvent);
+    previousArgs.forEach((value) => releaseSaved(vm, value));
+  }
+}
+
+/** Frees a handle `getGlobal` minted for a table- or function-valued global. A no-op for the
+ * scalars, which `toJs` maps to plain JS values and which own no slot. */
+function releaseSaved(vm: LuaVM, value: unknown): void {
+  if (vm.isRef(value)) {
+    vm.unref(value);
   }
 }
 
