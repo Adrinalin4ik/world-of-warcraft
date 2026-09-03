@@ -66,6 +66,46 @@ export class TerrainProvider {
   /** Cached world AABBs for the broadphase -- see `boundsOf` for the invalidation key. */
   private bounds = new WeakMap<object, { box: THREE.Box3; tx: number; ty: number; tz: number }>();
 
+  /**
+   * **THE A/B SWITCH. `false` restores the all-chunks walk exactly.**
+   *
+   * The broadphase's win was measured offline at ~8.4 us per untouched chunk, but the owner's five
+   * at-rest `ctl.move` samples span 4.1 to 10.2 ms -- a 2.5x spread that a 2.7 ms change cannot be
+   * seen inside, and `CLAUDE.md` says exactly that: run-to-run spread has repeatedly covered an
+   * entire claimed change here. Two readings at two locations across a page reload cannot settle it.
+   *
+   * So the comparison has to happen in ONE sitting at ONE spot with the registered chunk set
+   * unchanged, and the only difference between the arms is this boolean. `window.moveProfile()`
+   * reports both arms' inputs alongside the timing.
+   *
+   * **Its mere PRESENCE also identifies the build**: `collisionWorld.terrain.broadphase === undefined`
+   * means the page is running a bundle from before the fix, which is the trivial explanation to rule
+   * out before any number is interpreted.
+   */
+  broadphase = true;
+
+  /**
+   * Gather counters and PER-GATHER timings -- see `window.moveProfile()`.
+   *
+   * **THE TIMING RING IS THE ARM THAT NEEDS NO SCALING ASSUMPTION.** An offline bench measured
+   * ~8.4 us per untouched chunk at 64 chunks on a different machine; at the owner's **441** registered
+   * chunks that would extrapolate to ~18.5 ms a frame from this term alone, which his pre-fix
+   * `ctl.move` never came close to. So the bench gives the SHAPE and not the SIZE, and the size has
+   * to be measured where it matters. `us` here is the median cost of ONE gather on HIS machine at HIS
+   * chunk count -- flip `broadphase` and read it twice and the pair answers what the rejection bought,
+   * with no extrapolation in it at all.
+   *
+   * Two clock reads per gather, five gathers on an at-rest frame, so about a microsecond a frame --
+   * paid to measure the thing being argued about.
+   */
+  readonly census = {
+    gathers: 0,
+    visited: 0,
+    rejected: 0,
+    /** Ring of per-gather durations in microseconds; `moveProfile` takes the median. */
+    us: [] as number[],
+  };
+
   /** Registered chunk count. Read by the collision debug overlay. */
   get size(): number {
     return this.chunks.size;
@@ -109,7 +149,13 @@ export class TerrainProvider {
    * do it. One cheap correct change beats one clever change that has to be got right twice.
    */
   gather(worldBox: THREE.Box3, out: Triangle[]): void {
+    this.census.gathers += 1;
+    const t0 = performance.now();
     for (const chunk of this.chunks) {
+      // Computed before the switch is consulted, so BOTH arms pay the same `boundsOf` call and the
+      // A/B measures the rejection alone rather than the caching with it. `boundsOf` is a WeakMap hit
+      // and three compares after the first call, so this costs the off-arm almost nothing -- and
+      // leaving it out would have made the off-arm falsely cheap.
       const bounds = this.boundsOf(chunk);
       // A chunk with no resolvable bounds is NOT skipped -- it falls through to the old path, which
       // is the honest degrade: a geometry without a bounding box is a chunk we cannot reject, not a
@@ -127,12 +173,20 @@ export class TerrainProvider {
       // before it could become a fall-through-the-world report, which is exactly the reason it was
       // written first. Testing the same two axes the walk itself filters on makes the rejection a
       // strict superset of the cell clamps, so the output cannot change.
-      if (bounds !== null
+      this.census.visited += 1;
+      if (this.broadphase
+        && bounds !== null
         && (bounds.max.x < worldBox.min.x || bounds.min.x > worldBox.max.x
           || bounds.max.y < worldBox.min.y || bounds.min.y > worldBox.max.y)) {
+        this.census.rejected += 1;
         continue;
       }
       this.gatherChunk(chunk, worldBox, out);
+    }
+    const ring = this.census.us;
+    ring.push((performance.now() - t0) * 1000);
+    if (ring.length > 512) {
+      ring.shift();
     }
   }
 

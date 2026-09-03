@@ -906,14 +906,17 @@ class Controls extends React.Component<IProp> {
     }
 
     beginSection('ctl.move');
-    // INSIDE the span, so the census and the owner's `ctl.move` number describe exactly the same
-    // work. One integer increment; see `collision/collision-world.ts#castCensus`.
-    noteMovementFrame();
+    // TIMED HERE TOO, and deliberately over exactly the span `ctl.move` covers: `CpuSections` keeps
+    // only a per-frame total with no history, so there is no p50 to read out of it -- and a p50 is
+    // the whole point, since five single samples of this line span 4.1 to 10.2 ms. Two clock reads a
+    // frame buys `window.moveProfile()` a median over the last 512 frames.
+    const moveStartedAt = performance.now();
     movementFrame(player.move, deps, {
       moving, dir, speed, wantJump: this.jumpPressed, jumpPressed: this.jumpPressed,
       // The swim pair travels the same way the run speed does, and for the same reason.
       swimSpeed: speeds.swim, swimBackSpeed: speeds.swimBack,
     }, delta, now);
+    noteMovementFrame(performance.now() - moveStartedAt);
     endSection('ctl.move');
     this.jumpPressed = false;
 

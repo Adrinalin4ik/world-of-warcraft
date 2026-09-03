@@ -158,6 +158,8 @@ const castCensus = {
   pushTerrain: 0,
   pushWmo: 0,
   pushDoodads: 0,
+  /** Ring of `ctl.move` durations in ms, fed by `noteMovementFrame`. */
+  moveMs: [] as number[],
 };
 
 /**
@@ -166,8 +168,93 @@ const castCensus = {
  * Called from `Controls#update` inside the `ctl.move` span -- the same span the owner's number comes
  * from, so the two describe exactly the same work.
  */
-export function noteMovementFrame(): void {
+export function noteMovementFrame(ms?: number): void {
   castCensus.frames += 1;
+  if (ms !== undefined) {
+    castCensus.moveMs.push(ms);
+    if (castCensus.moveMs.length > 512) {
+      castCensus.moveMs.shift();
+    }
+  }
+}
+
+/** Median of a numeric ring, or null when it is empty. Sorts a copy; called from a console only. */
+function median(values: readonly number[]): number | null {
+  if (values.length === 0) {
+    return null;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+/**
+ * **THE ONE-PASTE A/B READOUT -- `window.moveProfile()`.**
+ *
+ * The owner's five at-rest `ctl.move` samples are 4.1, 6.1, 10.2, 4.7 and 9.3 ms: a 2.5x spread that
+ * no 2.7 ms change can be seen inside, and `CLAUDE.md` records exactly that failure -- run-to-run
+ * spread has repeatedly covered an entire claimed change here. Two readings at two locations across a
+ * page reload cannot settle anything, and asking a person to hold a location constant across a reload
+ * is a bad instrument.
+ *
+ * So this makes the comparison happen in ONE sitting at ONE spot with the registered set unchanged,
+ * where the arms differ only in `collisionWorld.terrain.broadphase`:
+ *
+ *     moveProfile()                                  // arm A, broadphase on
+ *     collisionWorld.terrain.broadphase = false
+ *     moveProfileReset(); // stand still ~10 s
+ *     moveProfile()                                  // arm B, the all-chunks walk
+ *
+ * **`gatherUs` is the arm that settles it and it carries no extrapolation.** It is the median cost of
+ * ONE gather on his machine at his chunk count. The offline bench's 8.4 us per untouched chunk was
+ * measured at 64 chunks on another machine; extrapolated to his 441 it would predict ~18.5 ms a frame
+ * from this term alone, which his pre-fix `ctl.move` never approached -- so the bench gives the SHAPE
+ * and not the SIZE, and this is the size.
+ *
+ * `broadphase` appearing in the output at all also identifies the build: if
+ * `collisionWorld.terrain.broadphase` is `undefined`, the page is running a bundle from before the
+ * fix and no number below means anything yet.
+ */
+function readMoveProfile() {
+  const n = Math.max(castCensus.frames, 1);
+  const per = (total: number) => Math.round((total / n) * 10) / 10;
+  const t = collisionWorld.terrain;
+  const gathers = Math.max(t.census.gathers, 1);
+  const round2 = (v: number | null) => (v === null ? null : Math.round(v * 100) / 100);
+  return {
+    // Arm identity and the two inputs that MUST match between the two reads for the pair to mean
+    // anything. A different `registeredChunks` between arms invalidates the comparison outright.
+    broadphase: t.broadphase,
+    registeredChunks: t.size,
+    frames: castCensus.frames,
+
+    // THE HEADLINE PAIR.
+    gatherUs: round2(median(t.census.us)),
+    ctlMoveMs: round2(median(castCensus.moveMs)),
+
+    perFrame: {
+      gathers: per(t.census.gathers),
+      casts: per(castCensus.casts),
+      pushOuts: per(castCensus.pushOuts),
+      candidates: per(
+        castCensus.castTerrain + castCensus.castWmo + castCensus.castDoodads
+        + castCensus.pushTerrain + castCensus.pushWmo + castCensus.pushDoodads,
+      ),
+    },
+    perGather: {
+      chunksVisited: Math.round((t.census.visited / gathers) * 10) / 10,
+      chunksRejected: Math.round((t.census.rejected / gathers) * 10) / 10,
+    },
+  };
+}
+
+/** Clear both censuses, so each A/B arm measures its own window. */
+function resetMoveProfile(): void {
+  resetCastCensus();
+  const t = collisionWorld.terrain;
+  t.census.gathers = 0;
+  t.census.visited = 0;
+  t.census.rejected = 0;
+  t.census.us.length = 0;
 }
 
 function readCastCensus() {
@@ -209,6 +296,7 @@ function resetCastCensus(): void {
   castCensus.pushTerrain = 0;
   castCensus.pushWmo = 0;
   castCensus.pushDoodads = 0;
+  castCensus.moveMs.length = 0;
 }
 const _end = new THREE.Vector3();
 
@@ -542,6 +630,11 @@ if (typeof window !== 'undefined') {
   // suites import this module in a node environment where `window` does not exist. Ten suites went
   // red on a module-scope assignment before this was moved inside.
   (window as any).castCensus = readCastCensus;
+  // The A/B readout. Guarded with the rest: the collision and movement suites import this module
+  // under node, where `window` does not exist -- a module-scope assignment took ten suites red once
+  // already this session.
+  (window as any).moveProfile = readMoveProfile;
+  (window as any).moveProfileReset = resetMoveProfile;
   (window as any).castCensusReset = resetCastCensus;
   // Reachable from the console: "is there any collision geometry near me, and from which provider"
   // is the first question every movement or camera report asks, and it is not answerable from the
