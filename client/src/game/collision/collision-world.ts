@@ -292,6 +292,28 @@ function readMoveProfile() {
       chunksRejected: Math.round((t.census.rejected / gathers) * 10) / 10,
     },
     /**
+     * **THE WMO PROVIDER, the last gather that was still dark.** `gatherUs` times only the terrain
+     * provider, so a WMO cost could not have shown up in any earlier arm -- and `perCast.wmo`
+     * reading 0 candidates does not mean 0 cost, which is exactly the lesson the doodad provider
+     * taught: 1509 hulls walked to return 3 candidates.
+     *
+     * Integers, no clock. `refreshesPerFrame` is the one that matters and it is the gate on the
+     * settle latch: it must fall to **0** once the resident groups have been placed for two frames.
+     * A non-zero steady state means some group never settles, and `visited` against `rejected` says
+     * whether the registry walk itself is worth attacking next.
+     */
+    wmo: {
+      registered: collisionWorld.wmo.size,
+      gathersPerFrame: per(collisionWorld.wmo.census.gathers),
+      visitedPerGather: collisionWorld.wmo.census.gathers === 0
+        ? 0
+        : Math.round((collisionWorld.wmo.census.visited / collisionWorld.wmo.census.gathers) * 10) / 10,
+      rejectedPerGather: collisionWorld.wmo.census.gathers === 0
+        ? 0
+        : Math.round((collisionWorld.wmo.census.rejected / collisionWorld.wmo.census.gathers) * 10) / 10,
+      refreshesPerFrame: per(collisionWorld.wmo.census.refreshes),
+    },
+    /**
      * THE LIQUID PROVIDER, never instrumented until now and the one caller the earlier execution
      * list missed: `frame.ts`'s `surfaceAt` goes to `LiquidRegistry`, NOT to the terrain provider, so
      * it is not one of the four gathers already counted. `surfaceAt` walks every registered surface
@@ -318,6 +340,11 @@ function resetMoveProfile(): void {
   t.census.usTotal = 0;
   collisionWorld.liquid.census.calls = 0;
   collisionWorld.liquid.census.visited = 0;
+  const w = collisionWorld.wmo.census;
+  w.gathers = 0;
+  w.visited = 0;
+  w.rejected = 0;
+  w.refreshes = 0;
   movePhases?.reset();
 }
 

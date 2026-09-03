@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
 import { Triangle } from './types';
+import { collisionEpoch, matrixElementsEqual, placementHasSettled } from './collision-frame';
 
 const _localBox = new THREE.Box3();
 const _inverse = new THREE.Matrix4();
@@ -39,109 +40,23 @@ interface HullBounds {
 }
 
 /**
- * **THE COLLISION EPOCH: one world-matrix refresh per doodad per FRAME, not per cast.**
+ * The collision epoch, the settle test and the exact matrix compare all live in `collision-frame.ts`
+ * now: the WMO provider had the identical per-cast refresh cost and takes the identical fix, so the
+ * mechanism belongs to the collision FRAME rather than to this provider. That module carries the
+ * measurement, the recorded failure the refresh prevents, and why the settle test needs BOTH a
+ * non-zero translation and a stable matrix.
  *
- * MEASURED, and this is the whole of `ctl.move`. The owner's phase split standing still, 2060
- * frames: `depenetrate` 1698 us, `classify` 1586 us, `groundedStep` 1055 us -- 4.34 ms across three
- * collision phases -- against **36 candidates per frame**. The terrain gather is 44.5 us and
- * `castCapsuleAgainstTriangles` benches at ~2.7 us per triangle, so a dozen candidates is ~32 us.
- * Gather plus solve is under 80 us of a 1586 us phase; the other **~1.5 ms per cast is this
- * provider**, and it does not depend on the candidate count at all -- which is why three successive
- * candidate-count hypotheses all came back refuted.
- *
- * `gather` walks EVERY registered hull and `gatherOne` opened with
- * `mesh.updateWorldMatrix(true, false)`. The `true` makes it recurse UP the parent chain, so each
- * call re-composes every ancestor's `matrixWorld` on the way to the doodad. At the owner's
- * **1509 loaded map doodads** and three casts a frame that is ~4500 ancestor-chain walks per frame,
- * and it is being paid to reject a doodad that returns 3 candidates in total.
- *
- * It is also undoing a saving this project already banked: `scene.matrixWorldAutoUpdate = false`
- * took the render section from 8.1 ms to 1.9 ms precisely by not walking static nodes every frame
- * (`CLAUDE.md`), and this walks them from the collision path instead.
- *
- * **THE REFRESH CANNOT SIMPLY GO** -- its comment records why, with a measurement: a hull is
- * registered when its M2 is CONSTRUCTED, before the doodad is placed, and nothing else ever updates
- * a static subtree, so a stale identity matrix puts the bounds at the world origin and the doodad
- * silently never collides. "Measured: 2528 map doodads loaded, zero triangles gathered."
- *
- * So it is kept and made ONCE PER FRAME. Every cast in a frame sees the same scene -- the mover's
- * three casts and the camera's boom all run inside one `requestAnimationFrame` and nothing moves a
- * doodad between them -- so the second, third and fourth refresh of a frame can only recompute the
- * identical matrix.
- *
- * **DEFAULTS TO THE OLD BEHAVIOUR when no frame has been begun.** `epoch` starts at 0 and
- * `refreshedIn` starts at 0, so a caller that never calls `beginCollisionFrame` -- every collision
- * unit test -- refreshes on every gather exactly as before. The optimisation is opt-in by the app,
- * which keeps the risk on the side that has an owner to check it.
+ * `beginCollisionFrame` is re-exported here because `Controls#update` and this provider's tests
+ * already import it from this module.
  */
-let epoch = 0;
+export { beginCollisionFrame } from './collision-frame';
 
-/**
- * **HAS THIS HULL'S PLACEMENT SETTLED?** Two conditions, and both are needed.
- *
- * The refresh exists for a one-time ORDERING problem, not a recurring one: a hull is registered when
- * its M2 is CONSTRUCTED (`pipeline/m2/index.ts`), which happens BEFORE the doodad is placed
- * (`world/doodad-manager.js:300-330`), and the map subtree is declared static
- * (`world/map.js:39`, `isStaticSubtree = true`) so `World#updateDynamicMatrices` deliberately never
- * walks it. Hence a refresh is needed exactly ONCE, after placement -- never per frame, and never
- * per cast.
- *
- * **NOTHING IN THIS CLIENT MOVES A PLACED DOODAD, and that was checked rather than assumed.**
- * `doodad-manager.js:300-330` is the only writer of a doodad's position, quaternion or scale; the
- * animated-doodad path (`enableDoodadAnimations`, and the billboard pass) writes BONE transforms and
- * never the root; there are no transports, elevators or `MOVEMENT`-flagged placements implemented at
- * all. Streaming a doodad out and back in removes and re-adds the hull, which makes a fresh entry.
- *
- * **NAMED GAP for whenever transports land**: a doodad that moves after settling would keep the
- * bounds it settled with. The fix then is to clear `settled` from whatever moves it -- the marker is
- * per-hull and public to this module, so that is a one-line hook rather than a redesign. And a
- * doodad in a NON-static subtree needs no refresh from here in the first place, because
- * `updateDynamicMatrices` already updates its matrix every frame and `worldBoundsOf`'s matrix
- * comparison then re-derives the box on its own.
- *
- * ## Why the test is "non-identity AND unchanged" and not either alone
- *
- * "Unchanged since the last refresh" ALONE is unsafe, and this is the trap: an UNPLACED hull's
- * matrix is also unchanged between frames, so settling on stability would latch the identity matrix
- * before placement ever happened -- which is precisely the recorded failure this refresh exists to
- * prevent ("Measured: 2528 map doodads loaded, zero triangles gathered"). It has to be shown that
- * placement HAS occurred, and a non-zero translation is that evidence: every map doodad sits
- * thousands of yards from the world origin.
- *
- * The assumption is stated rather than hidden: a doodad placed at exactly the world origin with no
- * rotation and unit scale would never settle and would keep paying one refresh per frame. That costs
- * correctness nothing -- it is the old behaviour -- and no such placement exists in a real map.
- */
 function hasSettled(elements: ArrayLike<number>, cached: HullBounds): boolean {
-  // Placed: a non-zero translation. `matrixWorld` is identity until `doodad-manager` places it.
-  if (elements[12] === 0 && elements[13] === 0 && elements[14] === 0) {
-    return false;
-  }
-  // And stable: this refresh produced the same matrix the last one did.
-  return matrixEquals(cached.matrix, elements);
+  return placementHasSettled(elements, cached.matrix);
 }
 
-/**
- * Open a new collision frame: every doodad hull will refresh its world matrix once more.
- *
- * Called from `Controls#update` before any cast is issued. Bumping it more often than once a frame
- * is safe (it only costs the refreshes back); bumping it LESS often is not, and is why this is not
- * driven off the movement census, which is stamped after the mover has already cast.
- */
-export function beginCollisionFrame(): void {
-  epoch += 1;
-}
-
-/** 16 floats, compared exactly. No epsilon: the question is "is this the same matrix", not "is it
- * close" -- a near-equal matrix is a doodad that moved slightly, and its collision must move with
- * it. */
 function matrixEquals(cached: Float64Array, elements: ArrayLike<number>): boolean {
-  for (let i = 0; i < 16; ++i) {
-    if (cached[i] !== elements[i]) {
-      return false;
-    }
-  }
-  return true;
+  return matrixElementsEqual(cached, elements);
 }
 
 /**
@@ -253,7 +168,7 @@ export class DoodadProvider {
       // already current for this epoch. Leaving it at 0 would refresh a second time on the next
       // gather of the same frame -- correct, but it would give back a quarter of the saving on every
       // newly streamed doodad.
-      refreshedIn: epoch,
+      refreshedIn: collisionEpoch(),
       settled: false,
       geometry,
       boundingBox,
@@ -293,21 +208,21 @@ export class DoodadProvider {
     // it. A stale matrix is the identity, which puts the bounds at the world origin where no query
     // reaches, and the doodad silently never collides at all. Measured: 2528 map doodads loaded,
     // zero triangles gathered.
-    // `epoch === 0` means NO FRAME HAS EVER BEEN BEGUN, and then the skip is disabled outright.
+    // `collisionEpoch() === 0` means NO FRAME HAS EVER BEEN BEGUN, and then the skip is disabled outright.
     // **That guard is load-bearing and its absence was a real bug**: a fresh entry is stamped with
     // the current epoch, so at epoch 0 it compared equal and the refresh was skipped for ever --
     // which `__tests__/doodad-provider.test.ts`'s "re-gathers a placement that moves after its
     // bounds were already cached" caught immediately, gathering 12 triangles at a position the
     // doodad had left. Every collision unit test runs at epoch 0 and therefore keeps the exact
     // pre-change behaviour; only the app, which calls `beginCollisionFrame`, takes the saving.
-    if (cached === null || epoch === 0 || (!cached.settled && cached.refreshedIn !== epoch)) {
+    if (cached === null || collisionEpoch() === 0 || (!cached.settled && cached.refreshedIn !== collisionEpoch())) {
       mesh.updateWorldMatrix(true, false);
       if (cached !== null) {
-        cached.refreshedIn = epoch;
+        cached.refreshedIn = collisionEpoch();
         // LATCH once the placement is provably done -- see `hasSettled`. Checked AFTER the refresh
         // and BEFORE `worldBoundsOf`, because the comparison it needs is "did this refresh change
         // anything", and `worldBoundsOf` overwrites the cached matrix.
-        if (epoch !== 0 && hasSettled(mesh.matrixWorld.elements, cached)) {
+        if (collisionEpoch() !== 0 && hasSettled(mesh.matrixWorld.elements, cached)) {
           cached.settled = true;
         }
       }

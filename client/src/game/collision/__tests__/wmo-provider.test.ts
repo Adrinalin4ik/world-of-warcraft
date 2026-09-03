@@ -5,6 +5,7 @@ import * as THREE from 'three';
 
 import { CollisionLayer, MOPY_DETAIL, MOPY_NOCAMCOLLIDE } from '../layers';
 import { Triangle } from '../types';
+import { beginCollisionFrame } from '../collision-frame';
 import { WmoProvider } from '../wmo-provider';
 
 /**
@@ -296,4 +297,61 @@ describe('WmoProvider placement cache', () => {
     expect(() => provider.gather(bigBox(), CollisionLayer.Walk, out)).not.toThrow();
     expect(out).toHaveLength(0);
   });
+
+  /**
+   * THE GATE ON THE SETTLE LATCH, and it is the failure mode the refresh exists to prevent: a group
+   * is registered before its placement transform is written, and the map subtree is static so
+   * nothing else will ever fix a stale identity matrix. A latch that settled on stability ALONE
+   * would latch that identity matrix here -- the two frames before placement are exactly the window
+   * in which it would -- and the group would silently never collide.
+   *
+   * Note `view.updateMatrix()` without `updateMatrixWorld()`: reproducing the real ordering means
+   * the placer writes the local matrix and the provider's own refresh is the only thing that can
+   * carry it into `matrixWorld`.
+   */
+  it('finds a group placed after registration, then stops refreshing once it has settled', () => {
+    const provider = new WmoProvider();
+    const c = collider([0, 0, 0]);
+    provider.add(c);
+
+    // Two frames while still unplaced. A stability-only latch would settle on the identity matrix.
+    beginCollisionFrame();
+    provider.gather(bigBox(), CollisionLayer.Walk, []);
+    beginCollisionFrame();
+    provider.gather(bigBox(), CollisionLayer.Walk, []);
+
+    // Now place it, the way `matrixWorld` actually gets written for a static subtree.
+    c.view.position.set(100, 0, 0);
+    c.view.updateMatrix();
+
+    beginCollisionFrame();
+    const atNewPosition: Triangle[] = [];
+    provider.gather(
+      new THREE.Box3(new THREE.Vector3(99, -1, -1), new THREE.Vector3(102, 2, 4)),
+      CollisionLayer.Walk, atNewPosition,
+    );
+    expect(atNewPosition).toHaveLength(3);
+    expect(atNewPosition[0].a.x).toBeCloseTo(100);
+
+    // And nothing where it used to be. `bigBox()` covers the origin and no longer reaches the
+    // group, so this asserts the world-space bounds moved WITH the placement rather than being
+    // left behind at the identity matrix -- the exact stale-bounds failure, stated as a negative.
+    const atOldPosition: Triangle[] = [];
+    provider.gather(bigBox(), CollisionLayer.Walk, atOldPosition);
+    expect(atOldPosition).toHaveLength(0);
+
+    // One more frame for the latch to observe a matrix that did not move: the frame that saw the
+    // placement necessarily saw it CHANGE, so settling can only happen on the frame after it.
+    beginCollisionFrame();
+    provider.gather(bigBox(), CollisionLayer.Walk, []);
+
+    // Settled: five further frames must cost no world-matrix refresh at all.
+    provider.census.refreshes = 0;
+    for (let i = 0; i < 5; ++i) {
+      beginCollisionFrame();
+      provider.gather(bigBox(), CollisionLayer.Walk, []);
+    }
+    expect(provider.census.refreshes).toBe(0);
+  });
+
 });
