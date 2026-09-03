@@ -144,6 +144,14 @@ export class SelectionRing {
 
   private readonly decal: DecalMesh = decalMesh(MAX_VERTICES);
 
+  /**
+   * The world point the emitted positions are measured from -- this mesh's own `position`.
+   *
+   * Held rather than recomputed because `vertices()` has to add it back to keep its promise of world
+   * space; see the projection site for why the positions are relative at all.
+   */
+  private readonly origin = new THREE.Vector3();
+
   private readonly frame: DecalFrame = {
     centre: new THREE.Vector3(),
     sin: 0,
@@ -381,11 +389,34 @@ export class SelectionRing {
     frame.minZ = -vertical;
     frame.maxZ = vertical;
 
+    /**
+     * **THE PROJECTION IS MEASURED FROM THE RING'S OWN CENTRE, and that is the flicker fix.**
+     *
+     * The owner: "Круг есть, но декаль при неровной земле мерцает."
+     *
+     * `decal.ts#projectDecal`'s `origin` parameter carries the whole argument and the reference's
+     * decision 0781 behind it; in one line, the decal used to reach the terrain's plane through
+     * different arithmetic than the terrain does -- absolute world coordinates in a `Float32Array`
+     * against the terrain's chunk-local vertices plus a CPU-composed matrix -- and on a slope that
+     * disagreement became a depth error the existing `polygonOffset` could not settle.
+     *
+     * The origin then has to travel to the DRAWN OBJECT, and `updateMatrix()` is not optional: this
+     * mesh sets `matrixAutoUpdate = false` (see its construction), so a bare `position` write is
+     * inert -- the same trap `CLAUDE.md` records for `model.scale.setScalar()`.
+     *
+     * `copy`, not a reference: `frame` is reused across projections, so sharing its vector would let
+     * the next frame's centre silently move this mesh.
+     */
+    this.origin.copy(frame.centre);
+    this.mesh.position.copy(frame.centre);
+    this.mesh.updateMatrix();
+
     return projectDecal(
       this.decal,
       frame,
       (_x, _y, dz) => Math.min(1, Math.max(0, (vertical - Math.abs(dz)) / (1.5 * radius))),
       (x, y) => rectUv(frame, x, y),
+      this.origin,
     );
   }
 
@@ -433,8 +464,18 @@ export class SelectionRing {
    */
   vertices(): number[][] {
     const out: number[][] = [];
+    // **THE ORIGIN IS ADDED BACK, because this instrument promises WORLD space and its entire value
+    // is being comparable against `collisionWorld.terrain.heightAt`.** The emitted buffer is now
+    // relative to `origin` (see the projection site), and returning those raw would have left this
+    // method quietly answering in a different frame than its own docstring claims -- an instrument a
+    // fix had blinded, which `CLAUDE.md` lists among this project's recorded failures. The
+    // comparison it exists for is unchanged.
     for (let i = 0; i < this.decal.count; ++i) {
-      out.push([this.decal.positions[i * 3], this.decal.positions[i * 3 + 1], this.decal.positions[i * 3 + 2]]);
+      out.push([
+        this.decal.positions[i * 3] + this.origin.x,
+        this.decal.positions[i * 3 + 1] + this.origin.y,
+        this.decal.positions[i * 3 + 2] + this.origin.z,
+      ]);
     }
     return out;
   }

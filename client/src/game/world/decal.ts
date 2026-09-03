@@ -216,6 +216,7 @@ export function projectDecal(
   frame: DecalFrame,
   fade: (x: number, y: number, dz: number) => number,
   uv: (x: number, y: number) => [number, number],
+  origin: THREE.Vector3 | null = null,
 ): boolean {
   mesh.count = 0;
   if (frame.maxX - frame.minX <= 0 || frame.maxY - frame.minY <= 0) {
@@ -250,9 +251,12 @@ export function projectDecal(
         const fy = _fy;
         const [u, v] = uv(fx, fy);
         const i = mesh.count;
-        mesh.positions[i * 3] = p.x;
-        mesh.positions[i * 3 + 1] = p.y;
-        mesh.positions[i * 3 + 2] = p.z;
+        // ORIGIN-RELATIVE when the caller gives one -- see `projectDecal`'s `origin` parameter. The
+        // subtraction happens here, in float64, and only the small remainder is stored in the
+        // float32 buffer; that ordering is the whole point and doing it any later would be useless.
+        mesh.positions[i * 3] = origin === null ? p.x : p.x - origin.x;
+        mesh.positions[i * 3 + 1] = origin === null ? p.y : p.y - origin.y;
+        mesh.positions[i * 3 + 2] = origin === null ? p.z : p.z - origin.z;
         mesh.uvs[i * 2] = u;
         mesh.uvs[i * 2 + 1] = v;
         mesh.fades[i] = fade(fx, fy, p.z - frame.centre.z);
@@ -263,6 +267,56 @@ export function projectDecal(
 
   return mesh.count > 0;
 }
+
+/**
+ * **WHY `origin` EXISTS: THE DECAL AND THE TERRAIN MUST REACH THE SAME PLANE THROUGH THE SAME
+ * ARITHMETIC, AND WITHOUT IT THEY DO NOT.**
+ *
+ * The owner: "Круг есть, но декаль при неровной земле мерцает." Flicker on uneven ground.
+ *
+ * This projector is already exact: it emits clipped SUB-PIECES of the very triangles being drawn,
+ * so the decal is coplanar with the terrain by construction and no amount of better fitting is
+ * available. The flicker was never a fitting problem and it was not a missing bias either -- the
+ * selection ring has carried `polygonOffset` (factor -1, units -4), `depthWrite: false` and a
+ * `renderOrder` since it was written.
+ *
+ * **THE REFERENCE NAMES THE ACTUAL REQUIREMENT AND THE EXACT FAILURE**
+ * (`benilla-world/src/decal.rs:5-11`): a decal is pixel-coplanar with what is on screen "**provided
+ * it transforms through the same `clip_from_world` matrix as the world-mesh shaders** (the
+ * `DECAL_WORLD_CLIP` lane variant; the cam-relative route reaches the same plane through different
+ * arithmetic and **misses by more than the bias at WoW-scale coordinates** -- decision 0781), the
+ * rasterizer `depth_bias` settling the depth test". So the bias settles a RESIDUAL, and only after
+ * the two routes agree. Ours did not agree:
+ *
+ *  - **the terrain** builds vertices CHUNK-LOCAL -- `-(y * unitSize)`, `-(x * unitSize)`, i.e. 0..533
+ *    -- and puts the whole world offset in the mesh's own `position`
+ *    (`pipeline/adt/chunk/index.ts:27-28, 52-54`). So its route is
+ *    `projection * (view * chunkMatrix) * smallLocal`, and the large offset is composed on the CPU in
+ *    float64 before being uploaded once.
+ *  - **the decal** wrote ABSOLUTE world coordinates into a `Float32Array` and drew with an identity
+ *    model matrix. Its route was `projection * view * hugeWorldFloat32`.
+ *
+ * A float32 holding -8900.375 resolves to about 0.001 yd; the same number expressed relative to the
+ * decal's own centre (a few yards) resolves to about 5e-7 yd -- **roughly 2000x finer**, and finer
+ * than the terrain's own chunk-local rounding (~6e-5 yd), so the residual mismatch is now dominated
+ * by the receiver rather than by us. That is what the fixed `polygonOffset` can actually settle.
+ *
+ * **AND IT EXPLAINS WHY UNEVEN GROUND SPECIFICALLY.** The mismatch is a position error that is
+ * roughly isotropic. On FLAT ground a horizontal error slides the point along the surface and changes
+ * its depth not at all. On a SLOPE the same error becomes a depth error scaled by the gradient -- so
+ * the steeper the ground, the larger the depth discrepancy, until it exceeds the offset and which
+ * surface wins starts varying per pixel and per frame. Flat ground was always fine; that is the
+ * symptom, and it is what a distance-tuned bias would have masked at one camera height and not
+ * another.
+ *
+ * **NOT A TUNED CONSTANT.** No value was chosen and the existing bias is untouched; this changes
+ * only where the coordinates are measured FROM. `null` keeps the previous absolute-world behaviour
+ * exactly, so a caller that has not opted in is bit-for-bit unchanged.
+ *
+ * The caller that passes an origin owes two things: put that same origin on the drawn object's
+ * `position` (and `updateMatrix()` it, since the world scene runs `matrixAutoUpdate = false`), and
+ * add it back in any instrument that promises world space.
+ */
 
 /** The frame's default UV map: the texture square IS the frame rectangle. */
 export function rectUv(frame: DecalFrame, x: number, y: number): [number, number] {

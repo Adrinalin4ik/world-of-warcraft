@@ -27,7 +27,7 @@ import { selectionColor, SELECTION_NEUTRAL, SELECTION_PLAYER } from '../selectio
 const CELL = 33.3333 / 8;
 const ROW_STRIDE = 17;
 
-function rampChunk(heightAt: (x: number, y: number) => number) {
+function rampChunk(heightAt: (x: number, y: number) => number, offset = 0) {
   const positions = new Float32Array(145 * 3);
   const put = (i: number, lx: number, ly: number) => {
     positions[i * 3] = lx;
@@ -52,7 +52,13 @@ function rampChunk(heightAt: (x: number, y: number) => number) {
     // NOTHING -- which looked exactly like a broken projector. `gatherChunk` maps the query box into chunk
     // LOCAL space and indexes cells off `-local.x / CELL`, so a chunk's own vertices run 0 -> -33.33 and its
     // placement matrix flips them back into increasing world coordinates. This is that flip.
-    matrixWorld: new THREE.Matrix4().makeScale(-1, -1, 1),
+    // `offset` TRANSLATES the chunk into real Azeroth magnitudes, which the float32 test below needs:
+    // the mirror alone leaves this chunk at world 0..33, where the precision defect cannot appear at
+    // all. Composed as `T * S` so the mirror still runs first and the gather's local indexing is
+    // unchanged; with `heightAt = x`, the resulting world plane is `z = x - offset`.
+    matrixWorld: new THREE.Matrix4()
+      .makeTranslation(offset, offset, 0)
+      .multiply(new THREE.Matrix4().makeScale(-1, -1, 1)),
     isHole: () => false,
   };
 }
@@ -73,6 +79,61 @@ function frameAt(centre: THREE.Vector3, radius: number): DecalFrame {
 
 describe('the ground selection ring', () => {
   afterEach(() => collisionWorld.clear());
+
+  /**
+   * **THE FLICKER FIX: the emit is measured from an ORIGIN, and that is what makes it precise enough
+   * to be coplanar at WoW-scale coordinates.**
+   *
+   * The owner: "Круг есть, но декаль при неровной земле мерцает."
+   *
+   * The decal was already an exact sub-piece of the drawn triangle, so the flicker was never fitting
+   * and never a missing bias (the ring has carried `polygonOffset` since it was written). It was the
+   * reference's decision 0781: absolute world coordinates in a `Float32Array` reach the terrain's
+   * plane through different arithmetic than the terrain's own chunk-local vertices plus a
+   * CPU-composed matrix, and "misses by more than the bias at WoW-scale coordinates".
+   *
+   * Two things are asserted and the SECOND is the one that matters. That the world positions are
+   * recovered exactly is correctness. That the STORED numbers are small is the fix: a float32 holding
+   * a real WoW coordinate resolves to about a millimetre, and holding a few yards resolves to
+   * fractions of a micron -- which is finer than the terrain's own rounding, so the residual the
+   * `polygonOffset` must settle is now the receiver's rather than ours.
+   *
+   * The coordinates here are deliberately a REAL Azeroth magnitude rather than the tidy 6 the ramp
+   * test uses, because at 6 the defect does not exist: float32 holds small numbers precisely and the
+   * bug only appears once the exponent grows.
+   */
+  it('measures the emit from an origin, so stored coordinates stay small at WoW-scale', () => {
+    // A real Azeroth magnitude: the chunk is translated out to 8900, so every coordinate the
+    // projector handles has the exponent a live world coordinate has. At the origin-adjacent 6 the
+    // other test uses, float32 holds the numbers precisely and the defect cannot appear.
+    const OFFSET = 8900;
+    collisionWorld.terrain.add(rampChunk((x) => x, OFFSET));
+
+    const radius = 1.5;
+    // On the ramp's own world plane, `z = x - OFFSET` -- so the receiver is a genuine slope, which is
+    // the only case that flickers.
+    const centre = new THREE.Vector3(OFFSET + 6, OFFSET + 6, 6);
+    const frame = frameAt(centre, radius);
+    const mesh = decalMesh(4096);
+    const origin = centre.clone();
+
+    expect(projectDecal(mesh, frame, () => 1, (x, y) => rectUv(frame, x, y), origin)).toBe(true);
+    expect(mesh.count).toBeGreaterThanOrEqual(3);
+
+    for (let i = 0; i < mesh.count; ++i) {
+      // THE FIX: every stored component is a small offset, never a world coordinate. `radius` bounds
+      // x and y; z is bounded by the frame's vertical slab.
+      expect(Math.abs(mesh.positions[i * 3])).toBeLessThanOrEqual(radius + 1e-3);
+      expect(Math.abs(mesh.positions[i * 3 + 1])).toBeLessThanOrEqual(radius + 1e-3);
+      expect(Math.abs(mesh.positions[i * 3 + 2])).toBeLessThanOrEqual(frame.maxZ + 1e-3);
+
+      // And adding the origin back reproduces a point on the ramp -- so the mesh, drawn at
+      // `position = origin`, lands exactly where the absolute emit used to.
+      const x = mesh.positions[i * 3] + origin.x;
+      const z = mesh.positions[i * 3 + 2] + origin.z;
+      expect(Math.abs(z - (x - OFFSET))).toBeLessThan(0.05);
+    }
+  });
 
   /**
    * A 45-degree ramp (`z = x`, so a 1-yd step across is a 1-yd rise). Over a 1.5-yd ring that is a 3-yd
