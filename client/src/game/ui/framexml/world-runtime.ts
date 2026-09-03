@@ -969,7 +969,9 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
  * `buttons` per frame alongside `buttonMs` -- a walk that is expensive because it visits 2000 buttons is
  * a different defect from one that visits 20 slowly.
  */
-const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, buttons: 0 };
+const tickCensus = {
+  frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, buttons: 0, actionButtonMs: 0, actionButtons: 0,
+};
 
 (window as unknown as Record<string, unknown>).uiTickCensus = () => {
   const n = Math.max(tickCensus.frames, 1);
@@ -979,10 +981,24 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
     perFrame: {
       editBoxMs: per(tickCensus.editBoxMs),
       buttonMs: per(tickCensus.buttonMs),
+      // **THE ACTION BUTTONS, SPLIT OUT FROM THE OTHER NAMED `OnUpdate` FRAMES.** `onUpdateMs` lumped
+      // some fifteen of them together -- bonus bar, casting bar, player frame, character model, quest
+      // fading, zone text, world map, chat edit boxes, buff frame, aura buttons AND the 24 action
+      // buttons -- so a report of "the tick costs 5.6 ms" could not say whether the action bar was any
+      // of it. That is the one question a frame-rate investigation of this session's action-bar work
+      // has to answer, and it was the one the census could not.
+      //
+      // `onUpdateMs` now EXCLUDES this, so the two are disjoint and `editBoxMs + buttonMs +
+      // onUpdateMs + actionButtonMs` is the whole tick.
+      actionButtonMs: per(tickCensus.actionButtonMs),
+      /** How many action buttons were `shown` and therefore ticked, averaged. */
+      actionButtons: Math.round(tickCensus.actionButtons / n),
       onUpdateMs: per(tickCensus.onUpdateMs),
       buttons: Math.round(tickCensus.buttons / n),
     },
-    totalPerFrameMs: per(tickCensus.editBoxMs + tickCensus.buttonMs + tickCensus.onUpdateMs),
+    totalPerFrameMs: per(
+      tickCensus.editBoxMs + tickCensus.buttonMs + tickCensus.onUpdateMs + tickCensus.actionButtonMs,
+    ),
   };
 };
 
@@ -992,6 +1008,8 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
   tickCensus.buttonMs = 0;
   tickCensus.onUpdateMs = 0;
   tickCensus.buttons = 0;
+  tickCensus.actionButtonMs = 0;
+  tickCensus.actionButtons = 0;
   return 'cleared';
 };
 
@@ -1104,14 +1122,26 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
       if (tempEnchantId !== null) {
         invokeScriptHandler(ctx, tempEnchantId, 'OnUpdate', [dt]);
       }
+      // EVERY OTHER NAMED FRAME IS ACCOUNTED FOR BY HERE -- the action buttons get their own phase
+      // below, so this stamp closes `onUpdateMs` before they run and the two never overlap.
+      const tPhase3 = performance.now();
+      tickCensus.onUpdateMs += tPhase3 - tPhase2;
+
       // The range indicator and the attack flash -- see `actionButtonIds`. Shown buttons only, which is
       // however many slots the character has filled.
+      //
+      // MEASURED SEPARATELY, because this is where this session's action-bar work lands and a census
+      // that could not separate it could not clear it either. Two `performance.now()` calls on a phase
+      // that already walks 24 ids, which is the same trade the three phases above already make.
+      let ticked = 0;
       for (const id of actionButtonIds) {
         if (registry.widget(id)?.shown) {
           invokeScriptHandler(ctx, id, 'OnUpdate', [dt]);
+          ticked += 1;
         }
       }
-      tickCensus.onUpdateMs += performance.now() - tPhase2;
+      tickCensus.actionButtons += ticked;
+      tickCensus.actionButtonMs += performance.now() - tPhase3;
     },
     dispose: () => {
       registry.reset();
