@@ -75,6 +75,7 @@
 import DBC from './index';
 import Loader from '../../net/loader';
 import { spellWire } from '../../classes/spell-wire';
+import { SpellRangeRow } from '../../classes/action-range';
 
 /** `Spell.dbc` column indices for 3.3.5a build 12340. See the header for how each was established. */
 const COL = {
@@ -767,8 +768,22 @@ class SpellData {
    */
   private kitWorldEffects: Map<number, number> | null = null;
 
-  /** `SpellRange.dbc` id -> `maxRangeHostile`, in YARDS. What `IsActionInRange` is judged against. */
+  /** `SpellRange.dbc` id -> `maxRangeHostile`, in YARDS. `maxRange`'s map; see `rangeRows` too. */
   private ranges: Map<number, number> | null = null;
+
+  /**
+   * `SpellRange.dbc` id -> the WHOLE row: min, max and flags.
+   *
+   * Added beside `ranges` rather than replacing it because the two answer different questions and
+   * `maxRange`'s two consumers want the old one: the tooltip's `$r` token wants a single number and
+   * `IsActionInRange` needs all three columns. **The minimum is the half that was missing** -- the
+   * bar judged Charge on its max alone and showed it usable at point-blank range.
+   *
+   * `flags & 1` is the MELEE row. Measured on the served file: 64 records, and id 2 "Combat" is the
+   * only row with that bit. See `classes/action-range.ts` for the full column table and the
+   * byte-verified formula that consumes it.
+   */
+  private rangeRows: Map<number, SpellRangeRow> | null = null;
 
   /** `SpellDuration.dbc` id -> `baseDuration` in MILLISECONDS. `$d`'s source. */
   private durations: Map<number, number> | null = null;
@@ -882,7 +897,17 @@ class SpellData {
     }
 
     this.ranges = new Map<number, number>();
+    this.rangeRows = new Map<number, SpellRangeRow>();
     for (const record of (ranges as any).records ?? []) {
+      // THE WHOLE ROW, for `IsActionInRange`. `minRangeHostile` is the column the old read dropped;
+      // `type` is the flag word whose bit 0 marks the melee row.
+      if (record && typeof record.maxRangeHostile === 'number') {
+        this.rangeRows.set(record.id, {
+          min: typeof record.minRangeHostile === 'number' ? record.minRangeHostile : 0,
+          max: record.maxRangeHostile,
+          flags: typeof record.type === 'number' ? record.type : 0,
+        });
+      }
       // `maxRangeHostile` is the one a cast at an enemy is judged by; `maxRangeFriendly` differs only for
       // a handful of spells and the client uses the hostile value for the indicator. Both are YARDS, as
       // floats (`wow-data-parser/dbc/entities/spell-range.js`).
@@ -1184,6 +1209,22 @@ class SpellData {
     }
     const yards = this.ranges?.get(row.rangeIndex) ?? null;
     return yards !== null && yards > 0 ? yards : null;
+  }
+
+  /**
+   * The whole `SpellRange.dbc` row a spell points at -- min, max and flags -- or null.
+   *
+   * What `IsActionInRange` needs, where `maxRange` above is what the tooltip needs. Unlike that one
+   * this does NOT drop a zero max: the Self row (id 1, min 0 / max 0) is a real answer that
+   * `classes/action-range.ts` turns into "range does not apply", and folding it away here would
+   * make it indistinguishable from an unknown spell.
+   */
+  spellRange(spellId: number): SpellRangeRow | null {
+    const row = this.spell(spellId);
+    if (row === null) {
+      return null;
+    }
+    return this.rangeRows?.get(row.rangeIndex) ?? null;
   }
 
   /** `SpellDuration.dbc` base duration in MILLISECONDS, or null. `$d`'s lookup. */

@@ -43,6 +43,7 @@ import { casterStatsFor } from './caster-stats';
 import { shapeshiftData } from '../pipeline/dbc/shapeshift-data';
 import { LuaVM } from './framexml/lua/vm';
 import type Unit from '../classes/unit';
+import { DEFAULT_COMBAT_REACH, rangeState } from '../classes/action-range';
 
 /**
  * Subscribe a VM to the server's action bar. Returns the teardown.
@@ -120,9 +121,31 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
    * The distance is measured in the world's own units, which are YARDS -- the same units
    * `SpellRange.dbc` stores. It is a 3D distance including height, which is what the server checks.
    */
-  const rangeOf = (spellId: number): number | null => {
-    const yards = spellData.maxRange(spellId);
-    if (yards === null) {
+  /**
+   * `IsActionInRange`'s tri-state answer -- and it now judges the MINIMUM as well as the maximum.
+   *
+   * The owner: "Я стою вблизи, мне хватает ярости на charge, но charge нельзя использовать вблизи."
+   * This used to read `maxRange` alone, so Charge -- whose row carries a real minimum of **8.00
+   * yards** -- reported `1` at point-blank range and the hotkey stayed grey.
+   *
+   * The whole rule, its four arms and the byte-verified constants live in
+   * `classes/action-range.ts`; this is only the seam that gathers the live inputs. Two of them are
+   * worth naming here:
+   *
+   *  - **the reaches are the units' own** `UNIT_FIELD_COMBATREACH`, already decoded
+   *    (`update-object/unit-fields.ts:87`), so a large mob is reachable at a greater centre
+   *    distance. A reach that has not streamed falls back to the reference's own 1.5.
+   *  - **the distance stays SQUARED.** No square root is taken anywhere on this path -- the
+   *    reference compares squares (`IsTargetInRange 0x6e47b0`), and at 24 buttons a frame that is
+   *    24 avoided `Math.sqrt` calls for free.
+   *
+   * `null` is returned for every untestable case -- no target, target not streamed, unknown spell,
+   * or a spell with no range row -- which makes the hotkey HIDE rather than claim a range this
+   * client cannot judge.
+   */
+  const rangeOf = (spellId: number): 0 | 1 | null => {
+    const row = spellData.spell(spellId);
+    if (row === null) {
       return null;
     }
     const player = world.player;
@@ -137,7 +160,13 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     const dx = target.position.x - player.position.x;
     const dy = target.position.y - player.position.y;
     const dz = target.position.z - player.position.z;
-    return Math.sqrt(dx * dx + dy * dy + dz * dz) <= yards ? 1 : 0;
+    return rangeState(
+      row,
+      spellData.spellRange(spellId),
+      player.fields.combatReach ?? DEFAULT_COMBAT_REACH,
+      target.fields.combatReach ?? null,
+      dx * dx + dy * dy + dz * dz,
+    );
   };
 
   /** Build the snapshot for one 1-based slot from the handler and the DBC tables. */
