@@ -177,4 +177,133 @@ describe('cost of entering Lua', () => {
 
     expect(leaked).toBe(0);
   });
+
+  /**
+   * **DOES THE PRICE OF A CALL DEPEND ON HOW BIG THE VM IS?** -- the arm that tests whether the
+   * harness can explain the live number at all.
+   *
+   * The owner's live VM stands at **39,499 handles** (flat, so not a leak) with the whole of
+   * `FrameXML.toc` loaded and a globals table to match. The harness's VM has about five handles and
+   * a bare global environment, and prices an invocation at ~23 us against a live ~239 us. If any
+   * part of `callWithBothConventions` is linear -- or even weakly superlinear -- in the live
+   * population, that is the 10x, and it is testable here by building the population first.
+   *
+   * The suspects are named rather than swept for: `lua_getglobal`/`lua_setglobal` hash into the
+   * globals table (nine round-trips per call), and `ref`/`unref` index our own slots table, which is
+   * a fengari `Table` backed by a JS `Map`. The record says handle operations were once
+   * O(live handles) under `luaL_ref` and were moved off it precisely for that reason
+   * (`lua/vm.ts#ref`, a measured 0.65 us -> 151 us across 0 -> 20,000 handles), so a residual
+   * linearity here is a specific, historically-grounded worry rather than a guess.
+   *
+   * Prints a cost-versus-population curve. Flat means the harness cannot explain the live figure and
+   * the gap is elsewhere -- his CPU, or the bundle -- which is a real answer and closes a line of
+   * enquiry. Rising means it is found.
+   */
+  it('prices an invocation against the live VM population', () => {
+    const { vm, registry, ctx } = harness();
+    const self = registry.create('Frame', 'BenchScale', null);
+
+    const real = vm.runExpr(
+      'return function(self, elapsed) \n'
+      + '  local t = self \n'
+      + '  if t then local x = elapsed + 1 end \n'
+      + 'end',
+      '=bench-scale',
+    );
+    if ('value' in real) {
+      setScriptHandler(vm, self, 'OnUpdate', real.value as never);
+    }
+
+    // A globals table the size of a loaded manifest's, so `lua_getglobal` hashes into a realistic
+    // one. `FrameXML.toc` defines thousands of functions and frame names.
+    vm.run(
+      'for i = 1, 6000 do _G["BenchGlobal" .. i] = { slot = i } end',
+      '=bench-globals',
+    );
+
+    const held: unknown[] = [];
+    const curve: string[] = [];
+
+    for (const target of [0, 10000, 40000]) {
+      // Grow the LIVE handle population by holding refs, exactly as the running interface does.
+      while (vm.liveHandles < target) {
+        const got = vm.getGlobal(`BenchGlobal${(held.length % 6000) + 1}`);
+        held.push(got);
+      }
+      meanUs(2000, () => invokeScriptHandler(ctx, self, 'OnUpdate', [0.016]));
+      const us = meanUs(N, () => invokeScriptHandler(ctx, self, 'OnUpdate', [0.016]));
+      curve.push(`${vm.liveHandles} handles -> ${us.toFixed(2)} us`);
+    }
+
+    // eslint-disable-next-line no-console
+    console.log(
+      '[lua-call] invoke cost vs live handle population:\n'
+      + curve.map((row) => `           ${row}`).join('\n'),
+    );
+
+    expect(curve).toHaveLength(3);
+  });
+
+
+  /**
+   * **DOES THE PRICE OF A CALL DEPEND ON HOW MANY GLOBALS EXIST?** -- and this is the arm that found
+   * the 10x.
+   *
+   * It was not looked for. The population arm above prices an invocation at ~97 us while the very
+   * first arm prices a STRICTLER body at ~22 us, and the only material difference between the two
+   * VMs is that the population arm had already defined 6000 globals so that `lua_getglobal` would
+   * hash into a realistic table. That is a 4x on an accident, which makes it the most interesting
+   * number in the file and worth an arm that isolates it instead of inferring it.
+   *
+   * The mechanism, if it is real: `callWithBothConventions` does **nine** `lua_getglobal` /
+   * `lua_setglobal` round-trips per invocation (`this`, `event` and `arg1` each saved, set and
+   * restored). The globals table is a fengari `Table`, and a `Table` that has grown a large hash
+   * part is not the O(1) a JS `Map` would suggest -- the same class of finding as `luaL_ref` being
+   * O(live handles) here, which is already recorded in `lua/vm.ts#ref`.
+   *
+   * WHY IT WOULD EXPLAIN THE LIVE NUMBER: `FrameXML.toc` defines thousands of globals -- every
+   * client function, every frame name, every constant. The harness's bare environment has a few
+   * dozen. So this is a cost the harness structurally under-reports, which is exactly the shape of a
+   * 10x gap that survived a correct per-call measurement.
+   *
+   * Same handler and same VM throughout, growing only the globals table between readings, so the
+   * body and the handle population are held constant and the globals are the only variable.
+   */
+  it('prices an invocation against the size of the globals table', () => {
+    const { vm, registry, ctx } = harness();
+    const self = registry.create('Frame', 'BenchGlobals', null);
+
+    const real = vm.runExpr(
+      'return function(self, elapsed) local x = elapsed + 1 end',
+      '=bench-globals-scale',
+    );
+    if ('value' in real) {
+      setScriptHandler(vm, self, 'OnUpdate', real.value as never);
+    }
+
+    const curve: string[] = [];
+    let defined = 0;
+
+    for (const target of [0, 2000, 6000, 12000]) {
+      if (target > defined) {
+        vm.run(
+          `for i = ${defined + 1}, ${target} do _G["BenchG" .. i] = i end`,
+          '=bench-grow',
+        );
+        defined = target;
+      }
+      meanUs(2000, () => invokeScriptHandler(ctx, self, 'OnUpdate', [0.016]));
+      const us = meanUs(N, () => invokeScriptHandler(ctx, self, 'OnUpdate', [0.016]));
+      curve.push(`${defined} globals -> ${us.toFixed(2)} us/invoke`);
+    }
+
+    // eslint-disable-next-line no-console
+    console.log(
+      '[lua-call] invoke cost vs globals-table size:\n'
+      + curve.map((row) => `           ${row}`).join('\n'),
+    );
+
+    expect(curve).toHaveLength(4);
+  });
+
 });

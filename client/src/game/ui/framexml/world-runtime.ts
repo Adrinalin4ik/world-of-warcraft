@@ -85,7 +85,7 @@ import { installSpellsApi } from './lua/api/spells';
 import { installCursorApi } from './lua/api/cursor';
 import { installAddOnsApi, markAddOnLoaded } from './lua/api/addons';
 import { DEFAULT_BINDINGS, fetchBindings } from './bindings';
-import { invokeScriptHandler } from './lua/scripts';
+import { invokeCensus, invokeScriptHandler } from './lua/scripts';
 import type { FileReport } from './runtime';
 
 const FRAMEXML_DIR = 'Interface\\FrameXML\\';
@@ -971,6 +971,11 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
  */
 const tickCensus = {
   frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, buttons: 0, actionButtonMs: 0, actionButtons: 0,
+  // Lua ENTRIES attributable to the action-button phase -- see `scripts.ts#invokeCensus`. The
+  // phase's own loop runs one per shown button, but a handler body that fires another frame's
+  // handler enters Lua again and the loop cannot see it. `actionButtons` counts buttons; this
+  // counts calls, and the two differing is the finding.
+  actionButtonCalls: 0,
 };
 
 (window as unknown as Record<string, unknown>).uiTickCensus = () => {
@@ -991,6 +996,13 @@ const tickCensus = {
       // `onUpdateMs` now EXCLUDES this, so the two are disjoint and `editBoxMs + buttonMs +
       // onUpdateMs + actionButtonMs` is the whole tick.
       actionButtonMs: per(tickCensus.actionButtonMs),
+      // **CALLS, NOT BUTTONS.** If this reads 8 the per-call cost is the gap; if it reads far more,
+      // the count was and the per-call price from the bench is right. `usPerCall` does the division
+      // so the comparison against the bench's 23.11 us is direct.
+      actionButtonCalls: Math.round((tickCensus.actionButtonCalls / n) * 10) / 10,
+      actionButtonUsPerCall: tickCensus.actionButtonCalls === 0
+        ? 0
+        : Math.round((tickCensus.actionButtonMs * 1000) / tickCensus.actionButtonCalls),
       /** How many action buttons were `shown` and therefore ticked, averaged. */
       actionButtons: Math.round(tickCensus.actionButtons / n),
       onUpdateMs: per(tickCensus.onUpdateMs),
@@ -1021,6 +1033,7 @@ const tickCensus = {
   tickCensus.buttons = 0;
   tickCensus.actionButtonMs = 0;
   tickCensus.actionButtons = 0;
+  tickCensus.actionButtonCalls = 0;
   return 'cleared';
 };
 
@@ -1145,6 +1158,7 @@ const tickCensus = {
       // that could not separate it could not clear it either. Two `performance.now()` calls on a phase
       // that already walks 24 ids, which is the same trade the three phases above already make.
       let ticked = 0;
+      const callsBefore = invokeCensus.calls;
       for (const id of actionButtonIds) {
         if (registry.widget(id)?.shown) {
           invokeScriptHandler(ctx, id, 'OnUpdate', [dt]);
@@ -1152,6 +1166,8 @@ const tickCensus = {
         }
       }
       tickCensus.actionButtons += ticked;
+      // NESTED ENTRIES INCLUDED, which is the whole point -- see `tickCensus.actionButtonCalls`.
+      tickCensus.actionButtonCalls += invokeCensus.calls - callsBefore;
       tickCensus.actionButtonMs += performance.now() - tPhase3;
     },
     dispose: () => {

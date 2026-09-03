@@ -185,6 +185,30 @@ function checkHandlerName(name: string, where: string): void {
  *
  * A `WeakMap` on the VM, so a disposed runtime's whole store goes with it and nothing here pins a VM.
  */
+/**
+ * **HOW MANY TIMES DID WE ENTER LUA THIS FRAME?** -- the integer that closes, or refuses to close, a
+ * 10x gap.
+ *
+ * The owner's census reports `actionButtons 8` and `actionButtonMs 1.91`, which reads as 237 us to
+ * service one button. The harness prices one invocation of a realistic handler at 23.11 us
+ * (`__bench__/script-call.test.ts`), so 8 x 23.11 us = 0.18 ms -- a **10x** shortfall against 1.91.
+ *
+ * `actionButtons` counts BUTTONS, not invocations, and those are not the same number: a handler body
+ * that calls a client function which fires another frame's handler enters Lua again, and the tick's
+ * outer loop cannot see it. So either the real invocation count is many times eight -- in which case
+ * the per-call price is right and the count was the error -- or it is eight and the live VM's
+ * per-call cost genuinely exceeds the harness's. **One counter separates those, and no amount of
+ * reading does.**
+ *
+ * Counted in `invokeScriptHandler`, which `scripts.ts:346-350` already documents as the ONE
+ * invocation entry point -- so this is a complete count by construction rather than by a survey of
+ * call sites. Incremented only when a handler actually exists and will be called, because a miss
+ * costs a `Map` lookup and is not an entry into Lua.
+ *
+ * One integer add on a path already doing a `pcall` and nine global round-trips.
+ */
+export const invokeCensus = { calls: 0 };
+
 const handlerStores = new WeakMap<LuaVM, Map<number, Map<string, LuaRef>>>();
 
 /** `vm`'s own frame-id -> handler-name -> handle store, created on first use. */
@@ -324,6 +348,42 @@ export function drainScriptErrors(): string[] {
  * a handler that itself fires another handler (directly, or via `invokeScriptHandler` again) must see
  * its own `this`/`event`/`argN` again once the nested call returns.
  */
+/**
+ * **THIS FUNCTION IS O(THE SIZE OF THE GLOBALS TABLE), AND THAT IS THE WHOLE OF `actionButtonMs`.**
+ *
+ * MEASURED (`__bench__/script-call.test.ts`), one VM, one handler, growing only `_G`:
+ *
+ * | globals | per invocation |
+ * |---------|----------------|
+ * |       0 |      18.74 us  |
+ * |   2,000 |      34.21 us  |
+ * |   6,000 |      93.86 us  |
+ * |  12,000 |     175.29 us  |
+ *
+ * Linear, at about **13 us per thousand globals**, against a `vm.call` floor of **1.5-2.4 us**. So a
+ * handler invocation in a bare harness costs ~20 us and the same invocation with `FrameXML.toc`
+ * loaded costs an order of magnitude more -- which is exactly the 10x that survived a correct
+ * per-call measurement, and it is why the harness structurally under-reports this path.
+ *
+ * The mechanism is the nine `lua_getglobal`/`lua_setglobal` round-trips below (`this`, `event` and
+ * `arg1` each saved, set and restored). Under fengari a `Table`'s hash part is a JS `Map` and
+ * **writing nil to a key DELETES it** -- `vm.ts#ref` already records this, having been bitten by the
+ * same representation: `mark_dead` does `strong.delete(hash)`. The steady state of `this` is nil, so
+ * every restore deletes the key and every next call re-inserts it, and an insert into a full table
+ * rehashes the whole thing. Nine round-trips, and the ones that matter are O(|_G|).
+ *
+ * It also explains what the leak fix did not: `ui.tick` reading 1.6, 3.4, 4.8, 5.6, 6.6, 9.7 ms
+ * across the owner's samples. That is not a leak and not "state" -- **the globals table GROWS as the
+ * manifest and its panels initialise**, and every handler invocation in the client gets more
+ * expensive as it does.
+ *
+ * **DO NOT "FIX" THIS BY DROPPING THE SAVE-RESTORE.** The reference does exactly what this does and
+ * says why: `samples/benilla/crates/benilla-ui/src/script/event.rs:264-306`,
+ * "saving and restoring the globals around the call (even on error) so nested handler firing is
+ * safe". Under mlua's real C Lua those writes are amortised O(1), so the reference pays nothing for
+ * a structure that costs us everything. The structure is right; the global writes are the defect,
+ * and the fix belongs in how `LuaVM` reaches a global -- not here.
+ */
 function callWithBothConventions(vm: LuaVM, handler: LuaRef, selfValue: unknown, args: unknown[]): LuaError | null {
   const previousThis = vm.getGlobal('this');
   const previousEvent = vm.getGlobal('event');
@@ -389,6 +449,7 @@ export function invokeScriptHandler(
   if (handler === null) {
     return null;
   }
+  invokeCensus.calls += 1;
   return callWithBothConventions(ctx.vm, handler, ctx.wrapper(self), args);
 }
 
