@@ -700,9 +700,28 @@ export class SpellKitEffects {
         // animation, animId 0, 1100 / 1667 ms), so showing them cannot produce a bind-pose sheet.
         //
         // AND THE OLD GUARD IS KEPT for exactly the case it was written for: a mesh with emitters
-        // that CANNOT be posed stays hidden, because that is still an unposed pale sheet
-        // (`ThunderClap_Cast_Base` 178 vertices in a 12.7 x 13.0 x 8.7 box, `Frost_Nova_state` 614 in
-        // 9.7 x 9.7 x 2.7 -- neither is lifted by this change unless it poses).
+        // that CANNOT be posed stays hidden, because that is still an unposed pale sheet.
+        //
+        // SELF-REVIEW: THE TWO MODELS THIS SENTENCE USED TO CITE WERE BOTH WRONG, and the owner found
+        // it. It read "`ThunderClap_Cast_Base` 178 vertices in a 12.7 x 13.0 x 8.7 box,
+        // `Frost_Nova_state` 614 in 9.7 x 9.7 x 2.7 -- neither is lifted by this change unless it
+        // poses". Measured properly:
+        //
+        //   * Those were HEADER bounding boxes, i.e. the PARTICLE volume, not the mesh. The VERTEX
+        //     boxes are `ThunderClap_Cast_Base` **6.90 x 6.90 x 3.54** and `Frost_Nova_state`
+        //     **1.39 x 1.61 x 0.86**. Frost Nova's mesh is a foot and a half across and was never a
+        //     sheet risk at all. Third time in this subsystem that a header box has been quoted as a
+        //     mesh box.
+        //   * And `ThunderClap_Cast_Base` PASSES this gate: 8 of its 10 bones are animated or
+        //     billboarded so `useSkinning` is true, and its single sequence is animId 0, 4933 ms,
+        //     flags 0x21 -- inline, so `armable` is true. **It is lifted by this change**, and the
+        //     claim that it was unaffected was never tested.
+        //
+        // That is not a reason to hide it again. Its authored shape IS a wide flat ground effect --
+        // 6.90 units across with vertices from z -1.00 to +2.55, planted at the caster's feet by the
+        // WORLD slot of cast kit 356 -- so a sheet several yards across lying on the ground is what
+        // the file contains, and it is posed (this gate returns true, so `poseEffectModel` runs it).
+        // What remains open is its APPEARANCE, not its visibility or its pose.
         //
         // `emitters == 0` still MUST be visible: then the mesh is the only thing the model can draw,
         // and hiding it draws nothing at all -- the arm that cost the owner his projectile
