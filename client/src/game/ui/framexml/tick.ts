@@ -395,7 +395,25 @@ export function placeCaret(
  * real `<NormalTexture>`/`<HighlightTexture>` regions, long after the load, and a boot-time snapshot
  * would leave every one of them a painted picture that never lights or presses.
  *
- * The cost is one array walk of the widget tree per frame, beside the one `drawList` already does.
+ * **THE WALK IS NOT A PERFORMANCE PROBLEM AND THIS IS THE MEASUREMENT, so that it stops being
+ * proposed as one.** The owner's `uiTickCensus`, 2157 frames standing still with no panels open:
+ * **`buttonMs` 0.14 ms** over **46 visited buttons**, inside a `ui.tick` of 5.5 ms. That is 2.5% of
+ * the tick and 0.8% of a 16.7 ms frame.
+ *
+ * Two rounds proposed replacing it -- most recently with a port of the reference's own ticked-kind
+ * registry (`samples/benilla/crates/benilla-ui/src/script/tick.rs:152-154`, `widget/mod.rs:413`),
+ * which really is what the reference does and really would remove the walk. It was cancelled on this
+ * number: the reference had thousands of frames of two ticked kinds to sweep, this has 46 buttons
+ * after the `visitHidden` prune, and a flat registry here would have to recover EFFECTIVE VISIBILITY
+ * per button by walking each one's parent chain -- which is the exact cost pattern the collision
+ * providers were just cured of. It would plausibly have been slower, to save 0.14 ms.
+ *
+ * The cost that WAS worth finding sits one layer down and is not in this file: entering Lua at all.
+ * `lua/scripts.ts#callWithBothConventions` measured 16.04 us against the 1.51 us `lua_pcall` it
+ * wraps (`__bench__/script-call.test.ts`). A tick's cost is its CALLS, not its walk.
+ *
+ * The cost here is one array walk of the widget tree per frame, beside the one `drawList` already
+ * does.
  *
  * `visitHidden = false` prunes a hidden subtree, and that is the world runtime's whole reason for the
  * parameter: on the glue screens the tree is ~450 widgets and pruning would save nothing, while
