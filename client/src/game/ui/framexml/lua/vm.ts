@@ -192,6 +192,98 @@ export class LuaVM {
     return { value: this.popValue() };
   }
 
+  /**
+   * `runExpr`, but running the chunk with a CALLER-SUPPLIED `_ENV` instead of `_G`.
+   *
+   * This is the Lua 5.3 mechanism that replaces 5.1's `setfenv`, and it is what lets a compiled
+   * script handler resolve `this`/`event`/`argN` out of a small table rather than out of `_G` --
+   * see `scripts.ts#callWithBothConventions` for the measurement that made that necessary. A
+   * function defined inside the chunk inherits the chunk's `_ENV`, so setting it on the chunk is
+   * enough to give the returned handler its environment.
+   *
+   * `_ENV` is upvalue 1 of any main chunk, which is why the index below is a literal 1 and not a
+   * search: `luaL_loadbuffer` produces a closure whose only upvalue is `_ENV`.
+   */
+  runExprInEnv(source: string, chunkName: string, env: LuaRef): LuaError | { value: unknown } {
+    const bytes = fengari.to_luastring(source);
+    const loadStatus = lauxlib.luaL_loadbuffer(this.L, bytes, bytes.length, chunkName);
+    if (loadStatus !== lua.LUA_OK) {
+      return this.popError(chunkName);
+    }
+    this.pushRef(env);
+    // Pops the env and installs it as the chunk's `_ENV`. Every chunk `luaL_loadbuffer` produces has
+    // exactly one upvalue and it is `_ENV`, so this cannot miss.
+    lua.lua_setupvalue(this.L, -2, 1);
+    const callStatus = lua.lua_pcall(this.L, 0, 1, 0);
+    if (callStatus !== lua.LUA_OK) {
+      return this.popError(chunkName);
+    }
+    return { value: this.popValue() };
+  }
+
+  /**
+   * Re-points a Lua function's `_ENV` upvalue at `env`. Returns false if it has none.
+   *
+   * A function with no `_ENV` upvalue references no globals at all, so there is nothing to re-point
+   * and false is the ordinary answer rather than a failure. The upvalue is FOUND BY NAME and not
+   * assumed to be index 1: that holds for a main chunk, but a nested function's upvalue order is
+   * whatever the compiler assigned.
+   *
+   * Used on every handler as it is stored (`scripts.ts#setScriptHandler`) so that a handler a
+   * pre-2.0 addon compiled itself resolves `this`/`event`/`argN` the same way one this runtime
+   * compiled does. Re-pointing is behaviour-preserving for everything else, because the environment
+   * chains to `_G` for reads and forwards writes back to it.
+   */
+  setFunctionEnv(fn: LuaRef, env: LuaRef): boolean {
+    this.pushRef(fn);
+    for (let i = 1; ; i += 1) {
+      const name = lua.lua_getupvalue(this.L, -1, i);
+      if (name === null) {
+        lua.lua_pop(this.L, 1);
+        return false;
+      }
+      // `lua_getupvalue` pushed the upvalue's value; drop it either way.
+      lua.lua_pop(this.L, 1);
+      if (fengari.to_jsstring(name) === '_ENV') {
+        this.pushRef(env);
+        lua.lua_setupvalue(this.L, -2, i);
+        lua.lua_pop(this.L, 1);
+        return true;
+      }
+    }
+  }
+
+  /**
+   * RAW read of `table[key]` -- no `__index`, so a miss reads as absent rather than chaining.
+   *
+   * The save half of the legacy-globals save-restore uses this deliberately: it must read what the
+   * environment itself holds, not what `_G` would supply through the chain, or a nested invocation
+   * would "save" an unrelated global and restore it over the outer handler's value.
+   */
+  rawGet(table: LuaRef, key: string): unknown {
+    this.pushRef(table);
+    lua.lua_pushstring(this.L, key);
+    lua.lua_rawget(this.L, -2);
+    const value = this.toJs(-1);
+    lua.lua_pop(this.L, 2);
+    return value;
+  }
+
+  /**
+   * RAW write of `table[key] = value` -- no `__newindex`, so it cannot be forwarded to `_G`.
+   *
+   * This is what keeps the environment's pass-through metamethod free to be an unconditional
+   * forward: the three legacy keys never go through it, so it needs no special-casing and a
+   * handler's ordinary `foo = 1` still lands in `_G`.
+   */
+  rawSet(table: LuaRef, key: string, value: unknown): void {
+    this.pushRef(table);
+    lua.lua_pushstring(this.L, key);
+    this.pushValue(value);
+    lua.lua_rawset(this.L, -3);
+    lua.lua_pop(this.L, 1);
+  }
+
   setGlobal(name: string, value: unknown): void {
     this.pushValue(value);
     lua.lua_setglobal(this.L, name);

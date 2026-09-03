@@ -303,7 +303,14 @@ describe('cost of entering Lua', () => {
       + curve.map((row) => `           ${row}`).join('\n'),
     );
 
-    expect(curve).toHaveLength(4);
+    // **THE GATE ON THE FIX, and it stands in for a delete counter.** Before the handler environment
+    // landed this curve read 15.37 / 32.71 / 89.97 / 184.36 us -- a 12x rise, because every
+    // invocation deleted three keys from `_G` and V8 compacted a 12,000-entry map each time. With
+    // the legacy globals in a three-entry environment nothing is deleted from `_G` at all and the
+    // curve is near-flat. A regression that reintroduced the churn would blow straight through this.
+    const flat = parseFloat(curve[0].split('-> ')[1]);
+    const full = parseFloat(curve[3].split('-> ')[1]);
+    expect(full).toBeLessThan(flat * 3);
   });
 
 
@@ -457,10 +464,17 @@ describe('cost of entering Lua', () => {
       + ' so the deferral to the outermost invocation ALREADY exists',
     );
 
-    // The point of the arm: nesting is already dramatically cheaper, because only the outermost
-    // invocation deletes. If this ever fails, the deferral has been lost and a depth counter WOULD
-    // buy something.
-    expect(nested).toBeLessThan(sequential);
+    // **THIS ARM HAS OUTLIVED ITS ORIGINAL QUESTION, and the reversal is the finding.** It was
+    // written to show that the nil write was already deferred to the outermost invocation, and it
+    // did: 8 sequential top-level invocations cost 1245.7 us (155.7 each) against 289.7 us (36.2
+    // each) for one invocation nesting seven -- 4.3x, which is what refuted the depth-counter
+    // proposal.
+    //
+    // With the legacy globals moved out of `_G` there is no delete left to defer, so the gap has
+    // inverted: sequential is now ~19.7 us per invocation and the nested shape is DEARER, because
+    // its nesting is driven through a JS binding that the sequential shape does not pay. The
+    // deferral question is dead and the arm is kept as a gate on the saving instead.
+    expect(sequential / 8).toBeLessThan(60);
   });
 
 
