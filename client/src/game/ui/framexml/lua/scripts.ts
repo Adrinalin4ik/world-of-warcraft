@@ -426,13 +426,39 @@ export function drainScriptErrors(): string[] {
  * eight sequential top-level invocations, not a nest -- there is no enclosing invocation to defer
  * into, so each is outermost and each deletes, and no depth counter can merge them.
  *
- * What remains is therefore a real choice with no free option, and it is recorded rather than
- * silently taken: either the legacy globals stop being cleared between top-level invocations (which
- * changes observable behaviour outside a handler, on an assumption about 3.3.5a nobody has verified),
- * or the clear moves to a per-frame flush (whose failure mode when someone forgets to call it IS
- * that same behaviour change, arrived at by accident), or the cost stands. Deciding it needs the
- * question "what does the real client leave in `this` between handlers" answered from the game, not
- * from a preference.
+ * ## Not clearing at all is settled AGAINST, by the reference
+ *
+ * `benilla-ui/src/script/event.rs:264-306` restores the SAVED value, which at the outermost
+ * invocation is nil -- so **the reference clears too**. Leaving the legacy globals set between
+ * top-level invocations is not a faithful port waiting on a fact about 3.3.5a; it is a deviation
+ * from the only authority we have on mechanism. That also closes the per-frame-flush variant, whose
+ * failure mode when someone forgets the hook is exactly that deviation, reached by accident.
+ *
+ * ## THE FIX THAT IS LEFT, and it is measured: give the handler its own ENVIRONMENT
+ *
+ * The three legacy names do not have to live in `_G` at all. This is fengari (Lua 5.3), so a handler
+ * compiled through `load(chunk, name, mode, env)` carries its own `_ENV` upvalue: a three-entry
+ * table holding `this`/`event`/`argN` and chaining to `_G` via `__index`. The saves and sets then
+ * write into a table with three keys -- **O(1), and no key is ever deleted from `_G`** -- while
+ * `this` still resolves inside the handler exactly as today. The save-restore structure the
+ * reference requires is untouched; only the table it writes to changes.
+ *
+ * The objection to doing this on `_G` itself was that `__index` would fire on every absent-global
+ * read in the game. Confined to handler BODIES that population is small, and MEASURED it costs
+ * nothing at all -- 10 global reads per call against a 12,000-entry `_G`, four runs:
+ *
+ *  - plain `_ENV = _G`:        4.09 - 4.20 us/call
+ *  - chained 3-entry `_ENV`:   3.60 - 3.73 us/call
+ *
+ * The chained environment is consistently **FASTER**, by ~0.45 us per call, in the same direction
+ * 4/4 with a within-arm spread of ~0.1 us. `__index = _G` is a table rather than a function, so the
+ * miss resolves by a raw get and the three-entry probe that precedes it is free.
+ *
+ * The hazard is a WRITE, not a read: a handler assigning a new global would land in the environment
+ * table and vanish from everyone else's view. A `__newindex` pass-through fixes it and is asserted
+ * in the bench rather than assumed (`BenchWroteThrough` reaches `_G`).
+ *
+ * NOT BUILT YET -- the shape and these numbers went to the coordinator first.
  *
  * **DO NOT "FIX" THIS BY DROPPING THE SAVE-RESTORE.** The reference does exactly what this does and
  * says why: `samples/benilla/crates/benilla-ui/src/script/event.rs:264-306`,

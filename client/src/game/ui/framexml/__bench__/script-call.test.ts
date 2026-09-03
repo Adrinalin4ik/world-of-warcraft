@@ -463,4 +463,76 @@ describe('cost of entering Lua', () => {
     expect(nested).toBeLessThan(sequential);
   });
 
+
+  /**
+   * **ROUTE B`s MISS PATH: what does a chained handler environment cost the handler BODY?**
+   *
+   * Route B puts `this`/`event`/`argN` in the handler`s own environment -- a 3-entry table chaining
+   * to `_G` through `__index` -- so the legacy globals are written into something small and no key
+   * is ever deleted from `_G`. The saving is the whole ~13 us per thousand globals.
+   *
+   * The cost is that every global a handler body reads now MISSES the 3-entry table first and
+   * resolves through `__index`. That is the objection that killed the `_G`-metatable variant, except
+   * confined to handler bodies instead of all Lua execution -- so the population is small and
+   * knowable, and this arm prices it.
+   *
+   * The body is deliberately global-READ heavy, which is the worst case for this route and is also
+   * realistic: FrameXML handlers call client functions by global name constantly. Ten reads per call
+   * against a 12,000-entry `_G`.
+   *
+   * A WRITE is measured too, because it is the sharper hazard: a handler assigning a new global
+   * would land in the environment table rather than `_G` and the global would silently vanish from
+   * everyone else`s view. The arm asserts the `__newindex` pass-through actually reaches `_G`, since
+   * that is a correctness question rather than a timing one.
+   */
+  it('prices a chained handler environment against a plain one', () => {
+    const { vm } = harness();
+
+    vm.run('for i = 1, 12000 do _G["BenchE" .. i] = i end', '=bench-fill-env');
+    vm.run('BenchTarget = 7', '=bench-target');
+
+    const body = 'local s = 0 '
+      + 'for i = 1, 10 do s = s + BenchTarget end '
+      + 'return s';
+
+    // A plain handler: `_ENV` is `_G`, which is what every handler has today.
+    vm.run(`BenchPlain = load('${body}', "plain", "t")`, '=bench-plain');
+
+    // Route B`s handler: a 3-entry environment chaining to `_G`, with a `__newindex` pass-through so
+    // a global assignment from inside a handler still lands in `_G`.
+    vm.run(
+      'BenchEnv = setmetatable({}, { __index = _G, '
+      + '__newindex = function(t, k, v) _G[k] = v end })'
+      + `\nBenchChained = load('${body}', "chained", "t", BenchEnv)`,
+      '=bench-chained',
+    );
+
+    const plainRef = vm.getGlobal('BenchPlain');
+    const chainedRef = vm.getGlobal('BenchChained');
+
+    meanUs(2000, () => vm.call(plainRef as never, []));
+    const plain = meanUs(N, () => vm.call(plainRef as never, []));
+    meanUs(2000, () => vm.call(chainedRef as never, []));
+    const chained = meanUs(N, () => vm.call(chainedRef as never, []));
+
+    // CORRECTNESS, not timing: a global written from inside a chained handler must reach `_G`.
+    vm.run(
+      `BenchWriter = load('BenchWroteThrough = 42', "writer", "t", BenchEnv)\nBenchWriter()`,
+      '=bench-write',
+    );
+    const wroteThrough = vm.getGlobal('BenchWroteThrough');
+
+    // eslint-disable-next-line no-console
+    console.log(
+      '[lua-call] route B miss path, 10 global reads per call at |_G| = 12000:\n'
+      + `           plain _ENV = _G:      ${plain.toFixed(3)} us/call\n`
+      + `           chained 3-entry env:  ${chained.toFixed(3)} us/call\n`
+      + `           => ${(chained - plain).toFixed(3)} us per call for 10 misses`
+      + ` = ${(((chained - plain) / 10) * 1000).toFixed(0)} ns per miss\n`
+      + `           __newindex pass-through reached _G: ${String(wroteThrough)}`,
+    );
+
+    expect(wroteThrough).toBe(42);
+  });
+
 });
