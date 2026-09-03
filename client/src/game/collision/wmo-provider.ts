@@ -73,6 +73,18 @@ export class WmoProvider {
    * `refreshes` falling to zero once the map has settled is the whole gate for the latch below, and
    * it needs no timing to read. A count is exact where this browser's `performance.now()` is
    * quantised to 100 us -- the resolution that made an earlier `gatherUs` median read only 0 or 100.
+   *
+   * **AND `registered` IS WHY THIS COUNTER EXISTS RATHER THAN AN ESTIMATE.** The commit that added
+   * the latch predicted a small saving from "8-11 groups", reasoning off the `visibleGroups` figure
+   * in the render stats. Measured: **`registered: 318`**, all 318 visited on every gather, four
+   * gathers a frame -- **1272 ancestor-chain walks per frame, not 35.** The estimate was 30x low and
+   * it under-sold the fix, which is the opposite of the usual direction and no more useful for it.
+   *
+   * `visibleGroups` IS NOT THE REGISTERED COUNT. The registry holds every streamed-in group whether
+   * it is on screen, behind the camera or occluded, and collision must consider all of them. This is
+   * the same error as reasoning from `visibleChunks` when `terrain.size` is 441 -- twice now, so the
+   * rule is: a per-frame cost is `registry.size x gathers`, and the registry size is read from the
+   * registry, never inferred from what is drawn.
    */
   readonly census = { gathers: 0, visited: 0, rejected: 0, refreshes: 0 };
 

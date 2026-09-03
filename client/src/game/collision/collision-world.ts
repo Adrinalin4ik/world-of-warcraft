@@ -299,8 +299,18 @@ function readMoveProfile() {
      *
      * Integers, no clock. `refreshesPerFrame` is the one that matters and it is the gate on the
      * settle latch: it must fall to **0** once the resident groups have been placed for two frames.
-     * A non-zero steady state means some group never settles, and `visited` against `rejected` says
-     * whether the registry walk itself is worth attacking next.
+     * MEASURED after the latch landed: **0**, with `registered: 318`.
+     *
+     * `registered` is the line that corrected the estimate, and by 30x: the latch was predicted to
+     * save little on the grounds of "8-11 groups", which was the `visibleGroups` render figure and
+     * not this one. 318 groups x 4 gathers is **1272 refreshes a frame** removed, not 35. See
+     * `wmo-provider.ts#census` -- reasoning about a per-frame collision cost from a VISIBLE count
+     * has now been wrong twice, here and for `terrain.size`.
+     *
+     * `visitedPerGather` 318 against `rejectedPerGather` 318 is the next structural item and is
+     * deliberately not chased: every group is rejected by the cheap world-box test, so the walk now
+     * costs only a matrix compare and a box overlap per group -- but it is still O(registry) per
+     * gather, and a spatial index over the three registries is the fix rather than a tweak.
      */
     wmo: {
       registered: collisionWorld.wmo.size,
