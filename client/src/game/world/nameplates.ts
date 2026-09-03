@@ -208,6 +208,8 @@ function plateFont(size: number, color: string): FontSpec {
 }
 
 /** One unit's plate: the sprites, and the last content each was built for. */
+const pickScratch = new THREE.Vector3();
+
 interface Plate {
   group: THREE.Group;
   name: THREE.Sprite;
@@ -1007,6 +1009,80 @@ export class Nameplates {
   }
 
   /** `window.worldNameplates()` -- the instrument. */
+  /**
+   * WHICH PLATE IS UNDER A CLICK, as a guid, or null. The owner's
+   * "Нажатие на nameplate тоже должно выделять цель."
+   *
+   * ## Per CLICK, never per frame -- and that is the whole design constraint
+   *
+   * Nothing retains a screen rect and nothing should: a per-frame hit-test structure would be a
+   * standing cost for a question asked only when a button goes down. This projects each visible
+   * plate's anchor on demand, capped at `MAX_PLATES` (20), so a click costs at most twenty
+   * `Vector3.project` calls and no allocation beyond the two module scratches.
+   *
+   * IT ALSO CANNOT DIRTY THE UI DRAW-LIST FINGERPRINT, which is the reason nameplates live outside
+   * the widget list at all (see this file's header): reading positions touches no widget and no
+   * material, so the 4-7.5 ms saved on ~92% of frames is untouched.
+   *
+   * ## The rect is derived from the SAME constants the draw uses, not from a second convention
+   *
+   * `place()` puts every sprite of a plate at ONE world anchor and shifts each by `Sprite#center`, a
+   * fraction of its own size -- so the frame is `ART.frameWidth` x `ART.frameHeight` LOGICAL
+   * (768-space) pixels, horizontally centred on the anchor (`center.x = 0.5`) with its bottom edge
+   * `PLATE.lift` logical pixels above it (`center.set(0.5, -lift / frameH)`). With
+   * `sizeAttenuation` off that size is constant on screen at any depth, which is exactly what the
+   * `unitScale = (2 * tan(fov / 2)) / 768` construction buys. So one logical pixel is `2 / 768` of
+   * the NDC y range, and `/ aspect` of the x range.
+   *
+   * No new factor is introduced anywhere here. Deriving the rect from the sprite's world `scale`
+   * instead would have meant reproducing three's non-attenuated sprite projection, i.e. a second
+   * convention meeting the first -- the shape this project has been bitten by four times.
+   *
+   * ## FRONTMOST WINS, by the key the draw already keeps
+   *
+   * Plates overlap in a pack and the real client picks the frontmost. `plate.distanceSq` is already
+   * recorded every pass for `report()`, so the smallest one among the rects containing the point is
+   * the answer -- no new sort, no new state, and the same key the depth ordering itself uses.
+   */
+  pickPlate(ndc: { x: number; y: number }, camera: THREE.PerspectiveCamera): string | null {
+    const perLogicalY = 2 / 768;
+    const perLogicalX = perLogicalY / (camera.aspect || 1);
+    const halfW = (ART.frameWidth / 2) * perLogicalX;
+    const bottomOffset = PLATE.lift * perLogicalY;
+    const height = ART.frameHeight * perLogicalY;
+
+    let bestGuid: string | null = null;
+    let bestDistanceSq = Infinity;
+
+    this.plates.forEach((plate, guid) => {
+      // An untouched plate is hidden at the end of its pass; a hidden plate is not clickable, which is
+      // the same rule the eye applies.
+      if (!plate.group.visible) {
+        return;
+      }
+      if (plate.distanceSq >= bestDistanceSq) {
+        // Already beaten on depth -- skip the projection entirely rather than compute and discard it.
+        return;
+      }
+      pickScratch.copy(plate.group.position).project(camera);
+      if (pickScratch.z < -1 || pickScratch.z > 1) {
+        return; // behind the camera or beyond the far plane
+      }
+      const dx = ndc.x - pickScratch.x;
+      if (dx < -halfW || dx > halfW) {
+        return;
+      }
+      const dy = ndc.y - pickScratch.y;
+      if (dy < bottomOffset || dy > bottomOffset + height) {
+        return;
+      }
+      bestGuid = guid;
+      bestDistanceSq = plate.distanceSq;
+    });
+
+    return bestGuid;
+  }
+
   report(): unknown {
     return {
       ...this.stats,

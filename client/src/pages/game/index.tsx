@@ -803,6 +803,37 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       return;
     }
     const world = this.game.world;
+
+    /**
+     * A NAMEPLATE IS CLICKABLE, and it is tried BEFORE the body pick -- the owner's
+     * "Нажатие на nameplate тоже должно выделять цель."
+     *
+     * ORDER, and it is the whole of why this sits here and not two lines earlier or later:
+     *
+     *   1. `this.ui?.pointerWidget` above still returns FIRST, so a Lua frame over a plate keeps the
+     *      click. The UI winning over the world is the existing law and a plate is world geometry --
+     *      inserting the test above that guard would let a nameplate steal a click meant for a frame.
+     *   2. The plate then beats the BODY, because a plate is drawn over the world and the thing under
+     *      the cursor is what the eye says it is. A body pick first would make a plate unclickable
+     *      wherever a mob stood behind another mob's plate.
+     *
+     * THROUGH `world.setTarget`, the same door the body click below uses and the ONE door to
+     * `CMSG_SET_SELECTION` (`world/index.ts:830`). Not a second source of truth for selection: the
+     * ring, the target frame and the Lua side follow exactly as they do for a body click, because
+     * this lane sets nothing itself.
+     *
+     * A GAMEOBJECT ARM IS DELIBERATELY ABSENT here -- `wants()` never gives a plate to anything
+     * without `fields`, so a plate can only ever name a unit and the object branch below cannot apply.
+     */
+    const plateGuid = world.nameplates.pickPlate(ndc, this.camera);
+    if (plateGuid !== null) {
+      const plated = world.entities.get(plateGuid);
+      if (plated) {
+        world.setTarget(plated);
+        return;
+      }
+    }
+
     const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
     /**
      * A WORLD OBJECT IS NOT A TARGET, and this is the owner's "их почему-то можно выделить".
