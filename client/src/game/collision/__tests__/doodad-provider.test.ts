@@ -3,7 +3,7 @@
  */
 import * as THREE from 'three';
 
-import { DoodadProvider } from '../doodad-provider';
+import { beginCollisionFrame, DoodadProvider } from '../doodad-provider';
 import { Triangle } from '../types';
 
 /** A unit-box hull, 12 triangles, optionally placed and scaled. */
@@ -216,4 +216,50 @@ describe('DoodadProvider', () => {
     expect(() => provider.gather(boxAt(0, 0, 0, 2), out)).not.toThrow();
     expect(out).toHaveLength(0);
   });
+});
+
+/**
+ * **THE COLLISION EPOCH: one world-matrix refresh per doodad per FRAME, not per cast.**
+ *
+ * This is where ~2.9 ms of the owner's 4.4 ms `ctl.move` was going -- `gatherOne` opened with
+ * `mesh.updateWorldMatrix(true, false)`, whose `true` recurses UP the parent chain, and `gather`
+ * runs it for every registered hull on every cast. At 1509 loaded doodads and three casts a frame
+ * that is ~4500 ancestor-chain walks, paid to return three candidates.
+ *
+ * Two things need pinning, and the SECOND one is the bug this fix already had once: within a frame
+ * the refresh must happen once, and with no frame ever begun it must happen every time -- because a
+ * fresh cache entry is stamped with the current epoch, so at epoch 0 it compared equal and skipped
+ * for ever. The existing "re-gathers a placement that moves" test above caught that, and this makes
+ * the rule explicit rather than incidental.
+ */
+it('refreshes a hull once per collision frame, and always when none has begun', () => {
+  const provider = new DoodadProvider();
+  const mesh = hull(new THREE.Vector3(0, 0, 0));
+  provider.add(mesh);
+
+  let refreshes = 0;
+  const real = mesh.updateWorldMatrix.bind(mesh);
+  mesh.updateWorldMatrix = ((parents: boolean, children: boolean) => {
+    refreshes += 1;
+    return real(parents, children);
+  }) as typeof mesh.updateWorldMatrix;
+
+  // EPOCH 0 -- no frame begun, which is every collision unit test. The skip is disabled outright and
+  // behaviour is exactly what it was before the change: one refresh per gather.
+  provider.gather(boxAt(0, 0, 0, 2), []);
+  provider.gather(boxAt(0, 0, 0, 2), []);
+  expect(refreshes).toBe(2);
+
+  // A FRAME: the first cast refreshes, the next three ride on it. This is the saving.
+  beginCollisionFrame();
+  refreshes = 0;
+  for (let cast = 0; cast < 4; ++cast) {
+    provider.gather(boxAt(0, 0, 0, 2), []);
+  }
+  expect(refreshes).toBe(1);
+
+  // THE NEXT FRAME refreshes again -- a doodad that streams or moves between frames must be seen.
+  beginCollisionFrame();
+  provider.gather(boxAt(0, 0, 0, 2), []);
+  expect(refreshes).toBe(2);
 });

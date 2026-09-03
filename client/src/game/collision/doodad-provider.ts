@@ -18,10 +18,66 @@ const _e2 = new THREE.Vector3();
 interface HullBounds {
   /** A COPY of the 16 elements, not the live array -- the live one mutates under us. */
   matrix: Float64Array;
+  /**
+   * The collision epoch this mesh's world matrix was last refreshed in. See `beginCollisionFrame`.
+   *
+   * `0` means never, which is also the value every entry starts at, so an unrefreshed hull always
+   * refreshes.
+   */
+  refreshedIn: number;
   /** Identity-compared, not value-compared: a geometry swap replaces the object. */
   geometry: THREE.BufferGeometry;
   boundingBox: THREE.Box3;
   box: THREE.Box3;
+}
+
+/**
+ * **THE COLLISION EPOCH: one world-matrix refresh per doodad per FRAME, not per cast.**
+ *
+ * MEASURED, and this is the whole of `ctl.move`. The owner's phase split standing still, 2060
+ * frames: `depenetrate` 1698 us, `classify` 1586 us, `groundedStep` 1055 us -- 4.34 ms across three
+ * collision phases -- against **36 candidates per frame**. The terrain gather is 44.5 us and
+ * `castCapsuleAgainstTriangles` benches at ~2.7 us per triangle, so a dozen candidates is ~32 us.
+ * Gather plus solve is under 80 us of a 1586 us phase; the other **~1.5 ms per cast is this
+ * provider**, and it does not depend on the candidate count at all -- which is why three successive
+ * candidate-count hypotheses all came back refuted.
+ *
+ * `gather` walks EVERY registered hull and `gatherOne` opened with
+ * `mesh.updateWorldMatrix(true, false)`. The `true` makes it recurse UP the parent chain, so each
+ * call re-composes every ancestor's `matrixWorld` on the way to the doodad. At the owner's
+ * **1509 loaded map doodads** and three casts a frame that is ~4500 ancestor-chain walks per frame,
+ * and it is being paid to reject a doodad that returns 3 candidates in total.
+ *
+ * It is also undoing a saving this project already banked: `scene.matrixWorldAutoUpdate = false`
+ * took the render section from 8.1 ms to 1.9 ms precisely by not walking static nodes every frame
+ * (`CLAUDE.md`), and this walks them from the collision path instead.
+ *
+ * **THE REFRESH CANNOT SIMPLY GO** -- its comment records why, with a measurement: a hull is
+ * registered when its M2 is CONSTRUCTED, before the doodad is placed, and nothing else ever updates
+ * a static subtree, so a stale identity matrix puts the bounds at the world origin and the doodad
+ * silently never collides. "Measured: 2528 map doodads loaded, zero triangles gathered."
+ *
+ * So it is kept and made ONCE PER FRAME. Every cast in a frame sees the same scene -- the mover's
+ * three casts and the camera's boom all run inside one `requestAnimationFrame` and nothing moves a
+ * doodad between them -- so the second, third and fourth refresh of a frame can only recompute the
+ * identical matrix.
+ *
+ * **DEFAULTS TO THE OLD BEHAVIOUR when no frame has been begun.** `epoch` starts at 0 and
+ * `refreshedIn` starts at 0, so a caller that never calls `beginCollisionFrame` -- every collision
+ * unit test -- refreshes on every gather exactly as before. The optimisation is opt-in by the app,
+ * which keeps the risk on the side that has an owner to check it.
+ */
+let epoch = 0;
+
+/**
+ * Open a new collision frame: every doodad hull will refresh its world matrix once more.
+ *
+ * Called from `Controls#update` before any cast is issued. Bumping it more often than once a frame
+ * is safe (it only costs the refreshes back); bumping it LESS often is not, and is why this is not
+ * driven off the movement census, which is stamped after the mover has already cast.
+ */
+export function beginCollisionFrame(): void {
+  epoch += 1;
 }
 
 /** 16 floats, compared exactly. No epsilon: the question is "is this the same matrix", not "is it
@@ -141,6 +197,11 @@ export class DoodadProvider {
 
     const entry = cached ?? {
       matrix: new Float64Array(16),
+      // A FRESH entry is created by the very gather that just refreshed this mesh's matrix, so it is
+      // already current for this epoch. Leaving it at 0 would refresh a second time on the next
+      // gather of the same frame -- correct, but it would give back a quarter of the saving on every
+      // newly streamed doodad.
+      refreshedIn: epoch,
       geometry,
       boundingBox,
       box: new THREE.Box3(),
@@ -170,14 +231,28 @@ export class DoodadProvider {
       return;
     }
 
-    // Refresh the world matrix from the parent chain before using it.
+    // Refresh the world matrix from the parent chain before using it -- ONCE PER FRAME, not once per
+    // cast. See `beginCollisionFrame` for the measurement that made this the whole of `ctl.move`,
+    // and for why the refresh itself cannot simply be removed.
     //
     // A hull is registered when its M2 is CONSTRUCTED, which happens before the doodad is placed --
     // and the scene root deliberately does not walk static subtrees, so nothing else ever updates
     // it. A stale matrix is the identity, which puts the bounds at the world origin where no query
     // reaches, and the doodad silently never collides at all. Measured: 2528 map doodads loaded,
     // zero triangles gathered.
-    mesh.updateWorldMatrix(true, false);
+    // `epoch === 0` means NO FRAME HAS EVER BEEN BEGUN, and then the skip is disabled outright.
+    // **That guard is load-bearing and its absence was a real bug**: a fresh entry is stamped with
+    // the current epoch, so at epoch 0 it compared equal and the refresh was skipped for ever --
+    // which `__tests__/doodad-provider.test.ts`'s "re-gathers a placement that moves after its
+    // bounds were already cached" caught immediately, gathering 12 triangles at a position the
+    // doodad had left. Every collision unit test runs at epoch 0 and therefore keeps the exact
+    // pre-change behaviour; only the app, which calls `beginCollisionFrame`, takes the saving.
+    if (cached === null || epoch === 0 || cached.refreshedIn !== epoch) {
+      mesh.updateWorldMatrix(true, false);
+      if (cached !== null) {
+        cached.refreshedIn = epoch;
+      }
+    }
 
     const bounds = this.worldBoundsOf(mesh, geometry, cached);
     if (bounds === null || !bounds.box.intersectsBox(worldBox)) {

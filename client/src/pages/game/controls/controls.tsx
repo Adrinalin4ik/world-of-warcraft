@@ -8,6 +8,7 @@ import {
 } from '../../../game/camera/rig';
 import { headHeight } from '../../../game/camera/pivot';
 import { collisionWorld, noteMovementFrame } from '../../../game/collision/collision-world';
+import { beginCollisionFrame } from '../../../game/collision/doodad-provider';
 import { CollisionLayer } from '../../../game/collision/types';
 import {
   CAPSULE_HEIGHT, CAPSULE_RADIUS, GROUND_COS, MOUSELOOK_BODY_TURN_RATE, MOUSELOOK_PITCH_CLAMP,
@@ -586,6 +587,13 @@ class Controls extends React.Component<IProp> {
   public update(delta: number) {
     const player = this.unit;
     const now = performance.now() / 1000;
+
+    // **OPEN THE COLLISION FRAME BEFORE ANY CAST IS ISSUED.** Every doodad hull refreshes its world
+    // matrix once per epoch instead of once per cast, which is where ~2.9 ms of `ctl.move` was going
+    // -- `collision/doodad-provider.ts#beginCollisionFrame` carries the measurement. It must be here,
+    // at the top of the frame's own update, and not in the movement census: that is stamped AFTER the
+    // mover has already cast, so an epoch bumped there would refresh nothing in time.
+    beginCollisionFrame();
 
     // 1. Mouse look. Right-drag turns the character, left-drag orbits, both buttons run forward.
     const look = runLookSession(this.rig, this.buttons, this.motion, this.prevButtons, this.pending);
