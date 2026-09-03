@@ -306,4 +306,84 @@ describe('cost of entering Lua', () => {
     expect(curve).toHaveLength(4);
   });
 
+
+  /**
+   * **IS THE LINEAR TERM IN THE GLOBAL ROUND-TRIPS, OR IN THE ENVIRONMENT?** -- the arm that decides
+   * whether a fix to the write path would buy anything at all.
+   *
+   * The previous arm grew `_G` and found cost linear in its size. But "grew `_G`" changes more than
+   * the write path: a 12,000-entry `Map` changes GC pressure, allocation locality and the shape of
+   * every hash the VM performs, so the linear term need not be in the nine round-trips at all.
+   *
+   * A mechanism was proposed for it -- that a nil write deletes the key and the next insert rehashes
+   * the table -- and **it does not survive fengari's source.** `luaH_setfrom` (`ltable.js:209-212`)
+   * calls `mark_dead` on a nil write, and `mark_dead` (`:141-162`) is one `Map.delete`, a
+   * doubly-linked-list unlink and a `set` into `dead_strong`: **O(1), with no rehash anywhere.**
+   * (`add` at `:118` does open with `t.dead_strong.clear()`, but `dead_strong` only holds entries
+   * killed since the last insert, which in this path is at most three.) So the linearity is real and
+   * that explanation of it was wrong.
+   *
+   * This arm holds `|_G|` FIXED at 12,000 and varies only how many round-trips an invocation makes:
+   * 0 (a bare `vm.call`), 3 (set only), 9 (the real save-set-restore shape). Cost rising with
+   * round-trips at fixed `|_G|` puts the multiplier in the write path and makes a fix there worth
+   * building; cost flat across them puts it in the environment, and no amount of work on
+   * `callWithBothConventions` would help.
+   *
+   * The per-round-trip cost is also measured directly at two table sizes, which is the same question
+   * asked from the other side.
+   */
+  it('separates the round-trip count from the size of the environment', () => {
+    const { vm, registry, ctx } = harness();
+    const self = registry.create('Frame', 'BenchTrips', null);
+    const handlerExpr = vm.runExpr(
+      'return function(self, elapsed) local x = elapsed + 1 end',
+      '=bench-trips',
+    );
+    setScriptHandler(vm, self, 'OnUpdate', (handlerExpr as { value: unknown }).value as never);
+    const handler = getScriptHandler(vm, self, 'OnUpdate')!;
+    const wrapper = ctx.wrapper(self);
+
+    // ONE round-trip pair, priced on its own at a bare table and then a full one. If a single
+    // get+set is size-independent, the nine cannot be carrying a linear term.
+    const tripCostAt = (label: string): string => {
+      meanUs(2000, () => {
+        vm.setGlobal('benchProbe', 1);
+        vm.getGlobal('benchProbe');
+      });
+      const pair = meanUs(N, () => {
+        vm.setGlobal('benchProbe', 1);
+        vm.getGlobal('benchProbe');
+      });
+      // The nil write is the one the refuted mechanism blamed, so it is priced separately.
+      const nilWrite = meanUs(N, () => {
+        vm.setGlobal('benchProbeNil', 1);
+        vm.setGlobal('benchProbeNil', undefined);
+      });
+      return `${label}: get+set ${pair.toFixed(3)} us | set+nil-set ${nilWrite.toFixed(3)} us`;
+    };
+
+    const lines: string[] = [tripCostAt('bare _G')];
+
+    vm.run('for i = 1, 12000 do _G["BenchT" .. i] = i end', '=bench-fill');
+    lines.push(tripCostAt('12000 globals'));
+
+    // Now the round-trip COUNT, at a fixed 12,000-entry `_G`.
+    const trips0 = meanUs(N, () => vm.call(handler, [wrapper, 0.016]));
+    const trips3 = meanUs(N, () => {
+      vm.setGlobal('this', wrapper);
+      vm.setGlobal('event', 0.016);
+      vm.setGlobal('arg1', 0.016);
+      vm.call(handler, [wrapper, 0.016]);
+    });
+    const trips9 = meanUs(N, () => invokeScriptHandler(ctx, self, 'OnUpdate', [0.016]));
+
+    lines.push(`at fixed |_G| = 12000: 0 trips ${trips0.toFixed(2)} us`
+      + ` | 3 trips ${trips3.toFixed(2)} us | 9 trips (real) ${trips9.toFixed(2)} us`);
+
+    // eslint-disable-next-line no-console
+    console.log('[lua-call] round-trips vs environment:\n' + lines.map((r) => `           ${r}`).join('\n'));
+
+    expect(lines).toHaveLength(3);
+  });
+
 });

@@ -365,17 +365,48 @@ export function drainScriptErrors(): string[] {
  * loaded costs an order of magnitude more -- which is exactly the 10x that survived a correct
  * per-call measurement, and it is why the harness structurally under-reports this path.
  *
- * The mechanism is the nine `lua_getglobal`/`lua_setglobal` round-trips below (`this`, `event` and
- * `arg1` each saved, set and restored). Under fengari a `Table`'s hash part is a JS `Map` and
- * **writing nil to a key DELETES it** -- `vm.ts#ref` already records this, having been bitten by the
- * same representation: `mark_dead` does `strong.delete(hash)`. The steady state of `this` is nil, so
- * every restore deletes the key and every next call re-inserts it, and an insert into a full table
- * rehashes the whole thing. Nine round-trips, and the ones that matter are O(|_G|).
+ * ## The mechanism, corrected -- an earlier version of this comment named the wrong layer
+ *
+ * It is the nine `lua_getglobal`/`lua_setglobal` round-trips below (`this`, `event` and `arg1` each
+ * saved, set and restored), and specifically the **nil** ones. That much is measured three ways:
+ *
+ *  - at a FIXED 12,000-entry `_G`, cost scales with the round-trip count: **0 trips 2.29 us,
+ *    3 trips 8.37 us, 9 trips 19.91 us**. So the write path is the multiplier, not the environment.
+ *  - a plain get+set pair is **size-INDEPENDENT**: 4.52 us at a bare `_G`, 4.32 us at 12,000.
+ *  - a set followed by a NIL set is not: **6.60 us bare, 75.25 us at 12,000**, an 11x.
+ *
+ * `vm.ts#ref` records that writing nil to a fengari key DELETES it, and that is true -- but the
+ * earlier claim here that the next insert then "rehashes the whole thing" inside fengari is **wrong
+ * and is withdrawn**. `luaH_setfrom` (`node_modules/fengari/src/ltable.js:209-212`) calls
+ * `mark_dead`, and `mark_dead` (`:141-162`) is one `Map.delete`, a linked-list unlink and a `set`
+ * into `dead_strong` -- O(1), no rehash. `add` (`:118`) does open with `dead_strong.clear()`, but
+ * that map only holds keys killed since the last insert, which here is at most three.
+ *
+ * The linear term is one layer further down, in **V8's `Map`**, and it was isolated with no Lua in
+ * the picture at all -- a bare JS `Map` of N entries, timing one key:
+ *
+ * | entries | set+delete | set+get |
+ * |---------|------------|---------|
+ * |       0 |   0.12 us  | 0.02 us |
+ * |   2,000 |   4.20 us  | 0.02 us |
+ * |   6,000 |  20.43 us  | 0.01 us |
+ * |  12,000 |  40.81 us  | 0.02 us |
+ *
+ * Overwriting an existing key is flat; **deleting and re-inserting one forces V8 to compact the
+ * backing store, which is O(capacity)**. So the cost is not that fengari rehashes -- it is that the
+ * delete/re-insert CYCLE makes V8 rehash, repeatedly, on a table the size of `_G`.
+ *
+ * The steady state of `this` is nil, so every invocation inserts the key and the restore deletes it
+ * again: one full churn per legacy global per call, on a 17,000-entry `_G`. Three of them is the
+ * ~239 us the owner measures.
  *
  * It also explains what the leak fix did not: `ui.tick` reading 1.6, 3.4, 4.8, 5.6, 6.6, 9.7 ms
  * across the owner's samples. That is not a leak and not "state" -- **the globals table GROWS as the
  * manifest and its panels initialise**, and every handler invocation in the client gets more
  * expensive as it does.
+ *
+ * **THE FIX THEREFORE IS TO STOP DELETING KEYS FROM `_G`, not to reduce the round-trip count.** An
+ * overwrite is already free; only the nil write is not.
  *
  * **DO NOT "FIX" THIS BY DROPPING THE SAVE-RESTORE.** The reference does exactly what this does and
  * says why: `samples/benilla/crates/benilla-ui/src/script/event.rs:264-306`,
