@@ -408,6 +408,32 @@ export function drainScriptErrors(): string[] {
  * **THE FIX THEREFORE IS TO STOP DELETING KEYS FROM `_G`, not to reduce the round-trip count.** An
  * overwrite is already free; only the nil write is not.
  *
+ * ## What is NOT available: "delete once per outermost invocation instead of once per call"
+ *
+ * It sounds like it should divide the cost by the number of invocations, and it does nothing,
+ * because **this function already behaves that way and gets it for free.** The restore writes back
+ * the SAVED value. A nested invocation saves the enclosing handler's wrapper, which is non-nil, so
+ * its restore is an overwrite and never a delete; only an invocation whose saved value was nil --
+ * the outermost one -- deletes. A depth counter would gate a case that is already gated.
+ *
+ * MEASURED, eight entries into Lua at a fixed 12,000-entry `_G`
+ * (`__bench__/script-call.test.ts`):
+ *
+ *  - eight SEQUENTIAL top-level invocations: 1245.7 us, **155.7 us each**
+ *  - one top-level invocation NESTING seven:  289.7 us, **36.2 us each**
+ *
+ * 4.3x cheaper per entry, which is the deferral already working. The tick's eight action buttons are
+ * eight sequential top-level invocations, not a nest -- there is no enclosing invocation to defer
+ * into, so each is outermost and each deletes, and no depth counter can merge them.
+ *
+ * What remains is therefore a real choice with no free option, and it is recorded rather than
+ * silently taken: either the legacy globals stop being cleared between top-level invocations (which
+ * changes observable behaviour outside a handler, on an assumption about 3.3.5a nobody has verified),
+ * or the clear moves to a per-frame flush (whose failure mode when someone forgets to call it IS
+ * that same behaviour change, arrived at by accident), or the cost stands. Deciding it needs the
+ * question "what does the real client leave in `this` between handlers" answered from the game, not
+ * from a preference.
+ *
  * **DO NOT "FIX" THIS BY DROPPING THE SAVE-RESTORE.** The reference does exactly what this does and
  * says why: `samples/benilla/crates/benilla-ui/src/script/event.rs:264-306`,
  * "saving and restoring the globals around the call (even on error) so nested handler firing is

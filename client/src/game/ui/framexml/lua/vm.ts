@@ -458,6 +458,39 @@ export class LuaVM {
   }
 
   /** Releases a slot: see `ref` for why the sentinel is `false` and not nil. */
+/**
+   * **THE GENERAL TRAP, and this is the place someone will find it: NEVER DELETE A KEY FROM A LARGE
+   * `Map` ON A HOT PATH. Overwrite it, or park a sentinel in it.**
+   *
+   * `false` is pushed here rather than nil precisely so no key is deleted, and that choice was
+   * originally made for fengari's sake. It turns out to matter one layer further down as well, and
+   * far more. MEASURED on a bare JS `Map` of N entries with no Lua in the picture, timing one key:
+   *
+   * | entries | set+delete | set+get |
+   * |---------|------------|---------|
+   * |       0 |   0.12 us  | 0.02 us |
+   * |   2,000 |   4.20 us  | 0.02 us |
+   * |   6,000 |  20.43 us  | 0.01 us |
+   * |  12,000 |  40.81 us  | 0.02 us |
+   *
+   * **Overwriting an existing key is flat and free at any size. Deleting one and re-inserting it
+   * makes V8 compact the backing store, which is O(capacity)** -- so a delete/re-insert cycle on a
+   * large map costs proportionally to the WHOLE MAP, every time round.
+   *
+   * That is not a fengari defect and it is not fixed by fengari's own code being O(1): `ltable.js`'s
+   * `mark_dead` (`:141-162`) really is one `Map.delete`, an unlink and a `set` into `dead_strong`,
+   * with no rehash anywhere. The cost is underneath it, in the JS `Map` primitive.
+   *
+   * It has already cost this project real milliseconds once, in a different file: a handler
+   * invocation saves and restores the legacy `this`/`event`/`argN` globals
+   * (`scripts.ts#callWithBothConventions`), the steady state of `this` is nil, and a nil write to a
+   * Lua table IS a delete -- so every invocation inserted a key into `_G` and deleted it again.
+   * At the ~17,000 globals `FrameXML.toc` defines that measured **~239 us per invocation**, against a
+   * `lua_pcall` floor of 1.5 us. See that function for the full arc.
+   *
+   * So: this handle table is the other large `Map` on a hot path in this codebase, and the sentinel
+   * below is what keeps it out of that regime. Do not "tidy" it into a delete.
+   */
   private freeSlot(slot: number): void {
     lua.lua_rawgeti(this.L, lua.LUA_REGISTRYINDEX, this.slotsRef);
     lua.lua_pushboolean(this.L, false);

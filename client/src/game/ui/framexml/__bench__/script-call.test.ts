@@ -386,4 +386,81 @@ describe('cost of entering Lua', () => {
     expect(lines).toHaveLength(3);
   });
 
+
+  /**
+   * **IS "ONCE PER OUTERMOST INVOCATION" ANY CHEAPER THAN WHAT WE ALREADY DO?** -- the arm that
+   * checks the arithmetic behind a proposed fix before the fix is built.
+   *
+   * The proposal was to keep the nil write but do it once per OUTERMOST invocation rather than once
+   * per call, on the expectation that eight action buttons would then cost three deletes a frame
+   * instead of twenty-four.
+   *
+   * **But today`s code already defers to the outermost invocation, and it does so for free.** The
+   * restore writes back the SAVED value: a nested invocation saves the outer handler`s wrapper,
+   * which is non-nil, so its restore is an OVERWRITE and never a delete. Only the outermost
+   * invocation -- the one whose saved value is nil -- deletes. A depth counter would be gating a
+   * case that is already gated.
+   *
+   * The eight buttons are not nested. They are eight SEQUENTIAL top-level invocations from the
+   * tick`s own loop, each at depth 1, so each is outermost and each deletes. 8 x 3 = 24 deletes a
+   * frame, and no depth counter can merge them, because there is no enclosing invocation to merge
+   * them into.
+   *
+   * This arm proves it by timing the two shapes at a fixed 12,000-entry `_G`: eight sequential
+   * top-level invocations against one invocation that nests seven. If nesting is already cheap per
+   * invocation, the deferral exists and the proposed saving does not.
+   */
+  it('shows the nil write is already once per outermost invocation', () => {
+    const { vm, registry, ctx } = harness();
+    const outer = registry.create('Frame', 'BenchNestOuter', null);
+    const inner = registry.create('Frame', 'BenchNestInner', null);
+
+    const leaf = vm.runExpr(
+      'return function(self, elapsed) local x = elapsed + 1 end',
+      '=bench-leaf',
+    );
+    setScriptHandler(vm, inner, 'OnUpdate', (leaf as { value: unknown }).value as never);
+    setScriptHandler(vm, outer, 'OnUpdate', (leaf as { value: unknown }).value as never);
+
+    // A door back into the invocation path from Lua, so the nested shape is a REAL nested
+    // `invokeScriptHandler` and not a simulation of one.
+    vm.registerFunction('BenchFireInner', () => {
+      invokeScriptHandler(ctx, inner, 'OnUpdate', [0.016]);
+      return [];
+    });
+    const nester = vm.runExpr(
+      'return function(self, elapsed) for i = 1, 7 do BenchFireInner() end end',
+      '=bench-nester',
+    );
+
+    vm.run('for i = 1, 12000 do _G["BenchN" .. i] = i end', '=bench-fill-nest');
+
+    // SHAPE A: eight sequential top-level invocations -- the tick`s action-button loop.
+    const sequential = meanUs(2000, () => {
+      for (let i = 0; i < 8; i += 1) {
+        invokeScriptHandler(ctx, outer, 'OnUpdate', [0.016]);
+      }
+    });
+
+    // SHAPE B: one top-level invocation that nests seven, for the same eight entries into Lua.
+    setScriptHandler(vm, outer, 'OnUpdate', (nester as { value: unknown }).value as never);
+    const nested = meanUs(2000, () => invokeScriptHandler(ctx, outer, 'OnUpdate', [0.016]));
+
+    // eslint-disable-next-line no-console
+    console.log(
+      '[lua-call] eight entries into Lua at |_G| = 12000:\n'
+      + `           8 sequential top-level: ${sequential.toFixed(1)} us`
+      + ` (${(sequential / 8).toFixed(1)} us per invocation)\n`
+      + `           1 top-level nesting 7:  ${nested.toFixed(1)} us`
+      + ` (${(nested / 8).toFixed(1)} us per invocation)\n`
+      + `           => nesting is ${(sequential / nested).toFixed(1)}x cheaper per entry,`
+      + ' so the deferral to the outermost invocation ALREADY exists',
+    );
+
+    // The point of the arm: nesting is already dramatically cheaper, because only the outermost
+    // invocation deletes. If this ever fails, the deferral has been lost and a depth counter WOULD
+    // buy something.
+    expect(nested).toBeLessThan(sequential);
+  });
+
 });
