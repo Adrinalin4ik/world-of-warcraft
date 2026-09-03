@@ -1138,6 +1138,44 @@ export default class World extends EventEmitter {
     if (newModel) {
       registry.addFrom(newModel);
     }
+
+    // A UNIT'S OWN MODEL EMITTERS -- and until this line no creature in the game had any.
+    //
+    // The owner: "Моб вонючий волк. Партиклы вокруг него появляются только после первого удара. А он
+    // вонючий, он должен вонять всегда." He was right that it is the mob's own built-in
+    // visualisation and nothing to do with the character -- and the reason it waited for a hit is
+    // that it was never HIS particles. `ParticleManager.register` was called from exactly five
+    // places: WMO doodads, ADT doodads, the gameobject sparkle, the level-up effect, and the two
+    // spell lanes (kits and missiles). **Nothing registered a unit's model.** What appeared after
+    // the first strike was the impact KIT's own emitters, on a model this lane loads and registers.
+    //
+    // MEASURED: 70 of 155 cached creature models (45.2%) author particle emitters -- 4 to 10 each on
+    // wraiths, spectral bears, clockwork gnomes, swamp-gas clouds, cold wraiths, doomguards. None of
+    // them has ever run.
+    //
+    // HERE rather than in `Unit`, for the reason `playSpellKit` states: the particle manager belongs
+    // to the MAP and the map is replaced on a worldport, so a unit-side cached reference would be
+    // the previous world's. And in `changeModel` specifically because this method is ALREADY the
+    // symmetric edge -- `removeEntity` calls `changeModel(entity, entity.model, null)` precisely so
+    // the outgoing body is handed back, so unregistering the old model here costs nothing extra and
+    // cannot be forgotten on a stream-out.
+    //
+    // AFTER the `registry` guard above, which returns when no map exists yet. That is the player's
+    // own case (his model resolves before the first zone finishes) and it is covered the same way the
+    // registry is: `changeMap`'s re-adoption walk below registers every entity's model once the map
+    // is there.
+    const particles = (this.map as unknown as {
+      particleManager?: { register: (m: unknown) => number; unregister: (m: unknown) => void };
+      ribbonManager?: { register: (m: unknown) => number; unregister: (m: unknown) => void };
+    } | null);
+    if (oldModel) {
+      particles?.particleManager?.unregister(oldModel);
+      particles?.ribbonManager?.unregister(oldModel);
+    }
+    if (newModel) {
+      particles?.particleManager?.register(newModel);
+      particles?.ribbonManager?.register(newModel);
+    }
   }
 
   /**
@@ -1154,10 +1192,20 @@ export default class World extends EventEmitter {
       return;
     }
 
+    // The particle/ribbon managers get the same walk, and for the same reason the registry does: a
+    // model that resolved BEFORE the map existed took `changeModel`'s early return, so this is the
+    // only place it can be picked up. `register` is idempotent -- it returns early on an instance it
+    // already holds -- so re-walking every zone change costs one Set lookup per entity.
+    const particles = (this.map as unknown as {
+      particleManager?: { register: (m: unknown) => number };
+      ribbonManager?: { register: (m: unknown) => number };
+    } | null);
     this.entities.forEach((entity) => {
       const model = entity.model;
       if (model) {
         registry.addFrom(model);
+        particles?.particleManager?.register(model);
+        particles?.ribbonManager?.register(model);
       }
     });
   }
