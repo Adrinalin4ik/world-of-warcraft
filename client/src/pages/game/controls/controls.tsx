@@ -7,7 +7,7 @@ import {
   createCameraControl, createPendingClicks, runLookSession, seatCamera,
 } from '../../../game/camera/rig';
 import { headHeight } from '../../../game/camera/pivot';
-import { collisionWorld } from '../../../game/collision/collision-world';
+import { collisionWorld, noteMovementFrame } from '../../../game/collision/collision-world';
 import { CollisionLayer } from '../../../game/collision/types';
 import {
   CAPSULE_HEIGHT, CAPSULE_RADIUS, GROUND_COS, MOUSELOOK_BODY_TURN_RATE, MOUSELOOK_PITCH_CLAMP,
@@ -906,6 +906,9 @@ class Controls extends React.Component<IProp> {
     }
 
     beginSection('ctl.move');
+    // INSIDE the span, so the census and the owner's `ctl.move` number describe exactly the same
+    // work. One integer increment; see `collision/collision-world.ts#castCensus`.
+    noteMovementFrame();
     movementFrame(player.move, deps, {
       moving, dir, speed, wantJump: this.jumpPressed, jumpPressed: this.jumpPressed,
       // The swim pair travels the same way the run speed does, and for the same reason.

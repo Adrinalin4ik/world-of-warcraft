@@ -123,6 +123,93 @@ class CastTrace {
 }
 
 export const castTrace = new CastTrace();
+
+/**
+ * **THE ALWAYS-ON CANDIDATE CENSUS -- `window.castCensus()`.**
+ *
+ * The owner is at `ctl.move` **10.2 ms while standing still**, against the 3.8 ms this file's own
+ * records establish. Attribution needs the CANDIDATE COUNT, because the cost model here is already
+ * written down and it is linear in that count: "a cast gathered 249 to 336 WMO triangles, a movement
+ * frame issues about ten casts ... and that is some three thousand capsule-triangle solves a frame --
+ * which is `ctl.move` at 3.8 ms almost exactly" (the pad note above). So candidates per frame IS the
+ * finding, and nothing measured it.
+ *
+ * `castTrace` cannot answer it: it is arm-and-read, it allocates a row per cast, and this file
+ * already records what that costs -- "an instrument costing as much as the thing it measures, in the
+ * one section (`ctl.move`) the owner and I are trying to read" (`mover.ts`). This is the cheap twin:
+ * **integer increments only**, on numbers the cast path had already computed for `castTrace` anyway,
+ * so an unarmed frame pays four adds per cast and nothing else. No allocation, no clock reads.
+ *
+ * The two paths are counted SEPARATELY because they are separate gathers with different boxes -- the
+ * swept `cast` and the frame-start `depenetrate` push-out -- and at rest the push-out is one of only
+ * three cast-equivalents the mover runs, so lumping them would hide which one is expensive.
+ *
+ * The PROVIDER SPLIT is the point: terrain, WMO and doodads are three different broadphases, and
+ * which of them returns the bulk of the candidates names the target. A doodad-dominated census with
+ * 145 doodads visible is a different defect from a terrain-dominated one.
+ */
+const castCensus = {
+  frames: 0,
+  casts: 0,
+  castTerrain: 0,
+  castWmo: 0,
+  castDoodads: 0,
+  pushOuts: 0,
+  pushTerrain: 0,
+  pushWmo: 0,
+  pushDoodads: 0,
+};
+
+/**
+ * Count one movement frame, so the census can report PER-FRAME totals rather than per-cast alone.
+ *
+ * Called from `Controls#update` inside the `ctl.move` span -- the same span the owner's number comes
+ * from, so the two describe exactly the same work.
+ */
+export function noteMovementFrame(): void {
+  castCensus.frames += 1;
+}
+
+function readCastCensus() {
+  const n = Math.max(castCensus.frames, 1);
+  const per = (total: number) => Math.round((total / n) * 10) / 10;
+  const each = (total: number, calls: number) => Math.round((total / Math.max(calls, 1)) * 10) / 10;
+  const castTotal = castCensus.castTerrain + castCensus.castWmo + castCensus.castDoodads;
+  const pushTotal = castCensus.pushTerrain + castCensus.pushWmo + castCensus.pushDoodads;
+  return {
+    frames: castCensus.frames,
+    perFrame: {
+      casts: per(castCensus.casts),
+      pushOuts: per(castCensus.pushOuts),
+      // THE HEADLINE. Compare against the ~3000 the 3.8 ms baseline was measured at.
+      candidates: per(castTotal + pushTotal),
+    },
+    perCast: {
+      terrain: each(castCensus.castTerrain, castCensus.casts),
+      wmo: each(castCensus.castWmo, castCensus.casts),
+      doodads: each(castCensus.castDoodads, castCensus.casts),
+      total: each(castTotal, castCensus.casts),
+    },
+    perPushOut: {
+      terrain: each(castCensus.pushTerrain, castCensus.pushOuts),
+      wmo: each(castCensus.pushWmo, castCensus.pushOuts),
+      doodads: each(castCensus.pushDoodads, castCensus.pushOuts),
+      total: each(pushTotal, castCensus.pushOuts),
+    },
+  };
+}
+
+function resetCastCensus(): void {
+  castCensus.frames = 0;
+  castCensus.casts = 0;
+  castCensus.castTerrain = 0;
+  castCensus.castWmo = 0;
+  castCensus.castDoodads = 0;
+  castCensus.pushOuts = 0;
+  castCensus.pushTerrain = 0;
+  castCensus.pushWmo = 0;
+  castCensus.pushDoodads = 0;
+}
 const _end = new THREE.Vector3();
 
 /**
@@ -260,6 +347,12 @@ export class CollisionWorld {
         this.doodads.gather(_box, candidates);
       }
 
+      // THE CENSUS, on numbers this path already computed. Four integer adds; see `castCensus`.
+      castCensus.casts += 1;
+      castCensus.castTerrain += afterTerrain;
+      castCensus.castWmo += afterWmo - afterTerrain;
+      castCensus.castDoodads += candidates.length - afterWmo;
+
       const hit = castCapsuleAgainstTriangles(
         from, dir, maxDist, radius, halfSegment, candidates, skin, minNormalZ,
       );
@@ -364,12 +457,20 @@ export class CollisionWorld {
       if (!this.ignore.terrain) {
         this.terrain.gather(_box, candidates);
       }
+      const pushAfterTerrain = candidates.length;
       if (!this.ignore.wmo) {
         this.wmo.gather(_box, layer, candidates);
       }
+      const pushAfterWmo = candidates.length;
       if (!this.ignore.doodads) {
         this.doodads.gather(_box, candidates);
       }
+      // THE CENSUS for the push-out's OWN gather -- a different box from the swept cast's, and at
+      // rest one of only three cast-equivalents the mover runs. See `castCensus`.
+      castCensus.pushOuts += 1;
+      castCensus.pushTerrain += pushAfterTerrain;
+      castCensus.pushWmo += pushAfterWmo - pushAfterTerrain;
+      castCensus.pushDoodads += candidates.length - pushAfterWmo;
 
       _penInfo.source = null;
       _penInfo.normalZ = 0;
@@ -416,6 +517,11 @@ export class CollisionWorld {
 export const collisionWorld = new CollisionWorld();
 
 if (typeof window !== 'undefined') {
+  // The candidate census -- guarded like everything else here, because the movement and collision
+  // suites import this module in a node environment where `window` does not exist. Ten suites went
+  // red on a module-scope assignment before this was moved inside.
+  (window as any).castCensus = readCastCensus;
+  (window as any).castCensusReset = resetCastCensus;
   // Reachable from the console: "is there any collision geometry near me, and from which provider"
   // is the first question every movement or camera report asks, and it is not answerable from the
   // scene graph -- collision comes from the BSP and the heightmap, not from what is drawn.
