@@ -102,8 +102,13 @@ export class TerrainProvider {
     gathers: 0,
     visited: 0,
     rejected: 0,
-    /** Ring of per-gather durations in microseconds; `moveProfile` takes the median. */
-    us: [] as number[],
+    /**
+     * ACCUMULATED microseconds across every gather since the reset, divided by `gathers` for the
+     * mean. **Not a ring and not a median**: the owner's `performance.now()` is quantised to 100 us,
+     * so an individual gather reads 0 or 100 and a median of those reports the quantum. See
+     * `moveProfile`'s `gatherUs`.
+     */
+    usTotal: 0,
   };
 
   /** Registered chunk count. Read by the collision debug overlay. */
@@ -131,9 +136,25 @@ export class TerrainProvider {
    * before its cell clamps reject it. MEASURED (`__bench__/gather.test.ts`), returning an identical
    * 4 candidates either way: **10.6 us with one chunk registered against 539.6 us with 64**, i.e.
    * about **8.4 us per registered chunk the query does not touch**. An at-rest movement frame runs
-   * FIVE gathers -- the ground classify, the election snap, one more cast, the frame-start push-out
-   * and `rescueFromVoid`'s `heightAt` -- so at the owner's 65 chunks that was ~2.7 ms a frame of
-   * pure rejection, which is the whole of the 3.0 ms `capsule-cast.ts` recorded "away from geometry".
+   * FOUR gathers inside `ctl.move` -- the ground classify, the election snap, one more cast and the
+   * frame-start push-out (`rescueFromVoid`'s `heightAt` is a fifth, but outside the span).   *
+   * **AND IT DID NOT SHOW. The owner's controlled A/B refutes the saving this note used to claim.**
+   * Same spot, same 441 registered chunks, the only difference this boolean: `ctl.move` **5.1 ms with
+   * the rejection and 4.6 ms without**, rejecting 440 of 441 chunks either way. `gatherUs` was ~100 us
+   * in BOTH arms, which at 4 gathers a frame is **0.4 ms of a 4.6 ms section** -- so the gather was
+   * never the cost and no rejection of it could have mattered. The extrapolation that predicted ~2.7 ms
+   * was mine and it was unsound: it took a per-chunk constant measured at 64 chunks on another machine
+   * and multiplied it by his 441.
+   *
+   * KEPT ANYWAY, and the reason is not the timing: 440 matrix inversions and box transforms per gather
+   * are replaced by 440 cheaper tests, which is strictly less work, and
+   * `__tests__/terrain-broadphase.test.ts` proves the output is unchanged. It is not defended as a
+   * performance fix and must not be cited as one.
+   *
+   * A LIKELY REASON IT IS A WASH, stated as a suspicion rather than a measurement: `boundsOf` is a
+   * `WeakMap` lookup per chunk, and a hashed lookup 1764 times a frame is not obviously cheaper than
+   * the inversion it replaced. Storing the box ON the chunk would make it a property read -- but the
+   * gather is 0.4 ms of 4.6, so there is nothing there worth winning and it is not worth the churn.
    *
    * The cached world AABB replaces that with four float compares on X and Y. **STRICTLY
    * CONSERVATIVE: the box CONTAINS the chunk and the test uses only the two axes `gatherChunk`
@@ -183,11 +204,7 @@ export class TerrainProvider {
       }
       this.gatherChunk(chunk, worldBox, out);
     }
-    const ring = this.census.us;
-    ring.push((performance.now() - t0) * 1000);
-    if (ring.length > 512) {
-      ring.shift();
-    }
+    this.census.usTotal += (performance.now() - t0) * 1000;
   }
 
   /**

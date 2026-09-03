@@ -14,10 +14,14 @@
  * number of REGISTERED chunks varied. Candidates returned are held constant, so everything the curve
  * shows is fixed per-chunk overhead.
  *
- * **IT FOUND THE COST AND NOW GUARDS THE FIX.** The first run measured 8.4 us per registered chunk
- * the query never touches -- a matrix inversion and a box transform paid to reject a chunk a hundred
- * yards away, five times a frame. `TerrainProvider.gather` now rejects on a cached world AABB first,
- * and the assertion below is inverted accordingly; the before/after numbers are recorded beside it.
+ * **IT MEASURED A REAL PER-CHUNK COST THAT TURNED OUT NOT TO MATTER.** The first run found 8.4 us
+ * per registered chunk the query never touches, and `TerrainProvider.gather` now rejects on a cached
+ * AABB first -- the assertion below is inverted accordingly. But the owner's controlled A/B then
+ * showed the change buys nothing measurable: 4 gathers a frame is **0.4 ms of a 4.6 ms `ctl.move`**,
+ * and turning the rejection off did not move the section. **So this bench's number does not scale to
+ * his frame** -- the per-frame figure the log line prints is illustrative of THIS machine at THIS
+ * chunk count only, and an earlier extrapolation of it to ~2.7 ms was unsound and is withdrawn. Kept
+ * as a regression guard on the per-chunk work, not as evidence of a saving.
  *
  * WHAT IT CANNOT TELL YOU: the owner's absolute milliseconds. This is node on a different machine
  * with a different JIT, so the NUMBER is not his -- the SHAPE is. If the cost grows linearly in
@@ -124,7 +128,9 @@ it('gather cost is FLAT in registered chunks the query does not touch', () => {
   console.log(
     `[gather] candidates ${outOne.length} | 1 chunk ${usOne.toFixed(2)} us`
     + ` | 64 chunks ${usMany.toFixed(2)} us | per idle chunk ${perChunkUs.toFixed(3)} us`
-    + ` | 5 gathers x 65 chunks = ${(perChunkUs * 65 * 5 / 1000).toFixed(2)} ms/frame`,
+    // Illustrative of THIS machine only -- the live A/B put the gather at ~0.4 ms of the
+    // owner's frame whatever this prints. See the header.
+    + ` | (this machine: 4 gathers x 65 chunks = ${(perChunkUs * 65 * 4 / 1000).toFixed(2)} ms/frame)`,
   );
 
   // **THE ASSERTION IS THE INVERSE OF THE ONE THIS BENCH SHIPPED WITH, and the flip is the record.**
