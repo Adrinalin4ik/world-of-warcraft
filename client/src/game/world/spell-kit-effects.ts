@@ -258,6 +258,18 @@ interface Instance {
    * definition one the removal path never reached, and no other field can say that.
    */
   bornAt: number;
+  /**
+   * WHICH ARM PRODUCED THIS INSTANCE, and it exists because `liveDetail` could not say.
+   *
+   * The owner's leak dump held TWO rows under one key `0x59a6:59752`, byte-identical including
+   * `ageMs`, and the row had no field that could distinguish them or name the stage. `kitId` does
+   * both at once without a new parameter on any caller: the stage IS the kit id (Every Man for
+   * Himself's precast is 99, its cast 270, its impact 226), and `slot` separates two arms of the
+   * same kit -- which is what two hand slots on one kit produce.
+   */
+  kitId: number;
+  slot: number;
+  modelPath: string;
 }
 
 /**
@@ -398,11 +410,24 @@ export class SpellKitEffects {
    * the removal path did not run for it, independently of what the deadline says. That is the one
    * question neither a count nor a key can answer.
    *
-   * `key` is `(guid:spellId)`, and a duplicate key among PERSISTENT rows is itself proof of a
-   * defect: `play` reaps this unit's live persistent instances of the same spell before beginning.
+   * ## SELF-REVIEW: "A DUPLICATE KEY IS PROOF OF A DEFECT" WAS WRONG, AND I SAID IT TWICE
+   *
+   * This paragraph used to read: "a duplicate key among PERSISTENT rows is itself proof of a defect:
+   * `play` reaps this unit's live persistent instances of the same spell before beginning". The
+   * owner's dump then showed TWO live rows under one key, byte-identical including `ageMs: 13598`,
+   * and the claim is simply false.
+   *
+   * `play` reaps ONCE and then arms one instance **per populated emitter slot** -- the reap is above
+   * the `for (const emitter of emitters)` loop, not inside it. So a kit with two hand slots produces
+   * two instances under one key, in the same tick, by design. Every Man for Himself's precast kit 99
+   * populates `hand6` and `hand7` with the same model, which is exactly two.
+   *
+   * `key` therefore identifies the (unit, spell) PAIR, never an instance, and duplicates under it are
+   * normal. `kitId` and `slot` are what tell two rows apart, which is why they were added.
    */
   public liveDetail(): Array<{
-    key: string; persistent: boolean; decaying: boolean; planted: boolean;
+    key: string; kitId: number; slot: number; model: string;
+    persistent: boolean; decaying: boolean; planted: boolean;
     remaining: number | null; ageMs: number; stuck: boolean; lifecycle: string;
   }> {
     const now = worldClock.ms;
@@ -410,6 +435,11 @@ export class SpellKitEffects {
       const ageMs = Math.round(now - instance.bornAt);
       return {
         key: `${instance.guid}:${instance.spellId}`,
+        // THE STAGE, without a new parameter on any caller: the kit id IS the stage, and `slot`
+        // separates two arms of the same kit -- which is exactly what two hand slots produce.
+        kitId: instance.kitId,
+        slot: instance.slot,
+        model: instance.modelPath.split(String.fromCharCode(92)).pop() ?? instance.modelPath,
         persistent: instance.persistent,
         decaying: instance.decaying,
         planted: instance.planted,
@@ -497,13 +527,14 @@ export class SpellKitEffects {
     }
     for (const emitter of emitters) {
       this.stats.requested += 1;
-      this.spawn(unit, spellId, persistent, emitter, particleManager, ribbonManager);
+      this.spawn(unit, spellId, kitId, persistent, emitter, particleManager, ribbonManager);
     }
   }
 
   private spawn(
     unit: Unit,
     spellId: number,
+    kitId: number,
     persistent: boolean,
     emitter: KitEmitter,
     particleManager: ParticleManager | null,
@@ -598,6 +629,9 @@ export class SpellKitEffects {
           manager: particleManager,
           guid,
           spellId,
+          kitId,
+          slot: emitter.slot,
+          modelPath: emitter.modelPath,
           persistent,
           remaining: persistent ? null : this.selfTerminateMs(model),
           planted,
